@@ -52,6 +52,14 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       }
 
       const now = new Date().toISOString();
+      // Fence durable preparation before cancelling its jobs. Otherwise the
+      // next coordinator tick (or an old leased worker) could recreate them.
+      const { data: preparationCount, error: preparationError } = await supabaseAdmin.rpc('ve_cancel_outreach_preparations', { p_project_id: id });
+      if (preparationError) {
+        await logError('tools.vertical-engine-v2.cancel.preparation_failed', preparationError, { userId, projectId: id });
+        return jsonError(preparationError.message, 500);
+      }
+      const cancelledPreparations = typeof preparationCount === 'number' ? preparationCount : 0;
       // Audit + its worker job transition in one DB transaction. The SQL
       // function also catches the race where the stage has already persisted
       // ready but its job is still running: the returned job id authorizes
@@ -92,7 +100,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       }
       const cancelled = (cancelledJobs ?? []).length + segmentationJobs;
 
-      if (cancelled === 0 && audits === 0) {
+      if (cancelled === 0 && audits === 0 && cancelledPreparations === 0) {
         return jsonError('Нет активных задач — отменять нечего', 409);
       }
 

@@ -257,16 +257,15 @@ export function VerticalEngineV2View() {
           <>
             <header>
               <nav className="ve2-eb" aria-label="Хлебные крошки">
-                Инструменты → Движок вертикалей
+                Инструменты → Автоаутрич
               </nav>
               <div className="mt-3 flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
                 <div>
                   <div className="flex flex-wrap items-center gap-2.5">
-                    <h1 className="ve2-h1">Движок вертикалей</h1>
-                    <span className="ve2-tag">V2 · внутренний контур</span>
+                    <h1 className="ve2-h1">Автоаутрич</h1>
                   </div>
                   <p className="ve2-lead mt-2 max-w-2xl">
-                    От исследования рынка до готовой базы и шаблона для запуска.
+                    Выберите гипотезы, согласуйте письма и базы — дальше система пополняет кампании автоматически.
                   </p>
                 </div>
                 <a

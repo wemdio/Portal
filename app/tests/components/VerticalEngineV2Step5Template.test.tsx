@@ -141,7 +141,7 @@ describe('Vertical Engine v2 Step 5 client onboarding', () => {
     expect(screen.queryByRole('button', { name: /исходный CSV/i })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Проверить перед запуском' }));
-    const createAction = await screen.findByRole('button', { name: 'Создать клиента и пресет' });
+    const createAction = await screen.findByRole('button', { name: 'Создать клиентский кабинет' });
     expect(screen.queryByRole('button', { name: 'Скачать CSV для запуска' })).not.toBeInTheDocument();
     expect(screen.queryByText(/sender-(one|two)@secret\.test/)).not.toBeInTheDocument();
     expect(createAction).toBeEnabled();
@@ -156,7 +156,7 @@ describe('Vertical Engine v2 Step 5 client onboarding', () => {
     expect(
       screen.getByRole('option', { name: 'Основной Instantly · VBI · будет проверено при создании' }),
     ).toBeEnabled();
-    await user.click(screen.getByRole('button', { name: 'Создать клиента' }));
+    await user.click(screen.getByRole('button', { name: 'Создать клиентский кабинет' }));
 
     await waitFor(() => {
       expect(mockVeEnginePost).toHaveBeenCalledWith('/api/tools/vertical-engine-v2/launch-clients', {
@@ -168,7 +168,7 @@ describe('Vertical Engine v2 Step 5 client onboarding', () => {
       });
     });
 
-    const presetSelect = await screen.findByLabelText('Клиентский пресет');
+    const presetSelect = await screen.findByLabelText('Настройки отправки');
     expect(presetSelect).toHaveValue('preset-1');
     expect((screen.getByRole('option', { name: 'VBI Новый клиент' }) as HTMLOptionElement).selected).toBe(true);
     expect(screen.getByText('Основной Instantly')).toBeInTheDocument();

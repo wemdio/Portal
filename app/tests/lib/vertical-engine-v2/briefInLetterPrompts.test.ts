@@ -412,8 +412,9 @@ describe('VE2 follow-up timing through generation and launch', () => {
     enforceQueryWindows: true,
     tables: {
       ve_projects: [{ id: 'timing-project', brief: {} }],
-      ve_verticals: [{ id: 'timing-vertical', name: 'Клиники', synonyms: [] }],
-      ve_bases: [{ id: 'timing-base', vertical_id: 'timing-vertical', columns: [], analysis: {} }],
+      ve_verticals: [{ id: 'timing-vertical', project_id: 'timing-project', name: 'Клиники', synonyms: [] }],
+      ve_bases: [{ id: 'timing-base', project_id: 'timing-project', vertical_id: 'timing-vertical', columns: [], analysis: {} }],
+      ve_hypotheses: [{ id: 'timing-hypothesis', project_id: 'timing-project', vertical_id: 'timing-vertical', title: 'Клиники', description: 'Услуги для клиник', status: 'accepted' }],
       ve_chains: [
         { id: 'other-vertical', vertical_id: 'other-vertical', language: 'ru',
           created_at: '2026-09-06', letters: sourceLetters([0, 88, 88, 88]) },
@@ -464,16 +465,19 @@ describe('VE2 follow-up timing through generation and launch', () => {
     expect(failed.inserts).toEqual([]);
   });
 
-  it('preserves the saved gaps through template rewriting and maps them to Instantly delay on the preceding step', async () => {
+  it('preserves legacy gaps in direct final generation and maps them to Instantly delay on the preceding step', async () => {
     const db = timingDb([0, 0, 4, 8]);
     jest.mocked(callLLMWithSchema).mockResolvedValueOnce({
-      data: { fixed_block: 'Костяк', personalization_plan: [], segment_additions: [], letters: [] },
+      data: { subject_options: ['Сотрудничество', 'Развитие клиники', 'Ваши приоритеты', 'Работа с клиентами', 'Новые возможности', 'Обсудим задачу'], letters: Array.from({ length: 4 }, () => ({
+        a: { body: 'Здравствуйте. Обсудим сотрудничество?\nКоманда клиента', angle: 'Сотрудничество', cta_intent: 'check_relevance' },
+        b: { body: 'Здравствуйте. Кто отвечает за развитие?\nКоманда клиента', angle: 'Ответственный', cta_intent: 'identify_owner' },
+      })) },
       ...usage,
     });
     const result = await runTemplateStage(job('template'), context(db));
     const letters = db.inserts.find((entry) => entry.table === 've_templates')!.rows[0].letters as VeChainLetter[];
     expect(waitsOf(letters)).toEqual([0, 0, 4, 8]);
-    expect(result.result).toMatchObject({ critique: { rewritten: true } });
+    expect(result.result).toMatchObject({ direct_final: true });
     const payload = buildCampaignPayloadFromPreset({
       preset: { email_account_ids: ['sender@example.test'], daily_limit: 30, daily_max_leads: 20,
         schedule_days: [1, 2, 3, 4, 5], schedule_timezone: 'Europe/Moscow',
