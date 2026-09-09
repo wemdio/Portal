@@ -349,6 +349,7 @@ function hasFormalMailboxChangeNotification(subject: string, text: string): bool
 
 function hasHumanReplyContinuation(text: string): boolean {
   return (
+    hasAuthoredConversationResumption(text) ||
     hasActionableDirectCommercialRequest(text) ||
     hasDirectActionableCta(text) ||
     hasDirectPositiveInterest(text) ||
@@ -357,6 +358,19 @@ function hasHumanReplyContinuation(text: string): boolean {
     hasSelfDirectedCooperationInterest(text) ||
     hasStandaloneFutureCooperationInterest(text)
   );
+}
+
+function hasAuthoredConversationResumption(text: string): boolean {
+  // This is only a fail-open guard for the machine filter, NOT proof of a lead.
+  // "Смогу вернуться к теме после 24 сентября" needs semantic qualification;
+  // "Вернусь в офис 24 сентября" is still ordinary out-of-office boilerplate.
+  // Do not broaden DEFERRED_ACTION/TIME: those also force positive verdicts.
+  const resumeTopic = /^(?:(?:я|мы)\s+)?(?:(?:смогу|сможем|могу|можем|готов(?:а|ы)?)\s+(?:снова\s+)?вернуться|(?:давайте\s+)?верн(?:усь|[её]мся))\s+к\s+(?:(?:ваш(?:ей|ему)|наш(?:ей|ему)|эт(?:ой|ому))\s+)?(?:теме|вопросу|предложению|обсуждению|разговору|проекту)(?=$|[\s,;.!?])/iu;
+  const resumeTopicEnglish = /^(?:i|we)(?:['’]ll|\s+(?:will|can|could))\s+(?:(?:return|get\s+back|come\s+back)\s+to|revisit|resume|continue)\s+(?:(?:the|our|your|this)\s+)?(?:discussion|conversation|proposal|topic|project)(?=$|[\s,;.!?])/iu;
+  return text
+    .split(/[.!?;\n]+/u)
+    .map((clause) => normalizeAuthoredStatement(clause))
+    .some((clause) => resumeTopic.test(clause) || resumeTopicEnglish.test(clause));
 }
 
 const JUNK_REPLY_EXACT = new Set([
@@ -1988,6 +2002,7 @@ ${criteriaReminder}
 ФИНАЛЬНАЯ ПРОВЕРКА МАШИННОГО ОТВЕТА (раньше любых критериев лида):
 - machine_reply_kind = "auto_reply" для автоматического ответа/отпуска, "delivery_failure" для уведомления о недоставке, "service_acknowledgement" для шаблонного подтверждения или обещания обработать запрос/ответить. Например, «Мы обязательно ответим в ближайшее время. Если запрос актуален — свяжитесь по телефону» — служебный шаблон, не коммерческий CTA, даже без слов «письмо получено».
 - Ставь этот признак только для полностью машинного/служебного ОСНОВНОГО ответа без самостоятельного человеческого интереса. Машинный текст в цитате или подписи не учитывай. Если рядом есть живой вопрос про цену/КП или просьба обсудить предложение/созвониться, machine_reply_kind=null: оцени человеческую часть по обычным критериям.
+- Само упоминание отпуска или отсутствия не делает ответ автоматическим. «С завтрашнего дня я в отпуске. Смогу вернуться к теме после 24 сентября» — собственный отложенный интерес к разговору, machine_reply_kind=null; по дефолтным критериям это лид. Отличай от обычного автоответа «Я в отпуске, вернусь в офис 24 сентября, на письма отвечу после возвращения»: здесь нет интереса к нашему предложению. Кастомные критерии продолжают определять квалификацию человеческого ответа.
 - При machine_reply_kind != null обязательно is_lead=false, custom_criteria_matched=false, needs_review=false, objection_handleable=false, objection_draft=null. Контакты и призывы из служебного шаблона не могут выполнить кастомное правило «передали контакт — лид».
 - Для человеческого ответа или при сомнении machine_reply_kind=null.
 
