@@ -38,7 +38,8 @@ import {
   sendHandoffNow,
   type PendingHandoffRow,
 } from './handoffSender';
-import type { Email } from './types';
+import type { Email, Lead } from './types';
+import { resolveLeadContactMetadata } from './leadContactMetadata';
 import { resolveEffectiveReplyOwner } from './replyOwnershipResolver';
 import { resolveInstantlyAccountId } from './accounts';
 import { createQualificationAiCheckpointStore } from './qualificationAiCheckpoint';
@@ -1667,25 +1668,22 @@ export async function qualifyOneReply(
 
   const campaignName = await resolveCampaignName(campaignId, accountId);
 
-  let leadName: string | undefined;
-  let companyName: string | undefined;
-  // Телефон/сайт — для авто-строки гостевой таблицы лидов (в саму квалификацию
-  // не пишутся: у instantly_lead_qualifications таких колонок нет).
-  let leadPhone: string | undefined;
-  let leadWebsite: string | undefined;
+  let leadMetadata: Lead[] = [];
   try {
     const leads = await instantly.getLeadsByEmail({ email: leadEmail, campaign_id: campaignId }, { accountId });
-    const lead = leads?.[0];
-    if (lead) {
-      leadName =
-        [lead.first_name, lead.last_name].filter(Boolean).join(' ') || undefined;
-      companyName = lead.company_name ?? undefined;
-      leadPhone = lead.phone?.trim() || undefined;
-      leadWebsite = lead.website?.trim() || undefined;
-    }
+    leadMetadata = Array.isArray(leads) ? leads : [];
   } catch {
     // lead metadata is optional enrichment
   }
+  // The loaded base also lives in payload/custom_variables. Reply fallback
+  // retains the responder's signature, never quoted outbound contact details.
+  // Phone/site belong to the board, not instantly_lead_qualifications.
+  const { leadName, companyName, phone: leadPhone, website: leadWebsite } = resolveLeadContactMetadata({
+    leads: leadMetadata,
+    leadEmail,
+    campaignId,
+    replyBody: (result.threadContext?.replyEmail ?? effectiveReply).body,
+  });
 
   const replyText = result.threadContext
     ? getBodyText(result.threadContext.replyEmail.body)
@@ -1716,8 +1714,8 @@ export async function qualifyOneReply(
       ...qualificationOwnerSnapshot,
       campaign_name: campaignName,
       lead_email: leadEmail,
-      lead_name: leadName,
-      company_name: companyName,
+      lead_name: leadName ?? undefined,
+      company_name: companyName ?? undefined,
       thread_id: effectiveReply.thread_id,
       reply_subject: effectiveReply.subject ?? null,
       reply_preview: replyText.slice(0, 300) || null,
@@ -1831,7 +1829,11 @@ export async function qualifyOneReply(
       effectiveReply.subject ?? null,
       replyText || null,
       result.reason ?? null,
-      { projectId: qualifiedProjectId, threadClaimConfirmed: true },
+      {
+        projectId: qualifiedProjectId,
+        threadClaimConfirmed: true,
+        contactMetadata: { phone: leadPhone, website: leadWebsite },
+      },
     );
   }
 
@@ -3121,6 +3123,8 @@ async function notifySpecialistsAboutLead(
     threadClaimConfirmed?: boolean;
     /** Stable attempt timestamp used for failed-delivery backoff. */
     attemptedAt?: string;
+    /** Already resolved enrichment; also usable if the optional board write failed. */
+    contactMetadata?: { phone: string | null; website: string | null };
   },
 ): Promise<void> {
   if (!supabaseMain) return;
@@ -3352,6 +3356,27 @@ async function notifySpecialistsAboutLead(
       return;
     }
 
+    let contacts = delivery?.contactMetadata ?? { phone: null, website: null };
+    try {
+      // Same source as the guest table, including retries after a worker restart.
+      // A row with null fields may be a deliberate guest edit: do not refill it.
+      const { data: boardRow, error: boardError } = await instantlyDb
+        .from('project_lead_board_rows')
+        .select('phone, website')
+        .eq('qualification_id', qualificationId)
+        .eq('project_id', projectId)
+        .maybeSingle();
+      if (boardError) throw new Error(boardError.message);
+      if (boardRow) {
+        contacts = {
+          phone: typeof boardRow.phone === 'string' ? boardRow.phone : null,
+          website: typeof boardRow.website === 'string' ? boardRow.website : null,
+        };
+      }
+    } catch (error) {
+      workerLog('warn', `lead alert contact lookup failed for ${qualificationId}; sending with available metadata`, error);
+    }
+
     const tgResult = await sendTelegramLeadAlertForSpecialists({
       userIds: userIdList,
       qualificationId,
@@ -3359,6 +3384,8 @@ async function notifySpecialistsAboutLead(
       leadEmail,
       leadName,
       companyName,
+      phone: contacts.phone,
+      website: contacts.website,
       campaignName,
       clientName,
       replySubject,
@@ -3730,6 +3757,14 @@ export async function reconcileLeadNotificationDeliveries(
         threadClaimConfirmed,
         attemptedAt: nowIso,
         projectId: lead.qualified_project_id,
+        // Full persisted reply includes signatures omitted from the short preview.
+        // No repeat Instantly lookup or AI call for delivery-only retries.
+        contactMetadata: resolveLeadContactMetadata({
+          leads: [],
+          leadEmail: lead.lead_email,
+          campaignId: lead.campaign_id,
+          replyBody: lead.reply_body?.trim() || lead.reply_preview || '',
+        }),
       },
     );
     if (threadClaimConfirmed) {
@@ -3763,6 +3798,8 @@ async function sendTelegramLeadAlertForSpecialists(data: {
   leadEmail: string;
   leadName: string | null;
   companyName: string | null;
+  phone: string | null;
+  website: string | null;
   campaignName: string | null;
   clientName: string | null;
   replySubject: string | null;
@@ -3813,6 +3850,8 @@ async function sendTelegramLeadAlertForSpecialists(data: {
       leadEmail: data.leadEmail,
       leadName: data.leadName,
       companyName: data.companyName,
+      phone: data.phone,
+      website: data.website,
       campaignName: data.campaignName,
       clientName: data.clientName,
       specialistMentions,
@@ -4084,6 +4123,7 @@ export async function maybePostLeadHandoff(opts: {
       leadReplyText: opts.leadReplyText,
       lastOutboundText: opts.lastOutboundText,
       apiKey: opts.apiKey,
+      onFallback: (reason) => workerLog('warn', `Handoff ${qualificationId}: using configured legend (${reason})`),
     });
     if (!draft.trim()) return { disposition: 'skipped', detail: 'handoff draft is empty' };
 
