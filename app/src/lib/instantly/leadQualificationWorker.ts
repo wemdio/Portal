@@ -1,5 +1,6 @@
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
+import { logInfo, logWarn } from '@/lib/loggerServer';
 import {
   qualifyReply,
   getBodyText,
@@ -1811,6 +1812,7 @@ export async function qualifyOneReply(
     (!opts?.clientDmOnlyOnLead || status === 'lead');
   if (inserted?.id && meaningfulForClient && !opts?.skipClientReplyNotification) {
     await notifyClientOfReply(db, campaignId, {
+      qualificationId: inserted.id,
       campaignName,
       leadEmail,
       leadName: leadName ?? null,
@@ -2770,6 +2772,8 @@ export async function notifyClientOfReply(
   instantlyDb: NonNullable<typeof supabaseAdmin>,
   campaignId: string,
   data: {
+    /** Correlates delivery diagnostics without copying lead email/body into logs. */
+    qualificationId?: string;
     campaignName: string | null;
     leadEmail: string;
     leadName: string | null;
@@ -2791,6 +2795,20 @@ export async function notifyClientOfReply(
     projectId?: string | null;
   },
 ): Promise<void> {
+  const recordDelivery = async (
+    outcome: 'sent' | 'failed' | 'blocked',
+    reason: string,
+    details: Record<string, unknown> = {},
+  ): Promise<void> => {
+    const context = { campaignId, qualificationId: data.qualificationId ?? null, reason, ...details };
+    const write = outcome === 'sent' ? logInfo : logWarn;
+    await write(
+      `client-replies.notification.${outcome}`,
+      `Client reply Telegram notification ${outcome}: ${reason}`,
+      context,
+    );
+  };
+
   try {
     // Bot not configured → feature is dark; skip without touching the DB.
     if (!getClientRepliesBotToken()) return;
@@ -2811,6 +2829,7 @@ export async function notifyClientOfReply(
           `notifyClientOfReply ownership lookup failed (campaign ${campaignId}) — no DM`,
           error,
         );
+        await recordDelivery('blocked', 'ownership_lookup_failed');
         return;
       }
     }
@@ -2819,6 +2838,7 @@ export async function notifyClientOfReply(
         'warn',
         `notifyClientOfReply blocked for campaign ${campaignId}: multiple project owners (${projectOwner.projectIds.join(', ')})`,
       );
+      await recordDelivery('blocked', 'ambiguous_project_owner', { projectIds: projectOwner.projectIds });
       return;
     }
 
@@ -2826,7 +2846,10 @@ export async function notifyClientOfReply(
       // Managed campaign: only the proven project's client may receive the DM.
       // client_instantly_access often mirrors visibility for that same client,
       // but must never add a second recipient to a project-owned reply.
-      if (!supabaseMain) return;
+      if (!supabaseMain) {
+        await recordDelivery('blocked', 'main_database_unavailable', { projectId: projectOwner.projectId });
+        return;
+      }
       const { data: project, error: projectError } = await supabaseMain
         .from('projects')
         .select('client_user_id')
@@ -2837,10 +2860,20 @@ export async function notifyClientOfReply(
           'warn',
           `notifyClientOfReply project lookup failed (campaign ${campaignId}) — no DM: ${projectError.message}`,
         );
+        await recordDelivery('blocked', 'project_lookup_failed', { projectId: projectOwner.projectId });
         return;
       }
       const projectClientId = project?.client_user_id as string | null | undefined;
-      if (projectClientId) clientUserIds.add(projectClientId);
+      if (!projectClientId) {
+        // Visibility grants are not proof of ownership. Record the broken
+        // project binding instead of silently returning or widening recipients.
+        workerLog('warn', `Client reply notify blocked: project ${projectOwner.projectId} has no client account`);
+        await recordDelivery('blocked', project ? 'project_client_missing' : 'project_missing', {
+          projectId: projectOwner.projectId,
+        });
+        return;
+      }
+      clientUserIds.add(projectClientId);
     } else {
       // Pure self-serve campaign: no managed project owner exists.
       const { data: access, error: accessError } = await instantlyDb
@@ -2853,6 +2886,7 @@ export async function notifyClientOfReply(
           'warn',
           `notifyClientOfReply self-serve lookup failed (campaign ${campaignId}) — no DM: ${accessError.message}`,
         );
+        await recordDelivery('blocked', 'self_serve_lookup_failed');
         return;
       }
       for (const a of (access ?? []) as { client_user_id: string | null }[]) {
@@ -2871,6 +2905,7 @@ export async function notifyClientOfReply(
     // клиентские DM без следа — было бы неотличимо от «ни у кого нет привязки».
     if (linksErr) {
       workerLog('warn', `notifyClientOfReply: client_reply_telegram_links query failed (campaign ${campaignId}) — ${linksErr.message}`);
+      await recordDelivery('blocked', 'telegram_links_lookup_failed', { clientUserIds: [...clientUserIds] });
       return;
     }
     if (!links?.length) return;
@@ -2894,13 +2929,22 @@ export async function notifyClientOfReply(
         isLeadByClientCriteria: !!data.criteriaClientUserId && link.client_user_id === data.criteriaClientUserId,
       });
       const result = await sendClientReplyTelegram(Number(link.chat_id), html);
+      const deliveryError = result.error ?? (result.messageId ? null : 'Telegram did not return a message ID');
       workerLog(
         'info',
         `Client reply notify → client ${link.client_user_id} chat ${link.chat_id}: ${result.messageId ? 'sent' : 'no-send'}`,
       );
+      await recordDelivery(deliveryError ? 'failed' : 'sent', deliveryError ? 'telegram_send_failed' : 'telegram_accepted', {
+        clientUserId: link.client_user_id,
+        messageId: result.messageId,
+        sentChunks: result.sentChunks,
+        totalChunks: result.totalChunks,
+        error: deliveryError,
+      });
     }
   } catch (err) {
     workerLog('warn', `notifyClientOfReply failed (campaign ${campaignId})`, err);
+    await recordDelivery('failed', 'unexpected_notification_error');
   }
 }
 

@@ -530,6 +530,35 @@ LIMIT 5;
   `appended` ставится до фактической загрузки и не доказывает принятие контакта
   Instantly; для объёма используйте журнал прогонов.
 
+### Личные Telegram-уведомления об ответах клиентов
+
+- Привязка бота: `client_reply_telegram_links` в **операционной Instantly БД**,
+  поля `client_user_id`, `enabled`, `leads_only`. Это не `telegram_links`
+  сотрудников и не `client_telegram_chats` для ручной пересылки в группы.
+- Получатель для кампании с проектом — только `projects.client_user_id` в
+  основной БД. Доступ к кампании через `client_instantly_access` не заменяет
+  эту привязку. Для кампаний без проекта получателей берут из access.
+  Проверять нужно обе модели связей: `project_instantly_campaigns` и
+  `project_period_instantly_campaigns` в операционной Instantly БД.
+- С версии кода 09.09.2026 исход попытки доступен в `application_logs`:
+  `client-replies.notification.sent`, `.failed`, `.blocked`. В `context`:
+  `qualificationId`, `campaignId`, `reason`, а при отправке также
+  `clientUserId`, `messageId`, `sentChunks`, `totalChunks`, `error`.
+  `project_client_missing` означает отсутствие клиентского аккаунта у
+  проекта; `telegram_send_failed` — отказ/таймаут Telegram (причина в error).
+  `sent` означает принятие сообщения Telegram, а не прочтение человеком.
+  Штатные пропуски при отключённом боте/привязке или фильтре «только лиды»
+  не записываются как ошибки. Журнал имеет обычную политику хранения
+  application_logs, записи могут отсутствовать при сбое БД/логгера.
+- `deadline_notification_log.tg_sent` относится к отдельному групповому
+  алерту специалистам и не доказывает личную доставку клиенту.
+  Повторной отправки клиентских DM после ошибки сейчас нет.
+- Миграция `20260909_0003_outreachos_client_reply_recipient.sql` восстанавливает
+  только проверенную привязку проекта OutreachOS. Она автоматически применяется
+  штатным деплоем; историю пропущенных уведомлений не отправляет. Перед
+  аналогичной ручной привязкой проверьте принадлежность всего проекта:
+  `client_user_id` открывает клиенту также проект и его задачи.
+
 ### Аутрич-пайплайн «2GIS + сигналы» (`gis_signal_*`, с 04.08.2026)
 - Клиентский пайплайн: 2gis_dataset (5 сегментов по рубрикам) → 6 сигналов с сайта → конструктор баз (`base_constructor_jobs`, кап 5 почт/компания) → добор в 5 кампаний Instantly. Воркер `gisSignalOutreachCron`.
 - `gis_signal_pipeline_config` — singleton id=1: `enabled`, `measure_only` (воронка без заливки/seen), `client_user_id` (владелец дашборда `/client/gis-signals`), `monthly_target_companies` (20000), `daily_limit`, `signal_min_count` (порог сигналов, дефолт 1), `selected_steps`/`step_config` конструктора.
