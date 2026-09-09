@@ -3570,7 +3570,7 @@ function AccountProfileModal({
         body: form,
       });
       const body = (await res.json().catch(() => null)) as
-        { error?: string; avatar_error?: string; queued?: boolean; message?: string } | null;
+        { error?: string; avatar_error?: string; queued?: boolean; message?: string; rest_until?: string } | null;
       if (!res.ok) {
         setError(body?.error ?? `Ошибка ${res.status}`);
         return;
@@ -3585,10 +3585,27 @@ function AccountProfileModal({
       }
       // Профиль в Telegram уже изменён, поэтому не откатываем и не считаем это
       // ошибкой — но карточку не закрываем, иначе предупреждение никто не увидит.
-      if (body?.avatar_error) {
-        setAvatarWarning(body.avatar_error);
-        return;
+      if (body?.avatar_error) setAvatarWarning(body.avatar_error);
+      /**
+       * Отлёжка после смены имени или аватарки — говорим сразу, а не плашкой в
+       * списке постфактум.
+       *
+       * 09.09.2026 свежая партия после настройки простояла молча, и первым
+       * объяснением стало «наверное, прогрев»: срок отлёжки виден только под
+       * курсором в колонке «Рассылка», а туда никто не наводит, пока не начнёт
+       * искать поломку.
+       */
+      if (body?.rest_until) {
+        const until = new Date(body.rest_until).toLocaleString('ru-RU', {
+          day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+        });
+        setFillNote(
+          `Профиль применён. До ${until} аккаунт не пойдёт в боевую рассылку: Telegram настороженно `
+          + 'смотрит на переименованный аккаунт, который сразу пишет незнакомым. Прогрев между своими '
+          + 'в это время разрешён.',
+        );
       }
+      if (body?.avatar_error || body?.rest_until) return;
       onClose();
     } finally {
       setSaving(false);
