@@ -56,7 +56,6 @@ import type {
   OutreachProxyList,
   OutreachProxyListStats,
   OutreachDialog,
-  OutreachProcessed,
   OutreachLog,
   OutreachBlockedUser,
   OpenAISettings,
@@ -1833,87 +1832,6 @@ function DialogsTab({ campaignId }: {
           <span className="text-xs text-gray-500">{currentPage} / {totalPages}</span>
           <button type="button" disabled={currentPage >= totalPages} onClick={() => setOffset(offset + limit)}
             className="rounded-full px-4 py-2 text-xs font-medium border border-gray-200 bg-white text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer">Вперёд</button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* =================== PROCESSED TAB =================== */
-function ProcessedTab({ campaignId }: { campaignId: string }) {
-  const [items, setItems] = useState<OutreachProcessed[]>([]);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState('');
-  const [showAdd, setShowAdd] = useState(false);
-  const [addUserId, setAddUserId] = useState('');
-  const [addUsername, setAddUsername] = useState('');
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    const res = await authFetch(`${API_BASE}/processed?campaign_id=${campaignId}&limit=200`);
-    if (res.ok) {
-      const d = await res.json() as { items: OutreachProcessed[]; total: number };
-      setItems(d.items); setTotal(d.total);
-    }
-    setLoading(false);
-  }, [campaignId]);
-
-  useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
-
-  const addProcessed = async () => {
-    await authFetch(`${API_BASE}/processed`, {
-      method: 'POST',
-      body: JSON.stringify({ campaign_id: campaignId, tg_user_id: Number(addUserId), tg_username: addUsername || null }),
-    });
-    setAddUserId(''); setAddUsername(''); setShowAdd(false); void load();
-  };
-
-  const removeProcessed = async (id: string) => {
-    await authFetch(`${API_BASE}/processed?id=${id}`, { method: 'DELETE' });
-    void load();
-  };
-
-  const filtered = search
-    ? items.filter(i => (i.tg_username ?? '').toLowerCase().includes(search.toLowerCase()) || String(i.tg_user_id).includes(search))
-    : items;
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <div className="flex items-center gap-2">
-          <Search className="h-3.5 w-3.5 text-gray-400" />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Поиск по имени или ID..."
-            className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs outline-none focus:border-indigo-400 w-56" />
-          <span className="text-xs text-gray-400">Всего: {total}</span>
-        </div>
-        <button type="button" onClick={() => setShowAdd(!showAdd)}
-          className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer">
-          <Plus className="h-3.5 w-3.5" /> Добавить
-        </button>
-      </div>
-      {showAdd && (
-        <div className="flex items-center gap-2 rounded-lg border border-gray-200 p-3">
-          <input value={addUserId} onChange={e => setAddUserId(e.target.value)} placeholder="User ID" className="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs outline-none w-36" />
-          <input value={addUsername} onChange={e => setAddUsername(e.target.value)} placeholder="@username" className="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs outline-none w-36" />
-          <button type="button" onClick={addProcessed} className="rounded-full bg-indigo-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition cursor-pointer">Добавить</button>
-        </div>
-      )}
-      {loading ? (
-        <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
-      ) : filtered.length === 0 ? (
-        <p className="text-xs text-gray-400 py-8 text-center">Нет обработанных клиентов</p>
-      ) : (
-        <div className="divide-y divide-gray-100 rounded-lg border border-gray-200">
-          {filtered.map(p => (
-            <div key={p.id} className="flex items-center gap-3 px-3 py-2 text-xs">
-              <UserCheck className="h-3.5 w-3.5 text-gray-400 shrink-0" />
-              <span className="font-medium text-gray-800 w-28">{p.tg_user_id}</span>
-              <span className="text-gray-500 flex-1">{p.tg_username ? `@${p.tg_username}` : '—'}</span>
-              <span className="text-gray-400">{formatDate(p.processed_at)}</span>
-              <button type="button" onClick={() => void removeProcessed(p.id)} className="p-2 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"><Trash2 className="h-3.5 w-3.5" /></button>
-            </div>
-          ))}
         </div>
       )}
     </div>
@@ -6041,7 +5959,6 @@ const TABS = [
   { id: 'proxies', label: 'Прокси', icon: Network },
   { id: 'logs', label: 'Логи', icon: ScrollText },
   { id: 'dialogs', label: 'Диалоги', icon: MessageCircle },
-  { id: 'processed', label: 'Обработанные', icon: UserCheck },
   { id: 'report', label: 'Отчёт', icon: FileSpreadsheet },
 ] as const;
 
@@ -6289,7 +6206,6 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
         )}
         {tab === 'logs' && <LogsTab campaignId={campaign.id} />}
         {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} />}
-        {tab === 'processed' && <ProcessedTab campaignId={campaign.id} />}
         {tab === 'report' && <CampaignReportTab campaignId={campaign.id} />}
       </div>
     </div>
