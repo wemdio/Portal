@@ -71,7 +71,6 @@ import {
   autoForwardWarning,
   type AutoForwardMark,
 } from '@/lib/tgOutreach/autoForward';
-import { DEFAULT_MAX_MESSAGE_CHARS } from '@/lib/tgOutreach/firstTouch/validateMessage';
 import { accountLabel } from '@/lib/tgOutreach/accountLabel';
 import { summarizeAccounts } from '@/lib/tgOutreach/accountsSummary';
 import { ProxyPicker } from '@/components/tg-outreach/ProxyPicker';
@@ -297,14 +296,11 @@ function GlobalBlocklistSection() {
   };
 
   return (
-    <section className="space-y-3">
-      <div>
-        <h3 className="text-sm font-semibold text-gray-800">Глобальный чёрный список (по tg_user_id)</h3>
-        <p className="mt-1 text-[11px] text-gray-500">
-          Применяется ко всем твоим кампаниям и аккаунтам. Бот не будет отвечать и не создаст диалог
-          для пользователей из этого списка — даже если у них нет username.
-        </p>
-      </div>
+    <Collapsible
+      title="Глобальный чёрный список (по tg_user_id)"
+      hint="Применяется ко всем твоим кампаниям и аккаунтам. Бот не будет отвечать и не создаст диалог для пользователей из этого списка — даже если у них нет username."
+      badge={items.length ? `${items.length}` : undefined}
+    >
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 p-3">
         <input
           value={addId}
@@ -354,7 +350,51 @@ function GlobalBlocklistSection() {
           ))}
         </div>
       )}
-    </section>
+    </Collapsible>
+  );
+}
+
+/* Раскрывающийся блок: чёрные списки заполняют редко, а места на экране
+   настроек они занимали столько же, сколько ежедневные ручки. Закрыт по
+   умолчанию, счётчик в шапке показывает, есть ли внутри записи. */
+function Collapsible({ title, hint, badge, children }: {
+  title: string;
+  hint?: string;
+  badge?: string;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="rounded-lg border border-gray-200">
+      <button type="button" onClick={() => setOpen(v => !v)}
+        className="flex w-full items-center gap-2 px-3 py-2.5 text-left transition hover:bg-gray-50 cursor-pointer">
+        {open ? <ChevronUp className="h-3.5 w-3.5 shrink-0 text-gray-400" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-gray-400" />}
+        <span className="text-xs font-semibold text-gray-800">{title}</span>
+        {badge && <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500">{badge}</span>}
+      </button>
+      {open && (
+        <div className="space-y-3 border-t border-gray-100 px-3 py-3">
+          {hint && <p className="text-[11px] text-gray-500">{hint}</p>}
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Переключатель вместо галочки: follow-up включают и выключают целиком, и
+   состояние должно читаться с расстояния — залитый синим тумблер видно сразу,
+   пустой квадратик галочки нет. Ползунок ездит слева направо и обратно. */
+function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
+  return (
+    <label className="flex w-fit cursor-pointer items-center gap-2.5 text-sm font-medium text-gray-700">
+      <span className="relative inline-flex shrink-0">
+        <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} className="peer sr-only" />
+        <span className="block h-5 w-9 rounded-full bg-gray-300 transition-colors duration-200 peer-checked:bg-indigo-600 peer-focus-visible:ring-2 peer-focus-visible:ring-indigo-300" />
+        <span className="pointer-events-none absolute left-0.5 top-0.5 block h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200 peer-checked:translate-x-4" />
+      </span>
+      {label}
+    </label>
   );
 }
 
@@ -408,14 +448,12 @@ function SettingsTab({ campaign, onSave }: {
             передачи с вкладки «Диалоги» — лид и партнёр — уходят в него же. */}
         <p className="text-[10px] text-gray-400 -mt-2">
           В чат пересылки бот отправляет сам, когда в его ответе встречается триггерная фраза.
-          Передача лида и партнёра с вкладки «Диалоги» — ручная, по кнопке и с подтверждением,
-          уходит в тот же чат.
         </p>
       </section>
 
-      {/* Telegram */}
+      {/* Заголовок «Telegram» снят с секции: экран целиком про Telegram-аутрич,
+          и подпись ничего не отделяла от соседних блоков. */}
       <section className="space-y-4">
-        <h3 className="text-sm font-semibold text-gray-800">Telegram</h3>
         {/* Названия сверены с кодом: каждое поле подписано тем, что оно делает
             на самом деле, а не тем, как называется переменная. Три подписи были
             неверны и вводили в заблуждение — история в комментариях ниже. */}
@@ -423,195 +461,165 @@ function SettingsTab({ campaign, onSave }: {
             09.09.2026: пересылка лида шлёт 5 последних сообщений, модель читает
             20 — дефолты подходят всегда, сохранённые значения кампаний воркер
             продолжает читать как раньше. */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="space-y-1">
-            <FieldNum label="Часовой пояс (UTC±)" value={telegram.timezone_offset} onChange={v => setTG('timezone_offset', v)} />
+        {/* Две строки вместо трёх сеток по два поля: сверху — что кампания
+            рассылает (пояс, пауза после ограничения, дневная норма, длина
+            письма), снизу — с каким темпом. Поля узкие, поэтому в строку
+            влезает по четыре-шесть штук. */}
+        <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
+          <div className="w-auto space-y-1">
+            <TimezoneField value={telegram.timezone_offset} onChange={v => setTG('timezone_offset', v)} />
             <p className="text-[10px] text-gray-400">
-              Влияет только на «Периоды сна». 3 — Москва.
+              Влияет только на «Периоды сна».
             </p>
           </div>
           {/* Было «Пауза аккаунта (часов)» — читалось как штатная пауза между
               заходами и создавало ложное чувство, что нагрузка размазана по
               суткам. На деле пауза включается ТОЛЬКО после того, как Telegram
               ограничил аккаунт (FloodError/Frozen), см. campaignLoop:1507. */}
-          <div className="space-y-1">
-            <FieldNum label="Пауза после ограничения (часов)" value={telegram.account_cooldown_hours} onChange={v => setTG('account_cooldown_hours', v)} />
+          <div className="w-52 space-y-1">
+            <StepperField
+              label="Пауза после ограничения (часов)"
+              value={telegram.account_cooldown_hours}
+              min={1}
+              max={72}
+              onChange={v => setTG('account_cooldown_hours', v)}
+              title="Сколько часов аккаунт не берётся в работу после ограничения Telegram."
+            />
             <p className="text-[10px] text-gray-400">
-              Сколько аккаунт отдыхает после PEER_FLOOD / FloodWait — и на ответе, и на
-              первом касании. Пока пауза не кончилась, воркер этот номер не берёт.
-              Для холодной рассылки ставьте сутки, не 5 часов.
+              Сколько аккаунт отдыхает после PEER_FLOOD / FloodWait.
             </p>
           </div>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="space-y-1">
-            <FieldNum
+          <div className="w-52 space-y-1">
+            <StepperField
               label="Первых сообщений на аккаунт в сутки"
-              value={telegram.first_touch_per_account_per_day ?? 0}
+              value={telegram.first_touch_per_account_per_day ?? 3}
+              min={0}
+              max={50}
               onChange={v => setTG('first_touch_per_account_per_day', v)}
+              title="Дневная норма первых сообщений на каждый аккаунт. Ноль выключает рассылку."
             />
-            {/* Прежняя подсказка предлагала «16 аккаунтов по 20» как пример.
-                В связке с паузой между действиями в 5–10 сек это означает 20
-                новых чатов с незнакомыми людьми за три минуты — на молодом
-                аккаунте почти верное ограничение. Пример заменён на лестницу. */}
-            <p className="text-[10px] text-gray-400">
-              Ноль — рассылка первых сообщений выключена. Норма считается на каждый аккаунт:
-              18 аккаунтов по 3 — это 54 сообщения в день. Свежие аккаунты начинайте с 2–3 и
-              поднимайте на ступень раз в 2–3 дня, только если в логах не было ограничений.
-              Норма не уходит одной очередью — она делится на порции полями ниже.
-            </p>
           </div>
-          {/* Порог был захардкожен в 400 знаков — число из статистики прошлых
-              кампаний (медиана 260, 99% в 400), а не правило Telegram. На базе
-              с ровными текстами по 430–460 знаков он останавливал рассылку
-              целиком: каждый контакт откладывался, за три круга уходил в
-              «отложенные», и не отправлялось ни одно сообщение. Ручка нужна
-              оператору под рукой. */}
-          <div className="space-y-1">
-            <FieldNum
-              label="Максимум знаков в первом сообщении"
-              value={telegram.first_touch_max_chars ?? DEFAULT_MAX_MESSAGE_CHARS}
-              onChange={v => setTG('first_touch_max_chars', v)}
+          {/* Рядом с дневной нормой: вместе они и отвечают на вопрос «сколько
+              уйдёт за круг». Ждать друг друга аккаунтам незачем — у каждого своя
+              сессия и свой прокси; ограничение упирается в прокси-хост, а не в
+              Telegram. */}
+          <div className="w-52 space-y-1">
+            <StepperField
+              label="Аккаунтов одновременно рассылает"
+              value={telegram.account_concurrency ?? 6}
+              min={1}
+              max={20}
+              onChange={v => setTG('account_concurrency', v)}
+              title="Сколько аккаунтов кампания обходит параллельно. Больше — быстрее круг, но выше нагрузка на прокси-хост."
             />
-            <p className="text-[10px] text-gray-400">
-              Длиннее — контакт откладывается, а не отправляется. Это фильтр мусора в файле
-              (съехавшая колонка, обрезанная строка), а не ограничение Telegram: у него предел
-              4096 знаков, выше него значение не поднимется. Ноль вернёт значение по умолчанию — 400.
-              Если подняли порог уже после запуска, верните отложенные контакты в очередь на вкладке «Базы».
-            </p>
           </div>
+          {/* «Максимум знаков в первом сообщении» убран с экрана 10.09.2026:
+              порог один на все кампании (DEFAULT_MAX_MESSAGE_CHARS, 600 знаков,
+              меняется переменной окружения TG_FIRST_TOUCH_MAX_CHARS). */}
         </div>
-        {/* Разнос нормы по дню. 09.09.2026 в ATOL-1 Telegram выдал PEER_FLOOD
-            свежим аккаунтам после 3–6 первых сообщений подряд — при суточной
-            норме 4. Спасает не норма, а расстояние между отправками: порция
-            уходит, дальше аккаунт молчит до конца паузы. */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="space-y-1">
+        {/* Вторая строка — темп: разнос нормы по дню и паузы обхода.
+            09.09.2026 в ATOL-1 Telegram выдал PEER_FLOOD свежим аккаунтам после
+            3–6 первых сообщений подряд при суточной норме 4. Спасает не норма, а
+            расстояние между отправками: порция уходит, дальше аккаунт молчит.
+            «Пауза перед прочтением» с экрана убрана — теперь всегда рандом
+            5–15 сек (campaignLoop), настройкой не управляется. */}
+        <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
+          <div className="w-44 space-y-1">
             <FieldNum
+              compact
               label="Пауза между порциями (минут)"
               value={telegram.first_touch_gap_minutes ?? 60}
               onChange={v => setTG('first_touch_gap_minutes', v)}
             />
             <p className="text-[10px] text-gray-400">
-              С последнего первого сообщения до следующей порции. Минимум 60 — при 60 и порции
-              из 2 аккаунт разнесёт норму 4 на весь день. Ноль отключает разнос: вся норма уйдёт
-              одной очередью, как раньше (так ловят PEER_FLOOD).
+              Сколько аккаунт молчит между порциями. Ноль — вся норма уйдёт сразу, одной очередью.
             </p>
           </div>
-          <div className="space-y-1">
-            <FieldNum
-              label="Первых сообщений в порции"
+          {/* Прежняя подпись объясняла порцию через саму порцию («сколько писем
+              в порции») и оператору ничего не давала. Пример с числами — самый
+              короткий способ показать, что поле делает с дневной нормой. */}
+          <div className="w-56 space-y-1">
+            <StepperField
+              label="Писем в одной порции"
               value={telegram.first_touch_per_gap ?? 2}
+              min={1}
+              max={20}
               onChange={v => setTG('first_touch_per_gap', v)}
+              title="Сколько первых сообщений аккаунт отправляет подряд, прежде чем замолчать до следующей порции."
             />
             <p className="text-[10px] text-gray-400">
-              Сколько писем аккаунт отправляет за одно окно, прежде чем замолчать до паузы.
-              Суточная норма остаётся потолком: порции только размазывают её по дню.
+              Норма 6, в порции 2, пауза 60 минут: два письма, час тишины, ещё два, час тишины, ещё два.
             </p>
           </div>
-        </div>
-        {/* «Пауза перед прочтением» убрана с экрана 09.09.2026: теперь всегда
-            рандом 5–15 сек (campaignLoop), настройкой не управляется. */}
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
           {/* Было «Задержка до ответа» — подпись покрывала лишь одно из четырёх
               применений. Тот же диапазон задаёт паузу между ПЕРВЫМИ сообщениями
               внутри дневной нормы (firstTouch/send.ts, gapMs), а при 5–10 сек
               аккаунт пишет всю норму незнакомым людям за полминуты — самый
-              короткий путь к ограничению. Об этом обязана говорить подпись. */}
-          <div className="space-y-1">
-            <RangeField label="Пауза между действиями (сек)" value={telegram.read_reply_delay_range} onChange={v => setTG('read_reply_delay_range', v)} />
-            <p className="text-[10px] text-gray-400">
-              Перед ответом, перед follow-up и <span className="text-amber-600">между первыми сообщениями</span>.
-              5–10 сек означает, что вся дневная норма уйдёт очередью за полминуты. Для холодной
-              рассылки ставьте 60–300.
-            </p>
-          </div>
-          <div className="space-y-1">
-            <RangeField label="Пауза между аккаунтами (сек)" value={telegram.account_loop_delay_range} onChange={v => setTG('account_loop_delay_range', v)} />
-            {/* Сколько аккаунтов работают одновременно. Ждать друг друга им
-                незачем — у каждого своя сессия и свой прокси; ограничение
-                упирается в прокси-хост, а не в Telegram. */}
-            <label className="block">
-              <span className="mb-1 block text-xs font-medium text-gray-600">Аккаунтов одновременно</span>
-              <input
-                type="number"
-                min={1}
-                max={20}
-                value={telegram.account_concurrency ?? 6}
-                onChange={(e) => setTG('account_concurrency', Math.min(Math.max(Number(e.target.value) || 1, 1), 20))}
-                title="Сколько аккаунтов кампания обходит параллельно. Больше — быстрее круг, но выше нагрузка на прокси-хост."
-                className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400"
-              />
-            </label>
-            <p className="text-[10px] text-gray-400">
-              Разбежка между заходами разных аккаунтов, чтобы они не работали гурьбой.
-            </p>
-          </div>
+              короткий путь к ограничению. */}
+          <RangeField compact label="Пауза между действиями (сек)" value={telegram.read_reply_delay_range} onChange={v => setTG('read_reply_delay_range', v)} />
           {/* Пауза между полными кругами по всем аккаунтам. Раньше была
               захардкожена в 30 секунд, что на «горячих» mobile-pool IP
               слишком быстро (Telegram продолжал отвечать silent throttle).
               Сейчас вынесено в настройки с дефолтом [300, 600] сек. */}
-          <div className="space-y-1">
-            <RangeField label="Пауза между кругами (сек)" value={telegram.cycle_delay_range ?? [300, 600]} onChange={v => setTG('cycle_delay_range', v)} />
-            <p className="text-[10px] text-gray-400">
-              Между полными обходами всех аккаунтов.
-            </p>
-          </div>
+          <RangeField compact label="Пауза между кругами (сек)" value={telegram.cycle_delay_range ?? [300, 600]} onChange={v => setTG('cycle_delay_range', v)} />
+          <RangeField compact label="Пауза между аккаунтами (сек)" value={telegram.account_loop_delay_range} onChange={v => setTG('account_loop_delay_range', v)} />
         </div>
         {/* «Окно ожидания диалога» (dialog_wait_window_range) убрано с экрана:
             ключ есть в TelegramSettings и в дефолтах, но НИ ОДНА строка кода его
             не читает — поле ничего не делало, а операторы его крутили. Значение
             в БД оставлено как есть, чтобы не трогать сохранённые кампании. */}
-        <Field label="Периоды сна" value={telegram.sleep_periods.join(', ')} onChange={v => setTG('sleep_periods', v.split(',').map(s => s.trim()).filter(Boolean))} placeholder="00:00-08:00, 19:00-00:00" />
-        <div className="flex flex-wrap items-center gap-4">
-          <label className="flex items-center gap-2 text-xs text-gray-700">
+        <Field half label="Периоды сна" value={telegram.sleep_periods.join(', ')} onChange={v => setTG('sleep_periods', v.split(',').map(s => s.trim()).filter(Boolean))} placeholder="00:00-08:00, 19:00-00:00" />
+        <div className="flex flex-col gap-2">
+          <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
             <input type="checkbox" checked={telegram.reply_only_if_previously_wrote} onChange={e => setTG('reply_only_if_previously_wrote', e.target.checked)} className="rounded border-gray-300" />
             Отвечать только если ранее писали
           </label>
-          <label className="flex items-center gap-2 text-xs text-gray-700">
+          <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
             <input type="checkbox" checked={telegram.auto_allow_new_dialogs} onChange={e => setTG('auto_allow_new_dialogs', e.target.checked)} className="rounded border-gray-300" />
             Новым диалогам разрешать отправку автоматически
           </label>
-          <label className="flex items-center gap-2 text-xs text-gray-700">
-            <input type="checkbox" checked={telegram.reply_only_to_base_contacts ?? false} onChange={e => setTG('reply_only_to_base_contacts', e.target.checked)} className="rounded border-gray-300" />
-            Писать только контактам из баз
-          </label>
-          <label className="flex items-center gap-2 text-xs text-gray-700">
-            <input type="checkbox" checked={telegram.ignore_bot_usernames} onChange={e => setTG('ignore_bot_usernames', e.target.checked)} className="rounded border-gray-300" />
-            Игнорировать ботов
-          </label>
-          <label className="flex items-center gap-2 text-xs text-gray-700">
+          <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
             <input type="checkbox" checked={telegram.ignore_no_username} onChange={e => setTG('ignore_no_username', e.target.checked)} className="rounded border-gray-300" />
             Игнорировать без имени пользователя
           </label>
         </div>
-        <p className="text-[10px] text-gray-400 -mt-2">
-          «Писать только контактам из баз» — бот отвечает лишь тем, кому мы сами написали по базе
-          этой кампании. Без неё он отвечает в любом чате, где есть наше исходящее, включая
-          переписку прогрева между своими же аккаунтами: партнёр по прогреву получал боевой скрипт,
-          а его ответ мог уехать в чат менеджера как лид. Обратная сторона: тот, кто написал первым
-          сам, без первого касания, ответа не получит.
-        </p>
-        <Field
-          label="Чёрный список username (через запятую)"
-          value={blockedRaw}
-          onChange={setBlockedRaw}
-          placeholder="SpamBot, another_bot"
-        />
+        {/* Галочки «Писать только контактам из баз» и «Игнорировать ботов» сняты
+            с экрана 10.09.2026: обе теперь заложены в инструмент и работают
+            всегда (campaignLoop). Выключать их было незачем — выключенная первая
+            возвращала ответы партнёрам по прогреву и фальшивые лиды. */}
       </section>
 
-      <GlobalBlocklistSection />
+      {/* Оба чёрных списка — рядом: заполняют их редко и обычно вместе, а по
+          отдельности каждый занимал целую строку экрана. */}
+      <div className="grid grid-cols-1 items-start gap-3 md:grid-cols-2">
+        <Collapsible
+          title="Чёрный список username"
+          hint="Через запятую. Этим аккаунтам кампания не пишет и не отвечает."
+          badge={blockedRaw.trim() ? `${blockedRaw.split(',').map(x => x.trim()).filter(Boolean).length}` : undefined}
+        >
+          <Field
+            label="Через запятую"
+            value={blockedRaw}
+            onChange={setBlockedRaw}
+            placeholder="SpamBot, another_bot"
+          />
+        </Collapsible>
+        <GlobalBlocklistSection />
+      </div>
 
       {/* Follow-up */}
       <section className="space-y-4">
-        <h3 className="text-sm font-semibold text-gray-800">Настройки Follow-up сообщений</h3>
-        <div className="rounded-lg border border-blue-100 bg-blue-50/50 p-3 text-xs text-gray-700">
-          Follow-up отправляется автоматически, если человек не ответил на сообщение в течение заданного времени. Отправляется только 1 раз для каждого диалога.
-        </div>
-        <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
-          <input type="checkbox" checked={telegram.follow_up.enabled} onChange={e => setTG('follow_up', { ...telegram.follow_up, enabled: e.target.checked })} className="rounded border-gray-300" />
-          Включить Follow-up сообщения
-        </label>
+        {/* Пояснение вынесено в сам заголовок: отдельная строка под ним занимала
+            место ради одной фразы. */}
+        <h3 className="text-sm font-semibold text-gray-800">
+          Настройки Follow-up сообщений{' '}
+          <span className="font-normal text-gray-400">(уходит один раз на диалог, если человек не ответил)</span>
+        </h3>
+        <Toggle
+          checked={telegram.follow_up.enabled}
+          onChange={v => setTG('follow_up', { ...telegram.follow_up, enabled: v })}
+          label="Включить Follow-up сообщения"
+        />
         {telegram.follow_up.enabled && (
           <div className="space-y-4 rounded-lg border border-gray-200 p-4">
             <div className="grid grid-cols-2 gap-4">
@@ -5992,12 +6000,6 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
   /** Раскрыто ли пояснение к восклицательному знаку у статуса. */
   const [warmingHint, setWarmingHint] = useState(false);
   const stoppingRef = useRef(false);
-  const [refetchJobId, setRefetchJobId] = useState<string | null>(null);
-  const [refetchProgress, setRefetchProgress] = useState<{
-    total: number; done: number; fetched: number; errors: number;
-    last_username: string | null; last_messages: number;
-    status: string;
-  } | null>(null);
 
   useEffect(() => {
     if (!stopping) return;
@@ -6016,56 +6018,15 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
     return () => clearInterval(poll);
   }, [stopping, campaign.id, onUpdate]);
 
-  useEffect(() => {
-    if (!refetchJobId) return;
-    const poll = setInterval(async () => {
-      try {
-        const res = await authFetch(`${API_BASE}/jobs/${refetchJobId}`);
-        if (!res.ok) return;
-        const job = await res.json() as {
-          status: string;
-          progress?: { total: number; done: number; fetched: number; errors: number; last_username: string | null; last_messages: number } | null;
-        };
-        setRefetchProgress({
-          total: job.progress?.total ?? 0,
-          done: job.progress?.done ?? 0,
-          fetched: job.progress?.fetched ?? 0,
-          errors: job.progress?.errors ?? 0,
-          last_username: job.progress?.last_username ?? null,
-          last_messages: job.progress?.last_messages ?? 0,
-          status: job.status,
-        });
-        if (job.status === 'completed' || job.status === 'failed') {
-          setTimeout(() => {
-            setRefetchJobId(null);
-            setRefetchProgress(null);
-            onUpdate();
-          }, 3000);
-        }
-      } catch { /* ignore */ }
-    }, 2000);
-    return () => clearInterval(poll);
-  }, [refetchJobId, onUpdate]);
-
-  const doAction = async (action: 'start' | 'stop' | 'refetch') => {
+  // Кнопка Refetch убрана с карточки кампании: ручную перезагрузку пустых
+  // диалогов оператор не использует. Ручка /campaigns/:id/refetch на бэкенде
+  // осталась — её дёргают точечно, минуя интерфейс.
+  const doAction = async (action: 'start' | 'stop') => {
     setActionLoading(true);
-    const res = await authFetch(`${API_BASE}/campaigns/${campaign.id}/${action}`, { method: 'POST' });
+    await authFetch(`${API_BASE}/campaigns/${campaign.id}/${action}`, { method: 'POST' });
     if (action === 'stop') {
       setStopping(true);
       stoppingRef.current = true;
-    }
-    if (action === 'refetch') {
-      try {
-        const body = await res.json() as { id?: string; empty_count?: number; message?: string; error?: string };
-        if (body.error) {
-          alert(`Ошибка: ${body.error}`);
-        } else if (body.empty_count === 0) {
-          alert('Нет диалогов с пустыми сообщениями');
-        } else if (body.id) {
-          setRefetchJobId(body.id);
-          setRefetchProgress({ total: body.empty_count ?? 0, done: 0, fetched: 0, errors: 0, last_username: null, last_messages: 0, status: 'pending' });
-        }
-      } catch { /* ignore parse errors */ }
     }
     setActionLoading(false);
     onUpdate();
@@ -6135,59 +6096,12 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
               Остановить
             </button>
           )}
-          {campaign.status !== 'running' && !stopping && (
-            <button type="button" onClick={() => void doAction('refetch')} disabled={actionLoading || !!refetchJobId}
-              title="Перезагрузить пустые диалоги из Telegram"
-              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-              {actionLoading || refetchJobId ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-              Refetch
-            </button>
-          )}
           <button type="button" onClick={() => onDelete(campaign.id)}
             className="rounded-full border border-gray-200 p-2.5 text-gray-400 hover:text-rose-600 hover:border-rose-300 hover:bg-rose-50 transition cursor-pointer">
             <Trash2 className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
-
-      {refetchProgress && (
-        <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-4 space-y-2">
-          <div className="flex items-center justify-between text-xs font-medium text-indigo-800">
-            <span className="flex items-center gap-2">
-              {refetchProgress.status === 'completed' ? (
-                <span className="text-emerald-600">✓ Refetch завершён</span>
-              ) : refetchProgress.status === 'failed' ? (
-                <span className="text-rose-600">✗ Refetch ошибка</span>
-              ) : (
-                <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Загрузка диалогов...</>
-              )}
-            </span>
-            <span>{refetchProgress.done} / {refetchProgress.total}</span>
-          </div>
-          <div className="h-2 rounded-full bg-indigo-100 overflow-hidden">
-            <div
-              className={`h-full rounded-full transition-all duration-500 ${
-                refetchProgress.status === 'completed' ? 'bg-emerald-500' :
-                refetchProgress.status === 'failed' ? 'bg-rose-500' : 'bg-indigo-500'
-              }`}
-              style={{ width: `${refetchProgress.total > 0 ? (refetchProgress.done / refetchProgress.total) * 100 : 0}%` }}
-            />
-          </div>
-          <div className="flex items-center justify-between text-[11px] text-indigo-600">
-            <span>
-              {refetchProgress.last_username && refetchProgress.last_messages > 0
-                ? `@${refetchProgress.last_username} — ${refetchProgress.last_messages} сообщ.`
-                : refetchProgress.last_username
-                  ? `@${refetchProgress.last_username} — пусто`
-                  : 'Ожидание...'}
-            </span>
-            <span>
-              {refetchProgress.fetched > 0 && <span className="text-emerald-600 mr-2">+{refetchProgress.fetched} загружено</span>}
-              {refetchProgress.errors > 0 && <span className="text-rose-500">{refetchProgress.errors} ошибок</span>}
-            </span>
-          </div>
-        </div>
-      )}
 
       <div className="flex gap-1 border-b border-gray-200">
         {TABS.map(t => {
@@ -6232,22 +6146,25 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
 }
 
 /* =================== FORM HELPERS =================== */
-function Field({ label, value, onChange, placeholder, type }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string; type?: string }) {
+/* half — поле на половину ширины: у «Периодов сна» внутри строка вида
+   «00:00-08:00», растянутая на весь экран она читалась как место под длинный
+   список. */
+function Field({ label, value, onChange, placeholder, type, half }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string; type?: string; half?: boolean }) {
   return (
-    <label className="space-y-1">
-      <span className="text-[11px] font-medium text-gray-500">{label}</span>
+    <label className="block space-y-1">
+      <span className="block text-[11px] font-medium text-gray-500">{label}</span>
       <input type={type ?? 'text'} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
-        className="block w-full rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400" />
+        className={`${half ? 'w-full md:w-1/2' : 'w-full'} block rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400`} />
     </label>
   );
 }
 
-function FieldNum({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
+function FieldNum({ label, value, onChange, compact }: { label: string; value: number; onChange: (v: number) => void; compact?: boolean }) {
   return (
     <label className="space-y-1">
-      <span className="text-[11px] font-medium text-gray-500">{label}</span>
+      <span className="block text-[11px] font-medium text-gray-500">{label}</span>
       <input type="number" value={value} onChange={e => onChange(Number(e.target.value))}
-        className="block w-full rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400" />
+        className={`${compact ? 'w-20 text-center' : 'w-full'} block rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400`} />
     </label>
   );
 }
@@ -6262,16 +6179,97 @@ function FieldArea({ label, value, onChange, rows, placeholder }: { label: strin
   );
 }
 
-function RangeField({ label, value, onChange }: { label: string; value: [number, number]; onChange: (v: [number, number]) => void }) {
+/* compact — поля под числа в 2–4 знака: тянуть их на всю колонку незачем,
+   и ряд из трёх пауз влезает в строку, не расползаясь на пол-экрана. */
+function RangeField({ label, value, onChange, compact }: { label: string; value: [number, number]; onChange: (v: [number, number]) => void; compact?: boolean }) {
+  const box = compact
+    ? 'w-16 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-center text-xs text-gray-800 outline-none focus:border-indigo-400'
+    : 'block w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400';
   return (
     <label className="space-y-1">
-      <span className="text-[11px] font-medium text-gray-500">{label}</span>
+      <span className="block text-[11px] font-medium text-gray-500">{label}</span>
       <div className="flex items-center gap-1">
         <input type="number" value={value[0]} onChange={e => onChange([Number(e.target.value), value[1]])}
-          className="block w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400" />
+          className={box} />
         <span className="text-gray-400 text-xs">—</span>
         <input type="number" value={value[1]} onChange={e => onChange([value[0], Number(e.target.value)])}
-          className="block w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400" />
+          className={box} />
+      </div>
+    </label>
+  );
+}
+
+/* Часовой пояс: раньше это было поле «UTC±» с голым числом — оператору
+   приходилось помнить, что 3 это Москва, а 5 — Екатеринбург. Список городов
+   снимает вопрос. Значение по-прежнему хранится числом (смещение от UTC),
+   формат настроек не меняется. */
+const TIMEZONE_ZONES: { offset: number; cities: string }[] = [
+  { offset: -8, cities: 'Лос-Анджелес' },
+  { offset: -7, cities: 'Денвер' },
+  { offset: -6, cities: 'Чикаго, Мехико' },
+  { offset: -5, cities: 'Нью-Йорк, Богота' },
+  { offset: -4, cities: 'Сантьяго' },
+  { offset: -3, cities: 'Сан-Паулу, Буэнос-Айрес' },
+  { offset: 0, cities: 'Лондон, Лиссабон' },
+  { offset: 1, cities: 'Берлин, Париж, Варшава' },
+  { offset: 2, cities: 'Киев, Кишинёв, Калининград' },
+  { offset: 3, cities: 'Москва, Минск, Стамбул' },
+  { offset: 4, cities: 'Самара, Дубай, Баку, Тбилиси' },
+  { offset: 5, cities: 'Екатеринбург, Ташкент, Алматы' },
+  { offset: 6, cities: 'Омск, Бишкек' },
+  { offset: 7, cities: 'Новосибирск, Красноярск, Бангкок' },
+  { offset: 8, cities: 'Иркутск, Пекин, Сингапур' },
+  { offset: 9, cities: 'Якутск, Токио, Сеул' },
+  { offset: 10, cities: 'Владивосток, Сидней' },
+  { offset: 11, cities: 'Магадан, Сахалин' },
+  { offset: 12, cities: 'Камчатка, Окленд' },
+];
+
+function formatUtcOffset(offset: number) {
+  if (offset === 0) return 'UTC±0';
+  return `UTC${offset > 0 ? '+' : '−'}${Math.abs(offset)}`;
+}
+
+function TimezoneField({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  // Сохранённое смещение может не совпасть со списком (полчаса, экзотика) —
+  // тогда показываем его отдельной строкой, чтобы поле не выглядело пустым и
+  // чтобы открытие настроек само не переписало значение кампании.
+  const known = TIMEZONE_ZONES.some(z => z.offset === value);
+  return (
+    <label className="space-y-1">
+      <span className="block text-[11px] font-medium text-gray-500">Часовой пояс</span>
+      {/* Ширина по содержимому, а не на всю колонку: внутри короткая строка
+          вроде «UTC+3 — Москва, Минск, Стамбул», растянутое поле выглядело
+          пустым. max-w держит список в рамках колонки на узком экране. */}
+      <select value={value} onChange={e => onChange(Number(e.target.value))}
+        className="block w-auto max-w-full cursor-pointer rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400">
+        {!known && <option value={value}>{formatUtcOffset(value)} — сохранённое значение</option>}
+        {TIMEZONE_ZONES.map(z => (
+          <option key={z.offset} value={z.offset}>{formatUtcOffset(z.offset)} — {z.cities}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+/* Счётчик со стрелками: значение здесь всегда однозначное, поле на всю
+   колонку сбивало с толку — казалось, что туда просят вписать диапазон. */
+function StepperField({ label, value, min, max, onChange, title }: { label: string; value: number; min: number; max: number; onChange: (v: number) => void; title?: string }) {
+  const clamp = (n: number) => Math.min(Math.max(n, min), max);
+  const arrow = 'flex h-[13px] w-5 cursor-pointer items-center justify-center border border-gray-200 bg-gray-50 text-[7px] leading-none text-gray-500 transition hover:bg-gray-100 disabled:cursor-default disabled:opacity-40';
+  return (
+    <label className="space-y-1" title={title}>
+      <span className="block text-[11px] font-medium text-gray-500">{label}</span>
+      <div className="flex items-center gap-1">
+        <input type="number" min={min} max={max} value={value}
+          onChange={e => onChange(clamp(Number(e.target.value) || min))}
+          className="w-14 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-center text-xs text-gray-800 outline-none focus:border-indigo-400 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none" />
+        <span className="flex flex-col">
+          <button type="button" aria-label="Больше" disabled={value >= max} onClick={() => onChange(clamp(value + 1))}
+            className={`${arrow} rounded-t-md`}>▲</button>
+          <button type="button" aria-label="Меньше" disabled={value <= min} onClick={() => onChange(clamp(value - 1))}
+            className={`${arrow} -mt-px rounded-b-md`}>▼</button>
+        </span>
       </div>
     </label>
   );
