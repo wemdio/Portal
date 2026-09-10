@@ -4,11 +4,20 @@
 
 Перед любыми действиями с Git, релизом или production обязательно прочитай и соблюдай [`AGENTS.md`](./AGENTS.md). Раздел про границы релиза и production — критический.
 
+## SSH-доступ с этого Mac
+
+Перед поиском доступов прочитай [`docs/ssh-access.md`](./docs/ssh-access.md).
+SSH уже восстановлен и проверен 2026-09-10: `root@139.60.162.24`,
+ключ `/Users/cybermart/.ssh/portal_hostkey_mac_ed25519`.
+Содержимое ключа не выводить и никуда не копировать; проверку ключа сервера
+не отключать. Доступ не разрешает деплой или изменения production без согласования.
+Старый адрес `139.60.162.12` ниже — историческая карта, не актуальная SSH-цель.
+
 ## Что это за репозиторий
 
 Portal — внутренний инструмент студии: Next.js app, воркеры и production-БД на prod-сервере, интеграция с Instantly для cold outreach. Инфраструктура описана в [`.env.servers`](./.env.servers) (НЕ коммитить).
 
-- Прод: `139.60.162.12` (Next.js, workers, main Supabase/Postgres, два instantly-postgres, analytics-датасет `instantly_dataset`, instantly-sync-bot, qualifier и т.д.)
+- Историческая карта от июля: `139.60.162.12` (Next.js, workers, main Supabase/Postgres, два instantly-postgres, analytics-датасет `instantly_dataset`, instantly-sync-bot, qualifier и т.д.). Актуальная SSH-цель — выше; адреса БД/MCP не менять на основании одного SSH-подключения.
 - Старый DB/utility-сервер: `144.31.54.166` (временные rollback-копии после переезда и вспомогательные сервисы; не использовать как текущий endpoint БД)
 
 Документация и архитектура: [README.md](./README.md), [DESIGN.md](./DESIGN.md), [PRODUCT.md](./PRODUCT.md).
