@@ -413,7 +413,7 @@ describe('VE2 follow-up timing through generation and launch', () => {
     tables: {
       ve_projects: [{ id: 'timing-project', brief: {} }],
       ve_verticals: [{ id: 'timing-vertical', project_id: 'timing-project', name: 'Клиники', synonyms: [] }],
-      ve_bases: [{ id: 'timing-base', project_id: 'timing-project', vertical_id: 'timing-vertical', columns: [], analysis: {} }],
+      ve_bases: [{ id: 'timing-base', project_id: 'timing-project', vertical_id: 'timing-vertical', row_count: 1, columns: [], analysis: {} }],
       ve_hypotheses: [{ id: 'timing-hypothesis', project_id: 'timing-project', vertical_id: 'timing-vertical', title: 'Клиники', description: 'Услуги для клиник', status: 'accepted' }],
       ve_chains: [
         { id: 'other-vertical', vertical_id: 'other-vertical', language: 'ru',
