@@ -59,7 +59,8 @@ export async function fetchThreadContext(
   leadEmail: string,
   threadId?: string | null,
   accountId?: string,
-  requestOptions?: Pick<InstantlyRequestOptions, 'requestPriority'>,
+  requestOptions?: Pick<InstantlyRequestOptions,
+    'requestPriority' | 'timeoutMs' | 'timeoutIncludesBody' | 'retryRateLimits'>,
 ): Promise<ThreadContext | null> {
   let allEmails: Email[] = [];
   let historyFetchFailed = false;
@@ -917,7 +918,49 @@ const SUPPORT_BOT_OPERATOR_SEGMENT_PATTERN =
 const SUPPORT_BOT_SKILLBOX_FOOTER_PATTERN =
   /^служба\s+заботы\s+Skillbox,?\s+с\s+\d{1,2}:\d{2}\s+до\s+\d{1,2}:\d{2}\s+по\s+мск\s*оставьте\s+отзыв\s+об\s+обучении\s+в\s+Skillbox\s*первое\s+занятие\s+по\s+английскому\s+за\s+\d{1,5}\s*₽\s*курс-знакомство\s+«как\s+учиться\s+в\s+Skillbox»\s*ответы\s+на\s+частые\s+вопросы\s+пользователей\s*пишите:\s*hello@skillbox\.ru$/iu;
 
+// A short mailbox-move notice may have neither an auto-reply marker nor the
+// formal company-migration wording above. Require BOTH a new-address statement
+// and an instruction about ALL correspondence, with no other authored content.
+// A human sharing a contact, or requesting a quote at a new address, is not this
+// template and must still be evaluated under the project's lead criteria.
+const MAILBOX_NOTICE_EMAIL_SOURCE = String.raw`<?${CONTACT_EMAIL_SOURCE}>?(?:\s*\[(?:mailto:)?${CONTACT_EMAIL_SOURCE}\])?`;
+const MAILBOX_NOTICE_EMAIL_ONLY_PATTERN = new RegExp(String.raw`^${MAILBOX_NOTICE_EMAIL_SOURCE}$`, 'iu');
+const MAILBOX_NOTICE_NEW_ADDRESS_PATTERN = new RegExp(
+  String.raw`^(?:(?:(?:мой|наш)\s+)?новый\s+(?:(?:электронный|почтовый)\s+){0,2}адрес|(?:(?:моя|наша)\s+)?новая\s+(?:электронная\s+)?почта|(?:(?:мой|наш)\s+)?новый\s+e-?mail|(?:my|our)\s+new\s+(?:e-?mail|email\s+address)|(?:my|our)\s+e-?mail(?:\s+address)?\s+has\s+changed)(?:\s+(?:это|is|to))?\s*[:：—–-]?\s*(?:${MAILBOX_NOTICE_EMAIL_SOURCE})?$`,
+  'iu',
+);
+const MAILBOX_NOTICE_DESTINATION_SOURCE = String.raw`(?:(?:него|не[её]|этот\s+адрес|новый\s+(?:(?:электронный|почтовый)\s+){0,2}адрес|новую\s+(?:электронную\s+)?почту)(?:\s*[:：]?\s*${MAILBOX_NOTICE_EMAIL_SOURCE})?|${MAILBOX_NOTICE_EMAIL_SOURCE})`;
+const MAILBOX_NOTICE_ALL_MAIL_PATTERN = new RegExp(
+  String.raw`^(?:(?:(?:прошу|просим)(?:\s+вас)?\s+)?(?:пожалуйста,?\s*)?(?:все\s+(?:письма|сообщения)|всю\s+(?:почту|корреспонденцию|переписку))\s+(?:прошу\s+|просим\s+)?(?:присылать|направлять|отправлять|пересылать)\s+на\s+${MAILBOX_NOTICE_DESTINATION_SOURCE}|(?:пожалуйста,?\s*)?(?:присылайте|направляйте|отправляйте|пересылайте)\s+(?:все\s+(?:письма|сообщения)|всю\s+(?:почту|корреспонденцию|переписку))\s+на\s+${MAILBOX_NOTICE_DESTINATION_SOURCE}|(?:please\s+)?(?:send|forward|direct)\s+all\s+(?:future\s+)?(?:emails?|messages|mail|correspondence)\s+to\s+(?:(?:it|this\s+address|(?:my|our|the)\s+new\s+(?:email\s+)?address)(?:\s*[:：]?\s*${MAILBOX_NOTICE_EMAIL_SOURCE})?|${MAILBOX_NOTICE_EMAIL_SOURCE}))$`,
+  'iu',
+);
+// HTML-to-text may join adjacent paragraphs without punctuation.
+const MAILBOX_NOTICE_COMBINED_PATTERN = new RegExp(
+  String.raw`${MAILBOX_NOTICE_NEW_ADDRESS_PATTERN.source.slice(0, -1)}\s+${MAILBOX_NOTICE_ALL_MAIL_PATTERN.source.slice(1)}`,
+  'iu',
+);
+
+function isPureMailboxChangeNotice(segments: string[]): boolean {
+  const combined = segments.some((segment) => MAILBOX_NOTICE_COMBINED_PATTERN.test(segment));
+  return (
+    (combined || segments.some((segment) => MAILBOX_NOTICE_NEW_ADDRESS_PATTERN.test(segment))) &&
+    (combined || segments.some((segment) => MAILBOX_NOTICE_ALL_MAIL_PATTERN.test(segment))) &&
+    segments.some((segment) => CONTACT_EMAIL_PATTERN.test(segment)) &&
+    segments.every((segment) =>
+      !segment || /^[—–\-_*=~\s]+$/u.test(segment) ||
+      SERVICE_ACK_GREETING_PATTERN.test(segment) ||
+      /^(?:спасибо|благодарю|благодарим|thank\s+you|thanks)$/iu.test(segment) ||
+      SERVICE_ACK_SIGNOFF_PATTERN.test(segment) ||
+      MAILBOX_NOTICE_EMAIL_ONLY_PATTERN.test(segment) ||
+      MAILBOX_NOTICE_NEW_ADDRESS_PATTERN.test(segment) ||
+      MAILBOX_NOTICE_ALL_MAIL_PATTERN.test(segment) ||
+      MAILBOX_NOTICE_COMBINED_PATTERN.test(segment))
+  );
+}
+
 function classifyTechnicalTemplateSegments(segments: string[]): MachineReplyKind | null {
+  if (isPureMailboxChangeNotice(segments)) return 'auto_reply';
+
   const antiSpam = segments.some((segment) => ANTISPAM_REJECTION_SEGMENT_PATTERN.test(segment)) &&
     segments.some((segment) => ANTISPAM_RECOVERY_SEGMENT_PATTERN.test(segment)) &&
     segments.some((segment) => /\bantispam@[a-z0-9.-]+\.[a-z]{2,}(?=$|\s)/iu.test(segment));
@@ -1059,7 +1102,7 @@ function machineReplyReason(kind: MachineReplyKind): string {
   if (kind === 'service_acknowledgement') {
     return 'Служебное подтверждение получения обращения';
   }
-  return 'Автоответ или отписка';
+  return 'Автоответ, служебное уведомление или отписка';
 }
 
 function machineReplyNonLead(
@@ -2041,6 +2084,7 @@ ${criteriaReminder}
 
 ФИНАЛЬНАЯ ПРОВЕРКА МАШИННОГО ОТВЕТА (раньше любых критериев лида):
 - machine_reply_kind = "auto_reply" для автоматического ответа/отпуска, "delivery_failure" для уведомления о недоставке, "service_acknowledgement" для шаблонного подтверждения или обещания обработать запрос/ответить. Например, «Мы обязательно ответим в ближайшее время. Если запрос актуален — свяжитесь по телефону» — служебный шаблон, не коммерческий CTA, даже без слов «письмо получено».
+- Чистое административное уведомление о смене почты («Мой новый электронный адрес X. Прошу все письма присылать на него») — machine_reply_kind="auto_reply", is_lead=false, даже если оно написано вручную и до него отправлен оффер. Это правило доставки всей корреспонденции, а не интерес к предложению; новый адрес не выполняет кастомное правило «поделились почтой — лид». Но «Пришлите КП/расчёт на новый адрес», вопрос о цене, согласие на звонок или отдельный человеческий интерес рядом с уведомлением оценивай по критериям проекта с machine_reply_kind=null. Обычная сознательная передача контакта в ответ на наш вопрос — тоже НЕ уведомление о смене почты: к ней применяются кастомные критерии.
 - Ставь этот признак только для полностью машинного/служебного ОСНОВНОГО ответа без самостоятельного человеческого интереса. Машинный текст в цитате или подписи не учитывай. Если рядом есть живой вопрос про цену/КП или просьба обсудить предложение/созвониться, machine_reply_kind=null: оцени человеческую часть по обычным критериям.
 - Само упоминание отпуска или отсутствия не делает ответ автоматическим. «С завтрашнего дня я в отпуске. Смогу вернуться к теме после 24 сентября» — человеческое намерение продолжить разговор, machine_reply_kind=null, но НЕ безусловный лид: по дефолтным критериям это отложенный интерес только после подтверждённого содержательного оффера. После запроса контакта или без подтверждённого оффера один перенос разговора не является лидом. Отличай от обычного автоответа «Я в отпуске, вернусь в офис 24 сентября, на письма отвечу после возвращения»: здесь нет интереса к нашему предложению. Кастомные критерии продолжают определять квалификацию человеческого ответа.
 - При machine_reply_kind != null обязательно is_lead=false, custom_criteria_matched=false, needs_review=false, objection_handleable=false, objection_draft=null. Контакты и призывы из служебного шаблона не могут выполнить кастомное правило «передали контакт — лид».
