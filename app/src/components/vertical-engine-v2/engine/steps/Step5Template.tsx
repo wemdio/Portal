@@ -34,7 +34,7 @@ import { HE, StatusDot } from '../design';
 import { ContactSupplyPanel, useContactSupply, type ContactSupplyController } from '../ContactSupplyPanel';
 import type { LaunchPortfolioResponse } from '../LaunchPortfolioView';
 import { SeasonalityStatus } from '../SeasonalitySummary';
-import { Badge, OperatorText, StatusBox, formatDate } from '../ui';
+import { OperatorText, StatusBox, formatDate } from '../ui';
 import {
   SegmentationAuditPanel,
   useSegmentationAudit,
@@ -135,8 +135,15 @@ function PreviewTokens({
  * Строки базы лениво подгружаются при первом раскрытии; рендер — чистый,
  * через renderTemplatePreview (сегментные варианты применяются по sample_segments).
  */
-function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseId: string }) {
+export function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseId: string }) {
+  return <TemplateLeadPreviewContent key={`${baseId}:${template.id}:${template.updated_at}`} template={template} baseId={baseId} />;
+}
+
+function TemplateLeadPreviewContent({ template, baseId }: { template: VeTemplate; baseId: string }) {
   const [state, setState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const [subjectIndex, setSubjectIndex] = useState(0);
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const [sample, setSample] = useState<{
     columns: string[];
     rows: Array<Record<string, unknown>>;
@@ -150,7 +157,9 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
     setState('loading');
     veEngineCall<VeTemplateGetResponse>(`${VE_API}/bases/${baseId}/template`)
       .then(({ ok, data }) => {
-        if (!ok) {
+        if (!alive.current) return;
+        if (!ok || (data.template?.id && data.template.id !== template.id)
+          || (data.template?.updated_at && data.template.updated_at !== template.updated_at)) {
           setState('error');
           return;
         }
@@ -161,20 +170,29 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
         });
         setState('ready');
       })
-      .catch(() => setState('error'));
+      .catch(() => { if (alive.current) setState('error'); });
   };
 
-  const preview = useMemo(() => {
-    if (state !== 'ready' || !sample) return null;
-    return renderTemplatePreview({
+  const first = template.letters[0];
+  const subjects = first?.selected_variant
+    ? (first.selected_subject_indices ?? []).map(index => first.subject_options?.[index] ?? '')
+    : first ? [first.subject ?? '', ...(first.variants ?? []).slice(0, 3).map(variant => variant.subject ?? '')] : [];
+  const subjectVariantIndex = Math.min(subjectIndex, Math.max(0, subjects.length - 1));
+  const rendered = useMemo(() => {
+    if (state !== 'ready' || !sample) return { preview: null, error: null };
+    try { return { preview: renderTemplatePreview({
       letters: template.letters,
       operatorMapping: mapping,
       rows: sample.rows,
       columns: sample.columns,
       maxRows: 3,
       rowSegments: sample.segments ?? undefined,
-    });
-  }, [state, sample, template, mapping]);
+      subjectVariantIndex,
+    }), error: null }; } catch {
+      return { preview: null, error: 'Не удалось показать выбранную версию письма. Проверьте тексты и темы в редакторе.' };
+    }
+  }, [state, sample, template, mapping, subjectVariantIndex]);
+  const preview = rendered.preview;
 
   const hasVariants = template.letters.some((l) => (l.segment_variants ?? []).length > 0);
   const segmentsClassified = hasVariants && (sample?.segments ?? null) !== null;
@@ -183,7 +201,6 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
     <details className="ve2-panel-line" onToggle={(e) => handleToggle(e.currentTarget.open)}>
       <summary className={`${HE.btnQuiet} min-h-11 w-full cursor-pointer select-none px-5 py-3`}>
         Превью по лидам: письма глазами конкретных лидов из базы
-        <Badge tone="amber">новое</Badge>
       </summary>
       <div className="border-t border-gray-100 px-5 py-3">
         {state === 'loading' || state === 'idle' ? (
@@ -191,14 +208,23 @@ function TemplateLeadPreview({ template, baseId }: { template: VeTemplate; baseI
         ) : null}
         {state === 'error' ? (
           <p className="text-xs text-gray-500">
-            Не удалось загрузить строки базы. Закройте и откройте блок, чтобы повторить.
+            Не удалось загрузить строки базы для этой версии писем. Если письма изменились, обновите страницу.
+            <button type="button" className={`${HE.btnQuiet} ml-2`} onClick={() => handleToggle(true)}>Повторить</button>
           </p>
         ) : null}
+        {rendered.error ? <p role="alert" className="text-sm text-red-600">{rendered.error}</p> : null}
         {preview && preview.rows.length === 0 ? (
           <p className="text-xs text-gray-500">В базе нет строк для превью.</p>
         ) : null}
         {preview && preview.rows.length > 0 && sample ? (
           <div>
+            {subjects.length > 1 ? <label className="mb-4 block text-sm font-medium text-gray-700">
+              Вариант темы для превью
+              <select value={subjectVariantIndex} aria-label="Вариант темы для превью" className={`${HE.input} mt-2 w-full`} onChange={event => setSubjectIndex(Number(event.target.value))}>
+                {subjects.map((subject, index) => <option key={index} value={index}>{index + 1}. {subject || 'Без темы'}</option>)}
+              </select>
+              {first?.selected_variant ? <span className="mt-2 block text-xs font-normal text-gray-500">Все выбранные темы используют один и тот же утверждённый текст первого письма. Получатель получит один вариант.</span> : null}
+            </label> : null}
             <ol className="ve2-letter-sheet">
               {preview.rows.map((leadRow, leadIdx) => {
                 const unresolved = dedupOperatorNames(leadRow.letters.flatMap((l) => l.unresolved));
@@ -323,7 +349,7 @@ function isValidDeliveryPreview(value: VeDeliveryPlanPreviewDto | null): value i
 function portalProjectFromBoundPlan(plan: VeDeliveryPlanPreviewDto): VePortalProjectOptionDto {
   return {
     id: plan.portal_project_id,
-    name: plan.portal_project_name?.trim() || 'Проект Portal',
+    name: plan.portal_project_name?.trim() || 'Проект клиента',
     active_period: {
       id: plan.portal_period_id,
       label: plan.portal_period_label,
@@ -337,11 +363,12 @@ function portalProjectFromBoundPlan(plan: VeDeliveryPlanPreviewDto): VePortalPro
  * Состояние запуска шаблона. Пока в launch_info шаблона есть запись — вместо
  * формы показываем её (один запуск на шаблон; повторный force — только через API).
  */
-function useTemplateLaunch(
+export function useTemplateLaunch(
   template: VeTemplate | null,
   segmentationAuditId: string | null,
   onSegmentationRejected: (phase: 'stale' | 'incomplete' | 'refresh') => void,
 ) {
+  const templateId = template?.id ?? null;
   const templateLaunch = parseLaunchInfo((template as { launch_info?: unknown } | null)?.launch_info);
   const reconciliationRequired = templateLaunch?.reconciliation_required === true;
   const [recorded, setRecorded] = useState<VeTemplateLaunchInfo | null>(() =>
@@ -364,6 +391,15 @@ function useTemplateLaunch(
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
+  const settingsLoad = useRef<{ templateId: string; active: boolean } | null>(null);
+
+  useEffect(() => () => {
+    const request = settingsLoad.current;
+    if (request?.templateId === templateId) {
+      request.active = false;
+      settingsLoad.current = null;
+    }
+  }, [templateId]);
 
   const selectedPortalProject = portalProjects?.find((project) => project.id === portalProjectId) ?? null;
   const activePortalPeriod = selectedPortalProject?.active_period ?? null;
@@ -385,14 +421,32 @@ function useTemplateLaunch(
   }, []);
 
   const openForm = useCallback(() => {
-    if (!template) return;
+    if (!templateId) return;
     setFormOpen(true);
     setSubmitError(null);
-    if (presets !== null) return;
-    void Promise.resolve(veEngineCall<VeLaunchPresetsResponse>(`${VE_API}/templates/${template.id}/launch`))
+    // Polling replaces template objects; load settings only once for this identity.
+    if (settingsLoad.current?.templateId === templateId) return;
+    const request = { templateId, active: true };
+    settingsLoad.current = request;
+    setPresets(null);
+    setLoadError(null);
+    setBoundPresetId(null);
+    setPresetId('');
+    setCanCreateClient(false);
+    setMailboxTagOptions([]);
+    setPortalProjects(null);
+    setPortalProjectId('');
+    setTargetContactsInput('');
+    setDeliveryPlanLocked(false);
+    clearDeliveryPreview();
+    void Promise.resolve()
+      .then(() => request.active
+        ? veEngineCall<VeLaunchPresetsResponse>(`${VE_API}/templates/${templateId}/launch`)
+        : null)
       .then((response) => {
+        if (!request.active || settingsLoad.current !== request) return;
         if (!response?.ok) {
-          setLoadError(response?.data?.error ?? 'Не удалось загрузить пресеты');
+          setLoadError(response?.data?.error ?? 'Не удалось загрузить настройки отправки');
           setPresets([]);
           setBoundPresetId(null);
           setCanCreateClient(false);
@@ -450,10 +504,11 @@ function useTemplateLaunch(
           return;
         }
         setPresetId('');
-        setLoadError('Закреплённый пресет проекта недоступен');
+        setLoadError('Настройки отправки проекта недоступны');
       })
       .catch(() => {
-        setLoadError('Не удалось загрузить пресеты');
+        if (!request.active || settingsLoad.current !== request) return;
+        setLoadError('Не удалось загрузить настройки отправки');
         setPresets([]);
         setBoundPresetId(null);
         setCanCreateClient(false);
@@ -463,7 +518,7 @@ function useTemplateLaunch(
         setDeliveryPreviewState('error');
         setDeliveryPreviewError('Не удалось загрузить проекты Portal и план выполнения.');
       });
-  }, [presets, template]);
+  }, [clearDeliveryPreview, templateId]);
 
   const selectPreset = useCallback((id: string) => {
     setPresetId(id);
@@ -691,7 +746,7 @@ function formatEmailCount(count: number | null): string {
   return formatRussianCount(count, ['почта', 'почты', 'почт']);
 }
 
-function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
+export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
   const preview = launch.deliveryPreview;
   const period = launch.activePortalPeriod;
   const targetInvalid = launch.targetContactsInput.trim() !== '' && launch.targetContacts === null;
@@ -715,18 +770,18 @@ function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
 
       {launch.portalProjects === null ? (
         <p className="mt-2 text-xs text-red-600" role="alert">
-          Проекты Portal и активный период недоступны. Новый запуск заблокирован.
+          Проекты клиента и активный период недоступны. Новый запуск заблокирован.
         </p>
       ) : launch.portalProjects.length === 0 ? (
         <p className="mt-2 text-xs text-red-600" role="alert">
-          Нет проектов Portal, доступных для привязки. Новый запуск заблокирован.
+          Нет доступных проектов клиента. Новый запуск заблокирован.
         </p>
       ) : (
         <>
           <div className="mt-2 grid gap-3 sm:grid-cols-2">
             <div>
               <label htmlFor="ve2-portal-project" className="ve2-label">
-                Проект Portal
+                Проект клиента
               </label>
               <select
                 id="ve2-portal-project"
@@ -745,7 +800,7 @@ function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
             </div>
             <div>
               <label htmlFor="ve2-delivery-target" className="ve2-label">
-                Обязательство, контактов
+                Цель контактов за период
               </label>
               <input
                 id="ve2-delivery-target"
@@ -790,7 +845,7 @@ function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
             </p>
           ) : null}
           {!launch.presetId && launch.portalProjectId && launch.targetContacts !== null ? (
-            <p className="mt-2 text-xs text-gray-500">Выберите клиентский пресет, чтобы рассчитать мощность.</p>
+            <p className="mt-2 text-xs text-gray-500">Выберите настройки отправки, чтобы рассчитать темп.</p>
           ) : null}
         </>
       )}
@@ -873,7 +928,7 @@ function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
   );
 }
 
-function CreateClientPresetInline({
+export function CreateClientPresetInline({
   launch,
   templateId,
 }: {
@@ -937,8 +992,8 @@ function CreateClientPresetInline({
       if (!response.ok || !response.data.preset) {
         setError(
           response.status === 409
-            ? 'Пользователь с такой почтой уже существует. Выберите его пресет или укажите другую почту.'
-            : response.data.error ?? 'Не удалось создать клиента и пресет. Попробуйте ещё раз.',
+            ? 'Пользователь с такой почтой уже существует. Выберите его настройки отправки или укажите другую почту.'
+            : response.data.error ?? 'Не удалось создать клиентский кабинет. Попробуйте ещё раз.',
         );
         requestAnimationFrame(() => passwordRef.current?.focus());
         return;
@@ -954,7 +1009,7 @@ function CreateClientPresetInline({
       setOpen(false);
       requestAnimationFrame(() => document.getElementById('ve2-launch-preset')?.focus());
     } catch {
-      setError('Не удалось создать клиента и пресет. Проверьте соединение и попробуйте ещё раз.');
+      setError('Не удалось создать клиентский кабинет. Проверьте соединение и попробуйте ещё раз.');
       requestAnimationFrame(() => passwordRef.current?.focus());
     } finally {
       setPassword('');
@@ -970,7 +1025,7 @@ function CreateClientPresetInline({
             Новый клиент
           </p>
           <p className="mt-1 text-xs leading-relaxed text-gray-500">
-            Создайте вход в портал и пресет отправителей прямо для этого проекта.
+            Создайте вход для клиента и выберите почты для рассылки.
           </p>
         </div>
         {!open ? (
@@ -982,7 +1037,7 @@ function CreateClientPresetInline({
             aria-controls="ve2-create-client-form"
             className={HE.btnSmall}
           >
-            Создать клиента и пресет
+            Создать клиентский кабинет
           </button>
         ) : null}
       </div>
@@ -995,7 +1050,7 @@ function CreateClientPresetInline({
       {created ? (
         <p className="mt-2 flex items-center gap-2 text-xs text-emerald-700" role="status" aria-live="polite">
           <StatusDot tone="ok" />
-          Клиент {created.email} создан, в пресете сохранено {formatMailboxCount(created.mailboxCount)}.
+          Клиентский кабинет {created.email} создан. Для отправки выбрано {formatMailboxCount(created.mailboxCount)}.
         </p>
       ) : null}
 
@@ -1072,8 +1127,7 @@ function CreateClientPresetInline({
           </div>
 
           <p id="ve2-create-client-note" className="max-w-3xl text-[11px] leading-relaxed text-gray-500">
-            Точный состав тега проверим в Instantly при создании. Он фиксируется в пресете и позднее не обновляется
-            вслед за тегом. Кампании создаются без отправки, текущую кампанию можно вручную поправить перед активацией.
+            При создании проверим и сохраним почты из выбранного тега. Изменения тега позднее не обновляют эти настройки автоматически. Кампании создаются без отправки, текущую кампанию можно вручную поправить перед активацией.
           </p>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -1082,7 +1136,7 @@ function CreateClientPresetInline({
               disabled={creating || !email.trim() || password.length < 8 || !selectedTag}
               className={HE.btnPrimary}
             >
-              {creating ? 'Создаём клиента…' : 'Создать клиента'}
+              {creating ? 'Создаём кабинет…' : 'Создать клиентский кабинет'}
             </button>
             <button type="button" onClick={closeForm} disabled={creating} className={HE.btnGhost}>
               Отмена
@@ -1331,7 +1385,7 @@ function PreparedLaunchPortfolio({
         ) : null}
         {deliveryDeferred ? (
           <p className="mt-2 text-xs text-gray-600" role="status">
-            Кампании ждут первой дневной партии. После её загрузки отправка начнётся по расписанию пресета.
+            Кампании ждут первой дневной партии. После её загрузки отправка начнётся по расписанию отправки.
           </p>
         ) : null}
         {queueHint ? (
@@ -1471,21 +1525,21 @@ function LaunchSection({
             Активация — вручную после проверки.
           </p>
           {launch.presets === null && !launch.loadError ? (
-            <p className="text-xs text-gray-500" role="status">Загружаем пресеты…</p>
+            <p className="text-xs text-gray-500" role="status">Загружаем настройки отправки…</p>
           ) : null}
           {launch.loadError ? <p className="text-xs text-red-500" role="alert">{launch.loadError}</p> : null}
           {launch.presets && launch.presets.length === 0 && !launch.loadError ? (
             <p className="text-xs text-gray-500">
               {launch.canCreateClient
-                ? 'Для этого проекта ещё нет доступного пресета.'
-                : 'Нет доступных пресетов. Сначала настройте пресет клиенту.'}
+                ? 'Для этого проекта ещё нет настроек отправки.'
+                : 'Нет доступных настроек отправки. Сначала выберите почты для клиента.'}
             </p>
           ) : null}
           {launch.presets && launch.presets.length > 0 ? (
             <div className="space-y-3">
               <div className="min-w-0 sm:max-w-sm">
                 <label htmlFor="ve2-launch-preset" className="ve2-label">
-                  Клиентский пресет
+                  Настройки отправки
                 </label>
                 <select
                   id="ve2-launch-preset"
@@ -1497,7 +1551,7 @@ function LaunchSection({
                 >
                   {!launch.boundPresetId ? <option value="">Выберите клиента</option> : null}
                   {launch.boundPresetId && !selectedPreset ? (
-                    <option value="">Закреплённый пресет недоступен</option>
+                    <option value="">Настройки отправки недоступны</option>
                   ) : null}
                   {launch.presets.map((preset) => (
                     <option key={preset.id} value={preset.id}>
@@ -1506,7 +1560,7 @@ function LaunchSection({
                   ))}
                 </select>
                 {launch.boundPresetId && selectedPreset ? (
-                  <p className="mt-1 text-[11px] text-gray-500">Пресет закреплён за проектом</p>
+                  <p className="mt-1 text-[11px] text-gray-500">Настройки отправки закреплены за проектом</p>
                 ) : null}
               </div>
               {selectedPreset ? (
@@ -1606,8 +1660,10 @@ export function Step5Template(props: {
   onBuildTemplate: () => void;
   /** Возврат к исходной цепочке: шаблон пересобирается после правок на шаге 3. */
   onGoToContent?: () => void;
+  /** Письма уже показаны в FinalLettersEditor; здесь остаётся только запуск. */
+  launchOnly?: boolean;
 }): JSX.Element {
-  const { template, base, jobs, onBuildTemplate, onGoToContent } = props;
+  const { template, base, jobs, onBuildTemplate, onGoToContent, launchOnly = false } = props;
   const [copied, setCopied] = useState(false);
   const [copiedLetterIdx, setCopiedLetterIdx] = useState<number | null>(null);
   const [csvDownloading, setCsvDownloading] = useState(false);
@@ -1767,6 +1823,7 @@ export function Step5Template(props: {
 
   return (
     <div className="space-y-5">
+      {!launchOnly ? <>
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-3">
@@ -1833,6 +1890,7 @@ export function Step5Template(props: {
           </div>
         </div>
       ) : null}
+      </> : null}
 
       {/* Запуск: существующие audit/recovery/portfolio состояния живут внутри одной панели. */}
       <section className="ve2-panel px-5 py-[18px]" aria-labelledby="ve2-template-launch-title">
@@ -1885,6 +1943,7 @@ export function Step5Template(props: {
         </div>
       </section>
 
+      {!launchOnly ? <>
       {/* Финальные письма: один лист, письма разделяются только hairline. */}
       <section aria-labelledby="ve2-template-letters-title">
         <p id="ve2-template-letters-title" className={HE.eyebrow}>
@@ -2003,6 +2062,7 @@ export function Step5Template(props: {
 
       {/* Превью по лидам сохранено как дополнительная подробность после основного шаблона. */}
       <TemplateLeadPreview template={template} baseId={base?.id ?? template.base_id} />
+      </> : null}
     </div>
   );
 }

@@ -1,172 +1,22 @@
-/**
- * Стадия template: база + вертикаль + цепочка → финальный шаблон 85/15.
- *  1) LLM-план (fixed_block ~85% + personalization_plan + letters[].segment_variants);
- *  2) LLM финальных писем по плану (маркеры ---LETTER N--- + ---SEGMENT: <when>---,
- *     у письма 1 — A/B-вариант ---LETTER 1 B---): основной текст — дефолт для
- *     всей базы, сегментные варианты хранятся отдельно
- *     (letters[].segment_variants), B-вариант — в letters[].variants,
- *     wait_days — сохранённые интервалы исходной цепочки вертикали;
- *  3) пост-проверки с одним retry каждая: длина тел (≤80 слов, письмо 1 ≤70) и
- *     консистентность operator_mapping (см. validateOperatorMapping);
- *  4) pure-маппинг операторов {{var}} финальных писем на колонки базы;
- *  5) insert в ve_templates (status 'ready', llm_model).
- * В промпты подмешиваются style_override из брифа (styleExample),
- * signature_override (дословная подпись отправителя) и winner-паттерны
- * датасета (best-effort); после генерации писем — критик-луп:
- * одна оценка (только основной вариант A) + максимум один rewrite по её
- * замечаниям; B-вариант и сегментные варианты после рерайта восстанавливаются
- * из исходных писем.
- */
-
-import { parseLettersFromModelOutput, type ParsedLetter } from '@/lib/emailSequenceV2/letterParser';
+/** Direct final emails from the client, hypothesis and analysed audience. No paid draft chain or textual plan. */
+import { z } from 'zod';
+import { callLLMWithSchema, getVeModel } from '../llm';
+import { VeBaseAnalysisSchema, type VeBaseAnalysisOutput, type VeTemplatePlanOutput } from '../schemas';
+import { buildVeFinalLetterMessages } from '../prompts/finalLetters';
+import { buildVeFinalPersonalization, normalizeVeFinalLetters } from '../finalLetters';
 import { applyVeChainTiming } from '../chainTiming';
-import { callLLMText, callLLMTextWithFallback, callLLMWithSchema, getVeModel, type LLMMessage } from '../llm';
-import {
-  VeBaseAnalysisSchema,
-  VeTemplatePlanSchema,
-  type VeBaseAnalysisOutput,
-  type VeTemplatePlanOutput,
-} from '../schemas';
-import {
-  buildTemplateCriticMessages,
-  buildTemplateLettersMessages,
-  buildTemplatePlanMessages,
-  buildTemplateRewriteMessages,
-} from '../prompts/template';
-import { buildChainRuleFixHint } from '../prompts/chain';
-import {
-  checkLetterRules,
-  extractNumberFacts,
-  findUnverifiedNumbers,
-  type VeLetterForCheck,
-  type VeLetterRuleViolation,
-} from '../letterChecks';
-import { selectCaseForVertical, type VeCase } from '../caseBank';
 import { compileClientBriefForLetters, splitBriefForLetterPrompt } from '../clientBriefIntake';
-import { getWinnerPatterns, matchSegmentLabels, type VeWinnerPattern } from '../datasetStats';
-import type {
-  VeBase,
-  VeChain,
-  VeChainLanguage,
-  VeChainLetter,
-  VeHypothesis,
-  VeJob,
-  VeOperatorMapping,
-  VePersonalizationPlan,
-  VeSegmentVariant,
-  VeVertical,
-} from '../types';
-import {
-  VeChainCritiqueSchema,
-  extractLetterBVariants,
-  parsedToChainLetters,
-  selectPromptHypotheses,
-  type VeChainLetterAB,
-} from './chain';
-import {
-  addUsage,
-  newUsage,
-  payloadString,
-  readProject,
-  stageLog,
-  type VeStageContext,
-  type VeStageResult,
-} from './shared';
+import { selectCaseForVertical } from '../caseBank';
+import { extractNumberFacts, findUnverifiedNumbers } from '../letterChecks';
+import type { VeBase, VeChainLanguage, VeChainLetter, VeJob, VeOperatorMapping, VeSegmentVariant, VeTemplate, VeVertical } from '../types';
+import type { VeChainLetterAB } from './chain';
+import { addUsage, newUsage, payloadString, readProject, type VeStageContext, type VeStageResult } from './shared';
 
 /* ───────────────── Pure-часть: операторы персонализации ───────────────── */
 
-const OPERATOR_RE = /\{\{\s*([A-Za-zА-Яа-яЁё0-9_.-]+)\s*\}\}/g;
+export { extractPersonalizationOperators, mapOperatorsToColumns } from '../letterPersonalization';
 
-/** Все уникальные операторы {{var}} в тексте, в порядке первого появления. */
-export function extractPersonalizationOperators(text: string): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const m of text.matchAll(OPERATOR_RE)) {
-    const name = (m[1] ?? '').trim();
-    if (!name) continue;
-    const key = name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(name);
-  }
-  return out;
-}
-
-function normalizeKey(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/[{}]/g, '')
-    .replace(/[_\-.]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function compactKey(s: string): string {
-  return normalizeKey(s).replace(/\s+/g, '');
-}
-
-/**
- * Словарь синонимов: компактный ключ оператора → возможные названия колонок
- * (тоже нормализуются через normalizeKey). Покрывает канонические переменные
- * Instantly и типичные CSV-базы специалистов (ru/en наименования колонок).
- * Порядок внутри списка важен: первое точное совпадение побеждает.
- */
-const OPERATOR_ALIASES: Record<string, string[]> = {
-  firstname: ['имя', 'имя лида', 'first name', 'контакт имя'],
-  lastname: ['фамилия', 'last name', 'surname'],
-  fullname: ['фио', 'имя фамилия', 'full name', 'контакт'],
-  name: ['имя', 'фио', 'контакт'],
-  companyname: ['компания', 'название компании', 'company', 'company name', 'организация', 'бренд'],
-  company: ['компания', 'название компании', 'company name', 'организация'],
-  website: ['сайт', 'сайт компании', 'site', 'домен', 'url', 'website', 'веб сайт'],
-  site: ['сайт', 'сайт компании', 'website', 'домен', 'url'],
-  email: ['email', 'e mail', 'почта', 'эл почта', 'электронная почта', 'емейл'],
-  phone: ['телефон', 'тел', 'phone', 'номер телефона'],
-  position: ['должность', 'position', 'title', 'job title', 'роль', 'позиция'],
-  jobtitle: ['должность', 'position', 'title', 'роль', 'позиция'],
-  city: ['город', 'city', 'area', 'населенный пункт'],
-  cityname: ['area', 'city', 'город', 'регион', 'населенный пункт', 'location'],
-  region: ['регион', 'region', 'область'],
-  country: ['страна', 'country'],
-  vacancytitle: ['name', 'вакансия', 'должность', 'название вакансии', 'vacancy', 'position', 'позиция', 'job title'],
-  vacancy: ['вакансия', 'название вакансии', 'vacancy', 'должность'],
-  industry: ['отрасль', 'индустрия', 'industry', 'ниша'],
-  segment: ['сегмент', 'segment'],
-};
-
-/**
- * Маппит операторы на колонки базы: точное совпадение (нормализованное),
- * затем таблица синонимов, затем подстрока. Маппинг возможен ТОЛЬКО на колонку
- * из переданного списка. Подстрочные правила ослаблены намеренно: короткие
- * кандидаты (<5 символов) и короткие имена колонок (<5) в подстроке не
- * участвуют — иначе cityName цеплялся бы к колонке «name» (вакансия), а не к
- * «area». Не нашлось — matched=false, column=null (специалист увидит дыру).
- */
-export function mapOperatorsToColumns(operators: string[], columns: string[]): VeOperatorMapping[] {
-  const normalizedColumns = columns.map((column) => ({ column, norm: normalizeKey(column) }));
-
-  return operators.map((operator) => {
-    const candidates = [normalizeKey(operator)];
-    for (const alias of OPERATOR_ALIASES[compactKey(operator)] ?? []) {
-      candidates.push(normalizeKey(alias));
-    }
-
-    for (const cand of candidates) {
-      const exact = normalizedColumns.find((c) => c.norm === cand);
-      if (exact) return { operator, column: exact.column, matched: true };
-    }
-    for (const cand of candidates) {
-      if (cand.length < 5) continue;
-      const partial = normalizedColumns.find((c) => c.norm.includes(cand));
-      if (partial) return { operator, column: partial.column, matched: true };
-    }
-    for (const cand of candidates) {
-      const partial = normalizedColumns.find((c) => c.norm.length >= 5 && cand.includes(c.norm));
-      if (partial) return { operator, column: partial.column, matched: true };
-    }
-    return { operator, column: null, matched: false };
-  });
-}
+function normalizeKey(value: string): string { return value.toLowerCase().replace(/[{}]/g, '').replace(/[_\-.]+/g, ' ').replace(/\s+/g, ' ').trim(); }
 
 /* ───────────────── Pure-часть: сегментные варианты ---SEGMENT: <when>--- ───────────────── */
 
@@ -330,8 +180,6 @@ export function countWords(text: string): number {
 }
 
 /** Порог, выше которого уходим в retry на сокращение (регламент — ≤80/≤70). */
-const SHORTEN_RETRY_WORDS = 85;
-
 /** Предупреждения о длине тел по регламенту (≤80 слов; письмо 1 ≤70). */
 export function collectLengthWarnings(letters: VeChainLetterAB[]): string[] {
   const warnings: string[] = [];
@@ -359,552 +207,81 @@ export function collectLengthWarnings(letters: VeChainLetterAB[]): string[] {
   return warnings;
 }
 
-/* ───────────────── Стадия ───────────────── */
-
-const RETRY_HINT = `Ты вернул слишком мало писем или нарушил формат. Нужно столько же писем, сколько в исходной цепочке (3–5), каждое блоком «---LETTER N---» + строка темы; у письма 1 — вариант B блоком «---LETTER 1 B---»; сегментные варианты — блоками «---SEGMENT: <when>---» после письма. Верни шаблон заново, целиком, без пояснений.`;
-
-function shortenRetryHint(letters: VeChainLetterAB[]): string {
-  const counts = letters.map((l, i) => `письмо ${i + 1}: ${countWords(l.body)} слов`).join(', ');
-  return (
-    `Тела писем длиннее регламента (${counts}). Регламент непреодолим: тело ≤ 80 слов, первое письмо ≤ 70 слов. ` +
-    `Сократи каждое длинное письмо, сохранив смысл, операторы {{var}}, блок «---LETTER 1 B---» и блоки «---SEGMENT: <when>---». ` +
-    `Верни шаблон заново, целиком, в том же формате.`
-  );
-}
-
-function operatorIssuesHint(issues: string[]): string {
-  return (
-    `В шаблоне проблемы с операторами персонализации:\n` +
-    issues.map((i) => `- ${i}`).join('\n') +
-    `\n\nИсправь: каждый оператор из плана должен реально использоваться в письмах и маппиться на реальную колонку базы; ` +
-    `в темах — только операторы с реальной колонкой (fallback в теме невозможен). ` +
-    `Верни шаблон заново, целиком, в том же формате (---LETTER N--- / ---SEGMENT: <when>---).`
-  );
-}
+const normalizedWords = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, '').replace(/\s+/g, ' ').trim();
 
 export async function runTemplateStage(job: VeJob, ctx: VeStageContext): Promise<VeStageResult> {
   const usage = newUsage();
   const baseId = payloadString(job, 'base_id');
-
-  const { data: baseRow, error: bError } = await ctx.supabase
-    .from('ve_bases')
-    .select('*')
-    .eq('id', baseId)
-    .single();
-  if (bError || !baseRow) throw new Error(`ve_bases ${baseId}: ${bError?.message ?? 'not found'}`);
+  const { data: baseRow, error: baseError } = await ctx.supabase.from('ve_bases').select('*').eq('id', baseId).eq('project_id', job.project_id).single();
+  if (baseError || !baseRow) throw new Error(`База недоступна: ${baseError?.message ?? 'not found'}`);
   const base = baseRow as VeBase;
-
-  const analysisParsed = VeBaseAnalysisSchema.safeParse(base.analysis);
-  if (!analysisParsed.success) {
-    throw new Error('ve_bases.analysis отсутствует или битый: сначала выполните стадию base_analyze');
+  const { data: existing, error: existingError } = await ctx.supabase.from('ve_templates').select('*').eq('base_id', baseId).eq('status', 'ready').order('created_at', { ascending: false }).limit(1).maybeSingle();
+  if (existingError) throw new Error(`Не удалось проверить сохранённые письма: ${existingError.message}`);
+  if (existing) {
+    const saved = existing as VeTemplate;
+    return { result: { template_id: saved.id, letters: saved.letters, personalization_plan: saved.personalization_plan, reused: true }, tokensUsed: 0, costUsd: 0 };
   }
-  const analysis: VeBaseAnalysisOutput = analysisParsed.data;
-
-  const { data: verticalRow, error: vError } = await ctx.supabase
-    .from('ve_verticals')
-    .select('*')
-    .eq('id', base.vertical_id)
-    .single();
-  if (vError || !verticalRow) throw new Error(`ve_verticals ${base.vertical_id}: ${vError?.message ?? 'not found'}`);
+  const analysis = VeBaseAnalysisSchema.parse(base.analysis);
+  const { data: verticalRow, error: verticalError } = await ctx.supabase.from('ve_verticals').select('*').eq('id', base.vertical_id).eq('project_id', job.project_id).single();
+  if (verticalError || !verticalRow) throw new Error(`Вертикаль недоступна: ${verticalError?.message ?? 'not found'}`);
   const vertical = verticalRow as VeVertical;
-
-  // Разметка специалиста по гипотезам: rejected уходят из промпта, accepted —
-  // первыми (см. selectPromptHypotheses в stages/chain). Base-per-hypothesis:
-  // у базы есть hypothesis_id → промпт строится по ЭТОЙ гипотезе; иначе
-  // (легаси/ручная загрузка) — по всем гипотезам вертикали, как раньше.
-  const hypothesesByHyp = base.hypothesis_id
-    ? await ctx.supabase
-        .from('ve_hypotheses')
-        .select('title, description, tier, status')
-        .eq('project_id', job.project_id)
-        .eq('id', base.hypothesis_id)
-    : await ctx.supabase
-        .from('ve_hypotheses')
-        .select('title, description, tier, status')
-        .eq('project_id', job.project_id)
-        .eq('vertical_id', base.vertical_id);
-  const { data: hyps, error: hError } = hypothesesByHyp;
-  if (hError) throw new Error(`ve_hypotheses read: ${hError.message}`);
-  const hypSelection = selectPromptHypotheses(
-    (hyps ?? []) as Array<Pick<VeHypothesis, 'title' | 'description' | 'tier' | 'status'>>,
-  );
-  if (hypSelection.fallbackUsed) {
-    stageLog(ctx, '[template] все гипотезы вертикали отклонены специалистом — используем полный список без разметки');
-  }
-  const hypotheses = hypSelection.list.map((h) => ({
-    title: h.title,
-    description: h.description,
-    tier: h.tier,
-    confirmed: h.status === 'accepted',
-  }));
-
-  const { data: chainRow, error: cError } = await ctx.supabase
-    .from('ve_chains')
-    .select('*')
-    .eq('vertical_id', base.vertical_id)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (cError) throw new Error(`ve_chains read: ${cError.message}`);
-  if (!chainRow) throw new Error('Нет цепочки вертикали: сначала выполните стадию chain');
-  const chain = chainRow as VeChain;
-  const chainLetters = (Array.isArray(chain.letters) ? chain.letters : []) as VeChainLetter[];
-  if (!chainLetters.length) throw new Error('ve_chains.letters пуст — перегенерируйте цепочку');
-
-  // Кейс-банк: лучший кейс клиента под вертикаль → главное доказательство
-  // fixed_block/писем. Best-effort: сбой чтения ve_cases не роняет генерацию.
-  let clientCase: VeCase | null = null;
-  try {
-    clientCase = await selectCaseForVertical(ctx.supabase, job.project_id, {
-      name: vertical.name,
-      synonyms: vertical.synonyms,
-    });
-  } catch (e) {
-    stageLog(ctx, `[template] кейс-банк недоступен: ${e instanceof Error ? e.message : String(e)} — продолжаем без кейса`);
-  }
-  if (clientCase) stageLog(ctx, `[template] кейс клиента под вертикаль: ${clientCase.id}`);
-
-  // Стиль клиента из брифа проекта (style_override, рядом с offer_override) →
-  // styleExample в промпты плана и финальных писем. Подпись отправителя
-  // (signature_override) → signatureOverride в план, письма и рерайт.
+  let query = ctx.supabase.from('ve_hypotheses').select('title, description, fit_rationale, evidence, status').eq('project_id', job.project_id).eq('vertical_id', base.vertical_id);
+  query = base.hypothesis_id ? query.eq('id', base.hypothesis_id) : query.neq('status', 'rejected');
+  const { data: hypotheses, error: hypothesisError } = await query;
+  if (hypothesisError || !hypotheses?.length) throw new Error('Не найдена гипотеза для финальных писем.');
   const project = await readProject(ctx.supabase, job.project_id);
-  const brief = (project.brief ?? {}) as Record<string, unknown>;
-  const styleExample = typeof brief.style_override === 'string' ? brief.style_override : undefined;
-  const signatureOverride =
-    typeof brief.signature_override === 'string' ? brief.signature_override : undefined;
-  // Ответы клиента идут в план 85/15: fixed_block обязан нести его УТП и
-  // гарантии авторскими формулировками, а не пересказом из писем цепочки.
-  const clientBriefText = compileClientBriefForLetters(
-    splitBriefForLetterPrompt(brief).clientBrief,
-  );
-
-  // Winner-паттерны датасета (best-effort): метки сегментов по терминам
-  // вертикали (имя + синонимы), фолбэк хинтов — имя вертикали. Любой сбой →
-  // генерим без паттернов, стадию это не валит.
-  let winnerPatterns: VeWinnerPattern[] = [];
-  try {
-    const terms = [vertical.name, ...(Array.isArray(vertical.synonyms) ? vertical.synonyms : [])];
-    const labels = matchSegmentLabels(terms);
-    winnerPatterns = await getWinnerPatterns(labels.length ? labels : [vertical.name], 5);
-  } catch (e) {
-    stageLog(ctx, `[template] winner-паттерны датасета недоступны: ${e instanceof Error ? e.message : String(e)}`);
-  }
-
+  const brief = project.brief ?? {};
+  // Migration-only settings reuse: an old draft is optional, never generated or used as letter content.
+  const { data: legacyChain, error: timingError } = await ctx.supabase.from('ve_chains').select('letters, language').eq('vertical_id', base.vertical_id).order('created_at', { ascending: false }).limit(1).maybeSingle();
+  if (timingError) throw new Error(`Не удалось проверить сохранённые интервалы: ${timingError.message}`);
+  const savedTiming = Array.isArray(legacyChain?.letters) ? legacyChain.letters as Array<{ wait_days?: number }> : [];
+  const languageValue = job.payload.language ?? (brief as Record<string, unknown>).language ?? legacyChain?.language;
+  const language: VeChainLanguage = languageValue === 'en' || languageValue === 'pl' ? languageValue : 'ru';
+  const requestedCount = job.payload.letter_count;
+  const letterCount = typeof requestedCount === 'number' && Number.isInteger(requestedCount) && requestedCount >= 3 && requestedCount <= 6 ? requestedCount : savedTiming.length >= 3 && savedTiming.length <= 6 ? savedTiming.length : 3;
+  let clientCase: Awaited<ReturnType<typeof selectCaseForVertical>> = null;
+  try { clientCase = await selectCaseForVertical(ctx.supabase, job.project_id, { name: vertical.name, synonyms: vertical.synonyms }); } catch { /* A missing optional case never authorises inventing one. */ }
   const columns = Array.isArray(base.columns) ? base.columns : [];
-
-  // Язык всех промптов стадии наследуется от цепочки вертикали (ve_chains.language).
-  const language = (chain.language === 'en' || chain.language === 'pl' ? chain.language : 'ru') as VeChainLanguage;
-
-  // Шаг 1: план 85/15.
-  const plan = await callLLMWithSchema(
-    buildTemplatePlanMessages({
-      language,
-      verticalName: vertical.name,
-      verticalSummary: vertical.summary ?? '',
-      chainLetters,
-      baseAnalysis: analysis,
-      columns,
-      hypotheses,
-      clientCase,
-      styleExample,
-      signatureOverride,
-      clientBrief: clientBriefText,
-    }),
-    VeTemplatePlanSchema,
-    { model: getVeModel('chain'), maxTokens: 8192 },
-  );
-  addUsage(usage, plan);
-
-  // Шаг 2: финальные письма по плану.
+  const promptBrief = splitBriefForLetterPrompt(brief);
+  const input = { language, letterCount, client: { name: project.name, website_url: project.website_url,
+    research: promptBrief.briefJson, client_brief: compileClientBriefForLetters(promptBrief.clientBrief),
+    offer: brief.offer_override, style: brief.style_override, sender_signature: brief.signature_override },
+    vertical: { name: vertical.name, summary: vertical.summary }, hypotheses, baseAnalysis: analysis, columns, clientCase };
+  const facts = extractNumberFacts(JSON.stringify(input));
+  const bodySchema = z.object({ body: z.string().min(1).max(12000), angle: z.string().min(1).max(1000),
+    cta_intent: z.enum(['check_relevance', 'identify_owner', 'choose_priority', 'confirm_timing']) });
+  const schema = z.object({ subject_options: z.array(z.string().min(1).max(500)).length(6),
+    letters: z.array(z.object({ a: bodySchema, b: bodySchema })).length(letterCount) }).superRefine((output, ctx) => {
+    if (new Set(output.subject_options.map(normalizedWords)).size !== 6) ctx.addIssue({ code: 'custom', message: 'All six subjects must be distinct.', path: ['subject_options'] });
+    output.letters.forEach((letter, index) => {
+      if (normalizedWords(letter.a.body) === normalizedWords(letter.b.body) || normalizedWords(letter.a.angle) === normalizedWords(letter.b.angle) || letter.a.cta_intent === letter.b.cta_intent) ctx.addIssue({ code: 'custom', path: ['letters', index], message: 'A and B need distinct bodies, angles and CTA intents.' });
+      for (const side of ['a', 'b'] as const) {
+        const body = letter[side].body;
+        if (countWords(body) > (index === 0 ? 70 : 80) || (body.match(/\?/g) ?? []).length !== 1 || /[—–]/.test(body)) ctx.addIssue({ code: 'custom', path: ['letters', index, side], message: 'Respect the word limit, exactly one question, and no em/en dashes.' });
+        if (findUnverifiedNumbers(body, facts).length) ctx.addIssue({ code: 'custom', path: ['letters', index, side], message: 'Remove numerical facts not found in the supplied material.' });
+      }
+    });
+    const candidate = toLetters(output);
+    const normalized = normalizeVeFinalLetters(candidate);
+    if (normalized.error) ctx.addIssue({ code: 'custom', message: normalized.error });
+    else try { buildVeFinalPersonalization(normalized.letters!, columns); } catch (error) { ctx.addIssue({ code: 'custom', message: error instanceof Error ? error.message : 'Invalid personalization' }); }
+  });
+  function toLetters(output: { subject_options: string[]; letters: Array<{ a: { body: string; angle: string; cta_intent: string }; b: { body: string; angle: string; cta_intent: string } }> }): VeChainLetter[] {
+    return applyVeChainTiming(output.letters.map((letter, index): VeChainLetter => ({ subject: index === 0 ? output.subject_options[0] : null,
+      ...letter.a, variants: [{ subject: null, ...letter.b }], selected_variant: 'A', wait_days: 0,
+      ...(index === 0 ? { subject_options: output.subject_options, selected_subject_indices: [0] } : {}) })), savedTiming);
+  }
   const model = getVeModel('chain');
-  const messages = buildTemplateLettersMessages({
-    language,
-    plan: plan.data,
-    verticalName: vertical.name,
-    chainLetters,
-    baseAnalysis: analysis,
-    clientCase,
-    styleExample,
-    winnerPatterns,
-    signatureOverride,
-  });
-
-  /** Сырой ответ модели → письма с приклеенными сегментными и B-вариантами. */
-  const buildLetters = (raw: string): { parsed: ParsedLetter[]; letters: VeChainLetterAB[] } => {
-    // Сначала B-варианты (---LETTER 1 B---), затем сегментные блоки: оба
-    // сплиттера работают до letterParser, который про эти маркеры не знает.
-    const ab = extractLetterBVariants(raw);
-    const seg = extractSegmentVariants(ab.cleaned);
-    const parsed = parseLettersFromModelOutput(seg.cleaned);
-    const sliced = parsed.slice(0, 6);
-    // Every retry/rewrite inherits the saved chain timing, not generation defaults.
-    const letters = applyVeChainTiming(parsedToChainLetters(sliced), chainLetters).map((l, i): VeChainLetterAB => {
-      const { variants: _legacy, ...rest } = l;
-      const idx = sliced[i]?.letter_index ?? i + 1;
-      const sv = seg.variants.get(idx);
-      const bv = ab.variants.get(idx);
-      return {
-        ...rest,
-        ...(sv?.length ? { segment_variants: sv } : {}),
-        ...(bv ? { variants: [bv] } : {}),
-      };
-    });
-    return { parsed, letters };
-  };
-
-  let llm = await callLLMTextWithFallback(messages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
-  addUsage(usage, llm);
-  let { parsed, letters } = buildLetters(llm.text);
-
-  if (parsed.length < 3) {
-    stageLog(ctx, `[template] распознано ${parsed.length} писем — retry с фидбэком`);
-    const retryMessages: LLMMessage[] = [
-      ...messages,
-      { role: 'assistant', content: llm.text.slice(0, 2000) },
-      { role: 'user', content: RETRY_HINT },
-    ];
-    llm = await callLLMTextWithFallback(retryMessages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
-    addUsage(usage, llm);
-    ({ parsed, letters } = buildLetters(llm.text));
-  }
-  if (parsed.length < 3) {
-    throw new Error(`Шаблон не распарсился: ${parsed.length} писем после retry`);
-  }
-
-  // Шаг 2b: длина тел — регламент ≤80 слов (письмо 1 ≤70); >85 слов → один retry на сокращение.
-  if (letters.some((l) => countWords(l.body) > SHORTEN_RETRY_WORDS)) {
-    stageLog(ctx, '[template] тела писем длиннее регламента — retry на сокращение');
-    const retryLlm = await callLLMText(
-      [
-        ...messages,
-        { role: 'assistant', content: llm.text.slice(0, 2000) },
-        { role: 'user', content: shortenRetryHint(letters) },
-      ],
-      { model, maxTokens: 16384 },
-    );
-    addUsage(usage, retryLlm);
-    const rebuilt = buildLetters(retryLlm.text);
-    if (rebuilt.parsed.length >= 3) {
-      llm = retryLlm;
-      ({ parsed, letters } = rebuilt);
-    } else {
-      stageLog(ctx, '[template] сокращённый вариант не распарсился — оставляем исходные письма');
-    }
-  }
-
-  // Шаг 2c: детерминированный контроль регламента + фактчек цифр (letterChecks).
-  // Тире/приветствие/один CTA/стоп-фразы + числа только из материалов (анализ
-  // базы, цепочка, кейс, бриф, winner-паттерны, fixed_block). Варианты A и B
-  // проверяются полностью; сегментные варианты — только по числам (это
-  // фрагменты, без приветствия/CTA). Нарушения → один фикс-проход ДО маппинга
-  // операторов и критика: критик должен ревьюить финальную механику текста.
-  const factCorpus = [
-    JSON.stringify(analysis),
-    chainLetters.map((l) => `${l.subject ?? ''}\n${l.body}`).join('\n'),
-    vertical.name,
-    vertical.summary ?? '',
-    clientCase ? JSON.stringify(clientCase) : '',
-    JSON.stringify(brief),
-    // Цифры из ответов клиента читаемым текстом: в JSON выше они есть, но
-    // фактчек сверяет по нормализованным числам, и обрезанный блок письма
-    // должен опираться на тот же корпус, что видел план.
-    clientBriefText,
-    JSON.stringify(winnerPatterns),
-    plan.data.fixed_block,
-  ].join('\n');
-  const facts = extractNumberFacts(factCorpus);
-  const lettersForCheck = (ls: VeChainLetterAB[]): VeLetterForCheck[] =>
-    ls.flatMap((l) => [
-      { subject: l.subject ?? '', body: l.body, variant: 'A' },
-      ...(l.variants ?? []).map((v) => ({ subject: v.subject ?? '', body: v.body, variant: 'B' })),
-    ]);
-  const segmentNumberViolations = (ls: VeChainLetterAB[]): VeLetterRuleViolation[] =>
-    ls.flatMap((l, i) =>
-      (l.segment_variants ?? []).flatMap((sv) =>
-        findUnverifiedNumbers(sv.text, facts).map((token) => ({
-          letter: i + 1,
-          rule: 'unverified_number' as const,
-          detail: `письмо ${i + 1}, сегментный вариант: число «${token}» отсутствует в материалах — удали или замени фактом из материалов`,
-        })),
-      ),
-    );
-  const collectRuleViolations = (ls: VeChainLetterAB[]) => [
-    ...checkLetterRules(lettersForCheck(ls), language, facts),
-    ...segmentNumberViolations(ls),
-  ];
-  const ruleViolations = collectRuleViolations(letters);
-  if (ruleViolations.length > 0) {
-    stageLog(ctx, `[template] детерминированный контроль: ${ruleViolations.length} нарушений — фикс-проход`);
-    // Принятие фикса: то же число писем и не меньше B/сегментных вариантов
-    // (модель могла молча выкинуть блоки ---LETTER N B--- / ---SEGMENT---).
-    const countVariants = (ls: VeChainLetterAB[]) => ({
-      b: ls.reduce((acc, l) => acc + (l.variants?.length ?? 0), 0),
-      seg: ls.reduce((acc, l) => acc + (l.segment_variants?.length ?? 0), 0),
-    });
-    const before = countVariants(letters);
-    try {
-      const fix = await callLLMText(
-        [
-          ...messages,
-          { role: 'assistant', content: llm.text },
-          { role: 'user', content: buildChainRuleFixHint(ruleViolations, language, { hasSegmentBlocks: true }) },
-        ],
-        { model, maxTokens: 16384 },
-      );
-      addUsage(usage, fix);
-      const rebuilt = buildLetters(fix.text);
-      const after = countVariants(rebuilt.letters);
-      if (
-        rebuilt.parsed.length >= 3 &&
-        rebuilt.letters.length === letters.length &&
-        after.b >= before.b &&
-        after.seg >= before.seg
-      ) {
-        llm = fix;
-        parsed = rebuilt.parsed;
-        letters = rebuilt.letters;
-        const remaining = collectRuleViolations(letters);
-        if (remaining.length > 0) {
-          stageLog(
-            ctx,
-            `[template] после фикс-прохода осталось ${remaining.length} нарушений: ${remaining
-              .slice(0, 3)
-              .map((v) => v.detail)
-              .join('; ')}`,
-          );
-        }
-      } else {
-        stageLog(
-          ctx,
-          `[template] фикс-проход: ${rebuilt.parsed.length} писем, варианты ${after.b}B/${after.seg}seg вместо ${before.b}B/${before.seg}seg — оставляем исходные`,
-        );
-      }
-    } catch (e) {
-      stageLog(ctx, `[template] фикс-проход недоступен: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-
-  // Шаг 2d: операторы финальных писем → колонки базы (pure) + консистентность.
-  // Операторы собираются из основного текста (A), B-вариантов и сегментных
-  // вариантов: B — полноценное письмо и тоже может нести {{var}}.
-  const collectOperators = (ls: VeChainLetterAB[]) => {
-    const variantTexts = (l: VeChainLetterAB) => (l.variants ?? []).flatMap((v) => [v.subject ?? '', v.body]);
-    const subjectOperators = extractPersonalizationOperators(
-      ls.map((l) => [l.subject ?? '', ...variantTexts(l)].join('\n')).join('\n'),
-    );
-    const allOperators = extractPersonalizationOperators(
-      ls
-        .map((l) =>
-          [
-            l.subject ?? '',
-            l.body,
-            ...variantTexts(l),
-            ...(l.segment_variants ?? []).map((v) => v.text),
-          ].join('\n'),
-        )
-        .join('\n'),
-    );
-    return { subjectOperators, allOperators };
-  };
-
-  // Операторы плана обязаны попасть в маппинг: отсутствующие в финальных
-  // письмах добавляем явно unmatched (с fallback из плана) — дыра видна специалисту.
-  const buildMapping = (ops: string[]): VeOperatorMapping[] => {
-    const mapped = mapOperatorsToColumns(ops, columns);
-    const present = new Set(mapped.map((m) => m.operator.toLowerCase()));
-    const fallbackByVar = new Map<string, string>();
-    for (const lp of plan.data.personalization_plan) {
-      for (const op of lp.operators) {
-        const key = op.var.toLowerCase();
-        if (op.fallback && !fallbackByVar.has(key)) fallbackByVar.set(key, op.fallback);
-        if (!present.has(key)) {
-          mapped.push({
-            operator: op.var,
-            column: null,
-            matched: false,
-            ...(op.fallback ? { fallback: op.fallback } : {}),
-          });
-          present.add(key);
-        }
-      }
-    }
-    return mapped.map((m) =>
-      !m.matched && !m.fallback && fallbackByVar.has(m.operator.toLowerCase())
-        ? { ...m, fallback: fallbackByVar.get(m.operator.toLowerCase()) }
-        : m,
-    );
-  };
-
-  let ops = collectOperators(letters);
-  let operatorMapping = buildMapping(ops.allOperators);
-  let mappingIssues = validateOperatorMapping(operatorMapping, columns, plan.data, {
-    subjectOperators: ops.subjectOperators,
-  });
-
-  if (mappingIssues.length) {
-    stageLog(ctx, `[template] operator_mapping: ${mappingIssues.length} проблем — retry с фидбэком`);
-    // Принимаем регенерацию только с тем же числом писем и без НОВЫХ
-    // нарушений детерминированного контроля: retry переписывает шаблон
-    // целиком и мог вернуть тире/лишние CTA уже после фикс-прохода.
-    const preRetryViolations = collectRuleViolations(letters).length;
-    const preRetry = { letters, ops, operatorMapping, mappingIssues };
-    const retryLlm = await callLLMText(
-      [
-        ...messages,
-        { role: 'assistant', content: llm.text.slice(0, 2000) },
-        { role: 'user', content: operatorIssuesHint(mappingIssues) },
-      ],
-      { model, maxTokens: 16384 },
-    );
-    addUsage(usage, retryLlm);
-    const rebuilt = buildLetters(retryLlm.text);
-    if (rebuilt.parsed.length >= 3 && rebuilt.letters.length === letters.length) {
-      const newViolations = collectRuleViolations(rebuilt.letters).length;
-      if (newViolations > preRetryViolations) {
-        stageLog(
-          ctx,
-          `[template] retry по операторам вернул ${newViolations} нарушений регламента (было ${preRetryViolations}) — оставляем прежние письма`,
-        );
-        ({ letters, ops, operatorMapping, mappingIssues } = preRetry);
-      } else {
-        llm = retryLlm;
-        letters = rebuilt.letters;
-        ops = collectOperators(letters);
-        operatorMapping = buildMapping(ops.allOperators);
-        mappingIssues = validateOperatorMapping(operatorMapping, columns, plan.data, {
-          subjectOperators: ops.subjectOperators,
-        });
-      }
-    } else {
-      stageLog(ctx, '[template] retry по операторам не распарсился/сменил число писем — оставляем предыдущие письма');
-    }
-  }
-
-  // Шаг 2e: критик-луп — одна оценка финальных писем той же моделью, что и
-  // генерация (getVeModel('chain')), + максимум один rewrite по её замечаниям.
-  // Критик работает ТОЛЬКО по основному варианту A (B-вариант и сегментные
-  // варианты в разбор не идут — стоимость). Rewrite не содержит ---SEGMENT---
-  // и ---LETTER N B--- блоков: варианты после его принятия восстанавливаются
-  // из исходных писем по индексу. Без цикла; сбой критика, нечитаемый,
-  // урезанный или раздутый rewrite → остаются исходные письма. Критик идёт
-  // ПОСЛЕ фикс-прохода и маппинга операторов — он ревюит финальную механику
-  // текста; маппинг после рерайта пересобирается детерминированно (ниже).
-  let critiqueInfo: { verdict: string; issues_count: number; rewritten: boolean } | null = null;
-  try {
-    const criticLetters = letters.map((l) => ({ subject: l.subject ?? '', body: l.body }));
-    const critique = await callLLMWithSchema(
-      buildTemplateCriticMessages({
-        verticalName: vertical.name,
-        verticalSummary: vertical.summary ?? '',
-        letters: criticLetters,
-        language,
-        styleExample,
-        winnerPatterns,
-      }),
-      VeChainCritiqueSchema,
-      { model, maxTokens: 4096 },
-    );
-    addUsage(usage, critique);
-    // letter_index вне 1..letters.length — галлюцинация критика: отбрасываем
-    // такие issue до решения о рерайте, чтобы не переписывать по фантомам.
-    const issues = critique.data.issues.filter(
-      (i) => i.letter_index >= 1 && i.letter_index <= letters.length,
-    );
-    critiqueInfo = { verdict: critique.data.verdict, issues_count: issues.length, rewritten: false };
-
-    if (issues.length > 0) {
-      const rewrite = await callLLMText(
-        buildTemplateRewriteMessages({
-          verticalName: vertical.name,
-          letters: criticLetters,
-          critique: { ...critique.data, issues },
-          language,
-          styleExample,
-          winnerPatterns,
-          signatureOverride,
-        }),
-        { model, maxTokens: 16384 },
-      );
-      addUsage(usage, rewrite);
-      const rebuilt = buildLetters(rewrite.text);
-      // Принимаем rewrite только при точном совпадении числа писем: иначе
-      // ломаются лесенка wait_days и индексация сегментных вариантов.
-      if (rebuilt.parsed.length === letters.length) {
-        llm = rewrite;
-        parsed = rebuilt.parsed;
-        // Рерайт выводит только тему+тело основного варианта (---SEGMENT--- и
-        // ---LETTER N B--- блоков в нём нет): варианты восстанавливаем
-        // детерминированно из исходных писем по индексу.
-        const originalLetters = letters;
-        letters = rebuilt.letters.map((l, i): VeChainLetterAB => {
-          const orig = originalLetters[i];
-          return {
-            ...l,
-            ...(orig?.segment_variants?.length ? { segment_variants: orig.segment_variants } : {}),
-            ...(orig?.variants?.length ? { variants: orig.variants } : {}),
-          };
-        });
-        critiqueInfo.rewritten = true;
-      } else {
-        stageLog(ctx, `[template] rewrite критика: ${rebuilt.parsed.length} писем вместо ${letters.length} — оставляем исходные`);
-      }
-    }
-  } catch (e) {
-    stageLog(ctx, `[template] критик-луп недоступен: ${e instanceof Error ? e.message : String(e)} — оставляем исходные письма`);
-  }
-
-  // Шаг 3: после рерайта критика текст мог изменить {{var}} — пересобираем
-  // маппинг детерминированно (pure, без LLM-retry: критик уже закрыл смысл).
-  ops = collectOperators(letters);
-  operatorMapping = buildMapping(ops.allOperators);
-  mappingIssues = validateOperatorMapping(operatorMapping, columns, plan.data, {
-    subjectOperators: ops.subjectOperators,
-  });
-  if (mappingIssues.length) {
-    stageLog(ctx, `[template] operator_mapping issues (best effort): ${mappingIssues.join(' | ')}`);
-  }
-
-  const segmentWarnings = validateSegmentVariants(letters, analysis);
-  if (segmentWarnings.length) stageLog(ctx, `[template] segment_warnings: ${segmentWarnings.join(' | ')}`);
-  const lengthWarnings = collectLengthWarnings(letters);
-  if (lengthWarnings.length) stageLog(ctx, `[template] length_warnings: ${lengthWarnings.join(' | ')}`);
-
-  const personalizationPlan: VePersonalizationPlan = {
-    letters: plan.data.personalization_plan,
-    additions: plan.data.segment_additions,
-    segment_variants: plan.data.letters,
-    operator_mapping: operatorMapping,
-  };
-
-  const { data: inserted, error: insError } = await ctx.supabase
-    .from('ve_templates')
-    .insert({
-      base_id: baseId,
-      vertical_id: base.vertical_id,
-      fixed_block: plan.data.fixed_block,
-      personalization_plan: personalizationPlan,
-      letters,
-      status: 'ready',
-      llm_model: model,
-      tokens_used: usage.tokensUsed,
-      cost_usd: usage.costUsd,
-    })
-    .select('id')
-    .single();
-  if (insError || !inserted) throw new Error(`ve_templates insert: ${insError?.message ?? 'unknown'}`);
-
-  return {
-    result: {
-      template_id: (inserted as { id: string }).id,
-      fixed_block: plan.data.fixed_block,
-      personalization_plan: personalizationPlan,
-      letters,
-      length_warnings: lengthWarnings,
-      operator_mapping_issues: mappingIssues,
-      segment_warnings: segmentWarnings,
-      critique: critiqueInfo,
-    },
-    tokensUsed: usage.tokensUsed,
-    costUsd: usage.costUsd,
-  };
+  const output = await callLLMWithSchema(buildVeFinalLetterMessages(input), schema, { model, maxTokens: 10000 });
+  addUsage(usage, output);
+  const letters = normalizeVeFinalLetters(toLetters(output.data)).letters!;
+  const personalizationPlan = buildVeFinalPersonalization(letters, columns);
+  const { data: inserted, error: insertError } = await ctx.supabase.from('ve_templates').insert({
+    base_id: baseId, vertical_id: base.vertical_id, fixed_block: '', personalization_plan: personalizationPlan,
+    letters, status: 'ready', llm_model: model, tokens_used: usage.tokensUsed, cost_usd: usage.costUsd,
+  }).select('id').single();
+  if (insertError || !inserted) throw new Error(`Не удалось сохранить финальные письма: ${insertError?.message ?? 'unknown'}`);
+  return { result: { template_id: inserted.id, letters, personalization_plan: personalizationPlan, direct_final: true }, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
 }
+
+/* ───────────────── Стадия ───────────────── */

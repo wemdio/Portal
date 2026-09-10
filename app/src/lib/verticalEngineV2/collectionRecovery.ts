@@ -12,9 +12,11 @@ export function previewRecoveryKind(base: Record<string, unknown>): 'validation'
   const names = info.company_name_cleanup as Record<string, unknown> | undefined;
   if (!progress) return null;
   if (progress.status === 'error' && construct?.status === 'done' && typeof construct.bc_job_id === 'string'
+    && typeof progress.round === 'number' && Number.isInteger(progress.round) && progress.round > 0
     && checkpoint?.completed_round === progress.round
-    && (progress.round === 1 || (typeof checkpoint?.prior_low_relevance === 'number'
-      && typeof checkpoint?.prior_relevance_unchecked === 'number'))
+    // Older multi-round previews lack prior_* diagnostic counters. Recovery
+    // uses the completed constructor and saved recipients, not those counters.
+    // Requiring them would silently start and pay for a new collection.
     && (stats?.relevance_coverage_complete === false
       || (!!info.company_name_recovery && names?.status === 'partial'))) return 'validation';
   // A failed planner has not committed any candidate round. Reuse its empty

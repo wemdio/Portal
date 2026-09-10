@@ -304,42 +304,15 @@ export function buildLaunchPortfolioMetadata(input: {
 type LaunchReservationTerminal = 'succeeded' | 'failed' | 'uncertain';
 
 async function reserveTemplateLaunch(input: {
-  portalDb: SupabaseClient;
-  audit: VeSegmentationAudit;
-  templateId: string;
-  force: boolean;
-  reservationId: string;
-  presetId: string;
+  portalDb: SupabaseClient; audit: VeSegmentationAudit; templateId: string;
+  force: boolean; reservationId: string; presetId: string; expectedUpdatedAt: string;
 }): Promise<{ state: 'reserved' } | { state: 'busy' } | { state: 'error'; error: string }> {
-  const startedAt = new Date().toISOString();
-  const reusableStates = input.force ? ['idle', 'failed', 'succeeded'] : ['idle', 'failed'];
-  const { data, error } = await input.portalDb
-    .from('ve_segmentation_audits')
-    .update({
-      launch_status: 'running',
-      launch_reservation_id: input.reservationId,
-      launch_preset_id: input.presetId,
-      launch_started_at: startedAt,
-      launch_heartbeat_at: startedAt,
-      launch_completed_at: null,
-      launch_error: null,
-      launch_resolution_id: null,
-      launch_resolved_by: null,
-      launch_resolved_at: null,
-      updated_at: startedAt,
-    })
-    .eq('id', input.audit.id)
-    .eq('template_id', input.templateId)
-    .eq('status', 'ready')
-    .in('launch_status', reusableStates)
-    .select('id')
-    .maybeSingle();
-  if (error) {
-    return error.code === '23505'
-      ? { state: 'busy' }
-      : { state: 'error', error: error.message };
-  }
-  return data ? { state: 'reserved' } : { state: 'busy' };
+  const { data, error } = await input.portalDb.rpc('ve_reserve_final_template_launch', {
+    p_template_id: input.templateId, p_audit_id: input.audit.id, p_reservation_id: input.reservationId,
+    p_preset_id: input.presetId, p_expected_updated_at: input.expectedUpdatedAt, p_force: input.force,
+  });
+  if (error) return error.code === '23505' ? { state: 'busy' } : { state: 'error', error: error.message };
+  return data === true ? { state: 'reserved' } : { state: 'busy' };
 }
 
 async function settleTemplateLaunch(input: {
@@ -773,6 +746,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     force,
     reservationId,
     presetId,
+    expectedUpdatedAt: template.updated_at,
   });
   if (reservation.state === 'error') {
     await logError(`${eventPrefix}.reservation_failed`, new Error(reservation.error), {

@@ -736,6 +736,24 @@ html[data-portal-theme="dark"] .ve2 {
   gap: 44px;
   align-items: start;
 }
+.ve2-project {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ve2-project .ve2-stats {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+}
+@media (max-width: 1023px) {
+  .ve2-project .ve2-wiz {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ve2-project .ve2-rail {
+    position: static;
+    border-right: 0;
+    border-bottom: 1px solid var(--ve2-line);
+    padding: 0 0 20px;
+  }
+}
 .ve2-rail {
   position: sticky;
   top: 24px;

@@ -1,3 +1,4 @@
+import { materializeVeFinalLetters } from './finalLetters';
 /**
  * Превью финальных писем шаблона 85/15 по лидам из загруженной базы.
  *
@@ -250,6 +251,10 @@ export function renderTemplatePreview(input: {
     body: string;
     wait_days: number;
     segment_variants?: Array<{ when: string; text: string }>;
+    selected_variant?: 'A' | 'B';
+    variants?: Array<{ subject: string | null; body: string }>;
+    subject_options?: string[];
+    selected_subject_indices?: number[];
   }>;
   operatorMapping: VeOperatorMapping[];
   rows: Array<Record<string, unknown>>;
@@ -257,17 +262,20 @@ export function renderTemplatePreview(input: {
   maxRows?: number;
   /** Сегмент (when) каждой строки по индексу — результат серверной классификации. */
   rowSegments?: Array<string | null>;
+  /** Index among selected first-email subjects, not among all suggestions. */
+  subjectVariantIndex?: number;
 }): VePreviewResult {
   const maxRows = Math.max(0, input.maxRows ?? 3);
   const rows = input.rows.slice(0, maxRows);
   return {
     rows: rows.map((row, index) => ({
       rowLabel: previewRowLabel(row, input.columns, input.operatorMapping, index),
-      letters: input.letters.map((letter) => {
+      letters: materializeVeFinalLetters(input.letters, input.rowSegments?.[index]).map((letter, letterIndex) => {
         const segmentKey = input.rowSegments?.[index] ?? null;
         const segmentBody = selectSegmentBody(letter, segmentKey);
-        const subject = tokenizePreviewText(letter.subject ?? '', input.operatorMapping, row);
-        const body = tokenizePreviewText(segmentBody ?? letter.body, input.operatorMapping, row);
+        const subjectVariant = letterIndex === 0 && (input.subjectVariantIndex ?? 0) > 0 ? letter.variants?.[(input.subjectVariantIndex ?? 0) - 1] : undefined;
+        const subject = tokenizePreviewText(letterIndex === 0 ? subjectVariant?.subject ?? letter.subject ?? '' : '', input.operatorMapping, row);
+        const body = tokenizePreviewText(subjectVariant?.body ?? segmentBody ?? letter.body, input.operatorMapping, row);
         return {
           subject: flattenTokens(subject.tokens),
           body: flattenTokens(body.tokens),

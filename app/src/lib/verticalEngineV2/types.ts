@@ -21,7 +21,8 @@ export type VeStage =
   | 'base_collect'
   | 'template'
   | 'dossier'
-  | 'segmentation_audit';
+  | 'segmentation_audit'
+  | 'outreach_start';
 
 export type VeJobStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
 
@@ -405,6 +406,8 @@ export interface VeEvidenceItem {
 export interface VeChainLetterVariant {
   subject: string | null;
   body: string;
+  angle?: string;
+  cta_intent?: string;
 }
 
 export interface VeChainLetter {
@@ -414,6 +417,13 @@ export interface VeChainLetter {
   wait_days: number;
   /** A/B-варианты (B, C…) для ручного выбора и A/B-теста в Instantly. */
   variants?: VeChainLetterVariant[];
+  /** Final-editor contract. Alternatives stay editable; only this body is sent. */
+  selected_variant?: 'A' | 'B';
+  angle?: string;
+  cta_intent?: string;
+  /** Six independent subject suggestions; present on the first email only. */
+  subject_options?: string[];
+  selected_subject_indices?: number[];
   /**
    * Условные сегментные варианты тела (только финальные шаблоны ve_templates):
    * основной body — дефолт для всей базы, вариант идёт только лидам сегмента.

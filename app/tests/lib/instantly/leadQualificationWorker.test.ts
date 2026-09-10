@@ -648,7 +648,8 @@ describe('pollAndQualifyReplies', () => {
     );
     expect(listEmails.mock.calls[0][0]).not.toHaveProperty('campaign_id');
     expect(qualifyReply).toHaveBeenCalledTimes(1);
-    expect(qualifyReply.mock.calls[0][0]).toBe('linked-campaign');
+    expect({ campaignId: qualifyReply.mock.calls[0][0], maxRetries: qualifyReply.mock.calls[0][3]?.maxRetries })
+      .toEqual({ campaignId: 'linked-campaign', maxRetries: undefined });
     // Контракт против двойного фетча: воркер передаёт УЖЕ зафетченный контекст
     // (здесь null — fetchThreadContext замокан в null) явно, а qualifyReply при
     // непустом prefetchedContext (включая null) НЕ рефетчит.
@@ -966,11 +967,15 @@ describe('pollAndQualifyReplies', () => {
     process.env.GUEST_TOKEN_SECRET = 'test-board-secret';
     getLeadsByEmail.mockResolvedValueOnce([
       {
+        email: 'lead@example.com',
+        campaign: 'linked-campaign',
         first_name: 'Иван',
         last_name: 'Петров',
-        company_name: 'ACME',
-        phone: '+7 900 111-22-33',
-        website: 'acme.ru',
+        company_name: null,
+        phone: null,
+        website: null,
+        custom_variables: { 'Название компании': 'ACME' },
+        payload: { phoneNumber: '+7 900 111-22-33', website: 'acme.ru' },
       },
     ]);
     qualifyReply.mockResolvedValueOnce({
@@ -1029,9 +1034,13 @@ describe('pollAndQualifyReplies', () => {
     expect(boardRows[0]).not.toHaveProperty('quality');
     expect(boardRows[0]).not.toHaveProperty('comment');
     expect(boardRows[0]).not.toHaveProperty('taken');
-    // Ссылка на доску ушла в TG-алерт
+    // Ссылка и те же обогащённые контакты ушли в TG-алерт.
     expect(sendLeadTelegramAlert).toHaveBeenCalledWith(
-      expect.objectContaining({ boardLink: expect.stringMatching(/\/leads-board\/lb_/) }),
+      expect.objectContaining({
+        boardLink: expect.stringMatching(/\/leads-board\/lb_/),
+        phone: '+7 900 111-22-33',
+        website: 'acme.ru',
+      }),
     );
   });
 
@@ -1209,6 +1218,7 @@ describe('pollAndQualifyReplies', () => {
             specialist_user_id: 'specialist-1',
             handoff_email: 'client@clientco.ru',
             handoff_legend: 'Передаю коллеге.',
+            handoff_ai_adapt: true,
             handoff_auto_send: false,
           },
         ],
@@ -1241,15 +1251,26 @@ describe('pollAndQualifyReplies', () => {
       next_starting_after: null,
     });
 
-    const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
-    expect(await pollAndQualifyReplies()).toBe(1);
+    // Optional adaptation must not lose the manual card when the provider
+    // produces an empty draft (the specialist's production incident).
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: '' }, finish_reason: 'length' }],
+    })));
+    try {
+      const { pollAndQualifyReplies } = await import('@/lib/instantly/leadQualificationWorker');
+      expect(await pollAndQualifyReplies()).toBe(1);
+    } finally {
+      fetchSpy.mockRestore();
+    }
 
     expect(postHandoffMessage).toHaveBeenCalledTimes(1);
     const card = postHandoffMessage.mock.calls[0][0] as { callbackData?: string };
     expect(typeof card.callbackData).toBe('string');
     expect(replyToEmail).not.toHaveBeenCalled();
     expect(sendTestEmail).not.toHaveBeenCalled();
-    expect(mockInstantlyDb!.getRows('instantly_pending_handoffs')[0].status).toBe('pending');
+    expect(mockInstantlyDb!.getRows('instantly_pending_handoffs')[0]).toEqual(expect.objectContaining({
+      status: 'pending', draft_text: 'Передаю коллеге.', auto_send: false,
+    }));
   });
 
   it('handoff fails closed when legacy and period links point to different projects', async () => {
@@ -3970,7 +3991,7 @@ describe('pollAndQualifyReplies', () => {
       });
 
       expect(second).toBe(0);
-      expect(qualifyReply).toHaveBeenCalledTimes(1);
+      expect(qualifyReply.mock.calls.map((args) => args[3]?.maxRetries)).toEqual([0]);
       expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
       expect(mockMainDb!.getRows('notifications')).toHaveLength(1);
       expect(mockMainDb!.getRows('deadline_notification_log')).toHaveLength(1);
@@ -4027,7 +4048,7 @@ describe('pollAndQualifyReplies', () => {
         'lead@example.com',
         refreshed.thread_id,
         'main',
-        { requestPriority: 'recovery' },
+        { requestPriority: 'recovery', timeoutMs: 20_000, timeoutIncludesBody: true, retryRateLimits: false },
       );
     });
 
@@ -4737,6 +4758,9 @@ describe('pollAndQualifyReplies', () => {
       const newerMissingLead = ownershipReviewRow({
         id: 'newer-missing-alert',
         status: 'lead',
+        reply_preview: 'Давайте обсудим предложение.',
+        reply_body: 'Давайте обсудим предложение.\n' + 'Подробности. '.repeat(40)
+          + '\nС уважением,\nИван\nТелефон: +7 900 111-22-33\nhttps://acme.ru',
         created_at: '2026-08-24T17:00:00.000Z',
         updated_at: '2026-08-24T17:00:00.000Z',
       });
@@ -4788,6 +4812,8 @@ describe('pollAndQualifyReplies', () => {
       expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
       expect(sendLeadTelegramAlert).toHaveBeenCalledWith(expect.objectContaining({
         qualificationId: 'newer-missing-alert',
+        phone: '+7 900 111-22-33',
+        website: 'https://acme.ru',
       }));
       expect(mockMainDb!.getRows('deadline_notification_log')).toEqual(
         expect.arrayContaining([
@@ -4808,6 +4834,7 @@ describe('pollAndQualifyReplies', () => {
       const managedLead = ownershipReviewRow({
         id: 'managed-missing-alert',
         status: 'lead',
+        reply_body: 'Мой телефон +7 900 111-22-33.\nС уважением,\nИван\nhttps://old.acme.ru',
         created_at: '2026-08-24T17:00:00.000Z',
         updated_at: '2026-08-24T17:00:00.000Z',
       });
@@ -4818,6 +4845,12 @@ describe('pollAndQualifyReplies', () => {
           ],
           project_period_instantly_campaigns: [],
           instantly_lead_qualifications: [selfServeLead, managedLead],
+          project_lead_board_rows: [
+            // Same qualification under an unrelated project must not supply contacts.
+            { qualification_id: 'managed-missing-alert', project_id: 'other-project', phone: '+7 900 000-00-01', website: 'wrong.ru' },
+            // Guest cleared phone and edited site: the alert respects both changes.
+            { qualification_id: 'managed-missing-alert', project_id: 'project-1', phone: null, website: 'edited.acme.ru' },
+          ],
         },
       });
       mockMainDb = createMockSupabase({
@@ -4847,6 +4880,8 @@ describe('pollAndQualifyReplies', () => {
       expect(recovered).toBe(1);
       expect(sendLeadTelegramAlert).toHaveBeenCalledWith(expect.objectContaining({
         qualificationId: 'managed-missing-alert',
+        phone: null,
+        website: 'edited.acme.ru',
       }));
       expect(mockMainDb!.getRows('deadline_notification_log')).toEqual([
         expect.objectContaining({ entity_id: 'managed-missing-alert', tg_sent: true }),
@@ -6455,15 +6490,20 @@ describe('thread-level specialist alert dedup — RED contract', () => {
       instantly_lead_handoff_outbox: [{ qualification_id: qualification.id, status: 'pending' }],
     }));
     mockMainDb = createMockSupabase({ tables: {
-      projects: [{ id: 'project-a', specialist_user_id: 'specialist-a', handoff_email: 'client@example.com', handoff_legend: 'Передаю.', handoff_ai_adapt: false, handoff_auto_send: false }],
+      projects: [{ id: 'project-a', specialist_user_id: 'specialist-a', handoff_email: 'client@example.com', handoff_legend: 'Передаю.', handoff_ai_adapt: true, handoff_auto_send: false }],
       profiles: [{ id: 'specialist-a', full_name: 'Specialist A' }],
       deadline_notification_log: [{ entity_id: qualification.id, tg_sent: true }],
     } });
 
-    const { reconcileLeadHandoffJobs } = await import('@/lib/instantly/leadQualificationWorker');
-    expect(await reconcileLeadHandoffJobs({ qualificationId: qualification.id })).toBe(1);
+    const fetchSpy = jest.spyOn(global, 'fetch').mockRejectedValue(new Error('provider unavailable'));
+    try {
+      const { reconcileLeadHandoffJobs } = await import('@/lib/instantly/leadQualificationWorker');
+      expect(await reconcileLeadHandoffJobs({ qualificationId: qualification.id })).toBe(1);
+    } finally {
+      fetchSpy.mockRestore();
+    }
     expect(mockInstantlyDb!.getRows('instantly_pending_handoffs')).toEqual([
-      expect.objectContaining({ qualification_id: qualification.id, status: 'pending' }),
+      expect.objectContaining({ qualification_id: qualification.id, status: 'pending', draft_text: 'Передаю.', auto_send: false }),
     ]);
     expect(mockInstantlyDb!.getRows('instantly_lead_handoff_outbox')).toEqual([
       expect.objectContaining({ qualification_id: qualification.id, status: 'completed' }),

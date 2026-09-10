@@ -3,6 +3,7 @@ import { buildVeContactDeliveryPreview } from './contactDeliveryPreview';
 import { readContactDeliveryPages } from './contactDeliveryInventory';
 import { getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
 import { allocateContactSupplyTargets } from './contactSupplyPlanner';
+import { buildVeBaseAudienceSummary, type VeAudienceBase, type VeBaseAudienceSummary } from './baseAudienceSummary';
 
 export interface VeContactSupplyStatus {
   required: boolean;
@@ -37,6 +38,8 @@ export interface VeContactSupplyStatus {
   };
   estimate: null | { contacts: number; as_of: string; scope: string; confidence: 'low' };
   metrics_error?: string;
+  /** Available before approval; facts and forecast never require creating a plan. */
+  audience?: VeBaseAudienceSummary;
 }
 
 /** Read-only display data; only facts from the ledger, never provider calls. */
@@ -45,9 +48,11 @@ export async function loadVeContactSupplyStatus(db: SupabaseClient, instantlyDb:
     .select('base_id, supply_batch_id').eq('id', templateId).maybeSingle();
   if (templateError || !template || template.supply_batch_id) throw new Error('Шаблон недоступен');
   const { data: base, error: baseError } = await db.from('ve_bases')
-    .select('id, collect_info').eq('id', template.base_id).maybeSingle();
+    .select('id, project_id, hypothesis_id, data, columns, source, status, updated_at, collect_info').eq('id', template.base_id).maybeSingle();
   if (baseError || !base) throw new Error('Превью недоступно');
   const result: VeContactSupplyStatus = { required: base.collect_info?.collection_mode === 'preview', plan: null, metrics: null, estimate: null };
+  result.audience = buildVeBaseAudienceSummary(base as VeAudienceBase);
+  result.estimate = result.audience.estimate;
   if (!result.required) return result;
   const { data: revision, error: revisionError } = await db.rpc('ve_contact_supply_preview_revision', { p_template_id: templateId });
   if (revisionError || typeof revision !== 'string') throw new Error('Не удалось зафиксировать версию превью');
