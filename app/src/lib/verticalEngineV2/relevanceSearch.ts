@@ -3,6 +3,11 @@ import { beginProviderUsage, getProviderUsageScope, type ProviderUsageDetails } 
 import type { SerperOrganicItem } from '@/lib/search/serperClient';
 import { withVeDeadline } from './operationDeadline';
 
+export const VE_RELEVANCE_SEARCH_TIMEOUT_MS = 10_000;
+// The evidence reader also bounds injected search adapters and metering around
+// the transport. It must leave time for the same request's usage journal.
+export const VE_RELEVANCE_SEARCH_OPERATION_TIMEOUT_MS = 15_000;
+
 export interface VeSearchProviderFailure {
   kind: 'billing' | 'configuration' | 'transient';
   message: string;
@@ -43,7 +48,7 @@ export async function searchVeRelevanceWebsites(query: string, signal?: AbortSig
   const metering = await beginProviderUsage('serper');
   const usage: ProviderUsageDetails = { status: 'ambiguous' };
   try {
-    return await withVeDeadline('Serper relevance search', 5_000, signal, async (requestSignal) => {
+    return await withVeDeadline('Serper relevance search', VE_RELEVANCE_SEARCH_TIMEOUT_MS, signal, async (requestSignal) => {
       const response = await fetch('https://google.serper.dev/search', {
         method: 'POST', signal: requestSignal, redirect: 'error',
         headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },

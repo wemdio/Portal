@@ -1,6 +1,7 @@
 'use client';
 
 import type { VeOutreachPreparation } from '@/lib/verticalEngineV2/outreachSetup';
+import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors';
 import type { VeBaseSummary, VeCollectInfo, VeJobSummary } from './api';
 import { collectCount, getCollectionProgress } from './collectionProgress';
 import { HE, StatusDot } from './design';
@@ -20,6 +21,11 @@ interface PreparationPresentation {
 }
 
 const STEPS = ['Сбор и проверка базы', 'Разбор состава базы', 'Подготовка A/B-писем'];
+
+function preparationError(message: string): string {
+  const failure = getVeCollectionFailure(message);
+  return ['billing', 'configuration', 'provider'].includes(failure.kind) ? failure.message : message;
+}
 const COLLECT_PHASES: Record<ReturnType<typeof getCollectionProgress>['phase'], [string, string]> = {
   planning: ['Подбираем источники компаний', 'Система подбирает источники под выбранную гипотезу. Затем соберёт кандидатов и проверит, подходят ли они для рассылки.'],
   collecting: ['Собираем компании и контакты', 'Получаем кандидатов из выбранных источников. Затем автоматически проверим соответствие гипотезе и email, исключим дубли.'],
@@ -41,7 +47,7 @@ export function getPreparationPresentation({ preparation, base, jobs }: Preparat
   };
   if (preparation.status === 'error') return {
     title: 'Подготовка остановлена',
-    description: preparation.last_error || 'Не удалось завершить подготовку. Нажмите «Продолжить подготовку», чтобы повторить остановленный этап.',
+    description: preparation.last_error ? preparationError(preparation.last_error) : 'Не удалось завершить подготовку. Нажмите «Продолжить подготовку», чтобы повторить остановленный этап.',
     currentStep: null, tone: 'err',
   };
   if (preparation.status === 'ready') return {
@@ -70,7 +76,7 @@ export function getPreparationPresentation({ preparation, base, jobs }: Preparat
 
   if (base?.status === 'failed' || (job && ['failed', 'cancelled'].includes(job.status))) return {
     title: 'Подготовка остановлена',
-    description: preparation.last_error || base?.error || job?.error || 'Этап не завершился. Состояние подготовки обновится автоматически.',
+    description: preparationError(preparation.last_error || base?.error || job?.error || 'Этап не завершился. Состояние подготовки обновится автоматически.'),
     currentStep: null, tone: 'err',
   };
   if (base?.status === 'analyzed' && base.row_count === 0) return {
@@ -115,6 +121,11 @@ export function getPreparationPresentation({ preparation, base, jobs }: Preparat
   if (info?.waiting_for_base_id) return {
     title: 'Ждём завершения другой базы проекта',
     description: 'Базы этого проекта собираются по очереди, чтобы исключать повторные контакты. Эта база продолжится автоматически.',
+    currentStep: 0, tone: 'muted',
+  };
+  if (job?.status === 'pending' && getVeCollectionFailure(job.error).kind === 'provider') return {
+    title: 'Проверка продолжится автоматически после сбоя поиска',
+    description: 'Сервис поиска Serper временно не ответил. Повторная попытка поставлена в очередь с паузой. Система продолжит с сохранённого этапа; повторно нажимать кнопку не нужно.',
     currentStep: 0, tone: 'muted',
   };
   if (job?.status !== 'running') return {

@@ -133,6 +133,11 @@ import { buildCatalogRepairMessagesEn, buildSourcePlanMessagesEn } from '../prom
 import { VeCatalogRepairSchema, VeSourcePlanSchema } from '../schemas';
 import type { VeBase, VeJob, VeProject, VeVertical } from '../types';
 import {
+  planVeRelevanceRetry,
+  VE_RELEVANCE_MAX_CONSECUTIVE_RETRIES,
+  VE_RELEVANCE_MAX_TOTAL_RETRIES,
+} from '../relevanceRetry';
+import {
   completeVeRefillNoNew,
   runVeRefillAppend,
   type VeRefillResult,
@@ -2439,32 +2444,40 @@ async function checkCollectedRelevance(args: {
     // Keep the completed constructor and per-company verdicts. Re-entering the
     // same stage reads these checkpoints; it does not buy another source round.
     // The budget is durable for this job/context, including across worker exits.
-    if (gate.error && (gate.retryable || gate.continueFromCheckpoint)) {
-      const previous = job.result?.relevance_retry as { context_hash?: unknown; attempts?: unknown } | undefined;
-      const attempts = previous?.context_hash === gate.checkpoint.context_hash
-        && Number.isSafeInteger(previous.attempts) && Number(previous.attempts) >= 0
-        ? Number(previous.attempts) : 0;
+    if (gate.checkpoint) {
       const capacity = job.result?.relevance_capacity as { context_hash?: unknown; verdicts?: unknown } | undefined;
       const previousVerdicts = capacity?.context_hash === gate.checkpoint.context_hash
         && Number.isSafeInteger(capacity.verdicts) && Number(capacity.verdicts) >= 0 ? Number(capacity.verdicts) : 0;
       const verdicts = Object.keys(gate.checkpoint.verdicts).length;
       // A per-call company cap is a continuation only while durable decisions
       // increase. It must never spend the transient retry budget or loop.
-      const continueCapacity = gate.continueFromCheckpoint === true && verdicts > previousVerdicts;
-      if (continueCapacity || (gate.retryable && attempts < 2)) {
-        const result = { ...job.result, ...(continueCapacity ? { relevance_capacity: {
-          context_hash: gate.checkpoint.context_hash, verdicts,
-        } } : { relevance_retry: { context_hash: gate.checkpoint.context_hash, attempts: attempts + 1 } }) };
-        const { data: saved, error } = await ctx.supabase.from('ve_jobs')
-          .update({ result, updated_at: new Date().toISOString() })
-          .eq('id', job.id).eq('status', 'running').select('id').maybeSingle();
-        if (error || !saved) throw new VeRelevanceCheckpointError(
-          error ? `Relevance retry checkpoint save: ${error.message}` : 'Relevance retry lost job ownership',
-        );
-        job.result = result;
-        await requeueSelf(ctx, job, continueCapacity ? 30_000 : 30_000 * (attempts + 1));
+      const continueCapacity = Boolean(gate.error) && gate.continueFromCheckpoint === true && verdicts > previousVerdicts;
+      const retry = planVeRelevanceRetry(job.result?.relevance_retry, gate.checkpoint,
+        Boolean(gate.error) && gate.retryable === true && !continueCapacity);
+      const waiting = continueCapacity || retry.retry;
+      const result = { ...job.result, relevance_retry: retry.state, ...(continueCapacity ? { relevance_capacity: {
+        context_hash: gate.checkpoint.context_hash, verdicts,
+      } } : {}) };
+      const retryError = retry.retry ? gate.error!.slice(0, 500) : null;
+      const now = Date.now();
+      ctx.signal?.throwIfAborted();
+      // Commit budget, waiting reason and next wake atomically. A cancellation
+      // must win without an old runner restoring pending or clearing its error.
+      const { data: saved, error } = await ctx.supabase.from('ve_jobs')
+        .update({ result, error: retryError, updated_at: new Date(now).toISOString(),
+          ...(waiting ? { status: 'pending', started_at: null,
+            run_after: new Date(now + (continueCapacity ? 30_000 : retry.delayMs)).toISOString() } : {}),
+        })
+        .eq('id', job.id).eq('status', 'running').select('id').maybeSingle();
+      if (error || !saved) throw new VeRelevanceCheckpointError(
+        error ? `Relevance retry checkpoint save: ${error.message}` : 'Relevance retry lost job ownership',
+      );
+      job.result = result;
+      job.error = retryError;
+      if (waiting) {
         stageLog(ctx, continueCapacity ? '[base_collect] пакет проверен; автоматически продолжаем оставшиеся компании'
-          : `[base_collect] временный сбой автопроверки; повтор ${attempts + 1}/2 по сохранённым результатам`);
+          : `[base_collect] временный сбой автопроверки; повтор ${retry.state.consecutive_attempts}/${VE_RELEVANCE_MAX_CONSECUTIVE_RETRIES} без продвижения, `
+            + `${retry.state.attempts}/${VE_RELEVANCE_MAX_TOTAL_RETRIES} всего, через ${retry.delayMs / 1000} с по сохранённым результатам`);
         throw new VeRelevanceRetryScheduled(base.id, { ...usage });
       }
     }
@@ -3585,6 +3598,18 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
 
 /** Keep an explicit target error without erasing a committed round checkpoint. */
 export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Promise<VeStageResult> {
+  if (job.error && job.result?.relevance_retry) {
+    ctx.signal?.throwIfAborted();
+    // The saved reason belongs to the previous cooldown. A later constructor
+    // poll or capacity continuation must not show that old provider outage.
+    const { data: saved, error } = await ctx.supabase.from('ve_jobs')
+      .update({ error: null, updated_at: new Date().toISOString() })
+      .eq('id', job.id).eq('status', 'running').select('id').maybeSingle();
+    if (error || !saved) throw new VeRelevanceCheckpointError(
+      error ? `Relevance retry status clear: ${error.message}` : 'Relevance retry lost job ownership',
+    );
+    job.error = null;
+  }
   try {
     return await runBaseCollectStageImpl(job, ctx);
   } catch (error) {
