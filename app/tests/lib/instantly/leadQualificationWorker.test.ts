@@ -648,7 +648,8 @@ describe('pollAndQualifyReplies', () => {
     );
     expect(listEmails.mock.calls[0][0]).not.toHaveProperty('campaign_id');
     expect(qualifyReply).toHaveBeenCalledTimes(1);
-    expect(qualifyReply.mock.calls[0][0]).toBe('linked-campaign');
+    expect({ campaignId: qualifyReply.mock.calls[0][0], maxRetries: qualifyReply.mock.calls[0][3]?.maxRetries })
+      .toEqual({ campaignId: 'linked-campaign', maxRetries: undefined });
     // Контракт против двойного фетча: воркер передаёт УЖЕ зафетченный контекст
     // (здесь null — fetchThreadContext замокан в null) явно, а qualifyReply при
     // непустом prefetchedContext (включая null) НЕ рефетчит.
@@ -3990,7 +3991,7 @@ describe('pollAndQualifyReplies', () => {
       });
 
       expect(second).toBe(0);
-      expect(qualifyReply).toHaveBeenCalledTimes(1);
+      expect(qualifyReply.mock.calls.map((args) => args[3]?.maxRetries)).toEqual([0]);
       expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
       expect(mockMainDb!.getRows('notifications')).toHaveLength(1);
       expect(mockMainDb!.getRows('deadline_notification_log')).toHaveLength(1);
@@ -4047,7 +4048,7 @@ describe('pollAndQualifyReplies', () => {
         'lead@example.com',
         refreshed.thread_id,
         'main',
-        { requestPriority: 'recovery' },
+        { requestPriority: 'recovery', timeoutMs: 20_000, timeoutIncludesBody: true, retryRateLimits: false },
       );
     });
 

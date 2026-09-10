@@ -804,7 +804,11 @@ export async function resolveEffectiveReplyOwner(args: {
       ? prefetchedContext
       : await fetchThreadContext(providerCampaignId, leadEmail, reply.thread_id, accountId,
         args.evidenceMode === 'recovery'
-          ? { requestPriority: args.evidencePriority ?? 'recovery' } : undefined);
+          // Recovery has a durable next attempt. Bound both context reads so
+          // a stalled search/fallback cannot occupy the poller for 90s each.
+          ? { requestPriority: args.evidencePriority ?? 'recovery',
+              timeoutMs: 20_000, timeoutIncludesBody: true, retryRateLimits: false,
+            } : undefined);
   const mailbox = normalizeMailbox(reply.eaccount);
   if (!mailbox) {
     return resolveProviderCampaignFallback({

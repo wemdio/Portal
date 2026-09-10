@@ -1288,7 +1288,10 @@ export async function qualifyOneReply(
         .or(`ai_reason.ilike.${OWNERSHIP_REVIEW_REASON_PREFIX}%,ai_reason.ilike.${TRANSIENT_RETRY_REASON_PREFIX}%`)
       : db.from('instantly_lead_qualifications')
         .upsert(payload, { onConflict: 'instantly_email_id', ignoreDuplicates: true });
-    const { error } = await write.select('id').maybeSingle();
+    // PostgREST 12 also resolves the OR filter against the PATCH projection.
+    // The column exists in storage, but omitting it here makes a recovered
+    // machine reply fail with 42703 and return to the queue indefinitely.
+    const { error } = await write.select('id, ai_reason').maybeSingle();
     if (error) {
       // Missing marker migration/storage must retain durable recovery, never
       // silently fall through to an owner guess or ACK a missing disposition.
@@ -1651,6 +1654,10 @@ export async function qualifyOneReply(
       projectId: qualifiedProjectId,
     }),
     model: MODEL,
+    // Durable recovery owns later transport attempts. One failed model call
+    // must yield to other replies, not hold this poll tick for three timeouts.
+    // Semantic adjudication and the lifetime checkpoint budget stay unchanged.
+    ...(opts?.existingQualificationId ? { maxRetries: 0 } : {}),
     // Empty string means "brief was resolved and absent"; null would make
     // qualifyReply resolve it again without the proven owner fingerprint.
     briefText: cachedBrief ?? '',
