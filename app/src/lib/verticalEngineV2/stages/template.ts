@@ -215,13 +215,16 @@ export async function runTemplateStage(job: VeJob, ctx: VeStageContext): Promise
   const { data: baseRow, error: baseError } = await ctx.supabase.from('ve_bases').select('*').eq('id', baseId).eq('project_id', job.project_id).single();
   if (baseError || !baseRow) throw new Error(`База недоступна: ${baseError?.message ?? 'not found'}`);
   const base = baseRow as VeBase;
+  if (!(base.row_count > 0)) throw new Error('Сбор завершён без готовых контактов. Для подготовки писем нужна непустая база.');
   const { data: existing, error: existingError } = await ctx.supabase.from('ve_templates').select('*').eq('base_id', baseId).eq('status', 'ready').order('created_at', { ascending: false }).limit(1).maybeSingle();
   if (existingError) throw new Error(`Не удалось проверить сохранённые письма: ${existingError.message}`);
   if (existing) {
     const saved = existing as VeTemplate;
     return { result: { template_id: saved.id, letters: saved.letters, personalization_plan: saved.personalization_plan, reused: true }, tokensUsed: 0, costUsd: 0 };
   }
-  const analysis = VeBaseAnalysisSchema.parse(base.analysis);
+  const parsedAnalysis = VeBaseAnalysisSchema.safeParse(base.analysis);
+  if (!parsedAnalysis.success) throw new Error('Разбор базы ещё не готов. Сначала завершите разбор, затем подготовьте письма.');
+  const analysis = parsedAnalysis.data;
   const { data: verticalRow, error: verticalError } = await ctx.supabase.from('ve_verticals').select('*').eq('id', base.vertical_id).eq('project_id', job.project_id).single();
   if (verticalError || !verticalRow) throw new Error(`Вертикаль недоступна: ${verticalError?.message ?? 'not found'}`);
   const vertical = verticalRow as VeVertical;

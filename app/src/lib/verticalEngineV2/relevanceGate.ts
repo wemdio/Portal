@@ -190,7 +190,9 @@ export async function findIrrelevantRows(input: {
   // Target-scope rules changed: reuse only decisions made under these rules.
   const contextHash = relevanceHash(['relevance-evidence-v5-single-citation-repair', input.checkpointScope ?? '', model, reviewModel, input.language,
     input.verticalName, input.verticalSummary ?? '', input.hypothesisTitle ?? '', input.hypothesisDescription ?? '']);
-  const checkpoint = readRelevanceCheckpoint(input.checkpoint, contextHash); checkpoint.failures = [];
+  const checkpoint = readRelevanceCheckpoint(input.checkpoint, contextHash);
+  const previousFailures = checkpoint.failures;
+  checkpoint.failures = [];
   const reviewAttempt = relevanceHash([input.reviewAttempt ?? 'automatic', 'verified-website-reader-v1']);
   const result: VeRelevanceGateResult = { checkpoint, retryable: false, decisions: new Map(), flagged: new Set(), unchecked: new Set(), review: new Set(), errored: new Set(),
     coverage: { checkedCompanies: 0, totalCompanies: 0, complete: false }, tokensUsed: 0, costUsd: 0 };
@@ -244,10 +246,36 @@ export async function findIrrelevantRows(input: {
     }
   };
   const citationFailure = (entry: Entry) => {
-    permanentFailure = true;
     failure(entry.key, 1, 'invalid_evidence');
-    result.error ??= 'Автоматическая проверка не получила допустимых цитат; неподтверждённые контакты не допущены.';
-    record(entry, errorDecision('Автоматическое исправление доказательств исчерпано; контакт не допущен.', entry.attempts));
+    const repair = checkpoint.citation_repairs[entry.key];
+    if (repair) repair.failure_code = 'invalid_evidence';
+    // This company's bounded evidence attempt is exhausted. Keep it uncertain
+    // and excluded, but let independently verified siblings and the remaining
+    // reserve progress. The attempt marker prevents another automatic payment.
+    record(entry, { ...errorDecision('Автоматическое исправление доказательств исчерпано; контакт остаётся в резерве.',
+      Math.max(1, entry.attempts)), status: 'needs_review' });
+  };
+  const citationProviderFailure = (entry: Entry, code: VeRelevanceFailureCode) => {
+    permanentFailure = true; stopProviderCalls = true;
+    failure(entry.key, 1, code);
+    const repair = checkpoint.citation_repairs[entry.key];
+    if (repair) repair.failure_code = code;
+    result.error = code === 'billing' ? 'Requesty 402: insufficient balance'
+      : result.error ?? 'Автоматическое исправление доказательств не завершено: ' + code;
+    record(entry, errorDecision('Результат исправления доказательств не получен; повтор той же оплаченной попытки запрещён.', entry.attempts));
+  };
+  const restoreCitationFailure = (entry: Entry) => {
+    const repair = checkpoint.citation_repairs[entry.key];
+    // Older repairs conflated invalid citations and non-billing provider errors.
+    // A finished attempt without separately recorded provider errors can be
+    // quarantined locally, never admitted or repaid; this does not establish
+    // its original cause. Unknown/interrupted attempts retain a global error.
+    const legacyCitationOnly = repair?.status === 'finished' && previousFailures.length > 0
+      && previousFailures.every((item) => item.code === 'invalid_evidence')
+      && previousFailures.some((item) => item.batch_hash === entry.key);
+    const code = repair?.failure_code ?? (legacyCitationOnly ? 'invalid_evidence' : 'provider');
+    if (code === 'invalid_evidence') citationFailure(entry);
+    else citationProviderFailure(entry, code);
   };
   const finishWebsite = (entry: Entry) => {
     const website = checkpoint.website_evidence[entry.key];
@@ -327,8 +355,9 @@ export async function findIrrelevantRows(input: {
     const inputHash = relevanceHash(['citation-repair-v4-single-company', contextHash, reviewModel, entry.key, entry.fields, proposed.status, proposed.reason]);
     const previous = checkpoint.citation_repairs[entry.key];
     if (previous?.input_hash === inputHash) {
+      restoreCitationFailure(entry);
       previous.review_attempt = reviewAttempt; previous.status = 'finished';
-      citationFailure(entry); finishWebsite(entry); return;
+      finishWebsite(entry); return;
     }
     // Reserve before the HTTP call. If its outcome is lost, retry must not pay
     // again: the coordinator retains an explicit error for that source input.
@@ -355,11 +384,12 @@ export async function findIrrelevantRows(input: {
     } catch (error) {
       signal?.throwIfAborted();
       if (error instanceof VeRelevanceCheckpointError) throw error;
-      citationFailure(entry);
-      if (!(error instanceof LLMValidationError)) stopProviderCalls = true;
-      if (isVeProviderBillingError(error)) {
-        stopProviderCalls = true; failure(entry.key, 1, 'billing'); result.error = 'Requesty 402: insufficient balance';
-      }
+      const diagnostic = getLLMValidationDiagnostic(error, ['abstain', 'evidence_ids']);
+      if (diagnostic) input.log?.('[relevanceGate] invalid citation repair: ' + JSON.stringify(diagnostic));
+      if (error instanceof LLMValidationError) citationFailure(entry);
+      else citationProviderFailure(entry, isVeProviderBillingError(error) ? 'billing'
+        : error instanceof Error && /Requesty (?:400|401|403)\b|API_KEY.*(?:не задан|missing)/i.test(error.message) ? 'configuration'
+          : error instanceof Error && /timeout|deadline|timed out/i.test(error.message) ? 'timeout' : 'provider');
     }
     checkpoint.citation_repairs[entry.key].status = 'finished';
     finishWebsite(entry);
@@ -460,7 +490,7 @@ export async function findIrrelevantRows(input: {
       }
       if (repair && (repair.status === 'started' || cached.status === 'error')) {
         if ((repair.review_attempt ?? website?.review_attempt) === reviewAttempt) {
-          citationFailure(entry); finishWebsite(entry); repair.status = 'finished'; recoveredRepair = true;
+          restoreCitationFailure(entry); finishWebsite(entry); repair.status = 'finished'; recoveredRepair = true;
         } else {
           // An explicit new review can discover changed facts. The exact input
           // hash still prevents paying for the same failed citation repair.
