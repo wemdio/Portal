@@ -30,14 +30,14 @@
  *   outboundMessages?:string[],prefetchedContext?:ThreadContext}}]}.
  * Exact prefetchedContext wins. Reconstructed contexts use reserved example domains.
  *
- * Each fixture/model makes at most ONE request, including technical replies so we
- * can measure AI defense in depth. The exact captured response is replayed through
- * classifyWithAI and qualifyReply without another network call. Raw model decisions,
- * parsed decisions, custom-priority decisions, prefilters and final rules are separate.
+ * Each fixture/model makes ONE initial request, including technical replies for
+ * AI defense in depth, and at most ONE separately accounted adjudication request
+ * when qualifyReply requires it. Exact responses are replayed offline. Initial raw
+ * decisions, adjudication, parsed decisions, prefilters and final rules are separate.
  * Synthetic/policy-derived labels are never pooled into human-confirmed accuracy.
  *
  * No worker is imported; DB/Instantly imports throw, even reads. No production
- * source is changed, no retries, no notifications/status writes. Production prompts
+ * source is changed, no transport retries/recovery, no notifications/status writes. Production prompts
  * and payload options are captured from the original classifyWithAI function.
  * All prompts, input snapshots and responses remain in an explicit new private
  * directory (0700/0600), ignored by Git when inside this worktree. Never commit them.
@@ -145,6 +145,10 @@ function makeContext(entry) {
 async function loadClassifier(maxTokens) {
   const qualifierPath = path.join(APP, 'src/lib/instantly/leadQualifier.ts');
   const namesPath = path.join(APP, 'src/lib/enrich/extractors/nameQuality.ts');
+  const pureModules = {
+    './qualificationAiCheckpoint': path.join(APP, 'src/lib/instantly/qualificationAiCheckpoint.ts'),
+    './emailReadDeferral': path.join(APP, 'src/lib/instantly/emailReadDeferral.ts'),
+  };
   const blocked = 'throw new Error("EVALUATION_BLOCKED_EXTERNAL_DEPENDENCY");';
   const stubs = {
     './campaignProjectOwnerResolver': `export function resolveCampaignProjectOwner(){${blocked}}`,
@@ -159,6 +163,10 @@ async function loadClassifier(maxTokens) {
         if (args.kind === 'entry-point') return { path: qualifierPath };
         if (Object.hasOwn(stubs, args.path)) return { path: args.path, namespace: 'blocked' };
         if (args.path === '@/lib/enrich/extractors/nameQuality') return { path: namesPath };
+        if (Object.hasOwn(pureModules, args.path)) return { path: pureModules[args.path] };
+        if (args.path === 'node:crypto' && args.importer === pureModules['./qualificationAiCheckpoint']) {
+          return { path: args.path, external: true };
+        }
         throw new Error(`Unapproved classifier dependency: ${args.path}`);
       });
       plugin.onLoad({ filter: /.*/, namespace: 'blocked' }, (args) => ({ contents: stubs[args.path], loader: 'js' }));
@@ -166,6 +174,10 @@ async function loadClassifier(maxTokens) {
   let fetchHandler = async () => { throw new Error('EVALUATION_NETWORK_BLOCKED'); };
   const isolatedModule = { exports: {} };
   const sandbox = { module: isolatedModule, exports: isolatedModule.exports, Response, AbortSignal,
+    require: (specifier) => {
+      if (specifier === 'node:crypto') return { createHash };
+      throw new Error('EVALUATION_BLOCKED_EXTERNAL_DEPENDENCY');
+    },
     process: { env: { INSTANTLY_LEAD_QUAL_MAX_TOKENS: String(maxTokens) } },
     fetch: (...args) => fetchHandler(...args),
     setTimeout: () => { throw new Error('Retries/backoffs are forbidden in model evaluation'); },
@@ -175,6 +187,40 @@ async function loadClassifier(maxTokens) {
   runInNewContext(bundled.outputFiles[0].text, sandbox, { timeout: 5000, filename: 'isolated-lead-qualifier.cjs' });
   return { api: isolatedModule.exports, setFetch: (handler) => { fetchHandler = handler; },
     sourceHash: hash(await readFile(qualifierPath, 'utf8')), bundleHash: hash(bundled.outputFiles[0].text) };
+}
+
+function createEvaluationCheckpointStore() {
+  // A fresh, in-memory store for each offline stage, never a production RPC.
+  // The benchmark permits exactly two distinct semantic passes, no retries or
+  // durable final recovery. Cached replay does not consume another reservation.
+  const checkpoints = new Map();
+  let reservations = 0;
+  return {
+    async reserve({ fingerprint, budgetFingerprint }) {
+      const prior = checkpoints.get(fingerprint);
+      if (prior) {
+        if (prior.budgetFingerprint !== budgetFingerprint) throw new Error('Evaluation checkpoint budget mismatch');
+        if (prior.rawResponse !== null) return { state: 'cached', rawResponse: prior.rawResponse };
+        throw new Error('Evaluation checkpoint retry or concurrent reservation forbidden');
+      }
+      if (++reservations > 2) throw new Error('Evaluation permits at most two distinct semantic passes');
+      const leaseToken = `evaluation-${reservations}`;
+      checkpoints.set(fingerprint, { budgetFingerprint, leaseToken, rawResponse: null });
+      return { state: 'reserved', leaseToken };
+    },
+    async reserveRecovery() { throw new Error('Evaluation paid recovery is forbidden'); },
+    async complete({ fingerprint, leaseToken, rawResponse }) {
+      const entry = checkpoints.get(fingerprint);
+      if (!entry || entry.leaseToken !== leaseToken) throw new Error('Evaluation checkpoint lease mismatch');
+      entry.rawResponse = rawResponse;
+    },
+    async release({ fingerprint, leaseToken }) {
+      const entry = checkpoints.get(fingerprint);
+      if (!entry || entry.leaseToken !== leaseToken) throw new Error('Evaluation checkpoint lease mismatch');
+      // Keep the failed reservation: this comparison never retries a paid pass.
+      entry.leaseToken = null;
+    },
+  };
 }
 
 const probeResponse = { choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({
@@ -268,22 +314,47 @@ function withoutContext(result) {
   return jsonCopy(rest);
 }
 
-async function replay(isolated, entry, context, model, response = probeResponse, requestProfile = null) {
+function inspectResponse(response) {
+  const content = response.choices?.[0]?.message?.content;
+  const rawText = typeof content === 'string' ? content : '';
+  let rawJson = null;
+  let rawJsonFormat = 'unparseable';
+  try {
+    rawJson = JSON.parse(rawText);
+    rawJsonFormat = 'strict';
+  } catch {
+    // Only a complete outer fence may be removed: no coercion or JSON repair.
+    const fenced = /^```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$/i.exec(rawText.trim());
+    if (fenced) {
+      try { rawJson = JSON.parse(fenced[1]); rawJsonFormat = 'markdown_fence'; }
+      catch { /* Production parsing remains a separate observation. */ }
+    }
+  }
+  const object = rawJson !== null && typeof rawJson === 'object' && !Array.isArray(rawJson);
+  const rawFlagsValid = object && typeof rawJson.is_lead === 'boolean' && typeof rawJson.needs_review === 'boolean';
+  const schemaIssues = [];
+  if (!object) schemaIssues.push('expected_json_object');
+  else {
+    for (const field of ['is_lead', 'needs_review', 'custom_criteria_matched', 'proposal_seen', 'objection_handleable']) {
+      if (typeof rawJson[field] !== 'boolean') schemaIssues.push(`invalid_${field}`);
+    }
+    if (![null, 'auto_reply', 'delivery_failure', 'service_acknowledgement'].includes(rawJson.machine_reply_kind)) schemaIssues.push('invalid_machine_reply_kind');
+    if (![null, 'seller_pitch', 'service_followup', 'contact_routing'].includes(rawJson.non_lead_kind)) schemaIssues.push('invalid_non_lead_kind');
+    if (typeof rawJson.reason !== 'string' || !rawJson.reason.trim()) schemaIssues.push('invalid_reason');
+    if (typeof rawJson.confidence !== 'number' || !Number.isFinite(rawJson.confidence) || rawJson.confidence < 0 || rawJson.confidence > 1) schemaIssues.push('invalid_confidence');
+    if (!Array.isArray(rawJson.interest_signals) || !rawJson.interest_signals.every((signal) => typeof signal === 'string')) schemaIssues.push('invalid_interest_signals');
+    if (rawJson.objection_draft !== null && typeof rawJson.objection_draft !== 'string') schemaIssues.push('invalid_objection_draft');
+  }
+  return { rawJson, rawJsonFormat, rawFlagsValid, schemaIssues,
+    strictJson: rawJsonFormat === 'strict' && object, strictSchema: schemaIssues.length === 0,
+    rawLabel: rawFlagsValid ? (rawJson.needs_review ? 'review' : rawJson.is_lead ? 'lead' : 'not_lead') : null };
+}
+
+async function replay(isolated, entry, context, model,
+  responses = { initial: probeResponse, adjudication: probeResponse }, requestProfile = null) {
   const options = { apiKey: 'evaluation-placeholder-not-a-real-key', model, maxRetries: 0,
     briefText: entry.input.briefText ?? '', leadCriteria: entry.input.leadCriteria ?? '', prefetchedContext: context };
-  let captured = null;
-  let capturedBase = null;
-  let calls = 0;
-  isolated.setFetch(async (url, init) => {
-    const basePayload = assertRequest(url, init);
-    const payload = applyRequestProfile(basePayload, requestProfile);
-    if (capturedBase && JSON.stringify(capturedBase) !== JSON.stringify(basePayload)) throw new Error('Replay base prompt differs from direct classifier prompt');
-    if (captured && JSON.stringify(captured) !== JSON.stringify(payload)) throw new Error('Replay prompt differs from direct classifier prompt');
-    capturedBase = basePayload;
-    captured = payload;
-    calls++;
-    return new Response(JSON.stringify(response), { status: 200, headers: { 'content-type': 'application/json' } });
-  });
+  const captures = {};
   // A rejected model response is an observation, not a runner failure. Replay
   // every stage separately: production prefilters can still reject a machine
   // reply without calling AI, but a failed AI verdict must never become not_lead.
@@ -296,52 +367,53 @@ async function replay(isolated, entry, context, model, response = probeResponse,
       return null;
     }
   }
-  const classified = await observeStage('classified', () => isolated.api.classifyWithAI(context, options));
-  if (calls !== 1) throw new Error('Direct classifier made an unexpected number of calls');
+  async function capturePass(pass, response) {
+    let calls = 0;
+    isolated.setFetch(async (url, init) => {
+      if (++calls !== 1) throw new Error('Evaluation transport retries are forbidden');
+      const basePayload = assertRequest(url, init);
+      captures[pass] = { basePayload, payload: applyRequestProfile(basePayload, requestProfile) };
+      return new Response(JSON.stringify(response), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    const result = await observeStage(pass === 'initial' ? 'classified' : 'adjudicated', () =>
+      isolated.api.classifyWithAI(context, { ...options, checkpointStore: createEvaluationCheckpointStore() },
+        pass === 'adjudication' ? { adjudication: true } : undefined));
+    if (calls !== 1) throw new Error('Direct classifier made an unexpected number of calls');
+    return result;
+  }
+  const classified = await capturePass('initial', responses.initial);
+  // Capture the real second-pass prompt offline even before a second response
+  // exists. The probe is never treated as an observed model decision.
+  const adjudicatedCapture = await capturePass('adjudication', responses.adjudication ?? probeResponse);
+  if (hash(captures.initial.basePayload.messages) === hash(captures.adjudication.basePayload.messages)) {
+    throw new Error('Adjudication must use its own production prompt');
+  }
+  let pipelineCalls = 0;
+  let adjudicationRequired = false;
+  const seenPasses = new Set();
+  isolated.setFetch(async (url, init) => {
+    const basePayload = assertRequest(url, init);
+    const pass = Object.keys(captures).find((name) => hash(captures[name].basePayload) === hash(basePayload));
+    if (!pass || seenPasses.has(pass) || ++pipelineCalls > 2) throw new Error('Unexpected pipeline pass or retry');
+    if (pass === 'adjudication' && !seenPasses.has('initial')) throw new Error('Adjudication preceded initial assessment');
+    seenPasses.add(pass);
+    if (pass === 'adjudication') adjudicationRequired = true;
+    if (!responses[pass]) throw new Error('EVALUATION_ADJUDICATION_RESPONSE_REQUIRED');
+    return new Response(JSON.stringify(responses[pass]), { status: 200, headers: { 'content-type': 'application/json' } });
+  });
   const result = await observeStage('final', () => isolated.api.qualifyReply(context.replyEmail.campaign_id ?? `eval-${entry.id}`,
-    context.replyEmail.from_address_email ?? 'lead@example.com', context.replyEmail.thread_id ?? null, options));
-  if (calls !== 1 && calls !== 2) throw new Error('Pipeline made an unexpected number of calls');
+    context.replyEmail.from_address_email ?? 'lead@example.com', context.replyEmail.thread_id ?? null,
+    { ...options, checkpointStore: createEvaluationCheckpointStore() }));
+  const response = responses.initial;
   const observedContent = response.choices?.[0]?.message?.content;
   const rawText = typeof observedContent === 'string' ? observedContent : '';
   const parsed = await observeStage('parsed', () => isolated.api._private.parseAIResult(rawText));
-  let rawJson = null;
-  let rawJsonFormat = 'unparseable';
-  try {
-    rawJson = JSON.parse(rawText);
-    rawJsonFormat = 'strict';
-  } catch {
-    // Formatting is measured separately from semantics. Only a complete outer
-    // Markdown fence may be removed here; no repair, coercion or business rules.
-    const fenced = /^```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$/i.exec(rawText.trim());
-    if (fenced) {
-      try {
-        rawJson = JSON.parse(fenced[1]);
-        rawJsonFormat = 'markdown_fence';
-      } catch { /* Keep unparseable; the production parser result remains separate. */ }
-    }
-  }
-  const rawFlagsValid = rawJson !== null && typeof rawJson === 'object' && !Array.isArray(rawJson) &&
-    typeof rawJson.is_lead === 'boolean' && typeof rawJson.needs_review === 'boolean';
-  const schemaIssues = [];
-  if (!rawJson || typeof rawJson !== 'object' || Array.isArray(rawJson)) schemaIssues.push('expected_json_object');
-  else {
-    for (const field of ['is_lead', 'needs_review', 'custom_criteria_matched', 'proposal_seen', 'objection_handleable']) {
-      if (typeof rawJson[field] !== 'boolean') schemaIssues.push(`invalid_${field}`);
-    }
-    if (![null, 'auto_reply', 'delivery_failure', 'service_acknowledgement'].includes(rawJson.machine_reply_kind)) schemaIssues.push('invalid_machine_reply_kind');
-    if (![null, 'seller_pitch', 'service_followup', 'contact_routing'].includes(rawJson.non_lead_kind)) schemaIssues.push('invalid_non_lead_kind');
-    if (typeof rawJson.reason !== 'string' || !rawJson.reason.trim()) schemaIssues.push('invalid_reason');
-    if (typeof rawJson.confidence !== 'number' || !Number.isFinite(rawJson.confidence) || rawJson.confidence < 0 || rawJson.confidence > 1) schemaIssues.push('invalid_confidence');
-    if (!Array.isArray(rawJson.interest_signals) || !rawJson.interest_signals.every((signal) => typeof signal === 'string')) schemaIssues.push('invalid_interest_signals');
-    if (rawJson.objection_draft !== null && typeof rawJson.objection_draft !== 'string') schemaIssues.push('invalid_objection_draft');
-  }
   const finalStatus = result ? workerStatus(result, Boolean(entry.input.leadCriteria?.trim())) : null;
-  return { payload: jsonCopy(captured), basePayload: jsonCopy(capturedBase), pipelineWouldCallAI: calls === 2, parsed: jsonCopy(parsed),
-    classified: jsonCopy(classified), final: result ? withoutContext(result) : null, rawJson, stageErrors, schemaIssues,
-    strictJson: rawJsonFormat === 'strict' && rawJson !== null && typeof rawJson === 'object' && !Array.isArray(rawJson),
-    rawJsonFormat,
-    strictSchema: schemaIssues.length === 0, rawFlagsValid,
-    rawLabel: rawFlagsValid ? (rawJson.needs_review ? 'review' : rawJson.is_lead ? 'lead' : 'not_lead') : null,
+  return { payload: jsonCopy(captures.initial.payload), basePayload: jsonCopy(captures.initial.basePayload),
+    adjudicationPayload: jsonCopy(captures.adjudication.payload), adjudicationBasePayload: jsonCopy(captures.adjudication.basePayload),
+    adjudicationRequired, adjudicated: responses.adjudication ? jsonCopy(adjudicatedCapture) : null,
+    pipelineWouldCallAI: pipelineCalls > 0, parsed: jsonCopy(parsed),
+    classified: jsonCopy(classified), final: result ? withoutContext(result) : null, stageErrors, ...inspectResponse(response),
     parsedLabel: decision(parsed), classifiedLabel: decision(classified), finalStatus,
     finalLabel: finalStatus === null ? null : finalStatus === 'needs_review' ? 'review' : finalStatus === 'lead' ? 'lead' : 'not_lead' };
 }
@@ -381,12 +453,72 @@ function observedCost(data, requestedModel, prices, reservation) {
   return { accountedUsd: estimate, basis: 'reported_tokens_configured_prices', usageEstimateUsd: estimate };
 }
 
+async function requestOnce(pass, payload, model, args, prices, ledger, transport) {
+  const reservation = reserveCost(payload, priceFor(prices, model));
+  if (ledger.stopped) return null;
+  if (ledger.calls >= args.maxCalls) { ledger.stopped = 'max_calls'; return null; }
+  if (ledger.accounted + reservation.usd > args.budgetUsd) { ledger.stopped = 'conservative_budget'; return null; }
+  ledger.calls++;
+  const record = { pass, request: payload, payload_sha256: hash(payload), prompt_sha256: hash(payload.messages) };
+  const t0 = performance.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), args.timeoutMs);
+  let errorPhase = 'request';
+  let data = null;
+  try {
+    const response = await transport(ENDPOINT, { method: 'POST', redirect: 'error', signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env[args.keyEnv]}`,
+        'HTTP-Referer': 'https://portal.app', 'X-Title': 'Portal - Instantly Lead Model Evaluation' },
+      body: JSON.stringify(payload) });
+    record.response_text = await response.text();
+    record.elapsed_ms = Math.round(performance.now() - t0);
+    record.http_status = response.status;
+    if (!response.ok) throw new Error(`HTTP_${response.status}`);
+    errorPhase = 'response_envelope';
+    data = JSON.parse(record.response_text);
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Invalid response envelope');
+    record.actual_model = data.model ?? null;
+    record.response_id = data.id ?? null;
+    record.usage = data.usage ?? null;
+    record.finish_reason = data.choices?.[0]?.finish_reason ?? null;
+    record.response_content = data.choices?.[0]?.message?.content ?? null;
+    record.reported_top_level_cost = data.cost ?? null;
+    record.reported_usage_cost = data.usage?.cost ?? null;
+    const costs = observedCost(data, model, prices, reservation);
+    record.accounted_usd = costs.accountedUsd;
+    record.cost_basis = costs.basis;
+    record.usage_estimate_usd = costs.usageEstimateUsd;
+    if (costs.accountedUsd > reservation.usd) ledger.stopped = 'reported_usage_exceeded_reservation';
+    const shape = inspectResponse(data);
+    Object.assign(record, { strict_json: shape.strictJson, raw_json_format: shape.rawJsonFormat,
+      strict_schema: shape.strictSchema, schema_issues: shape.schemaIssues,
+      raw_flags_valid: shape.rawFlagsValid, raw_json: shape.rawJson, raw_label: shape.rawLabel });
+    record.status = 'ok';
+  } catch (error) {
+    data = null;
+    record.status = 'error';
+    record.elapsed_ms ??= Math.round(performance.now() - t0);
+    record.error = controller.signal.aborted ? 'TIMEOUT_BILLING_UNKNOWN' :
+      /^HTTP_\d+$/.test(error.message) ? error.message :
+        errorPhase === 'response_envelope' ? 'INVALID_RESPONSE_ENVELOPE' : 'REQUEST_OR_REPLAY_ERROR';
+    if (errorPhase === 'response_envelope') record.schema_issues = ['invalid_response_envelope'];
+    record.accounted_usd = Math.max(record.accounted_usd ?? 0, reservation.usd);
+    record.cost_basis = 'error_reserved_maximum_billing_unknown';
+    if ([401, 402, 403, 429].includes(record.http_status)) ledger.stopped = `upstream_${record.http_status}`;
+  } finally {
+    clearTimeout(timer);
+  }
+  ledger.accounted += record.accounted_usd;
+  return { data, record };
+}
+
 function summarize(records, models) {
   return models.map((model) => {
     const rows = records.filter((row) => row.requested_model === model);
     const good = rows.filter((row) => row.status === 'ok');
     const attempted = rows.filter((row) => row.status !== 'dry_run');
-    const responses = attempted.filter((row) => row.http_status >= 200 && row.http_status < 300);
+    const passes = attempted.flatMap((row) => row.ai_passes ?? [row]);
+    const responses = passes.filter((row) => row.http_status >= 200 && row.http_status < 300);
     // Include paid HTTP successes even when parsing/classification failed. The
     // latency is HTTP completion time, not time spent on the offline replay.
     const latency = responses.map((row) => row.elapsed_ms).filter(Number.isFinite).sort((a, b) => a - b);
@@ -397,7 +529,7 @@ function summarize(records, models) {
       const group = groups[row.label_basis] ??= { n: 0, raw_correct: 0, final_correct: 0,
         raw_false_positive: 0, final_false_positive: 0, raw_missed_lead: 0, final_missed_lead: 0,
         raw_reviews: 0, final_reviews: 0, raw_no_verdict: 0, final_no_verdict: 0,
-        errors: 0, invalid_raw_flags: 0, changed_by_rules: 0 };
+        errors: 0, invalid_raw_flags: 0, changed_by_rules: 0, changed_by_adjudication: 0 };
       group.n++;
       group.raw_correct += Number(row.raw_label === row.expected_label);
       group.final_correct += Number(row.final_label === row.expected_label);
@@ -409,11 +541,21 @@ function summarize(records, models) {
       }
       group.errors += Number(row.status === 'error');
       group.invalid_raw_flags += Number(!row.raw_flags_valid);
-      group.changed_by_rules += Number(row.raw_label != null && row.final_label != null && row.raw_label !== row.final_label);
+      const adjudication = row.adjudication_required && row.adjudication_completed
+        ? row.ai_passes?.find((pass) => pass.pass === 'adjudication') : null;
+      // Initial accuracy stays initial; attribute rule changes only after the
+      // last AI pass actually used by the completed qualification pipeline.
+      const lastRawLabel = adjudication ? adjudication.raw_label : row.raw_label;
+      group.changed_by_adjudication += Number(adjudication && row.raw_label != null &&
+        adjudication.raw_label != null && row.raw_label !== adjudication.raw_label);
+      group.changed_by_rules += Number(lastRawLabel != null && row.final_label != null && lastRawLabel !== row.final_label);
     }
     return { model, planned_or_attempted: rows.length, completed: good.length,
       errors: rows.filter((row) => row.status === 'error').length,
-      http_responses: attempted.filter((row) => Number.isInteger(row.http_status)).length,
+      ai_requests: passes.length,
+      adjudication_requests: passes.filter((row) => row.pass === 'adjudication').length,
+      adjudication_required: attempted.filter((row) => row.adjudication_required).length,
+      http_responses: passes.filter((row) => Number.isInteger(row.http_status)).length,
       successful_http_responses: responses.length,
       final_verdicts: attempted.filter((row) => row.final_label != null).length,
       classification_errors: attempted.filter((row) => row.classification_errors && Object.keys(row.classification_errors).length).length,
@@ -431,7 +573,7 @@ function summarize(records, models) {
 async function main() {
   const args = argsOf(process.argv.slice(2));
   if (args.help) {
-    console.log('Isolated lead-model eval. Required: --fixtures FILE --models a/model,b/model --out /absolute/NEW-dir.\nDry by default. Live: --live --prices FILE --key-env VAR [--request-profiles FILE] [--budget-usd 3] [--max-calls 160] [--start-index 0] [--limit 40] [--timeout-ms 45000].\nSee script header for fixture/pricing schemas, privacy and fallback cost limitations.');
+    console.log('Isolated lead-model eval. Required: --fixtures FILE --models a/model,b/model --out /absolute/NEW-dir.\nDry by default. Live: --live --prices FILE --key-env VAR [--request-profiles FILE] [--budget-usd 3] [--max-calls 160] [--start-index 0] [--limit 40] [--timeout-ms 45000].\nEach case uses one initial call plus at most one required adjudication, both counted by max-calls and budget. See script header for schemas and safety boundaries.');
     return;
   }
   const fixtureBytes = await readFile(path.resolve(args.fixtures), 'utf8');
@@ -457,9 +599,7 @@ async function main() {
   const started = new Date().toISOString();
   const records = [];
   const prepared = [];
-  let accounted = 0;
-  let calls = 0;
-  let stopped = null;
+  const ledger = { accounted: 0, calls: 0, stopped: null };
   const consecutiveFailures = new Map(args.models.map((model) => [model, 0]));
   await writeFile(path.join(output, 'fixtures.private.json'), fixtureBytes, { mode: 0o600 });
   for (const entry of cases) {
@@ -484,7 +624,11 @@ async function main() {
     timeout_ms: args.timeoutMs, max_output_tokens: maxTokens, base_max_output_tokens: maxTokens,
     effective_output_caps: Object.fromEntries(args.models.map((model) => [model,
       effectiveOutputCap(applyRequestProfile(prepared[0].probes.get(model).basePayload, requestProfiles.models[model] ?? null))])),
-    prices, production_retries: 'disabled for comparison',
+    prices, production_retries: 'transport retries and durable recovery disabled for comparison',
+    pass_note: 'raw/parsed/classified are INITIAL decisions; adjudicated and ai_passes preserve the separate second response. final is the pipeline using only those captured responses. max-calls and budget cover BOTH passes.',
+    latency_note: 'p50/p95 cover individual HTTP calls, including adjudication, not end-to-end pipeline latency.',
+    fixture_contract_warnings: cases.filter((entry) => entry.score && entry.expected_label === 'review')
+      .map((entry) => `${entry.id}: legacy expected review; current qualifyReply returns a binary verdict or a technical failure. Label retained without reinterpretation.`),
     scoring_note: 'Label bases reported separately; all attempted scored cases remain in denominators, including errors; absent verdicts are null, never not_lead; no held-out claim.',
     cost_note: 'Conservative client-side estimate, not provider hard cap; policy reservations include configured fallback attempts.',
     prefilter_note: 'AI evaluated even for prefiltered cases for defense-in-depth; production would skip those calls.' };
@@ -507,48 +651,38 @@ async function main() {
         request_profile: requestProfile, effective_output_cap: effectiveOutputCap(payload),
         pipeline_would_call_ai: probe.pipelineWouldCallAI,
         prefilter: probe.pipelineWouldCallAI ? null : probe.final, base_request: basePayload, request: payload,
+        adjudication_request: applyRequestProfile(probe.adjudicationBasePayload, requestProfile),
+        adjudication_required: null, adjudication_completed: false, ai_passes: [],
         raw_label: null, parsed_label: null, classified_label: null, final_label: null, final_worker_status: null };
       if (!args.live) row.status = 'dry_run';
       else {
-        const reservation = reserveCost(payload, priceFor(prices, model));
-        if (calls >= args.maxCalls) { stopped = 'max_calls'; break outer; }
-        if (accounted + reservation.usd > args.budgetUsd) { stopped = 'conservative_budget'; break outer; }
-        calls++;
-        const t0 = performance.now();
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), args.timeoutMs);
-        let errorPhase = 'request';
+        const first = await requestOnce('initial', payload, model, args, prices, ledger, nativeFetch);
+        if (!first) break outer;
+        // Preserve legacy top-level transport/raw fields as INITIAL evidence.
+        // Only accounted_usd below aggregates the full fixture's actual calls.
+        Object.assign(row, first.record);
+        row.ai_passes.push(first.record);
         try {
-          const response = await nativeFetch(ENDPOINT, { method: 'POST', redirect: 'error', signal: controller.signal,
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env[args.keyEnv]}`,
-              'HTTP-Referer': 'https://portal.app', 'X-Title': 'Portal - Instantly Lead Model Evaluation' },
-            body: JSON.stringify(payload) });
-          const responseText = await response.text();
-          row.elapsed_ms = Math.round(performance.now() - t0);
-          row.http_status = response.status;
-          // Private artifact only. Never print an upstream body, which may echo inputs.
-          row.response_text = responseText;
-          if (!response.ok) throw new Error(`HTTP_${response.status}`);
-          errorPhase = 'response_envelope';
-          const data = JSON.parse(responseText);
-          if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Invalid response envelope');
-          // Persist billable transport evidence BEFORE replay. A strict parser
-          // rejecting {} or a truncated answer must not erase tokens/costs or
-          // masquerade as a transport failure with unknown model/finish reason.
-          row.actual_model = data.model ?? null;
-          row.response_id = data.id ?? null;
-          row.usage = data.usage ?? null;
-          row.finish_reason = data.choices?.[0]?.finish_reason ?? null;
-          row.response_content = data.choices?.[0]?.message?.content ?? null;
-          row.reported_top_level_cost = data.cost ?? null;
-          row.reported_usage_cost = data.usage?.cost ?? null;
-          const costs = observedCost(data, model, prices, reservation);
-          row.accounted_usd = costs.accountedUsd;
-          row.cost_basis = costs.basis;
-          row.usage_estimate_usd = costs.usageEstimateUsd;
-          if (costs.accountedUsd > reservation.usd) stopped = 'reported_usage_exceeded_reservation';
-          errorPhase = 'replay';
-          const result = await replay(isolated, entry, context, model, data, requestProfile);
+          if (!first.data) throw new Error('INITIAL_TRANSPORT_FAILED');
+          const responses = { initial: first.data };
+          let result = await replay(isolated, entry, context, model, responses, requestProfile);
+          row.adjudication_required = result.adjudicationRequired;
+          if (result.adjudicationRequired) {
+            if (hash(result.adjudicationPayload) !== hash(row.adjudication_request)) throw new Error('Adjudication payload mismatch');
+            const second = await requestOnce('adjudication', result.adjudicationPayload, model, args, prices, ledger, nativeFetch);
+            if (second) {
+              row.ai_passes.push(second.record);
+              if (second.data) {
+                responses.adjudication = second.data;
+                result = await replay(isolated, entry, context, model, responses, requestProfile);
+                row.adjudication_completed = !result.stageErrors.adjudicated && !result.stageErrors.final;
+              } else {
+                result.stageErrors.final = `Adjudication transport failed: ${second.record.error}`;
+              }
+            } else {
+              result.stageErrors.final = `Adjudication not requested: ${ledger.stopped}`;
+            }
+          }
           if (hash(result.payload) !== row.payload_sha256) throw new Error('Replay payload mismatch');
           if (hash(result.basePayload) !== row.base_payload_sha256 || hash(result.basePayload.messages) !== row.original_prompt_sha256) {
             throw new Error('Replay original production prompt mismatch');
@@ -569,44 +703,36 @@ async function main() {
             machine_reply_kind: result.rawJson.machine_reply_kind, non_lead_kind: result.rawJson.non_lead_kind };
           row.parsed = result.parsed;
           row.classified = result.classified;
+          row.adjudicated = result.adjudicated;
+          row.adjudicated_label = decision(result.adjudicated);
           row.final = result.final;
           row.parsed_label = result.parsedLabel;
           row.classified_label = result.classifiedLabel;
           row.final_label = result.finalLabel;
           row.final_worker_status = result.finalStatus;
-          const validResult = row.status === 'ok' && result.strictSchema && row.finish_reason !== 'length';
-          consecutiveFailures.set(model, validResult ? 0 : consecutiveFailures.get(model) + 1);
         } catch (error) {
           row.status = 'error';
-          row.elapsed_ms ??= Math.round(performance.now() - t0);
-          row.error = controller.signal.aborted ? 'TIMEOUT_BILLING_UNKNOWN' :
-            /^HTTP_\d+$/.test(error.message) ? error.message :
-              errorPhase === 'response_envelope' ? 'INVALID_RESPONSE_ENVELOPE' :
-                errorPhase === 'replay' ? 'REPLAY_INVARIANT_ERROR' : 'REQUEST_OR_REPLAY_ERROR';
-          if (errorPhase === 'response_envelope') row.schema_issues = ['invalid_response_envelope'];
-          row.accounted_usd = Math.max(row.accounted_usd ?? 0, reservation.usd);
-          row.cost_basis = 'error_reserved_maximum_billing_unknown';
-          consecutiveFailures.set(model, consecutiveFailures.get(model) + 1);
-          // Authentication/payment/rate failures are shared state, not bad cases.
-          if ([401, 402, 403, 429].includes(row.http_status)) stopped = `upstream_${row.http_status}`;
-        } finally {
-          clearTimeout(timer);
+          row.error = first.data ? 'REPLAY_INVARIANT_ERROR' : first.record.error;
+          row.classification_errors ??= { final: error.message === 'INITIAL_TRANSPORT_FAILED' ? 'Initial response unavailable' : 'Replay invariant failed' };
         }
-        accounted += row.accounted_usd;
-        if (consecutiveFailures.get(model) >= 3 && !stopped) stopped = 'three_consecutive_model_failures';
+        row.accounted_usd = row.ai_passes.reduce((sum, pass) => sum + pass.accounted_usd, 0);
+        row.cost_basis = row.ai_passes.length > 1 ? 'sum_of_individually_accounted_passes' : first.record.cost_basis;
+        const validResult = row.status === 'ok' && row.ai_passes.every((pass) => pass.strict_schema && pass.finish_reason === 'stop');
+        consecutiveFailures.set(model, validResult ? 0 : consecutiveFailures.get(model) + 1);
+        if (consecutiveFailures.get(model) >= 3 && !ledger.stopped) ledger.stopped = 'three_consecutive_model_failures';
       }
       records.push(row);
       await appendFile(path.join(output, 'results.private.jsonl'), `${JSON.stringify(row)}\n`, { mode: 0o600 });
       console.log(JSON.stringify({ progress: records.length, total: cases.length * args.models.length,
-        fixture: entry.id, model, status: row.status, calls, accounted_usd: Number(accounted.toFixed(5)) }));
-      if (stopped) break outer;
+        fixture: entry.id, model, status: row.status, calls: ledger.calls, accounted_usd: Number(ledger.accounted.toFixed(5)) }));
+      if (ledger.stopped) break outer;
     }
   }
-  const summary = { ...manifest, completed_at: new Date().toISOString(), calls, accounted_usd: accounted,
-    stopped, results: summarize(records, args.models) };
+  const summary = { ...manifest, completed_at: new Date().toISOString(), calls: ledger.calls, accounted_usd: ledger.accounted,
+    stopped: ledger.stopped, results: summarize(records, args.models) };
   await writeFile(path.join(output, 'summary.private.json'), JSON.stringify(summary, null, 2), { mode: 0o600 });
-  console.log(JSON.stringify({ output, mode: manifest.mode, calls, stopped, accounted_usd: accounted, results: summary.results }, null, 2));
-  if (stopped || records.some((row) => row.status === 'error')) process.exitCode = 2;
+  console.log(JSON.stringify({ output, mode: manifest.mode, calls: ledger.calls, stopped: ledger.stopped, accounted_usd: ledger.accounted, results: summary.results }, null, 2));
+  if (ledger.stopped || records.some((row) => row.status === 'error')) process.exitCode = 2;
 }
 
 main().catch(() => {

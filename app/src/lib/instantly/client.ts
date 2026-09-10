@@ -709,10 +709,16 @@ export async function listEmails(
      * 2026-07-15).
      */
     mode?: 'emode_focused' | 'emode_others' | 'emode_all';
+    /** Creation-date bounds, not the original email's sent/received date. */
+    min_timestamp_created?: string;
+    max_timestamp_created?: string;
+    sort_order?: 'asc' | 'desc';
+    latest_of_thread?: boolean;
+    preview_only?: boolean;
   },
   requestOptions?: InstantlyRequestOptions,
 ) {
-  return request<PaginatedResponse<Email>>('/emails', { params: params as Record<string, string | number> }, requestOptions);
+  return request<PaginatedResponse<Email>>('/emails', { params: { ...params } }, requestOptions);
 }
 
 export async function getEmail(id: string, requestOptions?: InstantlyRequestOptions) {

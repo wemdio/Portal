@@ -1,10 +1,16 @@
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
-import { pollAndQualifyReplies, drainWebhookQueue } from '@/lib/instantly/leadQualificationWorker';
+import {
+  discoverQualificationReplies,
+  drainQualificationReplies,
+  maybeReprocessOwnershipReviews,
+  reconcileQualificationDeliveries,
+  drainWebhookQueue,
+} from '@/lib/instantly/leadQualificationWorker';
 import { pollOthersOnce } from '@/lib/instantly/othersWatchdog';
 import { createWorkerLogger, setupGracefulShutdown } from './_shared';
 
-const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '30000');
-const DRAIN_INTERVAL_MS = Number(process.env.INSTANTLY_WEBHOOK_DRAIN_INTERVAL_MS ?? '7000');
+const POLL_INTERVAL_MS = envMs('WORKER_POLL_INTERVAL_MS', 30_000, 10_000);
+const DRAIN_INTERVAL_MS = envMs('INSTANTLY_WEBHOOK_DRAIN_INTERVAL_MS', 7_000, 1_000);
 const DRAIN_ENABLED = ['1', 'true', 'yes', 'on'].includes(
   (process.env.INSTANTLY_WEBHOOK_DRAIN_ENABLED ?? '').toLowerCase(),
 );
@@ -41,16 +47,51 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Поллинг — система записи / reconciliation-бэкап. Поведение не менялось.
+// Only durable discovery runs here. Slow AI and recovery cannot hold the next
+// page hostage, and collection continues while the AI account is unavailable.
 async function pollLoop(shouldStop: () => boolean): Promise<void> {
   while (!shouldStop()) {
     try {
-      const count = await pollAndQualifyReplies();
-      if (count > 0) log('info', `Qualified ${count} reply(s)`);
+      const count = await discoverQualificationReplies();
+      if (count > 0) log('info', `Staged ${count} reply(s) in durable intake`);
     } catch (err) {
       log('error', 'Poll cycle failed', err);
     }
     await sleep(POLL_INTERVAL_MS);
+  }
+}
+
+async function qualificationLoop(shouldStop: () => boolean): Promise<void> {
+  while (!shouldStop()) {
+    try {
+      const count = await drainQualificationReplies();
+      if (count > 0) log('info', `Completed intake for ${count} reply(s)`);
+    } catch (error) {
+      log('error', 'Durable qualification cycle failed', error);
+    }
+    await sleep(7_000);
+  }
+}
+
+async function recoveryLoop(shouldStop: () => boolean): Promise<void> {
+  while (!shouldStop()) {
+    try {
+      await maybeReprocessOwnershipReviews();
+    } catch (error) {
+      log('error', 'Qualification recovery cycle failed', error);
+    }
+    await sleep(30_000);
+  }
+}
+
+async function deliveryLoop(shouldStop: () => boolean): Promise<void> {
+  while (!shouldStop()) {
+    try {
+      await reconcileQualificationDeliveries();
+    } catch (error) {
+      log('error', 'Qualification delivery reconciliation failed', error);
+    }
+    await sleep(30_000);
   }
 }
 
@@ -96,7 +137,7 @@ async function main(): Promise<void> {
 
   const shouldStop = setupGracefulShutdown(log);
 
-  const loops = [pollLoop(shouldStop)];
+  const loops = [pollLoop(shouldStop), qualificationLoop(shouldStop), recoveryLoop(shouldStop), deliveryLoop(shouldStop)];
   if (OTHERS_ENABLED) {
     log('info', `Others watchdog ENABLED (every ${OTHERS_INTERVAL_MS}ms)`);
     loops.push(othersLoop(shouldStop));

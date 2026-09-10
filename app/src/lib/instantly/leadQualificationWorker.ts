@@ -47,6 +47,12 @@ import { captureQualificationReplySnapshot, qualificationRecoveryBackoff, qualif
 import { InstantlyApiError } from './errors';
 import { readInstantlyEmailReadDeferral } from './emailReadDeferral';
 import {
+  discoverReplyIntake,
+  claimReplyIntake,
+  completeReplyIntake,
+  deferReplyIntake,
+} from './replyIntake';
+import {
   resolveCampaignProjectOwner,
   resolveCampaignProjectOwners,
 } from './campaignProjectOwnerResolver';
@@ -77,7 +83,7 @@ const TRANSIENT_OTHERS_RETRY_TAG = '[others]';
 
 // Drain different eligible rows frequently, but do not retry one failing row
 // every tick. The old shared 15-minute clock limited all projects to 20/h.
-const OWNERSHIP_REVIEW_RETRY_INTERVAL_MS = 2 * 60 * 1000;
+const OWNERSHIP_REVIEW_RETRY_INTERVAL_MS = 60 * 1000;
 const OWNERSHIP_REVIEW_RETRY_BACKOFF_MS = 15 * 60 * 1000;
 const OWNERSHIP_RETRY_TIME_BUDGET_MS = 45_000;
 const OWNERSHIP_RETRY_PROVIDER_BACKOFF_MS = 5 * 60 * 1000;
@@ -90,7 +96,7 @@ const OWNERSHIP_PAGE_BUDGET_RETRY_INTERVAL_MS = 15 * 60 * 1000;
 const OWNERSHIP_PAGE_BUDGET_RETRY_MAX_AGE_MS = OWNERSHIP_REVIEW_RETRY_MAX_AGE_MS;
 const QUALIFICATION_FRESH_WINDOW_MS = 2 * 60 * 60 * 1000;
 let lastQualificationFreshRetryAt = 0;
-const QUALIFICATION_COLD_RETRY_INTERVAL_MS = 5 * 60 * 1000;
+const QUALIFICATION_COLD_RETRY_INTERVAL_MS = 60 * 1000;
 const QUALIFICATION_COLD_RETRY_BACKOFF_MS = 30 * 60 * 1000;
 const LEGACY_SEMANTIC_RETRY_TAG = '[legacy-semantic]';
 const LEAD_DELIVERY_RETRY_INTERVAL_MS = 15 * 60 * 1000;
@@ -824,7 +830,9 @@ async function fetchRecentLinkedReplies(
  * keeps only replies for campaigns linked to Portal client projects, deduplicates
  * against already-processed records, and qualifies new ones via AI.
  * Returns the number of new replies qualified.
- */
+ *
+ * Legacy synchronous entry point. Production workers use the durable intake
+ * below; keep this adapter for existing in-process integrations during rollout. */
 export async function pollAndQualifyReplies(): Promise<number> {
   if (!supabaseAdmin) {
     workerLog('warn', 'supabaseAdmin not configured — skipping');
@@ -1005,6 +1013,106 @@ export async function pollAndQualifyReplies(): Promise<number> {
   }
 
   return finishPoll(processed);
+}
+
+/** Discovery must not wait for AI, ownership recovery, or notification delivery.
+ * A provider page is committed to the inbox before its cursor can move. */
+export async function discoverQualificationReplies(): Promise<number> {
+  if (!supabaseAdmin) throw new Error('Instantly reply intake database is not configured');
+  const campaigns = await getCampaignsByAccountCached();
+  const maxPages = Math.max(1, Math.min(20, Math.floor(envNumber('INSTANTLY_LEADS_EMAIL_PAGES', 5))));
+  let staged = 0;
+  for (const [accountId, campaignIds] of campaigns) {
+    if (!campaignIds.size) continue;
+    try {
+      const result = await discoverReplyIntake(supabaseAdmin, { accountId, campaignIds, maxPages });
+      staged += result.staged;
+      if (result.pages) workerLog('info', `reply intake ${accountId}: pages=${result.pages}, staged=${result.staged}, sweepComplete=${result.sweepComplete}`);
+    } catch (error) {
+      // One inaccessible workspace must not prevent discovery in the others.
+      // The failed account retains its cursor; there is no legacy fail-open.
+      workerLog('error', `Durable reply discovery failed for ${accountId}`, error);
+    }
+  }
+  return staged;
+}
+
+let intakeDrainRunning = false;
+
+/** Lease only the two replies about to run, not an entire waiting batch. Paid
+ * attempt limits remain in the existing checkpoint store, including on restart. */
+export async function drainQualificationReplies(): Promise<number> {
+  if (!supabaseAdmin || !API_KEY() || intakeDrainRunning) return 0;
+  const db = supabaseAdmin;
+  intakeDrainRunning = true;
+  try {
+    const campaigns = await getCampaignsByAccountCached();
+    const accountIds = [...campaigns.keys()];
+    if (!accountIds.length) return 0;
+    const startedAt = Date.now();
+    const interReplyDelay = Math.max(1000, envNumber('INSTANTLY_LEADS_INTER_REPLY_DELAY_MS', 3500));
+    let acknowledged = 0;
+    let attempted = 0;
+    while (attempted < MAX_QUALIFY_PER_TICK && Date.now() - startedAt < 60_000) {
+      const claims = await claimReplyIntake(db, { accountIds, limit: Math.min(2, MAX_QUALIFY_PER_TICK - attempted) });
+      if (!claims.length) break;
+      attempted += claims.length;
+      const results = await Promise.allSettled(claims.map(async claim => {
+        let failure = 'Qualification returned without a durable result';
+        try {
+          const { data: existing, error } = await db.from('instantly_lead_qualifications')
+            .select('instantly_email_id').eq('instantly_email_id', claim.emailId).maybeSingle();
+          if (error) throw new Error(`Reply intake dedup lookup failed: ${error.message}`);
+          if (existing) {
+            // Existing pending rows belong to the CAS recovery lane. Repair
+            // missing source snapshots, but never reclassify finalized rows.
+            await refreshMissingRecoverySources(db, [claim.email]);
+          } else {
+            if (!campaigns.get(claim.accountId)?.has(claim.email.campaign_id ?? '')) {
+              throw new Error('Reply intake campaign is no longer in the qualifying surface');
+            }
+            await qualifyOneReply(db, claim.email, API_KEY(), claim.accountId);
+          }
+          if (await completeReplyIntake(db, claim)) return true;
+        } catch (error) {
+          failure = error instanceof Error ? error.message : String(error);
+          workerLog('warn', `Durable qualification deferred for ${claim.emailId}`, error);
+          // Hand transport/AI outages to the existing recovery mechanism. If
+          // even this write fails, the independent inbox still owns the reply.
+          if (isTransientQualifyError(failure)) {
+            const { error: retryError } = await persistTransientQualificationRetry(db, claim.email, failure);
+            if (!retryError && await completeReplyIntake(db, claim)) return true;
+          }
+        }
+        await deferReplyIntake(db, claim, failure);
+        return false;
+      }));
+      for (const result of results) {
+        if (result.status === 'fulfilled' && result.value) acknowledged++;
+        if (result.status === 'rejected') workerLog('error', 'Reply intake could not persist its disposition; lease recovery will retry', result.reason);
+      }
+      if (attempted < MAX_QUALIFY_PER_TICK) await new Promise(resolve => setTimeout(resolve, interReplyDelay));
+    }
+    return acknowledged;
+  } finally {
+    intakeDrainRunning = false;
+  }
+}
+
+/** Delivery is independent of both discovery and AI/recovery latency. */
+export async function reconcileQualificationDeliveries(): Promise<void> {
+  await maybeReconcileLeadNotificationDeliveries();
+  await reconcileLeadHandoffJobs();
+}
+
+/** General-worker compatibility: use the same durable inbox/claims as the
+ * dedicated worker, never a second lossy recent-pages qualification path. */
+export async function pollDurableQualificationReplies(): Promise<number> {
+  await discoverQualificationReplies();
+  const count = await drainQualificationReplies();
+  await maybeReprocessOwnershipReviews();
+  await reconcileQualificationDeliveries();
+  return count;
 }
 
 function splitEmailList(value: string | null | undefined): string[] {
