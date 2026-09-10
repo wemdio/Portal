@@ -112,6 +112,27 @@ function formatDate(iso: string) {
 }
 
 /**
+ * Дата и время отдельной реплики в переписке.
+ *
+ * Хранится не у всех сообщений: у диалогов, заведённых до появления поля,
+ * времени нет — в этом случае подписи просто не будет, вместо неё не рисуем
+ * заглушку вроде «—», чтобы не выдавать пустоту за данные.
+ */
+function messageDayLabel(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+function messageTimeLabel(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+}
+
+/**
  * Маппинг короткого кода `can_send_changed_reason` в человекочитаемую
  * подпись для UI. Коды одобрены схемой (см. migration / blockedUsers /
  * disableDialogIfUnreachable); если приходит неизвестный код — отдаём
@@ -1810,9 +1831,32 @@ function DialogsTab({ campaignId }: {
                         const senderName = m.role === 'user'
                           ? (d.tg_username ? `@${d.tg_username}` : `ID ${d.tg_user_id}`)
                           : accountLabelMap.get(d.account_id) ?? 'Наш аккаунт';
+                        // Разделитель дня рисуем только там, где дата сменилась:
+                        // в переписке на десяток сообщений за одни сутки полная
+                        // дата у каждой реплики только мешает читать. Время же
+                        // показываем всегда — по нему видно паузы между ответами.
+                        const dayLabel = messageDayLabel(m.timestamp);
+                        const prevDayLabel = i > 0 ? messageDayLabel(d.messages[i - 1]?.timestamp) : null;
                         return (
-                          <div key={i} className={`rounded-lg px-3 py-2 text-xs ${m.role === 'user' ? 'bg-blue-50 text-gray-800' : 'bg-emerald-50 text-gray-800'}`}>
-                            <span className="font-semibold">{senderName}:</span> {m.content}
+                          <div key={i}>
+                            {dayLabel && dayLabel !== prevDayLabel && (
+                              <div className="my-1.5 flex items-center gap-2">
+                                <span className="h-px flex-1 bg-gray-200" />
+                                <span className="text-[10px] font-medium text-gray-400">{dayLabel}</span>
+                                <span className="h-px flex-1 bg-gray-200" />
+                              </div>
+                            )}
+                            <div className={`rounded-lg px-3 py-2 text-xs ${m.role === 'user' ? 'bg-blue-50 text-gray-800' : 'bg-emerald-50 text-gray-800'}`}>
+                              <div className="mb-0.5 flex items-baseline gap-2">
+                                <span className="font-semibold">{senderName}</span>
+                                {m.timestamp && (
+                                  <span className="ml-auto shrink-0 text-[10px] text-gray-400" title={formatDate(m.timestamp)}>
+                                    {messageTimeLabel(m.timestamp)}
+                                  </span>
+                                )}
+                              </div>
+                              {m.content}
+                            </div>
                           </div>
                         );
                       })}
