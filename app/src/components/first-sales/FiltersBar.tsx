@@ -48,6 +48,47 @@ function shiftMonths(mskShifted: Date, months: number): Date {
   ));
 }
 
+/**
+ * Сегодня по МСК — верхняя граница обоих полей даты.
+ *
+ * Значение считается на каждый рендер, а не один раз при загрузке модуля:
+ * дашборд держат открытым сутками, и вкладка, открытая вчера, иначе не
+ * пускала бы выбрать сегодняшний день.
+ */
+function todayMskIso(): string {
+  return toDateInputValue(mskNow());
+}
+
+/**
+ * Нижняя граница дашборда — 1 мая 2026.
+ *
+ * Раньше этой даты подписи к записям встреч были нерегулярными и привязать
+ * разговор к сделке нечем (см. MEETINGS_RELIABLE_SINCE в firstSales/meetings.ts):
+ * март даёт 18 привязок, апрель — 6 против июньских 72. Показывать такой период
+ * значит выдавать «встреч почти не было» за факт, поэтому выбрать его нельзя.
+ */
+export const FIRST_SALES_MIN_DATE = '2026-05-01';
+
+/** Отрезает будущее и всё раньше 1 мая 2026: ручной ввод `min`/`max` не перехватывает. */
+function clampToRange(value: string): string {
+  const today = todayMskIso();
+  if (value > today) return today;
+  if (value < FIRST_SALES_MIN_DATE) return FIRST_SALES_MIN_DATE;
+  return value;
+}
+
+/**
+ * Приводит период, принесённый с другого дашборда, к границам первички:
+ * не раньше 1 мая 2026 и не позже сегодняшнего дня по МСК. Продления живут с
+ * 2025 года, и их «Всё время» иначе открыло бы здесь период, который руками
+ * выбрать нельзя.
+ */
+export function clampSharedPeriod(period: { from: string; to: string }): { from: string; to: string } {
+  const from = clampToRange(period.from);
+  const to = clampToRange(period.to);
+  return from > to ? { from: to, to } : { from, to };
+}
+
 type Preset = { id: string; label: string; from: (now: Date) => Date };
 
 const PRESETS: Preset[] = [
@@ -61,8 +102,9 @@ const PRESETS: Preset[] = [
  *  чтобы арифметика границ периода жила в одном месте с пресетами. */
 export function getDefaultFilters(): FiltersState {
   const now = mskNow();
+  const from = toDateInputValue(PRESETS[0]!.from(now));
   return {
-    from: toDateInputValue(PRESETS[0]!.from(now)),
+    from: from < FIRST_SALES_MIN_DATE ? FIRST_SALES_MIN_DATE : from,
     to: toDateInputValue(now),
     groupBy: 'day',
     sources: [],
@@ -86,6 +128,7 @@ export default function FiltersBar({
   sources: AvailableSource[];
   onChange: (value: FiltersState) => void;
 }) {
+  const today = todayMskIso();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const boxRef = useRef<HTMLDivElement | null>(null);
@@ -133,7 +176,13 @@ export default function FiltersBar({
 
   const applyPreset = (preset: Preset) => {
     const now = mskNow();
-    onChange({ ...value, from: toDateInputValue(preset.from(now)), to: toDateInputValue(now) });
+    // «Год» и «Квартал» отсчитываются от сегодня и легко уходят за 1 мая 2026 —
+    // подрезаем, иначе кнопка ставила бы период, который руками выбрать нельзя.
+    onChange({
+      ...value,
+      from: clampToRange(toDateInputValue(preset.from(now))),
+      to: toDateInputValue(now),
+    });
   };
 
   return (
@@ -157,20 +206,27 @@ export default function FiltersBar({
             </button>
           ))}
         </div>
+        {/* Будущие даты недоступны: за них данных нет по определению, а
+            выбранный «конец периода» в следующем месяце молча растягивал окно
+            и делал дневные графики хвостом из нулей. max закрывает выбор в
+            календаре, clampToToday — ручной ввод с клавиатуры, который max не
+            перехватывает. */}
         <div className="flex items-center gap-1.5">
           <input
             type="date"
             value={value.from}
-            max={value.to}
-            onChange={(e) => onChange({ ...value, from: e.target.value })}
+            min={FIRST_SALES_MIN_DATE}
+            max={value.to < today ? value.to : today}
+            onChange={(e) => onChange({ ...value, from: clampToRange(e.target.value) })}
             className="rounded-lg border border-zinc-200 px-2 py-1 text-xs text-zinc-700"
           />
           <span className="text-xs text-zinc-400">—</span>
           <input
             type="date"
             value={value.to}
-            min={value.from}
-            onChange={(e) => onChange({ ...value, to: e.target.value })}
+            min={value.from > FIRST_SALES_MIN_DATE ? value.from : FIRST_SALES_MIN_DATE}
+            max={today}
+            onChange={(e) => onChange({ ...value, to: clampToRange(e.target.value) })}
             className="rounded-lg border border-zinc-200 px-2 py-1 text-xs text-zinc-700"
           />
         </div>

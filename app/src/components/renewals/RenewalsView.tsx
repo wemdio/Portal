@@ -6,8 +6,10 @@ import { logError } from '@/lib/loggerClient';
 import { bucketRange } from '@/lib/firstSales/buckets';
 import type { RenewalsResult } from '@/lib/renewals/metrics';
 import type { RenewalTableRow } from '@/lib/renewals/tableRows';
-import FiltersBar, { getDefaultFilters, type FiltersState } from '@/components/renewals/FiltersBar';
+import FiltersBar, { clampSharedPeriod, getDefaultFilters, type FiltersState } from '@/components/renewals/FiltersBar';
+import { readSharedPeriod, writeSharedPeriod } from '@/lib/firstSales/sharedPeriod';
 import KpiRow from '@/components/renewals/KpiRow';
+import OwnerLeadBreakdown from '@/components/renewals/OwnerLeadBreakdown';
 import RenewalsTable from '@/components/renewals/RenewalsTable';
 import RenewalsUndatedSection from '@/components/renewals/RenewalsUndatedSection';
 import RenewalsChart from '@/components/renewals/RenewalsChart';
@@ -24,6 +26,8 @@ function formatDay(key: string): string {
 
 export default function RenewalsView() {
   const [filters, setFilters] = useState<FiltersState>(() => getDefaultFilters());
+  /** Общий период с дашбордом первички — см. FirstSalesView и sharedPeriod.ts. */
+  const [periodRestored, setPeriodRestored] = useState(false);
   const [data, setData] = useState<SummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -34,6 +38,21 @@ export default function RenewalsView() {
   // устаревший запрос при быстрой смене фильтров, флаг `active` подстраховывает
   // на случай, если промис успел зарезолвиться до того, как abort долетел.
   useEffect(() => {
+    const stored = readSharedPeriod();
+    if (stored) {
+      const { from, to } = clampSharedPeriod(stored);
+      setFilters((f) => (f.from === from && f.to === to ? f : { ...f, from, to }));
+    }
+    setPeriodRestored(true);
+  }, []);
+
+  useEffect(() => {
+    if (!periodRestored) return;
+    writeSharedPeriod({ from: filters.from, to: filters.to });
+  }, [periodRestored, filters.from, filters.to]);
+
+  useEffect(() => {
+    if (!periodRestored) return;
     const controller = new AbortController();
     let active = true;
 
@@ -68,7 +87,7 @@ export default function RenewalsView() {
       active = false;
       controller.abort();
     };
-  }, [filters]);
+  }, [filters, periodRestored]);
 
   // Границы выбранной корзины. Ключ корзины и `paymentDate` строки — оба
   // `YYYY-MM-DD`, поэтому сравниваем строками: для этого формата
@@ -166,6 +185,12 @@ export default function RenewalsView() {
               </button>
             </div>
           ) : null}
+
+          {/* Разбивка по ответственным лидам идёт перед таблицей: сначала
+              «кто сколько принёс», потом расшифровка по сделкам. Считается из
+              тех же строк, что и таблица, поэтому цифры сходятся по
+              определению. */}
+          <OwnerLeadBreakdown rows={visibleRows} />
 
           <RenewalsTable rows={visibleRows} />
 

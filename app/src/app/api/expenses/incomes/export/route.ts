@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import * as XLSX from 'xlsx';
 
 import { requireExpensesAccess } from '@/lib/expenses/access';
+import { groupByDay } from '@/lib/expenses/byDay';
 import { fetchIncomeRows } from '@/lib/expenses/rows';
 import { parseIncomesQuery, type IncomesQuery } from '@/lib/expenses/request';
 
@@ -56,8 +57,20 @@ export async function GET(req: NextRequest) {
     })),
   );
 
+  // Второй лист — то же, что раскрывающийся список на экране: день, число
+  // операций и итог прихода.
+  const daysSheet = XLSX.utils.json_to_sheet(
+    groupByDay(rows).map((d) => ({
+      День: d.date,
+      Операций: d.count,
+      'Сумма, ₽': d.total,
+      'Без курса': d.withoutRate || '',
+    })),
+  );
+
   const book = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(book, sheet, 'Доходы');
+  XLSX.utils.book_append_sheet(book, daysSheet, 'По дням');
   const buffer = XLSX.write(book, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
 
   return new NextResponse(new Uint8Array(buffer), {
