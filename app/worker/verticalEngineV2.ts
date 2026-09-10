@@ -50,6 +50,7 @@ import type { VeJob, VeStage } from '@/lib/verticalEngineV2/types';
 
 const WORKER_ID = `vertical-engine-v2-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
+const OUTREACH_PREPARATION_INTERVAL_MS = 10_000;
 const configuredContactDeliveryInterval = Number(process.env.VE_CONTACT_DELIVERY_INTERVAL_MS);
 const CONTACT_DELIVERY_INTERVAL_MS =
   Number.isFinite(configuredContactDeliveryInterval) && configuredContactDeliveryInterval >= 60_000
@@ -352,7 +353,7 @@ async function handleJob(job: VeJob) {
 
   await accumulateProjectUsage(job.project_id, tokensUsed, costUsd);
   await enqueueNextResearchStage(job);
-  if (job.stage === 'base_analyze' || job.stage === 'template') { lastOutreachPreparationAt = 0; await tickOutreachPreparation(); }
+  if (job.stage === 'base_analyze' || job.stage === 'template') void triggerOutreachPreparationTick();
   log('info', `Job ${job.id} (${job.stage}) → done (+${tokensUsed} tok, $${costUsd.toFixed(6)})`);
 }
 
@@ -436,18 +437,18 @@ async function failJob(job: VeJob, err: unknown) {
 
 }
 
-let lastOutreachPreparationAt = 0;
-let outreachPreparationInFlight = false;
-async function tickOutreachPreparation() {
-  if (shouldStop() || outreachPreparationInFlight || Date.now() - lastOutreachPreparationAt < 10_000) return;
-  outreachPreparationInFlight = true; lastOutreachPreparationAt = Date.now();
-  try { await runVeOutreachPreparations(db); }
-  catch (error) { log('warn', `[outreach] preparation tick: ${error instanceof Error ? error.message : 'unavailable'}`); }
-  finally { outreachPreparationInFlight = false; }
+let activeOutreachPreparationTick: Promise<void> | null = null;
+function triggerOutreachPreparationTick(): Promise<void> {
+  if (shouldStop() || activeOutreachPreparationTick) return activeOutreachPreparationTick ?? Promise.resolve();
+  activeOutreachPreparationTick = (async () => {
+    try { await runVeOutreachPreparations(db); }
+    catch (error) { log('warn', `[outreach] preparation tick: ${error instanceof Error ? error.message : 'unavailable'}`); }
+    finally { activeOutreachPreparationTick = null; }
+  })();
+  return activeOutreachPreparationTick;
 }
 
 async function pollOnce(): Promise<boolean> {
-  await tickOutreachPreparation();
   const job = await claimJob();
   if (!job) return false;
   try {
@@ -477,11 +478,19 @@ async function main() {
     CONTACT_DELIVERY_INTERVAL_MS,
   );
   if (typeof contactDeliveryTimer.unref === 'function') contactDeliveryTimer.unref();
+  const outreachPreparationTimer = setInterval(
+    () => { void triggerOutreachPreparationTick(); },
+    OUTREACH_PREPARATION_INTERVAL_MS,
+  );
+  if (typeof outreachPreparationTimer.unref === 'function') outreachPreparationTimer.unref();
 
   try {
     // Delivery is independent from VE research/template jobs; do not hold the
     // main poll loop behind a potentially slow provider batch at process start.
     void triggerContactDeliveryTick();
+    // Preparation only coordinates durable jobs. Keep it advancing while a
+    // collection or model call occupies the main worker for several minutes.
+    void triggerOutreachPreparationTick();
     await pollLoop({
       log,
       pollIntervalMs: POLL_INTERVAL_MS,
@@ -491,7 +500,9 @@ async function main() {
     });
   } finally {
     clearInterval(contactDeliveryTimer);
+    clearInterval(outreachPreparationTimer);
     if (activeContactDeliveryTick) await activeContactDeliveryTick;
+    if (activeOutreachPreparationTick) await activeOutreachPreparationTick;
     clearInterval(heartbeat);
   }
 

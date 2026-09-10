@@ -52,7 +52,7 @@ export async function runVeOutreachPreparations(db: SupabaseClient): Promise<voi
       const h = await db.from('ve_hypotheses').select('id,vertical_id,status').eq('id', p.hypothesis_id).eq('project_id', p.project_id).maybeSingle();
       if (h.error || !h.data?.vertical_id || h.data.status === 'rejected') throw new Error('Гипотеза больше недоступна. Измените выбор');
       if (!baseId) baseId = (await latestBase())?.id ?? null;
-      let base = baseId ? await db.from('ve_bases').select('id,status,error,collect_info')
+      let base = baseId ? await db.from('ve_bases').select('id,status,error,row_count,collect_info')
         .eq('id', baseId).eq('project_id', p.project_id).eq('hypothesis_id', p.hypothesis_id).maybeSingle() : null;
       if (base?.error) throw new Error(base.error.message);
       if (baseId && !base?.data) throw new Error('Сохранённая база недоступна. Обновите страницу');
@@ -64,7 +64,7 @@ export async function runVeOutreachPreparations(db: SupabaseClient): Promise<voi
           if (resumed.error.message.includes('VE_OUTREACH_PREPARATION_LEASE_LOST')) throw new PreparationLeaseLost(resumed.error.message);
           throw new Error(resumed.error.message);
         }
-        base = await db.from('ve_bases').select('id,status,error,collect_info')
+        base = await db.from('ve_bases').select('id,status,error,row_count,collect_info')
           .eq('id', baseId).eq('project_id', p.project_id).eq('hypothesis_id', p.hypothesis_id).maybeSingle();
         if (base.error) throw new Error(base.error.message);
       }
@@ -86,7 +86,7 @@ export async function runVeOutreachPreparations(db: SupabaseClient): Promise<voi
         baseId = String(result.base.id);
         templateId = null;
         await save('collecting', null, false);
-        base = await db.from('ve_bases').select('id,status,error,collect_info')
+        base = await db.from('ve_bases').select('id,status,error,row_count,collect_info')
           .eq('id', baseId).eq('project_id', p.project_id).eq('hypothesis_id', p.hypothesis_id).maybeSingle();
         if (base.error) throw new Error(base.error.message);
       }
@@ -119,6 +119,9 @@ export async function runVeOutreachPreparations(db: SupabaseClient): Promise<voi
         continue;
       }
       if (base.data.status !== 'analyzed') throw new Error(`База ещё не готова: ${base.data.status}`);
+      // Collection also uses this terminal status for an empty preview. It has
+      // no analysis and must not enqueue paid letter generation or reuse letters.
+      if (!(base.data.row_count > 0)) throw new Error('Сбор завершён без готовых контактов. Для подготовки писем нужна непустая база.');
       const template = await db.from('ve_templates').select('id,status').eq('base_id', baseId).is('supply_batch_id', null)
         .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(1).maybeSingle();
       if (template.error) throw new Error(template.error.message);

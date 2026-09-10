@@ -40,6 +40,8 @@ const checkpointSchema = z.object({
     input_hash: hashSchema,
     review_attempt: hashSchema.optional(),
     status: z.enum(['started', 'finished']),
+    // Preserve provider failures separately from a single unsupported citation.
+    failure_code: relevanceFailureCodeSchema.optional(),
   })).default({}),
   // pending is safe to resume; started/failed can have incurred a charge and
   // must never be repeated for the same evidence/model/context after a crash.
