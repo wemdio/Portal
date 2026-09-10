@@ -31,13 +31,15 @@ import RenewalsDealsList from '@/components/renewals/RenewalsDealsList';
  * отдельной строкой под воронкой.
  */
 
+/**
+ * Долей «сколько дошло от предыдущего этапа» здесь нет намеренно.
+ *
+ * С 10.09.2026 ступень считает вход на этап внутри периода, а не когорту, и
+ * ступени перестали быть вложенными: сделка могла обсуждаться в июле, а
+ * продлиться в августе. Отношение соседних чисел в такой воронке — не
+ * конверсия, и показывать его процентом значит выдавать за неё случайную дробь.
+ */
 function buildOption(data: FunnelData, theme: ChartTheme, animate: boolean): EChartsCoreOption {
-  const top = data.stages[0]?.reached ?? 0;
-  const prevByName = new Map<string, { name: string; reached: number }>();
-  data.stages.forEach((stage, i) => {
-    if (i > 0) prevByName.set(stage.name, data.stages[i - 1]);
-  });
-
   return {
     animation: animate,
     animationDuration: 700,
@@ -49,16 +51,9 @@ function buildOption(data: FunnelData, theme: ChartTheme, animate: boolean): ECh
       formatter: (params: unknown) => {
         const item = params as { name?: string; value?: number };
         const value = item.value ?? 0;
-        const share = top > 0 ? Math.round((value / top) * 100) : 0;
-        const prev = item.name ? prevByName.get(item.name) : undefined;
-        const step =
-          prev && prev.reached > 0
-            ? `<div style="margin-top:2px;opacity:.7">из «${prev.name}» — ${Math.round(
-                (value / prev.reached) * 100,
-              )}%</div>`
-            : '';
+        const word = value === 1 ? 'сделка' : value >= 2 && value <= 4 ? 'сделки' : 'сделок';
         return `<div style="font-weight:600">${item.name ?? ''}</div>
-                <div style="margin-top:4px;font-variant-numeric:tabular-nums">${value} · ${share}% от вошедших</div>${step}`;
+                <div style="margin-top:4px;font-variant-numeric:tabular-nums">${value} ${word} вошло за период</div>`;
       },
     },
     series: [
@@ -81,9 +76,7 @@ function buildOption(data: FunnelData, theme: ChartTheme, animate: boolean): ECh
           fontFamily: CHART_FONT,
           formatter: (params: unknown) => {
             const item = params as { name?: string; value?: number };
-            const value = item.value ?? 0;
-            const share = top > 0 ? Math.round((value / top) * 100) : 0;
-            return `${item.name ?? ''} — ${value} · ${share}%`;
+            return `${item.name ?? ''} — ${item.value ?? 0}`;
           },
         },
         labelLine: { show: false },
@@ -157,12 +150,13 @@ export default function RenewalsFunnel({ filters }: { filters: FiltersState }) {
     <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
       <div ref={rootRef} className="glass-tile p-3">
         <h3 className="text-sm font-semibold text-zinc-900">Воронка вторичных продаж за период</h3>
-        {/* Отбор когортный, и это обязано быть написано на экране: иначе
-            «проект в работе, а в воронке его нет» читается как потеря данных,
-            хотя он просто заведён раньше окна. */}
+        {/* Правило отбора обязано быть написано на экране: без него цифры
+            воронки и плиток выше читаются как расхождение, хотя это разные
+            вопросы — «что сдвинулось за месяц» и «за что заплатили». */}
         <p className="mb-2 text-[11px] text-zinc-400">
-          Сделки, заведённые в выбранном периоде, — и докуда каждая дошла. Проекты, заведённые раньше,
-          в эту воронку не входят, даже если сейчас движутся.
+          Сколько сделок вошло на каждый этап внутри периода — независимо от того, когда карточку
+          завели. Одна сделка может попасть сразу на несколько этапов: за месяц она могла и обсуждаться,
+          и продлиться.
         </p>
 
         {loading ? <div className="px-3 py-10 text-center text-sm text-zinc-400">Загружаю…</div> : null}
@@ -175,8 +169,8 @@ export default function RenewalsFunnel({ filters }: { filters: FiltersState }) {
 
         {!loading && !error && data && data.totalDeals === 0 ? (
           <p className="px-3 py-8 text-center text-sm text-zinc-400">
-            За выбранный период сделок в этой воронке нет. Проекты попадают в неё автоматически, когда сделка
-            закрывается успешно в основной воронке, — попробуйте расширить период.
+            За выбранный период в этой воронке ничего не двигалось. Проекты попадают в неё автоматически,
+            когда сделка закрывается успешно в основной воронке, — попробуйте расширить период.
           </p>
         ) : null}
 
@@ -190,7 +184,8 @@ export default function RenewalsFunnel({ filters }: { filters: FiltersState }) {
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-zinc-100 pt-2 text-[11px] text-zinc-500">
             {/* Исходы вне воронки: проект попадает туда вместо продления, и
                 ступенью это быть не может — иначе отвалившиеся посчитались бы
-                продлёнными просто потому, что их этап ниже по порядку. */}
+                продлёнными просто потому, что их этап ниже по порядку. Считаем
+                тем же правилом, что ступени: сколько ушло в исход за период. */}
             <span className="text-zinc-400">Вне пути:</span>
             {outcomes.map((outcome) => (
               <span key={outcome.statusId}>

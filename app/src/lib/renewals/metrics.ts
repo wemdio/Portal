@@ -35,6 +35,8 @@ export type RenewalProjectRow = {
   kpi_fact: string | null;
   status: string | null;
   manager: string | null;
+  /** «Ответственный лид» из карточки AMO — кто ведёт клиента, не кто двигает сделку. */
+  owner_lead: string | null;
   specialist: string | null;
 };
 

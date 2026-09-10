@@ -5,7 +5,8 @@ import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
 import { bucketRange } from '@/lib/firstSales/buckets';
 import type { FirstSalesSeries } from '@/lib/firstSales/metrics';
-import FiltersBar, { getDefaultFilters, type FiltersState } from '@/components/first-sales/FiltersBar';
+import FiltersBar, { clampSharedPeriod, getDefaultFilters, type FiltersState } from '@/components/first-sales/FiltersBar';
+import { readSharedPeriod, writeSharedPeriod } from '@/lib/firstSales/sharedPeriod';
 import KpiRow from '@/components/first-sales/KpiRow';
 import TimeSeriesChart from '@/components/first-sales/TimeSeriesChart';
 import FunnelChart from '@/components/first-sales/FunnelChart';
@@ -33,6 +34,15 @@ function formatDay(key: string): string {
 
 export default function FirstSalesView() {
   const [filters, setFilters] = useState<FiltersState>(() => getDefaultFilters());
+  /**
+   * Период переносится между дашбордами первички и продлений (localStorage,
+   * см. sharedPeriod.ts). Читается в эффекте, а не в инициализаторе useState:
+   * страница рендерится и на сервере, где localStorage нет, и разные значения
+   * на сервере и в браузере дали бы ошибку гидрации. Пока период не восстановлен,
+   * запрос сводки не уходит — иначе на каждое открытие экрана летели бы два
+   * запроса подряд, за дефолтные 30 дней и за сохранённый период.
+   */
+  const [periodRestored, setPeriodRestored] = useState(false);
   const [data, setData] = useState<SummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -77,6 +87,21 @@ export default function FirstSalesView() {
   // успел зарезолвиться до того, как abort долетел — тот же идиом, что в
   // analytics/mailbox-load/page.tsx.
   useEffect(() => {
+    const stored = readSharedPeriod();
+    if (stored) {
+      const { from, to } = clampSharedPeriod(stored);
+      setFilters((f) => (f.from === from && f.to === to ? f : { ...f, from, to }));
+    }
+    setPeriodRestored(true);
+  }, []);
+
+  useEffect(() => {
+    if (!periodRestored) return;
+    writeSharedPeriod({ from: filters.from, to: filters.to });
+  }, [periodRestored, filters.from, filters.to]);
+
+  useEffect(() => {
+    if (!periodRestored) return;
     const controller = new AbortController();
     let active = true;
 
@@ -112,7 +137,7 @@ export default function FirstSalesView() {
       active = false;
       controller.abort();
     };
-  }, [filters, reloadKey]);
+  }, [filters, reloadKey, periodRestored]);
 
   // Отдельный лёгкий фетч только под счётчик на кнопке — не завязан на
   // showMeetingLinks: число должно быть видно ДО того, как панель открыта

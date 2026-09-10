@@ -78,6 +78,15 @@ export async function POST(req: NextRequest) {
       // подключения, а прокси подбирать нужно уже сейчас. См. миграцию
       // 20260908_0003.
       const declaredCountry = String(formData.get('country') ?? '').trim().toUpperCase().slice(0, 2);
+      /**
+       * Цена одного аккаунта партии, рублями. Пустое поле — цена не указана
+       * (null), а не ноль: «не знаем, сколько стоил» и «достался бесплатно» —
+       * разные вещи, и в сумме партии их путать нельзя.
+       */
+      const rawPrice = String(formData.get('price') ?? '').trim().replace(',', '.');
+      const parsedPrice = rawPrice === '' ? null : Number(rawPrice);
+      const declaredPrice =
+        parsedPrice !== null && Number.isFinite(parsedPrice) && parsedPrice >= 0 ? parsedPrice : null;
       if (!files?.length) return jsonError('Добавьте файлы (JSON и/или .session)', 400);
 
       const zipFiles = files.filter((f) => f.name.toLowerCase().endsWith('.zip'));
@@ -206,6 +215,7 @@ export async function POST(req: NextRequest) {
              * пройденная отлёжка.
              */
             is_active: false,
+            price: declaredPrice,
           }));
         }
       }
@@ -224,6 +234,7 @@ export async function POST(req: NextRequest) {
           session_data: '',
           // Выключен до настройки — см. пояснение выше.
           is_active: false,
+          price: declaredPrice,
           ...(declaredCountry ? { country_code: declaredCountry } : {}),
         })),
         ...tdataRows,
