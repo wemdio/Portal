@@ -27,7 +27,7 @@ import { validateLeadEmails } from '@/lib/bugorOutreach/validateEmails';
 import { runLeadImportJob } from '@/lib/cisLeads/leadImportWorker';
 import { runPhoneEnrichmentBatch } from '@/lib/cisLeads/phoneEnrichmentWorker';
 import { runContactAggregationBatch } from '@/lib/cisLeads/contactAggregationWorker';
-import { pollAndQualifyReplies } from '@/lib/instantly/leadQualificationWorker';
+import { pollDurableQualificationReplies } from '@/lib/instantly/leadQualificationWorker';
 import { syncInstantlyCampaignAnalytics } from '@/lib/tools/instantlyCampaignCatalog';
 import { syncClientLeads } from '@/lib/instantly/clientLeadsSync';
 import { runCampaignTick } from '@/lib/liOutreach/campaignRunner';
@@ -557,7 +557,7 @@ async function pollOnce(): Promise<boolean> {
 
   // Instantly lead qualification: poll Instantly API for new reply emails and qualify via AI
   try {
-    const qualCount = await pollAndQualifyReplies();
+    const qualCount = await pollDurableQualificationReplies();
     if (qualCount > 0) {
       log('info', `Instantly lead qualification processed ${qualCount} reply(s)`);
       return true;
