@@ -59,6 +59,11 @@ export async function POST(req: NextRequest) {
           api_hash: apiHash,
           phone: (body.phone as string) ?? '',
           proxy_id: (body.proxy_id as string) || null,
+          // Цена: пусто — null, а не ноль (см. миграцию 20260910_0001).
+          price:
+            body.price === undefined || body.price === null || body.price === ''
+              ? null
+              : Number(body.price),
           session_data: (body.session_data as string) ?? '',
           is_active: body.is_active !== false,
         })

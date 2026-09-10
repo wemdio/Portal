@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 
+import DailyLedger from '@/components/expenses/DailyLedger';
 import IncomeFilters, {
   getDefaultIncomeFilters,
   type IncomeFiltersValue,
@@ -127,6 +128,10 @@ export default function IncomesView({
           <IncomeTimeChart series={summary.series} groupBy={period.groupBy} />
 
           <PayerBreakdown items={payers} query={query} />
+
+          {/* Разбивка по плательщикам — «от кого за период», список по дням —
+              «что именно пришло в этот день». */}
+          <DailyLedger kind="incomes" query={query} />
         </>
       ) : null}
     </div>

@@ -17,7 +17,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { chunkArray, IN_CHUNK_SIZE } from '@/lib/cisLeads/batchedQuery';
 import { bucketKey, buildBuckets, type GroupBy } from '@/lib/firstSales/buckets';
-import { MEETINGS_RELIABLE_SINCE, type MeetingLinkRow } from '@/lib/firstSales/meetings';
+import { MEETINGS_RELIABLE_SINCE } from '@/lib/firstSales/meetings';
 import {
   attributablePayment,
   dealInn,
@@ -106,10 +106,11 @@ export type FirstSalesTotals = {
   cycleAvgDays: number | null;
   cycleMedianDays: number | null;
   /**
-   * false — окно целиком раньше даты, с которой подписи к записям в чате
-   * встреч стали регулярными (`MEETINGS_RELIABLE_SINCE`). Тогда `meetings`
-   * заведомо занижен не потому, что встреч не было, а потому что автоматчер
-   * не может привязать запись без подписи. UI обязан показать прочерк.
+   * false — окно целиком раньше `MEETINGS_RELIABLE_SINCE` (1 мая 2026), с
+   * которой метрике встреч можно верить. До неё этап AMO двигали и без
+   * разговора: май дал 152 сделки на этапе при 20 с записью разговора, июнь —
+   * 207 при 60. Цифра за такой период не занижена, а раздута втрое, и UI
+   * обязан показать прочерк вместо неё.
    */
   meetingsReliable: boolean;
   /** Дата вступления правила в силу — чтобы UI мог назвать её пользователю. */
@@ -196,6 +197,10 @@ export const CONTRACT_RULE_SINCE = new Date(
  * Продажи такой оговорки не требуют: они считаются по дате закрытия сделки,
  * а она синкается с 2024 года и достоверна на всю историю — в отличие от
  * этапа «Согласование договора», ради которого эта оговорка и заводилась.
+ *
+ * Для встреч оговорка осталась и после возврата метрики на этап AMO
+ * (10.09.2026), только причина сменилась: раньше проблемой была привязка
+ * записей разговоров, теперь — дисциплина в самом AMO до мая 2026.
  */
 export function stageAvailability(to: Date): { meetingsReliable: boolean } {
   return {
@@ -242,62 +247,50 @@ export function isContractInWindow(lead: FirstSalesLeadRow, from: Date, to: Date
 }
 
 /**
- * Привязки записей разговоров, которые реально идут в метрику «Встречи»:
- * внутри окна, не раньше MEETINGS_RELIABLE_SINCE и по одной на пару
- * (сделка, день по МСК) — одна встреча часто разрезана на несколько файлов.
+ * Встреча сделки внутри окна — по этапу AMO «Встреча проведена».
  *
- * Вынесено из основного цикла, чтобы список сделок под строкой считал встречи
- * теми же правилами, что и сама строка, а не «примерно так же».
+ * Источник метрики вернулся с записей разговоров на этап 10.09.2026 (решение
+ * продаж). Записи остаются привязанными к сделкам (`meeting_deal_links`), но
+ * нужны они теперь ИИ-аналитике продаж — связать разговор с сделкой, — а не
+ * дашборду.
+ *
+ * Считается по `first_meeting_at`, то есть один раз на сделку: два разговора
+ * с одним клиентом в разные дни дают одну встречу, а не две.
  */
-export function countedMeetingLinks(
-  links: MeetingLinkRow[],
-  from: Date,
-  to: Date,
-): MeetingLinkRow[] {
-  const seen = new Set<string>();
-  const out: MeetingLinkRow[] = [];
-  for (const link of links) {
-    const meetingDate = new Date(link.meeting_at);
-    if (!Number.isFinite(meetingDate.getTime())) continue;
-    if (!inWindow(link.meeting_at, from, to)) continue;
-    if (meetingDate.getTime() < MEETINGS_RELIABLE_SINCE.getTime()) continue;
-    const dayKey = `${link.amo_deal_id}|${bucketKey(meetingDate, 'day')}`;
-    if (seen.has(dayKey)) continue;
-    seen.add(dayKey);
-    out.push(link);
-  }
-  return out;
+export function isMeetingInWindow(lead: FirstSalesLeadRow, from: Date, to: Date): boolean {
+  return inWindow(lead.first_meeting_at, from, to);
 }
 
-/** Сделка → сколько её встреч попало в период. */
+/** Сделка → 1, если её этап «Встреча проведена» попал в период. */
 export function meetingsByDeal(
-  links: MeetingLinkRow[],
+  leads: FirstSalesLeadRow[],
   from: Date,
   to: Date,
 ): Map<number, number> {
   const byDeal = new Map<number, number>();
-  for (const link of countedMeetingLinks(links, from, to)) {
-    byDeal.set(link.amo_deal_id, (byDeal.get(link.amo_deal_id) ?? 0) + 1);
+  for (const lead of leads) {
+    if (isMeetingInWindow(lead, from, to)) byDeal.set(lead.amo_id, 1);
   }
   return byDeal;
 }
 
 /**
- * Сделка → дата последней её встречи, попавшей в период.
+ * Сделка → дата её встречи внутри периода.
  *
  * Нужна списку рядом с воронкой: строка обязана показывать дату события,
  * которым сделка попала в период, а не дату своего создания. Сделка 2024 года
  * со встречей в августе 2026 иначе выглядит как «список не слушается фильтра».
  */
-export function lastMeetingByDeal(
-  links: MeetingLinkRow[],
+export function meetingAtByDeal(
+  leads: FirstSalesLeadRow[],
   from: Date,
   to: Date,
 ): Map<number, string> {
   const byDeal = new Map<number, string>();
-  for (const link of countedMeetingLinks(links, from, to)) {
-    const prev = byDeal.get(link.amo_deal_id);
-    if (prev === undefined || link.meeting_at > prev) byDeal.set(link.amo_deal_id, link.meeting_at);
+  for (const lead of leads) {
+    if (isMeetingInWindow(lead, from, to) && lead.first_meeting_at) {
+      byDeal.set(lead.amo_id, lead.first_meeting_at);
+    }
   }
   return byDeal;
 }
@@ -311,7 +304,6 @@ function median(values: number[]): number | null {
 
 export function computeFirstSalesSeries(
   leads: FirstSalesLeadRow[],
-  meetingLinks: MeetingLinkRow[],
   from: Date,
   to: Date,
   groupBy: GroupBy,
@@ -491,44 +483,29 @@ export function computeFirstSalesSeries(
     totals.cycleMedianDays = median(cycles);
   }
 
-  // ─── Встречи — по привязкам записей разговоров ──────────────────────────
+  // ─── Встречи — по этапу AMO «Встреча проведена» ─────────────────────────
   //
-  // Встреча = уникальная пара (сделка, дата записи по МСК), а не запись.
-  // Одна встреча часто разрезана на несколько файлов: в боевых данных
-  // `denvic.tech` встречается дважды за один день файлами `1.mp4` и `2.mp4` —
-  // это одна встреча, а не две. Дедуп — по дню в МСК (bucketKey с groupBy
-  // 'day' независимо от groupBy самого графика): при groupBy='month' два
-  // разных июльских дня одной сделки — всё ещё две встречи, просто обе
-  // попадают в одну месячную корзину графика.
-  for (const link of countedMeetingLinks(meetingLinks, from, to)) {
-    const meetingDate = new Date(link.meeting_at);
-    // (Окно, порог MEETINGS_RELIABLE_SINCE и дедуп «одна сделка — один день»
-    // применены в countedMeetingLinks: те же правила нужны и списку сделок
-    // под строкой разбивки, а два экземпляра одного правила рано или поздно
-    // разъезжаются.)
-    //
-    // Подписи к записям стали регулярными только с MEETINGS_RELIABLE_SINCE —
-    // раньше запись без подписи автоматчер привязать не мог, и привязок за
-    // март/апрель кратно меньше июньских/июльских. Считать эти месяцы нулём
-    // было бы неверно (см. totals.meetingsReliable), но досчитать их тоже
-    // нечем — единственное честное действие для отдельных ранних записей,
-    // которые всё же как-то привязались, — не звать их системным сигналом.
-    // Не отбрасывать раннюю запись означало бы дать частичную, непроверяемую
-    // цифру за месяц, который дальше в UI помечен прочерком.
-    // Сделка, на которую сослалась привязка, но которой нет в `leads`, —
-    // защитный случай (см. `fetchFirstSalesLeads`, параметр `extraDealIds`:
-    // в проде такая сделка должна была подтянуться именно через него). Если
-    // всё же не подтянулась — не роняем расчёт, относим встречу к «без
-    // источника» вместо того, чтобы потерять её вовсе.
-    const resolved = dealSourceMap.get(link.amo_deal_id);
+  // Источник вернулся с записей разговоров на этап AMO 10.09.2026 — решение
+  // продаж. Причина, по которой этап когда-то забраковали (сделку двигают по
+  // нему и без разговора), к августу 2026 ушла: 83 сделки по этапу против 83
+  // сделок с записью разговора, у 73 из них есть и то, и другое. Записи
+  // продолжают привязываться к сделкам (`meeting_deal_links`), но нужны они
+  // теперь ИИ-аналитике продаж, а не этой метрике.
+  //
+  // Встреча считается один раз на сделку: у `first_meeting_at` дата одна,
+  // поэтому два разговора с одним клиентом в разные дни дают одну встречу.
+  for (const lead of leads) {
+    if (!isMeetingInWindow(lead, from, to)) continue;
+
+    const resolved = dealSourceMap.get(lead.amo_id);
     const key = resolved?.key ?? NO_SOURCE_KEY;
     if (allowed && !allowed.has(key)) continue;
 
     totals.meetings += 1;
-    bump(bucketKey(meetingDate, groupBy), 'meetings');
+    bump(bucketKey(new Date(lead.first_meeting_at as string), groupBy), 'meetings');
 
     sourceRow(key, resolved?.label ?? NO_SOURCE_LABEL).meetings += 1;
-    managerRow(dealManagerMap.get(link.amo_deal_id) ?? null).meetings += 1;
+    managerRow(dealManagerMap.get(lead.amo_id) ?? null).meetings += 1;
   }
 
   // ─── Деньги — по банковским приходам, связанным по ИНН ───────────────────

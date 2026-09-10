@@ -9,11 +9,10 @@ import {
   isLeadInWindow,
   isQualifiedInWindow,
   isSaleInWindow,
-  lastMeetingByDeal,
+  meetingAtByDeal,
   meetingsByDeal,
   stageAvailability,
 } from '@/lib/firstSales/metrics';
-import { fetchMeetingLinks } from '@/lib/firstSales/meetings';
 import { fetchFirstSalesPayments, moneyByDeal } from '@/lib/firstSales/money';
 import { resolveSource } from '@/lib/firstSales/sources';
 
@@ -50,23 +49,17 @@ export async function GET(req: NextRequest) {
     // Та же ширина выборки, что в summary/route.ts: сделка может лежать вне
     // окна по created_at/этапам, а встреча или оплата по ней — случиться
     // внутри окна.
-    const [meetingLinks, payments] = await Promise.all([
-      fetchMeetingLinks(gate.supabaseAdmin, PIPELINE_ID, from, to),
-      fetchFirstSalesPayments(gate.supabaseAdmin, PIPELINE_ID, from, to),
-    ]);
+    const payments = await fetchFirstSalesPayments(gate.supabaseAdmin, PIPELINE_ID, from, to);
     const extraDealIds = [
-      ...new Set([
-        ...meetingLinks.map((m) => m.amo_deal_id),
-        ...payments.map((p) => p.amo_deal_id).filter((id): id is number => id != null),
-      ]),
+      ...new Set(payments.map((p) => p.amo_deal_id).filter((id): id is number => id != null)),
     ];
 
     const leads = await fetchFirstSalesLeads(
       gate.supabaseAdmin, PIPELINE_ID, from, to, extraDealIds,
     );
 
-    const meetings = meetingsByDeal(meetingLinks, from, to);
-    const meetingAt = lastMeetingByDeal(meetingLinks, from, to);
+    const meetings = meetingsByDeal(leads, from, to);
+    const meetingAt = meetingAtByDeal(leads, from, to);
     const money = moneyByDeal(payments, from, to);
 
     // Достоверность ступеней берём той же функцией, что и сводка: правило

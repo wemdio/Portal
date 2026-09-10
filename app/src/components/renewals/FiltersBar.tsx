@@ -37,6 +37,33 @@ function toDateInputValue(mskShifted: Date): string {
 }
 
 /**
+ * Сегодня по МСК — верхняя граница обоих полей даты.
+ *
+ * Значение считается на каждый рендер, а не один раз при загрузке модуля:
+ * дашборд держат открытым сутками, и вкладка, открытая вчера, иначе не
+ * пускала бы выбрать сегодняшний день.
+ */
+function todayMskIso(): string {
+  return toDateInputValue(mskNow());
+}
+
+/** Отрезает будущее: ручной ввод в поле даты `max` не перехватывает. */
+function clampToToday(value: string): string {
+  const today = todayMskIso();
+  return value > today ? today : value;
+}
+
+/**
+ * Приводит период, принесённый с дашборда первички, к границам продлений:
+ * не раньше начала истории и не позже сегодняшнего дня по МСК.
+ */
+export function clampSharedPeriod(period: { from: string; to: string }): { from: string; to: string } {
+  const from = clampToToday(period.from < ALL_TIME_FROM ? ALL_TIME_FROM : period.from);
+  const to = clampToToday(period.to);
+  return from > to ? { from: to, to } : { from, to };
+}
+
+/**
  * Начало «всей истории» продлений: раньше самого раннего продления, которое
  * есть в базе на момент написания (2025-07-25, см. план дашборда). Диапазон
  * дат на этой странице управляет только KPI-плитками и графиком — таблица
@@ -143,12 +170,17 @@ export default function FiltersBar({
         >
           Всё время
         </button>
+        {/* Будущие даты недоступны: за них данных нет по определению, а
+            выбранный «конец периода» в следующем месяце молча растягивал окно
+            и делал дневные графики хвостом из нулей. max закрывает выбор в
+            календаре, clampToToday — ручной ввод с клавиатуры, который max не
+            перехватывает. */}
         <div className="flex items-center gap-1.5">
           <input
             type="date"
             value={value.from}
-            max={value.to}
-            onChange={(e) => onChange({ ...value, from: e.target.value })}
+            max={value.to < today ? value.to : today}
+            onChange={(e) => onChange({ ...value, from: clampToToday(e.target.value) })}
             className="rounded-lg border border-zinc-200 px-2 py-1 text-xs text-zinc-700"
           />
           <span className="text-xs text-zinc-400">—</span>
@@ -156,7 +188,8 @@ export default function FiltersBar({
             type="date"
             value={value.to}
             min={value.from}
-            onChange={(e) => onChange({ ...value, to: e.target.value })}
+            max={today}
+            onChange={(e) => onChange({ ...value, to: clampToToday(e.target.value) })}
             className="rounded-lg border border-zinc-200 px-2 py-1 text-xs text-zinc-700"
           />
         </div>

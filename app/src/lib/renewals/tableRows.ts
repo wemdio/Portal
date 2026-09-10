@@ -24,6 +24,8 @@ export type RenewalTableRow = {
   kpiFactRaw: string | null;
   status: string | null;
   manager: string | null;
+  /** «Ответственный лид» из карточки AMO. Разбивка по лидам считается по нему. */
+  ownerLead: string | null;
 };
 
 // --- Разбор значений ---------------------------------------------------
@@ -106,6 +108,7 @@ function toTableRow(row: RenewalProjectRow, paymentDate: string | null, todayKey
     kpiFactRaw: row.kpi_fact,
     status: row.status,
     manager: row.manager,
+    ownerLead: row.owner_lead,
   };
 }
 

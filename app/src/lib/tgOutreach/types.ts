@@ -335,6 +335,13 @@ export interface OutreachAccount {
   session_file_path?: string | null;
   is_active: boolean;
   cooldown_until: string | null;
+  /**
+   * Цена аккаунта в рублях (миграция 20260910_0001).
+   *
+   * null — цена не указана, а не «достался бесплатно»: суммы партии считаются
+   * только по заполненным, иначе стоимость закупки занижалась бы молча.
+   */
+  price?: number | null;
   /** Consecutive AUTH_KEY_DUPLICATED errors during connect. See migration
    *  20260521_0002. Reset on successful connect; auto-disable at 3. */
   auth_key_dup_count?: number;

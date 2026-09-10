@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import * as XLSX from 'xlsx';
 
 import { requireExpensesAccess } from '@/lib/expenses/access';
+import { groupByDay } from '@/lib/expenses/byDay';
 import { fetchExpenseRows } from '@/lib/expenses/rows';
 import { parseExpensesQuery, type ExpensesQuery } from '@/lib/expenses/request';
 import { CATEGORY_LABELS } from '@/lib/expenses/types';
@@ -52,8 +53,23 @@ export async function GET(req: NextRequest) {
     })),
   );
 
+  // Второй лист — то же, что раскрывающийся список на экране: день, число
+  // операций и итог. Нужен для сверки «сколько всего ушло 19 августа» без
+  // сводных таблиц; операции целиком лежат на первом листе.
+  const daysSheet = XLSX.utils.json_to_sheet(
+    groupByDay(rows).map((d) => ({
+      День: d.date,
+      Операций: d.count,
+      'Сумма, ₽': d.total,
+      // Валютные строки без курса ЦБ в итог дня не вошли — столбец говорит,
+      // сколько их, чтобы расхождение с выпиской не выглядело ошибкой.
+      'Без курса': d.withoutRate || '',
+    })),
+  );
+
   const book = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(book, sheet, 'Расходы');
+  XLSX.utils.book_append_sheet(book, daysSheet, 'По дням');
   const buffer = XLSX.write(book, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
 
   return new NextResponse(new Uint8Array(buffer), {

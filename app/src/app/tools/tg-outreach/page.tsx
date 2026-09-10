@@ -112,6 +112,27 @@ function formatDate(iso: string) {
 }
 
 /**
+ * Дата и время отдельной реплики в переписке.
+ *
+ * Хранится не у всех сообщений: у диалогов, заведённых до появления поля,
+ * времени нет — в этом случае подписи просто не будет, вместо неё не рисуем
+ * заглушку вроде «—», чтобы не выдавать пустоту за данные.
+ */
+function messageDayLabel(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+function messageTimeLabel(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+}
+
+/**
  * Маппинг короткого кода `can_send_changed_reason` в человекочитаемую
  * подпись для UI. Коды одобрены схемой (см. migration / blockedUsers /
  * disableDialogIfUnreachable); если приходит неизвестный код — отдаём
@@ -1810,9 +1831,32 @@ function DialogsTab({ campaignId }: {
                         const senderName = m.role === 'user'
                           ? (d.tg_username ? `@${d.tg_username}` : `ID ${d.tg_user_id}`)
                           : accountLabelMap.get(d.account_id) ?? 'Наш аккаунт';
+                        // Разделитель дня рисуем только там, где дата сменилась:
+                        // в переписке на десяток сообщений за одни сутки полная
+                        // дата у каждой реплики только мешает читать. Время же
+                        // показываем всегда — по нему видно паузы между ответами.
+                        const dayLabel = messageDayLabel(m.timestamp);
+                        const prevDayLabel = i > 0 ? messageDayLabel(d.messages[i - 1]?.timestamp) : null;
                         return (
-                          <div key={i} className={`rounded-lg px-3 py-2 text-xs ${m.role === 'user' ? 'bg-blue-50 text-gray-800' : 'bg-emerald-50 text-gray-800'}`}>
-                            <span className="font-semibold">{senderName}:</span> {m.content}
+                          <div key={i}>
+                            {dayLabel && dayLabel !== prevDayLabel && (
+                              <div className="my-1.5 flex items-center gap-2">
+                                <span className="h-px flex-1 bg-gray-200" />
+                                <span className="text-[10px] font-medium text-gray-400">{dayLabel}</span>
+                                <span className="h-px flex-1 bg-gray-200" />
+                              </div>
+                            )}
+                            <div className={`rounded-lg px-3 py-2 text-xs ${m.role === 'user' ? 'bg-blue-50 text-gray-800' : 'bg-emerald-50 text-gray-800'}`}>
+                              <div className="mb-0.5 flex items-baseline gap-2">
+                                <span className="font-semibold">{senderName}</span>
+                                {m.timestamp && (
+                                  <span className="ml-auto shrink-0 text-[10px] text-gray-400" title={formatDate(m.timestamp)}>
+                                    {messageTimeLabel(m.timestamp)}
+                                  </span>
+                                )}
+                              </div>
+                              {m.content}
+                            </div>
                           </div>
                         );
                       })}
@@ -2241,6 +2285,22 @@ function CampaignAccountsTab({
   const [uploadSummary, setUploadSummary] = useState<AccountsUploadSummary | null>(null);
   /** Страна партии со слов оператора — см. выпадающий список у кнопки загрузки. */
   const [uploadCountry, setUploadCountry] = useState('');
+  /**
+   * Цена одного аккаунта загружаемой партии, рублями.
+   *
+   * Партию покупают одним чеком и по одной цене за штуку, поэтому поле стоит
+   * рядом с кнопкой загрузки: проставить цену потом, по одной строке на
+   * полсотни аккаунтов, оператор не станет. Пусто — цена не указана.
+   */
+  const [uploadPrice, setUploadPrice] = useState('');
+  /** Цена для аккаунта, добавляемого вручную. */
+  const [newPrice, setNewPrice] = useState('');
+  /** Цена, которую проставляем выбранным строкам разом. */
+  const [bulkPrice, setBulkPrice] = useState('');
+  const [bulkPriceSaving, setBulkPriceSaving] = useState(false);
+  /** Аккаунт, у которого сейчас правят цену прямо в строке. */
+  const [editingPriceFor, setEditingPriceFor] = useState<string | null>(null);
+  const [priceDraft, setPriceDraft] = useState('');
   const [sessionName, setSessionName] = useState('');
   const [apiId, setApiId] = useState('');
   const [apiHash, setApiHash] = useState('');
@@ -2361,6 +2421,47 @@ function CampaignAccountsTab({
 
   useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
 
+  /**
+   * Цена одной строки. Пустое поле стирает цену (null), а не ставит ноль:
+   * ноль означает «достался бесплатно» и попадает в сумму партии.
+   */
+  const savePrice = async (id: string, raw: string) => {
+    const trimmed = raw.trim().replace(',', '.');
+    const value = trimmed === '' ? null : Number(trimmed);
+    if (value !== null && (!Number.isFinite(value) || value < 0)) return;
+    setEditingPriceFor(null);
+    await authFetch(`${API_BASE}/accounts/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ price: value }),
+    });
+    void load();
+  };
+
+  const applyBulkPrice = async () => {
+    if (selectedIds.length === 0) return;
+    const trimmed = bulkPrice.trim().replace(',', '.');
+    const value = trimmed === '' ? null : Number(trimmed);
+    if (value !== null && (!Number.isFinite(value) || value < 0)) return;
+    setBulkPriceSaving(true);
+    await authFetch(`${API_BASE}/accounts/bulk-price`, {
+      method: 'POST',
+      body: JSON.stringify({ ids: selectedIds, price: value }),
+    });
+    setBulkPriceSaving(false);
+    setBulkPrice('');
+    void load();
+  };
+
+  /**
+   * Деньги партии. Считаем только по аккаунтам с проставленной ценой: строка
+   * без цены — «неизвестно», а не ноль, и подмешивать её в сумму нельзя.
+   */
+  const accountsPriceTotal = accounts.reduce(
+    (sum, a) => sum + (a.price === null || a.price === undefined ? 0 : Number(a.price)),
+    0,
+  );
+  const accountsWithoutPrice = accounts.filter((a) => a.price === null || a.price === undefined).length;
+
   const addAccount = async () => {
     if (!sessionName.trim() || !apiId.trim() || !apiHash.trim()) return;
     setSaving(true);
@@ -2373,10 +2474,11 @@ function CampaignAccountsTab({
         api_hash: apiHash.trim(),
         phone: phone.trim(),
         proxy_id: proxyId || null,
+        price: newPrice.trim() === '' ? null : Number(newPrice.trim().replace(',', '.')),
       }),
     });
     setSaving(false);
-    setSessionName(''); setApiId(''); setApiHash(''); setPhone(''); setProxyId('');
+    setSessionName(''); setApiId(''); setApiHash(''); setPhone(''); setProxyId(''); setNewPrice('');
     setShowAdd(false);
     void load();
   };
@@ -2647,6 +2749,7 @@ function CampaignAccountsTab({
       const formData = new FormData();
       Array.from(files).forEach(f => formData.append('files', f));
       if (uploadCountry) formData.append('country', uploadCountry);
+      if (uploadPrice.trim()) formData.append('price', uploadPrice.trim());
       // fetch отклоняется, только когда ответа нет вовсе: обрыв связи,
       // соединение, разорванное на середине многомегабайтной партии. Это не то
       // же, что отказ сервера — там ответ есть, и он объясняет причину. Здесь
@@ -2898,6 +3001,22 @@ function CampaignAccountsTab({
               ))}
             </select>
           </label>
+          {/* Цена партии — здесь же, а не отдельным шагом: аккаунты покупают
+              одним чеком по одной цене за штуку, и это единственный момент,
+              когда оператор её помнит. Пусто — цена не указана. */}
+          <label className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600">
+            Цена за аккаунт, ₽
+            <input
+              type="number"
+              min={0}
+              step="1"
+              value={uploadPrice}
+              onChange={(e) => setUploadPrice(e.target.value)}
+              placeholder="—"
+              title="Сколько стоил один аккаунт партии. Проставится всем загруженным; потом можно поправить построчно."
+              className="w-20 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-xs text-gray-800 outline-none focus:border-indigo-400"
+            />
+          </label>
           <label
             title="tdata — zip-архивами (можно сразу несколько), старый формат — парами .session и .json"
             className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer"
@@ -2934,6 +3053,26 @@ function CampaignAccountsTab({
             title="За сутки в логах аккаунта были ошибки или предупреждения — обычно это временные ограничения Telegram (FLOOD_WAIT, PEER_FLOOD), разрыв соединения со второй попытки или отложенный контакт. Считается по факту работы за сутки, а не по статусу проверки."
           >
             ограничены {restrictedCount} из {accounts.length}
+          </span>
+
+          {/* Деньги партии: сумма считается только по строкам с проставленной
+              ценой, а число строк без цены названо рядом — иначе «потратили
+              12 000» читалось бы как полная стоимость, хотя половина цен просто
+              не заполнена. */}
+          <span
+            className="rounded-md bg-gray-50 px-2 py-1 font-medium text-gray-600"
+            title={
+              accountsWithoutPrice > 0
+                ? `Сумма по ${accounts.length - accountsWithoutPrice} аккаунтам с проставленной ценой. Ещё у ${accountsWithoutPrice} цена не указана — они в сумму не входят.`
+                : 'Сколько всего заплатили за аккаунты этой кампании.'
+            }
+          >
+            потрачено {Math.round(accountsPriceTotal).toLocaleString('ru-RU')} ₽
+            {accountsWithoutPrice > 0 && (
+              <span className="ml-1 font-normal text-gray-400">
+                · без цены {accountsWithoutPrice}
+              </span>
+            )}
           </span>
 
           <span
@@ -3039,6 +3178,11 @@ function CampaignAccountsTab({
               <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="+79001234567"
                 className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
             </label>
+            <label className="space-y-1">
+              <span className="text-[11px] font-medium text-gray-500">Цена, ₽</span>
+              <input type="number" min={0} step="1" value={newPrice} onChange={e => setNewPrice(e.target.value)} placeholder="—"
+                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
+            </label>
             {/* Не <label>: внутри теперь кнопка со своим списком, а клик по
                 подписи в этом случае никуда не ведёт. */}
             <div className="space-y-1">
@@ -3076,6 +3220,30 @@ function CampaignAccountsTab({
         checking={checkingIds.length > 0}
         canCheck
         onCheck={() => { void checkSelected(); }}
+        extra={
+          /* Проставить цену выбранным: партия могла приехать двумя чеками, и
+             тогда цена у половины строк своя. Пустое поле стирает цену. */
+          <span className="inline-flex items-center gap-1.5">
+            <input
+              type="number"
+              min={0}
+              step="1"
+              value={bulkPrice}
+              onChange={(e) => setBulkPrice(e.target.value)}
+              placeholder="цена, ₽"
+              className="w-24 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-700 outline-none focus:border-indigo-400"
+            />
+            <button
+              type="button"
+              onClick={() => { void applyBulkPrice(); }}
+              disabled={bulkPriceSaving}
+              title="Проставить эту цену всем выбранным аккаунтам. Пустое поле — стереть цену."
+              className="rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-indigo-300 hover:bg-indigo-50 disabled:opacity-50 cursor-pointer"
+            >
+              {bulkPriceSaving ? 'Сохраняю…' : 'Проставить цену'}
+            </button>
+          </span>
+        }
         checkTitle={profileReadable
           ? 'Зайти в каждый аккаунт и проверить, жив ли он и кто ещё в нём сидит'
           : 'Кампания работает: проверка встанет в очередь и выполнится рассылкой в ближайшем круге, обычно за несколько минут. Останавливать кампанию не нужно.'}
@@ -3144,7 +3312,7 @@ function CampaignAccountsTab({
         </div>
       ) : (
         <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
-          <div className="grid grid-cols-[32px_44px_minmax(0,1fr)_126px_120px_360px_138px_60px_64px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+          <div className="grid grid-cols-[32px_44px_minmax(0,1fr)_126px_120px_360px_138px_92px_60px_64px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
             <SelectAllCheckbox total={accounts.length} selectedCount={selectedIds.length} onChange={setAll} />
             <span />
             <span>Аккаунт</span>
@@ -3155,6 +3323,12 @@ function CampaignAccountsTab({
             <span>Прокси</span>
             <span title="Проходят ли через прокси круги рассылки. Если нет — сколько дней уже не проходят.">
               Здоровье прокси
+            </span>
+            {/* Цена нужна не бухгалтерии, а гипотезам: партии покупают у разных
+                поставщиков и по разной цене, а живут они по-разному. Сумма по
+                колонке считается только по заполненным ценам. */}
+            <span title="Сколько заплатили за аккаунт. Нажмите на значение в строке, чтобы поправить.">
+              Цена
             </span>
             <span>Активен</span><span />
           </div>
@@ -3179,7 +3353,7 @@ function CampaignAccountsTab({
             return (
               <div
                 key={a.id}
-                className={`grid grid-cols-[32px_44px_minmax(0,1fr)_126px_120px_360px_138px_60px_64px] gap-4 items-center px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
+                className={`grid grid-cols-[32px_44px_minmax(0,1fr)_126px_120px_360px_138px_92px_60px_64px] gap-4 items-center px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
               >
                 <input
                   type="checkbox"
@@ -3346,6 +3520,32 @@ function CampaignAccountsTab({
                     </span>
                   )}
                 </span>
+                {editingPriceFor === a.id ? (
+                  <input
+                    type="number"
+                    min={0}
+                    step="1"
+                    autoFocus
+                    value={priceDraft}
+                    onChange={(e) => setPriceDraft(e.target.value)}
+                    onBlur={() => { void savePrice(a.id, priceDraft); }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') { void savePrice(a.id, priceDraft); }
+                      if (e.key === 'Escape') setEditingPriceFor(null);
+                    }}
+                    aria-label={`Цена аккаунта ${a.session_name}`}
+                    className="w-full rounded-lg border border-indigo-300 bg-white px-2 py-1 text-xs text-gray-800 outline-none"
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => { setEditingPriceFor(a.id); setPriceDraft(a.price === null || a.price === undefined ? '' : String(a.price)); }}
+                    title={a.price === null || a.price === undefined ? 'Цена не указана — нажмите, чтобы вписать' : 'Нажмите, чтобы поправить цену'}
+                    className={`w-full rounded-lg px-2 py-1 text-left text-xs tabular-nums transition hover:bg-gray-100 cursor-pointer ${a.price === null || a.price === undefined ? 'text-gray-300' : 'text-gray-700'}`}
+                  >
+                    {a.price === null || a.price === undefined ? '—' : `${Math.round(Number(a.price)).toLocaleString('ru-RU')} ₽`}
+                  </button>
+                )}
                 {editingProxyFor === a.id ? (
                   /* Свой список вместо <select>: рядом с каждым адресом стоит
                      его состояние, иначе сорок одинаковых строк «тот же хост,

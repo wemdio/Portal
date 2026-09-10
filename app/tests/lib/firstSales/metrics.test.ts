@@ -7,7 +7,7 @@ import {
   meetingsByDeal,
   type FirstSalesLeadRow,
 } from '@/lib/firstSales/metrics';
-import { MEETINGS_RELIABLE_SINCE, type MeetingLinkRow } from '@/lib/firstSales/meetings';
+import { MEETINGS_RELIABLE_SINCE } from '@/lib/firstSales/meetings';
 import type { FirstSalesPaymentRow } from '@/lib/firstSales/money';
 
 function lead(over: Partial<FirstSalesLeadRow> = {}): FirstSalesLeadRow {
@@ -31,14 +31,6 @@ function lead(over: Partial<FirstSalesLeadRow> = {}): FirstSalesLeadRow {
   };
 }
 
-function meetingLink(over: Partial<MeetingLinkRow> = {}): MeetingLinkRow {
-  return {
-    amo_deal_id: 1,
-    meeting_at: '2026-07-10T09:00:00.000Z',
-    ...over,
-  };
-}
-
 const from = new Date('2026-07-01T00:00:00.000Z');
 // Конец июля по МСК, не по UTC: buildBuckets режет дни в МСК (см.
 // firstSales/buckets.ts), и 2026-07-31T23:59:59.999Z — это уже
@@ -50,7 +42,7 @@ describe('computeFirstSalesSeries', () => {
   it('считает лидов по дате создания', () => {
     const res = computeFirstSalesSeries(
       [lead({ amo_id: 1 }), lead({ amo_id: 2, created_at: '2026-07-16T09:00:00.000Z' })],
-      [], from, to, 'day', null,
+      from, to, 'day', null,
     );
     expect(res.totals.leads).toBe(2);
     expect(res.series.find((b) => b.key === '2026-07-15')?.leads).toBe(1);
@@ -61,24 +53,26 @@ describe('computeFirstSalesSeries', () => {
     // Отчёт продаж их выбрасывает; дашборд — нет, иначе прошлое едет.
     const res = computeFirstSalesSeries(
       [lead({ amo_id: 1, name: 'Бот: Иван' })],
-      [], from, to, 'day', null,
+      from, to, 'day', null,
     );
     expect(res.totals.leads).toBe(1);
     expect(res.totals.leadMagnets).toBe(1);
   });
 
-  it('сделка без закрытия не даёт продаж, но остаётся лидом; first_meeting_at (этап AMO) на встречи больше не влияет', () => {
+  it('сделка без закрытия не даёт продаж, но остаётся лидом и даёт встречу', () => {
     const res = computeFirstSalesSeries(
       [lead({
         history_complete: false,
         first_meeting_at: '2026-07-10T09:00:00.000Z',
         first_contract_at: '2026-07-12T09:00:00.000Z',
       })],
-      [], // без привязок — старый источник встреч (этап AMO) больше не используется
       from, to, 'day', null,
     );
     expect(res.totals.leads).toBe(1);
-    expect(res.totals.meetings).toBe(0);
+    // Встреча считается по этапу AMO (с 10.09.2026), неполная история ей не
+    // помеха: дата этапа либо есть, либо её нет — в отличие от квала, где
+    // пробел в истории означает «этап мог случиться до горизонта событий».
+    expect(res.totals.meetings).toBe(1);
     // Этап «Согласование договора» продажей больше не считается: продажа —
     // это закрытие сделки в плюс, а `won_at` здесь пуст.
     expect(res.totals.sales).toBe(0);
@@ -89,7 +83,7 @@ describe('computeFirstSalesSeries', () => {
     // продаж Егора этап «Согласование договора» не проходили вовсе.
     const res = computeFirstSalesSeries(
       [lead({ first_contract_at: null, won_at: '2026-07-20T09:00:00.000Z' })],
-      [], from, to, 'day', null,
+      from, to, 'day', null,
     );
     expect(res.totals.sales).toBe(1);
     expect(res.series.find((b) => b.key === '2026-07-20')?.sales).toBe(1);
@@ -104,7 +98,7 @@ describe('computeFirstSalesSeries', () => {
           raw: { custom_fields_values: [{ field_name: 'Источник', values: [{ value: 'Сайт' }] }] },
         }),                                                             // text:сайт
       ],
-      [], from, to, 'day', ['text:email outreach'],
+      from, to, 'day', ['text:email outreach'],
     );
     expect(res.totals.leads).toBe(1);
   });
@@ -116,7 +110,7 @@ describe('computeFirstSalesSeries', () => {
         lead({ amo_id: 2, created_at: '2026-07-01T00:00:00.000Z', won_at: '2026-07-21T00:00:00.000Z' }), // 20 дней
         lead({ amo_id: 3, created_at: '2026-01-01T00:00:00.000Z', won_at: '2026-07-31T00:00:00.000Z' }), // 211 дней
       ],
-      [], from, to, 'day', null,
+      from, to, 'day', null,
     );
     expect(res.totals.wonCount).toBe(3);
     expect(res.totals.cycleMedianDays).toBe(20);
@@ -124,14 +118,14 @@ describe('computeFirstSalesSeries', () => {
   });
 
   it('пустая выборка не даёт NaN', () => {
-    const res = computeFirstSalesSeries([], [], from, to, 'day', null);
+    const res = computeFirstSalesSeries([], from, to, 'day', null);
     expect(res.totals.leads).toBe(0);
     expect(res.totals.cycleAvgDays).toBeNull();
     expect(res.totals.cycleMedianDays).toBeNull();
   });
 
   it('пустые корзины присутствуют в ряду', () => {
-    const res = computeFirstSalesSeries([lead()], [], from, to, 'day', null);
+    const res = computeFirstSalesSeries([lead()], from, to, 'day', null);
     expect(res.series).toHaveLength(31);
     expect(res.series[0]).toEqual(
       expect.objectContaining({ key: '2026-07-01', leads: 0, meetings: 0 }),
@@ -147,7 +141,7 @@ describe('computeFirstSalesSeries', () => {
           raw: { custom_fields_values: [{ field_name: 'Источник', values: [{ value: 'Нейровыдача' }] }] },
         }),
       ],
-      [], from, to, 'day', null,
+      from, to, 'day', null,
     );
     const unknown = res.bySource.find((s) => s.source === 'Нейровыдача');
     expect(unknown?.leads).toBe(1);
@@ -170,7 +164,7 @@ describe('computeFirstSalesSeries', () => {
         withEnum('Партнер', { amo_id: 1, created_at: '2026-07-10T09:00:00.000Z' }),
         withEnum('Партнёрка', { amo_id: 2, created_at: '2026-07-20T09:00:00.000Z' }),
       ],
-      [], from, to, 'day', null,
+      from, to, 'day', null,
     );
 
     expect(res.bySource).toHaveLength(1);
@@ -182,7 +176,7 @@ describe('computeFirstSalesSeries', () => {
   it('сделка без источника попадает в отдельную строку и в noSourceLeads', () => {
     const res = computeFirstSalesSeries(
       [lead({ amo_id: 1, raw: { custom_fields_values: [] } })],
-      [], from, to, 'day', null,
+      from, to, 'day', null,
     );
     expect(res.totals.noSourceLeads).toBe(1);
     expect(res.bySource.find((s) => s.key === 'none')?.leads).toBe(1);
@@ -194,7 +188,7 @@ describe('computeFirstSalesSeries', () => {
         amo_id: 1,
         raw: { custom_fields_values: [{ field_name: 'Контур', values: [{ value: 'Маркетинг' }] }] },
       })],
-      [], from, to, 'day', null,
+      from, to, 'day', null,
     );
     expect(res.totals.noSourceLeads).toBe(1);
   });
@@ -211,7 +205,7 @@ describe('computeFirstSalesSeries', () => {
       });
 
     const res = computeFirstSalesSeries(
-      [withEnum(111, 1), withEnum(222, 2)], [], from, to, 'day', ['111'],
+      [withEnum(111, 1), withEnum(222, 2)], from, to, 'day', ['111'],
     );
     expect(res.totals.leads).toBe(1);
     expect(res.bySource).toHaveLength(1);
@@ -229,7 +223,7 @@ describe('computeFirstSalesSeries', () => {
       });
 
     const res = computeFirstSalesSeries(
-      [withEnum(111, 1), withEnum(222, 2)], [], from, to, 'day', ['111'],
+      [withEnum(111, 1), withEnum(222, 2)], from, to, 'day', ['111'],
     );
     expect(res.availableSources.map((s) => s.key).sort()).toEqual(['111', '222']);
   });
@@ -246,7 +240,7 @@ describe('computeFirstSalesSeries', () => {
       });
 
     const res = computeFirstSalesSeries(
-      [withEnum(111, 1), withEnum(222, 2), withEnum(222, 3)], [], from, to, 'day', null,
+      [withEnum(111, 1), withEnum(222, 2), withEnum(222, 3)], from, to, 'day', null,
     );
     expect(res.availableSources[0]!.key).toBe('222');
     expect(res.availableSources[0]!.leads).toBe(2);
@@ -282,58 +276,41 @@ describe('этап «Согласование договора» — отмет�
     // наоборот: закрытая без этапа сделка продажу даёт (проверка выше).
     const res = computeFirstSalesSeries(
       [lead({ created_at: before, first_contract_at: after, won_at: null })],
-      [], wide.from, wide.to, 'month', null,
+      wide.from, wide.to, 'month', null,
     );
     expect(res.totals.sales).toBe(0);
   });
 });
 
-describe('встречи считаются по привязкам записей разговоров, а не по этапу AMO', () => {
-  // Этап AMO «Встреча проведена + КП отправлено» давал 200+ встреч в месяц
-  // против 64 у руководителя продаж — этап засорён. Руководитель считает
-  // встречу так: есть запись разговора в чате встреч. Таблица
-  // meeting_deal_links привязывает такие записи к сделкам; здесь проверяется
-  // расчёт метрики поверх этих привязок.
+describe('встречи считаются по этапу AMO «Встреча проведена»', () => {
+  // Источник метрики вернулся с записей разговоров на этап AMO 10.09.2026
+  // (решение продаж): по августу 2026 оба способа дают одни и те же 83 сделки,
+  // а этап не требует, чтобы менеджер выложил запись. Записи остаются
+  // привязанными к сделкам, но нужны ИИ-аналитике продаж, а не дашборду.
 
-  it('две записи одной сделки в один день — одна встреча', () => {
-    // Одна встреча часто разрезана на несколько файлов: в боевых данных
-    // denvic.tech дважды за один день, файлы 1.mp4 и 2.mp4.
+  it('сделка со встречей внутри окна даёт одну встречу в свой день', () => {
     const res = computeFirstSalesSeries(
-      [lead({ amo_id: 1 })],
-      [
-        meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-10T09:00:00.000Z' }),
-        meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-10T15:00:00.000Z' }),
-      ],
+      [lead({ amo_id: 1, first_meeting_at: '2026-07-10T09:00:00.000Z' })],
       from, to, 'day', null,
     );
     expect(res.totals.meetings).toBe(1);
     expect(res.series.find((b) => b.key === '2026-07-10')?.meetings).toBe(1);
   });
 
-  it('две записи одной сделки в разные дни — две встречи', () => {
+  it('два разговора с одним клиентом в разные дни — всё равно одна встреча', () => {
+    // У этапа дата одна, поэтому повторные звонки метрику не удваивают —
+    // ровно то, чего просили продажи: считаем клиентов, а не разговоры.
     const res = computeFirstSalesSeries(
-      [lead({ amo_id: 1 })],
-      [
-        meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-10T09:00:00.000Z' }),
-        meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-11T09:00:00.000Z' }),
-      ],
+      [lead({ amo_id: 1, first_meeting_at: '2026-07-10T09:00:00.000Z' })],
       from, to, 'day', null,
     );
-    expect(res.totals.meetings).toBe(2);
-    expect(res.series.find((b) => b.key === '2026-07-10')?.meetings).toBe(1);
-    expect(res.series.find((b) => b.key === '2026-07-11')?.meetings).toBe(1);
+    expect(res.totals.meetings).toBe(1);
   });
 
-  it('запись до MEETINGS_RELIABLE_SINCE не считается', () => {
-    const cutoff = MEETINGS_RELIABLE_SINCE.getTime();
-    const wide = {
-      from: new Date(cutoff - 60 * 24 * 60 * 60 * 1000),
-      to: new Date(cutoff + 60 * 24 * 60 * 60 * 1000),
-    };
+  it('этап вне окна не считается', () => {
     const res = computeFirstSalesSeries(
-      [lead({ amo_id: 1 })],
-      [meetingLink({ amo_deal_id: 1, meeting_at: new Date(cutoff - 5 * 24 * 60 * 60 * 1000).toISOString() })],
-      wide.from, wide.to, 'month', null,
+      [lead({ amo_id: 1, first_meeting_at: '2026-08-10T09:00:00.000Z' })],
+      from, to, 'day', null,
     );
     expect(res.totals.meetings).toBe(0);
   });
@@ -341,13 +318,13 @@ describe('встречи считаются по привязкам записе
   it('окно целиком раньше MEETINGS_RELIABLE_SINCE помечено как недостоверное', () => {
     const cutoff = MEETINGS_RELIABLE_SINCE.getTime();
     const res = computeFirstSalesSeries(
-      [], [],
+      [],
       new Date(cutoff - 60 * 24 * 60 * 60 * 1000),
       new Date(cutoff - 1),
       'month', null,
     );
-    // UI обязан показать прочерк: ноль тут означал бы «встреч не было», хотя
-    // на деле подписи к записям ещё не были регулярными и досчитать нечем.
+    // UI обязан показать прочерк: до мая 2026 этап двигали и без разговора,
+    // и цифра за такой период не занижена, а раздута втрое.
     expect(res.totals.meetingsReliable).toBe(false);
   });
 
@@ -357,22 +334,19 @@ describe('встречи считаются по привязкам записе
       from: new Date(cutoff - 60 * 24 * 60 * 60 * 1000),
       to: new Date(cutoff + 60 * 24 * 60 * 60 * 1000),
     };
-    const res = computeFirstSalesSeries([], [], wide.from, wide.to, 'month', null);
+    const res = computeFirstSalesSeries([], wide.from, wide.to, 'month', null);
     expect(res.totals.meetingsReliable).toBe(true);
   });
 
   it('фильтр по каналам применяется к встречам через канал сделки', () => {
     const res = computeFirstSalesSeries(
       [
-        lead({ amo_id: 1 }), // text:email outreach
+        lead({ amo_id: 1, first_meeting_at: '2026-07-10T09:00:00.000Z' }), // text:email outreach
         lead({
           amo_id: 2,
+          first_meeting_at: '2026-07-11T09:00:00.000Z',
           raw: { custom_fields_values: [{ field_name: 'Источник', values: [{ value: 'Сайт' }] }] },
         }), // text:сайт
-      ],
-      [
-        meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-10T09:00:00.000Z' }),
-        meetingLink({ amo_deal_id: 2, meeting_at: '2026-07-11T09:00:00.000Z' }),
       ],
       from, to, 'day', ['text:email outreach'],
     );
@@ -383,24 +357,6 @@ describe('встречи считаются по привязкам записе
     expect(res.series.find((b) => b.key === '2026-07-11')?.meetings).toBe(0);
   });
 
-  it('запись, привязанная к сделке вне выборки лидов, не роняет расчёт', () => {
-    // Сделка могла прийти раньше окна (встреча в июле у сделки, созданной в
-    // марте) и не попасть в `leads`, если вызывающий код не подтянул её через
-    // extraDealIds в fetchFirstSalesLeads. computeFirstSalesSeries обязан не
-    // упасть и всё равно посчитать встречу — просто без резолва канала.
-    expect(() => computeFirstSalesSeries(
-      [], // сделки #999 нет в выборке лидов вовсе
-      [meetingLink({ amo_deal_id: 999, meeting_at: '2026-07-10T09:00:00.000Z' })],
-      from, to, 'day', null,
-    )).not.toThrow();
-
-    const res = computeFirstSalesSeries(
-      [],
-      [meetingLink({ amo_deal_id: 999, meeting_at: '2026-07-10T09:00:00.000Z' })],
-      from, to, 'day', null,
-    );
-    expect(res.totals.meetings).toBe(1);
-  });
 });
 
 
@@ -417,7 +373,7 @@ describe('разбивка по ответственным менеджерам'
         lead({ amo_id: 2, responsible_name: 'Иванов', first_qualified_at: '2026-07-16T09:00:00.000Z' }),
         lead({ amo_id: 3, responsible_name: 'Петров' }),
       ],
-      [], from, to, 'day', null,
+      from, to, 'day', null,
     );
 
     const ivanov = res.byManager.find((m) => m.manager === 'Иванов');
@@ -432,7 +388,7 @@ describe('разбивка по ответственным менеджерам'
         lead({ amo_id: 2, responsible_name: 'Петров' }),
         lead({ amo_id: 3, responsible_name: null }),
       ],
-      [], from, to, 'day', null,
+      from, to, 'day', null,
     );
     expect(res.byManager.reduce((sum, m) => sum + m.leads, 0)).toBe(res.totals.leads);
   });
@@ -441,15 +397,14 @@ describe('разбивка по ответственным менеджерам'
   it('сделки без ответственного идут отдельной строкой, а не пропадают', () => {
     const res = computeFirstSalesSeries(
       [lead({ amo_id: 1, responsible_name: null }), lead({ amo_id: 2, responsible_name: '   ' })],
-      [], from, to, 'day', null,
+      from, to, 'day', null,
     );
     expect(res.byManager.find((m) => m.manager === 'Без ответственного')?.leads).toBe(2);
   });
 
   it('встречи попадают тому, за кем закреплена сделка', () => {
     const res = computeFirstSalesSeries(
-      [lead({ amo_id: 1, responsible_name: 'Иванов' })],
-      [meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-10T09:00:00.000Z' })],
+      [lead({ amo_id: 1, responsible_name: 'Иванов', first_meeting_at: '2026-07-10T09:00:00.000Z' })],
       from, to, 'day', null,
     );
     expect(res.byManager.find((m) => m.manager === 'Иванов')?.meetings).toBe(1);
@@ -459,7 +414,7 @@ describe('разбивка по ответственным менеджерам'
   it('пустые строки не показываем: менеджер без событий в окне не нужен', () => {
     const res = computeFirstSalesSeries(
       [lead({ amo_id: 1, responsible_name: 'Тихий', created_at: '2026-01-01T09:00:00.000Z' })],
-      [], from, to, 'day', null,
+      from, to, 'day', null,
     );
     expect(res.byManager).toHaveLength(0);
   });
@@ -487,7 +442,7 @@ describe('реальные деньги по ИНН', () => {
   it('платёж ложится в общую сумму, к менеджеру и к источнику сделки', () => {
     const res = computeFirstSalesSeries(
       [lead({ amo_id: 1, responsible_name: 'Иванов' })],
-      [], from, to, 'day', null,
+      from, to, 'day', null,
       [payment({ amount: 84_000 })],
     );
     expect(res.totals.money.received).toBe(84_000);
@@ -498,7 +453,7 @@ describe('реальные деньги по ИНН', () => {
 
   it('продление в первичку не идёт', () => {
     const res = computeFirstSalesSeries(
-      [lead({ amo_id: 1 })], [], from, to, 'day', null,
+      [lead({ amo_id: 1 })], from, to, 'day', null,
       [payment({ renewal_state: 'renewal' })],
     );
     expect(res.totals.money.received).toBe(0);
@@ -508,7 +463,7 @@ describe('реальные деньги по ИНН', () => {
   /** Занижение обязано быть видно: неразобранный кандидат — не ноль. */
   it('неразобранный кандидат не в деньгах, но и не потерян', () => {
     const res = computeFirstSalesSeries(
-      [lead({ amo_id: 1 })], [], from, to, 'day', null,
+      [lead({ amo_id: 1 })], from, to, 'day', null,
       [payment({ renewal_state: 'pending', amount: 50_000 })],
     );
     expect(res.totals.money.received).toBe(0);
@@ -519,7 +474,7 @@ describe('реальные деньги по ИНН', () => {
   it('один ИНН на несколько сделок — в спорные, а не наугад к первой', () => {
     const res = computeFirstSalesSeries(
       [lead({ amo_id: 1, responsible_name: 'Иванов' })],
-      [], from, to, 'day', null,
+      from, to, 'day', null,
       [payment({ deal_matches: 2, amount: 30_000 })],
     );
     expect(res.totals.money.received).toBe(0);
@@ -529,7 +484,7 @@ describe('реальные деньги по ИНН', () => {
 
   it('возвраты и нули в «пришло денег» не попадают', () => {
     const res = computeFirstSalesSeries(
-      [lead({ amo_id: 1 })], [], from, to, 'day', null,
+      [lead({ amo_id: 1 })], from, to, 'day', null,
       [payment({ amount: -10_000 }), payment({ transaction_id: 2, amount: 0 })],
     );
     expect(res.totals.money.received).toBe(0);
@@ -538,7 +493,7 @@ describe('реальные деньги по ИНН', () => {
 
   it('платёж вне окна не считается', () => {
     const res = computeFirstSalesSeries(
-      [lead({ amo_id: 1 })], [], from, to, 'day', null,
+      [lead({ amo_id: 1 })], from, to, 'day', null,
       [payment({ occurred_at: '2026-06-20T09:00:00.000Z' })],
     );
     expect(res.totals.money.received).toBe(0);
@@ -546,7 +501,7 @@ describe('реальные деньги по ИНН', () => {
 
   it('фильтр по каналу режет и деньги — они берут канал у сделки', () => {
     const res = computeFirstSalesSeries(
-      [lead({ amo_id: 1 })], [], from, to, 'day', ['inbound'],
+      [lead({ amo_id: 1 })], from, to, 'day', ['inbound'],
       [payment()],
     );
     expect(res.totals.money.received).toBe(0);
@@ -567,14 +522,14 @@ describe('реальные деньги по ИНН', () => {
     });
     const res = computeFirstSalesSeries(
       [withInn, lead({ amo_id: 2, won_at: wonAt })],
-      [], from, to, 'day', null, [],
+      from, to, 'day', null, [],
     );
     expect(res.totals.sales).toBe(2);
     expect(res.totals.money.contractsWithInn).toBe(1);
   });
 
   it('без платежей деньги — ноль, а не undefined', () => {
-    const res = computeFirstSalesSeries([lead()], [], from, to, 'day', null);
+    const res = computeFirstSalesSeries([lead()], from, to, 'day', null);
     expect(res.totals.money.received).toBe(0);
     expect(res.byManager[0]?.money).toBe(0);
   });
@@ -624,24 +579,18 @@ describe('попадание сделки в период', () => {
     ).toBe(false);
   });
 
-  it('встречи по сделкам — окно, порог достоверности и один день = одна встреча', () => {
+  it('встречи по сделкам — по этапу внутри окна, одна на сделку', () => {
     const byDeal = meetingsByDeal(
       [
-        meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-10T09:00:00.000Z' }),
-        // Тот же день той же сделки — одна встреча, разрезанная на два файла.
-        meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-10T12:00:00.000Z' }),
-        meetingLink({ amo_deal_id: 1, meeting_at: '2026-07-11T09:00:00.000Z' }),
-        // Вне окна.
-        meetingLink({ amo_deal_id: 2, meeting_at: '2026-08-10T09:00:00.000Z' }),
-        // Раньше порога, с которого встречи вообще можно считать.
-        meetingLink({
-          amo_deal_id: 3,
-          meeting_at: new Date(MEETINGS_RELIABLE_SINCE.getTime() - 24 * 3600 * 1000).toISOString(),
-        }),
+        lead({ amo_id: 1, first_meeting_at: '2026-07-10T09:00:00.000Z' }),
+        // Этап вне окна.
+        lead({ amo_id: 2, first_meeting_at: '2026-08-10T09:00:00.000Z' }),
+        // Этап не пройден вовсе.
+        lead({ amo_id: 3 }),
       ],
       from, to,
     );
-    expect(byDeal.get(1)).toBe(2);
+    expect(byDeal.get(1)).toBe(1);
     expect(byDeal.has(2)).toBe(false);
     expect(byDeal.has(3)).toBe(false);
   });
