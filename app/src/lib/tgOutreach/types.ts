@@ -1,5 +1,3 @@
-import { DEFAULT_MAX_MESSAGE_CHARS } from './firstTouch/validateMessage';
-
 /**
  * Служебный аккаунт Telegram (777000): коды входа и сервисные уведомления.
  *
@@ -148,12 +146,9 @@ export interface TelegramSettings {
   forward_limit: number;
   reply_only_if_previously_wrote: boolean;
   /**
-   * Отвечать только тем, кому мы писали по базе этой кампании.
-   *
-   * Без этого бот отвечает в любом диалоге, где есть наше исходящее, — а в
-   * купленном аккаунте это ещё и чаты прогрева между своими же аккаунтами.
-   * Кампании, заведённые до настройки, поля не имеют: `?` означает «выключено»,
-   * чтобы не менять молча поведение уже идущих рассылок.
+   * УСТАРЕЛО, воркер это поле больше не читает: с 10.09.2026 ответы только
+   * контактам из баз кампании — поведение инструмента, а не настройка.
+   * Ключ оставлен, чтобы сохранённые кампании не теряли поле при чтении.
    */
   reply_only_to_base_contacts?: boolean;
   auto_allow_new_dialogs: boolean;
@@ -200,6 +195,10 @@ export interface TelegramSettings {
   dialog_wait_window_range: [number, number];
   sleep_periods: string[];
   timezone_offset: number;
+  /**
+   * УСТАРЕЛО, воркер это поле больше не читает: ботов пропускаем всегда
+   * (с 10.09.2026). Ключ оставлен ради сохранённых кампаний.
+   */
   ignore_bot_usernames: boolean;
   ignore_no_username: boolean;
   blocked_usernames: string[];
@@ -212,11 +211,11 @@ export interface TelegramSettings {
   first_touch_per_account_per_day?: number;
   /**
    * Максимальная длина первого сообщения. Длиннее — контакт откладывается, а не
-   * отправляется. Это фильтр мусора в файле (съехавшая колонка, обрезанная
-   * строка), а не правило Telegram, поэтому порог должен быть под рукой у
-   * оператора: база с ровными текстами по 430–460 знаков при пороге 400 не
-   * отправляется вообще никогда. Ноль или отсутствие поля = дефолт 400,
-   * потолок — предел Telegram в 4096.
+   * отправляется.
+   *
+   * УСТАРЕЛО, воркер это поле больше не читает: с 10.09.2026 порог один на все
+   * кампании — DEFAULT_MAX_MESSAGE_CHARS (600 знаков, меняется переменной
+   * окружения TG_FIRST_TOUCH_MAX_CHARS). Ключ оставлен ради сохранённых кампаний.
    */
   first_touch_max_chars?: number;
   /**
@@ -614,11 +613,14 @@ export const DEFAULT_TELEGRAM_SETTINGS: TelegramSettings = {
   ignore_no_username: true,
   blocked_usernames: ['SpamBot'],
   account_cooldown_hours: 24,
-  first_touch_max_chars: DEFAULT_MAX_MESSAGE_CHARS,
   // Порции первых сообщений — по умолчанию включены (60 минут / 2 письма):
   // очередь за полминуты покупает PEER_FLOOD быстрее, чем успевает сработать
   // суточная норма. Ноль в gap выключает разнос обратно в очередь.
   first_touch_gap_minutes: 60,
   first_touch_per_gap: 2,
+  // Норма первых сообщений: 3 письма на аккаунт в сутки — нижняя ступень
+  // лестницы из подсказки на экране. Раньше ключа в дефолтах не было вовсе,
+  // и новая кампания заводилась с выключенной рассылкой (undefined → 0).
+  first_touch_per_account_per_day: 3,
   follow_up: DEFAULT_FOLLOW_UP,
 };
