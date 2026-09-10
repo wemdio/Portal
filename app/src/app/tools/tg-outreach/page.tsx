@@ -3328,7 +3328,7 @@ function CampaignAccountsTab({
                 поставщиков и по разной цене, а живут они по-разному. Сумма по
                 колонке считается только по заполненным ценам. */}
             <span title="Сколько заплатили за аккаунт. Нажмите на значение в строке, чтобы поправить.">
-              Цена
+              Цена, руб
             </span>
             <span>Активен</span><span />
           </div>
@@ -3520,32 +3520,6 @@ function CampaignAccountsTab({
                     </span>
                   )}
                 </span>
-                {editingPriceFor === a.id ? (
-                  <input
-                    type="number"
-                    min={0}
-                    step="1"
-                    autoFocus
-                    value={priceDraft}
-                    onChange={(e) => setPriceDraft(e.target.value)}
-                    onBlur={() => { void savePrice(a.id, priceDraft); }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') { void savePrice(a.id, priceDraft); }
-                      if (e.key === 'Escape') setEditingPriceFor(null);
-                    }}
-                    aria-label={`Цена аккаунта ${a.session_name}`}
-                    className="w-full rounded-lg border border-indigo-300 bg-white px-2 py-1 text-xs text-gray-800 outline-none"
-                  />
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => { setEditingPriceFor(a.id); setPriceDraft(a.price === null || a.price === undefined ? '' : String(a.price)); }}
-                    title={a.price === null || a.price === undefined ? 'Цена не указана — нажмите, чтобы вписать' : 'Нажмите, чтобы поправить цену'}
-                    className={`w-full rounded-lg px-2 py-1 text-left text-xs tabular-nums transition hover:bg-gray-100 cursor-pointer ${a.price === null || a.price === undefined ? 'text-gray-300' : 'text-gray-700'}`}
-                  >
-                    {a.price === null || a.price === undefined ? '—' : `${Math.round(Number(a.price)).toLocaleString('ru-RU')} ₽`}
-                  </button>
-                )}
                 {editingProxyFor === a.id ? (
                   /* Свой список вместо <select>: рядом с каждым адресом стоит
                      его состояние, иначе сорок одинаковых строк «тот же хост,
@@ -3575,6 +3549,32 @@ function CampaignAccountsTab({
                   </button>
                 )}
                 <HealthCell mark={proxyMark} />
+                {editingPriceFor === a.id ? (
+                  <input
+                    type="number"
+                    min={0}
+                    step="1"
+                    autoFocus
+                    value={priceDraft}
+                    onChange={(e) => setPriceDraft(e.target.value)}
+                    onBlur={() => { void savePrice(a.id, priceDraft); }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') { void savePrice(a.id, priceDraft); }
+                      if (e.key === 'Escape') setEditingPriceFor(null);
+                    }}
+                    aria-label={`Цена аккаунта ${a.session_name}`}
+                    className="w-full rounded-lg border border-indigo-300 bg-white px-2 py-1 text-xs text-gray-800 outline-none"
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => { setEditingPriceFor(a.id); setPriceDraft(a.price === null || a.price === undefined ? '' : String(a.price)); }}
+                    title={a.price === null || a.price === undefined ? 'Цена не указана — нажмите, чтобы вписать' : 'Нажмите, чтобы поправить цену'}
+                    className={`w-full rounded-lg px-2 py-1 text-left text-xs tabular-nums transition hover:bg-gray-100 cursor-pointer ${a.price === null || a.price === undefined ? 'text-gray-300' : 'text-gray-700'}`}
+                  >
+                    {a.price === null || a.price === undefined ? '—' : `${Math.round(Number(a.price)).toLocaleString('ru-RU')} ₽`}
+                  </button>
+                )}
                 <button type="button" onClick={() => { void toggleActive(a.id, a.is_active); }}
                   className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition cursor-pointer w-fit ${a.is_active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
                   {a.is_active ? 'Да' : 'Нет'}
