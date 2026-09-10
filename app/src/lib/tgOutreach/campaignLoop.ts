@@ -948,8 +948,10 @@ export async function handleChat(
     return { replied: false, triggerType: null };
   }
 
-  if (tg.ignore_bot_usernames && tgIsBot) {
-    log('info', `${displayName}: это бот — пропускаю (включена настройка "игнорировать ботов")`);
+  // Ботов не трогаем всегда: настройку сняли с экрана 10.09.2026 — выключать
+  // её было нечем оправдать, а включённой она стояла у всех кампаний.
+  if (tgIsBot) {
+    log('info', `${displayName}: это бот — пропускаю`);
     return { replied: false, triggerType: null };
   }
   if (tg.ignore_no_username && !tgUsername) {
@@ -1018,11 +1020,12 @@ export async function handleChat(
   // чатах прогрева — аккаунты писали друг другу. Из-за этого бот отвечал
   // боевым скриптом партнёрам по прогреву и слал фальшивые лиды в чат
   // менеджера. Здесь берём только тех, кому писали по базе кампании.
-  if (tg.reply_only_to_base_contacts) {
-    if (!(await isCampaignContact(db, campaign.id, tgUserId))) {
-      log('info', `${displayName}: не из баз кампании — пропускаю (включена настройка «писать только контактам из баз»)`);
-      return { replied: false, triggerType: null };
-    }
+  // Проверка безусловная: настройку сняли с экрана 10.09.2026. Выключенной она
+  // возвращала ровно тот сценарий, ради которого её и заводили — ответы
+  // партнёрам по прогреву и фальшивые лиды в чате менеджера.
+  if (!(await isCampaignContact(db, campaign.id, tgUserId))) {
+    log('info', `${displayName}: не из баз кампании — пропускаю`);
+    return { replied: false, triggerType: null };
   }
 
   if (tg.reply_only_if_previously_wrote) {
@@ -1248,7 +1251,7 @@ async function handleFollowUp(
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     const isBot = Boolean(dialog.tg_is_bot);
-    if (isBot && tg.ignore_bot_usernames) { stats.skip_bot++; continue; }
+    if (isBot) { stats.skip_bot++; continue; }
     if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) { stats.skip_blocked++; continue; }
 
     const messages = dialog.messages as DialogMessage[];
@@ -1389,7 +1392,7 @@ async function handleMissedRepliesLastDays(
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     const isBot = Boolean(dialog.tg_is_bot);
-    if (isBot && tg.ignore_bot_usernames) { skipBot++; continue; }
+    if (isBot) { skipBot++; continue; }
     if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) { skipBlocked++; continue; }
 
     const messages = Array.isArray(dialog.messages) ? (dialog.messages as DialogMessage[]) : [];
@@ -2693,7 +2696,7 @@ export async function runCampaignLoop(
             perDay: tg.first_touch_per_account_per_day,
             gapMinutes: tg.first_touch_gap_minutes,
             perGap: tg.first_touch_per_gap,
-            maxChars: tg.first_touch_max_chars,
+            // maxChars не передаём: порог один на все кампании, см. resolveMaxChars.
             cooldownHours: tg.account_cooldown_hours,
             log,
             shouldStop,
