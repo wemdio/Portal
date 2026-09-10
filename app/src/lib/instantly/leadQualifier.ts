@@ -424,6 +424,16 @@ const CONTACT_PHONE_LABEL_PATTERN = /(?:телефон|тел(?=\s|[.:,;]|$)|н�
 const CONTACT_DESCRIPTOR_PATTERN = /^(?:директор[а-яё]*|руководител[а-яё]*|начальник[а-яё]*|менеджер[а-яё]*|специалист[а-яё]*|координатор[а-яё]*|секретар[а-яё]*|телефон|тел\.|номер|e-?mail|почта|director|head|manager|specialist|coordinator|assistant|procurement)(?:\s+[А-ЯЁа-яёA-Za-z-]+){0,4}$/i;
 const GENERIC_FOOTER_CONTACT_PATTERN = /^\s*(?:позвоните\s+мне\s+по\s+любым\s+вопросам|feel\s+free\s+to\s+(?:call|contact|reach\s+out(?:\s+to)?)\s+me(?:\s+if\s+you\s+have\s+any\s+questions)?)[.!]?\s*$/i;
 const SIGNATURE_BOUNDARY_PATTERN = /^(?:--|с\s+(?:уважением|наилучшими\s+пожеланиями)(?:[,.!].*)?|(?:best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:[,.!].*)?)$/i;
+const QUOTED_NUMERIC_DATE_TIME_SOURCE = String.raw`\d{1,2}[./-]\d{1,2}[./-]\d{4},?\s+\d{1,2}:\d{2}(?::\d{2})?`;
+const QUOTED_RU_MONTH_SOURCE = String.raw`(?:январ[ья]|феврал[ья]|март(?:а)?|апрел[ья]|ма[йя]|июн[ья]|июл[ья]|август(?:а)?|сентябр[ья]|октябр[ья]|ноябр[ья]|декабр[ья])`;
+const QUOTED_MONTH_FIRST_DATE_TIME_SOURCE = String.raw`(?:понедельник|вторник|среда|четверг|пятница|суббота|воскресенье),\s+${QUOTED_RU_MONTH_SOURCE}\s+\d{1,2},\s+\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s+(?:[a-zа-я]{2,5}|[+-]\d{2}:?\d{2}))?`;
+const STRUCTURED_QUOTED_SENDER_PATTERNS = [
+  new RegExp(String.raw`^(?:${QUOTED_NUMERIC_DATE_TIME_SOURCE}|${QUOTED_MONTH_FIRST_DATE_TIME_SOURCE}),\s+[^<>\n]{1,120}<\s*${CONTACT_EMAIL_SOURCE}\s*>\s+(?:писал(?:\(а\)|а)?|написал(?:\(а\)|а)?|пишет|wrote):\s*$`, 'iu'),
+  // Rambler's text conversion duplicates an email inside a mailto link and
+  // omits "wrote". Require the complete dated sender header and identical
+  // linked/displayed addresses, not just an incidental date and contact.
+  new RegExp(String.raw`^${QUOTED_NUMERIC_DATE_TIME_SOURCE},\s+[^<>\n]{1,120}<\s*mailto:(${CONTACT_EMAIL_SOURCE})\s+\1\s*>\s*:?\s*$`, 'iu'),
+];
 const QUOTED_REPLY_BOUNDARY_PATTERNS = [
   /^(?:Отправлено\s+из\s+(?:мобильной\s+)?(?:Почты\s+Mail|мобильной\s+Яндекс\.Почты)|Sent\s+from\s+my\s+(?:iPhone|iPad|Android))(?:[\s:.]|$)/iu,
   /^>/,
@@ -433,6 +443,7 @@ const QUOTED_REPLY_BOUNDARY_PATTERNS = [
   /^Begin forwarded message:\s*$/i,
   /^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}[^\n]{0,160}(?:пишет|написал(?:а)?|wrote):\s*$/i,
   /^(?:пн|вт|ср|чт|пт|сб|вс|понедельник|вторник|среда|четверг|пятница|суббота|воскресенье),?\s+\d{1,2}\s+[а-яё]{3,}\.?(?:\s+\d{4})?(?:\s*г\.)?[^\n]{0,160}:\s*$/i,
+  ...STRUCTURED_QUOTED_SENDER_PATTERNS,
 ];
 const WRAPPED_QUOTED_SENDER_PATTERN = new RegExp(
   String.raw`<\s*${CONTACT_EMAIL_SOURCE}\s*>\s*(?:wrote\s*)?:\s*$`,
@@ -936,8 +947,10 @@ const SUPPORT_BOT_SKILLBOX_FOOTER_PATTERN =
   /^служба\s+заботы\s+Skillbox,?\s+с\s+\d{1,2}:\d{2}\s+до\s+\d{1,2}:\d{2}\s+по\s+мск\s*оставьте\s+отзыв\s+об\s+обучении\s+в\s+Skillbox\s*первое\s+занятие\s+по\s+английскому\s+за\s+\d{1,5}\s*₽\s*курс-знакомство\s+«как\s+учиться\s+в\s+Skillbox»\s*ответы\s+на\s+частые\s+вопросы\s+пользователей\s*пишите:\s*hello@skillbox\.ru$/iu;
 
 // A short mailbox-move notice may have neither an auto-reply marker nor the
-// formal company-migration wording above. Require BOTH a new-address statement
-// and an instruction about ALL correspondence, with no other authored content.
+// formal company-migration wording above. Require a complete administrative
+// change notice: either a new address + ALL correspondence instruction, or an
+// explicit contact-details change + a generic address/routing instruction.
+// In either case there must be no other authored content.
 // A human sharing a contact, or requesting a quote at a new address, is not this
 // template and must still be evaluated under the project's lead criteria.
 const MAILBOX_NOTICE_EMAIL_SOURCE = String.raw`<?${CONTACT_EMAIL_SOURCE}>?(?:\s*\[(?:mailto:)?${CONTACT_EMAIL_SOURCE}\])?`;
@@ -956,12 +969,31 @@ const MAILBOX_NOTICE_COMBINED_PATTERN = new RegExp(
   String.raw`${MAILBOX_NOTICE_NEW_ADDRESS_PATTERN.source.slice(0, -1)}\s+${MAILBOX_NOTICE_ALL_MAIL_PATTERN.source.slice(1)}`,
   'iu',
 );
+const CONTACT_CHANGE_DETAILS_RU_SOURCE = String.raw`(?:(?:(?:наших|моих|своих|нашего|моего|своего|нашей|моей|своей)\s+)?(?:контактных\s+данных|(?:электронной\s+)?почты|(?:(?:электронного|почтового)\s+){0,2}адреса|адреса\s+электронной\s+почты))`;
+const CONTACT_CHANGE_DETAILS_EN_SOURCE = String.raw`(?:(?:our|my|the)\s+)?(?:contact\s+(?:details|information)|e-?mail(?:\s+address)?)`;
+const CONTACT_CHANGE_ANNOUNCEMENT_PATTERN = new RegExp(
+  String.raw`^(?:(?:в\s+связи\s+(?:с|со)\s+(?:изменением|сменой|обновлением)|(?:сообщаем|уведомляем|информируем)(?:\s+вас)?\s+об?\s+(?:изменении|смене|обновлении))\s+${CONTACT_CHANGE_DETAILS_RU_SOURCE}|(?:(?:наши|мои)\s+)?контактные\s+данные\s+(?:изменились|обновились)|due\s+to\s+(?:an?\s+|the\s+)?(?:change|update)\s+(?:in|of|to)\s+${CONTACT_CHANGE_DETAILS_EN_SOURCE}|(?:please\s+note\s+that\s+)?${CONTACT_CHANGE_DETAILS_EN_SOURCE}\s+(?:has|have)\s+(?:been\s+)?(?:changed|updated))$`,
+  'iu',
+);
+const CONTACT_CHANGE_ROUTING_PATTERN = new RegExp(
+  String.raw`^(?:(?:(?:прошу|просим)(?:\s+вас)?\s+(?:обращаться|писать|направлять\s+(?:все\s+)?письма)|(?:пожалуйста,?\s*)?(?:обращайтесь|пишите|направляйте\s+(?:все\s+)?письма))\s+(?:по|на)\s+(?:(?:следующ(?:ему|ий)|нов(?:ому|ый))\s+)?(?:(?:адрес(?:у)?(?:\s+электронной\s+почты)?|электронн(?:ому|ый)\s+(?:почтов(?:ому|ый)\s+)?адрес(?:у)?|(?:электронную\s+)?почту|e-?mail)\s*)?[:：]?\s*(?:${MAILBOX_NOTICE_EMAIL_SOURCE})?|(?:please\s+)?(?:contact\s+(?:us|me)\s+at|write\s+to|(?:send|direct|forward)\s+(?:future\s+)?(?:emails?|mail|correspondence|messages)\s+to)\s+(?:(?:the|our|my)\s+)?(?:(?:following|new)\s+)?(?:e-?mail(?:\s+address)?\s*)?[:：]?\s*(?:${MAILBOX_NOTICE_EMAIL_SOURCE})?|(?:please\s+)?use\s+${MAILBOX_NOTICE_EMAIL_SOURCE}\s+for\s+(?:all\s+)?(?:future\s+)?(?:emails?|mail|correspondence|messages))$`,
+  'iu',
+);
+const CONTACT_CHANGE_COMBINED_PATTERN = new RegExp(
+  String.raw`${CONTACT_CHANGE_ANNOUNCEMENT_PATTERN.source.slice(0, -1)}\s*,?\s+${CONTACT_CHANGE_ROUTING_PATTERN.source.slice(1)}`,
+  'iu',
+);
 
 function isPureMailboxChangeNotice(segments: string[]): boolean {
   const combined = segments.some((segment) => MAILBOX_NOTICE_COMBINED_PATTERN.test(segment));
+  const contactChangeCombined = segments.some((segment) => CONTACT_CHANGE_COMBINED_PATTERN.test(segment));
+  const newAddress = segments.some((segment) => MAILBOX_NOTICE_NEW_ADDRESS_PATTERN.test(segment));
+  const allMail = segments.some((segment) => MAILBOX_NOTICE_ALL_MAIL_PATTERN.test(segment));
+  const contactChange = segments.some((segment) => CONTACT_CHANGE_ANNOUNCEMENT_PATTERN.test(segment));
+  const genericRouting = segments.some((segment) => CONTACT_CHANGE_ROUTING_PATTERN.test(segment));
   return (
-    (combined || segments.some((segment) => MAILBOX_NOTICE_NEW_ADDRESS_PATTERN.test(segment))) &&
-    (combined || segments.some((segment) => MAILBOX_NOTICE_ALL_MAIL_PATTERN.test(segment))) &&
+    (combined || (newAddress && allMail) || contactChangeCombined ||
+      (contactChange && (newAddress || allMail || genericRouting))) &&
     segments.some((segment) => CONTACT_EMAIL_PATTERN.test(segment)) &&
     segments.every((segment) =>
       !segment || /^[—–\-_*=~\s]+$/u.test(segment) ||
@@ -971,7 +1003,10 @@ function isPureMailboxChangeNotice(segments: string[]): boolean {
       MAILBOX_NOTICE_EMAIL_ONLY_PATTERN.test(segment) ||
       MAILBOX_NOTICE_NEW_ADDRESS_PATTERN.test(segment) ||
       MAILBOX_NOTICE_ALL_MAIL_PATTERN.test(segment) ||
-      MAILBOX_NOTICE_COMBINED_PATTERN.test(segment))
+      MAILBOX_NOTICE_COMBINED_PATTERN.test(segment) ||
+      CONTACT_CHANGE_ANNOUNCEMENT_PATTERN.test(segment) ||
+      CONTACT_CHANGE_ROUTING_PATTERN.test(segment) ||
+      CONTACT_CHANGE_COMBINED_PATTERN.test(segment))
   );
 }
 
@@ -1360,6 +1395,33 @@ function getPreReplyOutboundTexts(ctx: ThreadContext): string[] {
     })
     .map((email) => getBodyText(email.body))
     .filter(Boolean);
+}
+
+function isReplyOnlyQuotedHistory(ctx: ThreadContext, replyText: string): boolean {
+  if (extractAuthoredReplyText(replyText)) return false;
+  const lines = replyText.replace(/\r\n?/g, '\n').split('\n').map((line) => line.trim()).filter(Boolean);
+  const isSenderHeader = (line: string): boolean =>
+    /^On\s+.+<[^<>\n]+@[^<>\n]+>\s+wrote:\s*$/iu.test(line) ||
+    STRUCTURED_QUOTED_SENDER_PATTERNS.some((pattern) => pattern.test(line));
+  if (lines.some((line) => line.startsWith('>')) &&
+      lines.every((line) => line.startsWith('>') || isSenderHeader(line))) return true;
+
+  // An empty prefix alone does not prove an empty reply: bottom/inline human
+  // answers may follow unprefixed history. Reject only when EVERY complete
+  // quoted block exactly matches a known pre-reply outbound, ignoring spacing.
+  // Any unrecognized remainder stays with AI rather than disappearing.
+  if (!lines.length || !isSenderHeader(lines[0])) return false;
+  const normalize = (text: string): string => text.replace(/^\s*>+\s?/gm, '').replace(/\s+/gu, '');
+  const outboundTexts = new Set(getPreReplyOutboundTexts(ctx).map(normalize));
+  const blocks: string[][] = [];
+  for (const line of lines) {
+    if (isSenderHeader(line)) blocks.push([]);
+    else blocks.at(-1)?.push(line);
+  }
+  return blocks.length > 0 && blocks.every((block) => {
+    const text = normalize(block.join('\n'));
+    return Boolean(text) && outboundTexts.has(text);
+  });
 }
 
 function normalizeAuthoredStatement(text: string): string {
@@ -2013,11 +2075,11 @@ function buildSystemPrompt(
   // и объявлен приоритетным — например, проект может считать лидом даже простую
   // передачу контакта ЛПР, которую дефолтные правила не квалифицируют.
   const criteriaSection = leadCriteria?.trim()
-    ? `\n\nОПРЕДЕЛЕНИЕ ЛИДА ДЛЯ ЭТОГО ПРОЕКТА (задано командой проекта — при ЛЮБОМ противоречии со стандартными критериями ниже ПРИОРИТЕТ у этого определения):\n---\n${leadCriteria.trim().slice(0, 2000)}\n---`
+    ? `\n\nОПРЕДЕЛЕНИЕ ЛИДА ДЛЯ ЭТОГО ПРОЕКТА (задано командой проекта — для ЧЕЛОВЕЧЕСКОГО ответа при противоречии со стандартными критериями ниже ПРИОРИТЕТ у этого определения; полностью служебные/машинные уведомления сначала исключаются и не выполняют критерий передачи контакта):\n---\n${leadCriteria.trim().slice(0, 2000)}\n---`
     : '';
   const criteriaReminder = leadCriteria?.trim()
     ? `\n\nФИНАЛЬНАЯ ПРОВЕРКА КАСТОМНОГО КРИТЕРИЯ:
-- Перед выставлением флагов ещё раз сверь с определением проекта выше только основной ответ человека. При любом противоречии ПРИОРИТЕТ у кастомного определения.
+- Сначала исключи полностью служебное/машинное уведомление, затем сверь с определением проекта выше только основной ответ человека. Для человеческого ответа при противоречии со стандартными критериями ПРИОРИТЕТ у кастомного определения.
 - Ставь custom_criteria_matched=true, только когда основной ответ сам соответствует хотя бы одному позитивному условию кастомного определения.
 - Явные пункты «НЕ лид» и исключения в определении проекта — это запрет: они не могут одновременно давать custom_criteria_matched=true.
 - При custom_criteria_matched=true обязательно ставь is_lead=true, needs_review=false. Код применит это как однозначный итоговый вердикт.
@@ -2078,11 +2140,13 @@ function buildSystemPrompt(
 - После подтверждённого оффера просьба прислать предложение, информацию, материалы, презентацию, кейсы или примеры означает продолжение интереса и является лидом. В том числе «пришлите материалы, возможно, когда-нибудь посмотрим». Но просьба о материалах не отменяет явный отказ или условный интерес третьих лиц. Простое указание себя как адресата («рассказать можно мне» в ответ на поиск ответственного) не подменяй запросом материалов.
 - Отложенный интерес — «вернитесь через месяц», «напишите летом», «через месяц напишите мне», «летом свяжитесь со мной», «давайте обсудим позже», «сейчас не актуально, но напишите через месяц», готовность сотрудничать в будущем — является лидом только после подтверждённого содержательного оффера. После одного запроса контакта или без подтверждения оффера такой перенос сам по себе НЕ лид: is_lead=false, needs_review=false. Слова «к теме» или «к вашему предложению» сами по себе не доказывают понимания, что именно предлагается. Самодостаточный запрос КП/цены/покупки или явное согласие на звонок, встречу, демо или тест оценивай отдельно: это самостоятельное основание даже без найденного исходящего письма. Категоричный отказ («не интересно») и перенаправление к другому человеку, чужому менеджеру/коллеге или в общий отдел отложенным интересом не являются; дата такого перенаправления ничего не меняет.
 - После подтверждённого оффера неопределённое «возможно, когда-нибудь посмотрим» считается отложенным интересом. Без подтверждённого оффера такой ответ сам по себе не является лидом: is_lead=false, needs_review=false.
+- Сам по себе срок организационного изменения («новый логист появится через 2–3 недели», «руководитель вернётся в октябре») не выражает отложенного интереса и не является просьбой связаться позже. Не придумывай приглашение к повторному контакту из календарной даты. «Пишите в следующем году» или «свяжитесь в октябре» после подтверждённого оффера, напротив, содержат собственную просьбу вернуться и остаются лидами.
 - Явное отрицание («не интересно», «не актуально») и условный интерес третьих лиц («если коллегам будет интересно — они свяжутся») не являются положительным интересом самого получателя.
 
 ОБЩЕЕ ЛЮБОПЫТСТВО — НЕ ЛИД:
 - БЕЗ подтверждённого оффера «пришлите предложение» без слова «коммерческое», без расчёта/цены и без конкретного следующего шага — это лишь просьба ознакомиться.
 - БЕЗ подтверждённого оффера «пришлите информацию/материалы/презентацию», запрос примеров или кейсов сами по себе НЕ являются лидом: ставь is_lead=false, needs_review=false. После подтверждённого оффера это лид по правилу выше.
+- После запроса контакта фраза «можете презентовать вашу компанию мне» и описание своей роли/процесса выбора подрядчиков лишь разрешают первичное знакомство: это не доказательство полученного оффера и не назначенная встреча. Без отдельного коммерческого запроса или явного согласия на звонок, встречу, демо либо тест ставь is_lead=false, needs_review=false. Если человек действительно предлагает провести встречу/демо или спрашивает цену/КП — это самостоятельный CTA, даже без найденного оффера. Кастомный критерий может отдельно считать представление ответственного или передачу контакта лидом.
 - «расскажите подробнее» без конкретного следующего шага — ставь is_lead=false, needs_review=true.
 - Без подтверждённого оффера одиночное «интересно» остаётся неоднозначным: ставь is_lead=false, needs_review=true.
 - Запрос РАЗЪЯСНЕНИЯ («что вы предлагаете?», «о чём речь?», «что это за решение?», «в чём суть?») означает, что человек ещё не понял оффер: ставь is_lead=false, needs_review=true.
@@ -2102,7 +2166,7 @@ ${criteriaReminder}
 
 ФИНАЛЬНАЯ ПРОВЕРКА МАШИННОГО ОТВЕТА (раньше любых критериев лида):
 - machine_reply_kind = "auto_reply" для автоматического ответа/отпуска, "delivery_failure" для уведомления о недоставке, "service_acknowledgement" для шаблонного подтверждения или обещания обработать запрос/ответить. Например, «Мы обязательно ответим в ближайшее время. Если запрос актуален — свяжитесь по телефону» — служебный шаблон, не коммерческий CTA, даже без слов «письмо получено».
-- Чистое административное уведомление о смене почты («Мой новый электронный адрес X. Прошу все письма присылать на него») — machine_reply_kind="auto_reply", is_lead=false, даже если оно написано вручную и до него отправлен оффер. Это правило доставки всей корреспонденции, а не интерес к предложению; новый адрес не выполняет кастомное правило «поделились почтой — лид». Но «Пришлите КП/расчёт на новый адрес», вопрос о цене, согласие на звонок или отдельный человеческий интерес рядом с уведомлением оценивай по критериям проекта с machine_reply_kind=null. Обычная сознательная передача контакта в ответ на наш вопрос — тоже НЕ уведомление о смене почты: к ней применяются кастомные критерии.
+- Чистое административное уведомление о смене почты или контактных данных — machine_reply_kind="auto_reply", is_lead=false, даже если оно написано вручную и до него отправлен оффер. Определяй смысл класса, а не наличие буквальной фразы «автоответ» или «все письма»: «Мой новый электронный адрес X. Прошу все письма присылать на него», «В связи с изменением наших контактных данных просим обращаться по следующему адресу электронной почты X» и «Our contact details have changed, please contact us at X» сообщают только новые реквизиты связи. Новый адрес в таком уведомлении не выполняет кастомное правило «поделились почтой/контактом — лид». Но «Пришлите КП/расчёт на новый адрес», вопрос о цене, согласие на звонок или отдельный человеческий интерес рядом с уведомлением оценивай по критериям проекта с machine_reply_kind=null. Обычная сознательная передача контакта в ответ на наш вопрос («уточните по адресу X», «за это отвечает Анна, её почта X») — НЕ уведомление о смене контактных данных: к ней применяются кастомные критерии.
 - Ставь этот признак только для полностью машинного/служебного ОСНОВНОГО ответа без самостоятельного человеческого интереса. Машинный текст в цитате или подписи не учитывай. Если рядом есть живой вопрос про цену/КП или просьба обсудить предложение/созвониться, machine_reply_kind=null: оцени человеческую часть по обычным критериям.
 - Само упоминание отпуска или отсутствия не делает ответ автоматическим. «С завтрашнего дня я в отпуске. Смогу вернуться к теме после 24 сентября» — человеческое намерение продолжить разговор, machine_reply_kind=null, но НЕ безусловный лид: по дефолтным критериям это отложенный интерес только после подтверждённого содержательного оффера. После запроса контакта или без подтверждённого оффера один перенос разговора не является лидом. Отличай от обычного автоответа «Я в отпуске, вернусь в офис 24 сентября, на письма отвечу после возвращения»: здесь нет интереса к нашему предложению. Кастомные критерии продолжают определять квалификацию человеческого ответа.
 - При machine_reply_kind != null обязательно is_lead=false, custom_criteria_matched=false, needs_review=false, objection_handleable=false, objection_draft=null. Контакты и призывы из служебного шаблона не могут выполнить кастомное правило «передали контакт — лид».
@@ -2360,7 +2424,7 @@ ${quotedText.slice(0, 3000)}
 Тема: ${ctx.replyEmail.subject ?? '(без темы)'}
 ОСНОВНОЙ ОТВЕТ БЕЗ ПОДПИСИ И СТАРОЙ ПЕРЕПИСКИ (источник намерения):
 ---
-${authoredReply || '(не удалось выделить; проверь полный текст ниже)'}
+${authoredReply || '(до подписи или границы цитаты нового ответа нет; не приписывай получателю CTA из старых писем. Если ниже есть отдельный новый нецитированный ответ, оцени только его)'}
 ---
 ПОЛНЫЙ ТЕКСТ ПИСЬМА (цитаты и подпись — только контекст, не новые сигналы):
 ---
@@ -2967,6 +3031,15 @@ export async function qualifyReply(
   if (machineReply) {
     return {
       ...machineReplyNonLead(machineReply),
+      threadContext: ctx,
+    };
+  }
+
+  if (isReplyOnlyQuotedHistory(ctx, replyText)) {
+    return {
+      isLead: false, customCriteriaMatched: false, proposalSeen: false,
+      interestSignals: [], reason: 'В письме только процитированная переписка, нового ответа получателя нет.',
+      confidence: 0.99, needsReview: false, objectionHandleable: false, objectionDraft: null,
       threadContext: ctx,
     };
   }
