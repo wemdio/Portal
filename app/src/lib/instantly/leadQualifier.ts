@@ -434,6 +434,10 @@ const QUOTED_REPLY_BOUNDARY_PATTERNS = [
   /^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}[^\n]{0,160}(?:пишет|написал(?:а)?|wrote):\s*$/i,
   /^(?:пн|вт|ср|чт|пт|сб|вс|понедельник|вторник|среда|четверг|пятница|суббота|воскресенье),?\s+\d{1,2}\s+[а-яё]{3,}\.?(?:\s+\d{4})?(?:\s*г\.)?[^\n]{0,160}:\s*$/i,
 ];
+const WRAPPED_QUOTED_SENDER_PATTERN = new RegExp(
+  String.raw`<\s*${CONTACT_EMAIL_SOURCE}\s*>\s*(?:wrote\s*)?:\s*$`,
+  'iu',
+);
 const LETTER_TOKEN_START_SOURCE = String.raw`(?:^|[^A-Za-zА-ЯЁа-яё])`;
 const LETTER_TOKEN_END_SOURCE = String.raw`(?=$|[^A-Za-zА-ЯЁа-яё])`;
 const TEMPORARY_NOT_INTERESTED_SOURCE = String.raw`(?:(?:(?:нам|мне)\s+)?(?:сейчас|пока|на\s+данный\s+момент)\s+(?:(?:нам|мне)\s+)?(?:это\s+)?не\s+интересн(?:о|а|ы)|(?:(?:нам|мне)\s+)?(?:это\s+)?не\s+интересн(?:о|а|ы)\s+(?:сейчас|пока|на\s+данный\s+момент)|(?:(?:we(?:\s+are|'re)?|i(?:\s+am|'m)?|this|it)\s+)?not\s+interested\s+(?:right\s+now|now|at\s+the\s+moment))`;
@@ -763,12 +767,25 @@ function isPlainContactRoutingReply(text: string): boolean {
 
 function extractAuthoredReplyText(text: string): string {
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
-  const boundaryIndex = lines.findIndex((line) => {
+  const boundaryIndex = lines.findIndex((line, index) => {
     const trimmed = line.trim();
     if (!trimmed) return false;
     return (
       SIGNATURE_BOUNDARY_PATTERN.test(trimmed) ||
-      QUOTED_REPLY_BOUNDARY_PATTERNS.some((pattern) => pattern.test(trimmed))
+      QUOTED_REPLY_BOUNDARY_PATTERNS.some((pattern) => pattern.test(trimmed)) ||
+      // Mail clients can fold a dated quote header before the sender address.
+      // Require a complete sender header AND an immediately following quote;
+      // a human date/meeting sentence must not become a signature boundary.
+      (line.length <= 240 && [2, 3].some((width) => {
+        const parts = lines.slice(index, index + width);
+        if (parts.length !== width || parts.some((part) => !part.trim() || part.length > 240)) return false;
+        const header = parts.map((part) => part.trim()).join(' ');
+        const following = lines.slice(index + width, index + width + 3)
+          .find((part) => part.trim())?.trim();
+        return following?.startsWith('>') === true &&
+          WRAPPED_QUOTED_SENDER_PATTERN.test(header) &&
+          QUOTED_REPLY_BOUNDARY_PATTERNS.some((pattern) => pattern.test(header));
+      }))
     );
   });
   return lines.slice(0, boundaryIndex === -1 ? lines.length : boundaryIndex).join('\n').trim();
@@ -780,7 +797,7 @@ function semanticNonLead(result: QualificationResult, kind: NonLeadKind): Qualif
   const reasons: Record<NonLeadKind, string> = {
     seller_pitch: 'Получатель предлагает нам собственные товары или услуги, а не проявляет интерес к нашему предложению.',
     service_followup: 'Служебное продолжение переписки без покупательского интереса к нашему предложению.',
-    contact_routing: 'Получатель только перенаправил обращение к другому человеку или в отдел без собственного интереса.',
+    contact_routing: 'Получатель только указал адресата обращения (себя, другого человека или отдел), не выразив собственного покупательского интереса.',
   };
   return {
     ...result,
@@ -2030,6 +2047,7 @@ function buildSystemPrompt(
 - Вежливая готовность сотрудничать, личный телефон и предложение созвониться внутри встречной продажи не меняют направление интереса. Для полностью встречного предложения ставь non_lead_kind="seller_pitch".
 - non_lead_kind="service_followup" — служебное продолжение тикета/обслуживания, в котором поставщик ждёт нашу обратную связь или обсуждает выполнение своего запроса, без интереса приобрести наше предложение. Это может быть живой человек, а не автоответ. Одни лишь адрес support@, номер тикета или слова «обратная связь» НЕ доказывают эту категорию: сверяй роли отправителей, содержание и контекст.
 - non_lead_kind="contact_routing" — только передача контакта/перенаправление к коллеге или в отдел без собственного интереса: «можно связаться с Юлией, она отвечает за партнёрства»; «send the requested information to affiliates@..., this team cannot help». Это не собственное согласие на звонок и не запрос нашей цены, даже после подробного оффера.
+- Подтверждение СЕБЯ как адресата тоже может быть contact_routing: на вопрос «кто отвечает за документы / кому адресовать письмо?» ответили только «Рассказать можно мне», «Это ко мне», «Я отвечаю за это», «You can tell me». По дефолту это is_lead=false, needs_review=false: человек указал, КОМУ рассказывать, но не выразил интерес к решению. Наличие описания продукта, длина исходящего письма и его цитата не меняют этот смысл. Не путай с ответом на предложение провести демо/встречу или рассказать о решении: учитывай, на какой вопрос ответил человек. Если рядом есть «интересно ваше решение», запрос цены/КП, материалов после оффера или согласие на звонок — оцени этот отдельный интерес, non_lead_kind=null. Положительный кастомный критерий «ответственный ответил сам / назвал себя — лид» имеет приоритет; одного номера или email в подписи для такого совпадения недостаточно.
 - Если в том же основном ответе есть реальный покупательский интерес к НАШЕМУ предложению (вопрос о нашей цене, запрос нашего КП, согласие обсуждать наше решение), ставь non_lead_kind=null и оцени этот интерес. Описание своего бизнеса не отменяет покупательский запрос. «Пришлите ваше КП, передам руководству» — лид; простое перенаправление к коллеге без такого запроса — нет.
 - Положительный кастомный критерий проекта может считать сознательную передачу контакта лидом. Но явный кастомный запрет «передача своего или чужого контакта без интереса — НЕ лид» распространяется и на «Напишите мне в Макс +номер» после оффера; сама смена канала не является отдельным интересом.
 - При non_lead_kind != null и отсутствии совпадения с положительным кастомным критерием ставь is_lead=false, needs_review=false, objection_handleable=false, objection_draft=null. При сомнении в направлении или для иных ответов non_lead_kind=null. Не выдумывай направление из подписи или цитаты.
@@ -2057,7 +2075,7 @@ function buildSystemPrompt(
 - После подтверждённого оффера ответы «интересно», «нам интересно», «возможно, нам это интересно» выражают собственный положительный интерес: ставь is_lead=true, needs_review=false даже без назначенного следующего шага.
 - Самостоятельное «Надеюсь на возможное сотрудничество», «Будем рады сотрудничеству» или «Хотели бы сотрудничать» также является лидом, даже если исходящее письмо не восстановилось.
 - Выполнение прямого CTA из содержательного предложения — например, мы попросили личный номер, а человек передал свой номер — является лидом.
-- После подтверждённого оффера просьба прислать предложение, информацию, материалы, презентацию, кейсы или примеры означает продолжение интереса и является лидом. В том числе «пришлите материалы, возможно, когда-нибудь посмотрим». Но просьба о материалах не отменяет явный отказ или условный интерес третьих лиц.
+- После подтверждённого оффера просьба прислать предложение, информацию, материалы, презентацию, кейсы или примеры означает продолжение интереса и является лидом. В том числе «пришлите материалы, возможно, когда-нибудь посмотрим». Но просьба о материалах не отменяет явный отказ или условный интерес третьих лиц. Простое указание себя как адресата («рассказать можно мне» в ответ на поиск ответственного) не подменяй запросом материалов.
 - Отложенный интерес — «вернитесь через месяц», «напишите летом», «через месяц напишите мне», «летом свяжитесь со мной», «давайте обсудим позже», «сейчас не актуально, но напишите через месяц», готовность сотрудничать в будущем — является лидом только после подтверждённого содержательного оффера. После одного запроса контакта или без подтверждения оффера такой перенос сам по себе НЕ лид: is_lead=false, needs_review=false. Слова «к теме» или «к вашему предложению» сами по себе не доказывают понимания, что именно предлагается. Самодостаточный запрос КП/цены/покупки или явное согласие на звонок, встречу, демо или тест оценивай отдельно: это самостоятельное основание даже без найденного исходящего письма. Категоричный отказ («не интересно») и перенаправление к другому человеку, чужому менеджеру/коллеге или в общий отдел отложенным интересом не являются; дата такого перенаправления ничего не меняет.
 - После подтверждённого оффера неопределённое «возможно, когда-нибудь посмотрим» считается отложенным интересом. Без подтверждённого оффера такой ответ сам по себе не является лидом: is_lead=false, needs_review=false.
 - Явное отрицание («не интересно», «не актуально») и условный интерес третьих лиц («если коллегам будет интересно — они свяжутся») не являются положительным интересом самого получателя.
@@ -2624,6 +2642,43 @@ function isPlainContactReplyToContactOnlyOpener(
   );
 }
 
+// Unlike a materials request or a meeting acceptance, this is only an answer
+// to "who is the right recipient?". Match the ENTIRE authored reply: any extra
+// business content must reach ordinary AI/custom qualification. Do not extend
+// the shared contact parser: it is also used by deferred-interest/CTA guards.
+const SELF_RECIPIENT_CONFIRMATION_PATTERN = /^(?:рассказать\s+(?:можно|можете)\s+(?:мне|нам)|(?:можно|можете)\s+(?:мне|нам)\s+рассказать|(?:мне|нам)\s+(?:можно|можете)\s+рассказать|(?:это|по\s+(?:этому|данному)\s+вопросу)\s+(?:ко\s+мне|к\s+нам)|я\s+отвечаю\s+за\s+(?:это|этот\s+вопрос)|мы\s+отвечаем\s+за\s+(?:это|этот\s+вопрос)|you\s+can\s+tell\s+me|(?:i\s+am|i['’]m)\s+the\s+right\s+person)$/iu;
+const RESPONSIBLE_RECIPIENT_REQUEST_PATTERNS = [
+  /(?:^|[\s,])кто\s+[^.!?]{0,100}(?:отвечает\s+за|занимается|ответственн[а-яё]*)(?=\s|[?!.,]|$)/iu,
+  /(?:^|[\s,])кому\s+[^.!?]{0,100}(?:адресовать|направить|переслать)(?=\s|[?!.,]|$)/iu,
+  /(?:подскажите|подскажете|пришлите|дайте)\s+[^.!?]{0,60}(?:контакт|почту|email)\s+(?:коллеги|ответственного)(?=\s|[?!.,]|$)/iu,
+  /\bwho\s+[^.!?]{0,80}(?:responsible\s+for|handles|in\s+charge\s+of|right\s+person)\b/iu,
+];
+// Deliberately conservative: even a possible competing explanation/demo offer
+// is enough to skip the shortcut. The model then interprets the actual ask.
+const RECIPIENT_CONFIRMATION_COMPETING_OFFER_PATTERN = /(?:^|[^\p{L}])(?:демо|демонстрац[а-яё]*|созвон[а-яё]*|звон[а-яё]*|встреч[а-яё]*|пилот[а-яё]*|тест[а-яё]*|рассказать|расскажу|расскажем|показать|покажу|покажем|demo|demonstration|call|meeting|pilot|test)(?=$|[^\p{L}])/iu;
+
+function isSelfRecipientConfirmation(ctx: ThreadContext, replyText: string): boolean {
+  const statement = normalizeAuthoredStatement(extractAuthoredReplyText(replyText));
+  if (!SELF_RECIPIENT_CONFIRMATION_PATTERN.test(statement) || !ctx.lastOutbound) return false;
+  const outbound = extractAuthoredReplyText(getBodyText(ctx.lastOutbound.body)).replace(/\s+/g, ' ');
+  return RESPONSIBLE_RECIPIENT_REQUEST_PATTERNS.some((pattern) => pattern.test(outbound)) &&
+    // A competing concrete CTA makes the short answer ambiguous. Leave it to
+    // semantic assessment instead of treating acceptance of a demo as routing.
+    !RECIPIENT_CONFIRMATION_COMPETING_OFFER_PATTERN.test(outbound) &&
+    !hasDirectActionableCta(outbound) && !hasDirectActionableCta(outbound, true);
+}
+
+function selfRecipientConfirmationNonLead(
+  ctx: ThreadContext,
+  baseResult?: QualificationResult,
+): QualificationResult {
+  return {
+    ...sharedContactRoutingNonLead(ctx, baseResult),
+    nonLeadKind: 'contact_routing',
+    reason: 'Получатель подтвердил, кому можно адресовать информацию, но не выразил интереса к самому решению.',
+  };
+}
+
 /** Внутренние функции для unit-тестов парсера. Не использовать в продакшен-коде. */
 export const _private = {
   sanitizeAIJsonString,
@@ -2830,6 +2885,9 @@ function applyQualificationGuards(
   // classifyWithAI has already applied the machine veto before custom priority.
   // Do not let contact/CTA postprocessing undo that verdict on either pass.
   if (aiResult.machineReplyKind) return aiResult;
+  if (!leadCriteria?.trim() && isSelfRecipientConfirmation(ctx, replyText)) {
+    return selfRecipientConfirmationNonLead(ctx, aiResult);
+  }
   const criteriaAwareResult = enforceDeterministicCustomCriteria(
     aiResult,
     leadCriteria,
@@ -2926,6 +2984,12 @@ export async function qualifyReply(
       objectionDraft: null,
       threadContext: ctx,
     };
+  }
+
+  // Recipient confirmation is human routing, not technical noise. Custom
+  // definitions are interpreted by the model before any semantic verdict.
+  if (!hasCustomCriteria && isSelfRecipientConfirmation(ctx, replyText)) {
+    return { ...selfRecipientConfirmationNonLead(ctx), threadContext: ctx };
   }
 
   // Узкий дефолтный guard для институциональной маршрутизации: «обращайтесь в

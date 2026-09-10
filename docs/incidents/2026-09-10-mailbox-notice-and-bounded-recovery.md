@@ -55,5 +55,26 @@ Read-only diagnostics on 2026-09-10 found two separate failure modes:
   ownership/dependency/budget blockers need separate work. Old replies were
   not hidden, deleted or converted to non-leads merely because of their age.
 
-The separately reported Legal Brain response “Рассказать можно мне” has only
-been diagnosed. This change does not add a heuristic for that semantic case.
+## Follow-up: confirming the recipient is not buyer interest
+
+The separately reported Legal Brain response “Рассказать можно мне” answered
+an outbound question about who handles documents. The outbound described the
+product, but the reply only identified its recipient. The project had no custom
+lead criteria. This was a fresh reply (about 48 seconds to qualification), not
+another old-message recovery.
+
+The follow-up change adds a narrow default-only shortcut for a complete
+self-recipient confirmation paired with a visible responsible-person question.
+It does not use the outbound's length or the mere presence of a quote as a
+positive signal. An extra human request/interest, a missing recipient question,
+or a possible competing explanation/demo/call offer stays in semantic
+assessment. Custom definitions bypass the shortcut. The same guard also runs
+after model assessment, and both model passes get the clarified distinction.
+
+Wrapped quote headers are recognized only when a bounded 2–3-line header has
+a sender email and is followed by quoted text. Ordinary dates and live meeting
+requests must remain authored content. Offline checks exercise the actual
+qualification pipeline with mocked model responses, including optimistic and
+cached verdicts, custom criteria and mixed human requests. They do not measure
+live-model accuracy on every wording. No historical records or Telegram posts
+are changed by this code commit; deployment remains a separate user action.
