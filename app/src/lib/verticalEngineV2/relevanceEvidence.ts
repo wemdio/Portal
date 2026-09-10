@@ -7,7 +7,7 @@ import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
 import type { SerperOrganicItem } from '@/lib/search/serperClient';
 import { normalizeVeCompanyInn } from './collectionIdentity';
 import { parseVeEvidencePage, selectVeEvidenceText, type VeEvidencePage } from './relevancePage';
-import { searchVeRelevanceWebsites, veSearchProviderFailure, type VeSearchProviderFailure } from './relevanceSearch';
+import { searchVeRelevanceWebsites, veSearchProviderFailure, VE_RELEVANCE_SEARCH_OPERATION_TIMEOUT_MS, type VeSearchProviderFailure } from './relevanceSearch';
 
 export interface VeRelevanceEvidence {
   status: 'ok' | 'unavailable' | 'error';
@@ -27,7 +27,7 @@ export interface VeRelevanceEvidenceOptions {
   search?: (query: string, signal: AbortSignal) => Promise<SerperOrganicItem[]>;
 }
 
-const TOTAL_TIMEOUT_MS = 25_000;
+const TOTAL_TIMEOUT_MS = 40_000;
 const PAGE_TIMEOUT_MS = 5_000;
 const MAX_BODY_BYTES = 1_048_576;
 const MAX_TEXT_CHARS = 6_000;
@@ -160,7 +160,7 @@ async function fetchEvidencePage(initialUrl: URL, signal: AbortSignal, focus?: s
   throw new Error('website_redirect_unavailable');
 }
 
-/** Bounded official-site evidence: at most 10 pages, one search, 25 seconds.
+/** Bounded official-site evidence: at most 10 pages, one search, 40 seconds.
  * Search snippets are discovery only. With a known INN, every selected domain
  * must confirm that sole INN on its own pages before any activity is returned.
  * Unavailable, conflicting or unverified identity always stays needs_review.
@@ -260,7 +260,7 @@ export async function fetchVeRelevanceEvidence(
       const query = '"' + inn + '" официальный сайт -site:rusprofile.ru -site:list-org.com -site:checko.ru -site:companium.ru';
       let results: SerperOrganicItem[];
       try {
-        results = await withVeDeadline('relevance website search', 6_000, signal, async (searchSignal) =>
+        results = await withVeDeadline('relevance website search', VE_RELEVANCE_SEARCH_OPERATION_TIMEOUT_MS, signal, async (searchSignal) =>
           opts.search ? opts.search(query, searchSignal) : searchVeRelevanceWebsites(query, searchSignal));
       } catch (error) {
         if (error instanceof ProviderUsageWriteError) throw error;

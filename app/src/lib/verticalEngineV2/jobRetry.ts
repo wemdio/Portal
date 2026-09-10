@@ -12,7 +12,7 @@
  * они умирают быстро, как раньше.
  */
 
-import { isVeProviderBillingError } from './collectionErrors';
+import { isVeProviderBillingError, isVeProviderConfigurationError } from './collectionErrors';
 
 /** Попытки для постоянных ошибок — как было до автоповтора. */
 export const PERMANENT_MAX_ATTEMPTS = 3;
@@ -24,8 +24,9 @@ const RETRY_BACKOFF_MAX_MS = 120_000;
 
 /** Транзиентная ли ошибка стадии (стоит ли ждать и повторять). */
 export function isRetryableStageError(msg: string): boolean {
-  if (isVeProviderBillingError(msg)) return false;
+  if (isVeProviderBillingError(msg) || isVeProviderConfigurationError(msg)) return false;
   return (
+    /\bSerper transient:/i.test(msg) ||
     /\b(5\d\d|429)\b/.test(msg) ||
     /provider is currently unavailable/i.test(msg) ||
     /econnreset|econnrefused|etimedout|enotfound|network|fetch failed|socket hang up|timeout|aborted/i.test(msg)
@@ -37,7 +38,7 @@ export function maxAttemptsFor(msg: string): number {
   // A journal failure may occur after a paid response. A fresh worker scope
   // must not automatically repeat the stage and charge for that work again.
   if (msg === 'Provider usage journal could not be saved.') return 1;
-  if (isVeProviderBillingError(msg)) return 1;
+  if (isVeProviderBillingError(msg) || isVeProviderConfigurationError(msg)) return 1;
   return isRetryableStageError(msg) ? RETRYABLE_MAX_ATTEMPTS : PERMANENT_MAX_ATTEMPTS;
 }
 

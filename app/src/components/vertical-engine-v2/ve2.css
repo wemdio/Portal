@@ -300,6 +300,246 @@ html[data-portal-theme="dark"] .ve2 {
 .ve2-p-5 {
   padding: 20px;
 }
+/* Hypothesis selection: verticals group separate, readable choices. */
+.ve2-preparation {
+  display: grid;
+  gap: 16px;
+  padding: 24px;
+  border: 1px solid var(--ve2-line);
+  border-radius: 10px;
+  background: var(--ve2-surface);
+}
+.ve2-preparation-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ve2-preparation > p {
+  max-width: 75ch;
+  line-height: 1.65;
+}
+.ve2-preparation-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin: 0;
+  padding: 16px 0 0;
+  border-top: 1px solid var(--ve2-line);
+  list-style: none;
+}
+.ve2-preparation-steps > li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ve2-mute);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.ve2-preparation-steps > li[data-state="current"],
+.ve2-preparation-steps > li[data-state="done"] {
+  color: var(--ve2-fg);
+}
+.ve2-preparation-steps > li[data-state="current"] {
+  font-weight: 600;
+}
+.ve2-preparation-step-num {
+  display: inline-flex;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  border: 1px solid var(--ve2-line-strong);
+  border-radius: 50%;
+}
+.ve2-preparation-steps > li[data-state="current"] .ve2-preparation-step-num {
+  border-color: var(--ve2-fg);
+  background: var(--ve2-fg);
+  color: var(--ve2-bg);
+}
+@media (max-width: 640px) {
+  .ve2-preparation {
+    padding: 16px;
+  }
+  .ve2-preparation-steps {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+}
+
+.ve2-hypothesis-step,
+.ve2-vertical-list {
+  display: grid;
+  gap: 28px;
+}
+.ve2-hypothesis-intro {
+  display: grid;
+  gap: 10px;
+  max-width: 72ch;
+}
+.ve2-vertical-group {
+  min-width: 0;
+  padding: 24px;
+  border: 1px solid var(--ve2-line);
+  border-radius: 12px;
+  background: var(--ve2-surface);
+}
+.ve2-vertical-header {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 22px;
+}
+.ve2-vertical-header > p {
+  max-width: 72ch;
+  line-height: 1.65;
+}
+.ve2-vertical-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 16px;
+}
+.ve2-vertical-title {
+  font-size: 18px;
+  line-height: 1.35;
+  font-weight: 600;
+}
+.ve2-vertical-count {
+  font-size: 12px;
+  color: var(--ve2-mute);
+}
+.ve2-hypothesis-list {
+  display: grid;
+  gap: 12px;
+}
+.ve2-hypothesis-option {
+  min-width: 0;
+  border: 1px solid var(--ve2-line);
+  border-radius: 8px;
+  background: var(--ve2-bg);
+}
+.ve2-hypothesis-option:has(input:not(:disabled)):hover {
+  border-color: var(--ve2-input-line);
+}
+.ve2-hypothesis-option[data-selected] {
+  border-color: var(--ve2-fg);
+  box-shadow: inset 3px 0 0 var(--ve2-fg);
+  background: var(--ve2-elev);
+}
+.ve2-hypothesis-label {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 18px 18px 12px;
+  cursor: pointer;
+}
+.ve2-hypothesis-label:has(input:disabled) {
+  cursor: default;
+}
+.ve2-hypothesis-label > input {
+  margin-top: 3px;
+}
+.ve2-hypothesis-copy {
+  display: grid;
+  gap: 8px;
+  max-width: 72ch;
+  overflow-wrap: anywhere;
+}
+.ve2-hypothesis-copy > .ve2-mut {
+  line-height: 1.65;
+}
+.ve2-hypothesis-option[data-rejected] .ve2-h3 {
+  color: var(--ve2-mute);
+}
+.ve2-hypothesis-meta {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  padding: 0 18px 16px 50px;
+}
+.ve2-vertical-dossier > summary,
+.ve2-hypothesis-evidence > summary {
+  width: fit-content;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.ve2-dossier-content,
+.ve2-evidence-content {
+  display: grid;
+  gap: 20px;
+  margin-top: 16px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.ve2-dossier-content {
+  padding: 20px;
+  border-radius: 8px;
+  background: var(--ve2-bg);
+}
+.ve2-dossier-content > button {
+  justify-self: start;
+}
+.ve2-dossier-note {
+  display: grid;
+  gap: 8px;
+  max-width: 75ch;
+  margin-top: 14px;
+  line-height: 1.65;
+}
+.ve2-evidence-item {
+  display: grid;
+  gap: 8px;
+}
+.ve2-evidence-item > blockquote {
+  border-left: 2px solid var(--ve2-line-strong);
+  padding-left: 12px;
+}
+.ve2-hypothesis-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 20px 24px;
+  border: 1px solid var(--ve2-line);
+  border-radius: 12px;
+  background: var(--ve2-surface);
+}
+.ve2-hypothesis-language {
+  display: grid;
+  gap: 8px;
+  width: 180px;
+}
+.ve2-hypothesis-submit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+@media (max-width: 640px) {
+  .ve2-vertical-group {
+    padding: 16px;
+  }
+  .ve2-hypothesis-label {
+    padding: 16px 12px 12px;
+    gap: 10px;
+  }
+  .ve2-hypothesis-meta {
+    padding: 0 12px 16px 42px;
+  }
+  .ve2-dossier-content {
+    padding: 14px;
+  }
+  .ve2-hypothesis-actions {
+    padding: 16px;
+  }
+  .ve2-hypothesis-language,
+  .ve2-hypothesis-submit,
+  .ve2-hypothesis-submit > button {
+    width: 100%;
+  }
+}
 .ve2-soft {
   background: var(--ve2-elev);
   border-radius: 8px;

@@ -25,15 +25,9 @@ import { FinalLettersEditor } from './FinalLettersEditor';
 import { OutreachLaunchPanel } from './OutreachLaunchPanel';
 import { CampaignProgress } from './CampaignProgress';
 import { ManualBaseLibrary } from './ManualBaseLibrary';
+import { PreparationProgress, getPreparationPresentation } from './PreparationProgress';
 
 const LABELS = ['Гипотезы', 'Письма', 'Базы и объём', 'Запуск', 'Результаты'];
-const PREP_LABELS = {
-  pending: 'Ожидает подготовки',
-  collecting: 'Собираем и проверяем базу для итоговых писем',
-  generating: 'Готовим итоговые письма',
-  ready: 'Готово',
-  error: 'Подготовка остановлена',
-};
 const RUN_LABELS = {
   queued: 'Запуск в очереди',
   running: 'Создаём и запускаем кампании',
@@ -441,133 +435,154 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
         </aside>
         <main className="min-w-0 ve2-workspace">
           {step === 1 ? (
-            <section className="space-y-5">
-              <h2 className="ve2-h2">Выберите гипотезы</h2>
-              <p className={HE.muted}>
-                Можно выбрать гипотезы из нескольких вертикалей. Доказательства и досье помогут проверить выбор.
-              </p>
-              {detail.verticals.map((vertical) => {
-                const dossier = detail.dossiers?.find(
-                  (d) => d.vertical_id === vertical.id && d.status === 'ready' && d.data,
-                );
-                const dossierBusy = detail.jobs.some(
-                  (j) =>
-                    j.stage === 'dossier' &&
-                    j.payload?.vertical_id === vertical.id &&
-                    ['pending', 'running'].includes(j.status),
-                );
-                return (
-                  <article key={vertical.id} className="border-t border-[var(--ve2-line)] pt-5">
-                    <h3 className="ve2-h3">{vertical.name}</h3>
-                    <p className={`mt-2 ${HE.muted}`}>{vertical.summary}</p>
-                    <details className="mt-3">
-                      <summary className="ve2-link cursor-pointer">Досье вертикали</summary>
-                      <div className="mt-4 space-y-4">
-                        {dossier?.data ? (
-                          <>
-                            <DossierSegmentCard data={dossier.data} />
-                            <DossierSignalsCard data={dossier.data} />
-                            <DossierDatasetCard data={dossier.data} />
-                          </>
-                        ) : (
-                          <p className={HE.muted}>Досье ещё не подготовлено.</p>
-                        )}
-                        <button
-                          type="button"
-                          disabled={dossierBusy}
-                          className={HE.btnGhost}
-                          onClick={() => void runDossier(vertical.id)}
-                        >
-                          {dossierBusy ? 'Собираем досье…' : dossier ? 'Обновить досье' : 'Собрать досье'}
-                        </button>
-                      </div>
-                    </details>
-                    {(detail.hypotheses ?? [])
-                      .filter((h) => h.vertical_id === vertical.id)
-                      .map((h) => (
-                        <div key={h.id} className="border-t border-[var(--ve2-line)] mt-4 pt-4">
-                          <label className="flex items-start gap-3">
-                            <input
-                              type="checkbox"
-                              className="ve2-cbx mt-1"
-                              checked={selectedIds.includes(h.id)}
-                              disabled={busy || locked || h.status === 'rejected' || !snapshot}
-                              onChange={(e) =>
-                                void change({
-                                  action: 'select',
-                                  language: snapshot?.setup.language ?? 'ru',
-                                  hypothesis_ids: e.target.checked
-                                    ? [...selectedIds, h.id]
-                                    : selectedIds.filter((id) => id !== h.id),
-                                })
-                              }
-                            />
-                            <span className="ve2-h3">{h.title}</span>
-                          </label>
-                          <p className={`mt-2 ${HE.muted}`}>{h.description}</p>
-                          {h.status === 'rejected' ? (
+            <section className="ve2-hypothesis-step">
+              <header className="ve2-hypothesis-intro">
+                <h2 className="ve2-h2">Выберите гипотезы</h2>
+                <p className={HE.muted}>
+                  Можно выбрать гипотезы из нескольких вертикалей. Доказательства и досье помогут проверить выбор.
+                </p>
+              </header>
+              <div className="ve2-vertical-list">
+                {detail.verticals.map((vertical) => {
+                  const hypotheses = detail.hypotheses.filter((h) => h.vertical_id === vertical.id);
+                  const dossier = detail.dossiers?.find(
+                    (d) => d.vertical_id === vertical.id && d.status === 'ready' && d.data,
+                  );
+                  const dossierBusy = detail.jobs.some(
+                    (j) =>
+                      j.stage === 'dossier' &&
+                      j.payload?.vertical_id === vertical.id &&
+                      ['pending', 'running'].includes(j.status),
+                  );
+                  return (
+                    <article key={vertical.id} className="ve2-vertical-group" aria-labelledby={`vertical-${vertical.id}`}>
+                      <header className="ve2-vertical-header">
+                        <div className="ve2-vertical-title-row">
+                          <h3 id={`vertical-${vertical.id}`} className="ve2-vertical-title">{vertical.name}</h3>
+                          <span className="ve2-vertical-count">Гипотез: {hypotheses.length}</span>
+                        </div>
+                        {vertical.summary ? <p className={HE.muted}>{vertical.summary}</p> : null}
+                        <details className="ve2-vertical-dossier">
+                          <summary className="ve2-link">Досье вертикали</summary>
+                          <div className="ve2-dossier-content">
+                            {dossier?.data ? (
+                              <>
+                                <DossierSegmentCard data={dossier.data} />
+                                <DossierSignalsCard data={dossier.data} />
+                                <DossierDatasetCard data={dossier.data} />
+                              </>
+                            ) : (
+                              <p className={HE.muted}>Досье ещё не подготовлено.</p>
+                            )}
                             <button
                               type="button"
-                              disabled={busy || locked}
-                              className={HE.btnQuiet}
-                              onClick={() => void restoreHypothesis(h.id)}
+                              disabled={dossierBusy}
+                              className={HE.btnGhost}
+                              onClick={() => void runDossier(vertical.id)}
                             >
-                              Вернуть отклонённую гипотезу
+                              {dossierBusy ? 'Собираем досье…' : dossier ? 'Обновить досье' : 'Собрать досье'}
                             </button>
-                          ) : null}
-                          <details className="mt-2">
-                            <summary className="ve2-link cursor-pointer">
-                              Доказательства · {h.evidence?.length ?? 0}
-                            </summary>
-                            <div className="mt-3 space-y-3">
-                              {h.fit_rationale ? <p className={HE.muted}>{h.fit_rationale}</p> : null}
-                              {(h.evidence ?? []).map((ev, i) => (
-                                <div key={i}>
-                                  <p>{ev.claim}</p>
-                                  {ev.quote ? <blockquote className={`mt-1 ${HE.muted}`}>{ev.quote}</blockquote> : null}
-                                  {/^https?:\/\//i.test(ev.source_url ?? '') ? (
-                                    <a className="ve2-link" href={ev.source_url} target="_blank" rel="noreferrer">
-                                      Источник
-                                    </a>
+                          </div>
+                        </details>
+                      </header>
+                      <div className="ve2-hypothesis-list">
+                        {hypotheses.map((h) => (
+                          <div
+                            key={h.id}
+                            className="ve2-hypothesis-option"
+                            data-selected={selectedIds.includes(h.id) || undefined}
+                            data-rejected={h.status === 'rejected' || undefined}
+                          >
+                            <label className="ve2-hypothesis-label">
+                              <input
+                                type="checkbox"
+                                className="ve2-cbx"
+                                aria-label={h.title}
+                                aria-describedby={`hypothesis-description-${h.id}`}
+                                checked={selectedIds.includes(h.id)}
+                                disabled={busy || locked || h.status === 'rejected' || !snapshot}
+                                onChange={(e) =>
+                                  void change({
+                                    action: 'select',
+                                    language: snapshot?.setup.language ?? 'ru',
+                                    hypothesis_ids: e.target.checked
+                                      ? [...selectedIds, h.id]
+                                      : selectedIds.filter((id) => id !== h.id),
+                                  })
+                                }
+                              />
+                              <span className="ve2-hypothesis-copy">
+                                <span className="ve2-h3">{h.title}</span>
+                                <span id={`hypothesis-description-${h.id}`} className={HE.muted}>{h.description}</span>
+                              </span>
+                            </label>
+                            <div className="ve2-hypothesis-meta">
+                              {h.status === 'rejected' ? (
+                                <button
+                                  type="button"
+                                  disabled={busy || locked}
+                                  className={HE.btnQuiet}
+                                  onClick={() => void restoreHypothesis(h.id)}
+                                >
+                                  Вернуть отклонённую гипотезу
+                                </button>
+                              ) : null}
+                              <details className="ve2-hypothesis-evidence">
+                                <summary className="ve2-link">Доказательства · {h.evidence?.length ?? 0}</summary>
+                                <div className="ve2-evidence-content">
+                                  {h.fit_rationale ? <p className={HE.muted}>{h.fit_rationale}</p> : null}
+                                  {(h.evidence ?? []).map((ev, i) => (
+                                    <div key={i} className="ve2-evidence-item">
+                                      <p>{ev.claim}</p>
+                                      {ev.quote ? <blockquote className={HE.muted}>{ev.quote}</blockquote> : null}
+                                      {/^https?:\/\//i.test(ev.source_url ?? '') ? (
+                                        <a className="ve2-link" href={ev.source_url} target="_blank" rel="noreferrer">
+                                          Источник
+                                        </a>
+                                      ) : null}
+                                    </div>
+                                  ))}
+                                  {!h.evidence?.length ? (
+                                    <p className={HE.muted}>Подтверждающих источников пока нет.</p>
                                   ) : null}
                                 </div>
-                              ))}
-                              {!h.evidence?.length ? (
-                                <p className={HE.muted}>Подтверждающих источников пока нет.</p>
-                              ) : null}
+                              </details>
                             </div>
-                          </details>
-                        </div>
-                      ))}
-                  </article>
-                );
-              })}
-              <label className="block ve2-label">
-                Язык писем
-                <select
-                  aria-label="Язык писем"
-                  className={`${HE.input} mt-2 max-w-xs`}
-                  value={snapshot?.setup.language ?? 'ru'}
-                  disabled={busy || locked || !!snapshot?.preparations.length || !snapshot}
-                  onChange={(event) =>
-                    void change({ action: 'select', hypothesis_ids: selectedIds, language: event.target.value })
-                  }
-                >
-                  <option value="ru">Русский</option>
-                  <option value="en">English</option>
-                  <option value="pl">Polski</option>
-                </select>
-              </label>
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  type="button"
-                  disabled={busy || locked || !selectedIds.length}
-                  className={HE.btnPrimary}
-                  onClick={() => void change({ action: 'prepare' })}
-                >
-                  Подготовить письма и базы
-                </button>
-                <span className={HE.muted}>Выбрано: {selectedIds.length}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+              <div className="ve2-hypothesis-actions">
+                <label className="ve2-label ve2-hypothesis-language">
+                  Язык писем
+                  <select
+                    aria-label="Язык писем"
+                    className={HE.input}
+                    value={snapshot?.setup.language ?? 'ru'}
+                    disabled={busy || locked || !!snapshot?.preparations.length || !snapshot}
+                    onChange={(event) =>
+                      void change({ action: 'select', hypothesis_ids: selectedIds, language: event.target.value })
+                    }
+                  >
+                    <option value="ru">Русский</option>
+                    <option value="en">English</option>
+                    <option value="pl">Polski</option>
+                  </select>
+                </label>
+                <div className="ve2-hypothesis-submit">
+                  <span className={HE.muted} aria-live="polite">Выбрано: {selectedIds.length}</span>
+                  <button
+                    type="button"
+                    disabled={busy || locked || !selectedIds.length}
+                    className={HE.btnPrimary}
+                    onClick={() => void change({ action: 'prepare' })}
+                  >
+                    Подготовить письма и базы
+                  </button>
+                </div>
               </div>
             </section>
           ) : null}
@@ -584,15 +599,11 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                 />
               ) : (
                 <>
-                  <StatusBox tone={preparation?.status === 'error' ? 'error' : 'info'}>
-                    {preparation?.last_error ??
-                      (preparation ? PREP_LABELS[preparation.status] : 'Запустите подготовку выбранных гипотез.')}
-                    .
-                  </StatusBox>
-                  <p className={HE.muted}>
-                    Сначала проверяем состав базы, затем сразу готовим итоговые A/B-письма. Промежуточные тексты не
-                    генерируются.
-                  </p>
+                  <PreparationProgress
+                    preparation={preparation}
+                    base={detail.bases.find((b) => b.id === preparation?.base_id)}
+                    jobs={detail.jobs}
+                  />
                   {!preparation || preparation.status === 'error' ? (
                     <button
                       type="button"
@@ -672,7 +683,9 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                         ) : null}
                       </>
                     ) : (
-                      <p className={HE.muted}>{p ? PREP_LABELS[p.status] : 'Подготовка ещё не запущена'}</p>
+                      <p className={HE.muted}>
+                        {getPreparationPresentation({ preparation: p, base, jobs: detail.jobs }).title}
+                      </p>
                     )}
                     {p?.last_error ? <StatusBox tone="error">{p.last_error}</StatusBox> : null}
                   </article>
