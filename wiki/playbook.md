@@ -44,4 +44,4 @@ The cross-campaign "60× leads gradient by mailbox health" is a **confound of ca
 ## Operational
 
 - **Don't pull /emails at >10 RPM** while `portal-worker-instantly-leads` is up. Shared workspace limit. Pause worker (`docker stop`) for heavy pulls. Source: [log.md 2026-05-22 incident](./log.md).
-- **Daily sync runs at 00:00 UTC = 03:00 МСК** via cron on prod (139.60.162.12). Logs in `/var/log/instantly-dataset-sync/`. Worker is naturally idle at that hour. See [sync.mjs](../app/scripts/instantly-dataset/sync.mjs).
+- **Daily sync runs at 00:00 UTC = 03:00 МСК** via cron on prod (139.60.162.24, бывш. 139.60.162.12). Logs in `/var/log/instantly-dataset-sync/`. Worker is naturally idle at that hour. See [sync.mjs](../app/scripts/instantly-dataset/sync.mjs).
