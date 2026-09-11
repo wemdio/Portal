@@ -7370,9 +7370,9 @@ describe('ownership retry page-budget quarantine — RED contract', () => {
     const dateNow = jest.spyOn(Date, 'now').mockImplementation(() => clock);
     try {
       // Historic 402 does not pause a successful replay. Five fast rows plus
-      // one slow row run initially, then only fast rows at the two-minute tick.
+      // one slow row run initially, then only fast rows at the one-minute tick.
       expect(await maybeReprocessOwnershipReviews()).toBe(6);
-      clock += 119_999;
+      clock += 59_999;
       expect(await maybeReprocessOwnershipReviews()).toBe(0);
       clock += 1;
       expect(await maybeReprocessOwnershipReviews()).toBe(5);

@@ -1116,7 +1116,7 @@ export function DossierSegmentCard({ data }: { data: VeDossierData }) {
           <DossierNum
             className="ve2-stat"
             value={`~${counters.companies_total.toLocaleString('ru-RU')}`}
-            caption="старый расчёт директории"
+            caption="записей в справочнике компаний"
           />
         ) : null}
         {counters.hh_vacancies_total != null ? (
@@ -1127,19 +1127,31 @@ export function DossierSegmentCard({ data }: { data: VeDossierData }) {
           />
         ) : null}
       </div>
-      <div className="mt-3 max-w-[75ch] space-y-1 text-[11px] leading-relaxed text-gray-500">
+      <div className="ve2-dossier-note ve2-mut">
         {hasCompanyLevelStats ? (
           <>
             {counters.directory_rows_total != null ? (
-              <p>{counters.directory_rows_total.toLocaleString('ru-RU')} строк до дедупликации в выбранном срезе.</p>
+              <p>
+                {counters.directory_rows_total.toLocaleString('ru-RU')} записей в выбранном сегменте до объединения
+                повторов по ИНН.
+              </p>
             ) : null}
             <p>
-              Это широкий срез директории, а не прогноз готовой базы. Email в справочнике ещё не проверены; готовые к
-              запуску адреса считаются после сборки и аудита.
+              Здесь показаны компании подходящих отраслей. Их соответствие выбранной гипотезе и email проверяются
+              при сборе базы. Количество готовых к запуску контактов появится после этих проверок.
             </p>
           </>
         ) : counters.companies_total != null ? (
-          <p>Пересоберите досье, чтобы увидеть уникальные компании и указанные каналы связи.</p>
+          <>
+            <p>
+              В этом досье сохранён прежний подсчёт записей: одна компания могла учитываться несколько раз.
+              Соответствие гипотезе и email ещё не проверены.
+            </p>
+            <p>
+              Обновите досье, чтобы увидеть компании без повторов по ИНН и сколько из них имеют email или
+              телефон. Готовые к запуску контакты считаются после сбора и проверки базы.
+            </p>
+          </>
         ) : null}
         {counters.companies_note ? <p>{counters.companies_note}</p> : null}
       </div>

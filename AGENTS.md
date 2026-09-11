@@ -1,8 +1,16 @@
 # Portal AI agent rules
 
-## Production infrastructure map (critical, current since 2026-07-22)
+## SSH access from this Mac (verified 2026-09-10)
 
-- The current production host is `139.60.162.12`. It runs the Portal app and workers, the main Portal Supabase/Postgres stack, the Instantly operational Postgres instances, and the analytics database `instantly_dataset`.
+- Before searching for SSH credentials, read [`docs/ssh-access.md`](./docs/ssh-access.md). Local key-based access is already restored and verified.
+- SSH target: Hostkey server **33074**, **`root@139.60.162.24`**. Local private key path: `/Users/cybermart/.ssh/portal_hostkey_mac_ed25519`.
+- The older `139.60.162.12` references below are historical, **not the current verified SSH target**. This SSH note does not authorize changing database URLs, MCP endpoints or CI secrets.
+- Never print/copy the private key, commit credentials, disable host-key verification, or reinstall access just because another worktree has older docs. Agents running on another computer/cloud do not have this Mac's key.
+- SSH availability permits in-scope read-only diagnostics only; production writes/deploys still require explicit approval under the release boundary below.
+
+## Production infrastructure map (historical 2026-07-22; SSH superseded above)
+
+- The historical infrastructure map recorded `139.60.162.12` for the Portal app/workers, main Portal Supabase/Postgres, Instantly operational Postgres and analytics database `instantly_dataset`. Do not use this historical address to discover SSH access; see the verified SSH note above. Database/service endpoints must be verified separately before changing configuration.
 - The former DB host `144.31.54.166` is retained only for rollback copies and explicitly documented utility services. Do not use it as a current production database endpoint unless the user explicitly requests rollback verification or rollback work.
 - Documented utility services on `144.31.54.166` include the email-validation SMTP probe proxies (`smtp-proxy` :3100, `smtp-proxy-b` :3101, Docker compose in `/opt/smtp-proxy`); a third probe runs as Python/systemd on `89.19.209.252` (Timeweb, `/opt/smtp-proxy/smtp_proxy.py`). Workers reach them via `SMTP_PROXY_URLS`. Note: on 2026-07-24 the hoster's DNS resolver (`169.254.2.3`) on `144.31.54.166` died and killed all probes with `EAI_AGAIN` despite green `/health` — public resolvers were added to `/etc/resolv.conf`, but `dhclient` may revert it; see `docs/incidents/2026-07-24-smtp-proxy-hoster-dns-outage.md`.
 - `portal-db` means the main operational Portal database (projects, tasks, clients, invoices, CRM and related application data), normally through read-only access.

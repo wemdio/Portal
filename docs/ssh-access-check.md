@@ -1,5 +1,10 @@
 # One-time SSH access check through Semaphore
 
+> **Current status (2026-09-10): local Mac SSH access is restored.**
+> Read [SSH access from the project Mac](./ssh-access.md) for the working key
+> path, endpoint and read-only command. The procedure below is historical
+> recovery documentation; do not rerun it merely to locate existing access.
+
 This is a **read-only preparation step**, not SSH key installation or deployment.
 It uses the existing `portal_secrets` SSH credentials inside the CI runner. No API
 token is required, regenerated, exported or committed. No private key is uploaded.
