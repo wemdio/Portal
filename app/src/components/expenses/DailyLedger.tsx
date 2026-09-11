@@ -6,7 +6,7 @@ import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, ChevronsUpDown } from 'l
 import type { DayGroup } from '@/lib/expenses/byDay';
 import { expensesFetch, formatMoney, formatRub, pluralOps } from '@/lib/expenses/client';
 import { categoryLabel, sourceLabel } from '@/lib/expenses/labels';
-import type { ExpenseRow, IncomeRow } from '@/lib/expenses/types';
+import { SMALL_PAYMENT_THRESHOLD_RUB, type ExpenseRow, type IncomeRow } from '@/lib/expenses/types';
 
 /**
  * Раскрывающийся список операций по дням — общий для расхода и прихода.
@@ -26,6 +26,12 @@ interface Props {
   kind: 'expenses' | 'incomes';
   /** Query-строка периода и фильтров, без ведущего `?`. */
   query: string;
+  /**
+   * Только мелкие платежи дохода (до SMALL_PAYMENT_THRESHOLD_RUB). Такой список
+   * стоит под основным, с жёлтой пометкой, что в доход он не входит; основной
+   * список прихода их, наоборот, не показывает. Пустой — не рисуется вовсе.
+   */
+  smallOnly?: boolean;
 }
 
 type DaySortKey = 'date' | 'count' | 'total';
@@ -108,7 +114,7 @@ function formatDay(date: string): string {
   return `${d}.${m}.${y}, ${weekday}`;
 }
 
-export default function DailyLedger({ kind, query }: Props) {
+export default function DailyLedger({ kind, query, smallOnly = false }: Props) {
   const [days, setDays] = useState<DayGroup<Row>[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -117,6 +123,7 @@ export default function DailyLedger({ kind, query }: Props) {
   const [rowSort, setRowSort] = useState<{ key: RowSortKey; dir: SortDir }>({ key: 'amount', dir: 'desc' });
 
   const path = kind === 'expenses' ? '/by-day' : '/incomes/by-day';
+  const requestQuery = smallOnly ? `${query}&small=only` : query;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -124,7 +131,7 @@ export default function DailyLedger({ kind, query }: Props) {
     void (async () => {
       setLoading(true);
       try {
-        const res = await expensesFetch<{ days: DayGroup<Row>[] }>(`${path}?${query}`, {
+        const res = await expensesFetch<{ days: DayGroup<Row>[] }>(`${path}?${requestQuery}`, {
           signal: controller.signal,
         });
         if (!active) return;
@@ -142,7 +149,7 @@ export default function DailyLedger({ kind, query }: Props) {
       active = false;
       controller.abort();
     };
-  }, [path, query]);
+  }, [path, requestQuery]);
 
   const sortedDays = useMemo(() => {
     const value = (day: DayGroup<Row>): string | number =>
@@ -173,11 +180,13 @@ export default function DailyLedger({ kind, query }: Props) {
   };
 
   const columns = ROW_COLUMNS[kind];
-  const title = kind === 'expenses' ? 'Расходы по дням' : 'Приходы по дням';
+  const title = smallOnly ? 'Мелкие платежи по дням' : kind === 'expenses' ? 'Расходы по дням' : 'Приходы по дням';
 
   if (loading) return <div className="glass-tile p-4 text-xs text-zinc-400">Загрузка операций…</div>;
   if (error) return <div className="glass-tile p-4 text-xs text-rose-600">{error}</div>;
   if (days.length === 0) {
+    // Пустой список мелочи — не новость, а шум: блок просто не появляется.
+    if (smallOnly) return null;
     return <div className="glass-tile p-4 text-xs text-zinc-400">За период операций нет.</div>;
   }
 
@@ -200,6 +209,12 @@ export default function DailyLedger({ kind, query }: Props) {
           {pluralOps(periodOps)} · {formatRub(periodTotal)}
         </span>
       </div>
+
+      {smallOnly && (
+        <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs font-medium text-amber-800">
+          Не учитывается в общем доходе за период (мелкие платежи до {SMALL_PAYMENT_THRESHOLD_RUB.toLocaleString('ru-RU')} ₽)
+        </div>
+      )}
 
       <div className="grid grid-cols-[1fr_auto_auto] items-center gap-4 border-b border-zinc-100 px-4 py-2">
         {dayHeader('date', 'День', 'left')}
