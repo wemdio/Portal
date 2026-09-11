@@ -69,10 +69,10 @@ type LeadRow = {
   pipeline_id: number | null;
 };
 
-type StatusRef = { statusId: number; pipelineId: number | null };
+export type StatusRef = { statusId: number; pipelineId: number | null };
 
 /** Пара «этап + воронка» из `payload.value_before` / `value_after` события AMO. */
-function readStatusRef(payload: unknown, side: 'value_before' | 'value_after'): StatusRef | null {
+export function readStatusRef(payload: unknown, side: 'value_before' | 'value_after'): StatusRef | null {
   if (payload === null || typeof payload !== 'object') return null;
   const list = (payload as Record<string, unknown>)[side];
   if (!Array.isArray(list) || list.length === 0) return null;
