@@ -5,25 +5,31 @@ import { chunkArray, IN_CHUNK_SIZE } from '@/lib/cisLeads/batchedQuery';
 /**
  * Воронка вторичных продаж — из воронки AMO «Вторичные (и не только) продажи».
  *
- * Ступень = «сколько сделок вошло на этот этап ВНУТРИ периода», а не когорта
- * заведённых в периоде карточек (так было до 10.09.2026).
+ * Ступень = сколько сделок СТОЯЛО на этапе в последний день выбранного периода.
+ * Каждая сделка ровно один раз. Где она была до и после — видно в карточке
+ * сделки (рельсы переходов, см. firstSales/dealTransitions.ts).
  *
- * Почему переключили. Цикл продления — месяцы: клиента заводят в воронку
- * задолго до оплаты. Когортная воронка за август показывала девять сделок,
- * застрявших на первом этапе, и нули дальше, — при том что в том же августе
- * три сделки дошли до «Продлено», две получили счёт, три обсуждали продление.
- * Вся работа месяца шла по карточкам прошлых месяцев и в воронку не попадала,
- * а плитка «Продлений — 3» рядом ей открыто противоречила.
+ * Почему на конец периода, а не на сегодня. Продлённая 9 сентября nafi.ru в
+ * августовской воронке не должна выглядеть продлённой: в августе она была на
+ * паузе. Растянули период до 10 сентября — и она переезжает в «Продлено». Так
+ * воронка за прошлый месяц не меняется задним числом от того, что случилось
+ * после него.
  *
- * Плата за это — вложенности больше нет: сделка могла обсуждать продление в
- * июле, а продлиться в августе, и в августовской воронке она есть только на
- * «Продлено». Поэтому ступени показывают количества, а доли «сколько дошло от
- * предыдущего этапа» с экрана убраны — они врали бы.
+ * Путь сюда был через две другие схемы, и обе путали людей:
+ *   * до 10.09.2026 — когорта заведённых в периоде карточек: цикл продления
+ *     длиннее месяца, и за август воронка показывала девять сделок на входе и
+ *     нули дальше;
+ *   * 10–11.09.2026 — входы на этап внутри периода: сделка попадала на каждый
+ *     пройденный этап и в одном месяце висела и «на паузе», и «продлена».
  *
- * История берётся из `amo_events` (`lead_status_changed`, `to_value` — номер
- * этапа строкой). Карточка, заведённая внутри окна и ни разу не сдвинутая,
- * событий не имеет вовсе — её засчитываем на текущем этапе: иначе новые сделки
- * месяца пропали бы с экрана целиком.
+ * Какие сделки на воронке: заведённые в периоде или сдвинутые в нём хотя бы
+ * раз. Этап у каждой — тот, на котором она стояла в конце периода. Сделка,
+ * которая в конце периода была ещё в другой воронке (в первичке), сюда не
+ * попадает. Берутся карточки, которые сейчас лежат в воронке продлений:
+ * сделку, уведённую отсюда в другую воронку, прошлые периоды не увидят.
+ *
+ * Воронка при этом не вложенная: это распределение сделок по этапам, и сужение
+ * фигуры не означает отвал клиентов. Поэтому доли не показываются.
  */
 
 /** Воронка «Вторичные (и не только) продажи», создана 06.08.2026. */
@@ -47,7 +53,11 @@ export interface FunnelStage {
   statusId: number;
   name: string;
   sort: number;
-  /** Сколько сделок дошли до этого этапа хотя бы раз. */
+  /**
+   * Сколько сделок стояло на этом этапе в последний день периода.
+   * Имя поля историческое — осталось со схемы «дошло до этапа», интерфейс
+   * графика завязан на него.
+   */
   reached: number;
 }
 
@@ -65,26 +75,26 @@ export interface RenewalsFunnelDeal {
   companyName: string | null;
   responsibleName: string | null;
   amount: number | null;
-  /** Этап, на котором сделка стоит СЕЙЧАС. */
+  /**
+   * Этап сделки на последний день периода (имя поля историческое). Для периода,
+   * который кончается сегодня, это и есть текущий этап.
+   */
   currentStatusName: string | null;
-  /** Дата заведения сделки — по ней сделка и попала в период. */
+  /** Дата заведения сделки. */
   createdAt: string | null;
-  /** Заполнено, если сделка сейчас вне пути: пауза, реанимация, отвал. */
+  /**
+   * Значок исхода в строке. С 11.09.2026 всегда null: сделка стоит в группе
+   * своего текущего этапа, и сделка на паузе лежит в группе «Пауза», а не в
+   * ступени пути со значком. Поле оставлено, чтобы не трогать форму ответа.
+   */
   outcome: string | null;
   amoUrl: string | null;
 }
 
 /**
- * Сделки, сгруппированные по САМОМУ ГЛУБОКОМУ пройденному этапу.
- *
- * Не «сколько стоит на этапе сейчас» и не «дошло до этапа» (второе даёт
- * вложенные множества, и сделка попала бы в каждую группу разом). Здесь каждая
- * сделка ровно один раз — там, где остановилась, — так же, как в списке рядом
- * с воронкой первички.
- *
- * Сделка, уехавшая в паузу или отвал, остаётся в своей ступени пути: путь она
- * прошла, а исход виден отдельным значком в строке. Иначе половина списка
- * провалилась бы в исходы, и стало бы не видно, докуда именно дошли.
+ * Сделки, сгруппированные по этапу на последний день периода: каждая ровно один
+ * раз. Длина группы совпадает с числом на ступени — они считаются из одной и
+ * той же карты.
  */
 export interface RenewalsStageDeals {
   statusId: number;
@@ -95,7 +105,7 @@ export interface RenewalsStageDeals {
 
 export interface RenewalsFunnel {
   pipelineId: number;
-  /** Сделок, участвующих в воронке, — знаменатель для долей. */
+  /** Сколько сделок на воронке — на ступенях пути и в исходах вместе. */
   totalDeals: number;
   stages: FunnelStage[];
   outcomes: FunnelOutcome[];
@@ -103,27 +113,16 @@ export interface RenewalsFunnel {
    * Карточки, заведённые задним числом по портальным проектам: продления,
    * случившиеся до появления воронки.
    *
-   * В ступени они не входят и это не придирка. Их создали сразу на «Продлено»,
-   * они не проходили ни онбординг, ни обсуждение — а расчёт «дошло до этапа»
-   * засчитал бы им все предыдущие ступени, и воронка выродилась бы в
-   * прямоугольник со стопроцентной конверсией на каждом шаге. Продлены они при
-   * этом по-настоящему, поэтому показываются отдельным числом, а не прячутся.
+   * В ступени они не входят: их создали сразу на «Продлено» по данным портала,
+   * и в работе через воронку они не были. Продлены они по-настоящему, поэтому
+   * показываются отдельным числом, а не прячутся.
    */
   backfilledCount: number;
   /** Те же сделки, что стоят за ступенями, — списком (см. RenewalsStageDeals). */
   dealGroups: RenewalsStageDeals[];
   /**
-   * Сделки вне пути («Пауза», «Реанимация», «Отвал / не продлен»), сгруппированные
-   * по текущему исходу, — раскрывают цифры из `outcomes` в конкретные карточки.
-   *
-   * Ключ — ТЕКУЩИЙ этап, как и у `outcomes`: пауза, из которой проект вернулся
-   * в работу, здесь уже не пауза. В `dealGroups` сделка при этом остаётся в
-   * своей ступени с значком исхода — там вопрос «докуда дошла», здесь «кто
-   * стоит вне пути сейчас». Дубль в двух списках осознанный.
-   *
-   * Входит и сделка, не прошедшая ни одного этапа пути (например, уехавшая в
-   * отвал из «Неразобранного»): в ступенях ей нет места, а здесь она видна —
-   * иначе цифра исхода и список расходились бы.
+   * Сделки вне пути («Пауза», «Реанимация», «Отвал / не продлен»), которые
+   * стояли там в последний день периода, — раскрывают цифры `outcomes` в карточки.
    */
   outcomeGroups: RenewalsStageDeals[];
 }
@@ -148,11 +147,32 @@ interface LeadRow {
 const AMO_BASE = (process.env.AMO_BASE_URL ?? '').replace(/\/$/, '');
 
 /**
- * Окно периода. Считаются переходы на этапы внутри окна плюс карточки,
- * заведённые в окне и ещё не сдвинутые с места (у них событий нет). Дата
- * заведения карточки сама по себе в отбор не входит — см. шапку файла.
+ * Окно периода. `from` отбирает сделки (заведены или сдвинуты в окне), `to` —
+ * момент, на который берётся их этап.
  */
 export interface FunnelWindow { from: Date; to: Date }
+
+type StatusRef = { statusId: number; pipelineId: number | null };
+
+/** Пара «этап + воронка» из `payload.value_before` / `value_after` события AMO. */
+function readStatusRef(payload: unknown, side: 'value_before' | 'value_after'): StatusRef | null {
+  if (payload === null || typeof payload !== 'object') return null;
+  const list = (payload as Record<string, unknown>)[side];
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const status = (list[0] as { lead_status?: { id?: unknown; pipeline_id?: unknown } } | null)?.lead_status;
+  const statusId = Number(status?.id);
+  if (!Number.isFinite(statusId)) return null;
+  const pipelineId = Number(status?.pipeline_id);
+  return { statusId, pipelineId: Number.isFinite(pipelineId) ? pipelineId : null };
+}
+
+type EventRow = {
+  amo_deal_id: number;
+  changed_at: string | null;
+  from_value: string | null;
+  to_value: string | null;
+  payload: unknown;
+};
 
 export async function fetchRenewalsFunnel(
   db: SupabaseClient,
@@ -165,10 +185,8 @@ export async function fetchRenewalsFunnel(
   if (statusError) throw new Error(`amo_statuses: ${statusError.message}`);
 
   const statuses = (statusData ?? []) as StatusRow[];
-  const sortById = new Map<number, number>();
-  for (const row of statuses) {
-    if (row.sort !== null) sortById.set(Number(row.status_id), Number(row.sort));
-  }
+  const statusById = new Map<number, StatusRow>();
+  for (const row of statuses) statusById.set(Number(row.status_id), row);
 
   const { data: leadData, error: leadError } = await db
     .from('amo_leads')
@@ -193,80 +211,112 @@ export async function fetchRenewalsFunnel(
 
   const leads = allLeads.filter((l) => !backfilled.has(l.amo_id));
   const backfilledCount = allLeads.length - leads.length;
-  const leadById = new Map<number, LeadRow>(leads.map((l) => [Number(l.amo_id), l]));
 
-  const createdInWindow = (lead: LeadRow): boolean => {
-    if (window === undefined) return true;
-    if (!lead.created_at) return false;
-    const t = new Date(lead.created_at).getTime();
-    return Number.isFinite(t) && t >= window.from.getTime() && t <= window.to.getTime();
-  };
+  // Момент, на который берётся этап. Без окна — сегодня, то есть текущий этап.
+  const asOfMs = (window?.to ?? new Date()).getTime();
+  const fromMs = window ? window.from.getTime() : Number.NEGATIVE_INFINITY;
+  const timeOf = (iso: string | null) => (iso ? new Date(iso).getTime() : Number.NaN);
 
-  const changedInWindow = (changedAt: string | null): boolean => {
-    if (window === undefined) return true;
-    if (!changedAt) return false;
-    const t = new Date(changedAt).getTime();
-    return Number.isFinite(t) && t >= window.from.getTime() && t <= window.to.getTime();
-  };
-
-  /** Сделка → номера этапов (`sort`), на которые она вошла внутри окна. */
-  const enteredSorts = new Map<number, Set<number>>();
-  const addEntry = (dealId: number, sort: number) => {
-    const set = enteredSorts.get(dealId) ?? new Set<number>();
-    set.add(sort);
-    enteredSorts.set(dealId, set);
-  };
-
-  /** Двигали ли сделку вообще — чтобы отличить «стоит с рождения» от «двигали вне окна». */
-  const everMoved = new Set<number>();
-
+  // Вся история переходов, а не только внутри окна: этап на конец периода —
+  // это последний переход ДО его конца, и он мог случиться задолго до начала.
+  const eventsByDeal = new Map<number, EventRow[]>();
   if (leads.length > 0) {
     const ids = leads.map((l) => l.amo_id);
     for (const chunk of chunkArray(ids, IN_CHUNK_SIZE)) {
       const { data: eventData, error: eventError } = await db
         .from('amo_events')
-        .select('amo_deal_id, to_value, changed_at')
+        .select('amo_deal_id, changed_at, from_value, to_value, payload')
         .eq('event_type', 'lead_status_changed')
         .in('amo_deal_id', chunk);
       if (eventError) throw new Error(`amo_events: ${eventError.message}`);
-
-      const rows = (eventData ?? []) as {
-        amo_deal_id: number;
-        to_value: string | null;
-        changed_at: string | null;
-      }[];
-
-      for (const event of rows) {
-        if (!event.to_value) continue;
-        const sort = sortById.get(Number(event.to_value));
-        // Чужие воронки отсеиваются сами: их номеров нет в `sortById`.
-        // Системные «Успешно реализовано» / «Закрыто и не реализовано» тоже
-        // не показываем — они не этап этой воронки.
-        if (sort === undefined || sort >= SYSTEM_SORT) continue;
+      for (const event of (eventData ?? []) as EventRow[]) {
+        if (!Number.isFinite(timeOf(event.changed_at))) continue;
         const dealId = Number(event.amo_deal_id);
-        everMoved.add(dealId);
-        if (!changedInWindow(event.changed_at)) continue;
-        addEntry(dealId, sort);
+        const list = eventsByDeal.get(dealId) ?? [];
+        list.push(event);
+        eventsByDeal.set(dealId, list);
       }
+    }
+    for (const list of eventsByDeal.values()) {
+      list.sort((a, b) => timeOf(a.changed_at) - timeOf(b.changed_at));
     }
   }
 
-  // Карточка, заведённая внутри окна и ни разу не сдвинутая, событий не имеет —
-  // засчитываем её на том этапе, где она стоит. Без этого новые сделки месяца
-  // исчезли бы с воронки целиком, хотя в работу они как раз попали.
+  /**
+   * Этап сделки на конец периода. Последний переход до конца — его «куда». Если
+   * все переходы случились позже, сделка стояла там, откуда ушла первым из них.
+   * Если переходов нет вовсе — там, где стоит сейчас.
+   *
+   * Воронку берём из события: «Успешно реализовано» и «Закрыто» имеют один
+   * номер во всех воронках, и только пара «этап + воронка» говорит, была ли
+   * сделка в конце периода уже здесь или ещё в первичке.
+   */
+  const stateAt = (lead: LeadRow): StatusRef | null => {
+    const events = eventsByDeal.get(Number(lead.amo_id)) ?? [];
+    let last: EventRow | null = null;
+    for (const event of events) {
+      if (timeOf(event.changed_at) <= asOfMs) last = event;
+      else break;
+    }
+    if (last) {
+      return readStatusRef(last.payload, 'value_after')
+        ?? (last.to_value ? { statusId: Number(last.to_value), pipelineId: null } : null);
+    }
+    if (events.length > 0) {
+      const first = events[0]!;
+      return readStatusRef(first.payload, 'value_before')
+        ?? (first.from_value ? { statusId: Number(first.from_value), pipelineId: null } : null);
+    }
+    return lead.status_id === null ? null : { statusId: Number(lead.status_id), pipelineId: SECONDARY_PIPELINE_ID };
+  };
+
+  const toFunnelDeal = (lead: LeadRow, stageName: string | null): RenewalsFunnelDeal => ({
+    amoId: Number(lead.amo_id),
+    name: lead.name,
+    companyName: lead.company_name,
+    responsibleName: lead.responsible_name,
+    amount: lead.amount,
+    currentStatusName: stageName,
+    createdAt: lead.created_at,
+    outcome: null,
+    amoUrl: AMO_BASE ? `${AMO_BASE}/leads/detail/${lead.amo_id}` : null,
+  });
+
+  // Одна карта «этап на конец периода → сделки» кормит и ступени, и исходы, и
+  // оба списка: цифра на ступени и длина группы разойтись не могут.
+  const dealsBySort = new Map<number, RenewalsFunnelDeal[]>();
   for (const lead of leads) {
-    const dealId = Number(lead.amo_id);
-    if (everMoved.has(dealId)) continue;
-    if (!createdInWindow(lead)) continue;
-    const sort = lead.status_id === null ? undefined : sortById.get(Number(lead.status_id));
-    if (sort === undefined || sort >= SYSTEM_SORT) continue;
-    addEntry(dealId, sort);
+    const createdMs = timeOf(lead.created_at);
+    // Сделки на конец периода ещё не существовало.
+    if (window !== undefined && !(createdMs <= asOfMs)) continue;
+
+    const events = eventsByDeal.get(Number(lead.amo_id)) ?? [];
+    const activeInPeriod =
+      window === undefined
+      || (createdMs >= fromMs && createdMs <= asOfMs)
+      || events.some((e) => {
+        const t = timeOf(e.changed_at);
+        return t >= fromMs && t <= asOfMs;
+      });
+    if (!activeInPeriod) continue;
+
+    const state = stateAt(lead);
+    if (state === null) continue;
+    // В конце периода сделка была ещё в другой воронке — здесь её тогда не было.
+    if (state.pipelineId !== null && state.pipelineId !== SECONDARY_PIPELINE_ID) continue;
+
+    const status = statusById.get(state.statusId);
+    const sort = status?.sort ?? undefined;
+    // «Неразобранное» и системные «Успешно / Закрыто» — не этапы этой воронки,
+    // ни ступенью, ни исходом их не покажешь.
+    if (status === undefined || sort === undefined || sort < PATH_MIN_SORT || sort >= SYSTEM_SORT) continue;
+
+    const list = dealsBySort.get(sort) ?? [];
+    list.push(toFunnelDeal(lead, status.status_name));
+    dealsBySort.set(sort, list);
   }
 
-  const countBySort = new Map<number, number>();
-  for (const sorts of enteredSorts.values()) {
-    for (const sort of sorts) countBySort.set(sort, (countBySort.get(sort) ?? 0) + 1);
-  }
+  const countAt = (sort: number) => dealsBySort.get(sort)?.length ?? 0;
 
   const stages: FunnelStage[] = statuses
     .filter((row) => row.sort !== null && row.sort >= PATH_MIN_SORT && row.sort <= PATH_MAX_SORT)
@@ -275,68 +325,26 @@ export async function fetchRenewalsFunnel(
       statusId: Number(row.status_id),
       name: row.status_name ?? String(row.status_id),
       sort: Number(row.sort),
-      reached: countBySort.get(Number(row.sort)) ?? 0,
+      reached: countAt(Number(row.sort)),
     }));
 
-  // Исходы — тем же правилом, что и ступени: сколько сделок ушло в паузу,
-  // реанимацию или отвал ВНУТРИ окна. Считать их по «стоит сейчас» нельзя —
-  // это цифра на сегодня, а не за период, и с остальным экраном она спорила бы.
-  const outcomes: FunnelOutcome[] = statuses
+  const outcomeRows = statuses
     .filter((row) => row.sort !== null && row.sort > PATH_MAX_SORT && row.sort < SYSTEM_SORT)
-    .sort((a, b) => (a.sort as number) - (b.sort as number))
-    .map((row) => ({
-      statusId: Number(row.status_id),
-      name: row.status_name ?? String(row.status_id),
-      count: countBySort.get(Number(row.sort)) ?? 0,
-    }));
+    .sort((a, b) => (a.sort as number) - (b.sort as number));
 
-  // Список сделок под ступенями: та же карта maxPathSort, что и у ступеней, —
-  // значит длина группы и цифра на ступени посчитаны из одного источника и
-  // разойтись не могут.
+  const outcomes: FunnelOutcome[] = outcomeRows.map((row) => ({
+    statusId: Number(row.status_id),
+    name: row.status_name ?? String(row.status_id),
+    count: countAt(Number(row.sort)),
+  }));
+
   const nameBySort = new Map<number, StatusRow>();
   for (const row of statuses) {
     if (row.sort !== null) nameBySort.set(Number(row.sort), row);
   }
 
-  const toFunnelDeal = (lead: LeadRow, outcome: string | null): RenewalsFunnelDeal => ({
-    amoId: Number(lead.amo_id),
-    name: lead.name,
-    companyName: lead.company_name,
-    responsibleName: lead.responsible_name,
-    amount: lead.amount,
-    currentStatusName: lead.status_name,
-    createdAt: lead.created_at,
-    outcome,
-    amoUrl: AMO_BASE ? `${AMO_BASE}/leads/detail/${lead.amo_id}` : null,
-  });
-
-  // Сделка попадает в группу КАЖДОГО этапа, на который вошла внутри окна: за
-  // месяц она могла и обсуждаться, и получить счёт, и продлиться. Так длина
-  // группы совпадает с цифрой на ступени — они считаются из одной карты.
-  const dealsBySort = new Map<number, RenewalsFunnelDeal[]>();
-  for (const [dealId, sorts] of enteredSorts.entries()) {
-    const lead = leadById.get(dealId);
-    if (lead === undefined) continue;
-    const currentSort = lead.status_id === null ? undefined : sortById.get(Number(lead.status_id));
-    for (const sort of sorts) {
-      // Этапы ниже входа («Неразобранное») на воронке не показываются —
-      // значит и в списке им не место. Исходы идут своими группами ниже.
-      if (sort < PATH_MIN_SORT || sort > PATH_MAX_SORT) continue;
-      const list = dealsBySort.get(sort) ?? [];
-      list.push(
-        // Исход — состояние, а не пройденный этап: сделка стоит там СЕЙЧАС.
-        toFunnelDeal(
-          lead,
-          currentSort !== undefined && currentSort > PATH_MAX_SORT && currentSort < SYSTEM_SORT
-            ? lead.status_name
-            : null,
-        ),
-      );
-      dealsBySort.set(sort, list);
-    }
-  }
-
   const dealGroups: RenewalsStageDeals[] = [...dealsBySort.entries()]
+    .filter(([sort]) => sort <= PATH_MAX_SORT)
     .sort(([a], [b]) => a - b)
     .map(([sort, deals]) => {
       const status = nameBySort.get(sort);
@@ -348,39 +356,21 @@ export async function fetchRenewalsFunnel(
       };
     });
 
-  // Раскрываем исходы в конкретные сделки — по текущему этапу, как и сами
-  // цифры исходов, чтобы список и воронка не могли разойтись.
-  const outcomeDeals = new Map<number, RenewalsFunnelDeal[]>();
-  for (const [dealId, sorts] of enteredSorts.entries()) {
-    const lead = leadById.get(dealId);
-    if (lead === undefined) continue;
-    for (const sort of sorts) {
-      if (sort <= PATH_MAX_SORT || sort >= SYSTEM_SORT) continue;
-      const list = outcomeDeals.get(sort) ?? [];
-      // outcome тут не нужен: имя группы уже называет исход, значок в строке
-      // был бы повтором.
-      list.push(toFunnelDeal(lead, null));
-      outcomeDeals.set(sort, list);
-    }
-  }
-
-  const outcomeGroups: RenewalsStageDeals[] = statuses
-    .filter((row) => row.sort !== null && row.sort > PATH_MAX_SORT && row.sort < SYSTEM_SORT)
-    .sort((a, b) => (a.sort as number) - (b.sort as number))
+  const outcomeGroups: RenewalsStageDeals[] = outcomeRows
     .map((row) => ({
       statusId: Number(row.status_id),
       name: row.status_name ?? String(row.status_id),
       sort: Number(row.sort),
-      deals: outcomeDeals.get(Number(row.sort)) ?? [],
+      deals: dealsBySort.get(Number(row.sort)) ?? [],
     }))
     .filter((group) => group.deals.length > 0);
 
+  let totalDeals = 0;
+  for (const deals of dealsBySort.values()) totalDeals += deals.length;
+
   return {
     pipelineId: SECONDARY_PIPELINE_ID,
-    // Сколько РАЗНЫХ сделок засветилось в периоде хоть одним этапом. Прежнее
-    // `leads.length` было размером когорты и после переключения означало бы
-    // «все сделки воронки за всю историю».
-    totalDeals: enteredSorts.size,
+    totalDeals,
     stages,
     outcomes,
     backfilledCount,
