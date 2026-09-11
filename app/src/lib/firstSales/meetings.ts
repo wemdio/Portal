@@ -171,3 +171,132 @@ export async function fetchMeetingLinks(
       meeting_at: dateByTranscript.get(l.transcript_id) as string,
     }));
 }
+
+/** Встроенный тип задачи AMO «Встреча» («Звонок» — 1). */
+const MEETING_TASK_TYPE_ID = 2;
+/** Этап, на котором карточка «застревает», когда встречу провели, а сделку не передвинули. */
+const MEETING_SCHEDULED_STATUS = 'Назначена встреча';
+
+/**
+ * Встречи, которые прошли, но этапом не отмечены: сделка → срок задачи.
+ *
+ * Правило сверено с отчётом продаж 11.09.2026 (август: 77 встреч по этапу,
+ * 78 в отчёте; разница — Benkendorf). Встреча засчитывается, если у сделки в
+ * периоде есть ЗАКРЫТАЯ задача типа «Встреча» и в конце периода карточка всё
+ * ещё стоит на «Назначена встреча»: встречу провели и задачу закрыли, а
+ * карточку не передвинули.
+ *
+ * Условие на этап узкое намеренно. Правило «любая закрытая задача-встреча»
+ * добавило бы за август 16 встреч, в том числе у сделок, закрытых в минус или
+ * вернувшихся на «Первый контакт», — это не пропущенные встречи, а шум задач.
+ *
+ * Дата встречи — `complete_till` (срок задачи): менеджер закрывает задачу когда
+ * придётся, иногда через неделю, а срок — это когда встреча была назначена.
+ *
+ * Этап на конец периода: последний переход до его конца; если переходов до
+ * конца нет — этап, с которого сделка ушла первым переходом; если переходов нет
+ * вовсе — текущий этап. Тот же порядок, что у leadsReport (isLostByEnd).
+ */
+export async function fetchTaskMeetings(
+  db: SupabaseClient,
+  pipelineId: number,
+  from: Date,
+  to: Date,
+): Promise<Map<number, string>> {
+  const { data: taskData, error: taskError } = await db
+    .from('amo_tasks')
+    .select('amo_deal_id, complete_till')
+    .eq('task_type_id', MEETING_TASK_TYPE_ID)
+    .eq('is_completed', true)
+    .gte('complete_till', from.toISOString())
+    .lte('complete_till', to.toISOString());
+  if (taskError) throw taskError;
+
+  // Сделка → самый ранний срок закрытой задачи-встречи в периоде.
+  const taskAtByDeal = new Map<number, string>();
+  for (const task of (taskData ?? []) as Array<{ amo_deal_id: number | null; complete_till: string | null }>) {
+    if (task.amo_deal_id == null || !task.complete_till) continue;
+    const dealId = Number(task.amo_deal_id);
+    const prev = taskAtByDeal.get(dealId);
+    if (prev === undefined || task.complete_till < prev) taskAtByDeal.set(dealId, task.complete_till);
+  }
+  if (taskAtByDeal.size === 0) return new Map();
+
+  const { data: statusData, error: statusError } = await db
+    .from('amo_statuses')
+    .select('status_id, status_name')
+    .eq('pipeline_id', pipelineId);
+  if (statusError) throw statusError;
+  const scheduled = ((statusData ?? []) as Array<{ status_id: number; status_name: string | null }>)
+    .find((s) => (s.status_name ?? '').trim() === MEETING_SCHEDULED_STATUS);
+  // Этап переименовали или удалили — правило молча выключается, а не падает
+  // весь дашборд: встречи по этапу при этом считаются как обычно.
+  if (!scheduled) return new Map();
+  const scheduledId = Number(scheduled.status_id);
+
+  const dealIds = [...taskAtByDeal.keys()];
+  const toMs = to.getTime();
+
+  const [pipelineChunks, leadChunks, eventChunks] = await Promise.all([
+    // Воронка — исходная, как у остальных метрик первички (amo_lead_stage_dates_v).
+    Promise.all(chunkArray(dealIds, IN_CHUNK_SIZE).map(async (chunk) => {
+      const { data, error } = await db
+        .from('amo_lead_stage_dates_v')
+        .select('amo_deal_id')
+        .eq('pipeline_id', pipelineId)
+        .in('amo_deal_id', chunk);
+      if (error) throw error;
+      return (data ?? []) as Array<{ amo_deal_id: number }>;
+    })),
+    Promise.all(chunkArray(dealIds, IN_CHUNK_SIZE).map(async (chunk) => {
+      const { data, error } = await db
+        .from('amo_leads')
+        .select('amo_id, status_id')
+        .in('amo_id', chunk);
+      if (error) throw error;
+      return (data ?? []) as Array<{ amo_id: number; status_id: number | null }>;
+    })),
+    Promise.all(chunkArray(dealIds, IN_CHUNK_SIZE).map(async (chunk) => {
+      const { data, error } = await db
+        .from('amo_events')
+        .select('amo_deal_id, changed_at, from_value, to_value')
+        .eq('event_type', 'lead_status_changed')
+        .in('amo_deal_id', chunk);
+      if (error) throw error;
+      return (data ?? []) as Array<{
+        amo_deal_id: number; changed_at: string | null; from_value: string | null; to_value: string | null;
+      }>;
+    })),
+  ]);
+
+  const inPipeline = new Set(pipelineChunks.flat().map((r) => Number(r.amo_deal_id)));
+  const currentStatus = new Map(leadChunks.flat().map((r) => [Number(r.amo_id), r.status_id]));
+  const eventsByDeal = new Map<number, Array<{ at: number; from: number | null; to: number | null }>>();
+  for (const e of eventChunks.flat()) {
+    const at = Date.parse(e.changed_at ?? '');
+    if (!Number.isFinite(at)) continue;
+    const toId = Number(e.to_value);
+    const fromId = Number(e.from_value);
+    const list = eventsByDeal.get(Number(e.amo_deal_id)) ?? [];
+    list.push({
+      at,
+      from: Number.isInteger(fromId) ? fromId : null,
+      to: Number.isInteger(toId) ? toId : null,
+    });
+    eventsByDeal.set(Number(e.amo_deal_id), list);
+  }
+
+  const result = new Map<number, string>();
+  for (const [dealId, taskAt] of taskAtByDeal) {
+    if (!inPipeline.has(dealId)) continue;
+    const events = (eventsByDeal.get(dealId) ?? []).sort((a, b) => a.at - b.at);
+    const beforeEnd = events.filter((e) => e.at <= toMs);
+    const statusAtEnd = beforeEnd.length > 0
+      ? beforeEnd[beforeEnd.length - 1]!.to
+      : events.length > 0
+        ? events[0]!.from
+        : (currentStatus.get(dealId) ?? null);
+    if (statusAtEnd === scheduledId) result.set(dealId, taskAt);
+  }
+  return result;
+}

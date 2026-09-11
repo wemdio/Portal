@@ -7,6 +7,7 @@ import {
   computeFirstSalesSeries,
   fetchFirstSalesLeads,
 } from '@/lib/firstSales/metrics';
+import { fetchTaskMeetings } from '@/lib/firstSales/meetings';
 import { fetchFirstSalesPayments } from '@/lib/firstSales/money';
 
 // Роут авторизуется по заголовку и зависит от query — предрендер здесь дал бы
@@ -41,16 +42,23 @@ export async function GET(req: NextRequest) {
   // августе, и без этого расширения `computeFirstSalesSeries` не резолвнет её
   // источник и менеджера, а деньги ушли бы в «без источника».
   //
-  // Встречи расширения не требуют: с 10.09.2026 они считаются по этапу AMO
-  // (`first_meeting_at`), а по нему выборка сделок уже фильтруется — см. `or`
-  // в fetchFirstSalesLeads.
+  // Встречи по этапу AMO расширения не требуют: по `first_meeting_at` выборка
+  // сделок уже фильтруется (см. `or` в fetchFirstSalesLeads). Встречи по
+  // закрытой задаче (fetchTaskMeetings) — требуют: такая сделка стоит на
+  // «Назначена встреча», и ни одно поле окна её не поймает.
   const loadWindow = async (windowFrom: Date, windowTo: Date) => {
-    const payments = await fetchFirstSalesPayments(db, PIPELINE_ID, windowFrom, windowTo);
+    const [payments, taskMeetings] = await Promise.all([
+      fetchFirstSalesPayments(db, PIPELINE_ID, windowFrom, windowTo),
+      fetchTaskMeetings(db, PIPELINE_ID, windowFrom, windowTo),
+    ]);
     const extraDealIds = [
-      ...new Set(payments.map((p) => p.amo_deal_id).filter((id): id is number => id != null)),
+      ...new Set([
+        ...payments.map((p) => p.amo_deal_id).filter((id): id is number => id != null),
+        ...taskMeetings.keys(),
+      ]),
     ];
     const leads = await fetchFirstSalesLeads(db, PIPELINE_ID, windowFrom, windowTo, extraDealIds);
-    return { payments, leads };
+    return { payments, leads, taskMeetings };
   };
 
   try {
@@ -71,11 +79,11 @@ export async function GET(req: NextRequest) {
 
     const result = computeFirstSalesSeries(
       current.leads, from, to, groupBy, sources,
-      current.payments,
+      current.payments, current.taskMeetings,
     );
     const prevResult = computeFirstSalesSeries(
       previous.leads, prev.from, prev.to, groupBy, sources,
-      previous.payments,
+      previous.payments, previous.taskMeetings,
     );
 
     const lastRun = lastRunRes.data;
