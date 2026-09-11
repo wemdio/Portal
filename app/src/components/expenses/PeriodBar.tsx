@@ -89,6 +89,14 @@ export default function PeriodBar({
   onChange: (next: PeriodValue) => void;
 }) {
   const set = (patch: Partial<PeriodValue>) => onChange({ ...value, ...patch });
+  // Сегодня по МСК — верхняя граница обоих полей. Считается на каждый рендер,
+  // а не один раз: вкладку держат открытой сутками, и вчерашняя граница не
+  // пускала бы выбрать сегодняшний день.
+  const today = mskToday();
+  // `max` закрывает только календарь — дату можно впечатать с клавиатуры, и её
+  // подрезаем здесь. Будущих операций в выписке нет по определению, а конец
+  // периода в следующем месяце молча растягивал бы графики хвостом из нулей.
+  const clampToToday = (date: string) => (date > today ? today : date);
 
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -109,8 +117,8 @@ export default function PeriodBar({
         <input
           type="date"
           value={value.from}
-          max={value.to}
-          onChange={(e) => set({ from: e.target.value })}
+          max={value.to < today ? value.to : today}
+          onChange={(e) => set({ from: clampToToday(e.target.value) })}
           aria-label="Начало периода"
           className="rounded-lg border border-zinc-200 px-2 py-1 text-xs text-zinc-700"
         />
@@ -119,7 +127,8 @@ export default function PeriodBar({
           type="date"
           value={value.to}
           min={value.from}
-          onChange={(e) => set({ to: e.target.value })}
+          max={today}
+          onChange={(e) => set({ to: clampToToday(e.target.value) })}
           aria-label="Конец периода"
           className="rounded-lg border border-zinc-200 px-2 py-1 text-xs text-zinc-700"
         />

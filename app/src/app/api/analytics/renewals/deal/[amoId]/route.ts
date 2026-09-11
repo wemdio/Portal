@@ -2,6 +2,7 @@ import 'server-only';
 import { NextRequest, NextResponse } from 'next/server';
 import { requireRenewalsAccess } from '@/lib/renewals/access';
 import { readDealCardFields } from '@/lib/firstSales/dealCard';
+import { fetchDealRail } from '@/lib/firstSales/dealTransitions';
 
 /**
  * Одна сделка воронки продлений для модалки: карточка, комментарии и задачи.
@@ -42,7 +43,7 @@ export async function GET(
   const db = gate.supabaseAdmin;
 
   try {
-    const [leadRes, notesRes, tasksRes] = await Promise.all([
+    const [leadRes, notesRes, tasksRes, rail] = await Promise.all([
       db
         .from('amo_leads')
         .select('amo_id, name, company_name, company_website, responsible_name, status_name, pipeline_name, amount, contact_email, contact_phone, contact_tg_username, raw')
@@ -59,6 +60,10 @@ export async function GET(
         .select('amo_task_id, text, result_text, is_completed, complete_till, created_at_amo')
         .eq('amo_deal_id', amoId)
         .order('complete_till', { ascending: false }),
+      // Рельсы переходов по этапам. Не роняют модалку: без истории карточка,
+      // комментарии и задачи всё равно полезны, а блок рельсов просто не
+      // покажется.
+      fetchDealRail(db, amoId).catch(() => null),
     ]);
 
     if (leadRes.error) throw leadRes.error;
@@ -95,6 +100,7 @@ export async function GET(
       fields: readDealCardFields(lead.raw),
       notes: notesRes.data ?? [],
       tasks: tasksRes.data ?? [],
+      rail,
       amo_url: AMO_BASE ? `${AMO_BASE}/leads/detail/${lead.amo_id}` : null,
     });
   } catch (e) {
