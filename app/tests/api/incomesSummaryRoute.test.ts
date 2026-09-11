@@ -42,7 +42,9 @@ function row(over: Partial<IncomeRow>): IncomeRow {
   };
 }
 
-const REVENUE = row({ source_ref: 'a', amount_rub: 100 });
+// Оплата выше порога мелких платежей (SMALL_PAYMENT_THRESHOLD_RUB): сотня
+// рублей с 11.09.2026 в доход не входит, и тест склейки роута мерил бы порог.
+const REVENUE = row({ source_ref: 'a', amount: 10_000, amount_rub: 10_000 });
 const NON_REVENUE = row({
   source_ref: 'b',
   amount_rub: 900,
@@ -94,7 +96,7 @@ it('без фильтра: итог без не-выручки, не-выруч�
   const res = await GET(req(PERIOD));
   expect(res.status).toBe(200);
   const body = await res.json();
-  expect(body.total).toBe(100);
+  expect(body.total).toBe(10_000);
   expect(body.nonRevenueTotal).toBe(900);
   expect(body.nonRevenueByReason).toEqual({ возврат: 900 });
   // Текущий период + предыдущий, третьего запроса не нужно.
@@ -104,7 +106,7 @@ it('без фильтра: итог без не-выручки, не-выруч�
 it('под revenue=true не-выручка досчитывается отдельным запросом', async () => {
   const res = await GET(req(`${PERIOD}&revenue=true`));
   const body = await res.json();
-  expect(body.total).toBe(100);
+  expect(body.total).toBe(10_000);
   expect(body.nonRevenueTotal).toBe(900);
   expect(body.nonRevenueCount).toBe(1);
   expect(state.calls).toHaveLength(3);
