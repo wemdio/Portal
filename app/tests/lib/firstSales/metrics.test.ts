@@ -22,6 +22,7 @@ function lead(over: Partial<FirstSalesLeadRow> = {}): FirstSalesLeadRow {
     first_contract_at: null,
     won_at: null,
     history_complete: true,
+    status_id: null,
     raw: {
       custom_fields_values: [
         { field_name: 'Источник', values: [{ value: 'Email Outreach' }] },
@@ -547,10 +548,15 @@ describe('попадание сделки в период', () => {
     expect(isLeadInWindow(lead({ created_at: '2024-06-26T09:00:00.000Z' }), from, to)).toBe(false);
   });
 
-  it('квал — когортно: лид пришёл в окне и дошёл до этапа', () => {
+  it('квал — лид пришёл в окне и дошёл до этапа в том же окне', () => {
+    expect(
+      isQualifiedInWindow(lead({ first_qualified_at: '2026-07-20T09:00:00.000Z' }), from, to),
+    ).toBe(true);
+    // Лид июля, квалифицированный в августе, июлю не засчитывается: период —
+    // срез на свой конец, и прошлый месяц не растёт задним числом.
     expect(
       isQualifiedInWindow(lead({ first_qualified_at: '2026-08-02T09:00:00.000Z' }), from, to),
-    ).toBe(true);
+    ).toBe(false);
     // Квал есть, но лид пришёл раньше окна — в этот период он не считается.
     expect(
       isQualifiedInWindow(

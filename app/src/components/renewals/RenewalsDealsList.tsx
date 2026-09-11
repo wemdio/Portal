@@ -5,8 +5,9 @@ import DealModal from '@/components/analytics/DealModal';
 import type { RenewalsStageDeals } from '@/lib/renewals/funnel';
 
 /**
- * Список сделок рядом с воронкой вторичных продаж — близнец такого же списка
- * на дашборде первички (first-sales/FunnelDealsList.tsx).
+ * Список сделок рядом с воронкой по этапам AMO — общий для продлений и
+ * первички (см. RenewalsFunnel): подписи и ручка карточки сделки приходят
+ * пропсами, умолчания — продлений.
  *
  * Данные не грузит сам: воронка и список приходят одним ответом ручки
  * `renewals/funnel`, и второй запрос за тем же самым был бы лишним. Поэтому
@@ -65,9 +66,18 @@ function flatten(groups: RenewalsStageDeals[], outcomeGroups: RenewalsStageDeals
 export default function RenewalsDealsList({
   groups,
   outcomeGroups,
+  dealEndpoint = '/api/analytics/renewals/deal',
+  subtitle = 'Каждая сделка — на этапе, где была в последний день периода. Клик открывает карточку с историей переходов. '
+    + 'Внизу — сделки на паузе, в реанимации или отвале.',
+  outcomesLabel = 'Вне пути',
 }: {
   groups: RenewalsStageDeals[];
   outcomeGroups: RenewalsStageDeals[];
+  /** Базовый путь ручки карточки сделки без id. */
+  dealEndpoint?: string;
+  subtitle?: string;
+  /** Подпись разделителя перед исходами: «Вне пути» у продлений, «Итог» у первички. */
+  outcomesLabel?: string;
 }) {
   const [scrolled, setScrolled] = useState(CHUNK);
   const [openDeal, setOpenDeal] = useState<number | null>(null);
@@ -92,10 +102,7 @@ export default function RenewalsDealsList({
       <h3 className="mb-1 text-sm font-semibold text-zinc-900">Сделки в воронке</h3>
       {/* Подпись повторяет правило воронки слева: список и ступени считаются
           из одной карты «этап на конец периода → сделки», и разъехаться им нельзя. */}
-      <p className="mb-2 text-[11px] text-zinc-400">
-        Каждая сделка — на этапе, где была в последний день периода. Клик открывает карточку с историей переходов. Внизу —
-        сделки на паузе, в реанимации или отвале.
-      </p>
+      <p className="mb-2 text-[11px] text-zinc-400">{subtitle}</p>
 
       {items.length === 0 ? (
         <div style={{ height: LIST_HEIGHT_PX }} className="px-3 py-10 text-center text-sm text-zinc-400">
@@ -124,7 +131,7 @@ export default function RenewalsDealsList({
                 key={item.key}
                 className="border-t border-zinc-200 bg-zinc-50/60 px-2.5 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-400"
               >
-                Вне пути
+                {outcomesLabel}
               </div>
             ) : item.kind === 'outcome-header' ? (
               <h4
@@ -186,7 +193,7 @@ export default function RenewalsDealsList({
       {openDeal !== null && (
         <DealModal
           amoId={openDeal}
-          endpoint="/api/analytics/renewals/deal"
+          endpoint={dealEndpoint}
           onClose={() => setOpenDeal(null)}
         />
       )}

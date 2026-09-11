@@ -47,6 +47,11 @@ export type FirstSalesLeadRow = {
   first_contract_at: string | null;
   won_at: string | null;
   history_complete: boolean;
+  /**
+   * Текущий этап сделки в AMO. Нужен ради одного правила: закрытая в минус
+   * (143) сделка квалом не считается — см. isQualifiedInWindow.
+   */
+  status_id: number | null;
   raw: unknown;
 };
 
@@ -212,9 +217,28 @@ export function isLeadInWindow(lead: FirstSalesLeadRow, from: Date, to: Date): b
   return inWindow(lead.created_at, from, to);
 }
 
-/** Квал считается когортно — по дате СОЗДАНИЯ лида, см. основной цикл. */
+/**
+ * Квал периода — лид, заведённый в периоде И квалифицированный в нём же.
+ *
+ * До 11.09.2026 хватало первого условия: лид августа, дошедший до квала в
+ * сентябре, засчитывался августу, и цифра прошлого месяца росла задним числом
+ * (за август 80 квалов, из них 5 квалифицированы уже в сентябре). Продажи
+ * смотрят на период как на срез: сделки и их этапы на его конец. Этап после
+ * конца периода к нему не относится.
+ *
+ * Закрытая в минус сделка квалом не считается вовсе, когда бы её ни закрыли:
+ * так квалы считает отчёт продаж, и дашборд с ним сверяют. Цена решения —
+ * квалы прошлого периода уменьшаются, когда его сделку закрывают позже.
+ */
+const LOST_STATUS_ID = 143;
+
 export function isQualifiedInWindow(lead: FirstSalesLeadRow, from: Date, to: Date): boolean {
-  return isLeadInWindow(lead, from, to) && !!lead.first_qualified_at && lead.history_complete;
+  return (
+    isLeadInWindow(lead, from, to)
+    && inWindow(lead.first_qualified_at, from, to)
+    && lead.history_complete
+    && lead.status_id !== LOST_STATUS_ID
+  );
 }
 
 /**
@@ -261,15 +285,35 @@ export function isMeetingInWindow(lead: FirstSalesLeadRow, from: Date, to: Date)
   return inWindow(lead.first_meeting_at, from, to);
 }
 
-/** Сделка → 1, если её этап «Встреча проведена» попал в период. */
+/**
+ * Дата встречи сделки внутри периода: по этапу AMO, а если этапом встреча не
+ * отмечена — по закрытой задаче «Встреча», при которой карточка в конце периода
+ * так и осталась на «Назначена встреча» (fetchTaskMeetings в meetings.ts).
+ * null — встречи в периоде нет.
+ *
+ * Этап важнее задачи: сделка, дошедшая до «Встреча проведена», считается по
+ * дате этапа, и одна встреча не может посчитаться дважды.
+ */
+function meetingDateInWindow(
+  lead: FirstSalesLeadRow,
+  from: Date,
+  to: Date,
+  taskMeetings: Map<number, string>,
+): string | null {
+  if (isMeetingInWindow(lead, from, to)) return lead.first_meeting_at;
+  return taskMeetings.get(lead.amo_id) ?? null;
+}
+
+/** Сделка → 1, если её встреча (по этапу или по закрытой задаче) попала в период. */
 export function meetingsByDeal(
   leads: FirstSalesLeadRow[],
   from: Date,
   to: Date,
+  taskMeetings: Map<number, string> = new Map(),
 ): Map<number, number> {
   const byDeal = new Map<number, number>();
   for (const lead of leads) {
-    if (isMeetingInWindow(lead, from, to)) byDeal.set(lead.amo_id, 1);
+    if (meetingDateInWindow(lead, from, to, taskMeetings)) byDeal.set(lead.amo_id, 1);
   }
   return byDeal;
 }
@@ -285,12 +329,12 @@ export function meetingAtByDeal(
   leads: FirstSalesLeadRow[],
   from: Date,
   to: Date,
+  taskMeetings: Map<number, string> = new Map(),
 ): Map<number, string> {
   const byDeal = new Map<number, string>();
   for (const lead of leads) {
-    if (isMeetingInWindow(lead, from, to) && lead.first_meeting_at) {
-      byDeal.set(lead.amo_id, lead.first_meeting_at);
-    }
+    const meetingAt = meetingDateInWindow(lead, from, to, taskMeetings);
+    if (meetingAt) byDeal.set(lead.amo_id, meetingAt);
   }
   return byDeal;
 }
@@ -313,6 +357,9 @@ export function computeFirstSalesSeries(
   // существующие вызовы (и тесты воронки) остаются валидными, а расчёт без
   // денег — законным состоянием, а не забытым аргументом.
   payments: FirstSalesPaymentRow[] = [],
+  // Встречи по закрытой задаче «Встреча» (fetchTaskMeetings): сделка → срок
+  // задачи. Необязательно по той же причине, что и деньги.
+  taskMeetings: Map<number, string> = new Map(),
 ): FirstSalesSeries {
   const allowed = sourceFilter && sourceFilter.length > 0 ? new Set(sourceFilter) : null;
 
@@ -420,8 +467,9 @@ export function computeFirstSalesSeries(
       if (resolved.key === NO_SOURCE_KEY) totals.noSourceLeads += 1;
 
       // «Дошёл до квала» кладётся в корзину по дате СОЗДАНИЯ, а не по дате
-      // достижения этапа (first_qualified_at используется только как флаг
-      // «дошёл ли»). Это когортная семантика — «из пришедших в этот день/
+      // достижения этапа; first_qualified_at проверяется только на то, что
+      // квал случился внутри того же периода (с 11.09.2026, см.
+      // isQualifiedInWindow). Это когортная семантика — «из пришедших в этот день/
       // неделю/месяц скольких сумели квалифицировать», та же логика, что и у
       // «леды». Отличается от meetings/sales ниже, которые по спеке
       // кладутся по дате самого этапа («сколько встреч случилось в этот
@@ -494,15 +542,22 @@ export function computeFirstSalesSeries(
   //
   // Встреча считается один раз на сделку: у `first_meeting_at` дата одна,
   // поэтому два разговора с одним клиентом в разные дни дают одну встречу.
+  //
+  // С 11.09.2026 правила сверены с отчётом продаж (август: 78 = 78):
+  //   - «Перенос» встречей не делает — это в самом view (миграция 20260911_0001);
+  //   - встреча, проведённая по закрытой задаче «Встреча», но не отмеченная
+  //     этапом (карточка осталась на «Назначена встреча»), засчитывается по
+  //     сроку задачи — см. meetingDateInWindow.
   for (const lead of leads) {
-    if (!isMeetingInWindow(lead, from, to)) continue;
+    const meetingAt = meetingDateInWindow(lead, from, to, taskMeetings);
+    if (!meetingAt) continue;
 
     const resolved = dealSourceMap.get(lead.amo_id);
     const key = resolved?.key ?? NO_SOURCE_KEY;
     if (allowed && !allowed.has(key)) continue;
 
     totals.meetings += 1;
-    bump(bucketKey(new Date(lead.first_meeting_at as string), groupBy), 'meetings');
+    bump(bucketKey(new Date(meetingAt), groupBy), 'meetings');
 
     sourceRow(key, resolved?.label ?? NO_SOURCE_LABEL).meetings += 1;
     managerRow(dealManagerMap.get(lead.amo_id) ?? null).meetings += 1;
@@ -610,7 +665,7 @@ export function computeFirstSalesSeries(
 const STAGE_DATE_COLUMNS =
   'amo_deal_id, created_at, first_qualified_at, first_meeting_at, first_contract_at, won_at, history_complete';
 
-type StageDateRow = Omit<FirstSalesLeadRow, 'amo_id' | 'name' | 'responsible_name' | 'raw'> & { amo_deal_id: number };
+type StageDateRow = Omit<FirstSalesLeadRow, 'amo_id' | 'name' | 'responsible_name' | 'raw' | 'status_id'> & { amo_deal_id: number };
 
 /**
  * Тянет сделки воронки первички вместе с датами этапов из view.
@@ -692,22 +747,23 @@ export async function fetchFirstSalesLeads(
     chunkArray(ids, IN_CHUNK_SIZE).map(async (chunk) => {
       const { data: leadsChunk, error: leadsError } = await db
         .from('amo_leads')
-        .select('amo_id, name, company_name, responsible_name, raw')
+        .select('amo_id, name, company_name, responsible_name, status_id, raw')
         .in('amo_id', chunk);
       if (leadsError) throw leadsError;
       return (leadsChunk ?? []) as Array<{
         amo_id: number; name: string | null; company_name: string | null;
-        responsible_name: string | null; raw: unknown;
+        responsible_name: string | null; status_id: number | null; raw: unknown;
       }>;
     }),
   );
   const leadsById = new Map<
     number,
-    { name: string | null; company_name: string | null; responsible_name: string | null; raw: unknown }
+    { name: string | null; company_name: string | null; responsible_name: string | null; status_id: number | null; raw: unknown }
   >();
   for (const l of leadChunks.flat()) {
     leadsById.set(l.amo_id, {
-      name: l.name, company_name: l.company_name, responsible_name: l.responsible_name, raw: l.raw,
+      name: l.name, company_name: l.company_name, responsible_name: l.responsible_name,
+      status_id: l.status_id === null ? null : Number(l.status_id), raw: l.raw,
     });
   }
 
@@ -716,6 +772,7 @@ export async function fetchFirstSalesLeads(
     name: leadsById.get(r.amo_deal_id)?.name ?? null,
     company_name: leadsById.get(r.amo_deal_id)?.company_name ?? null,
     responsible_name: leadsById.get(r.amo_deal_id)?.responsible_name ?? null,
+    status_id: leadsById.get(r.amo_deal_id)?.status_id ?? null,
     raw: leadsById.get(r.amo_deal_id)?.raw ?? null,
     created_at: r.created_at,
     first_qualified_at: r.first_qualified_at,

@@ -11,6 +11,7 @@ import {
   isQualifiedInWindow,
   meetingsByDeal,
 } from '@/lib/firstSales/metrics';
+import { fetchTaskMeetings } from '@/lib/firstSales/meetings';
 import { fetchFirstSalesPayments, moneyByDeal } from '@/lib/firstSales/money';
 
 // Роут авторизуется по заголовку и зависит от query — предрендер здесь дал бы
@@ -53,14 +54,17 @@ export async function GET(req: NextRequest) {
     // раньше окна, тянуть незачем — `extraDealIds` сюда не передаём. В
     // summary/route.ts расширение остаётся: цифры сводки считают встречи и
     // деньги по старым сделкам и без них разошлись бы с бухгалтерией.
-    const payments = await fetchFirstSalesPayments(gate.supabaseAdmin, PIPELINE_ID, from, to);
+    const [payments, taskMeetings] = await Promise.all([
+      fetchFirstSalesPayments(gate.supabaseAdmin, PIPELINE_ID, from, to),
+      fetchTaskMeetings(gate.supabaseAdmin, PIPELINE_ID, from, to),
+    ]);
 
     const leads = await fetchFirstSalesLeads(gate.supabaseAdmin, PIPELINE_ID, from, to);
 
     // Встречи и деньги по сделкам — теми же правилами, что и цифры разбивки
     // (окно, порог достоверности встреч, дедуп «одна сделка — один день»,
     // отсев продлений и спорных платежей). Считаются один раз на запрос.
-    const meetings = meetingsByDeal(leads, from, to);
+    const meetings = meetingsByDeal(leads, from, to, taskMeetings);
     const money = moneyByDeal(payments, from, to);
 
     const rows = leads
