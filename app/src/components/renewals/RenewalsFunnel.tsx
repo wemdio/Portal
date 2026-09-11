@@ -34,9 +34,8 @@ import RenewalsDealsList from '@/components/renewals/RenewalsDealsList';
 /**
  * Долей «сколько дошло от предыдущего этапа» здесь нет намеренно.
  *
- * С 10.09.2026 ступень считает вход на этап внутри периода, а не когорту, и
- * ступени перестали быть вложенными: сделка могла обсуждаться в июле, а
- * продлиться в августе. Отношение соседних чисел в такой воронке — не
+ * С 11.09.2026 ступень — это сколько сделок стояло на этапе в последний день
+ * периода, то есть распределение, а не вложенная воронка. Отношение соседних чисел в ней — не
  * конверсия, и показывать его процентом значит выдавать за неё случайную дробь.
  */
 function buildOption(data: FunnelData, theme: ChartTheme, animate: boolean): EChartsCoreOption {
@@ -53,7 +52,7 @@ function buildOption(data: FunnelData, theme: ChartTheme, animate: boolean): ECh
         const value = item.value ?? 0;
         const word = value === 1 ? 'сделка' : value >= 2 && value <= 4 ? 'сделки' : 'сделок';
         return `<div style="font-weight:600">${item.name ?? ''}</div>
-                <div style="margin-top:4px;font-variant-numeric:tabular-nums">${value} ${word} вошло за период</div>`;
+                <div style="margin-top:4px;font-variant-numeric:tabular-nums">${value} ${word} на этапе в конце периода</div>`;
       },
     },
     series: [
@@ -152,9 +151,9 @@ export default function RenewalsFunnel({ filters }: { filters: FiltersState }) {
         <h3 className="text-sm font-semibold text-zinc-900">Воронка вторичных продаж за период</h3>
         {/* Правило отбора обязано быть написано на экране: без него цифры
             воронки и плиток выше читаются как расхождение, хотя это разные
-            вопросы — «что сдвинулось за месяц» и «за что заплатили». */}
+            вопросы — «где сделки на конец периода» и «за что заплатили в периоде». */}
         <p className="mb-2 text-[11px] text-zinc-400">
-          Сколько сделок перешли на каждый этап за период. Одна сделка может быть на нескольких этапах.
+          На каком этапе была каждая сделка в последний день периода. История переходов — в карточке сделки.
         </p>
 
         {loading ? <div className="px-3 py-10 text-center text-sm text-zinc-400">Загружаю…</div> : null}
@@ -183,7 +182,7 @@ export default function RenewalsFunnel({ filters }: { filters: FiltersState }) {
             {/* Исходы вне воронки: проект попадает туда вместо продления, и
                 ступенью это быть не может — иначе отвалившиеся посчитались бы
                 продлёнными просто потому, что их этап ниже по порядку. Считаем
-                тем же правилом, что ступени: сколько ушло в исход за период. */}
+                тем же правилом, что ступени: сколько сделок стояло там в конце периода. */}
             <span className="text-zinc-400">Вне пути:</span>
             {outcomes.map((outcome) => (
               <span key={outcome.statusId}>

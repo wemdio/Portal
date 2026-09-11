@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
 import { requireExpensesAccess } from '@/lib/expenses/access';
+import { isSmallPayment } from '@/lib/expenses/aggregate';
 import { groupByDay } from '@/lib/expenses/byDay';
 import { fetchIncomeRows } from '@/lib/expenses/rows';
 import { parseIncomesQuery, type IncomesQuery } from '@/lib/expenses/request';
@@ -31,7 +32,13 @@ export async function GET(req: NextRequest) {
       payerName: query.payerName,
       revenue: query.revenue,
     });
-    return NextResponse.json({ days: groupByDay(rows), total: rows.length });
+    // Мелкие платежи (выручка до SMALL_PAYMENT_THRESHOLD_RUB) в доход не входят,
+    // поэтому основной список их не показывает, а `?small=only` отдаёт только
+    // их — для отдельного списка под основным. Правило то же, что у итога
+    // (isSmallPayment), чтобы список и плитка не разошлись.
+    const smallOnly = req.nextUrl.searchParams.get('small') === 'only';
+    const picked = rows.filter((r) => isSmallPayment(r) === smallOnly);
+    return NextResponse.json({ days: groupByDay(picked), total: picked.length });
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });
   }
