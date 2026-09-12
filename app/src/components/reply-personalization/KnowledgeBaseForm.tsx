@@ -1,7 +1,73 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { fetchKnowledgeBase, saveKnowledgeBase } from './api';
+import { useEffect, useRef, useState } from 'react';
+import { extractTextFromFile, fetchKnowledgeBase, saveKnowledgeBase } from './api';
+
+const ACCEPT = '.pdf,.docx,.txt,.md';
+
+type UploadField = 'brief' | 'productFacts' | 'exampleCase';
+
+/**
+ * Поле базы знаний с опциональной кнопкой загрузки файла: текст извлекается
+ * на сервере и заменяет содержимое textarea — дальше сотрудник правит
+ * и сохраняет штатной кнопкой.
+ */
+function KbField({
+  label,
+  value,
+  onChange,
+  rows,
+  placeholder,
+  uploadField,
+  uploadingField,
+  onUpload,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  rows: number;
+  placeholder: string;
+  uploadField: UploadField;
+  uploadingField: UploadField | null;
+  onUpload: (field: UploadField, file: File) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const uploading = uploadingField === uploadField;
+
+  return (
+    <div className="mt-4">
+      <div className="flex items-center justify-between">
+        <label className="block text-sm font-medium text-zinc-700">{label}</label>
+        <button
+          type="button"
+          onClick={() => inputRef.current?.click()}
+          disabled={uploading}
+          className="text-xs text-blue-600 hover:text-blue-500 disabled:opacity-50"
+        >
+          {uploading ? 'Читаю файл...' : 'Загрузить файлом'}
+        </button>
+        <input
+          ref={inputRef}
+          type="file"
+          accept={ACCEPT}
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) onUpload(uploadField, file);
+            e.target.value = '';
+          }}
+        />
+      </div>
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        rows={rows}
+        className="mt-1 w-full rounded-lg border border-zinc-300 p-2 text-sm"
+        placeholder={placeholder}
+      />
+    </div>
+  );
+}
 
 export function KnowledgeBaseForm({ projectId, onClose }: { projectId: string; onClose: () => void }) {
   const [brief, setBrief] = useState('');
@@ -12,6 +78,7 @@ export function KnowledgeBaseForm({ projectId, onClose }: { projectId: string; o
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [uploadingField, setUploadingField] = useState<UploadField | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -42,6 +109,21 @@ export function KnowledgeBaseForm({ projectId, onClose }: { projectId: string; o
     }
   };
 
+  const handleUpload = async (field: UploadField, file: File) => {
+    setUploadingField(field);
+    setError(null);
+    try {
+      const text = await extractTextFromFile(file);
+      if (field === 'brief') setBrief(text);
+      if (field === 'productFacts') setProductFacts(text);
+      if (field === 'exampleCase') setExampleCase(text);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось прочитать файл');
+    } finally {
+      setUploadingField(null);
+    }
+  };
+
   if (loading) return <div className="p-6 text-sm text-zinc-500">Загрузка...</div>;
 
   return (
@@ -53,22 +135,28 @@ export function KnowledgeBaseForm({ projectId, onClose }: { projectId: string; o
         </button>
       </div>
 
-      <label className="block text-sm font-medium text-zinc-700 mt-4">Бриф</label>
-      <textarea
+      <p className="mt-1 text-xs text-zinc-400">Файлы: PDF, DOCX, TXT, MD до 20 МБ. Текст из файла заменяет поле — проверьте и сохраните.</p>
+
+      <KbField
+        label="Бриф"
         value={brief}
-        onChange={(e) => setBrief(e.target.value)}
+        onChange={setBrief}
         rows={4}
-        className="mt-1 w-full rounded-lg border border-zinc-300 p-2 text-sm"
         placeholder="О чём продукт, для кого, чем полезен"
+        uploadField="brief"
+        uploadingField={uploadingField}
+        onUpload={handleUpload}
       />
 
-      <label className="block text-sm font-medium text-zinc-700 mt-4">Факты о продукте</label>
-      <textarea
+      <KbField
+        label="Факты о продукте"
         value={productFacts}
-        onChange={(e) => setProductFacts(e.target.value)}
+        onChange={setProductFacts}
         rows={5}
-        className="mt-1 w-full rounded-lg border border-zinc-300 p-2 text-sm"
         placeholder="Возможности продукта и кейсы, которые можно упоминать в письмах"
+        uploadField="productFacts"
+        uploadingField={uploadingField}
+        onUpload={handleUpload}
       />
 
       <label className="block text-sm font-medium text-zinc-700 mt-4">Тон и ограничения</label>
@@ -80,13 +168,15 @@ export function KnowledgeBaseForm({ projectId, onClose }: { projectId: string; o
         placeholder="Как обращаться, чего избегать, стиль подписи"
       />
 
-      <label className="block text-sm font-medium text-zinc-700 mt-4">Пример хорошего письма</label>
-      <textarea
+      <KbField
+        label="Пример хорошего письма"
         value={exampleCase}
-        onChange={(e) => setExampleCase(e.target.value)}
+        onChange={setExampleCase}
         rows={5}
-        className="mt-1 w-full rounded-lg border border-zinc-300 p-2 text-sm"
         placeholder="Один реальный пример письма как ориентир по стилю"
+        uploadField="exampleCase"
+        uploadingField={uploadingField}
+        onUpload={handleUpload}
       />
 
       <label className="block text-sm font-medium text-zinc-700 mt-4">Instantly-аккаунт проекта</label>

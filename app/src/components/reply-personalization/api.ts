@@ -84,4 +84,28 @@ export function skipReply(qualificationId: string, projectId: string) {
   });
 }
 
+/**
+ * Извлечь текст из файла (PDF/DOCX/TXT/MD) для полей базы знаний.
+ * Отдельно от fetchWithAuth: multipart-форма не должна получать
+ * Content-Type: application/json — браузер сам ставит boundary.
+ */
+export async function extractTextFromFile(file: File): Promise<string> {
+  const { data: { session } } = await supabase.auth.getSession();
+  const token = session?.access_token;
+  if (!token) throw new Error('Not authenticated');
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(`${BASE}/extract-text`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body?.error ?? `Request failed: ${res.status}`);
+  }
+  const data = (await res.json()) as { text: string };
+  return data.text;
+}
+
 export type { DraftStatus };
