@@ -735,6 +735,9 @@ async function resolveProviderCampaignFallback(args: {
   providerCampaignId: string;
   providerContext: ThreadContext | null;
   reason: string;
+  reply: Email;
+  mailbox: string | null;
+  leadEmail: string;
 }): Promise<ReplyOwnershipResolution> {
   const { db, providerCampaignId, providerContext, reason } = args;
   let owner;
@@ -755,6 +758,39 @@ async function resolveProviderCampaignFallback(args: {
       candidateProjectIds: owner.projectIds,
       reason: `provider campaign ${providerCampaignId} is linked to multiple Portal projects`,
     };
+  }
+  // A text-matched campaign label alone is not ownership proof. Preserve
+  // established/manual and period links, but require independent evidence
+  // before notifying on an automatic text-only link with no mailbox mapping.
+  // This is intentionally narrower than requiring a parent for every reply:
+  // a unique exact-mailbox owner remains valid even if old history is absent.
+  if (owner.status === 'resolved' && (!args.mailbox || !strongExactProviderParent({
+    context: providerContext, reply: args.reply, providerCampaignId,
+    mailbox: args.mailbox, leadEmail: args.leadEmail,
+  }))) {
+    const [legacy, period] = await Promise.all([
+      db.from('project_instantly_campaigns').select('project_id, match_source')
+        .eq('campaign_id', providerCampaignId),
+      db.from('project_period_instantly_campaigns').select('project_id')
+        .eq('campaign_id', providerCampaignId),
+    ]);
+    if (legacy.error || period.error) {
+      return { status: 'defer', providerCampaignId, reason: 'campaign ownership provenance unavailable' };
+    }
+    const links = (legacy.data ?? []) as Array<{ project_id: string; match_source?: string | null }>;
+    const observedProjects = new Set([...links, ...(period.data ?? [])]
+      .map((link: { project_id?: string }) => link.project_id).filter(Boolean));
+    if (observedProjects.size !== 1 || !observedProjects.has(owner.projectId)) {
+      return { status: 'defer', providerCampaignId, reason: 'campaign ownership changed during provenance lookup' };
+    }
+    const hasPeriod = (period.data ?? []).some((link: { project_id: string }) => link.project_id === owner.projectId);
+    const projectLinks = links.filter(link => link.project_id === owner.projectId);
+    if (!hasPeriod && projectLinks.length > 0 && projectLinks.every(link => link.match_source === 'auto-text')) {
+      return {
+        status: 'defer', providerCampaignId,
+        reason: 'automatic text-only campaign link has no exact mailbox mapping or matching outbound parent',
+      };
+    }
   }
   return {
     status: 'resolved',
@@ -815,6 +851,7 @@ export async function resolveEffectiveReplyOwner(args: {
       db,
       providerCampaignId,
       providerContext,
+      reply, mailbox, leadEmail,
       reason: 'reply has no eaccount; provider campaign retained',
     });
   }
@@ -838,6 +875,7 @@ export async function resolveEffectiveReplyOwner(args: {
       db,
       providerCampaignId,
       providerContext,
+      reply, mailbox, leadEmail,
       reason: 'mailbox has no current campaign mappings; provider campaign retained',
     });
   }

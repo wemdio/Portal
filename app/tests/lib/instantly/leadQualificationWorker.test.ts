@@ -3658,8 +3658,9 @@ describe('pollAndQualifyReplies', () => {
     });
 
     it('recovers an old technical row only in the cold lane without starving behind permanent errors', async () => {
-      // Provider 404 recovery is allowed only from a real full inbound. No
-      // daily dead-id reads, no preview-as-body, no invented To=our mailbox.
+      // Real full snapshots are preferred to provider reads. An ownership
+      // failure may refresh stale metadata once; a 404 then stays local-only.
+      // No preview-as-body and no invented To=our mailbox.
       const { InstantlyApiError } = await import('@/lib/instantly/errors');
       const { captureQualificationReplySnapshot } = await import('@/lib/instantly/qualificationRecovery');
       const worker = await import('@/lib/instantly/leadQualificationWorker');
@@ -3682,19 +3683,20 @@ describe('pollAndQualifyReplies', () => {
         expect(await worker.reprocessOwnershipReviewRows({ now: retryNow, minRetryAgeMs: 0 })).toBe(1);
         const saved = mockInstantlyDb!.getRows('instantly_lead_qualifications')[0];
         expect(saved.status).toBe(source === 'safe' ? 'lead' : 'pending');
-        expect(saved.recovery_use_snapshot).toBe(true);
+        expect(saved.recovery_use_snapshot).toBe(source === 'legacy' ? true : undefined);
         expect(saved.recovery_attempts).toBe(1);
-        expect(getEmail).toHaveBeenCalledTimes(1);
+        expect(getEmail).toHaveBeenCalledTimes(source === 'legacy' ? 1 : 0);
         expect(qualifyReply).toHaveBeenCalledTimes(source === 'safe' ? 1 : 0);
         expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(source === 'safe' ? 1 : 0);
         // Simulate restart, then a later technical retry. Unsafe/absent source
-        // cannot become lead and cannot issue a second GET for the dead id.
+        // cannot become lead. Stale To/CC gets one refresh, then the confirmed
+        // dead id is not fetched again.
         jest.resetModules();
         const restarted = await import('@/lib/instantly/leadQualificationWorker');
         await restarted.reprocessOwnershipReviewRows({
           now: new Date(retryNow.getTime() + 24 * 60 * 60_000), minRetryAgeMs: 0,
         });
-        expect(getEmail).toHaveBeenCalledTimes(1);
+        expect(getEmail).toHaveBeenCalledTimes(source === 'safe' ? 0 : 1);
         expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(source === 'safe' ? 1 : 0);
         const beforeWake = { ...mockInstantlyDb!.getRows('instantly_lead_qualifications')[0] };
         if (source !== 'legacy') {
@@ -4107,11 +4109,11 @@ describe('pollAndQualifyReplies', () => {
       }
     });
 
-    it('replays historical semantic reviews only with explicit opt-in and keeps them binary', async () => {
+    it('replays unresolved historical semantic reviews by default, respects pause, and never reopens final verdicts', async () => {
       const previous = process.env.INSTANTLY_LEAD_QUAL_LEGACY_SEMANTIC_DRAIN_ENABLED;
       try {
-        for (const status of ['needs_review', 'objection'] as const) {
-          delete process.env.INSTANTLY_LEAD_QUAL_LEGACY_SEMANTIC_DRAIN_ENABLED;
+        for (const status of ['needs_review', 'objection', 'not_lead', 'lead'] as const) {
+          process.env.INSTANTLY_LEAD_QUAL_LEGACY_SEMANTIC_DRAIN_ENABLED = 'false';
           installOwnershipReviewRetryFixture({
             verdict: 'not_lead',
             enforceQueryWindows: true,
@@ -4150,12 +4152,16 @@ describe('pollAndQualifyReplies', () => {
           expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[0]).toEqual(
             expect.objectContaining({ status, ai_confidence: 0.6 }),
           );
-          process.env.INSTANTLY_LEAD_QUAL_LEGACY_SEMANTIC_DRAIN_ENABLED = 'true';
-          expect(await reprocessOwnershipReviewRows({ now: retryNow, minRetryAgeMs: 0, lane: 'cold' })).toBe(1);
-          expect(getEmail).toHaveBeenCalledTimes(1);
-          expect(qualifyReply).toHaveBeenCalledTimes(1);
+          delete process.env.INSTANTLY_LEAD_QUAL_LEGACY_SEMANTIC_DRAIN_ENABLED;
+          const expectedAttempts = status === 'needs_review' ? 1 : 0;
+          expect(await reprocessOwnershipReviewRows({ now: retryNow, minRetryAgeMs: 0, lane: 'cold' })).toBe(expectedAttempts);
+          expect(getEmail).toHaveBeenCalledTimes(expectedAttempts);
+          expect(qualifyReply).toHaveBeenCalledTimes(expectedAttempts);
           expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[0]).toEqual(
-            expect.objectContaining({ status: 'not_lead', id: 'ownership-review-qualification' }),
+            expect.objectContaining({
+              status: status === 'needs_review' ? 'not_lead' : status,
+              id: 'ownership-review-qualification',
+            }),
           );
           expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
           expect(sendClientReplyTelegram).not.toHaveBeenCalled();
@@ -4353,7 +4359,8 @@ describe('pollAndQualifyReplies', () => {
           }
           clock.mockReturnValue(retryNow.getTime() + 17 * 60_000);
           expect(await worker.maybeReprocessOwnershipReviews()).toBe(0);
-          expect(getEmail).toHaveBeenCalledTimes(3);
+          // The initial successful email fetch survives an AI billing outage.
+          expect(getEmail).toHaveBeenCalledTimes(message.startsWith('AI API') ? 2 : 3);
           expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(2);
         }
       } finally {

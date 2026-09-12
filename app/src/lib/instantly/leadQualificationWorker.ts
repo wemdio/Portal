@@ -2065,7 +2065,10 @@ export async function getCampaignsByAccountCached(): Promise<Map<string, Set<str
 }
 
 function legacySemanticDrainEnabled(): boolean {
-  return /^(?:1|true|yes|on)$/i.test(
+  // Old unresolved semantic reviews use the same bounded cold recovery lane.
+  // An explicit operator pause remains available; completed negatives are
+  // never adopted by this lane.
+  return !/^(?:0|false|no|off)$/i.test(
     process.env.INSTANTLY_LEAD_QUAL_LEGACY_SEMANTIC_DRAIN_ENABLED?.trim() ?? '',
   );
 }
@@ -2166,7 +2169,7 @@ export async function refreshMissingRecoverySources(
 }
 
 // Match technical legacy reasons in SQL BEFORE LIMIT. Ordinary semantic review
-// must neither be silently reopened nor starve technical adoption when opt-in is off.
+// must not starve technical adoption, including when semantic recovery is paused.
 const LEGACY_TECHNICAL_RETRY_FILTER = [
   `ai_reason.ilike.${OWNERSHIP_REVIEW_REASON_PREFIX}%`,
   `ai_reason.ilike.${TRANSIENT_RETRY_REASON_PREFIX}%`,
@@ -2200,7 +2203,7 @@ async function adoptLegacyQualificationRetries(
 ): Promise<void> {
   let query = db.from('instantly_lead_qualifications')
     .select('id, status, instantly_email_id, ai_reason, error_message, updated_at')
-    .in('status', options.semantic ? ['needs_review', 'objection'] : ['needs_review', 'error'])
+    .in('status', options.semantic ? ['needs_review'] : ['needs_review', 'error'])
     .not('instantly_email_id', 'is', null)
     .not('instantly_email_id', 'like', 'webhook:%');
   if (!options.semantic) query = query.or(LEGACY_TECHNICAL_RETRY_FILTER);
@@ -2253,6 +2256,25 @@ export interface OwnershipReviewRetryOptions {
   timeBudgetMs?: number;
   /** Old technical rows remain recoverable in a tiny, slow cold lane. */
   lane?: 'fresh' | 'active' | 'page_budget' | 'cold';
+}
+
+/** A saved inbound avoids repeating provider reads while the real owner is
+ * still proved normally. Refresh once after a source-sensitive failure, then
+ * only every eighth consecutive failure: old To/CC/thread metadata must not
+ * become permanent evidence, but each retry must not refetch the same email.
+ * A confirmed provider 404 stays local-only until ingestion supplies new data.
+ */
+function shouldRefreshRecoverySource(row: QualificationRecoveryState): boolean {
+  if (row.recovery_use_snapshot) return false;
+  if (!['ownership', 'evidence_blocked', 'dependency_unavailable'].includes(
+    row.recovery_failure_kind ?? '',
+  )) return false;
+  const failures = Math.max(0, row.recovery_failure_count ?? 0);
+  // The backoff counter saturates at 30; the durable total attempt counter
+  // does not. Keep periodic refresh alive after a long-running owner conflict.
+  const periodicCount = failures >= 30
+    ? Math.max(0, row.recovery_attempts ?? 0) : failures;
+  return failures === 1 || (periodicCount > 0 && periodicCount % 8 === 0);
 }
 
 /** Repair only the old scheduler's provable local-quota misclassification.
@@ -2572,19 +2594,22 @@ export async function reprocessOwnershipReviewRows(
     try {
       // Recovery already has durable retries. Do not spend another 28 seconds
       // retrying a 429 inside getEmail before yielding to fresh replies.
-      const loadSnapshot = async () => {
+      const readSnapshot = async () => {
         const { data, error } = await db.from('instantly_lead_qualifications')
           .select('instantly_email_id, lead_email, reply_recovery_snapshot')
           .eq('id', raw.id).maybeSingle();
-        const snapshot = !error && data ? qualificationReplySnapshot(data) : null;
-        if (!snapshot || snapshot.id !== emailId) {
-          throw new Error('recovery source unavailable: provider 404 and no complete saved inbound');
+        if (error) {
+          throw new Error('recovery source checkpoint unavailable');
         }
-        return snapshot;
+        const snapshot = data ? qualificationReplySnapshot(data) : null;
+        return snapshot?.id === emailId ? snapshot : null;
       };
+      const storedSnapshot = await readSnapshot();
       let fullEmail: Email;
-      if (raw.recovery_use_snapshot) fullEmail = await loadSnapshot();
-      else {
+      if (storedSnapshot && !shouldRefreshRecoverySource(raw)) fullEmail = storedSnapshot;
+      else if (raw.recovery_use_snapshot) {
+        throw new Error('recovery source unavailable: provider 404 and no complete saved inbound');
+      } else {
         try {
           fullEmail = await instantly.getEmail(emailId, {
             accountId, requestPriority: 'recovery', retryRateLimits: false,
@@ -2600,7 +2625,10 @@ export async function reprocessOwnershipReviewRows(
             .eq('id', raw.id).eq('status', 'processing').eq('updated_at', nowIso)
             .select('id').maybeSingle();
           if (saveError || !saved) throw new Error('recovery snapshot checkpoint unavailable');
-          fullEmail = await loadSnapshot();
+          if (!storedSnapshot) {
+            throw new Error('recovery source unavailable: provider 404 and no complete saved inbound');
+          }
+          fullEmail = storedSnapshot;
         }
       }
       if (!fullEmail?.id || fullEmail.id !== emailId) {
