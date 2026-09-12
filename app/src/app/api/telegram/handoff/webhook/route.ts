@@ -4,6 +4,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { verifyHandoffCallback } from '@/lib/instantly/handoffCallback';
 import { handoffBotToken, answerCallback, editHandoffMessage } from '@/lib/instantly/handoffTelegram';
 import { sendHandoffNow, type PendingHandoffRow } from '@/lib/instantly/handoffSender';
+import { handleHandoffEditor, type HandoffEditUpdate } from '@/lib/instantly/handoffEditor';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,7 +20,7 @@ interface TgUpdate {
 }
 
 /**
- * Webhook for the LEAD_ALERTS bot — handles "Передать клиенту" button presses.
+ * Webhook for LEAD_ALERTS — signed handoff buttons and authenticated edit replies.
  * Security: the endpoint is public, so we verify Telegram's secret_token header
  * (set via setWebhook) — without it, anyone could POST a forged press carrying
  * the responsible specialist's from.id. Fail-closed if the secret isn't configured.
@@ -36,13 +37,14 @@ export async function POST(req: NextRequest) {
     return OK(); // reject silently — looks like a normal 200 to a forger
   }
 
-  let update: TgUpdate;
+  let update: TgUpdate & HandoffEditUpdate;
   try {
-    update = (await req.json()) as TgUpdate;
+    update = (await req.json()) as TgUpdate & HandoffEditUpdate;
   } catch {
     return OK();
   }
 
+  if (await handleHandoffEditor(update, token)) return OK();
   const cq = update.callback_query;
   if (!cq?.id) return OK();
 

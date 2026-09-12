@@ -11,6 +11,18 @@ import { createHmac, timingSafeEqual } from 'crypto';
 const PREFIX = 'h';
 const SIG_LEN = 24;
 
+export type HandoffEditAction = 'e' | 'u' | 's' | 'c';
+export function signHandoffEdit(action: HandoffEditAction, id: string, secret: string): string {
+  const body = `${action}.${id}`;
+  return `${body}.${createHmac('sha256', secret).update(body).digest('base64url').slice(0, SIG_LEN)}`;
+}
+export function verifyHandoffEdit(data: string, secret: string): { action: HandoffEditAction; id: string } | null {
+  const match = /^([eusc])\.([0-9a-f-]{36})\.([A-Za-z0-9_-]{24})$/.exec(data);
+  if (!match || !secret) return null;
+  const action = match[1] as HandoffEditAction;
+  return safeEqual(data, signHandoffEdit(action, match[2], secret)) ? { action, id: match[2] } : null;
+}
+
 function safeEqual(a: string, b: string): boolean {
   const aBuf = Buffer.from(a);
   const bBuf = Buffer.from(b);
