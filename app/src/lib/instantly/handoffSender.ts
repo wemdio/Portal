@@ -48,11 +48,20 @@ export async function sendHandoffNow(
   pending: PendingHandoffRow,
   opts: { sentByTelegramId?: number | null } = {},
 ): Promise<HandoffSendResult> {
-  const { data: qual } = await db
+  const { data: qual, error: qualificationError } = await db
     .from('instantly_lead_qualifications')
-    .select('reply_subject, lead_email, lead_name, company_name, campaign_name, reply_body, last_outbound_preview, reply_timestamp, ai_reason')
+    .select('reply_subject, lead_email, lead_name, company_name, campaign_name, reply_body, last_outbound_preview, reply_timestamp, ai_reason, queue_archived_at')
     .eq('id', pending.qualification_id)
     .maybeSingle();
+  // Both an old Telegram button and a previously queued automatic handoff
+  // reach this shared sender. Never resume an archived reply, even if its
+  // original business status/draft was deliberately retained for audit.
+  if (qualificationError || !qual) {
+    return { ok: false, error: 'Не удалось проверить состояние квалификации; передача не выполнена' };
+  }
+  if (qual.queue_archived_at != null) {
+    return { ok: false, error: 'Ответ снят с обработки и сохранён в архиве; передача недоступна' };
+  }
 
   // «Ответить всем»: к адресу клиента (handoff CC) добавляем участников, которых
   // лид завёл в тред (То+CC оригинала, кроме нашего ящика и самого лида).
@@ -102,6 +111,20 @@ export async function sendHandoffNow(
   // видимость адресов та же, что у cc). Плата: без сущности в Unibox.
   let via: 'reply' | 'test' = 'reply';
   try {
+    // The source fetch above can take time. Re-check the archive boundary as
+    // close to the external side effect as possible; a DB failure is not a
+    // reason to send using the earlier cached row.
+    const { data: current, error: currentError } = await db
+      .from('instantly_lead_qualifications')
+      .select('id, queue_archived_at')
+      .eq('id', pending.qualification_id)
+      .maybeSingle();
+    if (currentError || !current) {
+      return { ok: false, error: 'Не удалось повторно проверить состояние квалификации; передача не выполнена' };
+    }
+    if (current.queue_archived_at != null) {
+      return { ok: false, error: 'Ответ снят с обработки и сохранён в архиве; передача недоступна' };
+    }
     const replySubject = buildReplySubject((qual?.reply_subject as string | null) ?? null);
     const replyHtml = textToReplyHtml(bodyText);
     try {
