@@ -32,6 +32,7 @@ import {
   List,
   Telescope,
   MapPin,
+  MessageSquareReply,
 } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, TOOL_GROUPS, type ToolId } from '@/lib/toolsRegistry';
@@ -111,6 +112,7 @@ const TOOL_ICONS: Record<ToolId, ComponentType<{ className?: string }>> = {
   'sales-chat-analyzer': TelegramIcon,
   'hypothesis-engine': Telescope,
   'vertical-engine-v2': Sparkles,
+  'reply-personalization': MessageSquareReply,
 };
 
 function ToolLinkCard({
