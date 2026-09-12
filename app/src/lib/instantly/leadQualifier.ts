@@ -776,8 +776,63 @@ function isPlainContactRoutingReply(text: string): boolean {
   return isPureNamedContactRouting(stripped.text);
 }
 
+interface TicketReplySegment {
+  author: string;
+  timestamp: string;
+  message: string;
+  history: string;
+}
+
+/**
+ * A helpdesk notification is an envelope, not necessarily an automatic reply.
+ * Recognize a complete reply-above-line envelope and repeated author/time
+ * entries, then isolate its newest entry. Never search history for a human:
+ * the latest entry can itself be a bot, refusal or plain acknowledgement.
+ */
+function extractLatestTicketReply(text: string): TicketReplySegment | null {
+  const normalized = text.replace(/\r\n?/g, '\n');
+  const prefix = normalized.trimStart().slice(0, 1000).replace(/\s+/gu, ' ');
+  if (!/^(?:добрый\s+день[,!]?\s*)?на\s+вашу\s+заявку\s+[a-z0-9_-]+\s+поступил\s+ответ\s*:/iu.test(prefix) ||
+      !/пожалуйста,?\s+введите\s+свой\s+ответ\s+над\s+этой\s+строкой/iu.test(prefix)) return null;
+
+  const lines = normalized.split('\n');
+  const headers: Array<{ authorIndex: number; timestampIndex: number; timestamp: number }> = [];
+  for (let index = 1; index < lines.length; index++) {
+    const match = lines[index].trim().match(/^(\d{1,2}):(\d{2})\s+(\d{2})\.(\d{2})\.(\d{4})$/u);
+    if (!match) continue;
+    let authorIndex = index - 1;
+    while (authorIndex >= 0 && !lines[authorIndex].trim()) authorIndex--;
+    // Structural author labels, not a name/address whitelist. System is a
+    // valid entry too and must not expose the older buyer request beneath it.
+    if (authorIndex < 0 || !/^[\p{L}][\p{L} .'-]{0,100}$/u.test(lines[authorIndex].trim())) continue;
+    const [, hour, minute, day, month, year] = match.map(Number);
+    const timestamp = Date.UTC(year, month - 1, day, hour, minute);
+    const date = new Date(timestamp);
+    if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 ||
+        date.getUTCDate() !== day || date.getUTCHours() !== hour || date.getUTCMinutes() !== minute) continue;
+    headers.push({ authorIndex, timestampIndex: index, timestamp });
+  }
+  if (headers.length < 2 || headers.some((entry, index) => index > 0 && entry.timestamp > headers[index - 1].timestamp)) return null;
+  const [latest, previous] = headers;
+  if (!lines.slice(0, latest.authorIndex).every((line) => {
+    const segment = line.trim();
+    return !segment || /^добрый\s+день[,!]?$/iu.test(segment) ||
+      /^на\s+вашу\s+заявку(?:\s+[a-z0-9_-]+)?\s+поступил\s+ответ\s*:$/iu.test(segment) ||
+      /^={3,}\s*пожалуйста,?\s+введите\s+свой\s+ответ\s+над\s+этой\s+строкой\.[^\n]{0,200}={3,}$/iu.test(segment);
+  })) return null;
+  const message = lines.slice(latest.timestampIndex + 1, previous.authorIndex).join('\n').trim();
+  if (!message) return null;
+  return {
+    author: lines[latest.authorIndex].trim(),
+    timestamp: lines[latest.timestampIndex].trim(),
+    message,
+    history: lines.slice(previous.authorIndex).join('\n').trim(),
+  };
+}
+
 function extractAuthoredReplyText(text: string): string {
-  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  const latestTicketReply = extractLatestTicketReply(text);
+  const lines = (latestTicketReply?.message ?? text).replace(/\r\n?/g, '\n').split('\n');
   const boundaryIndex = lines.findIndex((line, index) => {
     const trimmed = line.trim();
     if (!trimmed) return false;
@@ -2150,6 +2205,7 @@ function buildSystemPrompt(
 - «расскажите подробнее» без конкретного следующего шага — ставь is_lead=false, needs_review=true.
 - Без подтверждённого оффера одиночное «интересно» остаётся неоднозначным: ставь is_lead=false, needs_review=true.
 - Запрос РАЗЪЯСНЕНИЯ («что вы предлагаете?», «о чём речь?», «что это за решение?», «в чём суть?») означает, что человек ещё не понял оффер: ставь is_lead=false, needs_review=true.
+- Отличай общее разъяснение от ПРЕДМЕТНОГО вопроса о реализации описанного решения. «В какой системе?» после предложения настроить электронные транспортные документы, «С какой 1С работает?», «Есть интеграция с нашей CRM?» уточняют технические условия уже описанной услуги и являются интересом к ней: is_lead=true, needs_review=false. Название продукта, цена и длинная презентация для этого не обязательны. Но один поиск «кто отвечает за документы/IT?» без описания того, что мы предлагаем сделать, такого контекста не создаёт: не домысливай оффер из брифа или названия кампании.
 
 НЕ является лидом и НЕ возражение:
 - Автоответ/отпуск
@@ -2160,6 +2216,7 @@ function buildSystemPrompt(
 ВАЖНО — НЕ путай дежурные контакты с интересом:
 - Телефон/адрес/сайт в подписи или в шаблонном подтверждении ("Спасибо за сообщение", "Ваше письмо получено", "свяжемся / предоставим ответ", "звоните по любым вопросам") — это АВТООТВЕТ-подтверждение получения, а НЕ интерес. Само по себе это is_lead=false, proposal_seen=false.
 - Явная личная просьба позвонить или встретиться ("наберите меня завтра", "давайте созвонимся") — это лид даже без найденного исходящего письма. Но телефон в подписи или дежурное "звоните по любым вопросам" — не лид.
+- «По какому вопросу хотите обратиться? Можете написать сюда или позвонить по телефону…» лишь уточняет тему и перечисляет каналы первичного обращения, это contact_routing, не личное согласие на коммерческий звонок. Не извлекай отдельный CTA «можете позвонить» из такого предложения. Отдельные «наберите меня», назначенное время звонка, запрос цены/КП или покупательский вопрос рядом оценивай самостоятельно; положительный кастомный критерий передачи контакта сохраняет приоритет.
 - Перенаправление в приёмную, отдел или по общему номеру без собственной готовности обсуждать предложение и без коммерческого запроса не является коммерческим CTA: ставь is_lead=false, needs_review=false, даже если предложение процитировано.
 - Вежливость ("спасибо", "благодарю за информацию") без прямого CTA или конкретного коммерческого запроса — НЕ лид.
 ${criteriaReminder}
@@ -2168,6 +2225,7 @@ ${criteriaReminder}
 - machine_reply_kind = "auto_reply" для автоматического ответа/отпуска, "delivery_failure" для уведомления о недоставке, "service_acknowledgement" для шаблонного подтверждения или обещания обработать запрос/ответить. Например, «Мы обязательно ответим в ближайшее время. Если запрос актуален — свяжитесь по телефону» — служебный шаблон, не коммерческий CTA, даже без слов «письмо получено».
 - Чистое административное уведомление о смене почты или контактных данных — machine_reply_kind="auto_reply", is_lead=false, даже если оно написано вручную и до него отправлен оффер. Определяй смысл класса, а не наличие буквальной фразы «автоответ» или «все письма»: «Мой новый электронный адрес X. Прошу все письма присылать на него», «В связи с изменением наших контактных данных просим обращаться по следующему адресу электронной почты X» и «Our contact details have changed, please contact us at X» сообщают только новые реквизиты связи. Новый адрес в таком уведомлении не выполняет кастомное правило «поделились почтой/контактом — лид». Но «Пришлите КП/расчёт на новый адрес», вопрос о цене, согласие на звонок или отдельный человеческий интерес рядом с уведомлением оценивай по критериям проекта с machine_reply_kind=null. Обычная сознательная передача контакта в ответ на наш вопрос («уточните по адресу X», «за это отвечает Анна, её почта X») — НЕ уведомление о смене контактных данных: к ней применяются кастомные критерии.
 - Ставь этот признак только для полностью машинного/служебного ОСНОВНОГО ответа без самостоятельного человеческого интереса. Машинный текст в цитате или подписи не учитывай. Если рядом есть живой вопрос про цену/КП или просьба обсудить предложение/созвониться, machine_reply_kind=null: оцени человеческую часть по обычным критериям.
+- Helpdesk-оболочка «на вашу заявку поступил ответ / введите ответ над строкой» доставляет как автоматические, так и живые сообщения. Если выделено последнее сообщение участника, оцени только его как новый ответ; предыдущие датированные сообщения, включая System/автоответы и наши follow-up, — история. Имя автора само по себе не доказывает интереса. Адресное согласование делового продолжения после оффера («менеджер свяжется с вами в понедельник по UTC+5») не равно автоматическому «заявка получена, ответим скоро»; проверяй роли и контекст, а не адрес support@ или слово «заявка». Служебное обещание обработать наш тикет без интереса к нашему предложению остаётся не лидом.
 - Само упоминание отпуска или отсутствия не делает ответ автоматическим. «С завтрашнего дня я в отпуске. Смогу вернуться к теме после 24 сентября» — человеческое намерение продолжить разговор, machine_reply_kind=null, но НЕ безусловный лид: по дефолтным критериям это отложенный интерес только после подтверждённого содержательного оффера. После запроса контакта или без подтверждённого оффера один перенос разговора не является лидом. Отличай от обычного автоответа «Я в отпуске, вернусь в офис 24 сентября, на письма отвечу после возвращения»: здесь нет интереса к нашему предложению. Кастомные критерии продолжают определять квалификацию человеческого ответа.
 - При machine_reply_kind != null обязательно is_lead=false, custom_criteria_matched=false, needs_review=false, objection_handleable=false, objection_draft=null. Контакты и призывы из служебного шаблона не могут выполнить кастомное правило «передали контакт — лид».
 - Для человеческого ответа или при сомнении machine_reply_kind=null.
@@ -2377,8 +2435,18 @@ function buildUserMessage(ctx: ThreadContext): string {
     .reverse()
     .find(isSubstantiveOfferText)
     ?.slice(0, 3000);
-  const replyText = getBodyText(ctx.replyEmail.body).slice(0, 3000);
-  const authoredReply = extractAuthoredReplyText(replyText);
+  const fullReplyText = getBodyText(ctx.replyEmail.body);
+  // Parse before truncation: whitespace-heavy ticket HTML can spend the whole
+  // budget on its envelope, or truncate before the next participant boundary.
+  const ticketReply = extractLatestTicketReply(fullReplyText);
+  const compactTicketText = (text: string): string => text.replace(/[ \t]+/g, ' ').replace(/\n\s*\n/g, '\n\n').trim();
+  const replyText = ticketReply
+    ? `${compactTicketText(ticketReply.message)}\n\nИСТОРИЯ ТИКЕТА (не новый ответ):\n${compactTicketText(ticketReply.history)}`.slice(0, 3000)
+    : fullReplyText.slice(0, 3000);
+  const authoredReply = extractAuthoredReplyText(fullReplyText).slice(0, 3000);
+  const ticketHint = ticketReply
+    ? `\nHelpdesk-конверт распознан. Последнее сообщение: ${ticketReply.author}, ${ticketReply.timestamp}. Имя/конверт не доказывают ни автоматичность, ни интерес; квалифицируй содержание последнего сообщения.`
+    : '';
   const stepCount = outboundTexts.length;
 
   const hasQuotedContent = replyText.includes('>') || /(?:On|В|от)\s+.+(?:wrote|написал|:$)/im.test(replyText);
@@ -2422,6 +2490,7 @@ ${quotedText.slice(0, 3000)}
 Отправитель: ${ctx.replyEmail.from_address_email ?? '(не указан)'}
 Получатели: ${ctx.replyEmail.to_address_email_list ?? '(не указаны)'}
 Тема: ${ctx.replyEmail.subject ?? '(без темы)'}
+${ticketHint}
 ОСНОВНОЙ ОТВЕТ БЕЗ ПОДПИСИ И СТАРОЙ ПЕРЕПИСКИ (источник намерения):
 ---
 ${authoredReply || '(до подписи или границы цитаты нового ответа нет; не приписывай получателю CTA из старых писем. Если ниже есть отдельный новый нецитированный ответ, оцени только его)'}
@@ -2732,6 +2801,29 @@ function isSelfRecipientConfirmation(ctx: ThreadContext, replyText: string): boo
     !hasDirectActionableCta(outbound) && !hasDirectActionableCta(outbound, true);
 }
 
+// A clarification plus a generic choice of channels is still contact routing.
+// Match the whole authored reply, not the mere presence of "what is this?" or
+// a phone. Extra buyer content (KP/price, "call me", a meeting) must survive;
+// project-specific contact criteria are interpreted before this default rule.
+function isContactClarificationRouting(replyText: string): boolean {
+  let statement = normalizeAuthoredStatement(extractAuthoredReplyText(replyText));
+  statement = statement.replace(/^([\p{L}-]+(?:\s+[\p{L}-]+){0,2})[!,.]\s+/u,
+    (greeting, name: string) => isLikelyContactName(name) ? '' : greeting);
+  return /^(?:по\s+какому\s+вопросу(?:\s+(?:вы\s+)?(?:хотите|хотели\s+бы)\s+обратиться)?|о\s+ч[её]м\s+(?:ид[её]т\s+)?речь|что\s+вы\s+предлагаете)\s*[?!.,]\s*(?:можете|можно)\s+(?:написать|писать)\s+сюда(?:\s+или\s+(?:позвонить|набрать)(?:\s+(?:по|на)\s+(?:телефону|номеру))?\s*[:—–-]?\s*\+?\d[\d\s().-]{4,30}\d(?:\s*(?:доб\.?|добавочный)\s*\d{1,6})?)?(?:[.!]\s*(?:спасибо|благодарю))?$/iu.test(statement);
+}
+
+function contactClarificationRoutingNonLead(
+  ctx: ThreadContext,
+  baseResult?: QualificationResult,
+): QualificationResult {
+  return {
+    ...sharedContactRoutingNonLead(ctx, baseResult),
+    nonLeadKind: 'contact_routing',
+    proposalSeen: baseResult?.proposalSeen ?? false,
+    reason: 'Получатель уточнил тему обращения и указал доступные каналы связи без собственного коммерческого запроса.',
+  };
+}
+
 function selfRecipientConfirmationNonLead(
   ctx: ThreadContext,
   baseResult?: QualificationResult,
@@ -2949,6 +3041,9 @@ function applyQualificationGuards(
   // classifyWithAI has already applied the machine veto before custom priority.
   // Do not let contact/CTA postprocessing undo that verdict on either pass.
   if (aiResult.machineReplyKind) return aiResult;
+  if (!leadCriteria?.trim() && isContactClarificationRouting(replyText)) {
+    return contactClarificationRoutingNonLead(ctx, aiResult);
+  }
   if (!leadCriteria?.trim() && isSelfRecipientConfirmation(ctx, replyText)) {
     return selfRecipientConfirmationNonLead(ctx, aiResult);
   }
@@ -3061,6 +3156,9 @@ export async function qualifyReply(
 
   // Recipient confirmation is human routing, not technical noise. Custom
   // definitions are interpreted by the model before any semantic verdict.
+  if (!hasCustomCriteria && isContactClarificationRouting(replyText)) {
+    return { ...contactClarificationRoutingNonLead(ctx), threadContext: ctx };
+  }
   if (!hasCustomCriteria && isSelfRecipientConfirmation(ctx, replyText)) {
     return { ...selfRecipientConfirmationNonLead(ctx), threadContext: ctx };
   }

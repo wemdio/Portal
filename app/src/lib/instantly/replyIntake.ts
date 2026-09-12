@@ -1,11 +1,13 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { listEmails } from './client';
 import type { Email } from './types';
+import { decodeReplyIntakeEmail, encodeReplyIntakeEmail, replyIntakeJsonBytes, ReplyIntakePayloadError } from './replyIntakePayload';
 
 type IntakeDb = Pick<SupabaseClient, 'rpc'>;
 type RpcResult = Record<string, unknown>;
 const FAILURE = 'Instantly durable reply intake unavailable';
 const PAGE_SIZE = 100;
+const STAGE_BATCH_BYTES = 4 * 1024 * 1024;
 
 export interface ReplyIntakeClaim {
   accountId: string;
@@ -18,19 +20,28 @@ export interface ReplyIntakeClaim {
 async function call(db: IntakeDb, name: string, args: Record<string, unknown>): Promise<RpcResult> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let detail = 'rpc_unavailable';
   try {
     const request = db.rpc(name, args).abortSignal(controller.signal);
     const { data, error } = await Promise.race([
       request,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => { controller.abort(); reject(new Error('intake RPC deadline')); }, 10_000);
+        timer = setTimeout(() => { detail = 'rpc_timeout'; controller.abort(); reject(new Error('intake RPC deadline')); }, 10_000);
       }),
     ]);
-    if (error || !data || typeof data !== 'object' || Array.isArray(data)) throw new Error('invalid RPC result');
+    if (error) {
+      const code = typeof error.code === 'string' && /^[A-Z0-9]{3,12}$/.test(error.code) ? error.code : 'unknown';
+      const reason = error.message?.includes('invalid reply discovery page') ? 'page_rejected'
+        : error.message?.includes('invalid reply discovery item') ? 'item_rejected'
+          : error.message?.includes('invalid reply discovery cursor') ? 'cursor_rejected' : 'rpc_unavailable';
+      detail = `${reason}; db_code=${code}`;
+      throw new Error('RPC failed');
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('invalid RPC result');
     return data as RpcResult;
   } catch {
     // No credential, provider body or contact details in operational failures.
-    throw new Error(`${FAILURE}: ${name}`);
+    throw new Error(`${FAILURE}: ${name}; ${detail}`);
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -87,29 +98,68 @@ export async function discoverReplyIntake(
         timeoutMs: 20_000, timeoutIncludesBody: true, retryRateLimits: false,
       });
       if (!Array.isArray(page.items) || page.items.length > PAGE_SIZE) throw new Error(`${FAILURE}: invalid email page`);
+      let payloadFailure: ReplyIntakePayloadError | null = null;
       const items = page.items.filter(email =>
         (email.ue_type ?? 2) === 2 && email.campaign_id && options.campaignIds.has(email.campaign_id),
       ).flatMap(email => {
         if (typeof email.id !== 'string' || !email.id.trim()) throw new Error(`${FAILURE}: inbound missing id`);
         const replyTimestamp = timestamp(email.timestamp_email) ?? timestamp(email.timestamp_created);
         if (replyTimestamp && replyTimestamp < bootstrapSince) return [];
-        return [{ email_id: email.id, campaign_id: email.campaign_id,
-          lead_email: (email.from_address_email || email.lead || '').trim().toLowerCase() || null,
-          reply_timestamp: replyTimestamp, email_payload: email }];
+        try {
+          return [{ email_id: email.id, campaign_id: email.campaign_id,
+            lead_email: (email.from_address_email || email.lead || '').trim().toLowerCase() || null,
+            reply_timestamp: replyTimestamp, email_payload: encodeReplyIntakeEmail(email) }];
+        } catch (error) {
+          if (!(error instanceof ReplyIntakePayloadError)) throw error;
+          payloadFailure = error;
+          return [];
+        }
       });
       const next = page.next_starting_after ?? null;
       if (next !== null && (typeof next !== 'string' || !next.trim())) throw new Error(`${FAILURE}: invalid cursor`);
       // Do not declare EOF based on a short/old page: only the provider cursor.
       // A cyclic response is saved, but cannot advance the durable sweep cursor.
       const cycle = !head && next !== null && cursors.has(next);
-      const result = await call(db, 'stage_instantly_reply_page', {
-        p_account_id: options.accountId, p_lease_token: token, p_items: items,
-        p_is_head: head, p_expected_cursor: head ? null : cursor,
-        p_next_cursor: cycle ? cursor : next, p_sweep_complete: !head && next === null,
-      });
-      if (result.state !== 'saved') throw new Error(`${FAILURE}: discovery lease lost`);
+      const batches: typeof items[] = [];
+      let batch: typeof items = [];
+      let batchBytes = 2;
+      for (const item of items) {
+        const bytes = replyIntakeJsonBytes(item) + 2;
+        if (batch.length && batchBytes + bytes > STAGE_BATCH_BYTES) {
+          batches.push(batch); batch = []; batchBytes = 2;
+        }
+        batch.push(item); batchBytes += bytes;
+      }
+      if (batch.length || !batches.length) batches.push(batch);
+      for (let index = 0; index < batches.length; index += 1) {
+        // Nonfinal chunks use the existing non-advancing head operation. A
+        // crash/rejected later chunk leaves the cursor unchanged; replay only
+        // deduplicates already durable rows. Even unsupported oversized items
+        // do not prevent other replies on this page from being persisted.
+        const advance = index === batches.length - 1 && !payloadFailure;
+        const stagingHead = head || !advance;
+        const result = await call(db, 'stage_instantly_reply_page', {
+          p_account_id: options.accountId, p_lease_token: token, p_items: batches[index],
+          p_is_head: stagingHead, p_expected_cursor: stagingHead ? null : cursor,
+          p_next_cursor: cycle ? cursor : next,
+          p_sweep_complete: advance && !head && next === null,
+        });
+        if (result.state !== 'saved') throw new Error(`${FAILURE}: discovery lease lost`);
+        stats.staged += Number(result.staged) || 0;
+      }
       stats.pages += 1;
-      stats.staged += Number(result.staged) || 0;
+      if (payloadFailure && maxPages === 1 && !head) {
+        // An unsupported item must retain this sweep page, but must not pin a
+        // one-page worker to the sweep lane forever. This empty CAS changes
+        // only the next lane; it neither advances the cursor nor declares EOF.
+        const result = await call(db, 'stage_instantly_reply_page', {
+          p_account_id: options.accountId, p_lease_token: token, p_items: [],
+          p_is_head: false, p_expected_cursor: cursor, p_next_cursor: cursor,
+          p_sweep_complete: false,
+        });
+        if (result.state !== 'saved') throw new Error(`${FAILURE}: discovery lease lost`);
+      }
+      if (payloadFailure) throw payloadFailure;
       if (cycle) throw new Error(`${FAILURE}: cyclic provider cursor`);
       if (!head) {
         cursor = next;
@@ -143,14 +193,33 @@ export async function claimReplyIntake(
     p_account_ids: options.accountIds, p_limit: Math.max(1, Math.min(20, Math.trunc(options.limit) || 1)),
   });
   if (result.state !== 'claimed' || !Array.isArray(result.items)) throw new Error(`${FAILURE}: invalid intake claim`);
-  return result.items.map((item: RpcResult) => {
+  const claims: ReplyIntakeClaim[] = [];
+  for (const item of result.items as RpcResult[]) {
     if (typeof item.account_id !== 'string' || !options.accountIds.includes(item.account_id) ||
-      typeof item.email_id !== 'string' || typeof item.lease_token !== 'string' ||
-      !item.email_payload || typeof item.email_payload !== 'object' ||
-      (item.email_payload as Email).id !== item.email_id) throw new Error(`${FAILURE}: invalid claimed reply`);
-    return { accountId: item.account_id, emailId: item.email_id, leaseToken: item.lease_token,
-      email: item.email_payload as Email, attempts: Number(item.attempts) || 0 };
-  });
+      typeof item.email_id !== 'string' || typeof item.lease_token !== 'string') {
+      throw new Error(`${FAILURE}: invalid claimed reply scope`);
+    }
+    const claim = { accountId: item.account_id, emailId: item.email_id, leaseToken: item.lease_token,
+      email: { id: item.email_id } as Email, attempts: Number(item.attempts) || 0 };
+    try {
+      if (!item.email_payload || typeof item.email_payload !== 'object' ||
+        (item.email_payload as Email).id !== item.email_id) throw new ReplyIntakePayloadError('payload_decode_failed');
+      claim.email = decodeReplyIntakeEmail(item.email_payload as Email);
+      claims.push(claim);
+    } catch (error) {
+      if (!(error instanceof ReplyIntakePayloadError)) throw error;
+      try {
+        await deferReplyIntake(db, claim, error.message);
+      } catch {
+        // The existing lease will expire if this release is unavailable. Do
+        // not discard other healthy claims already leased in the same batch.
+        console.warn('[instantly-reply-intake] Invalid payload release unavailable; lease recovery will retry');
+      }
+      // Bounded operational code only: never log a body, header, or address.
+      console.warn('[instantly-reply-intake] Stored payload deferred:', error.reason);
+    }
+  }
+  return claims;
 }
 
 /** ACK means durably handed to qualification/recovery, NOT a final lead verdict. */
