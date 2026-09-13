@@ -1,6 +1,6 @@
 import { buildReplyPrompt } from './buildPrompt';
 import { getKnowledgeBase, getQualificationById, insertDraft } from './db';
-import { generateReplyWithSearch } from './geminiClient';
+import { generateReplyWithSearch, REPLY_MODEL_ID } from './geminiClient';
 import { fetchFullThread } from './instantlyThread';
 import type { GenerateDraftResult, ThreadMessage } from './types';
 
@@ -71,7 +71,7 @@ export async function generateDraftForQualification(
     factsUsed: result.sources.map((s) => s.title || s.url).join(', '),
     sources: result.sources,
     contextComplete,
-    model: process.env.REPLY_PERSONALIZATION_MODEL_ID ?? 'vertex/google/gemini-3-pro-preview',
+    model: REPLY_MODEL_ID,
     latencyMs: Date.now() - startedAt,
     createdBy: userId,
   });

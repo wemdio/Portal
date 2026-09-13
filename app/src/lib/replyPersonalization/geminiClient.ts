@@ -5,11 +5,11 @@
 
 const ENDPOINT = process.env.OPENROUTER_ENDPOINT ?? 'https://router.requesty.ai/v1/chat/completions';
 
-// TODO(проверить перед первым запуском в проде): точный id модели «Gemini
-// 3.1 Pro» в Model Library Requesty (https://app.requesty.ai/model-library)
-// может отличаться по написанию — свериться и при необходимости обновить
-// REPLY_PERSONALIZATION_MODEL_ID в .env.
-const MODEL_ID = process.env.REPLY_PERSONALIZATION_MODEL_ID ?? 'vertex/google/gemini-3-pro-preview';
+// Id сверен с Requesty Model Library (сентябрь 2026): модель там называется
+// «Gemini 3.1 Pro» с точным id `gemini-3.1-pro-preview` — без vertex/google-
+// префиксов. При смене поколения модели обновить здесь (и только здесь —
+// generateDraft импортирует эту константу).
+export const REPLY_MODEL_ID = process.env.REPLY_PERSONALIZATION_MODEL_ID ?? 'gemini-3.1-pro-preview';
 
 const MAX_ATTEMPTS = 3;
 const REQUEST_TIMEOUT_MS = 90_000;
@@ -51,7 +51,7 @@ export async function generateReplyWithSearch(messages: { role: string; content:
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
-          model: MODEL_ID,
+          model: REPLY_MODEL_ID,
           messages,
           max_tokens: maxTokens,
           temperature: 0.4,
