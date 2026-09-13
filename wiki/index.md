@@ -4,6 +4,8 @@ Live table of contents. AI updates this every time a new page is created or a pa
 
 ## Foundations
 
+- [Память Portal](../memory/index.md) — карта контекста, опыт разработки и разбор ошибок; предметные знания остаются в этой wiki
+
 - [README.md](./README.md) — что это и зачем
 - [CLAUDE.md](./CLAUDE.md) — инструкции AI-агенту, читается первым в каждой сессии
 - [log.md](./log.md) — хронология открытий
