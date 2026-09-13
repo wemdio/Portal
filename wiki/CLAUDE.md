@@ -1,5 +1,11 @@
 # Instantly Dataset Wiki — Agent Instructions
 
+## Portal memory integration
+
+For cross-session lessons and development context, use [`memory/index.md`](../memory/index.md) and the [`instantly-dataset` entry](../memory/domains/instantly-dataset.md). This wiki remains the home of dataset concepts and evidence-backed outreach findings; do not duplicate it into memory. Dated findings require rechecking before use as current statistics.
+
+The root `AGENTS.md` release/production boundary also applies to this wiki. Reading it does not authorize a production write or service operation. Without explicit authorization to write `query_log`, preserve a sanitized local session record through the `portal-memory` skill and continue the task. This local record is the fallback for the logging ritual below, not a claim that a DB row was inserted.
+
 You are an AI agent operating on this wiki. Read this file first **every session**.
 
 This wiki implements [Karpathy's LLM-Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) for our Instantly cold-outreach dataset. Knowledge accumulates and compounds — don't re-derive things that are already written here.
@@ -51,7 +57,7 @@ This wiki implements [Karpathy's LLM-Wiki pattern](https://gist.github.com/karpa
 
 ## Self-improving eval loop (MANDATORY)
 
-We follow a [YC-style observability loop](concepts/eval-loop.md). At the **end of every session** where you consulted the wiki and/or queried `instantly_dataset`, you MUST log the interaction to `query_log` so the weekly review can find patterns and we can improve the system.
+We follow a [YC-style observability loop](concepts/eval-loop.md). At the **end of every session** where you consulted the wiki and/or queried `instantly_dataset`, record the interaction for the review loop: use `query_log` only when production writes are explicitly authorized; otherwise save a sanitized local session record with `portal-memory`. The weekly review can use either source.
 
 ```sql
 INSERT INTO query_log (

@@ -127,8 +127,18 @@ async function resumeFailedPreview(
   if (!saved) return null;
   if (activeBaseIds.includes(saved.id)) return { ok: true, created: false, base: saved };
   const info = { ...saved.collect_info, ...(previewRecoveryKind(saved) === 'validation' ? { validation_retry: true } : {}) };
+  if (previewRecoveryKind(saved) === 'pipeline' && info.target_checkpoint?.completed_round === info.target_progress?.round) {
+    // Review saved observations from ALL completed batches; the last child
+    // alone cannot represent a pipelined preview. No re-scraping old inputs.
+    info.validation_retry = true;
+    info.relevance_review_requested = true;
+  }
   info.target_progress = { ...info.target_progress, status: 'collecting' };
   delete info.target_progress.reason;
+  if (info.preview_pipeline?.version === 1) {
+    info.preview_pipeline = { ...info.preview_pipeline, revision: info.preview_pipeline.revision + 1 };
+    delete info.preview_pipeline.error;
+  }
   const claimedAt = new Date().toISOString();
   const { data: claimed, error: claimError } = await supabase.from('ve_bases')
     .update({ status: 'collecting', error: null, collect_info: info, updated_at: claimedAt })
@@ -222,6 +232,7 @@ export async function enqueueVeBaseCollect(
       Object.assign(collectInfo, {
         collection_mode: collectionTarget.mode, ready_target: collectionTarget.ready_target,
         target_progress: { ...collectionTarget },
+        ...(collectionTarget.mode === 'preview' ? { preview_pipeline: { version: 1, revision: 0, batches: [] } } : {}),
       });
       Object.assign(jobPayload, {
         collection_mode: collectionTarget.mode, ready_target: collectionTarget.ready_target,

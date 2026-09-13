@@ -85,6 +85,7 @@
  * вариации поисковых запросов — future work.
  */
 
+import { randomUUID } from 'node:crypto';
 import { isVeAcceptedEmailStatus } from '../emailPolicy';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
@@ -654,6 +655,20 @@ export interface VeSliceProbe {
 }
 
 export interface VeCollectInfo {
+  /** Opt-in for NEW previews only. Inputs/IDs are reserved before child insertion. */
+  preview_pipeline?: {
+    version: 1;
+    revision: number;
+    batches: Array<{ id: string; rows: VeUnifiedRow[]; dispatched_at: string; inserted?: boolean }>;
+    active_batch_id?: string;
+    completed_batches?: number;
+    /** Compact lineage for timing/cost attribution after batches are consumed. */
+    job_ids?: string[];
+    started_at?: string;
+    first_ready_at?: string;
+    target_reached_at?: string;
+    error?: string;
+  };
   /** Лимит строк, выбранный при запуске сборки (route пишет при создании базы). */
   limit?: number;
   /** Более ранняя авто-сборка проекта: эта база ещё не начала работу. */
@@ -791,10 +806,25 @@ async function persistCollectInfo(
   ctx: VeStageContext,
   baseId: string,
   info: VeCollectInfo,
+  patch: Record<string, unknown> = {},
 ): Promise<void> {
+  ctx.signal?.throwIfAborted();
+  if (info.preview_pipeline) {
+    const revision = info.preview_pipeline.revision;
+    if (!Number.isSafeInteger(revision) || revision < 0) throw new Error('Invalid preview checkpoint revision');
+    const next = { ...info, preview_pipeline: { ...info.preview_pipeline, revision: revision + 1 } };
+    const { data, error } = await ctx.supabase.from('ve_bases')
+      .update({ ...patch, collect_info: next, updated_at: new Date().toISOString() })
+      .eq('id', baseId).eq('status', 'collecting')
+      .eq('collect_info->preview_pipeline->>revision', String(revision)).select('id').maybeSingle();
+    if (error || !data) throw new VeRelevanceCheckpointError(error
+      ? `Preview checkpoint save: ${error.message}` : 'Preview checkpoint changed; stale writer stopped');
+    info.preview_pipeline.revision = revision + 1;
+    return;
+  }
   const { error } = await ctx.supabase
     .from('ve_bases')
-    .update({ collect_info: info, updated_at: new Date().toISOString() })
+    .update({ ...patch, collect_info: info, updated_at: new Date().toISOString() })
     .eq('id', baseId);
   if (error) throw new Error(`ve_bases collect_info update: ${error.message}`);
 }
@@ -2161,14 +2191,16 @@ async function dispatchConstructJob(input: {
   baseLabel: string;
   rows: VeUnifiedRow[];
   market: VeMarket;
+  reservedId?: string;
 }): Promise<{ bcJobId: string; locale: 'ru' | 'en'; construct: VeConstructInfo }> {
-  const { ctx, ownerId, projectName, baseLabel, rows, market } = input;
+  const { ctx, ownerId, projectName, baseLabel, rows, market, reservedId } = input;
   if (!ownerId) {
     throw new Error('ve_projects.created_by пуст — джобе конструктора некому принадлежать');
   }
   const locale = market === 'us' ? 'en' : 'ru';
   const steps = constructStepsFor(rows);
-  const bcJobId = await insertChildJob(ctx, 'base_constructor_jobs', {
+  const record = {
+    ...(reservedId ? { id: reservedId } : {}),
     user_id: ownerId,
     // Общий список конструктора: сначала клиентский проект, затем сегмент.
     file_name: ['VE2', projectName?.trim(), baseLabel.replace(/^auto:\s*/, '')].filter(Boolean).join(' · '),
@@ -2176,15 +2208,28 @@ async function dispatchConstructJob(input: {
     locale,
     selected_steps: steps,
     step_config: {
+      ...(reservedId ? { queue_class: 'interactive_preview' } : {}),
       find_emails_target: 'separate',
       find_emails: {
         stop_at_first: false, max_per_site: null, max_pages: 12, site_timeout_ms: 60_000, merge_mode: 'prefer_found_validated',
+        ...(reservedId ? { reuse_website_description: true } : {}),
       },
     },
     data: buildConstructGrid(rows, market),
     initial_row_count: rows.length,
     total_steps: steps.length,
-  });
+  };
+  let bcJobId: string;
+  if (reservedId) {
+    // A timeout after INSERT is ambiguous. Repeating this exact ID must never
+    // reset a claimed/completed job or buy the same website scans again.
+    const { error } = await ctx.supabase.from('base_constructor_jobs')
+      .upsert(record, { onConflict: 'id', ignoreDuplicates: true });
+    if (error) throw new Error(`preview constructor insert: ${error.message}`);
+    bcJobId = reservedId;
+  } else {
+    bcJobId = await insertChildJob(ctx, 'base_constructor_jobs', record);
+  }
   return {
     bcJobId,
     locale,
@@ -2198,6 +2243,67 @@ async function dispatchConstructJob(input: {
       },
     },
   };
+}
+
+const PREVIEW_BATCH_SIZE = 200;
+const PREVIEW_IN_FLIGHT = 2;
+const PREVIEW_MAX_BATCHES = 100;
+
+/** One parent writer, at most two independently resumable constructor jobs. */
+async function preparePreviewBatches(args: {
+  ctx: VeStageContext; base: VeAutoBase; info: VeCollectInfo; project: VeProject;
+  target: VeCollectionTargetProgress; available: VeUnifiedRow[]; market: VeMarket;
+}): Promise<VeUnifiedRow[]> {
+  const { ctx, base, info, project, target, available, market } = args;
+  const pipeline = info.preview_pipeline!;
+  if (pipeline.version !== 1 || !Array.isArray(pipeline.batches) || pipeline.batches.length > PREVIEW_IN_FLIGHT
+    || new Set(pipeline.batches.map((batch) => batch.id)).size !== pipeline.batches.length
+    || pipeline.batches.some((batch) => !batch.id || !Array.isArray(batch.rows) || batch.rows.length > PREVIEW_BATCH_SIZE)) {
+    throw new Error('Invalid preview batch checkpoint');
+  }
+  const reserved = buildBaseExclusionKeysFromRows(pipeline.batches.flatMap((batch) => batch.rows));
+  const candidates = available.filter((row) => !baseRowMatchesExclusion(reserved, row));
+  let allocated = pipeline.batches.reduce((sum, batch) => sum + batch.rows.length, 0);
+  // Stop acquisition immediately at the ready goal/error, but drain already
+  // purchased batches through the same gates and retain their checked results.
+  if (!pipeline.error && target.ready_rows < target.ready_target && !info.tasks?.some((task) => task.status === 'failed')) {
+    while (pipeline.batches.length < Math.min(PREVIEW_IN_FLIGHT, target.max_rounds - target.round + 1) && candidates.length > 0) {
+      const batchSize = target.candidates_processed === 0 && allocated === 0 ? VE_PREVIEW_FIRST_CANDIDATES : PREVIEW_BATCH_SIZE;
+      const size = Math.min(batchSize, collectionRoundLimit(target), target.max_candidates - target.candidates_processed - allocated);
+      if (size <= 0) break;
+      const rows = candidates.splice(0, size);
+      pipeline.batches.push({ id: randomUUID(), rows, dispatched_at: new Date().toISOString() });
+      allocated += rows.length;
+    }
+  }
+  pipeline.job_ids = [...new Set([...(pipeline.job_ids ?? []), ...pipeline.batches.map((batch) => batch.id)])];
+  if (!pipeline.started_at) pipeline.started_at = new Date().toISOString();
+  // Write the complete reservation before any child can be claimed.
+  await persistCollectInfo(ctx, base.id, info);
+  for (const batch of pipeline.batches) {
+    if (batch.inserted) continue;
+    ctx.signal?.throwIfAborted();
+    await dispatchConstructJob({ ctx, ownerId: project.created_by, projectName: project.name,
+      baseLabel: base.filename ?? base.id, rows: batch.rows, market, reservedId: batch.id });
+    batch.inserted = true;
+    await persistCollectInfo(ctx, base.id, info);
+  }
+  let active = pipeline.batches.find((batch) => batch.id === pipeline.active_batch_id);
+  if (!active) {
+    // A slow website in one batch must not hold up a completed neighbour.
+    for (const batch of pipeline.batches) {
+      const status = await readConstructJobStatus(ctx, batch.id);
+      if (!status || ['completed', 'failed', 'cancelled'].includes(status.status)) { active = batch; break; }
+    }
+    // Keep a pending head only as UI progress, without pinning the import order.
+    const display = active ?? pipeline.batches[0];
+    if (display) info.construct = { bc_job_id: display.id, status: 'dispatched', dispatched_at: display.dispatched_at };
+    if (active) pipeline.active_batch_id = active.id;
+    await persistCollectInfo(ctx, base.id, info);
+    return display?.rows ?? [];
+  }
+  info.construct = { bc_job_id: active.id, status: 'dispatched', dispatched_at: active.dispatched_at };
+  return active.rows;
 }
 
 export interface VeConstructImport {
@@ -2788,12 +2894,26 @@ async function completeTargetRound(args: {
   // A saved-only review does not retry sources: their old failure remains in
   // task history but must not invalidate a now-confirmed saved audience.
   const taskError = reviewOnly ? undefined : tasks.find((task) => task.status === 'failed');
-  const finish = (readyCount: number, nameError?: string) => finishCollectionRound(progress, {
-    candidates: args.candidates.length, readyRows: readyCount,
-    validationRetry,
-    exhausted: reviewOnly ? false : exhausted, canContinue: !reviewOnly && (args.hasBufferedCandidates || renewableDirectory),
-    error: args.validationError ?? nameError ?? (taskError ? `${taskError.source}: ${taskError.error ?? 'ошибка источника'}` : null),
-  });
+  const pipeline = info.preview_pipeline;
+  const pendingBatches = pipeline?.batches.filter((batch) => batch.id !== pipeline.active_batch_id) ?? [];
+  const pendingSources = tasks.some((task) => task.status === 'pending' || task.status === 'dispatched');
+  const finish = (readyCount: number, nameError?: string) => {
+    const phaseError = args.validationError ?? nameError ?? (taskError ? `${taskError.source}: ${taskError.error ?? 'ошибка источника'}` : null);
+    const result = finishCollectionRound(progress, {
+      candidates: args.candidates.length, readyRows: readyCount,
+      validationRetry,
+      exhausted: reviewOnly ? false : exhausted && pendingBatches.length === 0 && !pendingSources,
+      canContinue: !reviewOnly && (args.hasBufferedCandidates || renewableDirectory || pendingBatches.length > 0 || !!pipeline && pendingSources),
+      error: phaseError ?? pipeline?.error ?? null,
+    });
+    // The other child is already paid for. Drain it even if this batch reaches
+    // the goal or fails; do not orphan its results or start replacement work.
+    if (pipeline && pendingBatches.length > 0 && !nameError && !reviewOnly) {
+      if (phaseError) pipeline.error = phaseError;
+      return { ...result, status: 'collecting' as const, reason: undefined, round: progress.round + 1 };
+    }
+    return result;
+  };
   const checkpoint: NonNullable<VeCollectInfo['target_checkpoint']> = {
     completed_round: progress.round,
     seen_rows: [...seen.values()],
@@ -2827,16 +2947,18 @@ async function completeTargetRound(args: {
     'Очистка названий завершилась не полностью');
   info.target_checkpoint = checkpoint;
   info.stats = stats;
-  const { error: pendingError } = await ctx.supabase.from('ve_bases').update({
+  await persistCollectInfo(ctx, base.id, info, {
     data: pendingRows, columns,
     sample_rows: prepareSegmentationAudience({ rows: pendingRows, columns, source: 'auto' }).rows.slice(0, SAMPLE_ROWS),
     row_count: pendingRows.length,
-    collect_info: info, updated_at: new Date().toISOString(),
-  }).eq('id', base.id);
-  if (pendingError) throw new VeRelevanceCheckpointError(`Company name phase save: ${pendingError.message}`);
+  });
   ctx.signal?.throwIfAborted();
   const cleaned = await cleanCollectedCompanyNames(ctx, job, info, pendingRows, args.usage);
   const readyRows = prepareSegmentationAudience({ rows: cleaned.rows, columns, source: 'auto' }).rows;
+  if (pipeline && cleaned.summary.status === 'complete') {
+    if (readyRows.length > 0 && !pipeline.first_ready_at) pipeline.first_ready_at = new Date().toISOString();
+    if (readyRows.length >= progress.ready_target && !pipeline.target_reached_at) pipeline.target_reached_at = new Date().toISOString();
+  }
   let next = finish(readyRows.length, cleaned.summary.error);
   const reviewablePending = reserveRows.some((row) => isVeAcceptedEmailStatus(row._email_status)
     && (row._ve_relevance as { status?: unknown } | undefined)?.status === 'needs_review');
@@ -2865,7 +2987,14 @@ async function completeTargetRound(args: {
   }
   stats.launchable_rows = readyRows.length;
   info.target_progress = next;
-  if (cleaned.summary.status === 'complete') delete info.company_name_recovery;
+  if (cleaned.summary.status === 'complete') {
+    delete info.company_name_recovery;
+    if (pipeline?.active_batch_id) {
+      pipeline.batches = pipeline.batches.filter((batch) => batch.id !== pipeline.active_batch_id);
+      pipeline.completed_batches = (pipeline.completed_batches ?? 0) + 1;
+      delete pipeline.active_batch_id;
+    }
+  }
   delete info.validation_retry;
   if (info.plan && needsDirectoryEstimateRefresh(info.plan, info.estimate)) {
     // A long-running batch can outlive its initial source snapshot. Refresh only
@@ -2896,7 +3025,7 @@ async function completeTargetRound(args: {
     // input round becomes pending. Resuming must never revalidate these rows.
     delete info.construct;
     delete stats.finished_at;
-    info.tasks = tasks.map((state) =>
+    info.tasks = pipeline ? tasks : tasks.map((state) =>
       state.source === 'companies_directory' && !state.exhausted && !state.hit_ceiling
         ? { source: state.source, task: state.task, status: 'pending', child_job_id: null, rows: 0 }
         : state,
@@ -2909,13 +3038,11 @@ async function completeTargetRound(args: {
   const status = next.status === 'collecting' ? 'collecting'
     : next.status === 'error' ? 'failed'
       : next.mode === 'preview' && readyRows.length > 0 ? 'analyzing' : 'analyzed';
-  const { error } = await ctx.supabase.from('ve_bases').update({
+  await persistCollectInfo(ctx, base.id, info, {
     data: cleaned.rows, columns, sample_rows: readyRows.slice(0, SAMPLE_ROWS), row_count: cleaned.rows.length,
-    status, collect_info: info, error: next.status === 'error' ? next.reason?.slice(0, 500) : null,
-    updated_at: new Date().toISOString(),
-  }).eq('id', base.id);
-  if (error) throw new Error(`ve_bases target checkpoint: ${error.message}`);
-  if (next.status === 'collecting') await requeueSelf(ctx, job);
+    status, error: next.status === 'error' ? next.reason?.slice(0, 500) : null,
+  });
+  if (next.status === 'collecting') await requeueSelf(ctx, job, pipeline ? 1_000 : undefined);
   else if (status === 'analyzing') await ensureTargetBaseAnalysis(ctx, job, base.id);
   return {
     result: { base_id: base.id, rows: readyRows.length, target_status: next.status, ...(next.status === 'collecting' ? { waiting: true } : {}) },
@@ -2939,7 +3066,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     .eq('id', baseId)
     .single();
   if (bError || !baseRow) throw new Error(`ve_bases ${baseId}: ${bError?.message ?? 'not found'}`);
-  const base = baseRow as VeAutoBase;
+  const base = ((baseRow as VeAutoBase).collect_info?.preview_pipeline ? structuredClone(baseRow) : baseRow) as VeAutoBase;
 
   if (base.source !== 'auto') {
     throw new Error(`ve_bases ${baseId}: source='${base.source ?? 'upload'}' — base_collect работает только с source='auto'`);
@@ -2960,7 +3087,22 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   }
   const info: VeCollectInfo =
     base.collect_info && typeof base.collect_info === 'object' ? base.collect_info : {};
+  if (info.preview_pipeline && !info.preview_pipeline.batches.length && !info.preview_pipeline.job_ids?.length
+    && (info.construct?.bc_job_id || (info.target_progress?.candidates_processed ?? 0) > 0)) {
+    // Rolling deploy: a previous worker may have started a newly enqueued
+    // preview before understanding this marker. Keep its exact existing scope.
+    const revision = info.preview_pipeline.revision;
+    delete info.preview_pipeline;
+    ctx.signal?.throwIfAborted();
+    const { data: saved, error } = await ctx.supabase.from('ve_bases')
+      .update({ collect_info: info, updated_at: new Date().toISOString() })
+      .eq('id', baseId).eq('status', 'collecting')
+      .eq('collect_info->preview_pipeline->>revision', String(revision)).select('id').maybeSingle();
+    if (error || !saved) throw new VeRelevanceCheckpointError(error
+      ? `Preview compatibility checkpoint: ${error.message}` : 'Preview compatibility checkpoint changed');
+  }
   const mode = info.collection_mode ?? job.payload?.collection_mode;
+  if (info.preview_pipeline && mode !== 'preview') throw new Error('Preview batches require preview mode');
   if (job.payload?.review_relevance === true) info.validation_retry = true;
   if (mode !== undefined && mode !== 'preview' && mode !== 'supply') throw new Error('Unknown collection_mode');
   let target: VeCollectionTargetProgress | null = null;
@@ -2968,6 +3110,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     if (isRefill || info.refill) throw new Error('Target collection cannot use legacy refill');
     if (!base.hypothesis_id || base.project_id !== job.project_id) throw new Error('Target collection requires a scoped hypothesis base');
     target = createCollectionTarget(mode, info.ready_target ?? job.payload?.ready_target as number | undefined);
+    if (info.preview_pipeline) target.max_rounds = PREVIEW_MAX_BATCHES;
     const previous = info.target_progress;
     if (previous) {
       const firstRoundCandidates = previous.first_round_candidates ?? 2_000;
@@ -2991,6 +3134,9 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     info.ready_target = target.ready_target;
     info.target_progress = target;
     limit = collectionRoundLimit(target);
+    if (info.preview_pipeline) limit = Math.min(PREVIEW_BATCH_SIZE * PREVIEW_IN_FLIGHT,
+      target.max_candidates - target.candidates_processed,
+      Math.max(VE_PREVIEW_FIRST_CANDIDATES * PREVIEW_IN_FLIGHT, limit));
     info.limit = limit;
     if (!previous) await persistCollectInfo(ctx, baseId, info);
   }
@@ -3089,15 +3235,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       // воркеру нельзя: отказ — решение, а не транзиент, но failJob ретраит до
       // MAX_ATTEMPTS, и повторные попытки (план уже сохранён, tasks=[]) умерли
       // бы в других ветках, перетерев причину на «план пуст» / start-guard.
-      await ctx.supabase
-        .from('ve_bases')
-        .update({
-          status: 'failed',
-          error: note.slice(0, 500),
-          collect_info: info,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', baseId);
+      await persistCollectInfo(ctx, baseId, info, { status: 'failed', error: note.slice(0, 500) });
       throw new Error(note);
     }
     info.tasks = info.plan.tasks.map((task) => ({
@@ -3134,11 +3272,36 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     return excludedKeysCache;
   };
 
+  if (info.preview_pipeline && target) {
+    const reservedKeys = buildBaseExclusionKeysFromRows(info.preview_pipeline.batches.flatMap((batch) => batch.rows));
+    const consumedKeys = await getExcludedKeys();
+    const canAcquire = !info.preview_pipeline.error && target.ready_rows < target.ready_target
+      && target.candidates_processed + info.preview_pipeline.batches.reduce((sum, batch) => sum + batch.rows.length, 0) < target.max_candidates;
+    // Retain buffered harvests. Only refill a directory when its previous
+    // candidates have all been consumed/reserved, never drop its unused tail.
+    for (const state of tasks) {
+      if (canAcquire && info.preview_pipeline.batches.length < PREVIEW_IN_FLIGHT
+        && state.source === 'companies_directory' && state.status === 'done' && !state.exhausted && !state.hit_ceiling
+        && !(state.harvest ?? []).some((row) => !baseRowMatchesExclusion(consumedKeys, row) && !baseRowMatchesExclusion(reservedKeys, row))) {
+        state.status = 'pending';
+      }
+    }
+  }
+
   // ─── DISPATCH ───
   for (const state of tasks) {
     if (state.status !== 'pending') continue;
+    if (info.preview_pipeline && target && (info.preview_pipeline.error || target.ready_rows >= target.ready_target)) continue;
     try {
-      await dispatchTask(ctx, state, project, limit, getExcludedKeys);
+      const sourceExclusions = async () => {
+        const keys = await getExcludedKeys();
+        if (!info.preview_pipeline) return keys;
+        // A separate set keeps reserved rows available to the import path.
+        return addRowsToExclusionKeys({ inns: new Set(keys.inns), emails: new Set(keys.emails),
+          websiteInns: new Map([...keys.websiteInns].map(([key, values]) => [key, new Set(values)])) },
+        info.preview_pipeline.batches.flatMap((batch) => batch.rows));
+      };
+      await dispatchTask(ctx, state, project, limit, sourceExclusions);
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +
@@ -3181,7 +3344,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   if (polledTasks) await persistCollectInfo(ctx, baseId, info);
 
   const waiting = tasks.filter((t) => t.status === 'pending' || t.status === 'dispatched');
-  if (waiting.length > 0) {
+  if (waiting.length > 0 && !info.preview_pipeline) {
     await requeueSelf(ctx, job);
     return {
       result: { waiting: true, base_id: baseId, pending_sources: waiting.map((t) => t.source) },
@@ -3216,7 +3379,16 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   }
   // Кап — после дедупа и исключения, как раньше после дедупа (limit уже
   // посчитан выше — тот же totalRowsCap(job)).
-  const merged = kept.slice(0, limit);
+  const merged = info.preview_pipeline && target
+    ? await preparePreviewBatches({ ctx, base, info, project, target, available: kept, market })
+    : kept.slice(0, limit);
+
+  if (info.preview_pipeline && merged.length === 0 && waiting.length > 0
+    && !info.preview_pipeline.error && (target?.ready_rows ?? 0) < (target?.ready_target ?? 500)) {
+    await requeueSelf(ctx, job, 15_000);
+    return { result: { waiting: true, base_id: baseId, pending_sources: waiting.map((task) => task.source) },
+      tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
+  }
 
   let stats: NonNullable<VeCollectInfo['stats']> = {
     tasks_total: tasks.length,
@@ -3292,8 +3464,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   }
 
   // ─── CONSTRUCT ───
-  const constructRequeueMs = target?.mode === 'preview' && target.round === 1
-    && target.first_round_candidates === VE_PREVIEW_FIRST_CANDIDATES ? 15_000 : CONSTRUCT_REQUEUE_MS;
+  const constructRequeueMs = info.preview_pipeline || (target?.mode === 'preview' && target.round === 1
+    && target.first_round_candidates === VE_PREVIEW_FIRST_CANDIDATES) ? 15_000 : CONSTRUCT_REQUEUE_MS;
   // Обогащение собранных строк конструктором баз (валидация почт ВСЕГДА,
   // поиск — для бедных баз, см. constructStepsFor). Пропуск — только когда
   // фаза завершалась ранее (construct.status='done' в collect_info). База в
@@ -3353,6 +3525,11 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       await persistCollectInfo(ctx, baseId, { ...info });
     }
     if (bcStatus === 'completed' || bcStatus === 'failed' || bcStatus === 'cancelled') {
+      if (info.preview_pipeline && !info.preview_pipeline.active_batch_id) {
+        // The child may complete between the scheduler's read and this read.
+        info.preview_pipeline.active_batch_id = bcJobId;
+        await persistCollectInfo(ctx, baseId, info);
+      }
       // Джоба могла быть поставлена до обязательного split_emails. Её
       // row-level validation status нельзя безопасно прикрепить к первому
       // адресу merged-ячейки: лучший статус мог относиться ко второму.
@@ -3427,15 +3604,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       ) {
         const note = `Конструктор баз не завершился за 6ч (job ${construct.bc_job_id}, статус: ${bc?.status ?? 'не найдена'})`;
         info.construct = { ...construct, note };
-        await ctx.supabase
-          .from('ve_bases')
-          .update({
-            status: 'failed',
-            error: note.slice(0, 500),
-            collect_info: { ...info, stats },
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', baseId);
+        await persistCollectInfo(ctx, baseId, { ...info, stats }, { status: 'failed', error: note.slice(0, 500) });
         throw new Error(note);
       }
       await requeueSelf(ctx, job, constructRequeueMs);

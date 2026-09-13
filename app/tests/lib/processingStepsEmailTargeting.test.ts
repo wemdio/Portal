@@ -26,6 +26,9 @@ jest.mock('@/lib/supabaseAdmin', () => ({
 jest.mock('@/lib/enrich/emailScraper', () => ({
   scrapeEmails: jest.fn(),
 }));
+jest.mock('@/lib/enrich/websiteParser', () => ({
+  ...jest.requireActual('@/lib/enrich/websiteParser'), fetchAndExtract: jest.fn(),
+}));
 
 // Мокаем validator (real validateEmail делает SMTP-запросы) — возвращаем
 // заранее заданный результат на основании email'а.
@@ -35,10 +38,12 @@ jest.mock('@/lib/emailValidation/validator', () => ({
 
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { validateEmail } from '@/lib/emailValidation/validator';
+import * as websiteParser from '@/lib/enrich/websiteParser';
 import {
   stepFindEmails,
   stepValidateEmails,
   stepSplitEmails,
+  stepEnrich,
   FOUND_EMAIL_COL,
 } from '@/lib/tools/processingSteps';
 import { mergeFoundEmailColumn } from '@/lib/tools/baseConstructorWorker';
@@ -74,6 +79,20 @@ describe('stepFindEmails', () => {
     expect(out[2][2]).toBe(''); // у Beta исходный пустой
     expect(out[2][3]).toBe('found@example.com'); // scrape сработал
     expect(scrapeEmails).toHaveBeenCalledTimes(2);
+    const description = 'We manufacture medical equipment for private clinics. '.repeat(8);
+    (scrapeEmails as jest.Mock).mockResolvedValue({ emails: ['found@example.com'], description });
+    const described = await stepFindEmails(data, noopProgress, undefined, { target: 'separate', reuseWebsiteDescription: true });
+    const fetchDescription = jest.mocked(websiteParser.fetchAndExtract).mockResolvedValue(description);
+    try {
+      const enriched = await stepEnrich(described, noopProgress);
+      expect(fetchDescription).not.toHaveBeenCalled();
+      expect(enriched[1][enriched[0].indexOf('Описание')]).toBe(description);
+      // An empty cached description never suppresses the normal fallback.
+      (scrapeEmails as jest.Mock).mockResolvedValue({ emails: [], description: '' });
+      await stepEnrich(await stepFindEmails(data, noopProgress, undefined,
+        { target: 'separate', reuseWebsiteDescription: true }), noopProgress);
+      expect(fetchDescription).toHaveBeenCalledTimes(2);
+    } finally { fetchDescription.mockReset(); }
   });
 
   it('target="same" + есть исходная email — дополняет ТУ ЖЕ колонку только для пустых ячеек', async () => {

@@ -63,6 +63,7 @@ interface StepConfig {
     max_per_site?: number | null;
     max_pages?: number;
     site_timeout_ms?: number;
+    reuse_website_description?: boolean;
     /** Opt-in website refresh; other callers keep the existing additive merge. */
     merge_mode?: 'all' | 'prefer_found' | 'prefer_found_validated';
   };
@@ -465,6 +466,7 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
       maxEmailsPerSite: cfg.find_emails?.max_per_site,
       maxPages: cfg.find_emails?.max_pages,
       siteTimeoutMs: cfg.find_emails?.site_timeout_ms,
+      reuseWebsiteDescription: cfg.find_emails?.reuse_website_description === true,
       // Локаль джобы (job.locale): 'en' → «Found Email», EN-блок-лист
       // хостов, Accept-Language 'en-US,en' и EN-пути первыми в скрапере.
       locale: cfg.locale,
