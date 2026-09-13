@@ -82,3 +82,11 @@ export class VeRelevanceCheckpointError extends Error {
     this.name = 'VeRelevanceCheckpointError';
   }
 }
+
+/** A newer writer owns the base; the old worker must not record a failure. */
+export class VePreviewCheckpointConflict extends VeRelevanceCheckpointError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VePreviewCheckpointConflict';
+  }
+}
