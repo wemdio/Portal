@@ -1,5 +1,7 @@
 /** Validated-recipient targets are distinct from candidate/cost safety caps. */
-export const VE_PREVIEW_READY_TARGET = 1_000;
+export const VE_PREVIEW_READY_TARGET = 500;
+/** Small first cohort publishes checked contacts before the full preview. */
+export const VE_PREVIEW_FIRST_CANDIDATES = 100;
 export const VE_COLLECTION_MAX_CANDIDATES = 10_000;
 export const VE_COLLECTION_MAX_ROUNDS = 5;
 export interface VeRemainingReadyEstimate {
@@ -100,6 +102,8 @@ export interface VeCollectionTargetProgress {
   round: number;
   max_rounds: number;
   max_candidates: number;
+  /** Persisted per run so a redeploy never shrinks an in-flight constructor's input. */
+  first_round_candidates?: number;
   status: 'collecting' | 'target_reached' | 'exhausted' | 'limited' | 'error';
   reason?: string;
 }
@@ -112,6 +116,7 @@ export function createCollectionTarget(mode: VeCollectionMode, readyTarget?: num
   }
   return {
     mode, ready_target: target!, ready_rows: 0, candidates_processed: 0,
+    first_round_candidates: mode === 'preview' ? VE_PREVIEW_FIRST_CANDIDATES : 2_000,
     round: 1, max_rounds: VE_COLLECTION_MAX_ROUNDS, max_candidates: VE_COLLECTION_MAX_CANDIDATES, status: 'collecting',
   };
 }
@@ -122,7 +127,7 @@ export function collectionRoundLimit(progress: VeCollectionTargetProgress): numb
     ? progress.ready_rows / progress.candidates_processed : 0.5;
   const requested = Math.ceil(missing / Math.max(0.05, observedYield));
   return Math.max(0, Math.min(
-    progress.round === 1 ? 2_000 : 5_000,
+    progress.round === 1 ? progress.first_round_candidates ?? 2_000 : 5_000,
     progress.max_candidates - progress.candidates_processed,
     requested,
   ));

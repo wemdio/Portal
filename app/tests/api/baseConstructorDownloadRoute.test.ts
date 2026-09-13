@@ -34,6 +34,8 @@ import { buildCsvGzip, EXPORT_BUCKET } from '@/lib/tools/csvExportArtifact';
 import {
   EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
   ENRICH_CHECKPOINT_ATTEMPTED_COL,
+  FIND_EMAILS_CHECKPOINT_ATTEMPTED_COL,
+  WEBSITE_EMAIL_PREFERENCE_COL,
 } from '@/lib/tools/baseConstructorCheckpoint';
 
 const JOB_ID = 'job-abc';
@@ -50,9 +52,11 @@ const CHECKPOINT_ROWS: unknown[][] = [
     'Сайт',
     ENRICH_CHECKPOINT_ATTEMPTED_COL,
     EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
+    FIND_EMAILS_CHECKPOINT_ATTEMPTED_COL,
+    WEBSITE_EMAIL_PREFERENCE_COL,
   ],
-  ['Alpha', 'alpha.example', '1', '{"a@alpha.example":{"attempts":1}}'],
-  ['Beta', 'beta.example', '', ''],
+  ['Alpha', 'alpha.example', '1', '{"a@alpha.example":{"attempts":1}}', '1', '{"group":"0","found":[]}'],
+  ['Beta', 'beta.example', '', '', '', ''],
 ];
 const CLEAN_CHECKPOINT_ROWS: unknown[][] = [
   ['компания', 'Сайт'],
