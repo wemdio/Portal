@@ -82,6 +82,7 @@ export const ALL_TOOL_IDS = [
   'sales-chat-analyzer',
   'hypothesis-engine',
   'vertical-engine-v2',
+  'reply-personalization',
 ] as const;
 
 export type ToolId = (typeof ALL_TOOL_IDS)[number];
@@ -434,6 +435,19 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     href: '/tools/vertical-engine-v2',
     accentColor: 'emerald',
   },
+  'reply-personalization': {
+    id: 'reply-personalization',
+    title: 'Персонализированные ответы',
+    title_en: 'Reply Personalization',
+    description: 'Живой ресёрч компании-адресата и черновик персонализированного ответа на входящее письмо — по кнопке, с отправкой из портала.',
+    description_en: 'Live research on the replying company and a personalized reply draft, generated on demand and sendable from the portal.',
+    href: '/tools/reply-personalization',
+    badge: 'В разработке',
+    badge_en: 'In development',
+    badgeVariant: 'amber',
+    accentColor: 'emerald',
+    disabled: true,
+  },
 };
 
 export interface ToolGroup {
@@ -446,7 +460,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Аутрич',
     label_en: 'Outreach',
-    toolIds: ['instantly', 'li-outreach', 'tg-outreach', 'email-sequence', 'email-sequence-v2', 'sales-copilot', 'sales-hypotheses', 'hypothesis-engine', 'vertical-engine-v2', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach', 'event-outreach', 'sales-chat-analyzer'],
+    toolIds: ['instantly', 'li-outreach', 'tg-outreach', 'email-sequence', 'email-sequence-v2', 'sales-copilot', 'sales-hypotheses', 'hypothesis-engine', 'vertical-engine-v2', 'reply-personalization', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach', 'event-outreach', 'sales-chat-analyzer'],
   },
   {
     label: 'Базы и данные',

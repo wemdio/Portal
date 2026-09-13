@@ -58,7 +58,8 @@ export async function GET(req: NextRequest) {
 
     // Per-user видимость учитываем только для не-'in_development' тулов:
     // тулы «в разработке» специально показываем всем, чтобы команда знала
-    // что готовится. Они и так не кликабельны.
+    // что готовится. Карточка для не-админов серая, страница закрыта
+    // гейтом (админам доступна — смотреть, что строится).
     if (effective !== 'in_development') {
       if (id in userVisibility) {
         if (userVisibility[id] === false) return false;
