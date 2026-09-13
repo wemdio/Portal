@@ -172,7 +172,7 @@ function seed(options: {
 describe('Vertical Engine v2 base CSV export', () => {
   beforeEach(seed);
 
-  it('exports up to 1000 checked contacts while collection continues and rejects unverified rows', async () => {
+  it('exports up to 500 checked contacts while collection continues and rejects unverified rows', async () => {
     const ready = Array.from({ length: 1100 }, (_, i) => ({ company: `Company ${i}`, email: `lead-${i}@example.com`, _email_status: 'ok' }));
     await mockPortalDb.from('ve_bases').update({
       status: 'analyzed', row_count: ready.length, data: ready,
@@ -180,7 +180,7 @@ describe('Vertical Engine v2 base CSV export', () => {
     }).eq('id', BASE_ID);
     const result = await GET(request('preview'), { params: Promise.resolve({ id: BASE_ID }) });
     expect(result.status).toBe(200);
-    expect((await result.text()).split('\r\n')).toHaveLength(1001);
+    expect((await result.text()).split('\r\n')).toHaveLength(501);
     const partial = [
       ROWS[0], ROWS[1], ROWS[2], ROWS[3], ROWS[4],
       { company: 'Catch all', email: 'catch@example.com', _email_status: 'catch_all' },

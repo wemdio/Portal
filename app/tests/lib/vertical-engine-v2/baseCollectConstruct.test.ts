@@ -279,7 +279,7 @@ describe('base_collect CONSTRUCT step order', () => {
       expect(repairedDb.getRows('ve_jobs')).toHaveLength(1);
     }
     expect(finishCollectionRound({ ...createCollectionTarget('preview'), candidates_processed: 2000 }, {
-      candidates: 0, readyRows: 500, exhausted: false, canContinue: true, error: null, validationRetry: true,
+      candidates: 0, readyRows: 250, exhausted: false, canContinue: true, error: null, validationRetry: true,
     })).toMatchObject({ status: 'collecting', round: 2, candidates_processed: 2000 });
     const bufferedInfo: VeCollectInfo = { ...info,
       construct: { status: 'done', bc_job_id: 'bc-saved' },
@@ -304,22 +304,32 @@ describe('base_collect CONSTRUCT step order', () => {
 
   it('targets validated recipients with bounded rounds and distinct stopping reasons', async () => {
     const preview = createCollectionTarget('preview', 50_000);
-    expect(preview.ready_target).toBe(1_000);
+    expect(preview.ready_target).toBe(500);
     expect(collectionRoundLimit(preview)).toBe(100);
-    expect(collectionRoundLimit({ ...preview, first_round_candidates: undefined })).toBe(2_000);
+    expect(collectionRoundLimit({ ...preview, ready_target: 1_000, first_round_candidates: undefined })).toBe(2_000);
     expect(collectionRoundLimit(createCollectionTarget('supply', 1_000))).toBe(2_000);
     const progressing = finishCollectionRound(preview, {
       candidates: 2_000, readyRows: 200, exhausted: false, canContinue: true, error: null,
     });
     expect(progressing).toMatchObject({ status: 'collecting', round: 2, ready_rows: 200 });
-    expect(collectionRoundLimit(progressing)).toBe(5_000);
+    expect(collectionRoundLimit(progressing)).toBe(3_000);
+    // Company inputs do not satisfy the goal. Size the next cohort from
+    // measured yield and stop only after 500 fully ready recipients exist.
+    const lowYield = finishCollectionRound(preview, {
+      candidates: 100, readyRows: 20, exhausted: false, canContinue: true, error: null,
+    });
+    expect(lowYield.status).toBe('collecting');
+    expect(collectionRoundLimit(lowYield)).toBe(2_400);
+    expect(finishCollectionRound(lowYield, {
+      candidates: 2_400, readyRows: 499, exhausted: false, canContinue: true, error: null,
+    }).status).toBe('collecting');
     for (const [change, status] of [
-      [{ readyRows: 1_100 }, 'target_reached'],
+      [{ readyRows: 500 }, 'target_reached'],
       [{ exhausted: true }, 'exhausted'],
       [{ candidates: 10_000 }, 'limited'],
       [{ canContinue: false }, 'limited'],
       [{ error: 'validation unavailable' }, 'error'],
-      [{ error: 'validation incomplete', readyRows: 1_100 }, 'error'],
+      [{ error: 'validation incomplete', readyRows: 500 }, 'error'],
     ] as const) {
       expect(finishCollectionRound(preview, Object.assign({
         candidates: 2_000, readyRows: 200, exhausted: false, canContinue: true, error: null,
@@ -335,33 +345,62 @@ describe('base_collect CONSTRUCT step order', () => {
     // The small cohort must reach the actual constructor and publish checked
     // rows while the same base continues collecting. Old runs retain their
     // original input scope across a deployment.
-    const harvest = Array.from({ length: 150 }, (_, i) => unifiedRow({
+    const harvest = Array.from({ length: 1_200 }, (_, i) => unifiedRow({
       company: `Clinic ${i}`, website: `clinic-${i}.test`, email: `mail@clinic-${i}.test`,
     }));
     for (const legacy of [false, true]) {
       const target = { ...createCollectionTarget('preview') };
-      if (legacy) delete target.first_round_candidates;
+      if (legacy) {
+        delete target.first_round_candidates;
+        target.ready_target = 1_000;
+      }
       const db = seed({ ...collectInfo(harvest), collection_mode: 'preview', target_progress: target });
       await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
       const constructor = db.getRows('base_constructor_jobs')[0];
-      const expected = legacy ? 150 : 100;
+      const expected = legacy ? 1_200 : 100;
+      const expectedReady = legacy ? 1_200 : 20;
       const input = constructor.data as string[][];
       expect(input).toHaveLength(expected + 1);
+      expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).target_progress?.ready_target)
+        .toBe(legacy ? 1_000 : 500);
       await db.from('base_constructor_jobs').update({ status: 'completed',
-        data: [[...input[0], 'Email Статус'], ...input.slice(1).map((row) => [...row, 'ok'])],
+        data: [[...input[0], 'Email Статус'], ...input.slice(1).map((row, index) =>
+          [...row, legacy || index < expectedReady ? 'ok' : 'invalid'])],
       }).eq('id', constructor.id);
       await db.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
       await expect(runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient }))
-        .resolves.toMatchObject({ result: { waiting: true, target_status: 'collecting' } });
+        .resolves.toMatchObject({ result: legacy ? { target_status: 'target_reached' }
+          : { waiting: true, target_status: 'collecting' } });
       const base = db.getRows('ve_bases')[0];
-      expect(base).toMatchObject({ status: 'collecting', row_count: expected });
+      expect(base).toMatchObject({ status: legacy ? 'analyzing' : 'collecting', row_count: expectedReady });
       expect((base.collect_info as VeCollectInfo).target_progress).toMatchObject({
-        round: 2, ready_rows: expected, candidates_processed: expected,
+        round: legacy ? 1 : 2, ready_rows: expectedReady, candidates_processed: expected,
         first_round_candidates: legacy ? 2_000 : 100,
+        ready_target: 500,
       });
-      expect(base.sample_rows).toHaveLength(30);
+      expect(base.sample_rows).toHaveLength(Math.min(30, expectedReady));
       expect(prepareSegmentationAudience({ rows: base.sample_rows as Record<string, unknown>[],
-        columns: base.columns as string[], source: 'auto' }).rows).toHaveLength(30);
+        columns: base.columns as string[], source: 'auto' }).rows).toHaveLength(Math.min(30, expectedReady));
+      if (!legacy) {
+        jest.mocked(searchRows).mockResolvedValue({ rows: Array.from({ length: 480 }, (_, i) => ({
+          name: `Clinic Next ${i}`, website: `next-${i}.test`, email: `mail@next-${i}.test`,
+        })) });
+        await db.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+        await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
+        const nextConstructor = db.getRows('base_constructor_jobs').find((row) => row.id !== constructor.id)!;
+        const nextInput = nextConstructor.data as string[][];
+        expect(nextInput).toHaveLength(481);
+        await db.from('base_constructor_jobs').update({ status: 'completed',
+          data: [[...nextInput[0], 'Email Статус'], ...nextInput.slice(1).map((row) => [...row, 'ok'])],
+        }).eq('id', nextConstructor.id);
+        await db.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+        await expect(runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient }))
+          .resolves.toMatchObject({ result: { rows: 500, target_status: 'target_reached' } });
+        const completed = db.getRows('ve_bases')[0];
+        expect(completed).toMatchObject({ status: 'analyzing', row_count: 500 });
+        expect(prepareSegmentationAudience({ rows: completed.data as Record<string, unknown>[],
+          columns: completed.columns as string[], source: 'auto' }).rows).toHaveLength(500);
+      }
     }
   });
 

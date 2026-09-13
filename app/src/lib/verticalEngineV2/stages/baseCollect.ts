@@ -116,6 +116,7 @@ import {
   collectionRoundLimit, createCollectionTarget, finishCollectionRound, updateCollectionEstimate,
   VE_SOURCE_POPULATION_MAX_AGE_MS,
   VE_PREVIEW_FIRST_CANDIDATES,
+  VE_PREVIEW_READY_TARGET,
   type VeCollectionMode, type VeCollectionTargetProgress, type VeCollectionEstimate,
 } from '../collectionTarget';
 import {
@@ -2741,7 +2742,12 @@ async function completeTargetRound(args: {
   /** Completing old name work must not consume the user's new reserve-review request. */
   continueManualReview?: boolean;
 }): Promise<VeStageResult> {
-  const { ctx, job, base, info, progress } = args;
+  const { ctx, job, base, info } = args;
+  // Apply the new preview goal only after this round's input has been fully
+  // accounted for. An in-flight legacy constructor keeps its original scope.
+  const progress = args.progress.mode === 'preview'
+    ? { ...args.progress, ready_target: VE_PREVIEW_READY_TARGET } : args.progress;
+  info.ready_target = progress.ready_target;
   const tasks = info.tasks ?? [];
   const reviewOnly = job.payload?.review_relevance === true;
   const prior = info.target_checkpoint;
@@ -2966,6 +2972,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     if (previous) {
       const firstRoundCandidates = previous.first_round_candidates ?? 2_000;
       if (!Number.isSafeInteger(previous.round) || previous.round < 1 || previous.round > target.max_rounds
+        || !Number.isSafeInteger(previous.ready_target) || previous.ready_target < 1 || previous.ready_target > target.max_candidates
         || !Number.isSafeInteger(firstRoundCandidates) || firstRoundCandidates < 1 || firstRoundCandidates > 2_000
         || !Number.isSafeInteger(previous.candidates_processed) || previous.candidates_processed < 0 || previous.candidates_processed > target.max_candidates
         || !Number.isSafeInteger(previous.ready_rows) || previous.ready_rows < 0
@@ -2975,6 +2982,9 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       target.round = previous.round;
       target.candidates_processed = previous.candidates_processed;
       target.ready_rows = previous.ready_rows;
+      // A new preview default must not change the input scope of a constructor
+      // already running for an older target (e.g. 1000 ready contacts).
+      target.ready_target = previous.ready_target;
       target.first_round_candidates = firstRoundCandidates;
     }
     info.collection_mode = mode;

@@ -25,7 +25,7 @@ import { readSpreadsheetFile } from '@/lib/spreadsheet/parseCSV';
 import { CLIENT_LAUNCH_ROW_LIMIT } from '@/lib/clientLaunch/constants';
 import { downloadBaseCsvResponse } from '@/lib/verticalEngineV2/baseCsv';
 import { VE_LAUNCH_MAX_LEADS } from '@/lib/verticalEngineV2/launchHandoff';
-import { VE_PREVIEW_READY_TARGET, VE_PREVIEW_FIRST_CANDIDATES, VE_COLLECTION_MAX_CANDIDATES } from '@/lib/verticalEngineV2/collectionTarget';
+import { VE_PREVIEW_READY_TARGET, VE_COLLECTION_MAX_CANDIDATES } from '@/lib/verticalEngineV2/collectionTarget';
 import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors';
 import { companyNameCell, isCompanyNameReady, VE_COMPANY_NAME_FIELD } from '@/lib/verticalEngineV2/companyNames';
 import {
@@ -938,7 +938,7 @@ export function BaseRow({ base, job, hypothesisTitle, queued, onUpdated }: { bas
               disabled={downloadingMode !== null || (isReadyPreview && !hasReadyContacts)}
               className={HE.btnQuiet}
               title={partialPreview ? 'Уже проверенные контакты; остальная база продолжает собираться'
-                : isReadyPreview ? 'До 1000 проверенных контактов для согласования' : 'Все собранные строки, включая исключённые из запуска'}
+                : isReadyPreview ? `До ${VE_PREVIEW_READY_TARGET} проверенных контактов для согласования` : 'Все собранные строки, включая исключённые из запуска'}
             >
               {downloadingMode !== null && downloadingMode !== 'review' ? <Spinner className="h-3 w-3" /> : null}
               {partialPreview ? 'Скачать готовую часть' : isReadyPreview ? 'CSV превью' : 'Исходный CSV'}
@@ -1223,14 +1223,12 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
     >
       {target ? (
         <div className="sm:col-span-2 mb-2 text-xs" role="status">
-          <p className="font-medium">Проверено и подготовлено: {target.ready_rows.toLocaleString('ru-RU')} / цель {target.ready_target.toLocaleString('ru-RU')}</p>
+          <p className="font-medium">{target.mode === 'preview' ? 'Готово для превью' : 'Проверено и подготовлено'}: {target.ready_rows.toLocaleString('ru-RU')} / {target.ready_target.toLocaleString('ru-RU')} контактов</p>
           {target.mode === 'preview' && base.status === 'collecting' ? (
             <p className="mt-1 text-gray-700">
               {target.ready_rows > 0
-                ? 'Первые контакты уже можно посмотреть и скачать. Остальную часть собираем дальше.'
-                : target.round === 1 && target.first_round_candidates === VE_PREVIEW_FIRST_CANDIDATES
-                  ? `Сначала проверяем небольшую партию — до ${VE_PREVIEW_FIRST_CANDIDATES} компаний. Первые подходящие контакты появятся после проверки почт и деятельности компаний.`
-                  : 'Первые подходящие контакты появятся после проверки текущей партии.'}
+                ? `Готовую часть можно посмотреть и скачать. Продолжаем добор до ${target.ready_target.toLocaleString('ru-RU')} проверенных контактов.`
+                : `Собираем ${target.ready_target.toLocaleString('ru-RU')} готовых контактов: проверяем почты, соответствие гипотезе и названия компаний. Размер следующих партий подбираем по фактическому выходу.`}
             </p>
           ) : null}
           <p className="mt-1">

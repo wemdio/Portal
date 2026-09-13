@@ -1,5 +1,5 @@
 /** Validated-recipient targets are distinct from candidate/cost safety caps. */
-export const VE_PREVIEW_READY_TARGET = 1_000;
+export const VE_PREVIEW_READY_TARGET = 500;
 /** Small first cohort publishes checked contacts before the full preview. */
 export const VE_PREVIEW_FIRST_CANDIDATES = 100;
 export const VE_COLLECTION_MAX_CANDIDATES = 10_000;
