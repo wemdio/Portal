@@ -38,8 +38,12 @@ import { validateEmail } from '@/lib/emailValidation/validator';
 import {
   stepFindEmails,
   stepValidateEmails,
+  stepSplitEmails,
   FOUND_EMAIL_COL,
 } from '@/lib/tools/processingSteps';
+import { mergeFoundEmailColumn } from '@/lib/tools/baseConstructorWorker';
+import { FIND_EMAILS_CHECKPOINT_ATTEMPTED_COL, WEBSITE_EMAIL_PREFERENCE_COL } from '@/lib/tools/baseConstructorCheckpoint';
+import { selectValidatedWebsiteEmails } from '@/lib/tools/websiteEmailPreference';
 
 const noopProgress = async () => {};
 
@@ -128,6 +132,26 @@ describe('stepFindEmails', () => {
     expect(out[1][2]).toBe('fresh@y.ru'); // дозаполнили
     expect(out[2][2]).toBe('already@b.ru'); // сохранили
     expect(scrapeEmails).toHaveBeenCalledTimes(1); // только a.ru
+
+    // Even an empty result is durable. A restart does not crawl that site
+    // again, and persistence errors cannot turn into successful completion.
+    (scrapeEmails as jest.Mock).mockReset().mockResolvedValue({ emails: [] });
+    const input = [['Сайт', 'Email'], ['empty.ru', 'fallback@empty.ru']];
+    let checkpoint: string[][] = [];
+    const result = await stepFindEmails(input, noopProgress, undefined, {
+      target: 'separate', onCheckpoint: async (rows) => { checkpoint = rows; },
+    });
+    expect(checkpoint[0]).toContain(FIND_EMAILS_CHECKPOINT_ATTEMPTED_COL);
+    expect(result[0]).not.toContain(FIND_EMAILS_CHECKPOINT_ATTEMPTED_COL);
+    expect(await stepFindEmails(checkpoint, noopProgress, undefined, { target: 'separate' })).toEqual(result);
+    expect(scrapeEmails).toHaveBeenCalledTimes(1);
+    const progress = jest.fn(noopProgress);
+    await expect(stepFindEmails(input, progress, undefined, {
+      onCheckpoint: async () => { throw new Error('storage unavailable'); }, target: 'separate',
+    })).rejects.toThrow('storage unavailable');
+    expect(progress).not.toHaveBeenCalledWith(100);
+    await expect(stepFindEmails(input, progress, async () => true, { target: 'separate' })).rejects.toThrow('Отменено');
+    expect(progress).not.toHaveBeenCalledWith(100);
   });
   it('prefers HH company_site_url over vacancy and employer hh.ru links', async () => {
     (scrapeEmails as jest.Mock).mockResolvedValue({ emails: ['hello@acme.ru'] });
@@ -202,6 +226,47 @@ describe('stepValidateEmails', () => {
     expect(out[1][0]).toBe('good@a.ru');
     // validateEmail вызвался только для исходных (2 строки → 2 вызова).
     expect(validateEmail).toHaveBeenCalledTimes(2);
+
+    // Website preference is decided AFTER per-address validation. A dead
+    // website email must not hide a usable database fallback, including on
+    // a restart with the validation checkpoint already persisted.
+    (validateEmail as jest.Mock).mockClear();
+    mockValidator({
+      'fallback@a.ru': 'ok', 'dead@a.ru': 'invalid',
+      'fallback@b.ru': 'ok', 'found@b.ru': 'catch_all',
+      'fallback@c.ru': 'ok', 'found@c.ru': 'ok', 'dead@c.ru': 'invalid',
+      'fallback@d.ru': 'ok',
+    });
+    const merged = mergeFoundEmailColumn([
+      ['Компания', 'Email', FOUND_EMAIL_COL],
+      ['A', 'fallback@a.ru', 'dead@a.ru'],
+      ['B', 'fallback@b.ru', 'found@b.ru'],
+      ['C', 'fallback@c.ru', 'found@c.ru, dead@c.ru'],
+      ['D', 'fallback@d.ru', ''],
+    ], 'ru', 'prefer_found_validated');
+    const split = await stepSplitEmails(merged, noopProgress);
+    const preferenceIdx = split[0].indexOf(WEBSITE_EMAIL_PREFERENCE_COL);
+    expect(split.slice(1).every((row) => JSON.parse(row[preferenceIdx]).found.length <= 1)).toBe(true);
+    let checkpoint: string[][] = [];
+    const selected = await stepValidateEmails(split, noopProgress, undefined, {
+      onCheckpoint: async (rows) => { checkpoint = rows; },
+    });
+    expect(selected.slice(1).map((row) => [row[1], row[2]])).toEqual([
+      ['fallback@a.ru', 'ok'], ['found@b.ru', 'catch_all'], ['found@c.ru', 'ok'], ['fallback@d.ru', 'ok'],
+    ]);
+    expect(selected[0]).not.toContain(WEBSITE_EMAIL_PREFERENCE_COL);
+    expect(checkpoint[0]).toContain(WEBSITE_EMAIL_PREFERENCE_COL);
+    const probes = (validateEmail as jest.Mock).mock.calls.length;
+    expect(await stepValidateEmails(checkpoint, noopProgress)).toEqual(selected);
+    expect(validateEmail).toHaveBeenCalledTimes(probes);
+    const unknownInput = [
+      ['Email', 'Email Статус', WEBSITE_EMAIL_PREFERENCE_COL],
+      ['found@a.ru', 'unknown', JSON.stringify({ group: 'a', found: ['found@a.ru'] })],
+      ['fallback@a.ru', 'ok', JSON.stringify({ group: 'a', found: ['found@a.ru'] })],
+    ];
+    expect(selectValidatedWebsiteEmails(unknownInput).slice(1)).toEqual([
+      ['found@a.ru', 'unknown'], ['fallback@a.ru', 'ok'],
+    ]);
   });
 
   it('validateTarget="found" — валидирует только FOUND_EMAIL_COL', async () => {
@@ -438,17 +503,44 @@ describe('stepFindEmails — step_config.find_emails (stop_at_first / max_per_si
     );
   });
 
-  it('stopAtFirstUsableEmail=false прокидывается в scrapeEmails (собираем больше адресов)', async () => {
-    (scrapeEmails as jest.Mock).mockResolvedValue({ emails: ['x@a.ru'] });
+  it('stopAtFirstUsableEmail=false refreshes populated rows and retains every discovered address', async () => {
+    const emails = Array.from({ length: 12 }, (_, i) => `e${i}@a.ru`);
+    (scrapeEmails as jest.Mock).mockResolvedValue({ emails });
     const data = [
       ['Сайт', 'Email'],
-      ['a.ru', ''],
+      ['a.ru', 'original@a.ru'],
     ];
-    await stepFindEmails(data, noopProgress, undefined, { stopAtFirstUsableEmail: false });
+    const out = await stepFindEmails(data, noopProgress, undefined, {
+      target: 'separate', stopAtFirstUsableEmail: false, maxEmailsPerSite: null, maxPages: 12, siteTimeoutMs: 60_000,
+    });
     expect(scrapeEmails).toHaveBeenCalledWith(
       'a.ru',
-      expect.objectContaining({ stopAtFirstUsableEmail: false }),
+      expect.objectContaining({ stopAtFirstUsableEmail: false, maxPages: 12 }),
     );
+    expect(out[1]).toEqual(['a.ru', 'original@a.ru', emails.join(', ')]);
+
+    jest.useFakeTimers();
+    try {
+      let finishLate: (value: { emails: string[] }) => void = () => {};
+      (scrapeEmails as jest.Mock).mockImplementationOnce(() => new Promise((resolve) => { finishLate = resolve; }));
+      let checkpoint: string[][] = [];
+      const pending = stepFindEmails(data, noopProgress, undefined, {
+        target: 'separate', siteTimeoutMs: 60_000,
+        onCheckpoint: async (rows) => { checkpoint = rows; },
+      });
+      await jest.advanceTimersByTimeAsync(61_000);
+      const timedOut = await pending;
+      expect(timedOut[1]).toEqual(['a.ru', 'original@a.ru', '']);
+      finishLate({ emails: ['late@a.ru'] });
+      await jest.advanceTimersByTimeAsync(0);
+      expect(timedOut[1][2]).toBe('');
+      const calls = (scrapeEmails as jest.Mock).mock.calls.length;
+      expect(await stepFindEmails(checkpoint, noopProgress, undefined, { target: 'separate' })).toEqual(timedOut);
+      expect(scrapeEmails).toHaveBeenCalledTimes(calls);
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('maxEmailsPerSite ограничивает число адресов, пишемых в ячейку', async () => {

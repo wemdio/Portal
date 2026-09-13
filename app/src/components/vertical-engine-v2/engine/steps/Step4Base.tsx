@@ -10,6 +10,7 @@
  * ВСЕ неотклонённые гипотезы, хотя пользователь выбирал одну.
  */
 
+import { isVeAcceptedEmailStatus } from '@/lib/verticalEngineV2/emailPolicy';
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react';
 import { ArrowRight } from 'lucide-react';
 import type {
@@ -825,9 +826,11 @@ export function BaseRow({ base, job, hypothesisTitle, queued, onUpdated }: { bas
   const progress = getCollectionProgress(base.collect_info, job);
   const columns = Array.isArray(base.columns) ? base.columns.filter((column) => column !== VE_COMPANY_NAME_FIELD && column !== '_ve_relevance') : [];
   const previewRows = (Array.isArray(base.sample_rows) ? base.sample_rows : [])
-    .filter((row) => !isReadyPreview || (isCompanyNameReady(row) && row._email_status === 'ok'
+    .filter((row) => !isReadyPreview || (isCompanyNameReady(row) && isVeAcceptedEmailStatus(row._email_status)
       && row._low_relevance !== true && row._relevance_unchecked !== true))
     .slice(0, PREVIEW_ROWS);
+  const hasReadyContacts = previewRows.length > 0 || (base.collect_info?.target_progress?.ready_rows ?? 0) > 0;
+  const partialPreview = isReadyPreview && base.status === 'collecting';
 
   const handleReview = useCallback(async () => {
     if (reviewStarting || base.status === 'collecting') return;
@@ -883,7 +886,11 @@ export function BaseRow({ base, job, hypothesisTitle, queued, onUpdated }: { bas
           <span className={HE.faint}>{formatDate(base.created_at)}</span>
         </span>
         <span className="ve2-tag">{base.source === 'auto' ? 'авто' : 'загрузка'}</span>
-        {base.status !== 'collecting' ? (
+        {partialPreview && hasReadyContacts ? (
+          <span className="shrink-0 font-mono text-xs text-gray-700">
+            Готово контактов: {(base.collect_info?.target_progress?.ready_rows ?? previewRows.length).toLocaleString('ru-RU')}
+          </span>
+        ) : base.status !== 'collecting' ? (
           <span className="shrink-0 font-mono text-xs text-gray-700">{base.row_count.toLocaleString('ru-RU')} строк</span>
         ) : !queued && progress.candidates !== null ? (
           <span className="shrink-0 font-mono text-xs text-gray-700">{progress.candidates.toLocaleString('ru-RU')} кандидатов</span>
@@ -923,17 +930,18 @@ export function BaseRow({ base, job, hypothesisTitle, queued, onUpdated }: { bas
               aria-expanded={previewOpen}
               aria-controls={`ve-base-preview-${base.id}`}
             >
-              {previewOpen ? 'Скрыть' : isReadyPreview ? 'Готовые контакты' : 'Исходные кандидаты'}
+              {previewOpen ? 'Скрыть' : partialPreview ? 'Первые контакты' : isReadyPreview ? 'Готовые контакты' : 'Исходные кандидаты'}
             </button> : null}
             {hasRows ? <button
               type="button"
               onClick={() => void handleDownload(base.collect_info?.collection_mode === 'preview' ? 'preview' : 'raw')}
-              disabled={downloadingMode !== null || (base.collect_info?.collection_mode === 'preview' && base.status === 'collecting')}
+              disabled={downloadingMode !== null || (isReadyPreview && !hasReadyContacts)}
               className={HE.btnQuiet}
-              title={base.collect_info?.collection_mode === 'preview' ? 'До 1000 проверенных контактов для согласования' : 'Все собранные строки, включая исключённые из запуска'}
+              title={partialPreview ? 'Уже проверенные контакты; остальная база продолжает собираться'
+                : isReadyPreview ? `До ${VE_PREVIEW_READY_TARGET} проверенных контактов для согласования` : 'Все собранные строки, включая исключённые из запуска'}
             >
               {downloadingMode !== null && downloadingMode !== 'review' ? <Spinner className="h-3 w-3" /> : null}
-              {base.collect_info?.collection_mode === 'preview' ? 'CSV превью' : 'Исходный CSV'}
+              {partialPreview ? 'Скачать готовую часть' : isReadyPreview ? 'CSV превью' : 'Исходный CSV'}
             </button> : null}
             {hasReserve ? <button type="button" className={HE.btnQuiet}
               onClick={() => void handleDownload('review')} disabled={downloadingMode !== null}
@@ -1215,7 +1223,14 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
     >
       {target ? (
         <div className="sm:col-span-2 mb-2 text-xs" role="status">
-          <p className="font-medium">Проверено и подготовлено: {target.ready_rows.toLocaleString('ru-RU')} / цель {target.ready_target.toLocaleString('ru-RU')}</p>
+          <p className="font-medium">{target.mode === 'preview' ? 'Готово для превью' : 'Проверено и подготовлено'}: {target.ready_rows.toLocaleString('ru-RU')} / {target.ready_target.toLocaleString('ru-RU')} контактов</p>
+          {target.mode === 'preview' && base.status === 'collecting' ? (
+            <p className="mt-1 text-gray-700">
+              {target.ready_rows > 0
+                ? `Готовую часть можно посмотреть и скачать. Продолжаем добор до ${target.ready_target.toLocaleString('ru-RU')} проверенных контактов.`
+                : `Собираем ${target.ready_target.toLocaleString('ru-RU')} готовых контактов: проверяем почты, соответствие гипотезе и названия компаний. Размер следующих партий подбираем по фактическому выходу.`}
+            </p>
+          ) : null}
           <p className="mt-1">
             {namesInProgress ? 'Контакты сохранены. Подготавливаем названия компаний для превью и писем.'
               : emailsInProgress ? 'Повторяем незавершённую проверку сохранённых email. Контакты сохранены; новый сбор не запускается.'

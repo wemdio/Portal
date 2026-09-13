@@ -45,12 +45,11 @@
  *     джоба падает. Упавшие задачи фиксируются в collect_info, но не валят
  *     джобу, если хотя бы одна задача дала строки.
  *  5. CONSTRUCT — обогащение собранных строк конструктором баз
- *     (base_constructor_jobs: find_emails при бедной базе →
+ *     (base_constructor_jobs: find_emails для всех строк →
  *     enrich_descriptions по одной строке компании → split_emails →
- *     dedup_email → validate_emails → cap_emails_per_company; locale джобы
+ *     dedup_email → validate_emails; locale джобы
  *     по рынку).
- *     Пропускается, когда email уже есть у >50% строк (RU-источники богатые)
- *     или фаза завершалась ранее (construct.status='done' в collect_info).
+ *     Завершённый результат конструктора переиспользуется при продолжении.
  *     DISPATCH-CONSTRUCT создаёт BC-джобу (bc_job_id — в collect_info.construct)
  *     и уходит в self-requeue с паузой 60с; WAIT-CONSTRUCT опрашивает её до
  *     терминального статуса (таймаут 6ч → база failed); IMPORT мапит сетку
@@ -86,6 +85,7 @@
  * вариации поисковых запросов — future work.
  */
 
+import { isVeAcceptedEmailStatus } from '../emailPolicy';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
 import { searchCount, searchRows } from '@/lib/companiesSearch/rpcSearch';
@@ -115,6 +115,8 @@ import { isContactSupplyActive } from '../contactSupplyEligibility';
 import {
   collectionRoundLimit, createCollectionTarget, finishCollectionRound, updateCollectionEstimate,
   VE_SOURCE_POPULATION_MAX_AGE_MS,
+  VE_PREVIEW_FIRST_CANDIDATES,
+  VE_PREVIEW_READY_TARGET,
   type VeCollectionMode, type VeCollectionTargetProgress, type VeCollectionEstimate,
 } from '../collectionTarget';
 import {
@@ -2014,22 +2016,20 @@ async function findOlderCollectingBase(
 /* ─────────────────────────── Фаза CONSTRUCT ─────────────────────────── */
 
 /**
- * Шаги конструктора для авто-базы VE2: (поиск на сайтах, если база бедная)
+ * Шаги конструктора для авто-базы VE2: поиск на сайтах каждой компании
  * → описания по одной строке компании → разнос адресов по строкам → дедуп
- * почт → ВАЛИДАЦИЯ → кап на компанию. AI-шагов
+ * почт → ВАЛИДАЦИЯ. Все найденные адреса сохраняются, без лимита на компанию. AI-шагов
  * (ta_scoring/personalization) нет — генерация и скоринг остаются в Движке.
  *
  * validate_emails — ВСЕГДА: раньше конструктор запускался только при бедных
  * почтах, и базы реестра/карт (email уже есть, но это протухшие info@ из
  * ЕГРЮЛ-источников) уходили в рассылку без валидации — баунсы ложились на
- * домен клиента. find_emails — только когда email есть у ≤50% строк
- * (ENG-базы pdl/funded/eng_hiring, бедные hh-сборки).
+ * домен клиента. Исходные адреса — запасной вариант, если сайт не дал адресов.
  */
 const CONSTRUCT_STEPS_AFTER_SPLIT = [
   'split_emails',
   'dedup_email',
   'validate_emails',
-  'cap_emails_per_company',
 ];
 
 /** Свыше этого размера enrich_descriptions (per-site фетчи) не укладывается в
@@ -2037,13 +2037,11 @@ const CONSTRUCT_STEPS_AFTER_SPLIT = [
 const CONSTRUCT_ENRICH_MAX_ROWS = 5000;
 
 function constructStepsFor(merged: VeUnifiedRow[]): string[] {
-  const withEmail = merged.filter((r) => r.email.trim() !== '').length;
-  const poor = withEmail * 2 <= merged.length;
   const enrich = merged.length <= CONSTRUCT_ENRICH_MAX_ROWS ? ['enrich_descriptions'] : [];
   // enrich_descriptions зависит только от компании/сайта. Выполняем его до
-  // split_emails: иначе до пяти адресов одной компании породят до пяти
+  // split_emails: иначе несколько адресов одной компании породят несколько
   // одинаковых HTTP-запросов и способны выбить 6-часовой таймаут.
-  return [...(poor ? ['find_emails'] : []), ...enrich, ...CONSTRUCT_STEPS_AFTER_SPLIT];
+  return ['find_emails', ...enrich, ...CONSTRUCT_STEPS_AFTER_SPLIT];
 }
 /** Канонические заголовки сетки конструктора (порядок — как VE_AUTO_COLLECT_COLUMNS). */
 const CONSTRUCT_HEADERS_RU = ['Компания', 'Сайт', 'Email', 'Телефон', 'Вакансия', 'Адрес', 'Категория', 'Сотрудники', 'Выручка', 'ИНН', 'Источник'];
@@ -2177,8 +2175,12 @@ async function dispatchConstructJob(input: {
     status: 'pending',
     locale,
     selected_steps: steps,
-    // Кап «до 5 почт на компанию» — ключ max, как читает STEP_RUNNERS воркера.
-    step_config: { cap_emails_per_company: { max: 5 } },
+    step_config: {
+      find_emails_target: 'separate',
+      find_emails: {
+        stop_at_first: false, max_per_site: null, max_pages: 12, site_timeout_ms: 60_000, merge_mode: 'prefer_found_validated',
+      },
+    },
     data: buildConstructGrid(rows, market),
     initial_row_count: rows.length,
     total_steps: steps.length,
@@ -2203,7 +2205,7 @@ export interface VeConstructImport {
   /**
    * Вердикт валидации (колонка «Email Статус») по каждой строке rows,
    * lowercase; null — колонки статуса в сетке не было / у строки пусто.
-   * Нужен refill-ветке (ENG auto-pipeline): в лиды идут только 'ok'.
+   * Нужен доливу VE2: допускаются 'ok' и 'catch_all'.
    */
   emailStatuses: Array<string | null>;
   /** Почт найдено (result_stats.emails_found; фолбэк — строки с email). */
@@ -2251,14 +2253,13 @@ async function importConstructRows(ctx: VeStageContext, bcJobId: string): Promis
     // Мусорные строки (пустая/схлопнутая компания) — как на HARVEST: выбросить.
     if (!normalizeCompanyForDedup(company)) continue;
     const emailStatus = statusIdx >= 0 ? String(bodyRow[statusIdx] ?? '').trim().toLowerCase() : '';
-    if (emailStatus === 'ok') validCount += 1;
+    if (isVeAcceptedEmailStatus(emailStatus)) validCount += 1;
     emailStatuses.push(emailStatus || null);
     rows.push({
       ...unifiedRow({
         company,
         website: get('website'),
-        // Мerged-ячейка может держать несколько адресов через запятую —
-        // в базе один email на строку: первый (исходный приоритетнее scrape).
+        // Конструктор разносит адреса до проверки: статус принадлежит этой строке.
         email: extractEmail(get('email')) ?? '',
         phone: get('phone'),
         vacancy_title: get('vacancy_title'),
@@ -2568,7 +2569,7 @@ async function resumeSavedPreviewValidation(
   // rejected/unchecked verdicts. Keep those recipients; recheck the remaining BC
   // output for this same immutable hypothesis, including legacy rejected rows.
   const priorReady = (Array.isArray(base.data) ? base.data : []) as Array<VeUnifiedRow & { _email_status?: string }>;
-  if (priorReady.some((row) => row._email_status !== 'ok')) throw new Error('Saved preview email verdicts are incomplete');
+  if (priorReady.some((row) => !isVeAcceptedEmailStatus(row._email_status))) throw new Error('Saved preview email verdicts are incomplete');
   const identity = (row: VeUnifiedRow) => JSON.stringify([row.company, row.email.toLowerCase()]);
   const priorKeys = new Set(priorReady.map(identity));
   const combined = new Map<string, { row: VeUnifiedRow; status: string | null }>();
@@ -2716,7 +2717,7 @@ async function resumeSavedCompanyNames(
 ): Promise<VeStageResult> {
   const recovery = info.company_name_recovery!;
   const rows = Array.isArray(base.data) ? base.data : [];
-  if (rows.some((row) => row._email_status !== 'ok' || row._low_relevance === true
+  if (rows.some((row) => !isVeAcceptedEmailStatus(row._email_status) || row._low_relevance === true
     || row._relevance_unchecked === true || !(VE_COMPANY_NAME_FIELD in row))) {
     throw new Error('Saved company name phase has incomplete contact validation');
   }
@@ -2741,7 +2742,12 @@ async function completeTargetRound(args: {
   /** Completing old name work must not consume the user's new reserve-review request. */
   continueManualReview?: boolean;
 }): Promise<VeStageResult> {
-  const { ctx, job, base, info, progress } = args;
+  const { ctx, job, base, info } = args;
+  // Apply the new preview goal only after this round's input has been fully
+  // accounted for. An in-flight legacy constructor keeps its original scope.
+  const progress = args.progress.mode === 'preview'
+    ? { ...args.progress, ready_target: VE_PREVIEW_READY_TARGET } : args.progress;
+  info.ready_target = progress.ready_target;
   const tasks = info.tasks ?? [];
   const reviewOnly = job.payload?.review_relevance === true;
   const prior = info.target_checkpoint;
@@ -2822,7 +2828,9 @@ async function completeTargetRound(args: {
   info.target_checkpoint = checkpoint;
   info.stats = stats;
   const { error: pendingError } = await ctx.supabase.from('ve_bases').update({
-    data: pendingRows, columns, sample_rows: pendingRows.slice(0, SAMPLE_ROWS), row_count: pendingRows.length,
+    data: pendingRows, columns,
+    sample_rows: prepareSegmentationAudience({ rows: pendingRows, columns, source: 'auto' }).rows.slice(0, SAMPLE_ROWS),
+    row_count: pendingRows.length,
     collect_info: info, updated_at: new Date().toISOString(),
   }).eq('id', base.id);
   if (pendingError) throw new VeRelevanceCheckpointError(`Company name phase save: ${pendingError.message}`);
@@ -2830,7 +2838,7 @@ async function completeTargetRound(args: {
   const cleaned = await cleanCollectedCompanyNames(ctx, job, info, pendingRows, args.usage);
   const readyRows = prepareSegmentationAudience({ rows: cleaned.rows, columns, source: 'auto' }).rows;
   let next = finish(readyRows.length, cleaned.summary.error);
-  const reviewablePending = reserveRows.some((row) => row._email_status === 'ok'
+  const reviewablePending = reserveRows.some((row) => isVeAcceptedEmailStatus(row._email_status)
     && (row._ve_relevance as { status?: unknown } | undefined)?.status === 'needs_review');
   const pendingAutomaticEmails = hasPendingVeSavedEmailRecovery(reserveRows, info.saved_email_recovery);
   const emailValidationCanContinue = pendingAutomaticEmails && args.validationError === 'Проверка email завершилась не полностью';
@@ -2902,7 +2910,7 @@ async function completeTargetRound(args: {
     : next.status === 'error' ? 'failed'
       : next.mode === 'preview' && readyRows.length > 0 ? 'analyzing' : 'analyzed';
   const { error } = await ctx.supabase.from('ve_bases').update({
-    data: cleaned.rows, columns, sample_rows: cleaned.rows.slice(0, SAMPLE_ROWS), row_count: cleaned.rows.length,
+    data: cleaned.rows, columns, sample_rows: readyRows.slice(0, SAMPLE_ROWS), row_count: cleaned.rows.length,
     status, collect_info: info, error: next.status === 'error' ? next.reason?.slice(0, 500) : null,
     updated_at: new Date().toISOString(),
   }).eq('id', base.id);
@@ -2962,15 +2970,22 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     target = createCollectionTarget(mode, info.ready_target ?? job.payload?.ready_target as number | undefined);
     const previous = info.target_progress;
     if (previous) {
+      const firstRoundCandidates = previous.first_round_candidates ?? 2_000;
       if (!Number.isSafeInteger(previous.round) || previous.round < 1 || previous.round > target.max_rounds
+        || !Number.isSafeInteger(previous.ready_target) || previous.ready_target < 1 || previous.ready_target > target.max_candidates
+        || !Number.isSafeInteger(firstRoundCandidates) || firstRoundCandidates < 1 || firstRoundCandidates > 2_000
         || !Number.isSafeInteger(previous.candidates_processed) || previous.candidates_processed < 0 || previous.candidates_processed > target.max_candidates
-        || !Number.isSafeInteger(previous.ready_rows) || previous.ready_rows < 0 || previous.ready_rows > target.max_candidates * 5
+        || !Number.isSafeInteger(previous.ready_rows) || previous.ready_rows < 0
         || (info.target_checkpoint?.completed_round ?? 0) !== previous.round - (info.validation_retry || info.company_name_recovery || info.relevance_review_requested ? 0 : 1)) {
         throw new Error('Invalid collection target checkpoint');
       }
       target.round = previous.round;
       target.candidates_processed = previous.candidates_processed;
       target.ready_rows = previous.ready_rows;
+      // A new preview default must not change the input scope of a constructor
+      // already running for an older target (e.g. 1000 ready contacts).
+      target.ready_target = previous.ready_target;
+      target.first_round_candidates = firstRoundCandidates;
     }
     info.collection_mode = mode;
     info.ready_target = target.ready_target;
@@ -3277,6 +3292,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   }
 
   // ─── CONSTRUCT ───
+  const constructRequeueMs = target?.mode === 'preview' && target.round === 1
+    && target.first_round_candidates === VE_PREVIEW_FIRST_CANDIDATES ? 15_000 : CONSTRUCT_REQUEUE_MS;
   // Обогащение собранных строк конструктором баз (валидация почт ВСЕГДА,
   // поиск — для бедных баз, см. constructStepsFor). Пропуск — только когда
   // фаза завершалась ранее (construct.status='done' в collect_info). База в
@@ -3315,7 +3332,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       info.construct = queuedConstruct;
       await persistCollectInfo(ctx, baseId, info);
       stageLog(ctx, `[base_collect] construct: создана base_constructor_jobs ${bcJobId} (${merged.length} строк, locale ${locale})`);
-      await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+      await requeueSelf(ctx, job, constructRequeueMs);
       return {
         result: { waiting: true, base_id: baseId, construct: 'dispatched' },
         tokensUsed: usage.tokensUsed,
@@ -3360,7 +3377,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
           `[base_collect] construct: legacy job ${construct.bc_job_id} без split_emails → ` +
             `повтор ${replacement.bcJobId}`,
         );
-        await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+        await requeueSelf(ctx, job, constructRequeueMs);
         return {
           result: { waiting: true, base_id: baseId, construct: 're_dispatched' },
           tokensUsed: usage.tokensUsed,
@@ -3421,7 +3438,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
           .eq('id', baseId);
         throw new Error(note);
       }
-      await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+      await requeueSelf(ctx, job, constructRequeueMs);
       return {
         result: { waiting: true, base_id: baseId, construct: bc?.status ?? 'missing' },
         tokensUsed: usage.tokensUsed,
