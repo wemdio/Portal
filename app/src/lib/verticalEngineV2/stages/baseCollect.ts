@@ -103,7 +103,7 @@ import { getVeDirectorySegmentStats } from '../dossierData';
 import { callLLMWithSchema, getVeModel } from '../llm';
 import { projectMarket, type VeMarket } from '../market';
 import { findIrrelevantRows, type VeRelevanceDecision } from '../relevanceGate';
-import { relevanceHash, VeRelevanceCheckpointError, type VeRelevanceCheckpoint } from '../relevanceCheckpoint';
+import { relevanceHash, VeRelevanceCheckpointError, VePreviewCheckpointConflict, type VeRelevanceCheckpoint } from '../relevanceCheckpoint';
 import {
   buildVeRelevanceReviewBatch, mergeVeRelevanceRows, needsVeRelevanceReview, readVeRelevanceReserve, readVeRelevanceSourceRows, summarizeVeRelevanceReserve,
   veRelevanceCompanyKey, veRelevanceRowKey, type VeRelevanceReserve, type VeRelevanceReserveSummary,
@@ -817,8 +817,8 @@ async function persistCollectInfo(
       .update({ ...patch, collect_info: next, updated_at: new Date().toISOString() })
       .eq('id', baseId).eq('status', 'collecting')
       .eq('collect_info->preview_pipeline->>revision', String(revision)).select('id').maybeSingle();
-    if (error || !data) throw new VeRelevanceCheckpointError(error
-      ? `Preview checkpoint save: ${error.message}` : 'Preview checkpoint changed; stale writer stopped');
+    if (error) throw new VeRelevanceCheckpointError(`Preview checkpoint save: ${error.message}`);
+    if (!data) throw new VePreviewCheckpointConflict('Preview checkpoint changed; stale writer stopped');
     info.preview_pipeline.revision = revision + 1;
     return;
   }
@@ -3098,8 +3098,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       .update({ collect_info: info, updated_at: new Date().toISOString() })
       .eq('id', baseId).eq('status', 'collecting')
       .eq('collect_info->preview_pipeline->>revision', String(revision)).select('id').maybeSingle();
-    if (error || !saved) throw new VeRelevanceCheckpointError(error
-      ? `Preview compatibility checkpoint: ${error.message}` : 'Preview compatibility checkpoint changed');
+    if (error) throw new VeRelevanceCheckpointError(`Preview compatibility checkpoint: ${error.message}`);
+    if (!saved) throw new VePreviewCheckpointConflict('Preview compatibility checkpoint changed');
   }
   const mode = info.collection_mode ?? job.payload?.collection_mode;
   if (info.preview_pipeline && mode !== 'preview') throw new Error('Preview batches require preview mode');
@@ -3799,6 +3799,9 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
   try {
     return await runBaseCollectStageImpl(job, ctx);
   } catch (error) {
+    // Do not reread the winner's revision and stamp our obsolete error over it.
+    // The worker also leaves the winner's job lifecycle untouched.
+    if (error instanceof VePreviewCheckpointConflict) throw error;
     if (error instanceof VeRelevanceRetryScheduled) {
       return { result: { base_id: error.baseId, waiting: true, relevance_retry: true },
         tokensUsed: error.usage.tokensUsed, costUsd: error.usage.costUsd };
