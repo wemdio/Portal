@@ -27,7 +27,8 @@ export function SendConfirmDialog({
     setSending(true);
     setError(null);
     try {
-      await sendReply(qualificationId, draftId);
+      // Уходит ровно тот текст, что показан в модалке (с правками сотрудника).
+      await sendReply(qualificationId, draftId, text);
       onSent();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось отправить письмо');

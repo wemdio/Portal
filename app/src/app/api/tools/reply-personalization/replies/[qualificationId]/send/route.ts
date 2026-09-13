@@ -9,8 +9,11 @@ export const POST = withAuth(async (req: NextRequest, _user, params) => {
   const qualificationId = params?.qualificationId;
   if (!qualificationId) return NextResponse.json({ error: 'qualificationId is required' }, { status: 400 });
 
-  const body = (await req.json().catch(() => null)) as { draftId?: string } | null;
+  const body = (await req.json().catch(() => null)) as { draftId?: string; text?: string } | null;
   if (!body?.draftId) return NextResponse.json({ error: 'draftId is required' }, { status: 400 });
+  if (typeof body.text !== 'string' || !body.text.trim()) {
+    return NextResponse.json({ error: 'text is required' }, { status: 400 });
+  }
 
   // Черновик и адрес в URL должны совпадать — иначе фронт по ошибке (или
   // устаревшая вкладка) мог бы отправить черновик другого письма.
@@ -20,7 +23,7 @@ export const POST = withAuth(async (req: NextRequest, _user, params) => {
   }
 
   try {
-    await sendDraft(body.draftId);
+    await sendDraft(body.draftId, body.text);
     return NextResponse.json({ ok: true });
   } catch (err) {
     if (err instanceof SendDraftError) {

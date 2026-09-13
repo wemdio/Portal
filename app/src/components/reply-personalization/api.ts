@@ -70,10 +70,10 @@ export function generateReply(qualificationId: string, projectId: string) {
   });
 }
 
-export function sendReply(qualificationId: string, draftId: string) {
+export function sendReply(qualificationId: string, draftId: string, text: string) {
   return fetchWithAuth<{ ok: true }>(`${BASE}/replies/${qualificationId}/send`, {
     method: 'POST',
-    body: JSON.stringify({ draftId }),
+    body: JSON.stringify({ draftId, text }),
   });
 }
 

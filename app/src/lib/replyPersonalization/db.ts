@@ -257,3 +257,17 @@ export async function markDraftSent(draftId: string): Promise<void> {
     .eq('id', draftId);
   if (error) throw new Error(`draft sent-update failed: ${error.message}`);
 }
+
+/**
+ * Пишет в черновик финальный (отредактированный сотрудником) текст ДО
+ * физической отправки: журнал хранит ровно то, что ушло адресату, а повторная
+ * попытка после сбоя отправляет тот же текст, а не оригинал генерации.
+ */
+export async function updateDraftText(draftId: string, text: string): Promise<void> {
+  const { admin } = requireClients();
+  const { error } = await admin
+    .from('reply_personalization_drafts')
+    .update({ generated_text: text })
+    .eq('id', draftId);
+  if (error) throw new Error(`draft text-update failed: ${error.message}`);
+}
