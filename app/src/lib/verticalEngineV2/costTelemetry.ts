@@ -11,6 +11,7 @@ export const VE_USAGE_VERSION = 1;
 export const VE_CHILD_SNAPSHOT_SELECT = [
   'round:collect_info->target_progress->>round',
   'construct_id:collect_info->construct->>bc_job_id',
+  'preview_jobs:collect_info->preview_pipeline->job_ids',
   'collect_started:collect_info->>started_at',
   ...Array.from({ length: 5 }, (_, i) => [
     `source${i}:collect_info->tasks->${i}->>source`,
@@ -24,6 +25,7 @@ export interface VeChildSnapshot {
   priorProgress?: boolean;
   sources: { source: string; jobId?: string }[];
   constructorJob?: { jobId: string; steps: string[] | null };
+  constructorJobs?: Array<{ jobId: string; steps: string[] | null }>;
   truncated?: boolean;
 }
 
@@ -52,6 +54,16 @@ async function childSnapshot(db: SupabaseClient, baseId?: string): Promise<VeChi
       const steps = !constructorError && Array.isArray(raw) && raw.length <= 30 && raw.every((step) => identifier(step))
         ? raw as string[] : null;
       snapshot.constructorJob = { jobId: constructorId, steps };
+    }
+    if (Array.isArray(row.preview_jobs) && row.preview_jobs.length > 0) {
+      const ids = [...new Set(row.preview_jobs.map(identifier).filter((id): id is string => !!id))].slice(0, 100);
+      if (ids.length !== row.preview_jobs.length) snapshot.truncated = true;
+      const { data: jobs, error: jobsError } = await db.from('base_constructor_jobs')
+        .select('id, selected_steps').in('id', ids).abortSignal(AbortSignal.timeout(10_000));
+      snapshot.constructorJobs = ids.map((jobId) => {
+        const raw = jobs?.find((job) => job.id === jobId)?.selected_steps;
+        return { jobId, steps: !jobsError && Array.isArray(raw) && raw.length <= 30 && raw.every((step) => identifier(step)) ? raw as string[] : null };
+      });
     }
     return snapshot;
   } catch {

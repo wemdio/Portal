@@ -185,7 +185,7 @@ interface Filter {
 interface Builder {
   select: (columns?: string, opts?: { count?: 'exact' | 'planned' | 'estimated' }) => Builder;
   insert: (rows: Row | Row[]) => Builder;
-  upsert: (rows: Row | Row[], opts?: { onConflict?: string }) => Builder;
+  upsert: (rows: Row | Row[], opts?: { onConflict?: string; ignoreDuplicates?: boolean }) => Builder;
   update: (patch: Row) => Builder;
   delete: () => Builder;
 
@@ -227,7 +227,13 @@ function matchesIlike(value: unknown, pattern: unknown): boolean {
 function applyFilter(rows: Row[], f: Filter): Row[] {
   switch (f.op) {
     case 'eq':
-      return rows.filter((r) => r[f.column] === f.value);
+      return rows.filter((r) => {
+        if (f.column in r || !f.column.includes('->')) return r[f.column] === f.value;
+        const parts = f.column.split(/->>?/);
+        let value: unknown = r;
+        for (const part of parts) value = value && typeof value === 'object' ? (value as Row)[part] : undefined;
+        return (f.column.includes('->>') && value != null ? String(value) : value) === f.value;
+      });
     case 'neq':
       return rows.filter((r) => r[f.column] !== f.value);
     case 'in':
@@ -382,7 +388,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
     const orGroups: Filter[][][] = []; // list of (DNF) constraints; each must hold
     let mode: 'select' | 'insert' | 'upsert' | 'update' | 'delete' = 'select';
     let pendingInsert: Row[] = [];
-    let pendingUpsert: { rows: Row[]; onConflict: string | null } | null = null;
+    let pendingUpsert: { rows: Row[]; onConflict: string | null; ignoreDuplicates?: boolean } | null = null;
     let pendingUpdate: Row | null = null;
     const requestedOrders: Array<{ column: string; ascending: boolean }> = [];
     let requestedLimit: number | null = null;
@@ -463,6 +469,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
           let replaced = false;
           for (let i = 0; i < result.length; i++) {
             if (keyCols.length && keyCols.every((k) => result[i][k] === r[k])) {
+              if (pendingUpsert.ignoreDuplicates) { replaced = true; break; }
               const nextRow = { ...result[i], ...r };
               result[i] = nextRow;
               returnedRows.push(nextRow);
@@ -536,6 +543,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         pendingUpsert = {
           rows: Array.isArray(rows) ? rows.slice() : [rows],
           onConflict: opts?.onConflict ?? null,
+          ignoreDuplicates: opts?.ignoreDuplicates,
         };
         return builder;
       },

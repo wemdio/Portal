@@ -468,6 +468,8 @@ export interface StepFindEmailsOptions {
   maxPages?: number;
   /** Optional deadline for the whole site, retaining addresses found before it. */
   siteTimeoutMs?: number;
+  /** Reuse a sufficient homepage description; short/empty pages still use enrich. */
+  reuseWebsiteDescription?: boolean;
   /**
    * Локаль джобы (job.locale конструктора баз, пробрасывает worker).
    * При 'en': колонка scrape-результата — «Found Email» (вместо
@@ -617,6 +619,13 @@ export async function stepFindEmails(
     body = body.map((row) => [...row, '']);
   }
 
+  let descriptionIdx = findColumnIndex(header, 'описание', 'description');
+  if (options?.reuseWebsiteDescription && descriptionIdx < 0) {
+    descriptionIdx = header.length;
+    header.push(descriptionColForLocale(locale));
+    body = body.map((row) => [...row, '']);
+  }
+
   // Для строк где target-колонка уже заполнена — скипаем (идемпотентно
   // при resume, и сохраняет ручной ввод когда target='same').
   // Для 'separate' это значит «не перезатираем найденный ранее scrape-результат».
@@ -655,6 +664,7 @@ export async function stepFindEmails(
         maxPages: options?.maxPages ?? 5,
         stopAtFirstUsableEmail,
         locale,
+        ...(options?.reuseWebsiteDescription ? { includeDescription: true } : {}),
         ...(controller ? { signal: controller.signal } : {}),
       });
       // Give an aborted crawler one second to return addresses from pages
@@ -666,6 +676,10 @@ export async function stepFindEmails(
         }),
       ]) : await scraping;
       const emails = result?.emails ?? [];
+      if (options?.reuseWebsiteDescription && descriptionIdx >= 0 && result?.description
+        && !(body[item.i][descriptionIdx] || '').trim()) {
+        body[item.i][descriptionIdx] = result.description.slice(0, 2000);
+      }
       if (emails.length > 0) {
         body[item.i][targetIdx] = (maxPerSite === null ? emails : emails.slice(0, maxPerSite)).join(', ');
       }

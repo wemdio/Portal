@@ -1,7 +1,7 @@
 import { isVeProviderBillingError } from './collectionErrors';
 
 /** Only recognized preview failures may reuse a base; never supply/refill. */
-export function previewRecoveryKind(base: Record<string, unknown>): 'validation' | 'billing' | null {
+export function previewRecoveryKind(base: Record<string, unknown>): 'validation' | 'billing' | 'pipeline' | null {
   const info = base.collect_info as Record<string, unknown> | null;
   if (base.source !== 'auto' || base.status !== 'failed' || !base.hypothesis_id
     || !info || info.collection_mode !== 'preview' || info.refill || info.supply_batch_id) return null;
@@ -11,6 +11,12 @@ export function previewRecoveryKind(base: Record<string, unknown>): 'validation'
   const stats = info.stats as Record<string, unknown> | undefined;
   const names = info.company_name_cleanup as Record<string, unknown> | undefined;
   if (!progress) return null;
+  const pipeline = info.preview_pipeline as Record<string, unknown> | undefined;
+  if (progress.status === 'error' && pipeline?.version === 1 && Array.isArray(pipeline.batches)
+    && typeof pipeline.revision === 'number' && Number.isSafeInteger(pipeline.revision)
+    && typeof progress.round === 'number' && Number.isSafeInteger(progress.round) && progress.round > 0
+    && (checkpoint?.completed_round === progress.round
+      || (pipeline.batches.length > 0 && (checkpoint?.completed_round ?? 0) === progress.round - 1))) return 'pipeline';
   if (progress.status === 'error' && construct?.status === 'done' && typeof construct.bc_job_id === 'string'
     && typeof progress.round === 'number' && Number.isInteger(progress.round) && progress.round > 0
     && checkpoint?.completed_round === progress.round
