@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { InDevelopmentGate } from '@/components/InDevelopmentGate';
 import { authFetch, getAccessToken } from '@/lib/authFetch';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
 
@@ -59,6 +60,14 @@ function formatDate(iso: string) {
    ═══════════════════════════════════════════ */
 
 export default function DoneForYouPage() {
+  return (
+    <InDevelopmentGate toolId="done-for-you">
+      <DoneForYouPageInner />
+    </InDevelopmentGate>
+  );
+}
+
+function DoneForYouPageInner() {
   const [briefMode, setBriefMode] = useState<'text' | 'pdf'>('text');
   const [brief, setBrief] = useState('');
   const [pdfFile, setPdfFile] = useState<File | null>(null);

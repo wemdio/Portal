@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { InDevelopmentGate } from '@/components/InDevelopmentGate';
 import { authFetch, getAccessToken } from '@/lib/authFetch';
 import { hasFioStructure } from '@/lib/cisLeads/fioStructure';
 
@@ -130,6 +131,14 @@ function ConfirmDeleteModal({
 }
 
 export default function CisLeadFinderPage() {
+  return (
+    <InDevelopmentGate toolId="cis-lead-finder">
+      <CisLeadFinderPageInner />
+    </InDevelopmentGate>
+  );
+}
+
+function CisLeadFinderPageInner() {
   const [uploading, setUploading] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [isDraggingFile, setIsDraggingFile] = useState(false);

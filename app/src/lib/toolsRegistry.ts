@@ -442,7 +442,11 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     description: 'Живой ресёрч компании-адресата и черновик персонализированного ответа на входящее письмо — по кнопке, с отправкой из портала.',
     description_en: 'Live research on the replying company and a personalized reply draft, generated on demand and sendable from the portal.',
     href: '/tools/reply-personalization',
+    badge: 'В разработке',
+    badge_en: 'In development',
+    badgeVariant: 'amber',
     accentColor: 'emerald',
+    disabled: true,
   },
 };
 

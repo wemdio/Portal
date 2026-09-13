@@ -46,8 +46,8 @@ export const TOOL_STATUS_OPTIONS: readonly ToolStatusOption[] = [
     value: 'in_development',
     label_ru: 'В разработке',
     label_en: 'In development',
-    hint_ru: 'Серая карточка с плашкой «В разработке», некликабельна.',
-    hint_en: 'Greyed-out card with “In development” badge, non-clickable.',
+    hint_ru: 'Плашка «В разработке» у всех: админам карточка и страница доступны, остальным карточка серая, а страница закрыта заглушкой.',
+    hint_en: '“In development” badge for everyone: admins can open the card and the page, others get a greyed-out card and a stub page.',
   },
   {
     value: 'disabled',
