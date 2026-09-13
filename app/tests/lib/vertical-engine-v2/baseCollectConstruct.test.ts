@@ -302,10 +302,12 @@ describe('base_collect CONSTRUCT step order', () => {
     expect(bufferedDb.getRows('base_constructor_jobs')).toHaveLength(1);
   });
 
-  it('targets validated recipients with bounded rounds and distinct stopping reasons', () => {
+  it('targets validated recipients with bounded rounds and distinct stopping reasons', async () => {
     const preview = createCollectionTarget('preview', 50_000);
     expect(preview.ready_target).toBe(1_000);
-    expect(collectionRoundLimit(preview)).toBe(2_000);
+    expect(collectionRoundLimit(preview)).toBe(100);
+    expect(collectionRoundLimit({ ...preview, first_round_candidates: undefined })).toBe(2_000);
+    expect(collectionRoundLimit(createCollectionTarget('supply', 1_000))).toBe(2_000);
     const progressing = finishCollectionRound(preview, {
       candidates: 2_000, readyRows: 200, exhausted: false, canContinue: true, error: null,
     });
@@ -329,6 +331,38 @@ describe('base_collect CONSTRUCT step order', () => {
     expect(estimateRemainingReady({ population: 5_000, candidatesProcessed: 1_000, readyRows: 200, eligible: true, asOf: '2026-09-03' }))
       .toMatchObject({ contacts: 800, confidence: 'low' });
     expect(estimateRemainingReady({ population: 5_000, candidatesProcessed: 1_000, readyRows: 200, eligible: false, asOf: '2026-09-03' })).toBeNull();
+
+    // The small cohort must reach the actual constructor and publish checked
+    // rows while the same base continues collecting. Old runs retain their
+    // original input scope across a deployment.
+    const harvest = Array.from({ length: 150 }, (_, i) => unifiedRow({
+      company: `Clinic ${i}`, website: `clinic-${i}.test`, email: `mail@clinic-${i}.test`,
+    }));
+    for (const legacy of [false, true]) {
+      const target = { ...createCollectionTarget('preview') };
+      if (legacy) delete target.first_round_candidates;
+      const db = seed({ ...collectInfo(harvest), collection_mode: 'preview', target_progress: target });
+      await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
+      const constructor = db.getRows('base_constructor_jobs')[0];
+      const expected = legacy ? 150 : 100;
+      const input = constructor.data as string[][];
+      expect(input).toHaveLength(expected + 1);
+      await db.from('base_constructor_jobs').update({ status: 'completed',
+        data: [[...input[0], 'Email Статус'], ...input.slice(1).map((row) => [...row, 'ok'])],
+      }).eq('id', constructor.id);
+      await db.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+      await expect(runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient }))
+        .resolves.toMatchObject({ result: { waiting: true, target_status: 'collecting' } });
+      const base = db.getRows('ve_bases')[0];
+      expect(base).toMatchObject({ status: 'collecting', row_count: expected });
+      expect((base.collect_info as VeCollectInfo).target_progress).toMatchObject({
+        round: 2, ready_rows: expected, candidates_processed: expected,
+        first_round_candidates: legacy ? 2_000 : 100,
+      });
+      expect(base.sample_rows).toHaveLength(30);
+      expect(prepareSegmentationAudience({ rows: base.sample_rows as Record<string, unknown>[],
+        columns: base.columns as string[], source: 'auto' }).rows).toHaveLength(30);
+    }
   });
 
   it('resumes a supply target from committed ready rows without revalidating the previous round', async () => {

@@ -172,7 +172,7 @@ function seed(options: {
 describe('Vertical Engine v2 base CSV export', () => {
   beforeEach(seed);
 
-  it('exports at most 1000 checked preview contacts and refuses an unfinished preview', async () => {
+  it('exports up to 1000 checked contacts while collection continues and rejects unverified rows', async () => {
     const ready = Array.from({ length: 1100 }, (_, i) => ({ company: `Company ${i}`, email: `lead-${i}@example.com`, _email_status: 'ok' }));
     await mockPortalDb.from('ve_bases').update({
       status: 'analyzed', row_count: ready.length, data: ready,
@@ -181,7 +181,26 @@ describe('Vertical Engine v2 base CSV export', () => {
     const result = await GET(request('preview'), { params: Promise.resolve({ id: BASE_ID }) });
     expect(result.status).toBe(200);
     expect((await result.text()).split('\r\n')).toHaveLength(1001);
-    await mockPortalDb.from('ve_bases').update({ status: 'collecting' }).eq('id', BASE_ID);
+    const partial = [
+      ROWS[0], ROWS[1], ROWS[2], ROWS[3], ROWS[4],
+      { company: 'Catch all', email: 'catch@example.com', _email_status: 'catch_all' },
+      { company: 'No verdict', email: 'pending@example.com' },
+      { company: 'Unprepared name', email: 'name@example.com', _email_status: 'ok',
+        _ve_company_name: { version: 1, status: 'failed', value: '', source_name: 'Unprepared name' } },
+    ];
+    for (const status of ['collecting', 'failed']) {
+      await mockPortalDb.from('ve_bases').update({ status, data: partial, row_count: partial.length,
+        collect_info: { collection_mode: 'preview', target_progress: { status: status === 'failed' ? 'error' : 'collecting' } },
+      }).eq('id', BASE_ID);
+      const response = await GET(request('preview'), { params: Promise.resolve({ id: BASE_ID }) });
+      expect(response.status).toBe(200);
+      expect((await response.text()).split('\r\n')).toEqual([
+        'company;email', 'Alpha;alpha@example.com', 'Catch all;catch@example.com',
+      ]);
+    }
+    await mockPortalDb.from('ve_bases').update({ status: 'collecting', data: [ROWS[1], ROWS[2]], row_count: 2 }).eq('id', BASE_ID);
+    expect((await GET(request('preview'), { params: Promise.resolve({ id: BASE_ID }) })).status).toBe(409);
+    await mockPortalDb.from('ve_bases').update({ data: [ROWS[0]], collect_info: { collection_mode: 'supply' } }).eq('id', BASE_ID);
     expect((await GET(request('preview'), { params: Promise.resolve({ id: BASE_ID }) })).status).toBe(409);
   });
 

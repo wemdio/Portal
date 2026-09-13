@@ -97,7 +97,9 @@ describe('VE2 base collection enqueue recovery', () => {
     expect(db.getRows('ve_bases')).toContainEqual(expect.objectContaining({
       hypothesis_id: 'hypothesis-2',
       status: 'collecting',
-      collect_info: expect.objectContaining({ collection_mode: 'preview', ready_target: 1_000, limit: 2_000 }),
+      collect_info: expect.objectContaining({ collection_mode: 'preview', ready_target: 1_000, limit: 100,
+        target_progress: expect.objectContaining({ first_round_candidates: 100 }),
+      }),
     }));
     expect(db.getRows('ve_jobs')).toContainEqual(expect.objectContaining({
       status: 'pending',

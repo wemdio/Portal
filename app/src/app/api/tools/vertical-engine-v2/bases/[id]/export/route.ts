@@ -138,9 +138,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         });
       }
       if (mode === 'preview') {
-        const info = base.collect_info as { collection_mode?: string; target_progress?: { status?: string } } | null;
-        if (info?.collection_mode !== 'preview' || !['analyzing', 'analyzed'].includes(base.status)
-          || !['target_reached', 'exhausted', 'limited'].includes(info?.target_progress?.status ?? '')) {
+        const info = base.collect_info as { collection_mode?: string } | null;
+        // Every completed cohort persists validated contacts independently of
+        // later collection. A slow or failed next cohort must not hide them.
+        if (info?.collection_mode !== 'preview' || !['collecting', 'analyzing', 'analyzed', 'failed'].includes(base.status)) {
           return jsonError('Превью ещё не прошло проверки', 409);
         }
         exportRows = prepareSegmentationAudience({ rows, columns, source: 'auto' }).rows.slice(0, VE_PREVIEW_READY_TARGET);

@@ -115,6 +115,7 @@ import { isContactSupplyActive } from '../contactSupplyEligibility';
 import {
   collectionRoundLimit, createCollectionTarget, finishCollectionRound, updateCollectionEstimate,
   VE_SOURCE_POPULATION_MAX_AGE_MS,
+  VE_PREVIEW_FIRST_CANDIDATES,
   type VeCollectionMode, type VeCollectionTargetProgress, type VeCollectionEstimate,
 } from '../collectionTarget';
 import {
@@ -2821,7 +2822,9 @@ async function completeTargetRound(args: {
   info.target_checkpoint = checkpoint;
   info.stats = stats;
   const { error: pendingError } = await ctx.supabase.from('ve_bases').update({
-    data: pendingRows, columns, sample_rows: pendingRows.slice(0, SAMPLE_ROWS), row_count: pendingRows.length,
+    data: pendingRows, columns,
+    sample_rows: prepareSegmentationAudience({ rows: pendingRows, columns, source: 'auto' }).rows.slice(0, SAMPLE_ROWS),
+    row_count: pendingRows.length,
     collect_info: info, updated_at: new Date().toISOString(),
   }).eq('id', base.id);
   if (pendingError) throw new VeRelevanceCheckpointError(`Company name phase save: ${pendingError.message}`);
@@ -2901,7 +2904,7 @@ async function completeTargetRound(args: {
     : next.status === 'error' ? 'failed'
       : next.mode === 'preview' && readyRows.length > 0 ? 'analyzing' : 'analyzed';
   const { error } = await ctx.supabase.from('ve_bases').update({
-    data: cleaned.rows, columns, sample_rows: cleaned.rows.slice(0, SAMPLE_ROWS), row_count: cleaned.rows.length,
+    data: cleaned.rows, columns, sample_rows: readyRows.slice(0, SAMPLE_ROWS), row_count: cleaned.rows.length,
     status, collect_info: info, error: next.status === 'error' ? next.reason?.slice(0, 500) : null,
     updated_at: new Date().toISOString(),
   }).eq('id', base.id);
@@ -2961,7 +2964,9 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     target = createCollectionTarget(mode, info.ready_target ?? job.payload?.ready_target as number | undefined);
     const previous = info.target_progress;
     if (previous) {
+      const firstRoundCandidates = previous.first_round_candidates ?? 2_000;
       if (!Number.isSafeInteger(previous.round) || previous.round < 1 || previous.round > target.max_rounds
+        || !Number.isSafeInteger(firstRoundCandidates) || firstRoundCandidates < 1 || firstRoundCandidates > 2_000
         || !Number.isSafeInteger(previous.candidates_processed) || previous.candidates_processed < 0 || previous.candidates_processed > target.max_candidates
         || !Number.isSafeInteger(previous.ready_rows) || previous.ready_rows < 0
         || (info.target_checkpoint?.completed_round ?? 0) !== previous.round - (info.validation_retry || info.company_name_recovery || info.relevance_review_requested ? 0 : 1)) {
@@ -2970,6 +2975,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       target.round = previous.round;
       target.candidates_processed = previous.candidates_processed;
       target.ready_rows = previous.ready_rows;
+      target.first_round_candidates = firstRoundCandidates;
     }
     info.collection_mode = mode;
     info.ready_target = target.ready_target;
@@ -3276,6 +3282,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   }
 
   // ─── CONSTRUCT ───
+  const constructRequeueMs = target?.mode === 'preview' && target.round === 1
+    && target.first_round_candidates === VE_PREVIEW_FIRST_CANDIDATES ? 15_000 : CONSTRUCT_REQUEUE_MS;
   // Обогащение собранных строк конструктором баз (валидация почт ВСЕГДА,
   // поиск — для бедных баз, см. constructStepsFor). Пропуск — только когда
   // фаза завершалась ранее (construct.status='done' в collect_info). База в
@@ -3314,7 +3322,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       info.construct = queuedConstruct;
       await persistCollectInfo(ctx, baseId, info);
       stageLog(ctx, `[base_collect] construct: создана base_constructor_jobs ${bcJobId} (${merged.length} строк, locale ${locale})`);
-      await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+      await requeueSelf(ctx, job, constructRequeueMs);
       return {
         result: { waiting: true, base_id: baseId, construct: 'dispatched' },
         tokensUsed: usage.tokensUsed,
@@ -3359,7 +3367,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
           `[base_collect] construct: legacy job ${construct.bc_job_id} без split_emails → ` +
             `повтор ${replacement.bcJobId}`,
         );
-        await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+        await requeueSelf(ctx, job, constructRequeueMs);
         return {
           result: { waiting: true, base_id: baseId, construct: 're_dispatched' },
           tokensUsed: usage.tokensUsed,
@@ -3420,7 +3428,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
           .eq('id', baseId);
         throw new Error(note);
       }
-      await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+      await requeueSelf(ctx, job, constructRequeueMs);
       return {
         result: { waiting: true, base_id: baseId, construct: bc?.status ?? 'missing' },
         tokensUsed: usage.tokensUsed,
