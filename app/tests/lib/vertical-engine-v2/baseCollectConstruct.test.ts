@@ -66,6 +66,7 @@ import { searchRows } from '@/lib/companiesSearch/rpcSearch';
 import { enqueueVeBaseCollect } from '@/lib/verticalEngineV2/baseCollectEnqueue';
 import { callLLMWithSchema } from '@/lib/verticalEngineV2/llm';
 import { stripTaskHarvest } from '@/lib/verticalEngineV2/projectDetail';
+import { VePreviewCheckpointConflict } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 
 const PROJECT = { id: 'p1', name: 'P', created_by: 'user-1', market: 'ru' };
 const VERTICAL = {
@@ -499,16 +500,19 @@ describe('base_collect CONSTRUCT step order', () => {
     await raceDb.from('base_constructor_jobs').update({ status: 'completed',
       data: [[...raceGrid[0], 'Email Статус'], ...raceGrid.slice(1).map((row) => [...row, 'ok'])] }).eq('id', raceChild.id);
     const classify = mockFindIrrelevantRows.getMockImplementation()!;
+    let winnerInfo: VeCollectInfo | undefined;
     mockFindIrrelevantRows.mockImplementationOnce(async (input) => {
       const newer = structuredClone(raceDb.getRows('ve_bases')[0].collect_info) as VeCollectInfo;
       newer.preview_pipeline!.revision++;
+      winnerInfo = structuredClone(newer);
       await raceDb.from('ve_bases').update({ collect_info: newer }).eq('id', 'b1');
       return classify(input);
     });
     await raceDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
     await expect(runBaseCollectStage(makeJob(), { supabase: raceDb as unknown as SupabaseClient }))
-      .rejects.toThrow('stale writer stopped');
+      .rejects.toBeInstanceOf(VePreviewCheckpointConflict);
     expect(raceDb.getRows('ve_bases')[0].data).toEqual([]);
+    expect(raceDb.getRows('ve_bases')[0].collect_info).toEqual(winnerInfo);
     await raceDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
     await runBaseCollectStage(makeJob(), { supabase: raceDb as unknown as SupabaseClient });
     expect(raceDb.getRows('base_constructor_jobs')).toHaveLength(1);

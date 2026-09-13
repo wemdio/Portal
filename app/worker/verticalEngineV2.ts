@@ -40,6 +40,7 @@ import {
 import { transitionVeJobFailure } from '@/lib/verticalEngineV2/jobFailureTransition';
 import { createVeJobWatchdog } from '@/lib/verticalEngineV2/workerLiveness';
 import { claimVeJob } from '@/lib/verticalEngineV2/jobQueue';
+import { VePreviewCheckpointConflict } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import {
   createGuardedContactDeliveryTick,
   runBoundContactDeliveries,
@@ -358,6 +359,12 @@ async function handleJob(job: VeJob) {
 }
 
 async function failJob(job: VeJob, err: unknown) {
+  if (err instanceof VePreviewCheckpointConflict) {
+    // Another invocation advanced the durable base. Its continuation (or the
+    // existing stale-job recovery after a crash) owns the next transition.
+    log('info', `Job ${job.id} (${job.stage}) stopped after a preview checkpoint conflict`);
+    return;
+  }
   const msg = err instanceof Error ? err.message : String(err);
   // Отменённая пользователем джоба: стадия упала по AbortSignal. Это не фейл —
   // не инкрементируем attempts, не затираем 'cancelled', не валим проект/базу.
