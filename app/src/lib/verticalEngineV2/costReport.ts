@@ -81,8 +81,10 @@ export function buildVeCostReport(input: VeCostReportInput) {
       if (!marker || marker.context.stage !== 'base_collect') continue;
       const children = object(marker.context.children);
       if (!children || children.state !== 'ok' || children.truncated) { issues.add('child_snapshot_incomplete'); continue; }
-      const constructor = object(children.constructorJob);
-      if (constructor) {
+      const constructors = [children.constructorJob, ...(Array.isArray(children.constructorJobs) ? children.constructorJobs : [])];
+      for (const entry of constructors) {
+        const constructor = object(entry);
+        if (!constructor) continue;
         const jobId = String(constructor.jobId ?? 'unknown');
         const steps = Array.isArray(constructor.steps) && constructor.steps.every((step) => typeof step === 'string') ? constructor.steps as string[] : null;
         const safe = steps !== null && steps.every((step) => CONSTRUCTOR_NO_AI_SEARCH.has(step));

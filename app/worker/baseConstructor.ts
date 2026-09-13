@@ -25,6 +25,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
+import { nextPendingConstructor } from '@/lib/tools/baseConstructorQueue';
 import { markShuttingDown } from '@/lib/workerShutdown';
 import {
   createWorkerLogger,
@@ -117,15 +118,10 @@ async function ageRunningJobsForFastHandoff(): Promise<void> {
  * Атомарно подбирает один pending-job: UPDATE WHERE status=pending.
  * Если другой воркер успел раньше — UPDATE затронет 0 строк, claim вернёт null.
  */
+let preferPreview = true;
 async function claimPendingJob(): Promise<ClaimedJob | null> {
   const db = requireSupabaseAdmin(log);
-  const { data: pending } = await db
-    .from('base_constructor_jobs')
-    .select('id')
-    .eq('status', 'pending')
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
+  const pending = await nextPendingConstructor(db, preferPreview);
   if (!pending) return null;
 
   const runToken = randomUUID();
@@ -140,6 +136,7 @@ async function claimPendingJob(): Promise<ClaimedJob | null> {
     .eq('status', 'pending')
     .select('id, run_token')
     .maybeSingle();
+  if (claimed?.id) preferPreview = !preferPreview;
   return claimed?.id ? { jobId: claimed.id, runToken: claimed.run_token ?? runToken } : null;
 }
 

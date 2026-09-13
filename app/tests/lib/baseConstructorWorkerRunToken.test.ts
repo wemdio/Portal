@@ -13,6 +13,9 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
+import { nextPendingConstructor } from '@/lib/tools/baseConstructorQueue';
 import {
   runBaseConstructorJob,
   updateJobProgress,
@@ -228,6 +231,14 @@ describe('Base Constructor run-token fencing', () => {
     await progressWithToken('job-token-fence', 0, 'validate_emails', 99, STALE_TOKEN);
     expect(admin.__getRow().current_step_progress).toBe(46);
     expect(admin.__getRow().run_token).toBe(ACTIVE_TOKEN);
+    const now = Date.now();
+    const queue = createMockSupabase({ enforceQueryWindows: true, tables: { base_constructor_jobs: [
+      { id: 'bulk', status: 'pending', created_at: new Date(now - 60_000).toISOString() },
+      { id: 'preview', status: 'pending', created_at: new Date(now).toISOString(), step_config: { queue_class: 'interactive_preview' } },
+    ] } });
+    expect(await nextPendingConstructor(queue as unknown as SupabaseClient, true, now)).toMatchObject({ id: 'preview' });
+    expect(await nextPendingConstructor(queue as unknown as SupabaseClient, false, now)).toMatchObject({ id: 'bulk' });
+    expect(await nextPendingConstructor(queue as unknown as SupabaseClient, true, now + 5 * 60_000)).toMatchObject({ id: 'bulk' });
   });
 
   it('lets the active token persist a checkpoint and complete the job', async () => {
