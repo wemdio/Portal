@@ -10,6 +10,7 @@
  * ВСЕ неотклонённые гипотезы, хотя пользователь выбирал одну.
  */
 
+import { isVeAcceptedEmailStatus } from '@/lib/verticalEngineV2/emailPolicy';
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react';
 import { ArrowRight } from 'lucide-react';
 import type {
@@ -825,7 +826,7 @@ export function BaseRow({ base, job, hypothesisTitle, queued, onUpdated }: { bas
   const progress = getCollectionProgress(base.collect_info, job);
   const columns = Array.isArray(base.columns) ? base.columns.filter((column) => column !== VE_COMPANY_NAME_FIELD && column !== '_ve_relevance') : [];
   const previewRows = (Array.isArray(base.sample_rows) ? base.sample_rows : [])
-    .filter((row) => !isReadyPreview || (isCompanyNameReady(row) && row._email_status === 'ok'
+    .filter((row) => !isReadyPreview || (isCompanyNameReady(row) && isVeAcceptedEmailStatus(row._email_status)
       && row._low_relevance !== true && row._relevance_unchecked !== true))
     .slice(0, PREVIEW_ROWS);
 

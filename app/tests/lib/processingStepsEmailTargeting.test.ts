@@ -438,17 +438,21 @@ describe('stepFindEmails — step_config.find_emails (stop_at_first / max_per_si
     );
   });
 
-  it('stopAtFirstUsableEmail=false прокидывается в scrapeEmails (собираем больше адресов)', async () => {
-    (scrapeEmails as jest.Mock).mockResolvedValue({ emails: ['x@a.ru'] });
+  it('stopAtFirstUsableEmail=false refreshes populated rows and retains every discovered address', async () => {
+    const emails = Array.from({ length: 12 }, (_, i) => `e${i}@a.ru`);
+    (scrapeEmails as jest.Mock).mockResolvedValue({ emails });
     const data = [
       ['Сайт', 'Email'],
-      ['a.ru', ''],
+      ['a.ru', 'original@a.ru'],
     ];
-    await stepFindEmails(data, noopProgress, undefined, { stopAtFirstUsableEmail: false });
+    const out = await stepFindEmails(data, noopProgress, undefined, {
+      target: 'separate', stopAtFirstUsableEmail: false, maxEmailsPerSite: null, maxPages: 12, siteTimeoutMs: 60_000,
+    });
     expect(scrapeEmails).toHaveBeenCalledWith(
       'a.ru',
-      expect.objectContaining({ stopAtFirstUsableEmail: false }),
+      expect.objectContaining({ stopAtFirstUsableEmail: false, maxPages: 12 }),
     );
+    expect(out[1]).toEqual(['a.ru', 'original@a.ru', emails.join(', ')]);
   });
 
   it('maxEmailsPerSite ограничивает число адресов, пишемых в ячейку', async () => {

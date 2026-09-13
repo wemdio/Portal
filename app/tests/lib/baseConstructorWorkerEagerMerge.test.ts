@@ -68,12 +68,16 @@ jest.mock('@/lib/tools/processingSteps', () => {
     stepFindEmails: async (data: string[][]) => {
       stepInputs['find_emails'] = data.map((r) => [...r]);
       const FOUND_EMAIL_COL = 'Найденный Email';
-      const newHeader = [...data[0], FOUND_EMAIL_COL];
+      const foundIdx = data[0].indexOf(FOUND_EMAIL_COL);
+      const newHeader = foundIdx >= 0 ? data[0] : [...data[0], FOUND_EMAIL_COL];
       const newBody = data.slice(1).map((row, i) => {
         const found = i === 0
           ? 'a@x.ru, b@x.ru, c@x.ru'   // company 0: 3 scraped emails
           : 'd@y.ru';                   // company 1: 1 scraped email
-        return [...row, found];
+        if (foundIdx < 0) return [...row, found];
+        const resumed = [...row];
+        if (!resumed[foundIdx] && row[1]) resumed[foundIdx] = found;
+        return resumed;
       });
       return [newHeader, ...newBody];
     },
@@ -139,6 +143,27 @@ describe('eager merge of FOUND_EMAIL_COL before subsequent steps', () => {
     const splitInputBody = stepInputs['split_emails'].slice(1);
     expect(splitInputBody[0][2]).toBe('orig-a@x.ru, a@x.ru, b@x.ru, c@x.ru');
     expect(splitInputBody[1][2]).toBe('orig-b@y.ru, d@y.ru');
+
+    // A resumed VE2 refresh keeps the original fallback separate until search
+    // finishes; successful site rows are not mistaken for unprocessed inputs.
+    (mod.supabaseAdmin as unknown as {
+      __setCurrentJob: (j: Record<string, unknown>) => void;
+    }).__setCurrentJob({
+      id: 'job-site-refresh', user_id: 'u', file_name: 'refresh.csv', status: 'processing',
+      selected_steps: ['find_emails', 'split_emails'],
+      step_config: { find_emails_target: 'separate', find_emails: { merge_mode: 'prefer_found' } },
+      current_step: 1, current_step_key: 'find_emails', current_step_progress: 50,
+      data: [
+        ['компания', 'сайт', 'email', 'Найденный Email'],
+        ['Acme', 'acme.com', 'original@x.ru', 'saved@x.ru'],
+        ['Beta', '', 'fallback@y.ru', ''],
+      ],
+    });
+    await runBaseConstructorJob('job-site-refresh');
+    expect(stepInputs['find_emails'][1]).toEqual(['Acme', 'acme.com', 'original@x.ru', 'saved@x.ru']);
+    expect(stepInputs['split_emails'].slice(1)).toEqual([
+      ['Acme', 'acme.com', 'saved@x.ru'], ['Beta', '', 'fallback@y.ru'],
+    ]);
   });
 
   it('no-op when find_emails is not in selected steps', async () => {

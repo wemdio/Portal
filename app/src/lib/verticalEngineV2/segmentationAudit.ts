@@ -7,6 +7,7 @@
  * а неполная LLM-классификация не маскируется под default.
  */
 
+import { isVeAcceptedEmailStatus } from './emailPolicy';
 import { createHash } from 'node:crypto';
 import type { LeadCreatePayload } from '@/lib/instantly/types';
 import type { VeChainLetter, VeOperatorMapping } from './types';
@@ -193,7 +194,7 @@ export function prepareSegmentationAudience(
         return;
       }
       const emailStatus = typeof row._email_status === 'string' ? row._email_status : null;
-      if (emailStatus !== 'ok') {
+      if (!isVeAcceptedEmailStatus(emailStatus)) {
         excluded.invalidEmailStatus += 1;
         return;
       }

@@ -428,11 +428,11 @@ describe('base_collect CONSTRUCT step order', () => {
         source_detail: 'реестр',
       }),
       expected: [
+        'find_emails',
         'enrich_descriptions',
         'split_emails',
         'dedup_email',
         'validate_emails',
-        'cap_emails_per_company',
       ],
     },
     {
@@ -449,10 +449,9 @@ describe('base_collect CONSTRUCT step order', () => {
         'split_emails',
         'dedup_email',
         'validate_emails',
-        'cap_emails_per_company',
       ],
     },
-  ])('$label splits before deduplication, validation and per-company cap', async ({ row, expected }) => {
+  ])('$label refreshes website emails before splitting and validation without a company cap', async ({ row, expected }) => {
     const db = seed(collectInfo([row]));
 
     await expect(
@@ -462,7 +461,8 @@ describe('base_collect CONSTRUCT step order', () => {
     const constructorInsert = db.inserts.find((insert) => insert.table === 'base_constructor_jobs');
     expect(constructorInsert?.rows[0].selected_steps).toEqual(expected);
     expect(constructorInsert?.rows[0].step_config).toEqual({
-      cap_emails_per_company: { max: 5 },
+      find_emails_target: 'separate',
+      find_emails: { stop_at_first: false, max_per_site: null, max_pages: 12, site_timeout_ms: 60_000, merge_mode: 'prefer_found' },
     });
     const dispatchedInfo = lastBasePatch(db)?.collect_info as VeCollectInfo;
     expect(dispatchedInfo.construct?.progress).toMatchObject({ status: 'pending', total_steps: expected.length });
@@ -616,7 +616,7 @@ describe('base_collect CONSTRUCT step order', () => {
 });
 
 describe('base_collect CONSTRUCT import', () => {
-  it('keeps one address per row, preserves its own status and launches only the ok address', async () => {
+  it('keeps one address per row, preserves its own status and admits ok and catch-all addresses', async () => {
     const dispatched: NonNullable<VeCollectInfo['construct']> = {
       bc_job_id: 'bc1',
       status: 'dispatched',
@@ -697,14 +697,14 @@ describe('base_collect CONSTRUCT import', () => {
       columns: [...VE_AUTO_COLLECT_COLUMNS],
       source: 'auto',
     });
-    expect(audience.leads.map((lead) => lead.email)).toEqual(['live@alpha.test']);
-    expect(audience.excluded.invalidEmailStatus).toBe(1);
+    expect(audience.leads.map((lead) => lead.email)).toEqual(['catch@alpha.test', 'live@alpha.test']);
+    expect(audience.excluded.invalidEmailStatus).toBe(0);
 
     const storedInfo = lastBasePatch(db)?.collect_info as VeCollectInfo;
     expect(storedInfo.stats).toMatchObject({
       rows_total: 1,
       processed_rows: 2,
-      launchable_rows: 1,
+      launchable_rows: 2,
       low_relevance: 0,
     });
   });
@@ -877,7 +877,7 @@ describe('VE2 auto email validation gate', () => {
     expect(audience.excluded.invalidEmailStatus).toBe(1);
   });
 
-  it('refill admits only exact ok and fails closed without status data', () => {
+  it('refill admits ok and catch-all and fails closed without status data', () => {
     const rows = [
       unifiedRow({ company: 'OK', email: 'ok@example.test' }),
       unifiedRow({ company: 'Catch-all', email: 'catch@example.test' }),
@@ -886,9 +886,9 @@ describe('VE2 auto email validation gate', () => {
     ];
 
     expect(selectRefillLeadRows(rows, ['ok', 'catch_all', null, ''])).toMatchObject({
-      leadRows: [expect.objectContaining({ email: 'ok@example.test' })],
+      leadRows: [expect.objectContaining({ email: 'ok@example.test' }), expect.objectContaining({ email: 'catch@example.test' })],
       withEmail: 4,
-      valid: 1,
+      valid: 2,
     });
     expect(selectRefillLeadRows(rows, null)).toMatchObject({
       leadRows: [],

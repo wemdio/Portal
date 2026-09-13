@@ -456,11 +456,15 @@ export interface StepFindEmailsOptions {
    */
   stopAtFirstUsableEmail?: boolean;
   /**
-   * Максимум адресов с одного сайта, которые пишем в ячейку (default 8).
+   * Максимум адресов с одного сайта, которые пишем в ячейку (default 8; null — все).
    * Защита от «сайта-простыни» (десятки адресов в футере/на team-странице)
    * когда stopAtFirstUsableEmail=false.
    */
-  maxEmailsPerSite?: number;
+  maxEmailsPerSite?: number | null;
+  /** Maximum pages to crawl (default 5; scraper enforces its own hard ceiling). */
+  maxPages?: number;
+  /** Optional deadline for the whole site, retaining addresses found before it. */
+  siteTimeoutMs?: number;
   /**
    * Локаль джобы (job.locale конструктора баз, пробрасывает worker).
    * При 'en': колонка scrape-результата — «Found Email» (вместо
@@ -578,7 +582,7 @@ export async function stepFindEmails(
   // step_config.find_emails.stop_at_first (default true = прежнее захардкоженное
   // поведение) и .max_per_site (default 8) — см. StepFindEmailsOptions.
   const stopAtFirstUsableEmail = options?.stopAtFirstUsableEmail ?? true;
-  const maxPerSite = Math.max(1, options?.maxEmailsPerSite ?? 8);
+  const maxPerSite = options?.maxEmailsPerSite === null ? null : Math.max(1, options?.maxEmailsPerSite ?? 8);
 
   // Target column resolution:
   //   - target='separate' + есть существующая email-колонка → пишем в FOUND_EMAIL_COL (новая);
@@ -622,6 +626,8 @@ export async function stepFindEmails(
   const shouldCheckpoint = makeCheckpointGate();
   await processInPool(toProcess, EMAIL_CONCURRENCY, async (item) => {
     if (isCancelled && await isCancelled()) return;
+    const controller = options?.siteTimeoutMs ? new AbortController() : null;
+    const deadline = controller ? setTimeout(() => controller.abort(), Math.max(1, options!.siteTimeoutMs!)) : null;
     try {
       // stopAtFirstUsableEmail (default true): bail as soon as the homepage /
       // first contact page gives us a usable address. Base-constructor only
@@ -631,14 +637,16 @@ export async function stepFindEmails(
       // для связки с cap_emails_per_company, где нужно несколько почт с сайта.
       const { emails } = await scrapeEmails(item.url, {
         timeout: 15_000,
-        maxPages: 5,
+        maxPages: options?.maxPages ?? 5,
         stopAtFirstUsableEmail,
         locale,
+        ...(controller ? { signal: controller.signal } : {}),
       });
       if (emails.length > 0) {
-        body[item.i][targetIdx] = emails.slice(0, maxPerSite).join(', ');
+        body[item.i][targetIdx] = (maxPerSite === null ? emails : emails.slice(0, maxPerSite)).join(', ');
       }
-    } catch { /* skip */ }
+    } catch { /* No site result: preserve the original email fallback. */ }
+    finally { if (deadline !== null) clearTimeout(deadline); }
     done++;
     if (done % 10 === 0 || done === toProcess.length) {
       await onProgress(Math.round((done / toProcess.length) * 100));
