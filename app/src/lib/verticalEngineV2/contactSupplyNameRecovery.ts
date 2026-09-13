@@ -1,3 +1,4 @@
+import { isVeAcceptedEmailStatus } from './emailPolicy';
 import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { companyNameSource, VE_COMPANY_NAME_FIELD } from './companyNames';
@@ -59,7 +60,7 @@ export async function prepareVeSupplyNameResume(
       const meta = row && record(row[VE_COMPANY_NAME_FIELD]);
       if (!row || !meta) return true;
       const source = companyNameSource(row);
-      return row._email_status !== 'ok' || row._low_relevance === true || row._relevance_unchecked === true
+      return !isVeAcceptedEmailStatus(row._email_status) || row._low_relevance === true || row._relevance_unchecked === true
         || meta.version !== 1 || !['ready', 'failed'].includes(String(meta.status))
         || meta.source !== source.source || meta.website !== source.website;
     })) {

@@ -31,6 +31,7 @@ export interface PendingHandoffRow {
   responsible_user_id: string | null;
   auto_send?: boolean;
   error_message?: string | null;
+  edit_text?: string | null;
 }
 
 export type HandoffSendResult =
@@ -46,8 +47,25 @@ function buildReplySubject(subject?: string | null): string {
 export async function sendHandoffNow(
   db: InstantlyDb,
   pending: PendingHandoffRow,
-  opts: { sentByTelegramId?: number | null } = {},
+  opts: { sentByTelegramId?: number | null; editToken?: string } = {},
 ): Promise<HandoffSendResult> {
+  // One atomic manual-only claim: stale buttons/concurrent Telegram deliveries
+  // cannot send twice or race an edit. Never auto-release an uncertain send.
+  if (opts.sentByTelegramId != null) {
+    let claim = db.from('instantly_pending_handoffs').update({
+      manual_send_claimed_at: new Date().toISOString(),
+      ...(opts.editToken ? { draft_text: pending.edit_text } : {}),
+    }).eq('id', pending.id).eq('status', 'pending').eq('auto_send', false)
+      .is('manual_send_claimed_at', null);
+    if (opts.editToken) {
+      if (!pending.edit_text?.trim()) return { ok: false, error: 'Пустой черновик' };
+      claim = claim.eq('edit_token', opts.editToken).eq('edit_user_id', opts.sentByTelegramId)
+        .eq('edit_text', pending.edit_text).gt('edit_expires_at', new Date().toISOString());
+    } else claim = claim.is('edit_token', null);
+    const { data, error } = await claim.select('*').maybeSingle();
+    if (error || !data) return { ok: false, error: 'Передача уже начата или черновик изменён. Используйте актуальные кнопки.' };
+    pending = data as PendingHandoffRow;
+  }
   const { data: qual, error: qualificationError } = await db
     .from('instantly_lead_qualifications')
     .select('reply_subject, lead_email, lead_name, company_name, campaign_name, reply_body, last_outbound_preview, reply_timestamp, ai_reason, queue_archived_at')

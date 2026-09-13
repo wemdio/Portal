@@ -84,7 +84,11 @@ function repairJobPayload(base: Record<string, unknown>): Record<string, unknown
   if (info.collection_mode === 'preview' || info.collection_mode === 'supply') {
     const target = createCollectionTarget(info.collection_mode, info.ready_target as number | undefined);
     payload.collection_mode = target.mode;
-    payload.ready_target = target.ready_target;
+    const savedProgress = info.target_progress && typeof info.target_progress === 'object'
+      ? info.target_progress as Record<string, unknown> : null;
+    const savedTarget = savedProgress?.ready_target;
+    payload.ready_target = typeof savedTarget === 'number' && Number.isSafeInteger(savedTarget)
+      && savedTarget > 0 && savedTarget <= target.max_candidates ? savedTarget : target.ready_target;
     if (typeof info.supply_batch_id === 'string') payload.supply_batch_id = info.supply_batch_id;
   }
 

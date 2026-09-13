@@ -1,3 +1,4 @@
+import { isVeAcceptedEmailStatus } from '@/lib/verticalEngineV2/emailPolicy';
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
@@ -55,10 +56,10 @@ function reviewCells(row: Record<string, unknown>): Record<string, string> {
     : status === 'error' ? 'Техническая ошибка проверки'
       : status === 'irrelevant' || row._low_relevance === true ? 'Не подходит этой гипотезе'
         : row._relevance_unchecked === true ? 'Релевантность не подтверждена'
-          : row._email_status !== 'ok' ? 'Не готов по проверке email'
+          : !isVeAcceptedEmailStatus(row._email_status) ? 'Не готов по проверке email'
             : 'Сохранён отдельно от готовой базы';
   const reason = typeof decision?.reason === 'string' ? decision.reason
-    : row._email_status !== 'ok' ? 'Email не прошёл все проверки; контакт не готов к запуску'
+    : !isVeAcceptedEmailStatus(row._email_status) ? 'Email не прошёл все проверки; контакт не готов к запуску'
       : 'В сохранённой записи нет подробной причины';
   const evidence = Array.isArray(decision?.evidence) ? decision.evidence
     .filter(isRecord)
@@ -137,9 +138,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         });
       }
       if (mode === 'preview') {
-        const info = base.collect_info as { collection_mode?: string; target_progress?: { status?: string } } | null;
-        if (info?.collection_mode !== 'preview' || !['analyzing', 'analyzed'].includes(base.status)
-          || !['target_reached', 'exhausted', 'limited'].includes(info?.target_progress?.status ?? '')) {
+        const info = base.collect_info as { collection_mode?: string } | null;
+        // Every completed cohort persists validated contacts independently of
+        // later collection. A slow or failed next cohort must not hide them.
+        if (info?.collection_mode !== 'preview' || !['collecting', 'analyzing', 'analyzed', 'failed'].includes(base.status)) {
           return jsonError('Превью ещё не прошло проверки', 409);
         }
         exportRows = prepareSegmentationAudience({ rows, columns, source: 'auto' }).rows.slice(0, VE_PREVIEW_READY_TARGET);

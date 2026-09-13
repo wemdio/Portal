@@ -492,6 +492,7 @@ async function fetchPage(
   options?: { timeout?: number; signal?: AbortSignal; acceptLanguage?: string },
 ): Promise<string | null> {
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
+  if (options?.signal?.aborted) return null;
   // Hard outer cap: даже если внутренний fetch() зависнет (видели на проде
   // 2026-06-19, undici assert(!this.paused) — body-stream после ассерта
   // может никогда не resolve'иться), эта race гарантирует возврат в
@@ -499,10 +500,22 @@ async function fetchPage(
   // отвалится сам по своему таймауту; зато processInPool слот свободен.
   // worker'ы Node-process'а параллельно ловят сам ассерт через
   // installUndiciAssertGuard() в app/worker/baseConstructor.ts.
-  return await Promise.race([
-    fetchPageInner(url, { timeout, signal: options?.signal, acceptLanguage: options?.acceptLanguage }),
-    new Promise<null>((resolve) => setTimeout(() => resolve(null), timeout + 5_000)),
-  ]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const bounded = new Promise<null>((resolve) => {
+    onAbort = () => resolve(null);
+    timer = setTimeout(onAbort, timeout + 5_000);
+    options?.signal?.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([
+      fetchPageInner(url, { timeout, signal: options?.signal, acceptLanguage: options?.acceptLanguage }),
+      bounded,
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (onAbort) options?.signal?.removeEventListener('abort', onAbort);
+  }
 }
 
 async function fetchPageInner(
@@ -514,7 +527,8 @@ async function fetchPageInner(
   const timer = setTimeout(() => controller.abort(), timeout);
 
   const externalSignal = options.signal;
-  const onExternalAbort = () => controller.abort();
+  const onExternalAbort = () => { clearTimeout(timer); controller.abort(); };
+  if (externalSignal?.aborted) onExternalAbort();
   externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
 
   try {
@@ -550,6 +564,7 @@ async function fetchPageWithRetry(
   options?: { timeout?: number; signal?: AbortSignal; acceptLanguage?: string },
 ): Promise<string | null> {
   for (let attempt = 0; attempt <= FETCH_RETRIES; attempt += 1) {
+    if (options?.signal?.aborted) return null;
     const html = await fetchPage(url, options);
     if (html) return html;
     if (options?.signal?.aborted) return null;

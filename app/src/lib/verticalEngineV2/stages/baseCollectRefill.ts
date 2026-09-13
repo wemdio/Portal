@@ -11,10 +11,8 @@
  *     последний по дате запуска шаблон вертикали с launch_info; маппинг
  *     колонок → переменные — operator_mapping того же шаблона (как при
  *     первичном запуске, mapBaseRowsToLeads из launchHandoff);
- *   - лиды: только строки с email И вердиктом валидации 'ok' (колонка
- *     «Email Статус» сетки конструктора; catch_all/invalid/disposable
- *     исключаем — TODO: catch_all может дать часть рабочих адресов, пока
- *     сознательно не шлём). Если валидации не было или она не завершилась,
+ *   - лиды: только строки с email И вердиктом валидации ok/catch_all
+ *     (колонка «Email Статус» сетки конструктора). Если валидации не было или она не завершилась,
  *     статус неизвестен и строка fail-closed не идёт в кампанию;
  *   - кап daily_leads_cap конфига — на ПРОЕКТ в сутки (UTC): уже долитое
  *     сегодня другими refill'ами вычитается;
@@ -30,6 +28,7 @@
  *     ЭТОЙ базы невозможен — стадия работает только из статуса 'collecting'.
  */
 
+import { isVeAcceptedEmailStatus } from '../emailPolicy';
 import {
   AppendLeadsPartialError,
   appendLeadsToClientCampaign,
@@ -323,8 +322,8 @@ export function pickRefillTemplate(
 }
 
 /**
- * Строки-кандидаты в лиды: непустой email И точный вердикт валидации 'ok'.
- * Отсутствующий/пустой статус, catch_all/invalid/disposable/unknown/error
+ * Строки-кандидаты в лиды: непустой email И точный вердикт 'ok' или 'catch_all'.
+ * Отсутствующий/пустой статус, invalid/disposable/unknown/error
  * отсекаем. Возвращает счётчики воронки для журнала.
  */
 export function selectRefillLeadRows(
@@ -345,8 +344,7 @@ export function selectRefillLeadRows(
     if (quality._low_relevance === true || quality._relevance_unchecked === true || !isVeRelevanceReady(row)) continue;
     withEmail += 1;
     const status = emailStatuses?.[i] ?? null;
-    // TODO(catch_all): catch_all-домены частично рабочие — пока не шлём (риск баунсов).
-    if (status !== 'ok') continue;
+    if (!isVeAcceptedEmailStatus(status)) continue;
     if (!isCompanyNameReady(row)) continue;
     leadRows.push(row);
   }

@@ -38,6 +38,7 @@ describe('mergeFoundEmailColumn', () => {
     const out = mergeFoundEmailColumn(data);
     expect(out[0]).toEqual(['Компания', 'Email']); // FOUND_EMAIL_COL удалена
     expect(out[1]).toEqual(['Acme', 'orig@a.ru, found@a.ru']);
+    expect(mergeFoundEmailColumn(data, 'ru', 'prefer_found')[1]).toEqual(['Acme', 'found@a.ru']);
   });
 
   it('дедуп case-insensitive: одинаковый email в обеих → одна копия с регистром первого', () => {
@@ -65,6 +66,7 @@ describe('mergeFoundEmailColumn', () => {
     ];
     const out = mergeFoundEmailColumn(data);
     expect(out[1][0]).toBe('only-orig@x.ru');
+    expect(mergeFoundEmailColumn(data, 'ru', 'prefer_found')[1][0]).toBe('only-orig@x.ru');
   });
 
   it('обе пустые — итог пустой', () => {
@@ -83,6 +85,7 @@ describe('mergeFoundEmailColumn', () => {
     ];
     const out = mergeFoundEmailColumn(data);
     expect(out[1][0]).toBe('a@x.ru, b@x.ru, c@x.ru');
+    expect(mergeFoundEmailColumn(data, 'ru', 'prefer_found')[1][0]).toBe('b@x.ru, c@x.ru');
   });
 
   it('FOUND_EMAIL_COL есть, но исходной email-колонки НЕТ → переименовываем FOUND в Email', () => {
