@@ -26,6 +26,8 @@ import {
 import {
   stripBaseConstructorCheckpointMetadata,
   stripEmailValidationCheckpointMetadata,
+  stripFindEmailsCheckpointMetadata,
+  WEBSITE_EMAIL_PREFERENCE_COL,
 } from './baseConstructorCheckpoint';
 import { extractEmail, findColumnIndex } from './dfybUtils';
 import { uploadExportArtifact } from './csvExportArtifact';
@@ -62,7 +64,7 @@ interface StepConfig {
     max_pages?: number;
     site_timeout_ms?: number;
     /** Opt-in website refresh; other callers keep the existing additive merge. */
-    merge_mode?: 'all' | 'prefer_found';
+    merge_mode?: 'all' | 'prefer_found' | 'prefer_found_validated';
   };
   /**
    * Настройки шага cap_emails_per_company (вложенный объект в step_config):
@@ -519,13 +521,15 @@ const STEP_RUNNERS: Record<StepKey, StepRunner> = {
  *
  * prefer_found выбирает свежие адреса сайта, исходные используются только
  * когда поиск не вернул адресов. Режим включается явно в конфиге VE2.
+ * prefer_found_validated сохраняет запасные адреса и происхождение до
+ * валидации: выбор источника делает selectValidatedWebsiteEmails.
  *
  * @internal — exported только для тестов; не использовать снаружи модуля.
  */
 export function mergeFoundEmailColumn(
   data: string[][],
   locale: ConstructorLocale = 'ru',
-  mode: 'all' | 'prefer_found' = 'all',
+  mode: 'all' | 'prefer_found' | 'prefer_found_validated' = 'all',
 ): string[][] {
   if (data.length === 0) return data;
   const header = data[0];
@@ -555,10 +559,11 @@ export function mergeFoundEmailColumn(
   // Email-регекс берём такой же как stepSplitEmails — общий паттерн.
   const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 
-  const mergedBody = data.slice(1).map((row) => {
+  const keepFallbackUntilValidation = mode === 'prefer_found_validated';
+  const mergedBody = data.slice(1).map((row, index) => {
     const origCell = row[originalIdx] || '';
     const foundCell = row[foundIdx] || '';
-    if (!foundCell) {
+    if (!foundCell && !keepFallbackUntilValidation) {
       // В found-колонке пусто — нечего сливать, оставляем оригинал.
       const out = [...row];
       out.splice(foundIdx, 1);
@@ -576,17 +581,25 @@ export function mergeFoundEmailColumn(
         if (!seen.has(lc)) seen.set(lc, m);
       }
     };
+    if (keepFallbackUntilValidation) collect(foundCell);
     if (mode !== 'prefer_found' || !foundCell.match(EMAIL_RE)?.length) collect(origCell);
     collect(foundCell);
     const merged = [...seen.values()].join(', ');
     const out = [...row];
     out[originalIdx] = merged;
     out.splice(foundIdx, 1);
+    if (keepFallbackUntilValidation) {
+      while (out.length < header.length - 1) out.push('');
+      out.push(JSON.stringify({
+        group: String(index), found: (foundCell.match(EMAIL_RE) ?? []).map((email) => email.toLowerCase()),
+      }));
+    }
     return out;
   });
 
   const newHeader = [...header];
   newHeader.splice(foundIdx, 1);
+  if (keepFallbackUntilValidation) newHeader.push(WEBSITE_EMAIL_PREFERENCE_COL);
   return [newHeader, ...mergedBody];
 }
 
@@ -790,6 +803,7 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
           data = cleanData;
         }
       }
+      if (stepKey !== 'find_emails') data = stripFindEmailsCheckpointMetadata(data);
 
       // On a mid-step resume the runner works only on the unprocessed tail.
       // Its local 0..100 callbacks therefore describe the tail, not the whole
@@ -944,7 +958,10 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
       );
       // A resumed website refresh must retain the found column: it identifies
       // completed sites and keeps their original fallback separate until split.
-      if (hasFoundCol && !(stepKey === 'find_emails' && stepConfig.find_emails?.merge_mode === 'prefer_found')) {
+      if (hasFoundCol && !(stepKey === 'find_emails' && (
+        stepConfig.find_emails?.merge_mode === 'prefer_found'
+        || stepConfig.find_emails?.merge_mode === 'prefer_found_validated'
+      ))) {
         const beforeMergeCols = preHeader.length;
         data = mergeFoundEmailColumn(data, locale, stepConfig.find_emails?.merge_mode);
         const afterMergeCols = data[0]?.length ?? 0;

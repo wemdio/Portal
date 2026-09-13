@@ -93,6 +93,7 @@ jest.mock('@/lib/tools/processingSteps', () => {
 });
 
 import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
+import { FIND_EMAILS_CHECKPOINT_ATTEMPTED_COL, WEBSITE_EMAIL_PREFERENCE_COL } from '@/lib/tools/baseConstructorCheckpoint';
 
 beforeEach(async () => {
   const mod = await import('@/lib/supabaseAdmin');
@@ -151,18 +152,20 @@ describe('eager merge of FOUND_EMAIL_COL before subsequent steps', () => {
     }).__setCurrentJob({
       id: 'job-site-refresh', user_id: 'u', file_name: 'refresh.csv', status: 'processing',
       selected_steps: ['find_emails', 'split_emails'],
-      step_config: { find_emails_target: 'separate', find_emails: { merge_mode: 'prefer_found' } },
+      step_config: { find_emails_target: 'separate', find_emails: { merge_mode: 'prefer_found_validated' } },
       current_step: 1, current_step_key: 'find_emails', current_step_progress: 50,
       data: [
-        ['компания', 'сайт', 'email', 'Найденный Email'],
-        ['Acme', 'acme.com', 'original@x.ru', 'saved@x.ru'],
-        ['Beta', '', 'fallback@y.ru', ''],
+        ['компания', 'сайт', 'email', 'Найденный Email', FIND_EMAILS_CHECKPOINT_ATTEMPTED_COL],
+        ['Acme', 'acme.com', 'original@x.ru', 'saved@x.ru', '1'],
+        ['Beta', '', 'fallback@y.ru', '', '1'],
       ],
     });
     await runBaseConstructorJob('job-site-refresh');
-    expect(stepInputs['find_emails'][1]).toEqual(['Acme', 'acme.com', 'original@x.ru', 'saved@x.ru']);
+    expect(stepInputs['find_emails'][1]).toEqual(['Acme', 'acme.com', 'original@x.ru', 'saved@x.ru', '1']);
+    expect(stepInputs['split_emails'][0]).toEqual(['компания', 'сайт', 'email', WEBSITE_EMAIL_PREFERENCE_COL]);
     expect(stepInputs['split_emails'].slice(1)).toEqual([
-      ['Acme', 'acme.com', 'saved@x.ru'], ['Beta', '', 'fallback@y.ru'],
+      ['Acme', 'acme.com', 'saved@x.ru, original@x.ru', JSON.stringify({ group: '0', found: ['saved@x.ru'] })],
+      ['Beta', '', 'fallback@y.ru', JSON.stringify({ group: '1', found: [] })],
     ]);
   });
 

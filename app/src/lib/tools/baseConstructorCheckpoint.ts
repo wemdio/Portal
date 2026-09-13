@@ -10,6 +10,12 @@
  */
 export const ENRICH_CHECKPOINT_ATTEMPTED_COL = '__portal_enrich_attempted_v1';
 
+/** Completed website lookups, including empty results, survive a restart. */
+export const FIND_EMAILS_CHECKPOINT_ATTEMPTED_COL = '__portal_find_emails_attempted_v1';
+
+/** Source preference survives splitting and validation checkpoints. */
+export const WEBSITE_EMAIL_PREFERENCE_COL = '__portal_website_email_preference_v1';
+
 /**
  * Private per-row state for the long-running `validate_emails` step.
  *
@@ -119,6 +125,10 @@ export function stripEnrichCheckpointMetadata(data: string[][]): string[][] {
   return stripCheckpointColumns(data, new Set([ENRICH_CHECKPOINT_ATTEMPTED_COL]));
 }
 
+export function stripFindEmailsCheckpointMetadata(data: string[][]): string[][] {
+  return stripCheckpointColumns(data, new Set([FIND_EMAILS_CHECKPOINT_ATTEMPTED_COL]));
+}
+
 /** Remove durable email-validation state once that step no longer needs it. */
 export function stripEmailValidationCheckpointMetadata(data: string[][]): string[][] {
   return stripCheckpointColumns(data, new Set([EMAIL_VALIDATION_CHECKPOINT_STATE_COL]));
@@ -132,6 +142,8 @@ export function stripEmailValidationCheckpointMetadata(data: string[][]): string
 export function stripBaseConstructorCheckpointMetadata(data: string[][]): string[][] {
   return stripCheckpointColumns(data, new Set([
     ENRICH_CHECKPOINT_ATTEMPTED_COL,
+    FIND_EMAILS_CHECKPOINT_ATTEMPTED_COL,
+    WEBSITE_EMAIL_PREFERENCE_COL,
     EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
   ]));
 }

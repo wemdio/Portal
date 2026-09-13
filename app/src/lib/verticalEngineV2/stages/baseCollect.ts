@@ -2176,7 +2176,7 @@ async function dispatchConstructJob(input: {
     step_config: {
       find_emails_target: 'separate',
       find_emails: {
-        stop_at_first: false, max_per_site: null, max_pages: 12, site_timeout_ms: 60_000, merge_mode: 'prefer_found',
+        stop_at_first: false, max_per_site: null, max_pages: 12, site_timeout_ms: 60_000, merge_mode: 'prefer_found_validated',
       },
     },
     data: buildConstructGrid(rows, market),
