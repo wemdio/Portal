@@ -239,6 +239,33 @@ describe('GET списка', () => {
     ]));
   });
 
+  it('отдаёт журнал продлений вместе со списком: оплаченные циклы не должны пропадать из месяца', async () => {
+    mockDb = createMockSupabase({
+      tables: {
+        profiles: [{ id: ADMIN_ID, role: 'admin' }],
+        tech_subscriptions: [subRow()],
+        tech_subscription_cost_events: [{
+          id: 'event-1',
+          subscription_id: 'sub-1',
+          billing_date: '2026-08-20',
+          service_name: 'Bright Data',
+          service_type: 'proxy',
+          billing_cycle: 'monthly',
+          amount: 250,
+          currency: 'USD',
+          paid_at: '2026-08-20T09:00:00.000Z',
+        }],
+      },
+    });
+    const { GET } = await import('@/app/api/tech-calendar/subscriptions/route');
+    const res = await GET(req());
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.renewed).toEqual([
+      expect.objectContaining({ id: 'event-1', subscription_id: 'sub-1', paid_at: '2026-08-20T09:00:00.000Z' }),
+    ]);
+  });
+
   it('скрытые строки отдаёт только по явному запросу', async () => {
     mockDb = createMockSupabase({
       tables: {

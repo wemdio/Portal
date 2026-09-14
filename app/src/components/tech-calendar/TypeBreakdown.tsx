@@ -2,18 +2,25 @@
 
 import { formatTotals } from '@/lib/techCalendar/money';
 import { totalsByType } from '@/lib/techCalendar/stats';
-import { SERVICE_TYPES, SERVICE_TYPE_LABELS, type ServiceType, type TechSubscription } from '@/lib/techCalendar/types';
+import {
+  SERVICE_TYPES,
+  SERVICE_TYPE_LABELS,
+  type ServiceType,
+  type TechRenewalEvent,
+  type TechSubscription,
+} from '@/lib/techCalendar/types';
 
 interface Props {
   subscriptions: TechSubscription[];
+  renewed: TechRenewalEvent[];
   year: number;
   month: number;
   selected: ServiceType | null;
   onSelect: (type: ServiceType | null) => void;
 }
 
-export default function TypeBreakdown({ subscriptions, year, month, selected, onSelect }: Props) {
-  const totals = totalsByType(subscriptions, year, month);
+export default function TypeBreakdown({ subscriptions, renewed, year, month, selected, onSelect }: Props) {
+  const totals = totalsByType(subscriptions, renewed, year, month);
 
   return (
     <div className="flex flex-wrap gap-2">
