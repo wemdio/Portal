@@ -5,6 +5,7 @@
  */
 
 import { signHandoffEdit, verifyHandoffCallback } from './handoffCallback';
+import { sendOrderedHandoff } from './leadTelegramOrder';
 const TG_TIMEOUT_MS = 15_000;
 
 export function handoffBotToken(): string {
@@ -53,6 +54,8 @@ export async function postHandoffMessage(opts: {
   text: string;
   callbackData?: string;
   threadId?: number | null;
+  qualificationId?: string;
+  replyTo?: number | null;
 }): Promise<number | null> {
   const body: Record<string, unknown> = {
     chat_id: opts.chatId,
@@ -75,8 +78,14 @@ export async function postHandoffMessage(opts: {
     ] };
   }
   if (opts.threadId) body.message_thread_id = opts.threadId;
-  const result = await tg<{ message_id?: number }>(opts.token, 'sendMessage', body);
-  return result?.message_id ?? null;
+  const send = async (parent?: number): Promise<number | null> => {
+    if (parent) body.reply_parameters = { message_id: parent, allow_sending_without_reply: false };
+    const result = await tg<{ message_id?: number }>(opts.token, 'sendMessage', body);
+    return result?.message_id ?? null;
+  };
+  return opts.qualificationId
+    ? sendOrderedHandoff(opts.chatId, opts.qualificationId, send, opts.replyTo)
+    : send();
 }
 
 /** Editing messages use plain text, so arbitrary specialist text cannot inject HTML. */
