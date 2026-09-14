@@ -25,7 +25,8 @@ import { FinalLettersEditor } from './FinalLettersEditor';
 import { OutreachLaunchPanel } from './OutreachLaunchPanel';
 import { CampaignProgress } from './CampaignProgress';
 import { ManualBaseLibrary } from './ManualBaseLibrary';
-import { PreparationProgress, getPreparationPresentation } from './PreparationProgress';
+import { PreparationProgress } from './PreparationProgress';
+import { selectHypothesisLetters } from './letterSelection';
 
 const LABELS = ['Гипотезы', 'Письма', 'Базы и объём', 'Запуск', 'Результаты'];
 const RUN_LABELS = {
@@ -240,7 +241,10 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   );
   const activeId = selectedIds.includes(activeHypothesis) ? activeHypothesis : (selectedIds[0] ?? '');
   const preparation = snapshot?.preparations.find((p) => p.hypothesis_id === activeId);
-  const template = (detail?.templates ?? []).find((t) => t.id === preparation?.template_id) ?? null;
+  const preparationBase = detail?.bases.find((base) => base.id === preparation?.base_id);
+  const { template, previous: previousLetters } = selectHypothesisLetters(
+    activeId, preparation, detail?.bases ?? [], detail?.templates ?? [],
+  );
   const guardLeave = () =>
     (!dirtyRef.current && !libraryDirtyRef.current) ||
     window.confirm('Есть несохранённые правки писем. Перейти без сохранения?');
@@ -590,21 +594,27 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
             <section className="space-y-5">
               <h2 className="ve2-h2">Итоговые письма</h2>
               {picker}
+              {previousLetters ? <StatusBox tone="info">
+                Это ранее созданные письма этой гипотезы. Они доступны для просмотра.
+                Текущая подготовка показана на шаге «Базы и объём».
+              </StatusBox> : null}
               {template ? (
                 <FinalLettersEditor
                   key={template.id}
                   templateId={template.id}
+                  readOnly={previousLetters}
                   onDirtyChange={dirtyChange}
                   onSaved={refresh}
                 />
               ) : (
                 <>
                   <PreparationProgress
+                    context="letters"
                     preparation={preparation}
-                    base={detail.bases.find((b) => b.id === preparation?.base_id)}
+                    base={preparationBase}
                     jobs={detail.jobs}
                   />
-                  {!preparation || preparation.status === 'error' ? (
+                  {(!preparation || preparation.status === 'error') && preparationBase?.status !== 'failed' ? (
                     <button
                       type="button"
                       disabled={busy || locked}
@@ -634,6 +644,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                 return (
                   <article key={h.id} className="border-t border-[var(--ve2-line)] pt-5 space-y-4">
                     <h3 className="ve2-h3">{h.title}</h3>
+                    {p?.status !== 'ready' ? <PreparationProgress preparation={p} base={base} jobs={detail.jobs} /> : null}
                     {base ? (
                       <>
                         <AudienceSummary baseId={base.id} presetId={presetId} />
@@ -682,12 +693,13 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                           <p className={HE.muted}>Одобрение станет доступно после подготовки итоговых писем.</p>
                         ) : null}
                       </>
-                    ) : (
-                      <p className={HE.muted}>
-                        {getPreparationPresentation({ preparation: p, base, jobs: detail.jobs }).title}
-                      </p>
-                    )}
-                    {p?.last_error ? <StatusBox tone="error">{p.last_error}</StatusBox> : null}
+                    ) : null}
+                    {p?.status === 'error' && base?.status === 'failed' ? (
+                      <button type="button" disabled={busy || locked} className={HE.btnPrimary}
+                        onClick={() => void change({ action: 'prepare' })}>
+                        Продолжить подготовку базы
+                      </button>
+                    ) : null}
                   </article>
                 );
               })}

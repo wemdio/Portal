@@ -31,6 +31,7 @@ export interface PendingHandoffRow {
   responsible_user_id: string | null;
   auto_send?: boolean;
   error_message?: string | null;
+  edit_text?: string | null;
 }
 
 export type HandoffSendResult =
@@ -46,13 +47,39 @@ function buildReplySubject(subject?: string | null): string {
 export async function sendHandoffNow(
   db: InstantlyDb,
   pending: PendingHandoffRow,
-  opts: { sentByTelegramId?: number | null } = {},
+  opts: { sentByTelegramId?: number | null; editToken?: string } = {},
 ): Promise<HandoffSendResult> {
-  const { data: qual } = await db
+  // One atomic manual-only claim: stale buttons/concurrent Telegram deliveries
+  // cannot send twice or race an edit. Never auto-release an uncertain send.
+  if (opts.sentByTelegramId != null) {
+    let claim = db.from('instantly_pending_handoffs').update({
+      manual_send_claimed_at: new Date().toISOString(),
+      ...(opts.editToken ? { draft_text: pending.edit_text } : {}),
+    }).eq('id', pending.id).eq('status', 'pending').eq('auto_send', false)
+      .is('manual_send_claimed_at', null);
+    if (opts.editToken) {
+      if (!pending.edit_text?.trim()) return { ok: false, error: 'Пустой черновик' };
+      claim = claim.eq('edit_token', opts.editToken).eq('edit_user_id', opts.sentByTelegramId)
+        .eq('edit_text', pending.edit_text).gt('edit_expires_at', new Date().toISOString());
+    } else claim = claim.is('edit_token', null);
+    const { data, error } = await claim.select('*').maybeSingle();
+    if (error || !data) return { ok: false, error: 'Передача уже начата или черновик изменён. Используйте актуальные кнопки.' };
+    pending = data as PendingHandoffRow;
+  }
+  const { data: qual, error: qualificationError } = await db
     .from('instantly_lead_qualifications')
-    .select('reply_subject, lead_email, lead_name, company_name, campaign_name, reply_body, last_outbound_preview, reply_timestamp, ai_reason')
+    .select('reply_subject, lead_email, lead_name, company_name, campaign_name, reply_body, last_outbound_preview, reply_timestamp, ai_reason, queue_archived_at')
     .eq('id', pending.qualification_id)
     .maybeSingle();
+  // Both an old Telegram button and a previously queued automatic handoff
+  // reach this shared sender. Never resume an archived reply, even if its
+  // original business status/draft was deliberately retained for audit.
+  if (qualificationError || !qual) {
+    return { ok: false, error: 'Не удалось проверить состояние квалификации; передача не выполнена' };
+  }
+  if (qual.queue_archived_at != null) {
+    return { ok: false, error: 'Ответ снят с обработки и сохранён в архиве; передача недоступна' };
+  }
 
   // «Ответить всем»: к адресу клиента (handoff CC) добавляем участников, которых
   // лид завёл в тред (То+CC оригинала, кроме нашего ящика и самого лида).
@@ -102,6 +129,20 @@ export async function sendHandoffNow(
   // видимость адресов та же, что у cc). Плата: без сущности в Unibox.
   let via: 'reply' | 'test' = 'reply';
   try {
+    // The source fetch above can take time. Re-check the archive boundary as
+    // close to the external side effect as possible; a DB failure is not a
+    // reason to send using the earlier cached row.
+    const { data: current, error: currentError } = await db
+      .from('instantly_lead_qualifications')
+      .select('id, queue_archived_at')
+      .eq('id', pending.qualification_id)
+      .maybeSingle();
+    if (currentError || !current) {
+      return { ok: false, error: 'Не удалось повторно проверить состояние квалификации; передача не выполнена' };
+    }
+    if (current.queue_archived_at != null) {
+      return { ok: false, error: 'Ответ снят с обработки и сохранён в архиве; передача недоступна' };
+    }
     const replySubject = buildReplySubject((qual?.reply_subject as string | null) ?? null);
     const replyHtml = textToReplyHtml(bodyText);
     try {

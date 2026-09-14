@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef, useCallback } from 'react';
+import { InDevelopmentGate } from '@/components/InDevelopmentGate';
 import { authFetch } from '@/lib/authFetch';
 import { Phone, Bot, History, Users, BarChart3 } from 'lucide-react';
 import { TestCallTab } from '@/components/ai-caller/TestCallTab';
@@ -19,6 +20,14 @@ const TABS: { id: AiCallerTab; label: string; icon: typeof Phone }[] = [
 ];
 
 export default function AiCallerV2Page() {
+  return (
+    <InDevelopmentGate toolId="ai-caller-v2">
+      <AiCallerV2PageInner />
+    </InDevelopmentGate>
+  );
+}
+
+function AiCallerV2PageInner() {
   const [activeTab, setActiveTab] = useState<AiCallerTab>('test-call');
   const [assistants, setAssistants] = useState<VapiAssistant[]>([]);
   const [phoneNumbers, setPhoneNumbers] = useState<VapiPhoneNumber[]>([]);

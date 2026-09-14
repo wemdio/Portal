@@ -7,21 +7,24 @@
  */
 
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
+import { reusableMainPageDescription } from '@/lib/enrich/websiteParser';
 
 describe('emailScraper direct fetching', () => {
   const originalFetch = global.fetch;
   const originalProxyUrls = process.env.PROXY_URLS;
 
   afterEach(() => {
+    jest.useRealTimers();
     global.fetch = originalFetch;
     if (originalProxyUrls === undefined) delete process.env.PROXY_URLS;
     else process.env.PROXY_URLS = originalProxyUrls;
   });
 
   it('does not attach a proxy dispatcher even when PROXY_URLS is configured', async () => {
+    jest.useFakeTimers();
     process.env.PROXY_URLS = 'http://user:pass@slow-proxy.invalid:8000';
     const fetchMock = jest.fn(async (_url: unknown, _init?: RequestInit) => {
-      return new Response('<html><body>sales@acme.ru</body></html>', {
+      return new Response(`<html><body><p>${'We manufacture medical equipment for private clinics. '.repeat(8)}</p>sales@acme.ru</body></html>`, {
         status: 200,
         headers: { 'content-type': 'text/html; charset=utf-8' },
       });
@@ -32,10 +35,37 @@ describe('emailScraper direct fetching', () => {
       timeout: 1_000,
       maxPages: 1,
       stopAtFirstUsableEmail: true,
+      includeDescription: true,
     });
 
     expect(result.emails).toEqual(['sales@acme.ru']);
+    expect(result.description).toContain('manufacture medical equipment');
+    expect(reusableMainPageDescription('<html><body>Contact us</body></html>')).toBe('');
+    expect(reusableMainPageDescription('<html><script>' + 'business '.repeat(100) + '</script><body>Hi</body></html>')).toBe('');
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][1]).not.toHaveProperty('dispatcher');
+    expect(jest.getTimerCount()).toBe(0);
+
+    // A body/fetch that ignores abort must not hold the crawler hostage.
+    // Keep addresses from the homepage when a later contact page stalls.
+    let contactStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => { contactStarted = resolve; });
+    fetchMock.mockClear().mockImplementationOnce(async () => new Response(
+      '<html><a href="/contact">Contact</a>sales@acme.ru</html>',
+    )).mockImplementation(async () => {
+      contactStarted();
+      return new Promise<Response>(() => {});
+    });
+    const controller = new AbortController();
+    const pending = scrapeEmails('https://acme.ru', {
+      timeout: 1_000, maxPages: 12, signal: controller.signal,
+    });
+    await started;
+    controller.abort();
+    expect((await pending).emails).toEqual(['sales@acme.ru']);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(jest.getTimerCount()).toBe(0);
+    expect((await scrapeEmails('https://acme.ru', { signal: controller.signal })).emails).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

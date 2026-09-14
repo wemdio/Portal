@@ -7,7 +7,7 @@ import { isUnownedGeneratedQualificationRetry } from './qualificationRecovery';
 
 const SUPERVISOR_ROLES = new Set(['admin', 'director', 'lead', 'manager']);
 export const QUALIFICATION_ACTION_GUARD_COLUMNS =
-  'status, ai_reason, ai_confidence, qualified_project_id, qualified_project_owner_proven, machine_reply_kind';
+  'status, ai_reason, ai_confidence, qualified_project_id, qualified_project_owner_proven, machine_reply_kind, queue_archived_at';
 
 export interface CampaignAccess {
   campaignIds: string[];
@@ -201,6 +201,9 @@ export async function authorizeQualificationRowsForUser(
   const legacyProjectIdsByCampaign = new Map<string, string>();
 
   for (const qualification of qualifications) {
+    if (qualification.queue_archived_at != null) {
+      return { ok: false, status: 409, error: 'Ответ снят с обработки и сохранён в архиве; действия недоступны' };
+    }
     // A technical disposition deliberately has no owner. Its provider
     // campaign is provenance, never permission to use live campaign access.
     if (qualification.machine_reply_kind != null) {

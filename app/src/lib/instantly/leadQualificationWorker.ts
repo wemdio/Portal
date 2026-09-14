@@ -40,6 +40,7 @@ import {
 } from './handoffSender';
 import type { Email, Lead } from './types';
 import { resolveLeadContactMetadata } from './leadContactMetadata';
+import { loadCachedLeadContacts } from './cachedLeadContacts';
 import { resolveEffectiveReplyOwner } from './replyOwnershipResolver';
 import { resolveInstantlyAccountId } from './accounts';
 import { createQualificationAiCheckpointStore } from './qualificationAiCheckpoint';
@@ -117,6 +118,23 @@ type SpecialistAlertClaimDecision =
   | { status: 'duplicate'; winnerQualificationId: string }
   | { status: 'retry'; reason: string };
 
+/** An operator archive is not a negative verdict. Keep the original row/id for
+ * ingestion dedup, but stop direct webhook/recovery work before provider or AI
+ * calls. Missing archive metadata fails closed until its migration is present. */
+async function qualificationQueueArchived(
+  db: NonNullable<typeof supabaseAdmin>,
+  identity: { qualificationId: string } | { emailId: string },
+): Promise<boolean> {
+  let query = db.from('instantly_lead_qualifications')
+    .select('queue_archived_at');
+  query = 'qualificationId' in identity
+    ? query.eq('id', identity.qualificationId)
+    : query.eq('instantly_email_id', identity.emailId);
+  const { data, error } = await query.maybeSingle();
+  if (error) throw new Error(`${OWNERSHIP_DEFER_ERROR_PREFIX}: queue archive state unavailable: ${error.message}`);
+  return data?.queue_archived_at != null;
+}
+
 function isMissingSpecialistAlertClaimRpc(error: {
   code?: string;
   message?: string;
@@ -147,6 +165,9 @@ async function claimSpecialistThreadAlert(
   qualificationId: string,
   enqueueHandoff = false,
 ): Promise<SpecialistAlertClaimDecision> {
+  if (await qualificationQueueArchived(db, { qualificationId })) {
+    return { status: 'duplicate', winnerQualificationId: qualificationId };
+  }
   const { data, error } = await db.rpc(SPECIALIST_ALERT_CLAIM_RPC, {
     p_qualification_id: qualificationId,
     p_enqueue_handoff: enqueueHandoff,
@@ -226,6 +247,7 @@ async function persistLegacyLeadOwnerSnapshot(
       qualified_project_owner_proven: true,
     })
     .eq('id', lead.id)
+    .is('queue_archived_at', null)
     .eq('status', 'lead')
     .not('qualified_project_owner_proven', 'is', true)
     .select('id, qualified_project_id, qualified_project_owner_proven')
@@ -250,6 +272,7 @@ async function persistLegacyLeadOwnerSnapshot(
     .from('instantly_lead_qualifications')
     .select('qualified_project_id, qualified_project_owner_proven')
     .eq('id', lead.id)
+    .is('queue_archived_at', null)
     .maybeSingle();
   if (currentError) {
     workerLog(
@@ -1244,6 +1267,7 @@ async function persistQualificationRow(
         updated_at: attemptedAt,
       })
       .eq('id', existingQualificationId)
+      .is('queue_archived_at', null)
       .eq('status', 'processing')
       // Fencing token: status alone is vulnerable to ABA after an expired
       // lease is reclaimed (processing@t1 → review → processing@t2).
@@ -1320,6 +1344,11 @@ export async function qualifyOneReply(
 
   if (!providerCampaignId || !leadEmail) return;
 
+  const archiveIdentity = opts?.existingQualificationId
+    ? { qualificationId: opts.existingQualificationId }
+    : reply.id ? { emailId: reply.id } : null;
+  if (archiveIdentity && await qualificationQueueArchived(db, archiveIdentity)) return;
+
   // Ящик, физически принявший письмо. Пишем в квалификацию и (для сирот)
   // показываем в DM — «в каком ящике искать ответ». Пустую строку схлопываем
   // в null, чтобы не плодить два представления отсутствия.
@@ -1340,6 +1369,7 @@ export async function qualifyOneReply(
     }
     const { data: current, error } = await db.from('instantly_lead_qualifications')
       .select('qualified_project_owner_proven')
+      .is('queue_archived_at', null)
       .eq('id', opts.existingQualificationId).eq('status', 'processing')
       .eq('updated_at', opts.existingQualificationAttemptedAt)
       .eq('instantly_email_id', reply.id!)
@@ -1387,6 +1417,7 @@ export async function qualifyOneReply(
     };
     const write = existingId
       ? db.from('instantly_lead_qualifications').update({ ...payload, updated_at: attemptedAt })
+        .is('queue_archived_at', null)
         .eq('id', existingId).eq('status', 'processing').eq('updated_at', attemptedAt!)
         .eq('instantly_email_id', reply.id!)
         .eq('lead_email', leadEmail)
@@ -1755,6 +1786,10 @@ export async function qualifyOneReply(
     );
   }
 
+  // Ownership lookups can take seconds. Recheck by ID (recovery) or email ID
+  // (direct ingestion) before paid classification in case an archive won.
+  if (archiveIdentity && await qualificationQueueArchived(db, archiveIdentity)) return;
+
   const result = await qualifyReply(campaignId, leadEmail, effectiveReply.thread_id, {
     apiKey,
     checkpointStore: createQualificationAiCheckpointStore(db, {
@@ -1787,14 +1822,21 @@ export async function qualifyOneReply(
   try {
     const leads = await instantly.getLeadsByEmail({ email: leadEmail, campaign_id: campaignId }, { accountId });
     leadMetadata = Array.isArray(leads) ? leads : [];
-  } catch {
-    // lead metadata is optional enrichment
+  } catch (error) {
+    workerLog('warn', 'Lead metadata API unavailable; using cached base and reply', error);
+  }
+  let cachedLeads: Lead[] = [];
+  try {
+    cachedLeads = await loadCachedLeadContacts(db, campaignId, leadEmail);
+  } catch (error) {
+    workerLog('warn', 'Lead metadata cache unavailable; using API and reply', error);
   }
   // The loaded base also lives in payload/custom_variables. Reply fallback
   // retains the responder's signature, never quoted outbound contact details.
   // Phone/site belong to the board, not instantly_lead_qualifications.
   const { leadName, companyName, phone: leadPhone, website: leadWebsite } = resolveLeadContactMetadata({
     leads: leadMetadata,
+    cachedLeads,
     leadEmail,
     campaignId,
     replyBody: (result.threadContext?.replyEmail ?? effectiveReply).body,
@@ -1862,6 +1904,10 @@ export async function qualifyOneReply(
     // записал status='error' и проблема была видна и в БД, и в Telegram-алертах.
     throw new Error(`Upsert failed: ${upsertErr.message ?? 'unknown'}`);
   }
+
+  // Archiving can win while ownership/AI work was already in flight. The DB
+  // fences its commit; this fresh read also fences all downstream side effects.
+  if (inserted?.id && await qualificationQueueArchived(db, { qualificationId: inserted.id })) return;
 
   workerLog(
     'info',
@@ -2065,7 +2111,10 @@ export async function getCampaignsByAccountCached(): Promise<Map<string, Set<str
 }
 
 function legacySemanticDrainEnabled(): boolean {
-  return /^(?:1|true|yes|on)$/i.test(
+  // Old unresolved semantic reviews use the same bounded cold recovery lane.
+  // An explicit operator pause remains available; completed negatives are
+  // never adopted by this lane.
+  return !/^(?:0|false|no|off)$/i.test(
     process.env.INSTANTLY_LEAD_QUAL_LEGACY_SEMANTIC_DRAIN_ENABLED?.trim() ?? '',
   );
 }
@@ -2122,6 +2171,7 @@ export async function refreshMissingRecoverySources(
     for (let offset = 0; offset < ids.length && checked < 10; offset += 50) {
       const { data, error } = await db.from('instantly_lead_qualifications')
         .select('id, instantly_email_id, campaign_id, lead_email, updated_at')
+        .is('queue_archived_at', null)
         .eq('status', 'pending').eq('recovery_use_snapshot', true)
         .eq('recovery_failure_kind', 'source_missing')
         .in('instantly_email_id', ids.slice(offset, offset + 50))
@@ -2147,6 +2197,7 @@ export async function refreshMissingRecoverySources(
             recovery_failure_kind: null, recovery_failure_count: 0,
           })
           .eq('id', row.id).eq('status', 'pending').eq('updated_at', row.updated_at)
+          .is('queue_archived_at', null)
           .eq('lead_email', row.lead_email).eq('recovery_use_snapshot', true)
           .eq('recovery_failure_kind', 'source_missing')
           .select('id').maybeSingle();
@@ -2166,7 +2217,7 @@ export async function refreshMissingRecoverySources(
 }
 
 // Match technical legacy reasons in SQL BEFORE LIMIT. Ordinary semantic review
-// must neither be silently reopened nor starve technical adoption when opt-in is off.
+// must not starve technical adoption, including when semantic recovery is paused.
 const LEGACY_TECHNICAL_RETRY_FILTER = [
   `ai_reason.ilike.${OWNERSHIP_REVIEW_REASON_PREFIX}%`,
   `ai_reason.ilike.${TRANSIENT_RETRY_REASON_PREFIX}%`,
@@ -2200,7 +2251,8 @@ async function adoptLegacyQualificationRetries(
 ): Promise<void> {
   let query = db.from('instantly_lead_qualifications')
     .select('id, status, instantly_email_id, ai_reason, error_message, updated_at')
-    .in('status', options.semantic ? ['needs_review', 'objection'] : ['needs_review', 'error'])
+    .is('queue_archived_at', null)
+    .in('status', options.semantic ? ['needs_review'] : ['needs_review', 'error'])
     .not('instantly_email_id', 'is', null)
     .not('instantly_email_id', 'like', 'webhook:%');
   if (!options.semantic) query = query.or(LEGACY_TECHNICAL_RETRY_FILTER);
@@ -2232,6 +2284,7 @@ async function adoptLegacyQualificationRetries(
         updated_at: row.updated_at ?? options.nowIso,
       } : { updated_at: options.nowIso })
       .eq('id', row.id)
+      .is('queue_archived_at', null)
       .eq('status', row.status);
     update = row.updated_at ? update.eq('updated_at', row.updated_at) : update.is('updated_at', null);
     const { error: adoptionError } = await update;
@@ -2255,6 +2308,25 @@ export interface OwnershipReviewRetryOptions {
   lane?: 'fresh' | 'active' | 'page_budget' | 'cold';
 }
 
+/** A saved inbound avoids repeating provider reads while the real owner is
+ * still proved normally. Refresh once after a source-sensitive failure, then
+ * only every eighth consecutive failure: old To/CC/thread metadata must not
+ * become permanent evidence, but each retry must not refetch the same email.
+ * A confirmed provider 404 stays local-only until ingestion supplies new data.
+ */
+function shouldRefreshRecoverySource(row: QualificationRecoveryState): boolean {
+  if (row.recovery_use_snapshot) return false;
+  if (!['ownership', 'evidence_blocked', 'dependency_unavailable'].includes(
+    row.recovery_failure_kind ?? '',
+  )) return false;
+  const failures = Math.max(0, row.recovery_failure_count ?? 0);
+  // The backoff counter saturates at 30; the durable total attempt counter
+  // does not. Keep periodic refresh alive after a long-running owner conflict.
+  const periodicCount = failures >= 30
+    ? Math.max(0, row.recovery_attempts ?? 0) : failures;
+  return failures === 1 || (periodicCount > 0 && periodicCount % 8 === 0);
+}
+
 /** Repair only the old scheduler's provable local-quota misclassification.
  * Bounded, lazy and CAS-protected: no owner, verdict or paid attempt changes. */
 async function normalizeLegacyLocalQuotaBackoff(
@@ -2264,6 +2336,7 @@ async function normalizeLegacyLocalQuotaBackoff(
 ): Promise<void> {
   const { data: rows, error } = await db.from('instantly_lead_qualifications')
     .select('id, status, updated_at, error_message, recovery_failure_kind, recovery_failure_count, recovery_next_at')
+    .is('queue_archived_at', null)
     .in('status', ['pending', 'needs_review'])
     .eq('ai_confidence', 0)
     .or(retryReasonFilter)
@@ -2283,6 +2356,7 @@ async function normalizeLegacyLocalQuotaBackoff(
     if (readInstantlyEmailReadDeferral(row.error_message)?.reason !== 'budget') continue;
     const { error: updateError } = await db.from('instantly_lead_qualifications')
       .update(qualificationRecoveryBackoff(row, row.error_message, nowMs, 0))
+      .is('queue_archived_at', null)
       .eq('id', row.id)
       .eq('status', row.status)
       .eq('ai_confidence', 0)
@@ -2402,6 +2476,7 @@ export async function reprocessOwnershipReviewRows(
         ...scheduling,
       })
       .eq('id', raw.id)
+      .is('queue_archived_at', null)
       .eq('status', raw.status)
       .eq('ai_confidence', 0)
       .or(retryReasonFilter)
@@ -2419,6 +2494,7 @@ export async function reprocessOwnershipReviewRows(
   const { error: leaseError } = await db
     .from('instantly_lead_qualifications')
     .update({ status: 'pending' })
+    .is('queue_archived_at', null)
     .eq('status', 'processing')
     .eq('ai_confidence', 0)
     .or(retryReasonFilter)
@@ -2433,6 +2509,7 @@ export async function reprocessOwnershipReviewRows(
   let candidatesQuery = db
     .from('instantly_lead_qualifications')
     .select('id, campaign_id, lead_email, instantly_email_id, status, ai_reason, ai_confidence, created_at, updated_at, recovery_attempts, recovery_failure_kind, recovery_failure_count, recovery_use_snapshot')
+    .is('queue_archived_at', null)
     .in('status', ['pending', 'needs_review'])
     .eq('ai_confidence', 0)
     .or(retryReasonFilter)
@@ -2538,6 +2615,7 @@ export async function reprocessOwnershipReviewRows(
         recovery_attempts: Math.max(0, raw.recovery_attempts ?? 0) + 1,
         recovery_last_attempt_at: nowIso,
       })
+      .is('queue_archived_at', null)
       .eq('id', raw.id)
       .eq('status', raw.status)
       .eq('ai_confidence', 0)
@@ -2572,19 +2650,23 @@ export async function reprocessOwnershipReviewRows(
     try {
       // Recovery already has durable retries. Do not spend another 28 seconds
       // retrying a 429 inside getEmail before yielding to fresh replies.
-      const loadSnapshot = async () => {
+      const readSnapshot = async () => {
         const { data, error } = await db.from('instantly_lead_qualifications')
           .select('instantly_email_id, lead_email, reply_recovery_snapshot')
+          .is('queue_archived_at', null)
           .eq('id', raw.id).maybeSingle();
-        const snapshot = !error && data ? qualificationReplySnapshot(data) : null;
-        if (!snapshot || snapshot.id !== emailId) {
-          throw new Error('recovery source unavailable: provider 404 and no complete saved inbound');
+        if (error || !data) {
+          throw new Error('recovery source checkpoint unavailable');
         }
-        return snapshot;
+        const snapshot = qualificationReplySnapshot(data);
+        return snapshot?.id === emailId ? snapshot : null;
       };
+      const storedSnapshot = await readSnapshot();
       let fullEmail: Email;
-      if (raw.recovery_use_snapshot) fullEmail = await loadSnapshot();
-      else {
+      if (storedSnapshot && !shouldRefreshRecoverySource(raw)) fullEmail = storedSnapshot;
+      else if (raw.recovery_use_snapshot) {
+        throw new Error('recovery source unavailable: provider 404 and no complete saved inbound');
+      } else {
         try {
           fullEmail = await instantly.getEmail(emailId, {
             accountId, requestPriority: 'recovery', retryRateLimits: false,
@@ -2597,10 +2679,14 @@ export async function reprocessOwnershipReviewRows(
           // same missing provider id every day (and never call AI blindly).
           const { data: saved, error: saveError } = await db.from('instantly_lead_qualifications')
             .update({ recovery_use_snapshot: true })
+            .is('queue_archived_at', null)
             .eq('id', raw.id).eq('status', 'processing').eq('updated_at', nowIso)
             .select('id').maybeSingle();
           if (saveError || !saved) throw new Error('recovery snapshot checkpoint unavailable');
-          fullEmail = await loadSnapshot();
+          if (!storedSnapshot) {
+            throw new Error('recovery source unavailable: provider 404 and no complete saved inbound');
+          }
+          fullEmail = storedSnapshot;
         }
       }
       if (!fullEmail?.id || fullEmail.id !== emailId) {
@@ -2610,6 +2696,7 @@ export async function reprocessOwnershipReviewRows(
       if (sourceSnapshot && !raw.recovery_use_snapshot) {
         const { data: saved, error: saveError } = await db.from('instantly_lead_qualifications')
           .update({ reply_recovery_snapshot: sourceSnapshot })
+          .is('queue_archived_at', null)
           .eq('id', raw.id).eq('status', 'processing').eq('updated_at', nowIso)
           .select('id').maybeSingle();
         if (saveError || !saved) throw new Error('recovery source checkpoint unavailable');
@@ -2627,6 +2714,7 @@ export async function reprocessOwnershipReviewRows(
         const { data: retryMeta, error: retryMetaError } = await db
           .from('instantly_lead_qualifications')
           .select('reply_out_of_campaign, eaccount, last_outbound_preview')
+          .is('queue_archived_at', null)
           .eq('id', raw.id)
           .maybeSingle();
         if (retryMetaError) {
@@ -2697,6 +2785,7 @@ export async function reprocessOwnershipReviewRows(
         .update({ status: 'pending', updated_at: nowIso,
           ...backoff('ownership recovery incomplete'),
         })
+        .is('queue_archived_at', null)
         .eq('id', raw.id)
         .eq('status', 'processing')
         .eq('updated_at', nowIso)
@@ -2705,9 +2794,11 @@ export async function reprocessOwnershipReviewRows(
       // Ambiguous ownership writes pending in place rather than throwing.
       // Persist its next deadline as well; an updated_at rotation is not enough.
       const { data: pending } = await db.from('instantly_lead_qualifications')
-        .select('ai_reason').eq('id', raw.id).eq('status', 'pending').eq('updated_at', nowIso).maybeSingle();
+        .select('ai_reason').is('queue_archived_at', null)
+        .eq('id', raw.id).eq('status', 'pending').eq('updated_at', nowIso).maybeSingle();
       if (pending) await db.from('instantly_lead_qualifications')
         .update(backoff(String(pending.ai_reason ?? 'ownership')))
+        .is('queue_archived_at', null)
         .eq('id', raw.id).eq('status', 'pending').eq('updated_at', nowIso);
       logAttempt(releaseError ? 'release_failed' : released ? 'pending' : 'completed_or_replaced');
     } catch (error) {
@@ -2727,6 +2818,7 @@ export async function reprocessOwnershipReviewRows(
           error_message: `Ownership retry failed: ${message}`.slice(0, 500),
           ...backoff(message),
         })
+        .is('queue_archived_at', null)
         .eq('id', raw.id)
         .eq('status', 'processing')
         .eq('updated_at', nowIso);
@@ -2937,6 +3029,7 @@ export async function drainWebhookQueue(): Promise<number> {
       await db
         .from('instantly_lead_qualifications')
         .update({ webhook_event_id: row.id })
+        .is('queue_archived_at', null)
         .eq('instantly_email_id', reply.id)
         .is('webhook_event_id', null);
     } catch (err) {
@@ -3076,6 +3169,12 @@ export async function notifyClientOfReply(
   try {
     // Bot not configured → feature is dark; skip without touching the DB.
     if (!getClientRepliesBotToken()) return;
+    if (data.qualificationId && await qualificationQueueArchived(instantlyDb, {
+      qualificationId: data.qualificationId,
+    })) {
+      await recordDelivery('blocked', 'qualification_queue_archived');
+      return;
+    }
 
     const clientUserIds = new Set<string>();
 
@@ -3264,6 +3363,7 @@ async function notifySpecialistsAboutLead(
 
   try {
     const userIds = new Set<string>();
+    if (await qualificationQueueArchived(instantlyDb, { qualificationId })) return;
     let clientName: string | null = null;
 
     let projectId = delivery?.projectId ?? null;
@@ -3647,6 +3747,7 @@ export async function reconcileLeadNotificationDeliveries(
       .from('instantly_lead_qualifications')
       .select('id, campaign_id, qualified_project_id, qualified_project_owner_proven, thread_id, instantly_email_id, eaccount, lead_email, lead_name, company_name, campaign_name, reply_subject, reply_body, reply_preview, last_outbound_preview, reply_timestamp, ai_reason, created_at, updated_at')
       .eq('status', 'lead')
+      .is('queue_archived_at', null)
       // A cold retry preserves created_at but refreshes updated_at. Its first
       // failed/interrupted Telegram send must have the same recovery window
       // as a fresh lead instead of disappearing behind the original mail age.
@@ -3856,13 +3957,27 @@ export async function reconcileLeadNotificationDeliveries(
 
     if (!claimId) continue;
     claimedCount++;
+    let deliveryCachedLeads: Lead[] = [];
+    try {
+      deliveryCachedLeads = await loadCachedLeadContacts(instantlyDb, lead.campaign_id, lead.lead_email);
+    } catch (error) {
+      workerLog('warn', 'Lead delivery metadata cache unavailable', error);
+    }
+    const deliveryMetadata = resolveLeadContactMetadata({
+      leads: [{ id: lead.id, email: lead.lead_email, campaign_id: lead.campaign_id,
+        company_name: lead.company_name }],
+      cachedLeads: deliveryCachedLeads,
+      leadEmail: lead.lead_email,
+      campaignId: lead.campaign_id,
+      replyBody: lead.reply_body?.trim() || lead.reply_preview || '',
+    });
     await notifySpecialistsAboutLead(
       instantlyDb,
       lead.id,
       lead.campaign_id,
       lead.lead_email,
       lead.lead_name,
-      lead.company_name,
+      deliveryMetadata.companyName,
       lead.campaign_name,
       lead.reply_subject,
       lead.reply_preview,
@@ -3874,12 +3989,7 @@ export async function reconcileLeadNotificationDeliveries(
         projectId: lead.qualified_project_id,
         // Full persisted reply includes signatures omitted from the short preview.
         // No repeat Instantly lookup or AI call for delivery-only retries.
-        contactMetadata: resolveLeadContactMetadata({
-          leads: [],
-          leadEmail: lead.lead_email,
-          campaignId: lead.campaign_id,
-          replyBody: lead.reply_body?.trim() || lead.reply_preview || '',
-        }),
+        contactMetadata: deliveryMetadata,
       },
     );
     if (threadClaimConfirmed) {
@@ -4039,6 +4149,7 @@ export async function reconcileLeadHandoffJobs(options: {
       .from('instantly_lead_qualifications')
       .select('id, campaign_id, qualified_project_id, instantly_email_id, eaccount, thread_id, lead_email, lead_name, campaign_name, reply_subject, reply_body, reply_preview, last_outbound_preview, reply_timestamp')
       .eq('id', job.qualification_id)
+      .is('queue_archived_at', null)
       .maybeSingle();
     if (leadError) {
       result = { disposition: 'retry', detail: `qualification lookup failed: ${leadError.message}` };
@@ -4125,6 +4236,9 @@ export async function maybePostLeadHandoff(opts: {
     if (!supabaseMain) return { disposition: 'retry', detail: 'main database unavailable' };
     const main = supabaseMain;
     const { instantlyDb, qualificationId, campaignId } = opts;
+    if (await qualificationQueueArchived(instantlyDb, { qualificationId })) {
+      return { disposition: 'skipped', detail: 'qualification queue archived' };
+    }
 
     // The delivery mode is snapshotted on materialization. In particular, an
     // auto handoff may crash after INSERT but before sendHandoffNow, leaving a

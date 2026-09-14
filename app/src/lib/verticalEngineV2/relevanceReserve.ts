@@ -1,3 +1,4 @@
+import { isVeAcceptedEmailStatus } from './emailPolicy';
 import { normalizeVeCompanyInn, veCompanyIdentityKey } from './collectionIdentity';
 import { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
 
@@ -91,7 +92,7 @@ export function summarizeVeRelevanceReserve(rows: Array<Record<string, unknown>>
     else if (decision?.status === 'error') summary.error += 1;
     else if (decision?.status === 'irrelevant' || row._low_relevance === true) summary.irrelevant += 1;
     else if (row._relevance_unchecked === true) summary.error += 1;
-    else if (row._email_status !== 'ok') summary.email_unready += 1;
+    else if (!isVeAcceptedEmailStatus(row._email_status)) summary.email_unready += 1;
     else summary.other += 1;
   }
   return summary;
@@ -106,7 +107,7 @@ export function needsVeRelevanceReview(row: Record<string, unknown>): boolean {
 }
 
 function canAutomaticallyReview(row: Record<string, unknown>, evidenceAvailable: boolean): boolean {
-  if (!needsVeRelevanceReview(row) || row._email_status !== 'ok') return false;
+  if (!needsVeRelevanceReview(row) || !isVeAcceptedEmailStatus(row._email_status)) return false;
   const decision = row._ve_relevance && typeof row._ve_relevance === 'object'
     ? row._ve_relevance as { status?: unknown; review_attempts?: unknown } : null;
   // Newly recovered legacy emails still need their initial classification.

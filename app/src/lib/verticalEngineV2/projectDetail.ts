@@ -21,7 +21,7 @@ import { readContactDeliveryPages } from './contactDeliveryInventory';
 // среза, stages/baseCollect) статус 'failed' сам по себе ничего не объясняет —
 // без причины отказ выглядит поломкой, а не решением.
 export const VE_BASE_LIST_COLUMNS =
-  'id, vertical_id, hypothesis_id, filename, row_count, status, error, analysis, source, collect_info, columns, sample_rows, created_at';
+  'id, vertical_id, hypothesis_id, filename, row_count, status, error, analysis, source, collect_info, columns, sample_rows, created_at, updated_at';
 // payload нужен клиенту, чтобы привязать джобу к вертикали (payload.vertical_id) —
 // иначе чужая dossier-джоба показывала бы busy/error на карточке другой вертикали.
 export const VE_JOB_LIST_COLUMNS = 'id, stage, status, error, attempts, started_at, finished_at, payload, progress';
@@ -67,15 +67,16 @@ async function readDetailPages(
 // Также удаляем checkpoints исключённых кандидатов и relevance-вердиктов; helper используется всеми
 // VE2-ответами, возвращающими карточку сборки, включая идемпотентный collect POST.
 export function stripTaskHarvest(base: Record<string, unknown>): Record<string, unknown> {
-  const info = base.collect_info as { tasks?: unknown; target_checkpoint?: unknown; relevance_checkpoint?: unknown; relevance_reserve?: unknown; saved_email_recovery?: unknown; company_name_checkpoint?: unknown; company_name_recovery?: unknown } | null | undefined;
+  const info = base.collect_info as { tasks?: unknown; preview_pipeline?: unknown; target_checkpoint?: unknown; relevance_checkpoint?: unknown; relevance_reserve?: unknown; saved_email_recovery?: unknown; company_name_checkpoint?: unknown; company_name_recovery?: unknown } | null | undefined;
   if (!info) return base;
   const tasks = Array.isArray(info.tasks) ? info.tasks : [];
   const hasHarvest = tasks.some(
     (t) => t !== null && typeof t === 'object' && 'harvest' in (t as Record<string, unknown>),
   );
   if (!hasHarvest && !('target_checkpoint' in info) && !('relevance_checkpoint' in info) && !('relevance_reserve' in info)
-    && !('saved_email_recovery' in info) && !('company_name_checkpoint' in info) && !('company_name_recovery' in info)) return base;
+    && !('saved_email_recovery' in info) && !('company_name_checkpoint' in info) && !('company_name_recovery' in info) && !('preview_pipeline' in info)) return base;
   const publicInfo = { ...info };
+  delete publicInfo.preview_pipeline;
   const emailRecovery = info.saved_email_recovery && typeof info.saved_email_recovery === 'object'
     ? info.saved_email_recovery as { batch?: unknown; error?: unknown } : null;
   delete publicInfo.target_checkpoint;

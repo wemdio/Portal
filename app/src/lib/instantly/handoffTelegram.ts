@@ -4,6 +4,7 @@
  * the button and answering its press both go through this bot's token.
  */
 
+import { signHandoffEdit, verifyHandoffCallback } from './handoffCallback';
 const TG_TIMEOUT_MS = 15_000;
 
 export function handoffBotToken(): string {
@@ -66,8 +67,29 @@ export async function postHandoffMessage(opts: {
         }
       : {}),
   };
+  if (opts.callbackData) {
+    const verified = verifyHandoffCallback(opts.callbackData, opts.token);
+    if (verified.ok) body.reply_markup = { inline_keyboard: [
+      [{ text: '➡️ Передать клиенту', callback_data: opts.callbackData }],
+      [{ text: '✏️ Изменить ответ', callback_data: signHandoffEdit('e', verified.qualificationId, opts.token) }],
+    ] };
+  }
   if (opts.threadId) body.message_thread_id = opts.threadId;
   const result = await tg<{ message_id?: number }>(opts.token, 'sendMessage', body);
+  return result?.message_id ?? null;
+}
+
+/** Editing messages use plain text, so arbitrary specialist text cannot inject HTML. */
+export async function postHandoffEditor(token: string, chatId: number, text: string,
+  options: { threadId?: number; replyTo?: number; forceReply?: boolean; buttons?: { text: string; callback_data: string }[][] } = {},
+): Promise<number | null> {
+  const result = await tg<{ message_id: number }>(token, 'sendMessage', {
+    chat_id: chatId, text, disable_web_page_preview: true,
+    ...(options.threadId ? { message_thread_id: options.threadId } : {}),
+    ...(options.replyTo ? { reply_parameters: { message_id: options.replyTo } } : {}),
+    ...(options.forceReply ? { reply_markup: { force_reply: true, selective: false } }
+      : options.buttons ? { reply_markup: { inline_keyboard: options.buttons } } : {}),
+  });
   return result?.message_id ?? null;
 }
 

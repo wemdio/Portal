@@ -31,13 +31,16 @@ import {
   EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
   EMAIL_VALIDATION_MAX_ATTEMPTS,
   ENRICH_CHECKPOINT_ATTEMPTED_COL,
+  FIND_EMAILS_CHECKPOINT_ATTEMPTED_COL,
   parseEmailValidationCheckpointState,
   serializeEmailValidationCheckpointState,
   stripBaseConstructorCheckpointMetadata,
   stripEnrichCheckpointMetadata,
+  stripFindEmailsCheckpointMetadata,
   type EmailValidationCheckpointEntry,
   type EmailValidationCheckpointState,
 } from './baseConstructorCheckpoint';
+import { compactWebsiteEmailPreferences, selectValidatedWebsiteEmails } from './websiteEmailPreference';
 import {
   CLEANUP_JSON_SYSTEM_PROMPT,
   CLEANUP_BATCH,
@@ -456,11 +459,17 @@ export interface StepFindEmailsOptions {
    */
   stopAtFirstUsableEmail?: boolean;
   /**
-   * Максимум адресов с одного сайта, которые пишем в ячейку (default 8).
+   * Максимум адресов с одного сайта, которые пишем в ячейку (default 8; null — все).
    * Защита от «сайта-простыни» (десятки адресов в футере/на team-странице)
    * когда stopAtFirstUsableEmail=false.
    */
-  maxEmailsPerSite?: number;
+  maxEmailsPerSite?: number | null;
+  /** Maximum pages to crawl (default 5; scraper enforces its own hard ceiling). */
+  maxPages?: number;
+  /** Optional deadline for the whole site, retaining addresses found before it. */
+  siteTimeoutMs?: number;
+  /** Reuse a sufficient homepage description; short/empty pages still use enrich. */
+  reuseWebsiteDescription?: boolean;
   /**
    * Локаль джобы (job.locale конструктора баз, пробрасывает worker).
    * При 'en': колонка scrape-результата — «Found Email» (вместо
@@ -566,6 +575,12 @@ export async function stepFindEmails(
   isCancelled?: CancelCheckFn,
   options?: StepFindEmailsOptions,
 ): Promise<string[][]> {
+  const attemptedIdx = data[0]?.indexOf(FIND_EMAILS_CHECKPOINT_ATTEMPTED_COL) ?? -1;
+  const attemptedRows = new Set<number>();
+  if (attemptedIdx >= 0) data.slice(1).forEach((row, index) => {
+    if (row[attemptedIdx] === '1') attemptedRows.add(index);
+  });
+  data = stripFindEmailsCheckpointMetadata(data);
   let header = [...data[0]];
   let body = data.slice(1).map((r) => [...r]);
   const siteColumnIndexes = findPreferredSiteColumnIndexes(header);
@@ -578,7 +593,7 @@ export async function stepFindEmails(
   // step_config.find_emails.stop_at_first (default true = прежнее захардкоженное
   // поведение) и .max_per_site (default 8) — см. StepFindEmailsOptions.
   const stopAtFirstUsableEmail = options?.stopAtFirstUsableEmail ?? true;
-  const maxPerSite = Math.max(1, options?.maxEmailsPerSite ?? 8);
+  const maxPerSite = options?.maxEmailsPerSite === null ? null : Math.max(1, options?.maxEmailsPerSite ?? 8);
 
   // Target column resolution:
   //   - target='separate' + есть существующая email-колонка → пишем в FOUND_EMAIL_COL (новая);
@@ -604,12 +619,20 @@ export async function stepFindEmails(
     body = body.map((row) => [...row, '']);
   }
 
+  let descriptionIdx = findColumnIndex(header, 'описание', 'description');
+  if (options?.reuseWebsiteDescription && descriptionIdx < 0) {
+    descriptionIdx = header.length;
+    header.push(descriptionColForLocale(locale));
+    body = body.map((row) => [...row, '']);
+  }
+
   // Для строк где target-колонка уже заполнена — скипаем (идемпотентно
   // при resume, и сохраняет ручной ввод когда target='same').
   // Для 'separate' это значит «не перезатираем найденный ранее scrape-результат».
   const toProcess = body
     .map((row, i) => ({ row, i, url: getPreferredSiteUrl(row, siteColumnIndexes) }))
-    .filter((r) => r.url && !extractEmail(r.row[targetIdx] || '') && !isNonScrapeableHost(r.url, locale));
+    .filter((r) => r.url && !attemptedRows.has(r.i)
+      && !extractEmail(r.row[targetIdx] || '') && !isNonScrapeableHost(r.url, locale));
 
   if (toProcess.length === 0) { await onProgress(100); return [header, ...body]; }
 
@@ -620,8 +643,15 @@ export async function stepFindEmails(
   // См. checkpointGate.
   const onCheckpoint = options?.onCheckpoint;
   const shouldCheckpoint = makeCheckpointGate();
+  let reportChain = Promise.resolve();
+  let cancelled = false;
+  let reportingFailed = false;
   await processInPool(toProcess, EMAIL_CONCURRENCY, async (item) => {
-    if (isCancelled && await isCancelled()) return;
+    if (cancelled || reportingFailed) return;
+    if (isCancelled && await isCancelled()) { cancelled = true; return; }
+    const controller = options?.siteTimeoutMs ? new AbortController() : null;
+    const deadline = controller ? setTimeout(() => controller.abort(), Math.max(1, options!.siteTimeoutMs!)) : null;
+    let hardDeadline: ReturnType<typeof setTimeout> | undefined;
     try {
       // stopAtFirstUsableEmail (default true): bail as soon as the homepage /
       // first contact page gives us a usable address. Base-constructor only
@@ -629,25 +659,61 @@ export async function stepFindEmails(
       // crawling 4 more pages per company is the dominant time sink.
       // stop_at_first=false (step_config.find_emails) выключает ранний выход —
       // для связки с cap_emails_per_company, где нужно несколько почт с сайта.
-      const { emails } = await scrapeEmails(item.url, {
+      const scraping = scrapeEmails(item.url, {
         timeout: 15_000,
-        maxPages: 5,
+        maxPages: options?.maxPages ?? 5,
         stopAtFirstUsableEmail,
         locale,
+        ...(options?.reuseWebsiteDescription ? { includeDescription: true } : {}),
+        ...(controller ? { signal: controller.signal } : {}),
       });
-      if (emails.length > 0) {
-        body[item.i][targetIdx] = emails.slice(0, maxPerSite).join(', ');
+      // Give an aborted crawler one second to return addresses from pages
+      // already read. A broken fetch must not occupy the pool slot forever.
+      const result = controller ? await Promise.race([
+        scraping,
+        new Promise<undefined>((resolve) => {
+          hardDeadline = setTimeout(() => resolve(undefined), Math.max(1, options!.siteTimeoutMs!) + 1_000);
+        }),
+      ]) : await scraping;
+      const emails = result?.emails ?? [];
+      if (options?.reuseWebsiteDescription && descriptionIdx >= 0 && result?.description
+        && !(body[item.i][descriptionIdx] || '').trim()) {
+        body[item.i][descriptionIdx] = result.description.slice(0, 2000);
       }
-    } catch { /* skip */ }
+      if (emails.length > 0) {
+        body[item.i][targetIdx] = (maxPerSite === null ? emails : emails.slice(0, maxPerSite)).join(', ');
+      }
+    } catch { /* No site result: preserve the original email fallback. */ }
+    finally {
+      if (deadline !== null) clearTimeout(deadline);
+      if (hardDeadline !== undefined) clearTimeout(hardDeadline);
+    }
+    attemptedRows.add(item.i);
     done++;
-    if (done % 10 === 0 || done === toProcess.length) {
-      await onProgress(Math.round((done / toProcess.length) * 100));
-    }
-    if (onCheckpoint && shouldCheckpoint(done, done === toProcess.length)) {
-      await onCheckpoint([header, ...body]);
-    }
+    const progress = done % 10 === 0 || done === toProcess.length
+      ? Math.min(99, Math.round((done / toProcess.length) * 100)) : null;
+    const checkpoint = onCheckpoint && shouldCheckpoint(done, done === toProcess.length)
+      ? [[...header, FIND_EMAILS_CHECKPOINT_ATTEMPTED_COL], ...body.map((row, index) => {
+        const out = row.slice(0, header.length);
+        while (out.length < header.length) out.push('');
+        return [...out, attemptedRows.has(index) ? '1' : ''];
+      })] : null;
+    // Serialize snapshots so an older concurrent write cannot overwrite a
+    // newer one. The pool swallows item errors; retain persistence failures
+    // on this chain and rethrow after draining in-flight lookups.
+    reportChain = reportChain.then(async () => {
+      if (checkpoint && onCheckpoint) await onCheckpoint(checkpoint);
+      if (progress !== null) await onProgress(progress);
+    }).catch((error) => {
+      reportingFailed = true;
+      throw error;
+    });
+    await reportChain;
   });
 
+  await reportChain;
+  if (cancelled || (isCancelled && await isCancelled())) throw new Error('Отменено');
+  if (done !== toProcess.length) throw new Error('Не удалось завершить поиск почт');
   await onProgress(100);
   return [header, ...body];
 }
@@ -687,7 +753,7 @@ export async function stepSplitEmails(
   }
 
   await onProgress(100);
-  return [header, ...result];
+  return compactWebsiteEmailPreferences([header, ...result]);
 }
 
 /* ═══════════════════════════════════════════
@@ -2281,7 +2347,7 @@ export async function stepValidateEmails(
   await onProgress(100);
   // Attempt counters are strictly worker state. Neither the next pipeline
   // step nor a completed export may observe the private JSON column.
-  return stripBaseConstructorCheckpointMetadata([newHeader, ...filtered]);
+  return stripBaseConstructorCheckpointMetadata(selectValidatedWebsiteEmails([newHeader, ...filtered]));
 }
 
 /* ═══════════════════════════════════════════

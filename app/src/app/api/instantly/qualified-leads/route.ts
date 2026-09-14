@@ -15,6 +15,8 @@ export const dynamic = 'force-dynamic';
 const MAX_PAGE_SIZE = 200;
 const MAX_OFFSET = 10_000;
 const SOURCE_PAGE_SIZE = 1_000;
+const RECOVERY_STATUSES = new Set(['pending', 'processing', 'needs_review', 'error']);
+const QUALIFICATION_HISTORY_COLUMNS = '*, queue_archived_at, queue_archive_batch_id';
 
 export const PATCH = withAuth(async (req, user) => {
   const instantlyDb = supabaseInstantly;
@@ -108,6 +110,7 @@ export const PATCH = withAuth(async (req, user) => {
       .in('id', group.ids)
       .eq('campaign_id', group.campaignId)
       .is('machine_reply_kind', null)
+      .is('queue_archived_at', null)
       .is('read_at', null);
     if (group.ownerState !== 'missing') {
       update = group.ownerState === 'legacy'
@@ -145,6 +148,19 @@ export const GET = withAuth(async (req, user) => {
 
   const url = new URL(req.url);
   const status = url.searchParams.get('status');
+  const queueState = url.searchParams.get('queue_state');
+  if (queueState !== null && !['active', 'archived', 'all'].includes(queueState)) {
+    return NextResponse.json(
+      { error: 'queue_state должен быть active, archived или all' },
+      { status: 400 },
+    );
+  }
+  // Recovery views/counts describe runnable work by default. The historical
+  // business feed retains the original verdict AND the explicit archive marker;
+  // archiving must not turn an unanswered reply into a negative classification.
+  const queueStateForStatus = (value: string | null) => queueState ?? (
+    value && RECOVERY_STATUSES.has(value) ? 'active' : 'all'
+  );
   const campaignId = url.searchParams.get('campaign_id');
   const campaignIds = url.searchParams.getAll('campaign_ids');
   const search = url.searchParams.get('search');
@@ -178,7 +194,7 @@ export const GET = withAuth(async (req, user) => {
     total: 0,
     limit,
     offset,
-    counts: { lead: 0, objection: 0, needs_review: 0, not_lead: 0, error: 0, pending: 0, processing: 0 },
+    counts: { lead: 0, objection: 0, needs_review: 0, not_lead: 0, error: 0, pending: 0, processing: 0, archived: 0 },
   });
 
   // Code-before-migration compatibility. The new worker defers every new
@@ -192,10 +208,12 @@ export const GET = withAuth(async (req, user) => {
 
     let query = instantlyDb
       .from('instantly_lead_qualifications')
-      .select('*', { count: 'exact' });
-    query = status && status !== 'all'
-      ? query.eq('status', status)
-      : query.neq('status', 'pending');
+      .select(QUALIFICATION_HISTORY_COLUMNS, { count: 'exact' });
+    if (status && status !== 'all') query = query.eq('status', status);
+    else if (queueState === null) query = query.neq('status', 'pending');
+    const selectedQueueState = queueStateForStatus(status);
+    if (selectedQueueState === 'active') query = query.is('queue_archived_at', null);
+    if (selectedQueueState === 'archived') query = query.not('queue_archived_at', 'is', null);
     query = query.in('campaign_id', campaignAccess.campaignIds);
     if (search) {
       query = query.or(
@@ -210,14 +228,17 @@ export const GET = withAuth(async (req, user) => {
 
     // Pending is automatic technical recovery, not a manual qualification task.
     // Expose its count even though the default business feed excludes it.
-    const statuses = ['lead', 'objection', 'needs_review', 'not_lead', 'error', 'pending', 'processing'] as const;
+    const statuses = ['lead', 'objection', 'needs_review', 'not_lead', 'error', 'pending', 'processing', 'archived'] as const;
     const counts: Record<string, number> = {};
     await Promise.all(statuses.map(async (value) => {
       let countQuery = instantlyDb
         .from('instantly_lead_qualifications')
-        .select('*', { count: 'exact', head: true })
-        .eq('status', value)
+        .select('id', { count: 'exact', head: true })
         .in('campaign_id', campaignAccess.campaignIds);
+      if (value !== 'archived') countQuery = countQuery.eq('status', value);
+      const countQueueState = value === 'archived' ? 'archived' : queueStateForStatus(value);
+      if (countQueueState === 'active') countQuery = countQuery.is('queue_archived_at', null);
+      if (countQueueState === 'archived') countQuery = countQuery.not('queue_archived_at', 'is', null);
       if (search) {
         countQuery = countQuery.or(
           `lead_email.ilike.%${search}%,lead_name.ilike.%${search}%,company_name.ilike.%${search}%`,
@@ -292,10 +313,13 @@ export const GET = withAuth(async (req, user) => {
     source: QualificationSource,
     statusFilter: string | null,
     head = false,
+    archiveCount = false,
   ) => {
     let query = instantlyDb
       .from('instantly_lead_qualifications')
-      .select('*', { count: 'exact', head });
+      // Keep one literal projection: head:true suppresses row payloads, and
+      // mixing SELECT strings makes the PostgREST type parser lose its shape.
+      .select(QUALIFICATION_HISTORY_COLUMNS, { count: 'exact', head });
     if (source.kind === 'snapshot') {
       query = query
         .eq('qualified_project_owner_proven', true)
@@ -315,9 +339,13 @@ export const GET = withAuth(async (req, user) => {
         .is('qualified_project_id', null)
         .in('campaign_id', source.campaignIds);
     }
-    query = statusFilter
-      ? query.eq('status', statusFilter)
-      : query.neq('status', 'pending');
+    if (!archiveCount) {
+      if (statusFilter) query = query.eq('status', statusFilter);
+      else if (queueState === null) query = query.neq('status', 'pending');
+    }
+    const selectedQueueState = archiveCount ? 'archived' : queueStateForStatus(statusFilter);
+    if (selectedQueueState === 'active') query = query.is('queue_archived_at', null);
+    if (selectedQueueState === 'archived') query = query.not('queue_archived_at', 'is', null);
     if (search) {
       query = query.or(
         `lead_email.ilike.%${search}%,lead_name.ilike.%${search}%,company_name.ilike.%${search}%`,
@@ -383,11 +411,11 @@ export const GET = withAuth(async (req, user) => {
   const items = mergedRows.slice(offset, offset + limit);
   const total = (snapshotPage.count ?? 0) + (legacyPage.count ?? 0);
 
-  const statuses = ['lead', 'objection', 'needs_review', 'not_lead', 'error', 'pending', 'processing'] as const;
+  const statuses = ['lead', 'objection', 'needs_review', 'not_lead', 'error', 'pending', 'processing', 'archived'] as const;
   const countEntries = await Promise.all(statuses.map(async (value) => {
     const countSource = async (source: QualificationSource | null) => {
       if (!source) return { count: 0, error: null };
-      const result = await buildSourceQuery(source, value, true);
+      const result = await buildSourceQuery(source, value === 'archived' ? null : value, true, value === 'archived');
       return { count: result.count ?? 0, error: result.error };
     };
     const snapshotCountPromise = countSource(snapshotSource);

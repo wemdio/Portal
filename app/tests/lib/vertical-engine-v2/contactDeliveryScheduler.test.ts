@@ -9,7 +9,7 @@ import { buildContactSupplyRequests, runProjectContactSupply } from '@/lib/verti
 import { allocateContactSupplyTargets } from '@/lib/verticalEngineV2/contactSupplyPlanner';
 import { prepareAuditSnapshot, runSegmentationAuditStage, toStoredAuditSummary } from '@/lib/verticalEngineV2/stages/segmentationAudit';
 import { buildSegmentationAudit } from '@/lib/verticalEngineV2/segmentationAudit';
-import { createVeJobWatchdog } from '@/lib/verticalEngineV2/workerLiveness';
+import { createVeJobShutdown, createVeJobWatchdog, VeWorkerShutdownError } from '@/lib/verticalEngineV2/workerLiveness';
 
 const COMPLETE_BINDING = {
   portal_project_id: '20000000-0000-0000-0000-000000000001',
@@ -49,6 +49,31 @@ describe('VE2 contact delivery scheduler', () => {
       cooperative.stop(); // Settled cancellation must not terminate the worker later.
       jest.advanceTimersByTime(2000);
       expect(onUnresponsive).toHaveBeenCalledTimes(1);
+      expect(jest.getTimerCount()).toBe(0);
+      const deployment = new AbortController();
+      const onDeadline = jest.fn();
+      const shutdown = createVeJobShutdown({ abort: deployment, graceMs: 100, onDeadline });
+      shutdown.request(); shutdown.request();
+      jest.advanceTimersByTime(90);
+      expect(deployment.signal.aborted).toBe(false); // The current operation may save its result.
+      expect(() => shutdown.checkpoint()).toThrow(VeWorkerShutdownError);
+      shutdown.stop();
+      jest.advanceTimersByTime(100);
+      expect(onDeadline).not.toHaveBeenCalled();
+      const hung = new AbortController();
+      const bounded = createVeJobShutdown({ abort: hung, graceMs: 100, onDeadline });
+      bounded.request();
+      jest.advanceTimersByTime(100);
+      expect(hung.signal.reason).toBeInstanceOf(VeWorkerShutdownError);
+      expect(onDeadline).toHaveBeenCalledTimes(1);
+      bounded.stop();
+      const userCancel = new AbortController();
+      const cancelReason = new Error('User cancelled');
+      userCancel.abort(cancelReason);
+      const immediate = createVeJobShutdown({ abort: userCancel, graceMs: 100, immediate: true, onDeadline });
+      immediate.request();
+      expect(() => immediate.checkpoint()).toThrow(cancelReason);
+      immediate.stop();
       expect(jest.getTimerCount()).toBe(0);
     } finally {
       jest.useRealTimers();
@@ -111,6 +136,16 @@ describe('VE2 contact delivery scheduler', () => {
       expect.stringContaining('ve-1'),
       expect.any(Error),
     );
+    for (const phase of ['supply', 'delivery']) {
+      let stopping = false;
+      const supply = jest.fn(async () => { if (phase === 'supply') stopping = true; return {}; });
+      const delivery = jest.fn(async () => { stopping = true; return { status: 'completed' }; });
+      const stopped = await runBoundContactDeliveries({ portalDb: portal as never, instantlyDb: {} as never,
+        shouldStop: () => stopping, runSupply: supply as never, runProject: delivery as never, log });
+      expect(supply).toHaveBeenCalledTimes(1);
+      expect(delivery).toHaveBeenCalledTimes(phase === 'delivery' ? 1 : 0);
+      expect(stopped).toMatchObject({ attemptedProjects: phase === 'delivery' ? 1 : 0, failedProjects: 0 });
+    }
   });
 
   it('requests only the weighted two-day buffer deficit and caps each collection batch', () => {

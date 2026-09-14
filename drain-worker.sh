@@ -131,6 +131,17 @@ patch_running_to_pending() {
   patch_rows "$table" "status=eq.running" "$body"
 }
 
+# Stop the VE2 coordinator before pausing/stopping any of its child workers.
+# Do not add ve_jobs to the generic running->pending bulk update: a live parent
+# must retain ownership until it saves its checkpoint and exits. Startup resumes
+# its remaining running job. A failed stop aborts deployment before force_rm_svc.
+if should_drain_worker "worker-vertical-engine-v2"; then
+  echo "[drain] Gracefully stopping Vertical Engine v2 (up to 5m)..."
+  COMPOSE_HTTP_TIMEOUT=360 DOCKER_CLIENT_TIMEOUT=360 \
+    docker compose --env-file .env -p portal -f docker-compose.prod.yml stop worker-vertical-engine-v2
+  echo "[drain] Vertical Engine v2 stopped"
+fi
+
 if should_drain_non_baseconstructor_workers && [ -n "$SUPABASE_URL" ] && [ -n "$KEY" ]; then
   echo "[drain] Checking active running tasks before deploy..."
 

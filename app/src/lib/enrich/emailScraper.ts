@@ -492,6 +492,7 @@ async function fetchPage(
   options?: { timeout?: number; signal?: AbortSignal; acceptLanguage?: string },
 ): Promise<string | null> {
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
+  if (options?.signal?.aborted) return null;
   // Hard outer cap: даже если внутренний fetch() зависнет (видели на проде
   // 2026-06-19, undici assert(!this.paused) — body-stream после ассерта
   // может никогда не resolve'иться), эта race гарантирует возврат в
@@ -499,10 +500,22 @@ async function fetchPage(
   // отвалится сам по своему таймауту; зато processInPool слот свободен.
   // worker'ы Node-process'а параллельно ловят сам ассерт через
   // installUndiciAssertGuard() в app/worker/baseConstructor.ts.
-  return await Promise.race([
-    fetchPageInner(url, { timeout, signal: options?.signal, acceptLanguage: options?.acceptLanguage }),
-    new Promise<null>((resolve) => setTimeout(() => resolve(null), timeout + 5_000)),
-  ]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const bounded = new Promise<null>((resolve) => {
+    onAbort = () => resolve(null);
+    timer = setTimeout(onAbort, timeout + 5_000);
+    options?.signal?.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([
+      fetchPageInner(url, { timeout, signal: options?.signal, acceptLanguage: options?.acceptLanguage }),
+      bounded,
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (onAbort) options?.signal?.removeEventListener('abort', onAbort);
+  }
 }
 
 async function fetchPageInner(
@@ -514,7 +527,8 @@ async function fetchPageInner(
   const timer = setTimeout(() => controller.abort(), timeout);
 
   const externalSignal = options.signal;
-  const onExternalAbort = () => controller.abort();
+  const onExternalAbort = () => { clearTimeout(timer); controller.abort(); };
+  if (externalSignal?.aborted) onExternalAbort();
   externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
 
   try {
@@ -550,6 +564,7 @@ async function fetchPageWithRetry(
   options?: { timeout?: number; signal?: AbortSignal; acceptLanguage?: string },
 ): Promise<string | null> {
   for (let attempt = 0; attempt <= FETCH_RETRIES; attempt += 1) {
+    if (options?.signal?.aborted) return null;
     const html = await fetchPage(url, options);
     if (html) return html;
     if (options?.signal?.aborted) return null;
@@ -601,6 +616,8 @@ export type ScrapeEmailsResult = {
   /** Кандидат-название компании с главной страницы (og:site_name / <title>).
    *  Сырое — финальная чистка делается отдельно (AI cleanCompanyNames). */
   siteName: string | null;
+  /** Opt-in, extracted with the description parser's existing sufficiency rule. */
+  description?: string;
 };
 
 /**
@@ -641,6 +658,7 @@ export async function scrapeEmails(
      * Пробрасывается из stepFindEmails (job.locale конструктора баз).
      */
     locale?: 'ru' | 'en';
+    includeDescription?: boolean;
   },
 ): Promise<ScrapeEmailsResult> {
   const url = normalizeUrl(rawUrl);
@@ -693,6 +711,11 @@ export async function scrapeEmails(
   // Название компании берём с главной (og:site_name / <title>) — бесплатно,
   // страница уже загружена. Используется как фоллбек когда нет имени из ФНС.
   const siteName = mainHtml ? extractSiteName(mainHtml) : null;
+  let description: string | undefined;
+  if (options?.includeDescription && mainHtml) {
+    try { description = (await import('@/lib/enrich/websiteParser')).reusableMainPageDescription(mainHtml); }
+    catch { /* Optional enrichment must never discard discovered email addresses. */ }
+  }
 
   // Discover internal links from main page
   let discoveredLinks: string[] = [];
@@ -711,6 +734,7 @@ export async function scrapeEmails(
         checkedUrls,
         pagesScanned: checkedUrls.length,
         siteName,
+        ...(description ? { description } : {}),
       };
     }
     discoveredLinks = await discoverEmailPageLinks(mainHtml, url);
@@ -766,5 +790,6 @@ export async function scrapeEmails(
     checkedUrls,
     pagesScanned: checkedUrls.length,
     siteName,
+    ...(description ? { description } : {}),
   };
 }

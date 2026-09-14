@@ -84,7 +84,11 @@ function repairJobPayload(base: Record<string, unknown>): Record<string, unknown
   if (info.collection_mode === 'preview' || info.collection_mode === 'supply') {
     const target = createCollectionTarget(info.collection_mode, info.ready_target as number | undefined);
     payload.collection_mode = target.mode;
-    payload.ready_target = target.ready_target;
+    const savedProgress = info.target_progress && typeof info.target_progress === 'object'
+      ? info.target_progress as Record<string, unknown> : null;
+    const savedTarget = savedProgress?.ready_target;
+    payload.ready_target = typeof savedTarget === 'number' && Number.isSafeInteger(savedTarget)
+      && savedTarget > 0 && savedTarget <= target.max_candidates ? savedTarget : target.ready_target;
     if (typeof info.supply_batch_id === 'string') payload.supply_batch_id = info.supply_batch_id;
   }
 
@@ -123,8 +127,18 @@ async function resumeFailedPreview(
   if (!saved) return null;
   if (activeBaseIds.includes(saved.id)) return { ok: true, created: false, base: saved };
   const info = { ...saved.collect_info, ...(previewRecoveryKind(saved) === 'validation' ? { validation_retry: true } : {}) };
+  if (previewRecoveryKind(saved) === 'pipeline' && info.target_checkpoint?.completed_round === info.target_progress?.round) {
+    // Review saved observations from ALL completed batches; the last child
+    // alone cannot represent a pipelined preview. No re-scraping old inputs.
+    info.validation_retry = true;
+    info.relevance_review_requested = true;
+  }
   info.target_progress = { ...info.target_progress, status: 'collecting' };
   delete info.target_progress.reason;
+  if (info.preview_pipeline?.version === 1) {
+    info.preview_pipeline = { ...info.preview_pipeline, revision: info.preview_pipeline.revision + 1 };
+    delete info.preview_pipeline.error;
+  }
   const claimedAt = new Date().toISOString();
   const { data: claimed, error: claimError } = await supabase.from('ve_bases')
     .update({ status: 'collecting', error: null, collect_info: info, updated_at: claimedAt })
@@ -218,6 +232,7 @@ export async function enqueueVeBaseCollect(
       Object.assign(collectInfo, {
         collection_mode: collectionTarget.mode, ready_target: collectionTarget.ready_target,
         target_progress: { ...collectionTarget },
+        ...(collectionTarget.mode === 'preview' ? { preview_pipeline: { version: 1, revision: 0, batches: [] } } : {}),
       });
       Object.assign(jobPayload, {
         collection_mode: collectionTarget.mode, ready_target: collectionTarget.ready_target,

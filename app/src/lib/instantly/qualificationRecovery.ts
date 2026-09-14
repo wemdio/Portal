@@ -1,6 +1,7 @@
 import type { Email } from './types';
 import { getEmailRecipients } from '@/lib/clientCampaignReplies/participants';
 import { readInstantlyEmailReadDeferral } from './emailReadDeferral';
+import { decodeReplyIntakeEmail, encodeReplyIntakeEmail, ReplyIntakePayloadError } from './replyIntakePayload';
 
 export interface QualificationRecoveryState {
   id?: string | null;
@@ -72,9 +73,8 @@ export function qualificationRecoveryBackoff(
   };
 }
 
-/** A stored full inbound is usable after a provider 404, not a preview or a
- * reconstructed outbound. It still passes all normal owner/recipient guards. */
-export function captureQualificationReplySnapshot(reply: Email): Email | null {
+/** Validate the real inbound envelope independently of its storage encoding. */
+function validatedQualificationReplySnapshot(reply: Email): Email | null {
   const validAddress = (value: string | null | undefined) =>
     Boolean(value && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim()));
   const body = typeof reply.body === 'string' ? reply.body
@@ -89,7 +89,9 @@ export function captureQualificationReplySnapshot(reply: Email): Email | null {
   // rows are not full inbound snapshots; missing To/CC is not evidence of To=us.
   if (![...to, ...cc].some(recipient =>
     /[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/i.test(recipient.email))) return null;
-  if (Buffer.byteLength(body) > 1024 * 1024) return null;
+  // Match the intake codec's expanded safety ceiling. The storage encoder
+  // also checks the complete serialized payload, including metadata.
+  if (Buffer.byteLength(body) > 64 * 1024 * 1024) return null;
   return {
     id: reply.id, campaign_id: reply.campaign_id,
     from_address_email: reply.from_address_email!.trim(),
@@ -105,6 +107,20 @@ export function captureQualificationReplySnapshot(reply: Email): Email | null {
   };
 }
 
+/** Opaque full-source storage, not necessarily a plain Email body. Large
+ * replies accepted by intake must retain their source after its ACK, even if
+ * the provider later returns 404. No preview or invented To/CC is accepted. */
+export function captureQualificationReplySnapshot(reply: Email): Email | null {
+  const snapshot = validatedQualificationReplySnapshot(reply);
+  if (!snapshot) return null;
+  try {
+    return encodeReplyIntakeEmail(snapshot);
+  } catch (error) {
+    if (error instanceof ReplyIntakePayloadError) return null;
+    throw error;
+  }
+}
+
 export function qualificationReplySnapshot(row: {
   instantly_email_id?: string | null;
   lead_email?: string | null;
@@ -112,7 +128,14 @@ export function qualificationReplySnapshot(row: {
 }): Email | null {
   const value = row.reply_recovery_snapshot;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const snapshot = captureQualificationReplySnapshot(value as Email);
+  let decoded: Email;
+  try {
+    decoded = decodeReplyIntakeEmail(value as Email);
+  } catch (error) {
+    if (error instanceof ReplyIntakePayloadError) return null;
+    throw error;
+  }
+  const snapshot = validatedQualificationReplySnapshot(decoded);
   if (!snapshot || snapshot.id !== row.instantly_email_id ||
     snapshot.from_address_email?.toLowerCase() !== row.lead_email?.trim().toLowerCase()) return null;
   return snapshot;
