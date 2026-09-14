@@ -24,6 +24,9 @@ import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors'
 import { findIrrelevantRows } from '@/lib/verticalEngineV2/relevanceGate';
 import type { VeRelevanceCheckpoint } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import { createVeJobShutdown } from '@/lib/verticalEngineV2/workerLiveness';
+import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
+import { parseVeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
+import { needsVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceReserve';
 
 const schema = z.object({ ok: z.boolean() });
 
@@ -284,6 +287,31 @@ describe('llm rawCall retry', () => {
     expect(Object.values(isolated.checkpoint.semantic_reviews).map((item) => item.attempts)).toEqual([2, 2]);
     await findIrrelevantRows({ ...expanded, checkpoint: isolated.checkpoint });
     expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(needsVeRelevanceEvidence({ ...input.rows[0], _email_status: 'ok', _ve_relevance: isolated.decisions.get(0) })).toBe(false);
+
+    // Old unavailable website checks get one pass through the improved reader,
+    // without invalidating initial paid classifications or completed matches.
+    const unavailable = jest.fn().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'website_evidence_timeout' });
+    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'needs_review', reason: 'More facts needed', evidence: [] }] }));
+    const old = await findIrrelevantRows({ ...input, fetchEvidence: unavailable });
+    expect(needsVeRelevanceEvidence({ ...input.rows[0], _email_status: 'ok', _ve_relevance: old.decisions.get(0) })).toBe(false);
+    await findIrrelevantRows({ ...input, checkpoint: old.checkpoint, fetchEvidence: unavailable });
+    expect(unavailable).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const legacy = JSON.parse(JSON.stringify(old.checkpoint)) as VeRelevanceCheckpoint;
+    Object.values(legacy.website_evidence).forEach((website) => { delete website.reader_revision; website.review_attempt = 'f'.repeat(64); });
+    Object.values(legacy.verdicts).forEach((verdict) => { delete verdict.website_review_version; });
+    const legacyRow = { ...input.rows[0], _email_status: 'ok', _ve_relevance: Object.values(legacy.verdicts)[0] };
+    expect(needsVeRelevanceEvidence(legacyRow)).toBe(true);
+    const available = jest.fn().mockResolvedValue({ status: 'ok', text: description, url: 'https://factory.test/', reason: 'identity_verified_website' });
+    fetchMock.mockReset().mockResolvedValueOnce(classification).mockResolvedValueOnce(confirmation);
+    const upgraded = await findIrrelevantRows({ ...input, rows: [legacyRow], checkpoint: legacy, fetchEvidence: available });
+    expect(upgraded.decisions.get(0)?.status).toBe('relevant');
+    expect(available).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await findIrrelevantRows({ ...input, rows: [legacyRow], checkpoint: upgraded.checkpoint, fetchEvidence: available });
+    expect(available).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(jest.getTimerCount()).toBe(0);
   });
 
@@ -329,6 +357,73 @@ describe('llm rawCall retry', () => {
     await expect(search('market')).resolves.toEqual([]);
     await expect(search('market')).rejects.toThrow('search failed');
     expect(activity).toHaveBeenCalledTimes(4);
+
+    // Use the actual HTML parser and reader across industries. Facts live on
+    // nested company/locations pages, behind a distracting product menu.
+    for (const [focus, section, label, evidence] of [
+      ['Сети частных клиник', 'branches', 'Наши филиалы', 'Сеть частных клиник объединяет три филиала в разных районах города. В каждом филиале ведут приём пациентов врачи нескольких специальностей.'],
+      ['Industrial equipment manufacturers', 'manufacturing', 'Production facilities', 'Our production facilities manufacture industrial equipment in two factories. We design and build machinery for industrial customers.'],
+      ['Розничные сети мебели', 'stores', 'Наши магазины', 'Наша розничная сеть мебели включает пять собственных магазинов. Адреса магазинов и часы работы опубликованы для покупателей.'],
+    ]) {
+      const origin = 'https://business.test';
+      const html: Record<string, string> = {
+        '/': `<main>Добро пожаловать на официальный сайт нашей компании. Здесь опубликованы сведения о деятельности и контактах.</main><nav>${Array.from({ length: 90 }, (_, i) => `<a href="/products/${i}">${focus}</a>`).join('')}<a href="/contacts">Контакты</a><a href="/company">О компании</a><a href="https://foreign.test/branches">${label}</a></nav>`,
+        '/contacts': '<h1>Контакты</h1><p>Полные юридические реквизиты компании и адрес для обращений посетителей. ИНН 7700000001.</p>',
+        '/company': `<h1>О компании</h1><p>Информация о структуре нашей компании, истории развития и подразделениях представлена в отдельных разделах.</p><a href="/company/${section}">${label}</a>`,
+        [`/company/${section}`]: `<h1>${label}</h1><p>${evidence}</p>`,
+      };
+      const read = jest.fn(async (url: string) => {
+        const body = html[new URL(url).pathname];
+        if (!body || new URL(url).origin !== origin) throw new Error('website_content_unavailable');
+        return parseVeEvidencePage(Buffer.from(body), url, 'text/html; charset=utf-8', focus);
+      });
+      const search = jest.fn().mockResolvedValue([]);
+      const checked = await fetchVeRelevanceEvidence(origin, { companyInn: '7700000001', focus, fetchPage: read, search });
+      expect(checked.status).toBe('ok');
+      expect(checked.text).toContain(evidence);
+      expect(checked.text).not.toContain(Array(3).fill(focus).join(' '));
+      expect(search).not.toHaveBeenCalled();
+      expect(read.mock.calls.every(([url]) => new URL(url).origin === origin)).toBe(true);
+      expect(read.mock.calls.length).toBeLessThanOrEqual(10);
+
+      // A real conflict discovered on a later page invalidates the entire
+      // site's evidence; useful activity text cannot override wrong ownership.
+      html[`/company/${section}`] += '<footer>ИНН 7700000002</footer>';
+      const conflict = await fetchVeRelevanceEvidence(origin, { companyInn: '7700000001', focus, fetchPage: read, search });
+      expect(conflict.status).toBe('unavailable');
+      expect(conflict.text).toBe('');
+    }
+
+    const root = 'https://retry.test/';
+    const source = '<main>Мы производим промышленное оборудование на собственном заводе и поставляем его клиентам по всей стране.</main><footer>ИНН 7700000001</footer>';
+    const signals: AbortSignal[] = [];
+    const retryRead = jest.fn(async (url: string, signal: AbortSignal) => {
+      if (url !== root) throw new Error('website_content_unavailable');
+      signals.push(signal);
+      if (signals.length === 1) return new Promise<never>(() => {});
+      return parseVeEvidencePage(Buffer.from(source), url, 'text/html');
+    });
+    const retried = fetchVeRelevanceEvidence(root, { companyInn: '7700000001', fetchPage: retryRead, search: async () => [] });
+    await jest.advanceTimersByTimeAsync(5_001);
+    expect((await retried).status).toBe('ok');
+    expect(signals).toHaveLength(2);
+    expect(signals[0].aborted).toBe(true);
+
+    const stalled = jest.fn(() => new Promise<never>(() => {}));
+    const bounded = fetchVeRelevanceEvidence(root, { companyInn: '7700000001', fetchPage: stalled,
+      search: async () => [1, 2, 3].map((i) => ({ link: `https://candidate${i}.test/` })) });
+    await jest.advanceTimersByTimeAsync(40_001);
+    expect((await bounded).status).toBe('unavailable');
+    expect(stalled.mock.calls.length).toBeLessThanOrEqual(12);
+    const cancel = new AbortController();
+    const cancelled = fetchVeRelevanceEvidence(root, { signal: cancel.signal, fetchPage: stalled });
+    const cancellation = expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+    await jest.advanceTimersByTimeAsync(0);
+    const beforeCancel = stalled.mock.calls.length;
+    cancel.abort();
+    await cancellation;
+    await jest.advanceTimersByTimeAsync(40_001);
+    expect(stalled.mock.calls.length).toBe(beforeCancel);
     expect(jest.getTimerCount()).toBe(0);
   });
 });

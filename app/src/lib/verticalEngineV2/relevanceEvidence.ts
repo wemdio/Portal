@@ -6,7 +6,7 @@ import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
 import type { SerperOrganicItem } from '@/lib/search/serperClient';
 import { normalizeVeCompanyInn } from './collectionIdentity';
-import { parseVeEvidencePage, selectVeEvidenceText, type VeEvidencePage } from './relevancePage';
+import { parseVeEvidencePage, rankVeEvidenceLinks, selectVeEvidenceText, type VeEvidencePage } from './relevancePage';
 import { searchVeRelevanceWebsites, veSearchProviderFailure, VE_RELEVANCE_SEARCH_OPERATION_TIMEOUT_MS, type VeSearchProviderFailure } from './relevanceSearch';
 
 export interface VeRelevanceEvidence {
@@ -32,6 +32,7 @@ const PAGE_TIMEOUT_MS = 5_000;
 const MAX_BODY_BYTES = 1_048_576;
 const MAX_TEXT_CHARS = 6_000;
 const MAX_PAGE_READS = 10;
+const MAX_PAGE_RETRIES = 2;
 const MAX_DOMAINS = 3;
 
 function allowedUrl(value: string): URL | null {
@@ -68,8 +69,6 @@ function websiteCandidates(raw: string): URL[] {
 
 function siteHost(url: URL): string { return url.hostname.replace(/^www\./, ''); }
 const DIRECTORY_HOST = /(?:^|\.)(?:rusprofile\.ru|list-org\.com|saby\.ru|sbis\.ru|spark-interfax\.ru|companium\.ru|checko\.ru|zachestnyibiznes\.ru|egrul\.nalog\.ru|2gis\.ru|yandex\.ru|google\.com|vk\.com|ok\.ru|prodoctorov\.ru|zoon\.ru|companies\.rbc\.ru|check\.tochka\.com|e-ecolog\.ru|xfirm\.ru|tbank\.ru|ruspeach\.com)$/i;
-const LEGAL_LINK = /контакт|реквизит|правов|оферт|политик|персональн|информаци[яи] о|contact|requisit|rekvizit|privacy|legal|oferta|about|o-klinik|o-kompan/i;
-const SERVICE_LINK = /услуг|направлен|процедур|каталог|продукт|решени|service|uslug|treatment|product|solution|catalog|price|ceny/i;
 function sameOriginLinks(page: VeEvidencePage): VeEvidencePage['links'] {
   return page.links.filter((link) => {
     const url = allowedUrl(link.url);
@@ -86,6 +85,11 @@ function publicIpv4(address: string): boolean {
     || (a === 192 && (b === 168 || (b === 0 && (c === 0 || c === 2))))
     || (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100)))
     || (a === 203 && b === 0 && c === 113));
+}
+
+function transientPageFailure(error: unknown): boolean {
+  return error instanceof VeOperationTimeoutError || error instanceof Error
+    && /website_transient_http_(?:408|500|502|503|504)|\b(?:EAI_AGAIN|ETIMEDOUT|ECONNRESET|ECONNREFUSED|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET)\b|fetch failed|network error/i.test(error.message);
 }
 
 /** Narrow static-page reader. The shared website parser follows unchecked
@@ -134,6 +138,7 @@ async function fetchEvidencePage(initialUrl: URL, signal: AbortSignal, focus?: s
       const contentType = response.headers.get('content-type') ?? '';
       if (!response.ok || !/^(?:text\/(?:html|plain)|application\/xhtml\+xml)\b/i.test(contentType) || !response.body) {
         await response.body?.cancel();
+        if ([408, 500, 502, 503, 504].includes(response.status)) throw new Error(`website_transient_http_${response.status}`);
         throw new Error('website_content_unavailable');
       }
       const reader = response.body.getReader();
@@ -160,7 +165,8 @@ async function fetchEvidencePage(initialUrl: URL, signal: AbortSignal, focus?: s
   throw new Error('website_redirect_unavailable');
 }
 
-/** Bounded official-site evidence: at most 10 pages, one search, 40 seconds.
+/** Bounded official-site evidence: 10 pages + at most 2 transient retries,
+ * one search, 40 seconds. Each URL can be retried at most once.
  * Search snippets are discovery only. With a known INN, every selected domain
  * must confirm that sole INN on its own pages before any activity is returned.
  * Unavailable, conflicting or unverified identity always stays needs_review.
@@ -175,29 +181,38 @@ export async function fetchVeRelevanceEvidence(
   if (!supplied.length && !inn) return { status: 'unavailable', text: '', url: '', reason: 'missing_or_unsafe_website' };
   const pages = new Map<string, Promise<VeEvidencePage | undefined>>();
   let failed = false, timedOut = false, unverified = false, searchAttempted = false;
+  let retries = 0;
   let providerError: VeSearchProviderFailure | undefined;
   const verified = new Map<string, VeEvidencePage[]>();
   const read = async (url: URL, parent: AbortSignal): Promise<VeEvidencePage | undefined> => {
     parent.throwIfAborted();
     if (pages.has(url.href)) return pages.get(url.href);
     if (pages.size >= MAX_PAGE_READS) return undefined;
-    const task = withVeDeadline('relevance evidence page', PAGE_TIMEOUT_MS, parent, async (signal) => {
-      const page = opts.fetchPage ? await opts.fetchPage(url.href, signal)
-        : opts.fetchText ? { text: selectVeEvidenceText(await opts.fetchText(url.href), opts.focus), url: url.href, links: [], inns: [] }
-          : await fetchEvidencePage(url, signal, opts.focus);
-      signal.throwIfAborted();
-      // Offline adapters have the same destination restrictions as transport.
-      const finalUrl = allowedUrl(page.url);
-      if (!finalUrl || siteHost(finalUrl) !== siteHost(url) || (url.protocol === 'https:' && finalUrl.protocol !== 'https:')) {
-        throw new Error('website_redirect_unavailable');
+    const task = (async () => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          return await withVeDeadline('relevance evidence page', PAGE_TIMEOUT_MS, parent, async (signal) => {
+            const page = opts.fetchPage ? await opts.fetchPage(url.href, signal)
+              : opts.fetchText ? { text: selectVeEvidenceText(await opts.fetchText(url.href), opts.focus), url: url.href, links: [], inns: [] }
+                : await fetchEvidencePage(url, signal, opts.focus);
+            signal.throwIfAborted();
+            // Offline adapters have the same destination restrictions as transport.
+            const finalUrl = allowedUrl(page.url);
+            if (!finalUrl || siteHost(finalUrl) !== siteHost(url) || (url.protocol === 'https:' && finalUrl.protocol !== 'https:')) {
+              throw new Error('website_redirect_unavailable');
+            }
+            return page;
+          });
+        } catch (error) {
+          parent.throwIfAborted();
+          failed = true;
+          timedOut ||= error instanceof VeOperationTimeoutError;
+          if (attempt > 0 || retries >= MAX_PAGE_RETRIES || !transientPageFailure(error)) return undefined;
+          retries += 1;
+        }
       }
-      return page;
-    }).catch((error) => {
-      parent.throwIfAborted();
-      failed = true;
-      timedOut ||= error instanceof VeOperationTimeoutError;
       return undefined;
-    });
+    })();
     pages.set(url.href, task);
     return task;
   };
@@ -210,11 +225,15 @@ export async function fetchVeRelevanceEvidence(
         : owners.size === 1 && owners.has(inn) ? 'verified' : 'unknown';
     };
     if (inn && identity() === 'unknown') {
-      const legal = initial ? sameOriginLinks(initial).filter((link) => LEGAL_LINK.test(link.text + ' ' + link.url)).map((link) => link.url) : [];
       const base = new URL(initial?.url ?? start.href);
-      for (const href of [...new Set([...legal, new URL('/contacts', base).href])].slice(0, 2)) {
-        const url = allowedUrl(href);
-        if (!url) continue;
+      // Re-rank newly discovered legal/about links after each page, so a hub
+      // can lead to requisites without crawling unrelated navigation.
+      for (let attempt = 0; attempt < 3 && pages.size < MAX_PAGE_READS; attempt++) {
+        const legal = rankVeEvidenceLinks(sitePages.flatMap(sameOriginLinks), opts.focus, 'identity');
+        const next = [...legal, { url: new URL('/contacts', base).href, text: 'Contacts' }]
+          .find((link) => !pages.has(link.url));
+        const url = next ? allowedUrl(next.url) : null;
+        if (!url) break;
         const page = await read(url, signal);
         if (page) sitePages.push(page);
         if (identity() !== 'unknown') break;
@@ -229,14 +248,15 @@ export async function fetchVeRelevanceEvidence(
     const publish = () => verified.set(host, sitePages.filter((page) => Boolean(page.text)));
     // Preserve already verified pages if a later optional service read times out.
     publish();
-    const links = sitePages.flatMap(sameOriginLinks);
-    const serviceUrls = [...new Set(links.filter((link) => SERVICE_LINK.test(link.text + ' ' + link.url)).map((link) => link.url))];
-    const focusWords = (opts.focus?.toLowerCase().match(/[\p{L}]{5,}/gu) ?? []).map((word) => word.slice(0, 5));
-    const focused = links.filter((link) => focusWords.some((word) => (link.text + ' ' + link.url).toLowerCase().includes(word))).map((link) => link.url);
     const fallback = new URL(/\.(?:ru|xn--p1ai)$/i.test(new URL(home.url).hostname) ? '/uslugi' : '/services', home.url).href;
-    for (const href of [...new Set([...focused, ...serviceUrls, fallback])].filter((url) => !sitePages.some((page) => page.url === url)).slice(0, 2)) {
-      const url = allowedUrl(href);
+    const visited: VeEvidencePage['links'] = [];
+    for (let attempt = 0; attempt < 4 && pages.size < MAX_PAGE_READS; attempt++) {
+      const ranked = rankVeEvidenceLinks(sitePages.flatMap(sameOriginLinks), opts.focus, 'activity', visited);
+      const next = [...ranked, { url: fallback, text: 'Services' }].find((link) => !pages.has(link.url));
+      if (!next) break;
+      const url = allowedUrl(next.url);
       if (!url || url.origin !== new URL(home.url).origin) continue;
+      visited.push(next);
       const page = await read(url, signal);
       if (page) sitePages.push(page);
       if (identity() === 'conflict') { verified.delete(host); unverified = true; return []; }

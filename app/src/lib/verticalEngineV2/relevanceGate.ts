@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, getVeModel, LLMValidationError, type LLMMessage, type LLMUsage } from './llm';
 import { isVeProviderBillingError } from './collectionErrors';
 import { readRelevanceCheckpoint, relevanceHash, VeRelevanceCheckpointError, type VeRelevanceCheckpoint, type VeRelevanceFailureCode } from './relevanceCheckpoint';
-import { veRelevanceDecisionSchema, type VeRelevanceDecision } from './relevanceDecision';
+import { VE_RELEVANCE_WEBSITE_VERSION, veRelevanceDecisionSchema, type VeRelevanceDecision } from './relevanceDecision';
 import { fetchVeRelevanceEvidence } from './relevanceEvidence';
 import { normalizeVeCompanyInn, veCompanyIdentityKey } from './collectionIdentity';
 import { reviewVeRelevanceEvidence, type VeRelevanceReviewCompany, type VeRelevanceReviewResult } from './relevanceReview';
@@ -195,7 +195,7 @@ export async function findIrrelevantRows(input: {
   const checkpoint = readRelevanceCheckpoint(input.checkpoint, contextHash);
   const previousFailures = checkpoint.failures;
   checkpoint.failures = [];
-  const reviewAttempt = relevanceHash([input.reviewAttempt ?? 'automatic', 'verified-website-reader-v1']);
+  const reviewAttempt = relevanceHash([input.reviewAttempt ?? 'automatic', `verified-website-reader-v${VE_RELEVANCE_WEBSITE_VERSION}`]);
   const result: VeRelevanceGateResult = { checkpoint, retryable: false, decisions: new Map(), flagged: new Set(), unchecked: new Set(), review: new Set(), errored: new Set(),
     coverage: { checkedCompanies: 0, totalCompanies: 0, complete: false }, tokensUsed: 0, costUsd: 0 };
   const groups = groupsFor(input.rows, input.evidenceRows ?? []); result.coverage.totalCompanies = groups.length;
@@ -295,7 +295,7 @@ export async function findIrrelevantRows(input: {
   const semanticAttempts = (review: SemanticReview) => review.attempts ?? (review.status === 'pending' ? 0 : 1);
   const quarantineSemantic = (entry: Entry) => {
     record(entry, { ...errorDecision('Смысловую проверку не удалось завершить после повторной попытки; контакт сохранён в резерве.',
-      Math.max(1, entry.attempts)), status: 'needs_review' });
+      Math.max(1, entry.attempts)), status: 'needs_review', website_review_version: VE_RELEVANCE_WEBSITE_VERSION });
     finishWebsite(entry);
   };
   const semanticFailure = (entry: Entry, review: SemanticReview, code: VeRelevanceFailureCode = review.failure_code ?? 'invalid_response') => {
@@ -579,7 +579,8 @@ export async function findIrrelevantRows(input: {
       if (checkpoint.citation_repairs[entry.key] && current.get(entry)?.status === 'error') return false;
       const pendingRefinement = cached?.reader_version === 1 && cached.status === 'ok' && !cached.refined && Boolean(cached.text);
       if (pendingRefinement) return true;
-      return current.get(entry)?.status === 'needs_review' && cached?.review_attempt !== reviewAttempt;
+      return current.get(entry)?.status === 'needs_review'
+        && (cached?.review_attempt !== reviewAttempt || cached?.reader_revision !== VE_RELEVANCE_WEBSITE_VERSION);
     })
       .sort((a, b) => {
         const pendingText = (entry: Entry) => {
@@ -613,7 +614,7 @@ export async function findIrrelevantRows(input: {
             || (provider.kind === 'configuration' && !/^(?:Serper billing:|Requesty 402:)/.test(result.error))) result.error = provider.message;
           failure(entry.key, 1, provider.kind === 'transient' ? 'provider' : provider.kind);
           checkpoint.website_evidence[entry.key] = {
-            reader_version: 1, status: 'error', text: '', url: evidence.url.slice(0, 1000),
+            reader_version: 1, reader_revision: VE_RELEVANCE_WEBSITE_VERSION, status: 'error', text: '', url: evidence.url.slice(0, 1000),
             reason: provider.message.slice(0, 400), provider_error: { ...provider, message: provider.message.slice(0, 400) },
             review_attempt: reviewAttempt, review_attempts: entry.attempts, refined: true,
           };
@@ -623,7 +624,7 @@ export async function findIrrelevantRows(input: {
         entry.attempts += 1;
         const usable = evidence.status === 'ok' && Boolean(evidence.text.trim());
         checkpoint.website_evidence[entry.key] = {
-          reader_version: 1, status: evidence.status, text: usable ? evidence.text.slice(0, 6000) : '',
+          reader_version: 1, reader_revision: VE_RELEVANCE_WEBSITE_VERSION, status: evidence.status, text: usable ? evidence.text.slice(0, 6000) : '',
           url: evidence.url.slice(0, 1000), reason: evidence.reason.slice(0, 400),
           review_attempt: reviewAttempt, review_attempts: entry.attempts, refined: !usable,
         };
@@ -647,7 +648,12 @@ export async function findIrrelevantRows(input: {
     result.continueFromCheckpoint = canContinue;
   }
   for (const entry of entries) {
-    const decision = current.get(entry) ?? errorDecision('Проверка ещё не выполнена. Контакт сохранён, а не отклонён.', entry.attempts);
+    let decision = current.get(entry) ?? errorDecision('Проверка ещё не выполнена. Контакт сохранён, а не отклонён.', entry.attempts);
+    const website = checkpoint.website_evidence[entry.key];
+    if (website?.reader_revision === VE_RELEVANCE_WEBSITE_VERSION && website.refined && !website.provider_error) {
+      decision = { ...decision, website_review_version: VE_RELEVANCE_WEBSITE_VERSION };
+      record(entry, decision);
+    }
     if (decision.status !== 'error') result.coverage.checkedCompanies += 1;
     for (const index of entry.group.rowIndices) {
       result.decisions.set(index, decision);

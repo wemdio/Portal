@@ -7,6 +7,9 @@ const hashSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const websiteEvidenceSchema = z.object({
   // Old pending extracts predate identity verification and must be refetched.
   reader_version: z.literal(1).optional(),
+  // Additive discovery revision: older workers can still parse identity-checked
+  // evidence and paid verdicts during rollback/rolling deployment.
+  reader_revision: z.literal(2).optional(),
   status: z.enum(['ok', 'unavailable', 'error']),
   // Keep text only while refinement is pending. Completed checks retain their
   // attempt marker, not thousands of full website extracts in every DB write.
