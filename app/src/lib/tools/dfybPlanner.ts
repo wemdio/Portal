@@ -13,6 +13,10 @@ export interface DfybPlan {
 export interface DfybParserConfig {
   type: 'search' | 'yandex_maps' | 'hh';
   queries?: string[];
+  /** Поиск по локальному каталогу Яндекс.Карт: города и рубрики вместо живых поисковых URL. */
+  cities?: string[];
+  rubrics?: string[];
+  /** Устарело: живой парсинг по URL отключён, поле игнорируется. */
   search_urls?: string[];
   hh_config?: { text: string; area?: number };
   expected_results: number;
@@ -34,9 +38,9 @@ function buildSystemPrompt(targetCount: number): string {
    - Используй формулировки: "официальный сайт", "контакты", "email", роли ЛПР
    - Разрешены 1-2 "источниковых" запроса (каталоги/реестры)
 
-2. yandex_maps — Парсер Яндекс Карт.
-   - Вход: URL-ы поиска (формат: https://yandex.ru/maps/?text=запрос+город)
-   - Выход: сотни организаций на запрос
+2. yandex_maps — Парсер Яндекс Карт (поиск по локальному каталогу организаций).
+   - Вход: города (cities) и рубрики (rubrics)
+   - Выход: сотни организаций на пару «город × рубрика»
    - Лучше для: локальный бизнес, HoReCa, медицина, ритейл, компании с офисами
 
 3. hh — Парсер HeadHunter.
@@ -49,7 +53,7 @@ function buildSystemPrompt(targetCount: number): string {
 
 ПРАВИЛА:
 1. Для search: генерируй от 8 до 30 запросов (чем больше целевое количество — тем больше запросов)
-2. Для yandex_maps: генерируй URL-ы в формате https://yandex.ru/maps/?text=...
+2. Для yandex_maps: укажи 1-5 городов и 2-10 рубрик (названия рубрик как в Яндекс.Картах)
 3. Можно использовать 1-3 парсера в комбинации
 4. expected_results — твоя оценка количества контактов от каждого парсера
 5. Сумма expected_results должна быть >= ${rawTarget}
@@ -61,7 +65,7 @@ function buildSystemPrompt(targetCount: number): string {
   "analysis": "краткий анализ: кто заказчик, кто ЦА, стратегия сбора",
   "parsers": [
     { "type": "search", "queries": ["q1", "q2", ...], "expected_results": N },
-    { "type": "yandex_maps", "search_urls": ["url1"], "expected_results": N }
+    { "type": "yandex_maps", "cities": ["Москва", "Санкт-Петербург"], "rubrics": ["стоматология", "автосервис"], "expected_results": N }
   ],
   "personalization_prompt": "инструкция для персонализации...",
   "ta_brief": "уточненный бриф для оценки ЦА..."

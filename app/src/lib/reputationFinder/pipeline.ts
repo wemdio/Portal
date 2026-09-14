@@ -4,7 +4,8 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { computePainScore, computeConfidenceScore, classifyCandidate, type ReputationCandidate, type Classification } from './scoring';
 import { fetchLowRatedOrganizations, ymapsOrgToCandidate, type YmapsFilterConfig } from './ymapsAdapter';
 import { scanBrandSerp, serpResultToCandidate } from './serpAdapter';
-import { generateSearchUrls } from '@/lib/parsers/yandexMapsData';
+import { normalizeYandexMapsCatalogFilters } from '@/lib/parsers/yandexMapsCatalog';
+import { runYandexMapsCatalogJobInline } from '@/lib/parsers/yandexMapsCatalogJob';
 
 export interface AutoSearchConfig {
   cities: string[];
@@ -25,8 +26,10 @@ export interface JobConfig {
 
 export type ProgressCallback = (msg: string) => void;
 
-const YMAPS_POLL_INTERVAL_MS = 8_000;
-const YMAPS_POLL_TIMEOUT_MS = 20 * 60_000;
+// Тот же потолок, что был у живого парсера: фильтр «низкий рейтинг» всё равно
+// оставит от выдачи малую часть, а копировать в задачу сотни тысяч строк
+// каталога ради этого незачем.
+const CATALOG_MAX_RESULTS = 5000;
 
 async function updateJobProgress(jobId: string, stage: string, extra?: Record<string, unknown>) {
   if (!supabaseAdmin) return;
@@ -36,115 +39,37 @@ async function updateJobProgress(jobId: string, stage: string, extra?: Record<st
     .eq('id', jobId);
 }
 
-async function createAndAwaitYmapsJob(
+/**
+ * Выдача городов × рубрик из локального каталога Яндекс.Карт.
+ *
+ * Раньше здесь был живой парсинг: генерировались поисковые URL, воркер собирал
+ * ссылки и открывал карточки. Живой обход остался только у фонового
+ * пополнения каталога; поиск по городам и рубрикам каталог закрывает сам.
+ */
+async function collectFromYandexMapsCatalog(
   repJobId: string,
   userId: string,
   cities: string[],
   rubrics: string[],
   log: ProgressCallback,
 ): Promise<string> {
-  if (!supabaseAdmin) throw new Error('Supabase admin not configured');
+  const filters = normalizeYandexMapsCatalogFilters({ cities, categories: rubrics });
+  if (!filters) throw new Error('Не из чего собирать выдачу — укажите хотя бы один город или рубрику');
 
-  const searchUrls = generateSearchUrls(cities, rubrics);
-  if (searchUrls.length === 0) throw new Error('No search URLs generated — check cities/rubrics');
+  log('Поиск организаций в каталоге Яндекс.Карт...');
+  await updateJobProgress(repJobId, 'ymaps_init');
 
-  log(`Создание задачи парсинга Яндекс.Карт (${searchUrls.length} URL)...`);
-  await updateJobProgress(repJobId, `ymaps_init:${searchUrls.length}`);
+  const { jobId, organizations } = await runYandexMapsCatalogJobInline(userId, filters, CATALOG_MAX_RESULTS, {
+    onJobCreated: (createdJobId) => updateJobProgress(repJobId, 'ymaps_catalog:0', { ymaps_job_id: createdJobId }),
+    onProgress: async (collected) => {
+      log(`Каталог: собрано ${collected} организаций`);
+      await updateJobProgress(repJobId, `ymaps_catalog:${collected}`);
+    },
+  });
 
-  const { data: job, error } = await supabaseAdmin
-    .from('yandex_maps_jobs')
-    .insert({
-      user_id: userId,
-      status: 'pending',
-      config: { search_urls: searchUrls, max_results: 5000, headless: true },
-      progress_stage: 'pending',
-      proxy_enabled: false,
-    })
-    .select('id')
-    .single();
-
-  if (error || !job) throw new Error(`Failed to create ymaps job: ${error?.message ?? 'unknown'}`);
-
-  const ymapsJobId = job.id as string;
-  log(`Задача парсинга создана: ${ymapsJobId}. Ожидание сбора ссылок...`);
-  await updateJobProgress(repJobId, 'ymaps_collecting:0/' + searchUrls.length, { ymaps_job_id: ymapsJobId });
-
-  const deadline = Date.now() + YMAPS_POLL_TIMEOUT_MS;
-
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, YMAPS_POLL_INTERVAL_MS));
-
-    const { data: row } = await supabaseAdmin
-      .from('yandex_maps_jobs')
-      .select('status, progress_stage, total_links, processed_links, error_message')
-      .eq('id', ymapsJobId)
-      .single();
-
-    if (!row) throw new Error('ymaps job disappeared');
-
-    const stage = String(row.progress_stage ?? '');
-    const status = String(row.status ?? '');
-
-    if (status === 'failed') throw new Error(`Парсинг Я.Карт не удался: ${row.error_message ?? 'unknown'}`);
-
-    if (stage === 'links_collected') {
-      const msg = `Ссылки собраны (${row.total_links ?? 0}). Запуск парсинга организаций...`;
-      log(msg);
-      await updateJobProgress(repJobId, `ymaps_links_collected:${row.total_links ?? 0}`);
-
-      await supabaseAdmin
-        .from('yandex_maps_jobs')
-        .update({ status: 'pending', progress_stage: 'ready_to_parse', error_message: null })
-        .eq('id', ymapsJobId);
-
-      break;
-    }
-
-    if (status === 'completed' && stage === 'completed') {
-      log('Парсинг уже завершён.');
-      await updateJobProgress(repJobId, 'ymaps_completed');
-      return ymapsJobId;
-    }
-
-    if (stage.startsWith('collecting_links')) {
-      const progress = stage.split(':')[1] ?? '...';
-      log(`Сбор ссылок: ${progress}`);
-      await updateJobProgress(repJobId, `ymaps_collecting:${progress}`);
-    }
-  }
-
-  const parseDeadline = Date.now() + YMAPS_POLL_TIMEOUT_MS;
-  while (Date.now() < parseDeadline) {
-    await new Promise((r) => setTimeout(r, YMAPS_POLL_INTERVAL_MS));
-
-    const { data: row } = await supabaseAdmin
-      .from('yandex_maps_jobs')
-      .select('status, progress_stage, processed_organizations, error_message')
-      .eq('id', ymapsJobId)
-      .single();
-
-    if (!row) throw new Error('ymaps job disappeared');
-
-    const stage = String(row.progress_stage ?? '');
-    const status = String(row.status ?? '');
-
-    if (status === 'failed') throw new Error(`Парсинг организаций не удался: ${row.error_message ?? 'unknown'}`);
-
-    if (status === 'completed' && stage === 'completed') {
-      const msg = `Парсинг завершён (${row.processed_organizations ?? 0} организаций).`;
-      log(msg);
-      await updateJobProgress(repJobId, 'ymaps_completed');
-      return ymapsJobId;
-    }
-
-    if (stage.startsWith('parsing_organizations')) {
-      const msg = `Парсинг организаций: ${row.processed_organizations ?? 0} обработано`;
-      log(msg);
-      await updateJobProgress(repJobId, `ymaps_parsing:${row.processed_organizations ?? 0}`);
-    }
-  }
-
-  throw new Error('Таймаут ожидания парсинга Яндекс.Карт');
+  log(`Каталог отдал ${organizations} организаций.`);
+  await updateJobProgress(repJobId, 'ymaps_completed');
+  return jobId;
 }
 
 export async function runReputationPipeline(
@@ -169,7 +94,7 @@ export async function runReputationPipeline(
       if (!ac) throw new Error('autoSearch config is required for auto_search mode');
       if (!userId) throw new Error('userId is required for auto_search mode');
 
-      const ymapsJobId = await createAndAwaitYmapsJob(jobId, userId, ac.cities, ac.rubrics, log);
+      const ymapsJobId = await collectFromYandexMapsCatalog(jobId, userId, ac.cities, ac.rubrics, log);
 
       log('Фильтрация организаций по рейтингу...');
       await updateJobProgress(jobId, 'filtering');

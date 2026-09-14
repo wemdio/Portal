@@ -319,14 +319,15 @@ export const WRITE_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'launch_yandex_maps_parser',
-      description: 'Запустить парсер Яндекс.Карт. ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
+      description: 'Запустить поиск организаций Яндекс.Карт по локальному каталогу (города × рубрики). ТРЕБУЕТ ПОДТВЕРЖДЕНИЯ.',
       parameters: {
         type: 'object',
         properties: {
-          search_urls: { type: 'string', description: 'URL-ы поиска Яндекс.Карт через перенос строки' },
-          max_results: { type: 'number', description: 'Макс. организаций (по умолчанию 500)' },
+          cities: { type: 'string', description: 'Города через перенос строки или запятую' },
+          rubrics: { type: 'string', description: 'Рубрики Яндекс.Карт через перенос строки или запятую' },
+          max_results: { type: 'number', description: 'Макс. организаций (по умолчанию 5000)' },
         },
-        required: ['search_urls'],
+        required: ['cities', 'rubrics'],
       },
     },
   },
@@ -442,7 +443,7 @@ export const WRITE_TOOLS: ToolDefinition[] = [
                   type: 'string',
                   enum: ['parse_hh', 'parse_search', 'parse_yandex_maps', 'clean_names', 'enrich_emails', 'validate_emails', 'deduplicate', 'export'],
                 },
-                config: { type: 'object', description: 'Конфиг шага. parse_hh: {text, area?}. parse_search: {queries?, brief?}. parse_yandex_maps: {search_urls}. Остальные: {}.' },
+                config: { type: 'object', description: 'Конфиг шага. parse_hh: {text, area?}. parse_search: {queries?, brief?}. parse_yandex_maps: {cities: [..], rubrics: [..]} — поиск по каталогу. Остальные: {}.' },
               },
               required: ['type'],
             },

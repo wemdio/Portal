@@ -1,5 +1,5 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { generateDfybPlan, type DfybPlan } from './dfybPlanner';
+import { generateDfybPlan, type DfybPlan, type DfybParserConfig } from './dfybPlanner';
 import {
   removeEmptyRowsAndCols,
   deduplicateRows,
@@ -12,6 +12,8 @@ import {
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { fetchAndExtract } from '@/lib/enrich/websiteParser';
 import { runSearchParserJob } from '@/lib/parsers/searchParserWorker';
+import { normalizeYandexMapsCatalogFilters } from '@/lib/parsers/yandexMapsCatalog';
+import { runYandexMapsCatalogJobInline } from '@/lib/parsers/yandexMapsCatalogJob';
 import {
   generatePersonalizationCompletion, PersonalizationCancelledError, personalizationFailureMessage,
   buildPersonalizationTable, type PersonalizationRowResult,
@@ -188,25 +190,23 @@ async function runSearchParsing(queries: string[], userId: string): Promise<stri
   ]);
 }
 
-async function runYandexMapsParsing(searchUrls: string[], userId: string): Promise<string[][]> {
-  const { runYandexMapsCollectLinks, runYandexMapsParseOrganizations } = await import(
-    '@/lib/parsers/yandexMapsWorker'
-  );
+async function runYandexMapsParsing(parser: DfybParserConfig, userId: string): Promise<string[][]> {
+  // Поиск по локальному каталогу: живой парсинг Яндекс.Карт из DFYB
+  // отключён, выдачу даёт каталог (см. yandexMapsCatalogJob.ts).
+  const filters = normalizeYandexMapsCatalogFilters({
+    cities: parser.cities ?? [],
+    categories: parser.rubrics ?? [],
+  });
+  if (!filters) {
+    throw new Error('DFYB-план не содержит города или рубрики для Яндекс.Карт');
+  }
 
-  const { data: job, error } = await admin
-    .from('yandex_maps_jobs')
-    .insert({ user_id: userId, status: 'pending', config: { search_urls: searchUrls } })
-    .select()
-    .single();
-  if (error || !job) throw new Error(`Failed to create yandex maps job: ${error?.message}`);
-
-  await runYandexMapsCollectLinks(job.id);
-  await runYandexMapsParseOrganizations(job.id);
+  const { jobId } = await runYandexMapsCatalogJobInline(userId, filters, 5000);
 
   const { data: results } = await admin
     .from('yandex_maps_organizations')
     .select('name, website, email, phone, address, city, categories')
-    .eq('job_id', job.id);
+    .eq('job_id', jobId);
 
   return (results || []).map((r) => [
     r.name || '',
@@ -260,8 +260,8 @@ async function stepParse(
       let rows: string[][] = [];
       if (p.type === 'search' && p.queries?.length) {
         rows = await runSearchParsing(p.queries, userId);
-      } else if (p.type === 'yandex_maps' && p.search_urls?.length) {
-        rows = await runYandexMapsParsing(p.search_urls, userId);
+      } else if (p.type === 'yandex_maps' && ((p.cities?.length ?? 0) > 0 || (p.rubrics?.length ?? 0) > 0)) {
+        rows = await runYandexMapsParsing(p, userId);
       } else if (p.type === 'hh' && p.hh_config) {
         rows = await runHHParsing(p.hh_config);
       }
