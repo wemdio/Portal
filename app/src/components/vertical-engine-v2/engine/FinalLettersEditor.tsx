@@ -10,7 +10,7 @@ import { TemplateLeadPreview } from './steps/Step5Template';
 
 interface EditorResponse { template: VeTemplate; revision: string; editable: boolean; error?: string }
 const CTA_LABELS: Record<string, string> = { check_relevance: 'Уточнить интерес', identify_owner: 'Найти ответственного', choose_priority: 'Уточнить приоритет', confirm_timing: 'Уточнить сроки' };
-interface EditorProps { templateId: string; onSaved: () => void | Promise<void>; onDirtyChange: (dirty: boolean) => void }
+interface EditorProps { templateId: string; onSaved: () => void | Promise<void>; onDirtyChange: (dirty: boolean) => void; readOnly?: boolean }
 function editorLetters(template: VeTemplate): VeChainLetter[] {
   return template.letters.map((letter, index) => {
     const alternatives = Array.isArray(letter.variants) ? letter.variants.filter(v => v && typeof v === 'object' && typeof v.body === 'string') : [];
@@ -25,12 +25,13 @@ export function FinalLettersEditor(props: EditorProps) {
   return <FinalLettersEditorSession key={props.templateId} {...props} />;
 }
 
-function FinalLettersEditorSession({ templateId, onSaved, onDirtyChange }: EditorProps) {
+function FinalLettersEditorSession({ templateId, onSaved, onDirtyChange, readOnly = false }: EditorProps) {
   const [record, setRecord] = useState<EditorResponse | null>(null);
   const [letters, setLetters] = useState<VeChainLetter[]>([]);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const editable = !!record?.editable && !readOnly;
   const [viewSides, setViewSides] = useState<Record<number, 'A' | 'B'>>({});
   const alive = useRef(false);
   const requestSerial = useRef(0);
@@ -72,7 +73,7 @@ function FinalLettersEditorSession({ templateId, onSaved, onDirtyChange }: Edito
     setLetters(current => current.map((letter, i) => i === index ? change(letter) : letter)); setDirty(true); setError('');
   };
   const save = async () => {
-    if (!record?.editable || busyRef.current) return;
+    if (!record || !editable || busyRef.current) return;
     const normalized = normalizeVeFinalLetters(letters);
     if (!normalized.letters) { setError(normalized.error ?? 'Проверьте письма'); return; }
     const serial = ++requestSerial.current;
@@ -92,34 +93,34 @@ function FinalLettersEditorSession({ templateId, onSaved, onDirtyChange }: Edito
       if (alive.current && serial === requestSerial.current) { busyRef.current = false; setBusy(false); }
     }
   };
-  const disabled = busy || !record?.editable;
+  const disabled = busy || !editable;
   if (!record) return <StatusBox tone={error ? 'error' : 'info'}>{error || 'Загружаем итоговые письма…'}{error ? <button type="button" className={`${HE.btnGhost} ml-3`} disabled={busy} onClick={() => { setBusy(true); void load(); }}>Повторить</button> : null}</StatusBox>;
   const legacy = record.template.letters.some(letter => !letter.selected_variant);
   // Confirmation is required even when accepting A unchanged. Merely opening
   // an old version is not an edit and should not trigger an exit warning.
-  const needsSelectionConfirmation = legacy && record.editable;
+  const needsSelectionConfirmation = legacy && editable;
   return <section className="space-y-5" aria-label="Итоговые письма">
-    <p className={HE.muted}>Выберите текст A или B. У первого письма можно выбрать несколько тем — текст у этих вариантов будет одинаковым.</p>
-    {legacy && record.editable ? <StatusBox tone="info">Это ранее созданные письма. Проверьте выбранные тексты и темы, затем сохраните выбор. Не выбранный текст останется в редакторе и не пойдёт в отправку.</StatusBox> : null}
-    {record.template.letters.some(letter => (letter.variants?.length ?? 0) > 1) && record.editable ? <StatusBox tone="info">В прежней версии было больше двух текстов. В этом редакторе оставлены A и B; сохранение подтвердит отправку только выбранного текста.</StatusBox> : null}
-    {!record.editable ? <StatusBox tone="info">Эта версия уже проверяется или передана в запуск. Письма доступны для просмотра.</StatusBox> : null}
+    {!readOnly ? <p className={HE.muted}>Выберите текст A или B. У первого письма можно выбрать несколько тем — текст у этих вариантов будет одинаковым.</p> : null}
+    {legacy && editable ? <StatusBox tone="info">Это ранее созданные письма. Проверьте выбранные тексты и темы, затем сохраните выбор. Не выбранный текст останется в редакторе и не пойдёт в отправку.</StatusBox> : null}
+    {record.template.letters.some(letter => (letter.variants?.length ?? 0) > 1) && editable ? <StatusBox tone="info">В прежней версии было больше двух текстов. В этом редакторе оставлены A и B; сохранение подтвердит отправку только выбранного текста.</StatusBox> : null}
+    {!record.editable && !readOnly ? <StatusBox tone="info">Эта версия уже проверяется или передана в запуск. Письма доступны для просмотра.</StatusBox> : null}
     {letters.map((letter, index) => {
       const side = viewSides[index] ?? letter.selected_variant ?? 'A';
       const active = side === 'B' ? letter.variants?.[0] : letter;
       return <article key={index} className="border-t border-[var(--ve2-line)] pt-5 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3"><h3 className="ve2-h3">Письмо {index + 1}</h3>
-          <div className="flex flex-wrap gap-2" role="group" aria-label={`Текст письма ${index + 1} для отправки`}>
+          <div className="flex flex-wrap gap-2" role="group" aria-label={`Варианты текста письма ${index + 1}`}>
             {(['A', 'B'] as const).map(variant => <button key={variant} type="button" aria-pressed={side === variant}
               disabled={busy || (variant === 'B' && !letter.variants?.[0])}
               className={side === variant ? HE.btnPrimary : HE.btnGhost}
               onClick={() => {
                 setViewSides(current => ({ ...current, [index]: variant }));
-                if (record.editable) update(index, current => ({ ...current, selected_variant: variant }));
-              }}>Текст {variant}{record.editable ? letter.selected_variant === variant ? ' · выбран' : '' : side === variant ? ' · просмотр' : ''}</button>)}
+                if (editable) update(index, current => ({ ...current, selected_variant: variant }));
+              }}>Текст {variant}{editable ? letter.selected_variant === variant ? ' · выбран' : '' : side === variant ? ' · просмотр' : ''}</button>)}
           </div>
         </div>
         {active?.angle || active?.cta_intent ? <p className={HE.muted}>{active.angle ? `Заход: ${active.angle}` : ''}{active.angle && active.cta_intent ? ' · ' : ''}{active.cta_intent ? `Следующий шаг: ${CTA_LABELS[active.cta_intent] ?? active.cta_intent}` : ''}</p> : null}
-        {index === 0 ? <fieldset className="space-y-2"><legend className="ve2-label mb-2">Темы первого письма · выберите от одной до шести</legend>
+        {index === 0 ? <fieldset className="space-y-2"><legend className="ve2-label mb-2">Темы первого письма{editable ? ' · выберите от одной до шести' : ''}</legend>
           {letter.subject_options?.map((subject, subjectIndex) => <div key={subjectIndex} className="flex items-center gap-3">
             <input type="checkbox" className="ve2-cbx shrink-0" disabled={disabled} aria-label={`Использовать тему ${subjectIndex + 1}`}
               checked={letter.selected_subject_indices?.includes(subjectIndex) ?? false}
@@ -147,10 +148,10 @@ function FinalLettersEditorSession({ templateId, onSaved, onDirtyChange }: Edito
       </article>;
     })}
     {error ? <StatusBox tone="error">{error}</StatusBox> : null}
-    <div className="flex items-center flex-wrap gap-3"><button type="button" className={HE.btnPrimary} disabled={disabled || (!dirty && !needsSelectionConfirmation)} onClick={() => void save()}>{busy ? 'Сохраняем…' : needsSelectionConfirmation ? 'Сохранить выбор' : 'Сохранить письма'}</button>
+    {!readOnly ? <div className="flex items-center flex-wrap gap-3"><button type="button" className={HE.btnPrimary} disabled={disabled || (!dirty && !needsSelectionConfirmation)} onClick={() => void save()}>{busy ? 'Сохраняем…' : needsSelectionConfirmation ? 'Сохранить выбор' : 'Сохранить письма'}</button>
       <span className={HE.muted} role="status">{dirty ? 'Есть несохранённые изменения' : needsSelectionConfirmation ? 'Выбор ещё не подтверждён' : 'Письма сохранены'}</span>
       {dirty ? <button type="button" className={HE.btnGhost} disabled={busy} onClick={() => { if (window.confirm('Отменить несохранённые изменения?')) { setBusy(true); void load(); } }}>Отменить правки</button> : null}
-    </div>
+    </div> : null}
     {!dirty && !needsSelectionConfirmation ? <TemplateLeadPreview key={record.revision} template={record.template} baseId={record.template.base_id} /> : <p className={HE.muted}>Сохраните выбор и правки, чтобы проверить итоговое письмо на получателе.</p>}
   </section>;
 }

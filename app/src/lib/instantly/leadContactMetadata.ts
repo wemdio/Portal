@@ -25,7 +25,7 @@ const WEBSITE_KEYS = ['website', 'company_website', 'website_url', 'company_url'
   'сайт компании', 'ссылка на сайт', 'веб-сайт', 'интернет-сайт'];
 const DOMAIN_KEYS = ['company_domain', 'domain', 'домен', 'домен компании'];
 const NON_COMPANY_DOMAINS = ['linkedin.com', 'facebook.com', 'instagram.com', 'twitter.com',
-  'x.com', 'youtube.com', 'youtu.be', 't.me', 'telegram.me', 'wa.me', 'whatsapp.com',
+  'x.com', 'youtube.com', 'youtu.be', 't.me', 'telegram.me', 'wa.me', 'whatsapp.com', 'aka.ms',
   'vk.com', 'ok.ru', 'max.ru', 'bit.ly', 'tinyurl.com', 'goo.gl', 'clck.ru'];
 
 const normalizeKey = (value: string) => value.replace(/№/g, '').normalize('NFKC').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9]/g, '').replace(/\d+$/, '');
@@ -120,6 +120,8 @@ function firstField(
 function companyValue(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const text = cleanValue(value);
+  // Instantly's top-level organization is the workspace UUID, not the company.
+  if (text && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(text)) return null;
   return text && /\p{L}/u.test(text) && !/^(?:ооо|оао|пао|зао|ао|ип|llc|ltd|company name|название компании)$/i.test(text) && !/^(?:https?:|www\.)|@/i.test(text)
     ? text.slice(0, 200) : null;
 }
@@ -132,6 +134,7 @@ function phoneValue(value: unknown): string | null {
   const phones = String(value).split(/[;,/\n]+/).flatMap((part) => {
     const formatted = part.trim().replace(/^(?:телефон|тел\.?|phone|mobile|telephone)\s*[:.]?\s*/i, '').trim();
     const number = formatted.replace(/\s*(?:доб\.?|ext\.?|extension|x)\s*\d+\s*$/i, '').trim();
+    if (/^\d{1,2}[.:]\d{2}\s*[-–—]\s*\d{1,2}[.:]\d{2}$/.test(number)) return [];
     if (!/^\+?[\d ()\-.]+$/.test(number) || /^(?:\d{4}[-./]\d{1,2}[-./]\d{1,2}|\d{1,2}[-./]\d{1,2}[-./]\d{4})$/.test(number)) return [];
     const digits = number.replace(/\D/g, '');
     if (digits.length < 7 || digits.length > 15 || /^(\d)\1+$/.test(digits)) return [];
@@ -171,11 +174,15 @@ export function normalizeLeadWebsite(value: unknown): string | null {
 /** Local only: same API lookup, no extra AI/crawl/Instantly calls or DB writes. */
 export function resolveLeadContactMetadata(input: {
   leads: readonly Lead[];
+  cachedLeads?: readonly Lead[];
   leadEmail: string;
   campaignId: string;
   replyBody: Email['body'];
 }): LeadContactMetadata {
-  const sources = matchedLeads(input.leads, input.leadEmail, input.campaignId).flatMap(sourcesForLead);
+  const sources = [
+    ...matchedLeads(input.leads, input.leadEmail, input.campaignId),
+    ...matchedLeads(input.cachedLeads ?? [], input.leadEmail, input.campaignId),
+  ].flatMap(sourcesForLead);
   let reply: LeadReplyContacts = { bodyPhone: null, signaturePhone: null, companyName: null, website: null };
   try {
     reply = extractLeadReplyContacts(input.replyBody);

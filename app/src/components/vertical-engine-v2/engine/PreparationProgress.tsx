@@ -7,6 +7,7 @@ import { collectCount, getCollectionProgress } from './collectionProgress';
 import { HE, StatusDot } from './design';
 
 interface PreparationProgressProps {
+  context?: 'letters' | 'base';
   preparation?: VeOutreachPreparation | null;
   base?: VeBaseSummary | null;
   /** Project detail supplies jobs newest first; its history is intentionally bounded. */
@@ -39,11 +40,16 @@ const COLLECT_PHASES: Record<ReturnType<typeof getCollectionProgress>['phase'], 
 };
 
 /** Queue evidence takes precedence over snapshots left by a previous attempt. */
-export function getPreparationPresentation({ preparation, base, jobs }: PreparationProgressProps): PreparationPresentation {
+export function getPreparationPresentation({ preparation, base, jobs, context = 'base' }: PreparationProgressProps): PreparationPresentation {
   if (!preparation) return {
     title: 'Подготовка ещё не запущена',
     description: 'Выберите гипотезы и запустите подготовку. Система соберёт и проверит базу, разберёт её состав и подготовит письма.',
     currentStep: null, tone: 'muted',
+  };
+  if (context === 'letters' && base?.status === 'failed') return {
+    title: 'Письма ждут завершения подготовки базы',
+    description: 'Подготовка остановилась до генерации писем. Причина и продолжение сбора доступны на шаге «Базы и объём».',
+    currentStep: 0, tone: 'muted',
   };
   if (preparation.status === 'error') return {
     title: 'Подготовка остановлена',

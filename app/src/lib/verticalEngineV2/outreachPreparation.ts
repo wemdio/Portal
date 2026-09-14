@@ -7,8 +7,9 @@ class PreparationLeaseLost extends Error {}
 type ClaimedPreparation = VeOutreachPreparation & { claim_token: string };
 
 /** Advances durable user-requested preparation. No paid calls in this coordinator. */
-export async function runVeOutreachPreparations(db: SupabaseClient): Promise<void> {
+export async function runVeOutreachPreparations(db: SupabaseClient, shouldStop: () => boolean = () => false): Promise<void> {
   for (let n = 0; n < 2; n++) {
+    if (shouldStop()) return;
     const claimed = await db.rpc('ve_claim_outreach_preparation');
     if (claimed.error) throw new Error(claimed.error.message);
     const p = (claimed.data as ClaimedPreparation[] | null)?.[0];

@@ -22,6 +22,8 @@ import type { VeStageContext } from '@/lib/verticalEngineV2/stages/shared';
 import { isRetryableStageError, maxAttemptsFor } from '@/lib/verticalEngineV2/jobRetry';
 import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors';
 import { findIrrelevantRows } from '@/lib/verticalEngineV2/relevanceGate';
+import type { VeRelevanceCheckpoint } from '@/lib/verticalEngineV2/relevanceCheckpoint';
+import { createVeJobShutdown } from '@/lib/verticalEngineV2/workerLiveness';
 
 const schema = z.object({ ok: z.boolean() });
 
@@ -197,6 +199,35 @@ describe('llm rawCall retry', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     await expect(callLLMText([], { model: 'test-model' })).rejects.toMatchObject({ name: 'AbortError' });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(jest.getTimerCount()).toBe(0);
+
+    // Deployment yields after the reserved paid review has saved its result,
+    // never between reserving that review and actually sending its request.
+    setVeActiveJobSignal(null);
+    const abort = new AbortController();
+    const shutdown = createVeJobShutdown({ abort, graceMs: 240_000, onDeadline: jest.fn() });
+    const description = 'Manufactures industrial equipment';
+    fetchMock.mockReset()
+      .mockResolvedValueOnce(httpResponse(200, { choices: [{ message: { content: JSON.stringify({ decisions: [
+        { i: 0, status: 'relevant', reason: 'Manufactures equipment', evidence: [{ field: 'description', quote: description }] },
+      ] }) } }] }))
+      .mockResolvedValueOnce(httpResponse(200, { choices: [{ message: { content: JSON.stringify({ reviews: [
+        { i: 0, result: 'direct_match', reason: 'Manufactures industrial equipment' },
+      ] }) } }] }));
+    const input = { rows: [{ company: 'Factory', inn: '7700000001', description }], verticalName: 'Equipment', language: 'en' as const };
+    let saved: VeRelevanceCheckpoint | undefined;
+    await expect(findIrrelevantRows({ ...input, signal: abort.signal, onCheckpoint: async (checkpoint, options) => {
+      saved = JSON.parse(JSON.stringify(checkpoint)) as VeRelevanceCheckpoint;
+      if (options?.canYield === false) shutdown.request();
+      else shutdown.checkpoint();
+    } })).rejects.toMatchObject({ name: 'VeWorkerShutdownError' });
+    shutdown.stop();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(Object.values(saved!.semantic_reviews)).toEqual([expect.objectContaining({ status: 'finished' })]);
+    const resumed = await findIrrelevantRows({ ...input, checkpoint: saved });
+    expect(resumed.decisions.get(0)?.status).toBe('relevant');
+    expect(resumed.coverage.complete).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(jest.getTimerCount()).toBe(0);
   });
 
