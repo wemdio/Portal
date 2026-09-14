@@ -830,7 +830,8 @@ export function BaseRow({ base, job, hypothesisTitle, queued, onUpdated }: { bas
       && row._low_relevance !== true && row._relevance_unchecked !== true))
     .slice(0, PREVIEW_ROWS);
   const hasReadyContacts = previewRows.length > 0 || (base.collect_info?.target_progress?.ready_rows ?? 0) > 0;
-  const partialPreview = isReadyPreview && base.status === 'collecting';
+  const partialPreview = isReadyPreview && base.status === 'collecting'
+    && (base.collect_info?.target_progress?.ready_rows ?? 0) < VE_PREVIEW_READY_TARGET;
 
   const handleReview = useCallback(async () => {
     if (reviewStarting || base.status === 'collecting') return;

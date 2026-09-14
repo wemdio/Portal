@@ -1075,6 +1075,12 @@ export async function fetchWebsiteEmails(
  * Fetch the main page and about page of a website and return combined extracted text.
  * About pages are prioritised: fetched first and placed first in the output.
  */
+/** Same sufficiency rule as fetchAndExtract; short pages still need its fallbacks. */
+export function reusableMainPageDescription(html: string): string {
+  const text = extractTextFromHtml(html);
+  return text.length >= MIN_MAIN_TEXT_TO_SKIP_ABOUT ? text.slice(0, MAX_TEXT_LENGTH) : '';
+}
+
 export async function fetchAndExtract(
   rawUrl: string,
   options?: { timeout?: number; signal?: AbortSignal },

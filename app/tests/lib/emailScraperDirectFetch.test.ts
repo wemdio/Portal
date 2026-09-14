@@ -7,6 +7,7 @@
  */
 
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
+import { reusableMainPageDescription } from '@/lib/enrich/websiteParser';
 
 describe('emailScraper direct fetching', () => {
   const originalFetch = global.fetch;
@@ -23,7 +24,7 @@ describe('emailScraper direct fetching', () => {
     jest.useFakeTimers();
     process.env.PROXY_URLS = 'http://user:pass@slow-proxy.invalid:8000';
     const fetchMock = jest.fn(async (_url: unknown, _init?: RequestInit) => {
-      return new Response('<html><body>sales@acme.ru</body></html>', {
+      return new Response(`<html><body><p>${'We manufacture medical equipment for private clinics. '.repeat(8)}</p>sales@acme.ru</body></html>`, {
         status: 200,
         headers: { 'content-type': 'text/html; charset=utf-8' },
       });
@@ -34,9 +35,13 @@ describe('emailScraper direct fetching', () => {
       timeout: 1_000,
       maxPages: 1,
       stopAtFirstUsableEmail: true,
+      includeDescription: true,
     });
 
     expect(result.emails).toEqual(['sales@acme.ru']);
+    expect(result.description).toContain('manufacture medical equipment');
+    expect(reusableMainPageDescription('<html><body>Contact us</body></html>')).toBe('');
+    expect(reusableMainPageDescription('<html><script>' + 'business '.repeat(100) + '</script><body>Hi</body></html>')).toBe('');
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][1]).not.toHaveProperty('dispatcher');
     expect(jest.getTimerCount()).toBe(0);

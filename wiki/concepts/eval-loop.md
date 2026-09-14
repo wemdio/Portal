@@ -1,5 +1,7 @@
 # Self-Improving Eval Loop
 
+**Execution boundary (2026-09-13):** production writes require explicit authorization under the root `AGENTS.md`. Without it, use a sanitized local session record via the [portal-memory skill](../../.agents/skills/portal-memory/SKILL.md). Local review and knowledge improvements can proceed without a DB write; the SQL below describes the authorized DB-backed workflow.
+
 Inspired by [Tom Blomfield's YC talk (4:12)](https://www.youtube.com/watch?v=X_JsIHUfUjc) on building self-improving companies. Adapted to our scale: human-in-the-loop weekly, not fully autonomous (yet).
 
 ---

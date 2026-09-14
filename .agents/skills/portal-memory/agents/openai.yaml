@@ -1,0 +1,4 @@
+interface:
+  display_name: "Память Portal"
+  short_description: "Опыт разработки Движка и аналитики Instantly"
+  default_prompt: "Используй $portal-memory: найди релевантные выводы для текущей задачи Portal или разбери накопленные ошибки и предложи обновления памяти."

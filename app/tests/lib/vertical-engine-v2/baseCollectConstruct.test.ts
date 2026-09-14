@@ -65,6 +65,9 @@ import {
 import { searchRows } from '@/lib/companiesSearch/rpcSearch';
 import { enqueueVeBaseCollect } from '@/lib/verticalEngineV2/baseCollectEnqueue';
 import { callLLMWithSchema } from '@/lib/verticalEngineV2/llm';
+import { stripTaskHarvest } from '@/lib/verticalEngineV2/projectDetail';
+import { VePreviewCheckpointConflict } from '@/lib/verticalEngineV2/relevanceCheckpoint';
+import { createVeJobShutdown, VeWorkerShutdownError } from '@/lib/verticalEngineV2/workerLiveness';
 
 const PROJECT = { id: 'p1', name: 'P', created_by: 'user-1', market: 'ru' };
 const VERTICAL = {
@@ -402,6 +405,165 @@ describe('base_collect CONSTRUCT step order', () => {
           columns: completed.columns as string[], source: 'auto' }).rows).toHaveLength(500);
       }
     }
+
+    // New previews overlap sources and durable constructor batches. An old
+    // slow batch cannot block checked output from its completed neighbours.
+    for (const failFirst of [false, true]) {
+      const fastInfo: VeCollectInfo = { ...collectInfo(harvest), collection_mode: 'preview',
+        target_progress: createCollectionTarget('preview'),
+        preview_pipeline: { version: 1, revision: 0, batches: [] } };
+      fastInfo.tasks!.push({ source: 'hh_live', status: 'dispatched', child_job_id: 'slow-hh', rows: 0,
+        task: { source: 'hh_live', rationale: 'Parallel source', hh_query: { text: 'клиники' } }, dispatched_at: new Date().toISOString() });
+      const db = seed(fastInfo, { parser_jobs: [{ id: 'slow-hh', status: 'running' }] });
+      const wake = async () => {
+        await db.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+        return runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
+      };
+      const finishChild = async (id: unknown, failed = false) => {
+        const child = db.getRows('base_constructor_jobs').find((row) => row.id === id)!;
+        const input = child.data as string[][];
+        await db.from('base_constructor_jobs').update({ status: failed ? 'failed' : 'completed',
+          data: [[...input[0], 'Email Статус'], ...input.slice(1).map((row) => [...row, failed ? 'invalid' : 'ok'])] }).eq('id', id);
+      };
+      await wake();
+      const children = db.getRows('base_constructor_jobs');
+      expect(children).toHaveLength(2);
+      expect(children.every((row) => (row.data as string[][]).length === 101)).toBe(true);
+      expect(children[0].step_config).toMatchObject({ queue_class: 'interactive_preview',
+        find_emails: { reuse_website_description: true, stop_at_first: false, max_per_site: null } });
+      const slowId = children[0].id;
+      const completedId = children[1].id;
+      await finishChild(completedId, failFirst);
+      // Simulate death after child INSERT committed, before the parent saved
+      // its acknowledgement. Replaying the reservation must preserve output.
+      const parentInfo = structuredClone(db.getRows('ve_bases')[0].collect_info) as VeCollectInfo;
+      parentInfo.preview_pipeline!.batches[1].inserted = false;
+      await db.from('ve_bases').update({ collect_info: parentInfo }).eq('id', 'b1');
+      await wake();
+      expect(db.getRows('base_constructor_jobs')).toHaveLength(2);
+      expect(db.getRows('base_constructor_jobs')[1].status).toBe(failFirst ? 'failed' : 'completed');
+      expect(db.getRows('ve_bases')[0].row_count).toBe(failFirst ? 0 : 100);
+      expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).preview_pipeline!.batches.map((batch) => batch.id)).toEqual([slowId]);
+      if (!failFirst) {
+        for (let tick = 0; tick < 12 && ((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).target_progress?.ready_rows ?? 0) < 500; tick++) {
+          const next = db.getRows('base_constructor_jobs').find((row) => row.id !== slowId && row.status === 'pending');
+          if (next) await finishChild(next.id);
+          await wake();
+        }
+        expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).target_progress?.ready_rows).toBe(500);
+        const purchased = db.getRows('base_constructor_jobs').length;
+        await wake();
+        expect(db.getRows('base_constructor_jobs')).toHaveLength(purchased);
+      }
+      await finishChild(slowId);
+      await wake();
+      const result = db.getRows('ve_bases')[0];
+      expect(result.status).toBe(failFirst ? 'failed' : 'analyzing');
+      const rows = prepareSegmentationAudience({ rows: result.data as Record<string, unknown>[],
+        columns: result.columns as string[], source: 'auto' }).rows;
+      expect(rows).toHaveLength(failFirst ? 100 : 600);
+      expect(new Set(rows.map((row) => row.email)).size).toBe(rows.length);
+      expect((result.collect_info as VeCollectInfo).preview_pipeline!.batches).toEqual([]);
+      expect((result.collect_info as VeCollectInfo).target_progress).toMatchObject({
+        candidates_processed: failFirst ? 200 : 600, status: failFirst ? 'error' : 'target_reached',
+      });
+      expect(db.getRows('base_constructor_jobs').every((row) => row.status !== 'pending')).toBe(true);
+      expect(stripTaskHarvest(result).collect_info).not.toHaveProperty('preview_pipeline');
+      if (failFirst) {
+        await db.from('ve_jobs').update({ status: 'failed' }).eq('id', makeJob().id);
+        const resumed = await enqueueVeBaseCollect(db as unknown as SupabaseClient, {
+          projectId: 'p1', verticalId: 'v1', verticalName: VERTICAL.name,
+          hypothesisIds: ['h1'], collectionMode: 'preview', limit: 2000,
+        });
+        expect(resumed).toMatchObject({ ok: true, created: true, base: { id: 'b1' } });
+        expect(db.getRows('ve_bases')).toHaveLength(1);
+        const recoveredInfo = db.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+        expect(recoveredInfo).toMatchObject({ relevance_review_requested: true, validation_retry: true });
+        expect(recoveredInfo.preview_pipeline).not.toHaveProperty('error');
+        expect(db.getRows('base_constructor_jobs')).toHaveLength(2);
+        const retry = db.getRows('ve_jobs').find((row) => row.id !== makeJob().id && row.stage === 'base_collect')!;
+        await db.from('ve_jobs').update({ status: 'running' }).eq('id', retry.id);
+        await runBaseCollectStage({ ...makeJob(), id: retry.id as string, payload: retry.payload as VeJob['payload'] },
+          { supabase: db as unknown as SupabaseClient });
+        expect(db.getRows('base_constructor_jobs')).toHaveLength(2);
+        expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).target_progress)
+          .toMatchObject({ candidates_processed: 200, ready_rows: 100, status: 'collecting' });
+      }
+    }
+
+    const raceInfo: VeCollectInfo = { ...collectInfo(harvest.slice(0, 2)), collection_mode: 'preview',
+      target_progress: createCollectionTarget('preview'), preview_pipeline: { version: 1, revision: 0, batches: [] } };
+    raceInfo.tasks![0].exhausted = true;
+    const raceDb = seed(raceInfo);
+    await runBaseCollectStage(makeJob(), { supabase: raceDb as unknown as SupabaseClient });
+    const raceChild = raceDb.getRows('base_constructor_jobs')[0];
+    const raceGrid = raceChild.data as string[][];
+    await raceDb.from('base_constructor_jobs').update({ status: 'completed',
+      data: [[...raceGrid[0], 'Email Статус'], ...raceGrid.slice(1).map((row) => [...row, 'ok'])] }).eq('id', raceChild.id);
+    const classify = mockFindIrrelevantRows.getMockImplementation()!;
+    let winnerInfo: VeCollectInfo | undefined;
+    mockFindIrrelevantRows.mockImplementationOnce(async (input) => {
+      const newer = structuredClone(raceDb.getRows('ve_bases')[0].collect_info) as VeCollectInfo;
+      newer.preview_pipeline!.revision++;
+      winnerInfo = structuredClone(newer);
+      await raceDb.from('ve_bases').update({ collect_info: newer }).eq('id', 'b1');
+      return classify(input);
+    });
+    await raceDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+    await expect(runBaseCollectStage(makeJob(), { supabase: raceDb as unknown as SupabaseClient }))
+      .rejects.toBeInstanceOf(VePreviewCheckpointConflict);
+    expect(raceDb.getRows('ve_bases')[0].data).toEqual([]);
+    expect(raceDb.getRows('ve_bases')[0].collect_info).toEqual(winnerInfo);
+    await raceDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+    await runBaseCollectStage(makeJob(), { supabase: raceDb as unknown as SupabaseClient });
+    expect(raceDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    expect((raceDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).target_progress)
+      .toMatchObject({ ready_rows: 2, candidates_processed: 2, status: 'exhausted' });
+
+    const rolling = seed({ ...collectInfo(harvest, { bc_job_id: 'old-worker-child', status: 'dispatched' }),
+      collection_mode: 'preview', target_progress: createCollectionTarget('preview'),
+      preview_pipeline: { version: 1, revision: 0, batches: [] } },
+    { base_constructor_jobs: [{ id: 'old-worker-child', status: 'pending' }] });
+    await runBaseCollectStage(makeJob(), { supabase: rolling as unknown as SupabaseClient });
+    expect(rolling.getRows('base_constructor_jobs')).toHaveLength(1);
+    expect(rolling.getRows('ve_bases')[0].collect_info).not.toHaveProperty('preview_pipeline');
+
+    const stopInfo: VeCollectInfo = { ...collectInfo(harvest.slice(0, 2)), collection_mode: 'preview',
+      target_progress: createCollectionTarget('preview'), preview_pipeline: { version: 1, revision: 0, batches: [] } };
+    stopInfo.tasks![0].exhausted = true;
+    const stopDb = seed(stopInfo);
+    const controller = new AbortController();
+    const shutdown = createVeJobShutdown({ abort: controller, graceMs: 1000, onDeadline: jest.fn() });
+    try {
+      await expect(runBaseCollectStage(makeJob(), { supabase: stopDb as unknown as SupabaseClient,
+        signal: controller.signal, onCheckpoint: () => {
+          // SIGTERM after child INSERT: acknowledge its durable identity before yielding.
+          if (stopDb.getRows('base_constructor_jobs').length) shutdown.request();
+          shutdown.checkpoint();
+        } })).rejects.toBeInstanceOf(VeWorkerShutdownError);
+    } finally { shutdown.stop(); }
+    const savedChild = stopDb.getRows('base_constructor_jobs')[0];
+    expect((stopDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).preview_pipeline!.batches[0])
+      .toMatchObject({ id: savedChild.id, inserted: true });
+    expect(stopDb.getRows('ve_jobs')[0]).toMatchObject({ status: 'running' });
+    expect(stopDb.getRows('ve_bases')[0]).toMatchObject({ status: 'collecting' });
+    const savedGrid = savedChild.data as string[][];
+    await stopDb.from('base_constructor_jobs').update({ status: 'completed',
+      data: [[...savedGrid[0], 'Email Статус'], ...savedGrid.slice(1).map(row => [...row, 'ok'])] }).eq('id', savedChild.id);
+    const stopAfterGate = new AbortController();
+    const gateShutdown = createVeJobShutdown({ abort: stopAfterGate, graceMs: 1000, onDeadline: jest.fn() });
+    mockFindIrrelevantRows.mockImplementationOnce(async input => { gateShutdown.request(); return classify(input); });
+    try {
+      await expect(runBaseCollectStage(makeJob(), { supabase: stopDb as unknown as SupabaseClient,
+        signal: stopAfterGate.signal, onCheckpoint: gateShutdown.checkpoint })).rejects.toBeInstanceOf(VeWorkerShutdownError);
+    } finally { gateShutdown.stop(); }
+    const classifiedCalls = mockFindIrrelevantRows.mock.calls.length;
+    expect(stopDb.getRows('ve_bases')[0]).toMatchObject({ status: 'collecting', row_count: 2 });
+    await runBaseCollectStage(makeJob(), { supabase: stopDb as unknown as SupabaseClient });
+    expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(classifiedCalls);
+    expect(stopDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    expect((stopDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).target_progress)
+      .toMatchObject({ ready_rows: 2, candidates_processed: 2, status: 'exhausted' });
   });
 
   it('resumes a supply target from committed ready rows without revalidating the previous round', async () => {

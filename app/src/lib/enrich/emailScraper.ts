@@ -616,6 +616,8 @@ export type ScrapeEmailsResult = {
   /** Кандидат-название компании с главной страницы (og:site_name / <title>).
    *  Сырое — финальная чистка делается отдельно (AI cleanCompanyNames). */
   siteName: string | null;
+  /** Opt-in, extracted with the description parser's existing sufficiency rule. */
+  description?: string;
 };
 
 /**
@@ -656,6 +658,7 @@ export async function scrapeEmails(
      * Пробрасывается из stepFindEmails (job.locale конструктора баз).
      */
     locale?: 'ru' | 'en';
+    includeDescription?: boolean;
   },
 ): Promise<ScrapeEmailsResult> {
   const url = normalizeUrl(rawUrl);
@@ -708,6 +711,11 @@ export async function scrapeEmails(
   // Название компании берём с главной (og:site_name / <title>) — бесплатно,
   // страница уже загружена. Используется как фоллбек когда нет имени из ФНС.
   const siteName = mainHtml ? extractSiteName(mainHtml) : null;
+  let description: string | undefined;
+  if (options?.includeDescription && mainHtml) {
+    try { description = (await import('@/lib/enrich/websiteParser')).reusableMainPageDescription(mainHtml); }
+    catch { /* Optional enrichment must never discard discovered email addresses. */ }
+  }
 
   // Discover internal links from main page
   let discoveredLinks: string[] = [];
@@ -726,6 +734,7 @@ export async function scrapeEmails(
         checkedUrls,
         pagesScanned: checkedUrls.length,
         siteName,
+        ...(description ? { description } : {}),
       };
     }
     discoveredLinks = await discoverEmailPageLinks(mainHtml, url);
@@ -781,5 +790,6 @@ export async function scrapeEmails(
     checkedUrls,
     pagesScanned: checkedUrls.length,
     siteName,
+    ...(description ? { description } : {}),
   };
 }

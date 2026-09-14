@@ -14,6 +14,9 @@ export interface LeadReplyContacts {
 const HISTORY_BOUNDARIES = [
   /^>/,
   /^On\s+.+\s+wrote:\s*$/i,
+  /^On\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s/i,
+  /^(?:Van|Verzonden|Aan|Onderwerp|De|Envoyé|À|Objet|Von|Gesendet|An|Betreff):\s+.+$/iu,
+  /^\d{1,2}[./-]\d{1,2}[./-]\d{2,4},?\s+\d{1,2}:\d{2}.*(?:@|mailto:)/iu,
   /^(?:От|От кого|From|Sent|Отправлено|Кому|To|Subject|Тема):\s+.+$/i,
   /^(?:[-_=]{2,}\s*)?(?:Original Message|Forwarded Message|Исходное сообщение|Пересланное сообщение|Перенаправленное сообщение|Пересылаемое сообщение)(?::)?(?:\s*[-_=]{2,})?$/i,
   /^Begin forwarded message:\s*$/i,
@@ -35,7 +38,7 @@ const NON_COMPANY_DOMAINS = [
   't.me', 'telegram.me', 'wa.me', 'whatsapp.com', 'vk.com', 'ok.ru',
   'facebook.com', 'instagram.com', 'linkedin.com', 'youtube.com',
   'twitter.com', 'x.com', 'linktr.ee', 'bit.ly', 'tinyurl.com',
-  '2gis.ru', 'maps.google.com', 'safelinks.protection.outlook.com',
+  '2gis.ru', 'maps.google.com', 'safelinks.protection.outlook.com', 'aka.ms',
 ];
 
 function currentLines(text: string): string[] {
@@ -63,6 +66,12 @@ function companyWebsite(raw: string): string | null {
 }
 
 function websitesInLine(line: string): string[] {
+  // A mail client can render "first.last <mailto:first.last@host> @host".
+  // The display label must not be interpreted as a company website.
+  line = line.replace(/[^\s<>]+\s*<mailto:[^>]+>\s*(?:@[^\s<>]+)?/giu, '')
+    .replace(/mailto:[^\s<>]+/giu, '')
+    .replace(/[^\s<>]+\s+@[^\s<>]+/gu, '')
+    .replace(/[^\s<>]+@[^\s<>]+/gu, '');
   return [...line.matchAll(URL_CANDIDATE)]
     .filter((match) => line[match.index + match[0].length] !== '@')
     .map((match) => companyWebsite(match[0]))
@@ -86,6 +95,10 @@ function htmlText(html: string): string {
   $('a[href]').each((_, anchor) => {
     const node = $(anchor);
     const href = (node.attr('href') ?? '').trim();
+    if (/^mailto:/i.test(href)) {
+      node.remove();
+      return;
+    }
     const visible = node.text().trim();
     const tel = /^tel:/i.test(href) ? href.replace(/^tel:/i, '').split(/[;?]/)[0] : null;
     const site = /^https?:\/\//i.test(href) ? companyWebsite(href) : null;
@@ -105,6 +118,7 @@ function phoneInLine(line: string, signature: boolean): string | null {
   const withoutExtensions = line.replace(/(?:доб(?:авочный)?\.?|ext(?:ension)?\.?|\bx)\s*[:.#]?\s*\d{1,6}/giu, '');
   for (const match of withoutExtensions.matchAll(PHONE_CANDIDATE)) {
     const value = match[0].trim();
+    if (/^\d{1,2}[.:]\d{2}\s*[-–—]\s*\d{1,2}[.:]\d{2}$/.test(value)) continue;
     const digits = value.replace(/\D/g, '');
     if (digits.length < 7 || digits.length > 15 || /^(\d)\1+$/.test(digits)) continue;
     const before = withoutExtensions.slice(0, match.index);
@@ -125,6 +139,7 @@ function phoneInLine(line: string, signature: boolean): string | null {
 }
 
 function explicitCompany(line: string): string | null {
+  if (/(?:переписк|конфиденциал|подлежит|disclaimer|confidential)/iu.test(line)) return null;
   if (/(?:^|\s)(?:оказывает|предоставляет|предлагает|производит|занимается|работает|осуществляет|поставляет|является|provides|offers|specializes|manufactures|works|delivers)(?:\s|$)/iu.test(line)) return null;
   const label = /^(?:компания|организация|company|organisation|organization)\s*:\s*(.+)$/iu.exec(line);
   const legal = /^(?:(?:ООО|АО|ПАО|ЗАО|ОАО|ИП|НКО|АНО|LLC|LTD|GmbH)\s+.+|.{2,80}\s+(?:LLC|Ltd\.?|Inc\.?|Corp\.?|GmbH|Limited|Corporation))$/iu.test(line);
@@ -159,7 +174,8 @@ function extractFromText(text: string): LeadReplyContacts {
   }
   const body = signatureStart < 0 ? lines : lines.slice(0, signatureStart);
   const signature = signatureStart < 0 ? [] : lines.slice(signatureStart);
-  const signatureSite = signature.flatMap(websitesInLine)[0] ?? null;
+  const signatureSite = signature.filter((line) => WEBSITE_LABEL.test(line)).flatMap(websitesInLine)[0]
+    ?? signature.flatMap(websitesInLine)[0] ?? null;
   const bodySite = body.flatMap((line) => {
     const sites = websitesInLine(line);
     const standalone = line.replace(URL_CANDIDATE, '').replace(/[\s<>()[\],;:.-]/g, '') === '';

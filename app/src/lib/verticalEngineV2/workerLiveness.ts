@@ -1,3 +1,39 @@
+export class VeWorkerShutdownError extends Error {
+  constructor() {
+    super('VE2 worker is stopping; resume the saved checkpoint after restart');
+    this.name = 'VeWorkerShutdownError';
+  }
+}
+
+/** Let an in-flight operation save its result before cooperative shutdown. */
+export function createVeJobShutdown(options: {
+  abort: AbortController;
+  graceMs: number;
+  immediate?: boolean;
+  onDeadline: () => void;
+}): { request: () => void; checkpoint: () => void; stop: () => void } {
+  let requested = false;
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const abort = () => options.abort.abort(new VeWorkerShutdownError());
+  return {
+    request: () => {
+      if (requested || stopped) return;
+      requested = true;
+      if (options.immediate) { abort(); return; }
+      timer = setTimeout(() => {
+        if (!stopped) { abort(); options.onDeadline(); }
+      }, options.graceMs);
+      timer.unref?.();
+    },
+    checkpoint: () => {
+      if (requested && !stopped) abort();
+      options.abort.signal.throwIfAborted();
+    },
+    stop: () => { stopped = true; clearTimeout(timer); },
+  };
+}
+
 /** A last-resort guard for research awaits that ignore AbortSignal (e.g. a DB socket).
  * Never races the stage or starts a replacement in the same process: the caller
  * must terminate an unresponsive process so stale work cannot keep writing.
