@@ -6,6 +6,21 @@ import type { VeOutreachPreparation } from './outreachSetup';
 class PreparationLeaseLost extends Error {}
 type ClaimedPreparation = VeOutreachPreparation & { claim_token: string };
 
+// This timer runs beside research. Do not deserialize megabytes of saved
+// candidates/evidence just to inspect a base's status every ten seconds.
+const BASE_STATE_COLUMNS = 'id,status,error,row_count,updated_at,collection_mode:collect_info->>collection_mode';
+
+/** A resumed base was committed after the old job finished, then the process died before enqueue. */
+export function isVeInterruptedCollectionResume(
+  base: { status?: unknown; updated_at?: unknown },
+  job: { status?: unknown; finished_at?: unknown } | null,
+): boolean {
+  if (base.status !== 'collecting' || job?.status !== 'done') return false;
+  const resumed = typeof base.updated_at === 'string' ? Date.parse(base.updated_at) : NaN;
+  const finished = typeof job.finished_at === 'string' ? Date.parse(job.finished_at) : NaN;
+  return Number.isFinite(resumed) && Number.isFinite(finished) && resumed > finished;
+}
+
 /** Advances durable user-requested preparation. No paid calls in this coordinator. */
 export async function runVeOutreachPreparations(db: SupabaseClient, shouldStop: () => boolean = () => false): Promise<void> {
   for (let n = 0; n < 2; n++) {
@@ -26,14 +41,14 @@ export async function runVeOutreachPreparations(db: SupabaseClient, shouldStop: 
       if (result.data !== true) throw new PreparationLeaseLost('Preparation claim changed');
     };
     const latestBase = async () => {
-      const result = await db.from('ve_bases').select('id,status,collect_info')
+      const result = await db.from('ve_bases').select('id,status')
         .eq('project_id', p.project_id).eq('hypothesis_id', p.hypothesis_id).eq('source', 'auto')
         .eq('collect_info->>collection_mode', 'preview').order('created_at', { ascending: false }).order('id', { ascending: false }).limit(1).maybeSingle();
       if (result.error) throw new Error(result.error.message);
       return result.data;
     };
     const latestJob = async (stage: string) => {
-      const result = await db.from('ve_jobs').select('id,status,payload,error')
+      const result = await db.from('ve_jobs').select('id,status,error,finished_at')
         .eq('project_id', p.project_id).eq('stage', stage).eq('payload->>base_id', baseId!)
         .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(1).maybeSingle();
       if (result.error) throw new Error(result.error.message);
@@ -53,7 +68,7 @@ export async function runVeOutreachPreparations(db: SupabaseClient, shouldStop: 
       const h = await db.from('ve_hypotheses').select('id,vertical_id,status').eq('id', p.hypothesis_id).eq('project_id', p.project_id).maybeSingle();
       if (h.error || !h.data?.vertical_id || h.data.status === 'rejected') throw new Error('Гипотеза больше недоступна. Измените выбор');
       if (!baseId) baseId = (await latestBase())?.id ?? null;
-      let base = baseId ? await db.from('ve_bases').select('id,status,error,row_count,collect_info')
+      let base = baseId ? await db.from('ve_bases').select(BASE_STATE_COLUMNS)
         .eq('id', baseId).eq('project_id', p.project_id).eq('hypothesis_id', p.hypothesis_id).maybeSingle() : null;
       if (base?.error) throw new Error(base.error.message);
       if (baseId && !base?.data) throw new Error('Сохранённая база недоступна. Обновите страницу');
@@ -65,14 +80,16 @@ export async function runVeOutreachPreparations(db: SupabaseClient, shouldStop: 
           if (resumed.error.message.includes('VE_OUTREACH_PREPARATION_LEASE_LOST')) throw new PreparationLeaseLost(resumed.error.message);
           throw new Error(resumed.error.message);
         }
-        base = await db.from('ve_bases').select('id,status,error,row_count,collect_info')
+        base = await db.from('ve_bases').select(BASE_STATE_COLUMNS)
           .eq('id', baseId).eq('project_id', p.project_id).eq('hypothesis_id', p.hypothesis_id).maybeSingle();
         if (base.error) throw new Error(base.error.message);
       }
       if (!baseId || (base?.data?.status === 'failed' && retryRequested)) {
         // Persist any adopted identity before enqueue/recovery can fail. A retry
         // continues the paid checkpoint instead of losing it and buying a new base.
-        await save('collecting', null, false);
+        // Keep the explicit retry intent until a durable worker job exists.
+        // A process death while loading/resuming a large base must not consume it.
+        await save(retryRequested ? 'pending' : 'collecting', null, false);
         const v = await db.from('ve_verticals').select('name').eq('id', h.data.vertical_id).eq('project_id', p.project_id).single();
         if (v.error) throw new Error(v.error.message);
         const result = await enqueueVeBaseCollect(db, { projectId: p.project_id, verticalId: h.data.vertical_id,
@@ -87,18 +104,19 @@ export async function runVeOutreachPreparations(db: SupabaseClient, shouldStop: 
         baseId = String(result.base.id);
         templateId = null;
         await save('collecting', null, false);
-        base = await db.from('ve_bases').select('id,status,error,row_count,collect_info')
+        base = await db.from('ve_bases').select(BASE_STATE_COLUMNS)
           .eq('id', baseId).eq('project_id', p.project_id).eq('hypothesis_id', p.hypothesis_id).maybeSingle();
         if (base.error) throw new Error(base.error.message);
       }
       if (!baseId || !base?.data) throw new Error('Не удалось определить базу гипотезы');
-      await save('collecting', null, false);
-      if (base.data.collect_info?.collection_mode !== 'preview') throw new Error('Подготовка требует отдельного превью гипотезы');
+      await save(retryRequested ? 'pending' : 'collecting', null, false);
+      if (base.data.collection_mode !== 'preview') throw new Error('Подготовка требует отдельного превью гипотезы');
       if (base.data.status === 'failed') throw new Error(base.data.error ?? 'Сбор остановлен. Готовые результаты сохранены');
       if (base.data.status === 'collecting') {
         const job = await latestJob('base_collect');
         if (job && ['failed', 'cancelled'].includes(job.status) && !retryRequested) throw new Error(job.error ?? 'Сбор базы остановлен. Нажмите «Продолжить подготовку»');
-        if (!job || (retryRequested && !['pending', 'running'].includes(job.status))) {
+        if (!job || isVeInterruptedCollectionResume(base.data, job)
+          || (retryRequested && !['pending', 'running'].includes(job.status))) {
           const v = await db.from('ve_verticals').select('name').eq('id', h.data.vertical_id).eq('project_id', p.project_id).single();
           if (v.error) throw new Error(v.error.message);
           const result = await enqueueVeBaseCollect(db, { projectId: p.project_id, verticalId: h.data.vertical_id,

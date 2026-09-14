@@ -727,6 +727,9 @@ services:
       - SERPER_API_KEY=${SERPER_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=vertical-engine-v2
+      - VE_JOB_CONCURRENCY=2
+      # Checkpoints can be large; Node's default ~256MB heap caused OOM on resume.
+      - NODE_OPTIONS=--max-old-space-size=1536
     stop_grace_period: 5m
     labels:
       - autoheal=true
@@ -739,8 +742,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
-          cpus: '0.5'
+          memory: 2G
+          cpus: '1.0'
     restart: unless-stopped
     networks:
       - portal-network
