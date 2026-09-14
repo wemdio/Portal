@@ -13,9 +13,11 @@ interface PreparationProgressProps {
   base?: VeBaseSummary | null;
   /** Project detail supplies jobs newest first; its history is intentionally bounded. */
   jobs: readonly VeJobSummary[];
+  onContinue?: () => void;
+  continueDisabled?: boolean;
 }
 
-interface PreparationPresentation {
+export interface PreparationPresentation {
   title: string;
   description: string;
   currentStep: number | null;
@@ -32,6 +34,9 @@ const CONSTRUCT_STEPS: Record<string, string> = {
 };
 
 function preparationError(message: string): string {
+  if (message.startsWith('Задача сбора завершилась, но база не готова.')) {
+    return 'Продолжение подготовки прервалось. Сейчас база не обрабатывается. Нажмите «Продолжить подготовку», чтобы возобновить работу с сохранёнными результатами.';
+  }
   const failure = getVeCollectionFailure(message);
   return ['billing', 'configuration', 'provider'].includes(failure.kind) ? failure.message : message;
 }
@@ -145,7 +150,8 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
   // The coordinator requeues itself while a child works. Pending is not proof
   // that collection is idle; its saved child snapshot is the stronger evidence.
   const childStatus = info?.construct?.progress?.status;
-  const hasChildState = !savedReview && ['pending', 'processing', 'completed', 'failed', 'cancelled'].includes(childStatus ?? '');
+  const hasChildState = job?.status === 'pending' && !savedReview
+    && ['pending', 'processing', 'completed', 'failed', 'cancelled'].includes(childStatus ?? '');
   if (job?.status !== 'running' && !hasChildState) return {
     title: job?.status === 'pending'
       ? savedReview ? 'Проверка сохранённой базы в очереди' : 'Сбор базы в очереди'
@@ -234,6 +240,11 @@ export function PreparationProgress(props: PreparationProgressProps) {
           Сохранённые результаты: {savedCandidates.toLocaleString('ru-RU')} кандидатов
           {savedReady !== null ? `, ${savedReady.toLocaleString('ru-RU')} готовых контактов` : ''}.
         </p>
+      ) : null}
+      {props.preparation?.status === 'error' && props.onContinue ? (
+        <button type="button" className={HE.btnPrimary} disabled={props.continueDisabled} onClick={props.onContinue}>
+          Продолжить подготовку
+        </button>
       ) : null}
     </div>
   );

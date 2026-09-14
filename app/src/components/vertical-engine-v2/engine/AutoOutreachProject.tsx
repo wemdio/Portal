@@ -25,7 +25,7 @@ import { FinalLettersEditor } from './FinalLettersEditor';
 import { OutreachLaunchPanel } from './OutreachLaunchPanel';
 import { CampaignProgress } from './CampaignProgress';
 import { ManualBaseLibrary } from './ManualBaseLibrary';
-import { PreparationProgress } from './PreparationProgress';
+import { PreparationProgress, getPreparationPresentation } from './PreparationProgress';
 import { selectHypothesisLetters } from './letterSelection';
 
 const LABELS = ['Гипотезы', 'Письма', 'Базы и объём', 'Запуск', 'Результаты'];
@@ -269,7 +269,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
       setSnapshot(result.data);
       if (payload.action === 'select' && payload.next_run === true) setStep(1);
       if (payload.action === 'prepare') {
-        setStep(2);
+        setStep((current) => current === 3 ? 3 : 2);
         await refresh();
       }
     } catch {
@@ -644,7 +644,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                 return (
                   <article key={h.id} className="border-t border-[var(--ve2-line)] pt-5 space-y-4">
                     <h3 className="ve2-h3">{h.title}</h3>
-                    {p?.status !== 'ready' ? <PreparationProgress preparation={p} base={base} jobs={detail.jobs} /> : null}
+                    {p?.status !== 'ready' ? <PreparationProgress preparation={p} base={base} jobs={detail.jobs}
+                      onContinue={() => void change({ action: 'prepare' })} continueDisabled={busy || locked} /> : null}
                     {base ? (
                       <>
                         <AudienceSummary baseId={base.id} presetId={presetId} />
@@ -654,8 +655,9 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                             <BaseRow
                               base={base}
                               job={detail.jobs.find(
-                                (j) => j.payload?.base_id === base.id && ['pending', 'running'].includes(j.status),
+                                (j) => j.payload?.base_id === base.id && j.stage === 'base_collect',
                               )}
+                              preparationState={getPreparationPresentation({ preparation: p, base, jobs: detail.jobs })}
                               queued={false}
                               onUpdated={() => void refresh()}
                             />
@@ -693,12 +695,6 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                           <p className={HE.muted}>Одобрение станет доступно после подготовки итоговых писем.</p>
                         ) : null}
                       </>
-                    ) : null}
-                    {p?.status === 'error' && base?.status === 'failed' ? (
-                      <button type="button" disabled={busy || locked} className={HE.btnPrimary}
-                        onClick={() => void change({ action: 'prepare' })}>
-                        Продолжить подготовку базы
-                      </button>
                     ) : null}
                   </article>
                 );

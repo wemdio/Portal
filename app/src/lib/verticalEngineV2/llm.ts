@@ -15,6 +15,7 @@
  */
 
 import { z } from 'zod';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { withVeDeadline } from './operationDeadline';
 import { beginProviderUsage, getProviderUsageScope } from '@/lib/providerUsage';
 
@@ -205,15 +206,14 @@ export function getLLMValidationDiagnostic(
   };
 }
 
-/**
- * AbortSignal активной джобы воркера. Воркер single-flight (handleJob
- * выполняет строго одну джобу за раз), поэтому сигнал — модульный:
- * worker/verticalEngineV2.ts ставит его перед runVeStage и снимает после.
- * Отмена задачи (ve_jobs.status='cancelled') через сигнал обрывает текущий
- * HTTP-запрос к LLM сразу, а не по окончании стадии — деньги не догорают.
- * Вне воркера (API-роуты) сигнала нет — поведение прежнее.
- */
+/** Per-job context: cancelling one project must not abort a parallel project. */
+const jobSignals = new AsyncLocalStorage<AbortSignal>();
+/** Compatibility for single-flight callers/tests; workers use the scoped API. */
 let activeJobSignal: AbortSignal | null = null;
+
+export function withVeActiveJobSignal<T>(signal: AbortSignal, work: () => Promise<T>): Promise<T> {
+  return jobSignals.run(signal, work);
+}
 
 export function setVeActiveJobSignal(signal: AbortSignal | null): void {
   activeJobSignal = signal;
@@ -221,7 +221,7 @@ export function setVeActiveJobSignal(signal: AbortSignal | null): void {
 
 /** Capture once per operation so late work cannot inherit the next job's signal. */
 export function getVeActiveJobSignal(): AbortSignal | null {
-  return activeJobSignal;
+  return jobSignals.getStore() ?? activeJobSignal;
 }
 
 interface LLMCallOptions {

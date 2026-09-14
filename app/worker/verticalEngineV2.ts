@@ -23,13 +23,13 @@
  *
  * Отмена: cancel-роут (projects/[id]/cancel) переводит джобы проекта в
  * 'cancelled'. Pending не клеймятся; у running наблюдатель в handleJob
- * аборти́т LLM-запрос через setVeActiveJobSignal, а если стадия успела
+ * аборти́т LLM-запрос в контексте своей джобы, а если стадия успела
  * завершиться — done/дочейн не выполняются, attempts не растут (failJob).
  */
 
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop, startWorkerHeartbeat } from './_shared';
 import { markSegmentationAuditFailed, runVeStage } from '@/lib/verticalEngineV2/stages';
-import { setVeActiveJobSignal } from '@/lib/verticalEngineV2/llm';
+import { withVeActiveJobSignal } from '@/lib/verticalEngineV2/llm';
 import { withVeCostTelemetry } from '@/lib/verticalEngineV2/costTelemetry';
 import { normalizeVeMarket } from '@/lib/verticalEngineV2/market';
 import {
@@ -39,7 +39,7 @@ import {
 } from '@/lib/verticalEngineV2/jobRetry';
 import { transitionVeJobFailure } from '@/lib/verticalEngineV2/jobFailureTransition';
 import { createVeJobShutdown, createVeJobWatchdog } from '@/lib/verticalEngineV2/workerLiveness';
-import { claimVeJob } from '@/lib/verticalEngineV2/jobQueue';
+import { claimVeJob, createVeJobPool } from '@/lib/verticalEngineV2/jobQueue';
 import { VePreviewCheckpointConflict } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import {
   createGuardedContactDeliveryTick,
@@ -51,6 +51,8 @@ import type { VeJob, VeStage } from '@/lib/verticalEngineV2/types';
 
 const WORKER_ID = `vertical-engine-v2-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
+// Keep a single queue-owning process; two independent projects can make progress.
+const JOB_CONCURRENCY = process.env.VE_JOB_CONCURRENCY === '1' ? 1 : 2;
 const OUTREACH_PREPARATION_INTERVAL_MS = 10_000;
 const configuredContactDeliveryInterval = Number(process.env.VE_CONTACT_DELIVERY_INTERVAL_MS);
 const CONTACT_DELIVERY_INTERVAL_MS =
@@ -99,12 +101,12 @@ const contactDeliveryTick = createGuardedContactDeliveryTick({
 });
 
 let activeContactDeliveryTick: Promise<boolean> | null = null;
-let activeResearchAbort: AbortController | null = null;
+const activeResearchAborts = new Set<AbortController>();
 
 function triggerContactDeliveryTick(): Promise<boolean> {
   // Do not start a provider upload while a research process is being recovered.
   // An already attempted upload keeps its durable uncertain/recovery semantics.
-  if (shouldStop() || activeResearchAbort?.signal.aborted) return Promise.resolve(false);
+  if (shouldStop() || [...activeResearchAborts].some((abort) => abort.signal.aborted)) return Promise.resolve(false);
   const promise = contactDeliveryTick();
   if (!activeContactDeliveryTick) {
     activeContactDeliveryTick = promise;
@@ -146,10 +148,6 @@ async function resetStuckJobs() {
       .update({ status: 'pending', started_at: null, updated_at: new Date().toISOString() })
       .eq('status', 'running');
   }
-}
-
-async function claimJob(): Promise<VeJob | null> {
-  return claimVeJob(db);
 }
 
 /** Добавить расход стадии на проект (read-modify-write, воркер один на проект). */
@@ -203,7 +201,7 @@ async function handleJob(job: VeJob) {
 
   // Отмена задачи: cancel-роут переводит джобу в 'cancelled'. Наблюдатель
   // раз в CANCEL_WATCH_MS перечитывает строку и аборти́т контроллер — сигнал
-  // проброшен в LLM-слой (setVeActiveJobSignal), текущий запрос к модели
+  // проброшен в LLM-слой через контекст джобы, текущий запрос к модели
   // обрывается сразу, а не по окончании стадии. Если стадия сейчас не в
   // LLM-вызове, отмена сработает по завершении: статус 'cancelled' ниже не
   // даёт записать done и дочейнить следующую стадию.
@@ -226,12 +224,11 @@ async function handleJob(job: VeJob) {
   });
   const onShutdown = () => shutdown.request();
   if (isResearch) {
-    activeResearchAbort = abort;
+    activeResearchAborts.add(abort);
   }
   process.once('SIGTERM', onShutdown);
   process.once('SIGINT', onShutdown);
   if (shouldStop()) shutdown.request();
-  setVeActiveJobSignal(abort.signal);
   let cancelCheckInFlight = false;
   let watching = true;
   const cancelWatcher = setInterval(() => {
@@ -265,7 +262,7 @@ async function handleJob(job: VeJob) {
     const market = normalizeVeMarket((proj as { market?: string } | null)?.market);
     if (isResearch) abort.signal.throwIfAborted();
 
-    stageResult = await withVeCostTelemetry(db, job, () => runVeStage(job, {
+    stageResult = await withVeActiveJobSignal(abort.signal, () => withVeCostTelemetry(db, job, () => runVeStage(job, {
       supabase: db,
       market,
       signal: abort.signal,
@@ -276,7 +273,7 @@ async function handleJob(job: VeJob) {
         watchdog?.touch();
         log('info', `[${job.stage}] ${msg}`);
       },
-    }));
+    })));
     if (isResearch) abort.signal.throwIfAborted();
   } finally {
     // Deliberately guard execution, not the legacy non-atomic done→enqueue
@@ -288,9 +285,8 @@ async function handleJob(job: VeJob) {
     process.removeListener('SIGTERM', onShutdown);
     process.removeListener('SIGINT', onShutdown);
     if (isResearch) {
-      activeResearchAbort = null;
+      activeResearchAborts.delete(abort);
     }
-    setVeActiveJobSignal(null);
   }
   const tokensUsed = stageResult.tokensUsed ?? 0;
   const costUsd = stageResult.costUsd ?? 0;
@@ -466,9 +462,7 @@ function triggerOutreachPreparationTick(): Promise<void> {
   return activeOutreachPreparationTick;
 }
 
-async function pollOnce(): Promise<boolean> {
-  const job = await claimJob();
-  if (!job) return false;
+async function processClaimedJob(job: VeJob): Promise<void> {
   try {
     await handleJob(job);
   } catch (err) {
@@ -480,11 +474,17 @@ async function pollOnce(): Promise<boolean> {
       await failJob(job, err);
     }
   }
-  return true;
 }
 
+const jobPool = createVeJobPool({
+  concurrency: JOB_CONCURRENCY, idleMs: POLL_INTERVAL_MS, shouldStop,
+  claim: (activeProjects) => claimVeJob(db, new Date(), activeProjects),
+  run: processClaimedJob,
+  onError: (error) => log('error', 'Job finalization failed; preserving state for recovery', error),
+});
+
 async function main() {
-  log('info', 'Hypothesis Engine worker starting…');
+  log('info', `Vertical Engine v2 worker starting (${JOB_CONCURRENCY} concurrent projects)…`);
 
   const heartbeat = startWorkerHeartbeat(HEARTBEAT_PATH);
   log('info', `Heartbeat ticker started → ${HEARTBEAT_PATH} (every 30s)`);
@@ -513,12 +513,13 @@ async function main() {
       log,
       pollIntervalMs: POLL_INTERVAL_MS,
       shouldStop,
-      pollOnce,
+      pollOnce: jobPool.pollOnce,
       realtimeTables: ['ve_jobs'],
     });
   } finally {
     clearInterval(contactDeliveryTimer);
     clearInterval(outreachPreparationTimer);
+    await jobPool.drain();
     if (activeContactDeliveryTick) await activeContactDeliveryTick;
     if (activeOutreachPreparationTick) await activeOutreachPreparationTick;
     clearInterval(heartbeat);

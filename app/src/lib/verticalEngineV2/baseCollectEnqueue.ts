@@ -146,7 +146,7 @@ async function resumeFailedPreview(
   const claimedAt = new Date().toISOString();
   const { data: claimed, error: claimError } = await supabase.from('ve_bases')
     .update({ status: 'collecting', error: null, collect_info: info, updated_at: claimedAt })
-    .eq('id', saved.id).eq('status', 'failed').select('id, status, hypothesis_id, collect_info').maybeSingle();
+    .eq('id', saved.id).eq('status', 'failed').select('id, status, hypothesis_id').maybeSingle();
   if (claimError || !claimed) {
     // Both same-base CAS and competing-base unique races are idempotent.
     const { data: winner, error: winnerError } = await supabase.from('ve_bases')
@@ -156,22 +156,24 @@ async function resumeFailedPreview(
     if (!winnerError && winner) return { ok: true, created: false, base: winner };
     return { ok: false, message: claimError?.message ?? winnerError?.message ?? 'Состояние базы изменилось. Обновите страницу и повторите попытку.' };
   }
+  // Reuse the snapshot already in memory, instead of receiving/parsing it again.
+  const resumed = { ...claimed, collect_info: info };
   const { error: jobError } = await supabase.from('ve_jobs').insert({
     project_id: input.projectId, stage: 'base_collect', status: 'pending',
-    payload: { base_id: claimed.id, ...repairJobPayload(claimed) },
+    payload: { base_id: claimed.id, ...repairJobPayload(resumed) },
   });
   if (jobError) {
     const { data: jobs, error: readError } = await supabase.from('ve_jobs').select('id, payload')
       .eq('project_id', input.projectId).eq('stage', 'base_collect').in('status', ['pending', 'running']);
     if (!readError && (jobs ?? []).some((j) => j.payload?.base_id === claimed.id)) {
-      return { ok: true, created: false, base: claimed };
+      return { ok: true, created: false, base: resumed };
     }
     // Never restore failed based on a non-atomic absence read: another request
     // can insert an orphan-repair job without changing the base timestamp.
     // UI exposes "Проверить запуск"; the existing repair is idempotent.
     return { ok: false, message: jobError.message };
   }
-  return { ok: true, created: true, base: claimed, bases: [claimed] };
+  return { ok: true, created: true, base: resumed, bases: [resumed] };
 }
 
 export async function enqueueVeBaseCollect(

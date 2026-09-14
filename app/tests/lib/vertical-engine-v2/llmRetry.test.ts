@@ -16,7 +16,7 @@ jest.mock('@/lib/enrich/websiteParser', () => ({
 
 import { assertPublicWebsite } from '@/lib/clientDemo/personalize';
 import { fetchAndExtract } from '@/lib/enrich/websiteParser';
-import { callLLMText, callLLMWithSchema, setVeActiveJobSignal } from '@/lib/verticalEngineV2/llm';
+import { callLLMText, callLLMWithSchema, setVeActiveJobSignal, withVeActiveJobSignal, getVeActiveJobSignal } from '@/lib/verticalEngineV2/llm';
 import { defaultFetchText, resolveFetchText, resolveSearch } from '@/lib/verticalEngineV2/stages/io';
 import type { VeStageContext } from '@/lib/verticalEngineV2/stages/shared';
 import { isRetryableStageError, maxAttemptsFor } from '@/lib/verticalEngineV2/jobRetry';
@@ -184,6 +184,30 @@ describe('llm rawCall retry', () => {
       expect(fetchMock).toHaveBeenCalledTimes(phase === 'repair' ? 2 : 1);
       expect(jest.getTimerCount()).toBe(0);
     }
+    setVeActiveJobSignal(null);
+    const controllers = [new AbortController(), new AbortController()];
+    const replies = [deferred<Response>(), deferred<Response>()];
+    const calls = jest.fn().mockImplementationOnce(() => replies[0].promise).mockImplementationOnce(() => replies[1].promise);
+    global.fetch = calls as unknown as typeof fetch;
+    const parallel = controllers.map((controller) => withVeActiveJobSignal(controller.signal, async () => {
+      await Promise.resolve();
+      expect(getVeActiveJobSignal()).toBe(controller.signal);
+      return callLLMWithSchema([{ role: 'user', content: 'json' }], schema, { model: 'test-model' });
+    }));
+    const cancelled = expect(parallel[0]).rejects.toMatchObject({ name: 'AbortError' });
+    await jest.advanceTimersByTimeAsync(0);
+    expect(calls).toHaveBeenCalledTimes(2);
+    controllers[0].abort();
+    await cancelled;
+    expect(calls.mock.calls[0][1].signal.aborted).toBe(true);
+    expect(calls.mock.calls[1][1].signal.aborted).toBe(false);
+    replies[1].resolve(httpResponse(200, { choices: [{ message: { content: '{"ok":true}' } }] }));
+    expect((await parallel[1]).data).toEqual({ ok: true });
+    replies[0].resolve(httpResponse(200, { choices: [{ message: { content: '{"ok":false}' } }] }));
+    await jest.advanceTimersByTimeAsync(0);
+    expect(getVeActiveJobSignal()).toBeNull();
+    expect(calls).toHaveBeenCalledTimes(2);
+    expect(jest.getTimerCount()).toBe(0);
   });
 
   it('cancels backoff immediately and never starts a retry or a pre-cancelled request', async () => {
