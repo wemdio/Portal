@@ -4,6 +4,9 @@ import { getCollectionProgress, getCollectionQueue } from '@/components/vertical
 import type { VeBaseSummary } from '@/components/vertical-engine-v2/engine/api';
 import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
 import { loadVeProjectDetail } from '@/lib/verticalEngineV2/projectDetail';
+import { selectHypothesisLetters } from '@/components/vertical-engine-v2/engine/letterSelection';
+import { getPreparationPresentation } from '@/components/vertical-engine-v2/engine/PreparationProgress';
+import type { VeOutreachPreparation } from '@/lib/verticalEngineV2/outreachSetup';
 
 jest.mock('@/lib/verticalEngineV2/actualsReconcile', () => ({ reconcileProjectVerticals: jest.fn(async () => {}) }));
 
@@ -46,6 +49,36 @@ describe('VE2 collection progress presentation', () => {
     expect(['ve_bases', 've_templates'].map((table) => db.selects.filter((query) => query.table === table).length)).toEqual([2, 2]);
     expect(bases[0].collect_info).toEqual({ collection_mode: 'supply', tasks: [{ status: 'done', rows: 3 }] });
     expect(getCollectionQueue(bases, [{ stage: 'base_collect', status: 'running', payload: { base_id: 'supply-active' } }]).current?.id).toBe('supply-active');
+
+    const preparation: VeOutreachPreparation = { project_id: 'project-1', hypothesis_id: 'h1', base_id: 'new',
+      template_id: null, status: 'error', language: 'ru', last_error: 'Serper billing: insufficient search credits.' };
+    const letterBases = [
+      { ...base('old', '2026-09-01'), hypothesis_id: 'h1' },
+      { ...base('new', '2026-09-03'), hypothesis_id: 'h1', status: 'failed' as const },
+      { ...base('other', '2026-09-04'), hypothesis_id: 'h2' },
+      { ...base('supply', '2026-09-05', { collection_mode: 'supply' }), hypothesis_id: 'h1' },
+    ];
+    const template = (id: string, baseId: string, createdAt: string) => ({ id, base_id: baseId, created_at: createdAt,
+      status: 'ready' as const, letters: [{ step: 1, wait_days: 0, subject: 'Subject', body: 'Letter' }] });
+    const savedLetters = template('t-old', 'old', '2026-09-01');
+    const letters = [template('t-other', 'other', '2026-09-04'), template('t-supply', 'supply', '2026-09-05'), savedLetters];
+    expect(selectHypothesisLetters('h1', preparation, letterBases, letters)).toEqual({ template: savedLetters, previous: true });
+    expect(selectHypothesisLetters('h3', undefined, letterBases, letters)).toEqual({ template: null, previous: false });
+    preparation.template_id = 't-other'; // A stale pointer must never cross hypotheses.
+    expect(selectHypothesisLetters('h1', preparation, letterBases, letters).template?.id).toBe('t-old');
+    const current = template('t-new', 'new', '2026-09-03');
+    preparation.template_id = current.id;
+    expect(selectHypothesisLetters('h1', preparation, letterBases, [...letters, current]))
+      .toEqual({ template: current, previous: false });
+    preparation.template_id = null;
+    expect(getPreparationPresentation({ preparation, base: letterBases[1], jobs: [], context: 'letters' }))
+      .toMatchObject({ tone: 'muted', currentStep: 0 });
+    expect(getPreparationPresentation({ preparation, base: letterBases[1], jobs: [], context: 'base' }).tone).toBe('err');
+    const failedLetters = { ...preparation, status: 'generating' as const, template_id: null };
+    expect(getPreparationPresentation({ preparation: failedLetters, base: { ...letterBases[1], status: 'analyzed' },
+      jobs: [{ id: 'template-job', stage: 'template', status: 'failed', attempts: 1, started_at: null, finished_at: null,
+        payload: { base_id: 'new' }, error: 'generation failed' }],
+      context: 'letters' }).tone).toBe('err');
   });
 
   it('selects the working project base, not the newest vertical base, and releases stale waits', () => {

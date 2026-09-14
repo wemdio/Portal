@@ -38,7 +38,7 @@ import {
   retryRunAfter,
 } from '@/lib/verticalEngineV2/jobRetry';
 import { transitionVeJobFailure } from '@/lib/verticalEngineV2/jobFailureTransition';
-import { createVeJobWatchdog } from '@/lib/verticalEngineV2/workerLiveness';
+import { createVeJobShutdown, createVeJobWatchdog } from '@/lib/verticalEngineV2/workerLiveness';
 import { claimVeJob } from '@/lib/verticalEngineV2/jobQueue';
 import { VePreviewCheckpointConflict } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import {
@@ -61,6 +61,8 @@ const CONTACT_DELIVERY_INTERVAL_MS =
 const CANCEL_WATCH_MS = 3000;
 const RESEARCH_IDLE_TIMEOUT_MS = 15 * 60_000;
 const RESEARCH_ABORT_GRACE_MS = 30_000;
+// Leave one minute for metering/final cleanup before Compose's five-minute stop.
+const SHUTDOWN_CHECKPOINT_GRACE_MS = 4 * 60_000;
 
 /**
  * Heartbeat-файл: обновляется каждые 30с независимым setInterval-тиком.
@@ -82,6 +84,7 @@ const contactDeliveryTick = createGuardedContactDeliveryTick({
     const result = await runBoundContactDeliveries({
       portalDb: db,
       instantlyDb: supabaseInstantly,
+      shouldStop,
       now: new Date(),
       log: (level, message, extra) => log(level, `[contact-delivery] ${message}`, extra),
     });
@@ -217,12 +220,17 @@ async function handleJob(job: VeJob) {
       process.exit(1);
     },
   }) : null;
-  const onShutdown = () => abort.abort(new Error('VE2 research interrupted by worker shutdown'));
+  const shutdown = createVeJobShutdown({
+    abort, immediate: isResearch, graceMs: SHUTDOWN_CHECKPOINT_GRACE_MS,
+    onDeadline: () => log('warn', `Job ${job.id} did not reach a shutdown checkpoint; aborting for restart`),
+  });
+  const onShutdown = () => shutdown.request();
   if (isResearch) {
     activeResearchAbort = abort;
-    process.once('SIGTERM', onShutdown);
-    process.once('SIGINT', onShutdown);
   }
+  process.once('SIGTERM', onShutdown);
+  process.once('SIGINT', onShutdown);
+  if (shouldStop()) shutdown.request();
   setVeActiveJobSignal(abort.signal);
   let cancelCheckInFlight = false;
   let watching = true;
@@ -247,6 +255,7 @@ async function handleJob(job: VeJob) {
 
   let stageResult;
   try {
+    shutdown.checkpoint();
     // Рынок проекта (geo поиска, язык промптов/писем) — один read на джобу.
     const { data: proj } = await db
       .from('ve_projects')
@@ -260,6 +269,7 @@ async function handleJob(job: VeJob) {
       supabase: db,
       market,
       signal: abort.signal,
+      onCheckpoint: shutdown.checkpoint,
       onActivity: () => watchdog?.touch(),
       log: (msg) => {
         lastActivity = msg.slice(0, 500);
@@ -274,10 +284,11 @@ async function handleJob(job: VeJob) {
     watching = false;
     clearInterval(cancelWatcher);
     watchdog?.stop();
+    shutdown.stop();
+    process.removeListener('SIGTERM', onShutdown);
+    process.removeListener('SIGINT', onShutdown);
     if (isResearch) {
       activeResearchAbort = null;
-      process.removeListener('SIGTERM', onShutdown);
-      process.removeListener('SIGINT', onShutdown);
     }
     setVeActiveJobSignal(null);
   }
@@ -448,7 +459,7 @@ let activeOutreachPreparationTick: Promise<void> | null = null;
 function triggerOutreachPreparationTick(): Promise<void> {
   if (shouldStop() || activeOutreachPreparationTick) return activeOutreachPreparationTick ?? Promise.resolve();
   activeOutreachPreparationTick = (async () => {
-    try { await runVeOutreachPreparations(db); }
+    try { await runVeOutreachPreparations(db, shouldStop); }
     catch (error) { log('warn', `[outreach] preparation tick: ${error instanceof Error ? error.message : 'unavailable'}`); }
     finally { activeOutreachPreparationTick = null; }
   })();
@@ -461,10 +472,10 @@ async function pollOnce(): Promise<boolean> {
   try {
     await handleJob(job);
   } catch (err) {
-    if (shouldStop() && RESEARCH_STAGES.has(job.stage)) {
+    if (shouldStop()) {
       // Leave running + its checkpoint for startup recovery; a deployment
       // interruption is not a failed provider attempt and must not use retries.
-      log('info', `Research job ${job.id} interrupted by shutdown; preserving checkpoint for restart`);
+      log('info', `Job ${job.id} (${job.stage}) interrupted by shutdown; preserving checkpoint for restart`);
     } else {
       await failJob(job, err);
     }

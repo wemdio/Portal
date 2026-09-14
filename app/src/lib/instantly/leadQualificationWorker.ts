@@ -40,6 +40,7 @@ import {
 } from './handoffSender';
 import type { Email, Lead } from './types';
 import { resolveLeadContactMetadata } from './leadContactMetadata';
+import { loadCachedLeadContacts } from './cachedLeadContacts';
 import { resolveEffectiveReplyOwner } from './replyOwnershipResolver';
 import { resolveInstantlyAccountId } from './accounts';
 import { createQualificationAiCheckpointStore } from './qualificationAiCheckpoint';
@@ -1821,14 +1822,21 @@ export async function qualifyOneReply(
   try {
     const leads = await instantly.getLeadsByEmail({ email: leadEmail, campaign_id: campaignId }, { accountId });
     leadMetadata = Array.isArray(leads) ? leads : [];
-  } catch {
-    // lead metadata is optional enrichment
+  } catch (error) {
+    workerLog('warn', 'Lead metadata API unavailable; using cached base and reply', error);
+  }
+  let cachedLeads: Lead[] = [];
+  try {
+    cachedLeads = await loadCachedLeadContacts(db, campaignId, leadEmail);
+  } catch (error) {
+    workerLog('warn', 'Lead metadata cache unavailable; using API and reply', error);
   }
   // The loaded base also lives in payload/custom_variables. Reply fallback
   // retains the responder's signature, never quoted outbound contact details.
   // Phone/site belong to the board, not instantly_lead_qualifications.
   const { leadName, companyName, phone: leadPhone, website: leadWebsite } = resolveLeadContactMetadata({
     leads: leadMetadata,
+    cachedLeads,
     leadEmail,
     campaignId,
     replyBody: (result.threadContext?.replyEmail ?? effectiveReply).body,
@@ -3949,13 +3957,27 @@ export async function reconcileLeadNotificationDeliveries(
 
     if (!claimId) continue;
     claimedCount++;
+    let deliveryCachedLeads: Lead[] = [];
+    try {
+      deliveryCachedLeads = await loadCachedLeadContacts(instantlyDb, lead.campaign_id, lead.lead_email);
+    } catch (error) {
+      workerLog('warn', 'Lead delivery metadata cache unavailable', error);
+    }
+    const deliveryMetadata = resolveLeadContactMetadata({
+      leads: [{ id: lead.id, email: lead.lead_email, campaign_id: lead.campaign_id,
+        company_name: lead.company_name }],
+      cachedLeads: deliveryCachedLeads,
+      leadEmail: lead.lead_email,
+      campaignId: lead.campaign_id,
+      replyBody: lead.reply_body?.trim() || lead.reply_preview || '',
+    });
     await notifySpecialistsAboutLead(
       instantlyDb,
       lead.id,
       lead.campaign_id,
       lead.lead_email,
       lead.lead_name,
-      lead.company_name,
+      deliveryMetadata.companyName,
       lead.campaign_name,
       lead.reply_subject,
       lead.reply_preview,
@@ -3967,12 +3989,7 @@ export async function reconcileLeadNotificationDeliveries(
         projectId: lead.qualified_project_id,
         // Full persisted reply includes signatures omitted from the short preview.
         // No repeat Instantly lookup or AI call for delivery-only retries.
-        contactMetadata: resolveLeadContactMetadata({
-          leads: [],
-          leadEmail: lead.lead_email,
-          campaignId: lead.campaign_id,
-          replyBody: lead.reply_body?.trim() || lead.reply_preview || '',
-        }),
+        contactMetadata: deliveryMetadata,
       },
     );
     if (threadClaimConfirmed) {

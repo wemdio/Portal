@@ -16,6 +16,8 @@ export interface VeStageContext {
   supabase: SupabaseClient; /* supabaseAdmin client — создаётся воркером и передаётся сюда */
   /** Captured per-job cancellation; never reuse a later job's signal. */
   signal?: AbortSignal;
+  /** A durable write has finished; the worker may yield for deployment here. */
+  onCheckpoint?: () => void;
   /** Real operation completion, not timer/heartbeat activity. */
   onActivity?: () => void;
   /** Подменяемый фетч текста страницы (дефолт — SSRF-гейт + websiteParser, см. io.ts). */

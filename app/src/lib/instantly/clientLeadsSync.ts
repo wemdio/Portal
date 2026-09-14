@@ -2,6 +2,7 @@ import 'server-only';
 
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { listAllLeads, listAllCampaigns } from '@/lib/instantly/client';
+import { resolveLeadContactMetadata } from './leadContactMetadata';
 
 const BATCH_SIZE = 500;
 const CONCURRENCY = 3;
@@ -73,17 +74,22 @@ export async function syncClientLeads(): Promise<{ campaigns: number; leads: num
     const now = new Date().toISOString();
 
     for (const userId of userIds) {
-      const rows = rawLeads.map((l) => ({
-        client_user_id: userId,
-        campaign_id: campaignId,
-        email: l.email,
-        first_name: l.first_name ?? null,
-        last_name: l.last_name ?? null,
-        company_name: l.company_name ?? null,
-        website: l.website ?? null,
-        linkedin_url: l.linkedin_url ?? null,
-        synced_at: now,
-      }));
+      const rows = rawLeads.map((l) => {
+        const metadata = resolveLeadContactMetadata({
+          leads: [l], leadEmail: l.email, campaignId, replyBody: '',
+        });
+        return {
+          client_user_id: userId,
+          campaign_id: campaignId,
+          email: l.email,
+          first_name: l.first_name ?? null,
+          last_name: l.last_name ?? null,
+          company_name: metadata.companyName,
+          website: metadata.website,
+          linkedin_url: l.linkedin_url ?? null,
+          synced_at: now,
+        };
+      });
 
       for (let j = 0; j < rows.length; j += BATCH_SIZE) {
         const { error } = await db
