@@ -316,7 +316,7 @@ describe('client case imports and refresh', () => {
     expect(callLLMWithSchema).toHaveBeenCalledTimes(1);
 
     // Durations copied as words are factual too; no conversion to invented digits.
-    for (const duration of ['несколько месяцев', 'три недели', 'два рабочих дня']) {
+    for (const duration of ['несколько месяцев', 'три недели', 'два рабочих дня', 'через год']) {
       const text = `Лаборатория: внедрение заняло ${duration}. Ускорили доступ к результатам.`;
       expect(validateCaseDrafts(text, [{ ...drafts[0], task: 'Внедрение системы',
         result: 'Ускорили доступ к результатам', metrics: { duration }, text }])[0].metrics).toEqual({ duration });
@@ -370,6 +370,12 @@ describe('client case imports and refresh', () => {
       metrics: { duration: 'несколько месяцев' }, result: 'Ускорили доступ к результатам', source_start: 1, source_end: 2 };
     for (const value of ['сколько', 'сто предприятий', 'три месяца', '3 месяца', 'не указано']) {
       expect(() => validateCaseDrafts(wordedSource, [{ ...worded, text: wordedSource, metrics: { duration: value } }])).toThrow();
+    }
+    const yearSource = 'Лаборатория: внедрение началось в конце 2006 года и закончилось\nчерез год. Ускорили доступ к результатам.';
+    expect(validateCaseDrafts(yearSource, [{ ...worded, text: yearSource, metrics: { duration: 'через год' } }])[0].metrics)
+      .toEqual({ duration: 'через год' });
+    for (const duration of ['1 год', 'один год', '12 месяцев']) {
+      expect(() => validateCaseDrafts(yearSource, [{ ...worded, text: yearSource, metrics: { duration } }])).toThrow();
     }
 
     // Exercise the real schema-feedback loop, replacing only provider HTTP.
