@@ -26,6 +26,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { collectionRoundLimit, createCollectionTarget, type VeCollectionMode } from './collectionTarget';
 import { previewRecoveryKind } from './collectionRecovery';
+import { resumeVeSavedEmailRecovery } from './savedEmailRecovery';
 
 export interface VeBaseCollectInput {
   verticalId: string;
@@ -127,6 +128,9 @@ async function resumeFailedPreview(
   if (!saved) return null;
   if (activeBaseIds.includes(saved.id)) return { ok: true, created: false, base: saved };
   const info = { ...saved.collect_info, ...(previewRecoveryKind(saved) === 'validation' ? { validation_retry: true } : {}) };
+  if (info.saved_email_recovery !== undefined) {
+    info.saved_email_recovery = resumeVeSavedEmailRecovery(info.saved_email_recovery);
+  }
   if (previewRecoveryKind(saved) === 'pipeline' && info.target_checkpoint?.completed_round === info.target_progress?.round) {
     // Review saved observations from ALL completed batches; the last child
     // alone cannot represent a pipelined preview. No re-scraping old inputs.

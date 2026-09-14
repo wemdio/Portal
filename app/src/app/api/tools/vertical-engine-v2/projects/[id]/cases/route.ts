@@ -11,7 +11,8 @@ import {
   validateCaseDrafts,
 } from '@/lib/verticalEngineV2/caseBank';
 import { VE_CASE_LIST_COLUMNS } from '@/lib/verticalEngineV2/projectDetail';
-import { withVeDeadline } from '@/lib/verticalEngineV2/operationDeadline';
+import { VeOperationTimeoutError, withVeDeadline } from '@/lib/verticalEngineV2/operationDeadline';
+import { getLLMValidationDiagnostic, getVeModel, LLMValidationError } from '@/lib/verticalEngineV2/llm';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -106,9 +107,19 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         try {
           drafts = await withVeDeadline('Case parsing', 45_000, req.signal, (signal) => structureCaseTexts(text, signal));
         } catch (e) {
-          await logError('tools.vertical-engine-v2.cases.structure_failed', e, { userId, projectId: id });
+          if (req.signal.aborted) return jsonError('Разбор кейсов отменён. Введённый текст остаётся в форме.', 409);
+          await logError('tools.vertical-engine-v2.cases.structure_failed',
+            e instanceof LLMValidationError ? new Error('Case parsing response failed validation') : e,
+            { userId, projectId: id, inputChars: text.length, model: getVeModel('gate'),
+              validation: getLLMValidationDiagnostic(e, ['has_more', 'cases', 'industry', 'client_type', 'task', 'metrics', 'result', 'source_start', 'source_end']) });
           if (e instanceof VeCaseImportIncompleteError) return jsonError(e.message, 502);
-          return jsonError('Не удалось полностью и надёжно разобрать кейсы. Разделите текст на меньшие части, укажите клиента, задачу и результат каждого кейса и повторите разбор.', 502);
+          if (e instanceof VeOperationTimeoutError) {
+            return jsonError('ИИ не успел завершить разбор. Введённый текст остаётся в форме — попробуйте разобрать его ещё раз.', 504);
+          }
+          if (e instanceof LLMValidationError) {
+            return jsonError('ИИ не смог подготовить разбор, подтверждённый исходным текстом, даже после автоматического исправления. Кейсы не сохранены, текст остаётся в форме. Повторите разбор; если ошибка повторится, передайте текст и время ошибки поддержке.', 502);
+          }
+          return jsonError('Сервис ИИ сейчас не смог выполнить разбор. Введённый текст остаётся в форме — попробуйте позже.', 503);
         }
       }
 
