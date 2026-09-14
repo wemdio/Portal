@@ -40,7 +40,7 @@ export type { VeCase } from './types';
 /**
  * Структурированный черновик кейса (до записи в БД). Схема намеренно
  * локальная (не в schemas.ts): это вспомогательная LLM-структура кейс-банка.
- * metrics — свободный json (ключ → значение), ТОЛЬКО реально найденные цифры.
+ * metrics — свободный json (ключ → значение), показатели из исходника.
  */
 export const heCaseDraftSchema = z.object({
   industry: z.string().default(''),
@@ -154,7 +154,7 @@ const CASE_STRUCTURING_SYSTEM = `Ты — аналитик B2B-кейсов аг
 - в task обязательно сохраняй указанное фактическое назначение работы/изделий и для какой аудитории или события это было сделано. Не путай реальное назначение выполненного заказа с рекомендациями для будущих продаж;
 - сохрани все существенные исходные детали в task/result/metrics: тираж, количество изделий в наборе, материал/покрытие, формат, срок с единицами (например рабочие дни), индивидуальную упаковку и логистику. Не своди разные числа в одно и не теряй характеристики без цифр;
 - явно помеченные РЕКОМЕНДАЦИИ («Хорошо использовать для…», «Рекомендуемые сегменты:…») — предложения специалиста о будущем применении кейса. Они НЕ подтверждают отрасль клиента, выполненную работу или результат. Не переноси их в industry/client_type/task/result/metrics и не используй цифры из этих заметок как достигнутые показатели;
-- никаких выдуманных цифр: metrics заполняй только числами, которые буквально есть в ИСХОДНОМ ФРАГМЕНТЕ ЭТОГО кейса (если их нет — пустой объект). Значения metrics — строки с цифрами или числа, не вложенные объекты;
+- никаких выдуманных цифр: metrics заполняй только показателями из ИСХОДНОГО ФРАГМЕНТА ЭТОГО кейса (если их нет — пустой объект). Значения — числа или строки с единицами, не вложенные объекты. Сроки и количества, записанные словами (например «несколько месяцев» или «три недели»), сохраняй ДОСЛОВНО как строку. Не превращай слова в цифры, не пересчитывай единицы, не вычисляй проценты и не добавляй значения «не указано»;
 - исходник разбит на пронумерованные ЧАСТИ. Это адреса строк/предложений, НЕ готовые кейсы. Для каждого кейса верни source_start/source_end — ID первой и последней части ВКЛЮЧИТЕЛЬНО. Используй только существующие целые ID; диапазоны кейсов не пересекаются;
 - диапазон обязан включать ВЕСЬ кейс: заголовок с клиентом, все предложения выполненной работы/результата и заключительные рекомендации, если они есть. Рекомендации сохраняются в оригинале для специалиста, хотя не являются фактами в полях. Не обрезай кейс до одного предложения и не захватывай начало следующего клиента;
 - поле text НЕ возвращай и исходник НЕ переписывай: сервер сам возьмёт точный исходный диапазон по ID, без переформулировок;
@@ -175,7 +175,7 @@ ${parts.map((part) => `[${part.id}]${part.recommendation ? ' [РЕКОМЕНДА
       "industry": string,     // отрасль клиента из этого кейса, если названа
       "client_type": string,  // сохрани имя клиента, если оно названо; не заменяй сегментом
       "task": string,         // конкретная выполненная работа со значимыми характеристиками
-      "metrics": object,      // только реальные цифры этого кейса с единицами; не цифры из рекомендаций; нет цифр — {}
+      "metrics": object,      // показатели с единицами из этого кейса; словесные сроки/количества — дословно; нет показателей — {}
       "result": string,       // конкретный выпуск / упаковка / логистика / другой результат без общих заглушек
       "source_start": integer, // ID первой части: с заголовком клиента
       "source_end": integer    // ID последней части ВКЛЮЧИТЕЛЬНО: с финальными заметками кейса
@@ -214,13 +214,26 @@ function numericTokens(text: string): string[] {
     .map(([number]) => number.replace(/[ \u00a0\u202f]/g, '').replace(',', '.'));
 }
 
+/** A worded quantity must be a verbatim phrase, not a substring of another word. */
+function includesCaseSourcePhrase(source: string, value: string): boolean {
+  const haystack = normalizeCaseText(source);
+  const needle = normalizeCaseText(value);
+  if (needle.length < 3) return false;
+  for (let start = haystack.indexOf(needle); start >= 0; start = haystack.indexOf(needle, start + 1)) {
+    const before = haystack[start - 1] ?? '';
+    const after = haystack[start + needle.length] ?? '';
+    if (!/[\p{L}\p{N}]/u.test(before) && !/[\p{L}\p{N}]/u.test(after)) return true;
+  }
+  return false;
+}
+
 function validateRawCaseText(rawText: string): void {
   if (typeof rawText !== 'string' || !rawText.trim()) throw new Error('Вставьте исходный текст кейсов');
   if (rawText.length > MAX_CASE_TEXT_CHARS) throw new Error(`Максимум ${MAX_CASE_TEXT_CHARS} символов за один раз`);
 }
 
 /**
- * Same checks for preview and save. Provenance and numeric presence are verified;
+ * Same checks for preview and save. Provenance, digits and worded metrics are verified;
  * semantic attribution still needs the specialist's review before saving.
  */
 export function validateCaseDrafts(rawText: string, value: unknown): VeCaseDraft[] {
@@ -258,8 +271,9 @@ export function validateCaseDrafts(rawText: string, value: unknown): VeCaseDraft
     const supportedNumbers = new Set(numericTokens(facts));
     for (const [key, metric] of Object.entries(draft.metrics)) {
       const numbers = numericTokens(String(metric));
-      if (!numbers.length || [...numbers, ...numericTokens(key)].some((number) => !supportedNumbers.has(number))) {
-        throw new Error(`${label}: цифры метрики «${key}» не найдены в его исходном фрагменте`);
+      if ([...numbers, ...numericTokens(key)].some((number) => !supportedNumbers.has(number))
+        || (!numbers.length && (missing.test(String(metric)) || !includesCaseSourcePhrase(facts, String(metric))))) {
+        throw new Error(`${label}: метрика «${key}» не подтверждена исходным фрагментом. Скопируй срок или количество дословно, без преобразования слов в цифры и без пересчёта единиц; если показателя нет — не добавляй его`);
       }
     }
     if (numericTokens([draft.industry, draft.client_type, draft.task, draft.result].join(' '))
@@ -270,13 +284,42 @@ export function validateCaseDrafts(rawText: string, value: unknown): VeCaseDraft
   });
 }
 
-/** One bounded model call parses all engagements; saving the preview calls no model. */
+/** Apply provenance checks inside the schema too, so a model can correct its own draft. */
+function materializeCaseDrafts(rawText: string, parts: CaseSourcePart[], data: z.infer<typeof veCaseImportSchema>): VeCaseDraft[] {
+  const spans: Array<{ start: number; end: number }> = [];
+  const drafts = data.cases.map(({ source_start: start, source_end: sourceEnd, ...draft }, index) => {
+    if (start > sourceEnd || sourceEnd > parts.length) {
+      throw new Error(`Кейс ${index + 1}: границы исходного текста некорректны`);
+    }
+    // Attach adjacent labelled notes without crossing a factual part/client.
+    let end = sourceEnd;
+    while (end < parts.length && parts[end].recommendation) end++;
+    if (spans.some((span) => start <= span.end && end >= span.start)) {
+      throw new Error(`Кейс ${index + 1}: границы исходного текста пересекаются`);
+    }
+    spans.push({ start, end });
+    return { ...draft, text: rawText.slice(parts[start - 1].start, parts[end - 1].end) };
+  });
+  return validateCaseDrafts(rawText, drafts);
+}
+
+/** At most two model answers, under one caller deadline; saving calls no model. */
 export async function structureCaseTexts(rawText: string, signal?: AbortSignal): Promise<VeCaseDraft[]> {
   validateRawCaseText(rawText);
   const parts = caseSourceParts(rawText);
-  const llm = await callLLMWithSchema(buildCaseStructuringMessages(parts), veCaseImportSchema, {
+  const sourceSchema = veCaseImportSchema.superRefine((data, ctx) => {
+    if (data.has_more) return; // A real overflow needs a smaller import, not a model retry.
+    try {
+      materializeCaseDrafts(rawText, parts, data);
+    } catch (error) {
+      ctx.addIssue({ code: 'custom', message: error instanceof Error ? error.message : 'Разбор не соответствует исходнику' });
+    }
+  });
+  const llm = await callLLMWithSchema(buildCaseStructuringMessages(parts), sourceSchema, {
     model: getVeModel('gate'),
     maxTokens: 14000,
+    requireCompleteJson: true,
+    maxSchemaAttempts: 2,
     signal,
   });
   signal?.throwIfAborted();
@@ -303,23 +346,7 @@ export async function structureCaseTexts(rawText: string, signal?: AbortSignal):
   // proves that IDs are actual integers within this source's bounds.
   const parsed = veCaseImportSchema.safeParse(llm.data);
   if (!parsed.success) throw new Error('Не удалось определить границы кейсов в исходном тексте');
-  const spans: Array<{ start: number; end: number }> = [];
-  const drafts = parsed.data.cases.map(({ source_start: start, source_end: sourceEnd, ...draft }, index) => {
-    if (start > sourceEnd || sourceEnd > parts.length) {
-      throw new Error(`Кейс ${index + 1}: границы исходного текста некорректны`);
-    }
-    // Models often stop at the last fact even when asked to retain notes.
-    // Attach only immediately adjacent explicitly labelled recommendations;
-    // never skip a factual part or move across the next client's heading.
-    let end = sourceEnd;
-    while (end < parts.length && parts[end].recommendation) end++;
-    if (spans.some((span) => start <= span.end && end >= span.start)) {
-      throw new Error(`Кейс ${index + 1}: границы исходного текста пересекаются`);
-    }
-    spans.push({ start, end });
-    return { ...draft, text: rawText.slice(parts[start - 1].start, parts[end - 1].end) };
-  });
-  return validateCaseDrafts(rawText, drafts);
+  return materializeCaseDrafts(rawText, parts, parsed.data);
 }
 
 /* ─────────────────── Подбор кейса под вертикаль ─────────────────── */

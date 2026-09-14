@@ -24,7 +24,8 @@ import {
   type TemplatePlanPromptInput,
 } from '@/lib/verticalEngineV2/prompts/template';
 import { structureCaseTexts, validateCaseDrafts } from '@/lib/verticalEngineV2/caseBank';
-import { callLLMText, callLLMTextWithFallback, callLLMWithSchema } from '@/lib/verticalEngineV2/llm';
+import { callLLMText, callLLMTextWithFallback, callLLMWithSchema, LLMValidationError } from '@/lib/verticalEngineV2/llm';
+import { VeOperationTimeoutError } from '@/lib/verticalEngineV2/operationDeadline';
 import { buildChainLetters, runChainStage } from '@/lib/verticalEngineV2/stages/chain';
 import { runTemplateStage } from '@/lib/verticalEngineV2/stages/template';
 import { normalizeVeChainLetters } from '@/lib/verticalEngineV2/chainLetters';
@@ -313,6 +314,13 @@ describe('client case imports and refresh', () => {
     expect(mockCaseDb.inserts).toHaveLength(1);
     expect(mockCaseDb.getRows('ve_cases')).toMatchObject(drafts);
     expect(callLLMWithSchema).toHaveBeenCalledTimes(1);
+
+    // Durations copied as words are factual too; no conversion to invented digits.
+    for (const duration of ['несколько месяцев', 'три недели', 'два рабочих дня']) {
+      const text = `Лаборатория: внедрение заняло ${duration}. Ускорили доступ к результатам.`;
+      expect(validateCaseDrafts(text, [{ ...drafts[0], task: 'Внедрение системы',
+        result: 'Ускорили доступ к результатам', metrics: { duration }, text }])[0].metrics).toEqual({ duration });
+    }
   });
 
   it('accepts no cases for generic text and rejects incomplete, invented or cross-case proof before saving', async () => {
@@ -354,6 +362,69 @@ describe('client case imports and refresh', () => {
     ]) {
       jest.mocked(callLLMWithSchema).mockResolvedValueOnce(incomplete);
       expect((await request({ mode: 'preview', text: raw })).status).toBe(502);
+    }
+    expect(mockCaseDb.inserts).toEqual([]);
+
+    const wordedSource = 'Лаборатория: внедрение заняло несколько месяцев. Ускорили доступ к результатам.\nРекомендуемые сегменты: сто предприятий.';
+    const worded = { industry: '', client_type: 'Лаборатория', task: 'Внедрение системы',
+      metrics: { duration: 'несколько месяцев' }, result: 'Ускорили доступ к результатам', source_start: 1, source_end: 2 };
+    for (const value of ['сколько', 'сто предприятий', 'три месяца', '3 месяца', 'не указано']) {
+      expect(() => validateCaseDrafts(wordedSource, [{ ...worded, text: wordedSource, metrics: { duration: value } }])).toThrow();
+    }
+
+    // Exercise the real schema-feedback loop, replacing only provider HTTP.
+    const previousFetch = global.fetch;
+    const previousKey = process.env.OPENROUTER_HYPOTHESIS_ENGINE_API_KEY;
+    const providerReply = (content: string, finish_reason = 'stop') => ({
+      ok: true, status: 200, json: async () => ({ choices: [{ finish_reason, message: { content } }], usage: {} }),
+    } as Response);
+    const validJson = JSON.stringify({ has_more: false, cases: [worded] });
+    const invalidJson = JSON.stringify({ has_more: false, cases: [{ ...worded, metrics: { duration: '3 месяца' } }] });
+    const fetchMock = jest.fn();
+    try {
+      process.env.OPENROUTER_HYPOTHESIS_ENGINE_API_KEY = 'test-key';
+      global.fetch = fetchMock;
+      jest.mocked(callLLMWithSchema).mockImplementation(
+        jest.requireActual<typeof import('@/lib/verticalEngineV2/llm')>('@/lib/verticalEngineV2/llm').callLLMWithSchema,
+      );
+      fetchMock.mockResolvedValueOnce(providerReply(invalidJson)).mockResolvedValueOnce(providerReply(validJson));
+      expect((await structureCaseTexts(wordedSource))[0]).toMatchObject({ metrics: worded.metrics, text: wordedSource });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const correction = JSON.parse(fetchMock.mock.calls[1][1].body).messages;
+      expect(correction.at(-1).content).toContain('не подтверждена исходным фрагментом');
+      expect(correction.find((message: { role: string }) => message.role === 'user').content).toContain('несколько месяцев');
+
+      fetchMock.mockReset().mockResolvedValue(providerReply(invalidJson));
+      const invalidPreview = await request({ mode: 'preview', text: wordedSource });
+      expect(invalidPreview.status).toBe(502);
+      expect((await invalidPreview.json()).error).toContain('после автоматического исправления');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(mockCaseDb.inserts).toEqual([]);
+
+      // An incomplete answer is regenerated, never silently repaired into a partial import.
+      for (const incomplete of [providerReply(validJson, 'length'), providerReply(validJson.slice(0, -1))]) {
+        fetchMock.mockReset().mockResolvedValueOnce(incomplete).mockResolvedValueOnce(providerReply(validJson));
+        expect((await structureCaseTexts(wordedSource))[0].text).toBe(wordedSource);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      }
+      fetchMock.mockReset().mockResolvedValue(providerReply(JSON.stringify({ has_more: true, cases: [worded] })));
+      await expect(structureCaseTexts(wordedSource)).rejects.toThrow(/больше 20/);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      global.fetch = previousFetch;
+      if (previousKey === undefined) delete process.env.OPENROUTER_HYPOTHESIS_ENGINE_API_KEY;
+      else process.env.OPENROUTER_HYPOTHESIS_ENGINE_API_KEY = previousKey;
+      jest.mocked(callLLMWithSchema).mockReset();
+    }
+    for (const [error, status] of [
+      [new VeOperationTimeoutError('Case parsing', 45_000), 504],
+      [new LLMValidationError('private provider response', 'private raw text'), 502],
+      [new Error('Requesty 503: private provider details'), 503],
+    ] as const) {
+      jest.mocked(callLLMWithSchema).mockRejectedValueOnce(error);
+      const failed = await request({ mode: 'preview', text: raw });
+      expect(failed.status).toBe(status);
+      expect((await failed.json()).error).not.toMatch(/Разделите текст|private/);
     }
     expect(mockCaseDb.inserts).toEqual([]);
   });
