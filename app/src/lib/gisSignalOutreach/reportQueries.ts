@@ -100,6 +100,160 @@ export interface GisAppendBatchTotals {
   skipped: number;
 }
 
+/** Итоги одного прогона (суммы воронки, из gis_signal_runs.funnel.total). */
+export interface GisSignalRunTotals {
+  pulled: number;
+  signalsOk: number;
+  onlineOk: number;
+  bcIn: number;
+  validContacts: number;
+  appended: number;
+}
+
+/** База (base_constructor_jobs), созданная прогоном. */
+export interface GisRunBaseInfo {
+  id: string;
+  /** pending | processing | completed | failed | cancelled. */
+  status: string;
+  errorMessage: string | null;
+}
+
+/** Элемент «Истории запусков» дашборда: один суточный прогон пайплайна. */
+export interface GisRunHistoryItem {
+  id: string;
+  startedAt: string;
+  finishedAt: string | null;
+  status: 'running' | 'completed' | 'failed';
+  totals: GisSignalRunTotals;
+  /** Причина падения (обрезана — текст может нести кусок payload'а). */
+  error: string | null;
+  /** База, собранная прогоном; null — прогон не дошёл до конструктора. */
+  base: GisRunBaseInfo | null;
+}
+
+interface RunHistoryRow {
+  id: string;
+  started_at: string;
+  finished_at: string | null;
+  status: string;
+  funnel: {
+    perSegment?: Record<string, Record<string, number | undefined>>;
+    total?: Record<string, number | undefined>;
+  } | null;
+  error: string | null;
+}
+
+interface BaseJobHistoryRow {
+  id: string;
+  status: string;
+  created_at: string;
+  error_message: string | null;
+}
+
+/**
+ * Окно связки run → база, когда finished_at нет (прогон идёт или убит
+ * watchdog'ом без записи): job создаётся в пределах ~полусуток от старта.
+ */
+const RUN_BASE_MATCH_MAX_MS = 12 * 3_600_000;
+
+/** Итоги прогона из funnel.total; для старых прогонов без total — сумма perSegment. */
+function runTotalsOf(funnel: RunHistoryRow['funnel']): GisSignalRunTotals {
+  const num = (v: unknown): number => Number(v ?? 0) || 0;
+  const t = funnel?.total;
+  if (t) {
+    // onlineOk появился позже signalsOk: у прогонов до require_online его
+    // не было, честный эквивалент = signalsOk (то же правило, что в addFunnel).
+    return {
+      pulled: num(t.pulled),
+      signalsOk: num(t.signalsOk),
+      onlineOk: num(t.onlineOk ?? t.signalsOk),
+      bcIn: num(t.bcIn),
+      validContacts: num(t.validContacts),
+      appended: num(t.appended),
+    };
+  }
+  const totals: GisSignalRunTotals = {
+    pulled: 0, signalsOk: 0, onlineOk: 0, bcIn: 0, validContacts: 0, appended: 0,
+  };
+  for (const seg of Object.values(funnel?.perSegment ?? {})) {
+    totals.pulled += num(seg?.pulled);
+    totals.signalsOk += num(seg?.signalsOk);
+    totals.onlineOk += num(seg?.onlineOk ?? seg?.signalsOk);
+    totals.bcIn += num(seg?.bcIn);
+    totals.validContacts += num(seg?.validContacts);
+    totals.appended += num(seg?.appended);
+  }
+  return totals;
+}
+
+/**
+ * Последние прогоны пайплайна для «Истории запусков» дашборда.
+ *
+ * Связка run ↔ база — эвристика (FK нет): pipelineRunner создаёт ровно один
+ * base_constructor_jobs с file_name 'gis-signals-…' от имени client_user_id
+ * внутри окна прогона, поэтому матчим по created_at ∈ [started_at; конца
+ * прогона (+12ч, если finished_at нет)]. Взять все job'ы клиента «наугад»
+ * нельзя: в конструкторе есть и его собственные запуски — их отсекает
+ * префикс имени файла.
+ * Ошибка БД → throw (дашборд отвечает 500, тихие пустые списки скрывают сбой).
+ */
+export async function getRunHistory(clientUserId: string, limit = 30): Promise<GisRunHistoryItem[]> {
+  if (!supabaseAdmin) return [];
+  const [runsRes, jobsRes] = await Promise.all([
+    supabaseAdmin
+      .from('gis_signal_runs')
+      .select('id, started_at, finished_at, status, funnel, error')
+      .order('started_at', { ascending: false })
+      .limit(limit),
+    supabaseAdmin
+      .from('base_constructor_jobs')
+      .select('id, status, created_at, error_message')
+      .eq('user_id', clientUserId)
+      .like('file_name', 'gis-signals-%')
+      .order('created_at', { ascending: false })
+      .limit(limit * 2),
+  ]);
+  if (runsRes.error) throw new Error(`gis_signal_runs read failed: ${runsRes.error.message}`);
+  if (jobsRes.error) throw new Error(`base_constructor_jobs read failed: ${jobsRes.error.message}`);
+
+  // Окно матча — по возрастанию created_at; матч поглощается, чтобы job
+  // одного прогона не прилип к соседнему.
+  const jobs = ((jobsRes.data ?? []) as BaseJobHistoryRow[])
+    .slice()
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+
+  const out: GisRunHistoryItem[] = [];
+  for (const run of (runsRes.data ?? []) as RunHistoryRow[]) {
+    const startMs = new Date(run.started_at).getTime();
+    const endMs = run.finished_at
+      ? new Date(run.finished_at).getTime()
+      : startMs + RUN_BASE_MATCH_MAX_MS;
+    let base: GisRunBaseInfo | null = null;
+    const idx = jobs.findIndex((job) => {
+      const created = new Date(job.created_at).getTime();
+      return created >= startMs && created <= endMs;
+    });
+    if (idx >= 0) {
+      const [job] = jobs.splice(idx, 1);
+      base = {
+        id: job.id,
+        status: job.status,
+        errorMessage: job.error_message ? job.error_message.slice(0, 300) : null,
+      };
+    }
+    out.push({
+      id: run.id,
+      startedAt: run.started_at,
+      finishedAt: run.finished_at,
+      status: run.status === 'running' || run.status === 'completed' ? run.status : 'failed',
+      totals: runTotalsOf(run.funnel),
+      error: run.error ? run.error.slice(0, 500) : null,
+      base,
+    });
+  }
+  return out;
+}
+
 /** Остаток пула: сколько компаний сегмента уже обработано за всё время. */
 export interface GisPoolProcessedRow {
   segmentKey: string;
