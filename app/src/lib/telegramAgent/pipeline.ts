@@ -6,6 +6,8 @@ import { exportPipelineResults } from './pipelineExport';
 import { cleanNamesForPipelineStep } from './cleanNames';
 import { deduplicateByField } from './dedup';
 import { publishWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentJobPublisher';
+import { normalizeYandexMapsCatalogFilters } from '@/lib/parsers/yandexMapsCatalog';
+import { queueYandexMapsCatalogJob } from '@/lib/parsers/yandexMapsCatalogJob';
 
 export type StepType =
   | 'parse_hh'
@@ -435,15 +437,15 @@ async function launchStep(pipeline: Pipeline, stepIdx: number, user: AgentUser):
     }
 
     case 'parse_yandex_maps': {
+      // Поиск по локальному каталогу организаций; живой парсинг по URL
+      // отключён. Задача встаёт в очередь, воркер yandexmaps заполняет её из
+      // каталога, а пайплайн следит за статусом как за любой другой задачей.
       const config = step.config;
-      if (!config.search_urls) throw new Error('Yandex Maps parser requires "search_urls" in config');
-      const { data, error } = await sb
-        .from('yandex_maps_jobs')
-        .insert({ user_id: user.userId, status: 'pending', config, progress_stage: 'pending' })
-        .select('id')
-        .single();
-      if (error) throw new Error(error.message);
-      return data.id as string;
+      const cities = Array.isArray(config.cities) ? (config.cities as unknown[]).filter((c): c is string => typeof c === 'string') : [];
+      const rubrics = Array.isArray(config.rubrics) ? (config.rubrics as unknown[]).filter((r): r is string => typeof r === 'string') : [];
+      const filters = normalizeYandexMapsCatalogFilters({ cities, categories: rubrics });
+      if (!filters) throw new Error('Yandex Maps: укажите города (cities) и рубрики (rubrics) в config — живой парсинг по URL отключён');
+      return queueYandexMapsCatalogJob(user.userId, filters, null);
     }
 
     case 'enrich_emails': {
