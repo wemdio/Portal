@@ -2,10 +2,11 @@
 
 import { formatTotals } from '@/lib/techCalendar/money';
 import { activeCount, decisionsDueWithin, monthTotals, pendingCount } from '@/lib/techCalendar/stats';
-import type { TechSubscription } from '@/lib/techCalendar/types';
+import type { TechRenewalEvent, TechSubscription } from '@/lib/techCalendar/types';
 
 interface Props {
   subscriptions: TechSubscription[];
+  renewed: TechRenewalEvent[];
   year: number;
   month: number;
   today: string;
@@ -25,7 +26,7 @@ function Card({ label, values, accent }: { label: string; values: string[]; acce
   );
 }
 
-export default function StatsRow({ subscriptions, year, month, today }: Props) {
+export default function StatsRow({ subscriptions, renewed, year, month, today }: Props) {
   const pending = pendingCount(subscriptions);
   const due = decisionsDueWithin(subscriptions, today);
 
@@ -33,7 +34,7 @@ export default function StatsRow({ subscriptions, year, month, today }: Props) {
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
       <Card label="Активных сервисов" values={[String(activeCount(subscriptions))]} />
       <Card label="Ожидают решения" values={[String(pending)]} accent={pending ? 'amber' : undefined} />
-      <Card label="За этот месяц" values={formatTotals(monthTotals(subscriptions, year, month))} />
+      <Card label="За этот месяц" values={formatTotals(monthTotals(subscriptions, renewed, year, month))} />
       <Card label="Решений на 7 дней" values={[String(due)]} accent={due ? 'blue' : undefined} />
     </div>
   );

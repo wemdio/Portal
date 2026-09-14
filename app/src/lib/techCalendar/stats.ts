@@ -1,16 +1,25 @@
 /**
  * Счётчики и суммы для плиток календаря технички.
  *
+ * Сумма месяца — два потока: продления, оплаченные в этом месяце (журнал
+ * `tech_subscription_cost_events` по дате оплаты), и будущие списания месяца
+ * (активные строки по `next_billing_date`). Поэтому продление не выкидывает
+ * платёж из текущего месяца и не уводит его в следующий: оплаченный цикл
+ * остаётся в месяце оплаты, а строка после продления считается только как
+ * будущее списание на новую дату. Цикл, чья дата списания прошла, а продления
+ * в том месяце не случилось, в сумму этого месяца не входит.
+ *
  * Отменённые сервисы (`cancel`) не входят ни в деньги, ни в активные: решение
  * по ним принято, платить их не собираются. В календаре они при этом остаются
  * красными — чтобы техник дошёл и отключил.
  */
-import { daysUntil } from '@/lib/techCalendar/dates';
+import { daysUntil, mskDateStr } from '@/lib/techCalendar/dates';
 import { addMoney, emptyTotals, type MoneyTotals } from '@/lib/techCalendar/money';
 import {
   PENDING_REVIEW_DAYS,
   SERVICE_TYPES,
   type ServiceType,
+  type TechRenewalEvent,
   type TechSubscription,
 } from '@/lib/techCalendar/types';
 
@@ -26,14 +35,29 @@ function inMonth(sub: TechSubscription, year: number, month: number): boolean {
   return y === year && m - 1 === month;
 }
 
-export function monthTotals(subs: TechSubscription[], year: number, month: number): MoneyTotals {
-  return subs
+/** Продление относится к месяцу оплаты (МСК), а не к месяцу даты списания. */
+function paidInMonth(event: TechRenewalEvent, year: number, month: number): boolean {
+  const [y, m] = mskDateStr(new Date(event.paid_at)).split('-').map(Number);
+  return y === year && m - 1 === month;
+}
+
+export function monthTotals(
+  subs: TechSubscription[],
+  renewed: TechRenewalEvent[],
+  year: number,
+  month: number,
+): MoneyTotals {
+  const rows = subs
     .filter((s) => isPayable(s) && inMonth(s, year, month))
     .reduce((acc, s) => addMoney(acc, s.currency, s.amount), emptyTotals());
+  return renewed
+    .filter((e) => paidInMonth(e, year, month))
+    .reduce((acc, e) => addMoney(acc, e.currency, e.amount), rows);
 }
 
 export function totalsByType(
   subs: TechSubscription[],
+  renewed: TechRenewalEvent[],
   year: number,
   month: number,
 ): Record<ServiceType, MoneyTotals> {
@@ -44,6 +68,10 @@ export function totalsByType(
   for (const s of subs) {
     if (!isPayable(s) || !inMonth(s, year, month)) continue;
     result[s.service_type] = addMoney(result[s.service_type], s.currency, s.amount);
+  }
+  for (const e of renewed) {
+    if (!paidInMonth(e, year, month)) continue;
+    result[e.service_type] = addMoney(result[e.service_type], e.currency, e.amount);
   }
   return result;
 }
