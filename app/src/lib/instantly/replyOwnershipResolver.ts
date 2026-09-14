@@ -321,6 +321,77 @@ function jsonAddressTokens(value: Email['from_address_json']): string[] {
   return value.flatMap((entry) => emailAddressTokens(entry?.address));
 }
 
+interface QuotedOutbound {
+  recipients: string[];
+  subject: string;
+  body: string;
+}
+
+/** Quoted headers are lookup hints, never ownership proof. Only a coherent
+ * From/To/Date/Subject block sent by our exact mailbox is eligible. Do not
+ * collect arbitrary signature addresses or expand to every address on a domain.
+ */
+function quotedOutbounds(reply: Email, mailbox: string): QuotedOutbound[] {
+  const text = getBodyText(reply.body).replace(/\r\n?/g, '\n')
+    .split('\n').map(line => line.replace(/^\s*(?:>\s*)+/, '')).join('\n');
+  const starts = [...text.matchAll(/^(?:From|От|От кого)\s*:\s*(.+)$/gim)];
+  const result: QuotedOutbound[] = [];
+  for (let index = 0; index < starts.length; index++) {
+    const start = starts[index];
+    const senders = emailAddressTokens(start[1]);
+    if (!senders.length || senders.some(sender => sender !== mailbox)) continue;
+    const block = text.slice(start.index! + start[0].length, starts[index + 1]?.index);
+    const lines = block.split('\n');
+    let recipients: string[] = [];
+    let subject = '';
+    let dated = false;
+    let bodyAt = 0;
+    // Outlook/forward headers may be separated by blank lines in HTML mail.
+    for (let i = 0; i < Math.min(16, lines.length); i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      const header = /^(Sent|Date|Отправлено|Дата|To|Кому|Cc|Копия|Subject|Тема)\s*:\s*(.*)$/i.exec(line);
+      if (!header) break;
+      if (/^(Sent|Date|Отправлено|Дата)$/i.test(header[1])) dated = Boolean(header[2].trim());
+      if (/^(To|Кому)$/i.test(header[1])) recipients = emailAddressTokens(header[2]);
+      if (/^(Subject|Тема)$/i.test(header[1])) subject = header[2].trim();
+      bodyAt = i + 1;
+    }
+    if (dated && subject && recipients.length) {
+      result.push({ recipients: [...new Set(recipients)].filter(address => address !== mailbox),
+        subject, body: lines.slice(bodyAt).join('\n') });
+    }
+  }
+  return result;
+}
+
+function normalizedSubject(value: string): string {
+  return value.toLowerCase().replace(/^(?:(?:re|fw|fwd|ответ|пересылка)(?:\[\d+\])?\s*:\s*)+/i, '')
+    .replace(/\s+/g, ' ').trim();
+}
+
+/** A changed-address reply needs stronger proof than a generic matching line:
+ * actual provider recipient + exact sending mailbox + subject + a substantial
+ * quote of the outbound body. Chronology and campaign guards still run below.
+ */
+function matchesQuotedOutbound(email: Email, quotes: QuotedOutbound[], mailbox: string): boolean {
+  if (![1, 3].includes(email.ue_type ?? 0) ||
+      normalizeMailbox(email.eaccount) !== mailbox ||
+      normalizeMailbox(email.from_address_email) !== mailbox) return false;
+  const recipients = new Set([
+    ...emailAddressTokens(email.to_address_email_list),
+    ...jsonAddressTokens(email.to_address_json),
+  ]);
+  const body = normalizeQuotedText(getBodyText(email.body));
+  if (body.length < 160) return false;
+  const subject = normalizedSubject(email.subject ?? '');
+  if (!subject) return false;
+  return quotes.some(quote =>
+    quote.recipients.some(address => recipients.has(address)) &&
+    normalizedSubject(quote.subject) === subject &&
+    normalizeQuotedText(quote.body).includes(body.slice(0, 300)));
+}
+
 function emailBelongsToReply(
   email: Email,
   reply: Email,
@@ -352,6 +423,7 @@ function collectCampaignEvidence(
 ): Map<string, CampaignEvidence> {
   const campaignSet = new Set(campaignIds);
   const replyAt = emailTs(reply);
+  const quotes = quotedOutbounds(reply, mailbox);
   const identities = new Set(
     [reply.lead, leadEmail, reply.from_address_email]
       .flatMap((value) => emailAddressTokens(value))
@@ -363,7 +435,8 @@ function collectCampaignEvidence(
     if (!campaignId || !campaignSet.has(campaignId)) continue;
     if (replyAt && emailTs(email) > replyAt) continue;
     const isTrustedParent = Boolean(trustedParentId && email.id === trustedParentId);
-    if (!isTrustedParent && !emailBelongsToReply(email, reply, identities)) continue;
+    if (!isTrustedParent && !emailBelongsToReply(email, reply, identities) &&
+        !matchesQuotedOutbound(email, quotes, mailbox)) continue;
     // The same provider message id can be exposed under both the polluted and
     // real campaign. Preserve both copies; cross-owner ties become manual.
     const key = email.id
@@ -414,7 +487,7 @@ function collectCampaignEvidence(
   return evidence;
 }
 
-async function fetchWorkspaceEvidence(args: {
+interface WorkspaceEvidenceArgs {
   db: SupabaseClient;
   campaignIds: string[];
   reply: Email;
@@ -429,7 +502,29 @@ async function fetchWorkspaceEvidence(args: {
   onEvidenceProgress?: () => void;
   /** Includes current project/client links, not just campaign names. */
   ownershipScope: unknown;
-}): Promise<WorkspaceEvidenceResult> {
+  evidenceDeadlineMs?: number;
+}
+
+async function fetchWorkspaceEvidence(args: WorkspaceEvidenceArgs): Promise<WorkspaceEvidenceResult> {
+  args = { ...args, evidenceDeadlineMs: Date.now() + RECOVERY_EVIDENCE_TIME_BUDGET_MS };
+  const primary = (args.reply.lead ?? args.leadEmail).trim().toLowerCase() || args.leadEmail;
+  const identities = [...new Set([primary, ...quotedOutbounds(args.reply, args.mailbox)
+    .flatMap(quote => quote.recipients)])];
+  // Never select a winner from a silently truncated candidate set.
+  if (identities.length > 4) throw new Error('ownership evidence checkpoint blocked: too many quoted recipients');
+  let evidence = new Map<string, CampaignEvidence>();
+  for (const identity of identities) {
+    const result = await fetchSingleIdentityEvidence(args, identity);
+    evidence = mergeCampaignEvidence(evidence, result.evidence);
+    if (!result.complete) return { evidence, complete: false };
+  }
+  return { evidence, complete: true };
+}
+
+async function fetchSingleIdentityEvidence(
+  args: WorkspaceEvidenceArgs,
+  identity: string,
+): Promise<WorkspaceEvidenceResult> {
   const {
     campaignIds,
     reply,
@@ -440,7 +535,6 @@ async function fetchWorkspaceEvidence(args: {
     providerCampaignId,
     trustPrefetchedParent,
   } = args;
-  const identity = (reply.lead ?? leadEmail).trim() || leadEmail;
   const items: Email[] = [];
   if (prefetchedContext) {
     for (const email of [
@@ -610,8 +704,12 @@ async function resumeWorkspaceEvidence(args: {
   trustedParentId: string | null;
   evidencePriority?: 'fresh' | 'recovery';
   onEvidenceProgress?: () => void;
+  evidenceDeadlineMs?: number;
 }): Promise<WorkspaceEvidenceResult> {
   const checkpoint = await loadOwnershipEvidenceCheckpoint(args.db, {
+    // Prior negative searches did not examine quoted original recipients.
+    // Keep durable pagination, but never reuse their incomplete proof.
+    evidenceVersion: 2,
     accountId: args.accountId ?? 'main',
     // Changing a body, mailbox, identity, timestamp, thread or owner scope
     // invalidates both cursors. Never reuse another reply's classification.
@@ -630,7 +728,8 @@ async function resumeWorkspaceEvidence(args: {
   const configuredPages = Number(process.env.INSTANTLY_OWNERSHIP_RECOVERY_EVIDENCE_PAGES);
   const maxPages = Number.isFinite(configuredPages) && configuredPages >= 2
     ? Math.min(20, Math.floor(configuredPages)) : RECOVERY_EVIDENCE_PAGES_PER_SURFACE;
-  const deadline = Date.now() + RECOVERY_EVIDENCE_TIME_BUDGET_MS;
+  const deadline = Math.min(args.evidenceDeadlineMs ?? Infinity,
+    Date.now() + RECOVERY_EVIDENCE_TIME_BUDGET_MS);
   const block = async (reason: string): Promise<never> => {
     checkpoint.progress.blockedReason = reason;
     await saveOwnershipEvidenceCheckpoint(args.db, checkpoint);
