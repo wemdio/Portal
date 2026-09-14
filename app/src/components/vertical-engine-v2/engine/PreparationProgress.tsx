@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import type { VeOutreachPreparation } from '@/lib/verticalEngineV2/outreachSetup';
 import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors';
 import type { VeBaseSummary, VeCollectInfo, VeJobSummary } from './api';
@@ -22,6 +23,13 @@ interface PreparationPresentation {
 }
 
 const STEPS = ['Сбор и проверка базы', 'Разбор состава базы', 'Подготовка A/B-писем'];
+const CONSTRUCT_STEPS: Record<string, string> = {
+  find_emails: 'Ищем email на сайтах компаний',
+  split_emails: 'Разделяем найденные email',
+  remove_empty: 'Исключаем строки без контактов',
+  dedup: 'Исключаем повторные контакты',
+  validate_emails: 'Проверяем email',
+};
 
 function preparationError(message: string): string {
   const failure = getVeCollectionFailure(message);
@@ -134,7 +142,11 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
     description: 'Сервис поиска Serper временно не ответил. Повторная попытка поставлена в очередь с паузой. Система продолжит с сохранённого этапа; повторно нажимать кнопку не нужно.',
     currentStep: 0, tone: 'muted',
   };
-  if (job?.status !== 'running') return {
+  // The coordinator requeues itself while a child works. Pending is not proof
+  // that collection is idle; its saved child snapshot is the stronger evidence.
+  const childStatus = info?.construct?.progress?.status;
+  const hasChildState = !savedReview && ['pending', 'processing', 'completed', 'failed', 'cancelled'].includes(childStatus ?? '');
+  if (job?.status !== 'running' && !hasChildState) return {
     title: job?.status === 'pending'
       ? savedReview ? 'Проверка сохранённой базы в очереди' : 'Сбор базы в очереди'
       : job?.status === 'done' ? 'Проверка завершена, обновляем результат' : 'Ожидаем обновления состояния базы',
@@ -146,6 +158,21 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
     currentStep: 0, tone: 'muted',
   };
   const phase = getCollectionProgress(info, job).phase;
+  if (phase === 'finishing' && job?.status !== 'running') return {
+    title: 'Контакты обработаны, ожидают проверки соответствия гипотезе',
+    description: 'Поиск и проверка email этого пакета завершены. Затем система проверит деятельность компаний. В готовую базу попадут контакты, прошедшие все проверки.',
+    currentStep: 0, tone: 'muted',
+  };
+  if (phase === 'processing' && childStatus === 'processing') {
+    const key = info?.construct?.progress?.current_step_key ?? '';
+    return {
+      title: CONSTRUCT_STEPS[key] ?? COLLECT_PHASES.processing[0],
+      description: key === 'validate_emails'
+        ? 'Проверяем найденные адреса. Ответы почтовых серверов и повторные проверки могут занимать время. Затем проверим соответствие компаний гипотезе; готовые контакты появятся после всех проверок.'
+        : COLLECT_PHASES.processing[1],
+      currentStep: 0, tone: 'info',
+    };
+  }
   const [title, description] = info?.validation_retry && !info.company_name_recovery && !info.saved_email_review_pending
     ? ['Продолжаем проверку сохранённых контактов', 'Система продолжает автоматическую проверку уже найденных контактов: соответствие компаний гипотезе и пригодность email для рассылки. После проверки начнётся разбор базы.']
     : COLLECT_PHASES[phase];
@@ -153,11 +180,26 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
 }
 
 export function PreparationProgress(props: PreparationProgressProps) {
+  const [now, setNow] = useState<number | null>(null);
+  useEffect(() => {
+    const update = () => setNow(Date.now());
+    const first = setTimeout(update, 0);
+    const timer = setInterval(update, 30_000);
+    return () => { clearTimeout(first); clearInterval(timer); };
+  }, []);
   const state = getPreparationPresentation(props);
+  const job = props.jobs.find(candidate => candidate.stage === 'base_collect' && candidate.payload?.base_id === props.base?.id);
+  const progress = getCollectionProgress(props.base?.collect_info, job);
   const target = props.base?.collect_info?.target_progress;
   const savedCandidates = collectCount(target?.candidates_processed);
   const savedReady = collectCount(target?.ready_rows);
-  const showSaved = savedCandidates !== null && savedCandidates > 0;
+  const goal = collectCount(target?.ready_target ?? props.base?.collect_info?.ready_target);
+  const collecting = props.base?.status === 'collecting' && state.tone !== 'err';
+  const stepPercent = collecting && state.tone === 'info' ? progress.stepPercent : null;
+  const started = Date.parse(props.base?.created_at ?? '');
+  const updated = Date.parse(props.base?.updated_at ?? '');
+  const minutes = now !== null && Number.isFinite(started) && now >= started ? Math.floor((now - started) / 60_000) : null;
+  const elapsed = minutes === null ? null : minutes < 1 ? 'меньше минуты' : minutes < 60 ? `${minutes} мин` : `${Math.floor(minutes / 60)} ч ${minutes % 60} мин`;
   return (
     <div className="ve2-preparation" role={state.tone === 'err' ? 'alert' : 'status'} aria-live="polite">
       <div className="ve2-preparation-head">
@@ -165,6 +207,20 @@ export function PreparationProgress(props: PreparationProgressProps) {
         <h3 className={HE.cardTitle}>{state.title}</h3>
       </div>
       <p className={HE.muted}>{state.description}</p>
+      {stepPercent !== null ? <div className="space-y-2">
+        <p className={HE.muted}>Текущий этап обработки: {stepPercent}% · это не готовность всей базы</p>
+        <progress className="w-full h-2" max={100} value={stepPercent} aria-label="Прогресс текущего этапа обработки" />
+      </div> : null}
+      {collecting ? <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
+        {goal !== null ? <span>Цель превью: {goal.toLocaleString('ru-RU')} готовых контактов</span> : null}
+        {progress.candidates !== null ? <span>Кандидатов: {progress.candidates.toLocaleString('ru-RU')}</span> : null}
+        {savedReady !== null ? <span>Прошли все проверки: {savedReady.toLocaleString('ru-RU')}</span> : null}
+      </div> : null}
+      {collecting && (elapsed || Number.isFinite(updated)) ? <p className={HE.muted}>
+        {elapsed ? `С момента создания базы: ${elapsed}. ` : ''}
+        {Number.isFinite(updated) ? `Статус обновлён ${new Date(updated).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} МСК. ` : ''}
+        Время завершения пока неизвестно.
+      </p> : null}
       <ol className="ve2-preparation-steps" aria-label="Этапы подготовки">
         {STEPS.map((label, index) => (
           <li key={label} data-state={state.currentStep === index ? 'current' : state.currentStep !== null && state.currentStep > index ? 'done' : 'pending'} aria-current={state.currentStep === index ? 'step' : undefined}>
@@ -173,7 +229,7 @@ export function PreparationProgress(props: PreparationProgressProps) {
           </li>
         ))}
       </ol>
-      {showSaved ? (
+      {!collecting && savedCandidates !== null && savedCandidates > 0 ? (
         <p className={HE.muted}>
           Сохранённые результаты: {savedCandidates.toLocaleString('ru-RU')} кандидатов
           {savedReady !== null ? `, ${savedReady.toLocaleString('ru-RU')} готовых контактов` : ''}.
