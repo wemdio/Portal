@@ -9,7 +9,7 @@ import SubscriptionModal, { type ModalMode, type ModalPayload } from '@/componen
 import TypeBreakdown from '@/components/tech-calendar/TypeBreakdown';
 import UpcomingList from '@/components/tech-calendar/UpcomingList';
 import { daysUntil, mskDateStr } from '@/lib/techCalendar/dates';
-import type { ServiceType, TechProviderBalance, TechSubscription } from '@/lib/techCalendar/types';
+import type { ServiceType, TechProviderBalance, TechRenewalEvent, TechSubscription } from '@/lib/techCalendar/types';
 
 const MONTH_NAMES = [
   'Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
@@ -19,6 +19,7 @@ const MONTH_NAMES = [
 interface TechCalendarApiResponse {
   subscriptions?: TechSubscription[];
   balances?: TechProviderBalance[];
+  renewed?: TechRenewalEvent[];
   sync?: Record<string, SyncOutcomeResponse>;
   error?: string;
 }
@@ -54,6 +55,7 @@ async function authHeaders(): Promise<Record<string, string>> {
 export default function TechCalendarView() {
   const today = mskDateStr(new Date());
   const [subscriptions, setSubscriptions] = useState<TechSubscription[]>([]);
+  const [renewed, setRenewed] = useState<TechRenewalEvent[]>([]);
   const [balances, setBalances] = useState<TechProviderBalance[]>([]);
   const [loading, setLoading] = useState(true);
   const [typeFilter, setTypeFilter] = useState<ServiceType | null>(null);
@@ -76,10 +78,12 @@ export default function TechCalendarView() {
       const res = await fetch(url, { headers: await authHeaders() });
       const json = await responseJson(res);
       setSubscriptions(res.ok ? (json.subscriptions ?? []) : []);
+      setRenewed(res.ok ? (json.renewed ?? []) : []);
       setBalances(res.ok ? (json.balances ?? []) : []);
       setError(res.ok ? null : (json.error ?? 'Не удалось загрузить список'));
     } catch {
       setSubscriptions([]);
+      setRenewed([]);
       setBalances([]);
       setError('Не удалось загрузить список');
     } finally {
@@ -97,6 +101,18 @@ export default function TechCalendarView() {
   const visible = useMemo(
     () => (typeFilter ? subscriptions.filter((s) => s.service_type === typeFilter) : subscriptions),
     [subscriptions, typeFilter],
+  );
+
+  // История продлений показывается по живым карточкам: скрытый или удалённый
+  // сервис из календаря исчезает целиком, вместе со своими прошлыми оплатами.
+  const knownRenewed = useMemo(() => {
+    const subIds = new Set(subscriptions.map((s) => s.id));
+    return renewed.filter((e) => subIds.has(e.subscription_id));
+  }, [subscriptions, renewed]);
+
+  const visibleRenewed = useMemo(
+    () => (typeFilter ? knownRenewed.filter((e) => e.service_type === typeFilter) : knownRenewed),
+    [knownRenewed, typeFilter],
   );
 
   const submit = async (payload: ModalPayload) => {
@@ -280,8 +296,8 @@ export default function TechCalendarView() {
 
       <ProviderBalances balances={balances} />
 
-      <StatsRow subscriptions={visible} year={year} month={month} today={today} />
-      <TypeBreakdown subscriptions={subscriptions} year={year} month={month} selected={typeFilter} onSelect={setTypeFilter} />
+      <StatsRow subscriptions={visible} renewed={visibleRenewed} year={year} month={month} today={today} />
+      <TypeBreakdown subscriptions={subscriptions} renewed={knownRenewed} year={year} month={month} selected={typeFilter} onSelect={setTypeFilter} />
 
       <div className="flex items-center justify-between">
         <button type="button" onClick={() => shiftMonth(-1)} className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm">
@@ -300,6 +316,7 @@ export default function TechCalendarView() {
       ) : (
         <MonthGrid
           subscriptions={visible}
+          renewed={visibleRenewed}
           year={year}
           month={month}
           today={today}
