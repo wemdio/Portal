@@ -820,6 +820,7 @@ async function persistCollectInfo(
     if (error) throw new VeRelevanceCheckpointError(`Preview checkpoint save: ${error.message}`);
     if (!data) throw new VePreviewCheckpointConflict('Preview checkpoint changed; stale writer stopped');
     info.preview_pipeline.revision = revision + 1;
+    ctx.onCheckpoint?.();
     return;
   }
   const { error } = await ctx.supabase
@@ -827,6 +828,7 @@ async function persistCollectInfo(
     .update({ ...patch, collect_info: info, updated_at: new Date().toISOString() })
     .eq('id', baseId);
   if (error) throw new Error(`ve_bases collect_info update: ${error.message}`);
+  ctx.onCheckpoint?.();
 }
 
 /* ─────────────────────────── Фаза PLAN ─────────────────────────── */
@@ -2529,7 +2531,7 @@ async function checkCollectedRelevance(args: {
       ]),
       reviewAttempt: job.payload?.review_relevance === true ? job.id : undefined,
       checkpoint: [job.result?.relevance_checkpoint, args.previousRelevanceCheckpoint, info.relevance_checkpoint],
-      onCheckpoint: async (checkpoint) => {
+      onCheckpoint: async (checkpoint, options) => {
         ctx.signal?.throwIfAborted();
         const result = { ...job.result, relevance_checkpoint: checkpoint };
         // Keep the per-batch write small: collect_info includes source harvests.
@@ -2542,6 +2544,7 @@ async function checkCollectedRelevance(args: {
           error ? `Relevance checkpoint save: ${error.message}` : 'Relevance checkpoint lost job ownership',
         );
         job.result = result;
+        if (options?.canYield !== false) ctx.onCheckpoint?.();
         ctx.signal?.throwIfAborted();
       },
     });
@@ -2807,6 +2810,7 @@ async function cleanCollectedCompanyNames(
       if (writeError || !saved) throw new VeRelevanceCheckpointError(writeError
         ? `Company name checkpoint save: ${writeError.message}` : 'Company name checkpoint lost job ownership');
       job.result = result;
+      ctx.onCheckpoint?.();
       ctx.signal?.throwIfAborted();
     },
   });
@@ -3784,6 +3788,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
 
 /** Keep an explicit target error without erasing a committed round checkpoint. */
 export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Promise<VeStageResult> {
+  ctx.onCheckpoint?.();
   if (job.error && job.result?.relevance_retry) {
     ctx.signal?.throwIfAborted();
     // The saved reason belongs to the previous cooldown. A later constructor
@@ -3799,6 +3804,7 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
   try {
     return await runBaseCollectStageImpl(job, ctx);
   } catch (error) {
+    ctx.signal?.throwIfAborted();
     // Do not reread the winner's revision and stamp our obsolete error over it.
     // The worker also leaves the winner's job lifecycle untouched.
     if (error instanceof VePreviewCheckpointConflict) throw error;

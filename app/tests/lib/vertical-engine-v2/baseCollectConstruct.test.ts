@@ -67,6 +67,7 @@ import { enqueueVeBaseCollect } from '@/lib/verticalEngineV2/baseCollectEnqueue'
 import { callLLMWithSchema } from '@/lib/verticalEngineV2/llm';
 import { stripTaskHarvest } from '@/lib/verticalEngineV2/projectDetail';
 import { VePreviewCheckpointConflict } from '@/lib/verticalEngineV2/relevanceCheckpoint';
+import { createVeJobShutdown, VeWorkerShutdownError } from '@/lib/verticalEngineV2/workerLiveness';
 
 const PROJECT = { id: 'p1', name: 'P', created_by: 'user-1', market: 'ru' };
 const VERTICAL = {
@@ -526,6 +527,43 @@ describe('base_collect CONSTRUCT step order', () => {
     await runBaseCollectStage(makeJob(), { supabase: rolling as unknown as SupabaseClient });
     expect(rolling.getRows('base_constructor_jobs')).toHaveLength(1);
     expect(rolling.getRows('ve_bases')[0].collect_info).not.toHaveProperty('preview_pipeline');
+
+    const stopInfo: VeCollectInfo = { ...collectInfo(harvest.slice(0, 2)), collection_mode: 'preview',
+      target_progress: createCollectionTarget('preview'), preview_pipeline: { version: 1, revision: 0, batches: [] } };
+    stopInfo.tasks![0].exhausted = true;
+    const stopDb = seed(stopInfo);
+    const controller = new AbortController();
+    const shutdown = createVeJobShutdown({ abort: controller, graceMs: 1000, onDeadline: jest.fn() });
+    try {
+      await expect(runBaseCollectStage(makeJob(), { supabase: stopDb as unknown as SupabaseClient,
+        signal: controller.signal, onCheckpoint: () => {
+          // SIGTERM after child INSERT: acknowledge its durable identity before yielding.
+          if (stopDb.getRows('base_constructor_jobs').length) shutdown.request();
+          shutdown.checkpoint();
+        } })).rejects.toBeInstanceOf(VeWorkerShutdownError);
+    } finally { shutdown.stop(); }
+    const savedChild = stopDb.getRows('base_constructor_jobs')[0];
+    expect((stopDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).preview_pipeline!.batches[0])
+      .toMatchObject({ id: savedChild.id, inserted: true });
+    expect(stopDb.getRows('ve_jobs')[0]).toMatchObject({ status: 'running' });
+    expect(stopDb.getRows('ve_bases')[0]).toMatchObject({ status: 'collecting' });
+    const savedGrid = savedChild.data as string[][];
+    await stopDb.from('base_constructor_jobs').update({ status: 'completed',
+      data: [[...savedGrid[0], 'Email Статус'], ...savedGrid.slice(1).map(row => [...row, 'ok'])] }).eq('id', savedChild.id);
+    const stopAfterGate = new AbortController();
+    const gateShutdown = createVeJobShutdown({ abort: stopAfterGate, graceMs: 1000, onDeadline: jest.fn() });
+    mockFindIrrelevantRows.mockImplementationOnce(async input => { gateShutdown.request(); return classify(input); });
+    try {
+      await expect(runBaseCollectStage(makeJob(), { supabase: stopDb as unknown as SupabaseClient,
+        signal: stopAfterGate.signal, onCheckpoint: gateShutdown.checkpoint })).rejects.toBeInstanceOf(VeWorkerShutdownError);
+    } finally { gateShutdown.stop(); }
+    const classifiedCalls = mockFindIrrelevantRows.mock.calls.length;
+    expect(stopDb.getRows('ve_bases')[0]).toMatchObject({ status: 'collecting', row_count: 2 });
+    await runBaseCollectStage(makeJob(), { supabase: stopDb as unknown as SupabaseClient });
+    expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(classifiedCalls);
+    expect(stopDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    expect((stopDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).target_progress)
+      .toMatchObject({ ready_rows: 2, candidates_processed: 2, status: 'exhausted' });
   });
 
   it('resumes a supply target from committed ready rows without revalidating the previous round', async () => {

@@ -48,8 +48,11 @@ export async function runBoundContactDeliveries(input: {
   now?: Date;
   runProject?: RunContactDeliveryProject;
   runSupply?: typeof runProjectContactSupply;
+  /** Finish an already attempted delivery, then leave remaining work for restart. */
+  shouldStop?: () => boolean;
   log: ContactDeliverySchedulerLog;
 }): Promise<ContactDeliverySweepResult> {
+  if (input.shouldStop?.()) return { skipped: true, eligibleProjects: 0, attemptedProjects: 0, failedProjects: 0 };
   if (!input.instantlyDb) {
     input.log('error', 'VE2 contact delivery skipped: Instantly DB client is not configured');
     return {
@@ -105,8 +108,10 @@ export async function runBoundContactDeliveries(input: {
   const projects = (data ?? []) as BoundProjectRow[];
   const runProject = input.runProject ?? DEFAULT_RUN_PROJECT;
   let failedProjects = 0;
+  let attemptedProjects = 0;
 
   for (const project of projects) {
+    if (input.shouldStop?.()) break;
     try {
       await (input.runSupply ?? runProjectContactSupply)({
         portalDb: input.portalDb, instantlyDb: input.instantlyDb, veProjectId: project.id, now: input.now,
@@ -115,6 +120,8 @@ export async function runBoundContactDeliveries(input: {
       // A source outage must not stop the already validated ready reserve.
       input.log('error', `VE2 contact supply project ${project.id} failed`, error);
     }
+    if (input.shouldStop?.()) break;
+    attemptedProjects += 1;
     try {
       const result = await runProject({
         portalDb: input.portalDb,
@@ -139,7 +146,7 @@ export async function runBoundContactDeliveries(input: {
   return {
     skipped: false,
     eligibleProjects: projects.length,
-    attemptedProjects: projects.length,
+    attemptedProjects,
     failedProjects,
   };
 }

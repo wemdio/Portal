@@ -2,6 +2,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 
 const appRoot = process.cwd();
 const repoRoot = path.resolve(appRoot, '..');
@@ -73,5 +75,32 @@ describe('BaseConstructor deploy drain', () => {
     );
     expect(drainIndex).toBeGreaterThanOrEqual(0);
     expect(forceRemoveIndex).toBeGreaterThan(drainIndex);
+
+    // Execute the drain with inert commands: ordering and fail-closed stop
+    // behavior must work, not merely appear as text in the deployment script.
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 've2-drain-'));
+    try {
+      const calls = path.join(fixture, 'calls');
+      fs.writeFileSync(path.join(fixture, 'docker'), '#!/bin/sh\nprintf "%s\\n" "$*" >> "$VE_DRAIN_CALLS"\ncase "$*" in *"stop worker-vertical-engine-v2") exit "${VE_DRAIN_FAIL:-0}";; esac\n', { mode: 0o755 });
+      fs.writeFileSync(path.join(fixture, 'sudo'), '#!/bin/sh\n[ "$1" = "-n" ] && shift\nexec "$@"\n', { mode: 0o755 });
+      const run = (target: string, fail: string) => {
+        fs.writeFileSync(calls, '');
+        const result = spawnSync('bash', [path.join(repoRoot, 'drain-worker.sh'), target], {
+          cwd: fixture, encoding: 'utf8', timeout: 5000,
+          env: { ...process.env, PATH: `${fixture}:${process.env.PATH}`, NEXT_PUBLIC_SUPABASE_URL: '', SUPABASE_SERVICE_ROLE_KEY: '',
+            VE_DRAIN_CALLS: calls, VE_DRAIN_FAIL: fail },
+        });
+        return { status: result.status, calls: fs.readFileSync(calls, 'utf8').trim().split('\n') };
+      };
+      const graceful = run('worker-vertical-engine-v2', '0');
+      expect(graceful.status).toBe(0);
+      expect(graceful.calls[0]).toContain('stop worker-vertical-engine-v2');
+      const failed = run('worker-vertical-engine-v2', '7');
+      expect(failed.status).toBe(7);
+      expect(failed.calls).toHaveLength(1); // No child stops or forced removal after failed coordinator stop.
+      const unrelated = run('worker-baseconstructor', '0');
+      expect(unrelated.status).toBe(0);
+      expect(unrelated.calls.every(call => !call.includes('vertical-engine-v2'))).toBe(true);
+    } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
   });
 });
