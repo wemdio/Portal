@@ -1,3 +1,4 @@
+import { sendOrderedLead } from './leadTelegramOrder';
 const TG_FETCH_TIMEOUT_MS = 15_000;
 
 export interface LeadTelegramSpecialistMention {
@@ -8,6 +9,7 @@ export interface LeadTelegramSpecialistMention {
 }
 
 export interface LeadTelegramAlertData {
+  expectHandoff?: boolean;
   qualificationId: string;
   campaignId: string;
   leadEmail: string;
@@ -111,7 +113,7 @@ function mentionSpecialist(specialist: LeadTelegramSpecialistMention, labelLimit
   return escapeHtml(clip(name, labelLimit));
 }
 
-function buildMessage(data: LeadTelegramAlertData): string {
+function buildMessage(data: LeadTelegramAlertData, statusText?: string): string {
   const contactLabel = data.leadName
     ? `${clip(data.leadName, 160)} (${clip(data.leadEmail, 320)})`
     : clip(data.leadEmail, 320);
@@ -138,6 +140,7 @@ function buildMessage(data: LeadTelegramAlertData): string {
 
   // Reserve the durable table link and qualification ID before fitting prose.
   const footer: string[] = [];
+  if (statusText) footer.push('', escapeHtml(statusText));
   if (data.boardLink) footer.push('', `📋 <a href="${escapeHtml(data.boardLink)}">Все лиды проекта</a>`);
   footer.push('', `<code>${escapeHtml(data.qualificationId)}</code>`);
   const remaining = () => Math.max(0, 4096 - visibleLength([...lines, ...footer].join('\n')));
@@ -185,6 +188,12 @@ export async function sendLeadTelegramAlert(
   const threadId = getThreadId();
   if (threadId) body.message_thread_id = threadId;
 
+  return sendOrderedLead(chatId, data.qualificationId, async (late) => {
+  if (late && data.expectHandoff) {
+    // Keep the payload within Telegram's limit; the full lead text is preserved
+    // in the guest table. The status is outside the quoted email.
+    body.text = buildMessage(data, '⏳ Ответ для передачи ещё готовится. Карточка передачи придёт ответом на это сообщение.');
+  }
   try {
     const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST',
@@ -213,6 +222,7 @@ export async function sendLeadTelegramAlert(
       error: err instanceof Error ? err.message : String(err),
     };
   }
+  }, data.expectHandoff === true);
 }
 
 export const _private = {

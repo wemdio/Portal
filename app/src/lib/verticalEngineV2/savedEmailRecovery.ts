@@ -16,12 +16,31 @@ const stateSchema = z.object({
   checked: z.record(z.string(), emailResult),
   /** Collection-wide automatic results survive a new job or explicit manual review. */
   automatic_checked: z.record(z.string(), emailResult).optional(),
+  /** Explicit collection continuation buys a fresh bounded pass for unknowns. */
+  generation: z.number().int().nonnegative().safe().optional(),
   batch: z.object({ id: z.string().uuid(), started_at: z.string(), emails: z.array(z.string()).min(1).max(EMAIL_BATCH), automatic: z.boolean().optional() }).optional(),
   error: z.string().optional(),
 });
 export type VeSavedEmailRecoveryState = z.infer<typeof stateSchema>;
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const automaticAttemptId = (baseId: string) => `automatic:${baseId}`;
+
+/** Called only when explicitly resuming a failed preview, never by polling or
+ * a worker wake. Retain conclusive verdicts and any already enqueued child. */
+export function resumeVeSavedEmailRecovery(value: unknown): VeSavedEmailRecoveryState | undefined {
+  if (value === undefined) return undefined;
+  const parsed = stateSchema.safeParse(value);
+  if (!parsed.success) throw new VeRelevanceCheckpointError('Saved email recovery checkpoint is invalid');
+  const state = parsed.data;
+  const generation = (state.generation ?? 0) + 1;
+  if (!Number.isSafeInteger(generation)) throw new VeRelevanceCheckpointError('Saved email recovery generation is invalid');
+  const conclusive = (results: VeSavedEmailRecoveryState['checked']) =>
+    Object.fromEntries(Object.entries(results).filter(([, status]) => status !== 'unknown'));
+  const resumed = { ...state, generation, checked: conclusive(state.checked),
+    ...(state.automatic_checked ? { automatic_checked: conclusive(state.automatic_checked) } : {}) };
+  delete resumed.error;
+  return resumed;
+}
 
 /** Unknown after one automatic check is a bounded outcome, not another wake. */
 export function hasPendingVeSavedEmailRecovery(rows: Array<Record<string, unknown>>, value?: unknown): boolean {
@@ -72,6 +91,7 @@ export async function recoverVeSavedEmails(input: {
     // A previous parent may have failed while its child kept working. Reuse
     // that child, not a second concurrent validation of the same addresses.
     state = { version: 1, attempt_id: attemptId,
+      ...(state.generation === undefined ? {} : { generation: state.generation }),
       checked: input.automatic ? { ...state.automatic_checked } : {},
       ...(state.automatic_checked ? { automatic_checked: state.automatic_checked } : {}),
       ...(state.batch ? { batch: state.batch } : {}) };
@@ -93,7 +113,9 @@ export async function recoverVeSavedEmails(input: {
   if (!state.batch) {
     const emails = pending().slice(0, EMAIL_BATCH);
     if (!emails.length) return { rows, state, waiting: false };
-    const digest = hash(['ve2-saved-email', baseId, attemptId, emails]);
+    // Generation zero retains old deterministic child IDs during rolling deploy.
+    // A new explicit continuation must not reread the same completed unknowns.
+    const digest = hash(['ve2-saved-email', baseId, attemptId, emails, ...(state.generation ? [state.generation] : [])]);
     const id = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
     state.batch = { id, emails, started_at: new Date().toISOString(), ...(input.automatic ? { automatic: true } : {}) };
     await save(); // Durable intent precedes the child INSERT, including ambiguous failures.

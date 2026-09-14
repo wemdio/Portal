@@ -7042,8 +7042,9 @@ describe('thread-level specialist alert dedup — RED contract', () => {
         return;
       }
       expect(postHandoffMessage).toHaveBeenCalledTimes(1);
-      expect(sendLeadTelegramAlert.mock.invocationCallOrder[0]).toBeLessThan(
-        postHandoffMessage.mock.invocationCallOrder[0],
+      // Preparation may finish in either order; transport pairs by qualification.
+      expect(postHandoffMessage.mock.calls[0][0].qualificationId).toBe(
+        sendLeadTelegramAlert.mock.calls[0][0].qualificationId,
       );
       expect(pending).toEqual([
         expect.objectContaining({

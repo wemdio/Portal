@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+export const VE_RELEVANCE_WEBSITE_VERSION = 2;
+
 export const veRelevanceDecisionSchema = z.object({
   version: z.literal(2),
   status: z.enum(['relevant', 'irrelevant', 'needs_review', 'error']),
@@ -7,6 +9,8 @@ export const veRelevanceDecisionSchema = z.object({
   evidence: z.array(z.object({ field: z.string().max(40), quote: z.string().min(1).max(400) })).max(3),
   context_hash: z.string().regex(/^[a-f0-9]{64}$/),
   review_attempts: z.number().int().nonnegative().optional(),
+  /** Bounded website follow-up completed (or exhausted) under this policy. */
+  website_review_version: z.literal(VE_RELEVANCE_WEBSITE_VERSION).optional(),
 });
 
 export type VeRelevanceDecision = z.infer<typeof veRelevanceDecisionSchema>;
