@@ -165,6 +165,8 @@ export type VeBaseSummary = Pick<
    * читается как поломка. Опционально — у старых записей и в фикстурах нет.
    */
   error?: string | null;
+  /** Last persisted collection state; not an estimated completion time. */
+  updated_at?: string | null;
   /** Статус разбора + 'collecting' (идёт автосборка; появился вместе с collect-эндпоинтом). */
   status: VeBase['status'] | 'collecting';
   /** Откуда база. У записей, созданных до автосборки, поля нет — считать 'upload'. */

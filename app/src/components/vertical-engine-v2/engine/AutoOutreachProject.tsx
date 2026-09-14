@@ -25,7 +25,7 @@ import { FinalLettersEditor } from './FinalLettersEditor';
 import { OutreachLaunchPanel } from './OutreachLaunchPanel';
 import { CampaignProgress } from './CampaignProgress';
 import { ManualBaseLibrary } from './ManualBaseLibrary';
-import { PreparationProgress, getPreparationPresentation } from './PreparationProgress';
+import { PreparationProgress } from './PreparationProgress';
 import { selectHypothesisLetters } from './letterSelection';
 
 const LABELS = ['Гипотезы', 'Письма', 'Базы и объём', 'Запуск', 'Результаты'];
@@ -644,6 +644,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                 return (
                   <article key={h.id} className="border-t border-[var(--ve2-line)] pt-5 space-y-4">
                     <h3 className="ve2-h3">{h.title}</h3>
+                    {p?.status !== 'ready' ? <PreparationProgress preparation={p} base={base} jobs={detail.jobs} /> : null}
                     {base ? (
                       <>
                         <AudienceSummary baseId={base.id} presetId={presetId} />
@@ -692,14 +693,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                           <p className={HE.muted}>Одобрение станет доступно после подготовки итоговых писем.</p>
                         ) : null}
                       </>
-                    ) : (
-                      <p className={HE.muted}>
-                        {getPreparationPresentation({ preparation: p, base, jobs: detail.jobs }).title}
-                      </p>
-                    )}
-                    {p?.last_error ? <StatusBox tone="error">
-                      {getPreparationPresentation({ preparation: p, base, jobs: detail.jobs }).description}
-                    </StatusBox> : null}
+                    ) : null}
                     {p?.status === 'error' && base?.status === 'failed' ? (
                       <button type="button" disabled={busy || locked} className={HE.btnPrimary}
                         onClick={() => void change({ action: 'prepare' })}>
