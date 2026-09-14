@@ -55,6 +55,17 @@ export function fetchReplies(projectId: string) {
   );
 }
 
+export interface ThreadResponse {
+  messages: { fromUs: boolean; text: string; timestamp?: string }[];
+  contextComplete: boolean;
+}
+
+export function fetchThread(qualificationId: string, projectId: string) {
+  return fetchWithAuth<ThreadResponse>(
+    `${BASE}/replies/${qualificationId}/thread?projectId=${encodeURIComponent(projectId)}`,
+  );
+}
+
 export interface GenerateResponse {
   draftId: string;
   text: string;

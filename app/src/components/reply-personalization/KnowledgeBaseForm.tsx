@@ -69,7 +69,16 @@ function KbField({
   );
 }
 
-export function KnowledgeBaseForm({ projectId, onClose }: { projectId: string; onClose: () => void }) {
+export function KnowledgeBaseForm({
+  projectId,
+  onClose,
+  onSaved,
+}: {
+  projectId: string;
+  onClose: () => void;
+  /** Дергается после успешного сохранения — родитель обновляет бейджи/списки. */
+  onSaved?: () => void;
+}) {
   const [brief, setBrief] = useState('');
   const [productFacts, setProductFacts] = useState('');
   const [toneNotes, setToneNotes] = useState('');
@@ -102,6 +111,7 @@ export function KnowledgeBaseForm({ projectId, onClose }: { projectId: string; o
       await saveKnowledgeBase(projectId, { brief, productFacts, toneNotes, exampleCase, instantlyAccountId });
       setSaved(true);
       window.setTimeout(() => setSaved(false), 2000);
+      onSaved?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось сохранить');
     } finally {
@@ -131,7 +141,7 @@ export function KnowledgeBaseForm({ projectId, onClose }: { projectId: string; o
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-lg font-semibold text-zinc-900">База знаний проекта</h2>
         <button type="button" onClick={onClose} className="text-sm text-zinc-500 hover:text-zinc-700">
-          Назад к письмам
+          Закрыть
         </button>
       </div>
 
