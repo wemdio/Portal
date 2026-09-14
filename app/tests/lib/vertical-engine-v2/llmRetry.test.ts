@@ -228,6 +228,62 @@ describe('llm rawCall retry', () => {
     expect(resumed.decisions.get(0)?.status).toBe('relevant');
     expect(resumed.coverage.complete).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // A malformed semantic response used to poison the entire durable preview.
+    // Recover legacy failed/interrupted reservations once, then quarantine only
+    // that company; never pay a third time or promote its unconfirmed proposal.
+    const reply = (data: unknown) => httpResponse(200, { choices: [{ message: { content: JSON.stringify(data) } }] });
+    const classification = reply({ decisions: [{ i: 0, status: 'relevant', reason: 'Makes equipment',
+      evidence: [{ field: 'description', quote: description }] }] });
+    const confirmation = reply({ reviews: [{ i: 0, result: 'direct_match', reason: description }] });
+    const expanded = { ...input, rows: [...input.rows, { company: 'Second factory', inn: '7700000002', description }] };
+    for (const outcome of ['success', 'malformed', 'interrupted', 'exhausted', 'transport', 'billing'] as const) {
+      const legacy = JSON.parse(JSON.stringify(saved)) as VeRelevanceCheckpoint;
+      const review = Object.values(legacy.semantic_reviews)[0];
+      review.status = ['interrupted', 'exhausted'].includes(outcome) ? 'started' : 'failed';
+      review.failure_code = 'invalid_response';
+      delete review.result; delete review.attempts;
+      if (outcome === 'exhausted') review.attempts = 2;
+      fetchMock.mockReset();
+      if (outcome === 'billing') fetchMock.mockResolvedValueOnce(httpResponse(402, {}));
+      else if (outcome === 'transport') fetchMock.mockRejectedValueOnce(new Error('fetch failed'));
+      else if (outcome !== 'exhausted') fetchMock.mockResolvedValueOnce(outcome === 'malformed' ? reply({ reviews: [] }) : confirmation);
+      fetchMock.mockResolvedValueOnce(classification).mockResolvedValueOnce(confirmation);
+      let checked = await findIrrelevantRows({ ...expanded, checkpoint: legacy });
+      if (outcome === 'billing') {
+        expect(checked.error).toContain('Requesty 402');
+        expect(checked.retryable).toBe(false);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        continue;
+      }
+      if (outcome === 'transport') {
+        expect(checked.retryable).toBe(true);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        checked = await findIrrelevantRows({ ...expanded, checkpoint: checked.checkpoint });
+      }
+      expect(checked.error).toBeUndefined();
+      expect(checked.coverage.complete).toBe(true);
+      expect(checked.decisions.get(0)?.status).toBe(['malformed', 'transport', 'exhausted'].includes(outcome) ? 'needs_review' : 'relevant');
+      expect(checked.decisions.get(1)?.status).toBe('relevant');
+      expect(fetchMock).toHaveBeenCalledTimes(outcome === 'exhausted' ? 2 : 3);
+      expect(Object.values(checked.checkpoint.semantic_reviews).find((item) => item.company_key === review.company_key)?.attempts).toBe(2);
+      await findIrrelevantRows({ ...expanded, checkpoint: checked.checkpoint });
+      expect(fetchMock).toHaveBeenCalledTimes(outcome === 'exhausted' ? 2 : 3);
+    }
+
+    // Fresh invalid batches split into isolated retries without replaying the
+    // initial classifier, including when only one sibling remains malformed.
+    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [0, 1].map((i) => ({
+      i, status: 'relevant', reason: 'Makes equipment', evidence: [{ field: 'description', quote: description }],
+    })) })).mockResolvedValueOnce(reply({ reviews: [] }))
+      .mockResolvedValueOnce(reply({ reviews: [] })).mockResolvedValueOnce(confirmation);
+    const isolated = await findIrrelevantRows(expanded);
+    expect(isolated.error).toBeUndefined();
+    expect([...isolated.decisions.values()].map((item) => item.status)).toEqual(['needs_review', 'relevant']);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(Object.values(isolated.checkpoint.semantic_reviews).map((item) => item.attempts)).toEqual([2, 2]);
+    await findIrrelevantRows({ ...expanded, checkpoint: isolated.checkpoint });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(jest.getTimerCount()).toBe(0);
   });
 

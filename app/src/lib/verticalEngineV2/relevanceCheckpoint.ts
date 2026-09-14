@@ -43,12 +43,13 @@ const checkpointSchema = z.object({
     // Preserve provider failures separately from a single unsupported citation.
     failure_code: relevanceFailureCodeSchema.optional(),
   })).default({}),
-  // pending is safe to resume; started/failed can have incurred a charge and
-  // must never be repeated for the same evidence/model/context after a crash.
+  // Reserve each paid attempt before HTTP. Legacy started/failed records count
+  // as one attempt; recovery may buy at most one isolated follow-up.
   semantic_reviews: z.record(hashSchema, z.object({
     company_key: hashSchema,
     proposal: veRelevanceDecisionSchema,
     status: z.enum(['pending', 'started', 'finished', 'failed']),
+    attempts: z.number().int().min(0).max(2).optional(),
     result: veRelevanceReviewResultSchema.optional(),
     failure_code: relevanceFailureCodeSchema.optional(),
   })).default({}),

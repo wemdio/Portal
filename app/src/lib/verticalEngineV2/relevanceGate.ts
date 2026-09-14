@@ -11,6 +11,7 @@ export type { VeRelevanceDecision } from './relevanceDecision';
 
 const BATCH_SIZE = 20;
 const RECOVERY_BATCH_SIZE = 5;
+const MAX_SEMANTIC_ATTEMPTS = 2;
 const configuredMax = Number(process.env.VE_RELEVANCE_MAX_ROWS);
 const MAX_COMPANIES = Number.isFinite(configuredMax) && configuredMax > 0 ? Math.min(10_000, Math.floor(configuredMax)) : 3000;
 const MAX_WEBSITES = 30;
@@ -291,15 +292,27 @@ export async function findIrrelevantRows(input: {
     (decision.status === 'relevant' && review.result === 'direct_match')
       || (decision.status === 'irrelevant' && review.result === 'direct_conflict');
   type SemanticReview = VeRelevanceCheckpoint['semantic_reviews'][string];
+  const semanticAttempts = (review: SemanticReview) => review.attempts ?? (review.status === 'pending' ? 0 : 1);
+  const quarantineSemantic = (entry: Entry) => {
+    record(entry, { ...errorDecision('Смысловую проверку не удалось завершить после повторной попытки; контакт сохранён в резерве.',
+      Math.max(1, entry.attempts)), status: 'needs_review' });
+    finishWebsite(entry);
+  };
   const semanticFailure = (entry: Entry, review: SemanticReview, code: VeRelevanceFailureCode = review.failure_code ?? 'invalid_response') => {
     review.status = 'failed'; review.failure_code = code;
-    // Even a timeout may have consumed a paid attempt. Do not repeat the same
-    // evidence on a worker retry or silently let its original verdict through.
-    permanentFailure = true; stopProviderCalls = true;
     failure(entry.key, 1, code);
-    result.error = code === 'billing' ? 'Requesty 402: insufficient balance'
-      : result.error ?? 'Смысловая проверка не завершена; неподтверждённые контакты не допущены.';
-    record(entry, errorDecision('Результат смысловой проверки не получен; повтор той же оплаченной попытки запрещён.', entry.attempts));
+    if (semanticAttempts(review) >= MAX_SEMANTIC_ATTEMPTS && code !== 'billing' && code !== 'configuration') quarantineSemantic(entry);
+    else record(entry, errorDecision('Результат смысловой проверки не получен; контакт сохранён для повторной попытки.', entry.attempts));
+    if (code === 'billing' || code === 'configuration') {
+      permanentFailure = true; stopProviderCalls = true;
+      result.error = code === 'billing' ? 'Requesty 402: insufficient balance'
+        : 'Смысловая проверка недоступна: проверьте настройки провайдера ИИ.';
+    } else if (code !== 'invalid_response') {
+      // Back off on transport/provider failures. Malformed model output is
+      // isolated below and must not halt unrelated companies or refill.
+      transientFailure = true; stopProviderCalls = true;
+      result.error ??= 'Смысловая проверка временно недоступна; повтор по сохранённым результатам.';
+    }
     finishWebsite(entry);
   };
   const applySemantic = (entry: Entry, review: SemanticReview) => {
@@ -309,24 +322,45 @@ export async function findIrrelevantRows(input: {
       : { ...review.proposal, status: 'needs_review',
         reason: ('Смысловое соответствие не подтверждено: ' + review.result.reason).slice(0, 400) });
   };
+  const resumeSemantic = (entry: Entry, review: SemanticReview) => {
+    // Normalize BEFORE changing status: an interrupted legacy reservation may
+    // have been charged and cannot turn back into a free initial attempt.
+    review.attempts = semanticAttempts(review);
+    if (review.failure_code === 'billing' || review.failure_code === 'configuration') {
+      semanticFailure(entry, review); return;
+    }
+    if (review.attempts >= MAX_SEMANTIC_ATTEMPTS) { review.status = 'failed'; quarantineSemantic(entry); return; }
+    review.status = 'pending';
+    record(entry, errorDecision('Ожидается независимая смысловая проверка доказательств.', entry.attempts));
+  };
   const stageDecision = (entry: Entry, decision: VeRelevanceDecision) => {
     if (decision.status !== 'relevant' && decision.status !== 'irrelevant') { record(entry, decision); return; }
     const hash = semanticHash(entry, decision);
     checkpoint.semantic_review_refs[entry.key] = hash;
     const previous = checkpoint.semantic_reviews[hash];
     if (previous) {
-      if (previous.status === 'started' || previous.status === 'failed') { semanticFailure(entry, previous); return; }
+      if (previous.status === 'started' || previous.status === 'failed') { resumeSemantic(entry, previous); return; }
       previous.proposal = decision;
       if (previous.status === 'finished') { applySemantic(entry, previous); return; }
     } else checkpoint.semantic_reviews[hash] = { company_key: entry.key, proposal: decision, status: 'pending' };
     record(entry, errorDecision('Ожидается независимая смысловая проверка доказательств.', entry.attempts));
   };
   const reviewPending = async (candidates: Entry[]) => {
-    const pending = candidates.filter((entry) => checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]]?.status === 'pending');
-    for (let start = 0; start < pending.length && !stopProviderCalls; start += 4) {
-      const batch = pending.slice(start, start + 4);
+    const pending = [...new Set(candidates)].filter((entry) => checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]]?.status === 'pending');
+    while (pending.length && !stopProviderCalls) {
+      // Retry a malformed batch one company at a time, preserving successful
+      // siblings and the exact same evidence/model/hypothesis scope.
+      const batch: Entry[] = [pending.shift()!];
+      const firstReview = checkpoint.semantic_reviews[checkpoint.semantic_review_refs[batch[0].key]];
+      if (semanticAttempts(firstReview) >= MAX_SEMANTIC_ATTEMPTS) {
+        firstReview.status = 'failed'; quarantineSemantic(batch[0]); await save(); continue;
+      }
+      if (semanticAttempts(firstReview) === 0) {
+        while (batch.length < 4 && pending.length
+          && semanticAttempts(checkpoint.semantic_reviews[checkpoint.semantic_review_refs[pending[0].key]]) === 0) batch.push(pending.shift()!);
+      }
       const reviews = batch.map((entry) => checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]]);
-      reviews.forEach((review) => { review.status = 'started'; });
+      reviews.forEach((review) => { review.attempts = semanticAttempts(review) + 1; review.status = 'started'; });
       // A graceful stop must not strand a reservation before its HTTP request.
       await save(false); // A failed reservation must still prevent the paid request.
       let notified = false;
@@ -339,11 +373,14 @@ export async function findIrrelevantRows(input: {
         for (const assessment of response.data.reviews) {
           const review = reviews[assessment.i];
           review.status = 'finished'; review.result = { result: assessment.result, reason: assessment.reason };
+          delete review.failure_code;
           applySemantic(batch[assessment.i], review);
         }
       } catch (error) {
         if (!notified && error instanceof LLMValidationError && error.usage) accountUsage(error.usage);
         signal?.throwIfAborted();
+        const diagnostic = getLLMValidationDiagnostic(error, ['reviews']);
+        if (diagnostic) input.log?.('[relevanceGate] invalid semantic review: ' + JSON.stringify(diagnostic));
         const code: VeRelevanceFailureCode = isVeProviderBillingError(error) ? 'billing'
           : error instanceof Error && /Requesty (?:400|401|403)\b|API_KEY.*(?:не задан|missing)/i.test(error.message) ? 'configuration'
             : error instanceof LLMValidationError || error instanceof z.ZodError ? 'invalid_response'
@@ -351,6 +388,13 @@ export async function findIrrelevantRows(input: {
         batch.forEach((entry, i) => semanticFailure(entry, reviews[i], code));
       }
       await save();
+      for (let i = 0; i < batch.length && !stopProviderCalls; i++) {
+        const review = reviews[i];
+        if (review.status === 'failed' && semanticAttempts(review) < MAX_SEMANTIC_ATTEMPTS) {
+          resumeSemantic(batch[i], review);
+          pending.push(batch[i]);
+        }
+      }
     }
   };
   const repairCitation = async (entry: Entry, proposed: z.infer<typeof outputDecision>) => {
@@ -466,7 +510,7 @@ export async function findIrrelevantRows(input: {
       const semantic = checkpoint.semantic_reviews[reviewHash];
       if (semantic?.company_key === entry.key) {
         if (semantic.status === 'started' || semantic.status === 'failed') {
-          semanticFailure(entry, semantic); recoveredRepair = true; return false;
+          resumeSemantic(entry, semantic); recoveredSemantic.push(entry); recoveredRepair = true; return false;
         }
         if (semantic.status === 'pending') {
           record(entry, errorDecision('Ожидается независимая смысловая проверка доказательств.', entry.attempts));
@@ -529,7 +573,8 @@ export async function findIrrelevantRows(input: {
     const review = entries.filter((entry) => {
       if (!entry.fields.website && !entry.identity) return false;
       const cached = checkpoint.website_evidence[entry.key];
-      if (current.get(entry)?.status === 'error' && checkpoint.semantic_review_refs[entry.key]) return false;
+      const semantic = checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]];
+      if (semantic && semantic.status !== 'finished') return false;
       if (cached?.provider_error) return true;
       if (checkpoint.citation_repairs[entry.key] && current.get(entry)?.status === 'error') return false;
       const pendingRefinement = cached?.reader_version === 1 && cached.status === 'ok' && !cached.refined && Boolean(cached.text);
