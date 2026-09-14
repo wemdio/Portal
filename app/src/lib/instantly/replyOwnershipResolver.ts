@@ -507,6 +507,10 @@ interface WorkspaceEvidenceArgs {
 
 async function fetchWorkspaceEvidence(args: WorkspaceEvidenceArgs): Promise<WorkspaceEvidenceResult> {
   args = { ...args, evidenceDeadlineMs: Date.now() + RECOVERY_EVIDENCE_TIME_BUDGET_MS };
+  const prefetched = collectPrefetchedEvidence(args);
+  // Others already matched this parent across candidate campaigns. Preserve
+  // that proof before expanding lookup hints; the flag alone is insufficient.
+  if (prefetched.trustedParentAlreadyProven) return { evidence: prefetched.evidence, complete: true };
   const primary = (args.reply.lead ?? args.leadEmail).trim().toLowerCase() || args.leadEmail;
   const identities = [...new Set([primary, ...quotedOutbounds(args.reply, args.mailbox)
     .flatMap(quote => quote.recipients)])];
@@ -514,23 +518,19 @@ async function fetchWorkspaceEvidence(args: WorkspaceEvidenceArgs): Promise<Work
   if (identities.length > 4) throw new Error('ownership evidence checkpoint blocked: too many quoted recipients');
   let evidence = new Map<string, CampaignEvidence>();
   for (const identity of identities) {
-    const result = await fetchSingleIdentityEvidence(args, identity);
+    const result = await fetchSingleIdentityEvidence(args, identity, prefetched);
     evidence = mergeCampaignEvidence(evidence, result.evidence);
     if (!result.complete) return { evidence, complete: false };
   }
   return { evidence, complete: true };
 }
 
-async function fetchSingleIdentityEvidence(
-  args: WorkspaceEvidenceArgs,
-  identity: string,
-): Promise<WorkspaceEvidenceResult> {
+function collectPrefetchedEvidence(args: WorkspaceEvidenceArgs) {
   const {
     campaignIds,
     reply,
     mailbox,
     leadEmail,
-    accountId,
     prefetchedContext,
     providerCampaignId,
     trustPrefetchedParent,
@@ -552,7 +552,7 @@ async function fetchSingleIdentityEvidence(
   const trustedParentId = trustPrefetchedParent
     ? prefetchedContext?.lastOutbound?.id?.trim() || null
     : null;
-  let evidence = collectCampaignEvidence(
+  const evidence = collectCampaignEvidence(
     campaignIds,
     reply,
     mailbox,
@@ -566,7 +566,18 @@ async function fetchSingleIdentityEvidence(
       entry.parents.some((candidate) => candidate.email.id === trustedParentId),
     ),
   );
-  if (trustedParentAlreadyProven) return { evidence, complete: true };
+  return { items, evidence, trustedParentId, trustedParentAlreadyProven };
+}
+
+async function fetchSingleIdentityEvidence(
+  args: WorkspaceEvidenceArgs,
+  identity: string,
+  prefetched: ReturnType<typeof collectPrefetchedEvidence>,
+): Promise<WorkspaceEvidenceResult> {
+  const { campaignIds, reply, mailbox, leadEmail, accountId } = args;
+  const { trustedParentId } = prefetched;
+  const items = [...prefetched.items];
+  let evidence = prefetched.evidence;
 
   if (args.evidenceMode === 'recovery') {
     return resumeWorkspaceEvidence({ ...args, identity, evidence, trustedParentId });

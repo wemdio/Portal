@@ -26,6 +26,12 @@ different projects do not authorize choosing one. All searched identities must
 finish both search and sent pagination before a cross-owner result is used.
 At most four distinct identities are considered; overflow fails closed.
 
+The existing Others trusted-parent path is checked before expanding these
+lookup hints. It still validates the prefetched outbound against the candidate
+campaigns, exact mailbox and existing chronology rules; a trust flag alone
+does not suffice. A validated parent needs no additional provider searches,
+even if the quoted header has many recipients. Unproven overflow still defers.
+
 Recovery saves progress separately for each identity under evidence version 2,
 so previous negative searches cannot hide the newly searched recipient.
 The 45-second recovery evidence budget is shared across the identities;
