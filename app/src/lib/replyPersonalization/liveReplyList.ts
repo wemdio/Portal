@@ -73,7 +73,7 @@ export async function getLiveReply(params: {
   const allowed = new Set(params.campaignIds);
   for (const accountId of params.accountIds) {
     try {
-      const email = await getEmail(params.emailId, { accountId, timeoutMs: 20_000 });
+      const email = await getEmail(params.emailId, { accountId, timeoutMs: 20_000, consumer: 'personalization_feed' });
       if (!email?.id || !email.lead || !email.campaign_id || !allowed.has(email.campaign_id)) continue;
       return { qualification: toQualificationRow({ ...email, lead: email.lead }, email.campaign_id), accountId };
     } catch {
