@@ -29,7 +29,7 @@ import { acquireInstantlyToken } from './rateLimiter';
 import { InstantlyApiError } from './errors';
 import { parseAccountCampaignMappingItems } from './accountCampaignMappings';
 import { deferInstantlyEmailReads, instantlyEmailRetryAfterMs, reserveInstantlyEmailRead } from './emailReadBudget';
-import { recordInstantlyApiUsage, type InstantlyUsageStatus } from './usageCounters';
+import { instantlyUsageEndpoint, recordInstantlyApiUsage, type InstantlyUsageStatus } from './usageCounters';
 export { InstantlyApiError } from './errors';
 export { InstantlyEmailReadDeferredError } from './emailReadBudget';
 
@@ -47,10 +47,9 @@ const RATE_LIMIT_BASE_DELAY_MS = 4000;
  * normalized so per-id paths collapse into one row family per verb.
  */
 function countAttempt(path: string, requestOptions: InstantlyRequestOptions | undefined, status: InstantlyUsageStatus): void {
-  const endpoint = path.replace(/\/[0-9a-f-]{16,}/gi, '/{id}').replace(/\/[^/?#]{8,}@[^\s/?#]+/gi, '/{email}');
   recordInstantlyApiUsage({
     accountId: resolveInstantlyAccountId(requestOptions?.accountId),
-    endpoint,
+    endpoint: instantlyUsageEndpoint(path),
     consumer: requestOptions?.consumer ?? 'unspecified',
     status,
   });
