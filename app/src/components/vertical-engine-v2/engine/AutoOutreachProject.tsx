@@ -89,26 +89,34 @@ function AudienceSummary({
         Считаем готовые контакты…
       </p>
     );
+  const preparedForLaunch = data.client_exclusions_applied
+    ? `Новых контактов для резерва запуска: ${data.ready.toLocaleString('ru-RU')}. Исключения клиента и контакты, уже распределённые в кампании проекта, учтены.`
+    : `До ${data.ready.toLocaleString('ru-RU')} контактов попадут в резерв запуска. Повторы с уже подготовленными кампаниями проекта исключены; точное число пересчитаем после выбора клиента и применения его списка исключений.`;
   return (
     <div className="space-y-3">
       <div className="ve2-stats">
         <div className="ve2-stat">
           <p className="ve2-stat-v">{data.ready.toLocaleString('ru-RU')}</p>
-          <p className="ve2-stat-k">Готово по гипотезе</p>
+          <p className="ve2-stat-k">Готово в базе</p>
         </div>
         <div className="ve2-stat">
           <p className="ve2-stat-v">
-            {data.estimate ? `~${data.estimate.contacts.toLocaleString('ru-RU')}` : 'Пока неизвестно'}
+            {data.processed_candidates === null ? '—' : data.processed_candidates.toLocaleString('ru-RU')}
+          </p>
+          <p className="ve2-stat-k">Проверено кандидатов</p>
+        </div>
+        <div className="ve2-stat">
+          <p className="ve2-stat-v">
+            {data.estimate ? `~${data.estimate.contacts.toLocaleString('ru-RU')}` : 'Не рассчитан'}
           </p>
           <p className="ve2-stat-k">Можно собрать дополнительно</p>
         </div>
       </div>
-      {!data.client_exclusions_applied ? (
-        <p className={HE.muted}>
-          Исключения клиента будут учтены после выбора настроек отправки. Пересечения баз дополнительно проверим перед
-          стартом.
-        </p>
-      ) : null}
+      <p className={HE.muted}>{preparedForLaunch}</p>
+      <p className={HE.faint}>
+        Контакты будут загружаться в Instantly дневными партиями. Темп и срок появятся на шаге «Запуск» после выбора
+        проекта и настроек отправки; план считается по общему обязательству проекта сразу для всех гипотез.
+      </p>
       <details>
         <summary className="ve2-link cursor-pointer">Как рассчитан объём</summary>
         <div className="mt-2 space-y-2">
@@ -116,8 +124,14 @@ function AudienceSummary({
             <p className={HE.muted}>
               Проверено кандидатов: {data.observed_yield.candidates.toLocaleString('ru-RU')}. Получено готовых
               контактов: {data.observed_yield.ready.toLocaleString('ru-RU')}. Выход:{' '}
-              {data.observed_yield.contacts_per_candidate.toLocaleString('ru-RU', { maximumFractionDigits: 2 })}{' '}
-              контакта на кандидата.
+              {(data.observed_yield.contacts_per_candidate * 100).toLocaleString('ru-RU', { maximumFractionDigits: 1 })}%.
+            </p>
+          ) : null}
+          {data.preview_target !== null && data.checked_ready > data.preview_target ? (
+            <p className={HE.muted}>
+              Цель превью — {data.preview_target.toLocaleString('ru-RU')}. Последняя проверенная партия дала{' '}
+              {(data.checked_ready - data.preview_target).toLocaleString('ru-RU')} дополнительный контакт; он сохранён в
+              готовой базе. CSV-превью содержит первые {data.preview_target.toLocaleString('ru-RU')} контактов.
             </p>
           ) : null}
           <p className={HE.muted}>
