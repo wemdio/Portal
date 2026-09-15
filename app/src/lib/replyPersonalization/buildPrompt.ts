@@ -14,18 +14,20 @@ function formatThread(thread: ThreadMessage[]): string {
 
 export function buildReplyPrompt(input: {
   kb: KnowledgeBase;
+  /** Бриф проекта живьём из карточки (projects.brief_text), не из базы знаний. */
+  brief: string;
   qualification: QualificationRow;
   thread: ThreadMessage[];
   contextComplete: boolean;
 }): PromptMessage[] {
-  const { kb, qualification, thread, contextComplete } = input;
+  const { kb, brief, qualification, thread, contextComplete } = input;
 
   const system = `${UNIVERSAL_REPLY_RULES}
 
 О продукте/проекте, для которого пишешь письмо:
 
 Бриф:
-${kb.brief || '(бриф не заполнен)'}
+${brief || '(бриф проекта не заполнен)'}
 
 Факты о продукте и что можно предлагать:
 ${kb.productFacts || '(факты не заполнены)'}

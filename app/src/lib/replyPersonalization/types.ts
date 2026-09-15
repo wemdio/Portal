@@ -3,9 +3,12 @@
 // из lib/instantly/leadQualifier.ts, leadQualificationWorker.ts,
 // handoffSender.ts, replyIntake.ts.
 
+/**
+ * Бриф здесь не хранится: он всегда читается живьём из карточки проекта
+ * (projects.brief_text) — к запуску кампании бриф уже заполнен.
+ */
 export interface KnowledgeBase {
   projectId: string;
-  brief: string;
   productFacts: string;
   toneNotes: string;
   exampleCase: string;

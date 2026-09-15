@@ -30,15 +30,17 @@ export function fetchProjects() {
 
 export interface KnowledgeBaseDto {
   projectId: string;
-  brief: string;
   productFacts: string;
   toneNotes: string;
   exampleCase: string;
   updatedAt: string;
 }
 
+/** Бриф из карточки проекта — read-only, в базе знаний не хранится. */
 export function fetchKnowledgeBase(projectId: string) {
-  return fetchWithAuth<{ kb: KnowledgeBaseDto | null }>(`${BASE}/projects/${projectId}/kb`);
+  return fetchWithAuth<{ kb: KnowledgeBaseDto | null; projectBrief: string }>(
+    `${BASE}/projects/${projectId}/kb`,
+  );
 }
 
 export function saveKnowledgeBase(projectId: string, patch: Omit<KnowledgeBaseDto, 'projectId' | 'updatedAt'>) {
