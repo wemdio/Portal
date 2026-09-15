@@ -45,7 +45,7 @@ export async function listLiveReplies(params: {
     try {
       const response = await listEmails(
         { campaign_id: campaignId, email_type: 'received', sort_order: 'desc' },
-        { accountId: params.accountId, timeoutMs: 20_000, requestPriority: 'fresh' },
+        { accountId: params.accountId, timeoutMs: 20_000, requestPriority: 'fresh', consumer: 'personalization_feed' },
       );
       for (const email of response.items ?? []) {
         if (!email.id || !email.lead) continue;

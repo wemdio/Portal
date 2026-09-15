@@ -1,6 +1,7 @@
 import { isVeAcceptedEmailStatus } from './emailPolicy';
 import { normalizeVeCompanyInn, veCompanyIdentityKey } from './collectionIdentity';
 import { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
+import { VE_RELEVANCE_WEBSITE_VERSION } from './relevanceDecision';
 
 /** Durable candidates are separate from the approved/launchable base projection. */
 export interface VeRelevanceReserve {
@@ -109,11 +110,12 @@ export function needsVeRelevanceReview(row: Record<string, unknown>): boolean {
 function canAutomaticallyReview(row: Record<string, unknown>, evidenceAvailable: boolean): boolean {
   if (!needsVeRelevanceReview(row) || !isVeAcceptedEmailStatus(row._email_status)) return false;
   const decision = row._ve_relevance && typeof row._ve_relevance === 'object'
-    ? row._ve_relevance as { status?: unknown; review_attempts?: unknown } : null;
+    ? row._ve_relevance as { status?: unknown; review_attempts?: unknown; website_review_version?: unknown } : null;
   // Newly recovered legacy emails still need their initial classification.
   // Technical errors use the caller's bounded recovery policy, not a guess.
   if (!decision || decision.status === 'error') return true;
-  return decision.status === 'needs_review' && evidenceAvailable && (decision.review_attempts ?? 0) === 0;
+  return decision.status === 'needs_review' && evidenceAvailable && ((decision.review_attempts ?? 0) === 0
+    || decision.website_review_version !== VE_RELEVANCE_WEBSITE_VERSION);
 }
 
 /** Spend the next bounded pass on usable emails with a site or searchable INN. */

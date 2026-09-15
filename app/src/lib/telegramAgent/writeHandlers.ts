@@ -7,10 +7,19 @@ import type { PipelineStep } from './pipeline';
 import { cleanCompanyNames } from './cleanNames';
 import { deduplicateByField } from './dedup';
 import { publishWebsiteEnrichmentJob } from '@/lib/enrich/websiteEnrichmentJobPublisher';
+import { normalizeYandexMapsCatalogFilters } from '@/lib/parsers/yandexMapsCatalog';
+import { queueYandexMapsCatalogJob } from '@/lib/parsers/yandexMapsCatalogJob';
 
 function ensureAdmin() {
   if (!supabaseAdmin) throw new Error('Supabase admin not configured');
   return supabaseAdmin;
+}
+
+/** Список из параметров инструмента: строки через перенос строки или запятую, либо готовый массив. */
+function splitList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.filter((v): v is string => typeof v === 'string').map((v) => v.trim()).filter(Boolean);
+  if (typeof value !== 'string') return [];
+  return value.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
 }
 
 const REVIEW_TRANSITIONS: Record<string, string[]> = {
@@ -329,32 +338,28 @@ export const launchSearchParser: WriteToolHandler = async (params, user) => {
 };
 
 export const launchYandexMapsParser: WriteToolHandler = async (params, user) => {
-  const sb = ensureAdmin();
-  const urlsRaw = params.search_urls as string | undefined;
-  if (!urlsRaw) return 'Необходимо указать URL-ы поиска Яндекс.Карт.';
+  ensureAdmin();
 
-  const search_urls = urlsRaw.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
-  if (search_urls.length === 0) return 'Не найдено ни одного URL.';
+  // Поиск идёт по локальному каталогу организаций, живой парсинг отключён:
+  // инструмент принимает города и рубрики, а не поисковые URL.
+  const cities = splitList(params.cities);
+  const rubrics = splitList(params.rubrics);
+  const filters = normalizeYandexMapsCatalogFilters({ cities, categories: rubrics });
+  if (!filters) return 'Укажите хотя бы один город или рубрику для поиска.';
 
-  const max_results = Math.max(1, Math.min(5000, Number(params.max_results ?? 500) || 500));
+  const max_results = Math.max(1, Math.min(50_000, Number(params.max_results ?? 5000) || 5000));
 
-  const { data: job, error } = await sb
-    .from('yandex_maps_jobs')
-    .insert({
-      user_id: user.userId,
-      status: 'pending',
-      config: { search_urls, max_results, headless: true },
-      progress_stage: 'pending',
-    })
-    .select('id, status')
-    .single();
+  let jobId: string;
+  try {
+    jobId = await queueYandexMapsCatalogJob(user.userId, filters, max_results);
+  } catch (error) {
+    return `Ошибка: ${error instanceof Error ? error.message : 'не удалось создать задачу'}`;
+  }
 
-  if (error) return `Ошибка: ${error.message}`;
-
-  await logAudit('telegram-agent.write.yandex-maps-launch', `Yandex Maps parser launched`, {
-    jobId: job.id, search_urls, max_results, userId: user.userId, userName: user.fullName,
+  await logAudit('telegram-agent.write.yandex-maps-launch', 'Yandex Maps catalog search launched', {
+    jobId, cities, rubrics, max_results, userId: user.userId, userName: user.fullName,
   });
-  return `Парсер Яндекс.Карт запущен (ID: ${job.id}). URL-ов: ${search_urls.length}, макс. результатов: ${max_results}.`;
+  return `Поиск по каталогу Яндекс.Карт запущен (ID: ${jobId}). Городов: ${cities.length}, рубрик: ${rubrics.length}, макс. результатов: ${max_results}.`;
 };
 
 export const launchEmailSearch: WriteToolHandler = async (params, user) => {

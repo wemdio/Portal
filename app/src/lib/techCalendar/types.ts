@@ -79,6 +79,22 @@ export interface TechSubscription {
   updated_at: string;
 }
 
+/**
+ * Оплаченный цикл из журнала продлений (`tech_subscription_cost_events`).
+ * `paid_at` — когда фактически ушли деньги; `billing_date` — на какой цикл.
+ */
+export interface TechRenewalEvent {
+  id: string;
+  subscription_id: string;
+  billing_date: string;
+  service_name: string;
+  service_type: ServiceType;
+  billing_cycle: BillingCycle;
+  amount: number;
+  currency: Currency;
+  paid_at: string;
+}
+
 export interface TechProviderBalance {
   provider: TechBalanceProvider;
   label: string;

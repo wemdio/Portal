@@ -7,6 +7,9 @@ const hashSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const websiteEvidenceSchema = z.object({
   // Old pending extracts predate identity verification and must be refetched.
   reader_version: z.literal(1).optional(),
+  // Additive discovery revision: older workers can still parse identity-checked
+  // evidence and paid verdicts during rollback/rolling deployment.
+  reader_revision: z.literal(2).optional(),
   status: z.enum(['ok', 'unavailable', 'error']),
   // Keep text only while refinement is pending. Completed checks retain their
   // attempt marker, not thousands of full website extracts in every DB write.
@@ -43,12 +46,13 @@ const checkpointSchema = z.object({
     // Preserve provider failures separately from a single unsupported citation.
     failure_code: relevanceFailureCodeSchema.optional(),
   })).default({}),
-  // pending is safe to resume; started/failed can have incurred a charge and
-  // must never be repeated for the same evidence/model/context after a crash.
+  // Reserve each paid attempt before HTTP. Legacy started/failed records count
+  // as one attempt; recovery may buy at most one isolated follow-up.
   semantic_reviews: z.record(hashSchema, z.object({
     company_key: hashSchema,
     proposal: veRelevanceDecisionSchema,
     status: z.enum(['pending', 'started', 'finished', 'failed']),
+    attempts: z.number().int().min(0).max(2).optional(),
     result: veRelevanceReviewResultSchema.optional(),
     failure_code: relevanceFailureCodeSchema.optional(),
   })).default({}),

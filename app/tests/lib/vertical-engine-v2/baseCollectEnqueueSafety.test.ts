@@ -5,6 +5,8 @@ import { NextRequest } from 'next/server';
 
 import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
 import { enqueueVeBaseCollect } from '@/lib/verticalEngineV2/baseCollectEnqueue';
+import { claimVeJob, createVeJobPool } from '@/lib/verticalEngineV2/jobQueue';
+import { runVeOutreachPreparations } from '@/lib/verticalEngineV2/outreachPreparation';
 
 let mockRouteDb = createMockSupabase();
 jest.mock('@/lib/supabaseAdmin', () => ({ get supabaseAdmin() { return mockRouteDb; } }));
@@ -144,6 +146,75 @@ describe('VE2 base collection enqueue recovery', () => {
       status: 'pending',
       payload: expect.objectContaining({ base_id: collecting[0]?.id, limit: 500, collection_mode: 'supply', ready_target: 250 }),
     }));
+
+    // Death after base resume but before queue INSERT: recover only an older
+    // completed job, never automatically retry a real terminal failure.
+    for (const [lastStatus, finished, shouldRepair] of [
+      ['done', '2026-09-14T08:23:00Z', true],
+      ['done', '2026-09-14T22:42:00Z', false],
+      ['failed', '2026-09-14T08:23:00Z', false],
+      ['cancelled', '2026-09-14T08:23:00Z', false],
+    ] as const) {
+      let claims = 0;
+      const preparation = { project_id: input.projectId, hypothesis_id: 'h1', base_id: 'resumed',
+        template_id: null, status: 'collecting', language: 'ru', claim_token: 'lease' };
+      const resumedDb = createMockSupabase({ tables: {
+        ve_hypotheses: [{ id: 'h1', project_id: input.projectId, vertical_id: input.verticalId, status: 'approved' }],
+        ve_verticals: [{ id: input.verticalId, project_id: input.projectId, name: 'Medicine' }],
+        ve_bases: [{ id: 'resumed', project_id: input.projectId, hypothesis_id: 'h1', vertical_id: input.verticalId,
+          source: 'auto', status: 'collecting', updated_at: '2026-09-14T22:41:33Z', collection_mode: 'preview',
+          collect_info: { collection_mode: 'preview', limit: 2000, ready_target: 500, hypothesis_id: 'h1' } }],
+        ve_jobs: [{ id: 'old', project_id: input.projectId, stage: 'base_collect', status: lastStatus,
+          finished_at: finished, 'payload->>base_id': 'resumed', payload: { base_id: 'resumed' } }],
+      }, rpcHandlers: {
+        ve_claim_outreach_preparation: () => ({ data: claims++ === 0 ? [preparation] : [] }),
+        ve_save_outreach_preparation: () => ({ data: true }),
+      } });
+      await runVeOutreachPreparations(resumedDb as unknown as SupabaseClient);
+      expect(resumedDb.getRows('ve_jobs').filter((row) => row.status === 'pending')).toHaveLength(shouldRepair ? 1 : 0);
+      if (shouldRepair) {
+        claims = 0;
+        await runVeOutreachPreparations(resumedDb as unknown as SupabaseClient);
+        expect(resumedDb.getRows('ve_jobs').filter((row) => row.status === 'pending')).toHaveLength(1);
+      }
+    }
+
+    // One project keeps its stage order while another uses the free slot.
+    const now = new Date('2026-09-14T23:00:00Z');
+    const queueDb = createMockSupabase({ enforceQueryWindows: true, tables: { ve_jobs:
+      [['a1', 'a'], ['a2', 'a'], ['b1', 'b'], ['c1', 'c']].map(([id, project_id], index) => ({
+        id, project_id, stage: 'base_collect', status: 'pending', payload: {},
+        run_after: `2026-09-14T22:00:0${index}Z`, created_at: `2026-09-14T22:00:0${index}Z`,
+      })),
+    } });
+    let stopped = false;
+    const started: string[] = [];
+    const release = new Map<string, () => void>();
+    const onError = jest.fn();
+    const pool = createVeJobPool({ concurrency: 2, idleMs: 0, shouldStop: () => stopped,
+      claim: (projects) => claimVeJob(queueDb as unknown as SupabaseClient, now, projects),
+      run: async (job) => {
+        started.push(job.id);
+        await new Promise<void>((resolve) => { release.set(job.id, resolve); });
+        await queueDb.from('ve_jobs').update({ status: 'done' }).eq('id', job.id);
+        if (job.id === 'b1') throw new Error('isolated failure');
+      }, onError,
+    });
+    await pool.pollOnce(); await pool.pollOnce();
+    expect(started).toEqual(['a1', 'b1']);
+    const full = pool.pollOnce();
+    expect(started).toHaveLength(2);
+    release.get('b1')!(); await full; await pool.pollOnce();
+    expect(started).toEqual(['a1', 'b1', 'c1']);
+    expect(onError).toHaveBeenCalledTimes(1);
+    release.get('a1')!();
+    await pool.pollOnce(); await pool.pollOnce();
+    expect(started).toEqual(['a1', 'b1', 'c1', 'a2']);
+    stopped = true;
+    expect(await pool.pollOnce()).toBe(false);
+    release.get('c1')!(); release.get('a2')!();
+    await pool.drain();
+    expect(queueDb.getRows('ve_jobs').every((row) => row.status === 'done')).toBe(true);
   });
 
   it('repairs a normal orphan from its stored snapshot even when the caller requests refill', async () => {

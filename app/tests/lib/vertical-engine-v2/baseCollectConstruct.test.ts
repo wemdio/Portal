@@ -67,6 +67,8 @@ import { enqueueVeBaseCollect } from '@/lib/verticalEngineV2/baseCollectEnqueue'
 import { callLLMWithSchema } from '@/lib/verticalEngineV2/llm';
 import { stripTaskHarvest } from '@/lib/verticalEngineV2/projectDetail';
 import { VePreviewCheckpointConflict } from '@/lib/verticalEngineV2/relevanceCheckpoint';
+import { recoverVeSavedEmails, resumeVeSavedEmailRecovery, hasPendingVeSavedEmailRecovery,
+  type VeSavedEmailRecoveryState } from '@/lib/verticalEngineV2/savedEmailRecovery';
 import { createVeJobShutdown, VeWorkerShutdownError } from '@/lib/verticalEngineV2/workerLiveness';
 
 const PROJECT = { id: 'p1', name: 'P', created_by: 'user-1', market: 'ru' };
@@ -227,6 +229,9 @@ describe('base_collect CONSTRUCT step order', () => {
       target_checkpoint: { completed_round: 1, seen_rows: [ready, pending], processed_rows: 2, relevance_unchecked: 1 },
       stats: { tasks_total: 1, tasks_done: 1, tasks_failed: 0, rows_total: 2, excluded_existing_bases: 0,
         excluded_during_fetch: 0, relevance_coverage_complete: false },
+      saved_email_recovery: { version: 1, attempt_id: 'automatic:b1',
+        checked: { a: 'unknown', b: 'ok', c: 'catch_all', d: 'invalid' },
+        automatic_checked: { a: 'unknown', b: 'ok', c: 'catch_all', d: 'invalid' } },
     };
     info.tasks![0].exhausted = true;
     const saved = { ...makeBase(info), status: 'failed', row_count: 1,
@@ -249,6 +254,11 @@ describe('base_collect CONSTRUCT step order', () => {
       expect(result).toMatchObject({ ok: true, created: true, base: { id: 'b1' } });
       // A second click must join the same queued recovery.
       await expect(enqueueVeBaseCollect(supabase, enqueueInput)).resolves.toMatchObject({ ok: true, created: false, base: { id: 'b1' } });
+      expect((db.getRows('ve_bases').find((base) => base.id === 'b1')!.collect_info as VeCollectInfo).saved_email_recovery)
+        .toMatchObject({ generation: complete ? 2 : 1, checked: { b: 'ok', c: 'catch_all', d: 'invalid' },
+          automatic_checked: { b: 'ok', c: 'catch_all', d: 'invalid' } });
+      expect((db.getRows('ve_bases').find((base) => base.id === 'b1')!.collect_info as VeCollectInfo).saved_email_recovery?.checked)
+        .not.toHaveProperty('a');
       const queued = db.getRows('ve_jobs').filter((j) => j.stage === 'base_collect').at(-1)!;
       const job = { ...makeJob(), id: queued.id as string, payload: queued.payload as VeJob['payload'] };
       await supabase.from('ve_jobs').update({ status: 'running' }).eq('id', queued.id);
@@ -264,6 +274,43 @@ describe('base_collect CONSTRUCT step order', () => {
     expect(db.getRows('base_constructor_jobs')).toHaveLength(1);
     expect(searchRows).not.toHaveBeenCalled();
     expect(db.getRows('ve_jobs').filter((j) => j.stage === 'base_analyze')).toHaveLength(1);
+
+    // Restarting after an outage must buy a NEW validation child for unknowns,
+    // while repeated wakes and an in-flight child remain idempotent.
+    const emailDb = createMockSupabase({ tables: { ve_projects: [PROJECT], base_constructor_jobs: [] } });
+    let emailState: VeSavedEmailRecoveryState | undefined;
+    let emailRows: Array<Record<string, unknown>> = [
+      { email: 'pending@clinic.test', _email_status: 'unknown' }, { email: 'ready@clinic.test', _email_status: 'ok' },
+    ];
+    const recover = () => recoverVeSavedEmails({ ctx: { supabase: emailDb as unknown as SupabaseClient },
+      job: makeJob(), baseId: 'b1', automatic: true, rows: emailRows, state: emailState,
+      save: async (state, rows) => { emailState = state; emailRows = rows; } });
+    const finishEmail = async (status: string) => {
+      const child = emailDb.getRows('base_constructor_jobs').at(-1)!;
+      const grid = child.data as string[][];
+      await emailDb.from('base_constructor_jobs').update({ status: 'completed',
+        data: [[...grid[0], 'Email Статус'], ...grid.slice(1).map((row) => [...row, status])] }).eq('id', child.id);
+    };
+    await recover();
+    await finishEmail('unknown');
+    await recover();
+    expect(hasPendingVeSavedEmailRecovery(emailRows, emailState)).toBe(false);
+    emailState = resumeVeSavedEmailRecovery(emailState);
+    expect(hasPendingVeSavedEmailRecovery(emailRows, emailState)).toBe(true);
+    await recover();
+    const children = emailDb.getRows('base_constructor_jobs');
+    expect(children).toHaveLength(2);
+    expect(children[1].id).not.toBe(children[0].id);
+    expect(children[1].initial_row_count).toBe(1);
+    emailState = resumeVeSavedEmailRecovery(emailState); // preserve the pending child
+    await recover();
+    expect(emailDb.getRows('base_constructor_jobs')).toHaveLength(2);
+    await finishEmail('ok');
+    await recover();
+    await recover();
+    expect(emailRows.every((row) => row._email_status === 'ok')).toBe(true);
+    expect(hasPendingVeSavedEmailRecovery(emailRows, emailState)).toBe(false);
+    expect(emailDb.getRows('base_constructor_jobs')).toHaveLength(2);
     // A failed/ambiguous queue insert never races a concurrent repair by
     // restoring failed; a later explicit queue check repairs that same base.
     for (const committed of [false, true]) {

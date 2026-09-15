@@ -137,6 +137,25 @@ describe('VE2 collection progress presentation', () => {
     expect(getCollectionProgress(collecting.collect_info)).toMatchObject({ phase: 'finishing', stepPercent: null });
     expect(getPreparationPresentation({ preparation, base: collecting, jobs: [parent] }))
       .toMatchObject({ tone: 'muted', currentStep: 0 });
+    // A stale checkpoint must not make a stopped or unconfirmed job look busy.
+    collecting.collect_info.relevance_review_requested = true;
+    const interrupted = { ...preparation, status: 'error' as const,
+      last_error: 'Задача сбора завершилась, но база не готова. Нажмите «Продолжить подготовку»' };
+    expect(getPreparationPresentation({ preparation: interrupted, base: collecting, jobs: [{ ...parent, status: 'done' }] }))
+      .toMatchObject({ tone: 'err', currentStep: null });
+    expect(getPreparationPresentation({ preparation: { ...interrupted, status: 'pending' }, base: collecting, jobs: [{ ...parent, status: 'done' }] }))
+      .toMatchObject({ tone: 'muted', currentStep: null });
+    for (const status of ['failed', 'analyzing'] as const) {
+      expect(getPreparationPresentation({ preparation: interrupted, base: { ...collecting, status }, jobs: [] }).tone).toBe('err');
+      expect(getPreparationPresentation({ preparation: { ...interrupted, status: 'pending' }, base: { ...collecting, status }, jobs: [] }).tone).toBe('muted');
+    }
+    expect(getPreparationPresentation({ preparation, base: collecting, jobs: [{ ...parent, status: 'running' }] }))
+      .toMatchObject({ tone: 'info', currentStep: 0 });
+    collecting.collect_info.relevance_review_requested = false;
+    collecting.collect_info.construct.progress = { status: 'processing', current_step_key: 'validate_emails', current_step_progress: 37 };
+    for (const history of [[], [{ ...parent, status: 'done' as const }]]) {
+      expect(getPreparationPresentation({ preparation, base: collecting, jobs: history }).tone).toBe('muted');
+    }
     collecting.collect_info = { stats: { rows_total: Number.NaN }, tasks: [{ status: 'done', rows: -1 }] };
     expect(getCollectionProgress(collecting.collect_info)).toMatchObject({ candidates: null, sourceRows: null });
     collecting.collect_info.stats = { rows_total: 0 };

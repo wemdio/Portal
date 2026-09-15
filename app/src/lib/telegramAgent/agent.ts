@@ -49,7 +49,7 @@ function describeAction(tool: string, args: Record<string, unknown>): string {
     update_review_status: (a) => `Изменить статус ревью → <b>${a.new_status}</b>`,
     launch_hh_parser: (a) => `Запустить HH-парсер: «${a.text}»${a.area ? ` (регион: ${a.area})` : ''}${a.salary_from ? ` от ${a.salary_from}₽` : ''}`,
     launch_search_parser: (a) => `Запустить поисковый парсер${a.queries ? `: ${String(a.queries).split('\n').length} запрос(ов)` : ''}${a.brief ? ` по брифу` : ''}`,
-    launch_yandex_maps_parser: (a) => `Запустить парсер Яндекс.Карт: ${String(a.search_urls ?? '').split('\n').filter(Boolean).length} URL`,
+    launch_yandex_maps_parser: (a) => `Запустить поиск по каталогу Яндекс.Карт: ${String(a.cities ?? '').split(/[\n,]+/).filter(Boolean).length} город(ов) × ${String(a.rubrics ?? '').split(/[\n,]+/).filter(Boolean).length} рубрик`,
     launch_email_search: (a) => `Найти email на ${String(a.urls ?? '').split('\n').filter(Boolean).length} сайтах`,
     launch_email_validation: (a) => `Валидировать ${String(a.emails ?? '').split(/[\n,;]+/).filter(Boolean).length} email`,
     launch_lpr_search: (a) => `Найти ЛПР: ${a.domain ?? a.company_name ?? a.linkedin_url ?? ''}`,

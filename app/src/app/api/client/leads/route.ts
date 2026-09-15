@@ -151,6 +151,7 @@ async function enrichFromInstantlyReplies(items: LeadListItem[], accessRows: Cli
       limit: REPLIES_PER_CAMPAIGN,
     }, {
       accountId: getResourceInstantlyAccountId(campaignId, accessRows, 'campaign'),
+      consumer: 'client_leads_fallback',
     });
 
     const replies = (data.items ?? []).map((email) => {
