@@ -97,7 +97,14 @@ LEADS_INTER_PAGE_DELAY_SEC: float = float(
     os.environ.get("INSTANTLY_LEADS_INTER_PAGE_DELAY_SEC", "0.5")
 )
 LEADS_FLUSH_THRESHOLD = int(os.environ.get("INSTANTLY_LEADS_FLUSH_THRESHOLD", "5000"))
-LEADS_RPS_LIMIT: float = float(os.environ.get("INSTANTLY_LEADS_RPS_LIMIT", "3.0"))
+# Размазывание лид-фазы по времени (запрос пользователя 15.09.2026): раньше
+# 3 req/s выкладывали весь часовой объём (~70 запросов) за первые ~1-2 минуты
+# бёрстом, конкурируя с остальными потребителями воркспейса. Дефолт 0.08 req/s
+# (~5 запросов/мин, интервал ~12 с) растягивает текущий объём до ~15 минут, а
+# рост до ~150 кампаний-страниц — до ~30 минут, не меняя суммарный расход.
+# Планировщик max_instances=1 + coalesce: удлинение прогона не даёт наложений.
+# Старый бёрст-режим возвращается env-ом INSTANTLY_LEADS_RPS_LIMIT=3.0.
+LEADS_RPS_LIMIT: float = float(os.environ.get("INSTANTLY_LEADS_RPS_LIMIT", "0.08"))
 
 def _resolve_db_ssl_mode(database_url: str) -> bool | str:
     """Resolve SSL mode from env/query to avoid forcing SSL on self-hosted PG."""
@@ -972,9 +979,12 @@ async def sync_client_leads() -> dict[str, int]:
     LEADS_UPSERT_BATCH.  DB connections are held only during flushes.
 
     Resource budget (2xXeon E5-2670 / 64GB):
-      DB pool: max 5 conns  ← well under 95% of pgbouncer limit (57 of 60)
+      DB pool: max 5 conns  ← well under 95% of pgbouncer limit (57 of 60);
+               коннекты живут дольше прежнего — лид-фаза теперь растянута
+               на ~15-30 мин (см. LEADS_RPS_LIMIT), но между флашами простаивают
       HTTP:    max 4 conns  ← 2 active + 2 keepalive buffer
-      Rate:    ~3 RPS global limit across all workers
+      Rate:    ~0.08 RPS (≈5 запросов/мин) global limit across all workers —
+               часовой объём размазан по ~15-30 мин вместо бёрста в первые минуты
       Memory:  ~2 × 5000 leads × ~2KB ≈ 20MB peak — acceptable
     """
     pool = await asyncpg.create_pool(

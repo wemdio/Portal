@@ -76,18 +76,33 @@ export async function getCampaignAccountIds(campaignIds: string[]): Promise<Map<
   return result;
 }
 
+/**
+ * Бриф проекта — единственный источник для генерации ответов. Читается живьём
+ * из карточки проекта, а не из базы знаний инструмента: к запуску кампании
+ * бриф уже заполнен там, дублировать его не нужно.
+ */
+export async function getProjectBrief(projectId: string): Promise<string> {
+  const { admin } = requireClients();
+  const { data, error } = await admin
+    .from('projects')
+    .select('brief_text')
+    .eq('id', projectId)
+    .maybeSingle();
+  if (error) throw new Error(`project brief query failed: ${error.message}`);
+  return (data?.brief_text as string) ?? '';
+}
+
 export async function getKnowledgeBase(projectId: string): Promise<KnowledgeBase | null> {
   const { admin } = requireClients();
   const { data, error } = await admin
     .from('reply_personalization_kb')
-    .select('project_id, brief, product_facts, tone_notes, example_case, updated_at')
+    .select('project_id, product_facts, tone_notes, example_case, updated_at')
     .eq('project_id', projectId)
     .maybeSingle();
   if (error) throw new Error(`kb query failed: ${error.message}`);
   if (!data) return null;
   return {
     projectId: data.project_id as string,
-    brief: (data.brief as string) ?? '',
     productFacts: (data.product_facts as string) ?? '',
     toneNotes: (data.tone_notes as string) ?? '',
     exampleCase: (data.example_case as string) ?? '',
@@ -97,14 +112,13 @@ export async function getKnowledgeBase(projectId: string): Promise<KnowledgeBase
 
 export async function upsertKnowledgeBase(
   projectId: string,
-  patch: Pick<KnowledgeBase, 'brief' | 'productFacts' | 'toneNotes' | 'exampleCase'>,
+  patch: Pick<KnowledgeBase, 'productFacts' | 'toneNotes' | 'exampleCase'>,
   userId: string,
 ): Promise<void> {
   const { admin } = requireClients();
   const { error } = await admin.from('reply_personalization_kb').upsert(
     {
       project_id: projectId,
-      brief: patch.brief,
       product_facts: patch.productFacts,
       tone_notes: patch.toneNotes,
       example_case: patch.exampleCase,
