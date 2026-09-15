@@ -106,6 +106,9 @@ describe('VE2 collection progress presentation', () => {
     expect(getCollectionQueue([waiting, unclaimed], [
       { stage: 'base_collect', status: 'pending', payload: { base_id: unclaimed.id } },
     ]).current).toBe(waiting);
+    const parallel = base('parallel', '2026-09-02T12:12:00Z', { construct: { progress: { status: 'processing' } } });
+    expect(getCollectionQueue([waiting, parallel], recentJobs).queued).toEqual([]);
+    expect(getCollectionProgress({ source_contact_discovery: { checked: 16, remaining: 100 } }).phase).toBe('discovering_sites');
   });
 
   it('keeps unknown counts, source rows, candidates and step progress distinct from the run cap', () => {

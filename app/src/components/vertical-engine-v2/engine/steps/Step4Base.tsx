@@ -1329,6 +1329,7 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
 }
 
 const COLLECT_PHASE_LABELS = {
+  discovering_sites: 'Находим официальные сайты',
   planning: 'Подбираем источники',
   collecting: 'Собираем из источников',
   construct_queued: 'Ждём обработку базы',

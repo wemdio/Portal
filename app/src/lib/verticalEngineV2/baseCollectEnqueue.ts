@@ -124,7 +124,8 @@ async function resumeFailedPreview(
   if (error) return { ok: false, message: error.message };
   const candidates = (failed ?? []).filter((base) => previewRecoveryKind(base));
   // A newer empty 402 attempt must not hide an older already enriched result.
-  const saved = candidates.find((base) => previewRecoveryKind(base) === 'validation') ?? candidates[0];
+  const saved = candidates.find((base) => previewRecoveryKind(base) === 'validation')
+    ?? candidates.find((base) => previewRecoveryKind(base) !== 'billing') ?? candidates[0];
   if (!saved) return null;
   if (activeBaseIds.includes(saved.id)) return { ok: true, created: false, base: saved };
   const info = { ...saved.collect_info, ...(previewRecoveryKind(saved) === 'validation' ? { validation_retry: true } : {}) };

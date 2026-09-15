@@ -2,6 +2,7 @@ import { loadBuffer } from 'cheerio';
 import { isIP } from 'node:net';
 
 export interface VeEvidencePage {
+  title?: string;
   text: string;
   url: string;
   links: Array<{ url: string; text: string }>;
@@ -226,5 +227,5 @@ export function parseVeEvidencePage(body: Buffer, url: string, contentType: stri
   const unique = new Map<string, EvidenceLink>();
   for (const link of ranked) if (!unique.has(link.url)) unique.set(link.url, link);
   const links = [...unique.values()].slice(0, 80);
-  return { text: selectVeEvidenceText(activityText, focus), url, links, inns, ownerInns: [...ownerInns] };
+  return { text: selectVeEvidenceText(activityText, focus), title: cleanText([title, $('h1').first().text()].join(' ')).slice(0, 500), url, links, inns, ownerInns: [...ownerInns] };
 }

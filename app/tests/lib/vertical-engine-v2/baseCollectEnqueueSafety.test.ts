@@ -5,7 +5,8 @@ import { NextRequest } from 'next/server';
 
 import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
 import { enqueueVeBaseCollect } from '@/lib/verticalEngineV2/baseCollectEnqueue';
-import { claimVeJob, createVeJobPool } from '@/lib/verticalEngineV2/jobQueue';
+import { claimVeJob, createVeJobPool, veJobConcurrency } from '@/lib/verticalEngineV2/jobQueue';
+import type { VeJob } from '@/lib/verticalEngineV2/types';
 import { runVeOutreachPreparations } from '@/lib/verticalEngineV2/outreachPreparation';
 
 let mockRouteDb = createMockSupabase();
@@ -32,6 +33,7 @@ describe('VE2 base collection enqueue recovery', () => {
     const privateInfo = {
       collection_mode: 'preview', ready_target: 1_000, limit: 2_000,
       target_checkpoint: { seen_rows: [{ email: 'rejected@example.com' }] },
+      source_contact_recovery: { version: 1, checked: { private: { website: 'https://private.test/' } } },
       tasks: [{ source: 'directory', rows: 25, harvest: [{ email: 'raw@example.com' }] }],
     };
     mockRouteDb = createMockSupabase({ tables: {
@@ -50,6 +52,7 @@ describe('VE2 base collection enqueue recovery', () => {
       const payload = await response.json();
       for (const base of [payload.base, ...(payload.bases ?? [])]) {
         expect(base.collect_info).not.toHaveProperty('target_checkpoint');
+        expect(base.collect_info).not.toHaveProperty('source_contact_recovery');
         expect(base.collect_info?.tasks?.some((task: Record<string, unknown>) => 'harvest' in task)).not.toBe(true);
       }
     }
@@ -215,6 +218,33 @@ describe('VE2 base collection enqueue recovery', () => {
     release.get('c1')!(); release.get('a2')!();
     await pool.drain();
     expect(queueDb.getRows('ve_jobs').every((row) => row.status === 'done')).toBe(true);
+    // The requested 15 x 25 workload must drain without starving a project or
+    // allowing two parent writers to mutate the same project's usage/state.
+    expect([undefined, '0', 'NaN', '1', '8', '16', '999'].map(veJobConcurrency)).toEqual([8, 8, 8, 1, 8, 16, 16]);
+    const backlog = Array.from({ length: 375 }, (_, i) => ({ id: `j${i}`, project_id: `p${i % 15}` }) as VeJob);
+    const activeProjects = new Set<string>(), completed = new Set<string>();
+    const finishWave: Array<() => void> = [];
+    let highWater = 0;
+    const errors = jest.fn();
+    const scaled = createVeJobPool({ concurrency: 8, idleMs: 0, shouldStop: () => false,
+      claim: async (active) => {
+        const index = backlog.findIndex((job) => !active.includes(job.project_id));
+        return index < 0 ? null : backlog.splice(index, 1)[0];
+      }, run: async (job) => {
+        expect(activeProjects.has(job.project_id)).toBe(false);
+        activeProjects.add(job.project_id); highWater = Math.max(highWater, activeProjects.size);
+        await new Promise<void>((resolve) => { finishWave.push(resolve); });
+        activeProjects.delete(job.project_id); completed.add(job.id);
+      }, onError: errors,
+    });
+    while (backlog.length) {
+      for (let slot = 0; slot < 8; slot++) await scaled.pollOnce();
+      finishWave.splice(0).forEach((finish) => finish());
+      await scaled.drain();
+    }
+    expect(completed.size).toBe(375);
+    expect(highWater).toBe(8);
+    expect(errors).not.toHaveBeenCalled();
   });
 
   it('repairs a normal orphan from its stored snapshot even when the caller requests refill', async () => {

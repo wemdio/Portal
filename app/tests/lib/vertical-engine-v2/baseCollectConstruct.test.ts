@@ -21,6 +21,10 @@ jest.mock('@/lib/verticalEngineV2/llm', () => ({
   getVeModel: jest.fn(() => 'test-bulk-model'),
   getVeActiveJobSignal: jest.fn(() => undefined),
 }));
+jest.mock('@/lib/verticalEngineV2/relevanceEvidence', () => ({
+  ...jest.requireActual('@/lib/verticalEngineV2/relevanceEvidence'),
+  fetchVeRelevanceEvidence: jest.fn(async () => ({ status: 'unavailable', text: '', url: '', reason: 'offline_fixture' })),
+}));
 
 const mockFindIrrelevantRows = jest.fn();
 
@@ -70,6 +74,9 @@ import { VePreviewCheckpointConflict } from '@/lib/verticalEngineV2/relevanceChe
 import { recoverVeSavedEmails, resumeVeSavedEmailRecovery, hasPendingVeSavedEmailRecovery,
   type VeSavedEmailRecoveryState } from '@/lib/verticalEngineV2/savedEmailRecovery';
 import { createVeJobShutdown, VeWorkerShutdownError } from '@/lib/verticalEngineV2/workerLiveness';
+import { normalizeVeSourceContacts } from '@/lib/verticalEngineV2/sourceContacts';
+import { veAcquisitionReceipt } from '@/lib/verticalEngineV2/collectionIdentity';
+import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
 
 const PROJECT = { id: 'p1', name: 'P', created_by: 'user-1', market: 'ru' };
 const VERTICAL = {
@@ -247,6 +254,18 @@ describe('base_collect CONSTRUCT step order', () => {
     const supabase = db as unknown as SupabaseClient;
     const enqueueInput = { projectId: 'p1', verticalId: 'v1', verticalName: VERTICAL.name,
       hypothesisIds: ['h1'], collectionMode: 'preview' as const, limit: 2000 };
+    const discoveryInfo: VeCollectInfo = { ...collectInfo([pending]), collection_mode: 'preview',
+      target_progress: { ...createCollectionTarget('preview'), round: 2, candidates_processed: 1, status: 'error' },
+      target_checkpoint: { completed_round: 1, seen_rows: [ready] },
+      source_contact_recovery: { version: 1, checked: { paid: { website: 'https://confirmed.test/', reason: 'verified' } } } };
+    const discoveryDb = seed(discoveryInfo, { ve_jobs: [], ve_bases: [
+      { ...makeBase(discoveryInfo), id: 'saved-discovery', status: 'failed', created_at: '2026-09-03' }, empty,
+    ] });
+    await expect(enqueueVeBaseCollect(discoveryDb as unknown as SupabaseClient, enqueueInput)).resolves.toMatchObject({ ok: true });
+    expect(discoveryDb.getRows('ve_bases')).toHaveLength(2);
+    expect(discoveryDb.getRows('ve_jobs')[0].payload).toMatchObject({ base_id: 'saved-discovery' });
+    expect((discoveryDb.getRows('ve_bases').find((row) => row.id === 'saved-discovery')?.collect_info as VeCollectInfo).source_contact_recovery)
+      .toEqual(discoveryInfo.source_contact_recovery);
     mockFindIrrelevantRows.mockResolvedValueOnce({ flagged: new Set(), unchecked: new Set([0]),
       coverage: { checkedCompanies: 0, totalCompanies: 1, complete: false }, tokensUsed: 0, costUsd: 0 });
     for (const complete of [false, true]) {
@@ -391,6 +410,27 @@ describe('base_collect CONSTRUCT step order', () => {
     expect(estimateRemainingReady({ population: 5_000, candidatesProcessed: 1_000, readyRows: 200, eligible: true, asOf: '2026-09-03' }))
       .toMatchObject({ contacts: 800, confidence: 'low' });
     expect(estimateRemainingReady({ population: 5_000, candidatesProcessed: 1_000, readyRows: 200, eligible: false, asOf: '2026-09-03' })).toBeNull();
+    // Production regression: 1,071 previously consumed HH observations without
+    // INNs/sites were selected again, inflating counters and buying another BC.
+    const anonymous = Array.from({ length: 1_071 }, (_, i) => unifiedRow({ company: `Agency ${i}`, source_detail: 'hh' }));
+    const repeatedInfo: VeCollectInfo = { ...collectInfo(anonymous), collection_mode: 'preview',
+      target_progress: { ...createCollectionTarget('preview'), round: 2, candidates_processed: 1071 },
+      target_checkpoint: { completed_round: 1, seen_rows: anonymous.map(({ company, inn, email, website }) => ({ company, inn, email, website })) } };
+    repeatedInfo.tasks![0].exhausted = true;
+    const repeatedDb = seed(repeatedInfo);
+    await runBaseCollectStage(makeJob(), { supabase: repeatedDb as unknown as SupabaseClient });
+    expect(repeatedDb.getRows('base_constructor_jobs')).toHaveLength(0);
+    expect((lastBasePatch(repeatedDb)?.collect_info as VeCollectInfo).target_progress?.candidates_processed).toBe(1071);
+    const knownInn = unifiedRow({ company: 'Agency with missing site', inn: '7700000777', source_detail: 'реестр' });
+    const recoveredInfo: VeCollectInfo = { ...collectInfo([knownInn]), collection_mode: 'preview',
+      target_progress: { ...createCollectionTarget('preview'), round: 2, candidates_processed: 1 },
+      target_checkpoint: { completed_round: 1, seen_rows: [knownInn] } };
+    jest.mocked(fetchVeRelevanceEvidence).mockResolvedValueOnce({ status: 'ok', text: 'Confirmed legal entity', url: 'https://found.test/', reason: 'discovered_verified_website' });
+    const recoveredDb = seed(recoveredInfo);
+    await runBaseCollectStage(makeJob(), { supabase: recoveredDb as unknown as SupabaseClient });
+    const recoveredInput = recoveredDb.getRows('base_constructor_jobs')[0].data as string[][];
+    expect(recoveredInput).toHaveLength(2);
+    expect(recoveredInput[1]).toContain('https://found.test/');
 
     // The small cohort must reach the actual constructor and publish checked
     // rows while the same base continues collecting. Old runs retain their
@@ -989,6 +1029,20 @@ describe('base_collect CONSTRUCT import', () => {
       launchable_rows: 2,
       low_relevance: 0,
     });
+    // Header-only validated output means zero usable addresses. Failed or
+    // malformed output must still remain a recoverable validation failure.
+    for (const [status, validHeader] of [['completed', true], ['failed', true], ['completed', false]] as const) {
+      const rows = [unifiedRow({ company: 'Без контактов', website: 'empty.test' })];
+      const info: VeCollectInfo = { ...collectInfo(rows, { bc_job_id: 'empty-child', status: 'dispatched' }),
+        collection_mode: 'preview', target_progress: createCollectionTarget('preview'), ready_target: 500 };
+      const emptyDb = seed(info, { base_constructor_jobs: [{ id: 'empty-child', status,
+        selected_steps: ['split_emails', 'validate_emails'], data: [validHeader ? ['Компания', 'Email', 'Email Статус'] : ['Email Статус']] }] });
+      await runBaseCollectStage(makeJob(), { supabase: emptyDb as unknown as SupabaseClient });
+      const after = lastBasePatch(emptyDb)!;
+      expect(after.row_count).toBe(0);
+      expect((after.collect_info as VeCollectInfo).target_progress?.status === 'error').toBe(status !== 'completed' || !validHeader);
+      expect(emptyDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    }
   });
 
   it('does not claim launch-ready recipients after a failed partial validation', async () => {
@@ -1189,6 +1243,14 @@ describe('VE2 source-row email preservation', () => {
     });
 
     expect(row.email).toBe('first@clinic.test, second@clinic.test');
+    const dirty = unifiedRow({ company: 'Agency', website: 'http://exclusive@century21.ru/', email: 'second@agency.test', source_detail: 'hh' });
+    const clean = normalizeVeSourceContacts(dirty);
+    expect(clean.website).toBe('');
+    expect(clean.email).toBe('second@agency.test, exclusive@century21.ru');
+    expect(clean.source_detail).toContain(dirty.website);
+    expect(dirty.website).toBe('http://exclusive@century21.ru/');
+    expect(normalizeVeSourceContacts({ ...dirty, email: '', website: 'https://agency.test/?ref=tracking@foreign.test' }).email).toBe('');
+    expect(veAcquisitionReceipt({ ...dirty, address: 'Москва' })).not.toBe(veAcquisitionReceipt({ ...dirty, address: 'Тула' }));
   });
 
   it('merges emails when duplicate company and website rows collapse', () => {
@@ -1264,7 +1326,8 @@ describe('VE2 cross-base contact exclusion', () => {
     await runBaseCollectStage(waitingJob, { supabase: db as unknown as SupabaseClient });
     expect(db.updates.filter((update) => update.table === 've_bases')).toHaveLength(queueWrites);
 
-    await db.from('ve_bases').update({ status: 'analyzing' }).eq('id', 'b-old');
+    // Independent hypotheses can dispatch while the first base is collecting.
+    await db.from('ve_bases').update({ hypothesis_id: 'another-hypothesis' }).eq('id', 'b-old');
     await expect(
       runBaseCollectStage(waitingJob, { supabase: db as unknown as SupabaseClient }),
     ).resolves.toMatchObject({ result: { waiting: true, construct: 'dispatched' } });
