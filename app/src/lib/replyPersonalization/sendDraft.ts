@@ -3,7 +3,8 @@
 // бизнес-логика квалификатора, её мы не трогаем).
 
 import { replyToEmail } from '@/lib/instantly/client';
-import { getDraftById, getKnowledgeBase, getQualificationById, markDraftSent, updateDraftText } from './db';
+import { getDraftById, getKnowledgeBase, markDraftSent, updateDraftText } from './db';
+import { resolveProjectReply } from './projectReply';
 
 /** Щедрый верхний предел тела письма: реальный ответ 90-170 слов, это защита от мусора, не лимит стиля. */
 const MAX_SEND_TEXT_LENGTH = 100_000;
@@ -31,8 +32,9 @@ export async function sendDraft(draftId: string, finalText: string): Promise<voi
   if (!draft) throw new SendDraftError('Черновик не найден', 404);
   if (draft.status === 'sent') return; // идемпотентно: повторный клик не шлёт письмо дважды
 
-  const qualification = await getQualificationById(draft.qualificationId);
-  if (!qualification) throw new SendDraftError('Письмо не найдено', 404);
+  const reply = await resolveProjectReply(draft.projectId, draft.qualificationId);
+  if (!reply) throw new SendDraftError('Письмо не найдено', 404);
+  const { qualification, accountId } = reply;
   if (!qualification.instantlyEmailId) throw new SendDraftError('Нет id письма для ответа в Instantly', 422);
   if (!qualification.eaccount) throw new SendDraftError('Не определён почтовый ящик отправителя (eaccount)', 422);
 
@@ -48,7 +50,7 @@ export async function sendDraft(draftId: string, finalText: string): Promise<voi
       subject: qualification.replySubject ? `Re: ${qualification.replySubject}` : 'Re:',
       body: { text: finalText },
     },
-    { accountId: kb.instantlyAccountId },
+    { accountId },
   );
 
   await markDraftSent(draftId);

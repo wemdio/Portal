@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
-import { getKnowledgeBase, getQualificationById } from '@/lib/replyPersonalization/db';
+import { getKnowledgeBase } from '@/lib/replyPersonalization/db';
 import { fetchFullThread } from '@/lib/replyPersonalization/instantlyThread';
+import { resolveProjectReply } from '@/lib/replyPersonalization/projectReply';
 import type { ThreadMessage } from '@/lib/replyPersonalization/types';
 
 export const dynamic = 'force-dynamic';
@@ -51,8 +52,9 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
   const kb = await getKnowledgeBase(projectId);
   if (!kb) return NextResponse.json({ error: 'У проекта не заполнена база знаний' }, { status: 409 });
 
-  const qualification = await getQualificationById(qualificationId);
-  if (!qualification) return NextResponse.json({ error: 'Письмо не найдено' }, { status: 404 });
+  const reply = await resolveProjectReply(projectId, qualificationId);
+  if (!reply) return NextResponse.json({ error: 'Письмо не найдено' }, { status: 404 });
+  const { qualification, accountId } = reply;
 
   let contextComplete = true;
   let messages: ThreadMessage[] | null = null;
@@ -61,7 +63,7 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
       campaignId: qualification.campaignId,
       leadEmail: qualification.leadEmail,
       threadId: qualification.threadId,
-      accountId: kb.instantlyAccountId,
+      accountId,
     });
   }
   if (!messages || messages.length === 0) {
