@@ -1,6 +1,6 @@
 import type { Email } from './types';
 import { getEmailRecipients } from '@/lib/clientCampaignReplies/participants';
-import { readInstantlyEmailReadDeferral } from './emailReadDeferral';
+import { isBudgetDeferralReason, readInstantlyEmailReadDeferral } from './emailReadDeferral';
 import { decodeReplyIntakeEmail, encodeReplyIntakeEmail, ReplyIntakePayloadError } from './replyIntakePayload';
 
 export interface QualificationRecoveryState {
@@ -30,13 +30,14 @@ export function qualificationRecoveryBackoff(
   minimumDelayMs: number,
 ) {
   const readDeferral = readInstantlyEmailReadDeferral(message);
-  if (readDeferral?.reason === 'budget') {
-    // Admission exhaustion means no LIST /emails attempt reached Instantly.
-    // It must not accumulate hours of failure backoff, or inherit a slow
-    // ownership lane's 15-minute minimum. The atomic DB gate still enforces
-    // all 18/min and recovery 6/min reservations on every eventual attempt.
-    // Ten seconds avoids subsecond retry churn; the rolling window is 60s.
-    // Stable row jitter spreads due dates without changing after a restart.
+  if (readDeferral && isBudgetDeferralReason(readDeferral.reason)) {
+    // Admission exhaustion (common cap or the recovery/bulk sub-lane) means no
+    // LIST /emails attempt reached Instantly. It must not accumulate hours of
+    // failure backoff, or inherit a slow ownership lane's 15-minute minimum.
+    // The atomic DB gate still enforces all 18/min + lane reservations on
+    // every eventual attempt. Ten seconds avoids subsecond retry churn; the
+    // rolling window is 60s. Stable row jitter spreads due dates without
+    // changing after a restart.
     let hash = 0;
     for (const character of previous.id ?? '') hash = (Math.imul(hash, 31) + character.charCodeAt(0)) >>> 0;
     const delay = Math.max(10_000, Math.min(60_000, readDeferral.retryAfterMs)) + hash % 5_001;

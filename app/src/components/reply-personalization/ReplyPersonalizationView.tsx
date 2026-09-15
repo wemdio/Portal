@@ -253,14 +253,12 @@ export function ReplyPersonalizationView() {
       {kbModalOpen && project ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="fixed inset-0 bg-black/40" onClick={() => setKbModalOpen(false)} />
-          <div className="relative flex max-h-[88vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
-            <div className="overflow-y-auto">
-              <KnowledgeBaseForm
-                projectId={project.id}
-                onClose={() => setKbModalOpen(false)}
-                onSaved={handleKbSaved}
-              />
-            </div>
+          <div className="relative w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <KnowledgeBaseForm
+              projectId={project.id}
+              onClose={() => setKbModalOpen(false)}
+              onSaved={handleKbSaved}
+            />
           </div>
         </div>
       ) : null}

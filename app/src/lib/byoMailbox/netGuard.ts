@@ -4,12 +4,15 @@ import net from 'net';
 import { promises as dns } from 'dns';
 
 /**
- * SSRF-защита исходящих SMTP-подключений (BYO-почты).
+ * SSRF-защита исходящих SMTP/IMAP-подключений (BYO-почты).
  *
- * Пользователь с provider='custom' задаёт host/port сам. Без проверки прод-сервер
- * мог бы подключиться к внутренним адресам (loopback, RFC1918, link-local,
- * cloud-metadata 169.254.169.254) и стать сканером/оракулом. Разрешаем только
- * публичные адреса и стандартные SMTP-порты.
+ * Пользователь с provider='custom' задаёт host/port сам (для IMAP у Maildoso это
+ * вообще всегда индивидуальный хост из CSV). Без проверки прод-сервер мог бы
+ * подключиться к внутренним адресам (loopback, RFC1918, link-local,
+ * cloud-metadata 169.254.169.254) и стать сканером/оракулом — причём для IMAP это
+ * особенно опасно: byoReplies опрашивает ящик по расписанию бесконечно, то есть
+ * это не разовый запрос, а постоянный canal на заданный клиентом host:port.
+ * Разрешаем только публичные адреса и стандартные порты.
  */
 
 // ТОЛЬКО submission-порты (465 implicit TLS / 587 STARTTLS / 2525 alt).
@@ -17,7 +20,12 @@ import { promises as dns } from 'dns';
 // это паттерн, за который Spamhaus вносит IP в списки (был инцидент с email-валидацией
 // с нашего сервера). Отправка с подключённых ящиков всегда идёт на submission-порт
 // провайдера (465/587), порт 25 для этого не нужен.
-const ALLOWED_PORTS = new Set([465, 587, 2525]);
+const SMTP_ALLOWED_PORTS = new Set([465, 587, 2525]);
+
+// IMAP всегда по implicit TLS на 993 у всех провайдеров из compatibility-матрицы
+// (Gmail, Yandex, Maildoso, ZapMail). STARTTLS-порт 143 не поддерживаем осознанно —
+// он бы расширил allowlist без реальной необходимости.
+const IMAP_ALLOWED_PORTS = new Set([993]);
 
 function isPrivateV4(ip: string): boolean {
   const parts = ip.split('.').map((n) => Number(n));
@@ -56,9 +64,8 @@ export interface TargetCheck {
   reason?: 'port' | 'host' | 'dns';
 }
 
-/** Проверяет, что SMTP-цель безопасна (публичный адрес + стандартный порт). */
-export async function assertSafeSmtpTarget(host: string, port: number): Promise<TargetCheck> {
-  if (!ALLOWED_PORTS.has(port)) return { ok: false, reason: 'port' };
+async function assertSafeTarget(host: string, port: number, allowedPorts: Set<number>): Promise<TargetCheck> {
+  if (!allowedPorts.has(port)) return { ok: false, reason: 'port' };
   const h = (host ?? '').trim().toLowerCase();
   if (!h) return { ok: false, reason: 'host' };
 
@@ -77,4 +84,14 @@ export async function assertSafeSmtpTarget(host: string, port: number): Promise<
     if (isDisallowedAddress(a.address)) return { ok: false, reason: 'host' };
   }
   return { ok: true };
+}
+
+/** Проверяет, что SMTP-цель безопасна (публичный адрес + стандартный submission-порт). */
+export async function assertSafeSmtpTarget(host: string, port: number): Promise<TargetCheck> {
+  return assertSafeTarget(host, port, SMTP_ALLOWED_PORTS);
+}
+
+/** Проверяет, что IMAP-цель безопасна (публичный адрес + порт 993). */
+export async function assertSafeImapTarget(host: string, port: number): Promise<TargetCheck> {
+  return assertSafeTarget(host, port, IMAP_ALLOWED_PORTS);
 }

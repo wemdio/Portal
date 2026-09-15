@@ -20,8 +20,18 @@ export interface PublicInstantlyAccount {
 
 export interface InstantlyRequestOptions {
   accountId?: string | null;
-  /** LIST /emails recovery reads share a smaller budget, reserving room for fresh replies. */
-  requestPriority?: 'fresh' | 'recovery';
+  /**
+   * LIST /emails admission lane. 'fresh' (default) — discovery/qualification
+   * and interactive reads; 'recovery' — ownership retries (own 6/60s share);
+   * 'bulk' — background exports/reports (own 6/60s share, never starves
+   * fresh reply collection). All lanes share the common 18/60s cap.
+   */
+  requestPriority?: 'fresh' | 'recovery' | 'bulk';
+  /**
+   * Logical consumer label for hourly usage counters (instantly_api_usage_hourly):
+   * discovery, qualification, ownership, others, client_feed, export, …
+   */
+  consumer?: string;
   /** Optional timeout for each fetch attempt; defaults to 90 seconds. */
   timeoutMs?: number;
   /**

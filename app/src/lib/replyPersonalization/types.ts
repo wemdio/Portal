@@ -9,7 +9,6 @@ export interface KnowledgeBase {
   productFacts: string;
   toneNotes: string;
   exampleCase: string;
-  instantlyAccountId: string;
   updatedAt: string;
 }
 

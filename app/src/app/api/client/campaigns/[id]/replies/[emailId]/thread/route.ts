@@ -96,7 +96,7 @@ export async function GET(
     if (leadEmail) {
       const list = await listEmails(
         { campaign_id: campaignId, lead: leadEmail, limit: THREAD_FETCH_LIMIT },
-        instantlyRequestOptions,
+        { ...instantlyRequestOptions, consumer: 'client_thread' },
       );
       const items = list.items ?? [];
       if (items.length > 0) {

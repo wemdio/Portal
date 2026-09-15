@@ -56,11 +56,31 @@ export async function getProjectCampaignIds(projectId: string): Promise<string[]
   return [...ids];
 }
 
+/**
+ * Instantly-аккаунт каждой кампании — из каталога, который синк заполняет по
+ * всем аккаунтам. Кампания, ещё не попавшая в каталог, считается основной.
+ */
+export async function getCampaignAccountIds(campaignIds: string[]): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  if (!campaignIds.length) return result;
+  const { admin } = requireClients();
+  const { data, error } = await admin
+    .from('instantly_campaign_catalog')
+    .select('id, instantly_account_id')
+    .in('id', campaignIds);
+  if (error) throw new Error(`campaign catalog query failed: ${error.message}`);
+  for (const row of data ?? []) {
+    result.set(row.id as string, (row.instantly_account_id as string) || 'main');
+  }
+  for (const id of campaignIds) if (!result.has(id)) result.set(id, 'main');
+  return result;
+}
+
 export async function getKnowledgeBase(projectId: string): Promise<KnowledgeBase | null> {
   const { admin } = requireClients();
   const { data, error } = await admin
     .from('reply_personalization_kb')
-    .select('project_id, brief, product_facts, tone_notes, example_case, instantly_account_id, updated_at')
+    .select('project_id, brief, product_facts, tone_notes, example_case, updated_at')
     .eq('project_id', projectId)
     .maybeSingle();
   if (error) throw new Error(`kb query failed: ${error.message}`);
@@ -71,14 +91,13 @@ export async function getKnowledgeBase(projectId: string): Promise<KnowledgeBase
     productFacts: (data.product_facts as string) ?? '',
     toneNotes: (data.tone_notes as string) ?? '',
     exampleCase: (data.example_case as string) ?? '',
-    instantlyAccountId: (data.instantly_account_id as string) ?? 'main',
     updatedAt: data.updated_at as string,
   };
 }
 
 export async function upsertKnowledgeBase(
   projectId: string,
-  patch: Pick<KnowledgeBase, 'brief' | 'productFacts' | 'toneNotes' | 'exampleCase' | 'instantlyAccountId'>,
+  patch: Pick<KnowledgeBase, 'brief' | 'productFacts' | 'toneNotes' | 'exampleCase'>,
   userId: string,
 ): Promise<void> {
   const { admin } = requireClients();
@@ -89,7 +108,6 @@ export async function upsertKnowledgeBase(
       product_facts: patch.productFacts,
       tone_notes: patch.toneNotes,
       example_case: patch.exampleCase,
-      instantly_account_id: patch.instantlyAccountId || 'main',
       updated_by: userId,
       updated_at: new Date().toISOString(),
     },
@@ -118,7 +136,7 @@ function mapQualificationRow(row: Record<string, unknown>): QualificationRow {
 const QUALIFICATION_COLUMNS =
   'id, campaign_id, campaign_name, lead_email, company_name, thread_id, reply_subject, reply_body, last_outbound_preview, instantly_email_id, eaccount, reply_timestamp';
 
-/** Read-only: уже синхронизированные квалификатором ответы (только account 'main', см. §«Отклонения»). */
+/** Read-only: уже синхронизированные квалификатором ответы (кампании проектов квалификатор читает только с 'main'). */
 export async function listSyncedQualifications(campaignIds: string[], limit = 50): Promise<QualificationRow[]> {
   if (!campaignIds.length) return [];
   const { instantly } = requireClients();

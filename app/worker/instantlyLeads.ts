@@ -1,4 +1,5 @@
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import {
   discoverQualificationReplies,
   drainQualificationReplies,
@@ -43,6 +44,39 @@ const OTHERS_STARTUP_DELAY_MS = envMs('INSTANTLY_OTHERS_STARTUP_DELAY_MS', 90_00
 const WORKER_ID = `instantly-leads-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 
+// ── Адаптивный интервал discovery (аудит API 14.09.2026) ─────────────────────
+// Треть бюджета LIST /emails уходила на «пустые» head-чтения каждые 30с, когда
+// новых ответов нет. Вместо фиксированного тика: интервал растёт при простое
+// (30с → 60с → 120с → 180с) и мгновенно сбрасывается при (а) новых staged
+// ответах, (б) reply-событии из Instantly webhooks (instantly_activity_events,
+// push-события квоту не тратят), (в) ошибке цикла.
+// Худший случай при тихо умерших webhook'ах: ответ подхватится за ≤3 мин вместо
+// ≤30с — компромисс согласован с задачей «перестать спрашивать каждые 30с».
+// Выключатель INSTANTLY_DISCOVERY_ADAPTIVE=0 возвращает фиксированный тик.
+const DISCOVERY_ADAPTIVE_ENABLED = !['0', 'false', 'no', 'off'].includes(
+  (process.env.INSTANTLY_DISCOVERY_ADAPTIVE ?? '').toLowerCase(),
+);
+const DISCOVERY_MAX_IDLE_INTERVAL_MS = envMs('INSTANTLY_DISCOVERY_MAX_IDLE_MS', 180_000, 30_000);
+const DISCOVERY_IDLE_MULTIPLIERS = [1, 2, 4, 6] as const;
+
+function discoveryIdleIntervalMs(idleStreak: number): number {
+  const multiplier = DISCOVERY_IDLE_MULTIPLIERS[Math.min(idleStreak, DISCOVERY_IDLE_MULTIPLIERS.length - 1)];
+  return Math.min(DISCOVERY_MAX_IDLE_INTERVAL_MS, POLL_INTERVAL_MS * multiplier);
+}
+
+/** Reply-событие из webhook-журнала позже sinceIso. Ошибка проверки = «была
+ *  активность»: безопаснее не разгонять интервал на слепом предположении. */
+async function hasRepliedActivitySince(sinceIso: string): Promise<boolean> {
+  if (!supabaseAdmin) return true;
+  const { count, error } = await supabaseAdmin
+    .from('instantly_activity_events')
+    .select('id', { count: 'exact', head: true })
+    .eq('event_type', 'replied')
+    .gt('occurred_at', sinceIso);
+  if (error) return true;
+  return (count ?? 0) > 0;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -50,14 +84,35 @@ function sleep(ms: number): Promise<void> {
 // Only durable discovery runs here. Slow AI and recovery cannot hold the next
 // page hostage, and collection continues while the AI account is unavailable.
 async function pollLoop(shouldStop: () => boolean): Promise<void> {
+  let idleStreak = 0;
+  let activitySinceIso = new Date().toISOString();
   while (!shouldStop()) {
+    let staged = 0;
+    let errored = false;
     try {
-      const count = await discoverQualificationReplies();
-      if (count > 0) log('info', `Staged ${count} reply(s) in durable intake`);
+      staged = await discoverQualificationReplies();
+      if (staged > 0) log('info', `Staged ${staged} reply(s) in durable intake`);
     } catch (err) {
+      errored = true;
       log('error', 'Poll cycle failed', err);
     }
-    await sleep(POLL_INTERVAL_MS);
+    let replyActivity = true;
+    try {
+      replyActivity = await hasRepliedActivitySince(activitySinceIso);
+    } catch {
+      replyActivity = true;
+    }
+    activitySinceIso = new Date().toISOString();
+    if (staged > 0 || errored || replyActivity) {
+      idleStreak = 0;
+    } else if (DISCOVERY_ADAPTIVE_ENABLED) {
+      idleStreak += 1;
+    }
+    const intervalMs = DISCOVERY_ADAPTIVE_ENABLED ? discoveryIdleIntervalMs(idleStreak) : POLL_INTERVAL_MS;
+    if (intervalMs !== POLL_INTERVAL_MS) {
+      log('info', `No new replies — discovery idle interval stretched to ${Math.round(intervalMs / 1000)}s`);
+    }
+    await sleep(intervalMs);
   }
 }
 
