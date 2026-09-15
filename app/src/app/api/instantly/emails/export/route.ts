@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { fetchUserRole, jsonError } from '@/lib/instantly/apiRouteHelper';
 import * as instantly from '@/lib/instantly/client';
+import { readInstantlyEmailReadDeferral } from '@/lib/instantly/emailReadDeferral';
 import { buildEmailsExportRows } from '@/lib/instantly/emailsExport';
 import type { Email } from '@/lib/instantly/types';
 
@@ -11,6 +12,14 @@ export const maxDuration = 300;
 
 const PAGE_RETRIES = 4;
 const RETRY_BASE_DELAY_MS = 3000;
+// Потолок страниц на экспорт (60 = 6000 писем). Без него большая кампания
+// выкачивала сотни страниц и занимала свежий бюджет чтений на десятки минут;
+// bulk-полоса (6/мин) честно не успевает больше за таймаут роута.
+const MAX_PAGES = 60;
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 async function fetchEmailPageWithRetry(
   campaignId: string,
@@ -23,12 +32,21 @@ async function fetchEmailPageWithRetry(
         campaign_id: campaignId,
         limit: 100,
         starting_after: startingAfter,
+      }, {
+        // Фоновая выгрузка: отдельная bulk-полоса бюджета чтений — не конкурирует
+        // со сбором новых ответов. Отказ полосы (retry-after) честно ждём, а не
+        // долбим фиксированным 3с-бэкоффом мимо окна выдачи.
+        requestPriority: 'bulk',
+        consumer: 'export',
       });
     } catch (err) {
       lastErr = err instanceof Error ? err : new Error(String(err));
       if (attempt < PAGE_RETRIES - 1) {
-        const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
-        await new Promise((r) => setTimeout(r, delay));
+        const deferral = readInstantlyEmailReadDeferral(err);
+        const delay = deferral
+          ? Math.min(120_000, Math.max(RETRY_BASE_DELAY_MS, deferral.retryAfterMs))
+          : RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
+        await sleep(delay);
       }
     }
   }
@@ -60,6 +78,12 @@ export async function GET(req: NextRequest) {
       const page = await fetchEmailPageWithRetry(campaignId, startingAfter);
       allEmails.push(...(page.items ?? []));
       startingAfter = page.next_starting_after ?? undefined;
+      if (allEmails.length >= MAX_PAGES * 100) {
+        return jsonError(
+          `Слишком много писем для выгрузки (${allEmails.length}+). Обратитесь к администратору — экспорт ограничен ${MAX_PAGES * 100} письмами на кампанию.`,
+          413,
+        );
+      }
     } while (startingAfter);
 
     const rows = buildEmailsExportRows(allEmails);

@@ -650,6 +650,14 @@ def _leads_retry_delay(attempt: int, *, status_code: int | None) -> float:
     return base
 
 
+# ── 404-томбстоуны и каталог из БД (аудит Instantly API 14.09.2026) ──────────
+# Кампании, на которые провайдер отвечает 404 (удалённые/чужие связки), не
+# дёргаем каждый час: после 404 кампания спит LEADS_404_SKIP_SEC. Любой другой
+# ответ (в т.ч. ошибка) — томбстоун снимается. Таблица instantly_leads_sync_404
+# может отсутствовать до миграции: тогда бот работает как раньше (без кэша).
+LEADS_404_SKIP_SEC = 24 * 3600
+
+
 async def _fetch_leads_page(
     client: httpx.AsyncClient,
     campaign_id: str,
@@ -834,19 +842,55 @@ async def _sync_single_campaign(
                 f"[leads-sync] campaign {campaign_id} — {campaign_leads} leads "
                 f"for {len(user_ids)} user(s)"
             )
-        return campaign_leads, 0
+        return campaign_leads, 0, None
 
     except Exception as e:
+        status_code = (
+            e.response.status_code
+            if isinstance(e, httpx.HTTPStatusError) and e.response is not None
+            else None
+        )
         print(
             f"[leads-sync] ERROR campaign {campaign_id}: "
             f"{_format_leads_sync_error(e)}"
         )
-        return 0, 1
+        return 0, 1, ("404" if status_code == 404 else None)
     finally:
         progress["done"] += 1
         done, total = progress["done"], progress["total"]
         if done % 5 == 0 or done == total:
             print(f"[leads-sync] progress: {done}/{total} campaigns completed")
+
+
+async def _load_leads_404_skips(conn) -> set[str]:
+    """Campaign ids with a recent provider 404. Missing table -> empty set."""
+    try:
+        rows = await conn.fetch(
+            "SELECT resource_id FROM public.instantly_leads_sync_404 "
+            "WHERE last_404_at > now() - make_interval(secs => $1)",
+            LEADS_404_SKIP_SEC,
+        )
+        return {str(r["resource_id"]) for r in rows}
+    except asyncpg.UndefinedTableError:
+        return set()
+
+
+async def _mark_leads_404(conn, campaign_id: str) -> None:
+    await conn.execute(
+        "INSERT INTO public.instantly_leads_sync_404 "
+        "(resource_id, account_id, first_404_at, last_404_at, hits) "
+        "VALUES ($1, 'main', now(), now(), 1) "
+        "ON CONFLICT (resource_id) DO UPDATE SET "
+        "last_404_at = now(), hits = public.instantly_leads_sync_404.hits + 1",
+        campaign_id,
+    )
+
+
+async def _clear_leads_404(conn, campaign_id: str) -> None:
+    await conn.execute(
+        "DELETE FROM public.instantly_leads_sync_404 WHERE resource_id = $1",
+        campaign_id,
+    )
 
 
 async def sync_client_leads() -> dict[str, int]:
@@ -874,19 +918,47 @@ async def sync_client_leads() -> dict[str, int]:
     try:
         async with pool.acquire() as conn:
             access_rows = await conn.fetch(
-                "SELECT client_user_id, resource_id FROM public.client_instantly_access "
+                "SELECT client_user_id, resource_id, instantly_account_id "
+                "FROM public.client_instantly_access "
                 "WHERE resource_type = 'campaign'"
             )
+            skipped_404 = await _load_leads_404_skips(conn)
 
         if not access_rows:
             print("[leads-sync] no access rows — skipping")
             return {"campaigns": 0, "leads": 0}
 
         campaign_users: dict[str, list[str]] = {}
+        skipped_foreign = 0
         for row in access_rows:
+            account_id = (row["instantly_account_id"] or "main").strip() or "main"
+            # Бот ОДНО-АККАУНТНыЙ (ключ main): кампании доп-аккаунтов этим ключом
+            # дают 404 каждый час — бессмысленная трата квоты (~888 запр/сутки).
+            if account_id != "main":
+                skipped_foreign += 1
+                continue
             cid = str(row["resource_id"])
             uid = str(row["client_user_id"])
             campaign_users.setdefault(cid, []).append(uid)
+
+        tombstoned = [cid for cid in campaign_users if cid in skipped_404]
+        for cid in tombstoned:
+            campaign_users.pop(cid, None)
+
+        if skipped_foreign:
+            print(
+                f"[leads-sync] skipped {skipped_foreign} campaign(s) of non-main "
+                f"instantly accounts (bot is main-only)"
+            )
+        if tombstoned:
+            print(
+                f"[leads-sync] skipped {len(tombstoned)} campaign(s) with recent "
+                f"provider 404 (tombstone, retry in <=24h)"
+            )
+
+        if not campaign_users:
+            print("[leads-sync] nothing to sync after account/404 filters")
+            return {"campaigns": 0, "leads": 0}
 
         print(
             f"[leads-sync] {len(campaign_users)} campaigns for "
@@ -910,21 +982,32 @@ async def sync_client_leads() -> dict[str, int]:
 
         async with httpx.AsyncClient(timeout=_timeout, limits=_limits) as http_client:
 
-            async def _bounded(cid: str, uids: list[str]) -> tuple[int, int]:
+            async def _bounded(cid: str, uids: list[str]) -> tuple[int, int, str | None]:
                 async with semaphore:
                     return await _sync_single_campaign(
                         pool, http_client, cid, uids, progress, rate_limiter,
                     )
 
+            campaign_ids = list(campaign_users.keys())
             results = await asyncio.gather(
-                *[_bounded(cid, uids) for cid, uids in campaign_users.items()],
+                *[_bounded(cid, campaign_users[cid]) for cid in campaign_ids],
             )
 
         total_leads = 0
         campaigns_errors = 0
-        for leads, errors in results:
+        for cid, (leads, errors, error_code) in zip(campaign_ids, results):
             total_leads += leads
             campaigns_errors += errors
+            # Томбстоуны 404: успешный/не-404 ответ реанимирует кампанию,
+            # 404 — усыпляет на LEADS_404_SKIP_SEC. Ошибка кэша не валит синк.
+            try:
+                async with pool.acquire() as conn:
+                    if error_code == "404":
+                        await _mark_leads_404(conn, cid)
+                    elif errors == 0:
+                        await _clear_leads_404(conn, cid)
+            except Exception as cache_err:
+                print(f"[leads-sync] 404-cache update failed for {cid[:12]}: {cache_err!r}")
 
         campaigns_done = len(results)
         print(
@@ -1012,6 +1095,60 @@ async def _check_instantly_api() -> bool:
 
 # ── Sync orchestration ────────────────────────────────────────────────────────
 
+# Каталог сначала из БД: его каждый час полностью синкает мультиаккаунтный Portal-роут
+# (в конце прошлого цикла) — двойное чтение /campaigns стоило ~30 запросов/час
+# (аудит 14.09.2026). БД пуста/протухла/недоступна — живой фетч как раньше.
+CATALOG_DB_FRESH_SEC = 2 * 3600
+
+
+async def _load_campaigns_for_sync() -> tuple[list[dict], int, bool]:
+    """Returns (campaigns, api_errors, from_db)."""
+    rows: list = []
+    try:
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+        try:
+            rows = await conn.fetch(
+                "SELECT id, name FROM public.instantly_campaign_catalog "
+                "WHERE instantly_account_id = 'main' "
+                "AND synced_at > now() - make_interval(secs => $1)",
+                CATALOG_DB_FRESH_SEC,
+            )
+        finally:
+            await conn.close()
+    except Exception as e:
+        print(f"[sync] DB catalog read failed ({e!r}) — live /campaigns fetch")
+    if rows:
+        return (
+            [{"id": r["id"], "name": r["name"] or ""} for r in rows],
+            0,
+            True,
+        )
+    campaigns, api_errors = await fetch_all_instantly_campaigns()
+    return campaigns, api_errors, False
+
+
+async def _catalog_db_stats(fetched: int) -> dict[str, int]:
+    """Stats-заглушка для пути «каталог из БД»: upsert здесь не нужен
+    (его сделал Portal-роут), дельт added/removed = 0 — сообщения TG о изменениях
+    каталога в этом режиме не приходят."""
+    async def _do() -> dict[str, int]:
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+        try:
+            count = await _db_count(conn)
+            return {
+                "before": count,
+                "after": count,
+                "fetched": fetched,
+                "added": 0,
+                "removed": 0,
+                "updated": 0,
+            }
+        finally:
+            await conn.close()
+
+    return await _retry(_do, base_delay=2.0)  # type: ignore[return-value]
+
+
 async def run_sync(manual: bool = False) -> dict:
     """Run full sync and return result dict."""
     loop = asyncio.get_event_loop()
@@ -1020,10 +1157,17 @@ async def run_sync(manual: bool = False) -> dict:
 
     try:
         print(f"[sync] Starting sync at {ts}…")
-        campaigns, api_errors = await fetch_all_instantly_campaigns()
-        print(f"[sync] Fetched {len(campaigns)} campaigns from Instantly (api_errors={api_errors})")
+        campaigns, api_errors, catalog_from_db = await _load_campaigns_for_sync()
+        if catalog_from_db:
+            print(
+                f"[sync] Loaded {len(campaigns)} campaigns from DB catalog "
+                f"(synced by Portal route — no /campaigns calls this cycle)"
+            )
+            stats = await _catalog_db_stats(len(campaigns))
+        else:
+            print(f"[sync] Fetched {len(campaigns)} campaigns from Instantly (api_errors={api_errors})")
 
-        stats = await sync_to_db(campaigns)
+            stats = await sync_to_db(campaigns)
 
         analytics_count = 0
         try:

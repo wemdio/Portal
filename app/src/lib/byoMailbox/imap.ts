@@ -5,6 +5,8 @@ import { simpleParser } from 'mailparser';
 import { unsealMailboxSecret } from './credentials';
 import { getAccessTokenFromRefresh } from './googleOAuth';
 import { getYandexAccessTokenFromRefresh } from './yandexOAuth';
+import { assertSafeImapTarget } from './netGuard';
+import { logError } from '@/lib/loggerServer';
 
 /**
  * Чтение новых писем (ответов) по IMAP с подключённого ящика клиента.
@@ -53,6 +55,21 @@ function imapTarget(mb: ReplyMailboxRow): { host: string; port: number } | null 
 export async function fetchNewReplies(mb: ReplyMailboxRow): Promise<FetchResult | null> {
   const target = imapTarget(mb);
   if (!target) return null;
+
+  // SSRF-guard: для oauth-ящиков host захардкожен (безопасен), но для
+  // custom/Maildoso он идёт из client-supplied imap_host в БД. Проверяем и
+  // здесь, не только при подключении ящика в mailboxes/route.ts — иначе
+  // legacy-строки, сохранённые до фикса, и DNS rebinding (публичный IP на
+  // верификации → приватный на момент реального опроса) остаются дырой.
+  const guard = await assertSafeImapTarget(target.host, target.port);
+  if (!guard.ok) {
+    await logError('byoMailbox.imap.target_blocked', new Error(`blocked: ${guard.reason ?? 'unknown'}`), {
+      mailboxId: mb.id,
+      host: target.host,
+      port: target.port,
+    });
+    return null;
+  }
 
   const secret = unsealMailboxSecret(mb.secret_encrypted);
   let auth: { user: string; pass?: string; accessToken?: string };

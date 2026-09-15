@@ -29,6 +29,7 @@ import { acquireInstantlyToken } from './rateLimiter';
 import { InstantlyApiError } from './errors';
 import { parseAccountCampaignMappingItems } from './accountCampaignMappings';
 import { deferInstantlyEmailReads, instantlyEmailRetryAfterMs, reserveInstantlyEmailRead } from './emailReadBudget';
+import { recordInstantlyApiUsage, type InstantlyUsageStatus } from './usageCounters';
 export { InstantlyApiError } from './errors';
 export { InstantlyEmailReadDeferredError } from './emailReadBudget';
 
@@ -40,6 +41,20 @@ function getApiKey(options?: InstantlyRequestOptions): string {
 
 const RATE_LIMIT_RETRIES = 3;
 const RATE_LIMIT_BASE_DELAY_MS = 4000;
+
+/**
+ * Counts one provider attempt outcome (fire-and-forget). The endpoint is
+ * normalized so per-id paths collapse into one row family per verb.
+ */
+function countAttempt(path: string, requestOptions: InstantlyRequestOptions | undefined, status: InstantlyUsageStatus): void {
+  const endpoint = path.replace(/\/[0-9a-f-]{16,}/gi, '/{id}').replace(/\/[^/?#]{8,}@[^\s/?#]+/gi, '/{email}');
+  recordInstantlyApiUsage({
+    accountId: resolveInstantlyAccountId(requestOptions?.accountId),
+    endpoint,
+    consumer: requestOptions?.consumer ?? 'unspecified',
+    status,
+  });
+}
 
 async function request<T>(
   path: string,
@@ -71,9 +86,12 @@ async function request<T>(
   // wait cannot be added on top of the caller's ownership-recovery budget.
   const emailReadDeadline = isEmailList ? Date.now() + timeoutMs : undefined;
   for (let attempt = 0; attempt <= rateLimitRetries; attempt++) {
+    // 'pending' survives into the catch only for transport/timeout failures;
+    // every explicit outcome below overwrites it before throwing/returning.
+    let attemptStatus: InstantlyUsageStatus | 'pending' = 'pending';
     if (isEmailList) {
       await reserveInstantlyEmailRead(resolveInstantlyAccountId(requestOptions?.accountId),
-        requestOptions?.requestPriority ?? 'fresh', emailReadDeadline);
+        requestOptions?.requestPriority ?? 'fresh', emailReadDeadline, requestOptions?.consumer ?? 'unspecified');
     }
     const headers: HeadersInit = { Authorization: `Bearer ${apiKey}` };
     const controller = new AbortController();
@@ -101,6 +119,7 @@ async function request<T>(
       if (!timeoutIncludesBody) clearTimeout(timeoutId);
 
       if (res.status === 429 && isEmailList) {
+        attemptStatus = 'http_429';
         const retryAfterMs = instantlyEmailRetryAfterMs(res.headers?.get?.('retry-after'));
         // No eager retry, and no need to read a potentially hanging 429 body.
         // Cancel the response transport, then persist the workspace cooldown.
@@ -119,6 +138,7 @@ async function request<T>(
       }
 
       if (!res.ok) {
+        attemptStatus = res.status === 429 ? 'http_429' : 'http_error';
         const raw = await res.text().catch(() => '');
         // Do not swallow an aborted error-body read and turn a timeout into
         // a permanent HTTP/data failure in the durable recovery path.
@@ -128,11 +148,23 @@ async function request<T>(
         throw new InstantlyApiError(`Instantly API ${res.status}: ${detail}`, res.status, isHtml ? undefined : raw);
       }
 
-      if (res.status === 204) return undefined as T;
+      if (res.status === 204) {
+        attemptStatus = 'ok';
+        return undefined as T;
+      }
       const body = (await res.json()) as T;
       if (timeoutIncludesBody) controller.signal.throwIfAborted();
+      attemptStatus = 'ok';
       return body;
+    } catch (error) {
+      if (attemptStatus === 'pending') {
+        attemptStatus = error instanceof InstantlyApiError ? 'http_error' : 'network_error';
+      }
+      throw error;
     } finally {
+      if (attemptStatus !== 'pending') {
+        countAttempt(path, requestOptions, attemptStatus);
+      }
       // This is idempotent for legacy callers whose timer was cleared at
       // headers, and covers success, refusal, parse failure and network abort.
       clearTimeout(timeoutId);

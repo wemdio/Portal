@@ -11,6 +11,16 @@ function applyVars(tpl: string, vars: Record<string, string>): string {
   return tpl.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, k: string) => vars[k] ?? '');
 }
 
+// Защита API от неограниченного массива recipients (случайная вставка огромного
+// CSV или злонамеренный запрос) — не отражает реальный объём пилотной рассылки,
+// просто верхняя граница одной постановки в очередь.
+const MAX_CAMPAIGN_RECIPIENTS = 2000;
+
+// Обычная syntax-валидация (не полный RFC 5322): один @, непустые local/domain,
+// точка в домене, без пробелов. `!email.includes('@')` из старого кода пропускал
+// откровенный мусор вроде "not-an-email@" или "@@" в очередь на отправку.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 /** GET — сводка по кампаниям (для статистики на странице). */
 export async function GET(req: NextRequest) {
   const res = await requireByoMailboxClient(req);
@@ -31,7 +41,7 @@ export async function GET(req: NextRequest) {
     const c = (agg[key] ??= { pending: 0, sent: 0, failed: 0, total: 0 });
     c.total++;
     if (r.status === 'sent') c.sent++;
-    else if (r.status === 'pending') c.pending++;
+    else if (r.status === 'pending' || r.status === 'sending') c.pending++;
     else if (r.status === 'failed') c.failed++;
   }
   const campaigns = Object.entries(agg).map(([name, c]) => ({ name, ...c }));
@@ -61,6 +71,12 @@ export async function POST(req: NextRequest) {
   if (!subject) return NextResponse.json({ error: 'Укажите тему' }, { status: 400 });
   if (!bodyTpl.trim()) return NextResponse.json({ error: 'Укажите текст письма' }, { status: 400 });
   if (!recipients.length) return NextResponse.json({ error: 'Добавьте получателей' }, { status: 400 });
+  if (recipients.length > MAX_CAMPAIGN_RECIPIENTS) {
+    return NextResponse.json(
+      { error: `Слишком много получателей за один раз (максимум ${MAX_CAMPAIGN_RECIPIENTS}). Разбейте на несколько кампаний.` },
+      { status: 400 },
+    );
+  }
 
   // Ящик принадлежит этому клиенту и подтверждён.
   const { data: mb } = await supabaseAdmin
@@ -76,10 +92,13 @@ export async function POST(req: NextRequest) {
 
   const nowIso = new Date().toISOString();
   const rows: Record<string, unknown>[] = [];
+  const seenEmails = new Set<string>(); // дедуп в рамках одной постановки кампании
   for (const raw of recipients) {
     const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
     const email = String(r.email ?? '').trim().toLowerCase();
-    if (!email || !email.includes('@')) continue;
+    if (!email || !EMAIL_RE.test(email)) continue;
+    if (seenEmails.has(email)) continue;
+    seenEmails.add(email);
     const name = String(r.name ?? '').trim();
     const vars: Record<string, string> = {};
     if (r.vars && typeof r.vars === 'object') {
