@@ -27,6 +27,7 @@ import { createVeJobShutdown } from '@/lib/verticalEngineV2/workerLiveness';
 import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
 import { parseVeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
 import { needsVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceReserve';
+import { recoverVeSourceContacts, hasPendingVeSourceContacts, type VeSourceContactCheckpoint } from '@/lib/verticalEngineV2/sourceContacts';
 
 const schema = z.object({ ok: z.boolean() });
 
@@ -328,7 +329,7 @@ describe('llm rawCall retry', () => {
     const legacyRow = { ...input.rows[0], _email_status: 'ok', _ve_relevance: Object.values(legacy.verdicts)[0] };
     expect(needsVeRelevanceEvidence(legacyRow)).toBe(true);
     const available = jest.fn().mockResolvedValue({ status: 'ok', text: description, url: 'https://factory.test/', reason: 'identity_verified_website' });
-    fetchMock.mockReset().mockResolvedValueOnce(classification).mockResolvedValueOnce(confirmation);
+    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'relevant', reason: 'Makes equipment', evidence_ids: [0] }] })).mockResolvedValueOnce(confirmation);
     const upgraded = await findIrrelevantRows({ ...input, rows: [legacyRow], checkpoint: legacy, fetchEvidence: available });
     expect(upgraded.decisions.get(0)?.status).toBe('relevant');
     expect(available).toHaveBeenCalledTimes(1);
@@ -337,6 +338,21 @@ describe('llm rawCall retry', () => {
     expect(available).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(jest.getTimerCount()).toBe(0);
+    // Numbered excerpts are selected on the company's own bounded evidence;
+    // the independent reviewer receives the exact text, never a model quote.
+    const secondRequest = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(secondRequest.messages[1].content).toContain('"excerpts"');
+    const reviewRequest = JSON.parse(fetchMock.mock.calls[1][1].body);
+    expect(reviewRequest.messages[1].content).toContain(description);
+    expect(reviewRequest.messages[1].content).not.toContain('"status":"relevant"');
+    const sameBrand = { ...input, rows: ['Тула', 'Омск'].map((address) => ({ company: 'Домком', address })) };
+    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [0, 1].map((i) => ({ i, status: 'needs_review', reason: 'Need own-site evidence', evidence: [] })) }));
+    const noSite = jest.fn().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'not_confirmed' });
+    const separateCities = await findIrrelevantRows({ ...sameBrand, fetchEvidence: noSite });
+    expect(Object.keys(separateCities.checkpoint.website_evidence)).toHaveLength(2);
+    expect(noSite).toHaveBeenCalledTimes(2);
+    await findIrrelevantRows({ ...sameBrand, checkpoint: separateCities.checkpoint, fetchEvidence: noSite });
+    expect(noSite).toHaveBeenCalledTimes(2);
   });
 
   it('does not start website HTTP after a late DNS result, and aborts an active extraction', async () => {
@@ -360,6 +376,45 @@ describe('llm rawCall retry', () => {
     await jest.advanceTimersByTimeAsync(0);
     expect(failure).toEqual(expect.objectContaining({ name: 'AbortError' }));
     expect(jest.mocked(fetchAndExtract).mock.calls[0][1]?.signal?.aborted).toBe(true);
+    expect(jest.getTimerCount()).toBe(0);
+
+    // Name-only search is discovery, not identity proof. Brand AND original
+    // geography must match on the site's own page; directory snippets cannot.
+    for (const [brand, city, expected] of [['Домком', 'Тула', 'ok'], ['Другая компания', 'Тула', 'unavailable'], ['Домком', 'Омск', 'unavailable']]) {
+      const found = await fetchVeRelevanceEvidence('mailto:wrong@elsewhere.test', {
+        companyName: 'ООО Домком', companyAddress: 'Тула',
+        search: async () => [{ link: 'https://hh.ru/employer/1' }, { link: 'https://domkom.test/' }],
+        fetchPage: async (url) => {
+          if (new URL(url).hostname !== 'domkom.test') throw new Error('Unexpected directory fetch');
+          return parseVeEvidencePage(Buffer.from(`<title>${brand} — агентство недвижимости</title><main>Наш адрес: ${city}. Оказываем услуги по продаже недвижимости и подбору жилья покупателям.</main>`), url, 'text/html');
+        },
+      });
+      expect(found.status).toBe(expected);
+      if (expected === 'unavailable') expect(found.text).toBe('');
+    }
+    // Discovery is bounded, resumes without repaying successful siblings, and
+    // provider failure does not erase already completed searches.
+    const sourceRows = Array.from({ length: 18 }, (_, i) => ({ company: `Agency ${i}`, address: 'Тула',
+      website: '', email: '', inn: '', source_detail: 'hh' }));
+    let discoveryState: VeSourceContactCheckpoint | undefined;
+    const findSite = jest.fn(async (_website: string, opts?: { companyName?: string }) => ({
+      status: 'ok' as const, text: 'Verified own business', url: `https://agency-${opts?.companyName?.split(' ')[1]}.test/`, reason: 'discovered_verified_website',
+    }));
+    const save = async (state: VeSourceContactCheckpoint) => { discoveryState = structuredClone(state); };
+    const firstDiscovery = await recoverVeSourceContacts({ rows: sourceRows, fetchEvidence: findSite, save });
+    expect(firstDiscovery.waiting).toBe(true);
+    expect(findSite).toHaveBeenCalledTimes(16);
+    const finalDiscovery = await recoverVeSourceContacts({ rows: sourceRows, state: discoveryState, fetchEvidence: findSite, save });
+    expect(finalDiscovery.waiting).toBe(false);
+    expect(finalDiscovery.rows.every((row) => row.website && !row.email)).toBe(true);
+    expect(hasPendingVeSourceContacts(sourceRows, discoveryState)).toBe(false);
+    await recoverVeSourceContacts({ rows: sourceRows, state: discoveryState, fetchEvidence: findSite, save });
+    expect(findSite).toHaveBeenCalledTimes(18);
+    expect(sourceRows.every((row) => row.website === '')).toBe(true);
+    const partial = jest.fn().mockResolvedValueOnce({ status: 'ok', text: 'Own business', url: 'https://first.test/', reason: 'verified' })
+      .mockResolvedValueOnce({ status: 'error', text: '', url: '', reason: 'billing', provider_error: { kind: 'billing', message: 'Serper billing: no credits' } });
+    await expect(recoverVeSourceContacts({ rows: sourceRows.slice(0, 2), fetchEvidence: partial, save })).rejects.toThrow('Serper billing');
+    expect(Object.keys(discoveryState!.checked)).toHaveLength(1);
     expect(jest.getTimerCount()).toBe(0);
 
     // Real progress includes successful/error IO, but never a still-pending await.

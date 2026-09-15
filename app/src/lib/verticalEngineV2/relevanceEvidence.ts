@@ -5,7 +5,7 @@ import { assertPublicWebsite } from '@/lib/clientDemo/personalize';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
 import type { SerperOrganicItem } from '@/lib/search/serperClient';
-import { normalizeVeCompanyInn } from './collectionIdentity';
+import { normalizeVeCompanyInn, normalizeVeCompanyName } from './collectionIdentity';
 import { parseVeEvidencePage, rankVeEvidenceLinks, selectVeEvidenceText, type VeEvidencePage } from './relevancePage';
 import { searchVeRelevanceWebsites, veSearchProviderFailure, VE_RELEVANCE_SEARCH_OPERATION_TIMEOUT_MS, type VeSearchProviderFailure } from './relevanceSearch';
 
@@ -20,6 +20,8 @@ export interface VeRelevanceEvidence {
 export interface VeRelevanceEvidenceOptions {
   signal?: AbortSignal;
   companyInn?: string;
+  companyName?: string;
+  companyAddress?: string;
   focus?: string;
   /** Trusted offline adapters; never selected from user/source data. */
   fetchText?: (url: string) => Promise<string>;
@@ -52,7 +54,7 @@ function allowedUrl(value: string): URL | null {
   }
 }
 
-function websiteCandidates(raw: string): URL[] {
+export function veOfficialWebsiteCandidates(raw: string): URL[] {
   const candidates = new Map<string, URL>();
   // A multi-value cell may contain emails, labels and several websites. Never
   // extract the domain from an email or repair a URL containing credentials.
@@ -68,7 +70,21 @@ function websiteCandidates(raw: string): URL[] {
 }
 
 function siteHost(url: URL): string { return url.hostname.replace(/^www\./, ''); }
-const DIRECTORY_HOST = /(?:^|\.)(?:rusprofile\.ru|list-org\.com|saby\.ru|sbis\.ru|spark-interfax\.ru|companium\.ru|checko\.ru|zachestnyibiznes\.ru|egrul\.nalog\.ru|2gis\.ru|yandex\.ru|google\.com|vk\.com|ok\.ru|prodoctorov\.ru|zoon\.ru|companies\.rbc\.ru|check\.tochka\.com|e-ecolog\.ru|xfirm\.ru|tbank\.ru|ruspeach\.com)$/i;
+const DIRECTORY_HOST = /(?:^|\.)(?:rusprofile\.ru|list-org\.com|saby\.ru|sbis\.ru|spark-interfax\.ru|companium\.ru|checko\.ru|zachestnyibiznes\.ru|egrul\.nalog\.ru|2gis\.ru|yandex\.ru|google\.com|vk\.com|ok\.ru|hh\.ru|headhunter\.ru|superjob\.ru|rabota\.ru|t\.me|instagram\.com|facebook\.com|prodoctorov\.ru|zoon\.ru|companies\.rbc\.ru|check\.tochka\.com|e-ecolog\.ru|xfirm\.ru|tbank\.ru|ruspeach\.com)$/i;
+
+/** No-INN discovery needs the complete brand in the site's own title AND a
+ * geographic clue from the original source. Search snippets cannot verify it. */
+function discoveredNameMatches(pages: VeEvidencePage[], name: string, address: string): boolean {
+  const brand = normalizeVeCompanyName(name);
+  const distinctive = brand.split(' ').filter((word) => word.length >= 4
+    && !/^(агентство|недвижимости|компания|группа|компаний|центр|риэлтор|риелтор|сервис|услуги)$/.test(word));
+  const geo = address.toLowerCase().match(/[\p{L}]{4,}/gu)?.filter((word) =>
+    !/^(россия|область|район|город|улица|проспект|республика|край|russia|region)$/.test(word)) ?? [];
+  const titles = pages.map((page) => ` ${normalizeVeCompanyName(page.title)} `).join(' ');
+  const text = normalizeVeCompanyName(pages.map((page) => page.text).join(' '));
+  return distinctive.length > 0 && geo.length > 0 && titles.includes(` ${brand} `)
+    && geo.some((word) => (` ${text} `).includes(` ${word} `));
+}
 function sameOriginLinks(page: VeEvidencePage): VeEvidencePage['links'] {
   return page.links.filter((link) => {
     const url = allowedUrl(link.url);
@@ -177,8 +193,9 @@ export async function fetchVeRelevanceEvidence(
 ): Promise<VeRelevanceEvidence> {
   opts.signal?.throwIfAborted();
   const inn = normalizeVeCompanyInn(opts.companyInn);
-  const supplied = websiteCandidates(website);
-  if (!supplied.length && !inn) return { status: 'unavailable', text: '', url: '', reason: 'missing_or_unsafe_website' };
+  const supplied = veOfficialWebsiteCandidates(website);
+  const nameSearch = Boolean(opts.companyName?.trim() && opts.companyAddress?.trim());
+  if (!supplied.length && !inn && !nameSearch) return { status: 'unavailable', text: '', url: '', reason: 'missing_or_unsafe_website' };
   const pages = new Map<string, Promise<VeEvidencePage | undefined>>();
   let failed = false, timedOut = false, unverified = false, searchAttempted = false;
   let retries = 0;
@@ -216,15 +233,15 @@ export async function fetchVeRelevanceEvidence(
     pages.set(url.href, task);
     return task;
   };
-  const inspect = async (start: URL, initial: VeEvidencePage | undefined, signal: AbortSignal): Promise<VeEvidencePage[]> => {
+  const inspect = async (start: URL, initial: VeEvidencePage | undefined, signal: AbortSignal, discovered = false): Promise<VeEvidencePage[]> => {
     const sitePages: VeEvidencePage[] = initial ? [initial] : [];
     const identity = () => {
       const seen = new Set(sitePages.flatMap((page) => page.inns));
       const owners = new Set(sitePages.flatMap((page) => page.ownerInns ?? []));
-      return !inn ? 'supplied' : [...seen].some((value) => value !== inn) ? 'conflict'
+      return !inn ? (!discovered || discoveredNameMatches(sitePages, opts.companyName ?? '', opts.companyAddress ?? '') ? 'supplied' : 'unknown') : [...seen].some((value) => value !== inn) ? 'conflict'
         : owners.size === 1 && owners.has(inn) ? 'verified' : 'unknown';
     };
-    if (inn && identity() === 'unknown') {
+    if ((inn || discovered) && identity() === 'unknown') {
       const base = new URL(initial?.url ?? start.href);
       // Re-rank newly discovered legal/about links after each page, so a hub
       // can lead to requisites without crawling unrelated navigation.
@@ -274,10 +291,11 @@ export async function fetchVeRelevanceEvidence(
       for (let i = 0; i < candidates.length; i += 1) {
         await inspect(candidates[i], homes[i], signal);
       }
-      if (verified.size || !inn || pages.size >= MAX_PAGE_READS) return;
+      if (verified.size || (!inn && !nameSearch) || pages.size >= MAX_PAGE_READS) return;
       signal.throwIfAborted();
       searchAttempted = true;
-      const query = '"' + inn + '" официальный сайт -site:rusprofile.ru -site:list-org.com -site:checko.ru -site:companium.ru';
+      const query = (inn ? '"' + inn + '"' : '"' + String(opts.companyName).replace(/["\r\n]/g, ' ').slice(0, 160) + '" ' + String(opts.companyAddress).slice(0, 100))
+        + ' официальный сайт -site:rusprofile.ru -site:list-org.com -site:checko.ru -site:companium.ru -site:hh.ru';
       let results: SerperOrganicItem[];
       try {
         results = await withVeDeadline('relevance website search', VE_RELEVANCE_SEARCH_OPERATION_TIMEOUT_MS, signal, async (searchSignal) =>
@@ -298,7 +316,7 @@ export async function fetchVeRelevanceEvidence(
         if (found.length >= MAX_DOMAINS) break;
       }
       for (const url of found) {
-        await inspect(url, await read(url, signal), signal);
+        await inspect(url, await read(url, signal), signal, true);
         if (verified.size) return;
       }
     });

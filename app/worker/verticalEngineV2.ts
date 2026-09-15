@@ -39,7 +39,7 @@ import {
 } from '@/lib/verticalEngineV2/jobRetry';
 import { transitionVeJobFailure } from '@/lib/verticalEngineV2/jobFailureTransition';
 import { createVeJobShutdown, createVeJobWatchdog } from '@/lib/verticalEngineV2/workerLiveness';
-import { claimVeJob, createVeJobPool } from '@/lib/verticalEngineV2/jobQueue';
+import { claimVeJob, createVeJobPool, veJobConcurrency } from '@/lib/verticalEngineV2/jobQueue';
 import { VePreviewCheckpointConflict } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import {
   createGuardedContactDeliveryTick,
@@ -51,8 +51,9 @@ import type { VeJob, VeStage } from '@/lib/verticalEngineV2/types';
 
 const WORKER_ID = `vertical-engine-v2-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
-// Keep a single queue-owning process; two independent projects can make progress.
-const JOB_CONCURRENCY = process.env.VE_JOB_CONCURRENCY === '1' ? 1 : 2;
+// One queue owner preserves per-project writes; independent projects use a
+// bounded pool instead of waiting behind long website/provider calls.
+const JOB_CONCURRENCY = veJobConcurrency(process.env.VE_JOB_CONCURRENCY);
 const OUTREACH_PREPARATION_INTERVAL_MS = 10_000;
 const configuredContactDeliveryInterval = Number(process.env.VE_CONTACT_DELIVERY_INTERVAL_MS);
 const CONTACT_DELIVERY_INTERVAL_MS =

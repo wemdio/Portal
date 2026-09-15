@@ -47,7 +47,10 @@ export function getCollectionQueue(
     ?? started[0]
     ?? eligible.find((base) => activeJobBaseIds.has(base.id))
     ?? eligible[0];
-  return { current, queued: ordered.filter((base) => base.id !== current?.id) };
+  const processing = new Set(started.filter((base) => !blocked.has(base.id)
+    && (activeJobBaseIds.has(base.id) || base.collect_info?.tasks?.some((task) => task.status === 'dispatched')
+      || ['pending', 'processing'].includes(base.collect_info?.construct?.progress?.status ?? ''))).map((base) => base.id));
+  return { current, queued: ordered.filter((base) => base.id !== current?.id && !processing.has(base.id)) };
 }
 
 export function getCollectionProgress(
@@ -61,7 +64,7 @@ export function getCollectionProgress(
   const candidates = collectCount(info?.stats?.rows_total);
   const construct = info?.construct;
   const snapshot = construct?.progress;
-  const phase = info?.company_name_recovery ? 'cleaning_names'
+  const phase = info?.source_contact_discovery ? 'discovering_sites' : info?.company_name_recovery ? 'cleaning_names'
     : info?.saved_email_review_pending ? 'reviewing_emails'
     : info?.relevance_review_requested || job?.payload?.review_relevance ? 'reviewing_relevance' : !construct
     ? (tasks.length > 0 || (Array.isArray(info?.plan?.tasks) && info.plan.tasks.length > 0) ? 'collecting' : 'planning')

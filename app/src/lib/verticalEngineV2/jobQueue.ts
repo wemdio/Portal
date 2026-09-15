@@ -1,6 +1,12 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { VeJob } from './types';
 
+export const VE_MAX_JOB_CONCURRENCY = 16;
+export function veJobConcurrency(value: string | undefined): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 1 ? Math.min(parsed, VE_MAX_JOB_CONCURRENCY) : 8;
+}
+
 /**
  * Ready-time FIFO: a cooperative yield puts the same durable job behind work
  * already waiting, instead of its original created_at reclaiming the worker.
@@ -44,8 +50,8 @@ export function createVeJobPool(options: {
   run: (job: VeJob) => Promise<void>;
   onError: (error: unknown) => void;
 }) {
-  if (!Number.isInteger(options.concurrency) || options.concurrency < 1 || options.concurrency > 2) {
-    throw new Error('VE2 job concurrency must be 1 or 2');
+  if (!Number.isInteger(options.concurrency) || options.concurrency < 1 || options.concurrency > VE_MAX_JOB_CONCURRENCY) {
+    throw new Error('VE2 job concurrency must be between 1 and 16');
   }
   const active = new Map<string, Promise<void>>();
   const settle = async (idleMs?: number) => {

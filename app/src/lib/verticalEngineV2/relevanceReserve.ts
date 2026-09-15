@@ -28,7 +28,8 @@ const fact = (row: Record<string, unknown>, names: string[]) => {
   return '';
 };
 const hasEvidenceSource = (row: Record<string, unknown>) => Boolean(normalizeVeCompanyInn(fact(row, ['inn', 'инн']))
-  || fact(row, ['website', 'site', 'сайт']));
+  || fact(row, ['website', 'site', 'сайт'])
+  || (fact(row, ['company', 'компания']) && fact(row, ['address', 'адрес'])));
 
 export function veRelevanceCompanyKey(row: Record<string, unknown>): string {
   const stableIdentity = veCompanyIdentityKey({ inn: fact(row, ['inn', 'инн']),

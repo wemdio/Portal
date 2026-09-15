@@ -1,7 +1,7 @@
 import { isVeProviderBillingError } from './collectionErrors';
 
 /** Only recognized preview failures may reuse a base; never supply/refill. */
-export function previewRecoveryKind(base: Record<string, unknown>): 'validation' | 'billing' | 'pipeline' | null {
+export function previewRecoveryKind(base: Record<string, unknown>): 'validation' | 'billing' | 'pipeline' | 'discovery' | null {
   const info = base.collect_info as Record<string, unknown> | null;
   if (base.source !== 'auto' || base.status !== 'failed' || !base.hypothesis_id
     || !info || info.collection_mode !== 'preview' || info.refill || info.supply_batch_id) return null;
@@ -11,6 +11,10 @@ export function previewRecoveryKind(base: Record<string, unknown>): 'validation'
   const stats = info.stats as Record<string, unknown> | undefined;
   const names = info.company_name_cleanup as Record<string, unknown> | undefined;
   if (!progress) return null;
+  const discovery = info.source_contact_recovery as Record<string, unknown> | undefined;
+  if (progress.status === 'error' && !construct && discovery?.version === 1
+    && typeof progress.round === 'number' && Number.isSafeInteger(progress.round) && progress.round > 0
+    && (checkpoint?.completed_round ?? 0) === progress.round - 1) return 'discovery';
   const pipeline = info.preview_pipeline as Record<string, unknown> | undefined;
   if (progress.status === 'error' && pipeline?.version === 1 && Array.isArray(pipeline.batches)
     && typeof pipeline.revision === 'number' && Number.isSafeInteger(pipeline.revision)
@@ -24,6 +28,7 @@ export function previewRecoveryKind(base: Record<string, unknown>): 'validation'
     // uses the completed constructor and saved recipients, not those counters.
     // Requiring them would silently start and pay for a new collection.
     && (stats?.relevance_coverage_complete === false
+      || base.error === 'Проверка email завершилась не полностью'
       || (!!info.company_name_recovery && names?.status === 'partial'))) return 'validation';
   // A failed planner has not committed any candidate round. Reuse its empty
   // base after funds are restored, instead of accumulating duplicate failures.

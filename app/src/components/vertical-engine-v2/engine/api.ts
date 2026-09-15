@@ -108,6 +108,7 @@ export interface VeCollectStatsDto {
 }
 
 export interface VeCollectInfo {
+  source_contact_discovery?: { checked: number; remaining: number };
   relevance_review_requested?: boolean;
   /** Only a phase marker; raw validation checkpoints stay on the server. */
   saved_email_review_pending?: boolean;

@@ -40,6 +40,15 @@ export function veCompanyIdentityKey(row: { company?: unknown; website?: unknown
   return websiteKey ? `site:${websiteKey}` : null;
 }
 
+/** A same-base acquisition receipt, not proof that two companies are equal.
+ * Legacy receipts contain exactly these four fields. It is deliberately not
+ * used for cross-hypothesis exclusions or for joining richer observations. */
+export function veAcquisitionReceipt(row: { company?: unknown; website?: unknown; inn?: unknown; email?: unknown; address?: unknown; source_detail?: unknown }): string {
+  const facts = [row.company, row.website, row.inn, row.email];
+  if ('address' in row || 'source_detail' in row) facts.push(row.address, row.source_detail);
+  return JSON.stringify(facts.map((value) => String(value ?? '').trim()));
+}
+
 /** Keep complementary source facts; repeated observations must be idempotent. */
 export function mergeVeSourceFactText(left: unknown, right: unknown): string {
   const first = String(left ?? '').trim(), next = String(right ?? '').trim();
