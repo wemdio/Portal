@@ -1973,13 +1973,14 @@ export async function qualifyOneReply(
     }
   }
 
+  let specialistNotificationTask: Promise<void> | null = null;
   if (
     specialistLeadSideEffectsAllowed &&
     inserted?.id &&
     supabaseMain &&
     qualifiedProjectId
   ) {
-    await notifySpecialistsAboutLead(
+    specialistNotificationTask = notifySpecialistsAboutLead(
       db,
       inserted.id,
       campaignId,
@@ -2032,10 +2033,11 @@ export async function qualifyOneReply(
     specialistThreadClaim?.status === 'alert' &&
     specialistThreadClaim.claimRpcApplied
   ) {
-    // Alert delivery intentionally stays first: handoff drafting/provider I/O
-    // must not add latency to the fresh specialist alert.
+    // Drafting and alert preparation overlap. Telegram transport batches the
+    // ready pair, without holding the chat queue during generation.
     await reconcileLeadHandoffJobs({ qualificationId: inserted.id, limit: 1 });
   }
+  await specialistNotificationTask;
 
   // Client-facing notification: DM the reply text to the client who owns this
   // campaign for any HUMAN reply — everything EXCEPT automated noise
@@ -3427,7 +3429,7 @@ async function notifySpecialistsAboutLead(
     boardLink = await getBoardLinkForProject(instantlyDb, projectId);
     const { data: project, error: projectError } = await supabaseMain
       .from('projects')
-      .select('specialist_user_id, specialist, client')
+      .select('specialist_user_id, specialist, client, handoff_email, handoff_legend')
       .eq('id', projectId)
       .maybeSingle();
     if (projectError) {
@@ -3593,6 +3595,7 @@ async function notifySpecialistsAboutLead(
     }
 
     const tgResult = await sendTelegramLeadAlertForSpecialists({
+      expectHandoff: handoffEnabled() && Boolean(project?.specialist_user_id && project?.handoff_email?.trim() && project?.handoff_legend?.trim()),
       userIds: userIdList,
       qualificationId,
       campaignId,
@@ -3971,7 +3974,7 @@ export async function reconcileLeadNotificationDeliveries(
       campaignId: lead.campaign_id,
       replyBody: lead.reply_body?.trim() || lead.reply_preview || '',
     });
-    await notifySpecialistsAboutLead(
+    const notificationTask = notifySpecialistsAboutLead(
       instantlyDb,
       lead.id,
       lead.campaign_id,
@@ -3995,6 +3998,7 @@ export async function reconcileLeadNotificationDeliveries(
     if (threadClaimConfirmed) {
       await reconcileLeadHandoffJobs({ qualificationId: lead.id, limit: 1 });
     }
+    await notificationTask;
   }
 
   return claimedCount;
@@ -4017,6 +4021,7 @@ async function maybeReconcileLeadNotificationDeliveries(): Promise<number> {
 }
 
 async function sendTelegramLeadAlertForSpecialists(data: {
+  expectHandoff?: boolean;
   userIds: string[];
   qualificationId: string;
   campaignId: string;
@@ -4070,6 +4075,7 @@ async function sendTelegramLeadAlertForSpecialists(data: {
     });
 
     const result = await sendLeadTelegramAlert({
+      expectHandoff: data.expectHandoff,
       qualificationId: data.qualificationId,
       campaignId: data.campaignId,
       leadEmail: data.leadEmail,
@@ -4390,12 +4396,23 @@ export async function maybePostLeadHandoff(opts: {
         : 'Нажмите «Передать клиенту» — письмо уйдёт лиду, клиент в копии. Нажать может только ответственный.',
     ].filter(Boolean).join('\n');
 
+    // Recovery must reply to the persisted alert, including after a restart.
+    const { data: parentAlert } = await main.from('deadline_notification_log')
+      .select('tg_message_id')
+      .eq('entity_type', 'lead_qualification')
+      .eq('entity_id', qualificationId)
+      .eq('level', 'specialist')
+      .eq('tg_sent', true)
+      .limit(1)
+      .maybeSingle();
     const messageId = await postHandoffMessage({
       token,
       chatId,
       text,
       ...(autoSend ? {} : { callbackData: signHandoffCallback(qualificationId, token) }),
       threadId: handoffThreadId(),
+      qualificationId,
+      replyTo: parentAlert?.tg_message_id ? Number(parentAlert.tg_message_id) : null,
     });
     if (!messageId) {
       workerLog('warn', `Handoff: failed to post TG message (qual ${qualificationId})`);

@@ -42,6 +42,7 @@ import { HE, StatusDot, Spinner } from '../design';
 import { SeasonalityDetail } from '../SeasonalitySummary';
 import { StatusBox, TIER_META, formatDate } from '../ui';
 import { collectCount, collectTaskDone, collectTaskFailed, getCollectionProgress, getCollectionQueue } from '../collectionProgress';
+import type { PreparationPresentation } from '../PreparationProgress';
 
 /** Как часто дёргать reload детали во время автосборки (как POLL_INTERVAL_MS родителя). */
 const COLLECT_POLL_MS = 4000;
@@ -809,7 +810,10 @@ function previewCellText(value: unknown): string {
   return typeof value === 'string' ? value : String(value);
 }
 
-export function BaseRow({ base, job, hypothesisTitle, queued, onUpdated }: { base: VeBaseSummary; job?: VeJobSummary; hypothesisTitle?: string; queued: boolean; onUpdated: () => void }) {
+export function BaseRow({ base, job, hypothesisTitle, queued, preparationState, onUpdated }: {
+  base: VeBaseSummary; job?: VeJobSummary; hypothesisTitle?: string; queued: boolean;
+  preparationState?: PreparationPresentation; onUpdated: () => void;
+}) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [downloadingMode, setDownloadingMode] = useState<BaseExportMode | null>(null);
   const [downloadError, setDownloadError] = useState('');
@@ -824,6 +828,12 @@ export function BaseRow({ base, job, hypothesisTitle, queued, onUpdated }: { bas
   const hasReviewCandidates = (collectCount(reserve?.needs_review) ?? 0) > 0
     || (collectCount(reserve?.error) ?? 0) > 0 || (collectCount(reserve?.email_retryable) ?? 0) > 0;
   const progress = getCollectionProgress(base.collect_info, job);
+  // The outreach summary and this row must describe the same live state.
+  // collect_info records the last checkpoint, which can survive a worker crash.
+  const collectionTone = preparationState?.tone ?? (queued ? 'muted' : 'info');
+  const collectionLabel = preparationState?.title ?? (queued ? 'В очереди' : COLLECT_PHASE_LABELS[progress.phase]);
+  const collectionClass = { err: 've2-tg-err', ok: 've2-tg-ok', info: 've2-tg-warn', muted: 've2-tg-q' }[collectionTone];
+  const showPreparationState = preparationState && ['collecting', 'analyzing', 'failed'].includes(base.status);
   const columns = Array.isArray(base.columns) ? base.columns.filter((column) => column !== VE_COMPANY_NAME_FIELD && column !== '_ve_relevance') : [];
   const previewRows = (Array.isArray(base.sample_rows) ? base.sample_rows : [])
     .filter((row) => !isReadyPreview || (isCompanyNameReady(row) && isVeAcceptedEmailStatus(row._email_status)
@@ -896,10 +906,10 @@ export function BaseRow({ base, job, hypothesisTitle, queued, onUpdated }: { bas
         ) : !queued && progress.candidates !== null ? (
           <span className="shrink-0 font-mono text-xs text-gray-700">{progress.candidates.toLocaleString('ru-RU')} кандидатов</span>
         ) : null}
-        {base.status === 'collecting' ? (
-          <span className={`ve2-st ${queued ? 've2-tg-q' : 've2-tg-warn'}`}>
-            {queued ? <StatusDot tone="muted" /> : <Spinner className="h-3.5 w-3.5" />}
-            {queued ? 'В очереди' : COLLECT_PHASE_LABELS[progress.phase]}
+        {base.status === 'collecting' || showPreparationState ? (
+          <span className={`ve2-st ${collectionClass}`}>
+            {collectionTone === 'info' ? <Spinner className="h-3.5 w-3.5" /> : <StatusDot tone={collectionTone} />}
+            {collectionLabel}
           </span>
         ) : base.status === 'analyzing' ? (
           <span className="ve2-st ve2-tg-warn">
@@ -938,7 +948,7 @@ export function BaseRow({ base, job, hypothesisTitle, queued, onUpdated }: { bas
               onClick={() => void handleDownload(base.collect_info?.collection_mode === 'preview' ? 'preview' : 'raw')}
               disabled={downloadingMode !== null || (isReadyPreview && !hasReadyContacts)}
               className={HE.btnQuiet}
-              title={partialPreview ? 'Уже проверенные контакты; остальная база продолжает собираться'
+              title={partialPreview ? 'Уже проверенные контакты из сохранённой части базы'
                 : isReadyPreview ? `До ${VE_PREVIEW_READY_TARGET} проверенных контактов для согласования` : 'Все собранные строки, включая исключённые из запуска'}
             >
               {downloadingMode !== null && downloadingMode !== 'review' ? <Spinner className="h-3 w-3" /> : null}
@@ -955,11 +965,11 @@ export function BaseRow({ base, job, hypothesisTitle, queued, onUpdated }: { bas
       </div>
       {base.source === 'auto' && base.status !== 'collecting' ? (
         <div className="px-4 pb-3">
-          {base.status === 'failed' ? (
+          {base.status === 'failed' && (!preparationState || preparationState.tone === 'err') ? (
             <p className="mt-2 text-xs text-red-600" role="alert">{collectionFailureMessage(base)}</p>
           ) : null}
           <CollectionFunnel base={base} />
-          {base.status === 'failed' && hasReviewCandidates ? <div className="mt-3">
+          {base.status === 'failed' && hasReviewCandidates && !preparationState ? <div className="mt-3">
             <button type="button" className={HE.btnGhost} onClick={() => void handleReview()}
               disabled={reviewStarting}>
               {reviewStarting ? 'Запускаем проверку…' : 'Возобновить автопроверку'}

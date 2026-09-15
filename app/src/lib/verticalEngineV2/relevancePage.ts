@@ -23,12 +23,54 @@ function focusTerms(focus: string): string[] {
   // synonyms. They rank excerpts only; they do not establish relevance.
   return [...new Set((focus.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? [])
     .filter((term) => !STOP_WORDS.has(term))
-    .map((term) => /^[а-яё]+$/u.test(term) && term.length > 6 ? term.slice(0, 6) : term))].slice(0, 32);
+    .map((term) => /^[а-яё]+$/u.test(term) && term.length > 5 ? term.slice(0, 5) : term))].slice(0, 32);
 }
 
 function matchTerms(text: string, terms: string[]): number[] {
   const words = text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
   return terms.map((term) => Math.min(3, words.filter((word) => word.startsWith(term)).length));
+}
+
+type EvidenceLink = VeEvidencePage['links'][number];
+const ACTIVITY_SCORES = { legal: 0, about: 55, locations: 60, operations: 60, offering: 50, references: 35, other: 0 };
+function linkFacts(link: EvidenceLink): { text: string; kind: keyof typeof ACTIVITY_SCORES; identityScore: number } {
+  let path = new URL(link.url).pathname;
+  try { path = decodeURIComponent(path); } catch { /* Rank the literal path. */ }
+  const text = `${link.text} ${path}`.toLowerCase();
+  const requisites = /реквизит|юридич|rekvizit|requisite|legal.details/.test(text);
+  const contacts = /контакт|contact|kontakt/.test(text);
+  const legal = /правов|оферт|политик|персональн|privacy|policy|legal|oferta/.test(text);
+  const about = /^(?:о|об|about)\s|who.we.are|профиль компании/iu.test(link.text)
+    || /\/(?:about(?:-[\p{L}\p{N}_-]+)?|o-[\p{L}\p{N}_-]+|company|overview)\/?$/iu.test(path);
+  const locations = /филиал|подразделен|представительств|географ|адрес|офис|наши магазины|сеть|сети|network|branch|location|office|store|filial|geograph|address/.test(text);
+  const offering = /услуг|направлен|деятельност|продукц|продукт|производств|решени|каталог|service|uslug|product|solution|catalog|manufactur|capabilit|facilit/.test(text);
+  const operations = /производств|площадк|мощност|завод|склад|manufactur|production|capabilit|facilit|factor[yi]|warehouse/.test(text);
+  const offeringPath = /\/(?:products?|services?|catalog(?:ue)?|katalog|uslugi|solutions?)(?:\/|$)/i.test(path);
+  const references = /проект|кейс|клиент|отрасл|project|case|customer|industr/.test(text);
+  const kind = requisites || legal ? 'legal' : offeringPath ? 'offering' : locations || contacts ? 'locations' : operations ? 'operations' : about ? 'about'
+    : offering ? 'offering' : references ? 'references' : 'other';
+  return { text, kind, identityScore: requisites ? 100 : contacts ? 80 : legal ? 60 : about ? 40 : 0 };
+}
+
+/** Site structure guides discovery across industries; these scores are never
+ * evidence of company identity, activity or membership in a network. */
+export function rankVeEvidenceLinks(
+  links: EvidenceLink[], focus = '', purpose: 'identity' | 'activity' = 'activity', visited: EvidenceLink[] = [],
+): EvidenceLink[] {
+  const terms = focusTerms(focus);
+  const seenKinds = visited.map((link) => linkFacts(link).kind);
+  const unique = new Map<string, { link: EvidenceLink; score: number; order: number }>();
+  links.forEach((link, order) => {
+    const facts = linkFacts(link);
+    const topical = Math.min(3, matchTerms(facts.text, terms).filter(Boolean).length);
+    const activityScore = ACTIVITY_SCORES[facts.kind];
+    const base = purpose === 'identity' ? facts.identityScore : topical * 40 + activityScore;
+    if (!base) return;
+    const score = base - (purpose === 'activity' ? seenKinds.filter((kind) => kind === facts.kind).length * 100 : 0);
+    const previous = unique.get(link.url);
+    if (!previous || score > previous.score) unique.set(link.url, { link, score, order });
+  });
+  return [...unique.values()].sort((a, b) => b.score - a.score || a.order - b.order).map(({ link }) => link);
 }
 
 /** Keep the page introduction and the strongest contextual passages anywhere
@@ -123,6 +165,9 @@ export function parseVeEvidencePage(body: Buffer, url: string, contentType: stri
   $('br').replaceWith(' ');
   $('p, div, li, h1, h2, h3, h4, h5, h6, section, article, header, footer, td, th, tr, dl, dt, dd').append(' ');
   const raw = `${title} ${description} ${$('body').text()}`;
+  const activity = $('body').clone();
+  activity.find('nav, [role="navigation"]').remove();
+  const activityText = `${title} ${description} ${activity.text()}`;
   // Keep a second representation for inline <span>ИНН</span><span>...</span>
   // labels. The text still excludes scripts and hidden content.
   const identityDom = $.root().clone();
@@ -160,9 +205,8 @@ export function parseVeEvidencePage(body: Buffer, url: string, contentType: stri
         && !isIP(candidate.hostname) && !candidate.hostname.startsWith('[')) linkBase = candidate;
     } catch { /* An unsafe or malformed base cannot change link destinations. */ }
   }
-  const terms = focusTerms(focus);
-  const candidates = new Map<string, { url: string; text: string; score: number; order: number }>();
-  $('a[href]').each((order, element) => {
+  const candidates: EvidenceLink[] = [];
+  $('a[href]').each((_order, element) => {
     try {
       const href = $(element).attr('href') ?? '';
       if (href.length > 1_000) return;
@@ -173,20 +217,14 @@ export function parseVeEvidencePage(body: Buffer, url: string, contentType: stri
       if (target.href === origin.href || /\.(?:pdf|jpe?g|png|gif|webp|svg|zip|docx?|xlsx?|mp[34])$/i.test(target.pathname)) return;
       const label = cleanText($(element).text() || $(element).attr('title') || $(element).attr('aria-label')
         || $(element).find('img[alt]').map((_i, image) => $(image).attr('alt') ?? '').get().join(' ')).slice(0, 240);
-      let path = target.pathname;
-      try { path = decodeURIComponent(path); } catch { /* Use the literal path if malformed. */ }
-      const searchable = `${label} ${path}`.toLowerCase();
-      const topical = matchTerms(searchable, terms).filter(Boolean).length;
-      const legal = /контакт|реквизит|юридич|лиценз|политик|contact|rekvizit|requisite|legal|license|licence|oferta|оферт|privacy|policy/.test(searchable);
-      const services = /услуг|сервис|направлен|деятельност|продукц|товар|service|uslugi|product|solution/.test(searchable);
-      const about = /о компании|about us/i.test(label) || /^\/(?:about|o-kompanii)\/?$/i.test(path);
-      const depth = path.split('/').filter(Boolean).length;
-      const score = topical * 100 + (legal ? 30 : 0) + (services ? 20 : 0) + (about ? 10 : 0) - Math.min(5, depth);
-      const existing = candidates.get(target.href);
-      if (!existing || score > existing.score) candidates.set(target.href, { url: target.href, text: label, score, order });
+      candidates.push({ url: target.href, text: label });
     } catch { /* Malformed and off-origin links are not discovery candidates. */ }
   });
-  const links = [...candidates.values()].sort((a, b) => b.score - a.score || a.order - b.order)
-    .slice(0, 80).map(({ url: linkUrl, text }) => ({ url: linkUrl, text }));
-  return { text: selectVeEvidenceText(raw, focus), url, links, inns, ownerInns: [...ownerInns] };
+  // A large product menu must not crowd ownership/about links out of the cap.
+  const ranked = [...rankVeEvidenceLinks(candidates, focus, 'identity').slice(0, 6),
+    ...rankVeEvidenceLinks(candidates, focus), ...candidates];
+  const unique = new Map<string, EvidenceLink>();
+  for (const link of ranked) if (!unique.has(link.url)) unique.set(link.url, link);
+  const links = [...unique.values()].slice(0, 80);
+  return { text: selectVeEvidenceText(activityText, focus), url, links, inns, ownerInns: [...ownerInns] };
 }
