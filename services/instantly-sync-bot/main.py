@@ -26,7 +26,9 @@ PolzaInstantlySync Bot
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
+import re
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -113,6 +115,72 @@ _CONNECT_KWARGS: dict[str, bool | str | int] = {
     "statement_cache_size": 0,
     "ssl": _resolve_db_ssl_mode(DATABASE_URL),
 }
+
+# ── Учёт запросов к Instantly ────────────────────────────────────────────────
+# Та же почасовая таблица, что у портала (instantly_api_usage_hourly в ОСНОВНОЙ
+# БД, DATABASE_URL — не INSTANTLY_DATABASE_URL). Каждая HTTP-попытка считается
+# на уровне транспорта, итоги пишутся пачкой в конце прохода; сбой учёта синк
+# не ломает. Бот ходит только ключом main.
+USAGE_DB_URL: str = (os.environ.get("DATABASE_URL") or "").strip()
+USAGE_ACCOUNT_ID = "main"
+_usage_consumer: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "instantly_usage_consumer", default="sync_bot"
+)
+_usage_counts: dict[tuple[datetime, str, str, str], int] = {}
+_USAGE_ID_SEGMENT = re.compile(r"/[0-9a-f-]{16,}", re.IGNORECASE)
+
+
+def _count_instantly_attempt(url: httpx.URL, status: str) -> None:
+    path = url.path.removeprefix("/api/v2") or "/"
+    endpoint = _USAGE_ID_SEGMENT.sub("/{id}", path)
+    hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    key = (hour, endpoint, _usage_consumer.get(), status)
+    _usage_counts[key] = _usage_counts.get(key, 0) + 1
+
+
+class _CountingTransport(httpx.AsyncBaseTransport):
+    """HTTP-транспорт для клиентов Instantly: считает каждую попытку."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self._inner = httpx.AsyncHTTPTransport(**kwargs)
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        try:
+            response = await self._inner.handle_async_request(request)
+        except Exception:
+            _count_instantly_attempt(request.url, "network_error")
+            raise
+        code = response.status_code
+        status = "http_429" if code == 429 else "ok" if 200 <= code < 400 else "http_error"
+        _count_instantly_attempt(request.url, status)
+        return response
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+async def flush_instantly_usage() -> None:
+    if not _usage_counts:
+        return
+    pending = dict(_usage_counts)
+    _usage_counts.clear()
+    if not USAGE_DB_URL:
+        print(f"[usage] DATABASE_URL not set — {sum(pending.values())} Instantly attempts not recorded")
+        return
+    try:
+        conn = await asyncpg.connect(
+            USAGE_DB_URL, statement_cache_size=0, ssl=_resolve_db_ssl_mode(USAGE_DB_URL)
+        )
+        try:
+            for (hour, endpoint, consumer, status), count in pending.items():
+                await conn.execute(
+                    "SELECT public.instantly_bump_api_usage($1, $2, $3, $4, $5, $6)",
+                    hour, USAGE_ACCOUNT_ID, endpoint, consumer, status, count,
+                )
+        finally:
+            await conn.close()
+    except Exception as e:
+        print(f"[usage] flush failed ({e!r}) — {sum(pending.values())} Instantly attempts not recorded")
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
 
@@ -322,7 +390,7 @@ async def fetch_all_instantly_campaigns() -> tuple[list[dict], int]:
     pages = 0
     error_count = [0]
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(transport=_CountingTransport()) as client:
         while True:
             cursor_key = starting_after or "__first__"
             if cursor_key in seen_cursors:
@@ -398,7 +466,7 @@ async def fetch_campaign_analytics(
         last_err: Exception | None = None
         for attempt in range(RETRY_ATTEMPTS):
             try:
-                async with httpx.AsyncClient(timeout=ANALYTICS_TIMEOUT) as client:
+                async with httpx.AsyncClient(timeout=ANALYTICS_TIMEOUT, transport=_CountingTransport()) as client:
                     r = await client.get(
                         f"{INSTANTLY_BASE}/campaigns/analytics",
                         headers=headers,
@@ -437,7 +505,7 @@ async def fetch_campaign_analytics(
 
     async def _per_id_fetch(ids: list[str]) -> list[dict]:
         sem = asyncio.Semaphore(ANALYTICS_FALLBACK_CONCURRENCY)
-        async with httpx.AsyncClient(timeout=ANALYTICS_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=ANALYTICS_TIMEOUT, transport=_CountingTransport()) as client:
             results = await asyncio.gather(
                 *(_fetch_one(client, sem, cid) for cid in ids),
                 return_exceptions=False,
@@ -980,7 +1048,7 @@ async def sync_client_leads() -> dict[str, int]:
         )
         rate_limiter = _TokenBucket(rate=LEADS_RPS_LIMIT, burst=max(1, int(LEADS_RPS_LIMIT)))
 
-        async with httpx.AsyncClient(timeout=_timeout, limits=_limits) as http_client:
+        async with httpx.AsyncClient(timeout=_timeout, transport=_CountingTransport(limits=_limits)) as http_client:
 
             async def _bounded(cid: str, uids: list[str]) -> tuple[int, int, str | None]:
                 async with semaphore:
@@ -1082,7 +1150,7 @@ def _format_sync_result(result: dict) -> str:
 async def _check_instantly_api() -> bool:
     """Quick ping: fetch 1 campaign to verify the API key and connectivity."""
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10, transport=_CountingTransport()) as client:
             r = await client.get(
                 f"{INSTANTLY_BASE}/campaigns",
                 params={"limit": "1"},
@@ -1157,6 +1225,7 @@ async def run_sync(manual: bool = False) -> dict:
 
     try:
         print(f"[sync] Starting sync at {ts}…")
+        _usage_consumer.set("sync_bot_catalog")
         campaigns, api_errors, catalog_from_db = await _load_campaigns_for_sync()
         if catalog_from_db:
             print(
@@ -1170,6 +1239,7 @@ async def run_sync(manual: bool = False) -> dict:
             stats = await sync_to_db(campaigns)
 
         analytics_count = 0
+        _usage_consumer.set("sync_bot_analytics")
         try:
             campaign_ids = [c["id"] for c in campaigns if isinstance(c.get("id"), str)]
             analytics = await fetch_campaign_analytics(campaign_ids)
@@ -1181,6 +1251,7 @@ async def run_sync(manual: bool = False) -> dict:
 
         leads_stats: dict[str, int] = {"campaigns": 0, "leads": 0}
         try:
+            _usage_consumer.set("sync_bot_leads")
             print("[sync] Starting client leads sync…")
             leads_stats = await sync_client_leads()
             print(f"[sync] Client leads sync OK: {leads_stats}")
@@ -1284,6 +1355,7 @@ async def _run_sync_and_report(manual: bool = False) -> None:
 
     async with _sync_lock:
         result = await run_sync(manual=manual)
+        await flush_instantly_usage()
         _last_sync_result = result
 
         if should_notify(result, manual):

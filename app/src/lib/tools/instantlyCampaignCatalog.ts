@@ -126,7 +126,10 @@ export async function syncInstantlyCampaignCatalog(): Promise<{
   for (const account of listInstantlyAccounts()) {
     try {
       const apiKey = getInstantlyAccountApiKey(account.id);
-      for await (const page of iterateInstantlyCampaignPages(apiKey)) {
+      for await (const page of iterateInstantlyCampaignPages(apiKey, {
+        accountId: account.id,
+        consumer: 'campaign_catalog',
+      })) {
         pages += 1;
         const batch = page.map((c) => ({
           id: c.id,
