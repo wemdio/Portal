@@ -21,7 +21,6 @@ export const PUT = withAuth(async (req: NextRequest, user, params) => {
     productFacts?: string;
     toneNotes?: string;
     exampleCase?: string;
-    instantlyAccountId?: string;
   } | null;
   if (!body) return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
 
@@ -32,7 +31,6 @@ export const PUT = withAuth(async (req: NextRequest, user, params) => {
       productFacts: body.productFacts ?? '',
       toneNotes: body.toneNotes ?? '',
       exampleCase: body.exampleCase ?? '',
-      instantlyAccountId: body.instantlyAccountId ?? 'main',
     },
     user.id,
   );
