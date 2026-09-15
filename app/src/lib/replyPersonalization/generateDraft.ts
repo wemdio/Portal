@@ -1,5 +1,5 @@
 import { buildReplyPrompt } from './buildPrompt';
-import { getKnowledgeBase, insertDraft } from './db';
+import { getKnowledgeBase, getProjectBrief, insertDraft } from './db';
 import { generateReplyWithSearch, REPLY_MODEL_ID } from './geminiClient';
 import { fetchFullThread } from './instantlyThread';
 import { resolveProjectReply } from './projectReply';
@@ -35,7 +35,7 @@ export async function generateDraftForQualification(
 ): Promise<GenerateDraftResult> {
   const startedAt = Date.now();
 
-  const kb = await getKnowledgeBase(projectId);
+  const [kb, brief] = await Promise.all([getKnowledgeBase(projectId), getProjectBrief(projectId)]);
   if (!kb) throw new GenerateDraftError('У проекта не заполнена база знаний', 409);
 
   const reply = await resolveProjectReply(projectId, qualificationId);
@@ -60,7 +60,7 @@ export async function generateDraftForQualification(
     throw new GenerateDraftError('Нет текста переписки для генерации ответа', 422);
   }
 
-  const messages = buildReplyPrompt({ kb, qualification, thread, contextComplete });
+  const messages = buildReplyPrompt({ kb, brief, qualification, thread, contextComplete });
   const result = await generateReplyWithSearch(messages);
 
   const draft = await insertDraft({
