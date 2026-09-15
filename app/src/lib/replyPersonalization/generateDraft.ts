@@ -1,7 +1,8 @@
 import { buildReplyPrompt } from './buildPrompt';
-import { getKnowledgeBase, getQualificationById, insertDraft } from './db';
+import { getKnowledgeBase, insertDraft } from './db';
 import { generateReplyWithSearch, REPLY_MODEL_ID } from './geminiClient';
 import { fetchFullThread } from './instantlyThread';
+import { resolveProjectReply } from './projectReply';
 import type { GenerateDraftResult, ThreadMessage } from './types';
 
 export class GenerateDraftError extends Error {
@@ -37,8 +38,9 @@ export async function generateDraftForQualification(
   const kb = await getKnowledgeBase(projectId);
   if (!kb) throw new GenerateDraftError('У проекта не заполнена база знаний', 409);
 
-  const qualification = await getQualificationById(qualificationId);
-  if (!qualification) throw new GenerateDraftError('Письмо не найдено', 404);
+  const reply = await resolveProjectReply(projectId, qualificationId);
+  if (!reply) throw new GenerateDraftError('Письмо не найдено', 404);
+  const { qualification, accountId } = reply;
 
   let contextComplete = true;
   let thread: ThreadMessage[] | null = null;
@@ -47,7 +49,7 @@ export async function generateDraftForQualification(
       campaignId: qualification.campaignId,
       leadEmail: qualification.leadEmail,
       threadId: qualification.threadId,
-      accountId: kb.instantlyAccountId,
+      accountId,
     });
   }
   if (!thread) {

@@ -34,7 +34,6 @@ export interface KnowledgeBaseDto {
   productFacts: string;
   toneNotes: string;
   exampleCase: string;
-  instantlyAccountId: string;
   updatedAt: string;
 }
 
