@@ -723,6 +723,7 @@ html[data-portal-theme="dark"] .ve2 {
 .ve2-tag {
   display: inline-flex;
   align-items: center;
+  max-width: 100%;
   border: 1px solid var(--ve2-line-strong);
   border-radius: 6px;
   padding: 3px 8px;
@@ -730,7 +731,9 @@ html[data-portal-theme="dark"] .ve2 {
   font-size: 11px;
   letter-spacing: 0.02em;
   color: var(--ve2-mute);
-  white-space: nowrap;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .ve2-tier {
   font-family: var(--ve2-mono);
@@ -1085,6 +1088,7 @@ html[data-portal-theme="dark"] .ve2 {
   margin-bottom: 12px;
 }
 .ve2-panel {
+  min-width: 0;
   background: var(--ve2-surface);
   border-radius: 8px;
 }

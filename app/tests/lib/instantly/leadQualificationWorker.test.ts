@@ -2256,6 +2256,148 @@ describe('pollAndQualifyReplies', () => {
     expect(String(rows[0].ai_reason)).toContain('kirill@kira-aggregator.ru');
   });
 
+  it('preserves conversation ownership across combined correspondent, mailbox and history changes', async () => {
+    const { resolveEffectiveReplyOwner } = await import('@/lib/instantly/replyOwnershipResolver');
+    const offer = 'Hello! We help manufacturers find wholesale buyers and reach purchasing managers. We can prepare a selection of suitable companies and discuss a pilot campaign for your products.';
+    const sent = replyEmail({ id: 'source-send', campaign_id: 'source', ue_type: 1,
+      from_address_email: 'sales@source.example', eaccount: 'sales@source.example',
+      to_address_email_list: 'info@buyer.example', subject: 'Wholesale buyers',
+      timestamp_email: '2026-09-10T10:00:00Z', thread_id: 'ab-source-thread', body: { text: offer } });
+    const quoted = `From: Sales <sales@source.example>\nSent: September 10, 2026\nTo: info@buyer.example\nSubject: Wholesale buyers\n\n${offer}`;
+    const base = replyEmail({ id: 'source-reply', campaign_id: 'source', ue_type: 2,
+      from_address_email: 'person@buyer.example', eaccount: 'sales@other.example',
+      to_address_email_list: 'sales@other.example', subject: 'Re: Wholesale buyers',
+      timestamp_email: '2026-09-11T10:00:00Z', thread_id: sent.thread_id,
+      body: { text: `Please send details.\n\n${quoted}` } });
+    const cases: Array<{ name: string; reply?: Partial<Email>; parent?: Partial<Email>;
+      missing?: boolean; duplicate?: boolean; later?: boolean; discover?: boolean;
+      mapping?: string; failure?: boolean; resume?: boolean; unknownOwner?: boolean;
+      duplicateOwner?: boolean; expected: string }> = [
+      { name: 'both addresses change', expected: 'source-project' },
+      { name: 'same correspondent, other mailbox', reply: { from_address_email: 'info@buyer.example' }, expected: 'source-project' },
+      { name: 'colleague, same mailbox', reply: { eaccount: sent.eaccount, to_address_email_list: sent.eaccount }, mapping: 'source', expected: 'source-project' },
+      { name: 'new thread with full quoted original', reply: { thread_id: 'new-thread' }, expected: 'source-project' },
+      { name: 'no thread with full quoted original', reply: { thread_id: undefined }, expected: 'source-project' },
+      { name: 'quote shows receiving alias', reply: { body: { text: `Interested\n${quoted.replace('sales@source.example', 'sales@other.example')}` } }, expected: 'source-project' },
+      { name: 'Russian quote CRLF', reply: { body: { text: `Интересно\r\n${quoted.replace('From:', 'От:').replace('Sent:', 'Дата:').replace('To:', 'Кому:').replace('Subject:', 'Тема:').split('\n').map(line => '> '+line).join('\r\n')}` } }, expected: 'source-project' },
+      { name: 'first send quoted, latest not quoted', later: true, expected: 'source-project' },
+      { name: 'parent found during recovery', discover: true, expected: 'source-project' },
+      { name: 'JSON recipient proof survives interrupted recovery', discover: true, resume: true,
+        reply: { from_address_email: 'info@buyer.example', body: { text: `Interested\n${offer}` } },
+        parent: { to_address_email_list: undefined, to_address_json: [{ address: 'info@buyer.example' }] }, expected: 'source-project' },
+      { name: 'wrong actual recipient', parent: { to_address_email_list: 'stranger@buyer.example' }, expected: 'blocked' },
+      { name: 'future send', parent: { timestamp_email: '2026-09-12T10:00:00Z' }, expected: 'blocked' },
+      { name: 'missing send date', parent: { timestamp_email: undefined }, expected: 'blocked' },
+      { name: 'not an outbound', parent: { ue_type: 2 }, expected: 'blocked' },
+      { name: 'sender inconsistent', parent: { from_address_email: 'different@source.example' }, expected: 'blocked' },
+      { name: 'same domain only', reply: { body: { text: 'Interested' } }, expected: 'blocked' },
+      { name: 'wrong quoted recipient', reply: { body: { text: quoted.replace('info@buyer.example', 'fake@buyer.example') } }, expected: 'blocked' },
+      { name: 'wrong quoted subject', reply: { body: { text: quoted.replace('Subject: Wholesale buyers', 'Subject: Something else') } }, expected: 'blocked' },
+      { name: 'unrelated quoted sender', reply: { body: { text: quoted.replace('sales@source.example', 'random@third.example') } }, expected: 'blocked' },
+      { name: 'signature or generic quote only', reply: { body: { text: 'Please send details. We help manufacturers.' } }, expected: 'blocked' },
+      { name: 'source campaign owner missing', unknownOwner: true, expected: 'blocked' },
+      { name: 'source campaign has two owners', duplicateOwner: true, expected: 'blocked' },
+      { name: 'quote without actual send', missing: true, expected: 'blocked' },
+      { name: 'conflicting complete parents', duplicate: true, expected: 'blocked' },
+      { name: 'history unavailable', missing: true, failure: true, expected: 'blocked' },
+      { name: 'no history, one consistent mapping', missing: true, mapping: 'source', reply: { body: { text: 'Interested' } }, expected: 'source-project' },
+      { name: 'no conversation evidence, one mailbox owner despite provider label', missing: true, reply: { body: { text: 'Interested' } }, expected: 'other-project' },
+    ];
+    for (const [index, scenario] of cases.entries()) {
+      const inbound = { ...base, ...scenario.reply };
+      const parent = { ...sent, ...scenario.parent };
+      const followup = { ...sent, id: 'follow-up', timestamp_email: '2026-09-11T09:00:00Z', body: { text: 'Following up' } };
+      const sends = scenario.missing ? [] : [parent,
+        ...(scenario.later ? [followup] : []),
+        ...(scenario.duplicate ? [{ ...sent, id: 'competing-send', campaign_id: 'other' }] : [])];
+      const context = { replyEmail: inbound, threadEmails: [inbound, ...(scenario.discover ? [] : sends)],
+        lastOutbound: scenario.discover ? null : sends.at(-1) ?? null };
+      getAccountCampaignMappings.mockResolvedValue([{ campaign_id: scenario.mapping ?? 'other', status: 1 }]);
+      let page = 0;
+      listEmails.mockImplementation(async () => {
+        page++;
+        if (scenario.resume && page === 2) throw new Error('temporary sent lookup failure');
+        if (scenario.resume && page > 2) return { items: [], next_starting_after: null };
+        if (scenario.failure) throw new Error('history unavailable');
+        return { items: [inbound, ...sends], next_starting_after: null };
+      });
+      const db = createMockSupabase({ tables: {
+        project_instantly_campaigns: [
+          ...(!scenario.unknownOwner ? [{ campaign_id: 'source', project_id: 'source-project' }] : []),
+          ...(scenario.duplicateOwner ? [{ campaign_id: 'source', project_id: 'other-project' }] : []),
+          { campaign_id: 'other', project_id: 'other-project' },
+        ], project_period_instantly_campaigns: [], client_instantly_access: [],
+        instantly_ownership_evidence_progress: [],
+      } });
+      const resolve = () => resolveEffectiveReplyOwner({ db: db as never, reply: inbound,
+        providerCampaignId: 'source', leadEmail: inbound.from_address_email!,
+        accountId: `ownership-matrix-${index}`, prefetchedContext: context,
+        ...(scenario.discover ? { evidenceMode: 'recovery' as const } : {}) });
+      if (scenario.resume) expect((await resolve()).status).toBe('defer');
+      const result = await resolve();
+      expect({ scenario: scenario.name, owner: result.status === 'resolved' ? result.effectiveProjectId : 'blocked' })
+        .toEqual({ scenario: scenario.name, owner: scenario.expected });
+      if (scenario.resume && result.status === 'resolved') expect(result.conversationVerified).toBe(true);
+    }
+  });
+
+  it('uses the proven conversation criteria and specialist while retaining the original source for replay', async () => {
+    mockInstantlyDb = createMockSupabase({ tables: { project_instantly_campaigns: [
+      ...mockInstantlyDb!.getRows('project_instantly_campaigns'),
+      { campaign_id: 'other-campaign', project_id: 'other-project' },
+    ], instantly_lead_qualifications: [] } });
+    mockMainDb = createMockSupabase({ tables: { projects: [
+      { id: 'project-1', client: 'Source', specialist_user_id: 'specialist-1', lead_criteria: 'Source project criteria' },
+      { id: 'other-project', client: 'Other', specialist_user_id: 'wrong-specialist', lead_criteria: 'Wrong criteria' },
+    ], profiles: mockMainDb!.getRows('profiles'), telegram_links: mockMainDb!.getRows('telegram_links'),
+    notifications: [], deadline_notification_log: [] } });
+    const offer = 'We help manufacturers find wholesale buyers and reach purchasing managers. We can prepare a selection of suitable companies and discuss a pilot campaign for your products.';
+    const sent = replyEmail({ id: 'actual-source-send', campaign_id: 'linked-campaign', ue_type: 1,
+      from_address_email: 'source@sales.example', eaccount: 'source@sales.example',
+      to_address_email_list: 'info@buyer.example', subject: 'Wholesale buyers', body: { text: offer },
+      timestamp_email: '2026-09-10T10:00:00Z' });
+    const inbound = replyEmail({ id: 'combined-reply', campaign_id: 'other-campaign',
+      from_address_email: 'colleague@buyer.example', eaccount: 'other@sales.example',
+      to_address_email_list: 'other@sales.example', timestamp_email: '2026-09-11T10:00:00Z',
+      body: { text: `Interested.\nFrom: source@sales.example\nSent: September 10\nTo: info@buyer.example\nSubject: Wholesale buyers\n\n${offer}` } });
+    const context = { replyEmail: inbound, threadEmails: [sent, inbound], lastOutbound: sent };
+    getAccountCampaignMappings.mockResolvedValue([{ campaign_id: 'other-campaign', status: 1 }]);
+    qualifyReply.mockResolvedValue({ isLead: true, proposalSeen: true, interestSignals: ['requested_materials'],
+      reason: 'Requested information', confidence: 0.98, needsReview: false,
+      objectionHandleable: false, objectionDraft: null, threadContext: context });
+    const { qualifyOneReply } = await import('@/lib/instantly/leadQualificationWorker');
+    await qualifyOneReply(mockInstantlyDb! as never, inbound, 'test-key', 'main', context);
+    const row = mockInstantlyDb!.getRows('instantly_lead_qualifications')[0];
+    const telegram = sendLeadTelegramAlert.mock.calls[0]?.[0];
+    expect({ campaign: qualifyReply.mock.calls[0]?.[0],
+      criteria: qualifyReply.mock.calls[0]?.[3]?.leadCriteria,
+      parent: qualifyReply.mock.calls[0]?.[3]?.prefetchedContext?.lastOutbound?.id,
+      storedCampaign: row?.campaign_id, storedProject: row?.qualified_project_id,
+      originalCampaign: (row?.reply_recovery_snapshot as Email)?.campaign_id,
+      notified: mockMainDb!.getRows('notifications').map(item => item.user_id),
+      telegramCampaign: telegram?.campaignId,
+      telegramSpecialists: telegram?.specialistMentions?.map((item: { userId: string }) => item.userId),
+    }).toEqual({ campaign: 'linked-campaign', criteria: 'Source project criteria', parent: sent.id,
+      storedCampaign: 'linked-campaign', storedProject: 'project-1', originalCampaign: 'other-campaign',
+      notified: ['specialist-1'], telegramCampaign: 'linked-campaign', telegramSpecialists: ['specialist-1'] });
+    // Equally proven sends from different projects must not leak an alert or
+    // consume an AI call just because one mailbox has a single current tag.
+    qualifyReply.mockClear();
+    sendLeadTelegramAlert.mockClear();
+    sendClientReplyTelegram.mockClear();
+    postHandoffMessage.mockClear();
+    const conflict = { ...inbound, id: 'conflicting-reply' };
+    const competing = { ...sent, id: 'competing-send', campaign_id: 'other-campaign' };
+    await qualifyOneReply(mockInstantlyDb! as never, conflict, 'test-key', 'main', {
+      replyEmail: conflict, threadEmails: [sent, competing, conflict], lastOutbound: competing,
+    });
+    expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')
+      .find(item => item.instantly_email_id === conflict.id)?.status).toBe('pending');
+    for (const effect of [qualifyReply, sendLeadTelegramAlert, sendClientReplyTelegram, postHandoffMessage]) {
+      expect(effect).not.toHaveBeenCalled();
+    }
+  });
+
   it('routes a provider-mislabeled reply by the exact mailbox and parent outbound to the real project specialist', async () => {
     const providerCampaignId = 'ritso-campaign';
     const ownerCampaignId = 'outreachos-campaign';
