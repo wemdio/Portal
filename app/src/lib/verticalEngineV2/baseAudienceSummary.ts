@@ -3,10 +3,21 @@ import { getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
 import { readContactDeliveryPages } from './contactDeliveryInventory';
 import { prepareSegmentationAudience } from './segmentationAudit';
 import type { VeBase } from './types';
-import { estimateRemainingReady, VE_SOURCE_POPULATION_MAX_AGE_MS, type VeCollectionEstimate, type VeObservedContactYield, type VeRemainingReadyEstimate } from './collectionTarget';
+import {
+  estimateRemainingReady,
+  VE_SOURCE_POPULATION_MAX_AGE_MS,
+  type VeCollectionEstimate,
+  type VeCollectionTargetProgress,
+  type VeObservedContactYield,
+  type VeRemainingReadyEstimate,
+} from './collectionTarget';
 
 export type VeAudienceBase = Pick<VeBase, 'id' | 'project_id' | 'hypothesis_id' | 'data' | 'columns' | 'source' | 'status' | 'updated_at'> & {
-  collect_info?: { collection_mode?: string; estimate?: VeCollectionEstimate | null } | null;
+  collect_info?: {
+    collection_mode?: string;
+    estimate?: VeCollectionEstimate | null;
+    target_progress?: VeCollectionTargetProgress | null;
+  } | null;
 };
 
 export interface VeBaseAudienceSummary {
@@ -19,6 +30,9 @@ export interface VeBaseAudienceSummary {
   /** Already allocated to campaigns, including uncertain provider attempts. */
   excluded_used: number;
   client_exclusions_applied: boolean;
+  /** Candidate rows acquired across the adaptive preview rounds. */
+  processed_candidates: number | null;
+  preview_target: number | null;
   observed_yield: VeObservedContactYield | null;
   estimate: VeRemainingReadyEstimate | null;
   estimate_reason: string | null;
@@ -44,26 +58,45 @@ export function buildVeBaseAudienceSummary(base: VeAudienceBase, context: {
     else if (context.allocated?.has(email)) allocated += 1;
   }
   const info = base.collect_info?.estimate;
+  const target = base.collect_info?.target_progress;
   const observed = info?.observed_yield;
-  const validObserved = info?.version === 2 && observed && validCount(observed.candidates) && observed.candidates > 0
+  const savedObserved = info?.version === 2 && observed && validCount(observed.candidates) && observed.candidates > 0
     && validCount(observed.ready) && Number.isFinite(observed.contacts_per_candidate)
     && observed.contacts_per_candidate === observed.ready / observed.candidates
     && Number.isFinite(Date.parse(observed.as_of)) && Date.parse(observed.as_of) <= now.getTime() ? observed : null;
+  const processedCandidates = validCount(target?.candidates_processed) ? target.candidates_processed : null;
+  const terminalTarget = target && ['target_reached', 'exhausted', 'limited'].includes(target.status);
+  // A finished target is sufficient to explain the measured preview funnel,
+  // even when unresolved reserve rows make a remaining-market forecast unsafe.
+  const measuredObserved = terminalTarget && processedCandidates
+    ? {
+      candidates: processedCandidates,
+      ready: audience.leads.length,
+      contacts_per_candidate: audience.leads.length / processedCandidates,
+      as_of: base.updated_at,
+    }
+    : null;
+  const validObserved = savedObserved ?? measuredObserved;
   const forecast = info?.remaining_ready_estimate;
   const age = now.getTime() - Date.parse(forecast?.population_as_of ?? '');
-  const expected = validObserved ? estimateRemainingReady({
-    population: info?.unique_companies ?? null, candidatesProcessed: validObserved.candidates, readyRows: validObserved.ready,
-    eligible: true, asOf: validObserved.as_of, populationAsOf: info?.population_as_of,
+  const expected = savedObserved ? estimateRemainingReady({
+    population: info?.unique_companies ?? null, candidatesProcessed: savedObserved.candidates, readyRows: savedObserved.ready,
+    eligible: true, asOf: savedObserved.as_of, populationAsOf: info?.population_as_of,
   }) : null;
-  let estimate = info?.version === 2 && info.population_matches_source && validObserved && forecast
+  let estimate = info?.version === 2 && info.population_matches_source && savedObserved && forecast
     && validCount(forecast.contacts) && validCount(forecast.source_population)
     && forecast.contacts === expected?.contacts && forecast.source_population === info.unique_companies
     && forecast.population_as_of === info.population_as_of && forecast.confidence === 'low'
-    && forecast.candidates_processed === validObserved.candidates && forecast.ready_rows === validObserved.ready
-    && forecast.as_of === validObserved.as_of && typeof forecast.scope === 'string'
+    && forecast.candidates_processed === savedObserved.candidates && forecast.ready_rows === savedObserved.ready
+    && forecast.as_of === savedObserved.as_of && typeof forecast.scope === 'string'
     && Number.isFinite(age) && age >= 0 && age <= VE_SOURCE_POPULATION_MAX_AGE_MS ? forecast : null;
   let reason = estimate ? null : info?.estimate_reason ?? info?.note
     ?? (forecast ? 'Счётчик источника требует обновления при следующей партии.' : 'Пока недостаточно данных для оценки дополнительного объёма.');
+  if (!estimate && terminalTarget) {
+    reason = info?.population_matches_source === false
+      ? 'Дополнительный объём пока нельзя надёжно оценить: источники и фильтры этой базы не совпадают с одним измеримым срезом.'
+      : info?.note ?? 'Текущая партия завершена. Для оценки дополнительного объёма нужен новый сопоставимый срез источника.';
+  }
   // The measured source population has no client blocklist/campaign predicate.
   // Known client exclusions cannot be silently ignored in a remaining forecast.
   if ((context.blocked?.size ?? 0) > 0 || (context.allocated?.size ?? 0) > 0) {
@@ -74,6 +107,8 @@ export function buildVeBaseAudienceSummary(base: VeAudienceBase, context: {
     base_id: base.id, hypothesis_id: base.hypothesis_id,
     ready: audience.leads.length - blocked - allocated, checked_ready: audience.leads.length,
     excluded_blocked: blocked, excluded_used: allocated, client_exclusions_applied: context.clientExclusionsApplied === true,
+    processed_candidates: processedCandidates,
+    preview_target: target?.mode === 'preview' && validCount(target.ready_target) ? target.ready_target : null,
     observed_yield: validObserved, estimate, estimate_reason: reason,
     updated_at: base.updated_at, measured_at: now.toISOString(),
   };
@@ -84,11 +119,17 @@ export async function loadVeBaseAudienceSummary(db: SupabaseClient, instantlyDb:
   baseId: string; presetId?: string | null; now?: Date;
 }): Promise<VeBaseAudienceSummary> {
   const { data: raw, error } = await db.from('ve_bases')
-    .select('id, project_id, hypothesis_id, data, columns, source, status, updated_at, collect_info->estimate')
+    .select('id, project_id, hypothesis_id, data, columns, source, status, updated_at, collect_info->estimate, collect_info->target_progress')
     .eq('id', input.baseId).maybeSingle();
   if (error || !raw) throw new Error('Не удалось загрузить состав базы');
-  const base = { ...raw, collect_info: { estimate: raw.estimate
-    ?? (raw as unknown as VeAudienceBase).collect_info?.estimate } } as VeAudienceBase;
+  const projected = raw as typeof raw & {
+    estimate?: VeCollectionEstimate | null;
+    target_progress?: VeCollectionTargetProgress | null;
+  };
+  const base = { ...raw, collect_info: {
+    estimate: projected.estimate ?? (raw as unknown as VeAudienceBase).collect_info?.estimate,
+    target_progress: projected.target_progress ?? (raw as unknown as VeAudienceBase).collect_info?.target_progress,
+  } } as VeAudienceBase;
   const { data: project, error: projectError } = await db.from('ve_projects')
     .select('launch_preset_id').eq('id', base.project_id).maybeSingle();
   if (projectError || !project) throw new Error('Не удалось определить настройки клиента');

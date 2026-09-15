@@ -1229,11 +1229,11 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
 
   return (
     <div
-      className="mt-3 grid gap-x-5 gap-y-1 border-t pt-3 text-[11px] text-gray-600 ve2-div sm:grid-cols-2"
+      className="mt-3 space-y-1 border-t pt-3 text-xs leading-5 text-gray-600 ve2-div"
       aria-label="Воронка автосборки"
     >
       {target ? (
-        <div className="sm:col-span-2 mb-2 text-xs" role="status">
+        <div className="mb-2" role="status">
           <p className="font-medium">{target.mode === 'preview' ? 'Готово для превью' : 'Проверено и подготовлено'}: {target.ready_rows.toLocaleString('ru-RU')} / {target.ready_target.toLocaleString('ru-RU')} контактов</p>
           {target.mode === 'preview' && base.status === 'collecting' ? (
             <p className="mt-1 text-gray-700">
@@ -1247,19 +1247,23 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
               : emailsInProgress ? 'Повторяем незавершённую проверку сохранённых email. Контакты сохранены; новый сбор не запускается.'
               : relevanceInProgress ? 'Автоматически проверяем деятельность компаний: ищем сайты по ИНН и читаем подтверждённые страницы.'
               : target.status === 'collecting' ? `Проход ${target.round} из ${target.max_rounds}. Добираем контакты после проверок.`
-              : target.status === 'target_reached' ? 'Превью готово к согласованию. Отправка ещё не включена.'
+              : target.status === 'target_reached' ? `Цель превью достигнута. В готовой базе ${target.ready_rows.toLocaleString('ru-RU')} контактов; отправка ещё не включена.`
               : target.status === 'exhausted' ? 'Источники текущего плана закончились. Это не оценка всего рынка.'
               : target.status === 'limited' ? 'Сбор остановлен защитным лимитом. Это не означает, что контакты закончились.'
               : 'Подготовка превью остановлена. Непроверенные контакты не попадут в запуск.'}
           </p>
-          <p className={`mt-1 ${HE.faint}`}>Обработано кандидатов за все проходы: {target.candidates_processed.toLocaleString('ru-RU')}. В CSV превью не более {VE_PREVIEW_READY_TARGET.toLocaleString('ru-RU')} контактов.</p>
+          <p className={`mt-1 ${HE.faint}`}>За все проходы проверено кандидатов: {target.candidates_processed.toLocaleString('ru-RU')}. Это фактически обработанная выборка, а не размер всего реестра. В CSV-превью не более {VE_PREVIEW_READY_TARGET.toLocaleString('ru-RU')} контактов.</p>
         </div>
       ) : null}
       {estimate.uniqueCompanies !== null ? (
-        <p>{estimate.uniqueCompanies.toLocaleString('ru-RU')} уникальных компаний в реестровом срезе гипотезы</p>
-      ) : null}
-      {estimate.companiesWithEmail !== null ? (
-        <p>Из них {estimate.companiesWithEmail.toLocaleString('ru-RU')} с email в реестре</p>
+        <p>
+          Реестровый ориентир: {estimate.uniqueCompanies.toLocaleString('ru-RU')} уникальных компаний
+          {estimate.companiesWithEmail !== null
+            ? `, у ${estimate.companiesWithEmail.toLocaleString('ru-RU')} из них найден ещё не проверенный email`
+            : ''}. В сборе могут участвовать и другие источники, поэтому это не число обработанных строк.
+        </p>
+      ) : estimate.companiesWithEmail !== null ? (
+        <p>В реестровом срезе найдено {estimate.companiesWithEmail.toLocaleString('ru-RU')} компаний с ещё не проверенным email.</p>
       ) : null}
       {!target && shownLimit !== null ? <p>Лимит этого прогона: {shownLimit.toLocaleString('ru-RU')} кандидатов</p> : null}
       {!target && stats.rowsTotal !== null ? (
@@ -1281,7 +1285,10 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
         <p className="font-medium text-amber-700">{base.status === 'collecting' ? 'Пока нет подтверждений' : 'Данных недостаточно'}: {stats.relevanceNeedsReview.toLocaleString('ru-RU')} строк. Сохранены, не отправляются. Ручная проверка не требуется.</p>
       ) : null}
       {stats.relevanceErrors !== null && stats.relevanceErrors > 0 ? (
-        <p className="font-medium text-amber-700">Проверка прервана: {stats.relevanceErrors.toLocaleString('ru-RU')} строк. Сохранены для повторной проверки.</p>
+        <p className="font-medium text-amber-700">
+          {base.status === 'collecting' ? 'Повторяем техническую проверку' : 'Не удалось завершить автопроверку'} для{' '}
+          {stats.relevanceErrors.toLocaleString('ru-RU')} строк. Они сохранены в резерве и не входят в готовую базу.
+        </p>
       ) : null}
       {stats.relevanceIrrelevant !== null && stats.relevanceIrrelevant > 0 ? (
         <p>Не подходят этой гипотезе: {stats.relevanceIrrelevant.toLocaleString('ru-RU')} строк.{stats.reserveRows !== null ? ' Сохранены отдельно от готовой базы.' : ''}</p>
@@ -1314,11 +1321,6 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
         <p className="sm:col-span-2 font-medium text-amber-700">
           {stats.relevanceUnchecked.toLocaleString('ru-RU')} строк без подтверждённой релевантности не входят в готовый запас
           и не отправляются. В этой старой записи причины не разделены на нехватку данных и технические ошибки.
-        </p>
-      ) : null}
-      {estimate.companiesWithEmail !== null ? (
-        <p className="sm:col-span-2 text-gray-500">
-          Email в реестре ещё не проверены; итог после фильтров появляется только после полной построчной валидации.
         </p>
       ) : null}
       {estimate.note ? <p className="sm:col-span-2 text-gray-500">{estimate.note}</p> : null}

@@ -611,6 +611,71 @@ describe('audited buyer-versus-seller direction regressions', () => {
 });
 
 describe('elliptical material request policy', () => {
+  it('requires an actual offer for generic discussion readiness without suppressing commercial actions or custom criteria', async () => {
+    const opener = [
+      'Добрый день!',
+      'Подскажите, пожалуйста, кто у вас отвечает за продажу и привлечение новых клиентов?',
+      'Хочу обсудить поиск корпоративных заказчиков на интернет-маркетинг.',
+      'Буду благодарен, если передадите письмо ответственному сотруднику или подскажете его контакт.',
+      'С уважением, Егор, коммерческий директор агентства.',
+    ].join('\n');
+    const readiness = [
+      'Добрый день! Меня зовут Ольга! Готова пообщаться с вами по вопросам по письму ниже.',
+      'Добрый день\nМеня зовут Олеся, я занимаюсь привлечением новых клиентов. Готова обсудить ваше предложение',
+      'Готовы обсудить ваше предложение.',
+      'Давайте обсудим этот вопрос.',
+    ];
+    for (const authored of readiness) {
+      for (const [label, outboundText, expected] of [
+        ['contact opener', opener, false],
+        ['logistics topic only', opener.replace('поиск корпоративных заказчиков на интернет-маркетинг', 'привлечение прямых заказчиков на перевозки, экспедирование, таможенное оформление и сопровождение импорта и экспорта'), false],
+        ['actual offer', SUBSTANTIVE_OUTBOUND_TEXT, true],
+        ['short actual offer', 'Мы предлагаем услугу поиска B2B-клиентов: подбираем компании, пишем их руководителям и передаём вам заинтересованных.', true],
+      ] as const) {
+        for (const format of ['outbound', 'quote-only', 'html-only']) {
+          fetchMock.mockReset();
+          mockAiResult({ is_lead: true, proposal_seen: true, needs_review: false });
+          const body = `${authored}\n\n--\nРуководитель отдела\nТел. +7 999 123 45 67\n\n---------- Forwarded message ----------\nОт: Sales <sales@example.com>\nDate: 1 September 2026\nTo: info@buyer.example\nSubject: Вопрос\n\n${outboundText}`;
+          const ctx = contextWithReply(body, format === 'outbound' ? outboundText : null);
+          if (format === 'html-only') ctx.replyEmail.body = {
+            html: body.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>'),
+          };
+          const result = await qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+            apiKey: 'test-key', maxRetries: 0, briefText: '', prefetchedContext: ctx,
+          });
+          expect({ label, format, authored, lead: result.isLead, review: result.needsReview })
+            .toEqual({ label, format, authored, lead: expected, review: false });
+          if (!expected) expect(result).toMatchObject({ proposalSeen: false, interestSignals: [], objectionHandleable: false, objectionDraft: null });
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+        }
+      }
+    }
+    for (const action of ['Пришлите КП.', 'Сколько стоит?', 'Давайте завтра созвонимся.', 'Можете меня набрать в 14:00.', 'Хочу купить вашу услугу.']) {
+      fetchMock.mockReset();
+      mockAiResult({ is_lead: true, proposal_seen: false, needs_review: false });
+      expect((await qualify(`${readiness[1]}\n${action}`, { outboundText: opener })).isLead).toBe(true);
+    }
+    fetchMock.mockReset();
+    mockAiResult({ is_lead: true, custom_criteria_matched: true, proposal_seen: false, needs_review: false });
+    expect((await qualify(readiness[1], { outboundText: opener, leadCriteria: OUTREACH_OS_CRITERIA })).isLead).toBe(true);
+    // An earlier real offer remains relevant when the latest outbound only asks for a contact.
+    fetchMock.mockReset();
+    mockAiResult({ is_lead: true, proposal_seen: true, needs_review: false });
+    const ctx = contextWithReply(readiness[1], opener);
+    ctx.threadEmails.unshift(email({ id: 'earlier-offer', ue_type: 1,
+      timestamp_email: '2026-08-01T09:00:00Z', body: { text: SUBSTANTIVE_OUTBOUND_TEXT } }));
+    expect((await qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+      apiKey: 'test-key', maxRetries: 0, briefText: '', prefetchedContext: ctx,
+    })).isLead).toBe(true);
+    fetchMock.mockReset();
+    mockAiResult({ is_lead: true, proposal_seen: true, needs_review: false });
+    const failedHistory = contextWithReply(readiness[1], null);
+    failedHistory.historyFetchFailed = true;
+    await expect(qualifyReply('campaign-1', 'lead@example.com', 'thread-1', {
+      apiKey: 'test-key', maxRetries: 0, briefText: '', prefetchedContext: failedHistory,
+    })).rejects.toThrow('outbound history unavailable');
+  });
+
   it.each([
     { name: 'outbound and quote', outboundText: TOBYLAB_OUTBOUND_TEXT },
     { name: 'quote only', outboundText: null },
