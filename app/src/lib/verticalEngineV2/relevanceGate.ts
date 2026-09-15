@@ -14,7 +14,8 @@ const RECOVERY_BATCH_SIZE = 5;
 const MAX_SEMANTIC_ATTEMPTS = 2;
 const configuredMax = Number(process.env.VE_RELEVANCE_MAX_ROWS);
 const MAX_COMPANIES = Number.isFinite(configuredMax) && configuredMax > 0 ? Math.min(10_000, Math.floor(configuredMax)) : 3000;
-const MAX_WEBSITES = 30;
+const MAX_WEBSITES = 32;
+const WEBSITE_CONCURRENCY = 8;
 const FIELDS = ['company', 'website', 'category', 'description', 'vacancy_title', 'website_text'] as const;
 const ACTIVITY_FIELDS: ReadonlyArray<typeof FIELDS[number]> = ['description', 'website_text', 'category'];
 type Fields = Record<typeof FIELDS[number], string>;
@@ -212,6 +213,10 @@ export async function findIrrelevantRows(input: {
     // activity labels before saving their evidence, so they cannot be repaired
     // merely by reinterpreting the saved verdict.
     const keyParts: unknown[] = [identity, fields];
+    if (!identity && !fields.website) {
+      const addresses = [...new Set(group.rows.map((row) => rowText(row, ['address', 'адрес'])).filter(Boolean))].sort();
+      if (addresses.length) keyParts.push(['discovery-geography-v1', addresses]);
+    }
     if (ACTIVITY_FIELDS.some((field) => (field === 'category' ? fields[field].split(/\r?\n/) : [fields[field]])
       .some((value) => isCompleteShortActivityQuote(field, value, fields[field])))) {
       keyParts.push('complete-short-activity-evidence-v1');
@@ -356,7 +361,7 @@ export async function findIrrelevantRows(input: {
         firstReview.status = 'failed'; quarantineSemantic(batch[0]); await save(); continue;
       }
       if (semanticAttempts(firstReview) === 0) {
-        while (batch.length < 4 && pending.length
+        while (batch.length < 8 && pending.length
           && semanticAttempts(checkpoint.semantic_reviews[checkpoint.semantic_review_refs[pending[0].key]]) === 0) batch.push(pending.shift()!);
       }
       const reviews = batch.map((entry) => checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]]);
@@ -442,9 +447,21 @@ export async function findIrrelevantRows(input: {
     await save();
   };
   const classify = async (batch: Entry[], secondPass: boolean, recovering = false): Promise<void> => {
-    const schema = z.object({ decisions: z.array(outputDecision.extend({ i: z.number().int().min(0).max(batch.length - 1) })).length(batch.length) }).superRefine((data, ctx) => {
+    // Select exact source excerpts on the website pass. Asking the model to
+    // reproduce prose caused paid citation repairs and lost valid companies.
+    const excerpts = batch.map((entry) => repairEvidenceCandidates(entry.fields));
+    const decisionSchema = secondPass ? outputDecision.omit({ evidence: true }).extend({
+      evidence_ids: z.array(z.number().int().nonnegative()).max(3),
+    }) : outputDecision;
+    const schema = z.object({ decisions: z.array(decisionSchema.extend({ i: z.number().int().min(0).max(batch.length - 1) })).length(batch.length) }).superRefine((data, ctx) => {
       const ids = new Set(data.decisions.map((item) => item.i));
       if (ids.size !== batch.length || data.decisions.some((item) => item.i >= batch.length)) ctx.addIssue({ code: 'custom', message: 'Every local i must occur exactly once' });
+      if (secondPass) for (const decision of data.decisions) {
+        const selected = (decision as { evidence_ids?: number[] }).evidence_ids ?? [];
+        if (new Set(selected).size !== selected.length || selected.some((id) => !excerpts[decision.i]?.[id])) {
+          ctx.addIssue({ code: 'custom', message: 'Evidence IDs must belong to this company' });
+        }
+      }
     });
     // Verified with Requesty's default gate model. Other configured providers
     // retain JSON mode until their native schema support has been verified.
@@ -455,12 +472,17 @@ export async function findIrrelevantRows(input: {
       } }) } : undefined;
     let classified = false;
     try {
-      const llm = await invoke(messages(scope, batch.map((entry) => entry.fields), input.language, secondPass), schema,
+      const fields = batch.map((entry, i) => secondPass
+        ? { ...entry.fields, description: '', website_text: '', category: '', excerpts: excerpts[i] } : entry.fields);
+      const llm = await invoke(messages(scope, fields, input.language, secondPass, secondPass), schema,
         { model, maxTokens: 5000, requireCompleteJson: true, jsonSchema, ...(recovering ? { maxSchemaAttempts: 1 as const } : {}), signal: signal ?? undefined });
       signal?.throwIfAborted(); const data = schema.parse(llm.data);
       classified = true;
       const repair: Array<{ entry: Entry; raw: z.infer<typeof outputDecision> }> = [];
-      for (const raw of data.decisions) {
+      for (const selected of data.decisions) {
+        const raw = secondPass ? { ...selected, evidence: (selected as { evidence_ids: number[] }).evidence_ids.map((id) => ({
+          field: excerpts[selected.i][id].field, quote: excerpts[selected.i][id].quote,
+        })) } : selected as z.infer<typeof outputDecision>;
         const entry = batch[raw.i];
         stageDecision(entry, supportedDecision(raw, entry.fields, contextHash, entry.attempts, secondPass));
         if (secondPass && needsCitationRepair(raw, entry.fields)) repair.push({ entry, raw });
@@ -571,7 +593,8 @@ export async function findIrrelevantRows(input: {
       signal?.throwIfAborted(); await classify(eligible.slice(start, start + BATCH_SIZE), false);
     }
     const review = entries.filter((entry) => {
-      if (!entry.fields.website && !entry.identity) return false;
+      if (!entry.fields.website && !entry.identity
+        && !entry.group.rows.some((row) => rowText(row, ['address', 'адрес']) && rowText(row, ['company', 'компания']))) return false;
       const cached = checkpoint.website_evidence[entry.key];
       const semantic = checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]];
       if (semantic && semantic.status !== 'finished') return false;
@@ -590,9 +613,9 @@ export async function findIrrelevantRows(input: {
         // Finish saved refinement before accumulating more paid/unfinished work.
         return pendingText(b) - pendingText(a) || a.attempts - b.attempts;
       }).slice(0, MAX_WEBSITES);
-    for (let start = 0; start < review.length && !stopProviderCalls; start += 4) {
+    for (let start = 0; start < review.length && !stopProviderCalls; start += WEBSITE_CONCURRENCY) {
       signal?.throwIfAborted(); const enriched: Entry[] = [];
-      await Promise.all(review.slice(start, start + 4).map(async (entry) => {
+      await Promise.all(review.slice(start, start + WEBSITE_CONCURRENCY).map(async (entry) => {
         if (stopProviderCalls) return;
         const cached = checkpoint.website_evidence[entry.key];
         if (cached?.reader_version === 1 && cached.status === 'ok' && !cached.refined && cached.text) {
@@ -604,7 +627,8 @@ export async function findIrrelevantRows(input: {
           return;
         }
         const evidence = await (input.fetchEvidence ?? fetchVeRelevanceEvidence)(entry.fields.website, { signal: signal ?? undefined,
-          companyInn: entry.identity, focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' ') });
+          companyInn: entry.identity, companyName: entry.fields.company,
+          companyAddress: entry.group.rows.map((row) => rowText(row, ['address', 'адрес'])).find(Boolean), focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' ') });
         signal?.throwIfAborted();
         if (evidence.provider_error) {
           stopProviderCalls = true;

@@ -41,6 +41,7 @@ function preparationError(message: string): string {
   return ['billing', 'configuration', 'provider'].includes(failure.kind) ? failure.message : message;
 }
 const COLLECT_PHASES: Record<ReturnType<typeof getCollectionProgress>['phase'], [string, string]> = {
+  discovering_sites: ['Находим официальные сайты компаний', 'В источнике не было сайта. Ищем его по ИНН или названию и городу, затем проверим принадлежность компании и найдём email.'],
   planning: ['Подбираем источники компаний', 'Система подбирает источники под выбранную гипотезу. Затем соберёт кандидатов и проверит, подходят ли они для рассылки.'],
   collecting: ['Собираем компании и контакты', 'Получаем кандидатов из выбранных источников. Затем автоматически проверим соответствие гипотезе и email, исключим дубли.'],
   construct_queued: ['Обработка контактов в очереди', 'Кандидаты собраны. Поиск недостающих данных и проверка контактов начнутся автоматически, когда освободится обработчик.'],
@@ -139,7 +140,7 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
     || info?.company_name_recovery || job?.payload?.review_relevance;
   if (info?.waiting_for_base_id) return {
     title: 'Ждём завершения другой базы проекта',
-    description: 'Базы этого проекта собираются по очереди, чтобы исключать повторные контакты. Эта база продолжится автоматически.',
+    description: 'Другая сборка по этой же гипотезе ещё работает. Эта база продолжится автоматически после неё.',
     currentStep: 0, tone: 'muted',
   };
   if (job?.status === 'pending' && getVeCollectionFailure(job.error).kind === 'provider') return {
