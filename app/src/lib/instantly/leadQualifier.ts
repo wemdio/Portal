@@ -1877,6 +1877,19 @@ function hasContextDependentDeferredSignal(authoredReply: string): boolean {
 interface ProtectedDefaultVerdict {
   reason: string;
   needsReview: boolean;
+  proposalSeen?: false;
+}
+
+/** A named responsible person agreeing to hear the topic is not yet accepting
+ * our service. Match the entire authored statement, allowing only a name/role
+ * introduction. Any extra commercial content remains for normal assessment;
+ * phone numbers and quoted CTAs must not manufacture buyer intent. */
+function isGenericDiscussionReadiness(authoredReply: string): boolean {
+  const statement = normalizeAuthoredStatement(authoredReply)
+    .replace(/^меня\s+зовут\s+[\p{L}-]+(?:\s+[\p{L}-]+){0,2}\s*[,!.;]\s*/iu, '')
+    .replace(/^я\s+(?:занимаюсь|отвечаю\s+за)\s+(?:(?:привлечени(?:ем|е)\s+(?:новых\s+)?клиентов|продаж(?:ами|и)|маркетинг(?:ом)?|развити(?:ем|е)(?:\s+продаж)?)(?:\s+и\s+)?){1,3}\s*[.!;,]\s*/iu, '')
+    .replace(/[.!;,]?\s*(?:спасибо|благодарю)[.!]?$/iu, '').trim();
+  return /^(?:(?:я|мы)\s+)?(?:готов(?:а|ы)?\s+(?:с\s+вами\s+)?(?:пообщаться|поговорить|обсудить)|давайте\s+(?:пообщаемся|поговорим|обсудим))(?:\s+с\s+вами)?(?:\s+(?:(?:ваше|это|данное)\s+предложение|(?:этот|данный)\s+вопрос|(?:по\s+)?(?:вопросам?\s+)?(?:по\s+)?(?:вашему\s+)?письму(?:\s+ниже)?|подробнее|детали|тему))?[.!]?$/iu.test(statement);
 }
 
 function protectedDefaultVerdict(
@@ -1892,6 +1905,14 @@ function protectedDefaultVerdict(
   const negatedDirectCta = hasNegatedDirectActionableCta(statement);
   const requestedFollowupMaterials = isFollowupMaterialRequest(statement);
   const selfCooperationInterest = hasSelfDirectedCooperationInterest(statement);
+
+  if (!confirmedProposal && !semanticShortOffer && isGenericDiscussionReadiness(authoredReply)) {
+    return {
+      reason: 'Получатель готов обсудить тему обращения, но понятное предложение нашей услуги ещё не подтверждено; конкретного коммерческого запроса или согласия на созвон нет.',
+      needsReview: false,
+      proposalSeen: false,
+    };
+  }
 
   if (
     !confirmedProposal && !semanticShortOffer &&
@@ -2052,6 +2073,7 @@ function normalizeDefaultLeadSignals(
     return {
       ...result,
       isLead: false,
+      ...(protectedVerdict.proposalSeen === false ? { proposalSeen: false } : {}),
       interestSignals: [],
       reason: protectedVerdict.reason,
       confidence: Math.max(result.confidence, 0.95),
@@ -2181,6 +2203,7 @@ function buildSystemPrompt(
 - Запрос контакта ответственного — это НЕ предложение. Но если до ответа было отправлено отдельное содержательное предложение — учитывай его
 - Бриф проекта, название кампании, сам факт ответа или цитирования письма НЕ доказывают, что клиент получил понятный оффер. В исходящем письме или цитате должно быть описано, что именно мы предлагаем, а не только «кому направить информацию?».
 - Оффер может быть коротким: важен понятный продукт/услуга и предложение для клиента, а не длина письма.
+- «Хочу обсудить привлечение прямых заказчиков / поиск корпоративных клиентов» вместе с вопросом «кто отвечает за продажи?» обозначает тему обращения, но само по себе НЕ объясняет нашу услугу. Не достраивай из брифа или подписи, что мы предлагаем платный лидогенерационный сервис. Для proposal_seen=true в полученном тексте должно быть понятно, что именно мы предлагаем сделать для адресата. Первое письмо может содержать полноценный оффер; номер шага рассылки не является критерием.
 
 КОНКРЕТНЫЙ КОММЕРЧЕСКИЙ ЗАПРОС — ЭТО ЛИД:
 - Запрос КП или коммерческого предложения.
@@ -2199,6 +2222,7 @@ function buildSystemPrompt(
 - Явное отрицание («не интересно», «не актуально») и условный интерес третьих лиц («если коллегам будет интересно — они свяжутся») не являются положительным интересом самого получателя.
 
 ОБЩЕЕ ЛЮБОПЫТСТВО — НЕ ЛИД:
+- БЕЗ подтверждённого оффера «готова пообщаться с вами по вопросам по письму ниже», «я занимаюсь привлечением новых клиентов, готова обсудить ваше предложение», «давайте обсудим этот вопрос» означают готовность к первичному знакомству: is_lead=false, proposal_seen=false, needs_review=false. Самопредставление, слово «предложение» и телефон в подписи не доказывают понимания нашей услуги. Это НЕ равнозначно явному «давайте созвонимся», «позвоните мне в 14:00» или запросу КП/цены. После подтверждённого понятного оффера готовность обсудить его является положительным интересом. Положительный кастомный критерий, явно считающий самопредставление ответственного лидом, сохраняет приоритет.
 - БЕЗ подтверждённого оффера «пришлите предложение» без слова «коммерческое», без расчёта/цены и без конкретного следующего шага — это лишь просьба ознакомиться.
 - БЕЗ подтверждённого оффера «пришлите информацию/материалы/презентацию», запрос примеров или кейсов сами по себе НЕ являются лидом: ставь is_lead=false, needs_review=false. После подтверждённого оффера это лид по правилу выше.
 - После запроса контакта фраза «можете презентовать вашу компанию мне» и описание своей роли/процесса выбора подрядчиков лишь разрешают первичное знакомство: это не доказательство полученного оффера и не назначенная встреча. Без отдельного коммерческого запроса или явного согласия на звонок, встречу, демо либо тест ставь is_lead=false, needs_review=false. Если человек действительно предлагает провести встречу/демо или спрашивает цену/КП — это самостоятельный CTA, даже без найденного оффера. Кастомный критерий может отдельно считать представление ответственного или передачу контакта лидом.
@@ -2409,7 +2433,7 @@ export async function fetchBriefByCampaign(
 }
 
 function extractQuotedText(replyText: string): string | null {
-  const lines = replyText.split('\n');
+  const lines = replyText.replace(/\r\n?/g, '\n').split('\n');
   const quotedLines: string[] = [];
   let inQuote = false;
 
@@ -2425,7 +2449,31 @@ function extractQuotedText(replyText: string): string | null {
   }
 
   const quoted = quotedLines.join('\n').trim();
-  return quoted.length > 50 ? quoted : null;
+  if (quoted.length > 50) return quoted;
+
+  // Forwarded plain-text/HTML messages often have no ">" prefix. Require a
+  // coherent sender/recipient/date/subject envelope, not a signature address.
+  // This is offer context only; project ownership still requires real sends.
+  for (let start = 0; start < lines.length; start++) {
+    if (!/^(?:От(?:\s+кого)?|From):\s*.+/iu.test(lines[start].trim())) continue;
+    const fields = new Set<string>();
+    let end = start;
+    for (; end < Math.min(lines.length, start + 12); end++) {
+      const line = lines[end].trim();
+      if (!line) continue;
+      const field = /^(От(?:\s+кого)?|From|Кому|To|Дата|Date|Отправлено|Sent|Тема|Subject):\s*.+/iu.exec(line)?.[1];
+      if (!field) break;
+      if (/^(?:От(?:\s+кого)?|From)$/iu.test(field)) fields.add('from');
+      else if (/^(?:Кому|To)$/iu.test(field)) fields.add('to');
+      else if (/^(?:Тема|Subject)$/iu.test(field)) fields.add('subject');
+      else fields.add('date');
+    }
+    if (fields.size === 4) {
+      const body = lines.slice(end).join('\n').trim();
+      if (body.length > 50) return body;
+    }
+  }
+  return null;
 }
 
 function buildUserMessage(ctx: ThreadContext): string {
