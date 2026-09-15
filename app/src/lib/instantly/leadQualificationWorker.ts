@@ -1441,8 +1441,8 @@ export async function qualifyOneReply(
 
   // Instantly может приклеить входящее к новой кампании того же lead, хотя
   // письмо продолжает старый диалог другого проекта. До критериев, ИИ и любых
-  // пользовательских side effects восстанавливаем владельца по ТОЧНОМУ
-  // eaccount и реальному исходящему родителю.
+  // пользовательских side effects восстанавливаем владельца по исходящему
+  // родителю и eaccount, учитывая доказанный ответ через другой ящик.
   const ownership = await resolveEffectiveReplyOwner({
     db,
     reply,
@@ -1512,10 +1512,10 @@ export async function qualifyOneReply(
     ? { ...reply, campaign_id: campaignId }
     : reply;
   const outOfCampaign = opts?.outOfCampaign === true || ownership.corrected;
-  if (ownership.corrected) {
+  if (ownership.corrected || ownership.conversationVerified) {
     workerLog(
       'info',
-      `corrected reply ownership ${reply.id ?? '?'}: ${providerCampaignId} → ${campaignId} (${ownership.reason})`,
+      `resolved reply ownership ${reply.id ?? '?'}: ${providerCampaignId} → ${campaignId} (${ownership.reason})`,
     );
   }
 
@@ -1529,7 +1529,9 @@ export async function qualifyOneReply(
     ? {
         qualified_project_id: qualifiedProjectId,
         qualified_project_owner_proven: true,
-        reply_recovery_snapshot: captureQualificationReplySnapshot(effectiveReply),
+        // Preserve the provider input, not our derived campaign. Otherwise a
+        // retry loses the original conversation and reinforces a wrong owner.
+        reply_recovery_snapshot: captureQualificationReplySnapshot(reply),
       }
     : {};
 
@@ -1660,7 +1662,7 @@ export async function qualifyOneReply(
   // лиду в этом треде. Контекст треда фетчим здесь и передаём в qualifyReply
   // как prefetchedContext — итоговое число вызовов Instantly не растёт.
   const ctx = ownership.context;
-  if (ourMailbox && ctx && !ownership.mailboxVerified) {
+  if (ourMailbox && ctx && !ownership.mailboxVerified && !ownership.conversationVerified) {
     // Тред-исходящие ∪ ящики кампании (campaignOutboundMailboxes — из уже
     // скачанных страниц, без доп. вызовов). Только тредовых НЕДОСТАТОЧНО: для
     // «слепого» письма search идёт по адресу ОТПРАВИТЕЛЯ (кампания ему не

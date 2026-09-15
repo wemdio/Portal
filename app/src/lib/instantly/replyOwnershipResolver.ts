@@ -49,6 +49,8 @@ export type ReplyOwnershipResolution =
       corrected: boolean;
       /** Exact live mailbox configuration proved the effective campaign. */
       mailboxVerified: boolean;
+      /** Exact thread, recipient, chronology and quoted send prove a reply via another mailbox. */
+      conversationVerified?: boolean;
       reason: string;
     }
   | {
@@ -840,6 +842,38 @@ function strongExactProviderParent(args: {
   return evidence.get(providerCampaignId)?.parents[0]?.email ?? null;
 }
 
+/** Mailbox rotation / Reply-To can change the receiving account without
+ * changing the conversation's owner. Neither a provider thread alone nor a
+ * generic quoted line is sufficient to cross that boundary. Inspect all sends:
+ * the reply may quote the first offer rather than the latest follow-up. */
+function verifiedConversationParents(context: ThreadContext | null, reply: Email): Email[] {
+  const thread = reply.thread_id?.trim();
+  const mailbox = normalizeMailbox(reply.eaccount);
+  const replyAt = emailTs(reply);
+  if (!context || !thread || !mailbox || !replyAt) return [];
+  const identities = new Set([
+    ...emailAddressTokens(reply.from_address_email), ...emailAddressTokens(reply.lead),
+  ]);
+  const quote = normalizeQuotedText(getBodyText(reply.body));
+  return [...context.threadEmails, ...(context.lastOutbound ? [context.lastOutbound] : [])]
+    .filter((email, index, all) => {
+      if (!email.id || !email.campaign_id?.trim() ||
+          all.findIndex(item => item.id === email.id && item.campaign_id === email.campaign_id) !== index ||
+          (email.ue_type !== 1 && email.ue_type !== 3) ||
+          email.thread_id?.trim() !== thread) return false;
+      const sentAt = emailTs(email);
+      const sender = normalizeMailbox(email.eaccount);
+      if (!sentAt || sentAt >= replyAt || !sender ||
+          normalizeMailbox(email.from_address_email) !== sender) return false;
+      const recipients = [
+        ...emailAddressTokens(email.to_address_email_list), ...jsonAddressTokens(email.to_address_json),
+      ];
+      if (!recipients.some(address => identities.has(address))) return false;
+      const body = normalizeQuotedText(getBodyText(email.body));
+      return body.length >= 80 && quote.includes(body);
+    });
+}
+
 async function resolveProviderCampaignFallback(args: {
   db: SupabaseClient;
   providerCampaignId: string;
@@ -917,8 +951,9 @@ async function resolveProviderCampaignFallback(args: {
 /**
  * Resolve the real campaign/project before any qualification criteria or
  * user-visible side effects. Instantly can attach an inbound to a different
- * campaign merely because the same lead exists there; the exact receiving
- * mailbox plus the actual outbound parent are authoritative.
+ * campaign merely because the same lead exists there. Prove the actual
+ * conversation first when sender and receiver accounts differ; otherwise use
+ * the exact receiving mailbox together with outbound history.
  */
 export async function resolveEffectiveReplyOwner(args: {
   db: SupabaseClient;
@@ -964,6 +999,37 @@ export async function resolveEffectiveReplyOwner(args: {
       reply, mailbox, leadEmail,
       reason: 'reply has no eaccount; provider campaign retained',
     });
+  }
+
+  // Actual conversation proof takes precedence over today's mailbox tags.
+  // Keep this separate from mailboxVerified: the receiving mailbox may quite
+  // legitimately belong to another project, and must not be globally relinked.
+  const conversationParents = verifiedConversationParents(providerContext, reply);
+  if (conversationParents.some(parent => parent.campaign_id === providerCampaignId &&
+      normalizeMailbox(parent.eaccount) !== mailbox)) {
+    const campaignIds = [...new Set(conversationParents.map(parent => parent.campaign_id!))];
+    const conversationLinks = await loadOwnershipLinks(db, campaignIds);
+    if (conversationLinks.error) {
+      return { status: 'defer', providerCampaignId,
+        reason: `conversation ownership unavailable: ${conversationLinks.error}` };
+    }
+    const ownerKeys = [...new Set(campaignIds.flatMap(id => campaignOwnerKeys(conversationLinks, id)))];
+    if (ownerKeys.length !== 1 || ownerKeys[0].startsWith('unknown:')) {
+      return { status: 'ambiguous', providerCampaignId, candidateCampaignIds: campaignIds,
+        candidateProjectIds: [...new Set(campaignIds.flatMap(id =>
+          [...(conversationLinks.projectsByCampaign.get(id) ?? [])]))],
+        reason: 'cross-mailbox conversation matches multiple or unknown owners' };
+    }
+    const parent = conversationParents.filter(item => item.campaign_id === providerCampaignId)
+      .sort((a, b) => emailTs(b) - emailTs(a))[0];
+    return {
+      status: 'resolved', providerCampaignId, effectiveCampaignId: providerCampaignId,
+      effectiveProjectId: projectIdFromOwnerKey(ownerKeys[0]),
+      context: correctedContext(reply, providerCampaignId, normalizeMailbox(parent.eaccount)!,
+        providerContext!.threadEmails.filter(email => email.campaign_id === providerCampaignId), parent),
+      corrected: false, mailboxVerified: false, conversationVerified: true,
+      reason: `exact thread, recipient, chronology and quoted outbound ${parent.id} prove cross-mailbox campaign ${providerCampaignId}`,
+    };
   }
 
   let mappings: MappedCampaigns;
