@@ -7,6 +7,9 @@
  */
 
 import { z } from 'zod';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import type { VeJob } from '@/lib/verticalEngineV2/types';
+import { withVeCostTelemetry } from '@/lib/verticalEngineV2/costTelemetry';
 
 jest.mock('@/lib/clientDemo/personalize', () => ({ assertPublicWebsite: jest.fn() }));
 jest.mock('@/lib/enrich/websiteParser', () => ({
@@ -85,6 +88,35 @@ describe('llm rawCall retry', () => {
 
     expect(result.data).toEqual({ ok: true });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // A committed journal write whose response was lost must be retried with
+    // one stable ID, without repeating the successful paid request.
+    for (const permanent of [false, true]) {
+      const writes = new Map<string, number>();
+      const upsert = jest.fn((row: { id: string; event: string }, options: unknown) => {
+        expect(options).toEqual({ onConflict: 'id', ignoreDuplicates: true });
+        const count = (writes.get(row.id) ?? 0) + 1;
+        writes.set(row.id, count);
+        return { abortSignal: async () => ({ error: count === 1 || (permanent && row.event === 'finished')
+          ? { message: 'write response lost' } : null }) };
+      });
+      const db = { from: (table: string) => {
+        expect(table).toBe('application_logs');
+        return { upsert };
+      } } as unknown as SupabaseClient;
+      const job = { id: 'job', project_id: 'project', stage: 'base_analyze', payload: { provider_usage_origin: { runId: 'origin' } } } as unknown as VeJob;
+      fetchMock.mockClear().mockResolvedValue(httpResponse(200, { choices: [{ message: { content: '{"ok":true}' } }], usage: {} }));
+      const operation = withVeCostTelemetry(db, job, () => callLLMWithSchema(
+        [{ role: 'user', content: 'json' }], schema, { model: 'test-model' },
+      ));
+      const assertion = permanent ? expect(operation).rejects.toThrow('Provider usage journal could not be saved.')
+        : expect(operation).resolves.toMatchObject({ data: { ok: true } });
+      await jest.advanceTimersByTimeAsync(5000);
+      await assertion;
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect([...writes.values()].sort()).toEqual(permanent ? [2, 2, 2, 3] : [2, 2, 2, 2]);
+      expect(maxAttemptsFor('Provider usage journal could not be saved.')).toBe(1);
+    }
   });
 
   it('does not retry a permanent 4xx', async () => {
@@ -328,9 +360,16 @@ describe('llm rawCall retry', () => {
     Object.values(legacy.verdicts).forEach((verdict) => { delete verdict.website_review_version; });
     const legacyRow = { ...input.rows[0], _email_status: 'ok', _ve_relevance: Object.values(legacy.verdicts)[0] };
     expect(needsVeRelevanceEvidence(legacyRow)).toBe(true);
-    const available = jest.fn().mockResolvedValue({ status: 'ok', text: description, url: 'https://factory.test/', reason: 'identity_verified_website' });
-    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'relevant', reason: 'Makes equipment', evidence_ids: [0] }] })).mockResolvedValueOnce(confirmation);
-    const upgraded = await findIrrelevantRows({ ...input, rows: [legacyRow], checkpoint: legacy, fetchEvidence: available });
+    const websiteText = (description + '. 🏭 ').padEnd(5999, 'x') + '😀 tail\u0000\ud83d';
+    const available = jest.fn().mockResolvedValue({ status: 'ok', text: websiteText, url: 'https://factory.test/', reason: 'identity_verified_website' });
+    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'relevant', reason: 'x'.repeat(399) + '😀', evidence_ids: [0] }] })).mockResolvedValueOnce(confirmation);
+    const upgraded = await findIrrelevantRows({ ...input, rows: [legacyRow], checkpoint: legacy, fetchEvidence: available,
+      onCheckpoint: async (checkpoint) => {
+        expect(JSON.stringify(checkpoint)).not.toMatch(/\\u(?:0000|d[89a-f][0-9a-f]{2})/i);
+        const pending = Object.values(checkpoint.website_evidence).find((item) => item.text);
+        if (pending) expect(pending.text).toContain('🏭');
+      },
+    });
     expect(upgraded.decisions.get(0)?.status).toBe('relevant');
     expect(available).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(2);

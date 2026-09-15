@@ -330,6 +330,42 @@ describe('base_collect CONSTRUCT step order', () => {
     expect(emailRows.every((row) => row._email_status === 'ok')).toBe(true);
     expect(hasPendingVeSavedEmailRecovery(emailRows, emailState)).toBe(false);
     expect(emailDb.getRows('base_constructor_jobs')).toHaveLength(2);
+    // Valid recipients progress while a small SMTP child waits in the shared
+    // queue. Even 500 ready recipients must not orphan that queued child.
+    for (const count of [1, 500]) {
+      const reviewRows = Array.from({ length: count }, (_, index) => ({
+        ...unifiedRow({ company: 'Clinic Verified', website: 'verified.test', email: `recipient${index}@verified.test` }),
+        _email_status: 'ok', _relevance_unchecked: true,
+      }));
+      const unknown = { ...unifiedRow({ company: 'Clinic Unknown', website: 'unknown.test', email: 'mail@unknown.test' }),
+        _email_status: 'unknown', _relevance_unchecked: true };
+      const overlapInfo: VeCollectInfo = { ...collectInfo([]), collection_mode: 'preview', ready_target: 500,
+        validation_retry: true, target_progress: { ...createCollectionTarget('preview'), candidates_processed: count + 1 },
+        target_checkpoint: { completed_round: 1, seen_rows: [], processed_rows: count + 1 },
+        relevance_reserve: { version: 1, rows: [...reviewRows, unknown], source_rows: [] } };
+      overlapInfo.tasks![0].exhausted = true;
+      const overlapDb = seed(overlapInfo, { ve_bases: [{ ...makeBase(overlapInfo), columns: [...VE_AUTO_COLLECT_COLUMNS] }] });
+      const wake = async () => {
+        await overlapDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+        return runBaseCollectStage(makeJob(), { supabase: overlapDb as unknown as SupabaseClient });
+      };
+      await wake();
+      expect(overlapDb.getRows('ve_bases')[0]).toMatchObject({ status: 'collecting', row_count: count });
+      const child = overlapDb.getRows('base_constructor_jobs')[0];
+      expect(child).toMatchObject({ status: 'pending', selected_steps: ['validate_emails'], initial_row_count: 1 });
+      const calls = mockFindIrrelevantRows.mock.calls.length;
+      await wake();
+      expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(calls);
+      expect(overlapDb.getRows('base_constructor_jobs')).toHaveLength(1);
+      expect(overlapDb.getRows('ve_jobs').filter((row) => row.stage === 'base_analyze')).toHaveLength(0);
+      const grid = child.data as string[][];
+      await overlapDb.from('base_constructor_jobs').update({ status: 'completed',
+        data: [[...grid[0], 'Email Статус'], ...grid.slice(1).map((row) => [...row, 'ok'])] }).eq('id', child.id);
+      await wake();
+      expect(overlapDb.getRows('ve_bases')[0]).toMatchObject({ status: 'analyzing', row_count: count + 1 });
+      expect((overlapDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).saved_email_recovery?.batch).toBeUndefined();
+      expect(overlapDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    }
     // A failed/ambiguous queue insert never races a concurrent repair by
     // restoring failed; a later explicit queue check repairs that same base.
     for (const committed of [false, true]) {

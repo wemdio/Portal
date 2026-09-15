@@ -72,15 +72,22 @@ async function childSnapshot(db: SupabaseClient, baseId?: string): Promise<VeChi
 }
 
 async function append(db: SupabaseClient, scope: ProviderUsageScope, event: string, context: Record<string, unknown>) {
-  try {
-    const { error } = await db.from('application_logs').insert({
-      level: 'info', source: VE_USAGE_SOURCE, event, message: `VE2 provider accounting: ${event}`,
-      request_id: scope.projectId, context: { version: VE_USAGE_VERSION, ...scope, ...context },
-    }).abortSignal(AbortSignal.timeout(10_000));
-    if (error) throw new ProviderUsageWriteError();
-  } catch {
-    throw new ProviderUsageWriteError();
+  // A timeout can arrive after Postgres committed. Retry only this immutable
+  // journal entry, with the same ID; never replay the paid provider operation.
+  const row = {
+    id: randomUUID(), created_at: new Date().toISOString(),
+    level: 'info', source: VE_USAGE_SOURCE, event, message: `VE2 provider accounting: ${event}`,
+    request_id: scope.projectId, context: { version: VE_USAGE_VERSION, ...scope, ...context },
+  };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const { error } = await db.from('application_logs')
+        .upsert(row, { onConflict: 'id', ignoreDuplicates: true }).abortSignal(AbortSignal.timeout(10_000));
+      if (!error) return;
+    } catch { /* Bounded persistence retry; the caller still fails closed. */ }
+    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
   }
+  throw new ProviderUsageWriteError();
 }
 
 function eventFields(event: ProviderUsageEvent): Record<string, unknown> {

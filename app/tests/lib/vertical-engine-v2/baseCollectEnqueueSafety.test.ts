@@ -182,6 +182,24 @@ describe('VE2 base collection enqueue recovery', () => {
       }
     }
 
+    // A busy coordinator advances beyond two preparations per tick, but never
+    // spins around a short queue redoing the same preparation repeatedly.
+    for (const size of [2, 50]) {
+      let claimCount = 0;
+      const save = jest.fn(() => ({ data: true }));
+      const preparations = Array.from({ length: size }, (_, index) => ({
+        project_id: `coord-${index}`, hypothesis_id: `h-${index}`, base_id: null,
+        template_id: null, status: 'pending', language: 'ru', last_error: null, claim_token: 'lease',
+      }));
+      const coordinatorDb = createMockSupabase({ rpcHandlers: {
+        ve_claim_outreach_preparation: () => ({ data: [preparations[claimCount++ % size]] }),
+        ve_save_outreach_preparation: save,
+      } });
+      await runVeOutreachPreparations(coordinatorDb as unknown as SupabaseClient);
+      expect(claimCount).toBe(size === 2 ? 3 : 32);
+      expect(save).toHaveBeenCalledTimes(claimCount);
+    }
+
     // One project keeps its stage order while another uses the free slot.
     const now = new Date('2026-09-14T23:00:00Z');
     const queueDb = createMockSupabase({ enforceQueryWindows: true, tables: { ve_jobs:

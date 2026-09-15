@@ -236,9 +236,18 @@ describe('Base Constructor run-token fencing', () => {
       { id: 'bulk', status: 'pending', created_at: new Date(now - 60_000).toISOString() },
       { id: 'preview', status: 'pending', created_at: new Date(now).toISOString(), step_config: { queue_class: 'interactive_preview' } },
     ] } });
-    expect(await nextPendingConstructor(queue as unknown as SupabaseClient, true, now)).toMatchObject({ id: 'preview' });
-    expect(await nextPendingConstructor(queue as unknown as SupabaseClient, false, now)).toMatchObject({ id: 'bulk' });
-    expect(await nextPendingConstructor(queue as unknown as SupabaseClient, true, now + 5 * 60_000)).toMatchObject({ id: 'bulk' });
+    expect(await nextPendingConstructor(queue as unknown as SupabaseClient, true)).toMatchObject({ id: 'preview' });
+    expect(await nextPendingConstructor(queue as unknown as SupabaseClient, false)).toMatchObject({ id: 'bulk' });
+    await queue.from('base_constructor_jobs').update({ created_at: new Date(now - 3_600_000).toISOString() }).eq('id', 'bulk');
+    await queue.from('base_constructor_jobs').insert([
+      { id: 'short', status: 'pending', created_at: new Date(now).toISOString(), initial_row_count: 32, selected_steps: ['validate_emails'] },
+      { id: 'large-validation', status: 'pending', created_at: new Date(now - 20_000).toISOString(), initial_row_count: 10_000, selected_steps: ['validate_emails'] },
+      { id: 'multi-step', status: 'pending', created_at: new Date(now - 10_000).toISOString(), initial_row_count: 10, selected_steps: ['validate_emails', 'ta_scoring'] },
+    ]);
+    expect(await nextPendingConstructor(queue as unknown as SupabaseClient, true)).toMatchObject({ id: 'short' });
+    expect(await nextPendingConstructor(queue as unknown as SupabaseClient, false)).toMatchObject({ id: 'bulk' });
+    await queue.from('base_constructor_jobs').update({ status: 'processing' }).eq('id', 'short');
+    expect(await nextPendingConstructor(queue as unknown as SupabaseClient, true)).toMatchObject({ id: 'preview' });
   });
 
   it('lets the active token persist a checkpoint and complete the job', async () => {
