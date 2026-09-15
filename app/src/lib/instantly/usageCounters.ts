@@ -37,6 +37,18 @@ function clip(value: string): string {
   return value.length > MAX_LEN ? value.slice(0, MAX_LEN) : value;
 }
 
+/** Path (or full URL) → endpoint label: query dropped, ids/emails collapsed. */
+export function instantlyUsageEndpoint(pathOrUrl: string): string {
+  const path = pathOrUrl.replace(/^https?:\/\/[^/]+\/api\/v2/i, '').split('?')[0];
+  return path.replace(/\/[0-9a-f-]{16,}/gi, '/{id}').replace(/\/[^/?#]{8,}@[^\s/?#]+/gi, '/{email}');
+}
+
+/** Status label for one finished HTTP attempt. */
+export function instantlyUsageStatusFromHttp(status: number): InstantlyUsageStatus {
+  if (status === 429) return 'http_429';
+  return status >= 200 && status < 400 ? 'ok' : 'http_error';
+}
+
 export function recordInstantlyApiUsage(record: InstantlyUsageRecord): void {
   if (!supabaseAdmin) return;
   const hour = new Date();
