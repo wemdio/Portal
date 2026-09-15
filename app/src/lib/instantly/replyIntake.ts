@@ -94,7 +94,7 @@ export async function discoverReplyIntake(
       }, {
         // Both lanes discover newly received work. Do not spend the separate
         // recovery allowance needed by already-persisted ownership retries.
-        accountId: options.accountId, requestPriority: 'fresh',
+        accountId: options.accountId, requestPriority: 'fresh', consumer: 'discovery',
         timeoutMs: 20_000, timeoutIncludesBody: true, retryRateLimits: false,
       });
       if (!Array.isArray(page.items) || page.items.length > PAGE_SIZE) throw new Error(`${FAILURE}: invalid email page`);

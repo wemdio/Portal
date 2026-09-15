@@ -78,7 +78,7 @@ export async function fetchThreadContext(
       campaign_id: campaignId,
       search: leadEmail,
       limit: 100,
-    }, { accountId, ...requestOptions });
+    }, { accountId, consumer: 'qualification', ...requestOptions });
     allEmails = res.items ?? [];
     historyFetchFailed = Boolean(res.next_starting_after);
   } catch (error) {
@@ -108,7 +108,7 @@ export async function fetchThreadContext(
       const response = await instantly.listEmails({
         campaign_id: campaignId,
         limit: 100,
-      }, { accountId, ...requestOptions });
+      }, { accountId, consumer: 'qualification', ...requestOptions });
       // A complete campaign-wide fallback also repairs an earlier failed or
       // truncated narrow lookup; otherwise the same reply would defer forever.
       historyFetchFailed = Boolean(response.next_starting_after);

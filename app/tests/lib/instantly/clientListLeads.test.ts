@@ -90,7 +90,11 @@ describe('listLeads → Instantly POST /leads/list body shape', () => {
 
     expect(onRequestAttempt).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(mockEmailBudgetRpc).not.toHaveBeenCalled();
+    // Не-emails запрос не резервирует email-read бюджет. Hourly-счётчик
+    // (instantly_bump_api_usage) — отдельный fire-and-forget RPC, ему можно.
+    const budgetRpcNames = mockEmailBudgetRpc.mock.calls.map((c) => c[0]);
+    expect(budgetRpcNames).not.toContain('instantly_reserve_email_read');
+    expect(budgetRpcNames).not.toContain('instantly_defer_email_reads');
 
     // Read admission is a separate hard gate, including skipRateLimiter callers.
     fetchMock.mockClear();
@@ -107,9 +111,9 @@ describe('listLeads → Instantly POST /leads/list body shape', () => {
     });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(onRequestAttempt).not.toHaveBeenCalled();
-    expect(mockEmailBudgetRpc).toHaveBeenLastCalledWith('instantly_reserve_email_read', {
+    expect(mockEmailBudgetRpc.mock.calls).toContainEqual(['instantly_reserve_email_read', {
       p_account: 'main', p_priority: 'recovery',
-    });
+    }]);
 
     mockEmailBudgetRpc.mockReturnValueOnce({
       abortSignal: () => Promise.resolve({ data: null, error: { code: 'PGRST202' } }),
@@ -122,9 +126,9 @@ describe('listLeads → Instantly POST /leads/list body shape', () => {
     await listEmails({ limit: 1 }, { onRequestAttempt });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(onRequestAttempt).toHaveBeenCalledTimes(1);
-    expect(mockEmailBudgetRpc).toHaveBeenLastCalledWith('instantly_reserve_email_read', {
+    expect(mockEmailBudgetRpc.mock.calls).toContainEqual(['instantly_reserve_email_read', {
       p_account: 'main', p_priority: 'fresh',
-    });
+    }]);
 
     fetchMock.mockResolvedValueOnce(new Response('', { status: 429, headers: { 'Retry-After': '120' } }));
     mockEmailBudgetRpc.mockReturnValueOnce({
@@ -134,9 +138,9 @@ describe('listLeads → Instantly POST /leads/list body shape', () => {
     });
     await expect(listEmails({ limit: 1 }, { retryRateLimits: true, onRequestAttempt }))
       .rejects.toBeInstanceOf(InstantlyEmailReadDeferredError);
-    expect(mockEmailBudgetRpc).toHaveBeenLastCalledWith('instantly_defer_email_reads', {
+    expect(mockEmailBudgetRpc.mock.calls).toContainEqual(['instantly_defer_email_reads', {
       p_account: 'main', p_retry_after_ms: 120_000,
-    });
+    }]);
     // A second logical call cannot defeat the shared/local cooldown or pay for
     // a second HTTP attempt. No real backoff timer is slept in this test.
     await expect(listEmails({ limit: 1 }, { skipRateLimiter: true }))

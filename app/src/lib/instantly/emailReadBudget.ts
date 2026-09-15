@@ -3,10 +3,18 @@ import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { InstantlyApiError } from './errors';
 import type { InstantlyEmailReadDeferredReason } from './emailReadDeferral';
+import { recordInstantlyApiUsage } from './usageCounters';
 
 export type { InstantlyEmailReadDeferredReason } from './emailReadDeferral';
 
-export type InstantlyEmailReadPriority = 'fresh' | 'recovery';
+/**
+ * Admission priorities for LIST /emails inside the shared 18/60s workspace
+ * budget: 'fresh' — reply discovery/qualification and interactive reads (up
+ * to the whole 18 when idle); 'recovery' — ownership retries, own 6/60s
+ * sub-share; 'bulk' — background exports/reports, own 6/60s sub-share so a
+ * heavy export can no longer starve fresh reply collection.
+ */
+export type InstantlyEmailReadPriority = 'fresh' | 'recovery' | 'bulk';
 
 /** A technical deferral, never evidence that a reply is not a lead. */
 export class InstantlyEmailReadDeferredError extends InstantlyApiError {
@@ -75,16 +83,19 @@ export async function reserveInstantlyEmailRead(
   accountId: string,
   priority: InstantlyEmailReadPriority = 'fresh',
   deadline?: number,
+  consumer = 'unspecified',
 ): Promise<void> {
   const nowMs = Date.now();
   const localUntil = localCooldowns.get(accountId) ?? 0;
   if (localUntil > nowMs) {
+    recordInstantlyApiUsage({ accountId, endpoint: '/emails', consumer, status: 'deferred_cooldown' });
     throw new InstantlyEmailReadDeferredError('cooldown', localUntil - nowMs);
   }
   if (localUntil) localCooldowns.delete(accountId);
   const admissionKey = `${accountId}:${priority}`;
   const admissionUntil = localAdmissionDeferrals.get(admissionKey) ?? 0;
   if (admissionUntil > nowMs) {
+    recordInstantlyApiUsage({ accountId, endpoint: '/emails', consumer, status: 'deferred_budget' });
     throw new InstantlyEmailReadDeferredError('budget', admissionUntil - nowMs);
   }
   if (admissionUntil) localAdmissionDeferrals.delete(admissionKey);
@@ -93,17 +104,23 @@ export async function reserveInstantlyEmailRead(
     p_priority: priority,
   }, deadline);
   if (!data || typeof data !== 'object') {
+    recordInstantlyApiUsage({ accountId, endpoint: '/emails', consumer, status: 'deferred_storage_unavailable' });
     throw new InstantlyEmailReadDeferredError('storage_unavailable', STORAGE_RETRY_MS);
   }
   const result = data as { granted?: unknown; retry_after_ms?: unknown; reason?: unknown };
   if (result.granted === true && result.retry_after_ms === 0) return;
+  const reason = result.reason;
   if (result.granted === false && typeof result.retry_after_ms === 'number' &&
       Number.isFinite(result.retry_after_ms) && result.retry_after_ms > 0 &&
-      (result.reason === 'budget' || result.reason === 'cooldown')) {
-    if (result.reason === 'cooldown') localCooldowns.set(accountId, Date.now() + result.retry_after_ms);
-    else localAdmissionDeferrals.set(admissionKey, Date.now() + result.retry_after_ms);
-    throw new InstantlyEmailReadDeferredError(result.reason, result.retry_after_ms);
+      (reason === 'budget' || reason === 'recovery_budget' || reason === 'bulk_budget' || reason === 'cooldown')) {
+    // Local denial caches use the coarse 'budget' reason key: the SQL lane
+    // reason only matters to counters/logs, not to retry scheduling.
+    if (reason === 'cooldown') localCooldowns.set(accountId, Date.now() + (result.retry_after_ms as number));
+    else localAdmissionDeferrals.set(admissionKey, Date.now() + (result.retry_after_ms as number));
+    recordInstantlyApiUsage({ accountId, endpoint: '/emails', consumer, status: `deferred_${reason}` });
+    throw new InstantlyEmailReadDeferredError(reason, result.retry_after_ms);
   }
+  recordInstantlyApiUsage({ accountId, endpoint: '/emails', consumer, status: 'deferred_storage_unavailable' });
   throw new InstantlyEmailReadDeferredError('storage_unavailable', STORAGE_RETRY_MS);
 }
 

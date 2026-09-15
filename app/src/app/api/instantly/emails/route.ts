@@ -16,6 +16,6 @@ export const GET = withAuth(async (req) => {
     lead_id,
     limit: limit ? parseInt(limit, 10) : 25,
     starting_after,
-  });
+  }, { consumer: 'admin_emails' });
   return NextResponse.json(data);
 });

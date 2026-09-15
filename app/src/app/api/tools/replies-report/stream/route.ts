@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { getBearerToken, createAuthedSupabaseClient } from '@/lib/supabaseRouteClient';
 import { listEmails, getCampaignAnalytics } from '@/lib/instantly/client';
+import { readInstantlyEmailReadDeferral } from '@/lib/instantly/emailReadDeferral';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
 import type { Email } from '@/lib/instantly/types';
 import type { CampaignMetrics, CampaignReplies, ReportReply } from '@/lib/repliesReport/types';
@@ -24,6 +25,10 @@ const BATCH_SIZE = 5;
 const INTER_BATCH_DELAY_MS = 600;
 const MAX_REPLIES_PER_CAMPAIGN = 2000;
 const MAX_PAGES = 200;
+// Ретраи страницы при отказе bulk-полосы бюджета чтений: полоса выдаёт
+// retry-after, его и ждём (фиксированный короткий сон просто сжигал бы
+// попытки мимо окна выдачи).
+const PAGE_DEFERRAL_RETRIES = 5;
 
 function sseEvent(data: object): string {
   return `data: ${JSON.stringify(data)}\n\n`;
@@ -71,12 +76,27 @@ async function fetchReplies(
   let truncated = false;
 
   for (let guard = 0; guard < MAX_PAGES; guard += 1) {
-    const page = await listEmails({
-      campaign_id: campaignId,
-      email_type: 'received',
-      limit: 100,
-      starting_after: after,
-    });
+    const page = await (async () => {
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          return await listEmails({
+            campaign_id: campaignId,
+            email_type: 'received',
+            limit: 100,
+            starting_after: after,
+          }, {
+            // Фоновый отчёт: bulk-полоса бюджета чтений — не конкурирует со
+            // сбором новых ответов; при отказе полосы ждём её retry-after.
+            requestPriority: 'bulk',
+            consumer: 'replies_report',
+          });
+        } catch (err) {
+          const deferral = readInstantlyEmailReadDeferral(err);
+          if (!deferral || attempt >= PAGE_DEFERRAL_RETRIES) throw err;
+          await sleep(Math.min(120_000, Math.max(1_000, deferral.retryAfterMs)));
+        }
+      }
+    })();
     const items: Email[] = page.items ?? [];
     let oldest = Infinity;
     for (const e of items) {

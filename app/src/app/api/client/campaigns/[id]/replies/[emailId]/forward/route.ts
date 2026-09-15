@@ -71,7 +71,7 @@ export async function POST(
 
     let eaccount = findEaccountForReply({ originalEmail: original, threadEmails: [] });
     if (!eaccount && original.thread_id && original.lead) {
-      const thread = await listEmails({ campaign_id: campaignId, lead_id: original.lead, limit: 100 }, instantlyRequestOptions);
+      const thread = await listEmails({ campaign_id: campaignId, lead_id: original.lead, limit: 100 }, { ...instantlyRequestOptions, consumer: 'client_forward' });
       eaccount = findEaccountForReply({ originalEmail: original, threadEmails: thread.items ?? [] });
     }
     if (!eaccount) {

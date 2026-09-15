@@ -55,7 +55,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       limit,
       starting_after: startingAfter,
       search,
-    }, { accountId });
+    }, { accountId, consumer: 'client_campaign_feed' });
 
     // Кросс-клиентская гигиена: Instantly клеит входящее к кампании по адресу
     // отправителя, не проверяя получателя — письма, пришедшие на ящик ДРУГОГО
