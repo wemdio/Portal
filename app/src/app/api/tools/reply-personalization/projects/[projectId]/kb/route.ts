@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
-import { getKnowledgeBase, upsertKnowledgeBase } from '@/lib/replyPersonalization/db';
+import { getKnowledgeBase, getProjectBrief, upsertKnowledgeBase } from '@/lib/replyPersonalization/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -8,8 +8,8 @@ export const GET = withAuth(async (_req, _user, params) => {
   const projectId = params?.projectId;
   if (!projectId) return NextResponse.json({ error: 'projectId is required' }, { status: 400 });
 
-  const kb = await getKnowledgeBase(projectId);
-  return NextResponse.json({ kb });
+  const [kb, projectBrief] = await Promise.all([getKnowledgeBase(projectId), getProjectBrief(projectId)]);
+  return NextResponse.json({ kb, projectBrief });
 });
 
 export const PUT = withAuth(async (req: NextRequest, user, params) => {
@@ -17,7 +17,6 @@ export const PUT = withAuth(async (req: NextRequest, user, params) => {
   if (!projectId) return NextResponse.json({ error: 'projectId is required' }, { status: 400 });
 
   const body = (await req.json().catch(() => null)) as {
-    brief?: string;
     productFacts?: string;
     toneNotes?: string;
     exampleCase?: string;
@@ -27,7 +26,6 @@ export const PUT = withAuth(async (req: NextRequest, user, params) => {
   await upsertKnowledgeBase(
     projectId,
     {
-      brief: body.brief ?? '',
       productFacts: body.productFacts ?? '',
       toneNotes: body.toneNotes ?? '',
       exampleCase: body.exampleCase ?? '',
@@ -35,6 +33,6 @@ export const PUT = withAuth(async (req: NextRequest, user, params) => {
     user.id,
   );
 
-  const kb = await getKnowledgeBase(projectId);
-  return NextResponse.json({ kb });
+  const [kb, projectBrief] = await Promise.all([getKnowledgeBase(projectId), getProjectBrief(projectId)]);
+  return NextResponse.json({ kb, projectBrief });
 });

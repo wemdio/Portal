@@ -9,7 +9,10 @@ const ACCEPT = '.pdf,.docx,.txt,.md';
 const CONTROL_CLASS =
   'w-full rounded-lg border border-zinc-300 bg-white px-3.5 py-2.5 text-sm leading-relaxed text-zinc-900 transition-colors focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20';
 
-type UploadField = 'brief' | 'productFacts' | 'exampleCase';
+type UploadField = 'productFacts' | 'exampleCase';
+
+/** Сколько символов брифа показывать до кнопки «Показать полностью». */
+const BRIEF_PREVIEW_CHARS = 600;
 
 /**
  * Поле базы знаний с опциональной кнопкой загрузки файла: текст извлекается
@@ -93,7 +96,8 @@ export function KnowledgeBaseForm({
   /** Дергается после успешного сохранения — родитель обновляет бейджи/списки. */
   onSaved?: () => void;
 }) {
-  const [brief, setBrief] = useState('');
+  const [projectBrief, setProjectBrief] = useState('');
+  const [briefExpanded, setBriefExpanded] = useState(false);
   const [productFacts, setProductFacts] = useState('');
   const [toneNotes, setToneNotes] = useState('');
   const [exampleCase, setExampleCase] = useState('');
@@ -105,9 +109,9 @@ export function KnowledgeBaseForm({
 
   useEffect(() => {
     fetchKnowledgeBase(projectId)
-      .then(({ kb }) => {
+      .then(({ kb, projectBrief: brief }) => {
+        setProjectBrief(brief);
         if (!kb) return;
-        setBrief(kb.brief);
         setProductFacts(kb.productFacts);
         setToneNotes(kb.toneNotes);
         setExampleCase(kb.exampleCase);
@@ -120,7 +124,7 @@ export function KnowledgeBaseForm({
     setSaving(true);
     setError(null);
     try {
-      await saveKnowledgeBase(projectId, { brief, productFacts, toneNotes, exampleCase });
+      await saveKnowledgeBase(projectId, { productFacts, toneNotes, exampleCase });
       setSaved(true);
       window.setTimeout(() => setSaved(false), 2000);
       onSaved?.();
@@ -136,7 +140,6 @@ export function KnowledgeBaseForm({
     setError(null);
     try {
       const text = await extractTextFromFile(file);
-      if (field === 'brief') setBrief(text);
       if (field === 'productFacts') setProductFacts(text);
       if (field === 'exampleCase') setExampleCase(text);
     } catch (err) {
@@ -173,17 +176,37 @@ export function KnowledgeBaseForm({
       ) : (
         <>
           <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-7 py-6">
-            <KbField
-              label="Бриф"
-              hint="О чём продукт, для кого, чем полезен"
-              value={brief}
-              onChange={setBrief}
-              rows={4}
-              placeholder="Например: сервис для учёта заявок в сервисных компаниях…"
-              uploadField="brief"
-              uploadingField={uploadingField}
-              onUpload={handleUpload}
-            />
+            <div>
+              <div className="mb-2 flex items-end justify-between gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-zinc-900">Бриф проекта</label>
+                  <p className="mt-0.5 text-xs text-zinc-500">
+                    Подтягивается из карточки проекта и редактируется там — здесь только для просмотра
+                  </p>
+                </div>
+              </div>
+              {projectBrief ? (
+                <div className="rounded-lg border border-zinc-200 bg-zinc-50 px-3.5 py-2.5">
+                  <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-zinc-700">
+                    {briefExpanded ? projectBrief : projectBrief.slice(0, BRIEF_PREVIEW_CHARS)}
+                    {!briefExpanded && projectBrief.length > BRIEF_PREVIEW_CHARS ? '…' : ''}
+                  </p>
+                  {projectBrief.length > BRIEF_PREVIEW_CHARS ? (
+                    <button
+                      type="button"
+                      onClick={() => setBriefExpanded((v) => !v)}
+                      className="mt-2 text-xs font-medium text-blue-600 transition-colors hover:text-blue-500"
+                    >
+                      {briefExpanded ? 'Свернуть' : 'Показать полностью'}
+                    </button>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-sm leading-relaxed text-amber-700">
+                  В карточке проекта нет брифа. Заполните бриф в проекте — генерация ответов использует его как основной источник.
+                </p>
+              )}
+            </div>
 
             <KbField
               label="Факты о продукте"
