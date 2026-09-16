@@ -293,11 +293,15 @@ blocks:
               # SERVER_PASSWORD), SENDER_REMOTE_DIR (default: /opt/portal-sender).
               # На хосте один раз создать .env по deploy/sender/.env.example.
               SENDER_HOST="${SENDER_SSH_HOST:-}"
-              if [ "$DEPLOY_SENDER" = 1 ]; then
-                if [ -z "$SENDER_HOST" ]; then
-                  echo "[scheduled] FATAL: выбран деплой sender-воркера, но SENDER_SSH_HOST пуст" >&2
-                  exit 1
-                fi
+              if [ "$DEPLOY_SENDER" = 1 ] && [ -z "$SENDER_HOST" ]; then
+                # Не FATAL: блокировать деплой portal-хоста нельзя — он как раз
+                # убирает worker-sender из стека на 139, а пропуск sender-хоста
+                # оставляет рассылку без воркера (инструмент в разработке, это
+                # безопаснее, чем держать отправку на IP портала).
+                echo "[scheduled] WARNING: DEPLOY_SENDER=1, но SENDER_SSH_HOST пуст — sender-воркер ПРОПУЩЕН." >&2
+                echo "[scheduled] WARNING: добавь SENDER_SSH_HOST=144.31.54.166 в секрет portal_secrets (опционально SENDER_SSH_USER/SENDER_SSH_PASSWORD) и создай /opt/portal-sender/.env по deploy/sender/.env.example." >&2
+              fi
+              if [ "$DEPLOY_SENDER" = 1 ] && [ -n "$SENDER_HOST" ]; then
                 SENDER_USER="${SENDER_SSH_USER:-$USER}"
                 SENDER_PASS="${SENDER_SSH_PASSWORD:-$SERVER_PASSWORD}"
                 SENDER_PATH="${SENDER_REMOTE_DIR:-/opt/portal-sender}"
@@ -345,7 +349,7 @@ blocks:
                 sudo -n docker ps --filter name=portal-worker-sender --format '{{.Names}} {{.Status}}'
                 "
               else
-                echo "[scheduled] Sender host: изменений нет — удалённый воркер не трогаем"
+                echo "[scheduled] Sender host: пропущен (изменений нет или SENDER_SSH_HOST не задан)"
               fi
 
               if [ "$DEPLOY_PORTAL_HOST" = 1 ] || [ "$IDB_BACKUP_DEPLOYED" = 1 ]; then
