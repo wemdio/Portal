@@ -22,6 +22,17 @@ import { TWO_GIS_MAX_EXPORT_ROWS } from './types';
 const EXPORT_TICKET_TTL_MINUTES = 15;
 
 /**
+ * Порог отсечения минорных пар (категория, подрубрика) в фасетах.
+ * У карточки одна категория на все её рубрики, поэтому шумные перекрёстные
+ * теги (потолочная компания с рубрикой «Продажа легковых автомобилей»)
+ * порождают пары вида «Коммунальные → Продажа легковых (3 карточки)».
+ * Пара показывается, только если в ней достаточно карточек и это заметная
+ * доля всех карточек подрубрики; иначе она скрыта из выбора рубрик.
+ */
+const MIN_SUBCATEGORY_FACET_ROWS = 10;
+const MIN_SUBCATEGORY_FACET_SHARE = 0.05;
+
+/**
  * Id текущего снапшота 2GIS-датасета — iterateTwoGisCards требует его явно
  * (стрим привязан к снапшоту, чтобы импорт нового среза не ломал курсор).
  * null → датасет недоступен, прогон пропускаем.
@@ -74,7 +85,18 @@ export async function getTwoGisFacets(): Promise<TwoGisFacets> {
     ),
     twoGisDatasetQuery<{ category: string; value: string; count: string | number }>(
       `SELECT category, value, row_count AS count
-       FROM public.facet_subcategories
+       FROM (
+         SELECT
+           category,
+           value,
+           row_count,
+           SUM(row_count) OVER (PARTITION BY value) AS value_total
+         FROM public.facet_subcategories
+       ) AS rubric_pairs
+       WHERE row_count >= GREATEST(
+         ${MIN_SUBCATEGORY_FACET_ROWS},
+         CEIL(value_total * ${MIN_SUBCATEGORY_FACET_SHARE})
+       )
        ORDER BY category ASC, row_count DESC, value ASC`,
     ),
     twoGisDatasetQuery<{ scope: string; snapshot_date: string | Date; accepted_rows: string | number }>(

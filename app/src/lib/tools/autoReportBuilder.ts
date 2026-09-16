@@ -3,6 +3,18 @@
  * Port of n8n pipeline: fetch analytics + steps, normalize (Code3), aggregate (Code1).
  */
 
+import {
+  instantlyUsageEndpoint,
+  instantlyUsageStatusFromHttp,
+  recordInstantlyApiUsage,
+} from '@/lib/instantly/usageCounters';
+
+/** Кому записать попытку в учёт Instantly-запросов. */
+export interface InstantlyUsageTag {
+  accountId: string;
+  consumer: string;
+}
+
 const INSTANTLY_BASE = 'https://api.instantly.ai/api/v2';
 /** Таймаут одного запроса к Instantly. */
 const INSTANTLY_TIMEOUT_MS = 180_000;
@@ -44,18 +56,38 @@ function getErrorMessage(err: unknown): string {
   return String(err);
 }
 
+function isTransientTransportError(err: unknown): boolean {
+  const isTimeout = err instanceof Error && err.name === 'AbortError';
+  return isTimeout || /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND/i.test(getErrorMessage(err));
+}
+
 async function fetchInstantlyJson(
   url: string,
   headers: HeadersInit,
   context: string,
+  usage: InstantlyUsageTag,
 ): Promise<unknown> {
   let lastError: unknown;
+  const endpoint = instantlyUsageEndpoint(url);
 
   for (let attempt = 0; attempt <= INSTANTLY_MAX_RETRIES; attempt += 1) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), INSTANTLY_TIMEOUT_MS);
+    let res: Response;
     try {
-      const res = await fetch(url, { headers, signal: controller.signal });
+      res = await fetch(url, { headers, signal: controller.signal });
+    } catch (err) {
+      clearTimeout(timeoutId);
+      recordInstantlyApiUsage({ ...usage, endpoint, status: 'network_error' });
+      lastError = err;
+      if (attempt < INSTANTLY_MAX_RETRIES && isTransientTransportError(err)) {
+        await sleep(1000 * (attempt + 1));
+        continue;
+      }
+      break;
+    }
+    recordInstantlyApiUsage({ ...usage, endpoint, status: instantlyUsageStatusFromHttp(res.status) });
+    try {
       if (res.ok) {
         return (await res.json()) as unknown;
       }
@@ -73,10 +105,7 @@ async function fetchInstantlyJson(
       );
     } catch (err) {
       lastError = err;
-      const message = getErrorMessage(err);
-      const isTimeout = err instanceof Error && err.name === 'AbortError';
-      const isNetwork = /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND/i.test(message);
-      if (attempt < INSTANTLY_MAX_RETRIES && (isTimeout || isNetwork)) {
+      if (attempt < INSTANTLY_MAX_RETRIES && isTransientTransportError(err)) {
         await sleep(1000 * (attempt + 1));
         continue;
       }
@@ -117,6 +146,7 @@ function extractCampaignsArray(data: unknown): InstantlyCampaignItem[] | null {
  */
 export async function* iterateInstantlyCampaignPages(
   apiKey: string,
+  usage: InstantlyUsageTag,
 ): AsyncGenerator<InstantlyCampaignItem[], void, void> {
   const headers: HeadersInit = { Authorization: `Bearer ${apiKey}` };
   let startingAfter: string | null = null;
@@ -134,7 +164,7 @@ export async function* iterateInstantlyCampaignPages(
     pageCount += 1;
     if (pageCount > 200) break;
 
-    const data = await fetchInstantlyJson(url.toString(), headers, 'Instantly list campaigns');
+    const data = await fetchInstantlyJson(url.toString(), headers, 'Instantly list campaigns', usage);
     const arr = extractCampaignsArray(data);
     if (arr?.length) yield arr;
 
@@ -149,9 +179,12 @@ export async function* iterateInstantlyCampaignPages(
  * Авторизация: Bearer {{api_key}} в заголовке Authorization.
  * Поддержана пагинация (limit=100, starting_after).
  */
-export async function fetchInstantlyCampaignsList(apiKey: string): Promise<InstantlyCampaignItem[]> {
+export async function fetchInstantlyCampaignsList(
+  apiKey: string,
+  usage: InstantlyUsageTag,
+): Promise<InstantlyCampaignItem[]> {
   const all: InstantlyCampaignItem[] = [];
-  for await (const page of iterateInstantlyCampaignPages(apiKey)) {
+  for await (const page of iterateInstantlyCampaignPages(apiKey, usage)) {
     all.push(...page);
   }
   return all;
@@ -165,7 +198,8 @@ export function extractCampaignIdsFromText(text: string): string[] {
 
 export async function fetchInstantlyCampaignData(
   campaignId: string,
-  apiKey: string
+  apiKey: string,
+  usage: InstantlyUsageTag,
 ): Promise<{ analytics: unknown; steps: unknown }> {
   const headers: HeadersInit = {
     Authorization: `Bearer ${apiKey}`,
@@ -176,9 +210,9 @@ export async function fetchInstantlyCampaignData(
   const stepsUrl =
     `${INSTANTLY_BASE}/campaigns/analytics/steps?campaign_id=${encodeURIComponent(campaignId)}`;
 
-  const analytics = await fetchInstantlyJson(analyticsUrl, headers, 'Instantly analytics');
+  const analytics = await fetchInstantlyJson(analyticsUrl, headers, 'Instantly analytics', usage);
   await sleep(200);
-  const steps = await fetchInstantlyJson(stepsUrl, headers, 'Instantly steps');
+  const steps = await fetchInstantlyJson(stepsUrl, headers, 'Instantly steps', usage);
   return { analytics, steps };
 }
 
@@ -729,7 +763,10 @@ export async function buildAutoReport(
           campaignId: id,
           phase: 'fetching',
         });
-        const { analytics, steps } = await fetchInstantlyCampaignData(id, apiKey);
+        const { analytics, steps } = await fetchInstantlyCampaignData(id, apiKey, {
+          accountId: 'main',
+          consumer: 'auto_report',
+        });
         return { id, analytics, steps };
       }),
     );

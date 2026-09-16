@@ -9,6 +9,7 @@
  * Чтение самого XLSX/CSV живёт в роуте: здесь чистая функция над массивом
  * строк, поэтому её поведение целиком покрыто тестами.
  */
+import { countSpintaxVariants } from './spintax';
 import { normalizeUsername } from './normalizeUsername';
 
 export interface ParsedContact {
@@ -25,6 +26,15 @@ export interface ParseStats {
   noUsername: number;
   noMessage: number;
   duplicates: number;
+  /**
+   * Сколько разных сообщений даёт спинтакс в загруженных текстах.
+   *
+   * Единица означает, что все получат дословно одинаковый абзац — и узнать об
+   * этом лучше на загрузке, а не из переписок неделю спустя. Берём максимум по
+   * базе: обычно текст один на всю базу, а если их несколько, показательна
+   * самая богатая формулировка.
+   */
+  spintaxVariants: number;
 }
 
 export interface ParseResult {
@@ -60,7 +70,7 @@ function looksLikeHeader(row: unknown[]): boolean {
 }
 
 export function parseBaseRows(rows: unknown[][]): ParseResult {
-  const stats: ParseStats = { total: 0, accepted: 0, noUsername: 0, noMessage: 0, duplicates: 0 };
+  const stats: ParseStats = { total: 0, accepted: 0, noUsername: 0, noMessage: 0, duplicates: 0, spintaxVariants: 1 };
   const contacts: ParsedContact[] = [];
   const seen = new Set<string>();
 
@@ -104,6 +114,7 @@ export function parseBaseRows(rows: unknown[][]): ParseResult {
 
     contacts.push({ username, message, raw });
     stats.accepted++;
+    stats.spintaxVariants = Math.max(stats.spintaxVariants, countSpintaxVariants(message));
   }
 
   return { contacts, stats, headers };

@@ -43,6 +43,38 @@ const HIDDEN_PREFIXES = ['utm_'];
 
 export type DealCardField = { name: string; value: string };
 
+/**
+ * Типы полей AMO, в которых лежит дата unix-секундами.
+ *
+ * Определяем дату по типу поля, а не по виду значения: десятизначный ИНН
+ * («1234567890») неотличим от метки времени, и правило «десять цифр — значит
+ * дата» превратило бы ИНН компании в 2009 год.
+ */
+const DATE_FIELD_TYPES = new Set(['date', 'date_time', 'birthday']);
+
+/**
+ * Дата и время по Москве, до минут: «20.05.2026 00:00».
+ *
+ * Зона задана явно: сервер может жить в UTC, и без неё дата поля «Дата
+ * оплаты» — полночь по Москве — показалась бы предыдущим днём в 21:00.
+ */
+const MSK_DATE_TIME = new Intl.DateTimeFormat('ru-RU', {
+  timeZone: 'Europe/Moscow',
+  day: '2-digit',
+  month: '2-digit',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+});
+
+function formatAmoDate(value: string): string {
+  if (!/^\d{1,12}$/.test(value)) return value;
+  const date = new Date(Number(value) * 1000);
+  if (Number.isNaN(date.getTime())) return value;
+  // Intl ставит запятую между датой и временем — в карточке она лишняя.
+  return MSK_DATE_TIME.format(date).replace(', ', ' ');
+}
+
 function isHidden(name: string): boolean {
   const lower = name.trim().toLowerCase();
   if (HIDDEN_FIELDS.has(lower)) return true;
@@ -53,9 +85,10 @@ function isHidden(name: string): boolean {
  * Содержательные поля карточки в том порядке, в каком их отдал AMO.
  *
  * Значение приводится к строке: в `select`-полях лежит текст, в числовых —
- * число, в датах — unix-секунды. Разбирать их по типам здесь не нужно, модалка
- * показывает поле как есть; пустые значения выбрасываются, чтобы не рисовать
- * строку «Оффер: —» ради самого факта существования поля.
+ * число. Даты AMO отдаёт unix-секундами, и модалка показывала «1779310800»
+ * вместо дня — поэтому поля с типом даты переводятся в «ДД.ММ.ГГГГ ЧЧ:ММ» по
+ * Москве. Пустые значения выбрасываются, чтобы не рисовать строку «Оффер: —»
+ * ради самого факта существования поля.
  */
 export function readDealCardFields(raw: unknown): DealCardField[] {
   if (raw === null || typeof raw !== 'object') return [];
@@ -72,6 +105,9 @@ export function readDealCardFields(raw: unknown): DealCardField[] {
     const values = (field as { values?: unknown }).values;
     if (!Array.isArray(values) || values.length === 0) continue;
 
+    const fieldType = (field as { field_type?: unknown }).field_type;
+    const isDate = typeof fieldType === 'string' && DATE_FIELD_TYPES.has(fieldType);
+
     // Мультиселект отдаёт несколько значений — склеиваем, а не берём первое:
     // «Аутрич, ЛинкедИн» и «Аутрич» это разные ответы.
     const parts: string[] = [];
@@ -80,7 +116,7 @@ export function readDealCardFields(raw: unknown): DealCardField[] {
       const value = (entry as { value?: unknown }).value;
       if (value === null || value === undefined) continue;
       const text = String(value).trim();
-      if (text !== '') parts.push(text);
+      if (text !== '') parts.push(isDate ? formatAmoDate(text) : text);
     }
     if (parts.length === 0) continue;
 

@@ -91,14 +91,24 @@ def format_xlsx_report(
     campaigns: list[Campaign],
     include_created: bool = True,
     include_base_left: bool = True,
-    weighted_reply_rate: bool = False,
 ) -> bytes:
+    """Собрать XLSX-отчёт.
+
+    Проценты везде взвешенные: ответы делятся на всех связавшихся, а не
+    усредняются по кампаниям. Среднее арифметическое искажает итог при
+    кампаниях разного размера — маленькая кампания с нулём ответов тянет его
+    вниз наравне с большой. На Тригге это дало 0.6 % вместо реальных 2.4 %.
+
+    Раньше Coldy-отчёт намеренно повторял проценты из чужого кабинета, чтобы
+    цифры сходились при сверке. С 24.08.2026 считаем сами и здесь: точность
+    важнее совпадения с чужим экраном.
+    """
     report_date = datetime.now().strftime("%d.%m.%Y")
     header_row = [
         "Название кампании",
         "Создано",
         "Связались",
-        "Всего контактов",
+        "Всего контактов в базе",
         "Всего открытий",
         "% открываемости",
         "Ответов",
@@ -133,6 +143,9 @@ def format_xlsx_report(
         sent_total = sum(letter.sent for letter in main_letters) if main_letters else camp.sent
         replied_total = sum(letter.replied for letter in main_letters) if main_letters else camp.replied
         base_left = camp.connected_total - camp.connected_reached
+        # Из письменной статистики, а не из заголовка Coldy: сумма по письмам
+        # цепочки — то же число, что стоит в колонке «Ответов» строкой левее.
+        reply_rate = (replied_total / camp.connected_reached * 100) if camp.connected_reached else 0.0
 
         campaign_row = [
             camp.name,
@@ -142,7 +155,7 @@ def format_xlsx_report(
             camp.opened,
             f"{camp.opened_pct:.1f}%",
             replied_total,
-            f"{camp.replied_pct:.1f}%",
+            f"{reply_rate:.1f}%",
             "",
             sent_total,
             base_left,
@@ -158,16 +171,12 @@ def format_xlsx_report(
 
     rows.extend(campaign_rows)
 
-    avg_open_rate = sum(camp.opened_pct for camp in campaigns) / len(campaigns) if campaigns else 0
-    if weighted_reply_rate:
-        # Взвешенная отвечаемость для итога: все ответы / все связавшиеся (как «Итого»
-        # в Тригге), а не среднее арифметическое процентов по кампаниям. Среднее
-        # искажает результат при кампаниях разного размера и обнуляется кампаниями
-        # с 0 ответов (давало 0.6% вместо реальных 2.4%). Trigga-фикс 2026-06.
-        total_contacts = sum(camp.connected_reached for camp in campaigns)
-        avg_reply_rate = round(sum(replied_totals) / total_contacts * 100, 1) if total_contacts else 0
-    else:
-        avg_reply_rate = sum(camp.replied_pct for camp in campaigns) / len(campaigns) if campaigns else 0
+    # Итоги — от общих чисел, а не средним по кампаниям (см. шапку функции).
+    total_touched = sum(camp.connected_reached for camp in campaigns)
+    total_opened = sum(camp.opened for camp in campaigns)
+    total_replied = sum(replied_totals)
+    open_rate = (total_opened / total_touched * 100) if total_touched else 0.0
+    reply_rate = (total_replied / total_touched * 100) if total_touched else 0.0
 
     summary_merge_rows: set[int] = set()
 
@@ -175,10 +184,10 @@ def format_xlsx_report(
         empty_row.copy(),
         ["Общая статистика:", *[""] * (width - 1)],
         ["Показатель", "Значение", "Конверсия в след. этап", *[""] * (width - 3)],
-        ["Общее количество контактов", sum(camp.connected_reached for camp in campaigns), "", *[""] * (width - 3)],
+        ["Общее количество коснувшихся контактов", total_touched, "", *[""] * (width - 3)],
         ["Общее количество отправленных писем", sum(sent_totals), "", *[""] * (width - 3)],
-        ["Количество открытий", sum(camp.opened for camp in campaigns), f"{avg_open_rate:.1f}%", *[""] * (width - 3)],
-        ["Количество ответов", sum(replied_totals), f"{avg_reply_rate:.1f}%", *[""] * (width - 3)],
+        ["Количество открытий", total_opened, f"{open_rate:.1f}%", *[""] * (width - 3)],
+        ["Количество ответов", total_replied, f"{reply_rate:.1f}%", *[""] * (width - 3)],
         ["Общее количество лидов", "", "", *[""] * (width - 3)],
     ])
     summary_header_row = len(campaign_rows) + 8

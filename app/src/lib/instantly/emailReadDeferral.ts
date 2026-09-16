@@ -1,8 +1,28 @@
-export type InstantlyEmailReadDeferredReason = 'budget' | 'cooldown' | 'storage_unavailable';
+export type InstantlyEmailReadDeferredReason =
+  | 'budget'
+  | 'recovery_budget'
+  | 'bulk_budget'
+  | 'cooldown'
+  | 'storage_unavailable';
+
+/** Every lane-specific denial ('recovery_budget' | 'bulk_budget') plus the
+ * common-cap denial share the 'budget' family: no LIST /emails attempt was
+ * sent to the provider, and callers treat them identically. */
+export function isBudgetDeferralReason(reason: InstantlyEmailReadDeferredReason): boolean {
+  return reason === 'budget' || reason === 'recovery_budget' || reason === 'bulk_budget';
+}
 
 export interface InstantlyEmailReadDeferral {
   reason: InstantlyEmailReadDeferredReason;
   retryAfterMs: number;
+}
+
+const DEFERRAL_MESSAGE_RE =
+  /Instantly email read deferred:\s*(budget|recovery_budget|bulk_budget|cooldown|storage_unavailable);\s*retry after (\d+(?:\.\d+)?) ms\b/i;
+
+function isDeferralReason(value: unknown): value is InstantlyEmailReadDeferredReason {
+  return value === 'budget' || value === 'recovery_budget' || value === 'bulk_budget'
+    || value === 'cooldown' || value === 'storage_unavailable';
 }
 
 /** Pure recognition shared by retry scheduling and callers that preserve only
@@ -15,12 +35,12 @@ export function readInstantlyEmailReadDeferral(error: unknown): InstantlyEmailRe
       ? current as { name?: unknown; reason?: unknown; retryAfterMs?: unknown; message?: unknown; cause?: unknown }
       : null;
     if (value?.name === 'InstantlyEmailReadDeferredError' &&
-        (value.reason === 'budget' || value.reason === 'cooldown' || value.reason === 'storage_unavailable') &&
+        isDeferralReason(value.reason) &&
         typeof value.retryAfterMs === 'number' && Number.isFinite(value.retryAfterMs) && value.retryAfterMs > 0) {
       return { reason: value.reason, retryAfterMs: Math.ceil(value.retryAfterMs) };
     }
     const message = typeof current === 'string' ? current : typeof value?.message === 'string' ? value.message : '';
-    const match = message.match(/Instantly email read deferred:\s*(budget|cooldown|storage_unavailable);\s*retry after (\d+(?:\.\d+)?) ms\b/i);
+    const match = message.match(DEFERRAL_MESSAGE_RE);
     if (match) {
       const retryAfterMs = Number(match[2]);
       if (Number.isFinite(retryAfterMs) && retryAfterMs > 0) {

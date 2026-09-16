@@ -100,6 +100,9 @@ switch (kind) {
   case 'byo-replies':
     run('./byoReplies');
     break;
+  case 'sender':
+    run('./sender');
+    break;
   case 'saleschatlogger':
     run('./salesChatLogger');
     break;

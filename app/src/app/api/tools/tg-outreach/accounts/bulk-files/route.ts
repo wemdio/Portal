@@ -74,6 +74,19 @@ export async function POST(req: NextRequest) {
 
       const formData = await req.formData();
       const files = formData.getAll('files') as File[];
+      // Страна партии со слов оператора: у tdata телефона нет до первого
+      // подключения, а прокси подбирать нужно уже сейчас. См. миграцию
+      // 20260908_0003.
+      const declaredCountry = String(formData.get('country') ?? '').trim().toUpperCase().slice(0, 2);
+      /**
+       * Цена одного аккаунта партии, рублями. Пустое поле — цена не указана
+       * (null), а не ноль: «не знаем, сколько стоил» и «достался бесплатно» —
+       * разные вещи, и в сумме партии их путать нельзя.
+       */
+      const rawPrice = String(formData.get('price') ?? '').trim().replace(',', '.');
+      const parsedPrice = rawPrice === '' ? null : Number(rawPrice);
+      const declaredPrice =
+        parsedPrice !== null && Number.isFinite(parsedPrice) && parsedPrice >= 0 ? parsedPrice : null;
       if (!files?.length) return jsonError('Добавьте файлы (JSON и/или .session)', 400);
 
       const zipFiles = files.filter((f) => f.name.toLowerCase().endsWith('.zip'));
@@ -188,7 +201,21 @@ export async function POST(req: NextRequest) {
             proxy_id: null,
             session_data: candidate.sessionString,
             tg_user_id: candidate.tgUserId,
-            is_active: true,
+            /**
+             * Загруженный аккаунт выключен, пока оператор его не настроит.
+             *
+             * 08.09.2026 залитая партия ушла рассылать сама: круг фиксирует
+             * состав на старте, но любой его перезапуск — деплой, рестарт
+             * воркера, авто-резюм — перечитывает всех включённых, и новички
+             * попадали в боевую рассылку без прокси, без прочитанного профиля и
+             * без единой проверки.
+             *
+             * Включение — осознанное действие оператора: к этому моменту у
+             * аккаунта есть прокси нужной страны, заполненный профиль и
+             * пройденная отлёжка.
+             */
+            is_active: false,
+            price: declaredPrice,
           }));
         }
       }
@@ -205,17 +232,22 @@ export async function POST(req: NextRequest) {
           phone: acc.phone ?? '',
           proxy_id: null,
           session_data: '',
-          is_active: true,
+          // Выключен до настройки — см. пояснение выше.
+          is_active: false,
+          price: declaredPrice,
+          ...(declaredCountry ? { country_code: declaredCountry } : {}),
         })),
         ...tdataRows,
       ];
 
-      let inserted: Array<{ id: string; session_name: string }> = [];
+      // Телефон возвращаем, чтобы экран сразу назвал страны партии: имена
+      // файлов вида «s386_tdata» о стране не говорят ничего.
+      let inserted: Array<{ id: string; session_name: string; phone?: string | null; country_code?: string | null }> = [];
       if (insertRows.length) {
         const { data, error: insertError } = await db
           .from('tg_outreach_accounts')
           .insert(insertRows)
-          .select('id, session_name');
+          .select('id, session_name, phone, country_code');
         if (insertError) return jsonError(insertError.message, 500);
         inserted = data ?? [];
       }

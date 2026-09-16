@@ -607,7 +607,7 @@ async function fetchSingleIdentityEvidence(
           limit: 100,
           ...(cursor ? { starting_after: cursor } : {}),
         },
-        { accountId },
+        { accountId, consumer: 'ownership' },
       );
       items.push(...(response.items ?? []));
       evidence = collectCampaignEvidence(
@@ -769,6 +769,7 @@ async function resumeWorkspaceEvidence(args: {
       }, {
         accountId: args.accountId,
         requestPriority: args.evidencePriority ?? 'recovery',
+        consumer: 'ownership_recovery',
         retryRateLimits: false,
         timeoutMs: Math.min(20_000, remainingMs),
         timeoutIncludesBody: true,

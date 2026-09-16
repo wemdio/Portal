@@ -32,6 +32,7 @@ import {
   List,
   Telescope,
   MapPin,
+  MessageSquareReply,
 } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, TOOL_GROUPS, type ToolId } from '@/lib/toolsRegistry';
@@ -43,6 +44,7 @@ import { ToolVisibilityModal } from './ToolVisibilityModal';
 import { usePortalBlockingLoad } from '@/components/PortalLoadingProvider';
 import { useUser } from '@/lib/UserProvider';
 import type { Locale } from '@/lib/i18n';
+import type { UserRole } from '@/types';
 
 type ToolsLayoutMode = 'grouped' | 'list';
 const LAYOUT_MODE_STORAGE_KEY = 'tools-layout-mode';
@@ -111,16 +113,20 @@ const TOOL_ICONS: Record<ToolId, ComponentType<{ className?: string }>> = {
   'sales-chat-analyzer': TelegramIcon,
   'hypothesis-engine': Telescope,
   'vertical-engine-v2': Sparkles,
+  'reply-personalization': MessageSquareReply,
+  sender: MailPlus,
 };
 
 function ToolLinkCard({
   toolId,
   locale,
   effectiveStatus,
+  userRole,
 }: {
   toolId: ToolId;
   locale: Locale;
   effectiveStatus?: ToolStatus;
+  userRole: UserRole | null;
 }) {
   const config = TOOLS_CONFIG[toolId];
   const Icon = TOOL_ICONS[toolId];
@@ -144,10 +150,12 @@ function ToolLinkCard({
 
   // «В разработке» через override ИЛИ (нет override AND config.disabled).
   // Если override='active' — config.disabled из реестра тоже игнорится.
-  const isDisabled = effectiveStatus === 'in_development'
+  const inDevelopment = effectiveStatus === 'in_development'
     || (!hasOverride && Boolean(config.disabled));
 
-  if (isDisabled) {
+  // «В разработке» больше не блокирует админа: он может зайти и посмотреть,
+  // что строится. Плашка при этом остаётся у всех, включая админа.
+  if (inDevelopment && !isAdmin(userRole)) {
     const badgeClass = badgeVariant === 'emerald'
       ? 'bg-emerald-100 text-emerald-700'
       : 'bg-amber-100 text-amber-700';
@@ -302,6 +310,7 @@ export default function ToolsPage() {
         toolId={toolId as ToolId}
         locale={locale}
         effectiveStatus={statuses[toolId]}
+        userRole={userRole}
       />
     );
 

@@ -821,7 +821,7 @@ async function fetchRecentLinkedReplies(
         email_type: 'received',
         limit: REPLY_EMAILS_PAGE_SIZE,
         starting_after: startingAfter,
-      }, { accountId });
+      }, { accountId, consumer: 'discovery_legacy' });
     } catch (error) {
       if (!(error instanceof Error && error.message.startsWith('Instantly email read deferred:'))) throw error;
       // Discovery is not an ownership proof. Already fetched inbound messages

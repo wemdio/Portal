@@ -16,7 +16,15 @@ const MAX_SEMANTIC_ATTEMPTS = 2;
 const configuredMax = Number(process.env.VE_RELEVANCE_MAX_ROWS);
 const MAX_COMPANIES = Number.isFinite(configuredMax) && configuredMax > 0 ? Math.min(10_000, Math.floor(configuredMax)) : 3000;
 const MAX_WEBSITES = 32;
+// Сколько раз оплачивать поиск по одной компании, если провайдер так и не
+// ответил. Три попытки переживают разовый шторм у Serper; дальше повторы
+// перестают быть починкой и становятся тратой — 16.09.2026 этап сборки базы
+// перезапускался по пять раз за сутки, и каждый перезапуск покупал поиск
+// по тем же провалившимся строкам заново.
+const MAX_SEARCH_PROVIDER_ATTEMPTS = 3;
 const WEBSITE_CONCURRENCY = 8;
+const searchAttemptsExhausted = (evidence?: { provider_error?: unknown; provider_error_attempts?: number }): boolean =>
+  Boolean(evidence?.provider_error) && (evidence?.provider_error_attempts ?? 1) >= MAX_SEARCH_PROVIDER_ATTEMPTS;
 const FIELDS = ['company', 'website', 'category', 'description', 'vacancy_title', 'website_text'] as const;
 const ACTIVITY_FIELDS: ReadonlyArray<typeof FIELDS[number]> = ['description', 'website_text', 'category'];
 type Fields = Record<typeof FIELDS[number], string>;
@@ -619,7 +627,7 @@ export async function findIrrelevantRows(input: {
       const cached = checkpoint.website_evidence[entry.key];
       const semantic = checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]];
       if (semantic && semantic.status !== 'finished') return false;
-      if (cached?.provider_error) return true;
+      if (cached?.provider_error) return !searchAttemptsExhausted(cached);
       if (checkpoint.citation_repairs[entry.key] && current.get(entry)?.status === 'error') return false;
       const pendingRefinement = cached?.reader_version === 1 && cached.status === 'ok' && !cached.refined && Boolean(cached.text);
       if (pendingRefinement) return true;
@@ -668,6 +676,7 @@ export async function findIrrelevantRows(input: {
           checkpoint.website_evidence[entry.key] = {
             reader_version: 1, reader_revision: VE_RELEVANCE_WEBSITE_VERSION, status: 'error', text: '', url: sliceWholeChars(evidence.url, 0, 1000),
             reason: sliceWholeChars(provider.message, 0, 400), provider_error: { ...provider, message: sliceWholeChars(provider.message, 0, 400) },
+            provider_error_attempts: (cached?.provider_error_attempts ?? 0) + 1,
             review_attempt: reviewAttempt, review_attempts: entry.attempts, refined: true,
           };
           record(entry, errorDecision(sliceWholeChars(provider.message, 0, 400), entry.attempts));
@@ -706,8 +715,15 @@ export async function findIrrelevantRows(input: {
       // A failed company may have been rotated behind this pass's website cap.
       // Its unresolved failure still needs a durable retry, not a false success
       // or a non-retryable incomplete-coverage stop.
-      transientFailure ||= website.provider_error.kind === 'transient';
-      permanentFailure ||= website.provider_error.kind !== 'transient';
+      // Строка, исчерпавшая оплаченные попытки по временному сбою, остаётся
+      // непроверенной и в запуск не пойдёт — но и повторять из-за неё весь
+      // этап больше нельзя: джоба возвращалась бы в очередь бесконечно и
+      // каждый раз платила заново. Отказ по балансу или ключу этим не
+      // затрагивается: он требует действия человека, а не тихого забвения.
+      if (!(searchAttemptsExhausted(website) && website.provider_error.kind === 'transient')) {
+        transientFailure ||= website.provider_error.kind === 'transient';
+        permanentFailure ||= website.provider_error.kind !== 'transient';
+      }
       result.error ??= website.provider_error.message;
     }
     if (website?.reader_revision === VE_RELEVANCE_WEBSITE_VERSION && website.refined && !website.provider_error) {

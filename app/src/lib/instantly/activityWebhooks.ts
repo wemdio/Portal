@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { listInstantlyAccounts, getInstantlyAccountApiKey } from './accounts';
+import { instantlyUsageEndpoint, instantlyUsageStatusFromHttp, recordInstantlyApiUsage } from './usageCounters';
 
 /**
  * Idempotent registration of the activity webhooks (email_opened + reply_received)
@@ -41,19 +42,32 @@ export interface EnsureWebhookResult {
   error?: string;
 }
 
+interface WebhookAccount {
+  accountId: string;
+  apiKey: string;
+}
+
 async function instantlyFetch(
-  apiKey: string,
+  target: WebhookAccount,
   pathOrUrl: string | URL,
   init?: { method?: string; body?: unknown },
 ): Promise<unknown> {
   const url = typeof pathOrUrl === 'string' ? `${BASE_URL}${pathOrUrl}` : pathOrUrl.toString();
-  const headers: Record<string, string> = { Authorization: `Bearer ${apiKey}` };
+  const headers: Record<string, string> = { Authorization: `Bearer ${target.apiKey}` };
   const reqInit: RequestInit = { method: init?.method ?? 'GET', headers };
   if (init?.body !== undefined) {
     headers['Content-Type'] = 'application/json';
     reqInit.body = JSON.stringify(init.body);
   }
-  const res = await fetch(url, reqInit);
+  const usage = { accountId: target.accountId, endpoint: instantlyUsageEndpoint(url), consumer: 'webhook_register' };
+  let res: Response;
+  try {
+    res = await fetch(url, reqInit);
+  } catch (err) {
+    recordInstantlyApiUsage({ ...usage, status: 'network_error' });
+    throw err;
+  }
+  recordInstantlyApiUsage({ ...usage, status: instantlyUsageStatusFromHttp(res.status) });
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
     throw new Error(`Instantly ${res.status}: ${txt.slice(0, 200)}`);
@@ -62,14 +76,14 @@ async function instantlyFetch(
   return res.json().catch(() => null);
 }
 
-async function listAllWebhooks(apiKey: string): Promise<RawWebhook[]> {
+async function listAllWebhooks(target: WebhookAccount): Promise<RawWebhook[]> {
   const out: RawWebhook[] = [];
   let startingAfter: string | undefined;
   for (let page = 0; page < 20; page++) {
     const url = new URL(`${BASE_URL}/webhooks`);
     url.searchParams.set('limit', '100');
     if (startingAfter) url.searchParams.set('starting_after', startingAfter);
-    const res = (await instantlyFetch(apiKey, url)) as
+    const res = (await instantlyFetch(target, url)) as
       | { items?: RawWebhook[]; next_starting_after?: string | null }
       | null;
     const items = Array.isArray(res?.items) ? res!.items : [];
@@ -106,13 +120,13 @@ export async function ensureActivityWebhooks(): Promise<EnsureWebhookResult[]> {
   const results: EnsureWebhookResult[] = [];
 
   for (const account of listInstantlyAccounts()) {
-    const apiKey = getInstantlyAccountApiKey(account.id);
+    const target: WebhookAccount = { accountId: account.id, apiKey: getInstantlyAccountApiKey(account.id) };
     const desiredPath = `${site}/api/instantly/webhook/${account.id}`;
     const desiredUrl = `${desiredPath}?token=${encodeURIComponent(secret)}`;
 
     let existing: RawWebhook[] = [];
     try {
-      existing = await listAllWebhooks(apiKey);
+      existing = await listAllWebhooks(target);
     } catch (e) {
       for (const event of ACTIVITY_EVENTS) {
         results.push({
@@ -140,7 +154,7 @@ export async function ensureActivityWebhooks(): Promise<EnsureWebhookResult[]> {
         const dead = matches.filter(isDead);
         for (const w of dead) {
           try {
-            await instantlyFetch(apiKey, `/webhooks/${w.id}`, { method: 'DELETE' });
+            await instantlyFetch(target, `/webhooks/${w.id}`, { method: 'DELETE' });
           } catch {
             // best-effort; we recreate below regardless
           }
@@ -149,7 +163,7 @@ export async function ensureActivityWebhooks(): Promise<EnsureWebhookResult[]> {
         if (live) {
           if (live.target_hook_url !== desiredUrl) {
             // Path matches but token rotated → update in place (no duplicate).
-            await instantlyFetch(apiKey, `/webhooks/${live.id}`, {
+            await instantlyFetch(target, `/webhooks/${live.id}`, {
               method: 'PATCH',
               body: { target_hook_url: desiredUrl },
             });
@@ -159,7 +173,7 @@ export async function ensureActivityWebhooks(): Promise<EnsureWebhookResult[]> {
           }
           continue;
         }
-        const created = (await instantlyFetch(apiKey, '/webhooks', {
+        const created = (await instantlyFetch(target, '/webhooks', {
           method: 'POST',
           body: {
             name: `Portal activity: ${event}`,

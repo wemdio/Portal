@@ -32,6 +32,10 @@ export interface HealthAccount {
   /** Разобранный диагноз Telegram — колонка показывает его дословно. */
   check_detail?: string | null;
   proxy_id?: string | null;
+  /** Пока не наступил — аккаунт греется и в боевую рассылку не берётся. */
+  warmup_until?: string | null;
+  /** Пока не наступил — аккаунт отлёживается после смены имени или ника. */
+  profile_rest_until?: string | null;
 }
 
 export interface HealthProxy {
@@ -45,7 +49,15 @@ export interface HealthProxy {
   total_errors?: number | null;
 }
 
-export type HealthTone = 'ok' | 'warn' | 'bad' | 'unknown';
+/**
+ * `info` — состояние по плану, а не оценка здоровья.
+ *
+ * Прогрев не «хорошо» и не «плохо»: аккаунт молчит намеренно. Серый `unknown`
+ * читался как «портал не знает», зелёный — как «рассылает». Синий — тот же
+ * цвет, которым прогрев обозначен в статусе кампании, так что на двух экранах
+ * это одно и то же состояние.
+ */
+export type HealthTone = 'ok' | 'warn' | 'bad' | 'info' | 'rest' | 'unknown';
 
 export interface HealthMark {
   tone: HealthTone;
@@ -55,6 +67,12 @@ export interface HealthMark {
   detail: string;
   /** Сколько дней длится текущее состояние. null — считать не от чего. */
   days: number | null;
+  /**
+   * Причина не в аккаунте, а в кампании: пустая очередь контактов, выключенное
+   * первое касание, остановленная рассылка. Такой аккаунт нельзя списывать в
+   * мёртвые — с ним всё в порядке, ему просто нечего делать.
+   */
+  campaignWide?: boolean;
 }
 
 /**
@@ -117,6 +135,18 @@ export interface SendingContext {
   campaignRunning: boolean;
   /** Включено ли первое касание в настройках кампании (лимит > 0). */
   firstTouchEnabled: boolean;
+  /**
+   * Сколько контактов ещё ждёт своей очереди во всех базах кампании.
+   *
+   * Ноль — писать некому, и молчат тогда все аккаунты сразу. Без этого числа
+   * колонка объясняла общую тишину по-аккаунтно: 04.09.2026 в ATOL-1 базы
+   * кончились 3 сентября, а экран показывал тридцать красных «молчит 2 дня» и
+   * отправлял оператора искать поломку в аккаунтах и прокси.
+   *
+   * `null` или отсутствие — портал не знает (ручка не ответила); тогда ведём
+   * себя как раньше и молчание объясняем аккаунтом.
+   */
+  queuePending?: number | null;
   now: number;
 }
 
@@ -128,7 +158,7 @@ export interface SendingContext {
  * важнее кулдауна: кулдаун пройдёт сам, сессия — нет.
  */
 export function describeSending(ctx: SendingContext): HealthMark {
-  const { account, stat, proxy, campaignRunning, firstTouchEnabled, now } = ctx;
+  const { account, stat, proxy, campaignRunning, firstTouchEnabled, queuePending, now } = ctx;
   const silentDays = daysSince(stat?.last_sent_at, now);
   const lastSentNote = stat?.last_sent_at
     ? `Последняя отправка — ${hhmm(stat.last_sent_at)} (${silenceWord(silentDays)}).`
@@ -140,6 +170,44 @@ export function describeSending(ctx: SendingContext): HealthMark {
       label: 'выключен',
       detail: `Аккаунт выключен в портале — рассылка его не берёт вообще. ${lastSentNote}`,
       days: silentDays,
+    };
+  }
+
+  /**
+   * Прогрев — раньше всех диагнозов, кроме выключенного.
+   *
+   * Греющийся аккаунт молчит по плану, и назвать это «молчит 5 дней» значило бы
+   * отправить оператора искать поломку там, где всё идёт как задумано. Стоит
+   * выше проверок Telegram намеренно: свежая партия ещё не проверялась, и её
+   * «не проверялся» тоже не про поломку.
+   */
+  const warmupUntil = ts(account.warmup_until);
+  if (warmupUntil !== null && warmupUntil > ctx.now) {
+    return {
+      tone: 'info',
+      label: 'на прогреве',
+      detail: `Аккаунт греется до ${hhmm(account.warmup_until as string)} и в боевую рассылку не берётся. `
+        + 'Как только срок выйдет, круг подхватит его сам.',
+      days: null,
+    };
+  }
+
+  /**
+   * Отлёжка после смены профиля — сразу за прогревом.
+   *
+   * Тоже молчание по плану, но по другой причине, и причина эта оператору
+   * нужна: иначе свежезаполненный аккаунт выглядит сломанным ровно в тот день,
+   * когда его только что настроили.
+   */
+  const restUntil = ts(account.profile_rest_until);
+  if (restUntil !== null && restUntil > ctx.now) {
+    return {
+      tone: 'rest',
+      label: 'в отлёжке',
+      detail: `Аккаунт сменил данные профиля — имя или ник. До ${hhmm(account.profile_rest_until as string)} `
+        + 'он не идёт в боевую рассылку: Telegram настороженно смотрит на переименованный аккаунт, '
+        + 'который сразу пишет незнакомым. Прогрев между своими в это время разрешён.',
+      days: null,
     };
   }
 
@@ -174,6 +242,20 @@ export function describeSending(ctx: SendingContext): HealthMark {
 
   // Ограничение есть, а паузы уже нет: она истекла раньше, чем Telegram снял
   // спам-блок. Аккаунт формально свободен, но писать незнакомым не может.
+  /**
+   * Заморозка — не спам-блок: её не пережидают, по ней подают обжалование.
+   * Отдельная ветка, чтобы оператор не ставил такой аккаунт «на отлёжку» и не
+   * ждал впустую неделями.
+   */
+  if (account.check_status === 'frozen') {
+    return {
+      tone: 'bad',
+      label: 'заморожен',
+      detail: `${account.check_detail ?? 'Telegram заморозил аккаунт.'} ${lastSentNote}`,
+      days: silentDays,
+    };
+  }
+
   if (account.check_status === 'restricted') {
     return {
       tone: 'warn',
@@ -207,8 +289,31 @@ export function describeSending(ctx: SendingContext): HealthMark {
   if (!firstTouchEnabled) {
     return {
       tone: 'unknown',
+      campaignWide: true,
       label: 'касание выключено',
       detail: `В настройках кампании дневной лимит первых сообщений — 0, новые контакты не пишутся никем. ${lastSentNote}`,
+      days: silentDays,
+    };
+  }
+
+  /**
+   * Пустая очередь важнее статуса кампании: запуск ничего не изменит, пока в
+   * базах некому писать, и сказать об этом надо до того, как оператор пойдёт
+   * жать «Запустить».
+   */
+  if (queuePending === 0) {
+    const todayNote = (stat?.sent_24h ?? 0) > 0
+      ? `За сутки от него успело уйти ${stat?.sent_24h}, дальше писать некому. `
+      : '';
+    return {
+      tone: 'unknown',
+      campaignWide: true,
+      label: 'нет контактов',
+      detail:
+        'В базах кампании не осталось ни одного контакта в очереди — писать некому, '
+        + 'поэтому молчат все аккаунты сразу, а не этот один. Залейте новую базу на '
+        + 'вкладке «Базы»; там же возвращаются в очередь сгоревшие контакты. '
+        + `${todayNote}${lastSentNote}`,
       days: silentDays,
     };
   }
@@ -216,6 +321,7 @@ export function describeSending(ctx: SendingContext): HealthMark {
   if (!campaignRunning) {
     return {
       tone: 'unknown',
+      campaignWide: true,
       label: 'кампания стоит',
       detail: `Кампания не запущена — молчат все аккаунты, и этот не исключение. ${lastSentNote}`,
       days: silentDays,
@@ -334,6 +440,11 @@ export function healthToneClass(tone: HealthTone): string {
     case 'ok': return 'bg-emerald-50 text-emerald-700';
     case 'warn': return 'bg-amber-50 text-amber-700';
     case 'bad': return 'bg-rose-50 text-rose-700';
+    case 'info': return 'bg-blue-50 text-blue-700';
+    // Отлёжка после смены профиля — своим цветом: это не поломка и не прогрев,
+    // а третье состояние, и сваливать его в чужую плашку значит объяснять
+    // оператору неправильную причину простоя.
+    case 'rest': return 'bg-violet-50 text-violet-700';
     default: return 'bg-gray-100 text-gray-500';
   }
 }
@@ -370,4 +481,86 @@ export function countSendingAccounts(
     if ((stats[a.id]?.sent_24h ?? 0) > 0) sending++;
   }
   return sending;
+}
+
+
+/**
+ * Кого отключать кнопкой «Выключить неживые».
+ *
+ * Кнопка нужна не для красоты: партия из пятнадцати замороженных номеров
+ * (ATOL-1, 30.08.2026) неделю числилась «живой» — они подключались, проходили
+ * круг, но не могли найти в Telegram ни одного собеседника. Со стороны экрана
+ * такой аккаунт неотличим от исправного: зелёное «жив», рабочий прокси,
+ * галочка «Активен». Разница видна только в колонке рассылки, и искать их
+ * там глазами среди сорока строк оператор не станет — а каждый их заход в
+ * круг стоил трёх живых контактов из базы.
+ *
+ * Два признака, и оба — про рассылку, а не про подключение:
+ *   - диагноз «сам не заработает» (мёртвая сессия, бан, нет прокси, прокси не
+ *     отвечает) — это `tone: 'bad'`;
+ *   - молчание дольше порога, в том числе «не рассылал ни разу», если аккаунт
+ *     заведён давно.
+ *
+ * Аккаунт на паузе не трогаем: пауза пройдёт сама, и выключать номер из-за
+ * неё — значит терять его до ручного возврата.
+ */
+export interface DeadAccountRow {
+  id: string;
+  /** Как показать его оператору в подтверждении. */
+  name: string;
+  isActive: boolean;
+  /** Когда аккаунт заведён в портале — чтобы не выключать свежие. */
+  addedAt?: string | null;
+  mark: HealthMark;
+}
+
+export interface DeadAccountPick {
+  id: string;
+  name: string;
+  /** Причина словами — она же уедет в подтверждение и в лог. */
+  reason: string;
+}
+
+export function pickDeadAccounts(
+  rows: DeadAccountRow[],
+  opts: { now: number; silentDays: number },
+): DeadAccountPick[] {
+  const picks: DeadAccountPick[] = [];
+  for (const row of rows) {
+    // Выключенные пропускаем: кнопка выключает, а не «переподтверждает».
+    if (!row.isActive) continue;
+    // Пауза пройдёт сама — это не повод списывать номер.
+    if (row.mark.label === 'на паузе') continue;
+    /**
+     * Причина не в аккаунте, а в кампании: пустая очередь, остановленная
+     * рассылка, выключенное первое касание. Молчание там общее для всех, и без
+     * этой оговорки кнопка предлагала бы выключить весь пул разом — тридцать
+     * исправных номеров за то, что кончилась база.
+     */
+    if (row.mark.campaignWide) continue;
+
+    if (row.mark.tone === 'bad') {
+      picks.push({ id: row.id, name: row.name, reason: row.mark.label });
+      continue;
+    }
+
+    const silent = row.mark.days;
+    if (silent !== null && silent >= opts.silentDays) {
+      picks.push({ id: row.id, name: row.name, reason: `молчит ${daysWord(silent)}` });
+      continue;
+    }
+
+    /**
+     * «Ни разу не рассылал» — самый частый вид мёртвого номера, но у только
+     * что заведённого аккаунта он выглядит так же. Разводит их дата заведения:
+     * пока аккаунт моложе порога, молчание — это норма, а не диагноз.
+     */
+    if (silent === null && row.addedAt) {
+      const ageDays = Math.floor((opts.now - new Date(row.addedAt).getTime()) / DAY_MS);
+      if (ageDays >= opts.silentDays) {
+        picks.push({ id: row.id, name: row.name, reason: `не рассылал ни разу за ${daysWord(ageDays)}` });
+      }
+    }
+  }
+  return picks;
 }

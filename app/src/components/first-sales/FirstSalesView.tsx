@@ -5,12 +5,11 @@ import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
 import { bucketRange } from '@/lib/firstSales/buckets';
 import type { FirstSalesSeries } from '@/lib/firstSales/metrics';
-import FiltersBar, { getDefaultFilters, type FiltersState } from '@/components/first-sales/FiltersBar';
+import FiltersBar, { clampSharedPeriod, getDefaultFilters, type FiltersState } from '@/components/first-sales/FiltersBar';
+import { readSharedPeriod, writeSharedPeriod } from '@/lib/firstSales/sharedPeriod';
+import RenewalsFunnel from '@/components/renewals/RenewalsFunnel';
 import KpiRow from '@/components/first-sales/KpiRow';
 import TimeSeriesChart from '@/components/first-sales/TimeSeriesChart';
-import FunnelChart from '@/components/first-sales/FunnelChart';
-import FunnelDealsList from '@/components/first-sales/FunnelDealsList';
-import type { FunnelStageId } from '@/lib/firstSales/funnelDeals';
 import SourceTable from '@/components/first-sales/SourceTable';
 import { drillKey } from '@/components/first-sales/DealDrillDown';
 import ManagerTable from '@/components/first-sales/ManagerTable';
@@ -33,6 +32,15 @@ function formatDay(key: string): string {
 
 export default function FirstSalesView() {
   const [filters, setFilters] = useState<FiltersState>(() => getDefaultFilters());
+  /**
+   * Период переносится между дашбордами первички и продлений (localStorage,
+   * см. sharedPeriod.ts). Читается в эффекте, а не в инициализаторе useState:
+   * страница рендерится и на сервере, где localStorage нет, и разные значения
+   * на сервере и в браузере дали бы ошибку гидрации. Пока период не восстановлен,
+   * запрос сводки не уходит — иначе на каждое открытие экрана летели бы два
+   * запроса подряд, за дефолтные 30 дней и за сохранённый период.
+   */
+  const [periodRestored, setPeriodRestored] = useState(false);
   const [data, setData] = useState<SummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -48,18 +56,6 @@ export default function FirstSalesView() {
   const [meetingQueueCount, setMeetingQueueCount] = useState<{ count: number; truncated: boolean } | null>(null);
   /** Корзина, выбранная кликом по графику; null — таблица за весь период. */
   const [selectedBucket, setSelectedBucket] = useState<string | null>(null);
-  /**
-   * Ступень, по которой кликнули на воронке: список сделок рядом прокрутится
-   * к её группе. Хранится здесь, а не в списке, потому что источник события —
-   * соседний компонент.
-   *
-   * Значение не сбрасывается после прокрутки намеренно: повторный клик по той
-   * же ступени тогда не сработал бы вовсе (состояние не изменилось), а сброс
-   * через таймер добавил бы гонку на ровном месте. Список прокручивается
-   * заново на каждый рендер с новым `focusStage`, а тот меняется только по
-   * клику.
-   */
-  const [focusStage, setFocusStage] = useState<FunnelStageId | null>(null);
   /**
    * Сводка за одну корзину. Отдельным запросом, а не срезом уже загруженной:
    * `bySource` приходит агрегированным по всему окну, и разложить его обратно
@@ -77,6 +73,21 @@ export default function FirstSalesView() {
   // успел зарезолвиться до того, как abort долетел — тот же идиом, что в
   // analytics/mailbox-load/page.tsx.
   useEffect(() => {
+    const stored = readSharedPeriod();
+    if (stored) {
+      const { from, to } = clampSharedPeriod(stored);
+      setFilters((f) => (f.from === from && f.to === to ? f : { ...f, from, to }));
+    }
+    setPeriodRestored(true);
+  }, []);
+
+  useEffect(() => {
+    if (!periodRestored) return;
+    writeSharedPeriod({ from: filters.from, to: filters.to });
+  }, [periodRestored, filters.from, filters.to]);
+
+  useEffect(() => {
+    if (!periodRestored) return;
     const controller = new AbortController();
     let active = true;
 
@@ -112,7 +123,7 @@ export default function FirstSalesView() {
       active = false;
       controller.abort();
     };
-  }, [filters, reloadKey]);
+  }, [filters, reloadKey, periodRestored]);
 
   // Отдельный лёгкий фетч только под счётчик на кнопке — не завязан на
   // showMeetingLinks: число должно быть видно ДО того, как панель открыта
@@ -272,31 +283,27 @@ export default function FirstSalesView() {
           ) : (
             <>
               {/* Воронка перед графиком по времени: она отвечает на первый
-                  вопрос («сколько доходит от этапа к этапу»), а динамика по
+                  вопрос — «на каком этапе стоят сделки периода», а динамика по
                   корзинам — уже на второй.
 
-                  Рядом с воронкой — список сделок, которые за ней стоят.
-                  Воронка нарисована в центре широкого пустого поля, так что на
-                  половине ширины ничего не теряет, а список отвечает на
-                  следующий же вопрос: «а кто это?». На узком экране список
-                  уезжает вниз — рядом ему там не хватит места на осмысленную
-                  строку. */}
-              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                <FunnelChart totals={data.totals} onSelectStage={setFocusStage} />
-                {/* Высота списка задаётся воронкой: `items-stretch` у грида по
-                    умолчанию растягивает обе ячейки по самой высокой, а внутри
-                    списка прокручивается только сам перечень строк. */}
-                <FunnelDealsList
-                  filters={filters}
-                  focusStage={focusStage}
-                  funnelCounts={{
-                    lead: data.totals.leads,
-                    qualified: data.totals.qualified,
-                    meeting: data.totals.meetingsReliable ? data.totals.meetings : undefined,
-                    contract: data.totals.contractsReliable ? data.totals.contracts : undefined,
-                  }}
-                />
-              </div>
+                  С 11.09.2026 воронка первички — та же, что у продлений: каждая
+                  сделка один раз, на этапе AMO, где стояла в последний день
+                  периода (lib/firstSales/stageFunnel.ts). Рядом — список этих
+                  сделок, клик открывает карточку с историей переходов. Прежняя
+                  воронка метрик «Лиды → Квал → Встречи → Продажи» смешивала
+                  когорту с датами событий и не показывала, где сделки стоят. */}
+              <RenewalsFunnel
+                filters={filters}
+                endpoint="/api/analytics/first-sales/stage-funnel"
+                dealEndpoint="/api/analytics/first-sales/deal"
+                title="Воронка первички за период"
+                subtitle="На каком этапе была каждая сделка в последний день периода — среди заведённых или сдвинутых в нём. История переходов — в карточке сделки."
+                emptyText="За выбранный период в воронке новых лидов сделок не было — попробуйте расширить период."
+                ariaLabel="Воронка первички по этапам AMO"
+                outcomesLabel="Итог:"
+                listSubtitle="Каждая сделка — на этапе, где была в последний день периода. Клик открывает карточку с историей переходов. Внизу — успешные и закрытые в минус."
+                listOutcomesLabel="Итог"
+              />
               <TimeSeriesChart
                 series={data.series}
                 groupBy={filters.groupBy}

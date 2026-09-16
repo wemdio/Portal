@@ -97,6 +97,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/** Возвращает claimed-письмо обратно в очередь (ящик не готов/лимит исчерпан в этом проходе). */
+async function releaseMessage(id: string): Promise<void> {
+  if (!supabaseAdmin) return;
+  await supabaseAdmin.from('client_byo_messages').update({ status: 'pending' }).eq('id', id);
+}
+
 /**
  * Один проход дренажа очереди. Возвращает true, если что-то реально отправили
  * (тогда воркер сразу делает следующий проход). Письма сверх дневного лимита
@@ -111,15 +117,11 @@ export async function processByoSendBatch(opts?: {
   const batchSize = opts?.batchSize ?? 25;
   const gapMs = opts?.gapMs ?? 4000;
   const log: Log = opts?.log ?? (() => {});
-  const nowIso = new Date().toISOString();
 
-  const { data: msgs } = await supabaseAdmin
-    .from('client_byo_messages')
-    .select('id, mailbox_id, to_email, to_name, subject, body, attempts')
-    .eq('status', 'pending')
-    .lte('scheduled_at', nowIso)
-    .order('scheduled_at', { ascending: true })
-    .limit(batchSize);
+  // Атомарный claim (FOR UPDATE SKIP LOCKED) вместо plain select — см.
+  // migrations/20260915_0002_claim_byo_messages.sql. Без него параллельные
+  // воркеры могли выбрать одну и ту же pending-строку и отправить дубликат.
+  const { data: msgs } = await supabaseAdmin.rpc('claim_byo_messages', { p_limit: batchSize });
 
   if (!msgs?.length) return false;
 
@@ -150,11 +152,18 @@ export async function processByoSendBatch(opts?: {
         .eq('id', m.id);
       continue;
     }
-    // Ящик не готов (выключен / требует переподключения) — письмо оставляем в очереди.
-    if (mb.status !== 'verified') continue;
+    // Ящик не готов (выключен / требует переподключения) — письмо возвращаем в очередь
+    // (claim уже перевёл его в 'sending', иначе оно зависло бы там до stale-таймаута).
+    if (mb.status !== 'verified') {
+      await releaseMessage(m.id);
+      continue;
+    }
 
     const left = remaining.get(m.mailbox_id) ?? 0;
-    if (left <= 0) continue; // дневной лимит исчерпан — оставляем на следующее окно
+    if (left <= 0) {
+      await releaseMessage(m.id); // дневной лимит исчерпан — оставляем на следующее окно
+      continue;
+    }
 
     const res = await sendViaMailbox(mb, { to: m.to_email, subject: m.subject, text: m.body });
     const attempts = (m.attempts ?? 0) + 1;
@@ -168,11 +177,12 @@ export async function processByoSendBatch(opts?: {
       processed++;
       await sleep(gapMs);
     } else if (res.error === 'reauth_required') {
-      // Токен доступа умер → помечаем ящик на переподключение; письмо оставляем в очереди.
+      // Токен доступа умер → помечаем ящик на переподключение; письмо возвращаем в очередь.
       await supabaseAdmin
         .from('client_mailbox_accounts')
         .update({ status: 'failed', last_error: 'Токен доступа истёк — переподключите ящик.' })
         .eq('id', mb.id);
+      await releaseMessage(m.id);
       remaining.set(m.mailbox_id, 0); // остальные письма этого ящика в этом проходе не трогаем
       log('warn', `BYO mailbox ${mb.email} requires re-auth — marked for reconnect`);
     } else {

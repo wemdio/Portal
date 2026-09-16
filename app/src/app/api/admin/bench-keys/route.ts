@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { z } from 'zod';
 import { issueBenchKey } from '@/lib/bench/issueKey';
 import { describeBenchTool, listAllBenchTools } from '@/lib/bench/registry';
+import { loadBenchUsage } from '@/lib/bench/usage';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { isAdmin } from '@/lib/roles';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -59,6 +60,11 @@ export async function GET(req: NextRequest) {
     return jsonError(error.message, 500);
   }
 
+  // Расход считается по тому же журналу и той же границе суток, что и сами
+  // лимиты. Иначе экран показывал бы одно, а API отказывал по другому — и
+  // верить экрану было бы нельзя.
+  const usage = await loadBenchUsage(auth.admin);
+
   // Ответ собирается перечислением полей, а не отдачей строки как есть.
   // Список колонок в запросе выше уже исключает `key_hash`, но полагаться
   // на одну лишь строку запроса нельзя: `select('*')` вписывается одним
@@ -75,6 +81,11 @@ export async function GET(req: NextRequest) {
     revoked_at: row.revoked_at ?? null,
     last_used_at: row.last_used_at ?? null,
     created_at: row.created_at,
+    usage: usage[String(row.id)] ?? {
+      requests_last_minute: 0,
+      jobs_today: 0,
+      rows_today: 0,
+    },
   }));
 
   return NextResponse.json({

@@ -8,7 +8,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { TelegramClient } from 'telegram';
 import { validateFirstTouch, describeFailure, resolveMaxChars } from './validateMessage';
-import { selectNextContacts, remainingDailyQuota, type PendingContact } from './selectContacts';
+import { selectNextContacts, remainingDailyQuota, portionBudget, type PendingContact } from './selectContacts';
 import * as fdb from './db';
 import {
   isFloodLimitReason,
@@ -17,6 +17,7 @@ import {
 } from '../accountCooldown';
 import { classifyRestriction, describeRestriction } from '../restriction';
 import { withTimeout } from '../withTimeout';
+import { expandSpintax } from './spintax';
 
 /**
  * Сроки на вызовы Telegram в первом касании — та же причина, что в боевом
@@ -44,6 +45,13 @@ export interface SendBatchArgs {
   };
   /** Дневная норма первых сообщений на аккаунт. Ноль = выключено. */
   perDay: number | undefined;
+  /**
+   * Минимальная пауза между порциями первых сообщений, минут. Отсутствие =
+   * 60 (см. portionBudget); 0 — вся норма одной очередью, как до разнесения.
+   */
+  gapMinutes?: number;
+  /** Писем за одну порцию. Отсутствие = 2. */
+  perGap?: number;
   log: LogFn;
   shouldStop?: () => boolean;
   onProgress?: () => void;
@@ -66,12 +74,41 @@ export interface SendBatchArgs {
    * (как было до 24.08: PEER_FLOOD только останавливал порцию).
    */
   cooldownHours?: number;
+  /**
+   * Контакты, уже разобранные в этом круге кампании другими аккаунтами.
+   *
+   * Порция теперь добирается до нормы, а неудачный контакт остаётся `pending` —
+   * без общей отметки следующий аккаунт того же круга взял бы ровно те же ники
+   * и повторил ту же работу. Набор ведёт круг кампании и обнуляет на каждом
+   * новом проходе: сутки спустя контакт стоит попробовать снова, но не через
+   * десять минут.
+   */
+  claimed?: Set<string>;
+  /**
+   * Замок вокруг выбора контактов из очереди.
+   *
+   * Круг обходит аккаунты параллельно; без него два аккаунта берут одну порцию.
+   * По умолчанию замка нет — для одиночного вызова он не нужен.
+   */
+  claimLock?: <T>(fn: () => Promise<T>) => Promise<T>;
 }
 
 export interface SendBatchResult {
   sent: number;
   skipped: number;
   postponed: number;
+  /**
+   * Аккаунт не резолвнул НИ ОДНОГО ника из порции, и ограничение не
+   * подтвердилось ни кодом ошибки, ни ботом.
+   *
+   * Сам по себе это не приговор — порция могла состоять из мёртвых ников. Но
+   * повторяясь круг за кругом, признак становится однозначным: 02.09.2026 в
+   * ATOL-1 пятнадцать аккаунтов одной партии за неделю не отправили НИ ОДНОГО
+   * первого касания при 205 отложенных, тогда как остальные восемнадцать
+   * рассылали с той же очереди. Решение по этому флагу принимает круг
+   * кампании — он видит историю аккаунта, а порция видит только себя.
+   */
+  resolveBlocked: boolean;
 }
 
 /** Начало текущих суток по времени сервера — для дневной нормы. */
@@ -299,8 +336,21 @@ function isUsernameInvalid(err: unknown): boolean {
 }
 
 export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatchResult> {
-  const { db, client, campaignId, account, perDay, log } = args;
-  const result: SendBatchResult = { sent: 0, skipped: 0, postponed: 0 };
+  const { db, client, campaignId, account, perDay } = args;
+
+  /**
+   * Каждая строка отсюда подписана аккаунтом.
+   *
+   * Лог аккаунта в интерфейсе отбирает строки по его имени в тексте: ссылки на
+   * аккаунт в таблице логов нет (колонка `account_id` есть, но её никто не
+   * заполняет). Первое касание писало без подписи — и в карточке аккаунта из
+   * всей порции была видна одна сводка «отправлено 0, отложено 6», а причина,
+   * записанная миллисекундой позже, оставалась только в общем логе кампании.
+   * Оператор видел, что аккаунт молчит, и не видел почему.
+   */
+  const log: LogFn = (level, message) => args.log(level, `Аккаунт ${account.session_name}: ${message}`);
+
+  const result: SendBatchResult = { sent: 0, skipped: 0, postponed: 0, resolveBlocked: false };
   const maxChars = resolveMaxChars(args.maxChars);
   const resolveTimeoutMs = args.resolveTimeoutMs ?? FT_RESOLVE_TIMEOUT_MS;
   const sendTimeoutMs = args.sendTimeoutMs ?? FT_SEND_TIMEOUT_MS;
@@ -315,252 +365,348 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
   const quota = remainingDailyQuota({ perDay, sentToday });
   if (quota <= 0) return result;
 
-  const baseIds = await fdb.loadCampaignBaseIds(db, campaignId);
+  /**
+   * Норма по дням, а не по часам: суточного «4» мало, Telegram читает очередь
+   * из 4 писем за две минуты как всплеск. Отправляем порциями — по `perGap`
+   * писем не чаще, чем раз в `gapMinutes` (счёт — от последнего фактического
+   * письма аккаунта, не от круга кампании). Не пора — тихо выходим: круг
+   * возвращается каждые несколько минут и сам зайдёт, когда пауза истечёт.
+   */
+  const lastSentRaw = await fdb.lastFirstTouchSentAt(db, account.id);
+  const lastSentMs = lastSentRaw ? new Date(lastSentRaw).getTime() : null;
+  const plan = portionBudget({
+    perDay,
+    sentToday,
+    gapMinutes: args.gapMinutes,
+    perGap: args.perGap,
+    lastSentAtMs: lastSentMs !== null && Number.isFinite(lastSentMs) ? lastSentMs : null,
+    nowMs: Date.now(),
+  });
+  if (!plan.due) return result;
+  const sendBudget = plan.budget;
+
+  // Из включённых баз кампании аккаунту доступны те, где он в списке
+  // рассыльщиков (пустой список у базы = шлют все). Аккаунт, исключённый из
+  // всех баз, уходит отсюда с пустым результатом — диалоги и фоллапы при этом
+  // остаются за ним: фильтр только на первые касания.
+  const campaignBases = await fdb.loadCampaignBases(db, campaignId);
+  const baseIds = fdb.basesAllowedForAccount(campaignBases, account.id);
   if (!baseIds.length) return result;
 
-  // С запасом: часть контактов отсеется на дедупе и резолве, второй заход в БД
-  // за добором дороже, чем лишние строки в выборке.
-  const perBase = await fdb.loadPendingByBase(db, baseIds, quota * 2, account.id);
-  const picked = selectNextContacts({ perBase, limit: quota });
-  if (!picked.length) return result;
+  /**
+   * Норма — это ОТПРАВЛЕННЫЕ письма, а не взятые из очереди контакты.
+   *
+   * Раньше аккаунт брал ровно три контакта и на этом заканчивал круг: попались
+   * три мёртвых ника — день потерян, следующая очередь придёт часов через
+   * шесть. 02.09.2026 в ATOL-1 так уходило впустую по десятку кругов подряд.
+   * Теперь мёртвые пропускаются, а на их место добирается следующий контакт —
+   * пока не наберётся норма или не кончатся кандидаты.
+   *
+   * Три ограничителя, чтобы добор не превратился в перебор всей базы одним
+   * аккаунтом:
+   *   - потолок просмотренных за круг (норма × 5);
+   *   - обрыв, если аккаунт не резолвит вообще ничего (признак заморозки);
+   *   - любое ограничение самого аккаунта — оно останавливает круг сразу.
+   */
+  const MAX_EXAMINED = quota * 5;
+  /** Столько подряд «ника не существует» без единого успеха = аккаунт слеп. */
+  const RESOLVE_GIVE_UP = 6;
+  /** Окно выборки: с запасом, чтобы добор не ходил в базу на каждый контакт. */
+  const WINDOW = quota * 6;
 
+  const claimed = args.claimed ?? new Set<string>();
+  const withClaimLock = args.claimLock ?? (<T,>(fn: () => Promise<T>) => fn());
   // RPC USERNAME_NOT_OCCUPIED неоднозначен: так Telegram отвечает и за мёртвый
   // ник, и за замороженный аккаунт (на живые ники). Решаем судьбу таких контактов
-  // только по итогу порции — по одному сигналу ничего сказать нельзя.
+  // только по итогу круга — по одному сигналу ничего сказать нельзя.
   const notOccupied: Array<{ contact: PendingContact; attempts: number }> = [];
+  /** Хоть один ник за круг нашёлся — значит резолв у аккаунта работает. */
+  let resolvedAny = false;
+  let examined = 0;
+  let stopAll = false;
 
-  for (const contact of picked) {
-    if (args.shouldStop?.()) break;
-    args.onProgress?.();
+  while (!stopAll && result.sent < sendBudget && examined < MAX_EXAMINED) {
+    /**
+     * Выбор и захват контактов — одним неделимым куском.
+     *
+     * Круг обходит аккаунты параллельно, а между чтением очереди и пометкой
+     * «занято» есть await. Без замка два аккаунта успевали прочитать одну и ту
+     * же порцию до того, как первый её пометит, и писали одному человеку
+     * дважды с разных номеров — для получателя это очевидная рассылка.
+     *
+     * Замок держим только на выборке: сама отправка идёт параллельно, ради
+     * чего параллельность и делалась.
+     */
+    const picked = await withClaimLock(async () => {
+      const perBase = await fdb.loadPendingByBase(db, baseIds, WINDOW, account.id);
+      const chosen = selectNextContacts({ perBase, limit: WINDOW })
+        .filter((c) => !claimed.has(c.id))
+        .slice(0, Math.max(1, sendBudget - result.sent));
+      for (const c of chosen) claimed.add(c.id);
+      return chosen;
+    });
+    if (!picked.length) break;
 
-    const attempts = Number((contact as PendingContact & { attempts?: number }).attempts ?? 0);
+    for (const contact of picked) {
+      if (args.shouldStop?.()) { stopAll = true; break; }
+      args.onProgress?.();
+      // Пауза не после отправки, а перед каждым следующим контактом: добор
+      // означает и резолвы без отправки, а частые резолвы подряд Telegram не
+      // любит ровно так же.
+      if (examined > 0 && args.gapMs) await new Promise((r) => setTimeout(r, args.gapMs));
+      examined++;
 
-    const check = validateFirstTouch(contact.message, maxChars);
-    if (!check.ok) {
-      const why = describeFailure(check.reason, maxChars);
-      const outcome = await fdb.recordContactFailure(db, contact.id, attempts, why);
-      log('warning', `Первое касание: @${contact.username} отложен — ${why}${attemptNote(outcome)}`);
-      result.postponed++;
-      continue;
-    }
-
-    let entity: { id: unknown; username?: string };
-    try {
-      entity = (await withTimeout(
-        client.getEntity(`@${contact.username}`),
-        resolveTimeoutMs,
-        'поиск контакта по юзернейму',
-      )) as { id: unknown; username?: string };
-    } catch (err) {
-      // Честно кривой ник (недопустимый формат, USERNAME_INVALID) — это не
-      // заморозка, такой ник не «оживёт». Скипаем сразу.
-      if (isUsernameInvalid(err)) {
-        await fdb.markContactSkipped(db, contact.id, 'юзернейм не найден в Telegram');
-        log('info', `Первое касание: @${contact.username} пропущен — юзернейм не найден`);
-        result.skipped++;
-        continue;
-      }
-
-      // «No user has X as username» / USERNAME_NOT_OCCUPIED — неоднозначен: тот же
-      // ответ Telegram отдаёт и на живые ники, когда аккаунт урезан/frozen. Сжигать
-      // контакт здесь нельзя; буферизуем и решаем по итогу порции.
-      if (isUsernameNotFoundAmbiguous(err)) {
-        notOccupied.push({ contact, attempts });
-        continue;
-      }
-
-      // Резолв юзернейма — такой же поход в Telegram, как и отправка, и падает
-      // он на тех же ограничениях. Раньше классификация висела только на
-      // sendMessage, поэтому флуд-вейт или бан аккаунта, случившиеся на
-      // getEntity, списывали попытку живому контакту и порция продолжала
-      // ломиться в API. Разбираем ошибку тем же классификатором.
-      const msg = err instanceof Error ? err.message : String(err);
-      const failure = classifySendFailure(msg);
-
-      if (failure.kind === 'contact_permanent') {
-        await fdb.markContactSkipped(db, contact.id, failure.reason);
-        log('warning', `Первое касание: @${contact.username} пропущен — ${failure.reason}. Больше не пробуем.`);
-        result.skipped++;
-        continue;
-      }
-
-      if (failure.kind === 'account_limited' || failure.kind === 'transport_down') {
-        const parked = failure.kind === 'account_limited'
-          && await parkIfFlood({
-            db,
-            client,
-            account,
-            hours: args.cooldownHours,
-            reason: failure.reason,
-            rawError: msg,
-            log,
-          });
-        if (!parked) {
-          // Пауза не настроена — но сказать, временное это или навсегда, всё
-          // равно обязаны: иначе оператор читает «Telegram ограничил аккаунт»
-          // и не знает, ждать ему или менять номер.
-          const restriction = failure.kind === 'account_limited'
-            ? classifyRestriction(msg, Date.now())
-            : null;
-          const cause = failure.kind === 'transport_down'
-            ? `обрыв связи или прокси (${failure.reason})`
-            : restriction
-              ? describeRestriction(restriction)
-              : `Telegram ограничил аккаунт (${failure.reason})`;
-          log(
-            'warning',
-            `Первое касание остановлено на резолве юзернейма: ${cause}. ` +
-              `Контакты остаются в очереди, попытки им не засчитываем — продолжим следующим кругом.`,
-          );
-        }
-        result.postponed++;
-        break;
-      }
-
-      // Раньше эта ветка молчала: причина уходила в skip_reason контакта, а в
-      // логе оставалось только «отложено N» без единого слова почему. Показать
-      // skip_reason на экране тоже негде — оператор не мог узнать причину
-      // вообще никак.
-      const outcome = await fdb.recordContactFailure(db, contact.id, attempts, `не смог найти собеседника: ${msg}`);
-      log('warning', `Первое касание: @${contact.username} отложен — не смог найти собеседника: ${msg}${attemptNote(outcome)}`);
-      result.postponed++;
-      continue;
-    }
-
-    const tgUserId = Number(entity.id);
-
-    // Единая точка «этому человеку уже писали» — общая для всех баз и кампаний.
-    const { data: already } = await db
-      .from('tg_outreach_processed')
-      .select('tg_user_id')
-      .eq('campaign_id', campaignId)
-      .eq('tg_user_id', tgUserId)
-      .maybeSingle();
-    if (already) {
-      await fdb.markContactSkipped(db, contact.id, 'этому человеку уже писали');
-      result.skipped++;
-      continue;
-    }
-
-    try {
-      await withTimeout(
-        client.sendMessage(`@${contact.username}`, { message: contact.message }),
-        sendTimeoutMs,
-        'отправка первого сообщения',
-      );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const attempts = Number((contact as PendingContact & { attempts?: number }).attempts ?? 0);
 
       /**
-       * Наш таймаут на ОТПРАВКЕ — особый случай, и повторять её нельзя.
+       * Спинтакс разворачиваем до проверки длины.
        *
-       * Ответа мы не дождались, но это не значит, что сообщение не ушло:
-       * запрос мог дойти до Telegram и быть доставленным, а потеряться могло
-       * подтверждение. Повторная попытка в следующем круге отправит человеку
-       * то же самое второй раз — а для холодного аутрича задвоенное сообщение
-       * выглядит как работа бота и стоит дороже, чем один недописанный контакт
-       * из трёхсот.
+       * Проверять надо то, что реально уйдёт: `{Здравствуйте|Добрый день}`
+       * длиннее любого своего варианта, и контакт с нормальным текстом
+       * отсеивался бы как слишком длинный.
        *
-       * Поэтому считаем контакт обработанным и оставляем след в журнале, чтобы
-       * при разборе было видно: тут не отказ, тут неизвестность.
-       *
-       * Таймауты на ЧТЕНИИ (резолв ника, история) сюда не попадают — их
-       * повторять безопасно, и они уходят в общую классификацию ниже.
+       * Разворот на каждый контакт, а не на порцию: смысл в том, чтобы соседние
+       * получатели видели разные формулировки.
        */
-      if (msg.includes('отправка первого сообщения: нет ответа')) {
-        await fdb.markContactSkipped(db, contact.id, 'отправка без подтверждения — возможно, доставлено');
-        log(
-          'warning',
-          `Первое касание: @${contact.username} — Telegram не подтвердил отправку за ${Math.round(sendTimeoutMs / 1000)}с. `
-          + 'Сообщение могло уйти, поэтому повторять не буду: задвоенное первое касание хуже пропущенного контакта. '
-          + 'Проверьте диалог руками, если контакт важен.',
+      const messageText = expandSpintax(contact.message);
+      const check = validateFirstTouch(messageText, maxChars);
+      if (!check.ok) {
+        const why = describeFailure(check.reason, maxChars);
+        const outcome = await fdb.recordContactFailure(db, contact.id, attempts, why);
+        log('warning', `Первое касание: @${contact.username} отложен — ${why}${attemptNote(outcome)}`);
+        result.postponed++;
+        continue;
+      }
+
+      let entity: { id: unknown; username?: string };
+      try {
+        entity = (await withTimeout(
+          client.getEntity(`@${contact.username}`),
+          resolveTimeoutMs,
+          'поиск контакта по юзернейму',
+        )) as { id: unknown; username?: string };
+      } catch (err) {
+        // Честно кривой ник (недопустимый формат, USERNAME_INVALID) — это не
+        // заморозка, такой ник не «оживёт». Скипаем сразу.
+        if (isUsernameInvalid(err)) {
+          await fdb.markContactSkipped(db, contact.id, 'юзернейм не найден в Telegram');
+          log('info', `Первое касание: @${contact.username} пропущен — юзернейм не найден`);
+          result.skipped++;
+          continue;
+        }
+
+        // «No user has X as username» / USERNAME_NOT_OCCUPIED — неоднозначен: тот же
+        // ответ Telegram отдаёт и на живые ники, когда аккаунт урезан/frozen. Сжигать
+        // контакт здесь нельзя; буферизуем и решаем по итогу порции.
+        if (isUsernameNotFoundAmbiguous(err)) {
+          notOccupied.push({ contact, attempts });
+          continue;
+        }
+
+        // Резолв юзернейма — такой же поход в Telegram, как и отправка, и падает
+        // он на тех же ограничениях. Раньше классификация висела только на
+        // sendMessage, поэтому флуд-вейт или бан аккаунта, случившиеся на
+        // getEntity, списывали попытку живому контакту и порция продолжала
+        // ломиться в API. Разбираем ошибку тем же классификатором.
+        const msg = err instanceof Error ? err.message : String(err);
+        const failure = classifySendFailure(msg);
+
+        if (failure.kind === 'contact_permanent') {
+          await fdb.markContactSkipped(db, contact.id, failure.reason);
+          log('warning', `Первое касание: @${contact.username} пропущен — ${failure.reason}. Больше не пробуем.`);
+          result.skipped++;
+          continue;
+        }
+
+        if (failure.kind === 'account_limited' || failure.kind === 'transport_down') {
+          const parked = failure.kind === 'account_limited'
+            && await parkIfFlood({
+              db,
+              client,
+              account,
+              hours: args.cooldownHours,
+              reason: failure.reason,
+              rawError: msg,
+              log,
+            });
+          if (!parked) {
+            // Пауза не настроена — но сказать, временное это или навсегда, всё
+            // равно обязаны: иначе оператор читает «Telegram ограничил аккаунт»
+            // и не знает, ждать ему или менять номер.
+            const restriction = failure.kind === 'account_limited'
+              ? classifyRestriction(msg, Date.now())
+              : null;
+            const cause = failure.kind === 'transport_down'
+              ? `обрыв связи или прокси (${failure.reason})`
+              : restriction
+                ? describeRestriction(restriction)
+                : `Telegram ограничил аккаунт (${failure.reason})`;
+            log(
+              'warning',
+              `Первое касание остановлено на резолве юзернейма: ${cause}. ` +
+                `Контакты остаются в очереди, попытки им не засчитываем — продолжим следующим кругом.`,
+            );
+          }
+          result.postponed++;
+          stopAll = true;
+          break;
+        }
+
+        // Раньше эта ветка молчала: причина уходила в skip_reason контакта, а в
+        // логе оставалось только «отложено N» без единого слова почему. Показать
+        // skip_reason на экране тоже негде — оператор не мог узнать причину
+        // вообще никак.
+        const outcome = await fdb.recordContactFailure(db, contact.id, attempts, `не смог найти собеседника: ${msg}`);
+        log('warning', `Первое касание: @${contact.username} отложен — не смог найти собеседника: ${msg}${attemptNote(outcome)}`);
+        result.postponed++;
+        continue;
+      }
+
+      // Ник нашёлся — резолв у аккаунта работает, что бы дальше ни случилось.
+      // Дальше «не найден» уже нельзя списать на заморозку: аккаунт доказал делом.
+      resolvedAny = true;
+      const tgUserId = Number(entity.id);
+
+      // Единая точка «этому человеку уже писали» — общая для всех баз и кампаний.
+      const { data: already } = await db
+        .from('tg_outreach_processed')
+        .select('tg_user_id')
+        .eq('campaign_id', campaignId)
+        .eq('tg_user_id', tgUserId)
+        .maybeSingle();
+      if (already) {
+        await fdb.markContactSkipped(db, contact.id, 'этому человеку уже писали');
+        result.skipped++;
+        continue;
+      }
+
+      try {
+        await withTimeout(
+          client.sendMessage(`@${contact.username}`, { message: messageText }),
+          sendTimeoutMs,
+          'отправка первого сообщения',
         );
-        result.skipped++;
-        continue;
-      }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
 
-      const failure = classifySendFailure(msg);
-
-      if (failure.kind === 'contact_permanent') {
-        await fdb.markContactSkipped(db, contact.id, failure.reason);
-        log('warning', `Первое касание: @${contact.username} пропущен — ${failure.reason}. Больше не пробуем.`);
-        result.skipped++;
-        continue;
-      }
-
-      if (failure.kind === 'account_limited' || failure.kind === 'transport_down') {
-        const parked = failure.kind === 'account_limited'
-          && await parkIfFlood({
-            db,
-            client,
-            account,
-            hours: args.cooldownHours,
-            reason: failure.reason,
-            rawError: msg,
-            log,
-          });
-        if (!parked) {
-          // Пауза не настроена — но сказать, временное это или навсегда, всё
-          // равно обязаны: иначе оператор читает «Telegram ограничил аккаунт»
-          // и не знает, ждать ему или менять номер.
-          const restriction = failure.kind === 'account_limited'
-            ? classifyRestriction(msg, Date.now())
-            : null;
-          const cause = failure.kind === 'transport_down'
-            ? `обрыв связи или прокси (${failure.reason})`
-            : restriction
-              ? describeRestriction(restriction)
-              : `Telegram ограничил аккаунт (${failure.reason})`;
+        /**
+         * Наш таймаут на ОТПРАВКЕ — особый случай, и повторять её нельзя.
+         *
+         * Ответа мы не дождались, но это не значит, что сообщение не ушло:
+         * запрос мог дойти до Telegram и быть доставленным, а потеряться могло
+         * подтверждение. Повторная попытка в следующем круге отправит человеку
+         * то же самое второй раз — а для холодного аутрича задвоенное сообщение
+         * выглядит как работа бота и стоит дороже, чем один недописанный контакт
+         * из трёхсот.
+         *
+         * Поэтому считаем контакт обработанным и оставляем след в журнале, чтобы
+         * при разборе было видно: тут не отказ, тут неизвестность.
+         *
+         * Таймауты на ЧТЕНИИ (резолв ника, история) сюда не попадают — их
+         * повторять безопасно, и они уходят в общую классификацию ниже.
+         */
+        if (msg.includes('отправка первого сообщения: нет ответа')) {
+          await fdb.markContactSkipped(db, contact.id, 'отправка без подтверждения — возможно, доставлено');
           log(
             'warning',
-            `Первое касание остановлено: ${cause}. ` +
-              `Контакты остаются в очереди, попытки им не засчитываем — продолжим следующим кругом.`,
+            `Первое касание: @${contact.username} — Telegram не подтвердил отправку за ${Math.round(sendTimeoutMs / 1000)}с. `
+            + 'Сообщение могло уйти, поэтому повторять не буду: задвоенное первое касание хуже пропущенного контакта. '
+            + 'Проверьте диалог руками, если контакт важен.',
           );
+          result.skipped++;
+          continue;
         }
+
+        const failure = classifySendFailure(msg);
+
+        if (failure.kind === 'contact_permanent') {
+          await fdb.markContactSkipped(db, contact.id, failure.reason);
+          log('warning', `Первое касание: @${contact.username} пропущен — ${failure.reason}. Больше не пробуем.`);
+          result.skipped++;
+          continue;
+        }
+
+        if (failure.kind === 'account_limited' || failure.kind === 'transport_down') {
+          const parked = failure.kind === 'account_limited'
+            && await parkIfFlood({
+              db,
+              client,
+              account,
+              hours: args.cooldownHours,
+              reason: failure.reason,
+              rawError: msg,
+              log,
+            });
+          if (!parked) {
+            // Пауза не настроена — но сказать, временное это или навсегда, всё
+            // равно обязаны: иначе оператор читает «Telegram ограничил аккаунт»
+            // и не знает, ждать ему или менять номер.
+            const restriction = failure.kind === 'account_limited'
+              ? classifyRestriction(msg, Date.now())
+              : null;
+            const cause = failure.kind === 'transport_down'
+              ? `обрыв связи или прокси (${failure.reason})`
+              : restriction
+                ? describeRestriction(restriction)
+                : `Telegram ограничил аккаунт (${failure.reason})`;
+            log(
+              'warning',
+              `Первое касание остановлено: ${cause}. ` +
+                `Контакты остаются в очереди, попытки им не засчитываем — продолжим следующим кругом.`,
+            );
+          }
+          result.postponed++;
+          stopAll = true;
+          break;
+        }
+
+        const outcome = await fdb.recordContactFailure(db, contact.id, attempts, `не отправилось: ${msg}`);
+        log('warning', `Первое касание: @${contact.username} не отправилось — ${msg}${attemptNote(outcome)}`);
         result.postponed++;
-        break;
+        continue;
       }
 
-      const outcome = await fdb.recordContactFailure(db, contact.id, attempts, `не отправилось: ${msg}`);
-      log('warning', `Первое касание: @${contact.username} не отправилось — ${msg}${attemptNote(outcome)}`);
-      result.postponed++;
-      continue;
+      const nowIso = new Date().toISOString();
+      await db.from('tg_outreach_dialogs').insert({
+        campaign_id: campaignId,
+        account_id: account.id,
+        tg_user_id: tgUserId,
+        tg_username: contact.username,
+        // В историю — отправленный вариант, а не шаблон: дальше по нему
+        // отвечает модель, и она должна видеть то же, что и собеседник.
+        messages: [{ role: 'assistant', content: messageText, timestamp: nowIso }],
+        status: 'none',
+        can_send: true,
+        last_message_at: nowIso,
+      });
+      await db.from('tg_outreach_processed').upsert(
+        { campaign_id: campaignId, tg_user_id: tgUserId, tg_username: contact.username },
+        { onConflict: 'campaign_id,tg_user_id' },
+      );
+      await fdb.markContactSent(db, contact.id, account.id, tgUserId);
+
+      log('info', `Первое касание: отправлено @${contact.username}`);
+      result.sent++;
     }
 
-    const nowIso = new Date().toISOString();
-    await db.from('tg_outreach_dialogs').insert({
-      campaign_id: campaignId,
-      account_id: account.id,
-      tg_user_id: tgUserId,
-      tg_username: contact.username,
-      messages: [{ role: 'assistant', content: contact.message, timestamp: nowIso }],
-      status: 'none',
-      can_send: true,
-      last_message_at: nowIso,
-    });
-    await db.from('tg_outreach_processed').upsert(
-      { campaign_id: campaignId, tg_user_id: tgUserId, tg_username: contact.username },
-      { onConflict: 'campaign_id,tg_user_id' },
-    );
-    await fdb.markContactSent(db, contact.id, account.id, tgUserId);
-
-    log('info', `Первое касание: отправлено @${contact.username}`);
-    result.sent++;
-
-    if (args.gapMs && result.sent < picked.length) {
-      await new Promise((r) => setTimeout(r, args.gapMs));
-    }
+    // Аккаунт подряд не находит ни одного ника и ни разу не преуспел — дальше
+    // добирать бессмысленно: перебор базы этого не вылечит, а признак для
+    // круга кампании уже собран.
+    if (!resolvedAny && notOccupied.length >= RESOLVE_GIVE_UP) break;
   }
 
-  // Решаем судьбу буфера «юзернейм не найден» по итогу порции.
+  // Решаем судьбу буфера «юзернейм не найден» по итогу всего круга.
   //
-  // Вся порция «не найдена» (два и более контакта) — подозрение, что заморожен
-  // наш аккаунт, а не что база мёртвая: мёртвый ник — одиночное явление, а
-  // урезанный аккаунт отдаёт этот ответ на каждый резолв. Подозрение проверяем
-  // у @SpamBot и только подтверждённое считаем ограничением; иначе виноваты
-  // ники, и попытка списывается им. Одиночный такой ответ (ветка else) —
-  // всегда про контакт: откладываем с попыткой, но навсегда не сжигаем.
-  if (notOccupied.length >= 2 && notOccupied.length === picked.length) {
+  // Ни один ник за круг не нашёлся (и таких было хотя бы два) — подозрение,
+  // что заморожен наш аккаунт, а не что база мёртвая: мёртвый ник — одиночное
+  // явление, а урезанный аккаунт отдаёт этот ответ на каждый резолв.
+  // Подозрение проверяем у @SpamBot и только подтверждённое считаем
+  // ограничением.
+  //
+  // Если же хоть один ник за круг нашёлся, аккаунт доказал делом, что резолв у
+  // него работает, — и тогда «не найден» это уже про контакт: откладываем с
+  // попыткой (ветка else), но навсегда не сжигаем.
+  if (notOccupied.length >= 2 && !resolvedAny) {
     /**
      * Тот же ответ Telegram («юзернейм не найден») означает две разные вещи:
      * мёртвый ник в базе или живой ник, который не видит урезанный аккаунт.
@@ -597,22 +743,33 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
       );
       result.postponed += notOccupied.length;
     } else {
+      /**
+       * Порция не резолвнулась целиком, а бот ограничения не подтвердил.
+       * Виноват либо аккаунт, либо ники — и по одной порции не различить.
+       *
+       * Пока в этой ветке списывали попытку контактам, вышло хуже некуда:
+       * пятнадцать замороженных аккаунтов ATOL-1 за сутки сожгли треть
+       * оставшейся базы, хотя ники были живыми — те же контакты потом
+       * спокойно уходили с исправных номеров. Поэтому контакты здесь не
+       * трогаем: неизвестность не повод портить базу.
+       *
+       * Мёртвые ники всё равно выбывают — но по другой ветке (ниже), где
+       * аккаунт доказал делом, что резолвить умеет: часть порции у него
+       * прошла, а этот ник нет.
+       */
       log(
         'warning',
-        'Весь резолв порции вернул «юзернейм не найден», но ограничения на аккаунте нет — ' +
-          `@SpamBot его не подтвердил. Значит дело в никах, а не в номере: аккаунт остаётся в работе, ` +
-          `попытки засчитываю контактам, после ${fdb.MAX_CONTACT_ATTEMPTS} они уйдут из очереди.`,
+        'Весь резолв порции вернул «юзернейм не найден», ограничения @SpamBot не подтвердил. ' +
+          'Кто виноват — аккаунт или ники — по одной порции не понять, поэтому контакты ' +
+          'оставляю в очереди нетронутыми. Если повторится ещё круг, круг кампании уведёт ' +
+          'аккаунт на паузу.',
       );
-      for (const { contact, attempts } of notOccupied) {
-        const outcome = await fdb.recordContactFailure(
-          db,
-          contact.id,
-          attempts,
-          'юзернейм не резолвился (ограничение аккаунта не подтвердилось)',
-        );
-        log('warning', `Первое касание: @${contact.username} отложен — юзернейм не резолвился${attemptNote(outcome)}`);
-        result.postponed++;
-      }
+      result.resolveBlocked = true;
+      result.postponed += notOccupied.length;
+      // Отметку «этот контакт уже разобран» с них снимаем: её ставит тот, кто
+      // может судить о нике, а слепой аккаунт не может. Пусть в этом же круге
+      // их попробует следующий — на исправном номере такой ник обычно уходит.
+      for (const { contact } of notOccupied) claimed.delete(contact.id);
     }
   } else {
     for (const { contact, attempts } of notOccupied) {

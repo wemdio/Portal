@@ -7,6 +7,7 @@ import {
   NoSpeechError,
 } from '@/lib/transcription';
 import { logError, logInfo } from '@/lib/loggerServer';
+import { linkTranscriptToLead } from '@/lib/transcriptAmoLink';
 import {
   isMtprotoAvailable,
   isUserMtprotoAvailable,
@@ -69,22 +70,23 @@ function sanitizeTranscriptRow(row: Record<string, unknown>): Record<string, unk
   return out;
 }
 
-async function safeInsertTranscript(row: Record<string, unknown>): Promise<boolean> {
-  if (!supabaseAdmin) return false;
-  if (!canAttemptTranscriptWrite()) return false;
+async function safeInsertTranscript(row: Record<string, unknown>): Promise<string | null> {
+  if (!supabaseAdmin) return null;
+  if (!canAttemptTranscriptWrite()) return null;
   try {
-    const { error } = await supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from('tg_video_transcripts')
-      .insert(sanitizeTranscriptRow(row));
+      .insert(sanitizeTranscriptRow(row))
+      .select('id');
     if (error) {
       markTranscriptWriteFailure(error);
-      return false;
+      return null;
     }
     tgTranscriptWritesPausedUntil = 0;
-    return true;
+    return (data?.[0] as { id: string } | undefined)?.id ?? null;
   } catch (error) {
     markTranscriptWriteFailure(error);
-    return false;
+    return null;
   }
 }
 
@@ -645,6 +647,8 @@ export async function processVideoMessage(
       'Скорее всего Postgres отклонил вставку (см. предыдущий log).',
     );
   }
+
+  await linkTranscriptToLead(supabaseAdmin, insertOk, msg.caption, msg.chat.id, msg.message_thread_id ?? 0);
 
   await logInfo('tg-transcribe.completed', `Transcribed video from ${senderName}`, {
     chatId: msg.chat.id,

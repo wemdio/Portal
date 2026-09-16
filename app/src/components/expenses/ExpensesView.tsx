@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 
 import ClassifyQueue from '@/components/expenses/ClassifyQueue';
+import DailyLedger from '@/components/expenses/DailyLedger';
 import Filters, { getDefaultFilters, type FiltersValue } from '@/components/expenses/Filters';
 import KpiRow from '@/components/expenses/KpiRow';
 import ManualExpenseForm from '@/components/expenses/ManualExpenseForm';
@@ -208,6 +209,11 @@ export default function ExpensesView({
           <TimeChart series={summary.series} groupBy={period.groupBy} />
 
           <VendorBreakdown items={vendors} query={query} queueQuery={queueQuery} />
+
+          {/* Разбивка по вендорам отвечает «кому за период», список по дням —
+              «что именно ушло в этот день». Он же заменяет собой выгрузку в
+              Excel в половине случаев, ради которых её открывали. */}
+          <DailyLedger kind="expenses" query={query} />
 
           <ManualExpenseForm
             range={range}

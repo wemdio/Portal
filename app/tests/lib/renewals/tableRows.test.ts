@@ -13,6 +13,7 @@ function renewal(over: Partial<RenewalProjectRow> = {}): RenewalProjectRow {
     kpi_fact: null,
     status: 'В работе',
     manager: null,
+    owner_lead: null,
     specialist: null,
     ...over,
   };

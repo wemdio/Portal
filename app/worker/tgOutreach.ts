@@ -44,11 +44,38 @@ const WATCHDOG_KILL_GRACE_MS = Number(process.env.TG_OUTREACH_WATCHDOG_GRACE_MS)
 const campaignControls = new Map<string, LoopControl>();
 const campaignKillRequestedAt = new Map<string, number>();
 
+/**
+ * Прогревы — отдельным реестром от боевых кругов.
+ *
+ * Раньше прогрев занимал тот же слот, что и рассылка: по кампании шло либо
+ * одно, либо другое. С разделением на уровне аккаунтов (миграция
+ * 20260907_0001) они идут одновременно, и общий слот стал ошибкой. 07.09.2026
+ * прогрев ATOL-1 встал после перезапуска воркера и больше не поднялся: боевой
+ * круг занял слот кампании, и возобновление прогрева пропускалось каждые пять
+ * минут молча — на экране при этом честно висело «день 1 из 3».
+ *
+ * Ключ прогресса и сторожевого таймера тоже свой: иначе завершившийся прогрев
+ * вычистил бы из реестра работающую рассылку.
+ */
+const runningWarmups = new Map<string, { stop: () => void; promise: Promise<void> }>();
+
+function warmupKey(campaignId: string): string {
+  return `warmup:${campaignId}`;
+}
+
 function forgetCampaign(campaignId: string) {
   runningCampaigns.delete(campaignId);
   campaignLastProgressAt.delete(campaignId);
   campaignControls.delete(campaignId);
   campaignKillRequestedAt.delete(campaignId);
+}
+
+function forgetWarmup(campaignId: string) {
+  const key = warmupKey(campaignId);
+  runningWarmups.delete(campaignId);
+  campaignLastProgressAt.delete(key);
+  campaignControls.delete(key);
+  campaignKillRequestedAt.delete(key);
 }
 
 /**
@@ -177,7 +204,10 @@ export async function reclaimOrphanedStartJobs() {
 
   const orphans = selectOrphanedStartJobs({
     jobs: (data ?? []) as StartJobRow[],
-    liveCampaignIds: new Set(runningCampaigns.keys()),
+    // Прогревы тоже живые: они держат джобу `warmup_start` и с 08.09.2026
+    // живут отдельным реестром. Без них сборщик счёл бы идущий прогрев сиротой
+    // и закрыл бы его джобу — ровно там, где мы только что чинили обратное.
+    liveCampaignIds: new Set([...runningCampaigns.keys(), ...runningWarmups.keys()]),
     now: Date.now(),
     graceMs: ORPHAN_START_JOB_GRACE_MS,
   });
@@ -345,19 +375,19 @@ async function handleRefetchJob(job: { id: string; campaign_id: string }) {
 }
 
 /**
- * Прогрев кампании. Занимает тот же слот в runningCampaigns, что и боевой цикл,
- * — так прогрев и аутрич не могут идти по одной кампании одновременно, а
- * сторожевой таймер следит за прогревом ровно как за обычной кампанией.
+ * Прогрев кампании. Идёт своим слотом, параллельно боевому кругу: греются
+ * только отмеченные аккаунты, остальные в это время рассылают. Сторожевой
+ * таймер следит за прогревом отдельно, под ключом `warmup:<id>`.
  */
 async function handleWarmupStartJob(job: { id: string; campaign_id: string }) {
   const campaignId = job.campaign_id;
 
-  if (runningCampaigns.has(campaignId)) {
+  if (runningWarmups.has(campaignId)) {
     if (shouldStop()) {
       log('info', `Warmup for ${campaignId} already running and worker is shutting down — re-queueing`);
       await db.from('tg_outreach_jobs').update({ status: 'pending', started_at: null }).eq('id', job.id);
     } else {
-      log('warn', `Campaign ${campaignId} is already busy, skipping warmup start`);
+      log('warn', `Warmup for ${campaignId} is already running, skipping warmup start`);
       await db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id);
     }
     return;
@@ -366,11 +396,12 @@ async function handleWarmupStartJob(job: { id: string; campaign_id: string }) {
   let stopRequested = false;
   const stopFn = () => { stopRequested = true; };
 
-  campaignLastProgressAt.set(campaignId, Date.now());
-  const onProgress = () => { campaignLastProgressAt.set(campaignId, Date.now()); };
+  const key = warmupKey(campaignId);
+  campaignLastProgressAt.set(key, Date.now());
+  const onProgress = () => { campaignLastProgressAt.set(key, Date.now()); };
 
   const control: LoopControl = {};
-  campaignControls.set(campaignId, control);
+  campaignControls.set(key, control);
 
   const promise = runWarmupLoop(campaignId, db, () => shouldStop() || stopRequested, onProgress, control)
     .then(() => {
@@ -395,13 +426,13 @@ async function handleWarmupStartJob(job: { id: string; campaign_id: string }) {
         .then(() => {}, () => {});
     })
     .finally(() => {
-      forgetCampaign(campaignId);
+      forgetWarmup(campaignId);
       db.from('tg_outreach_jobs').update({ status: 'completed', finished_at: new Date().toISOString() }).eq('id', job.id).then(({ error }) => {
         if (error) log('error', `Failed to mark tg job ${job.id} as completed: ${error.message}`);
       }, () => {});
     });
 
-  runningCampaigns.set(campaignId, { stop: stopFn, promise });
+  runningWarmups.set(campaignId, { stop: stopFn, promise });
   log('info', `Started warmup for campaign ${campaignId}`);
 }
 
@@ -416,7 +447,7 @@ async function handleWarmupStopJob(job: { id: string; campaign_id: string }) {
     .eq('campaign_id', campaignId)
     .in('status', ['pending', 'running']);
 
-  const running = runningCampaigns.get(campaignId);
+  const running = runningWarmups.get(campaignId);
   if (running) {
     running.stop();
     log('info', `Signaled warmup stop for campaign ${campaignId}`);
@@ -600,7 +631,9 @@ export async function resumeWarmupRuns() {
   if (!runs?.length) return;
 
   for (const run of runs as Array<{ id: string; campaign_id: string }>) {
-    if (runningCampaigns.has(run.campaign_id)) continue;
+    // Смотрим только на прогревы: боевой круг по этой кампании может идти
+    // параллельно и возобновлению прогрева не мешает.
+    if (runningWarmups.has(run.campaign_id)) continue;
 
     const { data: existingJob } = await db
       .from('tg_outreach_jobs')

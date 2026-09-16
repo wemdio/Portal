@@ -44,21 +44,29 @@ export async function logWarmup(
 }
 
 /**
- * Пометить кампанию как греющуюся (или вернуть в «остановлена»).
+ * Отметить, что по кампании идёт прогрев.
  *
- * Статус кампании — то место, где правило «либо греем, либо работаем по лидам»
- * становится видимым и проверяемым: воркер не берёт `warming` в боевой
- * auto-resume, а API отказывает в запуске аутрича.
+ * Статус кампании больше не трогаем. Раньше прогрев переводил её в `warming`, и
+ * это останавливало боевой круг у всех аккаунтов разом, а по окончании
+ * оставлял `stopped` — кампанию приходилось поднимать руками. Пользоваться
+ * прогревом при таком устройстве было нельзя: у ATOL-1 один запуск за всё
+ * время, у Polza ни одного, и новые аккаунты шли в бой с первого дня.
+ *
+ * Теперь греется не кампания, а аккаунт (`warmup_until`, миграция
+ * 20260907_0001): кампания продолжает рассылать готовыми, пока новички греются
+ * рядом. Останавливать её незачем.
+ *
+ * Функция оставлена намеренно: она — единственное место, где решалось, что
+ * делать со статусом, и её вызовы разбросаны по всем выходам из прогрева.
+ * Убрать статус здесь надёжнее, чем вычищать вызовы по одному и однажды
+ * пропустить тот, что вернёт кампанию в `warming`.
  */
 export async function setCampaignWarming(
-  db: SupabaseClient,
-  campaignId: string,
-  warming: boolean,
+  _db: SupabaseClient,
+  _campaignId: string,
+  _warming: boolean,
 ): Promise<void> {
-  await db
-    .from('tg_outreach_campaigns')
-    .update({ status: warming ? 'warming' : 'stopped', updated_at: new Date().toISOString() })
-    .eq('id', campaignId);
+  return;
 }
 
 /** Идущий или ожидающий запуск прогрева. Активный может быть только один. */
@@ -103,6 +111,9 @@ export async function createRun(
   return { run: (data as WarmupRun | null) ?? null, error: error?.message ?? null };
 }
 
+/** Состояния, после которых прогрев больше не идёт ни при каких условиях. */
+const TERMINAL_RUN_STATUSES = new Set(['finished', 'failed', 'stopped']);
+
 export async function setRunStatus(
   db: SupabaseClient,
   runId: string,
@@ -115,7 +126,34 @@ export async function setRunStatus(
     summary?: WarmupSummary;
   },
 ): Promise<void> {
-  await db.from('tg_outreach_warmup_runs').update(patch).eq('id', runId);
+  const { data } = await db
+    .from('tg_outreach_warmup_runs')
+    .update(patch)
+    .eq('id', runId)
+    .select('campaign_id')
+    .maybeSingle();
+
+  /**
+   * Прогрев кончился — снимаем отметку с аккаунтов.
+   *
+   * Отметку ставит оператор сроком вперёд («греть три дня»), а прогрев может
+   * закончиться раньше: план дня выполнен, запуск остановлен, аккаунтов не
+   * хватило. Раз отметка живёт по дате, аккаунты оставались «на прогреве» и
+   * после конца — боевой круг их не брал, а шапка кампании показывала «идёт
+   * прогрев». 09.09.2026 так простаивали 36 аккаунтов ATOL-1 при завершённом
+   * прогреве.
+   *
+   * Снимаем здесь, а не по месту: концовок у прогрева пять, и любая
+   * пропущенная вернула бы ровно эту поломку.
+   */
+  const campaignId = (data as { campaign_id?: string } | null)?.campaign_id;
+  if (campaignId && patch.status && TERMINAL_RUN_STATUSES.has(patch.status)) {
+    await db
+      .from('tg_outreach_accounts')
+      .update({ warmup_until: null })
+      .eq('campaign_id', campaignId)
+      .not('warmup_until', 'is', null);
+  }
 }
 
 /**

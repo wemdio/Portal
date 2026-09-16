@@ -8,11 +8,50 @@ export function veJobConcurrency(value: string | undefined): number {
 }
 
 const BASE_STAGES = new Set(['base_collect', 'base_analyze', 'template']);
+const COLLECT_STAGE = 'base_collect';
+
+/** Сколько баз собирается одновременно на весь движок.
+ *
+ * Сборка — единственная стадия, которая покупает поиски у Serper (по одному
+ * на каждую строку с неподтверждённым доменом). 16.09.2026 при VE_JOB_CONCURRENCY=16
+ * одновременно готовились 16 проектов: 39 093 поиска за сутки против 3 930
+ * накануне, дневной баланс Serper выжжен, а собственная очередь захлебнулась —
+ * полторы тысячи запросов не дождались ответа, сработал предохранитель и
+ * остановил подготовку у всех сразу.
+ *
+ * Лимит именно на сборку, а не на все стадии: лёгкие стадии (письма, анализ)
+ * не должны стоять в очереди за тяжёлой. Остальные сборки ждут в ve_jobs со
+ * статусом pending — очередь durable и переживает редеплой (воркер на старте
+ * возвращает прерванные running в pending, см. resetStuckJobs).
+ *
+ * Лимит считается по активным задачам ОДНОГО процесса. Это корректно, пока
+ * воркер запущен в единственном экземпляре (container_name в compose), и
+ * ровно на этом же допущении держится resetStuckJobs.
+ */
+export const VE_DEFAULT_BASE_COLLECT_CONCURRENCY = 3;
+export function veBaseCollectConcurrency(value: string | undefined): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 1
+    ? Math.min(parsed, VE_MAX_JOB_CONCURRENCY) : VE_DEFAULT_BASE_COLLECT_CONCURRENCY;
+}
 type JobScope = Pick<VeJob, 'id' | 'project_id' | 'stage' | 'payload'>;
 const baseKey = (job: JobScope): string | null => BASE_STAGES.has(job.stage)
   && typeof job.payload?.base_id === 'string' && job.payload.base_id.trim() ? job.payload.base_id : null;
 
-export function canRunVeJob(job: JobScope, active: readonly JobScope[]): boolean {
+/** Активные сборки, посчитанные по базам: одна база не занимает два слота. */
+function collectingBases(active: readonly JobScope[]): Set<string> {
+  return new Set(active.filter((other) => other.stage === COLLECT_STAGE).map((other) => baseKey(other) ?? other.id));
+}
+
+export function canRunVeJob(
+  job: JobScope,
+  active: readonly JobScope[],
+  collectLimit = veBaseCollectConcurrency(process.env.VE_BASE_COLLECT_CONCURRENCY),
+): boolean {
+  if (job.stage === COLLECT_STAGE) {
+    const bases = collectingBases(active);
+    if (!bases.has(baseKey(job) ?? job.id) && bases.size >= collectLimit) return false;
+  }
   const siblings = active.filter((other) => other.project_id === job.project_id);
   if (!siblings.length) return true;
   const base = baseKey(job);
@@ -20,8 +59,16 @@ export function canRunVeJob(job: JobScope, active: readonly JobScope[]): boolean
 }
 
 /** Ready-time FIFO, with exclusive research and independent per-base writers. */
-export async function claimVeJob(db: SupabaseClient, now = new Date(), active: readonly JobScope[] = []): Promise<VeJob | null> {
+export async function claimVeJob(
+  db: SupabaseClient,
+  now = new Date(),
+  active: readonly JobScope[] = [],
+  collectLimit = veBaseCollectConcurrency(process.env.VE_BASE_COLLECT_CONCURRENCY),
+): Promise<VeJob | null> {
   const nowIso = now.toISOString();
+  // Слоты сборки заняты — не тянем такие строки из БД вовсе, иначе каждый
+  // опрос листал бы всю очередь только чтобы отбросить их в памяти.
+  const collectFull = collectingBases(active).size >= collectLimit;
   const blocked = new Set(active.filter((job) => !baseKey(job)).map((job) => job.project_id));
   for (const job of active) if (active.filter((other) => other.project_id === job.project_id).length >= 4) blocked.add(job.project_id);
   let pending: JobScope | undefined;
@@ -30,6 +77,7 @@ export async function claimVeJob(db: SupabaseClient, now = new Date(), active: r
   for (let offset = 0; !pending;) {
     let query = db.from('ve_jobs').select('id,project_id,stage,payload')
       .eq('status', 'pending').lte('run_after', nowIso);
+    if (collectFull) query = query.neq('stage', COLLECT_STAGE);
     for (const projectId of blocked) query = query.neq('project_id', projectId);
     const { data, error } = await query.order('run_after', { ascending: true })
       .order('created_at', { ascending: true }).order('id', { ascending: true }).range(offset, offset + 99);
@@ -38,7 +86,7 @@ export async function claimVeJob(db: SupabaseClient, now = new Date(), active: r
     const previousBlocked = blocked.size;
     for (const candidate of data as JobScope[]) {
       if (blocked.has(candidate.project_id)) continue;
-      if (canRunVeJob(candidate, active)) { pending = candidate; break; }
+      if (canRunVeJob(candidate, active, collectLimit)) { pending = candidate; break; }
       if (!baseKey(candidate)) blocked.add(candidate.project_id);
     }
     if (pending) break;
@@ -63,6 +111,9 @@ export async function claimVeJob(db: SupabaseClient, now = new Date(), active: r
 /** One process owns the queue; base stages share a base lock, research a project lock. */
 export function createVeJobPool(options: {
   concurrency: number;
+  // Лимит одновременных сборок баз. Обязан совпадать с тем, с которым считает
+  // claim: иначе пул отвергает как конфликт то, что очередь честно выдала.
+  collectLimit?: number;
   idleMs: number;
   shouldStop: () => boolean;
   claim: (activeJobs: JobScope[]) => Promise<VeJob | null>;
@@ -72,6 +123,7 @@ export function createVeJobPool(options: {
   if (!Number.isInteger(options.concurrency) || options.concurrency < 1 || options.concurrency > VE_MAX_JOB_CONCURRENCY) {
     throw new Error('VE2 job concurrency must be between 1 and 16');
   }
+  const collectLimit = options.collectLimit ?? veBaseCollectConcurrency(process.env.VE_BASE_COLLECT_CONCURRENCY);
   const active = new Map<string, { job: VeJob; promise: Promise<void> }>();
   const settle = async (idleMs?: number) => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -95,7 +147,7 @@ export function createVeJobPool(options: {
         await settle(options.idleMs);
         return true;
       }
-      if (!canRunVeJob(job, scopes)) throw new Error('VE2 claimed a conflicting job scope');
+      if (!canRunVeJob(job, scopes, collectLimit)) throw new Error('VE2 claimed a conflicting job scope');
       const pending = Promise.resolve().then(() => options.run(job))
         .catch(options.onError).finally(() => { active.delete(job.id); });
       active.set(job.id, { job, promise: pending });

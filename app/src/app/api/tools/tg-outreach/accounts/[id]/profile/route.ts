@@ -1,15 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
-import { createGramClient } from '@/lib/tgOutreach/gramClient';
-import { downloadSessionToTemp } from '@/lib/tgOutreach/campaignLoop';
-import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { validateProfile } from '@/lib/tgOutreach/profile/validateProfile';
 import { applyProfile, describeTelegramError } from '@/lib/tgOutreach/profile/applyProfile';
 import { readProfile } from '@/lib/tgOutreach/profile/readProfile';
 import { storeAccountAvatar } from '@/lib/tgOutreach/profile/avatarStorage';
-import type { OutreachAccount, OutreachProxy } from '@/lib/tgOutreach/types';
-import type { SupabaseClient } from '@supabase/supabase-js';
+import { loadAccountForProfile, connectAccount } from '@/lib/tgOutreach/profile/session';
+import { usernameCandidates } from '@/lib/tgOutreach/profile/autofill';
+import { PROFILE_REST_HOURS } from '@/lib/tgOutreach/profile/queuedProfile';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,69 +15,6 @@ type Ctx = { params: Promise<{ id: string }> };
 
 /** Аватарку крупнее этого Telegram всё равно не примет без пережатия. */
 const MAX_AVATAR_BYTES = 1024 * 1024;
-
-/**
- * Аккаунт + гейт по статусу кампании.
- *
- * Работающая кампания уже держит соединение с этим аккаунтом; второе
- * подключение через мобильный прокси — лишний повод для сбоя. Правило одно и
- * для записи профиля, и для чтения: пока идёт рассылка или прогрев, в Telegram
- * не ходим, карточка показывает сохранённое в портале.
- */
-async function loadAccountForProfile(
-  supabase: SupabaseClient,
-  id: string,
-): Promise<{ account: OutreachAccount } | { error: NextResponse }> {
-  const { data: accountRow } = await supabase
-    .from('tg_outreach_accounts')
-    .select('*')
-    .eq('id', id)
-    .maybeSingle();
-  if (!accountRow) return { error: jsonError('Аккаунт не найден', 404) };
-  const account = accountRow as OutreachAccount;
-
-  const { data: campaign } = await supabase
-    .from('tg_outreach_campaigns')
-    .select('status')
-    .eq('id', account.campaign_id)
-    .maybeSingle();
-  const status = (campaign as { status?: string } | null)?.status;
-  if (status && status !== 'stopped' && status !== 'error') {
-    return {
-      error: jsonError(
-        `Кампания сейчас в состоянии «${status}». Остановите её, чтобы работать с профилем аккаунта: во время работы аккаунт занят.`,
-        409,
-      ),
-    };
-  }
-  return { account };
-}
-
-/**
- * Подключиться аккаунтом через его прокси.
- *
- * downloadSessionFile обязателен: у аккаунтов, залитых парами `.json`+`.session`
- * без успешной конверсии SQLite в StringSession, `session_data` пустой, а
- * `session_file_path` заполнен. Без функции скачивания createGramClient падает
- * ещё до подключения — «Нет session_data или session_file_path».
- *
- * Скачивать нужно служебным ключом, а не пользовательским: бакет с сессиями
- * приватный, и обычному пользователю хранилище отвечает «Object not found» —
- * ту же фразу, что и на действительно отсутствующий файл. 10.08.2026 из-за
- * этого чтение профиля падало на всех аккаунтах разом с сообщением про прокси.
- */
-async function connectAccount(supabase: SupabaseClient, account: OutreachAccount) {
-  const { data: proxyRow } = account.proxy_id
-    ? await supabase.from('tg_outreach_proxies').select('*').eq('id', account.proxy_id).maybeSingle()
-    : { data: null };
-
-  const storage = supabaseAdmin ?? supabase;
-  return createGramClient(
-    account,
-    (proxyRow as OutreachProxy) ?? null,
-    (storagePath) => downloadSessionToTemp(storage, storagePath),
-  );
-}
 
 /**
  * Прочитать профиль из Telegram и сохранить в портал.
@@ -98,6 +33,16 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 
       const loaded = await loadAccountForProfile(auth.supabase, id);
       if ('error' in loaded) return loaded.error;
+      // Чтение остаётся только на свободном аккаунте: заказывать поход в
+      // Telegram ради обновления карточки незачем, портал показывает
+      // сохранённое.
+      if (loaded.busy) {
+        return jsonError(
+          'Кампания сейчас работает — прочитать профиль из Telegram нельзя: аккаунт занят рассылкой. '
+          + 'Карточка показывает сохранённое в портале.',
+          409,
+        );
+      }
 
       let client;
       try {
@@ -176,6 +121,41 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
       if ('error' in loaded) return loaded.error;
       const account = loaded.account;
 
+      /**
+       * Кампания работает — заказ вместо записи.
+       *
+       * Подключаться нельзя: сессию держит круг. Заказ применит он же, дойдя до
+       * аккаунта, и результат вернёт в те же поля карточки.
+       *
+       * Аватарку в заказ не берём: она весит до мегабайта, а очередь живёт в
+       * строке аккаунта. Аватарку по-прежнему меняют на остановленной кампании,
+       * и это честно сказано в ответе.
+       */
+      if (loaded.busy) {
+        const candidates = usernameCandidates({
+          firstName: profile.first_name,
+          lastName: profile.last_name,
+        });
+        const { error: qErr } = await auth.supabase
+          .from('tg_outreach_accounts')
+          .update({
+            profile_requested_at: new Date().toISOString(),
+            profile_payload: { ...profile, username_candidates: candidates },
+            profile_status: null,
+            profile_detail: null,
+          })
+          .eq('id', id);
+        if (qErr) return jsonError(qErr.message, 500);
+
+        const avatarAsked = (form.get('avatar') as File | null)?.size;
+        return NextResponse.json({
+          queued: true,
+          message:
+            'Кампания работает, поэтому профиль встал в очередь — рассылка применит его, когда дойдёт до аккаунта в круге.'
+            + (avatarAsked ? ' Аватарка в очередь не идёт: её меняют на остановленной кампании.' : ''),
+        });
+      }
+
       const avatarFile = form.get('avatar') as File | null;
       let avatar: { buffer: Buffer; name: string } | undefined;
       if (avatarFile && avatarFile.size > 0) {
@@ -208,6 +188,34 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
         }
         const avatarUrl = stored?.url ?? null;
 
+        /**
+         * Отлёжка после смены имени — и на остановленной кампании тоже.
+         *
+         * До 09.09.2026 её ставила только очередь круга (см. `campaignLoop`,
+         * PROFILE_REST_HOURS), то есть правка профиля НА РАБОТАЮЩЕЙ кампании.
+         * А настраивают партию ровно наоборот: кампанию останавливают, заливают
+         * аккаунты, заполняют профили — и эта, самая частая, ветка отлёжку не
+         * записывала вовсе. Правило TgNinja, ради которого всё делалось, на
+         * практике не работало.
+         *
+         * Считаем по факту, а не по заказу: сравниваем то, что реально встало в
+         * Telegram, с тем, что портал знал до правки. Иначе «открыл карточку,
+         * ничего не менял, нажал Сохранить» стоило бы аккаунту полусуток
+         * простоя — поля в форме предзаполнены текущими значениями.
+         *
+         * Аватарка входит в правило наравне с именем (её меняют только здесь:
+         * в очередь она не идёт, весит слишком много) — для антиспама смена
+         * фото такой же признак подготовки к рассылке, как переименование.
+         */
+        const identityChanged =
+          applied.first_name !== (account.first_name ?? '')
+          || applied.last_name !== (account.last_name ?? '')
+          || applied.tg_username !== (account.tg_username ?? '')
+          || Boolean(avatar);
+        const restUntil = identityChanged
+          ? new Date(Date.now() + PROFILE_REST_HOURS * 3_600_000).toISOString()
+          : null;
+
         await auth.supabase
           .from('tg_outreach_accounts')
           .update({
@@ -217,6 +225,7 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
             tg_username: applied.tg_username,
             ...(applied.tg_user_id != null ? { tg_user_id: applied.tg_user_id } : {}),
             ...(avatarUrl ? { avatar_url: avatarUrl } : {}),
+            ...(restUntil ? { profile_rest_until: restUntil } : {}),
             profile_synced_at: new Date().toISOString(),
           })
           .eq('id', id);
@@ -227,6 +236,10 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
           ...applied,
           avatar_url: avatarUrl ?? undefined,
           ...(stored?.error ? { avatar_error: stored.error } : {}),
+          // Экран показывает срок сразу после сохранения: «почему свежий
+          // аккаунт не рассылает» — первый вопрос оператора после настройки
+          // партии, и отвечать на него постфактум плашкой в списке поздно.
+          ...(restUntil ? { rest_until: restUntil } : {}),
         });
       } catch (e) {
         return jsonError(describeTelegramError(e), 400);

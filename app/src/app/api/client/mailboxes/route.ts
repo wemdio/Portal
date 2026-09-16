@@ -4,7 +4,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { requireByoMailboxClient } from '@/lib/byoMailbox/access';
 import { sealMailboxSecret } from '@/lib/byoMailbox/credentials';
 import { verifySmtp, sendTestEmail } from '@/lib/byoMailbox/smtp';
-import { assertSafeSmtpTarget } from '@/lib/byoMailbox/netGuard';
+import { assertSafeSmtpTarget, assertSafeImapTarget } from '@/lib/byoMailbox/netGuard';
 import { presetFor, isFreeDomain, type MailboxProvider } from '@/lib/byoMailbox/providers';
 import { registerMailboxForSending } from '@/lib/byoMailbox/sendingProvider';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -101,6 +101,18 @@ export async function POST(req: NextRequest) {
       { error: 'Недопустимый SMTP-хост или порт.', code: 'SMTP_TARGET_BLOCKED' },
       { status: 400 },
     );
+  }
+
+  // 0b) Тот же SSRF-guard для IMAP — у Maildoso это индивидуальный хост из CSV,
+  //     а byoReplies опрашивает его по расписанию бесконечно, не один раз.
+  if (imapHost) {
+    const imapGuard = await assertSafeImapTarget(imapHost, imapPort || 993);
+    if (!imapGuard.ok) {
+      return NextResponse.json(
+        { error: 'Недопустимый IMAP-хост или порт.', code: 'IMAP_TARGET_BLOCKED' },
+        { status: 400 },
+      );
+    }
   }
 
   // 1) Проверяем, что логинимся в SMTP. Детали — только в серверный лог; клиенту

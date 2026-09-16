@@ -2,6 +2,11 @@
 
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { authFetch, getAccessToken } from '@/lib/authFetch';
+import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
+import { defaultAppealText } from '@/lib/tgOutreach/freezeAppeal';
+import { BaseContactsModal } from '@/components/tg-outreach/BaseContactsModal';
+import { pickIdentity } from '@/lib/tgOutreach/profile/autofill';
+import { accountCountryLabel, countryOptions } from '@/lib/tgOutreach/phoneCountry';
 import {
   MessageSquareMore,
   Plus,
@@ -27,12 +32,20 @@ import {
   AlertCircle,
   Flame,
   Database,
+  Eye,
   ShieldCheck,
   FileSpreadsheet,
   LayoutDashboard,
+  PowerOff,
+  FolderPlus,
+  Inbox,
+  Folder,
+  Move,
+  Pencil,
 } from 'lucide-react';
 import DashboardTab from '@/components/tg-outreach/DashboardTab';
 import BaseComparison from '@/components/tg-outreach/BaseComparison';
+import { AccountPicker } from '@/components/tg-outreach/AccountPicker';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
 import type {
   CampaignStatus,
@@ -40,8 +53,9 @@ import type {
   OutreachCampaign,
   OutreachAccount,
   OutreachProxy,
+  OutreachProxyList,
+  OutreachProxyListStats,
   OutreachDialog,
-  OutreachProcessed,
   OutreachLog,
   OutreachBlockedUser,
   OpenAISettings,
@@ -57,7 +71,6 @@ import {
   autoForwardWarning,
   type AutoForwardMark,
 } from '@/lib/tgOutreach/autoForward';
-import { DEFAULT_MAX_MESSAGE_CHARS } from '@/lib/tgOutreach/firstTouch/validateMessage';
 import { accountLabel } from '@/lib/tgOutreach/accountLabel';
 import { summarizeAccounts } from '@/lib/tgOutreach/accountsSummary';
 import { ProxyPicker } from '@/components/tg-outreach/ProxyPicker';
@@ -68,8 +81,10 @@ import {
 } from '@/lib/tgOutreach/proxySelection';
 import {
   describeSending,
+  healthToneClass,
   describeProxy,
   countSendingAccounts,
+  pickDeadAccounts,
   type AccountSendingStat,
   type HealthMark,
 } from '@/lib/tgOutreach/accountHealth';
@@ -80,12 +95,41 @@ import type { AccountCheckResult, OtherSession } from '@/lib/tgOutreach/accountC
 import type { ProxyCheckResult } from '@/lib/tgOutreach/proxyCheck';
 
 const API_BASE = '/api/tools/tg-outreach';
+/**
+ * Со скольких дней молчания аккаунт считается неживым.
+ *
+ * Трое суток — это минимум три полных круга кампании (проход по сорока
+ * аккаунтам занимает около шести часов). Меньше брать нельзя: аккаунт мог
+ * пропустить день из-за паузы или обрыва прокси, и выключать его за это рано.
+ */
+const DEAD_SILENT_DAYS = 3;
 
 function formatDate(iso: string) {
   return new Date(iso).toLocaleString('ru-RU', {
     day: '2-digit', month: '2-digit', year: 'numeric',
     hour: '2-digit', minute: '2-digit',
   });
+}
+
+/**
+ * Дата и время отдельной реплики в переписке.
+ *
+ * Хранится не у всех сообщений: у диалогов, заведённых до появления поля,
+ * времени нет — в этом случае подписи просто не будет, вместо неё не рисуем
+ * заглушку вроде «—», чтобы не выдавать пустоту за данные.
+ */
+function messageDayLabel(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+function messageTimeLabel(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 }
 
 /**
@@ -175,7 +219,7 @@ function ForwardBadge({
   return (
     <span
       title={pending
-        ? 'Стоит в очереди — уйдёт, когда воркер дойдёт до этого аккаунта'
+        ? 'Стоит в очереди — воркер отправит в ближайшие секунды; если висит дольше, причина в карточке диалога'
         : 'Уже отправлено. Передать ещё раз, в том числе другим видом, нельзя'}
       className={`inline-flex items-center rounded-full border text-[10px] font-medium ${size} ${tone}`}
     >
@@ -273,14 +317,11 @@ function GlobalBlocklistSection() {
   };
 
   return (
-    <section className="space-y-3">
-      <div>
-        <h3 className="text-sm font-semibold text-gray-800">Глобальный чёрный список (по tg_user_id)</h3>
-        <p className="mt-1 text-[11px] text-gray-500">
-          Применяется ко всем твоим кампаниям и аккаунтам. Бот не будет отвечать и не создаст диалог
-          для пользователей из этого списка — даже если у них нет username.
-        </p>
-      </div>
+    <Collapsible
+      title="Глобальный чёрный список (по tg_user_id)"
+      hint="Применяется ко всем твоим кампаниям и аккаунтам. Бот не будет отвечать и не создаст диалог для пользователей из этого списка — даже если у них нет username."
+      badge={items.length ? `${items.length}` : undefined}
+    >
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 p-3">
         <input
           value={addId}
@@ -330,7 +371,51 @@ function GlobalBlocklistSection() {
           ))}
         </div>
       )}
-    </section>
+    </Collapsible>
+  );
+}
+
+/* Раскрывающийся блок: чёрные списки заполняют редко, а места на экране
+   настроек они занимали столько же, сколько ежедневные ручки. Закрыт по
+   умолчанию, счётчик в шапке показывает, есть ли внутри записи. */
+function Collapsible({ title, hint, badge, children }: {
+  title: string;
+  hint?: string;
+  badge?: string;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="rounded-lg border border-gray-200">
+      <button type="button" onClick={() => setOpen(v => !v)}
+        className="flex w-full items-center gap-2 px-3 py-2.5 text-left transition hover:bg-gray-50 cursor-pointer">
+        {open ? <ChevronUp className="h-3.5 w-3.5 shrink-0 text-gray-400" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-gray-400" />}
+        <span className="text-xs font-semibold text-gray-800">{title}</span>
+        {badge && <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500">{badge}</span>}
+      </button>
+      {open && (
+        <div className="space-y-3 border-t border-gray-100 px-3 py-3">
+          {hint && <p className="text-[11px] text-gray-500">{hint}</p>}
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Переключатель вместо галочки: follow-up включают и выключают целиком, и
+   состояние должно читаться с расстояния — залитый синим тумблер видно сразу,
+   пустой квадратик галочки нет. Ползунок ездит слева направо и обратно. */
+function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
+  return (
+    <label className="flex w-fit cursor-pointer items-center gap-2.5 text-sm font-medium text-gray-700">
+      <span className="relative inline-flex shrink-0">
+        <input type="checkbox" checked={checked} onChange={e => onChange(e.target.checked)} className="peer sr-only" />
+        <span className="block h-5 w-9 rounded-full bg-gray-300 transition-colors duration-200 peer-checked:bg-indigo-600 peer-focus-visible:ring-2 peer-focus-visible:ring-indigo-300" />
+        <span className="pointer-events-none absolute left-0.5 top-0.5 block h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200 peer-checked:translate-x-4" />
+      </span>
+      {label}
+    </label>
   );
 }
 
@@ -378,210 +463,184 @@ function SettingsTab({ campaign, onSave }: {
         <FieldArea label="Системный промпт" value={openai.system_prompt} onChange={v => setOAI('system_prompt', v)} rows={6} />
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <FieldArea label="Триггер (положительный)" value={openai.trigger_phrases_positive} onChange={v => setOAI('trigger_phrases_positive', v)} rows={2} />
-          <FieldArea label="Триггер (отрицательный)" value={openai.trigger_phrases_negative} onChange={v => setOAI('trigger_phrases_negative', v)} rows={2} />
           <Field label="Чат для пересылки (+)" value={openai.target_chats_positive} onChange={v => setOAI('target_chats_positive', v)} placeholder="@username" />
-          <Field label="Чат для пересылки (−)" value={openai.target_chats_negative} onChange={v => setOAI('target_chats_negative', v)} placeholder="@username" />
-          <div className="space-y-1 md:col-span-2">
-            <Field
-              label="Чат для партнёров"
-              value={openai.target_chats_partner ?? ''}
-              onChange={v => setOAI('target_chats_partner', v)}
-              placeholder="@username или оставьте пустым"
-            />
-            <p className="text-[10px] text-gray-400">
-              Куда уходит кнопка «Передать партнёра» на вкладке «Диалоги». Заинтересованного клиента
-              и человека, который хочет стать партнёром, обычно разбирают разные люди. Пусто —
-              уйдёт в «Чат для пересылки (+)».
-            </p>
-          </div>
         </div>
-        {/* Два верхних поля наполняет автоматика по триггерным фразам, нижнее —
-            только ручная кнопка. Сказать об этом стоит здесь: иначе разница
-            между «чатом пересылки» и «чатом партнёров» выглядит произвольной. */}
+        {/* Чат пересылки наполняет автоматика по триггерной фразе; ручные
+            передачи с вкладки «Диалоги» — лид и партнёр — уходят в него же. */}
         <p className="text-[10px] text-gray-400 -mt-2">
-          В чаты пересылки (+) и (−) бот отправляет сам, когда в его ответе встречается триггерная
-          фраза. Передача лида и партнёра с вкладки «Диалоги» — всегда ручная, по кнопке и с
-          подтверждением.
+          В чат пересылки бот отправляет сам, когда в его ответе встречается триггерная фраза.
         </p>
-        <div className="flex items-center gap-4">
-          <label className="flex items-center gap-2 text-xs text-gray-700">
-            <input type="checkbox" checked={openai.use_fallback_on_fail} onChange={e => setOAI('use_fallback_on_fail', e.target.checked)} className="rounded border-gray-300" />
-            Резервный ответ при ошибке
-          </label>
-        </div>
-        {openai.use_fallback_on_fail && (
-          <FieldArea label="Резервный текст" value={openai.fallback_text} onChange={v => setOAI('fallback_text', v)} rows={2} />
-        )}
       </section>
 
-      {/* Telegram */}
+      {/* Заголовок «Telegram» снят с секции: экран целиком про Telegram-аутрич,
+          и подпись ничего не отделяла от соседних блоков. */}
       <section className="space-y-4">
-        <h3 className="text-sm font-semibold text-gray-800">Telegram</h3>
         {/* Названия сверены с кодом: каждое поле подписано тем, что оно делает
             на самом деле, а не тем, как называется переменная. Три подписи были
             неверны и вводили в заблуждение — история в комментариях ниже. */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div className="space-y-1">
-            <FieldNum label="Сообщений в пересылке" value={telegram.forward_limit} onChange={v => setTG('forward_limit', v)} />
+        {/* «Сообщений в пересылке» и «Сообщений в контексте GPT» убраны с экрана
+            09.09.2026: пересылка лида шлёт 5 последних сообщений, модель читает
+            20 — дефолты подходят всегда, сохранённые значения кампаний воркер
+            продолжает читать как раньше. */}
+        {/* Две строки вместо трёх сеток по два поля: сверху — что кампания
+            рассылает (пояс, пауза после ограничения, дневная норма, длина
+            письма), снизу — с каким темпом. Поля узкие, поэтому в строку
+            влезает по четыре-шесть штук. */}
+        <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
+          <div className="w-auto space-y-1">
+            <TimezoneField value={telegram.timezone_offset} onChange={v => setTG('timezone_offset', v)} />
             <p className="text-[10px] text-gray-400">
-              Сколько последних сообщений диалога уйдёт в чат-приёмник при пересылке лида.
-            </p>
-          </div>
-          <div className="space-y-1">
-            <FieldNum label="Сообщений в контексте GPT" value={telegram.history_limit} onChange={v => setTG('history_limit', v)} />
-            <p className="text-[10px] text-gray-400">
-              Сколько последних сообщений диалога читает модель, прежде чем ответить.
-            </p>
-          </div>
-          <div className="space-y-1">
-            <FieldNum label="Часовой пояс (UTC±)" value={telegram.timezone_offset} onChange={v => setTG('timezone_offset', v)} />
-            <p className="text-[10px] text-gray-400">
-              Влияет только на «Периоды сна». 3 — Москва.
+              Влияет только на «Периоды сна».
             </p>
           </div>
           {/* Было «Пауза аккаунта (часов)» — читалось как штатная пауза между
               заходами и создавало ложное чувство, что нагрузка размазана по
               суткам. На деле пауза включается ТОЛЬКО после того, как Telegram
               ограничил аккаунт (FloodError/Frozen), см. campaignLoop:1507. */}
-          <div className="space-y-1">
-            <FieldNum label="Пауза после ограничения (часов)" value={telegram.account_cooldown_hours} onChange={v => setTG('account_cooldown_hours', v)} />
+          <div className="w-52 space-y-1">
+            <StepperField
+              label="Пауза после ограничения (часов)"
+              value={telegram.account_cooldown_hours}
+              min={1}
+              max={72}
+              onChange={v => setTG('account_cooldown_hours', v)}
+              title="Сколько часов аккаунт не берётся в работу после ограничения Telegram."
+            />
             <p className="text-[10px] text-gray-400">
-              Сколько аккаунт отдыхает после PEER_FLOOD / FloodWait — и на ответе, и на
-              первом касании. Пока пауза не кончилась, воркер этот номер не берёт.
-              Для холодной рассылки ставьте сутки, не 5 часов.
+              Сколько аккаунт отдыхает после PEER_FLOOD / FloodWait.
             </p>
           </div>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="space-y-1">
-            <FieldNum
+          <div className="w-52 space-y-1">
+            <StepperField
               label="Первых сообщений на аккаунт в сутки"
-              value={telegram.first_touch_per_account_per_day ?? 0}
+              value={telegram.first_touch_per_account_per_day ?? 3}
+              min={0}
+              max={50}
               onChange={v => setTG('first_touch_per_account_per_day', v)}
+              title="Дневная норма первых сообщений на каждый аккаунт. Ноль выключает рассылку."
             />
-            {/* Прежняя подсказка предлагала «16 аккаунтов по 20» как пример.
-                В связке с паузой между действиями в 5–10 сек это означает 20
-                новых чатов с незнакомыми людьми за три минуты — на молодом
-                аккаунте почти верное ограничение. Пример заменён на лестницу. */}
-            <p className="text-[10px] text-gray-400">
-              Ноль — рассылка первых сообщений выключена. Норма считается на каждый аккаунт:
-              18 аккаунтов по 3 — это 54 сообщения в день. Свежие аккаунты начинайте с 2–3 и
-              поднимайте на ступень раз в 2–3 дня, только если в логах не было ограничений.
-              Всю норму аккаунт отправляет одной очередью — разносите её полем
-              «Пауза между действиями».
-            </p>
           </div>
-          {/* Порог был захардкожен в 400 знаков — число из статистики прошлых
-              кампаний (медиана 260, 99% в 400), а не правило Telegram. На базе
-              с ровными текстами по 430–460 знаков он останавливал рассылку
-              целиком: каждый контакт откладывался, за три круга уходил в
-              «отложенные», и не отправлялось ни одно сообщение. Ручка нужна
-              оператору под рукой. */}
-          <div className="space-y-1">
-            <FieldNum
-              label="Максимум знаков в первом сообщении"
-              value={telegram.first_touch_max_chars ?? DEFAULT_MAX_MESSAGE_CHARS}
-              onChange={v => setTG('first_touch_max_chars', v)}
+          {/* Рядом с дневной нормой: вместе они и отвечают на вопрос «сколько
+              уйдёт за круг». Ждать друг друга аккаунтам незачем — у каждого своя
+              сессия и свой прокси; ограничение упирается в прокси-хост, а не в
+              Telegram. */}
+          <div className="w-52 space-y-1">
+            <StepperField
+              label="Аккаунтов одновременно рассылает"
+              value={telegram.account_concurrency ?? 6}
+              min={1}
+              max={20}
+              onChange={v => setTG('account_concurrency', v)}
+              title="Сколько аккаунтов кампания обходит параллельно. Больше — быстрее круг, но выше нагрузка на прокси-хост."
             />
-            <p className="text-[10px] text-gray-400">
-              Длиннее — контакт откладывается, а не отправляется. Это фильтр мусора в файле
-              (съехавшая колонка, обрезанная строка), а не ограничение Telegram: у него предел
-              4096 знаков, выше него значение не поднимется. Ноль вернёт значение по умолчанию — 400.
-              Если подняли порог уже после запуска, верните отложенные контакты в очередь на вкладке «Базы».
-            </p>
           </div>
+          {/* «Максимум знаков в первом сообщении» убран с экрана 10.09.2026:
+              порог один на все кампании (DEFAULT_MAX_MESSAGE_CHARS, 600 знаков,
+              меняется переменной окружения TG_FIRST_TOUCH_MAX_CHARS). */}
         </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div className="space-y-1">
-            <RangeField label="Пауза перед прочтением (сек)" value={telegram.pre_read_delay_range} onChange={v => setTG('pre_read_delay_range', v)} />
+        {/* Вторая строка — темп: разнос нормы по дню и паузы обхода.
+            09.09.2026 в ATOL-1 Telegram выдал PEER_FLOOD свежим аккаунтам после
+            3–6 первых сообщений подряд при суточной норме 4. Спасает не норма, а
+            расстояние между отправками: порция уходит, дальше аккаунт молчит.
+            «Пауза перед прочтением» с экрана убрана — теперь всегда рандом
+            5–15 сек (campaignLoop), настройкой не управляется. */}
+        <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
+          <div className="w-44 space-y-1">
+            <FieldNum
+              compact
+              label="Пауза между порциями (минут)"
+              value={telegram.first_touch_gap_minutes ?? 60}
+              onChange={v => setTG('first_touch_gap_minutes', v)}
+            />
             <p className="text-[10px] text-gray-400">
-              Сколько ждём, прежде чем отметить входящее прочитанным.
+              Сколько аккаунт молчит между порциями. Ноль — вся норма уйдёт сразу, одной очередью.
+            </p>
+          </div>
+          {/* Прежняя подпись объясняла порцию через саму порцию («сколько писем
+              в порции») и оператору ничего не давала. Пример с числами — самый
+              короткий способ показать, что поле делает с дневной нормой. */}
+          <div className="w-56 space-y-1">
+            <StepperField
+              label="Писем в одной порции"
+              value={telegram.first_touch_per_gap ?? 2}
+              min={1}
+              max={20}
+              onChange={v => setTG('first_touch_per_gap', v)}
+              title="Сколько первых сообщений аккаунт отправляет подряд, прежде чем замолчать до следующей порции."
+            />
+            <p className="text-[10px] text-gray-400">
+              Норма 6, в порции 2, пауза 60 минут: два письма, час тишины, ещё два, час тишины, ещё два.
             </p>
           </div>
           {/* Было «Задержка до ответа» — подпись покрывала лишь одно из четырёх
               применений. Тот же диапазон задаёт паузу между ПЕРВЫМИ сообщениями
               внутри дневной нормы (firstTouch/send.ts, gapMs), а при 5–10 сек
               аккаунт пишет всю норму незнакомым людям за полминуты — самый
-              короткий путь к ограничению. Об этом обязана говорить подпись. */}
-          <div className="space-y-1">
-            <RangeField label="Пауза между действиями (сек)" value={telegram.read_reply_delay_range} onChange={v => setTG('read_reply_delay_range', v)} />
-            <p className="text-[10px] text-gray-400">
-              Перед ответом, перед follow-up и <span className="text-amber-600">между первыми сообщениями</span>.
-              5–10 сек означает, что вся дневная норма уйдёт очередью за полминуты. Для холодной
-              рассылки ставьте 60–300.
-            </p>
-          </div>
-          <div className="space-y-1">
-            <RangeField label="Пауза между аккаунтами (сек)" value={telegram.account_loop_delay_range} onChange={v => setTG('account_loop_delay_range', v)} />
-            <p className="text-[10px] text-gray-400">
-              Разбежка между заходами разных аккаунтов, чтобы они не работали гурьбой.
-            </p>
-          </div>
+              короткий путь к ограничению. */}
+          <RangeField compact label="Пауза между действиями (сек)" value={telegram.read_reply_delay_range} onChange={v => setTG('read_reply_delay_range', v)} />
           {/* Пауза между полными кругами по всем аккаунтам. Раньше была
               захардкожена в 30 секунд, что на «горячих» mobile-pool IP
               слишком быстро (Telegram продолжал отвечать silent throttle).
               Сейчас вынесено в настройки с дефолтом [300, 600] сек. */}
-          <div className="space-y-1">
-            <RangeField label="Пауза между кругами (сек)" value={telegram.cycle_delay_range ?? [300, 600]} onChange={v => setTG('cycle_delay_range', v)} />
-            <p className="text-[10px] text-gray-400">
-              Между полными обходами всех аккаунтов.
-            </p>
-          </div>
+          <RangeField compact label="Пауза между кругами (сек)" value={telegram.cycle_delay_range ?? [300, 600]} onChange={v => setTG('cycle_delay_range', v)} />
+          <RangeField compact label="Пауза между аккаунтами (сек)" value={telegram.account_loop_delay_range} onChange={v => setTG('account_loop_delay_range', v)} />
         </div>
         {/* «Окно ожидания диалога» (dialog_wait_window_range) убрано с экрана:
             ключ есть в TelegramSettings и в дефолтах, но НИ ОДНА строка кода его
             не читает — поле ничего не делало, а операторы его крутили. Значение
             в БД оставлено как есть, чтобы не трогать сохранённые кампании. */}
-        <Field label="Периоды сна" value={telegram.sleep_periods.join(', ')} onChange={v => setTG('sleep_periods', v.split(',').map(s => s.trim()).filter(Boolean))} placeholder="00:00-08:00, 19:00-00:00" />
-        <div className="flex flex-wrap items-center gap-4">
-          <label className="flex items-center gap-2 text-xs text-gray-700">
+        <Field half label="Периоды сна" value={telegram.sleep_periods.join(', ')} onChange={v => setTG('sleep_periods', v.split(',').map(s => s.trim()).filter(Boolean))} placeholder="00:00-08:00, 19:00-00:00" />
+        <div className="flex flex-col gap-2">
+          <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
             <input type="checkbox" checked={telegram.reply_only_if_previously_wrote} onChange={e => setTG('reply_only_if_previously_wrote', e.target.checked)} className="rounded border-gray-300" />
             Отвечать только если ранее писали
           </label>
-          <label className="flex items-center gap-2 text-xs text-gray-700">
+          <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
             <input type="checkbox" checked={telegram.auto_allow_new_dialogs} onChange={e => setTG('auto_allow_new_dialogs', e.target.checked)} className="rounded border-gray-300" />
             Новым диалогам разрешать отправку автоматически
           </label>
-          <label className="flex items-center gap-2 text-xs text-gray-700">
-            <input type="checkbox" checked={telegram.reply_only_to_base_contacts ?? false} onChange={e => setTG('reply_only_to_base_contacts', e.target.checked)} className="rounded border-gray-300" />
-            Писать только контактам из баз
-          </label>
-          <label className="flex items-center gap-2 text-xs text-gray-700">
-            <input type="checkbox" checked={telegram.ignore_bot_usernames} onChange={e => setTG('ignore_bot_usernames', e.target.checked)} className="rounded border-gray-300" />
-            Игнорировать ботов
-          </label>
-          <label className="flex items-center gap-2 text-xs text-gray-700">
+          <label className="flex w-fit items-center gap-2 text-xs text-gray-700">
             <input type="checkbox" checked={telegram.ignore_no_username} onChange={e => setTG('ignore_no_username', e.target.checked)} className="rounded border-gray-300" />
             Игнорировать без имени пользователя
           </label>
         </div>
-        <p className="text-[10px] text-gray-400 -mt-2">
-          «Писать только контактам из баз» — бот отвечает лишь тем, кому мы сами написали по базе
-          этой кампании. Без неё он отвечает в любом чате, где есть наше исходящее, включая
-          переписку прогрева между своими же аккаунтами: партнёр по прогреву получал боевой скрипт,
-          а его ответ мог уехать в чат менеджера как лид. Обратная сторона: тот, кто написал первым
-          сам, без первого касания, ответа не получит.
-        </p>
-        <Field
-          label="Чёрный список username (через запятую)"
-          value={blockedRaw}
-          onChange={setBlockedRaw}
-          placeholder="SpamBot, another_bot"
-        />
+        {/* Галочки «Писать только контактам из баз» и «Игнорировать ботов» сняты
+            с экрана 10.09.2026: обе теперь заложены в инструмент и работают
+            всегда (campaignLoop). Выключать их было незачем — выключенная первая
+            возвращала ответы партнёрам по прогреву и фальшивые лиды. */}
       </section>
 
-      <GlobalBlocklistSection />
+      {/* Оба чёрных списка — рядом: заполняют их редко и обычно вместе, а по
+          отдельности каждый занимал целую строку экрана. */}
+      <div className="grid grid-cols-1 items-start gap-3 md:grid-cols-2">
+        <Collapsible
+          title="Чёрный список username"
+          hint="Через запятую. Этим аккаунтам кампания не пишет и не отвечает."
+          badge={blockedRaw.trim() ? `${blockedRaw.split(',').map(x => x.trim()).filter(Boolean).length}` : undefined}
+        >
+          <Field
+            label="Через запятую"
+            value={blockedRaw}
+            onChange={setBlockedRaw}
+            placeholder="SpamBot, another_bot"
+          />
+        </Collapsible>
+        <GlobalBlocklistSection />
+      </div>
 
       {/* Follow-up */}
       <section className="space-y-4">
-        <h3 className="text-sm font-semibold text-gray-800">Настройки Follow-up сообщений</h3>
-        <div className="rounded-lg border border-blue-100 bg-blue-50/50 p-3 text-xs text-gray-700">
-          Follow-up отправляется автоматически, если человек не ответил на сообщение в течение заданного времени. Отправляется только 1 раз для каждого диалога.
-        </div>
-        <label className="flex items-center gap-2 text-sm font-medium text-gray-700">
-          <input type="checkbox" checked={telegram.follow_up.enabled} onChange={e => setTG('follow_up', { ...telegram.follow_up, enabled: e.target.checked })} className="rounded border-gray-300" />
-          Включить Follow-up сообщения
-        </label>
+        {/* Пояснение вынесено в сам заголовок: отдельная строка под ним занимала
+            место ради одной фразы. */}
+        <h3 className="text-sm font-semibold text-gray-800">
+          Настройки Follow-up сообщений{' '}
+          <span className="font-normal text-gray-400">(уходит один раз на диалог, если человек не ответил)</span>
+        </h3>
+        <Toggle
+          checked={telegram.follow_up.enabled}
+          onChange={v => setTG('follow_up', { ...telegram.follow_up, enabled: v })}
+          label="Включить Follow-up сообщения"
+        />
         {telegram.follow_up.enabled && (
           <div className="space-y-4 rounded-lg border border-gray-200 p-4">
             <div className="grid grid-cols-2 gap-4">
@@ -1070,6 +1129,12 @@ function DialogsTab({ campaignId }: {
   const [filterCanSend, setFilterCanSend] = useState<'all' | 'enabled' | 'disabled'>('all');
   const [filterAudience, setFilterAudience] = useState<'all' | 'users' | 'bots'>('all');
   /**
+   * Длина переписки. «Одно сообщение» — мы написали, ответа нет; «два и
+   * больше» — разговор завязался. Первых накапливаются сотни, и они прячут те
+   * немногие, ради которых экран и открывают.
+   */
+  const [filterMessages, setFilterMessages] = useState<'all' | 'one' | 'many'>('all');
+  /**
    * Чьи диалоги показывать — пустая строка означает «всех аккаунтов».
    *
    * Отбор идёт на сервере: список листается по тридцать штук, и фильтрация
@@ -1080,6 +1145,9 @@ function DialogsTab({ campaignId }: {
   const [sendText, setSendText] = useState('');
   const [sending, setSending] = useState(false);
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
+  /** Базы кампании — для фильтра «показать только диалоги этой гипотезы». */
+  const [bases, setBases] = useState<Array<{ id: string; name: string }>>([]);
+  const [filterBaseId, setFilterBaseId] = useState('');
   /** `<dialogId>:<kind>` пока собирается предпросмотр и ставится задача. */
   const [forwarding, setForwarding] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState<string | null>(null);
@@ -1090,6 +1158,14 @@ function DialogsTab({ campaignId }: {
     if (res.ok) {
       const d = await res.json() as { items: OutreachAccount[] };
       setAccounts(d.items);
+    }
+  }, [campaignId]);
+
+  const fetchBases = useCallback(async () => {
+    const res = await authFetch(`${API_BASE}/bases?campaign_id=${campaignId}`);
+    if (res.ok) {
+      const d = await res.json() as { items: Array<{ id: string; name: string }> };
+      setBases(d.items ?? []);
     }
   }, [campaignId]);
 
@@ -1119,13 +1195,15 @@ function DialogsTab({ campaignId }: {
     if (filterAudience === 'bots') params.set('tg_is_bot', 'true');
     if (filterAudience === 'users') params.set('tg_is_bot', 'false');
     if (filterAccountId) params.set('account_id', filterAccountId);
+    if (filterBaseId) params.set('base_id', filterBaseId);
+    if (filterMessages !== 'all') params.set('messages', filterMessages);
     const res = await authFetch(`${API_BASE}/dialogs?${params}`);
     if (res.ok) {
       const d = await res.json() as { items: OutreachDialog[]; total: number };
       setDialogs(d.items); setTotal(d.total);
     }
     setLoading(false);
-  }, [campaignId, offset, query, filterStatus, filterCanSend, filterAudience, filterAccountId]);
+  }, [campaignId, offset, query, filterStatus, filterCanSend, filterAudience, filterAccountId, filterBaseId, filterMessages]);
 
   // Полсекунды тишины — и запрос уходит. Заодно сбрасываем страницу: искать на
   // третьей странице прошлого фильтра бессмысленно.
@@ -1137,7 +1215,7 @@ function DialogsTab({ campaignId }: {
     return () => clearTimeout(timer);
   }, [search, query]);
 
-  useEffect(() => { queueMicrotask(() => { void fetchDialogs(); void fetchAccounts(); }); }, [fetchDialogs, fetchAccounts]);
+  useEffect(() => { queueMicrotask(() => { void fetchDialogs(); void fetchAccounts(); void fetchBases(); }); }, [fetchDialogs, fetchAccounts, fetchBases]);
 
   /**
    * Пометка статуса и тумблер «можно писать» — оптимистично.
@@ -1189,7 +1267,8 @@ function DialogsTab({ campaignId }: {
    * Сначала показываем ровно тот текст, который уйдёт, — подтверждать вслепую
    * нечестно: сообщение уходит наружу, живому человеку, и отозвать его нельзя.
    * Дальше кнопка только ставит задачу: отправляет воркер тем же аккаунтом,
-   * что вёл переписку, когда дойдёт до него в круге.
+   * что вёл переписку, — его опрос очереди берёт задачу в ближайшие секунды,
+   * не дожидаясь круга.
    */
   const forwardDialog = async (dialog: OutreachDialog, kind: 'lead' | 'partner') => {
     const key = `${dialog.id}:${kind}`;
@@ -1214,7 +1293,7 @@ function DialogsTab({ campaignId }: {
       if (!confirm(
         (warning ? `⚠ ${warning}\n\n` : '')
         + `Передать ${what} в ${preview?.target_chat}?\n\n`
-        + 'Отправит аккаунт кампании, когда воркер дойдёт до него в круге.\n'
+        + 'Отправит аккаунт кампании в ближайшие секунды (кампания должна быть запущена).\n'
         + 'Пока задача ждёт в очереди, её можно снять кнопкой «Отменить отправку».\n\n'
         + `——— Текст сообщения ———\n${preview?.text ?? ''}`,
       )) return;
@@ -1228,7 +1307,7 @@ function DialogsTab({ campaignId }: {
         alert(body?.error ?? `Не удалось поставить передачу в очередь (${res.status})`);
         return;
       }
-      alert(`Поставлено в очередь. Уйдёт в ${body?.target_chat} с аккаунта, который вёл переписку.`);
+      alert(`Поставлено в очередь. В ближайшие секунды уйдёт в ${body?.target_chat} с аккаунта, который вёл переписку.`);
       // Перечитываем список: иначе кнопки остались бы на экране, приглашая
       // поставить в очередь то же самое ещё раз.
       void fetchDialogs();
@@ -1312,8 +1391,21 @@ function DialogsTab({ campaignId }: {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <div className="flex items-center gap-2 flex-wrap">
+      {/*
+       * Две строки, а не одна: поиск с выгрузками сверху, фильтры снизу.
+       *
+       * Фильтров стало шесть, и в один ряд они не помещались — панель
+       * переносилась как попало, разрывая группы посередине: подпись «Тип:»
+       * оставалась на одной строке, а её кнопки уезжали на следующую.
+       *
+       * Каждая группа теперь отдельным блоком, который не разрывается: перенос
+       * идёт по границам групп, и подпись всегда рядом со своими кнопками.
+       */}
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          {/* Поле не растягиваем на весь экран: ник короткий, а строка в
+              полтора метра выглядит как поле для абзаца. */}
+          <div className="min-w-0 max-w-md flex-1">
           {/* Поиск стоит первым: когда ищут конкретного человека, фильтры не
               нужны, а листать три сотни диалогов руками — не вариант. */}
           <div className="relative">
@@ -1323,7 +1415,7 @@ function DialogsTab({ campaignId }: {
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Поиск по нику или ID"
               aria-label="Поиск диалога по никнейму или числовому ID"
-              className="w-56 rounded-full border border-gray-200 bg-white py-1.5 pl-8 pr-7 text-xs outline-none transition focus:border-indigo-400"
+              className="w-full rounded-full border border-gray-200 bg-white py-1.5 pl-8 pr-7 text-xs outline-none transition focus:border-indigo-400"
             />
             {search && (
               <button
@@ -1336,42 +1428,98 @@ function DialogsTab({ campaignId }: {
               </button>
             )}
           </div>
-          <span className="text-xs text-gray-500">Статус:</span>
-          {['', 'none', 'lead', 'not_lead', 'later'].map(s => (
-            <button key={s} type="button" onClick={() => { setFilterStatus(s); setOffset(0); }}
-              className={`rounded-full px-4 py-1.5 text-xs font-medium transition border cursor-pointer ${filterStatus === s ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
-              {s ? DIALOG_STATUS_LABELS[s]?.label : 'Все'}
-            </button>
-          ))}
-          <span className="ml-2 text-xs text-gray-500">Отправка:</span>
-          {[
-            { id: 'all', label: 'Все' },
-            { id: 'enabled', label: 'Разрешено' },
-            { id: 'disabled', label: 'Запрещено' },
-          ].map(s => (
-            <button key={s.id} type="button" onClick={() => { setFilterCanSend(s.id as typeof filterCanSend); setOffset(0); }}
-              className={`rounded-full px-4 py-1.5 text-xs font-medium transition border cursor-pointer ${filterCanSend === s.id ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
-              {s.label}
-            </button>
-          ))}
-          <span className="ml-2 text-xs text-gray-500">Тип:</span>
-          {[
-            { id: 'all', label: 'Все' },
-            { id: 'users', label: 'Люди' },
-            { id: 'bots', label: 'Боты' },
-          ].map(s => (
-            <button key={s.id} type="button" onClick={() => { setFilterAudience(s.id as typeof filterAudience); setOffset(0); }}
-              className={`rounded-full px-4 py-1.5 text-xs font-medium transition border cursor-pointer ${filterAudience === s.id ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
-              {s.label}
-            </button>
-          ))}
-          {/* Не плашки, как у соседних фильтров: аккаунтов в кампании полтора
-              десятка, и рядом кнопок они переносили бы всю панель на третью
-              строку. Показываем контрол, только когда аккаунт не один — с
-              единственным выбирать не из чего. */}
+          </div>
+          {/* Выгрузки — в одной строке с поиском: обе про весь список целиком,
+              а не про отбор, и внизу они мешались бы фильтрам. */}
+          <button type="button" onClick={() => void exportDialogs('json')} className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer">
+            <Download className="h-3.5 w-3.5" /> JSON
+          </button>
+          <button type="button" onClick={() => void exportDialogs('html')} className="inline-flex shrink-0 items-center gap-1 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer">
+            <Download className="h-3.5 w-3.5" /> HTML
+          </button>
+        </div>
+
+        {/* Фильтры отбора — дропдаунами: плашки по три-четыре на фильтр
+            переносили панель на несколько строк, а выбирают за раз обычно
+            одно значение. «Все» сбрасывает фильтр. */}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-500">Статус:</span>
+            <select
+              value={filterStatus}
+              onChange={(e) => { setFilterStatus(e.target.value); setOffset(0); }}
+              aria-label="Показывать диалоги только с этим статусом"
+              className={`rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterStatus ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
+            >
+              <option value="">Все</option>
+              <option value="none">Без статуса</option>
+              <option value="lead">Лид</option>
+              <option value="not_lead">Не лид</option>
+              <option value="later">Потом</option>
+            </select>
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-500">Отправка:</span>
+            <select
+              value={filterCanSend}
+              onChange={(e) => { setFilterCanSend(e.target.value as typeof filterCanSend); setOffset(0); }}
+              aria-label="Показывать диалоги по признаку «можно писать»"
+              title="Разрешена ли нашему аккаунту отправка в этот диалог"
+              className={`rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterCanSend !== 'all' ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
+            >
+              <option value="all">Все</option>
+              <option value="enabled">Разрешено</option>
+              <option value="disabled">Запрещено</option>
+            </select>
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-500">Тип:</span>
+            <select
+              value={filterAudience}
+              onChange={(e) => { setFilterAudience(e.target.value as typeof filterAudience); setOffset(0); }}
+              aria-label="Показывать диалоги с людьми или с ботами"
+              className={`rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterAudience !== 'all' ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
+            >
+              <option value="all">Все</option>
+              <option value="users">Люди</option>
+              <option value="bots">Боты</option>
+            </select>
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-500">Сообщений:</span>
+            <select
+              value={filterMessages}
+              onChange={(e) => { setFilterMessages(e.target.value as typeof filterMessages); setOffset(0); }}
+              aria-label="Показывать диалоги по количеству сообщений"
+              className={`rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterMessages !== 'all' ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
+            >
+              <option value="all">Все</option>
+              <option value="one" title="Мы написали, ответа не было">1 сообщение</option>
+              <option value="many" title="Разговор завязался — есть хотя бы один ответ">2 и больше</option>
+            </select>
+          </div>
+          {/* База и аккаунт — те же дропдауны, но появляются не всегда:
+              с единственной базой (аккаунтом) выбирать не из чего. */}
+          {bases.length > 1 && (
+            <div className="flex items-center gap-1">
+              <span className="text-xs text-gray-500">База:</span>
+              <select
+                value={filterBaseId}
+                onChange={(e) => { setFilterBaseId(e.target.value); setOffset(0); }}
+                aria-label="Показывать диалоги только по одной базе"
+                title="Из какой базы контакт, которому писали"
+                className={`max-w-[220px] rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterBaseId ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
+              >
+                <option value="">Все</option>
+                {bases.map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
           {accounts.length > 1 && (
-            <>
-              <span className="ml-2 text-xs text-gray-500">Аккаунт:</span>
+            <div className="flex items-center gap-1">
+              <span className="text-xs text-gray-500">Аккаунт:</span>
               <select
                 value={filterAccountId}
                 onChange={(e) => { setFilterAccountId(e.target.value); setOffset(0); }}
@@ -1384,16 +1532,8 @@ function DialogsTab({ campaignId }: {
                   <option key={a.id} value={a.id}>{accountLabel(a) ?? a.session_name}</option>
                 ))}
               </select>
-            </>
+            </div>
           )}
-        </div>
-        <div className="flex gap-2">
-          <button type="button" onClick={() => void exportDialogs('json')} className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer">
-            <Download className="h-3.5 w-3.5" /> JSON
-          </button>
-          <button type="button" onClick={() => void exportDialogs('html')} className="inline-flex items-center gap-1 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer">
-            <Download className="h-3.5 w-3.5" /> HTML
-          </button>
         </div>
       </div>
 
@@ -1407,7 +1547,15 @@ function DialogsTab({ campaignId }: {
               // Пустой список под фильтром читается как «диалогов нет вообще»,
               // и оператор идёт проверять кампанию. Называем аккаунт вслух.
               ? `У аккаунта ${accountLabelMap.get(filterAccountId) ?? ''} диалогов нет. Выберите «Аккаунт: Все», чтобы увидеть остальные.`
-              : 'Нет диалогов'}
+              : filterBaseId
+                // Та же причина, что и с аккаунтом: под фильтром пустой список
+                // читается как «диалогов нет вообще».
+                ? `По базе «${bases.find((b) => b.id === filterBaseId)?.name ?? ''}» диалогов пока нет. Выберите «База: Все», чтобы увидеть остальные.`
+                : filterMessages === 'many'
+                  ? 'Диалогов с ответом пока нет — во всех переписках только наше первое сообщение.'
+                  : filterMessages === 'one'
+                    ? 'Диалогов без ответа нет: везде переписка завязалась.'
+                    : 'Нет диалогов'}
         </p>
       ) : (
         <div className="space-y-2">
@@ -1609,6 +1757,14 @@ function DialogsTab({ campaignId }: {
                         {d.forward.error_message || 'причина не записана'}
                       </p>
                     )}
+                    {/* Передача в очереди, но первая попытка сорвалась по сети:
+                        воркер повторит сам, а оператору нужно видеть, что
+                        «в очереди» затянулось не просто так. */}
+                    {d.forward?.status === 'pending' && d.forward.error_message && (
+                      <p className="mt-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[10px] text-amber-700">
+                        В очереди, отправка задерживается: {d.forward.error_message}
+                      </p>
+                    )}
                     {/* Снятая передача — не авария, поэтому серым, а не красным:
                         оператор сам так решил. Но след нужен: без него исчезнувшая
                         плашка «в очереди» читается как сбой, и человека передают
@@ -1675,9 +1831,32 @@ function DialogsTab({ campaignId }: {
                         const senderName = m.role === 'user'
                           ? (d.tg_username ? `@${d.tg_username}` : `ID ${d.tg_user_id}`)
                           : accountLabelMap.get(d.account_id) ?? 'Наш аккаунт';
+                        // Разделитель дня рисуем только там, где дата сменилась:
+                        // в переписке на десяток сообщений за одни сутки полная
+                        // дата у каждой реплики только мешает читать. Время же
+                        // показываем всегда — по нему видно паузы между ответами.
+                        const dayLabel = messageDayLabel(m.timestamp);
+                        const prevDayLabel = i > 0 ? messageDayLabel(d.messages[i - 1]?.timestamp) : null;
                         return (
-                          <div key={i} className={`rounded-lg px-3 py-2 text-xs ${m.role === 'user' ? 'bg-blue-50 text-gray-800' : 'bg-emerald-50 text-gray-800'}`}>
-                            <span className="font-semibold">{senderName}:</span> {m.content}
+                          <div key={i}>
+                            {dayLabel && dayLabel !== prevDayLabel && (
+                              <div className="my-1.5 flex items-center gap-2">
+                                <span className="h-px flex-1 bg-gray-200" />
+                                <span className="text-[10px] font-medium text-gray-400">{dayLabel}</span>
+                                <span className="h-px flex-1 bg-gray-200" />
+                              </div>
+                            )}
+                            <div className={`rounded-lg px-3 py-2 text-xs ${m.role === 'user' ? 'bg-blue-50 text-gray-800' : 'bg-emerald-50 text-gray-800'}`}>
+                              <div className="mb-0.5 flex items-baseline gap-2">
+                                <span className="font-semibold">{senderName}</span>
+                                {m.timestamp && (
+                                  <span className="ml-auto shrink-0 text-[10px] text-gray-400" title={formatDate(m.timestamp)}>
+                                    {messageTimeLabel(m.timestamp)}
+                                  </span>
+                                )}
+                              </div>
+                              {m.content}
+                            </div>
                           </div>
                         );
                       })}
@@ -1707,87 +1886,6 @@ function DialogsTab({ campaignId }: {
           <span className="text-xs text-gray-500">{currentPage} / {totalPages}</span>
           <button type="button" disabled={currentPage >= totalPages} onClick={() => setOffset(offset + limit)}
             className="rounded-full px-4 py-2 text-xs font-medium border border-gray-200 bg-white text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer">Вперёд</button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* =================== PROCESSED TAB =================== */
-function ProcessedTab({ campaignId }: { campaignId: string }) {
-  const [items, setItems] = useState<OutreachProcessed[]>([]);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState('');
-  const [showAdd, setShowAdd] = useState(false);
-  const [addUserId, setAddUserId] = useState('');
-  const [addUsername, setAddUsername] = useState('');
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    const res = await authFetch(`${API_BASE}/processed?campaign_id=${campaignId}&limit=200`);
-    if (res.ok) {
-      const d = await res.json() as { items: OutreachProcessed[]; total: number };
-      setItems(d.items); setTotal(d.total);
-    }
-    setLoading(false);
-  }, [campaignId]);
-
-  useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
-
-  const addProcessed = async () => {
-    await authFetch(`${API_BASE}/processed`, {
-      method: 'POST',
-      body: JSON.stringify({ campaign_id: campaignId, tg_user_id: Number(addUserId), tg_username: addUsername || null }),
-    });
-    setAddUserId(''); setAddUsername(''); setShowAdd(false); void load();
-  };
-
-  const removeProcessed = async (id: string) => {
-    await authFetch(`${API_BASE}/processed?id=${id}`, { method: 'DELETE' });
-    void load();
-  };
-
-  const filtered = search
-    ? items.filter(i => (i.tg_username ?? '').toLowerCase().includes(search.toLowerCase()) || String(i.tg_user_id).includes(search))
-    : items;
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <div className="flex items-center gap-2">
-          <Search className="h-3.5 w-3.5 text-gray-400" />
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Поиск по имени или ID..."
-            className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-1.5 text-xs outline-none focus:border-indigo-400 w-56" />
-          <span className="text-xs text-gray-400">Всего: {total}</span>
-        </div>
-        <button type="button" onClick={() => setShowAdd(!showAdd)}
-          className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition cursor-pointer">
-          <Plus className="h-3.5 w-3.5" /> Добавить
-        </button>
-      </div>
-      {showAdd && (
-        <div className="flex items-center gap-2 rounded-lg border border-gray-200 p-3">
-          <input value={addUserId} onChange={e => setAddUserId(e.target.value)} placeholder="User ID" className="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs outline-none w-36" />
-          <input value={addUsername} onChange={e => setAddUsername(e.target.value)} placeholder="@username" className="rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs outline-none w-36" />
-          <button type="button" onClick={addProcessed} className="rounded-full bg-indigo-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition cursor-pointer">Добавить</button>
-        </div>
-      )}
-      {loading ? (
-        <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
-      ) : filtered.length === 0 ? (
-        <p className="text-xs text-gray-400 py-8 text-center">Нет обработанных клиентов</p>
-      ) : (
-        <div className="divide-y divide-gray-100 rounded-lg border border-gray-200">
-          {filtered.map(p => (
-            <div key={p.id} className="flex items-center gap-3 px-3 py-2 text-xs">
-              <UserCheck className="h-3.5 w-3.5 text-gray-400 shrink-0" />
-              <span className="font-medium text-gray-800 w-28">{p.tg_user_id}</span>
-              <span className="text-gray-500 flex-1">{p.tg_username ? `@${p.tg_username}` : '—'}</span>
-              <span className="text-gray-400">{formatDate(p.processed_at)}</span>
-              <button type="button" onClick={() => void removeProcessed(p.id)} className="p-2 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer"><Trash2 className="h-3.5 w-3.5" /></button>
-            </div>
-          ))}
         </div>
       )}
     </div>
@@ -1845,6 +1943,13 @@ function BulkActionsBar({
   /** Что именно проверяем — по умолчанию аккаунты, у прокси свои слова. */
   checkLabel,
   checkTitle,
+  /**
+   * Дополнительные кнопки между «Проверить» и «Удалить» — для разовых
+   * действий, специфичных типу строк (например, «Переместить в список» у
+   * прокси). Не children, чтобы случайно не засунуть сюда разметку вне
+   * кнопок — иначе визуальный ряд в баре ломается.
+   */
+  extra,
 }: {
   selectedCount: number;
   deleting: boolean;
@@ -1855,6 +1960,7 @@ function BulkActionsBar({
   onCheck?: () => void;
   checkLabel?: string;
   checkTitle?: string;
+  extra?: React.ReactNode;
 }) {
   if (selectedCount === 0) return null;
   return (
@@ -1874,6 +1980,7 @@ function BulkActionsBar({
           {checkLabel ?? 'Проверить аккаунты'}
         </button>
       )}
+      {extra}
       <button
         type="button"
         onClick={onDelete}
@@ -1974,6 +2081,114 @@ interface CheckRow {
  * были красными и назывались похоже («ограничен» / «забанен»), из-за чего
  * живые номера, поймавшие спам-блок на пару дней, читались как сгоревшие.
  */
+/**
+ * Обжалование заморозки: кнопка и окно с текстом.
+ *
+ * Обращение отправляет не браузер, а воркер — тем соединением, которое уже
+ * держит аккаунт. Подключиться отсюда нельзя: второе подключение к той же
+ * сессии Telegram встречает AUTH_KEY_DUPLICATED и выключает аккаунт. Поэтому
+ * кнопка ставит заказ в очередь, а не «отправляет».
+ *
+ * Текст даём править. Обращение читает живой человек в поддержке, и заготовка
+ * на все случаи, разосланная десятком одинаковых аккаунтов, скорее навредит,
+ * чем поможет.
+ */
+function AppealButton({
+  account,
+  onDone,
+}: {
+  account: OutreachAccount;
+  onDone: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState(defaultAppealText());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/accounts/${account.id}/appeal`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setError(body.error ?? 'Не получилось поставить обжалование');
+        return;
+      }
+      setOpen(false);
+      onDone();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        title="Отправить обращение в поддержку Telegram от имени этого аккаунта"
+        className="cursor-pointer rounded-md border border-rose-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-rose-700 transition hover:bg-rose-50"
+      >
+        Обжаловать
+      </button>
+
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-lg rounded-xl bg-white p-4 shadow-xl">
+            <h3 className="text-sm font-semibold text-gray-900">
+              Обжалование заморозки · {account.first_name || account.session_name}
+            </h3>
+            <p className="mt-1 text-[11px] leading-tight text-gray-500">
+              Обращение уйдёт от имени этого аккаунта, когда рассылка в ближайшем круге до него
+              дойдёт. Отправит его портал — заходить в аккаунт не нужно.
+            </p>
+            {account.freeze_appeal_url && (
+              <p className="mt-1 break-all text-[11px] text-gray-400">
+                Адрес от Telegram: {account.freeze_appeal_url}
+              </p>
+            )}
+
+            <textarea
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              rows={6}
+              className="mt-3 w-full rounded-lg border border-gray-200 px-3 py-2 text-xs text-gray-800 outline-none focus:border-indigo-400"
+            />
+
+            {error && (
+              <p className="mt-2 rounded-lg bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">{error}</p>
+            )}
+
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="cursor-pointer rounded-lg px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-100"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                disabled={busy || !text.trim()}
+                onClick={() => void submit()}
+                className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                Поставить в очередь
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 const CHECK_LABEL: Record<string, { text: string; cls: string }> = {
   ok: { text: 'жив', cls: 'bg-emerald-50 text-emerald-700' },
   session_revoked: { text: 'разлогинен', cls: 'bg-amber-50 text-amber-700' },
@@ -1982,6 +2197,9 @@ const CHECK_LABEL: Record<string, { text: string; cls: string }> = {
   proxy_dead: { text: 'прокси молчит', cls: 'bg-amber-50 text-amber-700' },
   restricted: { text: 'ограничен временно', cls: 'bg-amber-50 text-amber-700' },
   banned: { text: 'бан навсегда', cls: 'bg-rose-50 text-rose-700' },
+  // Заморозка отдельно от «ограничен временно»: спам-блок проходит сам по
+  // таймеру, а эта снимается только обжалованием — рядом и стоит кнопка.
+  frozen: { text: 'заморожен', cls: 'bg-rose-50 text-rose-700' },
   error: { text: 'ошибка', cls: 'bg-gray-100 text-gray-500' },
   // Не итог проверки, а её ожидание: кампания работает, и проверку выполнит
   // рассылка своим соединением, дойдя до аккаунта в круге.
@@ -1993,50 +2211,6 @@ const CHECK_LABEL: Record<string, { text: string; cls: string }> = {
  * Аватарка аккаунта. Пока профиль не читали из Telegram, показываем инициалы —
  * пустой серый кружок ничем не отличался бы от «фото нет».
  */
-function AccountAvatar({
-  account,
-  size = 36,
-}: {
-  account: OutreachAccount;
-  size?: number;
-}) {
-  const [broken, setBroken] = useState(false);
-  const label = (account.first_name || account.session_name || '?').trim();
-  const initials = label
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((w) => w[0]?.toUpperCase() ?? '')
-    .join('');
-  const url = account.avatar_url?.trim();
-
-  if (url && !broken) {
-    // Аватарки лежат в публичном бакете Supabase; next/image потребовал бы
-    // прописывать домен хранилища в конфиг ради картинки 36×36.
-    return (
-      // eslint-disable-next-line @next/next/no-img-element
-      <img
-        src={url}
-        alt=""
-        width={size}
-        height={size}
-        onError={() => setBroken(true)}
-        style={{ width: size, height: size }}
-        className="rounded-full object-cover bg-gray-100 shrink-0"
-      />
-    );
-  }
-
-  return (
-    <span
-      style={{ width: size, height: size, fontSize: Math.round(size / 2.8) }}
-      className="flex items-center justify-center rounded-full bg-gray-100 font-medium text-gray-400 shrink-0"
-      title={account.profile_synced_at ? 'В Telegram нет аватарки' : 'Профиль ещё не читали из Telegram'}
-    >
-      {initials || '?'}
-    </span>
-  );
-}
-
 /**
  * Итог загрузки файлов аккаунтов.
  *
@@ -2061,13 +2235,14 @@ interface AccountsUploadSummary {
  * прибора, и оператор сравнивает не то.
  */
 function HealthCell({ mark }: { mark: HealthMark }) {
-  const cls = mark.tone === 'ok'
-    ? 'bg-emerald-50 text-emerald-700'
-    : mark.tone === 'warn'
-      ? 'bg-amber-50 text-amber-700'
-      : mark.tone === 'bad'
-        ? 'bg-rose-50 text-rose-700'
-        : 'bg-gray-100 text-gray-500';
+  /**
+   * Цвет берём из общей палитры, а не из собственной лесенки.
+   *
+   * Своя знала три тона и всё остальное красила серым. Добавленные потом
+   * «на прогреве» (синий) и «в отлёжке» (фиолетовый) молча приезжали серыми —
+   * то есть выглядели как «портал не знает», хотя портал знает точно.
+   */
+  const cls = healthToneClass(mark.tone);
   return (
     <span title={mark.detail} className={`w-fit cursor-help rounded-md px-1.5 py-0.5 text-[10px] font-medium ${cls}`}>
       {mark.label}
@@ -2098,11 +2273,34 @@ function CampaignAccountsTab({
   >({});
   /** Что каждый аккаунт отправил за сутки и когда отправлял в последний раз. */
   const [sendingStats, setSendingStats] = useState<Record<string, AccountSendingStat>>({});
+  /**
+   * Сколько контактов ещё ждёт отправки во всех базах кампании. `null` — ручка
+   * не ответила, и тогда колонка «Рассылка» про очередь молчит.
+   */
+  const [queuePending, setQueuePending] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSummary, setUploadSummary] = useState<AccountsUploadSummary | null>(null);
+  /** Страна партии со слов оператора — см. выпадающий список у кнопки загрузки. */
+  const [uploadCountry, setUploadCountry] = useState('');
+  /**
+   * Цена одного аккаунта загружаемой партии, рублями.
+   *
+   * Партию покупают одним чеком и по одной цене за штуку, поэтому поле стоит
+   * рядом с кнопкой загрузки: проставить цену потом, по одной строке на
+   * полсотни аккаунтов, оператор не станет. Пусто — цена не указана.
+   */
+  const [uploadPrice, setUploadPrice] = useState('');
+  /** Цена для аккаунта, добавляемого вручную. */
+  const [newPrice, setNewPrice] = useState('');
+  /** Цена, которую проставляем выбранным строкам разом. */
+  const [bulkPrice, setBulkPrice] = useState('');
+  const [bulkPriceSaving, setBulkPriceSaving] = useState(false);
+  /** Аккаунт, у которого сейчас правят цену прямо в строке. */
+  const [editingPriceFor, setEditingPriceFor] = useState<string | null>(null);
+  const [priceDraft, setPriceDraft] = useState('');
   const [sessionName, setSessionName] = useState('');
   const [apiId, setApiId] = useState('');
   const [apiHash, setApiHash] = useState('');
@@ -2129,6 +2327,7 @@ function CampaignAccountsTab({
    * честнее мерить от момента загрузки данных, а не от момента перерисовки.
    */
   const [loadedAt, setLoadedAt] = useState<number | null>(null);
+  const [disablingDead, setDisablingDead] = useState(false);
 
   /**
    * Момент, от которого считается здоровье аккаунтов и прокси, — один на весь
@@ -2212,14 +2411,56 @@ function CampaignAccountsTab({
       setErrorCounts(d.counts ?? {});
     }
     if (sendRes.ok) {
-      const d = await sendRes.json() as { stats: Record<string, AccountSendingStat> };
+      const d = await sendRes.json() as { stats: Record<string, AccountSendingStat>; pending?: number };
       setSendingStats(d.stats ?? {});
+      setQueuePending(typeof d.pending === 'number' ? d.pending : null);
     }
     setLoadedAt(Date.now());
     setLoading(false);
   }, [campaignId]);
 
   useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
+
+  /**
+   * Цена одной строки. Пустое поле стирает цену (null), а не ставит ноль:
+   * ноль означает «достался бесплатно» и попадает в сумму партии.
+   */
+  const savePrice = async (id: string, raw: string) => {
+    const trimmed = raw.trim().replace(',', '.');
+    const value = trimmed === '' ? null : Number(trimmed);
+    if (value !== null && (!Number.isFinite(value) || value < 0)) return;
+    setEditingPriceFor(null);
+    await authFetch(`${API_BASE}/accounts/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ price: value }),
+    });
+    void load();
+  };
+
+  const applyBulkPrice = async () => {
+    if (selectedIds.length === 0) return;
+    const trimmed = bulkPrice.trim().replace(',', '.');
+    const value = trimmed === '' ? null : Number(trimmed);
+    if (value !== null && (!Number.isFinite(value) || value < 0)) return;
+    setBulkPriceSaving(true);
+    await authFetch(`${API_BASE}/accounts/bulk-price`, {
+      method: 'POST',
+      body: JSON.stringify({ ids: selectedIds, price: value }),
+    });
+    setBulkPriceSaving(false);
+    setBulkPrice('');
+    void load();
+  };
+
+  /**
+   * Деньги партии. Считаем только по аккаунтам с проставленной ценой: строка
+   * без цены — «неизвестно», а не ноль, и подмешивать её в сумму нельзя.
+   */
+  const accountsPriceTotal = accounts.reduce(
+    (sum, a) => sum + (a.price === null || a.price === undefined ? 0 : Number(a.price)),
+    0,
+  );
+  const accountsWithoutPrice = accounts.filter((a) => a.price === null || a.price === undefined).length;
 
   const addAccount = async () => {
     if (!sessionName.trim() || !apiId.trim() || !apiHash.trim()) return;
@@ -2233,10 +2474,11 @@ function CampaignAccountsTab({
         api_hash: apiHash.trim(),
         phone: phone.trim(),
         proxy_id: proxyId || null,
+        price: newPrice.trim() === '' ? null : Number(newPrice.trim().replace(',', '.')),
       }),
     });
     setSaving(false);
-    setSessionName(''); setApiId(''); setApiHash(''); setPhone(''); setProxyId('');
+    setSessionName(''); setApiId(''); setApiHash(''); setPhone(''); setProxyId(''); setNewPrice('');
     setShowAdd(false);
     void load();
   };
@@ -2506,6 +2748,8 @@ function CampaignAccountsTab({
       const token = await getAccessToken();
       const formData = new FormData();
       Array.from(files).forEach(f => formData.append('files', f));
+      if (uploadCountry) formData.append('country', uploadCountry);
+      if (uploadPrice.trim()) formData.append('price', uploadPrice.trim());
       // fetch отклоняется, только когда ответа нет вовсе: обрыв связи,
       // соединение, разорванное на середине многомегабайтной партии. Это не то
       // же, что отказ сервера — там ответ есть, и он объясняет причину. Здесь
@@ -2526,6 +2770,7 @@ function CampaignAccountsTab({
       const body = await res.json().catch(() => null) as {
         error?: string;
         count?: number;
+        items?: Array<{ phone?: string | null; country_code?: string | null }>;
         skipped?: Array<{ name: string; reason: string }>;
         errors?: Array<{ name: string; error: string }>;
         unchecked_existing_accounts?: number;
@@ -2546,8 +2791,25 @@ function CampaignAccountsTab({
         const errors = body.errors ?? [];
         // «Добавлено аккаунтов: 0» само по себе ничего не объясняет, поэтому
         // пустой результат проговариваем словами.
+        /**
+         * Страны партии — сразу в итоге загрузки.
+         *
+         * Аккаунты приезжают файлами вида «s386_tdata», и по имени страну не
+         * узнать. А она решает, какие прокси им нужны: гео прокси обязано
+         * совпадать с гео номера, иначе Telegram видит несовпадение.
+         */
+        const countries = new Map<string, number>();
+        for (const item of body.items ?? []) {
+          const label = accountCountryLabel(item.phone, item.country_code);
+          if (label) countries.set(label, (countries.get(label) ?? 0) + 1);
+        }
+        const countryNote = countries.size
+          ? ` · ${[...countries.entries()].sort((a, b) => b[1] - a[1]).map(([c, n]) => `${c}: ${n}`).join(', ')}`
+          : '';
+
         const headline = count > 0
-          ? `Добавлено аккаунтов: ${count}`
+          ? `Добавлено аккаунтов: ${count}${countryNote}. Все выключены — включите после того, `
+            + 'как назначите прокси, заполните профиль и проверите'
           : skipped.length || errors.length
             ? 'Ни одного аккаунта не добавлено — почему, ниже'
             : 'Ни одного аккаунта не добавлено: в этих файлах их не нашлось';
@@ -2592,6 +2854,12 @@ function CampaignAccountsTab({
     [accounts, sendingStats],
   );
 
+  /** Кого Telegram хоть раз за сутки прижал: ошибка или предупреждение в логах.
+   *  FLOOD_WAIT, PEER_FLOOD, повторное подключение и т.п. — это и читается
+   *  сводным словом «ограничены». Считается поверх alive/dead — отдельно от
+   *  статуса проверки и отдельно от фактических отправок. */
+  const restrictedCount = accountStats.withErrors + accountStats.withWarningsOnly;
+
   /** Кто именно не рассылает — под курсор на плашке, чтобы не искать глазами. */
   const notSendingNames = useMemo(
     () => accounts
@@ -2602,14 +2870,70 @@ function CampaignAccountsTab({
     [accounts, sendingStats],
   );
 
-  /** Разбивка мёртвых по причине — человеческими ярлыками, для подсказки. */
-  const deadBreakdown = useMemo(
-    () => Object.entries(accountStats.byStatus)
-      .sort((a, b) => b[1] - a[1])
-      .map(([st, n]) => `${CHECK_LABEL[st]?.text ?? st} — ${n}`)
-      .join(', '),
-    [accountStats.byStatus],
+  /**
+   * Кого предлагает выключить кнопка «Снять неживые с рассылки».
+   *
+   * Считается тем же `describeSending`, что рисует колонку «Рассылка», —
+   * оператор видит на экране ровно те причины, по которым кнопка и выбирает.
+   */
+  const deadAccounts = useMemo(
+    () => pickDeadAccounts(
+      accounts.map((a) => ({
+        id: a.id,
+        name: a.session_name,
+        isActive: a.is_active,
+        addedAt: a.created_at,
+        mark: describeSending({
+          account: a,
+          stat: sendingStats[a.id],
+          proxy: proxies.find((p) => p.id === a.proxy_id) ?? null,
+          campaignRunning: campaignStatus === 'running',
+          firstTouchEnabled: firstTouchPerDay > 0,
+          queuePending,
+          now: healthNow,
+        }),
+      })),
+      { now: healthNow, silentDays: DEAD_SILENT_DAYS },
+    ),
+    [accounts, sendingStats, proxies, campaignStatus, firstTouchPerDay, queuePending, healthNow],
   );
+
+  /**
+   * Снять с рассылки все неживые аккаунты разом.
+   *
+   * Кого именно — считает `pickDeadAccounts` по той же колонке «Рассылка»,
+   * которую оператор видит на экране. Список с причинами показываем до
+   * действия: выключение обратимо, но сорок строк вслепую переключать нельзя.
+   */
+  const disableDeadAccounts = useCallback(async () => {
+    if (!deadAccounts.length) return;
+    const preview = deadAccounts.slice(0, 15).map((d) => `• ${d.name} — ${d.reason}`).join('\n');
+    const tail = deadAccounts.length > 15 ? `\n…и ещё ${deadAccounts.length - 15}` : '';
+    if (!confirm(
+      `Снять с рассылки аккаунтов: ${deadAccounts.length}?\n\n${preview}${tail}\n\n`
+      + 'Аккаунты останутся в кампании — их можно включить обратно галочкой «Активен».',
+    )) return;
+
+    setDisablingDead(true);
+    try {
+      const res = await authFetch(`${API_BASE}/accounts/bulk`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          campaign_id: campaignId,
+          ids: deadAccounts.map((d) => d.id),
+          is_active: false,
+        }),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        alert(`Не удалось выключить: ${d?.error ?? res.status}`);
+        return;
+      }
+      await load();
+    } finally {
+      setDisablingDead(false);
+    }
+  }, [deadAccounts, campaignId, load]);
 
   return (
     <div className="space-y-4">
@@ -2618,6 +2942,24 @@ function CampaignAccountsTab({
           Аккаунты кампании <span className="text-gray-400 font-normal">({accounts.length})</span>
         </span>
         <div className="flex items-center gap-2">
+          {/* Первой кнопкой — уборка: пока в списке висят мёртвые номера, они
+              съедают время круга и контакты из базы, а искать их глазами среди
+              сорока строк никто не станет. */}
+          {deadAccounts.length > 0 && (
+            <button
+              type="button"
+              disabled={disablingDead}
+              onClick={() => { void disableDeadAccounts(); }}
+              title={`Снять с рассылки аккаунты, которые сами не заработают: ${deadAccounts
+                .slice(0, 12)
+                .map((d) => `${d.name} — ${d.reason}`)
+                .join('; ')}${deadAccounts.length > 12 ? ' и другие' : ''}. Перед выключением покажу полный список.`}
+              className="inline-flex items-center gap-1.5 rounded-full border border-amber-300 bg-amber-50 px-4 py-2 text-xs font-semibold text-amber-800 hover:bg-amber-100 transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {disablingDead ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PowerOff className="h-3.5 w-3.5" />}
+              Снять неживые ({deadAccounts.length})
+            </button>
+          )}
           <button
             type="button"
             disabled={!profileReadable || syncingIds.length > 0 || syncTargets.length === 0}
@@ -2638,6 +2980,43 @@ function CampaignAccountsTab({
                 ? `Обновить профили выбранных (${syncTargets.length})`
                 : `Обновить профили всех (${syncTargets.length})`}
           </button>
+          {/*
+            Страна партии — со слов оператора, до загрузки.
+            У tdata телефона нет, пока не подключишься, а подключаться положено
+            через прокси той же страны: чтобы узнать страну, нужен прокси, а
+            чтобы выбрать прокси — страна. Круг разрывается тем, что оператор
+            и так знает страну: он выбирал её в объявлении при покупке.
+          */}
+          <label className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600">
+            Страна партии
+            <select
+              value={uploadCountry}
+              onChange={(e) => setUploadCountry(e.target.value)}
+              title="Страна, в которой зарегистрированы аккаунты партии. Нужна, чтобы подобрать прокси до первого подключения."
+              className="cursor-pointer rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-xs text-gray-800 outline-none focus:border-indigo-400"
+            >
+              <option value="">не указана</option>
+              {countryOptions().map((c) => (
+                <option key={c.code} value={c.code}>{c.flag} {c.name}</option>
+              ))}
+            </select>
+          </label>
+          {/* Цена партии — здесь же, а не отдельным шагом: аккаунты покупают
+              одним чеком по одной цене за штуку, и это единственный момент,
+              когда оператор её помнит. Пусто — цена не указана. */}
+          <label className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600">
+            Цена за аккаунт, ₽
+            <input
+              type="number"
+              min={0}
+              step="1"
+              value={uploadPrice}
+              onChange={(e) => setUploadPrice(e.target.value)}
+              placeholder="—"
+              title="Сколько стоил один аккаунт партии. Проставится всем загруженным; потом можно поправить построчно."
+              className="w-20 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-xs text-gray-800 outline-none focus:border-indigo-400"
+            />
+          </label>
           <label
             title="tdata — zip-архивами (можно сразу несколько), старый формат — парами .session и .json"
             className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer"
@@ -2654,14 +3033,48 @@ function CampaignAccountsTab({
       </div>
 
       {/* Сводка идёт до таблицы: вопрос «сколько из партии рабочих» встаёт
-          раньше, чем вопрос про конкретную строку. Возраст проверки стоит
-          рядом с числами намеренно — зелёное «жив 20» на позавчерашней
-          проверке читается как «сейчас всё хорошо», а это не так. */}
+          раньше, чем вопрос про конкретную строку. Три числа отвечают на три
+          разных вопроса: «живо» — про разрешения (последняя проверка ok),
+          «ограничены» — про работу за сутки (были ли сбои в логах),
+          «рассылали за 24ч» — про факт. Возраст проверки стоит рядом
+          намеренно — зелёное «живо 50/53» на позавчерашней проверке читается
+          как «сейчас всё хорошо», а это не так. */}
       {!loading && accounts.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-[11px]">
-          {/* Первым числом — то, ради чего экран открывают: сколько аккаунтов
-              реально пишут людям. «Жив» и «Активен» отвечают только на вопрос
-              о разрешениях. */}
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${accountStats.alive > 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}
+            title="Последняя проверка вернула «жив». Проверку теперь ставит и сама рассылка: каждый успешный круг аккаунта — это подтверждение, что он жив, без остановки кампании."
+          >
+            живо {accountStats.alive} из {accounts.length}
+          </span>
+
+          <span
+            className={`rounded-md px-2 py-1 font-medium ${restrictedCount > 0 ? 'bg-amber-50 text-amber-700' : 'bg-gray-50 text-gray-400'}`}
+            title="За сутки в логах аккаунта были ошибки или предупреждения — обычно это временные ограничения Telegram (FLOOD_WAIT, PEER_FLOOD), разрыв соединения со второй попытки или отложенный контакт. Считается по факту работы за сутки, а не по статусу проверки."
+          >
+            ограничены {restrictedCount} из {accounts.length}
+          </span>
+
+          {/* Деньги партии: сумма считается только по строкам с проставленной
+              ценой, а число строк без цены названо рядом — иначе «потратили
+              12 000» читалось бы как полная стоимость, хотя половина цен просто
+              не заполнена. */}
+          <span
+            className="rounded-md bg-gray-50 px-2 py-1 font-medium text-gray-600"
+            title={
+              accountsWithoutPrice > 0
+                ? `Сумма по ${accounts.length - accountsWithoutPrice} аккаунтам с проставленной ценой. Ещё у ${accountsWithoutPrice} цена не указана — они в сумму не входят.`
+                : 'Сколько всего заплатили за аккаунты этой кампании.'
+            }
+          >
+            потрачено {Math.round(accountsPriceTotal).toLocaleString('ru-RU')} ₽
+            {accountsWithoutPrice > 0 && (
+              <span className="ml-1 font-normal text-gray-400">
+                · без цены {accountsWithoutPrice}
+              </span>
+            )}
+          </span>
+
           <span
             className={`rounded-md px-2 py-1 font-medium ${sendingCount > 0 ? 'bg-indigo-50 text-indigo-700' : 'bg-rose-50 text-rose-700'}`}
             title={
@@ -2669,71 +3082,12 @@ function CampaignAccountsTab({
               + (notSendingNames ? ` Не рассылают: ${notSendingNames}${accounts.length - sendingCount > 12 ? ' и другие' : ''}. Причина по каждому — в колонке «Рассылка».` : '')
             }
           >
-            рассылают {sendingCount} из {accounts.length}
-          </span>
-
-          <span className="mx-1 h-4 w-px bg-gray-200" aria-hidden />
-
-          <span
-            className="rounded-md bg-emerald-50 px-2 py-1 font-medium text-emerald-700"
-            title="Последняя проверка вернула «жив». Проверку теперь ставит и сама рассылка: каждый успешный круг аккаунта — это подтверждение, что он жив, без остановки кампании."
-          >
-            жив {accountStats.alive}
-          </span>
-          <span
-            className={`rounded-md px-2 py-1 font-medium ${accountStats.dead > 0 ? 'bg-rose-50 text-rose-700' : 'bg-gray-100 text-gray-500'}`}
-            title={deadBreakdown
-              ? `По причинам: ${deadBreakdown}`
-              : 'Аккаунтов с неудачной проверкой нет'}
-          >
-            не жив {accountStats.dead}
-          </span>
-          <span
-            className={`rounded-md px-2 py-1 font-medium ${accountStats.unchecked > 0 ? 'bg-gray-100 text-gray-600' : 'bg-gray-50 text-gray-400'}`}
-            title="Проверка ни разу не запускалась. Эти аккаунты не входят ни в «жив», ни в «не жив» — про них просто ничего не известно."
-          >
-            не проверялись {accountStats.unchecked}
-          </span>
-          {accountStats.disabled > 0 && (
-            <span
-              className="rounded-md bg-amber-50 px-2 py-1 font-medium text-amber-700"
-              title="Выключены в портале — воркер их не берёт в работу вообще. Аккаунт выключается сам после трёх AUTH_KEY_DUPLICATED подряд; чинится завершением чужих сеансов и перевыпуском session_data."
-            >
-              выключены {accountStats.disabled}
-            </span>
-          )}
-
-          <span className="mx-1 h-4 w-px bg-gray-200" aria-hidden />
-
-          <span
-            className={`rounded-md px-2 py-1 font-medium ${accountStats.withErrors > 0 ? 'bg-rose-50 text-rose-700' : 'bg-gray-50 text-gray-400'}`}
-            title={`Аккаунты, у которых за сутки в логах были строки уровня «ошибка». Всего таких строк: ${accountStats.errorTotal}.`}
-          >
-            с ошибками за 24ч {accountStats.withErrors}
-          </span>
-          {accountStats.withWarningsOnly > 0 && (
-            <span
-              className="rounded-md bg-amber-50 px-2 py-1 font-medium text-amber-700"
-              title="За сутки были только предупреждения, ошибок не было. Обычно это подключение со второй попытки или отложенный контакт."
-            >
-              только предупреждения {accountStats.withWarningsOnly}
-            </span>
-          )}
-
-          <span
-            className={`rounded-md px-2 py-1 font-medium ${freeProxies.length > 0 ? 'bg-gray-100 text-gray-600' : 'bg-amber-50 text-amber-700'}`}
-            title={
-              `Прокси в кампании: ${proxies.length}. Свободных — ${freeProxies.length}: только они и предлагаются при назначении. `
-              + 'Занятость считается по адресу и по всему порталу — один адрес это одно устройство для Telegram, '
-              + 'и два аккаунта на нём это повод для блокировки.'
-            }
-          >
-            свободных прокси {freeProxies.length} из {proxies.length}
+            рассылали за 24ч {sendingCount} из {accounts.length}
           </span>
 
           <span className="ml-auto text-[10px] text-gray-400">
             {accountStats.newestCheck === null ? (
-              'проверок ещё не было — «жив» и «не жив» показывать не из чего'
+              'проверок ещё не было — «живо» показывать не из чего'
             ) : (
               <>
                 проверка от{' '}
@@ -2824,6 +3178,11 @@ function CampaignAccountsTab({
               <input value={phone} onChange={e => setPhone(e.target.value)} placeholder="+79001234567"
                 className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
             </label>
+            <label className="space-y-1">
+              <span className="text-[11px] font-medium text-gray-500">Цена, ₽</span>
+              <input type="number" min={0} step="1" value={newPrice} onChange={e => setNewPrice(e.target.value)} placeholder="—"
+                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
+            </label>
             {/* Не <label>: внутри теперь кнопка со своим списком, а клик по
                 подписи в этом случае никуда не ведёт. */}
             <div className="space-y-1">
@@ -2861,6 +3220,30 @@ function CampaignAccountsTab({
         checking={checkingIds.length > 0}
         canCheck
         onCheck={() => { void checkSelected(); }}
+        extra={
+          /* Проставить цену выбранным: партия могла приехать двумя чеками, и
+             тогда цена у половины строк своя. Пустое поле стирает цену. */
+          <span className="inline-flex items-center gap-1.5">
+            <input
+              type="number"
+              min={0}
+              step="1"
+              value={bulkPrice}
+              onChange={(e) => setBulkPrice(e.target.value)}
+              placeholder="цена, ₽"
+              className="w-24 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-700 outline-none focus:border-indigo-400"
+            />
+            <button
+              type="button"
+              onClick={() => { void applyBulkPrice(); }}
+              disabled={bulkPriceSaving}
+              title="Проставить эту цену всем выбранным аккаунтам. Пустое поле — стереть цену."
+              className="rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-indigo-300 hover:bg-indigo-50 disabled:opacity-50 cursor-pointer"
+            >
+              {bulkPriceSaving ? 'Сохраняю…' : 'Проставить цену'}
+            </button>
+          </span>
+        }
         checkTitle={profileReadable
           ? 'Зайти в каждый аккаунт и проверить, жив ли он и кто ещё в нём сидит'
           : 'Кампания работает: проверка встанет в очередь и выполнится рассылкой в ближайшем круге, обычно за несколько минут. Останавливать кампанию не нужно.'}
@@ -2929,7 +3312,7 @@ function CampaignAccountsTab({
         </div>
       ) : (
         <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
-          <div className="grid grid-cols-[32px_44px_minmax(0,1fr)_126px_120px_360px_138px_60px_64px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+          <div className="grid grid-cols-[32px_44px_minmax(0,1fr)_126px_120px_360px_138px_92px_60px_64px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
             <SelectAllCheckbox total={accounts.length} selectedCount={selectedIds.length} onChange={setAll} />
             <span />
             <span>Аккаунт</span>
@@ -2940,6 +3323,12 @@ function CampaignAccountsTab({
             <span>Прокси</span>
             <span title="Проходят ли через прокси круги рассылки. Если нет — сколько дней уже не проходят.">
               Здоровье прокси
+            </span>
+            {/* Цена нужна не бухгалтерии, а гипотезам: партии покупают у разных
+                поставщиков и по разной цене, а живут они по-разному. Сумма по
+                колонке считается только по заполненным ценам. */}
+            <span title="Сколько заплатили за аккаунт. Нажмите на значение в строке, чтобы поправить.">
+              Цена, руб
             </span>
             <span>Активен</span><span />
           </div>
@@ -2957,13 +3346,14 @@ function CampaignAccountsTab({
               proxy: proxy ?? null,
               campaignRunning: campaignStatus === 'running',
               firstTouchEnabled: firstTouchPerDay > 0,
+              queuePending,
               now: healthNow,
             });
             const proxyMark = describeProxy(proxy ?? null, healthNow);
             return (
               <div
                 key={a.id}
-                className={`grid grid-cols-[32px_44px_minmax(0,1fr)_126px_120px_360px_138px_60px_64px] gap-4 items-center px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
+                className={`grid grid-cols-[32px_44px_minmax(0,1fr)_126px_120px_360px_138px_92px_60px_64px] gap-4 items-center px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
               >
                 <input
                   type="checkbox"
@@ -3043,6 +3433,42 @@ function CampaignAccountsTab({
                           {CHECK_LABEL[a.check_status]?.text ?? a.check_status}
                         </span>
                       )}
+                      {a.check_status === 'frozen' && (
+                        <AppealButton account={a} onDone={() => { void load(); }} />
+                      )}
+                      {a.profile_requested_at && (
+                        <span
+                          title={`Правку профиля заказал ${a.profile_requested_by_name || 'сотрудник портала'}. Рассылка применит её своим соединением, когда дойдёт до аккаунта в круге.`}
+                          className="cursor-help rounded-md bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-700"
+                        >
+                          профиль в очереди
+                        </span>
+                      )}
+                      {a.profile_status === 'failed' && !a.profile_requested_at && (
+                        <span
+                          title={a.profile_detail ?? undefined}
+                          className="cursor-help rounded-md bg-amber-50 px-1.5 py-0.5 text-[10px] text-amber-700"
+                        >
+                          профиль не применился
+                        </span>
+                      )}
+                      {a.appeal_requested_at && !a.appeal_status && (
+                        <span className="rounded-md bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-700">
+                          обжалование в очереди
+                        </span>
+                      )}
+                      {a.appeal_status && !a.appeal_requested_at && (
+                        <span
+                          title={a.appeal_detail ?? undefined}
+                          className={`cursor-help rounded-md px-1.5 py-0.5 text-[10px] ${
+                            a.appeal_status === 'sent'
+                              ? 'bg-emerald-50 text-emerald-700'
+                              : 'bg-amber-50 text-amber-700'
+                          }`}
+                        >
+                          {a.appeal_status === 'sent' ? 'обжаловано' : 'обжалование не ушло'}
+                        </span>
+                      )}
                       {(a.other_sessions?.length ?? 0) > 0 && (
                         <span
                           title={a.other_sessions!
@@ -3080,7 +3506,20 @@ function CampaignAccountsTab({
                   )}
                 </div>
                 <HealthCell mark={sendingMark} />
-                <span className="text-xs text-gray-500 truncate">{a.phone || '—'}</span>
+                {/*
+                  Страна под номером: аккаунты покупают партиями и в списке они
+                  зовутся «s386_tdata» — по имени страну не узнать. А она тут не
+                  украшение: прокси обязаны совпадать с ней по гео, и от неё же
+                  зависит, сколько писем аккаунт отдаст.
+                */}
+                <span className="min-w-0 truncate">
+                  <span className="block truncate text-xs text-gray-500">{a.phone || '—'}</span>
+                  {(a.phone || a.country_code) && (
+                    <span className="block truncate text-[10px] text-gray-400">
+                      {accountCountryLabel(a.phone, a.country_code)}
+                    </span>
+                  )}
+                </span>
                 {editingProxyFor === a.id ? (
                   /* Свой список вместо <select>: рядом с каждым адресом стоит
                      его состояние, иначе сорок одинаковых строк «тот же хост,
@@ -3110,6 +3549,32 @@ function CampaignAccountsTab({
                   </button>
                 )}
                 <HealthCell mark={proxyMark} />
+                {editingPriceFor === a.id ? (
+                  <input
+                    type="number"
+                    min={0}
+                    step="1"
+                    autoFocus
+                    value={priceDraft}
+                    onChange={(e) => setPriceDraft(e.target.value)}
+                    onBlur={() => { void savePrice(a.id, priceDraft); }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') { void savePrice(a.id, priceDraft); }
+                      if (e.key === 'Escape') setEditingPriceFor(null);
+                    }}
+                    aria-label={`Цена аккаунта ${a.session_name}`}
+                    className="w-full rounded-lg border border-indigo-300 bg-white px-2 py-1 text-xs text-gray-800 outline-none"
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => { setEditingPriceFor(a.id); setPriceDraft(a.price === null || a.price === undefined ? '' : String(a.price)); }}
+                    title={a.price === null || a.price === undefined ? 'Цена не указана — нажмите, чтобы вписать' : 'Нажмите, чтобы поправить цену'}
+                    className={`w-full rounded-lg px-2 py-1 text-left text-xs tabular-nums transition hover:bg-gray-100 cursor-pointer ${a.price === null || a.price === undefined ? 'text-gray-300' : 'text-gray-700'}`}
+                  >
+                    {a.price === null || a.price === undefined ? '—' : `${Math.round(Number(a.price)).toLocaleString('ru-RU')} ₽`}
+                  </button>
+                )}
                 <button type="button" onClick={() => { void toggleActive(a.id, a.is_active); }}
                   className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition cursor-pointer w-fit ${a.is_active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
                   {a.is_active ? 'Да' : 'Нет'}
@@ -3179,6 +3644,72 @@ function AccountProfileModal({
   const [firstName, setFirstName] = useState(account.first_name ?? '');
   const [lastName, setLastName] = useState(account.last_name ?? '');
   const [bio, setBio] = useState(account.bio ?? '');
+  /**
+   * Автозаполнение: имя, фамилия, свободный ник и описание по компании.
+   *
+   * Профили заполняли руками по одному — на партии в двадцать аккаунтов это час
+   * одинаковой работы, и у половины профиль так и оставался пустым. Пустой
+   * профиль первое, на что смотрит получатель холодного письма.
+   *
+   * Кнопки только подставляют в поля. Записывает в Telegram по-прежнему
+   * «Сохранить» — иначе одно нажатие переписывало бы уже настроенный аккаунт.
+   */
+  const [fillBusy, setFillBusy] = useState<null | 'all' | 'name' | 'check'>(null);
+  const [fillNote, setFillNote] = useState<string | null>(null);
+
+  const callFill = async (mode: 'all' | 'name' | 'check', payload: Record<string, unknown>) => {
+    setFillBusy(mode);
+    setFillNote(null);
+    try {
+      const token = await getAccessToken();
+      const res = await fetch(`${API_BASE}/accounts/${account.id}/profile/autofill`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const body = (await res.json().catch(() => null)) as
+        { error?: string; first_name?: string; last_name?: string; username?: string | null;
+          bio?: string; available?: boolean | null; checked?: number; note?: string } | null;
+      if (!res.ok) {
+        setFillNote(body?.error ?? `Не получилось (HTTP ${res.status})`);
+        return null;
+      }
+      return body;
+    } catch (e) {
+      setFillNote(e instanceof Error ? e.message : 'Не получилось');
+      return null;
+    } finally {
+      setFillBusy(null);
+    }
+  };
+
+  const autofillAll = async () => {
+    const data = await callFill('all', {});
+    if (!data) return;
+    if (data.first_name) setFirstName(data.first_name);
+    if (data.last_name) setLastName(data.last_name);
+    if (data.bio) setBio(data.bio);
+    if (data.username) {
+      setUsername(data.username);
+      setFillNote(
+        data.note
+          ?? `Готово. Ник свободен — проверено в Telegram (вариантов перебрано: ${data.checked ?? 1}). Осталось нажать «Применить».`,
+      );
+    } else {
+      setFillNote('Имя и описание подставил, а свободный ник не нашёлся — нажмите «Другой ник».');
+    }
+  };
+
+  const regenerateUsername = async () => {
+    const data = await callFill('check', { first_name: firstName, last_name: lastName });
+    if (!data) return;
+    if (data.username) {
+      setUsername(data.username);
+      setFillNote(data.note ?? 'Ник свободен — проверено в Telegram.');
+    } else {
+      setFillNote('Свободный ник не нашёлся. Попробуйте ещё раз или смените имя.');
+    }
+  };
   const [username, setUsername] = useState(account.tg_username ?? '');
   // Превью держим рядом с файлом: ссылку на blob создаём в момент выбора, а не
   // эффектом на каждый рендер.
@@ -3247,18 +3778,42 @@ function AccountProfileModal({
         body: form,
       });
       const body = (await res.json().catch(() => null)) as
-        { error?: string; avatar_error?: string } | null;
+        { error?: string; avatar_error?: string; queued?: boolean; message?: string; rest_until?: string } | null;
       if (!res.ok) {
         setError(body?.error ?? `Ошибка ${res.status}`);
         return;
       }
       onSaved();
-      // Профиль в Telegram уже изменён, поэтому не откатываем и не считаем это
-      // ошибкой — но карточку не закрываем, иначе предупреждение никто не увидит.
-      if (body?.avatar_error) {
-        setAvatarWarning(body.avatar_error);
+      // Кампания работает — профиль применит круг. Карточку не закрываем:
+      // иначе оператор решит, что всё уже в Telegram, и удивится, не найдя
+      // там изменений ближайший час.
+      if (body?.queued) {
+        setFillNote(body.message ?? 'Профиль поставлен в очередь — рассылка применит его в ближайшем круге.');
         return;
       }
+      // Профиль в Telegram уже изменён, поэтому не откатываем и не считаем это
+      // ошибкой — но карточку не закрываем, иначе предупреждение никто не увидит.
+      if (body?.avatar_error) setAvatarWarning(body.avatar_error);
+      /**
+       * Отлёжка после смены имени или аватарки — говорим сразу, а не плашкой в
+       * списке постфактум.
+       *
+       * 09.09.2026 свежая партия после настройки простояла молча, и первым
+       * объяснением стало «наверное, прогрев»: срок отлёжки виден только под
+       * курсором в колонке «Рассылка», а туда никто не наводит, пока не начнёт
+       * искать поломку.
+       */
+      if (body?.rest_until) {
+        const until = new Date(body.rest_until).toLocaleString('ru-RU', {
+          day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+        });
+        setFillNote(
+          `Профиль применён. До ${until} аккаунт не пойдёт в боевую рассылку: Telegram настороженно `
+          + 'смотрит на переименованный аккаунт, который сразу пишет незнакомым. Прогрев между своими '
+          + 'в это время разрешён.',
+        );
+      }
+      if (body?.avatar_error || body?.rest_until) return;
       onClose();
     } finally {
       setSaving(false);
@@ -3358,6 +3913,44 @@ function AccountProfileModal({
               <RefreshCw className={`h-3 w-3 ${syncing ? 'animate-spin' : ''}`} />
               Обновить
             </button>
+          </div>
+
+          {/* Автозаполнение над всеми полями, которые оно меняет. */}
+          <div className="flex flex-wrap items-center gap-2 rounded-lg bg-indigo-50 px-3 py-2">
+            <button
+              type="button"
+              disabled={fillBusy !== null}
+              onClick={() => void autofillAll()}
+              className="cursor-pointer rounded-lg bg-indigo-600 px-3 py-1.5 text-[11px] font-medium text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {fillBusy === 'all' ? 'Подбираю…' : 'Автозаполнение'}
+            </button>
+            <button
+              type="button"
+              disabled={fillBusy !== null}
+              onClick={() => {
+                const identity = pickIdentity();
+                setFirstName(identity.firstName);
+                setLastName(identity.lastName);
+                setFillNote('Имя и фамилия заменены, ник остался прежним.');
+              }}
+              title="Другая пара имя-фамилия. Ник не трогаем — он уже проверен."
+              className="cursor-pointer rounded-lg border border-indigo-200 bg-white px-3 py-1.5 text-[11px] font-medium text-indigo-700 transition hover:bg-indigo-100 disabled:opacity-50"
+            >
+              Другое имя
+            </button>
+            <button
+              type="button"
+              disabled={fillBusy !== null || !firstName.trim()}
+              onClick={() => void regenerateUsername()}
+              title="Подобрать другой свободный ник под текущее имя"
+              className="cursor-pointer rounded-lg border border-indigo-200 bg-white px-3 py-1.5 text-[11px] font-medium text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {fillBusy === 'check' ? 'Проверяю…' : 'Другой ник'}
+            </button>
+            <span className="w-full text-[10px] leading-tight text-indigo-900">
+              {fillNote ?? 'Имя и фамилия — русские, ник собирается из них латиницей и проверяется в Telegram на занятость. Описание — по компании кампании.'}
+            </span>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -3653,6 +4246,12 @@ interface OutreachBase {
   source_chats?: string;
   /** Кампания-владелец. null — база осталась без владельца от старой модели. */
   campaign_id: string | null;
+  /**
+   * Аккаунты, которым разрешено рассылать эту базу. Пусто/null — все активные
+   * аккаунты кампании (поведение до фичи). Действует только на первые касания:
+   * диалоги, уже открытые другим аккаунтом, остаются за ним.
+   */
+  sending_account_ids?: string[] | null;
   counts: { total: number; pending: number; sent: number; replied: number; failed: number; skipped: number };
 }
 
@@ -3668,7 +4267,15 @@ interface OutreachBase {
  * Галочка теперь означает не «чья база», а «участвует в рассылке» — выключатель,
  * которым базу ставят на паузу, не удаляя.
  */
-function CampaignBasesTab({ campaignId }: { campaignId: string }) {
+function CampaignBasesTab({
+  campaignId,
+  campaignStatus,
+  firstTouchPerDay,
+}: {
+  campaignId: string;
+  campaignStatus: string;
+  firstTouchPerDay: number;
+}) {
   const [bases, setBases] = useState<OutreachBase[]>([]);
   /**
    * Базы без кампании — наследство старой модели: кнопка «Создать базу» не
@@ -3689,11 +4296,31 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
   /** id базы, пока её файл собирается на сервере. */
   const [exporting, setExporting] = useState<string | null>(null);
 
+  /**
+   * Аккаунты кампании и их состояние — для выбора рассыльщиков базы.
+   *
+   * Те же три запроса, что грузит вкладка «Аккаунты»; без статусов выбор
+   * превращается в угадывание (см. комментарий у AccountPicker).
+   */
+  const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
+  const [proxies, setProxies] = useState<OutreachProxy[]>([]);
+  const [sendingStats, setSendingStats] = useState<Record<string, AccountSendingStat>>({});
+  const [queuePending, setQueuePending] = useState<number | null>(null);
+  /** База, у которой сейчас правят список рассыльщиков. */
+  const [editingSendersFor, setEditingSendersFor] = useState<string | null>(null);
+  /** Открытая база в окне просмотра контактов. */
+  const [viewingBase, setViewingBase] = useState<{ id: string; name: string } | null>(null);
+  const [sendersDraft, setSendersDraft] = useState<Set<string>>(new Set());
+  const [savingSenders, setSavingSenders] = useState(false);
+
   const load = useCallback(async () => {
     setLoading(true);
-    const [basesRes, linkRes] = await Promise.all([
+    const [basesRes, linkRes, accRes, proxRes, sendRes] = await Promise.all([
       authFetch(`${API_BASE}/bases?campaign_id=${campaignId}`),
       authFetch(`${API_BASE}/campaigns/${campaignId}/bases`),
+      authFetch(`${API_BASE}/accounts?campaign_id=${campaignId}`),
+      authFetch(`${API_BASE}/proxies?campaign_id=${campaignId}`),
+      authFetch(`${API_BASE}/campaigns/${campaignId}/accounts/sending`),
     ]);
     if (basesRes.ok) {
       const d = (await basesRes.json()) as { items: OutreachBase[]; orphans?: OutreachBase[] };
@@ -3704,10 +4331,44 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
       const d = (await linkRes.json()) as { items: Array<{ base_id: string }> };
       setLinked(new Set(d.items.map((i) => i.base_id)));
     }
+    if (accRes.ok) {
+      const d = await accRes.json() as { items: OutreachAccount[] };
+      setAccounts(d.items);
+    }
+    if (proxRes.ok) {
+      const d = await proxRes.json() as { items: OutreachProxy[] };
+      setProxies(d.items);
+    }
+    if (sendRes.ok) {
+      const d = await sendRes.json() as { stats: Record<string, AccountSendingStat>; pending?: number };
+      setSendingStats(d.stats ?? {});
+      setQueuePending(typeof d.pending === 'number' ? d.pending : null);
+    }
     setLoading(false);
   }, [campaignId]);
 
   useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
+
+  /**
+   * Статусы аккаунтов считаем от момента загрузки, а не от ререндера:
+   * «на паузе» не должно мигать из-за того, что React перерисовал панель.
+   */
+  const [marksNow] = useState(() => Date.now());
+  const senderMarks = useMemo(() => {
+    const out: Record<string, HealthMark> = {};
+    for (const a of accounts) {
+      out[a.id] = describeSending({
+        account: a,
+        stat: sendingStats[a.id],
+        proxy: proxies.find((p) => p.id === a.proxy_id) ?? null,
+        campaignRunning: campaignStatus === 'running',
+        firstTouchEnabled: firstTouchPerDay > 0,
+        queuePending,
+        now: marksNow,
+      });
+    }
+    return out;
+  }, [accounts, sendingStats, proxies, campaignStatus, firstTouchPerDay, queuePending, marksNow]);
 
   const createBase = async () => {
     if (!newName.trim()) return;
@@ -3791,6 +4452,34 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
       setBases((cur) => cur.map((b) => (b.id === baseId ? { ...b, source_chats: chatsDraft.trim() } : b)));
       setEditingChatsFor(null);
     } finally { setSavingChats(false); }
+  };
+
+  /**
+   * Сохранить список рассыльщиков базы.
+   *
+   * Пустой список — не «никто», а «все аккаунты кампании»: это и поведение
+   * баз, заведённых до фичи, и способ вернуть базу к общему пулу одним
+   * движением. Поэтому галочку «снять всё» не запрещаем — наоборот, ей
+   * возвращают базу из персонального режима в общий.
+   */
+  const saveSendingAccounts = async (baseId: string) => {
+    setSavingSenders(true); setError(null); setNotice(null);
+    try {
+      const res = await authFetch(`${API_BASE}/bases/${baseId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ sending_account_ids: [...sendersDraft] }),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        setError(d?.error ?? `Не удалось сохранить список аккаунтов (${res.status})`);
+        return;
+      }
+      const saved = (await res.json()) as { sending_account_ids?: string[] | null };
+      setBases((cur) => cur.map((b) => (b.id === baseId
+        ? { ...b, sending_account_ids: saved.sending_account_ids ?? [] }
+        : b)));
+      setEditingSendersFor(null);
+    } finally { setSavingSenders(false); }
   };
 
   /**
@@ -3911,7 +4600,7 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
       });
       const d = (await res.json().catch(() => null)) as {
         error?: string;
-        stats?: { total: number; accepted: number; noUsername: number; noMessage: number; duplicates: number };
+        stats?: { total: number; accepted: number; noUsername: number; noMessage: number; duplicates: number; spintaxVariants?: number };
       } | null;
       if (!res.ok) {
         setError(d?.error ?? `Ошибка загрузки (${res.status})`);
@@ -3920,7 +4609,12 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
       const s = d?.stats;
       if (s) {
         setNotice(
-          `Загружено ${s.accepted} из ${s.total}. Без юзернейма — ${s.noUsername}, без текста — ${s.noMessage}, дублей — ${s.duplicates}.`,
+          `Загружено ${s.accepted} из ${s.total}. Без юзернейма — ${s.noUsername}, без текста — ${s.noMessage}, дублей — ${s.duplicates}.`
+          + (s.accepted > 0 && s.spintaxVariants !== undefined
+            ? s.spintaxVariants > 1
+              ? ` Вариантов текста: ${s.spintaxVariants}.`
+              : ' Вариантов текста: 1 — все получат дословно одинаковое сообщение. Добавьте синонимы в фигурных скобках.'
+            : ''),
         );
       }
       void load();
@@ -3964,6 +4658,8 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
           <Database className="mx-auto h-8 w-8 text-gray-300 mb-2" />
           <p className="text-xs text-gray-400">
             Баз пока нет. Создайте базу и загрузите файл: юзернейм в первой колонке, текст сообщения во второй.
+            В тексте можно писать варианты в фигурных скобках — {'{'}Здравствуйте|Добрый день|Приветствую{'}'} —
+            портал выберет один при отправке, и соседние получатели увидят разные формулировки.
           </p>
         </div>
       ) : (
@@ -3971,7 +4667,7 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
           {/* «Отложено» (status=failed) раньше не показывали вовсе: контакты
               копились в невидимой колонке, и база, вставшая на пороге длины,
               выглядела просто пустеющей. */}
-          <div className="grid grid-cols-[32px_1fr_repeat(5,80px)_180px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+          <div className="grid grid-cols-[32px_1fr_repeat(5,80px)_215px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
             <span />
             <span>База</span><span>Всего</span><span>Ждут</span><span>Отправлено</span><span>Пропущено</span><span>Отложено</span><span />
           </div>
@@ -3982,7 +4678,7 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
               .filter(Boolean);
             return (
             <React.Fragment key={b.id}>
-            <div className={`grid grid-cols-[32px_1fr_repeat(5,80px)_180px] gap-4 items-center px-4 py-2.5 ${linked.has(b.id) ? 'bg-indigo-50/60' : ''}`}>
+            <div className={`grid grid-cols-[32px_1fr_repeat(5,80px)_215px] gap-4 items-center px-4 py-2.5 ${linked.has(b.id) ? 'bg-indigo-50/60' : ''}`}>
               <input
                 type="checkbox"
                 checked={linked.has(b.id)}
@@ -4000,12 +4696,34 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
                   type="button"
                   onClick={() => {
                     setEditingChatsFor(editingChatsFor === b.id ? null : b.id);
+                    setEditingSendersFor(null);
                     setChatsDraft(b.source_chats ?? '');
                   }}
                   title="Чаты, из которых собрана эта гипотеза. Идут в отчёт: «Кол-во обработанных чатов» и «Канал/чат»."
-                  className={`mt-0.5 text-[10px] underline decoration-dotted underline-offset-2 transition cursor-pointer ${chats.length ? 'text-gray-400 hover:text-indigo-600' : 'text-amber-600 hover:text-amber-700'}`}
+                  className={`mt-0.5 block text-[10px] underline decoration-dotted underline-offset-2 transition cursor-pointer ${chats.length ? 'text-gray-400 hover:text-indigo-600' : 'text-amber-600 hover:text-amber-700'}`}
                 >
                   {chats.length ? `чатов-источников: ${chats.length}` : 'чаты-источники не указаны — отчёт не посчитает'}
+                </button>
+                {/* Рассыльщики — вторая такая же ссылка: слева от счётчиков её
+                    некуда ставить, а в строке базы оператор видит её ровно в
+                    момент, когда настраивает базу. */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingSendersFor(editingSendersFor === b.id ? null : b.id);
+                    setEditingChatsFor(null);
+                    setSendersDraft(new Set(b.sending_account_ids ?? []));
+                  }}
+                  title="Какие аккаунты берут первые касания из этой базы. Пустой выбор — все аккаунты кампании."
+                  className={`mt-0.5 block text-[10px] underline decoration-dotted underline-offset-2 transition cursor-pointer ${
+                    (b.sending_account_ids?.length ?? 0) > 0
+                      ? 'text-indigo-600 hover:text-indigo-700'
+                      : 'text-gray-400 hover:text-indigo-600'
+                  }`}
+                >
+                  {(b.sending_account_ids?.length ?? 0) > 0
+                    ? `рассылают: ${b.sending_account_ids?.length} из ${accounts.length}`
+                    : 'рассылают: все аккаунты'}
                 </button>
               </div>
               <span className="text-xs text-gray-600">{b.counts.total}</span>
@@ -4022,6 +4740,15 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
                   onChange={(e) => { void uploadContacts(b.id, e); }} />
               </label>
                 {exportButton(b)}
+                {/* Просмотр базы: до него она была чёрным ящиком — видно
+                    только счётчики. Убрать один неверный ник значило выгрузить
+                    файл, поправить и залить обратно, потеряв статусы отправки
+                    по всей базе. */}
+                <button type="button" onClick={() => setViewingBase({ id: b.id, name: b.name })} disabled={busy}
+                  title="Посмотреть контакты базы, поправить или удалить отдельные, очистить базу целиком"
+                  className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-50">
+                  <Eye className="h-3.5 w-3.5" />
+                </button>
                 <button type="button" onClick={() => { void requeueBase(b); }} disabled={busy || b.counts.failed === 0}
                   title="Вернуть отложенные контакты в очередь — например, после того как подняли порог длины первого сообщения"
                   className="p-1 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-400 disabled:hover:bg-transparent">
@@ -4034,6 +4761,34 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
                 </button>
               </div>
             </div>
+            {editingSendersFor === b.id && (
+              <div className="space-y-2 border-t border-gray-100 bg-gray-50 px-4 py-3">
+                <div className="text-[11px] font-medium text-gray-700">
+                  Кто рассылает базу «{b.name}»
+                </div>
+                <p className="text-[10px] text-gray-500">
+                  Отмеченные аккаунты берут первые касания из этой базы по общим настройкам
+                  кампании — лимиты, паузы и тихие часы те же. Пустой выбор — шлют все аккаунты
+                  кампании. Ответы в уже открытых диалогах остаются за тем, кто их начал.
+                </p>
+                <AccountPicker
+                  accounts={accounts}
+                  marks={senderMarks}
+                  selected={sendersDraft}
+                  onChange={setSendersDraft}
+                />
+                <div className="flex items-center gap-2">
+                  <button type="button" disabled={savingSenders} onClick={() => { void saveSendingAccounts(b.id); }}
+                    className="rounded-full bg-indigo-600 px-4 py-1.5 text-[11px] font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-50 cursor-pointer">
+                    {savingSenders ? 'Сохраняю…' : 'Сохранить'}
+                  </button>
+                  <button type="button" onClick={() => setEditingSendersFor(null)}
+                    className="rounded-full border border-gray-200 px-3 py-1.5 text-[11px] text-gray-500 transition hover:bg-gray-100 cursor-pointer">
+                    Отмена
+                  </button>
+                </div>
+              </div>
+            )}
             {editingChatsFor === b.id && (
               <div className="space-y-2 border-t border-gray-100 bg-gray-50 px-4 py-3">
                 <div className="text-[11px] font-medium text-gray-700">
@@ -4116,6 +4871,15 @@ function CampaignBasesTab({ campaignId }: { campaignId: string }) {
           </div>
         </div>
       )}
+
+      {viewingBase && (
+        <BaseContactsModal
+          baseId={viewingBase.id}
+          baseName={viewingBase.name}
+          onClose={() => setViewingBase(null)}
+          onChanged={() => { void load(); }}
+        />
+      )}
     </div>
   );
 }
@@ -4136,6 +4900,16 @@ function formatLatency(ms: number | null): string {
 }
 
 /** Что случилось с самим прокси — словом, по статусу проверки. */
+/** «1 аккаунт», «2 аккаунта», «5 аккаунтов». */
+function accountsWord(n: number): string {
+  const last = n % 10;
+  const teen = n % 100;
+  if (teen >= 11 && teen <= 14) return 'аккаунтов';
+  if (last === 1) return 'аккаунт';
+  if (last >= 2 && last <= 4) return 'аккаунта';
+  return 'аккаунтов';
+}
+
 function proxyVerdictWord(r: ProxyCheckResult): string {
   if (r.proxy_ok) return 'жив';
   if (r.status === 'bad_url') return 'строку не разобрать';
@@ -4183,11 +4957,43 @@ function ProxyVerdict({
   );
 }
 
+/**
+ * Ключ активного списка в UI: либо uuid, либо `null` = «Неопределённые»
+ * (виртуальный список, прокси с proxy_list_id IS NULL). Строковое
+ * представление для ключей в state.
+ */
+type ActiveProxyListKey = string | null;
+
 function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
+  const [lists, setLists] = useState<OutreachProxyList[]>([]);
+  const [activeList, setActiveList] = useState<ActiveProxyListKey>(null);
+  /** null = «Неопределённые»: счётчик рисуем отдельно, чтобы в сайдбаре
+   *  видеть, сколько прокси ещё не разнесено. */
+  const [undefinedCount, setUndefinedCount] = useState<number | null>(null);
+  /** Сколько в каждом именованном списке — нужно для сайдбара. Считается
+   *  одним запросом при загрузке: `select id, count(*)` по прокси. */
+  const [listCounts, setListCounts] = useState<Record<string, number>>({});
+
   const [proxies, setProxies] = useState<OutreachProxy[]>([]);
+  /** Сводка активного списка: работает/всего/средний возраст. null пока не
+   *  подгрузили. */
+  const [stats, setStats] = useState<OutreachProxyListStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [showBulk, setShowBulk] = useState(false);
+  const [showCreateList, setShowCreateList] = useState(false);
+  const [newListName, setNewListName] = useState('');
+  /** Переименование списка: id редактируемого списка и текущее значение. */
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  /** Удаление списка: id и состояние галочки «удалить прокси вместе со
+   *  списком». По умолчанию выключено — это безопасный вариант (прокси
+   *  уезжают в «Неопределённые»), и случайно снести 50 прокси одним
+   *  нажатием нельзя. */
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteProxiesToo, setDeleteProxiesToo] = useState(false);
+  /** Куда перетаскиваем сейчас: открывает модалку выбора списка. */
+  const [moveTarget, setMoveTarget] = useState<{ ids: string[]; fromList: ActiveProxyListKey } | null>(null);
   const [url, setUrl] = useState('');
   const [name, setName] = useState('');
   const [bulkText, setBulkText] = useState('');
@@ -4226,17 +5032,169 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     return () => clearInterval(timer);
   }, [checking]);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    const res = await authFetch(`${API_BASE}/proxies?campaign_id=${campaignId}`);
-    if (res.ok) {
-      const d = await res.json() as { items: OutreachProxy[] };
-      setProxies(d.items);
+  /**
+   * Сайдбар: списки + «Неопределённые». Список прокси одного запроса
+   * хватает: `select count(*) ... group by proxy_list_id` даёт обе цифры
+   * разом — сколько в именованных списках и сколько без списка.
+   */
+  const loadSidebar = useCallback(async () => {
+    const [listsRes, countRes] = await Promise.all([
+      authFetch(`${API_BASE}/proxy-lists?campaign_id=${campaignId}`),
+      authFetch(`${API_BASE}/proxies?campaign_id=${campaignId}`),
+    ]);
+    if (listsRes.ok) {
+      const d = await listsRes.json() as { items: OutreachProxyList[] };
+      setLists(d.items ?? []);
     }
-    setLoading(false);
+    if (countRes.ok) {
+      const d = await countRes.json() as { items: OutreachProxy[] };
+      const counts: Record<string, number> = {};
+      let undefinedN = 0;
+      for (const p of d.items ?? []) {
+        if (p.proxy_list_id == null) {
+          undefinedN++;
+        } else {
+          counts[p.proxy_list_id] = (counts[p.proxy_list_id] ?? 0) + 1;
+        }
+      }
+      setListCounts(counts);
+      setUndefinedCount(undefinedN);
+    }
   }, [campaignId]);
 
-  useEffect(() => { queueMicrotask(() => { void load(); }); }, [load]);
+  /** Прокси активного списка. С сервера сейчас нет фильтра по proxy_list_id,
+   *  поэтому берём все и фильтруем на клиенте — прокси 140 строк, мелочь. */
+  const loadActiveList = useCallback(async () => {
+    setLoading(true);
+    const [proxRes, statsRes] = await Promise.all([
+      authFetch(`${API_BASE}/proxies?campaign_id=${campaignId}`),
+      activeList === null
+        ? authFetch(`${API_BASE}/proxies/undefined/stats?campaign_id=${campaignId}`)
+        : authFetch(`${API_BASE}/proxy-lists/${activeList}/stats`),
+    ]);
+    if (proxRes.ok) {
+      const d = await proxRes.json() as { items: OutreachProxy[] };
+      const filtered = activeList === null
+        ? (d.items ?? []).filter(p => p.proxy_list_id == null)
+        : (d.items ?? []).filter(p => p.proxy_list_id === activeList);
+      setProxies(filtered);
+    } else {
+      setProxies([]);
+    }
+    if (statsRes.ok) {
+      const s = await statsRes.json() as OutreachProxyListStats;
+      setStats(s);
+    } else {
+      setStats(null);
+    }
+    setLoading(false);
+  }, [campaignId, activeList]);
+
+  useEffect(() => { queueMicrotask(() => { void loadSidebar(); }); }, [loadSidebar]);
+  useEffect(() => { queueMicrotask(() => { void loadActiveList(); }); }, [loadActiveList]);
+  // Смена списка сбрасывает выбор — выделенные строки не должны «перепрыгивать»
+  // в другой список: пользователь и не заметит, и bulk-операция сделает не то.
+  useEffect(() => { clear(); }, [activeList, clear]);
+
+  const reloadAll = useCallback(async () => {
+    await Promise.all([loadSidebar(), loadActiveList()]);
+  }, [loadSidebar, loadActiveList]);
+
+  const createList = async () => {
+    const n = newListName.trim();
+    if (!n) return;
+    setSaving(true);
+    setProxyError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/proxy-lists`, {
+        method: 'POST',
+        body: JSON.stringify({ campaign_id: campaignId, name: n }),
+      });
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+        setProxyError(errBody?.error ?? `Ошибка сервера (${res.status})`);
+        return;
+      }
+      const created = await res.json() as OutreachProxyList;
+      setNewListName('');
+      setShowCreateList(false);
+      setActiveList(created.id);
+      void loadSidebar();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /**
+   * Переименовать список. PUT /proxy-lists/[id] с body { name }.
+   * Сохраняем по Enter, отменяем по Escape — стандарт для inline-форм в этом UI.
+   */
+  const submitRename = async () => {
+    if (!renamingId) return;
+    const n = renameValue.trim();
+    if (!n) return;
+    setSaving(true);
+    setProxyError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/proxy-lists/${renamingId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ name: n }),
+      });
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+        setProxyError(errBody?.error ?? `Не удалось переименовать (${res.status})`);
+        return;
+      }
+      setRenamingId(null);
+      setRenameValue('');
+      void loadSidebar();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /**
+   * Удаление списка с двумя ветками:
+   *  - deleteProxiesToo = false: только DELETE /proxy-lists/[id]. Прокси
+   *    уезжают в «Неопределённые» по FK on delete set null.
+   *  - deleteProxiesToo = true: сначала POST /proxies/bulk-by-list (удалит
+   *    все прокси списка с отвязкой аккаунтов), потом DELETE /proxy-lists/[id].
+   *
+   * Двухшагово, а не одним server-RPC, чтобы UI-эффект был прозрачен по
+   * логам: видно отдельно «прокси удалены» и «список удалён». Случай, когда
+   * прокси удалились, а список — нет, обработан ниже: reload вернёт
+   * актуальное состояние, а прокси уже не вернуть (так и задумано).
+   */
+  const submitDelete = async () => {
+    if (!deletingId) return;
+    setSaving(true);
+    setProxyError(null);
+    try {
+      if (deleteProxiesToo) {
+        const res = await authFetch(`${API_BASE}/proxies/bulk-by-list`, {
+          method: 'POST',
+          body: JSON.stringify({ campaign_id: campaignId, list_id: deletingId }),
+        });
+        if (!res.ok) {
+          const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+          setProxyError(errBody?.error ?? `Не удалось удалить прокси (${res.status})`);
+          return;
+        }
+      }
+      const res = await authFetch(`${API_BASE}/proxy-lists/${deletingId}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+        setProxyError(errBody?.error ?? `Не удалось удалить список (${res.status})`);
+        return;
+      }
+      if (activeList === deletingId) setActiveList(null);
+      setDeletingId(null);
+      setDeleteProxiesToo(false);
+      void reloadAll();
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const addProxy = async () => {
     if (!url.trim()) return;
@@ -4245,7 +5203,12 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     try {
       const res = await authFetch(`${API_BASE}/proxies`, {
         method: 'POST',
-        body: JSON.stringify({ campaign_id: campaignId, url: url.trim(), name: name.trim() }),
+        body: JSON.stringify({
+          campaign_id: campaignId,
+          url: url.trim(),
+          name: name.trim(),
+          proxy_list_id: activeList,
+        }),
       });
       if (!res.ok) {
         const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -4253,7 +5216,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         return;
       }
       setUrl(''); setName(''); setShowAdd(false);
-      void load();
+      void reloadAll();
     } finally {
       setSaving(false);
     }
@@ -4268,7 +5231,12 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
       for (let i = 0; i < lines.length; i++) {
         const res = await authFetch(`${API_BASE}/proxies`, {
           method: 'POST',
-          body: JSON.stringify({ campaign_id: campaignId, url: lines[i], name: '' }),
+          body: JSON.stringify({
+            campaign_id: campaignId,
+            url: lines[i],
+            name: '',
+            proxy_list_id: activeList,
+          }),
         });
         if (!res.ok) {
           const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
@@ -4279,7 +5247,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         }
       }
       setBulkText(''); setShowBulk(false);
-      void load();
+      void reloadAll();
     } finally {
       setSaving(false);
     }
@@ -4333,13 +5301,13 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
       method: 'PUT',
       body: JSON.stringify({ is_active: !current }),
     });
-    void load();
+    void reloadAll();
   };
 
   const deleteProxy = async (id: string) => {
     if (!confirm('Удалить прокси? Аккаунты с этим прокси будут отвязаны.')) return;
     await authFetch(`${API_BASE}/proxies/${id}`, { method: 'DELETE' });
-    void load();
+    void reloadAll();
   };
 
   const deleteSelected = async () => {
@@ -4359,215 +5327,578 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
         return;
       }
       clear();
-      void load();
+      void reloadAll();
     } finally {
       setBulkDeleting(false);
     }
   };
 
+  /**
+   * Переместить пачку прокси в выбранный список (или в «Неопределённые»).
+   * Один POST на всю пачку — см. /api/.../proxies/bulk-move.
+   */
+  const executeMove = async (targetList: ActiveProxyListKey) => {
+    if (!moveTarget) return;
+    const ids = moveTarget.ids;
+    setSaving(true);
+    setProxyError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/proxies/bulk-move`, {
+        method: 'POST',
+        body: JSON.stringify({
+          campaign_id: campaignId,
+          ids,
+          list_id: targetList,
+        }),
+      });
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+        setProxyError(errBody?.error ?? `Не удалось переместить (${res.status})`);
+        return;
+      }
+      setMoveTarget(null);
+      clear();
+      void reloadAll();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /** Переместить один прокси прямо из строки — без модалки, чтобы частый
+   *  кейс «не глядя переложить один» не требовал двух кликов. */
+  const moveOne = async (id: string, fromList: ActiveProxyListKey, toList: ActiveProxyListKey) => {
+    setProxyError(null);
+    const res = await authFetch(`${API_BASE}/proxies/${id}/list`, {
+      method: 'PUT',
+      body: JSON.stringify({ list_id: toList }),
+    });
+    if (!res.ok) {
+      const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+      setProxyError(errBody?.error ?? `Не удалось переместить (${res.status})`);
+      return;
+    }
+    void reloadAll();
+  };
+
+  /** Списки для выбора в модалке перемещения. Исключаем тот, в котором сейчас
+   *  лежат выбранные — нет смысла «перенести в этот же список». */
+  const moveOptions = useMemo(() => {
+    const options: Array<{ key: ActiveProxyListKey; label: string; icon: typeof Folder }> = [
+      { key: null, label: 'Неопределённые', icon: Inbox },
+    ];
+    for (const l of lists) {
+      if (l.id !== moveTarget?.fromList) {
+        options.push({ key: l.id, label: l.name, icon: Folder });
+      }
+    }
+    return options;
+  }, [lists, moveTarget]);
+
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <span className="text-sm font-medium text-gray-700">
-          Прокси кампании <span className="text-gray-400 font-normal">({proxies.length})</span>
-        </span>
-        <div className="flex items-center gap-2">
-          <button type="button" onClick={() => { setShowBulk(!showBulk); setShowAdd(false); setProxyError(null); }}
-            className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer">
-            Массовое добавление
-          </button>
-          <button type="button" onClick={() => { setShowAdd(!showAdd); setShowBulk(false); setProxyError(null); }}
-            className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition cursor-pointer">
-            <Plus className="h-3.5 w-3.5" /> Добавить
-          </button>
-        </div>
-      </div>
-
-      {/* Без привязки к showAdd/showBulk: ошибка массового удаления приходит при
-          закрытых формах и иначе была бы не видна вообще. */}
-      {proxyError && (
-        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-          {proxyError}
-        </div>
-      )}
-
-      {showAdd && (
-        <div className="rounded-lg border border-gray-200 p-4 space-y-3 bg-gray-50">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <label className="space-y-1">
-              <span className="text-[11px] font-medium text-gray-500">URL прокси</span>
-              <input value={url} onChange={e => setUrl(e.target.value)} placeholder="http://user:pass@host:port"
-                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
-            </label>
-            <label className="space-y-1">
-              <span className="text-[11px] font-medium text-gray-500">Название (необязательно)</span>
-              <input value={name} onChange={e => setName(e.target.value)} placeholder="Proxy 1"
-                className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
-            </label>
-          </div>
-          <div className="flex gap-2">
-            <button type="button" onClick={() => { void addProxy(); }} disabled={saving || !url.trim()}
-              className="rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Сохранить'}
-            </button>
-            <button type="button" onClick={() => setShowAdd(false)}
-              className="rounded-full border border-gray-200 px-4 py-2 text-xs text-gray-500 hover:bg-gray-100 transition cursor-pointer">Отмена</button>
-          </div>
-        </div>
-      )}
-
-      {showBulk && (
-        <div className="rounded-lg border border-gray-200 p-4 space-y-3 bg-gray-50">
-          <p className="text-xs text-gray-500">Введите по одному URL прокси на строку:</p>
-          <textarea value={bulkText} onChange={e => setBulkText(e.target.value)} rows={5}
-            placeholder={'http://user:pass@host:port\nпо одному URL на строку'}
-            className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y font-mono" />
-          <div className="flex gap-2">
-            <button type="button" onClick={() => { void addBulk(); }} disabled={saving || !bulkText.trim()}
-              className="rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Добавить'}
-            </button>
-            <button type="button" onClick={() => setShowBulk(false)}
-              className="rounded-full border border-gray-200 px-4 py-2 text-xs text-gray-500 hover:bg-gray-100 transition cursor-pointer">Отмена</button>
-          </div>
-        </div>
-      )}
-
-      <BulkActionsBar
-        selectedCount={selectedIds.length}
-        deleting={bulkDeleting}
-        onClear={clear}
-        onDelete={() => { void deleteSelected(); }}
-        checking={checking}
-        canCheck
-        onCheck={() => { void checkSelected(); }}
-        checkLabel={checking
-          ? `Проверяю прокси (${selectedIds.length})… ${checkElapsed} с`
-          : `Проверить прокси (${selectedIds.length})`}
-        checkTitle="Проверить два раза подряд: отвечает ли сам прокси и открывается ли через него туннель до Telegram"
-      />
-
-      {/* Проверка сетевая и небыстрая: сорок прокси — около минуты. Молчащая
-          кнопка со спиннером на минуту читается как «всё зависло». */}
-      {checking && (
-        <div className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-500" />
-          Проверяю прокси: {selectedIds.length}. Идёт {checkElapsed} с — на сорок прокси уходит около
-          минуты, вкладку можно не трогать.
-        </div>
-      )}
-
-      {checkRun && checkRun.rows.length > 0 && (
-        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
-          <div className="flex items-start justify-between gap-3">
-            <span>
-              Проверено прокси: {checkRun.rows.length} в{' '}
-              {new Date(checkRun.checkedAt).toLocaleString('ru-RU', {
-                day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
-              })}
-              . Слева — отвечает ли сам прокси, справа — доходит ли через него Telegram:
-            </span>
-            <button type="button" onClick={() => setCheckRun(null)} className="cursor-pointer text-gray-400 hover:text-gray-600">
-              <X className="h-3.5 w-3.5" />
-            </button>
-          </div>
-          <ul className="mt-2 space-y-1.5">
-            {checkRun.rows.map((r) => (
-              <li key={r.id} className="flex flex-wrap items-center gap-1.5">
-                <span className="font-medium text-gray-800">{r.name || 'без названия'}</span>
-                <ProxyVerdict
-                  label="прокси"
-                  verdict={proxyVerdictWord(r)}
-                  ok={r.proxy_ok}
-                  latencyMs={r.proxy_latency_ms}
-                />
-                <ProxyVerdict
-                  label="Telegram"
-                  verdict={r.telegram_ok ? 'доходит' : r.proxy_ok ? 'не доходит' : 'не проверяли'}
-                  ok={r.telegram_ok}
-                  latencyMs={r.telegram_latency_ms}
-                  skipped={!r.proxy_ok && !r.telegram_ok}
-                />
-                {/* Технический код — для инженера в логах, словами — оператору. */}
-                <span className="text-gray-400">({r.status})</span>
-                {r.reason && <span className="text-gray-500">{r.reason}</span>}
-              </li>
-            ))}
-          </ul>
-          {/* Прокси удалили в другой вкладке, пока оператор выбирал строки. */}
-          {checkRun.missing > 0 && (
-            <div className="mt-2 text-gray-500">
-              Не нашлись в кампании: {checkRun.missing} — список на экране устарел, обновите страницу.
-            </div>
+    <div className="grid grid-cols-1 md:grid-cols-[220px_1fr] gap-4">
+      {/* Сайдбар списков. Виртуальный «Неопределённые» — первым, потому что
+          на старте у всех 140 прокси именно он. Иконка Inbox читается как
+          «всё подряд», не как именованная папка. */}
+      <aside className="space-y-1">
+        <button
+          type="button"
+          onClick={() => setActiveList(null)}
+          className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs transition cursor-pointer ${
+            activeList === null
+              ? 'bg-indigo-50 text-indigo-700 font-semibold'
+              : 'text-gray-700 hover:bg-gray-50'
+          }`}
+        >
+          <Inbox className="h-3.5 w-3.5 shrink-0" />
+          <span className="flex-1 truncate">Неопределённые</span>
+          {undefinedCount != null && (
+            <span className="text-[10px] text-gray-400">{undefinedCount}</span>
           )}
-        </div>
-      )}
+        </button>
 
-      {loading ? (
-        <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
-      ) : proxies.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-gray-200 p-8 text-center">
-          <Network className="mx-auto h-8 w-8 text-gray-300 mb-2" />
-          <p className="text-xs text-gray-400">Нет прокси. Добавьте для этой кампании.</p>
-        </div>
-      ) : (
-        <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
-          <div className="grid grid-cols-[32px_1fr_80px_40px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
-            <SelectAllCheckbox total={proxies.length} selectedCount={selectedIds.length} onChange={setAll} />
-            <span>URL / Название</span><span>Активен</span><span />
-          </div>
-          {proxies.map(p => {
-            const check = checkById.get(p.id);
-            return (
-            <div
-              key={p.id}
-              className={`grid grid-cols-[32px_1fr_80px_40px] gap-4 items-center px-4 py-2.5 ${isSelected(p.id) ? 'bg-indigo-50/60' : ''}`}
-            >
-              <input
-                type="checkbox"
-                checked={isSelected(p.id)}
-                onChange={() => toggle(p.id)}
-                aria-label={`Выбрать ${p.name || p.url}`}
-                className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
-              />
-              <div className="min-w-0">
-                {p.name && <p className="text-xs font-medium text-gray-800">{p.name}</p>}
-                <p className="text-xs text-gray-500 truncate font-mono">{p.url}</p>
-                {/* Итог последней проверки прямо в строке: список не
-                    перечитываем, показываем то, что ответила проверка. */}
-                {check && (
-                  <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px]">
-                    <ProxyVerdict
-                      label="прокси"
-                      verdict={proxyVerdictWord(check)}
-                      ok={check.proxy_ok}
-                      latencyMs={check.proxy_latency_ms}
-                    />
-                    <ProxyVerdict
-                      label="Telegram"
-                      verdict={check.telegram_ok ? 'доходит' : check.proxy_ok ? 'не доходит' : 'не проверяли'}
-                      ok={check.telegram_ok}
-                      latencyMs={check.telegram_latency_ms}
-                      skipped={!check.proxy_ok && !check.telegram_ok}
-                    />
-                  </div>
+        {lists.length > 0 && <div className="my-2 h-px bg-gray-100" />}
+
+        {lists.map(l => {
+          const count = listCounts[l.id] ?? 0;
+          const active = activeList === l.id;
+          const isRenaming = renamingId === l.id;
+          const isDeleting = deletingId === l.id;
+          return (
+            <div key={l.id} className="space-y-1">
+              <div
+                className={`group flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs transition ${
+                  active ? 'bg-indigo-50 text-indigo-700' : 'text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                <Folder className="h-3.5 w-3.5 shrink-0 ml-1" />
+                {isRenaming ? (
+                  /* Inline input вместо названия. Enter — сохранить, Escape — отмена.
+                     Авто-фокус обязателен, иначе придётся ещё раз кликать. */
+                  <input
+                    autoFocus
+                    value={renameValue}
+                    onChange={e => setRenameValue(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') { void submitRename(); }
+                      if (e.key === 'Escape') { setRenamingId(null); setRenameValue(''); }
+                    }}
+                    onBlur={() => { if (renameValue.trim() && renameValue.trim() !== l.name) { void submitRename(); } else { setRenamingId(null); setRenameValue(''); } }}
+                    aria-label={`Переименовать список ${l.name}`}
+                    className="flex-1 min-w-0 rounded border border-indigo-300 bg-white px-1.5 py-0.5 text-xs outline-none focus:border-indigo-500"
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setActiveList(l.id)}
+                    onDoubleClick={() => { setRenamingId(l.id); setRenameValue(l.name); }}
+                    className={`flex-1 min-w-0 text-left truncate cursor-pointer ${active ? 'font-semibold' : ''}`}
+                    title="Клик — открыть. Двойной клик — переименовать."
+                  >
+                    {l.name}
+                  </button>
+                )}
+                <span className="text-[10px] text-gray-400 mr-1">{count}</span>
+                {!isRenaming && !isDeleting && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => { setRenamingId(l.id); setRenameValue(l.name); }}
+                      title="Переименовать"
+                      aria-label={`Переименовать ${l.name}`}
+                      className="p-1 text-gray-300 hover:text-indigo-600 hover:bg-indigo-50 rounded transition cursor-pointer opacity-0 group-hover:opacity-100 focus:opacity-100"
+                    >
+                      <Pencil className="h-3 w-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setDeletingId(l.id); setDeleteProxiesToo(false); }}
+                      title="Удалить список"
+                      aria-label={`Удалить ${l.name}`}
+                      className="p-1 text-gray-300 hover:text-rose-600 hover:bg-rose-50 rounded transition cursor-pointer opacity-0 group-hover:opacity-100 focus:opacity-100"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </>
                 )}
               </div>
-              <button type="button" onClick={() => { void toggleActive(p.id, p.is_active); }}
-                className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition cursor-pointer w-fit ${p.is_active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
-                {p.is_active ? 'Да' : 'Нет'}
+
+              {/* Inline-форма удаления с галочкой. Не confirm(): нужен выбор
+                  между «оставить прокси» и «удалить прокси», и его надо
+                  показать словами — что именно произойдёт в каждом из
+                  вариантов. confirm этого не умеет. */}
+              {isDeleting && (
+                <div className="rounded-lg border border-rose-200 bg-rose-50/50 p-2.5 space-y-2 text-[11px]">
+                  <div className="text-rose-900 font-medium">
+                    Удалить «{l.name}»?
+                  </div>
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={deleteProxiesToo}
+                      onChange={e => setDeleteProxiesToo(e.target.checked)}
+                      className="mt-0.5 h-3.5 w-3.5 cursor-pointer accent-rose-600"
+                    />
+                    <span className="text-rose-900">
+                      Удалить <b>{count}</b> прокси из этого списка полностью
+                    </span>
+                  </label>
+                  <div
+                    className={`rounded border px-2 py-1.5 ${
+                      deleteProxiesToo
+                        ? 'border-rose-300 bg-rose-100 text-rose-900'
+                        : 'border-gray-200 bg-white text-gray-700'
+                    }`}
+                  >
+                    {deleteProxiesToo ? (
+                      <>
+                        Прокси будут <b>безвозвратно удалены</b>. Аккаунты с
+                        этими прокси останутся, но будут отвязаны от прокси.
+                      </>
+                    ) : (
+                      <>
+                        Список удалится, <b>{count} прокси уедут в «Неопределённые»</b>:
+                        они останутся в кампании, прокси не пропадут, и их можно
+                        будет положить в другой список.
+                      </>
+                    )}
+                  </div>
+                  <div className="flex gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => { void submitDelete(); }}
+                      disabled={saving}
+                      className="flex-1 rounded bg-rose-600 px-2 py-1 text-[11px] font-semibold text-white hover:bg-rose-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      {saving ? <Loader2 className="h-3 w-3 animate-spin mx-auto" /> : 'Удалить'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setDeletingId(null); setDeleteProxiesToo(false); }}
+                      className="rounded border border-gray-200 bg-white px-2 py-1 text-[11px] text-gray-500 hover:bg-gray-50 transition cursor-pointer"
+                    >
+                      Отмена
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {showCreateList ? (
+          <div className="rounded-lg border border-gray-200 bg-white p-2 space-y-1.5">
+            <input
+              autoFocus
+              value={newListName}
+              onChange={e => setNewListName(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') { void createList(); }
+                if (e.key === 'Escape') { setShowCreateList(false); setNewListName(''); }
+              }}
+              placeholder="Название списка"
+              className="block w-full rounded border border-gray-200 bg-white px-2 py-1 text-xs outline-none focus:border-indigo-400"
+            />
+            <div className="flex gap-1">
+              <button
+                type="button"
+                onClick={() => { void createList(); }}
+                disabled={saving || !newListName.trim()}
+                className="flex-1 rounded bg-indigo-600 px-2 py-1 text-[10px] font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+              >
+                {saving ? <Loader2 className="h-3 w-3 animate-spin mx-auto" /> : 'Создать'}
               </button>
-              <button type="button" onClick={() => { void deleteProxy(p.id); }}
-                className="p-1.5 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer">
-                <Trash2 className="h-3.5 w-3.5" />
+              <button
+                type="button"
+                onClick={() => { setShowCreateList(false); setNewListName(''); }}
+                className="rounded border border-gray-200 px-2 py-1 text-[10px] text-gray-500 hover:bg-gray-50 transition cursor-pointer"
+              >
+                Отмена
               </button>
             </div>
-            );
-          })}
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setShowCreateList(true)}
+            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs text-indigo-600 hover:bg-indigo-50 transition cursor-pointer"
+          >
+            <FolderPlus className="h-3.5 w-3.5" />
+            Создать список
+          </button>
+        )}
+      </aside>
+
+      <div className="space-y-4 min-w-0">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-gray-700">
+              {activeList === null ? 'Неопределённые' : (lists.find(l => l.id === activeList)?.name ?? 'Список')}
+              <span className="ml-1 text-gray-400 font-normal">({stats?.proxy_count ?? 0})</span>
+            </div>
+            {stats && (
+              <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-gray-500">
+                <span className={stats.active_count > 0 ? 'text-emerald-700' : 'text-gray-400'}>
+                  работает {stats.active_count} из {stats.proxy_count}
+                </span>
+                {stats.dead_count > 0 && (
+                  <span className="text-rose-600">· выключены {stats.dead_count}</span>
+                )}
+                {stats.avg_age_hours != null && (
+                  <span>
+                    · средний возраст {formatHours(stats.avg_age_hours)}
+                  </span>
+                )}
+                {stats.avg_age_hours_at_death != null && (
+                  <span
+                    className="text-gray-400"
+                    title="Средний возраст выключенных прокси в списке. Грубая оценка того, как долго партия жила — точной даты отключения мы не пишем."
+                  >
+                    · до отказа {formatHours(stats.avg_age_hours_at_death)}
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={() => { setShowBulk(!showBulk); setShowAdd(false); setProxyError(null); }}
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer">
+              Массовое добавление
+            </button>
+            <button type="button" onClick={() => { setShowAdd(!showAdd); setShowBulk(false); setProxyError(null); }}
+              className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition cursor-pointer">
+              <Plus className="h-3.5 w-3.5" /> Добавить
+            </button>
+          </div>
         </div>
-      )}
+
+        {/* Без привязки к showAdd/showBulk: ошибка массового удаления приходит при
+            закрытых формах и иначе была бы не видна вообще. */}
+        {proxyError && (
+          <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+            {proxyError}
+          </div>
+        )}
+
+        {showAdd && (
+          <div className="rounded-lg border border-gray-200 p-4 space-y-3 bg-gray-50">
+            <div className="text-[11px] text-gray-500">
+              Новый прокси попадёт в <b>{activeList === null ? '«Неопределённые»' : `«${lists.find(l => l.id === activeList)?.name ?? '—'}»`}</b>.
+              Переложить в другой можно после создания.
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <label className="space-y-1">
+                <span className="text-[11px] font-medium text-gray-500">URL прокси</span>
+                <input value={url} onChange={e => setUrl(e.target.value)} placeholder="http://user:pass@host:port"
+                  className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
+              </label>
+              <label className="space-y-1">
+                <span className="text-[11px] font-medium text-gray-500">Название (необязательно)</span>
+                <input value={name} onChange={e => setName(e.target.value)} placeholder="Proxy 1"
+                  className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400" />
+              </label>
+            </div>
+            <div className="flex gap-2">
+              <button type="button" onClick={() => { void addProxy(); }} disabled={saving || !url.trim()}
+                className="rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+                {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Сохранить'}
+              </button>
+              <button type="button" onClick={() => setShowAdd(false)}
+                className="rounded-full border border-gray-200 px-4 py-2 text-xs text-gray-500 hover:bg-gray-100 transition cursor-pointer">Отмена</button>
+            </div>
+          </div>
+        )}
+
+        {showBulk && (
+          <div className="rounded-lg border border-gray-200 p-4 space-y-3 bg-gray-50">
+            <p className="text-xs text-gray-500">
+              Каждая строка — отдельный прокси. Все уйдут в <b>{activeList === null ? '«Неопределённые»' : `«${lists.find(l => l.id === activeList)?.name ?? '—'}»`}</b>.
+            </p>
+            <textarea value={bulkText} onChange={e => setBulkText(e.target.value)} rows={5}
+              placeholder={'http://user:pass@host:port\nпо одному URL на строку'}
+              className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y font-mono" />
+            <div className="flex gap-2">
+              <button type="button" onClick={() => { void addBulk(); }} disabled={saving || !bulkText.trim()}
+                className="rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+                {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Добавить'}
+              </button>
+              <button type="button" onClick={() => setShowBulk(false)}
+                className="rounded-full border border-gray-200 px-4 py-2 text-xs text-gray-500 hover:bg-gray-100 transition cursor-pointer">Отмена</button>
+            </div>
+          </div>
+        )}
+
+        <BulkActionsBar
+          selectedCount={selectedIds.length}
+          deleting={bulkDeleting}
+          onClear={clear}
+          onDelete={() => { void deleteSelected(); }}
+          checking={checking}
+          canCheck
+          onCheck={() => { void checkSelected(); }}
+          checkLabel={checking
+            ? `Проверяю прокси (${selectedIds.length})… ${checkElapsed} с`
+            : `Проверить прокси (${selectedIds.length})`}
+          checkTitle="Проверить два раза подряд: отвечает ли сам прокси и открывается ли через него туннель до Telegram"
+          extra={selectedIds.length > 0 ? (
+            /* Кнопка перемещения пачки. Модалка — потому что перенести в любой
+               из N списков одной кнопкой нельзя: целевой список должен выбрать
+               оператор. */
+            <button
+              type="button"
+              onClick={() => setMoveTarget({ ids: selectedIds, fromList: activeList })}
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer"
+            >
+              <Move className="h-3.5 w-3.5" />
+              Переместить ({selectedIds.length})
+            </button>
+          ) : null}
+        />
+
+        {/* Модалка выбора списка для перемещения пачки. Не отдельный
+            компонент: используется ровно в одном месте, а вынос только ради
+            выноса усложнил бы. */}
+        {moveTarget && (
+          <div className="rounded-lg border border-gray-200 bg-white p-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-medium text-gray-700">
+                Переместить {moveTarget.ids.length} прокси в:
+              </span>
+              <button type="button" onClick={() => setMoveTarget(null)}
+                aria-label="Закрыть выбор списка"
+                className="p-1 text-gray-400 hover:text-gray-600 transition cursor-pointer">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {moveOptions.length === 0 ? (
+                <span className="text-xs text-gray-400">
+                  Нет других списков — сначала создайте.
+                </span>
+              ) : moveOptions.map(opt => {
+                const Icon = opt.icon;
+                return (
+                  <button
+                    key={opt.key ?? '__undefined__'}
+                    type="button"
+                    onClick={() => { void executeMove(opt.key); }}
+                    disabled={saving}
+                    className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                  >
+                    <Icon className="h-3.5 w-3.5" />
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Проверка сетевая и небыстрая: сорок прокси — около минуты. Молчащая
+            кнопка со спиннером на минуту читается как «всё зависло». */}
+        {checking && (
+          <div className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-500" />
+            Проверяю прокси: {selectedIds.length}. Идёт {checkElapsed} с — на сорок прокси уходит около
+            минуты, вкладку можно не трогать.
+          </div>
+        )}
+
+        {checkRun && checkRun.rows.length > 0 && (
+          <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+            <div className="flex items-start justify-between gap-3">
+              <span>
+                Проверено прокси: {checkRun.rows.length} в{' '}
+                {new Date(checkRun.checkedAt).toLocaleString('ru-RU', {
+                  day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+                })}
+                . Слева — отвечает ли сам прокси, справа — доходит ли через него Telegram:
+              </span>
+              <button type="button" onClick={() => setCheckRun(null)} className="cursor-pointer text-gray-400 hover:text-gray-600">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <ul className="mt-2 space-y-1.5">
+              {checkRun.rows.map((r) => (
+                <li key={r.id} className="flex flex-wrap items-center gap-1.5">
+                  <span className="font-medium text-gray-800">{r.name || 'без названия'}</span>
+                  <ProxyVerdict
+                    label="прокси"
+                    verdict={proxyVerdictWord(r)}
+                    ok={r.proxy_ok}
+                    latencyMs={r.proxy_latency_ms}
+                  />
+                  <ProxyVerdict
+                    label="Telegram"
+                    verdict={r.telegram_ok ? 'доходит' : r.proxy_ok ? 'не доходит' : 'не проверяли'}
+                    ok={r.telegram_ok}
+                    latencyMs={r.telegram_latency_ms}
+                    skipped={!r.proxy_ok && !r.telegram_ok}
+                  />
+                  {/* Технический код — для инженера в логах, словами — оператору. */}
+                  <span className="text-gray-400">({r.status})</span>
+                  {r.reason && <span className="text-gray-500">{r.reason}</span>}
+                </li>
+              ))}
+            </ul>
+            {/* Прокси удалили в другой вкладке, пока оператор выбирал строки. */}
+            {checkRun.missing > 0 && (
+              <div className="mt-2 text-gray-500">
+                Не нашлись в кампании: {checkRun.missing} — список на экране устарел, обновите страницу.
+              </div>
+            )}
+          </div>
+        )}
+
+        {loading ? (
+          <div className="flex items-center gap-2 py-8 text-sm text-gray-400"><Loader2 className="h-4 w-4 animate-spin" />Загрузка...</div>
+        ) : proxies.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-gray-200 p-8 text-center">
+            <Network className="mx-auto h-8 w-8 text-gray-300 mb-2" />
+            <p className="text-xs text-gray-400">
+              {activeList === null
+                ? 'В «Неопределённых» пусто. Все прокси разнесены по спискам — или ещё не добавлены.'
+                : 'В этом списке пусто. Добавьте прокси или перенесите из «Неопределённых».'}
+            </p>
+          </div>
+        ) : (
+          <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
+            <div className="grid grid-cols-[32px_1fr_80px_180px_40px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+              <SelectAllCheckbox total={proxies.length} selectedCount={selectedIds.length} onChange={setAll} />
+              <span>URL / Название</span><span>Активен</span><span>Список</span><span />
+            </div>
+            {proxies.map(p => {
+              const check = checkById.get(p.id);
+              return (
+              <div
+                key={p.id}
+                className={`grid grid-cols-[32px_1fr_80px_180px_40px] gap-4 items-center px-4 py-2.5 ${isSelected(p.id) ? 'bg-indigo-50/60' : ''}`}
+              >
+                <input
+                  type="checkbox"
+                  checked={isSelected(p.id)}
+                  onChange={() => toggle(p.id)}
+                  aria-label={`Выбрать ${p.name || p.url}`}
+                  className="h-3.5 w-3.5 cursor-pointer accent-indigo-600"
+                />
+                <div className="min-w-0">
+                  {p.name && <p className="text-xs font-medium text-gray-800">{p.name}</p>}
+                  <p className="text-xs text-gray-500 truncate font-mono">{p.url}</p>
+                  {/* Итог последней проверки прямо в строке: список не
+                      перечитываем, показываем то, что ответила проверка. */}
+                  {check && (
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px]">
+                      <ProxyVerdict
+                        label="прокси"
+                        verdict={proxyVerdictWord(check)}
+                        ok={check.proxy_ok}
+                        latencyMs={check.proxy_latency_ms}
+                      />
+                      <ProxyVerdict
+                        label="Telegram"
+                        verdict={check.telegram_ok ? 'доходит' : check.proxy_ok ? 'не доходит' : 'не проверяли'}
+                        ok={check.telegram_ok}
+                        latencyMs={check.telegram_latency_ms}
+                        skipped={!check.proxy_ok && !check.telegram_ok}
+                      />
+                    </div>
+                  )}
+                </div>
+                <button type="button" onClick={() => { void toggleActive(p.id, p.is_active); }}
+                  className={`rounded-full px-2.5 py-1 text-[10px] font-medium transition cursor-pointer w-fit ${p.is_active ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
+                  {p.is_active ? 'Да' : 'Нет'}
+                </button>
+                <select
+                  value={p.proxy_list_id ?? ''}
+                  onChange={e => { void moveOne(p.id, p.proxy_list_id ?? null, e.target.value || null); }}
+                  aria-label={`Список для ${p.name || p.url}`}
+                  className="block w-full rounded-lg border border-gray-200 bg-white px-2 py-1 text-[11px] outline-none focus:border-indigo-400 cursor-pointer"
+                >
+                  <option value="">Неопределённые</option>
+                  {lists.map(l => (
+                    <option key={l.id} value={l.id}>{l.name}</option>
+                  ))}
+                </select>
+                <button type="button" onClick={() => { void deleteProxy(p.id); }}
+                  className="p-1.5 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer">
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
+}
+
+/** Часы → «2.5 ч» / «3 д 4 ч» — для шапки статистики списка. */
+function formatHours(h: number): string {
+  if (h < 1) return `${Math.round(h * 60)} мин`;
+  if (h < 48) return `${h.toFixed(1)} ч`;
+  const days = Math.floor(h / 24);
+  const rem = Math.round(h - days * 24);
+  return rem > 0 ? `${days} д ${rem} ч` : `${days} д`;
 }
 
 /* =================== CAMPAIGN REPORT TAB =================== */
@@ -4855,7 +6186,6 @@ const TABS = [
   { id: 'proxies', label: 'Прокси', icon: Network },
   { id: 'logs', label: 'Логи', icon: ScrollText },
   { id: 'dialogs', label: 'Диалоги', icon: MessageCircle },
-  { id: 'processed', label: 'Обработанные', icon: UserCheck },
   { id: 'report', label: 'Отчёт', icon: FileSpreadsheet },
 ] as const;
 
@@ -4867,13 +6197,9 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
   const [tab, setTab] = useState<string>('dashboard');
   const [actionLoading, setActionLoading] = useState(false);
   const [stopping, setStopping] = useState(false);
+  /** Раскрыто ли пояснение к восклицательному знаку у статуса. */
+  const [warmingHint, setWarmingHint] = useState(false);
   const stoppingRef = useRef(false);
-  const [refetchJobId, setRefetchJobId] = useState<string | null>(null);
-  const [refetchProgress, setRefetchProgress] = useState<{
-    total: number; done: number; fetched: number; errors: number;
-    last_username: string | null; last_messages: number;
-    status: string;
-  } | null>(null);
 
   useEffect(() => {
     if (!stopping) return;
@@ -4892,56 +6218,15 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
     return () => clearInterval(poll);
   }, [stopping, campaign.id, onUpdate]);
 
-  useEffect(() => {
-    if (!refetchJobId) return;
-    const poll = setInterval(async () => {
-      try {
-        const res = await authFetch(`${API_BASE}/jobs/${refetchJobId}`);
-        if (!res.ok) return;
-        const job = await res.json() as {
-          status: string;
-          progress?: { total: number; done: number; fetched: number; errors: number; last_username: string | null; last_messages: number } | null;
-        };
-        setRefetchProgress({
-          total: job.progress?.total ?? 0,
-          done: job.progress?.done ?? 0,
-          fetched: job.progress?.fetched ?? 0,
-          errors: job.progress?.errors ?? 0,
-          last_username: job.progress?.last_username ?? null,
-          last_messages: job.progress?.last_messages ?? 0,
-          status: job.status,
-        });
-        if (job.status === 'completed' || job.status === 'failed') {
-          setTimeout(() => {
-            setRefetchJobId(null);
-            setRefetchProgress(null);
-            onUpdate();
-          }, 3000);
-        }
-      } catch { /* ignore */ }
-    }, 2000);
-    return () => clearInterval(poll);
-  }, [refetchJobId, onUpdate]);
-
-  const doAction = async (action: 'start' | 'stop' | 'refetch') => {
+  // Кнопка Refetch убрана с карточки кампании: ручную перезагрузку пустых
+  // диалогов оператор не использует. Ручка /campaigns/:id/refetch на бэкенде
+  // осталась — её дёргают точечно, минуя интерфейс.
+  const doAction = async (action: 'start' | 'stop') => {
     setActionLoading(true);
-    const res = await authFetch(`${API_BASE}/campaigns/${campaign.id}/${action}`, { method: 'POST' });
+    await authFetch(`${API_BASE}/campaigns/${campaign.id}/${action}`, { method: 'POST' });
     if (action === 'stop') {
       setStopping(true);
       stoppingRef.current = true;
-    }
-    if (action === 'refetch') {
-      try {
-        const body = await res.json() as { id?: string; empty_count?: number; message?: string; error?: string };
-        if (body.error) {
-          alert(`Ошибка: ${body.error}`);
-        } else if (body.empty_count === 0) {
-          alert('Нет диалогов с пустыми сообщениями');
-        } else if (body.id) {
-          setRefetchJobId(body.id);
-          setRefetchProgress({ total: body.empty_count ?? 0, done: 0, fetched: 0, errors: 0, last_username: null, last_messages: 0, status: 'pending' });
-        }
-      } catch { /* ignore parse errors */ }
     }
     setActionLoading(false);
     onUpdate();
@@ -4957,21 +6242,43 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
 
   const displayStatus = stopping ? 'stopping' : campaign.status;
   const st = STATUS_LABELS[displayStatus] ?? STATUS_LABELS.stopped;
+  const warmingCount = campaign.warming_accounts ?? 0;
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">
           <h2 className="text-lg font-bold text-gray-900">{campaign.name}</h2>
-          <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-semibold ${st.cls}`}>{st.label}</span>
+          <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-semibold ${st.cls}`}>
+            {st.label}
+            {/*
+              Восклицательный знак рядом со статусом, а не отдельной плашкой:
+              «Запущена» теперь не полный ответ — часть аккаунтов может греться
+              параллельно, и оператор должен видеть это там же, где смотрит
+              статус, а не на вкладке «Аккаунты».
+            */}
+            {warmingCount > 0 && displayStatus === 'running' && (
+              <button
+                type="button"
+                onClick={() => setWarmingHint((v) => !v)}
+                title="Параллельно идёт прогрев"
+                className="ml-1 cursor-pointer align-middle text-[11px] font-bold text-amber-600 hover:text-amber-700"
+              >
+                !
+              </button>
+            )}
+          </span>
+          {warmingHint && warmingCount > 0 && (
+            <span className="rounded-lg bg-amber-50 px-2 py-1 text-[10px] leading-tight text-amber-800">
+              Параллельно греется {warmingCount} {accountsWord(warmingCount)} — в боевую рассылку
+              их не берут. Как только срок прогрева выйдет, круг подхватит их сам.
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {campaign.status !== 'running' && !stopping ? (
             <button type="button" onClick={() => void doAction('start')}
-              disabled={actionLoading || campaign.status === 'warming'}
-              title={campaign.status === 'warming'
-                ? 'Идёт прогрев аккаунтов — остановите его на вкладке «Прогрев»'
-                : undefined}
+              disabled={actionLoading}
               className="inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-5 py-2.5 text-xs font-semibold text-white hover:bg-emerald-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
               {actionLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
               Запустить
@@ -4989,59 +6296,12 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
               Остановить
             </button>
           )}
-          {campaign.status !== 'running' && !stopping && (
-            <button type="button" onClick={() => void doAction('refetch')} disabled={actionLoading || !!refetchJobId}
-              title="Перезагрузить пустые диалоги из Telegram"
-              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2.5 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 hover:shadow-sm transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-              {actionLoading || refetchJobId ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-              Refetch
-            </button>
-          )}
           <button type="button" onClick={() => onDelete(campaign.id)}
             className="rounded-full border border-gray-200 p-2.5 text-gray-400 hover:text-rose-600 hover:border-rose-300 hover:bg-rose-50 transition cursor-pointer">
             <Trash2 className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
-
-      {refetchProgress && (
-        <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-4 space-y-2">
-          <div className="flex items-center justify-between text-xs font-medium text-indigo-800">
-            <span className="flex items-center gap-2">
-              {refetchProgress.status === 'completed' ? (
-                <span className="text-emerald-600">✓ Refetch завершён</span>
-              ) : refetchProgress.status === 'failed' ? (
-                <span className="text-rose-600">✗ Refetch ошибка</span>
-              ) : (
-                <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Загрузка диалогов...</>
-              )}
-            </span>
-            <span>{refetchProgress.done} / {refetchProgress.total}</span>
-          </div>
-          <div className="h-2 rounded-full bg-indigo-100 overflow-hidden">
-            <div
-              className={`h-full rounded-full transition-all duration-500 ${
-                refetchProgress.status === 'completed' ? 'bg-emerald-500' :
-                refetchProgress.status === 'failed' ? 'bg-rose-500' : 'bg-indigo-500'
-              }`}
-              style={{ width: `${refetchProgress.total > 0 ? (refetchProgress.done / refetchProgress.total) * 100 : 0}%` }}
-            />
-          </div>
-          <div className="flex items-center justify-between text-[11px] text-indigo-600">
-            <span>
-              {refetchProgress.last_username && refetchProgress.last_messages > 0
-                ? `@${refetchProgress.last_username} — ${refetchProgress.last_messages} сообщ.`
-                : refetchProgress.last_username
-                  ? `@${refetchProgress.last_username} — пусто`
-                  : 'Ожидание...'}
-            </span>
-            <span>
-              {refetchProgress.fetched > 0 && <span className="text-emerald-600 mr-2">+{refetchProgress.fetched} загружено</span>}
-              {refetchProgress.errors > 0 && <span className="text-rose-500">{refetchProgress.errors} ошибок</span>}
-            </span>
-          </div>
-        </div>
-      )}
 
       <div className="flex gap-1 border-b border-gray-200">
         {TABS.map(t => {
@@ -5066,14 +6326,19 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
             firstTouchPerDay={campaign.telegram_settings?.first_touch_per_account_per_day ?? 0}
           />
         )}
-        {tab === 'bases' && <CampaignBasesTab campaignId={campaign.id} />}
+        {tab === 'bases' && (
+          <CampaignBasesTab
+            campaignId={campaign.id}
+            campaignStatus={campaign.status}
+            firstTouchPerDay={campaign.telegram_settings?.first_touch_per_account_per_day ?? 0}
+          />
+        )}
         {tab === 'proxies' && <CampaignProxiesTab campaignId={campaign.id} />}
         {tab === 'warmup' && (
           <WarmupTab campaignId={campaign.id} campaignStatus={campaign.status} />
         )}
         {tab === 'logs' && <LogsTab campaignId={campaign.id} />}
         {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} />}
-        {tab === 'processed' && <ProcessedTab campaignId={campaign.id} />}
         {tab === 'report' && <CampaignReportTab campaignId={campaign.id} />}
       </div>
     </div>
@@ -5081,22 +6346,25 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
 }
 
 /* =================== FORM HELPERS =================== */
-function Field({ label, value, onChange, placeholder, type }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string; type?: string }) {
+/* half — поле на половину ширины: у «Периодов сна» внутри строка вида
+   «00:00-08:00», растянутая на весь экран она читалась как место под длинный
+   список. */
+function Field({ label, value, onChange, placeholder, type, half }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string; type?: string; half?: boolean }) {
   return (
-    <label className="space-y-1">
-      <span className="text-[11px] font-medium text-gray-500">{label}</span>
+    <label className="block space-y-1">
+      <span className="block text-[11px] font-medium text-gray-500">{label}</span>
       <input type={type ?? 'text'} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
-        className="block w-full rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400" />
+        className={`${half ? 'w-full md:w-1/2' : 'w-full'} block rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400`} />
     </label>
   );
 }
 
-function FieldNum({ label, value, onChange }: { label: string; value: number; onChange: (v: number) => void }) {
+function FieldNum({ label, value, onChange, compact }: { label: string; value: number; onChange: (v: number) => void; compact?: boolean }) {
   return (
     <label className="space-y-1">
-      <span className="text-[11px] font-medium text-gray-500">{label}</span>
+      <span className="block text-[11px] font-medium text-gray-500">{label}</span>
       <input type="number" value={value} onChange={e => onChange(Number(e.target.value))}
-        className="block w-full rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400" />
+        className={`${compact ? 'w-20 text-center' : 'w-full'} block rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400`} />
     </label>
   );
 }
@@ -5111,16 +6379,97 @@ function FieldArea({ label, value, onChange, rows, placeholder }: { label: strin
   );
 }
 
-function RangeField({ label, value, onChange }: { label: string; value: [number, number]; onChange: (v: [number, number]) => void }) {
+/* compact — поля под числа в 2–4 знака: тянуть их на всю колонку незачем,
+   и ряд из трёх пауз влезает в строку, не расползаясь на пол-экрана. */
+function RangeField({ label, value, onChange, compact }: { label: string; value: [number, number]; onChange: (v: [number, number]) => void; compact?: boolean }) {
+  const box = compact
+    ? 'w-16 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-center text-xs text-gray-800 outline-none focus:border-indigo-400'
+    : 'block w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400';
   return (
     <label className="space-y-1">
-      <span className="text-[11px] font-medium text-gray-500">{label}</span>
+      <span className="block text-[11px] font-medium text-gray-500">{label}</span>
       <div className="flex items-center gap-1">
         <input type="number" value={value[0]} onChange={e => onChange([Number(e.target.value), value[1]])}
-          className="block w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400" />
+          className={box} />
         <span className="text-gray-400 text-xs">—</span>
         <input type="number" value={value[1]} onChange={e => onChange([value[0], Number(e.target.value)])}
-          className="block w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400" />
+          className={box} />
+      </div>
+    </label>
+  );
+}
+
+/* Часовой пояс: раньше это было поле «UTC±» с голым числом — оператору
+   приходилось помнить, что 3 это Москва, а 5 — Екатеринбург. Список городов
+   снимает вопрос. Значение по-прежнему хранится числом (смещение от UTC),
+   формат настроек не меняется. */
+const TIMEZONE_ZONES: { offset: number; cities: string }[] = [
+  { offset: -8, cities: 'Лос-Анджелес' },
+  { offset: -7, cities: 'Денвер' },
+  { offset: -6, cities: 'Чикаго, Мехико' },
+  { offset: -5, cities: 'Нью-Йорк, Богота' },
+  { offset: -4, cities: 'Сантьяго' },
+  { offset: -3, cities: 'Сан-Паулу, Буэнос-Айрес' },
+  { offset: 0, cities: 'Лондон, Лиссабон' },
+  { offset: 1, cities: 'Берлин, Париж, Варшава' },
+  { offset: 2, cities: 'Киев, Кишинёв, Калининград' },
+  { offset: 3, cities: 'Москва, Минск, Стамбул' },
+  { offset: 4, cities: 'Самара, Дубай, Баку, Тбилиси' },
+  { offset: 5, cities: 'Екатеринбург, Ташкент, Алматы' },
+  { offset: 6, cities: 'Омск, Бишкек' },
+  { offset: 7, cities: 'Новосибирск, Красноярск, Бангкок' },
+  { offset: 8, cities: 'Иркутск, Пекин, Сингапур' },
+  { offset: 9, cities: 'Якутск, Токио, Сеул' },
+  { offset: 10, cities: 'Владивосток, Сидней' },
+  { offset: 11, cities: 'Магадан, Сахалин' },
+  { offset: 12, cities: 'Камчатка, Окленд' },
+];
+
+function formatUtcOffset(offset: number) {
+  if (offset === 0) return 'UTC±0';
+  return `UTC${offset > 0 ? '+' : '−'}${Math.abs(offset)}`;
+}
+
+function TimezoneField({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  // Сохранённое смещение может не совпасть со списком (полчаса, экзотика) —
+  // тогда показываем его отдельной строкой, чтобы поле не выглядело пустым и
+  // чтобы открытие настроек само не переписало значение кампании.
+  const known = TIMEZONE_ZONES.some(z => z.offset === value);
+  return (
+    <label className="space-y-1">
+      <span className="block text-[11px] font-medium text-gray-500">Часовой пояс</span>
+      {/* Ширина по содержимому, а не на всю колонку: внутри короткая строка
+          вроде «UTC+3 — Москва, Минск, Стамбул», растянутое поле выглядело
+          пустым. max-w держит список в рамках колонки на узком экране. */}
+      <select value={value} onChange={e => onChange(Number(e.target.value))}
+        className="block w-auto max-w-full cursor-pointer rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-800 outline-none focus:border-indigo-400">
+        {!known && <option value={value}>{formatUtcOffset(value)} — сохранённое значение</option>}
+        {TIMEZONE_ZONES.map(z => (
+          <option key={z.offset} value={z.offset}>{formatUtcOffset(z.offset)} — {z.cities}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+/* Счётчик со стрелками: значение здесь всегда однозначное, поле на всю
+   колонку сбивало с толку — казалось, что туда просят вписать диапазон. */
+function StepperField({ label, value, min, max, onChange, title }: { label: string; value: number; min: number; max: number; onChange: (v: number) => void; title?: string }) {
+  const clamp = (n: number) => Math.min(Math.max(n, min), max);
+  const arrow = 'flex h-[13px] w-5 cursor-pointer items-center justify-center border border-gray-200 bg-gray-50 text-[7px] leading-none text-gray-500 transition hover:bg-gray-100 disabled:cursor-default disabled:opacity-40';
+  return (
+    <label className="space-y-1" title={title}>
+      <span className="block text-[11px] font-medium text-gray-500">{label}</span>
+      <div className="flex items-center gap-1">
+        <input type="number" min={min} max={max} value={value}
+          onChange={e => onChange(clamp(Number(e.target.value) || min))}
+          className="w-14 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-center text-xs text-gray-800 outline-none focus:border-indigo-400 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none" />
+        <span className="flex flex-col">
+          <button type="button" aria-label="Больше" disabled={value >= max} onClick={() => onChange(clamp(value + 1))}
+            className={`${arrow} rounded-t-md`}>▲</button>
+          <button type="button" aria-label="Меньше" disabled={value <= min} onClick={() => onChange(clamp(value - 1))}
+            className={`${arrow} -mt-px rounded-b-md`}>▼</button>
+        </span>
       </div>
     </label>
   );

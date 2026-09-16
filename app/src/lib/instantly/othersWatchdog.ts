@@ -384,7 +384,7 @@ async function fetchCampaignSent(
     try {
       const res = await instantly.listEmails(
         { campaign_id: campaignId, email_type: 'sent', limit: 100 },
-        { accountId },
+        { accountId, consumer: 'others' },
       );
       rawCount = (res.items ?? []).length;
       items = (res.items ?? []).filter((e) => (e.ue_type ?? 1) === 1 || (e.ue_type ?? 1) === 3);
@@ -543,6 +543,77 @@ function buildOthersThreadContext(
   };
 }
 
+// ─── Негативный кэш просмотренных Others-писем ───────────────────────────────
+// Аудит API 14.09.2026: тик каждые 15 мин перечитал одни и те же ~200 писем
+// ради ~17-18 новых кандидатов. Кэш хранит письма с ФИНАЛЬНЫМ вердиктом
+// «не кандидат»: 'skip' — отсеялось локальным фильтром (TTL 7 дней),
+// 'drop' — кандидат без квалифицируемой кампании / тема не совпала (TTL 6
+// часов: привязка проекта может появиться, пока письмо в окне сканирования).
+// Отложенные (исчерпание проб, транзиентные сбои) НЕ кэшируются — их ждёт
+// следующий тик. Любая ошибка кэша — best-effort: тик работает как раньше.
+
+const OTHERS_SEEN_CHUNK = 50;
+const OTHERS_SKIP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const OTHERS_DROP_TTL_MS = 6 * 60 * 60 * 1000;
+
+async function loadOthersSeenIds(
+  db: NonNullable<typeof supabaseAdmin>,
+  ids: string[],
+): Promise<Set<string>> {
+  const seen = new Set<string>();
+  for (let i = 0; i < ids.length; i += OTHERS_SEEN_CHUNK) {
+    const { data, error } = await db
+      .from('instantly_others_seen')
+      .select('email_id, verdict, seen_at')
+      .in('email_id', ids.slice(i, i + OTHERS_SEEN_CHUNK));
+    if (error) throw new Error(error.message);
+    const nowMs = Date.now();
+    for (const row of (data ?? []) as Array<{ email_id: string; verdict: string; seen_at: string }>) {
+      const ttl = row.verdict === 'drop' ? OTHERS_DROP_TTL_MS : OTHERS_SKIP_TTL_MS;
+      // Просроченные строки не считаются seen (чистятся ниже), но и не
+      // ре-скринятся дважды в одном тике: Set остаётся консультативным.
+      if (Date.parse(row.seen_at) + ttl > nowMs) seen.add(row.email_id);
+    }
+  }
+  return seen;
+}
+
+async function markOthersSeen(
+  db: NonNullable<typeof supabaseAdmin>,
+  entries: Array<{ email_id: string; verdict: 'skip' | 'drop' }>,
+): Promise<void> {
+  for (let i = 0; i < entries.length; i += OTHERS_SEEN_CHUNK) {
+    const { error } = await db
+      .from('instantly_others_seen')
+      .upsert(entries.slice(i, i + OTHERS_SEEN_CHUNK), { onConflict: 'email_id' });
+    if (error) throw new Error(error.message);
+  }
+}
+
+async function purgeOthersSeen(db: NonNullable<typeof supabaseAdmin>): Promise<void> {
+  const cutoffSkip = new Date(Date.now() - OTHERS_SKIP_TTL_MS).toISOString();
+  const cutoffDrop = new Date(Date.now() - OTHERS_DROP_TTL_MS).toISOString();
+  const { error } = await db
+    .from('instantly_others_seen')
+    .delete()
+    .or(`seen_at.lt.${cutoffSkip},and(verdict.eq.drop,seen_at.lt.${cutoffDrop})`);
+  if (error) throw new Error(error.message);
+}
+
+/** Финальный дроп кандидата: короткий кэш, ошибка записи не роняет тик. */
+async function markCandidateDropped(
+  db: NonNullable<typeof supabaseAdmin>,
+  emailId: string | undefined,
+  verdict: 'drop',
+): Promise<void> {
+  if (!emailId) return;
+  try {
+    await markOthersSeen(db, [{ email_id: emailId, verdict }]);
+  } catch (cacheError) {
+    workerLog('warn', `others seen cache write failed for candidate: ${cacheError instanceof Error ? (cacheError as Error).message : String(cacheError)}`);
+  }
+}
+
 // ─── Основной тик ─────────────────────────────────────────────────────────────
 
 export async function pollOthersOnce(): Promise<number> {
@@ -556,6 +627,12 @@ export async function pollOthersOnce(): Promise<number> {
     workerLog('warn', 'No AI API key — skipping');
     return 0;
   }
+  // Ретеншн негативного кэша — раз в тик, дешёвый DELETE по малой таблице.
+  try {
+    await purgeOthersSeen(db);
+  } catch (cacheError) {
+    workerLog('warn', `others seen cache purge failed: ${cacheError instanceof Error ? (cacheError as Error).message : String(cacheError)}`);
+  }
 
   const { domains, mailboxesByDomain } = await getOurAccountsInfo();
   if (domains.size === 0) {
@@ -568,6 +645,7 @@ export async function pollOthersOnce(): Promise<number> {
   const pageDelay = Math.max(500, envNumber('INSTANTLY_OTHERS_PAGE_DELAY_MS', 2000));
   const skips: Record<string, number> = {};
   let scanned = 0;
+  let seenCached = 0;
   const rawCandidates: { email: Email; citedDomain: string }[] = [];
   let startingAfter: string | undefined;
   for (let page = 0; page < maxPages; page++) {
@@ -579,7 +657,7 @@ export async function pollOthersOnce(): Promise<number> {
         mode: 'emode_others',
         limit: OTHERS_PAGE_SIZE,
         starting_after: startingAfter,
-      });
+      }, { consumer: 'others' });
     } catch (error) {
       if (!(error instanceof Error && error.message.startsWith('Instantly email read deferred:'))) throw error;
       // Keep successful discovery pages; normal attribution still has to prove
@@ -589,20 +667,50 @@ export async function pollOthersOnce(): Promise<number> {
     }
     const items = res.items ?? [];
     scanned += items.length;
+    // Негативный кэш: письма с финальным вердиктом не перескринимаем. Ошибка
+    // чтения кэша — тик деградирует к прежнему поведению (скриним всё).
+    let seenIds: Set<string> = new Set();
+    const pageIds = items.map((e) => e.id).filter(Boolean);
+    if (pageIds.length > 0) {
+      try {
+        seenIds = await loadOthersSeenIds(db, pageIds);
+      } catch (cacheError) {
+        workerLog('warn', `others seen cache read failed — full rescreen this tick: ${cacheError instanceof Error ? (cacheError as Error).message : String(cacheError)}`);
+      }
+    }
+    const toMarkSkip: Array<{ email_id: string; verdict: 'skip' }> = [];
+    let unseenOnPage = 0;
     for (const email of items) {
+      if (!email.id) continue;
+      if (seenIds.has(email.id)) {
+        seenCached++;
+        continue;
+      }
+      unseenOnPage++;
       const screened = screenOthersEmail(email, domains);
       if (screened.verdict === 'candidate' && screened.citedDomain) {
         rawCandidates.push({ email, citedDomain: screened.citedDomain });
       } else {
         skips[screened.verdict] = (skips[screened.verdict] ?? 0) + 1;
+        toMarkSkip.push({ email_id: email.id, verdict: 'skip' });
+      }
+    }
+    if (toMarkSkip.length > 0) {
+      try {
+        await markOthersSeen(db, toMarkSkip);
+      } catch (cacheError) {
+        workerLog('warn', `others seen cache write failed: ${cacheError instanceof Error ? (cacheError as Error).message : String(cacheError)}`);
       }
     }
     startingAfter = res.next_starting_after || undefined;
+    // Новые письма всегда приходят в начало списка: страница без единого
+    // непросмотренного письма означает, что глубже нового тоже нет.
+    if (unseenOnPage === 0) break;
     if (!startingAfter || items.length === 0) break;
   }
 
   if (rawCandidates.length === 0) {
-    workerLog('info', `Scanned ${scanned} Others email(s): no candidates (${JSON.stringify(skips)})`);
+    workerLog('info', `Scanned ${scanned} Others email(s): no candidates (${seenCached} in seen cache, ${JSON.stringify(skips)})`);
     return 0;
   }
 
@@ -642,7 +750,7 @@ export async function pollOthersOnce(): Promise<number> {
   const fresh = [...latestByKey.values()];
   workerLog(
     'info',
-    `Scanned ${scanned} Others email(s): ${rawCandidates.length} candidate(s), ${fresh.length} new (${JSON.stringify(skips)})`,
+    `Scanned ${scanned} Others email(s) (${seenCached} in seen cache): ${rawCandidates.length} candidate(s), ${fresh.length} new (${JSON.stringify(skips)})`,
   );
   if (fresh.length === 0) return 0;
 
@@ -681,6 +789,8 @@ export async function pollOthersOnce(): Promise<number> {
       // привязанная кампания. Ничего не пишем: негативный кэш короткий, при
       // привязке проекта письмо (пока оно в окне сканирования) подхватится.
       workerLog('info', `No qualifiable campaign for cited domain ${citedDomain} (from ${sender}) — skipped`);
+      // Короткий негативный кэш: привязка может появиться, пока письмо в окне.
+      await markCandidateDropped(db, email.id, 'drop');
       continue;
     }
 
@@ -724,6 +834,7 @@ export async function pollOthersOnce(): Promise<number> {
       // = лишние вставки, а короткий кэш атрибуции + выход письма из окна уберут.
       warmupDropped++;
       workerLog('info', `Reply subject "${email.subject ?? ''}" matches no campaign of ${citedDomain} (from ${sender}) — warmup/non-reply, skipped`);
+      await markCandidateDropped(db, email.id, 'drop');
       continue;
     }
 

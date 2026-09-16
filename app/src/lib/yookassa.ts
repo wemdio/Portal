@@ -538,8 +538,9 @@ export async function chargeRecurringPayment(
 
 /**
  * Parse YooKassa webhook notification body.
- * YooKassa does not sign webhooks with HMAC — verify by IP allowlist or
- * re-fetch the object from the API.
+ * YooKassa does not sign webhooks with HMAC, so the parsed body is UNTRUSTED:
+ * anyone can POST it. Callers must confirm the payment through
+ * `verifyYookassaPaymentFromWebhook` before acting on `object.status`.
  */
 export function parseYookassaWebhookBody(rawBody: string): {
   type: string;
@@ -547,6 +548,37 @@ export function parseYookassaWebhookBody(rawBody: string): {
   object: YookassaPayment;
 } {
   return JSON.parse(rawBody);
+}
+
+/**
+ * Re-fetch a payment mentioned in a webhook from the YooKassa API using our
+ * own shop credentials, so the returned object is authoritative regardless of
+ * what the (unsigned) webhook body claimed.
+ *
+ * Both shops POST to the same webhook URL. We try the shop the invoice was
+ * created in first, then the other one (only if it is configured); a payment
+ * unknown to both shops is rejected — that is exactly a forged notification.
+ * Returns null when the payment cannot be confirmed by any shop.
+ */
+export async function verifyYookassaPaymentFromWebhook(
+  paymentId: string,
+  preferTestShop: boolean,
+): Promise<{ payment: YookassaPayment; isTestShop: boolean } | null> {
+  const order = preferTestShop ? [true, false] : [false, true];
+  let lastErr: unknown = null;
+  for (const isTestShop of order) {
+    if (!isYookassaConfigured(isTestShop)) continue;
+    try {
+      const payment = await getYookassaPayment(paymentId, isTestShop);
+      if (payment && payment.id === paymentId) return { payment, isTestShop };
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  if (lastErr) {
+    console.error('[yookassa] webhook payment could not be verified', paymentId, lastErr);
+  }
+  return null;
 }
 
 /** Cancel a pending YooKassa invoice so the customer can no longer pay it */

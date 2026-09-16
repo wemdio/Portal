@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
+import type { DealRail, DealTransitionKind } from '@/lib/firstSales/dealTransitions';
 import { authFetch } from '@/lib/authFetch';
 import { logError } from '@/lib/loggerClient';
 
@@ -65,6 +66,8 @@ type DealDetails = {
     created_at_amo: string | null;
   }>;
   amo_url: string | null;
+  /** История переходов по этапам; null — не удалось собрать, блок не рисуется. */
+  rail?: DealRail | null;
 };
 
 const fmtDateTime = (iso: string | null) =>
@@ -82,6 +85,62 @@ function stagePath(stages: Stages): Array<{ label: string; value: string }> {
     { label: 'Договор', value: fmtDate(stages.first_contract_at) },
     { label: 'Оплата', value: fmtDate(stages.won_at) },
   ];
+}
+
+/**
+ * Подпись и цвет точки на рельсах. Откат и возврат из закрытой сделки — янтарные:
+ * это не ошибка данных, но разбирать сделку стоит именно с них.
+ */
+const RAIL_KIND: Record<DealTransitionKind, { badge: string | null; dot: string; badgeClass: string }> = {
+  forward: { badge: null, dot: 'bg-blue-500', badgeClass: '' },
+  rollback: { badge: 'откат', dot: 'bg-amber-500', badgeClass: 'border-amber-200 bg-amber-50 text-amber-700' },
+  reopened: { badge: 'возврат в работу', dot: 'bg-amber-500', badgeClass: 'border-amber-200 bg-amber-50 text-amber-700' },
+  pipeline: { badge: 'перенос в воронку', dot: 'bg-violet-500', badgeClass: 'border-violet-200 bg-violet-50 text-violet-700' },
+  won: { badge: 'успешно', dot: 'bg-emerald-500', badgeClass: 'border-emerald-200 bg-emerald-50 text-emerald-700' },
+  lost: { badge: 'закрыта', dot: 'bg-zinc-400', badgeClass: 'border-zinc-200 bg-zinc-50 text-zinc-600' },
+};
+
+const fmtDays = (days: number | null) => (days === null ? null : `${days} дн.`);
+
+function DealRailView({ rail }: { rail: DealRail }) {
+  return (
+    <ol className="relative ml-1.5 border-l border-zinc-200">
+      <li className="relative pb-3 pl-4">
+        <span className="absolute -left-[5px] top-1 h-2.5 w-2.5 rounded-full bg-zinc-300" />
+        <p className="text-xs text-zinc-700">
+          Создана{rail.createdStatus ? <> на этапе <span className="font-medium">{rail.createdStatus}</span></> : null}
+          {rail.createdPipeline ? <span className="text-zinc-400"> · {rail.createdPipeline}</span> : null}
+        </p>
+        <p className="text-[10px] tabular-nums text-zinc-400">{fmtDateTime(rail.createdAt)}</p>
+      </li>
+
+      {rail.transitions.map((step, index) => {
+        const kind = RAIL_KIND[step.kind];
+        const isLast = index === rail.transitions.length - 1;
+        return (
+          <li key={`${step.changedAt}-${index}`} className={`relative pl-4 ${isLast ? '' : 'pb-3'}`}>
+            <span className={`absolute -left-[5px] top-1 h-2.5 w-2.5 rounded-full ${kind.dot}`} />
+            <div className="flex flex-wrap items-center gap-1.5 text-xs text-zinc-700">
+              <span className="text-zinc-400">{step.fromStatus ?? '—'}</span>
+              <span className="text-zinc-300">→</span>
+              <span className="font-medium">{step.toStatus ?? '—'}</span>
+              {kind.badge ? (
+                <span className={`rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${kind.badgeClass}`}>
+                  {step.kind === 'pipeline' && step.toPipeline ? `${kind.badge} «${step.toPipeline}»` : kind.badge}
+                </span>
+              ) : null}
+            </div>
+            <p className="text-[10px] tabular-nums text-zinc-400">
+              {fmtDateTime(step.changedAt)}
+              {step.changedBy ? ` · ${step.changedBy}` : ''}
+              {/* У последнего шага — «стоит N дн.»: он ещё на этом этапе. */}
+              {fmtDays(step.daysOnStage) ? ` · ${isLast ? 'стоит' : 'пробыла'} ${fmtDays(step.daysOnStage)}` : ''}
+            </p>
+          </li>
+        );
+      })}
+    </ol>
+  );
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -231,6 +290,15 @@ export default function DealModal({
                 ) : null}
               </dl>
             </Section>
+
+            {/* Рельсы — сразу под карточкой: при разборе застрявшей сделки
+                первый вопрос «когда и куда она заходила», и откаты назад
+                видны здесь же, а не только в истории AMO. */}
+            {data.rail ? (
+              <Section title={`Движение по этапам${data.rail.transitions.length > 0 ? ` (${data.rail.transitions.length})` : ''}`}>
+                <DealRailView rail={data.rail} />
+              </Section>
+            ) : null}
 
             {data.stages ? (
               <Section title="Путь по воронке">

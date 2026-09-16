@@ -284,6 +284,74 @@ blocks:
                 echo "[scheduled] Instantly DB/backup: изменений нет — удалённый стек не трогаем"
               fi
 
+              # ─── Sender host (изолированный email-IP): воркер «Рассылки» ───
+              # Массовые SMTP/IMAP-подключения не должны идти с IP портала, иначе
+              # хостер банит интернет всего сервера. Воркер живёт на отдельном
+              # хосте (144.31.54.166) и НИКОГДА не добавляется в стек portal host.
+              # Semaphore secrets / env: SENDER_SSH_HOST (обязательно). Optional:
+              # SENDER_SSH_USER (default: USER), SENDER_SSH_PASSWORD (default:
+              # SERVER_PASSWORD), SENDER_REMOTE_DIR (default: /opt/portal-sender).
+              # На хосте один раз создать .env по deploy/sender/.env.example.
+              SENDER_HOST="${SENDER_SSH_HOST:-}"
+              if [ "$DEPLOY_SENDER" = 1 ] && [ -z "$SENDER_HOST" ]; then
+                # Не FATAL: блокировать деплой portal-хоста нельзя — он как раз
+                # убирает worker-sender из стека на 139, а пропуск sender-хоста
+                # оставляет рассылку без воркера (инструмент в разработке, это
+                # безопаснее, чем держать отправку на IP портала).
+                echo "[scheduled] WARNING: DEPLOY_SENDER=1, но SENDER_SSH_HOST пуст — sender-воркер ПРОПУЩЕН." >&2
+                echo "[scheduled] WARNING: добавь SENDER_SSH_HOST=144.31.54.166 в секрет portal_secrets (опционально SENDER_SSH_USER/SENDER_SSH_PASSWORD) и создай /opt/portal-sender/.env по deploy/sender/.env.example." >&2
+              fi
+              if [ "$DEPLOY_SENDER" = 1 ] && [ -n "$SENDER_HOST" ]; then
+                SENDER_USER="${SENDER_SSH_USER:-$USER}"
+                SENDER_PASS="${SENDER_SSH_PASSWORD:-$SERVER_PASSWORD}"
+                SENDER_PATH="${SENDER_REMOTE_DIR:-/opt/portal-sender}"
+                run_ssh_sender() {
+                  desc="$1"
+                  remote="$2"
+                  n=1
+                  while [ "$n" -le "$SSH_RETRIES" ]; do
+                    if sshpass -p "${SENDER_PASS}" ssh ${SSH_BASE} ${SENDER_USER}@${SENDER_HOST} "$remote"; then
+                      return 0
+                    fi
+                    echo "[scheduled] ${desc}: SSH (sender) не удалась (попытка ${n}/${SSH_RETRIES})" >&2
+                    n=$((n + 1))
+                    [ "$n" -le "$SSH_RETRIES" ] && sleep "$SSH_RETRY_PAUSE"
+                  done
+                  return 1
+                }
+                run_scp_sender() {
+                  desc="$1"
+                  shift
+                  n=1
+                  while [ "$n" -le "$SSH_RETRIES" ]; do
+                    if sshpass -p "${SENDER_PASS}" scp ${SSH_BASE} "$@"; then
+                      return 0
+                    fi
+                    echo "[scheduled] ${desc}: scp (sender) не удалась (попытка ${n}/${SSH_RETRIES})" >&2
+                    n=$((n + 1))
+                    [ "$n" -le "$SSH_RETRIES" ] && sleep "$SSH_RETRY_PAUSE"
+                  done
+                  return 1
+                }
+                echo "[scheduled] Sender worker: deploying to ${SENDER_USER}@${SENDER_HOST}:${SENDER_PATH}"
+                run_ssh_sender "mkdir sender dir" \
+                  "sudo -n mkdir -p ${SENDER_PATH} && sudo -n chown -R ${SENDER_USER}:${SENDER_USER} ${SENDER_PATH}"
+                run_scp_sender "copy sender compose" \
+                  deploy/sender/docker-compose.yml "${SENDER_USER}@${SENDER_HOST}:${SENDER_PATH}/"
+                run_ssh_sender "sender compose pull + up" "set -e
+                cd ${SENDER_PATH}
+                if [ ! -f .env ]; then echo \"[sender] FATAL: нет .env в ${SENDER_PATH} — создай по deploy/sender/.env.example\"; exit 1; fi
+                printf '%s\n' \"${DOCKER_PASSWORD}\" | sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin
+                export DOCKER_CLIENT_TIMEOUT=300
+                export COMPOSE_HTTP_TIMEOUT=300
+                sudo -n docker compose -f docker-compose.yml -p portal-sender --env-file .env pull
+                sudo -n docker compose -f docker-compose.yml -p portal-sender --env-file .env up -d
+                sudo -n docker ps --filter name=portal-worker-sender --format '{{.Names}} {{.Status}}'
+                "
+              else
+                echo "[scheduled] Sender host: пропущен (изменений нет или SENDER_SSH_HOST не задан)"
+              fi
+
               if [ "$DEPLOY_PORTAL_HOST" = 1 ] || [ "$IDB_BACKUP_DEPLOYED" = 1 ]; then
                 run_scp "copy compose files" \
                   docker-compose.prod.yml drain-worker.sh deploy/nginx/50x.html ${USER}@${HOST}:/home/Portal/prod/
@@ -483,7 +551,10 @@ blocks:
                   echo \"--- Step 4: restart selected services: \${CORE_TARGETS} ---\";
                   for svc in \${CORE_TARGETS}; do force_rm_svc \"\$svc\"; done;
                   if [ \"\${PORTAL_CHANGED}\" = 1 ]; then wait_port_free 3000 15; fi;
-                  sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate \${CORE_TARGETS};
+                  # --remove-orphans: сервис, убранный из compose (пример:
+                  # worker-sender, вынесенный на изолированный email-хост),
+                  # иначе остаётся работать старым контейнером-сиротой.
+                  sudo -n env DOCKER_GID=\"\${DOCKER_GID}\" docker compose --env-file .env -p portal -f docker-compose.prod.yml up -d --no-deps --force-recreate --remove-orphans \${CORE_TARGETS};
                 fi;
                 if [ \"\${PORTAL_CHANGED}\" = 1 ]; then
                   echo '--- Step 4.1: verify Docker socket access inside portal ---';

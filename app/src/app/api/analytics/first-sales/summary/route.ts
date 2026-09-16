@@ -7,7 +7,7 @@ import {
   computeFirstSalesSeries,
   fetchFirstSalesLeads,
 } from '@/lib/firstSales/metrics';
-import { fetchMeetingLinks } from '@/lib/firstSales/meetings';
+import { fetchTaskMeetings } from '@/lib/firstSales/meetings';
 import { fetchFirstSalesPayments } from '@/lib/firstSales/money';
 
 // Роут авторизуется по заголовку и зависит от query — предрендер здесь дал бы
@@ -37,31 +37,28 @@ export async function GET(req: NextRequest) {
   // ряд по времени раздуется вдвое и график покажет лишнее.
   const prev = previousWindow(from, to);
 
-  // Привязки встреч тянутся раньше сделок: список задействованных amo_deal_id
-  // идёт в fetchFirstSalesLeads как extraDealIds — иначе сделка, пришедшая
-  // раньше окна (встреча в июле у мартовской сделки), не попадёт в `leads`,
-  // и computeFirstSalesSeries не сможет резолвнуть её источник для встречи.
-  // Внутри окна эта пара запросов последовательна по существу; два окна между
-  // собой — нет, и раньше они всё равно шли друг за другом (см. Promise.all
-  // ниже). Цена была заметной: каждое чтение `amo_lead_stage_dates_v`
-  // материализует историю событий целиком, фильтр туда не проваливается.
-  // Платежи тянутся вместе со встречами и по той же причине попадают в
-  // extraDealIds: сделка могла прийти в марте, а деньги по ней — в августе.
-  // Без неё в выборке `computeFirstSalesSeries` не сможет резолвнуть источник
-  // и менеджера сделки, и деньги ушли бы в «без источника».
+  // Платежи тянутся раньше сделок: их amo_deal_id идут в fetchFirstSalesLeads
+  // как extraDealIds — сделка могла прийти в марте, а деньги по ней прийти в
+  // августе, и без этого расширения `computeFirstSalesSeries` не резолвнет её
+  // источник и менеджера, а деньги ушли бы в «без источника».
+  //
+  // Встречи по этапу AMO расширения не требуют: по `first_meeting_at` выборка
+  // сделок уже фильтруется (см. `or` в fetchFirstSalesLeads). Встречи по
+  // закрытой задаче (fetchTaskMeetings) — требуют: такая сделка стоит на
+  // «Назначена встреча», и ни одно поле окна её не поймает.
   const loadWindow = async (windowFrom: Date, windowTo: Date) => {
-    const [meetingLinks, payments] = await Promise.all([
-      fetchMeetingLinks(db, PIPELINE_ID, windowFrom, windowTo),
+    const [payments, taskMeetings] = await Promise.all([
       fetchFirstSalesPayments(db, PIPELINE_ID, windowFrom, windowTo),
+      fetchTaskMeetings(db, PIPELINE_ID, windowFrom, windowTo),
     ]);
     const extraDealIds = [
       ...new Set([
-        ...meetingLinks.map((m) => m.amo_deal_id),
         ...payments.map((p) => p.amo_deal_id).filter((id): id is number => id != null),
+        ...taskMeetings.keys(),
       ]),
     ];
     const leads = await fetchFirstSalesLeads(db, PIPELINE_ID, windowFrom, windowTo, extraDealIds);
-    return { meetingLinks, payments, leads };
+    return { payments, leads, taskMeetings };
   };
 
   try {
@@ -81,12 +78,12 @@ export async function GET(req: NextRequest) {
     ]);
 
     const result = computeFirstSalesSeries(
-      current.leads, current.meetingLinks, from, to, groupBy, sources,
-      current.payments,
+      current.leads, from, to, groupBy, sources,
+      current.payments, current.taskMeetings,
     );
     const prevResult = computeFirstSalesSeries(
-      previous.leads, previous.meetingLinks, prev.from, prev.to, groupBy, sources,
-      previous.payments,
+      previous.leads, prev.from, prev.to, groupBy, sources,
+      previous.payments, previous.taskMeetings,
     );
 
     const lastRun = lastRunRes.data;

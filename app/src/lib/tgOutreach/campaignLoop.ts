@@ -15,10 +15,10 @@ import type {
   DialogMessage,
   OutreachProxy,
 } from './types';
-import { DEFAULT_FOLLOW_UP } from './types';
+import { DEFAULT_FOLLOW_UP, TG_SERVICE_NOTIFICATIONS_USER_ID } from './types';
 import { checkAccount, classifyCheckError } from './accountCheck';
 import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
-import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient } from './gramClient';
+import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient, type ActiveClient } from './gramClient';
 import type { LoopControl } from './watchdog';
 import { orderByStaleness } from './accountRotation';
 import { openaiGenerate, detectTrigger } from './openaiChat';
@@ -31,7 +31,9 @@ import {
 import { sendFirstTouchBatch } from './firstTouch/send';
 import { parkAccountAfterLimit } from './accountCooldown';
 import { pickForwardIds } from './forwardSelection';
-import { processLeadForwards } from './leadForward';
+import { sendFreezeAppeal } from './freezeAppeal';
+import { applyQueuedProfile, PROFILE_REST_HOURS, type QueuedProfilePayload } from './profile/queuedProfile';
+import { runLeadForwardPoller, isAccountRestrictedError } from './leadForward';
 import { buildLeadMessage, splitTelegramMessage } from './leadMessage';
 import { loadLeadOrigin } from './leadOrigin';
 import { withTimeout } from './withTimeout';
@@ -74,6 +76,12 @@ const TG_FORWARD_TIMEOUT_MS = Number(process.env.TG_OUTREACH_FORWARD_TIMEOUT_MS)
  * механизма и не ломал его логику повторной попытки.
  */
 const TG_DIALOGS_TIMEOUT_MS = Number(process.env.TG_OUTREACH_DIALOGS_TIMEOUT_MS) || 240_000;
+/**
+ * Пауза перед отметкой входящего «прочитано». Настраивалась раньше полем
+ * pre_read_delay_range, 09.09.2026 убрана с экрана и зафиксирована: живой
+ * человек не открывает чат в ту же секунду, и настраивать это незачем.
+ */
+const PRE_READ_DELAY_RANGE_SEC: [number, number] = [5, 15];
 
 const BUCKET_SESSIONS = 'tg-outreach-sessions';
 const SESSION_CACHE_MAX = 100;
@@ -116,14 +124,21 @@ function randomRange([min, max]: [number, number]): number {
 
 
 /**
- * Сколько диалогов аккаунта забирать из getDialogs за итерацию.
- * Было 100 — снизили до 50: меньше данных через прокси = меньше шанс
- * таймаута на getDialogs (3 аккаунта стабильно зависали на 180с).
- * 50 достаточно, т.к. обрабатываются только непрочитанные User-диалоги,
- * а группы/каналы скипаются. Если лиды проваливаются ниже 50-й позиции —
- * поднять через env TG_OUTREACH_DIALOGS_LIMIT.
+ * Сколько последних диалогов аккаунта забирать из getDialogs за итерацию.
+ *
+ * Со 100 снижали до 50 в надежде, что меньше данных через прокси — меньше
+ * зависаний. Зависания не прекратились: 07.09.2026 их было 66 на 91 круг, и
+ * каждое лечилось переподключением, после которого те же диалоги приходили за
+ * 0.4с. Полсотни диалогов через прокси не грузятся три минуты ни при каких
+ * условиях — значит висел сокет, а объём был ни при чём, и платили за эту
+ * догадку покрытием лидов.
+ *
+ * Возвращаем 100: обрабатываются только непрочитанные диалоги с людьми,
+ * группы и каналы пропускаются, так что лишние полсотни строк почти ничего не
+ * стоят, а лид, провалившийся ниже пятидесятой позиции, перестаёт теряться.
+ * Настраивается через env TG_OUTREACH_DIALOGS_LIMIT.
  */
-const DIALOGS_FETCH_LIMIT = Number(process.env.TG_OUTREACH_DIALOGS_LIMIT ?? '50');
+const DIALOGS_FETCH_LIMIT = Number(process.env.TG_OUTREACH_DIALOGS_LIMIT ?? '100');
 
 /**
  * Hard per-account ceiling on the first gramJS call of each iteration
@@ -132,12 +147,84 @@ const DIALOGS_FETCH_LIMIT = Number(process.env.TG_OUTREACH_DIALOGS_LIMIT ?? '50'
  * hostage and triggering the worker watchdog at 15 minutes. The watchdog
  * still acts as the ultimate backstop for the rest of the iteration.
  */
-// Default 180s: accounts with thousands of dialogs (e.g. Политген) routinely
-// hit the original 60s ceiling on getDialogs() even when the proxy is healthy.
-// Raising the bar trades a small amount of wall-clock time for full dialog
-// coverage. Override via TG_OUTREACH_PER_ACCOUNT_TIMEOUT_MS if needed.
+// 180с оставлены как потолок ПОВТОРНОЙ попытки — той, что идёт по свежему
+// сокету. Первую сторожит короткий FIRST_DIALOGS_PROBE_TIMEOUT_MS ниже.
+// Прежнее объяснение («аккаунты с тысячами диалогов не укладываются в 60с»)
+// держалось на догадке про объём: забираем мы сотню последних диалогов, и
+// столько через исправный прокси не грузится и десяти секунд. Потолок остаётся
+// запасом на нештатный случай, а не ожидаемым временем работы.
+// Override via TG_OUTREACH_PER_ACCOUNT_TIMEOUT_MS if needed.
+/**
+ * Статусы, при которых аккаунт нельзя ставить подменным на передачу лида.
+ *
+ * `restricted` сюда входит намеренно, в отличие от колонки здоровья: там речь
+ * о том, спишут ли номер, а здесь — доверят ли ему единственную попытку
+ * донести лида. Ограниченный аккаунт с заметной вероятностью не отправит
+ * ничего, и подменять им — менять одну поломку на другую.
+ */
+const TERMINAL_FORWARD_STATUSES = new Set([
+  'banned', 'frozen', 'restricted', 'session_revoked', 'session_duplicate', 'no_session',
+]);
+
+/**
+ * За сколько суток назад догоняем неотвеченные диалоги.
+ *
+ * Круг проверяет диалоги, где последним писал человек, и отвечает тем, кому
+ * ответить не успели. Окно было трое суток — и оказалось дедлайном на оплату
+ * ИИ: 08.09.2026 у OpenRouter кончились деньги, ответы начали падать с 402, и
+ * всё, что старше трёх дней, выпадало из догона навсегда.
+ *
+ * Семь суток дают неделю на восстановление счёта. Цена — круг перепроверяет
+ * вдвое больше диалогов, но платных вызовов это почти не добавляет: те, где мы
+ * уже ответили последними, отсеиваются до обращения к модели.
+ *
+ * Настраивается через env: у кампаний с плотной перепиской неделя старых
+ * диалогов может оказаться лишней.
+ */
+const CATCHUP_LOOKBACK_DAYS = Number(process.env.TG_OUTREACH_CATCHUP_DAYS) || 7;
+const CATCHUP_LOOKBACK_MS = CATCHUP_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+
 const PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS =
   Number(process.env.TG_OUTREACH_PER_ACCOUNT_TIMEOUT_MS) || 180_000;
+
+/**
+ * Первая попытка getDialogs ждёт коротко — она проверяет сокет, а не грузит почту.
+ *
+ * Через мобильный прокси соединение регулярно становится полуоткрытым: гramJS
+ * ждёт ответа вечно, потолок выше срабатывает на 180-й секунде, а сразу после
+ * переподключения тот же запрос отрабатывает за 0.4с. 07.09.2026 так висели
+ * 66 кругов из 91 у 48 аккаунтов во всех четырёх кампаниях — 3.3 часа чистого
+ * ожидания в сутки на ровном месте.
+ *
+ * Мёртвый сокет от медленной загрузки отличается тем, что по нему не приходит
+ * вообще ничего. Поэтому первой попытке хватает короткого срока: не ответили —
+ * почти наверняка сокет, и переподключение стоит полторы секунды.
+ *
+ * Если же аккаунт не уложился честно, ничего не теряется: полный потолок
+ * остаётся у повторной попытки по свежему соединению. Цена ошибки — одно
+ * лишнее переподключение в полторы секунды вместо трёх минут простоя.
+ */
+/**
+ * Сколько аккаунтов обходим одновременно, если кампания не задала своё число.
+ *
+ * Шесть — осторожная середина: круг по полусотне аккаунтов сжимается с десяти
+ * часов примерно до полутора, а на прокси-хост приходится столько же
+ * одновременных соединений, сколько бывало при ручной проверке партии.
+ */
+const DEFAULT_ACCOUNT_CONCURRENCY = Number(process.env.TG_OUTREACH_ACCOUNT_CONCURRENCY) || 6;
+
+const FIRST_DIALOGS_PROBE_TIMEOUT_MS =
+  Number(process.env.TG_OUTREACH_FIRST_PROBE_TIMEOUT_MS) || 25_000;
+
+/**
+ * Повтор уложился в этот срок — висел сокет, а не почта.
+ *
+ * Наблюдаемая разница огромна: на мёртвом сокете повтор по свежему соединению
+ * отдаёт диалоги за 0.3–0.7с, а большая почта грузится десятками секунд и
+ * после переподключения. Порог поставлен с большим запасом в сторону «это
+ * сокет»: ошибочно не обвинить прокси дешевле, чем свапнуть исправный.
+ */
+const FAST_RETRY_MEANS_DEAD_SOCKET_MS = 5_000;
 
 /** Marker string included in the Error message so the catch branch can
  *  distinguish our explicit timeout from generic TIMEOUT errors. */
@@ -539,6 +626,12 @@ async function upsertDialog(
   status?: string,
   opts?: { canSend?: boolean; initialCanSend?: boolean; tgIsBot?: boolean; autoForward?: AutoForwardOutcome },
 ) {
+  // Служебный аккаунт Telegram не становится диалогом кампании ни при каких
+  // настройках: это страховка поверх скипа в цикле, закрывающая и все прочие
+  // пути записи — backfill, refetch, догоняющие ответы и напоминания, которые
+  // читают диалоги из базы и могут дотянуться до старых строк с 777000.
+  if (tgUserId === TG_SERVICE_NOTIFICATIONS_USER_ID) return;
+
   const { data: existing } = await db
     .from('tg_outreach_dialogs')
     .select('id, messages, status, can_send, tg_is_bot')
@@ -722,6 +815,33 @@ async function writeLog(
 }
 
 /**
+ * Свободный аккаунт на замену для передачи лида/партнёра.
+ *
+ * Требования те же, что к боевому: включён, не в кулдауне, без итогового
+ * запрета от Telegram и не на прогреве. Греющийся сюда не годится
+ * принципиально — он потому и греется, что писать ему пока рано.
+ *
+ * Берём первого подходящего, а не «самого свежего»: карточка уходит один
+ * раз и нагрузки не создаёт, а выбирать лучшего среди здоровых незачем.
+ */
+function pickSpareClient(
+  clients: ActiveClient[],
+  excludeAccountId: string,
+): { client: TelegramClient; accountName: string } | null {
+  const spare = clients.find((c) => {
+    const a = c.account;
+    if (a.id === excludeAccountId || !a.is_active) return false;
+    if (a.check_status && TERMINAL_FORWARD_STATUSES.has(a.check_status)) return false;
+    const cooldown = a.cooldown_until ? new Date(a.cooldown_until).getTime() : NaN;
+    if (Number.isFinite(cooldown) && cooldown > Date.now()) return false;
+    const warmup = a.warmup_until ? new Date(a.warmup_until).getTime() : NaN;
+    if (Number.isFinite(warmup) && warmup > Date.now()) return false;
+    return true;
+  });
+  return spare ? { client: spare.client, accountName: spare.account.session_name } : null;
+}
+
+/**
  * Исход пересылки возвращаем, а не только пишем в журнал.
  *
  * Сбой автопересылки — это лид, который не доехал до менеджера. Пока он оседал
@@ -786,6 +906,12 @@ export interface HandleChatOptions {
    * so spammers (especially ones without a username) can't keep poking through.
    */
   blockedUserIds?: Set<number>;
+  /**
+   * Здоровый аккаунт кампании на замену: автопересылка лида по триггеру идёт
+   * клиентом владельца диалога, и если тот под PEER_FLOOD, карточку отправляет
+   * подменный — переписка в ней текстом, оригиналы подменному недоступны.
+   */
+  getSpareClient?: (excludeAccountId: string) => { client: TelegramClient; accountName: string } | null;
 }
 
 export async function handleChat(
@@ -822,8 +948,10 @@ export async function handleChat(
     return { replied: false, triggerType: null };
   }
 
-  if (tg.ignore_bot_usernames && tgIsBot) {
-    log('info', `${displayName}: это бот — пропускаю (включена настройка "игнорировать ботов")`);
+  // Ботов не трогаем всегда: настройку сняли с экрана 10.09.2026 — выключать
+  // её было нечем оправдать, а включённой она стояла у всех кампаний.
+  if (tgIsBot) {
+    log('info', `${displayName}: это бот — пропускаю`);
     return { replied: false, triggerType: null };
   }
   if (tg.ignore_no_username && !tgUsername) {
@@ -831,7 +959,7 @@ export async function handleChat(
     return { replied: false, triggerType: null };
   }
 
-  const preReadDelay = randomRange(tg.pre_read_delay_range) * 1000;
+  const preReadDelay = randomRange(PRE_READ_DELAY_RANGE_SEC) * 1000;
   if (shouldStop) await interruptibleSleep(preReadDelay, shouldStop); else await sleep(preReadDelay);
 
   try {
@@ -892,11 +1020,12 @@ export async function handleChat(
   // чатах прогрева — аккаунты писали друг другу. Из-за этого бот отвечал
   // боевым скриптом партнёрам по прогреву и слал фальшивые лиды в чат
   // менеджера. Здесь берём только тех, кому писали по базе кампании.
-  if (tg.reply_only_to_base_contacts) {
-    if (!(await isCampaignContact(db, campaign.id, tgUserId))) {
-      log('info', `${displayName}: не из баз кампании — пропускаю (включена настройка «писать только контактам из баз»)`);
-      return { replied: false, triggerType: null };
-    }
+  // Проверка безусловная: настройку сняли с экрана 10.09.2026. Выключенной она
+  // возвращала ровно тот сценарий, ради которого её и заводили — ответы
+  // партнёрам по прогреву и фальшивые лиды в чате менеджера.
+  if (!(await isCampaignContact(db, campaign.id, tgUserId))) {
+    log('info', `${displayName}: не из баз кампании — пропускаю`);
+    return { replied: false, triggerType: null };
   }
 
   if (tg.reply_only_if_previously_wrote) {
@@ -1007,6 +1136,29 @@ export async function handleChat(
         }
       }
       outcome = await forwardToTargetChat(client, entity, messageIdsToForward, targetChat, log, card);
+      // PEER_FLOOD на владельце диалога: оригиналы пересылки больше некому
+      // отправить, но карточка самодостаточна — переписка в ней текстом. Её
+      // везёт любой здоровый аккаунт кампании, и лид доезжает до менеджера.
+      if (!outcome.ok && isAccountRestrictedError(outcome.error) && card) {
+        const spare = options?.getSpareClient?.(account.id) ?? null;
+        if (spare) {
+          const target = targetChat.startsWith('@') ? targetChat.slice(1) : targetChat;
+          try {
+            for (const part of splitTelegramMessage(card)) {
+              await withTimeout(
+                spare.client.sendMessage(target, { message: part }),
+                TG_SEND_TIMEOUT_MS,
+                'отправка карточки лида подменным аккаунтом',
+              );
+            }
+            outcome = { ok: true };
+            log('warning', `Пересылка по триггеру упёрлась в ограничение аккаунта ${account.session_name} — карточку в ${targetChat} отправил ${spare.accountName}.`);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            log('error', `Подменный аккаунт ${spare.accountName} тоже не смог отправить карточку в ${targetChat} — ${msg}`);
+          }
+        }
+      }
     } else {
       log('info', `${displayName}: триггер "${triggerLabel}" сработал, но чат для пересылки не указан в настройках кампании — пересылка пропущена`);
       outcome = { ok: false, error: 'чат для пересылки не указан в настройках кампании' };
@@ -1065,6 +1217,9 @@ async function handleFollowUp(
     .eq('account_id', account.id)
     .eq('status', 'none')
     .eq('can_send', true)
+    // Служебный чат Telegram не получает и напоминаний: строка могла остаться
+    // в базе до скипа в цикле, и без этого фильтра воркер писал бы 777000.
+    .neq('tg_user_id', TG_SERVICE_NOTIFICATIONS_USER_ID)
     .lt('last_message_at', cutoff)
     .limit(10);
 
@@ -1096,7 +1251,7 @@ async function handleFollowUp(
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     const isBot = Boolean(dialog.tg_is_bot);
-    if (isBot && tg.ignore_bot_usernames) { stats.skip_bot++; continue; }
+    if (isBot) { stats.skip_bot++; continue; }
     if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) { stats.skip_blocked++; continue; }
 
     const messages = dialog.messages as DialogMessage[];
@@ -1193,8 +1348,7 @@ async function handleMissedRepliesLastDays(
   const tg = campaign.telegram_settings as TelegramSettings;
   const oai = campaign.openai_settings as OpenAISettings;
   const blocked = new Set((tg.blocked_usernames ?? []).map((u) => u.trim().toLowerCase().replace(/^@/, '')));
-  const lookbackMs = 3 * 24 * 60 * 60 * 1000;
-  const cutoffIso = new Date(Date.now() - lookbackMs).toISOString();
+  const cutoffIso = new Date(Date.now() - CATCHUP_LOOKBACK_MS).toISOString();
 
   const { data: dialogs, error: cErr } = await db
     .from('tg_outreach_dialogs')
@@ -1203,6 +1357,9 @@ async function handleMissedRepliesLastDays(
     .eq('account_id', account.id)
     .eq('status', 'none')
     .eq('can_send', true)
+    // Тот же запрет, что у напоминаний: старые строки со служебным чатом
+    // Telegram не должны получать догоняющих ответов.
+    .neq('tg_user_id', TG_SERVICE_NOTIFICATIONS_USER_ID)
     .gte('last_message_at', cutoffIso)
     .order('last_message_at', { ascending: true })
     .limit(200);
@@ -1212,7 +1369,7 @@ async function handleMissedRepliesLastDays(
     return;
   }
   if (!dialogs?.length) {
-    log('info', `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up) — нет диалогов за последние 3 дня, где пользователь написал последним`);
+    log('info', `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up) — нет диалогов за последние ${CATCHUP_LOOKBACK_DAYS} дн., где пользователь написал последним`);
     return;
   }
 
@@ -1235,7 +1392,7 @@ async function handleMissedRepliesLastDays(
     const tgUserId = dialog.tg_user_id as number;
     const tgUsername = dialog.tg_username as string | null;
     const isBot = Boolean(dialog.tg_is_bot);
-    if (isBot && tg.ignore_bot_usernames) { skipBot++; continue; }
+    if (isBot) { skipBot++; continue; }
     if (tgUsername && blocked.has(tgUsername.toLowerCase().replace(/^@/, ''))) { skipBlocked++; continue; }
 
     const messages = Array.isArray(dialog.messages) ? (dialog.messages as DialogMessage[]) : [];
@@ -1314,7 +1471,7 @@ async function handleMissedRepliesLastDays(
   // Always emit a summary so the operator can confirm catch-up actually ran.
   log(
     'info',
-    `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up за 3 дня) — проверил ${processed} диалогов, отправил ${replied} ответов.` +
+    `Аккаунт ${account.session_name}: проверка пропущенных ответов (catch-up за ${CATCHUP_LOOKBACK_DAYS} дн.) — проверил ${processed} диалогов, отправил ${replied} ответов.` +
       (skipBot || skipBlocked || skipEmpty || skipLastNotUser || skipOpenaiEmpty || skipLowValue || skipRepeat || skipCloser
         ? ' Не отправил по причинам:'
         : '') +
@@ -1461,19 +1618,88 @@ export async function runCampaignLoop(
     return;
   }
 
-  const { data: accounts } = await db
+  const { data: allAccounts } = await db
     .from('tg_outreach_accounts')
     .select('*')
     .eq('campaign_id', campaignId)
     .eq('is_active', true);
 
-  if (!accounts?.length) {
-    log('error', 'Нет активных аккаунтов в кампании — поставил на паузу. Как только включите хотя бы один аккаунт, кампания возобновится автоматически.');
+  /**
+   * Греющиеся в бой не идут.
+   *
+   * Раньше прогрев останавливал кампанию целиком: его запуск переводил статус в
+   * `warming`, и рассылка вставала у всех. Пользоваться этим было нельзя, и
+   * новые аккаунты шли в бой с первого дня — там, где живут около тридцати
+   * писем. Теперь прогрев — свойство аккаунта: кампания продолжает рассылать
+   * готовыми, пока новички греются рядом.
+   *
+   * Отбор по времени, а не по флагу: срок истёк — аккаунт боевой без единого
+   * действия оператора.
+   */
+  const nowMs = Date.now();
+  const isWarming = (a: OutreachAccount, now: number): boolean => {
+    const until = a.warmup_until ? new Date(a.warmup_until).getTime() : NaN;
+    return Number.isFinite(until) && until > now;
+  };
+  /**
+   * Отлёжка после смены имени — в бой тоже не идут.
+   *
+   * Отдельно от прогрева, потому что это разные состояния: греющийся ещё не
+   * готов, а отлёживающийся уже настроен и ждёт, пока Telegram перестанет
+   * видеть в нём свежепереименованный аккаунт. Греться ему при этом можно —
+   * поэтому фильтр стоит здесь, а не в круге прогрева.
+   */
+  const isResting = (a: OutreachAccount, now: number): boolean => {
+    const until = a.profile_rest_until ? new Date(a.profile_rest_until).getTime() : NaN;
+    return Number.isFinite(until) && until > now;
+  };
+  /** Готов рассылать прямо сейчас: не греется и не отлёживается. */
+  const isFree = (a: OutreachAccount, now: number): boolean => !isWarming(a, now) && !isResting(a, now);
+
+  const warmingNow = (allAccounts ?? []).filter((a) => isWarming(a as OutreachAccount, nowMs));
+  const restingNow = (allAccounts ?? []).filter(
+    (a) => !isWarming(a as OutreachAccount, nowMs) && isResting(a as OutreachAccount, nowMs),
+  );
+  const accounts = (allAccounts ?? []).filter((a) => isFree(a as OutreachAccount, nowMs));
+
+  if (warmingNow.length) {
+    log('info', `На прогреве ${warmingNow.length} аккаунтов — в боевую рассылку их не беру.`);
+  }
+  if (restingNow.length) {
+    log('info', `Отлёживаются после смены профиля ${restingNow.length} аккаунтов — в боевую рассылку их не беру.`);
+  }
+
+  /**
+   * Все заняты временно — ждём в цикле, а не уходим в паузу.
+   *
+   * Пауза здесь означала смерть до перезагрузки воркера: `resumeRunningCampaigns`
+   * поднимает paused-кампании только на старте процесса (см. `worker/tgOutreach`),
+   * а не по расписанию. Партию настраивают вечером — заливают, заполняют профили,
+   * включают, запускают, — и к этому моменту все аккаунты в отлёжке; кампания
+   * вставала намертво, хотя через полсуток рассылать было бы кем. Прогрев — тот
+   * же случай.
+   *
+   * Отсутствие включённых аккаунтов — по-прежнему пауза: там ждать нечего,
+   * пока оператор не включит хотя бы один.
+   */
+  const busyOnly = !accounts.length && Boolean(warmingNow.length || restingNow.length);
+  if (!accounts.length && !busyOnly) {
+    log(
+      'error',
+      'Нет активных аккаунтов в кампании — поставил на паузу. Как только включите хотя бы один аккаунт, кампания возобновится автоматически.',
+    );
     // Use paused (not error) so resumeRunningCampaigns retries us automatically
     // once accounts become active again, instead of leaving the campaign stuck.
     const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId);
     if (stErr) log('error', `Не смог записать статус "на паузе" в базу данных — ${stErr.message}`);
     return;
+  }
+  if (busyOnly) {
+    log(
+      'warning',
+      `Рассылать пока некем: ${warmingNow.length} на прогреве, ${restingNow.length} отлёживаются после смены профиля. `
+        + 'Кампанию не останавливаю — жду и перечитываю состав каждую минуту, круг возьмёт их сам, как только срок выйдет.',
+    );
   }
 
   const { data: proxies } = await db
@@ -1482,12 +1708,30 @@ export async function runCampaignLoop(
     .eq('campaign_id', campaignId)
     .eq('is_active', true);
 
-  // Собственные аккаунты кампании. После прогрева (см. warmup/) у них остаются
-  // диалоги друг с другом, и без этого фильтра боевой цикл принял бы свой же
-  // аккаунт за лида: сгенерировал бы продающий ответ, сработал бы триггер и
-  // переписка ушла бы в рабочий чат как заявка.
+  /**
+   * Собственные аккаунты кампании — ВСЕ, а не только те, кто сейчас в круге.
+   *
+   * После прогрева (см. warmup/) у аккаунтов остаются диалоги друг с другом, и
+   * без этого фильтра боевой цикл принимает свой же аккаунт за лида:
+   * генерирует продающий ответ, срабатывает триггер, и переписка про погоду и
+   * сериалы уходит в рабочий чат как заявка.
+   *
+   * Список строился из `accounts` — уже отфильтрованных: без выключенных, без
+   * греющихся, без отлёживающихся. Все трое — наши же аккаунты, и именно с
+   * ними чаще всего остаётся незакрытая переписка: греется как раз тот, кто в
+   * бою не участвует. 10.09.2026 боевой аккаунт так отвечал выключенному
+   * напарнику по прогреву, и переписка висела в «Диалогах» с кнопкой
+   * «Передать лида».
+   *
+   * Поэтому спрашиваем базу отдельно и без единого условия: своим аккаунт
+   * остаётся независимо от того, включён он, греется или стоит на паузе.
+   */
+  const { data: ownRows } = await db
+    .from('tg_outreach_accounts')
+    .select('tg_user_id')
+    .eq('campaign_id', campaignId);
   const ownTgUserIds = new Set(
-    (accounts as OutreachAccount[])
+    ((ownRows ?? []) as Array<{ tg_user_id: number | null }>)
       .map((a) => a.tg_user_id)
       .filter((v): v is number => typeof v === 'number'),
   );
@@ -1516,9 +1760,15 @@ export async function runCampaignLoop(
   // соседние. Замыкание читает `clients` в момент вызова, поэтому переживает
   // переподключение ниже.
   if (control) control.forceDisconnect = () => disconnectAll(clients);
-  log('info', `Подключились ${clients.length} из ${accounts.length} аккаунтов${clients.length < accounts.length ? ` (остальные с ошибками подключения, смотри строки выше)` : ''}`);
+  // При пустом составе (все на прогреве или в отлёжке) строка «подключились 0
+  // из 0» только сбивает с толку — про ожидание уже сказано выше.
+  if (accounts.length) {
+    log('info', `Подключились ${clients.length} из ${accounts.length} аккаунтов${clients.length < accounts.length ? ` (остальные с ошибками подключения, смотри строки выше)` : ''}`);
+  }
 
-  if (clients.length === 0) {
+  // Пустой состав из-за прогрева и отлёжки — не сбой подключения: подключать
+  // было некого. Переподключаться незачем, ждём в цикле (см. busyOnly выше).
+  if (accounts.length && clients.length === 0) {
     log('warning', 'Ни один аккаунт не подключился — пробую ещё раз через 60 секунд');
     await interruptibleSleep(60_000, shouldStop);
     if (shouldStop()) return;
@@ -1538,6 +1788,128 @@ export async function runCampaignLoop(
     if (stErr) log('error', `Не смог записать статус "запущена" в базу данных — ${stErr.message}`);
   }
 
+  /**
+   * Состав круга перечитывается на каждом круге, а не фиксируется на старте.
+   *
+   * До 09.09.2026 список аккаунтов читался один раз, перед первым кругом, и
+   * дальше цикл гонял ровно его. Из-за этого «как только срок выйдет, круг
+   * подхватит его сам» из подсказки в портале было неправдой: аккаунт,
+   * вышедший из прогрева или отлёжки, ждал перезапуска кампании — то есть
+   * деплоя или ручного стоп-старта. Симметрично не работало и обратное:
+   * выключенный оператором аккаунт продолжал рассылать до конца запуска, а
+   * отлёжка, назначенная кругом при смене профиля, на этот же запуск не
+   * действовала — аккаунт оставался в составе и писал дальше.
+   *
+   * Раз в круг, а не чаще: состав меняется руками оператора, минута задержки
+   * тут ничего не решает, а лишний запрос на каждый аккаунт — решает.
+   */
+  const refreshRoster = async (): Promise<void> => {
+    const { data: rows, error } = await db
+      .from('tg_outreach_accounts')
+      .select('*')
+      .eq('campaign_id', campaignId)
+      .eq('is_active', true);
+    if (error) {
+      log('warning', `Не смог перечитать состав аккаунтов — ${error.message}. Иду прежним составом.`);
+      return;
+    }
+
+    const now = Date.now();
+    const free = ((rows ?? []) as OutreachAccount[]).filter((a) => isFree(a, now));
+    const freeIds = new Set(free.map((a) => a.id));
+    const inRound = new Set(clients.map((c) => c.account.id));
+
+    /**
+     * Соединения ушедших рвём, а не оставляем висеть: сессия одна на аккаунт, и
+     * если он ушёл на прогрев, второе подключение к ней встретит
+     * AUTH_KEY_DUPLICATED — Telegram выключит аккаунт (см. gramClient).
+     */
+    const leaving = clients.filter((c) => !freeIds.has(c.account.id));
+    if (leaving.length) {
+      clients = clients.filter((c) => freeIds.has(c.account.id));
+      log(
+        'info',
+        `Из круга выходят ${leaving.length}: ${leaving.map((c) => c.account.session_name).join(', ')} — `
+          + 'выключены оператором, ушли на прогрев или в отлёжку. Разрываю их соединения.',
+      );
+      await disconnectAll(leaving);
+    }
+
+    const joining = free.filter((a) => !inRound.has(a.id));
+    if (!joining.length) return;
+
+    /**
+     * Прокси перечитываем вместе с аккаунтами: список читался один раз на
+     * старте, а новичку прокси назначают вместе с включением — без этого он
+     * подключался бы «без прокси», то есть с IP сервера.
+     */
+    const { data: freshProxies } = await db
+      .from('tg_outreach_proxies')
+      .select('*')
+      .eq('campaign_id', campaignId)
+      .eq('is_active', true);
+    const proxyList = (freshProxies ?? proxies ?? []) as OutreachProxy[];
+    for (const p of proxyList) proxyMap.set(p.id, p);
+
+    const added = await buildClients(orderByStaleness(joining), proxyList, log, downloadSessionFile, db);
+    for (const entry of added) {
+      clients.push(entry);
+      // Свой аккаунт остальные обязаны опознавать как свой, иначе переписка с
+      // ним уедет в рабочий чат как заявка (см. ownTgUserIds выше).
+      if (typeof entry.account.tg_user_id === 'number') ownTgUserIds.add(entry.account.tg_user_id);
+    }
+    log(
+      'info',
+      `В круг добавлены ${added.length} из ${joining.length} освободившихся аккаунтов`
+        + (added.length ? `: ${added.map((c) => c.account.session_name).join(', ')}` : ' (остальные не подключились, смотри строки выше)'),
+    );
+  };
+
+  /**
+   * Ручные передачи лидов и партнёров — отдельным опросом, а не по ходу круга.
+   *
+   * Все аккаунты подключены с этого момента и до конца запуска, а круг с
+   * паузами 5–10 минут между аккаунтами и «тихим часом» ночью доходит до
+   * нужного аккаунта часами: 01.09.2026 лид, поставленный в 19:26, ушёл в
+   * 08:57. Опрос берёт клиент из `clients` в момент отправки — круг
+   * пересоздаёт клиенты на мёртвых сокетах, и нужен свежий.
+   *
+   * `forwardsStopped` поднимаем в `finally` перед разрывом сокетов: иначе
+   * опрос успел бы взять задачу на закрывающемся клиенте.
+   */
+  let forwardsStopped = false;
+  const forwardPoller = runLeadForwardPoller({
+    db,
+    campaignId,
+    getClient: (accountId) => {
+      const entry = clients.find((c) => c.account.id === accountId);
+      return entry ? { client: entry.client, accountName: entry.account.session_name } : null;
+    },
+    /**
+     * Кем подменить, когда свой аккаунт не отвечает или под ограничением
+     * (PEER_FLOOD). Отбор — общий `pickSpareClient`, им же пользуется и
+     * автопересылка по триггеру.
+     */
+    getFallbackClient: (excludeAccountId) => pickSpareClient(clients, excludeAccountId),
+    reconnect: async (accountId) => {
+      const entry = clients.find((c) => c.account.id === accountId);
+      if (!entry) return false;
+      const proxy = entry.account.proxy_id ? proxyMap.get(entry.account.proxy_id) ?? null : null;
+      try {
+        entry.client = await reconnectClient(entry.account, proxy, entry.client, downloadSessionFile);
+        return true;
+      } catch {
+        // Не помогло — значит дело не в сокете. Очередь и дальше отсчитывает
+        // свои попытки, просто уже без надежды на свежее соединение.
+        return false;
+      }
+    },
+    log,
+    shouldStop: () => forwardsStopped || shouldStop(),
+  }).catch((err) => {
+    log('warning', `Опрос очереди передач остановился с ошибкой — ${err instanceof Error ? err.message : String(err)}. Передачи уйдут после перезапуска кампании.`);
+  });
+
   const offsetErrorCounts = new Map<string, number>();
   // Separate counter for the gramJS internal pagination bug — `getDialogs`
   // throws RangeError ("offset out of range") on accounts with thousands of
@@ -1546,10 +1918,81 @@ export async function runCampaignLoop(
   // so we no longer retry. Instead we track consecutive failures per account
   // and put chronic offenders on a 6h cooldown so the operator can act.
   const pagingFailureCounts = new Map<string, number>();
+
+  /**
+   * Сколько кругов подряд аккаунт не резолвнул ни одного ника из порции.
+   *
+   * Заморозка Telegram глушит аккаунту резолв юзернеймов и при этом не
+   * называется никак: в ошибке приходит обычное «юзернейм не найден», @SpamBot
+   * молчит (он отвечает только про спам-блок), в профиле флага нет. Отличить
+   * такой аккаунт от невезения с мёртвыми никами можно только по истории — на
+   * одной порции это неразличимо, поэтому счётчик живёт здесь, в круге.
+   *
+   * 02.09.2026 в ATOL-1 таких аккаунтов было пятнадцать из одной партии: за
+   * неделю ноль отправленных первых касаний при 205 отложенных, тогда как
+   * остальные восемнадцать рассылали с той же очереди.
+   */
+  /**
+   * Счётчик живёт в строке аккаунта (миграция 20260906_0001), а не здесь.
+   *
+   * В памяти он не работал: круг перезапускается от остановки, передеплоя и
+   * переподключения, а до отдельного аккаунта за один запуск доходит один-два
+   * раза — порога в два пустых круга подряд не достигал никто. Одиннадцать
+   * замороженных аккаунтов ATOL-1 неделями числились исправными.
+   */
+  const readBlankRounds = (account: OutreachAccount): number => account.resolve_blank_rounds ?? 0;
+
+  const writeBlankRounds = async (account: OutreachAccount, value: number) => {
+    if (readBlankRounds(account) === value) return;
+    account.resolve_blank_rounds = value;
+    const { error } = await db
+      .from('tg_outreach_accounts')
+      .update({ resolve_blank_rounds: value })
+      .eq('id', account.id);
+    // Не смогли записать — счётчик просто не сдвинется, и диагноз отложится на
+    // круг. Ронять из-за этого рассылку нечем: она к резолву не привязана.
+    if (error) log('error', `Не смог записать счётчик пустых резолвов — ${error.message}`);
+  };
+
+  /**
+   * Контакты, уже разобранные кем-то в текущем проходе по аккаунтам.
+   *
+   * Порция первого касания добирается до нормы, а неудачный контакт остаётся
+   * `pending`. Без общей отметки следующий аккаунт того же прохода взял бы
+   * ровно те же ники — и повторил бы ту же работу, только с другого номера.
+   * Набор обнуляется на каждом новом проходе: через сутки контакт стоит
+   * попробовать снова, но не через десять минут.
+   */
+  let claimedContacts = new Set<string>();
+
+  /**
+   * Замок вокруг выбора контактов из очереди.
+   *
+   * Аккаунты идут параллельно, а между чтением очереди и пометкой «занято»
+   * есть обращение к базе. Без замка двое успевают прочитать одну и ту же
+   * порцию и написать одному человеку с разных номеров — для получателя это
+   * очевидная рассылка, а для нас сожжённый контакт и лишняя жалоба.
+   *
+   * Держит он только выборку: отправка идёт параллельно, ради чего всё и
+   * затевалось. Очередь из промисов вместо настоящего мьютекса потому, что
+   * поток один — достаточно выстроить желающих в цепочку.
+   */
+  let claimChain: Promise<unknown> = Promise.resolve();
+  const withClaimLock = <T,>(fn: () => Promise<T>): Promise<T> => {
+    const next = claimChain.then(fn, fn);
+    claimChain = next.catch(() => {});
+    return next;
+  };
+  /** После скольких пустых кругов подряд уводим аккаунт на паузу. */
+  const RESOLVE_BLOCKED_LIMIT = 2;
   // Stays true while we're inside a sleep_periods window so we can emit a
   // matching "сон закончился" line when it ends (otherwise users see only
   // the start of the silence and can't tell when work resumed).
   let inSleepPeriod = false;
+  // Та же логика, что у inSleepPeriod: «рассылать некем» пишем один раз на
+  // вход в простой, а не каждую минуту ожидания — иначе за ночь отлёжки журнал
+  // кампании состоит из этой строки.
+  let idleAnnounced = false;
 
   try {
     while (!shouldStop()) {
@@ -1568,6 +2011,23 @@ export async function runCampaignLoop(
         inSleepPeriod = false;
       }
 
+      // Состав круга — заново на каждом круге, до всей остальной работы:
+      // освободившиеся попадут уже в этот круг, ушедшие в него не попадут.
+      await refreshRoster();
+      if (!clients.length) {
+        if (!idleAnnounced) {
+          log(
+            'warning',
+            'Рассылать некем: все аккаунты выключены, на прогреве или в отлёжке. Кампанию не останавливаю — '
+              + 'проверяю состав раз в минуту и возьму в круг первого же освободившегося.',
+          );
+          idleAnnounced = true;
+        }
+        await interruptibleSleep(60_000, shouldStop);
+        continue;
+      }
+      idleAnnounced = false;
+
       let blockedUserIds: Set<number>;
       try {
         blockedUserIds = await loadBlockedUserIds(db, campaign.user_id);
@@ -1578,9 +2038,37 @@ export async function runCampaignLoop(
       }
 
       let tlSchemaErrorCount = 0;
-      log('info', `Начинаю обход ${clients.length} аккаунтов`);
+      claimedContacts = new Set<string>();
 
-      for (const entry of clients) {
+      /**
+       * Аккаунты обходим параллельно, а не по одному.
+       *
+       * Последовательный обход стоил кампании суток: 49 аккаунтов по ~190 с
+       * работы и ~570 с паузы после каждого — круг длиной 10 часов, из которых
+       * почти 8 приходилось на паузы. Аккаунт отправлял свои три письма раз в
+       * полсуток, при том что живёт он около тридцати писем и вопрос всегда
+       * «успеть до заморозки».
+       *
+       * Ждать друг друга аккаунтам незачем: у каждого своя сессия и свой прокси
+       * со своим IP, и Telegram видит независимые подключения. Пауза защищает
+       * от всплеска активности ОДНОГО аккаунта — поэтому она осталась там же,
+       * между кругами одного и того же аккаунта, а не между разными.
+       *
+       * Одновременность ограничена: полсотни параллельных MTProto-соединений
+       * через один прокси-хост упрутся уже в него, а не в Telegram.
+       */
+      const concurrency = Math.min(
+        Math.max(Number(tg.account_concurrency) || DEFAULT_ACCOUNT_CONCURRENCY, 1),
+        clients.length || 1,
+      );
+      log('info', `Начинаю обход ${clients.length} аккаунтов, одновременно по ${concurrency}`);
+
+      let cursor = 0;
+      const runAccountWorker = async (): Promise<void> => {
+      for (;;) {
+        const entry = clients[cursor];
+        if (!entry || shouldStop()) return;
+        cursor += 1;
         const { account } = entry;
         // `let`, not destructured const: if getDialogs wedges we rebuild the
         // client mid-iteration and must point every downstream call (handleChat,
@@ -1607,6 +2095,7 @@ export async function runCampaignLoop(
           unread: 0,
           not_user: 0,
           own_account: 0,
+          service: 0,
           processed: 0,
           replied: 0,
           flood: 0,
@@ -1628,7 +2117,7 @@ export async function runCampaignLoop(
           // smaller result set reduces the chance gramJS's internal pagination
           // overshoots the dialog count (the "offset out of range" bug, also
           // handled there via a raw single-page GetDialogs fallback).
-          const raceGetDialogs = () => {
+          const raceGetDialogs = (timeoutMs: number) => {
             // Always read entry.client: after a mid-iteration reconnect the
             // retry must hit the fresh client, not the wedged one.
             const loadDialogsPromise = loadOutreachDialogs(entry.client, DIALOGS_FETCH_LIMIT);
@@ -1644,10 +2133,10 @@ export async function runCampaignLoop(
                   () =>
                     reject(
                       new Error(
-                        `${PER_ACCOUNT_TIMEOUT_MARKER} (${PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS / 1000}s) on getDialogs`,
+                        `${PER_ACCOUNT_TIMEOUT_MARKER} (${timeoutMs / 1000}s) on getDialogs`,
                       ),
                     ),
-                  PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS,
+                  timeoutMs,
                 ),
               ),
             ]);
@@ -1656,7 +2145,7 @@ export async function runCampaignLoop(
           let dialogs: helpers.TotalList<Dialog>;
           let usedRawPageFallback: boolean;
           try {
-            ({ dialogs, usedRawPageFallback } = await raceGetDialogs());
+            ({ dialogs, usedRawPageFallback } = await raceGetDialogs(FIRST_DIALOGS_PROBE_TIMEOUT_MS));
           } catch (firstErr) {
             const firstMsg = firstErr instanceof Error ? firstErr.message : String(firstErr);
             // Only the wedged-socket timeout gets the reconnect-and-retry-now
@@ -1675,12 +2164,18 @@ export async function runCampaignLoop(
             const acctRef = `acc_id=${account.id}${account.phone ? ` тел=${account.phone}` : ''}${account.proxy_id ? ` proxy_id=${account.proxy_id}` : ''}`;
             const firstHangSec = ((Date.now() - accountStartMs) / 1000).toFixed(1);
 
-            // Прокси-инцидент №1: getDialogs завис на «мёртвом сокете».
-            // Регистрируем ошибку прокси и при необходимости свапаем — даже
-            // если reconnect ниже потом всё-таки помог. Один и тот же прокси
-            // не должен бесконечно сжигать наш 180с-таймаут на каждом круге.
-            await handleProxyError({ db, account, reason: 'getDialogs_hung', log });
-
+            // Прокси-инцидент №1 регистрируем НЕ здесь, а после повторной
+            // попытки — см. ниже.
+            //
+            // Пока первая попытка ждала три минуты, зависание можно было сразу
+            // считать мёртвым сокетом: столько не грузится ничто живое. С
+            // коротким сроком проверки это перестало быть верным — аккаунт с
+            // тысячами диалогов не укладывается в него честно, и обвинять его
+            // прокси значит свапать исправный адрес каждые три круга.
+            //
+            // Отличает их повторная попытка: по свежему сокету мёртвый случай
+            // отдаёт диалоги мгновенно, а большая почта грузится ровно столько
+            // же, сколько и была. Поэтому ждём её результата.
             const reconnectStartMs = Date.now();
             try {
               entry.client = await reconnectClient(account, proxy, entry.client, downloadSessionFile);
@@ -1705,7 +2200,7 @@ export async function runCampaignLoop(
 
             const retryStartMs = Date.now();
             try {
-              ({ dialogs, usedRawPageFallback } = await raceGetDialogs());
+              ({ dialogs, usedRawPageFallback } = await raceGetDialogs(PER_ACCOUNT_FIRST_CALL_TIMEOUT_MS));
             } catch (secondErr) {
               const secMsg = secondErr instanceof Error ? secondErr.message : String(secondErr);
               const retrySec = ((Date.now() - retryStartMs) / 1000).toFixed(1);
@@ -1725,10 +2220,17 @@ export async function runCampaignLoop(
                   `Похоже на проблему не с сокетом (битая сессия / теневой бан аккаунта / прокси режет MTProto). ${proxyProbeLog}. ${acctRef}`,
               );
             }
+            const retryMs = Date.now() - retryStartMs;
             log(
               'info',
-              `Аккаунт ${account.session_name}: повторная загрузка после переподключения удалась за ${((Date.now() - retryStartMs) / 1000).toFixed(1)}с.`,
+              `Аккаунт ${account.session_name}: повторная загрузка после переподключения удалась за ${(retryMs / 1000).toFixed(1)}с.`,
             );
+            // Свежий сокет отдал то же самое мгновенно — значит висел именно
+            // сокет, а не объём почты. Только теперь это ошибка прокси: один и
+            // тот же адрес не должен сжигать проверку на каждом круге.
+            if (retryMs <= FAST_RETRY_MEANS_DEAD_SOCKET_MS) {
+              await handleProxyError({ db, account, reason: 'getDialogs_hung', log });
+            }
           }
           // Successful fetch — reset the chronic paging failure counter.
           if (pagingFailureCounts.has(account.id)) pagingFailureCounts.delete(account.id);
@@ -1785,6 +2287,9 @@ export async function runCampaignLoop(
                   other_sessions: checkResult.other_sessions ?? [],
                   check_requested_at: null,
                   check_requested_by_name: null,
+                  // Ссылку пишем всегда, в том числе пустую: аккаунт мог
+                  // оттаять, и старый адрес обжалования вводил бы в заблуждение.
+                  freeze_appeal_url: checkResult.freeze_appeal_url ?? null,
                   ...(checkResult.tg_user_id != null ? { tg_user_id: checkResult.tg_user_id } : {}),
                   ...(checkResult.tg_username != null ? { tg_username: checkResult.tg_username } : {}),
                   ...(checkResult.phone ? { phone: checkResult.phone } : {}),
@@ -1806,6 +2311,98 @@ export async function runCampaignLoop(
               // сделать вид, что оператору ответили.
               log('warning', `Аккаунт ${account.session_name}: проверка по заказу (${who}) не удалась — ${msg}. Заказ остался в очереди, повторим в следующем круге.`);
             }
+          }
+
+          /**
+           * Обжалование заморозки — здесь же и по той же причине.
+           *
+           * Заморозку Telegram снимает по обращению, а не по таймеру, подать
+           * его должен сам аккаунт, а зайти в него оператор не может: телефон
+           * остался у продавца. Отправляем этим соединением — отдельное
+           * подключение к той же сессии выключило бы аккаунт.
+           *
+           * Итог пишем всегда, включая отказ: обжалование подают один раз и
+           * ждут ответа неделями, и молчание после нажатия кнопки оператор
+           * прочитает как «ушло».
+           */
+          /**
+           * Заказанная правка профиля — здесь же и по той же причине.
+           *
+           * Ручка профиля открывает своё соединение и потому работает только на
+           * остановленной кампании. Заказ из работающей приземляется сюда: круг
+           * применяет его тем соединением, что уже открыто, и оператору не
+           * приходится ради одного аккаунта останавливать рассылку всем.
+           */
+          if (account.profile_requested_at && account.profile_payload) {
+            const who = account.profile_requested_by_name || 'оператор';
+            const outcome = await applyQueuedProfile({
+              client,
+              payload: account.profile_payload as QueuedProfilePayload,
+              currentUsername: account.tg_username ?? undefined,
+            });
+            const { error: prErr } = await db
+              .from('tg_outreach_accounts')
+              .update({
+                profile_status: outcome.status,
+                profile_detail: outcome.detail.slice(0, 500),
+                profile_applied_at: new Date().toISOString(),
+                profile_requested_at: null,
+                profile_requested_by_name: null,
+                profile_payload: null,
+                // Отлёжка после смены имени — см. PROFILE_REST_HOURS. Своим
+                // полем, а не общим кулдауном: тот останавливает и прогрев, а
+                // греться в эти сутки как раз нужно. Ставим только на успешном
+                // применении: аккаунту, которому профиль не записался,
+                // отлёживаться не за что.
+                ...(outcome.status === 'applied' && outcome.identityChanged
+                  ? { profile_rest_until: new Date(Date.now() + PROFILE_REST_HOURS * 3_600_000).toISOString() }
+                  : {}),
+                // Что реально встало в Telegram — оттуда же, из ответа: заказ и
+                // результат расходятся, когда ник занят или значение подрезано.
+                ...(outcome.applied
+                  ? {
+                      first_name: outcome.applied.first_name,
+                      last_name: outcome.applied.last_name,
+                      bio: outcome.applied.bio,
+                      tg_username: outcome.applied.tg_username || null,
+                      profile_synced_at: new Date().toISOString(),
+                    }
+                  : {}),
+              })
+              .eq('id', account.id);
+            if (prErr) {
+              log('warning', `Аккаунт ${account.session_name}: профиль применён, но итог не записался — ${prErr.message}`);
+            }
+            log(
+              outcome.status === 'applied' ? 'info' : 'warning',
+              `Аккаунт ${account.session_name}: правка профиля по заказу (${who}) — ${outcome.detail}`,
+            );
+          }
+
+          if (account.appeal_requested_at) {
+            const who = account.appeal_requested_by_name || 'оператор';
+            const outcome = await sendFreezeAppeal({
+              client,
+              appealUrl: account.freeze_appeal_url,
+              text: account.appeal_text ?? '',
+            });
+            const { error: apErr } = await db
+              .from('tg_outreach_accounts')
+              .update({
+                appeal_status: outcome.status,
+                appeal_detail: outcome.detail.slice(0, 500),
+                appealed_at: new Date().toISOString(),
+                appeal_requested_at: null,
+                appeal_requested_by_name: null,
+              })
+              .eq('id', account.id);
+            if (apErr) {
+              log('warning', `Аккаунт ${account.session_name}: обжалование отработало, но итог не записался — ${apErr.message}`);
+            }
+            log(
+              outcome.status === 'sent' ? 'info' : 'warning',
+              `Аккаунт ${account.session_name}: обжалование по заказу (${who}) — ${outcome.detail}`,
+            );
           }
           if (usedRawPageFallback) {
             log(
@@ -1831,9 +2428,20 @@ export async function runCampaignLoop(
               cycleStats.own_account++;
               continue;
             }
+            // Коды входа и сервисные уведомления: непрочитанный чат с 777000
+            // есть у каждого аккаунта после логина, но собеседником он не
+            // является — на него не должно тратиться ни GPT-обращение, ни
+            // строка в списке диалогов.
+            if (Number(dialog.entity.id) === TG_SERVICE_NOTIFICATIONS_USER_ID) {
+              cycleStats.service++;
+              continue;
+            }
 
             try {
-              const r = await handleChat(client, account, dialog, campaign as OutreachCampaign, db, log, shouldStop, { blockedUserIds });
+              const r = await handleChat(client, account, dialog, campaign as OutreachCampaign, db, log, shouldStop, {
+                blockedUserIds,
+                getSpareClient: (excludeId) => pickSpareClient(clients, excludeId),
+              });
               cycleStats.processed++;
               if (r.replied) cycleStats.replied++;
             } catch (err: unknown) {
@@ -1919,6 +2527,7 @@ export async function runCampaignLoop(
               `Обработано ${cycleStats.processed} непрочитанных из ${cycleStats.unread}, отправлено ${cycleStats.replied} ответов. ` +
               `Пропуски: групп/каналов ${cycleStats.not_user}, ошибок ${cycleStats.errors}` +
               (cycleStats.own_account ? `, своих аккаунтов кампании ${cycleStats.own_account}` : '') +
+              (cycleStats.service ? `, служебных чатов Telegram ${cycleStats.service}` : '') +
               (cycleStats.flood ? `, паузы из-за Flood ${cycleStats.flood}` : '') +
               '.',
           );
@@ -2091,24 +2700,8 @@ export async function runCampaignLoop(
           }
         }
 
-        // Ручные передачи лидов и партнёров: оператор поставил их из интерфейса,
-        // отправить может только живое соединение — оно здесь.
-        try {
-          await processLeadForwards({
-            db,
-            client,
-            accountId: account.id,
-            accountName: account.session_name,
-            log,
-            shouldStop,
-          });
-        } catch (err) {
-          // Передача лида не должна ронять круг: аутрич важнее и уже отработал.
-          log(
-            'warning',
-            `Аккаунт ${account.session_name}: очередь передач не отработала — ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
+        // Ручные передачи лидов здесь больше не разбираем — их шлёт отдельный
+        // опрос очереди (см. runLeadForwardPoller выше), не дожидаясь круга.
 
         // Первое касание — после разбора входящих и только этим же аккаунтом:
         // отвечать на ответ обязан тот, кто написал первым.
@@ -2119,18 +2712,58 @@ export async function runCampaignLoop(
             campaignId,
             account,
             perDay: tg.first_touch_per_account_per_day,
-            maxChars: tg.first_touch_max_chars,
+            gapMinutes: tg.first_touch_gap_minutes,
+            perGap: tg.first_touch_per_gap,
+            // maxChars не передаём: порог один на все кампании, см. resolveMaxChars.
             cooldownHours: tg.account_cooldown_hours,
             log,
             shouldStop,
             onProgress: tick,
             gapMs: randomRange(tg.read_reply_delay_range) * 1000,
+            claimed: claimedContacts,
+            claimLock: withClaimLock,
           });
           if (ft.sent || ft.skipped || ft.postponed) {
             log(
               'info',
               `Аккаунт ${account.session_name}: первое касание — отправлено ${ft.sent}, пропущено ${ft.skipped}, отложено ${ft.postponed}`,
             );
+          }
+
+          // Ушедшее сообщение доказывает, что резолв у аккаунта работает —
+          // счётчик пустых кругов обнуляем.
+          if (ft.sent > 0) await writeBlankRounds(account, 0);
+          else if (ft.resolveBlocked) {
+            const blanks = readBlankRounds(account) + 1;
+            await writeBlankRounds(account, blanks);
+            if (blanks >= RESOLVE_BLOCKED_LIMIT) {
+              const detail =
+                `ВРЕМЕННОЕ ограничение — аккаунт не резолвит юзернеймы: ${blanks} круга подряд ` +
+                'ни один ник из порции не нашёлся, при том что другие аккаунты кампании с той же ' +
+                'очереди рассылают. Так выглядит заморозка Telegram: @SpamBot про неё не отвечает, ' +
+                'кода ошибки нет. Проверьте аккаунт в официальном приложении — при заморозке там ' +
+                'висит баннер с кнопкой обжалования.';
+              const parked = await parkAccountAfterLimit({
+                db,
+                account,
+                hours: tg.account_cooldown_hours,
+                reason: 'резолв юзернеймов не работает',
+                log,
+                // Бота не спрашиваем: он уже отвечал «ограничений нет» на
+                // каждом из этих кругов — про заморозку он не знает.
+                client: null,
+                inferred: { status: 'restricted', detail },
+              });
+              await writeBlankRounds(account, 0);
+              if (parked.parked) {
+                log(
+                  'warning',
+                  `Аккаунт ${account.session_name}: ${detail} Аккаунт на паузе до ` +
+                    `${new Date(parked.untilIso).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}, ` +
+                    'контакты остаются в очереди нетронутыми.',
+                );
+              }
+            }
           }
         } catch (err) {
           // Первое касание не должно ронять круг: аутрич по существующим
@@ -2164,6 +2797,9 @@ export async function runCampaignLoop(
         await interruptibleSleep(accountDelay, shouldStop);
         tick();
       }
+      };
+
+      await Promise.all(Array.from({ length: concurrency }, () => runAccountWorker()));
 
       if (tlSchemaErrorCount > 0 && tlSchemaErrorCount >= clients.length) {
         const tlBackoff = 300_000;
@@ -2196,7 +2832,12 @@ export async function runCampaignLoop(
       }
     }
   } finally {
+    forwardsStopped = true;
     await disconnectAll(clients);
+    // Опрос выходит сам по флагу выше, не позже чем через секунду; зависшая
+    // отправка ограничена своим таймаутом. Дождаться его надо: иначе он
+    // допишет статус задачи уже после строки «Кампания остановлена».
+    await forwardPoller;
     // On worker shutdown we must preserve campaign status (running/paused), otherwise
     // auto-resume on the next worker start will skip it.
     // Explicit stop is handled by worker handler which sets status=stopped before signaling stop.

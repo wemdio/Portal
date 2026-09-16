@@ -67,6 +67,14 @@ const FIELD_PAYMENT_DATE = 'Дата оплаты продления';
 const FIELD_DEAL_TYPE = 'Тип вторичной сделки';
 /** Поле «KPI проекта» — свободный текст («20 лидов», «-»), не число. */
 const FIELD_KPI = 'KPI проекта';
+/**
+ * Поле «Ответственный лид» — кто ведёт клиента по продлению.
+ *
+ * Это НЕ ответственный за сделку в AMO (`responsible_name`, он же «менеджер» в
+ * таблице): менеджер заводит и двигает карточку, а лид отвечает за отношения с
+ * клиентом. Заполнено у всех 19 карточек с полями, значение — телеграм-ник.
+ */
+const FIELD_OWNER_LEAD = 'Ответственный лид';
 /** Поле «Дата окончания оплаченного периода» — конец ПРЕДЫДУЩЕГО периода. */
 const FIELD_PAID_UNTIL = 'Дата окончания оплаченного периода';
 
@@ -258,6 +266,7 @@ export function mapAmoRenewals(
       kpi_fact: readCustomField(lead.raw, FIELD_KPI),
       status: lead.status_name,
       manager: lead.responsible_name,
+      owner_lead: readCustomField(lead.raw, FIELD_OWNER_LEAD),
       specialist: null,
     });
   }

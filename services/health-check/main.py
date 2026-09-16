@@ -54,6 +54,10 @@ except ImportError:
 PORTAL_URL = os.environ.get("HEALTH_PORTAL_URL", "https://polza-portal.ru")
 DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL")
 INSTANTLY_DATABASE_URL = os.environ.get("INSTANTLY_DATABASE_URL")
+# Аналитический датасет instantly_dataset — отдельный Postgres, НЕ операционная
+# instantly-БД выше. Нужен утреннему разбору ночного синка; в контейнер попадает
+# из общего .env (env_file), как и в приложение.
+INSTANTLY_DATASET_DB_URL = os.environ.get("INSTANTLY_DATASET_DB_URL")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_HEALTH_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_HEALTH_CHAT_ID")
 HTTP_TIMEOUT = int(os.environ.get("HEALTH_HTTP_TIMEOUT_SEC", "15"))
@@ -2759,6 +2763,407 @@ async def run_li_outreach_report() -> None:
     await send_telegram("\n".join(lines), force=True)
 
 
+# ── Ежедневный отчёт по каталогу Яндекс.Карт (08:00 МСК) ────────────────────
+#
+# Каталог пополняется двумя фоновыми процессами воркера portal-worker-yandexmaps,
+# у которых нет «времени запуска»: обход новых организаций (discovery) идёт всё
+# время, пока воркер не занят ручными задачами, и упирается в дневной лимит;
+# обновление старых карточек (refresh) — по своей очереди. Оба ходят в Яндекс
+# через прокси-пул воркера, и когда пул умирает, оба молча дают ноль.
+#
+# 28.08.2026 так и случилось: пять дней подряд каждый скан падал с
+# ERR_PROXY_CONNECTION_FAILED, новых компаний — ноль, обновлений — ноль, и
+# никто не узнал до 02.09. Проверка живых прокси в этом боте не помогла бы:
+# она смотрит PROXY_URLS, а воркер Карт при наличии YANDEXMAPS_PROXY_URLS
+# берёт его. Поэтому здесь проверяется результат, а не инструмент: сколько
+# сканов и обновлений прошло за сутки и чем кончались упавшие.
+YANDEXMAPS_REPORT_COMMAND_TIMEOUT_SEC = 60
+# Доля упавших сканов, с которой сутки считаются проблемными даже при
+# ненулевом результате: половина пула мёртвая — это уже не «бывает».
+YANDEXMAPS_ERROR_SHARE_WARN = 0.5
+
+
+def _yandexmaps_verdict(
+    scans: int, failed: int, found_new: int, reserved: int, completed: int,
+) -> tuple[str, str]:
+    """Оценка суток каталога: (значок, причина).
+
+    Вынесено из отчёта, чтобы порог менялся в одном месте, а не по тексту
+    сообщения. 🔴 — синк не прошёл, 🟠 — прошёл с натяжкой, 🟢 — норма.
+    """
+    if scans == 0:
+        return "🔴", "обход новых организаций за сутки не запускался ни разу"
+    if failed >= scans:
+        return "🔴", "все сканы упали — новых организаций ноль"
+    if reserved > 0 and completed == 0:
+        return "🔴", "обновление карточек не прошло: зарезервировано, выполнено 0"
+    if failed / scans >= YANDEXMAPS_ERROR_SHARE_WARN:
+        return "🟠", f"упало {failed} из {scans} сканов"
+    if found_new == 0:
+        return "🟠", "сканы прошли, но новых организаций не нашлось"
+    return "🟢", "норма"
+
+
+async def run_yandexmaps_catalog_report() -> None:
+    """Ежедневная сводка каталога Яндекс.Карт → health-бот (08:00 МСК).
+
+    Окно — последние 24 часа по сканам (у обхода нет расписания) и вчерашний
+    день МСК по обновлению карточек (счётчик ведётся по дням). Сообщение
+    уходит всегда: тихий день должен отличаться от тихой поломки бота.
+    """
+    try:
+        conn = await asyncpg.connect(
+            DATABASE_URL, **_connect_kwargs(YANDEXMAPS_REPORT_COMMAND_TIMEOUT_SEC)
+        )
+    except Exception as e:
+        await send_telegram(
+            f"🗺 <b>Каталог Яндекс.Карт</b>\nНе смог подключиться к БД для отчёта: "
+            f"{_normalize_network_error(e)}",
+            force=True,
+        )
+        return
+    try:
+        scan = await conn.fetchrow(
+            """
+            select count(*)::int as scans,
+                   count(*) filter (where last_error is not null)::int as failed,
+                   coalesce(sum(last_found_new), 0)::int as found_new,
+                   coalesce(sum(last_seen_links), 0)::int as seen_links
+              from public.yandex_maps_catalog_discovery_queue
+             where last_scanned_at >= now() - interval '24 hours'
+            """
+        )
+        # Ошибки группируем по сути, а не по тексту: в тексте зашит URL запроса,
+        # и один и тот же мёртвый прокси даёт сотни «разных» строк.
+        errors = await conn.fetch(
+            """
+            select case
+                     when last_error like '%ERR_PROXY_CONNECTION_FAILED%' then 'прокси не соединяется (ERR_PROXY_CONNECTION_FAILED)'
+                     when last_error ilike '%timeout%' then 'таймаут'
+                     when last_error like '%Сервис yandexmaps недоступен%' then 'сервис yandexmaps недоступен'
+                     else left(regexp_replace(last_error, ' at https?://\\S+', ''), 120)
+                   end as reason,
+                   count(*)::int as n
+              from public.yandex_maps_catalog_discovery_queue
+             where last_scanned_at >= now() - interval '24 hours'
+               and last_error is not null
+             group by 1
+             order by 2 desc
+             limit 3
+            """
+        )
+        refresh = await conn.fetchrow(
+            """
+            select coalesce(reserved_rows, 0)::int as reserved,
+                   coalesce(completed_rows, 0)::int as completed
+              from public.yandex_maps_catalog_refresh_daily
+             where day = ((now() at time zone 'Europe/Moscow')::date - 1)
+            """
+        )
+    except Exception as e:
+        await send_telegram(
+            f"🗺 <b>Каталог Яндекс.Карт</b>\nОтчёт не собрался: "
+            f"<code>{html.escape(_format_exception_message(e))}</code>",
+            force=True,
+        )
+        return
+    finally:
+        await conn.close()
+
+    scans = int(scan["scans"] or 0)
+    failed = int(scan["failed"] or 0)
+    found_new = int(scan["found_new"] or 0)
+    seen_links = int(scan["seen_links"] or 0)
+    reserved = int(refresh["reserved"] or 0) if refresh else 0
+    completed = int(refresh["completed"] or 0) if refresh else 0
+
+    icon, reason = _yandexmaps_verdict(scans, failed, found_new, reserved, completed)
+    title = "синк не прошёл" if icon == "🔴" else ("синк с проблемами" if icon == "🟠" else "синк прошёл")
+
+    lines = [
+        f"{icon} <b>Каталог Яндекс.Карт: {title}</b> — {_now_msk()}",
+        f"Обход за 24 ч: сканов {scans}, упало {failed}, "
+        f"ссылок просмотрено {seen_links}, <b>новых организаций {found_new}</b>",
+        f"Обновление карточек за вчера: зарезервировано {reserved}, выполнено {completed}",
+    ]
+    if icon != "🟢":
+        lines.append(f"Причина: {reason}")
+    if failed and errors:
+        lines.append("Ошибки сканов:")
+        for row in errors:
+            lines.append(f"• {html.escape(str(row['reason']))} — {row['n']}")
+        if any("прокси" in str(row["reason"]) for row in errors):
+            lines.append(
+                "Похоже, умер прокси-пул воркера Карт. Проверить: "
+                "<code>docker exec portal-worker-yandexmaps printenv YANDEXMAPS_PROXY_URLS PROXY_URLS</code>, "
+                "после правки .env пересоздать воркер с <code>--force-recreate</code> — пул кэшируется при старте."
+            )
+    lines.append(
+        "Логи: <code>docker logs portal-worker-yandexmaps --since 24h 2>&1 | grep -ci err_proxy</code>"
+    )
+    await send_telegram("\n".join(lines), force=icon != "🟢")
+
+
+# ── Ночной синк аналитического датасета: разбор в 08:30 МСК ──────────────────
+#
+# Датасет instantly_dataset наполняют четыре ночных задания крона на самом
+# сервере (вне compose портала): sync.mjs в 00:00, sync-portal-mirror в 01:00,
+# label-new-replies в 02:00, label-new-segments в 02:30 по МСК.
+#
+# Их отказ полностью молчаливый: дашборды («Нагрузка почт» и вся аналитика
+# аутрича) продолжают показывать позавчерашние цифры как вчерашние, то есть
+# поломка инфраструктуры выглядит как бизнес-картина «клиенты не работают».
+# 06.08.2026 синк стоял пять дней (в crontab слетело экранирование '%'),
+# 16.09.2026 — сутки (общий регулировщик чтений сменил формулировку отказа,
+# скрипт не понял её и остановил весь прогон). Оба раза поломку замечал живой
+# человек, глядя на дашборд.
+#
+# Поэтому смотрим на РЕЗУЛЬТАТ с двух сторон:
+#   1) dataset_snapshots в самом датасете — единственное задание, ведущее учёт
+#      в БД: чем кончилось, сколько залило, текст ошибки;
+#   2) файлы логов всех четырёх заданий — только там виден случай, когда
+#      процесс убили на полпути (OOM, рестарт docker) и в БД не легло ничего.
+DATASET_SYNC_LOG_DIR = Path(
+    os.environ.get("HEALTH_DATASET_SYNC_LOG_DIR", "/var/log/instantly-dataset-sync")
+)
+DATASET_REPORT_COMMAND_TIMEOUT_SEC = 30
+# Старше этого лог за ночь не считается: задания идут 00:00–02:30 МСК, отчёт в
+# 08:30 — 12 часов покрывают всю ночь с запасом и не принимают позавчерашний
+# файл за свежий.
+DATASET_LOG_MAX_AGE_HOURS = 12
+# Синк, последний успех которого старше этого, уже портит дашборды: они берут
+# «последний полный день», а его в датасете к этому моменту нет. 30 ч = ночь
+# пропущена целиком, а не просто задержалась.
+DATASET_STALE_SYNC_HOURS = 30
+# Имя файла — <префикс>YYYY-MM-DD.log по UTC, а крон идёт по МСК: запуск в
+# 00:00 МСК попадает в UTC ещё на вчера. Поэтому файл за ночь ищем не по имени
+# (оно уедет на сутки назад и собьёт с толку), а как самый свежий подходящий.
+DATASET_SYNC_JOBS: tuple[tuple[str, str], ...] = (
+    ("20??-??-??.log", "Синк датасета (00:00)"),
+    ("portal-mirror-20??-??-??.log", "Зеркало портала (01:00)"),
+    ("labeler-20??-??-??.log", "Разметка ответов (02:00)"),
+    ("segments-20??-??-??.log", "Разметка ниш (02:30)"),
+)
+# Как задания сообщают исход в лог. Успех у всех четырёх — строка с DONE;
+# фатальный конец — FAILED:/FAIL:/FATAL:. Ни того, ни другого = процесс убили
+# на полпути, и это отдельный, самый тихий вид поломки.
+DATASET_LOG_FAIL_MARKERS = ("FAILED:", "FAIL:", "FATAL:")
+
+
+def _read_dataset_log(pattern: str) -> dict:
+    """Самый свежий лог одного задания: возраст, исход, текст ошибки.
+
+    Читаем хвостом (последние 20 КБ), а не целиком: лог синка за ночь — это
+    тысячи строк постраничной выгрузки, а исход всегда в конце.
+    """
+    try:
+        files = [p for p in DATASET_SYNC_LOG_DIR.glob(pattern) if p.is_file()]
+    except OSError as e:
+        return {"state": "unreadable", "detail": _format_exception_message(e)}
+    if not files:
+        return {"state": "missing"}
+
+    path = max(files, key=lambda p: p.stat().st_mtime)
+    try:
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - 20_000))
+            tail = fh.read().decode("utf-8", "replace").splitlines()
+    except OSError as e:
+        return {"state": "unreadable", "detail": _format_exception_message(e)}
+
+    age_hours = (datetime.now(timezone.utc) - mtime).total_seconds() / 3600
+    done = False
+    failure = ""
+    for line in tail:
+        if any(marker in line for marker in DATASET_LOG_FAIL_MARKERS):
+            failure = line.strip()
+        elif "DONE" in line:
+            done = True
+
+    if age_hours > DATASET_LOG_MAX_AGE_HOURS:
+        # Задание не запускалось этой ночью вовсе — ровно симптом августовского
+        # крона: логов не появляется, а не «появляются с ошибкой».
+        state = "stale"
+    elif done:
+        # Ошибка до DONE — не фатальная (в синке так устроен захват лидов):
+        # прогон дошёл до конца, но кусок работы не сделан.
+        state = "warn" if failure else "ok"
+    elif failure:
+        state = "failed"
+    else:
+        state = "cut"
+    return {
+        "state": state, "file": path.name, "mtime": mtime,
+        "age_hours": age_hours, "failure": failure,
+    }
+
+
+async def _fetch_dataset_snapshots() -> dict:
+    """Последний прогон sync.mjs и последний УСПЕШНЫЙ — из самого датасета."""
+    if not INSTANTLY_DATASET_DB_URL:
+        return {"state": "not_configured"}
+    try:
+        conn = await asyncpg.connect(
+            INSTANTLY_DATASET_DB_URL,
+            **_connect_kwargs(DATASET_REPORT_COMMAND_TIMEOUT_SEC),
+        )
+    except Exception as e:
+        return {"state": "unreachable", "detail": _normalize_network_error(e)}
+    try:
+        last = await conn.fetchrow(
+            """
+            select started_at, finished_at, ok, notes, counts
+              from dataset_snapshots
+             where started_at >= now() - interval '18 hours'
+             order by started_at desc
+             limit 1
+            """
+        )
+        last_ok = await conn.fetchval(
+            "select max(finished_at) from dataset_snapshots where ok"
+        )
+    except Exception as e:
+        return {"state": "query_failed", "detail": _format_exception_message(e)}
+    finally:
+        await conn.close()
+
+    result: dict = {"state": "ok", "last_ok": last_ok, "row": last}
+    if last_ok is not None:
+        result["ok_age_hours"] = (
+            datetime.now(timezone.utc) - last_ok
+        ).total_seconds() / 3600
+    return result
+
+
+def _dataset_counts_line(counts) -> str:
+    """Короткая строка «что залилось» из counts прогона (jsonb)."""
+    if isinstance(counts, str):
+        try:
+            counts = json.loads(counts)
+        except ValueError:
+            return ""
+    if not isinstance(counts, dict) or not counts:
+        return ""
+    interesting = [
+        ("emails", "письма"), ("leads", "лиды"),
+        ("campaigns", "кампании"), ("accounts", "ящики"),
+    ]
+    parts = [
+        f"{title} {counts[key]}"
+        for key, title in interesting
+        if isinstance(counts.get(key), int)
+    ]
+    return ", ".join(parts)
+
+
+async def run_dataset_sync_report() -> None:
+    """Утренний разбор ночного синка датасета → health-бот (08:30 МСК).
+
+    Сообщение уходит всегда, даже когда всё хорошо: иначе тихая ночь не
+    отличается от тихо умершего бота — ради этого отчёт и заводился.
+    """
+    jobs = [(title, _read_dataset_log(pattern)) for pattern, title in DATASET_SYNC_JOBS]
+    snapshot = await _fetch_dataset_snapshots()
+
+    icons = {
+        "ok": "🟢", "warn": "🟠", "failed": "🔴",
+        "cut": "🔴", "stale": "🔴", "missing": "🔴", "unreadable": "🟠",
+    }
+    explain = {
+        "ok": "ок", "warn": "прошло, но с ошибкой внутри",
+        "failed": "упало", "cut": "оборвалось без финала (убит процесс?)",
+        "stale": "этой ночью не запускалось", "missing": "лога нет",
+        "unreadable": "лог не читается",
+    }
+
+    broken = [title for title, info in jobs if icons[info["state"]] == "🔴"]
+    warned = [title for title, info in jobs if icons[info["state"]] == "🟠"]
+    ok_age = snapshot.get("ok_age_hours")
+    sync_stale = ok_age is not None and ok_age > DATASET_STALE_SYNC_HOURS
+
+    if broken or sync_stale:
+        icon, title = "🔴", "ночью были ошибки"
+    elif warned or snapshot["state"] not in ("ok", "not_configured"):
+        icon, title = "🟠", "прошло с замечаниями"
+    else:
+        icon, title = "🟢", "всё прошло"
+
+    lines = [f"{icon} <b>Ночной синк датасета: {title}</b> — {_now_msk()}"]
+    for job_title, info in jobs:
+        state = info["state"]
+        line = f"{icons[state]} {job_title} — {explain[state]}"
+        if state in ("ok", "warn", "failed", "cut"):
+            line += f", лог {_msk(info['mtime'])}"
+        elif state == "stale":
+            line += f" (последний лог {_msk(info['mtime'])})"
+        lines.append(line)
+        if info.get("failure"):
+            lines.append(f"   <code>{html.escape(info['failure'][:300])}</code>")
+        if info.get("detail"):
+            lines.append(f"   <code>{html.escape(info['detail'])}</code>")
+
+    if snapshot["state"] == "not_configured":
+        lines.append("Данные по прогонам недоступны: не задан INSTANTLY_DATASET_DB_URL.")
+    elif snapshot["state"] != "ok":
+        lines.append(
+            f"Датасет не опрошен ({snapshot['state']}): "
+            f"<code>{html.escape(str(snapshot.get('detail', '')))}</code>"
+        )
+    else:
+        row = snapshot.get("row")
+        if row is None:
+            lines.append("Прогон sync.mjs за последние 18 ч в датасете не записан.")
+        else:
+            counts = _dataset_counts_line(row["counts"])
+            if row["ok"]:
+                outcome = "успешно"
+            elif row["finished_at"] is None:
+                # Строка так и осталась открытой: процесс не дошёл даже до
+                # ветки обработки ошибки — его убили (OOM, рестарт docker).
+                outcome = "не закончился"
+            else:
+                outcome = "без отметки об успехе"
+            finished = (
+                f", финиш {_msk(row['finished_at'])}"
+                if row["finished_at"] is not None else ""
+            )
+            lines.append(
+                f"Прогон: старт {_msk(row['started_at'])}{finished} — {outcome}"
+                + (f"; залито: {counts}" if counts else "")
+            )
+            # notes у открытой строки — просто «daily sync <дата>»; текст ошибки
+            # дописывается в неё только при штатном падении. Показываем второе.
+            notes = str(row["notes"] or "")
+            if not row["ok"] and "FAILED" in notes:
+                lines.append(f"   <code>{html.escape(notes[:300])}</code>")
+        if snapshot.get("last_ok") is None:
+            lines.append("⚠️ Успешных прогонов в истории датасета нет вообще.")
+        else:
+            age = f"{ok_age:.0f} ч назад" if ok_age is not None else "—"
+            mark = "⚠️ " if sync_stale else ""
+            lines.append(
+                f"{mark}Последний успешный синк: {_msk(snapshot['last_ok'])} ({age})"
+            )
+            if sync_stale:
+                lines.append(
+                    "Дашборды (в т.ч. «Нагрузка почт») сейчас показывают неполный день — "
+                    "это не простой клиентов, это отсутствие данных."
+                )
+
+    if icon != "🟢":
+        lines.append(
+            "Разбор: <code>ls -1t /var/log/instantly-dataset-sync/ | head</code>, "
+            "затем <code>tail -40 /var/log/instantly-dataset-sync/&lt;файл&gt;</code>. "
+            "Догнать пропущенное без ожидания ночи: <code>docker run --rm "
+            "-v /opt/instantly-dataset-sync:/app -w /app --env-file "
+            "/opt/instantly-dataset-sync/.env node:22-alpine node sync.mjs</code>"
+        )
+    await send_telegram("\n".join(lines), force=icon != "🟢")
+
+
 async def main():
     _require("DATABASE_URL or SUPABASE_DB_URL", DATABASE_URL)
     _require("TELEGRAM_HEALTH_CHAT_ID", TELEGRAM_CHAT_ID)
@@ -2816,6 +3221,27 @@ async def main():
         run_li_outreach_report, "cron",
         hour=16, minute=0, timezone="UTC",
         id="li_outreach_report",
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+
+    # Ежедневная сводка каталога Яндекс.Карт в 08:00 МСК == 05:00 UTC.
+    # misfire_grace_time=1h — тот же смысл, что у LinkedIn-отчёта выше.
+    scheduler.add_job(
+        run_yandexmaps_catalog_report, "cron",
+        hour=5, minute=0, timezone="UTC",
+        id="yandexmaps_catalog_report",
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+
+    # Разбор ночного синка датасета в 08:30 МСК == 05:30 UTC — после того, как
+    # отработали все четыре задания (последнее в 02:30 МСК), и до начала дня,
+    # чтобы поломку чинили до того, как по дашбордам начнут принимать решения.
+    scheduler.add_job(
+        run_dataset_sync_report, "cron",
+        hour=5, minute=30, timezone="UTC",
+        id="dataset_sync_report",
         max_instances=1,
         misfire_grace_time=3600,
     )

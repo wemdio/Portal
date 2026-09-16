@@ -19,7 +19,34 @@ export async function GET(req: NextRequest) {
         .order('created_at', { ascending: false });
 
       if (error) return jsonError(error.message, 500);
-      return NextResponse.json({ items: data ?? [] });
+      const items = (data ?? []) as Record<string, unknown>[];
+
+      /**
+       * Сколько аккаунтов кампании сейчас греется.
+       *
+       * Нужно шапке: с тех пор как прогрев перестал останавливать кампанию
+       * (миграция 20260907_0001), «Запущена» перестала быть полным ответом —
+       * часть аккаунтов может греться параллельно, и это стоит показать рядом
+       * со статусом, а не прятать во вкладку «Аккаунты».
+       *
+       * Одним запросом на весь список: кампаний единицы, отдельный поход за
+       * каждой стоил бы дороже самой страницы.
+       */
+      const { data: warmingRows } = await supabase
+        .from('tg_outreach_accounts')
+        .select('campaign_id')
+        .eq('is_active', true)
+        .gt('warmup_until', new Date().toISOString());
+
+      const warmingByCampaign = new Map<string, number>();
+      for (const row of (warmingRows ?? []) as { campaign_id: string }[]) {
+        warmingByCampaign.set(row.campaign_id, (warmingByCampaign.get(row.campaign_id) ?? 0) + 1);
+      }
+      for (const c of items) {
+        c.warming_accounts = warmingByCampaign.get(c.id as string) ?? 0;
+      }
+
+      return NextResponse.json({ items });
     },
   );
 }

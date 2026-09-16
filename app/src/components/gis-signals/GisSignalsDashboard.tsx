@@ -3,11 +3,13 @@
 /**
  * Дашборд «2GIS + сигналы» — отчётность outreach-пайплайна для одного клиента.
  *
- * Данные — два GET-эндпоинта (оба гейтятся: чужим 404):
+ * Данные — три GET-эндпоинта (все гейтятся: чужим 404):
  *   /api/client/gis-signals         — сегменты + перформанс кампаний Instantly;
  *   /api/client/gis-signals/report  — периодная отчётность (воронка с дельтами,
  *                                     срез 16 сигналов, грейды A/B/C, недельный
- *                                     отчёт, остаток пула).
+ *                                     отчёт, остаток пула);
+ *   /api/client/gis-signals/runs    — история запусков пайплайна (последние
+ *                                     прогоны: статус, воронка, база, ошибки).
  *
  * Блоки:
  *   01 — заголовок + период-селектор (7 дней / 30 дней / всё время / свои даты);
@@ -18,7 +20,9 @@
  *   05 — грейды A/B/C + hit-rate сигналов за период (скоринг-сегменты, legal);
  *   06 — недельный отчёт (пн–вс МСК, «эта/прошлая»): воронка + дельта,
  *        залито из журнала Portal, кампании недели, грейды, остаток пула, CSV;
- *   07 — остаток пула по сегментам (processed |seen ∪ archive| vs оценка 2GIS).
+ *   07 — остаток пула по сегментам (processed |seen ∪ archive| vs оценка 2GIS);
+ *   08 — история запусков: последние прогоны (дата МСК, статус, длительность,
+ *        итоги воронки, ссылка на скачивание базы, причина падения).
  *
  * Стили — как у остальных страниц клиентского портала: neu-card, ds-eyebrow,
  * ds-mono/tabular-nums для чисел, CSS-переменные --cp-*.
@@ -27,6 +31,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertCircle, Download, Loader2, RefreshCw } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
+import { authFetch } from '@/lib/authFetch';
 
 // ───────────────────────── types (зеркала ответов API) ─────────────────────────
 
@@ -145,6 +150,28 @@ interface GisSignalsReportResponse {
   pool: PoolRow[];
 }
 
+/** Зеркало GisRunBaseInfo из reportQueries (база, созданная прогоном). */
+interface RunBaseInfo {
+  id: string;
+  status: string;
+  errorMessage: string | null;
+}
+
+/** Зеркало GisRunHistoryItem из reportQueries — один прогон пайплайна. */
+interface RunHistoryItem {
+  id: string;
+  startedAt: string;
+  finishedAt: string | null;
+  status: 'running' | 'completed' | 'failed';
+  totals: FunnelTotals;
+  error: string | null;
+  base: RunBaseInfo | null;
+}
+
+interface GisSignalsRunsResponse {
+  runs: RunHistoryItem[];
+}
+
 // ───────────────────────── константы ─────────────────────────
 
 /** Порядок и русские подписи 16 сигналов — фиксированы, не зависят от выборки. */
@@ -258,6 +285,30 @@ function pct(part: number, total: number): string | null {
 function ruDate(iso: string): string {
   const [y, m, d] = iso.split('-');
   return `${d}.${m}.${y}`;
+}
+
+/** ISO-timestamp → '14.09.2026 03:15' в московском времени (как весь отчёт). */
+function mskDateTime(iso: string): string {
+  return new Date(iso)
+    .toLocaleString('ru-RU', {
+      timeZone: 'Europe/Moscow',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+    .replace(', ', ' ');
+}
+
+/** Длительность прогона: «42 мин» / «3 ч 07 мин»; null → «ещё идёт» по now. */
+function fmtDuration(fromIso: string, toIso: string | null): string {
+  const ms = (toIso ? new Date(toIso).getTime() : Date.now()) - new Date(fromIso).getTime();
+  const min = Math.max(0, Math.round(ms / 60_000));
+  if (min < 60) return `${min} мин`;
+  const h = Math.floor(min / 60);
+  const rest = min % 60;
+  return rest === 0 ? `${h} ч` : `${h} ч ${String(rest).padStart(2, '0')} мин`;
 }
 
 function localIsoDay(d: Date): string {
@@ -413,6 +464,13 @@ export function GisSignalsDashboard() {
 
   const [week, setWeek] = useState<'current' | 'previous'>('current');
 
+  // ── runs history fetch (последние прогоны пайплайна) ────
+  const [runs, setRuns] = useState<GisSignalsRunsResponse | null>(null);
+  const [runsError, setRunsError] = useState('');
+  const [runsReloadKey, setRunsReloadKey] = useState(0);
+  const retryRuns = useCallback(() => setRunsReloadKey((k) => k + 1), []);
+  const [downloadingBaseId, setDownloadingBaseId] = useState<string | null>(null);
+
   // ── main fetch (сегменты + кампании) ──────────────────────
   useEffect(() => {
     let cancelled = false;
@@ -432,6 +490,36 @@ export function GisSignalsDashboard() {
       cancelled = true;
     };
   }, [mainReloadKey]);
+
+  // ── runs fetch (история запусков) ────────────────────────
+  // Пока свежий прогон идёт (status=running), подтягиваем раз в минуту —
+  // строка «Идёт» и цифры воронки дозреют без ручного F5.
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    void (async () => {
+      if (cancelled) return;
+      setRunsError('');
+      try {
+        const res = await clientApiFetch<GisSignalsRunsResponse>('/gis-signals/runs');
+        if (cancelled) return;
+        setRuns(res);
+        if (res.runs.some((r) => r.status === 'running')) {
+          timer = setTimeout(() => {
+            if (!cancelled) setRunsReloadKey((k) => k + 1);
+          }, 60_000);
+        }
+      } catch {
+        if (cancelled) return;
+        setRuns(null);
+        setRunsError('Не удалось загрузить историю запусков.');
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [runsReloadKey]);
 
   // ── report fetch (период + неделя) ────────────────────────
   useEffect(() => {
@@ -515,6 +603,30 @@ export function GisSignalsDashboard() {
     }
     setDateError('');
     setPeriodQuery({ preset: 'custom', from: draftFrom, to: draftTo });
+  }
+
+  /** Скачивание базы прогона — тот же роут, что в конструкторе баз; CSV
+   *  строится/стримится сервером (артефакт .csv.gz), поэтому authFetch + blob. */
+  async function downloadRunBase(baseId: string) {
+    if (downloadingBaseId) return;
+    setDownloadingBaseId(baseId);
+    try {
+      const res = await authFetch(`/api/tools/base-constructor/${baseId}/download`);
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `gis-signals-base-${baseId.slice(0, 8)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      /* скачивание — best-effort: кнопка просто вернётся в исходное состояние */
+    } finally {
+      setDownloadingBaseId(null);
+    }
   }
 
   // ── loading / error ──────────────────────────────────────
@@ -1381,11 +1493,204 @@ export function GisSignalsDashboard() {
           </>
         ) : null}
       </section>
+
+      {/* 08 → История запусков пайплайна */}
+      <section aria-labelledby="gis-runs-label">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <h2 id="gis-runs-label" className="ds-eyebrow m-0">
+            08<span aria-hidden> → </span>История запусков
+          </h2>
+          <button
+            type="button"
+            className="ds-btn-secondary inline-flex items-center gap-1.5"
+            onClick={retryRuns}
+          >
+            <RefreshCw className="h-3.5 w-3.5" aria-hidden />
+            Обновить
+          </button>
+        </div>
+
+        {runsError ? (
+          <div className="neu-card px-5 py-6 flex items-start gap-3" role="alert">
+            <AlertCircle
+              className="h-5 w-5 shrink-0 mt-0.5"
+              style={{ color: 'var(--cp-paper-faint)' }}
+              aria-hidden
+            />
+            <span className="flex-1 text-sm" style={{ color: 'var(--cp-paper)' }}>
+              {runsError}
+            </span>
+            <button
+              type="button"
+              onClick={retryRuns}
+              className="ds-btn-secondary px-3 py-1 text-xs inline-flex items-center gap-1.5"
+            >
+              <RefreshCw className="h-3 w-3" aria-hidden />
+              Повторить
+            </button>
+          </div>
+        ) : !runs ? (
+          <CardLoader />
+        ) : runs.runs.length === 0 ? (
+          <EmptyCard
+            title="Запусков ещё не было"
+            hint="Как только пайплайн отработает первый раз, здесь появится история с базами и результатами."
+          />
+        ) : (
+          <>
+            <div className="neu-card overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr>
+                    {[
+                      'Запуск', 'Статус', 'Длительность', 'Отобрано', 'С сигналами', 'Онлайн',
+                      'В конструктор', 'Валидных', 'Залито', 'База',
+                    ].map((h, i) => (
+                      <th
+                        key={h}
+                        className={`ds-eyebrow text-left px-4 sm:px-5 py-3 font-normal ${
+                          i >= 3 && i <= 8 ? 'text-right' : ''
+                        }`}
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {runs.runs.map((run) => (
+                    <RunHistoryRow
+                      key={run.id}
+                      run={run}
+                      downloadingBaseId={downloadingBaseId}
+                      onDownloadBase={downloadRunBase}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-xs mt-2" style={{ color: 'var(--cp-text-l)' }}>
+              Прогон запускается раз в сутки: 2GIS → сигнальная проверка → сборка базы → заливка
+              в Instantly. Время московское; строка «Идёт» обновляется автоматически раз в минуту.
+            </p>
+          </>
+        )}
+      </section>
     </div>
   );
 }
 
 // ── subcomponents ──────────────────────────────────────────
+
+/** Строка «Истории запусков»: прогон + (для упавших) отдельная строка с причиной. */
+function RunHistoryRow({
+  run,
+  downloadingBaseId,
+  onDownloadBase,
+}: {
+  run: RunHistoryItem;
+  downloadingBaseId: string | null;
+  onDownloadBase: (baseId: string) => void;
+}) {
+  return (
+    <>
+      <tr style={{ borderTop: '1px solid var(--cp-row-divider, rgba(180,173,164,0.18))' }}>
+        <td className="px-4 sm:px-5 py-3 font-bold whitespace-nowrap" style={{ color: 'var(--cp-text)' }}>
+          {mskDateTime(run.startedAt)}
+        </td>
+        <td className="px-4 sm:px-5 py-3">
+          <RunStatusBadge status={run.status} />
+        </td>
+        <td className="px-4 sm:px-5 py-3 whitespace-nowrap ds-mono tabular-nums" style={{ color: 'var(--cp-text-m)' }}>
+          {fmtDuration(run.startedAt, run.finishedAt)}
+        </td>
+        <NumCell value={run.totals.pulled} />
+        <NumCell value={run.totals.signalsOk} />
+        <NumCell value={run.totals.onlineOk} />
+        <NumCell value={run.totals.bcIn} />
+        <NumCell value={run.totals.validContacts} />
+        <NumCell value={run.totals.appended} />
+        <td className="px-4 sm:px-5 py-3">
+          <RunBaseCell base={run.base} downloading={downloadingBaseId} onDownload={onDownloadBase} />
+        </td>
+      </tr>
+      {run.status === 'failed' && run.error && (
+        <tr>
+          <td
+            colSpan={10}
+            className="px-4 sm:px-5 py-2 text-xs"
+            style={{ color: 'var(--cp-red)', borderTop: 'none' }}
+          >
+            Причина: {run.error}
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function RunStatusBadge({ status }: { status: RunHistoryItem['status'] }) {
+  const cfg =
+    status === 'completed'
+      ? { label: 'Завершён', color: 'var(--cp-green)' }
+      : status === 'running'
+        ? { label: 'Идёт', color: 'var(--cp-amber)' }
+        : { label: 'Ошибка', color: 'var(--cp-red)' };
+  return (
+    <span className="ds-status-tag whitespace-nowrap" style={{ color: cfg.color }}>
+      <span className="ds-status-dot" style={{ background: cfg.color }} aria-hidden />
+      {cfg.label}
+    </span>
+  );
+}
+
+/** Колонка «База»: скачивание готовой, статус сборки, причина падения сборки. */
+function RunBaseCell({
+  base,
+  downloading,
+  onDownload,
+}: {
+  base: RunBaseInfo | null;
+  downloading: string | null;
+  onDownload: (baseId: string) => void;
+}) {
+  if (!base) return <Dash title="Прогон не дошёл до сборки базы" />;
+  if (base.status === 'completed') {
+    const busy = downloading === base.id;
+    return (
+      <button
+        type="button"
+        className="ds-btn-secondary px-2.5 py-1 text-xs inline-flex items-center gap-1.5 whitespace-nowrap"
+        onClick={() => onDownload(base.id)}
+        disabled={busy}
+        title="Скачать CSV базы этого прогона"
+      >
+        {busy ? (
+          <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+        ) : (
+          <Download className="h-3 w-3" aria-hidden />
+        )}
+        CSV
+      </button>
+    );
+  }
+  if (base.status === 'pending' || base.status === 'processing') {
+    return (
+      <span className="text-xs whitespace-nowrap" style={{ color: 'var(--cp-text-l)' }}>
+        собирается…
+      </span>
+    );
+  }
+  return (
+    <span
+      className="text-xs whitespace-nowrap"
+      style={{ color: 'var(--cp-red)' }}
+      title={base.errorMessage ?? 'Сборка базы не завершилась'}
+    >
+      не собрана
+    </span>
+  );
+}
 
 function NumCell({ value, delta }: { value: number; delta?: number | null }) {
   return (

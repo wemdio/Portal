@@ -26,7 +26,9 @@ PolzaInstantlySync Bot
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
+import re
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -95,7 +97,14 @@ LEADS_INTER_PAGE_DELAY_SEC: float = float(
     os.environ.get("INSTANTLY_LEADS_INTER_PAGE_DELAY_SEC", "0.5")
 )
 LEADS_FLUSH_THRESHOLD = int(os.environ.get("INSTANTLY_LEADS_FLUSH_THRESHOLD", "5000"))
-LEADS_RPS_LIMIT: float = float(os.environ.get("INSTANTLY_LEADS_RPS_LIMIT", "3.0"))
+# Размазывание лид-фазы по времени (запрос пользователя 15.09.2026): раньше
+# 3 req/s выкладывали весь часовой объём (~70 запросов) за первые ~1-2 минуты
+# бёрстом, конкурируя с остальными потребителями воркспейса. Дефолт 0.08 req/s
+# (~5 запросов/мин, интервал ~12 с) растягивает текущий объём до ~15 минут, а
+# рост до ~150 кампаний-страниц — до ~30 минут, не меняя суммарный расход.
+# Планировщик max_instances=1 + coalesce: удлинение прогона не даёт наложений.
+# Старый бёрст-режим возвращается env-ом INSTANTLY_LEADS_RPS_LIMIT=3.0.
+LEADS_RPS_LIMIT: float = float(os.environ.get("INSTANTLY_LEADS_RPS_LIMIT", "0.08"))
 
 def _resolve_db_ssl_mode(database_url: str) -> bool | str:
     """Resolve SSL mode from env/query to avoid forcing SSL on self-hosted PG."""
@@ -113,6 +122,72 @@ _CONNECT_KWARGS: dict[str, bool | str | int] = {
     "statement_cache_size": 0,
     "ssl": _resolve_db_ssl_mode(DATABASE_URL),
 }
+
+# ── Учёт запросов к Instantly ────────────────────────────────────────────────
+# Та же почасовая таблица, что у портала (instantly_api_usage_hourly в ОСНОВНОЙ
+# БД, DATABASE_URL — не INSTANTLY_DATABASE_URL). Каждая HTTP-попытка считается
+# на уровне транспорта, итоги пишутся пачкой в конце прохода; сбой учёта синк
+# не ломает. Бот ходит только ключом main.
+USAGE_DB_URL: str = (os.environ.get("DATABASE_URL") or "").strip()
+USAGE_ACCOUNT_ID = "main"
+_usage_consumer: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "instantly_usage_consumer", default="sync_bot"
+)
+_usage_counts: dict[tuple[datetime, str, str, str], int] = {}
+_USAGE_ID_SEGMENT = re.compile(r"/[0-9a-f-]{16,}", re.IGNORECASE)
+
+
+def _count_instantly_attempt(url: httpx.URL, status: str) -> None:
+    path = url.path.removeprefix("/api/v2") or "/"
+    endpoint = _USAGE_ID_SEGMENT.sub("/{id}", path)
+    hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    key = (hour, endpoint, _usage_consumer.get(), status)
+    _usage_counts[key] = _usage_counts.get(key, 0) + 1
+
+
+class _CountingTransport(httpx.AsyncBaseTransport):
+    """HTTP-транспорт для клиентов Instantly: считает каждую попытку."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self._inner = httpx.AsyncHTTPTransport(**kwargs)
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        try:
+            response = await self._inner.handle_async_request(request)
+        except Exception:
+            _count_instantly_attempt(request.url, "network_error")
+            raise
+        code = response.status_code
+        status = "http_429" if code == 429 else "ok" if 200 <= code < 400 else "http_error"
+        _count_instantly_attempt(request.url, status)
+        return response
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+async def flush_instantly_usage() -> None:
+    if not _usage_counts:
+        return
+    pending = dict(_usage_counts)
+    _usage_counts.clear()
+    if not USAGE_DB_URL:
+        print(f"[usage] DATABASE_URL not set — {sum(pending.values())} Instantly attempts not recorded")
+        return
+    try:
+        conn = await asyncpg.connect(
+            USAGE_DB_URL, statement_cache_size=0, ssl=_resolve_db_ssl_mode(USAGE_DB_URL)
+        )
+        try:
+            for (hour, endpoint, consumer, status), count in pending.items():
+                await conn.execute(
+                    "SELECT public.instantly_bump_api_usage($1, $2, $3, $4, $5, $6)",
+                    hour, USAGE_ACCOUNT_ID, endpoint, consumer, status, count,
+                )
+        finally:
+            await conn.close()
+    except Exception as e:
+        print(f"[usage] flush failed ({e!r}) — {sum(pending.values())} Instantly attempts not recorded")
 
 # ── Rate limiter ──────────────────────────────────────────────────────────────
 
@@ -322,7 +397,7 @@ async def fetch_all_instantly_campaigns() -> tuple[list[dict], int]:
     pages = 0
     error_count = [0]
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(transport=_CountingTransport()) as client:
         while True:
             cursor_key = starting_after or "__first__"
             if cursor_key in seen_cursors:
@@ -398,7 +473,7 @@ async def fetch_campaign_analytics(
         last_err: Exception | None = None
         for attempt in range(RETRY_ATTEMPTS):
             try:
-                async with httpx.AsyncClient(timeout=ANALYTICS_TIMEOUT) as client:
+                async with httpx.AsyncClient(timeout=ANALYTICS_TIMEOUT, transport=_CountingTransport()) as client:
                     r = await client.get(
                         f"{INSTANTLY_BASE}/campaigns/analytics",
                         headers=headers,
@@ -437,7 +512,7 @@ async def fetch_campaign_analytics(
 
     async def _per_id_fetch(ids: list[str]) -> list[dict]:
         sem = asyncio.Semaphore(ANALYTICS_FALLBACK_CONCURRENCY)
-        async with httpx.AsyncClient(timeout=ANALYTICS_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=ANALYTICS_TIMEOUT, transport=_CountingTransport()) as client:
             results = await asyncio.gather(
                 *(_fetch_one(client, sem, cid) for cid in ids),
                 return_exceptions=False,
@@ -650,6 +725,14 @@ def _leads_retry_delay(attempt: int, *, status_code: int | None) -> float:
     return base
 
 
+# ── 404-томбстоуны и каталог из БД (аудит Instantly API 14.09.2026) ──────────
+# Кампании, на которые провайдер отвечает 404 (удалённые/чужие связки), не
+# дёргаем каждый час: после 404 кампания спит LEADS_404_SKIP_SEC. Любой другой
+# ответ (в т.ч. ошибка) — томбстоун снимается. Таблица instantly_leads_sync_404
+# может отсутствовать до миграции: тогда бот работает как раньше (без кэша).
+LEADS_404_SKIP_SEC = 24 * 3600
+
+
 async def _fetch_leads_page(
     client: httpx.AsyncClient,
     campaign_id: str,
@@ -834,19 +917,55 @@ async def _sync_single_campaign(
                 f"[leads-sync] campaign {campaign_id} — {campaign_leads} leads "
                 f"for {len(user_ids)} user(s)"
             )
-        return campaign_leads, 0
+        return campaign_leads, 0, None
 
     except Exception as e:
+        status_code = (
+            e.response.status_code
+            if isinstance(e, httpx.HTTPStatusError) and e.response is not None
+            else None
+        )
         print(
             f"[leads-sync] ERROR campaign {campaign_id}: "
             f"{_format_leads_sync_error(e)}"
         )
-        return 0, 1
+        return 0, 1, ("404" if status_code == 404 else None)
     finally:
         progress["done"] += 1
         done, total = progress["done"], progress["total"]
         if done % 5 == 0 or done == total:
             print(f"[leads-sync] progress: {done}/{total} campaigns completed")
+
+
+async def _load_leads_404_skips(conn) -> set[str]:
+    """Campaign ids with a recent provider 404. Missing table -> empty set."""
+    try:
+        rows = await conn.fetch(
+            "SELECT resource_id FROM public.instantly_leads_sync_404 "
+            "WHERE last_404_at > now() - make_interval(secs => $1)",
+            LEADS_404_SKIP_SEC,
+        )
+        return {str(r["resource_id"]) for r in rows}
+    except asyncpg.UndefinedTableError:
+        return set()
+
+
+async def _mark_leads_404(conn, campaign_id: str) -> None:
+    await conn.execute(
+        "INSERT INTO public.instantly_leads_sync_404 "
+        "(resource_id, account_id, first_404_at, last_404_at, hits) "
+        "VALUES ($1, 'main', now(), now(), 1) "
+        "ON CONFLICT (resource_id) DO UPDATE SET "
+        "last_404_at = now(), hits = public.instantly_leads_sync_404.hits + 1",
+        campaign_id,
+    )
+
+
+async def _clear_leads_404(conn, campaign_id: str) -> None:
+    await conn.execute(
+        "DELETE FROM public.instantly_leads_sync_404 WHERE resource_id = $1",
+        campaign_id,
+    )
 
 
 async def sync_client_leads() -> dict[str, int]:
@@ -860,9 +979,12 @@ async def sync_client_leads() -> dict[str, int]:
     LEADS_UPSERT_BATCH.  DB connections are held only during flushes.
 
     Resource budget (2xXeon E5-2670 / 64GB):
-      DB pool: max 5 conns  ← well under 95% of pgbouncer limit (57 of 60)
+      DB pool: max 5 conns  ← well under 95% of pgbouncer limit (57 of 60);
+               коннекты живут дольше прежнего — лид-фаза теперь растянута
+               на ~15-30 мин (см. LEADS_RPS_LIMIT), но между флашами простаивают
       HTTP:    max 4 conns  ← 2 active + 2 keepalive buffer
-      Rate:    ~3 RPS global limit across all workers
+      Rate:    ~0.08 RPS (≈5 запросов/мин) global limit across all workers —
+               часовой объём размазан по ~15-30 мин вместо бёрста в первые минуты
       Memory:  ~2 × 5000 leads × ~2KB ≈ 20MB peak — acceptable
     """
     pool = await asyncpg.create_pool(
@@ -874,19 +996,47 @@ async def sync_client_leads() -> dict[str, int]:
     try:
         async with pool.acquire() as conn:
             access_rows = await conn.fetch(
-                "SELECT client_user_id, resource_id FROM public.client_instantly_access "
+                "SELECT client_user_id, resource_id, instantly_account_id "
+                "FROM public.client_instantly_access "
                 "WHERE resource_type = 'campaign'"
             )
+            skipped_404 = await _load_leads_404_skips(conn)
 
         if not access_rows:
             print("[leads-sync] no access rows — skipping")
             return {"campaigns": 0, "leads": 0}
 
         campaign_users: dict[str, list[str]] = {}
+        skipped_foreign = 0
         for row in access_rows:
+            account_id = (row["instantly_account_id"] or "main").strip() or "main"
+            # Бот ОДНО-АККАУНТНыЙ (ключ main): кампании доп-аккаунтов этим ключом
+            # дают 404 каждый час — бессмысленная трата квоты (~888 запр/сутки).
+            if account_id != "main":
+                skipped_foreign += 1
+                continue
             cid = str(row["resource_id"])
             uid = str(row["client_user_id"])
             campaign_users.setdefault(cid, []).append(uid)
+
+        tombstoned = [cid for cid in campaign_users if cid in skipped_404]
+        for cid in tombstoned:
+            campaign_users.pop(cid, None)
+
+        if skipped_foreign:
+            print(
+                f"[leads-sync] skipped {skipped_foreign} campaign(s) of non-main "
+                f"instantly accounts (bot is main-only)"
+            )
+        if tombstoned:
+            print(
+                f"[leads-sync] skipped {len(tombstoned)} campaign(s) with recent "
+                f"provider 404 (tombstone, retry in <=24h)"
+            )
+
+        if not campaign_users:
+            print("[leads-sync] nothing to sync after account/404 filters")
+            return {"campaigns": 0, "leads": 0}
 
         print(
             f"[leads-sync] {len(campaign_users)} campaigns for "
@@ -908,23 +1058,34 @@ async def sync_client_leads() -> dict[str, int]:
         )
         rate_limiter = _TokenBucket(rate=LEADS_RPS_LIMIT, burst=max(1, int(LEADS_RPS_LIMIT)))
 
-        async with httpx.AsyncClient(timeout=_timeout, limits=_limits) as http_client:
+        async with httpx.AsyncClient(timeout=_timeout, transport=_CountingTransport(limits=_limits)) as http_client:
 
-            async def _bounded(cid: str, uids: list[str]) -> tuple[int, int]:
+            async def _bounded(cid: str, uids: list[str]) -> tuple[int, int, str | None]:
                 async with semaphore:
                     return await _sync_single_campaign(
                         pool, http_client, cid, uids, progress, rate_limiter,
                     )
 
+            campaign_ids = list(campaign_users.keys())
             results = await asyncio.gather(
-                *[_bounded(cid, uids) for cid, uids in campaign_users.items()],
+                *[_bounded(cid, campaign_users[cid]) for cid in campaign_ids],
             )
 
         total_leads = 0
         campaigns_errors = 0
-        for leads, errors in results:
+        for cid, (leads, errors, error_code) in zip(campaign_ids, results):
             total_leads += leads
             campaigns_errors += errors
+            # Томбстоуны 404: успешный/не-404 ответ реанимирует кампанию,
+            # 404 — усыпляет на LEADS_404_SKIP_SEC. Ошибка кэша не валит синк.
+            try:
+                async with pool.acquire() as conn:
+                    if error_code == "404":
+                        await _mark_leads_404(conn, cid)
+                    elif errors == 0:
+                        await _clear_leads_404(conn, cid)
+            except Exception as cache_err:
+                print(f"[leads-sync] 404-cache update failed for {cid[:12]}: {cache_err!r}")
 
         campaigns_done = len(results)
         print(
@@ -999,7 +1160,7 @@ def _format_sync_result(result: dict) -> str:
 async def _check_instantly_api() -> bool:
     """Quick ping: fetch 1 campaign to verify the API key and connectivity."""
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10, transport=_CountingTransport()) as client:
             r = await client.get(
                 f"{INSTANTLY_BASE}/campaigns",
                 params={"limit": "1"},
@@ -1012,6 +1173,60 @@ async def _check_instantly_api() -> bool:
 
 # ── Sync orchestration ────────────────────────────────────────────────────────
 
+# Каталог сначала из БД: его каждый час полностью синкает мультиаккаунтный Portal-роут
+# (в конце прошлого цикла) — двойное чтение /campaigns стоило ~30 запросов/час
+# (аудит 14.09.2026). БД пуста/протухла/недоступна — живой фетч как раньше.
+CATALOG_DB_FRESH_SEC = 2 * 3600
+
+
+async def _load_campaigns_for_sync() -> tuple[list[dict], int, bool]:
+    """Returns (campaigns, api_errors, from_db)."""
+    rows: list = []
+    try:
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+        try:
+            rows = await conn.fetch(
+                "SELECT id, name FROM public.instantly_campaign_catalog "
+                "WHERE instantly_account_id = 'main' "
+                "AND synced_at > now() - make_interval(secs => $1)",
+                CATALOG_DB_FRESH_SEC,
+            )
+        finally:
+            await conn.close()
+    except Exception as e:
+        print(f"[sync] DB catalog read failed ({e!r}) — live /campaigns fetch")
+    if rows:
+        return (
+            [{"id": r["id"], "name": r["name"] or ""} for r in rows],
+            0,
+            True,
+        )
+    campaigns, api_errors = await fetch_all_instantly_campaigns()
+    return campaigns, api_errors, False
+
+
+async def _catalog_db_stats(fetched: int) -> dict[str, int]:
+    """Stats-заглушка для пути «каталог из БД»: upsert здесь не нужен
+    (его сделал Portal-роут), дельт added/removed = 0 — сообщения TG о изменениях
+    каталога в этом режиме не приходят."""
+    async def _do() -> dict[str, int]:
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+        try:
+            count = await _db_count(conn)
+            return {
+                "before": count,
+                "after": count,
+                "fetched": fetched,
+                "added": 0,
+                "removed": 0,
+                "updated": 0,
+            }
+        finally:
+            await conn.close()
+
+    return await _retry(_do, base_delay=2.0)  # type: ignore[return-value]
+
+
 async def run_sync(manual: bool = False) -> dict:
     """Run full sync and return result dict."""
     loop = asyncio.get_event_loop()
@@ -1020,12 +1235,21 @@ async def run_sync(manual: bool = False) -> dict:
 
     try:
         print(f"[sync] Starting sync at {ts}…")
-        campaigns, api_errors = await fetch_all_instantly_campaigns()
-        print(f"[sync] Fetched {len(campaigns)} campaigns from Instantly (api_errors={api_errors})")
+        _usage_consumer.set("sync_bot_catalog")
+        campaigns, api_errors, catalog_from_db = await _load_campaigns_for_sync()
+        if catalog_from_db:
+            print(
+                f"[sync] Loaded {len(campaigns)} campaigns from DB catalog "
+                f"(synced by Portal route — no /campaigns calls this cycle)"
+            )
+            stats = await _catalog_db_stats(len(campaigns))
+        else:
+            print(f"[sync] Fetched {len(campaigns)} campaigns from Instantly (api_errors={api_errors})")
 
-        stats = await sync_to_db(campaigns)
+            stats = await sync_to_db(campaigns)
 
         analytics_count = 0
+        _usage_consumer.set("sync_bot_analytics")
         try:
             campaign_ids = [c["id"] for c in campaigns if isinstance(c.get("id"), str)]
             analytics = await fetch_campaign_analytics(campaign_ids)
@@ -1037,6 +1261,7 @@ async def run_sync(manual: bool = False) -> dict:
 
         leads_stats: dict[str, int] = {"campaigns": 0, "leads": 0}
         try:
+            _usage_consumer.set("sync_bot_leads")
             print("[sync] Starting client leads sync…")
             leads_stats = await sync_client_leads()
             print(f"[sync] Client leads sync OK: {leads_stats}")
@@ -1140,6 +1365,7 @@ async def _run_sync_and_report(manual: bool = False) -> None:
 
     async with _sync_lock:
         result = await run_sync(manual=manual)
+        await flush_instantly_usage()
         _last_sync_result = result
 
         if should_notify(result, manual):

@@ -22,21 +22,25 @@ import RenewalsDealsList from '@/components/renewals/RenewalsDealsList';
  * Воронка вторичных продаж — из воронки AMO «Вторичные (и не только) продажи».
  *
  * Ступени идут в порядке этапов, а не по величине: сортировка по числу
- * переставила бы их местами, и воронка перестала бы быть воронкой (см. ту же
- * оговорку в first-sales/FunnelChart.tsx).
+ * переставила бы их местами, и воронка перестала бы быть воронкой.
+ *
+ * С 11.09.2026 компонент общий для продлений и первички: у обоих дашбордов
+ * одна схема «этап каждой сделки на последний день периода», отличаются только
+ * ручка данных и подписи — они приходят пропсами, умолчания — продлений.
  *
  * «Пауза», «Реанимация» и «Отвал» в ступени не входят — это исходы, а не
  * продолжение пути: проект попадает туда ВМЕСТО продления. Они показаны
  * отдельной строкой под воронкой.
  */
 
+/**
+ * Долей «сколько дошло от предыдущего этапа» здесь нет намеренно.
+ *
+ * С 11.09.2026 ступень — это сколько сделок стояло на этапе в последний день
+ * периода, то есть распределение, а не вложенная воронка. Отношение соседних чисел в ней — не
+ * конверсия, и показывать его процентом значит выдавать за неё случайную дробь.
+ */
 function buildOption(data: FunnelData, theme: ChartTheme, animate: boolean): EChartsCoreOption {
-  const top = data.stages[0]?.reached ?? 0;
-  const prevByName = new Map<string, { name: string; reached: number }>();
-  data.stages.forEach((stage, i) => {
-    if (i > 0) prevByName.set(stage.name, data.stages[i - 1]);
-  });
-
   return {
     animation: animate,
     animationDuration: 700,
@@ -48,16 +52,9 @@ function buildOption(data: FunnelData, theme: ChartTheme, animate: boolean): ECh
       formatter: (params: unknown) => {
         const item = params as { name?: string; value?: number };
         const value = item.value ?? 0;
-        const share = top > 0 ? Math.round((value / top) * 100) : 0;
-        const prev = item.name ? prevByName.get(item.name) : undefined;
-        const step =
-          prev && prev.reached > 0
-            ? `<div style="margin-top:2px;opacity:.7">из «${prev.name}» — ${Math.round(
-                (value / prev.reached) * 100,
-              )}%</div>`
-            : '';
+        const word = value === 1 ? 'сделка' : value >= 2 && value <= 4 ? 'сделки' : 'сделок';
         return `<div style="font-weight:600">${item.name ?? ''}</div>
-                <div style="margin-top:4px;font-variant-numeric:tabular-nums">${value} · ${share}% от вошедших</div>${step}`;
+                <div style="margin-top:4px;font-variant-numeric:tabular-nums">${value} ${word} на этапе в конце периода</div>`;
       },
     },
     series: [
@@ -80,9 +77,7 @@ function buildOption(data: FunnelData, theme: ChartTheme, animate: boolean): ECh
           fontFamily: CHART_FONT,
           formatter: (params: unknown) => {
             const item = params as { name?: string; value?: number };
-            const value = item.value ?? 0;
-            const share = top > 0 ? Math.round((value / top) * 100) : 0;
-            return `${item.name ?? ''} — ${value} · ${share}%`;
+            return `${item.name ?? ''} — ${item.value ?? 0}`;
           },
         },
         labelLine: { show: false },
@@ -99,7 +94,50 @@ function buildOption(data: FunnelData, theme: ChartTheme, animate: boolean): ECh
   };
 }
 
-export default function RenewalsFunnel() {
+const RENEWALS_DEFAULTS = {
+  endpoint: '/api/analytics/renewals/funnel',
+  dealEndpoint: '/api/analytics/renewals/deal',
+  title: 'Воронка вторичных продаж за период',
+  subtitle: 'На каком этапе была каждая сделка в последний день периода. История переходов — в карточке сделки.',
+  emptyText:
+    'За выбранный период в этой воронке ничего не двигалось. Проекты попадают в неё автоматически, '
+    + 'когда сделка закрывается успешно в основной воронке, — попробуйте расширить период.',
+  ariaLabel: 'Воронка вторичных продаж по этапам AMO',
+  outcomesLabel: 'Вне пути:',
+  listSubtitle:
+    'Каждая сделка — на этапе, где была в последний день периода. Клик открывает карточку с историей переходов. '
+    + 'Внизу — сделки на паузе, в реанимации или отвале.',
+  listOutcomesLabel: 'Вне пути',
+};
+
+/** Разделитель ключей каналов в зависимости эффекта: запятая может встретиться в самом ключе. */
+const SOURCES_SEPARATOR = '\u0001';
+
+export default function RenewalsFunnel({
+  filters,
+  endpoint = RENEWALS_DEFAULTS.endpoint,
+  dealEndpoint = RENEWALS_DEFAULTS.dealEndpoint,
+  title = RENEWALS_DEFAULTS.title,
+  subtitle = RENEWALS_DEFAULTS.subtitle,
+  emptyText = RENEWALS_DEFAULTS.emptyText,
+  ariaLabel = RENEWALS_DEFAULTS.ariaLabel,
+  outcomesLabel = RENEWALS_DEFAULTS.outcomesLabel,
+  listSubtitle = RENEWALS_DEFAULTS.listSubtitle,
+  listOutcomesLabel = RENEWALS_DEFAULTS.listOutcomesLabel,
+}: {
+  /** Период и — у первички — фильтр каналов. Остальные поля фильтров экрана воронке не нужны. */
+  filters: { from: string; to: string; sources?: string[] };
+  endpoint?: string;
+  dealEndpoint?: string;
+  title?: string;
+  subtitle?: string;
+  emptyText?: string;
+  ariaLabel?: string;
+  outcomesLabel?: string;
+  listSubtitle?: string;
+  listOutcomesLabel?: string;
+}) {
+  const sourcesKey = (filters.sources ?? []).join(SOURCES_SEPARATOR);
   const rootRef = useRef<HTMLDivElement>(null);
   const theme = useChartTheme(rootRef);
   const reducedMotion = usePrefersReducedMotion();
@@ -115,7 +153,11 @@ export default function RenewalsFunnel() {
     const run = async () => {
       setLoading(true);
       try {
-        const res = await authFetch('/api/analytics/renewals/funnel', { signal: controller.signal });
+        const qs = new URLSearchParams({ from: filters.from, to: filters.to });
+        for (const source of sourcesKey ? sourcesKey.split(SOURCES_SEPARATOR) : []) qs.append('source', source);
+        const res = await authFetch(`${endpoint}?${qs.toString()}`, {
+          signal: controller.signal,
+        });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = (await res.json()) as FunnelData;
         if (!active) return;
@@ -136,7 +178,7 @@ export default function RenewalsFunnel() {
       active = false;
       controller.abort();
     };
-  }, []);
+  }, [endpoint, filters.from, filters.to, sourcesKey]);
 
   const option = useMemo(
     () => (theme && data && data.totalDeals > 0 ? buildOption(data, theme, !reducedMotion) : null),
@@ -152,15 +194,12 @@ export default function RenewalsFunnel() {
     // вопрос — «а кто это?». На узком экране список уезжает вниз.
     <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
       <div ref={rootRef} className="glass-tile p-3">
-        <h3 className="text-sm font-semibold text-zinc-900">Воронка вторичных продаж: где проекты сейчас</h3>
-        {/* Период здесь не действует намеренно (см. renewals/funnel/route.ts):
-            воронка отвечает на «где стоят проекты и сколько дошло до
-            продления», а не «сколько продлили за выбранные дни». Без этой
-            строки экран противоречит сам себе: сверху «0 продлений за период»,
-            снизу шестнадцать сделок. */}
+        <h3 className="text-sm font-semibold text-zinc-900">{title}</h3>
+        {/* Правило отбора обязано быть написано на экране: без него цифры
+            воронки и плиток выше читаются как расхождение, хотя это разные
+            вопросы — «где сделки на конец периода» и «за что заплатили в периоде». */}
         <p className="mb-2 text-[11px] text-zinc-400">
-          Снимок всей воронки на сейчас — выбранный период на него не влияет. Сколько продлили за период,
-          показывают плитки сверху и таблица ниже.
+          {subtitle}
         </p>
 
         {loading ? <div className="px-3 py-10 text-center text-sm text-zinc-400">Загружаю…</div> : null}
@@ -173,14 +212,13 @@ export default function RenewalsFunnel() {
 
         {!loading && !error && data && data.totalDeals === 0 ? (
           <p className="px-3 py-8 text-center text-sm text-zinc-400">
-            Сделок, прошедших по этапам, пока нет. Проекты попадают в воронку автоматически, когда сделка закрывается
-            успешно в основной воронке, — и двигаются по ней дальше.
+            {emptyText}
           </p>
         ) : null}
 
         {option ? (
           <div className="mx-auto w-full max-w-[680px]">
-            <EChart option={option} height={340} ariaLabel="Воронка вторичных продаж по этапам AMO" />
+            <EChart option={option} height={400} ariaLabel={ariaLabel} />
           </div>
         ) : null}
 
@@ -188,8 +226,9 @@ export default function RenewalsFunnel() {
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-zinc-100 pt-2 text-[11px] text-zinc-500">
             {/* Исходы вне воронки: проект попадает туда вместо продления, и
                 ступенью это быть не может — иначе отвалившиеся посчитались бы
-                продлёнными просто потому, что их этап ниже по порядку. */}
-            <span className="text-zinc-400">Вне пути:</span>
+                продлёнными просто потому, что их этап ниже по порядку. Считаем
+                тем же правилом, что ступени: сколько сделок стояло там в конце периода. */}
+            <span className="text-zinc-400">{outcomesLabel}</span>
             {outcomes.map((outcome) => (
               <span key={outcome.statusId}>
                 {outcome.name} — <span className="font-semibold text-zinc-700">{outcome.count}</span>
@@ -214,7 +253,15 @@ export default function RenewalsFunnel() {
         ) : null}
       </div>
 
-      {data && data.dealGroups.length > 0 ? <RenewalsDealsList groups={data.dealGroups} /> : null}
+      {data && (data.dealGroups.length > 0 || data.outcomeGroups.length > 0) ? (
+        <RenewalsDealsList
+          groups={data.dealGroups}
+          outcomeGroups={data.outcomeGroups}
+          dealEndpoint={dealEndpoint}
+          subtitle={listSubtitle}
+          outcomesLabel={listOutcomesLabel}
+        />
+      ) : null}
     </div>
   );
 }

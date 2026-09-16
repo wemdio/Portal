@@ -126,7 +126,10 @@ export async function syncInstantlyCampaignCatalog(): Promise<{
   for (const account of listInstantlyAccounts()) {
     try {
       const apiKey = getInstantlyAccountApiKey(account.id);
-      for await (const page of iterateInstantlyCampaignPages(apiKey)) {
+      for await (const page of iterateInstantlyCampaignPages(apiKey, {
+        accountId: account.id,
+        consumer: 'campaign_catalog',
+      })) {
         pages += 1;
         const batch = page.map((c) => ({
           id: c.id,
@@ -330,7 +333,7 @@ async function countUniqueRepliers(campaignId: string, accountId: string): Promi
   for (let page = 0; page < ACTUAL_REPLY_MAX_PAGES; page++) {
     const res = await listEmails(
       { campaign_id: campaignId, email_type: 'received', limit: 100, starting_after: after },
-      { accountId },
+      { accountId, consumer: 'actual_reply_count' },
     );
     const items = res.items ?? [];
     for (const e of items) {

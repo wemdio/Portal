@@ -115,6 +115,9 @@ export async function POST(req: NextRequest) {
           url,
           name: providedName || proxyDisplayName(url),
           is_active: body.is_active !== false,
+          // Список при создании: миграция 20260909_0005. null = «Неопределённые»,
+          // это и поведение по умолчанию — поле необязательное.
+          proxy_list_id: body.proxy_list_id ?? null,
         })
         .select()
         .single();

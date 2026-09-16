@@ -54,7 +54,10 @@ export async function GET(_req: NextRequest) {
             });
           }
 
-          const list = await fetchInstantlyCampaignsList(INSTANTLY_API_KEY);
+          const list = await fetchInstantlyCampaignsList(INSTANTLY_API_KEY, {
+            accountId: 'main',
+            consumer: 'auto_report_campaigns',
+          });
           const sorted = [...list].sort((a, b) => {
             const at = a.timestamp_created ?? a.timestamp_updated ?? '';
             const bt = b.timestamp_created ?? b.timestamp_updated ?? '';

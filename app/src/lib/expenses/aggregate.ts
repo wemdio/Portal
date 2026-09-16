@@ -2,6 +2,7 @@ import { differenceInCalendarDays, endOfMonth, endOfWeek, format, parseISO } fro
 
 import { bucketKey, type GroupBy } from '@/lib/expenses/period';
 import {
+  SMALL_PAYMENT_THRESHOLD_RUB,
   TRANSFER_CATEGORIES,
   UNCLASSIFIED_CATEGORY_KEY,
   UNKNOWN_EXCLUDE_REASON_KEY,
@@ -242,6 +243,24 @@ function isNonRevenue(r: IncomeRow): boolean {
   return r.is_revenue === false;
 }
 
+/**
+ * Мелкий платёж: выручка меньше SMALL_PAYMENT_THRESHOLD_RUB рублей (см. types.ts).
+ *
+ * Не-выручка сюда не попадает — у неё свой учёт и своя причина. Строка без
+ * курса ЦБ тоже: её размер в рублях неизвестен, и молча выкинуть валютную
+ * оплату из дохода, приняв её за мелочь, хуже, чем оставить.
+ */
+export function isSmallPayment(r: IncomeRow): boolean {
+  if (isNonRevenue(r)) return false;
+  if (r.amount_rub == null) return false;
+  return r.amount_rub < SMALL_PAYMENT_THRESHOLD_RUB;
+}
+
+/** Выручка, которая идёт в доход: не «не-выручка» и не мелкий платёж. */
+function isCountedRevenue(r: IncomeRow): boolean {
+  return !isNonRevenue(r) && !isSmallPayment(r);
+}
+
 /** Имя плательщика в человеческом виде либо null, если банк его не прислал. */
 function payerDisplayName(r: IncomeRow): string | null {
   const name = r.counterparty?.trim();
@@ -285,8 +304,9 @@ export function summarizeIncomes(
   range: { from: string; to: string },
   prevRows: IncomeRow[] | null,
 ): IncomesSummary {
-  const revenue = rows.filter((r) => !isNonRevenue(r));
+  const revenue = rows.filter(isCountedRevenue);
   const nonRevenue = rows.filter(isNonRevenue);
+  const small = rows.filter(isSmallPayment);
 
   const total = sum(revenue);
   const days = differenceInCalendarDays(parseISO(range.to), parseISO(range.from)) + 1;
@@ -324,10 +344,12 @@ export function summarizeIncomes(
     total,
     avgPerDay: days > 0 ? total / days : 0,
     deltaPrev:
-      prevRows === null ? null : delta(total, sum(prevRows.filter((r) => !isNonRevenue(r)))),
+      prevRows === null ? null : delta(total, sum(prevRows.filter(isCountedRevenue))),
     nonRevenueTotal: sum(nonRevenue),
     nonRevenueCount: nonRevenue.length,
     nonRevenueByReason,
+    smallTotal: sum(small),
+    smallCount: small.length,
     unconvertedCount: unconverted.length,
     unconvertedByCurrency,
     series: [...buckets.values()].sort((a, b) => a.bucket.localeCompare(b.bucket)),
@@ -342,11 +364,12 @@ interface PrevPayerTotal {
 
 /** Разбивка дохода по плательщикам с долей и дельтой к прошлому периоду. */
 export function breakdownByPayer(rows: IncomeRow[], prevRows: IncomeRow[]): PayerBreakdownItem[] {
-  const revenue = rows.filter((r) => !isNonRevenue(r));
+  // Мелкие платежи в разбивку не идут — по той же причине, что и в итог.
+  const revenue = rows.filter(isCountedRevenue);
   const total = sum(revenue);
 
   const prevByPayer = new Map<string, PrevPayerTotal>();
-  for (const r of prevRows.filter((x) => !isNonRevenue(x))) {
+  for (const r of prevRows.filter(isCountedRevenue)) {
     const key = payerKey(r);
     const existing = prevByPayer.get(key);
     if (existing) {

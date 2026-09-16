@@ -137,6 +137,18 @@ export type IncomeSeriesPoint = SeriesPointBase;
 /** Ключ бакета `nonRevenueByReason` для строк, у которых причина не записана. */
 export const UNKNOWN_EXCLUDE_REASON_KEY = 'unknown';
 
+/**
+ * Порог мелкого платежа, рублей: приход МЕНЬШЕ этой суммы в доход не входит.
+ *
+ * Такие зачисления — кэшбэк, проценты на остаток, копеечные компенсации (у
+ * «Аванпоста» они идут по 900 ₽ раз в неделю). Клиентских оплат меньше тысячи
+ * у студии не бывает, а в сумме за месяц мелочь заметно искажала доход.
+ * Решение владельца от 11.09.2026. Мелкие платежи не прячутся: у вкладки
+ * «Доходы» для них отдельный список по дням с пометкой, что в итог они не
+ * входят.
+ */
+export const SMALL_PAYMENT_THRESHOLD_RUB = 1000;
+
 export interface IncomesSummary {
   total: number;
   avgPerDay: number;
@@ -150,6 +162,9 @@ export interface IncomesSummary {
    * объясняет, почему деньги пришли, но выручкой не считаются.
    */
   nonRevenueByReason: Record<string, number>;
+  /** Мелкие платежи (выручка до SMALL_PAYMENT_THRESHOLD_RUB): в итог и ряд не входят. */
+  smallTotal: number;
+  smallCount: number;
   unconvertedCount: number;
   /** Сумма в исходной валюте (поле amount) по строкам без курса, сгруппированная по валюте. */
   unconvertedByCurrency: Record<string, number>;

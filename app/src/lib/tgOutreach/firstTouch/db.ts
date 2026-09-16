@@ -5,17 +5,51 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PendingContact } from './selectContacts';
 
-/** Базы, привязанные к кампании. */
-export async function loadCampaignBaseIds(
+/** База рассылки с фильтром «кто её шлёт». */
+export interface CampaignBase {
+  id: string;
+  /** Пусто/null — шлют все аккаунты кампании (поведение до фичи). */
+  sending_account_ids: string[] | null;
+}
+
+/** Включённые в рассылку базы кампании вместе с их фильтром аккаунтов. */
+export async function loadCampaignBases(
   db: SupabaseClient,
   campaignId: string,
-): Promise<string[]> {
-  const { data } = await db
+): Promise<CampaignBase[]> {
+  const { data: links } = await db
     .from('tg_outreach_campaign_bases')
     .select('base_id')
     .eq('campaign_id', campaignId)
     .limit(500);
-  return (data ?? []).map((r) => (r as { base_id: string }).base_id);
+  const baseIds = (links ?? []).map((r) => (r as { base_id: string }).base_id);
+  if (!baseIds.length) return [];
+
+  // Пачками: пятьсот uuid одним `in()` — это URL под 20 КБ, который рискует
+  // упереться в лимиты длины запроса. Реальные кампании далеки от предела,
+  // но ломается это молча и по ночам.
+  const out: CampaignBase[] = [];
+  for (let i = 0; i < baseIds.length; i += 100) {
+    const { data: bases } = await db
+      .from('tg_outreach_bases')
+      .select('id, sending_account_ids')
+      .in('id', baseIds.slice(i, i + 100));
+    out.push(...((bases ?? []) as Array<{ id: string; sending_account_ids: string[] | null }>));
+  }
+  return out;
+}
+
+/**
+ * Какие из баз этому аккаунту разрешено рассылать.
+ *
+ * Чистая функция: правило «пустой фильтр = все, иначе только выбранные»
+ * проверяется тестами без базы и Telegram.
+ */
+export function basesAllowedForAccount(bases: CampaignBase[], accountId: string): string[] {
+  return bases
+    .filter((b) => !b.sending_account_ids || b.sending_account_ids.length === 0
+      || b.sending_account_ids.includes(accountId))
+    .map((b) => b.id);
 }
 
 /**
@@ -96,6 +130,27 @@ export async function countSentToday(
     .eq('account_id', accountId)
     .gte('sent_at', since.toISOString());
   return count ?? 0;
+}
+
+/**
+ * Когда аккаунт отправил последнее первое сообщение (любого дня).
+ *
+ * Основа разнесения нормы по дню: пауза между порциями считается именно от
+ * фактической отправки, а не от «круга кампании». Индекс
+ * (account_id, sent_at desc) делает запрос дешёвым.
+ */
+export async function lastFirstTouchSentAt(
+  db: SupabaseClient,
+  accountId: string,
+): Promise<string | null> {
+  const { data } = await db
+    .from('tg_outreach_base_contacts')
+    .select('sent_at')
+    .eq('account_id', accountId)
+    .not('sent_at', 'is', null)
+    .order('sent_at', { ascending: false })
+    .limit(1);
+  return ((data ?? [])[0] as { sent_at: string } | undefined)?.sent_at ?? null;
 }
 
 export async function markContactSent(

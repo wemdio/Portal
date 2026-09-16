@@ -7,6 +7,7 @@ import {
   type DialogBaseRef,
 } from '@/lib/tgOutreach/dialogBase';
 import { usernameKey } from '@/lib/tgOutreach/report';
+import { TG_SERVICE_NOTIFICATIONS_USER_ID } from '@/lib/tgOutreach/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -47,13 +48,54 @@ export async function GET(req: NextRequest) {
       const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 500);
       const offset = Math.max(parseInt(url.searchParams.get('offset') ?? '0', 10) || 0, 0);
 
-      let query = auth.supabase
-        .from('tg_outreach_dialogs')
-        .select('*', { count: 'exact' })
-        .eq('campaign_id', campaignId)
+      /**
+       * Фильтр по базе: диалоги, чей собеседник есть среди контактов базы.
+       *
+       * Прямой связи диалога с базой нет — диалог заводится по входящему из
+       * Telegram и знает только собеседника. Раньше фильтр собирали здесь:
+       * выгружали все контакты базы (до 20 000) и вклеивали их юзернеймы и id
+       * в условие запроса `or(tg_username.in.(…),tg_user_id.in.(…))`. Условие
+       * едет в URL запроса к базе, и уже на нескольких сотнях контактов он
+       * перерастал лимит шлюза — вкладка падала с «URI too long». Совпадение
+       * теперь считает сама база функцией tg_outreach_dialogs_by_base: те же
+       * два ключа, что у подписи базы в строке диалога (нормализованный
+       * юзернейм или tg_user_id). Пустая база даёт ноль строк, а не «фильтр
+       * не применился»: молча показать все диалогы значило бы соврать про
+       * выбранный фильтр.
+       *
+       * `get: true` обязателен: только GET-вызов функции PostgREST разрешает
+       * фильтровать и сортировать поверх результата, как над таблицей.
+       */
+      const baseId = url.searchParams.get('base_id');
+      let query = baseId
+        ? auth.supabase
+            .rpc('tg_outreach_dialogs_by_base', { p_campaign_id: campaignId, p_base_id: baseId }, { get: true, count: 'exact' })
+        : auth.supabase
+            .from('tg_outreach_dialogs')
+            .select('*', { count: 'exact' })
+            .eq('campaign_id', campaignId);
+
+      // Служебный чат Telegram (коды входа и уведомления) собеседником не
+      // является, но успел накопиться в базе до скипа в воркере — из списка
+      // его прячем независимо от фильтров.
+      query = query.neq('tg_user_id', TG_SERVICE_NOTIFICATIONS_USER_ID);
+
+      query = query
         .order('last_message_at', { ascending: false, nullsFirst: false })
         .range(offset, offset + limit - 1);
-
+      /**
+       * Сколько сообщений в переписке: «одно» против «два и больше».
+       *
+       * Считает вычисляемая колонка (миграция 20260908_0004), а не выборка на
+       * экране: фильтровать уже загруженную страницу значит показывать не тех —
+       * отбор применился бы к пятидесяти строкам, а не ко всей кампании.
+       */
+      const messagesParam = url.searchParams.get('messages');
+      if (messagesParam === 'one') {
+        query = query.eq('messages_count', 1);
+      } else if (messagesParam === 'many') {
+        query = query.gte('messages_count', 2);
+      }
       if (status) {
         query = query.eq('status', status);
       }

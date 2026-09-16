@@ -47,7 +47,7 @@ const managerSortColumns: SortColumns<ManagerBreakdown> = {
   leads: { type: 'number', getValue: (r) => r.leads },
   qualified: { type: 'number', getValue: (r) => r.qualified },
   meetings: { type: 'number', getValue: (r) => r.meetings },
-  contracts: { type: 'number', getValue: (r) => r.contracts },
+  sales: { type: 'number', getValue: (r) => r.sales },
   money: { type: 'number', getValue: (r) => r.money },
 };
 
@@ -69,10 +69,10 @@ export default function ManagerTable({
       leads: acc.leads + r.leads,
       qualified: acc.qualified + r.qualified,
       meetings: acc.meetings + r.meetings,
-      contracts: acc.contracts + r.contracts,
+      sales: acc.sales + r.sales,
       money: acc.money + r.money,
     }),
-    { leads: 0, qualified: 0, meetings: 0, contracts: 0, money: 0 },
+    { leads: 0, qualified: 0, meetings: 0, sales: 0, money: 0 },
   );
 
   if (rows.length === 0) return null;
@@ -88,10 +88,10 @@ export default function ManagerTable({
               <SortableTh label="Лиды" sortKey="leads" sort={sort} onSort={toggleSort} align="right" />
               <SortableTh label="Квалы" sortKey="qualified" sort={sort} onSort={toggleSort} align="right" />
               <SortableTh label="Встречи" sortKey="meetings" sort={sort} onSort={toggleSort} align="right" />
-              <SortableTh label="Договоры" sortKey="contracts" sort={sort} onSort={toggleSort} align="right" />
+              <SortableTh label="Продажи" sortKey="sales" sort={sort} onSort={toggleSort} align="right" />
               <SortableTh label="Деньги" sortKey="money" sort={sort} onSort={toggleSort} align="right" />
               <th className="px-3 py-2 text-right font-medium">Квал / лид</th>
-              <th className="px-3 py-2 text-right font-medium">Договор / лид</th>
+              <th className="px-3 py-2 text-right font-medium">Продажа / лид</th>
             </tr>
           </thead>
           <tbody>
@@ -117,10 +117,10 @@ export default function ManagerTable({
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(r.leads)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(r.qualified)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(r.meetings)}</td>
-                <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(r.contracts)}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(r.sales)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmtMoney(r.money)}</td>
                 <td className="px-3 py-2 text-right tabular-nums text-zinc-500">{pct(r.qualified, r.leads)}</td>
-                <td className="px-3 py-2 text-right tabular-nums text-zinc-500">{pct(r.contracts, r.leads)}</td>
+                <td className="px-3 py-2 text-right tabular-nums text-zinc-500">{pct(r.sales, r.leads)}</td>
               </tr>
               {isOpen && <DealDrillDown query={{ manager: r.manager }} filters={filters} colSpan={8} />}
               </Fragment>
@@ -131,10 +131,10 @@ export default function ManagerTable({
               <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(totals.leads)}</td>
               <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(totals.qualified)}</td>
               <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(totals.meetings)}</td>
-              <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(totals.contracts)}</td>
+              <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmt(totals.sales)}</td>
               <td className="px-3 py-2 text-right tabular-nums text-zinc-700">{fmtMoney(totals.money)}</td>
               <td className="px-3 py-2 text-right tabular-nums text-zinc-500">{pct(totals.qualified, totals.leads)}</td>
-              <td className="px-3 py-2 text-right tabular-nums text-zinc-500">{pct(totals.contracts, totals.leads)}</td>
+              <td className="px-3 py-2 text-right tabular-nums text-zinc-500">{pct(totals.sales, totals.leads)}</td>
             </tr>
           </tbody>
         </table>

@@ -1,0 +1,95 @@
+import { buildReplyPrompt } from './buildPrompt';
+import { getGlobalKnowledgeBase, getKnowledgeBase, getProjectBrief, insertDraft, resolveBrief } from './db';
+import { generateReplyWithSearch, REPLY_MODEL_ID } from './geminiClient';
+import { fetchFullThread } from './instantlyThread';
+import { resolveProjectReply } from './projectReply';
+import type { GenerateDraftResult, ThreadMessage } from './types';
+
+export class GenerateDraftError extends Error {
+  constructor(message: string, public status = 400) {
+    super(message);
+  }
+}
+
+function fallbackThread(reply: { replyBody: string | null; lastOutboundPreview: string | null }): ThreadMessage[] {
+  const thread: ThreadMessage[] = [];
+  if (reply.lastOutboundPreview) thread.push({ fromUs: true, text: reply.lastOutboundPreview });
+  if (reply.replyBody) thread.push({ fromUs: false, text: reply.replyBody });
+  return thread;
+}
+
+/**
+ * projectId передаётся явно вызывающим роутом (URL/тело запроса уже содержит
+ * его — и он же используется для проверки доступа пользователя ДО вызова
+ * этой функции), поэтому здесь не резолвится заново.
+ *
+ * qualificationId может быть как uuid из instantly_lead_qualifications
+ * (аккаунт 'main'), так и строкой instantly_email_id (живой список с другого
+ * аккаунта): для 'main' письмо достаётся из таблицы, для живого — напрямую
+ * из Instantly при получении треда.
+ */
+export async function generateDraftForQualification(
+  projectId: string,
+  qualificationId: string,
+  userId: string,
+): Promise<GenerateDraftResult> {
+  const startedAt = Date.now();
+
+  const [kb, projectBrief, globalKb] = await Promise.all([
+    getKnowledgeBase(projectId),
+    getProjectBrief(projectId),
+    getGlobalKnowledgeBase(),
+  ]);
+  if (!kb) throw new GenerateDraftError('У проекта не заполнена база знаний', 409);
+  // Карточка проекта в приоритете; её запасной вариант из модалки нужен, пока
+  // бриф там не заполнен, иначе ответить лиду сегодня было бы нечем.
+  const brief = resolveBrief(projectBrief, kb);
+
+  const reply = await resolveProjectReply(projectId, qualificationId);
+  if (!reply) throw new GenerateDraftError('Письмо не найдено', 404);
+  const { qualification, accountId } = reply;
+
+  let contextComplete = true;
+  let thread: ThreadMessage[] | null = null;
+  if (qualification.threadId) {
+    thread = await fetchFullThread({
+      campaignId: qualification.campaignId,
+      leadEmail: qualification.leadEmail,
+      threadId: qualification.threadId,
+      accountId,
+    });
+  }
+  if (!thread) {
+    contextComplete = false;
+    thread = fallbackThread(qualification);
+  }
+  if (thread.length === 0) {
+    throw new GenerateDraftError('Нет текста переписки для генерации ответа', 422);
+  }
+
+  const messages = buildReplyPrompt({ kb, globalKb, brief, qualification, thread, contextComplete });
+  const result = await generateReplyWithSearch(messages);
+
+  const draft = await insertDraft({
+    projectId,
+    qualificationId,
+    campaignId: qualification.campaignId,
+    threadId: qualification.threadId,
+    leadEmail: qualification.leadEmail,
+    generatedText: result.text,
+    factsUsed: result.sources.map((s) => s.title || s.url).join(', '),
+    sources: result.sources,
+    contextComplete,
+    model: REPLY_MODEL_ID,
+    latencyMs: Date.now() - startedAt,
+    createdBy: userId,
+  });
+
+  return {
+    draftId: draft.id,
+    text: draft.generatedText ?? '',
+    factsUsed: draft.factsUsed ?? '',
+    sources: draft.sources,
+    contextComplete: draft.contextComplete,
+  };
+}

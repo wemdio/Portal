@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
-import { parseYookassaWebhookBody } from '@/lib/yookassa';
+import { parseYookassaWebhookBody, verifyYookassaPaymentFromWebhook } from '@/lib/yookassa';
 import { applyInvoicePaidToTariff } from '@/lib/tariffs';
 import { mapYookassaErrorRu } from '@/lib/billing';
 
@@ -18,14 +18,22 @@ export const dynamic = 'force-dynamic';
  * YooKassa does not sign notifications with HMAC — they rely on IP allowlisting
  * (185.71.76.0/27, 185.71.77.0/27, 77.75.153.0/25, 77.75.156.11,
  *  77.75.156.35, 77.75.154.128/25, 2a02:5180::/32).
- * We verify by re-fetching the payment from the YooKassa API.
+ *
+ * SECURITY: the endpoint is public (middleware lets every `/webhook` through)
+ * and the body is plain JSON, so the request body is treated as UNTRUSTED. It
+ * is only used to find which invoice the notification is about. Before any
+ * state change we re-fetch the payment from the YooKassa API with our own shop
+ * credentials (`verifyYookassaPaymentFromWebhook`) and act solely on that
+ * authoritative object: status, captured_at, payment_method, cancellation
+ * reason. A forged `{"status":"succeeded"}` therefore cannot mark an invoice
+ * paid — the payment must really be succeeded on YooKassa's side.
  *
  * Multi-shop note: both the production and test YooKassa shops are configured
  * to POST to this same endpoint. We disambiguate by the UUID `payment_id` —
- * unique across shops in practice — and never touch the YK API from inside
- * the webhook handler, so no shop-specific credentials are needed here. The
- * test shop's webhook URL must be configured separately in the YooKassa test
- * cabinet, pointing to this same path.
+ * unique across shops in practice — and look the payment up in the shop the
+ * invoice was created in (`invoices.is_test_shop`) first, then in the other
+ * one. The test shop's webhook URL must be configured separately in the
+ * YooKassa test cabinet, pointing to this same path.
  *
  * Important distinction: YooKassa sends events about Payment objects, not
  * Invoice objects. One YK Invoice (our `invoices` row) can spawn multiple
@@ -51,8 +59,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
-  const payment = event.object;
-  if (!payment?.id) {
+  const claimed = event.object;
+  if (!claimed?.id || typeof claimed.id !== 'string') {
     return NextResponse.json({ error: 'Missing payment id' }, { status: 400 });
   }
 
@@ -67,26 +75,60 @@ export async function POST(req: NextRequest) {
   //     → stored = YK payment.id. Webhook payment.id == that.
   // NOTE: payment.metadata.invoice_id is OUR DB id, NOT a YK id —
   // do NOT use it for routing (was a bug pre-/v3/payments switch).
-  const invoiceDetailsId =
-    (payment as { invoice_details?: { invoice_id?: string } }).invoice_details?.invoice_id ?? null;
-  const candidateIds = [invoiceDetailsId, payment.id].filter((v): v is string => Boolean(v));
+  const claimedInvoiceDetailsId = claimed.invoice_details?.invoice_id;
+  const candidateIds = [claimedInvoiceDetailsId, claimed.id].filter(
+    (v): v is string => typeof v === 'string' && v.length > 0,
+  );
 
   const { data: invoice, error: findErr } = await supabaseAdmin
     .from('invoices')
-    .select('id, status, paid_at, client_user_id')
+    .select('id, status, paid_at, client_user_id, yookassa_payment_id, is_test_shop')
     .in('yookassa_payment_id', candidateIds)
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
 
   if (findErr) {
-    await logError('invoices.webhook.find.failed', findErr, { payment_id: payment.id });
+    await logError('invoices.webhook.find.failed', findErr, { payment_id: claimed.id });
     return NextResponse.json({ error: 'DB error' }, { status: 500 });
   }
 
   if (!invoice) {
     // Not an invoice we track — acknowledge silently.
     return NextResponse.json({ ok: true });
+  }
+
+  // ── Verify with YooKassa before trusting anything from the body ─────────
+  const verified = await verifyYookassaPaymentFromWebhook(claimed.id, invoice.is_test_shop === true);
+  if (!verified) {
+    await logError(
+      'invoices.webhook.unverified',
+      new Error('Payment not confirmed by YooKassa API — notification rejected'),
+      { invoice_id: invoice.id, payment_id: claimed.id, claimed_status: claimed.status ?? null },
+    );
+    return NextResponse.json({ error: 'Payment not verified' }, { status: 403 });
+  }
+  const payment = verified.payment;
+
+  // The authoritative payment must really belong to this invoice: either it
+  // IS the stored YK id (autopay flow) or it was spawned by the stored YK
+  // invoice (manual /invoices flow). Guards against a real-but-foreign payment
+  // id being paired with someone else's invoice via a forged invoice_details.
+  const storedYkId = invoice.yookassa_payment_id;
+  const belongsToInvoice =
+    storedYkId === payment.id || (payment.invoice_details?.invoice_id ?? null) === storedYkId;
+  if (!belongsToInvoice) {
+    await logError(
+      'invoices.webhook.mismatch',
+      new Error('Verified payment does not belong to matched invoice — notification rejected'),
+      {
+        invoice_id: invoice.id,
+        payment_id: payment.id,
+        stored_yk_id: storedYkId,
+        yk_invoice_id: payment.invoice_details?.invoice_id ?? null,
+      },
+    );
+    return NextResponse.json({ error: 'Payment does not match invoice' }, { status: 403 });
   }
 
   // ── payment.succeeded → mark invoice paid + apply to tariff ───────────
