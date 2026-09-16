@@ -1,4 +1,17 @@
 import type { FileRow } from './fileParse';
+import {
+  FALLBACK_PROVIDER,
+  PRESETS,
+  lookupProviderByMx,
+  lookupProviders,
+  providerFromEmailDomain,
+  providerFromHeaders,
+  providerFromHost,
+  type DomainLookup,
+  type ProviderPreset,
+  type SenderProvider,
+  type TlsMode,
+} from './providerDetect';
 
 /**
  * Распознавание выгрузки провайдера: строка файла → нормализованный ящик.
@@ -6,14 +19,16 @@ import type { FileRow } from './fileParse';
  * Названия колонок у провайдеров разные и меняются («Email», «Mailbox»,
  * «SMTP Username», «App Password»…), поэтому колонки сопоставляются по списку
  * синонимов, а не по фиксированному порядку. Чего нет в файле — берём из
- * пресета провайдера. Исключение: IMAP-хост у Maildoso индивидуален для
- * каждого ящика, общего значения по умолчанию для него нет.
+ * пресета провайдера, а самого провайдера определяем по файлу и домену
+ * (providerDetect), а не спрашиваем у человека. Исключение: IMAP-хост у
+ * Maildoso индивидуален для каждого ящика, общего значения по умолчанию для
+ * него нет.
  */
 
-export type SenderProvider = 'maildoso' | 'zapmail' | 'google' | 'custom';
-export type TlsMode = 'implicit_tls' | 'starttls';
+export type { SenderProvider, TlsMode } from './providerDetect';
 
 export interface ParsedMailbox {
+  provider: SenderProvider;
   email: string;
   username: string;
   displayName: string | null;
@@ -37,22 +52,6 @@ export interface ParsedImport {
   mailboxes: ParsedMailbox[];
   errors: ImportRowError[];
 }
-
-interface ProviderPreset {
-  smtpHost?: string;
-  smtpPort: number;
-  smtpTlsMode: TlsMode;
-  imapHost?: string;
-  imapPort: number;
-}
-
-/** Порты и режим TLS по умолчанию. Хост Maildoso известен, IMAP-хост — нет. */
-const PRESETS: Record<SenderProvider, ProviderPreset> = {
-  maildoso: { smtpHost: 'smtp.maildoso.com', smtpPort: 587, smtpTlsMode: 'starttls', imapPort: 993 },
-  zapmail: { smtpHost: 'smtp.gmail.com', smtpPort: 465, smtpTlsMode: 'implicit_tls', imapHost: 'imap.gmail.com', imapPort: 993 },
-  google: { smtpHost: 'smtp.gmail.com', smtpPort: 465, smtpTlsMode: 'implicit_tls', imapHost: 'imap.gmail.com', imapPort: 993 },
-  custom: { smtpPort: 587, smtpTlsMode: 'starttls', imapPort: 993 },
-};
 
 const ALIASES = {
   email: ['email', 'emailaddress', 'mailbox', 'mailboxemail', 'account', 'login', 'user', 'address'],
@@ -141,10 +140,54 @@ function resolveTlsMode(encryption: string, port: number, preset: ProviderPreset
   return preset.smtpTlsMode;
 }
 
-export function parseMailboxRows(rows: FileRow[], provider: SenderProvider): ParsedImport {
-  const preset = PRESETS[provider];
+/** Строка файла, прошедшая проверку: провайдер известен либо ждёт ответа DNS. */
+interface Draft {
+  line: number;
+  email: string;
+  domain: string;
+  provider: SenderProvider | null;
+  row: FileRow;
+}
+
+/**
+ * Провайдер по тому, что уже есть в файле. Лесенка, до первого попадания:
+ *
+ * 1. SMTP-хост в колонке — сильнее всего: хост у нас на руках в любом случае,
+ *    и незнакомый хост честно означает «свои настройки».
+ * 2. IMAP-хост в колонке — так узнаётся выгрузка Maildoso (у неё IMAP-хост свой
+ *    на каждый ящик). Незнакомый IMAP-хост провайдера НЕ определяет: SMTP-хоста
+ *    он не даёт, и объявить такую строку «своими настройками» значило бы
+ *    отвергнуть её из-за отсутствия SMTP-хоста.
+ * 3. Шапка файла — выгрузка пользователей Google Workspace.
+ * 4. Домен адреса, если он публичный (@gmail.com и подобные).
+ *
+ * Не хватило — спрашиваем DNS домена (шаг 5 в parseMailboxRows).
+ */
+function detectFromFile(
+  row: FileRow,
+  map: Map<FieldName, string>,
+  headerProvider: SenderProvider | null,
+  domain: string,
+): SenderProvider | null {
+  const smtpHost = value(row, map, 'smtpHost');
+  if (smtpHost) return providerFromHost(smtpHost) ?? 'custom';
+
+  const imapHost = value(row, map, 'imapHost');
+  if (imapHost) {
+    const byImap = providerFromHost(imapHost);
+    if (byImap) return byImap;
+  }
+
+  return headerProvider ?? providerFromEmailDomain(domain);
+}
+
+export async function parseMailboxRows(
+  rows: FileRow[],
+  lookup: DomainLookup = lookupProviderByMx,
+): Promise<ParsedImport> {
   const headers = Object.keys(rows[0] ?? {});
   const map = buildHeaderMap(headers);
+  const headerProvider = providerFromHeaders(headers.map((h) => normalizeHeader(stripAnnotations(h))));
   const mailboxes: ParsedMailbox[] = [];
   const errors: ImportRowError[] = [];
   const seen = new Set<string>();
@@ -173,6 +216,8 @@ export function parseMailboxRows(rows: FileRow[], provider: SenderProvider): Par
     }
   }
 
+  const drafts: Draft[] = [];
+
   rows.forEach((row, index) => {
     // +2: первая строка файла — заголовки, нумерация с единицы.
     const line = index + 2;
@@ -190,17 +235,31 @@ export function parseMailboxRows(rows: FileRow[], provider: SenderProvider): Par
       errors.push({ line, email, message: 'Этот ящик уже есть выше в файле' });
       return;
     }
-
-    const password = value(row, map, 'password');
-    if (!password) {
+    if (!value(row, map, 'password')) {
       errors.push({ line, email, message: 'Нет пароля (пароль приложения или SMTP)' });
       return;
     }
 
+    seen.add(email);
+    const domain = email.slice(email.indexOf('@') + 1);
+    drafts.push({ line, email, domain, provider: detectFromFile(row, map, headerProvider, domain), row });
+  });
+
+  // Шаг 5 лесенки — DNS, и только для доменов, по которым файл промолчал.
+  // Спрашиваем раз на домен, а не на ящик: у выгрузки на две сотни ящиков
+  // доменов единицы.
+  const unresolved = [...new Set(drafts.filter((d) => !d.provider).map((d) => d.domain))];
+  const byDomain = unresolved.length ? await lookupProviders(unresolved, lookup) : new Map<string, SenderProvider>();
+
+  for (const draft of drafts) {
+    const { row, line, email } = draft;
+    const provider = draft.provider ?? byDomain.get(draft.domain) ?? FALLBACK_PROVIDER;
+    const preset = PRESETS[provider];
+
     const smtpHost = value(row, map, 'smtpHost') || preset.smtpHost || '';
     if (!smtpHost) {
-      errors.push({ line, email, message: 'Нет SMTP-хоста, и у провайдера нет значения по умолчанию' });
-      return;
+      errors.push({ line, email, message: 'Не поняли, какой у ящика SMTP-сервер — добавьте в файл колонку SMTP Host' });
+      continue;
     }
 
     const smtpPort = parsePort(value(row, map, 'smtpPort'), preset.smtpPort);
@@ -208,10 +267,9 @@ export function parseMailboxRows(rows: FileRow[], provider: SenderProvider): Par
     // Хост IMAP у Maildoso свой для каждого ящика: подставлять чужой нельзя,
     // ящик просто останется без чтения ответов, пока хост не укажут.
     const imapHost = value(row, map, 'imapHost') || preset.imapHost || null;
-    const imapPassword = value(row, map, 'imapPassword') || null;
 
-    seen.add(email);
     mailboxes.push({
+      provider,
       email,
       username: value(row, map, 'username') || email,
       displayName: value(row, map, 'displayName') || null,
@@ -220,10 +278,15 @@ export function parseMailboxRows(rows: FileRow[], provider: SenderProvider): Par
       smtpTlsMode: resolveTlsMode(value(row, map, 'encryption'), smtpPort, preset),
       imapHost,
       imapPort,
-      smtpPassword: password,
-      imapPassword,
+      smtpPassword: value(row, map, 'password'),
+      imapPassword: value(row, map, 'imapPassword') || null,
     });
-  });
+  }
+
+  // Ошибки строк набираются в два прохода (проверка строки и подстановка
+  // настроек), а на экране они должны идти по порядку файла — иначе первые
+  // десять в списке окажутся не первыми в выгрузке.
+  errors.sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
 
   return { mailboxes, errors };
 }
