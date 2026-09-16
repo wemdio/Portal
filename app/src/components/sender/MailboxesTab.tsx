@@ -3,10 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2, RefreshCw, Trash2, Upload } from 'lucide-react';
 import {
+  bulkMailboxes,
   deleteMailbox,
   fetchMailboxes,
   importMailboxes,
   patchMailbox,
+  type BulkMailboxAction,
   type ImportMailboxesResult,
   type MailboxDto,
 } from './api';
@@ -26,6 +28,7 @@ const STATUS_LABELS: Record<MailboxDto['status'], { text: string; className: str
 };
 
 const PAGE_SIZE = 30;
+const EMPTY_SELECTION: ReadonlySet<string> = new Set();
 
 export function MailboxesTab() {
   const [mailboxes, setMailboxes] = useState<MailboxDto[]>([]);
@@ -36,6 +39,15 @@ export function MailboxesTab() {
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<ImportMailboxesResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Выбор хранится вместе со страницей, которой он принадлежит, а не
+  // сбрасывается эффектом на смену страницы: эффект ради setState — лишний
+  // каскад рендеров, и его же запрещает правило react-hooks/set-state-in-effect.
+  // Соседняя страница — другие строки, и «выбрано 30» там означало бы не то,
+  // что видно на экране.
+  const [selection, setSelection] = useState<{ page: number; ids: Set<string> }>(
+    { page: 1, ids: new Set() },
+  );
+  const [bulkBusy, setBulkBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async (targetPage: number) => {
@@ -91,6 +103,41 @@ export function MailboxesTab() {
     if (!window.confirm(`Убрать ящик ${mailbox.email} из инструмента?`)) return;
     await deleteMailbox(mailbox.id);
     await load(page);
+  };
+
+  // Автообновление статусов раз в 15 секунд выбор не трогает: id те же.
+  const selected = selection.page === page ? selection.ids : EMPTY_SELECTION;
+  const setSelected = (ids: Set<string>) => setSelection({ page, ids });
+
+  const allOnPageSelected = mailboxes.length > 0 && mailboxes.every((m) => selected.has(m.id));
+  const someOnPageSelected = mailboxes.some((m) => selected.has(m.id));
+
+  const toggleOne = (id: string) => {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    setSelected(next);
+  };
+
+  const toggleAllOnPage = () => {
+    setSelected(allOnPageSelected ? new Set() : new Set(mailboxes.map((m) => m.id)));
+  };
+
+  const runBulk = async (action: BulkMailboxAction) => {
+    const ids = [...selected];
+    if (!ids.length) return;
+    if (action === 'delete'
+      && !window.confirm(`Убрать выбранные ящики (${ids.length}) из инструмента? У провайдера они останутся.`)) return;
+    setBulkBusy(true);
+    setError(null);
+    try {
+      await bulkMailboxes(ids, action);
+      setSelected(new Set());
+      await load(page);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось применить действие');
+    } finally {
+      setBulkBusy(false);
+    }
   };
 
   return (
@@ -174,6 +221,56 @@ export function MailboxesTab() {
           </button>
         </div>
 
+        {/* Панель появляется только при выборе: пустая полоса кнопок над
+            таблицей мозолила бы глаза в обычном режиме, когда действия
+            построчные. Действия те же, что в строке, но на всю выборку. */}
+        {selected.size > 0 ? (
+          <div className="flex flex-wrap items-center gap-2 border-b border-zinc-200 bg-blue-50/60 px-5 py-2.5 text-sm">
+            <span className="font-medium text-zinc-900">Выбрано: {selected.size}</span>
+            <button
+              type="button"
+              disabled={bulkBusy}
+              onClick={() => void runBulk('recheck')}
+              className="rounded-md border border-zinc-300 bg-white px-2.5 py-1 text-xs text-blue-600 hover:bg-zinc-50 disabled:opacity-50"
+            >
+              Проверить
+            </button>
+            <button
+              type="button"
+              disabled={bulkBusy}
+              onClick={() => void runBulk('disable')}
+              className="rounded-md border border-zinc-300 bg-white px-2.5 py-1 text-xs text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+            >
+              Выключить
+            </button>
+            <button
+              type="button"
+              disabled={bulkBusy}
+              onClick={() => void runBulk('enable')}
+              className="rounded-md border border-zinc-300 bg-white px-2.5 py-1 text-xs text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+            >
+              Включить
+            </button>
+            <button
+              type="button"
+              disabled={bulkBusy}
+              onClick={() => void runBulk('delete')}
+              className="rounded-md border border-red-200 bg-white px-2.5 py-1 text-xs text-red-600 hover:bg-red-50 disabled:opacity-50"
+            >
+              Удалить
+            </button>
+            <button
+              type="button"
+              disabled={bulkBusy}
+              onClick={() => setSelected(new Set())}
+              className="rounded-md px-2.5 py-1 text-xs text-zinc-500 hover:bg-zinc-100 disabled:opacity-50"
+            >
+              Снять выделение
+            </button>
+            {bulkBusy ? <Loader2 className="h-4 w-4 animate-spin text-zinc-400" /> : null}
+          </div>
+        ) : null}
+
         {loading ? (
           <div className="flex items-center justify-center gap-2 px-5 py-10 text-sm text-zinc-500">
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -186,7 +283,22 @@ export function MailboxesTab() {
             <table className="w-full text-sm">
               <thead className="text-left text-xs uppercase text-zinc-500">
                 <tr className="border-b border-zinc-200">
-                  <th className="px-5 py-2 font-medium">Ящик</th>
+                  <th className="w-10 pl-5 pr-2 py-2">
+                    <input
+                      type="checkbox"
+                      aria-label="Выбрать все на странице"
+                      checked={allOnPageSelected}
+                      ref={(node) => {
+                        // Частичный выбор — это третье состояние флажка, а не
+                        // «снято»: иначе на половине выбранных строк шапка
+                        // выглядит так же, как на пустой странице.
+                        if (node) node.indeterminate = someOnPageSelected && !allOnPageSelected;
+                      }}
+                      onChange={toggleAllOnPage}
+                      className="h-4 w-4 cursor-pointer rounded border-zinc-300"
+                    />
+                  </th>
+                  <th className="px-3 py-2 font-medium">Ящик</th>
                   <th className="px-3 py-2 font-medium">Статус</th>
                   <th className="px-3 py-2 font-medium">Лимит/день</th>
                   <th className="px-3 py-2 font-medium">SMTP</th>
@@ -198,8 +310,20 @@ export function MailboxesTab() {
                 {mailboxes.map((mailbox) => {
                   const status = STATUS_LABELS[mailbox.status];
                   return (
-                    <tr key={mailbox.id} className="border-b border-zinc-100 last:border-0">
-                      <td className="px-5 py-2.5">
+                    <tr
+                      key={mailbox.id}
+                      className={`border-b border-zinc-100 last:border-0 ${selected.has(mailbox.id) ? 'bg-blue-50/40' : ''}`}
+                    >
+                      <td className="w-10 pl-5 pr-2 py-2.5">
+                        <input
+                          type="checkbox"
+                          aria-label={`Выбрать ${mailbox.email}`}
+                          checked={selected.has(mailbox.id)}
+                          onChange={() => toggleOne(mailbox.id)}
+                          className="h-4 w-4 cursor-pointer rounded border-zinc-300"
+                        />
+                      </td>
+                      <td className="px-3 py-2.5">
                         <div className="font-medium text-zinc-900">{mailbox.email}</div>
                         {mailbox.last_error ? (
                           <div className="mt-0.5 text-xs text-amber-600">{mailbox.last_error}</div>
