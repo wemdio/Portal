@@ -1,3 +1,9 @@
+export const MAX_MANUAL_CONSTRUCTOR_JOBS = 6;
+
+export function isActiveManualConstructorJob(job: { status: string; workload_origin?: string | null }): boolean {
+  return job.workload_origin !== 'automation' && ['pending', 'processing'].includes(job.status);
+}
+
 /** Extra slots admit only bounded preview batches; bulk uploads keep their own slot. */
 export function constructorPreviewSlots(value: string | undefined): number {
   const parsed = Number(value);

@@ -306,6 +306,7 @@ describe('base_collect CONSTRUCT step order', () => {
       save: async (state, rows) => { emailState = state; emailRows = rows; } });
     const finishEmail = async (status: string) => {
       const child = emailDb.getRows('base_constructor_jobs').at(-1)!;
+      expect(child.workload_origin).toBe('automation');
       const grid = child.data as string[][];
       await emailDb.from('base_constructor_jobs').update({ status: 'completed',
         data: [[...grid[0], 'Email Статус'], ...grid.slice(1).map((row) => [...row, status])] }).eq('id', child.id);
@@ -483,6 +484,7 @@ describe('base_collect CONSTRUCT step order', () => {
       const db = seed({ ...collectInfo(harvest), collection_mode: 'preview', target_progress: target });
       await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
       const constructor = db.getRows('base_constructor_jobs')[0];
+      expect(constructor.workload_origin).toBe('automation');
       const expected = legacy ? 1_200 : 100;
       const expectedReady = legacy ? 1_200 : 20;
       const input = constructor.data as string[][];

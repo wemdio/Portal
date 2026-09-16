@@ -1,7 +1,8 @@
 /** @jest-environment node */
 import fs from 'node:fs';
 import path from 'node:path';
-import { constructorAdmission, constructorPreviewSlots, isSmallConstructorJob, createConstructorProbePool } from '@/lib/tools/baseConstructorCapacity';
+import { parse } from 'yaml';
+import { constructorAdmission, constructorPreviewSlots, isSmallConstructorJob, createConstructorProbePool, isActiveManualConstructorJob } from '@/lib/tools/baseConstructorCapacity';
 
 const repoRoot = path.resolve(process.cwd(), '..');
 const read = (name: string) => fs.readFileSync(path.join(repoRoot, name), 'utf8');
@@ -15,6 +16,16 @@ describe('BaseConstructor production capacity', () => {
     for (const service of services) {
       expect(deploy).toContain(service);
       expect(drain).toContain(`portal-${service}`);
+    }
+    const compose = parse(read('docker-compose.prod.yml'), { merge: true });
+    const pools = services.map(service => compose.services[service]);
+    const reserved = pools.filter(service => service.environment.BASE_CONSTRUCTOR_QUEUE === 'manual');
+    expect(reserved).toHaveLength(2);
+    expect(pools.filter(service => service.environment.BASE_CONSTRUCTOR_QUEUE === 'shared')).toHaveLength(pools.length - 2);
+    for (const service of reserved) {
+      expect(Number(service.environment.BASE_CONSTRUCTOR_CONCURRENCY)).toBe(1);
+      expect(Number(service.environment.BASE_CONSTRUCTOR_PREVIEW_SLOTS)).toBe(0);
+      expect(service.deploy.resources.limits.memory).toBe('10240M');
     }
   });
 
@@ -31,6 +42,12 @@ describe('BaseConstructor production capacity', () => {
   });
 
   it('admits only small validation jobs or known preview steps to extra slots', () => {
+    expect([
+      { status: 'pending', workload_origin: 'automation' },
+      { status: 'processing', workload_origin: 'manual' },
+      { status: 'completed', workload_origin: 'manual' },
+      { status: 'pending', workload_origin: null },
+    ].map(isActiveManualConstructorJob)).toEqual([false, true, false, true]);
     const job = { initial_row_count: 100, selected_steps: ['find_emails', 'enrich_descriptions', 'split_emails', 'dedup_email', 'validate_emails'], step_config: { queue_class: 'interactive_preview' } };
     expect(isSmallConstructorJob(job)).toBe(true);
     expect(isSmallConstructorJob({ ...job, selected_steps: ['validate_emails'], step_config: {} })).toBe(true);

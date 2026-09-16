@@ -1,3 +1,4 @@
+import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
 /**
  * Стадия base_collect: авто-сборка базы под вертикаль (ve_bases source='auto').
  *
@@ -2202,11 +2203,12 @@ async function readConstructJobStatus(
 } | null> {
   const { data, error } = await ctx.supabase
     .from('base_constructor_jobs')
-    .select('status, error_message, selected_steps, current_step, total_steps, current_step_key, current_step_progress')
+    .select('status, error_message, selected_steps, current_step, total_steps, current_step_key, current_step_progress, workload_origin')
     .eq('id', bcJobId)
     .maybeSingle();
   if (error) throw new Error(`base_constructor_jobs read: ${error.message}`);
   if (!data) return null;
+  if (data.workload_origin !== 'automation') await markAutomatedConstructor(ctx.supabase, bcJobId);
   const row = data as Record<string, unknown>;
   const totalSteps = constructProgressNumber(row.total_steps, 1);
   return {
@@ -2245,6 +2247,7 @@ async function dispatchConstructJob(input: {
   const record = {
     ...(reservedId ? { id: reservedId } : {}),
     user_id: ownerId,
+    workload_origin: 'automation',
     // Общий список конструктора: сначала клиентский проект, затем сегмент.
     file_name: ['VE2', projectName?.trim(), baseLabel.replace(/^auto:\s*/, '')].filter(Boolean).join(' · '),
     status: 'pending',
