@@ -148,6 +148,10 @@ async def ensure_table() -> None:
             sent_at     timestamptz NOT NULL DEFAULT now()
         )
     """)
+    # head_sha — граница следующей сводки: «всё, что появилось в main после
+    # этого коммита». Колонка добавляется отдельно, потому что таблица уже
+    # живёт на проде с сентября 2026.
+    await pool.execute("ALTER TABLE changelog_digests ADD COLUMN IF NOT EXISTS head_sha text")
     print("[changelog] DB table ready", flush=True)
 
 
@@ -162,15 +166,30 @@ async def already_sent(since: datetime, until: datetime) -> bool:
     return row is not None
 
 
-async def save_digest(since: datetime, until: datetime, summary: str) -> None:
+async def save_digest(
+    since: datetime, until: datetime, summary: str, head_sha: str | None = None
+) -> None:
     pool = await get_pool()
     if not pool:
         return
     await pool.execute(
-        "INSERT INTO changelog_digests (window_from, window_to, summary) VALUES ($1, $2, $3)",
-        since, until, summary,
+        "INSERT INTO changelog_digests (window_from, window_to, summary, head_sha)"
+        " VALUES ($1, $2, $3, $4)",
+        since, until, summary, head_sha,
     )
     print("[changelog] Digest saved to DB", flush=True)
+
+
+async def last_head_sha() -> str | None:
+    """Коммит main, на котором закончилась прошлая сводка."""
+    pool = await get_pool()
+    if not pool:
+        return None
+    row = await pool.fetchrow(
+        "SELECT head_sha FROM changelog_digests"
+        " WHERE head_sha IS NOT NULL ORDER BY sent_at DESC LIMIT 1"
+    )
+    return str(row["head_sha"]) if row else None
 
 
 # ── Time window helpers ───────────────────────────────────────────────────────
@@ -243,6 +262,89 @@ async def fetch_commits(since: datetime, until: datetime) -> list[dict[str, Any]
     except Exception as e:
         print(f"[changelog] GitHub fetch error: {e}", flush=True)
 
+    return commits
+
+
+async def fetch_head_sha() -> str | None:
+    """Текущая вершина main: к ней и привязывается сводка."""
+    headers: dict[str, str] = {"Accept": "application/vnd.github+json"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(
+                f"https://api.github.com/repos/{GITHUB_REPO}/commits/main", headers=headers
+            )
+            if r.status_code != 200:
+                print(f"[changelog] GitHub head error {r.status_code}: {r.text[:200]}", flush=True)
+                return None
+            return str(r.json().get("sha") or "") or None
+    except Exception as e:
+        print(f"[changelog] GitHub head fetch error: {e}", flush=True)
+        return None
+
+
+async def fetch_commits_between(base_sha: str, head_sha: str) -> list[dict[str, Any]] | None:
+    """Коммиты, появившиеся в main между прошлой сводкой и текущей вершиной.
+
+    Возвращает None, если диапазон построить не удалось (вершина прошлой сводки
+    пропала после force-push, GitHub ответил ошибкой) — тогда вызывающий код
+    откатывается на отбор по датам.
+
+    Трёхточечное сравнение `base...head` отдаёт ровно то, что есть в head и чего
+    не было в base, — независимо от дат коммитов. Именно это и чинит главную
+    дыру: коммит, написанный ночью и влитый в main через день, попадает в
+    ближайшую сводку, а не проваливается между окнами.
+    """
+    headers: dict[str, str] = {"Accept": "application/vnd.github+json"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+
+    commits: list[dict[str, Any]] = []
+    data: Any = None
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/compare/{base_sha}...{head_sha}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            for page in range(1, MAX_COMMIT_PAGES + 1):
+                r = await client.get(
+                    url, headers=headers, params={"per_page": "100", "page": str(page)}
+                )
+                if r.status_code != 200:
+                    print(
+                        f"[changelog] GitHub compare error {r.status_code}: {r.text[:200]}",
+                        flush=True,
+                    )
+                    return None
+                data = r.json()
+                page_commits = data.get("commits") or []
+                commits.extend(page_commits)
+                if len(commits) >= int(data.get("total_commits") or 0) or not page_commits:
+                    break
+            else:
+                print(
+                    f"[changelog] Compare stopped at {MAX_COMMIT_PAGES} pages "
+                    f"({len(commits)} commits)",
+                    flush=True,
+                )
+    except Exception as e:
+        print(f"[changelog] GitHub compare error: {e}", flush=True)
+        return None
+
+    # GitHub отдаёт по сравнению веток не больше 250 коммитов, даже если в
+    # диапазоне их больше. На суточном ритме это недостижимо (десятки в день),
+    # но после долгого простоя бота — возможно, и молчать об этом нельзя.
+    total = int(data.get("total_commits") or 0) if isinstance(data, dict) else 0
+    if total and len(commits) < total:
+        print(
+            f"[changelog] В диапазоне {total} коммитов, GitHub отдал {len(commits)} "
+            "(лимит сравнения веток) — в сводку попадут самые свежие",
+            flush=True,
+        )
+
+    # compare отдаёт от старых к новым, а дальше по списку режется MAX_MESSAGES —
+    # при обрезке терять надо старое, а не сегодняшнее.
+    commits.reverse()
     return commits
 
 
@@ -364,6 +466,16 @@ SYSTEM_PROMPT = """\
 
 Заголовков, кроме трёх блоков ниже, не бывает. Строки вида «Новое:», «Улучшения и исправления:», «Изменения:» запрещены — ни пунктом, ни подпунктом. Порядок «сначала новое, потом улучшения, потом исправления» задаётся порядком пунктов, а не подписями к ним.
 
+## Правило полноты (КРИТИЧНО)
+
+Ни один коммит не исчезает бесследно. Каждый коммит из списка обязан быть виден в ответе — сам по себе или внутри пункта, объединившего несколько коммитов об одном и том же.
+
+Если у правки нет заметного пользователю эффекта — это не повод её выбросить: такая правка идёт строкой в блок «Прочие технические обновления». Туда же уходит всё, что сделано ради надёжности: изоляция сбоев, ограничения нагрузки, восстановление после обрывов. Пиши коротко и по-русски, эффектом: «разовые сбои поиска больше не роняют подготовку базы».
+
+Не попадают в ответ только: merge-коммиты, правки самой документации и памяти агентов (docs, memory), удаление файлов и любые упоминания ключей и секретов.
+
+Перед выдачей ответа сверься со списком: для каждого коммита назови себе пункт, в котором он отражён. Нашёлся коммит без пункта — добавь его, а не опускай.
+
 ## Структура ответа
 
 Ответ состоит из трёх блоков. Каждый блок начинается с заголовка, за которым идут пункты списка.
@@ -376,7 +488,7 @@ SYSTEM_PROMPT = """\
 Сюда идут изменения, затрагивающие КЛИЕНТСКИЙ портал.
 
 Блок 3 — заголовок: «Прочие технические обновления:»
-Сюда идут: инфраструктурные, косметические и прочие технические изменения без пользовательского эффекта. Не больше трёх пунктов, одной строкой каждый.
+Сюда идут: инфраструктурные, косметические и прочие технические изменения без пользовательского эффекта. Каждый пункт — одна строка. Близкие правки объединяй в один пункт, но не выбрасывай: этот блок и существует, чтобы работа без видимого эффекта всё равно была видна.
 
 ## Как разложить коммит по блокам
 
@@ -677,8 +789,33 @@ async def run_digest(
         print("[changelog] Digest for this window already sent — skipping.", flush=True)
         return
 
-    commits = await fetch_commits(since_utc, until_utc)
-    print(f"[changelog] Fetched {len(commits)} commits from GitHub", flush=True)
+    # Отбор по диапазону main: от вершины прошлой сводки до текущей. Окно дат
+    # остаётся запасным путём — для самого первого запуска (в базе ещё нет
+    # вершины), для ручного прогона с --days и если вершина не найдена.
+    head_sha = await fetch_head_sha()
+    base_sha = None if days_override is not None else await last_head_sha()
+
+    commits: list[dict[str, Any]] | None = None
+    if base_sha and head_sha:
+        if base_sha == head_sha:
+            print("[changelog] main не двигался с прошлой сводки — нечего слать.", flush=True)
+            return
+        commits = await fetch_commits_between(base_sha, head_sha)
+        if commits is None:
+            print(
+                f"[changelog] Диапазон {base_sha[:8]}…{head_sha[:8]} не построился — "
+                "откат на отбор по датам",
+                flush=True,
+            )
+        else:
+            print(
+                f"[changelog] Range {base_sha[:8]}…{head_sha[:8]}: {len(commits)} commits",
+                flush=True,
+            )
+
+    if commits is None:
+        commits = await fetch_commits(since_utc, until_utc)
+        print(f"[changelog] Fetched {len(commits)} commits from GitHub (окно дат)", flush=True)
 
     if not commits:
         print("[changelog] No commits in window — nothing to send.", flush=True)
@@ -704,7 +841,9 @@ async def run_digest(
     ok = await send_message(text)
     print(f"[changelog] Message sent: {ok}", flush=True)
     if ok:
-        await save_digest(since_utc, until_utc, summary)
+        # Вершину запоминаем только после удачной отправки: иначе неотправленная
+        # сводка сдвинула бы границу и её коммиты не попали бы уже никуда.
+        await save_digest(since_utc, until_utc, summary, head_sha=head_sha)
 
 
 # ── Health check server ───────────────────────────────────────────────────────
