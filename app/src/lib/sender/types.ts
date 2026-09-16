@@ -1,0 +1,81 @@
+import type { TlsMode } from './mailboxImport';
+
+export type MailboxStatus = 'pending' | 'verified' | 'failed' | 'disabled';
+export type CampaignStatus = 'draft' | 'running' | 'paused' | 'done';
+export type RecipientStatus = 'active' | 'replied' | 'bounced' | 'unsubscribed' | 'finished' | 'stopped';
+export type MessageStatus = 'scheduled' | 'sending' | 'sent' | 'failed' | 'canceled';
+export type ReplyKind = 'human' | 'auto_reply' | 'bounce' | 'warmup' | 'unknown';
+
+export interface MailboxRow {
+  id: string;
+  provider: string;
+  email: string;
+  display_name: string | null;
+  username: string;
+  smtp_host: string;
+  smtp_port: number;
+  smtp_tls_mode: TlsMode;
+  imap_host: string | null;
+  imap_port: number;
+  secret_encrypted: string;
+  status: MailboxStatus;
+  daily_campaign_limit: number;
+  daily_total_limit: number;
+  last_verified_at: string | null;
+  last_error: string | null;
+  last_send_at: string | null;
+  imap_last_uid: number | null;
+  imap_uidvalidity: string | null;
+  imap_checked_at: string | null;
+}
+
+export interface CampaignRow {
+  id: string;
+  name: string;
+  status: CampaignStatus;
+  timezone: string;
+  send_hour_from: number;
+  send_hour_to: number;
+  send_weekdays: number[];
+  gap_seconds: number;
+  gap_jitter_seconds: number;
+  started_at: string | null;
+}
+
+export interface StepRow {
+  id: string;
+  campaign_id: string;
+  step_no: number;
+  delay_days: number;
+  subject: string;
+  body: string;
+}
+
+export interface RecipientRow {
+  id: string;
+  campaign_id: string;
+  email: string;
+  name: string | null;
+  vars: Record<string, string>;
+  status: RecipientStatus;
+  mailbox_id: string | null;
+  last_step_sent: number;
+  next_step_at: string | null;
+  thread_message_id: string | null;
+}
+
+export interface MessageRow {
+  id: string;
+  campaign_id: string;
+  recipient_id: string;
+  mailbox_id: string;
+  step_no: number;
+  to_email: string;
+  subject: string;
+  body: string;
+  message_id: string;
+  in_reply_to: string | null;
+  status: MessageStatus;
+  scheduled_at: string;
+  attempts: number;
+}
