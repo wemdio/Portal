@@ -201,17 +201,43 @@ export async function GET(req: NextRequest) {
       const { user } = await getUser(req);
       if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-      const { data, error } = await admin
+      const params = req.nextUrl.searchParams;
+      const source = params.get('source') ?? 'manual';
+      const page = Number(params.get('page') ?? '1');
+      const search = (params.get('q') ?? '').trim();
+      const pageSize = 20;
+      if (!['manual', 'automation'].includes(source)
+        || !Number.isSafeInteger(page) || page < 1 || page > 100_000
+        || search.length > 200) {
+        return NextResponse.json({ error: 'Некорректные параметры поиска истории.' }, { status: 400 });
+      }
+
+      // Filter before pagination: automated VE jobs must never evict a user's
+      // uploads. NULL retains legacy manual jobs until origin backfill finishes.
+      let query = admin
         .from('base_constructor_jobs')
-        .select('id, status, workload_origin, file_name, selected_steps, current_step, current_step_key, current_step_progress, total_steps, initial_row_count, result_stats, error_message, created_at, completed_at')
-        .eq('user_id', user.id)
+        .select('id, status, workload_origin, file_name, selected_steps, current_step, current_step_key, current_step_progress, total_steps, initial_row_count, result_stats, error_message, created_at, completed_at', { count: 'exact' })
+        .eq('user_id', user.id);
+      query = source === 'automation'
+        ? query.eq('workload_origin', 'automation')
+        : query.or('workload_origin.eq.manual,workload_origin.is.null');
+      if (search) {
+        // Treat filename punctuation (notably underscores) literally.
+        query = query.ilike('file_name', `%${search.replace(/[\\%_]/g, '\\$&')}%`);
+      }
+      const { data, error, count } = await query
         .order('created_at', { ascending: false })
-        .limit(20);
+        .order('id', { ascending: false })
+        .range((page - 1) * pageSize, page * pageSize - 1);
 
       if (error) return NextResponse.json({ error: error.message }, { status: 500 });
       try {
         const activeManualCount = await countActiveManualConstructorJobs(admin, user.id);
-        return NextResponse.json({ jobs: data || [], active_manual_count: activeManualCount });
+        return NextResponse.json({
+          jobs: data || [], active_manual_count: activeManualCount,
+          page, page_size: pageSize, total: count ?? 0,
+          has_more: page * pageSize < (count ?? 0),
+        });
       } catch {
         return NextResponse.json({ error: 'Не удалось проверить очередь ручных баз. Повторите попытку.' }, { status: 503 });
       }
