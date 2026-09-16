@@ -388,6 +388,16 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const [downloading, setDownloading] = useState(false);
   const [loadingFull, setLoadingFull] = useState(false);
   const [history, setHistory] = useState<ConstructorJob[]>([]);
+  const [historyFilters, setHistoryFilters] = useState({ source: 'manual', query: '', page: 1 });
+  const [historySearch, setHistorySearch] = useState('');
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState('');
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const historyRequestRef = useRef(0);
+  const historyPendingRef = useRef(false);
+  const historyFiltersRef = useRef(historyFilters);
+  const historyInitialLoadRef = useRef(true);
   const [activeManualCount, setActiveManualCount] = useState<number | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -395,14 +405,57 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
   /* ─── Load history ─── */
 
-  const loadHistory = useCallback(async () => {
-    const res = await authFetch('/api/tools/base-constructor');
-    if (!res.ok) return null;
-    const { jobs, active_manual_count } = await res.json();
-    setHistory(jobs || []);
-    setActiveManualCount(typeof active_manual_count === 'number' ? active_manual_count : null);
-    return (jobs ?? []) as ConstructorJob[];
+  const invalidateHistoryRequests = useCallback(() => {
+    historyRequestRef.current++;
+    historyPendingRef.current = false;
   }, []);
+
+  function changeHistoryFilters(next: typeof historyFilters) {
+    historyInitialLoadRef.current = false;
+    historyFiltersRef.current = next;
+    invalidateHistoryRequests();
+    setHistoryFilters(next);
+    setHistory([]);
+    setHistoryTotal(0);
+    setHistoryHasMore(false);
+    setHistoryError('');
+    setHistoryLoading(true);
+  }
+
+  const loadHistory = useCallback(async () => {
+    // A completed job poll may still hold the previous filter's callback.
+    if (historyFiltersRef.current !== historyFilters) return null;
+    // Slow responses must not be invalidated by every five-second poll.
+    if (historyPendingRef.current) return null;
+    historyPendingRef.current = true;
+    const requestId = ++historyRequestRef.current;
+    setHistoryLoading(true);
+    try {
+      const params = new URLSearchParams({
+        source: historyFilters.source, q: historyFilters.query, page: String(historyFilters.page),
+      });
+      const res = await authFetch(`/api/tools/base-constructor?${params}`);
+      if (!res.ok) throw new Error('Не удалось загрузить историю. Повторите попытку.');
+      const { jobs, active_manual_count, total, has_more } = await res.json();
+      if (requestId !== historyRequestRef.current) return null;
+      setHistory(jobs || []);
+      setHistoryTotal(total ?? 0);
+      setHistoryHasMore(has_more === true);
+      setHistoryError('');
+      setActiveManualCount(typeof active_manual_count === 'number' ? active_manual_count : null);
+      return (jobs ?? []) as ConstructorJob[];
+    } catch {
+      if (requestId === historyRequestRef.current) {
+        setHistoryError('Не удалось загрузить историю. Повторите попытку.');
+      }
+      return null;
+    } finally {
+      if (requestId === historyRequestRef.current) {
+        historyPendingRef.current = false;
+        setHistoryLoading(false);
+      }
+    }
+  }, [historyFilters]);
 
   // Initial mount: подтянуть историю и, если есть незавершённая задача,
   // открыть её на экране прогресса (юзер вернулся на страницу пока
@@ -413,13 +466,16 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
     let cancelled = false;
     void (async () => {
       const jobs = await loadHistory();
-      if (cancelled || !jobs) return;
+      if (cancelled || !jobs || !historyInitialLoadRef.current) return;
+      historyInitialLoadRef.current = false;
       const running = jobs.find(isActiveManualConstructorJob);
       if (running) setActiveJob(running);
     })();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    return () => {
+      cancelled = true;
+      invalidateHistoryRequests();
+    };
+  }, [loadHistory, invalidateHistoryRequests]);
 
   // Пока в истории есть хоть одна активная задача (pending/processing) —
   // поллим историю раз в 5 сек, чтобы статусы в списке (и счётчик активных
@@ -827,19 +883,20 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
   /* ─── Download CSV ─── */
 
-  async function downloadCSV() {
-    if (!activeJob || activeJob.status !== 'completed' || downloading) return;
+  async function downloadCSV(job = activeJob) {
+    if (!job || job.status !== 'completed' || downloading) return;
     setDownloading(true);
     try {
       // CSV is built server-side and streamed as a file \u2014 the browser no longer
       // fetches/parses the full (up to tens of MB) result blob just to download.
-      const res = await authFetch(`/api/tools/base-constructor/${activeJob.id}/download`);
+      const res = await authFetch(`/api/tools/base-constructor/${job.id}/download`);
       if (!res.ok) { setError('\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043A\u0430\u0447\u0430\u0442\u044C \u0444\u0430\u0439\u043B'); return; }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `constructor_${new Date().toISOString().slice(0, 10)}.csv`;
+      const name = job.file_name?.replace(/\.(csv|tsv|txt|xlsx?)$/i, '') || `constructor_${job.id}`;
+      a.download = `${name}.csv`;
       a.click();
       URL.revokeObjectURL(url);
     } catch {
@@ -2176,7 +2233,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
             {/* Actions */}
             <div className="flex items-center gap-3 flex-wrap">
               <button
-                onClick={downloadCSV}
+                onClick={() => { void downloadCSV(); }}
                 disabled={downloading}
                 className={clientMode
                   ? 'ds-btn-primary inline-flex items-center gap-2 px-4 disabled:opacity-40'
@@ -2253,37 +2310,91 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
             нужно видеть весь список (включая «В очереди» и «В работе»),
             чтобы понимать, сколько свободных слотов осталось и какие
             файлы уже сданы. */}
-        {history.length > 0 && (
           <div className={clientMode ? 'neu-card overflow-hidden' : 'bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden'}>
             <div className={clientMode ? 'px-6 py-4 border-b border-[var(--cp-divider)] flex items-center justify-between' : 'px-6 py-4 border-b border-gray-100 bg-gray-50/50 flex items-center justify-between'}>
               <h3 className={clientMode ? 'text-base font-semibold m-0 text-[var(--cp-paper)]' : 'text-base font-bold text-gray-900'}>История</h3>
-              {anyJobActive && (
-                <span className={`text-xs ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-gray-500'}`}>
-                  Ручных в работе: {activeJobsCount} / {MAX_ACTIVE_JOBS}
-                </span>
+              <span className={`text-xs ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-gray-500'}`}>
+                Ручных в работе: {activeManualCount === null ? '…' : activeManualCount} / {MAX_ACTIVE_JOBS}
+              </span>
+            </div>
+            <div className={`px-6 py-4 space-y-3 border-b ${clientMode ? 'border-[var(--cp-divider)]' : 'border-gray-100'}`}>
+              <div className="flex flex-wrap gap-2" role="group" aria-label="Источник баз">
+                {[
+                  { value: 'manual', label: 'Мои загрузки' },
+                  { value: 'automation', label: 'Автоматические сборы' },
+                ].map(({ value, label }) => (
+                  <button key={value} type="button" aria-pressed={historyFilters.source === value}
+                    onClick={() => {
+                      if (historyFilters.source !== value) changeHistoryFilters({ ...historyFilters, source: value, page: 1 });
+                    }}
+                    className={`rounded-lg px-3 py-2 text-sm font-medium border ${clientMode
+                      ? historyFilters.source === value
+                        ? 'border-[var(--cp-paper)] bg-[var(--cp-surface-active)] text-[var(--cp-paper)]'
+                        : 'border-[var(--cp-divider)] text-[var(--cp-paper-mute)]'
+                      : historyFilters.source === value
+                        ? 'border-blue-600 bg-blue-50 text-blue-700'
+                        : 'border-gray-200 text-gray-600 hover:bg-gray-50'}`}
+                  >{label}</button>
+                ))}
+              </div>
+              <p className={`text-xs ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-gray-500'}`}>
+                {historyFilters.source === 'manual'
+                  ? 'Загруженные вами файлы за всё время. Автоматические сборы находятся в отдельной вкладке.'
+                  : 'Задачи движка вертикалей и других автоматических сборов.'}
+              </p>
+              <form className="flex flex-wrap gap-2" onSubmit={(event) => {
+                event.preventDefault();
+                const query = historySearch.trim();
+                if (query === historyFilters.query && historyFilters.page === 1) void loadHistory();
+                else changeHistoryFilters({ ...historyFilters, query, page: 1 });
+              }}>
+                <input type="search" aria-label="Поиск базы по названию" maxLength={200}
+                  value={historySearch} onChange={(event) => setHistorySearch(event.target.value)}
+                  placeholder="Название файла или проекта"
+                  className={`min-w-0 flex-1 rounded-lg border px-3 py-2 text-sm ${clientMode
+                    ? 'border-[var(--cp-divider-strong)] bg-[var(--cp-surface-rest)] text-[var(--cp-paper)]'
+                    : 'border-gray-200 bg-white text-gray-900'}`}
+                />
+                <button type="submit" className={`rounded-lg border px-4 py-2 text-sm ${clientMode
+                  ? 'border-[var(--cp-divider-strong)] text-[var(--cp-paper)]'
+                  : 'border-gray-200 text-gray-700 hover:bg-gray-50'}`}>Найти</button>
+              </form>
+              <div role="status" className={`text-xs ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-gray-500'}`}>
+                {historyLoading ? 'Загружаем историю…' : historyError ? null : `Найдено баз: ${historyTotal.toLocaleString('ru-RU')}`}
+              </div>
+              {historyError && (
+                <div role="alert" className={`text-sm ${clientMode ? 'text-[var(--cp-red)]' : 'text-red-600'}`}>
+                  {historyError}{' '}
+                  <button type="button" className="underline" onClick={() => { void loadHistory(); }}>Повторить</button>
+                </div>
               )}
             </div>
+            {!historyLoading && !historyError && history.length === 0 && (
+              <p className={`px-6 py-5 text-sm ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-gray-500'}`}>
+                {historyFilters.query ? 'По этому названию ничего не найдено. Попробуйте часть названия.' : 'В этом разделе пока нет баз.'}
+              </p>
+            )}
             <div className="divide-y divide-gray-50">
               {history.map((j) => (
                 <div
                   key={j.id}
                   className={clientMode
-                    ? 'px-6 py-3 flex items-center justify-between cursor-pointer hover:bg-[var(--cp-surface-elev)] transition'
-                    : 'px-6 py-3 flex items-center justify-between cursor-pointer hover:bg-gray-50/50 transition'}
+                    ? 'px-6 py-3 flex flex-wrap items-center gap-3 hover:bg-[var(--cp-surface-elev)] transition'
+                    : 'px-6 py-3 flex flex-wrap items-center gap-3 hover:bg-gray-50/50 transition'}
+                >
+                  <button type="button" className="min-w-0 flex-1 basis-64 text-left"
                   onClick={() => {
                     setActiveJob(j);
+                    setPreviewData(null);
                     if (j.status === 'completed') loadJobPreview(j.id);
                   }}
-                >
-                  <div className="flex items-center gap-3">
-                    <div>
-                      <span className={`text-sm font-medium ${clientMode ? 'text-[var(--cp-paper)]' : 'text-gray-900'}`}>
+                  >
+                      <span className={`block break-words text-sm font-medium ${clientMode ? 'text-[var(--cp-paper)]' : 'text-gray-900'}`}>
                         {j.file_name || 'Без имени'}
                       </span>
-                      <span className={`text-xs ml-2 ${clientMode ? 'text-[var(--cp-paper-faint)]' : 'text-gray-400'}`}>{formatDate(j.created_at)}</span>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
+                      <span className={`block mt-1 text-xs ${clientMode ? 'text-[var(--cp-paper-faint)]' : 'text-gray-400'}`}>{formatDate(j.created_at)}</span>
+                  </button>
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
                     <span className="text-xs text-gray-400">
                       {j.selected_steps?.length || 0} шагов
                     </span>
@@ -2318,12 +2429,33 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                               ? 'В очереди'
                               : 'В работе'}
                     </span>
+                    {j.status === 'completed' && (
+                      <button type="button" disabled={downloading}
+                        onClick={() => { void downloadCSV(j); }}
+                        aria-label={`Скачать CSV: ${j.file_name || 'Без имени'}`}
+                        className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs disabled:opacity-50 ${clientMode
+                          ? 'border-[var(--cp-divider)] text-[var(--cp-paper)]'
+                          : 'border-gray-200 text-gray-700 hover:bg-gray-100'}`}
+                      ><Download className="w-3.5 h-3.5" /> CSV</button>
+                    )}
                   </div>
                 </div>
               ))}
             </div>
+            {(historyFilters.page > 1 || historyHasMore) && (
+              <div className={`px-6 py-4 flex flex-wrap items-center justify-between gap-3 border-t text-sm ${clientMode
+                ? 'border-[var(--cp-divider)] text-[var(--cp-paper)]'
+                : 'border-gray-100 text-gray-700'}`}>
+                <button type="button" disabled={historyLoading || historyFilters.page === 1}
+                  className="px-3 py-2 rounded-lg border disabled:opacity-40"
+                  onClick={() => changeHistoryFilters({ ...historyFilters, page: historyFilters.page - 1 })}>Назад</button>
+                <span>Страница {historyFilters.page}</span>
+                <button type="button" disabled={historyLoading || !historyHasMore}
+                  className="px-3 py-2 rounded-lg border disabled:opacity-40"
+                  onClick={() => changeHistoryFilters({ ...historyFilters, page: historyFilters.page + 1 })}>Дальше</button>
+              </div>
+            )}
           </div>
-        )}
       </div>
     </div>
   );
