@@ -73,6 +73,9 @@ const mockUpdateEq = jest.fn(); // (col, val) => update builder (spy)
 const mockStorageDownload = jest.fn(); // (bucket, path) => { data, error }
 const mockStorageUpload = jest.fn(); // (bucket, path, body, opts) => { error }
 
+jest.mock('@/lib/tools/processingSteps', () => ({ AVAILABLE_STEPS: [] }));
+jest.mock('@/lib/toolTrace', () => ({ withToolTrace: (_options: unknown, run: () => unknown) => run() }));
+
 jest.mock('@/lib/supabaseAdmin', () => {
   // `.update(...).eq('id',id).eq('status','completed')` is awaited directly.
   const updateBuilder = {
@@ -172,9 +175,11 @@ async function bodyBytes(res: Response): Promise<Buffer> {
 const params = { params: Promise.resolve({ id: JOB_ID }) };
 
 let GET: (req: NextRequest, ctx: typeof params) => Promise<Response>;
+let listHistory: (req: NextRequest) => Promise<Response>;
 
 beforeAll(async () => {
   ({ GET } = await import('@/app/api/tools/base-constructor/[id]/download/route'));
+  ({ GET: listHistory } = await import('@/app/api/tools/base-constructor/route'));
 });
 
 beforeEach(() => {
@@ -191,6 +196,7 @@ describe('auth precedes any body work', () => {
   it('401 without a bearer token — no auth lookup, no db, no storage', async () => {
     const res = await GET(makeReq({ auth: null }), params);
     expect(res.status).toBe(401);
+    expect((await listHistory(makeReq({ auth: null }))).status).toBe(401);
     expect(mockGetUser).not.toHaveBeenCalled();
     expect(mockJobSelect).not.toHaveBeenCalled();
     expect(mockStorageDownload).not.toHaveBeenCalled();
@@ -220,6 +226,50 @@ describe('auth precedes any body work', () => {
     // The meta SELECT never asks for `data` (the ~50MB blob).
     expect(mockJobSelect).toHaveBeenCalledWith('user_id, status, export_path');
     expect(mockJobSelect).not.toHaveBeenCalledWith('data');
+
+    // History must find older uploads without loading their row blobs or
+    // widening ownership. Reuse this metadata/access test's fixture budget.
+    const calls: Array<[string, ...unknown[]]> = [];
+    mockJobSelect.mockImplementation((columns: string, options?: { head?: boolean }) => {
+      calls.push(['select', columns, options]);
+      const builder: Record<string, unknown> = {};
+      for (const method of ['eq', 'or', 'in', 'ilike', 'order', 'range']) {
+        builder[method] = (...args: unknown[]) => { calls.push([method, ...args]); return builder; };
+      }
+      builder.then = (resolve: (result: unknown) => unknown) => Promise.resolve({
+        data: options?.head ? null : [{ id: JOB_ID }], error: null,
+        count: options?.head ? 3 : 25,
+      }).then(resolve);
+      return builder;
+    });
+    const historyRequest = (query: string) => ({
+      ...makeReq(), nextUrl: new URL(`https://portal.example/api/tools/base-constructor${query}`),
+    }) as unknown as NextRequest;
+    for (const query of ['?page=0', '?page=1.5', '?page=Infinity', '?source=all', `?q=${'x'.repeat(201)}`]) {
+      expect((await listHistory(historyRequest(query))).status).toBe(400);
+    }
+    expect(calls).toEqual([]);
+
+    const first = await listHistory(historyRequest(''));
+    expect(await first.json()).toMatchObject({ total: 25, page: 1, page_size: 20, has_more: true, active_manual_count: 3 });
+    expect(calls).toContainEqual(['or', 'workload_origin.eq.manual,workload_origin.is.null']);
+    expect(calls).toContainEqual(['range', 0, 19]);
+    expect(calls.filter(([method]) => method === 'eq')).toEqual([
+      ['eq', 'user_id', OWNER], ['eq', 'user_id', OWNER],
+    ]);
+    expect(calls).toContainEqual(['order', 'id', { ascending: false }]);
+    expect(calls.filter(([method]) => method === 'select').every(([, columns]) => !String(columns).split(',').includes('data'))).toBe(true);
+
+    calls.length = 0;
+    const second = await listHistory(historyRequest(`?page=2&q=${encodeURIComponent('Эво_Груп%')}`));
+    expect(await second.json()).toMatchObject({ page: 2, has_more: false, active_manual_count: 3 });
+    expect(calls).toContainEqual(['ilike', 'file_name', '%Эво\\_Груп\\%%']);
+    expect(calls).toContainEqual(['range', 20, 39]);
+    calls.length = 0;
+    expect((await listHistory(historyRequest('?source=automation'))).status).toBe(200);
+    expect(calls).toContainEqual(['eq', 'workload_origin', 'automation']);
+    // Quota remains manual even while browsing automation or search results.
+    expect(calls).toContainEqual(['or', 'workload_origin.is.null,workload_origin.eq.manual']);
   });
 });
 
