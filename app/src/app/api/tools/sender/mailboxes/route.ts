@@ -14,20 +14,29 @@ const LIST_COLS =
 const PROVIDERS: SenderProvider[] = ['maildoso', 'zapmail', 'google', 'custom'];
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
-/** GET — список подключённых ящиков (без паролей). */
+const PAGE_SIZE = 30;
+
+/** GET — список подключённых ящиков (без паролей), постранично. */
 export async function GET(req: NextRequest) {
   return withToolTrace({ request: req, operation: 'tools.sender.mailboxes.list' }, async () => {
     const auth = await authenticateRequest(req.headers.get('authorization'));
     if ('error' in auth) return auth.error;
     if (!supabaseAdmin) return jsonError('Сервис не настроен', 503);
 
-    const { data, error } = await supabaseAdmin
+    const url = new URL(req.url);
+    const page = Math.max(1, Number(url.searchParams.get('page') ?? '1') || 1);
+
+    // Сортировка строго по email: батч-импорт даёт всем строкам одинаковое
+    // created_at, и сортировка по нему дёргает список при каждом опросе
+    // статусов — строки менялись местами каждые пару секунд.
+    const { data, error, count } = await supabaseAdmin
       .from('sender_mailboxes')
-      .select(LIST_COLS)
-      .order('created_at', { ascending: false });
+      .select(LIST_COLS, { count: 'exact' })
+      .order('email', { ascending: true })
+      .range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1);
 
     if (error) return jsonError(error.message, 500);
-    return NextResponse.json({ mailboxes: data ?? [] });
+    return NextResponse.json({ mailboxes: data ?? [], total: count ?? 0 });
   });
 }
 
