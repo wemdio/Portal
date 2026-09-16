@@ -3,12 +3,13 @@
 import { useState } from 'react';
 import { MailboxesTab } from './MailboxesTab';
 import { CampaignsTab } from './CampaignsTab';
-import { RepliesTab } from './RepliesTab';
 
+// Вкладки «Ответы» нет: обработка входящих — в инструменте «Персонализированные
+// ответы». Воркер рассылки по-прежнему читает ответы по IMAP, чтобы останавливать
+// цепочку тем, кто ответил/забанился, — но в UI они не выводятся.
 const TABS = [
   { id: 'mailboxes', label: 'Ящики' },
   { id: 'campaigns', label: 'Кампании' },
-  { id: 'replies', label: 'Ответы' },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
@@ -45,7 +46,6 @@ export function SenderView() {
 
       {tab === 'mailboxes' ? <MailboxesTab /> : null}
       {tab === 'campaigns' ? <CampaignsTab /> : null}
-      {tab === 'replies' ? <RepliesTab /> : null}
     </div>
   );
 }

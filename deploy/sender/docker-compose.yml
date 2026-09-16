@@ -1,0 +1,40 @@
+# Воркер инструмента «Рассылка» — изолированный email-хост (144.31.54.166).
+#
+# Почему отдельный сервер: массовые SMTP/IMAP-подключения к провайдерам ящиков
+# не должны идти с IP основного портала (139.60.162.24), иначе хостер банит
+# весь интернет сервера. Этот compose живёт ТОЛЬКО на sender-хосте и никогда
+# не добавляется в docker-compose.prod.yml стека портала.
+#
+# Воркер общается с порталом исключительно через БД (Supabase): проверка
+# ящиков, планировщик цепочки, отправка, чтение ответов. Очередь берётся
+# атомарно, поэтому позже контейнер можно размножить на несколько серверов.
+#
+# Деплой: Semaphore scheduled-deploy (цель SENDER_SSH_HOST), каталог
+# /opt/portal-sender, .env — по deploy/sender/.env.example.
+#
+# Usage:
+#   cp .env.example .env   # fill in secrets
+#   docker compose -p portal-sender --env-file .env up -d
+
+services:
+  worker-sender:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-sender
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - BYO_MAILBOX_CRED_KEY=${BYO_MAILBOX_CRED_KEY}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - SENDER_REPLIES_INTERVAL_MS=${SENDER_REPLIES_INTERVAL_MS:-60000}
+      - WORKER_KIND=sender
+    stop_grace_period: 2m
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+          pids: 512
+    restart: unless-stopped
