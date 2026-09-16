@@ -12,20 +12,7 @@ import {
   type ImportMailboxesResult,
   type MailboxDto,
 } from './api';
-
-const PROVIDERS = [
-  { id: 'maildoso', label: 'Maildoso' },
-  { id: 'zapmail', label: 'ZapMail' },
-  { id: 'google', label: 'Google Workspace' },
-  { id: 'custom', label: 'Другой' },
-];
-
-const STATUS_LABELS: Record<MailboxDto['status'], { text: string; className: string }> = {
-  pending: { text: 'Проверяется', className: 'bg-amber-100 text-amber-700' },
-  verified: { text: 'Готов', className: 'bg-emerald-100 text-emerald-700' },
-  failed: { text: 'Ошибка', className: 'bg-red-100 text-red-700' },
-  disabled: { text: 'Выключен', className: 'bg-zinc-100 text-zinc-600' },
-};
+import { MAILBOX_STATUS_LABELS, providerLabel } from './labels';
 
 const PAGE_SIZE = 30;
 const EMPTY_SELECTION: ReadonlySet<string> = new Set();
@@ -34,7 +21,6 @@ export function MailboxesTab() {
   const [mailboxes, setMailboxes] = useState<MailboxDto[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [provider, setProvider] = useState('maildoso');
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<ImportMailboxesResult | null>(null);
@@ -52,7 +38,7 @@ export function MailboxesTab() {
 
   const load = useCallback(async (targetPage: number) => {
     try {
-      const { mailboxes: rows, total: count } = await fetchMailboxes(targetPage);
+      const { mailboxes: rows, total: count } = await fetchMailboxes({ page: targetPage });
       setMailboxes(rows);
       setTotal(count);
       // Строку удалили и страница стала пустой — откатываемся к предыдущей.
@@ -85,7 +71,7 @@ export function MailboxesTab() {
     setError(null);
     setResult(null);
     try {
-      setResult(await importMailboxes(file, provider));
+      setResult(await importMailboxes(file));
       await load(page);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить файл');
@@ -145,23 +131,12 @@ export function MailboxesTab() {
       <div className="rounded-xl border border-zinc-200 bg-white p-5">
         <h2 className="text-base font-semibold text-zinc-900">Подключить ящики файлом</h2>
         <p className="mt-1 text-sm text-zinc-500">
-          Выгрузка провайдера как есть: CSV или XLSX. Колонки распознаются сами. После загрузки каждый ящик
-          проверяется на вход по SMTP и IMAP — до проверки он в рассылку не идёт.
+          Выгрузка провайдера как есть: CSV или XLSX. Колонки и сам провайдер распознаются сами — по хостам
+          в файле, шапке выгрузки и домену ящика. После загрузки каждый ящик проверяется на вход по SMTP и
+          IMAP — до проверки он в рассылку не идёт.
         </p>
 
         <div className="mt-4 flex flex-wrap items-center gap-3">
-          <select
-            value={provider}
-            onChange={(e) => setProvider(e.target.value)}
-            className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
-          >
-            {PROVIDERS.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label}
-              </option>
-            ))}
-          </select>
-
           <button
             type="button"
             onClick={() => fileRef.current?.click()}
@@ -188,6 +163,17 @@ export function MailboxesTab() {
         {result ? (
           <div className="mt-4 rounded-lg bg-zinc-50 p-3 text-sm">
             <p className="text-zinc-900">Подключено ящиков: {result.imported}</p>
+            {/* Провайдера выбрал портал, а не человек — значит, его решение
+                должно быть видно сразу, а не всплывать на проверке входа. */}
+            {Object.keys(result.detected ?? {}).length ? (
+              <p className="mt-0.5 text-zinc-600">
+                Распознано:{' '}
+                {Object.entries(result.detected)
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([id, count]) => `${providerLabel(id)} — ${count}`)
+                  .join(', ')}
+              </p>
+            ) : null}
             {result.errors.length ? (
               <ul className="mt-2 space-y-1 text-zinc-600">
                 {/* line === null — сломан файл целиком: подпись «Строка N» тут
@@ -231,7 +217,7 @@ export function MailboxesTab() {
               type="button"
               disabled={bulkBusy}
               onClick={() => void runBulk('recheck')}
-              className="rounded-md border border-zinc-300 bg-white px-2.5 py-1 text-xs text-blue-600 hover:bg-zinc-50 disabled:opacity-50"
+              className="rounded-md border border-zinc-300 bg-white px-2.5 py-1 text-xs text-blue-600 hover:bg-zinc-100 disabled:opacity-50"
             >
               Проверить
             </button>
@@ -239,7 +225,7 @@ export function MailboxesTab() {
               type="button"
               disabled={bulkBusy}
               onClick={() => void runBulk('disable')}
-              className="rounded-md border border-zinc-300 bg-white px-2.5 py-1 text-xs text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+              className="rounded-md border border-zinc-300 bg-white px-2.5 py-1 text-xs text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
             >
               Выключить
             </button>
@@ -247,7 +233,7 @@ export function MailboxesTab() {
               type="button"
               disabled={bulkBusy}
               onClick={() => void runBulk('enable')}
-              className="rounded-md border border-zinc-300 bg-white px-2.5 py-1 text-xs text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+              className="rounded-md border border-zinc-300 bg-white px-2.5 py-1 text-xs text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
             >
               Включить
             </button>
@@ -299,6 +285,7 @@ export function MailboxesTab() {
                     />
                   </th>
                   <th className="px-3 py-2 font-medium">Ящик</th>
+                  <th className="px-3 py-2 font-medium">Провайдер</th>
                   <th className="px-3 py-2 font-medium">Статус</th>
                   <th className="px-3 py-2 font-medium">Лимит/день</th>
                   <th className="px-3 py-2 font-medium">SMTP</th>
@@ -308,7 +295,7 @@ export function MailboxesTab() {
               </thead>
               <tbody>
                 {mailboxes.map((mailbox) => {
-                  const status = STATUS_LABELS[mailbox.status];
+                  const status = MAILBOX_STATUS_LABELS[mailbox.status];
                   return (
                     <tr
                       key={mailbox.id}
@@ -329,6 +316,7 @@ export function MailboxesTab() {
                           <div className="mt-0.5 text-xs text-amber-600">{mailbox.last_error}</div>
                         ) : null}
                       </td>
+                      <td className="px-3 py-2.5 text-zinc-600">{providerLabel(mailbox.provider)}</td>
                       <td className="px-3 py-2.5">
                         <span className={`rounded-md px-2 py-0.5 text-xs font-medium ${status.className}`}>
                           {status.text}

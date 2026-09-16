@@ -22,6 +22,8 @@ export interface MailboxDto {
 export interface CampaignDto {
   id: string;
   name: string;
+  /** Пул ящиков кампании — боковая колонка вкладки «Письма». */
+  mailboxes: { id: string; email: string }[];
   status: 'draft' | 'running' | 'paused' | 'done';
   timezone: string;
   send_hour_from: number;
@@ -33,7 +35,39 @@ export interface CampaignDto {
 
 export interface ImportMailboxesResult {
   imported: number;
-  errors: { line: number; email: string | null; message: string }[];
+  /** Провайдер → сколько ящиков портал к нему отнёс. Ключи — значения колонки provider. */
+  detected: Record<string, number>;
+  errors: { line: number | null; email: string | null; message: string }[];
+}
+
+/** Строка представления sender_threads: одна переписка с получателем. */
+export interface ThreadDto {
+  recipient_id: string;
+  campaign_id: string;
+  campaign_name: string;
+  recipient_email: string;
+  recipient_name: string | null;
+  status: string;
+  replied_at: string | null;
+  mailbox_id: string | null;
+  mailbox_email: string | null;
+  sent_count: number;
+  last_sent_at: string | null;
+  reply_count: number;
+  last_reply_at: string | null;
+  has_human_reply: boolean;
+  last_activity_at: string;
+}
+
+/** Письмо переписки: наше исходящее или ответ получателя. */
+export interface ThreadItemDto {
+  id: string;
+  direction: 'out' | 'in';
+  subject: string | null;
+  body: string | null;
+  at: string | null;
+  note: string | null;
+  fromEmail: string | null;
 }
 
 export interface ImportRecipientsResult {
@@ -60,14 +94,17 @@ async function upload<T>(url: string, file: File, fields?: Record<string, string
   return data as T;
 }
 
-export function fetchMailboxes(page = 1) {
+export function fetchMailboxes(params: { page?: number; search?: string; pageSize?: number } = {}) {
+  const query = new URLSearchParams({ page: String(params.page ?? 1) });
+  if (params.search) query.set('search', params.search);
+  if (params.pageSize) query.set('pageSize', String(params.pageSize));
   return authFetchJson<{ mailboxes: MailboxDto[]; total: number }>(
-    `${BASE}/mailboxes?page=${page}`,
+    `${BASE}/mailboxes?${query.toString()}`,
   );
 }
 
-export function importMailboxes(file: File, provider: string) {
-  return upload<ImportMailboxesResult>(`${BASE}/mailboxes`, file, { provider });
+export function importMailboxes(file: File) {
+  return upload<ImportMailboxesResult>(`${BASE}/mailboxes`, file);
 }
 
 export function patchMailbox(id: string, body: Record<string, unknown>) {
@@ -102,12 +139,64 @@ export function createCampaign(body: {
   steps: StepInput[];
   sendHourFrom: number;
   sendHourTo: number;
+  /** Дни недели, когда кампании разрешено отправлять: 1 = понедельник … 7 = воскресенье. */
+  sendWeekdays: number[];
 }) {
   return authFetchJson<{ id: string }>(`${BASE}/campaigns`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+}
+
+export function fetchThreads(params: {
+  page?: number;
+  campaignId?: string;
+  mailboxId?: string;
+  search?: string;
+  onlyReplied?: boolean;
+} = {}) {
+  const query = new URLSearchParams({ page: String(params.page ?? 1) });
+  if (params.campaignId) query.set('campaignId', params.campaignId);
+  if (params.mailboxId) query.set('mailboxId', params.mailboxId);
+  if (params.search) query.set('search', params.search);
+  if (params.onlyReplied) query.set('onlyReplied', '1');
+  return authFetchJson<{ threads: ThreadDto[]; total: number; pageSize: number }>(
+    `${BASE}/threads?${query.toString()}`,
+  );
+}
+
+export function fetchThread(recipientId: string) {
+  return authFetchJson<{
+    thread: {
+      recipient_id: string;
+      campaign_name: string;
+      recipient_email: string;
+      recipient_name: string | null;
+      status: string;
+      mailbox_email: string | null;
+      reply_count: number;
+    };
+    items: ThreadItemDto[];
+  }>(`${BASE}/threads/${recipientId}`);
+}
+
+/** Входящее письмо, которое не удалось связать с получателем кампании. */
+export interface UnlinkedReplyDto {
+  id: string;
+  fromEmail: string | null;
+  fromName: string | null;
+  subject: string | null;
+  body: string | null;
+  kind: string;
+  at: string | null;
+  mailboxEmail: string | null;
+}
+
+export function fetchUnlinkedReplies(page = 1) {
+  return authFetchJson<{ replies: UnlinkedReplyDto[]; total: number; pageSize: number }>(
+    `${BASE}/replies?page=${page}`,
+  );
 }
 
 export function patchCampaign(id: string, action: 'start' | 'pause' | 'finish') {
