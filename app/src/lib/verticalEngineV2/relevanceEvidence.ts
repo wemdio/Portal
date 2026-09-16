@@ -7,7 +7,7 @@ import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
 import type { SerperOrganicItem } from '@/lib/search/serperClient';
 import { normalizeVeCompanyInn, normalizeVeCompanyName } from './collectionIdentity';
 import { parseVeEvidencePage, rankVeEvidenceLinks, selectVeEvidenceText, type VeEvidencePage } from './relevancePage';
-import { searchVeRelevanceWebsites, veSearchProviderFailure, VE_RELEVANCE_SEARCH_OPERATION_TIMEOUT_MS, type VeSearchProviderFailure } from './relevanceSearch';
+import { searchVeRelevanceWebsites, veSearchProviderFailure, VeSearchProviderError, VE_RELEVANCE_SEARCH_OPERATION_TIMEOUT_MS, type VeSearchProviderFailure } from './relevanceSearch';
 
 export interface VeRelevanceEvidence {
   status: 'ok' | 'unavailable' | 'error';
@@ -29,7 +29,8 @@ export interface VeRelevanceEvidenceOptions {
   search?: (query: string, signal: AbortSignal) => Promise<SerperOrganicItem[]>;
 }
 
-const TOTAL_TIMEOUT_MS = 40_000;
+// Includes the shared search queue, one bounded search and website reads.
+const TOTAL_TIMEOUT_MS = 120_000;
 const PAGE_TIMEOUT_MS = 5_000;
 const MAX_BODY_BYTES = 1_048_576;
 const MAX_TEXT_CHARS = 6_000;
@@ -182,7 +183,7 @@ async function fetchEvidencePage(initialUrl: URL, signal: AbortSignal, focus?: s
 }
 
 /** Bounded official-site evidence: 10 pages + at most 2 transient retries,
- * one search, 40 seconds. Each URL can be retried at most once.
+ * one search, 120 seconds including queue/metering. Each URL can be retried at most once.
  * Search snippets are discovery only. With a known INN, every selected domain
  * must confirm that sole INN on its own pages before any activity is returned.
  * Unavailable, conflicting or unverified identity always stays needs_review.
@@ -197,7 +198,7 @@ export async function fetchVeRelevanceEvidence(
   const nameSearch = Boolean(opts.companyName?.trim() && opts.companyAddress?.trim());
   if (!supplied.length && !inn && !nameSearch) return { status: 'unavailable', text: '', url: '', reason: 'missing_or_unsafe_website' };
   const pages = new Map<string, Promise<VeEvidencePage | undefined>>();
-  let failed = false, timedOut = false, unverified = false, searchAttempted = false;
+  let failed = false, timedOut = false, unverified = false, searchAttempted = false, searchCompleted = false;
   let retries = 0;
   let providerError: VeSearchProviderFailure | undefined;
   const verified = new Map<string, VeEvidencePage[]>();
@@ -306,6 +307,7 @@ export async function fetchVeRelevanceEvidence(
         providerError = veSearchProviderFailure(error);
         return;
       }
+      searchCompleted = true;
       signal.throwIfAborted();
       const found: URL[] = [];
       for (const item of results.slice(0, 6)) {
@@ -325,6 +327,9 @@ export async function fetchVeRelevanceEvidence(
     opts.signal?.throwIfAborted();
     failed = true;
     timedOut ||= error instanceof VeOperationTimeoutError;
+    if (searchAttempted && !searchCompleted && !providerError) {
+      providerError = veSearchProviderFailure(new VeSearchProviderError('transient', timedOut ? 'timeout' : 'transport'));
+    }
   }
   opts.signal?.throwIfAborted();
   if (providerError) return {
