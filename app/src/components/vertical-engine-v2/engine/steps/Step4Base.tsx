@@ -41,7 +41,7 @@ import {
 import { HE, StatusDot, Spinner } from '../design';
 import { SeasonalityDetail } from '../SeasonalitySummary';
 import { StatusBox, TIER_META, formatDate } from '../ui';
-import { collectCount, collectTaskDone, collectTaskFailed, getCollectionProgress, getCollectionQueue } from '../collectionProgress';
+import { collectCount, collectTaskDone, collectTaskFailed, getCollectionProgress, getCollectionQueue, isPartialPreview } from '../collectionProgress';
 import type { PreparationPresentation } from '../PreparationProgress';
 
 /** Как часто дёргать reload детали во время автосборки (как POLL_INTERVAL_MS родителя). */
@@ -841,8 +841,7 @@ export function BaseRow({ base, job, hypothesisTitle, queued, preparationState, 
       && row._low_relevance !== true && row._relevance_unchecked !== true))
     .slice(0, PREVIEW_ROWS);
   const hasReadyContacts = previewRows.length > 0 || (base.collect_info?.target_progress?.ready_rows ?? 0) > 0;
-  const partialPreview = isReadyPreview && base.status === 'collecting'
-    && (base.collect_info?.target_progress?.ready_rows ?? 0) < VE_PREVIEW_READY_TARGET;
+  const partialPreview = isPartialPreview(base);
 
   const handleReview = useCallback(async () => {
     if (reviewStarting || base.status === 'collecting') return;
@@ -900,7 +899,7 @@ export function BaseRow({ base, job, hypothesisTitle, queued, preparationState, 
         <span className="ve2-tag">{base.source === 'auto' ? 'авто' : 'загрузка'}</span>
         {partialPreview && hasReadyContacts ? (
           <span className="shrink-0 font-mono text-xs text-gray-700">
-            Готово контактов: {(base.collect_info?.target_progress?.ready_rows ?? previewRows.length).toLocaleString('ru-RU')}
+            Проверенных контактов: {(base.collect_info?.target_progress?.ready_rows ?? previewRows.length).toLocaleString('ru-RU')}
           </span>
         ) : base.status !== 'collecting' ? (
           <span className="shrink-0 font-mono text-xs text-gray-700">{base.row_count.toLocaleString('ru-RU')} строк</span>
@@ -942,7 +941,7 @@ export function BaseRow({ base, job, hypothesisTitle, queued, preparationState, 
               aria-expanded={previewOpen}
               aria-controls={`ve-base-preview-${base.id}`}
             >
-              {previewOpen ? 'Скрыть' : partialPreview ? 'Первые контакты' : isReadyPreview ? 'Готовые контакты' : 'Исходные кандидаты'}
+              {previewOpen ? 'Скрыть' : partialPreview ? 'Проверенная часть' : isReadyPreview ? 'Готовые контакты' : 'Исходные кандидаты'}
             </button> : null}
             {hasRows ? <button
               type="button"
@@ -953,7 +952,7 @@ export function BaseRow({ base, job, hypothesisTitle, queued, preparationState, 
                 : isReadyPreview ? `До ${VE_PREVIEW_READY_TARGET} проверенных контактов для согласования` : 'Все собранные строки, включая исключённые из запуска'}
             >
               {downloadingMode !== null && downloadingMode !== 'review' ? <Spinner className="h-3 w-3" /> : null}
-              {partialPreview ? 'Скачать готовую часть' : isReadyPreview ? 'CSV превью' : 'Исходный CSV'}
+              {partialPreview ? 'Скачать проверенную часть' : isReadyPreview ? 'CSV превью' : 'Исходный CSV'}
             </button> : null}
             {hasReserve ? <button type="button" className={HE.btnQuiet}
               onClick={() => void handleDownload('review')} disabled={downloadingMode !== null}
@@ -989,7 +988,8 @@ export function BaseRow({ base, job, hypothesisTitle, queued, preparationState, 
       {previewOpen && hasRows ? (
         <div id={`ve-base-preview-${base.id}`} className="overflow-x-auto px-4 pb-4">
           <p className={`mb-2 ${HE.faint}`}>{isReadyPreview
-            ? 'Первые готовые контакты для согласования. Это не весь исходный список.'
+            ? partialPreview ? 'Промежуточный результат: только уже проверенные контакты. Подготовка превью ещё не завершена.'
+              : 'Первые готовые контакты для согласования. Это не весь исходный список.'
             : 'Образец исходных кандидатов, включая не прошедших проверки. Не используйте его как готовую базу для рассылки.'}</p>
           <table className="min-w-full divide-y divide-gray-200 text-xs">
             <thead>
@@ -1235,7 +1235,7 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
     >
       {target ? (
         <div className="mb-2" role="status">
-          <p className="font-medium">{target.mode === 'preview' ? 'Готово для превью' : 'Проверено и подготовлено'}: {target.ready_rows.toLocaleString('ru-RU')} / {target.ready_target.toLocaleString('ru-RU')} контактов</p>
+          <p className="font-medium">{target.mode === 'preview' ? isPartialPreview(base) ? 'Проверено сейчас — превью не завершено' : 'Готово для превью' : 'Проверено и подготовлено'}: {target.ready_rows.toLocaleString('ru-RU')} / {target.ready_target.toLocaleString('ru-RU')} контактов</p>
           {target.mode === 'preview' && base.status === 'collecting' ? (
             <p className="mt-1 text-gray-700">
               {target.ready_rows > 0
