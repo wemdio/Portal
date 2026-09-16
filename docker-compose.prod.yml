@@ -733,6 +733,11 @@ services:
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=vertical-engine-v2
       - VE_JOB_CONCURRENCY=${VE_JOB_CONCURRENCY:-16}
+      # Сколько баз собирается одновременно. Сборка — единственная стадия,
+      # покупающая поиски Serper, и 16.09.2026 шестнадцать параллельных
+      # проектов выжгли дневной баланс за сутки. Лёгкие стадии этим лимитом
+      # не ограничены и в очереди за сборкой не стоят.
+      - VE_BASE_COLLECT_CONCURRENCY=${VE_BASE_COLLECT_CONCURRENCY:-3}
       # Independent bases share the pool; research remains exclusive per project.
       - NODE_OPTIONS=--max-old-space-size=6144
     stop_grace_period: 5m
@@ -1306,12 +1311,20 @@ services:
       # в main.py). Кидает жёлтый алерт когда контейнер съел >= X% cgroup-лимита
       # по памяти ИЛИ CPU-quota. 0 отключает проверку.
       - HEALTH_CONTAINER_USAGE_PCT=${HEALTH_CONTAINER_USAGE_PCT:-80}
+      # INSTANTLY_DATASET_DB_URL отдельной строкой НЕ дублируем: он приходит из
+      # env_file выше. Явная строка при отсутствии ключа в .env перебила бы его
+      # пустым значением и молча выключила утренний разбор синка.
     # Резолв публичного хоста в IP хоста, чтобы проверять именно https://polza-portal.ru с того же сервера
     extra_hosts:
       - "polza-portal.ru:host-gateway"
     volumes:
       # Read-only docker socket для per-container watchdog (memory/CPU vs limit).
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Логи ночного синка датасета: крон живёт на хосте, вне этого compose,
+      # и его отказ иначе виден только по устаревшим дашбордам. Утренний разбор
+      # в 08:30 МСК (run_dataset_sync_report) читает хвосты этих файлов —
+      # только чтение, писать туда health-check нечего.
+      - /var/log/instantly-dataset-sync:/var/log/instantly-dataset-sync:ro
     deploy:
       resources:
         limits:
