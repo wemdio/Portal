@@ -114,6 +114,35 @@ async function applyReply(params: {
   }
 }
 
+/**
+ * Почему не прочитались входящие — человеческим языком.
+ *
+ * Сообщение видит менеджер в списке ящиков, а IMAP-движок отдаёт свой текст
+ * по-английски и про себя: «Failed to establish connection in required time»
+ * не говорит ни что это про чтение ответов, ни что письма при этом уходят.
+ * Незнакомую ошибку оставляем как есть — лучше непонятный текст, чем
+ * потерянная причина.
+ */
+function describeImapFailure(e: unknown): string {
+  const text = e instanceof Error ? e.message : String(e ?? '');
+  const code = (e as { code?: string } | null)?.code ?? '';
+  const known = `${code} ${text}`.toLowerCase();
+
+  if (known.includes('required time') || known.includes('timeout') || known.includes('etimedout')) {
+    return 'IMAP: почта ящика не ответила вовремя — входящие в этот раз не прочитались. Отправка при этом работает';
+  }
+  if (known.includes('authenticationfailed') || known.includes('invalid credentials') || known.includes('auth')) {
+    return 'IMAP: ящик не принял пароль — ответы читаться не будут, пока пароль не обновят';
+  }
+  if (known.includes('enotfound') || known.includes('eai_again')) {
+    return 'IMAP: сервер ящика не найден — проверьте IMAP-хост в выгрузке провайдера';
+  }
+  if (known.includes('econnrefused') || known.includes('econnreset')) {
+    return 'IMAP: сервер ящика отклонил подключение — это обычно временно';
+  }
+  return `IMAP: ${text.slice(0, 400)}`;
+}
+
 /** Один проход опроса входящих. true — если что-то новое нашли. */
 export async function processSenderReplies(opts?: { log?: Log }): Promise<boolean> {
   if (!supabaseAdmin) return false;
@@ -188,13 +217,20 @@ export async function processSenderReplies(opts?: { log?: Log }): Promise<boolea
           imap_last_uid: result.newLastUid,
           imap_uidvalidity: result.uidValidity,
           imap_checked_at: nowIso,
+          // Опрос прошёл — значит, прошлая жалоба на почту ящика больше не
+          // правда. Без этого одна секундная заминка на стороне провайдера
+          // оставалась на экране навсегда: ящик работает и шлёт письма, а под
+          // адресом всё висит ошибка чтения входящих. Опрашиваются только
+          // проверенные ящики, и здесь может лежать только IMAP-заметка —
+          // отказ SMTP переводит ящик в «Ошибка», и сюда он уже не попадает.
+          last_error: null,
         })
         .eq('id', mailbox.id);
     } catch (e) {
       log('warn', `Не удалось прочитать входящие ${mailbox.email}: ${e instanceof Error ? e.message : String(e)}`);
       await db
         .from('sender_mailboxes')
-        .update({ imap_checked_at: nowIso, last_error: e instanceof Error ? e.message.slice(0, 500) : null })
+        .update({ imap_checked_at: nowIso, last_error: describeImapFailure(e) })
         .eq('id', mailbox.id);
     }
   }

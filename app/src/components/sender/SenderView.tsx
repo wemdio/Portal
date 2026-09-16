@@ -3,13 +3,16 @@
 import { useState } from 'react';
 import { MailboxesTab } from './MailboxesTab';
 import { CampaignsTab } from './CampaignsTab';
+import { ThreadsTab } from './ThreadsTab';
 
-// Вкладки «Ответы» нет: обработка входящих — в инструменте «Персонализированные
-// ответы». Воркер рассылки по-прежнему читает ответы по IMAP, чтобы останавливать
-// цепочку тем, кто ответил/забанился, — но в UI они не выводятся.
+// «Письма» — переписка после отправки: воркер читает входящие по IMAP, сводит
+// их с получателями кампаний и обрывает цепочку ответившим. Разбор и написание
+// ответов остаются в инструменте «Персонализированные ответы»; здесь видно, что
+// ушло и что пришло.
 const TABS = [
   { id: 'mailboxes', label: 'Ящики' },
   { id: 'campaigns', label: 'Кампании' },
+  { id: 'threads', label: 'Письма' },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
@@ -22,8 +25,7 @@ export function SenderView() {
       <div className="mb-6">
         <h1 className="text-xl font-semibold text-zinc-900">Рассылка</h1>
         <p className="mt-1 text-sm text-zinc-500">
-          Своя отправка писем с подключённых ящиков провайдера. Ящики и домены покупаются и прогреваются на стороне
-          провайдера — портал только подключает их файлом и ведёт рассылку.
+          Своя отправка писем с подключённых ящиков провайдера.
         </p>
       </div>
 
@@ -46,6 +48,7 @@ export function SenderView() {
 
       {tab === 'mailboxes' ? <MailboxesTab /> : null}
       {tab === 'campaigns' ? <CampaignsTab /> : null}
+      {tab === 'threads' ? <ThreadsTab /> : null}
     </div>
   );
 }

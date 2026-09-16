@@ -57,6 +57,34 @@ async function campaignStats(campaignId: string) {
   };
 }
 
+/**
+ * Ящики кампаний одним запросом на весь список, а не по запросу на кампанию:
+ * вкладка «Письма» показывает их в боковой колонке под каждой кампанией.
+ */
+async function mailboxesByCampaign(campaignIds: string[]) {
+  const out = new Map<string, { id: string; email: string }[]>();
+  if (!supabaseAdmin || !campaignIds.length) return out;
+
+  const { data } = await supabaseAdmin
+    .from('sender_campaign_mailboxes')
+    .select('campaign_id, sender_mailboxes(id, email)')
+    .in('campaign_id', campaignIds);
+
+  for (const row of (data ?? []) as { campaign_id: string; sender_mailboxes: unknown }[]) {
+    // Вложенная запись приезжает объектом или массивом в зависимости от того,
+    // как PostgREST разобрал связь, — приводим к одному виду.
+    const raw = row.sender_mailboxes;
+    const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    const mailboxes = list
+      .map((m) => m as { id?: string; email?: string })
+      .filter((m): m is { id: string; email: string } => Boolean(m.id && m.email))
+      .map((m) => ({ id: String(m.id), email: String(m.email) }));
+    const key = String(row.campaign_id);
+    out.set(key, [...(out.get(key) ?? []), ...mailboxes]);
+  }
+  return out;
+}
+
 /** GET — список кампаний с короткой статистикой. */
 export async function GET(req: NextRequest) {
   return withToolTrace({ request: req, operation: 'tools.sender.campaigns.list' }, async () => {
@@ -72,9 +100,11 @@ export async function GET(req: NextRequest) {
 
     if (error) return jsonError(error.message, 500);
 
+    const pool = await mailboxesByCampaign((data ?? []).map((c) => String(c.id)));
     const campaigns = await Promise.all(
       (data ?? []).map(async (campaign) => ({
         ...campaign,
+        mailboxes: pool.get(String(campaign.id)) ?? [],
         stats: await campaignStats(String(campaign.id)),
       })),
     );
