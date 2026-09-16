@@ -25,8 +25,12 @@ const STATUS_LABELS: Record<MailboxDto['status'], { text: string; className: str
   disabled: { text: 'Выключен', className: 'bg-zinc-100 text-zinc-600' },
 };
 
+const PAGE_SIZE = 30;
+
 export function MailboxesTab() {
   const [mailboxes, setMailboxes] = useState<MailboxDto[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [provider, setProvider] = useState('maildoso');
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -34,10 +38,15 @@ export function MailboxesTab() {
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (targetPage: number) => {
     try {
-      const { mailboxes: rows } = await fetchMailboxes();
+      const { mailboxes: rows, total: count } = await fetchMailboxes(targetPage);
       setMailboxes(rows);
+      setTotal(count);
+      // Строку удалили и страница стала пустой — откатываемся к предыдущей.
+      if (rows.length === 0 && count > 0 && targetPage > 1) {
+        setPage(Math.max(1, Math.ceil(count / PAGE_SIZE)));
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить ящики');
     } finally {
@@ -46,12 +55,18 @@ export function MailboxesTab() {
   }, []);
 
   useEffect(() => {
-    void load();
+    void load(page);
+  }, [load, page]);
+
+  useEffect(() => {
     // Ящики после загрузки проверяются воркером — подтягиваем статусы, пока
-    // есть хоть один в очереди на проверку.
-    const timer = window.setInterval(() => void load(), 15_000);
+    // есть хоть один в очереди на проверку. Сортировка по email стабильна,
+    // поэтому опрос больше дёргает строки местами.
+    const timer = window.setInterval(() => void load(page), 15_000);
     return () => window.clearInterval(timer);
-  }, [load]);
+  }, [load, page]);
+
+  const maxPage = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   const handleUpload = async (file: File) => {
     setUploading(true);
@@ -59,7 +74,7 @@ export function MailboxesTab() {
     setResult(null);
     try {
       setResult(await importMailboxes(file, provider));
-      await load();
+      await load(page);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить файл');
     } finally {
@@ -69,13 +84,13 @@ export function MailboxesTab() {
 
   const act = async (id: string, body: Record<string, unknown>) => {
     await patchMailbox(id, body);
-    await load();
+    await load(page);
   };
 
   const remove = async (mailbox: MailboxDto) => {
     if (!window.confirm(`Убрать ящик ${mailbox.email} из инструмента?`)) return;
     await deleteMailbox(mailbox.id);
-    await load();
+    await load(page);
   };
 
   return (
@@ -145,10 +160,10 @@ export function MailboxesTab() {
 
       <div className="rounded-xl border border-zinc-200 bg-white">
         <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-3">
-          <h2 className="text-base font-semibold text-zinc-900">Ящики ({mailboxes.length})</h2>
+          <h2 className="text-base font-semibold text-zinc-900">Ящики ({total})</h2>
           <button
             type="button"
-            onClick={() => void load()}
+            onClick={() => void load(page)}
             className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700"
           >
             <RefreshCw className="h-3.5 w-3.5" />
@@ -248,6 +263,30 @@ export function MailboxesTab() {
             </table>
           </div>
         )}
+
+        {total > PAGE_SIZE ? (
+          <div className="flex items-center justify-between border-t border-zinc-200 px-5 py-3 text-sm">
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              disabled={page <= 1}
+              className="rounded-md px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 disabled:opacity-40"
+            >
+              ← Назад
+            </button>
+            <span className="text-zinc-500">
+              Стр. {page} из {maxPage} · {total} ящиков
+            </span>
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.min(maxPage, p + 1))}
+              disabled={page >= maxPage}
+              className="rounded-md px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 disabled:opacity-40"
+            >
+              Вперёд →
+            </button>
+          </div>
+        ) : null}
       </div>
     </div>
   );

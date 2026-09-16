@@ -60,8 +60,10 @@ async function upload<T>(url: string, file: File, fields?: Record<string, string
   return data as T;
 }
 
-export function fetchMailboxes() {
-  return authFetchJson<{ mailboxes: MailboxDto[] }>(`${BASE}/mailboxes`);
+export function fetchMailboxes(page = 1) {
+  return authFetchJson<{ mailboxes: MailboxDto[]; total: number }>(
+    `${BASE}/mailboxes?page=${page}`,
+  );
 }
 
 export function importMailboxes(file: File, provider: string) {
