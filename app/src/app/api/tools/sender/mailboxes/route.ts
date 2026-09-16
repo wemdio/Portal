@@ -16,6 +16,13 @@ const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
 const PAGE_SIZE = 30;
 
+const BULK_ACTIONS = ['recheck', 'enable', 'disable', 'delete'] as const;
+type BulkAction = (typeof BULK_ACTIONS)[number];
+// Потолок на выборку: он же ограничивает длину `in (...)` в запросе к БД.
+// Страница списка — 30 ящиков, «выбрать все» на проекте с сотнями ящиков
+// упрётся в этот предел раньше, чем в лимит запроса.
+const MAX_BULK_IDS = 1000;
+
 /** GET — список подключённых ящиков (без паролей), постранично. */
 export async function GET(req: NextRequest) {
   return withToolTrace({ request: req, operation: 'tools.sender.mailboxes.list' }, async () => {
@@ -37,6 +44,57 @@ export async function GET(req: NextRequest) {
 
     if (error) return jsonError(error.message, 500);
     return NextResponse.json({ mailboxes: data ?? [], total: count ?? 0 });
+  });
+}
+
+/**
+ * PATCH — массовое действие над выбранными ящиками.
+ *
+ * Отдельный маршрут, а не цикл запросов из браузера: ящиков бывает несколько
+ * сотен, и двести PATCH-ов подряд — это двести раундтрипов, двести проверок
+ * доступа и список, который перерисовывается в процессе. Здесь одна операция
+ * на всю выборку, и она либо прошла, либо нет.
+ *
+ * Повторная проверка и возврат в работу — это одно и то же: ящик снова
+ * встаёт в очередь на вход по SMTP/IMAP и до успеха в рассылку не идёт.
+ */
+export async function PATCH(req: NextRequest) {
+  return withToolTrace({ request: req, operation: 'tools.sender.mailboxes.bulk' }, async () => {
+    const auth = await authenticateRequest(req.headers.get('authorization'));
+    if ('error' in auth) return auth.error;
+    if (!supabaseAdmin) return jsonError('Сервис не настроен', 503);
+
+    const body = (await req.json().catch(() => null)) as
+      | { ids?: unknown; action?: unknown }
+      | null;
+    if (!body) return jsonError('Невалидный JSON', 400);
+
+    const ids = Array.isArray(body.ids)
+      ? [...new Set(body.ids.filter((id): id is string => typeof id === 'string' && id.length > 0))]
+      : [];
+    if (!ids.length) return jsonError('Не выбрано ни одного ящика', 400);
+    if (ids.length > MAX_BULK_IDS) return jsonError(`За раз можно изменить не больше ${MAX_BULK_IDS} ящиков`, 400);
+
+    const action = String(body.action ?? '');
+    if (!BULK_ACTIONS.includes(action as BulkAction)) return jsonError('Неизвестное действие', 400);
+
+    const nowIso = new Date().toISOString();
+
+    if (action === 'delete') {
+      const { error, count } = await supabaseAdmin
+        .from('sender_mailboxes').delete({ count: 'exact' }).in('id', ids);
+      if (error) return jsonError(error.message, 500);
+      return NextResponse.json({ ok: true, affected: count ?? 0 });
+    }
+
+    const patch = action === 'disable'
+      ? { status: 'disabled', updated_at: nowIso }
+      : { status: 'pending', last_error: null, updated_at: nowIso };
+
+    const { error, count } = await supabaseAdmin
+      .from('sender_mailboxes').update(patch, { count: 'exact' }).in('id', ids);
+    if (error) return jsonError(error.message, 500);
+    return NextResponse.json({ ok: true, affected: count ?? 0 });
   });
 }
 

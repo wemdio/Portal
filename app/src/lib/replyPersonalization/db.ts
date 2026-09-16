@@ -84,9 +84,13 @@ export async function getCampaignAccountIds(campaignIds: string[]): Promise<Map<
 }
 
 /**
- * Бриф проекта — единственный источник для генерации ответов. Читается живьём
- * из карточки проекта, а не из базы знаний инструмента: к запуску кампании
- * бриф уже заполнен там, дублировать его не нужно.
+ * Бриф из карточки проекта — основной источник для генерации ответов. Читается
+ * живьём, а не копируется в базу знаний инструмента: карточку ведут менеджеры
+ * проекта, и она остаётся источником истины.
+ *
+ * Пустая строка здесь не тупик: у базы знаний есть запасной `localBrief`,
+ * который специалист заполняет прямо в модалке, когда карточка ещё пуста,
+ * а отвечать лиду нужно сейчас. Приоритет — у карточки (см. resolveBrief).
  */
 export async function getProjectBrief(projectId: string): Promise<string> {
   const { admin } = requireClients();
@@ -99,11 +103,20 @@ export async function getProjectBrief(projectId: string): Promise<string> {
   return (data?.brief_text as string) ?? '';
 }
 
+/**
+ * Какой бриф уходит в генерацию. Карточка проекта побеждает всегда: локальное
+ * поле — это запас на время, пока карточку не заполнили, и оно не должно
+ * незаметно переопределять то, что менеджеры ведут в проекте.
+ */
+export function resolveBrief(projectBrief: string, kb: KnowledgeBase | null): string {
+  return projectBrief.trim() ? projectBrief : (kb?.localBrief ?? '');
+}
+
 export async function getKnowledgeBase(projectId: string): Promise<KnowledgeBase | null> {
   const { admin } = requireClients();
   const { data, error } = await admin
     .from('reply_personalization_kb')
-    .select('project_id, product_facts, tone_notes, example_case, updated_at')
+    .select('project_id, product_facts, tone_notes, example_case, local_brief, updated_at')
     .eq('project_id', projectId)
     .maybeSingle();
   if (error) throw new Error(`kb query failed: ${error.message}`);
@@ -113,13 +126,14 @@ export async function getKnowledgeBase(projectId: string): Promise<KnowledgeBase
     productFacts: (data.product_facts as string) ?? '',
     toneNotes: (data.tone_notes as string) ?? '',
     exampleCase: (data.example_case as string) ?? '',
+    localBrief: (data.local_brief as string) ?? '',
     updatedAt: data.updated_at as string,
   };
 }
 
 export async function upsertKnowledgeBase(
   projectId: string,
-  patch: Pick<KnowledgeBase, 'productFacts' | 'toneNotes' | 'exampleCase'>,
+  patch: Pick<KnowledgeBase, 'productFacts' | 'toneNotes' | 'exampleCase' | 'localBrief'>,
   userId: string,
 ): Promise<void> {
   const { admin } = requireClients();
@@ -129,6 +143,7 @@ export async function upsertKnowledgeBase(
       product_facts: patch.productFacts,
       tone_notes: patch.toneNotes,
       example_case: patch.exampleCase,
+      local_brief: patch.localBrief,
       updated_by: userId,
       updated_at: new Date().toISOString(),
     },

@@ -14,7 +14,7 @@ const ACCEPT = '.pdf,.docx,.txt,.md';
 const CONTROL_CLASS =
   'w-full rounded-lg border border-zinc-300 bg-white px-3.5 py-2.5 text-sm leading-relaxed text-zinc-900 transition-colors focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20';
 
-type UploadField = 'productFacts' | 'exampleCase';
+type UploadField = 'productFacts' | 'exampleCase' | 'localBrief';
 
 /** Сколько символов брифа/глобальной настройки показывать до «Показать полностью». */
 const PREVIEW_CHARS = 600;
@@ -146,6 +146,8 @@ export function KnowledgeBaseForm({
   onSaved?: () => void;
 }) {
   const [projectBrief, setProjectBrief] = useState('');
+  // Запасной бриф: заполняется здесь, в карточку проекта не уходит.
+  const [localBrief, setLocalBrief] = useState('');
   const [briefExpanded, setBriefExpanded] = useState(false);
   const [productFacts, setProductFacts] = useState('');
   const [toneNotes, setToneNotes] = useState('');
@@ -164,6 +166,7 @@ export function KnowledgeBaseForm({
         setGlobalKb(global);
         if (!kb) return;
         setProductFacts(kb.productFacts);
+        setLocalBrief(kb.localBrief);
         setToneNotes(kb.toneNotes);
         setExampleCase(kb.exampleCase);
       })
@@ -175,7 +178,7 @@ export function KnowledgeBaseForm({
     setSaving(true);
     setError(null);
     try {
-      await saveKnowledgeBase(projectId, { productFacts, toneNotes, exampleCase });
+      await saveKnowledgeBase(projectId, { productFacts, toneNotes, exampleCase, localBrief });
       setSaved(true);
       window.setTimeout(() => setSaved(false), 2000);
       onSaved?.();
@@ -193,6 +196,7 @@ export function KnowledgeBaseForm({
       const text = await extractTextFromFile(file);
       if (field === 'productFacts') setProductFacts(text);
       if (field === 'exampleCase') setExampleCase(text);
+      if (field === 'localBrief') setLocalBrief(text);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось прочитать файл');
     } finally {
@@ -227,16 +231,20 @@ export function KnowledgeBaseForm({
       ) : (
         <>
           <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-7 py-6">
-            <div>
-              <div className="mb-2 flex items-end justify-between gap-3">
-                <div>
+            {/* Бриф из карточки проекта — источник истины, его тут только
+                показываем. Когда карточка пуста, отвечать лиду всё равно
+                нужно сегодня, поэтому рядом лежит запасное поле: оно уходит
+                в генерацию и НЕ пишется обратно в карточку. Жёлтая пометка
+                остаётся намеренно — напоминает, где бриф должен жить, чтобы
+                запасное поле не стало тихо основным местом. */}
+            {projectBrief ? (
+              <div>
+                <div className="mb-2">
                   <label className="block text-sm font-medium text-zinc-900">Бриф проекта</label>
                   <p className="mt-0.5 text-xs text-zinc-500">
                     Подтягивается из карточки проекта и редактируется там — здесь только для просмотра
                   </p>
                 </div>
-              </div>
-              {projectBrief ? (
                 <div className="rounded-lg border border-zinc-200 bg-zinc-50 px-3.5 py-2.5">
                   <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-zinc-700">
                     {briefExpanded ? projectBrief : projectBrief.slice(0, PREVIEW_CHARS)}
@@ -252,12 +260,32 @@ export function KnowledgeBaseForm({
                     </button>
                   ) : null}
                 </div>
-              ) : (
-                <p className="rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-sm leading-relaxed text-amber-700">
-                  В карточке проекта нет брифа. Заполните бриф в проекте — генерация ответов использует его как основной источник.
-                </p>
-              )}
-            </div>
+                {localBrief.trim() ? (
+                  <p className="mt-2 text-xs text-zinc-500">
+                    В базе знаний сохранён свой бриф, но используется бриф из карточки проекта — он главнее.
+                  </p>
+                ) : null}
+              </div>
+            ) : (
+              <KbField
+                label="Бриф проекта"
+                hint="В карточке проекта его нет — заполните здесь, и генерация возьмёт этот текст"
+                value={localBrief}
+                onChange={setLocalBrief}
+                rows={6}
+                placeholder="Что за продукт, кому продаём, чем отличаемся, какие возражения закрываем…"
+                uploadField="localBrief"
+                uploadingField={uploadingField}
+                onUpload={handleUpload}
+                belowLabel={
+                  <p className="mb-2 rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-sm leading-relaxed text-amber-700">
+                    В карточке проекта нет брифа — заполните его там, когда дойдут руки: это основной
+                    источник для всего портала. Текст ниже сохранится только в этой базе знаний,
+                    в карточку проекта он не попадёт.
+                  </p>
+                }
+              />
+            )}
 
             <KbField
               label="Факты о продукте"
