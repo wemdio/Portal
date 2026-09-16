@@ -110,6 +110,47 @@ describe('VE2 base collection enqueue recovery', () => {
       status: 'pending',
       payload: expect.objectContaining({ hypothesis_id: 'hypothesis-2', collection_mode: 'preview', ready_target: 500 }),
     }));
+
+    // A later request/day must reuse a finished preview, including a limited
+    // or empty result. Reaching fewer than 500 does not authorize daily supply.
+    await db.from('ve_jobs').update({ status: 'done' });
+    for (const status of ['analyzing', 'analyzed']) {
+      await db.from('ve_bases').update({ status, row_count: status === 'analyzed' ? 0 : 128,
+        collect_info: { collection_mode: 'preview', target_progress: { status: 'limited' } } });
+      await expect(enqueueVeBaseCollect(db as unknown as SupabaseClient, {
+        ...input, hypothesisIds: ['hypothesis-1', 'hypothesis-2'], collectionMode: 'preview',
+      })).resolves.toMatchObject({ ok: true, created: false });
+      expect(db.getRows('ve_bases')).toHaveLength(2);
+      expect(db.getRows('ve_jobs')).toHaveLength(2);
+      expect(db.getRows('ve_jobs').every((row) => row.status === 'done')).toBe(true);
+    }
+
+    let claimed = false;
+    const save = jest.fn(() => ({ data: true }));
+    const resumedDb = createMockSupabase({ tables: {
+      ve_hypotheses: [{ id: 'h1', project_id: input.projectId, vertical_id: input.verticalId, status: 'approved' }],
+      ve_bases: [
+        { id: 'old-ready', project_id: input.projectId, hypothesis_id: 'h1', source: 'auto',
+          status: 'analyzed', row_count: 128, collection_mode: 'preview', collect_info: { collection_mode: 'preview' } },
+        { id: 'cancelled-duplicate', project_id: input.projectId, hypothesis_id: 'h1', source: 'auto',
+          status: 'failed', error: 'Отменено пользователем', collection_mode: 'preview', collect_info: { collection_mode: 'preview' } },
+      ],
+      ve_templates: [{ id: 'saved-letters', base_id: 'old-ready', status: 'ready', supply_batch_id: null }],
+    }, rpcHandlers: {
+      ve_claim_outreach_preparation: () => {
+        if (claimed) return { data: [] };
+        claimed = true;
+        return { data: [{ project_id: input.projectId, hypothesis_id: 'h1', base_id: 'cancelled-duplicate',
+          template_id: null, status: 'pending', language: 'ru', claim_token: 'lease' }] };
+      },
+      ve_save_outreach_preparation: save,
+    } });
+    await runVeOutreachPreparations(resumedDb as unknown as SupabaseClient);
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({
+      p_status: 'ready', p_base_id: 'old-ready', p_template_id: 'saved-letters',
+    }), expect.anything());
+    expect(resumedDb.getRows('ve_jobs')).toHaveLength(0);
+    expect(resumedDb.rpcCalls.some((call) => call.fn === 've_resume_outreach_cancelled_base')).toBe(false);
   });
 
   it('repairs an orphan collecting base that has no active worker job', async () => {
