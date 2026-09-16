@@ -6,7 +6,7 @@
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
-import type { DraftRow, DraftStatus, KnowledgeBase, QualificationRow } from './types';
+import type { DraftRow, DraftStatus, GlobalKnowledgeBase, KnowledgeBase, QualificationRow } from './types';
 
 export function requireClients() {
   if (!supabaseAdmin || !supabaseInstantly) {
@@ -24,7 +24,11 @@ export async function isSupervisor(userId: string): Promise<boolean> {
 }
 
 /** Проекты, видимые пользователю — тот же критерий, что у /api/instantly/my-projects. */
-export async function listVisibleProjects(userId: string) {
+export async function listVisibleProjects(userId: string): Promise<{
+  projects: { id: string; client: string }[];
+  /** Руководитель (admin/director/lead/manager) — может редактировать глобальный тон/пример. */
+  supervisor: boolean;
+}> {
   const { admin } = requireClients();
   const supervisor = await isSupervisor(userId);
 
@@ -37,10 +41,13 @@ export async function listVisibleProjects(userId: string) {
 
   const { data, error } = await query;
   if (error) throw new Error(`projects query failed: ${error.message}`);
-  return (data ?? []).map((p) => ({
-    id: p.id as string,
-    client: (p.client as string) ?? (p.name as string) ?? '',
-  }));
+  return {
+    projects: (data ?? []).map((p) => ({
+      id: p.id as string,
+      client: (p.client as string) ?? (p.name as string) ?? '',
+    })),
+    supervisor,
+  };
 }
 
 /** Кампании проекта — тот же join, что у /api/instantly/my-projects. */
@@ -128,6 +135,43 @@ export async function upsertKnowledgeBase(
     { onConflict: 'project_id' },
   );
   if (error) throw new Error(`kb upsert failed: ${error.message}`);
+}
+
+const EMPTY_GLOBAL: GlobalKnowledgeBase = { toneNotes: '', exampleCase: '', updatedAt: '' };
+
+/** Глобальный тон/пример — singleton id=1, для всех проектов сразу. */
+export async function getGlobalKnowledgeBase(): Promise<GlobalKnowledgeBase> {
+  const { admin } = requireClients();
+  const { data, error } = await admin
+    .from('reply_personalization_global_kb')
+    .select('tone_notes, example_case, updated_at')
+    .eq('id', 1)
+    .maybeSingle();
+  if (error) throw new Error(`global kb query failed: ${error.message}`);
+  if (!data) return { ...EMPTY_GLOBAL };
+  return {
+    toneNotes: (data.tone_notes as string) ?? '',
+    exampleCase: (data.example_case as string) ?? '',
+    updatedAt: (data.updated_at as string) ?? '',
+  };
+}
+
+export async function upsertGlobalKnowledgeBase(
+  patch: Pick<GlobalKnowledgeBase, 'toneNotes' | 'exampleCase'>,
+  userId: string,
+): Promise<void> {
+  const { admin } = requireClients();
+  const { error } = await admin.from('reply_personalization_global_kb').upsert(
+    {
+      id: 1,
+      tone_notes: patch.toneNotes,
+      example_case: patch.exampleCase,
+      updated_by: userId,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'id' },
+  );
+  if (error) throw new Error(`global kb upsert failed: ${error.message}`);
 }
 
 function mapQualificationRow(row: Record<string, unknown>): QualificationRow {

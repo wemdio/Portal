@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
-import { getKnowledgeBase, getProjectBrief, upsertKnowledgeBase } from '@/lib/replyPersonalization/db';
+import {
+  getGlobalKnowledgeBase,
+  getKnowledgeBase,
+  getProjectBrief,
+  upsertKnowledgeBase,
+} from '@/lib/replyPersonalization/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -8,8 +13,12 @@ export const GET = withAuth(async (_req, _user, params) => {
   const projectId = params?.projectId;
   if (!projectId) return NextResponse.json({ error: 'projectId is required' }, { status: 400 });
 
-  const [kb, projectBrief] = await Promise.all([getKnowledgeBase(projectId), getProjectBrief(projectId)]);
-  return NextResponse.json({ kb, projectBrief });
+  const [kb, projectBrief, global] = await Promise.all([
+    getKnowledgeBase(projectId),
+    getProjectBrief(projectId),
+    getGlobalKnowledgeBase(),
+  ]);
+  return NextResponse.json({ kb, projectBrief, global });
 });
 
 export const PUT = withAuth(async (req: NextRequest, user, params) => {
@@ -33,6 +42,10 @@ export const PUT = withAuth(async (req: NextRequest, user, params) => {
     user.id,
   );
 
-  const [kb, projectBrief] = await Promise.all([getKnowledgeBase(projectId), getProjectBrief(projectId)]);
-  return NextResponse.json({ kb, projectBrief });
+  const [kb, projectBrief, global] = await Promise.all([
+    getKnowledgeBase(projectId),
+    getProjectBrief(projectId),
+    getGlobalKnowledgeBase(),
+  ]);
+  return NextResponse.json({ kb, projectBrief, global });
 });

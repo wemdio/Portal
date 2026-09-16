@@ -25,7 +25,9 @@ export interface ProjectListItem {
 }
 
 export function fetchProjects() {
-  return fetchWithAuth<{ projects: ProjectListItem[] }>(`${BASE}/projects`);
+  return fetchWithAuth<{ projects: ProjectListItem[]; canManageGlobalKb: boolean }>(
+    `${BASE}/projects`,
+  );
 }
 
 export interface KnowledgeBaseDto {
@@ -36,9 +38,15 @@ export interface KnowledgeBaseDto {
   updatedAt: string;
 }
 
+export interface GlobalKnowledgeBaseDto {
+  toneNotes: string;
+  exampleCase: string;
+  updatedAt: string;
+}
+
 /** Бриф из карточки проекта — read-only, в базе знаний не хранится. */
 export function fetchKnowledgeBase(projectId: string) {
-  return fetchWithAuth<{ kb: KnowledgeBaseDto | null; projectBrief: string }>(
+  return fetchWithAuth<{ kb: KnowledgeBaseDto | null; projectBrief: string; global: GlobalKnowledgeBaseDto }>(
     `${BASE}/projects/${projectId}/kb`,
   );
 }
@@ -48,6 +56,17 @@ export function saveKnowledgeBase(projectId: string, patch: Omit<KnowledgeBaseDt
     method: 'PUT',
     body: JSON.stringify(patch),
   });
+}
+
+export function saveGlobalKnowledgeBase(patch: { toneNotes: string; exampleCase: string }) {
+  return fetchWithAuth<{ global: GlobalKnowledgeBaseDto }>(`${BASE}/global-kb`, {
+    method: 'PUT',
+    body: JSON.stringify(patch),
+  });
+}
+
+export function fetchGlobalKnowledgeBase() {
+  return fetchWithAuth<{ global: GlobalKnowledgeBaseDto }>(`${BASE}/global-kb`);
 }
 
 export function fetchReplies(projectId: string) {
