@@ -613,7 +613,11 @@ export async function findIrrelevantRows(input: {
           return evidence?.reader_version === 1 && evidence.status === 'ok' && !evidence.refined && evidence.text ? 1 : 0;
         };
         // Finish saved refinement before accumulating more paid/unfinished work.
-        return pendingText(b) - pendingText(a) || a.attempts - b.attempts;
+        // Failed searches must not monopolize every retry's first batch.
+        // Fresh companies progress before the failed subset is retried.
+        return pendingText(b) - pendingText(a)
+          || Number(Boolean(checkpoint.website_evidence[a.key]?.provider_error)) - Number(Boolean(checkpoint.website_evidence[b.key]?.provider_error))
+          || a.attempts - b.attempts;
       }).slice(0, MAX_WEBSITES);
     for (let start = 0; start < review.length && !stopProviderCalls; start += WEBSITE_CONCURRENCY) {
       signal?.throwIfAborted(); const enriched: Entry[] = [];
@@ -633,8 +637,11 @@ export async function findIrrelevantRows(input: {
           companyAddress: entry.group.rows.map((row) => rowText(row, ['address', 'адрес'])).find(Boolean), focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' ') }));
         signal?.throwIfAborted();
         if (evidence.provider_error) {
-          stopProviderCalls = true;
           const provider = evidence.provider_error;
+          // Transient search failure belongs to this company. Preserve it for
+          // a bounded retry, but finish siblings and their paid refinements.
+          // The shared search circuit prevents an outage from flooding Serper.
+          stopProviderCalls ||= provider.kind !== 'transient';
           transientFailure ||= provider.kind === 'transient'; permanentFailure ||= provider.kind !== 'transient';
           if (provider.kind === 'billing' || !result.error
             || (provider.kind === 'configuration' && !/^(?:Serper billing:|Requesty 402:)/.test(result.error))) result.error = provider.message;
@@ -676,6 +683,14 @@ export async function findIrrelevantRows(input: {
   for (const entry of entries) {
     let decision = current.get(entry) ?? errorDecision('Проверка ещё не выполнена. Контакт сохранён, а не отклонён.', entry.attempts);
     const website = checkpoint.website_evidence[entry.key];
+    if (decision.status === 'error' && website?.provider_error) {
+      // A failed company may have been rotated behind this pass's website cap.
+      // Its unresolved failure still needs a durable retry, not a false success
+      // or a non-retryable incomplete-coverage stop.
+      transientFailure ||= website.provider_error.kind === 'transient';
+      permanentFailure ||= website.provider_error.kind !== 'transient';
+      result.error ??= website.provider_error.message;
+    }
     if (website?.reader_revision === VE_RELEVANCE_WEBSITE_VERSION && website.refined && !website.provider_error) {
       decision = { ...decision, website_review_version: VE_RELEVANCE_WEBSITE_VERSION };
       record(entry, decision);

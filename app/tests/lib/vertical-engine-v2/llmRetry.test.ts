@@ -10,6 +10,8 @@ import { z } from 'zod';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { VeJob } from '@/lib/verticalEngineV2/types';
 import { withVeCostTelemetry } from '@/lib/verticalEngineV2/costTelemetry';
+import { withProviderUsage } from '@/lib/providerUsage';
+import { createVeSearchCapacity, searchVeRelevanceWebsites, VeSearchProviderError } from '@/lib/verticalEngineV2/relevanceSearch';
 
 jest.mock('@/lib/clientDemo/personalize', () => ({ assertPublicWebsite: jest.fn() }));
 jest.mock('@/lib/enrich/websiteParser', () => ({
@@ -241,6 +243,62 @@ describe('llm rawCall retry', () => {
     expect(getVeActiveJobSignal()).toBeNull();
     expect(calls).toHaveBeenCalledTimes(2);
     expect(jest.getTimerCount()).toBe(0);
+
+    // A slow but successful search must finish without buying a second request.
+    process.env.SERPER_API_KEY = 'test-search-key';
+    const response = deferred<Response>();
+    const searchFetch = jest.fn().mockReturnValue(response.promise);
+    global.fetch = searchFetch as unknown as typeof fetch;
+    const events: Array<{ phase: string; status?: string }> = [];
+    const scope = { projectId: 'project', baseId: 'base', jobId: 'job', stage: 'base_collect' };
+    const searching = withProviderUsage(scope, async (_scope, event) => { events.push(event); },
+      () => searchVeRelevanceWebsites('company'));
+    await jest.advanceTimersByTimeAsync(20_000);
+    expect(searchFetch.mock.calls[0][1].signal.aborted).toBe(false);
+    response.resolve(httpResponse(200, { organic: [{ link: 'https://company.test/' }], credits: 1 }));
+    await expect(searching).resolves.toEqual([{ link: 'https://company.test/' }]);
+    expect(searchFetch).toHaveBeenCalledTimes(1);
+    expect(events.map((event) => [event.phase, event.status])).toEqual([['started', undefined], ['finished', 'success']]);
+    searchFetch.mockClear().mockReturnValue(new Promise<never>(() => {}));
+    const timedOut = expect(searchVeRelevanceWebsites('company')).rejects.toThrow('Serper transient: timeout.');
+    await jest.advanceTimersByTimeAsync(30_001);
+    await timedOut;
+    expect(searchFetch).toHaveBeenCalledTimes(1);
+    expect(searchFetch.mock.calls[0][1].signal.aborted).toBe(true);
+
+    // Shared capacity releases on errors, removes cancelled waiters and rejects
+    // outage traffic before metering/HTTP. Advancing time reopens it naturally.
+    const capacity = createVeSearchCapacity(2, 2, 60_000);
+    const releases = [deferred<void>(), deferred<void>()];
+    const paid = jest.fn().mockImplementationOnce(async () => {
+      await releases[0].promise; throw new VeSearchProviderError('transient', 'timeout');
+    }).mockImplementationOnce(async () => {
+      await releases[1].promise; throw new VeSearchProviderError('transient', 'transport');
+    }).mockResolvedValue('ok');
+    const first = expect(capacity(undefined, paid)).rejects.toThrow('timeout');
+    const second = expect(capacity(undefined, paid)).rejects.toThrow('transport');
+    const queuedAbort = new AbortController();
+    const queued = expect(capacity(queuedAbort.signal, paid)).rejects.toMatchObject({ name: 'AbortError' });
+    queuedAbort.abort();
+    await queued;
+    releases[0].resolve(); releases[1].resolve();
+    await Promise.all([first, second]);
+    await expect(capacity(undefined, paid)).rejects.toThrow('cooldown');
+    expect(paid).toHaveBeenCalledTimes(2);
+    await jest.advanceTimersByTimeAsync(60_001);
+    await expect(capacity(undefined, paid)).resolves.toBe('ok');
+    expect(paid).toHaveBeenCalledTimes(3);
+    const outageCapacity = createVeSearchCapacity(1, 1, 60_000);
+    const releaseOutage = deferred<void>();
+    const outage = expect(outageCapacity(undefined, async () => {
+      await releaseOutage.promise; throw new VeSearchProviderError('transient', 'timeout');
+    })).rejects.toThrow('timeout');
+    const waitingWork = jest.fn();
+    const rejectedQueue = expect(outageCapacity(undefined, waitingWork)).rejects.toThrow('cooldown');
+    releaseOutage.resolve();
+    await Promise.all([outage, rejectedQueue]);
+    expect(waitingWork).not.toHaveBeenCalled();
+    expect(jest.getTimerCount()).toBe(0);
   });
 
   it('cancels backoff immediately and never starts a retry or a pre-cancelled request', async () => {
@@ -392,6 +450,56 @@ describe('llm rawCall retry', () => {
     expect(noSite).toHaveBeenCalledTimes(2);
     await findIrrelevantRows({ ...sameBrand, checkpoint: separateCities.checkpoint, fetchEvidence: noSite });
     expect(noSite).toHaveBeenCalledTimes(2);
+
+    // An intermittent search timeout cannot discard a successful sibling's
+    // evidence or stop the next website batch. The failed subset retries alone.
+    const networkRows = Array.from({ length: 10 }, (_, i) => ({ company: `Network ${i}`, inn: String(7700000000 + i) }));
+    const networkInput = { ...input, rows: networkRows };
+    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: networkRows.map((_row, i) => ({
+      i, status: 'needs_review', reason: 'Need website evidence', evidence: [],
+    })) })).mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'relevant', reason: description, evidence_ids: [0] }] }))
+      .mockResolvedValueOnce(confirmation);
+    const evidence = jest.fn(async (_url, options) => options?.companyInn === '7700000000'
+      ? { status: 'error' as const, text: '', url: '', reason: 'timeout', provider_error: { kind: 'transient' as const, message: 'Serper transient: timeout.' } }
+      : options?.companyInn === '7700000001'
+        ? { status: 'ok' as const, text: description, url: 'https://factory.test/', reason: 'identity_verified_website' }
+        : { status: 'unavailable' as const, text: '', url: '', reason: 'not_confirmed' });
+    const partial = await findIrrelevantRows({ ...networkInput, fetchEvidence: evidence });
+    expect(evidence).toHaveBeenCalledTimes(10);
+    expect(partial.decisions.get(0)?.status).toBe('error');
+    expect(partial.decisions.get(1)?.status).toBe('relevant');
+    expect(partial.decisions.get(9)?.status).toBe('needs_review');
+    expect(partial.retryable).toBe(true);
+    expect(partial.coverage.complete).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    evidence.mockClear().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'not_confirmed' });
+    const extraRows = Array.from({ length: 33 }, (_, i) => ({ company: `Extra ${i}`, inn: String(7710000000 + i) }));
+    fetchMock.mockReset();
+    for (const size of [20, 13]) fetchMock.mockResolvedValueOnce(reply({ decisions: Array.from({ length: size }, (_, i) => ({
+      i, status: 'needs_review', reason: 'Need website evidence', evidence: [],
+    })) }));
+    const rotated = await findIrrelevantRows({ ...networkInput, rows: [...networkRows, ...extraRows], checkpoint: partial.checkpoint, fetchEvidence: evidence });
+    expect(evidence).toHaveBeenCalledTimes(32);
+    expect(evidence.mock.calls.every(([, options]) => options?.companyInn !== '7700000000')).toBe(true);
+    expect(rotated.retryable).toBe(true);
+    expect(rotated.decisions.get(0)?.status).toBe('error');
+    expect(rotated.decisions.get(1)?.status).toBe('relevant');
+    fetchMock.mockClear(); evidence.mockClear();
+    await findIrrelevantRows({ ...networkInput, checkpoint: partial.checkpoint, fetchEvidence: evidence });
+    expect(evidence).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    fetchMock.mockResolvedValueOnce(reply({ decisions: networkRows.map((_row, i) => ({
+      i, status: 'needs_review', reason: 'Need website evidence', evidence: [],
+    })) }));
+    const billingEvidence = jest.fn().mockResolvedValue({ status: 'error', text: '', url: '', reason: 'billing',
+      provider_error: { kind: 'billing', message: 'Serper billing: insufficient search credits.' } });
+    const billing = await findIrrelevantRows({ ...networkInput, fetchEvidence: billingEvidence });
+    expect(billingEvidence).toHaveBeenCalledTimes(8);
+    expect(billing.retryable).toBe(false);
+    expect(billing.error).toContain('Serper billing:');
+    expect([...billing.decisions.values()].some((decision) => decision.status === 'relevant')).toBe(false);
+    expect(billing.errored.size).toBe(8);
   });
 
   it('does not start website HTTP after a late DNS result, and aborts an active extraction', async () => {
@@ -530,9 +638,14 @@ describe('llm rawCall retry', () => {
     const stalled = jest.fn(() => new Promise<never>(() => {}));
     const bounded = fetchVeRelevanceEvidence(root, { companyInn: '7700000001', fetchPage: stalled,
       search: async () => [1, 2, 3].map((i) => ({ link: `https://candidate${i}.test/` })) });
-    await jest.advanceTimersByTimeAsync(40_001);
+    await jest.advanceTimersByTimeAsync(120_001);
     expect((await bounded).status).toBe('unavailable');
     expect(stalled.mock.calls.length).toBeLessThanOrEqual(12);
+    // A queued/injected search deadline remains a provider failure, not a
+    // completed empty website result that would permanently consume the review.
+    const stalledSearch = fetchVeRelevanceEvidence('', { companyInn: '7700000001', search: stalled });
+    await jest.advanceTimersByTimeAsync(90_001);
+    expect((await stalledSearch).provider_error).toEqual({ kind: 'transient', message: 'Serper transient: timeout.' });
     const cancel = new AbortController();
     const cancelled = fetchVeRelevanceEvidence(root, { signal: cancel.signal, fetchPage: stalled });
     const cancellation = expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
