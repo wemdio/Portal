@@ -3,7 +3,7 @@
 # The functions are sourced by scheduled-deploy.yml and by the shell tests.
 
 ALL_CORE_SERVICES="portal yandexmaps googleparsers transcribe-worker guacd rdp-ws telegram-bot-api health-check loop-watchdog atmos-bot instantly-sync-bot portal-external-sync changelog-bot polza-reports autoheal"
-ALL_WORKER_SERVICES="worker-hh worker-eng-hiring worker-search worker-enrich worker-enrich-2 worker-enrich-3 worker-enrich-4 worker-enrich-5 worker-enrich-6 worker-enrich-7 worker-enrich-8 worker-enrich-9 worker-enrich-coordinator worker-yandexmaps worker-googleparsers worker-emailvalidation worker-inn-enrich worker-website-inn-lookup worker-tg-outreach worker-aicaller worker-sales-copilot worker-sales-ai-analysis worker-leads-report worker-leads-report-bot worker-byo-send worker-byo-replies worker-sender worker-sales-chat-logger worker-sales-chat-archive worker-tg-parser worker-tg-transcribe worker-instantly-leads worker-outreach worker-li-outreach worker-baseconstructor worker-baseconstructor-2 worker-baseconstructor-3 worker-baseconstructor-4 worker-baseconstructor-5 worker-baseconstructor-6 worker-baseconstructor-7 worker-baseconstructor-8 worker-baseconstructor-9 worker-baseconstructor-10 worker-baseconstructor-11 worker-baseconstructor-12 worker-client-report-exports worker-bob-scorer worker-manual-scoring worker-autopipeline worker-autorenew worker-hypothesis-engine worker-vertical-engine-v2"
+ALL_WORKER_SERVICES="worker-hh worker-eng-hiring worker-search worker-enrich worker-enrich-2 worker-enrich-3 worker-enrich-4 worker-enrich-5 worker-enrich-6 worker-enrich-7 worker-enrich-8 worker-enrich-9 worker-enrich-coordinator worker-yandexmaps worker-googleparsers worker-emailvalidation worker-inn-enrich worker-website-inn-lookup worker-tg-outreach worker-aicaller worker-sales-copilot worker-sales-ai-analysis worker-leads-report worker-leads-report-bot worker-byo-send worker-byo-replies worker-sales-chat-logger worker-sales-chat-archive worker-tg-parser worker-tg-transcribe worker-instantly-leads worker-outreach worker-li-outreach worker-baseconstructor worker-baseconstructor-2 worker-baseconstructor-3 worker-baseconstructor-4 worker-baseconstructor-5 worker-baseconstructor-6 worker-baseconstructor-7 worker-baseconstructor-8 worker-baseconstructor-9 worker-baseconstructor-10 worker-baseconstructor-11 worker-baseconstructor-12 worker-client-report-exports worker-bob-scorer worker-manual-scoring worker-autopipeline worker-autorenew worker-hypothesis-engine worker-vertical-engine-v2"
 BASE_CONSTRUCTOR_WORKER_SERVICES="worker-baseconstructor worker-baseconstructor-2 worker-baseconstructor-3 worker-baseconstructor-4 worker-baseconstructor-5 worker-baseconstructor-6 worker-baseconstructor-7 worker-baseconstructor-8 worker-baseconstructor-9 worker-baseconstructor-10 worker-baseconstructor-11 worker-baseconstructor-12"
 
 add_core_service() {
@@ -42,6 +42,7 @@ select_deploy_targets_from_files() {
   DEPLOY_IDB_STACK=0
   DEPLOY_BACKUP=0
   DEPLOY_DATASET_SYNC=0
+  DEPLOY_SENDER=0
   CORE_SERVICES=""
   WORKER_SERVICES=""
 
@@ -83,6 +84,21 @@ select_deploy_targets_from_files() {
         DEPLOY_PORTAL=1
         select_all_workers
         ;;
+      app/src/lib/sender/*|app/src/app/api/tools/sender/*)
+        # Sender tool: API routes live in the Portal image, but the sending
+        # worker runs on the isolated sender host (email IP reputation — it
+        # must never join the Portal host worker fleet).
+        DEPLOY_PORTAL=1
+        DEPLOY_SENDER=1
+        ;;
+      app/worker/sender.ts)
+        # Entrypoint is exclusive to the sender host worker (as baseConstructor
+        # entrypoints are to their worker group) — Portal need not restart.
+        DEPLOY_SENDER=1
+        ;;
+      deploy/sender/*)
+        DEPLOY_SENDER=1
+        ;;
       app/src/lib/tools/baseConstructor*.ts)
         # Shared Base Constructor runtime is also imported by its API routes.
         DEPLOY_PORTAL=1
@@ -108,6 +124,7 @@ select_deploy_targets_from_files() {
         ;;
       Dockerfile.worker)
         select_all_workers
+        DEPLOY_SENDER=1
         ;;
       supabase/migrations/*base_constructor*.sql|supabase/migrations/*baseconstructor*.sql)
         DEPLOY_PORTAL=1
@@ -160,6 +177,7 @@ EOF
     select_all_workers
     DEPLOY_IDB_STACK=1
     DEPLOY_BACKUP=1
+    DEPLOY_SENDER=1
     CORE_SERVICES="$ALL_CORE_SERVICES"
     WORKER_SERVICES="$ALL_WORKER_SERVICES"
   else
@@ -201,7 +219,7 @@ print_deploy_plan() {
   else
     echo "  - <none>"
   fi
-  echo "[deploy-plan] full=${DEPLOY_ALL} portal=${DEPLOY_PORTAL} workers=${DEPLOY_WORKERS} idb=${DEPLOY_IDB_STACK} backup=${DEPLOY_BACKUP} dataset_sync=${DEPLOY_DATASET_SYNC}"
+  echo "[deploy-plan] full=${DEPLOY_ALL} portal=${DEPLOY_PORTAL} workers=${DEPLOY_WORKERS} idb=${DEPLOY_IDB_STACK} backup=${DEPLOY_BACKUP} dataset_sync=${DEPLOY_DATASET_SYNC} sender=${DEPLOY_SENDER}"
   echo "[deploy-plan] core services: ${CORE_SERVICES:-<none>}"
   echo "[deploy-plan] worker services: ${WORKER_SERVICES:-<none>}"
 }

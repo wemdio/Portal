@@ -31,17 +31,6 @@ export interface CampaignDto {
   stats: { recipients: number; replied: number; sent: number; scheduled: number; failed: number } | null;
 }
 
-export interface ReplyDto {
-  id: string;
-  from_email: string | null;
-  from_name: string | null;
-  subject: string | null;
-  body: string | null;
-  kind: 'human' | 'auto_reply' | 'bounce' | 'warmup' | 'unknown';
-  received_at: string | null;
-  created_at: string;
-}
-
 export interface ImportMailboxesResult {
   imported: number;
   errors: { line: number; email: string | null; message: string }[];
@@ -119,8 +108,4 @@ export function patchCampaign(id: string, action: 'start' | 'pause' | 'finish') 
 
 export function uploadRecipients(campaignId: string, file: File) {
   return upload<ImportRecipientsResult>(`${BASE}/campaigns/${campaignId}/recipients`, file);
-}
-
-export function fetchReplies(kind: string) {
-  return authFetchJson<{ replies: ReplyDto[] }>(`${BASE}/replies?kind=${encodeURIComponent(kind)}`);
 }
