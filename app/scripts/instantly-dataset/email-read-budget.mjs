@@ -15,6 +15,14 @@ export class DatasetEmailReadDeferredError extends Error {
   }
 }
 
+/** Refusal reasons `instantly_reserve_email_read` may return. The lane-specific
+ * 'recovery_budget' / 'bulk_budget' arrived with migration 20260915_0001; the
+ * application gate learned them (src/lib/instantly/emailReadDeferral.ts), this
+ * standalone copy did not — so an ordinary lane refusal read as broken storage
+ * and aborted the whole nightly sync (16.09.2026). Keep the two lists in sync.
+ */
+const RESERVE_REFUSAL_REASONS = ['budget', 'recovery_budget', 'bulk_budget', 'cooldown'];
+
 export function createDatasetEmailReadBudget(env, {
   fetchImpl = globalThis.fetch,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -86,7 +94,7 @@ export function createDatasetEmailReadBudget(env, {
       if (wait <= 0) {
         const result = await rpc('instantly_reserve_email_read', { p_account: account, p_priority: 'recovery' });
         if (result?.granted === true && result.retry_after_ms === 0) return;
-        if (result?.granted !== false || !['budget', 'cooldown'].includes(result.reason) ||
+        if (result?.granted !== false || !RESERVE_REFUSAL_REASONS.includes(result.reason) ||
             typeof result.retry_after_ms !== 'number' || !Number.isFinite(result.retry_after_ms) || result.retry_after_ms <= 0) {
           throw new DatasetEmailReadDeferredError('main_budget_storage_unavailable');
         }
