@@ -19,7 +19,7 @@ function jsonError(message: string, status: number) {
 // POST — запустить авто-сборку базы под вертикаль (стадия base_collect: план
 // источников → коллекторы → harvest в ve_bases). Создаёт ve_bases
 // (source='auto', status='collecting') + ve_jobs (stage='base_collect').
-// Каждый новый ручной запуск готовит превью по явно выбранным гипотезам.
+// Повторный запрос использует сохранённое превью выбранной гипотезы.
 // Старый client-supplied limit больше не управляет сбором: цель задаёт сервер.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace(

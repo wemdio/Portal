@@ -1,3 +1,4 @@
+import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
 /**
  * Стадия base_collect: авто-сборка базы под вертикаль (he_bases source='auto').
  *
@@ -1767,11 +1768,12 @@ async function readConstructJobStatus(
 ): Promise<{ status: string; error_message: string | null } | null> {
   const { data, error } = await ctx.supabase
     .from('base_constructor_jobs')
-    .select('status, error_message')
+    .select('status, error_message, workload_origin')
     .eq('id', bcJobId)
     .maybeSingle();
   if (error) throw new Error(`base_constructor_jobs read: ${error.message}`);
   if (!data) return null;
+  if (data.workload_origin !== 'automation') await markAutomatedConstructor(ctx.supabase, bcJobId);
   const row = data as { status?: unknown; error_message?: unknown };
   return {
     status: String(row.status ?? ''),
@@ -2137,6 +2139,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       const steps = constructStepsFor(merged);
       const bcJobId = await insertChildJob(ctx, 'base_constructor_jobs', {
         user_id: project.created_by,
+        workload_origin: 'automation',
         file_name: `HE · ${base.filename ?? baseId}`,
         status: 'pending',
         locale,

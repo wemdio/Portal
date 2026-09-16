@@ -72,15 +72,31 @@ async function childSnapshot(db: SupabaseClient, baseId?: string): Promise<VeChi
 }
 
 async function append(db: SupabaseClient, scope: ProviderUsageScope, event: string, context: Record<string, unknown>) {
-  try {
-    const { error } = await db.from('application_logs').insert({
-      level: 'info', source: VE_USAGE_SOURCE, event, message: `VE2 provider accounting: ${event}`,
-      request_id: scope.projectId, context: { version: VE_USAGE_VERSION, ...scope, ...context },
-    }).abortSignal(AbortSignal.timeout(10_000));
-    if (error) throw new ProviderUsageWriteError();
-  } catch {
-    throw new ProviderUsageWriteError();
+  // A timeout can arrive after Postgres committed. Retry only this immutable
+  // journal entry, with the same ID; never replay the paid provider operation.
+  const row = {
+    id: randomUUID(), created_at: new Date().toISOString(),
+    level: 'info', source: VE_USAGE_SOURCE, event, message: `VE2 provider accounting: ${event}`,
+    request_id: scope.projectId, context: { version: VE_USAGE_VERSION, ...scope, ...context },
+  };
+  let failureCode = 'unknown';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const { error } = await db.from('application_logs')
+        .upsert(row, { onConflict: 'id', ignoreDuplicates: true }).abortSignal(AbortSignal.timeout(10_000));
+      if (!error) return;
+      throw error;
+    } catch (error) {
+      // Never log the raw DB error: messages may include URLs or row data.
+      const failure = error as { code?: unknown; name?: unknown; message?: unknown; cause?: { code?: unknown } } | null;
+      const code = failure?.cause?.code ?? failure?.code;
+      failureCode = typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(code) ? code
+        : /abort|timeout/i.test(String(failure?.name ?? '') + String(failure?.message ?? '')) ? 'DEADLINE' : 'unknown';
+    }
+    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
   }
+  console.warn(`[ve-cost] journal persistence failed (event=${event}, code=${failureCode}, attempts=3, job=${scope.jobId})`);
+  throw new ProviderUsageWriteError();
 }
 
 function eventFields(event: ProviderUsageEvent): Record<string, unknown> {

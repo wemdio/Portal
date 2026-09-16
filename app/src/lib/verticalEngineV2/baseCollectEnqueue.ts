@@ -57,7 +57,7 @@ export interface VeBaseCollectInput {
 export type VeBaseCollectResult =
   /** Сборка стартовала: созданы базы + джобы (по одной на гипотезу либо одна). */
   | { ok: true; created: true; bases: Array<Record<string, unknown>>; base: Record<string, unknown> }
-  /** Дедуп: сборка уже идёт (существующая collecting-база). */
+  /** Существующее превью: сборка уже идёт либо результат сохранён. */
   | { ok: true; created: false; base: Record<string, unknown> }
   | { ok: false; message: string };
 
@@ -124,10 +124,21 @@ async function resumeFailedPreview(
   if (error) return { ok: false, message: error.message };
   const candidates = (failed ?? []).filter((base) => previewRecoveryKind(base));
   // A newer empty 402 attempt must not hide an older already enriched result.
-  const saved = candidates.find((base) => previewRecoveryKind(base) === 'validation') ?? candidates[0];
+  const saved = candidates.find((base) => previewRecoveryKind(base) === 'validation')
+    ?? candidates.find((base) => previewRecoveryKind(base) !== 'billing') ?? candidates[0];
   if (!saved) return null;
   if (activeBaseIds.includes(saved.id)) return { ok: true, created: false, base: saved };
   const info = { ...saved.collect_info, ...(previewRecoveryKind(saved) === 'validation' ? { validation_retry: true } : {}) };
+  // Older workers timed out queued children from dispatch time. On an explicit
+  // continuation, poll the SAME child again instead of buying another scrape.
+  if (Array.isArray(info.tasks)) {
+    info.tasks = info.tasks.map((task: Record<string, unknown>) => {
+      if (task.status !== 'failed' || !task.child_job_id || task.error !== 'timeout: дочерняя джоба зависла') return task;
+      const recovered: Record<string, unknown> = { ...task, status: 'dispatched' };
+      delete recovered.error;
+      return recovered;
+    });
+  }
   if (info.saved_email_recovery !== undefined) {
     info.saved_email_recovery = resumeVeSavedEmailRecovery(info.saved_email_recovery);
   }
@@ -348,6 +359,26 @@ export async function enqueueVeBaseCollect(
     }
 
     if (input.collectionMode === 'preview' && hypothesisId && !refill) {
+      // A finished preview is a one-time result awaiting approval/launch.
+      // Repeated preparation requests must reuse it, even below the target or
+      // with zero contacts. Daily replenishment uses the approved supply path.
+      const { data: prepared, error: preparedError } = await supabase
+        .from('ve_bases')
+        .select('id, status, hypothesis_id, row_count, collect_info')
+        .eq('project_id', projectId)
+        .eq('hypothesis_id', hypothesisId)
+        .eq('source', 'auto')
+        .eq('collect_info->>collection_mode', 'preview')
+        .in('status', ['analyzing', 'analyzed'])
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (preparedError) return { ok: false, message: preparedError.message };
+      if (prepared) {
+        existing.push(prepared as Record<string, unknown>);
+        continue;
+      }
       const resumed = await resumeFailedPreview(supabase, input, hypothesisId, allActiveBaseIds);
       if (resumed) {
         if (!resumed.ok) return resumed;

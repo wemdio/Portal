@@ -23,7 +23,9 @@ export function isVeInterruptedCollectionResume(
 
 /** Advances durable user-requested preparation. No paid calls in this coordinator. */
 export async function runVeOutreachPreparations(db: SupabaseClient, shouldStop: () => boolean = () => false): Promise<void> {
-  for (let n = 0; n < 2; n++) {
+  const visited = new Set<string>();
+  const deadline = Date.now() + 8_000;
+  for (let n = 0; n < 32 && Date.now() < deadline; n++) {
     if (shouldStop()) return;
     const claimed = await db.rpc('ve_claim_outreach_preparation');
     if (claimed.error) throw new Error(claimed.error.message);
@@ -65,6 +67,11 @@ export async function runVeOutreachPreparations(db: SupabaseClient, shouldStop: 
       }
     };
     try {
+      const identity = `${p.project_id}:${p.hypothesis_id}`;
+      // The claim RPC rotates oldest first. Stop after one full pass when the
+      // queue is small, releasing the new lease without repeating its work.
+      if (visited.has(identity)) { await save(p.status, p.last_error); return; }
+      visited.add(identity);
       const h = await db.from('ve_hypotheses').select('id,vertical_id,status').eq('id', p.hypothesis_id).eq('project_id', p.project_id).maybeSingle();
       if (h.error || !h.data?.vertical_id || h.data.status === 'rejected') throw new Error('Гипотеза больше недоступна. Измените выбор');
       if (!baseId) baseId = (await latestBase())?.id ?? null;
@@ -72,6 +79,21 @@ export async function runVeOutreachPreparations(db: SupabaseClient, shouldStop: 
         .eq('id', baseId).eq('project_id', p.project_id).eq('hypothesis_id', p.hypothesis_id).maybeSingle() : null;
       if (base?.error) throw new Error(base.error.message);
       if (baseId && !base?.data) throw new Error('Сохранённая база недоступна. Обновите страницу');
+      if (retryRequested && base?.data?.status === 'failed') {
+        // An older finished preview can coexist with a later failed duplicate.
+        // Continue preparation from that result instead of reviving collection,
+        // including when the duplicate was explicitly cancelled.
+        const prepared = await db.from('ve_bases').select(BASE_STATE_COLUMNS)
+          .eq('project_id', p.project_id).eq('hypothesis_id', p.hypothesis_id).eq('source', 'auto')
+          .eq('collect_info->>collection_mode', 'preview').in('status', ['analyzing', 'analyzed'])
+          .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(1).maybeSingle();
+        if (prepared.error) throw new Error(prepared.error.message);
+        if (prepared.data) {
+          baseId = prepared.data.id;
+          templateId = null;
+          base = prepared;
+        }
+      }
       if (baseId && retryRequested && base?.data?.status === 'failed' && base.data.error === 'Отменено пользователем') {
         const resumed = await db.rpc('ve_resume_outreach_cancelled_base', {
           p_project_id: p.project_id, p_hypothesis_id: p.hypothesis_id, p_claim_token: p.claim_token, p_base_id: baseId,

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { callLLMWithSchema, getVeModel, type LLMMessage, type LLMUsage } from './llm';
 
 export const veRelevanceReviewResultSchema = z.object({
@@ -30,7 +31,7 @@ export async function reviewVeRelevanceEvidence(input: {
   scope: string; language: 'ru' | 'en'; companies: VeRelevanceReviewCompany[];
   model?: string; signal?: AbortSignal; onUsage?: (usage: LLMUsage) => void;
 }) {
-  if (input.companies.length < 1 || input.companies.length > 4) throw new Error('Semantic relevance review requires 1..4 companies');
+  if (input.companies.length < 1 || input.companies.length > 8) throw new Error('Semantic relevance review requires 1..8 companies');
   const companies = z.array(z.object({ evidence: z.array(z.object({
     field: z.enum(['description', 'website_text', 'category']), quote: z.string().min(1).max(400),
   }).strict()).min(1).max(3) }).strict()).parse(input.companies);
@@ -38,14 +39,14 @@ export async function reviewVeRelevanceEvidence(input: {
     i: z.number().int().nonnegative(),
     // Explanatory verbosity must not waste a paid, otherwise valid decision.
     // Persist/UI reasons retain the strict 400-character checkpoint contract.
-    reason: z.string().min(1).max(2000).transform((reason) => reason.slice(0, 400)),
+    reason: z.string().min(1).max(2000).transform((reason) => sliceWholeChars(stripUnstorableJsonChars(reason), 0, 400)),
   }).strict())
     .length(companies.length) }).strict().superRefine((data, ctx) => {
     if (new Set(data.reviews.map((review) => review.i)).size !== companies.length
       || data.reviews.some((review) => review.i >= companies.length)) ctx.addIssue({ code: 'custom', message: 'Every local i must occur exactly once' });
   });
   return callLLMWithSchema(relevanceReviewMessages(input.scope, companies, input.language), schema, {
-    model: input.model ?? getVeModel('relevanceReview'), maxTokens: 4096,
+    model: input.model ?? getVeModel('relevanceReview'), maxTokens: 8192,
     maxHttpAttempts: 1, maxSchemaAttempts: 1, timeoutMs: 90_000, requireCompleteJson: true,
     signal: input.signal, onUsage: input.onUsage,
   });

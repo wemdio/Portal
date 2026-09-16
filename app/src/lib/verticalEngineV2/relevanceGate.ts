@@ -1,5 +1,6 @@
 /** Evidence-backed hypothesis triage. Uncertainty is retained, never silently accepted or discarded. */
 import { z } from 'zod';
+import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, getVeModel, LLMValidationError, type LLMMessage, type LLMUsage } from './llm';
 import { isVeProviderBillingError } from './collectionErrors';
 import { readRelevanceCheckpoint, relevanceHash, VeRelevanceCheckpointError, type VeRelevanceCheckpoint, type VeRelevanceFailureCode } from './relevanceCheckpoint';
@@ -14,7 +15,8 @@ const RECOVERY_BATCH_SIZE = 5;
 const MAX_SEMANTIC_ATTEMPTS = 2;
 const configuredMax = Number(process.env.VE_RELEVANCE_MAX_ROWS);
 const MAX_COMPANIES = Number.isFinite(configuredMax) && configuredMax > 0 ? Math.min(10_000, Math.floor(configuredMax)) : 3000;
-const MAX_WEBSITES = 30;
+const MAX_WEBSITES = 32;
+const WEBSITE_CONCURRENCY = 8;
 const FIELDS = ['company', 'website', 'category', 'description', 'vacancy_title', 'website_text'] as const;
 const ACTIVITY_FIELDS: ReadonlyArray<typeof FIELDS[number]> = ['description', 'website_text', 'category'];
 type Fields = Record<typeof FIELDS[number], string>;
@@ -50,18 +52,19 @@ function groupsFor(rows: Array<Record<string, unknown>>, evidenceRows: Array<Rec
 function fieldsFor(group: Group): Fields {
   // Preserve all source aliases in a stable priority order. A registry code
   // inserted before `category` must not hide the company's actual activity.
-  const merged = (names: string[], max: number) => [...new Set(names.flatMap((name) => group.rows.flatMap((row) =>
+  const merged = (names: string[]) => [...new Set(names.flatMap((name) => group.rows.flatMap((row) =>
     Object.entries(row).flatMap(([key, value]) => {
       if (key.trim().toLowerCase() !== name || (typeof value !== 'string' && typeof value !== 'number')) return [];
       if (typeof value === 'number' && !Number.isFinite(value)) return [];
-      const text = String(value).trim();
+      const text = stripUnstorableJsonChars(String(value)).trim();
       return text ? [text] : [];
     }),
-  )))].join('\n').slice(0, max);
-  return { company: merged(['company', 'компания'], 240), website: merged(['website', 'site', 'сайт'], 400),
-    category: merged(['category', 'категория', 'okved', 'оквэд'], 600),
-    description: merged(['description', 'описание', 'company_description'], 2000),
-    vacancy_title: merged(['vacancy_title', 'vacancy', 'вакансия'], 400), website_text: '' };
+  )))].join('\n');
+  const bounded = (names: string[], max: number) => sliceWholeChars(merged(names), 0, max);
+  return { company: bounded(['company', 'компания'], 240), website: bounded(['website', 'site', 'сайт'], 400),
+    category: bounded(['category', 'категория', 'okved', 'оквэд'], 600),
+    description: bounded(['description', 'описание', 'company_description'], 2000),
+    vacancy_title: bounded(['vacancy_title', 'vacancy', 'вакансия'], 400), website_text: '' };
 }
 const normalized = (value: string) => value.replace(/\s+/g, ' ').trim().toLowerCase();
 const activityQuote = (quote: string) => /\p{L}/u.test(quote
@@ -81,7 +84,7 @@ function isCompleteShortActivityQuote(field: typeof FIELDS[number], quote: strin
 const outputDecision = z.object({
   i: z.number().int().nonnegative(), status: z.enum(['relevant', 'irrelevant', 'needs_review']),
   // Explanation verbosity must not discard otherwise valid company decisions.
-  reason: z.string().min(1).max(2000).transform((value) => value.slice(0, 400)),
+  reason: z.string().min(1).max(2000).transform((value) => sliceWholeChars(stripUnstorableJsonChars(value), 0, 400)),
   // Empty padding is unusable evidence, not a reason to lose the entire batch.
   // checkedEvidence removes it; supportedDecision then withholds admission and
   // the website pass can repair citations under its existing bounded policy.
@@ -115,7 +118,7 @@ function supportedDecision(raw: z.infer<typeof outputDecision>, fields: Fields, 
   }
   // A sparse catalog impression must receive an independent website second look before rejection.
   if (status === 'irrelevant' && !secondPass) {
-    status = 'needs_review'; reason = ('Требуется проверить предварительное несовпадение: ' + reason).slice(0, 400);
+    status = 'needs_review'; reason = sliceWholeChars('Требуется проверить предварительное несовпадение: ' + reason, 0, 400);
   }
   if (status === 'irrelevant' && !evidence.some((item) => item.field === 'website_text' && activityQuote(item.quote))) {
     status = 'needs_review'; reason = 'Сайт не подтвердил несовпадение с гипотезой; недостаточно подтверждённых данных.';
@@ -152,7 +155,7 @@ function repairEvidenceCandidates(fields: Fields) {
           overlap = true;
         }
       }
-      const quote = value.slice(start, end).trim();
+      const quote = sliceWholeChars(value, start, end).trim();
       if (quote) excerpts.push({ id: excerpts.length, field, quote });
       start = end < value.length && overlap ? end - 64 : end;
     }
@@ -212,6 +215,10 @@ export async function findIrrelevantRows(input: {
     // activity labels before saving their evidence, so they cannot be repaired
     // merely by reinterpreting the saved verdict.
     const keyParts: unknown[] = [identity, fields];
+    if (!identity && !fields.website) {
+      const addresses = [...new Set(group.rows.map((row) => rowText(row, ['address', 'адрес'])).filter(Boolean))].sort();
+      if (addresses.length) keyParts.push(['discovery-geography-v1', addresses]);
+    }
     if (ACTIVITY_FIELDS.some((field) => (field === 'category' ? fields[field].split(/\r?\n/) : [fields[field]])
       .some((value) => isCompleteShortActivityQuote(field, value, fields[field])))) {
       keyParts.push('complete-short-activity-evidence-v1');
@@ -320,7 +327,7 @@ export async function findIrrelevantRows(input: {
     record(entry, confirms(review.proposal, review.result)
       ? { ...review.proposal, reason: review.result.reason }
       : { ...review.proposal, status: 'needs_review',
-        reason: ('Смысловое соответствие не подтверждено: ' + review.result.reason).slice(0, 400) });
+        reason: sliceWholeChars('Смысловое соответствие не подтверждено: ' + review.result.reason, 0, 400) });
   };
   const resumeSemantic = (entry: Entry, review: SemanticReview) => {
     // Normalize BEFORE changing status: an interrupted legacy reservation may
@@ -356,7 +363,7 @@ export async function findIrrelevantRows(input: {
         firstReview.status = 'failed'; quarantineSemantic(batch[0]); await save(); continue;
       }
       if (semanticAttempts(firstReview) === 0) {
-        while (batch.length < 4 && pending.length
+        while (batch.length < 8 && pending.length
           && semanticAttempts(checkpoint.semantic_reviews[checkpoint.semantic_review_refs[pending[0].key]]) === 0) batch.push(pending.shift()!);
       }
       const reviews = batch.map((entry) => checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]]);
@@ -442,9 +449,21 @@ export async function findIrrelevantRows(input: {
     await save();
   };
   const classify = async (batch: Entry[], secondPass: boolean, recovering = false): Promise<void> => {
-    const schema = z.object({ decisions: z.array(outputDecision.extend({ i: z.number().int().min(0).max(batch.length - 1) })).length(batch.length) }).superRefine((data, ctx) => {
+    // Select exact source excerpts on the website pass. Asking the model to
+    // reproduce prose caused paid citation repairs and lost valid companies.
+    const excerpts = batch.map((entry) => repairEvidenceCandidates(entry.fields));
+    const decisionSchema = secondPass ? outputDecision.omit({ evidence: true }).extend({
+      evidence_ids: z.array(z.number().int().nonnegative()).max(3),
+    }) : outputDecision;
+    const schema = z.object({ decisions: z.array(decisionSchema.extend({ i: z.number().int().min(0).max(batch.length - 1) })).length(batch.length) }).superRefine((data, ctx) => {
       const ids = new Set(data.decisions.map((item) => item.i));
       if (ids.size !== batch.length || data.decisions.some((item) => item.i >= batch.length)) ctx.addIssue({ code: 'custom', message: 'Every local i must occur exactly once' });
+      if (secondPass) for (const decision of data.decisions) {
+        const selected = (decision as { evidence_ids?: number[] }).evidence_ids ?? [];
+        if (new Set(selected).size !== selected.length || selected.some((id) => !excerpts[decision.i]?.[id])) {
+          ctx.addIssue({ code: 'custom', message: 'Evidence IDs must belong to this company' });
+        }
+      }
     });
     // Verified with Requesty's default gate model. Other configured providers
     // retain JSON mode until their native schema support has been verified.
@@ -455,12 +474,17 @@ export async function findIrrelevantRows(input: {
       } }) } : undefined;
     let classified = false;
     try {
-      const llm = await invoke(messages(scope, batch.map((entry) => entry.fields), input.language, secondPass), schema,
+      const fields = batch.map((entry, i) => secondPass
+        ? { ...entry.fields, description: '', website_text: '', category: '', excerpts: excerpts[i] } : entry.fields);
+      const llm = await invoke(messages(scope, fields, input.language, secondPass, secondPass), schema,
         { model, maxTokens: 5000, requireCompleteJson: true, jsonSchema, ...(recovering ? { maxSchemaAttempts: 1 as const } : {}), signal: signal ?? undefined });
       signal?.throwIfAborted(); const data = schema.parse(llm.data);
       classified = true;
       const repair: Array<{ entry: Entry; raw: z.infer<typeof outputDecision> }> = [];
-      for (const raw of data.decisions) {
+      for (const selected of data.decisions) {
+        const raw = secondPass ? { ...selected, evidence: (selected as { evidence_ids: number[] }).evidence_ids.map((id) => ({
+          field: excerpts[selected.i][id].field, quote: excerpts[selected.i][id].quote,
+        })) } : selected as z.infer<typeof outputDecision>;
         const entry = batch[raw.i];
         stageDecision(entry, supportedDecision(raw, entry.fields, contextHash, entry.attempts, secondPass));
         if (secondPass && needsCitationRepair(raw, entry.fields)) repair.push({ entry, raw });
@@ -571,7 +595,8 @@ export async function findIrrelevantRows(input: {
       signal?.throwIfAborted(); await classify(eligible.slice(start, start + BATCH_SIZE), false);
     }
     const review = entries.filter((entry) => {
-      if (!entry.fields.website && !entry.identity) return false;
+      if (!entry.fields.website && !entry.identity
+        && !entry.group.rows.some((row) => rowText(row, ['address', 'адрес']) && rowText(row, ['company', 'компания']))) return false;
       const cached = checkpoint.website_evidence[entry.key];
       const semantic = checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]];
       if (semantic && semantic.status !== 'finished') return false;
@@ -588,11 +613,15 @@ export async function findIrrelevantRows(input: {
           return evidence?.reader_version === 1 && evidence.status === 'ok' && !evidence.refined && evidence.text ? 1 : 0;
         };
         // Finish saved refinement before accumulating more paid/unfinished work.
-        return pendingText(b) - pendingText(a) || a.attempts - b.attempts;
+        // Failed searches must not monopolize every retry's first batch.
+        // Fresh companies progress before the failed subset is retried.
+        return pendingText(b) - pendingText(a)
+          || Number(Boolean(checkpoint.website_evidence[a.key]?.provider_error)) - Number(Boolean(checkpoint.website_evidence[b.key]?.provider_error))
+          || a.attempts - b.attempts;
       }).slice(0, MAX_WEBSITES);
-    for (let start = 0; start < review.length && !stopProviderCalls; start += 4) {
+    for (let start = 0; start < review.length && !stopProviderCalls; start += WEBSITE_CONCURRENCY) {
       signal?.throwIfAborted(); const enriched: Entry[] = [];
-      await Promise.all(review.slice(start, start + 4).map(async (entry) => {
+      await Promise.all(review.slice(start, start + WEBSITE_CONCURRENCY).map(async (entry) => {
         if (stopProviderCalls) return;
         const cached = checkpoint.website_evidence[entry.key];
         if (cached?.reader_version === 1 && cached.status === 'ok' && !cached.refined && cached.text) {
@@ -603,34 +632,38 @@ export async function findIrrelevantRows(input: {
           enriched.push(entry);
           return;
         }
-        const evidence = await (input.fetchEvidence ?? fetchVeRelevanceEvidence)(entry.fields.website, { signal: signal ?? undefined,
-          companyInn: entry.identity, focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' ') });
+        const evidence = stripUnstorableJsonChars(await (input.fetchEvidence ?? fetchVeRelevanceEvidence)(entry.fields.website, { signal: signal ?? undefined,
+          companyInn: entry.identity, companyName: entry.fields.company,
+          companyAddress: entry.group.rows.map((row) => rowText(row, ['address', 'адрес'])).find(Boolean), focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' ') }));
         signal?.throwIfAborted();
         if (evidence.provider_error) {
-          stopProviderCalls = true;
           const provider = evidence.provider_error;
+          // Transient search failure belongs to this company. Preserve it for
+          // a bounded retry, but finish siblings and their paid refinements.
+          // The shared search circuit prevents an outage from flooding Serper.
+          stopProviderCalls ||= provider.kind !== 'transient';
           transientFailure ||= provider.kind === 'transient'; permanentFailure ||= provider.kind !== 'transient';
           if (provider.kind === 'billing' || !result.error
             || (provider.kind === 'configuration' && !/^(?:Serper billing:|Requesty 402:)/.test(result.error))) result.error = provider.message;
           failure(entry.key, 1, provider.kind === 'transient' ? 'provider' : provider.kind);
           checkpoint.website_evidence[entry.key] = {
-            reader_version: 1, reader_revision: VE_RELEVANCE_WEBSITE_VERSION, status: 'error', text: '', url: evidence.url.slice(0, 1000),
-            reason: provider.message.slice(0, 400), provider_error: { ...provider, message: provider.message.slice(0, 400) },
+            reader_version: 1, reader_revision: VE_RELEVANCE_WEBSITE_VERSION, status: 'error', text: '', url: sliceWholeChars(evidence.url, 0, 1000),
+            reason: sliceWholeChars(provider.message, 0, 400), provider_error: { ...provider, message: sliceWholeChars(provider.message, 0, 400) },
             review_attempt: reviewAttempt, review_attempts: entry.attempts, refined: true,
           };
-          record(entry, errorDecision(provider.message.slice(0, 400), entry.attempts));
+          record(entry, errorDecision(sliceWholeChars(provider.message, 0, 400), entry.attempts));
           return;
         }
         entry.attempts += 1;
         const usable = evidence.status === 'ok' && Boolean(evidence.text.trim());
         checkpoint.website_evidence[entry.key] = {
-          reader_version: 1, reader_revision: VE_RELEVANCE_WEBSITE_VERSION, status: evidence.status, text: usable ? evidence.text.slice(0, 6000) : '',
-          url: evidence.url.slice(0, 1000), reason: evidence.reason.slice(0, 400),
+          reader_version: 1, reader_revision: VE_RELEVANCE_WEBSITE_VERSION, status: evidence.status, text: usable ? sliceWholeChars(evidence.text, 0, 6000) : '',
+          url: sliceWholeChars(evidence.url, 0, 1000), reason: sliceWholeChars(evidence.reason, 0, 400),
           review_attempt: reviewAttempt, review_attempts: entry.attempts, refined: !usable,
         };
         // This write is durably saved below BEFORE the paid refinement call.
         record(entry, { ...current.get(entry)!, review_attempts: entry.attempts });
-        if (usable) { entry.fields.website_text = evidence.text.slice(0, 6000); enriched.push(entry); }
+        if (usable) { entry.fields.website_text = sliceWholeChars(evidence.text, 0, 6000); enriched.push(entry); }
         else record(entry, { ...current.get(entry)!, status: 'needs_review', evidence: [], review_attempts: entry.attempts,
           reason: 'Сайт не дал подтверждения; недостаточно подтверждённых данных.' });
       }));
@@ -650,6 +683,14 @@ export async function findIrrelevantRows(input: {
   for (const entry of entries) {
     let decision = current.get(entry) ?? errorDecision('Проверка ещё не выполнена. Контакт сохранён, а не отклонён.', entry.attempts);
     const website = checkpoint.website_evidence[entry.key];
+    if (decision.status === 'error' && website?.provider_error) {
+      // A failed company may have been rotated behind this pass's website cap.
+      // Its unresolved failure still needs a durable retry, not a false success
+      // or a non-retryable incomplete-coverage stop.
+      transientFailure ||= website.provider_error.kind === 'transient';
+      permanentFailure ||= website.provider_error.kind !== 'transient';
+      result.error ??= website.provider_error.message;
+    }
     if (website?.reader_revision === VE_RELEVANCE_WEBSITE_VERSION && website.refined && !website.provider_error) {
       decision = { ...decision, website_review_version: VE_RELEVANCE_WEBSITE_VERSION };
       record(entry, decision);

@@ -5,7 +5,8 @@ import { NextRequest } from 'next/server';
 
 import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
 import { enqueueVeBaseCollect } from '@/lib/verticalEngineV2/baseCollectEnqueue';
-import { claimVeJob, createVeJobPool } from '@/lib/verticalEngineV2/jobQueue';
+import { claimVeJob, createVeJobPool, createVeProjectUsageAccumulator, canRunVeJob, veJobConcurrency } from '@/lib/verticalEngineV2/jobQueue';
+import type { VeJob } from '@/lib/verticalEngineV2/types';
 import { runVeOutreachPreparations } from '@/lib/verticalEngineV2/outreachPreparation';
 
 let mockRouteDb = createMockSupabase();
@@ -32,6 +33,7 @@ describe('VE2 base collection enqueue recovery', () => {
     const privateInfo = {
       collection_mode: 'preview', ready_target: 1_000, limit: 2_000,
       target_checkpoint: { seen_rows: [{ email: 'rejected@example.com' }] },
+      source_contact_recovery: { version: 1, checked: { private: { website: 'https://private.test/' } } },
       tasks: [{ source: 'directory', rows: 25, harvest: [{ email: 'raw@example.com' }] }],
     };
     mockRouteDb = createMockSupabase({ tables: {
@@ -50,6 +52,7 @@ describe('VE2 base collection enqueue recovery', () => {
       const payload = await response.json();
       for (const base of [payload.base, ...(payload.bases ?? [])]) {
         expect(base.collect_info).not.toHaveProperty('target_checkpoint');
+        expect(base.collect_info).not.toHaveProperty('source_contact_recovery');
         expect(base.collect_info?.tasks?.some((task: Record<string, unknown>) => 'harvest' in task)).not.toBe(true);
       }
     }
@@ -107,6 +110,47 @@ describe('VE2 base collection enqueue recovery', () => {
       status: 'pending',
       payload: expect.objectContaining({ hypothesis_id: 'hypothesis-2', collection_mode: 'preview', ready_target: 500 }),
     }));
+
+    // A later request/day must reuse a finished preview, including a limited
+    // or empty result. Reaching fewer than 500 does not authorize daily supply.
+    await db.from('ve_jobs').update({ status: 'done' });
+    for (const status of ['analyzing', 'analyzed']) {
+      await db.from('ve_bases').update({ status, row_count: status === 'analyzed' ? 0 : 128,
+        collect_info: { collection_mode: 'preview', target_progress: { status: 'limited' } } });
+      await expect(enqueueVeBaseCollect(db as unknown as SupabaseClient, {
+        ...input, hypothesisIds: ['hypothesis-1', 'hypothesis-2'], collectionMode: 'preview',
+      })).resolves.toMatchObject({ ok: true, created: false });
+      expect(db.getRows('ve_bases')).toHaveLength(2);
+      expect(db.getRows('ve_jobs')).toHaveLength(2);
+      expect(db.getRows('ve_jobs').every((row) => row.status === 'done')).toBe(true);
+    }
+
+    let claimed = false;
+    const save = jest.fn(() => ({ data: true }));
+    const resumedDb = createMockSupabase({ tables: {
+      ve_hypotheses: [{ id: 'h1', project_id: input.projectId, vertical_id: input.verticalId, status: 'approved' }],
+      ve_bases: [
+        { id: 'old-ready', project_id: input.projectId, hypothesis_id: 'h1', source: 'auto',
+          status: 'analyzed', row_count: 128, collection_mode: 'preview', collect_info: { collection_mode: 'preview' } },
+        { id: 'cancelled-duplicate', project_id: input.projectId, hypothesis_id: 'h1', source: 'auto',
+          status: 'failed', error: 'Отменено пользователем', collection_mode: 'preview', collect_info: { collection_mode: 'preview' } },
+      ],
+      ve_templates: [{ id: 'saved-letters', base_id: 'old-ready', status: 'ready', supply_batch_id: null }],
+    }, rpcHandlers: {
+      ve_claim_outreach_preparation: () => {
+        if (claimed) return { data: [] };
+        claimed = true;
+        return { data: [{ project_id: input.projectId, hypothesis_id: 'h1', base_id: 'cancelled-duplicate',
+          template_id: null, status: 'pending', language: 'ru', claim_token: 'lease' }] };
+      },
+      ve_save_outreach_preparation: save,
+    } });
+    await runVeOutreachPreparations(resumedDb as unknown as SupabaseClient);
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({
+      p_status: 'ready', p_base_id: 'old-ready', p_template_id: 'saved-letters',
+    }), expect.anything());
+    expect(resumedDb.getRows('ve_jobs')).toHaveLength(0);
+    expect(resumedDb.rpcCalls.some((call) => call.fn === 've_resume_outreach_cancelled_base')).toBe(false);
   });
 
   it('repairs an orphan collecting base that has no active worker job', async () => {
@@ -179,6 +223,24 @@ describe('VE2 base collection enqueue recovery', () => {
       }
     }
 
+    // A busy coordinator advances beyond two preparations per tick, but never
+    // spins around a short queue redoing the same preparation repeatedly.
+    for (const size of [2, 50]) {
+      let claimCount = 0;
+      const save = jest.fn(() => ({ data: true }));
+      const preparations = Array.from({ length: size }, (_, index) => ({
+        project_id: `coord-${index}`, hypothesis_id: `h-${index}`, base_id: null,
+        template_id: null, status: 'pending', language: 'ru', last_error: null, claim_token: 'lease',
+      }));
+      const coordinatorDb = createMockSupabase({ rpcHandlers: {
+        ve_claim_outreach_preparation: () => ({ data: [preparations[claimCount++ % size]] }),
+        ve_save_outreach_preparation: save,
+      } });
+      await runVeOutreachPreparations(coordinatorDb as unknown as SupabaseClient);
+      expect(claimCount).toBe(size === 2 ? 3 : 32);
+      expect(save).toHaveBeenCalledTimes(claimCount);
+    }
+
     // One project keeps its stage order while another uses the free slot.
     const now = new Date('2026-09-14T23:00:00Z');
     const queueDb = createMockSupabase({ enforceQueryWindows: true, tables: { ve_jobs:
@@ -215,6 +277,64 @@ describe('VE2 base collection enqueue recovery', () => {
     release.get('c1')!(); release.get('a2')!();
     await pool.drain();
     expect(queueDb.getRows('ve_jobs').every((row) => row.status === 'done')).toBe(true);
+    // The requested 15 x 25 workload must drain without starving a project or
+    // allowing two writers for the same base or unlimited work from one project.
+    expect([undefined, '0', 'NaN', '1', '8', '16', '999'].map(veJobConcurrency)).toEqual([8, 8, 8, 1, 8, 16, 16]);
+    const backlog = Array.from({ length: 375 }, (_, i) => ({ id: `j${i}`, project_id: `p${i % 15}`, stage: 'base_collect', payload: { base_id: `base${i}` } }) as unknown as VeJob);
+    const activeBases = new Set<string>(), completed = new Set<string>();
+    const finishWave: Array<() => void> = [];
+    let highWater = 0;
+    const errors = jest.fn();
+    const scaled = createVeJobPool({ concurrency: 16, idleMs: 0, shouldStop: () => false,
+      claim: async (active) => {
+        const index = backlog.findIndex((job) => canRunVeJob(job, active));
+        return index < 0 ? null : backlog.splice(index, 1)[0];
+      }, run: async (job) => {
+        const key = `${job.project_id}:${job.payload.base_id}`;
+        expect(activeBases.has(key)).toBe(false);
+        activeBases.add(key); highWater = Math.max(highWater, activeBases.size);
+        await new Promise<void>((resolve) => { finishWave.push(resolve); });
+        activeBases.delete(key); completed.add(job.id);
+      }, onError: errors,
+    });
+    while (backlog.length) {
+      for (let slot = 0; slot < 16; slot++) await scaled.pollOnce();
+      finishWave.splice(0).forEach((finish) => finish());
+      await scaled.drain();
+    }
+    expect(completed.size).toBe(375);
+    expect(highWater).toBe(16);
+    expect(errors).not.toHaveBeenCalled();
+
+    // Distinct bases of one project run together; all stages of the same base
+    // and a pending project-wide operation still hold their respective locks.
+    const baseJob = (id: string, base: string | null, stage = 'base_collect') => ({
+      id, project_id: 'one', stage, payload: base ? { base_id: base } : {},
+      status: 'pending', run_after: now.toISOString(), created_at: now.toISOString(),
+    }) as unknown as VeJob;
+    const first = baseJob('d1', 'b1');
+    const independent = baseJob('d2', 'b2');
+    const sameBase = baseJob('d3', 'b1', 'template');
+    const research = baseJob('d4', null, 'evidence');
+    const independentDb = createMockSupabase({ enforceQueryWindows: true, tables: { ve_jobs: [first, sameBase, independent, research, baseJob('d5', 'b3')].map((job) => ({ ...job })) } });
+    const claimed = await claimVeJob(independentDb as unknown as SupabaseClient, now);
+    expect(claimed?.id).toBe('d1');
+    expect((await claimVeJob(independentDb as unknown as SupabaseClient, now, [claimed!]))?.id).toBe('d2');
+    expect(await claimVeJob(independentDb as unknown as SupabaseClient, now, [claimed!, independent])).toBeNull();
+    expect(canRunVeJob(sameBase, [first])).toBe(false);
+    expect(canRunVeJob(independent, [research])).toBe(false);
+    expect(canRunVeJob(research, [independent])).toBe(false);
+    expect(canRunVeJob(baseJob('later', 'b5'), [1, 2, 3, 4].map((n) => baseJob(`a${n}`, `b${n}`)))).toBe(false);
+    // Real aggregate writes start from independent snapshots, so a missing
+    // serialization would lose concurrent increments in this one project.
+    const totals = { tokens_used: 0, cost_usd: 0 };
+    const aggregateDb = { from: () => ({
+      select: () => ({ eq: () => ({ abortSignal: () => ({ maybeSingle: async () => ({ data: { ...totals }, error: null }) }) }) }),
+      update: (value: typeof totals) => ({ eq: () => ({ abortSignal: async () => { Object.assign(totals, value); return { error: null }; } }) }),
+    }) } as unknown as SupabaseClient;
+    const accumulate = createVeProjectUsageAccumulator(aggregateDb);
+    await Promise.all(Array.from({ length: 16 }, () => accumulate('one', 10, 0.25)));
+    expect(totals).toMatchObject({ tokens_used: 160, cost_usd: 4 });
   });
 
   it('repairs a normal orphan from its stored snapshot even when the caller requests refill', async () => {

@@ -7,6 +7,12 @@
  */
 
 import { z } from 'zod';
+import { Resolver } from 'node:dns/promises';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import type { VeJob } from '@/lib/verticalEngineV2/types';
+import { withVeCostTelemetry } from '@/lib/verticalEngineV2/costTelemetry';
+import { withProviderUsage } from '@/lib/providerUsage';
+import { createVeSearchCapacity, searchVeRelevanceWebsites, VeSearchProviderError } from '@/lib/verticalEngineV2/relevanceSearch';
 
 jest.mock('@/lib/clientDemo/personalize', () => ({ assertPublicWebsite: jest.fn() }));
 jest.mock('@/lib/enrich/websiteParser', () => ({
@@ -24,9 +30,10 @@ import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors'
 import { findIrrelevantRows } from '@/lib/verticalEngineV2/relevanceGate';
 import type { VeRelevanceCheckpoint } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import { createVeJobShutdown } from '@/lib/verticalEngineV2/workerLiveness';
-import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
+import { fetchVeRelevanceEvidence, resolveVeEvidenceAddress } from '@/lib/verticalEngineV2/relevanceEvidence';
 import { parseVeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
 import { needsVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceReserve';
+import { recoverVeSourceContacts, hasPendingVeSourceContacts, type VeSourceContactCheckpoint } from '@/lib/verticalEngineV2/sourceContacts';
 
 const schema = z.object({ ok: z.boolean() });
 
@@ -84,6 +91,42 @@ describe('llm rawCall retry', () => {
 
     expect(result.data).toEqual({ ok: true });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // A committed journal write whose response was lost must be retried with
+    // one stable ID, without repeating the successful paid request.
+    const journalWarning = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    for (const permanent of [false, true]) {
+      journalWarning.mockClear();
+      const writes = new Map<string, number>();
+      const upsert = jest.fn((row: { id: string; event: string }, options: unknown) => {
+        expect(options).toEqual({ onConflict: 'id', ignoreDuplicates: true });
+        const count = (writes.get(row.id) ?? 0) + 1;
+        writes.set(row.id, count);
+        return { abortSignal: async () => ({ error: count === 1 || (permanent && row.event === 'finished')
+          ? { code: 'UND_ERR_CONNECT_TIMEOUT', message: 'private diagnostic details' } : null }) };
+      });
+      const db = { from: (table: string) => {
+        expect(table).toBe('application_logs');
+        return { upsert };
+      } } as unknown as SupabaseClient;
+      const job = { id: 'job', project_id: 'project', stage: 'base_analyze', payload: { provider_usage_origin: { runId: 'origin' } } } as unknown as VeJob;
+      fetchMock.mockClear().mockResolvedValue(httpResponse(200, { choices: [{ message: { content: '{"ok":true}' } }], usage: {} }));
+      const operation = withVeCostTelemetry(db, job, () => callLLMWithSchema(
+        [{ role: 'user', content: 'json' }], schema, { model: 'test-model' },
+      ));
+      const assertion = permanent ? expect(operation).rejects.toThrow('Provider usage journal could not be saved.')
+        : expect(operation).resolves.toMatchObject({ data: { ok: true } });
+      await jest.advanceTimersByTimeAsync(5000);
+      await assertion;
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect([...writes.values()].sort()).toEqual(permanent ? [2, 2, 2, 3] : [2, 2, 2, 2]);
+      expect(maxAttemptsFor('Provider usage journal could not be saved.')).toBe(1);
+      expect(journalWarning).toHaveBeenCalledTimes(permanent ? 1 : 0);
+      if (permanent) {
+        expect(journalWarning).toHaveBeenCalledWith(expect.stringContaining('code=UND_ERR_CONNECT_TIMEOUT'));
+        expect(JSON.stringify(journalWarning.mock.calls)).not.toContain('private diagnostic details');
+      }
+    }
   });
 
   it('does not retry a permanent 4xx', async () => {
@@ -208,6 +251,62 @@ describe('llm rawCall retry', () => {
     expect(getVeActiveJobSignal()).toBeNull();
     expect(calls).toHaveBeenCalledTimes(2);
     expect(jest.getTimerCount()).toBe(0);
+
+    // A slow but successful search must finish without buying a second request.
+    process.env.SERPER_API_KEY = 'test-search-key';
+    const response = deferred<Response>();
+    const searchFetch = jest.fn().mockReturnValue(response.promise);
+    global.fetch = searchFetch as unknown as typeof fetch;
+    const events: Array<{ phase: string; status?: string }> = [];
+    const scope = { projectId: 'project', baseId: 'base', jobId: 'job', stage: 'base_collect' };
+    const searching = withProviderUsage(scope, async (_scope, event) => { events.push(event); },
+      () => searchVeRelevanceWebsites('company'));
+    await jest.advanceTimersByTimeAsync(20_000);
+    expect(searchFetch.mock.calls[0][1].signal.aborted).toBe(false);
+    response.resolve(httpResponse(200, { organic: [{ link: 'https://company.test/' }], credits: 1 }));
+    await expect(searching).resolves.toEqual([{ link: 'https://company.test/' }]);
+    expect(searchFetch).toHaveBeenCalledTimes(1);
+    expect(events.map((event) => [event.phase, event.status])).toEqual([['started', undefined], ['finished', 'success']]);
+    searchFetch.mockClear().mockReturnValue(new Promise<never>(() => {}));
+    const timedOut = expect(searchVeRelevanceWebsites('company')).rejects.toThrow('Serper transient: timeout.');
+    await jest.advanceTimersByTimeAsync(30_001);
+    await timedOut;
+    expect(searchFetch).toHaveBeenCalledTimes(1);
+    expect(searchFetch.mock.calls[0][1].signal.aborted).toBe(true);
+
+    // Shared capacity releases on errors, removes cancelled waiters and rejects
+    // outage traffic before metering/HTTP. Advancing time reopens it naturally.
+    const capacity = createVeSearchCapacity(2, 2, 60_000);
+    const releases = [deferred<void>(), deferred<void>()];
+    const paid = jest.fn().mockImplementationOnce(async () => {
+      await releases[0].promise; throw new VeSearchProviderError('transient', 'timeout');
+    }).mockImplementationOnce(async () => {
+      await releases[1].promise; throw new VeSearchProviderError('transient', 'transport');
+    }).mockResolvedValue('ok');
+    const first = expect(capacity(undefined, paid)).rejects.toThrow('timeout');
+    const second = expect(capacity(undefined, paid)).rejects.toThrow('transport');
+    const queuedAbort = new AbortController();
+    const queued = expect(capacity(queuedAbort.signal, paid)).rejects.toMatchObject({ name: 'AbortError' });
+    queuedAbort.abort();
+    await queued;
+    releases[0].resolve(); releases[1].resolve();
+    await Promise.all([first, second]);
+    await expect(capacity(undefined, paid)).rejects.toThrow('cooldown');
+    expect(paid).toHaveBeenCalledTimes(2);
+    await jest.advanceTimersByTimeAsync(60_001);
+    await expect(capacity(undefined, paid)).resolves.toBe('ok');
+    expect(paid).toHaveBeenCalledTimes(3);
+    const outageCapacity = createVeSearchCapacity(1, 1, 60_000);
+    const releaseOutage = deferred<void>();
+    const outage = expect(outageCapacity(undefined, async () => {
+      await releaseOutage.promise; throw new VeSearchProviderError('transient', 'timeout');
+    })).rejects.toThrow('timeout');
+    const waitingWork = jest.fn();
+    const rejectedQueue = expect(outageCapacity(undefined, waitingWork)).rejects.toThrow('cooldown');
+    releaseOutage.resolve();
+    await Promise.all([outage, rejectedQueue]);
+    expect(waitingWork).not.toHaveBeenCalled();
+    expect(jest.getTimerCount()).toBe(0);
   });
 
   it('cancels backoff immediately and never starts a retry or a pre-cancelled request', async () => {
@@ -327,9 +426,16 @@ describe('llm rawCall retry', () => {
     Object.values(legacy.verdicts).forEach((verdict) => { delete verdict.website_review_version; });
     const legacyRow = { ...input.rows[0], _email_status: 'ok', _ve_relevance: Object.values(legacy.verdicts)[0] };
     expect(needsVeRelevanceEvidence(legacyRow)).toBe(true);
-    const available = jest.fn().mockResolvedValue({ status: 'ok', text: description, url: 'https://factory.test/', reason: 'identity_verified_website' });
-    fetchMock.mockReset().mockResolvedValueOnce(classification).mockResolvedValueOnce(confirmation);
-    const upgraded = await findIrrelevantRows({ ...input, rows: [legacyRow], checkpoint: legacy, fetchEvidence: available });
+    const websiteText = (description + '. 🏭 ').padEnd(5999, 'x') + '😀 tail\u0000\ud83d';
+    const available = jest.fn().mockResolvedValue({ status: 'ok', text: websiteText, url: 'https://factory.test/', reason: 'identity_verified_website' });
+    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'relevant', reason: 'x'.repeat(399) + '😀', evidence_ids: [0] }] })).mockResolvedValueOnce(confirmation);
+    const upgraded = await findIrrelevantRows({ ...input, rows: [legacyRow], checkpoint: legacy, fetchEvidence: available,
+      onCheckpoint: async (checkpoint) => {
+        expect(JSON.stringify(checkpoint)).not.toMatch(/\\u(?:0000|d[89a-f][0-9a-f]{2})/i);
+        const pending = Object.values(checkpoint.website_evidence).find((item) => item.text);
+        if (pending) expect(pending.text).toContain('🏭');
+      },
+    });
     expect(upgraded.decisions.get(0)?.status).toBe('relevant');
     expect(available).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -337,9 +443,106 @@ describe('llm rawCall retry', () => {
     expect(available).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(jest.getTimerCount()).toBe(0);
+    // Numbered excerpts are selected on the company's own bounded evidence;
+    // the independent reviewer receives the exact text, never a model quote.
+    const secondRequest = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(secondRequest.messages[1].content).toContain('"excerpts"');
+    const reviewRequest = JSON.parse(fetchMock.mock.calls[1][1].body);
+    expect(reviewRequest.messages[1].content).toContain(description);
+    expect(reviewRequest.messages[1].content).not.toContain('"status":"relevant"');
+    const sameBrand = { ...input, rows: ['Тула', 'Омск'].map((address) => ({ company: 'Домком', address })) };
+    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [0, 1].map((i) => ({ i, status: 'needs_review', reason: 'Need own-site evidence', evidence: [] })) }));
+    const noSite = jest.fn().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'not_confirmed' });
+    const separateCities = await findIrrelevantRows({ ...sameBrand, fetchEvidence: noSite });
+    expect(Object.keys(separateCities.checkpoint.website_evidence)).toHaveLength(2);
+    expect(noSite).toHaveBeenCalledTimes(2);
+    await findIrrelevantRows({ ...sameBrand, checkpoint: separateCities.checkpoint, fetchEvidence: noSite });
+    expect(noSite).toHaveBeenCalledTimes(2);
+
+    // An intermittent search timeout cannot discard a successful sibling's
+    // evidence or stop the next website batch. The failed subset retries alone.
+    const networkRows = Array.from({ length: 10 }, (_, i) => ({ company: `Network ${i}`, inn: String(7700000000 + i) }));
+    const networkInput = { ...input, rows: networkRows };
+    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: networkRows.map((_row, i) => ({
+      i, status: 'needs_review', reason: 'Need website evidence', evidence: [],
+    })) })).mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'relevant', reason: description, evidence_ids: [0] }] }))
+      .mockResolvedValueOnce(confirmation);
+    const evidence = jest.fn(async (_url, options) => options?.companyInn === '7700000000'
+      ? { status: 'error' as const, text: '', url: '', reason: 'timeout', provider_error: { kind: 'transient' as const, message: 'Serper transient: timeout.' } }
+      : options?.companyInn === '7700000001'
+        ? { status: 'ok' as const, text: description, url: 'https://factory.test/', reason: 'identity_verified_website' }
+        : { status: 'unavailable' as const, text: '', url: '', reason: 'not_confirmed' });
+    const partial = await findIrrelevantRows({ ...networkInput, fetchEvidence: evidence });
+    expect(evidence).toHaveBeenCalledTimes(10);
+    expect(partial.decisions.get(0)?.status).toBe('error');
+    expect(partial.decisions.get(1)?.status).toBe('relevant');
+    expect(partial.decisions.get(9)?.status).toBe('needs_review');
+    expect(partial.retryable).toBe(true);
+    expect(partial.coverage.complete).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    evidence.mockClear().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'not_confirmed' });
+    const extraRows = Array.from({ length: 33 }, (_, i) => ({ company: `Extra ${i}`, inn: String(7710000000 + i) }));
+    fetchMock.mockReset();
+    for (const size of [20, 13]) fetchMock.mockResolvedValueOnce(reply({ decisions: Array.from({ length: size }, (_, i) => ({
+      i, status: 'needs_review', reason: 'Need website evidence', evidence: [],
+    })) }));
+    const rotated = await findIrrelevantRows({ ...networkInput, rows: [...networkRows, ...extraRows], checkpoint: partial.checkpoint, fetchEvidence: evidence });
+    expect(evidence).toHaveBeenCalledTimes(32);
+    expect(evidence.mock.calls.every(([, options]) => options?.companyInn !== '7700000000')).toBe(true);
+    expect(rotated.retryable).toBe(true);
+    expect(rotated.decisions.get(0)?.status).toBe('error');
+    expect(rotated.decisions.get(1)?.status).toBe('relevant');
+    fetchMock.mockClear(); evidence.mockClear();
+    await findIrrelevantRows({ ...networkInput, checkpoint: partial.checkpoint, fetchEvidence: evidence });
+    expect(evidence).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    fetchMock.mockResolvedValueOnce(reply({ decisions: networkRows.map((_row, i) => ({
+      i, status: 'needs_review', reason: 'Need website evidence', evidence: [],
+    })) }));
+    const billingEvidence = jest.fn().mockResolvedValue({ status: 'error', text: '', url: '', reason: 'billing',
+      provider_error: { kind: 'billing', message: 'Serper billing: insufficient search credits.' } });
+    const billing = await findIrrelevantRows({ ...networkInput, fetchEvidence: billingEvidence });
+    expect(billingEvidence).toHaveBeenCalledTimes(8);
+    expect(billing.retryable).toBe(false);
+    expect(billing.error).toContain('Serper billing:');
+    expect([...billing.decisions.values()].some((decision) => decision.status === 'relevant')).toBe(false);
+    expect(billing.errored.size).toBe(8);
   });
 
   it('does not start website HTTP after a late DNS result, and aborts an active extraction', async () => {
+    // Evidence lookups use cancellable DNS queries, not the OS lookup pool
+    // shared with database/provider connections. One site's abort cannot
+    // cancel a sibling, and mixed public/private answers never reach HTTP.
+    const resolvers: Resolver[] = [];
+    const answers = new Map<Resolver, (value: string[]) => void>();
+    const rejects = new Map<Resolver, (reason: Error) => void>();
+    const resolve4 = jest.spyOn(Resolver.prototype, 'resolve4').mockImplementation(function (this: Resolver) {
+      resolvers.push(this);
+      return new Promise<string[]>((resolve, reject) => { answers.set(this, resolve); rejects.set(this, reject); });
+    });
+    const resolverCancel = jest.spyOn(Resolver.prototype, 'cancel').mockImplementation(function (this: Resolver) {
+      rejects.get(this)?.(new Error('queryA ECANCELLED'));
+    });
+    const abort = new AbortController();
+    const cancelledLookup = resolveVeEvidenceAddress('slow.test', abort.signal);
+    const cancelledAssertion = expect(cancelledLookup).rejects.toThrow('page expired');
+    const sibling = resolveVeEvidenceAddress('good.test', new AbortController().signal);
+    abort.abort(new Error('page expired'));
+    await cancelledAssertion;
+    expect(resolverCancel.mock.contexts).not.toContain(resolvers[1]);
+    answers.get(resolvers[1])!(['93.184.216.34']);
+    await expect(sibling).resolves.toBe('93.184.216.34');
+    for (const addresses of [[], ['93.184.216.34', '127.0.0.1'], ['169.254.169.254'], ['10.0.0.1'], ['::1']]) {
+      const pending = resolveVeEvidenceAddress('mixed.test', new AbortController().signal);
+      answers.get(resolvers[resolvers.length - 1])!(addresses);
+      await expect(pending).rejects.toThrow('website_address_unavailable');
+    }
+    const calls = resolve4.mock.calls.length;
+    await expect(resolveVeEvidenceAddress('cancelled.test', abort.signal)).rejects.toThrow('page expired');
+    expect(resolve4).toHaveBeenCalledTimes(calls);
+    resolve4.mockRestore(); resolverCancel.mockRestore();
+
     const dns = deferred<void>();
     jest.mocked(assertPublicWebsite).mockReturnValueOnce(dns.promise);
     let failure: unknown;
@@ -360,6 +563,45 @@ describe('llm rawCall retry', () => {
     await jest.advanceTimersByTimeAsync(0);
     expect(failure).toEqual(expect.objectContaining({ name: 'AbortError' }));
     expect(jest.mocked(fetchAndExtract).mock.calls[0][1]?.signal?.aborted).toBe(true);
+    expect(jest.getTimerCount()).toBe(0);
+
+    // Name-only search is discovery, not identity proof. Brand AND original
+    // geography must match on the site's own page; directory snippets cannot.
+    for (const [brand, city, expected] of [['Домком', 'Тула', 'ok'], ['Другая компания', 'Тула', 'unavailable'], ['Домком', 'Омск', 'unavailable']]) {
+      const found = await fetchVeRelevanceEvidence('mailto:wrong@elsewhere.test', {
+        companyName: 'ООО Домком', companyAddress: 'Тула',
+        search: async () => [{ link: 'https://hh.ru/employer/1' }, { link: 'https://domkom.test/' }],
+        fetchPage: async (url) => {
+          if (new URL(url).hostname !== 'domkom.test') throw new Error('Unexpected directory fetch');
+          return parseVeEvidencePage(Buffer.from(`<title>${brand} — агентство недвижимости</title><main>Наш адрес: ${city}. Оказываем услуги по продаже недвижимости и подбору жилья покупателям.</main>`), url, 'text/html');
+        },
+      });
+      expect(found.status).toBe(expected);
+      if (expected === 'unavailable') expect(found.text).toBe('');
+    }
+    // Discovery is bounded, resumes without repaying successful siblings, and
+    // provider failure does not erase already completed searches.
+    const sourceRows = Array.from({ length: 18 }, (_, i) => ({ company: `Agency ${i}`, address: 'Тула',
+      website: '', email: '', inn: '', source_detail: 'hh' }));
+    let discoveryState: VeSourceContactCheckpoint | undefined;
+    const findSite = jest.fn(async (_website: string, opts?: { companyName?: string }) => ({
+      status: 'ok' as const, text: 'Verified own business', url: `https://agency-${opts?.companyName?.split(' ')[1]}.test/`, reason: 'discovered_verified_website',
+    }));
+    const save = async (state: VeSourceContactCheckpoint) => { discoveryState = structuredClone(state); };
+    const firstDiscovery = await recoverVeSourceContacts({ rows: sourceRows, fetchEvidence: findSite, save });
+    expect(firstDiscovery.waiting).toBe(true);
+    expect(findSite).toHaveBeenCalledTimes(16);
+    const finalDiscovery = await recoverVeSourceContacts({ rows: sourceRows, state: discoveryState, fetchEvidence: findSite, save });
+    expect(finalDiscovery.waiting).toBe(false);
+    expect(finalDiscovery.rows.every((row) => row.website && !row.email)).toBe(true);
+    expect(hasPendingVeSourceContacts(sourceRows, discoveryState)).toBe(false);
+    await recoverVeSourceContacts({ rows: sourceRows, state: discoveryState, fetchEvidence: findSite, save });
+    expect(findSite).toHaveBeenCalledTimes(18);
+    expect(sourceRows.every((row) => row.website === '')).toBe(true);
+    const partial = jest.fn().mockResolvedValueOnce({ status: 'ok', text: 'Own business', url: 'https://first.test/', reason: 'verified' })
+      .mockResolvedValueOnce({ status: 'error', text: '', url: '', reason: 'billing', provider_error: { kind: 'billing', message: 'Serper billing: no credits' } });
+    await expect(recoverVeSourceContacts({ rows: sourceRows.slice(0, 2), fetchEvidence: partial, save })).rejects.toThrow('Serper billing');
+    expect(Object.keys(discoveryState!.checked)).toHaveLength(1);
     expect(jest.getTimerCount()).toBe(0);
 
     // Real progress includes successful/error IO, but never a still-pending await.
@@ -436,9 +678,14 @@ describe('llm rawCall retry', () => {
     const stalled = jest.fn(() => new Promise<never>(() => {}));
     const bounded = fetchVeRelevanceEvidence(root, { companyInn: '7700000001', fetchPage: stalled,
       search: async () => [1, 2, 3].map((i) => ({ link: `https://candidate${i}.test/` })) });
-    await jest.advanceTimersByTimeAsync(40_001);
+    await jest.advanceTimersByTimeAsync(120_001);
     expect((await bounded).status).toBe('unavailable');
     expect(stalled.mock.calls.length).toBeLessThanOrEqual(12);
+    // A queued/injected search deadline remains a provider failure, not a
+    // completed empty website result that would permanently consume the review.
+    const stalledSearch = fetchVeRelevanceEvidence('', { companyInn: '7700000001', search: stalled });
+    await jest.advanceTimersByTimeAsync(90_001);
+    expect((await stalledSearch).provider_error).toEqual({ kind: 'transient', message: 'Serper transient: timeout.' });
     const cancel = new AbortController();
     const cancelled = fetchVeRelevanceEvidence(root, { signal: cancel.signal, fetchPage: stalled });
     const cancellation = expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });

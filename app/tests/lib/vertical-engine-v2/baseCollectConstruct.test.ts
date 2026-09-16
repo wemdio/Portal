@@ -21,6 +21,10 @@ jest.mock('@/lib/verticalEngineV2/llm', () => ({
   getVeModel: jest.fn(() => 'test-bulk-model'),
   getVeActiveJobSignal: jest.fn(() => undefined),
 }));
+jest.mock('@/lib/verticalEngineV2/relevanceEvidence', () => ({
+  ...jest.requireActual('@/lib/verticalEngineV2/relevanceEvidence'),
+  fetchVeRelevanceEvidence: jest.fn(async () => ({ status: 'unavailable', text: '', url: '', reason: 'offline_fixture' })),
+}));
 
 const mockFindIrrelevantRows = jest.fn();
 
@@ -70,6 +74,9 @@ import { VePreviewCheckpointConflict } from '@/lib/verticalEngineV2/relevanceChe
 import { recoverVeSavedEmails, resumeVeSavedEmailRecovery, hasPendingVeSavedEmailRecovery,
   type VeSavedEmailRecoveryState } from '@/lib/verticalEngineV2/savedEmailRecovery';
 import { createVeJobShutdown, VeWorkerShutdownError } from '@/lib/verticalEngineV2/workerLiveness';
+import { normalizeVeSourceContacts } from '@/lib/verticalEngineV2/sourceContacts';
+import { veAcquisitionReceipt } from '@/lib/verticalEngineV2/collectionIdentity';
+import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
 
 const PROJECT = { id: 'p1', name: 'P', created_by: 'user-1', market: 'ru' };
 const VERTICAL = {
@@ -247,6 +254,18 @@ describe('base_collect CONSTRUCT step order', () => {
     const supabase = db as unknown as SupabaseClient;
     const enqueueInput = { projectId: 'p1', verticalId: 'v1', verticalName: VERTICAL.name,
       hypothesisIds: ['h1'], collectionMode: 'preview' as const, limit: 2000 };
+    const discoveryInfo: VeCollectInfo = { ...collectInfo([pending]), collection_mode: 'preview',
+      target_progress: { ...createCollectionTarget('preview'), round: 2, candidates_processed: 1, status: 'error' },
+      target_checkpoint: { completed_round: 1, seen_rows: [ready] },
+      source_contact_recovery: { version: 1, checked: { paid: { website: 'https://confirmed.test/', reason: 'verified' } } } };
+    const discoveryDb = seed(discoveryInfo, { ve_jobs: [], ve_bases: [
+      { ...makeBase(discoveryInfo), id: 'saved-discovery', status: 'failed', created_at: '2026-09-03' }, empty,
+    ] });
+    await expect(enqueueVeBaseCollect(discoveryDb as unknown as SupabaseClient, enqueueInput)).resolves.toMatchObject({ ok: true });
+    expect(discoveryDb.getRows('ve_bases')).toHaveLength(2);
+    expect(discoveryDb.getRows('ve_jobs')[0].payload).toMatchObject({ base_id: 'saved-discovery' });
+    expect((discoveryDb.getRows('ve_bases').find((row) => row.id === 'saved-discovery')?.collect_info as VeCollectInfo).source_contact_recovery)
+      .toEqual(discoveryInfo.source_contact_recovery);
     mockFindIrrelevantRows.mockResolvedValueOnce({ flagged: new Set(), unchecked: new Set([0]),
       coverage: { checkedCompanies: 0, totalCompanies: 1, complete: false }, tokensUsed: 0, costUsd: 0 });
     for (const complete of [false, true]) {
@@ -287,6 +306,7 @@ describe('base_collect CONSTRUCT step order', () => {
       save: async (state, rows) => { emailState = state; emailRows = rows; } });
     const finishEmail = async (status: string) => {
       const child = emailDb.getRows('base_constructor_jobs').at(-1)!;
+      expect(child.workload_origin).toBe('automation');
       const grid = child.data as string[][];
       await emailDb.from('base_constructor_jobs').update({ status: 'completed',
         data: [[...grid[0], 'Email Статус'], ...grid.slice(1).map((row) => [...row, status])] }).eq('id', child.id);
@@ -311,6 +331,42 @@ describe('base_collect CONSTRUCT step order', () => {
     expect(emailRows.every((row) => row._email_status === 'ok')).toBe(true);
     expect(hasPendingVeSavedEmailRecovery(emailRows, emailState)).toBe(false);
     expect(emailDb.getRows('base_constructor_jobs')).toHaveLength(2);
+    // Valid recipients progress while a small SMTP child waits in the shared
+    // queue. Even 500 ready recipients must not orphan that queued child.
+    for (const count of [1, 500]) {
+      const reviewRows = Array.from({ length: count }, (_, index) => ({
+        ...unifiedRow({ company: 'Clinic Verified', website: 'verified.test', email: `recipient${index}@verified.test` }),
+        _email_status: 'ok', _relevance_unchecked: true,
+      }));
+      const unknown = { ...unifiedRow({ company: 'Clinic Unknown', website: 'unknown.test', email: 'mail@unknown.test' }),
+        _email_status: 'unknown', _relevance_unchecked: true };
+      const overlapInfo: VeCollectInfo = { ...collectInfo([]), collection_mode: 'preview', ready_target: 500,
+        validation_retry: true, target_progress: { ...createCollectionTarget('preview'), candidates_processed: count + 1 },
+        target_checkpoint: { completed_round: 1, seen_rows: [], processed_rows: count + 1 },
+        relevance_reserve: { version: 1, rows: [...reviewRows, unknown], source_rows: [] } };
+      overlapInfo.tasks![0].exhausted = true;
+      const overlapDb = seed(overlapInfo, { ve_bases: [{ ...makeBase(overlapInfo), columns: [...VE_AUTO_COLLECT_COLUMNS] }] });
+      const wake = async () => {
+        await overlapDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+        return runBaseCollectStage(makeJob(), { supabase: overlapDb as unknown as SupabaseClient });
+      };
+      await wake();
+      expect(overlapDb.getRows('ve_bases')[0]).toMatchObject({ status: 'collecting', row_count: count });
+      const child = overlapDb.getRows('base_constructor_jobs')[0];
+      expect(child).toMatchObject({ status: 'pending', selected_steps: ['validate_emails'], initial_row_count: 1 });
+      const calls = mockFindIrrelevantRows.mock.calls.length;
+      await wake();
+      expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(calls);
+      expect(overlapDb.getRows('base_constructor_jobs')).toHaveLength(1);
+      expect(overlapDb.getRows('ve_jobs').filter((row) => row.stage === 'base_analyze')).toHaveLength(0);
+      const grid = child.data as string[][];
+      await overlapDb.from('base_constructor_jobs').update({ status: 'completed',
+        data: [[...grid[0], 'Email Статус'], ...grid.slice(1).map((row) => [...row, 'ok'])] }).eq('id', child.id);
+      await wake();
+      expect(overlapDb.getRows('ve_bases')[0]).toMatchObject({ status: 'analyzing', row_count: count + 1 });
+      expect((overlapDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).saved_email_recovery?.batch).toBeUndefined();
+      expect(overlapDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    }
     // A failed/ambiguous queue insert never races a concurrent repair by
     // restoring failed; a later explicit queue check repairs that same base.
     for (const committed of [false, true]) {
@@ -391,6 +447,27 @@ describe('base_collect CONSTRUCT step order', () => {
     expect(estimateRemainingReady({ population: 5_000, candidatesProcessed: 1_000, readyRows: 200, eligible: true, asOf: '2026-09-03' }))
       .toMatchObject({ contacts: 800, confidence: 'low' });
     expect(estimateRemainingReady({ population: 5_000, candidatesProcessed: 1_000, readyRows: 200, eligible: false, asOf: '2026-09-03' })).toBeNull();
+    // Production regression: 1,071 previously consumed HH observations without
+    // INNs/sites were selected again, inflating counters and buying another BC.
+    const anonymous = Array.from({ length: 1_071 }, (_, i) => unifiedRow({ company: `Agency ${i}`, source_detail: 'hh' }));
+    const repeatedInfo: VeCollectInfo = { ...collectInfo(anonymous), collection_mode: 'preview',
+      target_progress: { ...createCollectionTarget('preview'), round: 2, candidates_processed: 1071 },
+      target_checkpoint: { completed_round: 1, seen_rows: anonymous.map(({ company, inn, email, website }) => ({ company, inn, email, website })) } };
+    repeatedInfo.tasks![0].exhausted = true;
+    const repeatedDb = seed(repeatedInfo);
+    await runBaseCollectStage(makeJob(), { supabase: repeatedDb as unknown as SupabaseClient });
+    expect(repeatedDb.getRows('base_constructor_jobs')).toHaveLength(0);
+    expect((lastBasePatch(repeatedDb)?.collect_info as VeCollectInfo).target_progress?.candidates_processed).toBe(1071);
+    const knownInn = unifiedRow({ company: 'Agency with missing site', inn: '7700000777', source_detail: 'реестр' });
+    const recoveredInfo: VeCollectInfo = { ...collectInfo([knownInn]), collection_mode: 'preview',
+      target_progress: { ...createCollectionTarget('preview'), round: 2, candidates_processed: 1 },
+      target_checkpoint: { completed_round: 1, seen_rows: [knownInn] } };
+    jest.mocked(fetchVeRelevanceEvidence).mockResolvedValueOnce({ status: 'ok', text: 'Confirmed legal entity', url: 'https://found.test/', reason: 'discovered_verified_website' });
+    const recoveredDb = seed(recoveredInfo);
+    await runBaseCollectStage(makeJob(), { supabase: recoveredDb as unknown as SupabaseClient });
+    const recoveredInput = recoveredDb.getRows('base_constructor_jobs')[0].data as string[][];
+    expect(recoveredInput).toHaveLength(2);
+    expect(recoveredInput[1]).toContain('https://found.test/');
 
     // The small cohort must reach the actual constructor and publish checked
     // rows while the same base continues collecting. Old runs retain their
@@ -407,6 +484,7 @@ describe('base_collect CONSTRUCT step order', () => {
       const db = seed({ ...collectInfo(harvest), collection_mode: 'preview', target_progress: target });
       await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
       const constructor = db.getRows('base_constructor_jobs')[0];
+      expect(constructor.workload_origin).toBe('automation');
       const expected = legacy ? 1_200 : 100;
       const expectedReady = legacy ? 1_200 : 20;
       const input = constructor.data as string[][];
@@ -460,8 +538,10 @@ describe('base_collect CONSTRUCT step order', () => {
         target_progress: createCollectionTarget('preview'),
         preview_pipeline: { version: 1, revision: 0, batches: [] } };
       fastInfo.tasks!.push({ source: 'hh_live', status: 'dispatched', child_job_id: 'slow-hh', rows: 0,
-        task: { source: 'hh_live', rationale: 'Parallel source', hh_query: { text: 'клиники' } }, dispatched_at: new Date().toISOString() });
-      const db = seed(fastInfo, { parser_jobs: [{ id: 'slow-hh', status: 'running' }] });
+        task: { source: 'hh_live', rationale: 'Parallel source', hh_query: { text: 'клиники' } },
+        dispatched_at: new Date(Date.now() - 4 * 60 * 60_000).toISOString() });
+      const db = seed(fastInfo, { parser_jobs: [{ id: 'slow-hh', status: failFirst ? 'processing' : 'pending',
+        started_at: failFirst ? new Date().toISOString() : null }] });
       const wake = async () => {
         await db.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
         return runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
@@ -473,6 +553,8 @@ describe('base_collect CONSTRUCT step order', () => {
           data: [[...input[0], 'Email Статус'], ...input.slice(1).map((row) => [...row, failed ? 'invalid' : 'ok'])] }).eq('id', id);
       };
       await wake();
+      expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).tasks?.find((task) => task.child_job_id === 'slow-hh'))
+        .toMatchObject({ status: 'dispatched' });
       const children = db.getRows('base_constructor_jobs');
       expect(children).toHaveLength(2);
       expect(children.every((row) => (row.data as string[][]).length === 101)).toBe(true);
@@ -517,6 +599,11 @@ describe('base_collect CONSTRUCT step order', () => {
       expect(db.getRows('base_constructor_jobs').every((row) => row.status !== 'pending')).toBe(true);
       expect(stripTaskHarvest(result).collect_info).not.toHaveProperty('preview_pipeline');
       if (failFirst) {
+        const timeoutInfo = structuredClone(result.collect_info) as VeCollectInfo;
+        const queuedTask = timeoutInfo.tasks!.find((task) => task.child_job_id === 'slow-hh')!;
+        queuedTask.status = 'failed';
+        queuedTask.error = 'timeout: дочерняя джоба зависла';
+        await db.from('ve_bases').update({ collect_info: timeoutInfo }).eq('id', 'b1');
         await db.from('ve_jobs').update({ status: 'failed' }).eq('id', makeJob().id);
         const resumed = await enqueueVeBaseCollect(db as unknown as SupabaseClient, {
           projectId: 'p1', verticalId: 'v1', verticalName: VERTICAL.name,
@@ -526,6 +613,8 @@ describe('base_collect CONSTRUCT step order', () => {
         expect(db.getRows('ve_bases')).toHaveLength(1);
         const recoveredInfo = db.getRows('ve_bases')[0].collect_info as VeCollectInfo;
         expect(recoveredInfo).toMatchObject({ relevance_review_requested: true, validation_retry: true });
+        expect(recoveredInfo.tasks?.find((task) => task.child_job_id === 'slow-hh')).toMatchObject({ status: 'dispatched' });
+        expect(recoveredInfo.tasks?.find((task) => task.child_job_id === 'slow-hh')).not.toHaveProperty('error');
         expect(recoveredInfo.preview_pipeline).not.toHaveProperty('error');
         expect(db.getRows('base_constructor_jobs')).toHaveLength(2);
         const retry = db.getRows('ve_jobs').find((row) => row.id !== makeJob().id && row.stage === 'base_collect')!;
@@ -989,6 +1078,20 @@ describe('base_collect CONSTRUCT import', () => {
       launchable_rows: 2,
       low_relevance: 0,
     });
+    // Header-only validated output means zero usable addresses. Failed or
+    // malformed output must still remain a recoverable validation failure.
+    for (const [status, validHeader] of [['completed', true], ['failed', true], ['completed', false]] as const) {
+      const rows = [unifiedRow({ company: 'Без контактов', website: 'empty.test' })];
+      const info: VeCollectInfo = { ...collectInfo(rows, { bc_job_id: 'empty-child', status: 'dispatched' }),
+        collection_mode: 'preview', target_progress: createCollectionTarget('preview'), ready_target: 500 };
+      const emptyDb = seed(info, { base_constructor_jobs: [{ id: 'empty-child', status,
+        selected_steps: ['split_emails', 'validate_emails'], data: [validHeader ? ['Компания', 'Email', 'Email Статус'] : ['Email Статус']] }] });
+      await runBaseCollectStage(makeJob(), { supabase: emptyDb as unknown as SupabaseClient });
+      const after = lastBasePatch(emptyDb)!;
+      expect(after.row_count).toBe(0);
+      expect((after.collect_info as VeCollectInfo).target_progress?.status === 'error').toBe(status !== 'completed' || !validHeader);
+      expect(emptyDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    }
   });
 
   it('does not claim launch-ready recipients after a failed partial validation', async () => {
@@ -1189,6 +1292,14 @@ describe('VE2 source-row email preservation', () => {
     });
 
     expect(row.email).toBe('first@clinic.test, second@clinic.test');
+    const dirty = unifiedRow({ company: 'Agency', website: 'http://exclusive@century21.ru/', email: 'second@agency.test', source_detail: 'hh' });
+    const clean = normalizeVeSourceContacts(dirty);
+    expect(clean.website).toBe('');
+    expect(clean.email).toBe('second@agency.test, exclusive@century21.ru');
+    expect(clean.source_detail).toContain(dirty.website);
+    expect(dirty.website).toBe('http://exclusive@century21.ru/');
+    expect(normalizeVeSourceContacts({ ...dirty, email: '', website: 'https://agency.test/?ref=tracking@foreign.test' }).email).toBe('');
+    expect(veAcquisitionReceipt({ ...dirty, address: 'Москва' })).not.toBe(veAcquisitionReceipt({ ...dirty, address: 'Тула' }));
   });
 
   it('merges emails when duplicate company and website rows collapse', () => {
@@ -1264,7 +1375,8 @@ describe('VE2 cross-base contact exclusion', () => {
     await runBaseCollectStage(waitingJob, { supabase: db as unknown as SupabaseClient });
     expect(db.updates.filter((update) => update.table === 've_bases')).toHaveLength(queueWrites);
 
-    await db.from('ve_bases').update({ status: 'analyzing' }).eq('id', 'b-old');
+    // Independent hypotheses can dispatch while the first base is collecting.
+    await db.from('ve_bases').update({ hypothesis_id: 'another-hypothesis' }).eq('id', 'b-old');
     await expect(
       runBaseCollectStage(waitingJob, { supabase: db as unknown as SupabaseClient }),
     ).resolves.toMatchObject({ result: { waiting: true, construct: 'dispatched' } });

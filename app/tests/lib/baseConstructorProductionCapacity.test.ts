@@ -1,93 +1,75 @@
 /** @jest-environment node */
-
 import fs from 'node:fs';
 import path from 'node:path';
+import { parse } from 'yaml';
+import { constructorAdmission, constructorPreviewSlots, isSmallConstructorJob, createConstructorProbePool, isActiveManualConstructorJob } from '@/lib/tools/baseConstructorCapacity';
 
-const appRoot = process.cwd();
-const repoRoot = path.resolve(appRoot, '..');
-
-function readRepoFile(relativePath: string): string {
-  return fs.readFileSync(path.join(repoRoot, relativePath), 'utf8');
-}
-
-const serviceNames = [
-  'worker-baseconstructor',
-  'worker-baseconstructor-2',
-  'worker-baseconstructor-3',
-  'worker-baseconstructor-4',
-  'worker-baseconstructor-5',
-  'worker-baseconstructor-6',
-  'worker-baseconstructor-7',
-  'worker-baseconstructor-8',
-  'worker-baseconstructor-9',
-  'worker-baseconstructor-10',
-  'worker-baseconstructor-11',
-  'worker-baseconstructor-12',
-];
-
-const containerNames = serviceNames.map((serviceName) => `portal-${serviceName}`);
+const repoRoot = path.resolve(process.cwd(), '..');
+const read = (name: string) => fs.readFileSync(path.join(repoRoot, name), 'utf8');
 
 describe('BaseConstructor production capacity', () => {
-  it('defines exactly twelve single-job replicas', () => {
-    const compose = readRepoFile('docker-compose.prod.yml');
-    const declaredServices = Array.from(
-      compose.matchAll(
-        /^  (worker-baseconstructor(?:-(?:[2-9]|[1-9][0-9]+))?):/gm,
-      ),
-      (match) => match[1],
-    );
-
-    expect(declaredServices).toEqual(serviceNames);
-    expect(compose).toContain('- BASE_CONSTRUCTOR_CONCURRENCY=1');
-    expect(compose).toContain('- BASE_ENRICH_SCRAPE_CONCURRENCY=${BASE_ENRICH_SCRAPE_CONCURRENCY:-6}');
-    expect(compose).toContain('- BASE_ENRICH_PER_SITE_TIMEOUT_MS=${BASE_ENRICH_PER_SITE_TIMEOUT_MS:-60000}');
-    expect(compose).not.toContain(
-      'BASE_CONSTRUCTOR_CONCURRENCY=${BASE_CONSTRUCTOR_CONCURRENCY',
-    );
-
-    for (const containerName of containerNames) {
-      expect(compose).toContain(`container_name: ${containerName}`);
+  it('keeps every declared replica in deploy selection and shutdown handoff', () => {
+    const services = Array.from(read('docker-compose.prod.yml').matchAll(/^  (worker-baseconstructor(?:-\d+)?):/gm), (match) => match[1]);
+    const deploy = read('.semaphore/select-deploy-targets.sh').match(/ALL_WORKER_SERVICES="([\s\S]*?)"/)?.[1]?.split(/\s+/);
+    const drain = read('drain-worker.sh').match(/bc_containers=\(\s*([\s\S]*?)\n\s*\)/)?.[1]?.split(/\s+/).map((token) => token.replace(/^"|"$/g, ''));
+    expect(services.length).toBeGreaterThan(0);
+    for (const service of services) {
+      expect(deploy).toContain(service);
+      expect(drain).toContain(`portal-${service}`);
+    }
+    const compose = parse(read('docker-compose.prod.yml'), { merge: true });
+    const pools = services.map(service => compose.services[service]);
+    const reserved = pools.filter(service => service.environment.BASE_CONSTRUCTOR_QUEUE === 'manual');
+    expect(reserved).toHaveLength(2);
+    expect(pools.filter(service => service.environment.BASE_CONSTRUCTOR_QUEUE === 'shared')).toHaveLength(pools.length - 2);
+    for (const service of reserved) {
+      expect(Number(service.environment.BASE_CONSTRUCTOR_CONCURRENCY)).toBe(1);
+      expect(Number(service.environment.BASE_CONSTRUCTOR_PREVIEW_SLOTS)).toBe(0);
+      expect(service.deploy.resources.limits.memory).toBe('10240M');
     }
   });
 
-  it('keeps replicas four through twelve on the proven conservative limits', () => {
-    const compose = readRepoFile('docker-compose.prod.yml');
-    const conservativeReplicaBlock = compose.match(
-      /^  worker-baseconstructor-4:[\s\S]*?(?=^  worker-baseconstructor-5:)/m,
-    )?.[0];
-
-    expect(conservativeReplicaBlock).toBeDefined();
-    expect(conservativeReplicaBlock).toContain('memory: 4096M');
-    expect(conservativeReplicaBlock).toContain("cpus: '1'");
-    expect(conservativeReplicaBlock).toContain('pids: 512');
-    const inheritedConservativeReplicas = Array.from(
-      compose.matchAll(
-        /^  worker-baseconstructor-((?:[5-9]|[1-9][0-9]+)):\r?\n    <<: \*worker-baseconstructor-conservative/gm,
-      ),
-      (match) => Number(match[1]),
-    );
-    expect(inheritedConservativeReplicas).toEqual([5, 6, 7, 8, 9, 10, 11, 12]);
+  it('bounds extra admission by memory and preserves the bulk slot under sustained preview load', () => {
+    expect([undefined, '', 'bad', '-1', '1.5', '0', '1', '2', '100'].map(constructorPreviewSlots)).toEqual([0, 0, 0, 0, 0, 0, 1, 2, 2]);
+    expect(constructorAdmission(1, 1, 1, 2, 100, 1000)).toBe('small');
+    expect(constructorAdmission(2, 1, 1, 2, 100, 1000)).toBe('small');
+    expect(constructorAdmission(3, 1, 1, 2, 100, 1000)).toBeNull();
+    expect(constructorAdmission(1, 1, 1, 2, 650, 1000)).toBeNull();
+    expect(constructorAdmission(1, 1, 1, 2, 100, 0)).toBeNull();
+    expect(constructorAdmission(1, 1, 1, 0, 100, 1000)).toBeNull();
+    expect(constructorAdmission(2, 0, 1, 2, 100, 1000)).toBe('any');
+    expect(constructorAdmission(2, 0, 1, 2, 650, 1000)).toBeNull();
   });
 
-  it('includes every replica in shared-worker deploy selection', () => {
-    const selector = readRepoFile('.semaphore/select-deploy-targets.sh');
-    const allWorkers = selector.match(/ALL_WORKER_SERVICES="([\s\S]*?)"/)?.[1];
-
-    expect(allWorkers).toBeDefined();
-    for (const serviceName of serviceNames) {
-      expect(` ${allWorkers} `).toContain(` ${serviceName} `);
-    }
+  it('admits only small validation jobs or known preview steps to extra slots', () => {
+    expect([
+      { status: 'pending', workload_origin: 'automation' },
+      { status: 'processing', workload_origin: 'manual' },
+      { status: 'completed', workload_origin: 'manual' },
+      { status: 'pending', workload_origin: null },
+    ].map(isActiveManualConstructorJob)).toEqual([false, true, false, true]);
+    const job = { initial_row_count: 100, selected_steps: ['find_emails', 'enrich_descriptions', 'split_emails', 'dedup_email', 'validate_emails'], step_config: { queue_class: 'interactive_preview' } };
+    expect(isSmallConstructorJob(job)).toBe(true);
+    expect(isSmallConstructorJob({ ...job, selected_steps: ['validate_emails'], step_config: {} })).toBe(true);
+    for (const n of [undefined, 0, -1, 201, 25000, 1.5, '100']) expect(isSmallConstructorJob({ ...job, initial_row_count: n })).toBe(false);
+    for (const steps of [[], null, ['ta_scoring'], ['validate_emails', 'personalize']]) expect(isSmallConstructorJob({ ...job, selected_steps: steps })).toBe(false);
+    expect(isSmallConstructorJob({ ...job, step_config: {} })).toBe(false);
   });
 
-  it('includes every replica in the parallel deploy drain', () => {
-    const drainWorker = readRepoFile('drain-worker.sh');
-    const baseConstructorBlock = drainWorker.match(
-      /bc_containers=\(\s*([\s\S]*?)\n\s*\)/,
-    )?.[1];
-
-    expect(baseConstructorBlock).toBeDefined();
-    for (const containerName of containerNames) {
-      expect(baseConstructorBlock).toContain(containerName);
-    }
+  it('shares a bounded SMTP pool across jobs and releases failed probes', async () => {
+    const run = createConstructorProbePool(20);
+    let active = 0, highWater = 0;
+    const calls = Array.from({ length: 60 }, (_, i) => run(async () => {
+      active++; highWater = Math.max(highWater, active);
+      await Promise.resolve(); active--;
+      if (i % 7 === 0) throw new Error('temporary transport failure');
+      return i;
+    }));
+    const results = await Promise.allSettled(calls);
+    expect(highWater).toBe(20);
+    expect(active).toBe(0);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(9);
+    expect(results[59]).toEqual({ status: 'fulfilled', value: 59 });
+    await expect(run(async () => 61)).resolves.toBe(61);
   });
 });

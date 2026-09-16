@@ -24,8 +24,10 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { runBaseConstructorJob } from '@/lib/tools/baseConstructorWorker';
-import { nextPendingConstructor } from '@/lib/tools/baseConstructorQueue';
+import { constructorQueue, nextPendingConstructor, nextSmallConstructor, nextStaleConstructor } from '@/lib/tools/baseConstructorQueue';
+import { constructorAdmission, constructorPreviewSlots } from '@/lib/tools/baseConstructorCapacity';
 import { markShuttingDown } from '@/lib/workerShutdown';
 import {
   createWorkerLogger,
@@ -39,6 +41,17 @@ import { installUndiciAssertGuard } from './_undiciAssertGuard';
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 /** Сколько job'ов параллельно один воркер берёт. Память: 1 job ≈ 0.5–1.5GB JS heap (большой `data` в памяти). */
 const MAX_CONCURRENCY = Math.max(1, Number(process.env.BASE_CONSTRUCTOR_CONCURRENCY ?? '2'));
+const QUEUE = constructorQueue(process.env.BASE_CONSTRUCTOR_QUEUE);
+const PREVIEW_SLOTS = QUEUE === 'manual' ? 0 : constructorPreviewSlots(process.env.BASE_CONSTRUCTOR_PREVIEW_SLOTS);
+const MEMORY_LIMIT = (() => {
+  for (const path of ['/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes']) {
+    try {
+      const bytes = Number(readFileSync(path, 'utf8').trim());
+      if (Number.isFinite(bytes) && bytes > 0 && bytes < 1e12) return bytes;
+    } catch { /* Try the other cgroup version. */ }
+  }
+  return 0;
+})();
 /**
  * Через сколько минут «застрявшая» processing-задача считается умершей и
  * её надо резумнуть. Heartbeat в `updateJobProgress` шлёт started_at на
@@ -61,6 +74,7 @@ const WORKER_ID = `baseconstructor-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 
 const running = new Set<Promise<void>>();
+let bulkRunning = 0;
 interface ClaimedJob {
   jobId: string;
   runToken: string;
@@ -119,13 +133,13 @@ async function ageRunningJobsForFastHandoff(): Promise<void> {
  * Если другой воркер успел раньше — UPDATE затронет 0 строк, claim вернёт null.
  */
 let preferPreview = true;
-async function claimPendingJob(): Promise<ClaimedJob | null> {
+async function claimPendingJob(smallOnly = false): Promise<ClaimedJob | null> {
   const db = requireSupabaseAdmin(log);
-  const pending = await nextPendingConstructor(db, preferPreview);
+  const pending = smallOnly ? await nextSmallConstructor(db, undefined, QUEUE) : await nextPendingConstructor(db, preferPreview, QUEUE);
   if (!pending) return null;
 
   const runToken = randomUUID();
-  const { data: claimed } = await db
+  let claim = db
     .from('base_constructor_jobs')
     .update({
       status: 'processing',
@@ -133,10 +147,12 @@ async function claimPendingJob(): Promise<ClaimedJob | null> {
       run_token: runToken,
     })
     .eq('id', pending.id)
-    .eq('status', 'pending')
+    .eq('status', 'pending');
+  if (QUEUE === 'manual') claim = claim.eq('workload_origin', 'manual');
+  const { data: claimed } = await claim
     .select('id, run_token')
     .maybeSingle();
-  if (claimed?.id) preferPreview = !preferPreview;
+  if (claimed?.id && !smallOnly) preferPreview = !preferPreview;
   return claimed?.id ? { jobId: claimed.id, runToken: claimed.run_token ?? runToken } : null;
 }
 
@@ -150,21 +166,14 @@ async function claimPendingJob(): Promise<ClaimedJob | null> {
  * только первый воркер успешно bumps started_at, остальные видят свежий
  * timestamp и пропускают.
  */
-async function claimStaleResumable(): Promise<ClaimedJob | null> {
+async function claimStaleResumable(smallOnly = false): Promise<ClaimedJob | null> {
   const db = requireSupabaseAdmin(log);
   const cutoffIso = new Date(Date.now() - STALE_JOB_MINUTES * 60_000).toISOString();
-  const { data: stale } = await db
-    .from('base_constructor_jobs')
-    .select('id, current_step, total_steps, current_step_progress')
-    .eq('status', 'processing')
-    .lt('started_at', cutoffIso)
-    .order('started_at', { ascending: true })
-    .limit(1)
-    .maybeSingle();
+  const stale = smallOnly ? await nextSmallConstructor(db, cutoffIso, QUEUE) : await nextStaleConstructor(db, cutoffIso, QUEUE);
   if (!stale) return null;
 
   const runToken = randomUUID();
-  const { data: claimed } = await db
+  let claim = db
     .from('base_constructor_jobs')
     .update({
       started_at: new Date().toISOString(),
@@ -172,36 +181,39 @@ async function claimStaleResumable(): Promise<ClaimedJob | null> {
     })
     .eq('id', stale.id)
     .eq('status', 'processing')
-    .lt('started_at', cutoffIso)
+    .lt('started_at', cutoffIso);
+  if (QUEUE === 'manual') claim = claim.eq('workload_origin', 'manual');
+  const { data: claimed } = await claim
     .select('id, run_token')
     .maybeSingle();
   if (!claimed) return null;
 
   log(
     'info',
-    `claiming stale job ${stale.id} for resume: step ${stale.current_step}/${stale.total_steps}, progress ${stale.current_step_progress}%`,
+    `claiming stale job ${stale.id} for resume`,
   );
   return { jobId: claimed.id, runToken: claimed.run_token ?? runToken };
 }
 
 /**
- * Пытается забрать pending → если нет, забирает stale processing.
- * Pending приоритетнее, чтобы новые задачи не ждали в очереди за резумами.
+ * Resume an expired owner first: a deployment's saved work must not wait
+ * behind newly enqueued rounds. Both paths keep the same token-fenced claim.
  */
 async function pollOnce(): Promise<boolean> {
-  if (running.size >= MAX_CONCURRENCY) {
+  const admission = constructorAdmission(running.size, bulkRunning, MAX_CONCURRENCY, PREVIEW_SLOTS, process.memoryUsage().rss, MEMORY_LIMIT);
+  if (!admission) {
     await sleep(500);
     return true; // занят — повторим скоро
   }
 
-  let claimedJob = await claimPendingJob();
-  let isResume = false;
+  let claimedJob = await claimStaleResumable(admission === 'small');
+  const isResume = !!claimedJob;
   if (!claimedJob) {
-    claimedJob = await claimStaleResumable();
-    isResume = !!claimedJob;
+    claimedJob = await claimPendingJob(admission === 'small');
   }
   if (!claimedJob) return false;
   const { jobId, runToken } = claimedJob;
+  if (admission === 'any') bulkRunning++;
 
   const task = (async () => {
     log('info', `Running base-constructor job ${jobId}${isResume ? ' (RESUME)' : ''}`);
@@ -213,6 +225,7 @@ async function pollOnce(): Promise<boolean> {
       log('error', `base-constructor job ${jobId} crashed`, err);
     } finally {
       if (runningJobs.get(jobId) === runToken) runningJobs.delete(jobId);
+      if (admission === 'any') bulkRunning--;
     }
   })();
   running.add(task);
@@ -254,7 +267,7 @@ async function pollOnce(): Promise<boolean> {
 async function main(): Promise<void> {
   log(
     'info',
-    `Starting BaseConstructor worker (pid=${process.pid}, concurrency=${MAX_CONCURRENCY}, stale=${STALE_JOB_MINUTES}min)`,
+    `Starting BaseConstructor worker (pid=${process.pid}, queue=${QUEUE}, bulk=${MAX_CONCURRENCY}, extraPreview=${PREVIEW_SLOTS}, memoryLimit=${MEMORY_LIMIT}, stale=${STALE_JOB_MINUTES}min)`,
   );
   installUndiciAssertGuard(log);
   requireSupabaseAdmin(log);

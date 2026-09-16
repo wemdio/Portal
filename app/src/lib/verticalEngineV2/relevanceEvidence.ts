@@ -1,13 +1,12 @@
-import { lookup } from 'node:dns/promises';
+import { Resolver } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { Agent, fetch } from 'undici';
-import { assertPublicWebsite } from '@/lib/clientDemo/personalize';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
 import type { SerperOrganicItem } from '@/lib/search/serperClient';
-import { normalizeVeCompanyInn } from './collectionIdentity';
+import { normalizeVeCompanyInn, normalizeVeCompanyName } from './collectionIdentity';
 import { parseVeEvidencePage, rankVeEvidenceLinks, selectVeEvidenceText, type VeEvidencePage } from './relevancePage';
-import { searchVeRelevanceWebsites, veSearchProviderFailure, VE_RELEVANCE_SEARCH_OPERATION_TIMEOUT_MS, type VeSearchProviderFailure } from './relevanceSearch';
+import { searchVeRelevanceWebsites, veSearchProviderFailure, VeSearchProviderError, VE_RELEVANCE_SEARCH_OPERATION_TIMEOUT_MS, type VeSearchProviderFailure } from './relevanceSearch';
 
 export interface VeRelevanceEvidence {
   status: 'ok' | 'unavailable' | 'error';
@@ -20,6 +19,8 @@ export interface VeRelevanceEvidence {
 export interface VeRelevanceEvidenceOptions {
   signal?: AbortSignal;
   companyInn?: string;
+  companyName?: string;
+  companyAddress?: string;
   focus?: string;
   /** Trusted offline adapters; never selected from user/source data. */
   fetchText?: (url: string) => Promise<string>;
@@ -27,7 +28,8 @@ export interface VeRelevanceEvidenceOptions {
   search?: (query: string, signal: AbortSignal) => Promise<SerperOrganicItem[]>;
 }
 
-const TOTAL_TIMEOUT_MS = 40_000;
+// Includes the shared search queue, one bounded search and website reads.
+const TOTAL_TIMEOUT_MS = 120_000;
 const PAGE_TIMEOUT_MS = 5_000;
 const MAX_BODY_BYTES = 1_048_576;
 const MAX_TEXT_CHARS = 6_000;
@@ -52,7 +54,7 @@ function allowedUrl(value: string): URL | null {
   }
 }
 
-function websiteCandidates(raw: string): URL[] {
+export function veOfficialWebsiteCandidates(raw: string): URL[] {
   const candidates = new Map<string, URL>();
   // A multi-value cell may contain emails, labels and several websites. Never
   // extract the domain from an email or repair a URL containing credentials.
@@ -68,7 +70,21 @@ function websiteCandidates(raw: string): URL[] {
 }
 
 function siteHost(url: URL): string { return url.hostname.replace(/^www\./, ''); }
-const DIRECTORY_HOST = /(?:^|\.)(?:rusprofile\.ru|list-org\.com|saby\.ru|sbis\.ru|spark-interfax\.ru|companium\.ru|checko\.ru|zachestnyibiznes\.ru|egrul\.nalog\.ru|2gis\.ru|yandex\.ru|google\.com|vk\.com|ok\.ru|prodoctorov\.ru|zoon\.ru|companies\.rbc\.ru|check\.tochka\.com|e-ecolog\.ru|xfirm\.ru|tbank\.ru|ruspeach\.com)$/i;
+const DIRECTORY_HOST = /(?:^|\.)(?:rusprofile\.ru|list-org\.com|saby\.ru|sbis\.ru|spark-interfax\.ru|companium\.ru|checko\.ru|zachestnyibiznes\.ru|egrul\.nalog\.ru|2gis\.ru|yandex\.ru|google\.com|vk\.com|ok\.ru|hh\.ru|headhunter\.ru|superjob\.ru|rabota\.ru|t\.me|instagram\.com|facebook\.com|prodoctorov\.ru|zoon\.ru|companies\.rbc\.ru|check\.tochka\.com|e-ecolog\.ru|xfirm\.ru|tbank\.ru|ruspeach\.com)$/i;
+
+/** No-INN discovery needs the complete brand in the site's own title AND a
+ * geographic clue from the original source. Search snippets cannot verify it. */
+function discoveredNameMatches(pages: VeEvidencePage[], name: string, address: string): boolean {
+  const brand = normalizeVeCompanyName(name);
+  const distinctive = brand.split(' ').filter((word) => word.length >= 4
+    && !/^(агентство|недвижимости|компания|группа|компаний|центр|риэлтор|риелтор|сервис|услуги)$/.test(word));
+  const geo = address.toLowerCase().match(/[\p{L}]{4,}/gu)?.filter((word) =>
+    !/^(россия|область|район|город|улица|проспект|республика|край|russia|region)$/.test(word)) ?? [];
+  const titles = pages.map((page) => ` ${normalizeVeCompanyName(page.title)} `).join(' ');
+  const text = normalizeVeCompanyName(pages.map((page) => page.text).join(' '));
+  return distinctive.length > 0 && geo.length > 0 && titles.includes(` ${brand} `)
+    && geo.some((word) => (` ${text} `).includes(` ${word} `));
+}
 function sameOriginLinks(page: VeEvidencePage): VeEvidencePage['links'] {
   return page.links.filter((link) => {
     const url = allowedUrl(link.url);
@@ -89,25 +105,46 @@ function publicIpv4(address: string): boolean {
 
 function transientPageFailure(error: unknown): boolean {
   return error instanceof VeOperationTimeoutError || error instanceof Error
-    && /website_transient_http_(?:408|500|502|503|504)|\b(?:EAI_AGAIN|ETIMEDOUT|ECONNRESET|ECONNREFUSED|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET)\b|fetch failed|network error/i.test(error.message);
+    && /website_transient_http_(?:408|500|502|503|504)|\b(?:EAI_AGAIN|ETIMEOUT|ETIMEDOUT|ESERVFAIL|ECONNRESET|ECONNREFUSED|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET)\b|fetch failed|network error/i.test(error.message);
+}
+
+/** Website DNS must not occupy the OS lookup pool used by database/provider
+ * connections. A per-read resolver is cancellable when the page deadline ends;
+ * timed-out sites cannot leave background lookups blocking unrelated work.
+ * Only these checked IPv4 answers may be used by the pinned HTTP connection.
+ */
+export async function resolveVeEvidenceAddress(hostname: string, signal: AbortSignal): Promise<string> {
+  signal.throwIfAborted();
+  const resolver = new Resolver({ timeout: 1_500, tries: 2 });
+  const cancel = () => resolver.cancel();
+  signal.addEventListener('abort', cancel, { once: true });
+  try {
+    const addresses = await resolver.resolve4(hostname);
+    signal.throwIfAborted();
+    if (!addresses.length || addresses.some((address) => !publicIpv4(address))) {
+      throw new Error('website_address_unavailable');
+    }
+    return addresses[0];
+  } catch (error) {
+    signal.throwIfAborted();
+    throw error;
+  } finally {
+    signal.removeEventListener('abort', cancel);
+    resolver.cancel();
+  }
 }
 
 /** Narrow static-page reader. The shared website parser follows unchecked
  * redirects and crawls extra pages, so it is deliberately not used here.
- * Each hop passes the existing SSRF gate, then connects to a pinned public
+ * Each hop validates its URL and DNS answers, then connects to a pinned public
  * IPv4 address; neither DNS rebinding nor a redirect can reach a private host.
  */
 async function fetchEvidencePage(initialUrl: URL, signal: AbortSignal, focus?: string): Promise<VeEvidencePage> {
   let current = initialUrl;
   for (let hop = 0; hop <= 3; hop += 1) {
-    await assertPublicWebsite(current.href);
-    signal.throwIfAborted();
-    const addresses = await lookup(current.hostname, { all: true, family: 4 });
-    signal.throwIfAborted();
-    if (!addresses.length || addresses.some(({ address }) => !publicIpv4(address))) {
-      throw new Error('website_address_unavailable');
-    }
-    const pinned = addresses[0].address;
+    const checked = allowedUrl(current.href);
+    if (!checked) throw new Error('website_address_unavailable');
+    const pinned = await resolveVeEvidenceAddress(checked.hostname, signal);
     const dispatcher = new Agent({
       connect: {
         family: 4,
@@ -166,7 +203,7 @@ async function fetchEvidencePage(initialUrl: URL, signal: AbortSignal, focus?: s
 }
 
 /** Bounded official-site evidence: 10 pages + at most 2 transient retries,
- * one search, 40 seconds. Each URL can be retried at most once.
+ * one search, 120 seconds including queue/metering. Each URL can be retried at most once.
  * Search snippets are discovery only. With a known INN, every selected domain
  * must confirm that sole INN on its own pages before any activity is returned.
  * Unavailable, conflicting or unverified identity always stays needs_review.
@@ -177,10 +214,11 @@ export async function fetchVeRelevanceEvidence(
 ): Promise<VeRelevanceEvidence> {
   opts.signal?.throwIfAborted();
   const inn = normalizeVeCompanyInn(opts.companyInn);
-  const supplied = websiteCandidates(website);
-  if (!supplied.length && !inn) return { status: 'unavailable', text: '', url: '', reason: 'missing_or_unsafe_website' };
+  const supplied = veOfficialWebsiteCandidates(website);
+  const nameSearch = Boolean(opts.companyName?.trim() && opts.companyAddress?.trim());
+  if (!supplied.length && !inn && !nameSearch) return { status: 'unavailable', text: '', url: '', reason: 'missing_or_unsafe_website' };
   const pages = new Map<string, Promise<VeEvidencePage | undefined>>();
-  let failed = false, timedOut = false, unverified = false, searchAttempted = false;
+  let failed = false, timedOut = false, unverified = false, searchAttempted = false, searchCompleted = false;
   let retries = 0;
   let providerError: VeSearchProviderFailure | undefined;
   const verified = new Map<string, VeEvidencePage[]>();
@@ -216,15 +254,15 @@ export async function fetchVeRelevanceEvidence(
     pages.set(url.href, task);
     return task;
   };
-  const inspect = async (start: URL, initial: VeEvidencePage | undefined, signal: AbortSignal): Promise<VeEvidencePage[]> => {
+  const inspect = async (start: URL, initial: VeEvidencePage | undefined, signal: AbortSignal, discovered = false): Promise<VeEvidencePage[]> => {
     const sitePages: VeEvidencePage[] = initial ? [initial] : [];
     const identity = () => {
       const seen = new Set(sitePages.flatMap((page) => page.inns));
       const owners = new Set(sitePages.flatMap((page) => page.ownerInns ?? []));
-      return !inn ? 'supplied' : [...seen].some((value) => value !== inn) ? 'conflict'
+      return !inn ? (!discovered || discoveredNameMatches(sitePages, opts.companyName ?? '', opts.companyAddress ?? '') ? 'supplied' : 'unknown') : [...seen].some((value) => value !== inn) ? 'conflict'
         : owners.size === 1 && owners.has(inn) ? 'verified' : 'unknown';
     };
-    if (inn && identity() === 'unknown') {
+    if ((inn || discovered) && identity() === 'unknown') {
       const base = new URL(initial?.url ?? start.href);
       // Re-rank newly discovered legal/about links after each page, so a hub
       // can lead to requisites without crawling unrelated navigation.
@@ -274,10 +312,11 @@ export async function fetchVeRelevanceEvidence(
       for (let i = 0; i < candidates.length; i += 1) {
         await inspect(candidates[i], homes[i], signal);
       }
-      if (verified.size || !inn || pages.size >= MAX_PAGE_READS) return;
+      if (verified.size || (!inn && !nameSearch) || pages.size >= MAX_PAGE_READS) return;
       signal.throwIfAborted();
       searchAttempted = true;
-      const query = '"' + inn + '" официальный сайт -site:rusprofile.ru -site:list-org.com -site:checko.ru -site:companium.ru';
+      const query = (inn ? '"' + inn + '"' : '"' + String(opts.companyName).replace(/["\r\n]/g, ' ').slice(0, 160) + '" ' + String(opts.companyAddress).slice(0, 100))
+        + ' официальный сайт -site:rusprofile.ru -site:list-org.com -site:checko.ru -site:companium.ru -site:hh.ru';
       let results: SerperOrganicItem[];
       try {
         results = await withVeDeadline('relevance website search', VE_RELEVANCE_SEARCH_OPERATION_TIMEOUT_MS, signal, async (searchSignal) =>
@@ -288,6 +327,7 @@ export async function fetchVeRelevanceEvidence(
         providerError = veSearchProviderFailure(error);
         return;
       }
+      searchCompleted = true;
       signal.throwIfAborted();
       const found: URL[] = [];
       for (const item of results.slice(0, 6)) {
@@ -298,7 +338,7 @@ export async function fetchVeRelevanceEvidence(
         if (found.length >= MAX_DOMAINS) break;
       }
       for (const url of found) {
-        await inspect(url, await read(url, signal), signal);
+        await inspect(url, await read(url, signal), signal, true);
         if (verified.size) return;
       }
     });
@@ -307,6 +347,9 @@ export async function fetchVeRelevanceEvidence(
     opts.signal?.throwIfAborted();
     failed = true;
     timedOut ||= error instanceof VeOperationTimeoutError;
+    if (searchAttempted && !searchCompleted && !providerError) {
+      providerError = veSearchProviderFailure(new VeSearchProviderError('transient', timedOut ? 'timeout' : 'transport'));
+    }
   }
   opts.signal?.throwIfAborted();
   if (providerError) return {
