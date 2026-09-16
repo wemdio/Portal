@@ -117,6 +117,15 @@ export function getVeModel(kind: VeModelKind): string {
   return (process.env[VE_MODEL_ENV[kind]] ?? '').trim() || VE_MODEL_DEFAULTS[kind];
 }
 
+/** Native output constraints for the OpenAI models used by the relevance gate.
+ * Other configured providers retain JSON mode plus the same local validation. */
+export function veNativeJsonSchema(model: string, name: string, schema: z.ZodType) {
+  if (!/^(?:openai\/)?(?:gpt-4o-mini|gpt-5-mini)(?:-\d{4}-\d{2}-\d{2})?$/.test(model)) return undefined;
+  return { name, schema: z.toJSONSchema(schema, { io: 'input', override: ({ jsonSchema }) => {
+    if (jsonSchema.type === 'object') jsonSchema.additionalProperties = false;
+  } }) };
+}
+
 /* ─────────────────────── Базовые типы/вызов ─────────────────────── */
 
 export interface LLMMessage {

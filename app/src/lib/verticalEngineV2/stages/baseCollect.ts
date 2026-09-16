@@ -27,8 +27,10 @@ import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
  *     через ctx.supabase (keyset-пагинация по id у pdl/funded, офсетная у
  *     eng_hiring; дочерних джоб нет — исключение чужих баз для них, как для
  *     hh/карт, только на мёрдже);
- *     hh_live / yandex_maps / google_maps — insert дочерней джобы
- *     (parser_jobs / yandex_maps_jobs / google_maps_jobs), её id — в
+ *     yandex_maps — готовый каталог через read-only RPC, фильтры справочника
+ *     и курсор страниц сохраняются вместе со строками, без парсера/прокси;
+ *     hh_live / google_maps — insert дочерней джобы
+ *     (parser_jobs / google_maps_jobs), её id — в
  *     child_job_id. У google_maps language/region — по рынку проекта
  *     (us → en/US). collect_info персистится после каждой задачи.
  *  3. WAIT — опрос дочерних джоб по статусу. Есть незавершённые →
@@ -81,7 +83,7 @@ import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
  * с «сегмент исчерпан: новых компаний нет» вместо общего нулевого фейла.
  * Стоп по потолку 200 страниц — НЕ исчерпание: задача получает note про
  * предел сканирования, и «сегмент исчерпан» на такой задаче не срабатывает.
- * У hh/карт
+ * У hh/Google Maps
  * исключение остаётся только на мёрдже: продолжение для них требует
  * вариации поисковых запросов — future work.
  */
@@ -95,6 +97,7 @@ import { OKVED2_TREE, reduceToTopCodes } from '@/lib/companiesSearch/okved2';
 import { applyFundedFilters } from '@/lib/funded/queryFilters';
 import { buildRolesRegex } from '@/lib/parsers/atsFilters';
 import { domainToSiteUrl, resolveCompanyDomainViaPdl } from '@/lib/parsers/companyDomainResolver';
+import { readVeYandexCatalogPage, resolveVeYandexCatalogFilters, type VeYandexCatalogCheckpoint } from '../yandexCatalog';
 import { extractEmail, extractEmails } from '@/lib/tools/dfybUtils';
 import { applyVeSourceContacts, hasPendingVeSourceContacts, pendingVeSourceContacts, recoverVeSourceContacts, type VeSourceContactCheckpoint } from '../sourceContacts';
 import {
@@ -183,7 +186,6 @@ const MAX_DIRECTORY_PAGES = 200;
 /** Строк в ve_bases.sample_rows — как у ручной загрузки. */
 export const SAMPLE_ROWS = 30;
 /** Яндекс.Карты: max_results в воркере трактуется НА ОДИН поисковый URL, а не на задачу. */
-const YANDEX_RESULTS_PER_URL = 500;
 
 /** Достать необязательный number-параметр из payload джобы (не задан/не число — null). */
 function payloadNumber(job: VeJob, key: string): number | null {
@@ -284,9 +286,9 @@ export function mapYandexRow(row: Record<string, unknown>): VeUnifiedRow {
     company: cell(row.name),
     website: cell(row.website),
     email: cell(row.email),
-    phone: cell(row.phone),
+    phone: joinedCells([row.phone, row.mobile_phone, row.all_phones]),
     address: cell(row.address),
-    category: cell(row.categories),
+    category: joinedCells([row.categories, row.subcategories]),
     source_detail: 'яндекс.карты',
   });
 }
@@ -549,14 +551,6 @@ async function estimatePlanDirectorySegment(
   };
 }
 
-/** maps_query → поисковые URL Яндекс.Карт (формат как в YandexMapsParserForm). */
-export function buildYandexSearchUrls(query: { queries: string[]; geo?: string }): string[] {
-  return query.queries.map((q) => {
-    const text = query.geo ? `${q} ${query.geo}` : q;
-    return `https://yandex.ru/maps/?text=${encodeURIComponent(text)}`;
-  });
-}
-
 /** maps_query → inputLines Google Maps (гео доклеивается к каждому запросу). */
 export function buildGoogleInputLines(query: { queries: string[]; geo?: string }): string[] {
   return query.queries.map((q) => (query.geo ? `${q} ${query.geo}` : q));
@@ -573,6 +567,10 @@ export interface VeCollectTaskState {
   status: VeCollectTaskStatus;
   /** id дочерней джобы парсера; null у синхронного реестра. */
   child_job_id: string | null;
+  /** Direct catalog progress; saved together with harvest, never a live parser. */
+  catalog?: VeYandexCatalogCheckpoint;
+  /** Terminal legacy parser retained for diagnostics after explicit continuation. */
+  legacy_child_job_id?: string;
   /** Собрано строк (после завершения задачи). */
   rows: number;
   /** Снапшот задачи из плана (фильтры/запросы) — нужен на harvest. */
@@ -1612,8 +1610,45 @@ async function dispatchTask(
   project: VeProject,
   limit: number,
   getExcludedKeys: () => Promise<VeBaseExclusionKeys>,
+  usage: VeUsage,
+  save: () => Promise<void>,
 ): Promise<void> {
   const { task } = state;
+
+  if (task.source === 'yandex_maps') {
+    if (limit < 1) { state.status = 'done'; return; }
+    if (!task.maps_query?.queries?.length) throw new Error('yandex_maps: в задаче нет maps_query.queries');
+    if (!state.catalog) {
+      const filters = await resolveVeYandexCatalogFilters({ db: ctx.supabase, query: task.maps_query,
+        signal: ctx.signal, onUsage: (used) => addUsage(usage, used) });
+      state.catalog = { version: 1, filters };
+      await save(); // Reuse the resolved filter after a read failure/redeploy.
+    }
+    const excluded = await getExcludedKeys();
+    state.harvest ??= [];
+    state.child_job_id = null;
+    // Bound each worker tick; a heavily consumed catalog continues from the
+    // saved key, without re-reading the first pages or starting a parser.
+    for (let page = 0; page < 4 && state.harvest.length < limit && !state.exhausted; page++) {
+      const rows = await readVeYandexCatalogPage(ctx.supabase, state.catalog,
+        Math.min(500, limit - state.harvest.length), ctx.signal);
+      if (!rows.length) state.exhausted = true;
+      for (const row of rows) {
+        if (!row.yandex_id || row.yandex_id === state.catalog.after) throw new Error('yandex_maps: каталог не продвинул курсор');
+        const mapped = pruneBaseRowAgainstExclusion(excluded, mapYandexRow(row));
+        if (mapped && normalizeCompanyForDedup(mapped.company)) state.harvest.push(mapped);
+        else state.excluded_during_fetch = (state.excluded_during_fetch ?? 0) + 1;
+        state.catalog.after = row.yandex_id;
+      }
+      state.harvest = dedupUnifiedRows(state.harvest);
+      state.rows = state.harvest.length;
+      state.status = state.exhausted || state.rows >= limit ? 'done' : 'pending';
+      state.note = state.exhausted ? 'готовый каталог Яндекс Карт исчерпан' : 'выборка из готового каталога Яндекс Карт';
+      await save(); // Cursor and rows commit atomically, including an empty page.
+    }
+    if (state.exhausted || state.harvest.length >= limit) state.status = 'done';
+    return;
+  }
 
   // Реестр — синхронно, без дочерней джобы: строки сразу ложатся в задачу.
   // Компании других баз проекта исключаются ещё на выборке (fetchDirectoryRows),
@@ -1687,20 +1722,6 @@ async function dispatchTask(
       progress_stage: 'pending',
       progress_percent: 0,
       config,
-    });
-  } else if (task.source === 'yandex_maps') {
-    const q = task.maps_query;
-    if (!q?.queries?.length) throw new Error('yandex_maps: в задаче нет maps_query.queries');
-    const searchUrls = buildYandexSearchUrls(q);
-    state.child_job_id = await insertChildJob(ctx, CHILD_JOB_TABLE.yandex_maps, {
-      user_id: userId,
-      status: 'pending',
-      progress_stage: 'pending',
-      config: {
-        search_urls: searchUrls,
-        max_results: YANDEX_RESULTS_PER_URL,
-        headless: true,
-      },
     });
   } else {
     const q = task.maps_query;
@@ -2948,10 +2969,10 @@ async function completeTargetRound(args: {
     seen.set(JSON.stringify(compact), compact);
   }
   const renewableDirectory = tasks.some((task) =>
-    task.source === 'companies_directory' && task.status === 'done' && !task.exhausted && !task.hit_ceiling,
+    (task.source === 'companies_directory' || !!task.catalog) && task.status === 'done' && !task.exhausted && !task.hit_ceiling,
   );
   const exhausted = !args.hasBufferedCandidates && tasks.length > 0 && tasks.every((task) =>
-    task.source === 'companies_directory' && task.status === 'done' && task.exhausted && !task.hit_ceiling,
+    (task.source === 'companies_directory' || !!task.catalog) && task.status === 'done' && task.exhausted && !task.hit_ceiling,
   );
   // A saved-only review does not retry sources: their old failure remains in
   // task history but must not invalidate a now-confirmed saved audience.
@@ -2967,7 +2988,7 @@ async function completeTargetRound(args: {
       candidates: args.candidates.length, readyRows: readyCount,
       validationRetry,
       exhausted: reviewOnly ? false : exhausted && !pendingDiscovery && pendingBatches.length === 0 && !pendingSources,
-      canContinue: !reviewOnly && (args.hasBufferedCandidates || pendingDiscovery || renewableDirectory || pendingBatches.length > 0 || !!pipeline && pendingSources),
+      canContinue: !reviewOnly && (args.hasBufferedCandidates || pendingDiscovery || renewableDirectory || pendingBatches.length > 0 || pendingSources),
       error: phaseError ?? pipeline?.error ?? null,
     });
     // The other child is already paid for. Drain it even if this batch reaches
@@ -3092,8 +3113,9 @@ async function completeTargetRound(args: {
     delete info.construct;
     delete stats.finished_at;
     info.tasks = pipeline ? tasks : tasks.map((state) =>
-      state.source === 'companies_directory' && !state.exhausted && !state.hit_ceiling
-        ? { source: state.source, task: state.task, status: 'pending', child_job_id: null, rows: 0 }
+      (state.source === 'companies_directory' || !!state.catalog) && !state.exhausted && !state.hit_ceiling
+        ? { source: state.source, task: state.task, status: 'pending', child_job_id: null, rows: 0,
+          ...(state.catalog ? { catalog: state.catalog } : {}) }
         : state,
     );
     info.limit = collectionRoundLimit(next);
@@ -3348,9 +3370,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     // candidates have all been consumed/reserved, never drop its unused tail.
     for (const state of tasks) {
       if (canAcquire && info.preview_pipeline.batches.length < PREVIEW_IN_FLIGHT
-        && state.source === 'companies_directory' && state.status === 'done' && !state.exhausted && !state.hit_ceiling
+        && (state.source === 'companies_directory' || !!state.catalog) && state.status === 'done' && !state.exhausted && !state.hit_ceiling
         && !(state.harvest ?? []).some((row) => !baseRowMatchesExclusion(consumedKeys, row) && !baseRowMatchesExclusion(reservedKeys, row))) {
         state.status = 'pending';
+        if (state.catalog) { state.harvest = []; state.rows = 0; }
       }
     }
   }
@@ -3368,13 +3391,16 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
           receipts: new Set(keys.receipts), websiteInns: new Map([...keys.websiteInns].map(([key, values]) => [key, new Set(values)])) },
         info.preview_pipeline.batches.flatMap((batch) => batch.rows));
       };
-      await dispatchTask(ctx, state, project, limit, sourceExclusions);
+      await dispatchTask(ctx, state, project, limit, sourceExclusions, usage,
+        () => persistCollectInfo(ctx, baseId, info));
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +
           `${state.child_job_id ? ` (job ${state.child_job_id})` : ''}, строк: ${state.rows}`,
       );
     } catch (e) {
+      ctx.signal?.throwIfAborted();
+      if (e instanceof VeRelevanceCheckpointError || (e instanceof Error && e.name === 'VeWorkerShutdownError')) throw e;
       state.status = 'failed';
       state.error = e instanceof Error ? e.message : String(e);
       stageLog(ctx, `[base_collect] dispatch ${state.source} упал: ${state.error}`);

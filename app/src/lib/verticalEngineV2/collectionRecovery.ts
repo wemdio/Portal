@@ -1,7 +1,7 @@
 import { isVeProviderBillingError } from './collectionErrors';
 
 /** Only recognized preview failures may reuse a base; never supply/refill. */
-export function previewRecoveryKind(base: Record<string, unknown>): 'validation' | 'billing' | 'pipeline' | 'discovery' | null {
+export function previewRecoveryKind(base: Record<string, unknown>): 'validation' | 'billing' | 'pipeline' | 'discovery' | 'catalog' | null {
   const info = base.collect_info as Record<string, unknown> | null;
   if (base.source !== 'auto' || base.status !== 'failed' || !base.hypothesis_id
     || !info || info.collection_mode !== 'preview' || info.refill || info.supply_batch_id) return null;
@@ -34,5 +34,7 @@ export function previewRecoveryKind(base: Record<string, unknown>): 'validation'
   // base after funds are restored, instead of accumulating duplicate failures.
   if (!construct && !checkpoint && progress.round === 1 && progress.candidates_processed === 0
     && isVeProviderBillingError(base.error ?? progress.reason)) return 'billing';
+  if (progress.status === 'error' && Array.isArray(info.tasks) && info.tasks.some((task) =>
+    task?.source === 'yandex_maps' && task.status === 'failed' && task.task?.maps_query?.queries?.length)) return 'catalog';
   return null;
 }

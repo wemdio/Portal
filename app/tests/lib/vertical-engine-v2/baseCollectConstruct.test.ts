@@ -20,6 +20,7 @@ jest.mock('@/lib/verticalEngineV2/llm', () => ({
   callLLMWithSchema: jest.fn(),
   getVeModel: jest.fn(() => 'test-bulk-model'),
   getVeActiveJobSignal: jest.fn(() => undefined),
+  veNativeJsonSchema: jest.requireActual('@/lib/verticalEngineV2/llm').veNativeJsonSchema,
 }));
 jest.mock('@/lib/verticalEngineV2/relevanceEvidence', () => ({
   ...jest.requireActual('@/lib/verticalEngineV2/relevanceEvidence'),
@@ -77,6 +78,8 @@ import { createVeJobShutdown, VeWorkerShutdownError } from '@/lib/verticalEngine
 import { normalizeVeSourceContacts } from '@/lib/verticalEngineV2/sourceContacts';
 import { veAcquisitionReceipt } from '@/lib/verticalEngineV2/collectionIdentity';
 import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
+import { resolveVeYandexCatalogFilters } from '@/lib/verticalEngineV2/yandexCatalog';
+import { previewRecoveryKind } from '@/lib/verticalEngineV2/collectionRecovery';
 
 const PROJECT = { id: 'p1', name: 'P', created_by: 'user-1', market: 'ru' };
 const VERTICAL = {
@@ -917,6 +920,83 @@ describe('base_collect CONSTRUCT step order', () => {
       companies_with_phone: 7_105,
       directory_rows_total: 9_120,
     });
+
+    // Catalog sources use the stored dictionary and a read-only cursor RPC.
+    // Losing the process between pages must not lose rows or create a parser.
+    const catalogTask = { source: 'yandex_maps' as const, rationale: 'Existing catalog',
+      maps_query: { queries: ['Лифты'], geo: 'Россия' } };
+    const filters = { categories: ['Лифты'], countries: ['Россия'] };
+    const catalogInfo: VeCollectInfo = { plan: { tasks: [catalogTask] }, tasks: [{
+      source: 'yandex_maps', status: 'pending', child_job_id: null, task: catalogTask, rows: 0,
+      catalog: { version: 1, filters },
+    }] };
+    const catalogDb = seed(catalogInfo);
+    const pages = [{ yandex_id: '1', name: 'Lift service', website: 'lift.test', categories: 'Лифты',
+      subcategories: 'Ремонт лифтов', email: 'office@lift.test' }];
+    const originalRpc = catalogDb.rpc;
+    catalogDb.rpc = ((name: string, params: Record<string, unknown>) => {
+      const operation = name === 'yandex_maps_catalog_search'
+        ? Promise.resolve({ data: params.p_after ? [] : pages, error: null }) : originalRpc(name, params);
+      if (name === 'yandex_maps_catalog_search') {
+        expect(params).toMatchObject({ p_categories: ['Лифты'], p_countries: ['Россия'], p_offset: 0 });
+        catalogDb.rpcCalls.push({ fn: name, params });
+      }
+      return Object.assign(operation, { abortSignal: () => operation });
+    }) as typeof catalogDb.rpc;
+    let stopped = false;
+    await expect(runBaseCollectStage(makeJob(), { supabase: catalogDb as unknown as SupabaseClient,
+      onCheckpoint: () => {
+        const info = catalogDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+        if (!stopped && info.tasks?.[0].catalog?.after === '1') {
+          stopped = true; throw new VeWorkerShutdownError();
+        }
+      },
+    })).rejects.toMatchObject({ name: 'VeWorkerShutdownError' });
+    expect(catalogDb.getRows('ve_bases')[0].collect_info).toMatchObject({ tasks: [{
+      rows: 1, status: 'pending', catalog: { after: '1' },
+      harvest: [{ company: 'Lift service', category: expect.stringContaining('Ремонт лифтов') }],
+    }] });
+    await runBaseCollectStage(makeJob(), { supabase: catalogDb as unknown as SupabaseClient });
+    const catalogSaved = catalogDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+    expect(catalogSaved.tasks?.[0]).toMatchObject({ status: 'done', rows: 1, exhausted: true, child_job_id: null });
+    expect(catalogDb.rpcCalls.map((call) => call.params.p_after)).toEqual([null, '1']);
+    expect(catalogDb.getRows('yandex_maps_jobs')).toHaveLength(0);
+    expect(catalogDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    const failedCatalog = { ...makeBase({ ...catalogInfo, collection_mode: 'preview',
+      target_progress: { ...createCollectionTarget('preview'), status: 'error' },
+      tasks: [{ ...catalogInfo.tasks![0], catalog: undefined, status: 'failed' as const, child_job_id: 'old-parser', error: 'proxy unavailable' }],
+    }), status: 'failed' };
+    expect(previewRecoveryKind(failedCatalog)).toBe('catalog');
+    expect(previewRecoveryKind({ ...failedCatalog, source: 'manual' })).toBeNull();
+    const recoveryDb = seed(catalogInfo, { ve_bases: [failedCatalog], ve_jobs: [] });
+    const recovered = await enqueueVeBaseCollect(recoveryDb as unknown as SupabaseClient, {
+      projectId: 'p1', verticalId: 'v1', verticalName: VERTICAL.name, limit: 100,
+      hypothesisIds: ['h1'], collectionMode: 'preview',
+    });
+    expect(recovered).toMatchObject({ ok: true, created: true, base: { id: 'b1' } });
+    expect(recoveryDb.getRows('ve_bases')).toHaveLength(1);
+    expect(recoveryDb.getRows('ve_bases')[0].collect_info).toMatchObject({ tasks: [{
+      status: 'pending', child_job_id: null, legacy_child_job_id: 'old-parser',
+    }] });
+
+    const dictionaries = createMockSupabase({ enforceQueryWindows: true, tables: {
+      yandex_maps_catalog_rubrics: [{ rubric: 'Лифты' }, { rubric: 'Стройматериалы оптом' }],
+      yandex_maps_catalog_places: [{ country: 'Россия', region: 'Москва и Московская область', city: 'Москва' }],
+    } });
+    const dictionaryDb = { from: (table: string) => {
+      let start = 0, end = 999;
+      const query = { select: () => query, order: () => query,
+        range: (from: number, to: number) => { start = from; end = to; return query; },
+        abortSignal: async () => ({ data: dictionaries.getRows(table).slice(start, end + 1), error: null }),
+      };
+      return query;
+    } } as unknown as SupabaseClient;
+    const modelCalls = (callLLMWithSchema as jest.Mock).mock.calls.length;
+    expect(await resolveVeYandexCatalogFilters({ db: dictionaryDb, query: catalogTask.maps_query })).toEqual(filters);
+    expect((callLLMWithSchema as jest.Mock).mock.calls).toHaveLength(modelCalls);
+    await expect(resolveVeYandexCatalogFilters({ db: dictionaryDb, query: { queries: ['Лифты'], geo: 'Несуществующее место' } })).rejects.toThrow('география');
+    (callLLMWithSchema as jest.Mock).mockResolvedValueOnce({ data: { category_ids: [0], place_ids: [] }, tokensUsed: 0, costUsd: 0 });
+    expect(await resolveVeYandexCatalogFilters({ db: dictionaryDb, query: { queries: ['обслуживание лифтов'], geo: 'РФ' } })).toEqual(filters);
   });
 
   it('re-dispatches an in-flight legacy constructor result that never split multi-email cells', async () => {

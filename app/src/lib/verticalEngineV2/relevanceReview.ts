@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
-import { callLLMWithSchema, getVeModel, type LLMMessage, type LLMUsage } from './llm';
+import { callLLMWithSchema, getVeModel, veNativeJsonSchema, type LLMMessage, type LLMUsage } from './llm';
 
 export const veRelevanceReviewResultSchema = z.object({
   result: z.enum(['direct_match', 'direct_conflict', 'insufficient']),
@@ -45,8 +45,9 @@ export async function reviewVeRelevanceEvidence(input: {
     if (new Set(data.reviews.map((review) => review.i)).size !== companies.length
       || data.reviews.some((review) => review.i >= companies.length)) ctx.addIssue({ code: 'custom', message: 'Every local i must occur exactly once' });
   });
+  const model = input.model ?? getVeModel('relevanceReview');
   return callLLMWithSchema(relevanceReviewMessages(input.scope, companies, input.language), schema, {
-    model: input.model ?? getVeModel('relevanceReview'), maxTokens: 8192,
+    model, maxTokens: 8192, jsonSchema: veNativeJsonSchema(model, 've_relevance_review', schema),
     maxHttpAttempts: 1, maxSchemaAttempts: 1, timeoutMs: 90_000, requireCompleteJson: true,
     signal: input.signal, onUsage: input.onUsage,
   });

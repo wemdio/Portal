@@ -412,6 +412,47 @@ describe('llm rawCall retry', () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(needsVeRelevanceEvidence({ ...input.rows[0], _email_status: 'ok', _ve_relevance: isolated.decisions.get(0) })).toBe(false);
 
+    // Malformed classifier output isolates one company instead of failing all
+    // siblings. Unsupported output is saved, never admitted or repaid on retry.
+    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [] }))
+      .mockResolvedValueOnce(reply({ decisions: [] }))
+      .mockResolvedValueOnce(reply({ decisions: [] }))
+      .mockResolvedValueOnce(classification).mockResolvedValueOnce(confirmation);
+    const malformedInput = { ...expanded, fetchEvidence: jest.fn().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'offline' }) };
+    const repairedBatch = await findIrrelevantRows(malformedInput);
+    expect(repairedBatch.error).toBeUndefined();
+    expect([...repairedBatch.decisions.values()].map((item) => item.status)).toEqual(['needs_review', 'relevant']);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    await findIrrelevantRows({ ...malformedInput, checkpoint: repairedBatch.checkpoint });
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    fetchMock.mockReset().mockResolvedValue(reply({ decisions: [] }));
+    const outage = await findIrrelevantRows({ ...malformedInput, rows: Array.from({ length: 30 }, (_, i) => ({ company: `Factory ${i}` })) });
+    expect(outage.error).toContain('invalid_response');
+    expect(outage.coverage.complete).toBe(false);
+    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(8);
+
+    // Citation selection has one unambiguous field, constrained at the provider
+    // AND locally. Empty IDs abstain; duplicates/unknown IDs stay quarantined.
+    for (const selected of [[0], [], [999], [0, 0]]) {
+      fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'needs_review', reason: 'Need facts', evidence: [] }] }))
+        .mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'relevant', reason: 'Makes equipment', evidence_ids: [] }] }))
+        .mockResolvedValueOnce(reply({ evidence_ids: selected }));
+      if (selected.length === 1 && selected[0] === 0) fetchMock.mockResolvedValueOnce(confirmation);
+      const citationInput = { ...input, fetchEvidence: jest.fn().mockResolvedValue({
+        status: 'ok', text: description, url: 'https://factory.test/', reason: 'identity_verified_website',
+      }) };
+      const citations = await findIrrelevantRows(citationInput);
+      expect(citations.error).toBeUndefined();
+      expect(citations.decisions.get(0)?.status).toBe(selected.length === 1 && selected[0] === 0 ? 'relevant' : 'needs_review');
+      const request = JSON.parse(fetchMock.mock.calls[2][1].body as string);
+      expect(request.response_format).toMatchObject({ type: 'json_schema', json_schema: {
+        strict: true, schema: { required: ['evidence_ids'], additionalProperties: false },
+      } });
+      const callCount = fetchMock.mock.calls.length;
+      await findIrrelevantRows({ ...citationInput, checkpoint: citations.checkpoint });
+      expect(fetchMock).toHaveBeenCalledTimes(callCount);
+    }
+
     // Old unavailable website checks get one pass through the improved reader,
     // without invalidating initial paid classifications or completed matches.
     const unavailable = jest.fn().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'website_evidence_timeout' });
