@@ -1,5 +1,6 @@
 /** Evidence-backed hypothesis triage. Uncertainty is retained, never silently accepted or discarded. */
 import { z } from 'zod';
+import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, getVeModel, LLMValidationError, type LLMMessage, type LLMUsage } from './llm';
 import { isVeProviderBillingError } from './collectionErrors';
 import { readRelevanceCheckpoint, relevanceHash, VeRelevanceCheckpointError, type VeRelevanceCheckpoint, type VeRelevanceFailureCode } from './relevanceCheckpoint';
@@ -51,18 +52,19 @@ function groupsFor(rows: Array<Record<string, unknown>>, evidenceRows: Array<Rec
 function fieldsFor(group: Group): Fields {
   // Preserve all source aliases in a stable priority order. A registry code
   // inserted before `category` must not hide the company's actual activity.
-  const merged = (names: string[], max: number) => [...new Set(names.flatMap((name) => group.rows.flatMap((row) =>
+  const merged = (names: string[]) => [...new Set(names.flatMap((name) => group.rows.flatMap((row) =>
     Object.entries(row).flatMap(([key, value]) => {
       if (key.trim().toLowerCase() !== name || (typeof value !== 'string' && typeof value !== 'number')) return [];
       if (typeof value === 'number' && !Number.isFinite(value)) return [];
-      const text = String(value).trim();
+      const text = stripUnstorableJsonChars(String(value)).trim();
       return text ? [text] : [];
     }),
-  )))].join('\n').slice(0, max);
-  return { company: merged(['company', 'компания'], 240), website: merged(['website', 'site', 'сайт'], 400),
-    category: merged(['category', 'категория', 'okved', 'оквэд'], 600),
-    description: merged(['description', 'описание', 'company_description'], 2000),
-    vacancy_title: merged(['vacancy_title', 'vacancy', 'вакансия'], 400), website_text: '' };
+  )))].join('\n');
+  const bounded = (names: string[], max: number) => sliceWholeChars(merged(names), 0, max);
+  return { company: bounded(['company', 'компания'], 240), website: bounded(['website', 'site', 'сайт'], 400),
+    category: bounded(['category', 'категория', 'okved', 'оквэд'], 600),
+    description: bounded(['description', 'описание', 'company_description'], 2000),
+    vacancy_title: bounded(['vacancy_title', 'vacancy', 'вакансия'], 400), website_text: '' };
 }
 const normalized = (value: string) => value.replace(/\s+/g, ' ').trim().toLowerCase();
 const activityQuote = (quote: string) => /\p{L}/u.test(quote
@@ -82,7 +84,7 @@ function isCompleteShortActivityQuote(field: typeof FIELDS[number], quote: strin
 const outputDecision = z.object({
   i: z.number().int().nonnegative(), status: z.enum(['relevant', 'irrelevant', 'needs_review']),
   // Explanation verbosity must not discard otherwise valid company decisions.
-  reason: z.string().min(1).max(2000).transform((value) => value.slice(0, 400)),
+  reason: z.string().min(1).max(2000).transform((value) => sliceWholeChars(stripUnstorableJsonChars(value), 0, 400)),
   // Empty padding is unusable evidence, not a reason to lose the entire batch.
   // checkedEvidence removes it; supportedDecision then withholds admission and
   // the website pass can repair citations under its existing bounded policy.
@@ -116,7 +118,7 @@ function supportedDecision(raw: z.infer<typeof outputDecision>, fields: Fields, 
   }
   // A sparse catalog impression must receive an independent website second look before rejection.
   if (status === 'irrelevant' && !secondPass) {
-    status = 'needs_review'; reason = ('Требуется проверить предварительное несовпадение: ' + reason).slice(0, 400);
+    status = 'needs_review'; reason = sliceWholeChars('Требуется проверить предварительное несовпадение: ' + reason, 0, 400);
   }
   if (status === 'irrelevant' && !evidence.some((item) => item.field === 'website_text' && activityQuote(item.quote))) {
     status = 'needs_review'; reason = 'Сайт не подтвердил несовпадение с гипотезой; недостаточно подтверждённых данных.';
@@ -153,7 +155,7 @@ function repairEvidenceCandidates(fields: Fields) {
           overlap = true;
         }
       }
-      const quote = value.slice(start, end).trim();
+      const quote = sliceWholeChars(value, start, end).trim();
       if (quote) excerpts.push({ id: excerpts.length, field, quote });
       start = end < value.length && overlap ? end - 64 : end;
     }
@@ -325,7 +327,7 @@ export async function findIrrelevantRows(input: {
     record(entry, confirms(review.proposal, review.result)
       ? { ...review.proposal, reason: review.result.reason }
       : { ...review.proposal, status: 'needs_review',
-        reason: ('Смысловое соответствие не подтверждено: ' + review.result.reason).slice(0, 400) });
+        reason: sliceWholeChars('Смысловое соответствие не подтверждено: ' + review.result.reason, 0, 400) });
   };
   const resumeSemantic = (entry: Entry, review: SemanticReview) => {
     // Normalize BEFORE changing status: an interrupted legacy reservation may
@@ -626,9 +628,9 @@ export async function findIrrelevantRows(input: {
           enriched.push(entry);
           return;
         }
-        const evidence = await (input.fetchEvidence ?? fetchVeRelevanceEvidence)(entry.fields.website, { signal: signal ?? undefined,
+        const evidence = stripUnstorableJsonChars(await (input.fetchEvidence ?? fetchVeRelevanceEvidence)(entry.fields.website, { signal: signal ?? undefined,
           companyInn: entry.identity, companyName: entry.fields.company,
-          companyAddress: entry.group.rows.map((row) => rowText(row, ['address', 'адрес'])).find(Boolean), focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' ') });
+          companyAddress: entry.group.rows.map((row) => rowText(row, ['address', 'адрес'])).find(Boolean), focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' ') }));
         signal?.throwIfAborted();
         if (evidence.provider_error) {
           stopProviderCalls = true;
@@ -638,23 +640,23 @@ export async function findIrrelevantRows(input: {
             || (provider.kind === 'configuration' && !/^(?:Serper billing:|Requesty 402:)/.test(result.error))) result.error = provider.message;
           failure(entry.key, 1, provider.kind === 'transient' ? 'provider' : provider.kind);
           checkpoint.website_evidence[entry.key] = {
-            reader_version: 1, reader_revision: VE_RELEVANCE_WEBSITE_VERSION, status: 'error', text: '', url: evidence.url.slice(0, 1000),
-            reason: provider.message.slice(0, 400), provider_error: { ...provider, message: provider.message.slice(0, 400) },
+            reader_version: 1, reader_revision: VE_RELEVANCE_WEBSITE_VERSION, status: 'error', text: '', url: sliceWholeChars(evidence.url, 0, 1000),
+            reason: sliceWholeChars(provider.message, 0, 400), provider_error: { ...provider, message: sliceWholeChars(provider.message, 0, 400) },
             review_attempt: reviewAttempt, review_attempts: entry.attempts, refined: true,
           };
-          record(entry, errorDecision(provider.message.slice(0, 400), entry.attempts));
+          record(entry, errorDecision(sliceWholeChars(provider.message, 0, 400), entry.attempts));
           return;
         }
         entry.attempts += 1;
         const usable = evidence.status === 'ok' && Boolean(evidence.text.trim());
         checkpoint.website_evidence[entry.key] = {
-          reader_version: 1, reader_revision: VE_RELEVANCE_WEBSITE_VERSION, status: evidence.status, text: usable ? evidence.text.slice(0, 6000) : '',
-          url: evidence.url.slice(0, 1000), reason: evidence.reason.slice(0, 400),
+          reader_version: 1, reader_revision: VE_RELEVANCE_WEBSITE_VERSION, status: evidence.status, text: usable ? sliceWholeChars(evidence.text, 0, 6000) : '',
+          url: sliceWholeChars(evidence.url, 0, 1000), reason: sliceWholeChars(evidence.reason, 0, 400),
           review_attempt: reviewAttempt, review_attempts: entry.attempts, refined: !usable,
         };
         // This write is durably saved below BEFORE the paid refinement call.
         record(entry, { ...current.get(entry)!, review_attempts: entry.attempts });
-        if (usable) { entry.fields.website_text = evidence.text.slice(0, 6000); enriched.push(entry); }
+        if (usable) { entry.fields.website_text = sliceWholeChars(evidence.text, 0, 6000); enriched.push(entry); }
         else record(entry, { ...current.get(entry)!, status: 'needs_review', evidence: [], review_attempts: entry.attempts,
           reason: 'Сайт не дал подтверждения; недостаточно подтверждённых данных.' });
       }));

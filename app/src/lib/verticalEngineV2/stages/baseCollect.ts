@@ -2771,6 +2771,7 @@ async function reviewSavedRelevance(
   const automatic = info.relevance_review_requested === true && job.payload?.review_relevance !== true;
   let savedReserve = readVeRelevanceReserve(info.relevance_reserve);
   let emailRecoveryError: string | null = null;
+  let emailRecoveryWaiting = false;
   if (automatic || job.payload?.review_relevance === true) {
     const recovered = await recoverVeSavedEmails({
       ctx, job, baseId: base.id, rows: savedReserve, state: info.saved_email_recovery, automatic,
@@ -2783,10 +2784,7 @@ async function reviewSavedRelevance(
     });
     savedReserve = recovered.rows;
     info.saved_email_recovery = recovered.state;
-    if (recovered.waiting) {
-      await requeueSelf(ctx, job, 60_000);
-      return { result: { base_id: base.id, waiting: true, saved_email_review: true }, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };
-    }
+    emailRecoveryWaiting = recovered.waiting;
     emailRecoveryError = recovered.error ?? null;
   }
   const { rows, evidenceRows, companies } = buildVeRelevanceReviewBatch({
@@ -2794,6 +2792,15 @@ async function reviewSavedRelevance(
     ready: Array.isArray(base.data) ? base.data : [],
     source: readVeRelevanceSourceRows(info.relevance_reserve), automatic,
   });
+  // A queued SMTP child must not hold already validated recipients behind
+  // unrelated constructor jobs. Review those companies now; unknown email
+  // recipients still cannot enter the ready projection. Drain the same child
+  // before finalizing, including when this pass already reaches the target.
+  if (emailRecoveryWaiting && (!rows.some((row) => isVeAcceptedEmailStatus(row._email_status))
+    || (target.ready_rows ?? 0) >= target.ready_target)) {
+    await requeueSelf(ctx, job, 60_000);
+    return { result: { base_id: base.id, waiting: true, saved_email_review: true }, ...usage };
+  }
   // An email-only pass can finish with no classifiable rows (for example all
   // addresses remain unknown). It must reach the bounded refill decision.
   stageLog(ctx, `[base_collect] уточняем ${rows.length} сохранённых контактов ${companies} компаний; факты всех адресов объединены, новый сбор не запускается`);
@@ -3015,7 +3022,9 @@ async function completeTargetRound(args: {
     }).rows.length > 0);
   const pendingManualReview = args.continueManualReview === true
     && reserveRows.some((row) => needsVeRelevanceReview(row) || needsVeSavedEmailReview(row));
-  const continueSavedReview = cleaned.summary.status === 'complete' && (pendingAutomaticReview || pendingManualReview);
+  const drainingSavedEmailChild = Boolean(info.saved_email_recovery?.batch) && !args.validationError && !taskError;
+  const continueSavedReview = cleaned.summary.status === 'complete'
+    && (pendingAutomaticReview || pendingManualReview || drainingSavedEmailChild);
   if (continueSavedReview) {
     // Same acquisition round, same candidates: the next job wake only improves
     // already paid-for contacts. This marker is saved atomically with rows.
