@@ -771,7 +771,8 @@ describe('base_collect CONSTRUCT step order', () => {
     expect(completed).toMatchObject({ status: 'analyzed', row_count: 2 });
     expect((completed.collect_info as VeCollectInfo).target_progress).toMatchObject({ status: 'target_reached', ready_rows: 2 });
     expect((completed.data as Array<Record<string, unknown>>).map((row) => row.email)).toEqual(['ready@first.test', 'next@next.test']);
-    expect(mockFindIrrelevantRows.mock.calls.map(([input]) => input.rows.length)).toEqual([2, 1]);
+    expect(mockFindIrrelevantRows.mock.calls.map(([input]) => input.rows.map((row: VeUnifiedRow) => row.email)))
+      .toEqual([['ready@first.test'], ['next@next.test']]);
     expect(db.inserts.filter((entry) => entry.table === 've_jobs')).toEqual([]);
   });
 
@@ -1179,6 +1180,45 @@ describe('base_collect CONSTRUCT import', () => {
       launchable_rows: 2,
       low_relevance: 0,
     });
+    // Defer paid fit checks for companies with no accepted email. Preserve the
+    // facts of invalid sibling emails when another address IS usable, and run
+    // the same fit gate once a previously unknown email becomes usable.
+    const contacts = [
+      ['Клиника Альфа', 'alpha.test', 'live@alpha.test', '7700000001', 'ok'],
+      ['Клиника Альфа', 'alpha.test', 'bad@alpha.test', '7700000001', 'invalid'],
+      ['Клиника Бета', 'beta.test', 'unknown@beta.test', '7700000002', 'unknown'],
+      ['Клиника Гамма', 'gamma.test', 'bad@gamma.test', '7700000003', 'invalid'],
+    ];
+    const waitingInfo: VeCollectInfo = {
+      ...collectInfo(contacts.map(([company, website, email, inn]) => unifiedRow({ company, website, email, inn })), dispatched),
+      collection_mode: 'preview', target_progress: createCollectionTarget('preview'), ready_target: 500,
+    };
+    const waitingDb = seed(waitingInfo, { base_constructor_jobs: [{ id: 'bc1', status: 'completed',
+      selected_steps: ['find_emails', 'split_emails', 'dedup_email', 'validate_emails'],
+      data: [['Компания', 'Сайт', 'Email', 'ИНН', 'Email Статус'], ...contacts] }] });
+    mockFindIrrelevantRows.mockClear();
+    await runBaseCollectStage(makeJob(), { supabase: waitingDb as unknown as SupabaseClient });
+    expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(1);
+    expect(mockFindIrrelevantRows.mock.calls[0][0].rows.map((row: VeUnifiedRow) => row.email)).toEqual(['live@alpha.test', 'bad@alpha.test']);
+    const waitingBase = lastBasePatch(waitingDb)!;
+    const afterWaiting = waitingBase.collect_info as VeCollectInfo;
+    expect(waitingBase.row_count).toBe(1);
+    expect(afterWaiting.relevance_reserve?.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ email: 'unknown@beta.test', _ve_email_pending_relevance: true }),
+      expect.objectContaining({ email: 'bad@gamma.test', _ve_email_pending_relevance: true }),
+    ]));
+    expect(afterWaiting.relevance_summary).toMatchObject({ email_unready: 3, needs_review: 0 });
+    // Resume from saved observations after email recovery, without a fresh
+    // source collection. All facts of Beta still pass the usual fit gate.
+    const reserve = structuredClone(afterWaiting.relevance_reserve!);
+    for (const row of reserve.rows) if (row.email === 'unknown@beta.test') row._email_status = 'ok';
+    const recoveredInfo: VeCollectInfo = { ...afterWaiting, relevance_reserve: reserve, relevance_review_requested: true };
+    const recoveredDb = seed(recoveredInfo, { ve_bases: [{ ...makeBase(recoveredInfo),
+      data: waitingBase.data, columns: waitingBase.columns, row_count: waitingBase.row_count }] });
+    mockFindIrrelevantRows.mockClear();
+    await runBaseCollectStage(makeJob(), { supabase: recoveredDb as unknown as SupabaseClient });
+    expect(mockFindIrrelevantRows.mock.calls[0][0].rows.map((row: VeUnifiedRow) => row.email)).toEqual(['unknown@beta.test']);
+    expect(lastBasePatch(recoveredDb)?.row_count).toBe(2);
     // Header-only validated output means zero usable addresses. Failed or
     // malformed output must still remain a recoverable validation failure.
     for (const [status, validHeader] of [['completed', true], ['failed', true], ['completed', false]] as const) {

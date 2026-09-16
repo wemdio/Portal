@@ -12,7 +12,9 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { VeJob } from '@/lib/verticalEngineV2/types';
 import { withVeCostTelemetry } from '@/lib/verticalEngineV2/costTelemetry';
 import { withProviderUsage } from '@/lib/providerUsage';
+import type { SerperOrganicItem } from '@/lib/search/serperClient';
 import { createVeSearchCapacity, searchVeRelevanceWebsites, VeSearchProviderError } from '@/lib/verticalEngineV2/relevanceSearch';
+import { createVeCachedSearch, freshVeSearchCacheItems, VE_EMPTY_SEARCH_CACHE_TTL_MS, VE_SEARCH_CACHE_TTL_MS } from '@/lib/verticalEngineV2/relevanceSearchCache';
 
 jest.mock('@/lib/clientDemo/personalize', () => ({ assertPublicWebsite: jest.fn() }));
 jest.mock('@/lib/enrich/websiteParser', () => ({
@@ -336,6 +338,66 @@ describe('llm rawCall retry', () => {
     releaseOutage.resolve();
     await Promise.all([outage, rejectedQueue]);
     expect(waitingWork).not.toHaveBeenCalled();
+
+    // Concurrent bases share one discovery request, while each cancellation
+    // affects only its own waiter. Completed results survive another call.
+    const delivered: SerperOrganicItem[] = [{ link: 'https://company.test/' }];
+    const paidSearch = deferred<typeof delivered>();
+    let cachedItems: typeof delivered | null = null;
+    const readCache = jest.fn(async () => cachedItems);
+    const writeCache = jest.fn(async (_query: string, items: typeof delivered) => { cachedItems = items; });
+    const search = jest.fn((_query: string, _signal?: AbortSignal) => paidSearch.promise);
+    const cachedSearch = createVeCachedSearch({ read: readCache, write: writeCache, search });
+    const cancelledBase = new AbortController();
+    const firstWaiter = expect(cachedSearch('  COMPANY  ', cancelledBase.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    const otherWaiters = Array.from({ length: 12 }, () => cachedSearch('company'));
+    await jest.advanceTimersByTimeAsync(0);
+    expect(search).toHaveBeenCalledTimes(1);
+    cancelledBase.abort();
+    await firstWaiter;
+    expect(search.mock.calls[0][1]?.aborted).toBe(false);
+    paidSearch.resolve(delivered);
+    expect(await Promise.all(otherWaiters)).toEqual(Array.from({ length: 12 }, () => delivered));
+    expect(writeCache).toHaveBeenCalledTimes(1);
+    const fromCache = await cachedSearch('company');
+    fromCache[0].link = 'https://changed.test/';
+    expect((await cachedSearch('company'))[0].link).toBe('https://company.test/');
+    expect(search).toHaveBeenCalledTimes(1);
+    expect(readCache).toHaveBeenCalledTimes(3);
+
+    // Successful empty results are reusable; provider failures are not.
+    cachedItems = null;
+    search.mockRejectedValueOnce(new VeSearchProviderError('transient'));
+    await expect(cachedSearch('different')).rejects.toThrow('Serper transient');
+    expect(cachedItems).toBeNull();
+    search.mockResolvedValueOnce([]);
+    expect(await cachedSearch('different')).toEqual([]);
+    expect(await cachedSearch('different')).toEqual([]);
+    expect(search).toHaveBeenCalledTimes(3);
+    const alreadyCancelled = new AbortController(); alreadyCancelled.abort();
+    const before = readCache.mock.calls.length;
+    await expect(cachedSearch('different', alreadyCancelled.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(readCache).toHaveBeenCalledTimes(before);
+
+    cachedItems = null;
+    const lastWaiter = new AbortController();
+    search.mockImplementationOnce((_query, signal) => new Promise((_, reject) => {
+      signal!.addEventListener('abort', () => reject(signal!.reason), { once: true });
+    }));
+    const abandoned = expect(cachedSearch('abandoned', lastWaiter.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    await jest.advanceTimersByTimeAsync(0);
+    lastWaiter.abort(); await abandoned;
+    expect(search.mock.calls.at(-1)?.[1]?.aborted).toBe(true);
+    search.mockResolvedValueOnce(delivered);
+    expect(await cachedSearch('abandoned')).toEqual(delivered);
+    const now = Date.now();
+    const record = (items: unknown, age: number) => ({ results: items, created_at: new Date(now - age).toISOString() });
+    expect(freshVeSearchCacheItems(record([], VE_EMPTY_SEARCH_CACHE_TTL_MS - 1), now)).toEqual([]);
+    expect(freshVeSearchCacheItems(record([], VE_EMPTY_SEARCH_CACHE_TTL_MS), now)).toBeNull();
+    expect(freshVeSearchCacheItems(record(delivered, VE_SEARCH_CACHE_TTL_MS - 1), now)).toEqual(delivered);
+    expect(freshVeSearchCacheItems(record(delivered, VE_SEARCH_CACHE_TTL_MS), now)).toBeNull();
+    expect(freshVeSearchCacheItems(record(delivered, -1), now)).toBeNull();
+    expect(freshVeSearchCacheItems(record([{}], 0), now)).toBeNull();
     expect(jest.getTimerCount()).toBe(0);
   });
 

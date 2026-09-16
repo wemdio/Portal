@@ -6,7 +6,8 @@ import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
 import type { SerperOrganicItem } from '@/lib/search/serperClient';
 import { normalizeVeCompanyInn, normalizeVeCompanyName } from './collectionIdentity';
 import { parseVeEvidencePage, rankVeEvidenceLinks, selectVeEvidenceText, type VeEvidencePage } from './relevancePage';
-import { searchVeRelevanceWebsites, veSearchProviderFailure, VeSearchProviderError, VE_RELEVANCE_SEARCH_OPERATION_TIMEOUT_MS, type VeSearchProviderFailure } from './relevanceSearch';
+import { veSearchProviderFailure, VeSearchProviderError, VE_RELEVANCE_SEARCH_OPERATION_TIMEOUT_MS, type VeSearchProviderFailure } from './relevanceSearch';
+import { searchVeRelevanceWebsitesCached } from './relevanceSearchCache';
 
 export interface VeRelevanceEvidence {
   status: 'ok' | 'unavailable' | 'error';
@@ -320,7 +321,7 @@ export async function fetchVeRelevanceEvidence(
       let results: SerperOrganicItem[];
       try {
         results = await withVeDeadline('relevance website search', VE_RELEVANCE_SEARCH_OPERATION_TIMEOUT_MS, signal, async (searchSignal) =>
-          opts.search ? opts.search(query, searchSignal) : searchVeRelevanceWebsites(query, searchSignal));
+          opts.search ? opts.search(query, searchSignal) : searchVeRelevanceWebsitesCached(query, searchSignal));
       } catch (error) {
         if (error instanceof ProviderUsageWriteError) throw error;
         signal.throwIfAborted();

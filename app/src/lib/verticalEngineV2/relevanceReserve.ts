@@ -76,8 +76,10 @@ export function mergeVeRelevanceRows(...groups: Array<Array<Record<string, unkno
     if ('_ve_relevance' in row) {
       delete merged._low_relevance;
       delete merged._relevance_unchecked;
+      delete merged._ve_email_pending_relevance;
       if (row._low_relevance === true) merged._low_relevance = true;
       if (row._relevance_unchecked === true) merged._relevance_unchecked = true;
+      if (row._ve_email_pending_relevance === true) merged._ve_email_pending_relevance = true;
     }
     rows.set(key, merged);
   }
@@ -90,7 +92,8 @@ export function summarizeVeRelevanceReserve(rows: Array<Record<string, unknown>>
     if (needsVeSavedEmailReview(row)) summary.email_retryable += 1;
     const decision = row._ve_relevance && typeof row._ve_relevance === 'object'
       ? row._ve_relevance as { status?: unknown } : null;
-    if (decision?.status === 'needs_review') summary.needs_review += 1;
+    if (row._ve_email_pending_relevance === true && !isVeAcceptedEmailStatus(row._email_status)) summary.email_unready += 1;
+    else if (decision?.status === 'needs_review') summary.needs_review += 1;
     else if (decision?.status === 'error') summary.error += 1;
     else if (decision?.status === 'irrelevant' || row._low_relevance === true) summary.irrelevant += 1;
     else if (row._relevance_unchecked === true) summary.error += 1;

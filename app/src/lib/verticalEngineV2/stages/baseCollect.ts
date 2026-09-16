@@ -115,6 +115,7 @@ import {
 } from '../relevanceReserve';
 import { cleanVeCompanyNames, type VeCompanyNameCheckpoint } from '../companyNameCleanup';
 import { recoverVeSavedEmails, needsVeSavedEmailReview, hasPendingVeSavedEmailRecovery, type VeSavedEmailRecoveryState } from '../savedEmailRecovery';
+import { singleVeSavedEmail } from '../savedEmailReviewEligibility';
 import { companyNameSource, isCompanyNameReady, VE_COMPANY_NAME_FIELD, type VeCompanyNameCleanupSummary } from '../companyNames';
 import { prepareSegmentationAudience } from '../segmentationAudit';
 import { isContactSupplyActive } from '../contactSupplyEligibility';
@@ -2533,11 +2534,13 @@ async function checkCollectedRelevance(args: {
     _low_relevance?: boolean;
     _relevance_unchecked?: boolean;
     _ve_relevance?: VeRelevanceDecision;
+    _ve_email_pending_relevance?: boolean;
   };
   let storedRows: StoredRow[] = finalRows.map((row) => {
     const clean: StoredRow = { ...row };
     delete clean._low_relevance;
     delete clean._relevance_unchecked;
+    delete clean._ve_email_pending_relevance;
     // The gate never trusts an old verdict, but retains evidence-attempt counts
     // so bounded follow-up work rotates through the whole saved reserve.
     return clean;
@@ -2556,6 +2559,26 @@ async function checkCollectedRelevance(args: {
   let relevanceTotalCompanies: number | null = null;
   let relevanceCoverageComplete = false;
   let relevanceError: string | null = null;
+  // Pay for fit only once the company has a deliverable address. Keep ALL
+  // observations of eligible companies: an invalid sibling email can still
+  // carry useful business facts. Other companies remain in the durable reserve
+  // and receive the unchanged fit gate when email recovery makes them usable.
+  const eligibleCompanies = new Set(storedRows.filter((row) =>
+    isVeAcceptedEmailStatus(row._email_status) && singleVeSavedEmail(row) !== null).map(veRelevanceCompanyKey));
+  const eligibleIndices: number[] = [];
+  const combinedRows = storedRows.map((row, index): StoredRow => {
+    if (eligibleCompanies.has(veRelevanceCompanyKey(row))) { eligibleIndices.push(index); return row; }
+    return { ...row, _ve_email_pending_relevance: true, _relevance_unchecked: true,
+      _ve_relevance: { version: 2, status: 'needs_review',
+        reason: 'Проверка соответствия будет выполнена после получения пригодного email.', evidence: [],
+        context_hash: relevanceHash([job.project_id, base.id, 'awaiting-valid-email']), review_attempts: 0 } };
+  });
+  storedRows = eligibleIndices.map((index) => combinedRows[index]);
+  const deferredCount = combinedRows.length - storedRows.length;
+  if (deferredCount) stageLog(ctx, `[base_collect] ${deferredCount} строк без пригодного email сохранены; платная проверка соответствия отложена`);
+  if (!storedRows.length) return { storedRows: combinedRows, lowRelevanceCount, relevanceUncheckedCount,
+    relevanceNeedsReviewCount, relevanceErrorCount, relevanceCheckedCompanies: 0, relevanceTotalCompanies: 0,
+    relevanceCoverageComplete: true, relevanceError };
   try {
     const { data: vrow } = await ctx.supabase
       .from('ve_verticals')
@@ -2706,7 +2729,8 @@ async function checkCollectedRelevance(args: {
         `${e instanceof Error ? e.message : String(e)}`,
     );
   }
-  return { storedRows, lowRelevanceCount, relevanceUncheckedCount, relevanceNeedsReviewCount, relevanceErrorCount,
+  storedRows.forEach((row, index) => { combinedRows[eligibleIndices[index]] = row; });
+  return { storedRows: combinedRows, lowRelevanceCount, relevanceUncheckedCount, relevanceNeedsReviewCount, relevanceErrorCount,
     relevanceCheckedCompanies, relevanceTotalCompanies, relevanceCoverageComplete, relevanceError };
 }
 
