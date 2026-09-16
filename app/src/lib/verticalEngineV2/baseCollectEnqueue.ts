@@ -57,7 +57,7 @@ export interface VeBaseCollectInput {
 export type VeBaseCollectResult =
   /** Сборка стартовала: созданы базы + джобы (по одной на гипотезу либо одна). */
   | { ok: true; created: true; bases: Array<Record<string, unknown>>; base: Record<string, unknown> }
-  /** Дедуп: сборка уже идёт (существующая collecting-база). */
+  /** Существующее превью: сборка уже идёт либо результат сохранён. */
   | { ok: true; created: false; base: Record<string, unknown> }
   | { ok: false; message: string };
 
@@ -349,6 +349,26 @@ export async function enqueueVeBaseCollect(
     }
 
     if (input.collectionMode === 'preview' && hypothesisId && !refill) {
+      // A finished preview is a one-time result awaiting approval/launch.
+      // Repeated preparation requests must reuse it, even below the target or
+      // with zero contacts. Daily replenishment uses the approved supply path.
+      const { data: prepared, error: preparedError } = await supabase
+        .from('ve_bases')
+        .select('id, status, hypothesis_id, row_count, collect_info')
+        .eq('project_id', projectId)
+        .eq('hypothesis_id', hypothesisId)
+        .eq('source', 'auto')
+        .eq('collect_info->>collection_mode', 'preview')
+        .in('status', ['analyzing', 'analyzed'])
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (preparedError) return { ok: false, message: preparedError.message };
+      if (prepared) {
+        existing.push(prepared as Record<string, unknown>);
+        continue;
+      }
       const resumed = await resumeFailedPreview(supabase, input, hypothesisId, allActiveBaseIds);
       if (resumed) {
         if (!resumed.ok) return resumed;
