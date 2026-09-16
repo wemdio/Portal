@@ -35,6 +35,8 @@ export interface KnowledgeBaseDto {
   productFacts: string;
   toneNotes: string;
   exampleCase: string;
+  /** Запасной бриф из самой модалки: используется, пока карточка проекта пуста. */
+  localBrief: string;
   updatedAt: string;
 }
 
@@ -44,7 +46,11 @@ export interface GlobalKnowledgeBaseDto {
   updatedAt: string;
 }
 
-/** Бриф из карточки проекта — read-only, в базе знаний не хранится. */
+/**
+ * `projectBrief` — бриф из карточки проекта, только для чтения: карточку ведут
+ * менеджеры проекта, и инструмент её не переписывает. Если он пуст, в дело идёт
+ * `kb.localBrief`, который заполняют прямо в модалке.
+ */
 export function fetchKnowledgeBase(projectId: string) {
   return fetchWithAuth<{ kb: KnowledgeBaseDto | null; projectBrief: string; global: GlobalKnowledgeBaseDto }>(
     `${BASE}/projects/${projectId}/kb`,

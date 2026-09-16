@@ -29,6 +29,7 @@ export const PUT = withAuth(async (req: NextRequest, user, params) => {
     productFacts?: string;
     toneNotes?: string;
     exampleCase?: string;
+    localBrief?: string;
   } | null;
   if (!body) return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
 
@@ -38,6 +39,9 @@ export const PUT = withAuth(async (req: NextRequest, user, params) => {
       productFacts: body.productFacts ?? '',
       toneNotes: body.toneNotes ?? '',
       exampleCase: body.exampleCase ?? '',
+      // Пишется только в базу знаний инструмента: карточку проекта этот
+      // маршрут не трогает никогда — бриф там ведут менеджеры проекта.
+      localBrief: body.localBrief ?? '',
     },
     user.id,
   );

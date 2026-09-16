@@ -7,6 +7,7 @@ const KB_EMPTY: KnowledgeBase = {
   productFacts: 'факты',
   toneNotes: '',
   exampleCase: '',
+  localBrief: '',
   updatedAt: '2026-09-16T00:00:00Z',
 };
 
