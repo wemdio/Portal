@@ -23,6 +23,7 @@ import { fetchAndExtract } from '@/lib/enrich/websiteParser';
 import { validateEmail, type DomainInfo } from '@/lib/emailValidation/validator';
 import { isSupportEmail } from './supportEmails';
 import { makeCheckpointGate } from './checkpointGate';
+import { createConstructorProbePool } from './baseConstructorCapacity';
 import {
   generatePersonalizationCompletion, PersonalizationCancelledError, personalizationFailureMessage,
   buildPersonalizationTable, type PersonalizationRowResult,
@@ -1797,6 +1798,7 @@ export async function stepPersonalize(
    ═══════════════════════════════════════════ */
 
 const VALIDATION_CONCURRENCY = 10;
+const withConstructorProbe = createConstructorProbePool(20);
 
 export type ValidateEmailsTarget = 'original' | 'found' | 'both';
 
@@ -2052,7 +2054,10 @@ export async function stepValidateEmails(
 
   const runProbe = async (email: string): Promise<ProbeResult> => {
     try {
-      const r = await validateEmail(email, domainCache);
+      const r = await withConstructorProbe(async () => {
+        if (isCancelled && await isCancelled()) throw new Error('Отменено');
+        return validateEmail(email, domainCache);
+      });
       return { result: r.result, is_free: r.is_free, is_catch_all: r.is_catch_all, errorText: r.error || '' };
     } catch (err) {
       return {

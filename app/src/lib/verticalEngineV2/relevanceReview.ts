@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { callLLMWithSchema, getVeModel, type LLMMessage, type LLMUsage } from './llm';
 
 export const veRelevanceReviewResultSchema = z.object({
@@ -38,7 +39,7 @@ export async function reviewVeRelevanceEvidence(input: {
     i: z.number().int().nonnegative(),
     // Explanatory verbosity must not waste a paid, otherwise valid decision.
     // Persist/UI reasons retain the strict 400-character checkpoint contract.
-    reason: z.string().min(1).max(2000).transform((reason) => reason.slice(0, 400)),
+    reason: z.string().min(1).max(2000).transform((reason) => sliceWholeChars(stripUnstorableJsonChars(reason), 0, 400)),
   }).strict())
     .length(companies.length) }).strict().superRefine((data, ctx) => {
     if (new Set(data.reviews.map((review) => review.i)).size !== companies.length
