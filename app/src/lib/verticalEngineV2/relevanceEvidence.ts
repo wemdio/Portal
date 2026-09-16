@@ -7,7 +7,7 @@ import type { SerperOrganicItem } from '@/lib/search/serperClient';
 import { normalizeVeCompanyInn, normalizeVeCompanyName } from './collectionIdentity';
 import { parseVeEvidencePage, rankVeEvidenceLinks, selectVeEvidenceText, type VeEvidencePage } from './relevancePage';
 import { veSearchProviderFailure, VeSearchProviderError, VE_RELEVANCE_SEARCH_OPERATION_TIMEOUT_MS, type VeSearchProviderFailure } from './relevanceSearch';
-import { searchVeRelevanceWebsitesCached } from './relevanceSearchCache';
+import { readVeSearchCache, searchVeRelevanceWebsitesCached } from './relevanceSearchCache';
 
 export interface VeRelevanceEvidence {
   status: 'ok' | 'unavailable' | 'error';
@@ -15,6 +15,8 @@ export interface VeRelevanceEvidence {
   url: string;
   reason: string;
   provider_error?: VeSearchProviderFailure;
+  /** A cache miss postponed by acquisition policy, never a negative verdict. */
+  search_deferred?: true;
 }
 
 export interface VeRelevanceEvidenceOptions {
@@ -23,10 +25,12 @@ export interface VeRelevanceEvidenceOptions {
   companyName?: string;
   companyAddress?: string;
   focus?: string;
+  allowPaidSearch?: boolean;
   /** Trusted offline adapters; never selected from user/source data. */
   fetchText?: (url: string) => Promise<string>;
   fetchPage?: (url: string, signal: AbortSignal) => Promise<VeEvidencePage>;
   search?: (query: string, signal: AbortSignal) => Promise<SerperOrganicItem[]>;
+  searchCache?: typeof readVeSearchCache;
 }
 
 // Includes the shared search queue, one bounded search and website reads.
@@ -221,6 +225,7 @@ export async function fetchVeRelevanceEvidence(
   const pages = new Map<string, Promise<VeEvidencePage | undefined>>();
   let failed = false, timedOut = false, unverified = false, searchAttempted = false, searchCompleted = false;
   let retries = 0;
+  let searchDeferred = false;
   let providerError: VeSearchProviderFailure | undefined;
   const verified = new Map<string, VeEvidencePage[]>();
   const read = async (url: URL, parent: AbortSignal): Promise<VeEvidencePage | undefined> => {
@@ -320,8 +325,11 @@ export async function fetchVeRelevanceEvidence(
         + ' официальный сайт -site:rusprofile.ru -site:list-org.com -site:checko.ru -site:companium.ru -site:hh.ru';
       let results: SerperOrganicItem[];
       try {
-        results = await withVeDeadline('relevance website search', VE_RELEVANCE_SEARCH_OPERATION_TIMEOUT_MS, signal, async (searchSignal) =>
-          opts.search ? opts.search(query, searchSignal) : searchVeRelevanceWebsitesCached(query, searchSignal));
+        const found = await withVeDeadline('relevance website search', VE_RELEVANCE_SEARCH_OPERATION_TIMEOUT_MS, signal, async (searchSignal) =>
+          opts.allowPaidSearch === false ? (opts.searchCache ?? readVeSearchCache)(query, searchSignal)
+            : opts.search ? opts.search(query, searchSignal) : searchVeRelevanceWebsitesCached(query, searchSignal));
+        if (found === null) { searchDeferred = true; searchCompleted = true; return; }
+        results = found;
       } catch (error) {
         if (error instanceof ProviderUsageWriteError) throw error;
         signal.throwIfAborted();
@@ -353,6 +361,8 @@ export async function fetchVeRelevanceEvidence(
     }
   }
   opts.signal?.throwIfAborted();
+  if (searchDeferred) return { status: 'unavailable', text: '', url: supplied[0]?.href ?? '',
+    reason: 'paid_search_deferred', search_deferred: true };
   if (providerError) return {
     status: 'error', text: '', url: supplied[0]?.href ?? '',
     reason: providerError.message, provider_error: providerError,

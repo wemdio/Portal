@@ -319,7 +319,7 @@ export default function BriefsPage() {
         <div>
           <h1 className="text-2xl font-bold text-zinc-900 tracking-tight">Брифы клиентов</h1>
           <p className="mt-1 text-sm text-zinc-500">
-            Загрузите бриф и привяжите к кампаниям для AI-обработки возражений
+            Загрузите бриф и привяжите к кампаниям для определения лидов
           </p>
         </div>
         <button
@@ -403,7 +403,7 @@ export default function BriefsPage() {
           </div>
           <p className="text-sm font-medium text-zinc-600">Брифов пока нет</p>
           <p className="mt-1.5 text-xs text-zinc-400 max-w-sm mx-auto">
-            Загрузите PDF с брифом клиента и привяжите к кампаниям — AI будет использовать его для обработки возражений
+            Загрузите PDF с брифом клиента и привяжите к кампаниям. ИИ использует его как контекст при определении лидов.
           </p>
         </div>
       ) : (

@@ -5,7 +5,7 @@ import Link from 'next/link';
 import type { Route } from 'next';
 import {
   ChevronLeft, ChevronRight, Loader2, Search, CheckCircle2,
-  XCircle, AlertCircle, Eye, Mail, Sparkles, CircleDot, MessageSquare, Copy,
+  XCircle, AlertCircle, Eye, Mail, Sparkles, CircleDot, MessageSquare,
   Send, X, Check, ArrowUpRight, User, Building2, Tag,
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
@@ -25,7 +25,7 @@ type LeadQualification = {
   reply_preview: string | null;
   reply_body: string | null;
   last_outbound_preview: string | null;
-  status: 'lead' | 'not_lead' | 'needs_review' | 'objection' | 'error' | 'pending' | 'processing';
+  status: 'lead' | 'not_lead' | 'needs_review' | 'error' | 'pending' | 'processing';
   proposal_seen: boolean | null;
   interest_signals: string[] | null;
   ai_reason: string | null;
@@ -34,8 +34,6 @@ type LeadQualification = {
   created_at: string;
   read_at: string | null;
   read_by: string | null;
-  objection_handleable: boolean | null;
-  objection_draft: string | null;
   error_message: string | null;
   instantly_email_id: string | null;
   thread_id: string | null;
@@ -56,8 +54,7 @@ const STATUS_META: Record<string, {
   color: string; bg: string; ring: string; border: string;
 }> = {
   lead:         { label: 'Лид',         icon: CheckCircle2,  color: 'text-emerald-600', bg: 'bg-emerald-50',  ring: 'ring-emerald-200', border: 'border-l-emerald-500' },
-  objection:    { label: 'Возражение',  icon: MessageSquare, color: 'text-violet-600',  bg: 'bg-violet-50',   ring: 'ring-violet-200',  border: 'border-l-violet-500' },
-  needs_review: { label: 'На проверку', icon: AlertCircle,   color: 'text-amber-600',   bg: 'bg-amber-50',    ring: 'ring-amber-200',   border: 'border-l-amber-400' },
+  needs_review: { label: 'Автопроверка', icon: AlertCircle,   color: 'text-amber-600',   bg: 'bg-amber-50',    ring: 'ring-amber-200',   border: 'border-l-amber-400' },
   not_lead:     { label: 'Не лид',      icon: XCircle,       color: 'text-zinc-400',    bg: 'bg-zinc-50',     ring: 'ring-zinc-200',    border: 'border-l-zinc-300' },
   error:        { label: 'Ошибка',      icon: XCircle,       color: 'text-red-500',     bg: 'bg-red-50',      ring: 'ring-red-200',     border: 'border-l-red-400' },
   pending:      { label: 'В очереди',   icon: Loader2,       color: 'text-blue-500',    bg: 'bg-blue-50',     ring: 'ring-blue-200',    border: 'border-l-blue-300' },
@@ -67,8 +64,7 @@ const STATUS_META: Record<string, {
 const STATUS_FILTERS = [
   { value: 'all', label: 'Все' },
   { value: 'lead', label: 'Лиды' },
-  { value: 'objection', label: 'Возражения' },
-  { value: 'needs_review', label: 'На проверку' },
+  { value: 'needs_review', label: 'Автопроверка' },
   { value: 'not_lead', label: 'Не лид' },
 ];
 
@@ -741,17 +737,7 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
   const [showForward, setShowForward] = useState(false);
   const [showEmailForward, setShowEmailForward] = useState(false);
   const [showReply, setShowReply] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const m = STATUS_META[item.status] ?? STATUS_META.error;
-  const canForward = item.status === 'lead' || item.status === 'objection' || item.status === 'needs_review';
-
-  const handleCopyDraft = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch { /* noop */ }
-  };
+  const canForward = item.status === 'lead';
 
   return (
     <div className="h-full flex flex-col">
@@ -877,7 +863,6 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
                 </p>
                 <div className={`rounded-2xl rounded-tr-md px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap max-h-[500px] overflow-y-auto ${
                   item.status === 'lead' ? 'bg-emerald-50 text-emerald-900 ring-1 ring-emerald-200/60' :
-                  item.status === 'objection' ? 'bg-violet-50 text-violet-900 ring-1 ring-violet-200/60' :
                   'bg-blue-50 text-zinc-800 ring-1 ring-blue-200/60'
                 }`}>
                   {item.reply_body ?? item.reply_preview ?? '(пусто)'}
@@ -897,42 +882,24 @@ function DetailPanel({ item, onRefresh }: { item: LeadQualification; onRefresh: 
           </div>
         </section>
 
-        {/* Objection draft */}
-        {item.objection_handleable && item.objection_draft && (
-          <section className="rounded-xl border border-violet-200/80 bg-gradient-to-br from-violet-50 to-white p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-1.5">
-                <MessageSquare className="h-4 w-4 text-violet-500" />
-                <span className="text-sm font-bold text-violet-700">Черновик ответа на возражение</span>
-              </div>
-              <button onClick={() => handleCopyDraft(item.objection_draft!)}
-                className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-medium text-violet-500 hover:bg-violet-100 transition-colors">
-                {copied ? <CheckCircle2 className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-                {copied ? 'Скопировано' : 'Копировать'}
-              </button>
-            </div>
-            <p className="text-sm text-zinc-700 leading-relaxed whitespace-pre-wrap">{item.objection_draft}</p>
-          </section>
-        )}
-
         {/* Forward dialogs */}
-        {showReply && (
+        {canForward && showReply && (
           <ReplyDialog
             qualificationId={item.id}
-            initialText={item.objection_draft ?? ''}
+            initialText=""
             companyName={item.company_name}
             onClose={() => setShowReply(false)}
             onSent={() => { setShowReply(false); onRefresh(); }}
           />
         )}
-        {showForward && (
+        {canForward && showForward && (
           <ForwardToClientDialog
             qualificationId={item.id}
             onClose={() => setShowForward(false)}
             onForwarded={() => { setShowForward(false); onRefresh(); }}
           />
         )}
-        {showEmailForward && (
+        {canForward && showEmailForward && (
           <ForwardEmailDialog
             qualificationId={item.id}
             companyName={item.company_name}

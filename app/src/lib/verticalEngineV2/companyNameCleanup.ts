@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { callLLMWithSchema, getVeActiveJobSignal, getVeModel } from './llm';
+import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, getVeModel,
+  LLMValidationError, veNativeJsonSchema } from './llm';
 import { isVeProviderBillingError } from './collectionErrors';
 import { relevanceHash, VeRelevanceCheckpointError } from './relevanceCheckpoint';
 import {
@@ -37,7 +38,7 @@ function words(value: string): string[] {
 
 /** No invented brand tokens. Punctuation/case may change; meaningful word order may not. */
 function faithfulName(name: string, source: string): boolean {
-  if (!name.trim() || /[\r\n<>]|\{\{|\}\}/.test(name)) return false;
+  if (!name.trim() || name.length > MAX_NAME_LENGTH || /[\p{C}<>]|\{\{|\}\}/u.test(name)) return false;
   const original = words(source);
   const candidate = words(name);
   if (!candidate.length) return false;
@@ -115,33 +116,56 @@ export async function cleanVeCompanyNames(input: {
     const schema = z.object({ cleaned: z.array(z.object({
       idx: z.number().int().min(0).max(batch.length - 1),
       name: z.string().trim().min(1).max(MAX_NAME_LENGTH),
-    })).length(batch.length) }).superRefine((result, ctx) => {
+    }).strict()).length(batch.length) }).strict().superRefine((result, ctx) => {
       const seen = new Set<number>();
       for (const item of result.cleaned) {
-        if (seen.has(item.idx) || !faithfulName(item.name, batch[item.idx]?.source ?? '')) {
-          ctx.addIssue({ code: 'custom', message: 'Each input idx must occur once with a faithful, safe company name.' });
+        if (seen.has(item.idx)) {
+          ctx.addIssue({ code: 'custom', message: 'Each input idx must occur exactly once.' });
         }
         seen.add(item.idx);
       }
     });
-    let billing = false;
+    let stopCalls = false;
     try {
       const result = await callLLMWithSchema([
         { role: 'system', content: SYSTEM },
         { role: 'user', content: JSON.stringify({ language: input.language,
           companies: batch.map((group, idx) => ({ idx, name: group.source.replace(/\s+/g, ' '), domain: group.website })) }) },
-      ], schema, { model, maxTokens: 4096, requireCompleteJson: true, signal });
+      ], schema, { model, maxTokens: 4096, requireCompleteJson: true, signal,
+        jsonSchema: veNativeJsonSchema(model, 've_company_names', schema) });
       signal?.throwIfAborted();
       tokensUsed += result.tokensUsed;
       costUsd += result.costUsd;
-      for (const item of result.data.cleaned) checkpoint.names[batch[item.idx].key] = item.name;
+      let preserved = 0;
+      for (const item of result.data.cleaned) {
+        const group = batch[item.idx];
+        // A renamed/expanded brand cannot invalidate its successful siblings.
+        // The prompt explicitly permits the original words when a safe shorter
+        // name is unclear. Never infer a brand from the domain or drop words by
+        // heuristic; normalize whitespace only, and apply the same safety gate.
+        const value = faithfulName(item.name, group.source) ? item.name : group.source.replace(/\s+/g, ' ').trim();
+        if (faithfulName(value, group.source)) {
+          checkpoint.names[group.key] = value;
+          if (value !== item.name) preserved += 1;
+        }
+      }
+      if (preserved) input.log?.(`[company_names] сохранены исходные названия без переименования: ${preserved}`);
     } catch (cause) {
       signal?.throwIfAborted();
       if (cause instanceof Error && cause.name === 'AbortError') throw cause;
-      billing = isVeProviderBillingError(cause);
+      const billing = isVeProviderBillingError(cause);
+      if (cause instanceof LLMValidationError && cause.usage) {
+        tokensUsed += cause.usage.tokensUsed;
+        costUsd += cause.usage.costUsd;
+      }
       error = billing ? 'Requesty 402: insufficient balance (company name cleanup)'
         : error ?? 'Очистка названий завершилась не полностью';
       input.log?.(`[company_names] пакет ${offset + 1}–${offset + batch.length}: ${billing ? 'billing' : 'проверка не завершена'}`);
+      const diagnostic = getLLMValidationDiagnostic(cause, ['cleaned', 'idx', 'name']);
+      if (diagnostic) input.log?.(`[company_names] validation=${JSON.stringify(diagnostic)}`);
+      // Only malformed model output is local to a batch. Transport, billing,
+      // accounting and configuration failures must not trigger more paid calls.
+      stopCalls = !(cause instanceof LLMValidationError);
     }
     // Do not swallow checkpoint failure as an LLM failure and keep spending.
     signal?.throwIfAborted();
@@ -153,7 +177,7 @@ export async function cleanVeCompanyNames(input: {
       throw new VeRelevanceCheckpointError(cause instanceof Error ? cause.message : 'Company name checkpoint write failed');
     }
     signal?.throwIfAborted();
-    if (billing) break;
+    if (stopCalls) break;
     offset += batch.length;
   }
   const rows = input.rows.map((row) => ({ ...row }));
