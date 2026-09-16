@@ -733,6 +733,11 @@ services:
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=vertical-engine-v2
       - VE_JOB_CONCURRENCY=${VE_JOB_CONCURRENCY:-16}
+      # Сколько баз собирается одновременно. Сборка — единственная стадия,
+      # покупающая поиски Serper, и 16.09.2026 шестнадцать параллельных
+      # проектов выжгли дневной баланс за сутки. Лёгкие стадии этим лимитом
+      # не ограничены и в очереди за сборкой не стоят.
+      - VE_BASE_COLLECT_CONCURRENCY=${VE_BASE_COLLECT_CONCURRENCY:-3}
       # Independent bases share the pool; research remains exclusive per project.
       - NODE_OPTIONS=--max-old-space-size=6144
     stop_grace_period: 5m

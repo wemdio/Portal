@@ -89,12 +89,24 @@ export function createVeSearchCapacity(limit = 8, failureLimit = 4, cooldownMs =
 
 const withSearchCapacity = createVeSearchCapacity();
 
+/** Исчерпанный баланс Serper приходит тем же кодом 429, что и «слишком часто»:
+ * различает их только текст ответа. Пока 429 читался как временный сбой,
+ * «кончились кредиты» показывалось пользователю как «сервис временно
+ * недоступен» — и человек искал поломку вместо того, чтобы пополнить счёт.
+ *
+ * Список формулировок намеренно узкий. Ошибиться в эту сторону дороже:
+ * приняв обычное ограничение частоты за нехватку денег, движок перестанет
+ * повторять запросы и пошлёт оператора платить без повода. */
+const CREDITS_EXHAUSTED =
+  /not enough credits|insufficient[\s_-]+(?:funds|balance|credits|search credits)|payment[\s_-]+required|credit balance (?:is )?too low|out of credits/i;
+
 function responseFailure(status: number, body: string): VeSearchProviderError {
+  if (status === 402 || (status >= 400 && status < 500 && CREDITS_EXHAUSTED.test(body))) {
+    return new VeSearchProviderError('billing');
+  }
   if (status === 429) return new VeSearchProviderError('transient', 'rate_limit');
-  const billing = status === 402 || (status === 400 &&
-    /not enough credits|insufficient[\s_-]+(?:funds|balance|credits)|payment[\s_-]+required|credit balance (?:is )?too low/i.test(body));
-  return new VeSearchProviderError(billing ? 'billing'
-    : status >= 400 && status < 500 && ![408, 425, 429].includes(status) ? 'configuration' : 'transient');
+  return new VeSearchProviderError(
+    status >= 400 && status < 500 && ![408, 425].includes(status) ? 'configuration' : 'transient');
 }
 
 /** Strict VE2 search: an empty successful search is data, a provider failure is not. */
@@ -118,9 +130,11 @@ export async function searchVeRelevanceWebsites(query: string, signal?: AbortSig
         if (!response.ok) usage.status = 'http_error';
         requestSignal.throwIfAborted();
         if (!response.ok) {
-          // Metered failures may include returned credits. The response body itself
-          // is never retained; HTTP 400 also distinguishes exhausted credits.
-          const readBody = response.status === 400 || metered;
+          // Metered failures may include returned credits. The response body
+          // itself is never retained — оно нужно только чтобы отличить отказ
+          // по деньгам от отказа по частоте. 400, 402 и 429 читаются всегда:
+          // именно в их теле лежит эта разница (см. CREDITS_EXHAUSTED).
+          const readBody = response.status === 400 || response.status === 402 || response.status === 429 || metered;
           const body = readBody ? await response.text() : '';
           if (!readBody) await response.body?.cancel().catch(() => undefined);
           if (metered && body) {
@@ -137,8 +151,10 @@ export async function searchVeRelevanceWebsites(query: string, signal?: AbortSig
         usage.status = 'success';
         if (record.error || (typeof record.statusCode === 'number' && record.statusCode >= 400)) {
           usage.status = 'http_error';
+          // Serper умеет ответить 200 с ошибкой внутри тела: причина лежит
+          // то в message, то в error — читаем оба, иначе теряем «нет кредитов».
           throw responseFailure(typeof record.statusCode === 'number' ? record.statusCode : 500,
-            typeof record.message === 'string' ? record.message : '');
+            [record.message, record.error].filter((part): part is string => typeof part === 'string').join(' '));
         }
         if (record.organic !== undefined && !Array.isArray(record.organic)) throw new VeSearchProviderError('transient');
         return ((record.organic ?? []) as unknown[]).filter((item): item is SerperOrganicItem =>
