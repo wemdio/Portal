@@ -2981,7 +2981,8 @@ async function completeTargetRound(args: {
   const pendingBatches = pipeline?.batches.filter((batch) => batch.id !== pipeline.active_batch_id) ?? [];
   const pendingSources = tasks.some((task) => task.status === 'pending' || task.status === 'dispatched');
   const pendingDiscovery = tasks.some((task) => task.status === 'done'
-    && hasPendingVeSourceContacts(task.harvest ?? [], info.source_contact_recovery));
+    && hasPendingVeSourceContacts((task.harvest ?? []).filter((row) =>
+      pruneBaseRowAgainstExclusion(freshKeys, row) !== null), info.source_contact_recovery));
   const finish = (readyCount: number, nameError?: string) => {
     const phaseError = args.validationError ?? nameError ?? (taskError ? `${taskError.source}: ${taskError.error ?? 'ошибка источника'}` : null);
     const result = finishCollectionRound(progress, {
@@ -3453,6 +3454,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // compares exact same-base observations. A newly recovered website/email is
   // new evidence even when the old unusable row already had an INN.
   const existingKeys = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId, target ? base.hypothesis_id : undefined);
+  // Do not buy website lookups for companies already excluded by another base.
+  // Snapshot before adding same-base acquisition receipts: a previously seen
+  // row may still legitimately recover its missing website in this base.
+  const discoveryCandidates = interleaved.filter((row) => pruneBaseRowAgainstExclusion(existingKeys, row) !== null);
   if (target) {
     addAcquisitionReceipts(existingKeys, info.target_checkpoint?.seen_rows ?? [], interleaved);
     addRowsToExclusionKeys(existingKeys, Array.isArray(base.data) ? base.data : []);
@@ -3460,7 +3465,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // An existing constructor owns immutable inputs. New batches prefer rows
   // already carrying a site; search missing sites only when that stock runs low.
   let prepared = info.construct ? interleaved : applyVeSourceContacts(interleaved, info.source_contact_recovery);
-  let pendingSourceRows = new Set(pendingVeSourceContacts(interleaved, info.source_contact_recovery));
+  let pendingSourceRows = new Set(pendingVeSourceContacts(discoveryCandidates, info.source_contact_recovery));
   if (!info.construct && !info.preview_pipeline?.batches.length) {
     const immediatelyUsable = prepared.filter((row) => (row.website || row.email)
       && pruneBaseRowAgainstExclusion(existingKeys, row) !== null).length;
@@ -3473,9 +3478,9 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
           save: async (state) => { info.source_contact_recovery = state; await persistCollectInfo(ctx, base.id, info); ctx.onCheckpoint?.(); },
         });
         prepared = applyVeSourceContacts(interleaved, info.source_contact_recovery);
-        pendingSourceRows = new Set(pendingVeSourceContacts(interleaved, info.source_contact_recovery));
+        pendingSourceRows = new Set(pendingVeSourceContacts(discoveryCandidates, info.source_contact_recovery));
         if (prepared.filter((row) => (row.website || row.email) && pruneBaseRowAgainstExclusion(existingKeys, row) !== null).length < VE_PREVIEW_FIRST_CANDIDATES
-          && hasPendingVeSourceContacts(interleaved, info.source_contact_recovery)) {
+          && hasPendingVeSourceContacts(discoveryCandidates, info.source_contact_recovery)) {
           await requeueSelf(ctx, job, 1_000);
           return { result: { base_id: baseId, waiting: true, source_contact_discovery: true }, ...usage };
         }

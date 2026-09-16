@@ -472,6 +472,27 @@ describe('base_collect CONSTRUCT step order', () => {
     expect(recoveredInput).toHaveLength(2);
     expect(recoveredInput[1]).toContain('https://found.test/');
 
+    // Cross-base exclusions must apply before paid site discovery, while the
+    // same-base missing-site recovery above remains possible. Even a full
+    // discovery wave of duplicates cannot postpone the fresh company.
+    const excludedSources = Array.from({ length: 16 }, (_, i) => unifiedRow({
+      company: `Already collected ${i}`, inn: String(7700000100 + i),
+    }));
+    const discoveryInfo = { ...collectInfo([...excludedSources, knownInn]), collection_mode: 'preview' as const,
+      target_progress: createCollectionTarget('preview') };
+    const discoveryDb = seed(discoveryInfo, { ve_bases: [makeBase(discoveryInfo), {
+      ...makeBase({}), id: 'other-ready', hypothesis_id: 'h2', status: 'analyzed',
+      columns: [...VE_AUTO_COLLECT_COLUMNS],
+      data: excludedSources.map((row) => ({ ...row, email: `ready@${row.inn}.test`, _email_status: 'ok' })),
+    }] });
+    jest.mocked(fetchVeRelevanceEvidence).mockClear().mockResolvedValueOnce({
+      status: 'ok', text: 'Confirmed legal entity', url: 'https://found.test/', reason: 'discovered_verified_website',
+    });
+    await runBaseCollectStage(makeJob(), { supabase: discoveryDb as unknown as SupabaseClient });
+    expect(fetchVeRelevanceEvidence).toHaveBeenCalledTimes(1);
+    expect(fetchVeRelevanceEvidence).toHaveBeenCalledWith('', expect.objectContaining({ companyInn: knownInn.inn }));
+    expect((discoveryDb.getRows('base_constructor_jobs')[0].data as string[][])).toHaveLength(2);
+
     // The small cohort must reach the actual constructor and publish checked
     // rows while the same base continues collecting. Old runs retain their
     // original input scope across a deployment.
