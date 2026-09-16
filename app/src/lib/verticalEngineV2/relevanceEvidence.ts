@@ -1,7 +1,6 @@
-import { lookup } from 'node:dns/promises';
+import { Resolver } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { Agent, fetch } from 'undici';
-import { assertPublicWebsite } from '@/lib/clientDemo/personalize';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
 import type { SerperOrganicItem } from '@/lib/search/serperClient';
@@ -106,25 +105,46 @@ function publicIpv4(address: string): boolean {
 
 function transientPageFailure(error: unknown): boolean {
   return error instanceof VeOperationTimeoutError || error instanceof Error
-    && /website_transient_http_(?:408|500|502|503|504)|\b(?:EAI_AGAIN|ETIMEDOUT|ECONNRESET|ECONNREFUSED|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET)\b|fetch failed|network error/i.test(error.message);
+    && /website_transient_http_(?:408|500|502|503|504)|\b(?:EAI_AGAIN|ETIMEOUT|ETIMEDOUT|ESERVFAIL|ECONNRESET|ECONNREFUSED|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET)\b|fetch failed|network error/i.test(error.message);
+}
+
+/** Website DNS must not occupy the OS lookup pool used by database/provider
+ * connections. A per-read resolver is cancellable when the page deadline ends;
+ * timed-out sites cannot leave background lookups blocking unrelated work.
+ * Only these checked IPv4 answers may be used by the pinned HTTP connection.
+ */
+export async function resolveVeEvidenceAddress(hostname: string, signal: AbortSignal): Promise<string> {
+  signal.throwIfAborted();
+  const resolver = new Resolver({ timeout: 1_500, tries: 2 });
+  const cancel = () => resolver.cancel();
+  signal.addEventListener('abort', cancel, { once: true });
+  try {
+    const addresses = await resolver.resolve4(hostname);
+    signal.throwIfAborted();
+    if (!addresses.length || addresses.some((address) => !publicIpv4(address))) {
+      throw new Error('website_address_unavailable');
+    }
+    return addresses[0];
+  } catch (error) {
+    signal.throwIfAborted();
+    throw error;
+  } finally {
+    signal.removeEventListener('abort', cancel);
+    resolver.cancel();
+  }
 }
 
 /** Narrow static-page reader. The shared website parser follows unchecked
  * redirects and crawls extra pages, so it is deliberately not used here.
- * Each hop passes the existing SSRF gate, then connects to a pinned public
+ * Each hop validates its URL and DNS answers, then connects to a pinned public
  * IPv4 address; neither DNS rebinding nor a redirect can reach a private host.
  */
 async function fetchEvidencePage(initialUrl: URL, signal: AbortSignal, focus?: string): Promise<VeEvidencePage> {
   let current = initialUrl;
   for (let hop = 0; hop <= 3; hop += 1) {
-    await assertPublicWebsite(current.href);
-    signal.throwIfAborted();
-    const addresses = await lookup(current.hostname, { all: true, family: 4 });
-    signal.throwIfAborted();
-    if (!addresses.length || addresses.some(({ address }) => !publicIpv4(address))) {
-      throw new Error('website_address_unavailable');
-    }
-    const pinned = addresses[0].address;
+    const checked = allowedUrl(current.href);
+    if (!checked) throw new Error('website_address_unavailable');
+    const pinned = await resolveVeEvidenceAddress(checked.hostname, signal);
     const dispatcher = new Agent({
       connect: {
         family: 4,

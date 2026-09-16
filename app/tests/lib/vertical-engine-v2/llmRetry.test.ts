@@ -7,6 +7,7 @@
  */
 
 import { z } from 'zod';
+import { Resolver } from 'node:dns/promises';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { VeJob } from '@/lib/verticalEngineV2/types';
 import { withVeCostTelemetry } from '@/lib/verticalEngineV2/costTelemetry';
@@ -29,7 +30,7 @@ import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors'
 import { findIrrelevantRows } from '@/lib/verticalEngineV2/relevanceGate';
 import type { VeRelevanceCheckpoint } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import { createVeJobShutdown } from '@/lib/verticalEngineV2/workerLiveness';
-import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
+import { fetchVeRelevanceEvidence, resolveVeEvidenceAddress } from '@/lib/verticalEngineV2/relevanceEvidence';
 import { parseVeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
 import { needsVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceReserve';
 import { recoverVeSourceContacts, hasPendingVeSourceContacts, type VeSourceContactCheckpoint } from '@/lib/verticalEngineV2/sourceContacts';
@@ -93,14 +94,16 @@ describe('llm rawCall retry', () => {
 
     // A committed journal write whose response was lost must be retried with
     // one stable ID, without repeating the successful paid request.
+    const journalWarning = jest.spyOn(console, 'warn').mockImplementation(() => {});
     for (const permanent of [false, true]) {
+      journalWarning.mockClear();
       const writes = new Map<string, number>();
       const upsert = jest.fn((row: { id: string; event: string }, options: unknown) => {
         expect(options).toEqual({ onConflict: 'id', ignoreDuplicates: true });
         const count = (writes.get(row.id) ?? 0) + 1;
         writes.set(row.id, count);
         return { abortSignal: async () => ({ error: count === 1 || (permanent && row.event === 'finished')
-          ? { message: 'write response lost' } : null }) };
+          ? { code: 'UND_ERR_CONNECT_TIMEOUT', message: 'private diagnostic details' } : null }) };
       });
       const db = { from: (table: string) => {
         expect(table).toBe('application_logs');
@@ -118,6 +121,11 @@ describe('llm rawCall retry', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect([...writes.values()].sort()).toEqual(permanent ? [2, 2, 2, 3] : [2, 2, 2, 2]);
       expect(maxAttemptsFor('Provider usage journal could not be saved.')).toBe(1);
+      expect(journalWarning).toHaveBeenCalledTimes(permanent ? 1 : 0);
+      if (permanent) {
+        expect(journalWarning).toHaveBeenCalledWith(expect.stringContaining('code=UND_ERR_CONNECT_TIMEOUT'));
+        expect(JSON.stringify(journalWarning.mock.calls)).not.toContain('private diagnostic details');
+      }
     }
   });
 
@@ -503,6 +511,38 @@ describe('llm rawCall retry', () => {
   });
 
   it('does not start website HTTP after a late DNS result, and aborts an active extraction', async () => {
+    // Evidence lookups use cancellable DNS queries, not the OS lookup pool
+    // shared with database/provider connections. One site's abort cannot
+    // cancel a sibling, and mixed public/private answers never reach HTTP.
+    const resolvers: Resolver[] = [];
+    const answers = new Map<Resolver, (value: string[]) => void>();
+    const rejects = new Map<Resolver, (reason: Error) => void>();
+    const resolve4 = jest.spyOn(Resolver.prototype, 'resolve4').mockImplementation(function (this: Resolver) {
+      resolvers.push(this);
+      return new Promise<string[]>((resolve, reject) => { answers.set(this, resolve); rejects.set(this, reject); });
+    });
+    const resolverCancel = jest.spyOn(Resolver.prototype, 'cancel').mockImplementation(function (this: Resolver) {
+      rejects.get(this)?.(new Error('queryA ECANCELLED'));
+    });
+    const abort = new AbortController();
+    const cancelledLookup = resolveVeEvidenceAddress('slow.test', abort.signal);
+    const cancelledAssertion = expect(cancelledLookup).rejects.toThrow('page expired');
+    const sibling = resolveVeEvidenceAddress('good.test', new AbortController().signal);
+    abort.abort(new Error('page expired'));
+    await cancelledAssertion;
+    expect(resolverCancel.mock.contexts).not.toContain(resolvers[1]);
+    answers.get(resolvers[1])!(['93.184.216.34']);
+    await expect(sibling).resolves.toBe('93.184.216.34');
+    for (const addresses of [[], ['93.184.216.34', '127.0.0.1'], ['169.254.169.254'], ['10.0.0.1'], ['::1']]) {
+      const pending = resolveVeEvidenceAddress('mixed.test', new AbortController().signal);
+      answers.get(resolvers[resolvers.length - 1])!(addresses);
+      await expect(pending).rejects.toThrow('website_address_unavailable');
+    }
+    const calls = resolve4.mock.calls.length;
+    await expect(resolveVeEvidenceAddress('cancelled.test', abort.signal)).rejects.toThrow('page expired');
+    expect(resolve4).toHaveBeenCalledTimes(calls);
+    resolve4.mockRestore(); resolverCancel.mockRestore();
+
     const dns = deferred<void>();
     jest.mocked(assertPublicWebsite).mockReturnValueOnce(dns.promise);
     let failure: unknown;
