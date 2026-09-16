@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
-import { nextPendingConstructor } from '@/lib/tools/baseConstructorQueue';
+import { nextPendingConstructor, nextSmallConstructor } from '@/lib/tools/baseConstructorQueue';
 import {
   runBaseConstructorJob,
   updateJobProgress,
@@ -245,9 +245,18 @@ describe('Base Constructor run-token fencing', () => {
       { id: 'multi-step', status: 'pending', created_at: new Date(now - 10_000).toISOString(), initial_row_count: 10, selected_steps: ['validate_emails', 'ta_scoring'] },
     ]);
     expect(await nextPendingConstructor(queue as unknown as SupabaseClient, true)).toMatchObject({ id: 'short' });
+    expect(await nextSmallConstructor(queue as unknown as SupabaseClient)).toMatchObject({ id: 'short' });
     expect(await nextPendingConstructor(queue as unknown as SupabaseClient, false)).toMatchObject({ id: 'bulk' });
     await queue.from('base_constructor_jobs').update({ status: 'processing' }).eq('id', 'short');
     expect(await nextPendingConstructor(queue as unknown as SupabaseClient, true)).toMatchObject({ id: 'preview' });
+    expect(await nextSmallConstructor(queue as unknown as SupabaseClient)).toBeNull();
+    await queue.from('base_constructor_jobs').update({ initial_row_count: 100, selected_steps: ['find_emails', 'validate_emails'] }).eq('id', 'preview');
+    expect(await nextSmallConstructor(queue as unknown as SupabaseClient)).toMatchObject({ id: 'preview' });
+    const cutoff = new Date(now - 60_000).toISOString();
+    await queue.from('base_constructor_jobs').update({ started_at: new Date(now - 120_000).toISOString() }).eq('id', 'short');
+    expect(await nextSmallConstructor(queue as unknown as SupabaseClient, cutoff)).toMatchObject({ id: 'short' });
+    await queue.from('base_constructor_jobs').update({ started_at: new Date(now).toISOString() }).eq('id', 'short');
+    expect(await nextSmallConstructor(queue as unknown as SupabaseClient, cutoff)).toBeNull();
   });
 
   it('lets the active token persist a checkpoint and complete the job', async () => {

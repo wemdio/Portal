@@ -1,4 +1,21 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { isSmallConstructorJob } from './baseConstructorCapacity';
+
+export async function nextSmallConstructor(db: SupabaseClient, staleBefore?: string): Promise<{ id: string } | null> {
+  for (const validationOnly of [true, false]) {
+    let query = db.from('base_constructor_jobs').select('id, initial_row_count, selected_steps, step_config')
+      .eq('status', staleBefore ? 'processing' : 'pending').gt('initial_row_count', 0).lte('initial_row_count', 200);
+    query = validationOnly ? query.eq('selected_steps->>0', 'validate_emails')
+      : query.eq('step_config->>queue_class', 'interactive_preview');
+    if (staleBefore) query = query.lt('started_at', staleBefore);
+    const { data, error } = await query.order(staleBefore ? 'started_at' : 'created_at', { ascending: true })
+      .order('id', { ascending: true }).limit(100);
+    if (error) throw new Error(`Constructor small queue read: ${error.message}`);
+    const eligible = data?.find(isSmallConstructorJob);
+    if (eligible) return { id: eligible.id };
+  }
+  return null;
+}
 
 /** Alternate short/interactive work with FIFO, including under sustained load. */
 export async function nextPendingConstructor(

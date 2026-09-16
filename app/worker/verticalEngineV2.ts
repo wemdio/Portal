@@ -39,7 +39,7 @@ import {
 } from '@/lib/verticalEngineV2/jobRetry';
 import { transitionVeJobFailure } from '@/lib/verticalEngineV2/jobFailureTransition';
 import { createVeJobShutdown, createVeJobWatchdog } from '@/lib/verticalEngineV2/workerLiveness';
-import { claimVeJob, createVeJobPool, veJobConcurrency } from '@/lib/verticalEngineV2/jobQueue';
+import { claimVeJob, createVeJobPool, createVeProjectUsageAccumulator, veJobConcurrency } from '@/lib/verticalEngineV2/jobQueue';
 import { VePreviewCheckpointConflict } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import {
   createGuardedContactDeliveryTick,
@@ -51,8 +51,8 @@ import type { VeJob, VeStage } from '@/lib/verticalEngineV2/types';
 
 const WORKER_ID = `vertical-engine-v2-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
-// One queue owner preserves per-project writes; independent projects use a
-// bounded pool instead of waiting behind long website/provider calls.
+// One queue owner serializes research and per-base writes; independent bases
+// share the bounded pool, including within the same project.
 const JOB_CONCURRENCY = veJobConcurrency(process.env.VE_JOB_CONCURRENCY);
 const OUTREACH_PREPARATION_INTERVAL_MS = 10_000;
 const configuredContactDeliveryInterval = Number(process.env.VE_CONTACT_DELIVERY_INTERVAL_MS);
@@ -151,24 +151,11 @@ async function resetStuckJobs() {
   }
 }
 
-/** Добавить расход стадии на проект (read-modify-write, воркер один на проект). */
+const accumulateUsage = createVeProjectUsageAccumulator(db);
+/** The durable provider journal remains authoritative if this UI aggregate fails. */
 async function accumulateProjectUsage(projectId: string, tokensUsed: number, costUsd: number) {
-  if (!tokensUsed && !costUsd) return;
-  const { data: project } = await db
-    .from('ve_projects')
-    .select('tokens_used, cost_usd')
-    .eq('id', projectId)
-    .maybeSingle();
-  if (!project) return;
-  const p = project as { tokens_used: number | null; cost_usd: number | string | null };
-  await db
-    .from('ve_projects')
-    .update({
-      tokens_used: (p.tokens_used ?? 0) + tokensUsed,
-      cost_usd: Number(p.cost_usd ?? 0) + costUsd,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', projectId);
+  try { await accumulateUsage(projectId, tokensUsed, costUsd); }
+  catch (error) { log('warn', `Project usage aggregate was not updated for ${projectId}`, error); }
 }
 
 /**
@@ -479,13 +466,15 @@ async function processClaimedJob(job: VeJob): Promise<void> {
 
 const jobPool = createVeJobPool({
   concurrency: JOB_CONCURRENCY, idleMs: POLL_INTERVAL_MS, shouldStop,
-  claim: (activeProjects) => claimVeJob(db, new Date(), activeProjects),
+  claim: (activeJobs) => claimVeJob(db, new Date(), activeJobs),
   run: processClaimedJob,
   onError: (error) => log('error', 'Job finalization failed; preserving state for recovery', error),
 });
 
 async function main() {
-  log('info', `Vertical Engine v2 worker starting (${JOB_CONCURRENCY} concurrent projects)…`);
+  // Each active job installs and removes its own two shutdown listeners.
+  if (process.getMaxListeners() > 0) process.setMaxListeners(Math.max(process.getMaxListeners(), JOB_CONCURRENCY + 8));
+  log('info', `Vertical Engine v2 worker starting (${JOB_CONCURRENCY} concurrent jobs; at most 4 independent bases per project)…`);
 
   const heartbeat = startWorkerHeartbeat(HEARTBEAT_PATH);
   log('info', `Heartbeat ticker started → ${HEARTBEAT_PATH} (every 30s)`);

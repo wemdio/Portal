@@ -727,8 +727,8 @@ services:
       - SERPER_API_KEY=${SERPER_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=vertical-engine-v2
-      - VE_JOB_CONCURRENCY=${VE_JOB_CONCURRENCY:-8}
-      # Bounded parallel projects retain their own durable checkpoints.
+      - VE_JOB_CONCURRENCY=${VE_JOB_CONCURRENCY:-16}
+      # Independent bases share the pool; research remains exclusive per project.
       - NODE_OPTIONS=--max-old-space-size=6144
     stop_grace_period: 5m
     labels:
@@ -1040,6 +1040,9 @@ services:
       # Глобальный потолок — общий main-rest/Postgres, AI-роутер и скрейпинг.
       # Это НЕ то же, что per-user cap MAX_ACTIVE_JOBS_PER_USER=6 в route.ts.
       - BASE_CONSTRUCTOR_CONCURRENCY=1
+      # Two additional slots accept only <=200-row preview/validation batches.
+      # Bulk uploads retain their single reserved slot; RSS guards extra claims.
+      - BASE_CONSTRUCTOR_PREVIEW_SLOTS=${BASE_CONSTRUCTOR_PREVIEW_SLOTS:-2}
       # Per-job fan-out скрейпинга (find_emails/enrich). На 12 параллельных
       # job'ах библиотечные дефолты 15+5 дали бы до ~240 исходящих коннектов.
       # Для base-constructor держим 10+6 = до ~192; env можно откатить без
@@ -1741,4 +1744,3 @@ volumes:
 networks:
   portal-network:
     driver: bridge
-

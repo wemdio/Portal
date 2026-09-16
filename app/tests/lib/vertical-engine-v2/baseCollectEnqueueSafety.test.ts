@@ -5,7 +5,7 @@ import { NextRequest } from 'next/server';
 
 import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
 import { enqueueVeBaseCollect } from '@/lib/verticalEngineV2/baseCollectEnqueue';
-import { claimVeJob, createVeJobPool, veJobConcurrency } from '@/lib/verticalEngineV2/jobQueue';
+import { claimVeJob, createVeJobPool, createVeProjectUsageAccumulator, canRunVeJob, veJobConcurrency } from '@/lib/verticalEngineV2/jobQueue';
 import type { VeJob } from '@/lib/verticalEngineV2/types';
 import { runVeOutreachPreparations } from '@/lib/verticalEngineV2/outreachPreparation';
 
@@ -237,32 +237,63 @@ describe('VE2 base collection enqueue recovery', () => {
     await pool.drain();
     expect(queueDb.getRows('ve_jobs').every((row) => row.status === 'done')).toBe(true);
     // The requested 15 x 25 workload must drain without starving a project or
-    // allowing two parent writers to mutate the same project's usage/state.
+    // allowing two writers for the same base or unlimited work from one project.
     expect([undefined, '0', 'NaN', '1', '8', '16', '999'].map(veJobConcurrency)).toEqual([8, 8, 8, 1, 8, 16, 16]);
-    const backlog = Array.from({ length: 375 }, (_, i) => ({ id: `j${i}`, project_id: `p${i % 15}` }) as VeJob);
-    const activeProjects = new Set<string>(), completed = new Set<string>();
+    const backlog = Array.from({ length: 375 }, (_, i) => ({ id: `j${i}`, project_id: `p${i % 15}`, stage: 'base_collect', payload: { base_id: `base${i}` } }) as unknown as VeJob);
+    const activeBases = new Set<string>(), completed = new Set<string>();
     const finishWave: Array<() => void> = [];
     let highWater = 0;
     const errors = jest.fn();
-    const scaled = createVeJobPool({ concurrency: 8, idleMs: 0, shouldStop: () => false,
+    const scaled = createVeJobPool({ concurrency: 16, idleMs: 0, shouldStop: () => false,
       claim: async (active) => {
-        const index = backlog.findIndex((job) => !active.includes(job.project_id));
+        const index = backlog.findIndex((job) => canRunVeJob(job, active));
         return index < 0 ? null : backlog.splice(index, 1)[0];
       }, run: async (job) => {
-        expect(activeProjects.has(job.project_id)).toBe(false);
-        activeProjects.add(job.project_id); highWater = Math.max(highWater, activeProjects.size);
+        const key = `${job.project_id}:${job.payload.base_id}`;
+        expect(activeBases.has(key)).toBe(false);
+        activeBases.add(key); highWater = Math.max(highWater, activeBases.size);
         await new Promise<void>((resolve) => { finishWave.push(resolve); });
-        activeProjects.delete(job.project_id); completed.add(job.id);
+        activeBases.delete(key); completed.add(job.id);
       }, onError: errors,
     });
     while (backlog.length) {
-      for (let slot = 0; slot < 8; slot++) await scaled.pollOnce();
+      for (let slot = 0; slot < 16; slot++) await scaled.pollOnce();
       finishWave.splice(0).forEach((finish) => finish());
       await scaled.drain();
     }
     expect(completed.size).toBe(375);
-    expect(highWater).toBe(8);
+    expect(highWater).toBe(16);
     expect(errors).not.toHaveBeenCalled();
+
+    // Distinct bases of one project run together; all stages of the same base
+    // and a pending project-wide operation still hold their respective locks.
+    const baseJob = (id: string, base: string | null, stage = 'base_collect') => ({
+      id, project_id: 'one', stage, payload: base ? { base_id: base } : {},
+      status: 'pending', run_after: now.toISOString(), created_at: now.toISOString(),
+    }) as unknown as VeJob;
+    const first = baseJob('d1', 'b1');
+    const independent = baseJob('d2', 'b2');
+    const sameBase = baseJob('d3', 'b1', 'template');
+    const research = baseJob('d4', null, 'evidence');
+    const independentDb = createMockSupabase({ enforceQueryWindows: true, tables: { ve_jobs: [first, sameBase, independent, research, baseJob('d5', 'b3')].map((job) => ({ ...job })) } });
+    const claimed = await claimVeJob(independentDb as unknown as SupabaseClient, now);
+    expect(claimed?.id).toBe('d1');
+    expect((await claimVeJob(independentDb as unknown as SupabaseClient, now, [claimed!]))?.id).toBe('d2');
+    expect(await claimVeJob(independentDb as unknown as SupabaseClient, now, [claimed!, independent])).toBeNull();
+    expect(canRunVeJob(sameBase, [first])).toBe(false);
+    expect(canRunVeJob(independent, [research])).toBe(false);
+    expect(canRunVeJob(research, [independent])).toBe(false);
+    expect(canRunVeJob(baseJob('later', 'b5'), [1, 2, 3, 4].map((n) => baseJob(`a${n}`, `b${n}`)))).toBe(false);
+    // Real aggregate writes start from independent snapshots, so a missing
+    // serialization would lose concurrent increments in this one project.
+    const totals = { tokens_used: 0, cost_usd: 0 };
+    const aggregateDb = { from: () => ({
+      select: () => ({ eq: () => ({ abortSignal: () => ({ maybeSingle: async () => ({ data: { ...totals }, error: null }) }) }) }),
+      update: (value: typeof totals) => ({ eq: () => ({ abortSignal: async () => { Object.assign(totals, value); return { error: null }; } }) }),
+    }) } as unknown as SupabaseClient;
+    const accumulate = createVeProjectUsageAccumulator(aggregateDb);
+    await Promise.all(Array.from({ length: 16 }, () => accumulate('one', 10, 0.25)));
+    expect(totals).toMatchObject({ tokens_used: 160, cost_usd: 4 });
   });
 
   it('repairs a normal orphan from its stored snapshot even when the caller requests refill', async () => {
