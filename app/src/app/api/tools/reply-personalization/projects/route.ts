@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic';
 export const GET = withAuth(async (_req, user) => {
   if (!supabaseAdmin) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
 
-  const projects = await listVisibleProjects(user.id);
+  const { projects, supervisor } = await listVisibleProjects(user.id);
   const withKb = await Promise.all(
     projects.map(async (p) => ({
       ...p,
@@ -16,5 +16,5 @@ export const GET = withAuth(async (_req, user) => {
     })),
   );
 
-  return NextResponse.json({ projects: withKb });
+  return NextResponse.json({ projects: withKb, canManageGlobalKb: supervisor });
 });

@@ -15,6 +15,16 @@ export interface KnowledgeBase {
   updatedAt: string;
 }
 
+/**
+ * Глобальные тон/пример (singleton id=1). Приоритет в промпте: пер-проектное
+ * поле, если заполнено, иначе — глобальное.
+ */
+export interface GlobalKnowledgeBase {
+  toneNotes: string;
+  exampleCase: string;
+  updatedAt: string;
+}
+
 export interface QualificationRow {
   id: string;
   campaignId: string;
