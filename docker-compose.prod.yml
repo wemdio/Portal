@@ -1025,42 +1025,43 @@ services:
     container_name: portal-worker-baseconstructor
     env_file:
       - .env
-    environment:
-      - NODE_ENV=production
-      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
-      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
-      - OPENROUTER_BRIEF_API_KEY=${OPENROUTER_BRIEF_API_KEY}
-      - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
-      - OPENROUTER_CLEANUP_API_KEY=${OPENROUTER_CLEANUP_API_KEY}
-      - PROXY_URLS=${PROXY_URLS}
-      - SMTP_PROXY_URL=${SMTP_PROXY_URL}
-      - SMTP_PROXY_URLS=${SMTP_PROXY_URLS}
-      - SMTP_PROXY_API_KEY=${SMTP_PROXY_API_KEY}
-      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
-      - WORKER_KIND=baseconstructor
+    environment: &base-constructor-env
+      BASE_CONSTRUCTOR_QUEUE: shared
+      NODE_ENV: production
+      NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      OPENROUTER_BRIEF_API_KEY: ${OPENROUTER_BRIEF_API_KEY}
+      OPENROUTER_PERSONALIZATION_API_KEY: ${OPENROUTER_PERSONALIZATION_API_KEY}
+      OPENROUTER_CLEANUP_API_KEY: ${OPENROUTER_CLEANUP_API_KEY}
+      PROXY_URLS: ${PROXY_URLS}
+      SMTP_PROXY_URL: ${SMTP_PROXY_URL}
+      SMTP_PROXY_URLS: ${SMTP_PROXY_URLS}
+      SMTP_PROXY_API_KEY: ${SMTP_PROXY_API_KEY}
+      WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-5000}
+      WORKER_KIND: baseconstructor
       # Сколько job'ов параллельно НА ОДНУ реплику. Фиксируем ровно 1: отдельные
       # контейнеры изолируют heap/OOM и позволяют наращивать мощность по одной
       # реплике, не делая скачок concurrency сразу во всём пуле.
       # 1 job в памяти обычно ~0.5-1.5GB JS heap из-за большой `data` (string[][]).
       # Глобальный потолок — общий main-rest/Postgres, AI-роутер и скрейпинг.
       # Это НЕ то же, что per-user cap MAX_ACTIVE_JOBS_PER_USER=6 в route.ts.
-      - BASE_CONSTRUCTOR_CONCURRENCY=1
+      BASE_CONSTRUCTOR_CONCURRENCY: '1'
       # Two additional slots accept only <=200-row preview/validation batches.
       # Bulk uploads retain their single reserved slot; RSS guards extra claims.
-      - BASE_CONSTRUCTOR_PREVIEW_SLOTS=${BASE_CONSTRUCTOR_PREVIEW_SLOTS:-2}
+      BASE_CONSTRUCTOR_PREVIEW_SLOTS: ${BASE_CONSTRUCTOR_PREVIEW_SLOTS:-2}
       # Per-job fan-out скрейпинга (find_emails/enrich). На 12 параллельных
       # job'ах библиотечные дефолты 15+5 дали бы до ~240 исходящих коннектов.
       # Для base-constructor держим 10+6 = до ~192; env можно откатить без
       # правки кода. DFYB эти env не ставит -> у него остаются дефолты 15/5.
-      - BASE_EMAIL_SCRAPE_CONCURRENCY=${BASE_EMAIL_SCRAPE_CONCURRENCY:-10}
-      - BASE_ENRICH_SCRAPE_CONCURRENCY=${BASE_ENRICH_SCRAPE_CONCURRENCY:-6}
+      BASE_EMAIL_SCRAPE_CONCURRENCY: ${BASE_EMAIL_SCRAPE_CONCURRENCY:-10}
+      BASE_ENRICH_SCRAPE_CONCURRENCY: ${BASE_ENRICH_SCRAPE_CONCURRENCY:-6}
       # 60s возвращают запас времени для retry/fallback-цепочки.
-      - BASE_ENRICH_PER_SITE_TIMEOUT_MS=${BASE_ENRICH_PER_SITE_TIMEOUT_MS:-60000}
+      BASE_ENRICH_PER_SITE_TIMEOUT_MS: ${BASE_ENRICH_PER_SITE_TIMEOUT_MS:-60000}
       # Две TA-пачки на job: максимум 24 одновременных TA-вызова у 12 реплик.
       # Другие AI-инструменты используют тот же Requesty-аккаунт; это не общий
       # лимитер аккаунта. Для возврата к прежнему темпу задайте env=1.
-      - BASE_TA_SCORING_CONCURRENCY=${BASE_TA_SCORING_CONCURRENCY:-2}
-      - BASE_CONSTRUCTOR_STALE_MINUTES=${BASE_CONSTRUCTOR_STALE_MINUTES:-15}
+      BASE_TA_SCORING_CONCURRENCY: ${BASE_TA_SCORING_CONCURRENCY:-2}
+      BASE_CONSTRUCTOR_STALE_MINUTES: ${BASE_CONSTRUCTOR_STALE_MINUTES:-15}
     # Job может занимать 30-60 минут (find_emails+enrich на 1.5к строк).
     # SIGTERM придёт при docker compose down, но шаг доработает до конца —
     # просто след. шаг не запустится, и worker корректно выйдет.
@@ -1078,15 +1079,23 @@ services:
     networks:
       - portal-network
 
-  # Реплики base-constructor. Делят очередь base_constructor_jobs через
-  # атомарный CAS-claim, как enrich-реплики. Всего 12 x concurrency(1) = 12.
+  # Две 10GB-реплики зарезервированы для ручных загрузок (без подхвата
+  # автосбора даже при простое). Остальные десять обслуживают общую очередь.
   worker-baseconstructor-2:
     <<: *worker-baseconstructor
     container_name: portal-worker-baseconstructor-2
+    environment:
+      <<: *base-constructor-env
+      BASE_CONSTRUCTOR_QUEUE: manual
+      BASE_CONSTRUCTOR_PREVIEW_SLOTS: '0'
 
   worker-baseconstructor-3:
     <<: *worker-baseconstructor
     container_name: portal-worker-baseconstructor-3
+    environment:
+      <<: *base-constructor-env
+      BASE_CONSTRUCTOR_QUEUE: manual
+      BASE_CONSTRUCTOR_PREVIEW_SLOTS: '0'
 
   # Реплики 4-6 прошли production-canary 20.08.2026; реплики 7-12 используют те
   # же проверенные консервативные параметры.

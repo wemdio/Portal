@@ -23,18 +23,18 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
+import { isActiveManualConstructorJob, MAX_MANUAL_CONSTRUCTOR_JOBS } from '@/lib/tools/baseConstructorCapacity';
+
 const ALWAYS_ON_SET = new Set<StepKey>(ALWAYS_ON_STEPS_FOR_CLIENT as readonly StepKey[]);
 
 /**
- * Сколько активных задач (pending + processing) у ОДНОГО юзера разрешено
- * одновременно (per-user cap). Дублирует MAX_ACTIVE_JOBS_PER_USER в
- * app/src/app/api/tools/base-constructor/route.ts — UI блокирует кнопку
+ * Сколько ручных задач (pending + processing) у ОДНОГО юзера разрешено
+ * одновременно (per-user cap). Общая константа с API — UI блокирует кнопку
  * «Запустить» при достижении лимита, бэк защищает от обхода через прямой POST.
  * Это НЕ глобальная параллельность обработки — та задаётся
- * BASE_CONSTRUCTOR_CONCURRENCY в воркере (docker-compose.prod.yml). Если меняешь
- * этот per-user лимит — поменяй и в route.ts.
+ * BASE_CONSTRUCTOR_CONCURRENCY в воркере (docker-compose.prod.yml).
  */
-const MAX_ACTIVE_JOBS = 6;
+const MAX_ACTIVE_JOBS = MAX_MANUAL_CONSTRUCTOR_JOBS;
 
 function isActiveJobStatus(status: string): boolean {
   return status === 'pending' || status === 'processing';
@@ -75,6 +75,7 @@ interface StepDef {
 }
 
 interface ConstructorJob {
+  workload_origin?: 'manual' | 'automation' | null;
   id: string;
   status: string;
   file_name: string | null;
@@ -387,6 +388,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const [downloading, setDownloading] = useState(false);
   const [loadingFull, setLoadingFull] = useState(false);
   const [history, setHistory] = useState<ConstructorJob[]>([]);
+  const [activeManualCount, setActiveManualCount] = useState<number | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -396,8 +398,9 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   const loadHistory = useCallback(async () => {
     const res = await authFetch('/api/tools/base-constructor');
     if (!res.ok) return null;
-    const { jobs } = await res.json();
+    const { jobs, active_manual_count } = await res.json();
     setHistory(jobs || []);
+    setActiveManualCount(typeof active_manual_count === 'number' ? active_manual_count : null);
     return (jobs ?? []) as ConstructorJob[];
   }, []);
 
@@ -411,7 +414,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
     void (async () => {
       const jobs = await loadHistory();
       if (cancelled || !jobs) return;
-      const running = jobs.find((j) => isActiveJobStatus(j.status));
+      const running = jobs.find(isActiveManualConstructorJob);
       if (running) setActiveJob(running);
     })();
     return () => { cancelled = true; };
@@ -421,7 +424,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   // Пока в истории есть хоть одна активная задача (pending/processing) —
   // поллим историю раз в 5 сек, чтобы статусы в списке (и счётчик активных
   // для лимита) были живые, даже когда юзер не открыт ни на одной из них.
-  const anyJobActive = history.some((j) => isActiveJobStatus(j.status));
+  const anyJobActive = (activeManualCount ?? 0) > 0 || history.some((j) => isActiveJobStatus(j.status));
   useEffect(() => {
     if (!anyJobActive) return;
     const id = setInterval(() => { void loadHistory(); }, 5000);
@@ -565,7 +568,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
         if (!res.ok || cancelled) return;
         const { jobs } = (await res.json()) as { jobs?: ConstructorJob[] };
         const running = (jobs ?? []).find((j) =>
-          ['pending', 'processing'].includes(j.status),
+          isActiveManualConstructorJob(j),
         );
         if (running && !cancelled) {
           setActiveJob(running);
@@ -907,7 +910,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   // history обновляется и при первичной загрузке, и сразу после успешного
   // submit (см. handleSubmit), и в фоне раз в 5 сек пока что-то крутится —
   // значит число живое.
-  const activeJobsCount = history.filter((j) => isActiveJobStatus(j.status)).length;
+  const activeJobsCount = activeManualCount ?? history.filter(isActiveManualConstructorJob).length;
   const atActiveLimit = activeJobsCount >= MAX_ACTIVE_JOBS;
 
   const overallProgress = activeJob && activeJob.total_steps > 0
@@ -1794,7 +1797,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                   >
                     <AlertTriangle className={clientMode ? 'w-4 h-4 mt-0.5 flex-shrink-0 text-[var(--cp-amber)]' : 'w-4 h-4 mt-0.5 flex-shrink-0 text-amber-600'} />
                     <span>
-                      Нельзя поставить больше {MAX_ACTIVE_JOBS} активных баз одновременно.
+                      Нельзя поставить больше {MAX_ACTIVE_JOBS} ручных баз одновременно.
                       {' '}Подождите, пока какая-нибудь из предыдущих задач завершится.
                     </span>
                   </div>
@@ -2256,7 +2259,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
               <h3 className={clientMode ? 'text-base font-semibold m-0 text-[var(--cp-paper)]' : 'text-base font-bold text-gray-900'}>История</h3>
               {anyJobActive && (
                 <span className={`text-xs ${clientMode ? 'text-[var(--cp-paper-mute)]' : 'text-gray-500'}`}>
-                  Активных: {activeJobsCount} / {MAX_ACTIVE_JOBS}
+                  Ручных в работе: {activeJobsCount} / {MAX_ACTIVE_JOBS}
                 </span>
               )}
             </div>

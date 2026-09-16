@@ -692,6 +692,7 @@ export async function runGisSignalPipeline(
       .from('base_constructor_jobs')
       .insert({
         user_id: clientUserId,
+        workload_origin: 'automation',
         file_name: `gis-signals-${today}`,
         data: grid,
         selected_steps: config.selected_steps,

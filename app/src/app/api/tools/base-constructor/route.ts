@@ -5,6 +5,8 @@ import { blockDemo } from '@/lib/auth/blockDemo';
 import { withToolTrace } from '@/lib/toolTrace';
 import { AVAILABLE_STEPS, type StepKey } from '@/lib/tools/processingSteps';
 import { applyClientGuard } from '@/lib/tools/baseConstructorClientGuard';
+import { countActiveManualConstructorJobs } from '@/lib/tools/baseConstructorQueue';
+import { MAX_MANUAL_CONSTRUCTOR_JOBS } from '@/lib/tools/baseConstructorCapacity';
 import {
   countClientRows,
   getBillingPeriodStart,
@@ -22,14 +24,14 @@ const admin = supabaseAdmin!;
 const validStepKeys = new Set<string>(AVAILABLE_STEPS.map((s) => s.key));
 
 /**
- * Сколько одновременно «активных» (pending + processing) задач разрешено
+ * Сколько одновременно ручных (pending + processing) задач разрешено
  * ОДНОМУ юзеру (per-user анти-флуд очереди). ВАЖНО: это НЕ глобальная
  * параллельность обработки — та задаётся воркером (BASE_CONSTRUCTOR_CONCURRENCY,
- * сейчас 6, в docker-compose.prod.yml + app/worker/baseConstructor.ts) и общая
+ * в docker-compose.prod.yml + app/worker/baseConstructor.ts) и общая
  * на всех юзеров. Раньше per-user было 1; коллеги попросили накидывать
  * несколько баз, пока одна обрабатывается.
  */
-const MAX_ACTIVE_JOBS_PER_USER = 6;
+const MAX_ACTIVE_JOBS_PER_USER = MAX_MANUAL_CONSTRUCTOR_JOBS;
 
 async function getUser(req: NextRequest) {
   const token = req.headers.get('authorization')?.replace('Bearer ', '');
@@ -139,17 +141,15 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      const { count: activeCount } = await admin
-        .from('base_constructor_jobs')
-        .select('id', { count: 'exact', head: true })
-        .eq('user_id', user.id)
-        .in('status', ['pending', 'processing']);
+      let activeCount: number;
+      try { activeCount = await countActiveManualConstructorJobs(admin, user.id); }
+      catch { return NextResponse.json({ error: 'Не удалось проверить очередь ручных баз. Повторите попытку.' }, { status: 503 }); }
 
       if ((activeCount ?? 0) >= MAX_ACTIVE_JOBS_PER_USER) {
         return NextResponse.json(
           {
             error:
-              `Нельзя поставить больше ${MAX_ACTIVE_JOBS_PER_USER} активных баз одновременно. ` +
+              `Нельзя поставить больше ${MAX_ACTIVE_JOBS_PER_USER} ручных баз одновременно. ` +
               `Подождите, пока какая-нибудь из предыдущих задач завершится.`,
           },
           { status: 409 },
@@ -160,6 +160,7 @@ export async function POST(req: NextRequest) {
         .from('base_constructor_jobs')
         .insert({
           user_id: user.id,
+          workload_origin: 'manual',
           file_name: file_name || null,
           data,
           selected_steps: finalSteps,
@@ -202,13 +203,18 @@ export async function GET(req: NextRequest) {
 
       const { data, error } = await admin
         .from('base_constructor_jobs')
-        .select('id, status, file_name, selected_steps, current_step, current_step_key, current_step_progress, total_steps, initial_row_count, result_stats, error_message, created_at, completed_at')
+        .select('id, status, workload_origin, file_name, selected_steps, current_step, current_step_key, current_step_progress, total_steps, initial_row_count, result_stats, error_message, created_at, completed_at')
         .eq('user_id', user.id)
         .order('created_at', { ascending: false })
         .limit(20);
 
       if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-      return NextResponse.json({ jobs: data || [] });
+      try {
+        const activeManualCount = await countActiveManualConstructorJobs(admin, user.id);
+        return NextResponse.json({ jobs: data || [], active_manual_count: activeManualCount });
+      } catch {
+        return NextResponse.json({ error: 'Не удалось проверить очередь ручных баз. Повторите попытку.' }, { status: 503 });
+      }
     },
   );
 }
