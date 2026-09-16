@@ -114,7 +114,6 @@ const TOOL_ICONS: Record<ToolId, ComponentType<{ className?: string }>> = {
   'hypothesis-engine': Telescope,
   'vertical-engine-v2': Sparkles,
   'reply-personalization': MessageSquareReply,
-  sender: MailPlus,
 };
 
 function ToolLinkCard({
