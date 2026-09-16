@@ -12,6 +12,8 @@ export interface KnowledgeBase {
   productFacts: string;
   toneNotes: string;
   exampleCase: string;
+  /** Запасной бриф из самой модалки: нужен, пока карточка проекта пуста. */
+  localBrief: string;
   updatedAt: string;
 }
 

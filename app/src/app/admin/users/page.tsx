@@ -952,6 +952,11 @@ export default function UsersPage() {
   const [actionModalLoadingUserId, setActionModalLoadingUserId] = useState<string | null>(null);
   const [modalFlyIn, setModalFlyIn] = useState(false);
   const [modalRole, setModalRole] = useState<UserRole | null>(null);
+  // ФИО и почта правятся в той же модалке, что и роль: отдельного экрана
+  // профиля в админке нет, а до сентября 2026 их нельзя было изменить вовсе —
+  // опечатку в имени приходилось править в базе руками.
+  const [modalFullName, setModalFullName] = useState('');
+  const [modalEmail, setModalEmail] = useState('');
   const [toolVisibility, setToolVisibility] = useState<Record<string, boolean>>({});
   const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
 
@@ -1288,6 +1293,8 @@ export default function UsersPage() {
       // resets automatically — we pass key={user.id} below so it remounts on
       // user switch with its initial defaults ('month' / '' / 'manual' / etc).
       setModalRole(user.role ?? null);
+      setModalFullName(user.full_name ?? '');
+      setModalEmail(user.email ?? '');
       setActionModalOrigin(origin);
       setActionModalUserId(user.id);
       setModalFlyIn(false);
@@ -1311,6 +1318,8 @@ export default function UsersPage() {
       setBillingPeriod(null);
       setBillingAmount(null);
       setModalRole(user.role ?? null);
+      setModalFullName(user.full_name ?? '');
+      setModalEmail(user.email ?? '');
       setActionModalOrigin(origin);
       setActionModalUserId(user.id);
       setModalFlyIn(false);
@@ -1946,6 +1955,31 @@ export default function UsersPage() {
                 )}
               </div>
               <div className="p-7 overflow-y-auto space-y-6">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">ФИО</label>
+                    <input
+                      type="text"
+                      value={modalFullName}
+                      onChange={(e) => setModalFullName(e.target.value)}
+                      placeholder="Фамилия и имя"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Почта</label>
+                    <input
+                      type="email"
+                      value={modalEmail}
+                      onChange={(e) => setModalEmail(e.target.value)}
+                      placeholder="user@example.com"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <p className="mt-1 text-xs text-gray-400">
+                      Это и адрес для входа — после сохранения человек заходит по новому.
+                    </p>
+                  </div>
+                </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Роль</label>
                   <select

@@ -82,6 +82,16 @@ export function deleteMailbox(id: string) {
   return authFetchJson<{ ok: true }>(`${BASE}/mailboxes/${id}`, { method: 'DELETE' });
 }
 
+export type BulkMailboxAction = 'recheck' | 'enable' | 'disable' | 'delete';
+
+/** Действие над выборкой одним запросом: двести ящиков — это не двести запросов. */
+export function bulkMailboxes(ids: string[], action: BulkMailboxAction) {
+  return authFetchJson<{ ok: true; affected: number }>(`${BASE}/mailboxes`, {
+    method: 'PATCH',
+    body: JSON.stringify({ ids, action }),
+  });
+}
+
 export function fetchCampaigns() {
   return authFetchJson<{ campaigns: CampaignDto[] }>(`${BASE}/campaigns`);
 }
