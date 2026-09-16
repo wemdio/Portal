@@ -536,8 +536,10 @@ describe('base_collect CONSTRUCT step order', () => {
         target_progress: createCollectionTarget('preview'),
         preview_pipeline: { version: 1, revision: 0, batches: [] } };
       fastInfo.tasks!.push({ source: 'hh_live', status: 'dispatched', child_job_id: 'slow-hh', rows: 0,
-        task: { source: 'hh_live', rationale: 'Parallel source', hh_query: { text: 'клиники' } }, dispatched_at: new Date().toISOString() });
-      const db = seed(fastInfo, { parser_jobs: [{ id: 'slow-hh', status: 'running' }] });
+        task: { source: 'hh_live', rationale: 'Parallel source', hh_query: { text: 'клиники' } },
+        dispatched_at: new Date(Date.now() - 4 * 60 * 60_000).toISOString() });
+      const db = seed(fastInfo, { parser_jobs: [{ id: 'slow-hh', status: failFirst ? 'processing' : 'pending',
+        started_at: failFirst ? new Date().toISOString() : null }] });
       const wake = async () => {
         await db.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
         return runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
@@ -549,6 +551,8 @@ describe('base_collect CONSTRUCT step order', () => {
           data: [[...input[0], 'Email Статус'], ...input.slice(1).map((row) => [...row, failed ? 'invalid' : 'ok'])] }).eq('id', id);
       };
       await wake();
+      expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).tasks?.find((task) => task.child_job_id === 'slow-hh'))
+        .toMatchObject({ status: 'dispatched' });
       const children = db.getRows('base_constructor_jobs');
       expect(children).toHaveLength(2);
       expect(children.every((row) => (row.data as string[][]).length === 101)).toBe(true);
@@ -593,6 +597,11 @@ describe('base_collect CONSTRUCT step order', () => {
       expect(db.getRows('base_constructor_jobs').every((row) => row.status !== 'pending')).toBe(true);
       expect(stripTaskHarvest(result).collect_info).not.toHaveProperty('preview_pipeline');
       if (failFirst) {
+        const timeoutInfo = structuredClone(result.collect_info) as VeCollectInfo;
+        const queuedTask = timeoutInfo.tasks!.find((task) => task.child_job_id === 'slow-hh')!;
+        queuedTask.status = 'failed';
+        queuedTask.error = 'timeout: дочерняя джоба зависла';
+        await db.from('ve_bases').update({ collect_info: timeoutInfo }).eq('id', 'b1');
         await db.from('ve_jobs').update({ status: 'failed' }).eq('id', makeJob().id);
         const resumed = await enqueueVeBaseCollect(db as unknown as SupabaseClient, {
           projectId: 'p1', verticalId: 'v1', verticalName: VERTICAL.name,
@@ -602,6 +611,8 @@ describe('base_collect CONSTRUCT step order', () => {
         expect(db.getRows('ve_bases')).toHaveLength(1);
         const recoveredInfo = db.getRows('ve_bases')[0].collect_info as VeCollectInfo;
         expect(recoveredInfo).toMatchObject({ relevance_review_requested: true, validation_retry: true });
+        expect(recoveredInfo.tasks?.find((task) => task.child_job_id === 'slow-hh')).toMatchObject({ status: 'dispatched' });
+        expect(recoveredInfo.tasks?.find((task) => task.child_job_id === 'slow-hh')).not.toHaveProperty('error');
         expect(recoveredInfo.preview_pipeline).not.toHaveProperty('error');
         expect(db.getRows('base_constructor_jobs')).toHaveLength(2);
         const retry = db.getRows('ve_jobs').find((row) => row.id !== makeJob().id && row.stage === 'base_collect')!;

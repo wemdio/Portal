@@ -578,7 +578,7 @@ export interface VeCollectTaskState {
   task: VeCollectTask;
   /** Унифицированные строки задачи (реестр — сразу на dispatch). */
   harvest?: VeUnifiedRow[];
-  /** Когда задача ушла в дочерний парсер (ISO) — таймаут ожидания в WAIT. */
+  /** Когда задача ушла в дочерний парсер (ISO), fallback для старых running без started_at. */
   dispatched_at?: string;
   error?: string;
   /** Реестр: строк пропущено на выборке как уже собранные в других базах проекта. */
@@ -1781,7 +1781,7 @@ async function pollTask(ctx: VeStageContext, state: VeCollectTaskState, limit: n
 
   const { data, error } = await ctx.supabase
     .from(table)
-    .select('status, error_message')
+    .select('status, error_message, started_at')
     .eq('id', state.child_job_id)
     .maybeSingle();
   if (error) throw new Error(`${table} read: ${error.message}`);
@@ -1791,7 +1791,7 @@ async function pollTask(ctx: VeStageContext, state: VeCollectTaskState, limit: n
     return;
   }
 
-  const row = data as { status?: unknown; error_message?: unknown };
+  const row = data as { status?: unknown; error_message?: unknown; started_at?: unknown };
   const status = String(row.status ?? '');
   if (status === 'completed') {
     state.harvest = await readChildRows(ctx, state, limit);
@@ -1801,6 +1801,15 @@ async function pollTask(ctx: VeStageContext, state: VeCollectTaskState, limit: n
     state.status = 'failed';
     state.error =
       (typeof row.error_message === 'string' && row.error_message) || `дочерняя джоба: ${status}`;
+  } else if (status === 'running' || status === 'processing') {
+    // Queue wait (including a redeploy recovery) is not parser execution.
+    // Read terminal status first so a completed old child is still harvested.
+    const startedAt = typeof row.started_at === 'string' ? row.started_at : state.dispatched_at;
+    if (startedAt && Date.now() - Date.parse(startedAt) > CHILD_TIMEOUT_MS) {
+      state.status = 'failed';
+      state.error = 'timeout: дочерний сбор выполняется дольше 3 часов';
+      stageLog(ctx, `[base_collect] ${state.source}: ${state.error} (${state.child_job_id})`);
+    }
   }
   // queued/running/pending — задача остаётся dispatched, ждём следующий тик.
 }
@@ -3375,19 +3384,6 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   for (const state of tasks) {
     if (state.status !== 'dispatched') continue;
     polledTasks = true;
-    // Дочерняя джоба висит дольше 3ч (парсер умер/потерял строку) — вечно
-    // не ждём: задача failed, сборка продолжается по остальным задачам.
-    // У задач без dispatched_at (collect_info до появления штампа) таймаута
-    // нет — поведение как раньше.
-    if (
-      state.dispatched_at &&
-      Date.now() - new Date(state.dispatched_at).getTime() > CHILD_TIMEOUT_MS
-    ) {
-      state.status = 'failed';
-      state.error = 'timeout: дочерняя джоба зависла';
-      stageLog(ctx, `[base_collect] ${state.source}: ${state.error} (${state.child_job_id})`);
-      continue;
-    }
     try {
       await pollTask(ctx, state, target?.max_candidates ?? limit);
     } catch (e) {

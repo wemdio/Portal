@@ -129,6 +129,16 @@ async function resumeFailedPreview(
   if (!saved) return null;
   if (activeBaseIds.includes(saved.id)) return { ok: true, created: false, base: saved };
   const info = { ...saved.collect_info, ...(previewRecoveryKind(saved) === 'validation' ? { validation_retry: true } : {}) };
+  // Older workers timed out queued children from dispatch time. On an explicit
+  // continuation, poll the SAME child again instead of buying another scrape.
+  if (Array.isArray(info.tasks)) {
+    info.tasks = info.tasks.map((task: Record<string, unknown>) => {
+      if (task.status !== 'failed' || !task.child_job_id || task.error !== 'timeout: дочерняя джоба зависла') return task;
+      const recovered: Record<string, unknown> = { ...task, status: 'dispatched' };
+      delete recovered.error;
+      return recovered;
+    });
+  }
   if (info.saved_email_recovery !== undefined) {
     info.saved_email_recovery = resumeVeSavedEmailRecovery(info.saved_email_recovery);
   }
