@@ -1,5 +1,36 @@
 # Portal AI agent rules
 
+## Software Factory
+
+Use the repo-scoped workflow for implementation tasks. Load only the skill
+needed for the current step; a question or read-only investigation does not
+require a new worktree or code changes.
+
+1. **Prepare:** [new-feature](.agents/skills/new-feature/SKILL.md) verifies the
+   assigned worktree or creates an isolated `codex/` task branch from the
+   selected base. Preserve an existing task branch; do not default to `main`.
+2. **Build:** [code-structure](.agents/skills/code-structure/SKILL.md) guides
+   shared mechanics and domain boundaries without forcing unrelated refactors.
+3. **Verify:** [evidence-driven-testing](.agents/skills/evidence-driven-testing/SKILL.md)
+   records relevant checks and their limits. Use
+   [before-and-after](.agents/skills/before-and-after/SKILL.md) for visible
+   changes. Evidence stays local in ignored `.artifacts/` unless sharing is
+   authorized for a specific destination.
+4. **Deliver:** inspect the diff, commit only the task's files, push the
+   current task branch and report branch, SHA and validation. Apply
+   [unslop](.agents/skills/unslop/SKILL.md) to prose written for the user.
+
+[Greploop](.agents/skills/greploop/SKILL.md) and its
+[apps fallback](.agents/skills/greploop-apps/SKILL.md) apply only to separately
+requested work on an existing PR. They do not authorize PR creation, merge,
+deployment, uploads or changes to another developer's branch. The release
+and production boundary below remains authoritative.
+
+Read [docs/software-factory.md](docs/software-factory.md) for setup,
+environment cautions, Portal checks, examples and upstream provenance.
+Never use `npm run dev`, `npm start` or worker startup as automatic task
+setup: their hooks can migrate databases or process real queues.
+
 ## Production infrastructure map (critical, current since 2026-07-22)
 
 - The current production host is `139.60.162.12`. It runs the Portal app and workers, the main Portal Supabase/Postgres stack, the Instantly operational Postgres instances, and the analytics database `instantly_dataset`.

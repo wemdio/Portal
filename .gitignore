@@ -193,3 +193,30 @@ app/logs/
 
 # Нарезанные сегменты баз (espSegment)
 /esp-segments/
+
+# Software Factory: version only the shared project skills and Claude links.
+!/.agents/
+/.agents/*
+!/.agents/skills/
+/.agents/skills/*
+!/.agents/skills/new-feature/
+!/.agents/skills/code-structure/
+!/.agents/skills/evidence-driven-testing/
+!/.agents/skills/before-and-after/
+!/.agents/skills/greploop/
+!/.agents/skills/greploop-apps/
+!/.agents/skills/unslop/
+!/.claude/
+/.claude/*
+!/.claude/skills/
+/.claude/skills/*
+!/.claude/skills/new-feature
+!/.claude/skills/code-structure
+!/.claude/skills/evidence-driven-testing
+!/.claude/skills/before-and-after
+!/.claude/skills/greploop
+!/.claude/skills/greploop-apps
+!/.claude/skills/unslop
+
+# Local test evidence, never customer data in Git.
+/.artifacts/

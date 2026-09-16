@@ -1,0 +1,42 @@
+{
+  "repository": "https://github.com/michaelshimeles/skills",
+  "revision": "513f8a24aae6383b00356fa285144b1bc3730dc1",
+  "imported_on": "2026-09-16",
+  "skills": [
+    "new-feature",
+    "code-structure",
+    "evidence-driven-testing",
+    "before-and-after",
+    "greploop",
+    "greploop-apps",
+    "unslop"
+  ],
+  "unchanged_files": {
+    ".agents/skills/evidence-driven-testing/scripts/evidence.py": "d246b499991d495bf2f972f852d2dae0851b5bff2b5a64347f610242808ae8eb",
+    ".agents/skills/before-and-after/LICENSE": "e328fb0674dec4c1640fa17dbdb6834324dd53ec9ea43439e13e01e8b2598847",
+    ".agents/skills/greploop/LICENSE": "b5005f09527f9533812a206cefe6ff5f71e5cdc0ae644750a3b1c71901c89ddd",
+    ".agents/skills/greploop/references/graphql-queries.md": "99a689cf5318332316353a3fe2e68d5f6096f9c48b6428ca5ddf434ee5c75a42",
+    ".agents/skills/greploop-apps/LICENSE": "b5005f09527f9533812a206cefe6ff5f71e5cdc0ae644750a3b1c71901c89ddd",
+    ".agents/skills/unslop/LICENSE": "bc957ca6bee02792566a1a028d105e02e247c6e77cf057061674273da77b200e"
+  },
+  "adaptations": {
+    "new-feature": "Keep the assigned task/base; codex branches; no automatic main rebase or cleanup; controlled environment setup.",
+    "code-structure": "Add Portal module conventions and ENG/Vertical Engine v2 boundaries; retain upstream guidance.",
+    "evidence-driven-testing": "Local evidence and proportional checks; optional unchanged recorder; no automatic posts/uploads.",
+    "before-and-after": "Prefer available native capture; remove capture/upload scripts and public storage adapters; retain license.",
+    "greploop": "Existing authorized GitHub PR only; current-head review evidence; max 3 cycles; preserve task branch; no release actions.",
+    "greploop-apps": "Share greploop rules and budget; use only for a requested/confirmed file-count fallback.",
+    "unslop": "Retain upstream text; add factual accuracy, uncertainty and user-language guidance."
+  },
+  "upstream_license_files": [
+    "before-and-after/LICENSE",
+    "greploop/LICENSE",
+    "greploop-apps/LICENSE",
+    "unslop/LICENSE"
+  ],
+  "upstream_without_separate_license_file": [
+    "new-feature",
+    "code-structure",
+    "evidence-driven-testing"
+  ]
+}
