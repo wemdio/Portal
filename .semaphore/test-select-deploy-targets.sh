@@ -104,6 +104,25 @@ assert_eq "$DEPLOY_DATASET_SYNC" 0 "full deploy does not blindly re-copy dataset
 select_deploy_targets_from_files 'Dockerfile.worker'
 assert_eq "$DEPLOY_PORTAL" 0 "worker Dockerfile does not restart Portal"
 assert_eq "$DEPLOY_WORKERS" 1 "worker Dockerfile restarts the shared worker pool"
+assert_eq "$DEPLOY_SENDER" 1 "worker Dockerfile also redeploys the isolated sender worker"
+
+# Sender tool: API routes deploy with Portal, the SMTP/IMAP worker goes to the
+# isolated sender host only and must never restart the Portal host worker fleet.
+select_deploy_targets_from_files 'app/src/lib/sender/smtp.ts'
+assert_eq "$DEPLOY_SENDER" 1 "sender change deploys the sender host worker"
+assert_eq "$DEPLOY_PORTAL" 1 "sender change still deploys Portal (API routes share the image)"
+assert_eq "$DEPLOY_WORKERS" 0 "sender change does not restart Portal host workers"
+
+select_deploy_targets_from_files 'app/worker/sender.ts'
+assert_eq "$DEPLOY_SENDER" 1 "sender entrypoint change deploys the sender host worker"
+assert_eq "$DEPLOY_PORTAL" 0 "sender entrypoint change does not restart Portal"
+
+select_deploy_targets_from_files 'deploy/sender/docker-compose.yml'
+assert_eq "$DEPLOY_SENDER" 1 "sender compose change deploys the sender host worker"
+assert_eq "$DEPLOY_PORTAL_HOST" 0 "sender compose change does not restart the Portal host"
+
+select_deploy_targets_from_files 'app/src/lib/sender/smtp.ts'
+assert_eq "$DEPLOY_ALL" 0 "sender change is not a full deploy"
 
 select_deploy_targets_from_files 'supabase/instantly-migrations/999_test.sql'
 assert_eq "$DEPLOY_PORTAL" 1 "Instantly migration rebuilds Portal migration image"
