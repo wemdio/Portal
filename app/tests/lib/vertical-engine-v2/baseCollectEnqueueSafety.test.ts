@@ -350,11 +350,12 @@ describe('VE2 base collection enqueue recovery', () => {
     expect(canRunVeJob(independent, [research])).toBe(false);
     expect(canRunVeJob(research, [independent])).toBe(false);
     expect(canRunVeJob(baseJob('later', 'b5'), [1, 2, 3, 4].map((n) => baseJob(`a${n}`, `b${n}`)))).toBe(false);
-    // Бюджет Serper: одновременно собираются три базы, четвёртая ждёт в
-    // очереди, а лёгкие стадии мимо этого лимита проходят (16.09.2026).
-    expect(canRunVeJob(baseJob('fourth', 'b9'), [1, 2, 3].map((n) => baseJob(`s${n}`, `sb${n}`)))).toBe(false);
-    expect(canRunVeJob(baseJob('light', 'b9', 'template'), [1, 2, 3].map((n) => baseJob(`s${n}`, `sb${n}`)))).toBe(true);
-    expect([undefined, '0', 'NaN', '1', '3', '99'].map(veBaseCollectConcurrency)).toEqual([3, 3, 3, 1, 3, 16]);
+    // A lower collection cap is an explicit override, not the default. Scope
+    // locks still apply and lightweight work bypasses that optional throttle.
+    expect(canRunVeJob(baseJob('fourth', 'b9'), [1, 2, 3].map((n) => baseJob(`s${n}`, `sb${n}`)))).toBe(true);
+    expect(canRunVeJob(baseJob('fourth', 'b9'), [1, 2, 3].map((n) => baseJob(`s${n}`, `sb${n}`)), 3)).toBe(false);
+    expect(canRunVeJob(baseJob('light', 'b9', 'template'), [1, 2, 3].map((n) => baseJob(`s${n}`, `sb${n}`)), 3)).toBe(true);
+    expect([undefined, '0', 'NaN', '1', '3', '99'].map(veBaseCollectConcurrency)).toEqual([16, 16, 16, 1, 3, 16]);
     // Real aggregate writes start from independent snapshots, so a missing
     // serialization would lose concurrent increments in this one project.
     const totals = { tokens_used: 0, cost_usd: 0 };

@@ -11,6 +11,8 @@ export const veRelevanceDecisionSchema = z.object({
   evidence: z.array(z.object({ field: z.string().max(40), quote: z.string().min(1).max(400) })).max(3),
   context_hash: z.string().regex(/^[a-f0-9]{64}$/),
   review_attempts: z.number().int().nonnegative().optional(),
+  /** No new paid search while existing stock is still being processed. */
+  search_deferred: z.literal(true).optional(),
   /** Bounded website follow-up completed (or exhausted) under this policy. */
   website_review_version: z.union([z.literal(2), z.literal(3), z.literal(VE_RELEVANCE_WEBSITE_VERSION)]).optional(),
 });

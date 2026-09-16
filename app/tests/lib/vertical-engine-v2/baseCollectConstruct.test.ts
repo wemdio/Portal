@@ -465,8 +465,15 @@ describe('base_collect CONSTRUCT step order', () => {
     const recoveredInfo: VeCollectInfo = { ...collectInfo([knownInn]), collection_mode: 'preview',
       target_progress: { ...createCollectionTarget('preview'), round: 2, candidates_processed: 1 },
       target_checkpoint: { completed_round: 1, seen_rows: [knownInn] } };
+    recoveredInfo.tasks![0].exhausted = true;
+    jest.mocked(fetchVeRelevanceEvidence).mockClear();
     jest.mocked(fetchVeRelevanceEvidence).mockResolvedValueOnce({ status: 'ok', text: 'Confirmed legal entity', url: 'https://found.test/', reason: 'discovered_verified_website' });
     const recoveredDb = seed(recoveredInfo);
+    await runBaseCollectStage(makeJob(), { supabase: recoveredDb as unknown as SupabaseClient });
+    expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
+    expect((recoveredDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).search_policy)
+      .toMatchObject({ phase: 'paid', deferred_rows: [knownInn] });
+    await recoveredDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
     await runBaseCollectStage(makeJob(), { supabase: recoveredDb as unknown as SupabaseClient });
     const recoveredInput = recoveredDb.getRows('base_constructor_jobs')[0].data as string[][];
     expect(recoveredInput).toHaveLength(2);
@@ -478,8 +485,8 @@ describe('base_collect CONSTRUCT step order', () => {
     const excludedSources = Array.from({ length: 16 }, (_, i) => unifiedRow({
       company: `Already collected ${i}`, inn: String(7700000100 + i),
     }));
-    const discoveryInfo = { ...collectInfo([...excludedSources, knownInn]), collection_mode: 'preview' as const,
-      target_progress: createCollectionTarget('preview') };
+    const discoveryInfo: VeCollectInfo = { ...collectInfo([...excludedSources, knownInn]), collection_mode: 'preview',
+      search_policy: { version: 1, phase: 'paid', deferred_rows: [] }, target_progress: createCollectionTarget('preview') };
     const discoveryDb = seed(discoveryInfo, { ve_bases: [makeBase(discoveryInfo), {
       ...makeBase({}), id: 'other-ready', hypothesis_id: 'h2', status: 'analyzed',
       columns: [...VE_AUTO_COLLECT_COLUMNS],
@@ -493,9 +500,35 @@ describe('base_collect CONSTRUCT step order', () => {
     expect(fetchVeRelevanceEvidence).toHaveBeenCalledWith('', expect.objectContaining({ companyInn: knownInn.inn }));
     expect((discoveryDb.getRows('base_constructor_jobs')[0].data as string[][])).toHaveLength(2);
 
+    // Empty site/email lanes do not mean the whole directory is exhausted.
+    // Persist the phase switch, then read the original filters and search only
+    // for the deficit. A restored worker must not restart the empty free lanes.
+    const phasedInfo: VeCollectInfo = { ...collectInfo([]), collection_mode: 'preview',
+      target_progress: createCollectionTarget('preview') };
+    phasedInfo.tasks![0].status = 'pending';
+    const phasedDb = seed(phasedInfo);
+    jest.mocked(searchRows).mockReset().mockImplementation(async (filters) => ({ rows: filters.hasWebsite || filters.hasEmail
+      ? [] : [{ name: knownInn.company, inn: knownInn.inn, website: '', email: '' }] }));
+    jest.mocked(fetchVeRelevanceEvidence).mockClear().mockResolvedValueOnce({
+      status: 'ok', text: 'Confirmed legal entity', url: 'https://found.test/', reason: 'discovered_verified_website',
+    });
+    await runBaseCollectStage(makeJob(), { supabase: phasedDb as unknown as SupabaseClient });
+    expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
+    expect(searchRows).toHaveBeenCalledTimes(2);
+    expect(jest.mocked(searchRows).mock.calls.map(([filters]) => [!!filters.hasWebsite, !!filters.hasEmail]))
+      .toEqual([[true, false], [false, true]]);
+    expect((phasedDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).search_policy?.phase).toBe('paid');
+    await phasedDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+    await runBaseCollectStage(makeJob(), { supabase: phasedDb as unknown as SupabaseClient });
+    expect(searchRows).toHaveBeenCalledTimes(3);
+    expect(jest.mocked(searchRows).mock.calls.at(-1)?.[0]).toEqual(DIRECTORY_TASK.directory_filters);
+    expect(fetchVeRelevanceEvidence).toHaveBeenCalledTimes(1);
+    expect(phasedDb.getRows('base_constructor_jobs')).toHaveLength(1);
+
     // The small cohort must reach the actual constructor and publish checked
     // rows while the same base continues collecting. Old runs retain their
     // original input scope across a deployment.
+    jest.mocked(fetchVeRelevanceEvidence).mockClear();
     const harvest = Array.from({ length: 1_200 }, (_, i) => unifiedRow({
       company: `Clinic ${i}`, website: `clinic-${i}.test`, email: `mail@clinic-${i}.test`,
     }));
@@ -505,9 +538,12 @@ describe('base_collect CONSTRUCT step order', () => {
         delete target.first_round_candidates;
         target.ready_target = 1_000;
       }
-      const db = seed({ ...collectInfo(harvest), collection_mode: 'preview', target_progress: target });
+      const db = seed({ ...collectInfo([...harvest, knownInn]), collection_mode: 'preview', target_progress: target });
       await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
       const constructor = db.getRows('base_constructor_jobs')[0];
+      expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
+      expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).search_policy?.phase).toBe('existing');
+      expect((stripTaskHarvest(db.getRows('ve_bases')[0]).collect_info as VeCollectInfo).search_policy).not.toHaveProperty('deferred_rows');
       expect(constructor.workload_origin).toBe('automation');
       const expected = legacy ? 1_200 : 100;
       const expectedReady = legacy ? 1_200 : 20;
@@ -552,6 +588,9 @@ describe('base_collect CONSTRUCT step order', () => {
         expect(completed).toMatchObject({ status: 'analyzing', row_count: 500 });
         expect(prepareSegmentationAudience({ rows: completed.data as Record<string, unknown>[],
           columns: completed.columns as string[], source: 'auto' }).rows).toHaveLength(500);
+        expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
+        expect((completed.collect_info as VeCollectInfo).search_policy?.phase).toBe('existing');
+        expect(searchRows).toHaveBeenCalledWith(expect.objectContaining({ hasWebsite: true }), expect.any(Number), expect.any(Number));
       }
     }
 

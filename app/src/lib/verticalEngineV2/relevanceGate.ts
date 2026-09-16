@@ -197,6 +197,8 @@ export async function findIrrelevantRows(input: {
   /** New explicit manual review may refresh website facts; retry of the same
    * job and automatic continuation reuse its saved evidence and paid verdicts. */
   reviewAttempt?: string;
+  allowPaidSearch?: boolean;
+  websiteLimit?: number;
   fetchEvidence?: typeof fetchVeRelevanceEvidence;
 }): Promise<VeRelevanceGateResult> {
   const signal = input.signal ?? getVeActiveJobSignal(); signal?.throwIfAborted();
@@ -627,6 +629,7 @@ export async function findIrrelevantRows(input: {
       const cached = checkpoint.website_evidence[entry.key];
       const semantic = checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]];
       if (semantic && semantic.status !== 'finished') return false;
+      if (cached?.search_deferred) return input.allowPaidSearch !== false;
       if (cached?.provider_error) return !searchAttemptsExhausted(cached);
       if (checkpoint.citation_repairs[entry.key] && current.get(entry)?.status === 'error') return false;
       const pendingRefinement = cached?.reader_version === 1 && cached.status === 'ok' && !cached.refined && Boolean(cached.text);
@@ -645,7 +648,7 @@ export async function findIrrelevantRows(input: {
         return pendingText(b) - pendingText(a)
           || Number(Boolean(checkpoint.website_evidence[a.key]?.provider_error)) - Number(Boolean(checkpoint.website_evidence[b.key]?.provider_error))
           || a.attempts - b.attempts;
-      }).slice(0, MAX_WEBSITES);
+      }).slice(0, Math.min(MAX_WEBSITES, Math.max(0, input.websiteLimit ?? MAX_WEBSITES)));
     for (let start = 0; start < review.length && !stopProviderCalls; start += WEBSITE_CONCURRENCY) {
       signal?.throwIfAborted(); const enriched: Entry[] = [];
       await Promise.all(review.slice(start, start + WEBSITE_CONCURRENCY).map(async (entry) => {
@@ -661,8 +664,19 @@ export async function findIrrelevantRows(input: {
         }
         const evidence = stripUnstorableJsonChars(await (input.fetchEvidence ?? fetchVeRelevanceEvidence)(entry.fields.website, { signal: signal ?? undefined,
           companyInn: entry.identity, companyName: entry.fields.company,
-          companyAddress: entry.group.rows.map((row) => rowText(row, ['address', 'адрес'])).find(Boolean), focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' ') }));
+          companyAddress: entry.group.rows.map((row) => rowText(row, ['address', 'адрес'])).find(Boolean), focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' '),
+          allowPaidSearch: input.allowPaidSearch }));
         signal?.throwIfAborted();
+        if (evidence.search_deferred) {
+          checkpoint.website_evidence[entry.key] = {
+            reader_version: 1, reader_revision: VE_RELEVANCE_WEBSITE_VERSION, status: 'unavailable', text: '',
+            url: evidence.url, reason: 'paid_search_deferred', search_deferred: true,
+            review_attempt: reviewAttempt, review_attempts: entry.attempts, refined: true,
+          };
+          record(entry, { ...current.get(entry)!, status: 'needs_review', evidence: [], search_deferred: true,
+            reason: 'Дополнительный поиск отложен: сначала проверяем компании с имеющимися данными.' });
+          return;
+        }
         if (evidence.provider_error) {
           const provider = evidence.provider_error;
           // Transient search failure belongs to this company. Preserve it for
@@ -683,6 +697,8 @@ export async function findIrrelevantRows(input: {
           return;
         }
         entry.attempts += 1;
+        const previous = current.get(entry);
+        if (previous?.search_deferred) { const resumed = { ...previous }; delete resumed.search_deferred; record(entry, resumed); }
         const usable = evidence.status === 'ok' && Boolean(evidence.text.trim());
         checkpoint.website_evidence[entry.key] = {
           reader_version: 1, reader_revision: VE_RELEVANCE_WEBSITE_VERSION, status: evidence.status, text: usable ? sliceWholeChars(evidence.text, 0, 6000) : '',
@@ -726,7 +742,7 @@ export async function findIrrelevantRows(input: {
       }
       result.error ??= website.provider_error.message;
     }
-    if (website?.reader_revision === VE_RELEVANCE_WEBSITE_VERSION && website.refined && !website.provider_error) {
+    if (website?.reader_revision === VE_RELEVANCE_WEBSITE_VERSION && website.refined && !website.provider_error && !website.search_deferred) {
       decision = { ...decision, website_review_version: VE_RELEVANCE_WEBSITE_VERSION };
       record(entry, decision);
     }

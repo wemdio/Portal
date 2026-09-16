@@ -114,10 +114,11 @@ export function needsVeRelevanceReview(row: Record<string, unknown>): boolean {
 function canAutomaticallyReview(row: Record<string, unknown>, evidenceAvailable: boolean): boolean {
   if (!needsVeRelevanceReview(row) || !isVeAcceptedEmailStatus(row._email_status)) return false;
   const decision = row._ve_relevance && typeof row._ve_relevance === 'object'
-    ? row._ve_relevance as { status?: unknown; review_attempts?: unknown; website_review_version?: unknown } : null;
+    ? row._ve_relevance as { status?: unknown; review_attempts?: unknown; website_review_version?: unknown; search_deferred?: unknown } : null;
   // Newly recovered legacy emails still need their initial classification.
   // Technical errors use the caller's bounded recovery policy, not a guess.
   if (!decision || decision.status === 'error') return true;
+  if (decision.status === 'needs_review' && decision.search_deferred === true) return evidenceAvailable;
   return decision.status === 'needs_review' && evidenceAvailable && ((decision.review_attempts ?? 0) === 0
     || decision.website_review_version !== VE_RELEVANCE_WEBSITE_VERSION);
 }
@@ -141,6 +142,7 @@ export function buildVeRelevanceReviewBatch(input: {
   ready: Array<Record<string, unknown>>;
   source: Array<Record<string, unknown>>;
   automatic: boolean;
+  allowPaidSearch?: boolean;
 }): VeRelevanceReviewBatch {
   const saved = mergeVeRelevanceRows(input.reserve, input.ready);
   const withEvidence = new Set([...saved, ...input.source]
@@ -148,6 +150,7 @@ export function buildVeRelevanceReviewBatch(input: {
     .map(veRelevanceCompanyKey));
   const selected = new Set(input.reserve.filter((row) => {
     if (!needsVeRelevanceReview(row)) return false;
+    if (input.allowPaidSearch === false && (row._ve_relevance as { search_deferred?: unknown } | undefined)?.search_deferred === true) return false;
     if (!input.automatic) return true;
     return canAutomaticallyReview(row, withEvidence.has(veRelevanceCompanyKey(row)));
   }).map(veRelevanceCompanyKey));

@@ -592,6 +592,28 @@ describe('llm rawCall retry', () => {
     await findIrrelevantRows({ ...sameBrand, checkpoint: separateCities.checkpoint, fetchEvidence: noSite });
     expect(noSite).toHaveBeenCalledTimes(2);
 
+    // Postponing a paid search is neither a rejection nor a provider failure.
+    // Resume only that evidence lookup once the ready-contact deficit requires it.
+    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'needs_review', reason: 'Need website evidence', evidence: [] }] }));
+    const deferredEvidence = jest.fn().mockResolvedValue({ status: 'unavailable', text: '', url: '',
+      reason: 'paid_search_deferred', search_deferred: true });
+    const deferredSearch = await findIrrelevantRows({ ...input, allowPaidSearch: false, fetchEvidence: deferredEvidence });
+    expect(deferredSearch.decisions.get(0)).toMatchObject({ status: 'needs_review', search_deferred: true });
+    expect(deferredSearch.decisions.get(0)).not.toHaveProperty('website_review_version');
+    expect(deferredSearch.retryable).toBe(false);
+    expect(deferredSearch.coverage.complete).toBe(true);
+    await findIrrelevantRows({ ...input, allowPaidSearch: false, checkpoint: structuredClone(deferredSearch.checkpoint), fetchEvidence: deferredEvidence });
+    expect(deferredEvidence).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    deferredEvidence.mockResolvedValue({ status: 'ok', text: description, url: 'https://factory.test/', reason: 'identity_verified_website' });
+    fetchMock.mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'relevant', reason: description, evidence_ids: [0] }] }))
+      .mockResolvedValueOnce(confirmation);
+    const resumedSearch = await findIrrelevantRows({ ...input, allowPaidSearch: true, checkpoint: deferredSearch.checkpoint, fetchEvidence: deferredEvidence });
+    expect(deferredEvidence).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(resumedSearch.decisions.get(0)?.status).toBe('relevant');
+    expect(resumedSearch.decisions.get(0)).not.toHaveProperty('search_deferred');
+
     // An intermittent search timeout cannot discard a successful sibling's
     // evidence or stop the next website batch. The failed subset retries alone.
     const networkRows = Array.from({ length: 10 }, (_, i) => ({ company: `Network ${i}`, inn: String(7700000000 + i) }));
@@ -714,6 +736,16 @@ describe('llm rawCall retry', () => {
     }
     // Discovery is bounded, resumes without repaying successful siblings, and
     // provider failure does not erase already completed searches.
+    const paidSearch = jest.fn().mockResolvedValue([]);
+    const cacheSearch = jest.fn().mockResolvedValue(null);
+    const freeOptions = { companyName: 'Домком', companyAddress: 'Тула', allowPaidSearch: false,
+      search: paidSearch, searchCache: cacheSearch, fetchPage: async (url: string) => parseVeEvidencePage(Buffer.from(
+        '<title>Домком — агентство недвижимости</title><main>Наш адрес: Тула. Продажа недвижимости и подбор жилья покупателям.</main>'), url, 'text/html') };
+    expect(await fetchVeRelevanceEvidence('', freeOptions)).toMatchObject({ search_deferred: true, status: 'unavailable' });
+    expect(paidSearch).not.toHaveBeenCalled();
+    cacheSearch.mockResolvedValue([{ link: 'https://domkom.test/' }]);
+    expect(await fetchVeRelevanceEvidence('', freeOptions)).toMatchObject({ status: 'ok' });
+    expect(paidSearch).not.toHaveBeenCalled();
     const sourceRows = Array.from({ length: 18 }, (_, i) => ({ company: `Agency ${i}`, address: 'Тула',
       website: '', email: '', inn: '', source_detail: 'hh' }));
     let discoveryState: VeSourceContactCheckpoint | undefined;
