@@ -1,6 +1,8 @@
 import { z } from 'zod';
 
-export const VE_RELEVANCE_WEBSITE_VERSION = 3;
+// v4 separates explicit buyer requirements from benefits offered by the seller.
+// Only unresolved saved companies receive a bounded follow-up under this policy.
+export const VE_RELEVANCE_WEBSITE_VERSION = 4;
 
 export const veRelevanceDecisionSchema = z.object({
   version: z.literal(2),
@@ -10,7 +12,7 @@ export const veRelevanceDecisionSchema = z.object({
   context_hash: z.string().regex(/^[a-f0-9]{64}$/),
   review_attempts: z.number().int().nonnegative().optional(),
   /** Bounded website follow-up completed (or exhausted) under this policy. */
-  website_review_version: z.union([z.literal(2), z.literal(VE_RELEVANCE_WEBSITE_VERSION)]).optional(),
+  website_review_version: z.union([z.literal(2), z.literal(3), z.literal(VE_RELEVANCE_WEBSITE_VERSION)]).optional(),
 });
 
 export type VeRelevanceDecision = z.infer<typeof veRelevanceDecisionSchema>;

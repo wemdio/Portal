@@ -9,7 +9,7 @@ const websiteEvidenceSchema = z.object({
   reader_version: z.literal(1).optional(),
   // Additive discovery revision: older workers can still parse identity-checked
   // evidence and paid verdicts during rollback/rolling deployment.
-  reader_revision: z.union([z.literal(2), z.literal(3)]).optional(),
+  reader_revision: z.union([z.literal(2), z.literal(3), z.literal(4)]).optional(),
   status: z.enum(['ok', 'unavailable', 'error']),
   // Keep text only while refinement is pending. Completed checks retain their
   // attempt marker, not thousands of full website extracts in every DB write.

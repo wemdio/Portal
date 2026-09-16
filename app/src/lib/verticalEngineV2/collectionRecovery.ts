@@ -1,7 +1,7 @@
 import { isVeProviderBillingError } from './collectionErrors';
 
 /** Only recognized preview failures may reuse a base; never supply/refill. */
-export function previewRecoveryKind(base: Record<string, unknown>): 'validation' | 'billing' | 'pipeline' | 'discovery' | 'catalog' | null {
+export function previewRecoveryKind(base: Record<string, unknown>): 'validation' | 'billing' | 'pipeline' | 'discovery' | 'catalog' | 'interrupted' | null {
   const info = base.collect_info as Record<string, unknown> | null;
   if (base.source !== 'auto' || base.status !== 'failed' || !base.hypothesis_id
     || !info || info.collection_mode !== 'preview' || info.refill || info.supply_batch_id) return null;
@@ -11,6 +11,14 @@ export function previewRecoveryKind(base: Record<string, unknown>): 'validation'
   const stats = info.stats as Record<string, unknown> | undefined;
   const names = info.company_name_cleanup as Record<string, unknown> | undefined;
   if (!progress) return null;
+  // Accounting failures stop paid work immediately, possibly between rounds.
+  // An explicit continuation must reuse the durable children/cursors instead
+  // of purchasing a new base. Reject incoherent checkpoints and cancellations.
+  if (base.error === 'Provider usage journal could not be saved.'
+    && progress.status === 'collecting'
+    && typeof progress.round === 'number' && Number.isSafeInteger(progress.round) && progress.round > 0
+    && (checkpoint?.completed_round ?? 0) === progress.round
+      - (info.validation_retry || info.company_name_recovery || info.relevance_review_requested ? 0 : 1)) return 'interrupted';
   const discovery = info.source_contact_recovery as Record<string, unknown> | undefined;
   if (progress.status === 'error' && !construct && discovery?.version === 1
     && typeof progress.round === 'number' && Number.isSafeInteger(progress.round) && progress.round > 0

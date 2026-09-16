@@ -34,6 +34,7 @@ import { fetchVeRelevanceEvidence, resolveVeEvidenceAddress } from '@/lib/vertic
 import { parseVeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
 import { needsVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceReserve';
 import { recoverVeSourceContacts, hasPendingVeSourceContacts, type VeSourceContactCheckpoint } from '@/lib/verticalEngineV2/sourceContacts';
+import { cleanVeCompanyNames } from '@/lib/verticalEngineV2/companyNameCleanup';
 
 const schema = z.object({ ok: z.boolean() });
 
@@ -127,6 +128,35 @@ describe('llm rawCall retry', () => {
         expect(JSON.stringify(journalWarning.mock.calls)).not.toContain('private diagnostic details');
       }
     }
+    // A model-expanded brand must not discard the other verified names.
+    // Preserve the safe source words; do not infer the name from its domain.
+    const companyRows = [
+      { company: 'ОАО "БХЗ"', website: 'bhz.test' },
+      { company: 'ООО "ПГ"ФОСФОРИТ"', website: 'different.test' },
+      { company: '<unsafe>', website: 'unsafe.test' },
+    ];
+    fetchMock.mockReset().mockResolvedValue(httpResponse(200, {
+      choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ cleaned: [
+        { idx: 0, name: 'Выдуманный химический завод' }, { idx: 1, name: 'ПГ Фосфорит' }, { idx: 2, name: '<unsafe>' },
+      ] }) } }], usage: {},
+    }));
+    const checkpoint = jest.fn(async () => {});
+    const cleaned = await cleanVeCompanyNames({ rows: companyRows, language: 'ru', scope: 'test', onCheckpoint: checkpoint });
+    expect(cleaned.summary).toMatchObject({ checked: 2, failed: 1 });
+    expect(cleaned.rows.map((row) => row._ve_company_name)).toMatchObject([
+      { status: 'ready', value: companyRows[0].company }, { status: 'ready', value: 'ПГ Фосфорит' }, { status: 'failed', value: '' },
+    ]);
+    expect(cleaned.rows.map((row) => row.company)).toEqual(companyRows.map((row) => row.company));
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).response_format.type).toBe('json_schema');
+    fetchMock.mockClear();
+    await cleanVeCompanyNames({ rows: companyRows.slice(0, 2), language: 'ru', scope: 'test',
+      checkpoint: cleaned.checkpoint, onCheckpoint: checkpoint });
+    expect(fetchMock).not.toHaveBeenCalled();
+    fetchMock.mockResolvedValue(httpResponse(400, { error: 'configuration' }));
+    const stopped = await cleanVeCompanyNames({ rows: Array.from({ length: 81 }, (_, i) => ({ company: `Factory ${i}` })),
+      language: 'ru', scope: 'test', onCheckpoint: checkpoint });
+    expect(stopped.summary.checked).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('does not retry a permanent 4xx', async () => {
@@ -463,8 +493,8 @@ describe('llm rawCall retry', () => {
     expect(unavailable).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const legacy = JSON.parse(JSON.stringify(old.checkpoint)) as VeRelevanceCheckpoint;
-    Object.values(legacy.website_evidence).forEach((website) => { delete website.reader_revision; website.review_attempt = 'f'.repeat(64); });
-    Object.values(legacy.verdicts).forEach((verdict) => { delete verdict.website_review_version; });
+    Object.values(legacy.website_evidence).forEach((website) => { website.reader_revision = 3; website.review_attempt = 'f'.repeat(64); });
+    Object.values(legacy.verdicts).forEach((verdict) => { verdict.website_review_version = 3; });
     const legacyRow = { ...input.rows[0], _email_status: 'ok', _ve_relevance: Object.values(legacy.verdicts)[0] };
     expect(needsVeRelevanceEvidence(legacyRow)).toBe(true);
     const websiteText = (description + '. 🏭 ').padEnd(5999, 'x') + '😀 tail\u0000\ud83d';
