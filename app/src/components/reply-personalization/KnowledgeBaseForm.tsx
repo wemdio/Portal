@@ -1,8 +1,13 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Loader2, Upload, X } from 'lucide-react';
-import { extractTextFromFile, fetchKnowledgeBase, saveKnowledgeBase } from './api';
+import {
+  extractTextFromFile,
+  fetchKnowledgeBase,
+  saveKnowledgeBase,
+  type GlobalKnowledgeBaseDto,
+} from './api';
 
 const ACCEPT = '.pdf,.docx,.txt,.md';
 
@@ -11,8 +16,8 @@ const CONTROL_CLASS =
 
 type UploadField = 'productFacts' | 'exampleCase';
 
-/** Сколько символов брифа показывать до кнопки «Показать полностью». */
-const BRIEF_PREVIEW_CHARS = 600;
+/** Сколько символов брифа/глобальной настройки показывать до «Показать полностью». */
+const PREVIEW_CHARS = 600;
 
 /**
  * Поле базы знаний с опциональной кнопкой загрузки файла: текст извлекается
@@ -29,6 +34,7 @@ function KbField({
   uploadField,
   uploadingField,
   onUpload,
+  belowLabel,
 }: {
   label: string;
   hint?: string;
@@ -39,6 +45,8 @@ function KbField({
   uploadField?: UploadField;
   uploadingField?: UploadField | null;
   onUpload?: (field: UploadField, file: File) => void;
+  /** Пометка между заголовком и полем — про глобальную настройку студии. */
+  belowLabel?: ReactNode;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const uploading = uploadField != null && uploadingField === uploadField;
@@ -75,6 +83,7 @@ function KbField({
           </>
         ) : null}
       </div>
+      {belowLabel}
       <textarea
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -82,6 +91,46 @@ function KbField({
         className={`${CONTROL_CLASS} resize-y`}
         placeholder={placeholder}
       />
+    </div>
+  );
+}
+
+/**
+ * Пометка у поля с глобальной настройкой студии: пока поле проекта пусто —
+ * показывает глобальное значение (оно и используется), после заполнения —
+ * предупреждает, что приоритет у значения проекта.
+ */
+function GlobalOverrideNote({ globalValue, projectValue }: { globalValue: string; projectValue: string }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!globalValue.trim()) return null;
+
+  if (projectValue.trim()) {
+    return (
+      <p className="mb-2 text-xs text-zinc-500">
+        Глобальная настройка студии переопределена — используется это значение проекта.
+      </p>
+    );
+  }
+
+  return (
+    <div className="mb-2 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2">
+      <p className="text-xs text-blue-800">
+        Поле не заполнено — используется глобальная настройка студии. Заполните, чтобы задать
+        свою для этого проекта (она приоритетнее).
+      </p>
+      <p className="mt-1.5 whitespace-pre-wrap break-words text-xs leading-relaxed text-blue-700">
+        {expanded ? globalValue : globalValue.slice(0, PREVIEW_CHARS)}
+        {!expanded && globalValue.length > PREVIEW_CHARS ? '…' : ''}
+      </p>
+      {globalValue.length > PREVIEW_CHARS ? (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-1.5 text-xs font-medium text-blue-600 transition-colors hover:text-blue-500"
+        >
+          {expanded ? 'Свернуть' : 'Показать полностью'}
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -101,6 +150,7 @@ export function KnowledgeBaseForm({
   const [productFacts, setProductFacts] = useState('');
   const [toneNotes, setToneNotes] = useState('');
   const [exampleCase, setExampleCase] = useState('');
+  const [globalKb, setGlobalKb] = useState<GlobalKnowledgeBaseDto | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -109,8 +159,9 @@ export function KnowledgeBaseForm({
 
   useEffect(() => {
     fetchKnowledgeBase(projectId)
-      .then(({ kb, projectBrief: brief }) => {
+      .then(({ kb, projectBrief: brief, global }) => {
         setProjectBrief(brief);
+        setGlobalKb(global);
         if (!kb) return;
         setProductFacts(kb.productFacts);
         setToneNotes(kb.toneNotes);
@@ -188,10 +239,10 @@ export function KnowledgeBaseForm({
               {projectBrief ? (
                 <div className="rounded-lg border border-zinc-200 bg-zinc-50 px-3.5 py-2.5">
                   <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-zinc-700">
-                    {briefExpanded ? projectBrief : projectBrief.slice(0, BRIEF_PREVIEW_CHARS)}
-                    {!briefExpanded && projectBrief.length > BRIEF_PREVIEW_CHARS ? '…' : ''}
+                    {briefExpanded ? projectBrief : projectBrief.slice(0, PREVIEW_CHARS)}
+                    {!briefExpanded && projectBrief.length > PREVIEW_CHARS ? '…' : ''}
                   </p>
-                  {projectBrief.length > BRIEF_PREVIEW_CHARS ? (
+                  {projectBrief.length > PREVIEW_CHARS ? (
                     <button
                       type="button"
                       onClick={() => setBriefExpanded((v) => !v)}
@@ -227,6 +278,9 @@ export function KnowledgeBaseForm({
               onChange={setToneNotes}
               rows={3}
               placeholder="На «вы», без давления, подпись — имя и должность…"
+              belowLabel={
+                globalKb ? <GlobalOverrideNote globalValue={globalKb.toneNotes} projectValue={toneNotes} /> : null
+              }
             />
 
             <KbField
@@ -239,6 +293,9 @@ export function KnowledgeBaseForm({
               uploadField="exampleCase"
               uploadingField={uploadingField}
               onUpload={handleUpload}
+              belowLabel={
+                globalKb ? <GlobalOverrideNote globalValue={globalKb.exampleCase} projectValue={exampleCase} /> : null
+              }
             />
           </div>
 

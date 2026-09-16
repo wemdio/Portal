@@ -1,5 +1,5 @@
 import { UNIVERSAL_REPLY_RULES } from './promptRules';
-import type { KnowledgeBase, QualificationRow, ThreadMessage } from './types';
+import type { GlobalKnowledgeBase, KnowledgeBase, QualificationRow, ThreadMessage } from './types';
 
 export interface PromptMessage {
   role: 'system' | 'user';
@@ -12,15 +12,25 @@ function formatThread(thread: ThreadMessage[]): string {
     .join('\n\n---\n\n');
 }
 
+/** Пер-проектное значение приоритетнее глобального; пустое поле = глобальное. */
+function preferProject(projectValue: string, globalValue: string): string {
+  return projectValue.trim() ? projectValue : globalValue;
+}
+
 export function buildReplyPrompt(input: {
   kb: KnowledgeBase;
+  /** Глобальный тон/пример — fallback для проектов без своих значений. */
+  globalKb: Pick<GlobalKnowledgeBase, 'toneNotes' | 'exampleCase'>;
   /** Бриф проекта живьём из карточки (projects.brief_text), не из базы знаний. */
   brief: string;
   qualification: QualificationRow;
   thread: ThreadMessage[];
   contextComplete: boolean;
 }): PromptMessage[] {
-  const { kb, brief, qualification, thread, contextComplete } = input;
+  const { kb, globalKb, brief, qualification, thread, contextComplete } = input;
+
+  const toneNotes = preferProject(kb.toneNotes, globalKb.toneNotes);
+  const exampleCase = preferProject(kb.exampleCase, globalKb.exampleCase);
 
   const system = `${UNIVERSAL_REPLY_RULES}
 
@@ -33,11 +43,11 @@ ${brief || '(бриф проекта не заполнен)'}
 ${kb.productFacts || '(факты не заполнены)'}
 
 Тон и ограничения этого проекта:
-${kb.toneNotes || '(особых ограничений нет, используй деловой тон по умолчанию)'}
+${toneNotes || '(особых ограничений нет, используй деловой тон по умолчанию)'}
 
 Пример хорошего письма для этого проекта (ориентир по стилю, не копируй
 дословно):
-${kb.exampleCase || '(примера нет)'}`;
+${exampleCase || '(примера нет)'}`;
 
   const user = `Компания-адресат: ${qualification.companyName || qualification.leadEmail}
 Email адресата: ${qualification.leadEmail}

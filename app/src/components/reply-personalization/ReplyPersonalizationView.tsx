@@ -1,8 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { RefreshCw, Settings } from 'lucide-react';
+import { Globe, RefreshCw, Settings } from 'lucide-react';
 import { fetchProjects, fetchReplies, type ProjectListItem } from './api';
+import { GlobalKnowledgeForm } from './GlobalKnowledgeForm';
 import { KnowledgeBaseForm } from './KnowledgeBaseForm';
 import { ReplyDetailPanel } from './ReplyDetailPanel';
 import type { ReplyListItem } from '@/lib/replyPersonalization/types';
@@ -47,12 +48,15 @@ export function ReplyPersonalizationView() {
   const [needsKb, setNeedsKb] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [kbModalOpen, setKbModalOpen] = useState(false);
+  const [globalKbModalOpen, setGlobalKbModalOpen] = useState(false);
+  const [canManageGlobalKb, setCanManageGlobalKb] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadProjects = useCallback(async () => {
     try {
       const res = await fetchProjects();
       setProjects(res.projects);
+      setCanManageGlobalKb(res.canManageGlobalKb);
       setProject((current) =>
         current ? (res.projects.find((p) => p.id === current.id) ?? current) : current,
       );
@@ -111,6 +115,17 @@ export function ReplyPersonalizationView() {
       <aside className="flex min-h-0 flex-col border-r border-gray-200 bg-white">
         <div className="flex items-center justify-between gap-2 border-b border-gray-100 px-3 py-2.5">
           <h2 className="text-sm font-semibold text-gray-900">Проекты ({projects.length})</h2>
+          {canManageGlobalKb ? (
+            <button
+              type="button"
+              onClick={() => setGlobalKbModalOpen(true)}
+              title="Глобальные тон и пример письма"
+              aria-label="Глобальные настройки"
+              className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+            >
+              <Globe className="h-4 w-4" aria-hidden />
+            </button>
+          ) : null}
         </div>
         <div className="flex-1 overflow-y-auto">
           {projectsLoading ? (
@@ -259,6 +274,16 @@ export function ReplyPersonalizationView() {
               onClose={() => setKbModalOpen(false)}
               onSaved={handleKbSaved}
             />
+          </div>
+        </div>
+      ) : null}
+
+      {/* Модалка глобальных настроек (тон/пример по умолчанию, для руководителей) */}
+      {globalKbModalOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-black/40" onClick={() => setGlobalKbModalOpen(false)} />
+          <div className="relative w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-2xl">
+            <GlobalKnowledgeForm onClose={() => setGlobalKbModalOpen(false)} />
           </div>
         </div>
       ) : null}
