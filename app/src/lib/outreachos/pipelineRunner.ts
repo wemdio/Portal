@@ -868,6 +868,7 @@ async function runBaseConstructorJob(
     .from('base_constructor_jobs')
     .insert({
       user_id: opts.userId,
+      workload_origin: 'automation',
       file_name: opts.fileName,
       data: opts.grid,
       selected_steps: opts.selectedSteps,

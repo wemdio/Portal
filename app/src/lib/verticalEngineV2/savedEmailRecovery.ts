@@ -1,3 +1,4 @@
+import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { VeJob } from './types';
@@ -124,7 +125,7 @@ export async function recoverVeSavedEmails(input: {
   const label = `VE2 · Проверка сохранённых email · ${baseId}`;
   const readChild = async () => {
     const result = await ctx.supabase.from('base_constructor_jobs')
-      .select('id, user_id, file_name, status, selected_steps, data')
+      .select('id, user_id, file_name, status, selected_steps, data, workload_origin')
       .eq('id', batch.id).maybeSingle();
     ctx.signal?.throwIfAborted();
     if (result.error) throw new Error(`Saved email child read: ${result.error.message}`);
@@ -137,7 +138,7 @@ export async function recoverVeSavedEmails(input: {
     ctx.signal?.throwIfAborted();
     if (ownerError || !project?.created_by) throw new Error('Saved email validation owner is unavailable');
     const { error: insertError } = await ctx.supabase.from('base_constructor_jobs').insert({
-      id: batch.id, user_id: project.created_by, file_name: label, status: 'pending', locale: 'ru',
+      id: batch.id, user_id: project.created_by, file_name: label, status: 'pending', locale: 'ru', workload_origin: 'automation',
       selected_steps: ['validate_emails'], step_config: { validate_emails: { keepUnverifiable: true } },
       data: [['Email', 'VE2 Key'], ...batch.emails.map((email) => [email, hash(email)])],
       initial_row_count: batch.emails.length, total_steps: 1,
@@ -151,6 +152,7 @@ export async function recoverVeSavedEmails(input: {
     || child.selected_steps.length !== 1 || child.selected_steps[0] !== 'validate_emails') {
     throw new Error('Saved email child does not match the requested validation-only operation');
   }
+  if (child.workload_origin !== 'automation') await markAutomatedConstructor(ctx.supabase, batch.id);
   if (['pending', 'processing'].includes(child.status)) {
     const started = Date.parse(batch.started_at);
     if (!Number.isFinite(started) || Date.now() - started > EMAIL_WAIT_MS) {

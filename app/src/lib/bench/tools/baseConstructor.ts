@@ -68,6 +68,7 @@ export const baseConstructorTool: BenchJobTool = {
     const p = params as Params;
     return {
       user_id: ownerId,
+      workload_origin: 'manual',
       file_name: p.file_name ?? null,
       data: p.data,
       selected_steps: p.selected_steps,

@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
-import { nextPendingConstructor, nextSmallConstructor } from '@/lib/tools/baseConstructorQueue';
+import { constructorQueue, countActiveManualConstructorJobs, markAutomatedConstructor, nextPendingConstructor, nextSmallConstructor, nextStaleConstructor } from '@/lib/tools/baseConstructorQueue';
 import {
   runBaseConstructorJob,
   updateJobProgress,
@@ -257,6 +257,40 @@ describe('Base Constructor run-token fencing', () => {
     expect(await nextSmallConstructor(queue as unknown as SupabaseClient, cutoff)).toMatchObject({ id: 'short' });
     await queue.from('base_constructor_jobs').update({ started_at: new Date(now).toISOString() }).eq('id', 'short');
     expect(await nextSmallConstructor(queue as unknown as SupabaseClient, cutoff)).toBeNull();
+
+    // Auto work must neither consume the user's upload quota nor the reserved
+    // worker, including stale recovery and misleading user-supplied filenames.
+    const originQueue = createMockSupabase({ enforceQueryWindows: true, tables: { base_constructor_jobs: [
+      ...Array.from({ length: 12 }, (_, i) => ({ id: `auto-${i}`, user_id: 'owner', workload_origin: 'automation',
+        status: i === 0 ? 'processing' : 'pending', created_at: '2026-01-01', started_at: '2026-01-01',
+        initial_row_count: 20, selected_steps: ['validate_emails'] })),
+      { id: 'manual', user_id: 'owner', workload_origin: 'manual', status: 'pending', created_at: '2026-01-03', file_name: 'VE2 · user upload' },
+      { id: 'manual-stale', user_id: 'owner', workload_origin: 'manual', status: 'processing', started_at: '2026-01-02',
+        initial_row_count: 20, selected_steps: ['validate_emails'] },
+      { id: 'unknown', user_id: 'owner', workload_origin: null, status: 'pending', created_at: '2026-01-01' },
+      { id: 'other-owner', user_id: 'other', workload_origin: 'manual', status: 'processing', started_at: '2026-01-03' },
+      { id: 'done', user_id: 'owner', workload_origin: 'manual', status: 'completed' },
+    ] } });
+    const originDb = originQueue as unknown as SupabaseClient;
+    expect(await countActiveManualConstructorJobs(originDb, 'owner')).toBe(3);
+    expect(await nextPendingConstructor(originDb, true, 'manual')).toMatchObject({ id: 'manual' });
+    expect(await nextStaleConstructor(originDb, '2026-02-01', 'manual')).toMatchObject({ id: 'manual-stale' });
+    expect(await nextSmallConstructor(originDb, '2026-02-01', 'manual')).toMatchObject({ id: 'manual-stale' });
+    await originQueue.from('base_constructor_jobs').update({ status: 'processing' }).eq('id', 'manual');
+    expect(await nextPendingConstructor(originDb, true, 'manual')).toBeNull();
+    expect(await nextPendingConstructor(originDb, true, 'shared')).toMatchObject({ id: 'auto-1' });
+    await markAutomatedConstructor(originDb, 'unknown');
+    expect(await countActiveManualConstructorJobs(originDb, 'owner')).toBe(2);
+    await originQueue.from('base_constructor_jobs').insert(Array.from({ length: 4 }, (_, i) => ({
+      id: `upload-${i}`, user_id: 'owner', status: 'pending', workload_origin: 'manual',
+    })));
+    expect(await countActiveManualConstructorJobs(originDb, 'owner')).toBe(6);
+    const brokenQueue = createMockSupabase({ errorTables: { base_constructor_jobs: 'offline' } }) as unknown as SupabaseClient;
+    await expect(countActiveManualConstructorJobs(brokenQueue, 'owner')).rejects.toThrow('очередь ручных баз');
+    await expect(nextPendingConstructor(brokenQueue, true, 'manual')).rejects.toThrow('manual queue');
+    await expect(nextStaleConstructor(brokenQueue, cutoff, 'manual')).rejects.toThrow('stale queue');
+    expect([undefined, 'shared', 'manual'].map(constructorQueue)).toEqual(['shared', 'shared', 'manual']);
+    expect(() => constructorQueue('manul')).toThrow('BASE_CONSTRUCTOR_QUEUE');
   });
 
   it('lets the active token persist a checkpoint and complete the job', async () => {
