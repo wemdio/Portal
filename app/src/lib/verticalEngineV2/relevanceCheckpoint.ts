@@ -20,6 +20,11 @@ const websiteEvidenceSchema = z.object({
     kind: z.enum(['billing', 'configuration', 'transient']),
     message: z.string().max(400),
   }).optional(),
+  // Сколько раз поиск по этой компании уже оплачен и не дал ответа. Поле
+  // добавлено 16.09.2026: без счётчика каждый перезапуск этапа заново покупал
+  // поиск по одним и тем же провалившимся строкам. Optional — старые
+  // чекпоинты читаются прежними и новыми воркерами при раскатке и откате.
+  provider_error_attempts: z.number().int().nonnegative().max(1000).optional(),
   review_attempt: hashSchema,
   review_attempts: z.number().int().nonnegative(),
   refined: z.boolean(),
