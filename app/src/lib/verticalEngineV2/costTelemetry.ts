@@ -79,14 +79,23 @@ async function append(db: SupabaseClient, scope: ProviderUsageScope, event: stri
     level: 'info', source: VE_USAGE_SOURCE, event, message: `VE2 provider accounting: ${event}`,
     request_id: scope.projectId, context: { version: VE_USAGE_VERSION, ...scope, ...context },
   };
+  let failureCode = 'unknown';
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const { error } = await db.from('application_logs')
         .upsert(row, { onConflict: 'id', ignoreDuplicates: true }).abortSignal(AbortSignal.timeout(10_000));
       if (!error) return;
-    } catch { /* Bounded persistence retry; the caller still fails closed. */ }
+      throw error;
+    } catch (error) {
+      // Never log the raw DB error: messages may include URLs or row data.
+      const failure = error as { code?: unknown; name?: unknown; message?: unknown; cause?: { code?: unknown } } | null;
+      const code = failure?.cause?.code ?? failure?.code;
+      failureCode = typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(code) ? code
+        : /abort|timeout/i.test(String(failure?.name ?? '') + String(failure?.message ?? '')) ? 'DEADLINE' : 'unknown';
+    }
     if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
   }
+  console.warn(`[ve-cost] journal persistence failed (event=${event}, code=${failureCode}, attempts=3, job=${scope.jobId})`);
   throw new ProviderUsageWriteError();
 }
 
