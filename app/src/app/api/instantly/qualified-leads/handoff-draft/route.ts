@@ -50,6 +50,9 @@ export const POST = withAuth(async (req, user) => {
   if ((project.specialist_user_id as string | null) !== user.id) {
     return jsonError('Доступ к лиду запрещён', 403);
   }
+  if (qual.status !== 'lead') {
+    return jsonError('Передать можно только квалифицированный лид', 409);
+  }
 
   // Легенда: per-request override ИЛИ легенда проекта кампании.
   let legend = (framing ?? '').trim();

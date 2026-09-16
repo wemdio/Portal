@@ -54,6 +54,9 @@ export const POST = withAuth(async (req, user) => {
   const authorization = await loadAuthorizedQualification(user.id, qualification_id);
   if (!authorization.ok) return qualifiedLeadAccessErrorResponse(authorization);
   const qual = authorization.qualification;
+  if (qual.status !== 'lead') {
+    return NextResponse.json({ error: 'Передать можно только квалифицированный лид' }, { status: 409 });
+  }
 
   const instantlyEmailId = qual.instantly_email_id as string | null;
   if (!instantlyEmailId) {

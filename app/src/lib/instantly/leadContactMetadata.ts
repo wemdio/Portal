@@ -1,6 +1,8 @@
-import { isDisposable, isFreeProvider } from '@/lib/emailValidation/shared';
 import { extractLeadReplyContacts, type LeadReplyContacts } from './leadReplyContacts';
+import { normalizeLeadPhone, normalizeLeadWebsite } from './leadContactValues';
 import type { Email, Lead } from './types';
+
+export { normalizeLeadWebsite } from './leadContactValues';
 
 export interface LeadContactMetadata {
   leadName: string | null;
@@ -24,9 +26,6 @@ const WEBSITE_KEYS = ['website', 'company_website', 'website_url', 'company_url'
   'site', 'url', 'web_site', 'web', 'www', 'homepage', 'сайт',
   'сайт компании', 'ссылка на сайт', 'веб-сайт', 'интернет-сайт'];
 const DOMAIN_KEYS = ['company_domain', 'domain', 'домен', 'домен компании'];
-const NON_COMPANY_DOMAINS = ['linkedin.com', 'facebook.com', 'instagram.com', 'twitter.com',
-  'x.com', 'youtube.com', 'youtu.be', 't.me', 'telegram.me', 'wa.me', 'whatsapp.com', 'aka.ms',
-  'vk.com', 'ok.ru', 'max.ru', 'bit.ly', 'tinyurl.com', 'goo.gl', 'clck.ru'];
 
 const normalizeKey = (value: string) => value.replace(/№/g, '').normalize('NFKC').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9]/g, '').replace(/\d+$/, '');
 const normalizeEmail = (value: unknown) => typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -126,51 +125,6 @@ function companyValue(value: unknown): string | null {
     ? text.slice(0, 200) : null;
 }
 
-function phoneValue(value: unknown): string | null {
-  const text = cleanValue(value);
-  if (!text) return null;
-  // Uploaded phone columns are trusted as phone fields, but not arbitrary text
-  // or dates/IDs. Keep international formatting and an explicitly labelled ext.
-  const phones = String(value).split(/[;,/\n]+/).flatMap((part) => {
-    const formatted = part.trim().replace(/^(?:телефон|тел\.?|phone|mobile|telephone)\s*[:.]?\s*/i, '').trim();
-    const number = formatted.replace(/\s*(?:доб\.?|ext\.?|extension|x)\s*\d+\s*$/i, '').trim();
-    if (/^\d{1,2}[.:]\d{2}\s*[-–—]\s*\d{1,2}[.:]\d{2}$/.test(number)) return [];
-    if (!/^\+?[\d ()\-.]+$/.test(number) || /^(?:\d{4}[-./]\d{1,2}[-./]\d{1,2}|\d{1,2}[-./]\d{1,2}[-./]\d{4})$/.test(number)) return [];
-    const digits = number.replace(/\D/g, '');
-    if (digits.length < 7 || digits.length > 15 || /^(\d)\1+$/.test(digits)) return [];
-    return [formatted];
-  });
-  return phones.length ? [...new Set(phones)].join('; ').slice(0, 200) : null;
-}
-
-function blockedDomain(domain: string): boolean {
-  const labels = domain.toLowerCase().split('.');
-  return labels.some((_, index) => {
-    const suffix = labels.slice(index).join('.');
-    return isFreeProvider(suffix) || isDisposable(suffix) || NON_COMPANY_DOMAINS.includes(suffix);
-  });
-}
-
-export function normalizeLeadWebsite(value: unknown): string | null {
-  const text = cleanValue(value)?.replace(/^["'<]+|[>"',;]+$/g, '');
-  if (!text || /\s|@/.test(text) || text.length > 1000) return null;
-  if (/^[a-z][a-z\d+.-]*:/i.test(text) && !/^https?:\/\//i.test(text)) return null;
-  try {
-    const url = new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`);
-    const host = url.hostname.toLowerCase();
-    if (url.username || url.password || url.port || !host.includes('.') ||
-      !/^[a-z\d.-]+$/.test(host) || !/[a-z]{2,}$/.test(host) ||
-      /(?:^|\.)(?:localhost|local|internal)$/.test(host) || blockedDomain(host) ||
-      /(?:unsubscribe|email-tracking|\/track\/|\/open\/)|\.(?:png|jpe?g|gif|svg|webp)(?:$|\?)/i.test(url.pathname)) return null;
-    // Keep existing bare-domain formatting while validating a safe HTTP(S) URL.
-    url.hash = '';
-    return (/^https?:\/\//i.test(text) ? url.href : `${url.host}${url.pathname}${url.search}`)
-      .replace(/\/$/, '').slice(0, 300);
-  } catch {
-    return null;
-  }
-}
-
 /** Local only: same API lookup, no extra AI/crawl/Instantly calls or DB writes. */
 export function resolveLeadContactMetadata(input: {
   leads: readonly Lead[];
@@ -196,7 +150,7 @@ export function resolveLeadContactMetadata(input: {
   return {
     leadName: [firstName, lastName].filter(Boolean).join(' ') || null,
     companyName: firstField(sources, COMPANY_KEYS, companyValue, 'company') || companyValue(reply.companyName),
-    phone: firstField(sources, PHONE_KEYS, phoneValue, 'phone') || phoneValue(reply.bodyPhone) || phoneValue(reply.signaturePhone),
+    phone: firstField(sources, PHONE_KEYS, normalizeLeadPhone, 'phone') || normalizeLeadPhone(reply.bodyPhone) || normalizeLeadPhone(reply.signaturePhone),
     // An explicit uploaded website is stronger than a provider's inferred
     // company domain, even when that domain is in the top-level lead fields.
     website: firstField(sources, WEBSITE_KEYS, normalizeLeadWebsite, 'website') ||

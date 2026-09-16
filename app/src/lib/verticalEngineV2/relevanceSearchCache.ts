@@ -24,10 +24,11 @@ import { searchVeRelevanceWebsites } from './relevanceSearch';
  *    денег не потрачено, а журнал и так пишет по две строки на запрос.
  */
 
-// Сайт компании — величина медленная: за месяц он не переезжает, а вот
-// «не нашли сайт» за месяц вполне может устареть, поэтому TTL общий и
-// умеренный, а не вечный.
-export const VE_SEARCH_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+// Reuse discovery, never a relevance/email verdict. The reader still visits
+// the site and verifies its identity. Empty discovery expires much sooner so
+// a temporarily sparse index cannot hide a company for a month.
+export const VE_SEARCH_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+export const VE_EMPTY_SEARCH_CACHE_TTL_MS = 60 * 60 * 1000;
 // Serper и так отдаёт 6 позиций, а движок берёт из них не больше шести:
 // хранить больше нечего, а в БД это лишние килобайты на строку.
 const MAX_CACHED_ITEMS = 6;
@@ -40,33 +41,43 @@ export function veSearchCacheKey(query: string): string {
 }
 
 function usableItems(value: unknown): SerperOrganicItem[] | null {
-  if (!Array.isArray(value)) return null;
+  if (!Array.isArray(value) || value.length > MAX_CACHED_ITEMS) return null;
   const items = value.filter((item): item is SerperOrganicItem =>
     item != null && typeof item === 'object' && typeof (item as SerperOrganicItem).link === 'string');
   return items.length === value.length ? items : null;
 }
 
+export function freshVeSearchCacheItems(record: { results: unknown; created_at: unknown }, now = Date.now()): SerperOrganicItem[] | null {
+  const items = usableItems(record.results);
+  const age = now - Date.parse(String(record.created_at));
+  if (!items || !Number.isFinite(age) || age < 0
+    || age >= (items.length ? VE_SEARCH_CACHE_TTL_MS : VE_EMPTY_SEARCH_CACHE_TTL_MS)) return null;
+  return items;
+}
+
 /** Ответ из кэша либо null — промах, просроченная запись или недоступный кэш. */
-export async function readVeSearchCache(query: string): Promise<SerperOrganicItem[] | null> {
+export async function readVeSearchCache(query: string, signal?: AbortSignal): Promise<SerperOrganicItem[] | null> {
+  signal?.throwIfAborted();
   if (!supabaseAdmin) return null;
   const hash = veSearchCacheKey(query);
   try {
     const { data, error } = await supabaseAdmin.from('ve_search_cache')
       .select('results,created_at,hits').eq('query_hash', hash)
-      .abortSignal(AbortSignal.timeout(CACHE_TIMEOUT_MS)).maybeSingle();
+      .abortSignal(signal ? AbortSignal.any([signal, AbortSignal.timeout(CACHE_TIMEOUT_MS)])
+        : AbortSignal.timeout(CACHE_TIMEOUT_MS)).maybeSingle();
+    signal?.throwIfAborted();
     if (error || !data) return null;
-    const age = Date.now() - Date.parse(String(data.created_at));
-    if (!Number.isFinite(age) || age > VE_SEARCH_CACHE_TTL_MS) return null;
-    const items = usableItems(data.results);
+    const items = freshVeSearchCacheItems(data);
     if (!items) return null;
-    // Счётчик попаданий — прямая мера экономии, но ради него не ждём: ответ
-    // у нас уже есть, и запись статистики не должна задерживать проверку.
+    // Best-effort diagnostic only: simultaneous increments can race. Do not
+    // present this counter as a reconciled count of saved provider credits.
     void supabaseAdmin.from('ve_search_cache')
       .update({ hits: Number(data.hits ?? 0) + 1, last_used_at: new Date().toISOString() })
       .eq('query_hash', hash).abortSignal(AbortSignal.timeout(CACHE_TIMEOUT_MS))
       .then(() => undefined, () => undefined);
     return items;
   } catch {
+    signal?.throwIfAborted();
     return null;
   }
 }
@@ -91,13 +102,65 @@ export async function writeVeSearchCache(query: string, items: SerperOrganicItem
  * (relevanceSearch) намеренно: тот остаётся чистым «запрос → Serper», а
  * решение «платить или взять готовое» принимает читатель доказательств.
  */
-export async function searchVeRelevanceWebsitesCached(query: string, signal?: AbortSignal): Promise<SerperOrganicItem[]> {
-  const cached = await readVeSearchCache(query);
-  if (cached) return cached;
-  const items = await searchVeRelevanceWebsites(query, signal);
-  // Кладём и пустой ответ: «Serper по этому запросу ничего не нашёл» — такой
-  // же оплаченный факт, как и найденный сайт, и переспрашивать его на каждом
-  // перезапуске этапа незачем.
-  await writeVeSearchCache(query, items);
-  return items;
+export function createVeCachedSearch(adapters: {
+  read: typeof readVeSearchCache; write: typeof writeVeSearchCache;
+  search: typeof searchVeRelevanceWebsites;
+}) {
+  type Flight = { controller: AbortController; promise: Promise<SerperOrganicItem[]>; waiters: number; settled: boolean };
+  const flights = new Map<string, Flight>();
+  return async (query: string, signal?: AbortSignal): Promise<SerperOrganicItem[]> => {
+    signal?.throwIfAborted();
+    const key = veSearchCacheKey(query);
+    let flight = flights.get(key);
+    if (!flight) {
+      const controller = new AbortController();
+      const created: Flight = { controller, waiters: 0, settled: false, promise: Promise.resolve().then(async () => {
+        const cached = await adapters.read(query, controller.signal);
+        controller.signal.throwIfAborted();
+        if (cached !== null) return cached;
+        const items = await adapters.search(query, controller.signal);
+        // Preserve a paid successful response even if the final waiter leaves
+        // during this bounded, best-effort write. Failures never reach the cache.
+        await adapters.write(query, items);
+        return items;
+      }) };
+      flight = created;
+      flights.set(key, created);
+      const finished = () => {
+        created.settled = true;
+        if (flights.get(key) === created) flights.delete(key);
+      };
+      void created.promise.then(finished, finished);
+    }
+    const shared = flight;
+    shared.waiters += 1;
+    return new Promise<SerperOrganicItem[]>((resolve, reject) => {
+      let done = false;
+      const leave = () => {
+        done = true;
+        signal?.removeEventListener('abort', abort);
+        shared.waiters -= 1;
+        if (!shared.waiters && !shared.settled) {
+          if (flights.get(key) === shared) flights.delete(key);
+          shared.controller.abort();
+        }
+      };
+      const abort = () => { if (!done) { leave(); reject(signal?.reason); } };
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort();
+      void shared.promise.then((items) => {
+        if (done) return;
+        leave(); resolve(items.map((item) => ({ ...item })));
+      }, (error: unknown) => {
+        if (done) return;
+        leave(); reject(error);
+      });
+    });
+  };
 }
+
+// One active provider request per normalized query within this worker; the
+// existing database cache shares finished results across workers/redeploys.
+export const searchVeRelevanceWebsitesCached = createVeCachedSearch({
+  read: readVeSearchCache, write: writeVeSearchCache, search: searchVeRelevanceWebsites,
+});

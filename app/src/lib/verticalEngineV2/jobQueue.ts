@@ -10,25 +10,11 @@ export function veJobConcurrency(value: string | undefined): number {
 const BASE_STAGES = new Set(['base_collect', 'base_analyze', 'template']);
 const COLLECT_STAGE = 'base_collect';
 
-/** Сколько баз собирается одновременно на весь движок.
- *
- * Сборка — единственная стадия, которая покупает поиски у Serper (по одному
- * на каждую строку с неподтверждённым доменом). 16.09.2026 при VE_JOB_CONCURRENCY=16
- * одновременно готовились 16 проектов: 39 093 поиска за сутки против 3 930
- * накануне, дневной баланс Serper выжжен, а собственная очередь захлебнулась —
- * полторы тысячи запросов не дождались ответа, сработал предохранитель и
- * остановил подготовку у всех сразу.
- *
- * Лимит именно на сборку, а не на все стадии: лёгкие стадии (письма, анализ)
- * не должны стоять в очереди за тяжёлой. Остальные сборки ждут в ve_jobs со
- * статусом pending — очередь durable и переживает редеплой (воркер на старте
- * возвращает прерванные running в pending, см. resetStuckJobs).
- *
- * Лимит считается по активным задачам ОДНОГО процесса. Это корректно, пока
- * воркер запущен в единственном экземпляре (container_name в compose), и
- * ровно на этом же допущении держится resetStuckJobs.
- */
-export const VE_DEFAULT_BASE_COLLECT_CONCURRENCY = 3;
+/** Collection shares the normal pool by default. Paid searches have their own
+ * capacity/circuit breaker; waiting for SMTP or reading a catalog must not
+ * occupy a separate three-base bottleneck. The override remains available for
+ * an explicit operational throttle. Both limits are per worker process. */
+export const VE_DEFAULT_BASE_COLLECT_CONCURRENCY = VE_MAX_JOB_CONCURRENCY;
 export function veBaseCollectConcurrency(value: string | undefined): number {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 1

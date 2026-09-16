@@ -1857,8 +1857,6 @@ export async function qualifyOneReply(
   // needs_review=true. classifyWithAI уже нормализует эту пару, но worker не
   // должен снова потерять лид при несовместимом/замоканном результате.
   if (customMatch || result.isLead) status = 'lead';
-  // Compatibility subtype of a final negative verdict, not a manual queue.
-  else if (result.objectionHandleable) status = 'objection';
   else status = 'not_lead';
 
   // ВАЖНО: ловим error от upsert. Без этого тихий 42P10 («there is no unique
@@ -1889,8 +1887,9 @@ export async function qualifyOneReply(
       instantly_email_id: effectiveReply.id,
       instantly_lead_id: null,
       reply_timestamp: effectiveReply.timestamp_email ?? null,
-      objection_handleable: result.objectionHandleable,
-      objection_draft: result.objectionDraft,
+      // Keep legacy DB columns inert, including when updating an older row.
+      objection_handleable: false,
+      objection_draft: null,
       ...(strayColsOk ? { reply_out_of_campaign: outOfCampaign, eaccount: replyEaccount } : {}),
     },
     opts?.existingQualificationId,
@@ -1913,7 +1912,7 @@ export async function qualifyOneReply(
 
   workerLog(
     'info',
-    `Classified ${leadEmail} in campaign ${campaignId}: ${status}${result.objectionHandleable ? ' [objection]' : ''} (confidence: ${result.confidence.toFixed(2)})${inserted?.id ? '' : ' [dedup-skip]'}`,
+    `Classified ${leadEmail} in campaign ${campaignId}: ${status} (confidence: ${result.confidence.toFixed(2)})${inserted?.id ? '' : ' [dedup-skip]'}`,
   );
 
   // Гостевая таблица лидов проекта (lead board): авто-строка при каждом новом

@@ -1,5 +1,6 @@
 import { load } from 'cheerio';
 import { isPersonName } from '../enrich/extractors/nameQuality';
+import { joinLeadPhones, leadPhoneCandidates, normalizeLeadWebsite } from './leadContactValues';
 import type { Email } from './types';
 
 export interface LeadReplyContacts {
@@ -27,19 +28,8 @@ const HISTORY_BOUNDARIES = [
 const SIGNOFF = /^(?:--|—|с\s+(?:уважением|наилучшими\s+пожеланиями)(?:[,.!].*)?|(?:best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:[,.!].*)?)$/iu;
 const PHONE_LABEL = /(?:телефон|тел\s*[.:]|моб(?:ильный)?\s*[.:]|phone|mobile|telephone|whats\s*app|tel:|позвон|звоните|набери|свяжитесь|для\s+связи|(?:мой|наш)\s+номер|контакт|\b(?:call|reach|contact)\b|\b[mtp]\s*:)/iu;
 const NON_PHONE_LABEL = /(?:инн|кпп|огрн(?:ип)?|окпо|бик|снилс|р[/.]?с|к[/.]?с|vat|tax\s*(?:id|number)?|order|заказ[а-яё]*|заявк[аи]|сч[её]т[а-яё]*)\s*[:№#.-]?\s*$/iu;
-const PHONE_CANDIDATE = /(?:\+?\d|\(\d{2,5}\))[\d \t\u00a0().-]{4,}\d/g;
 const WEBSITE_LABEL = /(?:сайт|website|web\s*:|\bour\s+site\b)/iu;
 const URL_CANDIDATE = /https?:\/\/[^\s<>"'()[\]{}]+|(?<![\p{L}\p{N}@._-])(?:www\.)?(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?\.)+[\p{L}]{2,}(?:\/[^\s<>"'()[\]{}]*)?/giu;
-const NON_COMPANY_DOMAINS = [
-  'gmail.com', 'google.com', 'googleusercontent.com', 'gstatic.com',
-  'mail.ru', 'bk.ru', 'inbox.ru', 'list.ru', 'internet.ru', 'ya.ru',
-  'yandex.ru', 'yandex.com', 'rambler.ru', 'outlook.com', 'hotmail.com',
-  'live.com', 'yahoo.com', 'icloud.com', 'proton.me', 'protonmail.com',
-  't.me', 'telegram.me', 'wa.me', 'whatsapp.com', 'vk.com', 'ok.ru',
-  'facebook.com', 'instagram.com', 'linkedin.com', 'youtube.com',
-  'twitter.com', 'x.com', 'linktr.ee', 'bit.ly', 'tinyurl.com',
-  '2gis.ru', 'maps.google.com', 'safelinks.protection.outlook.com', 'aka.ms',
-];
 
 function currentLines(text: string): string[] {
   const lines = text.replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ').split('\n');
@@ -48,21 +38,8 @@ function currentLines(text: string): string[] {
 }
 
 function companyWebsite(raw: string): string | null {
-  const value = raw.replace(/[.,;:!?]+$/, '');
-  try {
-    const url = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`);
-    const host = url.hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '');
-    if (!/^https?:$/.test(url.protocol) || url.username || url.password) return null;
-    if (!host.includes('.') || /^[\d.]+$/.test(host) || host.includes(':')) return null;
-    if (/\.(?:local|localhost|internal|test|invalid)$/i.test(host)) return null;
-    if (NON_COMPANY_DOMAINS.some((domain) => host === domain || host.endsWith(`.${domain}`))) return null;
-    if (/(?:^|[.-])(?:track(?:ing)?|click|redirect)(?:[.-]|$)/i.test(host)) return null;
-    if (/(?:unsubscribe|unsub|optout|opt-out|tracking|redirect)/i.test(url.pathname + url.search)) return null;
-    if (/\.(?:png|jpe?g|gif|webp|svg|ico|pdf|docx?|xlsx?)(?:$|[?#])/i.test(url.pathname)) return null;
-    return url.origin;
-  } catch {
-    return null;
-  }
+  const value = normalizeLeadWebsite(raw);
+  return value ? new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`).origin : null;
 }
 
 function websitesInLine(line: string): string[] {
@@ -104,6 +81,8 @@ function htmlText(html: string): string {
     const site = /^https?:\/\//i.test(href) ? companyWebsite(href) : null;
     const target = tel ? `tel: ${tel}` : site;
     if (target && !visible.includes(target)) node.text(`${visible} ${target}`);
+    // Adjacent anchors/text must not produce "first.rusecond.com" or "site.ruнаш".
+    node.before(' ').after(' ');
   });
   $('br').replaceWith('\n');
   $('p, div, li, tr, td, th, section, article, header, footer, h1, h2, h3, h4, h5, h6').each((_, element) => {
@@ -114,36 +93,34 @@ function htmlText(html: string): string {
 
 function phoneInLine(line: string, signature: boolean): string | null {
   const framed = PHONE_LABEL.test(line);
-  // Keep extensions out of the base number, even when separated only by spaces.
-  const withoutExtensions = line.replace(/(?:доб(?:авочный)?\.?|ext(?:ension)?\.?|\bx)\s*[:.#]?\s*\d{1,6}/giu, '');
-  for (const match of withoutExtensions.matchAll(PHONE_CANDIDATE)) {
-    const value = match[0].trim();
-    if (/^\d{1,2}[.:]\d{2}\s*[-–—]\s*\d{1,2}[.:]\d{2}$/.test(value)) continue;
-    const digits = value.replace(/\D/g, '');
-    if (digits.length < 7 || digits.length > 15 || /^(\d)\1+$/.test(digits)) continue;
-    const before = withoutExtensions.slice(0, match.index);
-    const after = withoutExtensions.slice(match.index + match[0].length);
+  const phones: string[] = [];
+  const candidates = leadPhoneCandidates(line);
+  for (const { value, digits, start, end } of candidates) {
+    const before = line.slice(0, start);
+    const after = line.slice(end);
     if (NON_PHONE_LABEL.test(before) || after.startsWith('@')) continue;
     if (/https?:\/\/\S*$/i.test(before) && !/https?:\/\/wa\.me\/$/i.test(before)) continue;
-    if (/(?<!\d)(?:\d{4}[./-](?:0?[1-9]|1[0-2])[./-](?:0?[1-9]|[12]\d|3[01])|(?:0?[1-9]|[12]\d|3[01])[./-](?:0?[1-9]|1[0-2])[./-]\d{2,4})(?!\d)/.test(value)) continue;
     if (digits.length < 10 && !framed) continue;
     const formatted = value.startsWith('+') || /[()]/.test(value) || /\d[ .-]\d/.test(value);
     const russianFull = /^[78]\d{10}$/.test(digits);
     if (!framed && !formatted && !russianFull) continue;
-    const residue = (withoutExtensions.slice(0, match.index) + withoutExtensions.slice(match.index + match[0].length))
+    const residue = (line.slice(0, start) + line.slice(end))
       .replace(/[:;,|/()<>.]/g, ' ').replace(/^[\s-]+|[\s-]+$/g, '').trim();
     if (!signature && !framed && residue && !isPersonName(residue)) continue;
-    return value;
+    phones.push(value);
   }
-  return null;
+  return joinLeadPhones(phones);
 }
 
 function explicitCompany(line: string): string | null {
   if (/(?:переписк|конфиденциал|подлежит|disclaimer|confidential)/iu.test(line)) return null;
   if (/(?:^|\s)(?:оказывает|предоставляет|предлагает|производит|занимается|работает|осуществляет|поставляет|является|provides|offers|specializes|manufactures|works|delivers)(?:\s|$)/iu.test(line)) return null;
-  const label = /^(?:компания|организация|company|organisation|organization)\s*:\s*(.+)$/iu.exec(line);
-  const legal = /^(?:(?:ООО|АО|ПАО|ЗАО|ОАО|ИП|НКО|АНО|LLC|LTD|GmbH)\s+.+|.{2,80}\s+(?:LLC|Ltd\.?|Inc\.?|Corp\.?|GmbH|Limited|Corporation))$/iu.test(line);
-  const value = (label?.[1] ?? (legal ? line : '')).replace(/\s+/g, ' ').trim();
+  const label = /^(?:компания|организация|company|organisation|organization|магазин)(?:\s*:\s*|\s+)(.+)$/iu.exec(line);
+  // Accept a legal name inside a job title, not arbitrary narrative mentions.
+  const role = /^(?:специалист|менеджер|руководитель|директор|начальник|генеральный директор|региональный менеджер)\s+.{0,100}?\s+((?:ООО|АО|ПАО|ЗАО|ОАО|ИП|ТОО)\s+[«"“].+?[»"”])\s*$/iu.exec(line);
+  const legal = /^(?:(?:ООО|АО|ПАО|ЗАО|ОАО|ИП|ТОО|НКО|АНО|LLC|LTD|GmbH)\s+.+|.{2,80}\s+(?:LLC|Ltd\.?|Inc\.?|Corp\.?|GmbH|Limited|Corporation))$/iu.test(line);
+  const value = (label?.[1] ?? role?.[1] ?? (legal ? line : '')).replace(/\s+/g, ' ').trim()
+    .replace(/^\*{1,2}(.+?)\*{1,2}$/, '$1');
   if (value.length < 2 || value.length > 120 || /[@/:!?\n]/.test(value)) return null;
   if (!/[\p{L}]/u.test(value) || PHONE_LABEL.test(value) || websitesInLine(value).length) return null;
   if (/^(?:мы|нам|вам|we|please|our|you)\s/iu.test(value)) return null;
@@ -182,9 +159,10 @@ function extractFromText(text: string): LeadReplyContacts {
     return WEBSITE_LABEL.test(line) || standalone ? sites : [];
   })[0] ?? null;
   return {
-    bodyPhone: body.map((line) => phoneInLine(line, false)).find(Boolean) ?? null,
-    signaturePhone: signature.map((line) => phoneInLine(line, true)).find(Boolean) ?? null,
-    companyName: signature.map(explicitCompany).find(Boolean)
+    bodyPhone: joinLeadPhones(body.map((line) => phoneInLine(line, false))),
+    signaturePhone: joinLeadPhones(signature.map((line) => phoneInLine(line, true))),
+    companyName: signature.flatMap((_, index) => [1, 2, 3].map((length) =>
+      explicitCompany(signature.slice(Math.max(0, index - length + 1), index + 1).join(' ')))).find(Boolean)
       ?? signature.map((line) => brandedCompany(line, signatureSite)).find(Boolean) ?? null,
     website: signatureSite ?? bodySite,
   };

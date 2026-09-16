@@ -12,7 +12,9 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { VeJob } from '@/lib/verticalEngineV2/types';
 import { withVeCostTelemetry } from '@/lib/verticalEngineV2/costTelemetry';
 import { withProviderUsage } from '@/lib/providerUsage';
+import type { SerperOrganicItem } from '@/lib/search/serperClient';
 import { createVeSearchCapacity, searchVeRelevanceWebsites, VeSearchProviderError } from '@/lib/verticalEngineV2/relevanceSearch';
+import { createVeCachedSearch, freshVeSearchCacheItems, VE_EMPTY_SEARCH_CACHE_TTL_MS, VE_SEARCH_CACHE_TTL_MS } from '@/lib/verticalEngineV2/relevanceSearchCache';
 
 jest.mock('@/lib/clientDemo/personalize', () => ({ assertPublicWebsite: jest.fn() }));
 jest.mock('@/lib/enrich/websiteParser', () => ({
@@ -34,6 +36,7 @@ import { fetchVeRelevanceEvidence, resolveVeEvidenceAddress } from '@/lib/vertic
 import { parseVeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
 import { needsVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceReserve';
 import { recoverVeSourceContacts, hasPendingVeSourceContacts, type VeSourceContactCheckpoint } from '@/lib/verticalEngineV2/sourceContacts';
+import { cleanVeCompanyNames } from '@/lib/verticalEngineV2/companyNameCleanup';
 
 const schema = z.object({ ok: z.boolean() });
 
@@ -127,6 +130,35 @@ describe('llm rawCall retry', () => {
         expect(JSON.stringify(journalWarning.mock.calls)).not.toContain('private diagnostic details');
       }
     }
+    // A model-expanded brand must not discard the other verified names.
+    // Preserve the safe source words; do not infer the name from its domain.
+    const companyRows = [
+      { company: 'ОАО "БХЗ"', website: 'bhz.test' },
+      { company: 'ООО "ПГ"ФОСФОРИТ"', website: 'different.test' },
+      { company: '<unsafe>', website: 'unsafe.test' },
+    ];
+    fetchMock.mockReset().mockResolvedValue(httpResponse(200, {
+      choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ cleaned: [
+        { idx: 0, name: 'Выдуманный химический завод' }, { idx: 1, name: 'ПГ Фосфорит' }, { idx: 2, name: '<unsafe>' },
+      ] }) } }], usage: {},
+    }));
+    const checkpoint = jest.fn(async () => {});
+    const cleaned = await cleanVeCompanyNames({ rows: companyRows, language: 'ru', scope: 'test', onCheckpoint: checkpoint });
+    expect(cleaned.summary).toMatchObject({ checked: 2, failed: 1 });
+    expect(cleaned.rows.map((row) => row._ve_company_name)).toMatchObject([
+      { status: 'ready', value: companyRows[0].company }, { status: 'ready', value: 'ПГ Фосфорит' }, { status: 'failed', value: '' },
+    ]);
+    expect(cleaned.rows.map((row) => row.company)).toEqual(companyRows.map((row) => row.company));
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).response_format.type).toBe('json_schema');
+    fetchMock.mockClear();
+    await cleanVeCompanyNames({ rows: companyRows.slice(0, 2), language: 'ru', scope: 'test',
+      checkpoint: cleaned.checkpoint, onCheckpoint: checkpoint });
+    expect(fetchMock).not.toHaveBeenCalled();
+    fetchMock.mockResolvedValue(httpResponse(400, { error: 'configuration' }));
+    const stopped = await cleanVeCompanyNames({ rows: Array.from({ length: 81 }, (_, i) => ({ company: `Factory ${i}` })),
+      language: 'ru', scope: 'test', onCheckpoint: checkpoint });
+    expect(stopped.summary.checked).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('does not retry a permanent 4xx', async () => {
@@ -306,6 +338,66 @@ describe('llm rawCall retry', () => {
     releaseOutage.resolve();
     await Promise.all([outage, rejectedQueue]);
     expect(waitingWork).not.toHaveBeenCalled();
+
+    // Concurrent bases share one discovery request, while each cancellation
+    // affects only its own waiter. Completed results survive another call.
+    const delivered: SerperOrganicItem[] = [{ link: 'https://company.test/' }];
+    const paidSearch = deferred<typeof delivered>();
+    let cachedItems: typeof delivered | null = null;
+    const readCache = jest.fn(async () => cachedItems);
+    const writeCache = jest.fn(async (_query: string, items: typeof delivered) => { cachedItems = items; });
+    const search = jest.fn((_query: string, _signal?: AbortSignal) => paidSearch.promise);
+    const cachedSearch = createVeCachedSearch({ read: readCache, write: writeCache, search });
+    const cancelledBase = new AbortController();
+    const firstWaiter = expect(cachedSearch('  COMPANY  ', cancelledBase.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    const otherWaiters = Array.from({ length: 12 }, () => cachedSearch('company'));
+    await jest.advanceTimersByTimeAsync(0);
+    expect(search).toHaveBeenCalledTimes(1);
+    cancelledBase.abort();
+    await firstWaiter;
+    expect(search.mock.calls[0][1]?.aborted).toBe(false);
+    paidSearch.resolve(delivered);
+    expect(await Promise.all(otherWaiters)).toEqual(Array.from({ length: 12 }, () => delivered));
+    expect(writeCache).toHaveBeenCalledTimes(1);
+    const fromCache = await cachedSearch('company');
+    fromCache[0].link = 'https://changed.test/';
+    expect((await cachedSearch('company'))[0].link).toBe('https://company.test/');
+    expect(search).toHaveBeenCalledTimes(1);
+    expect(readCache).toHaveBeenCalledTimes(3);
+
+    // Successful empty results are reusable; provider failures are not.
+    cachedItems = null;
+    search.mockRejectedValueOnce(new VeSearchProviderError('transient'));
+    await expect(cachedSearch('different')).rejects.toThrow('Serper transient');
+    expect(cachedItems).toBeNull();
+    search.mockResolvedValueOnce([]);
+    expect(await cachedSearch('different')).toEqual([]);
+    expect(await cachedSearch('different')).toEqual([]);
+    expect(search).toHaveBeenCalledTimes(3);
+    const alreadyCancelled = new AbortController(); alreadyCancelled.abort();
+    const before = readCache.mock.calls.length;
+    await expect(cachedSearch('different', alreadyCancelled.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(readCache).toHaveBeenCalledTimes(before);
+
+    cachedItems = null;
+    const lastWaiter = new AbortController();
+    search.mockImplementationOnce((_query, signal) => new Promise((_, reject) => {
+      signal!.addEventListener('abort', () => reject(signal!.reason), { once: true });
+    }));
+    const abandoned = expect(cachedSearch('abandoned', lastWaiter.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    await jest.advanceTimersByTimeAsync(0);
+    lastWaiter.abort(); await abandoned;
+    expect(search.mock.calls.at(-1)?.[1]?.aborted).toBe(true);
+    search.mockResolvedValueOnce(delivered);
+    expect(await cachedSearch('abandoned')).toEqual(delivered);
+    const now = Date.now();
+    const record = (items: unknown, age: number) => ({ results: items, created_at: new Date(now - age).toISOString() });
+    expect(freshVeSearchCacheItems(record([], VE_EMPTY_SEARCH_CACHE_TTL_MS - 1), now)).toEqual([]);
+    expect(freshVeSearchCacheItems(record([], VE_EMPTY_SEARCH_CACHE_TTL_MS), now)).toBeNull();
+    expect(freshVeSearchCacheItems(record(delivered, VE_SEARCH_CACHE_TTL_MS - 1), now)).toEqual(delivered);
+    expect(freshVeSearchCacheItems(record(delivered, VE_SEARCH_CACHE_TTL_MS), now)).toBeNull();
+    expect(freshVeSearchCacheItems(record(delivered, -1), now)).toBeNull();
+    expect(freshVeSearchCacheItems(record([{}], 0), now)).toBeNull();
     expect(jest.getTimerCount()).toBe(0);
   });
 
@@ -412,6 +504,47 @@ describe('llm rawCall retry', () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(needsVeRelevanceEvidence({ ...input.rows[0], _email_status: 'ok', _ve_relevance: isolated.decisions.get(0) })).toBe(false);
 
+    // Malformed classifier output isolates one company instead of failing all
+    // siblings. Unsupported output is saved, never admitted or repaid on retry.
+    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [] }))
+      .mockResolvedValueOnce(reply({ decisions: [] }))
+      .mockResolvedValueOnce(reply({ decisions: [] }))
+      .mockResolvedValueOnce(classification).mockResolvedValueOnce(confirmation);
+    const malformedInput = { ...expanded, fetchEvidence: jest.fn().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'offline' }) };
+    const repairedBatch = await findIrrelevantRows(malformedInput);
+    expect(repairedBatch.error).toBeUndefined();
+    expect([...repairedBatch.decisions.values()].map((item) => item.status)).toEqual(['needs_review', 'relevant']);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    await findIrrelevantRows({ ...malformedInput, checkpoint: repairedBatch.checkpoint });
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    fetchMock.mockReset().mockResolvedValue(reply({ decisions: [] }));
+    const outage = await findIrrelevantRows({ ...malformedInput, rows: Array.from({ length: 30 }, (_, i) => ({ company: `Factory ${i}` })) });
+    expect(outage.error).toContain('invalid_response');
+    expect(outage.coverage.complete).toBe(false);
+    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(8);
+
+    // Citation selection has one unambiguous field, constrained at the provider
+    // AND locally. Empty IDs abstain; duplicates/unknown IDs stay quarantined.
+    for (const selected of [[0], [], [999], [0, 0]]) {
+      fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'needs_review', reason: 'Need facts', evidence: [] }] }))
+        .mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'relevant', reason: 'Makes equipment', evidence_ids: [] }] }))
+        .mockResolvedValueOnce(reply({ evidence_ids: selected }));
+      if (selected.length === 1 && selected[0] === 0) fetchMock.mockResolvedValueOnce(confirmation);
+      const citationInput = { ...input, fetchEvidence: jest.fn().mockResolvedValue({
+        status: 'ok', text: description, url: 'https://factory.test/', reason: 'identity_verified_website',
+      }) };
+      const citations = await findIrrelevantRows(citationInput);
+      expect(citations.error).toBeUndefined();
+      expect(citations.decisions.get(0)?.status).toBe(selected.length === 1 && selected[0] === 0 ? 'relevant' : 'needs_review');
+      const request = JSON.parse(fetchMock.mock.calls[2][1].body as string);
+      expect(request.response_format).toMatchObject({ type: 'json_schema', json_schema: {
+        strict: true, schema: { required: ['evidence_ids'], additionalProperties: false },
+      } });
+      const callCount = fetchMock.mock.calls.length;
+      await findIrrelevantRows({ ...citationInput, checkpoint: citations.checkpoint });
+      expect(fetchMock).toHaveBeenCalledTimes(callCount);
+    }
+
     // Old unavailable website checks get one pass through the improved reader,
     // without invalidating initial paid classifications or completed matches.
     const unavailable = jest.fn().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'website_evidence_timeout' });
@@ -422,8 +555,8 @@ describe('llm rawCall retry', () => {
     expect(unavailable).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const legacy = JSON.parse(JSON.stringify(old.checkpoint)) as VeRelevanceCheckpoint;
-    Object.values(legacy.website_evidence).forEach((website) => { delete website.reader_revision; website.review_attempt = 'f'.repeat(64); });
-    Object.values(legacy.verdicts).forEach((verdict) => { delete verdict.website_review_version; });
+    Object.values(legacy.website_evidence).forEach((website) => { website.reader_revision = 3; website.review_attempt = 'f'.repeat(64); });
+    Object.values(legacy.verdicts).forEach((verdict) => { verdict.website_review_version = 3; });
     const legacyRow = { ...input.rows[0], _email_status: 'ok', _ve_relevance: Object.values(legacy.verdicts)[0] };
     expect(needsVeRelevanceEvidence(legacyRow)).toBe(true);
     const websiteText = (description + '. 🏭 ').padEnd(5999, 'x') + '😀 tail\u0000\ud83d';
@@ -458,6 +591,28 @@ describe('llm rawCall retry', () => {
     expect(noSite).toHaveBeenCalledTimes(2);
     await findIrrelevantRows({ ...sameBrand, checkpoint: separateCities.checkpoint, fetchEvidence: noSite });
     expect(noSite).toHaveBeenCalledTimes(2);
+
+    // Postponing a paid search is neither a rejection nor a provider failure.
+    // Resume only that evidence lookup once the ready-contact deficit requires it.
+    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'needs_review', reason: 'Need website evidence', evidence: [] }] }));
+    const deferredEvidence = jest.fn().mockResolvedValue({ status: 'unavailable', text: '', url: '',
+      reason: 'paid_search_deferred', search_deferred: true });
+    const deferredSearch = await findIrrelevantRows({ ...input, allowPaidSearch: false, fetchEvidence: deferredEvidence });
+    expect(deferredSearch.decisions.get(0)).toMatchObject({ status: 'needs_review', search_deferred: true });
+    expect(deferredSearch.decisions.get(0)).not.toHaveProperty('website_review_version');
+    expect(deferredSearch.retryable).toBe(false);
+    expect(deferredSearch.coverage.complete).toBe(true);
+    await findIrrelevantRows({ ...input, allowPaidSearch: false, checkpoint: structuredClone(deferredSearch.checkpoint), fetchEvidence: deferredEvidence });
+    expect(deferredEvidence).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    deferredEvidence.mockResolvedValue({ status: 'ok', text: description, url: 'https://factory.test/', reason: 'identity_verified_website' });
+    fetchMock.mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'relevant', reason: description, evidence_ids: [0] }] }))
+      .mockResolvedValueOnce(confirmation);
+    const resumedSearch = await findIrrelevantRows({ ...input, allowPaidSearch: true, checkpoint: deferredSearch.checkpoint, fetchEvidence: deferredEvidence });
+    expect(deferredEvidence).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(resumedSearch.decisions.get(0)?.status).toBe('relevant');
+    expect(resumedSearch.decisions.get(0)).not.toHaveProperty('search_deferred');
 
     // An intermittent search timeout cannot discard a successful sibling's
     // evidence or stop the next website batch. The failed subset retries alone.
@@ -581,6 +736,16 @@ describe('llm rawCall retry', () => {
     }
     // Discovery is bounded, resumes without repaying successful siblings, and
     // provider failure does not erase already completed searches.
+    const paidSearch = jest.fn().mockResolvedValue([]);
+    const cacheSearch = jest.fn().mockResolvedValue(null);
+    const freeOptions = { companyName: 'Домком', companyAddress: 'Тула', allowPaidSearch: false,
+      search: paidSearch, searchCache: cacheSearch, fetchPage: async (url: string) => parseVeEvidencePage(Buffer.from(
+        '<title>Домком — агентство недвижимости</title><main>Наш адрес: Тула. Продажа недвижимости и подбор жилья покупателям.</main>'), url, 'text/html') };
+    expect(await fetchVeRelevanceEvidence('', freeOptions)).toMatchObject({ search_deferred: true, status: 'unavailable' });
+    expect(paidSearch).not.toHaveBeenCalled();
+    cacheSearch.mockResolvedValue([{ link: 'https://domkom.test/' }]);
+    expect(await fetchVeRelevanceEvidence('', freeOptions)).toMatchObject({ status: 'ok' });
+    expect(paidSearch).not.toHaveBeenCalled();
     const sourceRows = Array.from({ length: 18 }, (_, i) => ({ company: `Agency ${i}`, address: 'Тула',
       website: '', email: '', inn: '', source_detail: 'hh' }));
     let discoveryState: VeSourceContactCheckpoint | undefined;
