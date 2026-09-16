@@ -27,7 +27,8 @@ export interface ParsedMailbox {
 }
 
 export interface ImportRowError {
-  line: number;
+  /** null — сломан файл целиком, а не отдельная строка: номер строки тут врал бы. */
+  line: number | null;
   email: string | null;
   message: string;
 }
@@ -72,20 +73,45 @@ function normalizeHeader(header: string): string {
   return header.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
-/** Заголовок файла → наше поле. Первое совпадение выигрывает. */
+/**
+ * Пометки провайдера в скобках: выгрузка пользователей Google Workspace
+ * называет колонки «Email Address [Required]», «Status [READ ONLY]»,
+ * «Password [Required for new users]». Без снятия пометки заголовок
+ * нормализуется в `emailaddressrequired` и не совпадает ни с одним синонимом,
+ * из-за чего весь файл отвергался построчно с «Нет адреса ящика».
+ */
+function stripAnnotations(header: string): string {
+  return header.replace(/[[({][^\])}]*[\])}]/g, ' ');
+}
+
+/**
+ * Заголовок файла → наше поле. Первое совпадение выигрывает.
+ *
+ * Два прохода, и порядок принципиален: сначала точные заголовки, и только
+ * то, что не нашлось, сопоставляется без пометок в скобках. Иначе «Password
+ * (IMAP)» превратился бы в `password` и занял бы место SMTP-пароля, хотя в
+ * файле рядом есть настоящая колонка пароля.
+ */
 function buildHeaderMap(headers: string[]): Map<FieldName, string> {
   const map = new Map<FieldName, string>();
-  for (const header of headers) {
-    const normalized = normalizeHeader(header);
-    if (!normalized) continue;
-    for (const [field, aliases] of Object.entries(ALIASES) as [FieldName, readonly string[]][]) {
-      if (map.has(field)) continue;
-      if (aliases.includes(normalized)) {
-        map.set(field, header);
-        break;
+  const used = new Set<string>();
+  const pass = (prepare: (header: string) => string) => {
+    for (const header of headers) {
+      if (used.has(header)) continue;
+      const normalized = normalizeHeader(prepare(header));
+      if (!normalized) continue;
+      for (const [field, aliases] of Object.entries(ALIASES) as [FieldName, readonly string[]][]) {
+        if (map.has(field)) continue;
+        if (aliases.includes(normalized)) {
+          map.set(field, header);
+          used.add(header);
+          break;
+        }
       }
     }
-  }
+  };
+  pass((header) => header);
+  pass(stripAnnotations);
   return map;
 }
 
@@ -117,10 +143,35 @@ function resolveTlsMode(encryption: string, port: number, preset: ProviderPreset
 
 export function parseMailboxRows(rows: FileRow[], provider: SenderProvider): ParsedImport {
   const preset = PRESETS[provider];
-  const map = buildHeaderMap(Object.keys(rows[0] ?? {}));
+  const headers = Object.keys(rows[0] ?? {});
+  const map = buildHeaderMap(headers);
   const mailboxes: ParsedMailbox[] = [];
   const errors: ImportRowError[] = [];
   const seen = new Set<string>();
+
+  // Не нашлась целая колонка — это одна проблема файла, а не двести одинаковых
+  // проблем строк. Пока об этом сообщалось построчно, экран показывал «Нет
+  // адреса ящика» двести раз подряд: причина (нераспознанный заголовок) из
+  // такого списка не читалась вовсе, а номера строк уводили искать в данные.
+  // Поэтому сообщение одно, и в нём перечислены заголовки, которые мы увидели:
+  // по ним сразу видно и лишнюю пометку провайдера, и неверный разделитель
+  // (тогда весь заголовок приезжает одной колонкой).
+  if (rows.length) {
+    const shown = headers.slice(0, 10).join(', ') || '—';
+    const found = headers.length > 10 ? `${shown}… (всего колонок: ${headers.length})` : shown;
+    if (!map.has('email')) {
+      return { mailboxes: [], errors: [{ line: null, email: null, message:
+        `Не нашли колонку с адресом ящика. Заголовки файла: ${found}. `
+        + 'Нужны две колонки: адрес (Email, Email Address, Mailbox) и пароль '
+        + '(Password, App Password, SMTP Password). Пометки вида [Required] не мешают.' }] };
+    }
+    if (!map.has('password')) {
+      return { mailboxes: [], errors: [{ line: null, email: null, message:
+        `Адрес читается из колонки «${map.get('email')}», а колонку с паролем не нашли. `
+        + 'Добавьте колонку Password (подойдёт App Password или SMTP Password): без пароля '
+        + `портал не сможет войти в ящик. Заголовки файла: ${found}.` }] };
+    }
+  }
 
   rows.forEach((row, index) => {
     // +2: первая строка файла — заголовки, нумерация с единицы.

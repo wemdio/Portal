@@ -143,10 +143,13 @@ export function MailboxesTab() {
             <p className="text-zinc-900">Подключено ящиков: {result.imported}</p>
             {result.errors.length ? (
               <ul className="mt-2 space-y-1 text-zinc-600">
-                {result.errors.slice(0, 10).map((row) => (
-                  <li key={`${row.line}-${row.email ?? ''}`}>
-                    Строка {row.line}
-                    {row.email ? ` (${row.email})` : ''}: {row.message}
+                {/* line === null — сломан файл целиком: подпись «Строка N» тут
+                    отправила бы искать проблему в данных, хотя она в заголовках. */}
+                {result.errors.slice(0, 10).map((row, index) => (
+                  <li key={`${row.line ?? 'file'}-${row.email ?? ''}-${index}`}>
+                    {row.line === null
+                      ? row.message
+                      : `Строка ${row.line}${row.email ? ` (${row.email})` : ''}: ${row.message}`}
                   </li>
                 ))}
                 {result.errors.length > 10 ? <li>…и ещё {result.errors.length - 10}</li> : null}
