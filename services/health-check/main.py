@@ -130,8 +130,8 @@ _FAIL_COUNT: dict[str, int] = {}
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
 
-DISK_TOTAL_GB = float(os.environ.get("HEALTH_DISK_TOTAL_GB", "80"))
-DISK_WARN_GB = float(os.environ.get("HEALTH_DISK_WARN_GB", "72"))
+DISK_TOTAL_GB = float(os.environ.get("HEALTH_DISK_TOTAL_GB", "125"))
+DISK_WARN_GB = float(os.environ.get("HEALTH_DISK_WARN_GB", "110"))
 
 # ── Per-container resource watchdog ──────────────────────────────────────────
 # Alert when a container uses >= HEALTH_CONTAINER_USAGE_PCT of ITS OWN cgroup
