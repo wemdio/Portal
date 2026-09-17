@@ -758,6 +758,45 @@ describe('llm rawCall retry', () => {
     expect([...billing.decisions.values()].some((decision) => decision.status === 'relevant')).toBe(false);
     expect(billing.errored.size).toBe(8);
 
+    // A resume must not report an old billing/key refusal as a fresh outage.
+    // More saved failures than the per-pass cap remain excluded and reviewable;
+    // they recover before fresh candidates without repaying classification.
+    for (const kind of ['billing', 'configuration'] as const) {
+      const saved = structuredClone(billing.checkpoint);
+      for (const item of Object.values(saved.website_evidence)) {
+        item.provider_error = { kind, message: kind === 'billing'
+          ? 'Serper billing: insufficient search credits.' : 'Serper configuration: invalid key.' };
+        item.provider_error_attempts = 3;
+        delete item.reader_revision;
+      }
+      fetchMock.mockReset();
+      const resumeEvidence = jest.fn().mockResolvedValue({ status: 'unavailable', text: '', url: '',
+        reason: 'paid_search_deferred', search_deferred: true });
+      const cappedInput = { ...networkInput, rows: [...extraRows, ...networkRows], allowPaidSearch: false,
+        websiteLimit: 1, fetchEvidence: resumeEvidence };
+      let persisted: VeRelevanceCheckpoint | undefined;
+      const capped = await findIrrelevantRows({ ...cappedInput, checkpoint: saved,
+        onCheckpoint: async (checkpoint) => { persisted = structuredClone(checkpoint); } });
+      expect(resumeEvidence).toHaveBeenCalledTimes(1);
+      expect(resumeEvidence.mock.calls[0][1]).toMatchObject({ companyInn: '7700000000', allowPaidSearch: false });
+      expect([capped.error, capped.retryable, capped.errored.size, capped.unchecked.size])
+        .toEqual([undefined, false, 0, cappedInput.rows.length]);
+      const remaining = capped.decisions.get(extraRows.length + 1)!;
+      expect(remaining.status).toBe('needs_review');
+      expect(needsVeRelevanceEvidence({ ...networkRows[1], _email_status: 'ok', _ve_relevance: remaining })).toBe(true);
+      expect(Object.values(persisted!.website_evidence).filter((item) => item.provider_error)).toHaveLength(7);
+      const resumed = await findIrrelevantRows({ ...cappedInput, checkpoint: persisted });
+      expect(resumeEvidence.mock.calls[1][1]).toMatchObject({ companyInn: '7700000001', allowPaidSearch: false });
+      expect(resumed.error).toBeUndefined();
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      // A new refusal still blocks, even after a previous per-company cap.
+      const refused = await findIrrelevantRows({ ...networkInput, checkpoint: structuredClone(saved),
+        fetchEvidence: billingEvidence });
+      expect([refused.retryable, refused.coverage.complete, refused.error])
+        .toEqual([false, false, 'Serper billing: insufficient search credits.']);
+    }
+
     // Code-only inputs go directly to the same evidence reader. Small semantic
     // remainders share a batch and the final remainder is confirmed before return.
     const packedRows = Array.from({ length: 24 }, (_, i) => ({ company: `Factory ${i}`, inn: String(7720000000 + i), category: 'ОКВЭД 28.99' }));
