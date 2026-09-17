@@ -24,7 +24,7 @@ jest.mock('@/lib/enrich/websiteParser', () => ({
 
 import { assertPublicWebsite } from '@/lib/clientDemo/personalize';
 import { fetchAndExtract } from '@/lib/enrich/websiteParser';
-import { callLLMText, callLLMWithSchema, setVeActiveJobSignal, withVeActiveJobSignal, getVeActiveJobSignal } from '@/lib/verticalEngineV2/llm';
+import { callLLMText, callLLMWithSchema, setVeActiveJobSignal, withVeActiveJobSignal, getVeActiveJobSignal, VE_COLLECTION_MODEL } from '@/lib/verticalEngineV2/llm';
 import { defaultFetchText, resolveFetchText, resolveSearch } from '@/lib/verticalEngineV2/stages/io';
 import type { VeStageContext } from '@/lib/verticalEngineV2/stages/shared';
 import { isRetryableStageError, maxAttemptsFor } from '@/lib/verticalEngineV2/jobRetry';
@@ -61,6 +61,8 @@ describe('llm rawCall retry', () => {
 
   beforeEach(() => {
     process.env.OPENROUTER_HYPOTHESIS_ENGINE_API_KEY = 'test-key';
+    process.env.VE_MODEL_GATE = 'openai/gpt-4o-mini';
+    process.env.VE_MODEL_RELEVANCE_REVIEW = 'openai/gpt-5-mini';
     delete process.env.VE_LLM_TIMEOUT_MS;
     jest.useFakeTimers();
   });
@@ -448,6 +450,25 @@ describe('llm rawCall retry', () => {
     expect(resumed.coverage.complete).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
+    const requests = fetchMock.mock.calls.map((call) => JSON.parse(call[1].body));
+    expect(requests.map((request) => request.model)).toEqual(['openai/gpt-4o-mini', 'openai/gpt-5-mini']);
+    expect(requests.map((request) => request.response_format.type)).toEqual(['json_schema', 'json_schema']);
+    expect(requests[0].reasoning_effort).toBeUndefined();
+    expect(requests[1].reasoning_effort).toBeUndefined();
+    // Forward rollout and rollback both retain paid evidence and terminal
+    // decisions; a changed target still invalidates them in the normal path.
+    process.env.VE_MODEL_GATE = 'openai/gpt-4o-mini';
+    process.env.VE_MODEL_RELEVANCE_REVIEW = 'openai/gpt-5-mini';
+    const oldModelReplay = await findIrrelevantRows({ ...input, checkpoint: saved });
+    expect(oldModelReplay.decisions.get(0)?.status).toBe('relevant');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    delete process.env.VE_MODEL_GATE;
+    delete process.env.VE_MODEL_RELEVANCE_REVIEW;
+    await findIrrelevantRows({ ...input, checkpoint: oldModelReplay.checkpoint });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    process.env.VE_MODEL_GATE = 'openai/gpt-4o-mini';
+    process.env.VE_MODEL_RELEVANCE_REVIEW = 'openai/gpt-5-mini';
+
     // A malformed semantic response used to poison the entire durable preview.
     // Recover legacy failed/interrupted reservations once, then quarantine only
     // that company; never pay a third time or promote its unconfirmed proposal.
@@ -455,6 +476,48 @@ describe('llm rawCall retry', () => {
     const classification = reply({ decisions: [{ i: 0, status: 'relevant', reason: 'Makes equipment',
       evidence: [{ field: 'description', quote: description }] }] });
     const confirmation = reply({ reviews: [{ i: 0, result: 'direct_match', reason: description }] });
+    // Admission/contradiction gets one durably reserved GPT check. Missing facts do not
+    // trigger a costly second opinion and are never turned into acceptance.
+    const noWebsite = jest.fn().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'offline' });
+    delete process.env.VE_MODEL_GATE;
+    delete process.env.VE_MODEL_RELEVANCE_REVIEW;
+    for (const firstResult of ['direct_match', 'direct_conflict', 'insufficient'] as const) {
+      fetchMock.mockReset().mockResolvedValueOnce(classification)
+        .mockResolvedValueOnce(reply({ reviews: [{ i: 0, result: firstResult, reason: 'Unconfirmed activity' }] }))
+        .mockResolvedValueOnce(confirmation);
+      let confirmationCheckpoint: VeRelevanceCheckpoint | undefined;
+      const checked = await findIrrelevantRows({ ...input, fetchEvidence: noWebsite, onCheckpoint: async (checkpoint) => {
+        if (Object.values(checkpoint.semantic_reviews).some((review) => review.status === 'pending' && review.attempts === 1 && review.result)) {
+          confirmationCheckpoint = JSON.parse(JSON.stringify(checkpoint)) as VeRelevanceCheckpoint;
+        }
+      } });
+      const models = fetchMock.mock.calls.map((call) => JSON.parse(call[1].body).model);
+      expect(models).toEqual(firstResult !== 'insufficient'
+        ? [VE_COLLECTION_MODEL, VE_COLLECTION_MODEL, 'openai/gpt-5-mini'] : [VE_COLLECTION_MODEL, VE_COLLECTION_MODEL]);
+      expect(checked.decisions.get(0)?.status).toBe(firstResult !== 'insufficient' ? 'relevant' : 'needs_review');
+      expect(fetchMock.mock.calls.slice(0, 2).map((call) => JSON.parse(call[1].body).response_format.type))
+        .toEqual(['json_schema', 'json_schema']);
+      await findIrrelevantRows({ ...input, fetchEvidence: noWebsite, checkpoint: checked.checkpoint });
+      expect(fetchMock).toHaveBeenCalledTimes(models.length);
+      if (confirmationCheckpoint) {
+        fetchMock.mockReset().mockResolvedValueOnce(confirmation);
+        const recovered = await findIrrelevantRows({ ...input, fetchEvidence: noWebsite, checkpoint: confirmationCheckpoint });
+        expect(recovered.decisions.get(0)?.status).toBe('relevant');
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(JSON.parse(fetchMock.mock.calls[0][1].body).model).toBe('openai/gpt-5-mini');
+      }
+    }
+    const pair = { ...input, rows: [...input.rows, { company: 'Second factory', inn: '7700000002', description }] };
+    const pairReview = reply({ reviews: [0, 1].map((i) => ({ i, result: 'direct_match', reason: description })) });
+    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [0, 1].map((i) => ({
+      i, status: 'relevant', reason: 'Makes equipment', evidence: [{ field: 'description', quote: description }],
+    })) })).mockResolvedValueOnce(pairReview).mockResolvedValueOnce(pairReview);
+    const confirmedPair = await findIrrelevantRows(pair);
+    expect([...confirmedPair.decisions.values()].map((item) => item.status)).toEqual(['relevant', 'relevant']);
+    expect(fetchMock.mock.calls.map((call) => JSON.parse(call[1].body).model))
+      .toEqual([VE_COLLECTION_MODEL, VE_COLLECTION_MODEL, 'openai/gpt-5-mini']);
+    process.env.VE_MODEL_GATE = 'openai/gpt-4o-mini';
+    process.env.VE_MODEL_RELEVANCE_REVIEW = 'openai/gpt-5-mini';
     const expanded = { ...input, rows: [...input.rows, { company: 'Second factory', inn: '7700000002', description }] };
     for (const outcome of ['success', 'malformed', 'interrupted', 'exhausted', 'transport', 'billing'] as const) {
       const legacy = JSON.parse(JSON.stringify(saved)) as VeRelevanceCheckpoint;
@@ -492,6 +555,8 @@ describe('llm rawCall retry', () => {
 
     // Fresh invalid batches split into isolated retries without replaying the
     // initial classifier, including when only one sibling remains malformed.
+    delete process.env.VE_MODEL_GATE;
+    delete process.env.VE_MODEL_RELEVANCE_REVIEW;
     fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [0, 1].map((i) => ({
       i, status: 'relevant', reason: 'Makes equipment', evidence: [{ field: 'description', quote: description }],
     })) })).mockResolvedValueOnce(reply({ reviews: [] }))
@@ -501,9 +566,14 @@ describe('llm rawCall retry', () => {
     expect([...isolated.decisions.values()].map((item) => item.status)).toEqual(['needs_review', 'relevant']);
     expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(Object.values(isolated.checkpoint.semantic_reviews).map((item) => item.attempts)).toEqual([2, 2]);
+    expect(fetchMock.mock.calls.map((call) => JSON.parse(call[1].body).model)).toEqual([
+      VE_COLLECTION_MODEL, VE_COLLECTION_MODEL, 'openai/gpt-5-mini', 'openai/gpt-5-mini',
+    ]);
     await findIrrelevantRows({ ...expanded, checkpoint: isolated.checkpoint });
     expect(fetchMock).toHaveBeenCalledTimes(4);
     expect(needsVeRelevanceEvidence({ ...input.rows[0], _email_status: 'ok', _ve_relevance: isolated.decisions.get(0) })).toBe(false);
+    process.env.VE_MODEL_GATE = 'openai/gpt-4o-mini';
+    process.env.VE_MODEL_RELEVANCE_REVIEW = 'openai/gpt-5-mini';
 
     // Malformed classifier output isolates one company instead of failing all
     // siblings. Unsupported output is saved, never admitted or repaid on retry.

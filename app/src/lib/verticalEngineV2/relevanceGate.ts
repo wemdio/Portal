@@ -1,7 +1,7 @@
 /** Evidence-backed hypothesis triage. Uncertainty is retained, never silently accepted or discarded. */
 import { z } from 'zod';
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
-import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, getVeModel, veNativeJsonSchema, LLMValidationError, type LLMMessage, type LLMUsage } from './llm';
+import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, getVeModel, veNativeJsonSchema, veCollectionCacheModel, VE_COLLECTION_MODEL, LLMValidationError, type LLMMessage, type LLMUsage } from './llm';
 import { isVeProviderBillingError } from './collectionErrors';
 import { readRelevanceCheckpoint, relevanceHash, VeRelevanceCheckpointError, type VeRelevanceCheckpoint, type VeRelevanceFailureCode } from './relevanceCheckpoint';
 import { VE_RELEVANCE_WEBSITE_VERSION, veRelevanceDecisionSchema, type VeRelevanceDecision } from './relevanceDecision';
@@ -204,8 +204,9 @@ export async function findIrrelevantRows(input: {
 }): Promise<VeRelevanceGateResult> {
   const signal = input.signal ?? getVeActiveJobSignal(); signal?.throwIfAborted();
   const model = getVeModel('gate'), reviewModel = getVeModel('relevanceReview');
+  const cacheModel = veCollectionCacheModel('gate', model), cacheReviewModel = veCollectionCacheModel('relevanceReview', reviewModel);
   // Target-scope rules changed: reuse only decisions made under these rules.
-  const contextHash = relevanceHash(['relevance-evidence-v5-single-citation-repair', input.checkpointScope ?? '', model, reviewModel, input.language,
+  const contextHash = relevanceHash(['relevance-evidence-v5-single-citation-repair', input.checkpointScope ?? '', cacheModel, cacheReviewModel, input.language,
     input.verticalName, input.verticalSummary ?? '', input.hypothesisTitle ?? '', input.hypothesisDescription ?? '']);
   const checkpoint = readRelevanceCheckpoint(input.checkpoint, contextHash);
   const previousFailures = checkpoint.failures;
@@ -308,7 +309,7 @@ export async function findIrrelevantRows(input: {
       ? [{ field: item.field, quote: item.quote }] : []) });
   const semanticHash = (entry: Entry, decision: VeRelevanceDecision) =>
     relevanceHash([checkpoint.website_evidence[entry.key]?.reader_revision === 4 ? 'semantic-review-v2-buyer-scope' : 'semantic-review-v1',
-      contextHash, reviewModel, entry.key, reviewCompany(decision)]);
+      contextHash, cacheReviewModel, entry.key, reviewCompany(decision)]);
   const confirms = (decision: VeRelevanceDecision, review: VeRelevanceReviewResult) =>
     (decision.status === 'relevant' && review.result === 'direct_match')
       || (decision.status === 'irrelevant' && review.result === 'direct_conflict');
@@ -381,7 +382,8 @@ export async function findIrrelevantRows(input: {
         && deferredReviewBatches < 3) { deferredReviewBatches++; break; }
       deferredReviewBatches = 0;
       // Retry a malformed batch one company at a time, preserving successful
-      // siblings and the exact same evidence/model/hypothesis scope.
+      // siblings and the exact same evidence/hypothesis scope. DeepSeek's one
+      // reserved retry uses the established reviewer, never an unlimited loop.
       const batch: Entry[] = [pending.shift()!];
       const firstReview = checkpoint.semantic_reviews[checkpoint.semantic_review_refs[batch[0].key]];
       if (semanticAttempts(firstReview) >= MAX_SEMANTIC_ATTEMPTS) {
@@ -390,20 +392,42 @@ export async function findIrrelevantRows(input: {
       if (semanticAttempts(firstReview) === 0) {
         while (batch.length < SEMANTIC_BATCH_SIZE && pending.length
           && semanticAttempts(checkpoint.semantic_reviews[checkpoint.semantic_review_refs[pending[0].key]]) === 0) batch.push(pending.shift()!);
+      } else if (reviewModel === VE_COLLECTION_MODEL && firstReview.result && !firstReview.failure_code) {
+        // Positive candidates share a confirmation batch. Paying a separate GPT
+        // prompt for each candidate would erase most of the cheaper triage gain.
+        while (batch.length < SEMANTIC_BATCH_SIZE && pending.length) {
+          const next = checkpoint.semantic_reviews[checkpoint.semantic_review_refs[pending[0].key]];
+          if (semanticAttempts(next) !== 1 || !next.result || next.failure_code) break;
+          batch.push(pending.shift()!);
+        }
       }
       const reviews = batch.map((entry) => checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]]);
+      const attemptModel = reviewModel === VE_COLLECTION_MODEL && semanticAttempts(firstReview) > 0
+        ? 'openai/gpt-5-mini' : reviewModel;
       reviews.forEach((review) => { review.attempts = semanticAttempts(review) + 1; review.status = 'started'; });
       // A graceful stop must not strand a reservation before its HTTP request.
       await save(false); // A failed reservation must still prevent the paid request.
       let notified = false;
       try {
         const response = await reviewVeRelevanceEvidence({ scope, language: input.language,
-          companies: reviews.map((review) => reviewCompany(review.proposal)), model: reviewModel,
+          companies: reviews.map((review) => reviewCompany(review.proposal)), model: attemptModel,
           signal: signal ?? undefined, onUsage: (usage) => { notified = true; accountUsage(usage); } });
         if (!notified) accountUsage(response);
         signal?.throwIfAborted();
         for (const assessment of response.data.reviews) {
           const review = reviews[assessment.i];
+          // Cheap review screens the reserve. Confirm proposed admissions and
+          // direct contradictions with the established reviewer; never pay a
+          // second model to guess facts absent from an insufficient result.
+          const contradicted = (review.proposal.status === 'relevant' && assessment.result === 'direct_conflict')
+            || (review.proposal.status === 'irrelevant' && assessment.result === 'direct_match');
+          if (attemptModel === VE_COLLECTION_MODEL && (assessment.result === 'direct_match' || contradicted)
+            && semanticAttempts(review) < MAX_SEMANTIC_ATTEMPTS) {
+            review.status = 'pending';
+            review.result = { result: assessment.result, reason: assessment.reason };
+            record(batch[assessment.i], errorDecision('Выполняется контрольная проверка доказательств перед допуском.', review.proposal.review_attempts ?? 0));
+            continue;
+          }
           review.status = 'finished'; review.result = { result: assessment.result, reason: assessment.reason };
           delete review.failure_code;
           applySemantic(batch[assessment.i], review);
@@ -425,12 +449,14 @@ export async function findIrrelevantRows(input: {
         if (review.status === 'failed' && semanticAttempts(review) < MAX_SEMANTIC_ATTEMPTS) {
           resumeSemantic(batch[i], review);
           pending.push(batch[i]);
+        } else if (review.status === 'pending') {
+          pending.push(batch[i]);
         }
       }
     }
   };
   const repairCitation = async (entry: Entry, proposed: z.infer<typeof outputDecision>) => {
-    const inputHash = relevanceHash(['citation-repair-v4-single-company', contextHash, reviewModel, entry.key, entry.fields, proposed.status, proposed.reason]);
+    const inputHash = relevanceHash(['citation-repair-v4-single-company', contextHash, cacheReviewModel, entry.key, entry.fields, proposed.status, proposed.reason]);
     const previous = checkpoint.citation_repairs[entry.key];
     if (previous?.input_hash === inputHash) {
       restoreCitationFailure(entry);
@@ -492,8 +518,7 @@ export async function findIrrelevantRows(input: {
         }
       }
     });
-    // Verified with Requesty's default gate model. Other configured providers
-    // retain JSON mode until their native schema support has been verified.
+    // Verified Requesty routes use native schema constraints.
     // Provider constraints do not replace local completeness/evidence checks.
     const jsonSchema = veNativeJsonSchema(model, 've_relevance_batch', schema);
     let classified = false;
@@ -501,7 +526,9 @@ export async function findIrrelevantRows(input: {
       const fields = batch.map((entry, i) => secondPass
         ? { ...entry.fields, description: '', website_text: '', category: '', excerpts: excerpts[i] } : entry.fields);
       const llm = await invoke(messages(scope, fields, input.language, secondPass, secondPass), schema,
-        { model, maxTokens: 5000, requireCompleteJson: true, jsonSchema, ...(recovering ? { maxSchemaAttempts: 1 as const } : {}), signal: signal ?? undefined });
+        { model, maxTokens: 5000, requireCompleteJson: true, jsonSchema,
+          ...(model === VE_COLLECTION_MODEL ? { maxHttpAttempts: 2 as const, timeoutMs: 90_000 } : {}),
+          ...(recovering ? { maxSchemaAttempts: 1 as const } : {}), signal: signal ?? undefined });
       signal?.throwIfAborted(); const data = schema.parse(llm.data);
       classified = true;
       consecutiveMalformedCompanies = 0;
