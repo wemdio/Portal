@@ -13,6 +13,7 @@ import { parseColumnConfig, type BoardColumnConfigEntry } from '@/lib/instantly/
 export interface ResolvedBoard {
   projectId: string;
   columnConfig: BoardColumnConfigEntry[];
+  configUpdatedAt: string;
   db: NonNullable<typeof supabaseInstantly>;
 }
 
@@ -33,7 +34,7 @@ export async function resolveBoard(
 
   const { data, error } = await db
     .from('project_lead_boards')
-    .select('token, column_config')
+    .select('token, column_config, updated_at')
     .eq('project_id', projectId)
     .maybeSingle();
   if (error) return { error: jsonBoardError(error.message, 500) };
@@ -41,5 +42,5 @@ export async function resolveBoard(
   if (!data || (data.token as string) !== token) {
     return { error: jsonBoardError('Token invalid or revoked', 401) };
   }
-  return { board: { projectId, columnConfig: parseColumnConfig(data.column_config), db } };
+  return { board: { projectId, columnConfig: parseColumnConfig(data.column_config), configUpdatedAt: data.updated_at as string, db } };
 }

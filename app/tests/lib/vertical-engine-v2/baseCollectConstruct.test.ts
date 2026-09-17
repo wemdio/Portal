@@ -594,6 +594,63 @@ describe('base_collect CONSTRUCT step order', () => {
       }
     }
 
+    // Slow saved-email/relevance review must not leave both constructor slots
+    // empty for an hour. Repeated wakes keep the same reserved children; a
+    // manual saved-only review, error or reached goal must buy no new batch.
+    for (const mode of ['automatic', 'manual', 'failed', 'target', 'last_round'] as const) {
+      const round = mode === 'last_round' ? 100 : 2;
+      const reviewing: VeCollectInfo = { ...collectInfo(harvest.slice(0, 600)), collection_mode: 'preview',
+        relevance_review_requested: true,
+        target_progress: { ...createCollectionTarget('preview'), round, candidates_processed: 200,
+          ready_rows: mode === 'target' ? 500 : 0 },
+        target_checkpoint: { completed_round: round, seen_rows: harvest.slice(0, 200) },
+        relevance_reserve: { version: 1, rows: [{ ...harvest[0], _email_status: 'unknown' }] },
+        preview_pipeline: { version: 1, revision: 0, batches: [], completed_batches: 1, job_ids: ['previous-batch'],
+          ...(mode === 'failed' ? { error: 'Previous batch failed' } : {}) } };
+      const db = seed(reviewing);
+      const job = { ...makeJob(), payload: { ...makeJob().payload, ...(mode === 'manual' ? { review_relevance: true } : {}) } };
+      for (let wake = 0; wake < 2; wake++) {
+        await db.from('ve_jobs').update({ status: 'running' }).eq('id', job.id);
+        await runBaseCollectStage(job, { supabase: db as unknown as SupabaseClient });
+      }
+      const children = db.getRows('base_constructor_jobs');
+      const prefetched = children.filter((child) => (child.selected_steps as string[]).includes('find_emails'));
+      expect(prefetched).toHaveLength(mode === 'automatic' ? 2 : 0);
+      expect(children.filter((child) => (child.selected_steps as string[]).length === 1)).toHaveLength(1);
+      const after = db.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+      expect(after.preview_pipeline?.active_batch_id).toBeUndefined();
+      expect(after.target_progress?.candidates_processed).toBe(200);
+      expect(db.getRows('ve_bases')[0].row_count).toBe(0);
+      if (mode === 'automatic') {
+        const emails = prefetched.flatMap((child) => {
+          const grid = child.data as string[][];
+          return grid.slice(1).map((row) => row[grid[0].indexOf('Email')]);
+        });
+        expect(emails).toHaveLength(400);
+        expect(new Set(emails).size).toBe(400);
+        expect(emails).not.toContain(harvest[0].email);
+        expect(after.search_policy?.phase).toBe('existing');
+        // Once the saved check finishes, consume the prefetched output through
+        // normal gates exactly once, preserving its ready/candidate counters.
+        const emailChild = children.find((child) => (child.selected_steps as string[]).length === 1)!;
+        const emailGrid = emailChild.data as string[][];
+        await db.from('base_constructor_jobs').update({ status: 'completed', data: [
+          [...emailGrid[0], 'Email Статус'], ...emailGrid.slice(1).map((row) => [...row, 'unknown']),
+        ] }).eq('id', emailChild.id);
+        await db.from('ve_jobs').update({ status: 'running' }).eq('id', job.id);
+        await runBaseCollectStage(job, { supabase: db as unknown as SupabaseClient });
+        const grid = prefetched[0].data as string[][];
+        await db.from('base_constructor_jobs').update({ status: 'completed', data: [
+          [...grid[0], 'Email Статус'], ...grid.slice(1).map((row) => [...row, 'ok']),
+        ] }).eq('id', prefetched[0].id);
+        await db.from('ve_jobs').update({ status: 'running' }).eq('id', job.id);
+        await runBaseCollectStage(job, { supabase: db as unknown as SupabaseClient });
+        expect(db.getRows('base_constructor_jobs')).toHaveLength(3);
+        expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).target_progress)
+          .toMatchObject({ candidates_processed: 400, ready_rows: 200 });
+      }
+    }
+
     // New previews overlap sources and durable constructor batches. An old
     // slow batch cannot block checked output from its completed neighbours.
     for (const failFirst of [false, true]) {

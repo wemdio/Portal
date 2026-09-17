@@ -2351,6 +2351,8 @@ const PREVIEW_MAX_BATCHES = 100;
 async function preparePreviewBatches(args: {
   ctx: VeStageContext; base: VeAutoBase; info: VeCollectInfo; project: VeProject;
   target: VeCollectionTargetProgress; available: VeUnifiedRow[]; market: VeMarket;
+  /** Keep the current validation/review phase in charge of round accounting. */
+  reserveOnly?: boolean;
 }): Promise<VeUnifiedRow[]> {
   const { ctx, base, info, project, target, available, market } = args;
   const pipeline = info.preview_pipeline!;
@@ -2386,6 +2388,7 @@ async function preparePreviewBatches(args: {
     batch.inserted = true;
     await persistCollectInfo(ctx, base.id, info);
   }
+  if (args.reserveOnly) return [];
   let active = pipeline.batches.find((batch) => batch.id === pipeline.active_batch_id);
   if (!active) {
     // A slow website in one batch must not hold up a completed neighbour.
@@ -2402,6 +2405,37 @@ async function preparePreviewBatches(args: {
   }
   info.construct = { bc_job_id: active.id, status: 'dispatched', dispatched_at: active.dispatched_at };
   return active.rows;
+}
+
+/** A saved-reserve pass can span many worker wakes. Keep its free constructor
+ * slots busy with already fetched, usable source rows, without starting search
+ * or changing which batch owns the current round. Manual review stays saved-only.
+ */
+async function prefetchBufferedPreviewBatches(args: {
+  ctx: VeStageContext; base: VeAutoBase; info: VeCollectInfo; project: VeProject;
+  target: VeCollectionTargetProgress; market: VeMarket;
+}): Promise<void> {
+  const { ctx, base, info, target } = args;
+  const pipeline = info.preview_pipeline;
+  if (!pipeline || pipeline.error || info.validation_retry || target.ready_rows >= target.ready_target
+    || target.round >= target.max_rounds
+    || (pipeline.batches.length >= PREVIEW_IN_FLIGHT && pipeline.batches.every((batch) => batch.inserted))
+    || info.tasks?.some((task) => task.status === 'failed')) return;
+  const buffered = dedupUnifiedRows(interleaveTaskHarvests((info.tasks ?? [])
+    .filter((task) => task.status === 'done')
+    .map((task) => (task.harvest ?? []).filter((row) => normalizeCompanyForDedup(row.company) !== ''))));
+  const excluded = await loadOtherBaseExclusionKeys(ctx, base.project_id, base.id, base.hypothesis_id);
+  // Use the same immutable acquisition receipts as the ordinary harvest path.
+  addAcquisitionReceipts(excluded, info.target_checkpoint?.seen_rows ?? [], buffered);
+  addRowsToExclusionKeys(excluded, Array.isArray(base.data) ? base.data : []);
+  const available = applyVeSourceContacts(buffered.filter((row) => !baseRowMatchesExclusion(excluded, row)), info.source_contact_recovery)
+    .filter(hasExistingSourceContact)
+    .map((row) => pruneBaseRowAgainstExclusion(excluded, row))
+    .filter((row): row is VeUnifiedRow => row !== null);
+  if (!available.length && pipeline.batches.every((batch) => batch.inserted)) return;
+  // The reserve belongs to an already accounted round; reserve only the
+  // remaining future rounds, without advancing the persisted review cursor.
+  await preparePreviewBatches({ ...args, target: { ...target, round: target.round + 1 }, available, reserveOnly: true });
 }
 
 export interface VeConstructImport {
@@ -3382,6 +3416,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   }
   if (info.relevance_review_requested) {
     if (!target) throw new Error('Saved relevance review requires a collection target');
+    await prefetchBufferedPreviewBatches({ ctx, base, info, project, target, market });
     return reviewSavedRelevance(ctx, job, base, info, target, market, usage);
   }
   if (info.validation_retry) {
