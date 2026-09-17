@@ -3136,6 +3136,32 @@ async function completeTargetRound(args: {
   ctx.signal?.throwIfAborted();
   const cleaned = await cleanCollectedCompanyNames(ctx, job, info, pendingRows, args.usage);
   const readyRows = prepareSegmentationAudience({ rows: cleaned.rows, columns, source: 'auto' }).rows;
+  const nameRetry = job.result?.company_name_retry as { context?: unknown; attempts?: unknown } | undefined;
+  const nameAttempts = nameRetry?.context === cleaned.checkpoint.context
+    ? Number.isSafeInteger(nameRetry.attempts) && Number(nameRetry.attempts) >= 0 ? Number(nameRetry.attempts) : 3
+    : 0;
+  if (cleaned.summary.retryable && nameAttempts < 3) {
+    // Resume only missing names. Preserve paid classification/SMTP and the
+    // successful name batches, with a durable cap across worker restarts.
+    info.target_progress = { ...progress, status: 'collecting', ready_rows: readyRows.length,
+      candidates_processed: stats.rows_total };
+    delete info.target_progress.reason;
+    await persistCollectInfo(ctx, base.id, info, {
+      data: cleaned.rows, columns, row_count: cleaned.rows.length, sample_rows: readyRows.slice(0, SAMPLE_ROWS),
+    });
+    ctx.signal?.throwIfAborted();
+    const result = { ...job.result, company_name_retry: { context: cleaned.checkpoint.context, attempts: nameAttempts + 1 } };
+    const now = Date.now();
+    const { data: saved, error } = await ctx.supabase.from('ve_jobs').update({ result,
+      status: 'pending', started_at: null, error: 'Подготовка названий временно недоступна; повтор по сохранённым результатам.',
+      run_after: new Date(now + 30_000 * 2 ** nameAttempts).toISOString(), updated_at: new Date(now).toISOString(),
+    }).eq('id', job.id).eq('status', 'running').select('id').maybeSingle();
+    if (error || !saved) throw new VeRelevanceCheckpointError(error
+      ? `Company name retry save: ${error.message}` : 'Company name retry lost job ownership');
+    job.result = result;
+    stageLog(ctx, `[company_names] временный сбой; отложен повтор ${nameAttempts + 1}/3 только незавершённых названий`);
+    throw new VeRelevanceRetryScheduled(base.id, { ...args.usage });
+  }
   if (pipeline && cleaned.summary.status === 'complete') {
     if (readyRows.length > 0 && !pipeline.first_ready_at) pipeline.first_ready_at = new Date().toISOString();
     if (readyRows.length >= progress.ready_target && !pipeline.target_reached_at) pipeline.target_reached_at = new Date().toISOString();
@@ -4046,7 +4072,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
 /** Keep an explicit target error without erasing a committed round checkpoint. */
 export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Promise<VeStageResult> {
   ctx.onCheckpoint?.();
-  if (job.error && job.result?.relevance_retry) {
+  if (job.error && (job.result?.relevance_retry || job.result?.company_name_retry)) {
     ctx.signal?.throwIfAborted();
     // The saved reason belongs to the previous cooldown. A later constructor
     // poll or capacity continuation must not show that old provider outage.

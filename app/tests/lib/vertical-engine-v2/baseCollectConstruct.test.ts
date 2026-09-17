@@ -18,6 +18,8 @@ jest.mock('@/lib/companiesSearch/rpcSearch', () => ({
 
 jest.mock('@/lib/verticalEngineV2/llm', () => ({
   callLLMWithSchema: jest.fn(),
+  LLMValidationError: jest.requireActual('@/lib/verticalEngineV2/llm').LLMValidationError,
+  getLLMValidationDiagnostic: jest.requireActual('@/lib/verticalEngineV2/llm').getLLMValidationDiagnostic,
   getVeModel: jest.fn(() => 'test-bulk-model'),
   getVeActiveJobSignal: jest.fn(() => undefined),
   veNativeJsonSchema: jest.requireActual('@/lib/verticalEngineV2/llm').veNativeJsonSchema,
@@ -297,6 +299,43 @@ describe('base_collect CONSTRUCT step order', () => {
     expect(db.getRows('base_constructor_jobs')).toHaveLength(1);
     expect(searchRows).not.toHaveBeenCalled();
     expect(db.getRows('ve_jobs').filter((j) => j.stage === 'base_analyze')).toHaveLength(1);
+
+    // A transient name outage resumes the saved name phase, not acquisition or
+    // SMTP. Persist a retry cap so worker restarts cannot create an endless loop.
+    for (const recoverNames of [true, false]) {
+      const nameInfo: VeCollectInfo = { ...collectInfo([ready], { status: 'done', bc_job_id: 'bc-names' }),
+        collection_mode: 'preview', target_progress: { ...createCollectionTarget('preview'), candidates_processed: 1 },
+        target_checkpoint: { completed_round: 1, seen_rows: [ready], processed_rows: 1 },
+        company_name_recovery: { validation_error: null, has_buffered_candidates: false,
+          round_low_relevance: 0, round_relevance_unchecked: 0 } };
+      nameInfo.tasks![0].exhausted = true;
+      const namesDb = seed(nameInfo, { ve_bases: [{ ...makeBase(nameInfo), row_count: 1, columns: [...VE_AUTO_COLLECT_COLUMNS],
+        data: [{ ...ready, _email_status: 'ok', _ve_relevance: { version: 2, status: 'relevant',
+          reason: 'Verified clinic', context_hash: 'a'.repeat(64), evidence: [{ field: 'description', quote: 'Clinic' }] },
+          _ve_company_name: { version: 1, source: ready.company,
+          website: ready.website, status: 'failed', value: '' } }],
+      }], base_constructor_jobs: [{ id: 'bc-names', status: 'completed',
+        selected_steps: ['split_emails', 'validate_emails'],
+        data: [['Компания', 'Сайт', 'Email', 'Email Статус'], [ready.company, ready.website, ready.email, 'ok']],
+      }] });
+      const namesSupabase = namesDb as unknown as SupabaseClient;
+      mockFindIrrelevantRows.mockClear();
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const succeeds = recoverNames && attempt === 3;
+        if (!succeeds) jest.mocked(callLLMWithSchema).mockRejectedValueOnce(new Error('Requesty 429: temporarily limited'));
+        await namesSupabase.from('ve_jobs').update({ status: 'running' }).eq('id', 'job-1');
+        const nameJob = namesDb.getRows('ve_jobs').find((row) => row.id === 'job-1') as unknown as VeJob;
+        await runBaseCollectStage({ ...nameJob }, { supabase: namesSupabase });
+        const nameBase = namesDb.getRows('ve_bases')[0];
+        expect((nameBase.collect_info as VeCollectInfo).target_progress?.candidates_processed).toBe(1);
+        expect(nameBase.status).toBe(attempt < 3 ? 'collecting' : succeeds ? 'analyzing' : 'failed');
+        if (attempt < 3) expect(namesDb.getRows('ve_jobs').find((row) => row.id === 'job-1')).toMatchObject({
+          status: 'pending', result: { company_name_retry: { attempts: attempt + 1 } },
+        });
+      }
+      expect(mockFindIrrelevantRows).not.toHaveBeenCalled();
+      expect(namesDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    }
 
     // Restarting after an outage must buy a NEW validation child for unknowns,
     // while repeated wakes and an in-flight child remain idempotent.

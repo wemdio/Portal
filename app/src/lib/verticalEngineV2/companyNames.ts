@@ -13,6 +13,7 @@ export interface VeCompanyNameCleanupSummary {
   checked: number;
   failed: number;
   error?: string;
+  retryable?: boolean;
 }
 
 export const VE_COMPANY_NAME_FIELD = '_ve_company_name';
