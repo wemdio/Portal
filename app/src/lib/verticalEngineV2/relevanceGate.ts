@@ -12,6 +12,7 @@ export type { VeRelevanceDecision } from './relevanceDecision';
 
 const BATCH_SIZE = 20;
 const RECOVERY_BATCH_SIZE = 5;
+const SEMANTIC_BATCH_SIZE = 8;
 const MAX_SEMANTIC_ATTEMPTS = 2;
 const configuredMax = Number(process.env.VE_RELEVANCE_MAX_ROWS);
 const MAX_COMPANIES = Number.isFinite(configuredMax) && configuredMax > 0 ? Math.min(10_000, Math.floor(configuredMax)) : 3000;
@@ -365,9 +366,20 @@ export async function findIrrelevantRows(input: {
     } else checkpoint.semantic_reviews[hash] = { company_key: entry.key, proposal: decision, status: 'pending' };
     record(entry, errorDecision('Ожидается независимая смысловая проверка доказательств.', entry.attempts));
   };
-  const reviewPending = async (candidates: Entry[]) => {
+  let deferredReviewBatches = 0;
+  const reviewPending = async (candidates: Entry[], flush = true) => {
     const pending = [...new Set(candidates)].filter((entry) => checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]]?.status === 'pending');
+    if (!pending.length) deferredReviewBatches = 0;
     while (pending.length && !stopProviderCalls) {
+      // Keep the established eight-company prompt/schema, but fill it across
+      // classifier/website batches instead of paying for each small remainder.
+      // Do not hold a rare match through an entire large registry pass: wait
+      // at most three classifier batches. Retries still run alone; callers
+      // flush before website selection/return and always on recovery.
+      if (!flush && pending.length < SEMANTIC_BATCH_SIZE
+        && pending.every((entry) => semanticAttempts(checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]]) === 0)
+        && deferredReviewBatches < 3) { deferredReviewBatches++; break; }
+      deferredReviewBatches = 0;
       // Retry a malformed batch one company at a time, preserving successful
       // siblings and the exact same evidence/model/hypothesis scope.
       const batch: Entry[] = [pending.shift()!];
@@ -376,7 +388,7 @@ export async function findIrrelevantRows(input: {
         firstReview.status = 'failed'; quarantineSemantic(batch[0]); await save(); continue;
       }
       if (semanticAttempts(firstReview) === 0) {
-        while (batch.length < 8 && pending.length
+        while (batch.length < SEMANTIC_BATCH_SIZE && pending.length
           && semanticAttempts(checkpoint.semantic_reviews[checkpoint.semantic_review_refs[pending[0].key]]) === 0) batch.push(pending.shift()!);
       }
       const reviews = batch.map((entry) => checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]]);
@@ -504,7 +516,7 @@ export async function findIrrelevantRows(input: {
         else if (secondPass) finishWebsite(entry);
       }
       for (const { entry, raw } of repair) { if (stopProviderCalls) break; await repairCitation(entry, raw); }
-      await reviewPending(batch);
+      await reviewPending(entries, false);
     } catch (e) {
       signal?.throwIfAborted(); if (e instanceof Error && e.name === 'AbortError') throw e;
       if (e instanceof VeRelevanceCheckpointError) throw e;
@@ -620,9 +632,26 @@ export async function findIrrelevantRows(input: {
     await save();
   }
   else {
-    for (let start = 0; start < eligible.length && !stopProviderCalls; start += BATCH_SIZE) {
-      signal?.throwIfAborted(); await classify(eligible.slice(start, start + BATCH_SIZE), false);
+    // supportedDecision cannot admit or reject on a name, URL, vacancy or
+    // numeric registry codes alone. Save that same uncertainty for free and
+    // retain the normal website/discovery path, including paid-search gates.
+    // Filter before batching so sparse sources do not fragment paid batches.
+    const initial = eligible.filter((entry) => {
+      if (ACTIVITY_FIELDS.some((field) => activityQuote(entry.fields[field]))) return true;
+      record(entry, { ...errorDecision('Нет сведений о деятельности; требуется подтверждение по сайту.', entry.attempts),
+        status: 'needs_review' });
+      return false;
+    });
+    if (initial.length !== eligible.length) {
+      input.log?.('[relevanceGate] без платной первичной классификации: ' + (eligible.length - initial.length) + ' компаний без сведений о деятельности');
+      await save();
     }
+    for (let start = 0; start < initial.length && !stopProviderCalls; start += BATCH_SIZE) {
+      signal?.throwIfAborted(); await classify(initial.slice(start, start + BATCH_SIZE), false);
+    }
+    // Unconfirmed proposals remain excluded. Finish the remainder before
+    // deciding which companies need website evidence.
+    await reviewPending(entries);
     const review = entries.filter((entry) => {
       if (!entry.fields.website && !entry.identity
         && !entry.group.rows.some((row) => rowText(row, ['address', 'адрес']) && rowText(row, ['company', 'компания']))) return false;
@@ -714,6 +743,7 @@ export async function findIrrelevantRows(input: {
       await save();
       if (enriched.length && !stopProviderCalls) await classify(enriched, true);
     }
+    await reviewPending(entries);
   }
   if (pending.length > eligible.length) {
     const canContinue = !permanentFailure && !transientFailure && !stopProviderCalls && eligible.length > 0

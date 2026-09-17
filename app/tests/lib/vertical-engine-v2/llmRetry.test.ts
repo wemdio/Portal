@@ -196,6 +196,7 @@ describe('llm rawCall retry', () => {
     fetchMock.mockClear();
     const rows = Array.from({ length: 102 }, (_, i) => ({
       company: `Company ${Math.floor(i / 2)}`, email: `contact${i}@example.org`,
+      description: 'Manufactures industrial equipment',
       inn: String(7700000000 + Math.floor(i / 2)),
     }));
     const gate = await findIrrelevantRows({ rows, verticalName: 'Equipment', language: 'en' });
@@ -518,7 +519,7 @@ describe('llm rawCall retry', () => {
     await findIrrelevantRows({ ...malformedInput, checkpoint: repairedBatch.checkpoint });
     expect(fetchMock).toHaveBeenCalledTimes(5);
     fetchMock.mockReset().mockResolvedValue(reply({ decisions: [] }));
-    const outage = await findIrrelevantRows({ ...malformedInput, rows: Array.from({ length: 30 }, (_, i) => ({ company: `Factory ${i}` })) });
+    const outage = await findIrrelevantRows({ ...malformedInput, rows: Array.from({ length: 30 }, (_, i) => ({ company: `Factory ${i}`, description })) });
     expect(outage.error).toContain('invalid_response');
     expect(outage.coverage.complete).toBe(false);
     expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(8);
@@ -584,13 +585,15 @@ describe('llm rawCall retry', () => {
     expect(reviewRequest.messages[1].content).toContain(description);
     expect(reviewRequest.messages[1].content).not.toContain('"status":"relevant"');
     const sameBrand = { ...input, rows: ['Тула', 'Омск'].map((address) => ({ company: 'Домком', address })) };
-    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [0, 1].map((i) => ({ i, status: 'needs_review', reason: 'Need own-site evidence', evidence: [] })) }));
+    fetchMock.mockReset();
     const noSite = jest.fn().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'not_confirmed' });
     const separateCities = await findIrrelevantRows({ ...sameBrand, fetchEvidence: noSite });
     expect(Object.keys(separateCities.checkpoint.website_evidence)).toHaveLength(2);
     expect(noSite).toHaveBeenCalledTimes(2);
     await findIrrelevantRows({ ...sameBrand, checkpoint: separateCities.checkpoint, fetchEvidence: noSite });
     expect(noSite).toHaveBeenCalledTimes(2);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect([...separateCities.decisions.values()].every((decision) => decision.status === 'needs_review')).toBe(true);
 
     // Postponing a paid search is neither a rejection nor a provider failure.
     // Resume only that evidence lookup once the ready-contact deficit requires it.
@@ -616,11 +619,9 @@ describe('llm rawCall retry', () => {
 
     // An intermittent search timeout cannot discard a successful sibling's
     // evidence or stop the next website batch. The failed subset retries alone.
-    const networkRows = Array.from({ length: 10 }, (_, i) => ({ company: `Network ${i}`, inn: String(7700000000 + i) }));
+    const networkRows = Array.from({ length: 10 }, (_, i) => ({ company: `Network ${i}`, inn: String(7700000000 + i), category: 'ОКВЭД 86.21' }));
     const networkInput = { ...input, rows: networkRows };
-    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: networkRows.map((_row, i) => ({
-      i, status: 'needs_review', reason: 'Need website evidence', evidence: [],
-    })) })).mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'relevant', reason: description, evidence_ids: [0] }] }))
+    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'relevant', reason: description, evidence_ids: [0] }] }))
       .mockResolvedValueOnce(confirmation);
     const evidence = jest.fn(async (_url, options) => options?.companyInn === '7700000000'
       ? { status: 'error' as const, text: '', url: '', reason: 'timeout', provider_error: { kind: 'transient' as const, message: 'Serper transient: timeout.' } }
@@ -634,13 +635,10 @@ describe('llm rawCall retry', () => {
     expect(partial.decisions.get(9)?.status).toBe('needs_review');
     expect(partial.retryable).toBe(true);
     expect(partial.coverage.complete).toBe(false);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     evidence.mockClear().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'not_confirmed' });
     const extraRows = Array.from({ length: 33 }, (_, i) => ({ company: `Extra ${i}`, inn: String(7710000000 + i) }));
     fetchMock.mockReset();
-    for (const size of [20, 13]) fetchMock.mockResolvedValueOnce(reply({ decisions: Array.from({ length: size }, (_, i) => ({
-      i, status: 'needs_review', reason: 'Need website evidence', evidence: [],
-    })) }));
     const rotated = await findIrrelevantRows({ ...networkInput, rows: [...networkRows, ...extraRows], checkpoint: partial.checkpoint, fetchEvidence: evidence });
     expect(evidence).toHaveBeenCalledTimes(32);
     expect(evidence.mock.calls.every(([, options]) => options?.companyInn !== '7700000000')).toBe(true);
@@ -652,9 +650,6 @@ describe('llm rawCall retry', () => {
     expect(evidence).toHaveBeenCalledTimes(1);
     expect(fetchMock).not.toHaveBeenCalled();
 
-    fetchMock.mockResolvedValueOnce(reply({ decisions: networkRows.map((_row, i) => ({
-      i, status: 'needs_review', reason: 'Need website evidence', evidence: [],
-    })) }));
     const billingEvidence = jest.fn().mockResolvedValue({ status: 'error', text: '', url: '', reason: 'billing',
       provider_error: { kind: 'billing', message: 'Serper billing: insufficient search credits.' } });
     const billing = await findIrrelevantRows({ ...networkInput, fetchEvidence: billingEvidence });
@@ -663,6 +658,29 @@ describe('llm rawCall retry', () => {
     expect(billing.error).toContain('Serper billing:');
     expect([...billing.decisions.values()].some((decision) => decision.status === 'relevant')).toBe(false);
     expect(billing.errored.size).toBe(8);
+
+    // Code-only inputs go directly to the same evidence reader. Small semantic
+    // remainders share a batch and the final remainder is confirmed before return.
+    const packedRows = Array.from({ length: 24 }, (_, i) => ({ company: `Factory ${i}`, inn: String(7720000000 + i), category: 'ОКВЭД 28.99' }));
+    fetchMock.mockReset().mockImplementation(async (_url, init) => {
+      const body = JSON.parse(init.body as string);
+      if (body.response_format.json_schema.name === 've_relevance_review') {
+        return reply({ reviews: Array.from({ length: 6 }, (_, i) => ({ i, result: 'direct_match', reason: description })) });
+      }
+      return reply({ decisions: Array.from({ length: 8 }, (_, i) => ({ i,
+        status: i < 2 ? 'relevant' : 'needs_review', reason: description, evidence_ids: i < 2 ? [0] : [],
+      })) });
+    });
+    const packedEvidence = jest.fn().mockResolvedValue({ status: 'ok', text: description, url: 'https://factory.test/', reason: 'identity_verified_website' });
+    const packed = await findIrrelevantRows({ ...input, rows: packedRows, fetchEvidence: packedEvidence });
+    expect(packed.error).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(4); // Three website classifications, one independent review.
+    expect(packedEvidence).toHaveBeenCalledTimes(24);
+    expect([...packed.decisions.values()].filter((decision) => decision.status === 'relevant')).toHaveLength(6);
+    expect(Object.values(packed.checkpoint.semantic_reviews).every((review) => review.status === 'finished')).toBe(true);
+    await findIrrelevantRows({ ...input, rows: packedRows, fetchEvidence: packedEvidence, checkpoint: packed.checkpoint });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(packedEvidence).toHaveBeenCalledTimes(24);
   });
 
   it('does not start website HTTP after a late DNS result, and aborts an active extraction', async () => {
