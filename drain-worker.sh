@@ -57,19 +57,44 @@ should_drain_non_baseconstructor_workers() {
   return 1
 }
 
-if [ -f .env ]; then
-  set -o allexport
-  source <(tr -d '\r' < .env)
-  set +o allexport
-fi
-
-SUPABASE_URL="${NEXT_PUBLIC_SUPABASE_URL:-}"
-KEY="${SUPABASE_SERVICE_ROLE_KEY:-}"
-
 if ! command -v python3 >/dev/null 2>&1; then
   echo "[drain] python3 is required"
   exit 1
 fi
+
+# .env is Docker configuration, not a shell script. In particular, unquoted
+# PEM headers contain spaces; sourcing them aborts deployment before draining.
+# Read only the two single-line settings used here, without evaluating values
+# or exporting unrelated credentials into subprocesses. Compose reads its own
+# complete environment separately.
+read_drain_env() {
+  python3 - "$1" <<'PY'
+import os, re, sys
+from pathlib import Path
+
+key = sys.argv[1]
+value = os.environ.get(key, '')
+env_file = Path('.env')
+if env_file.is_file():
+    assignment = re.compile(r'^\s*(?:export\s+)?' + re.escape(key) + r'\s*=\s*(.*)$')
+    for line in env_file.read_text(encoding='utf-8-sig').splitlines():
+        match = assignment.match(line)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        if value.startswith(('"', "'")):
+            quoted = re.fullmatch(r'([\"\'])(.*?)\1\s*(?:#.*)?', value)
+            if not quoted:
+                sys.exit('[drain] Invalid single-line setting: ' + key)
+            value = quoted.group(2)
+        else:
+            value = re.split(r'\s+#', value, maxsplit=1)[0].rstrip()
+print(value)
+PY
+}
+
+SUPABASE_URL="$(read_drain_env NEXT_PUBLIC_SUPABASE_URL)"
+KEY="$(read_drain_env SUPABASE_SERVICE_ROLE_KEY)"
 
 auth_headers=(
   -H "apikey: ${KEY}"
