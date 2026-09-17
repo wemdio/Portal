@@ -55,12 +55,15 @@ function reviewCells(row: Record<string, unknown>): Record<string, string> {
   const statusLabel = status === 'needs_review' ? 'Недостаточно подтверждённых данных'
     : status === 'error' ? 'Техническая ошибка проверки'
       : status === 'irrelevant' || row._low_relevance === true ? 'Не подходит этой гипотезе'
-        : row._relevance_unchecked === true ? 'Релевантность не подтверждена'
+        : row._relevance_unchecked === true ? 'Проверка не проводилась'
           : !isVeAcceptedEmailStatus(row._email_status) ? 'Не готов по проверке email'
             : 'Сохранён отдельно от готовой базы';
   const reason = typeof decision?.reason === 'string' ? decision.reason
-    : !isVeAcceptedEmailStatus(row._email_status) ? 'Email не прошёл все проверки; контакт не готов к запуску'
-      : 'В сохранённой записи нет подробной причины';
+    // Строка без вердикта — не отказ: очередь проверки до неё не дошла.
+    : !decision && row._relevance_unchecked === true
+      ? 'Очередь проверки до строки не дошла: нужный объём базы был набран раньше'
+      : !isVeAcceptedEmailStatus(row._email_status) ? 'Email не прошёл все проверки; контакт не готов к запуску'
+        : 'В сохранённой записи нет подробной причины';
   const evidence = Array.isArray(decision?.evidence) ? decision.evidence
     .filter(isRecord)
     .filter((entry) => typeof entry.field === 'string' && typeof entry.quote === 'string')

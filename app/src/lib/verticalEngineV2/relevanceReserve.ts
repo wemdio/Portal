@@ -15,6 +15,9 @@ export interface VeRelevanceReserveSummary {
   total: number;
   needs_review: number;
   error: number;
+  /** Never submitted for checking — the round ended before the queue reached
+   * them. Separate from `error`: nothing failed, so the UI must not alarm. */
+  unchecked: number;
   irrelevant: number;
   email_unready: number;
   /** Additional overlapping count, not another term in the total. */
@@ -87,7 +90,7 @@ export function mergeVeRelevanceRows(...groups: Array<Array<Record<string, unkno
 }
 
 export function summarizeVeRelevanceReserve(rows: Array<Record<string, unknown>>): VeRelevanceReserveSummary {
-  const summary: VeRelevanceReserveSummary = { total: rows.length, needs_review: 0, error: 0, irrelevant: 0, email_unready: 0, email_retryable: 0, other: 0 };
+  const summary: VeRelevanceReserveSummary = { total: rows.length, needs_review: 0, error: 0, unchecked: 0, irrelevant: 0, email_unready: 0, email_retryable: 0, other: 0 };
   for (const row of rows) {
     if (needsVeSavedEmailReview(row)) summary.email_retryable += 1;
     const decision = row._ve_relevance && typeof row._ve_relevance === 'object'
@@ -96,7 +99,10 @@ export function summarizeVeRelevanceReserve(rows: Array<Record<string, unknown>>
     else if (decision?.status === 'needs_review') summary.needs_review += 1;
     else if (decision?.status === 'error') summary.error += 1;
     else if (decision?.status === 'irrelevant' || row._low_relevance === true) summary.irrelevant += 1;
-    else if (row._relevance_unchecked === true) summary.error += 1;
+    // Строка без вердикта — не сбой проверки: до неё просто не дошла очередь
+    // (обычно раунд закончился, когда набрался нужный объём). Прежде такие
+    // строки попадали в error, и интерфейс объявлял их неудачей автопроверки.
+    else if (row._relevance_unchecked === true) summary.unchecked += 1;
     else if (!isVeAcceptedEmailStatus(row._email_status)) summary.email_unready += 1;
     else summary.other += 1;
   }
