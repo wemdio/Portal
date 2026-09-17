@@ -11,19 +11,30 @@ import type { TlsMode } from './mailboxImport';
  * ставит провайдер ящика.
  */
 
+/**
+ * Вход в ящик: пароль приложения провайдера либо временный ключ Google.
+ *
+ * Разные это вещи только на этапе входа — дальше и SMTP, и IMAP работают
+ * одинаково, поэтому способ входа живёт в одном поле, а не растекается двумя
+ * ветками по всем воркерам.
+ */
+export type MailboxAuth =
+  | { kind: 'password'; password: string }
+  | { kind: 'oauth'; accessToken: string };
+
 export interface SenderSmtpConfig {
   host: string;
   port: number;
   tlsMode: TlsMode;
   username: string;
-  password: string;
+  auth: MailboxAuth;
 }
 
 export interface SenderImapConfig {
   host: string;
   port: number;
   username: string;
-  password: string;
+  auth: MailboxAuth;
 }
 
 export interface SendResult {
@@ -51,7 +62,10 @@ function buildTransport(cfg: SenderSmtpConfig) {
     // Для 587 STARTTLS обязателен: без requireTLS nodemailer молча отправит
     // письмо и пароль открытым текстом, если сервер не предложит STARTTLS.
     requireTLS: !implicit,
-    auth: { user: cfg.username, pass: cfg.password },
+    auth: cfg.auth.kind === 'password'
+      ? { user: cfg.username, pass: cfg.auth.password }
+      // XOAUTH2: тот же SMTP, но вместо пароля — ключ Google на этот ящик.
+      : { type: 'OAuth2' as const, user: cfg.username, accessToken: cfg.auth.accessToken },
     connectionTimeout: 15_000,
     greetingTimeout: 10_000,
     socketTimeout: 30_000,
@@ -144,7 +158,9 @@ export async function verifySenderImap(cfg: SenderImapConfig): Promise<SendResul
     host: cfg.host,
     port: cfg.port,
     secure: true,
-    auth: { user: cfg.username, pass: cfg.password },
+    auth: cfg.auth.kind === 'password'
+      ? { user: cfg.username, pass: cfg.auth.password }
+      : { user: cfg.username, accessToken: cfg.auth.accessToken },
     logger: false,
     connectionTimeout: 15_000,
     greetingTimeout: 10_000,

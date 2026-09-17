@@ -25,9 +25,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
     const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
 
-    if (body.action === 'disable') patch.status = 'disabled';
+    if (body.action === 'disable') patch.enabled = false;
     // Возврат в работу и повторная проверка — это одно и то же: ящик снова
     // проходит вход по SMTP/IMAP, и только после этого попадает в рассылку.
+    if (body.action === 'enable') patch.enabled = true;
+    // Взяли в работу или отправили на перепроверку — ящик заново проходит вход.
     if (body.action === 'enable' || body.action === 'recheck') {
       patch.status = 'pending';
       patch.last_error = null;
