@@ -18,6 +18,7 @@ export interface ProviderUsageEvent {
   actualModel?: string;
   providerRequestId?: string;
   httpStatus?: number;
+  retryAfterMs?: number;
   promptTokens?: number;
   completionTokens?: number;
   cachedTokens?: number;
@@ -77,7 +78,7 @@ function usageDetails(details: ProviderUsageDetails): ProviderUsageDetails {
     if (typeof value === 'string' && value.trim()) result[field] = value.trim().slice(0, 256);
   }
   for (const field of [
-    'httpStatus', 'promptTokens', 'completionTokens', 'cachedTokens',
+    'httpStatus', 'retryAfterMs', 'promptTokens', 'completionTokens', 'cachedTokens',
     'reportedCostUsd', 'estimatedCostUsd', 'serperCredits',
   ] as const) {
     const value = details[field];

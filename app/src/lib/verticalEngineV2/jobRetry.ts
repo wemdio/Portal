@@ -13,6 +13,7 @@
  */
 
 import { isVeProviderBillingError, isVeProviderConfigurationError } from './collectionErrors';
+import { veRateLimitDelay, type VeLlmRateLimit } from './llmRateLimit';
 
 /** Попытки для постоянных ошибок — как было до автоповтора. */
 export const PERMANENT_MAX_ATTEMPTS = 3;
@@ -48,8 +49,9 @@ export function maxAttemptsFor(msg: string): number {
  * время с бэкоффом (30с → 60с → 120с → 120с), для постоянных — `now` (клейм
  * сразу, как раньше).
  */
-export function retryRunAfter(attempts: number, retryable: boolean, nowMs = Date.now()): string {
+export function retryRunAfter(attempts: number, retryable: boolean, nowMs = Date.now(), rateLimit?: VeLlmRateLimit, scope = ''): string {
   if (!retryable) return new Date(nowMs).toISOString();
-  const delay = Math.min(RETRY_BACKOFF_BASE_MS * 2 ** (attempts - 1), RETRY_BACKOFF_MAX_MS);
+  const delay = Math.max(rateLimit?.deferred ? 0 : Math.min(RETRY_BACKOFF_BASE_MS * 2 ** Math.max(0, attempts - 1), RETRY_BACKOFF_MAX_MS),
+    rateLimit ? veRateLimitDelay(rateLimit, scope, nowMs) : 0);
   return new Date(nowMs + delay).toISOString();
 }

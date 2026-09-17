@@ -1,4 +1,5 @@
 import type { VeRelevanceCheckpoint } from './relevanceCheckpoint';
+import { veRateLimitDelay, type VeLlmRateLimit } from './llmRateLimit';
 
 export const VE_RELEVANCE_MAX_CONSECUTIVE_RETRIES = 4;
 export const VE_RELEVANCE_MAX_TOTAL_RETRIES = 12;
@@ -39,6 +40,7 @@ export function planVeRelevanceRetry(
   previous: unknown,
   checkpoint: VeRelevanceCheckpoint,
   retryable: boolean,
+  rateLimit?: VeLlmRateLimit,
 ): { retry: boolean; delayMs: number; state: VeRelevanceRetryState } {
   const candidate = record(previous);
   const saved = candidate?.context_hash === checkpoint.context_hash ? candidate : undefined;
@@ -57,11 +59,12 @@ export function planVeRelevanceRetry(
     && consecutive < VE_RELEVANCE_MAX_CONSECUTIVE_RETRIES;
   return {
     retry,
-    delayMs: retry ? Math.min(30_000 * 2 ** consecutive, 240_000) : 0,
+    delayMs: retry ? Math.max(rateLimit?.deferred ? 0 : Math.min(30_000 * 2 ** consecutive, 240_000),
+      rateLimit ? veRateLimitDelay(rateLimit, checkpoint.context_hash) : 0) : 0,
     state: {
       context_hash: checkpoint.context_hash,
-      attempts: attempts + Number(retry),
-      consecutive_attempts: consecutive + Number(retry),
+      attempts: attempts + Number(retry && !rateLimit?.deferred),
+      consecutive_attempts: consecutive + Number(retry && !rateLimit?.deferred),
       progress: {
         websites: Math.max(current.websites, oldProgress.websites),
         verdicts: Math.max(current.verdicts, oldProgress.verdicts),
