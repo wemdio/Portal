@@ -4,8 +4,8 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import {
   GoogleWorkspaceNotConfigured,
   isGoogleWorkspaceConfigured,
-  listWorkspaceMailboxes,
 } from '@/lib/sender/googleWorkspace';
+import { syncGoogleWorkspaceMailboxes } from '@/lib/sender/googleSyncWorker';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -20,22 +20,21 @@ export async function GET(req: NextRequest) {
 }
 
 /**
- * POST — забрать ящики из каталога Google Workspace.
+ * POST — синхронизировать каталог прямо сейчас.
  *
- * Пароли не спрашиваются и не хранятся: вход в такой ящик идёт по временному
- * ключу служебного аккаунта. Повторный запуск не плодит строки — уже
- * подключённые ящики обновляются и снова уходят на проверку, а новые ящики
- * домена просто добавляются к списку.
+ * То же самое воркер делает раз в час сам; кнопка нужна, когда ящики завели
+ * только что и ждать целый час незачем. Галочки «берём в рассылку»
+ * синхронизация не трогает: новые ящики появляются выключенными.
  */
 export async function POST(req: NextRequest) {
-  return withToolTrace({ request: req, operation: 'tools.sender.mailboxes.google.import' }, async () => {
+  return withToolTrace({ request: req, operation: 'tools.sender.mailboxes.google.sync' }, async () => {
     const auth = await authenticateRequest(req.headers.get('authorization'));
     if ('error' in auth) return auth.error;
     if (!supabaseAdmin) return jsonError('Сервис не настроен', 503);
 
-    let users;
     try {
-      users = await listWorkspaceMailboxes();
+      const result = await syncGoogleWorkspaceMailboxes();
+      return NextResponse.json(result);
     } catch (e) {
       if (e instanceof GoogleWorkspaceNotConfigured) return jsonError(e.message, 503);
       const text = e instanceof Error ? e.message : String(e);
@@ -47,45 +46,5 @@ export async function POST(req: NextRequest) {
         : '';
       return jsonError(`Google не отдал список ящиков: ${text}.${hint}`, 502);
     }
-
-    // Заблокированные и архивные ящики в рассылку не годятся: письмо с них не
-    // уйдёт, а в списке они выглядели бы рабочими.
-    const active = users.filter((user) => !user.suspended && !user.archived);
-    if (!active.length) {
-      return NextResponse.json({ imported: 0, skipped: users.length, total: users.length });
-    }
-
-    const nowIso = new Date().toISOString();
-    const rows = active.map((user) => ({
-      provider: 'google',
-      auth_type: 'google_sa',
-      email: user.email,
-      display_name: user.fullName,
-      username: user.email,
-      smtp_host: 'smtp.gmail.com',
-      smtp_port: 465,
-      smtp_tls_mode: 'implicit_tls',
-      imap_host: 'imap.gmail.com',
-      imap_port: 993,
-      secret_encrypted: null,
-      // Проверку входа делает воркер: двести ящиков не уложатся в один запрос.
-      status: 'pending',
-      last_error: null,
-      created_by: auth.user.id,
-      updated_at: nowIso,
-    }));
-
-    const { data, error } = await supabaseAdmin
-      .from('sender_mailboxes')
-      .upsert(rows, { onConflict: 'email' })
-      .select('id');
-
-    if (error) return jsonError(error.message, 500);
-
-    return NextResponse.json({
-      imported: data?.length ?? 0,
-      skipped: users.length - active.length,
-      total: users.length,
-    });
   });
 }

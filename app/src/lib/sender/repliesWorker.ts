@@ -156,6 +156,7 @@ export async function processSenderReplies(opts?: { log?: Log }): Promise<boolea
     .from('sender_mailboxes')
     .select('*')
     .eq('status', 'verified')
+    .eq('enabled', true)
     .not('imap_host', 'is', null)
     .order('imap_checked_at', { ascending: true, nullsFirst: true })
     .limit(MAILBOXES_PER_PASS);

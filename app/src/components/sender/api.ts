@@ -5,6 +5,11 @@ const BASE = '/api/tools/sender';
 export interface MailboxDto {
   id: string;
   provider: string;
+  auth_type: 'password' | 'google_sa';
+  /** Галочка «берём в рассылку». */
+  enabled: boolean;
+  /** Состояние ящика в самом Workspace на момент последней синхронизации. */
+  google_state: 'active' | 'suspended' | 'missing' | null;
   email: string;
   display_name: string | null;
   username: string;
@@ -108,9 +113,11 @@ export function importMailboxes(file: File) {
 }
 
 /** Итог загрузки ящиков напрямую из каталога Google Workspace. */
-export interface ImportGoogleResult {
-  imported: number;
-  skipped: number;
+export interface GoogleSyncResult {
+  added: number;
+  updated: number;
+  suspended: number;
+  missing: number;
   total: number;
 }
 
@@ -118,8 +125,9 @@ export function googleWorkspaceStatus() {
   return authFetchJson<{ configured: boolean }>(`${BASE}/mailboxes/google`);
 }
 
-export function importFromGoogleWorkspace() {
-  return authFetchJson<ImportGoogleResult>(`${BASE}/mailboxes/google`, { method: 'POST' });
+/** Синхронизировать каталог прямо сейчас; раз в час это делает воркер сам. */
+export function syncGoogleWorkspace() {
+  return authFetchJson<GoogleSyncResult>(`${BASE}/mailboxes/google`, { method: 'POST' });
 }
 
 export function patchMailbox(id: string, body: Record<string, unknown>) {

@@ -23,6 +23,10 @@ export interface MailboxRow {
   imap_port: number;
   /** null у ящиков с входом по ключу: хранить там нечего. */
   secret_encrypted: string | null;
+  /** Галочка «берём в рассылку»: решение человека, синхронизация её не трогает. */
+  enabled: boolean;
+  /** Что про ящик думает сам Google на момент последней синхронизации каталога. */
+  google_state: 'active' | 'suspended' | 'missing' | null;
   status: MailboxStatus;
   daily_campaign_limit: number;
   daily_total_limit: number;

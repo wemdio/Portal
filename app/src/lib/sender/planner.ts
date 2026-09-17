@@ -104,7 +104,9 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
     .from('sender_mailboxes')
     .select('*')
     .in('id', mailboxIds)
-    .eq('status', 'verified');
+    .eq('status', 'verified')
+    // Снятая галочка — это «не шлём с него», даже если ящик в пуле кампании.
+    .eq('enabled', true);
   const mailboxes = (mailboxRows ?? []) as MailboxRow[];
   if (!mailboxes.length) {
     log('warn', `Кампания ${campaign.name}: нет подтверждённых ящиков — пропуск`);

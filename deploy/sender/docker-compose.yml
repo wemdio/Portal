@@ -34,6 +34,9 @@ services:
       # не пройдут проверку, остальные работают как раньше.
       - SENDER_GOOGLE_SA_EMAIL=${SENDER_GOOGLE_SA_EMAIL:-}
       - SENDER_GOOGLE_SA_PRIVATE_KEY=${SENDER_GOOGLE_SA_PRIVATE_KEY:-}
+      # Каталог Workspace зеркалится раз в час: новые ящики домена появляются
+      # на экране сами, выключенными.
+      - SENDER_GOOGLE_SYNC_INTERVAL_MS=${SENDER_GOOGLE_SYNC_INTERVAL_MS:-3600000}
       - WORKER_KIND=sender
     stop_grace_period: 2m
     deploy:

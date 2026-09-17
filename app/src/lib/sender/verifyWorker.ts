@@ -26,6 +26,9 @@ export async function verifyPendingMailboxes(opts?: { log?: Log }): Promise<numb
     .from('sender_mailboxes')
     .select('*')
     .eq('status', 'pending')
+    // Невыбранные ящики не проверяем: вход в ящик — это лишний логин у
+    // провайдера, а на каталоге в двести адресов таких логинов были бы сотни.
+    .eq('enabled', true)
     .order('created_at')
     .limit(BATCH);
 
