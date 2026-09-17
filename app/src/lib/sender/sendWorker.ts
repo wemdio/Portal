@@ -1,7 +1,7 @@
 import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { unsealMailboxSecret } from '@/lib/byoMailbox/credentials';
+import { authForMailbox } from './mailboxAuth';
 import { sendSenderMail, type SendErrorCode } from './smtp';
 import type { MailboxRow, MessageRow, RecipientRow, StepRow } from './types';
 
@@ -115,10 +115,13 @@ export async function processSenderBatch(opts?: { batchSize?: number; log?: Log 
       continue;
     }
 
-    const secret = unsealMailboxSecret(mailbox.secret_encrypted);
-    if (!secret.smtpPassword) {
-      await db.from('sender_messages').update({ status: 'failed', error: 'Нет пароля ящика' }).eq('id', message.id);
-      await db.from('sender_mailboxes').update({ status: 'failed', last_error: 'Нет пароля ящика' }).eq('id', mailbox.id);
+    // Ящик не пускает — это его проблема, а не письма: письмо возвращаем в
+    // очередь и ждём, пока ящик починят, иначе потеряли бы касание по лиду.
+    const auth = await authForMailbox(mailbox);
+    if (!auth.ok) {
+      await db.from('sender_messages').update({ status: 'scheduled', error: auth.error }).eq('id', message.id);
+      await db.from('sender_mailboxes').update({ status: 'failed', last_error: auth.error }).eq('id', mailbox.id);
+      mailboxCache.set(mailbox.id, { ...mailbox, status: 'failed' });
       continue;
     }
 
@@ -129,7 +132,7 @@ export async function processSenderBatch(opts?: { batchSize?: number; log?: Log 
         port: mailbox.smtp_port,
         tlsMode: mailbox.smtp_tls_mode,
         username: mailbox.username,
-        password: secret.smtpPassword,
+        auth: auth.smtp,
       },
       {
         from: fromHeader(mailbox),

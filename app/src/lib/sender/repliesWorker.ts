@@ -2,6 +2,7 @@ import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { fetchNewReplies, type ReplyMailboxRow } from '@/lib/byoMailbox/imap';
+import { authForMailbox } from './mailboxAuth';
 import { classifyReply, extractBouncedRecipient } from './replyClassify';
 import type { MailboxRow, ReplyKind } from './types';
 
@@ -17,15 +18,17 @@ type Log = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => v
 
 const MAILBOXES_PER_PASS = 30;
 
-function toImapRow(mailbox: MailboxRow): ReplyMailboxRow {
+function toImapRow(mailbox: MailboxRow, accessToken?: string): ReplyMailboxRow {
   return {
+    accessToken,
     id: mailbox.id,
     // Ящики инструмента не принадлежат клиенту портала — поле нужно только
     // сигнатуре общего IMAP-модуля.
     client_user_id: '',
     email: mailbox.email,
     username: mailbox.username,
-    secret_encrypted: mailbox.secret_encrypted,
+    // У ящика на служебном аккаунте секрета нет — вместо него приходит ключ.
+    secret_encrypted: mailbox.secret_encrypted ?? '',
     auth_type: 'password',
     imap_host: mailbox.imap_host,
     imap_port: mailbox.imap_port,
@@ -153,6 +156,7 @@ export async function processSenderReplies(opts?: { log?: Log }): Promise<boolea
     .from('sender_mailboxes')
     .select('*')
     .eq('status', 'verified')
+    .eq('enabled', true)
     .not('imap_host', 'is', null)
     .order('imap_checked_at', { ascending: true, nullsFirst: true })
     .limit(MAILBOXES_PER_PASS);
@@ -165,7 +169,19 @@ export async function processSenderReplies(opts?: { log?: Log }): Promise<boolea
   for (const mailbox of mailboxes) {
     const nowIso = new Date().toISOString();
     try {
-      const result = await fetchNewReplies(toImapRow(mailbox));
+      const auth = await authForMailbox(mailbox);
+      if (!auth.ok) {
+        log('warn', `Ящик ${mailbox.email}: ${auth.error}`);
+        await db
+          .from('sender_mailboxes')
+          .update({ imap_checked_at: nowIso, last_error: auth.error })
+          .eq('id', mailbox.id);
+        continue;
+      }
+
+      const result = await fetchNewReplies(
+        toImapRow(mailbox, auth.imap.kind === 'oauth' ? auth.imap.accessToken : undefined),
+      );
       if (!result) {
         await db.from('sender_mailboxes').update({ imap_checked_at: nowIso }).eq('id', mailbox.id);
         continue;

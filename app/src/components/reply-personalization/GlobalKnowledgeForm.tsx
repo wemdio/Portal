@@ -96,14 +96,14 @@ export function GlobalKnowledgeForm({
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-zinc-900">Пример хорошего письма</label>
+              <label className="block text-sm font-medium text-zinc-900">Примеры хороших писем</label>
               <p className="mt-0.5 mb-2 text-xs text-zinc-500">
-                Один реальный пример как ориентир по стилю
+                Реальные ответы как ориентир по стилю — можно несколько подряд, новые дописывайте в конец
               </p>
               <textarea
                 value={exampleCase}
                 onChange={(e) => setExampleCase(e.target.value)}
-                rows={7}
+                rows={12}
                 className={`${CONTROL_CLASS} resize-y`}
                 placeholder="Вставьте письмо, которое хорошо сработало…"
               />
