@@ -540,6 +540,74 @@ describe('base_collect CONSTRUCT step order', () => {
     expect(fetchVeRelevanceEvidence).toHaveBeenCalledWith('', expect.objectContaining({ companyInn: knownInn.inn }));
     expect((discoveryDb.getRows('base_constructor_jobs')[0].data as string[][])).toHaveLength(2);
 
+    // Production regression: thousands of paid lookups while the ready count
+    // stayed unchanged. Cap the last wave to the remaining cohort and retain
+    // source rows without routing empty failures into paid enrichment instead.
+    for (const pipelined of [false, true]) {
+      const budgetInfo: VeCollectInfo = { ...collectInfo([knownInn, ...excludedSources]), collection_mode: 'preview',
+        search_policy: { version: 1, phase: 'paid', deferred_rows: [knownInn] },
+        target_progress: createCollectionTarget('preview'),
+        source_contact_budget: { version: 1, checked_at_growth: 0, ready_high_water: 0, paused: false },
+        source_contact_recovery: { version: 1, checked: Object.fromEntries(Array.from({ length: 199 }, (_, i) =>
+          [`previous-${i}`, { website: '', reason: 'identity_unverified' }])) },
+        ...(pipelined ? { preview_pipeline: { version: 1 as const, revision: 0, batches: [] } } : {}),
+      };
+      budgetInfo.tasks![0].exhausted = true;
+      const budgetDb = seed(structuredClone(budgetInfo));
+      jest.mocked(fetchVeRelevanceEvidence).mockClear().mockResolvedValueOnce({
+        status: 'unavailable', text: '', url: '', reason: 'identity_unverified',
+      });
+      await runBaseCollectStage(makeJob(), { supabase: budgetDb as unknown as SupabaseClient });
+      expect(fetchVeRelevanceEvidence).toHaveBeenCalledTimes(1);
+      expect(budgetDb.getRows('base_constructor_jobs')).toHaveLength(0);
+      const limited = budgetDb.getRows('ve_bases')[0];
+      expect(limited).toMatchObject({ status: 'analyzed', row_count: 0, data: [], collect_info: {
+        source_contact_budget: { paused: true }, target_progress: { status: 'limited', ready_target: 500,
+          reason: expect.stringContaining('200 попыток поиска без прироста') },
+      } });
+      expect((limited.collect_info as VeCollectInfo).tasks![0].harvest).toHaveLength(17);
+      expect((limited.collect_info as VeCollectInfo).search_policy?.deferred_rows).toEqual([knownInn]);
+      // An ordinary continuation reuses the existing preview; it cannot reset
+      // this persisted allowance or silently purchase another collection.
+      await enqueueVeBaseCollect(budgetDb as unknown as SupabaseClient, { projectId: 'p1', verticalId: 'v1',
+        verticalName: VERTICAL.name, hypothesisIds: ['h1'], collectionMode: 'preview', limit: 2000 });
+      expect(budgetDb.getRows('ve_bases')).toHaveLength(1);
+
+      // Finding the final site's URL is not itself success, but its paid-for
+      // constructor must finish before the cohort can be judged unproductive.
+      const inFlightInfo = structuredClone(budgetInfo);
+      delete inFlightInfo.source_contact_recovery!.checked['previous-198'];
+      const inFlightDb = seed(inFlightInfo);
+      jest.mocked(fetchVeRelevanceEvidence).mockClear().mockResolvedValueOnce({
+        status: 'unavailable', text: '', url: '', reason: 'identity_unverified',
+      }).mockResolvedValueOnce({
+        status: 'ok', text: 'Confirmed legal entity', url: 'https://found.test/', reason: 'verified',
+      });
+      await runBaseCollectStage(makeJob(), { supabase: inFlightDb as unknown as SupabaseClient });
+      const child = inFlightDb.getRows('base_constructor_jobs')[0];
+      expect(child).toBeDefined();
+      expect(child.initial_row_count).toBe(1);
+      await inFlightDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+      await runBaseCollectStage(makeJob(), { supabase: inFlightDb as unknown as SupabaseClient });
+      expect(fetchVeRelevanceEvidence).toHaveBeenCalledTimes(2);
+      expect(inFlightDb.getRows('base_constructor_jobs')).toHaveLength(1);
+      expect(inFlightDb.getRows('ve_bases')[0]).toMatchObject({ status: 'collecting', collect_info: {
+        source_contact_budget: { paused: false },
+      } });
+      // A website with no validated email does not reset the growth counter.
+      await inFlightDb.from('base_constructor_jobs').update({ status: 'completed',
+        data: [[...(child.data as string[][])[0], 'Email Статус']] }).eq('id', child.id);
+      for (let wake = 0; wake < 2; wake++) {
+        await inFlightDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+        await runBaseCollectStage(makeJob(), { supabase: inFlightDb as unknown as SupabaseClient });
+      }
+      expect(fetchVeRelevanceEvidence).toHaveBeenCalledTimes(2);
+      expect(inFlightDb.getRows('base_constructor_jobs')).toHaveLength(1);
+      expect(inFlightDb.getRows('ve_bases')[0]).toMatchObject({ data: [], collect_info: {
+        source_contact_budget: { paused: true }, target_progress: { status: 'limited', ready_rows: 0 },
+      } });
+    }
+
     // Empty site/email lanes do not mean the whole directory is exhausted.
     // Persist the phase switch, then read the original filters and search only
     // for the deficit. A restored worker must not restart the empty free lanes.
