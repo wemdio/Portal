@@ -25,6 +25,7 @@ import asyncio
 import os
 import re
 import sys
+import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -560,9 +561,30 @@ SYSTEM_PROMPT = """\
 MAX_MESSAGES = 2000
 MAX_USER_CONTENT_CHARS = 400_000
 
+# Сводка из трёх десятков правок пишется моделью минутами. 17.09.2026 прежних
+# 180 с не хватило: соединение оборвали мы сами, в панели провайдера прогон
+# виден как «Client closed connection» на 191 с и 0 токенов на выходе — то
+# есть модель даже не начала отвечать, а день остался без сводки.
+AI_TIMEOUT_SEC = 600.0
+AI_ATTEMPTS = 3          # первая попытка + два повтора на той же модели
+AI_RETRY_DELAY_SEC = 15.0
+
 # Markdown-разделитель («---», «***», «___», в т.ч. с пробелами между знаками).
 # Отдельно от списка: пункт «- текст» под это не подпадает, там после знака идёт текст.
 _HR_RE = re.compile(r"^(?:[-*_]\s*){3,}$")
+
+
+async def _sleep_before_retry(attempt: int) -> bool:
+    """Пауза перед повтором. False — попытки исчерпаны, повторять нечего.
+
+    В чат об ошибке не пишем намеренно: разбор идёт по логам контейнера.
+    """
+    if attempt >= AI_ATTEMPTS:
+        print("[changelog] AI: попытки исчерпаны, сводки не будет.", flush=True)
+        return False
+    print(f"[changelog] AI: повтор через {AI_RETRY_DELAY_SEC:.0f}с", flush=True)
+    await asyncio.sleep(AI_RETRY_DELAY_SEC)
+    return True
 
 
 async def summarize_with_ai(
@@ -612,26 +634,52 @@ async def summarize_with_ai(
         "temperature": 0.3,
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=180) as client:
-            r = await client.post(
-                "https://router.requesty.ai/v1/chat/completions",
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                    "HTTP-Referer": "https://portal.app",
-                    "X-Title": "Portal - Changelog Bot",
-                },
-                json=payload,
+    timeout = httpx.Timeout(connect=15, read=AI_TIMEOUT_SEC, write=30, pool=30)
+
+    for attempt in range(1, AI_ATTEMPTS + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.post(
+                    "https://router.requesty.ai/v1/chat/completions",
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "HTTP-Referer": "https://portal.app",
+                        "X-Title": "Portal - Changelog Bot",
+                    },
+                    json=payload,
+                )
+                if not r.is_success:
+                    # Текст ответа целиком: обрезанные 200 символов прятали
+                    # причину отказа как раз тогда, когда она нужна.
+                    print(
+                        f"[changelog] AI error {r.status_code} "
+                        f"(попытка {attempt}/{AI_ATTEMPTS}): {r.text}",
+                        flush=True,
+                    )
+                    # Перегрузку и сбой на стороне провайдера повторяем,
+                    # отказ по ключу, балансу или составу запроса — нет:
+                    # повтор вернёт ровно тот же ответ.
+                    if r.status_code in (408, 429) or r.status_code >= 500:
+                        if await _sleep_before_retry(attempt):
+                            continue
+                    return ""
+                data = r.json()
+                return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        except Exception as e:
+            # Класс ошибки и трейс целиком: у таймаутов httpx текст сообщения
+            # пустой, и прежняя строка «AI call error:» не говорила ничего.
+            print(
+                f"[changelog] AI call error (попытка {attempt}/{AI_ATTEMPTS}): "
+                f"{type(e).__name__}: {e!r}",
+                flush=True,
             )
-            if not r.is_success:
-                print(f"[changelog] AI error {r.status_code}: {r.text[:200]}", flush=True)
-                return ""
-            data = r.json()
-            return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-    except Exception as e:
-        print(f"[changelog] AI call error: {e}", flush=True)
-        return ""
+            print(traceback.format_exc(), flush=True)
+            if await _sleep_before_retry(attempt):
+                continue
+            return ""
+
+    return ""
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
