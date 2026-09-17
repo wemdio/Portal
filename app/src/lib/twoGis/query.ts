@@ -8,6 +8,29 @@ import {
 const MAX_PREVIEW_LIMIT = 200;
 const MAX_EXPORT_BATCH_SIZE = 10_000;
 
+/**
+ * Число филиалов лежит не в cards, а в отдельной таблице: импорт нового среза
+ * делает TRUNCATE cards, и колонка внутри неё умирала бы при каждом
+ * обновлении датасета — выкупленные у 2GIS запросы пришлось бы тратить заново.
+ *
+ * Таблицу создаёт 002_branch_count.sql, а он запускается на 139 руками, так
+ * что до его прогона её просто нет и запрос с JOIN уронил бы весь парсер.
+ * Поэтому вызывающий говорит явно, есть она сейчас или нет.
+ */
+const BRANCH_COUNTS_JOIN =
+  ' LEFT JOIN public.card_branch_counts AS branch_counts'
+  + ' ON branch_counts.card_id = cards.id';
+
+function selectColumns(withBranchCount: boolean | undefined): string {
+  if (!withBranchCount) return TWO_GIS_SOURCE_COLUMNS.join(', ');
+  return `${TWO_GIS_SOURCE_COLUMNS.map((column) => `cards.${column}`).join(', ')}`
+    + ', branch_counts.branch_count';
+}
+
+function branchJoin(withBranchCount: boolean | undefined): string {
+  return withBranchCount ? BRANCH_COUNTS_JOIN : '';
+}
+
 function normalizeList(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const seen = new Set<string>();
@@ -261,7 +284,7 @@ export function buildTwoGisCountQuery(filters: TwoGisFilters): TwoGisQuery {
 
 export function buildTwoGisSearchQuery(
   filters: TwoGisFilters,
-  options: { limit?: number; cursor?: string } = {},
+  options: { limit?: number; cursor?: string; withBranchCount?: boolean } = {},
 ): TwoGisQuery {
   const parts = buildQueryParts(filters, options.cursor);
   const requestedLimit = Number.isFinite(options.limit) ? Number(options.limit) : 100;
@@ -269,8 +292,9 @@ export function buildTwoGisSearchQuery(
   const params = [...parts.params, limit];
   return {
     text:
-      `SELECT ${TWO_GIS_SOURCE_COLUMNS.join(', ')} FROM public.cards AS cards`
-      + `${parts.joinSql}${parts.whereSql} ORDER BY id ASC`
+      `SELECT ${selectColumns(options.withBranchCount)} FROM public.cards AS cards`
+      + `${parts.joinSql}${branchJoin(options.withBranchCount)}${parts.whereSql}`
+      + ' ORDER BY cards.id ASC'
       + ` LIMIT $${params.length}`,
     params,
   };
@@ -278,7 +302,7 @@ export function buildTwoGisSearchQuery(
 
 export function buildTwoGisExportBatchQuery(
   filters: TwoGisFilters,
-  options: { batchSize?: number; cursor?: string } = {},
+  options: { batchSize?: number; cursor?: string; withBranchCount?: boolean } = {},
 ): TwoGisQuery {
   const parts = buildQueryParts(filters, options.cursor);
   const requested = Number.isFinite(options.batchSize) ? Number(options.batchSize) : 5_000;
@@ -286,8 +310,9 @@ export function buildTwoGisExportBatchQuery(
   const params = [...parts.params, batchSize];
   return {
     text:
-      `SELECT ${TWO_GIS_SOURCE_COLUMNS.join(', ')} FROM public.cards AS cards`
-      + `${parts.joinSql}${parts.whereSql} ORDER BY id ASC`
+      `SELECT ${selectColumns(options.withBranchCount)} FROM public.cards AS cards`
+      + `${parts.joinSql}${branchJoin(options.withBranchCount)}${parts.whereSql}`
+      + ' ORDER BY cards.id ASC'
       + ` LIMIT $${params.length}`,
     params,
   };

@@ -22,6 +22,41 @@ import { TWO_GIS_MAX_EXPORT_ROWS } from './types';
 const EXPORT_TICKET_TTL_MINUTES = 15;
 
 /**
+ * Таблица card_branch_counts появляется только после ручного прогона
+ * 002_branch_count.sql на 139. Код и датасет едут разными путями, поэтому
+ * её наличие проверяем в рантайме: пока таблицы нет, парсер работает как
+ * раньше, а поле «Филиалов» остаётся пустым. Отрицательный ответ
+ * перепроверяем раз в минуту — после прогона скрипта поле появится само,
+ * без рестарта приложения.
+ */
+const BRANCH_COUNT_RECHECK_MS = 60_000;
+let branchCountSupported = false;
+let branchCountCheckedAt = 0;
+let branchCountCheck: Promise<boolean> | null = null;
+
+async function readBranchCountSupport(): Promise<boolean> {
+  try {
+    const rows = await twoGisDatasetQuery<{ present: boolean }>(
+      `SELECT to_regclass('public.card_branch_counts') IS NOT NULL AS present`,
+    );
+    return rows[0]?.present === true;
+  } catch {
+    return false;
+  }
+}
+
+export async function supportsTwoGisBranchCount(): Promise<boolean> {
+  if (branchCountSupported) return true;
+  if (Date.now() - branchCountCheckedAt < BRANCH_COUNT_RECHECK_MS) return false;
+  branchCountCheck ??= readBranchCountSupport().finally(() => {
+    branchCountCheckedAt = Date.now();
+    branchCountCheck = null;
+  });
+  branchCountSupported = await branchCountCheck;
+  return branchCountSupported;
+}
+
+/**
  * Порог отсечения минорных пар (категория, подрубрика) в фасетах.
  * У карточки одна категория на все её рубрики, поэтому шумные перекрёстные
  * теги (потолочная компания с рубрикой «Продажа легковых автомобилей»)
@@ -65,7 +100,8 @@ export async function searchTwoGisCards(
   filters: TwoGisFilters,
   options: { limit?: number; cursor?: string } = {},
 ): Promise<{ rows: TwoGisCard[]; nextCursor: string | null }> {
-  const query = buildTwoGisSearchQuery(filters, options);
+  const withBranchCount = await supportsTwoGisBranchCount();
+  const query = buildTwoGisSearchQuery(filters, { ...options, withBranchCount });
   const rows = await twoGisDatasetQuery<TwoGisCard>(query.text, query.params);
   const requested = Number.isFinite(options.limit) ? Number(options.limit) : 100;
   const limit = Math.min(Math.max(Math.trunc(requested), 1), 200);
@@ -269,6 +305,7 @@ export async function* iterateTwoGisCards(
 ): AsyncGenerator<TwoGisCard[]> {
   const requested = Number.isFinite(options.batchSize) ? Number(options.batchSize) : 5_000;
   const batchSize = Math.min(Math.max(Math.trunc(requested), 1), 10_000);
+  const withBranchCount = await supportsTwoGisBranchCount();
   let cursor = options.cursor;
   const client = options.client ?? await twoGisDatasetExportConnect();
   let lockHeld = false;
@@ -291,7 +328,11 @@ export async function* iterateTwoGisCards(
     }
 
     for (;;) {
-      const query = buildTwoGisExportBatchQuery(filters, { batchSize, cursor });
+      const query = buildTwoGisExportBatchQuery(filters, {
+        batchSize,
+        cursor,
+        withBranchCount,
+      });
       const result = await client.query<TwoGisCard>(query.text, query.params);
       const rows = result.rows;
       if (rows.length === 0) return;

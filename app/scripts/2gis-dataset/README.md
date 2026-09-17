@@ -26,6 +26,50 @@ psql $env:TWOGIS_IMPORT_DATABASE_URL -v ON_ERROR_STOP=1 -f scripts/2gis-dataset/
 The SQL file also aborts unless the target database is exactly
 `2gis_dataset`.
 
+## Branch counts (number of locations per organization)
+
+The source export has no such field. It ships 14 columns — one card per
+physical location, with no organization identifier and no `org` block
+(verified against the live database, hotels included). The real number lives in
+the 2GIS Places API as `items.org.branch_count` ("численность филиалов"), and a
+background job pulls it in.
+
+Install the storage once, after `001_schema.sql`:
+
+```powershell
+psql $env:TWOGIS_IMPORT_DATABASE_URL -v ON_ERROR_STOP=1 -f scripts/2gis-dataset/002_branch_count.sql
+```
+
+It creates `public.card_branch_counts` (one row per card: `org_id`,
+`branch_count`, `status`), the `branch_sync_runs` log and the
+`branch_sync_progress` view. The counts deliberately live **outside** `cards`,
+which the importer truncates and refills — a column there would throw away
+every purchased API request on each new snapshot.
+
+Then run the job (needs `TWOGIS_API_KEY` and `TWOGIS_DATASET_DB_URL`):
+
+```powershell
+node scripts/2gis-dataset/sync-branch-counts.mjs --budget=200
+node scripts/2gis-dataset/sync-branch-counts.mjs --only-subcategory="Гостиницы"
+node scripts/2gis-dataset/sync-branch-counts.mjs --mode=refresh --budget=500
+```
+
+Cost model, because it decides everything here: `/3.0/items/byid` takes **up to
+100 ids per request**, and the request — not the card — is the billable unit.
+The whole 4.28M-card base is therefore ~43 000 requests. The rate ceiling is
+600 requests/minute and cannot be raised, so a full pass is bounded at roughly
+1.2 hours; the real constraint is the purchased monthly package. A demo key
+allows 1 000 requests total (= 100 000 cards), which is enough to validate the
+pipeline — all 20 650 hotel cards fit in 207 requests.
+
+`--budget` caps requests per run so a stray restart cannot burn the package.
+Runs are resumable: every batch is written immediately and the data itself is
+the cursor. Cards that 2GIS no longer knows are stored as `not_found` so the
+job never asks for them twice.
+
+The parser checks for the table at runtime, so shipping the app before running
+this script only leaves the field empty — it does not break search or export.
+
 ## Build and run the importer
 
 The repository already contains `esbuild` and `pg`; no new dependency is
