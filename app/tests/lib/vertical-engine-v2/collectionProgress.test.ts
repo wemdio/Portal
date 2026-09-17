@@ -1,6 +1,6 @@
 /** @jest-environment node */
 
-import { getCollectionProgress, getCollectionQueue } from '@/components/vertical-engine-v2/engine/collectionProgress';
+import { getCollectionProgress, getCollectionQueue, isPartialPreview } from '@/components/vertical-engine-v2/engine/collectionProgress';
 import type { VeBaseSummary } from '@/components/vertical-engine-v2/engine/api';
 import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
 import { loadVeProjectDetail } from '@/lib/verticalEngineV2/projectDetail';
@@ -112,6 +112,18 @@ describe('VE2 collection progress presentation', () => {
   });
 
   it('keeps unknown counts, source rows, candidates and step progress distinct from the run cap', () => {
+    const preview = base('preview', '2026-09-16', { collection_mode: 'preview', target_progress: {
+      mode: 'preview', ready_rows: 523, ready_target: 500, candidates_processed: 1000,
+      round: 10, max_rounds: 100, max_candidates: 10000, status: 'target_reached',
+    } });
+    // Reaching the count does not finish an active or failed preparation.
+    expect(isPartialPreview(preview)).toBe(true);
+    expect(isPartialPreview({ ...preview, status: 'failed' })).toBe(true);
+    expect(isPartialPreview({ ...preview, status: 'analyzed' })).toBe(false);
+    preview.collect_info!.target_progress!.ready_rows = 22;
+    preview.collect_info!.target_progress!.status = 'exhausted';
+    expect(isPartialPreview({ ...preview, status: 'analyzed' })).toBe(true);
+    expect(isPartialPreview(base('uploaded', '2026-09-16'))).toBe(false);
     const collecting = base('active', '2026-09-02T12:10:00Z', { limit: 10000 });
     expect(getCollectionProgress(collecting.collect_info)).toMatchObject({ phase: 'planning', candidates: null, sourceRows: null, stepPercent: null });
     collecting.collect_info = {
