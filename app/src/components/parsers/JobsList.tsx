@@ -1,6 +1,6 @@
 'use client';
 
-import type { ParserJob, AtsParserJob, EngHiringParserJob, PartitionProgressDetail } from '@/types';
+import type { ParserJob, AtsParserJob, EngHiringParserJob, PolzaOutreachParserJob, PartitionProgressDetail } from '@/types';
 import { isStoppedByUser, JobStatus } from './JobStatus';
 import { ChevronRight, RefreshCw, Clock } from 'lucide-react';
 
@@ -16,13 +16,28 @@ const STAGE_LABELS: Record<string, string> = {
   enriching_details: 'Подгружаем описания вакансий',
   refreshing_cache: 'Обновляем кэш ATS',
   filtering_cache: 'Фильтруем вакансии',
+  // Polza outreach stages
+  selecting_vacancies: 'Выбираем SDR-вакансии',
+  resolving_domains: 'Находим домены компаний',
+  analyzing_vacancies: 'Разбираем вакансии (LLM)',
+  finding_emails: 'Ищем корпоративную почту',
+  building_letters: 'Собираем письма',
   saving: 'Сохраняем в базу',
   completed: 'Завершено',
   failed: 'Ошибка',
   cancelled: 'Остановлено',
 };
 
-type ParserListJob = ParserJob | AtsParserJob | EngHiringParserJob;
+type ParserListJob = ParserJob | AtsParserJob | EngHiringParserJob | PolzaOutreachParserJob;
+
+function jobQueryLabel(job: ParserListJob): string {
+  if (job.parser_type === 'polza_outreach') {
+    const config = job.config;
+    const countries = Array.isArray(config?.countries) ? config.countries.join(', ') : '';
+    return [countries || 'все гео', `свежесть ${config?.posted_within_days ?? 30} дн`, `лимит ${config?.limit ?? 100}`].join(' · ');
+  }
+  return job.config?.text ?? '';
+}
 
 function resolveStageLabel(job: ParserListJob) {
   if (job.progress_stage === 'partitioning') {
@@ -202,7 +217,7 @@ export function JobsList({
                     </div>
                     <div className="mt-2 text-sm text-gray-700 line-clamp-2">
                       <span className="font-medium text-gray-900">Запрос:</span>{' '}
-                      {clientMode ? (job.config?.text ?? '').replace(/\s*\|\s*/g, ', ') : job.config?.text}
+                      {clientMode ? jobQueryLabel(job).replace(/\s*\|\s*/g, ', ') : jobQueryLabel(job)}
                     </div>
                     {isPartitioning ? (
                       <div className="mt-2 rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-2">
