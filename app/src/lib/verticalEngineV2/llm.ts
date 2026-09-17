@@ -18,6 +18,8 @@ import { z } from 'zod';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { withVeDeadline } from './operationDeadline';
 import { beginProviderUsage, getProviderUsageScope } from '@/lib/providerUsage';
+import { veLlmRateLimit } from './llmRateLimit';
+import { isVeProviderBillingError } from './collectionErrors';
 
 const API_URL = 'https://router.requesty.ai/v1/chat/completions';
 
@@ -289,11 +291,11 @@ function withJsonModeHint(messages: LLMMessage[]): LLMMessage[] {
 }
 
 /**
- * Статусы, которые стоит ретраить: 408 (таймаут апстрима), 425/429 (лимиты),
- * 5xx (провайдер временно недоступен — 502/503/504). Остальные 4xx (ключ,
- * схема, баланс) — постоянные, повторять бессмысленно.
+ * Короткие повторы: 408 (таймаут апстрима), 425, 5xx.
+ * Для 429 очередь сохраняет длительную паузу, освобождая воркер.
+ * Остальные 4xx (ключ, схема, баланс) — постоянные.
  */
-const RAW_RETRYABLE_STATUSES = new Set<number>([408, 425, 429, 500, 502, 503, 504]);
+const RAW_RETRYABLE_STATUSES = new Set<number>([408, 425, 500, 502, 503, 504]);
 /** Сколько повторных попыток после первого вызова (итого 4). */
 const RAW_MAX_RETRIES = 3;
 /** База экспоненциального бэкоффа: 2с → 4с → 8с. */
@@ -334,6 +336,7 @@ async function rawCall(
     signal.throwIfAborted();
 
     const apiKey = getApiKey();
+    const rateGeneration = veLlmRateLimit.beforeRequest(model);
     const metering = await beginProviderUsage('requesty', { requestedModel: model });
     const scope = getProviderUsageScope();
     let res: Response;
@@ -389,9 +392,17 @@ async function rawCall(
     catch (error) { await metering.finish({ status: 'ambiguous', httpStatus: status }); throw error; }
     let failureResponse: RequestyResponse = {};
     try { failureResponse = JSON.parse(body) ?? {}; } catch { /* unknown billing */ }
-    await metering.finish({ status: 'http_error', httpStatus: status, ...providerUsage(failureResponse, model) });
-    signal.throwIfAborted();
     const err = new Error(`Requesty ${status}: ${body.slice(0, 300)}`);
+    const billing = isVeProviderBillingError(err);
+    const rateLimit = status === 429 && !billing
+      ? veLlmRateLimit.limited(model, rateGeneration, res.headers?.get('retry-after')) : undefined;
+    await metering.finish({ status: 'http_error', httpStatus: status, ...providerUsage(failureResponse, model),
+      ...(rateLimit ? { retryAfterMs: Math.max(0, rateLimit.retryAt - Date.now()) } : {}) });
+    signal.throwIfAborted();
+    // A short in-call retry storm exhausts every base's budget. The worker
+    // persists this wait and releases its slot, preserving paid checkpoints.
+    if (rateLimit) throw rateLimit;
+    if (billing) throw err;
     if (status < 500 && !RAW_RETRYABLE_STATUSES.has(status)) throw err;
     lastError = err;
   }

@@ -4,6 +4,7 @@ import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, getVeModel, veNativeJsonSchema, veCollectionCacheModel, VE_COLLECTION_MODEL, LLMValidationError, type LLMMessage, type LLMUsage } from './llm';
 import { isVeProviderBillingError } from './collectionErrors';
+import { VeLlmRateLimitError, type VeLlmRateLimit } from './llmRateLimit';
 import { readRelevanceCheckpoint, relevanceHash, VeRelevanceCheckpointError, type VeRelevanceCheckpoint, type VeRelevanceFailureCode } from './relevanceCheckpoint';
 import { VE_RELEVANCE_WEBSITE_VERSION, veRelevanceDecisionSchema, type VeRelevanceDecision } from './relevanceDecision';
 import { fetchVeRelevanceEvidence } from './relevanceEvidence';
@@ -184,6 +185,7 @@ export interface VeRelevanceGateResult {
   error?: string; checkpoint: VeRelevanceCheckpoint; decisions: Map<number, VeRelevanceDecision>;
   /** Only known transient provider failures permit the coordinator's bounded retry. */
   retryable?: boolean;
+  rateLimit?: VeLlmRateLimit;
   /** A full, durable cacheable batch can advance the company cap without a provider retry. */
   continueFromCheckpoint?: boolean;
   flagged: Set<number>; unchecked: Set<number>; review: Set<number>; errored: Set<number>;
@@ -258,6 +260,14 @@ export async function findIrrelevantRows(input: {
     checkpoint.failures = checkpoint.failures.slice(-100);
   };
   let stopProviderCalls = false, transientFailure = false, permanentFailure = false;
+  const rateLimited = (error: unknown): error is VeLlmRateLimitError => {
+    if (!(error instanceof VeLlmRateLimitError)) return false;
+    stopProviderCalls = true; transientFailure = true;
+    result.rateLimit = { retryAt: Math.max(result.rateLimit?.retryAt ?? 0, error.retryAt),
+      deferred: (result.rateLimit?.deferred ?? true) && error.deferred };
+    result.error = error.message;
+    return true;
+  };
   const currentSearchFailures = new Set<string>();
   let consecutiveMalformedCompanies = 0;
   const accountUsage = (usage: LLMUsage) => { result.tokensUsed += usage.tokensUsed; result.costUsd += usage.costUsd; };
@@ -448,6 +458,14 @@ export async function findIrrelevantRows(input: {
       } catch (error) {
         if (!notified && error instanceof LLMValidationError && error.usage) accountUsage(error.usage);
         signal?.throwIfAborted();
+        if (error instanceof ProviderUsageWriteError || error instanceof VeRelevanceCheckpointError) throw error;
+        if (rateLimited(error)) {
+          // A rejected/deferred request says nothing about these companies.
+          // Undo only this reservation; keep earlier completed quality checks.
+          reviews.forEach((review) => { review.attempts = Math.max(0, semanticAttempts(review) - 1); review.status = 'pending'; });
+          await save();
+          break;
+        }
         const diagnostic = getLLMValidationDiagnostic(error, ['reviews']);
         if (diagnostic) input.log?.('[relevanceGate] invalid semantic review: ' + JSON.stringify(diagnostic));
         const code: VeRelevanceFailureCode = isVeProviderBillingError(error) ? 'billing'
@@ -471,7 +489,7 @@ export async function findIrrelevantRows(input: {
   const repairCitation = async (entry: Entry, proposed: z.infer<typeof outputDecision>) => {
     const inputHash = relevanceHash(['citation-repair-v4-single-company', contextHash, cacheReviewModel, entry.key, entry.fields, proposed.status, proposed.reason]);
     const previous = checkpoint.citation_repairs[entry.key];
-    if (previous?.input_hash === inputHash) {
+    if (previous?.input_hash === inputHash && !previous.retry_proposal) {
       restoreCitationFailure(entry);
       previous.review_attempt = reviewAttempt; previous.status = 'finished';
       finishWebsite(entry); return;
@@ -504,6 +522,12 @@ export async function findIrrelevantRows(input: {
       signal?.throwIfAborted();
       if (error instanceof VeRelevanceCheckpointError) throw error;
       if (error instanceof ProviderUsageWriteError) throw error;
+      if (rateLimited(error)) {
+        checkpoint.citation_repairs[entry.key].retry_proposal = { status: proposed.status, reason: proposed.reason };
+        record(entry, errorDecision('Исправление доказательств ожидает снятия ограничения сервиса ИИ.', entry.attempts));
+        await save();
+        return;
+      }
       const diagnostic = getLLMValidationDiagnostic(error, ['evidence_ids']);
       if (diagnostic) input.log?.('[relevanceGate] invalid citation repair: ' + JSON.stringify(diagnostic));
       if (error instanceof LLMValidationError) citationFailure(entry);
@@ -561,6 +585,8 @@ export async function findIrrelevantRows(input: {
     } catch (e) {
       signal?.throwIfAborted(); if (e instanceof Error && e.name === 'AbortError') throw e;
       if (e instanceof VeRelevanceCheckpointError) throw e;
+      if (e instanceof ProviderUsageWriteError) throw e;
+      rateLimited(e);
       const diagnostic = getLLMValidationDiagnostic(e, ['decisions', 'i', 'status', 'reason', 'evidence', 'field', 'quote']);
       if (diagnostic) input.log?.('[relevanceGate] invalid response: ' + JSON.stringify({ ...diagnostic, companies: batch.length, secondPass, recovering }));
       // One malformed large response must not strand the whole collection.
@@ -606,6 +632,7 @@ export async function findIrrelevantRows(input: {
   const hasContext = Boolean(input.verticalName.trim());
   let recoveredRepair = false;
   const recoveredSemantic: Entry[] = [];
+  const recoveredCitations: Entry[] = [];
   const pending = entries.filter((entry) => {
     if (!hasContext) return true;
     const cached = entry.cacheable ? checkpoint.verdicts[entry.key] : undefined;
@@ -634,6 +661,12 @@ export async function findIrrelevantRows(input: {
         }
       }
       const repair = checkpoint.citation_repairs[entry.key];
+      if (repair?.retry_proposal && website?.reader_version === 1 && website.status === 'ok' && website.text) {
+        entry.fields.website_text = website.text;
+        current.set(entry, cached);
+        recoveredCitations.push(entry);
+        return false;
+      }
       if (website?.provider_error) {
         // A search outage is not a completed company review. Retry its reader
         // directly; do not repay the already completed initial classification.
@@ -663,6 +696,10 @@ export async function findIrrelevantRows(input: {
     return true;
   });
   if (recoveredRepair) await save();
+  for (const entry of recoveredCitations) {
+    if (stopProviderCalls) break;
+    await repairCitation(entry, { i: 0, ...checkpoint.citation_repairs[entry.key].retry_proposal!, evidence: [] });
+  }
   await reviewPending(recoveredSemantic);
   // Apply the budget AFTER cache hits, so recovery advances beyond the old first-N cap.
   const eligible = pending.slice(0, MAX_COMPANIES);

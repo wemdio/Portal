@@ -1,4 +1,5 @@
 import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
+import { VeLlmRateLimitError, veRateLimitDelay } from '../llmRateLimit';
 /**
  * Стадия base_collect: авто-сборка базы под вертикаль (ve_bases source='auto').
  *
@@ -92,7 +93,7 @@ import { randomUUID } from 'node:crypto';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { isVeProviderBillingError, isVeProviderConfigurationError } from '../collectionErrors';
 import { validVeAdaptiveCollection, newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys,
-  readVeBatchSpend, VE_ADAPTIVE_BATCH_SIZE, type VeAdaptiveCollection } from '../adaptiveCollection';
+  readVeBatchSpend, veAdaptiveCandidateLimit, type VeAdaptiveCollection } from '../adaptiveCollection';
 import { prioritizeVeCandidates, readVeCandidateHints } from '../candidatePriority';
 import { isVeAcceptedEmailStatus } from '../emailPolicy';
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -2469,6 +2470,7 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
     } catch (error) {
       ctx.signal?.throwIfAborted();
       if (error instanceof VeRelevanceCheckpointError || error instanceof ProviderUsageWriteError
+        || error instanceof VeLlmRateLimitError
         || isVeProviderBillingError(error) || isVeProviderConfigurationError(error)
         || (error instanceof Error && error.name === 'VeWorkerShutdownError')) throw error;
       policy.replan_needed = false; policy.replan_error = 'Не удалось подготовить альтернативный срез; оплаченные результаты сохранены.';
@@ -2508,9 +2510,10 @@ async function preparePreviewBatches(args: {
   // purchased batches through the same gates and retain their checked results.
   if (!pipeline.error && target.ready_rows < target.ready_target && !info.tasks?.some((task) => task.status === 'failed')) {
     while (pipeline.batches.length < Math.min(info.adaptive_collection ? 1 : PREVIEW_IN_FLIGHT, target.max_rounds - target.round + 1) && candidates.length > 0) {
-      const batchSize = info.adaptive_collection ? VE_ADAPTIVE_BATCH_SIZE
+      const batchSize = info.adaptive_collection ? veAdaptiveCandidateLimit(target, allocated)
         : target.candidates_processed === 0 && allocated === 0 ? VE_PREVIEW_FIRST_CANDIDATES : PREVIEW_BATCH_SIZE;
-      const size = Math.min(batchSize, info.adaptive_collection ? target.ready_target - target.ready_rows : batchSize, collectionRoundLimit(target), target.max_candidates - target.candidates_processed - allocated);
+      const size = info.adaptive_collection ? batchSize
+        : Math.min(batchSize, collectionRoundLimit(target), target.max_candidates - target.candidates_processed - allocated);
       if (size <= 0) break;
       const rows = candidates.splice(0, size);
       const id = randomUUID();
@@ -2866,7 +2869,7 @@ async function checkCollectedRelevance(args: {
       // increase. It must never spend the transient retry budget or loop.
       const continueCapacity = Boolean(gate.error) && gate.continueFromCheckpoint === true && verdicts > previousVerdicts;
       const retry = planVeRelevanceRetry(job.result?.relevance_retry, gate.checkpoint,
-        Boolean(gate.error) && gate.retryable === true && !continueCapacity);
+        Boolean(gate.error) && gate.retryable === true && !continueCapacity, gate.rateLimit);
       const waiting = continueCapacity || retry.retry;
       const result = { ...job.result, relevance_retry: retry.state, ...(continueCapacity ? { relevance_capacity: {
         context_hash: gate.checkpoint.context_hash, verdicts,
@@ -3300,16 +3303,18 @@ async function completeTargetRound(args: {
       data: cleaned.rows, columns, row_count: cleaned.rows.length, sample_rows: readyRows.slice(0, SAMPLE_ROWS),
     });
     ctx.signal?.throwIfAborted();
-    const result = { ...job.result, company_name_retry: { context: cleaned.checkpoint.context, attempts: nameAttempts + 1 } };
+    const nextNameAttempts = nameAttempts + Number(!cleaned.rateLimit?.deferred);
+    const result = { ...job.result, company_name_retry: { context: cleaned.checkpoint.context, attempts: nextNameAttempts } };
     const now = Date.now();
     const { data: saved, error } = await ctx.supabase.from('ve_jobs').update({ result,
       status: 'pending', started_at: null, error: 'Подготовка названий временно недоступна; повтор по сохранённым результатам.',
-      run_after: new Date(now + 30_000 * 2 ** nameAttempts).toISOString(), updated_at: new Date(now).toISOString(),
+      run_after: new Date(now + Math.max(cleaned.rateLimit?.deferred ? 0 : 30_000 * 2 ** nameAttempts,
+        cleaned.rateLimit ? veRateLimitDelay(cleaned.rateLimit, job.id, now) : 0)).toISOString(), updated_at: new Date(now).toISOString(),
     }).eq('id', job.id).eq('status', 'running').select('id').maybeSingle();
     if (error || !saved) throw new VeRelevanceCheckpointError(error
       ? `Company name retry save: ${error.message}` : 'Company name retry lost job ownership');
     job.result = result;
-    stageLog(ctx, `[company_names] временный сбой; отложен повтор ${nameAttempts + 1}/3 только незавершённых названий`);
+    stageLog(ctx, `[company_names] временный сбой; отложен повтор ${nextNameAttempts}/3 только незавершённых названий`);
     throw new VeRelevanceRetryScheduled(base.id, { ...args.usage });
   }
   if (pipeline && cleaned.summary.status === 'complete') {
@@ -3542,7 +3547,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     info.collection_mode = mode;
     info.ready_target = target.ready_target;
     info.target_progress = target;
-    limit = collectionRoundLimit(target);
+    limit = info.adaptive_collection ? veAdaptiveCandidateLimit(target) : collectionRoundLimit(target);
     if (info.preview_pipeline) limit = Math.min(PREVIEW_BATCH_SIZE * PREVIEW_IN_FLIGHT,
       target.max_candidates - target.candidates_processed,
       Math.max(VE_PREVIEW_FIRST_CANDIDATES * PREVIEW_IN_FLIGHT, limit));
@@ -3625,6 +3630,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   }
 
   // ─── PLAN ───
+  if (target && info.adaptive_collection && !info.construct && !info.adaptive_collection.pending) {
+    limit = veAdaptiveCandidateLimit(target);
+    info.limit = limit;
+  }
   if (!info.plan) {
     const hypothesisId = payloadString(job, 'hypothesis_id');
     const { plan, planRepair, sliceProbe, usedHypotheses } = await buildPlan(
@@ -3883,7 +3892,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   const merged = info.preview_pipeline && target
     ? await preparePreviewBatches({ ctx, base, info, project, target, available: kept, market })
     : (info.construct || info.adaptive_collection?.pending) && info.search_policy?.construct_rows ? info.search_policy.construct_rows
-      : orderedKept.slice(0, info.adaptive_collection ? Math.min(VE_ADAPTIVE_BATCH_SIZE, target!.ready_target - target!.ready_rows)
+      : orderedKept.slice(0, info.adaptive_collection ? veAdaptiveCandidateLimit(target!)
         : info.source_contact_recovery ? Math.min(limit, PREVIEW_BATCH_SIZE) : limit);
 
   if (merged.length === 0 && target && info.adaptive_collection && !info.adaptive_collection.pending
@@ -4328,6 +4337,9 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
     // Do not reread the winner's revision and stamp our obsolete error over it.
     // The worker also leaves the winner's job lifecycle untouched.
     if (error instanceof VePreviewCheckpointConflict) throw error;
+    // The generic worker persists Retry-After. A waiting job must not leave
+    // the base's progress looking like a terminal preparation failure.
+    if (error instanceof VeLlmRateLimitError) throw error;
     if (error instanceof VeRelevanceRetryScheduled) {
       return { result: { base_id: error.baseId, waiting: true, relevance_retry: true },
         tokensUsed: error.usage.tokensUsed, costUsd: error.usage.costUsd };

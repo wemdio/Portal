@@ -82,7 +82,7 @@ import { normalizeVeSourceContacts } from '@/lib/verticalEngineV2/sourceContacts
 import { veAcquisitionReceipt } from '@/lib/verticalEngineV2/collectionIdentity';
 import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
 import { resolveVeYandexCatalogFilters } from '@/lib/verticalEngineV2/yandexCatalog';
-import { newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys, summarizeVeBatchSpend, readVeBatchSpend } from '@/lib/verticalEngineV2/adaptiveCollection';
+import { newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys, summarizeVeBatchSpend, readVeBatchSpend, veAdaptiveCandidateLimit } from '@/lib/verticalEngineV2/adaptiveCollection';
 import { prioritizeVeCandidates } from '@/lib/verticalEngineV2/candidatePriority';
 import { veCompanyFactKey, VE_COMPANY_FACT_TTL_MS } from '@/lib/verticalEngineV2/companyFacts';
 import { previewRecoveryKind } from '@/lib/verticalEngineV2/collectionRecovery';
@@ -498,6 +498,11 @@ describe('base_collect CONSTRUCT step order', () => {
     const preview = createCollectionTarget('preview', 50_000);
     expect(preview.ready_target).toBe(500);
     expect(collectionRoundLimit(preview)).toBe(100);
+    const almostReady = { ...preview, round: 20, ready_rows: 499, candidates_processed: 2200 };
+    expect(veAdaptiveCandidateLimit(almostReady)).toBe(50);
+    expect(veAdaptiveCandidateLimit({ ...almostReady, ready_rows: 500 })).toBe(0);
+    expect(veAdaptiveCandidateLimit({ ...almostReady, candidates_processed: 9990 }, 4)).toBe(6);
+    expect(veAdaptiveCandidateLimit({ ...almostReady, candidates_processed: 10_000 })).toBe(0);
     expect(collectionRoundLimit({ ...preview, ready_target: 1_000, first_round_candidates: undefined })).toBe(2_000);
     expect(collectionRoundLimit(createCollectionTarget('supply', 1_000))).toBe(2_000);
     const progressing = finishCollectionRound(preview, {
@@ -739,18 +744,75 @@ describe('base_collect CONSTRUCT step order', () => {
           await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
         }
         const completed = db.getRows('ve_bases')[0];
-        expect(completed).toMatchObject({ status: 'analyzing', row_count: 500 });
+        expect(completed).toMatchObject({ status: 'analyzing', row_count: 516 });
         expect(prepareSegmentationAudience({ rows: completed.data as Record<string, unknown>[],
-          columns: completed.columns as string[], source: 'auto' }).rows).toHaveLength(500);
+          columns: completed.columns as string[], source: 'auto' }).rows).toHaveLength(516);
         expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
         expect((completed.collect_info as VeCollectInfo).search_policy?.phase).toBe('existing');
         // The original harvest's unused tail supplies later batches.
-        expect(new Set((completed.data as Array<{ email: string }>).map((row) => row.email)).size).toBe(500);
+        expect(new Set((completed.data as Array<{ email: string }>).map((row) => row.email)).size).toBe(516);
         const adaptive = (completed.collect_info as VeCollectInfo).adaptive_collection!;
-        expect(adaptive.completed.map((batch) => batch.new_ready)).toEqual([20, 100, 100, 100, 100, 80]);
+        expect(adaptive.completed.map((batch) => batch.new_ready)).toEqual([20, 100, 100, 100, 100, 96]);
         expect(stripTaskHarvest(completed).collect_info).toMatchObject({ adaptive_collection: { completed_batches: 6 } });
         expect((stripTaskHarvest(completed).collect_info as VeCollectInfo).adaptive_collection).not.toHaveProperty('pending');
       }
+    }
+
+    // Real scheduler at 499/500: reserve a useful cohort in both collector
+    // paths, then persist Retry-After without buying another constructor.
+    for (const pipeline of [false, true]) {
+      const ready = harvest.slice(0, 499).map((row) => ({ ...row, _email_status: 'ok',
+        _ve_company_name: { version: 1, source: row.company, website: row.website, status: 'ready', value: row.company } }));
+      const near: VeCollectInfo = { ...collectInfo(harvest.slice(499, 700)), collection_mode: 'preview',
+        adaptive_collection: newVeAdaptiveCollection(),
+        target_progress: { ...createCollectionTarget('preview'), round: 20, ready_rows: 499, candidates_processed: 2200 },
+        target_checkpoint: { completed_round: 19, seen_rows: ready },
+        ...(pipeline ? { preview_pipeline: { version: 1 as const, revision: 0, batches: [], job_ids: ['old-child'] } } : {}),
+      };
+      const nearDb = seed(near);
+      // Repeated wakes must cross the real JSON boundary: the generic mock
+      // otherwise aliases nested collect_info writes with live stage objects.
+      const from = nearDb.from.bind(nearDb);
+      nearDb.from = (table) => {
+        const query = from(table);
+        if (table === 've_bases') {
+          const update = query.update.bind(query);
+          query.update = (patch) => update(structuredClone(patch));
+          const single = query.single.bind(query);
+          query.single = async () => structuredClone(await single());
+        }
+        return query;
+      };
+      await nearDb.from('ve_bases').update({ data: ready, row_count: ready.length, columns: [...VE_AUTO_COLLECT_COLUMNS] }).eq('id', 'b1');
+      const wake = async () => {
+        await nearDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+        return runBaseCollectStage(nearDb.getRows('ve_jobs')[0] as unknown as VeJob, { supabase: nearDb as unknown as SupabaseClient });
+      };
+      await wake();
+      const child = nearDb.getRows('base_constructor_jobs')[0];
+      expect((child.data as string[][])).toHaveLength(51);
+      const grid = child.data as string[][];
+      await nearDb.from('base_constructor_jobs').update({ status: 'completed', data: [
+        [...grid[0], 'Email Статус'], ...grid.slice(1).map((row) => [...row, 'ok']),
+      ] }).eq('id', child.id);
+      const retryAt = Date.now() + 180_000;
+      const checkpoint = { version: 2, context_hash: 'a'.repeat(64), verdicts: {}, website_evidence: {},
+        citation_repairs: {}, semantic_reviews: {}, semantic_review_refs: {}, failures: [] };
+      for (const deferred of [false, true]) {
+        mockFindIrrelevantRows.mockResolvedValueOnce({ flagged: new Set(), unchecked: new Set([0]),
+          coverage: { checkedCompanies: 0, totalCompanies: 50, complete: false }, tokensUsed: 0, costUsd: 0,
+          checkpoint, error: 'Requesty 429: retry later', retryable: true, rateLimit: { retryAt, deferred } });
+        await expect(wake()).resolves.toMatchObject({ result: { waiting: true } });
+        const waiting = nearDb.getRows('ve_jobs')[0];
+        expect(waiting.status).toBe('pending');
+        expect(new Date(waiting.run_after as string).getTime()).toBeGreaterThanOrEqual(retryAt);
+        expect((waiting.result as { relevance_retry: { attempts: number } }).relevance_retry.attempts).toBe(1);
+        expect(nearDb.getRows('ve_bases')[0].status).toBe('collecting');
+        expect(nearDb.getRows('base_constructor_jobs')).toHaveLength(1);
+      }
+      await wake();
+      expect(nearDb.getRows('ve_bases')[0]).toMatchObject({ status: 'analyzing', row_count: 549 });
+      expect(nearDb.getRows('base_constructor_jobs')).toHaveLength(1);
     }
 
     // Real scheduler: two poor completed batches switch to another saved

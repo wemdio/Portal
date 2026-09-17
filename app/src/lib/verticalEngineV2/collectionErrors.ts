@@ -42,6 +42,10 @@ export function getVeCollectionFailure(
     kind: 'configuration',
     message: 'Проверка остановлена: сервис поиска Serper не настроен или отклонил ключ либо запрос. Собранные контакты сохранены.',
   };
+  if (/\bRequesty 429\b/i.test(message)) return {
+    kind: 'provider',
+    message: 'Сервис ИИ временно ограничил запросы. Собранные контакты и результаты проверок сохранены.',
+  };
   if (/\bSerper transient:/i.test(message)) return {
     kind: 'provider',
     message: 'Автопроверка остановлена: сервис поиска Serper временно недоступен. Собранные контакты сохранены.',

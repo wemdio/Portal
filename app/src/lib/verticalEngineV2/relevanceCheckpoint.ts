@@ -53,6 +53,9 @@ const checkpointSchema = z.object({
     status: z.enum(['started', 'finished']),
     // Preserve provider failures separately from a single unsupported citation.
     failure_code: relevanceFailureCodeSchema.optional(),
+    /** Explicit 429: this proposal has not consumed its citation repair yet. */
+    retry_proposal: z.object({ status: z.enum(['relevant', 'irrelevant', 'needs_review']),
+      reason: z.string().min(1).max(400) }).optional(),
   })).default({}),
   // Reserve each paid attempt before HTTP. Legacy started/failed records count
   // as one attempt; recovery may buy at most one isolated follow-up.

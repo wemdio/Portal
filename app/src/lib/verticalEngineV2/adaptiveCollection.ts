@@ -1,8 +1,16 @@
 import { createHash } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { VeCollectTask } from './prompts/sourcePlan';
+import { collectionRoundLimit, type VeCollectionTargetProgress } from './collectionTarget';
 
 export const VE_ADAPTIVE_BATCH_SIZE = 100;
+/** Candidates are not recipients. Near the goal retain a useful 50-company
+ * sample; otherwise one missing email causes dozens of tiny paid rounds. */
+export function veAdaptiveCandidateLimit(progress: VeCollectionTargetProgress, reserved = 0): number {
+  if (progress.ready_rows >= progress.ready_target) return 0;
+  return Math.max(0, Math.min(VE_ADAPTIVE_BATCH_SIZE, Math.max(50, collectionRoundLimit(progress)),
+    progress.max_candidates - progress.candidates_processed - reserved));
+}
 export const VE_ADAPTIVE_MIN_YIELD = 0.05;
 export const VE_ADAPTIVE_MAX_COST_PER_CONTACT = 0.05;
 export const VE_SERPER_CREDIT_ESTIMATE_USD = 50 / 49_999;

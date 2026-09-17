@@ -2,8 +2,8 @@
 
 /**
  * Регрессия на транзиентный отказ провайдера (инцидент: стадия «Генерация
- * гипотез» падала на Requesty 502). rawCall обязан ретраить 408/425/429/5xx
- * с бэкоффом и НЕ ретраить постоянные 4xx.
+ * гипотез» падала на Requesty 502). rawCall ретраит 408/425/5xx;
+ * 429 передаёт очереди с Retry-After, постоянные 4xx не ретраит.
  */
 
 import { z } from 'zod';
@@ -38,13 +38,17 @@ import { parseVeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
 import { needsVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceReserve';
 import { recoverVeSourceContacts, hasPendingVeSourceContacts, evaluateVeSourceDiscoveryBudget, type VeSourceContactCheckpoint } from '@/lib/verticalEngineV2/sourceContacts';
 import { cleanVeCompanyNames } from '@/lib/verticalEngineV2/companyNameCleanup';
+import { createVeLlmRateLimit, veLlmRateLimit, veRetryAfterMs, VeLlmRateLimitError } from '@/lib/verticalEngineV2/llmRateLimit';
+import { planVeRelevanceRetry } from '@/lib/verticalEngineV2/relevanceRetry';
+import { retryRunAfter } from '@/lib/verticalEngineV2/jobRetry';
 
 const schema = z.object({ ok: z.boolean() });
 
-function httpResponse(status: number, body: unknown) {
+function httpResponse(status: number, body: unknown, headers: Record<string, string> = {}) {
   return {
     ok: status >= 200 && status < 300,
     status,
+    headers: new Headers(headers),
     text: async () => (typeof body === 'string' ? body : JSON.stringify(body)),
     json: async () => (typeof body === 'string' ? JSON.parse(body) : body),
   } as unknown as Response;
@@ -66,6 +70,10 @@ describe('llm rawCall retry', () => {
     process.env.VE_MODEL_RELEVANCE_REVIEW = 'openai/gpt-5-mini';
     delete process.env.VE_LLM_TIMEOUT_MS;
     jest.useFakeTimers();
+    // Isolate the process-wide coordinator, while exercising its real logic.
+    const capacity = createVeLlmRateLimit();
+    jest.spyOn(veLlmRateLimit, 'beforeRequest').mockImplementation(capacity.beforeRequest);
+    jest.spyOn(veLlmRateLimit, 'limited').mockImplementation(capacity.limited);
   });
 
   afterEach(() => {
@@ -164,10 +172,50 @@ describe('llm rawCall retry', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     fetchMock.mockReset().mockResolvedValue(httpResponse(429, {}));
     const delayedNames = cleanVeCompanyNames({ rows: companyRows.slice(0, 2), language: 'ru', scope: 'test', onCheckpoint: checkpoint });
-    await jest.advanceTimersByTimeAsync(14_000);
-    expect((await delayedNames).summary).toMatchObject({ status: 'partial', retryable: true, checked: 0 });
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    const namesLimited = await delayedNames;
+    expect(namesLimited.summary).toMatchObject({ status: 'partial', retryable: true, checked: 0 });
+    expect(namesLimited.rateLimit).toMatchObject({ deferred: false, retryAt: Date.now() + 30_000 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(stopped.summary.retryable).toBeUndefined();
+
+    // Cooldown is shared across bases using the same model, never another
+    // model. No HTTP/journal attempt occurs while merely waiting.
+    const events: unknown[] = [];
+    const limitedModel = 'test-rate-limit-model';
+    const start = Date.now();
+    fetchMock.mockReset().mockResolvedValueOnce(httpResponse(429, { error: 'private diagnostic' }, { 'retry-after': '120' }))
+      .mockResolvedValue(httpResponse(200, { choices: [{ message: { content: '{"ok":true}' } }], usage: {} }));
+    await expect(withProviderUsage({ projectId: 'p', baseId: 'b', jobId: 'j', stage: 'base_collect' },
+      async (_scope, event) => { events.push(event); }, () => callLLMWithSchema(
+        [{ role: 'user', content: 'json' }], schema, { model: limitedModel })))
+      .rejects.toMatchObject({ name: 'VeLlmRateLimitError', retryAt: start + 120_000, deferred: false });
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({ status: 'http_error', httpStatus: 429, retryAfterMs: 120_000 });
+    expect(JSON.stringify(events)).not.toContain('private diagnostic');
+    await expect(callLLMWithSchema([{ role: 'user', content: 'json' }], schema, { model: limitedModel }))
+      .rejects.toMatchObject({ deferred: true, retryAt: start + 120_000 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await callLLMWithSchema([{ role: 'user', content: 'json' }], schema, { model: 'unaffected-model' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(veRetryAfterMs(new Date(start + 180_000).toUTCString(), start)).toBeGreaterThanOrEqual(179_001);
+    expect(veRetryAfterMs('nonsense', start)).toBeUndefined();
+    expect(veRetryAfterMs('-1', start)).toBeUndefined();
+    await jest.advanceTimersByTimeAsync(120_000);
+    await callLLMWithSchema([{ role: 'user', content: 'json' }], schema, { model: limitedModel });
+    await expect(callLLMWithSchema([{ role: 'user', content: 'json' }], schema, { model: limitedModel }))
+      .rejects.toMatchObject({ deferred: true, retryAt: Date.now() + 1000 });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const capacity = createVeLlmRateLimit();
+    const wave = Array.from({ length: 16 }, () => capacity.beforeRequest('shared', start));
+    expect(new Set(wave.map((generation) => capacity.limited('shared', generation, null, start).retryAt)))
+      .toEqual(new Set([start + 30_000]));
+    const generation = capacity.beforeRequest('shared', start + 30_000);
+    expect(capacity.limited('shared', generation, null, start + 30_000).retryAt).toBe(start + 90_000);
+    const localWait = { retryAt: Date.now() + 1000, deferred: true };
+    expect(new Date(retryRunAfter(4, true, Date.now(), localWait, 'job')).getTime() - Date.now()).toBeLessThan(6000);
+    const stop = new AbortController(); stop.abort();
+    await expect(callLLMWithSchema([{ role: 'user', content: 'json' }], schema, { model: limitedModel, signal: stop.signal })).rejects.toBeDefined();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it('does not retry a permanent 4xx', async () => {
@@ -201,6 +249,12 @@ describe('llm rawCall retry', () => {
     expect(getVeCollectionFailure('private database error').message).not.toContain('private database');
     expect(maxAttemptsFor('Requesty 502: unavailable')).toBe(5);
     expect(maxAttemptsFor('Invalid candidate 402')).toBe(3);
+    fetchMock.mockClear().mockResolvedValueOnce(httpResponse(429, { error: 'Insufficient funds; private account' }));
+    const noFunds = await callLLMWithSchema([{ role: 'user', content: 'json' }], schema, { model: 'billing-model' })
+      .catch((cause: Error) => cause);
+    expect(noFunds).not.toBeInstanceOf(VeLlmRateLimitError);
+    expect(getVeCollectionFailure(noFunds).kind).toBe('billing');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
 
     fetchMock.mockClear();
     const rows = Array.from({ length: 102 }, (_, i) => ({
@@ -214,6 +268,48 @@ describe('llm rawCall retry', () => {
     expect(gate.coverage).toEqual({ checkedCompanies: 0, totalCompanies: 51, complete: false });
     expect(gate.unchecked).toEqual(new Set(rows.map((_, i) => i)));
     expect(gate.flagged.size).toBe(0);
+
+    // A 429 on semantic review must preserve the paid classifier decision,
+    // not consume its two quality attempts or invoke the expensive fallback.
+    process.env.VE_MODEL_GATE = VE_COLLECTION_MODEL;
+    process.env.VE_MODEL_RELEVANCE_REVIEW = VE_COLLECTION_MODEL;
+    const description = 'Manufactures industrial equipment';
+    const reply = (data: unknown) => httpResponse(200, { choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(data) } }] });
+    fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'relevant', reason: 'Makes equipment',
+      evidence: [{ field: 'description', quote: description }] }] }))
+      .mockResolvedValueOnce(httpResponse(429, {}, { 'retry-after': '180' }));
+    const input = { rows: [{ company: 'Factory', inn: '7700000001', description }], verticalName: 'Equipment', language: 'en' as const };
+    const failed = await findIrrelevantRows(input);
+    expect(failed.rateLimit).toMatchObject({ deferred: false, retryAt: Date.now() + 180_000 });
+    expect(failed.decisions.get(0)?.status).toBe('error');
+    expect(Object.values(failed.checkpoint.semantic_reviews)[0]).toMatchObject({ status: 'pending', attempts: 0 });
+    const retry = planVeRelevanceRetry(undefined, failed.checkpoint, true, failed.rateLimit);
+    expect(retry.state.attempts).toBe(1);
+    expect(retry.delayMs).toBeGreaterThanOrEqual(180_000);
+    const delayed = await findIrrelevantRows({ ...input, checkpoint: failed.checkpoint });
+    expect(delayed.rateLimit?.deferred).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const wait = planVeRelevanceRetry(retry.state, delayed.checkpoint, true, delayed.rateLimit);
+    expect(wait.state.attempts).toBe(1);
+    expect(wait.state.consecutive_attempts).toBe(1);
+    const quick = planVeRelevanceRetry(wait.state, delayed.checkpoint, true, { retryAt: Date.now() + 1000, deferred: true });
+    expect(quick.delayMs).toBeLessThan(6000);
+    let capped = retry;
+    for (let i = 0; i < 4; i++) capped = planVeRelevanceRetry(capped.state, failed.checkpoint, true, failed.rateLimit);
+    expect(capped).toMatchObject({ retry: false, state: { attempts: 4, consecutive_attempts: 4 } });
+    expect(planVeRelevanceRetry({ ...retry.state, attempts: 12 }, failed.checkpoint, true, failed.rateLimit).retry).toBe(false);
+    expect(new Date(retryRunAfter(1, true, Date.now(), failed.rateLimit, 'job')).getTime()).toBeGreaterThanOrEqual(failed.rateLimit!.retryAt);
+    expect(new VeLlmRateLimitError(Date.now() + 30_000, true).message).not.toContain('balance');
+    // A worker restart resumes the serialized checkpoint; only unfinished
+    // semantic review is called, and actual admissions still require GPT.
+    await jest.advanceTimersByTimeAsync(240_000);
+    fetchMock.mockResolvedValueOnce(reply({ reviews: [{ i: 0, result: 'direct_match', reason: description }] }))
+      .mockResolvedValueOnce(reply({ reviews: [{ i: 0, result: 'direct_match', reason: description }] }));
+    const completed = await findIrrelevantRows({ ...input, checkpoint: JSON.parse(JSON.stringify(delayed.checkpoint)) });
+    expect(completed.error).toBeUndefined();
+    expect(completed.decisions.get(0)?.status).toBe('relevant');
+    expect(fetchMock.mock.calls.map((call) => JSON.parse(call[1].body).model))
+      .toEqual([VE_COLLECTION_MODEL, VE_COLLECTION_MODEL, VE_COLLECTION_MODEL, 'openai/gpt-5-mini']);
   });
 
   it('gives up after exhausting retries on 502', async () => {
@@ -637,7 +733,16 @@ describe('llm rawCall retry', () => {
       expect(failed.decisions.get(0)?.status).toBe('error');
       const resumed = await findIrrelevantRows({ ...citationInput, checkpoint: failed.checkpoint });
       expect(fetchMock).toHaveBeenCalledTimes(3);
-      if (status === 429 || status === 502) {
+      if (status === 429) {
+        expect(resumed.rateLimit).toMatchObject({ deferred: true });
+        expect(Object.values(resumed.checkpoint.citation_repairs)[0].retry_proposal).toBeDefined();
+        fetchMock.mockResolvedValueOnce(reply({ evidence_ids: [0] })).mockResolvedValueOnce(confirmation);
+        await jest.advanceTimersByTimeAsync(90_000);
+        const completed = await findIrrelevantRows({ ...citationInput, checkpoint: resumed.checkpoint });
+        expect(completed.decisions.get(0)?.status).toBe('relevant');
+        expect(fetchMock).toHaveBeenCalledTimes(5);
+        expect(citationInput.fetchEvidence).toHaveBeenCalledTimes(1);
+      } else if (status === 502) {
         expect(resumed.error).toBeUndefined();
         expect(resumed.decisions.get(0)?.status).toBe('needs_review');
       } else {
