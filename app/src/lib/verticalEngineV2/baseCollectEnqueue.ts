@@ -133,6 +133,12 @@ async function resumeFailedPreview(
   // continuation, poll the SAME child again instead of buying another scrape.
   if (Array.isArray(info.tasks)) {
     info.tasks = info.tasks.map((task: Record<string, unknown>) => {
+      if (task.source === 'yandex_maps' && task.status === 'failed') {
+        const recovered: Record<string, unknown> = { ...task, status: 'pending', child_job_id: null,
+          ...(task.child_job_id ? { legacy_child_job_id: task.child_job_id } : {}) };
+        delete recovered.error;
+        return recovered;
+      }
       if (task.status !== 'failed' || !task.child_job_id || task.error !== 'timeout: дочерняя джоба зависла') return task;
       const recovered: Record<string, unknown> = { ...task, status: 'dispatched' };
       delete recovered.error;

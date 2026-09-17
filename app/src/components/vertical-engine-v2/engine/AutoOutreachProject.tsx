@@ -14,6 +14,7 @@ import {
   type VeProjectDetailResponse,
   type VeProjectResponse,
   type VeJobResponse,
+  type VeBaseSummary,
 } from './api';
 import { HE } from './design';
 import { StatusBox, formatDate, prettyProjectName } from './ui';
@@ -25,8 +26,9 @@ import { FinalLettersEditor } from './FinalLettersEditor';
 import { OutreachLaunchPanel } from './OutreachLaunchPanel';
 import { CampaignProgress } from './CampaignProgress';
 import { ManualBaseLibrary } from './ManualBaseLibrary';
-import { PreparationProgress, getPreparationPresentation } from './PreparationProgress';
+import { PreparationProgress, getPreparationPresentation, type PreparationPresentation } from './PreparationProgress';
 import { selectHypothesisLetters } from './letterSelection';
+import { isPartialPreview } from './collectionProgress';
 
 const LABELS = ['Гипотезы', 'Письма', 'Базы и объём', 'Запуск', 'Результаты'];
 const RUN_LABELS = {
@@ -45,14 +47,17 @@ type ProjectData = Required<
 >;
 
 function AudienceSummary({
-  baseId,
+  base,
   presetId,
+  preparationState,
   onCount,
 }: {
-  baseId: string;
+  base: VeBaseSummary;
   presetId: string;
+  preparationState: PreparationPresentation;
   onCount?: (count: number) => void;
 }) {
+  const baseId = base.id;
   const [data, setData] = useState<VeBaseAudienceSummary | null>(null);
   const [error, setError] = useState('');
   useEffect(() => {
@@ -92,12 +97,18 @@ function AudienceSummary({
   const preparedForLaunch = data.client_exclusions_applied
     ? `Новых контактов для резерва запуска: ${data.ready.toLocaleString('ru-RU')}. Исключения клиента и контакты, уже распределённые в кампании проекта, учтены.`
     : `До ${data.ready.toLocaleString('ru-RU')} контактов попадут в резерв запуска. Повторы с уже подготовленными кампаниями проекта исключены; точное число пересчитаем после выбора клиента и применения его списка исключений.`;
+  const partial = isPartialPreview(base);
+  const collecting = base.status === 'collecting' && preparationState.tone !== 'err';
+  const waiting = collecting && preparationState.tone === 'muted';
   return (
     <div className="space-y-3">
       <div className="ve2-stats">
         <div className="ve2-stat">
-          <p className="ve2-stat-v">{data.ready.toLocaleString('ru-RU')}</p>
-          <p className="ve2-stat-k">Готово в базе</p>
+          <p className="ve2-stat-v">
+            {(partial ? data.checked_ready : data.ready).toLocaleString('ru-RU')}
+            {partial && data.preview_target !== null ? <span className="text-base font-normal text-[var(--ve2-muted)]"> / {data.preview_target.toLocaleString('ru-RU')}</span> : null}
+          </p>
+          <p className="ve2-stat-k">{partial ? waiting ? 'Подготовка не завершена' : collecting ? 'Сбор продолжается' : 'Сбор остановлен' : 'Готово в базе'}</p>
         </div>
         <div className="ve2-stat">
           <p className="ve2-stat-v">
@@ -112,11 +123,16 @@ function AudienceSummary({
           <p className="ve2-stat-k">Можно собрать дополнительно</p>
         </div>
       </div>
-      <p className={HE.muted}>{preparedForLaunch}</p>
-      <p className={HE.faint}>
+      <p className={HE.muted}>{partial
+        ? waiting ? 'Это промежуточный результат, а не готовое превью. Текущий этап подготовки указан выше.'
+          : collecting
+          ? 'Это промежуточный результат, а не готовое превью. Показаны контакты, уже прошедшие проверки; сбор ещё продолжается.'
+          : 'Это сохранённая проверенная часть. Полное превью ещё не готово. Причина остановки — в подробностях базы.'
+        : preparedForLaunch}</p>
+      {!partial ? <p className={HE.faint}>
         Контакты будут загружаться в Instantly дневными партиями. Темп и срок появятся на шаге «Запуск» после выбора
         проекта и настроек отправки; план считается по общему обязательству проекта сразу для всех гипотез.
-      </p>
+      </p> : null}
       <details>
         <summary className="ve2-link cursor-pointer">Как рассчитан объём</summary>
         <div className="mt-2 space-y-2">
@@ -633,7 +649,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                       type="button"
                       disabled={busy || locked}
                       className={HE.btnGhost}
-                      onClick={() => void change({ action: 'prepare' })}
+                      onClick={() => void change({ action: 'prepare', hypothesis_id: activeId })}
                     >
                       Продолжить подготовку
                     </button>
@@ -655,14 +671,15 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                   approval = base ? snapshot?.setup.approved_bases[base.id] : null;
                 const approved =
                   !!review && approval?.revision === review.revision && approval.template_id === review.template_id;
+                const preparationState = getPreparationPresentation({ preparation: p, base, jobs: detail.jobs });
                 return (
                   <article key={h.id} className="border-t border-[var(--ve2-line)] pt-5 space-y-4">
                     <h3 className="ve2-h3">{h.title}</h3>
                     {p?.status !== 'ready' ? <PreparationProgress preparation={p} base={base} jobs={detail.jobs}
-                      onContinue={() => void change({ action: 'prepare' })} continueDisabled={busy || locked} /> : null}
+                      onContinue={() => void change({ action: 'prepare', hypothesis_id: h.id })} continueDisabled={busy || locked} /> : null}
                     {base ? (
                       <>
-                        <AudienceSummary baseId={base.id} presetId={presetId} />
+                        <AudienceSummary base={base} presetId={presetId} preparationState={preparationState} />
                         <details>
                           <summary className="ve2-link cursor-pointer">Превью базы и подтверждения</summary>
                           <div className="mt-3">
@@ -671,7 +688,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                               job={detail.jobs.find(
                                 (j) => j.payload?.base_id === base.id && j.stage === 'base_collect',
                               )}
-                              preparationState={getPreparationPresentation({ preparation: p, base, jobs: detail.jobs })}
+                              preparationState={preparationState}
                               queued={false}
                               onUpdated={() => void refresh()}
                             />

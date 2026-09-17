@@ -13,7 +13,7 @@ export type BoardColumn = BoardColumnConfigEntry;
 export const CUSTOM_COLUMN_KEY_RE = /^c_[a-z0-9_]{1,30}$/;
 
 export function isBuiltinColumnKey(key: string): boolean {
-  return key in BOARD_COLUMN_LABELS;
+  return Object.prototype.hasOwnProperty.call(BOARD_COLUMN_LABELS, key);
 }
 
 export function columnLabel(c: BoardColumn): string {
@@ -22,42 +22,61 @@ export function columnLabel(c: BoardColumn): string {
 
 /**
  * Нормализация присланного конфига:
- * - builtin-ключи — всегда полным набором в дефолтном порядке; отсутствующие
- *   в payload = видимость по дефолту;
+ * - присланный порядок builtin и кастомных ключей сохраняется;
+ * - отсутствующие builtin дополняются в конце с дефолтной видимостью;
  * - кастомные — строгий формат ключа c_<slug>, обязательный label ≤60 симв.,
- *   без дублей; идут после builtin в присланном порядке;
+ *   без дублей;
  * - неизвестные ключи / битые записи / все скрытые → error.
  */
 export function normalizeColumnConfig(raw: unknown): { config?: BoardColumn[]; error?: string } {
   if (!Array.isArray(raw)) return { error: 'columnConfig must be an array' };
-  const builtinVisible = new Map<string, boolean>();
-  const customs: BoardColumn[] = [];
-  const seenCustom = new Set<string>();
+  const config: BoardColumn[] = [];
+  const seen = new Set<string>();
   for (const item of raw) {
     if (!item || typeof item !== 'object') return { error: 'columnConfig entries must be objects' };
     const key = (item as { key?: unknown }).key;
     if (typeof key !== 'string' || !key) return { error: 'columnConfig entry without key' };
+    if (seen.has(key)) return { error: `duplicate column key: ${key}` };
+    seen.add(key);
     const visible = (item as { visible?: unknown }).visible !== false;
     if (isBuiltinColumnKey(key)) {
-      builtinVisible.set(key, visible);
+      config.push({ key, visible });
       continue;
     }
     if (!CUSTOM_COLUMN_KEY_RE.test(key)) return { error: `unknown column key: ${key}` };
-    if (seenCustom.has(key)) return { error: `duplicate column key: ${key}` };
-    seenCustom.add(key);
     const label = (item as { label?: unknown }).label;
     if (typeof label !== 'string' || !label.trim()) {
       return { error: `custom column ${key} requires a label` };
     }
     if (label.trim().length > 60) return { error: 'label too long (max 60 chars)' };
-    customs.push({ key, label: label.trim(), visible, custom: true });
+    config.push({ key, label: label.trim(), visible, custom: true });
   }
-  const config: BoardColumn[] = [
-    ...DEFAULT_COLUMN_CONFIG.map((d) => ({ key: d.key, visible: builtinVisible.get(d.key) ?? d.visible })),
-    ...customs,
-  ];
+  config.push(...DEFAULT_COLUMN_CONFIG.filter((c) => !seen.has(c.key)).map((c) => ({ ...c })));
   if (!config.some((c) => c.visible)) return { error: 'at least one column must stay visible' };
   return { config };
+}
+
+/** Change positions only: stable keys keep cell values and visibility attached. */
+export function moveBoardColumn(columns: BoardColumn[], key: string, targetKey: string): BoardColumn[] {
+  const from = columns.findIndex((c) => c.key === key);
+  const to = columns.findIndex((c) => c.key === targetKey);
+  if (from < 0 || to < 0 || from === to) return columns;
+  const next = [...columns];
+  next.splice(to, 0, ...next.splice(from, 1));
+  return next;
+}
+
+/** Order-only API: never accept deletion, new keys or client-supplied metadata. */
+export function reorderColumnConfig(columns: BoardColumn[], order: unknown): { config?: BoardColumn[]; error?: string } {
+  if (!Array.isArray(order) || order.length !== columns.length ||
+      order.some((key) => typeof key !== 'string') || new Set(order).size !== order.length) {
+    return { error: 'Порядок должен содержать каждую колонку ровно один раз.' };
+  }
+  const byKey = new Map(columns.map((column) => [column.key, column]));
+  if (order.some((key) => !byKey.has(key))) {
+    return { error: 'Набор колонок изменился. Обновите страницу и повторите.' };
+  }
+  return { config: order.map((key) => byKey.get(key)!) };
 }
 
 const TRANSLIT: Record<string, string> = {

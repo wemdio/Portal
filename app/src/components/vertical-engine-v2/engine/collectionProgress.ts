@@ -5,6 +5,14 @@ export function collectCount(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : null;
 }
 
+/** A saved contact count is not proof that preview preparation finished. */
+export function isPartialPreview(base: Pick<VeBaseSummary, 'status' | 'collect_info'>): boolean {
+  const target = base.collect_info?.target_progress;
+  if (base.collect_info?.collection_mode !== 'preview' && target?.mode !== 'preview') return false;
+  return base.status === 'collecting' || base.status === 'failed' || target?.status === 'error'
+    || (target != null && target.ready_rows < target.ready_target);
+}
+
 export function collectTaskDone(status: string | undefined): boolean {
   return typeof status === 'string' && ['done', 'completed', 'success', 'ok'].includes(status.toLowerCase());
 }

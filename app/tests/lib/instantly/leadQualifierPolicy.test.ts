@@ -611,6 +611,43 @@ describe('audited buyer-versus-seller direction regressions', () => {
 });
 
 describe('elliptical material request policy', () => {
+  it('distinguishes first-contact readiness and a phone clarification from interest after the offer', async () => {
+    const opener = 'Подскажите, кто у вас отвечает за оптовые продажи и поиск новых клиентов? Хочу обсудить выход на кафе, рестораны и дистрибьюторов. Буду благодарен, если передадите письмо ответственному сотруднику или подскажете его контакт.';
+    // Anonymized wording from the two September 16 false-positive reports.
+    const replies = [
+      'Добрый день, Егор!\nПривлечением новых клиентов занимаюсь я.\nГотова пообщаться в удобное для вас время',
+      'Егор, здравствуйте! Меня зовут Анна, я региональный представитель в г.Казань.\n\nПодскажите свой номер телефона, чтобы я могла связаться с Вами и обсудить Ваш запрос ниже',
+    ];
+    for (const reply of replies) {
+      for (const [outbound, expected] of [[opener, false], [SUBSTANTIVE_OUTBOUND_TEXT, true]] as const) {
+        for (const quoteOnly of [false, true]) {
+          fetchMock.mockReset();
+          // Even an incorrect proposal_seen flag must not bypass the guard.
+          mockAiResult({ is_lead: true, proposal_seen: true });
+          const body = `${reply}\n\nС уважением,\nАнна\nТел. +7 999 123 45 67\n\n---------- Forwarded message ----------\nFrom: Sales <sales@example.com>\nTo: info@buyer.example\nDate: 1 September 2026\nSubject: Вопрос\n\n${outbound}`;
+          const result = await qualify(body, { outboundText: quoteOnly ? null : outbound });
+          expect({ reply, quoteOnly, isLead: result.isLead, needsReview: result.needsReview })
+            .toEqual({ reply, quoteOnly, isLead: expected, needsReview: false });
+          if (!expected) expect(result).toMatchObject({ proposalSeen: false, interestSignals: [] });
+          expect(fetchMock).toHaveBeenCalledTimes(1);
+        }
+      }
+      for (const extra of ['Пришлите КП.', 'Сколько стоит?', 'Хочу купить вашу услугу.']) {
+        mockAiResult({ is_lead: true });
+        expect((await qualify(`${reply}\n${extra}`, { outboundText: opener })).isLead).toBe(true);
+      }
+      mockAiResult({ custom_criteria_matched: true });
+      expect((await qualify(reply, { outboundText: opener, leadCriteria: OUTREACH_OS_CRITERIA })).isLead).toBe(true);
+    }
+    mockAiResult({ is_lead: true, proposal_seen: true });
+    expect((await qualify('Позвоните завтра после 11:00, пожалуйста', {
+      outboundText: SUBSTANTIVE_OUTBOUND_TEXT,
+    })).isLead).toBe(true);
+    // An unavailable history is not proof of a contact-only opener.
+    mockAiResult({ is_lead: true, proposal_seen: false });
+    expect((await qualify(replies[1], { outboundText: null })).isLead).toBe(true);
+  });
+
   it('requires an actual offer for generic discussion readiness without suppressing commercial actions or custom criteria', async () => {
     const opener = [
       'Добрый день!',

@@ -18,7 +18,9 @@ jest.mock('@/lib/toolTrace', () => ({
   withToolTrace: async (_options: unknown, handler: () => Promise<unknown>) => handler(),
 }));
 jest.mock('@/lib/loggerServer', () => ({ logAudit: jest.fn(), logError: jest.fn() }));
+jest.mock('@/lib/verticalEngineV2/outreachSetup', () => ({ loadVeOutreachSetup: jest.fn(async () => ({})) }));
 import { POST as collectPreview } from '@/app/api/tools/vertical-engine-v2/verticals/[id]/collect/route';
+import { POST as prepareOutreach } from '@/app/api/tools/vertical-engine-v2/projects/[id]/outreach/route';
 
 const input = {
   verticalId: 'vertical-1',
@@ -151,6 +153,24 @@ describe('VE2 base collection enqueue recovery', () => {
     }), expect.anything());
     expect(resumedDb.getRows('ve_jobs')).toHaveLength(0);
     expect(resumedDb.rpcCalls.some((call) => call.fn === 've_resume_outreach_cancelled_base')).toBe(false);
+
+    // A Continue action inside one card may not dispatch the project-wide RPC.
+    const projectId = '00000000-0000-4000-8000-000000000301';
+    const hypothesisId = '00000000-0000-4000-8000-000000000302';
+    mockRouteDb = createMockSupabase({ rpcHandlers: {
+      ve_request_outreach_preparation: () => ({ data: null }),
+      ve_request_outreach_hypothesis_preparation: () => ({ data: null }),
+    } });
+    const request = (extra: Record<string, unknown>) => prepareOutreach(new NextRequest('http://portal.test/outreach', {
+      method: 'POST', body: JSON.stringify({ action: 'prepare', revision: 7, ...extra }),
+    }), { params: Promise.resolve({ id: projectId }) });
+    expect((await request({ hypothesis_id: hypothesisId })).status).toBe(200);
+    expect(mockRouteDb.rpcCalls).toEqual([expect.objectContaining({ fn: 've_request_outreach_hypothesis_preparation',
+      params: { p_project_id: projectId, p_revision: 7, p_hypothesis_id: hypothesisId } })]);
+    for (const invalid of [null, '', 'wrong-id']) expect((await request({ hypothesis_id: invalid })).status).toBe(400);
+    expect(mockRouteDb.rpcCalls).toHaveLength(1);
+    expect((await request({})).status).toBe(200);
+    expect(mockRouteDb.rpcCalls[1].fn).toBe('ve_request_outreach_preparation');
   });
 
   it('repairs an orphan collecting base that has no active worker job', async () => {
@@ -190,6 +210,28 @@ describe('VE2 base collection enqueue recovery', () => {
       status: 'pending',
       payload: expect.objectContaining({ base_id: collecting[0]?.id, limit: 500, collection_mode: 'supply', ready_target: 250 }),
     }));
+
+    // A journal outage between rounds must not purchase another base or child.
+    const savedInfo = { collection_mode: 'preview', ready_target: 500, limit: 100,
+      target_progress: { round: 2, status: 'collecting', candidates_processed: 3 },
+      target_checkpoint: { completed_round: 1 },
+      tasks: [{ source: 'hh_live', status: 'dispatched', child_job_id: 'paid-child' }] };
+    const interruptedDb = createMockSupabase({ tables: {
+      ve_hypotheses: [{ id: 'h1', title: 'Law firms' }],
+      ve_bases: [{ id: 'interrupted', project_id: input.projectId, vertical_id: input.verticalId,
+        hypothesis_id: 'h1', source: 'auto', status: 'failed', collect_info: savedInfo,
+        error: 'Provider usage journal could not be saved.' }],
+      ve_jobs: [{ id: 'old-job', project_id: input.projectId, stage: 'base_collect', status: 'failed',
+        payload: { base_id: 'interrupted' } }],
+    } });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await expect(enqueueVeBaseCollect(interruptedDb as unknown as SupabaseClient, {
+        ...input, hypothesisIds: ['h1'], collectionMode: 'preview',
+      })).resolves.toMatchObject({ ok: true, base: { id: 'interrupted' } });
+    }
+    expect(interruptedDb.getRows('ve_bases')).toHaveLength(1);
+    expect(interruptedDb.getRows('ve_bases')[0].collect_info).toEqual(savedInfo);
+    expect(interruptedDb.getRows('ve_jobs').filter((row) => row.status === 'pending')).toHaveLength(1);
 
     // Death after base resume but before queue INSERT: recover only an older
     // completed job, never automatically retry a real terminal failure.
@@ -328,11 +370,12 @@ describe('VE2 base collection enqueue recovery', () => {
     expect(canRunVeJob(independent, [research])).toBe(false);
     expect(canRunVeJob(research, [independent])).toBe(false);
     expect(canRunVeJob(baseJob('later', 'b5'), [1, 2, 3, 4].map((n) => baseJob(`a${n}`, `b${n}`)))).toBe(false);
-    // Бюджет Serper: одновременно собираются три базы, четвёртая ждёт в
-    // очереди, а лёгкие стадии мимо этого лимита проходят (16.09.2026).
-    expect(canRunVeJob(baseJob('fourth', 'b9'), [1, 2, 3].map((n) => baseJob(`s${n}`, `sb${n}`)))).toBe(false);
-    expect(canRunVeJob(baseJob('light', 'b9', 'template'), [1, 2, 3].map((n) => baseJob(`s${n}`, `sb${n}`)))).toBe(true);
-    expect([undefined, '0', 'NaN', '1', '3', '99'].map(veBaseCollectConcurrency)).toEqual([3, 3, 3, 1, 3, 16]);
+    // A lower collection cap is an explicit override, not the default. Scope
+    // locks still apply and lightweight work bypasses that optional throttle.
+    expect(canRunVeJob(baseJob('fourth', 'b9'), [1, 2, 3].map((n) => baseJob(`s${n}`, `sb${n}`)))).toBe(true);
+    expect(canRunVeJob(baseJob('fourth', 'b9'), [1, 2, 3].map((n) => baseJob(`s${n}`, `sb${n}`)), 3)).toBe(false);
+    expect(canRunVeJob(baseJob('light', 'b9', 'template'), [1, 2, 3].map((n) => baseJob(`s${n}`, `sb${n}`)), 3)).toBe(true);
+    expect([undefined, '0', 'NaN', '1', '3', '99'].map(veBaseCollectConcurrency)).toEqual([16, 16, 16, 1, 3, 16]);
     // Real aggregate writes start from independent snapshots, so a missing
     // serialization would lose concurrent increments in this one project.
     const totals = { tokens_used: 0, cost_usd: 0 };

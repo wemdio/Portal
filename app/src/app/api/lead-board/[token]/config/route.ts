@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { resolveBoard, jsonBoardError as jsonError } from '@/lib/leadBoard/boardResolver';
-import { normalizeColumnConfig } from '@/lib/leadBoard/columnConfig';
+import { normalizeColumnConfig, reorderColumnConfig } from '@/lib/leadBoard/columnConfig';
 
 export const dynamic = 'force-dynamic';
 
@@ -11,7 +11,7 @@ export const dynamic = 'force-dynamic';
  * rows.custom[key] при удалении колонки НЕ стираются — колонка просто уходит
  * из конфига (недеструктивно; вернёте — данные на месте).
  *
- * PATCH { columnConfig } → нормализация (lib/leadBoard/columnConfig) →
+ * PATCH { columnConfig } или { columnOrder: string[] } → проверка →
  * update project_lead_boards.column_config. Ответ — нормализованный конфиг.
  */
 export async function PATCH(
@@ -21,24 +21,35 @@ export async function PATCH(
   const token = (await ctx.params).token;
   const r = await resolveBoard(token);
   if (r.error) return r.error;
-  const { projectId, db } = r.board!;
+  const { projectId, db, columnConfig, configUpdatedAt } = r.board!;
 
-  let body: { columnConfig?: unknown };
+  let body: { columnConfig?: unknown; columnOrder?: unknown };
   try {
-    body = (await req.json()) as { columnConfig?: unknown };
+    body = (await req.json()) as typeof body;
   } catch {
     return jsonError('Invalid JSON', 400);
   }
   if (body === null || typeof body !== 'object') return jsonError('Invalid JSON', 400);
 
-  const n = normalizeColumnConfig(body.columnConfig);
+  if ('columnOrder' in body && 'columnConfig' in body) return jsonError('Send either columnOrder or columnConfig', 400);
+  const orderOnly = 'columnOrder' in body;
+  const n = orderOnly
+    ? reorderColumnConfig(columnConfig, body.columnOrder)
+    : normalizeColumnConfig(body.columnConfig);
   if (n.error) return jsonError(n.error, 400);
 
-  const { error } = await db
+  // Optimistic concurrency protects metadata changed while this request runs.
+  // Reordering writes only the board config, never any lead rows.
+  const { data: saved, error } = await db
     .from('project_lead_boards')
     .update({ column_config: n.config, updated_at: new Date().toISOString() })
-    .eq('project_id', projectId);
+    .eq('project_id', projectId)
+    .eq('token', token)
+    .eq('updated_at', configUpdatedAt)
+    .select('project_id')
+    .maybeSingle();
   if (error) return jsonError(error.message, 500);
+  if (!saved) return jsonError('Настройки изменились в другой вкладке. Обновите страницу и повторите.', 409);
 
   return NextResponse.json({ ok: true, columnConfig: n.config });
 }

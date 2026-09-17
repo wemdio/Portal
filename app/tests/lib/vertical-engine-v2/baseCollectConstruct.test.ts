@@ -18,8 +18,12 @@ jest.mock('@/lib/companiesSearch/rpcSearch', () => ({
 
 jest.mock('@/lib/verticalEngineV2/llm', () => ({
   callLLMWithSchema: jest.fn(),
+  LLMValidationError: jest.requireActual('@/lib/verticalEngineV2/llm').LLMValidationError,
+  getLLMValidationDiagnostic: jest.requireActual('@/lib/verticalEngineV2/llm').getLLMValidationDiagnostic,
   getVeModel: jest.fn(() => 'test-bulk-model'),
   getVeActiveJobSignal: jest.fn(() => undefined),
+  veNativeJsonSchema: jest.requireActual('@/lib/verticalEngineV2/llm').veNativeJsonSchema,
+  veCollectionCacheModel: jest.requireActual('@/lib/verticalEngineV2/llm').veCollectionCacheModel,
 }));
 jest.mock('@/lib/verticalEngineV2/relevanceEvidence', () => ({
   ...jest.requireActual('@/lib/verticalEngineV2/relevanceEvidence'),
@@ -77,6 +81,8 @@ import { createVeJobShutdown, VeWorkerShutdownError } from '@/lib/verticalEngine
 import { normalizeVeSourceContacts } from '@/lib/verticalEngineV2/sourceContacts';
 import { veAcquisitionReceipt } from '@/lib/verticalEngineV2/collectionIdentity';
 import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
+import { resolveVeYandexCatalogFilters } from '@/lib/verticalEngineV2/yandexCatalog';
+import { previewRecoveryKind } from '@/lib/verticalEngineV2/collectionRecovery';
 
 const PROJECT = { id: 'p1', name: 'P', created_by: 'user-1', market: 'ru' };
 const VERTICAL = {
@@ -294,6 +300,43 @@ describe('base_collect CONSTRUCT step order', () => {
     expect(searchRows).not.toHaveBeenCalled();
     expect(db.getRows('ve_jobs').filter((j) => j.stage === 'base_analyze')).toHaveLength(1);
 
+    // A transient name outage resumes the saved name phase, not acquisition or
+    // SMTP. Persist a retry cap so worker restarts cannot create an endless loop.
+    for (const recoverNames of [true, false]) {
+      const nameInfo: VeCollectInfo = { ...collectInfo([ready], { status: 'done', bc_job_id: 'bc-names' }),
+        collection_mode: 'preview', target_progress: { ...createCollectionTarget('preview'), candidates_processed: 1 },
+        target_checkpoint: { completed_round: 1, seen_rows: [ready], processed_rows: 1 },
+        company_name_recovery: { validation_error: null, has_buffered_candidates: false,
+          round_low_relevance: 0, round_relevance_unchecked: 0 } };
+      nameInfo.tasks![0].exhausted = true;
+      const namesDb = seed(nameInfo, { ve_bases: [{ ...makeBase(nameInfo), row_count: 1, columns: [...VE_AUTO_COLLECT_COLUMNS],
+        data: [{ ...ready, _email_status: 'ok', _ve_relevance: { version: 2, status: 'relevant',
+          reason: 'Verified clinic', context_hash: 'a'.repeat(64), evidence: [{ field: 'description', quote: 'Clinic' }] },
+          _ve_company_name: { version: 1, source: ready.company,
+          website: ready.website, status: 'failed', value: '' } }],
+      }], base_constructor_jobs: [{ id: 'bc-names', status: 'completed',
+        selected_steps: ['split_emails', 'validate_emails'],
+        data: [['Компания', 'Сайт', 'Email', 'Email Статус'], [ready.company, ready.website, ready.email, 'ok']],
+      }] });
+      const namesSupabase = namesDb as unknown as SupabaseClient;
+      mockFindIrrelevantRows.mockClear();
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const succeeds = recoverNames && attempt === 3;
+        if (!succeeds) jest.mocked(callLLMWithSchema).mockRejectedValueOnce(new Error('Requesty 429: temporarily limited'));
+        await namesSupabase.from('ve_jobs').update({ status: 'running' }).eq('id', 'job-1');
+        const nameJob = namesDb.getRows('ve_jobs').find((row) => row.id === 'job-1') as unknown as VeJob;
+        await runBaseCollectStage({ ...nameJob }, { supabase: namesSupabase });
+        const nameBase = namesDb.getRows('ve_bases')[0];
+        expect((nameBase.collect_info as VeCollectInfo).target_progress?.candidates_processed).toBe(1);
+        expect(nameBase.status).toBe(attempt < 3 ? 'collecting' : succeeds ? 'analyzing' : 'failed');
+        if (attempt < 3) expect(namesDb.getRows('ve_jobs').find((row) => row.id === 'job-1')).toMatchObject({
+          status: 'pending', result: { company_name_retry: { attempts: attempt + 1 } },
+        });
+      }
+      expect(mockFindIrrelevantRows).not.toHaveBeenCalled();
+      expect(namesDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    }
+
     // Restarting after an outage must buy a NEW validation child for unknowns,
     // while repeated wakes and an in-flight child remain idempotent.
     const emailDb = createMockSupabase({ tables: { ve_projects: [PROJECT], base_constructor_jobs: [] } });
@@ -462,16 +505,70 @@ describe('base_collect CONSTRUCT step order', () => {
     const recoveredInfo: VeCollectInfo = { ...collectInfo([knownInn]), collection_mode: 'preview',
       target_progress: { ...createCollectionTarget('preview'), round: 2, candidates_processed: 1 },
       target_checkpoint: { completed_round: 1, seen_rows: [knownInn] } };
+    recoveredInfo.tasks![0].exhausted = true;
+    jest.mocked(fetchVeRelevanceEvidence).mockClear();
     jest.mocked(fetchVeRelevanceEvidence).mockResolvedValueOnce({ status: 'ok', text: 'Confirmed legal entity', url: 'https://found.test/', reason: 'discovered_verified_website' });
     const recoveredDb = seed(recoveredInfo);
+    await runBaseCollectStage(makeJob(), { supabase: recoveredDb as unknown as SupabaseClient });
+    expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
+    expect((recoveredDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).search_policy)
+      .toMatchObject({ phase: 'paid', deferred_rows: [knownInn] });
+    await recoveredDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
     await runBaseCollectStage(makeJob(), { supabase: recoveredDb as unknown as SupabaseClient });
     const recoveredInput = recoveredDb.getRows('base_constructor_jobs')[0].data as string[][];
     expect(recoveredInput).toHaveLength(2);
     expect(recoveredInput[1]).toContain('https://found.test/');
 
+    // Cross-base exclusions must apply before paid site discovery, while the
+    // same-base missing-site recovery above remains possible. Even a full
+    // discovery wave of duplicates cannot postpone the fresh company.
+    const excludedSources = Array.from({ length: 16 }, (_, i) => unifiedRow({
+      company: `Already collected ${i}`, inn: String(7700000100 + i),
+    }));
+    const discoveryInfo: VeCollectInfo = { ...collectInfo([...excludedSources, knownInn]), collection_mode: 'preview',
+      search_policy: { version: 1, phase: 'paid', deferred_rows: [] }, target_progress: createCollectionTarget('preview') };
+    const discoveryDb = seed(discoveryInfo, { ve_bases: [makeBase(discoveryInfo), {
+      ...makeBase({}), id: 'other-ready', hypothesis_id: 'h2', status: 'analyzed',
+      columns: [...VE_AUTO_COLLECT_COLUMNS],
+      data: excludedSources.map((row) => ({ ...row, email: `ready@${row.inn}.test`, _email_status: 'ok' })),
+    }] });
+    jest.mocked(fetchVeRelevanceEvidence).mockClear().mockResolvedValueOnce({
+      status: 'ok', text: 'Confirmed legal entity', url: 'https://found.test/', reason: 'discovered_verified_website',
+    });
+    await runBaseCollectStage(makeJob(), { supabase: discoveryDb as unknown as SupabaseClient });
+    expect(fetchVeRelevanceEvidence).toHaveBeenCalledTimes(1);
+    expect(fetchVeRelevanceEvidence).toHaveBeenCalledWith('', expect.objectContaining({ companyInn: knownInn.inn }));
+    expect((discoveryDb.getRows('base_constructor_jobs')[0].data as string[][])).toHaveLength(2);
+
+    // Empty site/email lanes do not mean the whole directory is exhausted.
+    // Persist the phase switch, then read the original filters and search only
+    // for the deficit. A restored worker must not restart the empty free lanes.
+    const phasedInfo: VeCollectInfo = { ...collectInfo([]), collection_mode: 'preview',
+      target_progress: createCollectionTarget('preview') };
+    phasedInfo.tasks![0].status = 'pending';
+    const phasedDb = seed(phasedInfo);
+    jest.mocked(searchRows).mockReset().mockImplementation(async (filters) => ({ rows: filters.hasWebsite || filters.hasEmail
+      ? [] : [{ name: knownInn.company, inn: knownInn.inn, website: '', email: '' }] }));
+    jest.mocked(fetchVeRelevanceEvidence).mockClear().mockResolvedValueOnce({
+      status: 'ok', text: 'Confirmed legal entity', url: 'https://found.test/', reason: 'discovered_verified_website',
+    });
+    await runBaseCollectStage(makeJob(), { supabase: phasedDb as unknown as SupabaseClient });
+    expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
+    expect(searchRows).toHaveBeenCalledTimes(2);
+    expect(jest.mocked(searchRows).mock.calls.map(([filters]) => [!!filters.hasWebsite, !!filters.hasEmail]))
+      .toEqual([[true, false], [false, true]]);
+    expect((phasedDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).search_policy?.phase).toBe('paid');
+    await phasedDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+    await runBaseCollectStage(makeJob(), { supabase: phasedDb as unknown as SupabaseClient });
+    expect(searchRows).toHaveBeenCalledTimes(3);
+    expect(jest.mocked(searchRows).mock.calls.at(-1)?.[0]).toEqual(DIRECTORY_TASK.directory_filters);
+    expect(fetchVeRelevanceEvidence).toHaveBeenCalledTimes(1);
+    expect(phasedDb.getRows('base_constructor_jobs')).toHaveLength(1);
+
     // The small cohort must reach the actual constructor and publish checked
     // rows while the same base continues collecting. Old runs retain their
     // original input scope across a deployment.
+    jest.mocked(fetchVeRelevanceEvidence).mockClear();
     const harvest = Array.from({ length: 1_200 }, (_, i) => unifiedRow({
       company: `Clinic ${i}`, website: `clinic-${i}.test`, email: `mail@clinic-${i}.test`,
     }));
@@ -481,9 +578,12 @@ describe('base_collect CONSTRUCT step order', () => {
         delete target.first_round_candidates;
         target.ready_target = 1_000;
       }
-      const db = seed({ ...collectInfo(harvest), collection_mode: 'preview', target_progress: target });
+      const db = seed({ ...collectInfo([...harvest, knownInn]), collection_mode: 'preview', target_progress: target });
       await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
       const constructor = db.getRows('base_constructor_jobs')[0];
+      expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
+      expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).search_policy?.phase).toBe('existing');
+      expect((stripTaskHarvest(db.getRows('ve_bases')[0]).collect_info as VeCollectInfo).search_policy).not.toHaveProperty('deferred_rows');
       expect(constructor.workload_origin).toBe('automation');
       const expected = legacy ? 1_200 : 100;
       const expectedReady = legacy ? 1_200 : 20;
@@ -528,6 +628,66 @@ describe('base_collect CONSTRUCT step order', () => {
         expect(completed).toMatchObject({ status: 'analyzing', row_count: 500 });
         expect(prepareSegmentationAudience({ rows: completed.data as Record<string, unknown>[],
           columns: completed.columns as string[], source: 'auto' }).rows).toHaveLength(500);
+        expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
+        expect((completed.collect_info as VeCollectInfo).search_policy?.phase).toBe('existing');
+        expect(searchRows).toHaveBeenCalledWith(expect.objectContaining({ hasWebsite: true }), expect.any(Number), expect.any(Number));
+      }
+    }
+
+    // Slow saved-email/relevance review must not leave both constructor slots
+    // empty for an hour. Repeated wakes keep the same reserved children; a
+    // manual saved-only review, error or reached goal must buy no new batch.
+    for (const mode of ['automatic', 'manual', 'failed', 'target', 'last_round'] as const) {
+      const round = mode === 'last_round' ? 100 : 2;
+      const reviewing: VeCollectInfo = { ...collectInfo(harvest.slice(0, 600)), collection_mode: 'preview',
+        relevance_review_requested: true,
+        target_progress: { ...createCollectionTarget('preview'), round, candidates_processed: 200,
+          ready_rows: mode === 'target' ? 500 : 0 },
+        target_checkpoint: { completed_round: round, seen_rows: harvest.slice(0, 200) },
+        relevance_reserve: { version: 1, rows: [{ ...harvest[0], _email_status: 'unknown' }] },
+        preview_pipeline: { version: 1, revision: 0, batches: [], completed_batches: 1, job_ids: ['previous-batch'],
+          ...(mode === 'failed' ? { error: 'Previous batch failed' } : {}) } };
+      const db = seed(reviewing);
+      const job = { ...makeJob(), payload: { ...makeJob().payload, ...(mode === 'manual' ? { review_relevance: true } : {}) } };
+      for (let wake = 0; wake < 2; wake++) {
+        await db.from('ve_jobs').update({ status: 'running' }).eq('id', job.id);
+        await runBaseCollectStage(job, { supabase: db as unknown as SupabaseClient });
+      }
+      const children = db.getRows('base_constructor_jobs');
+      const prefetched = children.filter((child) => (child.selected_steps as string[]).includes('find_emails'));
+      expect(prefetched).toHaveLength(mode === 'automatic' ? 2 : 0);
+      expect(children.filter((child) => (child.selected_steps as string[]).length === 1)).toHaveLength(1);
+      const after = db.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+      expect(after.preview_pipeline?.active_batch_id).toBeUndefined();
+      expect(after.target_progress?.candidates_processed).toBe(200);
+      expect(db.getRows('ve_bases')[0].row_count).toBe(0);
+      if (mode === 'automatic') {
+        const emails = prefetched.flatMap((child) => {
+          const grid = child.data as string[][];
+          return grid.slice(1).map((row) => row[grid[0].indexOf('Email')]);
+        });
+        expect(emails).toHaveLength(400);
+        expect(new Set(emails).size).toBe(400);
+        expect(emails).not.toContain(harvest[0].email);
+        expect(after.search_policy?.phase).toBe('existing');
+        // Once the saved check finishes, consume the prefetched output through
+        // normal gates exactly once, preserving its ready/candidate counters.
+        const emailChild = children.find((child) => (child.selected_steps as string[]).length === 1)!;
+        const emailGrid = emailChild.data as string[][];
+        await db.from('base_constructor_jobs').update({ status: 'completed', data: [
+          [...emailGrid[0], 'Email Статус'], ...emailGrid.slice(1).map((row) => [...row, 'unknown']),
+        ] }).eq('id', emailChild.id);
+        await db.from('ve_jobs').update({ status: 'running' }).eq('id', job.id);
+        await runBaseCollectStage(job, { supabase: db as unknown as SupabaseClient });
+        const grid = prefetched[0].data as string[][];
+        await db.from('base_constructor_jobs').update({ status: 'completed', data: [
+          [...grid[0], 'Email Статус'], ...grid.slice(1).map((row) => [...row, 'ok']),
+        ] }).eq('id', prefetched[0].id);
+        await db.from('ve_jobs').update({ status: 'running' }).eq('id', job.id);
+        await runBaseCollectStage(job, { supabase: db as unknown as SupabaseClient });
+        expect(db.getRows('base_constructor_jobs')).toHaveLength(3);
+        expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).target_progress)
+          .toMatchObject({ candidates_processed: 400, ready_rows: 200 });
       }
     }
 
@@ -747,7 +907,8 @@ describe('base_collect CONSTRUCT step order', () => {
     expect(completed).toMatchObject({ status: 'analyzed', row_count: 2 });
     expect((completed.collect_info as VeCollectInfo).target_progress).toMatchObject({ status: 'target_reached', ready_rows: 2 });
     expect((completed.data as Array<Record<string, unknown>>).map((row) => row.email)).toEqual(['ready@first.test', 'next@next.test']);
-    expect(mockFindIrrelevantRows.mock.calls.map(([input]) => input.rows.length)).toEqual([2, 1]);
+    expect(mockFindIrrelevantRows.mock.calls.map(([input]) => input.rows.map((row: VeUnifiedRow) => row.email)))
+      .toEqual([['ready@first.test'], ['next@next.test']]);
     expect(db.inserts.filter((entry) => entry.table === 've_jobs')).toEqual([]);
   });
 
@@ -917,6 +1078,83 @@ describe('base_collect CONSTRUCT step order', () => {
       companies_with_phone: 7_105,
       directory_rows_total: 9_120,
     });
+
+    // Catalog sources use the stored dictionary and a read-only cursor RPC.
+    // Losing the process between pages must not lose rows or create a parser.
+    const catalogTask = { source: 'yandex_maps' as const, rationale: 'Existing catalog',
+      maps_query: { queries: ['Лифты'], geo: 'Россия' } };
+    const filters = { categories: ['Лифты'], countries: ['Россия'] };
+    const catalogInfo: VeCollectInfo = { plan: { tasks: [catalogTask] }, tasks: [{
+      source: 'yandex_maps', status: 'pending', child_job_id: null, task: catalogTask, rows: 0,
+      catalog: { version: 1, filters },
+    }] };
+    const catalogDb = seed(catalogInfo);
+    const pages = [{ yandex_id: '1', name: 'Lift service', website: 'lift.test', categories: 'Лифты',
+      subcategories: 'Ремонт лифтов', email: 'office@lift.test' }];
+    const originalRpc = catalogDb.rpc;
+    catalogDb.rpc = ((name: string, params: Record<string, unknown>) => {
+      const operation = name === 'yandex_maps_catalog_search'
+        ? Promise.resolve({ data: params.p_after ? [] : pages, error: null }) : originalRpc(name, params);
+      if (name === 'yandex_maps_catalog_search') {
+        expect(params).toMatchObject({ p_categories: ['Лифты'], p_countries: ['Россия'], p_offset: 0 });
+        catalogDb.rpcCalls.push({ fn: name, params });
+      }
+      return Object.assign(operation, { abortSignal: () => operation });
+    }) as typeof catalogDb.rpc;
+    let stopped = false;
+    await expect(runBaseCollectStage(makeJob(), { supabase: catalogDb as unknown as SupabaseClient,
+      onCheckpoint: () => {
+        const info = catalogDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+        if (!stopped && info.tasks?.[0].catalog?.after === '1') {
+          stopped = true; throw new VeWorkerShutdownError();
+        }
+      },
+    })).rejects.toMatchObject({ name: 'VeWorkerShutdownError' });
+    expect(catalogDb.getRows('ve_bases')[0].collect_info).toMatchObject({ tasks: [{
+      rows: 1, status: 'pending', catalog: { after: '1' },
+      harvest: [{ company: 'Lift service', category: expect.stringContaining('Ремонт лифтов') }],
+    }] });
+    await runBaseCollectStage(makeJob(), { supabase: catalogDb as unknown as SupabaseClient });
+    const catalogSaved = catalogDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+    expect(catalogSaved.tasks?.[0]).toMatchObject({ status: 'done', rows: 1, exhausted: true, child_job_id: null });
+    expect(catalogDb.rpcCalls.map((call) => call.params.p_after)).toEqual([null, '1']);
+    expect(catalogDb.getRows('yandex_maps_jobs')).toHaveLength(0);
+    expect(catalogDb.getRows('base_constructor_jobs')).toHaveLength(1);
+    const failedCatalog = { ...makeBase({ ...catalogInfo, collection_mode: 'preview',
+      target_progress: { ...createCollectionTarget('preview'), status: 'error' },
+      tasks: [{ ...catalogInfo.tasks![0], catalog: undefined, status: 'failed' as const, child_job_id: 'old-parser', error: 'proxy unavailable' }],
+    }), status: 'failed' };
+    expect(previewRecoveryKind(failedCatalog)).toBe('catalog');
+    expect(previewRecoveryKind({ ...failedCatalog, source: 'manual' })).toBeNull();
+    const recoveryDb = seed(catalogInfo, { ve_bases: [failedCatalog], ve_jobs: [] });
+    const recovered = await enqueueVeBaseCollect(recoveryDb as unknown as SupabaseClient, {
+      projectId: 'p1', verticalId: 'v1', verticalName: VERTICAL.name, limit: 100,
+      hypothesisIds: ['h1'], collectionMode: 'preview',
+    });
+    expect(recovered).toMatchObject({ ok: true, created: true, base: { id: 'b1' } });
+    expect(recoveryDb.getRows('ve_bases')).toHaveLength(1);
+    expect(recoveryDb.getRows('ve_bases')[0].collect_info).toMatchObject({ tasks: [{
+      status: 'pending', child_job_id: null, legacy_child_job_id: 'old-parser',
+    }] });
+
+    const dictionaries = createMockSupabase({ enforceQueryWindows: true, tables: {
+      yandex_maps_catalog_rubrics: [{ rubric: 'Лифты' }, { rubric: 'Стройматериалы оптом' }],
+      yandex_maps_catalog_places: [{ country: 'Россия', region: 'Москва и Московская область', city: 'Москва' }],
+    } });
+    const dictionaryDb = { from: (table: string) => {
+      let start = 0, end = 999;
+      const query = { select: () => query, order: () => query,
+        range: (from: number, to: number) => { start = from; end = to; return query; },
+        abortSignal: async () => ({ data: dictionaries.getRows(table).slice(start, end + 1), error: null }),
+      };
+      return query;
+    } } as unknown as SupabaseClient;
+    const modelCalls = (callLLMWithSchema as jest.Mock).mock.calls.length;
+    expect(await resolveVeYandexCatalogFilters({ db: dictionaryDb, query: catalogTask.maps_query })).toEqual(filters);
+    expect((callLLMWithSchema as jest.Mock).mock.calls).toHaveLength(modelCalls);
+    await expect(resolveVeYandexCatalogFilters({ db: dictionaryDb, query: { queries: ['Лифты'], geo: 'Несуществующее место' } })).rejects.toThrow('география');
+    (callLLMWithSchema as jest.Mock).mockResolvedValueOnce({ data: { category_ids: [0], place_ids: [] }, tokensUsed: 0, costUsd: 0 });
+    expect(await resolveVeYandexCatalogFilters({ db: dictionaryDb, query: { queries: ['обслуживание лифтов'], geo: 'РФ' } })).toEqual(filters);
   });
 
   it('re-dispatches an in-flight legacy constructor result that never split multi-email cells', async () => {
@@ -1078,6 +1316,45 @@ describe('base_collect CONSTRUCT import', () => {
       launchable_rows: 2,
       low_relevance: 0,
     });
+    // Defer paid fit checks for companies with no accepted email. Preserve the
+    // facts of invalid sibling emails when another address IS usable, and run
+    // the same fit gate once a previously unknown email becomes usable.
+    const contacts = [
+      ['Клиника Альфа', 'alpha.test', 'live@alpha.test', '7700000001', 'ok'],
+      ['Клиника Альфа', 'alpha.test', 'bad@alpha.test', '7700000001', 'invalid'],
+      ['Клиника Бета', 'beta.test', 'unknown@beta.test', '7700000002', 'unknown'],
+      ['Клиника Гамма', 'gamma.test', 'bad@gamma.test', '7700000003', 'invalid'],
+    ];
+    const waitingInfo: VeCollectInfo = {
+      ...collectInfo(contacts.map(([company, website, email, inn]) => unifiedRow({ company, website, email, inn })), dispatched),
+      collection_mode: 'preview', target_progress: createCollectionTarget('preview'), ready_target: 500,
+    };
+    const waitingDb = seed(waitingInfo, { base_constructor_jobs: [{ id: 'bc1', status: 'completed',
+      selected_steps: ['find_emails', 'split_emails', 'dedup_email', 'validate_emails'],
+      data: [['Компания', 'Сайт', 'Email', 'ИНН', 'Email Статус'], ...contacts] }] });
+    mockFindIrrelevantRows.mockClear();
+    await runBaseCollectStage(makeJob(), { supabase: waitingDb as unknown as SupabaseClient });
+    expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(1);
+    expect(mockFindIrrelevantRows.mock.calls[0][0].rows.map((row: VeUnifiedRow) => row.email)).toEqual(['live@alpha.test', 'bad@alpha.test']);
+    const waitingBase = lastBasePatch(waitingDb)!;
+    const afterWaiting = waitingBase.collect_info as VeCollectInfo;
+    expect(waitingBase.row_count).toBe(1);
+    expect(afterWaiting.relevance_reserve?.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ email: 'unknown@beta.test', _ve_email_pending_relevance: true }),
+      expect.objectContaining({ email: 'bad@gamma.test', _ve_email_pending_relevance: true }),
+    ]));
+    expect(afterWaiting.relevance_summary).toMatchObject({ email_unready: 3, needs_review: 0 });
+    // Resume from saved observations after email recovery, without a fresh
+    // source collection. All facts of Beta still pass the usual fit gate.
+    const reserve = structuredClone(afterWaiting.relevance_reserve!);
+    for (const row of reserve.rows) if (row.email === 'unknown@beta.test') row._email_status = 'ok';
+    const recoveredInfo: VeCollectInfo = { ...afterWaiting, relevance_reserve: reserve, relevance_review_requested: true };
+    const recoveredDb = seed(recoveredInfo, { ve_bases: [{ ...makeBase(recoveredInfo),
+      data: waitingBase.data, columns: waitingBase.columns, row_count: waitingBase.row_count }] });
+    mockFindIrrelevantRows.mockClear();
+    await runBaseCollectStage(makeJob(), { supabase: recoveredDb as unknown as SupabaseClient });
+    expect(mockFindIrrelevantRows.mock.calls[0][0].rows.map((row: VeUnifiedRow) => row.email)).toEqual(['unknown@beta.test']);
+    expect(lastBasePatch(recoveredDb)?.row_count).toBe(2);
     // Header-only validated output means zero usable addresses. Failed or
     // malformed output must still remain a recoverable validation failure.
     for (const [status, validHeader] of [['completed', true], ['failed', true], ['completed', false]] as const) {

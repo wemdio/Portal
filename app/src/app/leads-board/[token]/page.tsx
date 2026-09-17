@@ -1,8 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useState, useRef, use } from 'react';
+import { ArrowUp, ArrowDown, GripVertical } from 'lucide-react';
 import {
-  columnLabel, isBuiltinColumnKey, makeCustomColumnKey, type BoardColumn,
+  columnLabel, isBuiltinColumnKey, makeCustomColumnKey, moveBoardColumn, type BoardColumn,
 } from '@/lib/leadBoard/columnConfig';
 
 type BoardRow = {
@@ -218,11 +219,18 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
   } | null>(null);
   const [showColPanel, setShowColPanel] = useState(false);
   const [newColLabel, setNewColLabel] = useState('');
+  const [configSaving, setConfigSaving] = useState(false);
+  const [configError, setConfigError] = useState('');
+  const configSavingRef = useRef(false);
+  const configRevisionRef = useRef(0);
+  const draggedColumnRef = useRef<string | null>(null);
+  const [dropColumn, setDropColumn] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const apiBase = `/api/lead-board/${encodeURIComponent(token)}`;
 
   const fetchData = useCallback(async () => {
+    const configRevision = configRevisionRef.current;
     try {
       const res = await fetch(apiBase);
       if (!res.ok) {
@@ -231,7 +239,9 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
         return;
       }
       const d = (await res.json()) as BoardData;
-      setData(d);
+      // A row refresh started before a reorder must not undo its saved order.
+      setData((cur) => cur && (configSavingRef.current || configRevision !== configRevisionRef.current)
+        ? { ...d, columnConfig: cur.columnConfig } : d);
       setRows(d.rows);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Network error');
@@ -315,26 +325,45 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
     }
   }
 
-  async function saveConfig(next: BoardColumn[]) {
+  async function saveConfig(next: BoardColumn[], orderOnly = false) {
+    if (!data || configSavingRef.current) return;
+    const previous = data.columnConfig;
+    configSavingRef.current = true;
+    configRevisionRef.current += 1;
+    setConfigSaving(true);
+    setConfigError('');
     setData((cur) => (cur ? { ...cur, columnConfig: next } : cur));
     try {
       const res = await fetch(`${apiBase}/config`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ columnConfig: next }),
+        body: JSON.stringify(orderOnly ? { columnOrder: next.map((c) => c.key) } : { columnConfig: next }),
       });
       const d = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(d.error || `Ошибка ${res.status}`);
+      if (!res.ok || !Array.isArray(d.columnConfig)) throw new Error(d.error || `Ошибка ${res.status}`);
       setData((cur) => (cur ? { ...cur, columnConfig: d.columnConfig } : cur));
       setToast('Колонки сохранены');
     } catch (err) {
-      await fetchData(); // откат
-      setToast(err instanceof Error ? err.message : 'Ошибка сохранения колонок');
+      // Roll back columns only. Refetching rows here can erase a parallel edit.
+      setData((cur) => cur ? { ...cur, columnConfig: previous } : cur);
+      setConfigError(err instanceof Error ? err.message : 'Не удалось сохранить колонки. Повторите действие.');
+    } finally {
+      configRevisionRef.current += 1;
+      configSavingRef.current = false;
+      setConfigSaving(false);
     }
+  }
+
+  function moveColumn(key: string, targetKey: string) {
+    if (!data || configSavingRef.current) return;
+    const next = moveBoardColumn(data.columnConfig, key, targetKey);
+    if (next !== data.columnConfig) void saveConfig(next, true);
   }
 
   function toggleColumn(key: string) {
     if (!data) return;
+    if (data.columnConfig.filter((c) => c.visible).length === 1 &&
+        data.columnConfig.find((c) => c.key === key)?.visible) return;
     void saveConfig(data.columnConfig.map((c) => (c.key === key ? { ...c, visible: !c.visible } : c)));
   }
 
@@ -456,7 +485,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
             <button onClick={() => void addRow()} className="ds-btn-secondary">
               Строка
             </button>
-            <button onClick={() => setShowColPanel((v) => !v)} className="ds-btn-ghost">
+            <button onClick={() => setShowColPanel((v) => !v)} aria-expanded={showColPanel} aria-controls="lead-board-columns" className="ds-btn-ghost">
               Колонки
             </button>
             <button
@@ -467,14 +496,43 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
               Копировать таблицу
             </button>
           </div>
+          <p id="column-move-help" className="mt-3 text-[12px] text-[var(--cp-paper-faint)]">
+            Перетащите заголовок за значок ⋮⋮ или измените порядок в меню «Колонки».
+            Порядок общий для всех, кто открывает эту таблицу.
+          </p>
+          <span role="status" className="text-[12px] text-[var(--cp-paper-mute)]">
+            {configSaving ? 'Сохраняю колонки…' : ''}
+          </span>
+          {configError && <p role="alert" className="mt-2 text-[13px] text-[var(--cp-red)]">{configError}</p>}
           {showColPanel && (
-            <div className="mt-3 rounded-lg bg-[var(--cp-surface-rest)] p-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-2">
-                {data.columnConfig.map((c) => (
+            <div id="lead-board-columns" className="mt-3 max-w-xl rounded-lg bg-[var(--cp-surface-rest)] p-4" aria-busy={configSaving}>
+              <p className="mb-2 text-[12px] text-[var(--cp-paper-faint)]">Сверху вниз: порядок колонок слева направо. Скрытие не удаляет данные.</p>
+              <div className="flex flex-col gap-1">
+                {data.columnConfig.map((c, index) => (
                   <div key={c.key} className="flex items-center gap-2 min-w-0">
+                    <div className="flex shrink-0">
+                      <button
+                        type="button"
+                        disabled={configSaving || index === 0}
+                        aria-label={`Переместить «${columnLabel(c)}» влево`}
+                        title="Переместить влево"
+                        onClick={() => moveColumn(c.key, data.columnConfig[index - 1].key)}
+                        className="ds-btn-ghost !p-2 min-h-11 min-w-11 disabled:opacity-30"
+                      ><ArrowUp size={16} aria-hidden="true" /></button>
+                      <button
+                        type="button"
+                        disabled={configSaving || index === data.columnConfig.length - 1}
+                        aria-label={`Переместить «${columnLabel(c)}» вправо`}
+                        title="Переместить вправо"
+                        onClick={() => moveColumn(c.key, data.columnConfig[index + 1].key)}
+                        className="ds-btn-ghost !p-2 min-h-11 min-w-11 disabled:opacity-30"
+                      ><ArrowDown size={16} aria-hidden="true" /></button>
+                    </div>
                     <input
                       type="checkbox"
                       checked={c.visible}
+                      disabled={configSaving || (c.visible && visibleColumns.length === 1)}
+                      aria-label={`Показывать «${columnLabel(c)}»`}
                       onChange={() => toggleColumn(c.key)}
                       className="accent-[#fafafa] cursor-pointer shrink-0"
                     />
@@ -483,6 +541,8 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                         <input
                           key={`${c.key}:${columnLabel(c)}`}
                           type="text"
+                          disabled={configSaving}
+                          aria-label={`Название колонки «${columnLabel(c)}»`}
                           defaultValue={columnLabel(c)}
                           onBlur={(e) => {
                             const v = e.target.value.trim();
@@ -493,7 +553,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                           }}
                           className={CELL_INPUT}
                         />
-                        <button onClick={() => deleteColumn(c.key)} className={GHOST_LINK}>
+                        <button disabled={configSaving} onClick={() => deleteColumn(c.key)} className={GHOST_LINK}>
                           Удалить
                         </button>
                       </>
@@ -503,18 +563,20 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
                   </div>
                 ))}
               </div>
-              <div className="mt-3 flex items-center gap-2 border-t border-[var(--cp-divider)] pt-3">
+              <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-[var(--cp-divider)] pt-3">
                 <input
                   type="text"
+                  disabled={configSaving}
+                  aria-label="Название новой колонки"
                   value={newColLabel}
                   onChange={(e) => setNewColLabel(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter') addColumn(); }}
                   placeholder="Новая колонка (напр. ИНН)"
-                  className="ds-input w-56"
+                  className="ds-input w-56 max-w-full"
                 />
                 <button
                   onClick={addColumn}
-                  disabled={!newColLabel.trim()}
+                  disabled={configSaving || !newColLabel.trim()}
                   className="ds-btn-secondary"
                 >
                   Добавить
@@ -560,7 +622,7 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
       )}
 
       {toast && (
-        <div className="fixed bottom-5 right-5 z-50 rounded-md border border-[var(--cp-divider)] bg-[var(--cp-surface-elev)] px-3.5 py-2 text-[13px] text-[var(--cp-paper)]">
+        <div role="status" className="fixed bottom-5 right-5 z-50 rounded-md border border-[var(--cp-divider)] bg-[var(--cp-surface-elev)] px-3.5 py-2 text-[13px] text-[var(--cp-paper)]">
           {toast}
         </div>
       )}
@@ -625,11 +687,49 @@ export default function LeadBoardPage({ params }: { params: Promise<{ token: str
               <table className="lb-table w-full text-[13px]">
                 <thead>
                   <tr>
-                    {visibleColumns.map((c) => (
+                    {visibleColumns.map((c, index) => (
                       <th
                         key={c.key}
+                        scope="col"
+                        onDragOver={(e) => {
+                          if (configSavingRef.current || !draggedColumnRef.current) return;
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = 'move';
+                          setDropColumn(c.key);
+                        }}
+                        onDrop={(e) => {
+                          const key = draggedColumnRef.current;
+                          if (!key) return;
+                          e.preventDefault();
+                          draggedColumnRef.current = null;
+                          setDropColumn(null);
+                          moveColumn(key, c.key);
+                        }}
+                        style={dropColumn === c.key ? { outline: '1px solid var(--cp-paper)', outlineOffset: '-1px' } : undefined}
                         className="ds-mono px-2.5 py-2 text-left text-[11px] font-medium tracking-[0.02em] text-[var(--cp-paper-faint)] whitespace-nowrap"
                       >
+                        <button
+                          type="button"
+                          draggable={!configSaving}
+                          disabled={configSaving}
+                          aria-label={`Переместить колонку «${columnLabel(c)}»`}
+                          aria-describedby="column-move-help"
+                          title="Перетащите или нажмите Alt + ← / →"
+                          onDragStart={(e) => {
+                            if (configSavingRef.current) { e.preventDefault(); return; }
+                            draggedColumnRef.current = c.key;
+                            e.dataTransfer.effectAllowed = 'move';
+                            e.dataTransfer.setData('text/plain', c.key);
+                          }}
+                          onDragEnd={() => { draggedColumnRef.current = null; setDropColumn(null); }}
+                          onKeyDown={(e) => {
+                            if (!e.altKey || !['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+                            e.preventDefault();
+                            const target = visibleColumns[index + (e.key === 'ArrowLeft' ? -1 : 1)];
+                            if (target) moveColumn(c.key, target.key);
+                          }}
+                          className="ds-btn-ghost !p-1 mr-1 align-middle cursor-grab active:cursor-grabbing disabled:opacity-30"
+                        ><GripVertical size={14} aria-hidden="true" /></button>
                         {columnLabel(c)}
                       </th>
                     ))}

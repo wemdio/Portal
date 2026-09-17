@@ -60,6 +60,9 @@ export const POST = withAuth(async (req, user) => {
   );
   if (!authorization.ok) return qualifiedLeadAccessErrorResponse(authorization);
   const qual = authorization.qualification;
+  if (qual.status !== 'lead') {
+    return NextResponse.json({ error: 'Передать можно только квалифицированный лид' }, { status: 409 });
+  }
   const campaignId = authorization.campaignId;
 
   // Deduplication: check by qualification + chat combo (or qualification + client)
