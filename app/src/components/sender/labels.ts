@@ -28,3 +28,10 @@ const PROVIDER_LABELS: Record<string, string> = {
 };
 
 export const providerLabel = (id: string) => PROVIDER_LABELS[id] ?? id;
+
+/** Что про ящик думает сам Google — это не то же, что «прошёл ли он проверку». */
+export const GOOGLE_STATE_LABELS: Record<string, { text: string; className: string }> = {
+  active: { text: 'Активен', className: 'bg-emerald-100 text-emerald-700' },
+  suspended: { text: 'Заблокирован', className: 'bg-red-100 text-red-700' },
+  missing: { text: 'Пропал', className: 'bg-amber-100 text-amber-700' },
+};

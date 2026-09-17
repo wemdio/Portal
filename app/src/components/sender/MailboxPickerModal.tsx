@@ -168,6 +168,12 @@ export function MailboxPickerModal({ initial, onSave, onClose }: Props) {
                   className="h-4 w-4 cursor-pointer rounded border-zinc-300"
                 />
                 <span className="min-w-0 flex-1 truncate text-sm text-zinc-900">{mailbox.email}</span>
+                {/* Снятая галочка на вкладке «Ящики» сильнее выбора в кампании:
+                    планировщик такой ящик пропустит, и об этом надо сказать
+                    здесь, а не оставлять человека гадать, почему письма стоят. */}
+                {!mailbox.enabled ? (
+                  <span className="rounded-md bg-amber-100 px-2 py-0.5 text-xs text-amber-700">Не в рассылке</span>
+                ) : null}
                 <span className="hidden text-xs text-zinc-400 sm:block">{providerLabel(mailbox.provider)}</span>
                 <span className={`rounded-md px-2 py-0.5 text-xs font-medium ${status.className}`}>{status.text}</span>
               </label>

@@ -22,6 +22,12 @@ export interface ReplyMailboxRow {
   username: string | null;
   secret_encrypted: string;
   auth_type: string;
+  /**
+   * Готовый ключ доступа к ящику, если вызывающий уже его получил. Так входят
+   * ящики «Рассылки» на служебном аккаунте Google: секрета у них нет вовсе,
+   * ключ выдаётся на час на конкретный адрес (lib/sender/googleWorkspace).
+   */
+  accessToken?: string | null;
   imap_host: string | null;
   imap_port: number | null;
   imap_last_uid: number | null;
@@ -71,20 +77,26 @@ export async function fetchNewReplies(mb: ReplyMailboxRow): Promise<FetchResult 
     return null;
   }
 
-  const secret = unsealMailboxSecret(mb.secret_encrypted);
   let auth: { user: string; pass?: string; accessToken?: string };
-  if (mb.auth_type === 'oauth_google') {
-    if (!secret.oauthRefreshToken) return null;
-    const accessToken = await getAccessTokenFromRefresh(secret.oauthRefreshToken);
-    auth = { user: mb.email, accessToken };
-  } else if (mb.auth_type === 'oauth_yandex') {
-    if (!secret.oauthRefreshToken) return null;
-    const accessToken = await getYandexAccessTokenFromRefresh(secret.oauthRefreshToken);
-    auth = { user: mb.email, accessToken };
+  if (mb.accessToken) {
+    // Ключ уже получен вызывающим: секрета у такого ящика нет и распечатывать
+    // нечего (ящики «Рассылки» на служебном аккаунте Google).
+    auth = { user: mb.username || mb.email, accessToken: mb.accessToken };
   } else {
-    const pass = secret.imapPassword || secret.smtpPassword;
-    if (!pass) return null;
-    auth = { user: mb.username || mb.email, pass };
+    const secret = unsealMailboxSecret(mb.secret_encrypted);
+    if (mb.auth_type === 'oauth_google') {
+      if (!secret.oauthRefreshToken) return null;
+      const accessToken = await getAccessTokenFromRefresh(secret.oauthRefreshToken);
+      auth = { user: mb.email, accessToken };
+    } else if (mb.auth_type === 'oauth_yandex') {
+      if (!secret.oauthRefreshToken) return null;
+      const accessToken = await getYandexAccessTokenFromRefresh(secret.oauthRefreshToken);
+      auth = { user: mb.email, accessToken };
+    } else {
+      const pass = secret.imapPassword || secret.smtpPassword;
+      if (!pass) return null;
+      auth = { user: mb.username || mb.email, pass };
+    }
   }
 
   const client = new ImapFlow({

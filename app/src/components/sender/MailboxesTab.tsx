@@ -1,18 +1,20 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Loader2, RefreshCw, Trash2, Upload } from 'lucide-react';
+import { Loader2, RefreshCw, Trash2, Upload, Users } from 'lucide-react';
 import {
   bulkMailboxes,
   deleteMailbox,
   fetchMailboxes,
+  googleWorkspaceStatus,
+  syncGoogleWorkspace,
   importMailboxes,
   patchMailbox,
   type BulkMailboxAction,
   type ImportMailboxesResult,
   type MailboxDto,
 } from './api';
-import { MAILBOX_STATUS_LABELS, providerLabel } from './labels';
+import { GOOGLE_STATE_LABELS, MAILBOX_STATUS_LABELS, providerLabel } from './labels';
 
 const PAGE_SIZE = 30;
 const EMPTY_SELECTION: ReadonlySet<string> = new Set();
@@ -24,6 +26,7 @@ export function MailboxesTab() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<ImportMailboxesResult | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Выбор хранится вместе со страницей, которой он принадлежит, а не
   // сбрасывается эффектом на смену страницы: эффект ради setState — лишний
@@ -34,6 +37,10 @@ export function MailboxesTab() {
     { page: 1, ids: new Set() },
   );
   const [bulkBusy, setBulkBusy] = useState(false);
+  // Подключение к Workspace настраивается на сервере; кнопка показывается,
+  // только если настроено, — иначе она обещала бы то, чего портал не умеет.
+  const [googleReady, setGoogleReady] = useState(false);
+  const [googleBusy, setGoogleBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async (targetPage: number) => {
@@ -57,6 +64,21 @@ export function MailboxesTab() {
   }, [load, page]);
 
   useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await googleWorkspaceStatus();
+        if (!cancelled) setGoogleReady(res.configured);
+      } catch {
+        /* не доехал статус — просто не показываем кнопку */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     // Ящики после загрузки проверяются воркером — подтягиваем статусы, пока
     // есть хоть один в очереди на проверку. Сортировка по email стабильна,
     // поэтому опрос больше дёргает строки местами.
@@ -77,6 +99,26 @@ export function MailboxesTab() {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить файл');
     } finally {
       setUploading(false);
+    }
+  };
+
+  const runGoogleSync = async () => {
+    setGoogleBusy(true);
+    setError(null);
+    setResult(null);
+    try {
+      const res = await syncGoogleWorkspace();
+      setNotice(
+        `Каталог Google: всего ящиков ${res.total}, новых ${res.added}`
+        + (res.suspended ? `, заблокированных ${res.suspended}` : '')
+        + (res.missing ? `, пропало из каталога ${res.missing}` : '')
+        + '. Новые ящики выключены — отметьте галочками те, с которых шлём.',
+      );
+      await load(page);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось синхронизировать каталог Google');
+    } finally {
+      setGoogleBusy(false);
     }
   };
 
@@ -132,8 +174,9 @@ export function MailboxesTab() {
         <h2 className="text-base font-semibold text-zinc-900">Подключить ящики файлом</h2>
         <p className="mt-1 text-sm text-zinc-500">
           Выгрузка провайдера как есть: CSV или XLSX. Колонки и сам провайдер распознаются сами — по хостам
-          в файле, шапке выгрузки и домену ящика. После загрузки каждый ящик проверяется на вход по SMTP и
-          IMAP — до проверки он в рассылку не идёт.
+          в файле, шапке выгрузки и домену ящика. Ящики Google Workspace подтягиваются из каталога сами, раз
+          в час, и появляются выключенными: отметьте галочками те, с которых шлём. До проверки входа ящик в
+          рассылку не идёт.
         </p>
 
         <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -146,6 +189,18 @@ export function MailboxesTab() {
             {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
             {uploading ? 'Загружаю…' : 'Выбрать файл'}
           </button>
+
+          {googleReady ? (
+            <button
+              type="button"
+              onClick={() => void runGoogleSync()}
+              disabled={googleBusy}
+              className="inline-flex items-center gap-2 rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50"
+            >
+              {googleBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Users className="h-4 w-4" />}
+              {googleBusy ? 'Синхронизирую…' : 'Синхронизировать с Google'}
+            </button>
+          ) : null}
 
           <input
             ref={fileRef}
@@ -191,6 +246,7 @@ export function MailboxesTab() {
           </div>
         ) : null}
 
+        {notice ? <p className="mt-3 text-sm text-emerald-600">{notice}</p> : null}
         {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
       </div>
 
@@ -227,7 +283,7 @@ export function MailboxesTab() {
               onClick={() => void runBulk('disable')}
               className="rounded-md border border-zinc-300 bg-white px-2.5 py-1 text-xs text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
             >
-              Выключить
+              Не использовать
             </button>
             <button
               type="button"
@@ -235,7 +291,7 @@ export function MailboxesTab() {
               onClick={() => void runBulk('enable')}
               className="rounded-md border border-zinc-300 bg-white px-2.5 py-1 text-xs text-zinc-700 hover:bg-zinc-100 disabled:opacity-50"
             >
-              Включить
+              Использовать
             </button>
             <button
               type="button"
@@ -286,6 +342,8 @@ export function MailboxesTab() {
                   </th>
                   <th className="px-3 py-2 font-medium">Ящик</th>
                   <th className="px-3 py-2 font-medium">Провайдер</th>
+                  <th className="px-3 py-2 font-medium">В рассылке</th>
+                  <th className="px-3 py-2 font-medium">В Google</th>
                   <th className="px-3 py-2 font-medium">Статус</th>
                   <th className="px-3 py-2 font-medium">Лимит/день</th>
                   <th className="px-3 py-2 font-medium">SMTP</th>
@@ -317,10 +375,44 @@ export function MailboxesTab() {
                         ) : null}
                       </td>
                       <td className="px-3 py-2.5 text-zinc-600">{providerLabel(mailbox.provider)}</td>
+                      {/* Галочка прямо в строке: выбирать ящики по одному
+                          удобнее здесь, а пачкой — панелью над таблицей. */}
                       <td className="px-3 py-2.5">
-                        <span className={`rounded-md px-2 py-0.5 text-xs font-medium ${status.className}`}>
-                          {status.text}
-                        </span>
+                        <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-zinc-600">
+                          <input
+                            type="checkbox"
+                            checked={mailbox.enabled}
+                            onChange={() =>
+                              void act(mailbox.id, { action: mailbox.enabled ? 'disable' : 'enable' })
+                            }
+                            className="h-4 w-4 cursor-pointer rounded border-zinc-300"
+                          />
+                          {mailbox.enabled ? 'Шлём' : 'Не шлём'}
+                        </label>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        {mailbox.google_state ? (
+                          <span
+                            className={`rounded-md px-2 py-0.5 text-xs font-medium ${
+                              GOOGLE_STATE_LABELS[mailbox.google_state]?.className ?? 'bg-zinc-100 text-zinc-600'
+                            }`}
+                          >
+                            {GOOGLE_STATE_LABELS[mailbox.google_state]?.text ?? mailbox.google_state}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-zinc-400">—</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        {/* Ящик не в рассылке — портал в него не заходит, и
+                            «Проверяется» висело бы вечно. */}
+                        {mailbox.enabled ? (
+                          <span className={`rounded-md px-2 py-0.5 text-xs font-medium ${status.className}`}>
+                            {status.text}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-zinc-400">—</span>
+                        )}
                       </td>
                       <td className="px-3 py-2.5">
                         <input
@@ -351,15 +443,6 @@ export function MailboxesTab() {
                             className="rounded-md px-2 py-1 text-xs text-blue-600 hover:bg-zinc-100"
                           >
                             Проверить
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              void act(mailbox.id, { action: mailbox.status === 'disabled' ? 'enable' : 'disable' })
-                            }
-                            className="rounded-md px-2 py-1 text-xs text-zinc-600 hover:bg-zinc-100"
-                          >
-                            {mailbox.status === 'disabled' ? 'Включить' : 'Выключить'}
                           </button>
                           <button
                             type="button"
