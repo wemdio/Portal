@@ -650,9 +650,11 @@ describe('llm rawCall retry', () => {
     const unavailable = jest.fn().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'website_evidence_timeout' });
     fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'needs_review', reason: 'More facts needed', evidence: [] }] }));
     const old = await findIrrelevantRows({ ...input, fetchEvidence: unavailable });
-    expect(needsVeRelevanceEvidence({ ...input.rows[0], _email_status: 'ok', _ve_relevance: old.decisions.get(0) })).toBe(false);
-    await findIrrelevantRows({ ...input, checkpoint: old.checkpoint, fetchEvidence: unavailable });
-    expect(unavailable).toHaveBeenCalledTimes(1);
+    expect(needsVeRelevanceEvidence({ ...input.rows[0], _email_status: 'ok', _ve_relevance: old.decisions.get(0) })).toBe(true);
+    const timedOutAgain = await findIrrelevantRows({ ...input, checkpoint: structuredClone(old.checkpoint), fetchEvidence: unavailable });
+    expect(needsVeRelevanceEvidence({ ...input.rows[0], _email_status: 'ok', _ve_relevance: timedOutAgain.decisions.get(0) })).toBe(false);
+    await findIrrelevantRows({ ...input, checkpoint: timedOutAgain.checkpoint, fetchEvidence: unavailable });
+    expect(unavailable).toHaveBeenCalledTimes(2);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const legacy = JSON.parse(JSON.stringify(old.checkpoint)) as VeRelevanceCheckpoint;
     Object.values(legacy.website_evidence).forEach((website) => { website.reader_revision = 3; website.review_attempt = 'f'.repeat(64); });
@@ -748,6 +750,37 @@ describe('llm rawCall retry', () => {
     await findIrrelevantRows({ ...networkInput, checkpoint: partial.checkpoint, fetchEvidence: evidence });
     expect(evidence).toHaveBeenCalledTimes(1);
     expect(fetchMock).not.toHaveBeenCalled();
+
+    // Exhausting one company's search retries must release the rest of the
+    // base. Replaying its checkpoint neither pays again nor admits that row.
+    const exhaustedSearch = jest.fn().mockResolvedValue({ status: 'error', text: '', url: '', reason: 'timeout',
+      provider_error: { kind: 'transient', message: 'Serper transient: timeout.' } });
+    const failedSearchInput = { ...networkInput, rows: [networkRows[0]], fetchEvidence: exhaustedSearch };
+    let failedSearch = await findIrrelevantRows(failedSearchInput);
+    for (let attempt = 1; attempt < 3; attempt++) {
+      failedSearch = await findIrrelevantRows({ ...failedSearchInput, checkpoint: failedSearch.checkpoint });
+    }
+    const releasedSearch = await findIrrelevantRows({ ...failedSearchInput, checkpoint: failedSearch.checkpoint });
+    expect(exhaustedSearch).toHaveBeenCalledTimes(3);
+    expect([releasedSearch.error, releasedSearch.retryable, releasedSearch.coverage.complete]).toEqual([undefined, false, true]);
+    expect(releasedSearch.decisions.get(0)?.status).toBe('needs_review');
+    expect(needsVeRelevanceEvidence({ ...networkRows[0], _email_status: 'ok', _ve_relevance: releasedSearch.decisions.get(0) })).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // A malformed-output storm backs off, then resumes only the remaining
+    // companies. Already quarantined outputs are not re-purchased or admitted.
+    fetchMock.mockReset().mockResolvedValue(reply({ decisions: [] }));
+    const formatStormInput = { ...input, rows: Array.from({ length: 5 }, (_, i) => ({
+      company: `Malformed ${i}`, inn: String(7730000000 + i), description,
+    })), fetchEvidence: jest.fn().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'not_confirmed' }) };
+    const malformed = await findIrrelevantRows(formatStormInput);
+    expect(malformed.retryable).toBe(true);
+    expect(malformed.error).toContain('invalid_response');
+    fetchMock.mockReset().mockResolvedValue(reply({ decisions: [{ i: 0, status: 'needs_review', reason: 'No proof', evidence: [] }] }));
+    const afterMalformed = await findIrrelevantRows({ ...formatStormInput, checkpoint: malformed.checkpoint });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(afterMalformed.error).toBeUndefined();
+    expect([...afterMalformed.decisions.values()].every((decision) => decision.status === 'needs_review')).toBe(true);
 
     const billingEvidence = jest.fn().mockResolvedValue({ status: 'error', text: '', url: '', reason: 'billing',
       provider_error: { kind: 'billing', message: 'Serper billing: insufficient search credits.' } });

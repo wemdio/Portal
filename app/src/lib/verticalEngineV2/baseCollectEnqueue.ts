@@ -25,7 +25,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { collectionRoundLimit, createCollectionTarget, type VeCollectionMode } from './collectionTarget';
-import { previewRecoveryKind } from './collectionRecovery';
+import { canResumePartialPreview, previewRecoveryKind } from './collectionRecovery';
 import { resumeVeSavedEmailRecovery } from './savedEmailRecovery';
 
 export interface VeBaseCollectInput {
@@ -39,6 +39,8 @@ export interface VeBaseCollectInput {
   hypothesisIds: string[] | null;
   collectionMode?: VeCollectionMode;
   readyTarget?: number;
+  /** Exact saved preview explicitly continued by its preparation coordinator. */
+  resumeBaseId?: string;
   /**
    * Переопределение filename авто-базы (по умолчанию «auto: <name>»).
    * ENG auto-pipeline пишет «auto-refill: <name> · <дата>».
@@ -117,18 +119,30 @@ async function resumeFailedPreview(
   supabase: SupabaseClient, input: VeBaseCollectInput, hypothesisId: string,
   activeBaseIds: string[],
 ): Promise<VeBaseCollectResult | null> {
-  const { data: failed, error } = await supabase.from('ve_bases')
+  let query = supabase.from('ve_bases')
     .select('id, project_id, vertical_id, hypothesis_id, source, status, error, collect_info, created_at')
     .eq('project_id', input.projectId).eq('vertical_id', input.verticalId).eq('hypothesis_id', hypothesisId)
-    .eq('source', 'auto').eq('status', 'failed').order('created_at', { ascending: false }).limit(100);
+    .eq('source', 'auto');
+  query = input.resumeBaseId ? query.eq('id', input.resumeBaseId).in('status', ['failed', 'analyzed']) : query.eq('status', 'failed');
+  const { data: failed, error } = await query.order('created_at', { ascending: false }).limit(100);
   if (error) return { ok: false, message: error.message };
-  const candidates = (failed ?? []).filter((base) => previewRecoveryKind(base));
+  const candidates = (failed ?? []).filter((base) => previewRecoveryKind(base) || (input.resumeBaseId && canResumePartialPreview(base)));
   // A newer empty 402 attempt must not hide an older already enriched result.
   const saved = candidates.find((base) => previewRecoveryKind(base) === 'validation')
     ?? candidates.find((base) => previewRecoveryKind(base) !== 'billing') ?? candidates[0];
   if (!saved) return null;
   if (activeBaseIds.includes(saved.id)) return { ok: true, created: false, base: saved };
-  const info = { ...saved.collect_info, ...(previewRecoveryKind(saved) === 'validation' ? { validation_retry: true } : {}) };
+  if (saved.status === 'analyzed') {
+    // A launched campaign owns this audience. Recovery must not mutate it.
+    const launched = await supabase.from('ve_templates').select('id').eq('base_id', saved.id)
+      .not('launch_info', 'is', null).limit(1).maybeSingle();
+    if (launched.error) return { ok: false, message: launched.error.message };
+    if (launched.data) return { ok: true, created: false, base: saved };
+  }
+  const info = { ...saved.collect_info,
+    ...(previewRecoveryKind(saved) === 'validation' ? { validation_retry: true } : {}),
+    ...(saved.status === 'analyzed' ? { validation_retry: true, relevance_review_requested: true } : {}),
+  };
   // Older workers timed out queued children from dispatch time. On an explicit
   // continuation, poll the SAME child again instead of buying another scrape.
   if (Array.isArray(info.tasks)) {
@@ -163,7 +177,7 @@ async function resumeFailedPreview(
   const claimedAt = new Date().toISOString();
   const { data: claimed, error: claimError } = await supabase.from('ve_bases')
     .update({ status: 'collecting', error: null, collect_info: info, updated_at: claimedAt })
-    .eq('id', saved.id).eq('status', 'failed').select('id, status, hypothesis_id').maybeSingle();
+    .eq('id', saved.id).eq('status', saved.status).select('id, status, hypothesis_id').maybeSingle();
   if (claimError || !claimed) {
     // Both same-base CAS and competing-base unique races are idempotent.
     const { data: winner, error: winnerError } = await supabase.from('ve_bases')
@@ -382,6 +396,14 @@ export async function enqueueVeBaseCollect(
         .maybeSingle();
       if (preparedError) return { ok: false, message: preparedError.message };
       if (prepared) {
+        if (prepared.id === input.resumeBaseId) {
+          const resumed = await resumeFailedPreview(supabase, input, hypothesisId, allActiveBaseIds);
+          if (resumed) {
+            if (!resumed.ok) return resumed;
+            (resumed.created ? created : existing).push(resumed.base);
+            continue;
+          }
+        }
         existing.push(prepared as Record<string, unknown>);
         continue;
       }

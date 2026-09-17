@@ -25,6 +25,8 @@ const websiteEvidenceSchema = z.object({
   // поиск по одним и тем же провалившимся строкам. Optional — старые
   // чекпоинты читаются прежними и новыми воркерами при раскатке и откате.
   provider_error_attempts: z.number().int().nonnegative().max(1000).optional(),
+  /** Bounded retries of a timed-out website, distinct from paid-search failures. */
+  read_error_attempts: z.number().int().nonnegative().max(1000).optional(),
   search_deferred: z.literal(true).optional(),
   review_attempt: hashSchema,
   review_attempts: z.number().int().nonnegative(),

@@ -24,9 +24,12 @@ const MAX_WEBSITES = 32;
 // перезапускался по пять раз за сутки, и каждый перезапуск покупал поиск
 // по тем же провалившимся строкам заново.
 const MAX_SEARCH_PROVIDER_ATTEMPTS = 3;
+const MAX_WEBSITE_TIMEOUT_ATTEMPTS = 2;
 const WEBSITE_CONCURRENCY = 8;
 const searchAttemptsExhausted = (evidence?: { provider_error?: { kind: string }; provider_error_attempts?: number }): boolean =>
   evidence?.provider_error?.kind === 'transient' && (evidence.provider_error_attempts ?? 1) >= MAX_SEARCH_PROVIDER_ATTEMPTS;
+const websiteTimeoutPending = (evidence?: { reason: string; read_error_attempts?: number }): boolean =>
+  evidence?.reason === 'website_evidence_timeout' && (evidence.read_error_attempts ?? 1) < MAX_WEBSITE_TIMEOUT_ATTEMPTS;
 const FIELDS = ['company', 'website', 'category', 'description', 'vacancy_title', 'website_text'] as const;
 const ACTIVITY_FIELDS: ReadonlyArray<typeof FIELDS[number]> = ['description', 'website_text', 'category'];
 type Fields = Record<typeof FIELDS[number], string>;
@@ -581,7 +584,7 @@ export async function findIrrelevantRows(input: {
         if (++consecutiveMalformedCompanies >= 4) {
           // A provider-wide format outage must not buy individual retries for
           // thousands of rows. Already verified siblings remain checkpointed.
-          stopProviderCalls = true; permanentFailure = true;
+          stopProviderCalls = true; transientFailure = true;
           result.error = 'Проверка релевантности завершилась не полностью: invalid_response';
         }
         await save();
@@ -698,6 +701,7 @@ export async function findIrrelevantRows(input: {
       if (semantic && semantic.status !== 'finished') return false;
       if (cached?.search_deferred) return input.allowPaidSearch !== false;
       if (cached?.provider_error) return !searchAttemptsExhausted(cached);
+      if (websiteTimeoutPending(cached)) return true;
       if (checkpoint.citation_repairs[entry.key] && current.get(entry)?.status === 'error') return false;
       const pendingRefinement = cached?.reader_version === 1 && cached.status === 'ok' && !cached.refined && Boolean(cached.text);
       if (pendingRefinement) return true;
@@ -778,12 +782,20 @@ export async function findIrrelevantRows(input: {
           reader_version: 1, reader_revision: VE_RELEVANCE_WEBSITE_VERSION, status: evidence.status, text: usable ? sliceWholeChars(evidence.text, 0, 6000) : '',
           url: sliceWholeChars(evidence.url, 0, 1000), reason: sliceWholeChars(evidence.reason, 0, 400),
           review_attempt: reviewAttempt, review_attempts: entry.attempts, refined: !usable,
+          ...(evidence.reason === 'website_evidence_timeout'
+            ? { read_error_attempts: (cached?.reason === evidence.reason ? cached.read_error_attempts ?? 1 : 0) + 1 } : {}),
         };
         // This write is durably saved below BEFORE the paid refinement call.
         record(entry, { ...current.get(entry)!, review_attempts: entry.attempts });
         if (usable) { entry.fields.website_text = sliceWholeChars(evidence.text, 0, 6000); enriched.push(entry); }
-        else record(entry, { ...current.get(entry)!, status: 'needs_review', evidence: [], review_attempts: entry.attempts,
-          reason: 'Сайт не дал подтверждения; недостаточно подтверждённых данных.' });
+        else {
+          const decision: VeRelevanceDecision = { ...current.get(entry)!, status: 'needs_review', evidence: [], review_attempts: entry.attempts,
+            reason: evidence.reason === 'website_evidence_timeout'
+              ? 'Сайт не ответил вовремя. Подтвердить соответствие компании пока не удалось; контакт сохранён в резерве.'
+              : 'Сайт не дал подтверждения; недостаточно подтверждённых данных.' };
+          if (websiteTimeoutPending(checkpoint.website_evidence[entry.key])) delete decision.website_review_version;
+          record(entry, decision);
+        }
       }));
       await save();
       if (enriched.length && !stopProviderCalls) await classify(enriched, true);
@@ -803,6 +815,14 @@ export async function findIrrelevantRows(input: {
   for (const entry of entries) {
     let decision = current.get(entry) ?? errorDecision('Проверка ещё не выполнена. Контакт сохранён, а не отклонён.', entry.attempts);
     const website = checkpoint.website_evidence[entry.key];
+    if (website && searchAttemptsExhausted(website)) {
+      // A consumed retry budget is a company-local unresolved check, not an
+      // outage of the whole base. Do not repay it or admit the company.
+      decision = { ...errorDecision('Сервис поиска не ответил после повторных попыток; контакт сохранён в резерве.',
+        Math.max(1, entry.attempts)), status: 'needs_review', website_review_version: VE_RELEVANCE_WEBSITE_VERSION };
+      record(entry, decision);
+      deferredProviderRecovery = true;
+    }
     if (decision.status === 'error' && website?.provider_error && website.provider_error.kind !== 'transient'
       && !currentSearchFailures.has(entry.key)) {
       // This lookup was outside this pass's cap (or a sibling stopped it).
@@ -830,7 +850,8 @@ export async function findIrrelevantRows(input: {
       }
       result.error ??= website.provider_error.message;
     }
-    if (website?.reader_revision === VE_RELEVANCE_WEBSITE_VERSION && website.refined && !website.provider_error && !website.search_deferred) {
+    if (website?.reader_revision === VE_RELEVANCE_WEBSITE_VERSION && website.refined && !website.provider_error && !website.search_deferred
+      && !websiteTimeoutPending(website)) {
       decision = { ...decision, website_review_version: VE_RELEVANCE_WEBSITE_VERSION };
       record(entry, decision);
     }
