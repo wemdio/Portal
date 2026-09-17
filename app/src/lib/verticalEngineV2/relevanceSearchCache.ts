@@ -25,10 +25,16 @@ import { searchVeRelevanceWebsites } from './relevanceSearch';
  */
 
 // Reuse discovery, never a relevance/email verdict. The reader still visits
-// the site and verifies its identity. Empty discovery expires much sooner so
-// a temporarily sparse index cannot hide a company for a month.
-export const VE_SEARCH_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-export const VE_EMPTY_SEARCH_CACHE_TTL_MS = 60 * 60 * 1000;
+// the site and verifies its identity.
+//
+// 17.09.2026 оба срока подняты до 30 суток по решению владельца движка:
+// сайт компании за месяц почти не меняется, а платить за один и тот же
+// запрос раз в сутки — это ровно та трата, ради которой кэш и заводили.
+// Цена решения для пустого ответа: если поисковик в момент запроса временно
+// не видел компанию, «сайта нет» держится месяц, а не час. Чтобы вернуть
+// такую компанию в работу раньше, строку надо удалить из ve_search_cache.
+export const VE_SEARCH_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+export const VE_EMPTY_SEARCH_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 // Serper и так отдаёт 6 позиций, а движок берёт из них не больше шести:
 // хранить больше нечего, а в БД это лишние килобайты на строку.
 const MAX_CACHED_ITEMS = 6;
