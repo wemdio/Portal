@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, getVeModel,
-  LLMValidationError, veNativeJsonSchema } from './llm';
+  LLMValidationError, veNativeJsonSchema, veCollectionCacheModel } from './llm';
 import { isVeProviderBillingError } from './collectionErrors';
 import { relevanceHash, VeRelevanceCheckpointError } from './relevanceCheckpoint';
 import {
@@ -69,7 +69,7 @@ export async function cleanVeCompanyNames(input: {
   const signal = input.signal ?? getVeActiveJobSignal() ?? undefined;
   signal?.throwIfAborted();
   const model = getVeModel('gate');
-  const context = relevanceHash(['ve-company-names-v1', input.scope, input.language, model]);
+  const context = relevanceHash(['ve-company-names-v1', input.scope, input.language, veCollectionCacheModel('gate', model)]);
   const checkpoint: VeCompanyNameCheckpoint = { version: 1, context, names: {} };
   // Merge matching durable sources: a newer partial attempt must not erase an
   // older successful batch. Rows are checked against their source again below.

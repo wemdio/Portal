@@ -21,6 +21,7 @@ jest.mock('@/lib/verticalEngineV2/llm', () => ({
   getVeModel: jest.fn(() => 'test-bulk-model'),
   getVeActiveJobSignal: jest.fn(() => undefined),
   veNativeJsonSchema: jest.requireActual('@/lib/verticalEngineV2/llm').veNativeJsonSchema,
+  veCollectionCacheModel: jest.requireActual('@/lib/verticalEngineV2/llm').veCollectionCacheModel,
 }));
 jest.mock('@/lib/verticalEngineV2/relevanceEvidence', () => ({
   ...jest.requireActual('@/lib/verticalEngineV2/relevanceEvidence'),
