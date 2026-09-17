@@ -1,5 +1,6 @@
 /** Evidence-backed hypothesis triage. Uncertainty is retained, never silently accepted or discarded. */
 import { z } from 'zod';
+import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, getVeModel, veNativeJsonSchema, veCollectionCacheModel, VE_COLLECTION_MODEL, LLMValidationError, type LLMMessage, type LLMUsage } from './llm';
 import { isVeProviderBillingError } from './collectionErrors';
@@ -279,7 +280,9 @@ export async function findIrrelevantRows(input: {
       Math.max(1, entry.attempts)), status: 'needs_review' });
   };
   const citationProviderFailure = (entry: Entry, code: VeRelevanceFailureCode) => {
-    permanentFailure = true; stopProviderCalls = true;
+    if (code === 'provider' || code === 'timeout') transientFailure = true;
+    else permanentFailure = true;
+    stopProviderCalls = true;
     failure(entry.key, 1, code);
     const repair = checkpoint.citation_repairs[entry.key];
     if (repair) repair.failure_code = code;
@@ -298,6 +301,12 @@ export async function findIrrelevantRows(input: {
       && previousFailures.some((item) => item.batch_hash === entry.key);
     const code = repair?.failure_code ?? (legacyCitationOnly ? 'invalid_evidence' : 'provider');
     if (code === 'invalid_evidence') citationFailure(entry);
+    else if (repair?.status === 'finished' && (code === 'provider' || code === 'timeout')) {
+      // The paid attempt is consumed. Quarantine this company without buying
+      // another repair; a past provider outage must not stop every sibling.
+      record(entry, { ...errorDecision('Исправление доказательств не завершено из-за сбоя провайдера; контакт остаётся в резерве.',
+        Math.max(1, entry.attempts)), status: 'needs_review' });
+    }
     else citationProviderFailure(entry, code);
   };
   const finishWebsite = (entry: Entry) => {
@@ -490,6 +499,7 @@ export async function findIrrelevantRows(input: {
     } catch (error) {
       signal?.throwIfAborted();
       if (error instanceof VeRelevanceCheckpointError) throw error;
+      if (error instanceof ProviderUsageWriteError) throw error;
       const diagnostic = getLLMValidationDiagnostic(error, ['evidence_ids']);
       if (diagnostic) input.log?.('[relevanceGate] invalid citation repair: ' + JSON.stringify(diagnostic));
       if (error instanceof LLMValidationError) citationFailure(entry);

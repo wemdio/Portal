@@ -2,6 +2,8 @@ import { z } from 'zod';
 import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, getVeModel,
   LLMValidationError, veNativeJsonSchema, veCollectionCacheModel } from './llm';
 import { isVeProviderBillingError } from './collectionErrors';
+import { isRetryableStageError } from './jobRetry';
+import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { relevanceHash, VeRelevanceCheckpointError } from './relevanceCheckpoint';
 import {
   companyNameSource, isCompanyNameReady, VE_COMPANY_NAME_FIELD,
@@ -108,6 +110,7 @@ export async function cleanVeCompanyNames(input: {
   await input.onCheckpoint(checkpoint, { done: all.length - pending.length, total: all.length });
   signal?.throwIfAborted();
   let error: string | undefined;
+  let retryable = false;
   let tokensUsed = 0;
   let costUsd = 0;
   let offset = 0;
@@ -153,6 +156,7 @@ export async function cleanVeCompanyNames(input: {
     } catch (cause) {
       signal?.throwIfAborted();
       if (cause instanceof Error && cause.name === 'AbortError') throw cause;
+      if (cause instanceof ProviderUsageWriteError) throw cause;
       const billing = isVeProviderBillingError(cause);
       if (cause instanceof LLMValidationError && cause.usage) {
         tokensUsed += cause.usage.tokensUsed;
@@ -160,6 +164,7 @@ export async function cleanVeCompanyNames(input: {
       }
       error = billing ? 'Requesty 402: insufficient balance (company name cleanup)'
         : error ?? 'Очистка названий завершилась не полностью';
+      retryable = !billing && cause instanceof Error && isRetryableStageError(cause.message);
       input.log?.(`[company_names] пакет ${offset + 1}–${offset + batch.length}: ${billing ? 'billing' : 'проверка не завершена'}`);
       const diagnostic = getLLMValidationDiagnostic(cause, ['cleaned', 'idx', 'name']);
       if (diagnostic) input.log?.(`[company_names] validation=${JSON.stringify(diagnostic)}`);
@@ -195,5 +200,6 @@ export async function cleanVeCompanyNames(input: {
   return { rows, checkpoint, tokensUsed, costUsd, summary: {
     status: failed ? 'partial' : 'complete', companies: all.length, checked, failed,
     ...(failed ? { error: error ?? 'Очистка названий завершилась не полностью' } : {}),
+    ...(failed && retryable ? { retryable: true } : {}),
   } };
 }

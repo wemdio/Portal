@@ -161,6 +161,12 @@ describe('llm rawCall retry', () => {
       language: 'ru', scope: 'test', onCheckpoint: checkpoint });
     expect(stopped.summary.checked).toBe(0);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    fetchMock.mockReset().mockResolvedValue(httpResponse(429, {}));
+    const delayedNames = cleanVeCompanyNames({ rows: companyRows.slice(0, 2), language: 'ru', scope: 'test', onCheckpoint: checkpoint });
+    await jest.advanceTimersByTimeAsync(14_000);
+    expect((await delayedNames).summary).toMatchObject({ status: 'partial', retryable: true, checked: 0 });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(stopped.summary.retryable).toBeUndefined();
   });
 
   it('does not retry a permanent 4xx', async () => {
@@ -614,6 +620,29 @@ describe('llm rawCall retry', () => {
       const callCount = fetchMock.mock.calls.length;
       await findIrrelevantRows({ ...citationInput, checkpoint: citations.checkpoint });
       expect(fetchMock).toHaveBeenCalledTimes(callCount);
+    }
+
+    // A consumed citation attempt cannot be charged again or admitted after
+    // a provider outage, but it must not permanently block other companies.
+    for (const status of [429, 502, 402, 401]) {
+      fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'needs_review', reason: 'Need facts', evidence: [] }] }))
+        .mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'relevant', reason: 'Makes equipment', evidence_ids: [] }] }))
+        .mockResolvedValueOnce(httpResponse(status, {}));
+      const citationInput = { ...input, fetchEvidence: jest.fn().mockResolvedValue({
+        status: 'ok', text: description, url: 'https://factory.test/', reason: 'identity_verified_website',
+      }) };
+      const failed = await findIrrelevantRows(citationInput);
+      expect(failed.retryable).toBe(status === 429 || status === 502);
+      expect(failed.decisions.get(0)?.status).toBe('error');
+      const resumed = await findIrrelevantRows({ ...citationInput, checkpoint: failed.checkpoint });
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      if (status === 429 || status === 502) {
+        expect(resumed.error).toBeUndefined();
+        expect(resumed.decisions.get(0)?.status).toBe('needs_review');
+      } else {
+        expect(resumed.error).toBeDefined();
+        expect(resumed.decisions.get(0)?.status).toBe('error');
+      }
     }
 
     // Old unavailable website checks get one pass through the improved reader,
