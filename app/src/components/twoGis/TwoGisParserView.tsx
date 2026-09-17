@@ -1253,10 +1253,16 @@ export function TwoGisParserView() {
           ) : rows.length > 0 ? (
             <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
               <div className="overflow-x-auto">
-                <table className="min-w-[980px] w-full border-collapse text-sm">
+                <table className="min-w-[1080px] w-full border-collapse text-sm">
                   <thead className="bg-gray-50 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
                     <tr>
                       <th className="px-4 py-3">Организация</th>
+                      <th
+                        className="px-4 py-3"
+                        title="Число филиалов организации по данным 2GIS. Пусто — карточку ещё не успели обновить или 2GIS её больше не знает."
+                      >
+                        Филиалов
+                      </th>
                       <th className="px-4 py-3">Город и адрес</th>
                       <th className="px-4 py-3">Рубрика</th>
                       <th className="px-4 py-3">Контакты</th>
@@ -1266,6 +1272,11 @@ export function TwoGisParserView() {
                     {rows.map((row) => (
                       <tr key={row.id} className="align-top hover:bg-gray-50/70">
                         <td className="max-w-72 px-4 py-3 font-medium text-gray-900">{row.name}</td>
+                        <td className="whitespace-nowrap px-4 py-3 tabular-nums text-gray-700">
+                          {typeof row.branch_count === 'number'
+                            ? row.branch_count.toLocaleString('ru-RU')
+                            : <span className="text-gray-300">—</span>}
+                        </td>
                         <td className="max-w-72 px-4 py-3 text-gray-700">
                           <div>{row.city_name}</div>
                           <div className="mt-0.5 text-xs text-gray-500">{row.geometry_name}</div>

@@ -1,6 +1,6 @@
-import { TWO_GIS_SOURCE_COLUMNS, type TwoGisCard } from './types';
+import { TWO_GIS_RESULT_COLUMNS, type TwoGisCard } from './types';
 
-export const TWO_GIS_CSV_COLUMNS = [...TWO_GIS_SOURCE_COLUMNS];
+export const TWO_GIS_CSV_COLUMNS = [...TWO_GIS_RESULT_COLUMNS];
 
 function protectSpreadsheetCell(column: string | undefined, text: string): string {
   if (
