@@ -30,6 +30,7 @@
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop, startWorkerHeartbeat } from './_shared';
 import { markSegmentationAuditFailed, runVeStage } from '@/lib/verticalEngineV2/stages';
 import { withVeActiveJobSignal } from '@/lib/verticalEngineV2/llm';
+import { VeLlmRateLimitError } from '@/lib/verticalEngineV2/llmRateLimit';
 import { withVeCostTelemetry } from '@/lib/verticalEngineV2/costTelemetry';
 import { normalizeVeMarket } from '@/lib/verticalEngineV2/market';
 import {
@@ -375,7 +376,8 @@ async function failJob(job: VeJob, err: unknown) {
   // attempts — число фейлов, а не клеймов: инкремент только здесь.
   const retryable = isRetryableStageError(msg);
   const attemptCap = maxAttemptsFor(msg);
-  const nextAttempts = job.attempts + 1;
+  const rateLimit = err instanceof VeLlmRateLimitError ? err : undefined;
+  const nextAttempts = job.attempts + Number(!rateLimit?.deferred);
   const finalFail = nextAttempts >= attemptCap;
   log('error', `Job ${job.id} (${job.stage}) failed (attempt ${nextAttempts}/${attemptCap}${retryable ? ', retryable' : ''}): ${msg}`);
 
@@ -394,7 +396,7 @@ async function failJob(job: VeJob, err: unknown) {
     finishedAt: finalFail ? new Date().toISOString() : null,
     // Транзиентные ошибки пережидаем с бэкоффом (run_after в будущем), чтобы
     // провайдер успел восстановиться; постоянные клеймим сразу, как раньше.
-    runAfter: retryRunAfter(nextAttempts, retryable),
+    runAfter: retryRunAfter(nextAttempts, retryable, Date.now(), rateLimit, job.id),
     updatedAt: new Date().toISOString(),
   });
   if (transition.error) throw new Error(`ve_jobs fail transition: ${transition.error}`);
