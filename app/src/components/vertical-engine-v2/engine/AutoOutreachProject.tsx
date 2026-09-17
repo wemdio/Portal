@@ -675,7 +675,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                 return (
                   <article key={h.id} className="border-t border-[var(--ve2-line)] pt-5 space-y-4">
                     <h3 className="ve2-h3">{h.title}</h3>
-                    {p?.status !== 'ready' ? <PreparationProgress preparation={p} base={base} jobs={detail.jobs}
+                    {p?.status !== 'ready' || (base && isPartialPreview(base)) ? <PreparationProgress preparation={p} base={base} jobs={detail.jobs}
                       onContinue={() => void change({ action: 'prepare', hypothesis_id: h.id })} continueDisabled={busy || locked} /> : null}
                     {base ? (
                       <>

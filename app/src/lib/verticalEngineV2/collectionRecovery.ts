@@ -1,4 +1,33 @@
 import { isVeProviderBillingError } from './collectionErrors';
+import { buildVeRelevanceReviewBatch, readVeRelevanceReserve, readVeRelevanceSourceRows } from './relevanceReserve';
+import { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
+
+/** Explicit continuation only: a terminal partial preview is never daily supply. */
+export function canResumePartialPreview(base: Record<string, unknown>): boolean {
+  const info = base.collect_info as Record<string, unknown> | null;
+  const target = info?.target_progress as Record<string, unknown> | undefined;
+  const checkpoint = info?.target_checkpoint as Record<string, unknown> | undefined;
+  if (base.source !== 'auto' || base.status !== 'analyzed' || !base.hypothesis_id
+    || info?.collection_mode !== 'preview' || info.refill || info.supply_batch_id || !target
+    || !['limited', 'exhausted', 'error'].includes(String(target.status))
+    || typeof target.ready_rows !== 'number' || !Number.isSafeInteger(target.ready_rows) || target.ready_rows < 0
+    || typeof target.ready_target !== 'number' || !Number.isSafeInteger(target.ready_target) || target.ready_target <= 0
+    || typeof target.round !== 'number' || !Number.isSafeInteger(target.round) || target.round < 1
+    || checkpoint?.completed_round !== target.round
+    || target.ready_rows >= target.ready_target) return false;
+  const reserve = readVeRelevanceReserve(info.relevance_reserve);
+  // Reuse current eligibility rules: completed uncertain checks do not become
+  // an unlimited paid loop merely because fewer than 500 contacts were found.
+  if (reserve.some(needsVeSavedEmailReview) || buildVeRelevanceReviewBatch({
+    reserve, ready: [], source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
+  }).rows.length > 0) return true;
+  return Number(target.candidates_processed) < Number(target.max_candidates)
+    && Number(target.round) < Number(target.max_rounds)
+    && Array.isArray(info.tasks) && info.tasks.some((task) =>
+      task && (task.status === 'pending' || task.status === 'dispatched'
+        || (task.status === 'done' && (task.source === 'companies_directory' || task.catalog)
+          && !task.exhausted && !task.hit_ceiling)));
+}
 
 /** Only recognized preview failures may reuse a base; never supply/refill. */
 export function previewRecoveryKind(base: Record<string, unknown>): 'validation' | 'billing' | 'pipeline' | 'discovery' | 'catalog' | 'interrupted' | null {

@@ -834,7 +834,7 @@ export function BaseRow({ base, job, hypothesisTitle, queued, preparationState, 
   const collectionTone = preparationState?.tone ?? (queued ? 'muted' : 'info');
   const collectionLabel = preparationState?.title ?? (queued ? 'В очереди' : COLLECT_PHASE_LABELS[progress.phase]);
   const collectionClass = { err: 've2-tg-err', ok: 've2-tg-ok', info: 've2-tg-warn', muted: 've2-tg-q' }[collectionTone];
-  const showPreparationState = preparationState && ['collecting', 'analyzing', 'failed'].includes(base.status);
+  const showPreparationState = preparationState && (['collecting', 'analyzing', 'failed'].includes(base.status) || isPartialPreview(base));
   const columns = Array.isArray(base.columns) ? base.columns.filter((column) => column !== VE_COMPANY_NAME_FIELD && column !== '_ve_relevance') : [];
   const previewRows = (Array.isArray(base.sample_rows) ? base.sample_rows : [])
     .filter((row) => !isReadyPreview || (isCompanyNameReady(row) && isVeAcceptedEmailStatus(row._email_status)
@@ -915,6 +915,11 @@ export function BaseRow({ base, job, hypothesisTitle, queued, preparationState, 
           <span className="ve2-st ve2-tg-warn">
             <StatusDot tone="warn" />
             Разбираем…
+          </span>
+        ) : base.status === 'analyzed' && partialPreview ? (
+          <span className="ve2-st ve2-tg-q">
+            <StatusDot tone="muted" />
+            Сбор остановлен — цель не достигнута
           </span>
         ) : base.status === 'analyzed' ? (
           <span className="ve2-st ve2-tg-ok">

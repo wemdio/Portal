@@ -8,7 +8,7 @@ type ClaimedPreparation = VeOutreachPreparation & { claim_token: string };
 
 // This timer runs beside research. Do not deserialize megabytes of saved
 // candidates/evidence just to inspect a base's status every ten seconds.
-const BASE_STATE_COLUMNS = 'id,status,error,row_count,updated_at,collection_mode:collect_info->>collection_mode';
+const BASE_STATE_COLUMNS = 'id,status,error,row_count,updated_at,collection_mode:collect_info->>collection_mode,target_progress:collect_info->target_progress';
 
 /** A resumed base was committed after the old job finished, then the process died before enqueue. */
 export function isVeInterruptedCollectionResume(
@@ -106,7 +106,13 @@ export async function runVeOutreachPreparations(db: SupabaseClient, shouldStop: 
           .eq('id', baseId).eq('project_id', p.project_id).eq('hypothesis_id', p.hypothesis_id).maybeSingle();
         if (base.error) throw new Error(base.error.message);
       }
-      if (!baseId || (base?.data?.status === 'failed' && retryRequested)) {
+      const rawTarget = base?.data?.target_progress;
+      const target = rawTarget && typeof rawTarget === 'object' && !Array.isArray(rawTarget) ? rawTarget : null;
+      const continuePartial = retryRequested && base?.data?.status === 'analyzed'
+        && target && ['limited', 'exhausted', 'error'].includes(String(target.status))
+        && typeof target.ready_rows === 'number' && typeof target.ready_target === 'number'
+        && target.ready_rows < target.ready_target;
+      if (!baseId || (base?.data?.status === 'failed' && retryRequested) || continuePartial) {
         // Persist any adopted identity before enqueue/recovery can fail. A retry
         // continues the paid checkpoint instead of losing it and buying a new base.
         // Keep the explicit retry intent until a durable worker job exists.
@@ -116,6 +122,7 @@ export async function runVeOutreachPreparations(db: SupabaseClient, shouldStop: 
         if (v.error) throw new Error(v.error.message);
         const result = await enqueueVeBaseCollect(db, { projectId: p.project_id, verticalId: h.data.vertical_id,
           verticalName: v.data.name, hypothesisIds: [p.hypothesis_id], collectionMode: 'preview',
+          ...(continuePartial && baseId ? { resumeBaseId: baseId } : {}),
           readyTarget: VE_PREVIEW_READY_TARGET, limit: VE_COLLECTION_MAX_CANDIDATES });
         if (!result.ok) {
           // enqueue can insert the base before reporting its job-insert failure.
