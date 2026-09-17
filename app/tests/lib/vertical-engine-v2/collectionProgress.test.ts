@@ -166,6 +166,15 @@ describe('VE2 collection progress presentation', () => {
     }
     expect(getPreparationPresentation({ preparation, base: collecting, jobs: [{ ...parent, status: 'running' }] }))
       .toMatchObject({ tone: 'info', currentStep: 0 });
+    expect(getPreparationPresentation({ preparation: interrupted, base: collecting, jobs: [{ ...parent, status: 'running' }] }))
+      .toMatchObject({ tone: 'info', currentStep: 0 });
+    for (const readyRows of [0, 22]) {
+      const stopped = { ...preview, id: collecting.id, status: 'analyzed' as const,
+        collect_info: { ...preview.collect_info, target_progress: { ...preview.collect_info!.target_progress!, ready_rows: readyRows } } };
+      const presentation = getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: stopped, jobs: [] });
+      expect(presentation).toMatchObject({ tone: 'muted', currentStep: null, canContinue: true });
+      expect(presentation.title).toContain(`${readyRows} из 500`);
+    }
     collecting.collect_info.relevance_review_requested = false;
     collecting.collect_info.construct.progress = { status: 'processing', current_step_key: 'validate_emails', current_step_progress: 37 };
     for (const history of [[], [{ ...parent, status: 'done' as const }]]) {

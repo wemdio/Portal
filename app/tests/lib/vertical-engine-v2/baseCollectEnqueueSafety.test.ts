@@ -154,6 +154,52 @@ describe('VE2 base collection enqueue recovery', () => {
     expect(resumedDb.getRows('ve_jobs')).toHaveLength(0);
     expect(resumedDb.rpcCalls.some((call) => call.fn === 've_resume_outreach_cancelled_base')).toBe(false);
 
+    // A terminal partial preview is resumed only by an explicit Continue for
+    // that saved base. Routine enqueue still reuses it without daily spending.
+    for (const mode of ['continue', 'routine', 'launched', 'checked'] as const) {
+      let partialClaimed = false;
+      const partialSave = jest.fn(() => ({ data: true }));
+      const target = { mode: 'preview', status: 'limited', ready_rows: 0, ready_target: 500,
+        candidates_processed: 17, round: 1, max_rounds: 100, max_candidates: 10000, first_round_candidates: 100 };
+      const partialDb = createMockSupabase({ tables: {
+        ve_hypotheses: [{ id: 'h1', title: 'Industrial plants', project_id: input.projectId, vertical_id: input.verticalId, status: 'approved' }],
+        ve_verticals: [{ id: input.verticalId, project_id: input.projectId, name: input.verticalName }],
+        ve_bases: [{ id: 'saved-partial', project_id: input.projectId, vertical_id: input.verticalId, hypothesis_id: 'h1',
+          source: 'auto', status: 'analyzed', row_count: 0, collection_mode: 'preview', target_progress: target,
+          collect_info: { collection_mode: 'preview', target_progress: target, target_checkpoint: { completed_round: 1 },
+            relevance_reserve: { version: 1, rows: [{ company: 'Plant', website: 'plant.test', email: 'info@plant.test',
+              _email_status: 'ok', _ve_relevance: { status: 'needs_review', review_attempts: 1,
+                website_review_version: mode === 'checked' ? 4 : 3 } }] } } }],
+        ve_templates: mode === 'launched' ? [{ id: 'live-template', base_id: 'saved-partial', launch_info: { campaign_id: 'live' } }] : [],
+      }, rpcHandlers: {
+        ve_claim_outreach_preparation: () => {
+          if (partialClaimed) return { data: [] };
+          partialClaimed = true;
+          return { data: [{ project_id: input.projectId, hypothesis_id: 'h1', base_id: 'saved-partial',
+            template_id: null, status: 'pending', language: 'ru', claim_token: 'partial-lease' }] };
+        },
+        ve_save_outreach_preparation: partialSave,
+      } });
+      const partialClient = partialDb as unknown as SupabaseClient;
+      if (mode === 'routine') {
+        await expect(enqueueVeBaseCollect(partialClient, { ...input, hypothesisIds: ['h1'], collectionMode: 'preview' }))
+          .resolves.toMatchObject({ ok: true, created: false });
+      } else await runVeOutreachPreparations(partialClient);
+      expect(partialDb.getRows('ve_bases')).toHaveLength(1);
+      const jobs = partialDb.getRows('ve_jobs');
+      expect(jobs).toHaveLength(mode === 'continue' ? 1 : 0);
+      if (mode === 'continue') {
+        expect(jobs[0]).toMatchObject({ stage: 'base_collect', status: 'pending',
+          payload: { base_id: 'saved-partial', hypothesis_id: 'h1', collection_mode: 'preview' } });
+        expect(partialDb.getRows('ve_bases')[0]).toMatchObject({ status: 'collecting',
+          collect_info: { relevance_review_requested: true, validation_retry: true,
+            target_progress: { ready_rows: 0, candidates_processed: 17, round: 1 } } });
+        expect(partialSave).toHaveBeenLastCalledWith(expect.objectContaining({ p_status: 'collecting' }), expect.anything());
+        await enqueueVeBaseCollect(partialClient, { ...input, hypothesisIds: ['h1'], collectionMode: 'preview', resumeBaseId: 'saved-partial' });
+        expect(partialDb.getRows('ve_jobs')).toHaveLength(1);
+      } else expect(partialDb.getRows('ve_bases')[0].status).toBe('analyzed');
+    }
+
     // A Continue action inside one card may not dispatch the project-wide RPC.
     const projectId = '00000000-0000-4000-8000-000000000301';
     const hypothesisId = '00000000-0000-4000-8000-000000000302';
