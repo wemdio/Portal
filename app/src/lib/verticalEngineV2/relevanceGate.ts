@@ -25,8 +25,8 @@ const MAX_WEBSITES = 32;
 // по тем же провалившимся строкам заново.
 const MAX_SEARCH_PROVIDER_ATTEMPTS = 3;
 const WEBSITE_CONCURRENCY = 8;
-const searchAttemptsExhausted = (evidence?: { provider_error?: unknown; provider_error_attempts?: number }): boolean =>
-  Boolean(evidence?.provider_error) && (evidence?.provider_error_attempts ?? 1) >= MAX_SEARCH_PROVIDER_ATTEMPTS;
+const searchAttemptsExhausted = (evidence?: { provider_error?: { kind: string }; provider_error_attempts?: number }): boolean =>
+  evidence?.provider_error?.kind === 'transient' && (evidence.provider_error_attempts ?? 1) >= MAX_SEARCH_PROVIDER_ATTEMPTS;
 const FIELDS = ['company', 'website', 'category', 'description', 'vacancy_title', 'website_text'] as const;
 const ACTIVITY_FIELDS: ReadonlyArray<typeof FIELDS[number]> = ['description', 'website_text', 'category'];
 type Fields = Record<typeof FIELDS[number], string>;
@@ -255,6 +255,7 @@ export async function findIrrelevantRows(input: {
     checkpoint.failures = checkpoint.failures.slice(-100);
   };
   let stopProviderCalls = false, transientFailure = false, permanentFailure = false;
+  const currentSearchFailures = new Set<string>();
   let consecutiveMalformedCompanies = 0;
   const accountUsage = (usage: LLMUsage) => { result.tokensUsed += usage.tokensUsed; result.costUsd += usage.costUsd; };
   const invoke = async <T>(chat: LLMMessage[], schema: z.ZodType<T>, opts: Parameters<typeof callLLMWithSchema>[2]) => {
@@ -708,10 +709,16 @@ export async function findIrrelevantRows(input: {
           const evidence = checkpoint.website_evidence[entry.key];
           return evidence?.reader_version === 1 && evidence.status === 'ok' && !evidence.refined && evidence.text ? 1 : 0;
         };
+        const blockedProvider = (entry: Entry) => {
+          const kind = checkpoint.website_evidence[entry.key]?.provider_error?.kind;
+          return kind === 'billing' || kind === 'configuration' ? 1 : 0;
+        };
         // Finish saved refinement before accumulating more paid/unfinished work.
-        // Failed searches must not monopolize every retry's first batch.
-        // Fresh companies progress before the failed subset is retried.
+        // Recheck old billing/key failures within the cap on resume. A fresh
+        // rejection still stops this pass; historical errors cannot starve
+        // behind fresh companies forever. Transient retries remain last.
         return pendingText(b) - pendingText(a)
+          || blockedProvider(b) - blockedProvider(a)
           || Number(Boolean(checkpoint.website_evidence[a.key]?.provider_error)) - Number(Boolean(checkpoint.website_evidence[b.key]?.provider_error))
           || a.attempts - b.attempts;
       }).slice(0, Math.min(MAX_WEBSITES, Math.max(0, input.websiteLimit ?? MAX_WEBSITES)));
@@ -744,6 +751,7 @@ export async function findIrrelevantRows(input: {
           return;
         }
         if (evidence.provider_error) {
+          currentSearchFailures.add(entry.key);
           const provider = evidence.provider_error;
           // Transient search failure belongs to this company. Preserve it for
           // a bounded retry, but finish siblings and their paid refinements.
@@ -756,7 +764,7 @@ export async function findIrrelevantRows(input: {
           checkpoint.website_evidence[entry.key] = {
             reader_version: 1, reader_revision: VE_RELEVANCE_WEBSITE_VERSION, status: 'error', text: '', url: sliceWholeChars(evidence.url, 0, 1000),
             reason: sliceWholeChars(provider.message, 0, 400), provider_error: { ...provider, message: sliceWholeChars(provider.message, 0, 400) },
-            provider_error_attempts: (cached?.provider_error_attempts ?? 0) + 1,
+            provider_error_attempts: (cached?.provider_error?.kind === provider.kind ? cached.provider_error_attempts ?? 0 : 0) + 1,
             review_attempt: reviewAttempt, review_attempts: entry.attempts, refined: true,
           };
           record(entry, errorDecision(sliceWholeChars(provider.message, 0, 400), entry.attempts));
@@ -791,9 +799,22 @@ export async function findIrrelevantRows(input: {
     await save();
     result.continueFromCheckpoint = canContinue;
   }
+  let deferredProviderRecovery = false;
   for (const entry of entries) {
     let decision = current.get(entry) ?? errorDecision('Проверка ещё не выполнена. Контакт сохранён, а не отклонён.', entry.attempts);
     const website = checkpoint.website_evidence[entry.key];
+    if (decision.status === 'error' && website?.provider_error && website.provider_error.kind !== 'transient'
+      && !currentSearchFailures.has(entry.key)) {
+      // This lookup was outside this pass's cap (or a sibling stopped it).
+      // Retain its checkpoint for recovery, but do not claim a fresh billing
+      // refusal. Unverified recipients stay excluded and reviewable.
+      decision = { ...decision, status: 'needs_review', evidence: [],
+        reason: 'После предыдущего сбоя поиска требуется повторная проверка. Контакт сохранён в резерве.' };
+      delete decision.website_review_version;
+      delete decision.search_deferred;
+      record(entry, decision);
+      deferredProviderRecovery = true;
+    }
     if (decision.status === 'error' && website?.provider_error) {
       // A failed company may have been rotated behind this pass's website cap.
       // Its unresolved failure still needs a durable retry, not a false success
@@ -821,6 +842,7 @@ export async function findIrrelevantRows(input: {
       if (decision.status === 'error') { result.errored.add(index); result.unchecked.add(index); }
     }
   }
+  if (deferredProviderRecovery) await save();
   result.coverage.complete = result.coverage.checkedCompanies === entries.length;
   result.retryable = transientFailure && !permanentFailure;
   return result;

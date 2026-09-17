@@ -10,6 +10,39 @@ const MAX_SITE_LOOKUPS = 10_000;
 const resultSchema = z.object({ website: z.string().max(1000), reason: z.string().max(400) });
 const checkpointSchema = z.object({ version: z.literal(1), checked: z.record(z.string(), resultSchema) });
 export type VeSourceContactCheckpoint = z.infer<typeof checkpointSchema>;
+export const VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT = 200;
+const discoveryBudgetSchema = z.object({
+  version: z.literal(1),
+  checked_at_growth: z.number().int().nonnegative().safe(),
+  ready_high_water: z.number().int().nonnegative().safe(),
+  paused: z.boolean(),
+});
+export type VeSourceDiscoveryBudget = z.infer<typeof discoveryBudgetSchema>;
+
+/** Call only after found sites and in-flight validations have been drained.
+ * Counts completed company lookups, not billable credits (cache hits are free).
+ * Legacy runs start an observed cohort; their historical yield is unknown. */
+export function evaluateVeSourceDiscoveryBudget(input: {
+  budget?: unknown; checkpoint?: unknown; readyRows: number;
+}): { budget: VeSourceDiscoveryBudget; remaining: number } {
+  const checked = Object.keys(readState(input.checkpoint).checked).length;
+  const parsed = discoveryBudgetSchema.safeParse(input.budget === undefined ? {
+    version: 1, checked_at_growth: checked, ready_high_water: input.readyRows, paused: false,
+  } : input.budget);
+  if (!parsed.success || !Number.isSafeInteger(input.readyRows) || input.readyRows < 0
+    || checked < parsed.data.checked_at_growth) {
+    throw new VeRelevanceCheckpointError('Source discovery budget checkpoint is invalid');
+  }
+  const budget = { ...parsed.data };
+  if (input.readyRows > budget.ready_high_water) {
+    budget.checked_at_growth = checked;
+    budget.ready_high_water = input.readyRows;
+    budget.paused = false;
+  }
+  const remaining = Math.max(0, VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT - (checked - budget.checked_at_growth));
+  budget.paused ||= remaining === 0;
+  return { budget, remaining: budget.paused ? 0 : remaining };
+}
 const keyFor = (row: SourceRow) => createHash('sha256')
   .update(JSON.stringify([row.company, row.website, row.inn, row.address])).digest('hex');
 
