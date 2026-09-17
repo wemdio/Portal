@@ -57,14 +57,26 @@ should_drain_non_baseconstructor_workers() {
   return 1
 }
 
-if [ -f .env ]; then
-  set -o allexport
-  source <(tr -d '\r' < .env)
-  set +o allexport
-fi
+# Читаем только две нужные переменные, а не source всего .env: значения там
+# рассчитаны на docker compose --env-file, а не на синтаксис bash. Пример —
+# ключ сервисного аккаунта Google (SENDER_GOOGLE_SA_PRIVATE_KEY=-----BEGIN
+# PRIVATE KEY-----\n...): bash видит присваивание + команду PRIVATE, падает по
+# set -e и роняет деплой на шаге drain (прогон 17.09.2026).
+read_env_value() {
+  local key="$1"
+  [ -f .env ] || return 0
+  local raw
+  raw="$(grep -E "^${key}=" .env | tail -n1 | cut -d= -f2- | tr -d '\r')"
+  # Значение могли записать в кавычках — снимаем парные.
+  case "$raw" in
+    \"*\") raw="${raw#\"}"; raw="${raw%\"}" ;;
+    \'*\') raw="${raw#\'}"; raw="${raw%\'}" ;;
+  esac
+  printf '%s' "$raw"
+}
 
-SUPABASE_URL="${NEXT_PUBLIC_SUPABASE_URL:-}"
-KEY="${SUPABASE_SERVICE_ROLE_KEY:-}"
+SUPABASE_URL="${NEXT_PUBLIC_SUPABASE_URL:-$(read_env_value NEXT_PUBLIC_SUPABASE_URL)}"
+KEY="${SUPABASE_SERVICE_ROLE_KEY:-$(read_env_value SUPABASE_SERVICE_ROLE_KEY)}"
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "[drain] python3 is required"
