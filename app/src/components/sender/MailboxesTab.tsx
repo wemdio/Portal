@@ -1,11 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Loader2, RefreshCw, Trash2, Upload } from 'lucide-react';
+import { Loader2, RefreshCw, Trash2, Upload, Users } from 'lucide-react';
 import {
   bulkMailboxes,
   deleteMailbox,
   fetchMailboxes,
+  googleWorkspaceStatus,
+  importFromGoogleWorkspace,
   importMailboxes,
   patchMailbox,
   type BulkMailboxAction,
@@ -24,6 +26,7 @@ export function MailboxesTab() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<ImportMailboxesResult | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Выбор хранится вместе со страницей, которой он принадлежит, а не
   // сбрасывается эффектом на смену страницы: эффект ради setState — лишний
@@ -34,6 +37,10 @@ export function MailboxesTab() {
     { page: 1, ids: new Set() },
   );
   const [bulkBusy, setBulkBusy] = useState(false);
+  // Подключение к Workspace настраивается на сервере; кнопка показывается,
+  // только если настроено, — иначе она обещала бы то, чего портал не умеет.
+  const [googleReady, setGoogleReady] = useState(false);
+  const [googleBusy, setGoogleBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async (targetPage: number) => {
@@ -57,6 +64,21 @@ export function MailboxesTab() {
   }, [load, page]);
 
   useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await googleWorkspaceStatus();
+        if (!cancelled) setGoogleReady(res.configured);
+      } catch {
+        /* не доехал статус — просто не показываем кнопку */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     // Ящики после загрузки проверяются воркером — подтягиваем статусы, пока
     // есть хоть один в очереди на проверку. Сортировка по email стабильна,
     // поэтому опрос больше дёргает строки местами.
@@ -77,6 +99,25 @@ export function MailboxesTab() {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить файл');
     } finally {
       setUploading(false);
+    }
+  };
+
+  const importGoogle = async () => {
+    setGoogleBusy(true);
+    setError(null);
+    setResult(null);
+    try {
+      const res = await importFromGoogleWorkspace();
+      setNotice(
+        `Из Google Workspace подключено ящиков: ${res.imported}`
+        + (res.skipped ? `. Пропущено заблокированных: ${res.skipped}` : '')
+        + '. Каждый проверяется на вход — это занимает пару минут.',
+      );
+      await load(page);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить ящики из Google');
+    } finally {
+      setGoogleBusy(false);
     }
   };
 
@@ -147,6 +188,18 @@ export function MailboxesTab() {
             {uploading ? 'Загружаю…' : 'Выбрать файл'}
           </button>
 
+          {googleReady ? (
+            <button
+              type="button"
+              onClick={() => void importGoogle()}
+              disabled={googleBusy}
+              className="inline-flex items-center gap-2 rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50"
+            >
+              {googleBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Users className="h-4 w-4" />}
+              {googleBusy ? 'Загружаю…' : 'Загрузить из Google Workspace'}
+            </button>
+          ) : null}
+
           <input
             ref={fileRef}
             type="file"
@@ -191,6 +244,7 @@ export function MailboxesTab() {
           </div>
         ) : null}
 
+        {notice ? <p className="mt-3 text-sm text-emerald-600">{notice}</p> : null}
         {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
       </div>
 

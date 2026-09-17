@@ -29,6 +29,11 @@ services:
       - BYO_MAILBOX_CRED_KEY=${BYO_MAILBOX_CRED_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - SENDER_REPLIES_INTERVAL_MS=${SENDER_REPLIES_INTERVAL_MS:-60000}
+      # Ящики Google Workspace без паролей: воркер берёт у Google часовой ключ
+      # на конкретный ящик перед входом по SMTP/IMAP. Пусто — такие ящики просто
+      # не пройдут проверку, остальные работают как раньше.
+      - SENDER_GOOGLE_SA_EMAIL=${SENDER_GOOGLE_SA_EMAIL:-}
+      - SENDER_GOOGLE_SA_PRIVATE_KEY=${SENDER_GOOGLE_SA_PRIVATE_KEY:-}
       - WORKER_KIND=sender
     stop_grace_period: 2m
     deploy:

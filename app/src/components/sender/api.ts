@@ -107,6 +107,21 @@ export function importMailboxes(file: File) {
   return upload<ImportMailboxesResult>(`${BASE}/mailboxes`, file);
 }
 
+/** Итог загрузки ящиков напрямую из каталога Google Workspace. */
+export interface ImportGoogleResult {
+  imported: number;
+  skipped: number;
+  total: number;
+}
+
+export function googleWorkspaceStatus() {
+  return authFetchJson<{ configured: boolean }>(`${BASE}/mailboxes/google`);
+}
+
+export function importFromGoogleWorkspace() {
+  return authFetchJson<ImportGoogleResult>(`${BASE}/mailboxes/google`, { method: 'POST' });
+}
+
 export function patchMailbox(id: string, body: Record<string, unknown>) {
   return authFetchJson<{ ok: true }>(`${BASE}/mailboxes/${id}`, {
     method: 'PATCH',

@@ -6,9 +6,13 @@ export type RecipientStatus = 'active' | 'replied' | 'bounced' | 'unsubscribed' 
 export type MessageStatus = 'scheduled' | 'sending' | 'sent' | 'failed' | 'canceled';
 export type ReplyKind = 'human' | 'auto_reply' | 'bounce' | 'warmup' | 'unknown';
 
+/** password — пароль приложения из выгрузки; google_sa — ключ служебного аккаунта. */
+export type MailboxAuthType = 'password' | 'google_sa';
+
 export interface MailboxRow {
   id: string;
   provider: string;
+  auth_type: MailboxAuthType;
   email: string;
   display_name: string | null;
   username: string;
@@ -17,7 +21,8 @@ export interface MailboxRow {
   smtp_tls_mode: TlsMode;
   imap_host: string | null;
   imap_port: number;
-  secret_encrypted: string;
+  /** null у ящиков с входом по ключу: хранить там нечего. */
+  secret_encrypted: string | null;
   status: MailboxStatus;
   daily_campaign_limit: number;
   daily_total_limit: number;
