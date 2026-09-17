@@ -1201,6 +1201,8 @@ function readCollectInfo(info: VeCollectInfo | null | undefined) {
 function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBaseSummary; job?: VeJobSummary; useDefaultLimit?: boolean }) {
   const target = base.collect_info?.target_progress;
   const nameCleanup = base.collect_info?.company_name_cleanup;
+  const adaptive = base.collect_info?.adaptive_collection;
+  const lastBatch = adaptive?.last_batch;
   const nameProgress = getCollectionProgress(base.collect_info, job);
   const namesInProgress = base.status === 'collecting' && nameProgress.phase === 'cleaning_names';
   const relevanceInProgress = base.status === 'collecting' && nameProgress.phase === 'reviewing_relevance';
@@ -1262,6 +1264,15 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
               : 'Подготовка превью остановлена. Непроверенные контакты не попадут в запуск.'}
           </p>
           <p className={`mt-1 ${HE.faint}`}>За все проходы проверено кандидатов: {target.candidates_processed.toLocaleString('ru-RU')}. Это фактически обработанная выборка, а не размер всего реестра. В CSV-превью не более {VE_PREVIEW_READY_TARGET.toLocaleString('ru-RU')} контактов.</p>
+        </div>
+      ) : null}
+      {adaptive ? (
+        <div className="my-2 space-y-1 break-words">
+          {lastBatch ? <p>Последняя проверенная партия: {lastBatch.candidates} компаний → {lastBatch.new_ready} новых готовых контактов.
+            {' '}{lastBatch.spend.complete ? 'Расход AI + Serper ≈ ' : 'Учтённая часть расходов AI + Serper ≈ '}
+            ${lastBatch.spend.estimated_total_usd.toFixed(3)}{lastBatch.spend.complete ? '.' : '; полный расход пока неизвестен.'}</p> : null}
+          <p>{adaptive.checking_batch ? 'Текущая партия ещё проверяется. Её результат и расходы появятся после проверки.' : adaptive.note}</p>
+          {adaptive.replan_error ? <p>{adaptive.replan_error}</p> : null}
         </div>
       ) : null}
       {estimate.uniqueCompanies !== null ? (

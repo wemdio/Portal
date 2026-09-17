@@ -89,6 +89,11 @@ import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
  */
 
 import { randomUUID } from 'node:crypto';
+import { ProviderUsageWriteError } from '@/lib/providerUsage';
+import { isVeProviderBillingError, isVeProviderConfigurationError } from '../collectionErrors';
+import { validVeAdaptiveCollection, newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys,
+  readVeBatchSpend, VE_ADAPTIVE_BATCH_SIZE, type VeAdaptiveCollection } from '../adaptiveCollection';
+import { prioritizeVeCandidates, readVeCandidateHints } from '../candidatePriority';
 import { isVeAcceptedEmailStatus } from '../emailPolicy';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
@@ -658,6 +663,7 @@ export interface VeSliceProbe {
 }
 
 export interface VeCollectInfo {
+  adaptive_collection?: VeAdaptiveCollection;
   /** Existing contacts/sites first; a cache miss may buy search only in paid.
    * Deferred source rows are worker state, never ready recipients. */
   search_policy?: { version: 1; phase: 'existing' | 'paid'; deferred_rows: VeUnifiedRow[]; construct_rows?: VeUnifiedRow[] };
@@ -863,6 +869,7 @@ async function buildPlan(
   usage: VeUsage,
   market: VeMarket,
   hypothesisId: string | null,
+  strategyFeedback?: string,
 ): Promise<{
   plan: VeSourcePlan;
   planRepair?: VePlanRepair;
@@ -952,7 +959,8 @@ async function buildPlan(
 
   const llm = await callLLMWithSchema(
     // Рынок 'us' — EN-промпт с ENG-источниками (pdl/funded/eng_hiring/google_maps).
-    (market === 'us' ? buildSourcePlanMessagesEn : buildSourcePlanMessages)(promptInput),
+    [...(market === 'us' ? buildSourcePlanMessagesEn : buildSourcePlanMessages)(promptInput),
+      ...(strategyFeedback ? [{ role: 'user' as const, content: strategyFeedback }] : [])],
     VeSourcePlanSchema,
     { model: getVeModel('bulk') },
   );
@@ -2344,6 +2352,136 @@ async function dispatchConstructJob(input: {
   };
 }
 
+function taggedHarvest(task: VeCollectTaskState): VeUnifiedRow[] {
+  return (task.harvest ?? []).map((row) => ({ ...row, _ve_source_strategy: veSourceStrategyKey(task.task) }));
+}
+const candidateSourceKey = (row: VeUnifiedRow) => (row as VeUnifiedRow & { _ve_source_strategy?: string })._ve_source_strategy;
+
+async function prepareAdaptiveCandidates(ctx: VeStageContext, base: VeAutoBase, info: VeCollectInfo, available: VeUnifiedRow[]): Promise<VeUnifiedRow[]> {
+  if (!available.length || info.adaptive_collection?.pending) return info.adaptive_collection?.pending ? [] : available;
+  let candidates = available;
+  const policy = info.adaptive_collection;
+  if (policy) {
+    const keys = [...new Set(available.map(candidateSourceKey).filter((key): key is string => !!key))];
+    const selected = chooseVeAdaptiveSource(policy, keys);
+    if (selected) {
+      if (policy.active_source && policy.active_source !== selected) {
+        policy.switches += 1;
+        policy.note = 'Для следующей партии выбран другой источник. Прежние кандидаты сохранены.';
+      }
+      policy.active_source = selected;
+      candidates = available.filter((row) => candidateSourceKey(row) === selected);
+    }
+  }
+  const hints = await readVeCandidateHints(candidates, ctx.supabase, ctx.signal);
+  const focus = info.hypotheses?.map((hypothesis) => hypothesis.title).join(' ') ?? '';
+  return prioritizeVeCandidates(candidates, hints, focus);
+}
+function beginAdaptiveBatch(base: VeAutoBase, info: VeCollectInfo, id: string, rows: VeUnifiedRow[]): void {
+  const policy = info.adaptive_collection;
+  if (!policy || policy.pending || !rows.length) return;
+  const sourceKey = candidateSourceKey(rows[0]) ?? policy.active_source ?? 'saved';
+  const source = info.tasks?.find((task) => veSourceStrategyKey(task.task) === sourceKey)?.source ?? 'saved';
+  policy.pending = { id, source_key: sourceKey, source, candidates: rows.length,
+    ready_before: veReadyContactKeys(prepareSegmentationAudience({ rows: Array.isArray(base.data) ? base.data : [],
+      columns: base.columns ?? [], source: 'auto' }).rows),
+    started_at: policy.last_completed_at ?? policy.started_at };
+}
+
+/** Keep user/plan restrictions when trying a different query. Cross-source
+ * fallback is allowed only when the original source has no numeric/geo scope
+ * which the new source cannot enforce. Final hypothesis checks stay unchanged. */
+function safeAlternativeTask(candidate: VeCollectTask, original: VeCollectTask): VeCollectTask | null {
+  if (!['companies_directory', 'yandex_maps', 'pdl', 'funded', 'eng_hiring'].includes(candidate.source)) return null;
+  if (candidate.source !== original.source) {
+    const restricted = original.directory_filters && Object.entries(original.directory_filters)
+      .some(([key, value]) => !['okvedCodes', 'hasEmail'].includes(key) && value !== undefined)
+      || original.maps_query?.geo || original.pdl_filters?.countries?.length || original.pdl_filters?.sizes?.length
+      || original.funded_filters || original.eng_hiring_query || original.hh_query;
+    if (restricted) return null;
+  }
+  if (candidate.source === 'companies_directory' && original.source === candidate.source) return {
+    ...candidate, directory_filters: { ...candidate.directory_filters, ...original.directory_filters,
+      okvedCodes: candidate.directory_filters?.okvedCodes ?? original.directory_filters?.okvedCodes },
+  };
+  if (candidate.source === 'yandex_maps' && original.maps_query && candidate.maps_query) return {
+    ...candidate, maps_query: { ...candidate.maps_query, geo: original.maps_query.geo },
+  };
+  if (candidate.source === 'pdl' && original.pdl_filters) return { ...candidate, pdl_filters: {
+    ...candidate.pdl_filters, countries: original.pdl_filters.countries, sizes: original.pdl_filters.sizes,
+  } };
+  if (candidate.source === 'funded' && original.funded_filters) return { ...candidate, funded_filters: {
+    ...candidate.funded_filters, countries: original.funded_filters.countries,
+    min_funding_usd: original.funded_filters.min_funding_usd, funded_since: original.funded_filters.funded_since,
+  } };
+  if (candidate.source === 'eng_hiring' && original.eng_hiring_query) return { ...candidate, eng_hiring_query: original.eng_hiring_query };
+  return candidate;
+}
+
+async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo,
+  vertical: VeVertical, market: VeMarket, usage: VeUsage): Promise<void> {
+  const policy = info.adaptive_collection;
+  const target = info.target_progress;
+  if (!policy || policy.pending || info.preview_pipeline?.batches.length || !target || target.ready_rows >= target.ready_target) return;
+  const tasks = info.tasks ?? [];
+  const consumed = buildBaseExclusionKeysFromRows(info.target_checkpoint?.seen_rows ?? []);
+  const available = tasks.filter((task) => task.status !== 'failed' && (task.status !== 'done'
+    || ((!task.exhausted && !task.hit_ceiling) && (task.source === 'companies_directory' || !!task.catalog))
+    || (task.harvest ?? []).some((row) => (info.search_policy?.phase !== 'existing' || hasExistingSourceContact(row))
+      && !baseRowMatchesExclusion(consumed, row))));
+  const alternatives = available.filter((task) => {
+    const recent = policy.completed.filter((batch) => batch.source_key === veSourceStrategyKey(task.task)).slice(-2);
+    return veSourceStrategyKey(task.task) !== policy.active_source && !(recent.length === 2 && recent.every((batch) => batch.poor));
+  });
+  if (policy.replan_needed && alternatives.length) {
+    policy.active_source = chooseVeAdaptiveSource(policy, alternatives.map((task) => veSourceStrategyKey(task.task)));
+    policy.replan_needed = false; policy.switches += 1;
+    policy.note = 'Низкий выход: автоматически переключились на другой источник из плана.';
+    await persistCollectInfo(ctx, base.id, info);
+    return;
+  }
+  if (policy.replan_needed && policy.replan_attempts < 2 && tasks.length < 6) {
+    const original = tasks.find((task) => veSourceStrategyKey(task.task) === policy.active_source) ?? tasks[0];
+    if (!original) return;
+    policy.replan_attempts += 1;
+    // Save before paying: a retry/redeploy cannot reset the replan allowance.
+    await persistCollectInfo(ctx, base.id, info);
+    try {
+      const feedback = `Предыдущие партии дали низкий выход. Предложи ДРУГОЙ источник из готовых каталогов или другой запрос/срез. Не меняй целевую аудиторию, обязательные признаки, географию и ограничения исходной гипотезы. Не повторяй прежние задачи. Живые парсеры не добавляй. Предыдущий план: ${JSON.stringify(tasks.map((task) => task.task))}. Результаты последних партий (расходы оценочные): ${JSON.stringify(policy.completed.slice(-6))}`;
+      const replacement = await buildPlan(job, ctx, vertical, usage, market, base.hypothesis_id ?? null, feedback);
+      if (replacement.sliceProbe?.outcome === 'rejected') throw new Error('alternative_slice_rejected');
+      const known = new Set(tasks.map((task) => veSourceStrategyKey(task.task)));
+      const next = replacement.plan.tasks.map((task) => safeAlternativeTask(task, original.task))
+        .find((task): task is VeCollectTask => !!task && !known.has(veSourceStrategyKey(task)));
+      if (next) {
+        tasks.push({ source: next.source, task: next, status: 'pending', child_job_id: null, rows: 0 });
+        info.tasks = tasks;
+        info.plan = { tasks: tasks.map((task) => task.task) };
+        policy.active_source = veSourceStrategyKey(next); policy.switches += 1; policy.replan_needed = false;
+        policy.note = 'Подобран новый поисковый срез с сохранением условий гипотезы. Проверяем пробную партию.';
+        delete policy.replan_error;
+        // A changed population is not the original estimate's denominator.
+        if (info.estimate) info.estimate = { ...info.estimate, remaining_ready_estimate: null,
+          estimate_reason: 'После смены источника объём будет уточнён по новым проверенным партиям.' };
+      } else {
+        policy.replan_needed = false; policy.replan_error = 'Подходящий новый срез не найден; сохранён прежний план.';
+      }
+    } catch (error) {
+      ctx.signal?.throwIfAborted();
+      if (error instanceof VeRelevanceCheckpointError || error instanceof ProviderUsageWriteError
+        || isVeProviderBillingError(error) || isVeProviderConfigurationError(error)
+        || (error instanceof Error && error.name === 'VeWorkerShutdownError')) throw error;
+      policy.replan_needed = false; policy.replan_error = 'Не удалось подготовить альтернативный срез; оплаченные результаты сохранены.';
+    }
+    await persistCollectInfo(ctx, base.id, info);
+    if (!policy.replan_error) return;
+  }
+  if (!policy.active_source || !available.some((task) => veSourceStrategyKey(task.task) === policy.active_source)) {
+    policy.active_source = chooseVeAdaptiveSource(policy, available.map((task) => veSourceStrategyKey(task.task)));
+    await persistCollectInfo(ctx, base.id, info);
+  }
+}
+
 const PREVIEW_BATCH_SIZE = 200;
 const PREVIEW_IN_FLIGHT = 2;
 const PREVIEW_MAX_BATCHES = 100;
@@ -2363,17 +2501,21 @@ async function preparePreviewBatches(args: {
     throw new Error('Invalid preview batch checkpoint');
   }
   const reserved = buildBaseExclusionKeysFromRows(pipeline.batches.flatMap((batch) => batch.rows));
-  const candidates = available.filter((row) => !baseRowMatchesExclusion(reserved, row));
+  const unreserved = available.filter((row) => !baseRowMatchesExclusion(reserved, row));
+  const candidates = await prepareAdaptiveCandidates(ctx, base, info, unreserved);
   let allocated = pipeline.batches.reduce((sum, batch) => sum + batch.rows.length, 0);
   // Stop acquisition immediately at the ready goal/error, but drain already
   // purchased batches through the same gates and retain their checked results.
   if (!pipeline.error && target.ready_rows < target.ready_target && !info.tasks?.some((task) => task.status === 'failed')) {
-    while (pipeline.batches.length < Math.min(PREVIEW_IN_FLIGHT, target.max_rounds - target.round + 1) && candidates.length > 0) {
-      const batchSize = target.candidates_processed === 0 && allocated === 0 ? VE_PREVIEW_FIRST_CANDIDATES : PREVIEW_BATCH_SIZE;
-      const size = Math.min(batchSize, collectionRoundLimit(target), target.max_candidates - target.candidates_processed - allocated);
+    while (pipeline.batches.length < Math.min(info.adaptive_collection ? 1 : PREVIEW_IN_FLIGHT, target.max_rounds - target.round + 1) && candidates.length > 0) {
+      const batchSize = info.adaptive_collection ? VE_ADAPTIVE_BATCH_SIZE
+        : target.candidates_processed === 0 && allocated === 0 ? VE_PREVIEW_FIRST_CANDIDATES : PREVIEW_BATCH_SIZE;
+      const size = Math.min(batchSize, info.adaptive_collection ? target.ready_target - target.ready_rows : batchSize, collectionRoundLimit(target), target.max_candidates - target.candidates_processed - allocated);
       if (size <= 0) break;
       const rows = candidates.splice(0, size);
-      pipeline.batches.push({ id: randomUUID(), rows, dispatched_at: new Date().toISOString() });
+      const id = randomUUID();
+      beginAdaptiveBatch(base, info, id, rows);
+      pipeline.batches.push({ id, rows, dispatched_at: new Date().toISOString() });
       allocated += rows.length;
     }
   }
@@ -2418,13 +2560,13 @@ async function prefetchBufferedPreviewBatches(args: {
 }): Promise<void> {
   const { ctx, base, info, target } = args;
   const pipeline = info.preview_pipeline;
-  if (!pipeline || pipeline.error || info.validation_retry || target.ready_rows >= target.ready_target
+  if (!pipeline || pipeline.error || info.validation_retry || info.adaptive_collection?.pending || target.ready_rows >= target.ready_target
     || target.round >= target.max_rounds
     || (pipeline.batches.length >= PREVIEW_IN_FLIGHT && pipeline.batches.every((batch) => batch.inserted))
     || info.tasks?.some((task) => task.status === 'failed')) return;
   const buffered = dedupUnifiedRows(interleaveTaskHarvests((info.tasks ?? [])
     .filter((task) => task.status === 'done')
-    .map((task) => (task.harvest ?? []).filter((row) => normalizeCompanyForDedup(row.company) !== ''))));
+    .map((task) => taggedHarvest(task).filter((row) => normalizeCompanyForDedup(row.company) !== ''))));
   const excluded = await loadOtherBaseExclusionKeys(ctx, base.project_id, base.id, base.hypothesis_id);
   // Use the same immutable acquisition receipts as the ordinary harvest path.
   addAcquisitionReceipts(excluded, info.target_checkpoint?.seen_rows ?? [], buffered);
@@ -3234,6 +3376,16 @@ async function completeTargetRound(args: {
     }
     stageLog(ctx, `[base_collect] имеющиеся данные проверены: ${readyRows.length}/${progress.ready_target} готовых контактов; дополнительный поиск включён только для недостающего объёма`);
   }
+  if (info.adaptive_collection?.pending && !continueSavedReview && !args.validationError && !taskError
+    && cleaned.summary.status === 'complete' && !pipeline?.error && pendingBatches.length === 0) {
+    const finishedAt = new Date().toISOString();
+    const spend = await readVeBatchSpend(ctx.supabase, job.project_id, base.id, info.adaptive_collection.pending.started_at, finishedAt);
+    info.adaptive_collection = finishVeAdaptiveBatch(info.adaptive_collection, readyRows, spend, finishedAt);
+    if (info.adaptive_collection.replan_needed && !reviewOnly && readyRows.length < progress.ready_target
+      && !acquisitionLimited && info.adaptive_collection.replan_attempts < 2) {
+      next = { ...next, status: 'collecting', round: progress.round + 1 }; delete next.reason;
+    }
+  }
   stats.launchable_rows = readyRows.length;
   info.target_progress = next;
   if (cleaned.summary.status === 'complete') {
@@ -3278,7 +3430,7 @@ async function completeTargetRound(args: {
     delete info.construct;
     if (info.search_policy) delete info.search_policy.construct_rows;
     delete stats.finished_at;
-    info.tasks = pipeline ? tasks : tasks.map((state) =>
+    info.tasks = pipeline || info.adaptive_collection ? tasks : tasks.map((state) =>
       (state.source === 'companies_directory' || !!state.catalog) && !state.exhausted && !state.hit_ceiling
         ? { source: state.source, task: state.task, status: 'pending', child_job_id: null, rows: 0,
           ...(state.catalog ? { catalog: state.catalog } : {}) }
@@ -3341,6 +3493,9 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   }
   const info: VeCollectInfo =
     base.collect_info && typeof base.collect_info === 'object' ? base.collect_info : {};
+  if (info.adaptive_collection && !validVeAdaptiveCollection(info.adaptive_collection)) {
+    throw new VeRelevanceCheckpointError('Invalid adaptive collection checkpoint');
+  }
   if (info.preview_pipeline && !info.preview_pipeline.batches.length && !info.preview_pipeline.job_ids?.length
     && (info.construct?.bc_job_id || (info.target_progress?.candidates_processed ?? 0) > 0)) {
     // Rolling deploy: a previous worker may have started a newly enqueued
@@ -3461,6 +3616,14 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     return resumeSavedPreviewValidation(ctx, job, base, info, target, market, usage);
   }
 
+  if (target && !info.adaptive_collection && !info.construct && !info.preview_pipeline?.batches.length
+    && !info.tasks?.some((task) => task.status === 'dispatched')
+    && (target.mode === 'supply' || target.first_round_candidates === VE_PREVIEW_FIRST_CANDIDATES || target.candidates_processed > 0)) {
+    info.adaptive_collection = newVeAdaptiveCollection();
+    target.max_rounds = Math.max(target.max_rounds, PREVIEW_MAX_BATCHES);
+    await persistCollectInfo(ctx, baseId, info);
+  }
+
   // ─── PLAN ───
   if (!info.plan) {
     const hypothesisId = payloadString(job, 'hypothesis_id');
@@ -3506,6 +3669,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     await persistCollectInfo(ctx, baseId, info);
     stageLog(ctx, `[base_collect] план: ${info.tasks.length} задач (${info.tasks.map((t) => t.source).join(', ')})`);
   }
+  if (target) await adaptCollectionSources(ctx, job, base, info, vertical, market, usage);
+
   // Базы, чей план был сохранён до появления estimate, получают его при
   // следующем безопасном тике, не переигрывая LLM-план и сбор источников.
   if (info.plan && needsDirectoryEstimateRefresh(info.plan, info.estimate)) {
@@ -3533,15 +3698,15 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
 
   retainDeferredSourceRows(info);
   const existingFirst = info.search_policy?.phase === 'existing';
-  if (info.preview_pipeline && target) {
-    const reservedKeys = buildBaseExclusionKeysFromRows(info.preview_pipeline.batches.flatMap((batch) => batch.rows));
+  if ((info.preview_pipeline || info.adaptive_collection) && target) {
+    const reservedKeys = buildBaseExclusionKeysFromRows(info.preview_pipeline?.batches.flatMap((batch) => batch.rows) ?? []);
     const consumedKeys = await getExcludedKeys();
-    const canAcquire = !info.preview_pipeline.error && target.ready_rows < target.ready_target
-      && target.candidates_processed + info.preview_pipeline.batches.reduce((sum, batch) => sum + batch.rows.length, 0) < target.max_candidates;
+    const canAcquire = !info.preview_pipeline?.error && !info.adaptive_collection?.pending && target.ready_rows < target.ready_target
+      && target.candidates_processed + (info.preview_pipeline?.batches.reduce((sum, batch) => sum + batch.rows.length, 0) ?? 0) < target.max_candidates;
     // Retain buffered harvests. Only refill a directory when its previous
     // candidates have all been consumed/reserved, never drop its unused tail.
     for (const state of tasks) {
-      if (canAcquire && info.preview_pipeline.batches.length < PREVIEW_IN_FLIGHT
+      if (canAcquire && (info.preview_pipeline?.batches.length ?? 0) < PREVIEW_IN_FLIGHT
         && (state.source === 'companies_directory' || !!state.catalog) && state.status === 'done' && !state.exhausted && !state.hit_ceiling
         && !(state.harvest ?? []).some((row) => (!existingFirst || hasExistingSourceContact(row))
           && !baseRowMatchesExclusion(consumedKeys, row) && !baseRowMatchesExclusion(reservedKeys, row))) {
@@ -3553,7 +3718,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
 
   // ─── DISPATCH ───
   for (const state of tasks) {
-    if (state.status !== 'pending') continue;
+    if (state.status !== 'pending' || info.adaptive_collection?.pending) continue;
+    if (info.adaptive_collection?.active_source && veSourceStrategyKey(state.task) !== info.adaptive_collection.active_source) continue;
     if (info.preview_pipeline && target && (info.preview_pipeline.error || target.ready_rows >= target.ready_target)) continue;
     try {
       const sourceExclusions = async () => {
@@ -3597,7 +3763,9 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   if (polledTasks) await persistCollectInfo(ctx, baseId, info);
   retainDeferredSourceRows(info);
 
-  const waiting = tasks.filter((t) => t.status === 'pending' || t.status === 'dispatched');
+  // Other pending sources are alternatives, not children we must await.
+  const waiting = tasks.filter((t) => t.status === 'dispatched' || (t.status === 'pending'
+    && (!info.adaptive_collection?.active_source || veSourceStrategyKey(t.task) === info.adaptive_collection.active_source)));
   if (waiting.length > 0 && !info.preview_pipeline) {
     await requeueSelf(ctx, job);
     return {
@@ -3616,7 +3784,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // один пустой ключ «|» (дедуп ниже их тоже отбрасывает, это первая линия).
   const interleaved = dedupUnifiedRows(
     interleaveTaskHarvests(
-      [...done.map((t) => (t.harvest ?? []).filter((r) => normalizeCompanyForDedup(r.company) !== '')),
+      [...done.map((t) => taggedHarvest(t).filter((r) => normalizeCompanyForDedup(r.company) !== '')),
         ...(!existingFirst && info.search_policy ? [info.search_policy.deferred_rows] : [])],
     ),
   );
@@ -3642,6 +3810,26 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // bypass discovery admission for unrelated candidates in the next child.
   const ownsLegacyInput = !!info.construct && !info.preview_pipeline;
   let prepared = ownsLegacyInput ? interleaved : applyVeSourceContacts(interleaved, info.source_contact_recovery);
+  if (target && !ownsLegacyInput && !info.adaptive_collection?.pending) {
+    const hints = await readVeCandidateHints(prepared, ctx.supabase, ctx.signal);
+    // Enrich without reordering here: discovery indexes still refer to interleaved.
+    const replacements = new Map<string, string>();
+    const enrichedRows = prioritizeVeCandidates(prepared, hints, '', Date.now(), true);
+    prepared = prepared.map((row, index) => {
+      const enriched = enrichedRows[index];
+      if (!row.website && enriched.website) replacements.set(veAcquisitionReceipt(row), enriched.website);
+      return enriched;
+    });
+    if (replacements.size) {
+      const enrich = (row: VeUnifiedRow) => {
+        const website = replacements.get(veAcquisitionReceipt(row));
+        return website ? { ...row, website } : row;
+      };
+      for (const task of tasks) if (task.harvest) task.harvest = task.harvest.map(enrich);
+      if (info.search_policy) info.search_policy.deferred_rows = info.search_policy.deferred_rows.map(enrich);
+      await persistCollectInfo(ctx, baseId, info);
+    }
+  }
   let pendingSourceRows = new Set(pendingVeSourceContacts(discoveryCandidates, info.source_contact_recovery));
   if (!existingFirst && !info.construct && !info.preview_pipeline?.batches.length && waiting.length === 0
     && (!target || target.ready_rows < target.ready_target)) {
@@ -3677,7 +3865,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   delete info.source_contact_discovery;
   if (target && info.source_contact_recovery) target.max_rounds = PREVIEW_MAX_BATCHES;
   const considered = prepared.filter((row, index) => ownsLegacyInput
-    || ((existingFirst ? hasExistingSourceContact(row) : !pendingSourceRows.has(interleaved[index]))
+    || ((existingFirst ? hasExistingSourceContact(row) : hasExistingSourceContact(row) || !pendingSourceRows.has(interleaved[index]))
       // An unsuccessful lookup must not move empty source rows into another
       // paid enrichment lane. Keep them in harvest/deferred storage instead.
       && (!info.source_contact_budget || hasExistingSourceContact(row))));
@@ -3690,10 +3878,27 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   }
   // Кап — после дедупа и исключения, как раньше после дедупа (limit уже
   // посчитан выше — тот же totalRowsCap(job)).
+  const orderedKept = target && !info.preview_pipeline && !info.construct
+    ? await prepareAdaptiveCandidates(ctx, base, info, kept) : kept;
   const merged = info.preview_pipeline && target
     ? await preparePreviewBatches({ ctx, base, info, project, target, available: kept, market })
-    : info.construct && info.search_policy?.construct_rows ? info.search_policy.construct_rows
-      : kept.slice(0, info.source_contact_recovery ? Math.min(limit, PREVIEW_BATCH_SIZE) : limit);
+    : (info.construct || info.adaptive_collection?.pending) && info.search_policy?.construct_rows ? info.search_policy.construct_rows
+      : orderedKept.slice(0, info.adaptive_collection ? Math.min(VE_ADAPTIVE_BATCH_SIZE, target!.ready_target - target!.ready_rows)
+        : info.source_contact_recovery ? Math.min(limit, PREVIEW_BATCH_SIZE) : limit);
+
+  if (merged.length === 0 && target && info.adaptive_collection && !info.adaptive_collection.pending
+    && !info.preview_pipeline?.error && !failed.length && target.ready_rows < target.ready_target) {
+    const nextSource = tasks.find((task) => task.status === 'pending'
+      && veSourceStrategyKey(task.task) !== info.adaptive_collection!.active_source);
+    if (nextSource) {
+      info.adaptive_collection.active_source = veSourceStrategyKey(nextSource.task);
+      info.adaptive_collection.switches += 1;
+      info.adaptive_collection.note = 'Текущий источник не дал новых кандидатов. Проверяем следующий источник из плана.';
+      await persistCollectInfo(ctx, baseId, info);
+      await requeueSelf(ctx, job, 1_000);
+      return { result: { waiting: true, base_id: baseId, next_source: nextSource.source }, ...usage };
+    }
+  }
 
   if (info.preview_pipeline && merged.length === 0 && waiting.length > 0
     && !info.preview_pipeline.error && (target?.ready_rows ?? 0) < (target?.ready_target ?? 500)) {
@@ -3805,6 +4010,11 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     if (!construct?.bc_job_id) {
       // DISPATCH-CONSTRUCT: джоба конструктора (воркер baseConstructor клеймит
       // pending), её id — в collect_info.construct; дальше WAIT с паузой 60с.
+      if (info.adaptive_collection && !info.adaptive_collection.pending) {
+        beginAdaptiveBatch(base, info, randomUUID(), merged);
+        if (info.search_policy) info.search_policy.construct_rows = merged;
+        await persistCollectInfo(ctx, baseId, info);
+      }
       const { bcJobId, locale, construct: queuedConstruct } = await dispatchConstructJob({
         ctx,
         ownerId: project.created_by,
@@ -3812,6 +4022,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
         baseLabel: base.filename ?? baseId,
         rows: merged,
         market,
+        reservedId: info.adaptive_collection?.pending?.id,
       });
       info.construct = queuedConstruct;
       if (info.search_policy) info.search_policy.construct_rows = merged;
