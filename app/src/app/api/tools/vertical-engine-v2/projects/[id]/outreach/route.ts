@@ -39,7 +39,14 @@ export async function POST(req: NextRequest, { params }: Context) {
         result = await supabaseAdmin.rpc('ve_save_outreach_setup', { p_project_id: projectId, p_revision: b.revision,
           p_hypothesis_ids: b.hypothesis_ids, p_language: b.language, p_actor: auth.auth.userId });
       } else if (b.action === 'prepare') {
-        result = await supabaseAdmin.rpc('ve_request_outreach_preparation', { p_project_id: projectId, p_revision: b.revision });
+        if (b.hypothesis_id !== undefined && !uuid(b.hypothesis_id)) {
+          return NextResponse.json({ error: 'Укажите гипотезу для продолжения' }, { status: 400 });
+        }
+        result = b.hypothesis_id === undefined
+          ? await supabaseAdmin.rpc('ve_request_outreach_preparation', { p_project_id: projectId, p_revision: b.revision })
+          : await supabaseAdmin.rpc('ve_request_outreach_hypothesis_preparation', {
+            p_project_id: projectId, p_revision: b.revision, p_hypothesis_id: b.hypothesis_id,
+          });
       } else if (b.action === 'approve') {
         if (!uuid(b.base_id) || !uuid(b.template_id) || typeof b.reviewed_revision !== 'string'
           || !b.reviewed_revision.trim() || b.reviewed_revision.length > 128 || typeof b.approved !== 'boolean') {
