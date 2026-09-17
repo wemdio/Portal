@@ -18,7 +18,9 @@ jest.mock('@/lib/toolTrace', () => ({
   withToolTrace: async (_options: unknown, handler: () => Promise<unknown>) => handler(),
 }));
 jest.mock('@/lib/loggerServer', () => ({ logAudit: jest.fn(), logError: jest.fn() }));
+jest.mock('@/lib/verticalEngineV2/outreachSetup', () => ({ loadVeOutreachSetup: jest.fn(async () => ({})) }));
 import { POST as collectPreview } from '@/app/api/tools/vertical-engine-v2/verticals/[id]/collect/route';
+import { POST as prepareOutreach } from '@/app/api/tools/vertical-engine-v2/projects/[id]/outreach/route';
 
 const input = {
   verticalId: 'vertical-1',
@@ -151,6 +153,24 @@ describe('VE2 base collection enqueue recovery', () => {
     }), expect.anything());
     expect(resumedDb.getRows('ve_jobs')).toHaveLength(0);
     expect(resumedDb.rpcCalls.some((call) => call.fn === 've_resume_outreach_cancelled_base')).toBe(false);
+
+    // A Continue action inside one card may not dispatch the project-wide RPC.
+    const projectId = '00000000-0000-4000-8000-000000000301';
+    const hypothesisId = '00000000-0000-4000-8000-000000000302';
+    mockRouteDb = createMockSupabase({ rpcHandlers: {
+      ve_request_outreach_preparation: () => ({ data: null }),
+      ve_request_outreach_hypothesis_preparation: () => ({ data: null }),
+    } });
+    const request = (extra: Record<string, unknown>) => prepareOutreach(new NextRequest('http://portal.test/outreach', {
+      method: 'POST', body: JSON.stringify({ action: 'prepare', revision: 7, ...extra }),
+    }), { params: Promise.resolve({ id: projectId }) });
+    expect((await request({ hypothesis_id: hypothesisId })).status).toBe(200);
+    expect(mockRouteDb.rpcCalls).toEqual([expect.objectContaining({ fn: 've_request_outreach_hypothesis_preparation',
+      params: { p_project_id: projectId, p_revision: 7, p_hypothesis_id: hypothesisId } })]);
+    for (const invalid of [null, '', 'wrong-id']) expect((await request({ hypothesis_id: invalid })).status).toBe(400);
+    expect(mockRouteDb.rpcCalls).toHaveLength(1);
+    expect((await request({})).status).toBe(200);
+    expect(mockRouteDb.rpcCalls[1].fn).toBe('ve_request_outreach_preparation');
   });
 
   it('repairs an orphan collecting base that has no active worker job', async () => {
