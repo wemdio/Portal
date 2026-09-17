@@ -8,6 +8,8 @@ import { normalizeVeCompanyInn, normalizeVeCompanyName } from './collectionIdent
 import { parseVeEvidencePage, rankVeEvidenceLinks, selectVeEvidenceText, type VeEvidencePage } from './relevancePage';
 import { veSearchProviderFailure, VeSearchProviderError, VE_RELEVANCE_SEARCH_OPERATION_TIMEOUT_MS, type VeSearchProviderFailure } from './relevanceSearch';
 import { readVeSearchCache, searchVeRelevanceWebsitesCached } from './relevanceSearchCache';
+import { createVeSharedPageReader, focusVeCompanyFact, freshVeCompanyFact, readVeCompanyFacts,
+  veCompanyFactKey, veFactPageKey, writeVeCompanyFacts } from './companyFacts';
 
 export interface VeRelevanceEvidence {
   status: 'ok' | 'unavailable' | 'error';
@@ -31,6 +33,7 @@ export interface VeRelevanceEvidenceOptions {
   fetchPage?: (url: string, signal: AbortSignal) => Promise<VeEvidencePage>;
   search?: (query: string, signal: AbortSignal) => Promise<SerperOrganicItem[]>;
   searchCache?: typeof readVeSearchCache;
+  companyFacts?: { read: typeof readVeCompanyFacts; write: typeof writeVeCompanyFacts };
 }
 
 // Includes the shared search queue, one bounded search and website reads.
@@ -207,6 +210,8 @@ async function fetchEvidencePage(initialUrl: URL, signal: AbortSignal, focus?: s
   throw new Error('website_redirect_unavailable');
 }
 
+const sharedPageReader = createVeSharedPageReader((url, signal) => fetchEvidencePage(url, signal));
+
 /** Bounded official-site evidence: 10 pages + at most 2 transient retries,
  * one search, 120 seconds including queue/metering. Each URL can be retried at most once.
  * Search snippets are discovery only. With a known INN, every selected domain
@@ -221,7 +226,28 @@ export async function fetchVeRelevanceEvidence(
   const inn = normalizeVeCompanyInn(opts.companyInn);
   const supplied = veOfficialWebsiteCandidates(website);
   const nameSearch = Boolean(opts.companyName?.trim() && opts.companyAddress?.trim());
+  const factKey = veCompanyFactKey({ inn, company: opts.companyName, address: opts.companyAddress });
+  // Offline adapters never touch the real cache unless explicitly provided.
+  const factStore = opts.companyFacts ?? (!opts.fetchPage && !opts.fetchText && !opts.search
+    ? { read: readVeCompanyFacts, write: writeVeCompanyFacts } : undefined);
+  const cachedPages = new Map<string, VeEvidencePage>();
+  if (factKey && factStore) {
+    for (const record of await factStore.read([factKey], opts.signal)) {
+      if (record.company_key !== factKey) continue;
+      const page = freshVeCompanyFact(record);
+      const url = page && allowedUrl(page.url);
+      if (page && url && !DIRECTORY_HOST.test(url.hostname)) cachedPages.set(veFactPageKey(page.url), page);
+    }
+    // Recover the confirmed company website without buying another search.
+    if (!supplied.length) for (const page of cachedPages.values()) {
+      const url = allowedUrl(page.url)!;
+      if (!supplied.some((other) => siteHost(other) === siteHost(url))) supplied.push(url);
+      if (supplied.length >= MAX_DOMAINS) break;
+    }
+  }
   if (!supplied.length && !inn && !nameSearch) return { status: 'unavailable', text: '', url: '', reason: 'missing_or_unsafe_website' };
+  const observedAt = new Date().toISOString();
+  const freshPages = new Set<string>();
   const pages = new Map<string, Promise<VeEvidencePage | undefined>>();
   let failed = false, timedOut = false, unverified = false, searchAttempted = false, searchCompleted = false;
   let retries = 0;
@@ -236,15 +262,17 @@ export async function fetchVeRelevanceEvidence(
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
           return await withVeDeadline('relevance evidence page', PAGE_TIMEOUT_MS, parent, async (signal) => {
-            const page = opts.fetchPage ? await opts.fetchPage(url.href, signal)
+            const cached = cachedPages.get(veFactPageKey(url.href));
+            const page = cached ? focusVeCompanyFact(cached, opts.focus) : opts.fetchPage ? await opts.fetchPage(url.href, signal)
               : opts.fetchText ? { text: selectVeEvidenceText(await opts.fetchText(url.href), opts.focus), url: url.href, links: [], inns: [] }
-                : await fetchEvidencePage(url, signal, opts.focus);
+                : focusVeCompanyFact(await sharedPageReader(url, signal), opts.focus);
             signal.throwIfAborted();
             // Offline adapters have the same destination restrictions as transport.
             const finalUrl = allowedUrl(page.url);
             if (!finalUrl || siteHost(finalUrl) !== siteHost(url) || (url.protocol === 'https:' && finalUrl.protocol !== 'https:')) {
               throw new Error('website_redirect_unavailable');
             }
+            if (!cached) freshPages.add(page.url);
             return page;
           });
         } catch (error) {
@@ -371,6 +399,14 @@ export async function fetchVeRelevanceEvidence(
   // all evidence. Focus selection has already scanned each complete document.
   const selected = [...verified.values()].flat();
   const unique = selected.filter((page, index) => selected.findIndex((other) => other.url === page.url) === index);
+  if (factKey && factStore) {
+    // Reuse never renews the observation's age. No-INN supplied sites require
+    // brand + geography verification before entering the shared store too.
+    const shareable = [...verified.values()].filter((sitePages) => inn
+      || discoveredNameMatches(sitePages, opts.companyName ?? '', opts.companyAddress ?? '')).flat();
+    const observations = shareable.filter((page) => freshPages.has(page.url));
+    if (observations.length) await factStore.write(factKey, observations, observedAt);
+  }
   const perPage = Math.floor((MAX_TEXT_CHARS - unique.reduce((n, page) => n + page.url.length + 8, 0)) / Math.max(1, unique.length));
   const text = unique.map((page) => `URL: ${page.url}\n${selectVeEvidenceText(page.text, opts.focus, Math.max(200, perPage))}`).join('\n\n').slice(0, MAX_TEXT_CHARS);
   return {

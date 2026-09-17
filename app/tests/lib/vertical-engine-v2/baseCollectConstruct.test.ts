@@ -82,6 +82,9 @@ import { normalizeVeSourceContacts } from '@/lib/verticalEngineV2/sourceContacts
 import { veAcquisitionReceipt } from '@/lib/verticalEngineV2/collectionIdentity';
 import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
 import { resolveVeYandexCatalogFilters } from '@/lib/verticalEngineV2/yandexCatalog';
+import { newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys, summarizeVeBatchSpend, readVeBatchSpend } from '@/lib/verticalEngineV2/adaptiveCollection';
+import { prioritizeVeCandidates } from '@/lib/verticalEngineV2/candidatePriority';
+import { veCompanyFactKey, VE_COMPANY_FACT_TTL_MS } from '@/lib/verticalEngineV2/companyFacts';
 import { previewRecoveryKind } from '@/lib/verticalEngineV2/collectionRecovery';
 
 const PROJECT = { id: 'p1', name: 'P', created_by: 'user-1', market: 'ru' };
@@ -452,6 +455,46 @@ describe('base_collect CONSTRUCT step order', () => {
   });
 
   it('targets validated recipients with bounded rounds and distinct stopping reasons', async () => {
+    // Source changes require two fully checked poor cohorts; costs are never
+    // inferred as zero from missing/ambiguous accounting. Replays are idempotent.
+    const cost = summarizeVeBatchSpend([
+      { event: 'started', context: { attemptId: 'a', provider: 'requesty' } },
+      { event: 'finished', context: { attemptId: 'a', provider: 'requesty', reportedCostUsd: 0.2 } },
+      { event: 'finished', context: { attemptId: 'a', provider: 'requesty', reportedCostUsd: 0.2 } },
+      { event: 'started', context: { attemptId: 's', provider: 'serper' } },
+      { event: 'finished', context: { attemptId: 's', provider: 'serper', serperCredits: 3 } },
+    ]);
+    expect(cost).toMatchObject({ ai_usd: 0.2, serper_credits: 3, complete: true, unknown_attempts: 0 });
+    expect(cost.estimated_total_usd).toBeCloseTo(0.203);
+    expect(summarizeVeBatchSpend([{ event: 'finished', context: { attemptId: 'missing', provider: 'requesty' } }]))
+      .toMatchObject({ complete: false, unknown_attempts: 1 });
+    expect(await readVeBatchSpend(createMockSupabase({ errorTables: { application_logs: 'offline' } }) as unknown as SupabaseClient,
+      'p1', 'b1', new Date(0).toISOString(), new Date().toISOString())).toMatchObject({ complete: false });
+    let adaptive = { ...newVeAdaptiveCollection(), active_source: 'a' };
+    const before = [{ email: 'old@test.ru' }];
+    for (let index = 0; index < 2; index++) {
+      const pending = { id: String(index), source_key: 'a', source: 'companies_directory', candidates: 100,
+        ready_before: veReadyContactKeys(before), started_at: new Date().toISOString() };
+      adaptive = { ...finishVeAdaptiveBatch({ ...adaptive, pending }, [...before, { email: 'new@test.ru' },
+        { email: 'NEW@test.ru' }], cost), active_source: 'a' };
+      expect(adaptive.completed.at(-1)?.new_ready).toBe(1);
+      expect(adaptive.replan_needed).toBe(index === 1);
+      expect(finishVeAdaptiveBatch({ ...adaptive, pending }, before, cost).completed).toHaveLength(index + 1);
+    }
+    expect(chooseVeAdaptiveSource(adaptive, ['a', 'untried'])).toBe('untried');
+    expect(veSourceStrategyKey(DIRECTORY_TASK)).toBe(veSourceStrategyKey({ ...DIRECTORY_TASK, rationale: 'Wording changes are not a new source' }));
+    expect(veSourceStrategyKey(DIRECTORY_TASK)).toBe(veSourceStrategyKey({ ...DIRECTORY_TASK,
+      directory_filters: { ...DIRECTORY_TASK.directory_filters, okvedCodes: [...DIRECTORY_TASK.directory_filters.okvedCodes].reverse() } }));
+    const company = unifiedRow({ company: 'Завод Орион', inn: '7700000001', address: 'Москва', website: '', email: '' });
+    const spare = unifiedRow({ company: 'Нет сведений', website: '', email: '' });
+    const present = unifiedRow({ company: 'Компания с сайтом', website: 'https://present.test', email: '' });
+    const hints = [{ key: veCompanyFactKey(company)!, website: 'https://orion.test/', facts: 'Производим промышленное оборудование',
+      observedAt: new Date().toISOString(), inns: [company.inn], ownerInns: [company.inn] }];
+    expect(prioritizeVeCandidates([spare, company, present], hints, 'Промышленное оборудование'))
+      .toEqual([{ ...company, website: hints[0].website }, present, spare]);
+    expect(prioritizeVeCandidates([company], [{ ...hints[0], inns: ['7700000002'], ownerInns: ['7700000002'] }])[0].website).toBe('');
+    expect(prioritizeVeCandidates([company], hints, '', Date.now() + VE_COMPANY_FACT_TTL_MS)[0].website).toBe('');
+    expect(company.website).toBe('');
     const preview = createCollectionTarget('preview', 50_000);
     expect(preview.ready_target).toBe(500);
     expect(collectionRoundLimit(preview)).toBe(100);
@@ -683,24 +726,115 @@ describe('base_collect CONSTRUCT step order', () => {
         })) });
         await db.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
         await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
-        const nextConstructor = db.getRows('base_constructor_jobs').find((row) => row.id !== constructor.id)!;
-        const nextInput = nextConstructor.data as string[][];
-        expect(nextInput).toHaveLength(481);
-        await db.from('base_constructor_jobs').update({ status: 'completed',
-          data: [[...nextInput[0], 'Email Статус'], ...nextInput.slice(1).map((row) => [...row, 'ok'])],
-        }).eq('id', nextConstructor.id);
-        await db.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
-        await expect(runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient }))
-          .resolves.toMatchObject({ result: { rows: 500, target_status: 'target_reached' } });
+        for (let tick = 0; tick < 10 && db.getRows('ve_bases')[0].status === 'collecting'; tick++) {
+          const nextConstructor = db.getRows('base_constructor_jobs').find((row) => row.status === 'pending');
+          if (nextConstructor) {
+            const nextInput = nextConstructor.data as string[][];
+            expect(nextInput.length).toBeLessThanOrEqual(101);
+            await db.from('base_constructor_jobs').update({ status: 'completed',
+              data: [[...nextInput[0], 'Email Статус'], ...nextInput.slice(1).map((row) => [...row, 'ok'])],
+            }).eq('id', nextConstructor.id);
+          }
+          await db.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+          await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
+        }
         const completed = db.getRows('ve_bases')[0];
         expect(completed).toMatchObject({ status: 'analyzing', row_count: 500 });
         expect(prepareSegmentationAudience({ rows: completed.data as Record<string, unknown>[],
           columns: completed.columns as string[], source: 'auto' }).rows).toHaveLength(500);
         expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
         expect((completed.collect_info as VeCollectInfo).search_policy?.phase).toBe('existing');
-        expect(searchRows).toHaveBeenCalledWith(expect.objectContaining({ hasWebsite: true }), expect.any(Number), expect.any(Number));
+        // The original harvest's unused tail supplies later batches.
+        expect(new Set((completed.data as Array<{ email: string }>).map((row) => row.email)).size).toBe(500);
+        const adaptive = (completed.collect_info as VeCollectInfo).adaptive_collection!;
+        expect(adaptive.completed.map((batch) => batch.new_ready)).toEqual([20, 100, 100, 100, 100, 80]);
+        expect(stripTaskHarvest(completed).collect_info).toMatchObject({ adaptive_collection: { completed_batches: 6 } });
+        expect((stripTaskHarvest(completed).collect_info as VeCollectInfo).adaptive_collection).not.toHaveProperty('pending');
       }
     }
+
+    // Real scheduler: two poor completed batches switch to another saved
+    // source, keep the first source's remainder and don't replay paid children.
+    const alternativeRows = harvest.slice(300, 500).map((row) => ({ ...row, company: `Alternative ${row.company}` }));
+    const switching: VeCollectInfo = { ...collectInfo(harvest.slice(0, 300)), collection_mode: 'preview',
+      target_progress: createCollectionTarget('preview'), preview_pipeline: { version: 1, revision: 0, batches: [] } };
+    const otherTask = { ...DIRECTORY_TASK, directory_filters: { okvedCodes: ['86.2'] } };
+    switching.tasks!.push({ source: 'companies_directory', task: otherTask, status: 'done', child_job_id: null,
+      rows: alternativeRows.length, harvest: alternativeRows, exhausted: true });
+    const switchDb = seed(switching);
+    const switchWake = async () => {
+      await switchDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+      return runBaseCollectStage(makeJob(), { supabase: switchDb as unknown as SupabaseClient });
+    };
+    for (let round = 0; round < 2; round++) {
+      await switchWake();
+      const child = switchDb.getRows('base_constructor_jobs').find((row) => row.status === 'pending')!;
+      expect(child).toBeDefined();
+      const count = switchDb.getRows('base_constructor_jobs').length;
+      await switchWake();
+      expect(switchDb.getRows('base_constructor_jobs')).toHaveLength(count);
+      const grid = child.data as string[][];
+      expect(grid).toHaveLength(101);
+      await switchDb.from('base_constructor_jobs').update({ status: 'completed', data: [
+        [...grid[0], 'Email Статус'], ...grid.slice(1).map((row) => [...row, 'ok']),
+      ] }).eq('id', child.id);
+      mockFindIrrelevantRows.mockResolvedValueOnce({ flagged: new Set(Array.from({ length: 100 }, (_, i) => i)),
+        unchecked: new Set(), coverage: { checkedCompanies: 100, totalCompanies: 100, complete: true }, tokensUsed: 0, costUsd: 0 });
+      await switchWake();
+      const current = switchDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+      expect(current.adaptive_collection?.completed).toHaveLength(round + 1);
+      expect(current.adaptive_collection?.replan_needed).toBe(round === 1);
+    }
+    await switchWake();
+    const switched = switchDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+    expect(switched.adaptive_collection).toMatchObject({ active_source: veSourceStrategyKey(otherTask), switches: 1 });
+    const newChild = switchDb.getRows('base_constructor_jobs').find((row) => row.status === 'pending')!;
+    expect((newChild.data as string[][])[1][0]).toContain('Alternative');
+    expect(switched.tasks![0].harvest).toHaveLength(300);
+    expect(switched.adaptive_collection?.completed.map((result) => result.new_ready)).toEqual([0, 0]);
+    expect((stripTaskHarvest(switchDb.getRows('ve_bases')[0]).collect_info as VeCollectInfo).adaptive_collection).not.toHaveProperty('pending');
+
+    // With no untried source, replan once, preserve original restrictions and
+    // invalidate the old single-population forecast. Pending retries reuse it.
+    const replanning = structuredClone(switched);
+    delete replanning.construct;
+    replanning.preview_pipeline!.batches = [];
+    delete replanning.preview_pipeline!.active_batch_id;
+    replanning.tasks = [replanning.tasks![0]];
+    replanning.plan = { tasks: [DIRECTORY_TASK] };
+    delete replanning.adaptive_collection!.pending;
+    replanning.adaptive_collection!.active_source = veSourceStrategyKey(DIRECTORY_TASK);
+    replanning.adaptive_collection!.replan_needed = true;
+    const replanDb = seed(replanning);
+    const proposed = { ...DIRECTORY_TASK, directory_filters: { okvedCodes: ['86.3'], includeIp: true } };
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce({ data: { tasks: [proposed] }, tokensUsed: 10, costUsd: 0.01,
+      promptTokens: 5, completionTokens: 5, rawResponse: '' });
+    jest.mocked(searchRows).mockResolvedValue({ rows: [{ name: 'New slice clinic', website: 'new-slice.test', email: 'hello@new-slice.test' }] });
+    await runBaseCollectStage(makeJob(), { supabase: replanDb as unknown as SupabaseClient });
+    const replanned = replanDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+    const expectedTask = { ...proposed, directory_filters: { ...proposed.directory_filters, includeIp: false } };
+    expect(replanned.tasks?.at(-1)?.task).toEqual(expectedTask);
+    expect(replanned.adaptive_collection).toMatchObject({ replan_attempts: 1, active_source: veSourceStrategyKey(expectedTask) });
+    expect(replanned.estimate?.unique_companies).toBeNull();
+    const planCalls = jest.mocked(callLLMWithSchema).mock.calls.length;
+    await replanDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
+    await runBaseCollectStage(makeJob(), { supabase: replanDb as unknown as SupabaseClient });
+    expect(callLLMWithSchema).toHaveBeenCalledTimes(planCalls);
+    expect(replanDb.getRows('base_constructor_jobs')).toHaveLength(1);
+
+    // In paid phase, an empty first source must not terminate a base while a
+    // saved alternative is still pending (and was deliberately not dispatched).
+    const emptyFirst: VeCollectInfo = { ...collectInfo([]), collection_mode: 'preview',
+      target_progress: createCollectionTarget('preview'), search_policy: { version: 1, phase: 'paid', deferred_rows: [] } };
+    emptyFirst.tasks![0].status = 'pending';
+    emptyFirst.tasks!.push({ source: otherTask.source, task: otherTask, status: 'pending', child_job_id: null, rows: 0 });
+    const emptyFirstDb = seed(emptyFirst);
+    jest.mocked(searchRows).mockResolvedValue({ rows: [] });
+    await expect(runBaseCollectStage(makeJob(), { supabase: emptyFirstDb as unknown as SupabaseClient }))
+      .resolves.toMatchObject({ result: { waiting: true, next_source: 'companies_directory' } });
+    expect(emptyFirstDb.getRows('ve_bases')[0].status).toBe('collecting');
+    expect((emptyFirstDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).adaptive_collection?.active_source)
+      .toBe(veSourceStrategyKey(otherTask));
 
     // Slow saved-email/relevance review must not leave both constructor slots
     // empty for an hour. Repeated wakes keep the same reserved children; a
