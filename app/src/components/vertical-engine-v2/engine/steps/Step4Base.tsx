@@ -1250,7 +1250,7 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
               : target.status === 'collecting' ? `Проход ${target.round} из ${target.max_rounds}. Добираем контакты после проверок.`
               : target.status === 'target_reached' ? `Цель превью достигнута. В готовой базе ${target.ready_rows.toLocaleString('ru-RU')} контактов; отправка ещё не включена.`
               : target.status === 'exhausted' ? 'Источники текущего плана закончились. Это не оценка всего рынка.'
-              : target.status === 'limited' ? 'Сбор остановлен защитным лимитом. Это не означает, что контакты закончились.'
+              : target.status === 'limited' ? target.reason || 'Сбор остановлен защитным лимитом. Это не означает, что контакты закончились.'
               : 'Подготовка превью остановлена. Непроверенные контакты не попадут в запуск.'}
           </p>
           <p className={`mt-1 ${HE.faint}`}>За все проходы проверено кандидатов: {target.candidates_processed.toLocaleString('ru-RU')}. Это фактически обработанная выборка, а не размер всего реестра. В CSV-превью не более {VE_PREVIEW_READY_TARGET.toLocaleString('ru-RU')} контактов.</p>

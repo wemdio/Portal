@@ -99,7 +99,7 @@ import { buildRolesRegex } from '@/lib/parsers/atsFilters';
 import { domainToSiteUrl, resolveCompanyDomainViaPdl } from '@/lib/parsers/companyDomainResolver';
 import { readVeYandexCatalogPage, resolveVeYandexCatalogFilters, type VeYandexCatalogCheckpoint } from '../yandexCatalog';
 import { extractEmail, extractEmails } from '@/lib/tools/dfybUtils';
-import { applyVeSourceContacts, normalizeVeSourceContacts, hasPendingVeSourceContacts, pendingVeSourceContacts, recoverVeSourceContacts, type VeSourceContactCheckpoint } from '../sourceContacts';
+import { applyVeSourceContacts, normalizeVeSourceContacts, hasPendingVeSourceContacts, pendingVeSourceContacts, recoverVeSourceContacts, evaluateVeSourceDiscoveryBudget, VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT, type VeSourceContactCheckpoint, type VeSourceDiscoveryBudget } from '../sourceContacts';
 import {
   mergeVeSourceFactText, normalizeVeCompanyInn, normalizeVeCompanyName, normalizeVeWebsiteHost,
   veCompanyWebsiteKey, veAcquisitionReceipt,
@@ -663,6 +663,7 @@ export interface VeCollectInfo {
   search_policy?: { version: 1; phase: 'existing' | 'paid'; deferred_rows: VeUnifiedRow[]; construct_rows?: VeUnifiedRow[] };
   /** Durable official-site discovery; never a substitute for email/relevance validation. */
   source_contact_recovery?: VeSourceContactCheckpoint;
+  source_contact_budget?: VeSourceDiscoveryBudget;
   source_contact_discovery?: { checked: number; remaining: number };
   /** Opt-in for NEW previews only. Inputs/IDs are reserved before child insertion. */
   preview_pipeline?: {
@@ -3073,7 +3074,8 @@ async function completeTargetRound(args: {
   const pendingBatches = pipeline?.batches.filter((batch) => batch.id !== pipeline.active_batch_id) ?? [];
   const pendingSources = tasks.some((task) => task.status === 'pending' || task.status === 'dispatched');
   const existingFirst = info.search_policy?.phase === 'existing';
-  const pendingDiscovery = !existingFirst && (tasks.some((task) => task.status === 'done'
+  const discoveryPaused = info.source_contact_budget?.paused === true;
+  const pendingDiscovery = !existingFirst && !discoveryPaused && (tasks.some((task) => task.status === 'done'
     && hasPendingVeSourceContacts((task.harvest ?? []).filter((row) =>
       pruneBaseRowAgainstExclusion(freshKeys, row) !== null), info.source_contact_recovery))
     || hasPendingVeSourceContacts((info.search_policy?.deferred_rows ?? []).filter((row) =>
@@ -3083,7 +3085,7 @@ async function completeTargetRound(args: {
     const result = finishCollectionRound(progress, {
       candidates: args.candidates.length, readyRows: readyCount,
       validationRetry: validationRetry || (existingFirst && (renewableDirectory || pendingSources)),
-      exhausted: reviewOnly ? false : exhausted && !pendingDiscovery && pendingBatches.length === 0 && !pendingSources,
+      exhausted: reviewOnly ? false : exhausted && !discoveryPaused && !pendingDiscovery && pendingBatches.length === 0 && !pendingSources,
       canContinue: !reviewOnly && (args.hasBufferedCandidates || pendingDiscovery || renewableDirectory || pendingBatches.length > 0 || pendingSources),
       error: phaseError ?? pipeline?.error ?? null,
     });
@@ -3093,6 +3095,9 @@ async function completeTargetRound(args: {
       if (phaseError) pipeline.error = phaseError;
       return { ...result, status: 'collecting' as const, reason: undefined, round: progress.round + 1 };
     }
+    if (discoveryPaused && result.status === 'limited') return { ...result,
+      reason: `Поиск недостающих сайтов остановлен: ${VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT} попыток поиска без прироста готовых контактов. Собранные контакты и исходные компании сохранены. Цель пока не достигнута; нужен другой источник или уточнение гипотезы.`,
+    };
     return result;
   };
   const checkpoint: NonNullable<VeCollectInfo['target_checkpoint']> = {
@@ -3627,14 +3632,23 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   }
   // An existing constructor owns immutable inputs. New batches prefer rows
   // already carrying a site; search missing sites only when that stock runs low.
-  let prepared = info.construct ? interleaved : applyVeSourceContacts(interleaved, info.source_contact_recovery);
+  // Pipelined children own rows in batches[]. A display/current child must not
+  // bypass discovery admission for unrelated candidates in the next child.
+  const ownsLegacyInput = !!info.construct && !info.preview_pipeline;
+  let prepared = ownsLegacyInput ? interleaved : applyVeSourceContacts(interleaved, info.source_contact_recovery);
   let pendingSourceRows = new Set(pendingVeSourceContacts(discoveryCandidates, info.source_contact_recovery));
-  if (!existingFirst && !info.construct && !info.preview_pipeline?.batches.length
+  if (!existingFirst && !info.construct && !info.preview_pipeline?.batches.length && waiting.length === 0
     && (!target || target.ready_rows < target.ready_target)) {
     const immediatelyUsable = prepared.filter((row) => (row.website || row.email)
       && pruneBaseRowAgainstExclusion(existingKeys, row) !== null).length;
     if (immediatelyUsable === 0) {
-      const discovery = [...pendingSourceRows].slice(0, Math.min(16, target ? target.ready_target - target.ready_rows : 16));
+      // A company/site is not a ready contact. Evaluate yield only here, after
+      // every usable row and constructor has had a chance to finish validation.
+      const allowance = target ? evaluateVeSourceDiscoveryBudget({ budget: info.source_contact_budget,
+        checkpoint: info.source_contact_recovery, readyRows: target.ready_rows }) : null;
+      if (allowance) info.source_contact_budget = allowance.budget;
+      const discovery = [...pendingSourceRows].slice(0, Math.min(16,
+        target ? target.ready_target - target.ready_rows : 16, allowance?.remaining ?? 16));
       if (discovery.length) {
         info.source_contact_discovery = { checked: Object.keys(info.source_contact_recovery?.checked ?? {}).length, remaining: pendingSourceRows.size };
         await persistCollectInfo(ctx, base.id, info);
@@ -3643,18 +3657,24 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
         });
         prepared = applyVeSourceContacts(interleaved, info.source_contact_recovery);
         pendingSourceRows = new Set(pendingVeSourceContacts(discoveryCandidates, info.source_contact_recovery));
-        if (prepared.filter((row) => (row.website || row.email) && pruneBaseRowAgainstExclusion(existingKeys, row) !== null).length === 0
-          && hasPendingVeSourceContacts(discoveryCandidates, info.source_contact_recovery)) {
-          await requeueSelf(ctx, job, 1_000);
-          return { result: { base_id: baseId, waiting: true, source_contact_discovery: true }, ...usage };
+        if (prepared.filter((row) => (row.website || row.email) && pruneBaseRowAgainstExclusion(existingKeys, row) !== null).length === 0) {
+          if (target) info.source_contact_budget = evaluateVeSourceDiscoveryBudget({ budget: info.source_contact_budget,
+            checkpoint: info.source_contact_recovery, readyRows: target.ready_rows }).budget;
+          if (!info.source_contact_budget?.paused && hasPendingVeSourceContacts(discoveryCandidates, info.source_contact_recovery)) {
+            await requeueSelf(ctx, job, 1_000);
+            return { result: { base_id: baseId, waiting: true, source_contact_discovery: true }, ...usage };
+          }
         }
       }
     }
   }
   delete info.source_contact_discovery;
   if (target && info.source_contact_recovery) target.max_rounds = PREVIEW_MAX_BATCHES;
-  const considered = prepared.filter((row, index) => !!info.construct
-    || (existingFirst ? hasExistingSourceContact(row) : !pendingSourceRows.has(interleaved[index])));
+  const considered = prepared.filter((row, index) => ownsLegacyInput
+    || ((existingFirst ? hasExistingSourceContact(row) : !pendingSourceRows.has(interleaved[index]))
+      // An unsuccessful lookup must not move empty source rows into another
+      // paid enrichment lane. Keep them in harvest/deferred storage instead.
+      && (!info.source_contact_budget || hasExistingSourceContact(row))));
   const kept = considered
     .map((row) => pruneBaseRowAgainstExclusion(existingKeys, row))
     .filter((row): row is VeUnifiedRow => row !== null);

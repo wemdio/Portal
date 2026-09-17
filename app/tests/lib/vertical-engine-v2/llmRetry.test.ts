@@ -35,7 +35,7 @@ import { createVeJobShutdown } from '@/lib/verticalEngineV2/workerLiveness';
 import { fetchVeRelevanceEvidence, resolveVeEvidenceAddress } from '@/lib/verticalEngineV2/relevanceEvidence';
 import { parseVeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
 import { needsVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceReserve';
-import { recoverVeSourceContacts, hasPendingVeSourceContacts, type VeSourceContactCheckpoint } from '@/lib/verticalEngineV2/sourceContacts';
+import { recoverVeSourceContacts, hasPendingVeSourceContacts, evaluateVeSourceDiscoveryBudget, type VeSourceContactCheckpoint } from '@/lib/verticalEngineV2/sourceContacts';
 import { cleanVeCompanyNames } from '@/lib/verticalEngineV2/companyNameCleanup';
 
 const schema = z.object({ ok: z.boolean() });
@@ -884,6 +884,25 @@ describe('llm rawCall retry', () => {
       .mockResolvedValueOnce({ status: 'error', text: '', url: '', reason: 'billing', provider_error: { kind: 'billing', message: 'Serper billing: no credits' } });
     await expect(recoverVeSourceContacts({ rows: sourceRows.slice(0, 2), fetchEvidence: partial, save })).rejects.toThrow('Serper billing');
     expect(Object.keys(discoveryState!.checked)).toHaveLength(1);
+    // Completed lookups are a bounded cohort, not a claim about paid credits.
+    // Restart/Continue or a drop and recovery of the same ready count cannot
+    // purchase another cohort. Actual net growth permits further discovery.
+    const initialBudget = evaluateVeSourceDiscoveryBudget({ readyRows: 23 }).budget;
+    const checkedCohort: VeSourceContactCheckpoint = { version: 1, checked: Object.fromEntries(
+      Array.from({ length: 200 }, (_, i) => [String(i), { website: '', reason: 'identity_unverified' }])) };
+    const stopped = evaluateVeSourceDiscoveryBudget({ budget: initialBudget, checkpoint: checkedCohort, readyRows: 23 });
+    expect(stopped).toMatchObject({ remaining: 0, budget: { paused: true, ready_high_water: 23 } });
+    for (const readyRows of [10, 23]) expect(evaluateVeSourceDiscoveryBudget({
+      budget: JSON.parse(JSON.stringify(stopped.budget)), checkpoint: checkedCohort, readyRows,
+    }).remaining).toBe(0);
+    expect(evaluateVeSourceDiscoveryBudget({ budget: stopped.budget, checkpoint: checkedCohort, readyRows: 24 }))
+      .toMatchObject({ remaining: 200, budget: { paused: false, checked_at_growth: 200, ready_high_water: 24 } });
+    expect(evaluateVeSourceDiscoveryBudget({ checkpoint: checkedCohort, readyRows: 23 }))
+      .toMatchObject({ remaining: 200, budget: { checked_at_growth: 200 } });
+    for (const budget of [null, { ...initialBudget, version: 2 }, { ...initialBudget, checked_at_growth: 201 }]) {
+      expect(() => evaluateVeSourceDiscoveryBudget({ budget, checkpoint: checkedCohort, readyRows: 23 }))
+        .toThrow('Source discovery budget checkpoint is invalid');
+    }
     expect(jest.getTimerCount()).toBe(0);
 
     // Real progress includes successful/error IO, but never a still-pending await.
