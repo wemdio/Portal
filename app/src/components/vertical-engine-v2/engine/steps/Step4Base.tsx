@@ -1172,6 +1172,9 @@ function readCollectInfo(info: VeCollectInfo | null | undefined) {
       launchableRows: collectCount(stats?.launchable_rows),
       relevanceNeedsReview: collectCount(info?.relevance_summary?.needs_review) ?? collectCount(stats?.relevance_needs_review),
       relevanceErrors: collectCount(info?.relevance_summary?.error) ?? collectCount(stats?.relevance_errors),
+      // Строки, до которых не дошла очередь проверки. У записей, сделанных до
+      // разделения счётчиков, поля нет — там они по-прежнему внутри errors.
+      relevanceNotChecked: collectCount(info?.relevance_summary?.unchecked),
       relevanceIrrelevant: collectCount(info?.relevance_summary?.irrelevant) ?? collectCount(stats?.relevance_irrelevant) ?? collectCount(stats?.low_relevance),
       reserveRows: collectCount(info?.relevance_summary?.total),
       reserveEmailUnready: collectCount(info?.relevance_summary?.email_unready),
@@ -1289,6 +1292,18 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
         <p className="font-medium text-amber-700">
           {base.status === 'collecting' ? 'Повторяем техническую проверку' : 'Не удалось завершить автопроверку'} для{' '}
           {stats.relevanceErrors.toLocaleString('ru-RU')} строк. Они сохранены в резерве и не входят в готовую базу.
+        </p>
+      ) : null}
+      {/* Спокойным тоном и без «жёлтого»: ничего не сломалось — проверка до
+          этих строк просто не дошла, чаще всего потому, что нужный объём базы
+          уже набран и сбор остановился. */}
+      {stats.relevanceNotChecked !== null && stats.relevanceNotChecked > 0 ? (
+        <p>
+          {base.status === 'collecting' ? 'Ещё не проверялись' : 'Проверка не понадобилась'}:{' '}
+          {stats.relevanceNotChecked.toLocaleString('ru-RU')} строк.{' '}
+          {base.status === 'collecting'
+            ? 'Очередь до них пока не дошла.'
+            : 'Очередь до них не дошла: нужный объём базы был набран раньше. Сохранены в резерве, в готовую базу не входят.'}
         </p>
       ) : null}
       {stats.relevanceIrrelevant !== null && stats.relevanceIrrelevant > 0 ? (

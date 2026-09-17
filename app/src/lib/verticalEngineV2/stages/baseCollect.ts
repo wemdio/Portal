@@ -2985,7 +2985,10 @@ async function completeTargetRound(args: {
     prior_low_relevance: validationRetry ? prior?.prior_low_relevance ?? 0 : prior?.low_relevance ?? 0,
     prior_relevance_unchecked: validationRetry ? prior?.prior_relevance_unchecked ?? 0 : prior?.relevance_unchecked ?? 0,
     low_relevance: info.relevance_summary.irrelevant,
-    relevance_unchecked: info.relevance_summary.needs_review + info.relevance_summary.error,
+    // Сводный счётчик «без подтверждённой релевантности»: слагаемых стало три,
+    // но само число прежнее — непроверенные строки раньше сидели внутри error.
+    relevance_unchecked: info.relevance_summary.needs_review + info.relevance_summary.error
+      + info.relevance_summary.unchecked,
   };
   const stats: NonNullable<VeCollectInfo['stats']> = {
     ...args.stats, rows_total: progress.candidates_processed + (validationRetry ? 0 : args.candidates.length),
@@ -3076,8 +3079,11 @@ async function completeTargetRound(args: {
     info.estimate = updateCollectionEstimate(info.estimate, {
       candidates: candidateCompanies.size, ready: readyRows.length,
       asOf: new Date().toISOString(), identitiesComplete,
+      // unchecked выделен из error и перечислен здесь явно: выборка с
+      // неразобранным остатком считается незавершённой, как и прежде.
       complete: !args.validationError && !taskError && !continueSavedReview
         && info.relevance_summary.needs_review === 0 && info.relevance_summary.error === 0
+        && info.relevance_summary.unchecked === 0
         && info.relevance_summary.email_retryable === 0 && cleaned.summary.status === 'complete',
       // Earlier rounds of THIS base are represented in the cumulative source
       // cohort. Other bases can consume unseen parts of the same population;
