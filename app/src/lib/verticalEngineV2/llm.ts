@@ -93,15 +93,17 @@ function providerUsage(response: RequestyResponse, requestedModel: string) {
 
 export type VeModelKind = 'research' | 'chain' | 'bulk' | 'gate' | 'relevanceReview';
 
+export const VE_COLLECTION_MODEL = 'deepinfra/deepseek-v4-flash-0731';
+
 const VE_MODEL_DEFAULTS: Record<VeModelKind, string> = {
   research: 'anthropic/claude-opus-5',
   chain: 'anthropic/claude-opus-5',
   bulk: 'anthropic/claude-sonnet-4-6',
   // Дешёвые классификационные задачи (relevance-gate, сегмент-классификатор,
   // case-bank). Допуск компаний отдельно подтверждает relevanceReview.
-  gate: 'openai/gpt-4o-mini',
+  gate: VE_COLLECTION_MODEL,
   // Focused entailment check; does not change hypothesis generation models.
-  relevanceReview: 'openai/gpt-5-mini',
+  relevanceReview: VE_COLLECTION_MODEL,
 };
 
 const VE_MODEL_ENV: Record<VeModelKind, string> = {
@@ -117,10 +119,18 @@ export function getVeModel(kind: VeModelKind): string {
   return (process.env[VE_MODEL_ENV[kind]] ?? '').trim() || VE_MODEL_DEFAULTS[kind];
 }
 
-/** Native output constraints for the OpenAI models used by the relevance gate.
+/** This rollout keeps the evidence/admission contract. Reuse paid checkpoints
+ * from the previous defaults; arbitrary model overrides remain isolated. */
+export function veCollectionCacheModel(kind: 'gate' | 'relevanceReview', model: string): string {
+  return model === VE_COLLECTION_MODEL
+    ? kind === 'gate' ? 'openai/gpt-4o-mini' : 'openai/gpt-5-mini'
+    : model;
+}
+
+/** Native output constraints verified in the Requesty collection-model pilot.
  * Other configured providers retain JSON mode plus the same local validation. */
 export function veNativeJsonSchema(model: string, name: string, schema: z.ZodType) {
-  if (!/^(?:openai\/)?(?:gpt-4o-mini|gpt-5-mini)(?:-\d{4}-\d{2}-\d{2})?$/.test(model)) return undefined;
+  if (model !== VE_COLLECTION_MODEL && !/^(?:openai\/)?(?:gpt-4o-mini|gpt-5-mini)(?:-\d{4}-\d{2}-\d{2})?$/.test(model)) return undefined;
   return { name, schema: z.toJSONSchema(schema, { io: 'input', override: ({ jsonSchema }) => {
     if (jsonSchema.type === 'object') jsonSchema.additionalProperties = false;
   } }) };
