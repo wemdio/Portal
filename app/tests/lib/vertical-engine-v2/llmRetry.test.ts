@@ -33,6 +33,7 @@ import { findIrrelevantRows } from '@/lib/verticalEngineV2/relevanceGate';
 import type { VeRelevanceCheckpoint } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import { createVeJobShutdown } from '@/lib/verticalEngineV2/workerLiveness';
 import { fetchVeRelevanceEvidence, resolveVeEvidenceAddress } from '@/lib/verticalEngineV2/relevanceEvidence';
+import { veCompanyFactKey, veFactPageKey, freshVeCompanyFact, focusVeCompanyFact, createVeSharedPageReader, VE_COMPANY_FACT_TTL_MS, type VeCompanyFactRecord } from '@/lib/verticalEngineV2/companyFacts';
 import { parseVeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
 import { needsVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceReserve';
 import { recoverVeSourceContacts, hasPendingVeSourceContacts, evaluateVeSourceDiscoveryBudget, type VeSourceContactCheckpoint } from '@/lib/verticalEngineV2/sourceContacts';
@@ -1032,6 +1033,77 @@ describe('llm rawCall retry', () => {
       expect(conflict.status).toBe('unavailable');
       expect(conflict.text).toBe('');
     }
+
+    // Share only dated public facts. Each new hypothesis reselects evidence
+    // from the full document and still verifies legal ownership independently.
+    const sharedRoot = 'https://shared.test/';
+    const sharedKey = veCompanyFactKey({ inn: '7700000001' })!;
+    const records: VeCompanyFactRecord[] = [];
+    const readFacts = jest.fn(async () => records);
+    const writeFacts = jest.fn(async (key: string, pages: ReturnType<typeof parseVeEvidencePage>[], observedAt: string) => {
+      for (const page of pages) records.push({ company_key: key, page_key: veFactPageKey(page.url), reader_version: 1,
+        observed_at: observedAt, expires_at: new Date(Date.parse(observedAt) + VE_COMPANY_FACT_TTL_MS).toISOString(), page });
+    });
+    const factsTransport = jest.fn(async (url: string) => parseVeEvidencePage(Buffer.from(
+      '<main><p>Сеть частных клиник: три филиала принимают пациентов.</p>'
+      + '<p>О компании и наших услугах для клиентов.</p>'.repeat(200)
+      + '<p>Производство оборудования: собственный завод выпускает лабораторные приборы.</p></main><footer>ИНН 7700000001</footer>'), url, 'text/html'));
+    const factsSearch = jest.fn().mockResolvedValue([]);
+    const factsOptions = { companyInn: '7700000001', fetchPage: factsTransport, search: factsSearch,
+      companyFacts: { read: readFacts, write: writeFacts } };
+    expect((await fetchVeRelevanceEvidence(sharedRoot, { ...factsOptions, focus: 'Сеть частных клиник' })).status).toBe('ok');
+    expect(records.length).toBeGreaterThan(0);
+    expect(readFacts).toHaveBeenCalledWith([sharedKey], undefined);
+    const requests = factsTransport.mock.calls.length;
+    const firstObservation = records[0].observed_at;
+    const secondHypothesis = await fetchVeRelevanceEvidence('', { ...factsOptions, focus: 'Производство оборудования собственный завод' });
+    expect(secondHypothesis.status).toBe('ok');
+    expect(secondHypothesis.text).toContain('собственный завод');
+    expect(factsTransport).toHaveBeenCalledTimes(requests);
+    expect(factsSearch).not.toHaveBeenCalled();
+    expect(writeFacts).toHaveBeenCalledTimes(1);
+    expect(records[0].observed_at).toBe(firstObservation);
+    expect(freshVeCompanyFact(records[0], Date.parse(firstObservation) + VE_COMPANY_FACT_TTL_MS)).toBeNull();
+    expect(freshVeCompanyFact({ ...records[0], reader_version: 99 })).toBeNull();
+    expect(freshVeCompanyFact({ ...records[0], observed_at: new Date(Date.now() + 1000).toISOString() })).toBeNull();
+    expect(veCompanyFactKey({ company: 'Same Brand' })).toBeNull();
+    expect(veCompanyFactKey({ company: 'Same Brand', address: 'Москва' })).toBeNull();
+    expect(veCompanyFactKey({ company: 'Same Brand', address: 'Москва, Ленина 10' })).not.toBe(veCompanyFactKey({ company: 'Same Brand', address: 'Тула, Ленина 10' }));
+    const factPage = freshVeCompanyFact(records[0])!;
+    expect(focusVeCompanyFact(factPage, 'Производство оборудования завод').text).toContain('лабораторные приборы');
+    const wrongTransport = jest.fn(async (url: string) => parseVeEvidencePage(Buffer.from(
+      '<main>Мы выпускаем приборы для лабораторий и предоставляем подробную информацию о нашей деятельности.</main><footer>ИНН 7700000002</footer>'), url, 'text/html'));
+    const writtenBefore = writeFacts.mock.calls.length;
+    expect((await fetchVeRelevanceEvidence('https://different.test/', { ...factsOptions, companyInn: '7700000003', fetchPage: wrongTransport })).status)
+      .toBe('unavailable');
+    expect(writeFacts).toHaveBeenCalledTimes(writtenBefore);
+
+    const sharedPage = deferred<ReturnType<typeof parseVeEvidencePage>>();
+    const transport = jest.fn().mockReturnValue(sharedPage.promise);
+    const sharedRead = createVeSharedPageReader(transport);
+    const leave = new AbortController(), stay = new AbortController();
+    const cancelledRead = expect(sharedRead(new URL(sharedRoot), leave.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    const remainingRead = sharedRead(new URL(sharedRoot), stay.signal);
+    leave.abort();
+    await cancelledRead;
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(transport.mock.calls[0][1].aborted).toBe(false);
+    sharedPage.resolve(factPage);
+    const isolatedPage = await remainingRead;
+    isolatedPage.text = 'changed by one hypothesis';
+    expect(factPage.text).not.toBe(isolatedPage.text);
+    const finalCancel = new AbortController();
+    transport.mockImplementation((_url, signal) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason))));
+    const abandonedRead = expect(sharedRead(new URL('https://abandoned.test'), finalCancel.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    await jest.advanceTimersByTimeAsync(0);
+    finalCancel.abort(); await abandonedRead;
+    expect(transport.mock.calls.at(-1)?.[1].aborted).toBe(true);
+    const immediateCancel = new AbortController();
+    const neverStarted = jest.fn();
+    const immediateRead = expect(createVeSharedPageReader(neverStarted)(new URL(sharedRoot), immediateCancel.signal))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    immediateCancel.abort(); await immediateRead;
+    expect(neverStarted).not.toHaveBeenCalled();
 
     const root = 'https://retry.test/';
     const source = '<main>Мы производим промышленное оборудование на собственном заводе и поставляем его клиентам по всей стране.</main><footer>ИНН 7700000001</footer>';
