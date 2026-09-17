@@ -649,7 +649,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                       type="button"
                       disabled={busy || locked}
                       className={HE.btnGhost}
-                      onClick={() => void change({ action: 'prepare' })}
+                      onClick={() => void change({ action: 'prepare', hypothesis_id: activeId })}
                     >
                       Продолжить подготовку
                     </button>
@@ -676,7 +676,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                   <article key={h.id} className="border-t border-[var(--ve2-line)] pt-5 space-y-4">
                     <h3 className="ve2-h3">{h.title}</h3>
                     {p?.status !== 'ready' ? <PreparationProgress preparation={p} base={base} jobs={detail.jobs}
-                      onContinue={() => void change({ action: 'prepare' })} continueDisabled={busy || locked} /> : null}
+                      onContinue={() => void change({ action: 'prepare', hypothesis_id: h.id })} continueDisabled={busy || locked} /> : null}
                     {base ? (
                       <>
                         <AudienceSummary base={base} presetId={presetId} preparationState={preparationState} />
