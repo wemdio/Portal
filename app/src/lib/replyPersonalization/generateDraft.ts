@@ -1,6 +1,6 @@
 import { buildReplyPrompt } from './buildPrompt';
 import { getGlobalKnowledgeBase, getGlobalSystemPrompt, getKnowledgeBaseOrEmpty, getProjectBrief, insertDraft, resolveBrief } from './db';
-import { generateReplyWithSearch, REPLY_MODEL_ID } from './geminiClient';
+import { generateReplyWithSearch } from './geminiClient';
 import { fetchFullThread } from './instantlyThread';
 import { resolveProjectReply } from './projectReply';
 import type { GenerateDraftResult, ThreadMessage } from './types';
@@ -85,7 +85,7 @@ export async function generateDraftForQualification(
     factsUsed: result.sources.map((s) => s.title || s.url).join(', '),
     sources: result.sources,
     contextComplete,
-    model: REPLY_MODEL_ID,
+    model: result.model,
     latencyMs: Date.now() - startedAt,
     createdBy: userId,
   });
