@@ -101,6 +101,13 @@ export interface GenerateResponse {
   contextComplete: boolean;
 }
 
+/** Сохранённый неотправленный черновик ИИ по письму. */
+export function fetchOpenDraft(qualificationId: string) {
+  return fetchWithAuth<{ draft: (GenerateResponse & { createdAt: string }) | null }>(
+    `${BASE}/replies/${qualificationId}/generate`,
+  );
+}
+
 export function generateReply(qualificationId: string, projectId: string) {
   return fetchWithAuth<GenerateResponse>(`${BASE}/replies/${qualificationId}/generate`, {
     method: 'POST',

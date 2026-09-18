@@ -379,6 +379,30 @@ export async function insertSkip(input: {
   if (error) throw new Error(`skip insert failed: ${error.message}`);
 }
 
+/**
+ * Неотправленный черновик ИИ по письму — чтобы вернуть его в поле ответа,
+ * когда менеджер ушёл в другое письмо и вернулся. Каждая генерация стоит
+ * денег, и терять её из-за переключения чата нельзя.
+ * Берём только если самая свежая запись по письму — черновик ИИ: после
+ * отправки или пропуска старый черновик уже не нужен. Ручные записи
+ * (model='manual') — техническая обёртка отправки, не черновик.
+ */
+export async function getOpenDraft(qualificationId: string): Promise<DraftRow | null> {
+  const { admin } = requireClients();
+  const { data, error } = await admin
+    .from('reply_personalization_drafts')
+    .select()
+    .eq('qualification_id', qualificationId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`open draft lookup failed: ${error.message}`);
+  if (!data) return null;
+  const draft = mapDraftRow(data);
+  if (draft.status !== 'draft' || draft.model === 'manual' || !draft.generatedText?.trim()) return null;
+  return draft;
+}
+
 export async function getDraftById(draftId: string): Promise<DraftRow | null> {
   const { admin } = requireClients();
   const { data, error } = await admin
