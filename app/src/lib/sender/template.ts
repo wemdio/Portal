@@ -1,8 +1,13 @@
 import { randomUUID } from 'crypto';
 
-/** Подстановка {{var}} из полей получателя. Неизвестная переменная → пусто. */
+/**
+ * Подстановка {{var}} из полей получателя. Неизвестная переменная → пусто.
+ * Кириллица в имени обязательна: колонка «Компания» из базы становится
+ * переменной {{компания}}, и раньше такие подстановки молча выпадали.
+ * Регистр не важен — ключи колонок хранятся в нижнем регистре.
+ */
 export function applyVars(template: string, vars: Record<string, string>): string {
-  return template.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, key: string) => vars[key] ?? '');
+  return template.replace(/\{\{\s*([a-zA-Z0-9_а-яА-ЯёЁ]+)\s*\}\}/g, (_, key: string) => vars[key.toLowerCase()] ?? '');
 }
 
 /**

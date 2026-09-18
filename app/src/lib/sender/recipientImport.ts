@@ -37,7 +37,7 @@ function findHeader(headers: string[], candidates: string[]): string | null {
 
 /** Ключ переменной: «Company Name» → company_name. */
 function varKey(header: string): string {
-  return normalize(header).replace(/[^a-z0-9а-я]+/gi, '_').replace(/^_+|_+$/g, '');
+  return normalize(header).replace(/[^a-z0-9а-яё]+/gi, '_').replace(/^_+|_+$/g, '');
 }
 
 export function parseRecipientRows(rows: FileRow[]): RecipientImportResult {

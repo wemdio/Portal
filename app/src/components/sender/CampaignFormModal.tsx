@@ -302,9 +302,17 @@ export function CampaignFormModal({ onClose, onCreated }: Props) {
               value={body}
               onChange={(e) => setBody(e.target.value)}
               rows={8}
-              placeholder="Текст письма. Подстановки: {{first_name}}, {{name}}, {{company}} и любые колонки базы"
+              placeholder="Здравствуйте, {{first_name}}! Пишу по поводу {{company}}…"
               className="w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
             />
+            {/* Откуда берутся подстановки, из формы было не понять: значения
+                едут из колонок файла шага 2, по одной строке на получателя. */}
+            <p className="mt-2 text-xs leading-relaxed text-zinc-500">
+              Подстановки берутся из колонок базы (шаг 2): у каждого получателя — из его строки. Колонка
+              «Компания» подставляется как {'{{компания}}'}, «Company Name» — как {'{{company_name}}'}.
+              Из колонки с именем (name, имя, ФИО) сами получаются {'{{name}}'} и {'{{first_name}}'} — первое слово.
+              Если у получателя ячейка пустая, на месте подстановки будет пусто.
+            </p>
           </Step>
 
           {/* Часы и дни — одно решение «когда отправлять», поэтому и на экране
