@@ -45,7 +45,8 @@ export function ReplyPersonalizationView() {
   const [project, setProject] = useState<ProjectListItem | null>(null);
   const [items, setItems] = useState<ReplyListItem[]>([]);
   const [itemsLoading, setItemsLoading] = useState(false);
-  const [needsKb, setNeedsKb] = useState(false);
+  /** Почему письма проекта не показаны — нет брифа; null — всё в порядке. */
+  const [missingReason, setMissingReason] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [kbModalOpen, setKbModalOpen] = useState(false);
   const [globalKbModalOpen, setGlobalKbModalOpen] = useState(false);
@@ -76,7 +77,7 @@ export function ReplyPersonalizationView() {
     try {
       const res = await fetchReplies(projectId);
       setItems(res.replies);
-      setNeedsKb(res.needsKnowledgeBase);
+      setMissingReason(res.missingReason);
       setSelectedId((current) => current ?? res.replies[0]?.id ?? null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить письма');
@@ -90,8 +91,9 @@ export function ReplyPersonalizationView() {
       setProject(p);
       setItems([]);
       setSelectedId(null);
-      setNeedsKb(false);
-      if (!p.hasKnowledgeBase) setKbModalOpen(true);
+      setMissingReason(null);
+      // Окно базы знаний открываем само только тем, кому без него не ответить.
+      if (p.missingReason) setKbModalOpen(true);
       loadReplies(p.id);
     },
     [loadReplies],
@@ -102,8 +104,9 @@ export function ReplyPersonalizationView() {
   }, [project, loadReplies]);
 
   const handleKbSaved = useCallback(() => {
+    // Пометку пересчитает сервер: сохранение базы знаний ещё не значит, что
+    // бриф появился (могли сохранить только тон или пример).
     loadProjects();
-    setProject((current) => (current ? { ...current, hasKnowledgeBase: true } : current));
     if (project) loadReplies(project.id);
   }, [loadProjects, loadReplies, project]);
 
@@ -158,8 +161,8 @@ export function ReplyPersonalizationView() {
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-medium text-gray-900">{p.client}</span>
-                    {!p.hasKnowledgeBase ? (
-                      <span className="block text-[11px] text-amber-600">база знаний не заполнена</span>
+                    {p.missingReason ? (
+                      <span className="block text-[11px] text-amber-600">{p.missingReason.toLowerCase()}</span>
                     ) : null}
                   </span>
                   <button
@@ -206,9 +209,10 @@ export function ReplyPersonalizationView() {
         <div className="flex-1 overflow-y-auto">
           {!project ? (
             <div className="p-3 text-sm text-gray-500">Выберите проект слева.</div>
-          ) : needsKb ? (
+          ) : missingReason ? (
             <div className="p-3 text-sm text-gray-500">
-              У проекта не заполнена база знаний — нажмите шестерёнку у проекта слева.
+              {missingReason} — ИИ не из чего собрать ответ. Заполните бриф в карточке проекта или
+              нажмите шестерёнку у проекта слева и вставьте его там.
             </div>
           ) : itemsLoading && items.length === 0 ? (
             <div className="p-3 text-sm text-gray-500">Загрузка...</div>
