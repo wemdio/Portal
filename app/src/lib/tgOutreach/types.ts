@@ -325,6 +325,11 @@ export interface OutreachProxyListStats {
 export interface OutreachAccount {
   id: string;
   campaign_id: string;
+  /** Архив (миграция 20260918_0003): когда, почему и кто убрал. null — в работе. */
+  archived_at?: string | null;
+  archive_reason?: string | null;
+  archive_note?: string | null;
+  archived_by_name?: string | null;
   session_name: string;
   api_id: number;
   api_hash: string;

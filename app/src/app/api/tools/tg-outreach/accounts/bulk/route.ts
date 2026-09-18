@@ -116,12 +116,14 @@ export async function PATCH(req: NextRequest) {
       if (!ids.length) return jsonError('ids должен быть непустым массивом', 400);
       if (typeof body?.is_active !== 'boolean') return jsonError('is_active обязателен', 400);
 
-      const { data, error } = await auth.supabase
+      let query = auth.supabase
         .from('tg_outreach_accounts')
         .update({ is_active: body.is_active })
         .eq('campaign_id', campaignId)
-        .in('id', ids)
-        .select('id');
+        .in('id', ids);
+      // Архивные не включаем — см. PUT /accounts/[id].
+      if (body.is_active) query = query.is('archived_at', null);
+      const { data, error } = await query.select('id');
 
       if (error) return jsonError(error.message, 500);
       return NextResponse.json({ ok: true, count: data?.length ?? 0 });
