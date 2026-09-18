@@ -93,7 +93,7 @@ function providerUsage(response: RequestyResponse, requestedModel: string) {
 
 /* ─────────────────────── Роли моделей ─────────────────────── */
 
-export type VeModelKind = 'research' | 'chain' | 'bulk' | 'gate' | 'relevanceReview';
+export type VeModelKind = 'research' | 'chain' | 'bulk' | 'collection' | 'gate' | 'relevanceReview';
 
 export const VE_COLLECTION_MODEL = 'deepinfra/deepseek-v4-flash-0731';
 
@@ -101,6 +101,9 @@ const VE_MODEL_DEFAULTS: Record<VeModelKind, string> = {
   research: 'anthropic/claude-opus-5',
   chain: 'anthropic/claude-opus-5',
   bulk: 'anthropic/claude-sonnet-4-6',
+  // Source planning/repair and base composition analysis have their own budget;
+  // they must not inherit the research-oriented VE_MODEL_BULK override.
+  collection: VE_COLLECTION_MODEL,
   // Дешёвые классификационные задачи (relevance-gate, сегмент-классификатор,
   // case-bank). Допуск компаний отдельно подтверждает relevanceReview.
   gate: VE_COLLECTION_MODEL,
@@ -112,11 +115,12 @@ const VE_MODEL_ENV: Record<VeModelKind, string> = {
   research: 'VE_MODEL_RESEARCH',
   chain: 'VE_MODEL_CHAIN',
   bulk: 'VE_MODEL_BULK',
+  collection: 'VE_MODEL_COLLECTION',
   gate: 'VE_MODEL_GATE',
   relevanceReview: 'VE_MODEL_RELEVANCE_REVIEW',
 };
 
-/** Модель для роли движка; переопределяется env VE_MODEL_RESEARCH/CHAIN/BULK/GATE/RELEVANCE_REVIEW. */
+/** Модель для роли движка; переопределяется соответствующей переменной VE_MODEL_*. */
 export function getVeModel(kind: VeModelKind): string {
   return (process.env[VE_MODEL_ENV[kind]] ?? '').trim() || VE_MODEL_DEFAULTS[kind];
 }

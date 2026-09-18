@@ -101,7 +101,7 @@ export async function runBaseAnalyzeStage(job: VeJob, ctx: VeStageContext): Prom
       verifiedSeasonality: market === 'ru' ? verifiedSeasonality : null,
     }),
     VeBaseAnalysisSchema,
-    { model: getVeModel('bulk'), maxTokens: 4096 },
+    { model: getVeModel('collection'), maxTokens: 4096 },
   );
   addUsage(usage, llm);
 

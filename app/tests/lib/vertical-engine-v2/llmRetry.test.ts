@@ -24,7 +24,7 @@ jest.mock('@/lib/enrich/websiteParser', () => ({
 
 import { assertPublicWebsite } from '@/lib/clientDemo/personalize';
 import { fetchAndExtract } from '@/lib/enrich/websiteParser';
-import { callLLMText, callLLMWithSchema, setVeActiveJobSignal, withVeActiveJobSignal, getVeActiveJobSignal, VE_COLLECTION_MODEL } from '@/lib/verticalEngineV2/llm';
+import { callLLMText, callLLMWithSchema, getVeModel, setVeActiveJobSignal, withVeActiveJobSignal, getVeActiveJobSignal, VE_COLLECTION_MODEL } from '@/lib/verticalEngineV2/llm';
 import { defaultFetchText, resolveFetchText, resolveSearch } from '@/lib/verticalEngineV2/stages/io';
 import type { VeStageContext } from '@/lib/verticalEngineV2/stages/shared';
 import { isRetryableStageError, maxAttemptsFor } from '@/lib/verticalEngineV2/jobRetry';
@@ -86,6 +86,11 @@ describe('llm rawCall retry', () => {
   });
 
   it('retries a transient 502 and succeeds on the next attempt', async () => {
+    // Collection must stay cheap even when research/bulk use an expensive model.
+    process.env.VE_MODEL_BULK = 'openai/gpt-5.5';
+    process.env.VE_MODEL_RESEARCH = 'test-research-model';
+    process.env.VE_MODEL_CHAIN = 'test-chain-model';
+    delete process.env.VE_MODEL_COLLECTION;
     const fetchMock = jest
       .fn()
       .mockResolvedValueOnce(
@@ -98,13 +103,21 @@ describe('llm rawCall retry', () => {
     const pending = callLLMWithSchema(
       [{ role: 'user', content: 'json' }],
       schema,
-      { model: 'test-model' },
+      { model: getVeModel('collection') },
     );
     await jest.advanceTimersByTimeAsync(2000);
     const result = await pending;
 
     expect(result.data).toEqual({ ok: true });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map((call) => JSON.parse(call[1].body).model))
+      .toEqual([VE_COLLECTION_MODEL, VE_COLLECTION_MODEL]);
+    process.env.VE_MODEL_COLLECTION = '  test-collection-override  ';
+    expect(getVeModel('collection')).toBe('test-collection-override');
+    process.env.VE_MODEL_COLLECTION = '  ';
+    expect(getVeModel('collection')).toBe(VE_COLLECTION_MODEL);
+    expect((['bulk', 'research', 'chain'] as const).map(getVeModel))
+      .toEqual(['openai/gpt-5.5', 'test-research-model', 'test-chain-model']);
 
     // A committed journal write whose response was lost must be retried with
     // one stable ID, without repeating the successful paid request.

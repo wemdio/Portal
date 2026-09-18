@@ -10,7 +10,7 @@ import { VeLlmRateLimitError, veRateLimitDelay } from '../llmRateLimit';
  * клеймит её после 30-секундной паузы (run_after).
  *
  * Фазы:
- *  1. PLAN — один LLM-вызов (модель bulk): вертикаль + неотклонённые гипотезы
+ *  1. PLAN — один LLM-вызов (модель collection): вертикаль + неотклонённые гипотезы
  *     + типы компаний из вокабуляра → план задач (промпт/схема — контракт
  *     prompts/sourcePlan.ts + VeSourcePlanSchema). Непустой hypothesis_ids в
  *     payload джобы (выбор гипотез в UI) сужает набор до выбранных id;
@@ -963,7 +963,7 @@ async function buildPlan(
     [...(market === 'us' ? buildSourcePlanMessagesEn : buildSourcePlanMessages)(promptInput),
       ...(strategyFeedback ? [{ role: 'user' as const, content: strategyFeedback }] : [])],
     VeSourcePlanSchema,
-    { model: getVeModel('bulk') },
+    { model: getVeModel('collection') },
   );
   addUsage(usage, llm);
 
@@ -1019,7 +1019,7 @@ async function ensureCatalogSource(
   let repair;
   try {
     repair = await callLLMWithSchema(buildCatalogRepairMessagesEn(promptInput), VeCatalogRepairSchema, {
-      model: getVeModel('bulk'),
+      model: getVeModel('collection'),
     });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -1162,7 +1162,7 @@ async function ensureSliceMatchesVertical(
   let repair;
   try {
     repair = await callLLMWithSchema(buildCatalogRepairMessagesEn(promptInput), VeCatalogRepairSchema, {
-      model: getVeModel('bulk'),
+      model: getVeModel('collection'),
     });
   } catch (e) {
     // Перепланировать не вышло — идём с исходным срезом: он плох, но отказ
