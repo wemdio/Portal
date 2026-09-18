@@ -108,10 +108,11 @@ export function generateReply(qualificationId: string, projectId: string) {
   });
 }
 
-export function sendReply(qualificationId: string, draftId: string, text: string) {
+/** draftId — ответ по сгенерированному черновику; null — ответ, написанный вручную. */
+export function sendReply(qualificationId: string, input: { draftId: string | null; projectId: string; text: string }) {
   return fetchWithAuth<{ ok: true }>(`${BASE}/replies/${qualificationId}/send`, {
     method: 'POST',
-    body: JSON.stringify({ draftId, text }),
+    body: JSON.stringify({ draftId: input.draftId ?? undefined, projectId: input.projectId, text: input.text }),
   });
 }
 

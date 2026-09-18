@@ -62,6 +62,10 @@ export function ReplyDetailPanel({
   }, [item.id, projectId]);
 
   const handleGenerate = async () => {
+    // Свой набранный текст молча не затираем: генерация кладёт черновик в то
+    // же поле, где менеджер мог уже написать ответ.
+    const typedByHand = draftText.trim() && draftText !== draft?.text;
+    if (typedByHand && !window.confirm('Заменить написанный текст черновиком от ИИ?')) return;
     setGenerating(true);
     setError(null);
     try {
@@ -132,97 +136,81 @@ export function ReplyDetailPanel({
         ) : null}
       </div>
 
-      {/* Черновик и действия */}
+      {/* Ответ: сверху — помощь ИИ (сгенерировать / пропустить), под ней
+          поле ответа, которое видно всегда. Раньше написать ответ можно было
+          только поверх сгенерированного черновика — на короткое «Спасибо,
+          перезвоним» менеджер ждал генерацию. Черновик ИИ ложится в это же
+          поле, дальше его можно править как свой текст. */}
       <div className="border-t border-gray-100 p-4">
-        {!draft ? (
-          <div>
-            <button
-              type="button"
-              onClick={handleGenerate}
-              disabled={generating}
-              className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
-            >
-              {generating ? 'Генерирую...' : 'Сгенерировать ответ'}
-            </button>
-            <button
-              type="button"
-              onClick={handleSkip}
-              disabled={skipping}
-              className="ml-2 rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-            >
-              {skipping ? 'Пропускаю...' : 'Пропустить'}
-            </button>
-          </div>
-        ) : (
-          <>
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-xs text-gray-500">Черновик ответа</span>
-              <button
-                type="button"
-                onClick={handleGenerate}
-                disabled={generating}
-                className="text-xs text-gray-500 hover:text-gray-700"
-              >
-                {generating ? 'Генерирую...' : 'Сгенерировать заново'}
-              </button>
-            </div>
-            <textarea
-              value={draftText}
-              onChange={(e) => setDraftText(e.target.value)}
-              rows={6}
-              className="w-full rounded-lg border border-gray-300 p-3 text-sm"
-            />
-            {!draft.contextComplete ? (
-              <p className="mt-1 text-xs text-amber-600">
-                Контекст переписки неполный — проверьте текст перед отправкой.
-              </p>
-            ) : null}
-            {draft.factsUsed ? (
-              <p className="mt-2 text-xs text-gray-400">Факты использованы: {draft.factsUsed}</p>
-            ) : null}
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleGenerate}
+            disabled={generating}
+            className="rounded-lg bg-blue-600 px-3.5 py-1.5 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+          >
+            {generating ? 'Генерирую...' : draft ? 'Сгенерировать заново' : 'Сгенерировать ответ'}
+          </button>
+          <button
+            type="button"
+            onClick={handleSkip}
+            disabled={skipping}
+            className="rounded-lg border border-gray-300 px-3.5 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            {skipping ? 'Пропускаю...' : 'Пропустить'}
+          </button>
+          {draft ? <span className="ml-auto text-xs text-gray-500">В поле — черновик ИИ, его можно править</span> : null}
+        </div>
 
-            <div className="mt-3 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={handleSkip}
-                disabled={skipping}
-                className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-              >
-                Пропустить
-              </button>
-              <button
-                type="button"
-                onClick={handleCopy}
-                className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
-              >
-                Копировать
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirmOpen(true)}
-                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500"
-              >
-                Отправить ответ
-              </button>
-            </div>
-          </>
-        )}
+        <textarea
+          value={draftText}
+          onChange={(e) => setDraftText(e.target.value)}
+          rows={6}
+          placeholder="Напишите ответ сами или нажмите «Сгенерировать ответ»"
+          className="w-full rounded-lg border border-gray-300 p-3 text-sm"
+        />
+        {draft && !draft.contextComplete ? (
+          <p className="mt-1 text-xs text-amber-600">
+            Контекст переписки неполный — проверьте текст перед отправкой.
+          </p>
+        ) : null}
+        {draft?.factsUsed ? (
+          <p className="mt-2 text-xs text-gray-400">Факты использованы: {draft.factsUsed}</p>
+        ) : null}
+
+        <div className="mt-3 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={handleCopy}
+            disabled={!draftText.trim()}
+            className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            Копировать
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirmOpen(true)}
+            disabled={!draftText.trim()}
+            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+          >
+            Отправить ответ
+          </button>
+        </div>
 
         {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
 
-        {draft ? (
-          <SendConfirmDialog
-            open={confirmOpen}
-            text={draftText}
-            onCancel={() => setConfirmOpen(false)}
-            onSent={() => {
-              setConfirmOpen(false);
-              onHandled();
-            }}
-            qualificationId={item.id}
-            draftId={draft.draftId}
-          />
-        ) : null}
+        <SendConfirmDialog
+          open={confirmOpen}
+          text={draftText}
+          onCancel={() => setConfirmOpen(false)}
+          onSent={() => {
+            setConfirmOpen(false);
+            onHandled();
+          }}
+          qualificationId={item.id}
+          projectId={projectId}
+          draftId={draft?.draftId ?? null}
+        />
       </div>
     </div>
   );
