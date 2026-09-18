@@ -307,7 +307,7 @@ export function ThreadsTab() {
           )}
 
           {total > pageSize ? (
-            <div className="flex items-center justify-between border-t border-zinc-200 px-5 py-3 text-sm">
+            <div className="flex items-center justify-center gap-4 border-t border-zinc-200 px-5 py-3 text-sm">
               <button
                 type="button"
                 onClick={() => setPage((p) => Math.max(1, p - 1))}

@@ -112,7 +112,10 @@ export function MailboxesTab() {
         `Каталог Google: всего ящиков ${res.total}, новых ${res.added}`
         + (res.suspended ? `, заблокированных ${res.suspended}` : '')
         + (res.missing ? `, пропало из каталога ${res.missing}` : '')
-        + '. Новые ящики выключены — отметьте галочками те, с которых шлём.',
+        + '. Новые ящики выключены — отметьте галочками те, с которых шлём.'
+        + (res.failed.length
+          ? ` Не прочитался каталог: ${res.failed.map((f) => `${f.account} (${f.error})`).join('; ')}.`
+          : ''),
       );
       await load(page);
     } catch (err) {
@@ -374,7 +377,14 @@ export function MailboxesTab() {
                           <div className="mt-0.5 text-xs text-amber-600">{mailbox.last_error}</div>
                         ) : null}
                       </td>
-                      <td className="px-3 py-2.5 text-zinc-600">{providerLabel(mailbox.provider)}</td>
+                      <td className="px-3 py-2.5 text-zinc-600">
+                        <div>{providerLabel(mailbox.provider)}</div>
+                        {/* Из какого Workspace пришёл ящик: аккаунтов может
+                            быть несколько, и без этого не понять, чей он. */}
+                        {mailbox.google_account ? (
+                          <div className="mt-0.5 text-xs text-zinc-400">{mailbox.google_account}</div>
+                        ) : null}
+                      </td>
                       {/* Галочка прямо в строке: выбирать ящики по одному
                           удобнее здесь, а пачкой — панелью над таблицей. */}
                       <td className="px-3 py-2.5">
@@ -387,7 +397,7 @@ export function MailboxesTab() {
                             }
                             className="h-4 w-4 cursor-pointer rounded border-zinc-300"
                           />
-                          {mailbox.enabled ? 'Шлём' : 'Не шлём'}
+                          Шлём
                         </label>
                       </td>
                       <td className="px-3 py-2.5">
@@ -463,7 +473,7 @@ export function MailboxesTab() {
         )}
 
         {total > PAGE_SIZE ? (
-          <div className="flex items-center justify-between border-t border-zinc-200 px-5 py-3 text-sm">
+          <div className="flex items-center justify-center gap-4 border-t border-zinc-200 px-5 py-3 text-sm">
             <button
               type="button"
               onClick={() => setPage((p) => Math.max(1, p - 1))}

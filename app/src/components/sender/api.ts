@@ -10,6 +10,8 @@ export interface MailboxDto {
   enabled: boolean;
   /** Состояние ящика в самом Workspace на момент последней синхронизации. */
   google_state: 'active' | 'suspended' | 'missing' | null;
+  /** Админ Workspace, из чьего каталога пришёл ящик. */
+  google_account: string | null;
   email: string;
   display_name: string | null;
   username: string;
@@ -119,6 +121,8 @@ export interface GoogleSyncResult {
   suspended: number;
   missing: number;
   total: number;
+  /** Аккаунты, чей каталог Google не отдал. */
+  failed: { account: string; error: string }[];
 }
 
 export function googleWorkspaceStatus() {
