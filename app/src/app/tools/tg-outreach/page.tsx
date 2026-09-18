@@ -42,7 +42,10 @@ import {
   Folder,
   Move,
   Pencil,
+  Archive,
 } from 'lucide-react';
+import { AccountArchiveSection, ArchiveAccountsDialog } from '@/components/tg-outreach/AccountArchive';
+import type { ArchiveReason } from '@/lib/tgOutreach/accountArchive';
 import DashboardTab from '@/components/tg-outreach/DashboardTab';
 import BaseComparison from '@/components/tg-outreach/BaseComparison';
 import { AccountPicker } from '@/components/tg-outreach/AccountPicker';
@@ -2265,6 +2268,13 @@ function CampaignAccountsTab({
   firstTouchPerDay: number;
 }) {
   const [accounts, setAccounts] = useState<OutreachAccount[]>([]);
+  /** Архив кампании — отдельным списком: в основной архивные не приходят. */
+  const [archivedAccounts, setArchivedAccounts] = useState<OutreachAccount[]>([]);
+  /** Кого убираем в архив — открытое окно выбора причины. */
+  const [archiveTarget, setArchiveTarget] = useState<string[] | null>(null);
+  const [archiveSaving, setArchiveSaving] = useState(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [restoringIds, setRestoringIds] = useState<string[]>([]);
   const [proxies, setProxies] = useState<OutreachProxy[]>([]);
   /** Адреса прокси, занятые аккаунтами по всему порталу (не только этой кампании). */
   const [takenUrls, setTakenUrls] = useState<string[]>([]);
@@ -2386,7 +2396,7 @@ function CampaignAccountsTab({
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [accRes, proxRes, errRes, sendRes] = await Promise.all([
+    const [accRes, proxRes, errRes, sendRes, archRes] = await Promise.all([
       authFetch(`${API_BASE}/accounts?campaign_id=${campaignId}`),
       authFetch(`${API_BASE}/proxies?campaign_id=${campaignId}`),
       // Bulk error counts in last 24h — cheap (one query, grouped server-side).
@@ -2394,10 +2404,15 @@ function CampaignAccountsTab({
       authFetch(`${API_BASE}/campaigns/${campaignId}/accounts/error-counts?range=24h`),
       // Отправки по аккаунтам — колонка «Рассылка» и счётчик «рассылают N».
       authFetch(`${API_BASE}/campaigns/${campaignId}/accounts/sending`),
+      authFetch(`${API_BASE}/accounts?campaign_id=${campaignId}&archived=1`),
     ]);
     if (accRes.ok) {
       const d = await accRes.json() as { items: OutreachAccount[] };
       setAccounts(d.items);
+    }
+    if (archRes.ok) {
+      const d = await archRes.json() as { items: OutreachAccount[] };
+      setArchivedAccounts(d.items);
     }
     if (proxRes.ok) {
       const d = await proxRes.json() as { items: OutreachProxy[]; taken_urls?: string[] };
@@ -2685,6 +2700,46 @@ function CampaignAccountsTab({
     }
   };
 
+  const archiveAccounts = async (reason: ArchiveReason, note: string) => {
+    if (!archiveTarget?.length) return;
+    setArchiveSaving(true);
+    setArchiveError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/accounts/archive`, {
+        method: 'POST',
+        body: JSON.stringify({ campaign_id: campaignId, ids: archiveTarget, reason, note }),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        setArchiveError(d?.error ?? `Не удалось убрать в архив (HTTP ${res.status})`);
+        return;
+      }
+      setArchiveTarget(null);
+      clear();
+      void load();
+    } finally {
+      setArchiveSaving(false);
+    }
+  };
+
+  const restoreAccounts = async (ids: string[]) => {
+    setRestoringIds((prev) => [...prev, ...ids]);
+    try {
+      const res = await authFetch(`${API_BASE}/accounts/archive`, {
+        method: 'DELETE',
+        body: JSON.stringify({ campaign_id: campaignId, ids }),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => null)) as { error?: string } | null;
+        alert(d?.error ?? `Не удалось вернуть из архива (HTTP ${res.status})`);
+        return;
+      }
+      void load();
+    } finally {
+      setRestoringIds((prev) => prev.filter((x) => !ids.includes(x)));
+    }
+  };
+
   const toggleActive = async (id: string, current: boolean) => {
     await authFetch(`${API_BASE}/accounts/${id}`, {
       method: 'PUT',
@@ -2937,6 +2992,21 @@ function CampaignAccountsTab({
 
   return (
     <div className="space-y-4">
+      <AccountArchiveSection
+        items={archivedAccounts}
+        restoringIds={restoringIds}
+        onRestore={(ids) => { void restoreAccounts(ids); }}
+      />
+      {archiveTarget && (
+        <ArchiveAccountsDialog
+          count={archiveTarget.length}
+          saving={archiveSaving}
+          error={archiveError}
+          onCancel={() => { setArchiveTarget(null); setArchiveError(null); }}
+          onConfirm={(reason, note) => { void archiveAccounts(reason, note); }}
+        />
+      )}
+
       <div className="flex items-center justify-between flex-wrap gap-2">
         <span className="text-sm font-medium text-gray-700">
           Аккаунты кампании <span className="text-gray-400 font-normal">({accounts.length})</span>
@@ -3224,6 +3294,15 @@ function CampaignAccountsTab({
           /* Проставить цену выбранным: партия могла приехать двумя чеками, и
              тогда цена у половины строк своя. Пустое поле стирает цену. */
           <span className="inline-flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => { setArchiveError(null); setArchiveTarget([...selectedIds]); }}
+              title="Убрать выбранные аккаунты в архив с причиной: они выключатся и пропадут из списка"
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer"
+            >
+              <Archive className="h-3.5 w-3.5" />
+              В архив
+            </button>
             <input
               type="number"
               min={0}
@@ -3583,6 +3662,10 @@ function CampaignAccountsTab({
                   <button type="button" onClick={() => setSelectedAccount(a)} title="Логи и информация"
                     className="p-1.5 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer">
                     <ScrollText className="h-3.5 w-3.5" />
+                  </button>
+                  <button type="button" onClick={() => { setArchiveError(null); setArchiveTarget([a.id]); }} title="Убрать в архив"
+                    className="p-1.5 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition cursor-pointer">
+                    <Archive className="h-3.5 w-3.5" />
                   </button>
                   <button type="button" onClick={() => { void deleteAccount(a.id); }} title="Удалить аккаунт"
                     className="p-1.5 rounded-lg text-gray-400 hover:text-rose-600 hover:bg-rose-50 transition cursor-pointer">

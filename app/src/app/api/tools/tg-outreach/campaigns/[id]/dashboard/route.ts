@@ -113,7 +113,9 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         supabase
           .from('tg_outreach_accounts')
           .select('id, session_name, is_active, check_status, checked_at')
-          .eq('campaign_id', campaignId),
+          .eq('campaign_id', campaignId)
+          // Архив не считаем: это уже не парк кампании, а его история.
+          .is('archived_at', null),
         // Один активный прогрев на кампанию (уникальный индекс в БД) — нужен
         // только чтобы понять, греется ли партия целиком прямо сейчас.
         supabase
