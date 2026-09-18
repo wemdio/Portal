@@ -21,7 +21,8 @@ async function fetchWithAuth<T>(path: string, options?: RequestInit): Promise<T>
 export interface ProjectListItem {
   id: string;
   client: string;
-  hasKnowledgeBase: boolean;
+  /** Почему по проекту не собрать ответ (сейчас — только нет брифа); null — всё есть. */
+  missingReason: string | null;
 }
 
 export function fetchProjects() {
@@ -76,7 +77,7 @@ export function fetchGlobalKnowledgeBase() {
 }
 
 export function fetchReplies(projectId: string) {
-  return fetchWithAuth<{ replies: ReplyListItem[]; needsKnowledgeBase: boolean }>(
+  return fetchWithAuth<{ replies: ReplyListItem[]; missingReason: string | null }>(
     `${BASE}/projects/${projectId}/replies`,
   );
 }

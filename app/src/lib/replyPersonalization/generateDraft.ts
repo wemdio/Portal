@@ -1,5 +1,5 @@
 import { buildReplyPrompt } from './buildPrompt';
-import { getGlobalKnowledgeBase, getKnowledgeBase, getProjectBrief, insertDraft, resolveBrief } from './db';
+import { getGlobalKnowledgeBase, getKnowledgeBaseOrEmpty, getProjectBrief, insertDraft, resolveBrief } from './db';
 import { generateReplyWithSearch, REPLY_MODEL_ID } from './geminiClient';
 import { fetchFullThread } from './instantlyThread';
 import { resolveProjectReply } from './projectReply';
@@ -36,14 +36,18 @@ export async function generateDraftForQualification(
   const startedAt = Date.now();
 
   const [kb, projectBrief, globalKb] = await Promise.all([
-    getKnowledgeBase(projectId),
+    getKnowledgeBaseOrEmpty(projectId),
     getProjectBrief(projectId),
     getGlobalKnowledgeBase(),
   ]);
-  if (!kb) throw new GenerateDraftError('У проекта не заполнена база знаний', 409);
   // Карточка проекта в приоритете; её запасной вариант из модалки нужен, пока
-  // бриф там не заполнен, иначе ответить лиду сегодня было бы нечем.
+  // бриф там не заполнен, иначе ответить лиду сегодня было бы нечем. Без брифа
+  // ИИ не из чего взять суть продукта — это единственный повод отказать:
+  // тон и пример подстрахованы глобальными настройками.
   const brief = resolveBrief(projectBrief, kb);
+  if (!brief.trim()) {
+    throw new GenerateDraftError('В карточке проекта нет брифа — заполните его там или в базе знаний проекта', 409);
+  }
 
   const reply = await resolveProjectReply(projectId, qualificationId);
   if (!reply) throw new GenerateDraftError('Письмо не найдено', 404);

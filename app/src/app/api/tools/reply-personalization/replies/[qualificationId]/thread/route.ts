@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
-import { getKnowledgeBase } from '@/lib/replyPersonalization/db';
 import { fetchFullThread } from '@/lib/replyPersonalization/instantlyThread';
 import { resolveProjectReply } from '@/lib/replyPersonalization/projectReply';
 import type { ThreadMessage } from '@/lib/replyPersonalization/types';
@@ -48,9 +47,6 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
   if (cached && cached.expiresAt > Date.now()) {
     return NextResponse.json({ messages: cached.messages, contextComplete: cached.contextComplete });
   }
-
-  const kb = await getKnowledgeBase(projectId);
-  if (!kb) return NextResponse.json({ error: 'У проекта не заполнена база знаний' }, { status: 409 });
 
   const reply = await resolveProjectReply(projectId, qualificationId);
   if (!reply) return NextResponse.json({ error: 'Письмо не найдено' }, { status: 404 });

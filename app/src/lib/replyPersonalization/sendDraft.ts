@@ -3,7 +3,7 @@
 // бизнес-логика квалификатора, её мы не трогаем).
 
 import { replyToEmail } from '@/lib/instantly/client';
-import { getDraftById, getKnowledgeBase, markDraftSent, updateDraftText } from './db';
+import { getDraftById, markDraftSent, updateDraftText } from './db';
 import { resolveProjectReply } from './projectReply';
 
 /** Щедрый верхний предел тела письма: реальный ответ 90-170 слов, это защита от мусора, не лимит стиля. */
@@ -37,9 +37,6 @@ export async function sendDraft(draftId: string, finalText: string): Promise<voi
   const { qualification, accountId } = reply;
   if (!qualification.instantlyEmailId) throw new SendDraftError('Нет id письма для ответа в Instantly', 422);
   if (!qualification.eaccount) throw new SendDraftError('Не определён почтовый ящик отправителя (eaccount)', 422);
-
-  const kb = await getKnowledgeBase(draft.projectId);
-  if (!kb) throw new SendDraftError('У проекта не заполнена база знаний', 409);
 
   await updateDraftText(draftId, finalText);
 
