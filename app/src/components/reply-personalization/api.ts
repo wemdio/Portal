@@ -65,15 +65,22 @@ export function saveKnowledgeBase(projectId: string, patch: Omit<KnowledgeBaseDt
   });
 }
 
-export function saveGlobalKnowledgeBase(patch: { toneNotes: string; exampleCase: string }) {
-  return fetchWithAuth<{ global: GlobalKnowledgeBaseDto }>(`${BASE}/global-kb`, {
+/** systemPrompt/defaultSystemPrompt приходят только админу. */
+export interface GlobalSettingsResponse {
+  global: GlobalKnowledgeBaseDto;
+  systemPrompt?: string;
+  defaultSystemPrompt?: string;
+}
+
+export function saveGlobalKnowledgeBase(patch: { toneNotes: string; exampleCase: string; systemPrompt?: string }) {
+  return fetchWithAuth<GlobalSettingsResponse>(`${BASE}/global-kb`, {
     method: 'PUT',
     body: JSON.stringify(patch),
   });
 }
 
 export function fetchGlobalKnowledgeBase() {
-  return fetchWithAuth<{ global: GlobalKnowledgeBaseDto }>(`${BASE}/global-kb`);
+  return fetchWithAuth<GlobalSettingsResponse>(`${BASE}/global-kb`);
 }
 
 export function fetchReplies(projectId: string) {

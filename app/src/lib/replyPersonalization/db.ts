@@ -221,6 +221,37 @@ export async function getGlobalKnowledgeBase(): Promise<GlobalKnowledgeBase> {
   };
 }
 
+export async function isAdminUser(userId: string): Promise<boolean> {
+  const { admin } = requireClients();
+  const { data } = await admin.from('profiles').select('role').eq('id', userId).single();
+  return (data?.role as string) === 'admin';
+}
+
+/**
+ * Системный промпт (правила письма) из глобальных настроек; пусто — берутся
+ * стандартные правила из кода. Отдельно от getGlobalKnowledgeBase намеренно:
+ * та уходит всем, кто открыл инструмент, а промпт видит только админ.
+ */
+export async function getGlobalSystemPrompt(): Promise<string> {
+  const { admin } = requireClients();
+  const { data, error } = await admin
+    .from('reply_personalization_global_kb')
+    .select('system_prompt')
+    .eq('id', 1)
+    .maybeSingle();
+  if (error) throw new Error(`global system prompt query failed: ${error.message}`);
+  return (data?.system_prompt as string) ?? '';
+}
+
+export async function saveGlobalSystemPrompt(systemPrompt: string, userId: string): Promise<void> {
+  const { admin } = requireClients();
+  const { error } = await admin.from('reply_personalization_global_kb').upsert(
+    { id: 1, system_prompt: systemPrompt, updated_by: userId, updated_at: new Date().toISOString() },
+    { onConflict: 'id' },
+  );
+  if (error) throw new Error(`global system prompt upsert failed: ${error.message}`);
+}
+
 export async function upsertGlobalKnowledgeBase(
   patch: Pick<GlobalKnowledgeBase, 'toneNotes' | 'exampleCase'>,
   userId: string,

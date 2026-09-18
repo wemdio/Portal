@@ -1,5 +1,5 @@
 import { buildReplyPrompt } from './buildPrompt';
-import { getGlobalKnowledgeBase, getKnowledgeBaseOrEmpty, getProjectBrief, insertDraft, resolveBrief } from './db';
+import { getGlobalKnowledgeBase, getGlobalSystemPrompt, getKnowledgeBaseOrEmpty, getProjectBrief, insertDraft, resolveBrief } from './db';
 import { generateReplyWithSearch, REPLY_MODEL_ID } from './geminiClient';
 import { fetchFullThread } from './instantlyThread';
 import { resolveProjectReply } from './projectReply';
@@ -35,10 +35,11 @@ export async function generateDraftForQualification(
 ): Promise<GenerateDraftResult> {
   const startedAt = Date.now();
 
-  const [kb, projectBrief, globalKb] = await Promise.all([
+  const [kb, projectBrief, globalKb, systemPrompt] = await Promise.all([
     getKnowledgeBaseOrEmpty(projectId),
     getProjectBrief(projectId),
     getGlobalKnowledgeBase(),
+    getGlobalSystemPrompt(),
   ]);
   // Карточка проекта в приоритете; её запасной вариант из модалки нужен, пока
   // бриф там не заполнен, иначе ответить лиду сегодня было бы нечем. Без брифа
@@ -71,7 +72,7 @@ export async function generateDraftForQualification(
     throw new GenerateDraftError('Нет текста переписки для генерации ответа', 422);
   }
 
-  const messages = buildReplyPrompt({ kb, globalKb, brief, qualification, thread, contextComplete });
+  const messages = buildReplyPrompt({ kb, globalKb, systemPrompt, brief, qualification, thread, contextComplete });
   const result = await generateReplyWithSearch(messages);
 
   const draft = await insertDraft({
