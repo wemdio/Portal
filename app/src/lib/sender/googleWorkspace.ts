@@ -27,7 +27,10 @@ import { google } from 'googleapis';
  * Переменные окружения:
  *   SENDER_GOOGLE_SA_EMAIL       — почта служебного аккаунта
  *   SENDER_GOOGLE_SA_PRIVATE_KEY — приватный ключ из JSON («\n» вместо переносов)
- *   SENDER_GOOGLE_ADMIN_EMAIL    — супер-админ, от чьего имени читается каталог
+ *   SENDER_GOOGLE_ADMIN_EMAIL    — супер-админ, от чьего имени читается каталог;
+ *                                  несколько Workspace — адреса через запятую
+ *                                  (в каждом нужно выдать делегирование тому же
+ *                                  Client ID)
  */
 
 /** SMTP-отправка у Google требует полный доступ к почте; gmail.send не подходит. */
@@ -49,15 +52,25 @@ export class GoogleWorkspaceNotConfigured extends Error {}
 interface Credentials {
   clientEmail: string;
   privateKey: string;
-  adminEmail: string;
+}
+
+/**
+ * Аккаунты Workspace, чьи каталоги зеркалим: по одному супер-админу на каждый.
+ * Ящик входит по ключу на свой адрес, поэтому для отправки неважно, из какого
+ * Workspace он пришёл, — список нужен только для чтения каталогов.
+ */
+export function workspaceAccounts(): string[] {
+  return (process.env.SENDER_GOOGLE_ADMIN_EMAIL ?? '')
+    .split(',')
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean);
 }
 
 function credentials(): Credentials {
   const clientEmail = process.env.SENDER_GOOGLE_SA_EMAIL ?? '';
   const rawKey = process.env.SENDER_GOOGLE_SA_PRIVATE_KEY ?? '';
-  const adminEmail = process.env.SENDER_GOOGLE_ADMIN_EMAIL ?? '';
 
-  if (!clientEmail || !rawKey || !adminEmail) {
+  if (!clientEmail || !rawKey || !workspaceAccounts().length) {
     throw new GoogleWorkspaceNotConfigured(
       'Подключение к Google Workspace не настроено: нужны SENDER_GOOGLE_SA_EMAIL, '
       + 'SENDER_GOOGLE_SA_PRIVATE_KEY и SENDER_GOOGLE_ADMIN_EMAIL в окружении.',
@@ -65,14 +78,14 @@ function credentials(): Credentials {
   }
 
   // В .env ключ лежит одной строкой с «\n» — иначе переносы ломают формат файла.
-  return { clientEmail, privateKey: rawKey.replace(/\\n/g, '\n'), adminEmail };
+  return { clientEmail, privateKey: rawKey.replace(/\\n/g, '\n') };
 }
 
 export function isGoogleWorkspaceConfigured(): boolean {
   return Boolean(
     process.env.SENDER_GOOGLE_SA_EMAIL
     && process.env.SENDER_GOOGLE_SA_PRIVATE_KEY
-    && process.env.SENDER_GOOGLE_ADMIN_EMAIL,
+    && workspaceAccounts().length,
   );
 }
 
@@ -111,13 +124,13 @@ export function forgetMailboxToken(email: string): void {
 }
 
 /**
- * Список ящиков домена из каталога Workspace.
+ * Список ящиков из каталога одного Workspace.
  *
- * Читается от имени супер-админа: у служебного аккаунта самого по себе доступа
- * к каталогу нет, делегирование выдаётся на конкретного пользователя.
+ * Читается от имени его супер-админа: у служебного аккаунта самого по себе
+ * доступа к каталогу нет, делегирование выдаётся на конкретного пользователя.
  */
-export async function listWorkspaceMailboxes(): Promise<WorkspaceUser[]> {
-  const { clientEmail, privateKey, adminEmail } = credentials();
+export async function listWorkspaceMailboxes(adminEmail: string): Promise<WorkspaceUser[]> {
+  const { clientEmail, privateKey } = credentials();
   const auth = new google.auth.JWT({
     email: clientEmail,
     key: privateKey,

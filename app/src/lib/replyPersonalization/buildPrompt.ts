@@ -31,6 +31,11 @@ export function buildReplyPrompt(input: {
 
   const toneNotes = preferProject(kb.toneNotes, globalKb.toneNotes);
   const exampleCase = preferProject(kb.exampleCase, globalKb.exampleCase);
+  // Поля фактов в форме больше нет (всё есть в брифе) — блок попадает в
+  // промпт, только если у проекта осталось старое заполненное значение.
+  const productFacts = kb.productFacts.trim()
+    ? `\nДополнительные факты о продукте:\n${kb.productFacts}\n`
+    : '';
 
   const system = `${UNIVERSAL_REPLY_RULES}
 
@@ -38,10 +43,7 @@ export function buildReplyPrompt(input: {
 
 Бриф:
 ${brief || '(бриф проекта не заполнен)'}
-
-Факты о продукте и что можно предлагать:
-${kb.productFacts || '(факты не заполнены)'}
-
+${productFacts}
 Тон и ограничения этого проекта:
 ${toneNotes || '(особых ограничений нет, используй деловой тон по умолчанию)'}
 
