@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, type ReactNode } from 'react';
-import { Loader2, Mail } from 'lucide-react';
-import { createCampaign } from './api';
+import { useRef, useState, type ReactNode } from 'react';
+import { FileSpreadsheet, Loader2, Mail } from 'lucide-react';
+import { createCampaign, uploadRecipients } from './api';
 import { MailboxPickerModal, type PickedMailbox } from './MailboxPickerModal';
 import { SenderModal } from './SenderModal';
 
@@ -81,13 +81,19 @@ function Step({
 
 interface Props {
   onClose: () => void;
-  onCreated: () => void | Promise<void>;
+  /** notice — итог для списка кампаний: сколько получателей легло или почему база не загрузилась. */
+  onCreated: (result: { notice?: string; error?: string }) => void | Promise<void>;
 }
 
 export function CampaignFormModal({ onClose, onCreated }: Props) {
   const [name, setName] = useState('');
   const [mailboxes, setMailboxes] = useState<PickedMailbox[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
+  // База получателей выбирается прямо в форме: раньше её можно было загрузить
+  // только кнопкой в списке уже созданной кампании, и из формы было непонятно,
+  // кому вообще уйдёт письмо.
+  const [recipientsFile, setRecipientsFile] = useState<File | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   // Кампания — это одно письмо. Follow-up'ы убраны: цепочку ведём не догоняющими
   // письмами, а работой с ответами. Формат запроса к API прежний (список писем),
   // и планировщик сам закрывает получателя после первого письма.
@@ -113,9 +119,10 @@ export function CampaignFormModal({ onClose, onCreated }: Props) {
    */
   const steps = [
     { no: 1, title: 'название', done: Boolean(name.trim()) },
-    { no: 2, title: 'ящики', done: mailboxes.length > 0 },
-    { no: 3, title: 'письмо', done: Boolean(subject.trim() && body.trim()) },
-    { no: 4, title: 'дни отправки', done: weekdays.length > 0 },
+    { no: 2, title: 'база получателей', done: recipientsFile != null },
+    { no: 3, title: 'ящики', done: mailboxes.length > 0 },
+    { no: 4, title: 'письмо', done: Boolean(subject.trim() && body.trim()) },
+    { no: 5, title: 'дни отправки', done: weekdays.length > 0 },
   ];
   const missing = steps.filter((step) => !step.done);
 
@@ -124,23 +131,42 @@ export function CampaignFormModal({ onClose, onCreated }: Props) {
       setError(`Заполните шаги: ${missing.map((step) => `${step.no} — ${step.title}`).join(', ')}`);
       return;
     }
+    if (!recipientsFile) return;
     setCreating(true);
     setError(null);
+    let campaignId: string;
     try {
-      await createCampaign({
+      ({ id: campaignId } = await createCampaign({
         name,
         mailboxIds: mailboxes.map((m) => m.id),
         steps: [{ delayDays: 0, subject, body }],
         sendHourFrom: hourFrom,
         sendHourTo: hourTo,
         sendWeekdays: weekdays,
-      });
-      await onCreated();
-      onClose();
+      }));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось создать кампанию');
       setCreating(false);
+      return;
     }
+
+    // Кампания уже создана — если база не легла, окно всё равно закрываем:
+    // повторное «Создать» завело бы дубль. Базу тогда догружают кнопкой в списке.
+    try {
+      const res = await uploadRecipients(campaignId, recipientsFile);
+      await onCreated({
+        notice:
+          `Кампания создана, получателей: ${res.imported}. Пропущено: ${res.skippedInvalid} с плохим адресом, ` +
+          `${res.skippedDuplicates} дублей, ${res.skippedSuppressed} из стоп-листа. Можно запускать.`,
+      });
+    } catch (err) {
+      await onCreated({
+        error: `Кампания создана, но база не загрузилась: ${
+          err instanceof Error ? err.message : 'ошибка'
+        }. Загрузите её кнопкой «База получателей» в списке.`,
+      });
+    }
+    onClose();
   };
 
   const shown = mailboxes.slice(0, SHOWN_MAILBOXES);
@@ -150,7 +176,7 @@ export function CampaignFormModal({ onClose, onCreated }: Props) {
     <>
       <SenderModal
         title="Новая кампания"
-        subtitle="Одно письмо по базе получателей с выбранных ящиков"
+        subtitle="Одно письмо по загруженной базе с выбранных ящиков"
         size="wide"
         onClose={onClose}
         footer={
@@ -193,13 +219,49 @@ export function CampaignFormModal({ onClose, onCreated }: Props) {
             />
           </Step>
 
+          <Step
+            no={2}
+            title="Кому отправлять"
+            done={steps[1].done}
+            hint={recipientsFile ? recipientsFile.name : undefined}
+          >
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => fileRef.current?.click()}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 transition-colors hover:bg-zinc-100"
+              >
+                <FileSpreadsheet className="h-3.5 w-3.5" />
+                {recipientsFile ? 'Другой файл' : 'Загрузить базу'}
+              </button>
+              <span className="text-sm text-zinc-500">
+                {recipientsFile ? recipientsFile.name : 'Файл не выбран'}
+              </span>
+            </div>
+            <p className="mt-2 text-xs text-zinc-500">
+              CSV или Excel до 20 МБ. Нужна колонка с почтой (email или «почта»); остальные колонки —
+              подстановки в письмо, например {'{{company}}'}. Адреса из стоп-листа и дубли пропустим.
+            </p>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".csv,.tsv,.xlsx,.xls"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) setRecipientsFile(file);
+                e.target.value = '';
+              }}
+            />
+          </Step>
+
           {/* Ящиков бывают сотни — в шаге живёт не список, а итог выбора:
               четыре адреса целиком и счётчик остальных. Сам выбор — в окне
               с поиском, иначе форма превращается в простыню из адресов. */}
           <Step
-            no={2}
+            no={3}
             title="Ящики для отправки"
-            done={steps[1].done}
+            done={steps[2].done}
             hint={mailboxes.length ? `Выбрано: ${mailboxes.length}` : undefined}
           >
             <div className="flex flex-wrap items-center gap-3">
@@ -229,7 +291,7 @@ export function CampaignFormModal({ onClose, onCreated }: Props) {
             </div>
           </Step>
 
-          <Step no={3} title="Первое письмо" done={steps[2].done}>
+          <Step no={4} title="Первое письмо" done={steps[3].done}>
             <input
               value={subject}
               onChange={(e) => setSubject(e.target.value)}
@@ -248,9 +310,9 @@ export function CampaignFormModal({ onClose, onCreated }: Props) {
           {/* Часы и дни — одно решение «когда отправлять», поэтому и на экране
               это один шаг, а не две разрозненные строки полей. */}
           <Step
-            no={4}
+            no={5}
             title="Когда отправлять"
-            done={steps[3].done}
+            done={steps[4].done}
             hint={`${hourFrom}:00–${hourTo}:00 · ${weekdaysLabel(weekdays)} · Москва`}
           >
             <div className="flex flex-wrap items-center gap-2 text-sm text-zinc-600">
