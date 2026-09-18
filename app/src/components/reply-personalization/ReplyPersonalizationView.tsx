@@ -1,7 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
-import { Globe, RefreshCw, Settings } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Globe, RefreshCw, Search, Settings, X } from 'lucide-react';
 import { fetchProjects, fetchReplies, type ProjectListItem } from './api';
 import { GlobalKnowledgeForm } from './GlobalKnowledgeForm';
 import { KnowledgeBaseForm } from './KnowledgeBaseForm';
@@ -112,6 +112,15 @@ export function ReplyPersonalizationView() {
 
   const selected = items.find((i) => i.id === selectedId) ?? null;
 
+  // Поиск по списку проектов: их 60, и листать до нужного дольше, чем набрать
+  // пару букв. Ищем по вхождению без учёта регистра и ё/е.
+  const [projectQuery, setProjectQuery] = useState('');
+  const visibleProjects = useMemo(() => {
+    const norm = (v: string) => v.toLowerCase().replace(/ё/g, 'е').trim();
+    const q = norm(projectQuery);
+    return q ? projects.filter((p) => norm(p.client).includes(q)) : projects;
+  }, [projects, projectQuery]);
+
   return (
     <div className="grid h-full min-h-0 grid-cols-[240px_360px_minmax(0,1fr)]">
       {/* Колонка 1: проекты */}
@@ -130,13 +139,40 @@ export function ReplyPersonalizationView() {
             </button>
           ) : null}
         </div>
+        <div className="border-b border-gray-100 px-3 py-2">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" aria-hidden />
+            <input
+              value={projectQuery}
+              onChange={(e) => setProjectQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setProjectQuery('');
+              }}
+              placeholder="Найти проект"
+              aria-label="Найти проект"
+              className="w-full rounded-lg border border-gray-200 bg-white py-1.5 pl-8 pr-7 text-sm text-gray-900 focus:border-blue-400 focus:outline-none"
+            />
+            {projectQuery ? (
+              <button
+                type="button"
+                onClick={() => setProjectQuery('')}
+                aria-label="Очистить поиск"
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+              >
+                <X className="h-3.5 w-3.5" aria-hidden />
+              </button>
+            ) : null}
+          </div>
+        </div>
         <div className="flex-1 overflow-y-auto">
           {projectsLoading ? (
             <div className="p-3 text-sm text-gray-500">Загрузка проектов...</div>
           ) : projects.length === 0 ? (
             <div className="p-3 text-sm text-gray-500">Нет доступных проектов.</div>
+          ) : visibleProjects.length === 0 ? (
+            <div className="p-3 text-sm text-gray-500">Ничего не нашлось по «{projectQuery.trim()}».</div>
           ) : (
-            projects.map((p) => {
+            visibleProjects.map((p) => {
               const isActive = project?.id === p.id;
               return (
                 <div

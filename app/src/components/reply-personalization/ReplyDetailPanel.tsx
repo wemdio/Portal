@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { fetchThread, generateReply, skipReply, type GenerateResponse } from './api';
+import { fetchOpenDraft, fetchThread, generateReply, skipReply, type GenerateResponse } from './api';
 import { SendConfirmDialog } from './SendConfirmDialog';
 import type { ReplyListItem, ThreadMessage } from '@/lib/replyPersonalization/types';
 
@@ -15,6 +15,40 @@ function formatTime(iso?: string) {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+/*
+ * Черновик переживает переход в другое письмо. Каждая генерация стоит денег,
+ * а раньше при возврате к письму поле было пустым, и менеджер генерировал
+ * заново. Теперь:
+ * - черновик ИИ берём из базы (он сохраняется при генерации);
+ * - текст в поле — свой или правленый черновик — держим в браузере;
+ * - если генерация ещё шла, когда ушли из письма, при возврате ждём её
+ *   результат, а не запускаем новую.
+ * localStorage может быть недоступен (приватный режим) — тогда просто
+ * работаем как раньше.
+ */
+const TEXT_KEY = (id: string) => `rp-reply-text:${id}`;
+const GEN_KEY = (id: string) => `rp-reply-generating:${id}`;
+/** Дольше генерация не идёт — старую отметку «генерирую» считаем брошенной. */
+const GEN_MAX_MS = 5 * 60_000;
+const GEN_POLL_MS = 4_000;
+
+function readStore(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStore(key: string, value: string | null) {
+  try {
+    if (value === null) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, value);
+  } catch {
+    // без хранилища просто не запоминаем
+  }
 }
 
 /**
@@ -61,20 +95,78 @@ export function ReplyDetailPanel({
     };
   }, [item.id, projectId]);
 
+  // Вернуть в поле то, что было: свой текст из браузера, иначе сохранённый
+  // черновик ИИ; если генерация ещё идёт — дождаться её.
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+    const savedText = readStore(TEXT_KEY(item.id));
+    const genStartedAt = Number(readStore(GEN_KEY(item.id)) ?? 0);
+    const genInFlight = genStartedAt > 0 && Date.now() - genStartedAt < GEN_MAX_MS;
+    if (savedText) setDraftText(savedText);
+    if (genInFlight) setGenerating(true);
+
+    const apply = (found: (GenerateResponse & { createdAt: string }) | null) => {
+      if (!found) return false;
+      setDraft(found);
+      // Свой текст главнее: он мог быть правкой этого же черновика.
+      if (!readStore(TEXT_KEY(item.id))) setDraftText(found.text);
+      return true;
+    };
+
+    const poll = async () => {
+      try {
+        const { draft: found } = await fetchOpenDraft(item.id);
+        if (cancelled) return;
+        const fresh = found && Date.parse(found.createdAt) >= genStartedAt - 60_000;
+        const stillRunning = readStore(GEN_KEY(item.id)) !== null && Date.now() - genStartedAt < GEN_MAX_MS;
+        if (genInFlight && !fresh && stillRunning) {
+          timer = window.setTimeout(poll, GEN_POLL_MS);
+          return;
+        }
+        apply(found);
+        setGenerating(false);
+      } catch {
+        if (!cancelled) setGenerating(false);
+      }
+    };
+    void poll();
+
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [item.id]);
+
+  const updateText = (value: string) => {
+    setDraftText(value);
+    writeStore(TEXT_KEY(item.id), value.trim() ? value : null);
+  };
+
+  const forgetLocal = () => {
+    writeStore(TEXT_KEY(item.id), null);
+    writeStore(GEN_KEY(item.id), null);
+  };
+
   const handleGenerate = async () => {
     // Свой набранный текст молча не затираем: генерация кладёт черновик в то
     // же поле, где менеджер мог уже написать ответ.
     const typedByHand = draftText.trim() && draftText !== draft?.text;
     if (typedByHand && !window.confirm('Заменить написанный текст черновиком от ИИ?')) return;
+    const qualificationId = item.id;
     setGenerating(true);
     setError(null);
+    writeStore(GEN_KEY(qualificationId), String(Date.now()));
     try {
-      const result = await generateReply(item.id, projectId);
+      const result = await generateReply(qualificationId, projectId);
+      // Новый черновик заменяет набранный текст — и в браузере тоже.
+      writeStore(TEXT_KEY(qualificationId), null);
       setDraft(result);
       setDraftText(result.text);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось сгенерировать ответ');
     } finally {
+      writeStore(GEN_KEY(qualificationId), null);
       setGenerating(false);
     }
   };
@@ -87,6 +179,7 @@ export function ReplyDetailPanel({
     setSkipping(true);
     try {
       await skipReply(item.id, projectId);
+      forgetLocal();
       onHandled();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось пропустить письмо');
@@ -164,7 +257,7 @@ export function ReplyDetailPanel({
 
         <textarea
           value={draftText}
-          onChange={(e) => setDraftText(e.target.value)}
+          onChange={(e) => updateText(e.target.value)}
           rows={6}
           placeholder="Напишите ответ сами или нажмите «Сгенерировать ответ»"
           className="w-full rounded-lg border border-gray-300 p-3 text-sm"
@@ -205,6 +298,7 @@ export function ReplyDetailPanel({
           onCancel={() => setConfirmOpen(false)}
           onSent={() => {
             setConfirmOpen(false);
+            forgetLocal();
             onHandled();
           }}
           qualificationId={item.id}
