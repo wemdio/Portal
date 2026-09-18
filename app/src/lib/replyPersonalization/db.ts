@@ -221,6 +221,37 @@ export async function getGlobalKnowledgeBase(): Promise<GlobalKnowledgeBase> {
   };
 }
 
+export async function isAdminUser(userId: string): Promise<boolean> {
+  const { admin } = requireClients();
+  const { data } = await admin.from('profiles').select('role').eq('id', userId).single();
+  return (data?.role as string) === 'admin';
+}
+
+/**
+ * Системный промпт (правила письма) из глобальных настроек; пусто — берутся
+ * стандартные правила из кода. Отдельно от getGlobalKnowledgeBase намеренно:
+ * та уходит всем, кто открыл инструмент, а промпт видит только админ.
+ */
+export async function getGlobalSystemPrompt(): Promise<string> {
+  const { admin } = requireClients();
+  const { data, error } = await admin
+    .from('reply_personalization_global_kb')
+    .select('system_prompt')
+    .eq('id', 1)
+    .maybeSingle();
+  if (error) throw new Error(`global system prompt query failed: ${error.message}`);
+  return (data?.system_prompt as string) ?? '';
+}
+
+export async function saveGlobalSystemPrompt(systemPrompt: string, userId: string): Promise<void> {
+  const { admin } = requireClients();
+  const { error } = await admin.from('reply_personalization_global_kb').upsert(
+    { id: 1, system_prompt: systemPrompt, updated_by: userId, updated_at: new Date().toISOString() },
+    { onConflict: 'id' },
+  );
+  if (error) throw new Error(`global system prompt upsert failed: ${error.message}`);
+}
+
 export async function upsertGlobalKnowledgeBase(
   patch: Pick<GlobalKnowledgeBase, 'toneNotes' | 'exampleCase'>,
   userId: string,
@@ -377,6 +408,30 @@ export async function insertSkip(input: {
     created_by: input.createdBy,
   });
   if (error) throw new Error(`skip insert failed: ${error.message}`);
+}
+
+/**
+ * Неотправленный черновик ИИ по письму — чтобы вернуть его в поле ответа,
+ * когда менеджер ушёл в другое письмо и вернулся. Каждая генерация стоит
+ * денег, и терять её из-за переключения чата нельзя.
+ * Берём только если самая свежая запись по письму — черновик ИИ: после
+ * отправки или пропуска старый черновик уже не нужен. Ручные записи
+ * (model='manual') — техническая обёртка отправки, не черновик.
+ */
+export async function getOpenDraft(qualificationId: string): Promise<DraftRow | null> {
+  const { admin } = requireClients();
+  const { data, error } = await admin
+    .from('reply_personalization_drafts')
+    .select()
+    .eq('qualification_id', qualificationId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`open draft lookup failed: ${error.message}`);
+  if (!data) return null;
+  const draft = mapDraftRow(data);
+  if (draft.status !== 'draft' || draft.model === 'manual' || !draft.generatedText?.trim()) return null;
+  return draft;
 }
 
 export async function getDraftById(draftId: string): Promise<DraftRow | null> {

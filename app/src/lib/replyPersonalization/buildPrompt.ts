@@ -21,6 +21,8 @@ export function buildReplyPrompt(input: {
   kb: KnowledgeBase;
   /** Глобальный тон/пример — fallback для проектов без своих значений. */
   globalKb: Pick<GlobalKnowledgeBase, 'toneNotes' | 'exampleCase'>;
+  /** Правила письма из глобальных настроек (правит админ); пусто — стандартные из кода. */
+  systemPrompt?: string;
   /** Бриф проекта живьём из карточки (projects.brief_text), не из базы знаний. */
   brief: string;
   qualification: QualificationRow;
@@ -28,6 +30,7 @@ export function buildReplyPrompt(input: {
   contextComplete: boolean;
 }): PromptMessage[] {
   const { kb, globalKb, brief, qualification, thread, contextComplete } = input;
+  const rules = input.systemPrompt?.trim() || UNIVERSAL_REPLY_RULES;
 
   const toneNotes = preferProject(kb.toneNotes, globalKb.toneNotes);
   const exampleCase = preferProject(kb.exampleCase, globalKb.exampleCase);
@@ -37,7 +40,7 @@ export function buildReplyPrompt(input: {
     ? `\nДополнительные факты о продукте:\n${kb.productFacts}\n`
     : '';
 
-  const system = `${UNIVERSAL_REPLY_RULES}
+  const system = `${rules}
 
 О продукте/проекте, для которого пишешь письмо:
 
@@ -60,7 +63,8 @@ ${contextComplete ? '' : 'Внимание: полный тред перепис
 
 ${formatThread(thread)}
 
-Напиши следующий ответ от НАС адресату, отвечая на его последнюю реплику.`;
+Напиши следующий ответ от НАС адресату, отвечая на его последнюю реплику.
+Ответ уйдёт на ${qualification.leadEmail} в эту же переписку.`;
 
   return [
     { role: 'system', content: system },

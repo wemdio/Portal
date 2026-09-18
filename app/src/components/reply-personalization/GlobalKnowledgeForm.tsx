@@ -23,6 +23,10 @@ export function GlobalKnowledgeForm({
 }) {
   const [toneNotes, setToneNotes] = useState('');
   const [exampleCase, setExampleCase] = useState('');
+  // Системный промпт — только для админа: сервер отдаёт defaultSystemPrompt
+  // лишь ему, по нему и понимаем, показывать ли блок.
+  const [defaultPrompt, setDefaultPrompt] = useState<string | null>(null);
+  const [systemPrompt, setSystemPrompt] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -30,9 +34,14 @@ export function GlobalKnowledgeForm({
 
   useEffect(() => {
     fetchGlobalKnowledgeBase()
-      .then(({ global }) => {
+      .then(({ global, systemPrompt: prompt, defaultSystemPrompt }) => {
         setToneNotes(global.toneNotes);
         setExampleCase(global.exampleCase);
+        if (defaultSystemPrompt !== undefined) {
+          setDefaultPrompt(defaultSystemPrompt);
+          // Пусто в базе — действует стандартный; показываем его, чтобы было что править.
+          setSystemPrompt(prompt?.trim() ? prompt : defaultSystemPrompt);
+        }
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'Не удалось загрузить'))
       .finally(() => setLoading(false));
@@ -42,7 +51,11 @@ export function GlobalKnowledgeForm({
     setSaving(true);
     setError(null);
     try {
-      await saveGlobalKnowledgeBase({ toneNotes, exampleCase });
+      await saveGlobalKnowledgeBase({
+        toneNotes,
+        exampleCase,
+        ...(defaultPrompt !== null ? { systemPrompt } : {}),
+      });
       setSaved(true);
       window.setTimeout(() => setSaved(false), 2000);
       onSaved?.();
@@ -108,6 +121,46 @@ export function GlobalKnowledgeForm({
                 placeholder="Вставьте письмо, которое хорошо сработало…"
               />
             </div>
+
+            {defaultPrompt !== null ? (
+              <div className="rounded-lg border border-red-200 bg-red-50/40 p-3">
+                <div className="mb-2 flex items-start justify-between gap-3">
+                  <div>
+                    <label className="block text-sm font-medium text-zinc-900">
+                      Системный промпт{' '}
+                      <span className="ml-1 rounded bg-red-100 px-1.5 py-0.5 text-[11px] font-semibold text-red-700">
+                        видят только админы
+                      </span>
+                    </label>
+                    <p className="mt-1 text-xs text-zinc-600">
+                      Общие правила, по которым ИИ пишет каждый ответ во всех проектах: как разобрать реплику
+                      лида, из чего собрать письмо, длина, что нельзя. Бриф, тон, пример письма и переписка
+                      добавляются к нему сами. Правка сразу меняет все следующие черновики — проверьте на
+                      паре писем.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSystemPrompt(defaultPrompt)}
+                    disabled={systemPrompt === defaultPrompt}
+                    className="shrink-0 rounded-md px-2 py-1 text-xs font-medium text-blue-600 transition-colors hover:bg-zinc-100 disabled:opacity-40"
+                  >
+                    Вернуть стандартный
+                  </button>
+                </div>
+                <textarea
+                  value={systemPrompt}
+                  onChange={(e) => setSystemPrompt(e.target.value)}
+                  rows={16}
+                  className={`${CONTROL_CLASS} resize-y font-mono text-xs`}
+                />
+                <p className="mt-1 text-[11px] text-zinc-500">
+                  {systemPrompt === defaultPrompt
+                    ? 'Сейчас действует стандартный промпт — он обновляется вместе с порталом.'
+                    : 'Действует ваш промпт. Обновления стандартного до него не доедут, пока не нажмёте «Вернуть стандартный».'}
+                </p>
+              </div>
+            ) : null}
           </div>
 
           <div className="flex items-center justify-end gap-3 border-t border-zinc-200 px-7 py-4">

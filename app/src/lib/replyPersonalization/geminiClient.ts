@@ -5,11 +5,12 @@
 
 const ENDPOINT = process.env.OPENROUTER_ENDPOINT ?? 'https://router.requesty.ai/v1/chat/completions';
 
-// Id сверен с Requesty Model Library (сентябрь 2026): модель там называется
-// «Gemini 3.1 Pro» с точным id `gemini-3.1-pro-preview` — без vertex/google-
-// префиксов. При смене поколения модели обновить здесь (и только здесь —
-// generateDraft импортирует эту константу).
-export const REPLY_MODEL_ID = process.env.REPLY_PERSONALIZATION_MODEL_ID ?? 'gemini-3.1-pro-preview';
+// Id — ровно как в каталоге Requesty (GET router.requesty.ai/v1/models), с
+// префиксом поставщика. Без префикса («gemini-3.1-pro-preview») такой модели в
+// каталоге нет, и Requesty молча отвечал старшей по списку gemini-3-pro-preview:
+// 18.09.2026 все запросы уходили не в 3.1. Какая модель ответила на самом деле —
+// пишем в черновик из ответа (поле model), а не эту константу.
+export const REPLY_MODEL_ID = process.env.REPLY_PERSONALIZATION_MODEL_ID ?? 'google/gemini-3.1-pro-preview';
 
 const MAX_ATTEMPTS = 3;
 const REQUEST_TIMEOUT_MS = 90_000;
@@ -22,6 +23,8 @@ export class ReplyGenerationError extends Error {}
 export interface GeminiReplyResult {
   text: string;
   sources: { url: string; title?: string }[];
+  /** Модель, которая реально ответила (по данным Requesty). */
+  model: string;
 }
 
 interface RequestyChoice {
@@ -65,7 +68,7 @@ export async function generateReplyWithSearch(messages: { role: string; content:
         continue;
       }
 
-      const data = (await response.json()) as { choices?: RequestyChoice[] };
+      const data = (await response.json()) as { choices?: RequestyChoice[]; model?: string };
       const choice = data.choices?.[0];
       const content = choice?.message?.content?.trim() ?? '';
 
@@ -84,7 +87,7 @@ export async function generateReplyWithSearch(messages: { role: string; content:
         .filter((s): s is { url: string; title?: string } => Boolean(s.url))
         .map((s) => ({ url: s.url, title: s.title }));
 
-      return { text: content, sources };
+      return { text: content, sources, model: data.model || REPLY_MODEL_ID };
     } catch (err) {
       lastError = err instanceof Error ? err : new ReplyGenerationError('Unknown error');
     } finally {

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import { generateDraftForQualification, GenerateDraftError } from '@/lib/replyPersonalization/generateDraft';
+import { getOpenDraft } from '@/lib/replyPersonalization/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,4 +22,24 @@ export const POST = withAuth(async (req: NextRequest, user, params) => {
     const message = err instanceof Error ? err.message : 'Generation failed';
     return NextResponse.json({ error: message }, { status: 502 });
   }
+});
+
+/** GET — последний неотправленный черновик ИИ по письму (или null). */
+export const GET = withAuth(async (_req: NextRequest, _user, params) => {
+  const qualificationId = params?.qualificationId;
+  if (!qualificationId) return NextResponse.json({ error: 'qualificationId is required' }, { status: 400 });
+
+  const draft = await getOpenDraft(qualificationId);
+  return NextResponse.json({
+    draft: draft
+      ? {
+          draftId: draft.id,
+          text: draft.generatedText ?? '',
+          factsUsed: draft.factsUsed ?? '',
+          sources: draft.sources,
+          contextComplete: draft.contextComplete,
+          createdAt: draft.createdAt,
+        }
+      : null,
+  });
 });
