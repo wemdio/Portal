@@ -234,6 +234,27 @@ export function patchCampaign(id: string, action: 'start' | 'pause' | 'finish') 
   });
 }
 
+/** Что нашлось в базе получателей — ответ /recipients/preview. */
+export interface RecipientVariableDto {
+  key: string;
+  header: string | null;
+  filled: number;
+  sample: string | null;
+}
+
+export interface RecipientColumnsDto {
+  emailHeader: string | null;
+  nameHeader: string | null;
+  recipients: number;
+  invalid: number;
+  duplicates: number;
+  variables: RecipientVariableDto[];
+}
+
+export function previewRecipients(file: File) {
+  return upload<RecipientColumnsDto>(`${BASE}/recipients/preview`, file);
+}
+
 export function uploadRecipients(campaignId: string, file: File) {
   return upload<ImportRecipientsResult>(`${BASE}/campaigns/${campaignId}/recipients`, file);
 }

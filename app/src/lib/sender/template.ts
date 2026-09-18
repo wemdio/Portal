@@ -1,13 +1,14 @@
 import { randomUUID } from 'crypto';
+import { PLACEHOLDER_RE, varKey } from './templateVars';
 
 /**
  * Подстановка {{var}} из полей получателя. Неизвестная переменная → пусто.
- * Кириллица в имени обязательна: колонка «Компания» из базы становится
- * переменной {{компания}}, и раньше такие подстановки молча выпадали.
- * Регистр не важен — ключи колонок хранятся в нижнем регистре.
+ * Имя внутри скобок приводится тем же правилом, что и заголовки колонок
+ * (templateVars.varKey): {{Company Name}}, {{companyName}} и {{company_name}}
+ * — одно и то же, кириллица работает.
  */
 export function applyVars(template: string, vars: Record<string, string>): string {
-  return template.replace(/\{\{\s*([a-zA-Z0-9_а-яА-ЯёЁ]+)\s*\}\}/g, (_, key: string) => vars[key.toLowerCase()] ?? '');
+  return template.replace(PLACEHOLDER_RE, (_, raw: string) => vars[varKey(raw)] ?? '');
 }
 
 /**
