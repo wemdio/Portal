@@ -3,6 +3,7 @@ import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, ge
   LLMValidationError, veNativeJsonSchema, veCollectionCacheModel } from './llm';
 import { isVeProviderBillingError } from './collectionErrors';
 import { isRetryableStageError } from './jobRetry';
+import { VeLlmRateLimitError, type VeLlmRateLimit } from './llmRateLimit';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { relevanceHash, VeRelevanceCheckpointError } from './relevanceCheckpoint';
 import {
@@ -67,6 +68,7 @@ export async function cleanVeCompanyNames(input: {
   summary: VeCompanyNameCleanupSummary;
   tokensUsed: number;
   costUsd: number;
+  rateLimit?: VeLlmRateLimit;
 }> {
   const signal = input.signal ?? getVeActiveJobSignal() ?? undefined;
   signal?.throwIfAborted();
@@ -111,6 +113,7 @@ export async function cleanVeCompanyNames(input: {
   signal?.throwIfAborted();
   let error: string | undefined;
   let retryable = false;
+  let rateLimit: VeLlmRateLimit | undefined;
   let tokensUsed = 0;
   let costUsd = 0;
   let offset = 0;
@@ -157,6 +160,7 @@ export async function cleanVeCompanyNames(input: {
       signal?.throwIfAborted();
       if (cause instanceof Error && cause.name === 'AbortError') throw cause;
       if (cause instanceof ProviderUsageWriteError) throw cause;
+      if (cause instanceof VeLlmRateLimitError) rateLimit = { retryAt: cause.retryAt, deferred: cause.deferred };
       const billing = isVeProviderBillingError(cause);
       if (cause instanceof LLMValidationError && cause.usage) {
         tokensUsed += cause.usage.tokensUsed;
@@ -197,7 +201,7 @@ export async function cleanVeCompanyNames(input: {
     } satisfies VeCompanyName;
   }
   const failed = all.length - checked;
-  return { rows, checkpoint, tokensUsed, costUsd, summary: {
+  return { rows, checkpoint, tokensUsed, costUsd, ...(rateLimit ? { rateLimit } : {}), summary: {
     status: failed ? 'partial' : 'complete', companies: all.length, checked, failed,
     ...(failed ? { error: error ?? 'Очистка названий завершилась не полностью' } : {}),
     ...(failed && retryable ? { retryable: true } : {}),

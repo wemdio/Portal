@@ -25,6 +25,8 @@ const websiteEvidenceSchema = z.object({
   // поиск по одним и тем же провалившимся строкам. Optional — старые
   // чекпоинты читаются прежними и новыми воркерами при раскатке и откате.
   provider_error_attempts: z.number().int().nonnegative().max(1000).optional(),
+  /** Bounded retries of a timed-out website, distinct from paid-search failures. */
+  read_error_attempts: z.number().int().nonnegative().max(1000).optional(),
   search_deferred: z.literal(true).optional(),
   review_attempt: hashSchema,
   review_attempts: z.number().int().nonnegative(),
@@ -51,6 +53,9 @@ const checkpointSchema = z.object({
     status: z.enum(['started', 'finished']),
     // Preserve provider failures separately from a single unsupported citation.
     failure_code: relevanceFailureCodeSchema.optional(),
+    /** Explicit 429: this proposal has not consumed its citation repair yet. */
+    retry_proposal: z.object({ status: z.enum(['relevant', 'irrelevant', 'needs_review']),
+      reason: z.string().min(1).max(400) }).optional(),
   })).default({}),
   // Reserve each paid attempt before HTTP. Legacy started/failed records count
   // as one attempt; recovery may buy at most one isolated follow-up.

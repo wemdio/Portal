@@ -9,6 +9,7 @@
  * волной по id вертикалей; досье и кейсы имеют project_id и идут первой волной.
  */
 
+import type { VeAdaptiveCollection } from './adaptiveCollection';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { reconcileProjectVerticals } from './actualsReconcile';
 import { readContactDeliveryPages } from './contactDeliveryInventory';
@@ -67,15 +68,17 @@ async function readDetailPages(
 // Также удаляем checkpoints исключённых кандидатов и relevance-вердиктов; helper используется всеми
 // VE2-ответами, возвращающими карточку сборки, включая идемпотентный collect POST.
 export function stripTaskHarvest(base: Record<string, unknown>): Record<string, unknown> {
-  const info = base.collect_info as { tasks?: unknown; search_policy?: { version: number; phase: string; deferred_rows?: unknown }; source_contact_recovery?: unknown; preview_pipeline?: unknown; target_checkpoint?: unknown; relevance_checkpoint?: unknown; relevance_reserve?: unknown; saved_email_recovery?: unknown; company_name_checkpoint?: unknown; company_name_recovery?: unknown } | null | undefined;
+  const info = base.collect_info as { adaptive_collection?: VeAdaptiveCollection; tasks?: unknown; search_policy?: { version: number; phase: string; deferred_rows?: unknown }; source_contact_recovery?: unknown; preview_pipeline?: unknown; target_checkpoint?: unknown; relevance_checkpoint?: unknown; relevance_reserve?: unknown; saved_email_recovery?: unknown; company_name_checkpoint?: unknown; company_name_recovery?: unknown } | null | undefined;
   if (!info) return base;
   const tasks = Array.isArray(info.tasks) ? info.tasks : [];
   const hasHarvest = tasks.some(
     (t) => t !== null && typeof t === 'object' && 'harvest' in (t as Record<string, unknown>),
   );
   if (!hasHarvest && !('target_checkpoint' in info) && !('relevance_checkpoint' in info) && !('relevance_reserve' in info)
-    && !('search_policy' in info) && !('source_contact_recovery' in info) && !('saved_email_recovery' in info) && !('company_name_checkpoint' in info) && !('company_name_recovery' in info) && !('preview_pipeline' in info)) return base;
+    && !('adaptive_collection' in info) && !('search_policy' in info) && !('source_contact_recovery' in info) && !('saved_email_recovery' in info) && !('company_name_checkpoint' in info) && !('company_name_recovery' in info) && !('preview_pipeline' in info)) return base;
   const publicInfo = { ...info };
+  const adaptive = info.adaptive_collection;
+  delete publicInfo.adaptive_collection;
   if (info.search_policy) publicInfo.search_policy = { version: info.search_policy.version, phase: info.search_policy.phase };
   delete publicInfo.preview_pipeline;
   const emailRecovery = info.saved_email_recovery && typeof info.saved_email_recovery === 'object'
@@ -91,6 +94,10 @@ export function stripTaskHarvest(base: Record<string, unknown>): Record<string, 
     ...base,
     collect_info: {
       ...publicInfo,
+      ...(adaptive ? { adaptive_collection: { version: adaptive.version, switches: adaptive.switches,
+        note: adaptive.note, replan_error: adaptive.replan_error, checking_batch: !!adaptive.pending,
+        completed_batches: adaptive.completed.length, last_batch: adaptive.completed.at(-1),
+      } } : {}),
       // Never send addresses, result hashes or the child job checkpoint in polls.
       ...(emailRecovery ? { saved_email_review_pending: !!emailRecovery.batch && !emailRecovery.error } : {}),
       tasks: tasks.map((t) => {

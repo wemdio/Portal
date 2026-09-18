@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import type { VeOutreachPreparation } from '@/lib/verticalEngineV2/outreachSetup';
 import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors';
 import type { VeBaseSummary, VeCollectInfo, VeJobSummary } from './api';
-import { collectCount, getCollectionProgress } from './collectionProgress';
+import { collectCount, getCollectionProgress, isPartialPreview } from './collectionProgress';
 import { HE, StatusDot } from './design';
 
 interface PreparationProgressProps {
@@ -22,6 +22,7 @@ export interface PreparationPresentation {
   description: string;
   currentStep: number | null;
   tone: 'info' | 'muted' | 'err' | 'ok';
+  canContinue?: boolean;
 }
 
 const STEPS = ['Сбор и проверка базы', 'Разбор состава базы', 'Подготовка A/B-писем'];
@@ -38,7 +39,7 @@ function preparationError(message: string): string {
     return 'Продолжение подготовки прервалось. Сейчас база не обрабатывается. Нажмите «Продолжить подготовку», чтобы возобновить работу с сохранёнными результатами.';
   }
   const failure = getVeCollectionFailure(message);
-  return ['billing', 'configuration', 'provider'].includes(failure.kind) ? failure.message : message;
+  return failure.kind !== 'unknown' ? failure.message : message;
 }
 const COLLECT_PHASES: Record<ReturnType<typeof getCollectionProgress>['phase'], [string, string]> = {
   discovering_sites: ['Находим официальные сайты компаний', 'В источнике не было сайта. Ищем его по ИНН или названию и городу, затем проверим принадлежность компании и найдём email.'],
@@ -60,22 +61,44 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
     description: 'Выберите гипотезы и запустите подготовку. Система соберёт и проверит базу, разберёт её состав и подготовит письма.',
     currentStep: null, tone: 'muted',
   };
-  if (context === 'letters' && base?.status === 'failed') return {
+  const baseId = preparation.base_id;
+  const jobFor = (stage: VeJobSummary['stage']) => baseId
+    ? jobs.find((job) => job.payload?.base_id === baseId && job.stage === stage)
+    : undefined;
+  const hasLiveJob = ['base_collect', 'base_analyze', 'template'].some((stage) => {
+    const job = jobFor(stage as VeJobSummary['stage']);
+    return job && ['pending', 'running'].includes(job.status);
+  });
+  const target = base?.collect_info?.target_progress;
+  if (base?.status === 'analyzed' && target && isPartialPreview(base) && !hasLiveJob && preparation.status !== 'pending') return {
+    title: `Сбор остановлен: ${target.ready_rows.toLocaleString('ru-RU')} из ${target.ready_target.toLocaleString('ru-RU')} контактов`,
+    description: `${preparation.status === 'ready' ? 'Письма подготовлены. ' : ''}Сейчас добор не идёт. `
+      + (target.status === 'exhausted' ? 'Компании из текущего плана источников обработаны; это не оценка всего рынка. '
+        : target.status === 'error' ? preparationError(target.reason ?? base.error ?? '') + ' '
+          : target.reason?.startsWith('Нет подтверждённого продолжения источников')
+            ? 'По текущему плану система не смогла продолжить добор. Это не означает, что подходящих компаний больше нет. '
+            : (target.reason ? target.reason.replace(/[.\s]+$/, '') + '. ' : 'Цель превью пока не достигнута. '))
+      + (target.ready_rows > 0 ? 'Проверенная часть сохранена и доступна для скачивания. '
+        : 'Кандидаты сохранены, но контактов, прошедших все проверки, пока нет. ')
+      + 'Продолжение повторит только доступные незавершённые этапы.',
+    currentStep: null, tone: 'muted', canContinue: true,
+  };
+  if (context === 'letters' && base?.status === 'failed' && !hasLiveJob) return {
     title: 'Письма ждут завершения подготовки базы',
     description: 'Подготовка остановилась до генерации писем. Причина и продолжение сбора доступны на шаге «Базы и объём».',
     currentStep: 0, tone: 'muted',
   };
-  if (preparation.status === 'error') return {
+  if (preparation.status === 'error' && !hasLiveJob) return {
     title: 'Подготовка остановлена',
     description: preparation.last_error ? preparationError(preparation.last_error) : 'Не удалось завершить подготовку. Нажмите «Продолжить подготовку», чтобы повторить остановленный этап.',
-    currentStep: null, tone: 'err',
+    currentStep: null, tone: 'err', canContinue: true,
   };
-  if (preparation.status === 'ready') return {
+  if (preparation.status === 'ready' && !hasLiveJob) return {
     title: 'Письма и база готовы',
     description: 'Можно выбрать и отредактировать письма, затем проверить и одобрить базу.',
     currentStep: STEPS.length, tone: 'ok',
   };
-  if (preparation.status === 'pending') return {
+  if (preparation.status === 'pending' && !hasLiveJob) return {
     title: 'Подготовка в очереди',
     description: 'Запрос принят. Система начнёт подготовку автоматически и продолжит с сохранённого этапа. Здесь появится текущий этап работы; страницу можно закрыть.',
     currentStep: null, tone: 'muted',
@@ -83,10 +106,6 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
 
   // The response contains only recent jobs. A missing job is not evidence of a
   // running worker, a failed worker, or the project's position in the queue.
-  const baseId = preparation.base_id;
-  const jobFor = (stage: VeJobSummary['stage']) => baseId
-    ? jobs.find((job) => job.payload?.base_id === baseId && job.stage === stage)
-    : undefined;
   const templateJob = jobFor('template');
   const letters = preparation.status === 'generating'
     || (base?.status === 'analyzed' && templateJob && ['pending', 'running'].includes(templateJob.status));
@@ -94,10 +113,10 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
   const job = letters ? templateJob : base?.status === 'analyzed' ? undefined : jobFor(analyzing ? 'base_analyze' : 'base_collect');
   const currentStep = letters ? 2 : analyzing ? 1 : 0;
 
-  if (base?.status === 'failed' || (job && ['failed', 'cancelled'].includes(job.status))) return {
+  if ((!hasLiveJob && base?.status === 'failed') || (job && ['failed', 'cancelled'].includes(job.status))) return {
     title: 'Подготовка остановлена',
     description: preparationError(preparation.last_error || base?.error || job?.error || 'Этап не завершился. Состояние подготовки обновится автоматически.'),
-    currentStep: null, tone: 'err',
+    currentStep: null, tone: 'err', canContinue: true,
   };
   if (base?.status === 'analyzed' && base.row_count === 0) return {
     title: 'Сбор завершён без готовых контактов',
@@ -135,6 +154,11 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
     description: 'Проверка и разбор базы завершены. Система автоматически перейдёт к подготовке писем.',
     currentStep: 2, tone: 'muted',
   };
+  if (job?.status === 'done') return {
+    title: 'Сбор сейчас не выполняется',
+    description: 'Задача завершилась, но подготовка базы осталась незаконченной. Результаты сохранены. Нажмите «Продолжить подготовку», чтобы возобновить незавершённые этапы.',
+    currentStep: null, tone: 'muted', canContinue: true,
+  };
   const info = base?.collect_info as (VeCollectInfo & { validation_retry?: boolean }) | null | undefined;
   const savedReview = info?.validation_retry || info?.relevance_review_requested || info?.saved_email_review_pending
     || info?.company_name_recovery || job?.payload?.review_relevance;
@@ -156,12 +180,10 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
   if (job?.status !== 'running' && !hasChildState) return {
     title: job?.status === 'pending'
       ? savedReview ? 'Проверка сохранённой базы в очереди' : 'Сбор базы в очереди'
-      : job?.status === 'done' ? 'Проверка завершена, обновляем результат' : 'Ожидаем обновления состояния базы',
+      : 'Ожидаем обновления состояния базы',
     description: job?.status === 'pending'
       ? 'Задача создана. Обработка начнётся автоматически, когда освободится обработчик. Затем система разберёт состав базы и подготовит письма.'
-      : job?.status === 'done'
-        ? 'Задача сбора и проверки завершилась. Ждём обновления результата базы, чтобы перейти к следующему этапу.'
-        : 'Подготовка базы запрошена. Ждём подтверждения начала обработки; состояние здесь обновляется автоматически.',
+      : 'Подготовка базы запрошена. Ждём подтверждения начала обработки; состояние здесь обновляется автоматически.',
     currentStep: 0, tone: 'muted',
   };
   const phase = getCollectionProgress(info, job).phase;
@@ -242,7 +264,7 @@ export function PreparationProgress(props: PreparationProgressProps) {
           {savedReady !== null ? `, ${savedReady.toLocaleString('ru-RU')} готовых контактов` : ''}.
         </p>
       ) : null}
-      {props.preparation?.status === 'error' && props.onContinue ? (
+      {state.canContinue && props.onContinue ? (
         <button type="button" className={HE.btnPrimary} disabled={props.continueDisabled} onClick={props.onContinue}>
           Продолжить подготовку
         </button>
