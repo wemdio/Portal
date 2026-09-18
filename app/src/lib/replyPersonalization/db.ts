@@ -72,8 +72,11 @@ export async function getProjectCampaignIds(projectId: string): Promise<string[]
 export async function getCampaignAccountIds(campaignIds: string[]): Promise<Map<string, string>> {
   const result = new Map<string, string>();
   if (!campaignIds.length) return result;
-  const { admin } = requireClients();
-  const { data, error } = await admin
+  // Каталог с аккаунтами ведёт синк в базе Instantly (instantly-migrations,
+  // 20260520_0001). В основной базе лежит старая копия таблицы без колонки
+  // instantly_account_id — запрос туда ронял список писем любого проекта.
+  const { instantly } = requireClients();
+  const { data, error } = await instantly
     .from('instantly_campaign_catalog')
     .select('id, instantly_account_id')
     .in('id', campaignIds);
