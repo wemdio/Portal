@@ -20,7 +20,7 @@ jest.mock('@/lib/verticalEngineV2/llm', () => ({
   callLLMWithSchema: jest.fn(),
   LLMValidationError: jest.requireActual('@/lib/verticalEngineV2/llm').LLMValidationError,
   getLLMValidationDiagnostic: jest.requireActual('@/lib/verticalEngineV2/llm').getLLMValidationDiagnostic,
-  getVeModel: jest.fn(() => 'test-bulk-model'),
+  getVeModel: jest.fn((kind: string) => `test-${kind}-model`),
   getVeActiveJobSignal: jest.fn(() => undefined),
   veNativeJsonSchema: jest.requireActual('@/lib/verticalEngineV2/llm').veNativeJsonSchema,
   veCollectionCacheModel: jest.requireActual('@/lib/verticalEngineV2/llm').veCollectionCacheModel,
@@ -879,6 +879,7 @@ describe('base_collect CONSTRUCT step order', () => {
     expect(replanned.adaptive_collection).toMatchObject({ replan_attempts: 1, active_source: veSourceStrategyKey(expectedTask) });
     expect(replanned.estimate?.unique_companies).toBeNull();
     const planCalls = jest.mocked(callLLMWithSchema).mock.calls.length;
+    expect(jest.mocked(callLLMWithSchema).mock.calls.at(-1)?.[2]).toEqual({ model: 'test-collection-model' });
     await replanDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
     await runBaseCollectStage(makeJob(), { supabase: replanDb as unknown as SupabaseClient });
     expect(callLLMWithSchema).toHaveBeenCalledTimes(planCalls);
