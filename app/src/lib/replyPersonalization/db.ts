@@ -25,7 +25,8 @@ export async function isSupervisor(userId: string): Promise<boolean> {
 
 /** Проекты, видимые пользователю — тот же критерий, что у /api/instantly/my-projects. */
 export async function listVisibleProjects(userId: string): Promise<{
-  projects: { id: string; client: string }[];
+  /** briefText — бриф из карточки проекта: по нему видно, чего проекту не хватает. */
+  projects: { id: string; client: string; briefText: string }[];
   /** Руководитель (admin/director/lead/manager) — может редактировать глобальный тон/пример. */
   supervisor: boolean;
 }> {
@@ -34,7 +35,7 @@ export async function listVisibleProjects(userId: string): Promise<{
 
   let query = admin
     .from('projects')
-    .select('id, client, name, specialist, specialist_user_id')
+    .select('id, client, name, specialist, specialist_user_id, brief_text')
     .in('status', ['В работе', 'Тестирование', 'Подготовка'])
     .order('client');
   if (!supervisor) query = query.eq('specialist_user_id', userId);
@@ -45,6 +46,7 @@ export async function listVisibleProjects(userId: string): Promise<{
     projects: (data ?? []).map((p) => ({
       id: p.id as string,
       client: (p.client as string) ?? (p.name as string) ?? '',
+      briefText: (p.brief_text as string) ?? '',
     })),
     supervisor,
   };
@@ -110,6 +112,51 @@ export async function getProjectBrief(projectId: string): Promise<string> {
  */
 export function resolveBrief(projectBrief: string, kb: KnowledgeBase | null): string {
   return projectBrief.trim() ? projectBrief : (kb?.localBrief ?? '');
+}
+
+/**
+ * Запасные брифы из базы знаний по списку проектов — одним запросом, для
+ * пометок в списке проектов (раньше там был запрос на каждый проект).
+ */
+export async function getLocalBriefs(projectIds: string[]): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  if (!projectIds.length) return result;
+  const { admin } = requireClients();
+  const { data, error } = await admin
+    .from('reply_personalization_kb')
+    .select('project_id, local_brief')
+    .in('project_id', projectIds);
+  if (error) throw new Error(`kb query failed: ${error.message}`);
+  for (const row of data ?? []) result.set(row.project_id as string, (row.local_brief as string) ?? '');
+  return result;
+}
+
+/**
+ * Что мешает собирать ответы по проекту. Единственное обязательное — бриф:
+ * тон и пример письма подстрахованы глобальными настройками студии, а без
+ * брифа ИИ не из чего взять, что за продукт и кому он продаётся.
+ *
+ * Раньше «готовность» считалась по наличию строки базы знаний — и все проекты
+ * с брифом в карточке, но без сохранённой модалки, числились незаполненными,
+ * а генерация им отказывала.
+ */
+export function missingBriefReason(projectBrief: string, localBrief: string | null | undefined): string | null {
+  if (projectBrief.trim() || (localBrief ?? '').trim()) return null;
+  return 'В карточке проекта нет брифа';
+}
+
+/** База знаний проекта; проекта без сохранённой модалки — пустая, не null. */
+export async function getKnowledgeBaseOrEmpty(projectId: string): Promise<KnowledgeBase> {
+  return (
+    (await getKnowledgeBase(projectId)) ?? {
+      projectId,
+      productFacts: '',
+      toneNotes: '',
+      exampleCase: '',
+      localBrief: '',
+      updatedAt: '',
+    }
+  );
 }
 
 export async function getKnowledgeBase(projectId: string): Promise<KnowledgeBase | null> {
