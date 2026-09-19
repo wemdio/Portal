@@ -262,22 +262,25 @@ describe('VE2 base collection enqueue recovery', () => {
       target_progress: { round: 2, status: 'collecting', candidates_processed: 3 },
       target_checkpoint: { completed_round: 1 },
       tasks: [{ source: 'hh_live', status: 'dispatched', child_job_id: 'paid-child' }] };
-    const interruptedDb = createMockSupabase({ tables: {
-      ve_hypotheses: [{ id: 'h1', title: 'Law firms' }],
-      ve_bases: [{ id: 'interrupted', project_id: input.projectId, vertical_id: input.verticalId,
-        hypothesis_id: 'h1', source: 'auto', status: 'failed', collect_info: savedInfo,
-        error: 'Provider usage journal could not be saved.' }],
-      ve_jobs: [{ id: 'old-job', project_id: input.projectId, stage: 'base_collect', status: 'failed',
-        payload: { base_id: 'interrupted' } }],
-    } });
-    for (let attempt = 0; attempt < 2; attempt++) {
-      await expect(enqueueVeBaseCollect(interruptedDb as unknown as SupabaseClient, {
-        ...input, hypothesisIds: ['h1'], collectionMode: 'preview',
-      })).resolves.toMatchObject({ ok: true, base: { id: 'interrupted' } });
+    // An exhausted 429 wait ends the same way: the round stays coherent.
+    for (const interruption of ['Provider usage journal could not be saved.',
+      'Requesty 429: сервис ИИ временно ограничил запросы; результаты сохранены.']) {
+      const interruptedDb = createMockSupabase({ tables: {
+        ve_hypotheses: [{ id: 'h1', title: 'Law firms' }],
+        ve_bases: [{ id: 'interrupted', project_id: input.projectId, vertical_id: input.verticalId,
+          hypothesis_id: 'h1', source: 'auto', status: 'failed', collect_info: savedInfo, error: interruption }],
+        ve_jobs: [{ id: 'old-job', project_id: input.projectId, stage: 'base_collect', status: 'failed',
+          payload: { base_id: 'interrupted' } }],
+      } });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(enqueueVeBaseCollect(interruptedDb as unknown as SupabaseClient, {
+          ...input, hypothesisIds: ['h1'], collectionMode: 'preview',
+        })).resolves.toMatchObject({ ok: true, base: { id: 'interrupted' } });
+      }
+      expect(interruptedDb.getRows('ve_bases')).toHaveLength(1);
+      expect(interruptedDb.getRows('ve_bases')[0].collect_info).toEqual(savedInfo);
+      expect(interruptedDb.getRows('ve_jobs').filter((row) => row.status === 'pending')).toHaveLength(1);
     }
-    expect(interruptedDb.getRows('ve_bases')).toHaveLength(1);
-    expect(interruptedDb.getRows('ve_bases')[0].collect_info).toEqual(savedInfo);
-    expect(interruptedDb.getRows('ve_jobs').filter((row) => row.status === 'pending')).toHaveLength(1);
 
     // Death after base resume but before queue INSERT: recover only an older
     // completed job, never automatically retry a real terminal failure.

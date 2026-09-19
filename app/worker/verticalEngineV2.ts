@@ -65,6 +65,12 @@ const CONTACT_DELIVERY_INTERVAL_MS =
 const CANCEL_WATCH_MS = 3000;
 const RESEARCH_IDLE_TIMEOUT_MS = 15 * 60_000;
 const RESEARCH_ABORT_GRACE_MS = 30_000;
+// Base stages had no inactivity guard: an await that never settled kept the
+// row `running` while the process heartbeat stayed healthy (19.09.2026: four
+// base_collect jobs silent for more than a day, each holding a project slot).
+// Website reads and LLM calls are bounded well below this idle window.
+const BASE_IDLE_TIMEOUT_MS = 20 * 60_000;
+const BASE_ABORT_GRACE_MS = 2 * 60_000;
 // Leave one minute for metering/final cleanup before Compose's five-minute stop.
 const SHUTDOWN_CHECKPOINT_GRACE_MS = 4 * 60_000;
 
@@ -139,16 +145,19 @@ const RESEARCH_STAGES = new Set<VeStage>([
 ]);
 
 async function resetStuckJobs() {
-  const { data } = await db
+  const { data, error } = await db
     .from('ve_jobs')
     .select('id')
     .eq('status', 'running');
+  if (error) { log('error', `Stuck running jobs could not be read: ${error.message}`); return; }
   if (data?.length) {
     log('info', `Resetting ${data.length} stuck running jobs to pending`);
-    await db
+    const { error: resetError } = await db
       .from('ve_jobs')
       .update({ status: 'pending', started_at: null, updated_at: new Date().toISOString() })
       .eq('status', 'running');
+    // A silent failure here left orphaned rows running until the next restart.
+    if (resetError) log('error', `Stuck running jobs were not reset: ${resetError.message}`);
   }
 }
 
@@ -197,16 +206,23 @@ async function handleJob(job: VeJob) {
   const abort = new AbortController();
   const isResearch = RESEARCH_STAGES.has(job.stage);
   let lastActivity = `stage ${job.stage} started`;
-  const watchdog = isResearch ? createVeJobWatchdog({
+  const idleMs = isResearch ? RESEARCH_IDLE_TIMEOUT_MS : BASE_IDLE_TIMEOUT_MS;
+  const graceMs = isResearch ? RESEARCH_ABORT_GRACE_MS : BASE_ABORT_GRACE_MS;
+  // The abort message contains "timeout", so failJob treats it as transient:
+  // the job returns to pending with backoff and its checkpoint, not to failed.
+  // An await that ignores the abort leaves a zombie that could later write
+  // stale state; the process exits so the container restart recovers the queue.
+  const watchdog = createVeJobWatchdog({
     abort,
-    idleMs: RESEARCH_IDLE_TIMEOUT_MS,
-    graceMs: RESEARCH_ABORT_GRACE_MS,
-    onTimeout: () => log('error', `Research inactivity timeout: job ${job.id}; last activity: ${lastActivity}`),
+    idleMs,
+    graceMs,
+    reason: `VE2 ${job.stage} inactivity timeout`,
+    onTimeout: () => log('error', `Inactivity timeout: job ${job.id} (${job.stage}) after ${idleMs}ms; last activity: ${lastActivity}`),
     onUnresponsive: () => {
-      log('error', `Research job ${job.id} ignored abort for ${RESEARCH_ABORT_GRACE_MS}ms; exiting without starting another job`);
+      log('error', `Job ${job.id} (${job.stage}) ignored abort for ${graceMs}ms; exiting without starting another job`);
       process.exit(1);
     },
-  }) : null;
+  });
   const shutdown = createVeJobShutdown({
     abort, immediate: isResearch, graceMs: SHUTDOWN_CHECKPOINT_GRACE_MS,
     onDeadline: () => log('warn', `Job ${job.id} did not reach a shutdown checkpoint; aborting for restart`),
@@ -255,11 +271,11 @@ async function handleJob(job: VeJob) {
       supabase: db,
       market,
       signal: abort.signal,
-      onCheckpoint: shutdown.checkpoint,
-      onActivity: () => watchdog?.touch(),
+      onCheckpoint: () => { watchdog.touch(); shutdown.checkpoint(); },
+      onActivity: () => watchdog.touch(),
       log: (msg) => {
         lastActivity = msg.slice(0, 500);
-        watchdog?.touch();
+        watchdog.touch();
         log('info', `[${job.stage}] ${msg}`);
       },
     })));
@@ -269,7 +285,7 @@ async function handleJob(job: VeJob) {
     // finalization. Never kill between those writes as a recovery strategy.
     watching = false;
     clearInterval(cancelWatcher);
-    watchdog?.stop();
+    watchdog.stop();
     shutdown.stop();
     process.removeListener('SIGTERM', onShutdown);
     process.removeListener('SIGINT', onShutdown);
