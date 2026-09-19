@@ -263,8 +263,10 @@ describe('VE2 base collection enqueue recovery', () => {
       target_checkpoint: { completed_round: 1 },
       tasks: [{ source: 'hh_live', status: 'dispatched', child_job_id: 'paid-child' }] };
     // An exhausted 429 wait ends the same way: the round stays coherent.
+    // So does a final inactivity-watchdog failure: never a new paid base.
     for (const interruption of ['Provider usage journal could not be saved.',
-      'Requesty 429: сервис ИИ временно ограничил запросы; результаты сохранены.']) {
+      'Requesty 429: сервис ИИ временно ограничил запросы; результаты сохранены.',
+      'VE2 base_collect inactivity timeout after 1200000ms']) {
       const interruptedDb = createMockSupabase({ tables: {
         ve_hypotheses: [{ id: 'h1', title: 'Law firms' }],
         ve_bases: [{ id: 'interrupted', project_id: input.projectId, vertical_id: input.verticalId,

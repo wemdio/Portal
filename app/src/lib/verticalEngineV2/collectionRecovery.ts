@@ -50,7 +50,10 @@ export function previewRecoveryKind(base: Record<string, unknown>): 'validation'
   // Exhausted 429 waits fail the job with the round still `collecting`; the
   // saved checkpoint is coherent and must be continued, not replaced by a new
   // paid base (18.09.2026: five bases). Same rule as the journal outage.
-  if ((base.error === 'Provider usage journal could not be saved.' || /^Requesty 429\b/.test(String(base.error ?? '')))
+  // The inactivity watchdog (19.09.2026) fails the same way after its retries:
+  // the round is still `collecting` and every checkpoint is intact.
+  if ((base.error === 'Provider usage journal could not be saved.'
+    || /^(?:Requesty 429|VE2 [a-z_]+ inactivity timeout)\b/.test(String(base.error ?? '')))
     && progress.status === 'collecting'
     && typeof progress.round === 'number' && Number.isSafeInteger(progress.round) && progress.round > 0
     && (checkpoint?.completed_round ?? 0) === progress.round

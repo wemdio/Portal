@@ -8,7 +8,7 @@
 import { findIrrelevantRows } from '@/lib/verticalEngineV2/relevanceGate';
 import type { VeRelevanceCheckpoint } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import { buildVeRelevanceReviewBatch } from '@/lib/verticalEngineV2/relevanceReserve';
-import { decideVeTriage, resetVeTriageState, selectVeTriageEvidence, type VeTriageRubric } from '@/lib/verticalEngineV2/relevanceTriage';
+import { decideVeTriage, resetVeTriageState, selectVeTriageEvidence, triageVeCompanies, type VeTriageRubric } from '@/lib/verticalEngineV2/relevanceTriage';
 import { isVeRelevanceTriageEnabled } from '@/lib/verticalEngineV2/relevanceTriageConfig';
 import { withProviderUsage, type ProviderUsageEvent } from '@/lib/providerUsage';
 
@@ -32,7 +32,7 @@ const input = { rows, verticalName: 'Промышленное оборудова
   fetchEvidence: jest.fn().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'offline' }) };
 
 /** Probabilities by company name; `down` makes the triage provider refuse the key. */
-function provider(options: { down?: boolean } = {}) {
+function provider(options: { down?: boolean; classifyStatus?: number; brokenRubric?: boolean; rubricStatus?: number } = {}) {
   const calls = { rubric: 0, classify: 0, review: 0, company: 0, evidence: 0 };
   const fetchMock = jest.fn(async (url: string, init: { body: string }) => {
     const body = JSON.parse(init.body);
@@ -53,12 +53,16 @@ function provider(options: { down?: boolean } = {}) {
         Object.keys(body.questions).map((key) => [key, { noul: key.endsWith('0') ? 0.8 : 0.1 }])) });
     }
     const system = body.messages[0].content as string;
-    if (system.startsWith('You convert ONE B2B targeting hypothesis')) { calls.rubric += 1; return llm(rubric); }
+    if (system.startsWith('You convert ONE B2B targeting hypothesis')) {
+      calls.rubric += 1;
+      return options.rubricStatus ? reply(options.rubricStatus, {}) : llm(options.brokenRubric ? { activity: 'x' } : rubric);
+    }
     if (system.startsWith('Independently check')) {
       calls.review += 1;
       return llm({ reviews: JSON.parse(body.messages[1].content.split('index:\n')[1]).map((item: { i: number }) => ({ i: item.i, result: 'direct_match', reason: 'Производит насосы' })) });
     }
     calls.classify += 1;
+    if (options.classifyStatus) return reply(options.classifyStatus, {});
     const batch = JSON.parse(body.messages[1].content.split(':\n').at(-1)!) as Array<{ i: number }>;
     return llm({ decisions: batch.map((item) => ({ i: item.i, status: 'needs_review', reason: 'Недостаточно сведений', evidence: [] })) });
   });
@@ -168,5 +172,101 @@ describe('VE2 calibrated relevance triage', () => {
     const stamped = rows.map((row, i) => ({ ...row, email: `a${i}@example.com`, _email_status: 'ok',
       _ve_relevance: { ...resumed.decisions.get(i)!, website_review_version: 4 } }));
     expect(buildVeRelevanceReviewBatch({ reserve: stamped, ready: [], source: [], automatic: true, triage: true }).companies).toBe(0);
+  });
+
+  it('does not buy the same fast check again after a stopped pass, and gives up on a checklist that cannot be built', async () => {
+    // The LLM path stops (no funds) after the fast check has read all three companies.
+    const stopped = provider({ classifyStatus: 402 });
+    const first = await findIrrelevantRows(input);
+    expect(first.error).toContain('Requesty 402');
+    expect(stopped.company).toBe(3);
+    expect(Object.values(first.checkpoint.triage_seen?.keys ?? {})).toEqual([1]);
+    const calls = provider();
+    const resumed = await findIrrelevantRows({ ...input, checkpoint: first.checkpoint });
+    expect([0, 1, 2].map((i) => resumed.decisions.get(i)?.status)).toEqual(['relevant', 'irrelevant', 'needs_review']);
+    // Reject and proposal were saved; the undecided company goes straight to the LLM.
+    expect(calls).toEqual({ rubric: 0, classify: 1, review: 2, company: 0, evidence: 0 });
+    expect(resumed.decisions.get(2)?.triage_version).toBe(1);
+    expect(resumed.checkpoint.triage_seen?.keys).toEqual({});
+
+    // A checklist that keeps failing is a paid call to the strongest model: two tries, then the LLM path only.
+    const broken = provider({ brokenRubric: true });
+    let checkpoint: VeRelevanceCheckpoint | undefined;
+    for (let pass = 0; pass < 3; pass++) {
+      const result = await findIrrelevantRows({ ...input, rows: [{ ...rows[2], inn: '770000010' + pass }], checkpoint });
+      expect(result.decisions.get(0)?.status).toBe('needs_review');
+      checkpoint = result.checkpoint;
+    }
+    expect(broken.rubric).toBe(2);
+    expect(broken.company).toBe(0);
+
+    // A balance refusal describes the provider at that moment, not the checklist:
+    // it is never counted, and the fast check returns with the provider.
+    const refused = provider({ rubricStatus: 402 });
+    let unpaid: VeRelevanceCheckpoint | undefined;
+    for (let pass = 0; pass < 3; pass++) unpaid = (await findIrrelevantRows({ ...input, rows: [{ ...rows[2], inn: '770000020' + pass }], checkpoint: unpaid })).checkpoint;
+    expect(refused.rubric).toBe(3);
+    expect(unpaid?.triage_rubric_failures).toBeUndefined();
+    const restored = provider();
+    await findIrrelevantRows({ ...input, rows: [{ ...rows[2], inn: '7700000209' }], checkpoint: unpaid });
+    expect(restored).toEqual(expect.objectContaining({ rubric: 1, company: 1 }));
+  });
+
+  it('opens the breaker on the first wave of hung requests instead of holding the slots for minutes', async () => {
+    jest.useFakeTimers();
+    try {
+      const fetchMock = jest.fn((_url: string, init: { signal: AbortSignal }) => new Promise<Response>((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+      }));
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const facts = { company: 'c', website: '', category: '', description: maker, vacancy_title: '', website_text: '' };
+      const pending = triageVeCompanies({ rubric, language: 'ru', target: { vertical: 'v', verticalSummary: '', hypothesisTitle: 'h', hypothesisDescription: '' },
+        companies: Array.from({ length: 24 }, () => ({ facts, excerpts: [] })) });
+      let outcome: Awaited<typeof pending> | undefined;
+      void pending.then((value) => { outcome = value; });
+      let waited = 0;
+      while (!outcome && waited < 120_000) { await jest.advanceTimersByTimeAsync(5_000); waited += 5_000; }
+      // Without the per-attempt breaker this packet needs 24 companies x 3 attempts x 10 s
+      // on six slots (two minutes, cut only by the packet deadline) and 72 requests.
+      expect(waited).toBeLessThanOrEqual(25_000);
+      expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(12);
+      if (!outcome) throw new Error('packet did not finish');
+      expect(outcome.unavailable).toBe(true);
+      expect(outcome.results.every((item) => item.outcome === 'failed')).toBe(true);
+      expect(jest.getTimerCount()).toBe(0);
+    } finally { jest.useRealTimers(); }
+  });
+
+  it('rides out a sub-second error burst and bounds a slow but answering provider by the packet deadline', async () => {
+    jest.useFakeTimers();
+    try {
+      const facts = { company: 'c', website: '', category: '', description: maker, vacancy_title: '', website_text: '' };
+      const target = { vertical: 'v', verticalSummary: '', hypothesisTitle: 'h', hypothesisDescription: '' };
+      const answer = reply(200, { model: 'jev-1.13.0', usage: { input_tokens: 100 }, answers: { activity: { noul: 0.2 } } });
+      const settle = async <T>(pending: Promise<T>, limitMs: number) => {
+        let value: T | undefined, waited = 0;
+        void pending.then((result) => { value = result; });
+        while (value === undefined && waited < limitMs) { await jest.advanceTimersByTimeAsync(500); waited += 500; }
+        if (value === undefined) throw new Error('not settled');
+        return { value, waited };
+      };
+      // The first wave gets 502 (a gateway restart); retries succeed. Before the
+      // HTTP-status rule this one wave switched the fast check off for five minutes.
+      let served = 0;
+      global.fetch = jest.fn(async () => (served++ < 6 ? reply(502, {}) : answer)) as unknown as typeof fetch;
+      const blip = await settle(triageVeCompanies({ rubric, language: 'ru', target, companies: Array.from({ length: 24 }, () => ({ facts, excerpts: [] })) }), 30_000);
+      expect(blip.value.unavailable).toBe(false);
+      expect(blip.value.results.every((item) => item.outcome === 'uncertain')).toBe(true);
+
+      // Every request succeeds after 9 s (below the request timeout): the breaker
+      // never opens, so only the deadline keeps the packet from taking as long as it likes.
+      const slow = jest.fn(() => new Promise<Response>((resolve) => { setTimeout(() => resolve(answer), 9_000); }));
+      global.fetch = slow as unknown as typeof fetch;
+      const late = await settle(triageVeCompanies({ rubric, language: 'ru', target, companies: Array.from({ length: 120 }, () => ({ facts, excerpts: [] })) }), 300_000);
+      expect(late.waited).toBeLessThanOrEqual(130_000);
+      expect(slow.mock.calls.length).toBeLessThan(120);
+      expect(late.value.results.some((item) => item.outcome === 'failed')).toBe(true);
+      expect(late.value.unavailable).toBe(false);
+    } finally { jest.useRealTimers(); }
   });
 });

@@ -109,12 +109,14 @@ const contactDeliveryTick = createGuardedContactDeliveryTick({
 });
 
 let activeContactDeliveryTick: Promise<boolean> | null = null;
-const activeResearchAborts = new Set<AbortController>();
+// Every stage can now end in a process exit (inactivity watchdog), not only research.
+const activeJobAborts = new Set<AbortController>();
 
 function triggerContactDeliveryTick(): Promise<boolean> {
-  // Do not start a provider upload while a research process is being recovered.
-  // An already attempted upload keeps its durable uncertain/recovery semantics.
-  if (shouldStop() || [...activeResearchAborts].some((abort) => abort.signal.aborted)) return Promise.resolve(false);
+  // Do not start a provider upload while an aborted job may still end in a
+  // process exit. An already attempted upload keeps its durable
+  // uncertain/recovery semantics.
+  if (shouldStop() || [...activeJobAborts].some((abort) => abort.signal.aborted)) return Promise.resolve(false);
   const promise = contactDeliveryTick();
   if (!activeContactDeliveryTick) {
     activeContactDeliveryTick = promise;
@@ -217,9 +219,11 @@ async function handleJob(job: VeJob) {
     idleMs,
     graceMs,
     reason: `VE2 ${job.stage} inactivity timeout`,
+    // A cancel of one base must not recycle a process that runs 16 jobs.
+    escalateExternalAbort: isResearch,
     onTimeout: () => log('error', `Inactivity timeout: job ${job.id} (${job.stage}) after ${idleMs}ms; last activity: ${lastActivity}`),
-    onUnresponsive: () => {
-      log('error', `Job ${job.id} (${job.stage}) ignored abort for ${graceMs}ms; exiting without starting another job`);
+    onUnresponsive: (waitedMs) => {
+      log('error', `Job ${job.id} (${job.stage}) ignored abort for ${waitedMs}ms; exiting without starting another job`);
       process.exit(1);
     },
   });
@@ -228,9 +232,7 @@ async function handleJob(job: VeJob) {
     onDeadline: () => log('warn', `Job ${job.id} did not reach a shutdown checkpoint; aborting for restart`),
   });
   const onShutdown = () => shutdown.request();
-  if (isResearch) {
-    activeResearchAborts.add(abort);
-  }
+  activeJobAborts.add(abort);
   process.once('SIGTERM', onShutdown);
   process.once('SIGINT', onShutdown);
   if (shouldStop()) shutdown.request();
@@ -289,9 +291,7 @@ async function handleJob(job: VeJob) {
     shutdown.stop();
     process.removeListener('SIGTERM', onShutdown);
     process.removeListener('SIGINT', onShutdown);
-    if (isResearch) {
-      activeResearchAborts.delete(abort);
-    }
+    activeJobAborts.delete(abort);
   }
   const tokensUsed = stageResult.tokensUsed ?? 0;
   const costUsd = stageResult.costUsd ?? 0;

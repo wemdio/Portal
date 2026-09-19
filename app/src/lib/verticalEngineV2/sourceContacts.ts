@@ -19,6 +19,24 @@ const discoveryBudgetSchema = z.object({
 });
 export type VeSourceDiscoveryBudget = z.infer<typeof discoveryBudgetSchema>;
 
+/**
+ * Companies to look up in one paid-discovery step. A lookup yields a ready
+ * contact only for a fraction of companies, so asking for exactly the missing
+ * count made bases at 499/500 look up ONE company per round and burn dozens of
+ * full rounds (constructor, checks, multi-megabyte saves) for one contact
+ * (19.09.2026). Scale by the observed yield, never below a useful handful; the
+ * no-growth allowance and the per-step cap still bound the spend (a lookup is
+ * about a tenth of a cent).
+ */
+export function veSourceDiscoveryLimit(input: { readyTarget?: number; readyRows?: number; candidatesProcessed?: number; remaining?: number }): number {
+  const cap = Math.max(0, Math.min(16, input.remaining ?? 16));
+  if (input.readyTarget === undefined || input.readyRows === undefined) return cap;
+  const missing = input.readyTarget - input.readyRows;
+  if (!(missing > 0)) return 0;
+  const observed = (input.candidatesProcessed ?? 0) > 0 ? input.readyRows / input.candidatesProcessed! : 0.05;
+  return Math.min(cap, Math.max(8, Math.ceil(missing / Math.min(1, Math.max(0.05, observed)))));
+}
+
 /** Call only after found sites and in-flight validations have been drained.
  * Counts completed company lookups, not billable credits (cache hits are free).
  * Legacy runs start an observed cohort; their historical yield is unknown. */
