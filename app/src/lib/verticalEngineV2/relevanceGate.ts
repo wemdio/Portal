@@ -26,6 +26,7 @@ const MAX_WEBSITES = 32;
 const TRIAGE_PACKET = 24;
 // Saved uncertain companies re-read per pass; the rest waits for the next pass.
 const TRIAGE_BACKLOG_LIMIT = 1000;
+const MAX_TRIAGE_RUBRIC_FAILURES = 2;
 // Сколько раз оплачивать поиск по одной компании, если провайдер так и не
 // ответил. Три попытки переживают разовый шторм у Serper; дальше повторы
 // перестают быть починкой и становятся тратой — 16.09.2026 этап сборки базы
@@ -681,17 +682,36 @@ export async function findIrrelevantRows(input: {
     hypothesisTitle: input.hypothesisTitle ?? '', hypothesisDescription: input.hypothesisDescription ?? '' };
   const triageRubric = async (): Promise<VeTriageRubric | null> => {
     if (checkpoint.triage?.version === VE_TRIAGE_RUBRIC_VERSION) return checkpoint.triage.rubric;
+    // The checklist is a paid call to the strongest model. A hypothesis it
+    // cannot be built for must not re-buy it on every pass of every round;
+    // an explicit manual review gets one more try.
+    if ((checkpoint.triage_rubric_failures ?? 0) >= MAX_TRIAGE_RUBRIC_FAILURES && !input.reviewAttempt) {
+      triageOff = true;
+      input.log?.('[relevanceGate] быстрая проверка отключена для этой гипотезы: критерии не удалось подготовить '
+        + checkpoint.triage_rubric_failures + ' раза; ручная перепроверка даст ещё одну попытку');
+      return null;
+    }
     try {
       const response = await invoke(veTriageRubricMessages(scope, input.language), veTriageRubricSchema,
-        { model: veTriageRubricModel(), maxTokens: 4000, timeoutMs: 120_000, maxHttpAttempts: 2, signal: signal ?? undefined });
+        { model: veTriageRubricModel(), maxTokens: 4000, timeoutMs: 120_000, maxHttpAttempts: 2, maxSchemaAttempts: 1, signal: signal ?? undefined });
       signal?.throwIfAborted();
       checkpoint.triage = { version: VE_TRIAGE_RUBRIC_VERSION, rubric: response.data };
+      delete checkpoint.triage_rubric_failures;
       await save();
       return response.data;
     } catch (error) {
       signal?.throwIfAborted();
       if (error instanceof Error && error.name === 'AbortError') throw error;
       if (error instanceof VeRelevanceCheckpointError || error instanceof ProviderUsageWriteError) throw error;
+      // Only a failure of the checklist itself counts: an unusable answer, or a
+      // deadline that may have been billed. A balance/key refusal, throttling or
+      // an outage describes the provider at that moment; replaying it later
+      // would switch the fast check off for the base for good (cf. resumeSemantic).
+      if (error instanceof LLMValidationError || error instanceof z.ZodError
+        || (error instanceof Error && /VE operation timeout|deadline|timed out/i.test(error.message))) {
+        checkpoint.triage_rubric_failures = (checkpoint.triage_rubric_failures ?? 0) + 1;
+        await save();
+      }
       // The checklist is an accelerator. Its outage must not stop the base or
       // spend the gate's retry budget: the LLM path continues and reports a
       // real provider problem itself.
@@ -703,15 +723,30 @@ export async function findIrrelevantRows(input: {
   /** Returns the companies that still need the LLM path. */
   const runTriage = async (batch: Entry[], stage: 'initial' | 'website' | 'backlog'): Promise<Entry[]> => {
     if (!triageEnabled || !batch.length) return batch;
-    const skip = (rest: Entry[]) => { rest.forEach((entry) => triageSkipped.add(entry)); return rest; };
-    if (triageOff || stopProviderCalls) return skip(batch);
-    const rubric = await triageRubric();
-    if (!rubric) return skip(batch);
     const undecided: Entry[] = [];
+    // Read by the fast check in a pass that stopped before the LLM verdict was
+    // saved (provider outage, deploy, throttling): do not buy that answer again.
+    const seenBit = stage === 'website' ? 2 : 1;
+    const seen = checkpoint.triage_seen?.version === VE_RELEVANCE_TRIAGE_VERSION ? checkpoint.triage_seen.keys : {};
+    const fresh = batch.filter((entry) => {
+      if (!entry.cacheable || !((seen[entry.key] ?? 0) & seenBit)) return true;
+      undecided.push(entry);
+      return false;
+    });
+    if (!fresh.length) return undecided;
+    const skip = (rest: Entry[]) => { rest.forEach((entry) => triageSkipped.add(entry)); return rest; };
+    if (triageOff || stopProviderCalls) return [...undecided, ...skip(fresh)];
+    const rubric = await triageRubric();
+    if (!rubric) return [...undecided, ...skip(fresh)];
+    const markSeen = (entry: Entry) => {
+      if (!entry.cacheable) return;
+      if (checkpoint.triage_seen?.version !== VE_RELEVANCE_TRIAGE_VERSION) checkpoint.triage_seen = { version: VE_RELEVANCE_TRIAGE_VERSION, keys: {} };
+      checkpoint.triage_seen.keys[entry.key] = (checkpoint.triage_seen.keys[entry.key] ?? 0) | seenBit;
+    };
     const totals = { reject: 0, admit: 0, uncertain: 0, failed: 0 };
     const share = (value: number) => Math.round(value * 100) / 100;
-    for (let start = 0, packets = 0; start < batch.length; start += TRIAGE_PACKET) {
-      const packet = batch.slice(start, start + TRIAGE_PACKET);
+    for (let start = 0, packets = 0; start < fresh.length; start += TRIAGE_PACKET) {
+      const packet = fresh.slice(start, start + TRIAGE_PACKET);
       if (triageOff || stopProviderCalls) { undecided.push(...skip(packet)); continue; }
       signal?.throwIfAborted();
       const excerpts = packet.map((entry) => repairEvidenceCandidates(entry.fields).slice(0, VE_TRIAGE_MAX_EXCERPTS));
@@ -745,6 +780,12 @@ export async function findIrrelevantRows(input: {
           }
         }
         totals.uncertain += 1; undecided.push(entry);
+        // Saved uncertainty keeps its verdict: mark it now, not only in the final
+        // loop, which a long semantic-review phase may never reach. New companies
+        // have no verdict to carry the mark until the LLM path has answered.
+        const saved = stage === 'backlog' ? current.get(entry) : undefined;
+        if (saved?.status === 'needs_review') record(entry, { ...saved, triage_version: VE_RELEVANCE_TRIAGE_VERSION });
+        else markSeen(entry);
       });
       if (checked.unavailable) {
         triageOff = true;
@@ -755,7 +796,7 @@ export async function findIrrelevantRows(input: {
     }
     await save();
     input.log?.('[relevanceGate] быстрая проверка (' + (stage === 'initial' ? 'новые компании' : stage === 'website' ? 'по сайту' : 'сохранённый резерв')
-      + '): ' + batch.length + ' компаний — отклонено ' + totals.reject + ', предложено к допуску ' + totals.admit
+      + '): ' + fresh.length + ' компаний — отклонено ' + totals.reject + ', предложено к допуску ' + totals.admit
       + ', без решения ' + totals.uncertain + (totals.failed ? ', сбоев ' + totals.failed : ''));
     return undecided;
   };
@@ -1049,6 +1090,11 @@ export async function findIrrelevantRows(input: {
       // must not return this company for another fast pass under this policy.
       decision = { ...decision, triage_version: VE_RELEVANCE_TRIAGE_VERSION };
       record(entry, decision);
+      triageStamped = true;
+    }
+    if (decision.status !== 'error' && checkpoint.triage_seen?.keys[entry.key]) {
+      // The saved verdict now carries everything; the limbo marker would only grow the state.
+      delete checkpoint.triage_seen.keys[entry.key];
       triageStamped = true;
     }
     if (decision.status !== 'error') result.coverage.checkedCompanies += 1;

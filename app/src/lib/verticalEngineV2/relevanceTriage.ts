@@ -22,8 +22,13 @@ const ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
 const DEFAULT_MODEL = 'jev-1.13.0';
 // Public price 15.09.2026: input tokens only, answers are free.
 const USD_PER_M_INPUT_TOKENS = 0.042;
-const REQUEST_TIMEOUT_MS = 30_000;
+// Normal latency is 0.4-1 s, also for ~100 questions. A hung provider must
+// open the breaker within seconds, not hold six process-wide slots for minutes.
+const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_HTTP_ATTEMPTS = 3;
+// A packet that is still running after this long hands its remaining companies
+// to the LLM path: the fast check must never be the slow part of a base.
+const PACKET_DEADLINE_MS = 120_000;
 // 1 200 requests/min per key; ~0.4-1 s per request keeps six slots under it
 // for the whole worker process, however many bases are being checked.
 const MAX_CONCURRENT_REQUESTS = 6;
@@ -52,9 +57,9 @@ const label = z.string().min(2).max(600).transform(clean(160));
 export const veTriageRubricSchema = z.object({
   activity: sentence,
   // Verbosity must not waste the paid call: keep the first items, never fail on count.
-  requirements: z.array(sentence).max(12).transform((items) => items.slice(0, 3)),
+  requirements: z.array(sentence).max(12).nullish().transform((items) => (items ?? []).slice(0, 3)),
   conflicts: z.array(sentence).min(1).max(12).transform((items) => items.slice(0, 3)),
-  adjacent: z.array(label).max(12).transform((items) => items.slice(0, 3)),
+  adjacent: z.array(label).max(12).nullish().transform((items) => (items ?? []).slice(0, 3)),
   // Interface notes only: a missing label must not waste the paid checklist.
   activity_label: label.catch(''),
   conflict_labels: z.array(label).max(12).transform((items) => items.slice(0, 3)).catch([]),
@@ -218,20 +223,27 @@ const responseSchema = z.object({
 });
 interface Asked { answers?: Answers; inputTokens: number; status: number; model?: string }
 
-async function ask(body: unknown, signal?: AbortSignal): Promise<Asked> {
+async function ask(body: unknown, signal?: AbortSignal, deadline = Infinity): Promise<Asked> {
   const payload = JSON.stringify(body);
   // A request that may have reached the provider is counted at its upper bound.
   const upperBound = Math.ceil(payload.length / 3);
   let spent = 0, status = 0;
   for (let attempt = 0; attempt < MAX_HTTP_ATTEMPTS; attempt++) {
-    // An open breaker is not another failure of this request.
-    if (!veTriageAvailable()) return { inputTokens: spent, status };
+    // An open breaker or a spent packet deadline is not another failure of this request.
+    if (!veTriageAvailable() || Date.now() >= deadline) return { inputTokens: spent, status };
     await acquire(signal);
     let retryAfterMs: number | undefined;
+    // A timer (not AbortSignal.timeout) so the deadline is one abortable, testable clock.
+    const request = new AbortController();
+    const cancel = () => request.abort(signal?.reason);
+    const timer = setTimeout(() => request.abort(new Error('triage request timeout')), REQUEST_TIMEOUT_MS);
+    signal?.addEventListener('abort', cancel, { once: true });
     try {
-      const res = await fetch(ENDPOINT, { method: 'POST', body: payload,
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${(process.env.TYPESAFE_API_KEY ?? '').trim()}` },
-        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]) : AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+      // The breaker may have opened, or the packet deadline passed, while this
+      // request waited for a slot shared by every job: drain at once.
+      if (!veTriageAvailable() || Date.now() >= deadline) return { inputTokens: spent, status };
+      const res = await fetch(ENDPOINT, { method: 'POST', body: payload, signal: request.signal,
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${(process.env.TYPESAFE_API_KEY ?? '').trim()}` } });
       status = res.status;
       if (res.ok) {
         const parsed = responseSchema.safeParse(await res.json().catch(() => null));
@@ -249,10 +261,18 @@ async function ask(body: unknown, signal?: AbortSignal): Promise<Asked> {
       // The job's own cancellation propagates; a request deadline or a network error is a provider failure.
       signal?.throwIfAborted();
       status = 0; spent += upperBound;
-    } finally { release(); }
-    if (attempt < MAX_HTTP_ATTEMPTS - 1) await sleep(retryAfterMs ?? 500 * 2 ** attempt, signal);
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', cancel);
+      release();
+    }
+    // A hung or unreachable provider counts per attempt: six parallel hangs open
+    // the breaker after the first timeout. An HTTP 429/5xx keeps its retries and
+    // counts once when they are exhausted, so a sub-second blip under load does
+    // not switch the fast check off for five minutes.
+    if (status === 0 || attempt === MAX_HTTP_ATTEMPTS - 1) failed(status);
+    if (attempt < MAX_HTTP_ATTEMPTS - 1 && veTriageAvailable()) await sleep(retryAfterMs ?? 500 * 2 ** attempt, signal);
   }
-  failed(status);
   return { inputTokens: spent, status };
 }
 
@@ -269,9 +289,10 @@ export async function triageVeCompanies(input: {
 }): Promise<{ results: VeTriageResult[]; inputTokens: number; costUsd: number; unavailable: boolean }> {
   const model = veTriageModel();
   const metering = await beginProviderUsage('typesafe', { requestedModel: model });
+  const deadline = Date.now() + PACKET_DEADLINE_MS;
   let inputTokens = 0, lastStatus = 0, succeeded = 0, actualModel: string | undefined;
   const one = async (company: { facts: VeTriageFacts; excerpts: VeTriageExcerpt[] }): Promise<VeTriageResult> => {
-    const first = await ask(veTriageCompanyRequest(input.rubric, input.target, company.facts, input.language, model), input.signal);
+    const first = await ask(veTriageCompanyRequest(input.rubric, input.target, company.facts, input.language, model), input.signal, deadline);
     inputTokens += first.inputTokens; lastStatus = first.status; actualModel = first.model ?? actualModel;
     const verdict = first.answers ? decideVeTriage(first.answers, input.rubric) : null;
     if (!verdict) return { outcome: 'failed' };
@@ -279,7 +300,9 @@ export async function triageVeCompanies(input: {
     if (verdict.outcome !== 'admit') return verdict;
     const excerpts = company.excerpts.slice(0, VE_TRIAGE_MAX_EXCERPTS);
     if (!excerpts.length) return { outcome: 'uncertain', activity: verdict.activity };
-    const second = await ask(veTriageEvidenceRequest(input.rubric, company.facts.company, excerpts, model), input.signal);
+    // The first answer is paid for: its proposal is not dropped for being late in a busy queue.
+    const second = await ask(veTriageEvidenceRequest(input.rubric, company.facts.company, excerpts, model), input.signal,
+      Math.max(deadline, Date.now() + 2 * REQUEST_TIMEOUT_MS));
     inputTokens += second.inputTokens; lastStatus = second.status;
     if (!second.answers) return { outcome: 'failed' };
     const evidenceIds = selectVeTriageEvidence(excerpts, second.answers, input.rubric);
