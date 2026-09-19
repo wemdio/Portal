@@ -105,7 +105,7 @@ import { buildRolesRegex } from '@/lib/parsers/atsFilters';
 import { domainToSiteUrl, resolveCompanyDomainViaPdl } from '@/lib/parsers/companyDomainResolver';
 import { readVeYandexCatalogPage, resolveVeYandexCatalogFilters, type VeYandexCatalogCheckpoint } from '../yandexCatalog';
 import { extractEmail, extractEmails } from '@/lib/tools/dfybUtils';
-import { applyVeSourceContacts, normalizeVeSourceContacts, hasPendingVeSourceContacts, pendingVeSourceContacts, recoverVeSourceContacts, evaluateVeSourceDiscoveryBudget, VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT, type VeSourceContactCheckpoint, type VeSourceDiscoveryBudget } from '../sourceContacts';
+import { applyVeSourceContacts, normalizeVeSourceContacts, hasPendingVeSourceContacts, pendingVeSourceContacts, recoverVeSourceContacts, evaluateVeSourceDiscoveryBudget, veSourceDiscoveryLimit, VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT, type VeSourceContactCheckpoint, type VeSourceDiscoveryBudget } from '../sourceContacts';
 import {
   mergeVeSourceFactText, normalizeVeCompanyInn, normalizeVeCompanyName, normalizeVeWebsiteHost,
   veCompanyWebsiteKey, veAcquisitionReceipt,
@@ -1285,7 +1285,11 @@ async function fetchDirectoryRows(
   let offset = 0;
   let page = 0;
   for (; page < MAX_DIRECTORY_PAGES && rows.length < limit; page += 1) {
+    // A deep scan logs nothing until it ends: each page is progress for the
+    // inactivity watchdog, and a cancel must not wait for the last page.
+    ctx.signal?.throwIfAborted();
     const res = await searchRows(filters, DIRECTORY_PAGE_SIZE, offset);
+    ctx.onActivity?.();
     if (res.error) {
       return { rows: [], excludedDuringFetch, exhausted: false, hitCeiling: false, error: res.error };
     }
@@ -1392,6 +1396,7 @@ async function fetchPdlRows(
   const rows: Record<string, unknown>[] = [];
   let lastId = '';
   for (;;) {
+    ctx.signal?.throwIfAborted(); ctx.onActivity?.();
     const params = {
       p_industries: filters?.industries?.length ? lowerList(filters.industries) : null,
       p_sizes: filters?.sizes?.length ? lowerList(filters.sizes) : null,
@@ -1441,6 +1446,7 @@ async function fetchFundedRows(
   const rows: Record<string, unknown>[] = [];
   let lastId = '';
   for (;;) {
+    ctx.signal?.throwIfAborted(); ctx.onActivity?.();
     let query = ctx.supabase
       .from('funded_companies')
       .select(
@@ -1594,6 +1600,7 @@ async function fetchEngHiringRows(
   const matched: Record<string, unknown>[] = [];
   let offset = 0;
   for (let page = 0; page < ENG_HIRING_MAX_PAGES && matched.length < limit; page += 1) {
+    ctx.signal?.throwIfAborted(); ctx.onActivity?.();
     let q = ctx.supabase
       .from('eng_hiring_cache')
       .select('company_name, company_site_url, vacancy_title, location, country, country_code, source, published_at');
@@ -3880,8 +3887,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       const allowance = target ? evaluateVeSourceDiscoveryBudget({ budget: info.source_contact_budget,
         checkpoint: info.source_contact_recovery, readyRows: target.ready_rows }) : null;
       if (allowance) info.source_contact_budget = allowance.budget;
-      const discovery = [...pendingSourceRows].slice(0, Math.min(16,
-        target ? target.ready_target - target.ready_rows : 16, allowance?.remaining ?? 16));
+      const discovery = [...pendingSourceRows].slice(0, veSourceDiscoveryLimit({ readyTarget: target?.ready_target,
+        readyRows: target?.ready_rows, candidatesProcessed: target?.candidates_processed, remaining: allowance?.remaining }));
       if (discovery.length) {
         info.source_contact_discovery = { checked: Object.keys(info.source_contact_recovery?.checked ?? {}).length, remaining: pendingSourceRows.size };
         await persistCollectInfo(ctx, base.id, info);

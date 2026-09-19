@@ -36,7 +36,7 @@ import { fetchVeRelevanceEvidence, resolveVeEvidenceAddress } from '@/lib/vertic
 import { veCompanyFactKey, veFactPageKey, freshVeCompanyFact, focusVeCompanyFact, createVeSharedPageReader, VE_COMPANY_FACT_TTL_MS, type VeCompanyFactRecord } from '@/lib/verticalEngineV2/companyFacts';
 import { parseVeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
 import { needsVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceReserve';
-import { recoverVeSourceContacts, hasPendingVeSourceContacts, evaluateVeSourceDiscoveryBudget, type VeSourceContactCheckpoint } from '@/lib/verticalEngineV2/sourceContacts';
+import { recoverVeSourceContacts, hasPendingVeSourceContacts, evaluateVeSourceDiscoveryBudget, veSourceDiscoveryLimit, type VeSourceContactCheckpoint } from '@/lib/verticalEngineV2/sourceContacts';
 import { cleanVeCompanyNames } from '@/lib/verticalEngineV2/companyNameCleanup';
 import { createVeLlmRateLimit, veLlmRateLimit, veRetryAfterMs, VeLlmRateLimitError } from '@/lib/verticalEngineV2/llmRateLimit';
 import { planVeRelevanceRetry } from '@/lib/verticalEngineV2/relevanceRetry';
@@ -1126,6 +1126,13 @@ describe('llm rawCall retry', () => {
       expect(() => evaluateVeSourceDiscoveryBudget({ budget, checkpoint: checkedCohort, readyRows: 23 }))
         .toThrow('Source discovery budget checkpoint is invalid');
     }
+    // One missing contact is not one lookup: at 499/500 a base looked up a single
+    // company per round and burned dozens of rounds. The allowance still bounds it.
+    expect(veSourceDiscoveryLimit({ readyTarget: 500, readyRows: 499, candidatesProcessed: 1200 })).toBe(8);
+    expect(veSourceDiscoveryLimit({ readyTarget: 500, readyRows: 20, candidatesProcessed: 2000 })).toBe(16);
+    expect(veSourceDiscoveryLimit({ readyTarget: 500, readyRows: 499, candidatesProcessed: 1200, remaining: 3 })).toBe(3);
+    expect(veSourceDiscoveryLimit({ readyTarget: 500, readyRows: 500, candidatesProcessed: 1200 })).toBe(0);
+    expect(veSourceDiscoveryLimit({})).toBe(16);
     expect(jest.getTimerCount()).toBe(0);
 
     // Real progress includes successful/error IO, but never a still-pending await.

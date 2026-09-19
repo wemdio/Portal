@@ -73,6 +73,12 @@ const checkpointSchema = z.object({
   // self-healing: an unreadable value is dropped and regenerated, never a
   // reason to discard the paid verdicts stored next to it.
   triage: z.object({ version: z.number().int().positive(), rubric: veTriageRubricSchema }).optional().catch(undefined),
+  // Companies the fast check has read without deciding and that have no saved
+  // verdict yet (bit 1: source facts, bit 2: website text). A stopped pass must
+  // not buy the same fast check again; entries leave once a verdict is saved.
+  triage_seen: z.object({ version: z.number().int().positive(), keys: z.record(hashSchema, z.number().int().min(1).max(3)) }).optional().catch(undefined),
+  // The paid checklist call failed this many times for this hypothesis context.
+  triage_rubric_failures: z.number().int().nonnegative().max(1000).optional().catch(undefined),
   failures: z.array(z.object({
     batch_hash: hashSchema,
     companies: z.number().int().positive(),
