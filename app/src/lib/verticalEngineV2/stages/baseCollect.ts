@@ -114,6 +114,7 @@ import { getVeDirectorySegmentStats } from '../dossierData';
 import { callLLMWithSchema, getVeModel } from '../llm';
 import { projectMarket, type VeMarket } from '../market';
 import { findIrrelevantRows, type VeRelevanceDecision } from '../relevanceGate';
+import { isVeRelevanceTriageEnabled } from '../relevanceTriageConfig';
 import { relevanceHash, VeRelevanceCheckpointError, VePreviewCheckpointConflict, type VeRelevanceCheckpoint } from '../relevanceCheckpoint';
 import {
   buildVeRelevanceReviewBatch, mergeVeRelevanceRows, needsVeRelevanceReview, readVeRelevanceReserve, readVeRelevanceSourceRows, summarizeVeRelevanceReserve,
@@ -2839,6 +2840,7 @@ async function checkCollectedRelevance(args: {
       allowPaidSearch: info.search_policy?.phase !== 'existing'
         && (!info.target_progress || info.target_progress.ready_rows < info.target_progress.ready_target),
       websiteLimit: info.target_progress ? Math.max(0, info.target_progress.ready_target - info.target_progress.ready_rows) : undefined,
+      triage: isVeRelevanceTriageEnabled(job.project_id),
       checkpoint: [job.result?.relevance_checkpoint, args.previousRelevanceCheckpoint, info.relevance_checkpoint],
       onCheckpoint: async (checkpoint, options) => {
         ctx.signal?.throwIfAborted();
@@ -3065,6 +3067,7 @@ async function reviewSavedRelevance(
     ready: Array.isArray(base.data) ? base.data : [],
     source: readVeRelevanceSourceRows(info.relevance_reserve), automatic,
     allowPaidSearch: info.search_policy?.phase !== 'existing',
+    triage: isVeRelevanceTriageEnabled(job.project_id),
   });
   // A queued SMTP child must not hold already validated recipients behind
   // unrelated constructor jobs. Review those companies now; unknown email
@@ -3331,9 +3334,10 @@ async function completeTargetRound(args: {
   const emailValidationCanContinue = pendingAutomaticEmails && args.validationError === 'Проверка email завершилась не полностью';
   const reviewEligible = !reviewOnly && (!args.validationError || emailValidationCanContinue) && !taskError
     && readyRows.length < progress.ready_target;
+  const triageEnabled = isVeRelevanceTriageEnabled(job.project_id);
   const automaticBatch = reviewEligible ? buildVeRelevanceReviewBatch({
     reserve: reserveRows, ready: cleaned.rows, source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
-    allowPaidSearch: !existingFirst,
+    allowPaidSearch: !existingFirst, triage: triageEnabled,
   }) : null;
   // A saved-review pass that leaves its own selection byte-identical cannot
   // progress: every verdict came from the checkpoint and no row changed. Stop
@@ -3344,7 +3348,11 @@ async function completeTargetRound(args: {
       (row._ve_relevance as Record<string, unknown> | undefined)?.status ?? null,
       (row._ve_relevance as Record<string, unknown> | undefined)?.review_attempts ?? null,
       (row._ve_relevance as Record<string, unknown> | undefined)?.website_review_version ?? null,
-      (row._ve_relevance as Record<string, unknown> | undefined)?.search_deferred ?? null]).sort()])
+      (row._ve_relevance as Record<string, unknown> | undefined)?.search_deferred ?? null,
+      // A fast pass that only marks companies as seen is progress too; the
+      // element exists only while the triage is enabled, so hashes saved
+      // without it stay comparable.
+      ...(triageEnabled ? [(row._ve_relevance as Record<string, unknown> | undefined)?.triage_version ?? null] : [])]).sort()])
     : null;
   const stalledReview = reviewSignature !== null && info.relevance_review_progress?.signature === reviewSignature;
   if (reviewSignature === null) delete info.relevance_review_progress;
@@ -3394,7 +3402,7 @@ async function completeTargetRound(args: {
       delete task.existing_contacts_only;
     }
     const saved = buildVeRelevanceReviewBatch({ reserve: reserveRows, ready: cleaned.rows,
-      source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true });
+      source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true, triage: triageEnabled });
     continueSavedReview = saved.rows.length > 0;
     if (continueSavedReview) info.relevance_review_requested = true;
     if (continueSavedReview || canAcquirePaid) {

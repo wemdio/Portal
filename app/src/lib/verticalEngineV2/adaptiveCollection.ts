@@ -107,6 +107,10 @@ export function summarizeVeBatchSpend(logs: Array<{ event: string; context: Reco
     } else if (finish?.provider === 'serper') {
       const cost = amount(finish.serperCredits);
       if (cost === undefined) missing = true; else credits += cost;
+    } else if (finish?.provider === 'typesafe') {
+      // The triage provider reports tokens, not money: its packet estimate is the charge.
+      const cost = amount(finish.estimatedCostUsd);
+      if (cost === undefined) missing = true; else ai += cost;
     } else if (finish) missing = true;
     if (missing) unknown++;
   }

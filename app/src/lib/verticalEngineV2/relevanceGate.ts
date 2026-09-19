@@ -10,6 +10,9 @@ import { VE_RELEVANCE_WEBSITE_VERSION, veRelevanceDecisionSchema, type VeRelevan
 import { fetchVeRelevanceEvidence } from './relevanceEvidence';
 import { normalizeVeCompanyInn, veCompanyIdentityKey } from './collectionIdentity';
 import { reviewVeRelevanceEvidence, VE_RELEVANCE_TARGET_RULES, type VeRelevanceReviewCompany, type VeRelevanceReviewResult } from './relevanceReview';
+import { triageVeCompanies, veTriageReason, veTriageRubricMessages, veTriageRubricModel, veTriageRubricSchema,
+  VE_TRIAGE_MAX_EXCERPTS, VE_TRIAGE_RUBRIC_VERSION, type VeTriageRubric } from './relevanceTriage';
+import { VE_RELEVANCE_TRIAGE_VERSION } from './relevanceTriageConfig';
 export type { VeRelevanceDecision } from './relevanceDecision';
 
 const BATCH_SIZE = 20;
@@ -19,6 +22,10 @@ const MAX_SEMANTIC_ATTEMPTS = 2;
 const configuredMax = Number(process.env.VE_RELEVANCE_MAX_ROWS);
 const MAX_COMPANIES = Number.isFinite(configuredMax) && configuredMax > 0 ? Math.min(10_000, Math.floor(configuredMax)) : 3000;
 const MAX_WEBSITES = 32;
+// One journal attempt and one durable save cadence per packet of fast checks.
+const TRIAGE_PACKET = 24;
+// Saved uncertain companies re-read per pass; the rest waits for the next pass.
+const TRIAGE_BACKLOG_LIMIT = 1000;
 // Сколько раз оплачивать поиск по одной компании, если провайдер так и не
 // ответил. Три попытки переживают разовый шторм у Serper; дальше повторы
 // перестают быть починкой и становятся тратой — 16.09.2026 этап сборки базы
@@ -207,6 +214,9 @@ export async function findIrrelevantRows(input: {
   allowPaidSearch?: boolean;
   websiteLimit?: number;
   fetchEvidence?: typeof fetchVeRelevanceEvidence;
+  /** Opt-in calibrated triage before the LLM (isVeRelevanceTriageEnabled). Does
+   * not enter the context hash: saved verdicts stay valid when it is toggled. */
+  triage?: boolean;
 }): Promise<VeRelevanceGateResult> {
   const signal = input.signal ?? getVeActiveJobSignal(); signal?.throwIfAborted();
   const model = getVeModel('gate'), reviewModel = getVeModel('relevanceReview');
@@ -658,6 +668,97 @@ export async function findIrrelevantRows(input: {
     await save();
   };
   const hasContext = Boolean(input.verticalName.trim());
+  // Calibrated triage (opt-in, relevanceTriage.ts). It removes clear mismatches
+  // before any LLM/website/search spend and turns clear matches into evidence-
+  // backed PROPOSALS; the independent semantic review below still decides every
+  // admission. Anything uncertain or failed continues on the unchanged LLM path.
+  const triageEnabled = input.triage === true && hasContext;
+  /** Should have been triaged in this pass but was not; stays eligible for the next pass. */
+  const triageSkipped = new Set<Entry>();
+  const triageBacklog: Entry[] = [];
+  let triageOff = false;
+  const triageTarget = { vertical: input.verticalName, verticalSummary: input.verticalSummary ?? '',
+    hypothesisTitle: input.hypothesisTitle ?? '', hypothesisDescription: input.hypothesisDescription ?? '' };
+  const triageRubric = async (): Promise<VeTriageRubric | null> => {
+    if (checkpoint.triage?.version === VE_TRIAGE_RUBRIC_VERSION) return checkpoint.triage.rubric;
+    try {
+      const response = await invoke(veTriageRubricMessages(scope, input.language), veTriageRubricSchema,
+        { model: veTriageRubricModel(), maxTokens: 4000, timeoutMs: 120_000, maxHttpAttempts: 2, signal: signal ?? undefined });
+      signal?.throwIfAborted();
+      checkpoint.triage = { version: VE_TRIAGE_RUBRIC_VERSION, rubric: response.data };
+      await save();
+      return response.data;
+    } catch (error) {
+      signal?.throwIfAborted();
+      if (error instanceof Error && error.name === 'AbortError') throw error;
+      if (error instanceof VeRelevanceCheckpointError || error instanceof ProviderUsageWriteError) throw error;
+      // The checklist is an accelerator. Its outage must not stop the base or
+      // spend the gate's retry budget: the LLM path continues and reports a
+      // real provider problem itself.
+      triageOff = true;
+      input.log?.('[relevanceGate] быстрая проверка пропущена: критерии гипотезы не подготовлены; используется обычная проверка');
+      return null;
+    }
+  };
+  /** Returns the companies that still need the LLM path. */
+  const runTriage = async (batch: Entry[], stage: 'initial' | 'website' | 'backlog'): Promise<Entry[]> => {
+    if (!triageEnabled || !batch.length) return batch;
+    const skip = (rest: Entry[]) => { rest.forEach((entry) => triageSkipped.add(entry)); return rest; };
+    if (triageOff || stopProviderCalls) return skip(batch);
+    const rubric = await triageRubric();
+    if (!rubric) return skip(batch);
+    const undecided: Entry[] = [];
+    const totals = { reject: 0, admit: 0, uncertain: 0, failed: 0 };
+    const share = (value: number) => Math.round(value * 100) / 100;
+    for (let start = 0, packets = 0; start < batch.length; start += TRIAGE_PACKET) {
+      const packet = batch.slice(start, start + TRIAGE_PACKET);
+      if (triageOff || stopProviderCalls) { undecided.push(...skip(packet)); continue; }
+      signal?.throwIfAborted();
+      const excerpts = packet.map((entry) => repairEvidenceCandidates(entry.fields).slice(0, VE_TRIAGE_MAX_EXCERPTS));
+      const checked = await triageVeCompanies({ rubric, target: triageTarget, language: input.language, signal: signal ?? undefined,
+        companies: packet.map((entry, i) => ({ facts: entry.fields, excerpts: excerpts[i] })) });
+      signal?.throwIfAborted();
+      result.tokensUsed += checked.inputTokens; result.costUsd += checked.costUsd;
+      packet.forEach((entry, i) => {
+        const verdict = checked.results[i];
+        if (verdict.outcome === 'failed') { totals.failed += 1; triageSkipped.add(entry); undecided.push(entry); return; }
+        if (verdict.outcome === 'reject') {
+          totals.reject += 1;
+          record(entry, { version: 2, status: 'irrelevant', reason: veTriageReason(rubric, verdict, input.language), evidence: [],
+            context_hash: contextHash, review_attempts: entry.attempts, triage_version: VE_RELEVANCE_TRIAGE_VERSION,
+            triage: { outcome: 'reject', activity: share(verdict.activity), final: true } });
+          if (stage === 'website') finishWebsite(entry);
+          return;
+        }
+        if (verdict.outcome === 'admit' && verdict.evidenceIds?.length) {
+          // Same verbatim/activity guards as an LLM proposal; admission itself
+          // still belongs to the independent semantic review.
+          const proposal = supportedDecision({ i: 0, status: 'relevant', reason: veTriageReason(rubric, verdict, input.language),
+            evidence: verdict.evidenceIds.map((id) => ({ field: excerpts[i][id].field, quote: excerpts[i][id].quote })) },
+          entry.fields, contextHash, entry.attempts, stage === 'website');
+          if (proposal.status === 'relevant') {
+            totals.admit += 1;
+            stageDecision(entry, { ...proposal, triage_version: VE_RELEVANCE_TRIAGE_VERSION,
+              triage: { outcome: 'admit', activity: share(verdict.activity) } });
+            if (stage === 'website') finishWebsite(entry);
+            return;
+          }
+        }
+        totals.uncertain += 1; undecided.push(entry);
+      });
+      if (checked.unavailable) {
+        triageOff = true;
+        input.log?.('[relevanceGate] сервис быстрой проверки недоступен; оставшиеся компании проходят обычную проверку');
+      }
+      // The checkpoint is megabytes; a lost packet costs a fraction of a cent.
+      if (++packets % 4 === 0) await save();
+    }
+    await save();
+    input.log?.('[relevanceGate] быстрая проверка (' + (stage === 'initial' ? 'новые компании' : stage === 'website' ? 'по сайту' : 'сохранённый резерв')
+      + '): ' + batch.length + ' компаний — отклонено ' + totals.reject + ', предложено к допуску ' + totals.admit
+      + ', без решения ' + totals.uncertain + (totals.failed ? ', сбоев ' + totals.failed : ''));
+    return undecided;
+  };
   let recoveredRepair = false;
   const recoveredSemantic: Entry[] = [];
   const recoveredCitations: Entry[] = [];
@@ -681,7 +782,8 @@ export async function findIrrelevantRows(input: {
           applySemantic(entry, semantic); recoveredRepair = true; return false;
         }
       }
-      if (cached.status === 'relevant' || cached.status === 'irrelevant') {
+      // A final triage reject carries no excerpt to review and is not re-bought.
+      if ((cached.status === 'relevant' || cached.status === 'irrelevant') && cached.triage?.final !== true) {
         const verified = semantic?.company_key === entry.key && semantic.status === 'finished'
           && semantic.result && reviewHash === semanticHash(entry, cached) && confirms(cached, semantic.result);
         if (!verified) {
@@ -719,7 +821,13 @@ export async function findIrrelevantRows(input: {
         return false;
       }
       const pendingRefinement = website?.reader_version === 1 && website.status === 'ok' && !website.refined && Boolean(website.text);
-      if (cached.status !== 'error' || pendingRefinement) { current.set(entry, cached); return false; }
+      if (cached.status !== 'error' || pendingRefinement) {
+        current.set(entry, cached);
+        // Saved uncertainty the triage has not seen yet: the bulk of a stalled reserve.
+        if (triageEnabled && cached.status === 'needs_review' && !pendingRefinement
+          && cached.triage_version !== VE_RELEVANCE_TRIAGE_VERSION) triageBacklog.push(entry);
+        return false;
+      }
     }
     return true;
   });
@@ -729,6 +837,12 @@ export async function findIrrelevantRows(input: {
     await repairCitation(entry, { i: 0, ...checkpoint.citation_repairs[entry.key].retry_proposal!, evidence: [] });
   }
   await reviewPending(recoveredSemantic);
+  if (triageBacklog.length) {
+    const known = triageBacklog.filter((entry) => ACTIVITY_FIELDS.some((field) => activityQuote(entry.fields[field])));
+    known.slice(TRIAGE_BACKLOG_LIMIT).forEach((entry) => triageSkipped.add(entry));
+    await runTriage(known.slice(0, TRIAGE_BACKLOG_LIMIT), 'backlog');
+    await reviewPending(entries);
+  }
   // Apply the budget AFTER cache hits, so recovery advances beyond the old first-N cap.
   const eligible = pending.slice(0, MAX_COMPANIES);
   if (!hasContext) {
@@ -752,8 +866,9 @@ export async function findIrrelevantRows(input: {
       input.log?.('[relevanceGate] без платной первичной классификации: ' + (eligible.length - initial.length) + ' компаний без сведений о деятельности');
       await save();
     }
-    for (let start = 0; start < initial.length && !stopProviderCalls; start += BATCH_SIZE) {
-      signal?.throwIfAborted(); await classify(initial.slice(start, start + BATCH_SIZE), false);
+    const unresolved = await runTriage(initial, 'initial');
+    for (let start = 0; start < unresolved.length && !stopProviderCalls; start += BATCH_SIZE) {
+      signal?.throwIfAborted(); await classify(unresolved.slice(start, start + BATCH_SIZE), false);
     }
     // Unconfirmed proposals remain excluded. Finish the remainder before
     // deciding which companies need website evidence.
@@ -764,6 +879,11 @@ export async function findIrrelevantRows(input: {
       const cached = checkpoint.website_evidence[entry.key];
       const semantic = checkpoint.semantic_reviews[checkpoint.semantic_review_refs[entry.key]];
       if (semantic && semantic.status !== 'finished') return false;
+      // The saved deferred-search/timeout markers below assume the company is
+      // still uncertain. A company the triage has just settled must not buy a
+      // search whose unusable result would overwrite that decision.
+      const settled = current.get(entry);
+      if (settled?.triage && (settled.status === 'relevant' || settled.status === 'irrelevant')) return false;
       if (cached?.search_deferred) return input.allowPaidSearch !== false;
       if (cached?.provider_error) return !searchAttemptsExhausted(cached);
       if (websiteTimeoutPending(cached)) return true;
@@ -863,7 +983,10 @@ export async function findIrrelevantRows(input: {
         }
       }));
       await save();
-      if (enriched.length && !stopProviderCalls) await classify(enriched, true);
+      if (enriched.length && !stopProviderCalls) {
+        const unresolved = await runTriage(enriched, 'website');
+        if (unresolved.length && !stopProviderCalls) await classify(unresolved, true);
+      }
     }
     await reviewPending(entries);
   }
@@ -876,7 +999,7 @@ export async function findIrrelevantRows(input: {
     await save();
     result.continueFromCheckpoint = canContinue;
   }
-  let deferredProviderRecovery = false;
+  let deferredProviderRecovery = false, triageStamped = false;
   for (const entry of entries) {
     let decision = current.get(entry) ?? errorDecision('Проверка ещё не выполнена. Контакт сохранён, а не отклонён.', entry.attempts);
     const website = checkpoint.website_evidence[entry.key];
@@ -920,6 +1043,14 @@ export async function findIrrelevantRows(input: {
       decision = { ...decision, website_review_version: VE_RELEVANCE_WEBSITE_VERSION };
       record(entry, decision);
     }
+    if (triageEnabled && decision.status === 'needs_review' && decision.triage_version !== VE_RELEVANCE_TRIAGE_VERSION
+      && !triageSkipped.has(entry)) {
+      // Seen by the triage (or nothing for it to read): the saved-review selector
+      // must not return this company for another fast pass under this policy.
+      decision = { ...decision, triage_version: VE_RELEVANCE_TRIAGE_VERSION };
+      record(entry, decision);
+      triageStamped = true;
+    }
     if (decision.status !== 'error') result.coverage.checkedCompanies += 1;
     for (const index of entry.group.rowIndices) {
       result.decisions.set(index, decision);
@@ -928,7 +1059,7 @@ export async function findIrrelevantRows(input: {
       if (decision.status === 'error') { result.errored.add(index); result.unchecked.add(index); }
     }
   }
-  if (deferredProviderRecovery) await save();
+  if (deferredProviderRecovery || triageStamped) await save();
   result.coverage.complete = result.coverage.checkedCompanies === entries.length;
   result.retryable = transientFailure && !permanentFailure;
   return result;
