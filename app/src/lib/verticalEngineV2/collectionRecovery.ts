@@ -43,7 +43,10 @@ export function previewRecoveryKind(base: Record<string, unknown>): 'validation'
   // Accounting failures stop paid work immediately, possibly between rounds.
   // An explicit continuation must reuse the durable children/cursors instead
   // of purchasing a new base. Reject incoherent checkpoints and cancellations.
-  if (base.error === 'Provider usage journal could not be saved.'
+  // Exhausted 429 waits fail the job with the round still `collecting`; the
+  // saved checkpoint is coherent and must be continued, not replaced by a new
+  // paid base (18.09.2026: five bases). Same rule as the journal outage.
+  if ((base.error === 'Provider usage journal could not be saved.' || /^Requesty 429\b/.test(String(base.error ?? '')))
     && progress.status === 'collecting'
     && typeof progress.round === 'number' && Number.isSafeInteger(progress.round) && progress.round > 0
     && (checkpoint?.completed_round ?? 0) === progress.round

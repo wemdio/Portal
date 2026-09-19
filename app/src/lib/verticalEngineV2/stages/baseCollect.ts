@@ -706,6 +706,9 @@ export interface VeCollectInfo {
   relevance_summary?: VeRelevanceReserveSummary;
   /** Finish bounded evidence passes on saved candidates before purchasing a new round. */
   relevance_review_requested?: boolean;
+  /** Selection fingerprint of the last automatic saved-review pass; an identical
+   * selection after a pass proves the loop cannot progress. */
+  relevance_review_progress?: { signature: string; passes: number };
   /** Worker-only checkpoint for validation of saved, unfinished email rows. */
   saved_email_recovery?: import('../savedEmailRecovery').VeSavedEmailRecoveryState;
   company_name_checkpoint?: VeCompanyNameCheckpoint;
@@ -3326,11 +3329,30 @@ async function completeTargetRound(args: {
     && (row._ve_relevance as { status?: unknown } | undefined)?.status === 'needs_review');
   const pendingAutomaticEmails = hasPendingVeSavedEmailRecovery(reserveRows, info.saved_email_recovery);
   const emailValidationCanContinue = pendingAutomaticEmails && args.validationError === 'Проверка email завершилась не полностью';
-  const pendingAutomaticReview = !reviewOnly && (!args.validationError || emailValidationCanContinue) && !taskError
-    && readyRows.length < progress.ready_target && (pendingAutomaticEmails || buildVeRelevanceReviewBatch({
-      reserve: reserveRows, ready: cleaned.rows, source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
-      allowPaidSearch: !existingFirst,
-    }).rows.length > 0);
+  const reviewEligible = !reviewOnly && (!args.validationError || emailValidationCanContinue) && !taskError
+    && readyRows.length < progress.ready_target;
+  const automaticBatch = reviewEligible ? buildVeRelevanceReviewBatch({
+    reserve: reserveRows, ready: cleaned.rows, source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
+    allowPaidSearch: !existingFirst,
+  }) : null;
+  // A saved-review pass that leaves its own selection byte-identical cannot
+  // progress: every verdict came from the checkpoint and no row changed. Stop
+  // requesting that pass instead of requeueing every 30 seconds (19.09.2026:
+  // one base looped 3000 times on one company). The rows stay in the reserve.
+  const reviewSignature = automaticBatch?.rows.length
+    ? relevanceHash([readyRows.length, automaticBatch.rows.map((row) => [veRelevanceRowKey(row), row._email_status ?? null,
+      (row._ve_relevance as Record<string, unknown> | undefined)?.status ?? null,
+      (row._ve_relevance as Record<string, unknown> | undefined)?.review_attempts ?? null,
+      (row._ve_relevance as Record<string, unknown> | undefined)?.website_review_version ?? null,
+      (row._ve_relevance as Record<string, unknown> | undefined)?.search_deferred ?? null]).sort()])
+    : null;
+  const stalledReview = reviewSignature !== null && info.relevance_review_progress?.signature === reviewSignature;
+  if (reviewSignature === null) delete info.relevance_review_progress;
+  else info.relevance_review_progress = { signature: reviewSignature,
+    passes: stalledReview ? (info.relevance_review_progress?.passes ?? 0) + 1 : 0 };
+  if (stalledReview) stageLog(ctx, `[base_collect] уточнение сохранённых контактов не продвигается: ${automaticBatch?.companies ?? 0} компаний повторно получают тот же сохранённый итог; они остаются в резерве, раунд завершается`);
+  const pendingAutomaticReview = reviewEligible
+    && (pendingAutomaticEmails || (Boolean(automaticBatch?.rows.length) && !stalledReview));
   const pendingManualReview = args.continueManualReview === true
     && reserveRows.some((row) => needsVeRelevanceReview(row) || needsVeSavedEmailReview(row));
   const drainingSavedEmailChild = Boolean(info.saved_email_recovery?.batch) && !args.validationError && !taskError;
