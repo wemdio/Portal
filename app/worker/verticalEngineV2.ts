@@ -278,7 +278,7 @@ async function handleJob(job: VeJob) {
         watchdog.touch();
         log('info', `[${job.stage}] ${msg}`);
       },
-    })));
+    }), () => watchdog.touch()));
     if (isResearch) abort.signal.throwIfAborted();
   } finally {
     // Deliberately guard execution, not the legacy non-atomic done→enqueue
