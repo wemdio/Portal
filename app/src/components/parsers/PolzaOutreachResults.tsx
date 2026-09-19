@@ -2,7 +2,7 @@
 
 import { Fragment, useState } from 'react';
 import type { PolzaOutreachCompanyRow, PolzaOutreachFunnel, ParserJobStatus } from '@/types';
-import { ChevronDown, ChevronRight, Download, ExternalLink, Loader2, Mail, Square, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Download, ExternalLink, FileText, Loader2, Mail, Square, Trash2 } from 'lucide-react';
 
 type Props = {
   items: PolzaOutreachCompanyRow[];
@@ -249,6 +249,7 @@ export function PolzaOutreachResults({
                   <th className="px-3 py-3">Гео продаж</th>
                   <th className="px-3 py-3">Уверенность</th>
                   <th className="px-3 py-3">Почта</th>
+                  <th className="px-3 py-3">Письма</th>
                   <th className="px-3 py-3">Статус</th>
                 </tr>
               </thead>
@@ -325,6 +326,16 @@ export function PolzaOutreachResults({
                           )}
                         </td>
                         <td className="px-3 py-3">
+                          {row.letters?.length ? (
+                            <span className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-xs font-medium text-violet-800">
+                              <FileText className="h-3 w-3" />
+                              {row.letters.length} письма
+                            </span>
+                          ) : (
+                            <span className="text-gray-400">—</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-3">
                           <StatusBadge status={row.status} />
                           {row.exclusion_reason ? (
                             <div className="mt-0.5 max-w-[140px] truncate text-[11px] text-gray-400" title={row.exclusion_reason}>
@@ -340,7 +351,7 @@ export function PolzaOutreachResults({
                       </tr>
                       {isOpen ? (
                         <tr className="bg-gray-50/60">
-                          <td colSpan={9} className="px-6 py-4">
+                          <td colSpan={10} className="px-6 py-4">
                             <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
                               <div className="space-y-3">
                                 <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">

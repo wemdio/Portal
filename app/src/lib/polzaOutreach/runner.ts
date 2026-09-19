@@ -128,6 +128,10 @@ export async function runPolzaOutreachJob(jobId: string): Promise<void> {
     });
 
     // ── S1: выборка вакансий ──
+    // Повторный прогон (recover после падения воркера вернул задачу в pending)
+    // начинается с чистого листа: старые строки джобы удаляем, иначе дубли
+    // сломают воронку. Как и saveResults в eng-hiring.
+    await db.from('polza_outreach_companies').delete().eq('job_id', jobId);
     const candidates = await selectVacancies(db, config);
     await ensureNotCancelled();
     await insertRows(
@@ -242,8 +246,18 @@ export async function runPolzaOutreachJob(jobId: string): Promise<void> {
       }
     }
     const domainFound = rows.filter((r) => r.normalizedDomain).length;
+    const domainShare = rows.length ? Math.round((domainFound / rows.length) * 100) : 0;
     const icpPassed = rows.filter((r) => !r.done).length;
-    log('info', `S2/S3: domain found ${domainFound}/${rows.length}, ICP passed ${icpPassed}`);
+    log('info', `S2/S3: domain found ${domainFound}/${rows.length} (${domainShare}%), ICP passed ${icpPassed}`);
+    // План, шаг 3: доля доменов — цифра для разговора про объёмы; <20% это риск.
+    await setProgress({
+      progress_detail: {
+        domains_resolved: rows.length,
+        domain_found: domainFound,
+        domain_share_pct: domainShare,
+        ...(domainShare < 20 ? { domain_share_warning: 'домен находится менее чем у 20% компаний' } : {}),
+      },
+    });
     if (domainFound / rows.length < 0.2) {
       log('warn', `S2: домен найден у ${domainFound}/${rows.length} (<20%) — это меняет разговор про объёмы`);
     }
