@@ -1,6 +1,14 @@
 # Paired classifier evaluation — 2026-09-19
 
-## Status: prepared, live comparison blocked
+## Update — completed on 2026-09-20 (UTC+4)
+
+The user raised the limit on the same credential. The frozen 300-case run is
+complete; no key was substituted. See the
+[paired results](instantly-paired-results-20260920.md) for provisional blind
+labels, errors, uncertainty, cost and limitations. Sections below preserve
+the preparation/blocker state recorded on September 19, not the current status.
+
+## Status on September 19: prepared, live comparison blocked
 
 The user approved comparing the latest fixed Portal classifier with frozen Jev
 v2.6. No production writes, deployment, notifications or qualification changes
