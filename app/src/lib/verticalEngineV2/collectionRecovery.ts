@@ -1,6 +1,7 @@
 import { isVeProviderBillingError } from './collectionErrors';
 import { buildVeRelevanceReviewBatch, readVeRelevanceReserve, readVeRelevanceSourceRows } from './relevanceReserve';
 import { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
+import { isVeRelevanceTriageEnabled } from './relevanceTriageConfig';
 
 /** Explicit continuation only: a terminal partial preview is never daily supply. */
 export function canResumePartialPreview(base: Record<string, unknown>): boolean {
@@ -18,8 +19,11 @@ export function canResumePartialPreview(base: Record<string, unknown>): boolean 
   const reserve = readVeRelevanceReserve(info.relevance_reserve);
   // Reuse current eligibility rules: completed uncertain checks do not become
   // an unlimited paid loop merely because fewer than 500 contacts were found.
+  // With the calibrated triage enabled, saved uncertainty it has not read yet is
+  // resumable work as well: one cheap pass per company, no sources or search.
   if (reserve.some(needsVeSavedEmailReview) || buildVeRelevanceReviewBatch({
     reserve, ready: [], source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
+    triage: isVeRelevanceTriageEnabled(typeof base.project_id === 'string' ? base.project_id : null),
   }).rows.length > 0) return true;
   return Number(target.candidates_processed) < Number(target.max_candidates)
     && Number(target.round) < Number(target.max_rounds)

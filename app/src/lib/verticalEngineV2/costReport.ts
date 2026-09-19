@@ -149,11 +149,14 @@ export function buildVeCostReport(input: VeCostReportInput) {
       providerRequestId: measured?.providerRequestId, httpStatus: number(measured?.httpStatus),
     };
   });
-  if (records.some((record) => !['requesty', 'serper'].includes(String(record.provider)))) issues.add('unknown_provider');
+  if (records.some((record) => !['requesty', 'serper', 'typesafe'].includes(String(record.provider)))) issues.add('unknown_provider');
 
   const aggregate = (rows: typeof records) => {
     const ai = rows.filter((row) => row.provider === 'requesty');
     const search = rows.filter((row) => row.provider === 'serper');
+    // Calibrated relevance triage: one attempt is a packet of requests; the
+    // provider reports tokens only, so its estimate is the known amount.
+    const triage = rows.filter((row) => row.provider === 'typesafe');
     const reported = sum(ai.flatMap((row) => row.reportedCostUsd === undefined ? [] : [row.reportedCostUsd]));
     const credits = sum(search.flatMap((row) => row.serperCredits === undefined ? [] : [row.serperCredits]));
     const aiUnknown = ai.filter((row) => row.reportedCostUsd === undefined || row.ambiguous).length;
@@ -164,16 +167,21 @@ export function buildVeCostReport(input: VeCostReportInput) {
         estimatedUsdKnownSubtotal: sum(ai.flatMap((row) => row.estimatedCostUsd === undefined ? [] : [row.estimatedCostUsd])),
         missingEstimateAttempts: ai.filter((row) => row.reportedCostUsd === undefined && row.estimatedCostUsd === undefined).length },
       serper: { attempts: search.length, returnedCreditsKnownSubtotal: credits, unknownCreditAttempts: searchUnknown },
+      typesafe: { attempts: triage.length,
+        estimatedUsdKnownSubtotal: sum(triage.flatMap((row) => row.estimatedCostUsd === undefined ? [] : [row.estimatedCostUsd])),
+        unknownCostAttempts: triage.filter((row) => row.estimatedCostUsd === undefined || row.ambiguous).length },
     };
   };
   const totals = aggregate(records);
   if (totals.requesty.unknownCostAttempts) issues.add('requesty_cost_missing');
   if (totals.serper.unknownCreditAttempts) issues.add('serper_credits_missing');
+  if (totals.typesafe.unknownCostAttempts) issues.add('typesafe_cost_missing');
   const journalComplete = issues.size === 0;
   const tariff = number(input.serperUsdPer1000);
   const ready = input.mode === 'collection' && input.baseId && number(input.readyCount) !== undefined ? input.readyCount! : null;
   const searchUsd = tariff === undefined ? null : totals.serper.returnedCreditsKnownSubtotal * tariff / 1000;
-  const totalUsd = journalComplete && searchUsd !== null ? sum([totals.requesty.reportedUsdKnownSubtotal, searchUsd]) : null;
+  const totalUsd = journalComplete && searchUsd !== null
+    ? sum([totals.requesty.reportedUsdKnownSubtotal, totals.typesafe.estimatedUsdKnownSubtotal, searchUsd]) : null;
   const collectionFinished = input.mode === 'collection' && jobs.length > 0 && jobs.every((job) => ['done', 'failed', 'cancelled'].includes(job.status));
   return {
     version: 1,
@@ -185,6 +193,7 @@ export function buildVeCostReport(input: VeCostReportInput) {
     unmeteredJobs, issues: [...issues], stageRuns: runs.size, childPlans: [...childPlans.values()],
     ...totals,
     requestyReportedUsd: journalComplete ? totals.requesty.reportedUsdKnownSubtotal : null,
+    typesafeEstimatedUsd: journalComplete ? totals.typesafe.estimatedUsdKnownSubtotal : null,
     serperCredits: journalComplete ? totals.serper.returnedCreditsKnownSubtotal : null,
     serperUsdPer1000: tariff ?? null, serperUsdAtProvidedTariff: journalComplete ? searchUsd : null,
     totalAiAndSearchUsd: totalUsd, readyCount: ready,

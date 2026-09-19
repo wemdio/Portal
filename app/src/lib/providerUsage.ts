@@ -11,7 +11,8 @@ export interface ProviderUsageScope {
 
 export interface ProviderUsageEvent {
   attemptId: string;
-  provider: 'requesty' | 'serper';
+  /** `typesafe`: calibrated relevance triage; one journal attempt covers a packet of requests. */
+  provider: 'requesty' | 'serper' | 'typesafe';
   phase: 'started' | 'finished';
   status?: 'success' | 'http_error' | 'ambiguous';
   requestedModel?: string;
