@@ -30,13 +30,14 @@ describe('VE2 contact delivery scheduler', () => {
       const abort = new AbortController();
       const onTimeout = jest.fn();
       const onUnresponsive = jest.fn();
-      const guard = createVeJobWatchdog({ abort, idleMs: 1000, graceMs: 100, onTimeout, onUnresponsive });
+      const guard = createVeJobWatchdog({ abort, idleMs: 1000, graceMs: 100, reason: 'VE2 base_collect inactivity timeout', onTimeout, onUnresponsive });
       jest.advanceTimersByTime(900);
       guard.touch();
       jest.advanceTimersByTime(900);
       expect(abort.signal.aborted).toBe(false);
       jest.advanceTimersByTime(100);
-      expect(abort.signal.reason.message).toMatch(/timeout/i);
+      // Base stages share the guard; the message stays a retryable stage error.
+      expect(abort.signal.reason.message).toBe('VE2 base_collect inactivity timeout after 1000ms');
       expect(onTimeout).toHaveBeenCalledTimes(1);
       guard.touch(); // A late read/log cannot resurrect the expired operation.
       jest.advanceTimersByTime(100);

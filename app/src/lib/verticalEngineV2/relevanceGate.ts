@@ -321,6 +321,14 @@ export async function findIrrelevantRows(input: {
       record(entry, { ...errorDecision('Исправление доказательств не завершено из-за сбоя провайдера; контакт остаётся в резерве.',
         Math.max(1, entry.attempts)), status: 'needs_review' });
     }
+    else if (code === 'billing' || code === 'configuration') {
+      // A refusal recorded by an earlier run is not a current provider error.
+      // Without a saved proposal the repair cannot be repeated; keep the
+      // company uncertain and finished under this policy so the pass and the
+      // saved-review selector both move on instead of replaying the old 402.
+      record(entry, { ...errorDecision('Исправление доказательств прервано отказом провайдера; контакт остаётся в резерве.',
+        Math.max(1, entry.attempts)), status: 'needs_review', website_review_version: VE_RELEVANCE_WEBSITE_VERSION });
+    }
     else citationProviderFailure(entry, code);
   };
   const finishWebsite = (entry: Entry) => {
@@ -372,7 +380,15 @@ export async function findIrrelevantRows(input: {
     // have been charged and cannot turn back into a free initial attempt.
     review.attempts = semanticAttempts(review);
     if (review.failure_code === 'billing' || review.failure_code === 'configuration') {
-      semanticFailure(entry, review); return;
+      // A saved balance/key refusal describes the provider at that moment, not
+      // now: resumed bases re-failed with the old 402 before any request
+      // (18-19.09.2026). Nothing was charged for the refused attempt; give it
+      // back and let a fresh request decide. A real refusal stops the pass again.
+      delete review.failure_code;
+      review.attempts = Math.max(0, review.attempts - 1);
+      review.status = 'pending';
+      record(entry, errorDecision('Ожидается повторная смысловая проверка после отказа провайдера.', entry.attempts));
+      return;
     }
     if (review.attempts >= MAX_SEMANTIC_ATTEMPTS) { review.status = 'failed'; quarantineSemantic(entry); return; }
     review.status = 'pending';
@@ -530,10 +546,22 @@ export async function findIrrelevantRows(input: {
       }
       const diagnostic = getLLMValidationDiagnostic(error, ['evidence_ids']);
       if (diagnostic) input.log?.('[relevanceGate] invalid citation repair: ' + JSON.stringify(diagnostic));
-      if (error instanceof LLMValidationError) citationFailure(entry);
-      else citationProviderFailure(entry, isVeProviderBillingError(error) ? 'billing'
-        : error instanceof Error && /Requesty (?:400|401|403)\b|API_KEY.*(?:не задан|missing)/i.test(error.message) ? 'configuration'
-          : error instanceof Error && /timeout|deadline|timed out/i.test(error.message) ? 'timeout' : 'provider');
+      if (error instanceof LLMValidationError) { citationFailure(entry); }
+      else {
+        const code: VeRelevanceFailureCode = isVeProviderBillingError(error) ? 'billing'
+          : error instanceof Error && /Requesty (?:400|401|403)\b|API_KEY.*(?:не задан|missing)/i.test(error.message) ? 'configuration'
+            : error instanceof Error && /timeout|deadline|timed out/i.test(error.message) ? 'timeout' : 'provider';
+        if (code === 'billing' || code === 'configuration') {
+          // Nothing was charged. Keep the proposal and the website text so an
+          // explicit resume after the balance/key is fixed repeats this repair
+          // once, instead of replaying today's refusal as a new failure.
+          checkpoint.citation_repairs[entry.key].retry_proposal = { status: proposed.status, reason: proposed.reason };
+          citationProviderFailure(entry, code);
+          await save();
+          return;
+        }
+        citationProviderFailure(entry, code);
+      }
     }
     checkpoint.citation_repairs[entry.key].status = 'finished';
     finishWebsite(entry);

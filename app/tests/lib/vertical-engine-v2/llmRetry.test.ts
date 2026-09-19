@@ -669,6 +669,27 @@ describe('llm rawCall retry', () => {
       expect(fetchMock).toHaveBeenCalledTimes(outcome === 'exhausted' ? 2 : 3);
     }
 
+    // A balance refusal saved by an earlier run says nothing about the provider
+    // now: resume retries that unpaid review instead of replaying a 402 before
+    // any request, which kept resumed bases failed after a top-up (19.09.2026).
+    {
+      const stale = JSON.parse(JSON.stringify(saved)) as VeRelevanceCheckpoint;
+      const review = Object.values(stale.semantic_reviews)[0];
+      review.status = 'failed'; review.failure_code = 'billing'; review.attempts = 1; delete review.result;
+      fetchMock.mockReset().mockResolvedValueOnce(confirmation).mockResolvedValueOnce(classification).mockResolvedValueOnce(confirmation);
+      const topped = await findIrrelevantRows({ ...expanded, checkpoint: stale });
+      expect(topped.error).toBeUndefined();
+      expect([...topped.decisions.values()].map((item) => item.status)).toEqual(['relevant', 'relevant']);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(Object.values(topped.checkpoint.semantic_reviews).find((item) => item.company_key === review.company_key))
+        .toEqual(expect.objectContaining({ status: 'finished', attempts: 1 }));
+      const stillEmpty = JSON.parse(JSON.stringify(stale)) as VeRelevanceCheckpoint;
+      fetchMock.mockReset().mockResolvedValueOnce(httpResponse(402, {}));
+      const refused = await findIrrelevantRows({ ...expanded, checkpoint: stillEmpty });
+      expect(refused.error).toContain('Requesty 402');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
+
     // Fresh invalid batches split into isolated retries without replaying the
     // initial classifier, including when only one sibling remains malformed.
     delete process.env.VE_MODEL_GATE;
@@ -744,8 +765,13 @@ describe('llm rawCall retry', () => {
       const failed = await findIrrelevantRows(citationInput);
       expect(failed.retryable).toBe(status === 429 || status === 502);
       expect(failed.decisions.get(0)?.status).toBe('error');
+      // A balance/key refusal was never charged. Once the operator fixes it, a
+      // resume repeats the reserved repair once instead of replaying the old
+      // refusal as a fresh failure (bases stayed failed after a top-up, 19.09.2026).
+      const refused = status === 402 || status === 401;
+      if (refused) fetchMock.mockResolvedValueOnce(reply({ evidence_ids: [0] })).mockResolvedValueOnce(confirmation);
       const resumed = await findIrrelevantRows({ ...citationInput, checkpoint: failed.checkpoint });
-      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(fetchMock).toHaveBeenCalledTimes(refused ? 5 : 3);
       if (status === 429) {
         expect(resumed.rateLimit).toMatchObject({ deferred: true });
         expect(Object.values(resumed.checkpoint.citation_repairs)[0].retry_proposal).toBeDefined();
@@ -759,8 +785,9 @@ describe('llm rawCall retry', () => {
         expect(resumed.error).toBeUndefined();
         expect(resumed.decisions.get(0)?.status).toBe('needs_review');
       } else {
-        expect(resumed.error).toBeDefined();
-        expect(resumed.decisions.get(0)?.status).toBe('error');
+        expect(resumed.error).toBeUndefined();
+        expect(resumed.decisions.get(0)?.status).toBe('relevant');
+        expect(citationInput.fetchEvidence).toHaveBeenCalledTimes(1);
       }
     }
 
@@ -780,6 +807,11 @@ describe('llm rawCall retry', () => {
     Object.values(legacy.verdicts).forEach((verdict) => { verdict.website_review_version = 3; });
     const legacyRow = { ...input.rows[0], _email_status: 'ok', _ve_relevance: Object.values(legacy.verdicts)[0] };
     expect(needsVeRelevanceEvidence(legacyRow)).toBe(true);
+    // A follow-up completed under the current policy without a counted attempt
+    // (site unavailable/unverified) must not be selected again: the gate would
+    // only replay its cached verdict, and the base would requeue forever.
+    expect(needsVeRelevanceEvidence({ ...legacyRow, _ve_relevance: { ...Object.values(legacy.verdicts)[0],
+      review_attempts: 0, website_review_version: 4 } })).toBe(false);
     const websiteText = (description + '. 🏭 ').padEnd(5999, 'x') + '😀 tail\u0000\ud83d';
     const available = jest.fn().mockResolvedValue({ status: 'ok', text: websiteText, url: 'https://factory.test/', reason: 'identity_verified_website' });
     fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'relevant', reason: 'x'.repeat(399) + '😀', evidence_ids: [0] }] })).mockResolvedValueOnce(confirmation);

@@ -42,6 +42,8 @@ export function createVeJobWatchdog(options: {
   abort: AbortController;
   idleMs: number;
   graceMs: number;
+  /** Abort message prefix; keep it matching the worker's retryable-error rules. */
+  reason?: string;
   onTimeout: () => void;
   onUnresponsive: () => void;
 }): { touch: () => void; stop: () => void } {
@@ -61,7 +63,7 @@ export function createVeJobWatchdog(options: {
     if (stopped || options.abort.signal.aborted) return;
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-      options.abort.abort(new Error(`VE2 research inactivity timeout after ${options.idleMs}ms`));
+      options.abort.abort(new Error(`${options.reason ?? 'VE2 research inactivity timeout'} after ${options.idleMs}ms`));
       options.onTimeout();
     }, options.idleMs);
     idleTimer.unref?.();

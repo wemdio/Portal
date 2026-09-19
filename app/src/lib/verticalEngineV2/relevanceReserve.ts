@@ -125,8 +125,13 @@ function canAutomaticallyReview(row: Record<string, unknown>, evidenceAvailable:
   // Technical errors use the caller's bounded recovery policy, not a guess.
   if (!decision || decision.status === 'error') return true;
   if (decision.status === 'needs_review' && decision.search_deferred === true) return evidenceAvailable;
-  return decision.status === 'needs_review' && evidenceAvailable && ((decision.review_attempts ?? 0) === 0
-    || decision.website_review_version !== VE_RELEVANCE_WEBSITE_VERSION);
+  // The gate stamps website_review_version once its bounded follow-up under the
+  // current policy is complete, also when no paid attempt was counted (site
+  // unavailable, identity unverified). Treating a zero attempt count as "never
+  // reviewed" re-selected such companies forever: the gate reused the cached
+  // verdict, nothing changed, and the base requeued every 30 seconds (19.09.2026).
+  return decision.status === 'needs_review' && evidenceAvailable
+    && decision.website_review_version !== VE_RELEVANCE_WEBSITE_VERSION;
 }
 
 /** Spend the next bounded pass on usable emails with a site or searchable INN. */

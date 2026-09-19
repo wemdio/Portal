@@ -109,7 +109,9 @@ function eventFields(event: ProviderUsageEvent): Record<string, unknown> {
 }
 
 /** A self-requeue is a finished invocation, even though its ve_jobs row remains pending. */
-export async function withVeCostTelemetry<T>(db: SupabaseClient, job: VeJob, work: () => Promise<T>): Promise<T> {
+export async function withVeCostTelemetry<T>(db: SupabaseClient, job: VeJob, work: () => Promise<T>,
+  /** Every provider attempt start/finish proves the stage is alive (worker inactivity guard). */
+  onProviderEvent?: () => void): Promise<T> {
   const scope: ProviderUsageScope = {
     projectId: job.project_id, jobId: job.id, stage: job.stage,
     ...(identifier(job.payload.base_id) ? { baseId: String(job.payload.base_id) } : {}),
@@ -137,7 +139,7 @@ export async function withVeCostTelemetry<T>(db: SupabaseClient, job: VeJob, wor
   let outcome: 'returned' | 'threw' = 'threw';
   try {
     const result = await withProviderUsage(scope,
-      (currentScope, event) => append(db, currentScope, event.phase, { runId, ...eventFields(event) }), work);
+      (currentScope, event) => { onProviderEvent?.(); return append(db, currentScope, event.phase, { runId, ...eventFields(event) }); }, work);
     outcome = 'returned';
     return result;
   } finally {
