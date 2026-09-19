@@ -15,6 +15,12 @@ export const veRelevanceDecisionSchema = z.object({
   search_deferred: z.literal(true).optional(),
   /** Bounded website follow-up completed (or exhausted) under this policy. */
   website_review_version: z.union([z.literal(2), z.literal(3), z.literal(VE_RELEVANCE_WEBSITE_VERSION)]).optional(),
+  /** The calibrated triage has seen this company under that policy (relevanceTriage.ts).
+   * Additive and tolerant: an unknown value must never invalidate a paid checkpoint. */
+  triage_version: z.number().int().positive().optional().catch(undefined),
+  /** Present only when the triage itself decided. `final`: a reject that is not re-reviewed. */
+  triage: z.object({ outcome: z.enum(['admit', 'reject']), activity: z.number().min(0).max(1),
+    final: z.literal(true).optional() }).optional().catch(undefined),
 });
 
 export type VeRelevanceDecision = z.infer<typeof veRelevanceDecisionSchema>;
