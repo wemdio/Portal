@@ -14,7 +14,7 @@ const ACCEPT = '.pdf,.docx,.txt,.md';
 const CONTROL_CLASS =
   'w-full rounded-lg border border-zinc-300 bg-white px-3.5 py-2.5 text-sm leading-relaxed text-zinc-900 transition-colors focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20';
 
-type UploadField = 'productFacts' | 'exampleCase' | 'localBrief';
+type UploadField = 'exampleCase' | 'localBrief';
 
 /** Сколько символов брифа/глобальной настройки показывать до «Показать полностью». */
 const PREVIEW_CHARS = 600;
@@ -149,6 +149,8 @@ export function KnowledgeBaseForm({
   // Запасной бриф: заполняется здесь, в карточку проекта не уходит.
   const [localBrief, setLocalBrief] = useState('');
   const [briefExpanded, setBriefExpanded] = useState(false);
+  // Отдельного поля «Факты о продукте» в форме больше нет — всё это есть
+  // в брифе. Старое значение (если было) не теряем: грузим и сохраняем как есть.
   const [productFacts, setProductFacts] = useState('');
   const [toneNotes, setToneNotes] = useState('');
   const [exampleCase, setExampleCase] = useState('');
@@ -194,7 +196,6 @@ export function KnowledgeBaseForm({
     setError(null);
     try {
       const text = await extractTextFromFile(file);
-      if (field === 'productFacts') setProductFacts(text);
       if (field === 'exampleCase') setExampleCase(text);
       if (field === 'localBrief') setLocalBrief(text);
     } catch (err) {
@@ -286,18 +287,6 @@ export function KnowledgeBaseForm({
                 }
               />
             )}
-
-            <KbField
-              label="Факты о продукте"
-              hint="Возможности и кейсы, которые можно упоминать в письмах"
-              value={productFacts}
-              onChange={setProductFacts}
-              rows={5}
-              placeholder="Цифры, клиенты, результаты внедрений…"
-              uploadField="productFacts"
-              uploadingField={uploadingField}
-              onUpload={handleUpload}
-            />
 
             <KbField
               label="Тон и ограничения"

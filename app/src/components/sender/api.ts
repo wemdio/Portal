@@ -10,6 +10,8 @@ export interface MailboxDto {
   enabled: boolean;
   /** Состояние ящика в самом Workspace на момент последней синхронизации. */
   google_state: 'active' | 'suspended' | 'missing' | null;
+  /** Админ Workspace, из чьего каталога пришёл ящик. */
+  google_account: string | null;
   email: string;
   display_name: string | null;
   username: string;
@@ -119,6 +121,8 @@ export interface GoogleSyncResult {
   suspended: number;
   missing: number;
   total: number;
+  /** Аккаунты, чей каталог Google не отдал. */
+  failed: { account: string; error: string }[];
 }
 
 export function googleWorkspaceStatus() {
@@ -228,6 +232,27 @@ export function patchCampaign(id: string, action: 'start' | 'pause' | 'finish') 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action }),
   });
+}
+
+/** Что нашлось в базе получателей — ответ /recipients/preview. */
+export interface RecipientVariableDto {
+  key: string;
+  header: string | null;
+  filled: number;
+  sample: string | null;
+}
+
+export interface RecipientColumnsDto {
+  emailHeader: string | null;
+  nameHeader: string | null;
+  recipients: number;
+  invalid: number;
+  duplicates: number;
+  variables: RecipientVariableDto[];
+}
+
+export function previewRecipients(file: File) {
+  return upload<RecipientColumnsDto>(`${BASE}/recipients/preview`, file);
 }
 
 export function uploadRecipients(campaignId: string, file: File) {

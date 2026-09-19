@@ -189,8 +189,9 @@ export function CampaignsTab() {
       {formOpen ? (
         <CampaignFormModal
           onClose={() => setFormOpen(false)}
-          onCreated={async () => {
-            setNotice('Кампания создана. Загрузите базу получателей и запускайте.');
+          onCreated={async ({ notice: createdNotice, error: createdError }) => {
+            setNotice(createdNotice ?? null);
+            setError(createdError ?? null);
             await load();
           }}
         />

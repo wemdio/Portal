@@ -2,6 +2,9 @@ import { loadBuffer } from 'cheerio';
 import { isIP } from 'node:net';
 
 export interface VeEvidencePage {
+  /** Hypothesis-neutral public content for shared facts. Oversized documents
+   * remain usable in memory but are deliberately not stored in the cache. */
+  document?: { text: string; links: Array<{ url: string; text: string }> };
   title?: string;
   text: string;
   url: string;
@@ -155,7 +158,8 @@ export function parseVeEvidencePage(body: Buffer, url: string, contentType: stri
     try { raw = new TextDecoder(charset ?? 'utf-8').decode(body); }
     catch { raw = body.toString('utf8'); }
     const inns = extractInns(raw);
-    return { text: selectVeEvidenceText(raw, focus), url, links: [], inns, ownerInns: isLegalPage(url) ? inns : [] };
+    return { text: selectVeEvidenceText(raw, focus), document: { text: cleanText(raw), links: [] },
+      url, links: [], inns, ownerInns: isLegalPage(url) ? inns : [] };
   }
 
   const $ = loadBuffer(body, { encoding: { transportLayerEncodingLabel: charset, defaultEncoding: 'utf-8' } });
@@ -227,5 +231,7 @@ export function parseVeEvidencePage(body: Buffer, url: string, contentType: stri
   const unique = new Map<string, EvidenceLink>();
   for (const link of ranked) if (!unique.has(link.url)) unique.set(link.url, link);
   const links = [...unique.values()].slice(0, 80);
-  return { text: selectVeEvidenceText(activityText, focus), title: cleanText([title, $('h1').first().text()].join(' ')).slice(0, 500), url, links, inns, ownerInns: [...ownerInns] };
+  return { text: selectVeEvidenceText(activityText, focus),
+    document: { text: cleanText(activityText), links: [...new Map(candidates.map((item) => [item.url, item])).values()] },
+    title: cleanText([title, $('h1').first().text()].join(' ')).slice(0, 500), url, links, inns, ownerInns: [...ownerInns] };
 }

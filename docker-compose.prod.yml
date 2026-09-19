@@ -753,6 +753,7 @@ services:
       - VE_MODEL_RESEARCH=openai/gpt-5.5
       - VE_MODEL_CHAIN=google/gemini-3.1-pro-preview
       - VE_MODEL_BULK=openai/gpt-5.5
+      - VE_MODEL_COLLECTION=${VE_MODEL_COLLECTION:-deepinfra/deepseek-v4-flash-0731}
       - SERPER_API_KEY=${SERPER_API_KEY}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=vertical-engine-v2

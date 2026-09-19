@@ -27,6 +27,8 @@ export interface MailboxRow {
   enabled: boolean;
   /** Что про ящик думает сам Google на момент последней синхронизации каталога. */
   google_state: 'active' | 'suspended' | 'missing' | null;
+  /** Админ Workspace, из чьего каталога пришёл ящик (их может быть несколько). */
+  google_account: string | null;
   status: MailboxStatus;
   daily_campaign_limit: number;
   daily_total_limit: number;

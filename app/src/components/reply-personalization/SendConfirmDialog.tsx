@@ -8,13 +8,16 @@ export function SendConfirmDialog({
   text,
   qualificationId,
   draftId,
+  projectId,
   onCancel,
   onSent,
 }: {
   open: boolean;
   text: string;
   qualificationId: string;
-  draftId: string;
+  /** null — ответ написан вручную, без черновика от ИИ. */
+  draftId: string | null;
+  projectId: string;
   onCancel: () => void;
   onSent: () => void;
 }) {
@@ -28,7 +31,7 @@ export function SendConfirmDialog({
     setError(null);
     try {
       // Уходит ровно тот текст, что показан в модалке (с правками сотрудника).
-      await sendReply(qualificationId, draftId, text);
+      await sendReply(qualificationId, { draftId, projectId, text });
       onSent();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось отправить письмо');

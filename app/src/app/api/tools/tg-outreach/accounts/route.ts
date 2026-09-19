@@ -11,14 +11,21 @@ export async function GET(req: NextRequest) {
       const auth = await authenticateRequest(req.headers.get('authorization'));
       if ('error' in auth) return auth.error;
 
-      const campaignId = new URL(req.url).searchParams.get('campaign_id');
+      const params = new URL(req.url).searchParams;
+      const campaignId = params.get('campaign_id');
       if (!campaignId) return jsonError('campaign_id обязателен', 400);
+      // По умолчанию — только аккаунты в работе: этим списком пользуются и
+      // выбор аккаунтов для баз, и прогрев, архивным там не место.
+      // ?archived=1 — содержимое архива, свежие уходы сверху.
+      const archived = params.get('archived') === '1';
 
-      const { data, error } = await auth.supabase
+      const query = auth.supabase
         .from('tg_outreach_accounts')
         .select('*')
-        .eq('campaign_id', campaignId)
-        .order('created_at', { ascending: true });
+        .eq('campaign_id', campaignId);
+      const { data, error } = archived
+        ? await query.not('archived_at', 'is', null).order('archived_at', { ascending: false })
+        : await query.is('archived_at', null).order('created_at', { ascending: true });
 
       if (error) return jsonError(error.message, 500);
       return NextResponse.json({ items: data ?? [] });
