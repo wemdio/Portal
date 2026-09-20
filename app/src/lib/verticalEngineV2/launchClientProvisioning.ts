@@ -9,7 +9,6 @@ import {
 import { listAccounts, listCustomTagMappings, listCustomTags } from '@/lib/instantly/client';
 import type { CustomTag } from '@/lib/instantly/types';
 import { SCHEDULE_DEFAULTS } from '@/lib/clientLaunch/scheduleMapping';
-import { TARIFF_DEFAULTS, TARIFF_LAUNCH } from '@/lib/tariffPricing';
 import { normalizeLaunchMailboxIds } from './launchPortfolio';
 import type { VeInstantlyTagMapping } from './launchPresets';
 
@@ -19,8 +18,15 @@ const TAG_PAGE_SIZE = 100;
 const MAX_TAG_PAGES = 20;
 const MAX_MAPPING_PAGES = 50;
 
-export const VE_LAUNCH_CLIENT_MAX_MAILBOXES =
-  TARIFF_DEFAULTS[TARIFF_LAUNCH].max_emails;
+/**
+ * Защита от заведомо чужого тега, а НЕ тарифное право. Кабинет, который
+ * специалист заводит из Движка, обслуживается по договору студии: сколько
+ * ящиков в его пуле, определяет пропускная способность рассылки (по умолчанию
+ * 50 писем в день на ящик), а не оплаченный клиентом тариф. Раньше здесь
+ * стоял лимит тарифа «Запуск» (16), и тег на 20 нормальных ящиков отвергался
+ * целиком — завести клиента было нельзя вовсе.
+ */
+export const VE_LAUNCH_CLIENT_MAX_MAILBOXES = 200;
 
 export const VE_LAUNCH_CLIENT_PRESET_DEFAULTS = {
   daily_limit: 50,
@@ -260,8 +266,8 @@ export async function resolveVeLaunchClientMailboxSnapshot(input: {
             ok: false,
             status: 400,
             error:
-              `Стандартный лимит для нового клиента — `
-              + `${VE_LAUNCH_CLIENT_MAX_MAILBOXES} почт; в выбранном теге больше`,
+              `В выбранном теге больше ${VE_LAUNCH_CLIENT_MAX_MAILBOXES} почт — `
+              + 'похоже, выбран не тот тег. Проверьте выбор.',
           };
         }
       }

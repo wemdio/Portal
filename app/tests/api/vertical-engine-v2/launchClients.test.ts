@@ -312,13 +312,29 @@ describe('POST /api/tools/vertical-engine-v2/launch-clients', () => {
     expectNoSecretLeak(allLogCalls());
   });
 
-  it('fails before user creation when the live tag exceeds the default mailbox limit', async () => {
+  it('заводит клиента на теге, который не влезал в лимит тарифа «Запуск»', async () => {
+    // 20 ящиков — обычный агентский пул. Пока здесь стоял лимит тарифа (16),
+    // такой тег отвергался целиком и клиента нельзя было создать вовсе.
     mockListAccounts.mockResolvedValue({
-      items: Array.from({ length: 17 }, (_, index) => ({
+      items: Array.from({ length: 20 }, (_, index) => ({ email: `sender-${index + 1}@example.test` })),
+      next_starting_after: '',
+    });
+
+    const response = await POST(request());
+
+    expect(response.status).toBe(201);
+    expect(mockCreateUser).toHaveBeenCalledTimes(1);
+    const [preset] = mockInstantlyDb.getRows('client_campaign_presets') as Array<{ email_account_ids: string[] }>;
+    expect(preset.email_account_ids).toHaveLength(20);
+  });
+
+  it('fails before user creation when the live tag is clearly the wrong one', async () => {
+    mockListAccounts.mockResolvedValue({
+      items: Array.from({ length: 201 }, (_, index) => ({
         email: `sender-${index + 1}@example.test`,
       })),
-      // The route must stop as soon as the 17th unique mailbox proves the
-      // preset cannot fit, instead of spending another external page read.
+      // The route must stop as soon as the 201st unique mailbox proves the tag
+      // cannot be this client's, instead of spending another external page read.
       next_starting_after: 'must-not-be-read',
     });
 
@@ -326,7 +342,7 @@ describe('POST /api/tools/vertical-engine-v2/launch-clients', () => {
     const body = await response.json();
 
     expect(response.status).toBe(400);
-    expect(body.error).toMatch(/лимит.*16/i);
+    expect(body.error).toMatch(/не тот тег/i);
     expect(mockListAccounts).toHaveBeenCalledTimes(1);
     expect(mockCreateUser).not.toHaveBeenCalled();
     expect(mockInstantlyDb.getRows('client_campaign_presets')).toHaveLength(0);
