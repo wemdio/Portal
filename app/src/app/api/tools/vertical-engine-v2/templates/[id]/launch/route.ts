@@ -5,7 +5,7 @@ import { withToolTrace } from '@/lib/toolTrace';
 import { logError } from '@/lib/loggerServer';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
-import { isTechnician } from '@/lib/roles';
+import { canProvisionLaunchClient } from '@/lib/roles';
 import {
   listInstantlyAccounts,
   resolveInstantlyAccountId,
@@ -131,7 +131,7 @@ export async function GET(
       const authed = await requireInternalToolAuth(req);
       if ('error' in authed) return authed.error;
       if (!supabaseAdmin || !supabaseInstantly) return jsonError('Server misconfigured', 500);
-      const canCreateClient = isTechnician(authed.auth.role);
+      const canCreateClient = canProvisionLaunchClient(authed.auth.role);
 
       const { id: templateId } = await params;
       if (!templateId) return jsonError('Missing id', 400);
