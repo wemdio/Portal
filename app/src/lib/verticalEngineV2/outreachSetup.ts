@@ -81,3 +81,17 @@ export async function loadVeOutreachSetup(db: SupabaseClient, projectId: string)
   }
   return { setup, preparations, reviews };
 }
+
+/**
+ * Автоподъём баз, легших на ВРЕМЕННОМ сбое провайдера (моргнул Serper, 429,
+ * таймаут). Пустой баланс, неверный ключ и отмену пользователем не трогает —
+ * их повтор бессмысленен или отменяет решение специалиста. Все проверки и
+ * счётчик попыток живут в RPC, чтобы гонка с воркером не подняла базу дважды.
+ */
+export async function autoResumeVeTransientPreparations(
+  db: SupabaseClient, scope: { limit?: number } = {},
+): Promise<{ resumed: number }> {
+  const { data, error } = await db.rpc('ve_auto_resume_transient_preparations', { p_limit: scope.limit ?? 10 });
+  if (error) throw new Error(error.message);
+  return { resumed: typeof data === 'number' && Number.isSafeInteger(data) && data > 0 ? data : 0 };
+}
