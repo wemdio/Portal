@@ -339,7 +339,7 @@ function inspectResponse(response) {
       if (typeof rawJson[field] !== 'boolean') schemaIssues.push(`invalid_${field}`);
     }
     if (![null, 'auto_reply', 'delivery_failure', 'service_acknowledgement'].includes(rawJson.machine_reply_kind)) schemaIssues.push('invalid_machine_reply_kind');
-    if (![null, 'seller_pitch', 'service_followup', 'contact_routing'].includes(rawJson.non_lead_kind)) schemaIssues.push('invalid_non_lead_kind');
+    if (![null, 'seller_pitch', 'service_followup', 'contact_routing', 'nonliteral_interest', 'intro_request'].includes(rawJson.non_lead_kind)) schemaIssues.push('invalid_non_lead_kind');
     if (typeof rawJson.reason !== 'string' || !rawJson.reason.trim()) schemaIssues.push('invalid_reason');
     if (typeof rawJson.confidence !== 'number' || !Number.isFinite(rawJson.confidence) || rawJson.confidence < 0 || rawJson.confidence > 1) schemaIssues.push('invalid_confidence');
     if (!Array.isArray(rawJson.interest_signals) || !rawJson.interest_signals.every((signal) => typeof signal === 'string')) schemaIssues.push('invalid_interest_signals');
