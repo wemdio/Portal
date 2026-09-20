@@ -791,13 +791,20 @@ export async function sendTestEmail(body: {
   subject: string;
   body: { html: string };
 }, requestOptions?: InstantlyRequestOptions): Promise<{ status?: string; error?: string }> {
+  // /emails/test drops loose top-level text nodes (verified against received
+  // MIME on 2026-09-20), leaving only <br> in otherwise nonempty replies.
+  // Enclose the whole fragment, including quoted history, at this boundary so
+  // both Telegram handoffs and client-cabinet fallbacks preserve their text.
+  // It also turns raw newlines into <br>: remove the formatting newline after
+  // an existing <br> to avoid doubling every line/paragraph break.
+  const html = `<div>${body.body.html.replace(/(<br\s*\/?>)\r?\n/gi, '$1')}</div>`;
   // У тест-эндпоинта ошибки приходят HTTP 200 с телом {error: 'ACC_*'} — обычный
   // request() считает это успехом (бросает только !res.ok). Проверяем payload
   // сами, иначе webhook пометил бы передачу 'sent' при неотправленном письме
   // (MEDIUM-находка swarm-ревью 27.07).
   const res = await request<{ status?: string; error?: string }>(
     '/emails/test',
-    { method: 'POST', body },
+    { method: 'POST', body: { ...body, body: { ...body.body, html } } },
     requestOptions,
   );
   if (res && typeof res === 'object' && res.error) {
