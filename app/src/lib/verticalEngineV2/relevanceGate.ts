@@ -10,7 +10,7 @@ import { VE_RELEVANCE_WEBSITE_VERSION, veRelevanceDecisionSchema, type VeRelevan
 import { fetchVeRelevanceEvidence } from './relevanceEvidence';
 import { normalizeVeCompanyInn, veCompanyIdentityKey } from './collectionIdentity';
 import { reviewVeRelevanceEvidence, VE_RELEVANCE_TARGET_RULES, type VeRelevanceReviewCompany, type VeRelevanceReviewResult } from './relevanceReview';
-import { triageVeCompanies, veTriageReason, veTriageRubricMessages, veTriageRubricModel, veTriageRubricSchema,
+import { triageVeCompanies, veTriageAvailable, veTriageReason, veTriageRubricMessages, veTriageRubricModel, veTriageRubricSchema,
   VE_TRIAGE_MAX_EXCERPTS, VE_TRIAGE_RUBRIC_VERSION, type VeTriageRubric } from './relevanceTriage';
 import { VE_RELEVANCE_TRIAGE_VERSION } from './relevanceTriageConfig';
 export type { VeRelevanceDecision } from './relevanceDecision';
@@ -751,7 +751,7 @@ export async function findIrrelevantRows(input: {
     });
     if (!fresh.length) return undecided;
     const skip = (rest: Entry[]) => { rest.forEach((entry) => triageSkipped.add(entry)); return rest; };
-    if (triageOff || stopProviderCalls) return [...undecided, ...skip(fresh)];
+    if (triageOff || stopProviderCalls || !veTriageAvailable()) return [...undecided, ...skip(fresh)];
     const rubric = await triageRubric();
     if (!rubric) return [...undecided, ...skip(fresh)];
     const markSeen = (entry: Entry) => {
@@ -763,7 +763,7 @@ export async function findIrrelevantRows(input: {
     const share = (value: number) => Math.round(value * 100) / 100;
     for (let start = 0, packets = 0; start < fresh.length; start += TRIAGE_PACKET) {
       const packet = fresh.slice(start, start + TRIAGE_PACKET);
-      if (triageOff || stopProviderCalls) { undecided.push(...skip(packet)); continue; }
+      if (triageOff || stopProviderCalls || !veTriageAvailable()) { undecided.push(...skip(packet)); continue; }
       signal?.throwIfAborted();
       const excerpts = packet.map((entry) => repairEvidenceCandidates(entry.fields).slice(0, VE_TRIAGE_MAX_EXCERPTS));
       const checked = await triageVeCompanies({ rubric, target: triageTarget, language: input.language, signal: signal ?? undefined,
@@ -803,10 +803,10 @@ export async function findIrrelevantRows(input: {
         if (saved?.status === 'needs_review') record(entry, { ...saved, triage_version: VE_RELEVANCE_TRIAGE_VERSION });
         else markSeen(entry);
       });
-      if (checked.unavailable) {
-        triageOff = true;
-        input.log?.('[relevanceGate] сервис быстрой проверки недоступен; оставшиеся компании проходят обычную проверку');
-      }
+      // Not latched: the breaker's cooldown is a minute, a pass is much longer,
+      // and the breaker is process-wide, so one busy base must not switch the
+      // cheap check off for every other base's remaining companies.
+      if (checked.unavailable) input.log?.('[relevanceGate] сервис быстрой проверки недоступен; оставшиеся компании проходят обычную проверку');
       // The checkpoint is megabytes; a lost packet costs a fraction of a cent.
       if (++packets % 4 === 0) await save();
     }

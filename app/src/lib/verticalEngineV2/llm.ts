@@ -62,6 +62,11 @@ const MODEL_PRICES: Record<string, ModelPrices> = {
   // «дороже $0.05 за контакт» не срабатывал никогда.
   'deepinfra/deepseek-v4-flash-0731':   { in: 0.094, out: 0.38, cached: 0.047 },
   'deepseek-ai/DeepSeek-V4-Flash-0731': { in: 0.094, out: 0.38, cached: 0.047 },
+  // Калиброванный классификатор быстрой проверки: платные только входные токены.
+  // Без строки estimatedCostUsd не считался бы, и пакет помечался бы неполным,
+  // отключая предохранитель «дороже $0.05 за контакт», если роутер не вернёт cost.
+  'jev-1.13.0':                     { in: 0.042, out: 0 },
+  'typesafe/jev-1.13.0':            { in: 0.042, out: 0 },
   // На случай downgrade через env
   'claude-haiku-4-5':               { in: 1.0, out: 5.0 },
   'anthropic/claude-haiku-4-5':     { in: 1.0, out: 5.0 },
@@ -270,6 +275,14 @@ interface LLMCallOptions {
   timeoutMs?: number;
   /** Each returned provider usage, including responses later rejected by validation. */
   onUsage?: (usage: LLMUsage) => void;
+  /**
+   * Provider-specific response contract passed through verbatim, for models
+   * that are not plain chat: the System One classifier (Jev) requires
+   * `{ type: 'questions', questions }` and answers with calibrated
+   * probabilities. Honoured on the text path only — the schema path owns its
+   * own `response_format` and would silently lose it.
+   */
+  responseFormat?: Record<string, unknown>;
 }
 
 function llmTimeoutMs(): number {
@@ -337,7 +350,7 @@ async function rawCall(
   maxTokens: number,
   jsonMode: boolean,
   signal: AbortSignal,
-  opts?: Pick<LLMCallOptions, 'maxHttpAttempts' | 'onUsage' | 'jsonSchema'>,
+  opts?: Pick<LLMCallOptions, 'maxHttpAttempts' | 'onUsage' | 'jsonSchema' | 'responseFormat'>,
 ): Promise<{ text: string; response: RequestyResponse }> {
   let lastError: Error | null = null;
 
@@ -359,9 +372,10 @@ async function rawCall(
           model,
           messages: jsonMode ? withJsonModeHint(messages) : messages,
           max_tokens: maxTokens,
-          ...(jsonMode ? { response_format: opts?.jsonSchema
-            ? { type: 'json_schema', json_schema: { name: opts.jsonSchema.name, strict: true, schema: opts.jsonSchema.schema } }
-            : { type: 'json_object' } } : {}),
+          ...(opts?.responseFormat && !jsonMode ? { response_format: opts.responseFormat }
+            : jsonMode ? { response_format: opts?.jsonSchema
+              ? { type: 'json_schema', json_schema: { name: opts.jsonSchema.name, strict: true, schema: opts.jsonSchema.schema } }
+              : { type: 'json_object' } } : {}),
           ...(scope ? { requesty: { metadata: {
             feature: 'vertical_engine_v2', project_id: scope.projectId,
             job_id: scope.jobId, stage: scope.stage, ...(scope.baseId ? { base_id: scope.baseId } : {}),
