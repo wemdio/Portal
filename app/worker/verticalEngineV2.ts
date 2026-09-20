@@ -48,6 +48,7 @@ import {
 } from '@/lib/verticalEngineV2/contactDeliveryScheduler';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { runVeOutreachPreparations } from '@/lib/verticalEngineV2/outreachPreparation';
+import { enqueueVeContactReprojections } from '@/lib/verticalEngineV2/outreachSetup';
 import type { VeJob, VeStage } from '@/lib/verticalEngineV2/types';
 
 const WORKER_ID = `vertical-engine-v2-${process.pid}`;
@@ -61,6 +62,8 @@ const CONTACT_DELIVERY_INTERVAL_MS =
   Number.isFinite(configuredContactDeliveryInterval) && configuredContactDeliveryInterval >= 60_000
     ? configuredContactDeliveryInterval
     : 5 * 60_000;
+/** Как часто воркер догоняет базы, которым сохранённый лимит адресов ещё не применён. */
+const CONTACT_CAP_SWEEP_INTERVAL_MS = 2 * 60_000;
 /** Как часто воркер проверяет строку активной джобы на отмену пользователем. */
 const CANCEL_WATCH_MS = 3000;
 const RESEARCH_IDLE_TIMEOUT_MS = 15 * 60_000;
@@ -87,6 +90,26 @@ const HEARTBEAT_PATH = process.env.VE_WORKER_HEARTBEAT_PATH ?? '/tmp/vertical-en
 const log = createWorkerLogger(WORKER_ID);
 const db = requireSupabaseAdmin(log);
 const shouldStop = setupGracefulShutdown(log);
+
+/**
+ * A saved "addresses per company" limit that the base was too busy to apply
+ * (a running collection, letters being generated, an analysis in flight) stays
+ * recorded on the row. This sweep hands those bases to the queue once they are
+ * free, so a limit is never silently lost. It reads plain columns only and
+ * enqueues nothing paid: the job re-partitions already saved rows.
+ */
+let activeContactCapSweep: Promise<void> | null = null;
+function triggerContactCapSweep(): Promise<void> {
+  if (shouldStop() || activeContactCapSweep) return activeContactCapSweep ?? Promise.resolve();
+  const promise = enqueueVeContactReprojections(db)
+    .then((outcome) => {
+      if (outcome.queued > 0) log('info', `[contact-cap] лимит адресов на компанию поставлен в очередь для ${outcome.queued} баз`);
+    })
+    .catch((error) => log('warn', '[contact-cap] sweep failed', { error: error instanceof Error ? error.message : String(error) }))
+    .finally(() => { if (activeContactCapSweep === promise) activeContactCapSweep = null; });
+  activeContactCapSweep = promise;
+  return promise;
+}
 
 const contactDeliveryTick = createGuardedContactDeliveryTick({
   log: (level, message, extra) => log(level, `[contact-delivery] ${message}`, extra),
@@ -509,6 +532,8 @@ async function main() {
     OUTREACH_PREPARATION_INTERVAL_MS,
   );
   if (typeof outreachPreparationTimer.unref === 'function') outreachPreparationTimer.unref();
+  const contactCapTimer = setInterval(() => { void triggerContactCapSweep(); }, CONTACT_CAP_SWEEP_INTERVAL_MS);
+  if (typeof contactCapTimer.unref === 'function') contactCapTimer.unref();
 
   try {
     // Delivery is independent from VE research/template jobs; do not hold the
@@ -517,6 +542,7 @@ async function main() {
     // Preparation only coordinates durable jobs. Keep it advancing while a
     // collection or model call occupies the main worker for several minutes.
     void triggerOutreachPreparationTick();
+    void triggerContactCapSweep();
     await pollLoop({
       log,
       pollIntervalMs: POLL_INTERVAL_MS,
@@ -527,9 +553,11 @@ async function main() {
   } finally {
     clearInterval(contactDeliveryTimer);
     clearInterval(outreachPreparationTimer);
+    clearInterval(contactCapTimer);
     await jobPool.drain();
     if (activeContactDeliveryTick) await activeContactDeliveryTick;
     if (activeOutreachPreparationTick) await activeOutreachPreparationTick;
+    if (activeContactCapSweep) await activeContactCapSweep;
     clearInterval(heartbeat);
   }
 

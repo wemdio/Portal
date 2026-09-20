@@ -22,6 +22,12 @@ const MAX_SEMANTIC_ATTEMPTS = 2;
 const configuredMax = Number(process.env.VE_RELEVANCE_MAX_ROWS);
 const MAX_COMPANIES = Number.isFinite(configuredMax) && configuredMax > 0 ? Math.min(10_000, Math.floor(configuredMax)) : 3000;
 const MAX_WEBSITES = 32;
+// Доля отказов, которые всё равно уходят на платную независимую проверку.
+// Смысловая проверка защищает от ошибочного ДОПУСКА: отказ и так требует
+// прямого противоречия на тексте сайта (supportedDecision), поэтому платить
+// за перепроверку каждого отказа — самая дорогая строка гейта. Оставляем
+// честную выборку: по ней видно, сколько отказов ошибочны.
+const REJECTION_REVIEW_SHARE = 0.1;
 // One journal attempt and one durable save cadence per packet of fast checks.
 const TRIAGE_PACKET = 24;
 // Saved uncertain companies re-read per pass; the rest waits for the next pass.
@@ -405,8 +411,18 @@ export async function findIrrelevantRows(input: {
     review.status = 'pending';
     record(entry, errorDecision('Ожидается независимая смысловая проверка доказательств.', entry.attempts));
   };
+  /** Стабильная выборка: одна и та же компания решается одинаково при каждом повторе. */
+  const sampledForReview = (entry: Entry) =>
+    parseInt(relevanceHash(['rejection-review-sample-v1', entry.key]).slice(0, 8), 16) / 0xffffffff < REJECTION_REVIEW_SHARE;
   const stageDecision = (entry: Entry, decision: VeRelevanceDecision) => {
     if (decision.status !== 'relevant' && decision.status !== 'irrelevant') { record(entry, decision); return; }
+    if (decision.status === 'irrelevant' && !sampledForReview(entry)) {
+      // Отказ уже опирается на дословное противоречие с сайта. Принимаем его
+      // без второй платной модели; контрольная выборка выше продолжает
+      // измерять, как часто такие отказы ошибочны.
+      record(entry, decision);
+      return;
+    }
     const hash = semanticHash(entry, decision);
     checkpoint.semantic_review_refs[entry.key] = hash;
     const previous = checkpoint.semantic_reviews[hash];

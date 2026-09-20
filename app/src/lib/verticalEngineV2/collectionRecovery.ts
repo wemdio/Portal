@@ -2,6 +2,8 @@ import { isVeProviderBillingError } from './collectionErrors';
 import { buildVeRelevanceReviewBatch, readVeRelevanceReserve, readVeRelevanceSourceRows } from './relevanceReserve';
 import { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
 import { isVeRelevanceTriageEnabled } from './relevanceTriageConfig';
+import { normalizeVeMaxEmailsPerCompany } from './companyContactCap';
+import { VE_COMPANY_CAP_FIELD } from './relevanceReserve';
 
 /** Explicit continuation only: a terminal partial preview is never daily supply. */
 export function canResumePartialPreview(base: Record<string, unknown>): boolean {
@@ -17,6 +19,13 @@ export function canResumePartialPreview(base: Record<string, unknown>): boolean 
     || checkpoint?.completed_round !== target.round
     || target.ready_rows >= target.ready_target) return false;
   const reserve = readVeRelevanceReserve(info.relevance_reserve);
+  // The specialist raised the "addresses per company" limit. The addresses the
+  // previous one held back are validated and waiting in the reserve, but only a
+  // normal round can return them: their company names still need preparing.
+  const limit = normalizeVeMaxEmailsPerCompany((base as { max_emails_per_company?: unknown }).max_emails_per_company);
+  const appliedLimit = normalizeVeMaxEmailsPerCompany((base as { contact_cap_applied?: unknown }).contact_cap_applied);
+  if (appliedLimit !== null && (limit === null || limit > appliedLimit)
+    && reserve.some((row) => row[VE_COMPANY_CAP_FIELD])) return true;
   // Reuse current eligibility rules: completed uncertain checks do not become
   // an unlimited paid loop merely because fewer than 500 contacts were found.
   // With the calibrated triage enabled, saved uncertainty it has not read yet is

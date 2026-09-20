@@ -1,9 +1,10 @@
 import { load } from 'cheerio';
-import { isPersonName } from '../enrich/extractors/nameQuality';
+import { isPersonName, isRoleTitle } from '../enrich/extractors/nameQuality';
 import { joinLeadPhones, leadPhoneCandidates, normalizeLeadWebsite } from './leadContactValues';
 import type { Email } from './types';
 
 export interface LeadReplyContacts {
+  leadName: string | null;
   bodyPhone: string | null;
   signaturePhone: string | null;
   companyName: string | null;
@@ -26,6 +27,7 @@ const HISTORY_BOUNDARIES = [
   /^(?:Sent\s+from\s+my\s+(?:iPhone|iPad|Android)|Отправлено\s+из\s+(?:мобильной\s+)?(?:Почты\s+Mail|мобильной\s+Яндекс\.Почты))(?:[\s:.]|$)/iu,
 ];
 const SIGNOFF = /^(?:--|—|с\s+(?:уважением|наилучшими\s+пожеланиями)(?:[,.!].*)?|(?:best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:[,.!].*)?)$/iu;
+const SIGNOFF_PREFIX = /^(?:с\s+(?:уважением|наилучшими\s+пожеланиями)|best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:[\s,.!:-]+|$)/iu;
 const PHONE_LABEL = /(?:телефон|тел\s*[.:]|моб(?:ильный)?\s*[.:]|phone|mobile|telephone|whats\s*app|tel:|позвон|звоните|набери|свяжитесь|для\s+связи|(?:мой|наш)\s+номер|контакт|\b(?:call|reach|contact)\b|\b[mtp]\s*:)/iu;
 const NON_PHONE_LABEL = /(?:инн|кпп|огрн(?:ип)?|окпо|бик|снилс|р[/.]?с|к[/.]?с|vat|tax\s*(?:id|number)?|order|заказ[а-яё]*|заявк[аи]|сч[её]т[а-яё]*)\s*[:№#.-]?\s*$/iu;
 const WEBSITE_LABEL = /(?:сайт|website|web\s*:|\bour\s+site\b)/iu;
@@ -73,7 +75,11 @@ function htmlText(html: string): string {
     const node = $(anchor);
     const href = (node.attr('href') ?? '').trim();
     if (/^mailto:/i.test(href)) {
-      node.remove();
+      // Keep a linked personal name, but not email/local-part labels that can
+      // look like websites ("first.last"). Never expose the mailto target.
+      const visible = node.text().replace(/\s+/g, ' ').trim();
+      if (signatureNameInLine(visible)) node.text(visible).before(' ').after(' ');
+      else node.remove();
       return;
     }
     const visible = node.text().trim();
@@ -117,7 +123,7 @@ function explicitCompany(line: string): string | null {
   if (/(?:^|\s)(?:оказывает|предоставляет|предлагает|производит|занимается|работает|осуществляет|поставляет|является|provides|offers|specializes|manufactures|works|delivers)(?:\s|$)/iu.test(line)) return null;
   const label = /^(?:компания|организация|company|organisation|organization|магазин)(?:\s*:\s*|\s+)(.+)$/iu.exec(line);
   // Accept a legal name inside a job title, not arbitrary narrative mentions.
-  const role = /^(?:специалист|менеджер|руководитель|директор|начальник|генеральный директор|региональный менеджер)\s+.{0,100}?\s+((?:ООО|АО|ПАО|ЗАО|ОАО|ИП|ТОО)\s+[«"“].+?[»"”])\s*$/iu.exec(line);
+  const role = /^(?:специалист|менеджер|руководитель|директор|начальник|помощник|ассистент|заместитель|генеральный директор|региональный менеджер)\s+.{0,100}?\s+((?:ООО|АО|ПАО|ЗАО|ОАО|ИП|ТОО)\s+[«"“].+?[»"”])\s*$/iu.exec(line);
   const legal = /^(?:(?:ООО|АО|ПАО|ЗАО|ОАО|ИП|ТОО|НКО|АНО|LLC|LTD|GmbH)\s+.+|.{2,80}\s+(?:LLC|Ltd\.?|Inc\.?|Corp\.?|GmbH|Limited|Corporation))$/iu.test(line);
   const value = (label?.[1] ?? role?.[1] ?? (legal ? line : '')).replace(/\s+/g, ' ').trim()
     .replace(/^\*{1,2}(.+?)\*{1,2}$/, '$1');
@@ -135,9 +141,33 @@ function brandedCompany(line: string, website: string | null): string | null {
   return hostParts.some((part) => part.replace(/-/g, '') === brand) ? display : null;
 }
 
+function signatureNameInLine(line: string): string | null {
+  const value = line.replace(/\s+/g, ' ').trim()
+    .replace(SIGNOFF_PREFIX, '')
+    .replace(/^(?:фио|имя|name)\s*:\s*/iu, '')
+    .replace(/[.,;:!]+$/u, '').trim();
+  return isPersonName(value) && !isRoleTitle(value) &&
+    !/(?:^|\s)(?:команда|компания|организация|магазин|отдел|team|company|department)(?:\s|$)/iu.test(value) &&
+    value.split(/\s+/).every((word) => /^\p{Lu}[\p{L}’'-]*$/u.test(word)) ? value : null;
+}
+
+/** Only the current sender's signature, not greetings, body mentions or quoted
+ * contacts. Require a recognized personal name and keep ambiguous signatures
+ * empty instead of choosing one of several people. Structured data wins later. */
+function signatureLeadName(signature: string[]): string | null {
+  const candidates = signature.slice(0, 5).map(signatureNameInLine)
+    .filter((name): name is string => name !== null);
+  const unique = new Map(candidates.map((name) => [name.toLowerCase(), name]));
+  return unique.size === 1 ? [...unique.values()][0] : null;
+}
+
 function extractFromText(text: string): LeadReplyContacts {
   const lines = currentLines(text).filter(Boolean);
-  let signatureStart = lines.findIndex((line) => SIGNOFF.test(line));
+  // A missing comma is fine only when the rest of the line is a name, not
+  // narrative such as "С уважением относимся к вашему предложению".
+  let signatureStart = lines.findIndex((line) => SIGNOFF.test(line) ||
+    (SIGNOFF_PREFIX.test(line) && signatureNameInLine(line) !== null));
+  let nameStart = signatureStart;
   if (signatureStart < 0) {
     // Unmarked signatures still commonly contain a standalone company line
     // immediately above their contact details. Do not mine narrative mentions.
@@ -148,6 +178,11 @@ function extractFromText(text: string): LeadReplyContacts {
       const company = explicitCompany(line) || brandedCompany(line, site);
       return Boolean(company && tail.some((item) => websitesInLine(item).length || phoneInLine(item, true) || /\S+@\S+\.\S+/.test(item)));
     });
+    // Include standalone names immediately above a confirmed company/contact
+    // footer. Stop at prose; keep multiple names so ambiguity is not hidden.
+    // Do not expand the company/phone/site extraction window into the body.
+    nameStart = signatureStart;
+    while (nameStart > Math.max(0, signatureStart - 3) && signatureNameInLine(lines[nameStart - 1])) nameStart--;
   }
   const body = signatureStart < 0 ? lines : lines.slice(0, signatureStart);
   const signature = signatureStart < 0 ? [] : lines.slice(signatureStart);
@@ -159,6 +194,7 @@ function extractFromText(text: string): LeadReplyContacts {
     return WEBSITE_LABEL.test(line) || standalone ? sites : [];
   })[0] ?? null;
   return {
+    leadName: signatureLeadName(nameStart < 0 ? [] : lines.slice(nameStart)),
     bodyPhone: joinLeadPhones(body.map((line) => phoneInLine(line, false))),
     signaturePhone: joinLeadPhones(signature.map((line) => phoneInLine(line, true))),
     companyName: signature.flatMap((_, index) => [1, 2, 3].map((length) =>
@@ -186,6 +222,7 @@ export function extractLeadReplyContacts(body: Email['body']): LeadReplyContacts
   try {
     const fallback = extractFromText(htmlText(html));
     return {
+      leadName: primary.leadName ?? fallback.leadName,
       bodyPhone: primary.bodyPhone ?? fallback.bodyPhone,
       signaturePhone: primary.signaturePhone ?? fallback.signaturePhone,
       companyName: primary.companyName ?? fallback.companyName,

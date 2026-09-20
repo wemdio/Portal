@@ -137,7 +137,7 @@ export function resolveLeadContactMetadata(input: {
     ...matchedLeads(input.leads, input.leadEmail, input.campaignId),
     ...matchedLeads(input.cachedLeads ?? [], input.leadEmail, input.campaignId),
   ].flatMap(sourcesForLead);
-  let reply: LeadReplyContacts = { bodyPhone: null, signaturePhone: null, companyName: null, website: null };
+  let reply: LeadReplyContacts = { leadName: null, bodyPhone: null, signaturePhone: null, companyName: null, website: null };
   try {
     reply = extractLeadReplyContacts(input.replyBody);
   } catch {
@@ -148,7 +148,7 @@ export function resolveLeadContactMetadata(input: {
   const lastName = firstField(sources, ['last_name', 'фамилия'], cleanValue);
   const emailDomain = normalizeEmail(input.leadEmail).match(/^[^@\s]+@([^@\s]+)$/)?.[1];
   return {
-    leadName: [firstName, lastName].filter(Boolean).join(' ') || null,
+    leadName: [firstName, lastName].filter(Boolean).join(' ') || reply.leadName,
     companyName: firstField(sources, COMPANY_KEYS, companyValue, 'company') || companyValue(reply.companyName),
     phone: firstField(sources, PHONE_KEYS, normalizeLeadPhone, 'phone') || normalizeLeadPhone(reply.bodyPhone) || normalizeLeadPhone(reply.signaturePhone),
     // An explicit uploaded website is stronger than a provider's inferred
