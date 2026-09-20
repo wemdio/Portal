@@ -167,7 +167,7 @@ export async function appendLeadsToClientCampaign(
   //    обращаться. Сама кампания уже создана.
   const { data: presetRow, error: presetErr } = await supabaseInstantly
     .from('client_campaign_presets')
-    .select('id, instantly_account_id')
+    .select('id, instantly_account_id, agency_managed')
     .eq('client_user_id', userId)
     .maybeSingle();
 
@@ -176,7 +176,7 @@ export async function appendLeadsToClientCampaign(
     throw new ClientLaunchError('Не удалось загрузить пресет', 500);
   }
 
-  const preset = presetRow as Pick<ClientCampaignPreset, 'id' | 'instantly_account_id'> | null;
+  const preset = presetRow as Pick<ClientCampaignPreset, 'id' | 'instantly_account_id' | 'agency_managed'> | null;
   if (!preset) {
     throw new ClientLaunchError('Пресет клиента не настроен', 400);
   }
@@ -229,8 +229,12 @@ export async function appendLeadsToClientCampaign(
   // uses an explicit Portal-period obligation whose atomic daily quota was
   // reserved before this function; it must not be blocked by an unrelated
   // self-serve subscription row created for the client's login.
+  // Агентский кабинет (заведён студией из Движка) обслуживается по договору
+  // студии: строки client_tariffs у него нет и быть не должно, поэтому
+  // self-serve гейт его не касается. Blocklist, доменная политика и журнал
+  // отправок выше остаются в силе для всех.
   let leadsToSend = allowedLeads;
-  if (input.entitlementMode !== 'managed_contract') {
+  if (input.entitlementMode !== 'managed_contract' && preset.agency_managed !== true) {
     const tariffRow = await getClientTariffRow(userId);
     const clientStatus = getClientStatus(tariffRow);
     if (clientStatus === 'setup') {

@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { checkSyntax } from '@/lib/emailValidation/shared';
 import { logAudit, logError } from '@/lib/loggerServer';
-import { isTechnician } from '@/lib/roles';
+import { canProvisionLaunchClient } from '@/lib/roles';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
@@ -115,7 +115,7 @@ export async function POST(req: NextRequest) {
       const authed = await requireInternalToolAuth(req);
       if ('error' in authed) return authed.error;
       const { userId, role } = authed.auth;
-      if (!isTechnician(role)) return jsonError('Forbidden', 403);
+      if (!canProvisionLaunchClient(role)) return jsonError('Forbidden', 403);
       if (!supabaseAdmin || !supabaseInstantly) {
         return jsonError('Server misconfigured', 500);
       }
@@ -224,6 +224,9 @@ export async function POST(req: NextRequest) {
             id: presetId,
             client_user_id: created.user.id,
             created_by: userId,
+            // Кабинет заведён студией: обязательство закрывает её договор,
+            // поэтому тарифные гейты запуска и долива к нему не применяются.
+            agency_managed: true,
             instantly_account_id: snapshot.instantlyAccountId,
             email_account_ids: snapshot.mailboxIds,
             ...VE_LAUNCH_CLIENT_PRESET_DEFAULTS,

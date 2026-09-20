@@ -15,6 +15,8 @@ export interface ClientCampaignPreset {
   schedule_days: number[]; // ISO weekdays: 0=Sun..6=Sat (Instantly format)
   schedule_timezone: string;
   created_by: string | null;
+  /** Кабинет заведён студией из Движка: тарифный гейт к нему не применяется. */
+  agency_managed: boolean;
   created_at: string;
   updated_at: string;
 }

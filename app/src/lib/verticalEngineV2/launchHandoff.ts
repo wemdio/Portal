@@ -373,14 +373,21 @@ export interface MapBaseRowsResult {
  *     соответствовать). Unmatched-оператор с fallback → fallback у всех лидов;
  *   - остальные колонки проходят в custom_variables под своими именами.
  */
+/** Канонические колонки авто-базы; у загруженной базы их может не быть вовсе. */
+const VE_STANDARD_FIELD_COLUMNS = { company_name: 'company', website: 'website', phone: 'phone' } as const;
+
 export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
   const { rows, columns, operatorMapping } = input;
 
   const emailColumn = findEmailColumn(columns, rows);
   if (!emailColumn) return { leads: [], emailColumn: null, leadRowIndices: [] };
 
-  // column → operator (первый matched-оператор на колонку выигрывает).
-  const operatorByColumn = new Map<string, string>();
+  const standardColumns = (Object.entries(VE_STANDARD_FIELD_COLUMNS) as Array<[keyof typeof VE_STANDARD_FIELD_COLUMNS, string]>)
+    .filter(([, column]) => column !== emailColumn && columns.includes(column));
+
+  // Колонки, которые занял хотя бы один оператор: их значение эмитится под
+  // именем КАЖДОГО такого оператора, а не под именем колонки.
+  const claimedColumns = new Set<string>();
   // operator → fallback для unmatched (fallback'ы unmatched идут всем лидам).
   const unmatchedFallbacks = new Map<string, string>();
   // Все matched-операторы: переменную надо эмитить даже при пустой ячейке.
@@ -389,7 +396,7 @@ export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
     if (!m?.operator) continue;
     if (m.column === VE_COMPANY_NAME_FIELD || m.operator === VE_COMPANY_NAME_FIELD) continue;
     if (m.matched && m.column) {
-      if (!operatorByColumn.has(m.column)) operatorByColumn.set(m.column, m.operator);
+      claimedColumns.add(m.column);
       if (!matchedOperators.has(m.operator)) {
         matchedOperators.set(m.operator, { column: m.column, fallback: (m.fallback ?? '').trim() });
       }
@@ -415,18 +422,32 @@ export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
 
     for (const col of columns) {
       if (col === emailColumn || col === VE_COMPANY_NAME_FIELD) continue;
+      if (claimedColumns.has(col)) continue;
       const val = String(companyNameCell(row, col) ?? '').trim();
       if (!val) continue;
-      customVars[operatorByColumn.get(col) ?? col] = val;
+      customVars[col] = val;
     }
-    // matched-операторы без значения (пустая ячейка/колонка вне списка):
-    // fallback → иначе пустая строка (parity с превью, никаких литералов {{var}}).
+    // Значение берётся ПО ОПЕРАТОРУ, из его собственной колонки. Промпты Движка
+    // пишут {{company}}, регламент учит специалистов писать {{companyName}}, и
+    // оба матчатся на колонку company: пока переменную эмитил только первый
+    // оператор колонки, второй уходил в письмо пустой строкой, а превью
+    // показывало его заполненным. Пустая ячейка → fallback, иначе пустая строка
+    // (parity с превью, никаких литералов {{var}} в письме клиенту).
     for (const [op, spec] of matchedOperators) {
-      if (customVars[op] !== undefined) continue;
-      customVars[op] = spec.fallback || '';
+      const val = String(companyNameCell(row, spec.column) ?? '').trim();
+      customVars[op] = val || spec.fallback || '';
     }
     for (const [op, fallback] of unmatchedFallbacks) {
       if (customVars[op] === undefined) customVars[op] = fallback;
+    }
+
+    // Штатные поля Instantly: без них у лида в их интерфейсе пустые Company
+    // Name и Website, а журнал клиентских отчётов пишет company_name: null.
+    // Переменные писем по-прежнему решают custom_variables, поэтому уже
+    // запущенные шаблоны это не меняет.
+    for (const [field, column] of standardColumns) {
+      const value = String(companyNameCell(row, column) ?? '').trim();
+      if (value) lead[field] = value;
     }
 
     if (Object.keys(customVars).length > 0) {
