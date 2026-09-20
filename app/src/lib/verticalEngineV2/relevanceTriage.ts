@@ -226,10 +226,13 @@ function failed(status: number) {
   drainWaiters();
 }
 
+// One unreadable answer must not void the whole company: an unparseable entry
+// becomes an empty one, and the decision rule (which is the range authority)
+// treats a missing probability as "no answer" and declines to decide.
 const answersSchema = z.record(z.string(), z.object({
-  noul: z.number().min(0).max(1).optional(),
+  noul: z.number().optional(),
   probabilities: z.record(z.string(), z.number()).optional(),
-}));
+}).catch({}));
 interface Asked { answers?: Answers; promptTokens: number; costUsd: number }
 
 const httpStatusOf = (error: unknown): number => {
@@ -270,7 +273,9 @@ async function ask(request: { model: string; state: unknown; questions: Record<s
         if (parsed.success) answers = parsed.data;
       } catch { /* not JSON: a provider failure, counted below */ }
     }
-    if (answers) consecutiveFailures = 0; else failed(0);
+    // An answered request that cannot be read is a bad response, not a dead
+    // provider: it counts towards the five-strike breaker, never trips it alone.
+    if (answers) consecutiveFailures = 0; else failed(200);
     return { answers, promptTokens: result.promptTokens, costUsd: result.costUsd };
   } catch (error) {
     // The job's own cancellation propagates; a request deadline is a provider failure.

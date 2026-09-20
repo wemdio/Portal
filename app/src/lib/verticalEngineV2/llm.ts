@@ -62,6 +62,11 @@ const MODEL_PRICES: Record<string, ModelPrices> = {
   // «дороже $0.05 за контакт» не срабатывал никогда.
   'deepinfra/deepseek-v4-flash-0731':   { in: 0.094, out: 0.38, cached: 0.047 },
   'deepseek-ai/DeepSeek-V4-Flash-0731': { in: 0.094, out: 0.38, cached: 0.047 },
+  // Калиброванный классификатор быстрой проверки: платные только входные токены.
+  // Без строки estimatedCostUsd не считался бы, и пакет помечался бы неполным,
+  // отключая предохранитель «дороже $0.05 за контакт», если роутер не вернёт cost.
+  'jev-1.13.0':                     { in: 0.042, out: 0 },
+  'typesafe/jev-1.13.0':            { in: 0.042, out: 0 },
   // На случай downgrade через env
   'claude-haiku-4-5':               { in: 1.0, out: 5.0 },
   'anthropic/claude-haiku-4-5':     { in: 1.0, out: 5.0 },
@@ -274,7 +279,8 @@ interface LLMCallOptions {
    * Provider-specific response contract passed through verbatim, for models
    * that are not plain chat: the System One classifier (Jev) requires
    * `{ type: 'questions', questions }` and answers with calibrated
-   * probabilities. Such a call gets no JSON-mode hint appended to its state.
+   * probabilities. Honoured on the text path only — the schema path owns its
+   * own `response_format` and would silently lose it.
    */
   responseFormat?: Record<string, unknown>;
 }
@@ -364,9 +370,9 @@ async function rawCall(
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
           model,
-          messages: jsonMode && !opts?.responseFormat ? withJsonModeHint(messages) : messages,
+          messages: jsonMode ? withJsonModeHint(messages) : messages,
           max_tokens: maxTokens,
-          ...(opts?.responseFormat ? { response_format: opts.responseFormat }
+          ...(opts?.responseFormat && !jsonMode ? { response_format: opts.responseFormat }
             : jsonMode ? { response_format: opts?.jsonSchema
               ? { type: 'json_schema', json_schema: { name: opts.jsonSchema.name, strict: true, schema: opts.jsonSchema.schema } }
               : { type: 'json_object' } } : {}),

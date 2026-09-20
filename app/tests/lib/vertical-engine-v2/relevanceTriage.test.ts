@@ -22,10 +22,16 @@ const rubric: VeTriageRubric = {
 const reply = (status: number, body: unknown) => ({ ok: status >= 200 && status < 300, status, headers: new Headers(),
   text: async () => JSON.stringify(body), json: async () => body }) as unknown as Response;
 const llm = (data: unknown) => reply(200, { choices: [{ message: { content: JSON.stringify(data) } }], usage: { prompt_tokens: 10, completion_tokens: 5, cost: 0.001 } });
-/** Jev answers through the chat contract: the probabilities are the message content. */
-const jev = (answers: unknown, promptTokens: number) => reply(200, { model: 'jev-1.13.0',
-  choices: [{ message: { content: JSON.stringify(answers) }, finish_reason: 'stop' }],
-  usage: { prompt_tokens: promptTokens, completion_tokens: 0, cost: promptTokens * 0.042 / 1e6 } });
+/**
+ * Jev answers through the chat contract: the probabilities are the message
+ * content. The real router tags every answer with its question type and bills
+ * ~18 output tokens per answer, so the double does too.
+ */
+const jev = (answers: Record<string, Record<string, unknown>>, promptTokens: number) => reply(200, { model: 'jev-1.13.0',
+  choices: [{ message: { content: JSON.stringify(Object.fromEntries(Object.entries(answers)
+    .map(([key, value]) => [key, { ...value, type: 'probabilities' in value ? 'choice' : 'noul' }]))) }, finish_reason: 'stop' }],
+  usage: { prompt_tokens: promptTokens, completion_tokens: 18 * Object.keys(answers).length,
+    cost: promptTokens * 0.042 / 1e6 } });
 
 const maker = 'Завод выпускает промышленные насосы на собственной производственной площадке в Туле.';
 const rows = [
@@ -225,14 +231,18 @@ describe('VE2 calibrated relevance triage', () => {
     // Both paths hit an empty balance. `runTriage` has no handler of its own:
     // an escaping error would skip the gate's save and lose the whole pass.
     const broke = provider({ triageStatus: 402, classifyStatus: 402 });
-    const stopped = await findIrrelevantRows(input);
+    // More companies than concurrency slots, so some wait for a slot: those must
+    // never reach the provider once the first refusal has arrived.
+    const many = Array.from({ length: 12 }, (_, i) => ({ company: 'Завод ' + i, inn: '77000001' + String(i).padStart(2, '0'), description: maker }));
+    const stopped = await findIrrelevantRows({ ...input, rows: many });
     expect(stopped.error).toContain('Requesty 402');
     expect(stopped.checkpoint).toBeDefined();
     // Nobody is settled on a refusal: every company stays for the next pass.
-    expect([0, 1, 2].map((i) => stopped.decisions.get(i)?.status).filter((status) => status === 'relevant' || status === 'irrelevant')).toEqual([]);
-    // The fast check is switched off by the first refusal, not retried per company.
-    expect(broke.company).toBeLessThanOrEqual(3);
-    expect(broke.evidence).toBe(0);
+    expect(many.map((_, i) => stopped.decisions.get(i)?.status).filter((status) => status === 'relevant' || status === 'irrelevant')).toEqual([]);
+    // Only the first wave of slots reaches the provider; the queued companies are
+    // released by the refusal itself and buy nothing.
+    expect(broke.company).toBeLessThanOrEqual(6);
+    expect(broke.company).toBeLessThan(many.length);
 
     // With funds only for the LLM path the pass still completes, without the fast check.
     resetVeTriageState();
@@ -240,6 +250,33 @@ describe('VE2 calibrated relevance triage', () => {
     const done = await findIrrelevantRows(input);
     expect(done.error).toBeUndefined();
     expect(partial.classify).toBe(1);
+  });
+
+  it('treats an answered but unreadable response as a bad answer, not as a dead provider', async () => {
+    const target = { vertical: 'v', verticalSummary: '', hypothesisTitle: 'h', hypothesisDescription: '' };
+    const facts = { company: 'c', website: '', category: '', description: maker, vacancy_title: '', website_text: '' };
+    const packet = (size: number) => ({ rubric, language: 'ru' as const, target, companies: Array.from({ length: size }, () => ({ facts, excerpts: [] })) });
+
+    // HTTP 200 with a body that is not the answer object at all.
+    const garbage = jest.fn(async () => reply(200, { model: 'jev-1.13.0',
+      choices: [{ message: { content: '```json\n{...' }, finish_reason: 'stop' }], usage: { prompt_tokens: 100, cost: 0 } }));
+    global.fetch = garbage as unknown as typeof fetch;
+    const unreadable = await triageVeCompanies(packet(3));
+    expect(unreadable.results.every((item) => item.outcome === 'failed')).toBe(true);
+    // Three bad answers are below the five-strike breaker: the next packet still asks.
+    expect(unreadable.unavailable).toBe(false);
+    expect(garbage.mock.calls).toHaveLength(3);
+    await triageVeCompanies(packet(1));
+    expect(garbage.mock.calls).toHaveLength(4);
+
+    // A single unreadable answer inside a readable packet costs only that answer:
+    // the broken conflict counts as "not shown" and the rest still decide.
+    resetVeTriageState();
+    global.fetch = jest.fn(async () => jev({ activity: { noul: 0.01 }, req_0: { noul: 0.02 },
+      conflict_0: { noul: 'не число' }, serves_target_not_member: { noul: 0.05 },
+      fit: { probabilities: { relevant: 0.05, irrelevant: 0.9, insufficient: 0.05 } } }, 100)) as unknown as typeof fetch;
+    const partial = await triageVeCompanies(packet(1));
+    expect(partial.results[0]).toEqual({ outcome: 'reject', activity: 0.01, conflict: null });
   });
 
   it('opens the breaker on the first wave of hung requests instead of holding the slots for minutes', async () => {
