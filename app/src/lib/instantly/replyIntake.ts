@@ -2,8 +2,9 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { listEmails } from './client';
 import type { Email } from './types';
 import { decodeReplyIntakeEmail, encodeReplyIntakeEmail, replyIntakeJsonBytes, ReplyIntakePayloadError } from './replyIntakePayload';
+import { qualificationAutomationPolicy, replyAutomationExpired } from './qualificationAutomationPolicy';
 
-type IntakeDb = Pick<SupabaseClient, 'rpc'>;
+type IntakeDb = Pick<SupabaseClient, 'rpc' | 'from'>;
 type RpcResult = Record<string, unknown>;
 const FAILURE = 'Instantly durable reply intake unavailable';
 const PAGE_SIZE = 100;
@@ -66,6 +67,7 @@ export async function discoverReplyIntake(
   const stats = { staged: 0, pages: 0, sweepComplete: false, busy: false };
   if (!options.accountId.trim()) throw new Error(`${FAILURE}: missing account`);
   if (!options.campaignIds.size) return stats;
+  const notBefore = await qualificationAutomationPolicy(db);
   // A one-page budget alternates durable head/sweep lanes across invocations.
   const maxPages = Math.max(1, Math.min(5, Math.trunc(options.maxPages ?? 5) || 5));
   const lease = await call(db, 'claim_instantly_reply_discovery', { p_account_id: options.accountId });
@@ -105,6 +107,7 @@ export async function discoverReplyIntake(
         if (typeof email.id !== 'string' || !email.id.trim()) throw new Error(`${FAILURE}: inbound missing id`);
         const replyTimestamp = timestamp(email.timestamp_email) ?? timestamp(email.timestamp_created);
         if (replyTimestamp && replyTimestamp < bootstrapSince) return [];
+        if (replyAutomationExpired(notBefore, email)) return [];
         try {
           return [{ email_id: email.id, campaign_id: email.campaign_id,
             lead_email: (email.from_address_email || email.lead || '').trim().toLowerCase() || null,
@@ -201,6 +204,9 @@ export async function claimReplyIntake(
     }
     const claim = { accountId: item.account_id, emailId: item.email_id, leaseToken: item.lease_token,
       email: { id: item.email_id } as Email, attempts: Number(item.attempts) || 0 };
+    // The DB checks BOTH original arrival and intake creation under the lease.
+    // Withdraw old/broken payloads before decoding or running any classifier.
+    if (await skipHistoricalReplyIntake(db, claim)) continue;
     try {
       if (!item.email_payload || typeof item.email_payload !== 'object' ||
         (item.email_payload as Email).id !== item.email_id) throw new ReplyIntakePayloadError('payload_decode_failed');
@@ -231,6 +237,15 @@ export async function completeReplyIntake(db: IntakeDb, claim: ReplyIntakeClaim)
   if (result.state === 'accepted') return true;
   if (result.state === 'missing_qualification') return false;
   throw new Error(`${FAILURE}: completion lease lost`);
+}
+
+export async function skipHistoricalReplyIntake(db: IntakeDb, claim: ReplyIntakeClaim): Promise<boolean> {
+  const result = await call(db, 'skip_historical_instantly_reply_intake', {
+    p_account_id: claim.accountId, p_email_id: claim.emailId, p_lease_token: claim.leaseToken,
+  });
+  if (result.state === 'skipped') return true;
+  if (result.state === 'not_historical') return false;
+  throw new Error(`${FAILURE}: historical intake withdrawal ${result.state}`);
 }
 
 export async function deferReplyIntake(db: IntakeDb, claim: ReplyIntakeClaim, error: string): Promise<void> {

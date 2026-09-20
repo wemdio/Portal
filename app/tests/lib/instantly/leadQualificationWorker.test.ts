@@ -21,6 +21,15 @@ const sendLeadTelegramAlert = jest.fn();
 const sendClientReplyTelegram = jest.fn();
 const postHandoffMessage = jest.fn();
 const editHandoffMessage = jest.fn();
+const mockReplyAutomationExpired = jest.fn();
+let mockAutomationNotBefore = 0;
+
+// The existing ownership fixtures intentionally replay fixed historical
+// dates. Test their routing separately from the new production time window.
+jest.mock('@/lib/instantly/qualificationAutomationPolicy', () => ({
+  qualificationAutomationPolicy: async () => mockAutomationNotBefore,
+  replyAutomationExpired: (...args: unknown[]) => mockReplyAutomationExpired(...args),
+}));
 
 jest.mock('@/lib/supabaseInstantly', () => ({
   get supabaseInstantly() {
@@ -529,6 +538,8 @@ describe('pollAndQualifyReplies', () => {
 
   beforeEach(() => {
     jest.resetModules();
+    mockReplyAutomationExpired.mockReset().mockReturnValue(false);
+    mockAutomationNotBefore = 0;
     listEmails.mockReset();
     getLeadsByEmail.mockReset().mockResolvedValue([]);
     getCampaign.mockReset().mockResolvedValue({ id: 'linked-campaign', name: 'Кампания Новикова' });
@@ -3748,6 +3759,102 @@ describe('pollAndQualifyReplies', () => {
 
     expect(result).toEqual(expect.objectContaining({ status: 'ambiguous' }));
     expect(listEmails).not.toHaveBeenCalled();
+  });
+
+  it('stores malformed email Unicode without breaking pages, newlines, emoji or literal escapes', async () => {
+    const { encodeReplyIntakeEmail, decodeReplyIntakeEmail } = await import('@/lib/instantly/replyIntakePayload');
+    const text = 'Hello\u0000\nЗдравствуйте 😀\nLiteral: \\u0000\nBroken: \ud800';
+    const expected = 'Hello\nЗдравствуйте 😀\nLiteral: \\u0000\nBroken: ';
+    const encoded = encodeReplyIntakeEmail(replyEmail({ body: { text } }));
+    expect(decodeReplyIntakeEmail(encoded).body).toEqual({ text: expected });
+
+    // Real outgoing HTTP boundary, fake fetch: no database/network side effects.
+    const oldFetch = globalThis.fetch;
+    const oldUrl = process.env.INSTANTLY_SUPABASE_URL;
+    const oldKey = process.env.INSTANTLY_SUPABASE_SERVICE_ROLE_KEY;
+    const fetch = jest.fn().mockImplementation(async () => new Response('{"state":"saved"}', {
+      headers: { 'content-type': 'application/json' },
+    }));
+    try {
+      globalThis.fetch = fetch;
+      process.env.INSTANTLY_SUPABASE_SERVICE_ROLE_KEY = 'test';
+      for (const url of ['http://localhost:9999', 'https://test.supabase.co']) {
+        jest.resetModules();
+        fetch.mockClear();
+        process.env.INSTANTLY_SUPABASE_URL = url;
+        const { supabaseInstantly } = jest.requireActual('@/lib/supabaseInstantly');
+        const result = await supabaseInstantly.rpc('stage_instantly_reply_page', {
+          p_items: [{ email_payload: { body: { text } }, preview: '😀'.slice(0, 1) }],
+        });
+        expect(result.error).toBeNull();
+        const [requestUrl, init] = fetch.mock.calls[0];
+        expect(JSON.parse(init.body).p_items).toEqual([
+          { email_payload: { body: { text: expected } }, preview: '' },
+        ]);
+        const hosted = url.includes('supabase.co');
+        expect(new Headers(init.headers).get('apikey')).toBe(hosted ? 'test' : null);
+        expect(new Headers(init.headers).get('Authorization')).toBe(hosted ? 'Bearer test' : null);
+        expect(String(requestUrl).includes('/rest/v1/')).toBe(hosted);
+      }
+    } finally {
+      globalThis.fetch = oldFetch;
+      if (oldUrl === undefined) delete process.env.INSTANTLY_SUPABASE_URL;
+      else process.env.INSTANTLY_SUPABASE_URL = oldUrl;
+      if (oldKey === undefined) delete process.env.INSTANTLY_SUPABASE_SERVICE_ROLE_KEY;
+      else process.env.INSTANTLY_SUPABASE_SERVICE_ROLE_KEY = oldKey;
+    }
+  });
+
+  it('withdraws pre-cutover/expired retries without provider, AI, changed verdict or Telegram', async () => {
+    const policy = jest.requireActual('@/lib/instantly/qualificationAutomationPolicy');
+    mockReplyAutomationExpired.mockImplementation(policy.replyAutomationExpired);
+    const now = Date.now();
+    mockAutomationNotBefore = now - 3 * 24 * 60 * 60_000;
+    const old = ownershipReviewRow({ status: 'pending', recovery_attempts: 307,
+      reply_timestamp: new Date(now - 25 * 60 * 60_000).toISOString(),
+      created_at: new Date(now - 25 * 60 * 60_000).toISOString() });
+    mockInstantlyDb = createMockSupabase({
+      tables: { instantly_lead_qualifications: [old] },
+      rpcHandlers: {
+        archive_instantly_qualification_queue: async (args, db) => {
+          await db.from('instantly_lead_qualifications')
+            .update({ queue_archived_at: new Date(now).toISOString(), queue_archive_batch_id: args.p_batch_id })
+            .eq('id', old.id);
+          return { data: { archived: 1, skipped: 0 } };
+        },
+      },
+    });
+    const worker = await import('@/lib/instantly/leadQualificationWorker');
+    await worker.expireQualificationRetries(new Date(now));
+    await worker.reprocessOwnershipReviewRows({ now: new Date(now), minRetryAgeMs: 0 });
+    mockAutomationNotBefore = now; // recent pre-deployment mail is history too
+    await worker.qualifyOneReply(mockInstantlyDb as never, replyEmail({
+      timestamp_email: new Date(now - 60_000).toISOString(),
+    }), 'test-ai-key');
+    expect(mockInstantlyDb.getRows('instantly_lead_qualifications')[0]).toEqual(expect.objectContaining({
+      status: 'pending', recovery_attempts: 307, queue_archived_at: new Date(now).toISOString(),
+    }));
+    expect(getEmail).not.toHaveBeenCalled();
+    expect(fetchThreadContext).not.toHaveBeenCalled();
+    expect(qualifyReply).not.toHaveBeenCalled();
+    expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+    expect(sendClientReplyTelegram).not.toHaveBeenCalled();
+    expect(postHandoffMessage).not.toHaveBeenCalled();
+    expect(policy.replyAutomationExpired(now, { timestamp_email: new Date(now).toISOString() }, now)).toBe(false);
+    expect(policy.replyAutomationExpired(0, { created_at: new Date(now - 24 * 60 * 60_000).toISOString() }, now)).toBe(true);
+
+    // The same real policy must still let fresh replies reach classification
+    // and delivery (all external calls here remain mocked).
+    mockAutomationNotBefore = now - 60 * 60_000;
+    const freshTime = new Date(now - 5 * 60_000).toISOString();
+    const { inbound } = installOwnershipReviewRetryFixture({ row: {
+      created_at: freshTime, updated_at: freshTime, reply_timestamp: freshTime,
+    } });
+    inbound.timestamp_email = freshTime;
+    expect(await worker.reprocessOwnershipReviewRows({ now: new Date(now), minRetryAgeMs: 0 })).toBe(1);
+    expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[0].status).toBe('lead');
+    expect(qualifyReply).toHaveBeenCalledTimes(1);
+    expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
   });
 
   describe('ownership-review reconciliation', () => {

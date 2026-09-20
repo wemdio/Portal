@@ -1,5 +1,6 @@
 import 'server-only';
 import { createClient } from '@supabase/supabase-js';
+import { stripUnstorableJsonChars } from './jsonbSafe';
 
 const url = process.env.INSTANTLY_SUPABASE_URL;
 const key = process.env.INSTANTLY_SUPABASE_SERVICE_ROLE_KEY;
@@ -24,8 +25,22 @@ const postgrestFetch: typeof globalThis.fetch = (input, init) => {
         ? input.toString()
         : input.url;
   const headers = new Headers(init?.headers);
-  headers.delete('Authorization');
-  headers.delete('apikey');
+  if (isLocalPostgrest) {
+    headers.delete('Authorization');
+    headers.delete('apikey');
+  }
+
+  // A single NUL/lone surrogate in an email (or a sliced preview) otherwise
+  // rejects the entire jsonb RPC page. Preserve real Unicode, line breaks and
+  // literal "\\u0000" text; sanitize parsed values, never the JSON escape text.
+  let body = init?.body;
+  if (typeof body === 'string' && headers.get('content-type')?.includes('application/json') &&
+    /\\u(?:0000|d[89a-f][0-9a-f]{2})/i.test(body)) {
+    body = JSON.stringify(stripUnstorableJsonChars(JSON.parse(body)));
+  }
+  // Hosted requests gain only JSON sanitization, not local routing/auth or a
+  // different timeout policy.
+  if (!isLocalPostgrest) return globalThis.fetch(input, { ...init, body });
 
   const controller = new AbortController();
   const timer = setTimeout(
@@ -46,13 +61,13 @@ const postgrestFetch: typeof globalThis.fetch = (input, init) => {
   }
 
   return globalThis
-    .fetch(raw.replace('/rest/v1', ''), { ...init, headers, signal: controller.signal })
+    .fetch(raw.replace('/rest/v1', ''), { ...init, body, headers, signal: controller.signal })
     .finally(() => clearTimeout(timer));
 };
 
 export const supabaseInstantly = url
   ? createClient(url, key ?? 'local-postgrest', {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-      ...(isLocalPostgrest ? { global: { fetch: postgrestFetch } } : {}),
+      global: { fetch: postgrestFetch },
     })
   : null;
