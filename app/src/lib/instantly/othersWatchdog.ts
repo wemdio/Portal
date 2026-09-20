@@ -15,6 +15,7 @@ import {
   strayColumnsSupported,
 } from './leadQualificationWorker';
 import type { Email } from './types';
+import { qualificationAutomationPolicy, replyAutomationExpired } from './qualificationAutomationPolicy';
 
 /**
  * Others-watchdog: достаёт РЕАЛЬНЫЕ ответы лидов из вкладки Unibox «Others».
@@ -622,6 +623,7 @@ export async function pollOthersOnce(): Promise<number> {
     return 0;
   }
   const db = supabaseAdmin;
+  const notBefore = await qualificationAutomationPolicy(db);
   const apiKey = API_KEY();
   if (!apiKey) {
     workerLog('warn', 'No AI API key — skipping');
@@ -682,6 +684,10 @@ export async function pollOthersOnce(): Promise<number> {
     let unseenOnPage = 0;
     for (const email of items) {
       if (!email.id) continue;
+      if (replyAutomationExpired(notBefore, email)) {
+        skips.historical = (skips.historical ?? 0) + 1;
+        continue;
+      }
       if (seenIds.has(email.id)) {
         seenCached++;
         continue;
