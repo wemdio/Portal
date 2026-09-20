@@ -753,6 +753,45 @@ describe('llm rawCall retry', () => {
       expect(fetchMock).toHaveBeenCalledTimes(callCount);
     }
 
+    // Отказ опирается на дословное противоречие с сайта, поэтому вторая
+    // платная модель по каждому отказу — самая дорогая и наименее полезная
+    // строка гейта. Оставляем контрольную выборку, а не полную перепроверку.
+    {
+      const other = 'Продаёт офисную мебель и канцелярию оптом, производства нет.';
+      // Факты приходят только с сайта: тогда дословное противоречие берётся из
+      // website_text, как того требует допуск отказа.
+      const rejectRows = Array.from({ length: 20 }, (_, i) => ({
+        company: `Поставщик ${i}`, inn: `77000100${String(i).padStart(2, '0')}`, website: `https://reseller${i}.test/`,
+      }));
+      const rejectInput = { ...input, rows: rejectRows, websiteLimit: 100,
+        fetchEvidence: jest.fn().mockResolvedValue({ status: 'ok', text: other, url: 'https://reseller.test/', reason: 'identity_verified_website' }) };
+      fetchMock.mockReset().mockImplementation(async (_url: string, init: { body: string }) => {
+        const body = JSON.parse(init.body as string);
+        const system = body.messages[0].content as string;
+        if (system.startsWith('Independently check')) {
+          const companies = JSON.parse(body.messages[1].content.split('index:\n')[1]) as Array<{ i: number }>;
+          return reply({ reviews: companies.map((item) => ({ i: item.i, result: 'direct_conflict', reason: 'Перепродажа' })) });
+        }
+        const batch = JSON.parse(body.messages[1].content.split(':\n').at(-1)!) as Array<{ i: number }>;
+        const secondPass = body.messages[1].content.includes('excerpts');
+        return reply({ decisions: batch.map((item) => secondPass
+          ? { i: item.i, status: 'irrelevant', reason: 'Перепродажа, производства нет', evidence_ids: [0] }
+          : { i: item.i, status: 'needs_review', reason: 'Нужны факты', evidence: [] }) });
+      });
+      const rejected = await findIrrelevantRows(rejectInput);
+      expect([...rejected.decisions.values()].every((decision) => decision.status === 'irrelevant')).toBe(true);
+      const reviewCalls = fetchMock.mock.calls.filter((call) =>
+        JSON.parse(call[1].body as string).messages[0].content.startsWith('Independently check')).length;
+      // Раньше на 20 отказов приходилось 3 пакета проверки (по 8 компаний);
+      // выборка в 10 % оставляет ноль или один.
+      expect(reviewCalls).toBeLessThanOrEqual(1);
+      // Решение стабильно: повтор не покупает ни одного нового вызова.
+      const calls = fetchMock.mock.calls.length;
+      await findIrrelevantRows({ ...rejectInput, checkpoint: rejected.checkpoint });
+      expect(fetchMock).toHaveBeenCalledTimes(calls);
+      fetchMock.mockReset();
+    }
+
     // A consumed citation attempt cannot be charged again or admitted after
     // a provider outage, but it must not permanently block other companies.
     for (const status of [429, 502, 402, 401]) {

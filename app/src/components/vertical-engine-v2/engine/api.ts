@@ -117,6 +117,8 @@ export interface VeCollectInfo {
   saved_email_review_pending?: boolean;
   /** Worker-authoritative saved reserve; never count it as ready inventory. */
   relevance_summary?: import('@/lib/verticalEngineV2/relevanceReserve').VeRelevanceReserveSummary;
+  /** Last applied "addresses per company" limit (display only). */
+  company_contact_cap?: { limit: number; over_cap_rows: number; companies: number; applied_at: string };
   company_name_cleanup?: import('@/lib/verticalEngineV2/companyNames').VeCompanyNameCleanupSummary;
   /** Durable marker: contacts are saved and name preparation is the remaining phase. */
   company_name_recovery?: {

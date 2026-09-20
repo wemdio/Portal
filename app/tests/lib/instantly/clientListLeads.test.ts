@@ -67,6 +67,39 @@ function lastFetchBody(): Record<string, unknown> {
   return JSON.parse(init.body!) as Record<string, unknown>;
 }
 
+it('preserves reply text and line breaks through the test-email fallback only', async () => {
+  const { sendTestEmail, replyToEmail } = await import('@/lib/instantly/client');
+  const { textToReplyHtml } = await import('@/lib/clientCampaignReplies/bodyHtml');
+  const { appendQuotedHistoryHtml } = await import('@/lib/clientCampaignReplies/quoteHistory');
+  const reply = textToReplyHtml('Изменённый ответ & < >\r\nСтрока 2\r\n\r\nАбзац 2');
+  const fragments = [reply, appendQuotedHistoryHtml(reply, {
+    bodyText: 'История\n> Вложенная цитата', fromName: 'Тест',
+  })];
+  const options = { skipRateLimiter: true, retryRateLimits: false };
+  const recipients = { eaccount: 'sender@example.test', to_address_email_list: 'lead@example.test, client@example.test' };
+
+  for (const html of fragments) {
+    fetchMock.mockClear();
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ status: 'success' })));
+    const input = { ...recipients, subject: 'Тест', body: { html } };
+    await sendTestEmail(input, options);
+    // Received MIME regression: unwrapped text disappeared; <br> + newline
+    // doubled spacing. Keep all text/quoted blocks inside a single root.
+    expect(lastFetchBody()).toEqual({ ...input, body: {
+      html: `<div>${html.replace(/(<br\s*\/?>)\r?\n/gi, '$1')}</div>`,
+    } });
+    expect((lastFetchBody().body as { html: string }).html)
+      .toContain('Изменённый ответ &amp; &lt; &gt;<br>Строка 2<br><br>Абзац 2');
+    expect(input.body.html).toBe(html);
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.instantly.ai/api/v2/emails/test');
+  }
+
+  fetchMock.mockClear();
+  const normalReply = { eaccount: recipients.eaccount, reply_to_uuid: 'email-1', subject: 'Тест', body: { html: reply, text: 'Изменённый ответ' } };
+  await replyToEmail(normalReply, options);
+  expect(lastFetchBody()).toEqual(normalReply);
+});
+
 describe('listLeads → Instantly POST /leads/list body shape', () => {
   it('translates lead_list_id → list_id (the actual Instantly API key)', async () => {
     const { listLeads } = await import('@/lib/instantly/client');

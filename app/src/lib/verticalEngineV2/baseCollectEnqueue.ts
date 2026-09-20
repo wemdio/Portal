@@ -26,6 +26,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { collectionRoundLimit, createCollectionTarget, type VeCollectionMode } from './collectionTarget';
 import { canResumePartialPreview, previewRecoveryKind } from './collectionRecovery';
+import { normalizeVeMaxEmailsPerCompany } from './companyContactCap';
 import { resumeVeSavedEmailRecovery } from './savedEmailRecovery';
 
 export interface VeBaseCollectInput {
@@ -245,6 +246,18 @@ export async function enqueueVeBaseCollect(
   const created: Array<Record<string, unknown>> = [];
   const existing: Array<Record<string, unknown>> = [];
 
+  // A new preview starts with the project's "addresses per company" limit. A
+  // failed read (or a database without the column) means no limit, and the
+  // column is sent only when there is a value.
+  let contactLimit: number | null = null;
+  if (input.collectionMode === 'preview' && !refill) {
+    try {
+      const { data: setup, error: setupError } = await supabase.from('ve_outreach_setups').select('max_emails_per_company')
+        .eq('project_id', projectId).maybeSingle();
+      if (!setupError) contactLimit = normalizeVeMaxEmailsPerCompany((setup as { max_emails_per_company?: unknown } | null)?.max_emails_per_company);
+    } catch { /* no limit */ }
+  }
+
   for (const target of targets) {
     const hypothesisId = target.hypothesisId;
 
@@ -435,6 +448,7 @@ export async function enqueueVeBaseCollect(
         // лимит, пока стадия ещё не перезаписала collect_info планом (поля
         // живут дальше — стадия мержит collect_info, а не заменяет).
         collect_info: collectInfo,
+        ...(contactLimit !== null && hypothesisId ? { max_emails_per_company: contactLimit } : {}),
       })
       .select('id, status')
       .single();

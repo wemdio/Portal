@@ -1184,6 +1184,8 @@ function readCollectInfo(info: VeCollectInfo | null | undefined) {
       reserveRows: collectCount(info?.relevance_summary?.total),
       reserveEmailUnready: collectCount(info?.relevance_summary?.email_unready),
       reserveOther: collectCount(info?.relevance_summary?.other),
+      reserveOverCompanyCap: collectCount(info?.relevance_summary?.over_company_cap),
+      companyCapLimit: collectCount(info?.company_contact_cap?.limit),
       relevanceUnchecked: collectCount(stats?.relevance_unchecked),
       relevanceCheckedCompanies: collectCount(stats?.relevance_checked_companies),
       relevanceTotalCompanies: collectCount(stats?.relevance_total_companies),
@@ -1327,6 +1329,9 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
       ) : null}
       {stats.reserveEmailUnready !== null && stats.reserveEmailUnready > 0 ? (
         <p>Не готовы по проверке email: {stats.reserveEmailUnready.toLocaleString('ru-RU')} строк. Сохранены, не отправляются.</p>
+      ) : null}
+      {stats.reserveOverCompanyCap !== null && stats.reserveOverCompanyCap > 0 ? (
+        <p>Сверх лимита на компанию{stats.companyCapLimit ? ` (${stats.companyCapLimit})` : ''}: {stats.reserveOverCompanyCap.toLocaleString('ru-RU')} адресов. Проверены и сохранены в резерве; вернутся в готовую базу, если увеличить лимит.</p>
       ) : null}
       {stats.reserveOther !== null && stats.reserveOther > 0 ? (
         <p>Другие сохранённые кандидаты: {stats.reserveOther.toLocaleString('ru-RU')} строк. Не входят в готовый запас.</p>

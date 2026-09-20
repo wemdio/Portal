@@ -55,6 +55,13 @@ const MODEL_PRICES: Record<string, ModelPrices> = {
   'openai/gpt-5.5':                 { in: 5.0, out: 30.0 },
   'gemini-3.1-pro-preview':         { in: 1.8, out: 10.8 },
   'google/gemini-3.1-pro-preview':  { in: 1.8, out: 10.8 },
+  // Основная модель сбора. Ставка снята с продового журнала 20.09.2026
+  // (26 619 оплаченных вызовов, регрессия по входным токенам, r=0.99):
+  // $0.099 за миллион входных с наценкой Requesty. Без этой строки
+  // estimatedCostUsd не считался, batch помечался неполным, и предохранитель
+  // «дороже $0.05 за контакт» не срабатывал никогда.
+  'deepinfra/deepseek-v4-flash-0731':   { in: 0.094, out: 0.38, cached: 0.047 },
+  'deepseek-ai/DeepSeek-V4-Flash-0731': { in: 0.094, out: 0.38, cached: 0.047 },
   // На случай downgrade через env
   'claude-haiku-4-5':               { in: 1.0, out: 5.0 },
   'anthropic/claude-haiku-4-5':     { in: 1.0, out: 5.0 },

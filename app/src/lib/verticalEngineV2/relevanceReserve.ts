@@ -4,6 +4,11 @@ import { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
 import { VE_RELEVANCE_WEBSITE_VERSION } from './relevanceDecision';
 import { VE_RELEVANCE_TRIAGE_VERSION } from './relevanceTriageConfig';
 
+/** Validated address of a relevant company kept out of the ready base only by the
+ * specialist's "addresses per company" limit (companyContactCap.ts). Recomputed
+ * by every partition; never a reason for paid relevance or e-mail work. */
+export const VE_COMPANY_CAP_FIELD = '_ve_company_cap';
+
 /** Durable candidates are separate from the approved/launchable base projection. */
 export interface VeRelevanceReserve {
   version: 1;
@@ -24,6 +29,8 @@ export interface VeRelevanceReserveSummary {
   /** Additional overlapping count, not another term in the total. */
   email_retryable: number;
   other: number;
+  /** Ready addresses over the per-company limit; present only when there are any. */
+  over_company_cap?: number;
 }
 
 const cell = (value: unknown) => typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
@@ -105,6 +112,7 @@ export function summarizeVeRelevanceReserve(rows: Array<Record<string, unknown>>
     // строки попадали в error, и интерфейс объявлял их неудачей автопроверки.
     else if (row._relevance_unchecked === true) summary.unchecked += 1;
     else if (!isVeAcceptedEmailStatus(row._email_status)) summary.email_unready += 1;
+    else if (row[VE_COMPANY_CAP_FIELD]) summary.over_company_cap = (summary.over_company_cap ?? 0) + 1;
     else summary.other += 1;
   }
   return summary;
