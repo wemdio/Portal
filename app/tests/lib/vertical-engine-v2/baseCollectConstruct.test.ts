@@ -677,8 +677,10 @@ describe('base_collect CONSTRUCT step order', () => {
     await runBaseCollectStage(makeJob(), { supabase: phasedDb as unknown as SupabaseClient });
     expect(fetchVeRelevanceEvidence).not.toHaveBeenCalled();
     expect(searchRows).toHaveBeenCalledTimes(2);
+    // Сначала компании с готовым адресом (контакт без обхода сайта и без
+    // SMTP-очереди), затем добор по сайту.
     expect(jest.mocked(searchRows).mock.calls.map(([filters]) => [!!filters.hasWebsite, !!filters.hasEmail]))
-      .toEqual([[true, false], [false, true]]);
+      .toEqual([[false, true], [true, false]]);
     expect((phasedDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).search_policy?.phase).toBe('paid');
     await phasedDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
     await runBaseCollectStage(makeJob(), { supabase: phasedDb as unknown as SupabaseClient });

@@ -1700,11 +1700,17 @@ async function dispatchTask(
   if (task.source === 'companies_directory') {
     const filters = mapDirectoryFilters(task.directory_filters);
     const excluded = await getExcludedKeys();
-    const first = await fetchDirectoryRows(ctx, existingContactsOnly ? { ...filters, hasWebsite: true } : filters, limit, excluded);
-    // Email-only companies can pass from source activity evidence. Include that
-    // stock too, without assuming that an email domain proves a company site.
-    const second = existingContactsOnly && !first.error && first.exhausted && first.rows.length < limit
-      ? await fetchDirectoryRows(ctx, { ...filters, hasEmail: true }, limit - first.rows.length,
+    // Компания с готовым адресом — это контакт, за который не нужно платить ни
+    // обходом сайта, ни очередью SMTP-проверки. Такие берём ПЕРВЫМИ, и только
+    // потом добираем тех, у кого есть лишь сайт. Раньше порядок был обратный,
+    // а лейн с почтой запускался лишь при полном исчерпании первого — то есть
+    // практически никогда, потому что лейн «с сайтом» упирался в потолок
+    // сканирования раньше, чем исчерпывался.
+    const first = await fetchDirectoryRows(ctx, existingContactsOnly ? { ...filters, hasEmail: true } : filters, limit, excluded);
+    // Второй лейн запускаем и после потолка сканирования, а не только после
+    // исчерпания: иначе недобор первого лейна навсегда оставляет партию пустой.
+    const second = existingContactsOnly && !first.error && (first.exhausted || first.hitCeiling) && first.rows.length < limit
+      ? await fetchDirectoryRows(ctx, { ...filters, hasWebsite: true }, limit - first.rows.length,
         addRowsToExclusionKeys({ inns: new Set(excluded.inns), emails: new Set(excluded.emails),
           receipts: new Set(excluded.receipts), websiteInns: new Map([...excluded.websiteInns].map(([key, values]) => [key, new Set(values)])) },
         first.rows.map(mapDirectoryRow))) : null;
