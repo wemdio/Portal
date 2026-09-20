@@ -990,7 +990,7 @@ describe('base_collect CONSTRUCT step order', () => {
       expect(children).toHaveLength(2);
       expect(children.every((row) => (row.data as string[][]).length === 101)).toBe(true);
       expect(children[0].step_config).toMatchObject({ queue_class: 'interactive_preview',
-        find_emails: { reuse_website_description: true, stop_at_first: false, max_per_site: null } });
+        find_emails: { reuse_website_description: true, stop_at_first: false, max_per_site: 6 } });
       const slowId = children[0].id;
       const completedId = children[1].id;
       await finishChild(completedId, failFirst);
@@ -1265,7 +1265,9 @@ describe('base_collect CONSTRUCT step order', () => {
     expect(constructorInsert?.rows[0].selected_steps).toEqual(expected);
     expect(constructorInsert?.rows[0].step_config).toEqual({
       find_emails_target: 'separate',
-      find_emails: { stop_at_first: false, max_per_site: null, max_pages: 12, site_timeout_ms: 60_000, merge_mode: 'prefer_found_validated' },
+      // Запас сверх лимита адресов на компанию: краул — главный расход
+      // времени, а всё сверх лимита выбрасывалось уже после SMTP-проверки.
+      find_emails: { stop_at_first: false, max_per_site: 6, max_pages: 4, site_timeout_ms: 30_000, merge_mode: 'prefer_found_validated' },
     });
     const dispatchedInfo = lastBasePatch(db)?.collect_info as VeCollectInfo;
     expect(dispatchedInfo.construct?.progress).toMatchObject({ status: 'pending', total_steps: expected.length });

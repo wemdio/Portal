@@ -2332,8 +2332,15 @@ async function dispatchConstructJob(input: {
     step_config: {
       ...(reservedId ? { queue_class: 'interactive_preview' } : {}),
       find_emails_target: 'separate',
+      // Краул сайта — главный расход времени на компанию (см. комментарий у
+      // stopAtFirstUsableEmail в processingSteps.ts). Раньше здесь стояло
+      // «все адреса с 12 страниц»: каждый найденный адрес потом проходил
+      // SMTP-проверку, а лимит адресов на компанию выбрасывал лишние уже
+      // после неё — у одной компании доходило до 167 проверенных адресов.
+      // Берём небольшой запас сверх лимита: его хватает, чтобы отбор
+      // предпочёл подтверждённый адрес catch-all, и не больше.
       find_emails: {
-        stop_at_first: false, max_per_site: null, max_pages: 12, site_timeout_ms: 60_000, merge_mode: 'prefer_found_validated',
+        stop_at_first: false, max_per_site: 6, max_pages: 4, site_timeout_ms: 30_000, merge_mode: 'prefer_found_validated',
         ...(reservedId ? { reuse_website_description: true } : {}),
       },
     },
