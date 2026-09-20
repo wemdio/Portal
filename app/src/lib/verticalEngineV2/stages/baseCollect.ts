@@ -270,7 +270,15 @@ export function mapDirectoryRow(row: Record<string, unknown>): VeUnifiedRow {
     // phones в реестре — text с телефонами через запятую (массив тоже схлопнется в ту же строку).
     phone: cell(row.phones).split(',')[0]?.trim() ?? '',
     address: cell(row.address),
-    category: cell(row.okved_code),
+    // Быстрая проверка и первичная классификация читают category как текст о
+    // деятельности. Голый код «28.30» не говорит им ничего и даже не проходит
+    // проверку «в тексте есть слова»: компании из реестра теряли и приоритет
+    // в партии, и саму возможность получить вердикт — отсюда доля «без
+    // решения» под 70%. Название ОКВЭД и отраслевой тип реестр отдаёт для
+    // 100% строк, мы их просто выбрасывали. Отдельными строками, потому что
+    // проверка цитат разбирает category построчно (см. relevanceGate).
+    category: [cell(row.okved_name), cell(row.activity_type), cell(row.okved_code)]
+      .map((part) => part.trim()).filter(Boolean).join('\n'),
     employees: cell(row.employees_count),
     revenue: cell(row.revenue),
     inn: cell(row.inn),

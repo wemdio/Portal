@@ -7,7 +7,7 @@
  */
 jest.mock('@/lib/companiesSearch/rpcSearch', () => ({ searchRows: jest.fn(), searchCount: jest.fn() }));
 
-import { fetchDirectoryRows } from '@/lib/verticalEngineV2/stages/baseCollect';
+import { fetchDirectoryRows, mapDirectoryRow } from '@/lib/verticalEngineV2/stages/baseCollect';
 import { searchRows } from '@/lib/companiesSearch/rpcSearch';
 import type { VeStageContext } from '@/lib/verticalEngineV2/stages/shared';
 
@@ -62,5 +62,30 @@ describe('закладка выдачи реестра', () => {
     jest.mocked(searchRows).mockResolvedValue({ rows: [], error: 'rpc timeout' });
     const result = await fetchDirectoryRows(ctx, {}, 10, empty, 700);
     expect(result).toMatchObject({ error: 'rpc timeout', nextOffset: 700, exhausted: false, hitCeiling: false });
+  });
+});
+
+describe('строка реестра', () => {
+  it('отдаёт название вида деятельности и отрасль, а не только код', () => {
+    // Классификатор и первичная проверка читают category как текст. Код
+    // «28.30» не говорит им ничего, из-за чего компании из реестра массово
+    // оставались без вердикта.
+    const row = mapDirectoryRow({
+      name: 'ООО "Ромашка"', inn: '7700000001', website: 'https://romashka.ru', email: 'info@romashka.ru',
+      okved_code: '28.30', okved_name: 'Производство машин и оборудования для сельского и лесного хозяйства',
+      activity_type: 'Сельхозтехника', address: 'Тула', employees_count: 120, revenue: 500000000, phones: '+7 999 000-00-00, +7 999 111-11-11',
+    });
+    expect(row.category.split('\n')).toEqual([
+      'Производство машин и оборудования для сельского и лесного хозяйства',
+      'Сельхозтехника',
+      '28.30',
+    ]);
+    // Остальное разбирается как раньше: телефон — первый из списка.
+    expect(row).toMatchObject({ company: 'ООО "Ромашка"', inn: '7700000001', phone: '+7 999 000-00-00', source_detail: 'реестр' });
+  });
+
+  it('обходится одним кодом, если справочник ничего не дал', () => {
+    const row = mapDirectoryRow({ name: 'ООО "Пустышка"', okved_code: '62.01' });
+    expect(row.category).toBe('62.01');
   });
 });
