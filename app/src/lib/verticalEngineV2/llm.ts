@@ -270,6 +270,13 @@ interface LLMCallOptions {
   timeoutMs?: number;
   /** Each returned provider usage, including responses later rejected by validation. */
   onUsage?: (usage: LLMUsage) => void;
+  /**
+   * Provider-specific response contract passed through verbatim, for models
+   * that are not plain chat: the System One classifier (Jev) requires
+   * `{ type: 'questions', questions }` and answers with calibrated
+   * probabilities. Such a call gets no JSON-mode hint appended to its state.
+   */
+  responseFormat?: Record<string, unknown>;
 }
 
 function llmTimeoutMs(): number {
@@ -337,7 +344,7 @@ async function rawCall(
   maxTokens: number,
   jsonMode: boolean,
   signal: AbortSignal,
-  opts?: Pick<LLMCallOptions, 'maxHttpAttempts' | 'onUsage' | 'jsonSchema'>,
+  opts?: Pick<LLMCallOptions, 'maxHttpAttempts' | 'onUsage' | 'jsonSchema' | 'responseFormat'>,
 ): Promise<{ text: string; response: RequestyResponse }> {
   let lastError: Error | null = null;
 
@@ -357,11 +364,12 @@ async function rawCall(
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
           model,
-          messages: jsonMode ? withJsonModeHint(messages) : messages,
+          messages: jsonMode && !opts?.responseFormat ? withJsonModeHint(messages) : messages,
           max_tokens: maxTokens,
-          ...(jsonMode ? { response_format: opts?.jsonSchema
-            ? { type: 'json_schema', json_schema: { name: opts.jsonSchema.name, strict: true, schema: opts.jsonSchema.schema } }
-            : { type: 'json_object' } } : {}),
+          ...(opts?.responseFormat ? { response_format: opts.responseFormat }
+            : jsonMode ? { response_format: opts?.jsonSchema
+              ? { type: 'json_schema', json_schema: { name: opts.jsonSchema.name, strict: true, schema: opts.jsonSchema.schema } }
+              : { type: 'json_object' } } : {}),
           ...(scope ? { requesty: { metadata: {
             feature: 'vertical_engine_v2', project_id: scope.projectId,
             job_id: scope.jobId, stage: scope.stage, ...(scope.baseId ? { base_id: scope.baseId } : {}),

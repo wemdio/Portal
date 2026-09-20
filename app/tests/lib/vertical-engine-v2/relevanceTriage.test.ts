@@ -1,9 +1,10 @@
 /** @jest-environment node */
 
 /**
- * Calibrated triage in front of the LLM relevance check (opt-in). The provider
- * is replaced by a URL-routing fetch double: api.typesafe.ai answers typed
- * questions with probabilities, router.requesty.ai answers the LLM prompts.
+ * Calibrated triage in front of the LLM relevance check (opt-in). Both paths go
+ * to Requesty, so the fetch double routes on the request itself: a body with
+ * `response_format.type === 'questions'` is the classifier and answers
+ * probabilities, everything else is an ordinary LLM prompt.
  */
 import { findIrrelevantRows } from '@/lib/verticalEngineV2/relevanceGate';
 import type { VeRelevanceCheckpoint } from '@/lib/verticalEngineV2/relevanceCheckpoint';
@@ -21,6 +22,10 @@ const rubric: VeTriageRubric = {
 const reply = (status: number, body: unknown) => ({ ok: status >= 200 && status < 300, status, headers: new Headers(),
   text: async () => JSON.stringify(body), json: async () => body }) as unknown as Response;
 const llm = (data: unknown) => reply(200, { choices: [{ message: { content: JSON.stringify(data) } }], usage: { prompt_tokens: 10, completion_tokens: 5, cost: 0.001 } });
+/** Jev answers through the chat contract: the probabilities are the message content. */
+const jev = (answers: unknown, promptTokens: number) => reply(200, { model: 'jev-1.13.0',
+  choices: [{ message: { content: JSON.stringify(answers) }, finish_reason: 'stop' }],
+  usage: { prompt_tokens: promptTokens, completion_tokens: 0, cost: promptTokens * 0.042 / 1e6 } });
 
 const maker = 'Завод выпускает промышленные насосы на собственной производственной площадке в Туле.';
 const rows = [
@@ -32,25 +37,27 @@ const input = { rows, verticalName: 'Промышленное оборудова
   fetchEvidence: jest.fn().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'offline' }) };
 
 /** Probabilities by company name; `down` makes the triage provider refuse the key. */
-function provider(options: { down?: boolean; classifyStatus?: number; brokenRubric?: boolean; rubricStatus?: number } = {}) {
+function provider(options: { down?: boolean; classifyStatus?: number; brokenRubric?: boolean; rubricStatus?: number; triageStatus?: number } = {}) {
   const calls = { rubric: 0, classify: 0, review: 0, company: 0, evidence: 0 };
   const fetchMock = jest.fn(async (url: string, init: { body: string }) => {
     const body = JSON.parse(init.body);
-    if (String(url).includes('typesafe')) {
+    const questions = body.response_format?.type === 'questions' ? body.response_format.questions : null;
+    if (questions) {
       if (options.down) return reply(401, { error: 'invalid key' });
-      if (body.questions.activity) {
+      if (options.triageStatus) { calls.company += 1; return reply(options.triageStatus, { error: { message: 'insufficient balance' } }); }
+      const state = JSON.parse(body.messages[0].content);
+      if (questions.activity) {
         calls.company += 1;
-        const name = body.state.company_facts_untrusted_data.company as string;
+        const name = state.company_facts_untrusted_data.company as string;
         const p = name === 'Насосный завод' ? { activity: 0.9, req_0: 0.8, conflict_0: 0.02, irrelevant: 0.01 }
           : name === 'Торговый дом' ? { activity: 0.01, req_0: 0.02, conflict_0: 0.9, irrelevant: 0.9 }
             : { activity: 0.2, req_0: 0.1, conflict_0: 0.1, irrelevant: 0.2 };
-        return reply(200, { model: 'jev-1.13.0', usage: { input_tokens: 1000 }, answers: {
+        return jev({
           activity: { noul: p.activity }, req_0: { noul: p.req_0 }, conflict_0: { noul: p.conflict_0 }, serves_target_not_member: { noul: 0.05 },
-          fit: { choice: 'x', probabilities: { relevant: 1 - p.irrelevant, irrelevant: p.irrelevant, insufficient: 0 } } } });
+          fit: { choice: 'x', probabilities: { relevant: 1 - p.irrelevant, irrelevant: p.irrelevant, insufficient: 0 } } }, 1000);
       }
       calls.evidence += 1;
-      return reply(200, { model: 'jev-1.13.0', usage: { input_tokens: 500 }, answers: Object.fromEntries(
-        Object.keys(body.questions).map((key) => [key, { noul: key.endsWith('0') ? 0.8 : 0.1 }])) });
+      return jev(Object.fromEntries(Object.keys(questions).map((key) => [key, { noul: key.endsWith('0') ? 0.8 : 0.1 }])), 500);
     }
     const system = body.messages[0].content as string;
     if (system.startsWith('You convert ONE B2B targeting hypothesis')) {
@@ -74,18 +81,18 @@ describe('VE2 calibrated relevance triage', () => {
   const env = { ...process.env };
   beforeEach(() => {
     resetVeTriageState();
-    process.env.VE_RELEVANCE_TRIAGE = 'jev'; process.env.TYPESAFE_API_KEY = 'test-key';
+    process.env.VE_RELEVANCE_TRIAGE = 'jev';
     process.env.OPENROUTER_HYPOTHESIS_ENGINE_API_KEY = 'test-key';
     delete process.env.VE_RELEVANCE_TRIAGE_PROJECTS; delete process.env.VE_MODEL_GATE; delete process.env.VE_MODEL_RELEVANCE_REVIEW;
   });
   afterEach(() => { process.env = { ...env }; });
 
-  it('is off unless the mode, the key and (when listed) the project are configured', () => {
+  it('is off unless the mode and (when listed) the project are configured', () => {
     expect(isVeRelevanceTriageEnabled('p1')).toBe(true);
     process.env.VE_RELEVANCE_TRIAGE_PROJECTS = 'p2, p3';
     expect(isVeRelevanceTriageEnabled('p1')).toBe(false);
     expect(isVeRelevanceTriageEnabled('p3')).toBe(true);
-    delete process.env.TYPESAFE_API_KEY;
+    delete process.env.VE_RELEVANCE_TRIAGE;
     expect(isVeRelevanceTriageEnabled('p3')).toBe(false);
   });
 
@@ -122,10 +129,12 @@ describe('VE2 calibrated relevance triage', () => {
     expect(checked.decisions.get(2)?.triage).toBeUndefined();
     // One checklist, one LLM classification for the single uncertain company, two review steps for the single proposal.
     expect(calls).toEqual({ rubric: 1, classify: 1, review: 2, company: 3, evidence: 1 });
-    // One journal attempt per packet, with summed tokens and an estimated charge.
-    const triageEvents = journal.filter((event) => event.provider === 'typesafe');
-    expect(triageEvents.map((event) => event.phase)).toEqual(['started', 'finished']);
-    expect(triageEvents[1]).toEqual(expect.objectContaining({ status: 'success', promptTokens: 3500, estimatedCostUsd: 3500 * 0.042 / 1e6, actualModel: 'jev-1.13.0' }));
+    // Every classifier request is journalled and priced by the shared layer.
+    const triageEvents = journal.filter((event) => event.requestedModel === 'typesafe/jev-1.13.0' && event.phase === 'finished');
+    expect(triageEvents).toHaveLength(4);
+    expect(triageEvents.every((event) => event.provider === 'requesty' && event.status === 'success')).toBe(true);
+    expect(triageEvents.reduce((sum, event) => sum + (event.promptTokens ?? 0), 0)).toBe(3500);
+    expect(triageEvents.reduce((sum, event) => sum + (event.reportedCostUsd ?? 0), 0)).toBeCloseTo(3500 * 0.042 / 1e6, 12);
     expect(checked.tokensUsed).toBeGreaterThanOrEqual(3500);
 
     // Everything is durable: a replay buys nothing, including for the final reject.
@@ -212,6 +221,27 @@ describe('VE2 calibrated relevance triage', () => {
     expect(restored).toEqual(expect.objectContaining({ rubric: 1, company: 1 }));
   });
 
+  it('never throws the balance refusal past the gate, so the paid pass keeps its checkpoint', async () => {
+    // Both paths hit an empty balance. `runTriage` has no handler of its own:
+    // an escaping error would skip the gate's save and lose the whole pass.
+    const broke = provider({ triageStatus: 402, classifyStatus: 402 });
+    const stopped = await findIrrelevantRows(input);
+    expect(stopped.error).toContain('Requesty 402');
+    expect(stopped.checkpoint).toBeDefined();
+    // Nobody is settled on a refusal: every company stays for the next pass.
+    expect([0, 1, 2].map((i) => stopped.decisions.get(i)?.status).filter((status) => status === 'relevant' || status === 'irrelevant')).toEqual([]);
+    // The fast check is switched off by the first refusal, not retried per company.
+    expect(broke.company).toBeLessThanOrEqual(3);
+    expect(broke.evidence).toBe(0);
+
+    // With funds only for the LLM path the pass still completes, without the fast check.
+    resetVeTriageState();
+    const partial = provider({ triageStatus: 402 });
+    const done = await findIrrelevantRows(input);
+    expect(done.error).toBeUndefined();
+    expect(partial.classify).toBe(1);
+  });
+
   it('opens the breaker on the first wave of hung requests instead of holding the slots for minutes', async () => {
     jest.useFakeTimers();
     try {
@@ -226,10 +256,10 @@ describe('VE2 calibrated relevance triage', () => {
       void pending.then((value) => { outcome = value; });
       let waited = 0;
       while (!outcome && waited < 120_000) { await jest.advanceTimersByTimeAsync(5_000); waited += 5_000; }
-      // Without the per-attempt breaker this packet needs 24 companies x 3 attempts x 10 s
-      // on six slots (two minutes, cut only by the packet deadline) and 72 requests.
+      // Without the breaker (and the drain of its queue) this packet needs 24
+      // companies x 20 s on six slots: 80 s, cut only by the packet deadline.
       expect(waited).toBeLessThanOrEqual(25_000);
-      expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(12);
+      expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(6);
       if (!outcome) throw new Error('packet did not finish');
       expect(outcome.unavailable).toBe(true);
       expect(outcome.results.every((item) => item.outcome === 'failed')).toBe(true);
@@ -242,7 +272,7 @@ describe('VE2 calibrated relevance triage', () => {
     try {
       const facts = { company: 'c', website: '', category: '', description: maker, vacancy_title: '', website_text: '' };
       const target = { vertical: 'v', verticalSummary: '', hypothesisTitle: 'h', hypothesisDescription: '' };
-      const answer = reply(200, { model: 'jev-1.13.0', usage: { input_tokens: 100 }, answers: { activity: { noul: 0.2 } } });
+      const answer = jev({ activity: { noul: 0.2 } }, 100);
       const settle = async <T>(pending: Promise<T>, limitMs: number) => {
         let value: T | undefined, waited = 0;
         void pending.then((result) => { value = result; });

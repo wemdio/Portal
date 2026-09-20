@@ -2,7 +2,9 @@
  * Calibrated triage in front of the LLM relevance check.
  *
  * TypeSafe Jev is a "System One" classifier: a JSON state plus typed questions
- * in, calibrated probabilities out, no generated text. Measured 19.09.2026 on
+ * in, calibrated probabilities out, no generated text. It is reached through
+ * Requesty like every other model, so it shares one key, one rate limiter and
+ * one provider journal. Measured 19.09.2026 on
  * 2 775 production company x hypothesis pairs with an independent judge
  * (docs/design/2026-09-19-ve2-relevance-triage.md). It never admits a company:
  *   reject    -> final `irrelevant`: no LLM, website or paid search is spent;
@@ -12,29 +14,33 @@
  * Every transport, quota or key failure also falls back to the LLM path.
  */
 import { z } from 'zod';
-import { beginProviderUsage } from '@/lib/providerUsage';
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
-import type { LLMMessage } from './llm';
+import { callLLMText, getVeActiveJobSignal, type LLMMessage } from './llm';
+import { isVeProviderBillingError } from './collectionErrors';
 import { VE_RELEVANCE_TARGET_RULES } from './relevanceReview';
 
-const ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
 // Thresholds below were calibrated on this exact release; an alias could move them silently.
-const DEFAULT_MODEL = 'jev-1.13.0';
-// Public price 15.09.2026: input tokens only, answers are free.
-const USD_PER_M_INPUT_TOKENS = 0.042;
+const DEFAULT_MODEL = 'typesafe/jev-1.13.0';
 // Normal latency is 0.4-1 s, also for ~100 questions. A hung provider must
 // open the breaker within seconds, not hold six process-wide slots for minutes.
-const REQUEST_TIMEOUT_MS = 10_000;
+const REQUEST_TIMEOUT_MS = 20_000;
 const MAX_HTTP_ATTEMPTS = 3;
+// Measured 20.09.2026: 96 questions answer in 1 722 tokens and Requesty does
+// not clamp to the catalog's 1 024. Headroom, plus a `length` guard below.
+const MAX_OUTPUT_TOKENS = 4096;
 // A packet that is still running after this long hands its remaining companies
 // to the LLM path: the fast check must never be the slow part of a base.
 const PACKET_DEADLINE_MS = 120_000;
-// 1 200 requests/min per key; ~0.4-1 s per request keeps six slots under it
+// ~0.4-1 s per request keeps six slots well under the shared Requesty limit
 // for the whole worker process, however many bases are being checked.
 const MAX_CONCURRENT_REQUESTS = 6;
 const BREAKER_FAILURES = 5;
 const BREAKER_COOLDOWN_MS = 5 * 60_000;
 const AUTH_COOLDOWN_MS = 15 * 60_000;
+// A request that never reaches an HTTP status is a hung or unreachable provider,
+// not a bad answer: one is enough to stop a whole wave of parallel companies,
+// and the short cooldown gets the cheap check back as soon as it recovers.
+const TRANSPORT_COOLDOWN_MS = 60_000;
 export const VE_TRIAGE_MAX_EXCERPTS = 24;
 export const VE_TRIAGE_RUBRIC_VERSION = 1;
 
@@ -203,117 +209,118 @@ let consecutiveFailures = 0, unavailableUntil = 0;
 export const veTriageAvailable = (now = Date.now()): boolean => now >= unavailableUntil;
 /** Test hook: the breaker and the limiter are process-wide by design. */
 export function resetVeTriageState(): void { consecutiveFailures = 0; unavailableUntil = 0; }
+/**
+ * A wave of concurrent failures reaches the breaker one at a time, interleaved
+ * with the waiters each released slot wakes. Without this drain the queue keeps
+ * starting requests against a provider already known to be down until the wave
+ * finishes arriving; with it, every waiter returns at once and buys nothing.
+ */
+function drainWaiters() { while (waiters.length) waiters.shift()!(); }
 function failed(status: number) {
-  if (status === 401 || status === 403) { unavailableUntil = Date.now() + AUTH_COOLDOWN_MS; return; }
-  if (++consecutiveFailures >= BREAKER_FAILURES) { consecutiveFailures = 0; unavailableUntil = Date.now() + BREAKER_COOLDOWN_MS; }
+  const cooldown = status === 401 || status === 403 ? AUTH_COOLDOWN_MS
+    : status === 0 ? TRANSPORT_COOLDOWN_MS
+      : ++consecutiveFailures >= BREAKER_FAILURES ? BREAKER_COOLDOWN_MS : 0;
+  if (!cooldown) return;
+  consecutiveFailures = 0;
+  unavailableUntil = Date.now() + cooldown;
+  drainWaiters();
 }
 
-const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
-  signal?.throwIfAborted();
-  const done = () => { signal?.removeEventListener('abort', abort); resolve(); };
-  const timer = setTimeout(done, ms);
-  const abort = () => { clearTimeout(timer); reject(signal!.reason); };
-  signal?.addEventListener('abort', abort, { once: true });
-});
+const answersSchema = z.record(z.string(), z.object({
+  noul: z.number().min(0).max(1).optional(),
+  probabilities: z.record(z.string(), z.number()).optional(),
+}));
+interface Asked { answers?: Answers; promptTokens: number; costUsd: number }
 
-const responseSchema = z.object({
-  answers: z.record(z.string(), z.object({ noul: z.number().optional(), probabilities: z.record(z.string(), z.number()).optional() })),
-  usage: z.object({ input_tokens: z.number().nonnegative().optional() }).optional(),
-  model: z.string().optional(),
-});
-interface Asked { answers?: Answers; inputTokens: number; status: number; model?: string }
+const httpStatusOf = (error: unknown): number => {
+  const match = /Requesty\s+(\d{3})\b/.exec(error instanceof Error ? error.message : String(error));
+  return match ? Number(match[1]) : 0;
+};
 
-async function ask(body: unknown, signal?: AbortSignal, deadline = Infinity): Promise<Asked> {
-  const payload = JSON.stringify(body);
-  // A request that may have reached the provider is counted at its upper bound.
-  const upperBound = Math.ceil(payload.length / 3);
-  let spent = 0, status = 0;
-  for (let attempt = 0; attempt < MAX_HTTP_ATTEMPTS; attempt++) {
-    // An open breaker or a spent packet deadline is not another failure of this request.
-    if (!veTriageAvailable() || Date.now() >= deadline) return { inputTokens: spent, status };
-    await acquire(signal);
-    let retryAfterMs: number | undefined;
-    // A timer (not AbortSignal.timeout) so the deadline is one abortable, testable clock.
-    const request = new AbortController();
-    const cancel = () => request.abort(signal?.reason);
-    const timer = setTimeout(() => request.abort(new Error('triage request timeout')), REQUEST_TIMEOUT_MS);
-    signal?.addEventListener('abort', cancel, { once: true });
-    try {
-      // The breaker may have opened, or the packet deadline passed, while this
-      // request waited for a slot shared by every job: drain at once.
-      if (!veTriageAvailable() || Date.now() >= deadline) return { inputTokens: spent, status };
-      const res = await fetch(ENDPOINT, { method: 'POST', body: payload, signal: request.signal,
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${(process.env.TYPESAFE_API_KEY ?? '').trim()}` } });
-      status = res.status;
-      if (res.ok) {
-        const parsed = responseSchema.safeParse(await res.json().catch(() => null));
-        if (parsed.success) {
-          consecutiveFailures = 0;
-          return { answers: parsed.data.answers, inputTokens: spent + (parsed.data.usage?.input_tokens ?? upperBound), status, model: parsed.data.model };
-        }
-        spent += upperBound;
-      } else {
-        const seconds = Number(res.headers?.get('retry-after'));
-        if (Number.isFinite(seconds) && seconds > 0) retryAfterMs = Math.min(20_000, seconds * 1000);
-        if (status !== 429 && status < 500) { failed(status); return { inputTokens: spent, status }; }
-      }
-    } catch {
-      // The job's own cancellation propagates; a request deadline or a network error is a provider failure.
-      signal?.throwIfAborted();
-      status = 0; spent += upperBound;
-    } finally {
-      clearTimeout(timer);
-      signal?.removeEventListener('abort', cancel);
-      release();
+/**
+ * One packet of questions about one company. Retries, backpressure, the key and
+ * the cost journal belong to the shared Requesty layer; this function owns only
+ * the concurrency slot, the breaker and the packet deadline.
+ */
+async function ask(request: { model: string; state: unknown; questions: Record<string, Question> },
+  signal?: AbortSignal, deadline = Infinity): Promise<Asked> {
+  const nothing: Asked = { promptTokens: 0, costUsd: 0 };
+  // An open breaker or a spent packet deadline is not another failure of this request.
+  if (!veTriageAvailable() || Date.now() >= deadline) return nothing;
+  await acquire(signal);
+  try {
+    // The breaker may have opened, or the packet deadline passed, while this
+    // request waited for a slot shared by every job: drain at once.
+    if (!veTriageAvailable() || Date.now() >= deadline) return nothing;
+    const result = await callLLMText([{ role: 'user', content: JSON.stringify(request.state) }], {
+      model: request.model,
+      maxTokens: MAX_OUTPUT_TOKENS,
+      timeoutMs: REQUEST_TIMEOUT_MS,
+      maxHttpAttempts: MAX_HTTP_ATTEMPTS,
+      // Jev takes its questions here and answers with the calibrated
+      // probabilities as the message content; it is not a chat model.
+      responseFormat: { type: 'questions', questions: request.questions },
+      ...(signal ? { signal } : {}),
+    });
+    let answers: Answers | undefined;
+    // Truncated answers are unusable: the decision rule must never read half a packet.
+    if (result.finishReason !== 'length') {
+      try {
+        const parsed = answersSchema.safeParse(JSON.parse(result.text));
+        if (parsed.success) answers = parsed.data;
+      } catch { /* not JSON: a provider failure, counted below */ }
     }
-    // A hung or unreachable provider counts per attempt: six parallel hangs open
-    // the breaker after the first timeout. An HTTP 429/5xx keeps its retries and
-    // counts once when they are exhausted, so a sub-second blip under load does
-    // not switch the fast check off for five minutes.
-    if (status === 0 || attempt === MAX_HTTP_ATTEMPTS - 1) failed(status);
-    if (attempt < MAX_HTTP_ATTEMPTS - 1 && veTriageAvailable()) await sleep(retryAfterMs ?? 500 * 2 ** attempt, signal);
+    if (answers) consecutiveFailures = 0; else failed(0);
+    return { answers, promptTokens: result.promptTokens, costUsd: result.costUsd };
+  } catch (error) {
+    // The job's own cancellation propagates; a request deadline is a provider failure.
+    signal?.throwIfAborted();
+    getVeActiveJobSignal()?.throwIfAborted();
+    // An empty balance fails every request, so the fast check stops at once.
+    // The error is NOT rethrown: `runTriage` has no handler, and escaping there
+    // would skip the gate's checkpoint save and lose a pass that was paid for.
+    // The LLM path below hits the same balance, records `billing` and saves.
+    if (isVeProviderBillingError(error)) {
+      consecutiveFailures = 0;
+      unavailableUntil = Date.now() + BREAKER_COOLDOWN_MS;
+      drainWaiters();
+      return nothing;
+    }
+    failed(httpStatusOf(error));
+    return nothing;
+  } finally {
+    release();
   }
-  return { inputTokens: spent, status };
 }
 
 export type VeTriageResult = (VeTriageVerdict & { evidenceIds?: number[] }) | { outcome: 'failed' };
 
-/**
- * Triage one packet of companies. Accounting is one journal attempt per packet
- * (token and cost totals of its requests): per-request rows would write two
- * journal lines for every company of a 10 000-row reserve.
- */
+/** Triage one packet of companies. Every request is journalled and priced by
+ * the shared Requesty layer; the totals here are for the caller's batch report. */
 export async function triageVeCompanies(input: {
   rubric: VeTriageRubric; target: VeTriageTarget; language: 'ru' | 'en';
   companies: Array<{ facts: VeTriageFacts; excerpts: VeTriageExcerpt[] }>; signal?: AbortSignal;
 }): Promise<{ results: VeTriageResult[]; inputTokens: number; costUsd: number; unavailable: boolean }> {
   const model = veTriageModel();
-  const metering = await beginProviderUsage('typesafe', { requestedModel: model });
   const deadline = Date.now() + PACKET_DEADLINE_MS;
-  let inputTokens = 0, lastStatus = 0, succeeded = 0, actualModel: string | undefined;
+  let inputTokens = 0, costUsd = 0;
   const one = async (company: { facts: VeTriageFacts; excerpts: VeTriageExcerpt[] }): Promise<VeTriageResult> => {
     const first = await ask(veTriageCompanyRequest(input.rubric, input.target, company.facts, input.language, model), input.signal, deadline);
-    inputTokens += first.inputTokens; lastStatus = first.status; actualModel = first.model ?? actualModel;
+    inputTokens += first.promptTokens; costUsd += first.costUsd;
     const verdict = first.answers ? decideVeTriage(first.answers, input.rubric) : null;
     if (!verdict) return { outcome: 'failed' };
-    succeeded += 1;
     if (verdict.outcome !== 'admit') return verdict;
     const excerpts = company.excerpts.slice(0, VE_TRIAGE_MAX_EXCERPTS);
     if (!excerpts.length) return { outcome: 'uncertain', activity: verdict.activity };
     // The first answer is paid for: its proposal is not dropped for being late in a busy queue.
     const second = await ask(veTriageEvidenceRequest(input.rubric, company.facts.company, excerpts, model), input.signal,
       Math.max(deadline, Date.now() + 2 * REQUEST_TIMEOUT_MS));
-    inputTokens += second.inputTokens; lastStatus = second.status;
+    inputTokens += second.promptTokens; costUsd += second.costUsd;
     if (!second.answers) return { outcome: 'failed' };
     const evidenceIds = selectVeTriageEvidence(excerpts, second.answers, input.rubric);
     // A proposal without a verbatim supporting excerpt cannot be admitted anyway.
     return evidenceIds.length ? { ...verdict, evidenceIds } : { outcome: 'uncertain', activity: verdict.activity };
   };
-  const usage = () => ({ httpStatus: lastStatus, promptTokens: inputTokens, completionTokens: 0,
-    estimatedCostUsd: inputTokens * USD_PER_M_INPUT_TOKENS / 1_000_000, ...(actualModel ? { actualModel } : {}) });
-  let results: VeTriageResult[];
-  try { results = await Promise.all(input.companies.map(one)); }
-  catch (error) { await metering.finish({ status: 'ambiguous', ...usage() }); throw error; }
-  await metering.finish({ status: succeeded > 0 ? 'success' : 'http_error', ...usage() });
-  return { results, inputTokens, costUsd: inputTokens * USD_PER_M_INPUT_TOKENS / 1_000_000, unavailable: !veTriageAvailable() };
+  const results = await Promise.all(input.companies.map(one));
+  return { results, inputTokens, costUsd, unavailable: !veTriageAvailable() };
 }
