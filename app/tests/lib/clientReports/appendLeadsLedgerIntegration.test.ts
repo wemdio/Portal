@@ -64,6 +64,8 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
     instantlyDb = createMockSupabase({ tables: {
       client_campaign_presets: [
         { id: 'preset-1', client_user_id: 'client-1', instantly_account_id: 'main' },
+        // Кабинет, заведённый студией из Движка: строки client_tariffs у него нет.
+        { id: 'preset-agency', client_user_id: 'client-agency', instantly_account_id: 'main', agency_managed: true },
         {
           id: 'preset-mailganer', client_user_id: MAILGANER_CLIENT_ID, instantly_account_id: 'main',
           email_account_ids: ['sender-1'], daily_limit: 30, daily_max_leads: 30,
@@ -94,6 +96,26 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
     expect(mainDb.getRows('client_campaign_contact_ledger').filter((row) => row.append_status === 'submitted')).toHaveLength(2);
     // Accepted identity rows are copied atomically by the database terminal-event trigger.
     expect(mainDb.getRows('client_campaign_contact_ledger').filter((row) => row.append_status === 'accepted')).toHaveLength(0);
+  });
+
+  it('не режет агентский кабинет тарифом, но по-прежнему режет self-serve', async () => {
+    // Кабинет заведён студией: подписки нет и не должно быть.
+    getClientStatusMock.mockReturnValue('inactive');
+
+    await appendLeadsToClientCampaign({
+      userId: 'client-agency', campaignId: 'campaign-1', contextLabel: 'agency', leads,
+      ledgerSource: { kind: 'auto_pipeline', runId: 'run-agency' },
+    });
+    expect(createLeadsMock).toHaveBeenCalledTimes(1);
+    // Тариф у агентского кабинета даже не читается.
+    expect(getClientTariffRowMock).not.toHaveBeenCalled();
+
+    // Обычный self-serve клиент с той же неактивной подпиской не проходит.
+    await expect(appendLeadsToClientCampaign({
+      userId: 'client-1', campaignId: 'campaign-1', contextLabel: 'self-serve', leads,
+      ledgerSource: { kind: 'auto_pipeline', runId: 'run-self' },
+    })).rejects.toThrow(/Подписка не активна/);
+    expect(createLeadsMock).toHaveBeenCalledTimes(1);
   });
 
   it('freezes exact accepted identities for a partially accepted external batch', async () => {

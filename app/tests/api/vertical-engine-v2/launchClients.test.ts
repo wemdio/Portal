@@ -283,8 +283,22 @@ describe('POST /api/tools/vertical-engine-v2/launch-clients', () => {
     expectNoSecretLeak(allLogCalls());
   });
 
-  it('rejects a non-technician/non-admin role before any side effect', async () => {
+  it('пускает специалиста, а не только технаря, и метит кабинет агентским', async () => {
+    // Специалист сидит под обычной внутренней ролью: раньше он упирался в 403
+    // и не мог довести собственную гипотезу до запуска без технаря.
     seed({ role: 'manager' });
+
+    const response = await POST(request());
+
+    expect(response.status).toBe(201);
+    expect(mockCreateUser).toHaveBeenCalledTimes(1);
+    const [preset] = mockInstantlyDb.getRows('client_campaign_presets') as Array<{ agency_managed: boolean }>;
+    // Кабинет обслуживается по договору студии: тарифный гейт к нему не применяется.
+    expect(preset.agency_managed).toBe(true);
+  });
+
+  it('rejects a client role before any side effect', async () => {
+    seed({ role: 'client' });
 
     const response = await POST(request());
 

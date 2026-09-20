@@ -70,6 +70,17 @@ export function isTechnician(role: UserRole | null): boolean {
   return role === 'technician' || role === 'admin';
 }
 
+/**
+ * Завести кабинет клиента для запуска и выбрать пул ящиков из Движка вертикалей.
+ * Роль создаваемого пользователя сервер всё равно форсит в 'client', поэтому
+ * эскалации прав это не даёт: специалисту просто больше не нужен технарь или
+ * админ, чтобы довести собственную гипотезу до запуска.
+ */
+export function canProvisionLaunchClient(role: UserRole | null): boolean {
+  if (!role) return false;
+  return INTERNAL_ROLES.includes(role);
+}
+
 export function isLead(role: UserRole | null): boolean {
   return role === 'lead' || role === 'director' || role === 'admin';
 }
