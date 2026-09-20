@@ -6,9 +6,14 @@
  *
  * Каждый лоадер грузит целевую строку + её проект и сверяет владельца.
  * Сообщения EN — это клиентский контур с английским UI.
+ *
+ * Здесь же `requireEngMarket` — гейт «этот кабинет вообще для этого клиента»:
+ * скоуп владельца отвечает на вопрос «чья строка», рынок — «чей раздел».
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { logError, logWarn } from '@/lib/loggerServer';
+import type { ClientMarket } from '@/lib/engMarket';
 
 export interface HeScopeFailure {
   status: number;
@@ -25,13 +30,155 @@ function notFound(message: string): HeScopeFailure {
   return { status: 404, message };
 }
 
-function dbError(message: string): HeScopeFailure {
-  return { status: 500, message };
+/**
+ * Текст сбоя БД клиенту НЕ отдаём: в сообщении Postgres едут имена таблиц
+ * `he_*`, типы колонок и текст запроса (для кривого uuid это 22P02
+ * «invalid input syntax for type uuid: …»). Наружу — константа, подробности в
+ * application_logs.
+ */
+const DB_ERROR_MESSAGE = 'Database error';
+
+function dbError(): HeScopeFailure {
+  return { status: 500, message: DB_ERROR_MESSAGE };
 }
 
 /** PGRST116 («строк нет») — легитимное отсутствие; прочие ошибки — сбой БД. */
 function failureFrom(error: { message: string; code?: string } | null, notFoundMessage: string): HeScopeFailure {
-  return error?.code === 'PGRST116' ? notFound(notFoundMessage) : dbError(error?.message ?? 'Database error');
+  if (error?.code === 'PGRST116') return notFound(notFoundMessage);
+  // Логируем fire-and-forget: writeLog сам глотает свои ошибки (loggerServer
+  // держит backoff), а гейт стоит на пути клиентского запроса — ждать запись
+  // лога незачем.
+  void logError('client.eng.scope.db_error', error, { scope: notFoundMessage });
+  return dbError();
+}
+
+/**
+ * Отказ рыночного гейта — единственное место контура, где клиент получает 403
+ * «раздел не для вашего аккаунта», и до этой правки он был НЕМЫМ: наружу
+ * английская константа без причины, в логах — ничего. Оператор, которому
+ * клиент пишет «кабинет не грузится», не мог отличить «у профиля market='ru'»
+ * от «лёг воркер». Пишем `warn`, а не `error`: это штатный отказ доступа.
+ *
+ * Дроссель — не украшение. Денай стоит на КАЖДОМ запросе контура (загрузка
+ * дашборда — это несколько запросов), а клиент с чужим рынком обычно ломится
+ * повтором, и без окна одна вкладка дописывала бы в `application_logs` строку
+ * на запрос. Причина отказа от повтора не меняется, поэтому одной записи на
+ * пользователя в окно достаточно. Окно — процессное; несколько инстансов дадут
+ * несколько записей, и это нормально: цель — чтобы отказ было ВИДНО, а не
+ * посчитать его точно.
+ */
+const MARKET_DENIAL_LOG_WINDOW_MS = 10 * 60 * 1000;
+/** userId → момент последней записи. Кэш дросселя, живёт в памяти процесса. */
+const marketDenialLoggedAt = new Map<string, number>();
+/** Потолок карты: поток разных userId не должен растить её без предела. */
+const MARKET_DENIAL_LOG_MAX_KEYS = 500;
+
+function noteMarketDenial(userId: string, role: string | null, profileFound: boolean): void {
+  const now = Date.now();
+  if (now - (marketDenialLoggedAt.get(userId) ?? 0) < MARKET_DENIAL_LOG_WINDOW_MS) return;
+  // Переполнение чистим целиком: это кэш, и потеря записи стоит ровно одной
+  // лишней строки лога — дешевле, чем LRU ради дросселя.
+  if (marketDenialLoggedAt.size >= MARKET_DENIAL_LOG_MAX_KEYS) marketDenialLoggedAt.clear();
+  marketDenialLoggedAt.set(userId, now);
+  // profileFound различает две разные причины с одним ответом: «профиль есть,
+  // но рынок ru» (клиента завели не через ENG-хост) и «профиля/колонки нет».
+  void logWarn(
+    'client.eng.market_gate.denied',
+    'ENG cabinet API denied: profile market is not eng',
+    { role, profileFound },
+    { userId },
+  );
+}
+
+/**
+ * Рыночный гейт клиентского ENG-контура: RU-клиенту в `/api/client/eng/**`
+ * делать нечего.
+ *
+ * Зачем guard, а не middleware: рыночные гейты middleware работают только по
+ * СТРАНИЦАМ (`pathname.startsWith('/client')`, middleware.ts), а `/api/client/eng/*`
+ * начинается с `/api` и под них не попадает — любой залогиненный ru-клиент
+ * своим токеном создавал `market='us'` проекты и крутил платный LLM-пайплайн.
+ *
+ * Три решения, важные для живого кабинета:
+ *  - ставится в роуте ПОСЛЕ ветки `serveClientDemo` — демо ходит фикстурами,
+ *    рынка у него нет, и гейт бы его закрыл;
+ *  - не-клиентские роли (admin) пропускаем: `market` у сотрудников не
+ *    проставлен, а ENG-контур им нужен для отладки (requireClientAuth уже
+ *    отсёк всех, кроме client/admin);
+ *  - рынок неизвестен (профиля нет; колонки `market` ещё нет — она из
+ *    миграции 20260804_0004) → `'ru'`, ровно как фолбэк middleware: гейт в
+ *    непонятной ситуации закрывается, а не открывается. Отдельно от этого
+ *    инфраструктурный сбой чтения профиля отдаёт 503 «обновите страницу» —
+ *    тот же контракт, что у requireClientAuth, чтобы блип main-БД не выглядел
+ *    как «вам сюда нельзя».
+ *
+ * Почему ВТОРОЕ чтение profiles, хотя requireClientAuth (lib/clientApiHelper.ts)
+ * ту же строку уже прочитал под роль: дешевле было бы дочитать там `market` и
+ * вернуть его наружу, но этот хелпер обслуживает ВЕСЬ клиентский кабинет, в том
+ * числе RU, и любую ошибку чтения профиля кроме PGRST116 превращает в 503. Стоит
+ * колонке `market` отсутствовать (окружение без 20260804_0004) или быть
+ * переименованной — PostgREST вернёт 42703 на весь select, и вместо закрытого
+ * ENG-раздела ляжет весь /api/client/*. Здесь же 42703 штатно означает «рынок
+ * неизвестен». Цена разделения — один индексный select по PK на ENG-запрос;
+ * платим её сознательно. Объединять только вместе с правкой контракта
+ * requireClientAuth (отдавать роль и рынок одной строкой, 42703 глотать) — это
+ * отдельная задача с RU-регрессом, а не попутная микрооптимизация.
+ *
+ * ПОЧЕМУ ЭТО НЕ ЗАПИРАЕТ ЖИВЫХ КЛИЕНТОВ (проверено по коду, не предположение).
+ * Страничный гейт middleware работает уже сегодня и решает РОВНО тем же
+ * предикатом, что и строка `market` ниже: `middleware.ts`, ветка «(б) ru-клиент
+ * в ENG-разделе» — `profileMarket === 'eng' ? 'eng' : 'ru'`, и всё, что не
+ * 'eng', уводится с `/client/eng*` на `/client`; ветка «(в)» тем же предикатом
+ * выкидывает такого клиента с ENG-хоста на основной. Значит клиент с
+ * `market <> 'eng'` не может открыть НИ ОДНУ страницу кабинета уже сейчас — и
+ * API, который эти страницы дёргают, ему нечем вызывать. Гейт здесь закрывает
+ * не страницы, а обход страниц (fetch по токену мимо UI), и множество
+ * допущенных у обоих гейтов одинаково. Предикат совпадает с middleware буква в
+ * букву намеренно: разойдутся предикаты — разойдутся и вердикты.
+ *
+ * Кэш рынка из третьего сегмента ROLE_COOKIE (middleware, 30 минут) здесь
+ * СОЗНАТЕЛЬНО не читаем: доступ решаем по источнику истины, а не по кэшу,
+ * живущему у клиента. Единственное возможное расхождение — рынок сняли с 'eng'
+ * на 'ru', и до протухания куки страницы ещё открываются, а API уже нет;
+ * авторитетен здесь API.
+ *
+ * Проверка ПЕРЕД деплоем (read-only, руками; БД эта волна не трогает):
+ *   select p.id from profiles p
+ *    where p.role = 'client' and p.market is distinct from 'eng'
+ *      and exists (select 1 from he_projects h where h.created_by = p.id);
+ * Пусто — ни один клиент с историей в ENG-кабинете доступа не теряет. Не пусто
+ * — это ровно те, кого сегодня уже разворачивает middleware: рынок им
+ * проставляют ДО деплоя, а не после жалобы.
+ */
+export async function requireEngMarket(
+  supabase: SupabaseClient,
+  userId: string,
+): Promise<HeScopeResult<{ market: ClientMarket }>> {
+  const { data: profile, error } = await supabase
+    .from('profiles')
+    .select('role, market')
+    .eq('id', userId)
+    .single();
+  // PGRST116 — профиля нет; 42703 — колонки market ещё нет. Оба случая
+  // «рынок неизвестен», прочие коды — сбой инфраструктуры.
+  if (error && error.code !== 'PGRST116' && error.code !== '42703') {
+    void logError('client.eng.market_gate.profile_failed', error, { userId });
+    return {
+      ok: false,
+      failure: { status: 503, message: 'Service temporarily unavailable — refresh the page' },
+    };
+  }
+
+  const row = (profile ?? null) as Row | null;
+  const role = typeof row?.role === 'string' ? row.role : null;
+  const market: ClientMarket = row?.market === 'eng' ? 'eng' : 'ru';
+
+  if (role !== null && role !== 'client') return { ok: true, market };
+  if (market !== 'eng') {
+    noteMarketDenial(userId, role, row !== null);
+    return { ok: false, failure: { status: 403, message: 'This section is not available for your account' } };
+  }
+  return { ok: true, market };
 }
 
 /** Проект, принадлежащий клиенту (created_by = userId). */

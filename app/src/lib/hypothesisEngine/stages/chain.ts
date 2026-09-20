@@ -24,6 +24,7 @@ import { callLLMText, callLLMTextWithFallback, callLLMWithSchema, getHeModel, ty
 import { buildChainCriticMessages, buildChainMessages, buildChainRewriteMessages, buildChainRuleFixHint } from '../prompts/chain';
 import { checkLetterRules, extractNumberFacts, type HeLetterForCheck } from '../letterChecks';
 import { getWinnerPatterns, matchSegmentLabels, type HeWinnerPattern } from '../datasetStats';
+import { projectMarket } from '../market';
 import { selectCaseForVertical, type HeCase } from '../caseBank';
 import type { HeChainLanguage, HeChainLetter, HeEvidenceItem, HeHypothesis, HeJob, HeVertical } from '../types';
 import {
@@ -259,11 +260,16 @@ export async function runChainStage(job: HeJob, ctx: HeStageContext): Promise<He
   // Winner-паттерны датасета (best-effort): метки сегментов по терминам
   // вертикали (имя + синонимы), фолбэк хинтов — имя вертикали. Любой сбой →
   // генерим без паттернов, стадию это не валит.
+  // Рынок обязателен: словарь SEGMENT_LABEL_KEYWORDS содержит и английские
+  // токены (saas, logistics, retail), поэтому ENG-вертикаль матчится на
+  // RU-сегменты, и в английскую генерацию уезжают русские темы кампаний
+  // вместе с русским текстом самого блока (renderWinnerPatternsBlock).
+  const market = ctx.market ?? projectMarket(project);
   let winnerPatterns: HeWinnerPattern[] = [];
   try {
     const terms = [vertical.name, ...(Array.isArray(vertical.synonyms) ? vertical.synonyms : [])];
     const labels = matchSegmentLabels(terms);
-    winnerPatterns = await getWinnerPatterns(labels.length ? labels : [vertical.name], 5);
+    winnerPatterns = await getWinnerPatterns(labels.length ? labels : [vertical.name], 5, { market });
   } catch (e) {
     stageLog(ctx, `[chain] winner-паттерны датасета недоступны: ${e instanceof Error ? e.message : String(e)}`);
   }

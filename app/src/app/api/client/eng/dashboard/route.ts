@@ -4,6 +4,12 @@ import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { stripTaskHarvest } from '@/lib/hypothesisEngine/projectDetail';
+import {
+  toClientEngCampaignName,
+  toClientEngCollectInfo,
+  toClientEngJobProgressLabel,
+} from '@/lib/hypothesisEngine/clientEngProjection';
+import { requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
 import { reconcileProjectVerticals } from '@/lib/hypothesisEngine/actualsReconcile';
 import {
   buildEngDashboardEvents,
@@ -11,8 +17,12 @@ import {
   nextDailyRunIso,
   utcDayStartIso,
 } from '@/lib/hypothesisEngine/engDashboard';
+import { engServerError } from '../_shared';
 
 export const dynamic = 'force-dynamic';
+
+/** Дашборд поллится каждые 15 с — один текст на все сбои сборки агрегата. */
+const DASHBOARD_LOAD_FAILED = 'Failed to load the dashboard';
 
 /**
  * GET — агрегат ENG Command Center (кабинет /client/eng/dashboard): общий
@@ -48,6 +58,29 @@ function ts(v: unknown): number {
   return Number.isNaN(t) ? 0 : t;
 }
 
+/**
+ * Имя кампании чистится на ВХОДЕ в склейку, а не в трёх местах на выходе:
+ * из `launch_info.campaign_name` оно расходится по дашборду тремя путями —
+ * `stageDetail` («live: <имя>», engDashboard.ts:156-158), карточка Launch
+ * (`launch.campaign_name` ниже) и лента активности («campaign launched
+ * (paused): <имя>», engDashboard.ts:366). У запусков до этой волны в имени
+ * лежит внутренний префикс `HE · ` и русский фолбэк «база»: гейт на записи
+ * (launchTemplate.ts) задал новые имена, но старые строки остались как были.
+ *
+ * Копия поверхностная — остальные поля записи склейке нужны как есть
+ * (`campaign_id`, `created_at`, `leads_count`). `campaigns[]` не трогаем: до
+ * клиента с дашборда доезжает только скалярное имя.
+ */
+function withSafeCampaignName(template: Record<string, unknown>): Record<string, unknown> {
+  const info = template.launch_info;
+  if (!info || typeof info !== 'object' || Array.isArray(info)) return template;
+  const launch = info as Record<string, unknown>;
+  return {
+    ...template,
+    launch_info: { ...launch, campaign_name: toClientEngCampaignName(launch.campaign_name) },
+  };
+}
+
 export async function GET(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
@@ -55,6 +88,9 @@ export async function GET(req: NextRequest) {
   if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
   const { userId } = result.auth;
+  const gate = await requireEngMarket(supabaseAdmin, userId);
+  if (!gate.ok) return jsonError(gate.failure.message, gate.failure.status);
+
   const now = new Date();
   const todayStartIso = utcDayStartIso(now);
   const todayStartTs = Date.parse(todayStartIso);
@@ -68,7 +104,7 @@ export async function GET(req: NextRequest) {
     .eq('created_by', userId)
     .order('created_at', { ascending: false })
     .limit(100);
-  if (projErr) return jsonError(projErr.message, 500);
+  if (projErr) return engServerError('client.eng.dashboard.projects_failed', projErr, DASHBOARD_LOAD_FAILED, { userId });
 
   const projectRows = projects ?? [];
   const emptyAggregate = {
@@ -127,16 +163,26 @@ export async function GET(req: NextRequest) {
         .limit(RUNS_LIMIT),
     ]);
   for (const res of [verticalsRes, basesRes, activeJobsRes, finishedJobsRes, configsRes, runsRes]) {
-    if (res.error) return jsonError(res.error.message, 500);
+    if (res.error) {
+      return engServerError('client.eng.dashboard.aggregate_failed', res.error, DASHBOARD_LOAD_FAILED, { userId });
+    }
   }
 
   const verticalRows = verticalsRes.data ?? [];
   const verticalIds = verticalRows.map((v) => v.id as string);
-  // collect_info.tasks[].harvest (до 50k строк на задачу) — рабочее состояние
-  // воркера, дашборду не нужно: вырезаем, как деталка проекта.
-  const baseRows = (basesRes.data ?? []).map((b) =>
-    stripTaskHarvest(b as Record<string, unknown>),
-  );
+  // collect_info: harvest (до 50k строк на задачу) режет stripTaskHarvest, всё
+  // остальное — клиентская проекция (план сорсинга с pdl_filters, id джоб
+  // конструктора и состояние долива дашборду не нужны и клиенту не полагаются).
+  // toClientEngBase здесь НЕ годится: дашборду нужны project_id/updated_at,
+  // которых нет в белом списке мастера.
+  const baseRows = (basesRes.data ?? []).map((b) => {
+    const row = stripTaskHarvest(b as Record<string, unknown>);
+    const info = row.collect_info;
+    if (info && typeof info === 'object' && !Array.isArray(info)) {
+      return { ...row, collect_info: toClientEngCollectInfo(info as Record<string, unknown>) };
+    }
+    return row;
+  });
   const activeJobRows = activeJobsRes.data ?? [];
   const finishedJobRows = finishedJobsRes.data ?? [];
   const configRows = configsRes.data ?? [];
@@ -156,10 +202,16 @@ export async function GET(req: NextRequest) {
         .select('id, vertical_id, base_id, status, launch_info, created_at')
         .in('vertical_id', verticalIds),
     ]);
-    if (chainsRes.error) return jsonError(chainsRes.error.message, 500);
-    if (templatesRes.error) return jsonError(templatesRes.error.message, 500);
+    if (chainsRes.error) {
+      return engServerError('client.eng.dashboard.chains_failed', chainsRes.error, DASHBOARD_LOAD_FAILED, { userId });
+    }
+    if (templatesRes.error) {
+      return engServerError('client.eng.dashboard.templates_failed', templatesRes.error, DASHBOARD_LOAD_FAILED, {
+        userId,
+      });
+    }
     chainRows = chainsRes.data ?? [];
-    templateRows = templatesRes.data ?? [];
+    templateRows = (templatesRes.data ?? []).map(withSafeCampaignName);
   }
 
   const projectById = new Map(projectRows.map((p) => [p.id as string, p]));
@@ -232,12 +284,12 @@ export async function GET(req: NextRequest) {
           appended_today: appendedTodayByVertical.get(vid) ?? 0,
           leads_launched: derived.launch?.leads_count ?? 0,
         },
-        launch: derived.launch
-          ? {
-              campaign_url: derived.launch.campaign_url,
-              campaign_name: derived.launch.campaign_name,
-            }
-          : null,
+        // campaign_url не отдаём: это ссылка вида
+        // `https://app.instantly.ai/app/campaign/<id>` — домен рассыльщика и
+        // его id кампании в payload'е white-label кабинета. Карточка рисует
+        // только имя кампании (EngDashboard: vertical.launch?.campaign_name),
+        // ссылок наружу в кабинете нет.
+        launch: derived.launch ? { campaign_name: derived.launch.campaign_name } : null,
         // Прогноз vs факт (петля actualsReconcile, 24ч свежесть).
         forecast: typeof v.potential_pct === 'number' ? { pct: v.potential_pct } : null,
         actual:
@@ -286,8 +338,15 @@ export async function GET(req: NextRequest) {
         stage: j.stage,
         status: j.status,
         vertical_id: direct || (viaBase ? str(viaBase.vertical_id) : null),
+        // Подпись прогресса — только из карты проекции: строки `he_jobs`,
+        // записанные до рыночного гейта в стадиях, несут русский текст, а
+        // блок «Right now» печатает подпись как есть (EngDashboard.tsx:472-473).
         progress: progress
-          ? { done: num(progress.done), total: num(progress.total), label: str(progress.label) }
+          ? {
+              done: num(progress.done),
+              total: num(progress.total),
+              label: toClientEngJobProgressLabel(progress.label),
+            }
           : null,
       };
     });

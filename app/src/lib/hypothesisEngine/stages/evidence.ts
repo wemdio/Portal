@@ -107,7 +107,7 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
   // undefined, верификация продолжается. Грузим один раз на всех кандидатов.
   const [portfolioProfile, markupHistory] = await Promise.all([
     loadPortfolioProfile(ctx, market),
-    loadMarkupHistory(ctx, job.project_id),
+    loadMarkupHistory(ctx, job.project_id, market),
   ]);
 
   const accepted: AcceptedHypothesis[] = [];
@@ -115,9 +115,14 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
   let dropped = 0;
   let evidenceDropped = 0;
 
+  // Подпись прогресса уезжает в he_jobs.progress.label и печатается клиенту
+  // как есть (блок «Right now» кабинета ENG), поэтому зависит от рынка, а не
+  // переводится насовсем: тот же V1 обслуживает русский внутренний инструмент.
+  const progressLabel = market === 'us' ? 'checking a hypothesis' : 'проверяем гипотезу';
+
   for (let i = 0; i < candidates.length; i += 1) {
     const candidate = candidates[i];
-    await reportProgress(ctx, job.id, i + 1, candidates.length, 'проверяем гипотезу');
+    await reportProgress(ctx, job.id, i + 1, candidates.length, progressLabel);
     stageLog(ctx, `[evidence] «${candidate.title}»…`);
 
     // 1) Поиск по запросам кандидата (2–4), дедуп ссылок, best-effort.

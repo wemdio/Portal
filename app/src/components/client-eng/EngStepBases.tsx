@@ -6,14 +6,15 @@
  * единая кнопка на шаге 5 «Review & Launch». Здесь клиент видит живой прогресс
  * сборки (фазы задач + счётчики конструктора: найдено/валидных почт из
  * collect_info.construct), статусы баз (анализ: сегменты/углы) и кампании
- * после запуска (ссылки Instantly).
+ * после запуска (имя, контакты, дата — без ссылок наружу: кабинет white-label).
  */
 
 import { useMemo } from 'react';
-import { Database, ExternalLink } from 'lucide-react';
+import { Database } from 'lucide-react';
 import type { HeTemplate, HeVertical } from '@/lib/hypothesisEngine/types';
 import { parseLaunchInfo } from '@/lib/hypothesisEngine/launchHandoff';
 import { type EngBaseSummary } from './api-client';
+import { engStageErrorText } from './engText';
 import { EngBadge, EngCard, EngSpinner, baseStatusTone, fmtDate } from './ui';
 import type { EngDetail } from './EngProjectWizard';
 
@@ -150,33 +151,21 @@ function TemplateLaunchStatus({ template }: { template: HeTemplate }) {
       <div className="ds-mono" style={{ color: 'var(--cp-text-m)' }}>
         {launch.leads_count.toLocaleString('en-US')} contacts · {fmtDate(launch.created_at)}
       </div>
-      {launch.campaign_url && (
-        <a
-          href={launch.campaign_url}
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex items-center gap-1 hover:underline"
-          style={{ color: 'var(--cp-paper)' }}
-        >
-          Open the campaign <ExternalLink className="h-3 w-3" />
-        </a>
-      )}
+      {/* White-label: сегменты — подписи, а не ссылки. Вести клиента наружу
+          некуда: своего входа в рассыльщик у него нет, а ссылка светит бренд. */}
       {Array.isArray(launch.campaigns) && launch.campaigns.length > 1 ? (
         <div className="flex flex-col gap-1 mt-1">
           <span className="text-[10px] font-semibold" style={{ color: 'var(--cp-text-m)' }}>
             Segment campaigns ({launch.campaigns.length})
           </span>
           {launch.campaigns.map((c) => (
-            <a
-              key={`${c.campaign_url}-${c.segment ?? 'main'}`}
-              href={c.campaign_url}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 hover:underline"
+            <span
+              key={`${c.campaign_id}-${c.segment ?? 'main'}`}
+              className="inline-flex items-center gap-1"
               style={{ color: 'var(--cp-paper)' }}
             >
-              {c.segment ?? 'Default texts'} <ExternalLink className="h-3 w-3" />
-            </a>
+              {c.segment ?? 'Default texts'}
+            </span>
           ))}
         </div>
       ) : null}
@@ -250,10 +239,18 @@ export function EngStepBases({ detail }: { detail: EngDetail; onChanged: () => v
 
                   <AutopilotDecisions base={b} />
 
-                  {/* Причина падения: без неё «failed / 0 rows» ничего не объясняет. */}
-                  {b.status === 'failed' && b.error && (
+                  {/* Причина падения: без неё «failed / 0 rows» ничего не объясняет.
+                      he_bases.error пишет стадия как есть (русский текст, uuid
+                      базы, имена таблиц), поэтому роут отдаёт не её, а код
+                      причины: «сегмент исчерпан» и «срез не про эту вертикаль»
+                      так остаются различимы, а сырьё не уезжает даже в payload.
+                      Отмена сюда тоже попадает со status='failed' (cancel-роут
+                      снимает базу с 'collecting') — её отдельный код 'cancelled'
+                      читается как остановка, а не как сбой; статуса для этого
+                      не хватает. */}
+                  {b.status === 'failed' && b.error_code && (
                     <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-red)' }}>
-                      {b.error}
+                      {engStageErrorText(b.error_code)}
                     </div>
                   )}
 

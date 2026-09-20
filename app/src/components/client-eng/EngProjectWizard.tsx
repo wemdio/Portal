@@ -14,8 +14,13 @@ import { ArrowLeft, Ban, LayoutDashboard } from 'lucide-react';
 import Link from 'next/link';
 import type { Route } from 'next';
 import { useSearchParams } from 'next/navigation';
-import type { HeProject } from '@/lib/hypothesisEngine/types';
-import { cancelEngProject, fetchEngProjectDetail, type HeProjectDetailResponse } from './api-client';
+import {
+  cancelEngProject,
+  fetchEngProjectDetail,
+  type EngProject,
+  type EngProjectDetailResponse,
+} from './api-client';
+import { engStageErrorText } from './engText';
 import { EngBadge, EngSpinner, fmtDate, projectStatusTone } from './ui';
 import { EngStepBrief } from './EngStepBrief';
 import { EngStepVerticals } from './EngStepVerticals';
@@ -33,7 +38,7 @@ const STEPS = [
   { id: 5, label: 'Review & Launch' },
 ] as const;
 
-export type EngDetail = HeProjectDetailResponse & { project: HeProject };
+export type EngDetail = EngProjectDetailResponse & { project: EngProject };
 
 export function EngProjectWizard({ projectId }: { projectId: string }) {
   const searchParams = useSearchParams();
@@ -159,9 +164,14 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
             )}
           </header>
 
-          {project?.error && (
+          {/* Русской прозаики стадии здесь нет ни на экране, ни в теле ответа:
+              роут отдаёт код причины (toClientEngStageErrorCode), экран
+              разворачивает его в английский текст. Отмена до шапки проекта не
+              доходит — cancel-роут ставит he_projects.error = null и возвращает
+              проект в 'draft', — поэтому префикс «Last error» здесь честен. */}
+          {project?.error_code && (
             <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-red)' }}>
-              Last error: {project.error}
+              Last error: {engStageErrorText(project.error_code)}
             </div>
           )}
 

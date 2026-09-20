@@ -11,6 +11,8 @@
  *     service-level read любого пресета по id, см. launchHandoff.ts);
  *   - locale: тексты ошибок RU (staff-UI) / EN (клиентский кабинет);
  *   - eventPrefix: имена событий logAudit/logError своего контура.
+ * Имя кампании от контура НЕ зависит: оно выбирается по рынку проекта (шаг 5c),
+ * потому что клиент видит его в своём рассыльщике, кто бы запуск ни нажал.
  *
  * Тарифных гейтов и журнала client_campaign_launches тут нет осознанно (см.
  * launchHandoff.ts): запуск HE-шаблона billing клиента не меняет.
@@ -33,7 +35,9 @@ import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { logAudit, logError } from '@/lib/loggerServer';
 import type { HeBase, HeTemplate } from './types';
 import { classifyBaseRowsIntoSegments, detectSegmentLanguage } from './segmentClassify';
+import { projectMarket, type HeMarket } from './market';
 import {
+  HE_ENG_CAMPAIGN_NAMING,
   HE_LAUNCH_MAX_LEADS,
   buildLaunchCampaignName,
   buildLaunchSequence,
@@ -165,9 +169,11 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   }
 
   // 2. База шаблона.
+  //    project_id тут нужен только чтобы узнать рынок проекта (имя кампании,
+  //    шаг 5c): у he_templates своего project_id нет, а у he_bases он not null.
   const { data: baseRow, error: baseErr } = await portalDb
     .from('he_bases')
-    .select('id, filename, columns, data, source')
+    .select('id, project_id, filename, columns, data, source')
     .eq('id', template.base_id)
     .single();
   if (baseErr) {
@@ -176,7 +182,9 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       body: { error: baseErr.code === 'PGRST116' ? t.baseNotFound : baseErr.message },
     };
   }
-  const base = baseRow as Pick<HeBase, 'id' | 'filename' | 'columns' | 'data'> & { source?: string };
+  const base = baseRow as Pick<HeBase, 'id' | 'project_id' | 'filename' | 'columns' | 'data'> & {
+    source?: string;
+  };
 
   // 3. Пресет — service-level read по id (у staff); в клиентском контуре —
   //    со скоупом владельца (чужой пресет = «не найден»).
@@ -287,6 +295,32 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     }
   }
 
+  // 5c. Рынок проекта — нужен ровно для ИМЕНИ кампании. Имя доезжает до клиента
+  //     (launch_info.campaign_name на дашборде ENG-кабинета и на шаге баз),
+  //     поэтому у us-проекта в нём не должно быть ни внутреннего «HE · », ни
+  //     русского фолбэка «база». Ключ — рынок ПРОЕКТА, а не locale контура:
+  //     us-проект может запустить и сотрудник из внутреннего RU-инструмента, а
+  //     клиент в своём рассыльщике увидит то же самое имя.
+  const { data: projectRow, error: projectErr } = await portalDb
+    .from('he_projects')
+    .select('market')
+    .eq('id', base.project_id)
+    .maybeSingle();
+  if (projectErr) {
+    await logError(`${eventPrefix}.project_market_failed`, projectErr, { userId, templateId });
+  }
+  // Рынок не прочитался (блип БД или строки нет) — запуск НЕ роняем, имя того
+  // не стоит. Фолбэк по контуру: ru-инструмент получает сегодняшние дефолты
+  // (байт-в-байт), а en-контур обслуживает только eng-клиентов (гейт
+  // requireEngMarket), и английское имя там безопаснее русского «база».
+  const market: HeMarket = projectRow
+    ? projectMarket(projectRow as { market?: string | null })
+    : locale === 'en'
+      ? 'us'
+      : 'ru';
+  // undefined = дефолты buildLaunchCampaignName, т.е. прежнее имя RU-запуска.
+  const campaignNaming = market === 'us' ? HE_ENG_CAMPAIGN_NAMING : undefined;
+
   const instantlyRequestOptions = { accountId: resolveInstantlyAccountId(preset.instantly_account_id) };
 
   // 6. Instantly: по кампании на группу (НЕ активируем!) + лиды группы. Текст
@@ -300,7 +334,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   for (const group of groups) {
     const sequence = buildLaunchSequence(templateLetters, { segmentWhen: group.segment });
     if (!sequence) return { status: 400, body: { error: t.noLetters } };
-    const campaignName = buildLaunchCampaignName(base.filename, new Date(), group.segment);
+    const campaignName = buildLaunchCampaignName(base.filename, new Date(), group.segment, campaignNaming);
     try {
       const payload = buildCampaignPayloadFromPreset({
         preset,

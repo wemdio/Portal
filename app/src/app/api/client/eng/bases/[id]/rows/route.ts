@@ -2,7 +2,13 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { loadClientHeBase } from '@/lib/hypothesisEngine/apiGuards';
+import { isValidUuid } from '@/lib/apiValidation';
+import { loadClientHeBase, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
+import {
+  toClientEngBaseColumns,
+  toClientEngBaseDataRow,
+} from '@/lib/hypothesisEngine/clientEngProjection';
+import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
 
@@ -29,7 +35,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
   const { id } = await params;
-  if (!id) return jsonError('Missing id', 400);
+  if (!isValidUuid(id)) return jsonError('Invalid id', 400);
+
+  const gate = await requireEngMarket(supabaseAdmin, result.auth.userId);
+  if (!gate.ok) return jsonError(gate.failure.message, gate.failure.status);
 
   // Скоуп владельца до чтения data: чужая база — 404, существование не раскрываем.
   const owned = await loadClientHeBase(supabaseAdmin, id, result.auth.userId);
@@ -45,7 +54,11 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     .eq('id', id)
     .single();
   if (error) {
-    return jsonError(error.code === 'PGRST116' ? 'Base not found' : error.message, error.code === 'PGRST116' ? 404 : 500);
+    if (error.code === 'PGRST116') return jsonError('Base not found', 404);
+    return engServerError('client.eng.bases.rows_failed', error, 'Failed to load the base rows', {
+      userId: result.auth.userId,
+      baseId: id,
+    });
   }
 
   const rows = Array.isArray((base as { data?: unknown }).data)
@@ -55,9 +68,14 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     ? ((base as { columns: unknown[] }).columns as string[])
     : [];
 
+  // Строки базы принадлежат клиенту, но в них есть и наше: провенанс источника
+  // (`source_detail` — код поставщика, русские подписи, поисковый запрос плана)
+  // и служебные пометки `_*`. Превью печатает строку ЦЕЛИКОМ в title каждой
+  // <tr> (EngStepReview.tsx:102), так что режем на сервере, а не на экране.
+  // Проецируем только отданную страницу: сама `data` — до 50k строк.
   return NextResponse.json({
-    columns,
-    rows: rows.slice(offset, offset + limit),
+    columns: toClientEngBaseColumns(columns),
+    rows: rows.slice(offset, offset + limit).map(toClientEngBaseDataRow),
     total: rows.length,
     status: (base as { status?: string }).status,
     row_count: (base as { row_count?: number }).row_count ?? rows.length,

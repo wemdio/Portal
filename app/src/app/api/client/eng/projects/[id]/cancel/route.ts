@@ -3,7 +3,10 @@ import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { logAudit, logError } from '@/lib/loggerServer';
-import { loadClientHeProject } from '@/lib/hypothesisEngine/apiGuards';
+import { isValidUuid } from '@/lib/apiValidation';
+import { withToolTrace } from '@/lib/toolTrace';
+import { loadClientHeProject, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
+import { engServerError } from '../../../_shared';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,59 +18,66 @@ export const dynamic = 'force-dynamic';
  * Уже завершённые джобы и готовые артефакты не трогаем.
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const result = await requireClientAuth(req);
-  if ('error' in result) return result.error;
-  if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
+  return withToolTrace({ request: req, operation: 'client.eng.cancel.post' }, async () => {
+    const result = await requireClientAuth(req);
+    if ('error' in result) return result.error;
+    if (!supabaseAdmin) return jsonError('Server misconfigured', 500);
 
-  const { id } = await params;
-  if (!id) return jsonError('Missing id', 400);
+    const { id } = await params;
+    if (!isValidUuid(id)) return jsonError('Invalid id', 400);
 
-  const owned = await loadClientHeProject(supabaseAdmin, id, result.auth.userId);
-  if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
+    const gate = await requireEngMarket(supabaseAdmin, result.auth.userId);
+    if (!gate.ok) return jsonError(gate.failure.message, gate.failure.status);
 
-  const now = new Date().toISOString();
-  const { data: cancelledJobs, error: jobsErr } = await supabaseAdmin
-    .from('he_jobs')
-    .update({ status: 'cancelled', finished_at: now, updated_at: now })
-    .eq('project_id', id)
-    .in('status', ['pending', 'running'])
-    .select('id');
-  if (jobsErr) {
-    await logError('client.eng.cancel.jobs_failed', jobsErr, { userId: result.auth.userId, projectId: id });
-    return jsonError(jobsErr.message, 500);
-  }
-  const cancelled = (cancelledJobs ?? []).length;
-  if (cancelled === 0) {
-    return jsonError('No active jobs — nothing to cancel', 409);
-  }
+    const owned = await loadClientHeProject(supabaseAdmin, id, result.auth.userId);
+    if (!owned.ok) return jsonError(owned.failure.message, owned.failure.status);
 
-  // Базы, которые ждали отменённые джобы, — в failed, чтобы не висели «в
-  // работе» вечно и не держали слот автосборки вертикали.
-  const { error: basesErr } = await supabaseAdmin
-    .from('he_bases')
-    .update({ status: 'failed', error: 'Cancelled by user', updated_at: now })
-    .eq('project_id', id)
-    .in('status', ['collecting', 'analyzing']);
-  if (basesErr) {
-    await logError('client.eng.cancel.bases_failed', basesErr, { userId: result.auth.userId, projectId: id });
-  }
-
-  // Research-пайплайн отменён — проект можно запустить заново с шага Brief.
-  if ((owned.project as { status?: string }).status === 'researching') {
-    const { error: updErr } = await supabaseAdmin
-      .from('he_projects')
-      .update({ status: 'draft', error: null, updated_at: now })
-      .eq('id', id);
-    if (updErr) {
-      await logError('client.eng.cancel.project_failed', updErr, { userId: result.auth.userId, projectId: id });
+    const now = new Date().toISOString();
+    const { data: cancelledJobs, error: jobsErr } = await supabaseAdmin
+      .from('he_jobs')
+      .update({ status: 'cancelled', finished_at: now, updated_at: now })
+      .eq('project_id', id)
+      .in('status', ['pending', 'running'])
+      .select('id');
+    if (jobsErr) {
+      return engServerError('client.eng.cancel.jobs_failed', jobsErr, 'Failed to cancel the running jobs', {
+        userId: result.auth.userId,
+        projectId: id,
+      });
     }
-  }
+    const cancelled = (cancelledJobs ?? []).length;
+    if (cancelled === 0) {
+      return jsonError('No active jobs — nothing to cancel', 409);
+    }
 
-  void logAudit('client.eng.cancelled', 'ENG cabinet project jobs cancelled', {
-    userId: result.auth.userId,
-    projectId: id,
-    cancelled,
+    // Базы, которые ждали отменённые джобы, — в failed, чтобы не висели «в
+    // работе» вечно и не держали слот автосборки вертикали.
+    const { error: basesErr } = await supabaseAdmin
+      .from('he_bases')
+      .update({ status: 'failed', error: 'Cancelled by user', updated_at: now })
+      .eq('project_id', id)
+      .in('status', ['collecting', 'analyzing']);
+    if (basesErr) {
+      await logError('client.eng.cancel.bases_failed', basesErr, { userId: result.auth.userId, projectId: id });
+    }
+
+    // Research-пайплайн отменён — проект можно запустить заново с шага Brief.
+    if ((owned.project as { status?: string }).status === 'researching') {
+      const { error: updErr } = await supabaseAdmin
+        .from('he_projects')
+        .update({ status: 'draft', error: null, updated_at: now })
+        .eq('id', id);
+      if (updErr) {
+        await logError('client.eng.cancel.project_failed', updErr, { userId: result.auth.userId, projectId: id });
+      }
+    }
+
+    void logAudit('client.eng.cancelled', 'ENG cabinet project jobs cancelled', {
+      userId: result.auth.userId,
+      projectId: id,
+      cancelled,
+    });
+
+    return NextResponse.json({ ok: true, cancelled });
   });
-
-  return NextResponse.json({ ok: true, cancelled });
 }

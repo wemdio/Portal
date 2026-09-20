@@ -22,6 +22,10 @@
  * чтение идут через функции с `SECURITY DEFINER`. Требовать GRANT в таком
  * случае значило бы требовать снять замок. См. `findServiceRoleRevokes`.
  *
+ * Второе правило в этом файле — зеркальное: `findUnsealedEngineObjects`
+ * требует у объектов движков (`he_`/`ve_`) поимённого ОТЗЫВА прав у
+ * `anon`/`authenticated`. См. докблок над ним.
+ *
  * Used by app/tests/migrations/grants.test.ts.
  */
 
@@ -36,6 +40,18 @@ export interface GrantViolation {
   file: string;
   table: string;
   /** Set only for special cases (e.g. an exemption marker with no reason). */
+  note?: string;
+}
+
+/** Таблица или функция — у отзыва прав это разные `revoke ... on ...`. */
+export type EngineObjectKind = 'table' | 'function';
+
+export interface EngineObjectViolation {
+  file: string;
+  kind: EngineObjectKind;
+  /** Имя без схемы: `he_bases`, `ve_reserve_refill_daily_budget`. */
+  name: string;
+  /** Заполняется только для особых случаев (маркер без причины). */
   note?: string;
 }
 
@@ -89,15 +105,52 @@ function stripSqlComments(sql: string): string {
     .replace(/--[^\n\r]*/g, '');
 }
 
+/*
+ * Квалификатор `public.` НЕОБЯЗАТЕЛЕН — и вот почему это не придирка.
+ * `search_path` у раннера миграций начинается с `public`, поэтому
+ * `create table invoices (...)` создаёт ровно ту же `public.invoices`, что и
+ * квалифицированная форма. В дереве так написаны десять существующих
+ * объявлений (6 таблиц + 4 функции). Пока регулярки требовали `public.`,
+ * такие объекты линт не видел ВООБЩЕ: новая `he_*`/`ve_*` таблица, созданная
+ * без квалификатора, уехала бы в прод без отзыва прав, а CI остался бы
+ * зелёным. Тихий промах — худший вид промаха для сторожа.
+ *
+ * Отсюда форма во всех регулярках ниже: `(?:public\.)?ИМЯ\b(?!\s*\.)`.
+ *  - `\b(?!\s*\.)` — имя НЕ должно продолжаться точкой. Иначе на
+ *    `create table analytics.foo` жадная группа отступила бы по символу и
+ *    выдала бы «таблицу `analytic`»: чужая схема должна давать НОЛЬ совпадений,
+ *    а не мусорное имя. `\b` не даёт откусить хвост.
+ *  - `(?!if\b)` после необязательного `if not exists` — на
+ *    `create table if not exists analytics.foo` движок, провалившись на точке,
+ *    откатился бы и объявил таблицей слово `if`.
+ * Обе ловушки появляются именно от необязательности `public.`; с обязательным
+ * квалификатором их не было.
+ */
+
 /**
- * Find every `create table [if not exists] public.<name>` in the SQL.
+ * Голые цели `alter default privileges ... on tables|sequences|functions`.
+ * Это НЕ имена объектов, а ключевые слова, и без квалификатора они выглядят
+ * как таблица с таким именем. Отсекаем только неквалифицированную форму:
+ * `public.functions` — реальная таблица, `on functions to service_role` —
+ * дефолтные привилегии.
+ */
+const DEFAULT_PRIVILEGE_TARGETS = new Set(['tables', 'sequences', 'functions', 'routines']);
+
+/**
+ * Find every `create table [if not exists] [public.]<name>` in the SQL —
+ * квалификатор необязателен, см. блок про `(?:public\.)?` выше.
  * Order-preserving, but a table appearing twice in the same file (e.g.
  * idempotent re-declarations) is deduped so callers don't get double
  * violations.
+ *
+ * `create temp table` сюда не попадает и не должен: `create\s+table` требует
+ * `table` сразу за `create`, а временная таблица живёт в `pg_temp`, и грант
+ * ей не нужен.
  */
 export function extractCreatedTables(sql: string): string[] {
   const cleaned = stripSqlComments(sql);
-  const rx = /create\s+table\s+(?:if\s+not\s+exists\s+)?public\.([A-Za-z_][A-Za-z0-9_]*)/gi;
+  const rx =
+    /create\s+table\s+(?:if\s+not\s+exists\s+)?(?!if\b)(?:public\.)?([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*\.)/gi;
   const seen = new Set<string>();
   const out: string[] = [];
   for (const m of cleaned.matchAll(rx)) {
@@ -131,12 +184,25 @@ export function findGrantsToServiceRole(sql: string): Set<string> {
     if (mentionsServiceRole(roleList)) out.add('*');
   }
 
-  // Concrete: grant ... on [table] public.X to ... service_role
+  // Concrete: grant ... on [table] [public.]X to ... service_role
+  //
+  // Квалификатор здесь тоже необязателен — иначе правка регулярок на создании
+  // объектов (см. блок выше) сделала бы нарушителем `client_companies_search_exports`:
+  // грант у него есть, но написан без `public.`. Линт обязан видеть обе формы
+  // с обеих сторон, иначе снимок нарушений врёт.
+  //
+  // `[^;]+?` вместо `[\s\S]+?`: ленивый префикс не должен переползать через
+  // `;` в СОСЕДНИЙ оператор и выдавать чужое имя за выданный грант — с
+  // необязательным `public.` таких «фантомных» имён стало бы больше, а фантом
+  // молча гасит нарушение. `\bon` — по той же причине: без границы слова
+  // совпадало бы «on» внутри слова (`functi|on `).
   const concreteRx =
-    /grant\s+[\s\S]+?on\s+(?:table\s+)?public\.([A-Za-z_][A-Za-z0-9_]*)\s+to\s+([^;]+);/gi;
+    /grant\s+[^;]+?\bon\s+(?:table\s+)?(public\.)?([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*\.)\s+to\s+([^;]+);/gi;
   for (const m of cleaned.matchAll(concreteRx)) {
-    const table = m[1];
-    const roleList = m[2];
+    const qualified = Boolean(m[1]);
+    const table = m[2];
+    const roleList = m[3];
+    if (!qualified && DEFAULT_PRIVILEGE_TARGETS.has(table.toLowerCase())) continue;
     if (mentionsServiceRole(roleList)) out.add(table);
   }
 
@@ -155,15 +221,20 @@ export function findGrantsToServiceRole(sql: string): Set<string> {
  * Оптовый `revoke ... on all tables in schema public` СОЗНАТЕЛЬНО не
  * распознаётся: одна такая строка выключила бы проверку для всего дерева
  * миграций. Замок засчитывается, только если названа конкретная таблица.
+ *
+ * Квалификатор `public.` необязателен — зеркально гранту выше: замок, написанный
+ * без него, обязан засчитываться, иначе линт потребует GRANT для запертой
+ * таблицы.
  */
 export function findServiceRoleRevokes(sql: string): Set<string> {
   const cleaned = stripSqlComments(sql);
   const out = new Set<string>();
 
   const rx =
-    /revoke\s+[\s\S]+?on\s+(?:table\s+)?public\.([A-Za-z_][A-Za-z0-9_]*)\s+from\s+([^;]+);/gi;
+    /revoke\s+[^;]+?\bon\s+(?:table\s+)?(public\.)?([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*\.)\s+from\s+([^;]+);/gi;
   for (const m of cleaned.matchAll(rx)) {
-    if (mentionsServiceRole(m[2])) out.add(m[1]);
+    if (!m[1] && DEFAULT_PRIVILEGE_TARGETS.has(m[2].toLowerCase())) continue;
+    if (mentionsServiceRole(m[3])) out.add(m[2]);
   }
 
   return out;
@@ -237,6 +308,220 @@ export function findMissingServiceRoleGrants(
       }
       violations.push({ file: f.name, table });
     }
+  }
+  return violations;
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Правило 2: объекты движков (`he_`/`ve_`) обязаны отзывать права поимённо.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Префиксы движков вертикалей: V1 (`he_`, английский кабинет `/client/eng`)
+ * и V2 (`ve_`, внутренний RU-движок). Правило намеренно узкое: это
+ * мультиарендные таблицы с клиентскими данными (строки лидов с почтой,
+ * брифы, тексты писем), и у них нет ни одного сценария, где прямой доступ
+ * браузера под `authenticated` был бы нужен — весь код ходит под
+ * `service_role`. Распространять правило на всё дерево нельзя: 25 из 40
+ * таблиц-движков и десятки прочих таблиц Portal отзыва не делают, правило
+ * «по всем» покрасило бы CI в день включения.
+ */
+const ENGINE_PREFIX_RX = /^(?:he|ve)_/;
+
+/**
+ * Маркер-исключение для объекта движка, который сознательно оставлен без
+ * статического отзыва. Пишется рядом с созданием объекта:
+ *
+ *   -- grants-lint: engine-open public.ve_foo — reason
+ *
+ * Реальный повод, ради которого маркер существует: отзыв, выполненный
+ * динамически. `20260903_0001_vertical_engine_v2_contact_supply.sql:521-536`
+ * отзывает права циклом `execute format('revoke all on function %s from
+ * public, anon, authenticated, service_role', f.signature)` — регулярка такой
+ * отзыв не видит в принципе, и без маркера это 21 ложное нарушение.
+ *
+ * Причина обязательна и должна стоять на самой строке маркера — молча
+ * выключенная проверка привилегий ровно так и протухает.
+ */
+const ENGINE_EXEMPTION_RX =
+  /--\s*grants-lint:\s*engine-open\s+public\.([A-Za-z_][A-Za-z0-9_]*)([^\n\r]*)/gi;
+
+/** Объекты, для которых этот файл заявляет осознанное исключение. */
+export function findEngineExemptions(sql: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const m of sql.matchAll(ENGINE_EXEMPTION_RX)) {
+    const reason = m[2].replace(/^[\s—:-]+/, '').trim();
+    // Первый маркер выигрывает: дубль без причины не должен стереть причину.
+    if (!out.has(m[1])) out.set(m[1], reason);
+  }
+  return out;
+}
+
+/** Ключ объекта в множествах и в allowlist: `table:he_bases`. */
+function engineKey(kind: EngineObjectKind, name: string): string {
+  return `${kind}:${name}`;
+}
+
+/**
+ * Найти созданные в файле таблицы и функции с префиксом движка.
+ *
+ * `create or replace function` считается созданием: повторный `or replace`
+ * в более поздней миграции — это та же функция, и отзыв прав у неё всё
+ * равно должен где-то в дереве существовать.
+ */
+export function extractCreatedEngineObjects(
+  sql: string,
+): { kind: EngineObjectKind; name: string }[] {
+  const cleaned = stripSqlComments(sql);
+  const seen = new Set<string>();
+  const out: { kind: EngineObjectKind; name: string }[] = [];
+
+  const push = (kind: EngineObjectKind, name: string) => {
+    if (!ENGINE_PREFIX_RX.test(name)) return;
+    const key = engineKey(kind, name);
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ kind, name });
+  };
+
+  // Квалификатор `public.` необязателен — см. блок выше. Для правила движков
+  // это и есть дыра из ревью: `create table ve_foo (...)` без `public.`
+  // уезжал бы в прод без отзыва прав, а CI оставался бы зелёным.
+  const tableRx =
+    /create\s+table\s+(?:if\s+not\s+exists\s+)?(?!if\b)(?:public\.)?([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*\.)/gi;
+  for (const m of cleaned.matchAll(tableRx)) push('table', m[1]);
+
+  const functionRx =
+    /create\s+(?:or\s+replace\s+)?function\s+(?:public\.)?([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*\.)/gi;
+  for (const m of cleaned.matchAll(functionRx)) push('function', m[1]);
+
+  return out;
+}
+
+/**
+ * Найти объекты, у которых права отобраны ПОИМЁННО у `anon` И `authenticated`.
+ *
+ * Почему обе роли обязательны, а `from public` недостаточно: права этим двум
+ * ролям выданы прямым грантом из
+ * `20260509_0003_public_default_privileges_for_postgres.sql:52-68`
+ * (`alter default privileges for role postgres ... to authenticated` / `anon`),
+ * а не через псевдороль PUBLIC. Отзыв у PUBLIC их не трогает — именно на этом
+ * августовские миграции V2 и оставили `security definer`-функции вызываемыми
+ * через PostgREST RPC.
+ *
+ * Одним `revoke` можно закрыть список объектов (`revoke all on table public.a,
+ * public.b from ...`), поэтому из левой части берутся все `public.X`.
+ * Оптовый `revoke ... on all tables in schema public` сознательно не
+ * распознаётся — одна такая строка выключила бы правило для всего дерева.
+ *
+ * ЕДИНСТВЕННОЕ место, где `public.` остаётся ОБЯЗАТЕЛЬНЫМ (в остальных
+ * регулярках он необязателен, см. блок выше). Здесь имена берутся не с
+ * фиксированной позиции `on … from`, а сканированием всей левой части, где
+ * вперемешку лежат привилегии, слова `all`/`table`/`function` и сигнатуры
+ * функций с именами параметров. Без якоря `public.` сюда попал бы параметр
+ * вроде `ve_limit int` — и объект `ve_limit` молча считался бы запертым. Это
+ * ровно тот тихий промах, который правило и ловит, поэтому промахиваемся в
+ * ГРОМКУЮ сторону: неквалифицированный отзыв не засчитается, тест упадёт и
+ * попросит ту самую квалифицированную форму, которую печатает в подсказке.
+ */
+export function findEngineRevokes(
+  sql: string,
+): Set<string> {
+  const cleaned = stripSqlComments(sql);
+  const out = new Set<string>();
+
+  // Левая часть (привилегии + цели) до `from`, правая — список ролей.
+  // `[\s\S]` — потому что боевой revoke переносится на несколько строк.
+  const rx = /revoke\b([\s\S]*?)\bfrom\s+([^;]*);/gi;
+  for (const m of cleaned.matchAll(rx)) {
+    const targets = m[1];
+    const roles = m[2];
+    if (!mentionsRole(roles, 'anon') || !mentionsRole(roles, 'authenticated')) continue;
+    if (/\ball\s+(?:tables|functions|routines|sequences)\s+in\s+schema\b/i.test(targets)) continue;
+    // `revoke ... on public.X` без ключевого слова — это TABLE (умолчание SQL).
+    const kind: EngineObjectKind = /\bon\s+function\b/i.test(targets) ? 'function' : 'table';
+    for (const t of targets.matchAll(/public\.([A-Za-z_][A-Za-z0-9_]*)/g)) {
+      if (ENGINE_PREFIX_RX.test(t[1])) out.add(engineKey(kind, t[1]));
+    }
+  }
+
+  return out;
+}
+
+function mentionsRole(roleList: string, role: string): boolean {
+  return roleList
+    .toLowerCase()
+    .replace(/"/g, '')
+    .split(/[\s,]+/)
+    .filter(Boolean)
+    .includes(role);
+}
+
+/**
+ * Кросс-файловый линт. Для каждого созданного объекта с префиксом `he_`/`ve_`
+ * требует, чтобы ГДЕ-ТО в дереве миграций нашёлся поимённый отзыв прав у
+ * `anon` и `authenticated` (замок может стоять не в той же миграции, что
+ * создала объект, — ровно как и GRANT в правиле выше).
+ *
+ * Пары из `opts.allowlist` (формат `"<file>::<kind>:<name>"`) подавляются —
+ * это замороженный снимок объектов V2, которые отзыва не делают. Снимок
+ * фиксирует долг, а не разрешает его наращивать: у новых объектов движков
+ * отзыв обязан быть в самой миграции.
+ *
+ * Единица учёта — ОБЪЕКТ, а не пара (файл, объект): одна и та же функция
+ * пересоздаётся через `create or replace` в нескольких миграциях, и нарушение
+ * по ней ровно одно. Файлом нарушения считается первая миграция, создавшая
+ * объект, — иначе запись в allowlist «переезжала» бы на следующее пересоздание
+ * и снимок начинал бы врать.
+ */
+export function findUnsealedEngineObjects(
+  files: MigrationFile[],
+  opts: { allowlist?: Set<string> } = {},
+): EngineObjectViolation[] {
+  const allowlist = opts.allowlist ?? new Set<string>();
+
+  const globalSealed = new Set<string>();
+  for (const f of files) {
+    for (const key of findEngineRevokes(f.sql)) globalSealed.add(key);
+  }
+
+  // key → первое создание объекта + заявленная причина исключения, если она
+  // написана в любой из создающих его миграций.
+  const created = new Map<
+    string,
+    { file: string; kind: EngineObjectKind; name: string; reason?: string }
+  >();
+  for (const f of files) {
+    const exemptions = findEngineExemptions(f.sql);
+    for (const { kind, name } of extractCreatedEngineObjects(f.sql)) {
+      const key = engineKey(kind, name);
+      const prev = created.get(key);
+      const reason = exemptions.get(name);
+      if (!prev) {
+        created.set(key, { file: f.name, kind, name, reason });
+      } else if (prev.reason === undefined || prev.reason.length === 0) {
+        // Маркер с причиной мог появиться в более поздней миграции —
+        // засчитываем его, но файл нарушения остаётся прежним.
+        if (reason !== undefined) prev.reason = reason;
+      }
+    }
+  }
+
+  const violations: EngineObjectViolation[] = [];
+  for (const [key, obj] of created) {
+    if (globalSealed.has(key)) continue;
+    if (allowlist.has(`${obj.file}::${key}`)) continue;
+    if (obj.reason !== undefined) {
+      if (obj.reason.length > 0) continue;
+      violations.push({
+        file: obj.file,
+        kind: obj.kind,
+        name: obj.name,
+        note: 'есть маркер grants-lint, но не указана причина — допишите её после имени объекта',
+      });
+      continue;
+    }
+    violations.push({ file: obj.file, kind: obj.kind, name: obj.name });
   }
   return violations;
 }

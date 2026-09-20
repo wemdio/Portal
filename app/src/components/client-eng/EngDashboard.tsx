@@ -22,7 +22,6 @@ import {
   Check,
   CheckCircle2,
   Database,
-  ExternalLink,
   LayoutGrid,
   Mail,
   RefreshCw,
@@ -303,21 +302,14 @@ function buildPipelineRows(
       key: 'launch',
       label: 'Launch',
       state: stateOf(6),
+      // White-label: имя кампании — подпись, а не ссылка. Наружу вести некуда:
+      // у клиента нет своего входа в рассыльщик, а сама ссылка светила бы бренд.
       evidence: launched ? (
         <>
           {s.leads_launched > 0 ? `${fmt(s.leads_launched)} leads` : ''}
-          {s.leads_launched > 0 && vertical.launch?.campaign_url ? ' · ' : ''}
-          {vertical.launch?.campaign_url && (
-            <a
-              href={vertical.launch.campaign_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 hover:underline"
-              style={{ color: 'var(--cp-paper)' }}
-            >
-              {vertical.launch.campaign_name || 'campaign'}
-              <ExternalLink className="h-3 w-3" />
-            </a>
+          {s.leads_launched > 0 && vertical.launch?.campaign_name ? ' · ' : ''}
+          {vertical.launch?.campaign_name && (
+            <span style={{ color: 'var(--cp-paper)' }}>{vertical.launch.campaign_name}</span>
           )}
         </>
       ) : (
@@ -580,17 +572,6 @@ function VerticalCard({
       </div>
 
       <div className="mt-auto flex items-center gap-2">
-        {vertical.launch?.campaign_url && (
-          <a
-            href={vertical.launch.campaign_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="ds-btn-ghost inline-flex items-center gap-1.5"
-          >
-            <ExternalLink className="h-3 w-3" />
-            Open in Instantly
-          </a>
-        )}
         <Link
           href={`/client/eng/projects/${vertical.project_id}?step=${step}` as Route}
           prefetch={false}

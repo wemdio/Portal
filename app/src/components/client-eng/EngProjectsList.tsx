@@ -21,6 +21,7 @@ import {
   fetchEngProjects,
   type EngProjectListItem,
 } from './api-client';
+import { engStageErrorText } from './engText';
 import { EngBadge, EngCard, EngSpinner, fmtDate, projectStatusTone } from './ui';
 
 export function EngProjectsList() {
@@ -187,9 +188,12 @@ export function EngProjectsList() {
                   <ArrowRight className="h-3 w-3" />
                 </span>
               </div>
-              {p.error && (
+              {/* he_projects.error (воркер пишет туда русский текст стадии с
+                  префиксом её имени) в кабинет не доезжает вовсе: роут отдаёт
+                  код причины, экран — английское объяснение по коду. */}
+              {p.error_code && (
                 <div className="text-[11px]" style={{ color: 'var(--cp-red)' }}>
-                  {p.error}
+                  {engStageErrorText(p.error_code)}
                 </div>
               )}
             </Link>

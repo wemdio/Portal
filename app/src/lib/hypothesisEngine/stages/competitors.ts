@@ -106,9 +106,13 @@ export async function runCompetitorsStage(job: HeJob, ctx: HeStageContext): Prom
 
   const selected = llm.data.competitors.slice(0, MAX_COMPETITORS);
   const competitors: HeCompetitorEntry[] = [];
+  // Подпись прогресса уезжает в he_jobs.progress.label и печатается клиенту
+  // как есть (блок «Right now» кабинета ENG), поэтому зависит от рынка, а не
+  // переводится насовсем: тот же V1 обслуживает русский внутренний инструмент.
+  const progressLabel = market === 'us' ? 'studying a competitor' : 'изучаем конкурента';
   for (let i = 0; i < selected.length; i += 1) {
     const c = selected[i];
-    await reportProgress(ctx, job.id, i + 1, selected.length, 'изучаем конкурента');
+    await reportProgress(ctx, job.id, i + 1, selected.length, progressLabel);
     const entry: HeCompetitorEntry = { name: c.name, url: c.url, why: c.why, geo: c.geo };
     try {
       entry.site_excerpt = truncate(await fetchText(c.url), HOMEPAGE_EXCERPT);

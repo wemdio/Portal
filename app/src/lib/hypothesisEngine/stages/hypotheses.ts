@@ -79,7 +79,9 @@ export async function loadPortfolioProfile(
     return undefined;
   }
   try {
-    return await getPortfolioProfile({ limit: 10 });
+    // market дублируем в опциях: гейт выше уже отсёк us, но второй рубеж
+    // внутри datasetStats переживёт случайный вызов в обход этой обёртки.
+    return await getPortfolioProfile({ limit: 10, market });
   } catch (e) {
     stageLog(ctx, `[hypotheses] getPortfolioProfile упал: ${e instanceof Error ? e.message : String(e)}`);
     return undefined;
@@ -90,11 +92,19 @@ export async function loadPortfolioProfile(
  * История ручной разметки гипотез ДРУГИХ проектов (accepted/rejected) —
  * калибровка «какие гипотезы живут / умирают на ревью специалиста».
  * Сбой чтения → undefined, стадия продолжается.
+ * Рынок us: `he_hypotheses` не скоупится ни по рынку, ни по владельцу, то
+ * есть в EN-промпт уехали бы русские заголовки чужих RU-проектов под
+ * подписью «вкус этого клиента» — гейтим так же, как loadPortfolioProfile.
  */
 export async function loadMarkupHistory(
   ctx: HeStageContext,
   projectId: string,
+  market: HeMarket,
 ): Promise<HeMarkupHistory | undefined> {
+  if (market === 'us') {
+    stageLog(ctx, '[hypotheses] market=us — калибровка по разметке RU-проектов пропущена');
+    return undefined;
+  }
   try {
     const { data, error } = await ctx.supabase
       .from('he_hypotheses')
@@ -124,8 +134,18 @@ export interface HeActualsHistoryItem {
  * — якоря шкалы potential_pct для промпта. До применения миграции
  * 20260806_0001 колонок нет → ошибка чтения → undefined (без них промпт
  * работает как раньше). Best-effort, как остальная калибровка.
+ * Рынок us: `he_verticals` читается по всей таблице (ни проекта, ни рынка),
+ * то есть шкалой для англоязычного проекта служили бы фактические reply%
+ * чужих RU-запусков — тот же гейт, что у остальной калибровки.
  */
-export async function loadActualsHistory(ctx: HeStageContext): Promise<HeActualsHistoryItem[] | undefined> {
+export async function loadActualsHistory(
+  ctx: HeStageContext,
+  market: HeMarket,
+): Promise<HeActualsHistoryItem[] | undefined> {
+  if (market === 'us') {
+    stageLog(ctx, '[hypotheses] market=us — калибровка по фактам RU-запусков пропущена');
+    return undefined;
+  }
   try {
     const { data, error } = await ctx.supabase
       .from('he_verticals')
@@ -180,8 +200,8 @@ export async function runHypothesesStage(job: HeJob, ctx: HeStageContext): Promi
   // мгновенный проход продолжается без калибровки.
   const [portfolioProfile, markupHistory, actualsHistory] = await Promise.all([
     loadPortfolioProfile(ctx, market),
-    loadMarkupHistory(ctx, job.project_id),
-    loadActualsHistory(ctx),
+    loadMarkupHistory(ctx, job.project_id, market),
+    loadActualsHistory(ctx, market),
   ]);
 
   stageLog(ctx, '[hypotheses] мгновенный проход: 25–40 кандидатов…');

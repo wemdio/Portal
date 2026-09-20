@@ -119,9 +119,13 @@ export async function runBrandCloudStage(job: HeJob, ctx: HeStageContext): Promi
   ];
 
   const entities: BrandCloudEntity[] = [];
+  // Подпись прогресса уезжает в he_jobs.progress.label и печатается клиенту
+  // как есть (блок «Right now» кабинета ENG), поэтому зависит от рынка, а не
+  // переводится насовсем: тот же V1 обслуживает русский внутренний инструмент.
+  const progressLabel = market === 'us' ? 'mapping a brand' : 'разбираем бренд';
   for (let i = 0; i < targets.length; i += 1) {
     const target = targets[i];
-    await reportProgress(ctx, job.id, i + 1, targets.length, 'разбираем бренд');
+    await reportProgress(ctx, job.id, i + 1, targets.length, progressLabel);
     stageLog(ctx, `[brand_cloud] ${target.name}…`);
     const { pages, searchResults } = await collectBrandPages(target, ctx, market);
     try {

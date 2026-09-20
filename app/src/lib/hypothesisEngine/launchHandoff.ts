@@ -105,15 +105,40 @@ export function instantlyCampaignUrl(campaignId: string): string {
   return `https://app.instantly.ai/app/campaign/${campaignId}`;
 }
 
+/** Как подписывать кампанию запуска (дефолты — внутренний контур, см. ниже). */
+export interface HeCampaignNamingOptions {
+  /** Префикс имени; '' — без префикса. */
+  prefix?: string;
+  /** Чем подписать базу, у которой нет filename. */
+  fallbackBaseName?: string;
+}
+
+/**
+ * Именование для проектов английского рынка (market='us'): имя кампании
+ * доезжает до клиента (launch_info.campaign_name на дашборде и шаге баз),
+ * поэтому ни внутреннего «HE · », ни русского фолбэка «база» в нём быть не
+ * должно. Подставляет его launchTemplate.ts по рынку ПРОЕКТА, а не по контуру
+ * запуска: у ru-проектов (в т.ч. всех запусков легаси-инструмента
+ * /tools/hypothesis-engine) остаются дефолты ниже — staff узнаёт свои кампании
+ * в списке рассыльщика именно по префиксу.
+ */
+export const HE_ENG_CAMPAIGN_NAMING: HeCampaignNamingOptions = {
+  prefix: '',
+  fallbackBaseName: 'audience',
+};
+
 /** Имя кампании: узнаваемое в списке Instantly, с датой запуска (+ сегмент при сплите). */
 export function buildLaunchCampaignName(
   baseFilename: string | null | undefined,
   now = new Date(),
   segment?: string | null,
+  naming?: HeCampaignNamingOptions,
 ): string {
-  const base = (baseFilename ?? '').trim() || 'база';
+  const prefix = naming?.prefix ?? 'HE · ';
+  const fallback = naming?.fallbackBaseName ?? 'база';
+  const base = (baseFilename ?? '').trim() || fallback;
   const seg = (segment ?? '').trim();
-  return `HE · ${base}${seg ? ` · ${seg}` : ''} · ${now.toISOString().slice(0, 10)}`.slice(0, 200);
+  return `${prefix}${base}${seg ? ` · ${seg}` : ''} · ${now.toISOString().slice(0, 10)}`.slice(0, 200);
 }
 
 export interface HeLaunchSequence {
