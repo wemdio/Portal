@@ -48,7 +48,7 @@ import {
 } from '@/lib/verticalEngineV2/contactDeliveryScheduler';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { runVeOutreachPreparations } from '@/lib/verticalEngineV2/outreachPreparation';
-import { enqueueVeContactReprojections } from '@/lib/verticalEngineV2/outreachSetup';
+import { autoResumeVeTransientPreparations, enqueueVeContactReprojections } from '@/lib/verticalEngineV2/outreachSetup';
 import type { VeJob, VeStage } from '@/lib/verticalEngineV2/types';
 
 const WORKER_ID = `vertical-engine-v2-${process.pid}`;
@@ -64,6 +64,7 @@ const CONTACT_DELIVERY_INTERVAL_MS =
     : 5 * 60_000;
 /** Как часто воркер догоняет базы, которым сохранённый лимит адресов ещё не применён. */
 const CONTACT_CAP_SWEEP_INTERVAL_MS = 2 * 60_000;
+const TRANSIENT_RESUME_INTERVAL_MS = 5 * 60_000;
 /** Как часто воркер проверяет строку активной джобы на отмену пользователем. */
 const CANCEL_WATCH_MS = 3000;
 const RESEARCH_IDLE_TIMEOUT_MS = 15 * 60_000;
@@ -108,6 +109,26 @@ function triggerContactCapSweep(): Promise<void> {
     .catch((error) => log('warn', '[contact-cap] sweep failed', { error: error instanceof Error ? error.message : String(error) }))
     .finally(() => { if (activeContactCapSweep === promise) activeContactCapSweep = null; });
   activeContactCapSweep = promise;
+  return promise;
+}
+
+/**
+ * База, легшая на временном сбое провайдера, лежит до ручного «Продолжить
+ * подготовку»: 2026-09-21 так простаивали три базы из пятнадцати — не деньги
+ * кончились, а поиск моргнул. Этот проход поднимает только такие базы, с
+ * ограничением попыток и остыванием; оплата, конфигурация и ручная отмена
+ * не трогаются — их повтор либо бессмыслен, либо отменяет решение человека.
+ */
+let activeTransientResume: Promise<void> | null = null;
+function triggerTransientResumeSweep(): Promise<void> {
+  if (shouldStop() || activeTransientResume) return activeTransientResume ?? Promise.resolve();
+  const promise = autoResumeVeTransientPreparations(db)
+    .then((outcome) => {
+      if (outcome.resumed > 0) log('info', `[auto-resume] возвращено в работу после временного сбоя: ${outcome.resumed} баз`);
+    })
+    .catch((error) => log('warn', '[auto-resume] sweep failed', { error: error instanceof Error ? error.message : String(error) }))
+    .finally(() => { if (activeTransientResume === promise) activeTransientResume = null; });
+  activeTransientResume = promise;
   return promise;
 }
 
@@ -534,6 +555,8 @@ async function main() {
   if (typeof outreachPreparationTimer.unref === 'function') outreachPreparationTimer.unref();
   const contactCapTimer = setInterval(() => { void triggerContactCapSweep(); }, CONTACT_CAP_SWEEP_INTERVAL_MS);
   if (typeof contactCapTimer.unref === 'function') contactCapTimer.unref();
+  const transientResumeTimer = setInterval(() => { void triggerTransientResumeSweep(); }, TRANSIENT_RESUME_INTERVAL_MS);
+  if (typeof transientResumeTimer.unref === 'function') transientResumeTimer.unref();
 
   try {
     // Delivery is independent from VE research/template jobs; do not hold the
@@ -543,6 +566,7 @@ async function main() {
     // collection or model call occupies the main worker for several minutes.
     void triggerOutreachPreparationTick();
     void triggerContactCapSweep();
+    void triggerTransientResumeSweep();
     await pollLoop({
       log,
       pollIntervalMs: POLL_INTERVAL_MS,
@@ -551,6 +575,7 @@ async function main() {
       realtimeTables: ['ve_jobs'],
     });
   } finally {
+    clearInterval(transientResumeTimer);
     clearInterval(contactDeliveryTimer);
     clearInterval(outreachPreparationTimer);
     clearInterval(contactCapTimer);
