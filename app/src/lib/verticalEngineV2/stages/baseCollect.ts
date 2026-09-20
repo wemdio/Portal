@@ -2540,6 +2540,10 @@ async function preparePreviewBatches(args: {
   // Stop acquisition immediately at the ready goal/error, but drain already
   // purchased batches through the same gates and retain their checked results.
   if (!pipeline.error && target.ready_rows < target.ready_target && !info.tasks?.some((task) => task.status === 'failed')) {
+    // Адаптивный сбор держит ровно одну партию в полёте намеренно: решение
+    // «источник плохой, переключаемся» принимается по итогу каждой партии, и
+    // вторая в полёте стартовала бы из среза, который первая только что
+    // признала бесполезным. Скорость добираем размером партии, а не их числом.
     while (pipeline.batches.length < Math.min(info.adaptive_collection ? 1 : PREVIEW_IN_FLIGHT, target.max_rounds - target.round + 1) && candidates.length > 0) {
       const batchSize = info.adaptive_collection ? veAdaptiveCandidateLimit(target, allocated)
         : target.candidates_processed === 0 && allocated === 0 ? VE_PREVIEW_FIRST_CANDIDATES : PREVIEW_BATCH_SIZE;
