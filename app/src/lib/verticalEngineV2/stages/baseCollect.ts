@@ -2498,6 +2498,10 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
   }
 }
 
+/** Ниже этой доли цели добор считается недостижимым по текущему срезу. */
+const VE_NARROW_MARKET_SHARE = 0.6;
+/** Меньше этого числа проверенных компаний наблюдаемый выход ещё не показателен. */
+const VE_NARROW_MARKET_MIN_COMPANIES = 300;
 const PREVIEW_BATCH_SIZE = 200;
 const PREVIEW_IN_FLIGHT = 2;
 const PREVIEW_MAX_BATCHES = 100;
@@ -3587,6 +3591,39 @@ async function completeTargetRound(args: {
       externalExclusions: freshKeys.inns.size > 0 || freshKeys.emails.size > 0 || freshKeys.websiteInns.size > 0
         || Boolean(args.stats.excluded_existing_bases),
     });
+    // Рынок гипотезы меньше цели. Раньше движок всё равно шёл к 500: каждый
+    // следующий раунд просил БОЛЬШЕ компаний (collectionRoundLimit делит
+    // недостачу на наблюдаемый выход), и узкая гипотеза упиралась в потолок
+    // 10 000 компаний — а это чтение сайтов и SMTP-проверки за каждую из них.
+    //
+    // Прогноз считаем здесь же, а не берём remaining_ready_estimate: тот
+    // обнуляется, пока в резерве есть хоть одна непроверенная строка, а такая
+    // строка есть почти всегда (компания, по которой конструктор не нашёл
+    // почту). Для решения «рынок мал» достаточно размера сопоставимого среза
+    // источника и наблюдаемого выхода.
+    const population = info.estimate.population_matches_source === true
+      && Number.isSafeInteger(info.estimate.unique_companies) ? Number(info.estimate.unique_companies) : null;
+    const processedCompanies = candidateCompanies.size;
+    const projected = population !== null && processedCompanies >= VE_NARROW_MARKET_MIN_COMPANIES
+      && population >= processedCompanies && readyRows.length > 0
+      ? Math.round((population - processedCompanies) * readyRows.length / processedCompanies) : null;
+    // Останавливаем только раунд, за которым не осталось уже оплаченной работы:
+    // недокачанный дочерний конструктор или неразобранный запас дороже одного
+    // лишнего раунда, а на следующем пробуждении оценка повторится.
+    if (projected !== null && next.status === 'collecting' && !reviewOnly && !continueSavedReview
+      && progress.round >= 2 && pendingBatches.length === 0 && !pendingSources && !pendingDiscovery
+      && !args.hasBufferedCandidates && !info.adaptive_collection?.pending
+      && readyRows.length + projected < progress.ready_target * VE_NARROW_MARKET_SHARE) {
+      next = { ...next, round: progress.round, status: 'limited',
+        reason: `Рынок гипотезы меньше цели: по текущему срезу источника осталось примерно ${projected} контактов `
+          + `сверх собранных ${readyRows.length} при цели ${progress.ready_target}. Сбор остановлен, чтобы не тратить `
+          + 'проверки на заведомо недостижимый объём. Сузьте цель, добавьте источник или уточните гипотезу.' };
+      // Локальная переменная уже скопирована в info выше: без этой записи
+      // статус и причина не сохранились бы, а «Продолжить подготовку» не
+      // увидела бы базу (там требуется терминальный статус раунда).
+      info.target_progress = next;
+      stageLog(ctx, `[base_collect] остановка по размеру рынка: собрано ${readyRows.length}, прогноз остатка ${projected}, цель ${progress.ready_target}`);
+    }
   }
   if (next.status === 'collecting' && !continueSavedReview) {
     // One atomic checkpoint: prior validated output is durable BEFORE the next

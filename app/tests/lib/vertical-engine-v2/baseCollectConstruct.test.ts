@@ -14,6 +14,9 @@
 
 jest.mock('@/lib/companiesSearch/rpcSearch', () => ({
   searchRows: jest.fn(),
+  // Точная сверка размера среза: без неё population_matches_source всегда
+  // false, и прогноз по размеру рынка не считается.
+  searchCount: jest.fn(async () => ({ count: 9_120 })),
 }));
 
 jest.mock('@/lib/verticalEngineV2/llm', () => ({
@@ -69,9 +72,9 @@ import { prepareSegmentationAudience } from '@/lib/verticalEngineV2/segmentation
 import type { VeJob } from '@/lib/verticalEngineV2/types';
 import {
   createCollectionTarget,
+  estimateRemainingReady,
   finishCollectionRound,
   collectionRoundLimit,
-  estimateRemainingReady,
 } from '@/lib/verticalEngineV2/collectionTarget';
 import { searchRows } from '@/lib/companiesSearch/rpcSearch';
 import { enqueueVeBaseCollect } from '@/lib/verticalEngineV2/baseCollectEnqueue';
@@ -1728,6 +1731,59 @@ describe('base_collect CONSTRUCT import', () => {
     expect(normalizeVeMaxEmailsPerCompany(0)).toBeNull();
     expect(normalizeVeMaxEmailsPerCompany(101)).toBeNull();
     expect(normalizeVeMaxEmailsPerCompany(3)).toBe(3);
+  });
+
+  it('stops a hypothesis whose market cannot reach the target instead of grinding to the candidate cap', async () => {
+    // Узкая гипотеза раньше шла к потолку в 10 000 компаний: каждый следующий
+    // раунд просил БОЛЬШЕ компаний, и за каждую платили чтением сайта и SMTP.
+    const description = 'Производит промышленные насосы на собственной площадке.';
+    const harvest = Array.from({ length: 320 }, (_, i) => unifiedRow({
+      company: `Завод ${i}`, website: `plant${i}.test`, email: `mail@plant${i}.test`, inn: `77000200${i}`,
+      source_detail: description,
+    }));
+    const dispatched: NonNullable<VeCollectInfo['construct']> = { bc_job_id: 'bc-narrow', status: 'dispatched', dispatched_at: '2026-09-20T00:00:00Z' };
+    const narrow = (population: number): VeCollectInfo => ({
+      ...collectInfo(harvest, dispatched),
+      collection_mode: 'preview', ready_target: 500,
+      target_progress: { ...createCollectionTarget('preview'), round: 2, candidates_processed: 900 },
+      target_checkpoint: { completed_round: 1, seen_rows: [], processed_rows: 900, low_relevance: 0, relevance_unchecked: 0 },
+      // Срез источника уже измерен: столько компаний всего сопоставимо плану.
+      estimate: { version: 2, unique_companies: population, companies_with_email: population,
+        population_matches_source: true, population_as_of: new Date().toISOString() },
+      stats: { tasks_total: 1, tasks_done: 1, tasks_failed: 0, rows_total: 900, excluded_existing_bases: 0, excluded_during_fetch: 0 },
+    });
+    // Реалистичный выход: годной почтой заканчивается меньше десятой части компаний.
+    const constructorRows = harvest.map((row, i) => [row.company, row.website, row.email, row.inn, i < 30 ? 'ok' : 'invalid']);
+    const run = async (uniqueCompanies: number) => {
+      const info = narrow(uniqueCompanies);
+      const db = createMockSupabase({ tables: {
+        ve_bases: [makeBase(info)], ve_verticals: [VERTICAL], ve_projects: [PROJECT],
+        ve_hypotheses: [{ id: 'h1', project_id: 'p1', vertical_id: 'v1', title: 'Сети частных клиник',
+          description: 'Частные клиники с собственным сайтом и действующим бизнесом.', status: 'accepted' }],
+        ve_jobs: [makeJob() as unknown as Record<string, unknown>],
+        base_constructor_jobs: [{ id: 'bc-narrow', status: 'completed', error_message: null,
+          selected_steps: ['find_emails', 'split_emails', 'dedup_email', 'validate_emails'],
+          data: [['Компания', 'Сайт', 'Email', 'ИНН', 'Email Статус'], ...constructorRows],
+          result_stats: { total_rows: constructorRows.length, emails_found: constructorRows.length } }],
+      }, rpcHandlers: {
+        // Тот же срез реестра, но разного размера: узкий и широкий рынок.
+        ve_directory_segment_stats: () => ({ data: { directory_rows_total: 9_120, companies_unique_total: uniqueCompanies,
+          companies_with_email: uniqueCompanies, companies_with_phone: uniqueCompanies, companies_with_any_contact: uniqueCompanies,
+          matched_companies_with_email: uniqueCompanies, matched_companies_with_phone: uniqueCompanies,
+          matched_companies_with_any_contact: uniqueCompanies } }),
+      } });
+      await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
+      const patch = db.updates.filter((u) => u.table === 've_bases' && (u.patch.collect_info as VeCollectInfo)?.target_progress).at(-1)!.patch;
+      return (patch.collect_info as VeCollectInfo).target_progress!;
+    };
+    // Срез почти исчерпан: 900 компаний из 1000, выход низкий — добор до 500 невозможен.
+    const stopped = await run(1000);
+    expect(stopped.status).toBe('limited');
+    expect(stopped.reason).toContain('Рынок гипотезы меньше цели');
+    // Статус терминальный и раунд совпадает с завершённым: «Продолжить подготовку» доступна.
+    expect(stopped.round).toBe(2);
+    // Широкий срез не останавливаем.
+    expect((await run(200_000)).status).not.toBe('limited');
   });
 
   it('does not claim launch-ready recipients after a failed partial validation', async () => {
