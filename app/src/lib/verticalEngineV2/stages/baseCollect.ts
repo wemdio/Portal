@@ -1700,11 +1700,17 @@ async function dispatchTask(
   if (task.source === 'companies_directory') {
     const filters = mapDirectoryFilters(task.directory_filters);
     const excluded = await getExcludedKeys();
-    const first = await fetchDirectoryRows(ctx, existingContactsOnly ? { ...filters, hasWebsite: true } : filters, limit, excluded);
-    // Email-only companies can pass from source activity evidence. Include that
-    // stock too, without assuming that an email domain proves a company site.
-    const second = existingContactsOnly && !first.error && first.exhausted && first.rows.length < limit
-      ? await fetchDirectoryRows(ctx, { ...filters, hasEmail: true }, limit - first.rows.length,
+    // Компания с готовым адресом — это контакт, за который не нужно платить ни
+    // обходом сайта, ни очередью SMTP-проверки. Такие берём ПЕРВЫМИ, и только
+    // потом добираем тех, у кого есть лишь сайт. Раньше порядок был обратный,
+    // а лейн с почтой запускался лишь при полном исчерпании первого — то есть
+    // практически никогда, потому что лейн «с сайтом» упирался в потолок
+    // сканирования раньше, чем исчерпывался.
+    const first = await fetchDirectoryRows(ctx, existingContactsOnly ? { ...filters, hasEmail: true } : filters, limit, excluded);
+    // Второй лейн запускаем и после потолка сканирования, а не только после
+    // исчерпания: иначе недобор первого лейна навсегда оставляет партию пустой.
+    const second = existingContactsOnly && !first.error && (first.exhausted || first.hitCeiling) && first.rows.length < limit
+      ? await fetchDirectoryRows(ctx, { ...filters, hasWebsite: true }, limit - first.rows.length,
         addRowsToExclusionKeys({ inns: new Set(excluded.inns), emails: new Set(excluded.emails),
           receipts: new Set(excluded.receipts), websiteInns: new Map([...excluded.websiteInns].map(([key, values]) => [key, new Set(values)])) },
         first.rows.map(mapDirectoryRow))) : null;
@@ -2332,8 +2338,15 @@ async function dispatchConstructJob(input: {
     step_config: {
       ...(reservedId ? { queue_class: 'interactive_preview' } : {}),
       find_emails_target: 'separate',
+      // Краул сайта — главный расход времени на компанию (см. комментарий у
+      // stopAtFirstUsableEmail в processingSteps.ts). Раньше здесь стояло
+      // «все адреса с 12 страниц»: каждый найденный адрес потом проходил
+      // SMTP-проверку, а лимит адресов на компанию выбрасывал лишние уже
+      // после неё — у одной компании доходило до 167 проверенных адресов.
+      // Берём небольшой запас сверх лимита: его хватает, чтобы отбор
+      // предпочёл подтверждённый адрес catch-all, и не больше.
       find_emails: {
-        stop_at_first: false, max_per_site: null, max_pages: 12, site_timeout_ms: 60_000, merge_mode: 'prefer_found_validated',
+        stop_at_first: false, max_per_site: 6, max_pages: 4, site_timeout_ms: 30_000, merge_mode: 'prefer_found_validated',
         ...(reservedId ? { reuse_website_description: true } : {}),
       },
     },
@@ -2527,6 +2540,10 @@ async function preparePreviewBatches(args: {
   // Stop acquisition immediately at the ready goal/error, but drain already
   // purchased batches through the same gates and retain their checked results.
   if (!pipeline.error && target.ready_rows < target.ready_target && !info.tasks?.some((task) => task.status === 'failed')) {
+    // Адаптивный сбор держит ровно одну партию в полёте намеренно: решение
+    // «источник плохой, переключаемся» принимается по итогу каждой партии, и
+    // вторая в полёте стартовала бы из среза, который первая только что
+    // признала бесполезным. Скорость добираем размером партии, а не их числом.
     while (pipeline.batches.length < Math.min(info.adaptive_collection ? 1 : PREVIEW_IN_FLIGHT, target.max_rounds - target.round + 1) && candidates.length > 0) {
       const batchSize = info.adaptive_collection ? veAdaptiveCandidateLimit(target, allocated)
         : target.candidates_processed === 0 && allocated === 0 ? VE_PREVIEW_FIRST_CANDIDATES : PREVIEW_BATCH_SIZE;
