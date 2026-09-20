@@ -8,6 +8,7 @@ import { enqueueVeBaseCollect } from '@/lib/verticalEngineV2/baseCollectEnqueue'
 import { claimVeJob, createVeJobPool, createVeProjectUsageAccumulator, canRunVeJob, veJobConcurrency, veBaseCollectConcurrency } from '@/lib/verticalEngineV2/jobQueue';
 import type { VeJob } from '@/lib/verticalEngineV2/types';
 import { runVeOutreachPreparations } from '@/lib/verticalEngineV2/outreachPreparation';
+import { enqueueVeContactReprojections } from '@/lib/verticalEngineV2/outreachSetup';
 
 let mockRouteDb = createMockSupabase();
 jest.mock('@/lib/supabaseAdmin', () => ({ get supabaseAdmin() { return mockRouteDb; } }));
@@ -18,7 +19,7 @@ jest.mock('@/lib/toolTrace', () => ({
   withToolTrace: async (_options: unknown, handler: () => Promise<unknown>) => handler(),
 }));
 jest.mock('@/lib/loggerServer', () => ({ logAudit: jest.fn(), logError: jest.fn() }));
-jest.mock('@/lib/verticalEngineV2/outreachSetup', () => ({ loadVeOutreachSetup: jest.fn(async () => ({})) }));
+jest.mock('@/lib/verticalEngineV2/outreachSetup', () => ({ ...jest.requireActual('@/lib/verticalEngineV2/outreachSetup'), loadVeOutreachSetup: jest.fn(async () => ({})) }));
 import { POST as collectPreview } from '@/app/api/tools/vertical-engine-v2/verticals/[id]/collect/route';
 import { POST as prepareOutreach } from '@/app/api/tools/vertical-engine-v2/projects/[id]/outreach/route';
 
@@ -217,6 +218,41 @@ describe('VE2 base collection enqueue recovery', () => {
     expect(mockRouteDb.rpcCalls).toHaveLength(1);
     expect((await request({})).status).toBe(200);
     expect(mockRouteDb.rpcCalls[1].fn).toBe('ve_request_outreach_preparation');
+
+    // The specialist's "addresses per company" limit: saved through its own RPC.
+    // The nudge only asks the queue for bases whose applied value is out of date
+    // and only when the limit was tightened; everything else waits for the sweep.
+    mockRouteDb = createMockSupabase({ tables: { ve_projects: [{ id: projectId }], ve_bases: [
+      { id: 'tightened', project_id: projectId, source: 'auto', status: 'analyzed', hypothesis_id: hypothesisId, max_emails_per_company: 3, contact_cap_applied: 5, updated_at: '2026-09-20T03:00:00Z' },
+      { id: 'first-time', project_id: projectId, source: 'auto', status: 'analyzed', hypothesis_id: hypothesisId, max_emails_per_company: 3, contact_cap_applied: null, updated_at: '2026-09-20T02:00:00Z' },
+      { id: 'already', project_id: projectId, source: 'auto', status: 'analyzed', hypothesis_id: hypothesisId, max_emails_per_company: 3, contact_cap_applied: 3, updated_at: '2026-09-20T01:00:00Z' },
+      { id: 'loosened', project_id: projectId, source: 'auto', status: 'analyzed', hypothesis_id: hypothesisId, max_emails_per_company: 9, contact_cap_applied: 3, updated_at: '2026-09-20T00:30:00Z' },
+      { id: 'running', project_id: projectId, source: 'auto', status: 'collecting', hypothesis_id: hypothesisId, max_emails_per_company: 3, contact_cap_applied: null, updated_at: '2026-09-20T00:00:00Z' },
+    ] }, rpcHandlers: {
+      ve_save_outreach_contact_limit: () => ({ data: null }),
+      ve_enqueue_contact_reprojection: () => ({ data: { ok: true, queued: true } }),
+    } });
+    const limit = (max: unknown) => prepareOutreach(new NextRequest('http://portal.test/outreach', {
+      method: 'POST', body: JSON.stringify({ action: 'contact_limit', revision: 7, max_emails_per_company: max }),
+    }), { params: Promise.resolve({ id: projectId }) });
+    for (const invalid of [0, 1.5, '5', 101, undefined]) expect((await limit(invalid)).status).toBe(400);
+    expect(mockRouteDb.rpcCalls).toHaveLength(0);
+    expect((await limit(3)).status).toBe(200);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockRouteDb.rpcCalls.map((call) => [call.fn, call.params])).toEqual([
+      ['ve_save_outreach_contact_limit', { p_project_id: projectId, p_revision: 7, p_max: 3, p_actor: expect.anything() }],
+      ['ve_enqueue_contact_reprojection', { p_base_id: 'tightened' }],
+      ['ve_enqueue_contact_reprojection', { p_base_id: 'first-time' }],
+    ]);
+    // The worker sweep catches up with whatever was busy, through its own scan.
+    const sweepReady = '00000000-0000-4000-8000-000000000401';
+    const sweepBusy = '00000000-0000-4000-8000-000000000402';
+    const sweepDb = createMockSupabase({ rpcHandlers: {
+      ve_pending_contact_reprojections: () => ({ data: [sweepReady, sweepBusy, 'not-a-uuid'] }),
+      ve_enqueue_contact_reprojection: ({ p_base_id }: Record<string, unknown>) => ({ data: { ok: true, queued: p_base_id === sweepReady } }),
+    } });
+    await expect(enqueueVeContactReprojections(sweepDb as unknown as SupabaseClient)).resolves.toEqual({ queued: 1, pending: 1 });
+    expect((await limit(null)).status).toBe(200);
   });
 
   it('repairs an orphan collecting base that has no active worker job', async () => {

@@ -12,7 +12,7 @@ import { validateStoredAuditSnapshot } from '@/lib/verticalEngineV2/stages/segme
 import { prepareSegmentationAudience } from '@/lib/verticalEngineV2/segmentationAudit';
 import { VE_PREVIEW_READY_TARGET } from '@/lib/verticalEngineV2/collectionTarget';
 import { projectCompanyNames, VE_COMPANY_NAME_FIELD } from '@/lib/verticalEngineV2/companyNames';
-import { readVeRelevanceReserve } from '@/lib/verticalEngineV2/relevanceReserve';
+import { readVeRelevanceReserve, VE_COMPANY_CAP_FIELD } from '@/lib/verticalEngineV2/relevanceReserve';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -51,6 +51,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Diagnostic projection only; no internal decision/checkpoint JSON in downloads. */
 function reviewCells(row: Record<string, unknown>): Record<string, string> {
   const decision = isRecord(row._ve_relevance) ? row._ve_relevance : null;
+  // A validated address of a fitting company, held back only by the specialist's
+  // limit: say so instead of showing the company's positive relevance reason.
+  if (isRecord(row[VE_COMPANY_CAP_FIELD]) && decision?.status === 'relevant' && isVeAcceptedEmailStatus(row._email_status)) {
+    const limit = Number(row[VE_COMPANY_CAP_FIELD].limit);
+    return { 'Статус проверки': 'Сверх лимита адресов на компанию',
+      'Причина': `У компании уже взято в работу ${Number.isFinite(limit) && limit > 0 ? limit : 'максимум'} адресов. Адрес проверен и сохранён в резерве; попадёт в работу при увеличении лимита.`,
+      'Подтверждение': '' };
+  }
   const status = decision?.status;
   const statusLabel = status === 'needs_review' ? 'Недостаточно подтверждённых данных'
     : status === 'error' ? 'Техническая ошибка проверки'

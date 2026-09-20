@@ -1,8 +1,9 @@
-import { NextResponse, type NextRequest } from 'next/server';
+import { after, NextResponse, type NextRequest } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { requireInternalToolAuth } from '@/lib/toolsApiAuth';
 import { withToolTrace } from '@/lib/toolTrace';
-import { loadVeOutreachSetup } from '@/lib/verticalEngineV2/outreachSetup';
+import { enqueueVeContactReprojections, loadVeOutreachSetup } from '@/lib/verticalEngineV2/outreachSetup';
+import { VE_MAX_EMAILS_PER_COMPANY_MAX, VE_MAX_EMAILS_PER_COMPANY_MIN } from '@/lib/verticalEngineV2/companyContactCap';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -54,6 +55,21 @@ export async function POST(req: NextRequest, { params }: Context) {
         }
         result = await supabaseAdmin.rpc('ve_approve_outreach_base', { p_project_id: projectId, p_revision: b.revision,
           p_base_id: b.base_id, p_template_id: b.template_id, p_reviewed_revision: b.reviewed_revision, p_approved: b.approved, p_actor: auth.auth.userId });
+      } else if (b.action === 'contact_limit') {
+        const max = b.max_emails_per_company;
+        if (max !== null && (!Number.isSafeInteger(max) || max < VE_MAX_EMAILS_PER_COMPANY_MIN || max > VE_MAX_EMAILS_PER_COMPANY_MAX)) {
+          return NextResponse.json({ error: 'Укажите целое число от 1 до 100 или оставьте поле пустым' }, { status: 400 });
+        }
+        result = await supabaseAdmin.rpc('ve_save_outreach_contact_limit', { p_project_id: projectId, p_revision: b.revision,
+          p_max: max, p_actor: auth.auth.userId });
+        if (!result.error) {
+          // Finished bases are re-partitioned by the worker (no paid work). This is
+          // only a nudge for the project just edited: a base that is busy right now
+          // keeps the mismatch and the worker sweep picks it up later.
+          const db = supabaseAdmin;
+          const apply = () => enqueueVeContactReprojections(db, { projectId }).then(() => undefined, () => undefined);
+          try { after(apply); } catch { void apply(); }
+        }
       } else return NextResponse.json({ error: 'Неизвестное действие' }, { status: 400 });
       if (result.error) return NextResponse.json({ error: result.error.message }, { status: 409 });
       return NextResponse.json(await loadVeOutreachSetup(supabaseAdmin, projectId));

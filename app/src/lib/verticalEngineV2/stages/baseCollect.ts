@@ -115,6 +115,7 @@ import { callLLMWithSchema, getVeModel } from '../llm';
 import { projectMarket, type VeMarket } from '../market';
 import { findIrrelevantRows, type VeRelevanceDecision } from '../relevanceGate';
 import { isVeRelevanceTriageEnabled } from '../relevanceTriageConfig';
+import { capVeContactsPerCompany, normalizeVeMaxEmailsPerCompany, stripVeCompanyCapMarker, veContactLimitKey, VE_COMPANY_CAP_FIELD } from '../companyContactCap';
 import { relevanceHash, VeRelevanceCheckpointError, VePreviewCheckpointConflict, type VeRelevanceCheckpoint } from '../relevanceCheckpoint';
 import {
   buildVeRelevanceReviewBatch, mergeVeRelevanceRows, needsVeRelevanceReview, readVeRelevanceReserve, readVeRelevanceSourceRows, summarizeVeRelevanceReserve,
@@ -666,6 +667,8 @@ export interface VeSliceProbe {
 
 export interface VeCollectInfo {
   adaptive_collection?: VeAdaptiveCollection;
+  /** Display/audit snapshot of the last applied "addresses per company" limit; the source of truth is ve_bases.max_emails_per_company. */
+  company_contact_cap?: { limit: number; over_cap_rows: number; companies: number; applied_at: string };
   /** Existing contacts/sites first; a cache miss may buy search only in paid.
    * Deferred source rows are worker state, never ready recipients. */
   search_policy?: { version: 1; phase: 'existing' | 'paid'; deferred_rows: VeUnifiedRow[]; construct_rows?: VeUnifiedRow[] };
@@ -3000,7 +3003,11 @@ async function resumeSavedPreviewValidation(
   const priorReady = (Array.isArray(base.data) ? base.data : []) as Array<VeUnifiedRow & { _email_status?: string }>;
   if (priorReady.some((row) => !isVeAcceptedEmailStatus(row._email_status))) throw new Error('Saved preview email verdicts are incomplete');
   const identity = (row: VeUnifiedRow) => JSON.stringify([row.company, row.email.toLowerCase()]);
-  const priorKeys = new Set(priorReady.map(identity));
+  // Addresses held back only by the per-company limit already carry a final
+  // verdict in the reserve: the constructor re-import must not send them through
+  // the relevance check again.
+  const overCapReserve = readVeRelevanceReserve(info.relevance_reserve).filter((row) => Boolean(row[VE_COMPANY_CAP_FIELD])) as VeUnifiedRow[];
+  const priorKeys = new Set([...priorReady, ...overCapReserve].map(identity));
   const combined = new Map<string, { row: VeUnifiedRow; status: string | null }>();
   const add = (row: VeUnifiedRow, status: string | null) => {
     const clean = { ...row } as VeUnifiedRow & { _low_relevance?: boolean; _relevance_unchecked?: boolean };
@@ -3150,6 +3157,80 @@ async function cleanCollectedCompanyNames(
   return cleaned;
 }
 
+/**
+ * Apply a TIGHTENED "addresses per company" limit to an already finished preview.
+ *
+ * Deliberately not a collection round: it reads the saved ready rows, keeps at
+ * most N per company and moves the rest into the reserve. No sources, no
+ * constructor, no SMTP, no search, no relevance or name calls, and no base
+ * analysis — the composition of a base that only lost addresses of companies it
+ * already contains does not change. The base stays `analyzed` the whole time, so
+ * a failure here can never make a finished preview look like an interrupted
+ * collection. Raising or removing the limit is NOT done here: returning
+ * addresses would need a paid company-name check, so that stays behind the
+ * specialist's explicit «Продолжить подготовку».
+ */
+async function applyVeContactCapToFinishedBase(
+  ctx: VeStageContext, job: VeJob, base: VeAutoBase,
+): Promise<VeStageResult> {
+  const info: VeCollectInfo = base.collect_info && typeof base.collect_info === 'object' ? base.collect_info : {};
+  const target = info.target_progress;
+  const limit = normalizeVeMaxEmailsPerCompany((base as unknown as { max_emails_per_company?: unknown }).max_emails_per_company);
+  const applied = normalizeVeMaxEmailsPerCompany((base as unknown as { contact_cap_applied?: unknown }).contact_cap_applied);
+  const rows = (Array.isArray(base.data) ? base.data : []) as VeUnifiedRow[];
+  if (info.collection_mode !== 'preview' || !target || base.status !== 'analyzed') {
+    return { result: { base_id: base.id, skipped: 'not_a_finished_preview' } };
+  }
+  if (limit === null || (applied !== null && limit >= applied)) {
+    // Loosening is the specialist's explicit action; record what is applied now.
+    await ctx.supabase.from('ve_bases').update({ contact_cap_applied: applied }).eq('id', base.id).eq('status', 'analyzed');
+    return { result: { base_id: base.id, skipped: 'needs_manual_continue' } };
+  }
+  const capped = capVeContactsPerCompany(rows, { limit, incumbentKeys: new Set(rows.map(veRelevanceRowKey)) });
+  if (!capped.overCap.length) {
+    await ctx.supabase.from('ve_bases').update({ contact_cap_applied: limit }).eq('id', base.id).eq('status', 'analyzed');
+    return { result: { base_id: base.id, rows: rows.length, unchanged: true } };
+  }
+  const columns = base.columns ?? [...VE_AUTO_COLLECT_COLUMNS];
+  const kept = capped.kept.map(stripVeCompanyCapMarker) as VeUnifiedRow[];
+  const overCapKeys = new Set(capped.overCap.map(veRelevanceRowKey));
+  const reserveRows = mergeVeRelevanceRows(readVeRelevanceReserve(info.relevance_reserve),
+    capped.overCap as Array<Record<string, unknown>>).map((row) =>
+    // A row an earlier, looser limit already held back is over this tighter one too.
+    overCapKeys.has(veRelevanceRowKey(row)) || row[VE_COMPANY_CAP_FIELD]
+      ? { ...row, [VE_COMPANY_CAP_FIELD]: { limit } } : row);
+  const readyRows = prepareSegmentationAudience({ rows: kept, columns, source: 'auto' }).rows;
+  const belowTarget = readyRows.length < target.ready_target;
+  const next: VeCollectionTargetProgress = { ...target, ready_rows: readyRows.length,
+    status: belowTarget ? 'limited' : 'target_reached' };
+  if (belowTarget) {
+    next.reason = `Применён лимит ${limit} адресов на компанию. В готовой базе ${readyRows.length} из ${target.ready_target} контактов; `
+      + 'остальные проверенные адреса сохранены в резерве. Новый сбор сам не запускается — при необходимости нажмите «Продолжить подготовку».';
+  } else delete next.reason;
+  const saved: VeCollectInfo = {
+    ...info,
+    target_progress: next,
+    relevance_reserve: { ...info.relevance_reserve, version: 1, rows: reserveRows },
+    company_contact_cap: { limit, over_cap_rows: capped.overCap.length,
+      companies: new Set(kept.map(veContactLimitKey)).size, applied_at: new Date().toISOString() },
+    stats: { ...(info.stats ?? { tasks_total: 0, tasks_done: 0, tasks_failed: 0, rows_total: 0,
+      excluded_existing_bases: 0, excluded_during_fetch: 0 }), launchable_rows: readyRows.length },
+  };
+  saved.relevance_summary = summarizeVeRelevanceReserve(reserveRows);
+  ctx.signal?.throwIfAborted();
+  // One atomic write, guarded on the status the decision was made from: a
+  // parallel collection or launch must never be overwritten by this projection.
+  const { data: written, error } = await ctx.supabase.from('ve_bases')
+    .update({ collect_info: saved, data: kept, columns, row_count: kept.length,
+      sample_rows: readyRows.slice(0, SAMPLE_ROWS), contact_cap_applied: limit, updated_at: new Date().toISOString() })
+    .eq('id', base.id).eq('status', 'analyzed').select('id').maybeSingle();
+  if (error) throw new VeRelevanceCheckpointError(`Contact cap save: ${error.message}`);
+  if (!written) throw new VePreviewCheckpointConflict('Base changed while the contact limit was applied');
+  stageLog(ctx, `[base_collect] лимит ${limit} адресов на компанию применён к сохранённой базе: готовых ${readyRows.length}, в резерв переведено ${capped.overCap.length}`);
+  void job;
+  return { result: { base_id: base.id, rows: readyRows.length, over_company_cap: capped.overCap.length } };
+}
+
 async function resumeSavedCompanyNames(
   ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo,
   target: VeCollectionTargetProgress, usage: VeUsage,
@@ -3170,6 +3251,29 @@ async function resumeSavedCompanyNames(
     hasBufferedCandidates: recovery.has_buffered_candidates, validationError: recovery.validation_error, usage,
     continueManualReview: job.payload?.review_relevance === true,
   });
+}
+
+/**
+ * The specialist's "addresses per company" limit for this base. Read fresh: it
+ * may change while a long job runs, and the worker-owned collect_info must not
+ * be its source (persistCollectInfo overwrites that document wholesale). A
+ * missing column or a failed read means "no limit", never a failed round.
+ */
+async function readVeContactLimit(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo): Promise<number | null> {
+  let own = normalizeVeMaxEmailsPerCompany((base as unknown as { max_emails_per_company?: unknown }).max_emails_per_company);
+  try {
+    const { data, error } = await ctx.supabase.from('ve_bases').select('max_emails_per_company').eq('id', base.id).maybeSingle();
+    if (!error && data) own = normalizeVeMaxEmailsPerCompany((data as { max_emails_per_company?: unknown }).max_emails_per_company);
+  } catch { /* keep the value loaded with the base */ }
+  ctx.signal?.throwIfAborted();
+  if (own !== null || (info.collection_mode ?? job.payload?.collection_mode) !== 'supply') return own;
+  // Daily supply bases are created in SQL from the plan and carry no value of
+  // their own: a new collection follows the project's current setting.
+  try {
+    const { data, error } = await ctx.supabase.from('ve_outreach_setups').select('max_emails_per_company')
+      .eq('project_id', job.project_id).maybeSingle();
+    return error || !data ? null : normalizeVeMaxEmailsPerCompany((data as { max_emails_per_company?: unknown }).max_emails_per_company);
+  } catch { return null; }
 }
 
 async function completeTargetRound(args: {
@@ -3205,9 +3309,24 @@ async function completeTargetRound(args: {
   const availableRows = retainedRows.filter((row) =>
     row && typeof row === 'object' && !baseRowMatchesExclusion(freshKeys, row as VeUnifiedRow),
   );
-  const contactRows = prepareSegmentationAudience({ rows: availableRows, columns, source: 'auto', ignoreCompanyNameCheck: true }).rows;
+  const eligibleRows = prepareSegmentationAudience({ rows: availableRows, columns, source: 'auto', ignoreCompanyNameCheck: true }).rows;
+  // The specialist's limit decides which validated addresses form the ready base.
+  // Nothing is deleted: the rest stays in the reserve, marked, and every later
+  // partition (also after the limit is raised) decides again from all rows.
+  const contactLimit = await readVeContactLimit(ctx, job, base, info);
+  const limitChanged = normalizeVeMaxEmailsPerCompany((base as unknown as { contact_cap_applied?: unknown }).contact_cap_applied) !== contactLimit;
+  const capped = capVeContactsPerCompany(eligibleRows, { limit: contactLimit, incumbentKeys: new Set(previousRows.map(veRelevanceRowKey)) });
+  const contactRows = capped.kept.map(stripVeCompanyCapMarker);
   const contactKeys = new Set(contactRows.map(veRelevanceRowKey));
-  const reserveRows = retainedRows.filter((row) => !contactKeys.has(veRelevanceRowKey(row)));
+  const overCapKeys = new Set(capped.overCap.map(veRelevanceRowKey));
+  const overCapRows = capped.overCap.map(stripVeCompanyCapMarker) as VeUnifiedRow[];
+  const reserveRows = retainedRows.filter((row) => !contactKeys.has(veRelevanceRowKey(row))).map((row) =>
+    overCapKeys.has(veRelevanceRowKey(row)) ? { ...row, [VE_COMPANY_CAP_FIELD]: { limit: contactLimit } } : stripVeCompanyCapMarker(row));
+  if (contactLimit !== null) {
+    info.company_contact_cap = { limit: contactLimit, over_cap_rows: capped.overCap.length,
+      companies: new Set(contactRows.map(veContactLimitKey)).size, applied_at: new Date().toISOString() };
+    if (capped.overCap.length) stageLog(ctx, `[base_collect] лимит ${contactLimit} адресов на компанию: в готовой базе ${contactRows.length}, сверх лимита сохранено в резерве ${capped.overCap.length}`);
+  } else delete info.company_contact_cap;
   info.relevance_reserve = { version: 1, rows: reserveRows,
     source_rows: mergeVeRelevanceRows(readVeRelevanceSourceRows(info.relevance_reserve),
       args.candidates.map((row) => ({ ...row, _ve_source_candidate: true }))),
@@ -3422,7 +3541,10 @@ async function completeTargetRound(args: {
     && cleaned.summary.status === 'complete' && !pipeline?.error && pendingBatches.length === 0) {
     const finishedAt = new Date().toISOString();
     const spend = await readVeBatchSpend(ctx.supabase, job.project_id, base.id, info.adaptive_collection.pending.started_at, finishedAt);
-    info.adaptive_collection = finishVeAdaptiveBatch(info.adaptive_collection, readyRows, spend, finishedAt);
+    // Measure the source BEFORE the per-company limit: its thresholds (5 % yield,
+    // $0.05 per contact) were calibrated on uncapped counts, so judging a capped
+    // batch by them would call every normal source weak and buy a replan.
+    info.adaptive_collection = finishVeAdaptiveBatch(info.adaptive_collection, [...readyRows, ...overCapRows], spend, finishedAt);
     if (info.adaptive_collection.replan_needed && !reviewOnly && readyRows.length < progress.ready_target
       && !acquisitionLimited && info.adaptive_collection.replan_attempts < 2) {
       next = { ...next, status: 'collecting', round: progress.round + 1 }; delete next.reason;
@@ -3490,6 +3612,11 @@ async function completeTargetRound(args: {
     data: cleaned.rows, columns, sample_rows: readyRows.slice(0, SAMPLE_ROWS), row_count: cleaned.rows.length,
     status, error: next.status === 'error' ? next.reason?.slice(0, 500) : null,
   });
+  if (limitChanged) {
+    // Plain column for the settings route: which finished bases still need a
+    // changed limit applied. Best effort: the partition above is already durable.
+    try { await ctx.supabase.from('ve_bases').update({ contact_cap_applied: contactLimit }).eq('id', base.id); } catch { /* next round retries */ }
+  }
   if (next.status === 'collecting') await requeueSelf(ctx, job, pipeline ? 1_000 : undefined);
   else if (status === 'analyzing') await ensureTargetBaseAnalysis(ctx, job, base.id);
   return {
@@ -3519,6 +3646,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   if (base.source !== 'auto') {
     throw new Error(`ve_bases ${baseId}: source='${base.source ?? 'upload'}' — base_collect работает только с source='auto'`);
   }
+  // A tightened "addresses per company" limit for a base that has already
+  // finished: a pure re-partition of saved rows, before the terminal-status
+  // no-op below. It never collects, never pays and never changes base.status.
+  if (job.payload?.reproject_contacts === true) return applyVeContactCapToFinishedBase(ctx, job, base);
   // Завершённую сборку не переигрываем. Честный провал (напр. ноль строк) ставит
   // базе терминальный статус И роняет джобу, а воркер повторяет её до
   // MAX_ATTEMPTS — каждая повторная попытка спотыкалась об этот guard и затирала

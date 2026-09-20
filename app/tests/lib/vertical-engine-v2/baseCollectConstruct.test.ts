@@ -49,6 +49,9 @@ jest.mock('@/lib/verticalEngineV2/relevanceGate', () => ({
 }));
 
 import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/mockSupabase';
+import { capVeContactsPerCompany, normalizeVeMaxEmailsPerCompany } from '@/lib/verticalEngineV2/companyContactCap';
+import { canResumePartialPreview } from '@/lib/verticalEngineV2/collectionRecovery';
+import { veRelevanceRowKey } from '@/lib/verticalEngineV2/relevanceReserve';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   baseRowMatchesExclusion,
@@ -1634,6 +1637,97 @@ describe('base_collect CONSTRUCT import', () => {
       expect((after.collect_info as VeCollectInfo).target_progress?.status === 'error').toBe(status !== 'completed' || !validHeader);
       expect(emptyDb.getRows('base_constructor_jobs')).toHaveLength(1);
     }
+  });
+
+  it('takes at most N addresses of a company into the ready base, keeps the rest in the reserve and restores them without paid work', async () => {
+    const dispatched: NonNullable<VeCollectInfo['construct']> = { bc_job_id: 'bc1', status: 'dispatched', dispatched_at: '2026-08-30T00:00:00Z' };
+    const contacts = [
+      ['Клиника Альфа', 'alpha.test', 'a1@alpha.test', '7700000001', 'catch_all'],
+      ['Клиника Альфа', 'alpha.test', 'a2@alpha.test', '7700000001', 'ok'],
+      ['Клиника Альфа', 'alpha.test', 'a3@alpha.test', '7700000001', 'ok'],
+      ['Клиника Альфа', 'alpha.test', 'a4@alpha.test', '7700000001', 'ok'],
+      ['Клиника Бета', 'beta.test', 'b1@beta.test', '7700000002', 'ok'],
+    ];
+    const info: VeCollectInfo = {
+      ...collectInfo([unifiedRow({ company: 'Клиника Альфа', website: 'alpha.test', inn: '7700000001' }),
+        unifiedRow({ company: 'Клиника Бета', website: 'beta.test', inn: '7700000002' })], dispatched),
+      collection_mode: 'preview', target_progress: createCollectionTarget('preview'), ready_target: 500,
+    };
+    const db = seed(info, { ve_bases: [{ ...makeBase(info), max_emails_per_company: 2 }],
+      base_constructor_jobs: [{ id: 'bc1', status: 'completed', selected_steps: ['find_emails', 'split_emails', 'dedup_email', 'validate_emails'],
+        data: [['Компания', 'Сайт', 'Email', 'ИНН', 'Email Статус'], ...contacts] }] });
+    await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
+    const dataPatch = (client: MockSupabaseClient) => client.updates.filter((update) => update.table === 've_bases' && Array.isArray(update.patch.data)).at(-1)!.patch;
+    const emails = (rows: unknown) => (rows as Array<Record<string, unknown>>).map((row) => row.email);
+    const capped = dataPatch(db);
+    const cappedInfo = capped.collect_info as VeCollectInfo;
+    // A confirmed address beats catch_all; otherwise the first N in order. Order is preserved.
+    expect(emails(capped.data)).toEqual(['a2@alpha.test', 'a3@alpha.test', 'b1@beta.test']);
+    expect(capped.row_count).toBe(3);
+    expect(cappedInfo.target_progress?.ready_rows).toBe(3);
+    expect(cappedInfo.company_contact_cap).toMatchObject({ limit: 2, over_cap_rows: 2, companies: 2 });
+    expect(cappedInfo.relevance_summary).toMatchObject({ over_company_cap: 2, other: 0 });
+    expect(cappedInfo.relevance_reserve?.rows.filter((row) => row._ve_company_cap).map((row) => [row.email, row._ve_company_cap]))
+      .toEqual([['a1@alpha.test', { limit: 2 }], ['a4@alpha.test', { limit: 2 }]]);
+    expect((capped.data as Array<Record<string, unknown>>).some((row) => '_ve_company_cap' in row)).toBe(false);
+    expect(db.updates.filter((update) => update.table === 've_bases').at(-1)?.patch).toEqual({ contact_cap_applied: 2 });
+
+    // The specialist tightens the limit to 1 on the FINISHED base. The saved rows
+    // are re-partitioned in place: no collection, no constructor, no relevance or
+    // name calls, no analysis job, and the base never leaves status 'analyzed'.
+    const finished: VeCollectInfo = { ...structuredClone(cappedInfo),
+      target_progress: { ...cappedInfo.target_progress!, status: 'target_reached' } };
+    const job = { ...makeJob(), payload: { ...makeJob().payload, collection_mode: 'preview', reproject_contacts: true } } as VeJob;
+    const tightenDb = seed(finished, { ve_jobs: [job as unknown as Record<string, unknown>],
+      ve_bases: [{ ...makeBase(finished), status: 'analyzed', data: capped.data, columns: capped.columns,
+        row_count: capped.row_count, max_emails_per_company: 1, contact_cap_applied: 2 }] });
+    mockFindIrrelevantRows.mockClear();
+    await runBaseCollectStage(job, { supabase: tightenDb as unknown as SupabaseClient });
+    const tightened = dataPatch(tightenDb);
+    const tightenedInfo = tightened.collect_info as VeCollectInfo;
+    expect(mockFindIrrelevantRows).not.toHaveBeenCalled();
+    expect(tightenDb.getRows('base_constructor_jobs')).toHaveLength(0);
+    expect(tightenDb.getRows('ve_jobs').filter((row) => row.status === 'pending')).toHaveLength(0);
+    expect(emails(tightened.data)).toEqual(['a2@alpha.test', 'b1@beta.test']);
+    expect(tightened.row_count).toBe(2);
+    expect(tightened.contact_cap_applied).toBe(1);
+    expect(tightened.status).toBeUndefined();
+    expect(tightenedInfo.target_progress).toMatchObject({ status: 'limited', ready_rows: 2, reason: expect.stringContaining('лимит 1') });
+    expect(tightenedInfo.relevance_summary).toMatchObject({ over_company_cap: 3 });
+    expect(tightenedInfo.company_contact_cap).toMatchObject({ limit: 1, over_cap_rows: 1, companies: 2 });
+
+    // Raising or removing the limit is NOT automatic: returning addresses need a
+    // paid company-name check, so only the applied value is recorded.
+    const loosenJob = { ...job, id: 'job-loosen' } as VeJob;
+    const loosenDb = seed(finished, { ve_jobs: [loosenJob as unknown as Record<string, unknown>],
+      ve_bases: [{ ...makeBase(finished), status: 'analyzed', data: capped.data, columns: capped.columns,
+        row_count: capped.row_count, max_emails_per_company: null, contact_cap_applied: 2 }] });
+    await runBaseCollectStage(loosenJob, { supabase: loosenDb as unknown as SupabaseClient });
+    expect(loosenDb.updates.filter((update) => update.table === 've_bases' && Array.isArray(update.patch.data))).toHaveLength(0);
+    expect(loosenDb.getRows('ve_bases')[0].data).toEqual(capped.data);
+
+    // Raising the limit back is the specialist's explicit action, and it is offered:
+    // the held-back addresses are in the reserve and a normal round returns them.
+    // Nothing else in this base asks for a continuation, so the limit is the reason.
+    const overCapRow = { company: 'Клиника Альфа', inn: '7700000001', email: 'a1@alpha.test', _email_status: 'ok',
+      _ve_company_cap: { limit: 2 }, _ve_relevance: { version: 2, status: 'relevant', reason: 'ok', evidence: [{ field: 'description', quote: 'x' }], context_hash: 'a'.repeat(64) } };
+    const heldBack = { id: 'b9', source: 'auto', status: 'analyzed', hypothesis_id: 'h1', collect_info: {
+      collection_mode: 'preview', tasks: [], relevance_reserve: { version: 1, rows: [overCapRow] },
+      target_progress: { mode: 'preview', status: 'limited', ready_rows: 3, ready_target: 500, round: 1, max_rounds: 100, max_candidates: 10_000, candidates_processed: 10 },
+      target_checkpoint: { completed_round: 1 } } };
+    expect(canResumePartialPreview({ ...heldBack, max_emails_per_company: 5, contact_cap_applied: 2 })).toBe(true);
+    expect(canResumePartialPreview({ ...heldBack, max_emails_per_company: null, contact_cap_applied: 2 })).toBe(true);
+    expect(canResumePartialPreview({ ...heldBack, max_emails_per_company: 2, contact_cap_applied: 2 })).toBe(false);
+    expect(canResumePartialPreview({ ...heldBack, max_emails_per_company: 1, contact_cap_applied: 2 })).toBe(false);
+
+    // Addresses already in the ready base stay when the limit shrinks the choice:
+    // the reserve is merged in front of the base and must not flip the selection.
+    const rows = ['x1', 'x2', 'x3'].map((name) => ({ company: 'Гамма', inn: '7700000003', email: `${name}@gamma.test`, _email_status: 'ok' }));
+    expect(capVeContactsPerCompany(rows, { limit: 1, incumbentKeys: new Set([veRelevanceRowKey(rows[2])]) }).kept).toEqual([rows[2]]);
+    expect(capVeContactsPerCompany(rows, { limit: null }).kept).toBe(rows);
+    expect(normalizeVeMaxEmailsPerCompany(0)).toBeNull();
+    expect(normalizeVeMaxEmailsPerCompany(101)).toBeNull();
+    expect(normalizeVeMaxEmailsPerCompany(3)).toBe(3);
   });
 
   it('does not claim launch-ready recipients after a failed partial validation', async () => {
