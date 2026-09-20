@@ -28,7 +28,10 @@ export function prioritizeVeCandidates<T extends Candidate>(rows: T[], hints: Ve
     const profile = /[\p{L}]{4}/u.test(text);
     const hits = terms.filter((term) => text.includes(term)).length;
     const score = (best ? 100 : 0) + (profile ? 25 : 0) + Math.min(20, hits * 4)
-      + (veOfficialWebsiteCandidates(prepared.website).length ? 30 : 0) + (row.email.trim() ? 5 : 0);
+      // Готовый адрес ценнее сайта: по нему контакт получается без обхода
+      // сайта и без очереди SMTP. Раньше сайт весил 30, а почта 5, и компании
+      // с готовым адресом уезжали в хвост партии.
+      + (veOfficialWebsiteCandidates(prepared.website).length ? 30 : 0) + (row.email.trim() ? 35 : 0);
     return { row: prepared, score, index };
   });
   return (preserveOrder ? scored : scored.sort((a, b) => b.score - a.score || a.index - b.index)).map((entry) => entry.row);
