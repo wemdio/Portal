@@ -89,7 +89,7 @@ import { VeLlmRateLimitError, veRateLimitDelay } from '../llmRateLimit';
  * вариации поисковых запросов — future work.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { isVeProviderBillingError, isVeProviderConfigurationError } from '../collectionErrors';
 import { validVeAdaptiveCollection, newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys,
@@ -270,7 +270,15 @@ export function mapDirectoryRow(row: Record<string, unknown>): VeUnifiedRow {
     // phones в реестре — text с телефонами через запятую (массив тоже схлопнется в ту же строку).
     phone: cell(row.phones).split(',')[0]?.trim() ?? '',
     address: cell(row.address),
-    category: cell(row.okved_code),
+    // Быстрая проверка и первичная классификация читают category как текст о
+    // деятельности. Голый код «28.30» не говорит им ничего и даже не проходит
+    // проверку «в тексте есть слова»: компании из реестра теряли и приоритет
+    // в партии, и саму возможность получить вердикт — отсюда доля «без
+    // решения» под 70%. Название ОКВЭД и отраслевой тип реестр отдаёт для
+    // 100% строк, мы их просто выбрасывали. Отдельными строками, потому что
+    // проверка цитат разбирает category построчно (см. relevanceGate).
+    category: [cell(row.okved_name), cell(row.activity_type), cell(row.okved_code)]
+      .map((part) => part.trim()).filter(Boolean).join('\n'),
     employees: cell(row.employees_count),
     revenue: cell(row.revenue),
     inn: cell(row.inn),
@@ -593,6 +601,14 @@ export interface VeCollectTaskState {
   error?: string;
   /** Реестр: строк пропущено на выборке как уже собранные в других базах проекта. */
   excluded_during_fetch?: number;
+  /**
+   * Реестр: закладка выдачи — сколько строк уже просканировано, отдельно для
+   * каждого набора фильтров (фаза existing/paid × лейн «есть почта»/«есть
+   * сайт»). Без неё каждый добор начинал с нуля, перелистывал уже собранное и
+   * упирался в потолок MAX_DIRECTORY_PAGES, после чего сегмент становился
+   * недостижимым: повторный запуск снова начинал с первой страницы.
+   */
+  directory_cursors?: Record<string, number>;
   /** Реестр: выдача под фильтры кончилась раньше limit — сегмент собран целиком. */
   exhausted?: boolean;
   /**
@@ -1271,21 +1287,24 @@ async function insertChildJob(
  * (иначе финальный разбор нулевой сборки врал «сегмент исчерпан» на простом
  * срабатывании предохранителя).
  */
-async function fetchDirectoryRows(
+export async function fetchDirectoryRows(
   ctx: VeStageContext,
   filters: CompaniesSearchFilters,
   limit: number,
   excludedKeys: VeBaseExclusionKeys,
+  startOffset = 0,
 ): Promise<{
   rows: Record<string, unknown>[];
   excludedDuringFetch: number;
   exhausted: boolean;
   hitCeiling: boolean;
+  /** Сколько строк выдачи просканировано суммарно — закладка следующего захода. */
+  nextOffset: number;
   error?: string;
 }> {
   const rows: Record<string, unknown>[] = [];
   let excludedDuringFetch = 0;
-  let offset = 0;
+  let offset = Number.isSafeInteger(startOffset) && startOffset > 0 ? startOffset : 0;
   let page = 0;
   for (; page < MAX_DIRECTORY_PAGES && rows.length < limit; page += 1) {
     // A deep scan logs nothing until it ends: each page is progress for the
@@ -1294,23 +1313,24 @@ async function fetchDirectoryRows(
     const res = await searchRows(filters, DIRECTORY_PAGE_SIZE, offset);
     ctx.onActivity?.();
     if (res.error) {
-      return { rows: [], excludedDuringFetch, exhausted: false, hitCeiling: false, error: res.error };
+      return { rows: [], excludedDuringFetch, exhausted: false, hitCeiling: false, nextOffset: offset, error: res.error };
     }
-    offset += res.rows.length;
+    // Смещение двигаем по ПРОСМОТРЕННЫМ строкам, а не по всей странице:
+    // закладка не имеет права перешагнуть строки, которые мы не разобрали —
+    // иначе следующий заход их больше никогда не увидит.
+    let scanned = 0;
     for (const r of res.rows) {
+      if (rows.length >= limit) break;
+      scanned += 1;
       // Дубль другой базы: по email, имени (с ИНН-уточнением) или точно по ИНН.
       const pruned = pruneBaseRowAgainstExclusion(excludedKeys, mapDirectoryRow(r));
       if (!pruned) {
         excludedDuringFetch += 1;
         continue;
       }
-      // Новых строк на странице может быть больше остатка до limit — лишние
-      // не берём (они не попадают ни в базу, ни в исключения и будут
-      // подобраны следующей сборкой-продолжением).
-      if (rows.length < limit) {
-        rows.push(pruned.email === cell(r.email) ? r : { ...r, email: pruned.email });
-      }
+      rows.push(pruned.email === cell(r.email) ? r : { ...r, email: pruned.email });
     }
+    offset += scanned;
     if (res.rows.length < DIRECTORY_PAGE_SIZE) break;
   }
   // Потолок: цикл вышел по числу страниц, а limit так и не набран — все
@@ -1324,7 +1344,36 @@ async function fetchDirectoryRows(
       `[base_collect] реестр: ${excludedDuringFetch} строк пропущено на выборке — компании уже есть в других базах проекта`,
     );
   }
-  return { rows, excludedDuringFetch, exhausted, hitCeiling };
+  return { rows, excludedDuringFetch, exhausted, hitCeiling, nextOffset: offset };
+}
+
+/**
+ * Закладка выдачи реестра хранится по ключу фильтров: у каждого набора своя
+ * нумерация строк, и продолжать чужую нельзя. RPC отдаёт строго `order by
+ * c.id`, новые компании получают больший id и попадают в конец выдачи —
+ * поэтому смещение остаётся верным между заходами.
+ */
+const DIRECTORY_CURSOR_LIMIT = 8;
+function directoryCursorKey(filters: CompaniesSearchFilters): string {
+  const stable = Object.entries(filters).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b));
+  return createHash('sha256').update(JSON.stringify(stable)).digest('hex').slice(0, 16);
+}
+function readDirectoryCursor(state: VeCollectTaskState, filters: CompaniesSearchFilters): number {
+  const saved = state.directory_cursors?.[directoryCursorKey(filters)];
+  return typeof saved === 'number' && Number.isSafeInteger(saved) && saved > 0 ? saved : 0;
+}
+function writeDirectoryCursor(state: VeCollectTaskState, filters: CompaniesSearchFilters, offset: number): void {
+  if (!Number.isSafeInteger(offset) || offset <= 0) return;
+  const key = directoryCursorKey(filters);
+  const cursors = { ...(state.directory_cursors ?? {}) };
+  // Ключей у задачи единицы: фаза × лейн. Их перебор — признак смены плана, и
+  // продолжать по старым закладкам всё равно нельзя.
+  if (!(key in cursors) && Object.keys(cursors).length >= DIRECTORY_CURSOR_LIMIT) {
+    state.directory_cursors = { [key]: offset };
+    return;
+  }
+  cursors[key] = offset;
+  state.directory_cursors = cursors;
 }
 
 /* ─────────────────────── ENG-источники: прямое чтение справочников ─────────────────────── */
@@ -1706,20 +1755,26 @@ async function dispatchTask(
     // а лейн с почтой запускался лишь при полном исчерпании первого — то есть
     // практически никогда, потому что лейн «с сайтом» упирался в потолок
     // сканирования раньше, чем исчерпывался.
-    const first = await fetchDirectoryRows(ctx, existingContactsOnly ? { ...filters, hasEmail: true } : filters, limit, excluded);
+    const firstFilters = existingContactsOnly ? { ...filters, hasEmail: true } : filters;
+    const first = await fetchDirectoryRows(ctx, firstFilters, limit, excluded, readDirectoryCursor(state, firstFilters));
     // Второй лейн запускаем и после потолка сканирования, а не только после
     // исчерпания: иначе недобор первого лейна навсегда оставляет партию пустой.
+    const secondFilters = { ...filters, hasWebsite: true };
     const second = existingContactsOnly && !first.error && (first.exhausted || first.hitCeiling) && first.rows.length < limit
-      ? await fetchDirectoryRows(ctx, { ...filters, hasWebsite: true }, limit - first.rows.length,
+      ? await fetchDirectoryRows(ctx, secondFilters, limit - first.rows.length,
         addRowsToExclusionKeys({ inns: new Set(excluded.inns), emails: new Set(excluded.emails),
           receipts: new Set(excluded.receipts), websiteInns: new Map([...excluded.websiteInns].map(([key, values]) => [key, new Set(values)])) },
-        first.rows.map(mapDirectoryRow))) : null;
+        first.rows.map(mapDirectoryRow)), readDirectoryCursor(state, secondFilters)) : null;
     const rows = [...first.rows, ...(second?.rows ?? [])];
     const excludedDuringFetch = first.excludedDuringFetch + (second?.excludedDuringFetch ?? 0);
     const exhausted = first.exhausted && (!existingContactsOnly || second?.exhausted === true);
     const hitCeiling = first.hitCeiling || second?.hitCeiling === true;
     const error = first.error ?? second?.error;
     if (error) throw new Error(`companies_directory: ${error}`);
+    // Закладки сохраняем только после успеха обоих лейнов: частично
+    // просканированная выдача не должна считаться пройденной.
+    writeDirectoryCursor(state, firstFilters, first.nextOffset);
+    if (second) writeDirectoryCursor(state, secondFilters, second.nextOffset);
     if (existingContactsOnly) state.existing_contacts_only = true;
     else delete state.existing_contacts_only;
     state.harvest = rows.map(mapDirectoryRow);

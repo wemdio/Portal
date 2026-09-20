@@ -686,6 +686,14 @@ describe('base_collect CONSTRUCT step order', () => {
     await runBaseCollectStage(makeJob(), { supabase: phasedDb as unknown as SupabaseClient });
     expect(searchRows).toHaveBeenCalledTimes(3);
     expect(jest.mocked(searchRows).mock.calls.at(-1)?.[0]).toEqual(DIRECTORY_TASK.directory_filters);
+    // Первый заход каждого набора фильтров начинается с нуля.
+    expect(jest.mocked(searchRows).mock.calls.map(([, , offset]) => offset ?? 0)).toEqual([0, 0, 0]);
+    // Закладка выдачи сохранена только там, где реально что-то просканировано:
+    // пустые бесплатные лейны её не создают, платный — создаёт. Без закладки
+    // следующий заход снова начинал бы с первой страницы и однажды упирался
+    // в потолок сканирования навсегда.
+    const scannedTask = (phasedDb.getRows('ve_bases')[0].collect_info as VeCollectInfo).tasks![0];
+    expect(Object.values(scannedTask.directory_cursors ?? {})).toEqual([1]);
     expect(fetchVeRelevanceEvidence).toHaveBeenCalledTimes(1);
     expect(phasedDb.getRows('base_constructor_jobs')).toHaveLength(1);
 

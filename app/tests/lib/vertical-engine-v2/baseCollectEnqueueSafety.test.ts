@@ -8,7 +8,7 @@ import { enqueueVeBaseCollect } from '@/lib/verticalEngineV2/baseCollectEnqueue'
 import { claimVeJob, createVeJobPool, createVeProjectUsageAccumulator, canRunVeJob, veJobConcurrency, veBaseCollectConcurrency } from '@/lib/verticalEngineV2/jobQueue';
 import type { VeJob } from '@/lib/verticalEngineV2/types';
 import { runVeOutreachPreparations } from '@/lib/verticalEngineV2/outreachPreparation';
-import { enqueueVeContactReprojections } from '@/lib/verticalEngineV2/outreachSetup';
+import { autoResumeVeTransientPreparations, enqueueVeContactReprojections } from '@/lib/verticalEngineV2/outreachSetup';
 
 let mockRouteDb = createMockSupabase();
 jest.mock('@/lib/supabaseAdmin', () => ({ get supabaseAdmin() { return mockRouteDb; } }));
@@ -253,6 +253,22 @@ describe('VE2 base collection enqueue recovery', () => {
     } });
     await expect(enqueueVeContactReprojections(sweepDb as unknown as SupabaseClient)).resolves.toEqual({ queued: 1, pending: 1 });
     expect((await limit(null)).status).toBe(200);
+
+    // Автоподъём после временного сбоя: все проверки живут в RPC, наружу
+    // отдаётся только число поднятых, а сбой самой RPC не глотается молча —
+    // иначе воркер годами «поднимал бы ноль» и никто бы не заметил.
+    const resumeCalls: Array<Record<string, unknown>> = [];
+    const resumeDb = createMockSupabase({ rpcHandlers: {
+      ve_auto_resume_transient_preparations: (params: Record<string, unknown>) => { resumeCalls.push(params); return { data: 3 }; },
+    } });
+    await expect(autoResumeVeTransientPreparations(resumeDb as unknown as SupabaseClient)).resolves.toEqual({ resumed: 3 });
+    expect(resumeCalls).toEqual([{ p_limit: 10 }]);
+    const brokenDb = createMockSupabase({ rpcHandlers: {
+      ve_auto_resume_transient_preparations: () => ({ data: null, error: { message: 'rpc down' } }),
+    } });
+    await expect(autoResumeVeTransientPreparations(brokenDb as unknown as SupabaseClient)).rejects.toThrow('rpc down');
+    const oddDb = createMockSupabase({ rpcHandlers: { ve_auto_resume_transient_preparations: () => ({ data: null }) } });
+    await expect(autoResumeVeTransientPreparations(oddDb as unknown as SupabaseClient)).resolves.toEqual({ resumed: 0 });
   });
 
   it('repairs an orphan collecting base that has no active worker job', async () => {
