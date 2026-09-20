@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import type { Email } from './types';
+import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 
 // Keep headroom below the operational RPC's 1MiB/item and 16MiB/page guards.
 // The expanded limit is defensive, not permission to truncate a larger reply.
@@ -52,10 +53,10 @@ function compactHtmlImages(html: string): string {
  * If still large, store a lossless envelope and decode it BEFORE qualification.
  * Uncompressible overflow is explicit/fail-closed, never a clipped business reply. */
 export function encodeReplyIntakeEmail(email: Email): Email {
-  let compacted = email;
-  if (typeof email.body === 'object' && email.body && typeof email.body.html === 'string') {
-    const html = compactHtmlImages(email.body.html);
-    if (html !== email.body.html) compacted = { ...email, body: { ...email.body, html } };
+  let compacted = stripUnstorableJsonChars(email);
+  if (typeof compacted.body === 'object' && compacted.body && typeof compacted.body.html === 'string') {
+    const html = compactHtmlImages(compacted.body.html);
+    if (html !== compacted.body.html) compacted = { ...compacted, body: { ...compacted.body, html } };
   }
   if (!Object.hasOwn(compacted, ENVELOPE_KEY) && replyIntakeJsonBytes(compacted) <= MAX_STORED_PAYLOAD_BYTES) {
     return compacted;
@@ -65,9 +66,9 @@ export function encodeReplyIntakeEmail(email: Email): Email {
   if (bytes > MAX_EXPANDED_PAYLOAD_BYTES) throw new ReplyIntakePayloadError('payload_too_large');
   const compressed = gzipSync(json).toString('base64');
   const envelope: Email = {
-    id: email.id, campaign_id: email.campaign_id, from_address_email: email.from_address_email,
-    eaccount: email.eaccount, thread_id: email.thread_id, ue_type: email.ue_type,
-    timestamp_email: email.timestamp_email, timestamp_created: email.timestamp_created,
+    id: compacted.id, campaign_id: compacted.campaign_id, from_address_email: compacted.from_address_email,
+    eaccount: compacted.eaccount, thread_id: compacted.thread_id, ue_type: compacted.ue_type,
+    timestamp_email: compacted.timestamp_email, timestamp_created: compacted.timestamp_created,
     [ENVELOPE_KEY]: { codec: 'gzip', bytes, sha256: createHash('sha256').update(json).digest('hex'), data: compressed },
   };
   if (replyIntakeJsonBytes(envelope) > MAX_STORED_PAYLOAD_BYTES) throw new ReplyIntakePayloadError('payload_too_large');
@@ -75,7 +76,7 @@ export function encodeReplyIntakeEmail(email: Email): Email {
 }
 
 export function decodeReplyIntakeEmail(stored: Email): Email {
-  if (!Object.hasOwn(stored, ENVELOPE_KEY)) return stored; // pre-deployment raw rows
+  if (!Object.hasOwn(stored, ENVELOPE_KEY)) return stripUnstorableJsonChars(stored);
   try {
     const envelope = stored[ENVELOPE_KEY] as Record<string, unknown> | null;
     if (!envelope || envelope.codec !== 'gzip' || typeof envelope.data !== 'string' ||
@@ -98,7 +99,7 @@ export function decodeReplyIntakeEmail(stored: Email): Email {
       email.timestamp_email !== stored.timestamp_email || email.timestamp_created !== stored.timestamp_created) {
       throw new Error('invalid decoded reply scope');
     }
-    return email;
+    return stripUnstorableJsonChars(email);
   } catch {
     throw new ReplyIntakePayloadError('payload_decode_failed');
   }
