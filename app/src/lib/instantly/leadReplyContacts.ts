@@ -1,9 +1,10 @@
 import { load } from 'cheerio';
-import { isPersonName } from '../enrich/extractors/nameQuality';
+import { isPersonName, isRoleTitle } from '../enrich/extractors/nameQuality';
 import { joinLeadPhones, leadPhoneCandidates, normalizeLeadWebsite } from './leadContactValues';
 import type { Email } from './types';
 
 export interface LeadReplyContacts {
+  leadName: string | null;
   bodyPhone: string | null;
   signaturePhone: string | null;
   companyName: string | null;
@@ -117,7 +118,7 @@ function explicitCompany(line: string): string | null {
   if (/(?:^|\s)(?:оказывает|предоставляет|предлагает|производит|занимается|работает|осуществляет|поставляет|является|provides|offers|specializes|manufactures|works|delivers)(?:\s|$)/iu.test(line)) return null;
   const label = /^(?:компания|организация|company|organisation|organization|магазин)(?:\s*:\s*|\s+)(.+)$/iu.exec(line);
   // Accept a legal name inside a job title, not arbitrary narrative mentions.
-  const role = /^(?:специалист|менеджер|руководитель|директор|начальник|генеральный директор|региональный менеджер)\s+.{0,100}?\s+((?:ООО|АО|ПАО|ЗАО|ОАО|ИП|ТОО)\s+[«"“].+?[»"”])\s*$/iu.exec(line);
+  const role = /^(?:специалист|менеджер|руководитель|директор|начальник|помощник|ассистент|заместитель|генеральный директор|региональный менеджер)\s+.{0,100}?\s+((?:ООО|АО|ПАО|ЗАО|ОАО|ИП|ТОО)\s+[«"“].+?[»"”])\s*$/iu.exec(line);
   const legal = /^(?:(?:ООО|АО|ПАО|ЗАО|ОАО|ИП|ТОО|НКО|АНО|LLC|LTD|GmbH)\s+.+|.{2,80}\s+(?:LLC|Ltd\.?|Inc\.?|Corp\.?|GmbH|Limited|Corporation))$/iu.test(line);
   const value = (label?.[1] ?? role?.[1] ?? (legal ? line : '')).replace(/\s+/g, ' ').trim()
     .replace(/^\*{1,2}(.+?)\*{1,2}$/, '$1');
@@ -133,6 +134,21 @@ function brandedCompany(line: string, website: string | null): string | null {
   const brand = display.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
   const hostParts = new URL(website).hostname.replace(/^www\./, '').split('.').slice(0, -1);
   return hostParts.some((part) => part.replace(/-/g, '') === brand) ? display : null;
+}
+
+/** Only the current sender's signature, not greetings, body mentions or quoted
+ * contacts. Require a recognized personal name and keep ambiguous signatures
+ * empty instead of choosing one of several people. Structured data wins later. */
+function signatureLeadName(signature: string[]): string | null {
+  const candidates = signature.slice(0, 5).map((line) => line
+    .replace(/^(?:с\s+(?:уважением|наилучшими\s+пожеланиями)|best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)[\s,.!:-]*/iu, '')
+    .replace(/^(?:фио|имя|name)\s*:\s*/iu, '')
+    .replace(/[.,;:!]+$/u, '').trim())
+    .filter((value) => isPersonName(value) && !isRoleTitle(value) &&
+      !/(?:^|\s)(?:команда|компания|организация|магазин|отдел|team|company|department)(?:\s|$)/iu.test(value) &&
+      value.split(/\s+/).every((word) => /^\p{Lu}[\p{L}’'-]*$/u.test(word)));
+  const unique = new Map(candidates.map((name) => [name.toLowerCase(), name]));
+  return unique.size === 1 ? [...unique.values()][0] : null;
 }
 
 function extractFromText(text: string): LeadReplyContacts {
@@ -159,6 +175,7 @@ function extractFromText(text: string): LeadReplyContacts {
     return WEBSITE_LABEL.test(line) || standalone ? sites : [];
   })[0] ?? null;
   return {
+    leadName: signatureLeadName(signature),
     bodyPhone: joinLeadPhones(body.map((line) => phoneInLine(line, false))),
     signaturePhone: joinLeadPhones(signature.map((line) => phoneInLine(line, true))),
     companyName: signature.flatMap((_, index) => [1, 2, 3].map((length) =>
@@ -186,6 +203,7 @@ export function extractLeadReplyContacts(body: Email['body']): LeadReplyContacts
   try {
     const fallback = extractFromText(htmlText(html));
     return {
+      leadName: primary.leadName ?? fallback.leadName,
       bodyPhone: primary.bodyPhone ?? fallback.bodyPhone,
       signaturePhone: primary.signaturePhone ?? fallback.signaturePhone,
       companyName: primary.companyName ?? fallback.companyName,

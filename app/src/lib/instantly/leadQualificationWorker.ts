@@ -1967,8 +1967,8 @@ export async function qualifyOneReply(
       const boardProjectId = qualifiedProjectId;
       await getOrCreateBoard(db, boardProjectId);
       // Шаг — тот же счёт, что ИИ видит в промпте («шаг N кампании»): наши
-      // исходящие (ue_type=1) в треде. Имя — фолбэк на заголовок письма,
-      // когда Instantly Lead API его не вернул.
+      // исходящие (ue_type=1) в треде. Заголовок письма — последний фолбэк
+      // имени, если ни в базе, ни в собственной подписи его не нашли.
       const stepNumber = result.threadContext
         ? result.threadContext.threadEmails.filter((e) => (e.ue_type ?? 1) === 1).length
         : null;
