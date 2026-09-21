@@ -2403,7 +2403,14 @@ async function dispatchConstructJob(input: {
       // предпочёл подтверждённый адрес catch-all, и не больше.
       find_emails: {
         stop_at_first: false, max_per_site: 6, max_pages: 4, site_timeout_ms: 30_000, merge_mode: 'prefer_found_validated',
-        ...(reservedId ? { reuse_website_description: true } : {}),
+        // Описание берём из главной страницы, которую find_emails и так уже
+        // скачал. Без этого enrich_descriptions идёт на тот же сайт второй
+        // раз — и втрое меньшей параллельностью, чем поиск почт. Замер: у 75%
+        // строк с сайтом описание набирается прямо с главной, то есть три из
+        // четырёх повторных закачек лишние. Флаг включаем только когда шаг
+        // enrich_descriptions реально стоит в списке: у баз свыше 5000 строк
+        // его нет, и колонка описания там появляться не должна.
+        ...(reservedId || steps.includes('enrich_descriptions') ? { reuse_website_description: true } : {}),
       },
     },
     data: buildConstructGrid(rows, market),
@@ -2472,21 +2479,35 @@ function beginAdaptiveBatch(base: VeAutoBase, info: VeCollectInfo, id: string, r
     started_at: policy.last_completed_at ?? policy.started_at };
 }
 
+/** Пороги размера компании ставит только планировщик-LLM: в интерфейсе движка
+ *  их задать нельзя. Поэтому ограничением специалиста они не являются и не
+ *  должны ни блокировать переход на другой источник, ни переживать смену
+ *  запроса. Замер по нефтехимии: «выручка от 100 млн + штат от 50» оставил 199
+ *  компаний из 2 863 по тому же ОКВЭД, задача встала с пометкой «реестр
+ *  исчерпан», а 27 тысяч организаций той же отрасли в Яндекс.Картах остались
+ *  недоступны — именно эти пороги считались ограничением, запрещающим карты. */
+const SIZE_FILTER_KEYS = ['revenueFrom', 'revenueTo', 'employeesFrom', 'employeesTo'] as const;
+
 /** Keep user/plan restrictions when trying a different query. Cross-source
  * fallback is allowed only when the original source has no numeric/geo scope
  * which the new source cannot enforce. Final hypothesis checks stay unchanged. */
-function safeAlternativeTask(candidate: VeCollectTask, original: VeCollectTask): VeCollectTask | null {
+export function safeAlternativeTask(candidate: VeCollectTask, original: VeCollectTask): VeCollectTask | null {
   if (!['companies_directory', 'yandex_maps', 'pdl', 'funded', 'eng_hiring'].includes(candidate.source)) return null;
   if (candidate.source !== original.source) {
     const restricted = original.directory_filters && Object.entries(original.directory_filters)
-      .some(([key, value]) => !['okvedCodes', 'hasEmail'].includes(key) && value !== undefined)
+      .some(([key, value]) => !['okvedCodes', 'hasEmail', ...SIZE_FILTER_KEYS].includes(key) && value !== undefined)
       || original.maps_query?.geo || original.pdl_filters?.countries?.length || original.pdl_filters?.sizes?.length
       || original.funded_filters || original.eng_hiring_query || original.hh_query;
     if (restricted) return null;
   }
   if (candidate.source === 'companies_directory' && original.source === candidate.source) return {
     ...candidate, directory_filters: { ...candidate.directory_filters, ...original.directory_filters,
-      okvedCodes: candidate.directory_filters?.okvedCodes ?? original.directory_filters?.okvedCodes },
+      okvedCodes: candidate.directory_filters?.okvedCodes ?? original.directory_filters?.okvedCodes,
+      // Пороги размера берём у КАНДИДАТА, а не у исходной задачи: иначе
+      // самовыдуманный планировщиком порог невозможно ослабить ни одной
+      // альтернативой — перетирался бы обратно на каждой попытке.
+      ...Object.fromEntries(SIZE_FILTER_KEYS.map((key) => [key, candidate.directory_filters?.[key]])),
+    },
   };
   if (candidate.source === 'yandex_maps' && original.maps_query && candidate.maps_query) return {
     ...candidate, maps_query: { ...candidate.maps_query, geo: original.maps_query.geo },
