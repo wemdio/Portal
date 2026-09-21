@@ -259,6 +259,19 @@ export interface ProjectPace {
 
 export type RiskAxis = 'contacts' | 'kpi';
 
+/**
+ * Допуск отставания в днях: проект считается проблемным только если прогноз
+ * промахивается мимо дедлайна БОЛЬШЕ чем на столько дней.
+ *
+ * Зачем: прогноз строится по средней скорости за окно истории и по своей
+ * природе шумный — пара медленных дней на 3-месячном проекте легко даёт
+ * «отставание» в 2–5 дней, которое закрывается само. Без допуска фильтр
+ * «Проблемные» наполнялся пограничными проектами и переставал читаться как
+ * сигнал. Неделя — минимальный отрезок, который команда реально успевает
+ * отыграть (и на который смещается любой перенос созвона/выгрузки).
+ */
+export const RISK_GRACE_DAYS = 7;
+
 export interface ProjectRiskSummary {
   /** Какие оси не успевают (forecast > deadline). Пустой массив ⇒ риска нет. */
   axes: RiskAxis[];
@@ -365,28 +378,34 @@ export async function loadAllProjectsPace(
  * Возвращает пустые axes (риска нет), если:
  *   - проект завершён/отменён,
  *   - нет dедлайна или меньше 2 точек истории (`onTrack === null`),
- *   - оба `onTrack === true`.
+ *   - оба `onTrack === true`,
+ *   - отставание укладывается в допуск `graceDays` (см. `RISK_GRACE_DAYS`).
+ *
+ * `graceDays` — сколько дней отставания прощаем. Ось попадает в риск только
+ * при `behindDays > graceDays`, поэтому «промахнулись на 3 дня» больше не
+ * красит проект в проблемный. Передайте 0, чтобы получить старое поведение
+ * (любое отставание = риск).
  */
 export function summarizeProjectRisk(
   pace: ProjectPace | undefined,
   isCompleted: boolean,
+  graceDays: number = RISK_GRACE_DAYS,
 ): ProjectRiskSummary {
   const empty: ProjectRiskSummary = { axes: [], daysBehind: 0 };
   if (!pace || isCompleted) return empty;
 
   const axes: RiskAxis[] = [];
   let daysBehind = 0;
-  if (pace.contacts && pace.contacts.onTrack === false) {
+  const isBehind = (data: PaceData | null): data is PaceData & { behindDays: number } =>
+    !!data && data.onTrack === false && data.behindDays !== null && data.behindDays > graceDays;
+
+  if (isBehind(pace.contacts)) {
     axes.push('contacts');
-    if (pace.contacts.behindDays !== null && pace.contacts.behindDays > daysBehind) {
-      daysBehind = pace.contacts.behindDays;
-    }
+    if (pace.contacts.behindDays > daysBehind) daysBehind = pace.contacts.behindDays;
   }
-  if (pace.kpi && pace.kpi.onTrack === false) {
+  if (isBehind(pace.kpi)) {
     axes.push('kpi');
-    if (pace.kpi.behindDays !== null && pace.kpi.behindDays > daysBehind) {
-      daysBehind = pace.kpi.behindDays;
-    }
+    if (pace.kpi.behindDays > daysBehind) daysBehind = pace.kpi.behindDays;
   }
   return { axes, daysBehind };
 }
