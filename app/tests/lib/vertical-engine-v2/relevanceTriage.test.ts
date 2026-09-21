@@ -133,6 +133,9 @@ describe('VE2 calibrated relevance triage', () => {
       reason: expect.stringContaining('перепродажа чужого оборудования') }));
     expect(checked.decisions.get(2)).toEqual(expect.objectContaining({ triage_version: 1 }));
     expect(checked.decisions.get(2)?.triage).toBeUndefined();
+    // Счёт нерешённой компании сохранён: по нему потом решается, стоит ли
+    // покупать ей платный поиск сайта. Решённые в этот список не попадают.
+    expect(Object.values(saved?.triage_activity ?? {})).toEqual([0.2]);
     // One checklist, one LLM classification for the single uncertain company, two review steps for the single proposal.
     expect(calls).toEqual({ rubric: 1, classify: 1, review: 2, company: 3, evidence: 1 });
     // Every classifier request is journalled and priced by the shared layer.
