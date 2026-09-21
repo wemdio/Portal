@@ -1,5 +1,7 @@
 import 'server-only';
 
+import { buildMessageId } from '@/lib/mail/message';
+import { BYO_SEND_WINDOW, isWithinWindow, nextWindowSlot } from '@/lib/mail/sendSchedule';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { unsealMailboxSecret } from './credentials';
 import { sendMailViaSmtp, sendMailViaOAuthGmail, sendMailViaOAuthToken, type SmtpResult } from './smtp';
@@ -34,6 +36,8 @@ interface QueuedMessage {
   subject: string;
   body: string;
   attempts: number;
+  /** Проставляется до отправки; на повторе переиспользуется прежний. */
+  message_id: string | null;
 }
 
 type Log = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => void;
@@ -49,15 +53,26 @@ function fromHeader(mb: MailboxRow): string {
 /** Отправить одно письмо через конкретный ящик (расшифровывает креды, выбирает SMTP/OAuth). */
 export async function sendViaMailbox(
   mb: MailboxRow,
-  msg: { to: string; subject: string; text: string },
+  msg: { to: string; subject: string; text: string; messageId?: string; inReplyTo?: string | null },
 ): Promise<SmtpResult> {
   const secret = unsealMailboxSecret(mb.secret_encrypted);
   const from = fromHeader(mb);
+  // Один и тот же набор полей на все три способа входа — иначе письмо
+  // выглядит по-разному в зависимости от того, как подключён ящик.
+  const mail = {
+    from,
+    to: msg.to,
+    subject: msg.subject,
+    text: msg.text,
+    messageId: msg.messageId,
+    inReplyTo: msg.inReplyTo ?? undefined,
+    references: msg.inReplyTo ?? undefined,
+  };
   if (mb.auth_type === 'oauth_google') {
     if (!secret.oauthRefreshToken) return { ok: false, error: 'reauth_required' };
     return sendMailViaOAuthGmail(
       { email: mb.email, refreshToken: secret.oauthRefreshToken },
-      { from, to: msg.to, subject: msg.subject, text: msg.text },
+      mail,
     );
   }
   if (mb.auth_type === 'oauth_yandex') {
@@ -70,13 +85,13 @@ export async function sendViaMailbox(
     }
     return sendMailViaOAuthToken(
       { host: 'smtp.yandex.ru', port: 465, secure: true, user: mb.email, accessToken },
-      { from, to: msg.to, subject: msg.subject, text: msg.text },
+      mail,
     );
   }
   if (!secret.smtpPassword) return { ok: false, error: 'no_smtp_password' };
   return sendMailViaSmtp(
     { host: mb.smtp_host, port: mb.smtp_port, secure: mb.smtp_secure, username: mb.username, password: secret.smtpPassword },
-    { from, to: msg.to, subject: msg.subject, text: msg.text },
+    mail,
   );
 }
 
@@ -97,16 +112,37 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Возвращает claimed-письмо обратно в очередь (ящик не готов/лимит исчерпан в этом проходе). */
-async function releaseMessage(id: string): Promise<void> {
+/** Тот же момент завтра — точка отсчёта для «следующего окна». */
+function tomorrow(): Date {
+  return new Date(Date.now() + 24 * 60 * 60 * 1000);
+}
+
+/**
+ * Возвращает claimed-письмо обратно в очередь (ящик не готов / лимит исчерпан /
+ * окно закрыто).
+ *
+ * nextAt сдвигает письмо вперёд. Без сдвига всё, что упёрлось в дневной лимит,
+ * назавтра станет доступно одной секундой — и рассылка снова начнётся всплеском,
+ * ровно тем, от которого уводит расписание.
+ */
+async function releaseMessage(id: string, nextAt?: Date): Promise<void> {
   if (!supabaseAdmin) return;
-  await supabaseAdmin.from('client_byo_messages').update({ status: 'pending' }).eq('id', id);
+  const patch: Record<string, unknown> = { status: 'pending' };
+  if (nextAt) patch.scheduled_at = nextAt.toISOString();
+  await supabaseAdmin.from('client_byo_messages').update(patch).eq('id', id);
 }
 
 /**
  * Один проход дренажа очереди. Возвращает true, если что-то реально отправили
  * (тогда воркер сразу делает следующий проход). Письма сверх дневного лимита
  * остаются 'pending' до следующего окна.
+ *
+ * Темп задаётся не здесь, а полем scheduled_at при постановке кампании
+ * (lib/mail/sendSchedule): письма уже разложены по окну со случайными паузами,
+ * и в норме к каждому проходу готово одно-два. Пауза ниже — только страховка
+ * от залпа, когда воркер простоял и накопился хвост: она короткая нарочно,
+ * потому что взятые письма висят в статусе sending, а claim_byo_messages
+ * забирает их обратно через десять минут.
  */
 export async function processByoSendBatch(opts?: {
   batchSize?: number;
@@ -115,8 +151,8 @@ export async function processByoSendBatch(opts?: {
 }): Promise<boolean> {
   if (!supabaseAdmin) return false;
   const batchSize = opts?.batchSize ?? 25;
-  const gapMs = opts?.gapMs ?? 4000;
   const log: Log = opts?.log ?? (() => {});
+  const burstGapMs = () => opts?.gapMs ?? 3000 + Math.random() * 5000;
 
   // Атомарный claim (FOR UPDATE SKIP LOCKED) вместо plain select — см.
   // migrations/20260915_0002_claim_byo_messages.sql. Без него параллельные
@@ -161,11 +197,33 @@ export async function processByoSendBatch(opts?: {
 
     const left = remaining.get(m.mailbox_id) ?? 0;
     if (left <= 0) {
-      await releaseMessage(m.id); // дневной лимит исчерпан — оставляем на следующее окно
+      // Дневной лимит исчерпан — письмо переезжает в начало следующего окна.
+      await releaseMessage(m.id, nextWindowSlot(tomorrow(), BYO_SEND_WINDOW));
       continue;
     }
 
-    const res = await sendViaMailbox(mb, { to: m.to_email, subject: m.subject, text: m.body });
+    // Окно закрыто — так бывает у писем, вернувшихся в очередь после ошибки
+    // или простоя воркера. Ночью холодное письмо не уходит.
+    if (!isWithinWindow(new Date(), BYO_SEND_WINDOW)) {
+      await releaseMessage(m.id, nextWindowSlot(new Date(), BYO_SEND_WINDOW));
+      continue;
+    }
+
+    // Message-ID пишем в базу ДО отправки: если после успешной отправки упасть
+    // на записи, письмо уже ушло, и восстановить его идентификатор нельзя —
+    // а без него не связать с письмом входящий ответ.
+    let messageId = m.message_id ?? null;
+    if (!messageId) {
+      messageId = buildMessageId(mb.email);
+      await supabaseAdmin.from('client_byo_messages').update({ message_id: messageId }).eq('id', m.id);
+    }
+
+    const res = await sendViaMailbox(mb, {
+      to: m.to_email,
+      subject: m.subject,
+      text: m.body,
+      messageId,
+    });
     const attempts = (m.attempts ?? 0) + 1;
 
     if (res.ok) {
@@ -175,7 +233,7 @@ export async function processByoSendBatch(opts?: {
         .eq('id', m.id);
       remaining.set(m.mailbox_id, left - 1);
       processed++;
-      await sleep(gapMs);
+      await sleep(burstGapMs());
     } else if (res.error === 'reauth_required') {
       // Токен доступа умер → помечаем ящик на переподключение; письмо возвращаем в очередь.
       await supabaseAdmin
