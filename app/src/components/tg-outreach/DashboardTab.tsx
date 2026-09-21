@@ -51,6 +51,8 @@ interface DashboardApiResponse {
   accounts: AccountsSummary;
   accounts_total: number;
   warming: number;
+  /** Деньги за аккаунты, заведённые в портал в этом периоде. */
+  accounts_spend?: { total: number; count: number; without_price: number };
 }
 
 const PERIOD_OPTIONS: Array<{ id: DashboardPeriod; label: string }> = [
@@ -432,7 +434,7 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
               а главное — это однородный ряд, и читать его удобнее в строку. */}
           <DashboardFunnel funnel={data.dashboard.funnel} />
 
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
             <SignalTile
               label="Заблокировали нас"
               value={data.dashboard.blocks}
@@ -475,6 +477,28 @@ export default function DashboardTab({ campaignId }: { campaignId: string }) {
                 'Очередь работы оператора: человек ответил в этом периоде, но диалог до сих пор без статуса '
                 + '(не «Целевой», не «Не целевой», не «Позже») и менеджеру не передан. '
                 + 'Сорвавшиеся передачи внимание не снимают — до менеджера такой диалог не дошёл.'
+              }
+            />
+            {/* Деньги — в том же ряду: это тоже итог периода, и смотрят его
+                вместе с остальными, а не отдельным разделом. */}
+            <SignalTile
+              label="Потрачено на аккаунты"
+              value={data.accounts_spend
+                ? `${Math.round(data.accounts_spend.total).toLocaleString('ru-RU')} ₽`
+                : '—'}
+              caption={data.accounts_spend
+                ? `завели в портал за период: ${data.accounts_spend.count}`
+                  + (data.accounts_spend.without_price
+                    ? `, из них без цены ${data.accounts_spend.without_price}`
+                    : '')
+                : 'нет данных'}
+              hint={
+                'Сумма цен аккаунтов кампании, заведённых в ПОРТАЛ внутри периода. '
+                + 'Дата берётся от появления аккаунта в портале, а не от прихода в кампанию: '
+                + 'переехавший из другой кампании куплен тогда, когда куплен, и в неделю переезда '
+                + 'деньги второй раз не тратились. Архивные считаются — списанный аккаунт стоил '
+                + 'столько же. Аккаунты без проставленной цены в сумму не входят: пусто значит '
+                + '«неизвестно», а не «бесплатно», поэтому их число сказано отдельно.'
               }
             />
             <SignalTile
