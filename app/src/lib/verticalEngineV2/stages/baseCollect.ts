@@ -1314,7 +1314,10 @@ export async function fetchDirectoryRows(
     const res = await searchRows(filters, DIRECTORY_PAGE_SIZE, offset);
     ctx.onActivity?.();
     if (res.error) {
-      return { rows: [], excludedDuringFetch, exhausted: false, hitCeiling: false, nextOffset: offset, error: res.error };
+      // Страницы до сбоя разобраны полностью, и offset двигался только по ним.
+      // Отдаём префикс вместе с его закладкой: строки уже оплачены сканом, а
+      // выбросить их — значит на следующем заходе листать тот же кусок заново.
+      return { rows, excludedDuringFetch, exhausted: false, hitCeiling: false, nextOffset: offset, error: res.error };
     }
     // Смещение двигаем по ПРОСМОТРЕННЫМ строкам, а не по всей странице:
     // закладка не имеет права перешагнуть строки, которые мы не разобрали —
@@ -1771,9 +1774,14 @@ async function dispatchTask(
     const exhausted = first.exhausted && (!existingContactsOnly || second?.exhausted === true);
     const hitCeiling = first.hitCeiling || second?.hitCeiling === true;
     const error = first.error ?? second?.error;
-    if (error) throw new Error(`companies_directory: ${error}`);
-    // Закладки сохраняем только после успеха обоих лейнов: частично
-    // просканированная выдача не должна считаться пройденной.
+    // Обрыв выдачи посреди лейна — не повод выбросить разобранный префикс.
+    // Падаем только когда фиксировать нечего: иначе таймаут шлюза на
+    // очередной странице уносил и собранные строки, и задачу, и всю базу
+    // (прод 21.09, база 3cd77243: 400 компаний и 10 590 просмотренных строк).
+    if (error && rows.length === 0) throw new Error(`companies_directory: ${error}`);
+    // Закладка и строки фиксируются одной записью: смещение двигается ровно по
+    // тем строкам, которые ушли в harvest, поэтому перешагнуть неразобранное
+    // оно не может — ни при успехе лейна, ни при обрыве.
     writeDirectoryCursor(state, firstFilters, first.nextOffset);
     if (second) writeDirectoryCursor(state, secondFilters, second.nextOffset);
     if (existingContactsOnly) state.existing_contacts_only = true;
@@ -1796,7 +1804,12 @@ async function dispatchTask(
       // исчерпан» там, где поможет просто повторный запуск.
       state.hit_ceiling = true;
       state.note = 'достигнут предел сканирования 200k — запустите сборку ещё раз';
+    } else if (error) {
+      // Партия частичная: источник жив, лейн оборвался на странице. Ни
+      // exhausted, ни hit_ceiling не ставим — продолжение пойдёт с закладки.
+      state.note = `частичная партия: выдача реестра оборвалась (${error})`;
     }
+    if (error) stageLog(ctx, `[base_collect] реестр: партия собрана частично, взято ${rows.length} строк, выдача оборвалась: ${error}`);
     return;
   }
 
@@ -3657,6 +3670,11 @@ async function completeTargetRound(args: {
     for (const task of tasks) if (canAcquirePaid && task.existing_contacts_only) {
       task.status = 'pending'; task.exhausted = false; task.hit_ceiling = false; delete task.note;
       delete task.existing_contacts_only;
+      // Счётчик отбраковки остаётся от лейнов бесплатной фазы. В платной
+      // задача читает другой срез с собственной нумерацией, и эти тысячи
+      // «выброшено» ни к нему не относятся, ни закладку по ним досеять нельзя:
+      // строки чужого лейна не покрывают строки нового.
+      delete task.excluded_during_fetch;
     }
     const saved = buildVeRelevanceReviewBatch({ reserve: reserveRows, ready: cleaned.rows,
       source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true, triage: triageEnabled });
