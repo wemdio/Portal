@@ -1,11 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Loader2, RefreshCw, Trash2, Upload, Users } from 'lucide-react';
+import { Loader2, RefreshCw, Search, Trash2, Upload, Users } from 'lucide-react';
 import {
   bulkMailboxes,
   deleteMailbox,
   fetchMailboxes,
+  fetchMailboxTags,
   googleWorkspaceStatus,
   syncGoogleWorkspace,
   importMailboxes,
@@ -13,11 +14,15 @@ import {
   type BulkMailboxAction,
   type ImportMailboxesResult,
   type MailboxDto,
+  type MailboxTagDto,
 } from './api';
 import { GOOGLE_STATE_LABELS, MAILBOX_STATUS_LABELS, providerLabel } from './labels';
+import { TagAssignMenu, TagChip, TagFilterMenu } from './MailboxTags';
 
 const PAGE_SIZE = 30;
 const EMPTY_SELECTION: ReadonlySet<string> = new Set();
+/** Пауза между буквой и запросом: иначе поиск стоит запроса на символ. */
+const SEARCH_DEBOUNCE_MS = 300;
 
 export function MailboxesTab() {
   const [mailboxes, setMailboxes] = useState<MailboxDto[]>([]);
@@ -43,9 +48,28 @@ export function MailboxesTab() {
   const [googleBusy, setGoogleBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // search — то, что набрано в поле; appliedSearch — то, что уже ушло в запрос.
+  // Разделены, чтобы каждая буква не стоила похода на сервер, а список не
+  // перерисовывался в процессе набора.
+  const [search, setSearch] = useState('');
+  const [appliedSearch, setAppliedSearch] = useState('');
+  const searchTimer = useRef<number | null>(null);
+  const [tags, setTags] = useState<MailboxTagDto[]>([]);
+  const [untagged, setUntagged] = useState(0);
+  const [tagFilter, setTagFilter] = useState<ReadonlySet<string>>(EMPTY_SELECTION);
+  const [noTagFilter, setNoTagFilter] = useState(false);
+  // Ключ строкой: Set в списке зависимостей useCallback сравнивается по ссылке,
+  // и список перезагружался бы на каждый рендер.
+  const tagFilterKey = [...tagFilter].sort().join(',');
+
   const load = useCallback(async (targetPage: number) => {
     try {
-      const { mailboxes: rows, total: count } = await fetchMailboxes({ page: targetPage });
+      const { mailboxes: rows, total: count } = await fetchMailboxes({
+        page: targetPage,
+        search: appliedSearch || undefined,
+        tagIds: tagFilterKey ? tagFilterKey.split(',') : undefined,
+        noTag: noTagFilter || undefined,
+      });
       setMailboxes(rows);
       setTotal(count);
       // Строку удалили и страница стала пустой — откатываемся к предыдущей.
@@ -57,6 +81,25 @@ export function MailboxesTab() {
     } finally {
       setLoading(false);
     }
+  }, [appliedSearch, tagFilterKey, noTagFilter]);
+
+  const loadTags = useCallback(async () => {
+    try {
+      const res = await fetchMailboxTags();
+      setTags(res.tags);
+      setUntagged(res.untagged);
+    } catch {
+      /* теги не доехали — фильтр просто останется пустым */
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadTags();
+  }, [loadTags]);
+
+  // Ушли с экрана недонабрав — отложенный запрос отменяем.
+  useEffect(() => () => {
+    if (searchTimer.current) window.clearTimeout(searchTimer.current);
   }, []);
 
   useEffect(() => {
@@ -153,6 +196,67 @@ export function MailboxesTab() {
     setSelected(allOnPageSelected ? new Set() : new Set(mailboxes.map((m) => m.id)));
   };
 
+  /**
+   * Смена фильтра — это другой набор строк: возвращаемся на первую страницу и
+   * снимаем галочки. «Выбрано 12» после смены фильтра относилось бы к ящикам,
+   * которых на экране больше нет.
+   */
+  const resetToFirstPage = () => {
+    setPage(1);
+    setSelection({ page: 1, ids: new Set() });
+  };
+
+  const onSearchChange = (value: string) => {
+    setSearch(value);
+    if (searchTimer.current) window.clearTimeout(searchTimer.current);
+    // Пауза отсчитывается в обработчике ввода, а не в эффекте: так опрос
+    // статусов раз в 15 секунд не может затереть набранное.
+    searchTimer.current = window.setTimeout(() => {
+      setAppliedSearch(value.trim());
+      resetToFirstPage();
+    }, SEARCH_DEBOUNCE_MS);
+  };
+
+  const toggleTagFilter = (id: string) => {
+    const next = new Set(tagFilter);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    setTagFilter(next);
+    resetToFirstPage();
+  };
+
+  const toggleNoTagFilter = () => {
+    setNoTagFilter((v) => !v);
+    resetToFirstPage();
+  };
+
+  const resetTagFilter = () => {
+    setTagFilter(EMPTY_SELECTION);
+    setNoTagFilter(false);
+    resetToFirstPage();
+  };
+
+  /** «Под тег» на выборку: у ящика может быть только один тег, поэтому замена. */
+  const assignTag = async (tagId: string | null) => {
+    const ids = [...selected];
+    if (!ids.length) return;
+    const withTag = mailboxes.filter((m) => ids.includes(m.id) && m.tag).length;
+    if (tagId && withTag
+      && !window.confirm(
+        `У ${withTag} из ${ids.length} ящиков тег уже стоит — он заменится на новый. Продолжить?`,
+      )) return;
+    setBulkBusy(true);
+    setError(null);
+    try {
+      await bulkMailboxes(ids, 'tag', tagId);
+      setSelected(new Set());
+      await Promise.all([load(page), loadTags()]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось повесить тег');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   const runBulk = async (action: BulkMailboxAction) => {
     const ids = [...selected];
     if (!ids.length) return;
@@ -163,7 +267,8 @@ export function MailboxesTab() {
     try {
       await bulkMailboxes(ids, action);
       setSelected(new Set());
-      await load(page);
+      // Удаление ящиков меняет счётчики тегов в фильтре.
+      await Promise.all([load(page), action === 'delete' ? loadTags() : Promise.resolve()]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось применить действие');
     } finally {
@@ -253,6 +358,33 @@ export function MailboxesTab() {
         {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
       </div>
 
+      {/* Поиск и фильтр тегов — между подключением и списком: это про список,
+          но нужны до того, как в нём начнёшь что-то искать глазами. */}
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        <div className="relative w-full max-w-md">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+          <input
+            value={search}
+            onChange={(e) => onSearchChange(e.target.value)}
+            placeholder="Поиск по адресу"
+            aria-label="Поиск по адресу"
+            className="w-full rounded-lg border border-zinc-300 bg-white py-2 pl-9 pr-3 text-sm text-zinc-900"
+          />
+        </div>
+        <TagFilterMenu
+          tags={tags}
+          untagged={untagged}
+          selected={tagFilter}
+          noTag={noTagFilter}
+          onToggleTag={toggleTagFilter}
+          onToggleNoTag={toggleNoTagFilter}
+          onReset={resetTagFilter}
+          onChanged={async () => {
+            await Promise.all([loadTags(), load(page)]);
+          }}
+        />
+      </div>
+
       <div className="rounded-xl border border-zinc-200 bg-white">
         <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-3">
           <h2 className="text-base font-semibold text-zinc-900">Ящики ({total})</h2>
@@ -304,6 +436,7 @@ export function MailboxesTab() {
             >
               Удалить
             </button>
+            <TagAssignMenu tags={tags} disabled={bulkBusy} onPick={(tagId) => void assignTag(tagId)} />
             <button
               type="button"
               disabled={bulkBusy}
@@ -322,7 +455,11 @@ export function MailboxesTab() {
             Загрузка…
           </div>
         ) : mailboxes.length === 0 ? (
-          <p className="px-5 py-10 text-center text-sm text-zinc-500">Ящиков пока нет — загрузите выгрузку провайдера.</p>
+          <p className="px-5 py-10 text-center text-sm text-zinc-500">
+            {appliedSearch || tagFilterKey || noTagFilter
+              ? 'Под фильтр не попал ни один ящик.'
+              : 'Ящиков пока нет — загрузите выгрузку провайдера.'}
+          </p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -345,6 +482,7 @@ export function MailboxesTab() {
                   </th>
                   <th className="px-3 py-2 font-medium">Ящик</th>
                   <th className="px-3 py-2 font-medium">Провайдер</th>
+                  <th className="px-3 py-2 font-medium">Тег</th>
                   <th className="px-3 py-2 font-medium">В рассылке</th>
                   <th className="px-3 py-2 font-medium">В Google</th>
                   <th className="px-3 py-2 font-medium">Статус</th>
@@ -384,6 +522,13 @@ export function MailboxesTab() {
                         {mailbox.google_account ? (
                           <div className="mt-0.5 text-xs text-zinc-400">{mailbox.google_account}</div>
                         ) : null}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        {mailbox.tag ? (
+                          <TagChip name={mailbox.tag.name} />
+                        ) : (
+                          <span className="text-xs text-zinc-400">—</span>
+                        )}
                       </td>
                       {/* Галочка прямо в строке: выбирать ящики по одному
                           удобнее здесь, а пачкой — панелью над таблицей. */}

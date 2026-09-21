@@ -24,6 +24,19 @@ export interface MailboxDto {
   last_verified_at: string | null;
   last_error: string | null;
   last_send_at: string | null;
+  /** Тег ящика, он же категория. Один ящик — один тег. */
+  tag: MailboxTagRef | null;
+}
+
+/** Тег в строке ящика: только то, что нужно нарисовать чип. */
+export interface MailboxTagRef {
+  id: string;
+  name: string;
+}
+
+/** Тег в окошке фильтра — со счётчиком ящиков. */
+export interface MailboxTagDto extends MailboxTagRef {
+  mailboxes: number;
 }
 
 export interface CampaignDto {
@@ -101,13 +114,49 @@ async function upload<T>(url: string, file: File, fields?: Record<string, string
   return data as T;
 }
 
-export function fetchMailboxes(params: { page?: number; search?: string; pageSize?: number } = {}) {
+export function fetchMailboxes(
+  params: {
+    page?: number;
+    search?: string;
+    pageSize?: number;
+    /** Показывать только ящики этих тегов. Пусто — не фильтруем по тегу. */
+    tagIds?: string[];
+    /** Вдобавок к tagIds показывать ящики без тега. */
+    noTag?: boolean;
+  } = {},
+) {
   const query = new URLSearchParams({ page: String(params.page ?? 1) });
   if (params.search) query.set('search', params.search);
   if (params.pageSize) query.set('pageSize', String(params.pageSize));
+  if (params.tagIds?.length) query.set('tagIds', params.tagIds.join(','));
+  if (params.noTag) query.set('noTag', '1');
   return authFetchJson<{ mailboxes: MailboxDto[]; total: number }>(
     `${BASE}/mailboxes?${query.toString()}`,
   );
+}
+
+export function fetchMailboxTags() {
+  return authFetchJson<{ tags: MailboxTagDto[]; untagged: number }>(`${BASE}/tags`);
+}
+
+export function createMailboxTag(name: string) {
+  return authFetchJson<MailboxTagDto>(`${BASE}/tags`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function renameMailboxTag(id: string, name: string) {
+  return authFetchJson<MailboxTagRef>(`${BASE}/tags/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function deleteMailboxTag(id: string) {
+  return authFetchJson<{ ok: true }>(`${BASE}/tags/${id}`, { method: 'DELETE' });
 }
 
 export function importMailboxes(file: File) {
@@ -146,13 +195,17 @@ export function deleteMailbox(id: string) {
   return authFetchJson<{ ok: true }>(`${BASE}/mailboxes/${id}`, { method: 'DELETE' });
 }
 
-export type BulkMailboxAction = 'recheck' | 'enable' | 'disable' | 'delete';
+export type BulkMailboxAction = 'recheck' | 'enable' | 'disable' | 'delete' | 'tag';
 
-/** Действие над выборкой одним запросом: двести ящиков — это не двести запросов. */
-export function bulkMailboxes(ids: string[], action: BulkMailboxAction) {
+/**
+ * Действие над выборкой одним запросом: двести ящиков — это не двести запросов.
+ * Для 'tag' в tagId приезжает тег или null — «снять тег».
+ */
+export function bulkMailboxes(ids: string[], action: BulkMailboxAction, tagId?: string | null) {
   return authFetchJson<{ ok: true; affected: number }>(`${BASE}/mailboxes`, {
     method: 'PATCH',
-    body: JSON.stringify({ ids, action }),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids, action, ...(action === 'tag' ? { tagId: tagId ?? null } : {}) }),
   });
 }
 
