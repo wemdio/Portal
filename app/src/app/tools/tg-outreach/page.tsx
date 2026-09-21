@@ -4389,6 +4389,15 @@ function AccountProfileModal({
 }
 
 /* =================== ACCOUNT LOGS MODAL =================== */
+/** Строка истории переездов аккаунта между кампаниями. */
+interface AccountMove {
+  moved_at: string;
+  reason: string;
+  from_campaign_name: string | null;
+  to_campaign_name: string | null;
+  moved_by_name: string | null;
+}
+
 function AccountLogsModal({
   account,
   proxy,
@@ -4400,6 +4409,7 @@ function AccountLogsModal({
 }) {
   const [range, setRange] = useState<ErrorRange>('24h');
   const [logs, setLogs] = useState<OutreachLog[]>([]);
+  const [moves, setMoves] = useState<AccountMove[]>([]);
   const [loading, setLoading] = useState(true);
   const [exportingRange, setExportingRange] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
@@ -4413,11 +4423,14 @@ function AccountLogsModal({
         const d = await res.json() as {
           items: OutreachLog[];
           truncated: boolean;
+          moves?: AccountMove[];
         };
         setLogs(d.items ?? []);
+        setMoves(d.moves ?? []);
         setTruncated(Boolean(d.truncated));
       } else {
         setLogs([]);
+        setMoves([]);
         setTruncated(false);
       }
     } finally {
@@ -4514,6 +4527,34 @@ function AccountLogsModal({
                 </span>
               )}
             </div>
+
+            {/* Переезды — отдельно от журнала: журнал собирается по текущей
+                кампании и по диапазону времени, а «откуда этот аккаунт взялся»
+                спрашивают как раз про давний переезд из другой кампании. */}
+            {moves.length > 0 && (
+              <div className="mt-2 space-y-1 rounded-lg bg-gray-50 px-3 py-2">
+                <div className="text-[11px] font-medium uppercase tracking-wide text-gray-400">
+                  Переносы между кампаниями
+                </div>
+                {moves.map((m) => (
+                  <div key={`${m.moved_at}-${m.to_campaign_name ?? ''}`} className="text-[11px] text-gray-600">
+                    <span className="tabular-nums text-gray-400">
+                      {new Date(m.moved_at).toLocaleString('ru-RU', {
+                        day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit',
+                      })}
+                    </span>
+                    {' · '}
+                    <span className="text-gray-700">{m.from_campaign_name ?? '—'}</span>
+                    {' → '}
+                    <span className="text-gray-700">{m.to_campaign_name ?? '—'}</span>
+                    {' · '}
+                    <span>{m.moved_by_name ?? 'неизвестно кто'}</span>
+                    {' · '}
+                    <span className="text-gray-500">{m.reason}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
           <button
             type="button"

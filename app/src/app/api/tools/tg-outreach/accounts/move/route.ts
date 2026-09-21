@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
+import { logCampaign } from '@/lib/tgOutreach/campaignLog';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -116,6 +117,39 @@ export async function POST(req: NextRequest) {
       .in('id', accounts.map((a) => a.id))
       .select('id');
     if (moveError) return jsonError(moveError.message, 500);
+
+    /**
+     * Журналы обеих кампаний.
+     *
+     * Запись уходит и туда, откуда ушли, и туда, куда пришли: на вкладке «Логи»
+     * оператор смотрит одну кампанию, и «аккаунты просто исчезли» в одной из них
+     * — ровно тот случай, ради которого журнал и ведут.
+     *
+     * Имена сессий перечислены в строке намеренно: журнал аккаунта собирается
+     * поиском его session_name по сообщениям, так что эта же запись попадёт и в
+     * карточку каждого переехавшего аккаунта.
+     */
+    const who = byName ?? 'неизвестно кто';
+    const names = accounts.map((a) => String(a.session_name)).join(', ');
+    const moveLine = (direction: string) =>
+      `${who}: ${direction}. Аккаунтов ${accounts.length} (${names}). Причина: ${reason}`;
+
+    await Promise.all([
+      from
+        ? logCampaign(
+            auth.supabase,
+            fromCampaignId,
+            'info',
+            moveLine(`перенёс аккаунты в кампанию «${to.name ?? toCampaignId}»`),
+          )
+        : Promise.resolve(),
+      logCampaign(
+        auth.supabase,
+        toCampaignId,
+        'info',
+        moveLine(`перенёс аккаунты из кампании «${from?.name ?? fromCampaignId}»`),
+      ),
+    ]);
 
     return NextResponse.json({
       moved: moved?.length ?? 0,
