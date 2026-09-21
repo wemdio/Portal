@@ -81,3 +81,45 @@ describe('Instantly custom tags — workspace request options', () => {
     expectWorkspaceAuthorization(1);
   });
 });
+
+describe('Instantly campaign scope guard', () => {
+  it('flags reserve-pool campaign tags but ignores project tags, account mappings and completed history', async () => {
+    const { detectReservedCampaignScopeIssues } = await import(
+      '@/lib/instantly/campaignScopeRules'
+    );
+
+    const issues = detectReservedCampaignScopeIssues(
+      [
+        { id: 'active-bad', name: 'Вороной 1', status: 1 },
+        { id: 'draft-bad', name: 'Вороной 2', status: 0 },
+        { id: 'active-good', name: 'Другой проект', status: 1 },
+        { id: 'completed-bad', name: 'Старая', status: 3 },
+      ],
+      [
+        { id: 'reserve-a', name: 'неименные maildoso' },
+        { id: 'reserve-b', name: 'Неименные почты' },
+        { id: 'project', name: 'Вороной' },
+      ],
+      [
+        { id: '1', tag_id: 'reserve-a', resource_id: 'active-bad', resource_type: 'campaign' },
+        { id: '2', tag_id: 'reserve-b', resource_id: 'draft-bad', resource_type: 'campaign' },
+        { id: '3', tag_id: 'project', resource_id: 'active-good', resource_type: 'campaign' },
+        { id: '4', tag_id: 'reserve-a', resource_id: 'completed-bad', resource_type: 'campaign' },
+        { id: '5', tag_id: 'reserve-a', resource_id: 'active-good', resource_type: 'account' },
+      ],
+    );
+
+    expect(issues).toEqual([
+      expect.objectContaining({
+        campaignId: 'active-bad',
+        campaignName: 'Вороной 1',
+        reserveTagNames: ['неименные maildoso'],
+      }),
+      expect.objectContaining({
+        campaignId: 'draft-bad',
+        campaignName: 'Вороной 2',
+        reserveTagNames: ['Неименные почты'],
+      }),
+    ]);
+  });
+});
