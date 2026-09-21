@@ -6,6 +6,7 @@ import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
 import { defaultAppealText } from '@/lib/tgOutreach/freezeAppeal';
 import { BaseContactsModal } from '@/components/tg-outreach/BaseContactsModal';
 import { pickIdentity } from '@/lib/tgOutreach/profile/autofill';
+import { BulkProfileModal } from '@/components/tg-outreach/BulkProfileModal';
 import { accountCountryLabel, countryOptions } from '@/lib/tgOutreach/phoneCountry';
 import {
   MessageSquareMore,
@@ -43,6 +44,7 @@ import {
   Move,
   Pencil,
   Archive,
+  UserPen,
 } from 'lucide-react';
 import { AccountArchiveSection, ArchiveAccountsDialog } from '@/components/tg-outreach/AccountArchive';
 import type { ArchiveReason } from '@/lib/tgOutreach/accountArchive';
@@ -2338,6 +2340,7 @@ function CampaignAccountsTab({
   const [selectedAccount, setSelectedAccount] = useState<OutreachAccount | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [profileAccount, setProfileAccount] = useState<OutreachAccount | null>(null);
+  const [bulkProfileOpen, setBulkProfileOpen] = useState(false);
   /** id аккаунтов, чей профиль сейчас читается из Telegram. */
   const [syncingIds, setSyncingIds] = useState<string[]>([]);
   const [syncSummary, setSyncSummary] = useState<string | null>(null);
@@ -3311,6 +3314,17 @@ function CampaignAccountsTab({
           /* Проставить цену выбранным: партия могла приехать двумя чеками, и
              тогда цена у половины строк своя. Пустое поле стирает цену. */
           <span className="inline-flex items-center gap-1.5">
+            {/* Профили заполняли по одному через карточку аккаунта: открыть,
+                автозаполнить, сохранить, закрыть — и так на всю партию. */}
+            <button
+              type="button"
+              onClick={() => setBulkProfileOpen(true)}
+              title="Подобрать имя, фамилию, свободный ник и описание сразу всем выбранным аккаунтам"
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer"
+            >
+              <UserPen className="h-3.5 w-3.5" />
+              Автозаполнение профилей
+            </button>
             <button
               type="button"
               onClick={() => { setArchiveError(null); setArchiveTarget([...selectedIds]); }}
@@ -3712,6 +3726,14 @@ function CampaignAccountsTab({
           account={selectedAccount}
           proxy={proxies.find(p => p.id === selectedAccount.proxy_id) ?? null}
           onClose={() => setSelectedAccount(null)}
+        />
+      )}
+
+      {bulkProfileOpen && (
+        <BulkProfileModal
+          accounts={accounts.filter((a) => selectedIds.includes(a.id))}
+          onClose={() => setBulkProfileOpen(false)}
+          onDone={() => { void load(); }}
         />
       )}
 
