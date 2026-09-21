@@ -7,6 +7,7 @@ import {
   isCatalogStale,
 } from '@/lib/tools/instantlyCampaignCatalog';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
+import { normalizeManualCampaignSenderScope } from '@/lib/instantly/manualCampaignSenderScope';
 
 export const dynamic = 'force-dynamic';
 
@@ -123,7 +124,11 @@ export const GET = withAuth(async (req) => {
 
 export const POST = withAuth(async (req) => {
   const body = await req.json();
-  const campaign = await instantly.createCampaign(body);
+  const senderScope = normalizeManualCampaignSenderScope(body);
+  if (!senderScope.ok) {
+    return NextResponse.json({ error: senderScope.error }, { status: 400 });
+  }
+  const campaign = await instantly.createCampaign(senderScope.payload);
   await upsertInstantlyCatalogFromCampaign(campaign);
   return NextResponse.json(campaign, { status: 201 });
 });

@@ -186,6 +186,10 @@ export default function CreateCampaignPage() {
       setError('Заполните тему или тело хотя бы для каждого шага');
       return;
     }
+    if (selectedAccounts.length === 0) {
+      setError('Выберите хотя бы один ящик отправки');
+      return;
+    }
 
     setCreating(true);
     setError('');
@@ -208,8 +212,10 @@ export default function CreateCampaignPage() {
           variants: [{ subject: s.subject, body: formatBodyForInstantly(s.body, textOnly) }],
         })),
       }],
-      email_list: selectedAccounts.length > 0 ? selectedAccounts : undefined,
-      email_tag_list: filterTagId ? [filterTagId] : undefined,
+      // The tag controls only the account filter in this form. Persist the
+      // exact checked mailboxes so a broad pool tag cannot add another
+      // client's account after the campaign is created.
+      email_list: selectedAccounts,
       daily_limit: dailyLimit ? Number(dailyLimit) : undefined,
       daily_max_leads: dailyMaxLeads ? Number(dailyMaxLeads) : undefined,
       email_gap: emailGap ? Number(emailGap) : undefined,
@@ -230,7 +236,7 @@ export default function CreateCampaignPage() {
     } finally {
       setCreating(false);
     }
-  }, [name, steps, selectedAccounts, filterTagId, dailyLimit, dailyMaxLeads, emailGap, stopOnReply, openTracking, linkTracking, textOnly, scheduleFrom, scheduleTo, scheduleDays, router]);
+  }, [name, steps, selectedAccounts, dailyLimit, dailyMaxLeads, emailGap, stopOnReply, openTracking, linkTracking, textOnly, scheduleFrom, scheduleTo, scheduleDays, router]);
 
   const DAY_NAMES = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
 
@@ -390,6 +396,9 @@ export default function CreateCampaignPage() {
                       </div>
                     </div>
                   )}
+                  <p className="mt-2 text-xs text-zinc-400">
+                    Тег только фильтрует список. В кампанию попадут выбранные ниже ящики.
+                  </p>
                 </div>
               )}
               <div className="mb-2 flex gap-2">
