@@ -125,16 +125,36 @@ describe('Next build typecheck contract', () => {
     const routeValidatorIndex = strictTypecheck.indexOf(
       'tsc -p tsconfig.next-route-validator.json --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/routes.tsbuildinfo',
     );
-    const tscIndex = strictTypecheck.indexOf(
-      'tsc --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/project.tsbuildinfo',
+    /**
+     * Проект проверяется кусками, а не одним проходом: сплошной tsc не влезает
+     * в 4 ГБ машины сборки. Поэтому сторожим не одну команду, а инвариант —
+     * КАЖДЫЙ tsconfig.typecheck.*.json обязан прогоняться. Так из команды не
+     * выпадет кусок (часть проекта перестала бы проверяться молча) и не
+     * появится файл-сирота, который завели, но запускать забыли.
+     */
+    const chunkConfigs = fs
+      .readdirSync(process.cwd())
+      .filter((name) => /^tsconfig\.typecheck\..+\.json$/.test(name))
+      .sort();
+    const chunkIndexes = chunkConfigs.map((name) =>
+      strictTypecheck.indexOf(
+        `tsc -p ${name} --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/`,
+      ),
     );
+    const tscIndex = chunkIndexes.length ? Math.min(...chunkIndexes) : -1;
 
     expect(testBlock).toContain("branch != 'main' AND branch != 'test'");
     expect(typecheckJob).toContain('- npm run typecheck:strict');
     expect(typecheckJob).not.toContain('- npx next typegen');
     expect(typegenIndex).toBeGreaterThan(-1);
     expect(routeValidatorIndex).toBeGreaterThan(typegenIndex);
+    expect(chunkConfigs.length).toBeGreaterThan(0);
+    expect(chunkIndexes).not.toContain(-1);
     expect(tscIndex).toBeGreaterThan(routeValidatorIndex);
+    // Куски пишут разные файлы incremental-состояния: общий файл на две разные
+    // программы означал бы, что каждый прогон обесценивает кэш соседнего.
+    const buildInfoFiles = [...strictTypecheck.matchAll(/--tsBuildInfoFile (\S+)/g)].map((m) => m[1]);
+    expect(new Set(buildInfoFiles).size).toBe(buildInfoFiles.length);
     expect(packageJson.scripts?.['pretypecheck:strict']).toContain(
       "mkdirSync('.next/cache/tsc', { recursive: true })",
     );

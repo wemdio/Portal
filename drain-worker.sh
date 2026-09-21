@@ -340,6 +340,7 @@ if should_drain_non_baseconstructor_workers; then
     "portal-worker"
     "portal-worker-hh"
     "portal-worker-eng-hiring"
+    "portal-worker-polza-outreach"
     "portal-worker-search"
     "portal-worker-enrich"
     "portal-worker-yandexmaps"

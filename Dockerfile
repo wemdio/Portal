@@ -54,12 +54,13 @@ ENV NEXT_PUBLIC_SIGNUP_HOSTS=$NEXT_PUBLIC_SIGNUP_HOSTS
 # Increase Node heap for Next.js build (avoids OOM in Docker)
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 
-# Validate generated route types and the whole project in separate Node
-# processes so each one releases its heap before the 4 GB Next.js build.
+# Проверка типов идёт до сборки и кусками (tsconfig.typecheck.*.json).
+# Сплошной проход здесь падал: 21.09 замер дал heap 4029 из 4096 МБ, exit 134.
+# По кускам худший берёт 3,3 ГБ, и запас остаётся.
 RUN npm run typecheck:strict
-
-# The strict precheck above already passed. Skip only Next's duplicate checker;
-# compilation and all other production build validation remain enabled.
+# Оба флага ниже обязательны: next.config.ts разрешает пропуск встроенного
+# тайпчекера Next только когда рядом стоит флаг «типы уже проверены».
+# И он здесь законен именно потому, что строка выше их проверила.
 RUN NEXT_BUILD_PRECHECKED_TYPECHECK=1 NEXT_BUILD_SKIP_TYPECHECK=1 npm run build
 RUN npm run build:sbis-importer
 RUN npm run build:sbis-exact-importer
