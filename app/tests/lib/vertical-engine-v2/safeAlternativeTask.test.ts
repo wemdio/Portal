@@ -41,7 +41,10 @@ describe('safeAlternativeTask', () => {
     // любой числовой фильтр считался ограничением, которое карты не исполнят.
     const maps = { source: 'yandex_maps', rationale: 'химия',
       maps_query: { text: 'нефтехимическое производство' } } as unknown as VeCollectTask;
-    expect(safeAlternativeTask(maps, directory({ okvedCodes: ['20.1'], revenueFrom: 100_000_000 }))).not.toBeNull();
+    // Прод-форма: includeIp стоит у 326 задач из 331, и он один запрещал карты.
+    expect(safeAlternativeTask(maps, directory({
+      okvedCodes: ['20.1'], includeIp: false, revenueFrom: 100_000_000, employeesFrom: 50,
+    }))).not.toBeNull();
     // А настоящее ограничение плана по-прежнему запрещает: карты не умеют в регион реестра.
     expect(safeAlternativeTask(maps, directory({ okvedCodes: ['20.1'], regionCodes: ['77'] }))).toBeNull();
   });

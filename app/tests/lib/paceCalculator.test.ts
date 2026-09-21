@@ -21,6 +21,7 @@ import {
   PACE_HISTORY_LIMIT,
   PACE_HISTORY_WINDOW_DAYS,
   summarizeProjectRisk,
+  RISK_GRACE_DAYS,
   type PaceData,
   type PaceHistoryPoint,
   type PaceQueryBuilder,
@@ -486,10 +487,10 @@ describe('summarizeProjectRisk', () => {
 
   it('flags only contacts axis when KPI is on track', () => {
     const pace: ProjectPace = {
-      contacts: paceWith({ onTrack: false, behindDays: 7 }),
+      contacts: paceWith({ onTrack: false, behindDays: 21 }),
       kpi: paceWith({ onTrack: true, behindDays: -2 }),
     };
-    expect(summarizeProjectRisk(pace, false)).toEqual({ axes: ['contacts'], daysBehind: 7 });
+    expect(summarizeProjectRisk(pace, false)).toEqual({ axes: ['contacts'], daysBehind: 21 });
   });
 
   it('flags only KPI axis when contacts is on track', () => {
@@ -502,7 +503,7 @@ describe('summarizeProjectRisk', () => {
 
   it('flags both axes and reports the worst behindDays when both miss', () => {
     const pace: ProjectPace = {
-      contacts: paceWith({ onTrack: false, behindDays: 4 }),
+      contacts: paceWith({ onTrack: false, behindDays: 9 }),
       kpi: paceWith({ onTrack: false, behindDays: 18 }),
     };
     expect(summarizeProjectRisk(pace, false)).toEqual({ axes: ['contacts', 'kpi'], daysBehind: 18 });
@@ -511,16 +512,59 @@ describe('summarizeProjectRisk', () => {
   it('treats axis with onTrack=null (нет дедлайна / мало точек) as not at risk', () => {
     const pace: ProjectPace = {
       contacts: paceWith({ onTrack: null, behindDays: null, deadline: null }),
-      kpi: paceWith({ onTrack: false, behindDays: 5 }),
+      kpi: paceWith({ onTrack: false, behindDays: 15 }),
     };
-    expect(summarizeProjectRisk(pace, false)).toEqual({ axes: ['kpi'], daysBehind: 5 });
+    expect(summarizeProjectRisk(pace, false)).toEqual({ axes: ['kpi'], daysBehind: 15 });
   });
 
   it('treats null axis (отключена) as not at risk', () => {
     const pace: ProjectPace = {
       contacts: null,
-      kpi: paceWith({ onTrack: false, behindDays: 3 }),
+      kpi: paceWith({ onTrack: false, behindDays: 13 }),
     };
-    expect(summarizeProjectRisk(pace, false)).toEqual({ axes: ['kpi'], daysBehind: 3 });
+    expect(summarizeProjectRisk(pace, false)).toEqual({ axes: ['kpi'], daysBehind: 13 });
+  });
+
+  /* ── Допуск отставания (RISK_GRACE_DAYS) ──────────────────────────────── */
+
+  it('допуск по умолчанию — неделя', () => {
+    expect(RISK_GRACE_DAYS).toBe(7);
+  });
+
+  it('не считает риском отставание в пределах допуска', () => {
+    for (const behindDays of [1, 3, 5, 7]) {
+      const pace: ProjectPace = {
+        contacts: paceWith({ onTrack: false, behindDays }),
+        kpi: paceWith({ onTrack: false, behindDays }),
+      };
+      expect(summarizeProjectRisk(pace, false)).toEqual({ axes: [], daysBehind: 0 });
+    }
+  });
+
+  it('считает риском отставание строго больше допуска', () => {
+    const pace: ProjectPace = {
+      contacts: paceWith({ onTrack: false, behindDays: RISK_GRACE_DAYS + 1 }),
+      kpi: paceWith({ onTrack: true, behindDays: -1 }),
+    };
+    expect(summarizeProjectRisk(pace, false)).toEqual({
+      axes: ['contacts'],
+      daysBehind: RISK_GRACE_DAYS + 1,
+    });
+  });
+
+  it('игнорирует ось в пределах допуска, но флагает соседнюю за его границей', () => {
+    const pace: ProjectPace = {
+      contacts: paceWith({ onTrack: false, behindDays: 4 }),
+      kpi: paceWith({ onTrack: false, behindDays: 30 }),
+    };
+    expect(summarizeProjectRisk(pace, false)).toEqual({ axes: ['kpi'], daysBehind: 30 });
+  });
+
+  it('graceDays=0 возвращает старое поведение (любое отставание — риск)', () => {
+    const pace: ProjectPace = {
+      contacts: paceWith({ onTrack: false, behindDays: 3 }),
+      kpi: paceWith({ onTrack: true, behindDays: -1 }),
+    };
+    expect(summarizeProjectRisk(pace, false, 0)).toEqual({ axes: ['contacts'], daysBehind: 3 });
   });
 });

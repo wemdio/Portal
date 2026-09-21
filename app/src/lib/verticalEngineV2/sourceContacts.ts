@@ -19,12 +19,17 @@ export const VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT = 120;
 /** Метка, которую applyVeSourceContacts ставит строке с НАЙДЕННЫМ сайтом:
  * единственный признак, отличающий контакт, купленный добором, от бесплатного. */
 export const VE_SOURCE_DISCOVERY_MARK = 'Официальный сайт подтверждён по данным компании:';
-const discoveryBudgetSchema = z.object({
-  version: z.literal(1),
+const discoveryBudgetFields = {
   checked_at_growth: z.number().int().nonnegative().safe(),
   ready_high_water: z.number().int().nonnegative().safe(),
   paused: z.boolean(),
-});
+};
+/** v2: ready_high_water считается в КОНТАКТАХ ДОБОРА. v1 хранил там общее число
+ *  готовых строк базы — величину другого порядка (на проде 242, 417, 499 против
+ *  3, 21, 6 купленных добором). Сравнивать их нельзя: ветка роста стала бы
+ *  недостижимой, и окно превратилось бы в необратимый стоп-кран. */
+const discoveryBudgetSchema = z.object({ version: z.literal(2), ...discoveryBudgetFields });
+const legacyDiscoveryBudgetSchema = z.object({ version: z.literal(1), ...discoveryBudgetFields });
 export type VeSourceDiscoveryBudget = z.infer<typeof discoveryBudgetSchema>;
 
 /**
@@ -56,9 +61,15 @@ export function evaluateVeSourceDiscoveryBudget(input: {
   budget?: unknown; checkpoint?: unknown; discoveryContacts: number;
 }): { budget: VeSourceDiscoveryBudget; remaining: number } {
   const checked = Object.keys(readState(input.checkpoint).checked).length;
-  const parsed = discoveryBudgetSchema.safeParse(input.budget === undefined ? {
-    version: 1, checked_at_growth: checked, ready_high_water: input.discoveryContacts, paused: false,
-  } : input.budget);
+  const fresh = { version: 2 as const, checked_at_growth: checked, ready_high_water: input.discoveryContacts, paused: false };
+  // Документ v1 пересеиваем, а не отвергаем: его ready_high_water измерен в
+  // других единицах, и падение стадии здесь остановило бы сбор на ровном месте.
+  // Пересев даёт базе одно полное окно в новых единицах — это осознанная плата
+  // за смену смысла, и она случается один раз на базу.
+  const legacy = input.budget !== undefined && !discoveryBudgetSchema.safeParse(input.budget).success
+    && legacyDiscoveryBudgetSchema.safeParse(input.budget).success;
+  const parsed = discoveryBudgetSchema.safeParse(
+    input.budget === undefined || legacy ? fresh : input.budget);
   if (!parsed.success || !Number.isSafeInteger(input.discoveryContacts) || input.discoveryContacts < 0
     || checked < parsed.data.checked_at_growth) {
     throw new VeRelevanceCheckpointError('Source discovery budget checkpoint is invalid');

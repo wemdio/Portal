@@ -601,7 +601,7 @@ describe('base_collect CONSTRUCT step order', () => {
       const budgetInfo: VeCollectInfo = { ...collectInfo([knownInn, ...excludedSources]), collection_mode: 'preview',
         search_policy: { version: 1, phase: 'paid', deferred_rows: [knownInn] },
         target_progress: createCollectionTarget('preview'),
-        source_contact_budget: { version: 1, checked_at_growth: 0, ready_high_water: 0, paused: false },
+        source_contact_budget: { version: 2, checked_at_growth: 0, ready_high_water: 0, paused: false },
         source_contact_recovery: { version: 1, checked: Object.fromEntries(Array.from({ length: 119 }, (_, i) =>
           [`previous-${i}`, { website: '', reason: 'identity_unverified' }])) },
         ...(pipelined ? { preview_pipeline: { version: 1 as const, revision: 0, batches: [] } } : {}),
@@ -1693,8 +1693,12 @@ describe('base_collect CONSTRUCT import', () => {
     // The specialist tightens the limit to 1 on the FINISHED base. The saved rows
     // are re-partitioned in place: no collection, no constructor, no relevance or
     // name calls, no analysis job, and the base never leaves status 'analyzed'.
+    // Причина, с которой сбор реально остановился. Кап применяют ПОСЛЕ сбора, и
+    // раньше он затирал её целиком: 44 базы из 54 рассказывали специалисту, что
+    // их остановил лимит адресов, хотя у них кончился реестр или предел раундов.
     const finished: VeCollectInfo = { ...structuredClone(cappedInfo),
-      target_progress: { ...cappedInfo.target_progress!, status: 'target_reached' } };
+      target_progress: { ...cappedInfo.target_progress!, status: 'target_reached',
+        reason: 'Источники выбранного плана исчерпаны' } };
     const job = { ...makeJob(), payload: { ...makeJob().payload, collection_mode: 'preview', reproject_contacts: true } } as VeJob;
     const tightenDb = seed(finished, { ve_jobs: [job as unknown as Record<string, unknown>],
       ve_bases: [{ ...makeBase(finished), status: 'analyzed', data: capped.data, columns: capped.columns,
@@ -1711,6 +1715,11 @@ describe('base_collect CONSTRUCT import', () => {
     expect(tightened.contact_cap_applied).toBe(1);
     expect(tightened.status).toBeUndefined();
     expect(tightenedInfo.target_progress).toMatchObject({ status: 'limited', ready_rows: 2, reason: expect.stringContaining('лимит 1') });
+    // Настоящая причина сохранена, а заметка про кап не задвоилась при повторном
+    // применении лимита (сначала 2, теперь 1).
+    expect(tightenedInfo.target_progress?.reason).toContain('Источники выбранного плана исчерпаны');
+    expect(tightenedInfo.target_progress?.reason?.match(/Применён лимит/g)).toHaveLength(1);
+    expect(tightenedInfo.target_progress?.reason).not.toContain('лимит 2');
     expect(tightenedInfo.relevance_summary).toMatchObject({ over_company_cap: 3 });
     expect(tightenedInfo.company_contact_cap).toMatchObject({ limit: 1, over_cap_rows: 1, companies: 2 });
 
