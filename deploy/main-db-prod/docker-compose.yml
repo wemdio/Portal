@@ -27,6 +27,8 @@ services:
     image: supabase/postgres:15.8.1.060
     container_name: main-postgres
     restart: unless-stopped
+    # 21.09.2026: keep total RAM + swap at 24 GiB when recreating the container.
+    memswap_limit: 24g
     # Для Postgres SIGTERM — это «smart shutdown»: он ждёт, пока клиенты сами
     # отключатся. Портал, воркеры и PostgREST не отключаются никогда, поэтому
     # docker через 10 секунд бьёт SIGKILL, и база каждый раз поднимается через
@@ -49,8 +51,8 @@ services:
       # 14 699 организаций за 255 мс, а сходить за ними в таблицу стоило 9 с.
       # Разбор — docs/incidents/2026-08-08-yandex-maps-index-migration-lock.md.
       - -c
-      # 25% от лимита контейнера (12 ГБ). Больше брать нельзя: в cgroup v2
-      # страничный кэш тоже считается в лимит, и место под него нужно оставить.
+      # 3 ГБ оставляем при лимите 16 ГБ: увеличение cgroup должно дать запас
+      # backend-процессам и страничному кэшу, а не увеличить shared_buffers.
       - shared_buffers=3GB
       - -c
       # Память не занимает — это подсказка планировщику, сколько данных реально
@@ -105,16 +107,12 @@ services:
     deploy:
       resources:
         limits:
-          # 13.08.2026: 12 GB не защищали от cgroup OOM, а вызывали его — на пике
-          # ядро дважды убило backend (`Memory cgroup out of memory`, dmesg 16:15),
-          # postmaster сбросил все соединения и ушёл в crash recovery. Наружу это
-          # выглядело как «портал упал»: вход отдавал `Database error querying
-          # schema`, client-report-exports ушёл в exit-loop. Контейнер при этом
-          # остаётся `Up` с зелёным healthcheck — по docker ps такое не видно.
-          # На хосте 64 GB и ~47 GB свободных, держать базу в 12 GB нет причин.
-          # В cgroup v2 страничный кэш считается в лимит, поэтому запас нужен
-          # кратный, а не впритык. shared_buffers оставлены на 3 GB.
-          memory: 24576M
+          # 21.09.2026: production still had 12 GiB despite the old 24 GiB Git
+          # setting. After confirmed cgroup OOM, owner approved 16 GiB with
+          # 44+ GiB host MemAvailable; shared_buffers remains 3 GiB.
+          # Apply live via docker update, verify HostConfig and persist this
+          # value without recreating PostgreSQL (explicit owner exception).
+          memory: 16384M
           cpus: '8.0'
           # 2048 у postgres: 100 connections × ~1 backend + ~10 внутренних worker'ов
           # + запас для pg_cron/pgsodium. Общий default 512 у остальных.

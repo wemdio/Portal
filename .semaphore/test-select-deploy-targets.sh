@@ -130,7 +130,8 @@ assert_eq "$DEPLOY_IDB_STACK" 1 "Instantly migration runs DB migrator"
 assert_eq "$DEPLOY_BACKUP" 0 "Instantly migration does not restart backup"
 
 select_deploy_targets_from_files '.semaphore/scheduled-deploy.yml
-docs/runbook.md'
+docs/runbook.md
+memory/sessions/portal/incident.md'
 assert_eq "$DEPLOY_PORTAL_HOST" 0 "CI/docs-only change restarts no Portal service"
 assert_eq "$DEPLOY_IDB_STACK" 0 "CI/docs-only change restarts no DB service"
 assert_eq "$DEPLOY_BACKUP" 0 "CI/docs-only change restarts no backup"
