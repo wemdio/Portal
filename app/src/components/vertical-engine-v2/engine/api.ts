@@ -111,7 +111,7 @@ export interface VeCollectInfo {
   adaptive_collection?: { version: 1; switches: number; note?: string; replan_error?: string; checking_batch: boolean;
     completed_batches: number; last_batch?: { candidates: number; new_ready: number;
       spend: { ai_usd: number; serper_credits: number; estimated_total_usd: number; complete: boolean } } };
-  source_contact_discovery?: { checked: number; remaining: number };
+  source_contact_discovery?: { checked: number; remaining: number; contacts?: number };
   relevance_review_requested?: boolean;
   /** Only a phase marker; raw validation checkpoints stay on the server. */
   saved_email_review_pending?: boolean;

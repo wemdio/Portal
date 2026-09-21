@@ -602,7 +602,7 @@ describe('base_collect CONSTRUCT step order', () => {
         search_policy: { version: 1, phase: 'paid', deferred_rows: [knownInn] },
         target_progress: createCollectionTarget('preview'),
         source_contact_budget: { version: 1, checked_at_growth: 0, ready_high_water: 0, paused: false },
-        source_contact_recovery: { version: 1, checked: Object.fromEntries(Array.from({ length: 199 }, (_, i) =>
+        source_contact_recovery: { version: 1, checked: Object.fromEntries(Array.from({ length: 119 }, (_, i) =>
           [`previous-${i}`, { website: '', reason: 'identity_unverified' }])) },
         ...(pipelined ? { preview_pipeline: { version: 1 as const, revision: 0, batches: [] } } : {}),
       };
@@ -617,7 +617,7 @@ describe('base_collect CONSTRUCT step order', () => {
       const limited = budgetDb.getRows('ve_bases')[0];
       expect(limited).toMatchObject({ status: 'analyzed', row_count: 0, data: [], collect_info: {
         source_contact_budget: { paused: true }, target_progress: { status: 'limited', ready_target: 500,
-          reason: expect.stringContaining('200 попыток поиска без прироста') },
+          reason: expect.stringContaining('Добор сайтов закрыт') },
       } });
       expect((limited.collect_info as VeCollectInfo).tasks![0].harvest).toHaveLength(17);
       expect((limited.collect_info as VeCollectInfo).search_policy?.deferred_rows).toEqual([knownInn]);
@@ -630,7 +630,7 @@ describe('base_collect CONSTRUCT step order', () => {
       // Finding the final site's URL is not itself success, but its paid-for
       // constructor must finish before the cohort can be judged unproductive.
       const inFlightInfo = structuredClone(budgetInfo);
-      delete inFlightInfo.source_contact_recovery!.checked['previous-198'];
+      delete inFlightInfo.source_contact_recovery!.checked['previous-118'];
       const inFlightDb = seed(inFlightInfo);
       jest.mocked(fetchVeRelevanceEvidence).mockClear().mockResolvedValueOnce({
         status: 'unavailable', text: '', url: '', reason: 'identity_unverified',

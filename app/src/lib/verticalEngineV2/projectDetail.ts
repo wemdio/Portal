@@ -21,8 +21,58 @@ import { readContactDeliveryPages } from './contactDeliveryInventory';
 // error нужен клиенту: с появлением права автопилота НЕ строить базу (проба
 // среза, stages/baseCollect) статус 'failed' сам по себе ничего не объясняет —
 // без причины отказ выглядит поломкой, а не решением.
-export const VE_BASE_LIST_COLUMNS =
-  'id, vertical_id, hypothesis_id, filename, row_count, status, error, analysis, source, collect_info, columns, sample_rows, created_at, updated_at';
+// collect_info НЕ берём колонкой целиком: 99,99 % документа — рабочее состояние
+// воркера (relevance_reserve, relevance_checkpoint, target_checkpoint,
+// tasks[].harvest, search_policy.deferred_rows), которое stripTaskHarvest
+// выбрасывала уже ПОСЛЕ материализации ответа. Замер прода 21.09.2026 по
+// проекту «Аврора» (17 баз, тот же фильтр, что ниже): 586 878 670 байт при
+// пределе строки V8 536 870 888 — Buffer.toString() падал с «Cannot create a
+// string longer than 0x1fffffe8 characters», деталка не открывалась трое суток.
+// Точечная проекция отдаёт те же ключи за ~77 КБ.
+/** Ключи collect_info, которые читает карточка проекта (по коду клиента:
+ *  components/vertical-engine-v2/**). Белый список: чего здесь нет — до
+ *  клиента не доедет, поэтому новый публичный ключ добавляется и сюда. */
+export const VE_BASE_COLLECT_INFO_KEYS = [
+  'collection_mode', 'ready_target', 'supply_hold', 'waiting_for_base_id', 'limit',
+  'target_progress', 'construct', 'plan', 'estimate', 'stats',
+  'relevance_summary', 'company_contact_cap', 'company_name_cleanup', 'company_name_recovery',
+  'source_contact_discovery', 'relevance_review_requested', 'validation_retry',
+  'hypothesis_id', 'hypothesis_ids', 'hypotheses', 'plan_repair', 'slice_probe',
+] as const;
+/** tasks[] берём поэлементно: harvest лежит ВНУТРИ элементов, а PostgREST не
+ *  умеет вырезать ключ из элементов массива — «взять tasks целиком» значит
+ *  снова тянуть harvest (17 МБ на «Авроре»). Жёсткий потолок задач — 6
+ *  (schemas.ts: план ≤4, адаптивный реплан ≤2 сверху), замер по всем базам
+ *  прода — максимум 4. Слот с индексом VE_BASE_TASK_SLOTS читается как проба
+ *  переполнения: усечение должно быть видно в логе, а не молча. */
+export const VE_BASE_TASK_SLOTS = 8;
+const VE_BASE_TASK_FIELDS = ['source', 'status', 'rows'] as const;
+export const VE_BASE_LIST_COLUMNS = [
+  'id', 'vertical_id', 'hypothesis_id', 'filename', 'row_count', 'status', 'error',
+  'analysis', 'source', 'columns', 'sample_rows', 'created_at', 'updated_at',
+  ...VE_BASE_COLLECT_INFO_KEYS.map((key) => `ci_${key}:collect_info->${key}`),
+  // search_policy: наружу уходят только version/phase — ровно то, что оставляла
+  // stripTaskHarvest. deferred_rows (до 2,5 МБ на базу) не выбираем вовсе.
+  'ci_search_policy_version:collect_info->search_policy->version',
+  'ci_search_policy_phase:collect_info->search_policy->>phase',
+  // adaptive_collection: pending.ready_before — sha256 уже готовых получателей,
+  // они никогда не уходят в поллинг. Берём сводку; completed (кап 100 батчей,
+  // ≤45 КБ) нужен целиком ради completed_batches и last_batch.
+  'ci_adaptive_version:collect_info->adaptive_collection->version',
+  'ci_adaptive_switches:collect_info->adaptive_collection->switches',
+  'ci_adaptive_note:collect_info->adaptive_collection->>note',
+  'ci_adaptive_replan_error:collect_info->adaptive_collection->>replan_error',
+  'ci_adaptive_pending_id:collect_info->adaptive_collection->pending->>id',
+  'ci_adaptive_completed:collect_info->adaptive_collection->completed',
+  // saved_email_recovery: наружу уходит только фаза. attempt_id гарантирован
+  // схемой (savedEmailRecovery.ts), поэтому он — признак «состояние есть»;
+  // карта checked (до 748 КБ) остаётся в БД.
+  'ci_saved_email_attempt_id:collect_info->saved_email_recovery->>attempt_id',
+  'ci_saved_email_batch_id:collect_info->saved_email_recovery->batch->>id',
+  'ci_saved_email_error:collect_info->saved_email_recovery->>error',
+  ...Array.from({ length: VE_BASE_TASK_SLOTS + 1 }, (_, i) => VE_BASE_TASK_FIELDS
+    .map((field) => `ci_task_${i}_${field}:collect_info->tasks->${i}->${field}`)).flat(),
+].join(', ');
 // payload нужен клиенту, чтобы привязать джобу к вертикали (payload.vertical_id) —
 // иначе чужая dossier-джоба показывала бы busy/error на карточке другой вертикали.
 export const VE_JOB_LIST_COLUMNS = 'id, stage, status, error, attempts, started_at, finished_at, payload, progress';
@@ -111,6 +161,63 @@ export function stripTaskHarvest(base: Record<string, unknown>): Record<string, 
 }
 
 /**
+ * Собрать collect_info обратно из точечной проекции VE_BASE_LIST_COLUMNS:
+ * PostgREST отдаёт пути плоскими колонками ci_*, а карточка ждёт объект.
+ * Форма совпадает с той, что отдавала stripTaskHarvest: те же имена ключей,
+ * та же сводка adaptive_collection, тот же флаг saved_email_review_pending.
+ * Отличие одно и оно безопасно: JSON null и отсутствие ключа после проекции
+ * неразличимы, поэтому null-ключи не попадают в ответ (клиент везде читает
+ * collect_info через ?.). stripTaskHarvest остаётся на месте — её по-прежнему
+ * зовёт идемпотентный collect POST, который читает полную строку.
+ */
+export function assembleVeBaseCollectInfo(row: Record<string, unknown>): Record<string, unknown> {
+  const base: Record<string, unknown> = {};
+  const projected = new Map<string, unknown>();
+  for (const [column, value] of Object.entries(row)) {
+    if (column.startsWith('ci_')) projected.set(column.slice(3), value);
+    else base[column] = value;
+  }
+  const info: Record<string, unknown> = {};
+  const put = (key: string, value: unknown) => { if (value !== null && value !== undefined) info[key] = value; };
+  for (const key of VE_BASE_COLLECT_INFO_KEYS) put(key, projected.get(key));
+  const policyVersion = projected.get('search_policy_version');
+  if (policyVersion !== null && policyVersion !== undefined) {
+    info.search_policy = { version: policyVersion, phase: projected.get('search_policy_phase') };
+  }
+  const adaptiveVersion = projected.get('adaptive_version');
+  if (adaptiveVersion !== null && adaptiveVersion !== undefined) {
+    const raw = projected.get('adaptive_completed');
+    const completed = Array.isArray(raw) ? raw : [];
+    info.adaptive_collection = {
+      version: adaptiveVersion, switches: projected.get('adaptive_switches'),
+      note: projected.get('adaptive_note') ?? undefined,
+      replan_error: projected.get('adaptive_replan_error') ?? undefined,
+      checking_batch: projected.get('adaptive_pending_id') != null,
+      completed_batches: completed.length, last_batch: completed.at(-1),
+    };
+  }
+  if (projected.get('saved_email_attempt_id') != null) {
+    info.saved_email_review_pending = projected.get('saved_email_batch_id') != null
+      && projected.get('saved_email_error') == null;
+  }
+  const tasks: Record<string, unknown>[] = [];
+  for (let slot = 0; slot < VE_BASE_TASK_SLOTS; slot += 1) {
+    const task: Record<string, unknown> = {};
+    for (const field of VE_BASE_TASK_FIELDS) {
+      const value = projected.get(`task_${slot}_${field}`);
+      if (value !== null && value !== undefined) task[field] = value;
+    }
+    if (Object.keys(task).length === 0) break;
+    tasks.push(task);
+  }
+  if (VE_BASE_TASK_FIELDS.some((field) => projected.get(`task_${VE_BASE_TASK_SLOTS}_${field}`) != null)) {
+    console.warn(`[ve-detail] base ${String(base.id)}: tasks projection truncated at ${VE_BASE_TASK_SLOTS} slots`);
+  }
+  if (tasks.length > 0) info.tasks = tasks;
+  return { ...base, collect_info: Object.keys(info).length > 0 ? info : null };
+}
+
+/**
  * Загрузить проект и все его артефакты. scopeCreatedBy — скоуп владельца
  * (клиентский контур): проект с чужим created_by отвечает not_found,
  * существование чужого проекта не раскрываем.
@@ -157,7 +264,11 @@ export async function loadVeProjectDetail(
       .or('collect_info->>collection_mode.is.null,collect_info->>collection_mode.neq.supply,status.eq.collecting')
       .order('created_at', { ascending: false })
       .order('id', { ascending: true })
-      .range(from, to)),
+      .range(from, to)
+      // Точечная проекция не типизируется генериком select(): для supabase-js
+      // это обычная строка, и строки вырождаются в GenericStringError[].
+      // Тот же приём, что в costTelemetry.VE_CHILD_SNAPSHOT_SELECT.
+      .overrideTypes<Record<string, unknown>[], { merge: false }>()),
     supabase
       .from('ve_jobs')
       .select(VE_JOB_LIST_COLUMNS)
@@ -227,7 +338,7 @@ export async function loadVeProjectDetail(
       verticals,
       chains,
       vocabs,
-      bases: (basesRes.data ?? []).map(stripTaskHarvest),
+      bases: (basesRes.data ?? []).map(assembleVeBaseCollectInfo),
       templates,
       jobs: jobsRes.data ?? [],
       dossiers: dossiersRes.data ?? [],

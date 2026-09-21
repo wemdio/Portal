@@ -10,7 +10,15 @@ const MAX_SITE_LOOKUPS = 10_000;
 const resultSchema = z.object({ website: z.string().max(1000), reason: z.string().max(400) });
 const checkpointSchema = z.object({ version: z.literal(1), checked: z.record(z.string(), resultSchema) });
 export type VeSourceContactCheckpoint = z.infer<typeof checkpointSchema>;
-export const VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT = 200;
+/** Окно рентабельности добора: столько платных поисков сайта подряд движок
+ * оплачивает, пока они не дали НИ ОДНОГО готового контакта. Замер 21.09.2026 по
+ * 56 базам (13 804 поиска, 1 815 сайтов, 201 контакт = 1,46 %): при 120 правило
+ * снимает 49,5 % поисков ценой 6,8 % контактов — 501 поиск на один потерянный
+ * контакт. При 200 — 40,8 % / 4,8 %. Смягчение — правка этого числа. */
+export const VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT = 120;
+/** Метка, которую applyVeSourceContacts ставит строке с НАЙДЕННЫМ сайтом:
+ * единственный признак, отличающий контакт, купленный добором, от бесплатного. */
+export const VE_SOURCE_DISCOVERY_MARK = 'Официальный сайт подтверждён по данным компании:';
 const discoveryBudgetSchema = z.object({
   version: z.literal(1),
   checked_at_growth: z.number().int().nonnegative().safe(),
@@ -40,21 +48,25 @@ export function veSourceDiscoveryLimit(input: { readyTarget?: number; readyRows?
 /** Call only after found sites and in-flight validations have been drained.
  * Counts completed company lookups, not billable credits (cache hits are free).
  * Legacy runs start an observed cohort; their historical yield is unknown. */
+/** Прирост считаем ТОЛЬКО по контактам, купленным добором (метка источника), а
+ * НЕ по target.ready_rows: тот растёт и от бесплатного лейна, и чужой успех
+ * обнулял окно платного поиска («Цемент» 799d3008: ready 417 при high-water 364,
+ * поэтому окно не закрывалось никогда). */
 export function evaluateVeSourceDiscoveryBudget(input: {
-  budget?: unknown; checkpoint?: unknown; readyRows: number;
+  budget?: unknown; checkpoint?: unknown; discoveryContacts: number;
 }): { budget: VeSourceDiscoveryBudget; remaining: number } {
   const checked = Object.keys(readState(input.checkpoint).checked).length;
   const parsed = discoveryBudgetSchema.safeParse(input.budget === undefined ? {
-    version: 1, checked_at_growth: checked, ready_high_water: input.readyRows, paused: false,
+    version: 1, checked_at_growth: checked, ready_high_water: input.discoveryContacts, paused: false,
   } : input.budget);
-  if (!parsed.success || !Number.isSafeInteger(input.readyRows) || input.readyRows < 0
+  if (!parsed.success || !Number.isSafeInteger(input.discoveryContacts) || input.discoveryContacts < 0
     || checked < parsed.data.checked_at_growth) {
     throw new VeRelevanceCheckpointError('Source discovery budget checkpoint is invalid');
   }
   const budget = { ...parsed.data };
-  if (input.readyRows > budget.ready_high_water) {
+  if (input.discoveryContacts > budget.ready_high_water) {
     budget.checked_at_growth = checked;
-    budget.ready_high_water = input.readyRows;
+    budget.ready_high_water = input.discoveryContacts;
     budget.paused = false;
   }
   const remaining = Math.max(0, VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT - (checked - budget.checked_at_growth));
@@ -102,8 +114,18 @@ export function applyVeSourceContacts<T extends SourceRow>(rows: T[], value?: un
   return rows.map((row) => {
     const found = state.checked[keyFor(row)]?.website;
     return normalizeVeSourceContacts(found ? { ...row, website: found,
-      source_detail: `${row.source_detail}\nОфициальный сайт подтверждён по данным компании: ${found}` } : row);
+      source_detail: `${row.source_detail}\n${VE_SOURCE_DISCOVERY_MARK} ${found}` } : row);
   });
+}
+
+/** Готовые контакты, КУПЛЕННЫЕ добором. В проекции base.data метку несут только
+ * строки, прошедшие email- и relevance-гейты, поэтому отдельная проверка не нужна. */
+export function countVeSourceDiscoveryContacts(rows: unknown): number {
+  if (!Array.isArray(rows)) return 0;
+  return rows.reduce<number>((total, row) => {
+    const detail = (row as { source_detail?: unknown } | null)?.source_detail;
+    return total + (typeof detail === 'string' && detail.includes(VE_SOURCE_DISCOVERY_MARK) ? 1 : 0);
+  }, 0);
 }
 
 /** One bounded discovery pass, eight sites at a time. Completed searches are
