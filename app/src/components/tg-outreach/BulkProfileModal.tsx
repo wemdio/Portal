@@ -342,31 +342,41 @@ export function BulkProfileModal({
             {touched && !running ? 'Запустить ещё раз' : 'Запуск'}
           </button>
         </div>
-      </div>
 
-      <input
-        ref={bulkFileRef}
-        type="file"
-        accept="image/*"
-        multiple
-        className="hidden"
-        onChange={(e) => {
-          if (e.target.files?.length) attachMany(e.target.files);
-          e.target.value = '';
-        }}
-      />
-      <input
-        ref={rowFileRef}
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={(e) => {
-          const index = rowTargetRef.current;
-          const file = e.target.files?.[0] ?? null;
-          if (index != null && file) attachAvatar(index, file);
-          e.target.value = '';
-        }}
-      />
+        {/*
+          Поля выбора файла живут ВНУТРИ окна, а не рядом с ним.
+
+          Подложка закрывается по клику мимо окна, а `input.click()` порождает
+          настоящее событие клика, которое всплывает как обычное. Пока поля
+          лежали снаружи, этот клик доходил до подложки и закрывал модалку ровно
+          в тот момент, когда открывался диалог выбора файла: выбранная картинка
+          прилетала в размонтированный компонент, и снаружи это выглядело как
+          «нажал, а ничего не произошло».
+        */}
+        <input
+          ref={bulkFileRef}
+          type="file"
+          accept="image/*"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            if (e.target.files?.length) attachMany(e.target.files);
+            e.target.value = '';
+          }}
+        />
+        <input
+          ref={rowFileRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={(e) => {
+            const index = rowTargetRef.current;
+            const file = e.target.files?.[0] ?? null;
+            if (index != null && file) attachAvatar(index, file);
+            e.target.value = '';
+          }}
+        />
+      </div>
     </div>
   );
 }
