@@ -2302,3 +2302,30 @@ describe('VE2 cross-base contact exclusion', () => {
     });
   });
 });
+
+describe('base_collect: реестр оборвался посреди лейна', () => {
+  it('сохраняет разобранный префикс и закладку вместо падения задачи', async () => {
+    // Прод 21.09, база 3cd77243: шлюз отдал таймаут на очередной странице —
+    // 400 собранных компаний и 10 590 просмотренных строк уходили в мусор,
+    // задача становилась failed и вместе с ней падала вся база.
+    const db = seed({ plan: { tasks: [DIRECTORY_TASK] }, tasks: [
+      { source: DIRECTORY_TASK.source, status: 'pending', child_job_id: null, rows: 0, task: DIRECTORY_TASK },
+    ] });
+    jest.mocked(searchRows).mockImplementation(async (_filters, limit, offset) => ((offset ?? 0) >= 1_000
+      ? { rows: [], error: 'The upstream server is timing out' }
+      : { rows: Array.from({ length: limit ?? 1_000 }, (_, index) => ({
+        name: `Клиника ${index}`, inn: String(7_700_000_000 + index),
+        website: `https://c${index}.test/`, email: `mail@c${index}.test`,
+      })) }));
+
+    await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
+
+    const saved = db.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+    const task = saved.tasks![0];
+    expect(task.status).toBe('done');
+    expect(task.rows).toBe(1_000);
+    expect(task.error).toBeUndefined();
+    expect(task.note).toContain('частичная партия');
+    expect(Object.values(task.directory_cursors ?? {})).toEqual([1_000]);
+  });
+});
