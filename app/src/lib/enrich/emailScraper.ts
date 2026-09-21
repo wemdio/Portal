@@ -9,6 +9,8 @@
  */
 
 import iconv from 'iconv-lite';
+import type { Agent } from 'undici';
+import { getProxyDispatcher, tryAcquireProxySlot } from '@/lib/enrich/proxyPool';
 import { normalizeUrl } from '@/lib/enrich/urlUtils';
 
 // ── Configuration ──────────────────────────────────────────────
@@ -16,6 +18,76 @@ const FETCH_TIMEOUT_MS = 10_000;
 const FETCH_RETRIES = 1;
 const FETCH_RETRY_DELAY_MS = 400;
 const DEFAULT_MAX_PAGES = 12;
+
+// Проверку сертификата для скрапа выключаем намеренно. Российские
+// производственные сайты массово живут на цепочках, которые Node не
+// валидирует: сертификаты Минцифры, просрочки, altname не на тот хост,
+// self-signed. Замер 21.09.2026 на базе 2ГИС (1294 строки): из 191 домена,
+// оставшегося без почты, 37 падали ровно здесь — fetch рвал соединение до
+// отправки запроса, и наверх это уходило неотличимо от «почты на сайте нет».
+// Читаем мы публичные страницы и ничего не отправляем, так что подлинность
+// сертификата на результат не влияет.
+// undici грузится лениво: его index тянет web-fetch рантайм, которому в
+// jsdom-окружении тестов не хватает TextDecoder. Тот же приём, что с cheerio
+// ниже. Не получилось — идём без dispatcher'а, как до правки.
+let insecureTlsAgent: Agent | null = null;
+let insecureTlsAgentTried = false;
+
+async function getInsecureTlsDispatcher(): Promise<Agent | undefined> {
+  if (insecureTlsAgent) return insecureTlsAgent;
+  if (insecureTlsAgentTried) return undefined;
+  insecureTlsAgentTried = true;
+  try {
+    const { Agent: UndiciAgent } = await import('undici');
+    insecureTlsAgent = new UndiciAgent({ connect: { rejectUnauthorized: false } });
+    return insecureTlsAgent;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Человекочитаемая причина, по которой страница не открылась. */
+export type PageFetchFailure = string;
+
+function describeFetchError(err: unknown): PageFetchFailure {
+  const code = String(
+    (err as { cause?: { code?: string } })?.cause?.code
+      ?? (err as { code?: string })?.code
+      ?? (err as { name?: string })?.name
+      ?? '',
+  );
+  if (/^(CERT_|UNABLE_TO_VERIFY|UNABLE_TO_GET_ISSUER|DEPTH_ZERO|SELF_SIGNED|ERR_TLS_CERT)/.test(code)) {
+    return 'Сертификат сайта не прошёл проверку';
+  }
+  if (code.includes('TLS') || code.includes('SSL')) return 'Ошибка TLS-соединения';
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return 'Домен не резолвится';
+  if (code === 'ECONNREFUSED') return 'Соединение отклонено';
+  if (code === 'ECONNRESET') return 'Соединение разорвано';
+  if (code === 'EHOSTUNREACH' || code === 'ENETUNREACH') return 'Хост недоступен';
+  if (code.includes('TIMEOUT') || code === 'TimeoutError' || code === 'AbortError') {
+    return 'Сайт не ответил за отведённое время';
+  }
+  return 'Сайт не открылся';
+}
+
+/**
+ * Ретрай через прокси имеет смысл только на бот-защите: сайт нас увидел и
+ * отказал по IP. Замер 21.09.2026 — из 14 доменов базы 2ГИС, отдавших 403
+ * нашему US-egress'у, российский прокси открыл 6. Таймауты и отказы
+ * соединения так НЕ лечатся: те же 24 домена не открылись ни через RU, ни
+ * через EU-прокси, поэтому на них ретрай не тратим.
+ */
+const PROXY_RETRY_STATUSES = new Set([403, 429]);
+const PROXY_RETRY_ENABLED = process.env.EMAIL_SCRAPER_PROXY_RETRY !== '0';
+/** Ретраю даём меньше времени, чем прямому запросу: он не должен удлинять строку. */
+const PROXY_RETRY_TIMEOUT_MS = 8_000;
+
+function describeFetchStatus(status: number): PageFetchFailure {
+  if (status === 403 || status === 429) return `Сайт блокирует автоматические запросы (${status})`;
+  if (status === 404) return 'Страница не найдена (404)';
+  if (status >= 500) return `Сайт вернул ошибку ${status}`;
+  return `Сайт вернул ${status}`;
+}
 
 const BROWSER_USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
@@ -487,12 +559,19 @@ function isHtmlLikeContentType(contentType: string | null): boolean {
   return ct.includes('text/html') || ct.includes('application/xhtml') || ct.startsWith('text/plain');
 }
 
+type PageFetchResult = {
+  html: string | null;
+  failure: PageFetchFailure | null;
+  /** HTTP-статус, когда ответ был получен. Нужен чтобы отличить 403 от обрыва. */
+  status?: number;
+};
+
 async function fetchPage(
   url: string,
-  options?: { timeout?: number; signal?: AbortSignal; acceptLanguage?: string },
-): Promise<string | null> {
+  options?: { timeout?: number; signal?: AbortSignal; acceptLanguage?: string; dispatcher?: unknown },
+): Promise<PageFetchResult> {
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
-  if (options?.signal?.aborted) return null;
+  if (options?.signal?.aborted) return { html: null, failure: null };
   // Hard outer cap: даже если внутренний fetch() зависнет (видели на проде
   // 2026-06-19, undici assert(!this.paused) — body-stream после ассерта
   // может никогда не resolve'иться), эта race гарантирует возврат в
@@ -500,16 +579,23 @@ async function fetchPage(
   // отвалится сам по своему таймауту; зато processInPool слот свободен.
   // worker'ы Node-process'а параллельно ловят сам ассерт через
   // installUndiciAssertGuard() в app/worker/baseConstructor.ts.
+  // Abort/timer снимаем в finally (правка Sergey от 2026-09): без этого
+  // на отменённых джобах копились слушатели и таймеры.
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
-  const bounded = new Promise<null>((resolve) => {
-    onAbort = () => resolve(null);
+  const bounded = new Promise<PageFetchResult>((resolve) => {
+    onAbort = () => resolve({ html: null, failure: 'Сайт не ответил за отведённое время' });
     timer = setTimeout(onAbort, timeout + 5_000);
     options?.signal?.addEventListener('abort', onAbort, { once: true });
   });
   try {
     return await Promise.race([
-      fetchPageInner(url, { timeout, signal: options?.signal, acceptLanguage: options?.acceptLanguage }),
+      fetchPageInner(url, {
+        timeout,
+        signal: options?.signal,
+        acceptLanguage: options?.acceptLanguage,
+        dispatcher: options?.dispatcher,
+      }),
       bounded,
     ]);
   } finally {
@@ -520,8 +606,8 @@ async function fetchPage(
 
 async function fetchPageInner(
   url: string,
-  options: { timeout: number; signal?: AbortSignal; acceptLanguage?: string },
-): Promise<string | null> {
+  options: { timeout: number; signal?: AbortSignal; acceptLanguage?: string; dispatcher?: unknown },
+): Promise<PageFetchResult> {
   const { timeout } = options;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
@@ -531,11 +617,13 @@ async function fetchPageInner(
   if (externalSignal?.aborted) onExternalAbort();
   externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
 
+  const dispatcher = await getInsecureTlsDispatcher();
+
   try {
-    // Email discovery intentionally goes directly from the worker. It used the
-    // shared PROXY_URLS pool between 2026-07-21 and 2026-07-30, but slow/dead
-    // residential proxies consumed the per-page timeout and made 1k-row jobs
-    // take about an hour. Other parsers still use their own proxy routing.
+    // Основной запрос идёт напрямую из воркера. Общий пул PROXY_URLS
+    // использовался с 21.07 по 30.07.2026 и был снят: медленные ноды
+    // съедали per-page таймаут и джоба на 1000 строк шла час. Прокси
+    // остался только как разовый ретрай на 403 — см. fetchWithProxyRetry.
     const res = await fetch(url, {
       method: 'GET',
       headers: {
@@ -545,14 +633,19 @@ async function fetchPageInner(
       },
       signal: controller.signal,
       redirect: 'follow',
-    });
-    if (res.status >= 400) return null;
+      ...(options.dispatcher ? { dispatcher: options.dispatcher } : dispatcher ? { dispatcher } : {}),
+    } as RequestInit);
+    if (res.status >= 400) {
+      return { html: null, failure: describeFetchStatus(res.status), status: res.status };
+    }
     const contentType = res.headers.get('content-type');
-    if (!isHtmlLikeContentType(contentType)) return null;
+    if (!isHtmlLikeContentType(contentType)) {
+      return { html: null, failure: 'Страница не отдала HTML', status: res.status };
+    }
     const body = await res.arrayBuffer();
-    return decodeHtml(body, contentType);
-  } catch {
-    return null;
+    return { html: decodeHtml(body, contentType), failure: null, status: res.status };
+  } catch (err) {
+    return { html: null, failure: describeFetchError(err) };
   } finally {
     clearTimeout(timer);
     externalSignal?.removeEventListener('abort', onExternalAbort);
@@ -562,15 +655,55 @@ async function fetchPageInner(
 async function fetchPageWithRetry(
   url: string,
   options?: { timeout?: number; signal?: AbortSignal; acceptLanguage?: string },
-): Promise<string | null> {
+): Promise<PageFetchResult> {
+  let last: PageFetchResult = { html: null, failure: null };
   for (let attempt = 0; attempt <= FETCH_RETRIES; attempt += 1) {
-    if (options?.signal?.aborted) return null;
-    const html = await fetchPage(url, options);
-    if (html) return html;
-    if (options?.signal?.aborted) return null;
+    if (options?.signal?.aborted) return last;
+    last = await fetchPage(url, options);
+    if (last.html) return last;
+    if (options?.signal?.aborted) return last;
     if (attempt < FETCH_RETRIES) await sleep(FETCH_RETRY_DELAY_MS * (attempt + 1));
   }
-  return null;
+  return last;
+}
+
+/**
+ * Один ретрай через прокси, если сайт отказал нам по IP (403/429). Прямой
+ * запрос к этому моменту уже отработал и провалился быстро — ответ пришёл,
+ * просто отказной, так что удлинения строки почти нет.
+ *
+ * Пропуск в пул берём без ожидания: прокси общие с парсерами Яндекс.Карт,
+ * и вставать к ним в очередь ради одного домена дороже, чем этот домен
+ * пропустить. Не досталось слота — возвращаем исходный 403 как есть.
+ */
+async function fetchPageWithProxyRetry(
+  url: string,
+  direct: PageFetchResult,
+  options?: { timeout?: number; signal?: AbortSignal; acceptLanguage?: string },
+): Promise<PageFetchResult> {
+  if (!PROXY_RETRY_ENABLED) return direct;
+  if (direct.html || direct.status === undefined) return direct;
+  if (!PROXY_RETRY_STATUSES.has(direct.status)) return direct;
+  if (options?.signal?.aborted) return direct;
+
+  const release = tryAcquireProxySlot();
+  if (!release) return direct;
+
+  try {
+    const dispatcher = await getProxyDispatcher(true);
+    if (!dispatcher) return direct;
+    const viaProxy = await fetchPage(url, {
+      timeout: Math.min(options?.timeout ?? FETCH_TIMEOUT_MS, PROXY_RETRY_TIMEOUT_MS),
+      signal: options?.signal,
+      acceptLanguage: options?.acceptLanguage,
+      dispatcher,
+    });
+    return viaProxy.html ? viaProxy : direct;
+  } catch {
+    return direct;
+  } finally {
+    release();
+  }
 }
 
 // ── Link discovery from HTML ───────────────────────────────────
@@ -618,6 +751,13 @@ export type ScrapeEmailsResult = {
   siteName: string | null;
   /** Opt-in, extracted with the description parser's existing sufficiency rule. */
   description?: string;
+  /**
+   * Почему не удалось прочитать главную страницу: сертификат, 403, таймаут,
+   * DNS. null — главная открылась (адресов на сайте может всё равно не быть).
+   * Нужен чтобы отличать «сайт не открылся» от «почты на сайте нет»: раньше
+   * оба случая приходили одинаковой пустой строкой.
+   */
+  failureReason: PageFetchFailure | null;
 };
 
 /**
@@ -691,7 +831,12 @@ export async function scrapeEmails(
     for (const e of extractEmailsFromHtmlAdvanced(html)) allEmails.add(e);
   };
 
-  const tryFetch = async (pageUrl: string): Promise<string | null> => {
+  // Причина, по которой не открылась главная. Пишется только для неё:
+  // отвал отдельной /contacts ни о чём не говорит, а отвал главной — это
+  // ровно тот случай, когда «почт нет» на самом деле значит «мы не смотрели».
+  let mainFailure: PageFetchFailure | null = null;
+
+  const tryFetch = async (pageUrl: string, isMain = false): Promise<string | null> => {
     const normalized = normalizeForDedupe(pageUrl);
     if (checkedNormalized.has(normalized)) return null;
     if (checkedUrls.length >= maxPages) return null;
@@ -699,13 +844,21 @@ export async function scrapeEmails(
 
     checkedNormalized.add(normalized);
     checkedUrls.push(pageUrl);
-    return fetchPageWithRetry(pageUrl, { timeout, signal, acceptLanguage });
+    let result = await fetchPageWithRetry(pageUrl, { timeout, signal, acceptLanguage });
+    // Прокси тратим только на главную: если она за бот-защитой, остальные
+    // страницы того же сайта за ней же, а ретраить каждую — это и есть
+    // тот июльский сценарий, когда джоба на 1000 строк шла час.
+    if (isMain && !result.html) {
+      result = await fetchPageWithProxyRetry(pageUrl, result, { timeout, signal, acceptLanguage });
+    }
+    if (isMain && !result.html && result.failure) mainFailure = result.failure;
+    return result.html;
   };
 
   // 1. Fetch main page
-  let mainHtml = await tryFetch(url);
+  let mainHtml = await tryFetch(url, true);
   if (!mainHtml && tryWithWww && wwwOrigin) {
-    mainHtml = await tryFetch(wwwOrigin);
+    mainHtml = await tryFetch(wwwOrigin, true);
   }
 
   // Название компании берём с главной (og:site_name / <title>) — бесплатно,
@@ -735,6 +888,7 @@ export async function scrapeEmails(
         pagesScanned: checkedUrls.length,
         siteName,
         ...(description ? { description } : {}),
+        failureReason: mainFailure,
       };
     }
     discoveredLinks = await discoverEmailPageLinks(mainHtml, url);
@@ -791,5 +945,6 @@ export async function scrapeEmails(
     pagesScanned: checkedUrls.length,
     siteName,
     ...(description ? { description } : {}),
+    failureReason: mainFailure,
   };
 }

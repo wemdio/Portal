@@ -1646,7 +1646,7 @@ describe('pollAndQualifyReplies', () => {
         replyEmail({
           id: 'normal-reply',
           eaccount: 'lyamina@ritso-contact.ru',
-          to_address_email_list: 'Yanislava Lyamina <lyamina@ritso-contact.ru>',
+          to_address_email_list: 'Forwarder <SRS0=z1yi=hn=ritso-contact.ru=lyamina@forwarder.example>',
         }),
         // Листинг без To/CC-полей — проверка невозможна, fail-open в ИИ-путь.
         replyEmail({
@@ -2356,6 +2356,17 @@ describe('pollAndQualifyReplies', () => {
       { name: 'no thread with full quoted original', reply: { thread_id: undefined }, expected: 'source-project' },
       { name: 'quote shows receiving alias', reply: { body: { text: `Interested\n${quoted.replace('sales@source.example', 'sales@other.example')}` } }, expected: 'source-project' },
       { name: 'Russian quote CRLF', reply: { body: { text: `Интересно\r\n${quoted.replace('From:', 'От:').replace('Sent:', 'Дата:').replace('To:', 'Кому:').replace('Subject:', 'Тема:').split('\n').map(line => '> '+line).join('\r\n')}` } }, expected: 'source-project' },
+      { name: 'missing eaccount recovered from quoted actual send',
+        reply: { eaccount: undefined, to_address_email_list: sent.eaccount }, expected: 'source-project' },
+      { name: 'missing eaccount with parent discovered in recovery', discover: true, mapping: 'source',
+        reply: { eaccount: undefined, to_address_email_list: sent.eaccount }, expected: 'source-project' },
+      { name: 'missing eaccount and Russian headers without colons',
+        reply: { eaccount: undefined, to_address_email_list: sent.eaccount,
+          body: { text: quoted.replace('From:', 'От').replace('Sent:', 'Дата').replace('To:', 'Кому').replace('Subject:', 'Тема') } }, expected: 'source-project' },
+      { name: 'missing eaccount with quote but no actual send', missing: true,
+        reply: { eaccount: undefined, to_address_email_list: sent.eaccount }, expected: 'blocked' },
+      { name: 'missing eaccount and conflicting real parents', duplicate: true,
+        reply: { eaccount: undefined, to_address_email_list: sent.eaccount }, expected: 'blocked' },
       { name: 'first send quoted, latest not quoted', later: true, expected: 'source-project' },
       { name: 'parent found during recovery', discover: true, expected: 'source-project' },
       { name: 'JSON recipient proof survives interrupted recovery', discover: true, resume: true,
@@ -3781,7 +3792,7 @@ describe('pollAndQualifyReplies', () => {
     expect(listEmails).not.toHaveBeenCalled();
   });
 
-  it('keeps cross-owner mailbox history ambiguous when the current provider thread has no strong exact-mailbox parent', async () => {
+  it('uses the sole current owner after both history surfaces prove no competing parent', async () => {
     const { providerCampaignId, inbound, leadEmail } =
       installCurrentProviderWithStaleMailboxOwnersFixture();
 
@@ -3796,7 +3807,9 @@ describe('pollAndQualifyReplies', () => {
       accountId: 'main',
     });
 
-    expect(result).toEqual(expect.objectContaining({ status: 'ambiguous' }));
+    expect(result).toEqual(expect.objectContaining({
+      status: 'resolved', effectiveCampaignId: providerCampaignId, effectiveProjectId: 'project-enagency',
+    }));
     expect(listEmails.mock.calls.filter(
       ([params]) => Boolean((params as { search?: string }).search) ||
         (params as { email_type?: string }).email_type === 'sent',
@@ -5696,6 +5709,26 @@ describe('pollAndQualifyReplies', () => {
     expect(qualifyReply.mock.calls[0]?.[0]).toBe(historicalCampaignId);
     expect(qualifyReply.mock.calls[0]?.[3]?.prefetchedContext?.lastOutbound?.id)
       .toBe('historical-parent');
+  });
+
+  it('ignores old assignments only after complete evidence and with one known current owner', async () => {
+    const { providerCampaignId, candidateCampaignIds, inbound } = installMailboxOwnershipConflictFixture();
+    const { resolveEffectiveReplyOwner } = await import('@/lib/instantly/replyOwnershipResolver');
+    for (const scenario of ['complete', 'unknown-current', 'incomplete'] as const) {
+      getAccountCampaignMappings.mockResolvedValue([
+        { campaign_id: providerCampaignId, status: 1 },
+        { campaign_id: candidateCampaignIds[0], status: 3 },
+        { campaign_id: 'unlinked-old-campaign', status: scenario === 'unknown-current' ? 1 : 3 },
+      ]);
+      listEmails.mockResolvedValue({ items: [], next_starting_after: scenario === 'incomplete' ? 'more' : null });
+      const result = await resolveEffectiveReplyOwner({
+        db: mockInstantlyDb! as unknown as Parameters<typeof resolveEffectiveReplyOwner>[0]['db'],
+        reply: { ...inbound, id: `current-owner-${scenario}` }, providerCampaignId,
+        leadEmail: inbound.from_address_email ?? '', accountId: `current-owner-${scenario}`,
+      });
+      expect(result.status).toBe(scenario === 'complete' ? 'resolved' : 'ambiguous');
+      if (result.status === 'resolved') expect(result.effectiveProjectId).toBe('project-provider');
+    }
   });
 
   it('resolves exact cross-owner sent evidence for one lead even when workspace sent history has more pages', async () => {

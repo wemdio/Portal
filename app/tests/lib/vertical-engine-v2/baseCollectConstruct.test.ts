@@ -91,7 +91,7 @@ import { resolveVeYandexCatalogFilters } from '@/lib/verticalEngineV2/yandexCata
 import { newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys, summarizeVeBatchSpend, readVeBatchSpend, veAdaptiveCandidateLimit } from '@/lib/verticalEngineV2/adaptiveCollection';
 import { prioritizeVeCandidates } from '@/lib/verticalEngineV2/candidatePriority';
 import { veCompanyFactKey, VE_COMPANY_FACT_TTL_MS } from '@/lib/verticalEngineV2/companyFacts';
-import { previewRecoveryKind } from '@/lib/verticalEngineV2/collectionRecovery';
+import { previewRecoveryKind, openNextVeCollectionRound } from '@/lib/verticalEngineV2/collectionRecovery';
 
 const PROJECT = { id: 'p1', name: 'P', created_by: 'user-1', market: 'ru' };
 const VERTICAL = {
@@ -1449,6 +1449,127 @@ describe('base_collect CONSTRUCT step order', () => {
     await expect(resolveVeYandexCatalogFilters({ db: dictionaryDb, query: { queries: ['Лифты'], geo: 'Несуществующее место' } })).rejects.toThrow('география');
     (callLLMWithSchema as jest.Mock).mockResolvedValueOnce({ data: { category_ids: [0], place_ids: [] }, tokensUsed: 0, costUsd: 0 });
     expect(await resolveVeYandexCatalogFilters({ db: dictionaryDb, query: { queries: ['обслуживание лифтов'], geo: 'РФ' } })).toEqual(filters);
+  });
+
+  it('возобновляет каталог после ЗАКРЫТОГО раунда и не отвергает собственную контрольную точку', async () => {
+    // Прод, база 4cf192ba-8897-4ee2-9c01-5f6c2d8ae920 («Стройматериалы B2B»,
+    // проект Прион), лежит с 17.09.2026. Раунд 1 закрылся штатно: контрольная
+    // точка записана (completed_round = 1), 2000 кандидатов обработаны, 105
+    // контактов готовы. Но задача карт упала, finishCollectionRound вернул
+    // error и НЕ увеличил номер раунда. «Продолжить подготовку» возвращала
+    // базу в collecting с тем же round = 1, а стадия отвергала это же
+    // состояние: completed_round === round - 1 не выполняется (1 !== 0).
+    const catalogTask = { source: 'yandex_maps' as const, rationale: 'Каталог стройматериалов',
+      maps_query: { queries: ['Стройматериалы оптом'], geo: 'Россия' } };
+    const closedRound: VeCollectInfo = {
+      collection_mode: 'preview',
+      ready_target: 500,
+      limit: 2_000,
+      plan: { tasks: [DIRECTORY_TASK, catalogTask] },
+      construct: { bc_job_id: 'bc-round-1', status: 'done', dispatched_at: '2026-09-16T01:30:00Z' },
+      stats: { tasks_total: 2, tasks_done: 1, tasks_failed: 1, rows_total: 2_000,
+        excluded_existing_bases: 0, excluded_during_fetch: 0, finished_at: '2026-09-16T07:36:00Z' },
+      tasks: [
+        { source: 'companies_directory', status: 'done', child_job_id: null, task: DIRECTORY_TASK,
+          rows: 2_000, directory_cursors: { exact: 2_000 }, harvest: [] },
+        { source: 'yandex_maps', status: 'failed', child_job_id: 'maps-child-1', task: catalogTask,
+          rows: 0, error: 'Requesty 429: rate limited' },
+      ],
+      target_progress: { ...createCollectionTarget('preview'), round: 1, ready_rows: 105,
+        candidates_processed: 2_000, first_round_candidates: 2_000,
+        status: 'error', reason: 'yandex_maps: Requesty 429: rate limited' },
+      target_checkpoint: { completed_round: 1, seen_rows: [], processed_rows: 6_031,
+        prior_low_relevance: 0, prior_relevance_unchecked: 0, low_relevance: 0, relevance_unchecked: 6_179 },
+    } as unknown as VeCollectInfo;
+    const stuck = { ...makeBase(closedRound), status: 'failed',
+      error: 'yandex_maps: Requesty 429: rate limited' };
+    expect(previewRecoveryKind(stuck)).toBe('catalog');
+
+    const db = seed(closedRound, { ve_bases: [stuck], ve_jobs: [] });
+    expect(await enqueueVeBaseCollect(db as unknown as SupabaseClient, {
+      projectId: 'p1', verticalId: 'v1', verticalName: VERTICAL.name, limit: 100,
+      hypothesisIds: ['h1'], collectionMode: 'preview',
+    })).toMatchObject({ ok: true, created: true, base: { id: 'b1' } });
+    const resumed = db.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+
+    // Закрытый раунд продолжается СЛЕДУЮЩИМ: номер увеличен, и вместе с ним
+    // выполнен тот же переход, что делает стадия на границе раунда, — иначе
+    // конструктор первого раунда достался бы второму и заново втянул те же
+    // 2000 компаний, завысив candidates_processed.
+    expect(resumed.target_progress).toMatchObject({ round: 2, status: 'collecting',
+      ready_rows: 105, candidates_processed: 2_000 });
+    expect(resumed.target_progress?.reason).toBeUndefined();
+    expect(resumed.construct).toBeUndefined();
+    expect(resumed.stats?.finished_at).toBeUndefined();
+    expect(resumed.limit).toBe(collectionRoundLimit(resumed.target_progress!));
+    // Упавшая задача карт снова опрашивает СВОЕГО ребёнка, живой лейн реестра
+    // возвращается к своей закладке, а не читает срез с первой страницы.
+    expect(resumed.tasks).toMatchObject([
+      { source: 'companies_directory', status: 'pending', child_job_id: null, rows: 0,
+        directory_cursors: { exact: 2_000 } },
+      { source: 'yandex_maps', status: 'pending', child_job_id: null, legacy_child_job_id: 'maps-child-1' },
+    ]);
+
+    // Прод дословно: именно этот запуск падал «Invalid collection target checkpoint».
+    const stageError = await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient })
+      .then(() => null, (error: unknown) => (error instanceof Error ? error.message : String(error)));
+    expect(stageError).not.toBe('Invalid collection target checkpoint');
+
+    // Раунд, который НЕ закрылся (контрольная точка на раунд позади), обязан
+    // продолжаться тем же номером: возобновление не двигает счётчик вслепую.
+    const openRound = { ...closedRound, target_checkpoint: { ...closedRound.target_checkpoint!,
+      completed_round: 1 }, target_progress: { ...closedRound.target_progress!, round: 2 } } as VeCollectInfo;
+    const openBase = { ...makeBase(openRound), status: 'failed', error: 'yandex_maps: Requesty 429: rate limited' };
+    expect(previewRecoveryKind(openBase)).toBe('catalog');
+    const openDb = seed(openRound, { ve_bases: [openBase], ve_jobs: [] });
+    await enqueueVeBaseCollect(openDb as unknown as SupabaseClient, {
+      projectId: 'p1', verticalId: 'v1', verticalName: VERTICAL.name, limit: 100,
+      hypothesisIds: ['h1'], collectionMode: 'preview',
+    });
+    const openResumed = openDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+    expect(openResumed.target_progress).toMatchObject({ round: 2, status: 'collecting' });
+    expect(openResumed.construct).toMatchObject({ bc_job_id: 'bc-round-1', status: 'done' });
+
+    // Состояние прода СЕГОДНЯ: первая попытка возобновления уже перевела
+    // задачу карт в pending и упала на проверке, а стадия записала свою
+    // причину в target_progress. Не узнать это состояние значит собрать новую
+    // платную базу вместо 105 уже проверенных контактов старой.
+    const afterFailedResume = { ...closedRound,
+      tasks: [closedRound.tasks![0], { ...closedRound.tasks![1], status: 'pending' as const,
+        child_job_id: null, legacy_child_job_id: 'maps-child-1', error: undefined }],
+      target_progress: { ...closedRound.target_progress!, reason: 'Invalid collection target checkpoint' },
+    } as unknown as VeCollectInfo;
+    const bricked = { ...makeBase(afterFailedResume), status: 'failed',
+      error: 'Invalid collection target checkpoint' };
+    expect(previewRecoveryKind(bricked)).toBe('catalog');
+    const brickedDb = seed(afterFailedResume, { ve_bases: [bricked], ve_jobs: [] });
+    expect(await enqueueVeBaseCollect(brickedDb as unknown as SupabaseClient, {
+      projectId: 'p1', verticalId: 'v1', verticalName: VERTICAL.name, limit: 100,
+      hypothesisIds: ['h1'], collectionMode: 'preview',
+    })).toMatchObject({ ok: true, created: true, base: { id: 'b1' } });
+    const brickedResumed = brickedDb.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+    expect(brickedResumed.target_progress).toMatchObject({ round: 2, status: 'collecting', ready_rows: 105 });
+    expect(brickedResumed.construct).toBeUndefined();
+    expect(brickedDb.getRows('ve_bases')[0]).toMatchObject({ status: 'collecting', error: null });
+    const brickedStageError = await runBaseCollectStage(makeJob(), { supabase: brickedDb as unknown as SupabaseClient })
+      .then(() => null, (error: unknown) => (error instanceof Error ? error.message : String(error)));
+    expect(brickedStageError).not.toBe('Invalid collection target checkpoint');
+
+    // Равенство completed_round и round означает «раунд закрыт» ТОЛЬКО без
+    // флагов повторного прохода. С любым из них стадия читает то же равенство
+    // как «идёт сохранённый проход ТОГО ЖЕ раунда»: сдвинув номер такой базе,
+    // мы отняли бы у неё конструктор и залипли бы ровно той ошибкой, ради
+    // которой написана вся эта ветка.
+    for (const flag of ['validation_retry', 'company_name_recovery', 'relevance_review_requested'] as const) {
+      const guarded = structuredClone(closedRound) as unknown as Record<string, unknown>;
+      guarded[flag] = true;
+      expect(openNextVeCollectionRound(guarded)).toBe(false);
+      expect((guarded.target_progress as { round: number }).round).toBe(1);
+    }
+    // Без флагов раунд открывается — иначе проверка выше была бы бессмысленной.
+    const openable = structuredClone(closedRound) as unknown as Record<string, unknown>;
+    expect(openNextVeCollectionRound(openable)).toBe(true);
+    expect((openable.target_progress as { round: number }).round).toBe(2);
   });
 
   it('re-dispatches an in-flight legacy constructor result that never split multi-email cells', async () => {

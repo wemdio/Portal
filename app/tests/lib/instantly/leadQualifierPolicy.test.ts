@@ -93,6 +93,16 @@ const FORMAL_MAILBOX_CHANGE_BODY = [
 ].join(' ');
 
 const MACHINE_ACK_FIXTURES = [
+  ...[
+    'Здравствуйте! Ваше письмо получено.',
+    'Ваше письмо получено и будет прочитано в ближайшее время!',
+    'Привет! Спасибо за обращение. Уже работаем над вопросом. Вернемся с ответом как можно скорее 😇\nГрафик обслуживания заявок определяют рабочие часы.',
+    'Благодарим за обращение! Ваш запрос передан в соответствующее подразделение. Менеджер свяжется с Вами в течение одного рабочего дня.',
+    'Здравствуйте! Я бот Skillbox и учусь вместе с вами 💙\nПо этому вопросу поможет оператор. Передал ваше обращение в работу — вернёмся с ответом в течение суток.\nПожалуйста, учитывайте: если отправить новые сообщения по этому же вопросу или написать в другие каналы, обращение может переместиться в конец очереди.',
+  ].map(text => ({ name: text.slice(0, 70), email: {
+    from_address_email: 'support@example.com', subject: 'Re: Предложение',
+    body: { text }, content_preview: text,
+  } })),
   {
     name: 'Gracie receiptless response promise with a conditional contact',
     email: {
@@ -293,6 +303,22 @@ afterAll(() => {
 });
 
 describe('machine acknowledgement policy', () => {
+  it('recognizes complete system envelopes, not human additions or populated ticket comments', () => {
+    const ticket = `HRC1234567\n[https://tenant.service-now.com/nav_to.do?uri=case.do?sys_id=123]\nOpened by: sender\nState: Ready\n\nShort Description: Re: Proposal\nDescription:\n${SUBSTANTIVE_OUTBOUND_TEXT}\n\nComments:\n\nRegards,\nOneSC\nRef:MSG123_abc`;
+    const gateway = 'Kaspersky Secure Mail Gateway found unwanted object(s) in a message\nfrom sales@example.com to info@example.org\nwith the subject "Our proposal".\nYou can find additional information about the message below.\nMessage-ID: <message@example.com>.\nMessage date: Mon, 21 Sep 2026 10:00:00 +0300\nNode: 10.0.0.1:9045\nInternal message ID: 123456.\nAction on message: rejected, backed up.\nRecipients involved: info@example.org.\nRules involved: 1.\n\nObject: Message.\nObject size: 5589.\nStatus: Spam.\nAction on object(s): rejected, backed up.\n======================================';
+    for (const [body, subject, sender, kind] of [
+      [ticket, 'HR Case HRC1234567 has been opened', 'tenant@service-now.com', 'service_acknowledgement'],
+      [gateway, 'Mail Gateway notification', 'gateway@example.com', 'delivery_failure'],
+    ]) {
+      const fixture = email({ from_address_email: sender, subject, body: { text: body } });
+      expect(classifyMachineReply(fixture)).toBe(kind);
+      expect(classifyMachineReply({ ...fixture, body: { text: `${body}\nПришлите КП по вашему продукту.` } })).toBeNull();
+    }
+    expect(classifyMachineReply(email({ from_address_email: 'tenant@service-now.com',
+      subject: 'HR Case HRC1234567 has been opened',
+      body: { text: ticket.replace('Comments:\n', 'Comments:\nНужна демонстрация вашей системы.\n') },
+    }))).toBeNull();
+  });
   it('leaves an unrecognized long contact plus a human request to AI without blocking the worker', () => {
     const fixture = email({
       body: { text: `Добрый день! Мы обязательно ответим вам в ближайшее время! Если ваш запрос актуален и требует ответа, то свяжитесь с нами по телефону: ${'9'.repeat(150)} пришлите КП` },
@@ -393,6 +419,17 @@ describe('machine acknowledgement policy', () => {
 });
 
 describe('plain contact routing policy', () => {
+  it('keeps conditional partnership applications non-leads without hiding a concrete buyer request', async () => {
+    const body = 'Здравствуйте, Егор.Бот ответил верно.Мы открыты к новым партнёрствам и рады обсудить возможности сотрудничества. Пожалуйста, заполните форму по ссылке: https://example.com/form Рассмотрим заявку и свяжемся в случае взаимной заинтересованности.\n\nСлужба заботы Skillbox, с 9:00 до 20:00 по мскОставьте отзыв об обучении в SkillboxПервое занятие по английскому за 299₽Курс-знакомство «Как учиться в Skillbox»Ответы на частые вопросы пользователейПишите: hello@skillbox.ru';
+    expect(classifyMachineReply(email({ body: { text: body } }))).toBeNull();
+    expect(await qualify(body)).toMatchObject({ isLead: false, nonLeadKind: 'service_followup', machineReplyKind: null });
+    expect(await qualify(body, { leadCriteria: ADK_CRITERIA })).toMatchObject({ isLead: false, customCriteriaMatched: false });
+    expect(fetchMock).not.toHaveBeenCalled();
+    await qualify(`${body}\nОтдельно: хотим внедрить вашу систему, пришлите цену и назначим демонстрацию.`, {
+      outboundText: SUBSTANTIVE_OUTBOUND_TEXT,
+    });
+    expect(fetchMock).toHaveBeenCalled();
+  });
   it.each([
     'Здравствуйте! запишите мой тел 89104886003 Алан',
     'Можете связаться с Артёмом. 89250310331',
