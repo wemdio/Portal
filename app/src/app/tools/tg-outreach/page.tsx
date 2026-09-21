@@ -2414,8 +2414,16 @@ function CampaignAccountsTab({
     [freeProxies, proxies],
   );
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /**
+   * Перечитать список.
+   *
+   * Заглушку «Загрузка…» показываем только на первом открытии вкладки. Раньше
+   * её ставило любое перечитывание: список на секунду исчезал, а вместе с ним
+   * уезжала прокрутка — оператор, поменявший галочку у сорокового аккаунта,
+   * возвращался в начало списка и листал вниз заново.
+   */
+  const load = useCallback(async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setLoading(true);
     const [accRes, proxRes, errRes, sendRes, archRes] = await Promise.all([
       authFetch(`${API_BASE}/accounts?campaign_id=${campaignId}`),
       authFetch(`${API_BASE}/proxies?campaign_id=${campaignId}`),
@@ -2465,11 +2473,11 @@ function CampaignAccountsTab({
     const value = trimmed === '' ? null : Number(trimmed);
     if (value !== null && (!Number.isFinite(value) || value < 0)) return;
     setEditingPriceFor(null);
+    setAccounts(prev => prev.map(a => (a.id === id ? { ...a, price: value } : a)));
     await authFetch(`${API_BASE}/accounts/${id}`, {
       method: 'PUT',
       body: JSON.stringify({ price: value }),
     });
-    void load();
   };
 
   const applyBulkPrice = async () => {
@@ -2760,12 +2768,30 @@ function CampaignAccountsTab({
     }
   };
 
+  /** Заменить одну строку списка, не трогая остальные. */
+  const patchAccount = useCallback((id: string, patch: Partial<OutreachAccount>) => {
+    setAccounts(prev => prev.map(a => (a.id === id ? { ...a, ...patch } : a)));
+  }, []);
+
+  /**
+   * Переключатель «Активен».
+   *
+   * Строка меняется сразу и на месте, без перечитывания списка: галочку жмут
+   * подряд у десятка аккаунтов, и каждый раз ждать общий запрос — значит
+   * ждать его десять раз. Если сервер откажет, переключатель возвращается
+   * назад, а не остаётся врать.
+   */
   const toggleActive = async (id: string, current: boolean) => {
-    await authFetch(`${API_BASE}/accounts/${id}`, {
+    patchAccount(id, { is_active: !current });
+    const res = await authFetch(`${API_BASE}/accounts/${id}`, {
       method: 'PUT',
       body: JSON.stringify({ is_active: !current }),
     });
-    void load();
+    if (!res.ok) {
+      patchAccount(id, { is_active: current });
+      const body = await res.json().catch(() => null) as { error?: string } | null;
+      alert(body?.error ?? `Не удалось изменить аккаунт (HTTP ${res.status})`);
+    }
   };
 
   const deleteAccount = async (id: string) => {
@@ -2778,7 +2804,7 @@ function CampaignAccountsTab({
       alert(body?.error ?? `Не удалось удалить аккаунт (HTTP ${res.status})`);
       return;
     }
-    void load();
+    setAccounts(prev => prev.filter(a => a.id !== id));
   };
 
   const deleteSelected = async () => {
@@ -2798,7 +2824,7 @@ function CampaignAccountsTab({
         return;
       }
       clear();
-      void load();
+      setAccounts(prev => prev.filter(a => !ids.includes(a.id)));
     } finally {
       setBulkDeleting(false);
     }
@@ -3733,7 +3759,7 @@ function CampaignAccountsTab({
         <BulkProfileModal
           accounts={accounts.filter((a) => selectedIds.includes(a.id))}
           onClose={() => setBulkProfileOpen(false)}
-          onDone={() => { void load(); }}
+          onApplied={patchAccount}
         />
       )}
 
@@ -3744,7 +3770,7 @@ function CampaignAccountsTab({
           syncing={syncingIds.includes(profileAccount.id)}
           onSync={() => syncProfile(profileAccount.id)}
           onClose={() => setProfileAccount(null)}
-          onSaved={() => { void load(); }}
+          onSaved={(patch) => patchAccount(profileAccount.id, patch)}
         />
       )}
     </div>
@@ -3773,7 +3799,8 @@ function AccountProfileModal({
   syncing: boolean;
   onSync: () => Promise<SyncResult>;
   onClose: () => void;
-  onSaved: () => void;
+  /** Что реально встало в Telegram — этим и обновляется строка списка. */
+  onSaved: (patch: Partial<OutreachAccount>) => void;
 }) {
   const [firstName, setFirstName] = useState(account.first_name ?? '');
   const [lastName, setLastName] = useState(account.last_name ?? '');
@@ -3912,12 +3939,24 @@ function AccountProfileModal({
         body: form,
       });
       const body = (await res.json().catch(() => null)) as
-        { error?: string; avatar_error?: string; queued?: boolean; message?: string; rest_until?: string } | null;
+        (Partial<OutreachAccount> & {
+          error?: string;
+          avatar_error?: string;
+          queued?: boolean;
+          message?: string;
+          rest_until?: string;
+        }) | null;
       if (!res.ok) {
         setError(body?.error ?? `Ошибка ${res.status}`);
         return;
       }
-      onSaved();
+      // Строку списка обновляем ответом, а не перечитыванием всего списка:
+      // ответ и есть то, что реально встало в Telegram.
+      const { error: _e, avatar_error: _a, queued: _q, message: _m, rest_until: restUntil, ...applied } =
+        body ?? {};
+      if (!body?.queued) {
+        onSaved({ ...applied, ...(restUntil ? { profile_rest_until: restUntil } : {}) });
+      }
       // Кампания работает — профиль применит круг. Карточку не закрываем:
       // иначе оператор решит, что всё уже в Telegram, и удивится, не найдя
       // там изменений ближайший час.

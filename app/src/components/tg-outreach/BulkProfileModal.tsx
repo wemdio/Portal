@@ -57,6 +57,7 @@ interface ApplyResponse {
   first_name?: string;
   last_name?: string;
   tg_username?: string;
+  avatar_url?: string;
   avatar_error?: string;
   error?: string;
 }
@@ -64,11 +65,16 @@ interface ApplyResponse {
 export function BulkProfileModal({
   accounts,
   onClose,
-  onDone,
+  onApplied,
 }: {
   accounts: OutreachAccount[];
   onClose: () => void;
-  onDone: () => void;
+  /**
+   * Готовый аккаунт обновляется в списке сразу, строкой. Перечитывать весь
+   * список нельзя: он уедет под ногами у оператора, который в это время
+   * листает, да и заполненные аккаунты видно и так — по этому же окну.
+   */
+  onApplied: (id: string, patch: Partial<OutreachAccount>) => void;
 }) {
   const [rows, setRows] = useState<Row[]>(() =>
     accounts.map((account) => ({
@@ -163,6 +169,12 @@ export function BulkProfileModal({
       }
 
       const name = [data.first_name, data.last_name].filter(Boolean).join(' ');
+      onApplied(id, {
+        first_name: data.first_name,
+        last_name: data.last_name,
+        tg_username: data.tg_username,
+        ...(data.avatar_url ? { avatar_url: data.avatar_url } : {}),
+      });
       patchRow(index, {
         state: 'done',
         detail: data.avatar_error ? `Профиль записан, аватарка — нет: ${data.avatar_error}` : 'Готово',
@@ -188,12 +200,10 @@ export function BulkProfileModal({
       await runOne(i);
     }
     setRunning(false);
-    onDone();
   };
 
   const close = () => {
     stopRef.current = true;
-    if (touched) onDone();
     onClose();
   };
 
