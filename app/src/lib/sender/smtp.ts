@@ -3,6 +3,7 @@ import 'server-only';
 import nodemailer from 'nodemailer';
 import { ImapFlow } from 'imapflow';
 import { assertSafeImapTarget, assertSafeSmtpTarget } from '@/lib/byoMailbox/netGuard';
+import { buildMailParts } from '@/lib/mail/message';
 import type { TlsMode } from './mailboxImport';
 
 /**
@@ -103,6 +104,8 @@ export interface OutgoingMail {
   to: string;
   subject: string;
   text: string;
+  /** Письмо целиком в HTML, если оно так написано. Обычно его нет: текст один. */
+  html?: string | null;
   /** Генерируется до отправки и сохраняется в очереди — по нему ловим ответ. */
   messageId: string;
   /** Для follow-up: письмо уходит в ту же переписку. */
@@ -115,12 +118,19 @@ export async function sendSenderMail(cfg: SenderSmtpConfig, mail: OutgoingMail):
   if (!guard.ok) return { ok: false, code: 'blocked_target', error: `SMTP-цель отклонена (${guard.reason})` };
 
   const transport = buildTransport(cfg);
+  const parts = buildMailParts({ from: mail.from, text: mail.text, html: mail.html });
   try {
     await transport.sendMail({
       from: mail.from,
       to: mail.to,
       subject: mail.subject,
-      text: mail.text,
+      // Обе части сразу: nodemailer соберёт multipart/alternative. Холодное
+      // письмо из одной части фильтры считают машинной рассылкой.
+      text: parts.text,
+      html: parts.html,
+      headers: parts.headers,
+      // Без этого кириллица уезжает в base64 — ещё один признак рассылки.
+      textEncoding: 'quoted-printable',
       messageId: mail.messageId,
       inReplyTo: mail.inReplyTo ?? undefined,
       references: mail.references ?? undefined,
