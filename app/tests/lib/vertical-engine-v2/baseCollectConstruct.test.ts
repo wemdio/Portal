@@ -601,7 +601,7 @@ describe('base_collect CONSTRUCT step order', () => {
       const budgetInfo: VeCollectInfo = { ...collectInfo([knownInn, ...excludedSources]), collection_mode: 'preview',
         search_policy: { version: 1, phase: 'paid', deferred_rows: [knownInn] },
         target_progress: createCollectionTarget('preview'),
-        source_contact_budget: { version: 1, checked_at_growth: 0, ready_high_water: 0, paused: false },
+        source_contact_budget: { version: 2, checked_at_growth: 0, ready_high_water: 0, paused: false },
         source_contact_recovery: { version: 1, checked: Object.fromEntries(Array.from({ length: 119 }, (_, i) =>
           [`previous-${i}`, { website: '', reason: 'identity_unverified' }])) },
         ...(pipelined ? { preview_pipeline: { version: 1 as const, revision: 0, batches: [] } } : {}),
