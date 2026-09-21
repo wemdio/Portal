@@ -42,8 +42,8 @@ interface MappedCampaigns {
 
 type MappingCacheEntry = { at: number; value: MappedCampaigns };
 const mappingCache = new Map<string, MappingCacheEntry>();
-type ReservedTagCacheEntry = { at: number; ids: Set<string> };
-type CampaignScopeCacheEntry = { at: number; usesReservedPoolTag: boolean };
+type ReservedTagCacheEntry = { at: number; ids: Set<string>; nonReserveIds: Set<string> };
+type CampaignScopeCacheEntry = { at: number; usesReservedPoolTag: boolean; exclusiveTagId: string | null };
 const reservedTagCache = new Map<string, ReservedTagCacheEntry>();
 const campaignScopeCache = new Map<string, CampaignScopeCacheEntry>();
 
@@ -235,7 +235,10 @@ async function reservedPoolTagIds(accountId?: string): Promise<Set<string>> {
       .map((tag) => tag.id)
       .filter(Boolean),
   );
-  reservedTagCache.set(key, { at: Date.now(), ids });
+  const nonReserveIds = new Set(tags
+    .filter(tag => tag.name?.trim() && !isReservedMailboxPoolTag(tag.name))
+    .map(tag => tag.id));
+  reservedTagCache.set(key, { at: Date.now(), ids, nonReserveIds });
   return ids;
 }
 
@@ -264,7 +267,9 @@ async function removeReservedPoolMappings(
     } else {
       const campaign = await instantly.getCampaign(campaignId, { accountId });
       usesReservedPoolTag = (campaign.email_tag_list ?? []).some((tagId) => reservedIds.has(tagId));
-      campaignScopeCache.set(key, { at: Date.now(), usesReservedPoolTag });
+      const exclusiveTagId = Array.isArray(campaign.email_list) && campaign.email_list.length === 0 &&
+        campaign.email_tag_list?.length === 1 ? campaign.email_tag_list[0] : null;
+      campaignScopeCache.set(key, { at: Date.now(), usesReservedPoolTag, exclusiveTagId });
     }
     if (usesReservedPoolTag) invalid.add(campaignId);
   }
@@ -279,6 +284,7 @@ async function removeReservedPoolMappings(
 interface OwnershipLinks {
   projectsByCampaign: Map<string, Set<string>>;
   clientsByCampaign: Map<string, Set<string>>;
+  manualCampaignIds: Set<string>;
   error: string | null;
 }
 
@@ -288,18 +294,19 @@ async function loadOwnershipLinks(
 ): Promise<OwnershipLinks> {
   const projectsByCampaign = new Map<string, Set<string>>();
   const clientsByCampaign = new Map<string, Set<string>>();
+  const manualCampaignIds = new Set<string>();
   if (campaignIds.length === 0) {
-    return { projectsByCampaign, clientsByCampaign, error: null };
+    return { projectsByCampaign, clientsByCampaign, manualCampaignIds, error: null };
   }
 
   const [legacy, period, clientAccess] = await Promise.all([
     db
       .from('project_instantly_campaigns')
-      .select('campaign_id, project_id')
+      .select('campaign_id, project_id, match_source')
       .in('campaign_id', campaignIds),
     db
       .from('project_period_instantly_campaigns')
-      .select('campaign_id, project_id')
+      .select('campaign_id, project_id, match_source')
       .in('campaign_id', campaignIds),
     db
       .from('client_instantly_access')
@@ -311,6 +318,7 @@ async function loadOwnershipLinks(
     return {
       projectsByCampaign,
       clientsByCampaign,
+      manualCampaignIds,
       error:
         legacy.error?.message ??
         period.error?.message ??
@@ -322,8 +330,10 @@ async function loadOwnershipLinks(
   for (const row of [...(legacy.data ?? []), ...(period.data ?? [])] as Array<{
     campaign_id?: string | null;
     project_id?: string | null;
+    match_source?: string | null;
   }>) {
     if (!row.campaign_id || !row.project_id) continue;
+    if (row.match_source === 'manual') manualCampaignIds.add(row.campaign_id);
     let projects = projectsByCampaign.get(row.campaign_id);
     if (!projects) {
       projects = new Set<string>();
@@ -344,7 +354,54 @@ async function loadOwnershipLinks(
     }
     clients.add(row.client_user_id as string);
   }
-  return { projectsByCampaign, clientsByCampaign, error: null };
+  return { projectsByCampaign, clientsByCampaign, manualCampaignIds, error: null };
+}
+
+/** Manual campaigns created in Instantly may not yet have a Portal link.
+ * A shared, exclusive NON-reserve sending tag is configuration evidence, not
+ * a name match. Borrow the owner only within this reply resolution; never
+ * create global links, cross client ownership, or revive a denied assignment.
+ */
+async function recoverCurrentTagOwners(
+  db: SupabaseClient, mappings: MappedCampaigns, links: OwnershipLinks, accountId?: string,
+): Promise<Set<string>> {
+  const recovered = new Set<string>();
+  const current = mappings.currentCampaignIds;
+  const unknown = current.filter(id => campaignOwnerKeys(links, id).every(key => key.startsWith('unknown:')));
+  if (!unknown.length || current.length > MAX_SENDER_SCOPE_INSPECTIONS) return recovered;
+  const knownOwners = [...new Set(current.flatMap(id => campaignOwnerKeys(links, id))
+    .filter(key => !key.startsWith('unknown:')))];
+  if (knownOwners.length !== 1 || !knownOwners[0].startsWith('project:') ||
+      !current.some(id => links.manualCampaignIds.has(id) &&
+        campaignOwnerKeys(links, id).length === 1 && campaignOwnerKeys(links, id)[0] === knownOwners[0])) return recovered;
+  const projectId = projectIdFromOwnerKey(knownOwners[0])!;
+  const denied = await db.from('project_instantly_campaigns_denylist')
+    .select('campaign_id').eq('project_id', projectId).in('campaign_id', current);
+  if (denied.error || denied.data?.length) return recovered;
+  const reserveTags = await reservedPoolTagIds(accountId);
+  const projectTags = reservedTagCache.get(accountId ?? 'main')!.nonReserveIds;
+  let commonTag: string | undefined;
+  for (const id of current) {
+    const key = `${accountId ?? 'main'}:${id}`;
+    let scope = campaignScopeCache.get(key);
+    if (!scope || Date.now() - scope.at >= SENDER_SCOPE_TTL_MS) {
+      const campaign = await instantly.getCampaign(id, { accountId });
+      // Mixed explicit accounts / several tags are not an exclusive project scope.
+      const exclusiveTagId = Array.isArray(campaign.email_list) && campaign.email_list.length === 0 &&
+        campaign.email_tag_list?.length === 1 ? campaign.email_tag_list[0] : null;
+      scope = { at: Date.now(), exclusiveTagId,
+        usesReservedPoolTag: (campaign.email_tag_list ?? []).some(tag => reserveTags.has(tag)) };
+      campaignScopeCache.set(key, scope);
+    }
+    const tag = scope.exclusiveTagId;
+    if (!tag || !projectTags.has(tag) || (commonTag && commonTag !== tag)) return recovered;
+    commonTag = tag;
+  }
+  for (const id of unknown) {
+    links.projectsByCampaign.set(id, new Set([projectId]));
+    recovered.add(id);
+  }
+  return recovered;
 }
 
 function campaignOwnerKeys(links: OwnershipLinks, campaignId: string): string[] {
@@ -1113,10 +1170,20 @@ export async function resolveEffectiveReplyOwner(args: {
   ], reply);
   if (conversationParents.length > 0) {
     const campaignIds = [...new Set(conversationParents.map(parent => parent.campaign_id!))];
-    const conversationLinks = await loadOwnershipLinks(db, campaignIds);
+    let conversationLinks = await loadOwnershipLinks(db, campaignIds);
     if (conversationLinks.error) {
       return { status: 'defer', providerCampaignId,
         reason: `conversation ownership unavailable: ${conversationLinks.error}` };
+    }
+    if (campaignIds.some(id => campaignOwnerKeys(conversationLinks, id).some(key => key.startsWith('unknown:')))) {
+      try {
+        const mapped = await getMappedCampaigns(mailbox, accountId, providerCampaignId);
+        conversationLinks = await loadOwnershipLinks(db, [...new Set([...campaignIds, ...mapped.currentCampaignIds])]);
+        if (conversationLinks.error) throw new Error(conversationLinks.error);
+        await recoverCurrentTagOwners(db, mapped, conversationLinks, accountId);
+      } catch {
+        return { status: 'defer', providerCampaignId, reason: 'conversation project tag evidence unavailable' };
+      }
     }
     const ownerKeys = [...new Set(campaignIds.flatMap(id => campaignOwnerKeys(conversationLinks, id)))];
     if (ownerKeys.length !== 1 || ownerKeys[0].startsWith('unknown:')) {
@@ -1196,6 +1263,13 @@ export async function resolveEffectiveReplyOwner(args: {
     }
   }
 
+  let tagRecovered = new Set<string>();
+  try {
+    tagRecovered = await recoverCurrentTagOwners(db, mappings, links, accountId);
+  } catch {
+    // Missing tag/campaign metadata never turns an unknown owner into proof.
+  }
+
   const ownerKeysByCampaign = new Map(
     evidenceCampaignIds.map((campaignId) => [
       campaignId,
@@ -1203,6 +1277,7 @@ export async function resolveEffectiveReplyOwner(args: {
     ]),
   );
   const ownershipScope = {
+    tagRecovered: [...tagRecovered].sort(),
     currentCampaignIds: [...currentCampaignIds].sort(),
     owners: linkIds.map((campaignId) =>
       [campaignId, campaignOwnerKeys(links, campaignId).sort()],
@@ -1289,7 +1364,7 @@ export async function resolveEffectiveReplyOwner(args: {
     let context = chosenCampaignId === providerCampaignId
       ? providerContext
       : correctedContext(reply, chosenCampaignId, mailbox, [], null);
-    let reason = `exact mailbox mappings resolve one owner; using ${chosenCampaignId}`;
+    let reason = `${tagRecovered.size ? 'exclusive current project sender tag and ' : ''}exact mailbox mappings resolve one owner; using ${chosenCampaignId}`;
 
     // When Instantly attached the inbound to an unrelated campaign — or to a
     // mapped sibling whose thread contains only the reply — the exact mailbox

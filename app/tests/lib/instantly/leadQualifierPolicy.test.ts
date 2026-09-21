@@ -92,8 +92,14 @@ const FORMAL_MAILBOX_CHANGE_BODY = [
   'Вы можете направить письмо на новый адрес.',
 ].join(' ');
 
+const ROCKET_SUPPORT_RECEIPT = "Добрый день!\n\nСпасибо, что обратились в службу технической поддержки ROCKET. Ваше\nобращение принято и рассматривается.\nНапоминаем, что согласно *\"Публичной оферте №1 на предоставление сервиса\nRocketSales\"\n<https://docs.google.com/document/d/example_terms/preview>*\nтехническая поддержка предоставляется с понедельника по пятницу с 9:00 до\n18:00, кроме выходных и праздничных дней.\n\nОбщение происходит в формате «Вопрос – ответ» посредством электронной почты\nsupport@rocket.red. Также у Вас есть возможность обратиться в нашу\nтехническую поддержку через бота в Telegram (@rocketsalesbot\n<https://t.me/rocketsalesbot>). По нашим стандартам специалист техподдержки\nсвяжется с вами в течение двух часов в рабочее время.\n\n\nМы делаем все возможное, чтобы отвечать нашим клиентам как можно быстрее.\nСредняя скорость ответа от технической поддержки – 15 минут. Если вы не\nполучили ответ от специалиста, проверьте, не попало ли наше письмо в спам!\n\n\nЧтобы ускорить решение вашего вопроса, пожалуйста, пришлите в ответ на\nданное письмо\n\n   1. id аккаунта amoCRM, где обнаружена данная проблема,\n   2. название вашей компании.\n\nС уважением,\nкоманда ROCKET\n\n*Подписывайтесь на Telegram-канал ROCKET <https://t.me/rocketcloudnews>*.\nТам вы узнаете больше про лучшие в мире облачные решения и найдете лучшие\nкейсы по доработке amoCRM.\n⠀\nT_I_C_K_E_T_I_D_123456\n";
+
 const MACHINE_ACK_FIXTURES = [
   ...[
+    'Здравствуйте, ваше письмо получено\n\nС уважением,\nООО Клиника\n+7 (900) 100-10-10',
+    'Доброго времени суток! Если вы получили это уведомление, значит Ваше письмо доставлено и принято в обработку. По всем моментам с Вами обязательно свяжется наш специалист в ближайшие дни. Спасибо!\n\nС уважением,\nКлиника',
+    'Спасибо за Ваше письмо.\nЯ  отвечу на него в ближайшее время.\n\nПо вопросам Диагностики, Сервиса, Ремонта техники обращаться по телефону Сервиса :+7 900 100 10 10\nЭлектронная почта Service@example.org\n\nHave a nice day.\nBest regards,\nTest Person',
+    ROCKET_SUPPORT_RECEIPT,
     'Здравствуйте! Ваше письмо получено.',
     'Ваше письмо получено и будет прочитано в ближайшее время!',
     'Привет! Спасибо за обращение. Уже работаем над вопросом. Вернемся с ответом как можно скорее 😇\nГрафик обслуживания заявок определяют рабочие часы.',
@@ -306,7 +312,9 @@ describe('machine acknowledgement policy', () => {
   it('recognizes complete system envelopes, not human additions or populated ticket comments', () => {
     const ticket = `HRC1234567\n[https://tenant.service-now.com/nav_to.do?uri=case.do?sys_id=123]\nOpened by: sender\nState: Ready\n\nShort Description: Re: Proposal\nDescription:\n${SUBSTANTIVE_OUTBOUND_TEXT}\n\nComments:\n\nRegards,\nOneSC\nRef:MSG123_abc`;
     const gateway = 'Kaspersky Secure Mail Gateway found unwanted object(s) in a message\nfrom sales@example.com to info@example.org\nwith the subject "Our proposal".\nYou can find additional information about the message below.\nMessage-ID: <message@example.com>.\nMessage date: Mon, 21 Sep 2026 10:00:00 +0300\nNode: 10.0.0.1:9045\nInternal message ID: 123456.\nAction on message: rejected, backed up.\nRecipients involved: info@example.org.\nRules involved: 1.\n\nObject: Message.\nObject size: 5589.\nStatus: Spam.\nAction on object(s): rejected, backed up.\n======================================';
+    const domainRetirement = "Message ID:  <example@example.org>\nSender (Отправитель):  sender@example.org\nReceiver (Получатель):  info@old.example\nSubject (Тема):                Можно в рассылку заявок?\n \nИспользование адреса электронной почты info@old.example с доменным именем OLD.EXAMPLE вскоре будет прекращено.\nИспользуйте для связи адреса электронной почты с доменным именем NEW.EXAMPLE.\nПри отсутствии такого адреса электронной почты, пожалуйста, свяжитесь с получателем при помощи другого способа связи или отправьте запрос по адресу info@new.example.\n\nThe use of email address info@old.example with domain name OLD.EXAMPLE will soon be ending.\nPlease use for communication email addresses with the NEW.EXAMPLE domain name.\nIf you do not have such an email address, please contact the recipient using another method of communication or send a request to info@new.example.\n";
     for (const [body, subject, sender, kind] of [
+      [domainRetirement, 'Notification: domain name OLD.EXAMPLE will be ending soon', 'postmaster@old.example', 'auto_reply'],
       [ticket, 'HR Case HRC1234567 has been opened', 'tenant@service-now.com', 'service_acknowledgement'],
       [gateway, 'Mail Gateway notification', 'gateway@example.com', 'delivery_failure'],
     ]) {

@@ -1032,6 +1032,11 @@ const SUPPORT_QUEUE_SEGMENT_PATTERN =
   /^(?:по\s+этому\s+вопросу\s+поможет\s+оператор|передал\s+ваше\s+обращение\s+в\s+работу\s*[—–-]\s*верн[её]мся\s+с\s+ответом\s+в\s+течение\s+суток|пожалуйста,\s*учитывайте:\s*если\s+отправить\s+новые\s+сообщения\s+по\s+этому\s+же\s+вопросу\s+или\s+написать\s+в\s+другие\s+каналы,\s*обращение\s+может\s+переместиться\s+в\s+конец\s+очереди)$/iu;
 const SERVICE_ACK_ADDITIONAL_SEGMENT_PATTERN =
   /^(?:ваше\s+письмо\s+получено\s+и\s+будет\s+прочитано\s+в\s+ближайшее\s+время|ваш\s+запрос\s+передан\s+в\s+соответствующее\s+подразделение|менеджер\s+свяжется\s+с\s+вами\s+в\s+течение\s+одного\s+рабочего\s+дня|уже\s+работаем\s+над\s+вопросом|верн[её]мся\s+с\s+ответом\s+как\s+можно\s+скорее(?:\s*😇)?|график\s+обслуживания\s+заявок\s+определяют\s+рабочие\s+часы)$/iu;
+const SERVICE_DELIVERED_NOTICE_PATTERN =
+  /^если\s+вы\s+получили\s+это\s+уведомление,?\s*значит\s+ваше\s+письмо\s+доставлено\s+и\s+принято\s+в\s+обработку$/iu;
+const SERVICE_PERSONAL_PROMISE_PATTERN = /^я\s+отвечу\s+на\s+него\s+в\s+ближайшее\s+время$/iu;
+const SERVICE_REPAIR_ROUTING_PATTERN =
+  /^по\s+вопросам\s+диагностики,\s*сервиса,\s*ремонта\s+техники\s+обращаться\s+по\s+телефону\s+сервиса\s*:\s*\+?[\d ()-]{7,30}$/iu;
 
 /** Human support routing is not a machine reply and stays visible as such.
  * Require the whole authored message, including the conditional application
@@ -1170,7 +1175,12 @@ function isServiceAcknowledgementBoilerplateSegment(segment: string): boolean {
     SERVICE_ACK_OPERATIONAL_CONTACT_PATTERN.test(segment) ||
     SERVICE_ACK_PATIENCE_PATTERN.test(segment) ||
     SERVICE_ACK_ADDITIONAL_SEGMENT_PATTERN.test(segment) ||
-    /^(?:привет|доброго\s+времени\s+суток)$/iu.test(segment)
+    SERVICE_DELIVERED_NOTICE_PATTERN.test(segment) ||
+    SERVICE_PERSONAL_PROMISE_PATTERN.test(segment) ||
+    SERVICE_REPAIR_ROUTING_PATTERN.test(segment) ||
+    /^по\s+всем\s+моментам\s+с\s+вами\s+обязательно\s+свяжется\s+наш\s+специалист\s+в\s+ближайшие\s+дни$/iu.test(segment) ||
+    /^электронная\s+почта\s+[^\s@]+@[^\s@]+\.[^\s@]+$/iu.test(segment) ||
+    /^(?:привет|доброго\s+времени\s+суток|спасибо|have\s+a\s+nice\s+day)$/iu.test(segment)
   );
 }
 
@@ -1183,6 +1193,7 @@ function isServiceAcknowledgementBoilerplateSegment(segment: string): boolean {
 function serviceAcknowledgementSegments(authoredBody: string): string[] {
   return authoredBody
     .replace(/\r\n?/g, '\n')
+    .replace(/^(здравствуйте),\s*(?=ваше\s+письмо\s+получено)/iu, '$1\n')
     .replace(/([.!?])\s+(?=[\p{L}\p{N}])/gu, '$1\n')
     .split(/\n+/u)
     .map(normalizeServiceAcknowledgementSegment);
@@ -1202,6 +1213,16 @@ function classifySystemEnvelope(sender: string, subject: string, text: string): 
   }
   const gateway = /^Kaspersky Secure Mail Gateway found unwanted object\(s\) in a message\s+from\s+[^\s@]+@[^\s@]+\s+to\s+[^\s@]+@[^\s@]+\s+with the subject "[^"\n]{1,500}"\.\s+You can find additional information about the message below\.\s+Message-ID: <[^<>\n]+>\.\s+Message date: [^\n]+\nNode: [\d.:]+\s+Internal message ID: \d+\.\s+Action on message: rejected, backed up\.\s+Recipients involved: [^\n]+\nRules involved: [\d, .]+\s+Object: Message\.\s+Object size: \d+\.\s+Status: Spam\.\s+Action on object\(s\): rejected, backed up\.\s+=+$/i;
   if (gateway.test(body)) return 'delivery_failure';
+  // A bilingual domain-retirement notice includes a real mail header, but no
+  // authored reply. Match the ENTIRE notice, with consistent repeated fields.
+  const retiredDomain = /^Message ID:\s*<[^<>\s]+>\s+Sender \(Отправитель\):\s*[^\s@]+@[^\s@]+\s+Receiver \(Получатель\):\s*(?<email>[^\s@]+@[^\s@]+)\s+Subject \(Тема\):[^\n]+\n\s*Использование адреса электронной почты \k<email> с доменным именем (?<old>[a-z0-9.-]+) вскоре будет прекращено\.\s+Используйте для связи адреса электронной почты с доменным именем (?<next>[a-z0-9.-]+)\.\s+При отсутствии такого адреса электронной почты, пожалуйста, свяжитесь с получателем при помощи другого способа связи или отправьте запрос по адресу (?<contact>[^\s@]+@[^\s@]+)\.\s+The use of email address \k<email> with domain name \k<old> will soon be ending\.\s+Please use for communication email addresses with the \k<next> domain name\.\s+If you do not have such an email address, please contact the recipient using another method of communication or send a request to \k<contact>\.$/iu;
+  if (/^postmaster@/i.test(sender) && /^Notification: domain name .+ be ending soon$/i.test(subject) &&
+      retiredDomain.test(body)) return 'auto_reply';
+  // The support autoresponder quotes its own service terms and asks for an
+  // account id. These are not a request for our offer. No arbitrary suffix or
+  // free-form field is consumed, including after the signature/ticket marker.
+  const rocket = /^Добрый день! Спасибо, что обратились в службу технической поддержки ROCKET\. Ваше обращение принято и рассматривается\. Напоминаем, что согласно \*"Публичной оферте №1 на предоставление сервиса RocketSales" <https:\/\/docs\.google\.com\/document\/d\/[a-z0-9_-]+\/preview>\* техническая поддержка предоставляется с понедельника по пятницу с 9:00 до 18:00, кроме выходных и праздничных дней\. Общение происходит в формате «Вопрос – ответ» посредством электронной почты support@rocket\.red\. Также у Вас есть возможность обратиться в нашу техническую поддержку через бота в Telegram \(@rocketsalesbot <https:\/\/t\.me\/rocketsalesbot>\)\. По нашим стандартам специалист техподдержки свяжется с вами в течение двух часов в рабочее время\. Мы делаем все возможное, чтобы отвечать нашим клиентам как можно быстрее\. Средняя скорость ответа от технической поддержки – 15 минут\. Если вы не получили ответ от специалиста, проверьте, не попало ли наше письмо в спам! Чтобы ускорить решение вашего вопроса, пожалуйста, пришлите в ответ на данное письмо 1\. id аккаунта amoCRM, где обнаружена данная проблема, 2\. название вашей компании\. С уважением, команда ROCKET \*Подписывайтесь на Telegram-канал ROCKET <https:\/\/t\.me\/rocketcloudnews>\*\. Там вы узнаете больше про лучшие в мире облачные решения и найдете лучшие кейсы по доработке amoCRM\. T_I_C_K_E_T_I_D_\d+$/iu;
+  if (rocket.test(body.replace(/[\s\u2800]+/gu, ' '))) return 'service_acknowledgement';
   return null;
 }
 
@@ -1224,6 +1245,14 @@ export function classifyMachineReply(
   // own reply, even when it is the only text in the message.
   const authoredBody = extractAuthoredReplyText(fullBody);
   if (!authoredBody) return null;
+  // A human sometimes adds a P.S. below a copied signature. Do not let the
+  // signature cutter hide that request from the early terminal filter. Old
+  // quoted messages still cannot contribute a buyer signal to the new reply.
+  const lines = fullBody.replace(/\r\n?/g, '\n').split('\n');
+  const quotedAt = lines.findIndex(line => QUOTED_REPLY_BOUNDARY_PATTERNS.some(pattern => pattern.test(line.trim())));
+  const beforeQuote = quotedAt < 0 ? lines : lines.slice(0, quotedAt);
+  const signatureAt = beforeQuote.findIndex(line => SIGNATURE_BOUNDARY_PATTERN.test(line.trim()));
+  if (signatureAt >= 0 && hasHumanReplyContinuation(beforeQuote.slice(signatureAt + 1).join('\n'))) return null;
 
   const deliverySubject = DELIVERY_FAILURE_SUBJECT_PATTERN.test(subject);
   const deliveryBody = DELIVERY_FAILURE_BODY_PATTERN.test(authoredBody);
@@ -1235,9 +1264,10 @@ export function classifyMachineReply(
     return 'delivery_failure';
   }
 
-  const serviceReceipt = SERVICE_RECEIPT_PATTERN.test(authoredBody);
   const serviceContext = SERVICE_CONTEXT_PATTERN.test(`${subject}\n${authoredBody}`);
   const serviceSegments = serviceAcknowledgementSegments(authoredBody);
+  const serviceReceipt = SERVICE_RECEIPT_PATTERN.test(authoredBody) ||
+    serviceSegments.some(segment => SERVICE_DELIVERED_NOTICE_PATTERN.test(segment));
   const serviceProcessing = SERVICE_PROCESSING_PATTERN.test(authoredBody) ||
     serviceSegments.some((segment) => SERVICE_ACK_PROCESSING_SEGMENT_PATTERN.test(segment));
   const technicalTemplate = classifyTechnicalTemplateSegments(serviceSegments);
@@ -1245,8 +1275,10 @@ export function classifyMachineReply(
   // Some service templates never say "received" (GracieDigital). Require two
   // independent boilerplate signals, not just a human promise to reply/call.
   const receiptlessAcknowledgement =
-    serviceSegments.some((segment) => SERVICE_ACK_RESPONSE_PROMISE_PATTERN.test(segment)) &&
-    serviceSegments.some((segment) => SERVICE_ACK_CONDITIONAL_CONTACT_PATTERN.test(segment));
+    (serviceSegments.some((segment) => SERVICE_ACK_RESPONSE_PROMISE_PATTERN.test(segment)) &&
+      serviceSegments.some((segment) => SERVICE_ACK_CONDITIONAL_CONTACT_PATTERN.test(segment))) ||
+    (serviceSegments.some(segment => SERVICE_PERSONAL_PROMISE_PATTERN.test(segment)) &&
+      serviceSegments.some(segment => SERVICE_REPAIR_ROUTING_PATTERN.test(segment)));
   if (
     ((serviceReceipt ||
       (serviceSegments.some(segment => /^ваш\s+запрос\s+передан\s+в\s+соответствующее\s+подразделение$/iu.test(segment)) &&
