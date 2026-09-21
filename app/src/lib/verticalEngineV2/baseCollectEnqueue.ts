@@ -25,7 +25,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { collectionRoundLimit, createCollectionTarget, type VeCollectionMode } from './collectionTarget';
-import { canResumePartialPreview, previewRecoveryKind } from './collectionRecovery';
+import { canResumePartialPreview, openNextVeCollectionRound, previewRecoveryKind } from './collectionRecovery';
 import { normalizeVeMaxEmailsPerCompany } from './companyContactCap';
 import { resumeVeSavedEmailRecovery } from './savedEmailRecovery';
 
@@ -171,6 +171,12 @@ async function resumeFailedPreview(
   }
   info.target_progress = { ...info.target_progress, status: 'collecting' };
   delete info.target_progress.reason;
+  // Каталожный сбой — единственный вид восстановления, который может застать
+  // раунд ЗАКРЫТЫМ: его контрольная точка записана, а номер остался прежним,
+  // потому что ошибка задачи не даёт finishCollectionRound его увеличить.
+  // Остальные виды либо требуют `completed_round === round - 1`, либо ставят
+  // флаги повтора — те редактируют уже собранное и номер двигать не должны.
+  if (previewRecoveryKind(saved) === 'catalog') openNextVeCollectionRound(info);
   if (info.preview_pipeline?.version === 1) {
     info.preview_pipeline = { ...info.preview_pipeline, revision: info.preview_pipeline.revision + 1 };
     delete info.preview_pipeline.error;
