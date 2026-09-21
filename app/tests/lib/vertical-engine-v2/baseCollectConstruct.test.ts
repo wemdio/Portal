@@ -538,6 +538,14 @@ describe('base_collect CONSTRUCT step order', () => {
         candidates: 2_000, readyRows: 200, exhausted: false, canContinue: true, error: null,
       }, change)).status).toBe(status);
     }
+    // Одна фраза на две разные остановки врала специалисту: «продолжать нечем»
+    // показывалось и когда источник ещё жив, а просто раунд вышел пустым.
+    expect(finishCollectionRound(preview, {
+      candidates: 2_000, readyRows: 200, exhausted: false, canContinue: false, error: null,
+    })).toMatchObject({ status: 'limited', reason: expect.stringContaining('Нет подтверждённого продолжения') });
+    expect(finishCollectionRound(preview, {
+      candidates: 0, readyRows: 200, exhausted: false, canContinue: true, error: null,
+    })).toMatchObject({ status: 'limited', reason: expect.stringContaining('Партия вышла пустой') });
     expect(finishCollectionRound({ ...preview, round: 5 }, {
       candidates: 1, readyRows: 0, exhausted: false, canContinue: true, error: null,
     }).status).toBe('limited');

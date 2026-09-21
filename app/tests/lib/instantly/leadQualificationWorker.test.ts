@@ -976,6 +976,19 @@ describe('pollAndQualifyReplies', () => {
 
   it('writes a lead-board row for a newly qualified lead (auto columns, enrichment, step from thread)', async () => {
     process.env.GUEST_TOKEN_SECRET = 'test-board-secret';
+    const { resolveLeadContactMetadata } = await import('@/lib/instantly/leadContactMetadata');
+    const introduction = 'Доброго дня! Меня зовут Евгений, руководитель IT-отдела. Вопрос актуальный.';
+    for (const [replyBody, expectedName] of [
+      [{ text: introduction }, 'Евгений'],
+      [{ html: '<p>Доброго дня! Меня зовут <b>Евгений</b>, руководитель IT-отдела.</p>' }, 'Евгений'],
+      [{ text: 'Спасибо!\n> ' + introduction }, null],
+      [{ text: 'Здравствуйте, Евгений!' }, null],
+      [{ text: introduction + '\nС уважением, Анна Иванова.' }, null],
+    ] as const) {
+      expect(resolveLeadContactMetadata({
+        leads: [], leadEmail: 'lead@example.com', campaignId: 'linked-campaign', replyBody,
+      }).leadName).toBe(expectedName);
+    }
     getLeadsByEmail.mockResolvedValueOnce([
       {
         email: 'lead@example.com',
@@ -999,7 +1012,7 @@ describe('pollAndQualifyReplies', () => {
       objectionHandleable: false,
       objectionDraft: null,
       threadContext: {
-        replyEmail: replyEmail({ id: 'lead-email', body: { text: 'Давайте созвонимся' } }),
+        replyEmail: replyEmail({ id: 'lead-email', body: { text: introduction } }),
         threadEmails: [
           replyEmail({ id: 'out-1', ue_type: 1 }),
           replyEmail({ id: 'out-2', ue_type: 1 }),
@@ -1036,7 +1049,7 @@ describe('pollAndQualifyReplies', () => {
         company_name: 'ACME',
         phone: '+7 900 111-22-33',
         website: 'acme.ru',
-        request_text: 'Давайте созвонимся',
+        request_text: introduction,
         step_number: 2,
         reply_timestamp: '2026-05-13T12:00:00Z',
       }),
