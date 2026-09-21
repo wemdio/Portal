@@ -105,7 +105,7 @@ import { buildRolesRegex } from '@/lib/parsers/atsFilters';
 import { domainToSiteUrl, resolveCompanyDomainViaPdl } from '@/lib/parsers/companyDomainResolver';
 import { readVeYandexCatalogPage, resolveVeYandexCatalogFilters, type VeYandexCatalogCheckpoint } from '../yandexCatalog';
 import { extractEmail, extractEmails } from '@/lib/tools/dfybUtils';
-import { applyVeSourceContacts, normalizeVeSourceContacts, hasPendingVeSourceContacts, pendingVeSourceContacts, recoverVeSourceContacts, evaluateVeSourceDiscoveryBudget, veSourceDiscoveryLimit, VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT, type VeSourceContactCheckpoint, type VeSourceDiscoveryBudget } from '../sourceContacts';
+import { applyVeSourceContacts, normalizeVeSourceContacts, hasPendingVeSourceContacts, pendingVeSourceContacts, recoverVeSourceContacts, countVeSourceDiscoveryContacts, evaluateVeSourceDiscoveryBudget, veSourceDiscoveryLimit, VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT, type VeSourceContactCheckpoint, type VeSourceDiscoveryBudget } from '../sourceContacts';
 import {
   mergeVeSourceFactText, normalizeVeCompanyInn, normalizeVeCompanyName, normalizeVeWebsiteHost,
   veCompanyWebsiteKey, veAcquisitionReceipt,
@@ -692,7 +692,7 @@ export interface VeCollectInfo {
   /** Durable official-site discovery; never a substitute for email/relevance validation. */
   source_contact_recovery?: VeSourceContactCheckpoint;
   source_contact_budget?: VeSourceDiscoveryBudget;
-  source_contact_discovery?: { checked: number; remaining: number };
+  source_contact_discovery?: { checked: number; remaining: number; contacts?: number };
   /** Opt-in for NEW previews only. Inputs/IDs are reserved before child insertion. */
   preview_pipeline?: {
     version: 1;
@@ -3462,6 +3462,11 @@ async function completeTargetRound(args: {
       pruneBaseRowAgainstExclusion(freshKeys, row) !== null), info.source_contact_recovery))
     || hasPendingVeSourceContacts((info.search_policy?.deferred_rows ?? []).filter((row) =>
       pruneBaseRowAgainstExclusion(freshKeys, row) !== null), info.source_contact_recovery));
+  // Цифры для честной причины остановки: сколько поисков куплено, сколько они
+  // дали сайтов и сколько из этих сайтов дошло до готового контакта.
+  const discoveryChecked = Object.values(info.source_contact_recovery?.checked ?? {});
+  const discoverySites = discoveryChecked.filter((entry) => entry.website.trim().length > 0).length;
+  const discoveryContacts = countVeSourceDiscoveryContacts(contactRows);
   const finish = (readyCount: number, nameError?: string) => {
     const phaseError = args.validationError ?? nameError ?? (taskError ? `${taskError.source}: ${taskError.error ?? 'ошибка источника'}` : null);
     const result = finishCollectionRound(progress, {
@@ -3478,7 +3483,7 @@ async function completeTargetRound(args: {
       return { ...result, status: 'collecting' as const, reason: undefined, round: progress.round + 1 };
     }
     if (discoveryPaused && result.status === 'limited') return { ...result,
-      reason: `Поиск недостающих сайтов остановлен: ${VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT} попыток поиска без прироста готовых контактов. Собранные контакты и исходные компании сохранены. Цель пока не достигнута; нужен другой источник или уточнение гипотезы.`,
+      reason: `Добор сайтов закрыт: последние ${VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT} платных поисков не дали ни одного готового контакта (всего поисков ${discoveryChecked.length}, найдено сайтов ${discoverySites}, контактов из них ${discoveryContacts}). Это решение о рентабельности, а не исчерпание источников: строки без контакта сохранены, сбор по строкам с готовым адресом не останавливался.`,
     };
     return result;
   };
@@ -4154,12 +4159,12 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       // A company/site is not a ready contact. Evaluate yield only here, after
       // every usable row and constructor has had a chance to finish validation.
       const allowance = target ? evaluateVeSourceDiscoveryBudget({ budget: info.source_contact_budget,
-        checkpoint: info.source_contact_recovery, readyRows: target.ready_rows }) : null;
+        checkpoint: info.source_contact_recovery, discoveryContacts: countVeSourceDiscoveryContacts(base.data) }) : null;
       if (allowance) info.source_contact_budget = allowance.budget;
       const discovery = [...pendingSourceRows].slice(0, veSourceDiscoveryLimit({ readyTarget: target?.ready_target,
         readyRows: target?.ready_rows, candidatesProcessed: target?.candidates_processed, remaining: allowance?.remaining }));
       if (discovery.length) {
-        info.source_contact_discovery = { checked: Object.keys(info.source_contact_recovery?.checked ?? {}).length, remaining: pendingSourceRows.size };
+        info.source_contact_discovery = { checked: Object.keys(info.source_contact_recovery?.checked ?? {}).length, remaining: pendingSourceRows.size, contacts: countVeSourceDiscoveryContacts(base.data) };
         await persistCollectInfo(ctx, base.id, info);
         await recoverVeSourceContacts({ rows: discovery, state: info.source_contact_recovery, signal: ctx.signal,
           save: async (state) => { info.source_contact_recovery = state; await persistCollectInfo(ctx, base.id, info); ctx.onCheckpoint?.(); },
@@ -4168,7 +4173,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
         pendingSourceRows = new Set(pendingVeSourceContacts(discoveryCandidates, info.source_contact_recovery));
         if (prepared.filter((row) => (row.website || row.email) && pruneBaseRowAgainstExclusion(existingKeys, row) !== null).length === 0) {
           if (target) info.source_contact_budget = evaluateVeSourceDiscoveryBudget({ budget: info.source_contact_budget,
-            checkpoint: info.source_contact_recovery, readyRows: target.ready_rows }).budget;
+            checkpoint: info.source_contact_recovery, discoveryContacts: countVeSourceDiscoveryContacts(base.data) }).budget;
           if (!info.source_contact_budget?.paused && hasPendingVeSourceContacts(discoveryCandidates, info.source_contact_recovery)) {
             await requeueSelf(ctx, job, 1_000);
             return { result: { base_id: baseId, waiting: true, source_contact_discovery: true }, ...usage };
