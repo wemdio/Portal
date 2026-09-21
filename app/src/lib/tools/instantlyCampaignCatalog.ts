@@ -14,6 +14,7 @@ import {
   type InstantlyCampaignItem,
 } from '@/lib/tools/autoReportBuilder';
 import { claimCampaignProjectOwnership } from '@/lib/instantly/campaignProjectOwnership';
+import { auditReservedCampaignTags } from '@/lib/instantly/campaignScopeMonitor';
 
 /** Порог актуальности каталога (синхронизация ведётся TG-ботом раз в час). */
 export const INSTANTLY_CATALOG_STALE_MS = 65 * 60 * 1000;
@@ -110,6 +111,8 @@ export async function readInstantlyCampaignCatalog(): Promise<{
 export async function syncInstantlyCampaignCatalog(): Promise<{
   pages: number;
   rows: number;
+  scopeIssues: number;
+  scopeAlerts: number;
 }> {
   if (!supabaseAdmin) {
     throw new Error('SUPABASE_SERVICE_ROLE_KEY не настроен — синхронизация каталога недоступна');
@@ -119,6 +122,11 @@ export async function syncInstantlyCampaignCatalog(): Promise<{
   let pages = 0;
   let rows = 0;
   let allAccountsOk = true;
+  const syncedAccounts: Array<{
+    id: string;
+    label: string;
+    campaigns: InstantlyCampaignItem[];
+  }> = [];
 
   // Мульти-аккаунт: синкаем КАЖДЫЙ Instantly-аккаунт своим ключом, проставляя
   // instantly_account_id. Один общий syncMarker на весь проход — чтобы удаление
@@ -126,11 +134,13 @@ export async function syncInstantlyCampaignCatalog(): Promise<{
   for (const account of listInstantlyAccounts()) {
     try {
       const apiKey = getInstantlyAccountApiKey(account.id);
+      const accountCampaigns: InstantlyCampaignItem[] = [];
       for await (const page of iterateInstantlyCampaignPages(apiKey, {
         accountId: account.id,
         consumer: 'campaign_catalog',
       })) {
         pages += 1;
+        accountCampaigns.push(...page);
         const batch = page.map((c) => ({
           id: c.id,
           instantly_account_id: account.id,
@@ -149,6 +159,7 @@ export async function syncInstantlyCampaignCatalog(): Promise<{
           throw new Error(error.message);
         }
       }
+      syncedAccounts.push({ id: account.id, label: account.label, campaigns: accountCampaigns });
     } catch (err) {
       // Один аккаунт упал — НЕ валим весь синк и пропускаем delete-фазу (иначе
       // затрём живые кампании упавшего аккаунта). Остальные аккаунты синкаются.
@@ -180,7 +191,26 @@ export async function syncInstantlyCampaignCatalog(): Promise<{
     console.error('[instantly-catalog] auto-match error (non-fatal)', err);
   }
 
-  return { pages, rows };
+  // Manual Instantly campaigns are the normal production path. Audit provider
+  // tags on the same hourly sync and warn in the lead topic; never pause or
+  // mutate a campaign automatically.
+  let scopeIssues = 0;
+  let scopeAlerts = 0;
+  for (const account of syncedAccounts) {
+    try {
+      const result = await auditReservedCampaignTags({
+        accountId: account.id,
+        accountLabel: account.label,
+        campaigns: account.campaigns,
+      });
+      scopeIssues += result.issues;
+      scopeAlerts += result.alerted;
+    } catch (err) {
+      console.error(`[instantly-catalog] campaign scope audit failed for account ${account.id}`, err);
+    }
+  }
+
+  return { pages, rows, scopeIssues, scopeAlerts };
 }
 
 /**

@@ -283,4 +283,74 @@ export interface EngHiringVacancyRow {
   created_at: string;
 }
 
+// ── Polza ENG outreach (SDR hiring-trigger MVP) ──
+
+export interface PolzaOutreachConfig {
+  countries: string[];
+  posted_within_days: number;
+  limit: number;
+}
+
+export interface PolzaOutreachParserJob {
+  id: string;
+  user_id: string;
+  parser_type: 'polza_outreach';
+  status: ParserJobStatus;
+  config: PolzaOutreachConfig;
+  total_found?: number | null;
+  total_parsed?: number | null;
+  progress_percent?: number | null;
+  progress_stage?: string | null;
+  progress_detail?: PartitionProgressDetail | Record<string, unknown> | null;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error_message?: string | null;
+}
+
+export interface PolzaOutreachLetter {
+  n: number;
+  subject: string;
+  body: string;
+}
+
+export interface PolzaOutreachCompanyRow {
+  id: string;
+  job_id: string;
+  source_type: string;
+  vacancy_id?: string | null;
+  job_title?: string | null;
+  job_source_url?: string | null;
+  job_country_code?: string | null;
+  job_published_at?: string | null;
+  company_name: string;
+  normalized_domain?: string | null;
+  company_website?: string | null;
+  outbound_mandate?: boolean | null;
+  outbound_evidence?: string | null;
+  service_line?: string | null;
+  target_sales_geo?: string | null;
+  target_sales_geo_evidence?: string | null;
+  target_sales_geo_confidence?: 'high' | 'medium' | 'low' | null;
+  selected_company_email?: string | null;
+  email_type?: string | null;
+  email_source_url?: string | null;
+  sequence_id?: string | null;
+  letters?: PolzaOutreachLetter[] | null;
+  status: string;
+  stage?: string | null;
+  exclusion_reason?: string | null;
+  review_reason?: string | null;
+  created_at: string;
+}
+
+export interface PolzaOutreachFunnel {
+  vacancies: number;
+  domain_found: number;
+  icp_passed: number;
+  geo_confirmed: number;
+  email_found: number;
+  ready: number;
+}
+
 

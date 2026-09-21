@@ -162,8 +162,14 @@ blocks:
             # новые mtime всем файлам, и стратегия по умолчанию сделала бы кэш
             # бесполезным.
             - npm run lint
-            # Общий сценарий используется также production Docker-сборкой:
-            # typegen и два tsc идут отдельными процессами и не суммируют heap.
+            # Проверка типов идёт кусками (tsconfig.typecheck.*.json), а не одним
+            # проходом. Причина — память: после мержей test 17–21.09 сплошной
+            # tsc --noEmit брал 4,09 ГБ при потолке 4096 МБ и падал с exit 134.
+            # Замер 21.09 по кускам: core 3,29 ГБ, api 3,31 ГБ, pages 1,42 ГБ,
+            # tests 1,90 ГБ — каждый процесс получает свою кучу, и худший кусок
+            # оставляет ~750 МБ запаса. Куски вместе покрывают весь проект;
+            # tests/lib/nextBuildTypecheckConfig.test.ts следит, чтобы ни один
+            # не выпал из команды.
             - npm run typecheck:strict
             - 'cache store checks-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_GIT_SHA .next/cache'
             # npm audit переехал в ночной прогон (.semaphore/nightly-audit.yml):
@@ -190,9 +196,8 @@ blocks:
             # webpack-кэш Next весит сотни мегабайт, и запись на каждый пуш
             # вытеснила бы из квоты всё остальное.
             - 'cache restore nextjs-v2-$SEMAPHORE_GIT_BRANCH-$(date +%Y%m%d),nextjs-v2-$SEMAPHORE_GIT_BRANCH-,nextjs-v2-'
-            # Проверку типов Next пропускает: строгий tsc уже отработал выше в
-            # этой же джобе, а повторная после успешной компиляции упирается в
-            # физические 4 ГБ runner-а.
+            # Проверку типов Next пропускает: она упирается в физические 4 ГБ
+            # runner-а. Типы проверяет production Docker-сборка на main.
             - 'NEXT_BUILD_SKIP_TYPECHECK=1 npm run build'
             - 'cache store nextjs-v2-$SEMAPHORE_GIT_BRANCH-$(date +%Y%m%d) .next/cache'
   - name: Build portal

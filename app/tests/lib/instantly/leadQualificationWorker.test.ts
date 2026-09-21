@@ -754,11 +754,29 @@ describe('pollAndQualifyReplies', () => {
       expect.objectContaining({ user_id: 'specialist-1', type: 'lead_new' }),
     ]);
     const actualTelegram = jest.requireActual('@/lib/instantly/leadTelegramAlerts') as {
-      _private: { buildMessage: (data: Record<string, unknown>) => string };
+      _private: {
+        buildMessage: (data: Record<string, unknown>) => string;
+        buildCampaignScopeMessage: (data: Record<string, unknown>) => string;
+      };
     };
     const html = actualTelegram._private.buildMessage(sendLeadTelegramAlert.mock.calls[0][0]);
     expect(html).toContain('<b>Ответственный:</b> <a href="tg://user?id=123456">Sergey Petrov</a>');
     expect(html).toContain('<b>Лид проекта:</b> <a href="tg://user?id=654321">Anna Lead</a>');
+
+    const scopeHtml = actualTelegram._private.buildCampaignScopeMessage({
+      mentionUsername: '@Jacob_Brown',
+      accountLabel: 'Основной Instantly',
+      campaigns: Array.from({ length: 20 }, (_, index) => ({
+        campaignId: `campaign-${index}`,
+        campaignName: `Кампания ${index} ${'я'.repeat(300)}`,
+        statusLabel: 'Активна',
+        reserveTagNames: [`неименные ${'п'.repeat(300)}`],
+      })),
+    });
+    expect(scopeHtml).toContain('@Jacob_Brown');
+    expect(scopeHtml).toContain('<b>Кампания не остановлена.</b>');
+    expect(scopeHtml).toContain('И ещё 12 кампаний.');
+    expect(scopeHtml.length).toBeLessThanOrEqual(4096);
   });
 
   it('keeps the committed project snapshot when ownership changes immediately after persistence', async () => {
