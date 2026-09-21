@@ -2247,6 +2247,63 @@ interface AccountsUploadSummary {
  * корзина справа осталась на месте. Дата рисуется коротким `дд.мм.гг`, чтобы
  * в эти 76 пикселей влезть без переноса.
  */
+/**
+ * По чему можно отсортировать список аккаунтов.
+ *
+ * Порядок по умолчанию — «добавлен», свежие сверху: аккаунты приходят партиями,
+ * и работают всегда с последней. Прежний порядок задавала база, то есть он был
+ * неопределённым, и новая партия оказывалась где придётся.
+ */
+type AccountSortKey =
+  | 'name' | 'added' | 'sending' | 'phone' | 'proxy' | 'health' | 'price' | 'active';
+
+interface AccountSort {
+  key: AccountSortKey;
+  dir: 'asc' | 'desc';
+}
+
+/**
+ * Насколько состояние плохое. По здоровью сортируют, чтобы найти поломанное,
+ * поэтому «хуже» — это «больше», и по убыванию проблемные всплывают наверх.
+ */
+const TONE_RANK: Record<string, number> = {
+  ok: 0, info: 1, rest: 2, unknown: 3, warn: 4, bad: 5,
+};
+
+/** Колонки, которые осмысленно открывать «сначала худшие»: время и проблемы. */
+const DESC_FIRST: AccountSortKey[] = ['added', 'sending', 'health', 'price'];
+
+function SortHeader({
+  col,
+  label,
+  title,
+  sort,
+  onSort,
+}: {
+  col: AccountSortKey;
+  label: string;
+  title?: string;
+  sort: AccountSort;
+  onSort: (key: AccountSortKey) => void;
+}) {
+  const active = sort.key === col;
+  return (
+    <button
+      type="button"
+      onClick={() => onSort(col)}
+      title={title}
+      className={`flex min-w-0 items-center gap-1 text-left transition hover:text-gray-600 cursor-pointer ${
+        active ? 'text-gray-700' : ''
+      }`}
+    >
+      <span className="truncate">{label}</span>
+      {/* Стрелка только у активной колонки: восемь бледных стрелок в шапке
+          читаются как украшение и не говорят, по чему список отсортирован. */}
+      {active ? <span className="shrink-0 text-[9px]">{sort.dir === 'asc' ? '▲' : '▼'}</span> : null}
+    </button>
+  );
+}
+
 const ACCOUNT_GRID = 'grid grid-cols-[32px_44px_minmax(0,1fr)_76px_126px_120px_360px_138px_92px_60px_88px] gap-4 items-center';
 
 /**
@@ -2366,6 +2423,92 @@ function CampaignAccountsTab({
    * ровно один раз и только пока список ещё не пришёл.
    */
   const healthNow = loadedAt ?? Date.now();
+
+  const [accountSort, setAccountSort] = useState<AccountSort>({ key: 'added', dir: 'desc' });
+  const toggleAccountSort = useCallback((key: AccountSortKey) => {
+    setAccountSort(prev => (
+      prev.key === key
+        ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+        // Первое нажатие открывает колонку так, как её обычно читают: свежее,
+        // дорогое и сломанное — сверху, имя и телефон — от начала алфавита.
+        : { key, dir: DESC_FIRST.includes(key) ? 'desc' : 'asc' }
+    ));
+  }, []);
+
+  /**
+   * Обе колонки здоровья считаются один раз на список, а не в отрисовке строки:
+   * по ним сортируют, и значение в ячейке обязано совпасть с тем, по которому
+   * список разложен.
+   */
+  const accountMarks = useMemo(() => {
+    const out = new Map<string, { sending: HealthMark; proxy: HealthMark }>();
+    for (const a of accounts) {
+      const proxy = proxies.find(p => p.id === a.proxy_id) ?? null;
+      out.set(a.id, {
+        sending: describeSending({
+          account: a,
+          stat: sendingStats[a.id],
+          proxy,
+          campaignRunning: campaignStatus === 'running',
+          firstTouchEnabled: firstTouchPerDay > 0,
+          queuePending,
+          now: healthNow,
+        }),
+        proxy: describeProxy(proxy, healthNow),
+      });
+    }
+    return out;
+  }, [accounts, proxies, sendingStats, campaignStatus, firstTouchPerDay, queuePending, healthNow]);
+
+  const sortedAccounts = useMemo(() => {
+    const factor = accountSort.dir === 'asc' ? 1 : -1;
+    // Числа и строки сравниваются по-разному, поэтому ключ строки — либо то,
+    // либо другое, а сравнение выбирается по типу. Пустое значение всегда
+    // уезжает вниз, в какую бы сторону ни сортировали: «цены нет» — это не
+    // «цена ноль», и в начале списка ему делать нечего.
+    const keyOf = (a: OutreachAccount): string | number | null => {
+      switch (accountSort.key) {
+        case 'name':
+          return ([a.first_name, a.last_name].filter(Boolean).join(' ').trim() || a.session_name).toLowerCase();
+        case 'added':
+          return a.created_at ? new Date(a.created_at).getTime() : null;
+        case 'phone':
+          return a.phone || null;
+        case 'proxy': {
+          const proxy = proxies.find(p => p.id === a.proxy_id);
+          return proxy ? (proxy.name || proxy.url || '').toLowerCase() : null;
+        }
+        case 'price':
+          return a.price === null || a.price === undefined ? null : Number(a.price);
+        case 'active':
+          return a.is_active ? 1 : 0;
+        case 'sending':
+        case 'health': {
+          const mark = accountMarks.get(a.id)?.[accountSort.key === 'sending' ? 'sending' : 'proxy'];
+          if (!mark) return null;
+          // Тон задаёт группу, дни — порядок внутри неё: «молчит 9 дней» должно
+          // стоять выше, чем «молчит 2 дня».
+          return (TONE_RANK[mark.tone] ?? 0) * 10_000 + Math.min(mark.days ?? 0, 9_999);
+        }
+        default:
+          return null;
+      }
+    };
+
+    return [...accounts].sort((a, b) => {
+      const ka = keyOf(a);
+      const kb = keyOf(b);
+      if (ka === null && kb === null) return 0;
+      if (ka === null) return 1;
+      if (kb === null) return -1;
+      const cmp = typeof ka === 'number' && typeof kb === 'number'
+        ? ka - kb
+        : String(ka).localeCompare(String(kb), 'ru');
+      // Ровные значения разводим по имени сессии: иначе строки с одинаковой
+      // ценой или одним тоном перескакивают местами при каждой перерисовке.
+      return cmp !== 0 ? cmp * factor : a.session_name.localeCompare(b.session_name, 'ru');
+    });
+  }, [accounts, accountSort, accountMarks, proxies]);
 
   // Профиль читается через то же соединение, что и работа кампании, поэтому
   // на запущенной кампании в Telegram не ходим — см. гейт в API.
@@ -3451,42 +3594,55 @@ function CampaignAccountsTab({
           <div className={`${ACCOUNT_GRID} px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50`}>
             <SelectAllCheckbox total={accounts.length} selectedCount={selectedIds.length} onChange={setAll} />
             <span />
-            <span>Аккаунт</span>
-            <span title="Когда аккаунт завели в портале.">Добавлен</span>
-            <span title="Идёт ли с этого аккаунта рассылка первых сообщений. Если нет — почему и сколько дней уже.">
-              Рассылка
-            </span>
-            <span>Телефон</span>
-            <span>Прокси</span>
-            <span title="Проходят ли через прокси круги рассылки. Если нет — сколько дней уже не проходят.">
-              Здоровье прокси
-            </span>
+            <SortHeader col="name" label="Аккаунт" sort={accountSort} onSort={toggleAccountSort} />
+            <SortHeader
+              col="added"
+              label="Добавлен"
+              title="Когда аккаунт завели в портале."
+              sort={accountSort}
+              onSort={toggleAccountSort}
+            />
+            <SortHeader
+              col="sending"
+              label="Рассылка"
+              title="Идёт ли с этого аккаунта рассылка первых сообщений. Если нет — почему и сколько дней уже."
+              sort={accountSort}
+              onSort={toggleAccountSort}
+            />
+            <SortHeader col="phone" label="Телефон" sort={accountSort} onSort={toggleAccountSort} />
+            <SortHeader col="proxy" label="Прокси" sort={accountSort} onSort={toggleAccountSort} />
+            <SortHeader
+              col="health"
+              label="Здоровье прокси"
+              title="Проходят ли через прокси круги рассылки. Если нет — сколько дней уже не проходят."
+              sort={accountSort}
+              onSort={toggleAccountSort}
+            />
             {/* Цена нужна не бухгалтерии, а гипотезам: партии покупают у разных
                 поставщиков и по разной цене, а живут они по-разному. Сумма по
                 колонке считается только по заполненным ценам. */}
-            <span title="Сколько заплатили за аккаунт. Нажмите на значение в строке, чтобы поправить.">
-              Цена, руб
-            </span>
-            <span>Активен</span><span />
+            <SortHeader
+              col="price"
+              label="Цена, руб"
+              title="Сколько заплатили за аккаунт. Нажмите на значение в строке, чтобы поправить."
+              sort={accountSort}
+              onSort={toggleAccountSort}
+            />
+            <SortHeader col="active" label="Активен" sort={accountSort} onSort={toggleAccountSort} />
+            <span />
           </div>
-          {accounts.map(a => {
+          {sortedAccounts.map(a => {
             const proxy = proxies.find(p => p.id === a.proxy_id);
             const onCooldown = a.cooldown_until && new Date(a.cooldown_until) > new Date();
             const counts = errorCounts[a.session_name];
             const errorCount = counts?.error ?? 0;
-            // Обе колонки здоровья считаются от момента загрузки списка
-            // (`healthNow` выше), а не от момента отрисовки: «молчит 2 дня» не
-            // должно меняться от того, что React перерисовал строку.
-            const sendingMark = describeSending({
-              account: a,
-              stat: sendingStats[a.id],
-              proxy: proxy ?? null,
-              campaignRunning: campaignStatus === 'running',
-              firstTouchEnabled: firstTouchPerDay > 0,
-              queuePending,
-              now: healthNow,
-            });
-            const proxyMark = describeProxy(proxy ?? null, healthNow);
+            // Обе колонки здоровья считаются один раз на весь список и от
+            // момента его загрузки (`healthNow`), а не от момента отрисовки:
+            // «молчит 2 дня» не должно меняться от того, что React перерисовал
+            // строку, а сортировка — расходиться с тем, что видно в ячейке.
+            const marks = accountMarks.get(a.id);
+            if (!marks) return null;
+            const { sending: sendingMark, proxy: proxyMark } = marks;
             return (
               <div
                 key={a.id}
