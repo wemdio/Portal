@@ -3760,8 +3760,12 @@ async function completeTargetRound(args: {
     delete stats.finished_at;
     info.tasks = pipeline || info.adaptive_collection ? tasks : tasks.map((state) =>
       (state.source === 'companies_directory' || !!state.catalog) && !state.exhausted && !state.hit_ceiling
+        // Закладку выдачи переносим вместе с задачей. Без неё следующий раунд
+        // читает реестр с первой страницы и заново просматривает уже
+        // просмотренные компании — ровно то, против чего закладка и вводилась.
         ? { source: state.source, task: state.task, status: 'pending', child_job_id: null, rows: 0,
-          ...(state.catalog ? { catalog: state.catalog } : {}) }
+          ...(state.catalog ? { catalog: state.catalog } : {}),
+          ...(state.directory_cursors ? { directory_cursors: state.directory_cursors } : {}) }
         : state,
     );
     info.limit = collectionRoundLimit(next);

@@ -148,8 +148,17 @@ export function finishCollectionRound(
   if (next.candidates_processed >= next.max_candidates || next.round >= next.max_rounds) {
     return { ...next, status: 'limited', reason: 'Достигнут защитный предел кандидатов или раундов; цель ещё не набрана' };
   }
-  if (!result.canContinue || (result.candidates === 0 && !result.validationRetry)) {
+  if (!result.canContinue) {
     return { ...next, status: 'limited', reason: 'Нет подтверждённого продолжения источников; исчерпание рынка не доказано' };
+  }
+  // Две разные остановки выдавали один текст. Здесь источник ЖИВ (canContinue),
+  // но раунд не дал ни одного кандидата — и карточка всё равно сообщала, что
+  // продолжать нечем, при задаче done и exhausted=false. Причина обязана
+  // совпадать с состоянием задач, иначе по ней нельзя решить, продолжать ли.
+  if (result.candidates === 0 && !result.validationRetry) {
+    return { ...next, status: 'limited', reason: 'Партия вышла пустой: источники плана ещё не отмечены исчерпанными, '
+      + 'но за раунд не набралось ни одного кандидата. Это остановка по пустому раунду, а не доказательство, '
+      + 'что подходящие компании кончились' };
   }
   return { ...next, round: next.round + 1, status: 'collecting' };
 }
