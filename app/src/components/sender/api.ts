@@ -92,9 +92,33 @@ export interface ThreadItemDto {
 
 export interface ImportRecipientsResult {
   imported: number;
+  /** База была заменена, а не дополнена. */
+  replaced?: boolean;
   skippedInvalid: number;
   skippedDuplicates: number;
   skippedSuppressed: number;
+}
+
+/** Кампания целиком — то, с чем открывается форма редактирования. */
+export interface CampaignDetailsDto {
+  campaign: {
+    id: string;
+    name: string;
+    status: CampaignDto['status'];
+    send_hour_from: number;
+    send_hour_to: number;
+    send_weekdays: number[];
+  };
+  steps: { step_no: number; delay_days: number; subject: string; body: string }[];
+  mailboxes: { id: string; email: string }[];
+  recipients: {
+    total: number;
+    /** Счётчики «заполнено у N» посчитаны по всей базе, а не по выборке. */
+    exact: boolean;
+    columns: RecipientColumnsDto;
+  };
+  /** Черновик и кампания на паузе правятся; идущая и завершённая — только чтение. */
+  editable: boolean;
 }
 
 export interface StepInput {
@@ -279,6 +303,29 @@ export function fetchUnlinkedReplies(page = 1) {
   );
 }
 
+export function fetchCampaign(id: string) {
+  return authFetchJson<CampaignDetailsDto>(`${BASE}/campaigns/${id}`);
+}
+
+/** Сохранить настройки кампании. Без action — сервер понимает это как правку. */
+export function updateCampaign(
+  id: string,
+  body: {
+    name: string;
+    mailboxIds: string[];
+    steps: StepInput[];
+    sendHourFrom: number;
+    sendHourTo: number;
+    sendWeekdays: number[];
+  },
+) {
+  return authFetchJson<{ ok: true; unstuck: number }>(`${BASE}/campaigns/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
 export function patchCampaign(id: string, action: 'start' | 'pause' | 'finish') {
   return authFetchJson<{ ok: true; status: string }>(`${BASE}/campaigns/${id}`, {
     method: 'PATCH',
@@ -308,6 +355,11 @@ export function previewRecipients(file: File) {
   return upload<RecipientColumnsDto>(`${BASE}/recipients/preview`, file);
 }
 
-export function uploadRecipients(campaignId: string, file: File) {
-  return upload<ImportRecipientsResult>(`${BASE}/campaigns/${campaignId}/recipients`, file);
+/** mode 'replace' — заменить базу; по умолчанию новые адреса добавляются к старым. */
+export function uploadRecipients(campaignId: string, file: File, mode: 'append' | 'replace' = 'append') {
+  return upload<ImportRecipientsResult>(
+    `${BASE}/campaigns/${campaignId}/recipients`,
+    file,
+    mode === 'replace' ? { mode } : undefined,
+  );
 }
