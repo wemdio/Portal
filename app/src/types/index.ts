@@ -85,6 +85,8 @@ export interface Project {
   handoff_ai_adapt?: boolean | null;
   /** ON: передача уходит сразу без кнопки-подтверждения спеца в TG; OFF/NULL: кнопка. */
   handoff_auto_send?: boolean | null;
+  /** ON: в Telegram-карточке лида дополнительно упоминается Лид (PM) проекта. */
+  tag_project_lead_in_telegram?: boolean | null;
 
   /** Кастомное определение лида для ИИ-квалификатора (все кампании проекта). Пусто = дефолтные критерии. */
   lead_criteria?: string | null;

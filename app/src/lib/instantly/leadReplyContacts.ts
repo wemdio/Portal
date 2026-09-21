@@ -161,6 +161,38 @@ function signatureLeadName(signature: string[]): string | null {
   return unique.size === 1 ? [...unique.values()][0] : null;
 }
 
+/** Explicit self-introductions belong to the current author; a greeting or a
+ * colleague mentioned in prose does not. History has already been stripped.
+ * Start at a sentence/line boundary, not inside reported or quoted speech. */
+function introducedLeadName(body: string[]): string | null {
+  const text = body.join('\n');
+  const intro = /(?:^|[.!?\n])\s*(?:(?:здравствуйте|привет|добрый\s+(?:день|вечер)|доброе\s+утро|доброго\s+дня|hello|hi)[,!]\s*)?(?:меня\s+зовут|мо[её]\s+имя|my\s+name\s+is)(?:\s+|\s*[:—–-]\s*)/giu;
+  const candidates = new Map<string, string>();
+  for (const match of text.matchAll(intro)) {
+    const rest = text.slice(match.index + match[0].length);
+    // Keep the case-sensitive name check separate from the case-insensitive
+    // marker. Stop before a role/comma, never include arbitrary prose.
+    const candidate = /^(\p{Lu}[\p{L}’'-]{1,50}(?:[ \t]+\p{Lu}[\p{L}’'-]{1,50}){0,2})(?=$|[\s,.;:!?—–()])/u.exec(rest)?.[1];
+    if (!candidate || /^\s*(?:\?|(?:или|or)\s)/iu.test(rest.slice(candidate.length))) continue;
+    const name = signatureNameInLine(candidate);
+    if (name) candidates.set(name.toLowerCase(), name);
+  }
+  return candidates.size === 1 ? [...candidates.values()][0] : null;
+}
+
+function replyLeadName(body: string[], signature: string[]): string | null {
+  const introduced = introducedLeadName(body);
+  const signed = signatureLeadName(signature);
+  if (!introduced || !signed) return signed ?? introduced;
+  // "Меня зовут Евгений" + "Евгений Иванов" is one person; two different
+  // names are not a reason to guess. Keep the more complete compatible form.
+  const introducedWords = introduced.toLowerCase().split(/\s+/);
+  const signedWords = signed.toLowerCase().split(/\s+/);
+  if (introducedWords.every((word) => signedWords.includes(word))) return signed;
+  if (signedWords.every((word) => introducedWords.includes(word))) return introduced;
+  return null;
+}
+
 function extractFromText(text: string): LeadReplyContacts {
   const lines = currentLines(text).filter(Boolean);
   // A missing comma is fine only when the rest of the line is a name, not
@@ -194,7 +226,7 @@ function extractFromText(text: string): LeadReplyContacts {
     return WEBSITE_LABEL.test(line) || standalone ? sites : [];
   })[0] ?? null;
   return {
-    leadName: signatureLeadName(nameStart < 0 ? [] : lines.slice(nameStart)),
+    leadName: replyLeadName(body, nameStart < 0 ? [] : lines.slice(nameStart)),
     bodyPhone: joinLeadPhones(body.map((line) => phoneInLine(line, false))),
     signaturePhone: joinLeadPhones(signature.map((line) => phoneInLine(line, true))),
     companyName: signature.flatMap((_, index) => [1, 2, 3].map((length) =>

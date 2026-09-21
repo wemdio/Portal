@@ -47,7 +47,14 @@ describe('VE2 collection progress presentation', () => {
     expect(bases.map((row) => row.id)).toEqual(['supply-active', 'preview-new', 'legacy-old', 'preview-old']);
     expect(result.detail.templates.map((row) => (row as { id: string }).id)).toEqual(['template-preview-new', 'template-legacy-old', 'template-preview-old']);
     expect(['ve_bases', 've_templates'].map((table) => db.selects.filter((query) => query.table === table).length)).toEqual([2, 2]);
-    expect(bases[0].collect_info).toEqual({ collection_mode: 'supply', tasks: [{ status: 'done', rows: 3 }] });
+    // Рабочее состояние воркера отсекает БД, а не Node: деталка просит у
+    // ve_bases вычисляемую колонку ve_base_public_info и НИКОГДА сырой
+    // collect_info. Полный документ проекта «Аврора» — 587 МБ, он не проходил
+    // через предел строки V8 и четверо суток держал специалиста без проекта.
+    // Здесь проверяется именно запрос: мок SQL-функцию исполнить не может.
+    const baseSelect = db.selects.find((query) => query.table === 've_bases')!.columns;
+    expect(baseSelect).toContain('collect_info:public_info');
+    expect(baseSelect).not.toMatch(/(^|,)\s*collect_info\s*(,|$)/);
     expect(getCollectionQueue(bases, [{ stage: 'base_collect', status: 'running', payload: { base_id: 'supply-active' } }]).current?.id).toBe('supply-active');
 
     const preparation: VeOutreachPreparation = { project_id: 'project-1', hypothesis_id: 'h1', base_id: 'new',

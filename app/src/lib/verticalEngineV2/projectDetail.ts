@@ -28,12 +28,20 @@ import { readContactDeliveryPages } from './contactDeliveryInventory';
 // create a string longer than 0x1fffffe8 characters», и карточка не
 // открывалась четверо суток. stripTaskHarvest вырезал это уже ПОСЛЕ
 // материализации ответа, то есть слишком поздно.
-// Срез собирает БД: ve_base_public_info (миграция 20260921_0003) отдаёт тот же
-// набор ключей за ~70 КБ и один детоаст на строку. Точечная проекция из
-// шестидесяти JSON-путей тут не годится: PostgreSQL детоастит колонку заново на
-// каждое обращение, и замер дал 76 секунд на тот же ответ.
+// Срез собирает БД. Точечная проекция из шестидесяти JSON-путей тут не годится:
+// PostgreSQL детоастит колонку заново на каждое обращение, и замер дал 76 секунд
+// на тот же ответ. Но и одного детоаста мало: чтение 178 МБ ради 94 КБ среза
+// стоило 1 985 мс на каждом опросе карточки, а опрашивается она раз в 4 секунды.
+// Поэтому срез считается ПРИ ЗАПИСИ (триггер, миграция 20260921_0004), где
+// документ и так в памяти и расчёт стоит десятки миллисекунд, а здесь читается
+// готовой колонкой.
+// Читаем именно КОЛОНКУ, а не функцию-обёртку: обёртка принимает строку
+// целиком, из-за чего PostgreSQL материализует её вместе с тяжёлым
+// collect_info. Замер на тех же двух проектах: через обёртку 548 и 405 мс,
+// прямым чтением колонки — 4,4 и 3,3 мс. Функция ve_base_public_info_cached
+// остаётся в базе как инструмент починки и разового пересчёта.
 export const VE_BASE_LIST_COLUMNS =
-  'id, vertical_id, hypothesis_id, filename, row_count, status, error, analysis, source, collect_info:ve_base_public_info, columns, sample_rows, created_at, updated_at';
+  'id, vertical_id, hypothesis_id, filename, row_count, status, error, analysis, source, collect_info:public_info, columns, sample_rows, created_at, updated_at';
 // payload нужен клиенту, чтобы привязать джобу к вертикали (payload.vertical_id) —
 // иначе чужая dossier-джоба показывала бы busy/error на карточке другой вертикали.
 export const VE_JOB_LIST_COLUMNS = 'id, stage, status, error, attempts, started_at, finished_at, payload, progress';
@@ -107,7 +115,12 @@ export function stripTaskHarvest(base: Record<string, unknown>): Record<string, 
       ...publicInfo,
       ...(adaptive ? { adaptive_collection: { version: adaptive.version, switches: adaptive.switches,
         note: adaptive.note, replan_error: adaptive.replan_error, checking_batch: !!adaptive.pending,
-        completed_batches: adaptive.completed.length, last_batch: adaptive.completed.at(-1),
+        // Документ мог уже пройти серверную сводку: там completed нет, а есть
+        // готовый счётчик. Падать на этом функция не должна.
+        completed_batches: Array.isArray(adaptive.completed) ? adaptive.completed.length
+          : (adaptive as { completed_batches?: number }).completed_batches ?? 0,
+        last_batch: Array.isArray(adaptive.completed) ? adaptive.completed.at(-1)
+          : (adaptive as { last_batch?: unknown }).last_batch,
       } } : {}),
       // Never send addresses, result hashes or the child job checkpoint in polls.
       ...(emailRecovery ? { saved_email_review_pending: !!emailRecovery.batch && !emailRecovery.error } : {}),
@@ -238,7 +251,11 @@ export async function loadVeProjectDetail(
       verticals,
       chains,
       vocabs,
-      bases: (basesRes.data ?? []).map(stripTaskHarvest),
+      // Срез уже собран в БД (ve_base_public_info). Повторно пропускать его
+      // через stripTaskHarvest НЕЛЬЗЯ: тот ждёт сырой документ и читает
+      // adaptive_collection.completed.length, которого в сводке нет — деталка
+      // падала с «Не удалось обновить проект». Один белый список, одно место.
+      bases: basesRes.data ?? [],
       templates,
       jobs: jobsRes.data ?? [],
       dossiers: dossiersRes.data ?? [],

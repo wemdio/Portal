@@ -93,6 +93,9 @@ export function ProjectBriefSection({
   }, [projectId, hasBrief, hasHypotheses, hypothesesError, canEdit]);
 
   async function generateHypotheses(opts: { regenerate?: boolean } = {}): Promise<void> {
+    // Сбрасываем ошибку прошлой попытки: иначе рядом со спиннером «Генерирую
+    // гипотезы…» продолжал висеть красный текст от предыдущего прогона.
+    setError(null);
     setBusy('generating');
     try {
       const url = `/api/projects/${projectId}/brief/hypotheses${opts.regenerate ? '?regenerate=1' : ''}`;
@@ -320,7 +323,7 @@ export function ProjectBriefSection({
           ) : busy === 'generating' ? (
             <div className="flex items-center gap-2 text-sm text-gray-600 bg-blue-50 border border-blue-200 rounded-lg p-3">
               <Sparkles className="w-4 h-4 animate-pulse text-blue-500" />
-              <span>Генерирую гипотезы… (до ~60 секунд)</span>
+              <span>Генерирую гипотезы… (до ~2 минут)</span>
             </div>
           ) : hypothesesError ? (
             <div className="flex items-start gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3">

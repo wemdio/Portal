@@ -7,6 +7,8 @@ import {
   isCatalogStale,
 } from '@/lib/tools/instantlyCampaignCatalog';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
+import { normalizeManualCampaignSenderScope } from '@/lib/instantly/manualCampaignSenderScope';
+import { isReservedMailboxPoolTag } from '@/lib/instantly/mailboxTags';
 
 export const dynamic = 'force-dynamic';
 
@@ -123,7 +125,24 @@ export const GET = withAuth(async (req) => {
 
 export const POST = withAuth(async (req) => {
   const body = await req.json();
-  const campaign = await instantly.createCampaign(body);
+  const senderScope = normalizeManualCampaignSenderScope(body);
+  if (!senderScope.ok) {
+    return NextResponse.json({ error: senderScope.error }, { status: 400 });
+  }
+  if (senderScope.mode === 'tag') {
+    const tags = await instantly.listAllCustomTags();
+    const selectedTag = tags.find((tag) => tag.id === senderScope.tagId);
+    if (!selectedTag) {
+      return NextResponse.json({ error: 'Тег проекта не найден' }, { status: 400 });
+    }
+    if (isReservedMailboxPoolTag(selectedTag.name)) {
+      return NextResponse.json(
+        { error: 'Теги «неименные …» — резервный пул. Выберите второй, проектный тег' },
+        { status: 400 },
+      );
+    }
+  }
+  const campaign = await instantly.createCampaign(senderScope.payload);
   await upsertInstantlyCatalogFromCampaign(campaign);
   return NextResponse.json(campaign, { status: 201 });
 });

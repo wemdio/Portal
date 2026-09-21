@@ -16,6 +16,7 @@ import { AlertTriangle, Clock } from 'lucide-react';
 import { ProjectBriefSection } from '@/components/projects/ProjectBriefSection';
 import { InstantlyInsightsSection } from '@/components/projects/InstantlyInsightsSection';
 import { SERVICE_OPTIONS } from '@/lib/projectServices';
+import { buildCampaignPickerEntries } from '@/lib/projects/campaignPicker';
 
 /**
  * Формат темпа для tooltip'ов «Анализ KPI» и «Анализ контактов».
@@ -61,7 +62,7 @@ import {
  * (с .join() тип схлопывается в GenericStringError и каст к Project[] падает).
  */
 const PROJECT_LIST_COLUMNS =
-  'id, created_at, updated_at, name, client, status, project_type, lead_source, work_format, budget, margin, contract_date, contract_link, handoff_link, handoff_email, handoff_legend, handoff_ai_adapt, handoff_auto_send, launch_date, deadline, payment_date, kpi_plan, kpi_fact, contacts_obligation, contacts_done, contacts_done_synced_at, specialist, specialist_user_id, manager, weekly_tasks, subtasks, materials_links, comment_elvira, comment_anya, comments, client_feedback, hypotheses, hypotheses_result, lead_criteria';
+  'id, created_at, updated_at, name, client, status, project_type, lead_source, work_format, budget, margin, contract_date, contract_link, handoff_link, handoff_email, handoff_legend, handoff_ai_adapt, handoff_auto_send, tag_project_lead_in_telegram, launch_date, deadline, payment_date, kpi_plan, kpi_fact, contacts_obligation, contacts_done, contacts_done_synced_at, specialist, specialist_user_id, manager, weekly_tasks, subtasks, materials_links, comment_elvira, comment_anya, comments, client_feedback, hypotheses, hypotheses_result, lead_criteria';
 
 /** Поля брифа/гипотез — грузятся лениво для выбранного проекта. */
 type PanelBrief = {
@@ -750,6 +751,9 @@ export function ProjectList() {
   const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [panelLinkedCampaigns, setPanelLinkedCampaigns] = useState<{ campaign_id: string; campaign_name: string; match_source: string }[]>([]);
   const [panelAllCampaigns, setPanelAllCampaigns] = useState<{ id: string; name: string }[]>([]);
+  /** campaign_id → название проекта, который уже владеет кампанией (одна кампания = один проект). */
+  const [panelTakenCampaigns, setPanelTakenCampaigns] = useState<Record<string, string>>({});
+  const [panelCampaignError, setPanelCampaignError] = useState<string | null>(null);
   const [panelPeriods, setPanelPeriods] = useState<ProjectPeriod[]>([]);
   const [panelBrief, setPanelBrief] = useState<PanelBrief>({});
   // Первый расчёт темпа — сразу, последующие — с дебаунсом (см. эффект ниже).
@@ -930,6 +934,8 @@ export function ProjectList() {
       setPanelBrief({});
       setShowPanelCampaignPicker(false);
       setPanelCampaignSearch('');
+      setPanelTakenCampaigns({});
+      setPanelCampaignError(null);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProjectId]);
@@ -1165,16 +1171,36 @@ export function ProjectList() {
     } catch { /* non-critical */ }
   }
 
-  async function addPanelCampaign(projectId: string, campaignId: string) {
+  async function fetchPanelTakenCampaigns(projectId: string) {
     try {
-      await authFetch(`/api/projects/${projectId}/campaigns`, {
+      const res = await authFetch(`/api/projects/${projectId}/campaigns?taken=1`);
+      if (!res.ok) return;
+      const json = await res.json() as { taken?: Record<string, string> };
+      setPanelTakenCampaigns(json.taken ?? {});
+    } catch { /* non-critical: без карты пикер просто не подсветит занятые */ }
+  }
+
+  async function addPanelCampaign(projectId: string, campaignId: string) {
+    setPanelCampaignError(null);
+    try {
+      const res = await authFetch(`/api/projects/${projectId}/campaigns`, {
         method: 'POST',
         body: JSON.stringify({ campaign_id: campaignId }),
       });
+      // Молчаливый провал здесь выглядел как «кнопка не работает»: 409 (кампания
+      // уже за другим проектом) фронт игнорировал и просто перечитывал список.
+      if (!res.ok) {
+        const json = await res.json().catch(() => null) as { error?: string } | null;
+        setPanelCampaignError(json?.error ?? `Не удалось привязать кампанию (${res.status})`);
+        void fetchPanelTakenCampaigns(projectId);
+        return;
+      }
+      // Пикер не закрываем: кампании привязывают пачками (20 подряд — обычный
+      // сценарий), а привязанная и так исчезает из списка ниже.
       void fetchPanelCampaigns(projectId);
-      setShowPanelCampaignPicker(false);
-      setPanelCampaignSearch('');
-    } catch { /* non-critical */ }
+    } catch {
+      setPanelCampaignError('Сеть недоступна — кампания не привязана');
+    }
   }
 
   async function removePanelCampaign(projectId: string, campaignId: string) {
@@ -2657,6 +2683,22 @@ export function ProjectList() {
                     className="bg-white border border-zinc-300 shadow-sm focus:border-blue-500 px-2.5 py-1.5 text-xs font-medium rounded-lg text-zinc-900 placeholder:text-zinc-400"
                   />
                 </div>
+
+                <label className="md:col-span-2 flex items-start gap-2 rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-700">
+                  <input
+                    type="checkbox"
+                    checked={getDraftValue(selectedProject, 'tag_project_lead_in_telegram') === 'true'}
+                    onChange={(e) => void commitProjectUpdate(selectedProject, { tag_project_lead_in_telegram: e.target.checked })}
+                    disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
+                    className="mt-0.5 accent-blue-600"
+                  />
+                  <span>
+                    <span className="block font-medium">Тегать лида проекта в Telegram-карточке</span>
+                    <span className="mt-0.5 block text-[10px] text-zinc-400">
+                      Вместе со специалистом будет упомянут сотрудник из поля «Лид (PM)». По умолчанию выключено.
+                    </span>
+                  </span>
+                </label>
               </section>
 
               <section>
@@ -2894,7 +2936,11 @@ export function ProjectList() {
                     {!showPanelCampaignPicker ? (
                       <button
                         type="button"
-                        onClick={() => setShowPanelCampaignPicker(true)}
+                        onClick={() => {
+                          setShowPanelCampaignPicker(true);
+                          setPanelCampaignError(null);
+                          void fetchPanelTakenCampaigns(selectedProject.id);
+                        }}
                         className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700"
                       >
                         <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
@@ -2914,26 +2960,42 @@ export function ProjectList() {
                         />
                         <div className="max-h-36 overflow-y-auto rounded-lg border border-zinc-100">
                           {(() => {
-                            const linkedIds = new Set(panelLinkedCampaigns.map((c) => c.campaign_id));
-                            const filtered = panelAllCampaigns
-                              .filter((c) => !linkedIds.has(c.id))
-                              .filter((c) => !panelCampaignSearch || c.name.toLowerCase().includes(panelCampaignSearch.toLowerCase()));
-                            if (filtered.length === 0) return <p className="px-2.5 py-2 text-xs text-zinc-400">Не найдено</p>;
-                            return filtered.slice(0, 15).map((c) => (
-                              <button
-                                key={c.id}
-                                type="button"
-                                onClick={() => void addPanelCampaign(selectedProject.id, c.id)}
-                                className="w-full text-left px-2.5 py-1.5 text-xs text-zinc-600 hover:bg-blue-50 hover:text-blue-700 border-b border-zinc-50 last:border-0"
-                              >
-                                {c.name}
-                              </button>
+                            const entries = buildCampaignPickerEntries(
+                              panelAllCampaigns,
+                              panelLinkedCampaigns.map((c) => c.campaign_id),
+                              panelTakenCampaigns,
+                              panelCampaignSearch,
+                            );
+                            if (entries.length === 0) return <p className="px-2.5 py-2 text-xs text-zinc-400">Не найдено</p>;
+                            return entries.map(({ campaign, takenBy }) => (
+                              takenBy ? (
+                                <div
+                                  key={campaign.id}
+                                  title={`Уже привязана к проекту «${takenBy}» — сначала отвяжите её там`}
+                                  className="w-full px-2.5 py-1.5 text-xs text-zinc-400 border-b border-zinc-50 last:border-0 cursor-not-allowed"
+                                >
+                                  <span className="line-through">{campaign.name}</span>
+                                  <span className="ml-1 text-zinc-300">— занята: {takenBy}</span>
+                                </div>
+                              ) : (
+                                <button
+                                  key={campaign.id}
+                                  type="button"
+                                  onClick={() => void addPanelCampaign(selectedProject.id, campaign.id)}
+                                  className="w-full text-left px-2.5 py-1.5 text-xs text-zinc-600 hover:bg-blue-50 hover:text-blue-700 border-b border-zinc-50 last:border-0"
+                                >
+                                  {campaign.name}
+                                </button>
+                              )
                             ));
                           })()}
                         </div>
+                        {panelCampaignError && (
+                          <p className="rounded-lg bg-red-50 px-2.5 py-1.5 text-[11px] text-red-600">{panelCampaignError}</p>
+                        )}
                         <button
                           type="button"
-                          onClick={() => { setShowPanelCampaignPicker(false); setPanelCampaignSearch(''); }}
+                          onClick={() => { setShowPanelCampaignPicker(false); setPanelCampaignSearch(''); setPanelCampaignError(null); }}
                           className="text-[10px] text-zinc-400 hover:text-zinc-600"
                         >
                           Отмена

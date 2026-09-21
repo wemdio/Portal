@@ -9,7 +9,14 @@
 
 import { callOpenRouterChat } from '@/lib/openrouter/client';
 
-export const DEFAULT_ICP_MODEL = process.env.PROJECT_ICP_MODEL ?? 'policy/gemini-flash';
+/**
+ * Тот же пин, что и у шага 2 (см. `generateHypotheses.ts`): за
+ * `policy/gemini-flash` стоит reasoning-модель, у которой 1200 токенов лимита
+ * уходят в скрытые рассуждения и `content` приходит пустым. Здесь это не валило
+ * генерацию (ошибка шага 1 глотается), но разбор ЦА молча не делался вообще —
+ * гипотезы выходили без привязки к ICP. Переопределяется env `PROJECT_ICP_MODEL`.
+ */
+export const DEFAULT_ICP_MODEL = process.env.PROJECT_ICP_MODEL ?? 'anthropic/claude-opus-4-8';
 
 const MAX_BRIEF_CHARS = 8000;
 
@@ -57,7 +64,10 @@ export async function analyzeBriefIcp(options: AnalyzeBriefIcpOptions): Promise<
       { role: 'user', content: user },
     ],
     temperature: 0.3,
-    maxTokens: 1200,
+    // 1200 → 2000: на 1200 разбор регулярно обрывался на полуслове
+    // (finish_reason: length) и шаг 2 получал обрезанный ICP. Опус укладывается
+    // в ~1000–1200 токенов, 2000 — запас без заметного роста цены.
+    maxTokens: 2000,
     signal,
     fetchImpl,
     maxRetries,
