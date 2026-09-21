@@ -29,6 +29,10 @@ export function MailboxesTab() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
+  // Отдельно от loading: первая загрузка рисует заглушку вместо таблицы, а
+  // переход на другую страницу — кружок поверх уже показанных строк. Подменять
+  // на заглушку и её тоже значит заставлять глаз заново искать, где он был.
+  const [paging, setPaging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<ImportMailboxesResult | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -103,7 +107,10 @@ export function MailboxesTab() {
   }, []);
 
   useEffect(() => {
-    void load(page);
+    // Кружок только на переходах, которые затеял человек: опрос статусов раз в
+    // 15 секунд зовёт load мимо этого эффекта и мигать ничем не должен.
+    setPaging(true);
+    void load(page).finally(() => setPaging(false));
   }, [load, page]);
 
   useEffect(() => {
@@ -461,7 +468,13 @@ export function MailboxesTab() {
               : 'Ящиков пока нет — загрузите выгрузку провайдера.'}
           </p>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="relative">
+            {paging ? (
+              <div className="absolute inset-0 z-10 flex items-start justify-center bg-white/60 pt-10">
+                <Loader2 className="h-5 w-5 animate-spin text-zinc-400" />
+              </div>
+            ) : null}
+            <div className={`overflow-x-auto transition-opacity ${paging ? 'opacity-40' : ''}`}>
             <table className="w-full text-sm">
               <thead className="text-left text-xs uppercase text-zinc-500">
                 <tr className="border-b border-zinc-200">
@@ -614,6 +627,7 @@ export function MailboxesTab() {
                 })}
               </tbody>
             </table>
+            </div>
           </div>
         )}
 
@@ -622,18 +636,19 @@ export function MailboxesTab() {
             <button
               type="button"
               onClick={() => setPage((p) => Math.max(1, p - 1))}
-              disabled={page <= 1}
+              disabled={page <= 1 || paging}
               className="rounded-md px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 disabled:opacity-40"
             >
               ← Назад
             </button>
-            <span className="text-zinc-500">
+            <span className="inline-flex items-center gap-2 text-zinc-500">
+              {paging ? <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400" /> : null}
               Стр. {page} из {maxPage} · {total} ящиков
             </span>
             <button
               type="button"
               onClick={() => setPage((p) => Math.min(maxPage, p + 1))}
-              disabled={page >= maxPage}
+              disabled={page >= maxPage || paging}
               className="rounded-md px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 disabled:opacity-40"
             >
               Вперёд →

@@ -8,7 +8,7 @@ import { BaseContactsModal } from '@/components/tg-outreach/BaseContactsModal';
 import { pickIdentity } from '@/lib/tgOutreach/profile/autofill';
 import { BulkProfileModal } from '@/components/tg-outreach/BulkProfileModal';
 import { MoveAccountsModal } from '@/components/tg-outreach/MoveAccountsModal';
-import { accountCountryLabel, countryOptions } from '@/lib/tgOutreach/phoneCountry';
+import { accountCountryLabel } from '@/lib/tgOutreach/phoneCountry';
 import {
   MessageSquareMore,
   Plus,
@@ -2008,6 +2008,22 @@ function BulkActionsBar({
   );
 }
 
+/**
+ * Плашка-итог уходит сама через 15 секунд.
+ *
+ * «Добавлено аккаунтов: 16» и подобное — сообщение о том, что уже случилось.
+ * Прочитали и забыли, а крестик нажимают не все: плашки копились сверху списка
+ * и отжимали таблицу вниз до следующей перезагрузки страницы. Ошибки живут по
+ * тому же правилу: их тоже прочитывают один раз, а висят они ровно так же.
+ */
+function useAutoHide(active: boolean, hide: () => void, ms = 15_000) {
+  useEffect(() => {
+    if (!active) return undefined;
+    const timer = window.setTimeout(hide, ms);
+    return () => window.clearTimeout(timer);
+  }, [active, hide, ms]);
+}
+
 /** Общая механика выделения строк таблицы: toggle, «выделить всё», сброс. */
 function useRowSelection(allIds: string[]) {
   const [raw, setRaw] = useState<Set<string>>(new Set());
@@ -2371,7 +2387,6 @@ function CampaignAccountsTab({
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSummary, setUploadSummary] = useState<AccountsUploadSummary | null>(null);
   /** Страна партии со слов оператора — см. выпадающий список у кнопки загрузки. */
-  const [uploadCountry, setUploadCountry] = useState('');
   /**
    * Цена одного аккаунта загружаемой партии, рублями.
    *
@@ -2379,7 +2394,6 @@ function CampaignAccountsTab({
    * рядом с кнопкой загрузки: проставить цену потом, по одной строке на
    * полсотни аккаунтов, оператор не станет. Пусто — цена не указана.
    */
-  const [uploadPrice, setUploadPrice] = useState('');
   /** Цена для аккаунта, добавляемого вручную. */
   const [newPrice, setNewPrice] = useState('');
   /** Цена, которую проставляем выбранным строкам разом. */
@@ -2401,6 +2415,13 @@ function CampaignAccountsTab({
   const [bulkProfileOpen, setBulkProfileOpen] = useState(false);
   const [moveOpen, setMoveOpen] = useState(false);
   const [moveNotice, setMoveNotice] = useState<string | null>(null);
+  const [bulkProxyBusy, setBulkProxyBusy] = useState(false);
+
+  // Итоги загрузки, ошибки и сообщение о переносе снимаются сами: их читают
+  // один раз, а места они занимают до перезагрузки страницы.
+  const hideUploadSummary = useCallback(() => setUploadSummary(null), []);
+  const hideUploadError = useCallback(() => setUploadError(null), []);
+  const hideMoveNotice = useCallback(() => setMoveNotice(null), []);
   /** id аккаунтов, чей профиль сейчас читается из Telegram. */
   const [syncingIds, setSyncingIds] = useState<string[]>([]);
   const [syncSummary, setSyncSummary] = useState<string | null>(null);
@@ -2425,6 +2446,10 @@ function CampaignAccountsTab({
    * будущем», и все прокси разом объявляются мёртвыми. `Date.now()` берётся
    * ровно один раз и только пока список ещё не пришёл.
    */
+  useAutoHide(uploadSummary != null, hideUploadSummary);
+  useAutoHide(uploadError != null, hideUploadError);
+  useAutoHide(moveNotice != null, hideMoveNotice);
+
   const healthNow = loadedAt ?? Date.now();
 
   const [accountSort, setAccountSort] = useState<AccountSort>({ key: 'added', dir: 'desc' });
@@ -2559,6 +2584,23 @@ function CampaignAccountsTab({
     (currentId: string | null) => proxyOptionsFor(currentId, proxies, freeProxies),
     [freeProxies, proxies],
   );
+
+  /**
+   * Свободные прокси в порядке пригодности: сначала те, что проходят круги,
+   * потом ни разу не проверенные, и только в конце — с отказами.
+   *
+   * Порядок задаёт владелец: новую партию сажают на заведомо рабочие адреса, а
+   * непроверенные берут, когда рабочие кончились. Сломанные не выбрасываем
+   * вовсе — иногда выбора просто нет, — но отдаём последними и говорим об этом
+   * вслух, а не подсовываем молча.
+   */
+  const rankProxy = useCallback((proxy: OutreachProxy): number => {
+    const tone = describeProxy(proxy, healthNow).tone;
+    if (tone === 'ok') return 0;
+    if (tone === 'unknown' || tone === 'info' || tone === 'rest') return 1;
+    if (tone === 'warn') return 2;
+    return 3;
+  }, [healthNow]);
 
   /**
    * Перечитать список.
@@ -2976,6 +3018,73 @@ function CampaignAccountsTab({
     }
   };
 
+  /**
+   * Раздать свободные прокси выбранным аккаунтам.
+   *
+   * Берём только тех, у кого прокси нет: это случай новой партии и аккаунтов,
+   * приехавших из другой кампании. У кого прокси уже стоит, не трогаем —
+   * переставлять работающий адрес массовой кнопкой значит рвать липкую сессию
+   * там, где об этом никто не просил.
+   *
+   * Раскладка считается заранее и целиком, а не по одному аккаунту: только так
+   * один адрес гарантированно не достанется двоим, а для Telegram два аккаунта
+   * на одном адресе — это один человек с двух телефонов.
+   */
+  const assignFreeProxies = async () => {
+    const targets = accounts.filter((a) => selectedIds.includes(a.id) && !a.proxy_id);
+    const already = selectedIds.length - targets.length;
+    if (!targets.length) {
+      setUploadError(already
+        ? `У всех выбранных аккаунтов (${already}) прокси уже стоит — массовая раздача их не трогает.`
+        : 'Не выбрано ни одного аккаунта.');
+      return;
+    }
+
+    const pool = [...freeProxies].sort((a, b) => rankProxy(a) - rankProxy(b));
+    if (!pool.length) {
+      setUploadError('Свободных прокси нет — добавьте их на вкладке «Прокси».');
+      return;
+    }
+
+    const pairs = targets.slice(0, pool.length).map((account, i) => ({ account, proxy: pool[i] }));
+    const short = targets.length - pairs.length;
+    const shaky = pairs.filter((pair) => rankProxy(pair.proxy) >= 2).length;
+
+    const plan = [
+      `Назначить прокси аккаунтам: ${pairs.length}.`,
+      already ? `У ${already} прокси уже стоит — не трогаем.` : '',
+      short ? `Свободных не хватило на ${short} — останутся без прокси.` : '',
+      shaky ? `Из них ${shaky} получат прокси с отказами: рабочих и непроверенных не хватило.` : '',
+    ].filter(Boolean).join(' ');
+    if (!confirm(`${plan} Продолжить?`)) return;
+
+    setUploadError(null);
+    setBulkProxyBusy(true);
+    try {
+      const done: { id: string; proxyId: string }[] = [];
+      for (const { account, proxy } of pairs) {
+        const res = await authFetch(`${API_BASE}/accounts/${account.id}`, {
+          method: 'PUT',
+          body: JSON.stringify({ proxy_id: proxy.id }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => null) as { error?: string } | null;
+          setUploadError(body?.error ?? `Не удалось назначить прокси аккаунту ${account.session_name}`);
+          break;
+        }
+        done.push({ id: account.id, proxyId: proxy.id });
+      }
+      // Одним обновлением на всю пачку: построчное меняло бы список под рукой
+      // столько раз, сколько аккаунтов в выборке.
+      const byId = new Map(done.map((d) => [d.id, d.proxyId]));
+      setAccounts((prev) => prev.map((a) => (byId.has(a.id) ? { ...a, proxy_id: byId.get(a.id)! } : a)));
+      setMoveNotice(`Прокси назначен аккаунтам: ${done.length}.`
+        + (short ? ` Без прокси остались ${short} — свободных не хватило.` : ''));
+    } finally {
+      setBulkProxyBusy(false);
+    }
+  };
+
   const assignProxy = async (accountId: string, newProxyId: string) => {
     await authFetch(`${API_BASE}/accounts/${accountId}`, {
       method: 'PUT',
@@ -2995,8 +3104,6 @@ function CampaignAccountsTab({
       const token = await getAccessToken();
       const formData = new FormData();
       Array.from(files).forEach(f => formData.append('files', f));
-      if (uploadCountry) formData.append('country', uploadCountry);
-      if (uploadPrice.trim()) formData.append('price', uploadPrice.trim());
       // fetch отклоняется, только когда ответа нет вовсе: обрыв связи,
       // соединение, разорванное на середине многомегабайтной партии. Это не то
       // же, что отказ сервера — там ответ есть, и он объясняет причину. Здесь
@@ -3242,43 +3349,6 @@ function CampaignAccountsTab({
                 ? `Обновить профили выбранных (${syncTargets.length})`
                 : `Обновить профили всех (${syncTargets.length})`}
           </button>
-          {/*
-            Страна партии — со слов оператора, до загрузки.
-            У tdata телефона нет, пока не подключишься, а подключаться положено
-            через прокси той же страны: чтобы узнать страну, нужен прокси, а
-            чтобы выбрать прокси — страна. Круг разрывается тем, что оператор
-            и так знает страну: он выбирал её в объявлении при покупке.
-          */}
-          <label className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600">
-            Страна партии
-            <select
-              value={uploadCountry}
-              onChange={(e) => setUploadCountry(e.target.value)}
-              title="Страна, в которой зарегистрированы аккаунты партии. Нужна, чтобы подобрать прокси до первого подключения."
-              className="cursor-pointer rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-xs text-gray-800 outline-none focus:border-indigo-400"
-            >
-              <option value="">не указана</option>
-              {countryOptions().map((c) => (
-                <option key={c.code} value={c.code}>{c.flag} {c.name}</option>
-              ))}
-            </select>
-          </label>
-          {/* Цена партии — здесь же, а не отдельным шагом: аккаунты покупают
-              одним чеком по одной цене за штуку, и это единственный момент,
-              когда оператор её помнит. Пусто — цена не указана. */}
-          <label className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600">
-            Цена за аккаунт, ₽
-            <input
-              type="number"
-              min={0}
-              step="1"
-              value={uploadPrice}
-              onChange={(e) => setUploadPrice(e.target.value)}
-              placeholder="—"
-              title="Сколько стоил один аккаунт партии. Проставится всем загруженным; потом можно поправить построчно."
-              className="w-20 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-xs text-gray-800 outline-none focus:border-indigo-400"
-            />
-          </label>
           <label
             title="tdata — zip-архивами (можно сразу несколько), старый формат — парами .session и .json"
             className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer"
@@ -3499,6 +3569,18 @@ function CampaignAccountsTab({
           /* Проставить цену выбранным: партия могла приехать двумя чеками, и
              тогда цена у половины строк своя. Пустое поле стирает цену. */
           <span className="inline-flex items-center gap-1.5">
+            {/* Новая партия и аккаунты из другой кампании приезжают без
+                прокси, и назначать их по одному через выпадашку — полчаса. */}
+            <button
+              type="button"
+              onClick={() => { void assignFreeProxies(); }}
+              disabled={bulkProxyBusy}
+              title="Раздать свободные прокси выбранным аккаунтам без прокси: сначала рабочие, потом непроверенные"
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {bulkProxyBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Network className="h-3.5 w-3.5" />}
+              Назначить прокси
+            </button>
             {/* Перенос между кампаниями: партию закупили под один проект, а
                 нужна она в другом. Кнопка живёт только у остановленной
                 кампании — из-под работающего круга аккаунт не забрать. */}
