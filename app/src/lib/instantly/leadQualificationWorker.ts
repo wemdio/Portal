@@ -73,8 +73,11 @@ const PROJECT_BATCH_SIZE = 100;
  * Прочие ошибки входных данных — постоянные, для них строка нужна, чтобы
  * сохранить видимость без бесконечного повторения одного и того же сбоя.
  */
-const TRANSIENT_QUALIFY_ERROR_RE =
-  /\b(?:402|429|500|502|503|504)\b|Instantly email read deferred|overload|rate.?limit|fetch failed|network error|timed?.?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|aborted|failed after retries/i;
+const PROVIDER_FAILURE_QUALIFY_ERROR_RE =
+  /\b(?:402|429|500|502|503|504)\b|overload|rate.?limit|fetch failed|network error|timed?.?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|aborted/i;
+// These markers make a reply retryable, but do not prove a provider outage:
+// missing history, invalid AI output and per-reply budgets share the wrapper.
+const LOCAL_RETRY_QUALIFY_ERROR_RE = /Instantly email read deferred|failed after retries/i;
 const RETRIABLE_BILLING_QUALIFY_ERROR_RE =
   /\b(?:insufficient credits?|insufficient balance|balance is too low|payment required|out of credits?|spend(?:ing)? limit|billing limit)\b/i;
 const OWNERSHIP_DEFER_ERROR_PREFIX = 'Reply ownership deferred';
@@ -334,7 +337,8 @@ async function persistLegacyLeadOwnerSnapshot(
 export function isTransientQualifyError(message: string): boolean {
   return (
     message.startsWith(OWNERSHIP_DEFER_ERROR_PREFIX) ||
-    TRANSIENT_QUALIFY_ERROR_RE.test(message) ||
+    PROVIDER_FAILURE_QUALIFY_ERROR_RE.test(message) ||
+    LOCAL_RETRY_QUALIFY_ERROR_RE.test(message) ||
     RETRIABLE_BILLING_QUALIFY_ERROR_RE.test(message)
   );
 }
@@ -2885,11 +2889,13 @@ export async function reprocessOwnershipReviewRows(
       workerLog('warn', `ownership retry failed for ${raw.id}; released with backoff`, error);
       logAttempt('pending', backoff(message).recovery_failure_kind);
       if (
-        !/Instantly email read deferred|AI checkpoint|AI paid attempt budget exhausted/i.test(message) &&
-        (TRANSIENT_QUALIFY_ERROR_RE.test(message) || RETRIABLE_BILLING_QUALIFY_ERROR_RE.test(message))
+        !/Instantly email read deferred|AI checkpoint|AI (?:final )?paid attempt budget exhausted/i.test(message) &&
+        (PROVIDER_FAILURE_QUALIFY_ERROR_RE.test(message) || RETRIABLE_BILLING_QUALIFY_ERROR_RE.test(message))
       ) {
         // Only a CURRENT provider failure pauses recovery. An old 402 in
-        // ai_reason must not keep a successfully recovered queue frozen.
+        // ai_reason must not keep a successfully recovered queue frozen. The
+        // generic retry wrapper alone is reply-local: its durable backoff must
+        // not prevent the next candidate or the other lanes from running.
         ownershipRetryProviderPausedUntil = Date.now() + Math.max(60_000,
           envNumber('INSTANTLY_OWNERSHIP_RETRY_PROVIDER_BACKOFF_MS', OWNERSHIP_RETRY_PROVIDER_BACKOFF_MS),
         );

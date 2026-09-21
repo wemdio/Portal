@@ -4532,13 +4532,76 @@ describe('pollAndQualifyReplies', () => {
       expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
     });
 
-    it('releases a transient provider failure back to pending with the same backoff', async () => {
+    it('backs off failed replies but pauses other candidates and lanes only for provider failures', async () => {
       const clock = jest.spyOn(Date, 'now');
       try {
+        for (const reason of [
+          'outbound history unavailable',
+          'thread context unavailable',
+          'AI returned an invalid response envelope',
+          'AI response hit the output token limit',
+          'AI checkpoint busy',
+          'AI paid attempt budget exhausted',
+          'AI final paid attempt budget exhausted',
+          'automatic adjudication request budget exhausted',
+        ]) {
+          jest.resetModules();
+          clock.mockReturnValue(retryNow.getTime());
+          getEmail.mockReset();
+          qualifyReply.mockReset();
+          sendLeadTelegramAlert.mockClear();
+          const { inbound } = installOwnershipReviewRetryFixture({
+            verdict: 'not_lead', enforceQueryWindows: true,
+          });
+          const waitingRow = ownershipReviewRow({
+            id: 'waiting-qualification', instantly_email_id: 'waiting-email',
+            updated_at: '2026-08-24T17:00:00.000Z',
+          });
+          await mockInstantlyDb!.from('instantly_lead_qualifications').insert(waitingRow);
+          getEmail.mockImplementation(async (id: string) => ({ ...inbound, id }));
+          const message = `AI classification failed after retries: ${reason}`;
+          qualifyReply.mockRejectedValueOnce(new Error(message));
+          const worker = await import('@/lib/instantly/leadQualificationWorker');
+
+          expect(worker.isTransientQualifyError(message)).toBe(true);
+          expect(await worker.reprocessOwnershipReviewRows({
+            now: retryNow, minRetryAgeMs: 15 * 60_000,
+          })).toBe(2);
+          expect(getEmail).toHaveBeenCalledTimes(2);
+          expect(qualifyReply).toHaveBeenCalledTimes(2);
+          const failed = mockInstantlyDb!.getRows('instantly_lead_qualifications')[0];
+          expect(failed).toMatchObject({
+            id: 'ownership-review-qualification', status: 'pending',
+            recovery_attempts: 1, error_message: expect.stringContaining(message),
+          });
+          expect(Date.parse(String(failed.recovery_next_at))).toBeGreaterThan(retryNow.getTime());
+          expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[1]).toMatchObject({
+            id: 'waiting-qualification', status: 'not_lead', error_message: null,
+          });
+
+          // A per-reply backoff must not set the shared circuit breaker or
+          // stop another scheduled lane. The failed row stays untouched.
+          await mockInstantlyDb!.from('instantly_lead_qualifications').insert(ownershipReviewRow({
+            id: 'fresh-qualification', instantly_email_id: 'fresh-email',
+            created_at: '2026-08-24T17:30:00.000Z', updated_at: '2026-08-24T17:30:00.000Z',
+          }));
+          clock.mockReturnValue(retryNow.getTime() + 60_000);
+          expect(await worker.maybeReprocessOwnershipReviews()).toBe(1);
+          expect(getEmail).toHaveBeenLastCalledWith('fresh-email', expect.objectContaining({ accountId: 'main' }));
+          expect(qualifyReply).toHaveBeenCalledTimes(3);
+          expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[0]).toEqual(failed);
+          expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[2]).toMatchObject({ status: 'not_lead' });
+          expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+        }
+
         for (const message of [
           'Instantly API 503: overloaded',
           'AI API 402: balance too low',
           'Instantly API 429: rate limit exceeded',
+          'AI API 412: Reached monthly spend limit for API key.',
+          'AI classification failed after retries: AI API 503: overloaded',
+          'AI classification failed after retries: AI response body timed out',
+          'Network error: fetch failed',
         ]) {
           jest.resetModules();
           clock.mockReturnValue(retryNow.getTime());
@@ -4557,7 +4620,8 @@ describe('pollAndQualifyReplies', () => {
             updated_at: '2026-08-24T17:00:00.000Z',
           });
           await mockInstantlyDb!.from('instantly_lead_qualifications').insert(waitingRow);
-          if (message.startsWith('AI API')) {
+          const aiFailure = !message.startsWith('Instantly API');
+          if (aiFailure) {
             qualifyReply.mockRejectedValueOnce(new Error(message));
           } else {
             getEmail.mockRejectedValueOnce(new Error(message));
@@ -4609,7 +4673,7 @@ describe('pollAndQualifyReplies', () => {
           clock.mockReturnValue(retryNow.getTime() + 17 * 60_000);
           expect(await worker.maybeReprocessOwnershipReviews()).toBe(0);
           // The initial successful email fetch survives an AI billing outage.
-          expect(getEmail).toHaveBeenCalledTimes(message.startsWith('AI API') ? 2 : 3);
+          expect(getEmail).toHaveBeenCalledTimes(/^AI API (?:402|412):/.test(message) ? 2 : 3);
           expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(2);
         }
       } finally {
