@@ -9,6 +9,7 @@ let mockMainDb: MockSupabaseClient | null;
 const listEmails = jest.fn();
 const getLeadsByEmail = jest.fn();
 const getCampaign = jest.fn();
+const listAllCustomTags = jest.fn();
 const getAccountCampaignMappings = jest.fn();
 const getEmail = jest.fn();
 const replyToEmail = jest.fn();
@@ -48,6 +49,7 @@ jest.mock('@/lib/instantly/client', () => ({
   listEmails: (...args: unknown[]) => listEmails(...args),
   getLeadsByEmail: (...args: unknown[]) => getLeadsByEmail(...args),
   getCampaign: (...args: unknown[]) => getCampaign(...args),
+  listAllCustomTags: (...args: unknown[]) => listAllCustomTags(...args),
   getAccountCampaignMappings: (...args: unknown[]) => getAccountCampaignMappings(...args),
   getEmail: (...args: unknown[]) => getEmail(...args),
   replyToEmail: (...args: unknown[]) => replyToEmail(...args),
@@ -543,6 +545,7 @@ describe('pollAndQualifyReplies', () => {
     listEmails.mockReset();
     getLeadsByEmail.mockReset().mockResolvedValue([]);
     getCampaign.mockReset().mockResolvedValue({ id: 'linked-campaign', name: 'Кампания Новикова' });
+    listAllCustomTags.mockReset().mockResolvedValue([]);
     getAccountCampaignMappings.mockReset().mockResolvedValue([]);
     getEmail.mockReset();
     replyToEmail.mockReset().mockResolvedValue({ id: 'sent-1' });
@@ -677,6 +680,20 @@ describe('pollAndQualifyReplies', () => {
   });
 
   it('sends a Telegram alert for a newly qualified lead assigned to a linked specialist', async () => {
+    await mockMainDb!.from('projects').update({
+      manager: 'Anna Lead',
+      tag_project_lead_in_telegram: true,
+    }).eq('id', 'project-1');
+    await mockMainDb!.from('profiles').insert({
+      id: 'project-lead-1',
+      full_name: 'Anna Lead',
+      email: 'anna@example.com',
+    });
+    await mockMainDb!.from('telegram_links').insert({
+      user_id: 'project-lead-1',
+      telegram_id: '654321',
+      telegram_username: 'anna_lead',
+    });
     qualifyReply.mockResolvedValueOnce({
       isLead: true,
       proposalSeen: true,
@@ -724,7 +741,24 @@ describe('pollAndQualifyReplies', () => {
           telegramUsername: 'sergey_portal',
         },
       ],
+      projectLeadMentions: [
+        {
+          userId: 'project-lead-1',
+          fullName: 'Anna Lead',
+          telegramId: '654321',
+          telegramUsername: 'anna_lead',
+        },
+      ],
     }));
+    expect(mockMainDb!.getRows('notifications')).toEqual([
+      expect.objectContaining({ user_id: 'specialist-1', type: 'lead_new' }),
+    ]);
+    const actualTelegram = jest.requireActual('@/lib/instantly/leadTelegramAlerts') as {
+      _private: { buildMessage: (data: Record<string, unknown>) => string };
+    };
+    const html = actualTelegram._private.buildMessage(sendLeadTelegramAlert.mock.calls[0][0]);
+    expect(html).toContain('<b>Ответственный:</b> <a href="tg://user?id=123456">Sergey Petrov</a>');
+    expect(html).toContain('<b>Лид проекта:</b> <a href="tg://user?id=654321">Anna Lead</a>');
   });
 
   it('keeps the committed project snapshot when ownership changes immediately after persistence', async () => {
@@ -5564,6 +5598,39 @@ describe('pollAndQualifyReplies', () => {
     ]);
     expect(qualifyReply).not.toHaveBeenCalled();
     expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+  });
+
+  it('does not treat a reserve-pool-tag campaign as project ownership evidence', async () => {
+    const { providerCampaignId, candidateCampaignIds, inbound } =
+      installMailboxOwnershipConflictFixture();
+    const reserveTagId = 'reserve-maildoso-tag';
+    listAllCustomTags.mockResolvedValue([
+      { id: reserveTagId, name: 'неименные maildoso' },
+      { id: 'owner-a-project-tag', name: 'Owner A' },
+    ]);
+    getCampaign.mockImplementation(async (campaignId: string) => ({
+      id: campaignId,
+      name: campaignId,
+      email_tag_list: campaignId === candidateCampaignIds[1]
+        ? [reserveTagId]
+        : ['owner-a-project-tag'],
+    }));
+
+    const { resolveEffectiveReplyOwner } = await import('@/lib/instantly/replyOwnershipResolver');
+    const result = await resolveEffectiveReplyOwner({
+      db: mockInstantlyDb! as unknown as Parameters<typeof resolveEffectiveReplyOwner>[0]['db'],
+      reply: inbound,
+      providerCampaignId,
+      leadEmail: inbound.from_address_email ?? '',
+      accountId: 'main',
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      status: 'resolved',
+      effectiveCampaignId: candidateCampaignIds[0],
+      effectiveProjectId: 'project-owner-a',
+    }));
+    expect(getCampaign).toHaveBeenCalledWith(candidateCampaignIds[1], { accountId: 'main' });
   });
 
   it.each([2, 4])('treats mailbox mapping status %s as current rather than historical', async (status) => {

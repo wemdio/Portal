@@ -62,7 +62,7 @@ import {
  * (с .join() тип схлопывается в GenericStringError и каст к Project[] падает).
  */
 const PROJECT_LIST_COLUMNS =
-  'id, created_at, updated_at, name, client, status, project_type, lead_source, work_format, budget, margin, contract_date, contract_link, handoff_link, handoff_email, handoff_legend, handoff_ai_adapt, handoff_auto_send, launch_date, deadline, payment_date, kpi_plan, kpi_fact, contacts_obligation, contacts_done, contacts_done_synced_at, specialist, specialist_user_id, manager, weekly_tasks, subtasks, materials_links, comment_elvira, comment_anya, comments, client_feedback, hypotheses, hypotheses_result, lead_criteria';
+  'id, created_at, updated_at, name, client, status, project_type, lead_source, work_format, budget, margin, contract_date, contract_link, handoff_link, handoff_email, handoff_legend, handoff_ai_adapt, handoff_auto_send, tag_project_lead_in_telegram, launch_date, deadline, payment_date, kpi_plan, kpi_fact, contacts_obligation, contacts_done, contacts_done_synced_at, specialist, specialist_user_id, manager, weekly_tasks, subtasks, materials_links, comment_elvira, comment_anya, comments, client_feedback, hypotheses, hypotheses_result, lead_criteria';
 
 /** Поля брифа/гипотез — грузятся лениво для выбранного проекта. */
 type PanelBrief = {
@@ -2683,6 +2683,22 @@ export function ProjectList() {
                     className="bg-white border border-zinc-300 shadow-sm focus:border-blue-500 px-2.5 py-1.5 text-xs font-medium rounded-lg text-zinc-900 placeholder:text-zinc-400"
                   />
                 </div>
+
+                <label className="md:col-span-2 flex items-start gap-2 rounded-xl border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-700">
+                  <input
+                    type="checkbox"
+                    checked={getDraftValue(selectedProject, 'tag_project_lead_in_telegram') === 'true'}
+                    onChange={(e) => void commitProjectUpdate(selectedProject, { tag_project_lead_in_telegram: e.target.checked })}
+                    disabled={!canEdit || Boolean(savingRows[selectedProject.id])}
+                    className="mt-0.5 accent-blue-600"
+                  />
+                  <span>
+                    <span className="block font-medium">Тегать лида проекта в Telegram-карточке</span>
+                    <span className="mt-0.5 block text-[10px] text-zinc-400">
+                      Вместе со специалистом будет упомянут сотрудник из поля «Лид (PM)». По умолчанию выключено.
+                    </span>
+                  </span>
+                </label>
               </section>
 
               <section>

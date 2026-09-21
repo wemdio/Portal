@@ -3503,11 +3503,24 @@ async function notifySpecialistsAboutLead(
     let boardLink: string | null = null;
     // Ссылка на гостевую таблицу лидов проекта — в каждой карточке (never throws).
     boardLink = await getBoardLinkForProject(instantlyDb, projectId);
-    const { data: project, error: projectError } = await supabaseMain
+    const projectLookup = await supabaseMain
       .from('projects')
-      .select('specialist_user_id, specialist, client, handoff_email, handoff_legend')
+      .select('specialist_user_id, specialist, manager, client, handoff_email, handoff_legend, tag_project_lead_in_telegram')
       .eq('id', projectId)
       .maybeSingle();
+    let project = projectLookup.data;
+    let projectError = projectLookup.error;
+    if (isMissingProjectLeadTelegramColumn(projectError)) {
+      const legacyLookup = await supabaseMain
+        .from('projects')
+        .select('specialist_user_id, specialist, manager, client, handoff_email, handoff_legend')
+        .eq('id', projectId)
+        .maybeSingle();
+      project = legacyLookup.data
+        ? { ...legacyLookup.data, tag_project_lead_in_telegram: false }
+        : null;
+      projectError = legacyLookup.error;
+    }
     if (projectError) {
       const reason = `Project lookup failed for campaign ${campaignId}: ${projectError.message}`;
       workerLog('warn', `${reason} — lead notification deferred`);
@@ -3522,6 +3535,7 @@ async function notifySpecialistsAboutLead(
     }
 
     const unlinkedNames = new Set<string>();
+    const projectLeadUserIds = new Set<string>();
     if (project?.specialist_user_id) {
       userIds.add(project.specialist_user_id as string);
     } else if (typeof project?.specialist === 'string' && project.specialist.trim()) {
@@ -3551,6 +3565,33 @@ async function notifySpecialistsAboutLead(
           'warn',
           `Specialist set as free text without a linked account (campaign ${campaignId}): [${[...unlinkedNames].join(', ')}] — matched ${matched.length}/${unlinkedNames.size} by name. Unmatched get no alert; link the specialist via the project dropdown.`,
         );
+      }
+    }
+
+    if (project?.tag_project_lead_in_telegram === true) {
+      const managerName = typeof project.manager === 'string' ? project.manager.trim() : '';
+      if (!managerName) {
+        workerLog('warn', `Project ${projectId} requests Telegram PM mention but has no Lead (PM)`);
+      } else {
+        const { data: managerProfiles, error: managerProfileError } = await supabaseMain
+          .from('profiles')
+          .select('id, full_name')
+          .ilike('full_name', managerName);
+        if (managerProfileError) {
+          workerLog('warn', `Lead (PM) lookup failed for project ${projectId}: ${managerProfileError.message}`);
+        } else {
+          const exactManagers = (managerProfiles ?? []).filter((profile: { full_name?: string | null }) =>
+            profile.full_name?.trim().toLocaleLowerCase('ru-RU') === managerName.toLocaleLowerCase('ru-RU'));
+          if (exactManagers.length === 1) {
+            const managerId = exactManagers[0].id as string;
+            if (!userIds.has(managerId)) projectLeadUserIds.add(managerId);
+          } else {
+            workerLog(
+              'warn',
+              `Lead (PM) ${managerName} for project ${projectId} resolved to ${exactManagers.length} profiles — Telegram mention skipped`,
+            );
+          }
+        }
       }
     }
 
@@ -3673,6 +3714,7 @@ async function notifySpecialistsAboutLead(
     const tgResult = await sendTelegramLeadAlertForSpecialists({
       expectHandoff: handoffEnabled() && Boolean(project?.specialist_user_id && project?.handoff_email?.trim() && project?.handoff_legend?.trim()),
       userIds: userIdList,
+      projectLeadUserIds: [...projectLeadUserIds],
       qualificationId,
       campaignId,
       leadEmail,
@@ -4101,6 +4143,7 @@ async function maybeReconcileLeadNotificationDeliveries(): Promise<number> {
 async function sendTelegramLeadAlertForSpecialists(data: {
   expectHandoff?: boolean;
   userIds: string[];
+  projectLeadUserIds: string[];
   qualificationId: string;
   campaignId: string;
   leadEmail: string;
@@ -4121,12 +4164,12 @@ async function sendTelegramLeadAlertForSpecialists(data: {
     const { data: profiles } = await supabaseMain
       .from('profiles')
       .select('id, full_name, email')
-      .in('id', data.userIds);
+      .in('id', [...new Set([...data.userIds, ...data.projectLeadUserIds])]);
 
     const { data: links } = await supabaseMain
       .from('telegram_links')
       .select('user_id, telegram_id, telegram_username')
-      .in('user_id', data.userIds);
+      .in('user_id', [...new Set([...data.userIds, ...data.projectLeadUserIds])]);
 
     const profilesById = new Map(
       (profiles ?? []).map((profile) => [
@@ -4151,6 +4194,16 @@ async function sendTelegramLeadAlertForSpecialists(data: {
         telegramUsername: link?.telegram_username ?? null,
       };
     });
+    const projectLeadMentions: LeadTelegramSpecialistMention[] = data.projectLeadUserIds.map((userId) => {
+      const profile = profilesById.get(userId);
+      const link = linksByUserId.get(userId);
+      return {
+        userId,
+        fullName: profile?.full_name ?? profile?.email ?? null,
+        telegramId: link?.telegram_id ?? null,
+        telegramUsername: link?.telegram_username ?? null,
+      };
+    });
 
     const result = await sendLeadTelegramAlert({
       expectHandoff: data.expectHandoff,
@@ -4164,6 +4217,7 @@ async function sendTelegramLeadAlertForSpecialists(data: {
       campaignName: data.campaignName,
       clientName: data.clientName,
       specialistMentions,
+      projectLeadMentions,
       replySubject: data.replySubject,
       replyPreview: data.replyPreview,
       aiReason: data.aiReason,
@@ -4193,6 +4247,17 @@ function isMissingHandoffAutoSendColumn(error: { code?: string; message?: string
   if (!error) return false;
   const message = error.message ?? '';
   if (!/\bauto_send\b/i.test(message)) return false;
+  return (
+    error.code === '42703' ||
+    error.code === 'PGRST204' ||
+    /(?:column|does not exist|schema cache)/i.test(message)
+  );
+}
+
+function isMissingProjectLeadTelegramColumn(error: { code?: string; message?: string } | null): boolean {
+  if (!error) return false;
+  const message = error.message ?? '';
+  if (!/tag_project_lead_in_telegram/i.test(message)) return false;
   return (
     error.code === '42703' ||
     error.code === 'PGRST204' ||
