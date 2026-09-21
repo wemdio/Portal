@@ -112,6 +112,50 @@ type CacheRunRow = {
 };
 
 class EngHiringCancelledError extends Error {}
+class EngHiringJobStateError extends Error {}
+
+const JOB_STATE_ATTEMPTS = 5;
+const JOB_STATE_TIMEOUT_MS = 15_000;
+
+type JobStateOutcome<T> = {
+  data: T;
+  error: { message: string; code?: string } | null;
+  status?: number;
+};
+
+// A failed status read is NOT evidence of cancellation. Pause on transient
+// PostgREST/pool/network errors, and fail explicitly if the retry budget expires.
+// This is local to ENG Hiring; it does not change other workers' DB policies.
+async function retryJobState<T>(
+  operation: () => PromiseLike<JobStateOutcome<T>>,
+  label: string,
+): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    let failure: { message: string; code?: string };
+    let status = 0;
+    try {
+      const result = await operation();
+      if (!result.error) return result.data;
+      failure = result.error;
+      status = result.status ?? 0;
+    } catch (err) {
+      const cause = err as { message?: string; code?: string; cause?: { code?: string } } | null;
+      failure = {
+        message: cause?.message ?? String(err),
+        code: cause?.code ?? cause?.cause?.code,
+      };
+    }
+    const retryable = status === 408 || status === 429 || (status >= 500 && status <= 599)
+      || /^(PGRST00[0-3]|08\w{3}|53300|57P0[1-3])$/.test(failure.code ?? '')
+      || isTransientDbError(`${failure.code ?? ''} ${failure.message}`);
+    if (!retryable || attempt >= JOB_STATE_ATTEMPTS) {
+      throw new EngHiringJobStateError(`${label} failed: ${failure.code ? `${failure.code}: ` : ''}${failure.message}`);
+    }
+    const delayMs = 1000 * 2 ** (attempt - 1);
+    log('warn', `${label}: retry ${attempt}/${JOB_STATE_ATTEMPTS - 1} in ${delayMs}ms (code=${failure.code || status || 'network'})`);
+    await sleep(delayMs);
+  }
+}
 
 type DetailRequest = {
   url: string;
@@ -753,6 +797,9 @@ async function ensureCache(
         });
       }
     } catch (err) {
+      // Keep the last durable cursor resumable when status cannot be read.
+      // Do not issue another cache write while the DB is unavailable.
+      if (err instanceof EngHiringJobStateError) throw err;
       if (err instanceof EngHiringCancelledError) {
         await updateCacheRunProgress(db, runRow.id, { error_message: null });
         throw err;
@@ -900,13 +947,20 @@ export async function runEngHiringParserJob(jobId: string): Promise<void> {
   }
 
   const setProgress = async (patch: Record<string, unknown>) => {
-    const { error } = await db.from('parser_jobs').update(patch).eq('id', jobId);
+    const { error } = await db.from('parser_jobs').update(patch).eq('id', jobId).eq('status', 'running');
     if (error) log('warn', `progress update failed for ${jobId}`, error);
   };
 
   const ensureNotCancelled = async () => {
-    const { data } = await db.from('parser_jobs').select('status').eq('id', jobId).single();
-    if (!data || data.status !== 'running') throw new EngHiringCancelledError();
+    const data = await retryJobState(
+      () => db.from('parser_jobs').select('status').eq('id', jobId)
+        .abortSignal(AbortSignal.timeout(JOB_STATE_TIMEOUT_MS)).single(),
+      `Read ENG hiring job ${jobId} status`,
+    );
+    if (!data || typeof data.status !== 'string') {
+      throw new EngHiringJobStateError(`Read ENG hiring job ${jobId} status failed: missing status`);
+    }
+    if (data.status !== 'running') throw new EngHiringCancelledError();
   };
 
   try {
@@ -916,6 +970,7 @@ export async function runEngHiringParserJob(jobId: string): Promise<void> {
       .eq('id', jobId)
       .single();
     if (jobErr || !job) throw new Error(jobErr?.message ?? 'Job not found');
+    if (job.status !== 'running') throw new EngHiringCancelledError();
 
     const config = (job.config ?? {}) as EngHiringSearchConfig;
     await setProgress({
@@ -966,14 +1021,17 @@ export async function runEngHiringParserJob(jobId: string): Promise<void> {
       return;
     }
     log('error', `job ${jobId} failed`, err);
-    await db
-      .from('parser_jobs')
-      .update({
-        status: 'failed',
-        progress_stage: 'failed',
-        completed_at: new Date().toISOString(),
-        error_message: err instanceof Error ? err.message : 'Unknown error',
-      })
-      .eq('id', jobId);
+    // Idempotent, conditional write: retries cannot overwrite a user's stop.
+    // If persistence also fails, throw to the worker instead of silently exiting.
+    await retryJobState(
+      () => db.from('parser_jobs').update({
+          status: 'failed',
+          progress_stage: 'failed',
+          completed_at: new Date().toISOString(),
+          error_message: err instanceof Error ? err.message : 'Unknown error',
+        }).eq('id', jobId).eq('status', 'running')
+        .abortSignal(AbortSignal.timeout(JOB_STATE_TIMEOUT_MS)),
+      `Persist ENG hiring job ${jobId} failure`,
+    );
   }
 }

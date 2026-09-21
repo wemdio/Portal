@@ -20,6 +20,7 @@ export interface LeadTelegramAlertData {
   campaignName: string | null;
   clientName: string | null;
   specialistMentions: LeadTelegramSpecialistMention[];
+  projectLeadMentions?: LeadTelegramSpecialistMention[];
   replySubject: string | null;
   replyPreview: string | null;
   aiReason: string | null;
@@ -119,17 +120,22 @@ function buildMessage(data: LeadTelegramAlertData, statusText?: string): string 
     : clip(data.leadEmail, 320);
   // The normal owner is one user. Legacy full-name matches may yield several:
   // shorten display labels, not numeric ping targets, so contacts still fit.
-  const mentionLabelLimit = Math.max(1, Math.min(120, Math.floor(800 / Math.max(1, data.specialistMentions.length)) - 2));
+  const mentionCount = data.specialistMentions.length + (data.projectLeadMentions?.length ?? 0);
+  const mentionLabelLimit = Math.max(1, Math.min(120, Math.floor(800 / Math.max(1, mentionCount)) - 2));
   const mentions = data.specialistMentions.length
     ? data.specialistMentions.map((specialist) => mentionSpecialist(specialist, mentionLabelLimit)).join(', ')
     : 'ответственный специалист не найден';
+  const projectLeadMentions = data.projectLeadMentions?.length
+    ? data.projectLeadMentions.map((lead) => mentionSpecialist(lead, mentionLabelLimit)).join(', ')
+    : null;
 
   const lines: string[] = [
     '<b>Новый лид из Instantly</b>',
     '',
     `<b>Ответственный:</b> ${mentions}`,
-    `<b>Контакт:</b> ${escapeHtml(contactLabel)}`,
   ];
+  if (projectLeadMentions) lines.push(`<b>Лид проекта:</b> ${projectLeadMentions}`);
+  lines.push(`<b>Контакт:</b> ${escapeHtml(contactLabel)}`);
 
   if (data.companyName) lines.push(`<b>Компания:</b> ${escapeHtml(clip(data.companyName, 200))}`);
   if (data.phone?.trim()) lines.push(`<b>Телефон:</b> ${escapeHtml(clip(data.phone.trim(), 200))}`);
