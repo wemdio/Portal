@@ -750,6 +750,9 @@ export function ProjectList() {
   const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [panelLinkedCampaigns, setPanelLinkedCampaigns] = useState<{ campaign_id: string; campaign_name: string; match_source: string }[]>([]);
   const [panelAllCampaigns, setPanelAllCampaigns] = useState<{ id: string; name: string }[]>([]);
+  /** campaign_id → проект, который уже владеет кампанией (одна кампания = один проект). */
+  const [panelTakenCampaigns, setPanelTakenCampaigns] = useState<Record<string, { project_id: string; project_name: string }>>({});
+  const [panelCampaignError, setPanelCampaignError] = useState<string | null>(null);
   const [panelPeriods, setPanelPeriods] = useState<ProjectPeriod[]>([]);
   const [panelBrief, setPanelBrief] = useState<PanelBrief>({});
   // Первый расчёт темпа — сразу, последующие — с дебаунсом (см. эффект ниже).
@@ -930,6 +933,8 @@ export function ProjectList() {
       setPanelBrief({});
       setShowPanelCampaignPicker(false);
       setPanelCampaignSearch('');
+      setPanelTakenCampaigns({});
+      setPanelCampaignError(null);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProjectId]);
@@ -1165,16 +1170,36 @@ export function ProjectList() {
     } catch { /* non-critical */ }
   }
 
-  async function addPanelCampaign(projectId: string, campaignId: string) {
+  async function fetchPanelTakenCampaigns(projectId: string) {
     try {
-      await authFetch(`/api/projects/${projectId}/campaigns`, {
+      const res = await authFetch(`/api/projects/${projectId}/campaigns?taken=1`);
+      if (!res.ok) return;
+      const json = await res.json() as { taken?: Record<string, { project_id: string; project_name: string }> };
+      setPanelTakenCampaigns(json.taken ?? {});
+    } catch { /* non-critical: без карты пикер просто не подсветит занятые */ }
+  }
+
+  async function addPanelCampaign(projectId: string, campaignId: string) {
+    setPanelCampaignError(null);
+    try {
+      const res = await authFetch(`/api/projects/${projectId}/campaigns`, {
         method: 'POST',
         body: JSON.stringify({ campaign_id: campaignId }),
       });
+      // Молчаливый провал здесь выглядел как «кнопка не работает»: 409 (кампания
+      // уже за другим проектом) фронт игнорировал и просто перечитывал список.
+      if (!res.ok) {
+        const json = await res.json().catch(() => null) as { error?: string } | null;
+        setPanelCampaignError(json?.error ?? `Не удалось привязать кампанию (${res.status})`);
+        void fetchPanelTakenCampaigns(projectId);
+        return;
+      }
+      // Пикер не закрываем: кампании привязывают пачками (20 подряд — обычный
+      // сценарий), а привязанная и так исчезает из списка ниже.
       void fetchPanelCampaigns(projectId);
-      setShowPanelCampaignPicker(false);
-      setPanelCampaignSearch('');
-    } catch { /* non-critical */ }
+    } catch {
+      setPanelCampaignError('Сеть недоступна — кампания не привязана');
+    }
   }
 
   async function removePanelCampaign(projectId: string, campaignId: string) {
@@ -2894,7 +2919,11 @@ export function ProjectList() {
                     {!showPanelCampaignPicker ? (
                       <button
                         type="button"
-                        onClick={() => setShowPanelCampaignPicker(true)}
+                        onClick={() => {
+                          setShowPanelCampaignPicker(true);
+                          setPanelCampaignError(null);
+                          void fetchPanelTakenCampaigns(selectedProject.id);
+                        }}
                         className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700"
                       >
                         <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
@@ -2915,25 +2944,48 @@ export function ProjectList() {
                         <div className="max-h-36 overflow-y-auto rounded-lg border border-zinc-100">
                           {(() => {
                             const linkedIds = new Set(panelLinkedCampaigns.map((c) => c.campaign_id));
+                            const search = panelCampaignSearch.trim().toLowerCase();
                             const filtered = panelAllCampaigns
                               .filter((c) => !linkedIds.has(c.id))
-                              .filter((c) => !panelCampaignSearch || c.name.toLowerCase().includes(panelCampaignSearch.toLowerCase()));
+                              .filter((c) => !search || c.name.toLowerCase().includes(search));
                             if (filtered.length === 0) return <p className="px-2.5 py-2 text-xs text-zinc-400">Не найдено</p>;
-                            return filtered.slice(0, 15).map((c) => (
-                              <button
-                                key={c.id}
-                                type="button"
-                                onClick={() => void addPanelCampaign(selectedProject.id, c.id)}
-                                className="w-full text-left px-2.5 py-1.5 text-xs text-zinc-600 hover:bg-blue-50 hover:text-blue-700 border-b border-zinc-50 last:border-0"
-                              >
-                                {c.name}
-                              </button>
-                            ));
+                            // Свободные наверх: 2 из 3 кампаний воркспейса заняты другими
+                            // проектами, и без сортировки верх списка был сплошь некликабельным.
+                            const free = filtered.filter((c) => !panelTakenCampaigns[c.id]);
+                            const taken = filtered.filter((c) => panelTakenCampaigns[c.id]);
+                            return [...free, ...taken].slice(0, 20).map((c) => {
+                              const owner = panelTakenCampaigns[c.id];
+                              if (owner) {
+                                return (
+                                  <div
+                                    key={c.id}
+                                    title={`Уже привязана к проекту «${owner.project_name}» — сначала отвяжите её там`}
+                                    className="w-full px-2.5 py-1.5 text-xs text-zinc-400 border-b border-zinc-50 last:border-0 cursor-not-allowed"
+                                  >
+                                    <span className="line-through">{c.name}</span>
+                                    <span className="ml-1 text-zinc-300">— занята: {owner.project_name}</span>
+                                  </div>
+                                );
+                              }
+                              return (
+                                <button
+                                  key={c.id}
+                                  type="button"
+                                  onClick={() => void addPanelCampaign(selectedProject.id, c.id)}
+                                  className="w-full text-left px-2.5 py-1.5 text-xs text-zinc-600 hover:bg-blue-50 hover:text-blue-700 border-b border-zinc-50 last:border-0"
+                                >
+                                  {c.name}
+                                </button>
+                              );
+                            });
                           })()}
                         </div>
+                        {panelCampaignError && (
+                          <p className="rounded-lg bg-red-50 px-2.5 py-1.5 text-[11px] text-red-600">{panelCampaignError}</p>
+                        )}
                         <button
                           type="button"
-                          onClick={() => { setShowPanelCampaignPicker(false); setPanelCampaignSearch(''); }}
+                          onClick={() => { setShowPanelCampaignPicker(false); setPanelCampaignSearch(''); setPanelCampaignError(null); }}
                           className="text-[10px] text-zinc-400 hover:text-zinc-600"
                         >
                           Отмена

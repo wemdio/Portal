@@ -147,6 +147,9 @@ export default function ProjectPage() {
   const [allCampaigns, setAllCampaigns] = useState<{ id: string; name: string }[]>([]);
   const [campaignSearch, setCampaignSearch] = useState('');
   const [showCampaignPicker, setShowCampaignPicker] = useState(false);
+  /** campaign_id → проект-владелец: одна кампания может принадлежать только одному проекту. */
+  const [takenCampaigns, setTakenCampaigns] = useState<Record<string, { project_id: string; project_name: string }>>({});
+  const [campaignError, setCampaignError] = useState<string | null>(null);
   const [leadBoard, setLeadBoard] = useState<{ link: string; columnConfig: { key: string; visible: boolean }[] } | null>(null);
   const [leadBoardError, setLeadBoardError] = useState('');
   const [boardSaving, setBoardSaving] = useState(false);
@@ -228,18 +231,39 @@ export default function ProjectPage() {
     } catch { /* non-critical */ }
   }
 
-  async function addCampaign(campaignId: string) {
+  async function fetchTakenCampaigns() {
     try {
       const headers = await getAuthHeaders();
-      await fetch(`/api/projects/${id}/campaigns`, {
+      const res = await fetch(`/api/projects/${id}/campaigns?taken=1`, { headers });
+      if (!res.ok) return;
+      const json = await res.json() as { taken?: Record<string, { project_id: string; project_name: string }> };
+      setTakenCampaigns(json.taken ?? {});
+    } catch { /* non-critical: без карты пикер просто не подсветит занятые */ }
+  }
+
+  async function addCampaign(campaignId: string) {
+    setCampaignError(null);
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`/api/projects/${id}/campaigns`, {
         method: 'POST',
         headers: { ...headers, 'Content-Type': 'application/json' },
         body: JSON.stringify({ campaign_id: campaignId }),
       });
+      // 409 = кампания уже за другим проектом. Раньше ответ игнорировался,
+      // и отказ выглядел как «кнопка привязки не работает».
+      if (!res.ok) {
+        const json = await res.json().catch(() => null) as { error?: string } | null;
+        setCampaignError(json?.error ?? `Не удалось привязать кампанию (${res.status})`);
+        void fetchTakenCampaigns();
+        return;
+      }
+      // Пикер остаётся открытым: кампании привязывают пачками, а привязанная
+      // сразу исчезает из списка (она уже в linkedCampaigns).
       void fetchLinkedCampaigns();
-      setShowCampaignPicker(false);
-      setCampaignSearch('');
-    } catch { /* non-critical */ }
+    } catch {
+      setCampaignError('Сеть недоступна — кампания не привязана');
+    }
   }
 
   async function removeCampaign(campaignId: string) {
@@ -1182,7 +1206,11 @@ export default function ProjectPage() {
                   {!showCampaignPicker ? (
                     <button
                       type="button"
-                      onClick={() => setShowCampaignPicker(true)}
+                      onClick={() => {
+                        setShowCampaignPicker(true);
+                        setCampaignError(null);
+                        void fetchTakenCampaigns();
+                      }}
                       className="inline-flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700 transition-colors"
                     >
                       <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
@@ -1203,27 +1231,50 @@ export default function ProjectPage() {
                       <div className="max-h-48 overflow-y-auto rounded-lg border border-gray-100">
                         {(() => {
                           const linkedIds = new Set(linkedCampaigns.map((c) => c.campaign_id));
+                          const search = campaignSearch.trim().toLowerCase();
                           const filtered = allCampaigns
                             .filter((c) => !linkedIds.has(c.id))
-                            .filter((c) => !campaignSearch || c.name.toLowerCase().includes(campaignSearch.toLowerCase()));
+                            .filter((c) => !search || c.name.toLowerCase().includes(search));
                           if (filtered.length === 0) {
                             return <p className="px-3 py-2 text-sm text-gray-400">Не найдено</p>;
                           }
-                          return filtered.slice(0, 20).map((c) => (
-                            <button
-                              key={c.id}
-                              type="button"
-                              onClick={() => void addCampaign(c.id)}
-                              className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors border-b border-gray-50 last:border-0"
-                            >
-                              {c.name}
-                            </button>
-                          ));
+                          // Свободные наверх: большая часть кампаний воркспейса занята
+                          // другими проектами, иначе верх списка некликабельный.
+                          const free = filtered.filter((c) => !takenCampaigns[c.id]);
+                          const taken = filtered.filter((c) => takenCampaigns[c.id]);
+                          return [...free, ...taken].slice(0, 20).map((c) => {
+                            const owner = takenCampaigns[c.id];
+                            if (owner) {
+                              return (
+                                <div
+                                  key={c.id}
+                                  title={`Уже привязана к проекту «${owner.project_name}» — сначала отвяжите её там`}
+                                  className="w-full px-3 py-2 text-sm text-gray-400 border-b border-gray-50 last:border-0 cursor-not-allowed"
+                                >
+                                  <span className="line-through">{c.name}</span>
+                                  <span className="ml-1 text-gray-300">— занята: {owner.project_name}</span>
+                                </div>
+                              );
+                            }
+                            return (
+                              <button
+                                key={c.id}
+                                type="button"
+                                onClick={() => void addCampaign(c.id)}
+                                className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors border-b border-gray-50 last:border-0"
+                              >
+                                {c.name}
+                              </button>
+                            );
+                          });
                         })()}
                       </div>
+                      {campaignError && (
+                        <p className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">{campaignError}</p>
+                      )}
                       <button
                         type="button"
-                        onClick={() => { setShowCampaignPicker(false); setCampaignSearch(''); }}
+                        onClick={() => { setShowCampaignPicker(false); setCampaignSearch(''); setCampaignError(null); }}
                         className="text-xs text-gray-400 hover:text-gray-600"
                       >
                         Отмена
