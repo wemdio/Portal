@@ -2239,7 +2239,13 @@ interface AccountsUploadSummary {
  * прежних 64 пикселях они не помещались и корзина вылезала за правый край
  * карточки.
  */
-const ACCOUNT_GRID = 'grid grid-cols-[32px_44px_minmax(0,1fr)_126px_120px_360px_138px_92px_60px_88px] gap-4 items-center';
+/*
+ * Колонка «Добавлен» (76px) стоит сразу за именем и живёт за счёт него: имя —
+ * единственная резиновая колонка, поэтому общая ширина карточки не выросла и
+ * корзина справа осталась на месте. Дата рисуется коротким `дд.мм.гг`, чтобы
+ * в эти 76 пикселей влезть без переноса.
+ */
+const ACCOUNT_GRID = 'grid grid-cols-[32px_44px_minmax(0,1fr)_76px_126px_120px_360px_138px_92px_60px_88px] gap-4 items-center';
 
 /**
  * Ячейка здоровья: слово и цвет, объяснение — под курсором.
@@ -3406,6 +3412,7 @@ function CampaignAccountsTab({
             <SelectAllCheckbox total={accounts.length} selectedCount={selectedIds.length} onChange={setAll} />
             <span />
             <span>Аккаунт</span>
+            <span title="Когда аккаунт завели в портале.">Добавлен</span>
             <span title="Идёт ли с этого аккаунта рассылка первых сообщений. Если нет — почему и сколько дней уже.">
               Рассылка
             </span>
@@ -3595,6 +3602,17 @@ function CampaignAccountsTab({
                     </div>
                   )}
                 </div>
+                {/* Дата загрузки в портал: по ней видно, какой партии аккаунт
+                    и сколько он у нас прожил. Полная дата со временем — под
+                    курсором. */}
+                <span
+                  title={a.created_at ? new Date(a.created_at).toLocaleString('ru-RU') : undefined}
+                  className={`text-[11px] tabular-nums ${a.created_at ? 'cursor-help text-gray-500' : 'text-gray-300'}`}
+                >
+                  {a.created_at
+                    ? new Date(a.created_at).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit' })
+                    : '—'}
+                </span>
                 <HealthCell mark={sendingMark} />
                 {/*
                   Страна под номером: аккаунты покупают партиями и в списке они
