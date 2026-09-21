@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { veRelevanceDecisionSchema } from './relevanceDecision';
 import { veRelevanceReviewResultSchema } from './relevanceReview';
+import { veTriageRubricSchema } from './relevanceTriage';
 
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const websiteEvidenceSchema = z.object({
@@ -68,6 +69,22 @@ const checkpointSchema = z.object({
     failure_code: relevanceFailureCodeSchema.optional(),
   })).default({}),
   semantic_review_refs: z.record(hashSchema, hashSchema).default({}),
+  // One paid checklist per hypothesis for the calibrated triage. Optional and
+  // self-healing: an unreadable value is dropped and regenerated, never a
+  // reason to discard the paid verdicts stored next to it.
+  triage: z.object({ version: z.number().int().positive(), rubric: veTriageRubricSchema }).optional().catch(undefined),
+  // Companies the fast check has read without deciding and that have no saved
+  // verdict yet (bit 1: source facts, bit 2: website text). A stopped pass must
+  // not buy the same fast check again; entries leave once a verdict is saved.
+  triage_seen: z.object({ version: z.number().int().positive(), keys: z.record(hashSchema, z.number().int().min(1).max(3)) }).optional().catch(undefined),
+  // Вероятность целевой деятельности, которую быстрая проверка выставила
+  // компании, ОСТАВШЕЙСЯ без вердикта. Само по себе ничего не решает и никого
+  // не отклоняет — это материал для решения, стоит ли покупать таким компаниям
+  // платный поиск сайта: сейчас поиск покупается всем подряд, а окупается
+  // верным сайтом лишь в 2.9% записей.
+  triage_activity: z.record(hashSchema, z.number().min(0).max(1)).optional().catch(undefined),
+  // The paid checklist call failed this many times for this hypothesis context.
+  triage_rubric_failures: z.number().int().nonnegative().max(1000).optional().catch(undefined),
   failures: z.array(z.object({
     batch_hash: hashSchema,
     companies: z.number().int().positive(),

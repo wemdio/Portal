@@ -78,6 +78,7 @@ jest.mock('@/lib/supabaseAdmin', () => {
     };
 
     const query: Record<string, unknown> = {
+      abortSignal: () => query,
       select: () => {
         if (mode === 'update') returnUpdatedRow = true;
         return query;

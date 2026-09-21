@@ -8,7 +8,10 @@ import { rankVeEvidenceLinks, selectVeEvidenceText, type VeEvidencePage } from '
 
 /** Only public, identity-verified website observations. Never client input,
  * email deliverability, hypothesis verdicts or model-generated summaries. */
-export const VE_COMPANY_FACT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+// Сайт компании за месяц почти не меняется — тот же срок, что у кэша поиска
+// (17.09.2026). Семь дней заставляли перечитывать до десяти страниц компании
+// при каждой следующей гипотезе по тому же срезу реестра.
+export const VE_COMPANY_FACT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const VERSION = 1;
 const TIMEOUT_MS = 2_000;
 const link = z.object({ url: z.string().url().max(1000), text: z.string().max(240) });

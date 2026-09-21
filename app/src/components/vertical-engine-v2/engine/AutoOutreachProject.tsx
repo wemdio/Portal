@@ -29,6 +29,7 @@ import { ManualBaseLibrary } from './ManualBaseLibrary';
 import { PreparationProgress, getPreparationPresentation, type PreparationPresentation } from './PreparationProgress';
 import { selectHypothesisLetters } from './letterSelection';
 import { isPartialPreview } from './collectionProgress';
+import { ContactLimitField } from './ContactLimitField';
 
 const LABELS = ['Гипотезы', 'Письма', 'Базы и объём', 'Запуск', 'Результаты'];
 const RUN_LABELS = {
@@ -302,6 +303,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
         setStep((current) => current === 3 ? 3 : 2);
         await refresh();
       }
+      // Finished bases are re-partitioned by the worker right after the save.
+      if (payload.action === 'contact_limit') await refresh();
     } catch {
       setError('Не удалось сохранить решение. Проверьте соединение');
     } finally {
@@ -664,6 +667,12 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           {step === 3 ? (
             <section className="space-y-6">
               <h2 className="ve2-h2">Базы и доступный объём</h2>
+              <ContactLimitField
+                key={snapshot?.setup.max_emails_per_company ?? 'none'}
+                value={snapshot?.setup.max_emails_per_company ?? null}
+                disabled={busy || locked || !snapshot}
+                onSave={(next) => void change({ action: 'contact_limit', max_emails_per_company: next })}
+              />
               {selectedHypotheses.map((h) => {
                 const p = snapshot?.preparations.find((p) => p.hypothesis_id === h.id),
                   base = detail.bases.find((b) => b.id === p?.base_id);

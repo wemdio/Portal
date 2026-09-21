@@ -36,7 +36,7 @@ import { fetchVeRelevanceEvidence, resolveVeEvidenceAddress } from '@/lib/vertic
 import { veCompanyFactKey, veFactPageKey, freshVeCompanyFact, focusVeCompanyFact, createVeSharedPageReader, VE_COMPANY_FACT_TTL_MS, type VeCompanyFactRecord } from '@/lib/verticalEngineV2/companyFacts';
 import { parseVeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
 import { needsVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceReserve';
-import { recoverVeSourceContacts, hasPendingVeSourceContacts, evaluateVeSourceDiscoveryBudget, type VeSourceContactCheckpoint } from '@/lib/verticalEngineV2/sourceContacts';
+import { recoverVeSourceContacts, hasPendingVeSourceContacts, evaluateVeSourceDiscoveryBudget, veSourceDiscoveryLimit, applyVeSourceContacts, countVeSourceDiscoveryContacts, VE_SOURCE_DISCOVERY_MARK, type VeSourceContactCheckpoint } from '@/lib/verticalEngineV2/sourceContacts';
 import { cleanVeCompanyNames } from '@/lib/verticalEngineV2/companyNameCleanup';
 import { createVeLlmRateLimit, veLlmRateLimit, veRetryAfterMs, VeLlmRateLimitError } from '@/lib/verticalEngineV2/llmRateLimit';
 import { planVeRelevanceRetry } from '@/lib/verticalEngineV2/relevanceRetry';
@@ -669,6 +669,27 @@ describe('llm rawCall retry', () => {
       expect(fetchMock).toHaveBeenCalledTimes(outcome === 'exhausted' ? 2 : 3);
     }
 
+    // A balance refusal saved by an earlier run says nothing about the provider
+    // now: resume retries that unpaid review instead of replaying a 402 before
+    // any request, which kept resumed bases failed after a top-up (19.09.2026).
+    {
+      const stale = JSON.parse(JSON.stringify(saved)) as VeRelevanceCheckpoint;
+      const review = Object.values(stale.semantic_reviews)[0];
+      review.status = 'failed'; review.failure_code = 'billing'; review.attempts = 1; delete review.result;
+      fetchMock.mockReset().mockResolvedValueOnce(confirmation).mockResolvedValueOnce(classification).mockResolvedValueOnce(confirmation);
+      const topped = await findIrrelevantRows({ ...expanded, checkpoint: stale });
+      expect(topped.error).toBeUndefined();
+      expect([...topped.decisions.values()].map((item) => item.status)).toEqual(['relevant', 'relevant']);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(Object.values(topped.checkpoint.semantic_reviews).find((item) => item.company_key === review.company_key))
+        .toEqual(expect.objectContaining({ status: 'finished', attempts: 1 }));
+      const stillEmpty = JSON.parse(JSON.stringify(stale)) as VeRelevanceCheckpoint;
+      fetchMock.mockReset().mockResolvedValueOnce(httpResponse(402, {}));
+      const refused = await findIrrelevantRows({ ...expanded, checkpoint: stillEmpty });
+      expect(refused.error).toContain('Requesty 402');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
+
     // Fresh invalid batches split into isolated retries without replaying the
     // initial classifier, including when only one sibling remains malformed.
     delete process.env.VE_MODEL_GATE;
@@ -732,6 +753,45 @@ describe('llm rawCall retry', () => {
       expect(fetchMock).toHaveBeenCalledTimes(callCount);
     }
 
+    // Отказ опирается на дословное противоречие с сайта, поэтому вторая
+    // платная модель по каждому отказу — самая дорогая и наименее полезная
+    // строка гейта. Оставляем контрольную выборку, а не полную перепроверку.
+    {
+      const other = 'Продаёт офисную мебель и канцелярию оптом, производства нет.';
+      // Факты приходят только с сайта: тогда дословное противоречие берётся из
+      // website_text, как того требует допуск отказа.
+      const rejectRows = Array.from({ length: 20 }, (_, i) => ({
+        company: `Поставщик ${i}`, inn: `77000100${String(i).padStart(2, '0')}`, website: `https://reseller${i}.test/`,
+      }));
+      const rejectInput = { ...input, rows: rejectRows, websiteLimit: 100,
+        fetchEvidence: jest.fn().mockResolvedValue({ status: 'ok', text: other, url: 'https://reseller.test/', reason: 'identity_verified_website' }) };
+      fetchMock.mockReset().mockImplementation(async (_url: string, init: { body: string }) => {
+        const body = JSON.parse(init.body as string);
+        const system = body.messages[0].content as string;
+        if (system.startsWith('Independently check')) {
+          const companies = JSON.parse(body.messages[1].content.split('index:\n')[1]) as Array<{ i: number }>;
+          return reply({ reviews: companies.map((item) => ({ i: item.i, result: 'direct_conflict', reason: 'Перепродажа' })) });
+        }
+        const batch = JSON.parse(body.messages[1].content.split(':\n').at(-1)!) as Array<{ i: number }>;
+        const secondPass = body.messages[1].content.includes('excerpts');
+        return reply({ decisions: batch.map((item) => secondPass
+          ? { i: item.i, status: 'irrelevant', reason: 'Перепродажа, производства нет', evidence_ids: [0] }
+          : { i: item.i, status: 'needs_review', reason: 'Нужны факты', evidence: [] }) });
+      });
+      const rejected = await findIrrelevantRows(rejectInput);
+      expect([...rejected.decisions.values()].every((decision) => decision.status === 'irrelevant')).toBe(true);
+      const reviewCalls = fetchMock.mock.calls.filter((call) =>
+        JSON.parse(call[1].body as string).messages[0].content.startsWith('Independently check')).length;
+      // Раньше на 20 отказов приходилось 3 пакета проверки (по 8 компаний);
+      // выборка в 10 % оставляет ноль или один.
+      expect(reviewCalls).toBeLessThanOrEqual(1);
+      // Решение стабильно: повтор не покупает ни одного нового вызова.
+      const calls = fetchMock.mock.calls.length;
+      await findIrrelevantRows({ ...rejectInput, checkpoint: rejected.checkpoint });
+      expect(fetchMock).toHaveBeenCalledTimes(calls);
+      fetchMock.mockReset();
+    }
+
     // A consumed citation attempt cannot be charged again or admitted after
     // a provider outage, but it must not permanently block other companies.
     for (const status of [429, 502, 402, 401]) {
@@ -744,8 +804,13 @@ describe('llm rawCall retry', () => {
       const failed = await findIrrelevantRows(citationInput);
       expect(failed.retryable).toBe(status === 429 || status === 502);
       expect(failed.decisions.get(0)?.status).toBe('error');
+      // A balance/key refusal was never charged. Once the operator fixes it, a
+      // resume repeats the reserved repair once instead of replaying the old
+      // refusal as a fresh failure (bases stayed failed after a top-up, 19.09.2026).
+      const refused = status === 402 || status === 401;
+      if (refused) fetchMock.mockResolvedValueOnce(reply({ evidence_ids: [0] })).mockResolvedValueOnce(confirmation);
       const resumed = await findIrrelevantRows({ ...citationInput, checkpoint: failed.checkpoint });
-      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(fetchMock).toHaveBeenCalledTimes(refused ? 5 : 3);
       if (status === 429) {
         expect(resumed.rateLimit).toMatchObject({ deferred: true });
         expect(Object.values(resumed.checkpoint.citation_repairs)[0].retry_proposal).toBeDefined();
@@ -759,8 +824,9 @@ describe('llm rawCall retry', () => {
         expect(resumed.error).toBeUndefined();
         expect(resumed.decisions.get(0)?.status).toBe('needs_review');
       } else {
-        expect(resumed.error).toBeDefined();
-        expect(resumed.decisions.get(0)?.status).toBe('error');
+        expect(resumed.error).toBeUndefined();
+        expect(resumed.decisions.get(0)?.status).toBe('relevant');
+        expect(citationInput.fetchEvidence).toHaveBeenCalledTimes(1);
       }
     }
 
@@ -780,6 +846,11 @@ describe('llm rawCall retry', () => {
     Object.values(legacy.verdicts).forEach((verdict) => { verdict.website_review_version = 3; });
     const legacyRow = { ...input.rows[0], _email_status: 'ok', _ve_relevance: Object.values(legacy.verdicts)[0] };
     expect(needsVeRelevanceEvidence(legacyRow)).toBe(true);
+    // A follow-up completed under the current policy without a counted attempt
+    // (site unavailable/unverified) must not be selected again: the gate would
+    // only replay its cached verdict, and the base would requeue forever.
+    expect(needsVeRelevanceEvidence({ ...legacyRow, _ve_relevance: { ...Object.values(legacy.verdicts)[0],
+      review_attempts: 0, website_review_version: 4 } })).toBe(false);
     const websiteText = (description + '. 🏭 ').padEnd(5999, 'x') + '😀 tail\u0000\ud83d';
     const available = jest.fn().mockResolvedValue({ status: 'ok', text: websiteText, url: 'https://factory.test/', reason: 'identity_verified_website' });
     fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'relevant', reason: 'x'.repeat(399) + '😀', evidence_ids: [0] }] })).mockResolvedValueOnce(confirmation);
@@ -1078,22 +1149,57 @@ describe('llm rawCall retry', () => {
     // Completed lookups are a bounded cohort, not a claim about paid credits.
     // Restart/Continue or a drop and recovery of the same ready count cannot
     // purchase another cohort. Actual net growth permits further discovery.
-    const initialBudget = evaluateVeSourceDiscoveryBudget({ readyRows: 23 }).budget;
+    const initialBudget = evaluateVeSourceDiscoveryBudget({ discoveryContacts: 23 }).budget;
     const checkedCohort: VeSourceContactCheckpoint = { version: 1, checked: Object.fromEntries(
-      Array.from({ length: 200 }, (_, i) => [String(i), { website: '', reason: 'identity_unverified' }])) };
-    const stopped = evaluateVeSourceDiscoveryBudget({ budget: initialBudget, checkpoint: checkedCohort, readyRows: 23 });
+      Array.from({ length: 120 }, (_, i) => [String(i), { website: '', reason: 'identity_unverified' }])) };
+    const stopped = evaluateVeSourceDiscoveryBudget({ budget: initialBudget, checkpoint: checkedCohort, discoveryContacts: 23 });
     expect(stopped).toMatchObject({ remaining: 0, budget: { paused: true, ready_high_water: 23 } });
-    for (const readyRows of [10, 23]) expect(evaluateVeSourceDiscoveryBudget({
-      budget: JSON.parse(JSON.stringify(stopped.budget)), checkpoint: checkedCohort, readyRows,
+    for (const discoveryContacts of [10, 23]) expect(evaluateVeSourceDiscoveryBudget({
+      budget: JSON.parse(JSON.stringify(stopped.budget)), checkpoint: checkedCohort, discoveryContacts,
     }).remaining).toBe(0);
-    expect(evaluateVeSourceDiscoveryBudget({ budget: stopped.budget, checkpoint: checkedCohort, readyRows: 24 }))
-      .toMatchObject({ remaining: 200, budget: { paused: false, checked_at_growth: 200, ready_high_water: 24 } });
-    expect(evaluateVeSourceDiscoveryBudget({ checkpoint: checkedCohort, readyRows: 23 }))
-      .toMatchObject({ remaining: 200, budget: { checked_at_growth: 200 } });
-    for (const budget of [null, { ...initialBudget, version: 2 }, { ...initialBudget, checked_at_growth: 201 }]) {
-      expect(() => evaluateVeSourceDiscoveryBudget({ budget, checkpoint: checkedCohort, readyRows: 23 }))
+    expect(evaluateVeSourceDiscoveryBudget({ budget: stopped.budget, checkpoint: checkedCohort, discoveryContacts: 24 }))
+      .toMatchObject({ remaining: 120, budget: { paused: false, checked_at_growth: 120, ready_high_water: 24 } });
+    expect(evaluateVeSourceDiscoveryBudget({ checkpoint: checkedCohort, discoveryContacts: 23 }))
+      .toMatchObject({ remaining: 120, budget: { checked_at_growth: 120 } });
+    for (const budget of [null, { ...initialBudget, version: 3 }, { ...initialBudget, checked_at_growth: 121 }]) {
+      expect(() => evaluateVeSourceDiscoveryBudget({ budget, checkpoint: checkedCohort, discoveryContacts: 23 }))
         .toThrow('Source discovery budget checkpoint is invalid');
     }
+    // Окно закрывает только СВОЙ результат: контакт, пришедший из бесплатного
+    // лейна, больше не продлевает платный поиск. Раньше общий счётчик базы рос
+    // от чужого успеха, и окно не закрывалось никогда («Цемент»: ready 417 при
+    // high-water 364, остаток снова 200 на каждом круге).
+    expect(countVeSourceDiscoveryContacts([
+      { source_detail: 'реестр' },
+      { source_detail: `2ГИС\n${VE_SOURCE_DISCOVERY_MARK} https://found.test/` },
+      null, 'не строка',
+    ])).toBe(1);
+    // Документ старой версии пересеивается, а не роняет стадию. В v1
+    // ready_high_water хранил общее число готовых строк базы (у «Цемента» 417),
+    // а сравнивать его теперь надо с контактами добора (21) — ветка роста была
+    // бы недостижима навсегда, и окно стало бы необратимым стоп-краном.
+    const legacyCohort: VeSourceContactCheckpoint = { version: 1, checked: Object.fromEntries(
+      Array.from({ length: 413 }, (_, i) => [`legacy-${i}`, { website: '', reason: 'identity_unverified' }])) };
+    const reseeded = evaluateVeSourceDiscoveryBudget({
+      budget: { version: 1, checked_at_growth: 413, ready_high_water: 417, paused: false },
+      checkpoint: legacyCohort, discoveryContacts: 21,
+    });
+    expect(reseeded).toMatchObject({ remaining: 120,
+      budget: { version: 2, checked_at_growth: 413, ready_high_water: 21, paused: false } });
+    // Усадка base.data (дедуп, кап адресов) не должна открывать новое окно.
+    expect(evaluateVeSourceDiscoveryBudget({
+      budget: reseeded.budget, checkpoint: legacyCohort, discoveryContacts: 20,
+    }).budget).toMatchObject({ checked_at_growth: 413, ready_high_water: 21 });
+
+    // Круговой проход: метку ставит applyVeSourceContacts, её же и считаем.
+    expect(countVeSourceDiscoveryContacts(applyVeSourceContacts(sourceRows.slice(0, 2), discoveryState))).toBe(1);
+    // One missing contact is not one lookup: at 499/500 a base looked up a single
+    // company per round and burned dozens of rounds. The allowance still bounds it.
+    expect(veSourceDiscoveryLimit({ readyTarget: 500, readyRows: 499, candidatesProcessed: 1200 })).toBe(8);
+    expect(veSourceDiscoveryLimit({ readyTarget: 500, readyRows: 20, candidatesProcessed: 2000 })).toBe(16);
+    expect(veSourceDiscoveryLimit({ readyTarget: 500, readyRows: 499, candidatesProcessed: 1200, remaining: 3 })).toBe(3);
+    expect(veSourceDiscoveryLimit({ readyTarget: 500, readyRows: 500, candidatesProcessed: 1200 })).toBe(0);
+    expect(veSourceDiscoveryLimit({})).toBe(16);
     expect(jest.getTimerCount()).toBe(0);
 
     // Real progress includes successful/error IO, but never a still-pending await.

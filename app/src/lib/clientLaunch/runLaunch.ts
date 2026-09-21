@@ -283,43 +283,50 @@ export async function runClientLaunch(input: RunClientLaunchInput): Promise<RunC
     validatedEmailAccountIdsOverride = unique;
   }
 
-  // 3. Проверяем статус и тарифные лимиты клиента.
-  const tariffRow = await getClientTariffRow(userId);
-  const clientStatus = getClientStatus(tariffRow);
-  if (clientStatus === 'setup') {
-    throw new ClientLaunchError(
-      'Идёт прогрев почт. Запуск кампаний станет доступен после завершения прогрева (15 дней с момента оплаты). До этого вы можете пользоваться остальными инструментами портала.',
-      403,
-    );
-  }
-  if (clientStatus !== 'active') {
-    throw new ClientLaunchError(
-      'Подписка не активна. Оплатите тариф для продолжения работы.',
-      403,
-    );
-  }
-  // Защита от эскалации: неоплаченный клиент после прогрева навсегда становится
-  // 'active' (paid_until пуст → 'expired' не срабатывает), поэтому одной проверки
-  // статуса мало — режем ещё и «оформил, но не оплатил».
-  if (isAwaitingFirstPayment(tariffRow)) {
-    throw new ClientLaunchError(
-      'Оформлена подписка, но оплата ещё не поступила. Запуск станет доступен после оплаты.',
-      403,
-    );
-  }
+  // 3. Проверяем статус и тарифные лимиты клиента. Агентский кабинет, заведённый
+  //    студией из Движка, обслуживается по её договору: строки client_tariffs у
+  //    него нет и быть не должно, а объём закрывает обязательство периода
+  //    проекта Portal. Поэтому весь self-serve блок для него пропускается
+  //    целиком — вместе с лимитом контактов, который иначе применился бы по
+  //    умолчанию тарифа «Запуск».
+  if (preset!.agency_managed !== true) {
+    const tariffRow = await getClientTariffRow(userId);
+    const clientStatus = getClientStatus(tariffRow);
+    if (clientStatus === 'setup') {
+      throw new ClientLaunchError(
+        'Идёт прогрев почт. Запуск кампаний станет доступен после завершения прогрева (15 дней с момента оплаты). До этого вы можете пользоваться остальными инструментами портала.',
+        403,
+      );
+    }
+    if (clientStatus !== 'active') {
+      throw new ClientLaunchError(
+        'Подписка не активна. Оплатите тариф для продолжения работы.',
+        403,
+      );
+    }
+    // Защита от эскалации: неоплаченный клиент после прогрева навсегда становится
+    // 'active' (paid_until пуст → 'expired' не срабатывает), поэтому одной проверки
+    // статуса мало — режем ещё и «оформил, но не оплатил».
+    if (isAwaitingFirstPayment(tariffRow)) {
+      throw new ClientLaunchError(
+        'Оформлена подписка, но оплата ещё не поступила. Запуск станет доступен после оплаты.',
+        403,
+      );
+    }
 
-  const limits = resolveEffectiveLimits(tariffRow);
-  const periodStart = getBillingPeriodStart(tariffRow);
-  const usedContacts = await countClientContacts(userId, periodStart);
-  if (usedContacts + allowedLeads.length > limits.max_contacts) {
-    const remaining = Math.max(0, limits.max_contacts - usedContacts);
-    throw new ClientLaunchError(
-      `Лимит контактов: ${limits.max_contacts.toLocaleString('ru-RU')} / мес. ` +
-        `Использовано: ${usedContacts.toLocaleString('ru-RU')}. ` +
-        `Попытка добавить: ${allowedLeads.length.toLocaleString('ru-RU')}. ` +
-        `Осталось: ${remaining.toLocaleString('ru-RU')}.`,
-      400,
-    );
+    const limits = resolveEffectiveLimits(tariffRow);
+    const periodStart = getBillingPeriodStart(tariffRow);
+    const usedContacts = await countClientContacts(userId, periodStart);
+    if (usedContacts + allowedLeads.length > limits.max_contacts) {
+      const remaining = Math.max(0, limits.max_contacts - usedContacts);
+      throw new ClientLaunchError(
+        `Лимит контактов: ${limits.max_contacts.toLocaleString('ru-RU')} / мес. ` +
+          `Использовано: ${usedContacts.toLocaleString('ru-RU')}. ` +
+          `Попытка добавить: ${allowedLeads.length.toLocaleString('ru-RU')}. ` +
+          `Осталось: ${remaining.toLocaleString('ru-RU')}.`,
+        400,
+      );
+    }
   }
 
   const instantlyAccountId = resolveInstantlyAccountId(preset!.instantly_account_id);

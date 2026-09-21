@@ -335,15 +335,18 @@ function inspectResponse(response) {
   const schemaIssues = [];
   if (!object) schemaIssues.push('expected_json_object');
   else {
-    for (const field of ['is_lead', 'needs_review', 'custom_criteria_matched', 'proposal_seen', 'objection_handleable']) {
+    for (const field of ['is_lead', 'needs_review', 'custom_criteria_matched', 'proposal_seen']) {
       if (typeof rawJson[field] !== 'boolean') schemaIssues.push(`invalid_${field}`);
     }
     if (![null, 'auto_reply', 'delivery_failure', 'service_acknowledgement'].includes(rawJson.machine_reply_kind)) schemaIssues.push('invalid_machine_reply_kind');
-    if (![null, 'seller_pitch', 'service_followup', 'contact_routing'].includes(rawJson.non_lead_kind)) schemaIssues.push('invalid_non_lead_kind');
+    if (![null, 'seller_pitch', 'service_followup', 'contact_routing', 'nonliteral_interest', 'intro_request'].includes(rawJson.non_lead_kind)) schemaIssues.push('invalid_non_lead_kind');
     if (typeof rawJson.reason !== 'string' || !rawJson.reason.trim()) schemaIssues.push('invalid_reason');
     if (typeof rawJson.confidence !== 'number' || !Number.isFinite(rawJson.confidence) || rawJson.confidence < 0 || rawJson.confidence > 1) schemaIssues.push('invalid_confidence');
     if (!Array.isArray(rawJson.interest_signals) || !rawJson.interest_signals.every((signal) => typeof signal === 'string')) schemaIssues.push('invalid_interest_signals');
-    if (rawJson.objection_draft !== null && typeof rawJson.objection_draft !== 'string') schemaIssues.push('invalid_objection_draft');
+    // Objection handling is no longer part of the classifier response contract.
+    // Older fixtures may still contain these fields; validate them only if present.
+    if (Object.hasOwn(rawJson, 'objection_handleable') && typeof rawJson.objection_handleable !== 'boolean') schemaIssues.push('invalid_objection_handleable');
+    if (Object.hasOwn(rawJson, 'objection_draft') && rawJson.objection_draft !== null && typeof rawJson.objection_draft !== 'string') schemaIssues.push('invalid_objection_draft');
   }
   return { rawJson, rawJsonFormat, rawFlagsValid, schemaIssues,
     strictJson: rawJsonFormat === 'strict' && object, strictSchema: schemaIssues.length === 0,
@@ -504,7 +507,9 @@ async function requestOnce(pass, payload, model, args, prices, ledger, transport
     if (errorPhase === 'response_envelope') record.schema_issues = ['invalid_response_envelope'];
     record.accounted_usd = Math.max(record.accounted_usd ?? 0, reservation.usd);
     record.cost_basis = 'error_reserved_maximum_billing_unknown';
-    if ([401, 402, 403, 429].includes(record.http_status)) ledger.stopped = `upstream_${record.http_status}`;
+    // Requesty reports an exhausted key/user/group spend limit as HTTP 412,
+    // even while the organization's prepaid balance is positive.
+    if ([401, 402, 403, 412, 429].includes(record.http_status)) ledger.stopped = `upstream_${record.http_status}`;
   } finally {
     clearTimeout(timer);
   }

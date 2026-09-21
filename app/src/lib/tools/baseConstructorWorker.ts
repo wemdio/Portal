@@ -196,6 +196,18 @@ export function sanitizeRowsForJsonb(rows: string[][]): string[][] {
 
 const PERSIST_MAX_ATTEMPTS = 3;
 const PERSIST_BASE_DELAY_MS = 1000;
+const PERSIST_RECOVERY_MAX_ATTEMPTS = 10;
+const PERSIST_RECOVERY_BUDGET_MS = 120_000;
+const PERSIST_MAX_DELAY_MS = 20_000;
+
+function isTransientPersistError(error: { message: string; code?: string }, status?: number): boolean {
+  if (status === 429 || status === 502 || status === 503 || status === 504) return true;
+  if (/^(08\w{3}|57P0[123]|53[23]00|PGRST00[0-3])$/.test(error.code ?? '')) return true;
+  // Kong may strip SQLSTATE/PostgREST codes when its upstream disappears.
+  // Do not classify invalid JSON, permission/schema or constraint errors as
+  // recovery: more attempts cannot repair those payloads.
+  return /invalid response was received from the upstream server|bad gateway|service unavailable|gateway timeout|database system is (?:in recovery mode|starting up|shutting down)|schema cache.*(?:retrying|connection)|(?:ECONNRESET|ECONNREFUSED|EAI_AGAIN|ETIMEDOUT|EPIPE|UND_ERR_\w+)|fetch failed|connection (?:reset|terminated|closed)/i.test(error.message);
+}
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -208,15 +220,14 @@ function sleepMs(ms: number): Promise<void> {
  * 502/503/504 от gateway'я, connection-reset, таймаут пула. Без retry'я
  * каждая такая ошибка — failed job и реран всех 8к строк юзером.
  *
- * НЕ серебряная пуля для PGRST102 «Empty or invalid json»: эта ошибка
- * детерминирована для битого payload'a — sanitize выше её и должен ловить.
- * Но retry всё равно крутим унифицированно: иногда PGRST102 возвращается
- * из-за гонки с background VACUUM на jsonb-колонке и второй attempt
- * проходит. ~7s максимум на retry-цикл — мизер на фоне 8 часов работы.
+ * Обычные ошибки сохраняют прежний предел в 3 попытки. При недоступности
+ * БД/gateway даём до 2 минут (включая HTTP), чтобы пережить recovery после
+ * разрыва соединений. Backoff + jitter не дают всем репликам одновременно
+ * переотправлять большие JSON. Один и тот же PATCH идемпотентен, а run_token
+ * и status проверяются БД при каждой попытке, в том числе после reclaim.
  *
  * Returns: `error: null` при успехе, иначе последняя ошибка после всех попыток.
- * Не throws — caller сам решает, fatal это или нет (persistData логирует
- * и продолжает, финальный update — throws чтобы пометить job как failed).
+ * Не throws — caller останавливает pipeline, если данные так и не сохранены.
  */
 /** @internal — exported только для тестов; не использовать снаружи модуля. */
 export async function updateJobWithRetry(
@@ -227,7 +238,14 @@ export async function updateJobWithRetry(
 ): Promise<{ error: { message: string } | null; ms: number; attempts: number }> {
   const t0 = Date.now();
   let lastError: { message: string } | null = null;
-  for (let attempt = 1; attempt <= PERSIST_MAX_ATTEMPTS; attempt += 1) {
+  let attempts = 0;
+  for (let attempt = 1; attempt <= PERSIST_RECOVERY_MAX_ATTEMPTS; attempt += 1) {
+    const remainingMs = PERSIST_RECOVERY_BUDGET_MS - (Date.now() - t0);
+    if (remainingMs <= 0) break;
+    attempts = attempt;
+    let transient = false;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), remainingMs);
     try {
       let q = admin.from('base_constructor_jobs').update(patch).eq('id', jobId);
       // Optional status guard (e.g. neqStatus:'cancelled' on the final update):
@@ -238,23 +256,29 @@ export async function updateJobWithRetry(
       // finish an HTTP call or JavaScript turn. Its token no longer matches,
       // so its checkpoint/final write must become a no-op.
       if (opts?.runToken) q = q.eq('run_token', opts.runToken);
-      const { error } = await q;
+      const { error, status } = await q.abortSignal(controller.signal);
       if (!error) return { error: null, ms: Date.now() - t0, attempts: attempt };
       lastError = { message: error.message };
+      transient = isTransientPersistError(error, status);
     } catch (err) {
       // supabase-js обычно возвращает { error }, но network-fail может throw
       // (fetch abort, DNS, TLS). Ловим обоих, чтоб ничего не утекло наружу.
       lastError = { message: err instanceof Error ? err.message : String(err) };
+      transient = isTransientPersistError(lastError);
+    } finally {
+      clearTimeout(timer);
     }
-    if (attempt < PERSIST_MAX_ATTEMPTS) {
-      const delay = PERSIST_BASE_DELAY_MS * 2 ** (attempt - 1);
-      console.warn(
-        `[base-constructor][${jobId}] update(${label}) attempt ${attempt}/${PERSIST_MAX_ATTEMPTS} failed: ${lastError?.message}. Retrying in ${delay}ms.`,
-      );
-      await sleepMs(delay);
-    }
+    const maxAttempts = transient ? PERSIST_RECOVERY_MAX_ATTEMPTS : PERSIST_MAX_ATTEMPTS;
+    if (attempt >= maxAttempts) break;
+    const backoff = Math.min(PERSIST_MAX_DELAY_MS, PERSIST_BASE_DELAY_MS * 2 ** (attempt - 1));
+    const delay = Math.round(backoff * (transient ? 1 + Math.random() * 0.2 : 1));
+    if (Date.now() - t0 + delay >= PERSIST_RECOVERY_BUDGET_MS) break;
+    console.warn(
+      `[base-constructor][${jobId}] update(${label}) attempt ${attempt}/${maxAttempts} failed: ${lastError?.message}. Retrying in ${delay}ms.`,
+    );
+    await sleepMs(delay);
   }
-  return { error: lastError, ms: Date.now() - t0, attempts: PERSIST_MAX_ATTEMPTS };
+  return { error: lastError ?? { message: 'Database persist deadline exceeded' }, ms: Date.now() - t0, attempts };
 }
 
 const CANONICAL_NAMES: Record<string, string> = {
@@ -743,8 +767,8 @@ export async function runBaseConstructorJob(jobId: string, runToken?: string): P
      * потеря всплывёт в `[base-constructor]` логах, и можно будет искать
      * по jobId в `docker logs portal`.
      *
-     * Retry: updateJobWithRetry — 3 попытки с 1s/2s/4s backoff, защищает от
-     * транзитных 5xx/network-блипов в PostgREST gateway. После исчерпания
+     * Retry: updateJobWithRetry — при недоступности БД до 2 минут с backoff;
+     * остальные ошибки — не больше прежних 3 попыток. После исчерпания
      * попыток останавливаем pipeline: публиковать progress=100 при несохранённом
      * checkpoint/result опаснее, чем явно завершить job с ошибкой.
      */

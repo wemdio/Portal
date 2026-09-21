@@ -1,6 +1,9 @@
 import { isVeProviderBillingError } from './collectionErrors';
 import { buildVeRelevanceReviewBatch, readVeRelevanceReserve, readVeRelevanceSourceRows } from './relevanceReserve';
 import { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
+import { isVeRelevanceTriageEnabled } from './relevanceTriageConfig';
+import { normalizeVeMaxEmailsPerCompany } from './companyContactCap';
+import { VE_COMPANY_CAP_FIELD } from './relevanceReserve';
 
 /** Explicit continuation only: a terminal partial preview is never daily supply. */
 export function canResumePartialPreview(base: Record<string, unknown>): boolean {
@@ -16,10 +19,20 @@ export function canResumePartialPreview(base: Record<string, unknown>): boolean 
     || checkpoint?.completed_round !== target.round
     || target.ready_rows >= target.ready_target) return false;
   const reserve = readVeRelevanceReserve(info.relevance_reserve);
+  // The specialist raised the "addresses per company" limit. The addresses the
+  // previous one held back are validated and waiting in the reserve, but only a
+  // normal round can return them: their company names still need preparing.
+  const limit = normalizeVeMaxEmailsPerCompany((base as { max_emails_per_company?: unknown }).max_emails_per_company);
+  const appliedLimit = normalizeVeMaxEmailsPerCompany((base as { contact_cap_applied?: unknown }).contact_cap_applied);
+  if (appliedLimit !== null && (limit === null || limit > appliedLimit)
+    && reserve.some((row) => row[VE_COMPANY_CAP_FIELD])) return true;
   // Reuse current eligibility rules: completed uncertain checks do not become
   // an unlimited paid loop merely because fewer than 500 contacts were found.
+  // With the calibrated triage enabled, saved uncertainty it has not read yet is
+  // resumable work as well: one cheap pass per company, no sources or search.
   if (reserve.some(needsVeSavedEmailReview) || buildVeRelevanceReviewBatch({
     reserve, ready: [], source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
+    triage: isVeRelevanceTriageEnabled(typeof base.project_id === 'string' ? base.project_id : null),
   }).rows.length > 0) return true;
   return Number(target.candidates_processed) < Number(target.max_candidates)
     && Number(target.round) < Number(target.max_rounds)
@@ -43,7 +56,13 @@ export function previewRecoveryKind(base: Record<string, unknown>): 'validation'
   // Accounting failures stop paid work immediately, possibly between rounds.
   // An explicit continuation must reuse the durable children/cursors instead
   // of purchasing a new base. Reject incoherent checkpoints and cancellations.
-  if (base.error === 'Provider usage journal could not be saved.'
+  // Exhausted 429 waits fail the job with the round still `collecting`; the
+  // saved checkpoint is coherent and must be continued, not replaced by a new
+  // paid base (18.09.2026: five bases). Same rule as the journal outage.
+  // The inactivity watchdog (19.09.2026) fails the same way after its retries:
+  // the round is still `collecting` and every checkpoint is intact.
+  if ((base.error === 'Provider usage journal could not be saved.'
+    || /^(?:Requesty 429|VE2 [a-z_]+ inactivity timeout)\b/.test(String(base.error ?? '')))
     && progress.status === 'collecting'
     && typeof progress.round === 'number' && Number.isSafeInteger(progress.round) && progress.round > 0
     && (checkpoint?.completed_round ?? 0) === progress.round

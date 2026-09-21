@@ -2,6 +2,12 @@ import { isVeAcceptedEmailStatus } from './emailPolicy';
 import { normalizeVeCompanyInn, veCompanyIdentityKey } from './collectionIdentity';
 import { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
 import { VE_RELEVANCE_WEBSITE_VERSION } from './relevanceDecision';
+import { VE_RELEVANCE_TRIAGE_VERSION } from './relevanceTriageConfig';
+
+/** Validated address of a relevant company kept out of the ready base only by the
+ * specialist's "addresses per company" limit (companyContactCap.ts). Recomputed
+ * by every partition; never a reason for paid relevance or e-mail work. */
+export const VE_COMPANY_CAP_FIELD = '_ve_company_cap';
 
 /** Durable candidates are separate from the approved/launchable base projection. */
 export interface VeRelevanceReserve {
@@ -23,6 +29,8 @@ export interface VeRelevanceReserveSummary {
   /** Additional overlapping count, not another term in the total. */
   email_retryable: number;
   other: number;
+  /** Ready addresses over the per-company limit; present only when there are any. */
+  over_company_cap?: number;
 }
 
 const cell = (value: unknown) => typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
@@ -104,6 +112,7 @@ export function summarizeVeRelevanceReserve(rows: Array<Record<string, unknown>>
     // строки попадали в error, и интерфейс объявлял их неудачей автопроверки.
     else if (row._relevance_unchecked === true) summary.unchecked += 1;
     else if (!isVeAcceptedEmailStatus(row._email_status)) summary.email_unready += 1;
+    else if (row[VE_COMPANY_CAP_FIELD]) summary.over_company_cap = (summary.over_company_cap ?? 0) + 1;
     else summary.other += 1;
   }
   return summary;
@@ -125,8 +134,24 @@ function canAutomaticallyReview(row: Record<string, unknown>, evidenceAvailable:
   // Technical errors use the caller's bounded recovery policy, not a guess.
   if (!decision || decision.status === 'error') return true;
   if (decision.status === 'needs_review' && decision.search_deferred === true) return evidenceAvailable;
-  return decision.status === 'needs_review' && evidenceAvailable && ((decision.review_attempts ?? 0) === 0
-    || decision.website_review_version !== VE_RELEVANCE_WEBSITE_VERSION);
+  // The gate stamps website_review_version once its bounded follow-up under the
+  // current policy is complete, also when no paid attempt was counted (site
+  // unavailable, identity unverified). Treating a zero attempt count as "never
+  // reviewed" re-selected such companies forever: the gate reused the cached
+  // verdict, nothing changed, and the base requeued every 30 seconds (19.09.2026).
+  return decision.status === 'needs_review' && evidenceAvailable
+    && decision.website_review_version !== VE_RELEVANCE_WEBSITE_VERSION;
+}
+
+/** Saved uncertainty the calibrated triage has not read yet. It needs no site,
+ * INN or paid search, so neither missing evidence sources nor a deferred search
+ * excludes the company. The gate stamps every company it has seen, including
+ * those it cannot decide, so one pass per company is all this ever selects. */
+function awaitsVeTriage(row: Record<string, unknown>): boolean {
+  if (!isVeAcceptedEmailStatus(row._email_status)) return false;
+  const decision = row._ve_relevance && typeof row._ve_relevance === 'object'
+    ? row._ve_relevance as { status?: unknown; triage_version?: unknown } : null;
+  return decision?.status === 'needs_review' && decision.triage_version !== VE_RELEVANCE_TRIAGE_VERSION;
 }
 
 /** Spend the next bounded pass on usable emails with a site or searchable INN. */
@@ -149,6 +174,8 @@ export function buildVeRelevanceReviewBatch(input: {
   source: Array<Record<string, unknown>>;
   automatic: boolean;
   allowPaidSearch?: boolean;
+  /** isVeRelevanceTriageEnabled(project): also select saved uncertainty not yet triaged. */
+  triage?: boolean;
 }): VeRelevanceReviewBatch {
   const saved = mergeVeRelevanceRows(input.reserve, input.ready);
   const withEvidence = new Set([...saved, ...input.source]
@@ -156,9 +183,11 @@ export function buildVeRelevanceReviewBatch(input: {
     .map(veRelevanceCompanyKey));
   const selected = new Set(input.reserve.filter((row) => {
     if (!needsVeRelevanceReview(row)) return false;
-    if (input.allowPaidSearch === false && (row._ve_relevance as { search_deferred?: unknown } | undefined)?.search_deferred === true) return false;
+    const untriaged = input.triage === true && awaitsVeTriage(row);
+    if (!untriaged && input.allowPaidSearch === false
+      && (row._ve_relevance as { search_deferred?: unknown } | undefined)?.search_deferred === true) return false;
     if (!input.automatic) return true;
-    return canAutomaticallyReview(row, withEvidence.has(veRelevanceCompanyKey(row)));
+    return untriaged || canAutomaticallyReview(row, withEvidence.has(veRelevanceCompanyKey(row)));
   }).map(veRelevanceCompanyKey));
   return {
     rows: saved.filter((row) => selected.has(veRelevanceCompanyKey(row))),

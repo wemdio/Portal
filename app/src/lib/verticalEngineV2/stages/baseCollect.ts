@@ -89,7 +89,7 @@ import { VeLlmRateLimitError, veRateLimitDelay } from '../llmRateLimit';
  * вариации поисковых запросов — future work.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { isVeProviderBillingError, isVeProviderConfigurationError } from '../collectionErrors';
 import { validVeAdaptiveCollection, newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys,
@@ -105,7 +105,7 @@ import { buildRolesRegex } from '@/lib/parsers/atsFilters';
 import { domainToSiteUrl, resolveCompanyDomainViaPdl } from '@/lib/parsers/companyDomainResolver';
 import { readVeYandexCatalogPage, resolveVeYandexCatalogFilters, type VeYandexCatalogCheckpoint } from '../yandexCatalog';
 import { extractEmail, extractEmails } from '@/lib/tools/dfybUtils';
-import { applyVeSourceContacts, normalizeVeSourceContacts, hasPendingVeSourceContacts, pendingVeSourceContacts, recoverVeSourceContacts, evaluateVeSourceDiscoveryBudget, VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT, type VeSourceContactCheckpoint, type VeSourceDiscoveryBudget } from '../sourceContacts';
+import { applyVeSourceContacts, normalizeVeSourceContacts, hasPendingVeSourceContacts, pendingVeSourceContacts, recoverVeSourceContacts, countVeSourceDiscoveryContacts, evaluateVeSourceDiscoveryBudget, veSourceDiscoveryLimit, VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT, type VeSourceContactCheckpoint, type VeSourceDiscoveryBudget } from '../sourceContacts';
 import {
   mergeVeSourceFactText, normalizeVeCompanyInn, normalizeVeCompanyName, normalizeVeWebsiteHost,
   veCompanyWebsiteKey, veAcquisitionReceipt,
@@ -114,6 +114,9 @@ import { getVeDirectorySegmentStats } from '../dossierData';
 import { callLLMWithSchema, getVeModel } from '../llm';
 import { projectMarket, type VeMarket } from '../market';
 import { findIrrelevantRows, type VeRelevanceDecision } from '../relevanceGate';
+import { isVePaidWebsiteSearchEnabled } from '../paidSearchPolicy';
+import { isVeRelevanceTriageEnabled } from '../relevanceTriageConfig';
+import { capVeContactsPerCompany, normalizeVeMaxEmailsPerCompany, stripVeCompanyCapMarker, veContactLimitKey, VE_COMPANY_CAP_FIELD } from '../companyContactCap';
 import { relevanceHash, VeRelevanceCheckpointError, VePreviewCheckpointConflict, type VeRelevanceCheckpoint } from '../relevanceCheckpoint';
 import {
   buildVeRelevanceReviewBatch, mergeVeRelevanceRows, needsVeRelevanceReview, readVeRelevanceReserve, readVeRelevanceSourceRows, summarizeVeRelevanceReserve,
@@ -268,7 +271,15 @@ export function mapDirectoryRow(row: Record<string, unknown>): VeUnifiedRow {
     // phones в реестре — text с телефонами через запятую (массив тоже схлопнется в ту же строку).
     phone: cell(row.phones).split(',')[0]?.trim() ?? '',
     address: cell(row.address),
-    category: cell(row.okved_code),
+    // Быстрая проверка и первичная классификация читают category как текст о
+    // деятельности. Голый код «28.30» не говорит им ничего и даже не проходит
+    // проверку «в тексте есть слова»: компании из реестра теряли и приоритет
+    // в партии, и саму возможность получить вердикт — отсюда доля «без
+    // решения» под 70%. Название ОКВЭД и отраслевой тип реестр отдаёт для
+    // 100% строк, мы их просто выбрасывали. Отдельными строками, потому что
+    // проверка цитат разбирает category построчно (см. relevanceGate).
+    category: [cell(row.okved_name), cell(row.activity_type), cell(row.okved_code)]
+      .map((part) => part.trim()).filter(Boolean).join('\n'),
     employees: cell(row.employees_count),
     revenue: cell(row.revenue),
     inn: cell(row.inn),
@@ -591,6 +602,14 @@ export interface VeCollectTaskState {
   error?: string;
   /** Реестр: строк пропущено на выборке как уже собранные в других базах проекта. */
   excluded_during_fetch?: number;
+  /**
+   * Реестр: закладка выдачи — сколько строк уже просканировано, отдельно для
+   * каждого набора фильтров (фаза existing/paid × лейн «есть почта»/«есть
+   * сайт»). Без неё каждый добор начинал с нуля, перелистывал уже собранное и
+   * упирался в потолок MAX_DIRECTORY_PAGES, после чего сегмент становился
+   * недостижимым: повторный запуск снова начинал с первой страницы.
+   */
+  directory_cursors?: Record<string, number>;
   /** Реестр: выдача под фильтры кончилась раньше limit — сегмент собран целиком. */
   exhausted?: boolean;
   /**
@@ -665,13 +684,15 @@ export interface VeSliceProbe {
 
 export interface VeCollectInfo {
   adaptive_collection?: VeAdaptiveCollection;
+  /** Display/audit snapshot of the last applied "addresses per company" limit; the source of truth is ve_bases.max_emails_per_company. */
+  company_contact_cap?: { limit: number; over_cap_rows: number; companies: number; applied_at: string };
   /** Existing contacts/sites first; a cache miss may buy search only in paid.
    * Deferred source rows are worker state, never ready recipients. */
   search_policy?: { version: 1; phase: 'existing' | 'paid'; deferred_rows: VeUnifiedRow[]; construct_rows?: VeUnifiedRow[] };
   /** Durable official-site discovery; never a substitute for email/relevance validation. */
   source_contact_recovery?: VeSourceContactCheckpoint;
   source_contact_budget?: VeSourceDiscoveryBudget;
-  source_contact_discovery?: { checked: number; remaining: number };
+  source_contact_discovery?: { checked: number; remaining: number; contacts?: number };
   /** Opt-in for NEW previews only. Inputs/IDs are reserved before child insertion. */
   preview_pipeline?: {
     version: 1;
@@ -706,6 +727,9 @@ export interface VeCollectInfo {
   relevance_summary?: VeRelevanceReserveSummary;
   /** Finish bounded evidence passes on saved candidates before purchasing a new round. */
   relevance_review_requested?: boolean;
+  /** Selection fingerprint of the last automatic saved-review pass; an identical
+   * selection after a pass proves the loop cannot progress. */
+  relevance_review_progress?: { signature: string; passes: number };
   /** Worker-only checkpoint for validation of saved, unfinished email rows. */
   saved_email_recovery?: import('../savedEmailRecovery').VeSavedEmailRecoveryState;
   company_name_checkpoint?: VeCompanyNameCheckpoint;
@@ -1264,42 +1288,50 @@ async function insertChildJob(
  * (иначе финальный разбор нулевой сборки врал «сегмент исчерпан» на простом
  * срабатывании предохранителя).
  */
-async function fetchDirectoryRows(
+export async function fetchDirectoryRows(
   ctx: VeStageContext,
   filters: CompaniesSearchFilters,
   limit: number,
   excludedKeys: VeBaseExclusionKeys,
+  startOffset = 0,
 ): Promise<{
   rows: Record<string, unknown>[];
   excludedDuringFetch: number;
   exhausted: boolean;
   hitCeiling: boolean;
+  /** Сколько строк выдачи просканировано суммарно — закладка следующего захода. */
+  nextOffset: number;
   error?: string;
 }> {
   const rows: Record<string, unknown>[] = [];
   let excludedDuringFetch = 0;
-  let offset = 0;
+  let offset = Number.isSafeInteger(startOffset) && startOffset > 0 ? startOffset : 0;
   let page = 0;
   for (; page < MAX_DIRECTORY_PAGES && rows.length < limit; page += 1) {
+    // A deep scan logs nothing until it ends: each page is progress for the
+    // inactivity watchdog, and a cancel must not wait for the last page.
+    ctx.signal?.throwIfAborted();
     const res = await searchRows(filters, DIRECTORY_PAGE_SIZE, offset);
+    ctx.onActivity?.();
     if (res.error) {
-      return { rows: [], excludedDuringFetch, exhausted: false, hitCeiling: false, error: res.error };
+      return { rows: [], excludedDuringFetch, exhausted: false, hitCeiling: false, nextOffset: offset, error: res.error };
     }
-    offset += res.rows.length;
+    // Смещение двигаем по ПРОСМОТРЕННЫМ строкам, а не по всей странице:
+    // закладка не имеет права перешагнуть строки, которые мы не разобрали —
+    // иначе следующий заход их больше никогда не увидит.
+    let scanned = 0;
     for (const r of res.rows) {
+      if (rows.length >= limit) break;
+      scanned += 1;
       // Дубль другой базы: по email, имени (с ИНН-уточнением) или точно по ИНН.
       const pruned = pruneBaseRowAgainstExclusion(excludedKeys, mapDirectoryRow(r));
       if (!pruned) {
         excludedDuringFetch += 1;
         continue;
       }
-      // Новых строк на странице может быть больше остатка до limit — лишние
-      // не берём (они не попадают ни в базу, ни в исключения и будут
-      // подобраны следующей сборкой-продолжением).
-      if (rows.length < limit) {
-        rows.push(pruned.email === cell(r.email) ? r : { ...r, email: pruned.email });
-      }
+      rows.push(pruned.email === cell(r.email) ? r : { ...r, email: pruned.email });
     }
+    offset += scanned;
     if (res.rows.length < DIRECTORY_PAGE_SIZE) break;
   }
   // Потолок: цикл вышел по числу страниц, а limit так и не набран — все
@@ -1313,7 +1345,36 @@ async function fetchDirectoryRows(
       `[base_collect] реестр: ${excludedDuringFetch} строк пропущено на выборке — компании уже есть в других базах проекта`,
     );
   }
-  return { rows, excludedDuringFetch, exhausted, hitCeiling };
+  return { rows, excludedDuringFetch, exhausted, hitCeiling, nextOffset: offset };
+}
+
+/**
+ * Закладка выдачи реестра хранится по ключу фильтров: у каждого набора своя
+ * нумерация строк, и продолжать чужую нельзя. RPC отдаёт строго `order by
+ * c.id`, новые компании получают больший id и попадают в конец выдачи —
+ * поэтому смещение остаётся верным между заходами.
+ */
+const DIRECTORY_CURSOR_LIMIT = 8;
+function directoryCursorKey(filters: CompaniesSearchFilters): string {
+  const stable = Object.entries(filters).filter(([, value]) => value !== undefined).sort(([a], [b]) => a.localeCompare(b));
+  return createHash('sha256').update(JSON.stringify(stable)).digest('hex').slice(0, 16);
+}
+function readDirectoryCursor(state: VeCollectTaskState, filters: CompaniesSearchFilters): number {
+  const saved = state.directory_cursors?.[directoryCursorKey(filters)];
+  return typeof saved === 'number' && Number.isSafeInteger(saved) && saved > 0 ? saved : 0;
+}
+function writeDirectoryCursor(state: VeCollectTaskState, filters: CompaniesSearchFilters, offset: number): void {
+  if (!Number.isSafeInteger(offset) || offset <= 0) return;
+  const key = directoryCursorKey(filters);
+  const cursors = { ...(state.directory_cursors ?? {}) };
+  // Ключей у задачи единицы: фаза × лейн. Их перебор — признак смены плана, и
+  // продолжать по старым закладкам всё равно нельзя.
+  if (!(key in cursors) && Object.keys(cursors).length >= DIRECTORY_CURSOR_LIMIT) {
+    state.directory_cursors = { [key]: offset };
+    return;
+  }
+  cursors[key] = offset;
+  state.directory_cursors = cursors;
 }
 
 /* ─────────────────────── ENG-источники: прямое чтение справочников ─────────────────────── */
@@ -1388,6 +1449,7 @@ async function fetchPdlRows(
   const rows: Record<string, unknown>[] = [];
   let lastId = '';
   for (;;) {
+    ctx.signal?.throwIfAborted(); ctx.onActivity?.();
     const params = {
       p_industries: filters?.industries?.length ? lowerList(filters.industries) : null,
       p_sizes: filters?.sizes?.length ? lowerList(filters.sizes) : null,
@@ -1437,6 +1499,7 @@ async function fetchFundedRows(
   const rows: Record<string, unknown>[] = [];
   let lastId = '';
   for (;;) {
+    ctx.signal?.throwIfAborted(); ctx.onActivity?.();
     let query = ctx.supabase
       .from('funded_companies')
       .select(
@@ -1590,6 +1653,7 @@ async function fetchEngHiringRows(
   const matched: Record<string, unknown>[] = [];
   let offset = 0;
   for (let page = 0; page < ENG_HIRING_MAX_PAGES && matched.length < limit; page += 1) {
+    ctx.signal?.throwIfAborted(); ctx.onActivity?.();
     let q = ctx.supabase
       .from('eng_hiring_cache')
       .select('company_name, company_site_url, vacancy_title, location, country, country_code, source, published_at');
@@ -1686,20 +1750,32 @@ async function dispatchTask(
   if (task.source === 'companies_directory') {
     const filters = mapDirectoryFilters(task.directory_filters);
     const excluded = await getExcludedKeys();
-    const first = await fetchDirectoryRows(ctx, existingContactsOnly ? { ...filters, hasWebsite: true } : filters, limit, excluded);
-    // Email-only companies can pass from source activity evidence. Include that
-    // stock too, without assuming that an email domain proves a company site.
-    const second = existingContactsOnly && !first.error && first.exhausted && first.rows.length < limit
-      ? await fetchDirectoryRows(ctx, { ...filters, hasEmail: true }, limit - first.rows.length,
+    // Компания с готовым адресом — это контакт, за который не нужно платить ни
+    // обходом сайта, ни очередью SMTP-проверки. Такие берём ПЕРВЫМИ, и только
+    // потом добираем тех, у кого есть лишь сайт. Раньше порядок был обратный,
+    // а лейн с почтой запускался лишь при полном исчерпании первого — то есть
+    // практически никогда, потому что лейн «с сайтом» упирался в потолок
+    // сканирования раньше, чем исчерпывался.
+    const firstFilters = existingContactsOnly ? { ...filters, hasEmail: true } : filters;
+    const first = await fetchDirectoryRows(ctx, firstFilters, limit, excluded, readDirectoryCursor(state, firstFilters));
+    // Второй лейн запускаем и после потолка сканирования, а не только после
+    // исчерпания: иначе недобор первого лейна навсегда оставляет партию пустой.
+    const secondFilters = { ...filters, hasWebsite: true };
+    const second = existingContactsOnly && !first.error && (first.exhausted || first.hitCeiling) && first.rows.length < limit
+      ? await fetchDirectoryRows(ctx, secondFilters, limit - first.rows.length,
         addRowsToExclusionKeys({ inns: new Set(excluded.inns), emails: new Set(excluded.emails),
           receipts: new Set(excluded.receipts), websiteInns: new Map([...excluded.websiteInns].map(([key, values]) => [key, new Set(values)])) },
-        first.rows.map(mapDirectoryRow))) : null;
+        first.rows.map(mapDirectoryRow)), readDirectoryCursor(state, secondFilters)) : null;
     const rows = [...first.rows, ...(second?.rows ?? [])];
     const excludedDuringFetch = first.excludedDuringFetch + (second?.excludedDuringFetch ?? 0);
     const exhausted = first.exhausted && (!existingContactsOnly || second?.exhausted === true);
     const hitCeiling = first.hitCeiling || second?.hitCeiling === true;
     const error = first.error ?? second?.error;
     if (error) throw new Error(`companies_directory: ${error}`);
+    // Закладки сохраняем только после успеха обоих лейнов: частично
+    // просканированная выдача не должна считаться пройденной.
+    writeDirectoryCursor(state, firstFilters, first.nextOffset);
+    if (second) writeDirectoryCursor(state, secondFilters, second.nextOffset);
     if (existingContactsOnly) state.existing_contacts_only = true;
     else delete state.existing_contacts_only;
     state.harvest = rows.map(mapDirectoryRow);
@@ -2318,9 +2394,23 @@ async function dispatchConstructJob(input: {
     step_config: {
       ...(reservedId ? { queue_class: 'interactive_preview' } : {}),
       find_emails_target: 'separate',
+      // Краул сайта — главный расход времени на компанию (см. комментарий у
+      // stopAtFirstUsableEmail в processingSteps.ts). Раньше здесь стояло
+      // «все адреса с 12 страниц»: каждый найденный адрес потом проходил
+      // SMTP-проверку, а лимит адресов на компанию выбрасывал лишние уже
+      // после неё — у одной компании доходило до 167 проверенных адресов.
+      // Берём небольшой запас сверх лимита: его хватает, чтобы отбор
+      // предпочёл подтверждённый адрес catch-all, и не больше.
       find_emails: {
-        stop_at_first: false, max_per_site: null, max_pages: 12, site_timeout_ms: 60_000, merge_mode: 'prefer_found_validated',
-        ...(reservedId ? { reuse_website_description: true } : {}),
+        stop_at_first: false, max_per_site: 6, max_pages: 4, site_timeout_ms: 30_000, merge_mode: 'prefer_found_validated',
+        // Описание берём из главной страницы, которую find_emails и так уже
+        // скачал. Без этого enrich_descriptions идёт на тот же сайт второй
+        // раз — и втрое меньшей параллельностью, чем поиск почт. Замер: у 75%
+        // строк с сайтом описание набирается прямо с главной, то есть три из
+        // четырёх повторных закачек лишние. Флаг включаем только когда шаг
+        // enrich_descriptions реально стоит в списке: у баз свыше 5000 строк
+        // его нет, и колонка описания там появляться не должна.
+        ...(reservedId || steps.includes('enrich_descriptions') ? { reuse_website_description: true } : {}),
       },
     },
     data: buildConstructGrid(rows, market),
@@ -2389,21 +2479,39 @@ function beginAdaptiveBatch(base: VeAutoBase, info: VeCollectInfo, id: string, r
     started_at: policy.last_completed_at ?? policy.started_at };
 }
 
+/** Пороги размера компании ставит только планировщик-LLM: в интерфейсе движка
+ *  их задать нельзя. Поэтому ограничением специалиста они не являются и не
+ *  должны ни блокировать переход на другой источник, ни переживать смену
+ *  запроса. Замер по нефтехимии: «выручка от 100 млн + штат от 50» оставил 199
+ *  компаний из 2 863 по тому же ОКВЭД, задача встала с пометкой «реестр
+ *  исчерпан», а 27 тысяч организаций той же отрасли в Яндекс.Картах остались
+ *  недоступны — именно эти пороги считались ограничением, запрещающим карты. */
+const SIZE_FILTER_KEYS = ['revenueFrom', 'revenueTo', 'employeesFrom', 'employeesTo'] as const;
+
 /** Keep user/plan restrictions when trying a different query. Cross-source
  * fallback is allowed only when the original source has no numeric/geo scope
  * which the new source cannot enforce. Final hypothesis checks stay unchanged. */
-function safeAlternativeTask(candidate: VeCollectTask, original: VeCollectTask): VeCollectTask | null {
+export function safeAlternativeTask(candidate: VeCollectTask, original: VeCollectTask): VeCollectTask | null {
   if (!['companies_directory', 'yandex_maps', 'pdl', 'funded', 'eng_hiring'].includes(candidate.source)) return null;
   if (candidate.source !== original.source) {
     const restricted = original.directory_filters && Object.entries(original.directory_filters)
-      .some(([key, value]) => !['okvedCodes', 'hasEmail'].includes(key) && value !== undefined)
+      // includeIp тоже ставит планировщик, а не специалист: отсутствие ключа и
+      // includeIp:false — один и тот же срез реестра (см. нормализацию в
+      // mapDirectoryFilters и veSourceStrategyKey). Он ничего не сужает, зато
+      // стоял у 326 задач из 331 и в одиночку запрещал уход на карты.
+      .some(([key, value]) => !['okvedCodes', 'hasEmail', 'includeIp', ...SIZE_FILTER_KEYS].includes(key) && value !== undefined)
       || original.maps_query?.geo || original.pdl_filters?.countries?.length || original.pdl_filters?.sizes?.length
       || original.funded_filters || original.eng_hiring_query || original.hh_query;
     if (restricted) return null;
   }
   if (candidate.source === 'companies_directory' && original.source === candidate.source) return {
     ...candidate, directory_filters: { ...candidate.directory_filters, ...original.directory_filters,
-      okvedCodes: candidate.directory_filters?.okvedCodes ?? original.directory_filters?.okvedCodes },
+      okvedCodes: candidate.directory_filters?.okvedCodes ?? original.directory_filters?.okvedCodes,
+      // Пороги размера берём у КАНДИДАТА, а не у исходной задачи: иначе
+      // самовыдуманный планировщиком порог невозможно ослабить ни одной
+      // альтернативой — перетирался бы обратно на каждой попытке.
+      ...Object.fromEntries(SIZE_FILTER_KEYS.map((key) => [key, candidate.directory_filters?.[key]])),
+    },
   };
   if (candidate.source === 'yandex_maps' && original.maps_query && candidate.maps_query) return {
     ...candidate, maps_query: { ...candidate.maps_query, geo: original.maps_query.geo },
@@ -2484,6 +2592,10 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
   }
 }
 
+/** Ниже этой доли цели добор считается недостижимым по текущему срезу. */
+const VE_NARROW_MARKET_SHARE = 0.6;
+/** Меньше этого числа проверенных компаний наблюдаемый выход ещё не показателен. */
+const VE_NARROW_MARKET_MIN_COMPANIES = 300;
 const PREVIEW_BATCH_SIZE = 200;
 const PREVIEW_IN_FLIGHT = 2;
 const PREVIEW_MAX_BATCHES = 100;
@@ -2509,6 +2621,10 @@ async function preparePreviewBatches(args: {
   // Stop acquisition immediately at the ready goal/error, but drain already
   // purchased batches through the same gates and retain their checked results.
   if (!pipeline.error && target.ready_rows < target.ready_target && !info.tasks?.some((task) => task.status === 'failed')) {
+    // Адаптивный сбор держит ровно одну партию в полёте намеренно: решение
+    // «источник плохой, переключаемся» принимается по итогу каждой партии, и
+    // вторая в полёте стартовала бы из среза, который первая только что
+    // признала бесполезным. Скорость добираем размером партии, а не их числом.
     while (pipeline.batches.length < Math.min(info.adaptive_collection ? 1 : PREVIEW_IN_FLIGHT, target.max_rounds - target.round + 1) && candidates.length > 0) {
       const batchSize = info.adaptive_collection ? veAdaptiveCandidateLimit(target, allocated)
         : target.candidates_processed === 0 && allocated === 0 ? VE_PREVIEW_FIRST_CANDIDATES : PREVIEW_BATCH_SIZE;
@@ -2833,9 +2949,14 @@ async function checkCollectedRelevance(args: {
         job.project_id, base.id, base.vertical_id, base.hypothesis_id ?? null,
       ]),
       reviewAttempt: job.payload?.review_relevance === true ? job.id : undefined,
-      allowPaidSearch: info.search_policy?.phase !== 'existing'
+      // Рубильник VE_PAID_WEBSITE_SEARCH=off отключает самую дорогую статью
+      // сбора, не теряя компаний: они получают штатный «поиск отложен» и
+      // вернутся к проверке, когда рубильник включат обратно.
+      allowPaidSearch: isVePaidWebsiteSearchEnabled()
+        && info.search_policy?.phase !== 'existing'
         && (!info.target_progress || info.target_progress.ready_rows < info.target_progress.ready_target),
       websiteLimit: info.target_progress ? Math.max(0, info.target_progress.ready_target - info.target_progress.ready_rows) : undefined,
+      triage: isVeRelevanceTriageEnabled(job.project_id),
       checkpoint: [job.result?.relevance_checkpoint, args.previousRelevanceCheckpoint, info.relevance_checkpoint],
       onCheckpoint: async (checkpoint, options) => {
         ctx.signal?.throwIfAborted();
@@ -2988,7 +3109,11 @@ async function resumeSavedPreviewValidation(
   const priorReady = (Array.isArray(base.data) ? base.data : []) as Array<VeUnifiedRow & { _email_status?: string }>;
   if (priorReady.some((row) => !isVeAcceptedEmailStatus(row._email_status))) throw new Error('Saved preview email verdicts are incomplete');
   const identity = (row: VeUnifiedRow) => JSON.stringify([row.company, row.email.toLowerCase()]);
-  const priorKeys = new Set(priorReady.map(identity));
+  // Addresses held back only by the per-company limit already carry a final
+  // verdict in the reserve: the constructor re-import must not send them through
+  // the relevance check again.
+  const overCapReserve = readVeRelevanceReserve(info.relevance_reserve).filter((row) => Boolean(row[VE_COMPANY_CAP_FIELD])) as VeUnifiedRow[];
+  const priorKeys = new Set([...priorReady, ...overCapReserve].map(identity));
   const combined = new Map<string, { row: VeUnifiedRow; status: string | null }>();
   const add = (row: VeUnifiedRow, status: string | null) => {
     const clean = { ...row } as VeUnifiedRow & { _low_relevance?: boolean; _relevance_unchecked?: boolean };
@@ -3062,6 +3187,7 @@ async function reviewSavedRelevance(
     ready: Array.isArray(base.data) ? base.data : [],
     source: readVeRelevanceSourceRows(info.relevance_reserve), automatic,
     allowPaidSearch: info.search_policy?.phase !== 'existing',
+    triage: isVeRelevanceTriageEnabled(job.project_id),
   });
   // A queued SMTP child must not hold already validated recipients behind
   // unrelated constructor jobs. Review those companies now; unknown email
@@ -3069,6 +3195,11 @@ async function reviewSavedRelevance(
   // before finalizing, including when this pass already reaches the target.
   if (emailRecoveryWaiting && (!rows.some((row) => isVeAcceptedEmailStatus(row._email_status))
     || (target.ready_rows ?? 0) >= target.ready_target)) {
+    // Опрос оставлен минутным намеренно. Каждый заход сюда перечитывает строку
+    // ve_bases целиком (select('*') на входе стадии), а это 12-80 МБ на базу с
+    // тяжёлым резервом и всё через main-rest. Учащение до 15 с дало бы вчетверо
+    // больше таких чтений ради ~5% ожидания при медиане ожидания 399 с — тот же
+    // паттерн, что выбивал main-rest. Ускорять надо не опрос, а вход в стадию.
     await requeueSelf(ctx, job, 60_000);
     return { result: { base_id: base.id, waiting: true, saved_email_review: true }, ...usage };
   }
@@ -3137,6 +3268,95 @@ async function cleanCollectedCompanyNames(
   return cleaned;
 }
 
+/**
+ * Apply a TIGHTENED "addresses per company" limit to an already finished preview.
+ *
+ * Deliberately not a collection round: it reads the saved ready rows, keeps at
+ * most N per company and moves the rest into the reserve. No sources, no
+ * constructor, no SMTP, no search, no relevance or name calls, and no base
+ * analysis — the composition of a base that only lost addresses of companies it
+ * already contains does not change. The base stays `analyzed` the whole time, so
+ * a failure here can never make a finished preview look like an interrupted
+ * collection. Raising or removing the limit is NOT done here: returning
+ * addresses would need a paid company-name check, so that stays behind the
+ * specialist's explicit «Продолжить подготовку».
+ */
+/** Начало заметки о лимите адресов в причине остановки. По нему же заметку
+ *  срезают при повторном применении лимита, поэтому текст должен совпадать. */
+const VE_CAP_REASON_MARK = 'Применён лимит';
+
+async function applyVeContactCapToFinishedBase(
+  ctx: VeStageContext, job: VeJob, base: VeAutoBase,
+): Promise<VeStageResult> {
+  const info: VeCollectInfo = base.collect_info && typeof base.collect_info === 'object' ? base.collect_info : {};
+  const target = info.target_progress;
+  const limit = normalizeVeMaxEmailsPerCompany((base as unknown as { max_emails_per_company?: unknown }).max_emails_per_company);
+  const applied = normalizeVeMaxEmailsPerCompany((base as unknown as { contact_cap_applied?: unknown }).contact_cap_applied);
+  const rows = (Array.isArray(base.data) ? base.data : []) as VeUnifiedRow[];
+  if (info.collection_mode !== 'preview' || !target || base.status !== 'analyzed') {
+    return { result: { base_id: base.id, skipped: 'not_a_finished_preview' } };
+  }
+  if (limit === null || (applied !== null && limit >= applied)) {
+    // Loosening is the specialist's explicit action; record what is applied now.
+    await ctx.supabase.from('ve_bases').update({ contact_cap_applied: applied }).eq('id', base.id).eq('status', 'analyzed');
+    return { result: { base_id: base.id, skipped: 'needs_manual_continue' } };
+  }
+  const capped = capVeContactsPerCompany(rows, { limit, incumbentKeys: new Set(rows.map(veRelevanceRowKey)) });
+  if (!capped.overCap.length) {
+    await ctx.supabase.from('ve_bases').update({ contact_cap_applied: limit }).eq('id', base.id).eq('status', 'analyzed');
+    return { result: { base_id: base.id, rows: rows.length, unchanged: true } };
+  }
+  const columns = base.columns ?? [...VE_AUTO_COLLECT_COLUMNS];
+  const kept = capped.kept.map(stripVeCompanyCapMarker) as VeUnifiedRow[];
+  const overCapKeys = new Set(capped.overCap.map(veRelevanceRowKey));
+  const reserveRows = mergeVeRelevanceRows(readVeRelevanceReserve(info.relevance_reserve),
+    capped.overCap as Array<Record<string, unknown>>).map((row) =>
+    // A row an earlier, looser limit already held back is over this tighter one too.
+    overCapKeys.has(veRelevanceRowKey(row)) || row[VE_COMPANY_CAP_FIELD]
+      ? { ...row, [VE_COMPANY_CAP_FIELD]: { limit } } : row);
+  const readyRows = prepareSegmentationAudience({ rows: kept, columns, source: 'auto' }).rows;
+  const belowTarget = readyRows.length < target.ready_target;
+  const next: VeCollectionTargetProgress = { ...target, ready_rows: readyRows.length,
+    status: belowTarget ? 'limited' : 'target_reached' };
+  if (belowTarget) {
+    // Кап — это то, что случилось с базой ПОСЛЕДНИМ, а не причина, по которой
+    // сбор остановился. Раньше эта строка затирала причину целиком, и карточка
+    // сообщала специалисту, будто базу остановил лимит адресов, хотя у неё
+    // кончился реестр, упёрся предел раундов или перестал окупаться добор.
+    // После прогона капа по проекту так «переобъяснились» 44 базы из 54.
+    const capNote = `${VE_CAP_REASON_MARK} ${limit} адресов на компанию: в готовой базе ${readyRows.length} `
+      + `из ${target.ready_target} контактов, остальные проверенные адреса сохранены в резерве.`;
+    // Свою же заметку срезаем перед пересборкой: кап применяют повторно (сначала
+    // 3, потом 5), и иначе текст рос бы с каждым прогоном.
+    const priorCause = (target.reason ?? '').split(VE_CAP_REASON_MARK)[0].trim();
+    next.reason = [priorCause, capNote,
+      'Новый сбор сам не запускается — при необходимости нажмите «Продолжить подготовку».',
+    ].filter(Boolean).join(' ');
+  } else delete next.reason;
+  const saved: VeCollectInfo = {
+    ...info,
+    target_progress: next,
+    relevance_reserve: { ...info.relevance_reserve, version: 1, rows: reserveRows },
+    company_contact_cap: { limit, over_cap_rows: capped.overCap.length,
+      companies: new Set(kept.map(veContactLimitKey)).size, applied_at: new Date().toISOString() },
+    stats: { ...(info.stats ?? { tasks_total: 0, tasks_done: 0, tasks_failed: 0, rows_total: 0,
+      excluded_existing_bases: 0, excluded_during_fetch: 0 }), launchable_rows: readyRows.length },
+  };
+  saved.relevance_summary = summarizeVeRelevanceReserve(reserveRows);
+  ctx.signal?.throwIfAborted();
+  // One atomic write, guarded on the status the decision was made from: a
+  // parallel collection or launch must never be overwritten by this projection.
+  const { data: written, error } = await ctx.supabase.from('ve_bases')
+    .update({ collect_info: saved, data: kept, columns, row_count: kept.length,
+      sample_rows: readyRows.slice(0, SAMPLE_ROWS), contact_cap_applied: limit, updated_at: new Date().toISOString() })
+    .eq('id', base.id).eq('status', 'analyzed').select('id').maybeSingle();
+  if (error) throw new VeRelevanceCheckpointError(`Contact cap save: ${error.message}`);
+  if (!written) throw new VePreviewCheckpointConflict('Base changed while the contact limit was applied');
+  stageLog(ctx, `[base_collect] лимит ${limit} адресов на компанию применён к сохранённой базе: готовых ${readyRows.length}, в резерв переведено ${capped.overCap.length}`);
+  void job;
+  return { result: { base_id: base.id, rows: readyRows.length, over_company_cap: capped.overCap.length } };
+}
+
 async function resumeSavedCompanyNames(
   ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo,
   target: VeCollectionTargetProgress, usage: VeUsage,
@@ -3157,6 +3377,29 @@ async function resumeSavedCompanyNames(
     hasBufferedCandidates: recovery.has_buffered_candidates, validationError: recovery.validation_error, usage,
     continueManualReview: job.payload?.review_relevance === true,
   });
+}
+
+/**
+ * The specialist's "addresses per company" limit for this base. Read fresh: it
+ * may change while a long job runs, and the worker-owned collect_info must not
+ * be its source (persistCollectInfo overwrites that document wholesale). A
+ * missing column or a failed read means "no limit", never a failed round.
+ */
+async function readVeContactLimit(ctx: VeStageContext, job: VeJob, base: VeAutoBase, info: VeCollectInfo): Promise<number | null> {
+  let own = normalizeVeMaxEmailsPerCompany((base as unknown as { max_emails_per_company?: unknown }).max_emails_per_company);
+  try {
+    const { data, error } = await ctx.supabase.from('ve_bases').select('max_emails_per_company').eq('id', base.id).maybeSingle();
+    if (!error && data) own = normalizeVeMaxEmailsPerCompany((data as { max_emails_per_company?: unknown }).max_emails_per_company);
+  } catch { /* keep the value loaded with the base */ }
+  ctx.signal?.throwIfAborted();
+  if (own !== null || (info.collection_mode ?? job.payload?.collection_mode) !== 'supply') return own;
+  // Daily supply bases are created in SQL from the plan and carry no value of
+  // their own: a new collection follows the project's current setting.
+  try {
+    const { data, error } = await ctx.supabase.from('ve_outreach_setups').select('max_emails_per_company')
+      .eq('project_id', job.project_id).maybeSingle();
+    return error || !data ? null : normalizeVeMaxEmailsPerCompany((data as { max_emails_per_company?: unknown }).max_emails_per_company);
+  } catch { return null; }
 }
 
 async function completeTargetRound(args: {
@@ -3192,9 +3435,24 @@ async function completeTargetRound(args: {
   const availableRows = retainedRows.filter((row) =>
     row && typeof row === 'object' && !baseRowMatchesExclusion(freshKeys, row as VeUnifiedRow),
   );
-  const contactRows = prepareSegmentationAudience({ rows: availableRows, columns, source: 'auto', ignoreCompanyNameCheck: true }).rows;
+  const eligibleRows = prepareSegmentationAudience({ rows: availableRows, columns, source: 'auto', ignoreCompanyNameCheck: true }).rows;
+  // The specialist's limit decides which validated addresses form the ready base.
+  // Nothing is deleted: the rest stays in the reserve, marked, and every later
+  // partition (also after the limit is raised) decides again from all rows.
+  const contactLimit = await readVeContactLimit(ctx, job, base, info);
+  const limitChanged = normalizeVeMaxEmailsPerCompany((base as unknown as { contact_cap_applied?: unknown }).contact_cap_applied) !== contactLimit;
+  const capped = capVeContactsPerCompany(eligibleRows, { limit: contactLimit, incumbentKeys: new Set(previousRows.map(veRelevanceRowKey)) });
+  const contactRows = capped.kept.map(stripVeCompanyCapMarker);
   const contactKeys = new Set(contactRows.map(veRelevanceRowKey));
-  const reserveRows = retainedRows.filter((row) => !contactKeys.has(veRelevanceRowKey(row)));
+  const overCapKeys = new Set(capped.overCap.map(veRelevanceRowKey));
+  const overCapRows = capped.overCap.map(stripVeCompanyCapMarker) as VeUnifiedRow[];
+  const reserveRows = retainedRows.filter((row) => !contactKeys.has(veRelevanceRowKey(row))).map((row) =>
+    overCapKeys.has(veRelevanceRowKey(row)) ? { ...row, [VE_COMPANY_CAP_FIELD]: { limit: contactLimit } } : stripVeCompanyCapMarker(row));
+  if (contactLimit !== null) {
+    info.company_contact_cap = { limit: contactLimit, over_cap_rows: capped.overCap.length,
+      companies: new Set(contactRows.map(veContactLimitKey)).size, applied_at: new Date().toISOString() };
+    if (capped.overCap.length) stageLog(ctx, `[base_collect] лимит ${contactLimit} адресов на компанию: в готовой базе ${contactRows.length}, сверх лимита сохранено в резерве ${capped.overCap.length}`);
+  } else delete info.company_contact_cap;
   info.relevance_reserve = { version: 1, rows: reserveRows,
     source_rows: mergeVeRelevanceRows(readVeRelevanceSourceRows(info.relevance_reserve),
       args.candidates.map((row) => ({ ...row, _ve_source_candidate: true }))),
@@ -3225,6 +3483,11 @@ async function completeTargetRound(args: {
       pruneBaseRowAgainstExclusion(freshKeys, row) !== null), info.source_contact_recovery))
     || hasPendingVeSourceContacts((info.search_policy?.deferred_rows ?? []).filter((row) =>
       pruneBaseRowAgainstExclusion(freshKeys, row) !== null), info.source_contact_recovery));
+  // Цифры для честной причины остановки: сколько поисков куплено, сколько они
+  // дали сайтов и сколько из этих сайтов дошло до готового контакта.
+  const discoveryChecked = Object.values(info.source_contact_recovery?.checked ?? {});
+  const discoverySites = discoveryChecked.filter((entry) => entry.website.trim().length > 0).length;
+  const discoveryContacts = countVeSourceDiscoveryContacts(contactRows);
   const finish = (readyCount: number, nameError?: string) => {
     const phaseError = args.validationError ?? nameError ?? (taskError ? `${taskError.source}: ${taskError.error ?? 'ошибка источника'}` : null);
     const result = finishCollectionRound(progress, {
@@ -3241,7 +3504,7 @@ async function completeTargetRound(args: {
       return { ...result, status: 'collecting' as const, reason: undefined, round: progress.round + 1 };
     }
     if (discoveryPaused && result.status === 'limited') return { ...result,
-      reason: `Поиск недостающих сайтов остановлен: ${VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT} попыток поиска без прироста готовых контактов. Собранные контакты и исходные компании сохранены. Цель пока не достигнута; нужен другой источник или уточнение гипотезы.`,
+      reason: `Добор сайтов закрыт: последние ${VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT} платных поисков не дали ни одного готового контакта (всего поисков ${discoveryChecked.length}, найдено сайтов ${discoverySites}, контактов из них ${discoveryContacts}). Это решение о рентабельности, а не исчерпание источников: строки без контакта сохранены, сбор по строкам с готовым адресом не останавливался.`,
     };
     return result;
   };
@@ -3326,11 +3589,35 @@ async function completeTargetRound(args: {
     && (row._ve_relevance as { status?: unknown } | undefined)?.status === 'needs_review');
   const pendingAutomaticEmails = hasPendingVeSavedEmailRecovery(reserveRows, info.saved_email_recovery);
   const emailValidationCanContinue = pendingAutomaticEmails && args.validationError === 'Проверка email завершилась не полностью';
-  const pendingAutomaticReview = !reviewOnly && (!args.validationError || emailValidationCanContinue) && !taskError
-    && readyRows.length < progress.ready_target && (pendingAutomaticEmails || buildVeRelevanceReviewBatch({
-      reserve: reserveRows, ready: cleaned.rows, source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
-      allowPaidSearch: !existingFirst,
-    }).rows.length > 0);
+  const reviewEligible = !reviewOnly && (!args.validationError || emailValidationCanContinue) && !taskError
+    && readyRows.length < progress.ready_target;
+  const triageEnabled = isVeRelevanceTriageEnabled(job.project_id);
+  const automaticBatch = reviewEligible ? buildVeRelevanceReviewBatch({
+    reserve: reserveRows, ready: cleaned.rows, source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
+    allowPaidSearch: !existingFirst, triage: triageEnabled,
+  }) : null;
+  // A saved-review pass that leaves its own selection byte-identical cannot
+  // progress: every verdict came from the checkpoint and no row changed. Stop
+  // requesting that pass instead of requeueing every 30 seconds (19.09.2026:
+  // one base looped 3000 times on one company). The rows stay in the reserve.
+  const reviewSignature = automaticBatch?.rows.length
+    ? relevanceHash([readyRows.length, automaticBatch.rows.map((row) => [veRelevanceRowKey(row), row._email_status ?? null,
+      (row._ve_relevance as Record<string, unknown> | undefined)?.status ?? null,
+      (row._ve_relevance as Record<string, unknown> | undefined)?.review_attempts ?? null,
+      (row._ve_relevance as Record<string, unknown> | undefined)?.website_review_version ?? null,
+      (row._ve_relevance as Record<string, unknown> | undefined)?.search_deferred ?? null,
+      // A fast pass that only marks companies as seen is progress too; the
+      // element exists only while the triage is enabled, so hashes saved
+      // without it stay comparable.
+      ...(triageEnabled ? [(row._ve_relevance as Record<string, unknown> | undefined)?.triage_version ?? null] : [])]).sort()])
+    : null;
+  const stalledReview = reviewSignature !== null && info.relevance_review_progress?.signature === reviewSignature;
+  if (reviewSignature === null) delete info.relevance_review_progress;
+  else info.relevance_review_progress = { signature: reviewSignature,
+    passes: stalledReview ? (info.relevance_review_progress?.passes ?? 0) + 1 : 0 };
+  if (stalledReview) stageLog(ctx, `[base_collect] уточнение сохранённых контактов не продвигается: ${automaticBatch?.companies ?? 0} компаний повторно получают тот же сохранённый итог; они остаются в резерве, раунд завершается`);
+  const pendingAutomaticReview = reviewEligible
+    && (pendingAutomaticEmails || (Boolean(automaticBatch?.rows.length) && !stalledReview));
   const pendingManualReview = args.continueManualReview === true
     && reserveRows.some((row) => needsVeRelevanceReview(row) || needsVeSavedEmailReview(row));
   const drainingSavedEmailChild = Boolean(info.saved_email_recovery?.batch) && !args.validationError && !taskError;
@@ -3372,7 +3659,7 @@ async function completeTargetRound(args: {
       delete task.existing_contacts_only;
     }
     const saved = buildVeRelevanceReviewBatch({ reserve: reserveRows, ready: cleaned.rows,
-      source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true });
+      source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true, triage: triageEnabled });
     continueSavedReview = saved.rows.length > 0;
     if (continueSavedReview) info.relevance_review_requested = true;
     if (continueSavedReview || canAcquirePaid) {
@@ -3385,7 +3672,10 @@ async function completeTargetRound(args: {
     && cleaned.summary.status === 'complete' && !pipeline?.error && pendingBatches.length === 0) {
     const finishedAt = new Date().toISOString();
     const spend = await readVeBatchSpend(ctx.supabase, job.project_id, base.id, info.adaptive_collection.pending.started_at, finishedAt);
-    info.adaptive_collection = finishVeAdaptiveBatch(info.adaptive_collection, readyRows, spend, finishedAt);
+    // Measure the source BEFORE the per-company limit: its thresholds (5 % yield,
+    // $0.05 per contact) were calibrated on uncapped counts, so judging a capped
+    // batch by them would call every normal source weak and buy a replan.
+    info.adaptive_collection = finishVeAdaptiveBatch(info.adaptive_collection, [...readyRows, ...overCapRows], spend, finishedAt);
     if (info.adaptive_collection.replan_needed && !reviewOnly && readyRows.length < progress.ready_target
       && !acquisitionLimited && info.adaptive_collection.replan_attempts < 2) {
       next = { ...next, status: 'collecting', round: progress.round + 1 }; delete next.reason;
@@ -3428,6 +3718,39 @@ async function completeTargetRound(args: {
       externalExclusions: freshKeys.inns.size > 0 || freshKeys.emails.size > 0 || freshKeys.websiteInns.size > 0
         || Boolean(args.stats.excluded_existing_bases),
     });
+    // Рынок гипотезы меньше цели. Раньше движок всё равно шёл к 500: каждый
+    // следующий раунд просил БОЛЬШЕ компаний (collectionRoundLimit делит
+    // недостачу на наблюдаемый выход), и узкая гипотеза упиралась в потолок
+    // 10 000 компаний — а это чтение сайтов и SMTP-проверки за каждую из них.
+    //
+    // Прогноз считаем здесь же, а не берём remaining_ready_estimate: тот
+    // обнуляется, пока в резерве есть хоть одна непроверенная строка, а такая
+    // строка есть почти всегда (компания, по которой конструктор не нашёл
+    // почту). Для решения «рынок мал» достаточно размера сопоставимого среза
+    // источника и наблюдаемого выхода.
+    const population = info.estimate.population_matches_source === true
+      && Number.isSafeInteger(info.estimate.unique_companies) ? Number(info.estimate.unique_companies) : null;
+    const processedCompanies = candidateCompanies.size;
+    const projected = population !== null && processedCompanies >= VE_NARROW_MARKET_MIN_COMPANIES
+      && population >= processedCompanies && readyRows.length > 0
+      ? Math.round((population - processedCompanies) * readyRows.length / processedCompanies) : null;
+    // Останавливаем только раунд, за которым не осталось уже оплаченной работы:
+    // недокачанный дочерний конструктор или неразобранный запас дороже одного
+    // лишнего раунда, а на следующем пробуждении оценка повторится.
+    if (projected !== null && next.status === 'collecting' && !reviewOnly && !continueSavedReview
+      && progress.round >= 2 && pendingBatches.length === 0 && !pendingSources && !pendingDiscovery
+      && !args.hasBufferedCandidates && !info.adaptive_collection?.pending
+      && readyRows.length + projected < progress.ready_target * VE_NARROW_MARKET_SHARE) {
+      next = { ...next, round: progress.round, status: 'limited',
+        reason: `Рынок гипотезы меньше цели: по текущему срезу источника осталось примерно ${projected} контактов `
+          + `сверх собранных ${readyRows.length} при цели ${progress.ready_target}. Сбор остановлен, чтобы не тратить `
+          + 'проверки на заведомо недостижимый объём. Сузьте цель, добавьте источник или уточните гипотезу.' };
+      // Локальная переменная уже скопирована в info выше: без этой записи
+      // статус и причина не сохранились бы, а «Продолжить подготовку» не
+      // увидела бы базу (там требуется терминальный статус раунда).
+      info.target_progress = next;
+      stageLog(ctx, `[base_collect] остановка по размеру рынка: собрано ${readyRows.length}, прогноз остатка ${projected}, цель ${progress.ready_target}`);
+    }
   }
   if (next.status === 'collecting' && !continueSavedReview) {
     // One atomic checkpoint: prior validated output is durable BEFORE the next
@@ -3453,6 +3776,11 @@ async function completeTargetRound(args: {
     data: cleaned.rows, columns, sample_rows: readyRows.slice(0, SAMPLE_ROWS), row_count: cleaned.rows.length,
     status, error: next.status === 'error' ? next.reason?.slice(0, 500) : null,
   });
+  if (limitChanged) {
+    // Plain column for the settings route: which finished bases still need a
+    // changed limit applied. Best effort: the partition above is already durable.
+    try { await ctx.supabase.from('ve_bases').update({ contact_cap_applied: contactLimit }).eq('id', base.id); } catch { /* next round retries */ }
+  }
   if (next.status === 'collecting') await requeueSelf(ctx, job, pipeline ? 1_000 : undefined);
   else if (status === 'analyzing') await ensureTargetBaseAnalysis(ctx, job, base.id);
   return {
@@ -3482,6 +3810,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   if (base.source !== 'auto') {
     throw new Error(`ve_bases ${baseId}: source='${base.source ?? 'upload'}' — base_collect работает только с source='auto'`);
   }
+  // A tightened "addresses per company" limit for a base that has already
+  // finished: a pure re-partition of saved rows, before the terminal-status
+  // no-op below. It never collects, never pays and never changes base.status.
+  if (job.payload?.reproject_contacts === true) return applyVeContactCapToFinishedBase(ctx, job, base);
   // Завершённую сборку не переигрываем. Честный провал (напр. ноль строк) ставит
   // базе терминальный статус И роняет джобу, а воркер повторяет её до
   // MAX_ATTEMPTS — каждая повторная попытка спотыкалась об этот guard и затирала
@@ -3848,12 +4180,12 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       // A company/site is not a ready contact. Evaluate yield only here, after
       // every usable row and constructor has had a chance to finish validation.
       const allowance = target ? evaluateVeSourceDiscoveryBudget({ budget: info.source_contact_budget,
-        checkpoint: info.source_contact_recovery, readyRows: target.ready_rows }) : null;
+        checkpoint: info.source_contact_recovery, discoveryContacts: countVeSourceDiscoveryContacts(base.data) }) : null;
       if (allowance) info.source_contact_budget = allowance.budget;
-      const discovery = [...pendingSourceRows].slice(0, Math.min(16,
-        target ? target.ready_target - target.ready_rows : 16, allowance?.remaining ?? 16));
+      const discovery = [...pendingSourceRows].slice(0, veSourceDiscoveryLimit({ readyTarget: target?.ready_target,
+        readyRows: target?.ready_rows, candidatesProcessed: target?.candidates_processed, remaining: allowance?.remaining }));
       if (discovery.length) {
-        info.source_contact_discovery = { checked: Object.keys(info.source_contact_recovery?.checked ?? {}).length, remaining: pendingSourceRows.size };
+        info.source_contact_discovery = { checked: Object.keys(info.source_contact_recovery?.checked ?? {}).length, remaining: pendingSourceRows.size, contacts: countVeSourceDiscoveryContacts(base.data) };
         await persistCollectInfo(ctx, base.id, info);
         await recoverVeSourceContacts({ rows: discovery, state: info.source_contact_recovery, signal: ctx.signal,
           save: async (state) => { info.source_contact_recovery = state; await persistCollectInfo(ctx, base.id, info); ctx.onCheckpoint?.(); },
@@ -3862,7 +4194,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
         pendingSourceRows = new Set(pendingVeSourceContacts(discoveryCandidates, info.source_contact_recovery));
         if (prepared.filter((row) => (row.website || row.email) && pruneBaseRowAgainstExclusion(existingKeys, row) !== null).length === 0) {
           if (target) info.source_contact_budget = evaluateVeSourceDiscoveryBudget({ budget: info.source_contact_budget,
-            checkpoint: info.source_contact_recovery, readyRows: target.ready_rows }).budget;
+            checkpoint: info.source_contact_recovery, discoveryContacts: countVeSourceDiscoveryContacts(base.data) }).budget;
           if (!info.source_contact_budget?.paused && hasPendingVeSourceContacts(discoveryCandidates, info.source_contact_recovery)) {
             await requeueSelf(ctx, job, 1_000);
             return { result: { base_id: baseId, waiting: true, source_contact_discovery: true }, ...usage };

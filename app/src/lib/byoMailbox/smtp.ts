@@ -2,6 +2,8 @@ import 'server-only';
 
 import nodemailer from 'nodemailer';
 
+import { buildMailParts } from '@/lib/mail/message';
+
 /**
  * Минимальный SMTP-движок для BYO-почт: проверка соединения и тестовая отправка
  * ЧЕРЕЗ SMTP-сервер провайдера клиента (наш сервер выступает как почтовый клиент,
@@ -145,13 +147,49 @@ export interface OutgoingMessage {
   to: string;
   subject: string;
   text: string;
+  /** Письмо целиком в HTML, если оно так написано. Обычно его нет: текст один. */
+  html?: string | null;
+  /**
+   * Свой Message-ID на домене отправителя. Без него заголовок проставит MTA
+   * провайдера — и домен в нём не совпадёт с доменом в From.
+   */
+  messageId?: string;
+  /** Для ответа в ту же переписку. */
+  inReplyTo?: string | null;
+  references?: string | null;
+}
+
+/**
+ * Поля письма для nodemailer: обе части, заголовок отписки и кодировка.
+ *
+ * Собирается в одном месте на все три способа отправки (пароль, Gmail OAuth,
+ * XOAUTH2 по токену) — иначе письмо выглядело бы по-разному в зависимости от
+ * того, как клиент подключил ящик.
+ */
+function mailFields(msg: OutgoingMessage) {
+  const parts = buildMailParts({ from: msg.from, text: msg.text, html: msg.html });
+  return {
+    from: msg.from,
+    to: msg.to,
+    subject: msg.subject,
+    // Обе части сразу: nodemailer соберёт multipart/alternative. Холодное
+    // письмо из одной части фильтры считают машинной рассылкой.
+    text: parts.text,
+    html: parts.html,
+    headers: parts.headers,
+    // Без этого кириллица уезжает в base64 — ещё один признак рассылки.
+    textEncoding: 'quoted-printable' as const,
+    messageId: msg.messageId,
+    inReplyTo: msg.inReplyTo ?? undefined,
+    references: msg.references ?? undefined,
+  };
 }
 
 /** Отправка по паролю приложения (SMTP). */
 export async function sendMailViaSmtp(cfg: SmtpConfig, msg: OutgoingMessage): Promise<SmtpResult> {
   const transport = buildTransport(cfg);
   try {
-    await transport.sendMail({ from: msg.from, to: msg.to, subject: msg.subject, text: msg.text });
+    await transport.sendMail(mailFields(msg));
     return { ok: true };
   } catch (e) {
     return { ok: false, error: toMessage(e) };
@@ -164,7 +202,7 @@ export async function sendMailViaSmtp(cfg: SmtpConfig, msg: OutgoingMessage): Pr
 export async function sendMailViaOAuthGmail(cfg: GmailOAuthConfig, msg: OutgoingMessage): Promise<SmtpResult> {
   const transport = buildOAuthTransport(cfg);
   try {
-    await transport.sendMail({ from: msg.from, to: msg.to, subject: msg.subject, text: msg.text });
+    await transport.sendMail(mailFields(msg));
     return { ok: true };
   } catch (e) {
     return { ok: false, error: toMessage(e) };
@@ -210,7 +248,7 @@ export async function verifyOAuthTokenSmtp(cfg: OAuthTokenSmtpConfig): Promise<S
 export async function sendMailViaOAuthToken(cfg: OAuthTokenSmtpConfig, msg: OutgoingMessage): Promise<SmtpResult> {
   const transport = buildOAuthTokenTransport(cfg);
   try {
-    await transport.sendMail({ from: msg.from, to: msg.to, subject: msg.subject, text: msg.text });
+    await transport.sendMail(mailFields(msg));
     return { ok: true };
   } catch (e) {
     return { ok: false, error: toMessage(e) };

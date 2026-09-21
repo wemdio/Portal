@@ -2229,7 +2229,16 @@ export async function stepValidateEmails(
   // Локальный предикат (worker не импортируем): статус unknown/error И текст
   // ошибки похож на временную проблему.
   const RETRYABLE_ERROR_RE = /временн|greylist|timeout|dns|prox/i;
-  const SECOND_PASS_DELAY_MS = 5 * 60 * 1000;
+  // Пауза перед вторым проходом. Была 5 минут и платилась ОДИН РАЗ НА ДЖОБУ
+  // независимо от её размера, поэтому у специалиста на 3 267 адресов она
+  // растворялась в работе, а у движка на 33 адреса съедала весь прогон:
+  // замер за 7 суток — 290,8 часа сна из 608,9 часа всей валидации, причём
+  // 1361 шаг из 1839 спал ~300 с ради двух десятков адресов.
+  // 90 секунд закрывают типовое окно greylisting (обычно 60 с), а адреса,
+  // которым не хватило, не теряются: они остаются с нетерминальным статусом
+  // и их перепроверяет следующий раунд — между дочерними джобами одной базы
+  // проходит в среднем 20 минут, что для greylist даже лучше пяти.
+  const SECOND_PASS_DELAY_MS = 90 * 1000;
   const retryable = toValidate.filter((e) => {
     const r = results.get(e);
     if (!r || (r.result !== 'unknown' && r.result !== 'error')) return false;
@@ -2237,9 +2246,8 @@ export async function stepValidateEmails(
       && (attemptsByEmail.get(e) ?? 0) < EMAIL_VALIDATION_MAX_ATTEMPTS;
   });
   if (retryable.length > 0 && !(isCancelled && await isCancelled())) {
-    // Пауза нужна только если основной проход отработал быстро: на больших
-    // базах 5 минут и так набегает за пулом. Ждём только остаток (hard cap
-    // 5 мин), чтобы маленькие базы не стопорились надолго.
+    // Ждём только остаток: если основной проход уже шёл дольше паузы, greylist
+    // отпустил сам и ждать нечего.
     const elapsed = Date.now() - mainPassStartedAt;
     const waitMs = Math.min(SECOND_PASS_DELAY_MS, Math.max(0, SECOND_PASS_DELAY_MS - elapsed));
     let waited = 0;

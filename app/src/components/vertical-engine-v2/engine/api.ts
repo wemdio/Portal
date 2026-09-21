@@ -111,12 +111,14 @@ export interface VeCollectInfo {
   adaptive_collection?: { version: 1; switches: number; note?: string; replan_error?: string; checking_batch: boolean;
     completed_batches: number; last_batch?: { candidates: number; new_ready: number;
       spend: { ai_usd: number; serper_credits: number; estimated_total_usd: number; complete: boolean } } };
-  source_contact_discovery?: { checked: number; remaining: number };
+  source_contact_discovery?: { checked: number; remaining: number; contacts?: number };
   relevance_review_requested?: boolean;
   /** Only a phase marker; raw validation checkpoints stay on the server. */
   saved_email_review_pending?: boolean;
   /** Worker-authoritative saved reserve; never count it as ready inventory. */
   relevance_summary?: import('@/lib/verticalEngineV2/relevanceReserve').VeRelevanceReserveSummary;
+  /** Last applied "addresses per company" limit (display only). */
+  company_contact_cap?: { limit: number; over_cap_rows: number; companies: number; applied_at: string };
   company_name_cleanup?: import('@/lib/verticalEngineV2/companyNames').VeCompanyNameCleanupSummary;
   /** Durable marker: contacts are saved and name preparation is the remaining phase. */
   company_name_recovery?: {

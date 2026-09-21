@@ -14,6 +14,11 @@ const INSERT_CHUNK = 500;
  * POST — загрузка базы получателей файлом (CSV/XLSX).
  * Адреса из стоп-листа в кампанию не попадают, повторная загрузка того же
  * файла не создаёт дублей: адрес уникален в пределах кампании.
+ *
+ * Поле mode=replace заменяет базу, а не дополняет: из кампании уходят только
+ * те, кому ещё ничего не планировали и не отправляли. Переписки замена не
+ * трогает — иначе «перезалить базу» означало бы потерять историю по тем, кто
+ * уже получил письмо и, может быть, ответил.
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'tools.sender.recipients.import' }, async () => {
@@ -43,6 +48,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     if (!(file instanceof File)) return jsonError('Добавьте файл базы (CSV или XLSX)', 400);
     if (file.size > MAX_FILE_BYTES) return jsonError('Файл больше 20 МБ', 400);
 
+    const replace = String(form.get('mode') ?? '') === 'replace';
+    if (replace && !['draft', 'paused'].includes(String(campaign.status))) {
+      return jsonError('Заменить базу можно у черновика или остановленной кампании', 409);
+    }
+
+    // Чистим до разбора файла, но после проверок статуса: если файл окажется
+    // битым, старую базу уже не вернуть, поэтому разбираем его первым делом.
     let parsed;
     try {
       const rows = parseMailboxFile(file.name, Buffer.from(await file.arrayBuffer()));
@@ -54,6 +66,19 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     if (!parsed.recipients.length) {
       return jsonError('В файле не нашлось ни одного корректного адреса', 400);
+    }
+
+    if (replace) {
+      // mailbox_id проставляется ровно в тот момент, когда планировщик завёл
+      // письмо, поэтому «пустой ящик и нулевой шаг» — это и есть «мы к нему
+      // ещё не прикасались».
+      const { error: wipeError } = await supabaseAdmin
+        .from('sender_recipients')
+        .delete()
+        .eq('campaign_id', campaignId)
+        .eq('last_step_sent', 0)
+        .is('mailbox_id', null);
+      if (wipeError) return jsonError(wipeError.message, 500);
     }
 
     const emails = parsed.recipients.map((r) => r.email);
@@ -90,6 +115,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     return NextResponse.json({
       imported,
+      replaced: replace,
       skippedInvalid: parsed.invalid,
       skippedDuplicates: parsed.duplicates,
       skippedSuppressed: suppressed.size,

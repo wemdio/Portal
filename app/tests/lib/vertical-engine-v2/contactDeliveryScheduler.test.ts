@@ -30,18 +30,64 @@ describe('VE2 contact delivery scheduler', () => {
       const abort = new AbortController();
       const onTimeout = jest.fn();
       const onUnresponsive = jest.fn();
-      const guard = createVeJobWatchdog({ abort, idleMs: 1000, graceMs: 100, onTimeout, onUnresponsive });
+      const guard = createVeJobWatchdog({ abort, idleMs: 1000, graceMs: 100, reason: 'VE2 base_collect inactivity timeout', onTimeout, onUnresponsive });
       jest.advanceTimersByTime(900);
       guard.touch();
       jest.advanceTimersByTime(900);
       expect(abort.signal.aborted).toBe(false);
       jest.advanceTimersByTime(100);
-      expect(abort.signal.reason.message).toMatch(/timeout/i);
+      // Base stages share the guard; the message stays a retryable stage error.
+      expect(abort.signal.reason.message).toBe('VE2 base_collect inactivity timeout after 1000ms');
       expect(onTimeout).toHaveBeenCalledTimes(1);
       guard.touch(); // A late read/log cannot resurrect the expired operation.
       jest.advanceTimersByTime(100);
       expect(onUnresponsive).toHaveBeenCalledTimes(1);
       guard.stop();
+
+      // A cancel of one base must not recycle a process that runs 16 jobs after
+      // the short grace: only the guard's own timeout keeps it. A cancelled stage
+      // that never returns is still recovered, one idle period later.
+      const cancelledBase = new AbortController();
+      const patient = createVeJobWatchdog({ abort: cancelledBase, idleMs: 1000, graceMs: 100, escalateExternalAbort: false, onTimeout, onUnresponsive });
+      cancelledBase.abort();
+      jest.advanceTimersByTime(1099);
+      expect(onUnresponsive).toHaveBeenCalledTimes(1);
+      jest.advanceTimersByTime(1);
+      expect(onUnresponsive).toHaveBeenCalledTimes(2);
+      patient.stop();
+      // The cancel keeps the silence already accumulated (a job hung for 19 of its
+      // 20 minutes is not granted 22 more), and a cancelled stage that still works
+      // is never recycled earlier than it would have been without the cancel.
+      const silentBase = new AbortController();
+      const silent = createVeJobWatchdog({ abort: silentBase, idleMs: 1000, graceMs: 100, escalateExternalAbort: false, onTimeout, onUnresponsive });
+      jest.advanceTimersByTime(900);
+      silentBase.abort();
+      jest.advanceTimersByTime(199);
+      expect(onUnresponsive).toHaveBeenCalledTimes(2);
+      jest.advanceTimersByTime(1);
+      expect(onUnresponsive).toHaveBeenCalledTimes(3);
+      expect(onUnresponsive).toHaveBeenLastCalledWith(200);
+      silent.stop();
+      const busyBase = new AbortController();
+      const busy = createVeJobWatchdog({ abort: busyBase, idleMs: 1000, graceMs: 100, escalateExternalAbort: false, onTimeout, onUnresponsive });
+      jest.advanceTimersByTime(900);
+      busyBase.abort();
+      jest.advanceTimersByTime(50);
+      busy.touch();
+      jest.advanceTimersByTime(1099);
+      expect(onUnresponsive).toHaveBeenCalledTimes(3);
+      jest.advanceTimersByTime(1);
+      expect(onUnresponsive).toHaveBeenCalledTimes(4);
+      busy.stop();
+      onUnresponsive.mockClear();
+      onUnresponsive(); onUnresponsive();
+      const idleBase = new AbortController();
+      const strict = createVeJobWatchdog({ abort: idleBase, idleMs: 1000, graceMs: 100, escalateExternalAbort: false, onTimeout, onUnresponsive });
+      jest.advanceTimersByTime(1100);
+      expect(onUnresponsive).toHaveBeenCalledTimes(3);
+      strict.stop();
+      onUnresponsive.mockClear();
+      onUnresponsive();
 
       const cancelled = new AbortController();
       const cooperative = createVeJobWatchdog({ abort: cancelled, idleMs: 1000, graceMs: 100, onTimeout, onUnresponsive });

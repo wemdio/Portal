@@ -1,5 +1,7 @@
-import { randomUUID } from 'crypto';
 import { PLACEHOLDER_RE, varKey } from './templateVars';
+
+// Message-ID общий для обоих движков отправки портала — см. lib/mail/message.
+export { buildMessageId } from '@/lib/mail/message';
 
 /**
  * Подстановка {{var}} из полей получателя. Неизвестная переменная → пусто.
@@ -23,17 +25,6 @@ export function recipientVars(recipient: { email: string; name: string | null; v
     vars.first_name ??= name.split(/\s+/)[0] ?? '';
   }
   return vars;
-}
-
-/**
- * Message-ID делаем сами и сохраняем ДО отправки: по нему входящий ответ
- * связывается с письмом (заголовок In-Reply-To), а follow-up уходит в ту же
- * переписку. Домен берём от адреса отправителя — так заголовок не выглядит
- * чужеродным для почтовых фильтров.
- */
-export function buildMessageId(fromEmail: string): string {
-  const domain = fromEmail.split('@')[1] || 'localhost';
-  return `<${randomUUID()}@${domain}>`;
 }
 
 /** Тема follow-up: пустая = продолжаем ту же переписку («Re: …»). */

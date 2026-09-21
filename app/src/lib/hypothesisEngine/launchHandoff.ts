@@ -258,8 +258,9 @@ export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
   const emailColumn = findEmailColumn(columns, rows);
   if (!emailColumn) return { leads: [], emailColumn: null, leadRowIndices: [] };
 
-  // column → operator (первый matched-оператор на колонку выигрывает).
-  const operatorByColumn = new Map<string, string>();
+  // Колонки, которые занял хотя бы один оператор: их значение эмитится под
+  // именем КАЖДОГО такого оператора, а не под именем колонки.
+  const claimedColumns = new Set<string>();
   // operator → fallback для unmatched (fallback'ы unmatched идут всем лидам).
   const unmatchedFallbacks = new Map<string, string>();
   // Все matched-операторы: переменную надо эмитить даже при пустой ячейке.
@@ -267,7 +268,7 @@ export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
   for (const m of operatorMapping ?? []) {
     if (!m?.operator) continue;
     if (m.matched && m.column) {
-      if (!operatorByColumn.has(m.column)) operatorByColumn.set(m.column, m.operator);
+      claimedColumns.add(m.column);
       if (!matchedOperators.has(m.operator)) {
         matchedOperators.set(m.operator, { column: m.column, fallback: (m.fallback ?? '').trim() });
       }
@@ -292,15 +293,17 @@ export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
 
     for (const col of columns) {
       if (col === emailColumn) continue;
+      if (claimedColumns.has(col)) continue;
       const val = String(row[col] ?? '').trim();
       if (!val) continue;
-      customVars[operatorByColumn.get(col) ?? col] = val;
+      customVars[col] = val;
     }
-    // matched-операторы без значения (пустая ячейка/колонка вне списка):
-    // fallback → иначе пустая строка (parity с превью, никаких литералов {{var}}).
+    // Значение берётся ПО ОПЕРАТОРУ, из его собственной колонки: два оператора
+    // на одну колонку ({{company}} и {{companyName}}) должны оба подставиться,
+    // а не только первый. Пустая ячейка → fallback, иначе пустая строка.
     for (const [op, spec] of matchedOperators) {
-      if (customVars[op] !== undefined) continue;
-      customVars[op] = spec.fallback || '';
+      const val = String(row[spec.column] ?? '').trim();
+      customVars[op] = val || spec.fallback || '';
     }
     for (const [op, fallback] of unmatchedFallbacks) {
       if (customVars[op] === undefined) customVars[op] = fallback;

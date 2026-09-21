@@ -21,8 +21,19 @@ import { readContactDeliveryPages } from './contactDeliveryInventory';
 // error нужен клиенту: с появлением права автопилота НЕ строить базу (проба
 // среза, stages/baseCollect) статус 'failed' сам по себе ничего не объясняет —
 // без причины отказ выглядит поломкой, а не решением.
+// collect_info НЕ берём колонкой: 99,99 % документа — рабочее состояние воркера
+// (relevance_reserve, relevance_checkpoint, target_checkpoint, harvest задач,
+// search_policy.deferred_rows). На проекте «Аврора» это 586 878 670 байт на 17
+// баз при пределе строки V8 в 536 870 888 — Buffer.toString() падал с «Cannot
+// create a string longer than 0x1fffffe8 characters», и карточка не
+// открывалась четверо суток. stripTaskHarvest вырезал это уже ПОСЛЕ
+// материализации ответа, то есть слишком поздно.
+// Срез собирает БД: ve_base_public_info (миграция 20260921_0003) отдаёт тот же
+// набор ключей за ~70 КБ и один детоаст на строку. Точечная проекция из
+// шестидесяти JSON-путей тут не годится: PostgreSQL детоастит колонку заново на
+// каждое обращение, и замер дал 76 секунд на тот же ответ.
 export const VE_BASE_LIST_COLUMNS =
-  'id, vertical_id, hypothesis_id, filename, row_count, status, error, analysis, source, collect_info, columns, sample_rows, created_at, updated_at';
+  'id, vertical_id, hypothesis_id, filename, row_count, status, error, analysis, source, collect_info:ve_base_public_info, columns, sample_rows, created_at, updated_at';
 // payload нужен клиенту, чтобы привязать джобу к вертикали (payload.vertical_id) —
 // иначе чужая dossier-джоба показывала бы busy/error на карточке другой вертикали.
 export const VE_JOB_LIST_COLUMNS = 'id, stage, status, error, attempts, started_at, finished_at, payload, progress';

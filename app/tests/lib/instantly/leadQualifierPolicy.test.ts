@@ -634,7 +634,9 @@ describe('elliptical material request policy', () => {
       }
       for (const extra of ['Пришлите КП.', 'Сколько стоит?', 'Хочу купить вашу услугу.']) {
         mockAiResult({ is_lead: true });
-        expect((await qualify(`${reply}\n${extra}`, { outboundText: opener })).isLead).toBe(true);
+        // A generic KP request after a KNOWN bare opener is introductory, not
+        // proof that the recipient understood the offer (September 19 policy).
+        expect((await qualify(`${reply}\n${extra}`, { outboundText: opener })).isLead).toBe(extra !== 'Пришлите КП.');
       }
       mockAiResult({ custom_criteria_matched: true });
       expect((await qualify(reply, { outboundText: opener, leadCriteria: OUTREACH_OS_CRITERIA })).isLead).toBe(true);
@@ -690,7 +692,7 @@ describe('elliptical material request policy', () => {
     for (const action of ['Пришлите КП.', 'Сколько стоит?', 'Давайте завтра созвонимся.', 'Можете меня набрать в 14:00.', 'Хочу купить вашу услугу.']) {
       fetchMock.mockReset();
       mockAiResult({ is_lead: true, proposal_seen: false, needs_review: false });
-      expect((await qualify(`${readiness[1]}\n${action}`, { outboundText: opener })).isLead).toBe(true);
+      expect((await qualify(`${readiness[1]}\n${action}`, { outboundText: opener })).isLead).toBe(action !== 'Пришлите КП.');
     }
     fetchMock.mockReset();
     mockAiResult({ is_lead: true, custom_criteria_matched: true, proposal_seen: false, needs_review: false });

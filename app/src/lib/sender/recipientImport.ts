@@ -1,4 +1,5 @@
 import type { FileRow } from './fileParse';
+import { recipientVars } from './template';
 import { EMAIL_VAR, NAME_VARS, varKey } from './templateVars';
 
 /**
@@ -137,6 +138,56 @@ export function describeRecipientColumns(rows: FileRow[]): RecipientColumnsSumma
     recipients: parsed.recipients.length,
     invalid: parsed.invalid,
     duplicates: parsed.duplicates,
+    variables,
+  };
+}
+
+/**
+ * То же описание колонок, но по уже загруженной базе кампании — для формы
+ * редактирования, где файла на руках нет.
+ *
+ * Заголовки исходного файла при импорте не сохраняются (в vars лежат уже
+ * приведённые ключи), поэтому header у всех переменных null, а сам список
+ * строится тем же recipientVars, которым подставляет значения отправщик:
+ * подсказка в форме и реальная отправка не разойдутся по определению.
+ */
+export function describeSavedRecipients(
+  rows: { email: string; name: string | null; vars: Record<string, string> }[],
+): RecipientColumnsSummary {
+  const variables: RecipientVariable[] = [];
+  const index = new Map<string, RecipientVariable>();
+
+  for (const row of rows) {
+    for (const [key, value] of Object.entries(recipientVars(row))) {
+      let variable = index.get(key);
+      if (!variable) {
+        variable = { key, header: null, filled: 0, sample: null };
+        index.set(key, variable);
+        variables.push(variable);
+      }
+      if (value && value.trim()) {
+        variable.filled += 1;
+        variable.sample ??= value;
+      }
+    }
+  }
+
+  // Порядок как в форме после загрузки файла: сначала почта и имя, дальше
+  // колонки базы по алфавиту — иначе набор чипов прыгает от выборки к выборке.
+  const fixed = [EMAIL_VAR, ...NAME_VARS] as string[];
+  variables.sort((a, b) => {
+    const ai = fixed.indexOf(a.key);
+    const bi = fixed.indexOf(b.key);
+    if (ai !== -1 || bi !== -1) return (ai === -1 ? fixed.length : ai) - (bi === -1 ? fixed.length : bi);
+    return a.key.localeCompare(b.key);
+  });
+
+  return {
+    emailHeader: null,
+    nameHeader: null,
+    recipients: rows.length,
+    invalid: 0,
+    duplicates: 0,
     variables,
   };
 }

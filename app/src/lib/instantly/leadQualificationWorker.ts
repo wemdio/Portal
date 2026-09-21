@@ -43,6 +43,8 @@ import { resolveLeadContactMetadata } from './leadContactMetadata';
 import { loadCachedLeadContacts } from './cachedLeadContacts';
 import { resolveEffectiveReplyOwner } from './replyOwnershipResolver';
 import { resolveInstantlyAccountId } from './accounts';
+import { randomUUID } from 'node:crypto';
+import { qualificationAutomationPolicy, replyAutomationExpired } from './qualificationAutomationPolicy';
 import { createQualificationAiCheckpointStore } from './qualificationAiCheckpoint';
 import { captureQualificationReplySnapshot, qualificationRecoveryBackoff, qualificationReplySnapshot, type QualificationRecoveryState } from './qualificationRecovery';
 import { InstantlyApiError } from './errors';
@@ -71,8 +73,11 @@ const PROJECT_BATCH_SIZE = 100;
  * Прочие ошибки входных данных — постоянные, для них строка нужна, чтобы
  * сохранить видимость без бесконечного повторения одного и того же сбоя.
  */
-const TRANSIENT_QUALIFY_ERROR_RE =
-  /\b(?:402|429|500|502|503|504)\b|Instantly email read deferred|overload|rate.?limit|fetch failed|network error|timed?.?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|aborted|failed after retries/i;
+const PROVIDER_FAILURE_QUALIFY_ERROR_RE =
+  /\b(?:402|429|500|502|503|504)\b|overload|rate.?limit|fetch failed|network error|timed?.?out|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|aborted/i;
+// These markers make a reply retryable, but do not prove a provider outage:
+// missing history, invalid AI output and per-reply budgets share the wrapper.
+const LOCAL_RETRY_QUALIFY_ERROR_RE = /Instantly email read deferred|failed after retries/i;
 const RETRIABLE_BILLING_QUALIFY_ERROR_RE =
   /\b(?:insufficient credits?|insufficient balance|balance is too low|payment required|out of credits?|spend(?:ing)? limit|billing limit)\b/i;
 const OWNERSHIP_DEFER_ERROR_PREFIX = 'Reply ownership deferred';
@@ -109,6 +114,7 @@ const SPECIALIST_ALERT_CLAIM_RPC = 'claim_instantly_specialist_alert';
 let lastOwnershipReviewRetryAt = 0;
 let lastOwnershipPageBudgetRetryAt = 0;
 let lastQualificationColdRetryAt = 0;
+let lastQualificationExpiryAt = 0;
 let ownershipRetryRunning = false;
 let ownershipRetryProviderPausedUntil = 0;
 let lastLeadDeliveryRetryAt = 0;
@@ -118,21 +124,57 @@ type SpecialistAlertClaimDecision =
   | { status: 'duplicate'; winnerQualificationId: string }
   | { status: 'retry'; reason: string };
 
-/** An operator archive is not a negative verdict. Keep the original row/id for
- * ingestion dedup, but stop direct webhook/recovery work before provider or AI
- * calls. Missing archive metadata fails closed until its migration is present. */
-async function qualificationQueueArchived(
+/** Archives and the persisted no-backfill window both fence AUTOMATIC work.
+ * Manual specialist actions are unchanged. An expired reply is not not_lead. */
+async function qualificationAutomationBlocked(
   db: NonNullable<typeof supabaseAdmin>,
   identity: { qualificationId: string } | { emailId: string },
 ): Promise<boolean> {
   let query = db.from('instantly_lead_qualifications')
-    .select('queue_archived_at');
+    .select('queue_archived_at, reply_timestamp, created_at');
   query = 'qualificationId' in identity
     ? query.eq('id', identity.qualificationId)
     : query.eq('instantly_email_id', identity.emailId);
   const { data, error } = await query.maybeSingle();
   if (error) throw new Error(`${OWNERSHIP_DEFER_ERROR_PREFIX}: queue archive state unavailable: ${error.message}`);
-  return data?.queue_archived_at != null;
+  if (data?.queue_archived_at != null) return true;
+  const notBefore = await qualificationAutomationPolicy(db);
+  return !!data && replyAutomationExpired(notBefore, data);
+}
+
+/** Stop automatic retries without changing the verdict, owner, source or AI
+ * budgets. The existing audited RPC also fences concurrent claims/delivery. */
+async function archiveExpiredQualification(
+  db: NonNullable<typeof supabaseAdmin>, qualificationId: string, nowMs: number,
+): Promise<void> {
+  if (await qualificationRecoveryDisposition(db, qualificationId, nowMs) !== 'ready') return;
+  const { data, error } = await db.rpc('archive_instantly_qualification_queue', {
+    p_batch_id: randomUUID(), p_qualification_ids: [qualificationId],
+    p_reason: 'Automatic processing window closed: pre-cutover history or 24-hour deadline; no AI verdict or notifications.',
+  });
+  if (error || !data) throw new Error('Reply ownership deferred: expired queue archive unavailable');
+}
+
+/** Expiry is independent of provider balance, retry backoff and old lane age. */
+export async function expireQualificationRetries(now = new Date()): Promise<void> {
+  if (!supabaseAdmin) return;
+  const db = supabaseAdmin;
+  const notBefore = await qualificationAutomationPolicy(db);
+  const cutoff = new Date(Math.max(notBefore, now.getTime() - 24 * 60 * 60_000)).toISOString();
+  const { data, error } = await db.from('instantly_lead_qualifications')
+    .select('id, reply_timestamp, created_at')
+    .is('queue_archived_at', null)
+    .in('status', ['pending', 'needs_review', 'error'])
+    .eq('ai_confidence', 0)
+    .or(`ai_reason.ilike.${OWNERSHIP_REVIEW_REASON_PREFIX}%,ai_reason.ilike.${TRANSIENT_RETRY_REASON_PREFIX}%`)
+    .or(`created_at.lte.${cutoff},reply_timestamp.lte.${cutoff}`)
+    .order('updated_at', { ascending: true }).limit(100);
+  if (error) throw new Error('Reply ownership deferred: expired queue lookup unavailable');
+  for (const row of data ?? []) {
+    if (replyAutomationExpired(notBefore, row, now.getTime())) {
+      await archiveExpiredQualification(db, row.id, now.getTime());
+    }
+  }
 }
 
 function isMissingSpecialistAlertClaimRpc(error: {
@@ -165,7 +207,7 @@ async function claimSpecialistThreadAlert(
   qualificationId: string,
   enqueueHandoff = false,
 ): Promise<SpecialistAlertClaimDecision> {
-  if (await qualificationQueueArchived(db, { qualificationId })) {
+  if (await qualificationAutomationBlocked(db, { qualificationId })) {
     return { status: 'duplicate', winnerQualificationId: qualificationId };
   }
   const { data, error } = await db.rpc(SPECIALIST_ALERT_CLAIM_RPC, {
@@ -295,7 +337,8 @@ async function persistLegacyLeadOwnerSnapshot(
 export function isTransientQualifyError(message: string): boolean {
   return (
     message.startsWith(OWNERSHIP_DEFER_ERROR_PREFIX) ||
-    TRANSIENT_QUALIFY_ERROR_RE.test(message) ||
+    PROVIDER_FAILURE_QUALIFY_ERROR_RE.test(message) ||
+    LOCAL_RETRY_QUALIFY_ERROR_RE.test(message) ||
     RETRIABLE_BILLING_QUALIFY_ERROR_RE.test(message)
   );
 }
@@ -862,6 +905,7 @@ export async function pollAndQualifyReplies(): Promise<number> {
     return 0;
   }
   const db = supabaseAdmin;
+  const notBefore = await qualificationAutomationPolicy(db);
 
   const apiKey = API_KEY();
   if (!apiKey) {
@@ -927,6 +971,7 @@ export async function pollAndQualifyReplies(): Promise<number> {
     try {
       const emails = await fetchRecentLinkedReplies(campaignSet, accountId);
       for (const e of emails) {
+        if (replyAutomationExpired(notBefore, e)) continue;
         replyEmails.push(e);
         if (e.id) accountByEmailId.set(e.id, accountId);
       }
@@ -1336,6 +1381,9 @@ export async function qualifyOneReply(
     onOwnershipEvidenceProgress?: () => void;
   },
 ): Promise<void> {
+  // Includes webhook/Others/direct entry points, not just the intake poller.
+  // Check before fetching history, resolving ownership or calling paid AI.
+  if (replyAutomationExpired(await qualificationAutomationPolicy(db), reply)) return;
   const providerCampaignId = reply.campaign_id;
   const leadEmail =
     reply.from_address_email ??
@@ -1347,7 +1395,7 @@ export async function qualifyOneReply(
   const archiveIdentity = opts?.existingQualificationId
     ? { qualificationId: opts.existingQualificationId }
     : reply.id ? { emailId: reply.id } : null;
-  if (archiveIdentity && await qualificationQueueArchived(db, archiveIdentity)) return;
+  if (archiveIdentity && await qualificationAutomationBlocked(db, archiveIdentity)) return;
 
   // Ящик, физически принявший письмо. Пишем в квалификацию и (для сирот)
   // показываем в DM — «в каком ящике искать ответ». Пустую строку схлопываем
@@ -1790,7 +1838,7 @@ export async function qualifyOneReply(
 
   // Ownership lookups can take seconds. Recheck by ID (recovery) or email ID
   // (direct ingestion) before paid classification in case an archive won.
-  if (archiveIdentity && await qualificationQueueArchived(db, archiveIdentity)) return;
+  if (archiveIdentity && await qualificationAutomationBlocked(db, archiveIdentity)) return;
 
   const result = await qualifyReply(campaignId, leadEmail, effectiveReply.thread_id, {
     apiKey,
@@ -1908,7 +1956,7 @@ export async function qualifyOneReply(
 
   // Archiving can win while ownership/AI work was already in flight. The DB
   // fences its commit; this fresh read also fences all downstream side effects.
-  if (inserted?.id && await qualificationQueueArchived(db, { qualificationId: inserted.id })) return;
+  if (inserted?.id && await qualificationAutomationBlocked(db, { qualificationId: inserted.id })) return;
 
   workerLog(
     'info',
@@ -1923,8 +1971,8 @@ export async function qualifyOneReply(
       const boardProjectId = qualifiedProjectId;
       await getOrCreateBoard(db, boardProjectId);
       // Шаг — тот же счёт, что ИИ видит в промпте («шаг N кампании»): наши
-      // исходящие (ue_type=1) в треде. Имя — фолбэк на заголовок письма,
-      // когда Instantly Lead API его не вернул.
+      // исходящие (ue_type=1) в треде. Заголовок письма — последний фолбэк
+      // имени, если ни в базе, ни в собственной подписи его не нашли.
       const stepNumber = result.threadContext
         ? result.threadContext.threadEmails.filter((e) => (e.ue_type ?? 1) === 1).length
         : null;
@@ -2165,7 +2213,9 @@ export async function refreshMissingRecoverySources(
   db: NonNullable<typeof supabaseAdmin>,
   emails: Email[],
 ): Promise<number> {
-  const byId = new Map(emails.filter(email => email.id && !email.id.startsWith('webhook:'))
+  const notBefore = await qualificationAutomationPolicy(db);
+  const byId = new Map(emails.filter(email => email.id && !email.id.startsWith('webhook:') &&
+    !replyAutomationExpired(notBefore, email))
     .map(email => [email.id, email]));
   const ids = [...byId.keys()];
   let refreshed = 0;
@@ -2252,8 +2302,9 @@ async function adoptLegacyQualificationRetries(
     cold: boolean; semantic: boolean; limit: number;
   },
 ): Promise<void> {
+  const notBefore = await qualificationAutomationPolicy(db);
   let query = db.from('instantly_lead_qualifications')
-    .select('id, status, instantly_email_id, ai_reason, error_message, updated_at')
+    .select('id, status, instantly_email_id, ai_reason, error_message, reply_timestamp, created_at, updated_at')
     .is('queue_archived_at', null)
     .in('status', options.semantic ? ['needs_review'] : ['needs_review', 'error'])
     .not('instantly_email_id', 'is', null)
@@ -2272,6 +2323,9 @@ async function adoptLegacyQualificationRetries(
     return;
   }
   for (const row of candidates ?? []) {
+    // Do not reopen/relabel historical error/review rows as a side effect of
+    // deploying the new worker. The withdrawal sweep owns generated retries.
+    if (replyAutomationExpired(notBefore, row, Date.parse(options.nowIso))) continue;
     const disposition = await qualificationRecoveryDisposition(db, row.id, Date.parse(options.nowIso));
     // Rotate handled/unreadable rows without erasing their historical verdict,
     // so they cannot monopolize every cold/legacy batch.
@@ -2307,7 +2361,7 @@ export interface OwnershipReviewRetryOptions {
   processingLeaseMs?: number;
   /** Soft budget between rows; never abandons a claimed in-flight reply. */
   timeBudgetMs?: number;
-  /** Old technical rows remain recoverable in a tiny, slow cold lane. */
+  /** Scheduling lane; all lanes obey the persisted cutoff and 24-hour limit. */
   lane?: 'fresh' | 'active' | 'page_budget' | 'cold';
 }
 
@@ -2388,6 +2442,7 @@ export async function reprocessOwnershipReviewRows(
   const db = supabaseAdmin;
   const now = options.now ?? new Date();
   const nowIso = now.toISOString();
+  const notBefore = await qualificationAutomationPolicy(db);
   const startedAt = Date.now();
   const timeBudgetMs = Math.max(1_000, Math.min(120_000,
     options.timeBudgetMs ?? envNumber(
@@ -2451,8 +2506,8 @@ export async function reprocessOwnershipReviewRows(
     await normalizeLegacyLocalQuotaBackoff(db, now.getTime(), retryReasonFilter);
   }
 
-  // Keep legacy repair bounded too: an old backlog must not monopolize a hot
-  // tick. The cold lane reaches failures older than the former seven-day DLQ.
+  // Keep legacy repair bounded. Adoption also checks the automation window;
+  // historical rows are not reopened merely because the worker was upgraded.
   if (!pageBudgetLane) {
     await adoptLegacyQualificationRetries(db, {
       nowIso, cutoffIso: freshLane ? freshCutoffIso : recentCutoffIso,
@@ -2506,12 +2561,12 @@ export async function reprocessOwnershipReviewRows(
     workerLog('warn', `ownership retry: stale-claim recovery failed: ${leaseError.message}`);
   }
 
-  // Age changes scheduling priority, never the business verdict. Old rows
-  // remain pending and are serviced by the cold lane, including page-budget cases.
+  // Age never changes the business verdict. Expired generated retries are
+  // withdrawn without provider/AI calls in every lane, including page-budget.
 
   let candidatesQuery = db
     .from('instantly_lead_qualifications')
-    .select('id, campaign_id, lead_email, instantly_email_id, status, ai_reason, ai_confidence, created_at, updated_at, recovery_attempts, recovery_failure_kind, recovery_failure_count, recovery_use_snapshot')
+    .select('id, campaign_id, lead_email, instantly_email_id, status, ai_reason, ai_confidence, reply_timestamp, created_at, updated_at, recovery_attempts, recovery_failure_kind, recovery_failure_count, recovery_use_snapshot')
     .is('queue_archived_at', null)
     .in('status', ['pending', 'needs_review'])
     .eq('ai_confidence', 0)
@@ -2570,10 +2625,15 @@ export async function reprocessOwnershipReviewRows(
     ai_reason: string | null;
     ai_confidence: number | null;
     created_at: string;
+    reply_timestamp?: string | null;
     updated_at: string;
   }>) {
     if (attempted >= limit) break;
     if (Date.now() - startedAt >= timeBudgetMs) break;
+    if (replyAutomationExpired(notBefore, raw, now.getTime())) {
+      await archiveExpiredQualification(db, raw.id, now.getTime());
+      continue; // no provider read, claim/attempt increment, AI or Telegram
+    }
     const emailId = raw.instantly_email_id?.trim();
     if (!emailId || emailId.startsWith('webhook:')) {
       await rotateSkippedCandidate(raw, 'not a provider email id');
@@ -2800,10 +2860,11 @@ export async function reprocessOwnershipReviewRows(
         .select('ai_reason').is('queue_archived_at', null)
         .eq('id', raw.id).eq('status', 'pending').eq('updated_at', nowIso).maybeSingle();
       if (pending) await db.from('instantly_lead_qualifications')
-        .update(backoff(String(pending.ai_reason ?? 'ownership')))
+        .update(backoff(pending.ai_reason?.startsWith(OWNERSHIP_REVIEW_REASON_PREFIX)
+          ? 'ownership recovery incomplete' : String(pending.ai_reason ?? 'ownership')))
         .is('queue_archived_at', null)
         .eq('id', raw.id).eq('status', 'pending').eq('updated_at', nowIso);
-      logAttempt(releaseError ? 'release_failed' : released ? 'pending' : 'completed_or_replaced');
+      logAttempt(releaseError ? 'release_failed' : released || pending ? 'pending' : 'completed_or_replaced');
     } catch (error) {
       const rawMessage = error instanceof Error ? error.message : String(error);
       const readDeferral = readInstantlyEmailReadDeferral(error);
@@ -2828,11 +2889,13 @@ export async function reprocessOwnershipReviewRows(
       workerLog('warn', `ownership retry failed for ${raw.id}; released with backoff`, error);
       logAttempt('pending', backoff(message).recovery_failure_kind);
       if (
-        !/Instantly email read deferred|AI checkpoint|AI paid attempt budget exhausted/i.test(message) &&
-        (TRANSIENT_QUALIFY_ERROR_RE.test(message) || RETRIABLE_BILLING_QUALIFY_ERROR_RE.test(message))
+        !/Instantly email read deferred|AI checkpoint|AI (?:final )?paid attempt budget exhausted/i.test(message) &&
+        (PROVIDER_FAILURE_QUALIFY_ERROR_RE.test(message) || RETRIABLE_BILLING_QUALIFY_ERROR_RE.test(message))
       ) {
         // Only a CURRENT provider failure pauses recovery. An old 402 in
-        // ai_reason must not keep a successfully recovered queue frozen.
+        // ai_reason must not keep a successfully recovered queue frozen. The
+        // generic retry wrapper alone is reply-local: its durable backoff must
+        // not prevent the next candidate or the other lanes from running.
         ownershipRetryProviderPausedUntil = Date.now() + Math.max(60_000,
           envNumber('INSTANTLY_OWNERSHIP_RETRY_PROVIDER_BACKOFF_MS', OWNERSHIP_RETRY_PROVIDER_BACKOFF_MS),
         );
@@ -2847,7 +2910,7 @@ export async function reprocessOwnershipReviewRows(
 
 export async function maybeReprocessOwnershipReviews(): Promise<number> {
   const nowMs = Date.now();
-  if (ownershipRetryRunning || nowMs < ownershipRetryProviderPausedUntil) return 0;
+  if (ownershipRetryRunning) return 0;
   const intervalMs = Math.max(
     60_000,
     envNumber('INSTANTLY_OWNERSHIP_RETRY_INTERVAL_MS', OWNERSHIP_REVIEW_RETRY_INTERVAL_MS),
@@ -2862,12 +2925,18 @@ export async function maybeReprocessOwnershipReviews(): Promise<number> {
   const freshDue = nowMs - lastQualificationFreshRetryAt >= 60_000;
   const pageBudgetDue = nowMs - lastOwnershipPageBudgetRetryAt >= pageBudgetIntervalMs;
   const coldDue = nowMs - lastQualificationColdRetryAt >= coldIntervalMs;
-  if (!freshDue && !activeDue && !pageBudgetDue && !coldDue) return 0;
+  const expiryDue = nowMs - lastQualificationExpiryAt >= 60_000;
+  if (!expiryDue && !freshDue && !activeDue && !pageBudgetDue && !coldDue) return 0;
   // A slow API call can exceed the fast interval. Keep same-process cycles
   // serial as well as retaining the cross-process row CAS claim.
   ownershipRetryRunning = true;
   try {
     const now = new Date(nowMs);
+    if (expiryDue) {
+      await expireQualificationRetries(now);
+      lastQualificationExpiryAt = nowMs;
+    }
+    if (nowMs < ownershipRetryProviderPausedUntil) return 0;
     let active = 0;
     let pageBudget = 0;
     let cold = 0;
@@ -2925,6 +2994,7 @@ export async function drainWebhookQueue(): Promise<number> {
   const db = supabaseAdmin;
   const apiKey = API_KEY();
   if (!apiKey) return 0;
+  const notBefore = await qualificationAutomationPolicy(db);
 
   const batchSize = envNumber('INSTANTLY_WEBHOOK_DRAIN_BATCH', 25);
   const minAgeMs = envNumber('INSTANTLY_WEBHOOK_DRAIN_MIN_AGE_MS', 3000);
@@ -2985,6 +3055,7 @@ export async function drainWebhookQueue(): Promise<number> {
     thread_id: string | null;
     created_at: string | null;
   }>) {
+    if (replyAutomationExpired(notBefore, row)) continue;
     const campaignId = row.campaign_id ?? '';
     const leadEmail = row.lead_email ?? '';
     if (!campaignId || !leadEmail) continue; // непригодное событие — оставляем acked
@@ -3014,6 +3085,7 @@ export async function drainWebhookQueue(): Promise<number> {
         campaign_id: ctx.replyEmail.campaign_id ?? campaignId,
       } as Email;
       if (!reply.id) continue; // без id невозможен дедуп-конвердж — пропускаем
+      if (replyAutomationExpired(notBefore, reply)) continue;
       replyForError = reply;
 
       // Дедуп по авторитетному id ДО AI: если поллинг (или прошлый drain) уже
@@ -3172,7 +3244,10 @@ export async function notifyClientOfReply(
   try {
     // Bot not configured → feature is dark; skip without touching the DB.
     if (!getClientRepliesBotToken()) return;
-    if (data.qualificationId && await qualificationQueueArchived(instantlyDb, {
+    if (replyAutomationExpired(await qualificationAutomationPolicy(instantlyDb), {
+      reply_timestamp: data.replyTimestamp,
+    })) return;
+    if (data.qualificationId && await qualificationAutomationBlocked(instantlyDb, {
       qualificationId: data.qualificationId,
     })) {
       await recordDelivery('blocked', 'qualification_queue_archived');
@@ -3366,7 +3441,7 @@ async function notifySpecialistsAboutLead(
 
   try {
     const userIds = new Set<string>();
-    if (await qualificationQueueArchived(instantlyDb, { qualificationId })) return;
+    if (await qualificationAutomationBlocked(instantlyDb, { qualificationId })) return;
     let clientName: string | null = null;
 
     let projectId = delivery?.projectId ?? null;
@@ -3700,6 +3775,7 @@ export async function reconcileLeadNotificationDeliveries(
   if (!supabaseAdmin || !supabaseMain) return 0;
   const instantlyDb = supabaseAdmin;
   const main = supabaseMain;
+  const notBefore = await qualificationAutomationPolicy(instantlyDb);
   if (!(await qualificationOwnerSnapshotSupported(instantlyDb))) return 0;
   const now = options.now ?? new Date();
   const nowIso = now.toISOString();
@@ -3784,6 +3860,7 @@ export async function reconcileLeadNotificationDeliveries(
     );
 
     for (const lead of leads) {
+      if (replyAutomationExpired(notBefore, lead, now.getTime())) continue;
       const replyBody = lead.reply_body ?? '';
       const replyPreview = lead.reply_preview ?? '';
       const storedReplyBody = replyBody.trim()
@@ -4243,8 +4320,8 @@ export async function maybePostLeadHandoff(opts: {
     if (!supabaseMain) return { disposition: 'retry', detail: 'main database unavailable' };
     const main = supabaseMain;
     const { instantlyDb, qualificationId, campaignId } = opts;
-    if (await qualificationQueueArchived(instantlyDb, { qualificationId })) {
-      return { disposition: 'skipped', detail: 'qualification queue archived' };
+    if (await qualificationAutomationBlocked(instantlyDb, { qualificationId })) {
+      return { disposition: 'skipped', detail: 'qualification archived or automatic processing window closed' };
     }
 
     // The delivery mode is snapshotted on materialization. In particular, an

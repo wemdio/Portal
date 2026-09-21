@@ -48,6 +48,7 @@ import {
 } from '@/lib/verticalEngineV2/contactDeliveryScheduler';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { runVeOutreachPreparations } from '@/lib/verticalEngineV2/outreachPreparation';
+import { autoResumeVeTransientPreparations, enqueueVeContactReprojections } from '@/lib/verticalEngineV2/outreachSetup';
 import type { VeJob, VeStage } from '@/lib/verticalEngineV2/types';
 
 const WORKER_ID = `vertical-engine-v2-${process.pid}`;
@@ -61,10 +62,19 @@ const CONTACT_DELIVERY_INTERVAL_MS =
   Number.isFinite(configuredContactDeliveryInterval) && configuredContactDeliveryInterval >= 60_000
     ? configuredContactDeliveryInterval
     : 5 * 60_000;
+/** Как часто воркер догоняет базы, которым сохранённый лимит адресов ещё не применён. */
+const CONTACT_CAP_SWEEP_INTERVAL_MS = 2 * 60_000;
+const TRANSIENT_RESUME_INTERVAL_MS = 5 * 60_000;
 /** Как часто воркер проверяет строку активной джобы на отмену пользователем. */
 const CANCEL_WATCH_MS = 3000;
 const RESEARCH_IDLE_TIMEOUT_MS = 15 * 60_000;
 const RESEARCH_ABORT_GRACE_MS = 30_000;
+// Base stages had no inactivity guard: an await that never settled kept the
+// row `running` while the process heartbeat stayed healthy (19.09.2026: four
+// base_collect jobs silent for more than a day, each holding a project slot).
+// Website reads and LLM calls are bounded well below this idle window.
+const BASE_IDLE_TIMEOUT_MS = 20 * 60_000;
+const BASE_ABORT_GRACE_MS = 2 * 60_000;
 // Leave one minute for metering/final cleanup before Compose's five-minute stop.
 const SHUTDOWN_CHECKPOINT_GRACE_MS = 4 * 60_000;
 
@@ -81,6 +91,46 @@ const HEARTBEAT_PATH = process.env.VE_WORKER_HEARTBEAT_PATH ?? '/tmp/vertical-en
 const log = createWorkerLogger(WORKER_ID);
 const db = requireSupabaseAdmin(log);
 const shouldStop = setupGracefulShutdown(log);
+
+/**
+ * A saved "addresses per company" limit that the base was too busy to apply
+ * (a running collection, letters being generated, an analysis in flight) stays
+ * recorded on the row. This sweep hands those bases to the queue once they are
+ * free, so a limit is never silently lost. It reads plain columns only and
+ * enqueues nothing paid: the job re-partitions already saved rows.
+ */
+let activeContactCapSweep: Promise<void> | null = null;
+function triggerContactCapSweep(): Promise<void> {
+  if (shouldStop() || activeContactCapSweep) return activeContactCapSweep ?? Promise.resolve();
+  const promise = enqueueVeContactReprojections(db)
+    .then((outcome) => {
+      if (outcome.queued > 0) log('info', `[contact-cap] лимит адресов на компанию поставлен в очередь для ${outcome.queued} баз`);
+    })
+    .catch((error) => log('warn', '[contact-cap] sweep failed', { error: error instanceof Error ? error.message : String(error) }))
+    .finally(() => { if (activeContactCapSweep === promise) activeContactCapSweep = null; });
+  activeContactCapSweep = promise;
+  return promise;
+}
+
+/**
+ * База, легшая на временном сбое провайдера, лежит до ручного «Продолжить
+ * подготовку»: 2026-09-21 так простаивали три базы из пятнадцати — не деньги
+ * кончились, а поиск моргнул. Этот проход поднимает только такие базы, с
+ * ограничением попыток и остыванием; оплата, конфигурация и ручная отмена
+ * не трогаются — их повтор либо бессмыслен, либо отменяет решение человека.
+ */
+let activeTransientResume: Promise<void> | null = null;
+function triggerTransientResumeSweep(): Promise<void> {
+  if (shouldStop() || activeTransientResume) return activeTransientResume ?? Promise.resolve();
+  const promise = autoResumeVeTransientPreparations(db)
+    .then((outcome) => {
+      if (outcome.resumed > 0) log('info', `[auto-resume] возвращено в работу после временного сбоя: ${outcome.resumed} баз`);
+    })
+    .catch((error) => log('warn', '[auto-resume] sweep failed', { error: error instanceof Error ? error.message : String(error) }))
+    .finally(() => { if (activeTransientResume === promise) activeTransientResume = null; });
+  activeTransientResume = promise;
+  return promise;
+}
 
 const contactDeliveryTick = createGuardedContactDeliveryTick({
   log: (level, message, extra) => log(level, `[contact-delivery] ${message}`, extra),
@@ -103,12 +153,14 @@ const contactDeliveryTick = createGuardedContactDeliveryTick({
 });
 
 let activeContactDeliveryTick: Promise<boolean> | null = null;
-const activeResearchAborts = new Set<AbortController>();
+// Every stage can now end in a process exit (inactivity watchdog), not only research.
+const activeJobAborts = new Set<AbortController>();
 
 function triggerContactDeliveryTick(): Promise<boolean> {
-  // Do not start a provider upload while a research process is being recovered.
-  // An already attempted upload keeps its durable uncertain/recovery semantics.
-  if (shouldStop() || [...activeResearchAborts].some((abort) => abort.signal.aborted)) return Promise.resolve(false);
+  // Do not start a provider upload while an aborted job may still end in a
+  // process exit. An already attempted upload keeps its durable
+  // uncertain/recovery semantics.
+  if (shouldStop() || [...activeJobAborts].some((abort) => abort.signal.aborted)) return Promise.resolve(false);
   const promise = contactDeliveryTick();
   if (!activeContactDeliveryTick) {
     activeContactDeliveryTick = promise;
@@ -139,16 +191,19 @@ const RESEARCH_STAGES = new Set<VeStage>([
 ]);
 
 async function resetStuckJobs() {
-  const { data } = await db
+  const { data, error } = await db
     .from('ve_jobs')
     .select('id')
     .eq('status', 'running');
+  if (error) { log('error', `Stuck running jobs could not be read: ${error.message}`); return; }
   if (data?.length) {
     log('info', `Resetting ${data.length} stuck running jobs to pending`);
-    await db
+    const { error: resetError } = await db
       .from('ve_jobs')
       .update({ status: 'pending', started_at: null, updated_at: new Date().toISOString() })
       .eq('status', 'running');
+    // A silent failure here left orphaned rows running until the next restart.
+    if (resetError) log('error', `Stuck running jobs were not reset: ${resetError.message}`);
   }
 }
 
@@ -197,24 +252,31 @@ async function handleJob(job: VeJob) {
   const abort = new AbortController();
   const isResearch = RESEARCH_STAGES.has(job.stage);
   let lastActivity = `stage ${job.stage} started`;
-  const watchdog = isResearch ? createVeJobWatchdog({
+  const idleMs = isResearch ? RESEARCH_IDLE_TIMEOUT_MS : BASE_IDLE_TIMEOUT_MS;
+  const graceMs = isResearch ? RESEARCH_ABORT_GRACE_MS : BASE_ABORT_GRACE_MS;
+  // The abort message contains "timeout", so failJob treats it as transient:
+  // the job returns to pending with backoff and its checkpoint, not to failed.
+  // An await that ignores the abort leaves a zombie that could later write
+  // stale state; the process exits so the container restart recovers the queue.
+  const watchdog = createVeJobWatchdog({
     abort,
-    idleMs: RESEARCH_IDLE_TIMEOUT_MS,
-    graceMs: RESEARCH_ABORT_GRACE_MS,
-    onTimeout: () => log('error', `Research inactivity timeout: job ${job.id}; last activity: ${lastActivity}`),
-    onUnresponsive: () => {
-      log('error', `Research job ${job.id} ignored abort for ${RESEARCH_ABORT_GRACE_MS}ms; exiting without starting another job`);
+    idleMs,
+    graceMs,
+    reason: `VE2 ${job.stage} inactivity timeout`,
+    // A cancel of one base must not recycle a process that runs 16 jobs.
+    escalateExternalAbort: isResearch,
+    onTimeout: () => log('error', `Inactivity timeout: job ${job.id} (${job.stage}) after ${idleMs}ms; last activity: ${lastActivity}`),
+    onUnresponsive: (waitedMs) => {
+      log('error', `Job ${job.id} (${job.stage}) ignored abort for ${waitedMs}ms; exiting without starting another job`);
       process.exit(1);
     },
-  }) : null;
+  });
   const shutdown = createVeJobShutdown({
     abort, immediate: isResearch, graceMs: SHUTDOWN_CHECKPOINT_GRACE_MS,
     onDeadline: () => log('warn', `Job ${job.id} did not reach a shutdown checkpoint; aborting for restart`),
   });
   const onShutdown = () => shutdown.request();
-  if (isResearch) {
-    activeResearchAborts.add(abort);
-  }
+  activeJobAborts.add(abort);
   process.once('SIGTERM', onShutdown);
   process.once('SIGINT', onShutdown);
   if (shouldStop()) shutdown.request();
@@ -255,27 +317,25 @@ async function handleJob(job: VeJob) {
       supabase: db,
       market,
       signal: abort.signal,
-      onCheckpoint: shutdown.checkpoint,
-      onActivity: () => watchdog?.touch(),
+      onCheckpoint: () => { watchdog.touch(); shutdown.checkpoint(); },
+      onActivity: () => watchdog.touch(),
       log: (msg) => {
         lastActivity = msg.slice(0, 500);
-        watchdog?.touch();
+        watchdog.touch();
         log('info', `[${job.stage}] ${msg}`);
       },
-    })));
+    }), () => watchdog.touch()));
     if (isResearch) abort.signal.throwIfAborted();
   } finally {
     // Deliberately guard execution, not the legacy non-atomic done→enqueue
     // finalization. Never kill between those writes as a recovery strategy.
     watching = false;
     clearInterval(cancelWatcher);
-    watchdog?.stop();
+    watchdog.stop();
     shutdown.stop();
     process.removeListener('SIGTERM', onShutdown);
     process.removeListener('SIGINT', onShutdown);
-    if (isResearch) {
-      activeResearchAborts.delete(abort);
-    }
+    activeJobAborts.delete(abort);
   }
   const tokensUsed = stageResult.tokensUsed ?? 0;
   const costUsd = stageResult.costUsd ?? 0;
@@ -493,6 +553,10 @@ async function main() {
     OUTREACH_PREPARATION_INTERVAL_MS,
   );
   if (typeof outreachPreparationTimer.unref === 'function') outreachPreparationTimer.unref();
+  const contactCapTimer = setInterval(() => { void triggerContactCapSweep(); }, CONTACT_CAP_SWEEP_INTERVAL_MS);
+  if (typeof contactCapTimer.unref === 'function') contactCapTimer.unref();
+  const transientResumeTimer = setInterval(() => { void triggerTransientResumeSweep(); }, TRANSIENT_RESUME_INTERVAL_MS);
+  if (typeof transientResumeTimer.unref === 'function') transientResumeTimer.unref();
 
   try {
     // Delivery is independent from VE research/template jobs; do not hold the
@@ -501,6 +565,8 @@ async function main() {
     // Preparation only coordinates durable jobs. Keep it advancing while a
     // collection or model call occupies the main worker for several minutes.
     void triggerOutreachPreparationTick();
+    void triggerContactCapSweep();
+    void triggerTransientResumeSweep();
     await pollLoop({
       log,
       pollIntervalMs: POLL_INTERVAL_MS,
@@ -509,11 +575,14 @@ async function main() {
       realtimeTables: ['ve_jobs'],
     });
   } finally {
+    clearInterval(transientResumeTimer);
     clearInterval(contactDeliveryTimer);
     clearInterval(outreachPreparationTimer);
+    clearInterval(contactCapTimer);
     await jobPool.drain();
     if (activeContactDeliveryTick) await activeContactDeliveryTick;
     if (activeOutreachPreparationTick) await activeOutreachPreparationTick;
+    if (activeContactCapSweep) await activeContactCapSweep;
     clearInterval(heartbeat);
   }
 

@@ -10,33 +10,74 @@ const MAX_SITE_LOOKUPS = 10_000;
 const resultSchema = z.object({ website: z.string().max(1000), reason: z.string().max(400) });
 const checkpointSchema = z.object({ version: z.literal(1), checked: z.record(z.string(), resultSchema) });
 export type VeSourceContactCheckpoint = z.infer<typeof checkpointSchema>;
-export const VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT = 200;
-const discoveryBudgetSchema = z.object({
-  version: z.literal(1),
+/** Окно рентабельности добора: столько платных поисков сайта подряд движок
+ * оплачивает, пока они не дали НИ ОДНОГО готового контакта. Замер 21.09.2026 по
+ * 56 базам (13 804 поиска, 1 815 сайтов, 201 контакт = 1,46 %): при 120 правило
+ * снимает 49,5 % поисков ценой 6,8 % контактов — 501 поиск на один потерянный
+ * контакт. При 200 — 40,8 % / 4,8 %. Смягчение — правка этого числа. */
+export const VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT = 120;
+/** Метка, которую applyVeSourceContacts ставит строке с НАЙДЕННЫМ сайтом:
+ * единственный признак, отличающий контакт, купленный добором, от бесплатного. */
+export const VE_SOURCE_DISCOVERY_MARK = 'Официальный сайт подтверждён по данным компании:';
+const discoveryBudgetFields = {
   checked_at_growth: z.number().int().nonnegative().safe(),
   ready_high_water: z.number().int().nonnegative().safe(),
   paused: z.boolean(),
-});
+};
+/** v2: ready_high_water считается в КОНТАКТАХ ДОБОРА. v1 хранил там общее число
+ *  готовых строк базы — величину другого порядка (на проде 242, 417, 499 против
+ *  3, 21, 6 купленных добором). Сравнивать их нельзя: ветка роста стала бы
+ *  недостижимой, и окно превратилось бы в необратимый стоп-кран. */
+const discoveryBudgetSchema = z.object({ version: z.literal(2), ...discoveryBudgetFields });
+const legacyDiscoveryBudgetSchema = z.object({ version: z.literal(1), ...discoveryBudgetFields });
 export type VeSourceDiscoveryBudget = z.infer<typeof discoveryBudgetSchema>;
+
+/**
+ * Companies to look up in one paid-discovery step. A lookup yields a ready
+ * contact only for a fraction of companies, so asking for exactly the missing
+ * count made bases at 499/500 look up ONE company per round and burn dozens of
+ * full rounds (constructor, checks, multi-megabyte saves) for one contact
+ * (19.09.2026). Scale by the observed yield, never below a useful handful; the
+ * no-growth allowance and the per-step cap still bound the spend (a lookup is
+ * about a tenth of a cent).
+ */
+export function veSourceDiscoveryLimit(input: { readyTarget?: number; readyRows?: number; candidatesProcessed?: number; remaining?: number }): number {
+  const cap = Math.max(0, Math.min(16, input.remaining ?? 16));
+  if (input.readyTarget === undefined || input.readyRows === undefined) return cap;
+  const missing = input.readyTarget - input.readyRows;
+  if (!(missing > 0)) return 0;
+  const observed = (input.candidatesProcessed ?? 0) > 0 ? input.readyRows / input.candidatesProcessed! : 0.05;
+  return Math.min(cap, Math.max(8, Math.ceil(missing / Math.min(1, Math.max(0.05, observed)))));
+}
 
 /** Call only after found sites and in-flight validations have been drained.
  * Counts completed company lookups, not billable credits (cache hits are free).
  * Legacy runs start an observed cohort; their historical yield is unknown. */
+/** Прирост считаем ТОЛЬКО по контактам, купленным добором (метка источника), а
+ * НЕ по target.ready_rows: тот растёт и от бесплатного лейна, и чужой успех
+ * обнулял окно платного поиска («Цемент» 799d3008: ready 417 при high-water 364,
+ * поэтому окно не закрывалось никогда). */
 export function evaluateVeSourceDiscoveryBudget(input: {
-  budget?: unknown; checkpoint?: unknown; readyRows: number;
+  budget?: unknown; checkpoint?: unknown; discoveryContacts: number;
 }): { budget: VeSourceDiscoveryBudget; remaining: number } {
   const checked = Object.keys(readState(input.checkpoint).checked).length;
-  const parsed = discoveryBudgetSchema.safeParse(input.budget === undefined ? {
-    version: 1, checked_at_growth: checked, ready_high_water: input.readyRows, paused: false,
-  } : input.budget);
-  if (!parsed.success || !Number.isSafeInteger(input.readyRows) || input.readyRows < 0
+  const fresh = { version: 2 as const, checked_at_growth: checked, ready_high_water: input.discoveryContacts, paused: false };
+  // Документ v1 пересеиваем, а не отвергаем: его ready_high_water измерен в
+  // других единицах, и падение стадии здесь остановило бы сбор на ровном месте.
+  // Пересев даёт базе одно полное окно в новых единицах — это осознанная плата
+  // за смену смысла, и она случается один раз на базу.
+  const legacy = input.budget !== undefined && !discoveryBudgetSchema.safeParse(input.budget).success
+    && legacyDiscoveryBudgetSchema.safeParse(input.budget).success;
+  const parsed = discoveryBudgetSchema.safeParse(
+    input.budget === undefined || legacy ? fresh : input.budget);
+  if (!parsed.success || !Number.isSafeInteger(input.discoveryContacts) || input.discoveryContacts < 0
     || checked < parsed.data.checked_at_growth) {
     throw new VeRelevanceCheckpointError('Source discovery budget checkpoint is invalid');
   }
   const budget = { ...parsed.data };
-  if (input.readyRows > budget.ready_high_water) {
+  if (input.discoveryContacts > budget.ready_high_water) {
     budget.checked_at_growth = checked;
-    budget.ready_high_water = input.readyRows;
+    budget.ready_high_water = input.discoveryContacts;
     budget.paused = false;
   }
   const remaining = Math.max(0, VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT - (checked - budget.checked_at_growth));
@@ -84,8 +125,18 @@ export function applyVeSourceContacts<T extends SourceRow>(rows: T[], value?: un
   return rows.map((row) => {
     const found = state.checked[keyFor(row)]?.website;
     return normalizeVeSourceContacts(found ? { ...row, website: found,
-      source_detail: `${row.source_detail}\nОфициальный сайт подтверждён по данным компании: ${found}` } : row);
+      source_detail: `${row.source_detail}\n${VE_SOURCE_DISCOVERY_MARK} ${found}` } : row);
   });
+}
+
+/** Готовые контакты, КУПЛЕННЫЕ добором. В проекции base.data метку несут только
+ * строки, прошедшие email- и relevance-гейты, поэтому отдельная проверка не нужна. */
+export function countVeSourceDiscoveryContacts(rows: unknown): number {
+  if (!Array.isArray(rows)) return 0;
+  return rows.reduce<number>((total, row) => {
+    const detail = (row as { source_detail?: unknown } | null)?.source_detail;
+    return total + (typeof detail === 'string' && detail.includes(VE_SOURCE_DISCOVERY_MARK) ? 1 : 0);
+  }, 0);
 }
 
 /** One bounded discovery pass, eight sites at a time. Completed searches are
@@ -105,7 +156,12 @@ export async function recoverVeSourceContacts<T extends SourceRow>(input: {
     // survive a provider error in another search.
     const results = await Promise.allSettled(pending.slice(start, start + 8).map(async (row) => {
       const evidence = await (input.fetchEvidence ?? fetchVeRelevanceEvidence)('', {
+        // Этот проход ищет сайты ровно тем строкам, у которых сайта нет, —
+        // и покупал поиск, не попробовав домен их же корпоративной почты.
+        // Бесплатный кандидат уже реализован, но задействован был только из
+        // гейта: 6 444 строки резерва платили за то, что лежало в них самих.
         signal: input.signal, companyInn: row.inn, companyName: row.company, companyAddress: row.address,
+        companyEmail: row.email,
       });
       if (evidence.provider_error) throw new Error(evidence.provider_error.message);
       state.checked[keyFor(row)] = { website: evidence.status === 'ok' ? evidence.url : '', reason: evidence.reason.slice(0, 400) };

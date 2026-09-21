@@ -21,6 +21,15 @@ const sendLeadTelegramAlert = jest.fn();
 const sendClientReplyTelegram = jest.fn();
 const postHandoffMessage = jest.fn();
 const editHandoffMessage = jest.fn();
+const mockReplyAutomationExpired = jest.fn();
+let mockAutomationNotBefore = 0;
+
+// The existing ownership fixtures intentionally replay fixed historical
+// dates. Test their routing separately from the new production time window.
+jest.mock('@/lib/instantly/qualificationAutomationPolicy', () => ({
+  qualificationAutomationPolicy: async () => mockAutomationNotBefore,
+  replyAutomationExpired: (...args: unknown[]) => mockReplyAutomationExpired(...args),
+}));
 
 jest.mock('@/lib/supabaseInstantly', () => ({
   get supabaseInstantly() {
@@ -529,6 +538,8 @@ describe('pollAndQualifyReplies', () => {
 
   beforeEach(() => {
     jest.resetModules();
+    mockReplyAutomationExpired.mockReset().mockReturnValue(false);
+    mockAutomationNotBefore = 0;
     listEmails.mockReset();
     getLeadsByEmail.mockReset().mockResolvedValue([]);
     getCampaign.mockReset().mockResolvedValue({ id: 'linked-campaign', name: 'Кампания Новикова' });
@@ -3750,6 +3761,102 @@ describe('pollAndQualifyReplies', () => {
     expect(listEmails).not.toHaveBeenCalled();
   });
 
+  it('stores malformed email Unicode without breaking pages, newlines, emoji or literal escapes', async () => {
+    const { encodeReplyIntakeEmail, decodeReplyIntakeEmail } = await import('@/lib/instantly/replyIntakePayload');
+    const text = 'Hello\u0000\nЗдравствуйте 😀\nLiteral: \\u0000\nBroken: \ud800';
+    const expected = 'Hello\nЗдравствуйте 😀\nLiteral: \\u0000\nBroken: ';
+    const encoded = encodeReplyIntakeEmail(replyEmail({ body: { text } }));
+    expect(decodeReplyIntakeEmail(encoded).body).toEqual({ text: expected });
+
+    // Real outgoing HTTP boundary, fake fetch: no database/network side effects.
+    const oldFetch = globalThis.fetch;
+    const oldUrl = process.env.INSTANTLY_SUPABASE_URL;
+    const oldKey = process.env.INSTANTLY_SUPABASE_SERVICE_ROLE_KEY;
+    const fetch = jest.fn().mockImplementation(async () => new Response('{"state":"saved"}', {
+      headers: { 'content-type': 'application/json' },
+    }));
+    try {
+      globalThis.fetch = fetch;
+      process.env.INSTANTLY_SUPABASE_SERVICE_ROLE_KEY = 'test';
+      for (const url of ['http://localhost:9999', 'https://test.supabase.co']) {
+        jest.resetModules();
+        fetch.mockClear();
+        process.env.INSTANTLY_SUPABASE_URL = url;
+        const { supabaseInstantly } = jest.requireActual('@/lib/supabaseInstantly');
+        const result = await supabaseInstantly.rpc('stage_instantly_reply_page', {
+          p_items: [{ email_payload: { body: { text } }, preview: '😀'.slice(0, 1) }],
+        });
+        expect(result.error).toBeNull();
+        const [requestUrl, init] = fetch.mock.calls[0];
+        expect(JSON.parse(init.body).p_items).toEqual([
+          { email_payload: { body: { text: expected } }, preview: '' },
+        ]);
+        const hosted = url.includes('supabase.co');
+        expect(new Headers(init.headers).get('apikey')).toBe(hosted ? 'test' : null);
+        expect(new Headers(init.headers).get('Authorization')).toBe(hosted ? 'Bearer test' : null);
+        expect(String(requestUrl).includes('/rest/v1/')).toBe(hosted);
+      }
+    } finally {
+      globalThis.fetch = oldFetch;
+      if (oldUrl === undefined) delete process.env.INSTANTLY_SUPABASE_URL;
+      else process.env.INSTANTLY_SUPABASE_URL = oldUrl;
+      if (oldKey === undefined) delete process.env.INSTANTLY_SUPABASE_SERVICE_ROLE_KEY;
+      else process.env.INSTANTLY_SUPABASE_SERVICE_ROLE_KEY = oldKey;
+    }
+  });
+
+  it('withdraws pre-cutover/expired retries without provider, AI, changed verdict or Telegram', async () => {
+    const policy = jest.requireActual('@/lib/instantly/qualificationAutomationPolicy');
+    mockReplyAutomationExpired.mockImplementation(policy.replyAutomationExpired);
+    const now = Date.now();
+    mockAutomationNotBefore = now - 3 * 24 * 60 * 60_000;
+    const old = ownershipReviewRow({ status: 'pending', recovery_attempts: 307,
+      reply_timestamp: new Date(now - 25 * 60 * 60_000).toISOString(),
+      created_at: new Date(now - 25 * 60 * 60_000).toISOString() });
+    mockInstantlyDb = createMockSupabase({
+      tables: { instantly_lead_qualifications: [old] },
+      rpcHandlers: {
+        archive_instantly_qualification_queue: async (args, db) => {
+          await db.from('instantly_lead_qualifications')
+            .update({ queue_archived_at: new Date(now).toISOString(), queue_archive_batch_id: args.p_batch_id })
+            .eq('id', old.id);
+          return { data: { archived: 1, skipped: 0 } };
+        },
+      },
+    });
+    const worker = await import('@/lib/instantly/leadQualificationWorker');
+    await worker.expireQualificationRetries(new Date(now));
+    await worker.reprocessOwnershipReviewRows({ now: new Date(now), minRetryAgeMs: 0 });
+    mockAutomationNotBefore = now; // recent pre-deployment mail is history too
+    await worker.qualifyOneReply(mockInstantlyDb as never, replyEmail({
+      timestamp_email: new Date(now - 60_000).toISOString(),
+    }), 'test-ai-key');
+    expect(mockInstantlyDb.getRows('instantly_lead_qualifications')[0]).toEqual(expect.objectContaining({
+      status: 'pending', recovery_attempts: 307, queue_archived_at: new Date(now).toISOString(),
+    }));
+    expect(getEmail).not.toHaveBeenCalled();
+    expect(fetchThreadContext).not.toHaveBeenCalled();
+    expect(qualifyReply).not.toHaveBeenCalled();
+    expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+    expect(sendClientReplyTelegram).not.toHaveBeenCalled();
+    expect(postHandoffMessage).not.toHaveBeenCalled();
+    expect(policy.replyAutomationExpired(now, { timestamp_email: new Date(now).toISOString() }, now)).toBe(false);
+    expect(policy.replyAutomationExpired(0, { created_at: new Date(now - 24 * 60 * 60_000).toISOString() }, now)).toBe(true);
+
+    // The same real policy must still let fresh replies reach classification
+    // and delivery (all external calls here remain mocked).
+    mockAutomationNotBefore = now - 60 * 60_000;
+    const freshTime = new Date(now - 5 * 60_000).toISOString();
+    const { inbound } = installOwnershipReviewRetryFixture({ row: {
+      created_at: freshTime, updated_at: freshTime, reply_timestamp: freshTime,
+    } });
+    inbound.timestamp_email = freshTime;
+    expect(await worker.reprocessOwnershipReviewRows({ now: new Date(now), minRetryAgeMs: 0 })).toBe(1);
+    expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[0].status).toBe('lead');
+    expect(qualifyReply).toHaveBeenCalledTimes(1);
+    expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
+  });
+
   describe('ownership-review reconciliation', () => {
     const retryNow = new Date('2026-08-24T18:00:00.000Z');
 
@@ -4425,13 +4532,76 @@ describe('pollAndQualifyReplies', () => {
       expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
     });
 
-    it('releases a transient provider failure back to pending with the same backoff', async () => {
+    it('backs off failed replies but pauses other candidates and lanes only for provider failures', async () => {
       const clock = jest.spyOn(Date, 'now');
       try {
+        for (const reason of [
+          'outbound history unavailable',
+          'thread context unavailable',
+          'AI returned an invalid response envelope',
+          'AI response hit the output token limit',
+          'AI checkpoint busy',
+          'AI paid attempt budget exhausted',
+          'AI final paid attempt budget exhausted',
+          'automatic adjudication request budget exhausted',
+        ]) {
+          jest.resetModules();
+          clock.mockReturnValue(retryNow.getTime());
+          getEmail.mockReset();
+          qualifyReply.mockReset();
+          sendLeadTelegramAlert.mockClear();
+          const { inbound } = installOwnershipReviewRetryFixture({
+            verdict: 'not_lead', enforceQueryWindows: true,
+          });
+          const waitingRow = ownershipReviewRow({
+            id: 'waiting-qualification', instantly_email_id: 'waiting-email',
+            updated_at: '2026-08-24T17:00:00.000Z',
+          });
+          await mockInstantlyDb!.from('instantly_lead_qualifications').insert(waitingRow);
+          getEmail.mockImplementation(async (id: string) => ({ ...inbound, id }));
+          const message = `AI classification failed after retries: ${reason}`;
+          qualifyReply.mockRejectedValueOnce(new Error(message));
+          const worker = await import('@/lib/instantly/leadQualificationWorker');
+
+          expect(worker.isTransientQualifyError(message)).toBe(true);
+          expect(await worker.reprocessOwnershipReviewRows({
+            now: retryNow, minRetryAgeMs: 15 * 60_000,
+          })).toBe(2);
+          expect(getEmail).toHaveBeenCalledTimes(2);
+          expect(qualifyReply).toHaveBeenCalledTimes(2);
+          const failed = mockInstantlyDb!.getRows('instantly_lead_qualifications')[0];
+          expect(failed).toMatchObject({
+            id: 'ownership-review-qualification', status: 'pending',
+            recovery_attempts: 1, error_message: expect.stringContaining(message),
+          });
+          expect(Date.parse(String(failed.recovery_next_at))).toBeGreaterThan(retryNow.getTime());
+          expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[1]).toMatchObject({
+            id: 'waiting-qualification', status: 'not_lead', error_message: null,
+          });
+
+          // A per-reply backoff must not set the shared circuit breaker or
+          // stop another scheduled lane. The failed row stays untouched.
+          await mockInstantlyDb!.from('instantly_lead_qualifications').insert(ownershipReviewRow({
+            id: 'fresh-qualification', instantly_email_id: 'fresh-email',
+            created_at: '2026-08-24T17:30:00.000Z', updated_at: '2026-08-24T17:30:00.000Z',
+          }));
+          clock.mockReturnValue(retryNow.getTime() + 60_000);
+          expect(await worker.maybeReprocessOwnershipReviews()).toBe(1);
+          expect(getEmail).toHaveBeenLastCalledWith('fresh-email', expect.objectContaining({ accountId: 'main' }));
+          expect(qualifyReply).toHaveBeenCalledTimes(3);
+          expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[0]).toEqual(failed);
+          expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')[2]).toMatchObject({ status: 'not_lead' });
+          expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+        }
+
         for (const message of [
           'Instantly API 503: overloaded',
           'AI API 402: balance too low',
           'Instantly API 429: rate limit exceeded',
+          'AI API 412: Reached monthly spend limit for API key.',
+          'AI classification failed after retries: AI API 503: overloaded',
+          'AI classification failed after retries: AI response body timed out',
+          'Network error: fetch failed',
         ]) {
           jest.resetModules();
           clock.mockReturnValue(retryNow.getTime());
@@ -4450,7 +4620,8 @@ describe('pollAndQualifyReplies', () => {
             updated_at: '2026-08-24T17:00:00.000Z',
           });
           await mockInstantlyDb!.from('instantly_lead_qualifications').insert(waitingRow);
-          if (message.startsWith('AI API')) {
+          const aiFailure = !message.startsWith('Instantly API');
+          if (aiFailure) {
             qualifyReply.mockRejectedValueOnce(new Error(message));
           } else {
             getEmail.mockRejectedValueOnce(new Error(message));
@@ -4502,7 +4673,7 @@ describe('pollAndQualifyReplies', () => {
           clock.mockReturnValue(retryNow.getTime() + 17 * 60_000);
           expect(await worker.maybeReprocessOwnershipReviews()).toBe(0);
           // The initial successful email fetch survives an AI billing outage.
-          expect(getEmail).toHaveBeenCalledTimes(message.startsWith('AI API') ? 2 : 3);
+          expect(getEmail).toHaveBeenCalledTimes(/^AI API (?:402|412):/.test(message) ? 2 : 3);
           expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(2);
         }
       } finally {

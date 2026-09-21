@@ -8,6 +8,7 @@ import { enqueueVeBaseCollect } from '@/lib/verticalEngineV2/baseCollectEnqueue'
 import { claimVeJob, createVeJobPool, createVeProjectUsageAccumulator, canRunVeJob, veJobConcurrency, veBaseCollectConcurrency } from '@/lib/verticalEngineV2/jobQueue';
 import type { VeJob } from '@/lib/verticalEngineV2/types';
 import { runVeOutreachPreparations } from '@/lib/verticalEngineV2/outreachPreparation';
+import { autoResumeVeTransientPreparations, enqueueVeContactReprojections } from '@/lib/verticalEngineV2/outreachSetup';
 
 let mockRouteDb = createMockSupabase();
 jest.mock('@/lib/supabaseAdmin', () => ({ get supabaseAdmin() { return mockRouteDb; } }));
@@ -18,7 +19,7 @@ jest.mock('@/lib/toolTrace', () => ({
   withToolTrace: async (_options: unknown, handler: () => Promise<unknown>) => handler(),
 }));
 jest.mock('@/lib/loggerServer', () => ({ logAudit: jest.fn(), logError: jest.fn() }));
-jest.mock('@/lib/verticalEngineV2/outreachSetup', () => ({ loadVeOutreachSetup: jest.fn(async () => ({})) }));
+jest.mock('@/lib/verticalEngineV2/outreachSetup', () => ({ ...jest.requireActual('@/lib/verticalEngineV2/outreachSetup'), loadVeOutreachSetup: jest.fn(async () => ({})) }));
 import { POST as collectPreview } from '@/app/api/tools/vertical-engine-v2/verticals/[id]/collect/route';
 import { POST as prepareOutreach } from '@/app/api/tools/vertical-engine-v2/projects/[id]/outreach/route';
 
@@ -217,6 +218,57 @@ describe('VE2 base collection enqueue recovery', () => {
     expect(mockRouteDb.rpcCalls).toHaveLength(1);
     expect((await request({})).status).toBe(200);
     expect(mockRouteDb.rpcCalls[1].fn).toBe('ve_request_outreach_preparation');
+
+    // The specialist's "addresses per company" limit: saved through its own RPC.
+    // The nudge only asks the queue for bases whose applied value is out of date
+    // and only when the limit was tightened; everything else waits for the sweep.
+    mockRouteDb = createMockSupabase({ tables: { ve_projects: [{ id: projectId }], ve_bases: [
+      { id: 'tightened', project_id: projectId, source: 'auto', status: 'analyzed', hypothesis_id: hypothesisId, max_emails_per_company: 3, contact_cap_applied: 5, updated_at: '2026-09-20T03:00:00Z' },
+      { id: 'first-time', project_id: projectId, source: 'auto', status: 'analyzed', hypothesis_id: hypothesisId, max_emails_per_company: 3, contact_cap_applied: null, updated_at: '2026-09-20T02:00:00Z' },
+      { id: 'already', project_id: projectId, source: 'auto', status: 'analyzed', hypothesis_id: hypothesisId, max_emails_per_company: 3, contact_cap_applied: 3, updated_at: '2026-09-20T01:00:00Z' },
+      { id: 'loosened', project_id: projectId, source: 'auto', status: 'analyzed', hypothesis_id: hypothesisId, max_emails_per_company: 9, contact_cap_applied: 3, updated_at: '2026-09-20T00:30:00Z' },
+      { id: 'running', project_id: projectId, source: 'auto', status: 'collecting', hypothesis_id: hypothesisId, max_emails_per_company: 3, contact_cap_applied: null, updated_at: '2026-09-20T00:00:00Z' },
+    ] }, rpcHandlers: {
+      ve_save_outreach_contact_limit: () => ({ data: null }),
+      ve_enqueue_contact_reprojection: () => ({ data: { ok: true, queued: true } }),
+    } });
+    const limit = (max: unknown) => prepareOutreach(new NextRequest('http://portal.test/outreach', {
+      method: 'POST', body: JSON.stringify({ action: 'contact_limit', revision: 7, max_emails_per_company: max }),
+    }), { params: Promise.resolve({ id: projectId }) });
+    for (const invalid of [0, 1.5, '5', 101, undefined]) expect((await limit(invalid)).status).toBe(400);
+    expect(mockRouteDb.rpcCalls).toHaveLength(0);
+    expect((await limit(3)).status).toBe(200);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockRouteDb.rpcCalls.map((call) => [call.fn, call.params])).toEqual([
+      ['ve_save_outreach_contact_limit', { p_project_id: projectId, p_revision: 7, p_max: 3, p_actor: expect.anything() }],
+      ['ve_enqueue_contact_reprojection', { p_base_id: 'tightened' }],
+      ['ve_enqueue_contact_reprojection', { p_base_id: 'first-time' }],
+    ]);
+    // The worker sweep catches up with whatever was busy, through its own scan.
+    const sweepReady = '00000000-0000-4000-8000-000000000401';
+    const sweepBusy = '00000000-0000-4000-8000-000000000402';
+    const sweepDb = createMockSupabase({ rpcHandlers: {
+      ve_pending_contact_reprojections: () => ({ data: [sweepReady, sweepBusy, 'not-a-uuid'] }),
+      ve_enqueue_contact_reprojection: ({ p_base_id }: Record<string, unknown>) => ({ data: { ok: true, queued: p_base_id === sweepReady } }),
+    } });
+    await expect(enqueueVeContactReprojections(sweepDb as unknown as SupabaseClient)).resolves.toEqual({ queued: 1, pending: 1 });
+    expect((await limit(null)).status).toBe(200);
+
+    // Автоподъём после временного сбоя: все проверки живут в RPC, наружу
+    // отдаётся только число поднятых, а сбой самой RPC не глотается молча —
+    // иначе воркер годами «поднимал бы ноль» и никто бы не заметил.
+    const resumeCalls: Array<Record<string, unknown>> = [];
+    const resumeDb = createMockSupabase({ rpcHandlers: {
+      ve_auto_resume_transient_preparations: (params: Record<string, unknown>) => { resumeCalls.push(params); return { data: 3 }; },
+    } });
+    await expect(autoResumeVeTransientPreparations(resumeDb as unknown as SupabaseClient)).resolves.toEqual({ resumed: 3 });
+    expect(resumeCalls).toEqual([{ p_limit: 10 }]);
+    const brokenDb = createMockSupabase({ rpcHandlers: {
+      ve_auto_resume_transient_preparations: () => ({ data: null, error: { message: 'rpc down' } }),
+    } });
+    await expect(autoResumeVeTransientPreparations(brokenDb as unknown as SupabaseClient)).rejects.toThrow('rpc down');
+    const oddDb = createMockSupabase({ rpcHandlers: { ve_auto_resume_transient_preparations: () => ({ data: null }) } });
+    await expect(autoResumeVeTransientPreparations(oddDb as unknown as SupabaseClient)).resolves.toEqual({ resumed: 0 });
   });
 
   it('repairs an orphan collecting base that has no active worker job', async () => {
@@ -262,22 +314,27 @@ describe('VE2 base collection enqueue recovery', () => {
       target_progress: { round: 2, status: 'collecting', candidates_processed: 3 },
       target_checkpoint: { completed_round: 1 },
       tasks: [{ source: 'hh_live', status: 'dispatched', child_job_id: 'paid-child' }] };
-    const interruptedDb = createMockSupabase({ tables: {
-      ve_hypotheses: [{ id: 'h1', title: 'Law firms' }],
-      ve_bases: [{ id: 'interrupted', project_id: input.projectId, vertical_id: input.verticalId,
-        hypothesis_id: 'h1', source: 'auto', status: 'failed', collect_info: savedInfo,
-        error: 'Provider usage journal could not be saved.' }],
-      ve_jobs: [{ id: 'old-job', project_id: input.projectId, stage: 'base_collect', status: 'failed',
-        payload: { base_id: 'interrupted' } }],
-    } });
-    for (let attempt = 0; attempt < 2; attempt++) {
-      await expect(enqueueVeBaseCollect(interruptedDb as unknown as SupabaseClient, {
-        ...input, hypothesisIds: ['h1'], collectionMode: 'preview',
-      })).resolves.toMatchObject({ ok: true, base: { id: 'interrupted' } });
+    // An exhausted 429 wait ends the same way: the round stays coherent.
+    // So does a final inactivity-watchdog failure: never a new paid base.
+    for (const interruption of ['Provider usage journal could not be saved.',
+      'Requesty 429: сервис ИИ временно ограничил запросы; результаты сохранены.',
+      'VE2 base_collect inactivity timeout after 1200000ms']) {
+      const interruptedDb = createMockSupabase({ tables: {
+        ve_hypotheses: [{ id: 'h1', title: 'Law firms' }],
+        ve_bases: [{ id: 'interrupted', project_id: input.projectId, vertical_id: input.verticalId,
+          hypothesis_id: 'h1', source: 'auto', status: 'failed', collect_info: savedInfo, error: interruption }],
+        ve_jobs: [{ id: 'old-job', project_id: input.projectId, stage: 'base_collect', status: 'failed',
+          payload: { base_id: 'interrupted' } }],
+      } });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(enqueueVeBaseCollect(interruptedDb as unknown as SupabaseClient, {
+          ...input, hypothesisIds: ['h1'], collectionMode: 'preview',
+        })).resolves.toMatchObject({ ok: true, base: { id: 'interrupted' } });
+      }
+      expect(interruptedDb.getRows('ve_bases')).toHaveLength(1);
+      expect(interruptedDb.getRows('ve_bases')[0].collect_info).toEqual(savedInfo);
+      expect(interruptedDb.getRows('ve_jobs').filter((row) => row.status === 'pending')).toHaveLength(1);
     }
-    expect(interruptedDb.getRows('ve_bases')).toHaveLength(1);
-    expect(interruptedDb.getRows('ve_bases')[0].collect_info).toEqual(savedInfo);
-    expect(interruptedDb.getRows('ve_jobs').filter((row) => row.status === 'pending')).toHaveLength(1);
 
     // Death after base resume but before queue INSERT: recover only an older
     // completed job, never automatically retry a real terminal failure.

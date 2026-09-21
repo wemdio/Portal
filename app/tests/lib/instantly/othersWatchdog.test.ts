@@ -11,6 +11,13 @@ const getAccountCampaignMappings = jest.fn();
 const qualifyOneReply = jest.fn();
 const getCampaignsByAccountCached = jest.fn();
 
+// Fixed-date routing fixtures; the automation time window is exercised in
+// leadQualificationWorker.test.ts, independently of Others attribution.
+jest.mock('@/lib/instantly/qualificationAutomationPolicy', () => ({
+  qualificationAutomationPolicy: async () => 0,
+  replyAutomationExpired: () => false,
+}));
+
 jest.mock('@/lib/supabaseInstantly', () => ({
   get supabaseInstantly() {
     return mockInstantlyDb;
