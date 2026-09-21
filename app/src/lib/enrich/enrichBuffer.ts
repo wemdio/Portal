@@ -172,7 +172,10 @@ export function planFlush(rows: EnrichBufferDrainedRow[]): FlushPlan {
         queue_id: r.queue_id,
         status: r.status as 'completed' | 'failed' | 'skipped',
         result_text: r.status === 'completed' ? r.result_text : null,
-        last_error: r.status === 'completed' ? null : r.last_error,
+        // completed + last_error = диагностика пустого результата (почему
+        // сайт не прочитан). UI почтового режима берёт в ячейку только
+        // result_text, так что в базу к почтам этот текст не попадает.
+        last_error: r.last_error ?? null,
       });
 
       // 2. jobs-counter: processed = всегда +1; success/error по статусу.

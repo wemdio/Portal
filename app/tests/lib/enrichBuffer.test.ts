@@ -46,11 +46,44 @@ describe('enrichBuffer.planFlush', () => {
     expect(p.queueUpdates.map((u) => u.queue_id).sort()).toEqual(['q-1', 'q-2', 'q-3']);
   });
 
-  it('completed row stores result_text and nullifies last_error', () => {
-    const p = planFlush([mkRow({ status: 'completed', result_text: 'hi', last_error: 'old' })]);
+  it('completed row stores result_text and keeps last_error as a diagnostic note', () => {
+    // С 21.09.2026 last_error у completed-строки несёт причину пустого
+    // результата («Сертификат сайта не прошёл проверку»), а не ошибку. В
+    // ячейку с почтами она не попадает — UI берёт туда только result_text.
+    const p = planFlush([
+      mkRow({ status: 'completed', result_text: 'hi', last_error: null }),
+      mkRow({
+        id: 2,
+        queue_id: 'q-2',
+        status: 'completed',
+        result_text: '',
+        last_error: 'Сертификат сайта не прошёл проверку',
+      }),
+    ]);
     expect(p.queueUpdates[0]).toEqual(
       expect.objectContaining({ status: 'completed', result_text: 'hi', last_error: null }),
     );
+    expect(p.queueUpdates[1]).toEqual(
+      expect.objectContaining({
+        status: 'completed',
+        result_text: '',
+        last_error: 'Сертификат сайта не прошёл проверку',
+      }),
+    );
+  });
+
+  it('cache upsert never stores the diagnostic note of a completed row', () => {
+    const p = planFlush([
+      mkRow({
+        status: 'completed',
+        result_text: '',
+        last_error: 'Сертификат сайта не прошёл проверку',
+        cache_url_normalized: 'https://acme.ru',
+      }),
+    ]);
+    // Иначе shouldUseCachedError на следующем прогоне примет заметку за
+    // жёсткую ошибку и вернёт её вместо повторной попытки.
+    expect(p.cacheUpserts[0]).toEqual(expect.objectContaining({ last_error: null }));
   });
 
   it('failed/skipped row stores last_error and nullifies result_text', () => {
