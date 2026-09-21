@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { NextResponse, type NextRequest } from 'next/server';
+import { spreadSchedule } from '@/lib/mail/sendSchedule';
 import { requireByoMailboxClient } from '@/lib/byoMailbox/access';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
@@ -81,7 +82,7 @@ export async function POST(req: NextRequest) {
   // Ящик принадлежит этому клиенту и подтверждён.
   const { data: mb } = await supabaseAdmin
     .from('client_mailbox_accounts')
-    .select('id, status')
+    .select('id, status, daily_limit')
     .eq('id', mailboxId)
     .eq('client_user_id', res.auth.userId)
     .maybeSingle();
@@ -90,7 +91,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Ящик ещё не подтверждён' }, { status: 422 });
   }
 
-  const nowIso = new Date().toISOString();
   const rows: Record<string, unknown>[] = [];
   const seenEmails = new Set<string>(); // дедуп в рамках одной постановки кампании
   for (const raw of recipients) {
@@ -117,13 +117,24 @@ export async function POST(req: NextRequest) {
       subject: applyVars(subject, vars),
       body: applyVars(bodyTpl, vars),
       status: 'pending',
-      scheduled_at: nowIso,
     });
   }
 
   if (!rows.length) {
     return NextResponse.json({ error: 'Нет валидных email среди получателей' }, { status: 400 });
   }
+
+  // Время каждого письма считается здесь, а не воркером: случайные паузы,
+  // рабочее окно и дневной лимит ящика. Раньше вся кампания вставала в очередь
+  // одним временем, и воркер выгребал её пачкой с ровным интервалом — по такому
+  // ритму холодную рассылку и опознают.
+  const schedule = spreadSchedule({
+    count: rows.length,
+    dailyLimit: Number(mb.daily_limit ?? 0),
+  });
+  rows.forEach((row, index) => {
+    row.scheduled_at = schedule[index].toISOString();
+  });
 
   const { error } = await supabaseAdmin.from('client_byo_messages').insert(rows);
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
