@@ -3281,6 +3281,10 @@ async function cleanCollectedCompanyNames(
  * addresses would need a paid company-name check, so that stays behind the
  * specialist's explicit «Продолжить подготовку».
  */
+/** Начало заметки о лимите адресов в причине остановки. По нему же заметку
+ *  срезают при повторном применении лимита, поэтому текст должен совпадать. */
+const VE_CAP_REASON_MARK = 'Применён лимит';
+
 async function applyVeContactCapToFinishedBase(
   ctx: VeStageContext, job: VeJob, base: VeAutoBase,
 ): Promise<VeStageResult> {
@@ -3315,8 +3319,19 @@ async function applyVeContactCapToFinishedBase(
   const next: VeCollectionTargetProgress = { ...target, ready_rows: readyRows.length,
     status: belowTarget ? 'limited' : 'target_reached' };
   if (belowTarget) {
-    next.reason = `Применён лимит ${limit} адресов на компанию. В готовой базе ${readyRows.length} из ${target.ready_target} контактов; `
-      + 'остальные проверенные адреса сохранены в резерве. Новый сбор сам не запускается — при необходимости нажмите «Продолжить подготовку».';
+    // Кап — это то, что случилось с базой ПОСЛЕДНИМ, а не причина, по которой
+    // сбор остановился. Раньше эта строка затирала причину целиком, и карточка
+    // сообщала специалисту, будто базу остановил лимит адресов, хотя у неё
+    // кончился реестр, упёрся предел раундов или перестал окупаться добор.
+    // После прогона капа по проекту так «переобъяснились» 44 базы из 54.
+    const capNote = `${VE_CAP_REASON_MARK} ${limit} адресов на компанию: в готовой базе ${readyRows.length} `
+      + `из ${target.ready_target} контактов, остальные проверенные адреса сохранены в резерве.`;
+    // Свою же заметку срезаем перед пересборкой: кап применяют повторно (сначала
+    // 3, потом 5), и иначе текст рос бы с каждым прогоном.
+    const priorCause = (target.reason ?? '').split(VE_CAP_REASON_MARK)[0].trim();
+    next.reason = [priorCause, capNote,
+      'Новый сбор сам не запускается — при необходимости нажмите «Продолжить подготовку».',
+    ].filter(Boolean).join(' ');
   } else delete next.reason;
   const saved: VeCollectInfo = {
     ...info,
