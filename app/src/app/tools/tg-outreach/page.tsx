@@ -7,6 +7,7 @@ import { defaultAppealText } from '@/lib/tgOutreach/freezeAppeal';
 import { BaseContactsModal } from '@/components/tg-outreach/BaseContactsModal';
 import { pickIdentity } from '@/lib/tgOutreach/profile/autofill';
 import { BulkProfileModal } from '@/components/tg-outreach/BulkProfileModal';
+import { MoveAccountsModal } from '@/components/tg-outreach/MoveAccountsModal';
 import { accountCountryLabel, countryOptions } from '@/lib/tgOutreach/phoneCountry';
 import {
   MessageSquareMore,
@@ -2398,6 +2399,8 @@ function CampaignAccountsTab({
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [profileAccount, setProfileAccount] = useState<OutreachAccount | null>(null);
   const [bulkProfileOpen, setBulkProfileOpen] = useState(false);
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [moveNotice, setMoveNotice] = useState<string | null>(null);
   /** id аккаунтов, чей профиль сейчас читается из Telegram. */
   const [syncingIds, setSyncingIds] = useState<string[]>([]);
   const [syncSummary, setSyncSummary] = useState<string | null>(null);
@@ -3362,6 +3365,19 @@ function CampaignAccountsTab({
         </div>
       )}
 
+      {moveNotice && (
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+          <span>{moveNotice}</span>
+          <button
+            type="button"
+            onClick={() => setMoveNotice(null)}
+            className="shrink-0 text-emerald-500 transition hover:text-emerald-700 cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {uploadError && (
         <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{uploadError}</div>
       )}
@@ -3483,6 +3499,21 @@ function CampaignAccountsTab({
           /* Проставить цену выбранным: партия могла приехать двумя чеками, и
              тогда цена у половины строк своя. Пустое поле стирает цену. */
           <span className="inline-flex items-center gap-1.5">
+            {/* Перенос между кампаниями: партию закупили под один проект, а
+                нужна она в другом. Кнопка живёт только у остановленной
+                кампании — из-под работающего круга аккаунт не забрать. */}
+            <button
+              type="button"
+              onClick={() => setMoveOpen(true)}
+              disabled={campaignStatus === 'running'}
+              title={campaignStatus === 'running'
+                ? 'Сначала остановите кампанию: из-под работающего круга аккаунты не переносятся'
+                : 'Перенести выбранные аккаунты в другую остановленную кампанию'}
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Move className="h-3.5 w-3.5" />
+              Перенести
+            </button>
             {/* Профили заполняли по одному через карточку аккаунта: открыть,
                 автозаполнить, сохранить, закрыть — и так на всю партию. */}
             <button
@@ -3908,6 +3939,24 @@ function CampaignAccountsTab({
           account={selectedAccount}
           proxy={proxies.find(p => p.id === selectedAccount.proxy_id) ?? null}
           onClose={() => setSelectedAccount(null)}
+        />
+      )}
+
+      {moveOpen && (
+        <MoveAccountsModal
+          ids={[...selectedIds]}
+          fromCampaignId={campaignId}
+          onClose={() => setMoveOpen(false)}
+          onMoved={(movedIds, toName) => {
+            // Строки уезжают из списка на месте: перечитывать всю вкладку ради
+            // ухода пятнадцати аккаунтов незачем.
+            setAccounts(prev => prev.filter(a => !movedIds.includes(a.id)));
+            clear();
+            setMoveNotice(
+              `Перенесено аккаунтов: ${movedIds.length} → «${toName}». `
+              + 'Там они выключены и без прокси — назначьте прокси и включите.',
+            );
+          }}
         />
       )}
 
