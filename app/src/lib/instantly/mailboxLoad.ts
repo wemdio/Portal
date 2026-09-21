@@ -1,5 +1,6 @@
 import 'server-only';
 import { datasetQuery } from '@/lib/instantlyDataset';
+import { isReservedMailboxPoolTag } from '@/lib/instantly/mailboxTags';
 
 /**
  * Нагрузка на почтовые ящики (mailbox load) по тегам и специалистам.
@@ -26,7 +27,7 @@ import { datasetQuery } from '@/lib/instantlyDataset';
  *              (ящик мог слать утром и встать на паузу вечером).
  *  - специалист: raw_campaigns.email_tag_list → portal_project_campaigns →
  *              portal_projects.specialist (доминирующий по числу кампаний тега)
- *  - пул:      тег «неименные почты» — резерв ящиков; при взятии клиента в
+ *  - пул:      теги «неименные …» — резерв ящиков; при взятии клиента в
  *              работу ящику ставят ВТОРОЙ (клиентский) тег. Поэтому пул-тег
  *              не показываем строкой клиента (дублировал бы клиентские цифры),
  *              а считаем по нему свободный резерв (ящики без второго тега).
@@ -43,9 +44,6 @@ const STALE_SYNC_HOURS = 30;
 // дефолт воркспейса Instantly для ящиков без явного daily_limit (API тогда
 // вообще не отдаёт блок настроек отправки). Значение подтверждено замером.
 const DEFAULT_DAILY_LIMIT = 30;
-// теги-пулы: резерв ящиков, не клиенты. Исключаются из клиентской таблицы.
-const POOL_TAG_NAMES = ['неименные почты'];
-
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 // формат + календарная валидность ('2026-02-31' проходит регексп, но ::date
@@ -260,9 +258,9 @@ export async function buildMailboxLoad(day?: string): Promise<MailboxLoad> {
   for (const arr of specByTag.values()) arr.sort((a, b) => b.campaigns - a.campaigns);
 
   const tags: TagLoad[] = tagRows
-    // пул-тег «неименные почты» — не клиент (это резерв ящиков): его ящики уже
+    // пул-теги «неименные …» — не клиенты (это резерв ящиков): их ящики уже
     // посчитаны под клиентскими тегами, отдельной строкой не дублируем.
-    .filter((r) => !POOL_TAG_NAMES.includes(r.tag ?? ''))
+    .filter((r) => !isReservedMailboxPoolTag(r.tag ?? ''))
     .map((r) => {
       const capacity = num(r.capacity);
       const sent = num(r.sent);
