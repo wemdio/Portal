@@ -796,6 +796,12 @@ export async function findIrrelevantRows(input: {
           }
         }
         totals.uncertain += 1; undecided.push(entry);
+        // Счёт вероятности сохраняем и для нерешённых: это единственный
+        // дешёвый признак, по которому потом можно будет решать, кому
+        // покупать платный поиск сайта, а кому он всё равно не поможет.
+        if (entry.cacheable && typeof verdict.activity === 'number') {
+          checkpoint.triage_activity = { ...(checkpoint.triage_activity ?? {}), [entry.key]: share(verdict.activity) };
+        }
         // Saved uncertainty keeps its verdict: mark it now, not only in the final
         // loop, which a long semantic-review phase may never reach. New companies
         // have no verdict to carry the mark until the LLM path has answered.
@@ -983,7 +989,8 @@ export async function findIrrelevantRows(input: {
         }
         const evidence = stripUnstorableJsonChars(await (input.fetchEvidence ?? fetchVeRelevanceEvidence)(entry.fields.website, { signal: signal ?? undefined,
           companyInn: entry.identity, companyName: entry.fields.company,
-          companyAddress: entry.group.rows.map((row) => rowText(row, ['address', 'адрес'])).find(Boolean), focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' '),
+          companyAddress: entry.group.rows.map((row) => rowText(row, ['address', 'адрес'])).find(Boolean),
+          companyEmail: entry.group.rows.map((row) => rowText(row, ['email', 'e-mail', 'почта'])).find(Boolean), focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' '),
           allowPaidSearch: input.allowPaidSearch }));
         signal?.throwIfAborted();
         if (evidence.search_deferred) {
