@@ -44,20 +44,32 @@ const OTHERS_STARTUP_DELAY_MS = envMs('INSTANTLY_OTHERS_STARTUP_DELAY_MS', 90_00
 const WORKER_ID = `instantly-leads-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 
-// ── Адаптивный интервал discovery (аудит API 14.09.2026) ─────────────────────
+// ── Адаптивный интервал discovery (аудит API 14.09.2026, потолок 21.09.2026) ──
 // Треть бюджета LIST /emails уходила на «пустые» head-чтения каждые 30с, когда
 // новых ответов нет. Вместо фиксированного тика: интервал растёт при простое
-// (30с → 60с → 120с → 180с) и мгновенно сбрасывается при (а) новых staged
+// (30с → 60с → … → 15 мин) и мгновенно сбрасывается при (а) новых staged
 // ответах, (б) reply-событии из Instantly webhooks (instantly_activity_events,
 // push-события квоту не тратят), (в) ошибке цикла.
-// Худший случай при тихо умерших webhook'ах: ответ подхватится за ≤3 мин вместо
-// ≤30с — компромисс согласован с задачей «перестать спрашивать каждые 30с».
+//
+// Потолок поднят со 180с до 900с: ночью по учёту 16.09.2026 на пустые опросы
+// уходило ~2 500 запросов в сутки при 160 push-событиях за то же время —
+// то есть опрос давно не основной путь, а подстраховка на случай потерянного
+// webhook'а.
+//
+// Задержку ответов это не удлиняет, и вот почему: сон не сплошной. Раз в
+// WAKE_CHECK_MS воркер смотрит В СВОЮ базу (квота Instantly не тратится), не
+// пришло ли reply-событие, и при первом же просыпается досрочно. Поэтому
+// потолок влияет только на тишину: пришёл ответ — подхватим за ≤30с независимо
+// от того, как высоко разогнался интервал, и независимо от того, включён ли
+// real-time drain (INSTANTLY_WEBHOOK_DRAIN_ENABLED).
 // Выключатель INSTANTLY_DISCOVERY_ADAPTIVE=0 возвращает фиксированный тик.
 const DISCOVERY_ADAPTIVE_ENABLED = !['0', 'false', 'no', 'off'].includes(
   (process.env.INSTANTLY_DISCOVERY_ADAPTIVE ?? '').toLowerCase(),
 );
-const DISCOVERY_MAX_IDLE_INTERVAL_MS = envMs('INSTANTLY_DISCOVERY_MAX_IDLE_MS', 180_000, 30_000);
-const DISCOVERY_IDLE_MULTIPLIERS = [1, 2, 4, 6] as const;
+const DISCOVERY_MAX_IDLE_INTERVAL_MS = envMs('INSTANTLY_DISCOVERY_MAX_IDLE_MS', 900_000, 30_000);
+const DISCOVERY_IDLE_MULTIPLIERS = [1, 2, 4, 6, 10, 20, 30] as const;
+/** Как часто во время сна заглядываем в свою базу за push-событием. */
+const DISCOVERY_WAKE_CHECK_MS = envMs('INSTANTLY_DISCOVERY_WAKE_CHECK_MS', 30_000, 5_000);
 
 function discoveryIdleIntervalMs(idleStreak: number): number {
   const multiplier = DISCOVERY_IDLE_MULTIPLIERS[Math.min(idleStreak, DISCOVERY_IDLE_MULTIPLIERS.length - 1)];
@@ -79,6 +91,32 @@ async function hasRepliedActivitySince(sinceIso: string): Promise<boolean> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Спать до конца интервала, но просыпаться досрочно, если Instantly прислал
+ * reply-событие.
+ *
+ * Проверка идёт по нашей базе, а не по Instantly: push-события квоту не
+ * тратят, а значит длинный интервал экономит запросы, не удлиняя реакцию на
+ * настоящий ответ. Возвращает true, если проснулись из-за события.
+ */
+async function sleepUntilReplyActivity(
+  totalMs: number,
+  sinceIso: string,
+  shouldStop: () => boolean,
+): Promise<boolean> {
+  let slept = 0;
+  while (slept < totalMs && !shouldStop()) {
+    const chunk = Math.min(DISCOVERY_WAKE_CHECK_MS, totalMs - slept);
+    await sleep(chunk);
+    slept += chunk;
+    if (slept >= totalMs) break;
+    // Ошибка проверки трактуется как «была активность» (см. hasRepliedActivitySince):
+    // на слепом предположении интервал не разгоняем.
+    if (await hasRepliedActivitySince(sinceIso)) return true;
+  }
+  return false;
 }
 
 // Only durable discovery runs here. Slow AI and recovery cannot hold the next
@@ -112,7 +150,11 @@ async function pollLoop(shouldStop: () => boolean): Promise<void> {
     if (intervalMs !== POLL_INTERVAL_MS) {
       log('info', `No new replies — discovery idle interval stretched to ${Math.round(intervalMs / 1000)}s`);
     }
-    await sleep(intervalMs);
+    if (await sleepUntilReplyActivity(intervalMs, activitySinceIso, shouldStop)) {
+      // Пришёл push — разгон снимаем сразу, не дожидаясь конца интервала.
+      idleStreak = 0;
+      log('info', 'Reply webhook seen — discovery woke up early');
+    }
   }
 }
 
