@@ -6,6 +6,8 @@ import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
 import { defaultAppealText } from '@/lib/tgOutreach/freezeAppeal';
 import { BaseContactsModal } from '@/components/tg-outreach/BaseContactsModal';
 import { pickIdentity } from '@/lib/tgOutreach/profile/autofill';
+import { BulkProfileModal } from '@/components/tg-outreach/BulkProfileModal';
+import { MoveAccountsModal } from '@/components/tg-outreach/MoveAccountsModal';
 import { accountCountryLabel, countryOptions } from '@/lib/tgOutreach/phoneCountry';
 import {
   MessageSquareMore,
@@ -43,6 +45,7 @@ import {
   Move,
   Pencil,
   Archive,
+  UserPen,
 } from 'lucide-react';
 import { AccountArchiveSection, ArchiveAccountsDialog } from '@/components/tg-outreach/AccountArchive';
 import type { ArchiveReason } from '@/lib/tgOutreach/accountArchive';
@@ -2245,6 +2248,63 @@ interface AccountsUploadSummary {
  * корзина справа осталась на месте. Дата рисуется коротким `дд.мм.гг`, чтобы
  * в эти 76 пикселей влезть без переноса.
  */
+/**
+ * По чему можно отсортировать список аккаунтов.
+ *
+ * Порядок по умолчанию — «добавлен», свежие сверху: аккаунты приходят партиями,
+ * и работают всегда с последней. Прежний порядок задавала база, то есть он был
+ * неопределённым, и новая партия оказывалась где придётся.
+ */
+type AccountSortKey =
+  | 'name' | 'added' | 'sending' | 'phone' | 'proxy' | 'health' | 'price' | 'active';
+
+interface AccountSort {
+  key: AccountSortKey;
+  dir: 'asc' | 'desc';
+}
+
+/**
+ * Насколько состояние плохое. По здоровью сортируют, чтобы найти поломанное,
+ * поэтому «хуже» — это «больше», и по убыванию проблемные всплывают наверх.
+ */
+const TONE_RANK: Record<string, number> = {
+  ok: 0, info: 1, rest: 2, unknown: 3, warn: 4, bad: 5,
+};
+
+/** Колонки, которые осмысленно открывать «сначала худшие»: время и проблемы. */
+const DESC_FIRST: AccountSortKey[] = ['added', 'sending', 'health', 'price'];
+
+function SortHeader({
+  col,
+  label,
+  title,
+  sort,
+  onSort,
+}: {
+  col: AccountSortKey;
+  label: string;
+  title?: string;
+  sort: AccountSort;
+  onSort: (key: AccountSortKey) => void;
+}) {
+  const active = sort.key === col;
+  return (
+    <button
+      type="button"
+      onClick={() => onSort(col)}
+      title={title}
+      className={`flex min-w-0 items-center gap-1 text-left transition hover:text-gray-600 cursor-pointer ${
+        active ? 'text-gray-700' : ''
+      }`}
+    >
+      <span className="truncate">{label}</span>
+      {/* Стрелка только у активной колонки: восемь бледных стрелок в шапке
+          читаются как украшение и не говорят, по чему список отсортирован. */}
+      {active ? <span className="shrink-0 text-[9px]">{sort.dir === 'asc' ? '▲' : '▼'}</span> : null}
+    </button>
+  );
+}
+
 const ACCOUNT_GRID = 'grid grid-cols-[32px_44px_minmax(0,1fr)_76px_126px_120px_360px_138px_92px_60px_88px] gap-4 items-center';
 
 /**
@@ -2338,6 +2398,9 @@ function CampaignAccountsTab({
   const [selectedAccount, setSelectedAccount] = useState<OutreachAccount | null>(null);
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [profileAccount, setProfileAccount] = useState<OutreachAccount | null>(null);
+  const [bulkProfileOpen, setBulkProfileOpen] = useState(false);
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [moveNotice, setMoveNotice] = useState<string | null>(null);
   /** id аккаунтов, чей профиль сейчас читается из Telegram. */
   const [syncingIds, setSyncingIds] = useState<string[]>([]);
   const [syncSummary, setSyncSummary] = useState<string | null>(null);
@@ -2363,6 +2426,92 @@ function CampaignAccountsTab({
    * ровно один раз и только пока список ещё не пришёл.
    */
   const healthNow = loadedAt ?? Date.now();
+
+  const [accountSort, setAccountSort] = useState<AccountSort>({ key: 'added', dir: 'desc' });
+  const toggleAccountSort = useCallback((key: AccountSortKey) => {
+    setAccountSort(prev => (
+      prev.key === key
+        ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+        // Первое нажатие открывает колонку так, как её обычно читают: свежее,
+        // дорогое и сломанное — сверху, имя и телефон — от начала алфавита.
+        : { key, dir: DESC_FIRST.includes(key) ? 'desc' : 'asc' }
+    ));
+  }, []);
+
+  /**
+   * Обе колонки здоровья считаются один раз на список, а не в отрисовке строки:
+   * по ним сортируют, и значение в ячейке обязано совпасть с тем, по которому
+   * список разложен.
+   */
+  const accountMarks = useMemo(() => {
+    const out = new Map<string, { sending: HealthMark; proxy: HealthMark }>();
+    for (const a of accounts) {
+      const proxy = proxies.find(p => p.id === a.proxy_id) ?? null;
+      out.set(a.id, {
+        sending: describeSending({
+          account: a,
+          stat: sendingStats[a.id],
+          proxy,
+          campaignRunning: campaignStatus === 'running',
+          firstTouchEnabled: firstTouchPerDay > 0,
+          queuePending,
+          now: healthNow,
+        }),
+        proxy: describeProxy(proxy, healthNow),
+      });
+    }
+    return out;
+  }, [accounts, proxies, sendingStats, campaignStatus, firstTouchPerDay, queuePending, healthNow]);
+
+  const sortedAccounts = useMemo(() => {
+    const factor = accountSort.dir === 'asc' ? 1 : -1;
+    // Числа и строки сравниваются по-разному, поэтому ключ строки — либо то,
+    // либо другое, а сравнение выбирается по типу. Пустое значение всегда
+    // уезжает вниз, в какую бы сторону ни сортировали: «цены нет» — это не
+    // «цена ноль», и в начале списка ему делать нечего.
+    const keyOf = (a: OutreachAccount): string | number | null => {
+      switch (accountSort.key) {
+        case 'name':
+          return ([a.first_name, a.last_name].filter(Boolean).join(' ').trim() || a.session_name).toLowerCase();
+        case 'added':
+          return a.created_at ? new Date(a.created_at).getTime() : null;
+        case 'phone':
+          return a.phone || null;
+        case 'proxy': {
+          const proxy = proxies.find(p => p.id === a.proxy_id);
+          return proxy ? (proxy.name || proxy.url || '').toLowerCase() : null;
+        }
+        case 'price':
+          return a.price === null || a.price === undefined ? null : Number(a.price);
+        case 'active':
+          return a.is_active ? 1 : 0;
+        case 'sending':
+        case 'health': {
+          const mark = accountMarks.get(a.id)?.[accountSort.key === 'sending' ? 'sending' : 'proxy'];
+          if (!mark) return null;
+          // Тон задаёт группу, дни — порядок внутри неё: «молчит 9 дней» должно
+          // стоять выше, чем «молчит 2 дня».
+          return (TONE_RANK[mark.tone] ?? 0) * 10_000 + Math.min(mark.days ?? 0, 9_999);
+        }
+        default:
+          return null;
+      }
+    };
+
+    return [...accounts].sort((a, b) => {
+      const ka = keyOf(a);
+      const kb = keyOf(b);
+      if (ka === null && kb === null) return 0;
+      if (ka === null) return 1;
+      if (kb === null) return -1;
+      const cmp = typeof ka === 'number' && typeof kb === 'number'
+        ? ka - kb
+        : String(ka).localeCompare(String(kb), 'ru');
+      // Ровные значения разводим по имени сессии: иначе строки с одинаковой
+      // ценой или одним тоном перескакивают местами при каждой перерисовке.
+      return cmp !== 0 ? cmp * factor : a.session_name.localeCompare(b.session_name, 'ru');
+    });
+  }, [accounts, accountSort, accountMarks, proxies]);
 
   // Профиль читается через то же соединение, что и работа кампании, поэтому
   // на запущенной кампании в Telegram не ходим — см. гейт в API.
@@ -2411,8 +2560,16 @@ function CampaignAccountsTab({
     [freeProxies, proxies],
   );
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  /**
+   * Перечитать список.
+   *
+   * Заглушку «Загрузка…» показываем только на первом открытии вкладки. Раньше
+   * её ставило любое перечитывание: список на секунду исчезал, а вместе с ним
+   * уезжала прокрутка — оператор, поменявший галочку у сорокового аккаунта,
+   * возвращался в начало списка и листал вниз заново.
+   */
+  const load = useCallback(async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setLoading(true);
     const [accRes, proxRes, errRes, sendRes, archRes] = await Promise.all([
       authFetch(`${API_BASE}/accounts?campaign_id=${campaignId}`),
       authFetch(`${API_BASE}/proxies?campaign_id=${campaignId}`),
@@ -2462,11 +2619,11 @@ function CampaignAccountsTab({
     const value = trimmed === '' ? null : Number(trimmed);
     if (value !== null && (!Number.isFinite(value) || value < 0)) return;
     setEditingPriceFor(null);
+    setAccounts(prev => prev.map(a => (a.id === id ? { ...a, price: value } : a)));
     await authFetch(`${API_BASE}/accounts/${id}`, {
       method: 'PUT',
       body: JSON.stringify({ price: value }),
     });
-    void load();
   };
 
   const applyBulkPrice = async () => {
@@ -2757,12 +2914,30 @@ function CampaignAccountsTab({
     }
   };
 
+  /** Заменить одну строку списка, не трогая остальные. */
+  const patchAccount = useCallback((id: string, patch: Partial<OutreachAccount>) => {
+    setAccounts(prev => prev.map(a => (a.id === id ? { ...a, ...patch } : a)));
+  }, []);
+
+  /**
+   * Переключатель «Активен».
+   *
+   * Строка меняется сразу и на месте, без перечитывания списка: галочку жмут
+   * подряд у десятка аккаунтов, и каждый раз ждать общий запрос — значит
+   * ждать его десять раз. Если сервер откажет, переключатель возвращается
+   * назад, а не остаётся врать.
+   */
   const toggleActive = async (id: string, current: boolean) => {
-    await authFetch(`${API_BASE}/accounts/${id}`, {
+    patchAccount(id, { is_active: !current });
+    const res = await authFetch(`${API_BASE}/accounts/${id}`, {
       method: 'PUT',
       body: JSON.stringify({ is_active: !current }),
     });
-    void load();
+    if (!res.ok) {
+      patchAccount(id, { is_active: current });
+      const body = await res.json().catch(() => null) as { error?: string } | null;
+      alert(body?.error ?? `Не удалось изменить аккаунт (HTTP ${res.status})`);
+    }
   };
 
   const deleteAccount = async (id: string) => {
@@ -2775,7 +2950,7 @@ function CampaignAccountsTab({
       alert(body?.error ?? `Не удалось удалить аккаунт (HTTP ${res.status})`);
       return;
     }
-    void load();
+    setAccounts(prev => prev.filter(a => a.id !== id));
   };
 
   const deleteSelected = async () => {
@@ -2795,7 +2970,7 @@ function CampaignAccountsTab({
         return;
       }
       clear();
-      void load();
+      setAccounts(prev => prev.filter(a => !ids.includes(a.id)));
     } finally {
       setBulkDeleting(false);
     }
@@ -3190,6 +3365,19 @@ function CampaignAccountsTab({
         </div>
       )}
 
+      {moveNotice && (
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+          <span>{moveNotice}</span>
+          <button
+            type="button"
+            onClick={() => setMoveNotice(null)}
+            className="shrink-0 text-emerald-500 transition hover:text-emerald-700 cursor-pointer"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {uploadError && (
         <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{uploadError}</div>
       )}
@@ -3311,6 +3499,32 @@ function CampaignAccountsTab({
           /* Проставить цену выбранным: партия могла приехать двумя чеками, и
              тогда цена у половины строк своя. Пустое поле стирает цену. */
           <span className="inline-flex items-center gap-1.5">
+            {/* Перенос между кампаниями: партию закупили под один проект, а
+                нужна она в другом. Кнопка живёт только у остановленной
+                кампании — из-под работающего круга аккаунт не забрать. */}
+            <button
+              type="button"
+              onClick={() => setMoveOpen(true)}
+              disabled={campaignStatus === 'running'}
+              title={campaignStatus === 'running'
+                ? 'Сначала остановите кампанию: из-под работающего круга аккаунты не переносятся'
+                : 'Перенести выбранные аккаунты в другую остановленную кампанию'}
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Move className="h-3.5 w-3.5" />
+              Перенести
+            </button>
+            {/* Профили заполняли по одному через карточку аккаунта: открыть,
+                автозаполнить, сохранить, закрыть — и так на всю партию. */}
+            <button
+              type="button"
+              onClick={() => setBulkProfileOpen(true)}
+              title="Подобрать имя, фамилию, свободный ник и описание сразу всем выбранным аккаунтам"
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer"
+            >
+              <UserPen className="h-3.5 w-3.5" />
+              Автозаполнение профилей
+            </button>
             <button
               type="button"
               onClick={() => { setArchiveError(null); setArchiveTarget([...selectedIds]); }}
@@ -3411,42 +3625,55 @@ function CampaignAccountsTab({
           <div className={`${ACCOUNT_GRID} px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50`}>
             <SelectAllCheckbox total={accounts.length} selectedCount={selectedIds.length} onChange={setAll} />
             <span />
-            <span>Аккаунт</span>
-            <span title="Когда аккаунт завели в портале.">Добавлен</span>
-            <span title="Идёт ли с этого аккаунта рассылка первых сообщений. Если нет — почему и сколько дней уже.">
-              Рассылка
-            </span>
-            <span>Телефон</span>
-            <span>Прокси</span>
-            <span title="Проходят ли через прокси круги рассылки. Если нет — сколько дней уже не проходят.">
-              Здоровье прокси
-            </span>
+            <SortHeader col="name" label="Аккаунт" sort={accountSort} onSort={toggleAccountSort} />
+            <SortHeader
+              col="added"
+              label="Добавлен"
+              title="Когда аккаунт завели в портале."
+              sort={accountSort}
+              onSort={toggleAccountSort}
+            />
+            <SortHeader
+              col="sending"
+              label="Рассылка"
+              title="Идёт ли с этого аккаунта рассылка первых сообщений. Если нет — почему и сколько дней уже."
+              sort={accountSort}
+              onSort={toggleAccountSort}
+            />
+            <SortHeader col="phone" label="Телефон" sort={accountSort} onSort={toggleAccountSort} />
+            <SortHeader col="proxy" label="Прокси" sort={accountSort} onSort={toggleAccountSort} />
+            <SortHeader
+              col="health"
+              label="Здоровье прокси"
+              title="Проходят ли через прокси круги рассылки. Если нет — сколько дней уже не проходят."
+              sort={accountSort}
+              onSort={toggleAccountSort}
+            />
             {/* Цена нужна не бухгалтерии, а гипотезам: партии покупают у разных
                 поставщиков и по разной цене, а живут они по-разному. Сумма по
                 колонке считается только по заполненным ценам. */}
-            <span title="Сколько заплатили за аккаунт. Нажмите на значение в строке, чтобы поправить.">
-              Цена, руб
-            </span>
-            <span>Активен</span><span />
+            <SortHeader
+              col="price"
+              label="Цена, руб"
+              title="Сколько заплатили за аккаунт. Нажмите на значение в строке, чтобы поправить."
+              sort={accountSort}
+              onSort={toggleAccountSort}
+            />
+            <SortHeader col="active" label="Активен" sort={accountSort} onSort={toggleAccountSort} />
+            <span />
           </div>
-          {accounts.map(a => {
+          {sortedAccounts.map(a => {
             const proxy = proxies.find(p => p.id === a.proxy_id);
             const onCooldown = a.cooldown_until && new Date(a.cooldown_until) > new Date();
             const counts = errorCounts[a.session_name];
             const errorCount = counts?.error ?? 0;
-            // Обе колонки здоровья считаются от момента загрузки списка
-            // (`healthNow` выше), а не от момента отрисовки: «молчит 2 дня» не
-            // должно меняться от того, что React перерисовал строку.
-            const sendingMark = describeSending({
-              account: a,
-              stat: sendingStats[a.id],
-              proxy: proxy ?? null,
-              campaignRunning: campaignStatus === 'running',
-              firstTouchEnabled: firstTouchPerDay > 0,
-              queuePending,
-              now: healthNow,
-            });
-            const proxyMark = describeProxy(proxy ?? null, healthNow);
+            // Обе колонки здоровья считаются один раз на весь список и от
+            // момента его загрузки (`healthNow`), а не от момента отрисовки:
+            // «молчит 2 дня» не должно меняться от того, что React перерисовал
+            // строку, а сортировка — расходиться с тем, что видно в ячейке.
+            const marks = accountMarks.get(a.id);
+            if (!marks) return null;
+            const { sending: sendingMark, proxy: proxyMark } = marks;
             return (
               <div
                 key={a.id}
@@ -3715,6 +3942,32 @@ function CampaignAccountsTab({
         />
       )}
 
+      {moveOpen && (
+        <MoveAccountsModal
+          ids={[...selectedIds]}
+          fromCampaignId={campaignId}
+          onClose={() => setMoveOpen(false)}
+          onMoved={(movedIds, toName) => {
+            // Строки уезжают из списка на месте: перечитывать всю вкладку ради
+            // ухода пятнадцати аккаунтов незачем.
+            setAccounts(prev => prev.filter(a => !movedIds.includes(a.id)));
+            clear();
+            setMoveNotice(
+              `Перенесено аккаунтов: ${movedIds.length} → «${toName}». `
+              + 'Там они выключены и без прокси — назначьте прокси и включите.',
+            );
+          }}
+        />
+      )}
+
+      {bulkProfileOpen && (
+        <BulkProfileModal
+          accounts={accounts.filter((a) => selectedIds.includes(a.id))}
+          onClose={() => setBulkProfileOpen(false)}
+          onApplied={patchAccount}
+        />
+      )}
+
       {profileAccount && (
         <AccountProfileModal
           account={accounts.find(a => a.id === profileAccount.id) ?? profileAccount}
@@ -3722,7 +3975,7 @@ function CampaignAccountsTab({
           syncing={syncingIds.includes(profileAccount.id)}
           onSync={() => syncProfile(profileAccount.id)}
           onClose={() => setProfileAccount(null)}
-          onSaved={() => { void load(); }}
+          onSaved={(patch) => patchAccount(profileAccount.id, patch)}
         />
       )}
     </div>
@@ -3751,7 +4004,8 @@ function AccountProfileModal({
   syncing: boolean;
   onSync: () => Promise<SyncResult>;
   onClose: () => void;
-  onSaved: () => void;
+  /** Что реально встало в Telegram — этим и обновляется строка списка. */
+  onSaved: (patch: Partial<OutreachAccount>) => void;
 }) {
   const [firstName, setFirstName] = useState(account.first_name ?? '');
   const [lastName, setLastName] = useState(account.last_name ?? '');
@@ -3890,12 +4144,24 @@ function AccountProfileModal({
         body: form,
       });
       const body = (await res.json().catch(() => null)) as
-        { error?: string; avatar_error?: string; queued?: boolean; message?: string; rest_until?: string } | null;
+        (Partial<OutreachAccount> & {
+          error?: string;
+          avatar_error?: string;
+          queued?: boolean;
+          message?: string;
+          rest_until?: string;
+        }) | null;
       if (!res.ok) {
         setError(body?.error ?? `Ошибка ${res.status}`);
         return;
       }
-      onSaved();
+      // Строку списка обновляем ответом, а не перечитыванием всего списка:
+      // ответ и есть то, что реально встало в Telegram.
+      const { error: _e, avatar_error: _a, queued: _q, message: _m, rest_until: restUntil, ...applied } =
+        body ?? {};
+      if (!body?.queued) {
+        onSaved({ ...applied, ...(restUntil ? { profile_rest_until: restUntil } : {}) });
+      }
       // Кампания работает — профиль применит круг. Карточку не закрываем:
       // иначе оператор решит, что всё уже в Telegram, и удивится, не найдя
       // там изменений ближайший час.
@@ -4123,6 +4389,15 @@ function AccountProfileModal({
 }
 
 /* =================== ACCOUNT LOGS MODAL =================== */
+/** Строка истории переездов аккаунта между кампаниями. */
+interface AccountMove {
+  moved_at: string;
+  reason: string;
+  from_campaign_name: string | null;
+  to_campaign_name: string | null;
+  moved_by_name: string | null;
+}
+
 function AccountLogsModal({
   account,
   proxy,
@@ -4134,6 +4409,7 @@ function AccountLogsModal({
 }) {
   const [range, setRange] = useState<ErrorRange>('24h');
   const [logs, setLogs] = useState<OutreachLog[]>([]);
+  const [moves, setMoves] = useState<AccountMove[]>([]);
   const [loading, setLoading] = useState(true);
   const [exportingRange, setExportingRange] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
@@ -4147,11 +4423,14 @@ function AccountLogsModal({
         const d = await res.json() as {
           items: OutreachLog[];
           truncated: boolean;
+          moves?: AccountMove[];
         };
         setLogs(d.items ?? []);
+        setMoves(d.moves ?? []);
         setTruncated(Boolean(d.truncated));
       } else {
         setLogs([]);
+        setMoves([]);
         setTruncated(false);
       }
     } finally {
@@ -4248,6 +4527,34 @@ function AccountLogsModal({
                 </span>
               )}
             </div>
+
+            {/* Переезды — отдельно от журнала: журнал собирается по текущей
+                кампании и по диапазону времени, а «откуда этот аккаунт взялся»
+                спрашивают как раз про давний переезд из другой кампании. */}
+            {moves.length > 0 && (
+              <div className="mt-2 space-y-1 rounded-lg bg-gray-50 px-3 py-2">
+                <div className="text-[11px] font-medium uppercase tracking-wide text-gray-400">
+                  Переносы между кампаниями
+                </div>
+                {moves.map((m) => (
+                  <div key={`${m.moved_at}-${m.to_campaign_name ?? ''}`} className="text-[11px] text-gray-600">
+                    <span className="tabular-nums text-gray-400">
+                      {new Date(m.moved_at).toLocaleString('ru-RU', {
+                        day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit',
+                      })}
+                    </span>
+                    {' · '}
+                    <span className="text-gray-700">{m.from_campaign_name ?? '—'}</span>
+                    {' → '}
+                    <span className="text-gray-700">{m.to_campaign_name ?? '—'}</span>
+                    {' · '}
+                    <span>{m.moved_by_name ?? 'неизвестно кто'}</span>
+                    {' · '}
+                    <span className="text-gray-500">{m.reason}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
           <button
             type="button"

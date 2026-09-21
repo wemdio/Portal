@@ -54,7 +54,10 @@ export function AccountPicker({
           Выбрано {selected.size} из {accounts.length}
         </span>
       </div>
-      <div className="grid max-h-72 grid-cols-1 gap-x-4 overflow-y-auto sm:grid-cols-2">
+      {/* Высота от экрана, а не фиксированные 288 пикселей: на полусотне
+          аккаунтов в два столбца в прежнее окно попадало шесть строк, и выбор
+          пятнадцати аккаунтов превращался в прокрутку внутри прокрутки. */}
+      <div className="grid max-h-[min(60vh,40rem)] grid-cols-1 gap-x-4 overflow-y-auto sm:grid-cols-2">
         {ordered.map((a) => {
           const mark = marks?.[a.id];
           const fullName = [a.first_name, a.last_name].filter(Boolean).join(' ').trim();
