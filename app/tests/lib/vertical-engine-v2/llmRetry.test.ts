@@ -1161,7 +1161,7 @@ describe('llm rawCall retry', () => {
       .toMatchObject({ remaining: 120, budget: { paused: false, checked_at_growth: 120, ready_high_water: 24 } });
     expect(evaluateVeSourceDiscoveryBudget({ checkpoint: checkedCohort, discoveryContacts: 23 }))
       .toMatchObject({ remaining: 120, budget: { checked_at_growth: 120 } });
-    for (const budget of [null, { ...initialBudget, version: 2 }, { ...initialBudget, checked_at_growth: 121 }]) {
+    for (const budget of [null, { ...initialBudget, version: 3 }, { ...initialBudget, checked_at_growth: 121 }]) {
       expect(() => evaluateVeSourceDiscoveryBudget({ budget, checkpoint: checkedCohort, discoveryContacts: 23 }))
         .toThrow('Source discovery budget checkpoint is invalid');
     }
@@ -1174,6 +1174,23 @@ describe('llm rawCall retry', () => {
       { source_detail: `2ГИС\n${VE_SOURCE_DISCOVERY_MARK} https://found.test/` },
       null, 'не строка',
     ])).toBe(1);
+    // Документ старой версии пересеивается, а не роняет стадию. В v1
+    // ready_high_water хранил общее число готовых строк базы (у «Цемента» 417),
+    // а сравнивать его теперь надо с контактами добора (21) — ветка роста была
+    // бы недостижима навсегда, и окно стало бы необратимым стоп-краном.
+    const legacyCohort: VeSourceContactCheckpoint = { version: 1, checked: Object.fromEntries(
+      Array.from({ length: 413 }, (_, i) => [`legacy-${i}`, { website: '', reason: 'identity_unverified' }])) };
+    const reseeded = evaluateVeSourceDiscoveryBudget({
+      budget: { version: 1, checked_at_growth: 413, ready_high_water: 417, paused: false },
+      checkpoint: legacyCohort, discoveryContacts: 21,
+    });
+    expect(reseeded).toMatchObject({ remaining: 120,
+      budget: { version: 2, checked_at_growth: 413, ready_high_water: 21, paused: false } });
+    // Усадка base.data (дедуп, кап адресов) не должна открывать новое окно.
+    expect(evaluateVeSourceDiscoveryBudget({
+      budget: reseeded.budget, checkpoint: legacyCohort, discoveryContacts: 20,
+    }).budget).toMatchObject({ checked_at_growth: 413, ready_high_water: 21 });
+
     // Круговой проход: метку ставит applyVeSourceContacts, её же и считаем.
     expect(countVeSourceDiscoveryContacts(applyVeSourceContacts(sourceRows.slice(0, 2), discoveryState))).toBe(1);
     // One missing contact is not one lookup: at 499/500 a base looked up a single

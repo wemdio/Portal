@@ -2495,7 +2495,11 @@ export function safeAlternativeTask(candidate: VeCollectTask, original: VeCollec
   if (!['companies_directory', 'yandex_maps', 'pdl', 'funded', 'eng_hiring'].includes(candidate.source)) return null;
   if (candidate.source !== original.source) {
     const restricted = original.directory_filters && Object.entries(original.directory_filters)
-      .some(([key, value]) => !['okvedCodes', 'hasEmail', ...SIZE_FILTER_KEYS].includes(key) && value !== undefined)
+      // includeIp тоже ставит планировщик, а не специалист: отсутствие ключа и
+      // includeIp:false — один и тот же срез реестра (см. нормализацию в
+      // mapDirectoryFilters и veSourceStrategyKey). Он ничего не сужает, зато
+      // стоял у 326 задач из 331 и в одиночку запрещал уход на карты.
+      .some(([key, value]) => !['okvedCodes', 'hasEmail', 'includeIp', ...SIZE_FILTER_KEYS].includes(key) && value !== undefined)
       || original.maps_query?.geo || original.pdl_filters?.countries?.length || original.pdl_filters?.sizes?.length
       || original.funded_filters || original.eng_hiring_query || original.hh_query;
     if (restricted) return null;
@@ -3191,10 +3195,12 @@ async function reviewSavedRelevance(
   // before finalizing, including when this pass already reaches the target.
   if (emailRecoveryWaiting && (!rows.some((row) => isVeAcceptedEmailStatus(row._email_status))
     || (target.ready_rows ?? 0) >= target.ready_target)) {
-    // Дочерняя SMTP-джоба на медианных 33 адресах отрабатывает быстрее минуты,
-    // а раунд всё это время стоит. Минутный опрос добавлял к каждому ожиданию
-    // до 60 секунд простоя, и таких дочерних джоб около 330 в сутки.
-    await requeueSelf(ctx, job, 15_000);
+    // Опрос оставлен минутным намеренно. Каждый заход сюда перечитывает строку
+    // ve_bases целиком (select('*') на входе стадии), а это 12-80 МБ на базу с
+    // тяжёлым резервом и всё через main-rest. Учащение до 15 с дало бы вчетверо
+    // больше таких чтений ради ~5% ожидания при медиане ожидания 399 с — тот же
+    // паттерн, что выбивал main-rest. Ускорять надо не опрос, а вход в стадию.
+    await requeueSelf(ctx, job, 60_000);
     return { result: { base_id: base.id, waiting: true, saved_email_review: true }, ...usage };
   }
   // An email-only pass can finish with no classifiable rows (for example all
@@ -3275,6 +3281,10 @@ async function cleanCollectedCompanyNames(
  * addresses would need a paid company-name check, so that stays behind the
  * specialist's explicit «Продолжить подготовку».
  */
+/** Начало заметки о лимите адресов в причине остановки. По нему же заметку
+ *  срезают при повторном применении лимита, поэтому текст должен совпадать. */
+const VE_CAP_REASON_MARK = 'Применён лимит';
+
 async function applyVeContactCapToFinishedBase(
   ctx: VeStageContext, job: VeJob, base: VeAutoBase,
 ): Promise<VeStageResult> {
@@ -3309,8 +3319,19 @@ async function applyVeContactCapToFinishedBase(
   const next: VeCollectionTargetProgress = { ...target, ready_rows: readyRows.length,
     status: belowTarget ? 'limited' : 'target_reached' };
   if (belowTarget) {
-    next.reason = `Применён лимит ${limit} адресов на компанию. В готовой базе ${readyRows.length} из ${target.ready_target} контактов; `
-      + 'остальные проверенные адреса сохранены в резерве. Новый сбор сам не запускается — при необходимости нажмите «Продолжить подготовку».';
+    // Кап — это то, что случилось с базой ПОСЛЕДНИМ, а не причина, по которой
+    // сбор остановился. Раньше эта строка затирала причину целиком, и карточка
+    // сообщала специалисту, будто базу остановил лимит адресов, хотя у неё
+    // кончился реестр, упёрся предел раундов или перестал окупаться добор.
+    // После прогона капа по проекту так «переобъяснились» 44 базы из 54.
+    const capNote = `${VE_CAP_REASON_MARK} ${limit} адресов на компанию: в готовой базе ${readyRows.length} `
+      + `из ${target.ready_target} контактов, остальные проверенные адреса сохранены в резерве.`;
+    // Свою же заметку срезаем перед пересборкой: кап применяют повторно (сначала
+    // 3, потом 5), и иначе текст рос бы с каждым прогоном.
+    const priorCause = (target.reason ?? '').split(VE_CAP_REASON_MARK)[0].trim();
+    next.reason = [priorCause, capNote,
+      'Новый сбор сам не запускается — при необходимости нажмите «Продолжить подготовку».',
+    ].filter(Boolean).join(' ');
   } else delete next.reason;
   const saved: VeCollectInfo = {
     ...info,
