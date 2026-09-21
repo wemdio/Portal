@@ -82,3 +82,85 @@ describe('emailScraper direct fetching', () => {
     expect(result.failureReason).toBeNull();
   });
 });
+
+describe('emailScraper proxy retry on bot protection', () => {
+  const originalFetch = global.fetch;
+  const originalPriority = process.env.YANDEXMAPS_PROXY_URLS_PRIORITY;
+
+  beforeEach(() => {
+    process.env.YANDEXMAPS_PROXY_URLS_PRIORITY = '["http://user:pass@ru-proxy.invalid:8000"]';
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('@/lib/enrich/proxyPool').resetProxyGroupsCache();
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    if (originalPriority === undefined) delete process.env.YANDEXMAPS_PROXY_URLS_PRIORITY;
+    else process.env.YANDEXMAPS_PROXY_URLS_PRIORITY = originalPriority;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('@/lib/enrich/proxyPool').resetProxyGroupsCache();
+  });
+
+  const htmlResponse = (body: string) =>
+    new Response(body, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } });
+
+  it('retries a 403 main page through the proxy and keeps the address it finds', async () => {
+    const calls: Array<{ hasProxy: boolean }> = [];
+    global.fetch = jest.fn(async (_url: unknown, init?: RequestInit) => {
+      const dispatcher = (init as { dispatcher?: { constructor?: { name?: string } } })?.dispatcher;
+      const hasProxy = dispatcher?.constructor?.name === 'ProxyAgent';
+      calls.push({ hasProxy });
+      if (!hasProxy) return new Response('nope', { status: 403 });
+      return htmlResponse('<html><body>sales@blocked.ru</body></html>');
+    }) as unknown as typeof fetch;
+
+    const result = await scrapeEmails('https://blocked.ru', {
+      timeout: 1_000,
+      maxPages: 1,
+      stopAtFirstUsableEmail: true,
+    });
+
+    expect(result.emails).toEqual(['sales@blocked.ru']);
+    expect(result.failureReason).toBeNull();
+    expect(calls.some((c) => c.hasProxy)).toBe(true);
+  });
+
+  it('does not spend a proxy request on a timeout — only bot protection is retried', async () => {
+    let proxyCalls = 0;
+    global.fetch = jest.fn(async (_url: unknown, init?: RequestInit) => {
+      const dispatcher = (init as { dispatcher?: { constructor?: { name?: string } } })?.dispatcher;
+      if (dispatcher?.constructor?.name === 'ProxyAgent') proxyCalls += 1;
+      throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'UND_ERR_CONNECT_TIMEOUT' } });
+    }) as unknown as typeof fetch;
+
+    const result = await scrapeEmails('https://slow.ru', { timeout: 500, maxPages: 1 });
+
+    expect(proxyCalls).toBe(0);
+    expect(result.failureReason).toBe('Сайт не ответил за отведённое время');
+  });
+
+  it('honours the kill switch', async () => {
+    const prev = process.env.EMAIL_SCRAPER_PROXY_RETRY;
+    process.env.EMAIL_SCRAPER_PROXY_RETRY = '0';
+    jest.resetModules();
+    try {
+      let proxyCalls = 0;
+      global.fetch = jest.fn(async (_url: unknown, init?: RequestInit) => {
+        const dispatcher = (init as { dispatcher?: { constructor?: { name?: string } } })?.dispatcher;
+        if (dispatcher?.constructor?.name === 'ProxyAgent') proxyCalls += 1;
+        return new Response('nope', { status: 403 });
+      }) as unknown as typeof fetch;
+
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { scrapeEmails: fresh } = require('@/lib/enrich/emailScraper');
+      const result = await fresh('https://blocked.ru', { timeout: 500, maxPages: 1 });
+
+      expect(proxyCalls).toBe(0);
+      expect(result.failureReason).toBe('Сайт блокирует автоматические запросы (403)');
+    } finally {
+      if (prev === undefined) delete process.env.EMAIL_SCRAPER_PROXY_RETRY;
+      else process.env.EMAIL_SCRAPER_PROXY_RETRY = prev;
+      jest.resetModules();
+    }
+  });
+});
