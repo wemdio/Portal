@@ -239,7 +239,13 @@ export async function fetchVeRelevanceEvidence(
       if (page && url && !DIRECTORY_HOST.test(url.hostname)) cachedPages.set(veFactPageKey(page.url), page);
     }
     // Recover the confirmed company website without buying another search.
-    if (!supplied.length) for (const page of cachedPages.values()) {
+    // Раньше память фактов подключалась только при ПУСТОМ website: компания с
+    // сайтом из реестра, который не печатает ИНН, шла покупать поиск заново,
+    // хотя её подтверждённая страница уже лежала в памяти (30 суток). В память
+    // попадают только страницы с подтверждённой личностью, поэтому добавлять
+    // их к указанным доменам безопасно — они лишь дают шанс подтвердиться
+    // бесплатно, а проверка владения остаётся прежней.
+    for (const page of cachedPages.values()) {
       const url = allowedUrl(page.url)!;
       if (!supplied.some((other) => siteHost(other) === siteHost(url))) supplied.push(url);
       if (supplied.length >= MAX_DOMAINS) break;
@@ -291,8 +297,13 @@ export async function fetchVeRelevanceEvidence(
   const inspect = async (start: URL, initial: VeEvidencePage | undefined, signal: AbortSignal, discovered = false): Promise<VeEvidencePage[]> => {
     const sitePages: VeEvidencePage[] = initial ? [initial] : [];
     const identity = () => {
-      const seen = new Set(sitePages.flatMap((page) => page.inns));
+      // Конфликт считаем по ВЛАДЕЛЬЧЕСКИМ позициям (подвал, реквизиты,
+      // юридическая страница), а не по любому ИНН в тексте: чужой ИНН в отзыве,
+      // в платёжном виджете или в перечне партнёров аннулировал весь сайт
+      // целиком, и компания уходила покупать поиск. Допуск при этом не
+      // ослаблен — он по-прежнему требует ровно одного владельца и нашего ИНН.
       const owners = new Set(sitePages.flatMap((page) => page.ownerInns ?? []));
+      const seen = owners;
       return !inn ? (!discovered || discoveredNameMatches(sitePages, opts.companyName ?? '', opts.companyAddress ?? '') ? 'supplied' : 'unknown') : [...seen].some((value) => value !== inn) ? 'conflict'
         : owners.size === 1 && owners.has(inn) ? 'verified' : 'unknown';
     };
