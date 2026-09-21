@@ -2403,7 +2403,14 @@ async function dispatchConstructJob(input: {
       // предпочёл подтверждённый адрес catch-all, и не больше.
       find_emails: {
         stop_at_first: false, max_per_site: 6, max_pages: 4, site_timeout_ms: 30_000, merge_mode: 'prefer_found_validated',
-        ...(reservedId ? { reuse_website_description: true } : {}),
+        // Описание берём из главной страницы, которую find_emails и так уже
+        // скачал. Без этого enrich_descriptions идёт на тот же сайт второй
+        // раз — и втрое меньшей параллельностью, чем поиск почт. Замер: у 75%
+        // строк с сайтом описание набирается прямо с главной, то есть три из
+        // четырёх повторных закачек лишние. Флаг включаем только когда шаг
+        // enrich_descriptions реально стоит в списке: у баз свыше 5000 строк
+        // его нет, и колонка описания там появляться не должна.
+        ...(reservedId || steps.includes('enrich_descriptions') ? { reuse_website_description: true } : {}),
       },
     },
     data: buildConstructGrid(rows, market),
