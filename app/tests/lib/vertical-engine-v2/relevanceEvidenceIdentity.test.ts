@@ -8,6 +8,7 @@
  */
 import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
 import { veCompanyFactKey, veFactPageKey } from '@/lib/verticalEngineV2/companyFacts';
+import { VeOperationTimeoutError } from '@/lib/verticalEngineV2/operationDeadline';
 import type { VeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
 
 const OUR_INN = '7700000001';
@@ -51,6 +52,22 @@ describe('подтверждение владения сайтом', () => {
       'https://romashka.ru/': page({ url: 'https://romashka.ru/' }),
     });
     expect(result.status).not.toBe('ok');
+  });
+
+  it('чужой владелец остаётся окончательным ответом, даже если страница тормозила', async () => {
+    // Ярлык «таймаут» отправляет компанию на повторную проверку, а повтор
+    // снова покупает платный поиск. Для сайта с чужим владельцем повторять
+    // нечего: ответ уже получен и не изменится.
+    const result = await fetchVeRelevanceEvidence('https://slow.test, https://romashka.ru', {
+      companyInn: OUR_INN, companyName: 'Ромашка', companyAddress: 'Казань, ул. Мира, 5', focus: 'мебель',
+      fetchPage: async (url) => {
+        if (url.includes('slow.test')) throw new VeOperationTimeoutError('relevance evidence page', 5000);
+        return page({ url, inns: [FOREIGN_INN], ownerInns: [FOREIGN_INN] });
+      },
+      search: (async () => []) as never,
+    });
+    expect(result.status).not.toBe('ok');
+    expect(result.reason).toBe('website_identity_unverified');
   });
 
   it('подтверждённая страница из памяти фактов проверяется вместо покупки поиска', async () => {
