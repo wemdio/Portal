@@ -141,11 +141,27 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         });
       }
 
+      /**
+       * История переездов — отдельным списком и без окна по времени.
+       *
+       * Журнал аккаунта собирается по кампании, в которой аккаунт лежит сейчас,
+       * поэтому записи прежней кампании в него не попадают в принципе. А «откуда
+       * этот аккаунт взялся и почему» спрашивают как раз тогда, когда переезд
+       * был давно и в журнал уже не попадает по диапазону.
+       */
+      const { data: moves } = await auth.supabase
+        .from('tg_outreach_account_moves')
+        .select('moved_at, reason, from_campaign_name, to_campaign_name, moved_by_name')
+        .eq('account_id', accountId)
+        .order('moved_at', { ascending: false })
+        .limit(20);
+
       return NextResponse.json({
         range: rangeKey,
         since: sinceIso,
         truncated,
         items,
+        moves: moves ?? [],
       });
     },
   );
