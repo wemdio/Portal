@@ -8,7 +8,7 @@ import { BaseContactsModal } from '@/components/tg-outreach/BaseContactsModal';
 import { pickIdentity } from '@/lib/tgOutreach/profile/autofill';
 import { BulkProfileModal } from '@/components/tg-outreach/BulkProfileModal';
 import { MoveAccountsModal } from '@/components/tg-outreach/MoveAccountsModal';
-import { accountCountryLabel, countryOptions } from '@/lib/tgOutreach/phoneCountry';
+import { accountCountryLabel } from '@/lib/tgOutreach/phoneCountry';
 import {
   MessageSquareMore,
   Plus,
@@ -2387,7 +2387,6 @@ function CampaignAccountsTab({
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSummary, setUploadSummary] = useState<AccountsUploadSummary | null>(null);
   /** Страна партии со слов оператора — см. выпадающий список у кнопки загрузки. */
-  const [uploadCountry, setUploadCountry] = useState('');
   /**
    * Цена одного аккаунта загружаемой партии, рублями.
    *
@@ -2395,7 +2394,6 @@ function CampaignAccountsTab({
    * рядом с кнопкой загрузки: проставить цену потом, по одной строке на
    * полсотни аккаунтов, оператор не станет. Пусто — цена не указана.
    */
-  const [uploadPrice, setUploadPrice] = useState('');
   /** Цена для аккаунта, добавляемого вручную. */
   const [newPrice, setNewPrice] = useState('');
   /** Цена, которую проставляем выбранным строкам разом. */
@@ -3106,8 +3104,6 @@ function CampaignAccountsTab({
       const token = await getAccessToken();
       const formData = new FormData();
       Array.from(files).forEach(f => formData.append('files', f));
-      if (uploadCountry) formData.append('country', uploadCountry);
-      if (uploadPrice.trim()) formData.append('price', uploadPrice.trim());
       // fetch отклоняется, только когда ответа нет вовсе: обрыв связи,
       // соединение, разорванное на середине многомегабайтной партии. Это не то
       // же, что отказ сервера — там ответ есть, и он объясняет причину. Здесь
@@ -3353,43 +3349,6 @@ function CampaignAccountsTab({
                 ? `Обновить профили выбранных (${syncTargets.length})`
                 : `Обновить профили всех (${syncTargets.length})`}
           </button>
-          {/*
-            Страна партии — со слов оператора, до загрузки.
-            У tdata телефона нет, пока не подключишься, а подключаться положено
-            через прокси той же страны: чтобы узнать страну, нужен прокси, а
-            чтобы выбрать прокси — страна. Круг разрывается тем, что оператор
-            и так знает страну: он выбирал её в объявлении при покупке.
-          */}
-          <label className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600">
-            Страна партии
-            <select
-              value={uploadCountry}
-              onChange={(e) => setUploadCountry(e.target.value)}
-              title="Страна, в которой зарегистрированы аккаунты партии. Нужна, чтобы подобрать прокси до первого подключения."
-              className="cursor-pointer rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-xs text-gray-800 outline-none focus:border-indigo-400"
-            >
-              <option value="">не указана</option>
-              {countryOptions().map((c) => (
-                <option key={c.code} value={c.code}>{c.flag} {c.name}</option>
-              ))}
-            </select>
-          </label>
-          {/* Цена партии — здесь же, а не отдельным шагом: аккаунты покупают
-              одним чеком по одной цене за штуку, и это единственный момент,
-              когда оператор её помнит. Пусто — цена не указана. */}
-          <label className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-2 text-xs text-gray-600">
-            Цена за аккаунт, ₽
-            <input
-              type="number"
-              min={0}
-              step="1"
-              value={uploadPrice}
-              onChange={(e) => setUploadPrice(e.target.value)}
-              placeholder="—"
-              title="Сколько стоил один аккаунт партии. Проставится всем загруженным; потом можно поправить построчно."
-              className="w-20 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-xs text-gray-800 outline-none focus:border-indigo-400"
-            />
-          </label>
           <label
             title="tdata — zip-архивами (можно сразу несколько), старый формат — парами .session и .json"
             className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer"
