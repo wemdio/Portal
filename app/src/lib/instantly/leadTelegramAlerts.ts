@@ -33,6 +33,13 @@ interface TgSendResult {
   result?: { message_id?: number };
 }
 
+export interface CampaignScopeAlertItem {
+  campaignId: string;
+  campaignName: string;
+  statusLabel: string;
+  reserveTagNames: string[];
+}
+
 function getToken(): string {
   return process.env.LEAD_ALERTS_TELEGRAM_BOT_TOKEN
     || process.env.CHANGELOG_BOT_TOKEN
@@ -169,6 +176,91 @@ function buildMessage(data: LeadTelegramAlertData, statusText?: string): string 
   return [...lines, ...footer].join('\n');
 }
 
+function buildCampaignScopeMessage(data: {
+  mentionUsername: string;
+  accountLabel: string;
+  campaigns: CampaignScopeAlertItem[];
+}): string {
+  const username = normalizeUsername(data.mentionUsername) ?? 'Jacob_Brown';
+  // Keep the complete HTML safely below Telegram's 4096-character limit.
+  const visible = data.campaigns.slice(0, 8);
+  const lines = [
+    '⚠️ <b>Неверный тег кампании Instantly</b>',
+    `@${escapeHtml(username)}`,
+    '',
+    `Аккаунт: <b>${escapeHtml(clip(data.accountLabel, 160))}</b>`,
+    'Резервный тег «неименные …» назначен кампании. Это тег запаса почт, а не проекта.',
+    '<b>Кампания не остановлена.</b> Нужно снять резервный тег с кампании и проверить проектный.',
+    '',
+  ];
+  for (const campaign of visible) {
+    const tags = campaign.reserveTagNames.join(', ');
+    lines.push(
+      `• <b>${escapeHtml(clip(campaign.campaignName || campaign.campaignId, 160))}</b> ` +
+        `(${escapeHtml(campaign.statusLabel)})\n` +
+        `  Тег: ${escapeHtml(clip(tags, 120))}\n` +
+        `  <code>${escapeHtml(campaign.campaignId)}</code>`,
+    );
+  }
+  if (data.campaigns.length > visible.length) {
+    lines.push('', `И ещё ${data.campaigns.length - visible.length} кампаний.`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Configuration warning uses the exact same bot/chat/topic as lead cards.
+ * It is informational only: this function never pauses or edits a campaign.
+ */
+export async function sendCampaignScopeTelegramAlert(data: {
+  mentionUsername: string;
+  accountLabel: string;
+  campaigns: CampaignScopeAlertItem[];
+}): Promise<{ sent: boolean; messageId: number | null; error: string | null }> {
+  if (data.campaigns.length === 0) return { sent: false, messageId: null, error: null };
+  const token = getToken();
+  const chatId = getChatId();
+  if (!token || !chatId) {
+    const error = `config missing (token=${token ? 'set' : 'missing'}, chat=${chatId ? 'set' : 'missing'})`;
+    console.warn(`[campaign-scope-alert] skipped (${error})`);
+    return { sent: false, messageId: null, error };
+  }
+
+  const body: Record<string, unknown> = {
+    chat_id: chatId,
+    text: buildCampaignScopeMessage(data),
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+  };
+  const threadId = getThreadId();
+  if (threadId) body.message_thread_id = threadId;
+
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(TG_FETCH_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      return { sent: false, messageId: null, error: `HTTP ${res.status}: ${detail.slice(0, 300)}` };
+    }
+    const json = await res.json() as TgSendResult;
+    return {
+      sent: json.ok,
+      messageId: json.result?.message_id ?? null,
+      error: json.ok ? null : JSON.stringify(json).slice(0, 300),
+    };
+  } catch (err) {
+    return {
+      sent: false,
+      messageId: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 export async function sendLeadTelegramAlert(
   data: LeadTelegramAlertData,
 ): Promise<{ sent: boolean; messageId: number | null; error: string | null }> {
@@ -233,5 +325,6 @@ export async function sendLeadTelegramAlert(
 
 export const _private = {
   buildMessage,
+  buildCampaignScopeMessage,
   escapeHtml,
 };
