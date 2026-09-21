@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { recipientMailboxIdentities } from '@/lib/clientCampaignReplies/participants';
 
 import * as instantly from './client';
 import {
@@ -58,6 +59,8 @@ export type ReplyOwnershipResolution =
       mailboxVerified: boolean;
       /** Recipient, chronology and quoted send prove the conversation, including across mailboxes. */
       conversationVerified?: boolean;
+      /** Missing provider eaccount recovered from recipients AND a real quoted send. */
+      inferredMailbox?: string;
       reason: string;
     }
   | {
@@ -396,7 +399,7 @@ interface QuotedOutbound {
 function quotedOutbounds(reply: Email, mailbox?: string): QuotedOutbound[] {
   const text = getBodyText(reply.body).replace(/\r\n?/g, '\n')
     .split('\n').map(line => line.replace(/^\s*(?:>\s*)+/, '')).join('\n');
-  const starts = [...text.matchAll(/^(?:From|От|От кого)\s*:\s*(.+)$/gim)];
+  const starts = [...text.matchAll(/^(?:From|От кого|От)(?:[ \t]*:[ \t]*|[ \t]+)(.+)$/gim)];
   const result: QuotedOutbound[] = [];
   for (let index = 0; index < starts.length; index++) {
     const start = starts[index];
@@ -412,7 +415,7 @@ function quotedOutbounds(reply: Email, mailbox?: string): QuotedOutbound[] {
     for (let i = 0; i < Math.min(16, lines.length); i++) {
       const line = lines[i].trim();
       if (!line) continue;
-      const header = /^(Sent|Date|Отправлено|Дата|To|Кому|Cc|Копия|Subject|Тема)\s*:\s*(.*)$/i.exec(line);
+      const header = /^(Sent|Date|Отправлено|Дата|To|Кому|Cc|Копия|Subject|Тема)(?:[ \t]*:[ \t]*|[ \t]+)(.*)$/i.exec(line);
       if (!header) break;
       if (/^(Sent|Date|Отправлено|Дата)$/i.test(header[1])) dated = Boolean(header[2].trim());
       if (/^(To|Кому)$/i.test(header[1])) recipients = emailAddressTokens(header[2]);
@@ -1069,6 +1072,29 @@ export async function resolveEffectiveReplyOwner(args: {
             } : undefined);
   const mailbox = normalizeMailbox(reply.eaccount);
   if (!mailbox) {
+    // A quote alone can be forwarded or forged. Use exactly one sender that
+    // also occurs in To/CC only as a search hint; accept it only after matching
+    // a real provider outbound, chronology, recipients, subject and full body.
+    const recipients = recipientMailboxIdentities(reply);
+    const candidates = [...new Set(quotedOutbounds(reply).map(quote => quote.sender))]
+      .filter(sender => recipients.has(sender));
+    if (candidates.length === 1) {
+      const inferred = candidates[0];
+      const inferredReply = { ...reply, eaccount: inferred };
+      const recovered = await resolveEffectiveReplyOwner({
+        ...args, reply: inferredReply, prefetchedContext: providerContext,
+      });
+      if (recovered.status === 'resolved' && (recovered.conversationVerified ||
+          (recovered.context?.lastOutbound && verifiedConversationParents(
+            [recovered.context.lastOutbound], inferredReply,
+          ).some(parent => parent.campaign_id === recovered.effectiveCampaignId)))) {
+        return { ...recovered, conversationVerified: true, inferredMailbox: inferred };
+      }
+      return recovered.status !== 'resolved' ? recovered : {
+        status: 'defer', providerCampaignId,
+        reason: 'quoted recipient suggests a mailbox but no actual conversation parent proves it',
+      };
+    }
     return resolveProviderCampaignFallback({
       db,
       providerCampaignId,
@@ -1380,6 +1406,25 @@ export async function resolveEffectiveReplyOwner(args: {
       candidateCampaignIds: evidenceCampaignIds,
       candidateProjectIds,
       reason: 'workspace ownership evidence exceeded the bounded page budget',
+    };
+  }
+  // Historical assignments alone are not a present-day ownership conflict.
+  // This fallback is deliberately AFTER the complete parent search: a late
+  // reply to an old project's real send must keep that old owner. An unmatched
+  // quote or unknown/current competing owner still needs evidence, not a guess.
+  const currentOwnerKeys = [...new Set(currentCampaignIds.flatMap(id => campaignOwnerKeys(links, id)))];
+  if (providerIsCurrent && currentOwnerKeys.length === 1 &&
+      !currentOwnerKeys[0].startsWith('unknown:') &&
+      providerOwnerKeys.length === 1 && providerOwnerKeys[0] === currentOwnerKeys[0] &&
+      quotedOutbounds(reply).length === 0 &&
+      !providerContext?.lastOutbound &&
+      campaignParentMatches(workspaceEvidence.evidence, evidenceCampaignIds).length === 0) {
+    return {
+      status: 'resolved', providerCampaignId, effectiveCampaignId: providerCampaignId,
+      effectiveProjectId: projectIdFromOwnerKey(currentOwnerKeys[0]),
+      context: providerContext ? { ...providerContext, historyFetchFailed: false } : null,
+      corrected: false, mailboxVerified: true,
+      reason: 'complete parent search found no competing conversation; all current exact mailbox mappings resolve one owner',
     };
   }
   return resolveParentEvidence(workspaceEvidence.evidence, evidenceCampaignIds, links, reply,

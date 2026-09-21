@@ -52,6 +52,22 @@ export function getEmailRecipients(email: Email): { to: Recipient[]; cc: Recipie
   return { to, cc };
 }
 
+/** Comparison identities only: never use decoded SRS addresses for sending or
+ * choosing a project. Ownership is established independently by the resolver.
+ */
+export function recipientMailboxIdentities(email: Email): Set<string> {
+  const { to, cc } = getEmailRecipients(email);
+  const identities = new Set<string>();
+  for (const recipient of [...to, ...cc]) {
+    for (const address of recipient.email.toLowerCase().match(/[a-z0-9._%+=\-]+@[a-z0-9.\-]+/g) ?? []) {
+      identities.add(address);
+      const srs = /^srs0([=+-])[a-z0-9]{1,32}\1[a-z0-9]{2}\1([a-z0-9.-]+\.[a-z]{2,})\1([a-z0-9._%+\-]+)@[a-z0-9.-]+$/i.exec(address);
+      if (srs) identities.add(`${srs[3]}@${srs[2]}`);
+    }
+  }
+  return identities;
+}
+
 /**
  * Reply-all CC addresses to keep when replying to `email`: every To+CC
  * participant EXCEPT our own sending mailbox (`eaccount`) and the lead we're

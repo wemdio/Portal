@@ -1,4 +1,5 @@
 import { isVeProviderBillingError } from './collectionErrors';
+import { collectionRoundLimit, type VeCollectionTargetProgress } from './collectionTarget';
 import { buildVeRelevanceReviewBatch, readVeRelevanceReserve, readVeRelevanceSourceRows } from './relevanceReserve';
 import { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
 import { isVeRelevanceTriageEnabled } from './relevanceTriageConfig';
@@ -90,7 +91,70 @@ export function previewRecoveryKind(base: Record<string, unknown>): 'validation'
   // base after funds are restored, instead of accumulating duplicate failures.
   if (!construct && !checkpoint && progress.round === 1 && progress.candidates_processed === 0
     && isVeProviderBillingError(base.error ?? progress.reason)) return 'billing';
+  // `pending` здесь — не новая задача, а след незавершённого возобновления:
+  // продолжение само переводит упавшую задачу карт в pending, и если следующий
+  // заход стадии упал (прод 17.09.2026), задача остаётся в этом статусе
+  // навсегда. Не узнать своё же состояние — значит на «Продолжить подготовку»
+  // купить новую базу вместо уже проверенных контактов старой.
   if (progress.status === 'error' && Array.isArray(info.tasks) && info.tasks.some((task) =>
-    task?.source === 'yandex_maps' && task.status === 'failed' && task.task?.maps_query?.queries?.length)) return 'catalog';
+    task?.source === 'yandex_maps' && (task.status === 'failed' || task.status === 'pending')
+    && task.task?.maps_query?.queries?.length)) return 'catalog';
   return null;
+}
+
+/**
+ * Раунд, записавший контрольную точку, ЗАКРЫТ: `completed_round === round`.
+ * При ошибке задачи `finishCollectionRound` возвращает `error`, НЕ увеличивая
+ * номер раунда, поэтому продолжение обязано открыть СЛЕДУЮЩИЙ раунд: стадия
+ * читает `completed_round === round - 1` как «этот раунд ещё не собирался» и
+ * отвергает собственное сохранённое состояние.
+ *
+ * Номер нельзя двигать в одиночку. В стадии инкремент всегда идёт в паре со
+ * сбросом завершённого конструктора и пересчётом лимита набора: конструктор
+ * закрытого раунда, оставленный следующему, заново втягивает те же компании и
+ * завышает `candidates_processed`. Здесь повторён ровно тот же переход.
+ *
+ * Контрольная точка на раунд позади — согласованное состояние (раунд ещё не
+ * закрылся), его продолжают тем же номером: функция ничего не меняет.
+ */
+export function openNextVeCollectionRound(info: Record<string, unknown>): boolean {
+  const progress = info.target_progress as VeCollectionTargetProgress | undefined;
+  const checkpoint = info.target_checkpoint as { completed_round?: unknown } | undefined;
+  // Потолок раундов не повторяем: стадия проверяет его сама, уже своим
+  // текущим значением. Сохранённое в старой базе (5 при нынешних 100) здесь
+  // означало бы отказ чинить ровно те базы, ради которых потолок и подняли.
+  if (!progress || typeof progress !== 'object'
+    || !Number.isSafeInteger(progress.round) || progress.round < 1
+    || checkpoint?.completed_round !== progress.round) return false;
+  // Равенство completed_round и round означает «раунд закрыт» ТОЛЬКО без флагов
+  // повторного прохода: с любым из них стадия читает то же равенство как «идёт
+  // сохранённый проход того же раунда» (предикат на входе стадии вычитает
+  // единицу лишь когда флагов нет). Сдвинув номер такой базе, мы отобрали бы у
+  // неё конструктор и залипли бы ровно той ошибкой, ради которой всё это.
+  if (info.validation_retry || info.company_name_recovery || info.relevance_review_requested) return false;
+  const next: VeCollectionTargetProgress = { ...progress, round: progress.round + 1, status: 'collecting' };
+  delete next.reason;
+  info.target_progress = next;
+  // Конструктор принадлежит закрытому раунду; следующий строит свой.
+  delete info.construct;
+  const policy = info.search_policy as Record<string, unknown> | undefined;
+  if (policy && typeof policy === 'object') delete policy.construct_rows;
+  const stats = info.stats as Record<string, unknown> | undefined;
+  if (stats && typeof stats === 'object') delete stats.finished_at;
+  // Живые лейны реестра и каталога снова читают СВОЮ закладку — тот же сброс,
+  // что делает стадия на границе раунда. Исчерпанные и упёршиеся в потолок
+  // остаются как есть, как и задачи, которые возобновление уже подняло.
+  const tasks = info.tasks;
+  if (Array.isArray(tasks) && !info.preview_pipeline && !info.adaptive_collection) {
+    info.tasks = tasks.map((state) => {
+      const task = state as Record<string, unknown> | null;
+      if (!task || task.status !== 'done' || task.exhausted || task.hit_ceiling
+        || !(task.source === 'companies_directory' || !!task.catalog)) return state;
+      return { source: task.source, task: task.task, status: 'pending', child_job_id: null, rows: 0,
+        ...(task.catalog ? { catalog: task.catalog } : {}),
+        ...(task.directory_cursors ? { directory_cursors: task.directory_cursors } : {}) };
+    });
+  }
+  info.limit = collectionRoundLimit(next);
+  return true;
 }

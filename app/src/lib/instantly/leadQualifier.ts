@@ -961,8 +961,6 @@ const DELIVERY_FAILURE_BODY_PATTERN =
   /(?:не\s+удалось\s+(?:выполнить\s+)?доставк|почтов(?:ый\s+ящик|ая\s+квота)[^\n.]{0,100}(?:переполнен|превышен)|mailbox[^\n.]{0,80}(?:full|over\s+quota)|quota\s*(?:exceeded|has\s+been\s+exceeded)|delivery\s+(?:has\s+)?failed|message\s+(?:was\s+)?not\s+delivered|recipient[^\n.]{0,100}(?:couldn'?t\s+be\s+reached|cannot\s+receive))/iu;
 const DELIVERY_DIAGNOSTIC_PATTERN =
   /(?:диагностическ(?:ие|ая)\s+сведени|diagnostic\s+information|QuotaExceeded(?:Exception)?|STOREDRV|\b[45]\.\d\.\d\b|\b(?:421|450|451|452|550|551|552|553|554)\b)/iu;
-const SERVICE_ACK_SUBJECT_PATTERN =
-  /(?:обращени[ея][^\n]{0,50}(?:принят|получен|зарегистрирован)|запрос[^\n]{0,40}(?:принят|получен|зарегистрирован)|уведомлени[ея]\s+о\s+получении\s+заявк[иы]|заявк[а-яё]*[^\n]{0,40}(?:принят|получен|зарегистрирован)|(?:support\s+)?(?:request|ticket)[^\n]{0,40}(?:received|accepted|registered|created))/iu;
 const SERVICE_RECEIPT_PATTERN =
   /(?:ваш[еа]?\s+(?:обращение|сообщение|письмо|запрос)\s+(?:был[оа]?\s+)?(?:успешно\s+)?(?:зарегистрирован[оа]?|получен[оа]?|принят[оа]?)|(?:мы\s+)?(?:получили|зарегистрировали|приняли)\s+ваш[еа]?\s+(?:обращение|сообщение|письмо|запрос)|спасибо\s+за\s+(?:вашу\s+)?заявк[ау]|\byour\s+(?:request|message|email|ticket)\s+(?:has\s+been|was|is)\s+(?:received|registered|accepted|created)\b|\bwe\s+have\s+(?:received|registered|accepted|created)\s+your\s+(?:request|message|email|ticket)\b)/iu;
 const SERVICE_PROCESSING_PATTERN =
@@ -1025,6 +1023,33 @@ const SUPPORT_BOT_OPERATOR_SEGMENT_PATTERN =
 // Keep the end anchor so a buyer request appended to the footer is not hidden.
 const SUPPORT_BOT_SKILLBOX_FOOTER_PATTERN =
   /^служба\s+заботы\s+Skillbox,?\s+с\s+\d{1,2}:\d{2}\s+до\s+\d{1,2}:\d{2}\s+по\s+мск\s*оставьте\s+отзыв\s+об\s+обучении\s+в\s+Skillbox\s*первое\s+занятие\s+по\s+английскому\s+за\s+\d{1,5}\s*₽\s*курс-знакомство\s+«как\s+учиться\s+в\s+Skillbox»\s*ответы\s+на\s+частые\s+вопросы\s+пользователей\s*пишите:\s*hello@skillbox\.ru$/iu;
+
+const SUPPORT_APPLICATION_REVIEW_PATTERN =
+  /^рассмотрим\s+заявку\s+и\s+свяжемся\s+(?:с\s+вами\s+)?в\s+случае\s+взаимной\s+заинтересованности$/iu;
+const SUPPORT_APPLICATION_WELCOME_PATTERN =
+  /^мы\s+открыты\s+к\s+новым\s+партн[её]рствам\s+и\s+рады\s+обсудить\s+возможности\s+сотрудничества$/iu;
+const SUPPORT_QUEUE_SEGMENT_PATTERN =
+  /^(?:по\s+этому\s+вопросу\s+поможет\s+оператор|передал\s+ваше\s+обращение\s+в\s+работу\s*[—–-]\s*верн[её]мся\s+с\s+ответом\s+в\s+течение\s+суток|пожалуйста,\s*учитывайте:\s*если\s+отправить\s+новые\s+сообщения\s+по\s+этому\s+же\s+вопросу\s+или\s+написать\s+в\s+другие\s+каналы,\s*обращение\s+может\s+переместиться\s+в\s+конец\s+очереди)$/iu;
+const SERVICE_ACK_ADDITIONAL_SEGMENT_PATTERN =
+  /^(?:ваше\s+письмо\s+получено\s+и\s+будет\s+прочитано\s+в\s+ближайшее\s+время|ваш\s+запрос\s+передан\s+в\s+соответствующее\s+подразделение|менеджер\s+свяжется\s+с\s+вами\s+в\s+течение\s+одного\s+рабочего\s+дня|уже\s+работаем\s+над\s+вопросом|верн[её]мся\s+с\s+ответом\s+как\s+можно\s+скорее(?:\s*😇)?|график\s+обслуживания\s+заявок\s+определяют\s+рабочие\s+часы)$/iu;
+
+/** Human support routing is not a machine reply and stays visible as such.
+ * Require the whole authored message, including the conditional application
+ * review. A concrete buyer request alongside the form must still reach AI.
+ */
+function isSupportApplicationRouting(text: string): boolean {
+  const segments = serviceAcknowledgementSegments(extractAuthoredReplyText(text)
+    .replace(/([.!?])(?=[А-ЯЁ])/gu, '$1\n')
+    .replace(/(https?:\/\/\S+)\s+(?=Рассмотрим\s+заявку)/gu, '$1\n'));
+  return segments.some(segment => SUPPORT_BOT_FORM_SEGMENT_PATTERN.test(segment)) &&
+    segments.some(segment => SUPPORT_APPLICATION_REVIEW_PATTERN.test(segment)) &&
+    segments.every(segment => !segment ||
+      /^(?:здравствуйте(?:,\s*[А-ЯЁ][а-яё-]{1,40})?|бот\s+ответил\s+верно)$/iu.test(segment) ||
+      SUPPORT_BOT_FORM_SEGMENT_PATTERN.test(segment) ||
+      SUPPORT_APPLICATION_REVIEW_PATTERN.test(segment) ||
+      SUPPORT_APPLICATION_WELCOME_PATTERN.test(segment) ||
+      SUPPORT_BOT_SKILLBOX_FOOTER_PATTERN.test(segment));
+}
 
 // A short mailbox-move notice may have neither an auto-reply marker nor the
 // formal company-migration wording above. Require a complete administrative
@@ -1104,13 +1129,15 @@ function classifyTechnicalTemplateSegments(segments: string[]): MachineReplyKind
   }
 
   const supportBot = segments.some((segment) => SUPPORT_BOT_IDENTITY_SEGMENT_PATTERN.test(segment)) &&
-    segments.some((segment) => SUPPORT_BOT_FORM_SEGMENT_PATTERN.test(segment));
+    segments.some((segment) => SUPPORT_BOT_FORM_SEGMENT_PATTERN.test(segment) ||
+      SUPPORT_QUEUE_SEGMENT_PATTERN.test(segment));
   if (supportBot && segments.every((segment) =>
     isServiceAcknowledgementBoilerplateSegment(segment) ||
     SUPPORT_BOT_IDENTITY_SEGMENT_PATTERN.test(segment) ||
     SUPPORT_BOT_FORM_SEGMENT_PATTERN.test(segment) ||
     SUPPORT_BOT_PARTNERSHIP_SEGMENT_PATTERN.test(segment) ||
     SUPPORT_BOT_OPERATOR_SEGMENT_PATTERN.test(segment) ||
+    SUPPORT_QUEUE_SEGMENT_PATTERN.test(segment) ||
     SUPPORT_BOT_SKILLBOX_FOOTER_PATTERN.test(segment))) {
     return 'service_acknowledgement';
   }
@@ -1141,7 +1168,9 @@ function isServiceAcknowledgementBoilerplateSegment(segment: string): boolean {
     SERVICE_ACK_SIGNOFF_PATTERN.test(segment) ||
     SERVICE_ACK_CONTACT_ONLY_PATTERN.test(segment) ||
     SERVICE_ACK_OPERATIONAL_CONTACT_PATTERN.test(segment) ||
-    SERVICE_ACK_PATIENCE_PATTERN.test(segment)
+    SERVICE_ACK_PATIENCE_PATTERN.test(segment) ||
+    SERVICE_ACK_ADDITIONAL_SEGMENT_PATTERN.test(segment) ||
+    /^(?:привет|доброго\s+времени\s+суток)$/iu.test(segment)
   );
 }
 
@@ -1159,6 +1188,23 @@ function serviceAcknowledgementSegments(authoredBody: string): string[] {
     .map(normalizeServiceAcknowledgementSegment);
 }
 
+/** System envelopes can contain our entire offer in a Description field.
+ * Inspect the envelope, not its quoted commercial words. Empty Comments and
+ * an exact terminal footer are mandatory; added human content fails open.
+ */
+function classifySystemEnvelope(sender: string, subject: string, text: string): MachineReplyKind | null {
+  const body = text.replace(/\r\n?/g, '\n').trim();
+  if (body.length > 80_000) return null;
+  const opened = /^HR Case (HRC\d+) has been opened$/i.exec(subject);
+  if (opened && /^[^@\s]+@(?:[a-z0-9-]+\.)*service-now\.com$/i.test(sender)) {
+    const envelope = /^(HRC\d+)\s+\[https:\/\/[a-z0-9.-]+\.service-now\.com\/[^\]\s]+\]\s*Opened by:[^\n]+\nState:\s*Ready\s*\n\s*Short Description:[\s\S]*?\nDescription:[\s\S]*?\nComments:\s*\nRegards,\s*\nOneSC\s*\nRef:MSG[a-z0-9_]+$/i.exec(body);
+    if (envelope?.[1].toLowerCase() === opened[1].toLowerCase()) return 'service_acknowledgement';
+  }
+  const gateway = /^Kaspersky Secure Mail Gateway found unwanted object\(s\) in a message\s+from\s+[^\s@]+@[^\s@]+\s+to\s+[^\s@]+@[^\s@]+\s+with the subject "[^"\n]{1,500}"\.\s+You can find additional information about the message below\.\s+Message-ID: <[^<>\n]+>\.\s+Message date: [^\n]+\nNode: [\d.:]+\s+Internal message ID: \d+\.\s+Action on message: rejected, backed up\.\s+Recipients involved: [^\n]+\nRules involved: [\d, .]+\s+Object: Message\.\s+Object size: \d+\.\s+Status: Spam\.\s+Action on object\(s\): rejected, backed up\.\s+=+$/i;
+  if (gateway.test(body)) return 'delivery_failure';
+  return null;
+}
+
 /**
  * Детерминированный шлюз только для доказанных машинных писем. Адреса вроде
  * support@/info@ сами по себе ничего не решают: сомнительные и человеческие
@@ -1171,6 +1217,8 @@ export function classifyMachineReply(
   const senderLocalPart = sender.split('@', 1)[0] ?? '';
   const subject = (email.subject ?? '').trim();
   const fullBody = getBodyText(email.body) || (email.content_preview ?? '');
+  const envelope = classifySystemEnvelope(sender, subject, fullBody);
+  if (envelope) return envelope;
   // An empty authored part is not permission to classify the quoted history.
   // In particular a forwarded/quoted support bot is not the human sender's
   // own reply, even when it is the only text in the message.
@@ -1200,8 +1248,10 @@ export function classifyMachineReply(
     serviceSegments.some((segment) => SERVICE_ACK_RESPONSE_PROMISE_PATTERN.test(segment)) &&
     serviceSegments.some((segment) => SERVICE_ACK_CONDITIONAL_CONTACT_PATTERN.test(segment));
   if (
-    ((serviceReceipt &&
-      (SERVICE_ACK_SUBJECT_PATTERN.test(subject) || (serviceProcessing && serviceContext))) ||
+    ((serviceReceipt ||
+      (serviceSegments.some(segment => /^ваш\s+запрос\s+передан\s+в\s+соответствующее\s+подразделение$/iu.test(segment)) &&
+        serviceSegments.some(segment => /^менеджер\s+свяжется/iu.test(segment))) ||
+      (serviceProcessing && serviceContext)) ||
       receiptlessAcknowledgement) &&
     serviceSegments.every(isServiceAcknowledgementBoilerplateSegment)
   ) {
@@ -2287,6 +2337,7 @@ function buildSystemPrompt(
 - Лид — потенциальный покупатель НАШЕГО предложения, а не собеседник, который продаёт НАМ свои услуги. «Наша компания оказывает услуги перевозки, готовы к долгосрочному сотрудничеству» — встречная продажа, а не интерес к нашим контейнерам. «Мы можем вам помочь, пришлите свой запрос с размерами, подготовим ответ/расчёт, со мной можно связаться» — тоже продавец, а не покупатель.
 - Вежливая готовность сотрудничать, личный телефон и предложение созвониться внутри встречной продажи не меняют направление интереса. Для полностью встречного предложения ставь non_lead_kind="seller_pitch".
 - non_lead_kind="service_followup" — служебное продолжение тикета/обслуживания, в котором поставщик ждёт нашу обратную связь или обсуждает выполнение своего запроса, без интереса приобрести наше предложение. Это может быть живой человек, а не автоответ. Одни лишь адрес support@, номер тикета или слова «обратная связь» НЕ доказывают эту категорию: сверяй роли отправителей, содержание и контекст.
+- Ответ поддержки «открыты к партнёрствам, заполните форму; рассмотрим заявку и свяжемся в случае взаимной заинтересованности» — только порядок подачи обращения, а не подтверждённый интерес к нашему предложению (non_lead_kind="service_followup"). Общая готовность рассматривать заявки не равна согласию на сотрудничество. Если вместе с формой есть конкретный интерес к нашему продукту или запрос цены/демонстрации, оцени его отдельно по контексту и критериям проекта.
 - non_lead_kind="contact_routing" — только передача контакта/перенаправление к коллеге или в отдел без собственного интереса: «можно связаться с Юлией, она отвечает за партнёрства»; «send the requested information to affiliates@..., this team cannot help». Это не собственное согласие на звонок и не запрос нашей цены, даже после подробного оффера.
 - Подтверждение СЕБЯ как адресата тоже может быть contact_routing: на вопрос «кто отвечает за документы / кому адресовать письмо?» ответили только «Рассказать можно мне», «Это ко мне», «Я отвечаю за это», «You can tell me». По дефолту это is_lead=false, needs_review=false: человек указал, КОМУ рассказывать, но не выразил интерес к решению. Наличие описания продукта, длина исходящего письма и его цитата не меняют этот смысл. Не путай с ответом на предложение провести демо/встречу или рассказать о решении: учитывай, на какой вопрос ответил человек. Если рядом есть «интересно ваше решение», запрос цены/КП, материалов после оффера или согласие на звонок — оцени этот отдельный интерес, non_lead_kind=null. Положительный кастомный критерий «ответственный ответил сам / назвал себя — лид» имеет приоритет; одного номера или email в подписи для такого совпадения недостаточно.
 - Если в том же основном ответе есть реальный покупательский интерес к НАШЕМУ предложению (вопрос о нашей цене, запрос нашего КП, согласие обсуждать наше решение), ставь non_lead_kind=null и оцени этот интерес. Описание своего бизнеса не отменяет покупательский запрос. «Пришлите ваше КП, передам руководству» после оффера или при отсутствующей истории — лид, но не после известного пустого opener; простое перенаправление к коллеге без такого запроса — нет.
@@ -3276,6 +3327,18 @@ export async function qualifyReply(
   if (machineReply) {
     return {
       ...machineReplyNonLead(machineReply),
+      threadContext: ctx,
+    };
+  }
+
+  // A generic application form is not a shared decision-maker contact or a
+  // buyer CTA, including projects that count personal contact sharing as a lead.
+  if (isSupportApplicationRouting(replyText)) {
+    return {
+      isLead: false, customCriteriaMatched: false, proposalSeen: false,
+      interestSignals: [], nonLeadKind: 'service_followup', machineReplyKind: null,
+      reason: 'Поддержка указала форму подачи заявки; интерес к нашему предложению ещё не подтверждён.',
+      confidence: 0.99, needsReview: false, objectionHandleable: false, objectionDraft: null,
       threadContext: ctx,
     };
   }

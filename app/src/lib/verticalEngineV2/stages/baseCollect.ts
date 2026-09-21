@@ -161,6 +161,15 @@ import {
   type VeRefillResult,
 } from './baseCollectRefill';
 import {
+  VE_BASE_COLLECT_PROBE_COLUMNS,
+  veBaseCollectFinished,
+  veIdleRequeueMs,
+  veNextIdleRounds,
+  veProbeCollectionMode,
+  veRoundAdvanced,
+  type VeBaseCollectProbe,
+} from '../baseCollectIdle';
+import {
   addUsage,
   newUsage,
   payloadString,
@@ -730,6 +739,9 @@ export interface VeCollectInfo {
   /** Selection fingerprint of the last automatic saved-review pass; an identical
    * selection after a pass proves the loop cannot progress. */
   relevance_review_progress?: { signature: string; passes: number };
+  /** Подряд идущие раунды, не сдвинувшие ни один счётчик прогресса. Растит
+   * паузу перед следующим пробуждением; любое продвижение обнуляет. */
+  idle_rounds?: number;
   /** Worker-only checkpoint for validation of saved, unfinished email rows. */
   saved_email_recovery?: import('../savedEmailRecovery').VeSavedEmailRecoveryState;
   company_name_checkpoint?: VeCompanyNameCheckpoint;
@@ -2275,6 +2287,8 @@ const CONSTRUCT_HEADERS_EN = ['Company', 'Site', 'Email', 'Phone', 'Vacancy', 'A
 const CONSTRUCT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 /** Пауза между тиками ожидания BC-джобы (run_after). */
 const CONSTRUCT_REQUEUE_MS = 60_000;
+/** Дефолт requeueVeJob, выписанный явно: паузу раунда теперь считает helper. */
+const VE_ROUND_REQUEUE_MS = 30_000;
 
 /** Заголовок сетки конструктора (lowercase) → унифицированная колонка / description. */
 const CONSTRUCT_HEADER_MAP: Record<string, keyof VeUnifiedRow | 'description'> = {
@@ -3791,6 +3805,13 @@ async function completeTargetRound(args: {
     stats.finished_at = new Date().toISOString();
   }
   info.stats = stats;
+  // Раунд, не сдвинувший ни раунд, ни кандидатов, ни готовые контакты, будет
+  // ждать вдвое дольше предыдущего. Счётчик едет в том же checkpoint'е, что и
+  // строки: отдельной записи он не стоит, а после рестарта воркера пауза не
+  // сбрасывается в секунду.
+  const roundAdvanced = veRoundAdvanced(args.progress, next);
+  info.idle_rounds = veNextIdleRounds(roundAdvanced, info.idle_rounds);
+  const idleRounds = info.idle_rounds;
   const status = next.status === 'collecting' ? 'collecting'
     : next.status === 'error' ? 'failed'
       : next.mode === 'preview' && readyRows.length > 0 ? 'analyzing' : 'analyzed';
@@ -3803,8 +3824,9 @@ async function completeTargetRound(args: {
     // changed limit applied. Best effort: the partition above is already durable.
     try { await ctx.supabase.from('ve_bases').update({ contact_cap_applied: contactLimit }).eq('id', base.id); } catch { /* next round retries */ }
   }
-  if (next.status === 'collecting') await requeueSelf(ctx, job, pipeline ? 1_000 : undefined);
-  else if (status === 'analyzing') await ensureTargetBaseAnalysis(ctx, job, base.id);
+  if (next.status === 'collecting') {
+    await requeueSelf(ctx, job, veIdleRequeueMs(pipeline ? 1_000 : VE_ROUND_REQUEUE_MS, idleRounds));
+  } else if (status === 'analyzing') await ensureTargetBaseAnalysis(ctx, job, base.id);
   return {
     result: { base_id: base.id, rows: readyRows.length, target_status: next.status, ...(next.status === 'collecting' ? { waiting: true } : {}) },
     tokensUsed: args.usage.tokensUsed, costUsd: args.usage.costUsd,
@@ -3821,6 +3843,38 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // (stages/baseCollectRefill.ts), а не analyzing + base_analyze.
   const isRefill = job.payload?.refill === true;
 
+  // ─── ВХОД: сначала узкое чтение ───
+  // Тяжёлое в строке — collect_info (16-62 МБ на активную базу), data и
+  // sample_rows. Решения «это не авто-база», «сборка уже завершена» и «сборка
+  // не начиналась» принимаются по статусу и режиму, а их узкая проекция стоит
+  // килобайты. Полную строку читаем ниже — ровно тогда, когда работа есть.
+  const { data: probeRow, error: probeError } = await ctx.supabase
+    .from('ve_bases')
+    .select(VE_BASE_COLLECT_PROBE_COLUMNS)
+    .eq('id', baseId)
+    .single();
+  if (probeError || !probeRow) throw new Error(`ve_bases ${baseId}: ${probeError?.message ?? 'not found'}`);
+  const probe = probeRow as VeBaseCollectProbe;
+  if (probe.source !== 'auto') {
+    throw new Error(`ve_bases ${baseId}: source='${probe.source ?? 'upload'}' — base_collect работает только с source='auto'`);
+  }
+  // Завершённую сборку не переигрываем. Честный провал (напр. ноль строк) ставит
+  // базе терминальный статус И роняет джобу, а воркер повторяет её до
+  // MAX_ATTEMPTS — каждая повторная попытка спотыкалась об этот guard и затирала
+  // настоящую причину своим сообщением. No-op сохраняет причину в ve_bases.error.
+  // Пересчёт лимита адресов (reproject_contacts) идёт по полной строке: он
+  // перекладывает сохранённые строки и обязан их видеть.
+  if (veBaseCollectFinished(probe.status) && job.payload?.reproject_contacts !== true) {
+    if (probe.status === 'analyzing' && veProbeCollectionMode(probe) === 'preview') {
+      await ensureTargetBaseAnalysis(ctx, job, baseId);
+    }
+    stageLog(ctx, `[base_collect] база ${baseId} уже в статусе '${probe.status}' — повторная сборка не нужна`);
+    return { result: { base_id: baseId, skipped: 'already_finished', base_status: probe.status } };
+  }
+  if (probe.status !== 'collecting' && job.payload?.reproject_contacts !== true) {
+    throw new Error(`ve_bases ${baseId}: status='${probe.status}' — сборка не начиналась`);
+  }
+
   const { data: baseRow, error: bError } = await ctx.supabase
     .from('ve_bases')
     .select('*')
@@ -3836,10 +3890,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // finished: a pure re-partition of saved rows, before the terminal-status
   // no-op below. It never collects, never pays and never changes base.status.
   if (job.payload?.reproject_contacts === true) return applyVeContactCapToFinishedBase(ctx, job, base);
-  // Завершённую сборку не переигрываем. Честный провал (напр. ноль строк) ставит
-  // базе терминальный статус И роняет джобу, а воркер повторяет её до
-  // MAX_ATTEMPTS — каждая повторная попытка спотыкалась об этот guard и затирала
-  // настоящую причину своим сообщением. No-op сохраняет причину в ve_bases.error.
+  // Статус мог смениться между узким и полным чтением: терминальную базу
+  // отдаём тем же no-op, а не роняем джобу на guard'е ниже.
   if (base.status === 'analyzing' || base.status === 'analyzed' || base.status === 'failed') {
     if (base.status === 'analyzing' && base.collect_info?.collection_mode === 'preview') {
       await ensureTargetBaseAnalysis(ctx, job, baseId);

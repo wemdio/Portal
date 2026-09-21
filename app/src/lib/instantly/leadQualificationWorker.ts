@@ -17,7 +17,7 @@ import {
 } from '@/lib/clientReplyBot/bot';
 import * as instantly from './client';
 import { isFreeProvider } from '@/lib/emailValidation/shared';
-import { getEmailRecipients } from '@/lib/clientCampaignReplies/participants';
+import { recipientMailboxIdentities } from '@/lib/clientCampaignReplies/participants';
 import { buildHandoffDraft } from './handoffLegend';
 import { signHandoffCallback } from './handoffCallback';
 import {
@@ -1400,7 +1400,7 @@ export async function qualifyOneReply(
   // Ящик, физически принявший письмо. Пишем в квалификацию и (для сирот)
   // показываем в DM — «в каком ящике искать ответ». Пустую строку схлопываем
   // в null, чтобы не плодить два представления отсутствия.
-  const replyEaccount = (reply.eaccount ?? '').trim() || null;
+  let replyEaccount = (reply.eaccount ?? '').trim() || null;
   // Keep the historical-client-DM fence through another pending ownership
   // result. The next retry must not forget this was a semantic replay.
   const replayTag = opts?.skipClientReplyNotification ? `${LEGACY_SEMANTIC_RETRY_TAG} ` : '';
@@ -1556,8 +1556,9 @@ export async function qualifyOneReply(
   const campaignId = ownership.effectiveCampaignId;
   const qualifiedProjectId = ownership.effectiveProjectId;
   const ownerSnapshotSupported = await qualificationOwnerSnapshotSupported(db);
-  const effectiveReply: Email = ownership.corrected
-    ? { ...reply, campaign_id: campaignId }
+  replyEaccount ??= ownership.inferredMailbox ?? null;
+  const effectiveReply: Email = ownership.corrected || ownership.inferredMailbox
+    ? { ...reply, campaign_id: campaignId, eaccount: replyEaccount ?? undefined }
     : reply;
   const outOfCampaign = opts?.outOfCampaign === true || ownership.corrected;
   if (ownership.corrected || ownership.conversationVerified) {
@@ -1652,15 +1653,7 @@ export async function qualifyOneReply(
   // проверка невозможна — идём обычным путём.
   const ourMailbox = (effectiveReply.eaccount ?? '').trim().toLowerCase();
   if (ourMailbox) {
-    const { to: toRcpt, cc: ccRcpt } = getEmailRecipients(effectiveReply);
-    const recipientAddrs = new Set<string>();
-    for (const r of [...toRcpt, ...ccRcpt]) {
-      // Токен может быть «Name <addr>» — достаём адреса регекспом, а не
-      // строгим равенством токена.
-      for (const m of r.email.toLowerCase().match(/[a-z0-9._%+\-]+@[a-z0-9.\-]+/g) ?? []) {
-        recipientAddrs.add(m);
-      }
-    }
+    const recipientAddrs = recipientMailboxIdentities(effectiveReply);
     if (recipientAddrs.size > 0 && !recipientAddrs.has(ourMailbox)) {
       const replyText = getBodyText(reply.body);
       const { error: strayUpsertErr } = await persistQualificationRow(
