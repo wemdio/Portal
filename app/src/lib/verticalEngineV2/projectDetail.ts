@@ -28,12 +28,16 @@ import { readContactDeliveryPages } from './contactDeliveryInventory';
 // create a string longer than 0x1fffffe8 characters», и карточка не
 // открывалась четверо суток. stripTaskHarvest вырезал это уже ПОСЛЕ
 // материализации ответа, то есть слишком поздно.
-// Срез собирает БД: ve_base_public_info (миграция 20260921_0003) отдаёт тот же
-// набор ключей за ~70 КБ и один детоаст на строку. Точечная проекция из
-// шестидесяти JSON-путей тут не годится: PostgreSQL детоастит колонку заново на
-// каждое обращение, и замер дал 76 секунд на тот же ответ.
+// Срез собирает БД. Точечная проекция из шестидесяти JSON-путей тут не годится:
+// PostgreSQL детоастит колонку заново на каждое обращение, и замер дал 76 секунд
+// на тот же ответ. Но и одного детоаста мало: чтение 178 МБ ради 94 КБ среза
+// стоило 1 985 мс на каждом опросе карточки, а опрашивается она раз в 4 секунды.
+// Поэтому срез считается ПРИ ЗАПИСИ (триггер, миграция 20260921_0004), где
+// документ и так в памяти и расчёт стоит десятки миллисекунд, а здесь читается
+// готовым. Для баз, не сохранявшихся с момента миграции, есть падение обратно
+// на расчёт на лету.
 export const VE_BASE_LIST_COLUMNS =
-  'id, vertical_id, hypothesis_id, filename, row_count, status, error, analysis, source, collect_info:ve_base_public_info, columns, sample_rows, created_at, updated_at';
+  'id, vertical_id, hypothesis_id, filename, row_count, status, error, analysis, source, collect_info:ve_base_public_info_cached, columns, sample_rows, created_at, updated_at';
 // payload нужен клиенту, чтобы привязать джобу к вертикали (payload.vertical_id) —
 // иначе чужая dossier-джоба показывала бы busy/error на карточке другой вертикали.
 export const VE_JOB_LIST_COLUMNS = 'id, stage, status, error, attempts, started_at, finished_at, payload, progress';
