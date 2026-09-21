@@ -3590,7 +3590,7 @@ function CampaignAccountsTab({
               disabled={campaignStatus === 'running'}
               title={campaignStatus === 'running'
                 ? 'Сначала остановите кампанию: из-под работающего круга аккаунты не переносятся'
-                : 'Перенести выбранные аккаунты в другую остановленную кампанию'}
+                : 'Перенести выбранные аккаунты в другую остановленную кампанию; перенесённые — вернуть обратно'}
               className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Move className="h-3.5 w-3.5" />
@@ -3858,6 +3858,28 @@ function CampaignAccountsTab({
                           профиль не применился
                         </span>
                       )}
+                      {/* «В гостях»: аккаунт пришёл из другой кампании. Пометка
+                          нужна не для красоты — от неё зависит, что с
+                          аккаунтом можно сделать: вернуть домой, но не
+                          переносить дальше. */}
+                      {a.moved_from_campaign_id && (
+                        <span
+                          title={[
+                            `Перенесён из кампании «${a.moved_from_campaign_name ?? '—'}»`,
+                            a.moved_at
+                              ? new Date(a.moved_at).toLocaleString('ru-RU', {
+                                  day: '2-digit', month: '2-digit', year: '2-digit',
+                                  hour: '2-digit', minute: '2-digit',
+                                })
+                              : null,
+                            a.moved_reason ? `Причина: ${a.moved_reason}` : null,
+                            'Его можно вернуть обратно, но не перенести в третью кампанию.',
+                          ].filter(Boolean).join(' · ')}
+                          className="cursor-help rounded-md bg-sky-50 px-1.5 py-0.5 text-[10px] text-sky-700"
+                        >
+                          из «{a.moved_from_campaign_name ?? '—'}»
+                        </span>
+                      )}
                       {a.appeal_requested_at && !a.appeal_status && (
                         <span className="rounded-md bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-700">
                           обжалование в очереди
@@ -4026,7 +4048,7 @@ function CampaignAccountsTab({
 
       {moveOpen && (
         <MoveAccountsModal
-          ids={[...selectedIds]}
+          accounts={accounts.filter((a) => selectedIds.includes(a.id))}
           fromCampaignId={campaignId}
           onClose={() => setMoveOpen(false)}
           onMoved={(movedIds, toName) => {

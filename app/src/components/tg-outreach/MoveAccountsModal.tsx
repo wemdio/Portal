@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowRight, Loader2, X } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
+import type { OutreachAccount } from '@/lib/tgOutreach/types';
 
 /**
  * Перенос аккаунтов в другую кампанию.
@@ -29,20 +30,33 @@ function isStopped(status: string): boolean {
 }
 
 export function MoveAccountsModal({
-  ids,
+  accounts,
   fromCampaignId,
   onClose,
   onMoved,
 }: {
-  ids: string[];
+  accounts: OutreachAccount[];
   fromCampaignId: string;
   onClose: () => void;
   /** Аккаунты уехали — строки убираются из списка текущей кампании. */
   onMoved: (movedIds: string[], toCampaignName: string) => void;
 }) {
+  const ids = accounts.map((a) => a.id);
+
+  /**
+   * Перенесённый аккаунт — «в гостях»: его можно вернуть домой, но не
+   * перетащить в третью кампанию. Иначе он кочует, и на вопрос «чей он» ответа
+   * нет: строка помнит одну исходную кампанию, а их к тому моменту три.
+   */
+  const guests = accounts.filter((a) => a.moved_from_campaign_id);
+  const mixed = guests.length > 0 && guests.length !== accounts.length;
+  const homes = [...new Set(guests.map((a) => String(a.moved_from_campaign_id)))];
+  const returning = guests.length > 0 && guests.length === accounts.length && homes.length === 1;
+  const homeName = returning ? (guests[0].moved_from_campaign_name ?? 'исходную кампанию') : '';
+
   const [campaigns, setCampaigns] = useState<CampaignRow[] | null>(null);
-  const [target, setTarget] = useState('');
-  const [reason, setReason] = useState('');
+  const [target, setTarget] = useState(returning ? homes[0] : '');
+  const [reason, setReason] = useState(returning ? 'Возврат в исходную кампанию' : '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -78,7 +92,7 @@ export function MoveAccountsModal({
         setError(data.error ?? `Не удалось перенести (HTTP ${res.status})`);
         return;
       }
-      onMoved(ids, data.to_campaign_name ?? available.find((c) => c.id === target)?.name ?? 'другую кампанию');
+      onMoved(ids, data.to_campaign_name ?? homeName ?? 'другую кампанию');
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Не удалось перенести');
@@ -87,7 +101,7 @@ export function MoveAccountsModal({
     }
   };
 
-  const ready = Boolean(target) && Boolean(reason.trim());
+  const ready = !mixed && Boolean(target) && Boolean(reason.trim());
 
   return (
     <div
@@ -103,7 +117,9 @@ export function MoveAccountsModal({
       >
         <div className="flex items-start justify-between gap-4 border-b border-gray-100 px-6 py-4">
           <div>
-            <h2 className="text-sm font-semibold text-gray-900">Перенести в другую кампанию</h2>
+            <h2 className="text-sm font-semibold text-gray-900">
+              {returning ? `Вернуть в «${homeName}»` : 'Перенести в другую кампанию'}
+            </h2>
             <p className="mt-0.5 text-xs text-gray-500">Аккаунтов: {ids.length}</p>
           </div>
           <button
@@ -117,7 +133,19 @@ export function MoveAccountsModal({
         </div>
 
         <div className="space-y-4 px-6 py-4">
-          <div>
+          {mixed ? (
+            <div className="rounded-lg bg-rose-50 px-3 py-2 text-[11px] leading-relaxed text-rose-800">
+              В выборке и перенесённые аккаунты ({guests.length}), и свои ({accounts.length - guests.length}).
+              Разделите их: перенесённый аккаунт можно только вернуть туда, откуда он пришёл.
+            </div>
+          ) : returning ? (
+            <div className="rounded-lg bg-sky-50 px-3 py-2 text-[11px] leading-relaxed text-sky-800">
+              Эти аккаунты перенесены из «{homeName}» — их можно только вернуть обратно. Перенести
+              дальше, в третью кампанию, нельзя: иначе аккаунт кочует, и чей он — уже не ответить.
+            </div>
+          ) : null}
+
+          <div className={returning || mixed ? 'hidden' : undefined}>
             <label className="mb-1 block text-xs font-medium text-gray-600" htmlFor="move-target">
               Куда переносим
             </label>
@@ -151,9 +179,9 @@ export function MoveAccountsModal({
             ) : null}
           </div>
 
-          <div>
+          <div className={mixed ? 'hidden' : undefined}>
             <label className="mb-1 block text-xs font-medium text-gray-600" htmlFor="move-reason">
-              Причина переноса <span className="text-rose-500">*</span>
+              {returning ? 'Причина возврата' : 'Причина переноса'} <span className="text-rose-500">*</span>
             </label>
             <textarea
               id="move-reason"
@@ -171,10 +199,12 @@ export function MoveAccountsModal({
             </p>
           </div>
 
-          <div className="rounded-lg bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-800">
-            Прокси не поедет вместе с аккаунтом: пул закреплён за кампанией. На новом месте назначьте
-            прокси заново — аккаунты приедут выключенными, чтобы не уйти в бой без него.
-          </div>
+          {mixed ? null : (
+            <div className="rounded-lg bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-800">
+              Прокси не поедет вместе с аккаунтом: пул закреплён за кампанией. На новом месте назначьте
+              прокси заново — аккаунты приедут выключенными, чтобы не уйти в бой без него.
+            </div>
+          )}
 
           {error ? <p className="text-xs text-rose-600">{error}</p> : null}
         </div>
@@ -194,7 +224,7 @@ export function MoveAccountsModal({
             className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:opacity-50"
           >
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}
-            Перенести
+            {returning ? 'Вернуть' : 'Перенести'}
           </button>
         </div>
       </div>

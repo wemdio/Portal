@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
 
     const { data: accounts, error: accError } = await auth.supabase
       .from('tg_outreach_accounts')
-      .select('id, campaign_id, session_name')
+      .select('id, campaign_id, session_name, moved_from_campaign_id, moved_from_campaign_name')
       .in('id', ids);
     if (accError) return jsonError(accError.message, 500);
     if (!accounts?.length) return jsonError('Аккаунты не найдены', 404);
@@ -57,6 +57,35 @@ export async function POST(req: NextRequest) {
     const fromCampaignId = fromIds[0];
     if (fromCampaignId === toCampaignId) {
       return jsonError('Аккаунты уже в этой кампании', 400);
+    }
+
+    /**
+     * Перенесённый аккаунт переносить дальше нельзя — только вернуть домой.
+     *
+     * Иначе аккаунт кочует по кампаниям, и на вопрос «чей он вообще» ответа
+     * нет: строка помнит одну исходную кампанию, а их к тому моменту три.
+     * Возврат — это тот же перенос, но в ту кампанию, откуда аккаунт пришёл.
+     */
+    const guests = accounts.filter((a) => a.moved_from_campaign_id);
+    const returning = guests.length > 0;
+    if (returning) {
+      if (guests.length !== accounts.length) {
+        return jsonError(
+          'В выборке и перенесённые аккаунты, и свои — разделите их: перенесённый можно только вернуть обратно',
+          400,
+        );
+      }
+      const homes = [...new Set(guests.map((a) => String(a.moved_from_campaign_id)))];
+      if (homes.length > 1) {
+        return jsonError('Выбранные аккаунты пришли из разных кампаний — возвращайте по одной', 400);
+      }
+      if (homes[0] !== toCampaignId) {
+        const home = guests[0].moved_from_campaign_name || 'исходную кампанию';
+        return jsonError(
+          `Эти аккаунты уже перенесены из «${home}» — их можно только вернуть обратно, а не переносить дальше`,
+          409,
+        );
+      }
     }
 
     const { data: campaigns, error: campError } = await auth.supabase
@@ -113,7 +142,18 @@ export async function POST(req: NextRequest) {
      */
     const { data: moved, error: moveError } = await auth.supabase
       .from('tg_outreach_accounts')
-      .update({ campaign_id: toCampaignId, proxy_id: null, is_active: false })
+      .update({
+        campaign_id: toCampaignId,
+        proxy_id: null,
+        is_active: false,
+        // Возврат снимает пометку: аккаунт дома, гостить ему больше негде.
+        // Обычный перенос её ставит — по ней в списке видно, откуда аккаунт, и
+        // по ней же запрещён следующий переезд.
+        moved_from_campaign_id: returning ? null : fromCampaignId,
+        moved_from_campaign_name: returning ? null : ((from?.name as string | null) ?? null),
+        moved_reason: returning ? null : reason,
+        moved_at: returning ? null : new Date().toISOString(),
+      })
       .in('id', accounts.map((a) => a.id))
       .select('id');
     if (moveError) return jsonError(moveError.message, 500);
@@ -131,8 +171,9 @@ export async function POST(req: NextRequest) {
      */
     const who = byName ?? 'неизвестно кто';
     const names = accounts.map((a) => String(a.session_name)).join(', ');
+    const verb = returning ? 'вернул аккаунты' : 'перенёс аккаунты';
     const moveLine = (direction: string) =>
-      `${who}: ${direction}. Аккаунтов ${accounts.length} (${names}). Причина: ${reason}`;
+      `${who}: ${verb} ${direction}. Аккаунтов ${accounts.length} (${names}). Причина: ${reason}`;
 
     await Promise.all([
       from
@@ -140,19 +181,20 @@ export async function POST(req: NextRequest) {
             auth.supabase,
             fromCampaignId,
             'info',
-            moveLine(`перенёс аккаунты в кампанию «${to.name ?? toCampaignId}»`),
+            moveLine(`в кампанию «${to.name ?? toCampaignId}»`),
           )
         : Promise.resolve(),
       logCampaign(
         auth.supabase,
         toCampaignId,
         'info',
-        moveLine(`перенёс аккаунты из кампании «${from?.name ?? fromCampaignId}»`),
+        moveLine(`из кампании «${from?.name ?? fromCampaignId}»`),
       ),
     ]);
 
     return NextResponse.json({
       moved: moved?.length ?? 0,
+      returned: returning,
       to_campaign_name: to.name ?? null,
     });
   });
