@@ -19,6 +19,10 @@ jest.mock('@/lib/supabaseInstantly', () => ({
   },
 }));
 
+function makeTakenReq(): NextRequest {
+  return new Request('http://x/api/projects/project-target/campaigns?taken=1') as unknown as NextRequest;
+}
+
 function makeCampaignReq(campaignId: string): NextRequest {
   return new Request('http://x/api/projects/project-target/campaigns', {
     method: 'POST',
@@ -47,6 +51,12 @@ describe('POST /api/projects/[id]/campaigns ownership', () => {
   });
 
   it('returns 409 instead of assigning a campaign owned by another project', async () => {
+    mockMainDb = createMockSupabase({
+      tables: {
+        project_periods: [],
+        projects: [{ id: 'project-existing', client: 'Другой клиент', name: 'Проект' }],
+      },
+    });
     mockInstantlyDb = createMockSupabase({
       rpcHandlers: campaignOwnershipRpcHandlers,
       tables: {
@@ -72,14 +82,64 @@ describe('POST /api/projects/[id]/campaigns ownership', () => {
     );
 
     expect(res.status).toBe(409);
+    // Ответ называет владельца: раньше фронт получал безличное «already assigned»,
+    // молча его глотал, и отказ выглядел как неработающая кнопка.
     await expect(res.json()).resolves.toEqual(
-      expect.objectContaining({ error: expect.stringMatching(/another project/i) }),
+      expect.objectContaining({
+        error: expect.stringContaining('Другой клиент'),
+        conflicting_project_ids: ['project-existing'],
+      }),
     );
     expect(mockInstantlyDb!.getRows('project_instantly_campaigns')).toHaveLength(0);
     expect(mockInstantlyDb!.getRows('project_period_instantly_campaigns')).toHaveLength(1);
     expect(mockInstantlyDb!.getRows('project_period_instantly_campaigns')[0]).toEqual(
       expect.objectContaining({ project_id: 'project-existing' }),
     );
+  });
+
+  it('maps campaigns owned by other projects for the picker on GET ?taken=1', async () => {
+    mockMainDb = createMockSupabase({
+      tables: {
+        project_periods: [],
+        projects: [
+          { id: 'project-existing', client: 'Другой клиент', name: 'Проект' },
+          { id: 'project-legacy', client: '  ', name: 'Легаси проект' },
+        ],
+      },
+    });
+    mockInstantlyDb = createMockSupabase({
+      rpcHandlers: campaignOwnershipRpcHandlers,
+      tables: {
+        instantly_campaign_catalog: [],
+        project_instantly_campaigns: [
+          { id: 'legacy-link', project_id: 'project-legacy', campaign_id: 'campaign-legacy', match_source: 'auto' },
+          { id: 'own-legacy-link', project_id: 'project-target', campaign_id: 'campaign-own', match_source: 'manual' },
+        ],
+        project_period_instantly_campaigns: [
+          {
+            id: 'existing-link',
+            project_id: 'project-existing',
+            period_id: 'period-existing',
+            campaign_id: 'campaign-shared',
+            match_source: 'auto-text',
+          },
+        ],
+        project_instantly_campaigns_denylist: [],
+      },
+    });
+
+    const { GET } = await import('@/app/api/projects/[id]/campaigns/route');
+    const res = await GET(makeTakenReq(), { params: Promise.resolve({ id: 'project-target' }) });
+
+    expect(res.status).toBe(200);
+    const body = await res.json() as { taken: Record<string, string> };
+    expect(body.taken).toEqual({
+      'campaign-shared': 'Другой клиент',
+      // client — пустая строка, подписываем проект по name, а не пробелом
+      'campaign-legacy': 'Легаси проект',
+    });
+    // Свои кампании не «заняты» — их пикер и так прячет как уже привязанные.
+    expect(body.taken['campaign-own']).toBeUndefined();
   });
 
   it('allows the same project to assign its campaign to a new active period', async () => {
