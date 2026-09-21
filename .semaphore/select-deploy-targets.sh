@@ -160,7 +160,7 @@ select_deploy_targets_from_files() {
       services/polza-reports/*) add_core_service polza-reports ;;
 
       # Repository/CI/docs/ops-only changes do not require container restarts.
-      .semaphore/*|.claude/*|.impeccable/*|docs/*|memory/*|wiki/*|scripts/*|deploy/nginx/*|deploy/main-db/*|deploy/main-db-prod/*|deploy/instantly-db-prod/*|services/smtp-proxy/*|drain-worker.sh|docker-compose.yml|docker-compose.rdp.yml|README.md|CLAUDE.md|DESIGN.md|PRODUCT.md|*.md|.gitignore|.dockerignore|test_*.py|tmp_*.py|package-lock.json)
+      .semaphore/*|.claude/*|.impeccable/*|docs/*|memory/*.md|wiki/*|scripts/*|deploy/nginx/*|deploy/main-db/*|deploy/main-db-prod/*|deploy/instantly-db-prod/*|services/smtp-proxy/*|drain-worker.sh|docker-compose.yml|docker-compose.rdp.yml|README.md|CLAUDE.md|DESIGN.md|PRODUCT.md|*.md|.gitignore|.dockerignore|test_*.py|tmp_*.py|package-lock.json)
         ;;
       *)
         # Unknown production-impacting paths fail safe: deploy everything until
