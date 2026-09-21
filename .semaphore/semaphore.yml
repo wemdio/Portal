@@ -70,16 +70,6 @@ blocks:
       # change_in всегда true.
       when: "branch != 'main' AND branch != 'test' AND change_in(['/app/', '/.semaphore/semaphore.yml', '/.semaphore/select-deploy-targets.sh', '/.semaphore/test-select-deploy-targets.sh', '/drain-worker.sh'], {default_branch: 'main', branch_range: '$SEMAPHORE_GIT_COMMIT_RANGE'})"
     task:
-      # e1-standard-4 (8 ГБ) вместо дефолтной e1-standard-2: с ростом проекта
-      # (мержи test 17–21.09) ХОЛОДНЫЙ tsc --noEmit перестал влезать в 4 ГБ —
-      # замер 21.09: 4096 МБ кучи = OOM (exit 134), 5120 МБ проходит. Тёплые
-      # прогоны по инкрементальному кэшу (~23 с) маскируют проблему, но любая
-      # новая ветка или чистка кэша падали на typecheck. Джоба осталась одна;
-      # дорожает только этот блок (сборки образов на main — на дешёвой машине).
-      agent:
-        machine:
-          type: e1-standard-4
-          os_image: ubuntu2204
       secrets:
         - name: portal_secrets
       prologue:
@@ -152,7 +142,7 @@ blocks:
             - source /tmp/env_vars
             - '(cd "$APP_PATH/.." && bash .semaphore/test-select-deploy-targets.sh)'
             - cd $APP_PATH
-            - 'export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=6144"'
+            - 'export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"'
             # Один кэш на обе медленные проверки: и eslint (.next/cache/eslint),
             # и incremental-состояние tsc (.next/cache/tsc) лежат в .next/cache
             # и вместе весят ~3,5 МБ. Замеры на этом проекте:
@@ -179,10 +169,10 @@ blocks:
             # npm audit переехал в ночной прогон (.semaphore/nightly-audit.yml):
             # на каждом пуше он ходил в интернет и изредка подвисал/флапал.
             #
-            # --maxWorkers=2: jest по умолчанию берёт cpus-1 воркеров; двух
-            # достаточно — весь набор гоняется меньше минуты.
+            # --maxWorkers=2: у e1-standard-2 два ядра, а jest по умолчанию
+            # берёт cpus-1 = 1 воркер и гонял бы набор последовательно.
             # --workerIdleMemoryLimit перезапускает раздувшийся воркер, чтобы
-            # два процесса не боролись за память даже на маленькой машине.
+            # два процесса не вышли за физические 4 ГБ runner-а.
             #
             # В ключе кэша нет имени ветки: jest хранит результат трансформации
             # по хэшу содержимого файла, поэтому кэш соседней ветки не «чужой» —
@@ -201,7 +191,8 @@ blocks:
             # вытеснила бы из квоты всё остальное.
             - 'cache restore nextjs-v2-$SEMAPHORE_GIT_BRANCH-$(date +%Y%m%d),nextjs-v2-$SEMAPHORE_GIT_BRANCH-,nextjs-v2-'
             # Проверку типов Next пропускает: строгий tsc уже отработал выше в
-            # этой же джобе, повторная — только лишние минуты в счёт.
+            # этой же джобе, а повторная после успешной компиляции упирается в
+            # физические 4 ГБ runner-а.
             - 'NEXT_BUILD_SKIP_TYPECHECK=1 npm run build'
             - 'cache store nextjs-v2-$SEMAPHORE_GIT_BRANCH-$(date +%Y%m%d) .next/cache'
   - name: Build portal
