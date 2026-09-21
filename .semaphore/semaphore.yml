@@ -162,11 +162,15 @@ blocks:
             # новые mtime всем файлам, и стратегия по умолчанию сделала бы кэш
             # бесполезным.
             - npm run lint
-            # Полный typecheck в CI веток не гоняем: после роста проекта
-            # (мержи test 17–21.09) холодный tsc --noEmit не влезает в 4 ГБ
-            # e1-standard-2 — 21.09 это уронило прогоны polza-eng-outreach.
-            # Типы проверяются в двух местах: локально у автора и в production
-            # Docker-сборке на main (Dockerfile: npm run typecheck:strict).
+            # Проверка типов идёт кусками (tsconfig.typecheck.*.json), а не одним
+            # проходом. Причина — память: после мержей test 17–21.09 сплошной
+            # tsc --noEmit брал 4,09 ГБ при потолке 4096 МБ и падал с exit 134.
+            # Замер 21.09 по кускам: core 3,29 ГБ, api 3,31 ГБ, pages 1,42 ГБ,
+            # tests 1,90 ГБ — каждый процесс получает свою кучу, и худший кусок
+            # оставляет ~750 МБ запаса. Куски вместе покрывают весь проект;
+            # tests/lib/nextBuildTypecheckConfig.test.ts следит, чтобы ни один
+            # не выпал из команды.
+            - npm run typecheck:strict
             - 'cache store checks-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_GIT_SHA .next/cache'
             # npm audit переехал в ночной прогон (.semaphore/nightly-audit.yml):
             # на каждом пуше он ходил в интернет и изредка подвисал/флапал.
