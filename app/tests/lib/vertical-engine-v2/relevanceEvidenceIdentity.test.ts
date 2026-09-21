@@ -8,6 +8,7 @@
  */
 import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
 import { veCompanyFactKey, veFactPageKey } from '@/lib/verticalEngineV2/companyFacts';
+import { VeOperationTimeoutError } from '@/lib/verticalEngineV2/operationDeadline';
 import type { VeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
 
 const OUR_INN = '7700000001';
@@ -50,6 +51,49 @@ describe('подтверждение владения сайтом', () => {
     const result = await run({
       'https://romashka.ru/': page({ url: 'https://romashka.ru/' }),
     });
+    expect(result.status).not.toBe('ok');
+  });
+
+  it('чужой владелец остаётся окончательным ответом, даже если страница тормозила', async () => {
+    // Ярлык «таймаут» отправляет компанию на повторную проверку, а повтор
+    // снова покупает платный поиск. Для сайта с чужим владельцем повторять
+    // нечего: ответ уже получен и не изменится.
+    const result = await fetchVeRelevanceEvidence('https://slow.test, https://romashka.ru', {
+      companyInn: OUR_INN, companyName: 'Ромашка', companyAddress: 'Казань, ул. Мира, 5', focus: 'мебель',
+      fetchPage: async (url) => {
+        if (url.includes('slow.test')) throw new VeOperationTimeoutError('relevance evidence page', 5000);
+        return page({ url, inns: [FOREIGN_INN], ownerInns: [FOREIGN_INN] });
+      },
+      search: (async () => []) as never,
+    });
+    expect(result.status).not.toBe('ok');
+    expect(result.reason).toBe('website_identity_unverified');
+  });
+
+  it('без сайта пробует домен корпоративной почты, а не сразу покупает поиск', async () => {
+    // 17.8% строк резерва вообще без сайта — им поиск покупался без единой
+    // бесплатной попытки. У трети из них почта на собственном домене.
+    const search = jest.fn(async () => []);
+    const result = await fetchVeRelevanceEvidence('', {
+      companyInn: OUR_INN, companyName: 'Ромашка', companyAddress: 'Казань, ул. Мира, 5', focus: 'мебель',
+      companyEmail: 'info@romashka-mebel.ru',
+      fetchPage: async (url) => page({ url, inns: [OUR_INN], ownerInns: [OUR_INN] }),
+      search: search as never,
+    });
+    expect(result.status).toBe('ok');
+    expect(result.url).toContain('romashka-mebel.ru');
+    expect(search).not.toHaveBeenCalled();
+  });
+
+  it('личный ящик сайтом компании не считается', async () => {
+    // mail.ru и gmail ничего не говорят о компании: такой домен читать нельзя.
+    const fetchPage = jest.fn(async (url: string) => page({ url }));
+    const result = await fetchVeRelevanceEvidence('', {
+      companyInn: OUR_INN, companyName: 'Ромашка', companyAddress: 'Казань, ул. Мира, 5',
+      companyEmail: 'romashka2020@mail.ru',
+      fetchPage, search: (async () => []) as never,
+    });
+    expect(fetchPage).not.toHaveBeenCalled();
     expect(result.status).not.toBe('ok');
   });
 

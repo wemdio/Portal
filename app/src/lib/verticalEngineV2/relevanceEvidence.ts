@@ -3,6 +3,7 @@ import { isIP } from 'node:net';
 import { Agent, fetch } from 'undici';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
+import { deriveWebsiteFromEmail } from '@/lib/leadBoard/deriveWebsite';
 import type { SerperOrganicItem } from '@/lib/search/serperClient';
 import { normalizeVeCompanyInn, normalizeVeCompanyName } from './collectionIdentity';
 import { parseVeEvidencePage, rankVeEvidenceLinks, selectVeEvidenceText, type VeEvidencePage } from './relevancePage';
@@ -26,6 +27,8 @@ export interface VeRelevanceEvidenceOptions {
   companyInn?: string;
   companyName?: string;
   companyAddress?: string;
+  /** Корпоративный адрес компании: его домен — бесплатный кандидат на сайт. */
+  companyEmail?: string;
   focus?: string;
   allowPaidSearch?: boolean;
   /** Trusted offline adapters; never selected from user/source data. */
@@ -225,6 +228,15 @@ export async function fetchVeRelevanceEvidence(
   opts.signal?.throwIfAborted();
   const inn = normalizeVeCompanyInn(opts.companyInn);
   const supplied = veOfficialWebsiteCandidates(website);
+  // У 17.8% строк резерва сайта нет вовсе — им платный поиск покупается без
+  // единой бесплатной попытки. Но у трети из них корпоративная почта на своём
+  // домене, а домен корпоративной почты и есть сайт компании. Кандидат
+  // проходит те же проверки безопасности и ту же проверку владения, что и
+  // сайт из источника: он лишь даёт шанс подтвердиться бесплатно.
+  if (!supplied.length) {
+    const domain = deriveWebsiteFromEmail(opts.companyEmail);
+    if (domain) supplied.push(...veOfficialWebsiteCandidates(`https://${domain}`));
+  }
   const nameSearch = Boolean(opts.companyName?.trim() && opts.companyAddress?.trim());
   const factKey = veCompanyFactKey({ inn, company: opts.companyName, address: opts.companyAddress });
   // Offline adapters never touch the real cache unless explicitly provided.
@@ -255,7 +267,11 @@ export async function fetchVeRelevanceEvidence(
   const observedAt = new Date().toISOString();
   const freshPages = new Set<string>();
   const pages = new Map<string, Promise<VeEvidencePage | undefined>>();
-  let failed = false, timedOut = false, unverified = false, searchAttempted = false, searchCompleted = false;
+  // conflicted — ОКОНЧАТЕЛЬНЫЙ отказ: в реквизитах сайта стоит чужой владелец,
+  // и никакой повтор этого не изменит. Отделён от unverified, чтобы медленная
+  // страница не переименовала его в «таймаут»: гейт по ярлыку таймаута ставит
+  // компанию на повторную проверку, а повтор снова покупает платный поиск.
+  let failed = false, timedOut = false, unverified = false, conflicted = false, searchAttempted = false, searchCompleted = false;
   let retries = 0;
   let searchDeferred = false;
   let providerError: VeSearchProviderFailure | undefined;
@@ -322,7 +338,7 @@ export async function fetchVeRelevanceEvidence(
         if (identity() !== 'unknown') break;
       }
     }
-    if (identity() === 'conflict' || identity() === 'unknown') { unverified = true; return []; }
+    if (identity() === 'conflict' || identity() === 'unknown') { conflicted ||= identity() === 'conflict'; unverified = true; return []; }
     // Use actual same-origin links, including deeper service sections. Focus
     // ranking comes from the page parser; never invent a target-specific path.
     const home = sitePages[0];
@@ -342,11 +358,11 @@ export async function fetchVeRelevanceEvidence(
       visited.push(next);
       const page = await read(url, signal);
       if (page) sitePages.push(page);
-      if (identity() === 'conflict') { verified.delete(host); unverified = true; return []; }
+      if (identity() === 'conflict') { verified.delete(host); conflicted = true; unverified = true; return []; }
       publish();
     }
     // A legal footer on a later service page can expose another entity.
-    if (identity() === 'conflict') { verified.delete(host); unverified = true; return []; }
+    if (identity() === 'conflict') { verified.delete(host); conflicted = true; unverified = true; return []; }
     return sitePages.filter((page) => Boolean(page.text));
   };
   try {
@@ -423,7 +439,11 @@ export async function fetchVeRelevanceEvidence(
   return {
     status: text ? 'ok' : 'unavailable', text, url: unique[0]?.url ?? supplied[0]?.href ?? '',
     reason: text ? (searchAttempted ? 'discovered_verified_website' : inn ? 'identity_verified_website' : 'supplied_website_evidence')
-      : timedOut ? 'website_evidence_timeout' : unverified ? 'website_identity_unverified'
+      // Окончательный отказ по владельцу идёт ПЕРЕД таймаутом: иначе одна
+      // медленная страница отправляла бы такую компанию на новый круг с новой
+      // покупкой поиска, хотя ответ уже получен и он не изменится.
+      : conflicted ? 'website_identity_unverified'
+        : timedOut ? 'website_evidence_timeout' : unverified ? 'website_identity_unverified'
         : failed ? 'website_evidence_failed' : searchAttempted ? 'website_search_unverified' : 'no_usable_website_text',
   };
 }
