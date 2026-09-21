@@ -123,7 +123,12 @@ export async function recoverVeSourceContacts<T extends SourceRow>(input: {
     // survive a provider error in another search.
     const results = await Promise.allSettled(pending.slice(start, start + 8).map(async (row) => {
       const evidence = await (input.fetchEvidence ?? fetchVeRelevanceEvidence)('', {
+        // Этот проход ищет сайты ровно тем строкам, у которых сайта нет, —
+        // и покупал поиск, не попробовав домен их же корпоративной почты.
+        // Бесплатный кандидат уже реализован, но задействован был только из
+        // гейта: 6 444 строки резерва платили за то, что лежало в них самих.
         signal: input.signal, companyInn: row.inn, companyName: row.company, companyAddress: row.address,
+        companyEmail: row.email,
       });
       if (evidence.provider_error) throw new Error(evidence.provider_error.message);
       state.checked[keyFor(row)] = { website: evidence.status === 'ok' ? evidence.url : '', reason: evidence.reason.slice(0, 400) };

@@ -7,6 +7,7 @@
  * стоит денег, а каждое ужесточение — контактов; обе стороны под тестом.
  */
 import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
+import { recoverVeSourceContacts } from '@/lib/verticalEngineV2/sourceContacts';
 import { veCompanyFactKey, veFactPageKey } from '@/lib/verticalEngineV2/companyFacts';
 import { VeOperationTimeoutError } from '@/lib/verticalEngineV2/operationDeadline';
 import type { VeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
@@ -124,5 +125,19 @@ describe('подтверждение владения сайтом', () => {
     // Память лишь даёт шанс подтвердиться бесплатно; покупать поиск не пришлось.
     expect(search).not.toHaveBeenCalled();
     expect(result.status).toBe('ok');
+  });
+});
+
+describe('проход добора сайтов', () => {
+  it('передаёт почту компании, чтобы её домен попробовали до покупки поиска', async () => {
+    // Этот проход работает ровно со строками БЕЗ сайта — и покупал поиск, не
+    // попробовав домен их же корпоративной почты.
+    const fetchEvidence = jest.fn(async () => ({ status: 'ok' as const, text: 'текст',
+      url: 'https://romashka-mebel.ru/', reason: 'identity_verified_website' }));
+    const rows = [{ company: 'Ромашка', inn: OUR_INN, address: 'Казань, ул. Мира, 5',
+      email: 'info@romashka-mebel.ru', website: '' }];
+    await recoverVeSourceContacts({ rows, fetchEvidence: fetchEvidence as never, save: async () => undefined });
+    expect(fetchEvidence).toHaveBeenCalledTimes(1);
+    expect(fetchEvidence.mock.calls[0][1]).toEqual(expect.objectContaining({ companyEmail: 'info@romashka-mebel.ru' }));
   });
 });
