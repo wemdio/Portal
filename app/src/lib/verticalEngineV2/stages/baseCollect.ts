@@ -114,6 +114,7 @@ import { getVeDirectorySegmentStats } from '../dossierData';
 import { callLLMWithSchema, getVeModel } from '../llm';
 import { projectMarket, type VeMarket } from '../market';
 import { findIrrelevantRows, type VeRelevanceDecision } from '../relevanceGate';
+import { isVePaidWebsiteSearchEnabled } from '../paidSearchPolicy';
 import { isVeRelevanceTriageEnabled } from '../relevanceTriageConfig';
 import { capVeContactsPerCompany, normalizeVeMaxEmailsPerCompany, stripVeCompanyCapMarker, veContactLimitKey, VE_COMPANY_CAP_FIELD } from '../companyContactCap';
 import { relevanceHash, VeRelevanceCheckpointError, VePreviewCheckpointConflict, type VeRelevanceCheckpoint } from '../relevanceCheckpoint';
@@ -2923,7 +2924,11 @@ async function checkCollectedRelevance(args: {
         job.project_id, base.id, base.vertical_id, base.hypothesis_id ?? null,
       ]),
       reviewAttempt: job.payload?.review_relevance === true ? job.id : undefined,
-      allowPaidSearch: info.search_policy?.phase !== 'existing'
+      // Рубильник VE_PAID_WEBSITE_SEARCH=off отключает самую дорогую статью
+      // сбора, не теряя компаний: они получают штатный «поиск отложен» и
+      // вернутся к проверке, когда рубильник включат обратно.
+      allowPaidSearch: isVePaidWebsiteSearchEnabled()
+        && info.search_policy?.phase !== 'existing'
         && (!info.target_progress || info.target_progress.ready_rows < info.target_progress.ready_target),
       websiteLimit: info.target_progress ? Math.max(0, info.target_progress.ready_target - info.target_progress.ready_rows) : undefined,
       triage: isVeRelevanceTriageEnabled(job.project_id),
