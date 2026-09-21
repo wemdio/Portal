@@ -107,7 +107,12 @@ export function stripTaskHarvest(base: Record<string, unknown>): Record<string, 
       ...publicInfo,
       ...(adaptive ? { adaptive_collection: { version: adaptive.version, switches: adaptive.switches,
         note: adaptive.note, replan_error: adaptive.replan_error, checking_batch: !!adaptive.pending,
-        completed_batches: adaptive.completed.length, last_batch: adaptive.completed.at(-1),
+        // Документ мог уже пройти серверную сводку: там completed нет, а есть
+        // готовый счётчик. Падать на этом функция не должна.
+        completed_batches: Array.isArray(adaptive.completed) ? adaptive.completed.length
+          : (adaptive as { completed_batches?: number }).completed_batches ?? 0,
+        last_batch: Array.isArray(adaptive.completed) ? adaptive.completed.at(-1)
+          : (adaptive as { last_batch?: unknown }).last_batch,
       } } : {}),
       // Never send addresses, result hashes or the child job checkpoint in polls.
       ...(emailRecovery ? { saved_email_review_pending: !!emailRecovery.batch && !emailRecovery.error } : {}),
@@ -238,7 +243,11 @@ export async function loadVeProjectDetail(
       verticals,
       chains,
       vocabs,
-      bases: (basesRes.data ?? []).map(stripTaskHarvest),
+      // Срез уже собран в БД (ve_base_public_info). Повторно пропускать его
+      // через stripTaskHarvest НЕЛЬЗЯ: тот ждёт сырой документ и читает
+      // adaptive_collection.completed.length, которого в сводке нет — деталка
+      // падала с «Не удалось обновить проект». Один белый список, одно место.
+      bases: basesRes.data ?? [],
       templates,
       jobs: jobsRes.data ?? [],
       dossiers: dossiersRes.data ?? [],
