@@ -2,7 +2,6 @@ import 'server-only';
 import { lookup } from 'node:dns/promises';
 import { callOpenRouterChat } from '@/lib/openrouter/client';
 import { WebsiteFetchError } from '@/lib/clientBrief/autofill';
-import { DEFAULT_HYPOTHESES_MODEL } from '@/lib/projectBriefHypotheses/generateHypotheses';
 
 /**
  * Серверная часть демо-персонализации («вставьте свой сайт» в демо-брифе):
@@ -16,9 +15,16 @@ export interface DemoPersonalizeLetter {
   wait_days: number;
 }
 
-/** Модель демо-прогонов: дешёвая и переопределяемая отдельно от боевых фич. */
+/**
+ * Модель демо-прогонов: дешёвая и переопределяемая отдельно от боевых фич.
+ *
+ * Раньше наследовала DEFAULT_HYPOTHESES_MODEL, т.е. `policy/gemini-flash` —
+ * reasoning-модель, возвращавшая пустой content (см. generateHypotheses.ts).
+ * Наследовать боевой пин (Opus) нельзя: демо — публичная поверхность с шагом на
+ * 90с, ей нужна быстрая и дешёвая модель. Haiku 4.5 укладывается в ~30с.
+ */
 export const DEMO_PERSONALIZE_MODEL =
-  process.env.DEMO_PERSONALIZE_MODEL ?? DEFAULT_HYPOTHESES_MODEL;
+  process.env.DEMO_PERSONALIZE_MODEL ?? 'anthropic/claude-haiku-4-5';
 
 function isPrivateIpV4(ip: string): boolean {
   const parts = ip.split('.').map(Number);

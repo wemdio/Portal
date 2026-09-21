@@ -121,7 +121,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       errorMessage =
         err instanceof Error
           ? err.name === 'AbortError'
-            ? 'Превышен таймаут генерации гипотез (90с). Попробуйте ещё раз.'
+            ? `Превышен таймаут генерации гипотез (${Math.round(HYPOTHESES_TIMEOUT_MS / 1000)}с). Попробуйте ещё раз.`
             : err.message
           : 'Не удалось сгенерировать гипотезы';
       await logError('projects.brief.hypotheses.failed', err, { projectId });

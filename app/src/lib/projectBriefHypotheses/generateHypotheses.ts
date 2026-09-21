@@ -1,15 +1,33 @@
-import { callOpenRouterChat } from '@/lib/openrouter/client';
+import { callOpenRouterChatRaw } from '@/lib/openrouter/client';
 import { EXPORT_BASE_CATALOG } from './exportBaseCatalog';
 import { buildHypothesesPrompt, selectRelevantCatalog, type HypothesesAudience } from './sources';
 import { analyzeBriefIcp } from './analyzeIcp';
 
+/**
+ * Пинится в обход политики `policy/gemini-flash`: этот алиас в Requesty стал
+ * роутиться на `deepseek-flash` — reasoning-модель. На этом промпте (система
+ * ~7.9K + бриф с каталогом источников) все 4500 токенов уходили в скрытые
+ * рассуждения: `finish_reason: length`, `content: ''` → пользователь видел
+ * «Гипотезы не сгенерированы: AI вернул пустой ответ». Тот же обход уже сделан
+ * в `salesHypotheses/model.ts` и `lib/constants.ts`.
+ *
+ * Opus 4.8 — та же модель, что у sales-инструмента «Гипотезы»: один генератор,
+ * одно качество на обеих поверхностях. Переопределяется env
+ * `PROJECT_HYPOTHESES_MODEL`.
+ */
 export const DEFAULT_HYPOTHESES_MODEL =
-  process.env.PROJECT_HYPOTHESES_MODEL ?? 'policy/gemini-flash';
+  process.env.PROJECT_HYPOTHESES_MODEL ?? 'anthropic/claude-opus-4-8';
 
 // Урезано 60 → 20: при 60 в промпт попадал большой grab-bag export-base
 // категорий, и модель добивала ими гипотезы для любого клиента (см. разбор
 // прогонов Егора — одни и те же базы у разных ЦА). 20 релевантных достаточно.
 const DEFAULT_CATALOG_LIMIT = Number(process.env.PROJECT_HYPOTHESES_CATALOG_LIMIT ?? '20');
+
+// Bumped from 2400 (May 2026): on briefs with structured ICP (ОКВЭД, regions,
+// revenue bands) the model spent budget on the first 1–2 hypotheses and got cut
+// off, leaving the user with only one block. 4500 covers 7–8 hypotheses × 5
+// fields comfortably even with verbose RU.
+const HYPOTHESES_MAX_TOKENS = 4500;
 
 // Суб-таймаут для шага 1 (разбор ЦА). Если разбор не успел — мягко продолжаем
 // без него (одношагово), чтобы не съесть весь бюджет запроса на шаг 2.
@@ -138,7 +156,7 @@ export async function generateLeadSourceHypotheses(
   const catalog = selectRelevantCatalog(briefText, EXPORT_BASE_CATALOG, catalogLimit);
   const { system, user } = buildHypothesesPrompt({ briefText, catalog, audience, icpAnalysis });
 
-  const content = await callOpenRouterChat({
+  const { content, finishReason } = await callOpenRouterChatRaw({
     apiKey,
     model,
     messages: [
@@ -146,11 +164,7 @@ export async function generateLeadSourceHypotheses(
       { role: 'user', content: user },
     ],
     temperature: 0.3,
-    // Bumped from 2400 (May 2026): on briefs with structured ICP (ОКВЭД,
-    // regions, revenue bands) the model spent budget on the first 1–2
-    // hypotheses and got cut off, leaving the user with only one block.
-    // 4500 covers 7–8 hypotheses × 5 fields comfortably even with verbose RU.
-    maxTokens: 4500,
+    maxTokens: HYPOTHESES_MAX_TOKENS,
     signal,
     fetchImpl,
     maxRetries,
@@ -159,7 +173,14 @@ export async function generateLeadSourceHypotheses(
 
   const trimmed = content.trim();
   if (!trimmed) {
-    throw new Error('AI вернул пустой ответ');
+    // Пустой content при finish_reason: length = весь бюджет вывода съеден
+    // (у reasoning-моделей — скрытыми рассуждениями). Называем причину явно:
+    // «AI вернул пустой ответ» не подсказывал, что лечится моделью/лимитом.
+    throw new Error(
+      finishReason === 'length'
+        ? `Модель ${model} израсходовала весь лимит вывода (${HYPOTHESES_MAX_TOKENS} токенов) и не вернула текст. Смените модель в PROJECT_HYPOTHESES_MODEL или поднимите лимит.`
+        : `AI вернул пустой ответ (модель ${model}, finish_reason: ${finishReason ?? 'n/a'})`,
+    );
   }
   return audience === 'client'
     ? scrubHhMentionsForClient(sanitizeClientHypothesesMarkdown(trimmed))
