@@ -3191,7 +3191,10 @@ async function reviewSavedRelevance(
   // before finalizing, including when this pass already reaches the target.
   if (emailRecoveryWaiting && (!rows.some((row) => isVeAcceptedEmailStatus(row._email_status))
     || (target.ready_rows ?? 0) >= target.ready_target)) {
-    await requeueSelf(ctx, job, 60_000);
+    // Дочерняя SMTP-джоба на медианных 33 адресах отрабатывает быстрее минуты,
+    // а раунд всё это время стоит. Минутный опрос добавлял к каждому ожиданию
+    // до 60 секунд простоя, и таких дочерних джоб около 330 в сутки.
+    await requeueSelf(ctx, job, 15_000);
     return { result: { base_id: base.id, waiting: true, saved_email_review: true }, ...usage };
   }
   // An email-only pass can finish with no classifiable rows (for example all
