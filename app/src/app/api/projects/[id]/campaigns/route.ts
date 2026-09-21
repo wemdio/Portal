@@ -67,11 +67,71 @@ async function getCampaignBaseline(
   return { data: Number.isFinite(n) ? n : 0, error: null };
 }
 
+/**
+ * Подписи проектов целиком (162 строки, ~3 КБ меток), а не `.in('id', [...])`:
+ * владельцев кампаний больше сотни, и список uuid раздул бы GET-строку к REST
+ * до ~5 КБ — впритык к nginx-буферу заголовков ради выборки, которая и так меньше.
+ */
+async function getProjectLabels(): Promise<Record<string, string>> {
+  if (!supabaseAdmin) return {};
+  const { data, error } = await supabaseAdmin
+    .from('projects')
+    .select('id, client, name');
+  if (error || !data) return {};
+  const rows = data as { id: string; client: string | null; name: string | null }[];
+  return Object.fromEntries(
+    rows.map((row) => [row.id, row.client?.trim() || row.name?.trim() || row.id]),
+  );
+}
+
+/**
+ * Кампания принадлежит ровно одному проекту (см. claim_project_instantly_campaign).
+ * Пикер об этом не знал: клик по чужой кампании ловил 409, фронт его молчал, и
+ * выглядело это как «кнопка привязки не работает». Отдаём карту занятых кампаний,
+ * чтобы список сразу показывал владельца. Читается лениво (?taken=1), только когда
+ * специалист открыл пикер, — обычный GET карточки остаётся лёгким.
+ */
+async function getCampaignsTakenByOtherProjects(
+  projectId: string,
+): Promise<Record<string, string>> {
+  if (!supabaseInstantly) return {};
+  const [legacy, period] = await Promise.all([
+    supabaseInstantly
+      .from('project_instantly_campaigns')
+      .select('campaign_id, project_id')
+      .neq('project_id', projectId),
+    supabaseInstantly
+      .from('project_period_instantly_campaigns')
+      .select('campaign_id, project_id')
+      .neq('project_id', projectId),
+  ]);
+  if (legacy.error || period.error) return {};
+
+  const rows = [
+    ...(legacy.data ?? []),
+    ...(period.data ?? []),
+  ] as { campaign_id: string; project_id: string }[];
+
+  const ownerByCampaign = new Map<string, string>();
+  for (const row of rows) {
+    if (!ownerByCampaign.has(row.campaign_id)) ownerByCampaign.set(row.campaign_id, row.project_id);
+  }
+  if (ownerByCampaign.size === 0) return {};
+
+  const labels = await getProjectLabels();
+  const taken: Record<string, string> = {};
+  for (const [campaignId, ownerId] of ownerByCampaign) {
+    taken[campaignId] = labels[ownerId] ?? ownerId;
+  }
+  return taken;
+}
+
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id: projectId } = await params;
+  const wantsTaken = new URL(req.url).searchParams.get('taken') === '1';
   if (!supabaseInstantly) {
     return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
   }
@@ -123,7 +183,9 @@ export async function GET(
     baseline_contacts: (r as { baseline_contacts?: number | null }).baseline_contacts ?? null,
   }));
 
-  return NextResponse.json({ items, activePeriod });
+  const taken = wantsTaken ? await getCampaignsTakenByOtherProjects(projectId) : undefined;
+
+  return NextResponse.json({ items, activePeriod, ...(taken ? { taken } : {}) });
 }
 
 export async function POST(
@@ -161,8 +223,15 @@ export async function POST(
       replaceAutomatic: false,
     });
     if (claim.status === 'conflict') {
+      const labels = await getProjectLabels();
+      const owners = claim.conflictingProjectIds.map((ownerId) => labels[ownerId] ?? ownerId);
       return NextResponse.json(
-        { error: 'Campaign is already assigned to another project' },
+        {
+          error: owners.length > 0
+            ? `Кампания уже привязана к проекту «${owners.join(', ')}»`
+            : 'Кампания уже привязана к другому проекту',
+          conflicting_project_ids: claim.conflictingProjectIds,
+        },
         { status: 409 },
       );
     }

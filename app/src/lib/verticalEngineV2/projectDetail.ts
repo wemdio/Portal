@@ -34,10 +34,14 @@ import { readContactDeliveryPages } from './contactDeliveryInventory';
 // стоило 1 985 мс на каждом опросе карточки, а опрашивается она раз в 4 секунды.
 // Поэтому срез считается ПРИ ЗАПИСИ (триггер, миграция 20260921_0004), где
 // документ и так в памяти и расчёт стоит десятки миллисекунд, а здесь читается
-// готовым. Для баз, не сохранявшихся с момента миграции, есть падение обратно
-// на расчёт на лету.
+// готовой колонкой.
+// Читаем именно КОЛОНКУ, а не функцию-обёртку: обёртка принимает строку
+// целиком, из-за чего PostgreSQL материализует её вместе с тяжёлым
+// collect_info. Замер на тех же двух проектах: через обёртку 548 и 405 мс,
+// прямым чтением колонки — 4,4 и 3,3 мс. Функция ve_base_public_info_cached
+// остаётся в базе как инструмент починки и разового пересчёта.
 export const VE_BASE_LIST_COLUMNS =
-  'id, vertical_id, hypothesis_id, filename, row_count, status, error, analysis, source, collect_info:ve_base_public_info_cached, columns, sample_rows, created_at, updated_at';
+  'id, vertical_id, hypothesis_id, filename, row_count, status, error, analysis, source, collect_info:public_info, columns, sample_rows, created_at, updated_at';
 // payload нужен клиенту, чтобы привязать джобу к вертикали (payload.vertical_id) —
 // иначе чужая dossier-джоба показывала бы busy/error на карточке другой вертикали.
 export const VE_JOB_LIST_COLUMNS = 'id, stage, status, error, attempts, started_at, finished_at, payload, progress';
