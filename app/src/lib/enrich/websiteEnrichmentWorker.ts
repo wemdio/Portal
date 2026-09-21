@@ -68,7 +68,12 @@ function parseExtractors(value: unknown): ExtractorKey[] | undefined {
   return filtered.length > 0 ? (filtered as ExtractorKey[]) : undefined;
 }
 
-type FetchResult = { text?: string; error?: string };
+/**
+ * `note` — диагностика при успешном, но пустом результате: почему сайт не
+ * прочитан (сертификат / 403 / таймаут / DNS). Уходит в queue.last_error,
+ * в ячейку с почтами НЕ попадает — туда пишется только result_text.
+ */
+type FetchResult = { text?: string; error?: string; note?: string };
 
 const WORKER_CONCURRENCY = Number(process.env.WEBSITE_ENRICHMENT_CONCURRENCY ?? '25');
 // Сколько items одна реплика клеймит за один claim_website_enrichment_items.
@@ -368,7 +373,11 @@ async function fetchEmailsForUrl(
         sourceUrl: normalizedUrl,
         pagesScanned: result.pagesScanned,
       });
-      return { text: emailsText };
+      // Причину не кладём в кэш: shouldUseCachedError превратил бы её в
+      // «жёсткую ошибку» на следующем прогоне. Это диагностика, не ошибка.
+      return emailsText
+        ? { text: emailsText }
+        : { text: '', note: result.failureReason ?? undefined };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Ошибка извлечения email';
       if (shouldUseCachedError(message)) {
@@ -485,6 +494,7 @@ async function fetchEmailsWithCacheInner(
 
   const collectedTexts: string[] = [];
   const errors = new Set<string>();
+  const notes = new Set<string>();
 
   for (const normalizedUrl of targets) {
     const result = await fetchEmailsForUrl(normalizedUrl, inflight);
@@ -494,6 +504,9 @@ async function fetchEmailsWithCacheInner(
     }
     if (result.error) {
       errors.add(result.error);
+    }
+    if (result.note) {
+      notes.add(result.note);
     }
   }
 
@@ -507,7 +520,8 @@ async function fetchEmailsWithCacheInner(
     return { error: errors.size > 1 ? `${firstError} (и ещё ${errors.size - 1})` : firstError };
   }
 
-  return { text: '' };
+  const [firstNote] = Array.from(notes);
+  return { text: '', note: firstNote };
 }
 
 async function fetchEmailsWithCache(
@@ -550,7 +564,9 @@ async function updateQueueItem(
       job_id: item.job_id,
       status: bufStatus,
       result_text: status === 'completed' ? result.text ?? null : null,
-      last_error: status === 'completed' ? null : result.error ?? null,
+      // У completed-строки last_error несёт не ошибку, а причину пустого
+      // результата («Сертификат сайта не прошёл проверку» и т.п.).
+      last_error: status === 'completed' ? result.note ?? null : result.error ?? null,
       // Cache-payload летит coordinator'у в составе этой же buffer-строки —
       // он сделает UPSERT в website_enrichment_cache одним batch-запросом
       // вместо отдельной записи на каждый URL.

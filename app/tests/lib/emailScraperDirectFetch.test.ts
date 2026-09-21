@@ -4,6 +4,9 @@
  * Regression for the 2026-07-30 base-constructor slowdown. PROXY_URLS is used
  * by other parsers, but email discovery must fetch sites directly: slow/dead
  * shared proxies used to consume the page timeout before a direct fallback.
+ *
+ * С 21.09.2026 dispatcher всё же есть — undici.Agent с выключенной проверкой
+ * сертификата. Прокси в нём по-прежнему нет, и проверяем мы именно это.
  */
 
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
@@ -43,7 +46,20 @@ describe('emailScraper direct fetching', () => {
     expect(reusableMainPageDescription('<html><body>Contact us</body></html>')).toBe('');
     expect(reusableMainPageDescription('<html><script>' + 'business '.repeat(100) + '</script><body>Hi</body></html>')).toBe('');
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][1]).not.toHaveProperty('dispatcher');
+    // С 21.09.2026 dispatcher есть всегда — undici.Agent со снятой проверкой
+    // сертификата (RU-промсайты массово живут на невалидируемых цепочках).
+    // Проверяем, что это именно он, а не ProxyAgent из PROXY_URLS.
+    const init = fetchMock.mock.calls[0][1] as { dispatcher?: unknown } | undefined;
+    const dispatcher = init?.dispatcher as Record<symbol, unknown> | undefined;
+    expect(dispatcher).toBeDefined();
+    const dispatcherOptions = Object.getOwnPropertySymbols(dispatcher ?? {})
+      .filter((sym) => sym.description === 'options')
+      .map((sym) => (dispatcher as Record<symbol, unknown>)[sym])[0] as
+        | { connect?: { rejectUnauthorized?: boolean }; uri?: string }
+        | undefined;
+    expect(dispatcherOptions?.connect?.rejectUnauthorized).toBe(false);
+    expect(dispatcherOptions?.uri).toBeUndefined();
+    expect(JSON.stringify(dispatcherOptions ?? {})).not.toContain('slow-proxy.invalid');
     expect(jest.getTimerCount()).toBe(0);
 
     // A body/fetch that ignores abort must not hold the crawler hostage.
@@ -67,5 +83,40 @@ describe('emailScraper direct fetching', () => {
     expect(jest.getTimerCount()).toBe(0);
     expect((await scrapeEmails('https://acme.ru', { signal: controller.signal })).emails).toEqual([]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+
+describe('emailScraper failure reasons', () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('reports why the page could not be read instead of returning silence', async () => {
+    const tlsError = Object.assign(new TypeError('fetch failed'), {
+      cause: { code: 'CERT_HAS_EXPIRED' },
+    });
+    global.fetch = jest.fn(async () => {
+      throw tlsError;
+    }) as unknown as typeof fetch;
+
+    const result = await scrapeEmails('https://expired.ru', { timeout: 500, maxPages: 1 });
+
+    expect(result.emails).toEqual([]);
+    expect(result.failureReason).toBe('Сертификат сайта не прошёл проверку');
+  });
+
+  it('leaves failureReason empty when the site opened and simply has no email', async () => {
+    global.fetch = jest.fn(async () => new Response('<html><body>нет почты</body></html>', {
+      status: 200,
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+    })) as unknown as typeof fetch;
+
+    const result = await scrapeEmails('https://empty.ru', { timeout: 500, maxPages: 1 });
+
+    expect(result.emails).toEqual([]);
+    expect(result.failureReason).toBeNull();
   });
 });
