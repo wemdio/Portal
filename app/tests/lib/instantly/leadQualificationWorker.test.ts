@@ -5711,9 +5711,73 @@ describe('pollAndQualifyReplies', () => {
       .toBe('historical-parent');
   });
 
-  it('ignores old assignments only after complete evidence and with one known current owner', async () => {
-    const { providerCampaignId, candidateCampaignIds, inbound } = installMailboxOwnershipConflictFixture();
+  it('requires complete current-owner evidence or an exclusive tag with a manual anchor for missing links', async () => {
     const { resolveEffectiveReplyOwner } = await import('@/lib/instantly/replyOwnershipResolver');
+    const offer = 'We help manufacturers find wholesale buyers and reach purchasing managers. We can prepare a selection of suitable companies and discuss a pilot campaign for your products.';
+    for (const scenario of ['unknown-provider', 'known-provider', 'unknown-parent', 'historical-parent',
+      'reserve', 'different-tag', 'mixed-senders', 'multiple-tags', 'foreign-owner', 'client-owner',
+      'denied', 'anchor-denied', 'denylist-unavailable', 'auto-only', 'no-anchor', 'metadata-unavailable', 'unknown-tag',
+      'duplicate-owner', 'completed-unknown'] as const) {
+      const knownProvider = scenario === 'known-provider';
+      const provider = knownProvider ? 'anchor' : 'unlinked';
+      const historical = scenario === 'historical-parent';
+      const parent = replyEmail({ id: 'actual-parent', campaign_id: historical ? 'historical' : 'unlinked',
+        ue_type: 1, from_address_email: 'sales@sender.example', eaccount: 'sales@sender.example',
+        to_address_email_list: 'info@buyer.example', subject: 'Wholesale buyers', body: { text: offer },
+        timestamp_email: '2026-09-10T10:00:00Z' });
+      const hasParent = historical || scenario === 'unknown-parent';
+      const inbound = replyEmail({ id: `tag-owner-${scenario}`, campaign_id: provider,
+        from_address_email: 'colleague@buyer.example', eaccount: 'sales@sender.example',
+        to_address_email_list: 'sales@sender.example', timestamp_email: '2026-09-11T10:00:00Z',
+        body: { text: hasParent
+          ? `Interested\nFrom: sales@sender.example\nSent: September 10\nTo: info@buyer.example\nSubject: Wholesale buyers\n\n${offer}`
+          : 'Interested' } });
+      const links = [
+        ...(scenario === 'no-anchor' ? [] : [{ campaign_id: 'anchor', project_id: 'project',
+          match_source: scenario === 'auto-only' ? 'auto' : 'manual' }]),
+        ...(scenario === 'foreign-owner' ? [{ campaign_id: 'foreign', project_id: 'other', match_source: 'manual' }] : []),
+        ...(scenario === 'duplicate-owner' ? [{ campaign_id: 'anchor', project_id: 'other', match_source: 'manual' }] : []),
+        ...(historical ? [{ campaign_id: 'historical', project_id: 'old-project', match_source: 'manual' }] : []),
+      ];
+      const db = createMockSupabase({ tables: {
+        project_instantly_campaigns: links,
+        client_instantly_access: scenario === 'client-owner'
+          ? [{ client_user_id: 'self-service-client', resource_type: 'campaign', resource_id: 'unlinked' }] : [],
+        project_instantly_campaigns_denylist: scenario === 'denied' || scenario === 'anchor-denied'
+          ? [{ campaign_id: scenario === 'anchor-denied' ? 'anchor' : 'unlinked', project_id: 'project' }] : [],
+      }, errorTables: scenario === 'denylist-unavailable'
+        ? { project_instantly_campaigns_denylist: 'database unavailable' } : undefined });
+      getAccountCampaignMappings.mockResolvedValue([
+        { campaign_id: 'anchor', status: 1 },
+        { campaign_id: 'unlinked', status: scenario === 'completed-unknown' ? 3 : 1 },
+        ...(scenario === 'foreign-owner' ? [{ campaign_id: 'foreign', status: 1 }] : []),
+      ]);
+      listAllCustomTags.mockResolvedValue(scenario === 'unknown-tag' ? [] : [
+        { id: 'shared-tag', name: scenario === 'reserve' ? 'неименные maildoso' : 'Project' },
+        { id: 'different-tag', name: 'Other project' },
+      ]);
+      getCampaign.mockImplementation(async (id: string) => {
+        if (scenario === 'metadata-unavailable') throw new Error('metadata unavailable');
+        return { id, email_list: scenario === 'mixed-senders' ? ['extra@sender.example'] : [],
+          email_tag_list: scenario === 'multiple-tags' ? ['shared-tag', 'different-tag']
+            : [scenario === 'different-tag' && id === 'unlinked' ? 'different-tag' : 'shared-tag'] };
+      });
+      listEmails.mockResolvedValue({ items: [], next_starting_after: null });
+      const result = await resolveEffectiveReplyOwner({ db: db as never, reply: inbound,
+        providerCampaignId: provider, leadEmail: inbound.from_address_email!,
+        accountId: `exclusive-tag-${scenario}`,
+        prefetchedContext: { replyEmail: inbound, threadEmails: hasParent ? [parent, inbound] : [inbound],
+          lastOutbound: hasParent ? parent : null },
+      });
+      const expected = historical ? 'old-project'
+        : ['unknown-provider', 'known-provider', 'unknown-parent'].includes(scenario) ? 'project' : 'blocked';
+      expect({ scenario, owner: result.status === 'resolved' ? result.effectiveProjectId : 'blocked' })
+        .toEqual({ scenario, owner: expected });
+      if (hasParent && result.status === 'resolved') expect(result.conversationVerified).toBe(true);
+      // Inference is per reply; never create global campaign links.
+      expect(db.getRows('project_instantly_campaigns')).toEqual(links);
+    }
+    const { providerCampaignId, candidateCampaignIds, inbound } = installMailboxOwnershipConflictFixture();
     for (const scenario of ['complete', 'unknown-current', 'incomplete'] as const) {
       getAccountCampaignMappings.mockResolvedValue([
         { campaign_id: providerCampaignId, status: 1 },
