@@ -762,6 +762,7 @@ export function ProjectList() {
   const [creatingPeriod, setCreatingPeriod] = useState(false);
   const [periodFormProject, setPeriodFormProject] = useState<Project | null>(null);
   const [periodForm, setPeriodForm] = useState<PeriodFormState | null>(null);
+  const [periodFormError, setPeriodFormError] = useState<string | null>(null);
   const [panelCampaignSearch, setPanelCampaignSearch] = useState('');
   const [showPanelCampaignPicker, setShowPanelCampaignPicker] = useState(false);
   const [editingContactsId, setEditingContactsId] = useState<string | null>(null);
@@ -1104,6 +1105,7 @@ export function ProjectList() {
   }
 
   function openNewPeriodDialog(project: Project) {
+    setPeriodFormError(null);
     setPeriodFormProject(project);
     setPeriodForm({
       period_start: todayInputDate(),
@@ -1117,6 +1119,7 @@ export function ProjectList() {
   }
 
   function updatePeriodForm(field: keyof PeriodFormState, value: string) {
+    setPeriodFormError(null);
     setPeriodForm((prev) => (prev ? { ...prev, [field]: value } : prev));
   }
 
@@ -1124,10 +1127,19 @@ export function ProjectList() {
     if (creatingPeriod) return;
     setPeriodForm(null);
     setPeriodFormProject(null);
+    setPeriodFormError(null);
   }
 
   async function createNextPeriod(project: Project, form: PeriodFormState) {
     if (creatingPeriod) return;
+    setPeriodFormError(null);
+    const activePeriod = activePeriodsByProjectId.get(project.id);
+    if (activePeriod && form.period_start && form.period_start <= activePeriod.period_start) {
+      setPeriodFormError(
+        `Текущий период начинается ${formatDate(activePeriod.period_start)}. Выберите дату позже его начала. Чтобы изменить только дедлайн, откройте «Настройки проекта» → «Дедлайн».`,
+      );
+      return;
+    }
     setCreatingPeriod(true);
     try {
       const res = await authFetch(`/api/projects/${project.id}/periods`, {
@@ -1142,13 +1154,23 @@ export function ProjectList() {
           deadline: formValueOrNull(form.deadline),
         }),
       });
-      if (!res.ok) return;
+      if (!res.ok) {
+        const result = await res.json().catch(() => null) as { error?: unknown } | null;
+        setPeriodFormError(
+          typeof result?.error === 'string' && result.error.trim()
+            ? result.error
+            : `Не удалось создать период (ошибка ${res.status}). Проверьте данные и повторите попытку.`,
+        );
+        return;
+      }
       await fetchProjects();
       await fetchPanelPeriods(project.id);
       await fetchPanelCampaigns(project.id);
       setPeriodForm(null);
       setPeriodFormProject(null);
-    } catch { /* non-critical */ }
+    } catch {
+      setPeriodFormError('Не удалось получить ответ сервера. Обновите страницу и проверьте список периодов перед повторной попыткой.');
+    }
     finally {
       setCreatingPeriod(false);
     }
@@ -2807,39 +2829,43 @@ export function ProjectList() {
                   </p>
                 ) : (
                   <div className="space-y-1">
-                    {panelPeriods.map((period) => (
-                      <div
-                        key={period.id}
-                        className="flex items-center justify-between gap-2 rounded-lg border border-zinc-100 px-2.5 py-1.5 text-xs"
-                      >
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-1.5">
-                            <span className="truncate font-medium text-zinc-700">
-                              {period.name ?? 'Период'}
-                            </span>
-                            <span className={`shrink-0 rounded px-1 py-0.5 text-[9px] font-medium ${period.status === 'active' ? 'bg-emerald-50 text-emerald-600' : 'bg-zinc-100 text-zinc-500'}`}>
-                              {period.status === 'active' ? 'активный' : 'закрыт'}
-                            </span>
-                          </div>
-                          <div className="mt-0.5 text-[11px] text-zinc-400">
-                            {period.period_start}
-                            {period.period_end ? ` - ${period.period_end}` : ''}
-                          </div>
-                          {(period.budget || period.margin) && (
-                            <div className="mt-0.5 truncate text-[11px] text-zinc-500">
-                              {period.budget ? `Сумма: ${period.budget}` : ''}
-                              {period.budget && period.margin ? ' · ' : ''}
-                              {period.margin ? `Маржа: ${period.margin}` : ''}
+                    {panelPeriods.map((period) => {
+                      // Active-period terms live on the project; closed periods keep their snapshot.
+                      const deadline = period.status === 'active' ? selectedProject.deadline : period.deadline;
+                      return (
+                        <div
+                          key={period.id}
+                          className="flex items-center justify-between gap-2 rounded-lg border border-zinc-100 px-2.5 py-1.5 text-xs"
+                        >
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span className="truncate font-medium text-zinc-700">
+                                {period.name ?? 'Период'}
+                              </span>
+                              <span className={`shrink-0 rounded px-1 py-0.5 text-[9px] font-medium ${period.status === 'active' ? 'bg-emerald-50 text-emerald-600' : 'bg-zinc-100 text-zinc-500'}`}>
+                                {period.status === 'active' ? 'активный' : 'закрыт'}
+                              </span>
                             </div>
-                          )}
+                            <div className="mt-0.5 text-[11px] text-zinc-400">
+                              {period.period_start}
+                              {period.period_end ? ` - ${period.period_end}` : ''}
+                            </div>
+                            {(period.budget || period.margin) && (
+                              <div className="mt-0.5 truncate text-[11px] text-zinc-500">
+                                {period.budget ? `Сумма: ${period.budget}` : ''}
+                                {period.budget && period.margin ? ' · ' : ''}
+                                {period.margin ? `Маржа: ${period.margin}` : ''}
+                              </div>
+                            )}
+                          </div>
+                          <div className="shrink-0 text-right text-[11px] text-zinc-500">
+                            <div>{period.contacts_done ?? '0'} / {period.contacts_obligation ?? '—'}</div>
+                            {period.kpi_plan && <div className="text-zinc-400">KPI {period.kpi_plan}</div>}
+                            {deadline && <div className="text-zinc-400">до {deadline}</div>}
+                          </div>
                         </div>
-                        <div className="shrink-0 text-right text-[11px] text-zinc-500">
-                          <div>{period.contacts_done ?? '0'} / {period.contacts_obligation ?? '—'}</div>
-                          {period.kpi_plan && <div className="text-zinc-400">KPI {period.kpi_plan}</div>}
-                          {period.deadline && <div className="text-zinc-400">до {period.deadline}</div>}
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </section>
@@ -3340,6 +3366,10 @@ export function ProjectList() {
                     Поля уже заполнены текущими данными проекта. Если клиент оплатил другую сумму,
                     изменились контакты, KPI, маржа или дедлайн, обновите детали здесь.
                   </p>
+                  <p className="mt-1 text-xs leading-5 text-amber-800">
+                    Новый период закроет текущий и обнулит счётчики контактов и KPI.
+                    Чтобы изменить только дедлайн, закройте это окно и откройте «Настройки проекта» → «Дедлайн».
+                  </p>
                 </div>
               </div>
             </div>
@@ -3351,6 +3381,7 @@ export function ProjectList() {
                 value={periodForm.period_start}
                 onChange={(value) => updatePeriodForm('period_start', value)}
                 disabled={creatingPeriod}
+                help="Дата должна быть позже начала текущего периода."
               />
               <PeriodDialogField
                 label="Дата оплаты"
@@ -3395,6 +3426,12 @@ export function ProjectList() {
                 disabled={creatingPeriod}
               />
             </div>
+
+            {periodFormError && (
+              <div role="alert" className="mx-5 mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+                {periodFormError}
+              </div>
+            )}
 
             <div className="flex flex-col-reverse gap-2 border-t border-zinc-100 px-5 py-4 sm:flex-row sm:justify-end">
               <button
