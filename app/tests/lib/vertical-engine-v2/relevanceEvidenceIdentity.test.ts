@@ -132,12 +132,15 @@ describe('проход добора сайтов', () => {
   it('передаёт почту компании, чтобы её домен попробовали до покупки поиска', async () => {
     // Этот проход работает ровно со строками БЕЗ сайта — и покупал поиск, не
     // попробовав домен их же корпоративной почты.
-    const fetchEvidence = jest.fn(async () => ({ status: 'ok' as const, text: 'текст',
-      url: 'https://romashka-mebel.ru/', reason: 'identity_verified_website' }));
+    const seen: Array<Record<string, unknown>> = [];
+    const fetchEvidence = (async (_website: string, options: Record<string, unknown>) => {
+      seen.push(options);
+      return { status: 'ok' as const, text: 'текст', url: 'https://romashka-mebel.ru/', reason: 'identity_verified_website' };
+    }) as unknown as typeof fetchVeRelevanceEvidence;
     const rows = [{ company: 'Ромашка', inn: OUR_INN, address: 'Казань, ул. Мира, 5',
-      email: 'info@romashka-mebel.ru', website: '' }];
-    await recoverVeSourceContacts({ rows, fetchEvidence: fetchEvidence as never, save: async () => undefined });
-    expect(fetchEvidence).toHaveBeenCalledTimes(1);
-    expect(fetchEvidence.mock.calls[0][1]).toEqual(expect.objectContaining({ companyEmail: 'info@romashka-mebel.ru' }));
+      email: 'info@romashka-mebel.ru', website: '', source_detail: 'реестр' }];
+    await recoverVeSourceContacts({ rows, fetchEvidence, save: async () => undefined });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual(expect.objectContaining({ companyEmail: 'info@romashka-mebel.ru' }));
   });
 });
