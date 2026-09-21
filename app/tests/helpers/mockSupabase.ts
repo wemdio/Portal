@@ -204,7 +204,7 @@ interface Builder {
 
   order: (...args: unknown[]) => Builder;
   limit: (...args: unknown[]) => Builder;
-  range: (...args: unknown[]) => Promise<{ data: Row[]; error: { message: string } | null; count: number }>;
+  range: (...args: unknown[]) => RangePromise;
 
   single: () => Promise<{ data: Row | null; error: { message: string; code?: string } | null }>;
   maybeSingle: () => Promise<{ data: Row | null; error: null }>;
@@ -213,6 +213,45 @@ interface Builder {
     onFulfilled?: (value: { data: Row[]; error: null; count: number }) => T,
     onRejected?: (reason: unknown) => T,
   ) => Promise<T>;
+}
+
+/**
+ * supabase-js `.overrideTypes()` / `.returns()` — типовые хелперы, в рантайме
+ * ничего не делают. Код точечной проекции jsonb без них не типизируется,
+ * поэтому мок обязан их принимать.
+ */
+type RangePromise = Promise<{ data: Row[]; error: { message: string } | null; count: number }> & {
+  overrideTypes?: () => RangePromise;
+  returns?: () => RangePromise;
+};
+
+/**
+ * PostgREST-проекция `alias:column->key->0->>key2`: алиасы добавляются к строке
+ * (исходные колонки мок оставляет на месте). Нужна, чтобы код, читающий
+ * точечную проекцию jsonb вместо колонки целиком, тестировался на такой же
+ * плоской строке, какую отдаёт PostgREST.
+ */
+function projectJsonAliases(rows: Row[], columns: string): Row[] {
+  const aliases = columns.split(',')
+    .map((part) => /^\s*([A-Za-z_]\w*):([A-Za-z_]\w*(?:->>?[^,\s]+)+)\s*$/.exec(part))
+    .filter((match): match is RegExpExecArray => Boolean(match));
+  if (!aliases.length) return rows;
+  return rows.map((row) => {
+    const next: Row = { ...row };
+    for (const [, alias, path] of aliases) {
+      const ops = [...path.matchAll(/->>?/g)].map((match) => match[0]);
+      const parts = path.split(/->>?/);
+      let value: unknown = row[parts[0]];
+      for (let i = 1; i < parts.length; i++) {
+        const key = parts[i].replace(/^"|"$/g, '');
+        value = value && typeof value === 'object'
+          ? Array.isArray(value) ? value[Number(key)] : (value as Row)[key]
+          : undefined;
+      }
+      next[alias] = value === undefined ? null : ops[ops.length - 1] === '->>' && value !== null ? String(value) : value;
+    }
+    return next;
+  });
 }
 
 function matchesIlike(value: unknown, pattern: unknown): boolean {
@@ -394,6 +433,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
     let requestedLimit: number | null = null;
     let requestedRange: { from: number; to: number } | null = null;
     let countRequested = false;
+    let selectedColumns = '*';
     let beforeFirstUpdateApplied = false;
 
     function rowsForRead(applyWindow = true): Row[] {
@@ -515,7 +555,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         mutations.push({ kind: 'delete', table, rows: matching });
         return { data: matching, error: null, count: matching.length };
       }
-      const data = rowsForRead();
+      const data = projectJsonAliases(rowsForRead(), selectedColumns);
       return {
         data,
         error: null,
@@ -525,6 +565,7 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
 
     const builder: Builder = {
       select: (columns, opts) => {
+        selectedColumns = columns ?? '*';
         selects.push({ table, columns: columns ?? '*' });
         countRequested = Boolean(opts?.count);
         if (selectError && (columns ?? '*').includes(selectError.columnsInclude)) {
@@ -601,12 +642,18 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
       },
       // Как then/single: errorTables/errorSelects обязаны пробиваться и через
       // range-пагинацию (PostgREST вернёт error на выполнении запроса).
-      range: async (...args) => {
-        const [from, to] = args as [number, number];
-        requestedRange = { from, to };
-        if (mode === 'upsert' && upsertError) return { data: [], error: upsertError, count: 0 };
-        if (errorMessage) return { data: [], error: { message: errorMessage, code: errorCode }, count: 0 };
-        return flushMutation();
+      range: (...args) => {
+        const page = (async () => {
+          const [from, to] = args as [number, number];
+          requestedRange = { from, to };
+          if (mode === 'upsert' && upsertError) return { data: [], error: upsertError, count: 0 };
+          if (errorMessage) return { data: [], error: { message: errorMessage, code: errorCode }, count: 0 };
+          return flushMutation();
+        })();
+        const chained: RangePromise = Object.assign(page as RangePromise, {
+          overrideTypes: () => chained, returns: () => chained,
+        });
+        return chained;
       },
 
       single: async () => {

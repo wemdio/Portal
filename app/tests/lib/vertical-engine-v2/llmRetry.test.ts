@@ -36,7 +36,7 @@ import { fetchVeRelevanceEvidence, resolveVeEvidenceAddress } from '@/lib/vertic
 import { veCompanyFactKey, veFactPageKey, freshVeCompanyFact, focusVeCompanyFact, createVeSharedPageReader, VE_COMPANY_FACT_TTL_MS, type VeCompanyFactRecord } from '@/lib/verticalEngineV2/companyFacts';
 import { parseVeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
 import { needsVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceReserve';
-import { recoverVeSourceContacts, hasPendingVeSourceContacts, evaluateVeSourceDiscoveryBudget, veSourceDiscoveryLimit, type VeSourceContactCheckpoint } from '@/lib/verticalEngineV2/sourceContacts';
+import { recoverVeSourceContacts, hasPendingVeSourceContacts, evaluateVeSourceDiscoveryBudget, veSourceDiscoveryLimit, applyVeSourceContacts, countVeSourceDiscoveryContacts, VE_SOURCE_DISCOVERY_MARK, type VeSourceContactCheckpoint } from '@/lib/verticalEngineV2/sourceContacts';
 import { cleanVeCompanyNames } from '@/lib/verticalEngineV2/companyNameCleanup';
 import { createVeLlmRateLimit, veLlmRateLimit, veRetryAfterMs, VeLlmRateLimitError } from '@/lib/verticalEngineV2/llmRateLimit';
 import { planVeRelevanceRetry } from '@/lib/verticalEngineV2/relevanceRetry';
@@ -1149,22 +1149,33 @@ describe('llm rawCall retry', () => {
     // Completed lookups are a bounded cohort, not a claim about paid credits.
     // Restart/Continue or a drop and recovery of the same ready count cannot
     // purchase another cohort. Actual net growth permits further discovery.
-    const initialBudget = evaluateVeSourceDiscoveryBudget({ readyRows: 23 }).budget;
+    const initialBudget = evaluateVeSourceDiscoveryBudget({ discoveryContacts: 23 }).budget;
     const checkedCohort: VeSourceContactCheckpoint = { version: 1, checked: Object.fromEntries(
-      Array.from({ length: 200 }, (_, i) => [String(i), { website: '', reason: 'identity_unverified' }])) };
-    const stopped = evaluateVeSourceDiscoveryBudget({ budget: initialBudget, checkpoint: checkedCohort, readyRows: 23 });
+      Array.from({ length: 120 }, (_, i) => [String(i), { website: '', reason: 'identity_unverified' }])) };
+    const stopped = evaluateVeSourceDiscoveryBudget({ budget: initialBudget, checkpoint: checkedCohort, discoveryContacts: 23 });
     expect(stopped).toMatchObject({ remaining: 0, budget: { paused: true, ready_high_water: 23 } });
-    for (const readyRows of [10, 23]) expect(evaluateVeSourceDiscoveryBudget({
-      budget: JSON.parse(JSON.stringify(stopped.budget)), checkpoint: checkedCohort, readyRows,
+    for (const discoveryContacts of [10, 23]) expect(evaluateVeSourceDiscoveryBudget({
+      budget: JSON.parse(JSON.stringify(stopped.budget)), checkpoint: checkedCohort, discoveryContacts,
     }).remaining).toBe(0);
-    expect(evaluateVeSourceDiscoveryBudget({ budget: stopped.budget, checkpoint: checkedCohort, readyRows: 24 }))
-      .toMatchObject({ remaining: 200, budget: { paused: false, checked_at_growth: 200, ready_high_water: 24 } });
-    expect(evaluateVeSourceDiscoveryBudget({ checkpoint: checkedCohort, readyRows: 23 }))
-      .toMatchObject({ remaining: 200, budget: { checked_at_growth: 200 } });
-    for (const budget of [null, { ...initialBudget, version: 2 }, { ...initialBudget, checked_at_growth: 201 }]) {
-      expect(() => evaluateVeSourceDiscoveryBudget({ budget, checkpoint: checkedCohort, readyRows: 23 }))
+    expect(evaluateVeSourceDiscoveryBudget({ budget: stopped.budget, checkpoint: checkedCohort, discoveryContacts: 24 }))
+      .toMatchObject({ remaining: 120, budget: { paused: false, checked_at_growth: 120, ready_high_water: 24 } });
+    expect(evaluateVeSourceDiscoveryBudget({ checkpoint: checkedCohort, discoveryContacts: 23 }))
+      .toMatchObject({ remaining: 120, budget: { checked_at_growth: 120 } });
+    for (const budget of [null, { ...initialBudget, version: 2 }, { ...initialBudget, checked_at_growth: 121 }]) {
+      expect(() => evaluateVeSourceDiscoveryBudget({ budget, checkpoint: checkedCohort, discoveryContacts: 23 }))
         .toThrow('Source discovery budget checkpoint is invalid');
     }
+    // Окно закрывает только СВОЙ результат: контакт, пришедший из бесплатного
+    // лейна, больше не продлевает платный поиск. Раньше общий счётчик базы рос
+    // от чужого успеха, и окно не закрывалось никогда («Цемент»: ready 417 при
+    // high-water 364, остаток снова 200 на каждом круге).
+    expect(countVeSourceDiscoveryContacts([
+      { source_detail: 'реестр' },
+      { source_detail: `2ГИС\n${VE_SOURCE_DISCOVERY_MARK} https://found.test/` },
+      null, 'не строка',
+    ])).toBe(1);
+    // Круговой проход: метку ставит applyVeSourceContacts, её же и считаем.
+    expect(countVeSourceDiscoveryContacts(applyVeSourceContacts(sourceRows.slice(0, 2), discoveryState))).toBe(1);
     // One missing contact is not one lookup: at 499/500 a base looked up a single
     // company per round and burned dozens of rounds. The allowance still bounds it.
     expect(veSourceDiscoveryLimit({ readyTarget: 500, readyRows: 499, candidatesProcessed: 1200 })).toBe(8);

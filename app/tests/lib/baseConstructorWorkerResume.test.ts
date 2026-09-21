@@ -33,6 +33,7 @@ jest.mock('@/lib/supabaseAdmin', () => {
   let currentJob: Record<string, unknown> = {};
 
   const builder = {
+    abortSignal: () => builder,
     select: () => builder,
     insert: () => builder,
     update: (patch: Record<string, unknown>) => {
