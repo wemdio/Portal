@@ -63,6 +63,19 @@ describe('закладка выдачи реестра', () => {
     const result = await fetchDirectoryRows(ctx, {}, 10, empty, 700);
     expect(result).toMatchObject({ error: 'rpc timeout', nextOffset: 700, exhausted: false, hitCeiling: false });
   });
+
+  it('отдаёт разобранный префикс и закладку по нему, когда выдача оборвалась посреди лейна', async () => {
+    // Прод 21.09, база 3cd77243: шлюз реестра отвалился после 10 590
+    // просмотренных строк. Строки префикса разобраны нормально — отдавать их
+    // вместе со смещением честно, а выбрасывать значит платить за них снова.
+    jest.mocked(searchRows).mockImplementation(async (_f, limit, offset) => ((offset ?? 0) >= 2_000
+      ? { rows: [], error: 'The upstream server is timing out' }
+      : { rows: page(offset ?? 0, limit) }));
+    const result = await fetchDirectoryRows(ctx, {}, 10_000, empty);
+    expect(result.error).toBe('The upstream server is timing out');
+    expect(result.rows).toHaveLength(2_000);
+    expect(result).toMatchObject({ nextOffset: 2_000, exhausted: false, hitCeiling: false });
+  });
 });
 
 describe('строка реестра', () => {
