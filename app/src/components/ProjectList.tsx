@@ -40,6 +40,7 @@ import {
   loadContactsPaceData,
   loadKpiPaceData,
   summarizeProjectRisk,
+  RISK_GRACE_DAYS,
   type PaceData,
   type ProjectPace,
   type ProjectPaceInput,
@@ -1577,21 +1578,34 @@ export function ProjectList() {
   ).sort((a, b) => a!.localeCompare(b!, 'ru-RU')) as string[];
 
   // Хелпер: проект считается «проблемным» если он отстаёт по любой
-  // активной оси. У проектов без плана (no contacts_obligation и no kpi_plan)
+  // активной оси БОЛЬШЕ ЧЕМ НА ДОПУСК (`RISK_GRACE_DAYS`, неделя).
+  // У проектов без плана (no contacts_obligation и no kpi_plan)
   // ни одно из условий не сработает — они «не проблемные».
+  //
+  // Допуск в неделю: прогноз шумный, и «промахиваемся на 3 дня» раньше
+  // красило проект в проблемный наравне с «горим на два месяца». Фильтр
+  // наполнялся пограничными случаями и переставал читаться как сигнал.
   //
   // Логика проверки идёт ОТ ДЕШЁВОГО К ДОРОГОМУ, чтобы фильтр работал даже
   // когда paceByProjectId ещё не подгрузился (он async после fetchProjects):
   //
-  //   1) HARD-FAILURE: дедлайн уже прошёл, обязательство не выполнено.
-  //      Самый болезненный случай, ЛПР всегда хочет видеть. Не требует истории.
-  //   2) PACE-BASED: forecastDays > daysUntilDeadline (summarizeProjectRisk).
+  //   1) HARD-FAILURE: дедлайн просрочен БОЛЬШЕ чем на неделю, обязательство
+  //      не выполнено. Самый болезненный случай, ЛПР всегда хочет видеть.
+  //      Не требует истории. Просрочка в пределах недели сюда не попадает —
+  //      её досчитает п.2, если хвост работы реально большой.
+  //   2) PACE-BASED: forecastDays > daysUntilDeadline + допуск
+  //      (summarizeProjectRisk с дефолтным RISK_GRACE_DAYS).
   //      Требует ≥2 точек истории и положительный темп — иначе onTrack=null
   //      и проект не считается «проблемным» по pace. Но если темп НУЛЕВОЙ
   //      или отрицательный, а обязательство значительное — это тоже проблема,
   //      она ловится через п.3.
-  //   3) ZERO-PACE: дедлайн близко (≤14 дней) и осталось значимое обязательство,
-  //      а pace либо null либо ≤ 0 (контакты/KPI не растут).
+  //   3) ZERO-PACE: дедлайн близко (≤14 дней) ИЛИ уже прошёл, осталось
+  //      значимое обязательство, а pace либо null либо ≤ 0 (контакты/KPI
+  //      не растут). Допуск здесь не применяется: при нулевом темпе лишняя
+  //      неделя ничего не меняет. Просроченные дедлайны сюда включены
+  //      намеренно — иначе проект, просроченный в пределах допуска и при этом
+  //      стоящий на месте, проваливался бы мимо всех трёх правил: п.1 его
+  //      прощает, а п.2 при нулевом темпе не строит прогноз (onTrack=null).
   const isProblemProject = (project: typeof projects[number]): boolean => {
     if (isCompletedStatus(project.status)) return false;
 
@@ -1612,8 +1626,8 @@ export function ProjectList() {
       }
     }
 
-    // 1) HARD-FAILURE: дедлайн в прошлом, не доехали.
-    if (daysUntilDeadline !== null && daysUntilDeadline < 0) {
+    // 1) HARD-FAILURE: дедлайн в прошлом больше чем на допуск, не доехали.
+    if (daysUntilDeadline !== null && daysUntilDeadline < -RISK_GRACE_DAYS) {
       if (contactsOblig > 0 && contactsDone < contactsOblig) return true;
       if (kpiPlan > 0 && kpiFact < kpiPlan) return true;
     }
@@ -1625,8 +1639,9 @@ export function ProjectList() {
     );
     if (risk.axes.length > 0) return true;
 
-    // 3) ZERO/NEGATIVE-PACE: дедлайн ≤14 дней и темп нулевой/отрицательный.
-    if (daysUntilDeadline !== null && daysUntilDeadline >= 0 && daysUntilDeadline <= 14) {
+    // 3) ZERO/NEGATIVE-PACE: дедлайн ≤14 дней (включая просроченный) и темп
+    //    нулевой/отрицательный.
+    if (daysUntilDeadline !== null && daysUntilDeadline <= 14) {
       const pace = paceByProjectId.get(project.id);
       const contactsRemaining = Math.max(0, contactsOblig - contactsDone);
       const kpiRemaining = Math.max(0, kpiPlan - kpiFact);
@@ -1782,7 +1797,7 @@ export function ProjectList() {
                 ? 'Сейчас отстающих проектов нет'
                 : showOnlyProblems
                 ? 'Показать все'
-                : `Показать только отстающие (${problemCount})`
+                : `Показать только отстающие (${problemCount}). Отставание в пределах недели не считается проблемой`
             }
             className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-2 text-xs font-medium whitespace-nowrap shadow-sm transition-all ${
               showOnlyProblems
