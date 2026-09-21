@@ -7,6 +7,7 @@ import {
 } from './accountCampaignMappings';
 import { fetchThreadContext, getBodyText, type ThreadContext } from './leadQualifier';
 import { CampaignStatus, type Email } from './types';
+import { isReservedMailboxPoolTag } from './mailboxTags';
 import { resolveCampaignProjectOwner } from './campaignProjectOwnerResolver';
 import {
   loadOwnershipEvidenceCheckpoint,
@@ -22,6 +23,8 @@ import {
 const MAPPING_POSITIVE_TTL_MS = 10 * 60 * 1000;
 const MAPPING_NEGATIVE_TTL_MS = 60 * 1000;
 const MAPPING_CACHE_MAX = 1_500;
+const SENDER_SCOPE_TTL_MS = 10 * 60 * 1000;
+const MAX_SENDER_SCOPE_INSPECTIONS = 40;
 // Each narrow surface may need a final empty page even after returning fewer
 // than 100 rows (TobyLab, 2026-09-02). Reserve its own bounded budget: at most
 // four listEmails calls in total, still using the shared workspace limiter.
@@ -38,6 +41,10 @@ interface MappedCampaigns {
 
 type MappingCacheEntry = { at: number; value: MappedCampaigns };
 const mappingCache = new Map<string, MappingCacheEntry>();
+type ReservedTagCacheEntry = { at: number; ids: Set<string> };
+type CampaignScopeCacheEntry = { at: number; usesReservedPoolTag: boolean };
+const reservedTagCache = new Map<string, ReservedTagCacheEntry>();
+const campaignScopeCache = new Map<string, CampaignScopeCacheEntry>();
 
 export type ReplyOwnershipResolution =
   | {
@@ -212,6 +219,58 @@ async function getMappedCampaigns(
   return refreshedForProviderMismatch
     ? { ...value, refreshedForProviderMismatch: true }
     : value;
+}
+
+async function reservedPoolTagIds(accountId?: string): Promise<Set<string>> {
+  const key = accountId ?? 'main';
+  const cached = reservedTagCache.get(key);
+  if (cached && Date.now() - cached.at < SENDER_SCOPE_TTL_MS) return cached.ids;
+  const tags = await instantly.listAllCustomTags({ accountId });
+  const ids = new Set(
+    tags
+      .filter((tag) => isReservedMailboxPoolTag(tag.name))
+      .map((tag) => tag.id)
+      .filter(Boolean),
+  );
+  reservedTagCache.set(key, { at: Date.now(), ids });
+  return ids;
+}
+
+/**
+ * A reserve-pool tag maps a campaign to every currently available mailbox in
+ * that inventory bucket. It is not project ownership evidence. Inspect this
+ * only when exact-mailbox mappings disagree across owners: the normal reply
+ * path therefore adds no campaign reads.
+ */
+async function removeReservedPoolMappings(
+  mappings: MappedCampaigns,
+  accountId?: string,
+): Promise<MappedCampaigns> {
+  if (mappings.allCampaignIds.length === 0 ||
+      mappings.allCampaignIds.length > MAX_SENDER_SCOPE_INSPECTIONS) return mappings;
+  const reservedIds = await reservedPoolTagIds(accountId);
+  if (reservedIds.size === 0) return mappings;
+
+  const invalid = new Set<string>();
+  for (const campaignId of mappings.allCampaignIds) {
+    const key = `${accountId ?? 'main'}:${campaignId}`;
+    const cached = campaignScopeCache.get(key);
+    let usesReservedPoolTag: boolean;
+    if (cached && Date.now() - cached.at < SENDER_SCOPE_TTL_MS) {
+      usesReservedPoolTag = cached.usesReservedPoolTag;
+    } else {
+      const campaign = await instantly.getCampaign(campaignId, { accountId });
+      usesReservedPoolTag = (campaign.email_tag_list ?? []).some((tagId) => reservedIds.has(tagId));
+      campaignScopeCache.set(key, { at: Date.now(), usesReservedPoolTag });
+    }
+    if (usesReservedPoolTag) invalid.add(campaignId);
+  }
+  if (invalid.size === 0) return mappings;
+  return {
+    ...mappings,
+    allCampaignIds: mappings.allCampaignIds.filter((id) => !invalid.has(id)),
+    currentCampaignIds: mappings.currentCampaignIds.filter((id) => !invalid.has(id)),
+  };
 }
 
 interface OwnershipLinks {
@@ -1080,12 +1139,13 @@ export async function resolveEffectiveReplyOwner(args: {
   // the refreshed mapping permanently. That is a reason to prove the parent,
   // not to defer before every evidence scan and restart this loop forever.
 
-  // Every exact-mailbox mapping is ownership evidence. Current mappings choose
-  // the representative campaign when all mapped campaigns belong to one owner;
-  // historical mappings remain candidates for late replies.
-  const evidenceCampaignIds = [...new Set([providerCampaignId, ...mappings.allCampaignIds])];
-  const currentCampaignIds = mappings.currentCampaignIds;
-  const linkIds = [...new Set([providerCampaignId, ...evidenceCampaignIds])];
+  // Exact-mailbox mappings are ownership evidence unless their campaign uses a
+  // reserve inventory tag. Current mappings choose the representative campaign
+  // when all valid mappings belong to one owner; historical mappings remain
+  // candidates for late replies.
+  let evidenceCampaignIds = [...new Set([providerCampaignId, ...mappings.allCampaignIds])];
+  let currentCampaignIds = mappings.currentCampaignIds;
+  let linkIds = [...new Set([providerCampaignId, ...evidenceCampaignIds])];
   const links = await loadOwnershipLinks(db, linkIds);
   if (links.error) {
     return {
@@ -1093,6 +1153,21 @@ export async function resolveEffectiveReplyOwner(args: {
       providerCampaignId,
       reason: `campaign ownership unavailable: ${links.error}`,
     };
+  }
+
+  const preliminaryOwnerKeys = [
+    ...new Set(mappings.allCampaignIds.flatMap((campaignId) => campaignOwnerKeys(links, campaignId))),
+  ];
+  if (preliminaryOwnerKeys.length > 1) {
+    try {
+      mappings = await removeReservedPoolMappings(mappings, accountId);
+      evidenceCampaignIds = [...new Set([providerCampaignId, ...mappings.allCampaignIds])];
+      currentCampaignIds = mappings.currentCampaignIds;
+      linkIds = [...new Set([providerCampaignId, ...evidenceCampaignIds])];
+    } catch {
+      // Scope inspection is a hardening layer. If Instantly cannot serve the
+      // campaign/tag metadata, retain the existing fail-closed conflict path.
+    }
   }
 
   const ownerKeysByCampaign = new Map(
