@@ -13,6 +13,7 @@ import { buildAssigneeOptions, ensureCurrentAssigneeOption } from '@/lib/project
 import { ProjectBriefSection } from '@/components/projects/ProjectBriefSection';
 import { InstantlyInsightsSection } from '@/components/projects/InstantlyInsightsSection';
 import { SERVICE_OPTIONS } from '@/lib/projectServices';
+import { buildCampaignPickerEntries } from '@/lib/projects/campaignPicker';
 import { BOARD_COLUMN_LABELS } from '@/lib/leadBoard/boardColumns';
 
 const WORK_FORMAT_OPTIONS = ['Колди', 'Тригга', 'Инстантли'];
@@ -147,8 +148,8 @@ export default function ProjectPage() {
   const [allCampaigns, setAllCampaigns] = useState<{ id: string; name: string }[]>([]);
   const [campaignSearch, setCampaignSearch] = useState('');
   const [showCampaignPicker, setShowCampaignPicker] = useState(false);
-  /** campaign_id → проект-владелец: одна кампания может принадлежать только одному проекту. */
-  const [takenCampaigns, setTakenCampaigns] = useState<Record<string, { project_id: string; project_name: string }>>({});
+  /** campaign_id → название проекта-владельца: кампания принадлежит только одному проекту. */
+  const [takenCampaigns, setTakenCampaigns] = useState<Record<string, string>>({});
   const [campaignError, setCampaignError] = useState<string | null>(null);
   const [leadBoard, setLeadBoard] = useState<{ link: string; columnConfig: { key: string; visible: boolean }[] } | null>(null);
   const [leadBoardError, setLeadBoardError] = useState('');
@@ -236,7 +237,7 @@ export default function ProjectPage() {
       const headers = await getAuthHeaders();
       const res = await fetch(`/api/projects/${id}/campaigns?taken=1`, { headers });
       if (!res.ok) return;
-      const json = await res.json() as { taken?: Record<string, { project_id: string; project_name: string }> };
+      const json = await res.json() as { taken?: Record<string, string> };
       setTakenCampaigns(json.taken ?? {});
     } catch { /* non-critical: без карты пикер просто не подсветит занятые */ }
   }
@@ -1230,43 +1231,36 @@ export default function ProjectPage() {
                       />
                       <div className="max-h-48 overflow-y-auto rounded-lg border border-gray-100">
                         {(() => {
-                          const linkedIds = new Set(linkedCampaigns.map((c) => c.campaign_id));
-                          const search = campaignSearch.trim().toLowerCase();
-                          const filtered = allCampaigns
-                            .filter((c) => !linkedIds.has(c.id))
-                            .filter((c) => !search || c.name.toLowerCase().includes(search));
-                          if (filtered.length === 0) {
+                          const entries = buildCampaignPickerEntries(
+                            allCampaigns,
+                            linkedCampaigns.map((c) => c.campaign_id),
+                            takenCampaigns,
+                            campaignSearch,
+                          );
+                          if (entries.length === 0) {
                             return <p className="px-3 py-2 text-sm text-gray-400">Не найдено</p>;
                           }
-                          // Свободные наверх: большая часть кампаний воркспейса занята
-                          // другими проектами, иначе верх списка некликабельный.
-                          const free = filtered.filter((c) => !takenCampaigns[c.id]);
-                          const taken = filtered.filter((c) => takenCampaigns[c.id]);
-                          return [...free, ...taken].slice(0, 20).map((c) => {
-                            const owner = takenCampaigns[c.id];
-                            if (owner) {
-                              return (
-                                <div
-                                  key={c.id}
-                                  title={`Уже привязана к проекту «${owner.project_name}» — сначала отвяжите её там`}
-                                  className="w-full px-3 py-2 text-sm text-gray-400 border-b border-gray-50 last:border-0 cursor-not-allowed"
-                                >
-                                  <span className="line-through">{c.name}</span>
-                                  <span className="ml-1 text-gray-300">— занята: {owner.project_name}</span>
-                                </div>
-                              );
-                            }
-                            return (
+                          return entries.map(({ campaign, takenBy }) => (
+                            takenBy ? (
+                              <div
+                                key={campaign.id}
+                                title={`Уже привязана к проекту «${takenBy}» — сначала отвяжите её там`}
+                                className="w-full px-3 py-2 text-sm text-gray-400 border-b border-gray-50 last:border-0 cursor-not-allowed"
+                              >
+                                <span className="line-through">{campaign.name}</span>
+                                <span className="ml-1 text-gray-300">— занята: {takenBy}</span>
+                              </div>
+                            ) : (
                               <button
-                                key={c.id}
+                                key={campaign.id}
                                 type="button"
-                                onClick={() => void addCampaign(c.id)}
+                                onClick={() => void addCampaign(campaign.id)}
                                 className="w-full text-left px-3 py-2 text-sm text-gray-700 hover:bg-blue-50 hover:text-blue-700 transition-colors border-b border-gray-50 last:border-0"
                               >
-                                {c.name}
+                                {campaign.name}
                               </button>
-                            );
-                          });
+                            )
+                          ));
                         })()}
                       </div>
                       {campaignError && (

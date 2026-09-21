@@ -67,14 +67,16 @@ async function getCampaignBaseline(
   return { data: Number.isFinite(n) ? n : 0, error: null };
 }
 
-type TakenCampaign = { project_id: string; project_name: string };
-
-async function getProjectLabels(projectIds: string[]): Promise<Record<string, string>> {
-  if (!supabaseAdmin || projectIds.length === 0) return {};
+/**
+ * Подписи проектов целиком (162 строки, ~3 КБ меток), а не `.in('id', [...])`:
+ * владельцев кампаний больше сотни, и список uuid раздул бы GET-строку к REST
+ * до ~5 КБ — впритык к nginx-буферу заголовков ради выборки, которая и так меньше.
+ */
+async function getProjectLabels(): Promise<Record<string, string>> {
+  if (!supabaseAdmin) return {};
   const { data, error } = await supabaseAdmin
     .from('projects')
-    .select('id, client, name')
-    .in('id', projectIds);
+    .select('id, client, name');
   if (error || !data) return {};
   const rows = data as { id: string; client: string | null; name: string | null }[];
   return Object.fromEntries(
@@ -91,7 +93,7 @@ async function getProjectLabels(projectIds: string[]): Promise<Record<string, st
  */
 async function getCampaignsTakenByOtherProjects(
   projectId: string,
-): Promise<Record<string, TakenCampaign>> {
+): Promise<Record<string, string>> {
   if (!supabaseInstantly) return {};
   const [legacy, period] = await Promise.all([
     supabaseInstantly
@@ -116,10 +118,10 @@ async function getCampaignsTakenByOtherProjects(
   }
   if (ownerByCampaign.size === 0) return {};
 
-  const labels = await getProjectLabels([...new Set(ownerByCampaign.values())]);
-  const taken: Record<string, TakenCampaign> = {};
+  const labels = await getProjectLabels();
+  const taken: Record<string, string> = {};
   for (const [campaignId, ownerId] of ownerByCampaign) {
-    taken[campaignId] = { project_id: ownerId, project_name: labels[ownerId] ?? ownerId };
+    taken[campaignId] = labels[ownerId] ?? ownerId;
   }
   return taken;
 }
@@ -221,7 +223,7 @@ export async function POST(
       replaceAutomatic: false,
     });
     if (claim.status === 'conflict') {
-      const labels = await getProjectLabels(claim.conflictingProjectIds);
+      const labels = await getProjectLabels();
       const owners = claim.conflictingProjectIds.map((ownerId) => labels[ownerId] ?? ownerId);
       return NextResponse.json(
         {

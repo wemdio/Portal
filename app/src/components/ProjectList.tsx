@@ -16,6 +16,7 @@ import { AlertTriangle, Clock } from 'lucide-react';
 import { ProjectBriefSection } from '@/components/projects/ProjectBriefSection';
 import { InstantlyInsightsSection } from '@/components/projects/InstantlyInsightsSection';
 import { SERVICE_OPTIONS } from '@/lib/projectServices';
+import { buildCampaignPickerEntries } from '@/lib/projects/campaignPicker';
 
 /**
  * Формат темпа для tooltip'ов «Анализ KPI» и «Анализ контактов».
@@ -750,8 +751,8 @@ export function ProjectList() {
   const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [panelLinkedCampaigns, setPanelLinkedCampaigns] = useState<{ campaign_id: string; campaign_name: string; match_source: string }[]>([]);
   const [panelAllCampaigns, setPanelAllCampaigns] = useState<{ id: string; name: string }[]>([]);
-  /** campaign_id → проект, который уже владеет кампанией (одна кампания = один проект). */
-  const [panelTakenCampaigns, setPanelTakenCampaigns] = useState<Record<string, { project_id: string; project_name: string }>>({});
+  /** campaign_id → название проекта, который уже владеет кампанией (одна кампания = один проект). */
+  const [panelTakenCampaigns, setPanelTakenCampaigns] = useState<Record<string, string>>({});
   const [panelCampaignError, setPanelCampaignError] = useState<string | null>(null);
   const [panelPeriods, setPanelPeriods] = useState<ProjectPeriod[]>([]);
   const [panelBrief, setPanelBrief] = useState<PanelBrief>({});
@@ -1174,7 +1175,7 @@ export function ProjectList() {
     try {
       const res = await authFetch(`/api/projects/${projectId}/campaigns?taken=1`);
       if (!res.ok) return;
-      const json = await res.json() as { taken?: Record<string, { project_id: string; project_name: string }> };
+      const json = await res.json() as { taken?: Record<string, string> };
       setPanelTakenCampaigns(json.taken ?? {});
     } catch { /* non-critical: без карты пикер просто не подсветит занятые */ }
   }
@@ -2943,41 +2944,34 @@ export function ProjectList() {
                         />
                         <div className="max-h-36 overflow-y-auto rounded-lg border border-zinc-100">
                           {(() => {
-                            const linkedIds = new Set(panelLinkedCampaigns.map((c) => c.campaign_id));
-                            const search = panelCampaignSearch.trim().toLowerCase();
-                            const filtered = panelAllCampaigns
-                              .filter((c) => !linkedIds.has(c.id))
-                              .filter((c) => !search || c.name.toLowerCase().includes(search));
-                            if (filtered.length === 0) return <p className="px-2.5 py-2 text-xs text-zinc-400">Не найдено</p>;
-                            // Свободные наверх: 2 из 3 кампаний воркспейса заняты другими
-                            // проектами, и без сортировки верх списка был сплошь некликабельным.
-                            const free = filtered.filter((c) => !panelTakenCampaigns[c.id]);
-                            const taken = filtered.filter((c) => panelTakenCampaigns[c.id]);
-                            return [...free, ...taken].slice(0, 20).map((c) => {
-                              const owner = panelTakenCampaigns[c.id];
-                              if (owner) {
-                                return (
-                                  <div
-                                    key={c.id}
-                                    title={`Уже привязана к проекту «${owner.project_name}» — сначала отвяжите её там`}
-                                    className="w-full px-2.5 py-1.5 text-xs text-zinc-400 border-b border-zinc-50 last:border-0 cursor-not-allowed"
-                                  >
-                                    <span className="line-through">{c.name}</span>
-                                    <span className="ml-1 text-zinc-300">— занята: {owner.project_name}</span>
-                                  </div>
-                                );
-                              }
-                              return (
+                            const entries = buildCampaignPickerEntries(
+                              panelAllCampaigns,
+                              panelLinkedCampaigns.map((c) => c.campaign_id),
+                              panelTakenCampaigns,
+                              panelCampaignSearch,
+                            );
+                            if (entries.length === 0) return <p className="px-2.5 py-2 text-xs text-zinc-400">Не найдено</p>;
+                            return entries.map(({ campaign, takenBy }) => (
+                              takenBy ? (
+                                <div
+                                  key={campaign.id}
+                                  title={`Уже привязана к проекту «${takenBy}» — сначала отвяжите её там`}
+                                  className="w-full px-2.5 py-1.5 text-xs text-zinc-400 border-b border-zinc-50 last:border-0 cursor-not-allowed"
+                                >
+                                  <span className="line-through">{campaign.name}</span>
+                                  <span className="ml-1 text-zinc-300">— занята: {takenBy}</span>
+                                </div>
+                              ) : (
                                 <button
-                                  key={c.id}
+                                  key={campaign.id}
                                   type="button"
-                                  onClick={() => void addPanelCampaign(selectedProject.id, c.id)}
+                                  onClick={() => void addPanelCampaign(selectedProject.id, campaign.id)}
                                   className="w-full text-left px-2.5 py-1.5 text-xs text-zinc-600 hover:bg-blue-50 hover:text-blue-700 border-b border-zinc-50 last:border-0"
                                 >
-                                  {c.name}
+                                  {campaign.name}
                                 </button>
-                              );
-                            });
+                              )
+                            ));
                           })()}
                         </div>
                         {panelCampaignError && (

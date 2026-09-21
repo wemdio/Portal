@@ -132,11 +132,11 @@ describe('POST /api/projects/[id]/campaigns ownership', () => {
     const res = await GET(makeTakenReq(), { params: Promise.resolve({ id: 'project-target' }) });
 
     expect(res.status).toBe(200);
-    const body = await res.json() as { taken: Record<string, { project_id: string; project_name: string }> };
+    const body = await res.json() as { taken: Record<string, string> };
     expect(body.taken).toEqual({
-      'campaign-shared': { project_id: 'project-existing', project_name: 'Другой клиент' },
+      'campaign-shared': 'Другой клиент',
       // client — пустая строка, подписываем проект по name, а не пробелом
-      'campaign-legacy': { project_id: 'project-legacy', project_name: 'Легаси проект' },
+      'campaign-legacy': 'Легаси проект',
     });
     // Свои кампании не «заняты» — их пикер и так прячет как уже привязанные.
     expect(body.taken['campaign-own']).toBeUndefined();
