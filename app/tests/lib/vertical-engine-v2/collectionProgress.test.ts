@@ -53,7 +53,7 @@ describe('VE2 collection progress presentation', () => {
     // через предел строки V8 и четверо суток держал специалиста без проекта.
     // Здесь проверяется именно запрос: мок SQL-функцию исполнить не может.
     const baseSelect = db.selects.find((query) => query.table === 've_bases')!.columns;
-    expect(baseSelect).toContain('collect_info:ve_base_public_info_cached');
+    expect(baseSelect).toContain('collect_info:public_info');
     expect(baseSelect).not.toMatch(/(^|,)\s*collect_info\s*(,|$)/);
     expect(getCollectionQueue(bases, [{ stage: 'base_collect', status: 'running', payload: { base_id: 'supply-active' } }]).current?.id).toBe('supply-active');
 
