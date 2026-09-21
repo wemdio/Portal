@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { instantlyFetch } from '@/lib/instantly/fetcher';
 import type { Account, Campaign, CampaignCreatePayload, CustomTag } from '@/lib/instantly/types';
+import { isReservedMailboxPoolTag } from '@/lib/instantly/mailboxTags';
 
 interface StepDraft {
   subject: string;
@@ -154,9 +155,10 @@ export default function CreateCampaignPage() {
   const getTagDisplayName = (t: CustomTag) => t.name || t.label || '';
 
   const q = tagSearch.trim().toLowerCase();
+  const projectTags = allTags.filter((tag) => !isReservedMailboxPoolTag(getTagDisplayName(tag)));
   const searchedTags = q
-    ? allTags.filter((t) => getTagDisplayName(t).toLowerCase().includes(q))
-    : allTags;
+    ? projectTags.filter((t) => getTagDisplayName(t).toLowerCase().includes(q))
+    : projectTags;
 
   const selectedTag = filterTagId ? allTags.find((t) => t.id === filterTagId) : null;
   const selectedTagName = selectedTag ? getTagDisplayName(selectedTag) : null;
@@ -186,8 +188,12 @@ export default function CreateCampaignPage() {
       setError('Заполните тему или тело хотя бы для каждого шага');
       return;
     }
-    if (selectedAccounts.length === 0) {
-      setError('Выберите хотя бы один ящик отправки');
+    if (!filterTagId && selectedAccounts.length === 0) {
+      setError('Выберите тег проекта или хотя бы один ящик отправки');
+      return;
+    }
+    if (filterTagId && !filteredAccounts.some((account) => account.status === 1)) {
+      setError('В выбранном проектном теге нет активных ящиков');
       return;
     }
 
@@ -212,10 +218,10 @@ export default function CreateCampaignPage() {
           variants: [{ subject: s.subject, body: formatBodyForInstantly(s.body, textOnly) }],
         })),
       }],
-      // The tag controls only the account filter in this form. Persist the
-      // exact checked mailboxes so a broad pool tag cannot add another
-      // client's account after the campaign is created.
-      email_list: selectedAccounts,
+      // Project tags intentionally follow temporary mailbox allocation. The
+      // reserve-pool tag is hidden in the UI and rejected again by the API.
+      email_tag_list: filterTagId ? [filterTagId] : undefined,
+      email_list: filterTagId ? undefined : selectedAccounts,
       daily_limit: dailyLimit ? Number(dailyLimit) : undefined,
       daily_max_leads: dailyMaxLeads ? Number(dailyMaxLeads) : undefined,
       email_gap: emailGap ? Number(emailGap) : undefined,
@@ -236,7 +242,7 @@ export default function CreateCampaignPage() {
     } finally {
       setCreating(false);
     }
-  }, [name, steps, selectedAccounts, dailyLimit, dailyMaxLeads, emailGap, stopOnReply, openTracking, linkTracking, textOnly, scheduleFrom, scheduleTo, scheduleDays, router]);
+  }, [name, steps, selectedAccounts, filterTagId, filteredAccounts, dailyLimit, dailyMaxLeads, emailGap, stopOnReply, openTracking, linkTracking, textOnly, scheduleFrom, scheduleTo, scheduleDays, router]);
 
   const DAY_NAMES = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
 
@@ -349,7 +355,7 @@ export default function CreateCampaignPage() {
                     }`}
                   >
                     <Tag className="h-3 w-3" />
-                    {selectedTagName ?? 'Фильтр по тегу'}
+                    {selectedTagName ?? 'Тег проекта'}
                     {filterTagId && (
                       <span
                         role="button"
@@ -382,7 +388,11 @@ export default function CreateCampaignPage() {
                           searchedTags.map((t) => (
                             <button
                               key={t.id}
-                              onClick={() => { setFilterTagId(t.id); setTagDropdownOpen(false); }}
+                              onClick={() => {
+                                setFilterTagId(t.id);
+                                setSelectedAccounts([]);
+                                setTagDropdownOpen(false);
+                              }}
                               className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-xs transition-colors ${
                                 filterTagId === t.id
                                   ? 'bg-zinc-100 font-semibold text-zinc-900'
@@ -397,52 +407,62 @@ export default function CreateCampaignPage() {
                     </div>
                   )}
                   <p className="mt-2 text-xs text-zinc-400">
-                    Тег только фильтрует список. В кампанию попадут выбранные ниже ящики.
+                    {filterTagId
+                      ? 'Кампания использует все ящики с этим проектным тегом. Состав обновляется при переносе тега между ящиками.'
+                      : 'Выберите проектный тег или отдельные ящики. Резервные теги «неименные …» здесь недоступны.'}
                   </p>
                 </div>
               )}
-              <div className="mb-2 flex gap-2">
-                <button
-                  onClick={() => {
-                    const active = filteredAccounts.filter(a => a.status === 1).map(a => a.email);
-                    setSelectedAccounts((prev) => [...new Set([...prev, ...active])]);
-                  }}
-                  className="text-xs text-zinc-500 hover:text-zinc-800 transition-colors"
-                >
-                  Выбрать все активные{filterTagId ? ' (в теге)' : ''}
-                </button>
-                <button
-                  onClick={() => setSelectedAccounts([])}
-                  className="text-xs text-zinc-500 hover:text-zinc-800 transition-colors"
-                >
-                  Снять все
-                </button>
-              </div>
+              {!filterTagId && (
+                <div className="mb-2 flex gap-2">
+                  <button
+                    onClick={() => {
+                      const active = filteredAccounts.filter(a => a.status === 1).map(a => a.email);
+                      setSelectedAccounts((prev) => [...new Set([...prev, ...active])]);
+                    }}
+                    className="text-xs text-zinc-500 hover:text-zinc-800 transition-colors"
+                  >
+                    Выбрать все активные
+                  </button>
+                  <button
+                    onClick={() => setSelectedAccounts([])}
+                    className="text-xs text-zinc-500 hover:text-zinc-800 transition-colors"
+                  >
+                    Снять все
+                  </button>
+                </div>
+              )}
               <div className="max-h-60 overflow-y-auto space-y-1">
                 {filteredAccounts.map((acc) => (
                   <label
                     key={acc.email}
-                    className={`flex items-center gap-3 rounded-lg px-3 py-2 cursor-pointer transition-colors text-sm ${
-                      selectedAccounts.includes(acc.email)
+                    className={`flex items-center gap-3 rounded-lg px-3 py-2 transition-colors text-sm ${
+                      filterTagId
+                        ? 'cursor-default bg-zinc-50 border border-transparent'
+                        : selectedAccounts.includes(acc.email)
                         ? 'bg-blue-50 border border-blue-100'
-                        : 'bg-zinc-50 border border-transparent hover:bg-zinc-100'
+                        : 'cursor-pointer bg-zinc-50 border border-transparent hover:bg-zinc-100'
                     }`}
                   >
-                    <input
-                      type="checkbox"
-                      checked={selectedAccounts.includes(acc.email)}
-                      onChange={() => toggleAccount(acc.email)}
-                      className="sr-only"
-                    />
-                    <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border-2 transition-colors ${
-                      selectedAccounts.includes(acc.email)
-                        ? 'border-blue-600 bg-blue-600'
-                        : 'border-zinc-300 bg-white'
-                    }`}>
-                      {selectedAccounts.includes(acc.email) && (
-                        <svg className="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
-                      )}
-                    </span>
+                    {!filterTagId && (
+                      <>
+                        <input
+                          type="checkbox"
+                          checked={selectedAccounts.includes(acc.email)}
+                          onChange={() => toggleAccount(acc.email)}
+                          className="sr-only"
+                        />
+                        <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border-2 transition-colors ${
+                          selectedAccounts.includes(acc.email)
+                            ? 'border-blue-600 bg-blue-600'
+                            : 'border-zinc-300 bg-white'
+                        }`}>
+                          {selectedAccounts.includes(acc.email) && (
+                            <svg className="h-2.5 w-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                          )}
+                        </span>
+                      </>
+                    )}
                     <span className="truncate">{acc.email}</span>
                     <span className={`ml-auto text-xs ${acc.status === 1 ? 'text-emerald-500' : 'text-zinc-400'}`}>
                       {acc.status === 1 ? 'active' : 'paused'}
@@ -451,8 +471,9 @@ export default function CreateCampaignPage() {
                 ))}
               </div>
               <p className="mt-2 text-xs text-zinc-400">
-                {selectedAccounts.length} выбрано
-                {filterTagId && ` · ${filteredAccounts.length} в теге`}
+                {filterTagId
+                  ? `${filteredAccounts.length} ящиков в проектном теге`
+                  : `${selectedAccounts.length} выбрано`}
               </p>
             </>
           )}
