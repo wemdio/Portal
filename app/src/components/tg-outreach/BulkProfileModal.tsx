@@ -1,44 +1,57 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
-import { AlertCircle, Check, Clock, ImagePlus, Loader2, Play, X } from 'lucide-react';
+import { useCallback, useMemo, useRef, useState } from 'react';
+import { AlertCircle, Check, Clock, ImagePlus, Loader2, Save, Sparkles, X } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import type { OutreachAccount } from '@/lib/tgOutreach/types';
 import { AccountAvatar } from './AccountAvatar';
 
 /**
- * Массовое автозаполнение профилей: выделили аккаунты — заполнили все разом.
+ * Массовое заполнение профилей: выделили аккаунты — настроили все разом.
  *
- * Поштучно это делалось через карточку аккаунта: открыть, нажать
- * «Автозаполнить», сохранить, закрыть — и так двадцать раз на партию. Здесь тот
- * же путь, но один на всю выборку и с видимым ходом работы.
+ * Работа разбита на два шага, и это главное в этом окне. «Подобрать имена»
+ * ничего не меняет в Telegram — оно только предлагает имя, фамилию, свободный
+ * ник и описание. Пишет в Telegram отдельная кнопка «Сохранить изменения».
+ *
+ * Разделение не ради осторожности, а потому что шаги независимы. Аватарки
+ * выбираются руками, файлами, и почти всегда уже после того, как имена
+ * подобраны. Пока запуск писал в Telegram сразу, у партии с заполненными
+ * профилями не было способа поменять одни только аватарки: любое нажатие
+ * перезаписывало имена. Теперь не нажали «Подобрать» — имена не тронуты, уедут
+ * только картинки.
  *
  * Перебор идёт в браузере, по одному аккаунту за раз, а не одним запросом на
- * сервер. Причин две: каждый аккаунт поднимает своё соединение с Telegram через
- * мобильный прокси — на двадцати аккаунтах это минуты, и такой запрос просто
- * не доживёт до ответа; и оператор должен видеть, на ком остановились, а не
- * ждать одного «готово» в конце.
+ * сервер: каждый аккаунт поднимает своё соединение с Telegram через мобильный
+ * прокси, на двадцати аккаунтах такой запрос не доживёт до ответа, а
+ * параллельный залп по одному пулу прокси — верный способ собрать ограничения
+ * на всю партию разом.
  */
 
 const API_BASE = '/api/tools/tg-outreach';
 const MAX_AVATAR_BYTES = 1024 * 1024;
 
-type RowState = 'idle' | 'running' | 'done' | 'queued' | 'error';
+type RowState = 'idle' | 'busy' | 'done' | 'queued' | 'error';
+
+interface Proposal {
+  firstName: string;
+  lastName: string;
+  username: string;
+  bio: string;
+}
 
 interface Row {
   account: OutreachAccount;
+  /** Что подобрали, но ещё не сохранили. null — имя оставляем как есть. */
+  proposal: Proposal | null;
+  avatar: File | null;
+  avatarUrl: string | null;
   state: RowState;
   /** Что сейчас происходит или чем кончилось. */
   detail: string;
-  /** Итоговое имя и ник — то, что реально встало в Telegram. */
-  result: string;
-  avatar: File | null;
-  avatarUrl: string | null;
 }
 
-function accountLabel(account: OutreachAccount): string {
-  const name = [account.first_name, account.last_name].filter(Boolean).join(' ').trim();
-  return name || account.session_name;
+function currentName(account: OutreachAccount): string {
+  return [account.first_name, account.last_name].filter(Boolean).join(' ').trim() || account.session_name;
 }
 
 interface AutofillResponse {
@@ -46,8 +59,6 @@ interface AutofillResponse {
   last_name?: string;
   username?: string | null;
   bio?: string;
-  queued_check?: boolean;
-  note?: string;
   error?: string;
 }
 
@@ -71,135 +82,149 @@ export function BulkProfileModal({
   onClose: () => void;
   /**
    * Готовый аккаунт обновляется в списке сразу, строкой. Перечитывать весь
-   * список нельзя: он уедет под ногами у оператора, который в это время
-   * листает, да и заполненные аккаунты видно и так — по этому же окну.
+   * список нельзя: он уедет под ногами у оператора, который в это время листает.
    */
   onApplied: (id: string, patch: Partial<OutreachAccount>) => void;
 }) {
-  const [rows, setRows] = useState<Row[]>(() =>
-    accounts.map((account) => ({
+  const initial = useMemo<Row[]>(
+    () => accounts.map((account) => ({
       account,
-      state: 'idle' as RowState,
-      detail: '',
-      result: '',
+      proposal: null,
       avatar: null,
       avatarUrl: null,
+      state: 'idle' as RowState,
+      detail: '',
     })),
+    [accounts],
   );
-  const [running, setRunning] = useState(false);
-  // Останов — через ref: обработчик кнопки должен дотянуться до цикла, который
-  // уже идёт, а обновление состояния до него не доедет.
+  const [rows, setRows] = useState<Row[]>(initial);
+  /**
+   * Зеркало строк для циклов.
+   *
+   * Цикл живёт дольше одного рендера, а читать ему нужно свежее: аватарку могли
+   * прицепить между подбором и сохранением. Состояние, попавшее в замыкание
+   * цикла, застыло бы на момент нажатия кнопки.
+   */
+  const rowsRef = useRef<Row[]>(initial);
+
+  const [busy, setBusy] = useState<null | 'pick' | 'save'>(null);
   const stopRef = useRef(false);
   const bulkFileRef = useRef<HTMLInputElement>(null);
   const rowFileRef = useRef<HTMLInputElement>(null);
   const rowTargetRef = useRef<number | null>(null);
-  const [touched, setTouched] = useState(false);
 
-  const stats = useMemo(() => {
-    const done = rows.filter((r) => r.state === 'done').length;
-    const queued = rows.filter((r) => r.state === 'queued').length;
-    const failed = rows.filter((r) => r.state === 'error').length;
-    return { done, queued, failed, total: rows.length };
-  }, [rows]);
+  const update = useCallback((index: number, patch: Partial<Row>) => {
+    rowsRef.current = rowsRef.current.map((row, i) => (i === index ? { ...row, ...patch } : row));
+    setRows(rowsRef.current);
+  }, []);
 
-  const patchRow = (index: number, patch: Partial<Row>) => {
-    setRows((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)));
-  };
-
-  const attachAvatar = (index: number, file: File | null) => {
-    if (file && file.size > MAX_AVATAR_BYTES) {
-      patchRow(index, { state: 'error', detail: `Картинка больше 1 МБ (${Math.round(file.size / 1024)} КБ)` });
+  const attachAvatar = (index: number, file: File) => {
+    if (file.size > MAX_AVATAR_BYTES) {
+      update(index, { state: 'error', detail: `Картинка больше 1 МБ (${Math.round(file.size / 1024)} КБ)` });
       return;
     }
-    patchRow(index, {
-      avatar: file,
-      avatarUrl: file ? URL.createObjectURL(file) : null,
-      ...(file ? { state: 'idle' as RowState, detail: '' } : {}),
-    });
+    update(index, { avatar: file, avatarUrl: URL.createObjectURL(file), state: 'idle', detail: '' });
   };
 
   /** Несколько файлов сразу — раскладываются по аккаунтам в порядке списка. */
   const attachMany = (files: FileList) => {
-    [...files].slice(0, rows.length).forEach((file, i) => attachAvatar(i, file));
+    [...files].slice(0, rowsRef.current.length).forEach((file, i) => attachAvatar(i, file));
   };
 
-  const runOne = async (index: number): Promise<void> => {
-    const row = rows[index];
-    const id = row.account.id;
-
-    patchRow(index, { state: 'running', detail: 'Подбираю имя и свободный ник…', result: '' });
-    let proposal: AutofillResponse;
+  /** Шаг 1: подобрать имя и свободный ник. В Telegram ничего не пишет. */
+  const pickOne = async (index: number) => {
+    const { account } = rowsRef.current[index];
+    update(index, { state: 'busy', detail: 'Подбираю имя и свободный ник…' });
     try {
-      const res = await authFetch(`${API_BASE}/accounts/${id}/profile/autofill`, { method: 'POST' });
-      proposal = (await res.json()) as AutofillResponse;
-      if (!res.ok) throw new Error(proposal.error || `Ошибка ${res.status}`);
-    } catch (e) {
-      patchRow(index, { state: 'error', detail: e instanceof Error ? e.message : 'Не удалось подобрать профиль' });
-      return;
-    }
-
-    if (!proposal.username) {
-      patchRow(index, {
-        state: 'error',
-        detail: 'Свободный ник не нашёлся — попробуйте запустить ещё раз, наберутся другие варианты.',
+      const res = await authFetch(`${API_BASE}/accounts/${account.id}/profile/autofill`, { method: 'POST' });
+      const data = (await res.json()) as AutofillResponse;
+      if (!res.ok) throw new Error(data.error || `Ошибка ${res.status}`);
+      if (!data.username) {
+        update(index, {
+          state: 'error',
+          detail: 'Свободный ник не нашёлся — нажмите «Подобрать имена» ещё раз, наберутся другие варианты.',
+        });
+        return;
+      }
+      update(index, {
+        state: 'idle',
+        detail: '',
+        proposal: {
+          firstName: data.first_name ?? '',
+          lastName: data.last_name ?? '',
+          username: data.username,
+          bio: data.bio ?? '',
+        },
       });
-      return;
+    } catch (e) {
+      update(index, { state: 'error', detail: e instanceof Error ? e.message : 'Не удалось подобрать профиль' });
     }
+  };
 
-    patchRow(index, { detail: 'Записываю профиль в Telegram…' });
+  /**
+   * Шаг 2: записать в Telegram.
+   *
+   * Строка без подобранного профиля, но с аватаркой уезжает с ТЕКУЩИМИ именем и
+   * описанием аккаунта, а поле ника не отправляется вовсе: у ручки отсутствие
+   * поля значит «не трогать», а пустая строка — «снять ник», и это разные
+   * намерения. Так меняется только картинка.
+   */
+  const saveOne = async (index: number) => {
+    const { account, proposal, avatar } = rowsRef.current[index];
+    if (!proposal && !avatar) return;
+
+    update(index, { state: 'busy', detail: 'Записываю в Telegram…' });
     const form = new FormData();
-    form.append('first_name', proposal.first_name ?? '');
-    form.append('last_name', proposal.last_name ?? '');
-    form.append('bio', proposal.bio ?? '');
-    form.append('username', proposal.username);
-    if (row.avatar) form.append('avatar', row.avatar);
+    form.append('first_name', proposal ? proposal.firstName : (account.first_name ?? ''));
+    form.append('last_name', proposal ? proposal.lastName : (account.last_name ?? ''));
+    form.append('bio', proposal ? proposal.bio : (account.bio ?? ''));
+    if (proposal) form.append('username', proposal.username);
+    if (avatar) form.append('avatar', avatar);
 
     try {
-      const res = await authFetch(`${API_BASE}/accounts/${id}/profile`, { method: 'PUT', body: form });
+      const res = await authFetch(`${API_BASE}/accounts/${account.id}/profile`, { method: 'PUT', body: form });
       const data = (await res.json()) as ApplyResponse;
       if (!res.ok) throw new Error(data.error || `Ошибка ${res.status}`);
 
       if (data.queued) {
-        patchRow(index, {
+        update(index, {
           state: 'queued',
           detail: data.message || 'Кампания работает — профиль применится в круге рассылки.',
-          result: `${proposal.first_name} ${proposal.last_name} · @${proposal.username}`,
         });
         return;
       }
 
-      const name = [data.first_name, data.last_name].filter(Boolean).join(' ');
-      onApplied(id, {
+      onApplied(account.id, {
         first_name: data.first_name,
         last_name: data.last_name,
         tg_username: data.tg_username,
         ...(data.avatar_url ? { avatar_url: data.avatar_url } : {}),
       });
-      patchRow(index, {
+      update(index, {
         state: 'done',
-        detail: data.avatar_error ? `Профиль записан, аватарка — нет: ${data.avatar_error}` : 'Готово',
-        result: `${name}${data.tg_username ? ` · @${data.tg_username}` : ''}`,
+        detail: data.avatar_error ? `Профиль записан, аватарка — нет: ${data.avatar_error}` : 'Сохранено',
+        // Подобранное уже применено: держать его дальше значит предлагать
+        // сохранить второй раз то же самое.
+        proposal: null,
+        avatar: null,
+        avatarUrl: null,
       });
     } catch (e) {
-      patchRow(index, { state: 'error', detail: e instanceof Error ? e.message : 'Не удалось записать профиль' });
+      update(index, { state: 'error', detail: e instanceof Error ? e.message : 'Не удалось записать профиль' });
     }
   };
 
-  const run = async () => {
+  const runAll = async (kind: 'pick' | 'save') => {
     stopRef.current = false;
-    setRunning(true);
-    setTouched(true);
-    for (let i = 0; i < rows.length; i += 1) {
-      if (stopRef.current) {
-        patchRow(i, { state: 'idle', detail: 'Остановлено' });
-        break;
-      }
+    setBusy(kind);
+    for (let i = 0; i < rowsRef.current.length; i += 1) {
+      if (stopRef.current) break;
       // Аккаунты идут по одному: каждый поднимает своё соединение с Telegram
-      // через мобильный прокси, и параллельный залп по одному пулу прокси —
-      // верный способ получить ограничения на всю партию разом.
-      await runOne(i);
+      // через мобильный прокси.
+      if (kind === 'pick') await pickOne(i);
+      else await saveOne(i);
     }
-    setRunning(false);
+    setBusy(null);
   };
 
   const close = () => {
@@ -207,13 +232,18 @@ export function BulkProfileModal({
     onClose();
   };
 
+  const pending = rows.filter((r) => r.proposal || r.avatar).length;
+  const saved = rows.filter((r) => r.state === 'done').length;
+  const queued = rows.filter((r) => r.state === 'queued').length;
+  const failed = rows.filter((r) => r.state === 'error').length;
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 backdrop-blur-sm sm:items-center"
       onClick={close}
       role="dialog"
       aria-modal="true"
-      aria-label="Автозаполнение профилей"
+      aria-label="Профили аккаунтов"
     >
       <div
         onClick={(e) => e.stopPropagation()}
@@ -221,10 +251,10 @@ export function BulkProfileModal({
       >
         <div className="flex items-start justify-between gap-4 border-b border-gray-200 px-5 py-4">
           <div>
-            <h2 className="text-base font-semibold text-gray-900">Автозаполнение профилей</h2>
+            <h2 className="text-base font-semibold text-gray-900">Профили аккаунтов</h2>
             <p className="mt-0.5 text-xs text-gray-500">
-              Выбрано аккаунтов: {rows.length}. Каждому подберётся имя, фамилия, свободный ник и описание.
-              Аватарки — по желанию, файлами.
+              Выбрано аккаунтов: {rows.length}. «Подобрать имена» только предлагает — в Telegram ничего
+              не уйдёт, пока не нажмёте «Сохранить изменения».
             </p>
           </div>
           <button
@@ -241,7 +271,7 @@ export function BulkProfileModal({
           <button
             type="button"
             onClick={() => bulkFileRef.current?.click()}
-            disabled={running}
+            disabled={busy != null}
             className="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 bg-white px-2.5 py-1.5 text-xs text-gray-700 transition hover:bg-gray-100 disabled:opacity-50"
           >
             <ImagePlus className="h-3.5 w-3.5" />
@@ -250,11 +280,11 @@ export function BulkProfileModal({
           <span className="text-[11px] text-gray-400">
             Можно выбрать сразу несколько — разложатся по аккаунтам сверху вниз. До 1 МБ каждая.
           </span>
-          {stats.done || stats.queued || stats.failed ? (
+          {saved || queued || failed ? (
             <span className="ml-auto text-xs text-gray-500">
-              Готово {stats.done} из {stats.total}
-              {stats.queued ? ` · в очереди ${stats.queued}` : ''}
-              {stats.failed ? ` · с ошибкой ${stats.failed}` : ''}
+              Сохранено {saved}
+              {queued ? ` · в очереди ${queued}` : ''}
+              {failed ? ` · с ошибкой ${failed}` : ''}
             </span>
           ) : null}
         </div>
@@ -264,7 +294,7 @@ export function BulkProfileModal({
             <div key={row.account.id} className="flex items-center gap-3 px-5 py-2.5">
               <button
                 type="button"
-                disabled={running}
+                disabled={busy != null}
                 onClick={() => {
                   rowTargetRef.current = index;
                   rowFileRef.current?.click();
@@ -284,26 +314,43 @@ export function BulkProfileModal({
               </button>
 
               <div className="min-w-0 flex-1">
-                <div className="truncate text-xs font-medium text-gray-800">
-                  {accountLabel(row.account)}
-                </div>
+                <div className="truncate text-xs font-medium text-gray-800">{currentName(row.account)}</div>
                 <div className="truncate text-[11px] text-gray-400">
-                  {row.result || row.detail || row.account.session_name}
+                  {row.detail || row.account.session_name}
                 </div>
               </div>
 
-              <div className="shrink-0">
-                {row.state === 'running' ? (
-                  <Loader2 className="h-4 w-4 animate-spin text-indigo-500" />
+              {/* Что уедет по кнопке «Сохранить». Пусто — имя оставляем как
+                  есть, и тогда уедет только аватарка. */}
+              {row.proposal ? (
+                <div className="flex min-w-0 shrink items-center gap-1.5">
+                  <span className="truncate text-[11px] text-indigo-700">
+                    → {row.proposal.firstName} {row.proposal.lastName} · @{row.proposal.username}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={busy != null}
+                    onClick={() => update(index, { proposal: null })}
+                    title="Не менять имя этому аккаунту — оставить как есть"
+                    className="rounded p-0.5 text-gray-300 transition hover:text-rose-500 disabled:opacity-50"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              ) : row.avatar ? (
+                <span className="shrink-0 text-[11px] text-indigo-700">→ только аватарка</span>
+              ) : null}
+
+              <div className="w-5 shrink-0 text-right">
+                {row.state === 'busy' ? (
+                  <Loader2 className="ml-auto h-4 w-4 animate-spin text-indigo-500" />
                 ) : row.state === 'done' ? (
-                  <Check className="h-4 w-4 text-emerald-500" />
+                  <Check className="ml-auto h-4 w-4 text-emerald-500" />
                 ) : row.state === 'queued' ? (
-                  <Clock className="h-4 w-4 text-amber-500" />
+                  <Clock className="ml-auto h-4 w-4 text-amber-500" />
                 ) : row.state === 'error' ? (
-                  <AlertCircle className="h-4 w-4 text-rose-500" />
-                ) : (
-                  <span className="text-[11px] text-gray-300">ждёт</span>
-                )}
+                  <AlertCircle className="ml-auto h-4 w-4 text-rose-500" />
+                ) : null}
               </div>
             </div>
           ))}
@@ -311,11 +358,13 @@ export function BulkProfileModal({
 
         <div className="flex flex-wrap items-center justify-end gap-2 border-t border-gray-200 bg-gray-50 px-5 py-3">
           <span className="mr-auto text-[11px] text-gray-500">
-            {running
-              ? 'Идёт по одному аккаунту: каждый подключается к Telegram через свой прокси.'
-              : 'На работающей кампании профиль встанет в очередь, а аватарка — нет: её меняют на остановленной.'}
+            {busy
+              ? 'Идём по одному аккаунту: каждый подключается к Telegram через свой прокси.'
+              : pending
+                ? `К сохранению: ${pending}`
+                : 'На работающей кампании профиль встанет в очередь, а аватарка — нет: её меняют на остановленной.'}
           </span>
-          {running ? (
+          {busy ? (
             <button
               type="button"
               onClick={() => { stopRef.current = true; }}
@@ -334,12 +383,22 @@ export function BulkProfileModal({
           )}
           <button
             type="button"
-            onClick={() => void run()}
-            disabled={running || rows.length === 0}
+            onClick={() => void runAll('pick')}
+            disabled={busy != null || rows.length === 0}
+            className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3.5 py-2 text-sm font-medium text-gray-700 transition hover:bg-gray-100 disabled:opacity-50"
+          >
+            {busy === 'pick' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+            Подобрать имена
+          </button>
+          <button
+            type="button"
+            onClick={() => void runAll('save')}
+            disabled={busy != null || pending === 0}
+            title={pending === 0 ? 'Нечего сохранять: подберите имена или добавьте аватарки' : undefined}
             className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:opacity-50"
           >
-            {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-            {touched && !running ? 'Запустить ещё раз' : 'Запуск'}
+            {busy === 'save' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+            Сохранить изменения
           </button>
         </div>
 
@@ -349,9 +408,7 @@ export function BulkProfileModal({
           Подложка закрывается по клику мимо окна, а `input.click()` порождает
           настоящее событие клика, которое всплывает как обычное. Пока поля
           лежали снаружи, этот клик доходил до подложки и закрывал модалку ровно
-          в тот момент, когда открывался диалог выбора файла: выбранная картинка
-          прилетала в размонтированный компонент, и снаружи это выглядело как
-          «нажал, а ничего не произошло».
+          в тот момент, когда открывался диалог выбора файла.
         */}
         <input
           ref={bulkFileRef}

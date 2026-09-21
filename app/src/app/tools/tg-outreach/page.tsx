@@ -3601,11 +3601,11 @@ function CampaignAccountsTab({
             <button
               type="button"
               onClick={() => setBulkProfileOpen(true)}
-              title="Подобрать имя, фамилию, свободный ник и описание сразу всем выбранным аккаунтам"
+              title="Имя, ник, описание и аватарки сразу всем выбранным аккаунтам. Подбор ничего не меняет — записывает отдельная кнопка «Сохранить изменения»"
               className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-indigo-300 hover:bg-indigo-50 cursor-pointer"
             >
               <UserPen className="h-3.5 w-3.5" />
-              Автозаполнение профилей
+              Профили
             </button>
             <button
               type="button"
