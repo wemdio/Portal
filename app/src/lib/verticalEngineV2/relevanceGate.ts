@@ -989,7 +989,8 @@ export async function findIrrelevantRows(input: {
         }
         const evidence = stripUnstorableJsonChars(await (input.fetchEvidence ?? fetchVeRelevanceEvidence)(entry.fields.website, { signal: signal ?? undefined,
           companyInn: entry.identity, companyName: entry.fields.company,
-          companyAddress: entry.group.rows.map((row) => rowText(row, ['address', 'адрес'])).find(Boolean), focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' '),
+          companyAddress: entry.group.rows.map((row) => rowText(row, ['address', 'адрес'])).find(Boolean),
+          companyEmail: entry.group.rows.map((row) => rowText(row, ['email', 'e-mail', 'почта'])).find(Boolean), focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' '),
           allowPaidSearch: input.allowPaidSearch }));
         signal?.throwIfAborted();
         if (evidence.search_deferred) {

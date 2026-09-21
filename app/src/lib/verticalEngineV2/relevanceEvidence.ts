@@ -3,6 +3,7 @@ import { isIP } from 'node:net';
 import { Agent, fetch } from 'undici';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
+import { deriveWebsiteFromEmail } from '@/lib/leadBoard/deriveWebsite';
 import type { SerperOrganicItem } from '@/lib/search/serperClient';
 import { normalizeVeCompanyInn, normalizeVeCompanyName } from './collectionIdentity';
 import { parseVeEvidencePage, rankVeEvidenceLinks, selectVeEvidenceText, type VeEvidencePage } from './relevancePage';
@@ -26,6 +27,8 @@ export interface VeRelevanceEvidenceOptions {
   companyInn?: string;
   companyName?: string;
   companyAddress?: string;
+  /** Корпоративный адрес компании: его домен — бесплатный кандидат на сайт. */
+  companyEmail?: string;
   focus?: string;
   allowPaidSearch?: boolean;
   /** Trusted offline adapters; never selected from user/source data. */
@@ -225,6 +228,15 @@ export async function fetchVeRelevanceEvidence(
   opts.signal?.throwIfAborted();
   const inn = normalizeVeCompanyInn(opts.companyInn);
   const supplied = veOfficialWebsiteCandidates(website);
+  // У 17.8% строк резерва сайта нет вовсе — им платный поиск покупается без
+  // единой бесплатной попытки. Но у трети из них корпоративная почта на своём
+  // домене, а домен корпоративной почты и есть сайт компании. Кандидат
+  // проходит те же проверки безопасности и ту же проверку владения, что и
+  // сайт из источника: он лишь даёт шанс подтвердиться бесплатно.
+  if (!supplied.length) {
+    const domain = deriveWebsiteFromEmail(opts.companyEmail);
+    if (domain) supplied.push(...veOfficialWebsiteCandidates(`https://${domain}`));
+  }
   const nameSearch = Boolean(opts.companyName?.trim() && opts.companyAddress?.trim());
   const factKey = veCompanyFactKey({ inn, company: opts.companyName, address: opts.companyAddress });
   // Offline adapters never touch the real cache unless explicitly provided.

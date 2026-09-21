@@ -70,6 +70,33 @@ describe('подтверждение владения сайтом', () => {
     expect(result.reason).toBe('website_identity_unverified');
   });
 
+  it('без сайта пробует домен корпоративной почты, а не сразу покупает поиск', async () => {
+    // 17.8% строк резерва вообще без сайта — им поиск покупался без единой
+    // бесплатной попытки. У трети из них почта на собственном домене.
+    const search = jest.fn(async () => []);
+    const result = await fetchVeRelevanceEvidence('', {
+      companyInn: OUR_INN, companyName: 'Ромашка', companyAddress: 'Казань, ул. Мира, 5', focus: 'мебель',
+      companyEmail: 'info@romashka-mebel.ru',
+      fetchPage: async (url) => page({ url, inns: [OUR_INN], ownerInns: [OUR_INN] }),
+      search: search as never,
+    });
+    expect(result.status).toBe('ok');
+    expect(result.url).toContain('romashka-mebel.ru');
+    expect(search).not.toHaveBeenCalled();
+  });
+
+  it('личный ящик сайтом компании не считается', async () => {
+    // mail.ru и gmail ничего не говорят о компании: такой домен читать нельзя.
+    const fetchPage = jest.fn(async (url: string) => page({ url }));
+    const result = await fetchVeRelevanceEvidence('', {
+      companyInn: OUR_INN, companyName: 'Ромашка', companyAddress: 'Казань, ул. Мира, 5',
+      companyEmail: 'romashka2020@mail.ru',
+      fetchPage, search: (async () => []) as never,
+    });
+    expect(fetchPage).not.toHaveBeenCalled();
+    expect(result.status).not.toBe('ok');
+  });
+
   it('подтверждённая страница из памяти фактов проверяется вместо покупки поиска', async () => {
     // Раньше память подключалась только при пустом поле «сайт»: компания с
     // сайтом из реестра, который не печатает ИНН, платила за поиск заново.
