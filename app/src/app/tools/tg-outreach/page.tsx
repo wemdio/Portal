@@ -2231,6 +2231,17 @@ interface AccountsUploadSummary {
 
 /* =================== CAMPAIGN ACCOUNTS TAB =================== */
 /**
+ * Колонки строки аккаунта. Раскладка одна на шапку и на строки, поэтому и
+ * строка одна: пока она была выписана в двух местах, шапка и строки разъезжались
+ * по одной правке.
+ *
+ * Последняя колонка — три кнопки действий по 26 пикселей с зазорами: на
+ * прежних 64 пикселях они не помещались и корзина вылезала за правый край
+ * карточки.
+ */
+const ACCOUNT_GRID = 'grid grid-cols-[32px_44px_minmax(0,1fr)_126px_120px_360px_138px_92px_60px_88px] gap-4 items-center';
+
+/**
  * Ячейка здоровья: слово и цвет, объяснение — под курсором.
  *
  * Один компонент на обе колонки («Рассылка» и «Прокси»): состояния у них
@@ -3391,7 +3402,7 @@ function CampaignAccountsTab({
         </div>
       ) : (
         <div className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white overflow-hidden">
-          <div className="grid grid-cols-[32px_44px_minmax(0,1fr)_126px_120px_360px_138px_92px_60px_64px] gap-4 px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50 items-center">
+          <div className={`${ACCOUNT_GRID} px-4 py-2 text-[11px] font-medium text-gray-400 bg-gray-50`}>
             <SelectAllCheckbox total={accounts.length} selectedCount={selectedIds.length} onChange={setAll} />
             <span />
             <span>Аккаунт</span>
@@ -3432,7 +3443,7 @@ function CampaignAccountsTab({
             return (
               <div
                 key={a.id}
-                className={`grid grid-cols-[32px_44px_minmax(0,1fr)_126px_120px_360px_138px_92px_60px_64px] gap-4 items-center px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
+                className={`${ACCOUNT_GRID} px-4 py-3 ${isSelected(a.id) ? 'bg-indigo-50/60' : ''}`}
               >
                 <input
                   type="checkbox"
