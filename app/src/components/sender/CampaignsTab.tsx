@@ -1,14 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Loader2, Pause, Play, Plus, Upload } from 'lucide-react';
-import {
-  fetchCampaigns,
-  patchCampaign,
-  uploadRecipients,
-  type CampaignDto,
-} from './api';
-import { CampaignFormModal, weekdaysLabel } from './CampaignFormModal';
+import { useCallback, useEffect, useState } from 'react';
+import { Loader2, Pause, Play, Plus } from 'lucide-react';
+import { fetchCampaigns, patchCampaign, type CampaignDto } from './api';
+import { CampaignFormModal } from './CampaignFormModal';
+import { weekdaysLabel } from './CampaignSteps';
 
 const STATUS_LABELS: Record<CampaignDto['status'], { text: string; className: string }> = {
   draft: { text: 'Черновик', className: 'bg-zinc-100 text-zinc-600' },
@@ -28,11 +24,10 @@ export function CampaignsTab() {
   const [campaigns, setCampaigns] = useState<CampaignDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [formOpen, setFormOpen] = useState(false);
+  // Какую кампанию открыли по названию. null — окно создания новой.
+  const [editing, setEditing] = useState<CampaignDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-
-  const uploadTargetRef = useRef<string | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     try {
@@ -48,22 +43,6 @@ export function CampaignsTab() {
   useEffect(() => {
     void load();
   }, [load]);
-
-  const handleUpload = async (file: File) => {
-    const campaignId = uploadTargetRef.current;
-    if (!campaignId) return;
-    setError(null);
-    try {
-      const res = await uploadRecipients(campaignId, file);
-      setNotice(
-        `Загружено получателей: ${res.imported}. Пропущено: ${res.skippedInvalid} с плохим адресом, ` +
-          `${res.skippedDuplicates} дублей, ${res.skippedSuppressed} из стоп-листа.`,
-      );
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Не удалось загрузить базу');
-    }
-  };
 
   return (
     <div className="space-y-4">
@@ -108,7 +87,16 @@ export function CampaignsTab() {
                 <div key={campaign.id} className="flex flex-wrap items-center gap-4 px-5 py-4">
                   <div className="min-w-48 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className="font-medium text-zinc-900">{campaign.name}</span>
+                      {/* Название — вход в настройки: отдельная кнопка
+                          «Изменить» в строке была бы четвёртой подряд, а по
+                          названию кликают и так, ожидая карточку. */}
+                      <button
+                        type="button"
+                        onClick={() => setEditing(campaign)}
+                        className="rounded font-medium text-zinc-900 underline-offset-4 transition-colors hover:text-blue-600 hover:underline"
+                      >
+                        {campaign.name}
+                      </button>
                       <span className={`rounded-md px-2 py-0.5 text-xs font-medium ${status.className}`}>
                         {status.text}
                       </span>
@@ -125,18 +113,6 @@ export function CampaignsTab() {
                       {weekdaysLabel(campaign.send_weekdays ?? [])}
                     </div>
                   </div>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      uploadTargetRef.current = campaign.id;
-                      fileRef.current?.click();
-                    }}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100"
-                  >
-                    <Upload className="h-3.5 w-3.5" />
-                    База получателей
-                  </button>
 
                   {campaign.status === 'running' ? (
                     <button
@@ -174,24 +150,17 @@ export function CampaignsTab() {
         )}
       </div>
 
-      <input
-        ref={fileRef}
-        type="file"
-        accept=".csv,.tsv,.xlsx,.xls"
-        className="hidden"
-        onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (file) void handleUpload(file);
-          e.target.value = '';
-        }}
-      />
-
-      {formOpen ? (
+      {formOpen || editing ? (
         <CampaignFormModal
-          onClose={() => setFormOpen(false)}
-          onCreated={async ({ notice: createdNotice, error: createdError }) => {
-            setNotice(createdNotice ?? null);
-            setError(createdError ?? null);
+          key={editing?.id ?? 'new'}
+          campaign={editing ?? undefined}
+          onClose={() => {
+            setFormOpen(false);
+            setEditing(null);
+          }}
+          onCreated={async ({ notice: savedNotice, error: savedError }) => {
+            setNotice(savedNotice ?? null);
+            setError(savedError ?? null);
             await load();
           }}
         />

@@ -52,6 +52,7 @@ export function TemplateField({
   placeholder,
   rows,
   className,
+  disabled,
 }: {
   multiline?: boolean;
   value: string;
@@ -62,6 +63,8 @@ export function TemplateField({
   placeholder: string;
   rows?: number;
   className: string;
+  /** Кампанию только показывают, а не правят — поля выключены. */
+  disabled?: boolean;
 }) {
   const [query, setQuery] = useState<string | null>(null);
   const [active, setActive] = useState(0);
@@ -112,6 +115,7 @@ export function TemplateField({
     value,
     placeholder,
     className,
+    disabled,
     onFocus,
     onKeyDown: handleKeyDown,
     onChange: (e: { target: FieldElement }) => {

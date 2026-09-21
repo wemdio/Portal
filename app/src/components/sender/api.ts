@@ -24,6 +24,19 @@ export interface MailboxDto {
   last_verified_at: string | null;
   last_error: string | null;
   last_send_at: string | null;
+  /** Тег ящика, он же категория. Один ящик — один тег. */
+  tag: MailboxTagRef | null;
+}
+
+/** Тег в строке ящика: только то, что нужно нарисовать чип. */
+export interface MailboxTagRef {
+  id: string;
+  name: string;
+}
+
+/** Тег в окошке фильтра — со счётчиком ящиков. */
+export interface MailboxTagDto extends MailboxTagRef {
+  mailboxes: number;
 }
 
 export interface CampaignDto {
@@ -79,9 +92,33 @@ export interface ThreadItemDto {
 
 export interface ImportRecipientsResult {
   imported: number;
+  /** База была заменена, а не дополнена. */
+  replaced?: boolean;
   skippedInvalid: number;
   skippedDuplicates: number;
   skippedSuppressed: number;
+}
+
+/** Кампания целиком — то, с чем открывается форма редактирования. */
+export interface CampaignDetailsDto {
+  campaign: {
+    id: string;
+    name: string;
+    status: CampaignDto['status'];
+    send_hour_from: number;
+    send_hour_to: number;
+    send_weekdays: number[];
+  };
+  steps: { step_no: number; delay_days: number; subject: string; body: string }[];
+  mailboxes: { id: string; email: string }[];
+  recipients: {
+    total: number;
+    /** Счётчики «заполнено у N» посчитаны по всей базе, а не по выборке. */
+    exact: boolean;
+    columns: RecipientColumnsDto;
+  };
+  /** Черновик и кампания на паузе правятся; идущая и завершённая — только чтение. */
+  editable: boolean;
 }
 
 export interface StepInput {
@@ -101,13 +138,49 @@ async function upload<T>(url: string, file: File, fields?: Record<string, string
   return data as T;
 }
 
-export function fetchMailboxes(params: { page?: number; search?: string; pageSize?: number } = {}) {
+export function fetchMailboxes(
+  params: {
+    page?: number;
+    search?: string;
+    pageSize?: number;
+    /** Показывать только ящики этих тегов. Пусто — не фильтруем по тегу. */
+    tagIds?: string[];
+    /** Вдобавок к tagIds показывать ящики без тега. */
+    noTag?: boolean;
+  } = {},
+) {
   const query = new URLSearchParams({ page: String(params.page ?? 1) });
   if (params.search) query.set('search', params.search);
   if (params.pageSize) query.set('pageSize', String(params.pageSize));
+  if (params.tagIds?.length) query.set('tagIds', params.tagIds.join(','));
+  if (params.noTag) query.set('noTag', '1');
   return authFetchJson<{ mailboxes: MailboxDto[]; total: number }>(
     `${BASE}/mailboxes?${query.toString()}`,
   );
+}
+
+export function fetchMailboxTags() {
+  return authFetchJson<{ tags: MailboxTagDto[]; untagged: number }>(`${BASE}/tags`);
+}
+
+export function createMailboxTag(name: string) {
+  return authFetchJson<MailboxTagDto>(`${BASE}/tags`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function renameMailboxTag(id: string, name: string) {
+  return authFetchJson<MailboxTagRef>(`${BASE}/tags/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function deleteMailboxTag(id: string) {
+  return authFetchJson<{ ok: true }>(`${BASE}/tags/${id}`, { method: 'DELETE' });
 }
 
 export function importMailboxes(file: File) {
@@ -146,13 +219,17 @@ export function deleteMailbox(id: string) {
   return authFetchJson<{ ok: true }>(`${BASE}/mailboxes/${id}`, { method: 'DELETE' });
 }
 
-export type BulkMailboxAction = 'recheck' | 'enable' | 'disable' | 'delete';
+export type BulkMailboxAction = 'recheck' | 'enable' | 'disable' | 'delete' | 'tag';
 
-/** Действие над выборкой одним запросом: двести ящиков — это не двести запросов. */
-export function bulkMailboxes(ids: string[], action: BulkMailboxAction) {
+/**
+ * Действие над выборкой одним запросом: двести ящиков — это не двести запросов.
+ * Для 'tag' в tagId приезжает тег или null — «снять тег».
+ */
+export function bulkMailboxes(ids: string[], action: BulkMailboxAction, tagId?: string | null) {
   return authFetchJson<{ ok: true; affected: number }>(`${BASE}/mailboxes`, {
     method: 'PATCH',
-    body: JSON.stringify({ ids, action }),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids, action, ...(action === 'tag' ? { tagId: tagId ?? null } : {}) }),
   });
 }
 
@@ -226,6 +303,29 @@ export function fetchUnlinkedReplies(page = 1) {
   );
 }
 
+export function fetchCampaign(id: string) {
+  return authFetchJson<CampaignDetailsDto>(`${BASE}/campaigns/${id}`);
+}
+
+/** Сохранить настройки кампании. Без action — сервер понимает это как правку. */
+export function updateCampaign(
+  id: string,
+  body: {
+    name: string;
+    mailboxIds: string[];
+    steps: StepInput[];
+    sendHourFrom: number;
+    sendHourTo: number;
+    sendWeekdays: number[];
+  },
+) {
+  return authFetchJson<{ ok: true; unstuck: number }>(`${BASE}/campaigns/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
 export function patchCampaign(id: string, action: 'start' | 'pause' | 'finish') {
   return authFetchJson<{ ok: true; status: string }>(`${BASE}/campaigns/${id}`, {
     method: 'PATCH',
@@ -255,6 +355,11 @@ export function previewRecipients(file: File) {
   return upload<RecipientColumnsDto>(`${BASE}/recipients/preview`, file);
 }
 
-export function uploadRecipients(campaignId: string, file: File) {
-  return upload<ImportRecipientsResult>(`${BASE}/campaigns/${campaignId}/recipients`, file);
+/** mode 'replace' — заменить базу; по умолчанию новые адреса добавляются к старым. */
+export function uploadRecipients(campaignId: string, file: File, mode: 'append' | 'replace' = 'append') {
+  return upload<ImportRecipientsResult>(
+    `${BASE}/campaigns/${campaignId}/recipients`,
+    file,
+    mode === 'replace' ? { mode } : undefined,
+  );
 }
