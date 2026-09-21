@@ -271,7 +271,7 @@ export async function fetchVeRelevanceEvidence(
   // и никакой повтор этого не изменит. Отделён от unverified, чтобы медленная
   // страница не переименовала его в «таймаут»: гейт по ярлыку таймаута ставит
   // компанию на повторную проверку, а повтор снова покупает платный поиск.
-  let failed = false, timedOut = false, unverified = false, conflicted = false, searchAttempted = false, searchCompleted = false;
+  let failed = false, timedOut = false, unverified = false, conflicted = false, searchAttempted = false, searchCompleted = false, brandVerified = false;
   let retries = 0;
   let searchDeferred = false;
   let providerError: VeSearchProviderFailure | undefined;
@@ -320,8 +320,14 @@ export async function fetchVeRelevanceEvidence(
       // ослаблен — он по-прежнему требует ровно одного владельца и нашего ИНН.
       const owners = new Set(sitePages.flatMap((page) => page.ownerInns ?? []));
       const seen = owners;
-      return !inn ? (!discovered || discoveredNameMatches(sitePages, opts.companyName ?? '', opts.companyAddress ?? '') ? 'supplied' : 'unknown') : [...seen].some((value) => value !== inn) ? 'conflict'
-        : owners.size === 1 && owners.has(inn) ? 'verified' : 'unknown';
+      // Сайт, который НЕ печатает ни одного владельческого ИНН, проверяем
+      // брендом и географией — тем же порогом, что и компанию без ИНН. Раньше
+      // наличие ИНН в реестре делало требование к тому же сайту строже: нет
+      // ИНН в подвале — покупаем поиск, а он приносит подтверждённый сайт в
+      // 2.7% записей. Чужой ИНН по-прежнему отменяет сайт целиком.
+      const brandMatches = () => discoveredNameMatches(sitePages, opts.companyName ?? '', opts.companyAddress ?? '');
+      return !inn ? (!discovered || brandMatches() ? 'supplied' : 'unknown') : [...seen].some((value) => value !== inn) ? 'conflict'
+        : owners.size === 1 ? 'verified' : brandMatches() ? 'supplied' : 'unknown';
     };
     if ((inn || discovered) && identity() === 'unknown') {
       const base = new URL(initial?.url ?? start.href);
@@ -338,7 +344,11 @@ export async function fetchVeRelevanceEvidence(
         if (identity() !== 'unknown') break;
       }
     }
-    if (identity() === 'conflict' || identity() === 'unknown') { conflicted ||= identity() === 'conflict'; unverified = true; return []; }
+    const verdict = identity();
+    if (verdict === 'conflict' || verdict === 'unknown') { conflicted ||= verdict === 'conflict'; unverified = true; return []; }
+    // Отмечаем допуск по бренду отдельно от допуска по ИНН: это разные по
+    // надёжности основания, и доля каждого нужна в замерах.
+    if (inn && verdict === 'supplied') brandVerified = true;
     // Use actual same-origin links, including deeper service sections. Focus
     // ranking comes from the page parser; never invent a target-specific path.
     const home = sitePages[0];
@@ -438,7 +448,8 @@ export async function fetchVeRelevanceEvidence(
   const text = unique.map((page) => `URL: ${page.url}\n${selectVeEvidenceText(page.text, opts.focus, Math.max(200, perPage))}`).join('\n\n').slice(0, MAX_TEXT_CHARS);
   return {
     status: text ? 'ok' : 'unavailable', text, url: unique[0]?.url ?? supplied[0]?.href ?? '',
-    reason: text ? (searchAttempted ? 'discovered_verified_website' : inn ? 'identity_verified_website' : 'supplied_website_evidence')
+    reason: text ? (searchAttempted ? 'discovered_verified_website'
+      : inn ? (brandVerified ? 'brand_verified_website' : 'identity_verified_website') : 'supplied_website_evidence')
       // Окончательный отказ по владельцу идёт ПЕРЕД таймаутом: иначе одна
       // медленная страница отправляла бы такую компанию на новый круг с новой
       // покупкой поиска, хотя ответ уже получен и он не изменится.
