@@ -1,13 +1,14 @@
 /** Evidence-backed hypothesis triage. Uncertainty is retained, never silently accepted or discarded. */
 import { z } from 'zod';
-import { ProviderUsageWriteError } from '@/lib/providerUsage';
+import { getProviderUsageScope, ProviderUsageWriteError } from '@/lib/providerUsage';
+import { logInfo } from '@/lib/loggerServer';
 import { sliceWholeChars, stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 import { callLLMWithSchema, getLLMValidationDiagnostic, getVeActiveJobSignal, getVeModel, veNativeJsonSchema, veCollectionCacheModel, VE_COLLECTION_MODEL, LLMValidationError, type LLMMessage, type LLMUsage } from './llm';
 import { isVeProviderBillingError } from './collectionErrors';
 import { VeLlmRateLimitError, type VeLlmRateLimit } from './llmRateLimit';
 import { readRelevanceCheckpoint, relevanceHash, VeRelevanceCheckpointError, type VeRelevanceCheckpoint, type VeRelevanceFailureCode } from './relevanceCheckpoint';
 import { VE_RELEVANCE_WEBSITE_VERSION, veRelevanceDecisionSchema, type VeRelevanceDecision } from './relevanceDecision';
-import { fetchVeRelevanceEvidence } from './relevanceEvidence';
+import { fetchVeRelevanceEvidence, type VeRelevanceEvidence } from './relevanceEvidence';
 import { normalizeVeCompanyInn, veCompanyIdentityKey } from './collectionIdentity';
 import { reviewVeRelevanceEvidence, VE_RELEVANCE_TARGET_RULES, type VeRelevanceReviewCompany, type VeRelevanceReviewResult } from './relevanceReview';
 import { triageVeCompanies, veTriageAvailable, veTriageReason, veTriageRubricMessages, veTriageRubricModel, veTriageRubricSchema,
@@ -41,6 +42,67 @@ const MAX_TRIAGE_RUBRIC_FAILURES = 2;
 const MAX_SEARCH_PROVIDER_ATTEMPTS = 3;
 const MAX_WEBSITE_TIMEOUT_ATTEMPTS = 2;
 const WEBSITE_CONCURRENCY = 8;
+// Журнал длительностей фазы сайтов. Версия отделяет замеры, снятые при разной
+// форме волны: сравнивать барьер с пулом можно только внутри одной версии.
+const WEBSITE_TIMING_VERSION = 1;
+// Границы гистограммы в миллисекундах; последняя корзина — всё, что больше.
+const WAVE_BUCKETS_MS = [1_000, 5_000, 15_000, 30_000, 60_000, 120_000] as const;
+/** Одна волна фазы сайтов. Ничего из этого не попадает в чекпойнт и в
+ * collect_info: запись уходит отдельной строкой в application_logs. */
+export interface VeWebsiteWaveTiming {
+  /** Сколько компаний волна могла вести одновременно. */
+  slots: number;
+  /** Сколько компаний реально обращались к сети. */
+  companies: number;
+  /** Компании, отданные из чекпойнта без обращения к сети. */
+  cached: number;
+  /** Стена волны: от старта первой компании до возврата последней. */
+  wallMs: number;
+  /** Сумма занятости слотов. slots*wallMs - sumMs — простой на барьере. */
+  sumMs: number;
+  maxMs: number;
+  minMs: number;
+  buckets: number[];
+  /** Долговечное сохранение волны. Пул его не отменяет, поэтому оно НЕ входит
+   * в wallMs и не должно попадать в «сколько можно сэкономить». */
+  saveMs: number;
+  pagesRead: number;
+  outcomes: { ok: number; unavailable: number; providerError: number; deferred: number;
+    timeoutPage: number; timeoutDeadline: number; slowButUsable: number };
+}
+function newWaveTiming(slots: number): VeWebsiteWaveTiming {
+  return { slots, companies: 0, cached: 0, wallMs: 0, sumMs: 0, maxMs: 0, minMs: 0,
+    buckets: WAVE_BUCKETS_MS.map(() => 0).concat(0), saveMs: 0, pagesRead: 0,
+    outcomes: { ok: 0, unavailable: 0, providerError: 0, deferred: 0, timeoutPage: 0, timeoutDeadline: 0, slowButUsable: 0 } };
+}
+function recordWaveCompany(wave: VeWebsiteWaveTiming, ms: number, evidence: VeRelevanceEvidence): void {
+  wave.minMs = wave.companies ? Math.min(wave.minMs, ms) : ms;
+  wave.companies += 1;
+  wave.sumMs += ms;
+  wave.maxMs = Math.max(wave.maxMs, ms);
+  const bucket = WAVE_BUCKETS_MS.findIndex((edge) => ms < edge);
+  wave.buckets[bucket === -1 ? WAVE_BUCKETS_MS.length : bucket] += 1;
+  wave.pagesRead += evidence.pages ?? 0;
+  const timedOut = evidence.reason === 'website_evidence_timeout';
+  if (evidence.search_deferred) wave.outcomes.deferred += 1;
+  else if (evidence.provider_error) wave.outcomes.providerError += 1;
+  else if (timedOut) { if (evidence.timeout === 'deadline') wave.outcomes.timeoutDeadline += 1; else wave.outcomes.timeoutPage += 1; }
+  else if (evidence.status === 'ok') wave.outcomes.ok += 1;
+  else wave.outcomes.unavailable += 1;
+  // Молчащая страница, после которой текст всё равно набрался: цена уплачена,
+  // а в ярлыках её не видно вовсе.
+  if (!timedOut && evidence.timeout) wave.outcomes.slowButUsable += 1;
+}
+/** Отдельный источник событий, а НЕ ve_provider_usage: сводка стоимости
+ * считает любое незнакомое событие внутри того источника дефектом учёта
+ * (unknown_journal_event) и пометила бы каждый отчёт неполным. Запись не
+ * ждётся и не умеет падать: логгер сам глотает ошибки и держит паузу. */
+export function journalWaveTiming(wave: VeWebsiteWaveTiming): void {
+  const scope = getProviderUsageScope();
+  if (!scope) return;
+  void logInfo('ve2_website_wave', `VE2 website wave: ${wave.companies}/${wave.slots} companies in ${wave.wallMs} ms`,
+    { version: WEBSITE_TIMING_VERSION, ...scope, ...wave }, { requestId: scope.projectId });
+}
 const searchAttemptsExhausted = (evidence?: { provider_error?: { kind: string }; provider_error_attempts?: number }): boolean =>
   evidence?.provider_error?.kind === 'transient' && (evidence.provider_error_attempts ?? 1) >= MAX_SEARCH_PROVIDER_ATTEMPTS;
 const websiteTimeoutPending = (evidence?: { reason: string; read_error_attempts?: number }): boolean =>
@@ -221,6 +283,10 @@ export async function findIrrelevantRows(input: {
   allowPaidSearch?: boolean;
   websiteLimit?: number;
   fetchEvidence?: typeof fetchVeRelevanceEvidence;
+  /** Приёмник длительностей фазы сайтов. Журнал по умолчанию пишется только
+   * с настоящим читателем сайтов: секунды оффлайн-адаптера синтетические и
+   * замер бы испортили. */
+  onWebsiteTiming?: (timing: VeWebsiteWaveTiming) => void;
   /** Opt-in calibrated triage before the LLM (isVeRelevanceTriageEnabled). Does
    * not enter the context hash: saved verdicts stay valid when it is toggled. */
   triage?: boolean;
@@ -286,6 +352,13 @@ export async function findIrrelevantRows(input: {
     return true;
   };
   const currentSearchFailures = new Set<string>();
+  const reportWave = (wave: VeWebsiteWaveTiming, wallMs: number) => {
+    if (!wave.companies && !wave.cached) return;
+    wave.wallMs = wallMs;
+    // Оффлайн-адаптер измеряет сам себя: его секунды в журнал не идут.
+    const sink = input.onWebsiteTiming ?? (input.fetchEvidence ? undefined : journalWaveTiming);
+    sink?.(wave);
+  };
   let consecutiveMalformedCompanies = 0;
   const accountUsage = (usage: LLMUsage) => { result.tokensUsed += usage.tokensUsed; result.costUsd += usage.costUsd; };
   const invoke = async <T>(chat: LLMMessage[], schema: z.ZodType<T>, opts: Parameters<typeof callLLMWithSchema>[2]) => {
@@ -976,6 +1049,8 @@ export async function findIrrelevantRows(input: {
       }).slice(0, Math.min(MAX_WEBSITES, Math.max(0, input.websiteLimit ?? MAX_WEBSITES)));
     for (let start = 0; start < review.length && !stopProviderCalls; start += WEBSITE_CONCURRENCY) {
       signal?.throwIfAborted(); const enriched: Entry[] = [];
+      const wave = newWaveTiming(Math.min(WEBSITE_CONCURRENCY, review.length - start));
+      const waveStartedAt = Date.now();
       await Promise.all(review.slice(start, start + WEBSITE_CONCURRENCY).map(async (entry) => {
         if (stopProviderCalls) return;
         const cached = checkpoint.website_evidence[entry.key];
@@ -985,13 +1060,18 @@ export async function findIrrelevantRows(input: {
           cached.review_attempt = reviewAttempt;
           entry.fields.website_text = cached.text;
           enriched.push(entry);
+          wave.cached += 1;
           return;
         }
+        const companyStartedAt = Date.now();
         const evidence = stripUnstorableJsonChars(await (input.fetchEvidence ?? fetchVeRelevanceEvidence)(entry.fields.website, { signal: signal ?? undefined,
           companyInn: entry.identity, companyName: entry.fields.company,
           companyAddress: entry.group.rows.map((row) => rowText(row, ['address', 'адрес'])).find(Boolean),
           companyEmail: entry.group.rows.map((row) => rowText(row, ['email', 'e-mail', 'почта'])).find(Boolean), focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' '),
           allowPaidSearch: input.allowPaidSearch }));
+        // Занятость слота снимается ДО throwIfAborted: иначе отменённая волна
+        // не оставит следа ровно в тех случаях, ради которых замер и делается.
+        recordWaveCompany(wave, Date.now() - companyStartedAt, evidence);
         signal?.throwIfAborted();
         if (evidence.search_deferred) {
           checkpoint.website_evidence[entry.key] = {
@@ -1046,7 +1126,15 @@ export async function findIrrelevantRows(input: {
           record(entry, decision);
         }
       }));
+      // Стена барьера снимается ДО save(): сохранение пул не отменяет, и
+      // класть его в wallMs значило бы записать долговечность в простой.
+      const waveWallMs = Date.now() - waveStartedAt;
+      const saveStartedAt = Date.now();
+      // Долговечность впереди телеметрии: журнал пишется после сохранения и
+      // не ждётся, поэтому не может ни задержать save(), ни уронить этап.
       await save();
+      wave.saveMs = Date.now() - saveStartedAt;
+      reportWave(wave, waveWallMs);
       if (enriched.length && !stopProviderCalls) {
         const unresolved = await runTriage(enriched, 'website');
         if (unresolved.length && !stopProviderCalls) await classify(unresolved, true);

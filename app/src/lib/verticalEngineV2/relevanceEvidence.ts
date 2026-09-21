@@ -20,6 +20,14 @@ export interface VeRelevanceEvidence {
   provider_error?: VeSearchProviderFailure;
   /** A cache miss postponed by acquisition policy, never a negative verdict. */
   search_deferred?: true;
+  /** Телеметрия. Ярлык `website_evidence_timeout` покрывает два разных
+   * события: не ответила страница (5 с) и кончился общий дедлайн (120 с).
+   * `reason` НЕ меняется — на нём держатся сохранённые чекпойнты и
+   * websiteTimeoutPending(); поле читает только журнал длительностей, в
+   * чекпойнт и в документ базы оно не попадает. */
+  timeout?: 'page' | 'deadline';
+  /** Сколько страниц было прочитано (включая неудачные попытки). */
+  pages?: number;
 }
 
 export interface VeRelevanceEvidenceOptions {
@@ -42,6 +50,10 @@ export interface VeRelevanceEvidenceOptions {
 // Includes the shared search queue, one bounded search and website reads.
 const TOTAL_TIMEOUT_MS = 120_000;
 const PAGE_TIMEOUT_MS = 5_000;
+// Оба дедлайна приходят одним классом ошибки; различает их только label.
+// Константы, чтобы строка не разъехалась между постановкой и разбором.
+const PAGE_DEADLINE_LABEL = 'relevance evidence page';
+const TOTAL_DEADLINE_LABEL = 'relevance website evidence';
 const MAX_BODY_BYTES = 1_048_576;
 const MAX_TEXT_CHARS = 6_000;
 const MAX_PAGE_READS = 10;
@@ -263,7 +275,7 @@ export async function fetchVeRelevanceEvidence(
       if (supplied.length >= MAX_DOMAINS) break;
     }
   }
-  if (!supplied.length && !inn && !nameSearch) return { status: 'unavailable', text: '', url: '', reason: 'missing_or_unsafe_website' };
+  if (!supplied.length && !inn && !nameSearch) return { status: 'unavailable', text: '', url: '', reason: 'missing_or_unsafe_website', pages: 0 };
   const observedAt = new Date().toISOString();
   const freshPages = new Set<string>();
   const pages = new Map<string, Promise<VeEvidencePage | undefined>>();
@@ -272,6 +284,13 @@ export async function fetchVeRelevanceEvidence(
   // страница не переименовала его в «таймаут»: гейт по ярлыку таймаута ставит
   // компанию на повторную проверку, а повтор снова покупает платный поиск.
   let failed = false, timedOut = false, unverified = false, conflicted = false, searchAttempted = false, searchCompleted = false, brandVerified = false;
+  // Разделение того же таймаута на «не успела страница» и «не успел общий
+  // дедлайн»: первое стоит 5 с и повторяется, второе съедает всю компанию.
+  let pageTimedOut = false, deadlineTimedOut = false;
+  const noteTimeout = (error: unknown): void => {
+    if (!(error instanceof VeOperationTimeoutError)) return;
+    if (error.label === PAGE_DEADLINE_LABEL) pageTimedOut = true; else deadlineTimedOut = true;
+  };
   let retries = 0;
   let searchDeferred = false;
   let providerError: VeSearchProviderFailure | undefined;
@@ -283,7 +302,7 @@ export async function fetchVeRelevanceEvidence(
     const task = (async () => {
       for (let attempt = 0; attempt < 2; attempt++) {
         try {
-          return await withVeDeadline('relevance evidence page', PAGE_TIMEOUT_MS, parent, async (signal) => {
+          return await withVeDeadline(PAGE_DEADLINE_LABEL, PAGE_TIMEOUT_MS, parent, async (signal) => {
             const cached = cachedPages.get(veFactPageKey(url.href));
             const page = cached ? focusVeCompanyFact(cached, opts.focus) : opts.fetchPage ? await opts.fetchPage(url.href, signal)
               : opts.fetchText ? { text: selectVeEvidenceText(await opts.fetchText(url.href), opts.focus), url: url.href, links: [], inns: [] }
@@ -301,6 +320,7 @@ export async function fetchVeRelevanceEvidence(
           parent.throwIfAborted();
           failed = true;
           timedOut ||= error instanceof VeOperationTimeoutError;
+          noteTimeout(error);
           if (attempt > 0 || retries >= MAX_PAGE_RETRIES || !transientPageFailure(error)) return undefined;
           retries += 1;
         }
@@ -376,7 +396,7 @@ export async function fetchVeRelevanceEvidence(
     return sitePages.filter((page) => Boolean(page.text));
   };
   try {
-    await withVeDeadline('relevance website evidence', TOTAL_TIMEOUT_MS, opts.signal, async (signal) => {
+    await withVeDeadline(TOTAL_DEADLINE_LABEL, TOTAL_TIMEOUT_MS, opts.signal, async (signal) => {
       // Without a strong identity, do not move across unrelated supplied domains.
       const candidates = inn ? supplied : supplied.slice(0, 1);
       const homes = await Promise.all(candidates.map((url) => read(url, signal)));
@@ -421,16 +441,21 @@ export async function fetchVeRelevanceEvidence(
     opts.signal?.throwIfAborted();
     failed = true;
     timedOut ||= error instanceof VeOperationTimeoutError;
+    noteTimeout(error);
     if (searchAttempted && !searchCompleted && !providerError) {
       providerError = veSearchProviderFailure(new VeSearchProviderError('transient', timedOut ? 'timeout' : 'transport'));
     }
   }
   opts.signal?.throwIfAborted();
+  // Общий дедлайн бьёт компанию целиком, постраничный — только одну страницу.
+  // Когда случилось и то и другое, отвечает тот, кто закончил работу.
+  const timeout = deadlineTimedOut ? 'deadline' as const : pageTimedOut ? 'page' as const : undefined;
   if (searchDeferred) return { status: 'unavailable', text: '', url: supplied[0]?.href ?? '',
-    reason: 'paid_search_deferred', search_deferred: true };
+    reason: 'paid_search_deferred', search_deferred: true, pages: pages.size, ...(timeout ? { timeout } : {}) };
   if (providerError) return {
     status: 'error', text: '', url: supplied[0]?.href ?? '',
     reason: providerError.message, provider_error: providerError,
+    pages: pages.size, ...(timeout ? { timeout } : {}),
   };
   // Reserve room for every page rather than letting a long home/menu consume
   // all evidence. Focus selection has already scanned each complete document.
@@ -456,5 +481,6 @@ export async function fetchVeRelevanceEvidence(
       : conflicted ? 'website_identity_unverified'
         : timedOut ? 'website_evidence_timeout' : unverified ? 'website_identity_unverified'
         : failed ? 'website_evidence_failed' : searchAttempted ? 'website_search_unverified' : 'no_usable_website_text',
+    pages: pages.size, ...(timeout ? { timeout } : {}),
   };
 }
