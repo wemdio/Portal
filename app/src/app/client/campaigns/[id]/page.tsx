@@ -481,12 +481,17 @@ function CampaignDetailPageContent() {
     [campaignId, repliesNextCursor, repliesSearch],
   );
 
-  // Lazy-load replies on first switch to the tab
+  // Lazy-load replies on first switch to the tab.
+  // `!repliesError`: после ошибки repliesLoaded остаётся false, а repliesLoading
+  // возвращается в false — без этой проверки эффект тут же стрелял снова, и
+  // вкладка крутила запросы в цикле без паузы, пока один не пройдёт. Каждый
+  // такой запрос занимает слот бюджета чтения писем (людскую долю, общую для
+  // всех на воркспейсе). После ошибки повтор — кнопкой «Повторить».
   useEffect(() => {
-    if (tab === 'replies' && !repliesLoaded && !repliesLoading) {
+    if (tab === 'replies' && !repliesLoaded && !repliesLoading && !repliesError) {
       void loadReplies('reset');
     }
-  }, [tab, repliesLoaded, repliesLoading, loadReplies]);
+  }, [tab, repliesLoaded, repliesLoading, repliesError, loadReplies]);
 
   const handleSearch = useCallback(() => {
     const q = repliesSearchInput.trim();
