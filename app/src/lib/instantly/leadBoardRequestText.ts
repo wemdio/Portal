@@ -34,7 +34,7 @@ export function leadBoardRequestText(body: Email['body']): string | null {
           // Only remove an attribution immediately attached to a closed quote.
           // Standalone From/To headers must remain terminal history boundaries.
           if (header.is('.gmail_attr, .moz-cite-prefix') ||
-            (!/[\r\n]/.test(label) && (/^On\s+.+\s+wrote:\s*$/iu.test(label) || ATTRIBUTION.test(label)))) {
+            (!/[\r\n]/.test(label) && (/^On\s+.+\s+wrote:\s*$/iu.test(label) || ATTRIBUTION.test(label) || YOU_WROTE.test(label)))) {
             header.remove();
           }
         }

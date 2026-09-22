@@ -11,12 +11,16 @@ export interface LeadReplyContacts {
   website: string | null;
 }
 
+const YOU_WROTE = /^Вы\s+писали\s+(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+[а-яё]{3,})(?:[^\n]{0,120})?:\s*$/iu;
+const EXTRA_DISPLAY_GIVEN_NAMES = new Set(['аружан', 'варя', 'maxime', 'raheel']);
+
 /** Sender display names are weaker than a signed name: keep plausible full
  * names (including uncommon ones), but never copy a mailbox/brand/role into
  * the board's personal-name column. */
 export function senderDisplayLeadName(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
-  const value = raw.replace(/\s+/g, ' ').trim();
+  const value = raw.replace(/\s+/g, ' ').trim()
+    .replace(/[\p{Extended_Pictographic}\uFE0F]+$/gu, '').trim();
   // Display names sometimes append a role, organization or address. Accept
   // only a self-contained personal prefix; the suffix is not part of a name.
   const prefix = value.split(/[,(]/u)[0].trim();
@@ -32,10 +36,15 @@ export function senderDisplayLeadName(raw: unknown): string | null {
   if (words.length < 2 || words.length > 3) return null;
   const cyrillic = words.every((word) => /^[А-ЯЁ][а-яё’-]{1,50}$/u.test(word));
   const latin = words.every((word) => /^[A-Z][a-z’-]{1,50}$/.test(word));
-  if (latin) return value;
+  if (latin) {
+    const hasKnownGiven = words.some((word) => EXTRA_DISPLAY_GIVEN_NAMES.has(word.toLowerCase()));
+    const hasSurname = words.some((word) => /(?:ov|ova|ev|eva|in|ina|enko|chuk|yuk|son|sen|ez|yan|ian|vich|shvili|dze)$/i.test(word));
+    return hasKnownGiven || hasSurname ? value : null;
+  }
   if (!cyrillic) return null;
+  if (words.some((word) => EXTRA_DISPLAY_GIVEN_NAMES.has(word.toLowerCase()))) return value;
   if (words.length === 3 && words.some((word) => /(?:ович|евич|ьевич|овна|евна|ьевна|инична)$/iu.test(word))) return value;
-  return words.length === 2 && words.some((word) => /(?:ов|ев|ин|ова|ева|ина|ский|ская|енко|юк|ич|ян|дзе|швили)$/iu.test(word))
+  return words.length === 2 && words.some((word) => /(?:ов|ев|ин|ова|ева|ина|енко|юк|ич|ян|дзе|швили)$/iu.test(word))
     ? value : null;
 }
 
@@ -45,7 +54,7 @@ const HISTORY_BOUNDARIES = [
   /^>/,
   /^On\s+.+\s+wrote:\s*$/i,
   /^On\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s/i,
-  /^Вы\s+писали\s+(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+[а-яё]{3,})(?:[^\n]{0,120})?:\s*$/iu,
+  YOU_WROTE,
   /^(?:Van|Verzonden|Aan|Onderwerp|De|Envoyé|À|Objet|Von|Gesendet|An|Betreff):\s+.+$/iu,
   /^\d{1,2}[./-]\d{1,2}[./-]\d{2,4},?\s+\d{1,2}:\d{2}.*(?:@|mailto:)/iu,
   /^(?:От|От кого|From|Sent|Отправлено|Кому|To|Subject|Тема):\s+.+$/i,
@@ -104,7 +113,15 @@ function websitesInLine(line: string): string[] {
 
 function htmlText(html: string): string {
   const $ = load(html);
-  $('script, style, head, blockquote, .gmail_quote, .yahoo_quoted, .protonmail_quote, .moz-forward-container, .ms-outlook-mobile-reference-message').remove();
+  $('script, style, head').remove();
+  const quotes = $('blockquote, .gmail_quote, .yahoo_quoted, .protonmail_quote, .moz-forward-container, .ms-outlook-mobile-reference-message');
+  quotes.each((_, quote) => {
+    let previous = quote.prev;
+    while (previous && ((previous.type === 'text' && !previous.data.trim()) ||
+      previous.type === 'comment' || $(previous).is('br'))) previous = previous.prev;
+    if (previous && YOU_WROTE.test($(previous).text().trim())) $(previous).remove();
+  });
+  quotes.remove();
   // Outlook's reply marker is a sibling of the old message, not its wrapper.
   // Remove following siblings at every enclosing level without losing the top reply.
   $('#divRplyFwdMsg, #stopSpelling, .OutlookMessageHeader, .moz-cite-prefix').each((_, marker) => {
@@ -144,12 +161,16 @@ function htmlText(html: string): string {
 
 function phoneInLine(line: string, signature: boolean): string | null {
   // "Наш номер в реестре ..." is an identifier, not an invitation to call.
-  if (/(?:^|\s)номер\s+(?:в\s+)?реестр(?:е|а|ов[а-яё]*)?(?=\s|[.:,;!?]|$)/iu.test(line) &&
-    !/(?:телефон|тел\s*[.:]|моб(?:ильный)?\s*[.:]|phone|mobile|tel:)/iu.test(line)) return null;
+  const registry = /(?:^|\s)номер\s+(?:в\s+)?реестр(?:е|а|ов[а-яё]*)?(?=\s|[.:,;!?]|$)/iu.exec(line);
+  const nextPhoneLabel = registry
+    ? [...line.matchAll(/(?:телефон|тел\s*[.:]|моб(?:ильный)?\s*[.:]|phone|mobile|tel:)/giu)]
+      .find((match) => match.index > registry.index)?.index ?? line.length
+    : 0;
   const framed = PHONE_LABEL.test(line);
   const phones: string[] = [];
   const candidates = leadPhoneCandidates(line);
   for (const { value, digits, start, end } of candidates) {
+    if (registry && start >= registry.index && start < nextPhoneLabel) continue;
     const before = line.slice(0, start);
     const after = line.slice(end);
     if (NON_PHONE_LABEL.test(before) || after.startsWith('@')) continue;
