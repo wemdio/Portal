@@ -10,7 +10,11 @@
 
 import iconv from 'iconv-lite';
 import type { Agent } from 'undici';
-import { getProxyDispatcher, tryAcquireProxySlot } from '@/lib/enrich/proxyPool';
+import {
+  getNonPriorityProxyDispatcher,
+  getProxyDispatcher,
+  tryAcquireProxySlot,
+} from '@/lib/enrich/proxyPool';
 import { normalizeUrl } from '@/lib/enrich/urlUtils';
 
 // ── Configuration ──────────────────────────────────────────────
@@ -702,16 +706,29 @@ async function fetchPageWithProxyRetry(
   const release = tryAcquireProxySlot();
   if (!release) return direct;
 
-  try {
-    const dispatcher = await getProxyDispatcher(true);
-    if (!dispatcher) return direct;
-    const viaProxy = await fetchPage(url, {
+  const viaProxy = async (dispatcher: unknown): Promise<PageFetchResult | null> => {
+    if (!dispatcher || options?.signal?.aborted) return null;
+    const res = await fetchPage(url, {
       timeout: Math.min(options?.timeout ?? FETCH_TIMEOUT_MS, PROXY_RETRY_TIMEOUT_MS),
       signal: options?.signal,
       acceptLanguage: options?.acceptLanguage,
       dispatcher,
     });
-    return viaProxy.html ? viaProxy : direct;
+    return res.html ? res : null;
+  };
+
+  try {
+    // Сначала RU: для RU-сайтов это основной шанс. Не вышло — одна попытка
+    // через ноду из другой подсети. Сайты режут прокси блоками по подсетям
+    // провайдера (замер 23.09.2026, 98 сайтов × 8 нод), поэтому вторая нода
+    // из той же RU-подсети почти ничего не добавила бы, а другая подсеть
+    // открывает то, что RU не открывает (eksis.ru). Слот один на обе
+    // попытки — лимит одновременных проксированных запросов не растёт.
+    return (
+      (await viaProxy(await getProxyDispatcher(true)))
+      ?? (await viaProxy(await getNonPriorityProxyDispatcher()))
+      ?? direct
+    );
   } catch {
     return direct;
   } finally {
