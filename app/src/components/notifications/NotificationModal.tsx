@@ -37,6 +37,7 @@ export function NotificationModal({
   onRead: (id: string) => void | Promise<void>;
 }) {
   const [summary, setSummary] = useState<string | null>(null);
+  const [period, setPeriod] = useState<string | null>(null);
   const [loading, setLoading] = useState(Boolean(notification.changelog_digest_id));
   const [busy, setBusy] = useState(false);
 
@@ -46,8 +47,9 @@ export function NotificationModal({
     try {
       const res = await authFetch(`/api/changelog/${digestId}`);
       if (!res.ok) return;
-      const data = (await res.json()) as { summary?: string };
+      const data = (await res.json()) as { summary?: string; period?: string | null };
       setSummary(data.summary ?? null);
+      setPeriod(data.period ?? null);
     } catch {
       /* не доехало — покажем короткий текст уведомления */
     } finally {
@@ -89,7 +91,9 @@ export function NotificationModal({
           <div>
             <h2 className="text-base font-semibold text-gray-900">{notification.title}</h2>
             <p className="mt-0.5 text-xs text-gray-500">
-              {new Date(notification.created_at).toLocaleString('ru-RU', {
+              {/* У сводки обновлений важна не минута создания записи, а окно,
+                  за которое она собрана: сутки от девяти утра до девяти утра. */}
+              {period ?? new Date(notification.created_at).toLocaleString('ru-RU', {
                 day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
               })}
             </p>

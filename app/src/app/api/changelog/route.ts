@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { isInternalUser } from '@/lib/auth/internalGuard';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { digestPreview, digestTitle } from '@/lib/changelog/digest';
+import { digestPeriod, digestPreview, digestTitle } from '@/lib/changelog/digest';
 
 export const dynamic = 'force-dynamic';
 
@@ -14,6 +14,7 @@ const WINDOW_DAYS = 45;
 
 interface DigestRow {
   id: number;
+  window_from: string;
   window_to: string;
   summary: string;
 }
@@ -50,7 +51,7 @@ export async function GET(req: NextRequest) {
   const sinceIso = new Date(Date.now() - WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
   const { data: digestRows, error } = await supabaseAdmin
     .from('changelog_digests')
-    .select('id, window_to, summary')
+    .select('id, window_from, window_to, summary')
     .gte('window_to', sinceIso)
     .order('window_to', { ascending: false })
     .limit(60);
@@ -112,10 +113,16 @@ export async function GET(req: NextRequest) {
   // заходивший три дня, не должен закрывать три окна подряд.
   const [latest, ...missed] = pending;
   return NextResponse.json({
-    latest: { id: latest.id, title: digestTitle(latest.window_to), summary: latest.summary },
+    latest: {
+      id: latest.id,
+      title: digestTitle(latest.window_to),
+      period: digestPeriod(latest.window_from, latest.window_to),
+      summary: latest.summary,
+    },
     missed: missed.map((d) => ({
       id: d.id,
       title: digestTitle(d.window_to),
+      period: digestPeriod(d.window_from, d.window_to),
       summary: d.summary,
     })),
   });

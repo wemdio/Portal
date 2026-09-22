@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { isInternalUser } from '@/lib/auth/internalGuard';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { digestTitle } from '@/lib/changelog/digest';
+import { digestPeriod, digestTitle } from '@/lib/changelog/digest';
 
 export const dynamic = 'force-dynamic';
 
@@ -35,7 +35,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
   const { data, error } = await supabaseAdmin
     .from('changelog_digests')
-    .select('id, window_to, summary')
+    .select('id, window_from, window_to, summary')
     .eq('id', digestId)
     .maybeSingle();
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -44,6 +44,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   return NextResponse.json({
     id: data.id,
     title: digestTitle(String(data.window_to)),
+    period: digestPeriod(String(data.window_from), String(data.window_to)),
     summary: String(data.summary ?? ''),
   });
 }

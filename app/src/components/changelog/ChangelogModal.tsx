@@ -21,6 +21,8 @@ import { DigestBody } from './DigestBody';
 interface Digest {
   id: number;
   title: string;
+  /** «Сводка за период с 9:00 21 сентября до 9:00 22 сентября». */
+  period: string | null;
   summary: string;
 }
 
@@ -79,7 +81,10 @@ export function ChangelogModal() {
               <p className="mt-0.5 text-xs text-gray-500">
                 {showMissed
                   ? `Сводок: ${missed.length}. Все они останутся в уведомлениях.`
-                  : 'Что изменилось в портале. Останется в уведомлениях, если захотите вернуться.'}
+                  // Дата в заголовке — «за 22 сентября», а сутки считаются от
+                  // девяти утра до девяти утра. Без явных границ это читается
+                  // как «за день, который ещё идёт».
+                  : latest.period ?? 'Что изменилось в портале.'}
               </p>
             </div>
           </div>
@@ -99,7 +104,10 @@ export function ChangelogModal() {
             <div className="space-y-6">
               {missed.map((digest) => (
                 <div key={digest.id}>
-                  <div className="mb-2 text-sm font-semibold text-gray-900">{digest.title}</div>
+                  <div className="text-sm font-semibold text-gray-900">{digest.title}</div>
+                  {digest.period ? (
+                    <div className="mb-2 text-[11px] text-gray-400">{digest.period}</div>
+                  ) : null}
                   <DigestBody summary={digest.summary} />
                 </div>
               ))}
