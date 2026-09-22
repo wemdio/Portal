@@ -13,10 +13,13 @@ export type { InstantlyEmailReadDeferredReason } from './emailReadDeferral';
  * 'recovery' — ownership retries, own 6/60s sub-share; 'bulk' — background
  * exports/reports, own 6/60s sub-share so a heavy export can no longer starve
  * fresh reply collection; 'interactive' — a SINGLE read a person is waiting on
- * (open a thread, reply, forward), own 6/60s sub-share.
+ * (open a thread, reply, forward, one page of one campaign's replies).
  *
- * fresh + recovery + bulk together hold at most 15 of the 18 slots: 3 per
- * minute stay free for 'interactive' (migration 20260922_0001). Use it only for
+ * fresh + recovery + bulk together hold at most 15 of the 18 slots, and
+ * interactive holds at most 15: each side always keeps 3 per minute for the
+ * other (migrations 20260922_0001 and 20260922_0002 — 0002 raised the
+ * interactive ceiling from 6, which was below the measured one-person burst of
+ * 12–14 thread opens per minute). Use it only for
  * one read per click — a fan-out (a feed walking every campaign) would eat the
  * reserved headroom in one page load and belongs to 'fresh'.
  */
