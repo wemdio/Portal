@@ -1,6 +1,6 @@
 'use client';
 
-import type { ParserJob, AtsParserJob, EngHiringParserJob, PartitionProgressDetail } from '@/types';
+import type { ParserJob, AtsParserJob, EngHiringParserJob, PolzaOutreachParserJob, PartitionProgressDetail } from '@/types';
 import { isStoppedByUser, JobStatus } from './JobStatus';
 import { ChevronRight, RefreshCw, Clock } from 'lucide-react';
 
@@ -16,13 +16,28 @@ const STAGE_LABELS: Record<string, string> = {
   enriching_details: 'Подгружаем описания вакансий',
   refreshing_cache: 'Обновляем кэш ATS',
   filtering_cache: 'Фильтруем вакансии',
+  // Polza outreach stages
+  selecting_vacancies: 'Выбираем SDR-вакансии',
+  resolving_domains: 'Находим домены компаний',
+  analyzing_vacancies: 'Разбираем вакансии (LLM)',
+  finding_emails: 'Ищем корпоративную почту',
+  building_letters: 'Собираем письма',
   saving: 'Сохраняем в базу',
   completed: 'Завершено',
   failed: 'Ошибка',
   cancelled: 'Остановлено',
 };
 
-type ParserListJob = ParserJob | AtsParserJob | EngHiringParserJob;
+type ParserListJob = ParserJob | AtsParserJob | EngHiringParserJob | PolzaOutreachParserJob;
+
+function jobQueryLabel(job: ParserListJob): string {
+  if (job.parser_type === 'polza_outreach') {
+    const config = job.config;
+    const countries = Array.isArray(config?.countries) ? config.countries.join(', ') : '';
+    return [countries || 'все гео', `свежесть ${config?.posted_within_days ?? 30} дн`, `лимит ${config?.limit ?? 100}`].join(' · ');
+  }
+  return job.config?.text ?? '';
+}
 
 function resolveStageLabel(job: ParserListJob) {
   if (job.progress_stage === 'partitioning') {
@@ -187,6 +202,29 @@ export function JobsList({
             const partDetail = getPartitionDetail(job);
             const isPartitioning = job.status === 'running' && partDetail != null;
             const sourceStatsSummary = getSourceStatsSummary(job);
+            // Сколько получилось НА ВЫХОДЕ. «Обработано» отвечает на другой
+            // вопрос — сколько строк прошло через конвейер, — а спрашивают
+            // обычно про готовые: ради них прогон и затевался.
+            const readyCount = (() => {
+              const funnel = (job.progress_detail as { funnel?: { ready?: unknown } } | null)?.funnel;
+              return typeof funnel?.ready === 'number' ? funnel.ready : null;
+            })();
+            // Заказ и причина остановки, если конвейер их сообщает (англ.
+            // автоаутрич): «Готово: 43 из 100» честнее голой цифры, а
+            // «вакансий больше нет» объясняет, почему запуск встал раньше
+            // заказа — это не ошибка, а конец свежих вакансий в кэше.
+            const runDetail = job.progress_detail as { target?: unknown; stop_reason?: unknown } | null;
+            const readyTarget = typeof runDetail?.target === 'number' ? runDetail.target : null;
+            const shortOfTarget =
+              readyCount != null && readyTarget != null && readyCount < readyTarget;
+            const stopNote =
+              job.status === 'completed' && shortOfTarget
+                ? runDetail?.stop_reason === 'pool_exhausted'
+                  ? 'свежие вакансии кончились'
+                  : runDetail?.stop_reason === 'scan_limit'
+                    ? 'дошли до потолка просмотра'
+                    : null
+                : null;
             return (
               <div
                 key={job.id}
@@ -202,7 +240,7 @@ export function JobsList({
                     </div>
                     <div className="mt-2 text-sm text-gray-700 line-clamp-2">
                       <span className="font-medium text-gray-900">Запрос:</span>{' '}
-                      {clientMode ? (job.config?.text ?? '').replace(/\s*\|\s*/g, ', ') : job.config?.text}
+                      {clientMode ? jobQueryLabel(job).replace(/\s*\|\s*/g, ', ') : jobQueryLabel(job)}
                     </div>
                     {isPartitioning ? (
                       <div className="mt-2 rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-2">
@@ -258,6 +296,13 @@ export function JobsList({
                             Обработано: {totalParsed}
                           </span>
                         ) : null}
+                        {readyCount != null ? (
+                          <span className={readyCount > 0 ? 'text-emerald-600' : undefined}>
+                            Готово: {readyCount}
+                            {readyTarget != null ? ` из ${readyTarget}` : ''}
+                          </span>
+                        ) : null}
+                        {stopNote ? <span className="text-gray-400">{stopNote}</span> : null}
                         {job.error_message ? (
                           <span className={`${stoppedByUser ? 'text-amber-700' : 'text-red-600'} line-clamp-1`}>
                             {stoppedByUser

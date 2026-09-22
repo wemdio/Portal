@@ -4,6 +4,8 @@ import { useEffect, useState, useCallback } from 'react';
 import { useUser } from '@/lib/UserProvider';
 import { commonDictionary, dict, toIntlLocale, type Locale } from '@/lib/i18n';
 import { supabase } from '@/lib/supabaseClient';
+import { NotificationModal } from '@/components/notifications/NotificationModal';
+import { stripEmphasis } from '@/lib/changelog/digest';
 
 interface Notification {
   id: string;
@@ -14,6 +16,8 @@ interface Notification {
   entity_id: string | null;
   is_read: boolean;
   created_at: string;
+  /** Сводка обновлений портала: полный текст тянется по этому id. */
+  changelog_digest_id?: number | null;
 }
 
 const TYPE_CONFIG: Record<string, { icon: string; color: string; bg: string }> = {
@@ -65,6 +69,9 @@ export default function NotificationsPage() {
   const { locale, refreshNotifications } = useUser();
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(true);
+  // Какое уведомление открыто карточкой. В списке помещается две строки с
+  // обрезкой, а длинное уведомление обрывалось на середине фразы.
+  const [opened, setOpened] = useState<Notification | null>(null);
 
   const fetchNotifications = useCallback(async () => {
     try {
@@ -184,7 +191,11 @@ export default function NotificationsPage() {
                     </div>
                     <p className="text-sm font-medium text-gray-900 mt-0.5">{n.title}</p>
                     {n.body && (
-                      <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{n.body}</p>
+                      /* Звёздочки выделения из сводки обновлений: в списке
+                         разметку никто не разбирает, и они читались бы мусором.
+                         Чистим при показе, а не в базе — записи, заведённые
+                         раньше, тоже должны выглядеть прилично. */
+                      <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{stripEmphasis(n.body)}</p>
                     )}
                   </div>
                 </>
@@ -193,7 +204,7 @@ export default function NotificationsPage() {
                 <li
                   key={n.id}
                   className={`flex items-start gap-3 px-5 py-4 transition-colors ${
-                    n.is_read ? 'bg-white' : 'bg-blue-50/40'
+                    n.is_read ? 'bg-white hover:bg-gray-50' : 'bg-blue-50/40 hover:bg-blue-50/70'
                   }`}
                 >
                   {n.entity_type === 'tech_subscription' ? (
@@ -205,7 +216,16 @@ export default function NotificationsPage() {
                       {cardBody}
                     </a>
                   ) : (
-                    cardBody
+                    /* Клик по строке открывает уведомление целиком. Отдельная
+                       галочка справа остаётся: пометить прочитанным, не читая,
+                       — обычное дело для списка из двух десятков строк. */
+                    <button
+                      type="button"
+                      onClick={() => setOpened(n)}
+                      className="contents cursor-pointer text-left"
+                    >
+                      {cardBody}
+                    </button>
                   )}
                   {!n.is_read && (
                     <button
@@ -225,6 +245,14 @@ export default function NotificationsPage() {
           </ul>
         )}
       </div>
+
+      {opened ? (
+        <NotificationModal
+          notification={opened}
+          onClose={() => setOpened(null)}
+          onRead={markOneRead}
+        />
+      ) : null}
     </div>
   );
 }

@@ -325,6 +325,19 @@ export interface OutreachProxyListStats {
 export interface OutreachAccount {
   id: string;
   campaign_id: string;
+  /**
+   * Перенос из другой кампании (миграция 20260921_0004). Заполнено — аккаунт
+   * «в гостях»: его можно вернуть домой, но не перенести в третью кампанию.
+   */
+  moved_from_campaign_id?: string | null;
+  moved_from_campaign_name?: string | null;
+  moved_reason?: string | null;
+  moved_at?: string | null;
+  /** Архив (миграция 20260918_0003): когда, почему и кто убрал. null — в работе. */
+  archived_at?: string | null;
+  archive_reason?: string | null;
+  archive_note?: string | null;
+  archived_by_name?: string | null;
   session_name: string;
   api_id: number;
   api_hash: string;

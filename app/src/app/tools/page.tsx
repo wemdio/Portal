@@ -115,6 +115,8 @@ const TOOL_ICONS: Record<ToolId, ComponentType<{ className?: string }>> = {
   'vertical-engine-v2': Sparkles,
   'reply-personalization': MessageSquareReply,
   sender: MailPlus,
+  'polza-outreach': Briefcase,
+  'polza-ru-outreach': Send,
 };
 
 function ToolLinkCard({

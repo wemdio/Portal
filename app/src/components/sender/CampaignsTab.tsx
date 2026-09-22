@@ -1,14 +1,11 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Loader2, Pause, Play, Plus, Upload } from 'lucide-react';
-import {
-  fetchCampaigns,
-  patchCampaign,
-  uploadRecipients,
-  type CampaignDto,
-} from './api';
-import { CampaignFormModal, weekdaysLabel } from './CampaignFormModal';
+import { useCallback, useEffect, useState } from 'react';
+import { Loader2, Pause, Play, Plus, Square, Trash2, Users } from 'lucide-react';
+import { deleteCampaign, fetchCampaigns, patchCampaign, type CampaignDto } from './api';
+import { CampaignFormModal } from './CampaignFormModal';
+import { timezoneLabel, weekdaysLabel } from './CampaignSteps';
+import { RecipientsModal } from './RecipientsModal';
 
 const STATUS_LABELS: Record<CampaignDto['status'], { text: string; className: string }> = {
   draft: { text: 'Черновик', className: 'bg-zinc-100 text-zinc-600' },
@@ -28,11 +25,12 @@ export function CampaignsTab() {
   const [campaigns, setCampaigns] = useState<CampaignDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [formOpen, setFormOpen] = useState(false);
+  // Какую кампанию открыли по названию. null — окно создания новой.
+  const [editing, setEditing] = useState<CampaignDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-
-  const uploadTargetRef = useRef<string | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
+  // Кому показать базу получателей (задача 5.2): список с фильтрами и поиском.
+  const [recipientsOf, setRecipientsOf] = useState<CampaignDto | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -48,22 +46,6 @@ export function CampaignsTab() {
   useEffect(() => {
     void load();
   }, [load]);
-
-  const handleUpload = async (file: File) => {
-    const campaignId = uploadTargetRef.current;
-    if (!campaignId) return;
-    setError(null);
-    try {
-      const res = await uploadRecipients(campaignId, file);
-      setNotice(
-        `Загружено получателей: ${res.imported}. Пропущено: ${res.skippedInvalid} с плохим адресом, ` +
-          `${res.skippedDuplicates} дублей, ${res.skippedSuppressed} из стоп-листа.`,
-      );
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Не удалось загрузить базу');
-    }
-  };
 
   return (
     <div className="space-y-4">
@@ -108,65 +90,120 @@ export function CampaignsTab() {
                 <div key={campaign.id} className="flex flex-wrap items-center gap-4 px-5 py-4">
                   <div className="min-w-48 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className="font-medium text-zinc-900">{campaign.name}</span>
+                      {/* Название — вход в настройки: отдельная кнопка
+                          «Изменить» в строке была бы четвёртой подряд, а по
+                          названию кликают и так, ожидая карточку. */}
+                      <button
+                        type="button"
+                        onClick={() => setEditing(campaign)}
+                        className="rounded font-medium text-zinc-900 underline-offset-4 transition-colors hover:text-blue-600 hover:underline"
+                      >
+                        {campaign.name}
+                      </button>
                       <span className={`rounded-md px-2 py-0.5 text-xs font-medium ${status.className}`}>
                         {status.text}
                       </span>
                     </div>
                     <div className="mt-1 text-xs text-zinc-500">
                       {stats
-                        ? `${stats.recipients} получателей · отправлено ${stats.sent} · в очереди ${stats.scheduled} · ответили ${stats.replied}${
-                            stats.failed ? ` · ошибок ${stats.failed}` : ''
-                          }`
+                        ? `${stats.recipients} получателей · отправлено ${stats.sent} · в очереди ${stats.scheduled}`
+                          + ` · ответили ${stats.replied}${stats.replyRate != null ? ` (${stats.replyRate}%)` : ''}`
+                          + (stats.bounced ? ` · отбоев ${stats.bounced}${stats.bounceRate != null ? ` (${stats.bounceRate}%)` : ''}` : '')
+                          + (stats.failed ? ` · ошибок ${stats.failed}` : '')
                         : '—'}
                       {' · '}
                       {campaign.send_hour_from}:00–{campaign.send_hour_to}:00
                       {' · '}
                       {weekdaysLabel(campaign.send_weekdays ?? [])}
+                      {' · '}
+                      {timezoneLabel(campaign.timezone)}
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      uploadTargetRef.current = campaign.id;
-                      fileRef.current?.click();
-                    }}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100"
-                  >
-                    <Upload className="h-3.5 w-3.5" />
-                    База получателей
-                  </button>
-
-                  {campaign.status === 'running' ? (
+                  <div className="flex items-center gap-2">
+                    {/* База получателей: кому отправлено, кто ответил, кто отбился —
+                        раньше только сводная строка цифр. */}
                     <button
                       type="button"
-                      onClick={async () => {
-                        await patchCampaign(campaign.id, 'pause');
-                        await load();
-                      }}
+                      onClick={() => setRecipientsOf(campaign)}
                       className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100"
                     >
-                      <Pause className="h-3.5 w-3.5" />
-                      Пауза
+                      <Users className="h-3.5 w-3.5" />
+                      База
                     </button>
-                  ) : campaign.status !== 'done' ? (
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        try {
-                          await patchCampaign(campaign.id, 'start');
+
+                    {campaign.status === 'running' ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await patchCampaign(campaign.id, 'pause');
                           await load();
-                        } catch (err) {
-                          setError(err instanceof Error ? err.message : 'Не удалось запустить');
-                        }
-                      }}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
-                    >
-                      <Play className="h-3.5 w-3.5" />
-                      Запустить
-                    </button>
-                  ) : null}
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100"
+                      >
+                        <Pause className="h-3.5 w-3.5" />
+                        Пауза
+                      </button>
+                    ) : campaign.status !== 'done' ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await patchCampaign(campaign.id, 'start');
+                            await load();
+                          } catch (err) {
+                            setError(err instanceof Error ? err.message : 'Не удалось запустить');
+                          }
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
+                      >
+                        <Play className="h-3.5 w-3.5" />
+                        Запустить
+                      </button>
+                    ) : null}
+
+                    {/* Завершение и удаление до сих пор были только в API: кампания
+                        навсегда оставалась «на паузе», а ненужные черновики
+                        копились в списке. */}
+                    {campaign.status !== 'done' ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (!window.confirm(`Завершить кампанию «${campaign.name}»? Запланированные письма отменятся.`)) return;
+                          try {
+                            await patchCampaign(campaign.id, 'finish');
+                            await load();
+                          } catch (err) {
+                            setError(err instanceof Error ? err.message : 'Не удалось завершить');
+                          }
+                        }}
+                        title="Завершить: запланированные письма отменяются"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100"
+                      >
+                        <Square className="h-3 w-3" />
+                        Завершить
+                      </button>
+                    ) : null}
+                    {campaign.status !== 'running' ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (!window.confirm(`Удалить кампанию «${campaign.name}» вместе с базой получателей и историей писем?`)) return;
+                          try {
+                            await deleteCampaign(campaign.id);
+                            await load();
+                          } catch (err) {
+                            setError(err instanceof Error ? err.message : 'Не удалось удалить');
+                          }
+                        }}
+                        title="Удалить кампанию"
+                        aria-label="Удалить кампанию"
+                        className="rounded-lg p-1.5 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-red-600"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
               );
             })}
@@ -174,25 +211,26 @@ export function CampaignsTab() {
         )}
       </div>
 
-      <input
-        ref={fileRef}
-        type="file"
-        accept=".csv,.tsv,.xlsx,.xls"
-        className="hidden"
-        onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (file) void handleUpload(file);
-          e.target.value = '';
-        }}
-      />
-
-      {formOpen ? (
+      {formOpen || editing ? (
         <CampaignFormModal
-          onClose={() => setFormOpen(false)}
-          onCreated={async () => {
-            setNotice('Кампания создана. Загрузите базу получателей и запускайте.');
+          key={editing?.id ?? 'new'}
+          campaign={editing ?? undefined}
+          onClose={() => {
+            setFormOpen(false);
+            setEditing(null);
+          }}
+          onCreated={async ({ notice: savedNotice, error: savedError }) => {
+            setNotice(savedNotice ?? null);
+            setError(savedError ?? null);
             await load();
           }}
+        />
+      ) : null}
+
+      {recipientsOf ? (
+        <RecipientsModal
+          campaign={recipientsOf}
+          onClose={() => setRecipientsOf(null)}
         />
       ) : null}
     </div>

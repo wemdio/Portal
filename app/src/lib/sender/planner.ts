@@ -71,6 +71,32 @@ async function loadSuppressed(emails: string[]): Promise<Set<string>> {
   return suppressed;
 }
 
+/**
+ * Адреса, которые прямо сейчас едут в другой кампании (задача 5.5): уникальность
+ * есть только внутри кампании, и один лид в двух запущенных получал бы два
+ * первых письма с двух разных ящиков одновременно. Занят = чужая активная
+ * цепочка, которая трогала лида за последний месяц; закончится — этот адрес
+ * поедет со следующего прохода.
+ */
+async function loadCrossCampaignBusy(emails: string[], campaignId: string): Promise<Set<string>> {
+  const busy = new Set<string>();
+  if (!supabaseAdmin || !emails.length) return busy;
+  const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const CHUNK = 50; // in-фильтр уезжает в адрес запроса — держим его коротким
+  for (let i = 0; i < emails.length; i += CHUNK) {
+    const { data } = await supabaseAdmin
+      .from('sender_recipients')
+      .select('email')
+      .in('email', emails.slice(i, i + CHUNK))
+      .neq('campaign_id', campaignId)
+      .eq('status', 'active')
+      .not('mailbox_id', 'is', null)
+      .gt('updated_at', monthAgo);
+    for (const row of data ?? []) busy.add(String(row.email).toLowerCase());
+  }
+  return busy;
+}
+
 function pickSlot(slots: MailboxSlot[], recipient: RecipientRow): MailboxSlot | null {
   // Уже закреплённый ящик: если он ещё в пуле и лимит не выбран — только он,
   // иначе лид ждёт следующего окна. Менять отправителя посреди цепочки нельзя:
@@ -126,10 +152,15 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
   if (!recipients.length) return 0;
 
   const suppressed = await loadSuppressed(recipients.map((r) => r.email));
+  const busy = await loadCrossCampaignBusy(recipients.map((r) => r.email), campaign.id);
   const now = new Date();
   const slots: MailboxSlot[] = [];
   for (const mailbox of mailboxes) {
-    slots.push({ mailbox, remaining: await remainingQuota(mailbox), cursor: new Date(now) });
+    // Курсоры всех ящиков не должны стартовать с одной секунды: иначе тысяча
+    // ящиков ставит первое письмо в один момент (всплеск в начале окна, потом
+    // простой). Случайный сдвиг до 45 минут размазывает старт по окну.
+    const startOffsetMs = Math.floor(Math.random() * 45 * 60 * 1000);
+    slots.push({ mailbox, remaining: await remainingQuota(mailbox), cursor: new Date(now.getTime() + startOffsetMs) });
   }
 
   let planned = 0;
@@ -149,6 +180,16 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
       await db
         .from('sender_recipients')
         .update({ status: 'finished', next_step_at: null, updated_at: new Date().toISOString() })
+        .eq('id', recipient.id);
+      continue;
+    }
+
+    // Первое касание не дублируем между кампаниями: пока адрес едет в другой
+    // активной кампании, этот старт откладываем на сутки (задача 5.5).
+    if (stepNo === 1 && !recipient.mailbox_id && busy.has(recipient.email)) {
+      await db
+        .from('sender_recipients')
+        .update({ next_step_at: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(), updated_at: now.toISOString() })
         .eq('id', recipient.id);
       continue;
     }

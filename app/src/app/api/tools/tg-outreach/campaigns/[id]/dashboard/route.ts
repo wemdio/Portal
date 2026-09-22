@@ -13,6 +13,8 @@ import { withToolTrace } from '@/lib/toolTrace';
 import {
   buildCampaignDashboard,
   customRange,
+  periodRange,
+  TZ_OFFSET_HOURS,
   type DashboardContact,
   type DashboardDialog,
   type DashboardForward,
@@ -92,6 +94,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         forwardsRes,
         accountsRes,
         warmupRunRes,
+        spendRes,
         errorLogsRes,
       ] = await Promise.all([
         baseIds.length
@@ -113,7 +116,9 @@ export async function GET(req: NextRequest, ctx: Ctx) {
         supabase
           .from('tg_outreach_accounts')
           .select('id, session_name, is_active, check_status, checked_at')
-          .eq('campaign_id', campaignId),
+          .eq('campaign_id', campaignId)
+          // Архив не считаем: это уже не парк кампании, а его история.
+          .is('archived_at', null),
         // Один активный прогрев на кампанию (уникальный индекс в БД) — нужен
         // только чтобы понять, греется ли партия целиком прямо сейчас.
         supabase
@@ -123,6 +128,22 @@ export async function GET(req: NextRequest, ctx: Ctx) {
           .in('status', ['pending', 'running'])
           .limit(1)
           .maybeSingle(),
+        /**
+         * Деньги за аккаунты, заведённые в портал в этом периоде.
+         *
+         * Отдельная выборка, а не поля к списку выше: там аккаунты нужны без
+         * архива (архив — уже не парк кампании), а потраченные деньги архив
+         * никуда не девает. Аккаунт, купленный на этой неделе и на этой же
+         * неделе списанный, стоил ровно столько же.
+         *
+         * Считаем по created_at — дате появления в портале, а не по приходу в
+         * кампанию: переехавший аккаунт куплен тогда, когда куплен, и в неделю
+         * переезда второй раз деньги не тратились.
+         */
+        supabase
+          .from('tg_outreach_accounts')
+          .select('price, created_at')
+          .eq('campaign_id', campaignId),
         supabase
           .from('tg_outreach_logs')
           .select('message')
@@ -190,9 +211,29 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       // активные аккаунты кампании.
       const warming = warmupRunRes.data ? accountRows.filter((a) => a.is_active).length : 0;
 
+      /**
+       * Итог по деньгам: сумма, сколько аккаунтов в периоде и у скольких из них
+       * цена не проставлена.
+       *
+       * Про «без цены» говорим вслух: строка без цены — это «неизвестно», а не
+       * «достался бесплатно», и сумма без такой оговорки занижена молча.
+       */
+      const { fromMs, toMs } = range ?? periodRange(period, now, TZ_OFFSET_HOURS);
+      let spendTotal = 0;
+      let spendCount = 0;
+      let spendWithoutPrice = 0;
+      for (const row of (spendRes.data ?? []) as { price: number | null; created_at: string | null }[]) {
+        const at = row.created_at ? new Date(row.created_at).getTime() : NaN;
+        if (!Number.isFinite(at) || at < fromMs || at > toMs) continue;
+        spendCount += 1;
+        if (row.price === null || row.price === undefined) spendWithoutPrice += 1;
+        else spendTotal += Number(row.price) || 0;
+      }
+
       return NextResponse.json({
         period,
         dashboard,
+        accounts_spend: { total: spendTotal, count: spendCount, without_price: spendWithoutPrice },
         accounts,
         accounts_total: accountRows.length,
         sending: sendingAccountIds.size,

@@ -25,7 +25,8 @@ export async function isSupervisor(userId: string): Promise<boolean> {
 
 /** Проекты, видимые пользователю — тот же критерий, что у /api/instantly/my-projects. */
 export async function listVisibleProjects(userId: string): Promise<{
-  projects: { id: string; client: string }[];
+  /** briefText — бриф из карточки проекта: по нему видно, чего проекту не хватает. */
+  projects: { id: string; client: string; briefText: string }[];
   /** Руководитель (admin/director/lead/manager) — может редактировать глобальный тон/пример. */
   supervisor: boolean;
 }> {
@@ -34,7 +35,7 @@ export async function listVisibleProjects(userId: string): Promise<{
 
   let query = admin
     .from('projects')
-    .select('id, client, name, specialist, specialist_user_id')
+    .select('id, client, name, specialist, specialist_user_id, brief_text')
     .in('status', ['В работе', 'Тестирование', 'Подготовка'])
     .order('client');
   if (!supervisor) query = query.eq('specialist_user_id', userId);
@@ -45,6 +46,7 @@ export async function listVisibleProjects(userId: string): Promise<{
     projects: (data ?? []).map((p) => ({
       id: p.id as string,
       client: (p.client as string) ?? (p.name as string) ?? '',
+      briefText: (p.brief_text as string) ?? '',
     })),
     supervisor,
   };
@@ -70,8 +72,11 @@ export async function getProjectCampaignIds(projectId: string): Promise<string[]
 export async function getCampaignAccountIds(campaignIds: string[]): Promise<Map<string, string>> {
   const result = new Map<string, string>();
   if (!campaignIds.length) return result;
-  const { admin } = requireClients();
-  const { data, error } = await admin
+  // Каталог с аккаунтами ведёт синк в базе Instantly (instantly-migrations,
+  // 20260520_0001). В основной базе лежит старая копия таблицы без колонки
+  // instantly_account_id — запрос туда ронял список писем любого проекта.
+  const { instantly } = requireClients();
+  const { data, error } = await instantly
     .from('instantly_campaign_catalog')
     .select('id, instantly_account_id')
     .in('id', campaignIds);
@@ -110,6 +115,51 @@ export async function getProjectBrief(projectId: string): Promise<string> {
  */
 export function resolveBrief(projectBrief: string, kb: KnowledgeBase | null): string {
   return projectBrief.trim() ? projectBrief : (kb?.localBrief ?? '');
+}
+
+/**
+ * Запасные брифы из базы знаний по списку проектов — одним запросом, для
+ * пометок в списке проектов (раньше там был запрос на каждый проект).
+ */
+export async function getLocalBriefs(projectIds: string[]): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  if (!projectIds.length) return result;
+  const { admin } = requireClients();
+  const { data, error } = await admin
+    .from('reply_personalization_kb')
+    .select('project_id, local_brief')
+    .in('project_id', projectIds);
+  if (error) throw new Error(`kb query failed: ${error.message}`);
+  for (const row of data ?? []) result.set(row.project_id as string, (row.local_brief as string) ?? '');
+  return result;
+}
+
+/**
+ * Что мешает собирать ответы по проекту. Единственное обязательное — бриф:
+ * тон и пример письма подстрахованы глобальными настройками студии, а без
+ * брифа ИИ не из чего взять, что за продукт и кому он продаётся.
+ *
+ * Раньше «готовность» считалась по наличию строки базы знаний — и все проекты
+ * с брифом в карточке, но без сохранённой модалки, числились незаполненными,
+ * а генерация им отказывала.
+ */
+export function missingBriefReason(projectBrief: string, localBrief: string | null | undefined): string | null {
+  if (projectBrief.trim() || (localBrief ?? '').trim()) return null;
+  return 'В карточке проекта нет брифа';
+}
+
+/** База знаний проекта; проекта без сохранённой модалки — пустая, не null. */
+export async function getKnowledgeBaseOrEmpty(projectId: string): Promise<KnowledgeBase> {
+  return (
+    (await getKnowledgeBase(projectId)) ?? {
+      projectId,
+      productFacts: '',
+      toneNotes: '',
+      exampleCase: '',
+      localBrief: '',
+      updatedAt: '',
+    }
+  );
 }
 
 export async function getKnowledgeBase(projectId: string): Promise<KnowledgeBase | null> {
@@ -169,6 +219,37 @@ export async function getGlobalKnowledgeBase(): Promise<GlobalKnowledgeBase> {
     exampleCase: (data.example_case as string) ?? '',
     updatedAt: (data.updated_at as string) ?? '',
   };
+}
+
+export async function isAdminUser(userId: string): Promise<boolean> {
+  const { admin } = requireClients();
+  const { data } = await admin.from('profiles').select('role').eq('id', userId).single();
+  return (data?.role as string) === 'admin';
+}
+
+/**
+ * Системный промпт (правила письма) из глобальных настроек; пусто — берутся
+ * стандартные правила из кода. Отдельно от getGlobalKnowledgeBase намеренно:
+ * та уходит всем, кто открыл инструмент, а промпт видит только админ.
+ */
+export async function getGlobalSystemPrompt(): Promise<string> {
+  const { admin } = requireClients();
+  const { data, error } = await admin
+    .from('reply_personalization_global_kb')
+    .select('system_prompt')
+    .eq('id', 1)
+    .maybeSingle();
+  if (error) throw new Error(`global system prompt query failed: ${error.message}`);
+  return (data?.system_prompt as string) ?? '';
+}
+
+export async function saveGlobalSystemPrompt(systemPrompt: string, userId: string): Promise<void> {
+  const { admin } = requireClients();
+  const { error } = await admin.from('reply_personalization_global_kb').upsert(
+    { id: 1, system_prompt: systemPrompt, updated_by: userId, updated_at: new Date().toISOString() },
+    { onConflict: 'id' },
+  );
+  if (error) throw new Error(`global system prompt upsert failed: ${error.message}`);
 }
 
 export async function upsertGlobalKnowledgeBase(
@@ -327,6 +408,30 @@ export async function insertSkip(input: {
     created_by: input.createdBy,
   });
   if (error) throw new Error(`skip insert failed: ${error.message}`);
+}
+
+/**
+ * Неотправленный черновик ИИ по письму — чтобы вернуть его в поле ответа,
+ * когда менеджер ушёл в другое письмо и вернулся. Каждая генерация стоит
+ * денег, и терять её из-за переключения чата нельзя.
+ * Берём только если самая свежая запись по письму — черновик ИИ: после
+ * отправки или пропуска старый черновик уже не нужен. Ручные записи
+ * (model='manual') — техническая обёртка отправки, не черновик.
+ */
+export async function getOpenDraft(qualificationId: string): Promise<DraftRow | null> {
+  const { admin } = requireClients();
+  const { data, error } = await admin
+    .from('reply_personalization_drafts')
+    .select()
+    .eq('qualification_id', qualificationId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`open draft lookup failed: ${error.message}`);
+  if (!data) return null;
+  const draft = mapDraftRow(data);
+  if (draft.status !== 'draft' || draft.model === 'manual' || !draft.generatedText?.trim()) return null;
+  return draft;
 }
 
 export async function getDraftById(draftId: string): Promise<DraftRow | null> {

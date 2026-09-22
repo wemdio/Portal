@@ -31,6 +31,8 @@ function formatAt(value: string | null): string {
 export function UnlinkedReplies({ refreshKey }: { refreshKey: number }) {
   const [replies, setReplies] = useState<UnlinkedReplyDto[]>([]);
   const [total, setTotal] = useState(0);
+  const [pageSize, setPageSize] = useState(20);
+  const [page, setPage] = useState(1);
   const [open, setOpen] = useState(false);
   const [openReply, setOpenReply] = useState<string | null>(null);
 
@@ -38,10 +40,13 @@ export function UnlinkedReplies({ refreshKey }: { refreshKey: number }) {
     let cancelled = false;
     void (async () => {
       try {
-        const res = await fetchUnlinkedReplies();
+        const res = await fetchUnlinkedReplies(page);
         if (cancelled) return;
         setReplies(res.replies);
         setTotal(res.total);
+        setPageSize(res.pageSize);
+        // Страница могла стать пустой после перезагрузки списка — откат.
+        if (res.replies.length === 0 && res.total > 0 && page > 1) setPage(Math.max(1, Math.ceil(res.total / res.pageSize)));
       } catch {
         /* блок вспомогательный: его отказ не должен ронять вкладку с перепиской */
       }
@@ -49,9 +54,11 @@ export function UnlinkedReplies({ refreshKey }: { refreshKey: number }) {
     return () => {
       cancelled = true;
     };
-  }, [refreshKey]);
+  }, [refreshKey, page]);
 
   if (!total) return null;
+
+  const maxPage = Math.max(1, Math.ceil(total / pageSize));
 
   return (
     <div className="rounded-xl border border-amber-200 bg-white">
@@ -107,7 +114,27 @@ export function UnlinkedReplies({ refreshKey }: { refreshKey: number }) {
             );
           })}
 
-          {total > replies.length ? (
+          {maxPage > 1 ? (
+            <div className="flex items-center justify-center gap-4 px-5 py-2.5 text-xs text-zinc-500">
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page <= 1}
+                className="rounded-md px-2.5 py-1 text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-40"
+              >
+                ← Назад
+              </button>
+              <span>Стр. {page} из {maxPage} · {total} писем</span>
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.min(maxPage, p + 1))}
+                disabled={page >= maxPage}
+                className="rounded-md px-2.5 py-1 text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-40"
+              >
+                Вперёд →
+              </button>
+            </div>
+          ) : total > replies.length ? (
             <p className="px-5 py-2.5 text-xs text-zinc-500">
               Показаны последние {replies.length} из {total}.
             </p>

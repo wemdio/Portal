@@ -21,6 +21,10 @@ switch (kind) {
   case 'eng-hiring':
     run('./engHiring');
     break;
+  case 'polzaoutreach':
+  case 'polza-outreach':
+    run('./polzaOutreach');
+    break;
   case 'search':
     run('./search');
     break;

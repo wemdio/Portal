@@ -1,29 +1,44 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Loader2, RefreshCw, Trash2, Upload, Users } from 'lucide-react';
+import { Loader2, RefreshCw, Search, Trash2, Upload, Users } from 'lucide-react';
 import {
   bulkMailboxes,
   deleteMailbox,
   fetchMailboxes,
+  fetchMailboxProbe,
+  fetchMailboxStats,
+  fetchMailboxTags,
   googleWorkspaceStatus,
   syncGoogleWorkspace,
   importMailboxes,
   patchMailbox,
+  startMailboxProbe,
   type BulkMailboxAction,
   type ImportMailboxesResult,
   type MailboxDto,
+  type MailboxStatsDto,
+  type MailboxTagDto,
+  type ProbeResultDto,
 } from './api';
 import { GOOGLE_STATE_LABELS, MAILBOX_STATUS_LABELS, providerLabel } from './labels';
+import { TagAssignMenu, TagChip, TagFilterMenu } from './MailboxTags';
+import { SenderModal } from './SenderModal';
 
 const PAGE_SIZE = 30;
 const EMPTY_SELECTION: ReadonlySet<string> = new Set();
+/** Пауза между буквой и запросом: иначе поиск стоит запроса на символ. */
+const SEARCH_DEBOUNCE_MS = 300;
 
 export function MailboxesTab() {
   const [mailboxes, setMailboxes] = useState<MailboxDto[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
+  // Отдельно от loading: первая загрузка рисует заглушку вместо таблицы, а
+  // переход на другую страницу — кружок поверх уже показанных строк. Подменять
+  // на заглушку и её тоже значит заставлять глаз заново искать, где он был.
+  const [paging, setPaging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<ImportMailboxesResult | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -43,9 +58,28 @@ export function MailboxesTab() {
   const [googleBusy, setGoogleBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // search — то, что набрано в поле; appliedSearch — то, что уже ушло в запрос.
+  // Разделены, чтобы каждая буква не стоила похода на сервер, а список не
+  // перерисовывался в процессе набора.
+  const [search, setSearch] = useState('');
+  const [appliedSearch, setAppliedSearch] = useState('');
+  const searchTimer = useRef<number | null>(null);
+  const [tags, setTags] = useState<MailboxTagDto[]>([]);
+  const [untagged, setUntagged] = useState(0);
+  const [tagFilter, setTagFilter] = useState<ReadonlySet<string>>(EMPTY_SELECTION);
+  const [noTagFilter, setNoTagFilter] = useState(false);
+  // Ключ строкой: Set в списке зависимостей useCallback сравнивается по ссылке,
+  // и список перезагружался бы на каждый рендер.
+  const tagFilterKey = [...tagFilter].sort().join(',');
+
   const load = useCallback(async (targetPage: number) => {
     try {
-      const { mailboxes: rows, total: count } = await fetchMailboxes({ page: targetPage });
+      const { mailboxes: rows, total: count } = await fetchMailboxes({
+        page: targetPage,
+        search: appliedSearch || undefined,
+        tagIds: tagFilterKey ? tagFilterKey.split(',') : undefined,
+        noTag: noTagFilter || undefined,
+      });
       setMailboxes(rows);
       setTotal(count);
       // Строку удалили и страница стала пустой — откатываемся к предыдущей.
@@ -57,10 +91,32 @@ export function MailboxesTab() {
     } finally {
       setLoading(false);
     }
+  }, [appliedSearch, tagFilterKey, noTagFilter]);
+
+  const loadTags = useCallback(async () => {
+    try {
+      const res = await fetchMailboxTags();
+      setTags(res.tags);
+      setUntagged(res.untagged);
+    } catch {
+      /* теги не доехали — фильтр просто останется пустым */
+    }
   }, []);
 
   useEffect(() => {
-    void load(page);
+    void loadTags();
+  }, [loadTags]);
+
+  // Ушли с экрана недонабрав — отложенный запрос отменяем.
+  useEffect(() => () => {
+    if (searchTimer.current) window.clearTimeout(searchTimer.current);
+  }, []);
+
+  useEffect(() => {
+    // Кружок только на переходах, которые затеял человек: опрос статусов раз в
+    // 15 секунд зовёт load мимо этого эффекта и мигать ничем не должен.
+    setPaging(true);
+    void load(page).finally(() => setPaging(false));
   }, [load, page]);
 
   useEffect(() => {
@@ -112,7 +168,10 @@ export function MailboxesTab() {
         `Каталог Google: всего ящиков ${res.total}, новых ${res.added}`
         + (res.suspended ? `, заблокированных ${res.suspended}` : '')
         + (res.missing ? `, пропало из каталога ${res.missing}` : '')
-        + '. Новые ящики выключены — отметьте галочками те, с которых шлём.',
+        + '. Новые ящики выключены — отметьте галочками те, с которых шлём.'
+        + (res.failed.length
+          ? ` Не прочитался каталог: ${res.failed.map((f) => `${f.account} (${f.error})`).join('; ')}.`
+          : ''),
       );
       await load(page);
     } catch (err) {
@@ -125,6 +184,53 @@ export function MailboxesTab() {
   const act = async (id: string, body: Record<string, unknown>) => {
     await patchMailbox(id, body);
     await load(page);
+  };
+
+  // Проверочная отправка: письмо с ящика на контрольный адрес и разбор
+  // заголовков доставленного. Отправляет воркер на sender-хосте, здесь только
+  // заводим пробу и показываем результат, когда он готов.
+  const [probeBusy, setProbeBusy] = useState<string | null>(null);
+  const [probeDetail, setProbeDetail] = useState<ProbeResultDto | null>(null);
+
+  const runProbe = async (mailbox: MailboxDto) => {
+    setProbeBusy(mailbox.id);
+    setError(null);
+    setNotice(null);
+    try {
+      await startMailboxProbe(mailbox.id);
+      setNotice(`Проверочное письмо с ${mailbox.email} отправляется — результат появится в строке ящика через пару минут.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось запустить проверку');
+    } finally {
+      setProbeBusy(null);
+    }
+  };
+
+  const openProbeDetail = async (mailbox: MailboxDto) => {
+    setError(null);
+    try {
+      const { probe } = await fetchMailboxProbe(mailbox.id);
+      if (probe) setProbeDetail(probe);
+      else setNotice('Проверок отправки с этого ящика ещё не было.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить результат проверки');
+    }
+  };
+
+  // Статистика ответов по ящикам и доменам (задача 6.3): где рассылка
+  // отвечает, а где только жжёт базу.
+  const [statsOpen, setStatsOpen] = useState(false);
+  const [stats, setStats] = useState<MailboxStatsDto | null>(null);
+  const [statsByDomain, setStatsByDomain] = useState(false);
+
+  const openStats = async () => {
+    setError(null);
+    setStatsOpen(true);
+    try {
+      setStats(await fetchMailboxStats());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить статистику');
+    }
   };
 
   const remove = async (mailbox: MailboxDto) => {
@@ -150,6 +256,67 @@ export function MailboxesTab() {
     setSelected(allOnPageSelected ? new Set() : new Set(mailboxes.map((m) => m.id)));
   };
 
+  /**
+   * Смена фильтра — это другой набор строк: возвращаемся на первую страницу и
+   * снимаем галочки. «Выбрано 12» после смены фильтра относилось бы к ящикам,
+   * которых на экране больше нет.
+   */
+  const resetToFirstPage = () => {
+    setPage(1);
+    setSelection({ page: 1, ids: new Set() });
+  };
+
+  const onSearchChange = (value: string) => {
+    setSearch(value);
+    if (searchTimer.current) window.clearTimeout(searchTimer.current);
+    // Пауза отсчитывается в обработчике ввода, а не в эффекте: так опрос
+    // статусов раз в 15 секунд не может затереть набранное.
+    searchTimer.current = window.setTimeout(() => {
+      setAppliedSearch(value.trim());
+      resetToFirstPage();
+    }, SEARCH_DEBOUNCE_MS);
+  };
+
+  const toggleTagFilter = (id: string) => {
+    const next = new Set(tagFilter);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    setTagFilter(next);
+    resetToFirstPage();
+  };
+
+  const toggleNoTagFilter = () => {
+    setNoTagFilter((v) => !v);
+    resetToFirstPage();
+  };
+
+  const resetTagFilter = () => {
+    setTagFilter(EMPTY_SELECTION);
+    setNoTagFilter(false);
+    resetToFirstPage();
+  };
+
+  /** «Под тег» на выборку: у ящика может быть только один тег, поэтому замена. */
+  const assignTag = async (tagId: string | null) => {
+    const ids = [...selected];
+    if (!ids.length) return;
+    const withTag = mailboxes.filter((m) => ids.includes(m.id) && m.tag).length;
+    if (tagId && withTag
+      && !window.confirm(
+        `У ${withTag} из ${ids.length} ящиков тег уже стоит — он заменится на новый. Продолжить?`,
+      )) return;
+    setBulkBusy(true);
+    setError(null);
+    try {
+      await bulkMailboxes(ids, 'tag', tagId);
+      setSelected(new Set());
+      await Promise.all([load(page), loadTags()]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось повесить тег');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   const runBulk = async (action: BulkMailboxAction) => {
     const ids = [...selected];
     if (!ids.length) return;
@@ -160,7 +327,8 @@ export function MailboxesTab() {
     try {
       await bulkMailboxes(ids, action);
       setSelected(new Set());
-      await load(page);
+      // Удаление ящиков меняет счётчики тегов в фильтре.
+      await Promise.all([load(page), action === 'delete' ? loadTags() : Promise.resolve()]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось применить действие');
     } finally {
@@ -218,6 +386,11 @@ export function MailboxesTab() {
         {result ? (
           <div className="mt-4 rounded-lg bg-zinc-50 p-3 text-sm">
             <p className="text-zinc-900">Подключено ящиков: {result.imported}</p>
+            {result.truncated != null && result.fileRows != null ? (
+              <p className="mt-0.5 text-amber-600">
+                В файле {result.fileRows} строк, прочитано {result.truncated} — дальше первых 20 000 портал не берёт.
+              </p>
+            ) : null}
             {/* Провайдера выбрал портал, а не человек — значит, его решение
                 должно быть видно сразу, а не всплывать на проверке входа. */}
             {Object.keys(result.detected ?? {}).length ? (
@@ -250,17 +423,53 @@ export function MailboxesTab() {
         {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
       </div>
 
+      {/* Поиск и фильтр тегов — между подключением и списком: это про список,
+          но нужны до того, как в нём начнёшь что-то искать глазами. */}
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        <div className="relative w-full max-w-md">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+          <input
+            value={search}
+            onChange={(e) => onSearchChange(e.target.value)}
+            placeholder="Поиск по адресу"
+            aria-label="Поиск по адресу"
+            className="w-full rounded-lg border border-zinc-300 bg-white py-2 pl-9 pr-3 text-sm text-zinc-900"
+          />
+        </div>
+        <TagFilterMenu
+          tags={tags}
+          untagged={untagged}
+          selected={tagFilter}
+          noTag={noTagFilter}
+          onToggleTag={toggleTagFilter}
+          onToggleNoTag={toggleNoTagFilter}
+          onReset={resetTagFilter}
+          onChanged={async () => {
+            await Promise.all([loadTags(), load(page)]);
+          }}
+        />
+      </div>
+
       <div className="rounded-xl border border-zinc-200 bg-white">
         <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-3">
           <h2 className="text-base font-semibold text-zinc-900">Ящики ({total})</h2>
-          <button
-            type="button"
-            onClick={() => void load(page)}
-            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700"
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-            Обновить
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => void openStats()}
+              className="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700"
+            >
+              Статистика ответов
+            </button>
+            <button
+              type="button"
+              onClick={() => void load(page)}
+              className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              Обновить
+            </button>
+          </div>
         </div>
 
         {/* Панель появляется только при выборе: пустая полоса кнопок над
@@ -301,6 +510,7 @@ export function MailboxesTab() {
             >
               Удалить
             </button>
+            <TagAssignMenu tags={tags} disabled={bulkBusy} onPick={(tagId) => void assignTag(tagId)} />
             <button
               type="button"
               disabled={bulkBusy}
@@ -319,9 +529,19 @@ export function MailboxesTab() {
             Загрузка…
           </div>
         ) : mailboxes.length === 0 ? (
-          <p className="px-5 py-10 text-center text-sm text-zinc-500">Ящиков пока нет — загрузите выгрузку провайдера.</p>
+          <p className="px-5 py-10 text-center text-sm text-zinc-500">
+            {appliedSearch || tagFilterKey || noTagFilter
+              ? 'Под фильтр не попал ни один ящик.'
+              : 'Ящиков пока нет — загрузите выгрузку провайдера.'}
+          </p>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="relative">
+            {paging ? (
+              <div className="absolute inset-0 z-10 flex items-start justify-center bg-white/60 pt-10">
+                <Loader2 className="h-5 w-5 animate-spin text-zinc-400" />
+              </div>
+            ) : null}
+            <div className={`overflow-x-auto transition-opacity ${paging ? 'opacity-40' : ''}`}>
             <table className="w-full text-sm">
               <thead className="text-left text-xs uppercase text-zinc-500">
                 <tr className="border-b border-zinc-200">
@@ -342,6 +562,7 @@ export function MailboxesTab() {
                   </th>
                   <th className="px-3 py-2 font-medium">Ящик</th>
                   <th className="px-3 py-2 font-medium">Провайдер</th>
+                  <th className="px-3 py-2 font-medium">Тег</th>
                   <th className="px-3 py-2 font-medium">В рассылке</th>
                   <th className="px-3 py-2 font-medium">В Google</th>
                   <th className="px-3 py-2 font-medium">Статус</th>
@@ -373,8 +594,56 @@ export function MailboxesTab() {
                         {mailbox.last_error ? (
                           <div className="mt-0.5 text-xs text-amber-600">{mailbox.last_error}</div>
                         ) : null}
+                        {/* Имя отправителя в письмах («Иван <box@dom>»): правится
+                            прямо в строке, как лимит. */}
+                        <input
+                          type="text"
+                          defaultValue={mailbox.display_name ?? ''}
+                          placeholder="Имя отправителя"
+                          disabled={false}
+                          onBlur={(e) => {
+                            const next = e.target.value.trim();
+                            if (next !== (mailbox.display_name ?? '')) {
+                              void act(mailbox.id, { displayName: next });
+                            }
+                          }}
+                          className="mt-1 w-44 rounded-md border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-xs text-zinc-600"
+                        />
+                        {mailbox.probe ? (
+                          <button
+                            type="button"
+                            onClick={() => void openProbeDetail(mailbox)}
+                            className={`mt-1 block text-left text-xs ${
+                              mailbox.probe.status === 'done'
+                                ? mailbox.probe.passed ? 'text-emerald-600' : 'text-red-600'
+                                : 'text-amber-600'
+                            } underline-offset-2 hover:underline`}
+                          >
+                            {mailbox.probe.status === 'done'
+                              ? mailbox.probe.passed
+                                ? 'Проверка отправки: заголовки не тронуты'
+                                : 'Проверка отправки: провайдер переписывает заголовки'
+                              : mailbox.probe.status === 'failed'
+                                ? `Проверка отправки не прошла: ${mailbox.probe.error ?? 'без деталей'}`
+                                : 'Проверка отправки идёт…'}
+                          </button>
+                        ) : null}
                       </td>
-                      <td className="px-3 py-2.5 text-zinc-600">{providerLabel(mailbox.provider)}</td>
+                      <td className="px-3 py-2.5 text-zinc-600">
+                        <div>{providerLabel(mailbox.provider)}</div>
+                        {/* Из какого Workspace пришёл ящик: аккаунтов может
+                            быть несколько, и без этого не понять, чей он. */}
+                        {mailbox.google_account ? (
+                          <div className="mt-0.5 text-xs text-zinc-400">{mailbox.google_account}</div>
+                        ) : null}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        {mailbox.tag ? (
+                          <TagChip name={mailbox.tag.name} />
+                        ) : (
+                          <span className="text-xs text-zinc-400">—</span>
+                        )}
+                      </td>
                       {/* Галочка прямо в строке: выбирать ящики по одному
                           удобнее здесь, а пачкой — панелью над таблицей. */}
                       <td className="px-3 py-2.5">
@@ -387,7 +656,7 @@ export function MailboxesTab() {
                             }
                             className="h-4 w-4 cursor-pointer rounded border-zinc-300"
                           />
-                          {mailbox.enabled ? 'Шлём' : 'Не шлём'}
+                          Шлём
                         </label>
                       </td>
                       <td className="px-3 py-2.5">
@@ -440,9 +709,19 @@ export function MailboxesTab() {
                           <button
                             type="button"
                             onClick={() => void act(mailbox.id, { action: 'recheck' })}
+                            title="Проверить вход по SMTP/IMAP"
                             className="rounded-md px-2 py-1 text-xs text-blue-600 hover:bg-zinc-100"
                           >
                             Проверить
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void runProbe(mailbox)}
+                            disabled={probeBusy === mailbox.id}
+                            title="Отправить проверочное письмо на контрольный адрес и сравнить заголовки доставленного"
+                            className="rounded-md px-2 py-1 text-xs text-blue-600 hover:bg-zinc-100 disabled:opacity-50"
+                          >
+                            {probeBusy === mailbox.id ? '…' : 'Отправка'}
                           </button>
                           <button
                             type="button"
@@ -459,26 +738,28 @@ export function MailboxesTab() {
                 })}
               </tbody>
             </table>
+            </div>
           </div>
         )}
 
         {total > PAGE_SIZE ? (
-          <div className="flex items-center justify-between border-t border-zinc-200 px-5 py-3 text-sm">
+          <div className="flex items-center justify-center gap-4 border-t border-zinc-200 px-5 py-3 text-sm">
             <button
               type="button"
               onClick={() => setPage((p) => Math.max(1, p - 1))}
-              disabled={page <= 1}
+              disabled={page <= 1 || paging}
               className="rounded-md px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 disabled:opacity-40"
             >
               ← Назад
             </button>
-            <span className="text-zinc-500">
+            <span className="inline-flex items-center gap-2 text-zinc-500">
+              {paging ? <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400" /> : null}
               Стр. {page} из {maxPage} · {total} ящиков
             </span>
             <button
               type="button"
               onClick={() => setPage((p) => Math.min(maxPage, p + 1))}
-              disabled={page >= maxPage}
+              disabled={page >= maxPage || paging}
               className="rounded-md px-3 py-1.5 text-zinc-700 hover:bg-zinc-100 disabled:opacity-40"
             >
               Вперёд →
@@ -486,6 +767,162 @@ export function MailboxesTab() {
           </div>
         ) : null}
       </div>
+
+      {/* Статистика ответов по ящикам/доменам (задача 6.3): reply rate считается
+          от получателей, которым реально ушло письмо, а не от строк писем. */}
+      {statsOpen ? (
+        <SenderModal
+          title="Статистика ответов"
+          subtitle="Доля ответов и отбоев среди получателей, которым ушло хотя бы одно письмо"
+          size="wide"
+          onClose={() => setStatsOpen(false)}
+          footer={
+            <button
+              type="button"
+              onClick={() => setStatsOpen(false)}
+              className="rounded-lg px-3 py-2 text-sm text-zinc-600 transition-colors hover:bg-zinc-100"
+            >
+              Закрыть
+            </button>
+          }
+        >
+          <div className="mb-3 inline-flex gap-1 rounded-xl border border-zinc-200 bg-zinc-50 p-1">
+            <button
+              type="button"
+              onClick={() => setStatsByDomain(false)}
+              className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                !statsByDomain ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:bg-zinc-100'
+              }`}
+            >
+              По ящикам
+            </button>
+            <button
+              type="button"
+              onClick={() => setStatsByDomain(true)}
+              className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                statsByDomain ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:bg-zinc-100'
+              }`}
+            >
+              По доменам
+            </button>
+          </div>
+
+          {!stats ? (
+            <div className="flex items-center justify-center gap-2 py-10 text-sm text-zinc-500">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Загрузка…
+            </div>
+          ) : statsByDomain ? (
+            <table className="w-full text-sm">
+              <thead className="text-left text-xs uppercase text-zinc-500">
+                <tr className="border-b border-zinc-200">
+                  <th className="py-2 pr-3 font-medium">Домен</th>
+                  <th className="py-2 pr-3 font-medium">Ящиков</th>
+                  <th className="py-2 pr-3 font-medium">Писем</th>
+                  <th className="py-2 pr-3 font-medium">Получателей</th>
+                  <th className="py-2 pr-3 font-medium">Ответы</th>
+                  <th className="py-2 pr-3 font-medium">Отбои</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stats.domains.map((row) => (
+                  <tr key={row.domain} className="border-b border-zinc-100 last:border-0">
+                    <td className="py-2 pr-3 font-medium text-zinc-900">{row.domain}</td>
+                    <td className="py-2 pr-3 text-zinc-600">{row.mailboxes}</td>
+                    <td className="py-2 pr-3 text-zinc-600">{row.sent}</td>
+                    <td className="py-2 pr-3 text-zinc-600">{row.reached}</td>
+                    <td className="py-2 pr-3 text-emerald-700">{row.replyRate != null ? `${row.replyRate}%` : '—'}</td>
+                    <td className="py-2 pr-3 text-amber-700">{row.bounceRate != null ? `${row.bounceRate}%` : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="text-left text-xs uppercase text-zinc-500">
+                <tr className="border-b border-zinc-200">
+                  <th className="py-2 pr-3 font-medium">Ящик</th>
+                  <th className="py-2 pr-3 font-medium">Писем</th>
+                  <th className="py-2 pr-3 font-medium">Получателей</th>
+                  <th className="py-2 pr-3 font-medium">Ответы</th>
+                  <th className="py-2 pr-3 font-medium">Отбои</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stats.mailboxes.map((row) => (
+                  <tr key={row.mailbox_id} className="border-b border-zinc-100 last:border-0">
+                    <td className="py-2 pr-3 font-medium text-zinc-900">
+                      {row.email}
+                      {!row.enabled ? <span className="ml-2 text-xs text-zinc-400">выключен</span> : null}
+                    </td>
+                    <td className="py-2 pr-3 text-zinc-600">{row.sent}</td>
+                    <td className="py-2 pr-3 text-zinc-600">{row.reached}</td>
+                    <td className="py-2 pr-3 text-emerald-700">{row.replyRate != null ? `${row.replyRate}%` : '—'}</td>
+                    <td className="py-2 pr-3 text-amber-700">{row.bounceRate != null ? `${row.bounceRate}%` : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </SenderModal>
+      ) : null}
+
+      {/* Разбор проверочной отправки: построчно, что отправили и что доставил
+          провайдер. Одно окно — для любого ящика, открытое из строки. */}
+      {probeDetail ? (
+        <SenderModal
+          title="Проверка отправки"
+          subtitle={
+            probeDetail.status === 'done'
+              ? probeDetail.passed
+                ? 'Заголовки доставленного письма совпадают с отправленными'
+                : 'Есть расхождения — провайдер меняет письмо при доставке'
+              : probeDetail.status === 'failed'
+                ? probeDetail.error ?? 'Проверка не прошла'
+                : 'Письмо отправлено, ждём доставки на контрольный адрес'
+          }
+          onClose={() => setProbeDetail(null)}
+          footer={
+            <button
+              type="button"
+              onClick={() => setProbeDetail(null)}
+              className="rounded-lg px-3 py-2 text-sm text-zinc-600 transition-colors hover:bg-zinc-100"
+            >
+              Закрыть
+            </button>
+          }
+        >
+          {probeDetail.status === 'done' && probeDetail.result?.length ? (
+            <table className="w-full text-sm">
+              <thead className="text-left text-xs uppercase text-zinc-500">
+                <tr className="border-b border-zinc-200">
+                  <th className="py-2 pr-3 font-medium">Проверка</th>
+                  <th className="py-2 pr-3 font-medium">Отправляли</th>
+                  <th className="py-2 pr-3 font-medium">Доставилось</th>
+                  <th className="py-2 font-medium">Итог</th>
+                </tr>
+              </thead>
+              <tbody>
+                {probeDetail.result.map((row, index) => (
+                  <tr key={`${row.check}-${index}`} className="border-b border-zinc-100 last:border-0">
+                    <td className="py-2 pr-3 font-medium text-zinc-900">{row.check}</td>
+                    <td className="py-2 pr-3 font-mono text-xs text-zinc-600">{row.expected ?? '—'}</td>
+                    <td className="py-2 pr-3 font-mono text-xs text-zinc-600">{row.actual ?? '—'}</td>
+                    <td className={`py-2 text-xs ${row.ok ? 'text-emerald-600' : 'text-red-600'}`}>
+                      {row.ok ? 'ок' : 'расхождение'}
+                      {row.note ? <div className="mt-0.5 font-sans text-zinc-500">{row.note}</div> : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p className="py-6 text-sm text-zinc-500">
+              {probeDetail.error ?? 'Результата пока нет — письмо ещё идёт до контрольного адреса.'}
+            </p>
+          )}
+        </SenderModal>
+      ) : null}
     </div>
   );
 }

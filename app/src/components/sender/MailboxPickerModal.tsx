@@ -1,9 +1,10 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { Loader2, Search } from 'lucide-react';
-import { fetchMailboxes, type MailboxDto } from './api';
+import { Check, Loader2, Search, Tag } from 'lucide-react';
+import { fetchMailboxTags, fetchMailboxes, type MailboxDto, type MailboxTagDto } from './api';
 import { MAILBOX_STATUS_LABELS, providerLabel } from './labels';
+import { TagChip } from './MailboxTags';
 import { SenderModal } from './SenderModal';
 
 /** Ящик в выборке: адрес храним рядом с id, чтобы показать его без повторного запроса. */
@@ -15,6 +16,8 @@ export interface PickedMailbox {
 const PAGE_SIZE = 200;
 /** Пауза перед запросом: человек печатает домен, а не отправляет запрос на каждую букву. */
 const SEARCH_DEBOUNCE_MS = 250;
+/** Сколько страниц вытянем, собирая ящики тега: 200 × 5 — весь пул с запасом. */
+const MAX_TAG_PAGES = 5;
 
 interface Props {
   initial: PickedMailbox[];
@@ -39,6 +42,33 @@ export function MailboxPickerModal({ initial, onSave, onClose }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [picked, setPicked] = useState<PickedMailbox[]>(initial);
+  const [tags, setTags] = useState<MailboxTagDto[]>([]);
+  // Какой тег сейчас докладываем: ящики тега доезжают запросом, и на пуле в
+  // несколько сотен это не мгновенно.
+  const [tagBusy, setTagBusy] = useState<string | null>(null);
+  /**
+   * Какие ящики лежат в теге — заполняется, когда тег хоть раз нажали.
+   *
+   * До этого галочки на теге нет, и это честно: связь «тег → ящики» живёт на
+   * сервере, и утверждать по счётчику, что тег уже целиком в выборке, нельзя —
+   * те же двадцать ящиков могли быть выбраны руками из другого тега.
+   */
+  const [tagMailboxIds, setTagMailboxIds] = useState<Map<string, Set<string>>>(new Map());
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetchMailboxTags();
+        if (!cancelled) setTags(res.tags);
+      } catch {
+        /* теги не доехали — остаётся обычный поиск по адресу */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setQuery(search.trim()), SEARCH_DEBOUNCE_MS);
@@ -75,6 +105,45 @@ export function MailboxPickerModal({ initial, onSave, onClose }: Props) {
         ? prev.filter((m) => m.id !== mailbox.id)
         : [...prev, { id: mailbox.id, email: mailbox.email }],
     );
+  };
+
+  /**
+   * Весь тег разом.
+   *
+   * Ящики тега берём запросом, а не из того, что сейчас на экране: экран
+   * показывает первые две сотни и отфильтрован строкой поиска, а «загнать тег
+   * в кампанию» означает весь тег целиком, включая то, что не видно.
+   *
+   * Повторное нажатие снимает тег — иначе взятый по ошибке тег из двадцати
+   * ящиков пришлось бы разбирать галочками.
+   */
+  const toggleTag = async (tag: MailboxTagDto) => {
+    setTagBusy(tag.id);
+    setError(null);
+    try {
+      const collected: PickedMailbox[] = [];
+      for (let page = 1; page <= MAX_TAG_PAGES; page += 1) {
+        const res = await fetchMailboxes({ tagIds: [tag.id], page, pageSize: PAGE_SIZE });
+        collected.push(...res.mailboxes.map((m) => ({ id: m.id, email: m.email })));
+        if (collected.length >= res.total || res.mailboxes.length < PAGE_SIZE) break;
+      }
+      if (!collected.length) return;
+
+      setTagMailboxIds((prev) => new Map(prev).set(tag.id, new Set(collected.map((m) => m.id))));
+      setPicked((prev) => {
+        const known = new Set(prev.map((m) => m.id));
+        const allIn = collected.every((m) => known.has(m.id));
+        if (allIn) {
+          const drop = new Set(collected.map((m) => m.id));
+          return prev.filter((m) => !drop.has(m.id));
+        }
+        return [...prev, ...collected.filter((m) => !known.has(m.id))];
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Не удалось взять ящики тега «${tag.name}»`);
+    } finally {
+      setTagBusy(null);
+    }
   };
 
   const toggleShown = () => {
@@ -124,6 +193,46 @@ export function MailboxPickerModal({ initial, onSave, onClose }: Props) {
         />
       </div>
 
+      {/* Тег одной кнопкой: частый случай — «в эту кампанию шлём с ящиков
+          такого-то клиента», и это ровно один тег, а не двадцать галочек. */}
+      {tags.length ? (
+        <div className="mt-3">
+          <p className="mb-1.5 text-xs text-zinc-500">
+            Взять целиком по тегу — нажмите; повторное нажатие снимает весь тег:
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {tags.map((tag) => {
+              // «Выбран» — когда в выборке уже столько ящиков этого тега,
+              // сколько в нём есть. Считаем по счётчику тега, а не по экрану:
+              // на экране первые две сотни и результат поиска.
+              const inPicked = picked.filter((m) => tagMailboxIds.get(tag.id)?.has(m.id)).length;
+              const full = tag.mailboxes > 0 && inPicked >= tag.mailboxes;
+              return (
+                <button
+                  key={tag.id}
+                  type="button"
+                  onClick={() => void toggleTag(tag)}
+                  disabled={tagBusy != null}
+                  className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs transition-colors disabled:opacity-50 ${
+                    full ? 'bg-blue-600 text-white' : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'
+                  }`}
+                >
+                  {tagBusy === tag.id ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : full ? (
+                    <Check className="h-3 w-3" />
+                  ) : (
+                    <Tag className="h-3 w-3 opacity-60" />
+                  )}
+                  {tag.name}
+                  <span className={full ? 'opacity-80' : 'text-zinc-400'}>{tag.mailboxes}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-500">
         <span>
           {loading ? 'Загружаю…' : `Найдено: ${total}`}
@@ -168,6 +277,7 @@ export function MailboxPickerModal({ initial, onSave, onClose }: Props) {
                   className="h-4 w-4 cursor-pointer rounded border-zinc-300"
                 />
                 <span className="min-w-0 flex-1 truncate text-sm text-zinc-900">{mailbox.email}</span>
+                {mailbox.tag ? <TagChip name={mailbox.tag.name} /> : null}
                 {/* Снятая галочка на вкладке «Ящики» сильнее выбора в кампании:
                     планировщик такой ящик пропустит, и об этом надо сказать
                     здесь, а не оставлять человека гадать, почему письма стоят. */}

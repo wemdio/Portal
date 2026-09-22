@@ -31,6 +31,17 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
         }
       
         if (Object.keys(update).length === 0) return jsonError('Нет полей для обновления', 400);
+
+        // Архивный аккаунт включить нельзя: иначе он уйдёт в рассылку, так и
+        // оставшись в архиве, — невидимый в списке кампании.
+        if (update.is_active === true) {
+          const { data: current } = await auth.supabase
+            .from('tg_outreach_accounts')
+            .select('archived_at')
+            .eq('id', id)
+            .maybeSingle();
+          if (current?.archived_at) return jsonError('Аккаунт в архиве — сначала верните его из архива', 409);
+        }
       
         const { data, error } = await auth.supabase
           .from('tg_outreach_accounts')

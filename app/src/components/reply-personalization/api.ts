@@ -21,7 +21,8 @@ async function fetchWithAuth<T>(path: string, options?: RequestInit): Promise<T>
 export interface ProjectListItem {
   id: string;
   client: string;
-  hasKnowledgeBase: boolean;
+  /** Почему по проекту не собрать ответ (сейчас — только нет брифа); null — всё есть. */
+  missingReason: string | null;
 }
 
 export function fetchProjects() {
@@ -64,19 +65,26 @@ export function saveKnowledgeBase(projectId: string, patch: Omit<KnowledgeBaseDt
   });
 }
 
-export function saveGlobalKnowledgeBase(patch: { toneNotes: string; exampleCase: string }) {
-  return fetchWithAuth<{ global: GlobalKnowledgeBaseDto }>(`${BASE}/global-kb`, {
+/** systemPrompt/defaultSystemPrompt приходят только админу. */
+export interface GlobalSettingsResponse {
+  global: GlobalKnowledgeBaseDto;
+  systemPrompt?: string;
+  defaultSystemPrompt?: string;
+}
+
+export function saveGlobalKnowledgeBase(patch: { toneNotes: string; exampleCase: string; systemPrompt?: string }) {
+  return fetchWithAuth<GlobalSettingsResponse>(`${BASE}/global-kb`, {
     method: 'PUT',
     body: JSON.stringify(patch),
   });
 }
 
 export function fetchGlobalKnowledgeBase() {
-  return fetchWithAuth<{ global: GlobalKnowledgeBaseDto }>(`${BASE}/global-kb`);
+  return fetchWithAuth<GlobalSettingsResponse>(`${BASE}/global-kb`);
 }
 
 export function fetchReplies(projectId: string) {
-  return fetchWithAuth<{ replies: ReplyListItem[]; needsKnowledgeBase: boolean }>(
+  return fetchWithAuth<{ replies: ReplyListItem[]; missingReason: string | null }>(
     `${BASE}/projects/${projectId}/replies`,
   );
 }
@@ -100,6 +108,13 @@ export interface GenerateResponse {
   contextComplete: boolean;
 }
 
+/** Сохранённый неотправленный черновик ИИ по письму. */
+export function fetchOpenDraft(qualificationId: string) {
+  return fetchWithAuth<{ draft: (GenerateResponse & { createdAt: string }) | null }>(
+    `${BASE}/replies/${qualificationId}/generate`,
+  );
+}
+
 export function generateReply(qualificationId: string, projectId: string) {
   return fetchWithAuth<GenerateResponse>(`${BASE}/replies/${qualificationId}/generate`, {
     method: 'POST',
@@ -107,10 +122,11 @@ export function generateReply(qualificationId: string, projectId: string) {
   });
 }
 
-export function sendReply(qualificationId: string, draftId: string, text: string) {
+/** draftId — ответ по сгенерированному черновику; null — ответ, написанный вручную. */
+export function sendReply(qualificationId: string, input: { draftId: string | null; projectId: string; text: string }) {
   return fetchWithAuth<{ ok: true }>(`${BASE}/replies/${qualificationId}/send`, {
     method: 'POST',
-    body: JSON.stringify({ draftId, text }),
+    body: JSON.stringify({ draftId: input.draftId ?? undefined, projectId: input.projectId, text: input.text }),
   });
 }
 

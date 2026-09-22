@@ -15,6 +15,12 @@ const AUTO_BODY = /(я в отпуске|вернусь|out of the office|curren
 /** Прогрев ходит по своим ящикам со служебными метками в теме. */
 const WARMUP_SUBJECTS = /(warm-?up|warmy|mailreach|instantly.*warm|\[wu-)/i;
 
+/** Адрес нашего же парка: письма между своими ящиками — прогрев, не ответы. */
+export function isOwnMailboxReply(fromEmail: string | null, ownEmails: ReadonlySet<string>): boolean {
+  if (!fromEmail) return false;
+  return ownEmails.has(fromEmail.toLowerCase());
+}
+
 export interface ReplyInput {
   fromEmail: string | null;
   subject: string | null;
@@ -58,4 +64,41 @@ export function extractBouncedRecipient(body: string | null, mailboxEmail: strin
     if (email !== mailboxEmail.toLowerCase()) return email;
   }
   return null;
+}
+
+/**
+ * Код из поля Status: отчёта о недоставке (DSN) — «5.1.1», «4.2.2», …
+ * Именно он отличает «адреса не существует» от «ящик переполнен» и прочих
+ * временных причин: подавление адреса по ним было бы вечным и незаслуженным.
+ */
+export function extractBounceStatus(body: string | null): string | null {
+  if (!body) return null;
+  // Средняя часть — от одной до трёх цифр: 5.1.1 и 5.2.22 одинаково валидны.
+  const match = body.match(/(?:^|\n)\s*Status:\s*([245])\.(\d{1,3})\.(\d+)/i);
+  return match ? `${match[1]}.${match[2]}.${match[3]}` : null;
+}
+
+/**
+ * Вечное подавление адреса — только за «адреса нет» (5.1.x). Переполнение
+ * ящика, greylisting и прочие 4.x/5.2.x проходят: адрес жив, повторная
+ * кампания имеет право написать ещё раз.
+ */
+export function bounceIsPermanent(status: string | null): boolean {
+  if (!status) return true; // код не разобрался — действуем по-старому
+  return /^5\.1\./.test(status);
+}
+
+// Граница перед ключевым словом — не-буква: «отпишите» в середине фразы это
+// тот же отказ, что и «Стоп» с новой строки, а влезание внутрь чужого слова
+// исключаем.
+const STOP_REQUEST = /(?:^|[^\p{L}])(стоп|отпиш\p{L}*|отпис\p{L}*|не\s+пиш\p{L}+|удал\p{L}*\s+(меня|адрес|из\s+базы)|unsubscribe|remove\s+me|stop\s+(?:emailing|sending)|take\s+me\s+off)/iu;
+
+/**
+ * Просьба больше не писать. Такой ответ — не лид для дожима, а отказ:
+ * цепочка обрывается, адрес уходит в глобальный стоп-лист (reason
+ * 'unsubscribe'), чтобы следующая кампания не написала снова.
+ */
+export function isStopRequest(body: string | null, subject: string | null): boolean {
+  const text = `${subject ?? ''}\n${body ?? ''}`;
+  return STOP_REQUEST.test(text.slice(0, 2000));
 }

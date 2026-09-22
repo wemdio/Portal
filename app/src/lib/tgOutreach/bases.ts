@@ -24,6 +24,7 @@ export async function sanitizeSendingAccountIds(
     .from('tg_outreach_accounts')
     .select('id')
     .eq('campaign_id', campaignId)
+    .is('archived_at', null)
     .in('id', candidates);
   return ((accounts ?? []) as Array<{ id: string }>).map((a) => a.id);
 }

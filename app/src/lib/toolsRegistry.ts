@@ -84,6 +84,8 @@ export const ALL_TOOL_IDS = [
   'vertical-engine-v2',
   'reply-personalization',
   'sender',
+  'polza-outreach',
+  'polza-ru-outreach',
 ] as const;
 
 export type ToolId = (typeof ALL_TOOL_IDS)[number];
@@ -448,6 +450,35 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     badgeVariant: 'amber',
     accentColor: 'emerald',
   },
+  'polza-outreach': {
+    id: 'polza-outreach',
+    title: 'Английский автоаутрич',
+    title_en: 'English outreach (auto)',
+    description:
+      'Свежие вакансии SDR/BDR → компания и почта → цепочка из четырёх писем на английском.',
+    description_en:
+      'Fresh SDR/BDR job posts → company and mailbox → a four-email English sequence.',
+    href: '/tools/polza-outreach',
+    accentColor: 'blue',
+    badge: 'В разработке',
+    badge_en: 'In development',
+    badgeVariant: 'amber',
+  },
+  'polza-ru-outreach': {
+    id: 'polza-ru-outreach',
+    title: 'Наш автоаутрич',
+    title_en: 'Russian outreach (auto)',
+    description:
+      'Русский аутрич Polza по сигналам: найм SDR, автоматизация аутрича, выставки/контракты/новости → компания и почта → готовая цепочка писем.',
+    description_en:
+      'Russian signal-based outreach: SDR hiring, automated outreach, trade shows/contracts/news → company and mailbox → ready email sequence.',
+    href: '/tools/polza-ru-outreach',
+    accentColor: 'emerald',
+    badge: 'В разработке',
+    badge_en: 'In development',
+    badgeVariant: 'amber',
+  },
+
   'reply-personalization': {
     id: 'reply-personalization',
     title: 'Персонализированные ответы',
@@ -473,7 +504,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   {
     label: 'Аутрич',
     label_en: 'Outreach',
-    toolIds: ['instantly', 'li-outreach', 'tg-outreach', 'email-sequence', 'email-sequence-v2', 'sales-copilot', 'sales-hypotheses', 'hypothesis-engine', 'vertical-engine-v2', 'reply-personalization', 'sender', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach', 'event-outreach', 'sales-chat-analyzer'],
+    toolIds: ['instantly', 'li-outreach', 'tg-outreach', 'polza-outreach', 'polza-ru-outreach', 'email-sequence', 'email-sequence-v2', 'sales-copilot', 'sales-hypotheses', 'hypothesis-engine', 'vertical-engine-v2', 'reply-personalization', 'sender', 'ai-caller', 'ai-caller-v2', 'bugor-outreach', 'nash-outreach', 'event-outreach', 'sales-chat-analyzer'],
   },
   {
     label: 'Базы и данные',

@@ -150,6 +150,30 @@ services:
     networks:
       - portal-network
 
+  worker-polza-outreach:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-polza-outreach
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      # S4 (LLM-разбор вакансий) ходит в OpenRouter через этот ключ
+      - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
+      - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
+      - WORKER_KIND=polzaoutreach
+    stop_grace_period: 3h
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+          cpus: '0.75'
+          pids: 512
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   worker-search:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-search
@@ -506,8 +530,10 @@ services:
         # закладывались под 10 кампаний, лимит подняли до 12 — добавляем тот же
         # запас, иначе первый же день с полной загрузкой упрётся в OOM, и
         # docker снесёт воркер вместе со всеми идущими кампаниями.
+        # 19.09.2026: health-check дважды за 15 минут показал 3.30–3.33 ГБ из
+        # 4 ГБ (82–83%) — до OOM оставалось меньше 700 МБ, лимит поднят до 6144M.
         limits:
-          memory: 4096M
+          memory: 6144M
           cpus: '2'
           pids: 512
     restart: unless-stopped
