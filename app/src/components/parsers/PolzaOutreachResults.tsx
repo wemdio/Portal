@@ -2,7 +2,8 @@
 
 import { Fragment, useState } from 'react';
 import type { PolzaOutreachCompanyRow, PolzaOutreachFunnel, ParserJobStatus } from '@/types';
-import { PolzaOutreachStages } from '@/components/parsers/PolzaOutreachStages';
+import { POLZA_STAGE_LABELS, PolzaOutreachStages } from '@/components/parsers/PolzaOutreachStages';
+import { PolzaOutreachStageModal } from '@/components/parsers/PolzaOutreachStageModal';
 import { ChevronDown, ChevronRight, Download, ExternalLink, FileText, Loader2, Mail, Square, Trash2 } from 'lucide-react';
 
 type Props = {
@@ -14,6 +15,8 @@ type Props = {
   jobStatus: ParserJobStatus | null;
   /** Текст ошибки запуска — показываем у этапа, на котором встали. */
   jobError?: string | null;
+  /** Строки всего прогона — для разбора этапа. */
+  loadAllRows?: () => Promise<PolzaOutreachCompanyRow[]>;
   currentPage: number;
   totalPages: number;
   onPageChange: (page: number) => void;
@@ -166,6 +169,7 @@ export function PolzaOutreachResults({
   loading,
   jobStatus,
   jobError,
+  loadAllRows,
   currentPage,
   totalPages,
   onPageChange,
@@ -176,6 +180,7 @@ export function PolzaOutreachResults({
   onDeleteJob,
 }: Props) {
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [openStage, setOpenStage] = useState<number | null>(null);
   const running = jobStatus === 'running' || jobStatus === 'pending';
   const hasItems = items.length > 0;
 
@@ -188,7 +193,19 @@ export function PolzaOutreachResults({
         funnel={funnel}
         run={jobStatus ? { running, failed: jobStatus === 'failed' } : null}
         error={jobError}
+        onOpenStage={loadAllRows ? setOpenStage : undefined}
       />
+
+      {openStage !== null && loadAllRows ? (
+        <PolzaOutreachStageModal
+          stageIndex={openStage}
+          stageLabel={POLZA_STAGE_LABELS[openStage] ?? 'Этап'}
+          loadRows={loadAllRows}
+          reviewLabel={reviewLabel}
+          exclusionLabel={(reason) => EXCLUSION_LABELS[reason] ?? reason}
+          onClose={() => setOpenStage(null)}
+        />
+      ) : null}
 
       {exclusionCounts && Object.keys(exclusionCounts).length > 0 ? (
         <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">

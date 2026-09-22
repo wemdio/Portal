@@ -174,6 +174,23 @@ export function PolzaOutreachView() {
     }
   }, []);
 
+  /**
+   * Все строки прогона — для разбора этапа.
+   *
+   * Таблица листается по полусотне, а этап — это про весь прогон: показывать
+   * его по строкам, случайно оказавшихся на текущей странице, значило бы
+   * отвечать не на тот вопрос. Потолок ручки — тысяча строк, лимит запуска —
+   * триста компаний, так что в один запрос прогон помещается целиком.
+   */
+  const loadAllRows = useCallback(async (): Promise<PolzaOutreachCompanyRow[]> => {
+    if (!activeJobId) return [];
+    const data = await apiFetch<ResultsResponse>(
+      `/api/parsers/polza-outreach/${activeJobId}/results?limit=1000&offset=0`,
+      { method: 'GET' },
+    );
+    return data.items ?? [];
+  }, [activeJobId]);
+
   const fetchAllResults = useCallback(async (jobId: string) => {
     const all: PolzaOutreachCompanyRow[] = [];
     let offset = 0;
@@ -422,6 +439,7 @@ export function PolzaOutreachView() {
           loading={resultsLoading}
           jobStatus={activeJob?.status ?? null}
           jobError={activeJob?.error_message ?? null}
+          loadAllRows={activeJobId ? loadAllRows : undefined}
           currentPage={resultsPage}
           totalPages={totalPages}
           onPageChange={handlePageChange}

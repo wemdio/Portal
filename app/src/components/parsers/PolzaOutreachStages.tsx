@@ -101,16 +101,21 @@ function Marker({ state, index }: { state: StageState; index: number }) {
   );
 }
 
+export const POLZA_STAGE_LABELS = STAGES.map((stage) => stage.label);
+
 export function PolzaOutreachStages({
   funnel,
   run,
   error,
+  onOpenStage,
 }: {
   funnel: PolzaOutreachFunnel | null | undefined;
   /** Текущий запуск: идёт он или упал. null — запусков ещё не было. */
   run: { running: boolean; failed: boolean } | null;
   /** Текст ошибки запуска — показываем у того этапа, на котором встали. */
   error?: string | null;
+  /** Открыть разбор этапа: кто прошёл, кто нет и почему. */
+  onOpenStage?: (index: number) => void;
 }) {
   const states = stageStates(funnel, run);
   const counts = STAGES.map((stage) => (funnel ? Number(funnel[stage.key] ?? 0) : 0));
@@ -140,7 +145,16 @@ export function PolzaOutreachStages({
           const dropped = prev !== null && state === 'done' ? Math.max(0, prev - value) : null;
 
           return (
-            <li key={stage.key} className={`flex items-start gap-3 rounded-lg border px-3 py-2.5 ${ROW_CLASS[state]}`}>
+            <li key={stage.key}>
+              {/* Строка — кнопка: за числом «домен нашёлся у 32 из 100» сразу
+                  встаёт вопрос «а у кого не нашёлся», и ответ должен быть в
+                  одном клике, а не в выгрузке CSV. */}
+              <button
+                type="button"
+                onClick={() => onOpenStage?.(index)}
+                disabled={!onOpenStage}
+                className={`flex w-full items-start gap-3 rounded-lg border px-3 py-2.5 text-left transition enabled:hover:border-indigo-400 ${ROW_CLASS[state]}`}
+              >
               <Marker state={state} index={index} />
 
               <div className="min-w-0 flex-1">
@@ -163,6 +177,7 @@ export function PolzaOutreachStages({
               >
                 {value}
               </span>
+              </button>
             </li>
           );
         })}
