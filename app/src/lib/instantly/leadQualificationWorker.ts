@@ -3028,7 +3028,7 @@ export async function drainWebhookQueue(): Promise<number> {
     .update({ processed: true })
     .in('id', ids)
     .eq('processed', false)
-    .select('id, campaign_id, lead_email, thread_id, created_at');
+    .select('id, email_id, campaign_id, lead_email, thread_id, created_at');
   if (!claimed || claimed.length === 0) return 0;
 
   const accountForCampaign = (campaignId: string): string | null => {
@@ -3043,6 +3043,7 @@ export async function drainWebhookQueue(): Promise<number> {
   let fetched = 0;
   for (const row of claimed as Array<{
     id: string;
+    email_id: string | null;
     campaign_id: string | null;
     lead_email: string | null;
     thread_id: string | null;
@@ -3055,10 +3056,22 @@ export async function drainWebhookQueue(): Promise<number> {
     const accountId = accountForCampaign(campaignId);
     if (!accountId) continue; // не Portal-linked/client кампания — поллинг её тоже не берёт
 
-    if (fetched > 0) await new Promise((r) => setTimeout(r, interDelay));
-    fetched++;
     let replyForError: Email | null = null;
     try {
+      // Polling may already have persisted this exact inbound (including a
+      // durable retry). ACK its webhook without spending another /emails read.
+      // A failed DB lookup is not proof of absence: keep the event retryable.
+      if (row.email_id) {
+        const { data: existing, error } = await db
+          .from('instantly_lead_qualifications')
+          .select('instantly_email_id')
+          .eq('instantly_email_id', row.email_id)
+          .maybeSingle();
+        if (error) throw new Error(`${OWNERSHIP_DEFER_ERROR_PREFIX}: webhook dedup unavailable: ${error.message}`);
+        if (existing) continue;
+      }
+      if (fetched > 0) await new Promise((r) => setTimeout(r, interDelay));
+      fetched++;
       // Один вызов Instantly: проверка готовности + источник настоящего id письма.
       const ctx = await fetchThreadContext(campaignId, leadEmail, row.thread_id, accountId);
       if (!ctx) {
@@ -3079,16 +3092,19 @@ export async function drainWebhookQueue(): Promise<number> {
       } as Email;
       if (!reply.id) continue; // без id невозможен дедуп-конвердж — пропускаем
       if (replyAutomationExpired(notBefore, reply)) continue;
-      replyForError = reply;
 
       // Дедуп по авторитетному id ДО AI: если поллинг (или прошлый drain) уже
       // квалифицировал — пропускаем без вызова модели.
-      const { data: existing } = await db
+      const { data: existing, error: dedupError } = await db
         .from('instantly_lead_qualifications')
         .select('instantly_email_id')
         .eq('instantly_email_id', reply.id)
         .maybeSingle();
+      if (dedupError) throw new Error(`${OWNERSHIP_DEFER_ERROR_PREFIX}: webhook dedup unavailable: ${dedupError.message}`);
       if (existing) continue;
+      // Only absent rows can receive a pending retry. A failed dedup read must
+      // reopen the webhook, not overwrite a possibly completed qualification.
+      replyForError = reply;
 
       await qualifyOneReply(db, reply, apiKey, accountId, ctx);
       qualified++;

@@ -120,7 +120,7 @@ import { capVeContactsPerCompany, normalizeVeMaxEmailsPerCompany, stripVeCompany
 import { relevanceHash, VeRelevanceCheckpointError, VePreviewCheckpointConflict, type VeRelevanceCheckpoint } from '../relevanceCheckpoint';
 import {
   buildVeRelevanceReviewBatch, mergeVeRelevanceRows, needsVeRelevanceReview, readVeRelevanceReserve, readVeRelevanceSourceRows, summarizeVeRelevanceReserve,
-  veRelevanceCompanyKey, veRelevanceRowKey, type VeRelevanceReserve, type VeRelevanceReserveSummary,
+  veRelevanceCompanyKey, veRelevanceRowKey, veSavedReviewSignature, type VeRelevanceReserve, type VeRelevanceReserveSummary,
 } from '../relevanceReserve';
 import { cleanVeCompanyNames, type VeCompanyNameCheckpoint } from '../companyNameCleanup';
 import { recoverVeSavedEmails, needsVeSavedEmailReview, hasPendingVeSavedEmailRecovery, type VeSavedEmailRecoveryState } from '../savedEmailRecovery';
@@ -3220,7 +3220,16 @@ async function reviewSavedRelevance(
   // unrelated constructor jobs. Review those companies now; unknown email
   // recipients still cannot enter the ready projection. Drain the same child
   // before finalizing, including when this pass already reaches the target.
-  if (emailRecoveryWaiting && (!rows.some((row) => isVeAcceptedEmailStatus(row._email_status))
+  //
+  // Но «сейчас» — это один раз. Если предыдущий проход вернул ровно тот же
+  // отбор (relevance_review_progress.passes > 0), гейт отдаст те же
+  // сохранённые вердикты и в этот раз: провайдера он не спросит, а база
+  // заплатит полным чтением и перезаписью резерва (19-62 МБ) за нулевой
+  // результат. Пока дочерняя валидация почт не ответила, ждём дёшево;
+  // её вердикты меняют отбор, и следующий проход снова будет осмысленным.
+  const savedReviewStalled = (info.relevance_review_progress?.passes ?? 0) > 0;
+  if (emailRecoveryWaiting && (savedReviewStalled
+    || !rows.some((row) => isVeAcceptedEmailStatus(row._email_status))
     || (target.ready_rows ?? 0) >= target.ready_target)) {
     // Опрос оставлен минутным намеренно. Каждый заход сюда перечитывает строку
     // ve_bases целиком (select('*') на входе стадии), а это 12-80 МБ на базу с
@@ -3627,16 +3636,14 @@ async function completeTargetRound(args: {
   // progress: every verdict came from the checkpoint and no row changed. Stop
   // requesting that pass instead of requeueing every 30 seconds (19.09.2026:
   // one base looped 3000 times on one company). The rows stay in the reserve.
+  // Отпечаток снимается только с отбора (veSavedReviewSignature): число готовых
+  // контактов и сырой статус валидации сюда больше не входят. Они менялись от
+  // дочерней валидации почт и от пересчёта лимита на компанию и обнуляли
+  // детектор на каждом раунде — цикл жил на этой ряби, а не на работе.
+  // Форма отпечатка изменилась, поэтому после раскатки каждая база делает ровно
+  // один лишний проход и только потом снова защёлкивается.
   const reviewSignature = automaticBatch?.rows.length
-    ? relevanceHash([readyRows.length, automaticBatch.rows.map((row) => [veRelevanceRowKey(row), row._email_status ?? null,
-      (row._ve_relevance as Record<string, unknown> | undefined)?.status ?? null,
-      (row._ve_relevance as Record<string, unknown> | undefined)?.review_attempts ?? null,
-      (row._ve_relevance as Record<string, unknown> | undefined)?.website_review_version ?? null,
-      (row._ve_relevance as Record<string, unknown> | undefined)?.search_deferred ?? null,
-      // A fast pass that only marks companies as seen is progress too; the
-      // element exists only while the triage is enabled, so hashes saved
-      // without it stay comparable.
-      ...(triageEnabled ? [(row._ve_relevance as Record<string, unknown> | undefined)?.triage_version ?? null] : [])]).sort()])
+    ? relevanceHash(veSavedReviewSignature(automaticBatch.rows, { triage: triageEnabled }))
     : null;
   const stalledReview = reviewSignature !== null && info.relevance_review_progress?.signature === reviewSignature;
   if (reviewSignature === null) delete info.relevance_review_progress;

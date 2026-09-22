@@ -1117,7 +1117,7 @@ export async function resolveEffectiveReplyOwner(args: {
     prefetchedContext,
     trustPrefetchedParent = false,
   } = args;
-  const providerContext =
+  const fetchedProviderContext =
     prefetchedContext !== undefined
       ? prefetchedContext
       : await fetchThreadContext(providerCampaignId, leadEmail, reply.thread_id, accountId,
@@ -1127,6 +1127,15 @@ export async function resolveEffectiveReplyOwner(args: {
           ? { requestPriority: args.evidencePriority ?? 'recovery',
               timeoutMs: 20_000, timeoutIncludesBody: true, retryRateLimits: false,
             } : undefined);
+  // A missing search result must not discard the authoritative inbound already
+  // saved by polling/recovery. Keep history explicitly incomplete until the
+  // workspace evidence scan proves otherwise; never fabricate an outbound.
+  const providerContext: ThreadContext = fetchedProviderContext ?? {
+    replyEmail: reply,
+    threadEmails: [reply],
+    lastOutbound: null,
+    historyFetchFailed: true,
+  };
   const mailbox = normalizeMailbox(reply.eaccount);
   if (!mailbox) {
     // A quote alone can be forwarded or forged. Use exactly one sender that
