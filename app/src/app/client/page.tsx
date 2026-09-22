@@ -26,6 +26,8 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { Mail, Plus, Search, X, RefreshCw } from 'lucide-react';
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { OnboardingBanner } from '@/components/client/OnboardingBanner';
+import { useClientPortalContext } from '@/lib/clientPortalContext';
+import { shouldShowOpenMetrics } from '@/lib/clientOpenMetrics';
 
 // Flat row returned by /api/client/campaigns (data comes from DB, analytics inline)
 interface CampaignRow {
@@ -184,6 +186,9 @@ function CampaignsPageContent() {
   const [error, setError] = useState('');
   const [campaigns, setCampaigns] = useState<CampaignRow[]>([]);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const { portalMode } = useClientPortalContext();
+  const showOpens = shouldShowOpenMetrics(portalMode);
+
   const [sortCol, setSortCol] = useState<SortCol>('name');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
   const [searchInput, setSearchInput] = useState(query);
@@ -432,7 +437,7 @@ function CampaignsPageContent() {
               Кампаний пока нет.
             </span>
             {' '}Запустите первую — мы покажем здесь её метрики (отправки,
-            открытия, ответы) в реальном времени.
+            ответы, лиды) в реальном времени.
           </p>
           <Link
             href={'/client/launch' as Route}
@@ -516,8 +521,12 @@ function CampaignsPageContent() {
             style={{ color: 'var(--cp-paper-mute)' }}
           >
             {totals.sent.toLocaleString('ru-RU')} отправлено
-            <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
-            {openRate}% открытий
+            {showOpens && (
+              <>
+                <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
+                {openRate}% открытий
+              </>
+            )}
             <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
             {replyRate}% ответов
             <span style={{ color: 'var(--cp-paper-faint)' }}>
@@ -616,8 +625,12 @@ function CampaignsPageContent() {
                       style={{ color: 'var(--cp-paper-mute)' }}
                     >
                       {sent.toLocaleString('ru-RU')} отправлено
-                      <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
-                      {or_}% откр
+                      {showOpens && (
+                        <>
+                          <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
+                          {or_}% откр
+                        </>
+                      )}
                       <span style={{ color: 'var(--cp-paper-faint)' }}> · </span>
                       {rr}% отв
                     </p>
@@ -650,23 +663,27 @@ function CampaignsPageContent() {
                           { col: 'replied' as SortCol, label: 'Ответы', align: 'right' },
                           { col: 'replyRate' as SortCol, label: '% ответов', align: 'right' },
                         ] as const
-                      ).map(({ col, label, align }) => (
-                        <th
-                          key={col}
-                          onClick={() => handleSort(col)}
-                          className={`ds-eyebrow px-5 py-3 text-${align} cursor-pointer select-none whitespace-nowrap`}
-                          style={{
-                            color:
-                              sortCol === col
-                                ? 'var(--cp-paper)'
-                                : 'var(--cp-paper-faint)',
-                            fontWeight: sortCol === col ? 600 : 500,
-                          }}
-                        >
-                          {label}
-                          <SortIcon active={sortCol === col} dir={sortDir} />
-                        </th>
-                      ))}
+                      )
+                        // Открытия скрыты вместе с колонками: сортировать по
+                        // невидимой метрике нечем — заголовок и есть кнопка.
+                        .filter(({ col }) => showOpens || (col !== 'opened' && col !== 'openRate'))
+                        .map(({ col, label, align }) => (
+                          <th
+                            key={col}
+                            onClick={() => handleSort(col)}
+                            className={`ds-eyebrow px-5 py-3 text-${align} cursor-pointer select-none whitespace-nowrap`}
+                            style={{
+                              color:
+                                sortCol === col
+                                  ? 'var(--cp-paper)'
+                                  : 'var(--cp-paper-faint)',
+                              fontWeight: sortCol === col ? 600 : 500,
+                            }}
+                          >
+                            {label}
+                            <SortIcon active={sortCol === col} dir={sortDir} />
+                          </th>
+                        ))}
                     </tr>
                   </thead>
                   <tbody>
@@ -699,18 +716,22 @@ function CampaignsPageContent() {
                           >
                             {sent.toLocaleString('ru-RU')}
                           </td>
-                          <td
-                            className="ds-mono px-5 py-3 text-right"
-                            style={{ borderTop: rowBorder, color: 'var(--cp-paper-mute)' }}
-                          >
-                            {opened.toLocaleString('ru-RU')}
-                          </td>
-                          <td
-                            className="ds-mono px-5 py-3 text-right"
-                            style={{ borderTop: rowBorder, color: 'var(--cp-paper)', fontWeight: 600 }}
-                          >
-                            {or_}%
-                          </td>
+                          {showOpens && (
+                            <>
+                              <td
+                                className="ds-mono px-5 py-3 text-right"
+                                style={{ borderTop: rowBorder, color: 'var(--cp-paper-mute)' }}
+                              >
+                                {opened.toLocaleString('ru-RU')}
+                              </td>
+                              <td
+                                className="ds-mono px-5 py-3 text-right"
+                                style={{ borderTop: rowBorder, color: 'var(--cp-paper)', fontWeight: 600 }}
+                              >
+                                {or_}%
+                              </td>
+                            </>
+                          )}
                           <td
                             className="ds-mono px-5 py-3 text-right"
                             style={{ borderTop: rowBorder, color: 'var(--cp-paper-mute)' }}
