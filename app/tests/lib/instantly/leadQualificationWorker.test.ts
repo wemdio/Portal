@@ -664,11 +664,13 @@ describe('pollAndQualifyReplies', () => {
     expect(qualifyReply).toHaveBeenCalledTimes(1);
     expect({ campaignId: qualifyReply.mock.calls[0][0], maxRetries: qualifyReply.mock.calls[0][3]?.maxRetries })
       .toEqual({ campaignId: 'linked-campaign', maxRetries: undefined });
-    // Контракт против двойного фетча: воркер передаёт УЖЕ зафетченный контекст
-    // (здесь null — fetchThreadContext замокан в null) явно, а qualifyReply при
-    // непустом prefetchedContext (включая null) НЕ рефетчит.
+    // Empty search does not lose the known inbound or cause a second fetch;
+    // qualification receives it with history explicitly marked incomplete.
     expect(qualifyReply.mock.calls[0][3]).toEqual(
-      expect.objectContaining({ prefetchedContext: null }),
+      expect.objectContaining({ prefetchedContext: expect.objectContaining({
+        replyEmail: expect.objectContaining({ id: 'linked-email' }),
+        lastOutbound: null, historyFetchFailed: true,
+      }) }),
     );
     expect(mockInstantlyDb!.upserts).toHaveLength(1);
     expect(mockInstantlyDb!.upserts[0].rows[0]).toEqual(
@@ -2986,6 +2988,27 @@ describe('pollAndQualifyReplies', () => {
     expect(result.context?.threadEmails.map((email) => email.id)).toEqual([
       'many-campaigns-reply',
     ]);
+
+    // The known inbound survives an empty provider search. Complete evidence
+    // releases it; failed history is still explicitly incomplete, not a verdict.
+    fetchThreadContext.mockResolvedValue(null);
+    for (const failHistory of [false, true]) {
+      listEmails.mockImplementation(async () => {
+        if (failHistory) throw new Error('history temporarily unavailable');
+        return { items: [], next_starting_after: null };
+      });
+      const knownInbound = { ...inbound, campaign_id: candidateCampaignIds[0] };
+      const missingContext = await resolveEffectiveReplyOwner({
+        db: mockInstantlyDb! as unknown as Parameters<typeof resolveEffectiveReplyOwner>[0]['db'],
+        reply: knownInbound,
+        providerCampaignId: candidateCampaignIds[0],
+        leadEmail: 'lead@example.com',
+        accountId: 'main',
+      });
+      expect(missingContext).toMatchObject({ status: 'resolved', context: {
+        replyEmail: knownInbound, lastOutbound: null, historyFetchFailed: failHistory,
+      } });
+    }
   });
 
   it('preserves a mapped historical provider campaign and its thread for a late reply', async () => {
@@ -3400,6 +3423,45 @@ describe('pollAndQualifyReplies', () => {
       expect.objectContaining({ id: 'old-empty-context-event', processed: false }),
     ]);
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toHaveLength(0);
+
+    // The poller may persist the same inbound while /emails is unavailable.
+    // Its webhook must ACK without another provider read, for terminal and
+    // durable-pending rows alike. A DB outage must not silently ACK it.
+    for (const status of ['lead', 'not_lead', 'pending', 'lookup-failed', 'legacy-lookup-failed']) {
+      const lookupFailed = status.endsWith('lookup-failed');
+      const legacy = status.startsWith('legacy-');
+      mockInstantlyDb = createMockSupabase({
+        tables: {
+          project_instantly_campaigns: [{ campaign_id: 'linked-campaign', project_id: 'project-1' }],
+          instantly_webhook_events: [{
+            id: 'known-event', email_id: legacy ? null : 'known-email', event_type: 'reply_received',
+            campaign_id: 'linked-campaign', lead_email: 'lead@example.com',
+            thread_id: 'thread-not-indexed', created_at: '2026-08-21T00:00:00.000Z', processed: false,
+          }],
+          instantly_lead_qualifications: [{ instantly_email_id: 'known-email', status }],
+        },
+        ...(lookupFailed ? { errorSelects: {
+          instantly_lead_qualifications: { columnsInclude: 'instantly_email_id', message: 'DB temporarily unavailable' },
+        } } : {}),
+      });
+      fetchThreadContext.mockClear();
+      if (legacy) fetchThreadContext.mockResolvedValue({
+        replyEmail: replyEmail({ id: 'known-email' }), threadEmails: [], lastOutbound: null,
+      });
+      qualifyReply.mockClear();
+      await withWebhookDrainEnabled(async () => {
+        const { drainWebhookQueue } = await import('@/lib/instantly/leadQualificationWorker');
+        expect(await drainWebhookQueue()).toBe(0);
+      });
+      expect(mockInstantlyDb.getRows('instantly_webhook_events')).toEqual([
+        expect.objectContaining({ processed: !lookupFailed }),
+      ]);
+      expect(fetchThreadContext).toHaveBeenCalledTimes(legacy ? 1 : 0);
+      expect(qualifyReply).not.toHaveBeenCalled();
+      expect(mockInstantlyDb.getRows('instantly_lead_qualifications')).toEqual([
+        { instantly_email_id: 'known-email', status },
+      ]);
+    }
   });
 
   it('persists a webhook retry when cold lead-criteria storage is unavailable', async () => {

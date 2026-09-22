@@ -1166,6 +1166,7 @@ function isServiceAcknowledgementBoilerplateSegment(segment: string): boolean {
     SERVICE_ACK_RECEIPT_SEGMENT_PATTERN.test(segment) ||
     SERVICE_ACK_PROCESSING_SEGMENT_PATTERN.test(segment) ||
     SERVICE_ACK_RESPONSE_PROMISE_PATTERN.test(segment) ||
+    /^мы\s+обязательно\s+на\s+него\s+ответим$/iu.test(segment) ||
     SERVICE_ACK_CONDITIONAL_CONTACT_PATTERN.test(segment) ||
     SERVICE_ACK_MATERIALS_INSTRUCTION_PATTERN.test(segment) ||
     SERVICE_ACK_TICKET_ID_PATTERN.test(segment) ||
@@ -1557,6 +1558,34 @@ function getPreReplyOutboundTexts(ctx: ThreadContext): string[] {
     })
     .map((email) => getBodyText(email.body))
     .filter(Boolean);
+}
+
+function isReplyOnlySignature(replyText: string): boolean {
+  const lines = replyText.replace(/\r\n?/g, '\n').split('\n').map(line => line.trim()).filter(Boolean);
+  if (!lines.length || !SIGNATURE_BOUNDARY_PATTERN.test(lines[0])) return false;
+  let hasIdentity = false;
+  for (const raw of lines) {
+    const line = raw.replace(/^(?:с\s+(?:уважением|наилучшими\s+пожеланиями)|best\s+regards|kind\s+regards|regards|sincerely)[,.!]?\s*/iu, '').trim();
+    if (!line || /^--$/.test(line)) continue;
+    // Check the WHOLE remainder, including anything after the signature.
+    // Dictionary names plus a narrow proper-case surname fallback cover less
+    // common names without treating arbitrary two-word CTAs as a signature.
+    const properName = /^(?:[А-ЯЁ][а-яё]+(?:-[А-ЯЁ]?[а-яё]+)?\s+){1,2}[А-ЯЁ][а-яё]+(?:-[А-ЯЁ]?[а-яё]+)?$/u.test(line);
+    if ((/^[А-ЯЁ][а-яё]+$/u.test(line) && isLikelyContactName(line)) ||
+        (properName && (isLikelyContactName(line) || /(?:ов|ев|ёв|ин|ова|ева|ёва|ина|ский|ская)$/iu.test(line)))) {
+      hasIdentity = true;
+      continue;
+    }
+    if (/^(?:ООО|АО|ПАО|ЗАО|ОАО|ТОО)\s+[«"][^«»"\n]{2,100}[»"]$/u.test(line)) continue;
+    const contact = stripContactArtifacts(line);
+    if (contact.hadArtifact && /^(?:(?:тел(?:ефон)?|моб(?:ильный)?|факс|e-?mail|email|почта|phone|mobile)[.:\s]*)?$/iu.test(contact.text)) {
+      hasIdentity = true;
+      continue;
+    }
+    if (/^(?:(?:сайт|website)[.:\s]*)?https?:\/\/[^\s<>]+$/iu.test(line)) continue;
+    return false;
+  }
+  return hasIdentity;
 }
 
 function isReplyOnlyQuotedHistory(ctx: ThreadContext, replyText: string): boolean {
@@ -3370,6 +3399,16 @@ export async function qualifyReply(
       isLead: false, customCriteriaMatched: false, proposalSeen: false,
       interestSignals: [], nonLeadKind: 'service_followup', machineReplyKind: null,
       reason: 'Поддержка указала форму подачи заявки; интерес к нашему предложению ещё не подтверждён.',
+      confidence: 0.99, needsReview: false, objectionHandleable: false, objectionDraft: null,
+      threadContext: ctx,
+    };
+  }
+
+  if (isReplyOnlySignature(replyText)) {
+    return {
+      isLead: false, customCriteriaMatched: false, proposalSeen: false,
+      interestSignals: [], nonLeadKind: 'service_followup', machineReplyKind: null,
+      reason: 'В письме только подпись с контактами; нового ответа или намеренной передачи контакта нет.',
       confidence: 0.99, needsReview: false, objectionHandleable: false, objectionDraft: null,
       threadContext: ctx,
     };
