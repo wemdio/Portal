@@ -20,6 +20,9 @@ type Props = {
   currentPage: number;
   totalPages: number;
   onPageChange: (page: number) => void;
+  /** Показывать только готовые к отправке строки. */
+  readyOnly: boolean;
+  onReadyOnlyChange: (value: boolean) => void;
   actionsBusy: boolean;
   exportProgress: string | null;
   onExportCsv: () => void;
@@ -174,6 +177,8 @@ export function PolzaOutreachResults({
   currentPage,
   totalPages,
   onPageChange,
+  readyOnly,
+  onReadyOnlyChange,
   actionsBusy,
   exportProgress,
   onExportCsv,
@@ -185,6 +190,7 @@ export function PolzaOutreachResults({
   const [openStage, setOpenStage] = useState<number | null>(null);
   const running = jobStatus === 'running' || jobStatus === 'pending';
   const hasItems = items.length > 0;
+  const readyCount = funnel ? Number(funnel.ready ?? 0) : null;
 
   return (
     <div className="space-y-4">
@@ -233,11 +239,29 @@ export function PolzaOutreachResults({
       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-4 border-b border-gray-200 px-6 py-4">
           <div className="flex items-center gap-2">
-            <h3 className="text-lg font-semibold text-gray-900">Компании ({count})</h3>
+            <h3 className="text-lg font-semibold text-gray-900">
+              {readyOnly ? 'Готовые к отправке' : 'Компании'} ({count})
+            </h3>
             {loading ? <Loader2 className="h-4 w-4 animate-spin text-gray-400" /> : null}
             {exportProgress ? <span className="text-xs text-gray-500">{exportProgress}</span> : null}
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {/* Отсеянные компании нужны, когда разбираешься, почему выход
+                такой; когда пора отправлять — мешают. Переключатель отвечает
+                сразу за таблицу и за обе выгрузки: что видно, то и выгрузится. */}
+            <button
+              type="button"
+              onClick={() => onReadyOnlyChange(!readyOnly)}
+              className={`inline-flex items-center rounded-lg border px-3 py-1.5 text-sm font-medium transition ${
+                readyOnly
+                  ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                  : 'border-gray-200 text-gray-700 hover:bg-gray-50'
+              }`}
+            >
+              <Mail className="mr-1.5 h-4 w-4" />
+              Только готовые
+              {readyCount != null ? <span className="ml-1.5 text-xs opacity-70">{readyCount}</span> : null}
+            </button>
             <button
               type="button"
               onClick={onExportCsv}

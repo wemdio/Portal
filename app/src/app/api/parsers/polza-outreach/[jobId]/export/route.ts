@@ -33,7 +33,7 @@ const COLUMNS: { header: string; key: string; width: number }[] = [
   { header: 'Outbound-мандат', key: 'outbound_mandate', width: 16 },
   { header: 'Цитата про мандат', key: 'outbound_evidence', width: 48 },
   { header: 'Почта', key: 'selected_company_email', width: 28 },
-  { header: 'Тип почты', key: 'email_type', width: 14 },
+  { header: 'Тип почты', key: 'email_type', width: 18 },
   { header: 'Статус', key: 'status', width: 18 },
   { header: 'Причина исключения', key: 'exclusion_reason', width: 22 },
   { header: 'На ручную проверку', key: 'review_reason', width: 22 },
@@ -55,6 +55,12 @@ const STATUS_RU: Record<string, string> = {
   qualified: 'квалифицирована',
   ready: 'готово',
   failed: 'ошибка',
+};
+
+const EMAIL_TYPE_RU: Record<string, string> = {
+  department_company: 'отдел продаж',
+  generic_company: 'общий ящик',
+  person_company: 'личный ящик',
 };
 
 const REASON_RU: Record<string, string> = {
@@ -93,12 +99,17 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   }
 
   const { jobId } = await ctx.params;
-  const { data: rows, error } = await supabase
+  // Фильтр приходит из таблицы: включён режим «только готовые» — в файле
+  // ровно те строки, которые оператор видит на экране и собирается отправить.
+  const statusFilter = req.nextUrl.searchParams.get('status');
+  let query = supabase
     .from('polza_outreach_companies')
     .select('*')
     .eq('job_id', jobId)
     .order('created_at', { ascending: true })
     .limit(5000);
+  if (statusFilter) query = query.eq('status', statusFilter);
+  const { data: rows, error } = await query;
 
   if (error) {
     await logError('parser.polza_outreach.export.failed', error, { jobId }, { userId, route: req.nextUrl.pathname });
@@ -124,6 +135,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       job_published_at: typeof row.job_published_at === 'string' ? row.job_published_at.slice(0, 10) : '',
       // Да/нет вместо true/false: файл читает продажник, а не разработчик.
       outbound_mandate: row.outbound_mandate === true ? 'да' : row.outbound_mandate === false ? 'нет' : '',
+      email_type: typeof row.email_type === 'string' ? EMAIL_TYPE_RU[row.email_type] ?? row.email_type : '',
       status: typeof row.status === 'string' ? STATUS_RU[row.status] ?? row.status : '',
       exclusion_reason: reason(row.exclusion_reason),
       review_reason: reason(row.review_reason),

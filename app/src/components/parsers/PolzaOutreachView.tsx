@@ -134,6 +134,9 @@ export function PolzaOutreachView() {
   const [funnel, setFunnel] = useState<PolzaOutreachFunnel | null>(null);
   const [exclusionCounts, setExclusionCounts] = useState<Record<string, number> | null>(null);
   const [resultsPage, setResultsPage] = useState(1);
+  // «Только готовые» — режим отправки: в таблице и в обеих выгрузках остаются
+  // строки с доменом, почтой и цепочкой, остальное прячется.
+  const [readyOnly, setReadyOnly] = useState(false);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [actionsBusy, setActionsBusy] = useState(false);
   const [exportProgress, setExportProgress] = useState<string | null>(null);
@@ -157,12 +160,14 @@ export function PolzaOutreachView() {
     setActiveJobId((prev) => prev ?? data.jobs?.[0]?.id ?? null);
   }, []);
 
+  const statusQuery = readyOnly ? '&status=ready' : '';
+
   const loadResults = useCallback(async (jobId: string, page: number) => {
     setResultsLoading(true);
     try {
       const offset = Math.max(0, (page - 1) * RESULTS_LIMIT);
       const data = await apiFetch<ResultsResponse>(
-        `/api/parsers/polza-outreach/${jobId}/results?limit=${RESULTS_LIMIT}&offset=${offset}`,
+        `/api/parsers/polza-outreach/${jobId}/results?limit=${RESULTS_LIMIT}&offset=${offset}${statusQuery}`,
         { method: 'GET' },
       );
       setResultsCount(data.count ?? 0);
@@ -172,7 +177,7 @@ export function PolzaOutreachView() {
     } finally {
       setResultsLoading(false);
     }
-  }, []);
+  }, [statusQuery]);
 
   /**
    * Все строки прогона — для разбора этапа.
@@ -197,7 +202,7 @@ export function PolzaOutreachView() {
     let total = Infinity;
     while (offset < total) {
       const data = await apiFetch<ResultsResponse>(
-        `/api/parsers/polza-outreach/${jobId}/results?limit=${EXPORT_LIMIT}&offset=${offset}`,
+        `/api/parsers/polza-outreach/${jobId}/results?limit=${EXPORT_LIMIT}&offset=${offset}${statusQuery}`,
         { method: 'GET' },
       );
       if (offset === 0) total = data.count ?? 0;
@@ -208,7 +213,7 @@ export function PolzaOutreachView() {
       setExportProgress(`Загрузка: ${Math.min(offset, total)} / ${total}`);
     }
     return all;
-  }, []);
+  }, [statusQuery]);
 
   useEffect(() => {
     void (async () => {
@@ -370,7 +375,9 @@ export function PolzaOutreachView() {
     setActionsBusy(true);
     setExportProgress('Excel: собираю файл');
     try {
-      const res = await authFetch(`/api/parsers/polza-outreach/${activeJobId}/export`);
+      const res = await authFetch(
+        `/api/parsers/polza-outreach/${activeJobId}/export${readyOnly ? '?status=ready' : ''}`,
+      );
       if (!res.ok) {
         const body = await res.json().catch(() => null) as { error?: string } | null;
         throw new Error(body?.error ?? `Не удалось выгрузить (HTTP ${res.status})`);
@@ -391,7 +398,7 @@ export function PolzaOutreachView() {
       setActionsBusy(false);
       setExportProgress(null);
     }
-  }, [activeJobId]);
+  }, [activeJobId, readyOnly]);
 
   const stopJob = useCallback(async () => {
     if (!activeJobId) return;
@@ -478,6 +485,8 @@ export function PolzaOutreachView() {
           currentPage={resultsPage}
           totalPages={totalPages}
           onPageChange={handlePageChange}
+          readyOnly={readyOnly}
+          onReadyOnlyChange={setReadyOnly}
           actionsBusy={actionsBusy}
           exportProgress={exportProgress}
           onExportCsv={() => void exportCsv()}

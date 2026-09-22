@@ -30,10 +30,10 @@ export const POLZA_OUTREACH_MAX_POSTED_WITHIN_DAYS = 45;
 
 export const POLZA_OUTREACH_DEFAULT_LIMIT = 100;
 export const POLZA_OUTREACH_MIN_LIMIT = 1;
-// Потолок компаний за прогон. 300 упирались в реальные месячные объёмы по
-// нескольким странам сразу: оператор просил «всё, что есть», а получал
-// обрезку. Каждая компания сверх отбора стоит запроса к ИИ и обхода сайта,
-// поэтому потолок остаётся — просто выше того, что набирается на практике.
+// Потолок ГОТОВЫХ компаний за прогон: лимит считает выход конвейера, а не
+// размер выборки — кандидатов раннер добирает волнами, пока не наберёт
+// заказанное. Реальные месячные объёмы кэша меньше тысячи по всем странам
+// сразу, так что потолок здесь — страховка, а не рабочее ограничение.
 export const POLZA_OUTREACH_MAX_LIMIT = 1000;
 
 export interface PolzaOutreachConfig {
@@ -104,6 +104,8 @@ export interface PolzaOutreachVacancyCandidate {
   jobPublishedAt: string | null;
   companyName: string;
   companyDescription: string | null;
+  /** Сайт компании прямо из кэша вакансий, если ATS его отдал. */
+  companySiteUrl: string | null;
   vacancyDescription: string;
 }
 
