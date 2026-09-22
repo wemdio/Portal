@@ -120,6 +120,8 @@ export function digestPeriod(windowFrom: string, windowTo: string): string | nul
 export function digestPreview(summary: string): string {
   const sections = parseDigest(summary);
   const first = sections.find((s) => s.kind === 'portal') ?? sections[0];
-  const text = first?.items[0] ?? '';
+  // Звёздочки выделения ИИ ставит всегда; в списке уведомлений разметку никто
+  // не разбирает, и они остались бы видимым мусором посреди предложения.
+  const text = (first?.items[0] ?? '').replace(/\*\*(.+?)\*\*/g, '$1');
   return text.length > 180 ? `${text.slice(0, 179)}…` : text;
 }
