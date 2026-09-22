@@ -19,6 +19,7 @@ export type InstantlyUsageStatus =
   | 'deferred_budget'
   | 'deferred_recovery_budget'
   | 'deferred_bulk_budget'
+  | 'deferred_interactive_budget'
   | 'deferred_cooldown'
   | 'deferred_storage_unavailable';
 

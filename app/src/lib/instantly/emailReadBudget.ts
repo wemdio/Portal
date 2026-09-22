@@ -9,12 +9,18 @@ export type { InstantlyEmailReadDeferredReason } from './emailReadDeferral';
 
 /**
  * Admission priorities for LIST /emails inside the shared 18/60s workspace
- * budget: 'fresh' — reply discovery/qualification and interactive reads (up
- * to the whole 18 when idle); 'recovery' — ownership retries, own 6/60s
- * sub-share; 'bulk' — background exports/reports, own 6/60s sub-share so a
- * heavy export can no longer starve fresh reply collection.
+ * budget: 'fresh' — reply discovery/qualification and fan-out feeds;
+ * 'recovery' — ownership retries, own 6/60s sub-share; 'bulk' — background
+ * exports/reports, own 6/60s sub-share so a heavy export can no longer starve
+ * fresh reply collection; 'interactive' — a SINGLE read a person is waiting on
+ * (open a thread, reply, forward), own 6/60s sub-share.
+ *
+ * fresh + recovery + bulk together hold at most 15 of the 18 slots: 3 per
+ * minute stay free for 'interactive' (migration 20260922_0001). Use it only for
+ * one read per click — a fan-out (a feed walking every campaign) would eat the
+ * reserved headroom in one page load and belongs to 'fresh'.
  */
-export type InstantlyEmailReadPriority = 'fresh' | 'recovery' | 'bulk';
+export type InstantlyEmailReadPriority = 'fresh' | 'recovery' | 'bulk' | 'interactive';
 
 /** A technical deferral, never evidence that a reply is not a lead. */
 export class InstantlyEmailReadDeferredError extends InstantlyApiError {
@@ -112,7 +118,8 @@ export async function reserveInstantlyEmailRead(
   const reason = result.reason;
   if (result.granted === false && typeof result.retry_after_ms === 'number' &&
       Number.isFinite(result.retry_after_ms) && result.retry_after_ms > 0 &&
-      (reason === 'budget' || reason === 'recovery_budget' || reason === 'bulk_budget' || reason === 'cooldown')) {
+      (reason === 'budget' || reason === 'recovery_budget' || reason === 'bulk_budget'
+        || reason === 'interactive_budget' || reason === 'cooldown')) {
     // Local denial caches use the coarse 'budget' reason key: the SQL lane
     // reason only matters to counters/logs, not to retry scheduling.
     if (reason === 'cooldown') localCooldowns.set(accountId, Date.now() + (result.retry_after_ms as number));

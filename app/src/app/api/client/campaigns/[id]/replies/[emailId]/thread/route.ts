@@ -99,7 +99,7 @@ export async function GET(
       try {
         const list = await listEmails(
           { campaign_id: campaignId, lead: leadEmail, limit: THREAD_FETCH_LIMIT },
-          { ...instantlyRequestOptions, consumer: 'client_thread' },
+          { ...instantlyRequestOptions, consumer: 'client_thread', requestPriority: 'interactive' },
         );
         const items = list.items ?? [];
         if (items.length > 0) {

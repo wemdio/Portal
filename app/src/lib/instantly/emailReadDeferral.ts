@@ -2,14 +2,17 @@ export type InstantlyEmailReadDeferredReason =
   | 'budget'
   | 'recovery_budget'
   | 'bulk_budget'
+  | 'interactive_budget'
   | 'cooldown'
   | 'storage_unavailable';
 
-/** Every lane-specific denial ('recovery_budget' | 'bulk_budget') plus the
- * common-cap denial share the 'budget' family: no LIST /emails attempt was
- * sent to the provider, and callers treat them identically. */
+/** Every lane-specific denial ('recovery_budget' | 'bulk_budget' |
+ * 'interactive_budget') plus the common-cap denial share the 'budget' family:
+ * no LIST /emails attempt was sent to the provider, and callers treat them
+ * identically. */
 export function isBudgetDeferralReason(reason: InstantlyEmailReadDeferredReason): boolean {
-  return reason === 'budget' || reason === 'recovery_budget' || reason === 'bulk_budget';
+  return reason === 'budget' || reason === 'recovery_budget' || reason === 'bulk_budget'
+    || reason === 'interactive_budget';
 }
 
 export interface InstantlyEmailReadDeferral {
@@ -18,11 +21,11 @@ export interface InstantlyEmailReadDeferral {
 }
 
 const DEFERRAL_MESSAGE_RE =
-  /Instantly email read deferred:\s*(budget|recovery_budget|bulk_budget|cooldown|storage_unavailable);\s*retry after (\d+(?:\.\d+)?) ms\b/i;
+  /Instantly email read deferred:\s*(budget|recovery_budget|bulk_budget|interactive_budget|cooldown|storage_unavailable);\s*retry after (\d+(?:\.\d+)?) ms\b/i;
 
 function isDeferralReason(value: unknown): value is InstantlyEmailReadDeferredReason {
   return value === 'budget' || value === 'recovery_budget' || value === 'bulk_budget'
-    || value === 'cooldown' || value === 'storage_unavailable';
+    || value === 'interactive_budget' || value === 'cooldown' || value === 'storage_unavailable';
 }
 
 /** Pure recognition shared by retry scheduling and callers that preserve only

@@ -122,6 +122,16 @@ describe('GET thread — история отложена бюджетом чте
     expect((await res.json()).history_deferred).toBeUndefined();
   });
 
+  it('история читается из людской доли бюджета (interactive)', async () => {
+    listEmails.mockResolvedValueOnce({ items: [] });
+
+    await callRoute();
+    expect(listEmails).toHaveBeenCalledWith(
+      expect.objectContaining({ lead: LEAD_EMAIL }),
+      expect.objectContaining({ consumer: 'client_thread', requestPriority: 'interactive' }),
+    );
+  });
+
   it('прочие ошибки чтения по-прежнему 502', async () => {
     listEmails.mockRejectedValueOnce(new Error('Instantly API 500: internal error'));
 
