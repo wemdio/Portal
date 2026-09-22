@@ -118,7 +118,13 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
           Выпадающий список держит выбор в одной строке и показывает его
           словами, а не набором подсвеченных кнопок, которые надо пересчитывать
           глазами. */}
-      <div className="mt-5" ref={geoRef}>
+      {/* Все три настройки — одна строка: гео, сколько компаний и за какой
+          срок вакансии. Это один вопрос «что парсим», и разложенный на три
+          яруса он читался как три отдельных решения. Гео тянется по остатку
+          ширины, лимиту хватает места под три цифры, переключатель свежести
+          занимает ровно столько, сколько занимает. */}
+      <div className="mt-5 flex flex-col gap-5 md:flex-row md:flex-wrap md:items-end">
+      <div className="min-w-0 flex-1 md:min-w-[260px]" ref={geoRef}>
         <label className="mb-2 block text-sm font-medium text-gray-700">Гео вакансий</label>
         <div className="relative">
           <button
@@ -134,7 +140,7 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
           </button>
 
           {geoOpen ? (
-            <div className="absolute left-0 right-0 z-30 mt-1 rounded-xl border border-gray-200 bg-white p-1.5 shadow-lg">
+            <div className="absolute left-0 right-0 z-30 mt-1 rounded-xl border border-gray-200 bg-white p-1.5 shadow-lg sm:right-auto sm:w-[520px] sm:max-w-[calc(100vw-4rem)]">
               <div className="flex items-center justify-between px-2 py-1">
                 <span className="text-xs uppercase tracking-wide text-gray-500">Откуда берём вакансии</span>
                 <button
@@ -149,7 +155,12 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
                   {countries.length === GEO_OPTIONS.length ? 'Снять все' : 'Выбрать все'}
                 </button>
               </div>
-              <div className="max-h-72 overflow-y-auto">
+              {/* Три страны в ряд: девятнадцать штук в один столбец давали
+                  список на полэкрана с прокруткой внутри выпадашки, хотя места
+                  по ширине вдоволь. В три колонки это семь строк и всё видно
+                  разом. Шрифт как у остальных полей формы — мелкий здесь
+                  ничего не экономил, только мешал попадать. */}
+              <div className="grid max-h-80 grid-cols-1 gap-x-2 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3">
                 {GEO_OPTIONS.map((option) => {
                   const selected = countries.includes(option.code);
                   return (
@@ -157,14 +168,14 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
                       key={option.code}
                       type="button"
                       onClick={() => toggleCountry(option.code)}
-                      className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-100"
+                      className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-base text-gray-700 hover:bg-gray-100"
                     >
                       <span
-                        className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
+                        className={`flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded border ${
                           selected ? 'border-violet-600 bg-violet-600 text-white' : 'border-gray-300'
                         }`}
                       >
-                        {selected ? <Check className="h-3 w-3" /> : null}
+                        {selected ? <Check className="h-3.5 w-3.5" /> : null}
                       </span>
                       {option.label}
                     </button>
@@ -175,9 +186,21 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
           ) : null}
         </div>
       </div>
+        <label className="block md:w-44">
+          <span className="mb-1 block text-sm font-medium text-gray-700">Компаний (лимит, 1–1000)</span>
+          <input
+            value={limit}
+            onChange={(e) => setLimit(e.target.value.replace(/\D/g, ''))}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') submit();
+            }}
+            inputMode="numeric"
+            placeholder="100"
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-violet-400 focus:outline-none focus:ring-1 focus:ring-violet-400"
+          />
+        </label>
 
-      <div className="mt-5 grid grid-cols-1 gap-5 md:grid-cols-2">
-        <div>
+        <div className="shrink-0">
           <label className="mb-2 block text-sm font-medium text-gray-700">Свежесть вакансий</label>
           <div className="inline-flex flex-wrap rounded-lg border border-gray-200 bg-gray-50 p-1">
             {RECENCY_OPTIONS.map((option) => {
@@ -197,19 +220,6 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
             })}
           </div>
         </div>
-        <label className="block">
-          <span className="mb-1 block text-sm font-medium text-gray-700">Компаний (лимит, 1–1000)</span>
-          <input
-            value={limit}
-            onChange={(e) => setLimit(e.target.value.replace(/\D/g, ''))}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') submit();
-            }}
-            inputMode="numeric"
-            placeholder="100"
-            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-violet-400 focus:outline-none focus:ring-1 focus:ring-violet-400"
-          />
-        </label>
       </div>
     </div>
   );
