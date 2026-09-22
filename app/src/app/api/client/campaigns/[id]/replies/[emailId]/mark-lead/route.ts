@@ -4,6 +4,7 @@ import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAccess';
 import { getEmail } from '@/lib/instantly/client';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
+import { resolveStrayAccess } from '@/lib/clientCampaignReplies/strayAccess';
 import { recordEmailRead } from '@/lib/clientCampaignReplies/clientEmailReads';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -67,12 +68,34 @@ export async function POST(
 
   try {
     const original = await getEmail(emailId, instantlyRequestOptions);
-    if (!original || original.campaign_id !== campaignId) {
+    if (!original) {
       return jsonError('Письмо не относится к кампании', 404);
     }
 
+    // Сирота: провайдер не привязал ответ к кампании (campaign_id пуст, поле
+    // lead тоже), кампанию мы вычислили сами по цитируемому домену. Тред и
+    // «Ответить» такие письма уже пускают через strayAccess — право доказывает
+    // ЯЩИК-получатель. Пометка лидом оставалась единственным действием без этой
+    // ветки: менеджер видел переписку, мог ответить, но на «Пометить как лид»
+    // получал «Письмо не относится к кампании» (кабинет outreachos, 22.09.2026).
+    let strayLeadEmail: string | null = null;
+    if (original.campaign_id !== campaignId) {
+      const stray = await resolveStrayAccess({
+        emailId,
+        campaignId,
+        userId,
+        accountId: instantlyRequestOptions.accountId,
+        eaccount: original.eaccount,
+      });
+      if (!stray) return jsonError('Письмо не относится к кампании', 404);
+      strayLeadEmail = stray.leadEmail;
+    }
+
     const reply = mapInstantlyEmailToReply(original);
-    const leadEmail = reply.from_email?.trim();
+    // У сироты `lead` пуст, но входящее письмо всё равно несёт адрес
+    // отправителя — он и есть лид. Фоллбэк на адрес из нашей записи нужен для
+    // писем, где провайдер не отдал from_address_email.
+    const leadEmail = reply.from_email?.trim() || strayLeadEmail?.trim();
     if (!leadEmail) return jsonError('У ответа нет email лида', 400);
 
     // Пометка «лид» = ответ обработан → отмечаем ЭТО письмо прочитанным для

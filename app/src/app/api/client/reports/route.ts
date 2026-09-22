@@ -4,6 +4,8 @@ import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { scopeAutoReportCampaignIds } from '@/lib/clientAccess';
 import { readCampaignAnalyticsFromDb, buildClientReport } from '@/lib/tools/instantlyCampaignCatalog';
+import { resolveClientPortalMode } from '@/lib/clientPortalMode';
+import { shouldShowOpenMetrics } from '@/lib/clientOpenMetrics';
 
 export const dynamic = 'force-dynamic';
 
@@ -11,7 +13,7 @@ export async function POST(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
   if (result.auth.isDemo) return serveClientDemo(req);
-  const { accessRows } = result.auth;
+  const { accessRows, userId } = result.auth;
 
   let body: { campaignIds?: string[] };
   try {
@@ -36,7 +38,12 @@ export async function POST(req: NextRequest) {
       return jsonError('Данные кампаний ещё не синхронизированы. Попробуйте через несколько минут.', 503);
     }
 
-    const report = buildClientReport(campaigns);
+    // Открытия в отчёте — только auto-режим (кабинет Mailganer). В обычном
+    // кабинете метрика убрана как недостоверная, см. lib/clientOpenMetrics.ts.
+    const portalMode = await resolveClientPortalMode(userId);
+    const report = buildClientReport(campaigns, {
+      includeOpens: shouldShowOpenMetrics(portalMode),
+    });
 
     return NextResponse.json({
       tableText: report.tableText,
