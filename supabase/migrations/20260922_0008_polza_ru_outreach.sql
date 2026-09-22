@@ -233,3 +233,69 @@ grant select, insert, update, delete on public.polza_ru_cases to authenticated;
 grant select, insert, update, delete on public.polza_ru_senders to authenticated;
 grant select, insert, update, delete on public.polza_ru_signal_uploads to authenticated;
 grant select, insert, update, delete on public.polza_ru_signal_rows to authenticated;
+
+-- ── Кандидаты из hh_vacancies одним запросом на запуск ──────────────────────
+-- В hh_vacancies ~4,4 млн строк почти целиком за последние недели, индекс по
+-- дате не сужает выборку, а регэксп по названию — это полный проход (~30 с на
+-- замере 22.09.2026). Поэтому раннер зовёт функцию один раз в начале запуска
+-- и режет результат на волны в памяти, а не листает таблицу страницами.
+-- Одна строка = работодатель; вакансии внутри — свежие первыми, дубли
+-- vacancy_id (одна вакансия в нескольких задачах парсера) схлопнуты.
+create or replace function public.polza_ru_hh_employers(
+  p_pattern text,
+  p_since timestamptz,
+  p_min_vacancies integer default 1
+)
+returns table (
+  employer_key text,
+  employer_id text,
+  company_name text,
+  company_site_url text,
+  vacancy_count integer,
+  latest_published_at timestamptz,
+  vacancies jsonb
+)
+language sql
+stable
+set statement_timeout = '110s'
+as $$
+  with v as (
+    select distinct on (h.vacancy_id)
+      h.vacancy_id, h.name, h.url, h.published_at, h.employer_id, h.company_name,
+      nullif(h.company_site_url, '') as company_site_url
+    from public.hh_vacancies h
+    where h.published_at >= p_since
+      and h.name ~* p_pattern
+      and h.company_name is not null
+    order by h.vacancy_id, h.created_at desc
+  ), g as (
+    select
+      coalesce(nullif(v.employer_id, ''), lower(v.company_name)) as employer_key,
+      max(v.employer_id) as employer_id,
+      max(v.company_name) as company_name,
+      max(v.company_site_url) as company_site_url,
+      count(*)::integer as vacancy_count,
+      max(v.published_at) as latest_published_at,
+      (jsonb_agg(
+        jsonb_build_object('vacancy_id', v.vacancy_id, 'name', v.name, 'url', v.url, 'published_at', v.published_at)
+        order by v.published_at desc
+      ) -> 0) as freshest,
+      jsonb_agg(
+        jsonb_build_object('vacancy_id', v.vacancy_id, 'name', v.name, 'url', v.url, 'published_at', v.published_at)
+        order by v.published_at desc
+      ) as all_vacancies
+    from v
+    group by 1
+  )
+  select g.employer_key, g.employer_id, g.company_name, g.company_site_url, g.vacancy_count,
+         g.latest_published_at,
+         (select coalesce(jsonb_agg(e), '[]'::jsonb) from (
+            select e from jsonb_array_elements(g.all_vacancies) e limit 10
+          ) s) as vacancies
+  from g
+  where g.vacancy_count >= greatest(1, p_min_vacancies)
+  order by g.latest_published_at desc;
+$$;
+
+revoke all on function public.polza_ru_hh_employers(text, timestamptz, integer) from public;
+grant execute on function public.polza_ru_hh_employers(text, timestamptz, integer) to service_role;
