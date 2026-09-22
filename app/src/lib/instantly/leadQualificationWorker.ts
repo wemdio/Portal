@@ -19,6 +19,7 @@ import * as instantly from './client';
 import { isFreeProvider } from '@/lib/emailValidation/shared';
 import { recipientMailboxIdentities } from '@/lib/clientCampaignReplies/participants';
 import { buildHandoffDraft } from './handoffLegend';
+import { leadBoardRequestText } from './leadBoardRequestText';
 import { signHandoffCallback } from './handoffCallback';
 import {
   getOrCreateBoard,
@@ -1985,7 +1986,7 @@ export async function qualifyOneReply(
         companyName: companyName ?? null,
         phone: leadPhone ?? null,
         website: leadWebsite ?? null,
-        requestText: replyText || null,
+        requestText: leadBoardRequestText((result.threadContext?.replyEmail ?? effectiveReply).body),
         stepNumber,
         replyTimestamp: effectiveReply.timestamp_email ?? null,
       });

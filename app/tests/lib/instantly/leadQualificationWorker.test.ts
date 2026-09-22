@@ -68,15 +68,12 @@ jest.mock('@/lib/instantly/handoffTelegram', () => ({
 
 jest.mock('@/lib/instantly/leadQualifier', () => ({
   __esModule: true,
+  extractAuthoredReplyText: (text: string) => jest.requireActual('@/lib/instantly/leadQualifier').extractAuthoredReplyText(text),
   qualifyReply: (...args: unknown[]) => qualifyReply(...args),
   fetchBriefByCampaign: (...args: unknown[]) => fetchBriefByCampaign(...args),
   fetchThreadContext: (...args: unknown[]) => fetchThreadContext(...args),
   classifyMachineReply: (...args: unknown[]) => classifyMachineReply(...args),
-  getBodyText: (body: Email['body']) => {
-    if (!body) return '';
-    if (typeof body === 'string') return body;
-    return body.text ?? body.html ?? '';
-  },
+  getBodyText: (body: Email['body']) => jest.requireActual('@/lib/instantly/leadQualifier').getBodyText(body),
   isAutoReplyOrUnsubscribe: () => false,
   isJunkReply: () => false,
 }));
@@ -1034,6 +1031,18 @@ describe('pollAndQualifyReplies', () => {
     const introduction = 'Доброго дня! Меня зовут Евгений, руководитель IT-отдела. Вопрос актуальный.';
     const footer = 'С уважением,\nАдминистратор Дарина.\n8(900)111-22-33\n8 901 22 23 344';
     const contactReply = introduction + '\n\n> Наше старое письмо\n> Телефон: +7 999 888-77-66\n\n' + footer;
+    const { leadBoardRequestText } = await import('@/lib/instantly/leadBoardRequestText');
+    for (const [body, expected] of [
+      [contactReply, introduction],
+      [{ text: 'Пришлите каталог.\n\nОтправлено из мобильной Почты Mail' }, 'Пришлите каталог.'],
+      [{ text: 'Нужны цены.\n\nИ условия доставки.\nС уважением,\nИван' }, 'Нужны цены.\n\nИ условия доставки.'],
+      [{ text: 'Olga Example писал 2026-09-18 12:49:\n> Наш старый ответ' }, null],
+      [{ text: '> Только цитата' }, null],
+      [{ html: '<p>Нужны цены.</p><div class="gmail_quote">Старое предложение</div>' }, 'Нужны цены.'],
+      ['<p>Пришлите каталог.</p><blockquote>Старое письмо</blockquote>', 'Пришлите каталог.'],
+    ] as const) {
+      expect(leadBoardRequestText(body)).toBe(expected);
+    }
     for (const [replyBody, expectedPhone] of [
       [{ text: contactReply }, '8(900)111-22-33; 8 901 22 23 344'],
       [{ text: introduction + '\n> С уважением,\n> 8(900)111-22-33' }, null],
@@ -1116,7 +1125,7 @@ describe('pollAndQualifyReplies', () => {
         company_name: 'ACME',
         phone: '+7 900 111-22-33; 8 901 22 23 344',
         website: 'acme.ru',
-        request_text: contactReply,
+        request_text: introduction,
         step_number: 2,
         reply_timestamp: '2026-05-13T12:00:00Z',
       }),

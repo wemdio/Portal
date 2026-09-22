@@ -835,7 +835,7 @@ function extractLatestTicketReply(text: string): TicketReplySegment | null {
   };
 }
 
-function extractAuthoredReplyText(text: string): string {
+export function extractAuthoredReplyText(text: string): string {
   const latestTicketReply = extractLatestTicketReply(text);
   const lines = (latestTicketReply?.message ?? text).replace(/\r\n?/g, '\n').split('\n');
   const boundaryIndex = lines.findIndex((line, index) => {
