@@ -1933,11 +1933,17 @@ describe('base_collect CONSTRUCT import', () => {
     // Срез почти исчерпан: 900 компаний из 1000, выход низкий — добор до 500 невозможен.
     const stopped = await run(1000);
     expect(stopped.status).toBe('limited');
-    expect(stopped.reason).toContain('Рынок гипотезы меньше цели');
+    expect(stopped.reason).toContain('Рынок гипотезы исчерпан');
     // Статус терминальный и раунд совпадает с завершённым: «Продолжить подготовку» доступна.
     expect(stopped.round).toBe(2);
     // Широкий срез не останавливаем.
     expect((await run(200_000)).status).not.toBe('limited');
+    // Узкая, но полезная база продолжает сбор. 7 500 компаний в срезе при том же
+    // выходе дают около 250 контактов — по прежнему порогу «меньше 60% цели»
+    // (то есть меньше 300) движок бы её срезал, хотя студия считает такие базы
+    // нормальными: узкая гипотеза на 200-300 контактов это маленькая, но
+    // полезная база. Порог теперь абсолютный, сто контактов.
+    expect((await run(7_500)).status).not.toBe('limited');
   });
 
   it('does not claim launch-ready recipients after a failed partial validation', async () => {
