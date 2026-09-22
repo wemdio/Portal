@@ -3,16 +3,18 @@
 import { useState } from 'react';
 import { MailboxesTab } from './MailboxesTab';
 import { CampaignsTab } from './CampaignsTab';
+import { StoplistTab } from './StoplistTab';
 import { ThreadsTab } from './ThreadsTab';
 
 // «Письма» — переписка после отправки: воркер читает входящие по IMAP, сводит
-// их с получателями кампаний и обрывает цепочку ответившим. Разбор и написание
-// ответов остаются в инструменте «Персонализированные ответы»; здесь видно, что
-// ушло и что пришло.
+// их с получателями кампаний и обрывает цепочку ответившим. Ответы лиду
+// пишутся прямо там же (задача 4.1); разбор входящих остаётся в инструменте
+// «Персонализированные ответы».
 const TABS = [
   { id: 'mailboxes', label: 'Ящики' },
   { id: 'campaigns', label: 'Кампании' },
   { id: 'threads', label: 'Письма' },
+  { id: 'stoplist', label: 'Стоп-лист' },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
@@ -49,6 +51,7 @@ export function SenderView() {
       {tab === 'mailboxes' ? <MailboxesTab /> : null}
       {tab === 'campaigns' ? <CampaignsTab /> : null}
       {tab === 'threads' ? <ThreadsTab /> : null}
+      {tab === 'stoplist' ? <StoplistTab /> : null}
     </div>
   );
 }

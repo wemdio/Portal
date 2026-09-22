@@ -35,7 +35,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     const { id } = await params;
     const db = supabaseAdmin;
 
-    const [{ data: thread }, { data: messages }, { data: replies }] = await Promise.all([
+    const [{ data: thread }, { data: messages }, { data: replies }, { data: manual }] = await Promise.all([
       db
         .from('sender_threads')
         .select('recipient_id, campaign_name, recipient_email, recipient_name, status, mailbox_email, reply_count, last_activity_at')
@@ -53,6 +53,12 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         .eq('recipient_id', id)
         .order('created_at')
         .limit(MAX_ITEMS),
+      db
+        .from('sender_manual_messages')
+        .select('id, subject, body, status, sent_at, created_at, error')
+        .eq('recipient_id', id)
+        .order('created_at')
+        .limit(MAX_ITEMS),
     ]);
 
     if (!thread) return jsonError('Переписка не найдена', 404);
@@ -63,6 +69,12 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       bounce: 'отбойник',
       warmup: 'прогрев',
       unknown: 'входящее',
+    };
+
+    const MANUAL_NOTES: Record<string, string> = {
+      queued: 'в очереди',
+      sending: 'отправляется',
+      failed: 'не ушло',
     };
 
     const items: ThreadItem[] = [
@@ -85,6 +97,19 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         at: (p.received_at ?? p.created_at) as string | null,
         note: KIND_NOTES[String(p.kind)] ?? String(p.kind),
         fromEmail: p.from_email ?? null,
+      })),
+      // Ручные ответы оператора — полноправная часть переписки: без них в ленте
+      // не видно, что мы ответили (задача 4.1).
+      ...(manual ?? []).map((x) => ({
+        id: String(x.id),
+        direction: 'out' as const,
+        subject: x.subject,
+        body: x.body,
+        at: (x.sent_at ?? x.created_at) as string | null,
+        note: MANUAL_NOTES[String(x.status)]
+          ?? (x.status === 'sent' && x.error ? x.error : null)
+          ?? (x.status === 'sent' ? null : `${x.status}${x.error ? `: ${x.error}` : ''}`),
+        fromEmail: null,
       })),
     ].sort((a, b) => new Date(a.at ?? 0).getTime() - new Date(b.at ?? 0).getTime());
 

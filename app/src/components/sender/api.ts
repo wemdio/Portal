@@ -156,6 +156,8 @@ export interface CampaignDetailsDto {
   };
   steps: { step_no: number; delay_hours: number; subject: string; body: string }[];
   mailboxes: { id: string; email: string }[];
+  /** Ответили по шагам цепочки: на каком касании лид ответил (задача 6.4). */
+  repliesByStep?: { step: number; replied: number }[];
   recipients: {
     total: number;
     /** Счётчики «заполнено у N» посчитаны по всей базе, а не по выборке. */
@@ -409,6 +411,12 @@ export interface RecipientVariableDto {
   sample: string | null;
 }
 
+/** Предпросмотр письма на реальных строках (задача 5.6). */
+export interface PreviewSampleDto {
+  email: string;
+  steps: { subject: string; body: string }[];
+}
+
 export interface RecipientColumnsDto {
   emailHeader: string | null;
   nameHeader: string | null;
@@ -420,10 +428,108 @@ export interface RecipientColumnsDto {
   fileRows?: number;
   /** Сколько строк реально прочитано, если файл обрезан лимитом. */
   truncated?: number | null;
+  /** Пришло, если форма передала шаги письма — рендер на реальных строках. */
+  samples?: PreviewSampleDto[];
 }
 
-export function previewRecipients(file: File) {
-  return upload<RecipientColumnsDto>(`${BASE}/recipients/preview`, file);
+export function previewRecipients(file: File, steps?: { subject: string; body: string }[]) {
+  return upload<RecipientColumnsDto>(
+    `${BASE}/recipients/preview`,
+    file,
+    steps?.length ? { steps: JSON.stringify(steps) } : undefined,
+  );
+}
+
+/** Предпросмотр шагов на реальных получателях уже загруженной базы кампании. */
+export function previewCampaignSteps(campaignId: string, steps: { subject: string; body: string }[]) {
+  return authFetchJson<{ samples: PreviewSampleDto[] }>(`${BASE}/campaigns/${campaignId}/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ steps }),
+  });
+}
+
+/** Строка базы кампании (экран получателей, задача 5.2). */
+export interface CampaignRecipientDto {
+  id: string;
+  email: string;
+  name: string | null;
+  status: string;
+  statusLabel: string;
+  lastStepSent: number;
+  repliedAt: string | null;
+  updatedAt: string;
+  mailboxEmail: string | null;
+}
+
+export function fetchCampaignRecipients(
+  campaignId: string,
+  params: { page?: number; search?: string; status?: string } = {},
+) {
+  const query = new URLSearchParams({ page: String(params.page ?? 1) });
+  if (params.search) query.set('search', params.search);
+  if (params.status) query.set('status', params.status);
+  return authFetchJson<{ recipients: CampaignRecipientDto[]; total: number; pageSize: number }>(
+    `${BASE}/campaigns/${campaignId}/recipients?${query.toString()}`,
+  );
+}
+
+/** Ответить лиду из окна переписки (задача 4.1): уходит с закреплённого ящика. */
+export function replyToThread(recipientId: string, text: string) {
+  return authFetchJson<{ ok: true }>(`${BASE}/threads/${recipientId}/reply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+}
+
+/** Строка стоп-листа (задача 5.3). */
+export interface SuppressionDto {
+  email: string;
+  reason: string;
+  note: string | null;
+  created_at: string;
+}
+
+export function fetchSuppressions(params: { page?: number; search?: string } = {}) {
+  const query = new URLSearchParams({ page: String(params.page ?? 1) });
+  if (params.search) query.set('search', params.search);
+  return authFetchJson<{ suppressions: SuppressionDto[]; total: number; pageSize: number }>(
+    `${BASE}/suppressions?${query.toString()}`,
+  );
+}
+
+export function addSuppressions(input: string, note?: string) {
+  const emails = input.split(/[\s,;]+/).filter(Boolean);
+  return authFetchJson<{ imported: number; skippedExisting: number }>(`${BASE}/suppressions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ emails, note }),
+  });
+}
+
+export function removeSuppression(email: string) {
+  return authFetchJson<{ ok: true }>(`${BASE}/suppressions?email=${encodeURIComponent(email)}`, {
+    method: 'DELETE',
+  });
+}
+
+/** Статистика ответов по ящикам и доменам (задача 6.3). */
+export interface MailboxStatRow {
+  reached: number;
+  replied: number;
+  bounced: number;
+  replyRate: number | null;
+  bounceRate: number | null;
+}
+
+export interface MailboxStatsDto {
+  mailboxes: (MailboxStatRow & { mailbox_id: string; email: string; domain: string; status: string; enabled: boolean; sent: number })[];
+  domains: (MailboxStatRow & { domain: string; mailboxes: number; sent: number })[];
+}
+
+export function fetchMailboxStats() {
+  return authFetchJson<MailboxStatsDto>(`${BASE}/mailbox-stats`);
 }
 
 /** mode 'replace' — заменить базу; по умолчанию новые адреса добавляются к старым. */
