@@ -429,7 +429,7 @@ export function ClientReportsDashboard() {
               Путь компаний от скоринга до подтверждённой передачи контактов в кампании.
             </p>
             <p className="mt-2 max-w-2xl text-xs leading-5" style={{ color: 'var(--cp-paper-faint)' }}>
-              Отправки, открытия, ответы и лиды смотрите в разделе{' '}
+              Отправки, ответы и лиды смотрите в разделе{' '}
               <Link className="underline underline-offset-2" href="/client">
                 Кампании
               </Link>
