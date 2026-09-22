@@ -470,14 +470,28 @@ export function ExpandedThread({
   const [threadAuthExpired, setThreadAuthExpired] = useState(false);
   const [actionMode, setActionMode] = useState<ActionMode>(null);
   // История переписки отложена бюджетом чтения (см. history_deferred в
-  // ClientReplyThread): 'waiting' — письмо уже показано, повтор запланирован;
-  // 'exhausted' — повторы кончились, дальше только руками.
-  const [historyState, setHistoryState] = useState<'waiting' | 'exhausted' | null>(null);
+  // ClientReplyThread):
+  //   'waiting'    — на экране только запрошенное письмо, повтор запланирован;
+  //   'refreshing' — на экране уже переписка длиннее, её не затираем одним
+  //                  письмом, повтор запланирован (обычно после «Ответить»);
+  //   'exhausted'  — повторы кончились, дальше только руками.
+  const [historyState, setHistoryState] = useState<'waiting' | 'refreshing' | 'exhausted' | null>(null);
   const historyAttemptsRef = useRef(0);
   const historyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Что сейчас на экране — нужно loadThread, чтобы не заменить полную
+  // переписку урезанным ответом. Ref, а не state: колбэк не должен
+  // пересоздаваться на каждое письмо.
+  const shownThreadRef = useRef<ThreadMessage[] | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
 
   const loadThread = useCallback(async () => {
+    // Любая загрузка отменяет запланированный повтор: иначе после «Ответить»
+    // или ручного «Повторить» таймер выстрелил бы лишним запросом поверх уже
+    // полученной переписки и отнял слот бюджета чтения.
+    if (historyTimerRef.current) {
+      clearTimeout(historyTimerRef.current);
+      historyTimerRef.current = null;
+    }
     setThreadLoading(true);
     setThreadError('');
     setThreadAuthExpired(false);
@@ -485,18 +499,26 @@ export function ExpandedThread({
       const data = await clientApiFetch<ClientReplyThread>(
         `/campaigns/${campaignId}/replies/${emailId}/thread`,
       );
-      setThread(data.messages);
-      setReplyTo(data.reply_to ?? null);
-      setReplyAllCc(data.reply_all_cc ?? []);
-      if (data.history_deferred) {
+      const deferred = data.history_deferred ?? null;
+      // Отложенный ответ несёт одно письмо. Если на экране уже переписка
+      // длиннее — оставляем её вместе с адресатами ответа: раньше после
+      // «Ответить» вся история схлопывалась в одну карточку до следующего
+      // повтора.
+      const keepShown = deferred != null && (shownThreadRef.current?.length ?? 0) > data.messages.length;
+      if (!keepShown) {
+        shownThreadRef.current = data.messages;
+        setThread(data.messages);
+        setReplyTo(data.reply_to ?? null);
+        setReplyAllCc(data.reply_all_cc ?? []);
+      }
+      if (deferred) {
         if (historyAttemptsRef.current < HISTORY_MAX_RETRIES) {
           historyAttemptsRef.current += 1;
-          setHistoryState('waiting');
+          setHistoryState(keepShown ? 'refreshing' : 'waiting');
           const delay = Math.min(
-            Math.max(data.history_deferred.retry_after_ms + 500, HISTORY_MIN_DELAY_MS),
+            Math.max(deferred.retry_after_ms + 500, HISTORY_MIN_DELAY_MS),
             HISTORY_MAX_DELAY_MS,
           );
-          if (historyTimerRef.current) clearTimeout(historyTimerRef.current);
           historyTimerRef.current = setTimeout(() => setReloadTick((t) => t + 1), delay);
         } else {
           setHistoryState('exhausted');
@@ -508,6 +530,11 @@ export function ExpandedThread({
     } catch (err) {
       if (isAuthExpiredError(err)) setThreadAuthExpired(true);
       setThreadError(err instanceof Error ? err.message : 'Не удалось загрузить тред');
+      // Упал сам повтор (обычная ошибка, не бюджет): обещание «догрузится»
+      // больше неправда, и новых попыток не будет. Убираем заметку — остаётся
+      // строка ошибки со своей кнопкой «Повторить».
+      historyAttemptsRef.current = 0;
+      setHistoryState(null);
     } finally {
       setThreadLoading(false);
     }
@@ -519,26 +546,29 @@ export function ExpandedThread({
     void loadThread();
   }, [loadThread]);
 
-  useEffect(() => {
-    void loadThread();
-  }, [loadThread, reloadTick]);
-
-  // Другое письмо или размонтирование — отложенный повтор больше не нужен.
+  // Другое письмо или размонтирование — отложенный повтор больше не нужен, и
+  // «что на экране» относится к прошлому письму. Объявлен ДО эффекта загрузки:
+  // эффекты идут по порядку, сброс должен случиться раньше первого запроса.
   // Состояние заметки сбрасывать не нужно: первый же ответ /thread для нового
-  // письма перезапишет его (null или 'waiting').
+  // письма перезапишет его.
   useEffect(() => {
     historyAttemptsRef.current = 0;
+    shownThreadRef.current = null;
     return () => {
       if (historyTimerRef.current) clearTimeout(historyTimerRef.current);
       historyTimerRef.current = null;
     };
   }, [campaignId, emailId]);
 
+  useEffect(() => {
+    void loadThread();
+  }, [loadThread, reloadTick]);
+
   return (
     <div className={className ?? 'mt-5 space-y-3'}>
       <hr className="neu-divider" />
 
-      {threadLoading && historyState !== 'waiting' && (
+      {threadLoading && historyState !== 'waiting' && historyState !== 'refreshing' && (
         <div
           className="flex items-center gap-2 text-[11px]"
           style={{ color: 'var(--cp-paper-faint)' }}
@@ -637,14 +667,18 @@ export function ExpandedThread({
 
       {historyState && thread && thread.length > 0 && (
         <div className="flex items-center gap-2 text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
-          {historyState === 'waiting' ? (
+          {historyState === 'waiting' || historyState === 'refreshing' ? (
             <>
               <Loader2 className="h-3 w-3 animate-spin shrink-0" aria-hidden />
-              <span>Показываем последнее письмо — остальная переписка догрузится через несколько секунд.</span>
+              <span>
+                {historyState === 'waiting'
+                  ? 'Показываем последнее письмо — остальная переписка догрузится через несколько секунд.'
+                  : 'Обновляем переписку — новые письма появятся через несколько секунд.'}
+              </span>
             </>
           ) : (
             <>
-              <span className="flex-1">Остальную переписку сейчас загрузить не удалось — повторите через минуту.</span>
+              <span className="flex-1">Переписку сейчас не удалось загрузить полностью — повторите через минуту.</span>
               <button
                 type="button"
                 onClick={retryThread}

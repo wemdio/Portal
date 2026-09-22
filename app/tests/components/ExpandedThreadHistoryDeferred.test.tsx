@@ -7,7 +7,7 @@
  * исчерпания повторов — предложить «Повторить» вручную.
  */
 
-import { act, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 
 import type { ClientReplyThread, ThreadMessage } from '@/lib/clientCampaignReplies/types';
 
@@ -114,4 +114,91 @@ describe('ExpandedThread — отложенная история', () => {
     });
     expect(clientApiFetch).toHaveBeenCalledTimes(4);
   });
+
+  it('если сам повтор упал обычной ошибкой — заметка «догрузится» уходит, остаётся ошибка с «Повторить»', async () => {
+    clientApiFetch
+      .mockResolvedValueOnce(PARTIAL)
+      .mockRejectedValueOnce(new Error('Сервис писем недоступен'));
+
+    await renderThread();
+    expect(screen.getByText(/остальная переписка догрузится/)).toBeInTheDocument();
+
+    await act(async () => {
+      jest.advanceTimersByTime(5_500);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('Сервис писем недоступен')).toBeInTheDocument();
+    expect(screen.queryByText(/остальная переписка догрузится/)).not.toBeInTheDocument();
+    // Письмо, которое уже было на экране, не пропало.
+    expect(screen.getByText('Последний ответ лида')).toBeInTheDocument();
+    // И больше никаких автоматических запросов.
+    await act(async () => {
+      jest.advanceTimersByTime(60_000);
+    });
+    expect(clientApiFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('отложенное обновление после «Ответить» не затирает уже показанную полную переписку', async () => {
+    clientApiFetch
+      .mockResolvedValueOnce(FULL) // первая загрузка — полная переписка
+      .mockResolvedValueOnce({ ok: true }) // POST ответа
+      .mockResolvedValueOnce(PARTIAL) // обновление после отправки — бюджет занят
+      .mockResolvedValueOnce(FULL); // автоповтор
+
+    await renderThread();
+    expect(screen.getByText('Наше первое письмо')).toBeInTheDocument();
+
+    await sendReply('Спасибо, созвонимся завтра');
+
+    // История осталась на экране, заметка честно говорит «обновляем».
+    expect(clientApiFetch).toHaveBeenCalledTimes(3);
+    expect(screen.getByText('Наше первое письмо')).toBeInTheDocument();
+    expect(screen.getByText(/Обновляем переписку/)).toBeInTheDocument();
+    expect(screen.queryByText(/Показываем последнее письмо/)).not.toBeInTheDocument();
+
+    await act(async () => {
+      jest.advanceTimersByTime(5_500);
+    });
+    await flush();
+
+    expect(clientApiFetch).toHaveBeenCalledTimes(4);
+    expect(screen.queryByText(/Обновляем переписку/)).not.toBeInTheDocument();
+  });
+
+  it('запланированный повтор отменяется, если переписка уже загрузилась другим путём', async () => {
+    clientApiFetch
+      .mockResolvedValueOnce(PARTIAL) // первая загрузка — одно письмо, повтор через 5,5 с
+      .mockResolvedValueOnce({ ok: true }) // менеджер сразу ответил
+      .mockResolvedValueOnce(FULL); // обновление после отправки — уже полная
+
+    await renderThread();
+    await sendReply('Добрый день!');
+
+    expect(clientApiFetch).toHaveBeenCalledTimes(3);
+    expect(screen.getByText('Наше первое письмо')).toBeInTheDocument();
+
+    // Старый таймер не должен выстрелить лишним запросом.
+    await act(async () => {
+      jest.advanceTimersByTime(60_000);
+    });
+    expect(clientApiFetch).toHaveBeenCalledTimes(3);
+  });
 });
+
+async function flush() {
+  for (let i = 0; i < 5; i++) {
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
+}
+
+async function sendReply(text: string) {
+  fireEvent.click(screen.getByRole('button', { name: /Ответить/ }));
+  fireEvent.change(screen.getByPlaceholderText('Текст ответа…'), { target: { value: text } });
+  fireEvent.click(screen.getByRole('button', { name: /Отправить/ }));
+  await flush();
+}
