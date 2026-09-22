@@ -1,9 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { ChevronDown, Loader2, Sparkles, X } from 'lucide-react';
+import { Loader2, Sparkles, X } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
-import { parseDigest, type DigestSection } from '@/lib/changelog/digest';
+import { DigestBody } from './DigestBody';
 
 /**
  * Сводка обновлений портала при входе.
@@ -22,52 +22,6 @@ interface Digest {
   id: number;
   title: string;
   summary: string;
-}
-
-/** Технический раздел свёрнут: он есть, но модалку собой не заслоняет. */
-function Section({ section }: { section: DigestSection }) {
-  const [open, setOpen] = useState(section.kind !== 'technical');
-
-  return (
-    <section className="border-t border-gray-100 pt-3 first:border-t-0 first:pt-0">
-      {section.title ? (
-        section.kind === 'technical' ? (
-          <button
-            type="button"
-            onClick={() => setOpen((v) => !v)}
-            className="flex w-full items-center gap-1.5 text-left text-xs font-semibold uppercase tracking-wide text-gray-400 transition hover:text-gray-600"
-          >
-            <ChevronDown className={`h-3.5 w-3.5 transition-transform ${open ? '' : '-rotate-90'}`} />
-            {section.title}
-            <span className="font-normal normal-case text-gray-300">({section.items.length})</span>
-          </button>
-        ) : (
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-indigo-500">{section.title}</h3>
-        )
-      ) : null}
-
-      {open ? (
-        <ol className="mt-2 space-y-2">
-          {section.items.map((item, index) => (
-            <li key={index} className="flex gap-2 text-sm leading-relaxed text-gray-700">
-              <span className="mt-0.5 shrink-0 text-xs tabular-nums text-gray-300">{index + 1}</span>
-              <span>{item}</span>
-            </li>
-          ))}
-        </ol>
-      ) : null}
-    </section>
-  );
-}
-
-function DigestBody({ digest }: { digest: Digest }) {
-  return (
-    <div className="space-y-4">
-      {parseDigest(digest.summary).map((section, index) => (
-        <Section key={`${section.title}-${index}`} section={section} />
-      ))}
-    </div>
-  );
 }
 
 export function ChangelogModal() {
@@ -146,12 +100,12 @@ export function ChangelogModal() {
               {missed.map((digest) => (
                 <div key={digest.id}>
                   <div className="mb-2 text-sm font-semibold text-gray-900">{digest.title}</div>
-                  <DigestBody digest={digest} />
+                  <DigestBody summary={digest.summary} />
                 </div>
               ))}
             </div>
           ) : (
-            <DigestBody digest={latest} />
+            <DigestBody summary={latest.summary} />
           )}
         </div>
 
