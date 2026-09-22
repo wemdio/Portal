@@ -1,8 +1,4 @@
-import {
-  buildQuoteHeader,
-  appendQuotedHistoryText,
-  appendQuotedHistoryHtml,
-} from '@/lib/clientCampaignReplies/quoteHistory';
+import { buildQuoteHeader, appendQuotedHistoryText, appendQuotedHistoryHtml, buildForwardedMessageHtml } from '@/lib/clientCampaignReplies/quoteHistory';
 import { extractBodyText } from '@/lib/clientCampaignReplies/mapEmail';
 
 const SRC = {
@@ -124,5 +120,39 @@ describe('extractBodyText — html-only письма с числовыми су�
 
   it('body.text имеет приоритет и не трогается декодом', () => {
     expect(extractBodyText({ text: 'как есть &#1055;', html: '<b>x</b>' })).toBe('как есть &#1055;');
+  });
+});
+
+describe('buildForwardedMessageHtml — тело пересылки для обходного пути', () => {
+  it('кладёт заголовок и текст исходного письма', () => {
+    const html = buildForwardedMessageHtml({
+      bodyText: 'Добрый день!\nПришлите условия.',
+      fromName: 'Иван Петров',
+      fromEmail: 'ivan@lead.example',
+      timestamp: '2026-09-22T10:00:00.000Z',
+      subject: 'Re: предложение',
+    });
+    expect(html).toContain('---------- Пересланное сообщение ----------');
+    expect(html).toContain('От: Иван Петров &lt;ivan@lead.example&gt;');
+    // 10:00 UTC = 13:00 МСК — время для внешнего адресата, а не TZ контейнера.
+    expect(html).toContain('Дата: 22.09.2026, 13:00:00 (МСК)');
+    expect(html).toContain('Тема: Re: предложение');
+    expect(html).toContain('Добрый день!<br>\nПришлите условия.');
+  });
+
+  it('экранирует HTML из письма лида', () => {
+    const html = buildForwardedMessageHtml({
+      bodyText: '<script>alert(1)</script>',
+      fromEmail: 'x@y.example',
+    });
+    expect(html).not.toContain('<script>');
+    expect(html).toContain('&lt;script&gt;');
+  });
+
+  it('без имени, даты и темы — только адрес, без пустых строк', () => {
+    const html = buildForwardedMessageHtml({ bodyText: 'Текст', fromEmail: 'x@y.example' });
+    expect(html).toContain('От: x@y.example');
+    expect(html).not.toContain('Дата:');
+    expect(html).not.toContain('Тема:');
   });
 });
