@@ -96,6 +96,7 @@ const ROCKET_SUPPORT_RECEIPT = "Добрый день!\n\nСпасибо, что
 
 const MACHINE_ACK_FIXTURES = [
   ...[
+    'Здравствуйте.\nВаше письмо получено. Мы обязательно на него ответим\nС Уважением.\nТестовая компания\n+7 (900) 100-10-10',
     'Здравствуйте, ваше письмо получено\n\nС уважением,\nООО Клиника\n+7 (900) 100-10-10',
     'Доброго времени суток! Если вы получили это уведомление, значит Ваше письмо доставлено и принято в обработку. По всем моментам с Вами обязательно свяжется наш специалист в ближайшие дни. Спасибо!\n\nС уважением,\nКлиника',
     'Спасибо за Ваше письмо.\nЯ  отвечу на него в ближайшее время.\n\nПо вопросам Диагностики, Сервиса, Ремонта техники обращаться по телефону Сервиса :+7 900 100 10 10\nЭлектронная почта Service@example.org\n\nHave a nice day.\nBest regards,\nTest Person',
@@ -507,6 +508,30 @@ describe('plain contact routing policy', () => {
       objectionHandleable: false,
       objectionDraft: null,
     });
+
+    // A real name/phone handoff above is distinct from a duplicated footer.
+    // Keep the entire body: a CTA after a signature must not be discarded.
+    const signature = '--\nС уважением, Резида Иванова\nООО "Пример"\nтел. 8 900 100 20 30';
+    for (const text of [signature, `${signature}\n\n${signature}`, signature.replace('--\n', '')]) {
+      fetchMock.mockClear();
+      expect(await qualify(text, { leadCriteria: ADK_CRITERIA })).toMatchObject({
+        isLead: false, customCriteriaMatched: false, needsReview: false,
+        reason: expect.stringContaining('только подпись'),
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+    for (const text of [
+      `Пришлите КП.\n${signature}`,
+      `${signature}\nПришлите КП.`,
+      `${signature}\nP.S. Позвоните завтра после 11:00.`,
+      '--\nС уважением, Пришлите КП',
+      '--\nС уважением, Анна перезвоните',
+      '8 900 100 20 30 Мария',
+    ]) {
+      fetchMock.mockClear();
+      expect(await qualify(text, { leadCriteria: ADK_CRITERIA })).toMatchObject({ isLead: true });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
   });
 });
 

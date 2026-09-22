@@ -154,6 +154,39 @@ function awaitsVeTriage(row: Record<string, unknown>): boolean {
   return decision?.status === 'needs_review' && decision.triage_version !== VE_RELEVANCE_TRIAGE_VERSION;
 }
 
+/** Отпечаток отбора сохранённой проверки: «этот проход повторяет предыдущий».
+ *
+ * Здесь ТОЛЬКО то, что сама проверка способна изменить: состав выбранных строк
+ * и поля вердикта, по которым строится следующий отбор. Числа готовых контактов
+ * базы и сырого статуса валидации чужого адреса здесь нет намеренно: они
+ * меняются от дочерней валидации почт и от пересчёта лимита адресов на
+ * компанию, то есть по причинам, к сохранённой проверке не относящимся.
+ * 21.09.2026 именно эта примесь сбрасывала детектор застоя: база 912c19df с
+ * 17:26 до 18:32 UTC сорок раз подряд «уточняла» одни и те же 479 контактов
+ * 110 компаний, каждый раунд перечитывая и переписывая свои 19 МБ и не делая
+ * ни одного обращения к провайдеру.
+ *
+ * Годность адреса всё же входит в отпечаток: именно она решает, попадёт ли
+ * строка в отбор, поэтому переход «unknown → ok» обязан считаться продвижением,
+ * а «unknown → invalid» — нет.
+ */
+export function veSavedReviewSignature(
+  rows: Array<Record<string, unknown>>,
+  options: { triage: boolean },
+): unknown[] {
+  return rows.map((row) => {
+    const decision = row._ve_relevance && typeof row._ve_relevance === 'object'
+      ? row._ve_relevance as Record<string, unknown> : undefined;
+    return [veRelevanceRowKey(row), isVeAcceptedEmailStatus(row._email_status),
+      decision?.status ?? null, decision?.review_attempts ?? null,
+      decision?.website_review_version ?? null, decision?.search_deferred ?? null,
+      // Быстрый проход, который лишь пометил компанию просмотренной, — тоже
+      // продвижение; элемент существует только при включённом триаже, поэтому
+      // отпечатки, снятые без него, остаются сравнимыми.
+      ...(options.triage ? [decision?.triage_version ?? null] : [])];
+  }).sort();
+}
+
 /** Spend the next bounded pass on usable emails with a site or searchable INN. */
 export function needsVeRelevanceEvidence(row: Record<string, unknown>): boolean {
   return canAutomaticallyReview(row, hasEvidenceSource(row));

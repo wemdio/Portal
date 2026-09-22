@@ -51,6 +51,7 @@ jest.mock('@/lib/verticalEngineV2/relevanceGate', () => ({
   },
 }));
 
+import { createHash } from 'node:crypto';
 import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/mockSupabase';
 import { capVeContactsPerCompany, normalizeVeMaxEmailsPerCompany } from '@/lib/verticalEngineV2/companyContactCap';
 import { canResumePartialPreview } from '@/lib/verticalEngineV2/collectionRecovery';
@@ -2448,5 +2449,80 @@ describe('base_collect: реестр оборвался посреди лейн�
     expect(task.error).toBeUndefined();
     expect(task.note).toContain('частичная партия');
     expect(Object.values(task.directory_cursors ?? {})).toEqual([1_000]);
+  });
+});
+
+describe('base_collect: ливлок сохранённой проверки', () => {
+  /** Тот же хэш адреса, что считает savedEmailRecovery (sha256 от JSON). */
+  const emailKey = (email: string) => createHash('sha256').update(JSON.stringify(email)).digest('hex');
+  const savedNeedsReview = () => ({ version: 2 as const, status: 'needs_review' as const,
+    reason: 'Нет сведений о деятельности; требуется подтверждение по сайту.', evidence: [],
+    context_hash: 'c'.repeat(64), review_attempts: 0 });
+
+  it('перестаёт уточнять тот же отбор, когда меняется только негодный адрес соседней строки', async () => {
+    // Прод 21.09.2026, база 912c19df: 40 раундов подряд «уточняем 479
+    // сохранённых контактов 110 компаний» → «проверено 110 из 110, без verdict
+    // 479». Отбор не менялся, провайдера не спрашивали ни разу, но детектор
+    // застоя не защёлкивался: в отпечаток входило число готовых контактов и
+    // сырой статус валидации соседнего адреса.
+    const mainA = { ...unifiedRow({ company: 'Клиника А', website: 'a.test', email: 'chief@a.test', inn: '7701234567' }),
+      _email_status: 'catch_all', _ve_relevance: savedNeedsReview() };
+    const siblingA = { ...unifiedRow({ company: 'Клиника А', website: 'a.test', email: 'info@a.test', inn: '7701234567' }),
+      _email_status: 'unknown', _ve_relevance: savedNeedsReview() };
+    const mainB = { ...unifiedRow({ company: 'Клиника Б', website: 'b.test', email: 'chief@b.test', inn: '7709876543' }),
+      _email_status: 'catch_all', _ve_relevance: savedNeedsReview() };
+    const reserve = [mainA, siblingA, mainB];
+    const checked = { [emailKey('info@a.test')]: 'unknown' as const };
+    const info: VeCollectInfo = {
+      ...collectInfo([]),
+      collection_mode: 'preview', ready_target: 500,
+      relevance_review_requested: true,
+      search_policy: { version: 1, phase: 'paid', deferred_rows: [] },
+      relevance_reserve: { version: 1, rows: reserve },
+      target_progress: { ...createCollectionTarget('preview'), status: 'collecting', round: 4,
+        candidates_processed: 40, ready_rows: 0 },
+      target_checkpoint: { completed_round: 4, seen_rows: reserve, processed_rows: 3 },
+      saved_email_recovery: { version: 1, attempt_id: 'automatic:b1', checked, automatic_checked: checked },
+    };
+    info.tasks![0].exhausted = true;
+    const db = seed(info);
+    const supabase = db as unknown as SupabaseClient;
+    // Гейт отвечает ровно тем, что уже лежит в чекпоинте: ни одной компании
+    // он сдвинуть не может, обращения к провайдеру нет.
+    mockFindIrrelevantRows.mockImplementation(async (input: { rows: Array<Record<string, unknown>> }) => ({
+      flagged: new Set<number>(), unchecked: new Set(input.rows.map((_, index) => index)),
+      review: new Set(input.rows.map((_, index) => index)), errored: new Set<number>(),
+      decisions: new Map(input.rows.map((_, index) => [index, savedNeedsReview()])),
+      coverage: { checkedCompanies: 2, totalCompanies: 2, complete: true }, tokensUsed: 0, costUsd: 0,
+    }));
+
+    const runRound = async () => {
+      const queued = db.getRows('ve_jobs').filter((row) => row.stage === 'base_collect').at(-1)!;
+      await supabase.from('ve_jobs').update({ status: 'running' }).eq('id', queued.id);
+      await runBaseCollectStage({ ...makeJob(), id: queued.id as string, payload: queued.payload as VeJob['payload'] },
+        { supabase });
+      return db.getRows('ve_bases').find((row) => row.id === 'b1')!.collect_info as VeCollectInfo;
+    };
+
+    const first = await runRound();
+    expect(first.relevance_review_requested).toBe(true);
+    expect(first.relevance_review_progress?.passes).toBe(0);
+    expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(1);
+
+    // Дочерняя валидация почт ответила по соседнему адресу «невалидный».
+    // Получателем он не стал, отбор сохранённой проверки не изменился —
+    // повторять её незачем.
+    const patched = db.getRows('ve_bases').find((row) => row.id === 'b1')!.collect_info as VeCollectInfo;
+    await supabase.from('ve_bases').update({ collect_info: { ...patched, relevance_reserve: {
+      ...patched.relevance_reserve!, rows: patched.relevance_reserve!.rows.map((row) => row.email === 'info@a.test'
+        ? { ...row, _email_status: 'invalid' } : row),
+    } } }).eq('id', 'b1');
+
+    const second = await runRound();
+    expect(second.relevance_review_progress).toEqual({ signature: first.relevance_review_progress!.signature, passes: 1 });
+    expect(second.relevance_review_requested).toBeUndefined();
+    // Контакты никуда не делись: раунд завершается честно, резерв цел.
+    expect(second.relevance_reserve!.rows).toHaveLength(3);
+    expect(second.relevance_summary).toMatchObject({ total: 3, needs_review: 3 });
   });
 });

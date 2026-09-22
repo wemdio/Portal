@@ -541,6 +541,19 @@ async function fetchEmailsWithCache(
   }
 }
 
+/**
+ * Что уходит в queue-строку при успешном завершении.
+ *
+ * Вынесено в функцию не ради красоты: раньше место вызова собирало объект
+ * заново (`{ text: result.text ?? '' }`) и молча роняло `note` — причину
+ * пустого результата. Юнит-тесты этого не ловили, потому что проверяли
+ * scrapeEmails и planFlush по отдельности, а склейку между ними — никто.
+ * Прогон на проде 22.09.2026: 195 пустых строк, причина ни у одной.
+ */
+export function completedPayload(result: FetchResult): FetchResult {
+  return { text: result.text ?? '', note: result.note };
+}
+
 async function updateQueueItem(
   item: QueueItem,
   result: FetchResult,
@@ -1025,7 +1038,7 @@ export async function runWebsiteEnrichmentJob(jobId: string) {
                 }
               }
             } else {
-              const markedCompleted = await updateQueueItem(item, { text: result.text ?? '' }, 'completed');
+              const markedCompleted = await updateQueueItem(item, completedPayload(result), 'completed');
               if (markedCompleted) {
                 _success += 1;
                 finalized = true;
