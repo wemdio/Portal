@@ -5,10 +5,12 @@ import { FileSpreadsheet, Loader2, Mail } from 'lucide-react';
 import {
   createCampaign,
   fetchCampaign,
+  previewCampaignSteps,
   previewRecipients,
   updateCampaign,
   uploadRecipients,
   type CampaignDto,
+  type PreviewSampleDto,
   type RecipientColumnsDto,
 } from './api';
 import { LetterStep, ScheduleStep, Step, WORKDAYS, letterIssues } from './CampaignSteps';
@@ -89,6 +91,11 @@ export function CampaignFormModal({ campaign, onClose, onCreated }: Props) {
   const [weekdays, setWeekdays] = useState<number[]>(campaign?.send_weekdays ?? [...WORKDAYS]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Предпросмотр на реальных получателях (задача 5.6) и разбивка ответов по
+  // шагам цепочки (задача 6.4) — обе показываются в блоке письма.
+  const [preview, setPreview] = useState<PreviewSampleDto[] | null>(null);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [repliesByStep, setRepliesByStep] = useState<{ step: number; replied: number }[]>([]);
 
   const campaignId = campaign?.id;
   const load = useCallback(async () => {
@@ -113,6 +120,7 @@ export function CampaignFormModal({ campaign, onClose, onCreated }: Props) {
         );
       }
       setSaved(details.recipients);
+      setRepliesByStep(details.repliesByStep ?? []);
       setReadOnly(!details.editable);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить кампанию');
@@ -295,6 +303,34 @@ export function CampaignFormModal({ campaign, onClose, onCreated }: Props) {
   const shown = mailboxes.slice(0, SHOWN_MAILBOXES);
   const rest = mailboxes.length - shown.length;
   const statusHint = campaign ? STATUS_HINT[campaign.status] : STATUS_HINT.draft;
+
+  /**
+   * Предпросмотр на реальных строках базы: файл — если выбран, иначе загруженная
+   * база кампании. Показывает, что фактически уедет лиду, включая пустые
+   * переменные — агрегат по колонкам этого не видит.
+   */
+  const runPreview = async () => {
+    setPreviewBusy(true);
+    setError(null);
+    setPreview(null);
+    try {
+      const steps = letters.map((letter) => ({ subject: letter.subject, body: letter.body }));
+      if (recipientsFile) {
+        const res = await previewRecipients(recipientsFile, steps);
+        if (res.samples?.length) setPreview(res.samples);
+        else setError('Предпросмотр не собрался — проверьте, что в письмах есть текст');
+      } else if (editing && (saved?.total ?? 0) > 0 && campaignId) {
+        const res = await previewCampaignSteps(campaignId, steps);
+        setPreview(res.samples);
+      } else {
+        setError('Для предпросмотра нужна база: выберите файл или откройте кампанию с загруженной базой');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось собрать предпросмотр');
+    } finally {
+      setPreviewBusy(false);
+    }
+  };
 
   return (
     <>
@@ -543,6 +579,25 @@ export function CampaignFormModal({ campaign, onClose, onCreated }: Props) {
               </button>
             ) : null}
 
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void runPreview()}
+                disabled={previewBusy}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50"
+              >
+                {previewBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                Предпросмотр на реальных получателях
+              </button>
+              {/* На каком шаге лиды ответили — видно, работает ли цепочка дальше
+                  первого касания (задача 6.4). */}
+              {repliesByStep.length ? (
+                <span className="text-xs text-zinc-500">
+                  Ответили по шагам: {repliesByStep.map((r) => `${r.step} — ${r.replied}`).join(', ')}
+                </span>
+              ) : null}
+            </div>
+
             <ScheduleStep
               no={5}
               done={steps[4].done}
@@ -573,6 +628,39 @@ export function CampaignFormModal({ campaign, onClose, onCreated }: Props) {
             setPickerOpen(false);
           }}
         />
+      ) : null}
+
+      {/* Предпросмотр поверх формы: сэмплы писем на реальных адресах базы. */}
+      {preview ? (
+        <SenderModal
+          title="Предпросмотр письма"
+          subtitle="Как письмо уйдёт реальным получателям базы (первые два адреса)"
+          size="wide"
+          onClose={() => setPreview(null)}
+          footer={
+            <button
+              type="button"
+              onClick={() => setPreview(null)}
+              className="rounded-lg px-3 py-2 text-sm text-zinc-600 transition-colors hover:bg-zinc-100"
+            >
+              Закрыть
+            </button>
+          }
+        >
+          <div className="space-y-4">
+            {preview.map((sample) => (
+              <div key={sample.email} className="rounded-xl border border-zinc-200 p-4">
+                <p className="text-xs font-medium text-zinc-500">Получатель: {sample.email}</p>
+                {sample.steps.map((step, index) => (
+                  <div key={index} className="mt-2 border-t border-zinc-100 pt-2 first:border-0 first:pt-0">
+                    <p className="text-sm font-medium text-zinc-900">{step.subject || 'Re: (в тот же тред)'}</p>
+                    <p className="mt-1 whitespace-pre-wrap break-words text-sm text-zinc-700">{step.body}</p>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </SenderModal>
       ) : null}
     </>
   );

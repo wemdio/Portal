@@ -33,10 +33,35 @@ const COLUMNS: { header: string; key: string; width: number }[] = [
   { header: 'Outbound-мандат', key: 'outbound_mandate', width: 16 },
   { header: 'Цитата про мандат', key: 'outbound_evidence', width: 48 },
   { header: 'Почта', key: 'selected_company_email', width: 28 },
-  { header: 'Тип почты', key: 'email_type', width: 14 },
+  { header: 'Тип почты', key: 'email_type', width: 18 },
   { header: 'Статус', key: 'status', width: 18 },
   { header: 'Причина исключения', key: 'exclusion_reason', width: 22 },
   { header: 'На ручную проверку', key: 'review_reason', width: 22 },
+  { header: 'Письмо 1 — тема', key: 'letter1_subject', width: 34 },
+  { header: 'Письмо 1 — текст', key: 'letter1_body', width: 60 },
+  { header: 'Письмо 2 — тема', key: 'letter2_subject', width: 34 },
+  { header: 'Письмо 2 — текст', key: 'letter2_body', width: 60 },
+  { header: 'Письмо 3 — тема', key: 'letter3_subject', width: 34 },
+  { header: 'Письмо 3 — текст', key: 'letter3_body', width: 60 },
+  { header: 'Письмо 4 — тема', key: 'letter4_subject', width: 34 },
+  { header: 'Письмо 4 — текст', key: 'letter4_body', width: 60 },
+];
+
+/**
+ * Колонки файла для отправки.
+ *
+ * Полный лист со статусами, причинами отсева и цитатами отвечает на вопрос
+ * «почему выход такой» — он остаётся для разбора. Здесь другой вопрос: кому
+ * и что отправлять. Список уходит в автоматическую рассылку, и лишние
+ * колонки там только мешают.
+ */
+const READY_COLUMNS: { header: string; key: string; width: number }[] = [
+  { header: 'Компания', key: 'company_name', width: 28 },
+  { header: 'Почта', key: 'selected_company_email', width: 30 },
+  { header: 'Домен', key: 'normalized_domain', width: 24 },
+  { header: 'Страна', key: 'job_country_code', width: 10 },
+  { header: 'Вакансия', key: 'job_title', width: 34 },
+  { header: 'Ссылка на вакансию', key: 'job_source_url', width: 38 },
   { header: 'Письмо 1 — тема', key: 'letter1_subject', width: 34 },
   { header: 'Письмо 1 — текст', key: 'letter1_body', width: 60 },
   { header: 'Письмо 2 — тема', key: 'letter2_subject', width: 34 },
@@ -55,6 +80,12 @@ const STATUS_RU: Record<string, string> = {
   qualified: 'квалифицирована',
   ready: 'готово',
   failed: 'ошибка',
+};
+
+const EMAIL_TYPE_RU: Record<string, string> = {
+  department_company: 'отдел продаж',
+  generic_company: 'общий ящик',
+  person_company: 'личный ящик',
 };
 
 const REASON_RU: Record<string, string> = {
@@ -93,21 +124,27 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   }
 
   const { jobId } = await ctx.params;
-  const { data: rows, error } = await supabase
+  // Фильтр приходит из таблицы: включён режим «только готовые» — в файле
+  // ровно те строки, которые оператор видит на экране и собирается отправить.
+  const statusFilter = req.nextUrl.searchParams.get('status');
+  let query = supabase
     .from('polza_outreach_companies')
     .select('*')
     .eq('job_id', jobId)
     .order('created_at', { ascending: true })
     .limit(5000);
+  if (statusFilter) query = query.eq('status', statusFilter);
+  const { data: rows, error } = await query;
 
   if (error) {
     await logError('parser.polza_outreach.export.failed', error, { jobId }, { userId, route: req.nextUrl.pathname });
     return jsonError(error.message, 500);
   }
 
+  const forSending = statusFilter === 'ready';
   const workbook = new ExcelJS.Workbook();
-  const sheet = workbook.addWorksheet('Английский автоаутрич');
-  sheet.columns = COLUMNS;
+  const sheet = workbook.addWorksheet(forSending ? 'Готовые к отправке' : 'Английский автоаутрич');
+  sheet.columns = forSending ? READY_COLUMNS : COLUMNS;
   sheet.getRow(1).font = { bold: true };
   // Шапка не уезжает при прокрутке: строк бывает под тысячу, и без закрепления
   // к двадцатой колонке уже не помнишь, что в ней.
@@ -124,6 +161,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       job_published_at: typeof row.job_published_at === 'string' ? row.job_published_at.slice(0, 10) : '',
       // Да/нет вместо true/false: файл читает продажник, а не разработчик.
       outbound_mandate: row.outbound_mandate === true ? 'да' : row.outbound_mandate === false ? 'нет' : '',
+      email_type: typeof row.email_type === 'string' ? EMAIL_TYPE_RU[row.email_type] ?? row.email_type : '',
       status: typeof row.status === 'string' ? STATUS_RU[row.status] ?? row.status : '',
       exclusion_reason: reason(row.exclusion_reason),
       review_reason: reason(row.review_reason),
@@ -135,7 +173,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   }
 
   const buffer = await workbook.xlsx.writeBuffer();
-  const filename = `polza_outreach_${jobId.slice(0, 8)}.xlsx`;
+  const filename = `polza_outreach${forSending ? '_ready' : ''}_${jobId.slice(0, 8)}.xlsx`;
 
   return new NextResponse(buffer as ArrayBuffer, {
     headers: {

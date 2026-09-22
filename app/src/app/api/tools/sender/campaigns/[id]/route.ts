@@ -68,6 +68,26 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
     if (!campaign) return jsonError('Кампания не найдена', 404);
 
+    const db = supabaseAdmin;
+    // Разбивка ответов по шагам цепочки (задача 6.4): на каком касании лид
+    // ответил. last_step_sent фиксируется после отправки шага, поэтому
+    // «ответил на шаге N» = ответил после N отправленных писем.
+    const MAX_STEP = 5;
+    const stepCounts = await Promise.all(
+      Array.from({ length: MAX_STEP }, (_, i) =>
+        db
+          .from('sender_recipients')
+          .select('id', { count: 'exact', head: true })
+          .eq('campaign_id', id)
+          .eq('status', 'replied')
+          .eq('last_step_sent', i + 1)
+          .then(({ count }) => count ?? 0),
+      ),
+    );
+    const repliesByStep = stepCounts
+      .map((count, index) => ({ step: index + 1, replied: count }))
+      .filter((row) => row.replied > 0);
+
     // Вложенная запись приезжает объектом или массивом — приводим к одному виду.
     const mailboxes = (pool ?? []).flatMap((row) => {
       const raw = (row as { sender_mailboxes?: unknown }).sender_mailboxes;
@@ -85,9 +105,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       campaign,
       steps: steps ?? [],
       mailboxes,
+      repliesByStep,
       recipients: {
         total,
-        // Счётчики «заполнено у N из M» честны, только если посчитаны по всей
+        // Счётчики «заполнено у N» честны, только если посчитаны по всей
         // базе; иначе форма покажет переменные без цифр, а не цифры наугад.
         exact: total <= VARS_SAMPLE,
         columns: describeSavedRecipients(rows),

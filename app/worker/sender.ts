@@ -15,6 +15,8 @@ import { planSenderMessages } from '@/lib/sender/planner';
 import { processSenderBatch } from '@/lib/sender/sendWorker';
 import { processSenderReplies } from '@/lib/sender/repliesWorker';
 import { processSendProbes } from '@/lib/sender/probeWorker';
+import { processManualMessages } from '@/lib/sender/manualWorker';
+import { runSenderMonitor } from '@/lib/sender/monitorWorker';
 import { syncGoogleWorkspaceMailboxes } from '@/lib/sender/googleSyncWorker';
 
 const log = createWorkerLogger('sender');
@@ -35,6 +37,11 @@ let lastRepliesAt = 0;
 // Google каждую минуту.
 const GOOGLE_SYNC_INTERVAL_MS = Number(process.env.SENDER_GOOGLE_SYNC_INTERVAL_MS ?? 3_600_000);
 let lastGoogleSyncAt = 0;
+
+// Монитор (5.7/5.8): метрики, TG-алерты и автопауза доменов. Реже отправки —
+// метрики скользящие, чаще незачем, а TG не должен шуметь.
+const MONITOR_INTERVAL_MS = Number(process.env.SENDER_MONITOR_INTERVAL_MS ?? 300_000);
+let lastMonitorAt = 0;
 
 async function tick(): Promise<boolean> {
   if (Date.now() - lastGoogleSyncAt >= GOOGLE_SYNC_INTERVAL_MS) {
@@ -65,6 +72,22 @@ async function tick(): Promise<boolean> {
     await processSendProbes({ log });
   } catch (e) {
     log('warn', `Проверочные отправки не обработались: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // Ручные ответы операторов: очередью через БД, SMTP только с этого хоста.
+  try {
+    await processManualMessages({ log });
+  } catch (e) {
+    log('warn', `Ручные ответы не обработались: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  if (Date.now() - lastMonitorAt >= MONITOR_INTERVAL_MS) {
+    lastMonitorAt = Date.now();
+    try {
+      await runSenderMonitor({ log });
+    } catch (e) {
+      log('warn', `Монитор не отработал: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   return sent;

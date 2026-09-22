@@ -1,10 +1,11 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Loader2, Pause, Play, Plus, Square, Trash2 } from 'lucide-react';
+import { Loader2, Pause, Play, Plus, Square, Trash2, Users } from 'lucide-react';
 import { deleteCampaign, fetchCampaigns, patchCampaign, type CampaignDto } from './api';
 import { CampaignFormModal } from './CampaignFormModal';
 import { timezoneLabel, weekdaysLabel } from './CampaignSteps';
+import { RecipientsModal } from './RecipientsModal';
 
 const STATUS_LABELS: Record<CampaignDto['status'], { text: string; className: string }> = {
   draft: { text: 'Черновик', className: 'bg-zinc-100 text-zinc-600' },
@@ -28,6 +29,8 @@ export function CampaignsTab() {
   const [editing, setEditing] = useState<CampaignDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Кому показать базу получателей (задача 5.2): список с фильтрами и поиском.
+  const [recipientsOf, setRecipientsOf] = useState<CampaignDto | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -118,6 +121,17 @@ export function CampaignsTab() {
                   </div>
 
                   <div className="flex items-center gap-2">
+                    {/* База получателей: кому отправлено, кто ответил, кто отбился —
+                        раньше только сводная строка цифр. */}
+                    <button
+                      type="button"
+                      onClick={() => setRecipientsOf(campaign)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100"
+                    >
+                      <Users className="h-3.5 w-3.5" />
+                      База
+                    </button>
+
                     {campaign.status === 'running' ? (
                       <button
                         type="button"
@@ -210,6 +224,13 @@ export function CampaignsTab() {
             setError(savedError ?? null);
             await load();
           }}
+        />
+      ) : null}
+
+      {recipientsOf ? (
+        <RecipientsModal
+          campaign={recipientsOf}
+          onClose={() => setRecipientsOf(null)}
         />
       ) : null}
     </div>

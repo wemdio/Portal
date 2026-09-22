@@ -98,8 +98,8 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
           </h2>
           <p className="mt-1 max-w-3xl text-sm text-gray-500">
             IT-компании, которые прямо сейчас нанимают SDR/BDR: домен, ICP-фильтр, гео продаж из текста вакансии
-            с цитатой-доказательством, корпоративная почта и готовая цепочка из 4 писем. Без отправки — только
-            генерация и выгрузка.
+            с цитатой-доказательством, корпоративная почта и готовая цепочка из 4 писем. Сколько закажете готовых —
+            столько и соберём, пока хватает свежих вакансий. Без отправки — только генерация и выгрузка.
           </p>
         </div>
         <button
@@ -187,7 +187,10 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
         </div>
       </div>
         <label className="block md:w-44">
-          <span className="mb-1 block text-sm font-medium text-gray-700">Компаний (лимит, 1–1000)</span>
+          {/* Число теперь про выход, а не про выборку: конвейер добирает
+              кандидатов волнами, пока не наберёт столько готовых компаний —
+              или пока свежие вакансии не кончатся. */}
+          <span className="mb-1 block text-sm font-medium text-gray-700">Готовых компаний (1–1000)</span>
           <input
             value={limit}
             onChange={(e) => setLimit(e.target.value.replace(/\D/g, ''))}

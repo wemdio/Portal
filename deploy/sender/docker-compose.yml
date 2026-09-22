@@ -45,6 +45,11 @@ services:
       - SENDER_PROBE_IMAP_PORT=${SENDER_PROBE_IMAP_PORT:-993}
       - SENDER_PROBE_IMAP_USER=${SENDER_PROBE_IMAP_USER:-}
       - SENDER_PROBE_IMAP_PASSWORD=${SENDER_PROBE_IMAP_PASSWORD:-}
+      # Алерты мониторинга в TG: отправка встала, ящики отваливаются, bounce
+      # rate домена. Без чата монитор работает (автопауза), но молчит.
+      - SENDER_ALERTS_TELEGRAM_CHAT_ID=${SENDER_ALERTS_TELEGRAM_CHAT_ID:-}
+      - SENDER_ALERTS_TELEGRAM_BOT_TOKEN=${SENDER_ALERTS_TELEGRAM_BOT_TOKEN:-}
+      - SENDER_MONITOR_INTERVAL_MS=${SENDER_MONITOR_INTERVAL_MS:-300000}
       - WORKER_KIND=sender
     stop_grace_period: 2m
     # autoheal + heartbeat — защита от event-loop hang (инциденты tgOutreach
