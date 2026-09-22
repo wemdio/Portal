@@ -120,11 +120,11 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
           глазами. */}
       {/* Все три настройки — одна строка: гео, сколько компаний и за какой
           срок вакансии. Это один вопрос «что парсим», и разложенный на три
-          яруса он читался как три отдельных решения. Гео тянется по остатку
-          ширины, лимиту хватает места под три цифры, переключатель свежести
-          занимает ровно столько, сколько занимает. */}
+          яруса он читался как три отдельных решения. Ширину каждому полю даём
+          по содержимому, а не по остатку строки: растянутое на пол-экрана поле
+          гео выглядело главным, хотя в нём одна строчка текста. */}
       <div className="mt-5 flex flex-col gap-5 md:flex-row md:flex-wrap md:items-end">
-      <div className="min-w-0 flex-1 md:min-w-[260px]" ref={geoRef}>
+      <div className="min-w-0 md:w-72" ref={geoRef}>
         <label className="mb-2 block text-sm font-medium text-gray-700">Гео вакансий</label>
         <div className="relative">
           <button
