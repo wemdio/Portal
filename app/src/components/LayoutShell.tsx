@@ -7,6 +7,7 @@ import { Sidebar } from './Sidebar';
 import { TopNav } from './TopNav';
 import { useIsTma } from '@/lib/useIsTma';
 import { TmaHeader } from './TmaHeader';
+import { ChangelogModal } from '@/components/changelog/ChangelogModal';
 import { UserProvider, useUser } from '@/lib/UserProvider';
 import { PortalLoadingProvider } from '@/components/PortalLoadingProvider';
 import { PortalDocumentTitle } from '@/components/PortalDocumentTitle';
@@ -183,6 +184,11 @@ export function LayoutShell({
         </main>
       </div>
     </div>
+    {/* Сводка обновлений при входе. Внутри портальной обвязки и ниже неё по
+        дереву: страницы без навигации (клиентский портал, вход, публичные
+        ссылки) выходят из LayoutShell раньше и окно не получают — им эта
+        сводка не предназначена. */}
+    {!isTma ? <ChangelogModal /> : null}
     </PortalLoadingProvider>
     </UserProvider>
     </>
