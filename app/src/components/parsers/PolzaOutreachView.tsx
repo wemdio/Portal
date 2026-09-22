@@ -397,6 +397,7 @@ export function PolzaOutreachView() {
           exclusionCounts={exclusionCounts}
           loading={resultsLoading}
           jobStatus={activeJob?.status ?? null}
+          jobError={activeJob?.error_message ?? null}
           currentPage={resultsPage}
           totalPages={totalPages}
           onPageChange={handlePageChange}
