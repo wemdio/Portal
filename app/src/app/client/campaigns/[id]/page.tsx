@@ -32,6 +32,8 @@ import {
 import { clientApiFetch } from '@/lib/clientFetcher';
 import { ExpandedThread } from '@/components/client-replies/ExpandedThread';
 import { ScheduleEditor } from '@/components/client/ScheduleEditor';
+import { useClientPortalContext } from '@/lib/clientPortalContext';
+import { shouldShowOpenMetrics } from '@/lib/clientOpenMetrics';
 import {
   CampaignStatus, CampaignStatusLabels,
   type Campaign, type CampaignAnalytics, type CampaignStepAnalytics, type SequenceStep,
@@ -397,6 +399,8 @@ function CampaignDetailPageContent() {
   const campaignId = params.id;
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { portalMode } = useClientPortalContext();
+  const showOpens = shouldShowOpenMetrics(portalMode);
 
   // URL-driven tab — shareable via ?tab=replies, browser back walks tabs.
   const rawTab = searchParams.get('tab');
@@ -868,10 +872,15 @@ function CampaignDetailPageContent() {
             <span className="ds-mono tabular-nums font-semibold" style={{ color: 'var(--cp-paper)' }}>
               {sentCount.toLocaleString('ru-RU')}
             </span>
-            {' '}писем, открыли{' '}
-            <span className="ds-mono tabular-nums font-semibold" style={{ color: 'var(--cp-paper)' }}>
-              {openRate}%
-            </span>
+            {' '}писем
+            {showOpens && (
+              <>
+                , открыли{' '}
+                <span className="ds-mono tabular-nums font-semibold" style={{ color: 'var(--cp-paper)' }}>
+                  {openRate}%
+                </span>
+              </>
+            )}
             , ответили{' '}
             <span className="ds-mono tabular-nums font-semibold" style={{ color: 'var(--cp-paper)' }}>
               {replyRate}%
@@ -891,11 +900,13 @@ function CampaignDetailPageContent() {
               isFirst
               emphasized
             />
-            <FunnelRow
-              label="Открытия"
-              value={openCount}
-              percent={reachedCount > 0 ? `${openRate}%` : undefined}
-            />
+            {showOpens && (
+              <FunnelRow
+                label="Открытия"
+                value={openCount}
+                percent={reachedCount > 0 ? `${openRate}%` : undefined}
+              />
+            )}
             <FunnelRow
               label="Ответы"
               value={replyCount}
@@ -926,7 +937,9 @@ function CampaignDetailPageContent() {
                     <tr style={{ background: 'var(--cp-surface-elev)' }}>
                       <th className="ds-eyebrow px-3 sm:px-5 py-2.5 sm:py-3 text-left">Шаг</th>
                       <th className="ds-eyebrow px-3 sm:px-5 py-2.5 sm:py-3 text-right">Отпр.</th>
-                      <th className="ds-eyebrow px-3 sm:px-5 py-2.5 sm:py-3 text-right">Откр.</th>
+                      {showOpens && (
+                        <th className="ds-eyebrow px-3 sm:px-5 py-2.5 sm:py-3 text-right">Откр.</th>
+                      )}
                       <th className="ds-eyebrow px-3 sm:px-5 py-2.5 sm:py-3 text-right">Отв.</th>
                     </tr>
                   </thead>
@@ -937,7 +950,9 @@ function CampaignDetailPageContent() {
                           {String(s.step).padStart(2, '0')}{s.variant ? ` · ${String.fromCharCode(65 + Number(s.variant))}` : ''}
                         </td>
                         <td className="ds-mono px-3 sm:px-5 py-2.5 sm:py-3 text-right" style={{ color: 'var(--cp-paper-mute)' }}>{s.sent ?? 0}</td>
-                        <td className="ds-mono px-3 sm:px-5 py-2.5 sm:py-3 text-right" style={{ color: 'var(--cp-paper-mute)' }}>{s.unique_opened ?? s.opened ?? 0}</td>
+                        {showOpens && (
+                          <td className="ds-mono px-3 sm:px-5 py-2.5 sm:py-3 text-right" style={{ color: 'var(--cp-paper-mute)' }}>{s.unique_opened ?? s.opened ?? 0}</td>
+                        )}
                         <td className="ds-mono px-3 sm:px-5 py-2.5 sm:py-3 text-right" style={{ color: 'var(--cp-paper-mute)' }}>{s.unique_replies ?? s.replies ?? 0}</td>
                       </tr>
                     ))}

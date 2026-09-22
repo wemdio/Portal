@@ -23,6 +23,11 @@ export const dynamic = 'force-dynamic';
  * навигацию: eng-клиент видит только ENG-кабинет, ru — всё кроме ENG.
  *
  * Используется /client/layout.tsx один раз при загрузке.
+ *
+ * Серверные роуты берут тот же предикат из lib/clientPortalMode.ts
+ * (resolveClientPortalMode). Здесь он оставлен инлайном только потому, что
+ * заодно читает profiles.market одним запросом — правки предиката нужно
+ * вносить в оба места.
  */
 export async function GET(req: NextRequest) {
   try {
