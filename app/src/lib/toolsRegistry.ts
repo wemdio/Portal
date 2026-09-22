@@ -457,9 +457,7 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
       'Свежие вакансии SDR/BDR → компания и почта → цепочка из четырёх писем на английском.',
     description_en:
       'Fresh SDR/BDR job posts → company and mailbox → a four-email English sequence.',
-    // Отдельной страницы у инструмента нет: он живёт вкладкой в «Парсерах»,
-    // рядом с источником вакансий, из которого берёт сигнал.
-    href: '/parsers?tab=polza-outreach',
+    href: '/tools/polza-outreach',
     accentColor: 'blue',
     badge: 'В разработке',
     badge_en: 'In development',

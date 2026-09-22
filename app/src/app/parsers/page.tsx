@@ -10,27 +10,25 @@ import { CryptoPaymentParserView } from '@/components/parsers/CryptoPaymentParse
 import { YandexDirectParserView } from '@/components/parsers/YandexDirectParserView';
 import { AtsParserView } from '@/components/parsers/AtsParserView';
 import { EngHiringParserView } from '@/components/parsers/EngHiringParserView';
-import { PolzaOutreachView } from '@/components/parsers/PolzaOutreachView';
 import { EuUsCompanyBaseView } from '@/components/parsers/EuUsCompanyBaseView';
 import { CrunchbaseParserView } from '@/components/parsers/CrunchbaseParserView';
 import { GoogleMapsParserView } from '@/components/parsers/GoogleMapsParserView';
 import { GoogleNewsParserView } from '@/components/parsers/GoogleNewsParserView';
 
-type Tab = 'hh' | 'eng-hiring' | 'polza-outreach' | 'ats' | 'crunchbase' | 'eu-us-base' | 'hh-archive' | 'search' | 'yandexmaps' | 'yandexdirect' | 'crypto' | 'googlemaps' | 'googlenews';
+type Tab = 'hh' | 'eng-hiring' | 'ats' | 'crunchbase' | 'eu-us-base' | 'hh-archive' | 'search' | 'yandexmaps' | 'yandexdirect' | 'crypto' | 'googlemaps' | 'googlenews';
 
 const TABS: readonly Tab[] = [
-  'hh', 'eng-hiring', 'polza-outreach', 'ats', 'crunchbase', 'eu-us-base', 'hh-archive',
+  'hh', 'eng-hiring', 'ats', 'crunchbase', 'eu-us-base', 'hh-archive',
   'search', 'yandexmaps', 'yandexdirect', 'crypto', 'googlemaps', 'googlenews',
 ];
 
 export default function ParsersPage() {
   /**
-   * Вкладку можно открыть ссылкой: /parsers?tab=polza-outreach.
+   * Вкладку можно открыть ссылкой: /parsers?tab=eng-hiring.
    *
-   * Нужно каталогу инструментов — там у англ. аутрича своя карточка, а
-   * собственной страницы у него нет: он живёт вкладкой рядом с источником
-   * вакансий, из которого берёт сигнал. Без этого карточка приводила бы на
-   * «Парсеры» вообще, и вкладку пришлось бы искать глазами.
+   * Парсеров на странице тринадцать, и «открой парсеры, там найдёшь» — плохая
+   * ссылка: вкладку приходится искать глазами. С параметром на нужную можно
+   * сослаться откуда угодно — из чата, из задачи, из другого экрана.
    *
    * Значение из адреса проверяем по списку: чужое просто игнорируется.
    */
@@ -80,18 +78,6 @@ export default function ParsersPage() {
           >
             ENG вакансии
             <span className="ml-1.5 rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-normal text-blue-700 align-middle">6 ATS sources</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('polza-outreach')}
-            className={`
-              whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm
-              ${activeTab === 'polza-outreach'
-                ? 'border-violet-500 text-violet-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}
-            `}
-          >
-            Polza аутрич
-            <span className="ml-1.5 rounded border border-violet-200 bg-violet-50 px-1.5 py-0.5 text-[10px] font-normal text-violet-700 align-middle">SDR hiring-trigger</span>
           </button>
           <button
             onClick={() => setActiveTab('crunchbase')}
@@ -198,7 +184,6 @@ export default function ParsersPage() {
 
       {activeTab === 'hh' && <HHParserView />}
       {activeTab === 'eng-hiring' && <EngHiringParserView />}
-      {activeTab === 'polza-outreach' && <PolzaOutreachView />}
       {activeTab === 'ats' && <AtsParserView />}
       {activeTab === 'crunchbase' && <CrunchbaseParserView />}
       {activeTab === 'eu-us-base' && <EuUsCompanyBaseView />}
