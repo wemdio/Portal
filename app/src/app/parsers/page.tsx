@@ -1,7 +1,7 @@
 
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { HHParserView } from '@/components/parsers/HHParserView';
 import { HHArchiveParserView } from '@/components/parsers/HHArchiveParserView';
 import { SearchParserView } from '@/components/parsers/SearchParserView';
@@ -18,8 +18,31 @@ import { GoogleNewsParserView } from '@/components/parsers/GoogleNewsParserView'
 
 type Tab = 'hh' | 'eng-hiring' | 'polza-outreach' | 'ats' | 'crunchbase' | 'eu-us-base' | 'hh-archive' | 'search' | 'yandexmaps' | 'yandexdirect' | 'crypto' | 'googlemaps' | 'googlenews';
 
+const TABS: readonly Tab[] = [
+  'hh', 'eng-hiring', 'polza-outreach', 'ats', 'crunchbase', 'eu-us-base', 'hh-archive',
+  'search', 'yandexmaps', 'yandexdirect', 'crypto', 'googlemaps', 'googlenews',
+];
+
 export default function ParsersPage() {
+  /**
+   * Вкладку можно открыть ссылкой: /parsers?tab=polza-outreach.
+   *
+   * Нужно каталогу инструментов — там у англ. аутрича своя карточка, а
+   * собственной страницы у него нет: он живёт вкладкой рядом с источником
+   * вакансий, из которого берёт сигнал. Без этого карточка приводила бы на
+   * «Парсеры» вообще, и вкладку пришлось бы искать глазами.
+   *
+   * Значение из адреса проверяем по списку: чужое просто игнорируется.
+   */
   const [activeTab, setActiveTab] = useState<Tab>('hh');
+  useEffect(() => {
+    // Читаем адрес в эффекте, а не хуком useSearchParams: тот заставляет
+    // оборачивать страницу в Suspense, иначе production-сборка Next падает.
+    // Эффект выполняется только в браузере, поэтому и рассинхрона разметки
+    // между сервером и клиентом не возникает.
+    const requested = new URLSearchParams(window.location.search).get('tab') as Tab | null;
+    if (requested && TABS.includes(requested)) setActiveTab(requested);
+  }, []);
 
   return (
     // zoom: 0.85 — глобальный «браузерный» масштаб только для страницы
