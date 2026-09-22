@@ -43,12 +43,20 @@ const MARKER_CLASS: Record<StageState, string> = {
   pending: 'bg-gray-100 text-gray-400',
 };
 
+/**
+ * Текущий этап выделяется рамкой и цветной полосой слева, а не заливкой.
+ *
+ * Заливка вида bg-rose-50 в тёмной теме превращается в светлый прямоугольник,
+ * на котором приглушённый серый текст пояснения становится нечитаемым — ровно
+ * это и вышло с первым вариантом. Рамка и полоса работают в обеих темах
+ * одинаково, потому что берут цвет границы, а не фона.
+ */
 const ROW_CLASS: Record<StageState, string> = {
-  done: 'border-gray-200 bg-white',
-  active: 'border-indigo-300 bg-indigo-50/50',
-  error: 'border-rose-300 bg-rose-50/50',
-  stopped: 'border-amber-300 bg-amber-50/50',
-  pending: 'border-gray-200 bg-gray-50/60',
+  done: 'border-gray-200 border-l-2 border-l-emerald-400',
+  active: 'border-indigo-400 border-l-2 border-l-indigo-500',
+  error: 'border-rose-400 border-l-2 border-l-rose-500',
+  stopped: 'border-amber-400 border-l-2 border-l-amber-500',
+  pending: 'border-gray-200 border-l-2 border-l-transparent',
 };
 
 /**
@@ -144,7 +152,7 @@ export function PolzaOutreachStages({
                 </div>
                 <p className="mt-0.5 text-xs leading-relaxed text-gray-500">{stage.hint}</p>
                 {state === 'error' && error ? (
-                  <p className="mt-1 text-xs leading-relaxed text-rose-700">{error}</p>
+                  <p className="mt-1 break-words text-xs leading-relaxed text-rose-500">{error}</p>
                 ) : null}
               </div>
 
