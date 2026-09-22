@@ -67,6 +67,8 @@ export interface RuOutreachConfig {
   relationship_filter: RelationshipFilter;
   /** Порог скоринга компании для оффера «по сигналам» (SPEC §10). */
   min_signal_score: number;
+  /** Нижний порог суммы госконтракта, ₽ (SPEC §5.3 «выше порога сегмента»). */
+  min_contract_amount: number;
   include_previously_exported: boolean;
   sender_id: string | null;
 }
@@ -81,6 +83,7 @@ export const MAX_FRESHNESS_DAYS = 180;
 export const DEFAULT_LIMIT = 50;
 export const MAX_LIMIT = 500;
 export const DEFAULT_MIN_SIGNAL_SCORE = 8;
+export const DEFAULT_MIN_CONTRACT_AMOUNT = 1_000_000;
 
 function clampInt(value: unknown, fallback: number, min: number, max: number): number {
   const n = Number(value);
@@ -110,6 +113,7 @@ export function sanitizeRuOutreachConfig(raw: Partial<RuOutreachConfig>): RuOutr
     limit: clampInt(raw.limit, DEFAULT_LIMIT, 1, MAX_LIMIT),
     relationship_filter: relationship,
     min_signal_score: clampInt(raw.min_signal_score, DEFAULT_MIN_SIGNAL_SCORE, 0, 15),
+    min_contract_amount: clampInt(raw.min_contract_amount, DEFAULT_MIN_CONTRACT_AMOUNT, 0, 10_000_000_000),
     include_previously_exported: raw.include_previously_exported === true,
     sender_id: senderId,
   };
@@ -162,6 +166,8 @@ export const REASON_LABELS: Record<string, string> = {
   AUTOMATION_FIT_TOO_WEAK: 'Мало признаков для автоматизации (нужно ≥2)',
   SEGMENTS_NOT_IDENTIFIABLE: 'Не видно нескольких сегментов',
   RELATIONSHIP_NOT_CONFIRMED: 'Прошлое общение не подтверждено AMO',
+  CRM_RECENT_CONTACT: 'Сделка в AMO закрыта меньше 30 дней назад',
+  SITE_UNREACHABLE: 'Сайт компании не открылся',
   SIGNAL_TOO_WEAK: 'Скоринг сигнала ниже порога',
   SIGNAL_STALE: 'Сигнал старше окна свежести',
   SIGNAL_EVIDENCE_AMBIGUOUS: 'Сигнал без дословного подтверждения',
@@ -175,6 +181,7 @@ export const REASON_LABELS: Record<string, string> = {
   QA_PLACEHOLDER_LEFT: 'QA: остались переменные',
   QA_FAILED: 'QA не пройден',
   PROCESSING_ERROR: 'Ошибка обработки',
+  LIMIT_REACHED: 'Лимит готовых компаний уже набран',
 };
 
 export type EvidenceLevel = 'A' | 'B' | 'C' | 'NONE';
