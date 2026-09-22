@@ -66,7 +66,9 @@ function parseAmount(value: unknown): number | null {
 
 /** Файл → строки. Бросает понятную ошибку, если не нашлась колонка с компанией. */
 export function parseSignalFile(buffer: Buffer, kind: UploadKind): ParsedSignalRow[] {
-  const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true, codepage: 65001 });
+  // raw: CSV читается как текст — иначе 19-значный реестровый номер ЕИС
+  // превращается в число и теряет последние цифры.
+  const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true, codepage: 65001, raw: true });
   const sheet = wb.Sheets[wb.SheetNames[0]];
   if (!sheet) throw new Error('В файле нет листов');
   const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null, raw: true });
