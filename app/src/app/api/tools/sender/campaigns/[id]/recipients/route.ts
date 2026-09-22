@@ -56,9 +56,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // Чистим до разбора файла, но после проверок статуса: если файл окажется
     // битым, старую базу уже не вернуть, поэтому разбираем его первым делом.
     let parsed;
+    let fileRows: number;
     try {
-      const rows = parseMailboxFile(file.name, Buffer.from(await file.arrayBuffer()));
-      parsed = parseRecipientRows(rows);
+      const parsedFile = parseMailboxFile(file.name, Buffer.from(await file.arrayBuffer()));
+      fileRows = parsedFile.totalRows;
+      parsed = parseRecipientRows(parsedFile.rows);
     } catch (e) {
       if (e instanceof FileParseError) return jsonError(e.message, 400);
       return jsonError(`Не удалось прочитать файл: ${e instanceof Error ? e.message : String(e)}`, 400);
@@ -119,6 +121,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       skippedInvalid: parsed.invalid,
       skippedDuplicates: parsed.duplicates,
       skippedSuppressed: suppressed.size,
+      // Обрез лимита виден человеку, а не молчит: «в файле 50 000, загружено 20 000».
+      fileRows,
+      truncated: fileRows > 20_000 ? 20_000 : null,
     });
   });
 }

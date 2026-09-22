@@ -15,6 +15,8 @@ type Log = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => v
 
 const MAX_ATTEMPTS = 5;
 const BACKOFF_BASE_MS = 5 * 60 * 1000;
+/** Насколько сдвигаем письмо, возвращённое из-за проблем ящика (не письма). */
+const MAILBOX_PROBLEM_DELAY_MS = 10 * 60 * 1000;
 
 function fromHeader(mailbox: MailboxRow): string {
   const name = (mailbox.display_name ?? '').trim();
@@ -25,14 +27,24 @@ function backoffMs(attempts: number): number {
   return BACKOFF_BASE_MS * Math.min(attempts, 4) ** 2;
 }
 
-/** Куда двигать письмо после неудачи — зависит от типа ошибки, а не от счётчика. */
-function retryPlan(code: SendErrorCode | undefined, attempts: number): 'retry' | 'fail' | 'hold' {
+/**
+ * Куда двигать письмо после неудачи — зависит от типа ошибки, а не от счётчика.
+ *
+ * unknown-исход («провайдер мог принять письмо») — терминальный: автоматический
+ * повтор после обрыва на DATA отправил бы получателю дубль, поэтому такие
+ * письма достаются оператору.
+ */
+function retryPlan(code: SendErrorCode | undefined, attempts: number): 'retry' | 'fail' | 'hold' | 'unknown' {
   switch (code) {
     case 'recipient_rejected':
+    case 'rejected':
       return 'fail';
     case 'auth':
     case 'blocked_target':
+    case 'policy_reject':
       return 'hold';
+    case 'inflight_drop':
+      return 'unknown';
     case 'rate_limit':
     case 'temporary':
     case 'network':
@@ -71,7 +83,7 @@ async function afterSend(message: MessageRow, mailbox: MailboxRow, sentAt: strin
   if (message.step_no === 1) patch.thread_message_id = message.message_id;
 
   if (nextStep) {
-    const next = new Date(new Date(sentAt).getTime() + nextStep.delay_days * 24 * 60 * 60 * 1000);
+    const next = new Date(new Date(sentAt).getTime() + nextStep.delay_hours * 60 * 60 * 1000);
     patch.next_step_at = next.toISOString();
   } else {
     patch.status = 'finished';
@@ -108,9 +120,13 @@ export async function processSenderBatch(opts?: { batchSize?: number; log?: Log 
     }
 
     if (!mailbox || mailbox.status !== 'verified') {
+      // Сдвиг обязателен: claim сортирует по scheduled_at, и письмо без сдвига
+      // навсегда остаётся самым старым — двадцать таких съедают весь батч, и
+      // отправка встаёт в ноль, пока ящик чинят.
+      const retryAt = new Date(Date.now() + MAILBOX_PROBLEM_DELAY_MS).toISOString();
       await db
         .from('sender_messages')
-        .update({ status: 'scheduled', error: 'Ящик недоступен или не подтверждён' })
+        .update({ status: 'scheduled', scheduled_at: retryAt, error: 'Ящик недоступен или не подтверждён' })
         .eq('id', message.id);
       continue;
     }
@@ -119,7 +135,8 @@ export async function processSenderBatch(opts?: { batchSize?: number; log?: Log 
     // очередь и ждём, пока ящик починят, иначе потеряли бы касание по лиду.
     const auth = await authForMailbox(mailbox);
     if (!auth.ok) {
-      await db.from('sender_messages').update({ status: 'scheduled', error: auth.error }).eq('id', message.id);
+      const retryAt = new Date(Date.now() + MAILBOX_PROBLEM_DELAY_MS).toISOString();
+      await db.from('sender_messages').update({ status: 'scheduled', scheduled_at: retryAt, error: auth.error }).eq('id', message.id);
       await db.from('sender_mailboxes').update({ status: 'failed', last_error: auth.error }).eq('id', mailbox.id);
       mailboxCache.set(mailbox.id, { ...mailbox, status: 'failed' });
       continue;
@@ -147,10 +164,23 @@ export async function processSenderBatch(opts?: { batchSize?: number; log?: Log 
 
     if (result.ok) {
       const sentAt = new Date().toISOString();
-      await db
+      // Провайдер письмо принял — дальше любая наша ошибка записи означает риск
+      // дубля: lease истечёт, claim отдаст письмо повторно. Проверяем результат
+      // и при неудаче фиксируем «unknown», чтобы письмо не вернулось в оборот.
+      const { error: markError } = await db
         .from('sender_messages')
         .update({ status: 'sent', sent_at: sentAt, attempts, error: null })
         .eq('id', message.id);
+      if (markError) {
+        log('error', `Письмо ${message.id} отправлено, но не зафиксировано (${markError.message}) — проверьте вручную`, {
+          to: message.to_email,
+        });
+        await db
+          .from('sender_messages')
+          .update({ status: 'unknown', attempts, error: 'Отправлено, но не зафиксировано в базе — проверить вручную' })
+          .eq('id', message.id);
+        continue;
+      }
       await afterSend(message, mailbox, sentAt);
       sentCount += 1;
       continue;
@@ -158,6 +188,16 @@ export async function processSenderBatch(opts?: { batchSize?: number; log?: Log 
 
     const plan = retryPlan(result.code, attempts);
     log('warn', `Письмо ${message.to_email} не ушло (${result.code}): ${result.error ?? 'нет деталей'}`);
+
+    if (plan === 'unknown') {
+      // Провайдер мог принять письмо (обрыв после DATA): повтор отправил бы
+      // дубль. Показываем оператору, автоматический ретрай запрещён.
+      await db
+        .from('sender_messages')
+        .update({ status: 'unknown', attempts, error: result.error ?? 'соединение оборвалось при отправке' })
+        .eq('id', message.id);
+      continue;
+    }
 
     if (plan === 'fail') {
       await db
@@ -167,7 +207,8 @@ export async function processSenderBatch(opts?: { batchSize?: number; log?: Log 
 
       if (result.code === 'recipient_rejected') {
         // Постоянный отказ по получателю — это отбойник: адрес в стоп-лист,
-        // цепочка по нему больше не идёт.
+        // цепочка по нему больше не идёт. Отказ без опознанного «адреса нет»
+        // (голый 5xx, спам-блокировки) адрес не выжигает.
         await db.from('sender_recipients').update({ status: 'bounced', next_step_at: null }).eq('id', message.recipient_id);
         await db
           .from('sender_suppressions')
@@ -181,8 +222,13 @@ export async function processSenderBatch(opts?: { batchSize?: number; log?: Log 
 
     if (plan === 'hold') {
       // Проблема не в письме, а в ящике: выключаем ящик и возвращаем письмо в
-      // очередь, чтобы оно ушло после переподключения.
-      await db.from('sender_messages').update({ status: 'scheduled', attempts, error: result.error ?? null }).eq('id', message.id);
+      // очередь, чтобы оно ушло после переподключения. Сюда же попадает
+      // спам-блокировка провайдера (5.7.x) — вина ящика, а не получателя.
+      const retryAt = new Date(Date.now() + MAILBOX_PROBLEM_DELAY_MS).toISOString();
+      await db
+        .from('sender_messages')
+        .update({ status: 'scheduled', scheduled_at: retryAt, attempts, error: result.error ?? null })
+        .eq('id', message.id);
       await db
         .from('sender_mailboxes')
         .update({ status: 'failed', last_error: result.error?.slice(0, 500) ?? 'Ящик отклонил вход' })

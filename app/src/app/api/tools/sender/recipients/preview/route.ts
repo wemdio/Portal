@@ -31,8 +31,12 @@ export async function POST(req: NextRequest) {
     if (file.size > MAX_FILE_BYTES) return jsonError('Файл больше 20 МБ', 400);
 
     try {
-      const rows = parseMailboxFile(file.name, Buffer.from(await file.arrayBuffer()));
-      return NextResponse.json(describeRecipientColumns(rows));
+      const parsed = parseMailboxFile(file.name, Buffer.from(await file.arrayBuffer()));
+      return NextResponse.json({
+        ...describeRecipientColumns(parsed.rows),
+        fileRows: parsed.totalRows,
+        truncated: parsed.totalRows > parsed.rows.length ? parsed.rows.length : null,
+      });
     } catch (e) {
       if (e instanceof FileParseError) return jsonError(e.message, 400);
       return jsonError(`Не удалось прочитать файл: ${e instanceof Error ? e.message : String(e)}`, 400);

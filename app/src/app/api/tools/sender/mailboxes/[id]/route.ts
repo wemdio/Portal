@@ -8,6 +8,8 @@ export const dynamic = 'force-dynamic';
 interface Body {
   action?: 'disable' | 'enable' | 'recheck';
   dailyCampaignLimit?: number;
+  /** Имя отправителя в письмах: «Иван <box@dom>». Пустая строка — только адрес. */
+  displayName?: string;
   imapHost?: string | null;
   imapPort?: number;
 }
@@ -38,6 +40,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (typeof body.dailyCampaignLimit === 'number') {
       const limit = Math.max(1, Math.min(500, Math.floor(body.dailyCampaignLimit)));
       patch.daily_campaign_limit = limit;
+    }
+    if (typeof body.displayName === 'string') {
+      patch.display_name = body.displayName.trim().slice(0, 120) || null;
     }
     if (body.imapHost !== undefined) patch.imap_host = body.imapHost?.trim() || null;
     if (typeof body.imapPort === 'number' && body.imapPort > 0 && body.imapPort < 65536) {

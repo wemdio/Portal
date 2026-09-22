@@ -6,7 +6,8 @@ import { withToolTrace } from '@/lib/toolTrace';
 export const dynamic = 'force-dynamic';
 
 interface StepInput {
-  delayDays?: number;
+  /** Задержка от предыдущего шага в часах; у первого письма игнорируется. */
+  delayHours?: number;
   subject?: string;
   body?: string;
 }
@@ -29,9 +30,11 @@ async function campaignStats(campaignId: string) {
   if (!supabaseAdmin) return null;
   const db = supabaseAdmin;
 
-  const recipientsQuery = (status?: string) => {
-    const q = db.from('sender_recipients').select('id', { count: 'exact', head: true }).eq('campaign_id', campaignId);
-    return status ? q.eq('status', status) : q;
+  const recipientsQuery = (filter?: { column?: string; value?: unknown; gtColumn?: string; gtValue?: number }) => {
+    let q = db.from('sender_recipients').select('id', { count: 'exact', head: true }).eq('campaign_id', campaignId);
+    if (filter?.column) q = q.eq(filter.column, filter.value);
+    if (filter?.gtColumn) q = q.gt(filter.gtColumn, filter.gtValue);
+    return q;
   };
   const messagesQuery = (status: string) =>
     db
@@ -40,17 +43,28 @@ async function campaignStats(campaignId: string) {
       .eq('campaign_id', campaignId)
       .eq('status', status);
 
-  const [recipients, replied, sent, scheduled, failed] = await Promise.all([
+  const [recipients, replied, bounced, reached, sent, scheduled, failed] = await Promise.all([
     recipientsQuery(),
-    recipientsQuery('replied'),
+    recipientsQuery({ column: 'status', value: 'replied' }),
+    recipientsQuery({ column: 'status', value: 'bounced' }),
+    // Знаменатель reply rate — те, кому реально ушло хотя бы одно письмо.
+    // Счётчик «отправлено» для этого не годится: он считает строки писем,
+    // то есть каждый шаг цепочки, и процент вышел бы заниженным в разы.
+    recipientsQuery({ gtColumn: 'last_step_sent', gtValue: 0 }),
     messagesQuery('sent'),
     messagesQuery('scheduled'),
     messagesQuery('failed'),
   ]);
 
+  const reachedCount = reached.count ?? 0;
   return {
     recipients: recipients.count ?? 0,
     replied: replied.count ?? 0,
+    bounced: bounced.count ?? 0,
+    reached: reachedCount,
+    // Проценты не считаем здесь при нуле знаменателя — UI покажет «—».
+    replyRate: reachedCount > 0 ? Math.round(((replied.count ?? 0) / reachedCount) * 1000) / 10 : null,
+    bounceRate: reachedCount > 0 ? Math.round(((bounced.count ?? 0) / reachedCount) * 1000) / 10 : null,
     sent: sent.count ?? 0,
     scheduled: scheduled.count ?? 0,
     failed: failed.count ?? 0,
@@ -161,7 +175,7 @@ export async function POST(req: NextRequest) {
       steps.map((step, index) => ({
         campaign_id: campaignId,
         step_no: index + 1,
-        delay_days: index === 0 ? 0 : Math.max(1, Math.floor(step.delayDays ?? 3)),
+        delay_hours: index === 0 ? 0 : Math.max(1, Math.round(step.delayHours ?? 72)),
         subject: (step.subject ?? '').trim(),
         body: (step.body ?? '').trim(),
       })),

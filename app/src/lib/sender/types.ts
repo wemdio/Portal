@@ -3,7 +3,7 @@ import type { TlsMode } from './mailboxImport';
 export type MailboxStatus = 'pending' | 'verified' | 'failed' | 'disabled';
 export type CampaignStatus = 'draft' | 'running' | 'paused' | 'done';
 export type RecipientStatus = 'active' | 'replied' | 'bounced' | 'unsubscribed' | 'finished' | 'stopped';
-export type MessageStatus = 'scheduled' | 'sending' | 'sent' | 'failed' | 'canceled';
+export type MessageStatus = 'scheduled' | 'sending' | 'sent' | 'failed' | 'canceled' | 'unknown';
 export type ReplyKind = 'human' | 'auto_reply' | 'bounce' | 'warmup' | 'unknown';
 
 /** password — пароль приложения из выгрузки; google_sa — ключ служебного аккаунта. */
@@ -57,7 +57,8 @@ export interface StepRow {
   id: string;
   campaign_id: string;
   step_no: number;
-  delay_days: number;
+  /** Задержка от предыдущего шага в часах; у первого письма игнорируется. */
+  delay_hours: number;
   subject: string;
   body: string;
 }
