@@ -190,13 +190,19 @@ export function PolzaOutreachResults({
     <div className="space-y-4">
       {/* Цепочка этапов вместо ряда цифр: по плоской воронке не понять, где
           сейчас работа и где она встала — все нули выглядят одинаково и когда
-          конвейер не запускали, и когда он упал на первом шаге. */}
-      <PolzaOutreachStages
-        funnel={funnel}
-        run={jobStatus ? { running, failed: jobStatus === 'failed' } : null}
-        error={jobError}
-        onOpenStage={loadAllRows ? setOpenStage : undefined}
-      />
+          конвейер не запускали, и когда он упал на первом шаге.
+
+          Пока запуск не выбран, цепочки нет вовсе: шесть строк с нулями
+          занимают пол-экрана и не отвечают ни на один вопрос — этапы всегда
+          про конкретный прогон. */}
+      {jobStatus ? (
+        <PolzaOutreachStages
+          funnel={funnel}
+          run={{ running, failed: jobStatus === 'failed' }}
+          error={jobError}
+          onOpenStage={loadAllRows ? setOpenStage : undefined}
+        />
+      ) : null}
 
       {openStage !== null && loadAllRows ? (
         <PolzaOutreachStageModal
