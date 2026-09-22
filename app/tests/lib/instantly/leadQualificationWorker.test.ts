@@ -1032,6 +1032,19 @@ describe('pollAndQualifyReplies', () => {
     process.env.GUEST_TOKEN_SECRET = 'test-board-secret';
     const { resolveLeadContactMetadata } = await import('@/lib/instantly/leadContactMetadata');
     const introduction = 'Доброго дня! Меня зовут Евгений, руководитель IT-отдела. Вопрос актуальный.';
+    const footer = 'С уважением,\nАдминистратор Дарина.\n8(900)111-22-33\n8 901 22 23 344';
+    const contactReply = introduction + '\n\n> Наше старое письмо\n> Телефон: +7 999 888-77-66\n\n' + footer;
+    for (const [replyBody, expectedPhone] of [
+      [{ text: contactReply }, '8(900)111-22-33; 8 901 22 23 344'],
+      [{ text: introduction + '\n> С уважением,\n> 8(900)111-22-33' }, null],
+      [{ text: introduction + '\nFrom: sender@example.org\nС уважением,\n8(900)111-22-33' }, null],
+      [{ text: introduction + '\n> Старое письмо\nЧужая неразмеченная история\n' + footer }, null],
+      [{ text: 'Телефон: 8(900)111-22-33', html: '<p>Телефон: 8(900)111-22-33</p><p>Моб.: 8 901 22 23 344</p><blockquote>Телефон: +7 999 888-77-66</blockquote>' }, '8(900)111-22-33; 8 901 22 23 344'],
+    ] as const) {
+      expect(resolveLeadContactMetadata({
+        leads: [], leadEmail: 'lead@example.com', campaignId: 'linked-campaign', replyBody,
+      }).phone).toBe(expectedPhone);
+    }
     for (const [replyBody, expectedName] of [
       [{ text: introduction }, 'Евгений'],
       [{ html: '<p>Доброго дня! Меня зовут <b>Евгений</b>, руководитель IT-отдела.</p>' }, 'Евгений'],
@@ -1066,7 +1079,7 @@ describe('pollAndQualifyReplies', () => {
       objectionHandleable: false,
       objectionDraft: null,
       threadContext: {
-        replyEmail: replyEmail({ id: 'lead-email', body: { text: introduction } }),
+        replyEmail: replyEmail({ id: 'lead-email', body: { text: contactReply } }),
         threadEmails: [
           replyEmail({ id: 'out-1', ue_type: 1 }),
           replyEmail({ id: 'out-2', ue_type: 1 }),
@@ -1101,9 +1114,9 @@ describe('pollAndQualifyReplies', () => {
         lead_email: 'lead@example.com',
         lead_name: 'Иван Петров',
         company_name: 'ACME',
-        phone: '+7 900 111-22-33',
+        phone: '+7 900 111-22-33; 8 901 22 23 344',
         website: 'acme.ru',
-        request_text: introduction,
+        request_text: contactReply,
         step_number: 2,
         reply_timestamp: '2026-05-13T12:00:00Z',
       }),
@@ -1116,7 +1129,7 @@ describe('pollAndQualifyReplies', () => {
     expect(sendLeadTelegramAlert).toHaveBeenCalledWith(
       expect.objectContaining({
         boardLink: expect.stringMatching(/\/leads-board\/lb_/),
-        phone: '+7 900 111-22-33',
+        phone: '+7 900 111-22-33; 8 901 22 23 344',
         website: 'acme.ru',
       }),
     );

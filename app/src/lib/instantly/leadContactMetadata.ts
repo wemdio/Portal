@@ -1,5 +1,5 @@
 import { extractLeadReplyContacts, type LeadReplyContacts } from './leadReplyContacts';
-import { normalizeLeadPhone, normalizeLeadWebsite } from './leadContactValues';
+import { joinLeadPhones, normalizeLeadPhone, normalizeLeadWebsite } from './leadContactValues';
 import type { Email, Lead } from './types';
 
 export { normalizeLeadWebsite } from './leadContactValues';
@@ -150,7 +150,12 @@ export function resolveLeadContactMetadata(input: {
   return {
     leadName: [firstName, lastName].filter(Boolean).join(' ') || reply.leadName,
     companyName: firstField(sources, COMPANY_KEYS, companyValue, 'company') || companyValue(reply.companyName),
-    phone: firstField(sources, PHONE_KEYS, normalizeLeadPhone, 'phone') || normalizeLeadPhone(reply.bodyPhone) || normalizeLeadPhone(reply.signaturePhone),
+    // Uploaded phones keep their order, but must not hide additional numbers
+    // from the same contact's reply/signature. History is excluded upstream.
+    phone: joinLeadPhones([
+      ...sources.flatMap((source) => fieldValues(source, PHONE_KEYS, 'phone').map(normalizeLeadPhone)),
+      reply.bodyPhone, reply.signaturePhone,
+    ]),
     // An explicit uploaded website is stronger than a provider's inferred
     // company domain, even when that domain is in the top-level lead fields.
     website: firstField(sources, WEBSITE_KEYS, normalizeLeadWebsite, 'website') ||

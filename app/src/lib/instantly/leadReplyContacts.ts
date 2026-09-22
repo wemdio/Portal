@@ -36,7 +36,22 @@ const URL_CANDIDATE = /https?:\/\/[^\s<>"'()[\]{}]+|(?<![\p{L}\p{N}@._-])(?:www\
 function currentLines(text: string): string[] {
   const lines = text.replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ').split('\n');
   const end = lines.findIndex((line) => HISTORY_BOUNDARIES.some((re) => re.test(line.trim())));
-  return lines.slice(0, end < 0 ? lines.length : end).map((line) => line.trim());
+  if (end < 0) return lines.map((line) => line.trim());
+  const current = lines.slice(0, end);
+  // Some clients put the current author's signature AFTER the quoted thread.
+  // Recover only an explicitly unquoted sign-off after a fully marked quote
+  // block. Unmarked forwarded history must still stop extraction completely.
+  const lastQuoted = lines.findLastIndex((line) => /^>/.test(line.trim()));
+  if (lastQuoted >= end && lines.slice(end, lastQuoted + 1).every((line) =>
+    !line.trim() || /^>/.test(line.trim()) || HISTORY_BOUNDARIES.some((re) => re.test(line.trim())))) {
+    const tail = lines.slice(lastQuoted + 1);
+    const first = tail.find((line) => line.trim())?.trim() ?? '';
+    if (SIGNOFF.test(first) || (SIGNOFF_PREFIX.test(first) && signatureNameInLine(first) !== null)) {
+      // Apply the same history boundary to the recovered footer, too.
+      current.push(...currentLines(tail.join('\n')));
+    }
+  }
+  return current.map((line) => line.trim());
 }
 
 function companyWebsite(raw: string): string | null {
@@ -255,8 +270,8 @@ export function extractLeadReplyContacts(body: Email['body']): LeadReplyContacts
     const fallback = extractFromText(htmlText(html));
     return {
       leadName: primary.leadName ?? fallback.leadName,
-      bodyPhone: primary.bodyPhone ?? fallback.bodyPhone,
-      signaturePhone: primary.signaturePhone ?? fallback.signaturePhone,
+      bodyPhone: joinLeadPhones([primary.bodyPhone, fallback.bodyPhone]),
+      signaturePhone: joinLeadPhones([primary.signaturePhone, fallback.signaturePhone]),
       companyName: primary.companyName ?? fallback.companyName,
       website: primary.website ?? fallback.website,
     };
