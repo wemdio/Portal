@@ -9,8 +9,24 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PolzaOutreachConfig, PolzaOutreachVacancyCandidate } from './types';
 
-// \m..\M — границы слова в POSIX-регулярке Postgres; iregex = регистронезависимо.
-const SDR_TITLE_REGEX = '\\m(sdr|bdr|sales development|business development|outbound sales)\\M';
+/**
+ * Названия вакансий, которые нас интересуют.
+ *
+ * Раньше это была одна POSIX-регулярка, уезжавшая в PostgREST оператором
+ * `iregex`, и он её не принимал вовсе:
+ *   failed to parse filter (iregex.\m(sdr|bdr|...)\M)
+ * Причины две сразу: оператора с таким именем у PostgREST нет, а скобки в
+ * значении фильтра для него служебные и требуют кавычек.
+ *
+ * Поэтому отбор разнесён на два шага. База сужает выборку по подстрокам — это
+ * она умеет без экзотики. Точное совпадение по границам слова проверяется уже
+ * здесь, регуляркой JavaScript: `\b` делает ровно то же, что `\m..\M` в
+ * Postgres. Подстрочный фильтр заведомо шире точного, поэтому по дороге не
+ * теряется ни одна нужная вакансия — отсеиваются только лишние, вроде
+ * «Ambassador» при поиске «bdr».
+ */
+const SDR_TITLE_TERMS = ['sdr', 'bdr', 'sales development', 'business development', 'outbound sales'];
+const SDR_TITLE_RE = new RegExp(`\\b(${SDR_TITLE_TERMS.join('|')})\\b`, 'i');
 const MIN_DESCRIPTION_CHARS = 300;
 const PAGE_SIZE = 500;
 // Страховочный потолок сканирования строк кэша: чтобы набрать `limit` компаний
@@ -46,7 +62,7 @@ export async function selectVacancies(
       .eq('source', 'jobhive')
       .gte('published_at', cutoff)
       .lte('published_at', now)
-      .filter('vacancy_title', 'iregex', SDR_TITLE_REGEX)
+      .or(SDR_TITLE_TERMS.map((term) => `vacancy_title.ilike.%${term}%`).join(','))
       .in('country_code', countries)
       .not('vacancy_description', 'is', null)
       .order('published_at', { ascending: false, nullsFirst: false })
@@ -59,6 +75,8 @@ export async function selectVacancies(
 
     for (const row of rows) {
       if (byCompany.size >= config.limit) break;
+      // Точная проверка по границам слова: база отдала более широкий набор.
+      if (!SDR_TITLE_RE.test(row.vacancy_title ?? '')) continue;
       const description = row.vacancy_description ?? '';
       if (description.trim().length <= MIN_DESCRIPTION_CHARS) continue;
       const company = row.company_name?.trim();
