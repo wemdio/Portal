@@ -87,6 +87,31 @@ export function digestTitle(windowTo: string): string {
 }
 
 /**
+ * Границы периода словами: «с 9:00 21 сентября до 9:00 22 сентября».
+ *
+ * Сводка накрывает сутки от девяти утра до девяти утра, и без этой строки
+ * дата в заголовке читается как «за 22 сентября» — то есть за день, который
+ * ещё идёт. Время по Москве: окно бот считает по ней же.
+ */
+export function digestPeriod(windowFrom: string, windowTo: string): string | null {
+  const from = new Date(windowFrom);
+  const to = new Date(windowTo);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return null;
+
+  const part = (date: Date) => {
+    const time = date.toLocaleTimeString('ru-RU', {
+      timeZone: 'Europe/Moscow', hour: 'numeric', minute: '2-digit',
+    });
+    const day = date.toLocaleDateString('ru-RU', {
+      timeZone: 'Europe/Moscow', day: 'numeric', month: 'long',
+    });
+    return `${time} ${day}`;
+  };
+
+  return `Сводка за период с ${part(from)} до ${part(to)}`;
+}
+
+/**
  * Короткая выжимка для строки в списке уведомлений.
  *
  * Первый пункт первого продуктового раздела: в списке у уведомления одна

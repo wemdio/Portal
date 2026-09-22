@@ -20,15 +20,22 @@ import { AccountAvatar } from './AccountAvatar';
  * перезаписывало имена. Теперь не нажали «Подобрать» — имена не тронуты, уедут
  * только картинки.
  *
- * Перебор идёт в браузере, по одному аккаунту за раз, а не одним запросом на
- * сервер: каждый аккаунт поднимает своё соединение с Telegram через мобильный
- * прокси, на двадцати аккаунтах такой запрос не доживёт до ответа, а
- * параллельный залп по одному пулу прокси — верный способ собрать ограничения
- * на всю партию разом.
+ * Перебор идёт в браузере, а не одним запросом на сервер: каждый аккаунт
+ * поднимает своё соединение с Telegram через мобильный прокси, и на двадцати
+ * аккаунтах такой запрос просто не доживёт до ответа.
+ *
+ * Аккаунты идут пачками по LANE_COUNT штук одновременно. Строго по одному было
+ * честно, но мучительно: двадцать аккаунтов по десять секунд — это три минуты
+ * ожидания у экрана. Залпом на всю выборку тоже нельзя: пул мобильных прокси
+ * общий, и два десятка одновременных подключений он встретит ограничениями на
+ * всю партию. Несколько дорожек — середина, которая и ускоряет, и не выглядит
+ * со стороны Telegram как всплеск.
  */
 
 const API_BASE = '/api/tools/tg-outreach';
 const MAX_AVATAR_BYTES = 1024 * 1024;
+/** Сколько аккаунтов обрабатываем одновременно. */
+const LANE_COUNT = 3;
 
 type RowState = 'idle' | 'busy' | 'done' | 'queued' | 'error';
 
@@ -170,7 +177,8 @@ export function BulkProfileModal({
    * намерения. Так меняется только картинка.
    */
   const saveOne = async (index: number) => {
-    const { account, proposal, avatar } = rowsRef.current[index];
+    const row = rowsRef.current[index];
+    const { account, proposal, avatar } = row;
     if (!proposal && !avatar) return;
 
     update(index, { state: 'busy', detail: 'Записываю в Telegram…' });
@@ -204,10 +212,20 @@ export function BulkProfileModal({
         state: 'done',
         detail: data.avatar_error ? `Профиль записан, аватарка — нет: ${data.avatar_error}` : 'Сохранено',
         // Подобранное уже применено: держать его дальше значит предлагать
-        // сохранить второй раз то же самое.
+        // сохранить второй раз то же самое. Файл отпускаем, а картинку в строке
+        // оставляем — иначе аватарка исчезала ровно в момент «Сохранено», и это
+        // читалось как «не применилось».
         proposal: null,
         avatar: null,
-        avatarUrl: null,
+        avatarUrl: data.avatar_error ? null : row.avatarUrl,
+        // Имя в строке тоже обновляем на то, что реально встало в Telegram.
+        account: {
+          ...account,
+          first_name: data.first_name ?? account.first_name,
+          last_name: data.last_name ?? account.last_name,
+          tg_username: data.tg_username ?? account.tg_username,
+          ...(data.avatar_url ? { avatar_url: data.avatar_url } : {}),
+        },
       });
     } catch (e) {
       update(index, { state: 'error', detail: e instanceof Error ? e.message : 'Не удалось записать профиль' });
@@ -217,13 +235,24 @@ export function BulkProfileModal({
   const runAll = async (kind: 'pick' | 'save') => {
     stopRef.current = false;
     setBusy(kind);
-    for (let i = 0; i < rowsRef.current.length; i += 1) {
-      if (stopRef.current) break;
-      // Аккаунты идут по одному: каждый поднимает своё соединение с Telegram
-      // через мобильный прокси.
-      if (kind === 'pick') await pickOne(i);
-      else await saveOne(i);
-    }
+
+    // Общая очередь и несколько дорожек: как только дорожка освободилась, она
+    // берёт следующий аккаунт. Делить список на равные куски заранее нельзя —
+    // аккаунты отвечают за разное время, и дорожка с быстрыми простаивала бы,
+    // пока соседняя дожёвывает свои.
+    let next = 0;
+    const lane = async () => {
+      for (;;) {
+        if (stopRef.current) return;
+        const index = next;
+        next += 1;
+        if (index >= rowsRef.current.length) return;
+        if (kind === 'pick') await pickOne(index);
+        else await saveOne(index);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(LANE_COUNT, rowsRef.current.length) }, lane));
+
     setBusy(null);
   };
 
@@ -359,7 +388,7 @@ export function BulkProfileModal({
         <div className="flex flex-wrap items-center justify-end gap-2 border-t border-gray-200 bg-gray-50 px-5 py-3">
           <span className="mr-auto text-[11px] text-gray-500">
             {busy
-              ? 'Идём по одному аккаунту: каждый подключается к Telegram через свой прокси.'
+              ? `Идём по ${LANE_COUNT} аккаунта разом: каждый подключается к Telegram через свой прокси.`
               : pending
                 ? `К сохранению: ${pending}`
                 : 'На работающей кампании профиль встанет в очередь, а аватарка — нет: её меняют на остановленной.'}
