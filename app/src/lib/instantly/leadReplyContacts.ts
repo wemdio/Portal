@@ -40,10 +40,11 @@ function currentLines(text: string): string[] {
   const current = lines.slice(0, end);
   // Some clients put the current author's signature AFTER the quoted thread.
   // Recover only an explicitly unquoted sign-off after a fully marked quote
-  // block. Unmarked forwarded history must still stop extraction completely.
+  // block. An unquoted From/To/forwarding header opens another author's
+  // message; even its nested quotes do not make the footer ours again.
   const lastQuoted = lines.findLastIndex((line) => /^>/.test(line.trim()));
   if (lastQuoted >= end && lines.slice(end, lastQuoted + 1).every((line) =>
-    !line.trim() || /^>/.test(line.trim()) || HISTORY_BOUNDARIES.some((re) => re.test(line.trim())))) {
+    !line.trim() || /^>/.test(line.trim()))) {
     const tail = lines.slice(lastQuoted + 1);
     const first = tail.find((line) => line.trim())?.trim() ?? '';
     if (SIGNOFF.test(first) || (SIGNOFF_PREFIX.test(first) && signatureNameInLine(first) !== null)) {

@@ -1040,6 +1040,13 @@ describe('pollAndQualifyReplies', () => {
       [{ text: '> Только цитата' }, null],
       [{ html: '<p>Нужны цены.</p><div class="gmail_quote">Старое предложение</div>' }, 'Нужны цены.'],
       ['<p>Пришлите каталог.</p><blockquote>Старое письмо</blockquote>', 'Пришлите каталог.'],
+      [{ html: '<p>Добрый день.</p><blockquote>Какой объём нужен?</blockquote><p>Нужно 200 единиц, пришлите расчёт.</p>' }, 'Добрый день.\n\nНужно 200 единиц, пришлите расчёт.'],
+      [{ html: '<blockquote>Пришлём каталог?</blockquote><p>Пришлите каталог.</p>' }, 'Пришлите каталог.'],
+      [{ text: '> Пришлём каталог?\nПришлите каталог.', html: '<blockquote>Пришлём каталог?</blockquote><p>Пришлите каталог.</p>' }, 'Пришлите каталог.'],
+      [{ html: '<div class="moz-cite-prefix">On Monday, Sender wrote:</div><br><blockquote>История</blockquote><p>Нужны цены.</p>' }, 'Нужны цены.'],
+      [{ html: '<p>Пришлите каталог.</p><div class="gmail_attr">On Monday, Sender wrote:</div><p>Старое письмо без обёртки</p>' }, 'Пришлите каталог.'],
+      [{ html: '<p>Пришлите каталог.</p><div>From: sender@example.org</div><blockquote>Вложенная цитата</blockquote><p>Чужой текст после цитаты</p>' }, 'Пришлите каталог.'],
+      ['Пришлите каталог.\nС уважением:\nИван Петров\nТелефон: +7 999 888-77-66', 'Пришлите каталог.'],
     ] as const) {
       expect(leadBoardRequestText(body)).toBe(expected);
     }
@@ -1048,6 +1055,7 @@ describe('pollAndQualifyReplies', () => {
       [{ text: introduction + '\n> С уважением,\n> 8(900)111-22-33' }, null],
       [{ text: introduction + '\nFrom: sender@example.org\nС уважением,\n8(900)111-22-33' }, null],
       [{ text: introduction + '\n> Старое письмо\nЧужая неразмеченная история\n' + footer }, null],
+      [{ text: introduction + '\nFrom: sender@example.org\nTo: lead@example.com\nSubject: Previous conversation\n> Вложенная цитата\n' + footer }, null],
       [{ text: 'Телефон: 8(900)111-22-33', html: '<p>Телефон: 8(900)111-22-33</p><p>Моб.: 8 901 22 23 344</p><blockquote>Телефон: +7 999 888-77-66</blockquote>' }, '8(900)111-22-33; 8 901 22 23 344'],
     ] as const) {
       expect(resolveLeadContactMetadata({
