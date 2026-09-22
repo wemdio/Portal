@@ -11,6 +11,7 @@ import { partitionForeignEmails, resolveClientMailboxes, isInboundEmail } from '
 import { computeReplyAllRecipients } from '@/lib/clientCampaignReplies/participants';
 import { recordEmailRead } from '@/lib/clientCampaignReplies/clientEmailReads';
 import type { ClientReplyThread } from '@/lib/clientCampaignReplies/types';
+import { readInstantlyEmailReadDeferral } from '@/lib/instantly/emailReadDeferral';
 import { logError, logInfo } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
@@ -93,14 +94,35 @@ export async function GET(
     // а не per-campaign, поэтому окно лиду больше не «съедают» чужие письма.
     // (Проверено живьём 2026-06-19.)
     let candidates = [original];
+    let historyRetryAfterMs: number | null = null;
     if (leadEmail) {
-      const list = await listEmails(
-        { campaign_id: campaignId, lead: leadEmail, limit: THREAD_FETCH_LIMIT },
-        { ...instantlyRequestOptions, consumer: 'client_thread' },
-      );
-      const items = list.items ?? [];
-      if (items.length > 0) {
-        candidates = items.some((e) => e.id === original.id) ? items : [original, ...items];
+      try {
+        const list = await listEmails(
+          { campaign_id: campaignId, lead: leadEmail, limit: THREAD_FETCH_LIMIT },
+          { ...instantlyRequestOptions, consumer: 'client_thread' },
+        );
+        const items = list.items ?? [];
+        if (items.length > 0) {
+          candidates = items.some((e) => e.id === original.id) ? items : [original, ...items];
+        }
+      } catch (err) {
+        // Бюджет LIST /emails (18 запросов в минуту на воркспейс) общий с
+        // воркером квалификации ответов: в часы, когда воркер разгребает
+        // пачку, кабинету слот не достаётся. Раньше это роняло весь тред в 502
+        // с техническим «email read deferred: budget; retry after …», и
+        // менеджер видел только последний ответ из списка — «не находит треды»
+        // (жалоба сейлза, неделя 14.09: 15 таких 502 по nginx). Само письмо уже
+        // прочитано отдельным запросом по id — его бюджет не держит, — поэтому
+        // отдаём его сразу, а историю кабинет догрузит повтором.
+        const deferral = readInstantlyEmailReadDeferral(err);
+        if (!deferral) throw err;
+        historyRetryAfterMs = deferral.retryAfterMs;
+        await logInfo('client.campaign.replies.thread.history_deferred', 'История треда отложена бюджетом чтения', {
+          campaignId,
+          emailId,
+          reason: deferral.reason,
+          retryAfterMs: deferral.retryAfterMs,
+        });
       }
     }
 
@@ -155,6 +177,7 @@ export async function GET(
       messages,
       reply_to,
       reply_all_cc,
+      ...(historyRetryAfterMs != null ? { history_deferred: { retry_after_ms: historyRetryAfterMs } } : {}),
     };
     return NextResponse.json(payload);
   } catch (err) {
