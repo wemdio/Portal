@@ -451,7 +451,7 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
   },
   'polza-outreach': {
     id: 'polza-outreach',
-    title: 'Англ. аутрич (авто)',
+    title: 'Английский автоаутрич',
     title_en: 'English outreach (auto)',
     description:
       'Свежие вакансии SDR/BDR → компания и почта → цепочка из четырёх писем на английском.',
