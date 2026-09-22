@@ -1057,25 +1057,24 @@ function buildDemoReportResponse(campaigns: DemoCampaign[]) {
       acc.contacts += c.new_leads_contacted_count;
       acc.sent += c.emails_sent_count;
       acc.reached += c.contacted_count;
-      acc.opened += c.open_count;
       acc.replies += c.reply_count_unique + c.reply_count_automatic_unique;
       acc.leads += c.leads_count;
       acc.bounced += c.bounced_count;
       return acc;
     },
-    { contacts: 0, sent: 0, reached: 0, opened: 0, replies: 0, leads: 0, bounced: 0 },
+    { contacts: 0, sent: 0, reached: 0, replies: 0, leads: 0, bounced: 0 },
   );
-  const openPct = totals.reached > 0 ? ((totals.opened / totals.reached) * 100).toFixed(1) : '0.0';
   const replyPct = totals.contacts > 0 ? ((totals.replies / totals.contacts) * 100).toFixed(1) : '0.0';
+  // Открытий в демо-отчёте нет — зеркалим реальный buildClientReport, который
+  // отдаёт их только auto-режиму (см. lib/clientOpenMetrics.ts). Демо-аккаунт
+  // всегда manual, поэтому колонки открытий тут быть не должно.
   const rows: (string | number)[][] = [
-    ['Дата', 'Кампания', 'Контактов', 'Отправлено писем', 'Открытий', '% открытий', 'Ответов', '% ответов', 'Браков'],
+    ['Дата', 'Кампания', 'Контактов', 'Отправлено писем', 'Ответов', '% ответов', 'Браков'],
     ...campaigns.map((c) => [
       '17.05.2026',
       c.name,
       c.new_leads_contacted_count,
       c.emails_sent_count,
-      c.open_count,
-      `${((c.open_count / c.contacted_count) * 100).toFixed(1)}%`,
       c.reply_count_unique + c.reply_count_automatic_unique,
       `${(((c.reply_count_unique + c.reply_count_automatic_unique) / c.new_leads_contacted_count) * 100).toFixed(1)}%`,
       c.bounced_count,
@@ -1089,11 +1088,10 @@ function buildDemoReportResponse(campaigns: DemoCampaign[]) {
       totalCampaigns: campaigns.length,
       totalContacts: totals.contacts,
       totalEmailsSent: totals.sent,
-      totalOpened: totals.opened,
       totalReplies: totals.replies,
       totalLeads: totals.leads,
       totalBounced: totals.bounced,
-      conversion: { openPctAllEmails: openPct, replyPctByLeads: replyPct },
+      conversion: { replyPctByLeads: replyPct },
     },
     campaignData: {},
   };

@@ -36,7 +36,7 @@ const PREVIEW_STEPS: DemoLetter[] = [
 ];
 
 const MAPPING = ['Email', 'Имя', 'Фамилия', 'Компания'];
-const SETTINGS = ['Трекинг открытий', 'Трекинг ссылок', 'Стоп при ответе', 'Только текст'];
+const SETTINGS = ['Трекинг ссылок', 'Стоп при ответе', 'Только текст'];
 
 const chipStyle = {
   color: 'var(--cp-paper-mute)',

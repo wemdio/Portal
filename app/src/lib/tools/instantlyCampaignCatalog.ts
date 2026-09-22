@@ -521,31 +521,52 @@ export interface ClientReportResult {
     totalCampaigns: number;
     totalContacts: number;
     totalEmailsSent: number;
-    totalOpened: number;
+    /** Отсутствует, когда открытия из отчёта исключены (includeOpens: false). */
+    totalOpened?: number;
     totalReplies: number;
     totalLeads: number;
     totalBounced: number;
-    conversion: { openPctAllEmails: string; replyPctByLeads: string };
+    conversion: { openPctAllEmails?: string; replyPctByLeads: string };
   };
+}
+
+export interface BuildClientReportOptions {
+  /**
+   * Включать ли открытия (колонки «Открытий» / «% открытий» и итоги по ним).
+   *
+   * По умолчанию НЕ включаем: трекинг-пиксель режут Apple Mail Privacy и прокси
+   * картинок Gmail, а боты защитных шлюзов открывают письмо за получателя —
+   * цифра не отражает реальность и из клиентского кабинета убрана (см.
+   * lib/clientOpenMetrics.ts). Вызывающий передаёт true только для auto-режима
+   * (кабинет Mailganer), где метрику переделывают отдельно.
+   */
+  includeOpens?: boolean;
 }
 
 /**
  * Строит отчёт по кампаниям из данных БД — без обращения к Instantly API.
  * Используется клиентским порталом (/api/client/reports).
  */
-export function buildClientReport(rows: CampaignDbRow[]): ClientReportResult {
+export function buildClientReport(
+  rows: CampaignDbRow[],
+  options: BuildClientReportOptions = {},
+): ClientReportResult {
+  const includeOpens = options.includeOpens === true;
   const totals = { contacts: 0, sent: 0, opened: 0, replies: 0, leads: 0, bounced: 0, reached: 0 };
 
   const currentDate = new Date().toLocaleDateString('ru-RU');
 
   let tableText = `Отчёт по email-кампании\nПериод: ${currentDate}\n\n`;
   tableText += `Статистика по кампаниям:\n`;
-  tableText += `Название кампании\tКонтактов\tОтправлено писем\tОткрытий\t% открытий\tОтветов\t% ответов\tЛидов\n`;
+  tableText += includeOpens
+    ? `Название кампании\tКонтактов\tОтправлено писем\tОткрытий\t% открытий\tОтветов\t% ответов\tЛидов\n`
+    : `Название кампании\tКонтактов\tОтправлено писем\tОтветов\t% ответов\tЛидов\n`;
 
   const reportRows: (string | number)[][] = [];
   reportRows.push([
     'Дата', 'Кампания', 'Контактов', 'Отправлено писем',
-    'Открытий', '% открытий', 'Ответов', '% ответов', 'Браков',
+    ...(includeOpens ? ['Открытий', '% открытий'] : []),
+    'Ответов', '% ответов', 'Браков',
   ]);
 
   for (const c of rows) {
@@ -569,9 +590,15 @@ export function buildClientReport(rows: CampaignDbRow[]): ClientReportResult {
     const openPct = reached > 0 ? (opened / reached * 100).toFixed(1) : '0.0';
     const replyPct = contacts > 0 ? (replies / contacts * 100).toFixed(1) : '0.0';
 
-    tableText += `${c.name}\t${contacts}\t${sent}\t${opened}\t${openPct}%\t${replies}\t${replyPct}%\t${leads}\n`;
+    tableText += includeOpens
+      ? `${c.name}\t${contacts}\t${sent}\t${opened}\t${openPct}%\t${replies}\t${replyPct}%\t${leads}\n`
+      : `${c.name}\t${contacts}\t${sent}\t${replies}\t${replyPct}%\t${leads}\n`;
 
-    reportRows.push([currentDate, c.name, contacts, sent, opened, `${openPct}%`, replies, `${replyPct}%`, bounced]);
+    reportRows.push([
+      currentDate, c.name, contacts, sent,
+      ...(includeOpens ? [opened, `${openPct}%`] : []),
+      replies, `${replyPct}%`, bounced,
+    ]);
 
     totals.contacts += contacts;
     totals.sent += sent;
@@ -586,11 +613,14 @@ export function buildClientReport(rows: CampaignDbRow[]): ClientReportResult {
   const totalReplyPct = totals.contacts > 0 ? (totals.replies / totals.contacts * 100).toFixed(1) : '0.0';
 
   tableText += `\nОбщая статистика:\n`;
-  tableText += `Контактов\t${totals.contacts}\nОтправлено\t${totals.sent}\nОткрытий\t${totals.opened}\t${totalOpenPct}%\nОтветов\t${totals.replies}\t${totalReplyPct}%\nЛидов\t${totals.leads}\nБраков\t${totals.bounced}\n`;
+  tableText += `Контактов\t${totals.contacts}\nОтправлено\t${totals.sent}\n`;
+  if (includeOpens) tableText += `Открытий\t${totals.opened}\t${totalOpenPct}%\n`;
+  tableText += `Ответов\t${totals.replies}\t${totalReplyPct}%\nЛидов\t${totals.leads}\nБраков\t${totals.bounced}\n`;
 
   reportRows.push([
     currentDate, 'ИТОГО', totals.contacts, totals.sent,
-    totals.opened, `${totalOpenPct}%`, totals.replies, `${totalReplyPct}%`, totals.bounced,
+    ...(includeOpens ? [totals.opened, `${totalOpenPct}%`] : []),
+    totals.replies, `${totalReplyPct}%`, totals.bounced,
   ]);
 
   return {
@@ -601,11 +631,14 @@ export function buildClientReport(rows: CampaignDbRow[]): ClientReportResult {
       totalCampaigns: rows.length,
       totalContacts: totals.contacts,
       totalEmailsSent: totals.sent,
-      totalOpened: totals.opened,
+      ...(includeOpens ? { totalOpened: totals.opened } : {}),
       totalReplies: totals.replies,
       totalLeads: totals.leads,
       totalBounced: totals.bounced,
-      conversion: { openPctAllEmails: totalOpenPct, replyPctByLeads: totalReplyPct },
+      conversion: {
+        ...(includeOpens ? { openPctAllEmails: totalOpenPct } : {}),
+        replyPctByLeads: totalReplyPct,
+      },
     },
   };
 }
