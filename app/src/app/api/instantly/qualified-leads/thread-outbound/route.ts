@@ -83,7 +83,7 @@ export const GET = withAuth(async (req, user) => {
       campaign_id: authorization.campaignId,
       lead: qualificationEmail,
       limit: 100,
-    }, { consumer: 'qualified_leads_thread' });
+    }, { consumer: 'qualified_leads_thread', requestPriority: 'interactive' });
 
     const emails = res.items ?? [];
     const leadLower = qualificationEmail.toLowerCase();

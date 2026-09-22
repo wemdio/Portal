@@ -68,15 +68,12 @@ jest.mock('@/lib/instantly/handoffTelegram', () => ({
 
 jest.mock('@/lib/instantly/leadQualifier', () => ({
   __esModule: true,
+  extractAuthoredReplyText: (text: string) => jest.requireActual('@/lib/instantly/leadQualifier').extractAuthoredReplyText(text),
   qualifyReply: (...args: unknown[]) => qualifyReply(...args),
   fetchBriefByCampaign: (...args: unknown[]) => fetchBriefByCampaign(...args),
   fetchThreadContext: (...args: unknown[]) => fetchThreadContext(...args),
   classifyMachineReply: (...args: unknown[]) => classifyMachineReply(...args),
-  getBodyText: (body: Email['body']) => {
-    if (!body) return '';
-    if (typeof body === 'string') return body;
-    return body.text ?? body.html ?? '';
-  },
+  getBodyText: (body: Email['body']) => jest.requireActual('@/lib/instantly/leadQualifier').getBodyText(body),
   isAutoReplyOrUnsubscribe: () => false,
   isJunkReply: () => false,
 }));
@@ -1032,6 +1029,39 @@ describe('pollAndQualifyReplies', () => {
     process.env.GUEST_TOKEN_SECRET = 'test-board-secret';
     const { resolveLeadContactMetadata } = await import('@/lib/instantly/leadContactMetadata');
     const introduction = 'Доброго дня! Меня зовут Евгений, руководитель IT-отдела. Вопрос актуальный.';
+    const footer = 'С уважением,\nАдминистратор Дарина.\n8(900)111-22-33\n8 901 22 23 344';
+    const contactReply = introduction + '\n\n> Наше старое письмо\n> Телефон: +7 999 888-77-66\n\n' + footer;
+    const { leadBoardRequestText } = await import('@/lib/instantly/leadBoardRequestText');
+    for (const [body, expected] of [
+      [contactReply, introduction],
+      [{ text: 'Пришлите каталог.\n\nОтправлено из мобильной Почты Mail' }, 'Пришлите каталог.'],
+      [{ text: 'Нужны цены.\n\nИ условия доставки.\nС уважением,\nИван' }, 'Нужны цены.\n\nИ условия доставки.'],
+      [{ text: 'Olga Example писал 2026-09-18 12:49:\n> Наш старый ответ' }, null],
+      [{ text: '> Только цитата' }, null],
+      [{ html: '<p>Нужны цены.</p><div class="gmail_quote">Старое предложение</div>' }, 'Нужны цены.'],
+      ['<p>Пришлите каталог.</p><blockquote>Старое письмо</blockquote>', 'Пришлите каталог.'],
+      [{ html: '<p>Добрый день.</p><blockquote>Какой объём нужен?</blockquote><p>Нужно 200 единиц, пришлите расчёт.</p>' }, 'Добрый день.\n\nНужно 200 единиц, пришлите расчёт.'],
+      [{ html: '<blockquote>Пришлём каталог?</blockquote><p>Пришлите каталог.</p>' }, 'Пришлите каталог.'],
+      [{ text: '> Пришлём каталог?\nПришлите каталог.', html: '<blockquote>Пришлём каталог?</blockquote><p>Пришлите каталог.</p>' }, 'Пришлите каталог.'],
+      [{ html: '<div class="moz-cite-prefix">On Monday, Sender wrote:</div><br><blockquote>История</blockquote><p>Нужны цены.</p>' }, 'Нужны цены.'],
+      [{ html: '<p>Пришлите каталог.</p><div class="gmail_attr">On Monday, Sender wrote:</div><p>Старое письмо без обёртки</p>' }, 'Пришлите каталог.'],
+      [{ html: '<p>Пришлите каталог.</p><div>From: sender@example.org</div><blockquote>Вложенная цитата</blockquote><p>Чужой текст после цитаты</p>' }, 'Пришлите каталог.'],
+      ['Пришлите каталог.\nС уважением:\nИван Петров\nТелефон: +7 999 888-77-66', 'Пришлите каталог.'],
+    ] as const) {
+      expect(leadBoardRequestText(body)).toBe(expected);
+    }
+    for (const [replyBody, expectedPhone] of [
+      [{ text: contactReply }, '8(900)111-22-33; 8 901 22 23 344'],
+      [{ text: introduction + '\n> С уважением,\n> 8(900)111-22-33' }, null],
+      [{ text: introduction + '\nFrom: sender@example.org\nС уважением,\n8(900)111-22-33' }, null],
+      [{ text: introduction + '\n> Старое письмо\nЧужая неразмеченная история\n' + footer }, null],
+      [{ text: introduction + '\nFrom: sender@example.org\nTo: lead@example.com\nSubject: Previous conversation\n> Вложенная цитата\n' + footer }, null],
+      [{ text: 'Телефон: 8(900)111-22-33', html: '<p>Телефон: 8(900)111-22-33</p><p>Моб.: 8 901 22 23 344</p><blockquote>Телефон: +7 999 888-77-66</blockquote>' }, '8(900)111-22-33; 8 901 22 23 344'],
+    ] as const) {
+      expect(resolveLeadContactMetadata({
+        leads: [], leadEmail: 'lead@example.com', campaignId: 'linked-campaign', replyBody,
+      }).phone).toBe(expectedPhone);
+    }
     for (const [replyBody, expectedName] of [
       [{ text: introduction }, 'Евгений'],
       [{ html: '<p>Доброго дня! Меня зовут <b>Евгений</b>, руководитель IT-отдела.</p>' }, 'Евгений'],
@@ -1066,7 +1096,7 @@ describe('pollAndQualifyReplies', () => {
       objectionHandleable: false,
       objectionDraft: null,
       threadContext: {
-        replyEmail: replyEmail({ id: 'lead-email', body: { text: introduction } }),
+        replyEmail: replyEmail({ id: 'lead-email', body: { text: contactReply } }),
         threadEmails: [
           replyEmail({ id: 'out-1', ue_type: 1 }),
           replyEmail({ id: 'out-2', ue_type: 1 }),
@@ -1101,7 +1131,7 @@ describe('pollAndQualifyReplies', () => {
         lead_email: 'lead@example.com',
         lead_name: 'Иван Петров',
         company_name: 'ACME',
-        phone: '+7 900 111-22-33',
+        phone: '+7 900 111-22-33; 8 901 22 23 344',
         website: 'acme.ru',
         request_text: introduction,
         step_number: 2,
@@ -1116,7 +1146,7 @@ describe('pollAndQualifyReplies', () => {
     expect(sendLeadTelegramAlert).toHaveBeenCalledWith(
       expect.objectContaining({
         boardLink: expect.stringMatching(/\/leads-board\/lb_/),
-        phone: '+7 900 111-22-33',
+        phone: '+7 900 111-22-33; 8 901 22 23 344',
         website: 'acme.ru',
       }),
     );

@@ -36,7 +36,7 @@ export async function fetchFullThread(params: {
         mode: 'emode_all',
         sort_order: 'asc',
       },
-      { accountId: params.accountId, timeoutMs: 20_000, requestPriority: 'fresh', consumer: 'personalization_thread' },
+      { accountId: params.accountId, timeoutMs: 20_000, requestPriority: 'interactive', consumer: 'personalization_thread' },
     );
     const messages: ThreadMessage[] = (response.items ?? [])
       .filter((email) => email.thread_id === params.threadId)

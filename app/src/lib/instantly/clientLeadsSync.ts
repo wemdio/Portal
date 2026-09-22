@@ -73,6 +73,7 @@ export async function syncClientLeads(): Promise<{ campaigns: number; leads: num
 
     const now = new Date().toISOString();
 
+    let phoneColumnAvailable = true;
     for (const userId of userIds) {
       const rows = rawLeads.map((l) => {
         const metadata = resolveLeadContactMetadata({
@@ -85,6 +86,7 @@ export async function syncClientLeads(): Promise<{ campaigns: number; leads: num
           first_name: l.first_name ?? null,
           last_name: l.last_name ?? null,
           company_name: metadata.companyName,
+          phone: metadata.phone,
           website: metadata.website,
           linkedin_url: l.linkedin_url ?? null,
           synced_at: now,
@@ -92,12 +94,22 @@ export async function syncClientLeads(): Promise<{ campaigns: number; leads: num
       });
 
       for (let j = 0; j < rows.length; j += BATCH_SIZE) {
-        const { error } = await db
+        const batch = rows.slice(j, j + BATCH_SIZE);
+        let { error } = await db
           .from('client_campaign_leads')
-          .upsert(rows.slice(j, j + BATCH_SIZE), {
+          .upsert(phoneColumnAvailable ? batch : batch.map(({ phone: _phone, ...row }) => row), {
             onConflict: 'client_user_id,campaign_id,email',
             ignoreDuplicates: false,
           });
+        if (error && phoneColumnAvailable && /phone/i.test(error.message ?? '') &&
+          (error.code === '42703' || error.code === 'PGRST204')) {
+          phoneColumnAvailable = false;
+          ({ error } = await db.from('client_campaign_leads')
+            .upsert(batch.map(({ phone: _phone, ...row }) => row), {
+              onConflict: 'client_user_id,campaign_id,email',
+              ignoreDuplicates: false,
+            }));
+        }
         if (error) {
           console.error(`[leads-sync] upsert error for "${campaignName}" user=${userId}:`, error.message);
         }
