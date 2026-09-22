@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Loader2, X } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import { DigestBody } from '@/components/changelog/DigestBody';
+import { stripEmphasis } from '@/lib/changelog/digest';
 
 /**
  * Карточка уведомления.
@@ -118,7 +119,7 @@ export function NotificationModal({
             <DigestBody summary={summary} />
           ) : (
             <p className="whitespace-pre-line text-sm leading-relaxed text-gray-700">
-              {notification.body || 'Без подробностей.'}
+              {notification.body ? stripEmphasis(notification.body) : 'Без подробностей.'}
             </p>
           )}
         </div>
