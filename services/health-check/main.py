@@ -217,6 +217,12 @@ def _parse_proxy_list(raw: str) -> list[str]:
     return [u.strip() for u in raw.split(",") if u.strip()]
 
 PROXY_URLS = _parse_proxy_list(os.environ.get("PROXY_URLS", ""))
+# Российский пул. С 21.09.2026 на него опирается почтовый скрапер: RU-сайты
+# отдают 403 нашему US-egress'у, и ретрай на бот-защите идёт через эти ноды
+# (см. ENRICH_PROXY_RETRY_CONCURRENCY в app/src/lib/enrich/proxyPool.ts). Пул
+# жил без присмотра: протухни он — находимость почт просела бы молча, ровно
+# как в инциденте 21.09, где «почты нет» на деле значило «сайт не открылся».
+RU_PROXY_URLS = _parse_proxy_list(os.environ.get("YANDEXMAPS_PROXY_URLS_PRIORITY", ""))
 CRITICAL_ENDPOINTS = _parse_proxy_list(HEALTH_CRITICAL_ENDPOINTS_RAW)
 
 # Targets used to probe whether a proxy can carry traffic. Tried in order until
@@ -231,7 +237,26 @@ PROXY_TEST_URLS = _parse_proxy_list(
     )
 ) or ["https://www.cloudflare.com/cdn-cgi/trace"]
 
-ALL_PROXIES: list[tuple[str, str]] = [(f"Proxy{i+1}", url) for i, url in enumerate(PROXY_URLS)]
+# Группа попадает в текст алерта, чтобы сразу было видно, какой пул лёг:
+# у общего и у RU-пула разные потребители и разная срочность. Прокси,
+# записанный в оба списка, проверяем один раз.
+# Зарубежные цели для RU-нод непригодны. Замер 23.09.2026 с боевого
+# health-check: 170.168.149.150 и 90.156.145.87 не открывают ни
+# cloudflare.com, ни ipify — ConnectTimeout, — при этом ya.ru отдаёт им 302,
+# а mikron.ru (типовая цель почтового скрапера) — 200. С общими целями обе
+# ноды числились бы мёртвыми круглосуточно, и алерт про прокси все бы
+# перестали читать. Поэтому RU проверяем по российскому хосту.
+RU_PROXY_TEST_URLS = _parse_proxy_list(
+    os.environ.get("RU_PROXY_TEST_URLS", "https://ya.ru/,https://dzen.ru/")
+) or ["https://ya.ru/"]
+
+ALL_PROXIES: list[tuple[str, str]] = [
+    *((f"Proxy{i+1}", url) for i, url in enumerate(PROXY_URLS)),
+    *((f"RU{i+1}", url) for i, url in enumerate(RU_PROXY_URLS) if url not in PROXY_URLS),
+]
+
+# Кого звать, когда прокси легли. Пустая строка отключает упоминание.
+PROXY_ALERT_MENTION = os.environ.get("HEALTH_PROXY_ALERT_MENTION", "@Jacob_brown").strip()
 
 
 def _require(name: str, val: str | None) -> str:
@@ -721,7 +746,10 @@ async def check_instantly_db() -> tuple[bool, str, int | None, int | None]:
     return False, _normalize_network_error(last_error), None, None
 
 
-async def check_proxy(proxy_url: str) -> tuple[bool, str]:
+async def check_proxy(
+    proxy_url: str,
+    test_urls: list[str] | None = None,
+) -> tuple[bool, str]:
     """Check that a proxy can carry traffic.
 
     A proxy is ALIVE if any test request traverses it and comes back with a
@@ -736,9 +764,10 @@ async def check_proxy(proxy_url: str) -> tuple[bool, str]:
     """
     last_error: Exception | None = None
     last_http_status: int | None = None
+    targets = test_urls or PROXY_TEST_URLS
 
     for attempt in range(1, HEALTH_RETRY_ATTEMPTS + 1):
-        for test_url in PROXY_TEST_URLS:
+        for test_url in targets:
             try:
                 async with httpx.AsyncClient(
                     proxy=proxy_url,
@@ -773,7 +802,9 @@ async def check_all_proxies() -> list[tuple[str, str, bool, str]]:
     results: list[tuple[str, str, bool, str]] = []
     tasks = []
     for group, url in ALL_PROXIES:
-        tasks.append(check_proxy(url))
+        tasks.append(
+            check_proxy(url, RU_PROXY_TEST_URLS if group.startswith("RU") else None)
+        )
     outcomes = await asyncio.gather(*tasks, return_exceptions=True)
     for (group, url), outcome in zip(ALL_PROXIES, outcomes):
         if isinstance(outcome, Exception):
@@ -1912,6 +1943,9 @@ async def _run_health_check_inner():
             lines = [f"🔴 <b>Прокси</b>: {alive}/{total} работают"]
             for g, addr, msg in dead_proxies:
                 lines.append(f"  ✖ [{g}] {addr}: {msg}")
+            # Тегаем только на падении: на восстановлении упоминание — шум.
+            if PROXY_ALERT_MENTION:
+                lines.append(PROXY_ALERT_MENTION)
             proxy_problem = "\n".join(lines)
         else:
             proxy_problem = ""

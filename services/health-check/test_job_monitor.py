@@ -388,3 +388,69 @@ class LiOutreachReportTests(unittest.IsolatedAsyncioTestCase):
             for call in list(conn.fetchrow.await_args_list) + list(conn.fetchval.await_args_list)
         )
         self.assertEqual(unnests, 1)
+
+
+class ProxyPoolCompositionTests(unittest.TestCase):
+    """RU-пул должен попадать под присмотр вместе с общим.
+
+    До 23.09.2026 health-check следил только за PROXY_URLS, а почтовый
+    скрапер с 21.09 опирается на RU-пул: протухание его нод никто бы не
+    заметил — находимость почт просела бы молча.
+    """
+
+    @staticmethod
+    def _compose(proxy_urls: list[str], ru_urls: list[str]) -> list[tuple[str, str]]:
+        """Та же склейка, что в ALL_PROXIES на уровне модуля."""
+        return [
+            *((f"Proxy{i+1}", url) for i, url in enumerate(proxy_urls)),
+            *((f"RU{i+1}", url) for i, url in enumerate(ru_urls) if url not in proxy_urls),
+        ]
+
+    def test_ru_pool_joins_the_watchlist_with_its_own_group(self):
+        ru_raw = '["http://u:p@ru-1.invalid:8000","http://u:p@ru-2.invalid:8000"]'
+        pairs = self._compose(
+            health._parse_proxy_list("http://u:p@eu-1.invalid:8000"),
+            health._parse_proxy_list(ru_raw),
+        )
+        self.assertEqual([g for g, _ in pairs], ["Proxy1", "RU1", "RU2"])
+
+    def test_a_proxy_listed_in_both_pools_is_probed_once(self):
+        shared = "http://u:p@shared.invalid:8000"
+        pairs = self._compose([shared], [shared, "http://u:p@ru-only.invalid:8000"])
+        self.assertEqual([url for _, url in pairs].count(shared), 1)
+        self.assertEqual([g for g, _ in pairs], ["Proxy1", "RU2"])
+
+    def test_empty_ru_pool_changes_nothing(self):
+        pairs = self._compose(["http://u:p@eu-1.invalid:8000"], health._parse_proxy_list(""))
+        self.assertEqual([g for g, _ in pairs], ["Proxy1"])
+
+    def test_dead_proxy_alert_mentions_someone_by_default(self):
+        self.assertTrue(health.PROXY_ALERT_MENTION.startswith("@"))
+
+
+class RuProxyProbeTargetTests(unittest.TestCase):
+    """RU-ноды проверяем по российскому хосту, а не по Cloudflare.
+
+    Замер 23.09.2026: две из трёх RU-нод не открывают cloudflare.com и
+    ipify (ConnectTimeout), но отдают 302 на ya.ru и 200 на mikron.ru. С
+    общими целями они числились бы мёртвыми круглосуточно.
+    """
+
+    def test_ru_group_gets_russian_targets(self):
+        captured: list[tuple[str, object]] = []
+
+        async def fake_check(url, test_urls=None):
+            captured.append((url, test_urls))
+            return True, "OK"
+
+        with patch.object(health, "ALL_PROXIES", [("Proxy1", "http://eu"), ("RU1", "http://ru")]):
+            with patch.object(health, "check_proxy", fake_check):
+                asyncio.run(health.check_all_proxies())
+
+        self.assertEqual(captured[0], ("http://eu", None))
+        self.assertEqual(captured[1][0], "http://ru")
+        self.assertEqual(captured[1][1], health.RU_PROXY_TEST_URLS)
+
+    def test_russian_targets_are_not_the_foreign_ones(self):
+        self.assertTrue(health.RU_PROXY_TEST_URLS)
+        self.assertNotIn("https://www.cloudflare.com/cdn-cgi/trace", health.RU_PROXY_TEST_URLS)
