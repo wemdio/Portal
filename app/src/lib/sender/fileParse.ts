@@ -15,6 +15,12 @@ export type FileRow = Record<string, string>;
 
 export class FileParseError extends Error {}
 
+export interface ParsedFile {
+  rows: FileRow[];
+  /** Сколько строк с данными было в файле до обреза лимитом. */
+  totalRows: number;
+}
+
 const MAX_ROWS = 20_000;
 
 function cleanValue(value: unknown): string {
@@ -22,7 +28,7 @@ function cleanValue(value: unknown): string {
   return String(value).trim();
 }
 
-function normalizeRows(raw: Record<string, unknown>[]): FileRow[] {
+function normalizeRows(raw: Record<string, unknown>[]): ParsedFile {
   const out: FileRow[] = [];
   for (const row of raw.slice(0, MAX_ROWS)) {
     const clean: FileRow = {};
@@ -36,10 +42,13 @@ function normalizeRows(raw: Record<string, unknown>[]): FileRow[] {
     }
     if (hasValue) out.push(clean);
   }
-  return out;
+  // Обрез молча подменял «загрузил 50 000» на «загрузил 20 000»: оператор
+  // узнавал об этом никогда. Считаем исходный размер и отдаём наверх.
+  const totalRows = raw.filter((row) => Object.values(row).some((value) => cleanValue(value))).length;
+  return { rows: out, totalRows };
 }
 
-function parseDelimited(text: string): FileRow[] {
+function parseDelimited(text: string): ParsedFile {
   // delimiter: '' — papaparse сам определяет разделитель: у провайдеров
   // встречаются и запятая, и точка с запятой, и таб.
   const parsed = Papa.parse<Record<string, unknown>>(text.replace(/^﻿/, ''), {
@@ -53,7 +62,7 @@ function parseDelimited(text: string): FileRow[] {
   return normalizeRows(parsed.data);
 }
 
-function parseWorkbook(buffer: Buffer): FileRow[] {
+function parseWorkbook(buffer: Buffer): ParsedFile {
   const book = XLSX.read(buffer, { type: 'buffer' });
   const sheetName = book.SheetNames[0];
   if (!sheetName) throw new FileParseError('В файле нет ни одного листа');
@@ -63,12 +72,12 @@ function parseWorkbook(buffer: Buffer): FileRow[] {
 }
 
 /** CSV/TSV/XLSX → строки. Формат определяется по расширению имени файла. */
-export function parseMailboxFile(fileName: string, buffer: Buffer): FileRow[] {
+export function parseMailboxFile(fileName: string, buffer: Buffer): ParsedFile {
   const ext = (fileName.split('.').pop() ?? '').toLowerCase();
-  const rows = ext === 'xlsx' || ext === 'xls'
+  const parsed = ext === 'xlsx' || ext === 'xls'
     ? parseWorkbook(buffer)
     : parseDelimited(buffer.toString('utf8'));
 
-  if (!rows.length) throw new FileParseError('Файл пустой или в нём только заголовки');
-  return rows;
+  if (!parsed.rows.length) throw new FileParseError('Файл пустой или в нём только заголовки');
+  return parsed;
 }

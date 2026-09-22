@@ -37,8 +37,28 @@ services:
       # Каталог Workspace зеркалится раз в час: новые ящики домена появляются
       # на экране сами, выключенными.
       - SENDER_GOOGLE_SYNC_INTERVAL_MS=${SENDER_GOOGLE_SYNC_INTERVAL_MS:-3600000}
+      # Контрольный ящик для «Проверить отправку»: туда шлём пробу и оттуда
+      # же читаем заголовки доставленного письма. Обязательно внешний адрес —
+      # между ящиками одного аккаунта провайдеры почту теряют.
+      - SENDER_PROBE_TO_EMAIL=${SENDER_PROBE_TO_EMAIL:-}
+      - SENDER_PROBE_IMAP_HOST=${SENDER_PROBE_IMAP_HOST:-}
+      - SENDER_PROBE_IMAP_PORT=${SENDER_PROBE_IMAP_PORT:-993}
+      - SENDER_PROBE_IMAP_USER=${SENDER_PROBE_IMAP_USER:-}
+      - SENDER_PROBE_IMAP_PASSWORD=${SENDER_PROBE_IMAP_PASSWORD:-}
       - WORKER_KIND=sender
     stop_grace_period: 2m
+    # autoheal + heartbeat — защита от event-loop hang (инциденты tgOutreach
+    # 35ч и yandexmaps 27.07.2026: процесс жив, письма не идут). Heartbeat
+    # пишет независимый setInterval в worker/sender.ts; healthcheck читает
+    # mtime файла, autoheal делает рестарт.
+    labels:
+      - autoheal=true
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/sender-worker-heartbeat && test $$(( $$(date +%s) - $$(cat /tmp/sender-worker-heartbeat | cut -c1-10) )) -lt 300 || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
     deploy:
       resources:
         limits:

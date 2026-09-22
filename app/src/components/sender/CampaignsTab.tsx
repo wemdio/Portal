@@ -1,10 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Loader2, Pause, Play, Plus } from 'lucide-react';
-import { fetchCampaigns, patchCampaign, type CampaignDto } from './api';
+import { Loader2, Pause, Play, Plus, Square, Trash2 } from 'lucide-react';
+import { deleteCampaign, fetchCampaigns, patchCampaign, type CampaignDto } from './api';
 import { CampaignFormModal } from './CampaignFormModal';
-import { weekdaysLabel } from './CampaignSteps';
+import { timezoneLabel, weekdaysLabel } from './CampaignSteps';
 
 const STATUS_LABELS: Record<CampaignDto['status'], { text: string; className: string }> = {
   draft: { text: 'Черновик', className: 'bg-zinc-100 text-zinc-600' },
@@ -103,46 +103,93 @@ export function CampaignsTab() {
                     </div>
                     <div className="mt-1 text-xs text-zinc-500">
                       {stats
-                        ? `${stats.recipients} получателей · отправлено ${stats.sent} · в очереди ${stats.scheduled} · ответили ${stats.replied}${
-                            stats.failed ? ` · ошибок ${stats.failed}` : ''
-                          }`
+                        ? `${stats.recipients} получателей · отправлено ${stats.sent} · в очереди ${stats.scheduled}`
+                          + ` · ответили ${stats.replied}${stats.replyRate != null ? ` (${stats.replyRate}%)` : ''}`
+                          + (stats.bounced ? ` · отбоев ${stats.bounced}${stats.bounceRate != null ? ` (${stats.bounceRate}%)` : ''}` : '')
+                          + (stats.failed ? ` · ошибок ${stats.failed}` : '')
                         : '—'}
                       {' · '}
                       {campaign.send_hour_from}:00–{campaign.send_hour_to}:00
                       {' · '}
                       {weekdaysLabel(campaign.send_weekdays ?? [])}
+                      {' · '}
+                      {timezoneLabel(campaign.timezone)}
                     </div>
                   </div>
 
-                  {campaign.status === 'running' ? (
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        await patchCampaign(campaign.id, 'pause');
-                        await load();
-                      }}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100"
-                    >
-                      <Pause className="h-3.5 w-3.5" />
-                      Пауза
-                    </button>
-                  ) : campaign.status !== 'done' ? (
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        try {
-                          await patchCampaign(campaign.id, 'start');
+                  <div className="flex items-center gap-2">
+                    {campaign.status === 'running' ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await patchCampaign(campaign.id, 'pause');
                           await load();
-                        } catch (err) {
-                          setError(err instanceof Error ? err.message : 'Не удалось запустить');
-                        }
-                      }}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
-                    >
-                      <Play className="h-3.5 w-3.5" />
-                      Запустить
-                    </button>
-                  ) : null}
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100"
+                      >
+                        <Pause className="h-3.5 w-3.5" />
+                        Пауза
+                      </button>
+                    ) : campaign.status !== 'done' ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await patchCampaign(campaign.id, 'start');
+                            await load();
+                          } catch (err) {
+                            setError(err instanceof Error ? err.message : 'Не удалось запустить');
+                          }
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
+                      >
+                        <Play className="h-3.5 w-3.5" />
+                        Запустить
+                      </button>
+                    ) : null}
+
+                    {/* Завершение и удаление до сих пор были только в API: кампания
+                        навсегда оставалась «на паузе», а ненужные черновики
+                        копились в списке. */}
+                    {campaign.status !== 'done' ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (!window.confirm(`Завершить кампанию «${campaign.name}»? Запланированные письма отменятся.`)) return;
+                          try {
+                            await patchCampaign(campaign.id, 'finish');
+                            await load();
+                          } catch (err) {
+                            setError(err instanceof Error ? err.message : 'Не удалось завершить');
+                          }
+                        }}
+                        title="Завершить: запланированные письма отменяются"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100"
+                      >
+                        <Square className="h-3 w-3" />
+                        Завершить
+                      </button>
+                    ) : null}
+                    {campaign.status !== 'running' ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (!window.confirm(`Удалить кампанию «${campaign.name}» вместе с базой получателей и историей писем?`)) return;
+                          try {
+                            await deleteCampaign(campaign.id);
+                            await load();
+                          } catch (err) {
+                            setError(err instanceof Error ? err.message : 'Не удалось удалить');
+                          }
+                        }}
+                        title="Удалить кампанию"
+                        aria-label="Удалить кампанию"
+                        className="rounded-lg p-1.5 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-red-600"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
               );
             })}

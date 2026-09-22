@@ -5,6 +5,7 @@ import { useUser } from '@/lib/UserProvider';
 import { commonDictionary, dict, toIntlLocale, type Locale } from '@/lib/i18n';
 import { supabase } from '@/lib/supabaseClient';
 import { NotificationModal } from '@/components/notifications/NotificationModal';
+import { stripEmphasis } from '@/lib/changelog/digest';
 
 interface Notification {
   id: string;
@@ -190,7 +191,11 @@ export default function NotificationsPage() {
                     </div>
                     <p className="text-sm font-medium text-gray-900 mt-0.5">{n.title}</p>
                     {n.body && (
-                      <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{n.body}</p>
+                      /* Звёздочки выделения из сводки обновлений: в списке
+                         разметку никто не разбирает, и они читались бы мусором.
+                         Чистим при показе, а не в базе — записи, заведённые
+                         раньше, тоже должны выглядеть прилично. */
+                      <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{stripEmphasis(n.body)}</p>
                     )}
                   </div>
                 </>

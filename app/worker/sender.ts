@@ -9,14 +9,23 @@
  * вынесена на отдельный сервер, поэтому воркер не зависит от остального
  * портала: всё общение — через БД.
  */
-import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop } from './_shared';
+import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop, startWorkerHeartbeat } from './_shared';
 import { verifyPendingMailboxes } from '@/lib/sender/verifyWorker';
 import { planSenderMessages } from '@/lib/sender/planner';
 import { processSenderBatch } from '@/lib/sender/sendWorker';
 import { processSenderReplies } from '@/lib/sender/repliesWorker';
+import { processSendProbes } from '@/lib/sender/probeWorker';
 import { syncGoogleWorkspaceMailboxes } from '@/lib/sender/googleSyncWorker';
 
 const log = createWorkerLogger('sender');
+
+/**
+ * Heartbeat-файл: обновляется независимым setInterval-тиком, docker
+ * healthcheck на sender-хосте читает mtime и с autoheal перезапускает
+ * контейнер при event-loop hang (см. инциденты tgOutreach 35ч и yandexmaps
+ * 27.07.2026 — процесс жив, письма не идут).
+ */
+const HEARTBEAT_PATH = '/tmp/sender-worker-heartbeat';
 
 const REPLIES_INTERVAL_MS = Number(process.env.SENDER_REPLIES_INTERVAL_MS ?? 60_000);
 let lastRepliesAt = 0;
@@ -50,12 +59,22 @@ async function tick(): Promise<boolean> {
     await processSenderReplies({ log });
   }
 
+  // Проверочные отправки (кнопка «Проверить отправку»): по одной попытке за
+  // тик, отправку не блокируют.
+  try {
+    await processSendProbes({ log });
+  } catch (e) {
+    log('warn', `Проверочные отправки не обработались: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   return sent;
 }
 
 async function main() {
   requireSupabaseAdmin(log);
   const shouldStop = setupGracefulShutdown(log);
+  startWorkerHeartbeat(HEARTBEAT_PATH);
+  log('info', `Heartbeat ticker started → ${HEARTBEAT_PATH} (every 30s)`);
   log('info', 'Sender worker started');
 
   await pollLoop({

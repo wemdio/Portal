@@ -117,11 +117,23 @@ export function digestPeriod(windowFrom: string, windowTo: string): string | nul
  * Первый пункт первого продуктового раздела: в списке у уведомления одна
  * строка, и полотно там не нужно — полный текст открывается по клику.
  */
+/**
+ * Убрать звёздочки выделения из текста.
+ *
+ * Нужно и при записи уведомления, и при показе: уведомления, заведённые до
+ * этой правки, хранят звёздочки в базе, и чинить их переписыванием строк — та
+ * ещё цена за косметику. Дешевле не показывать разметку там, где её некому
+ * разобрать.
+ */
+export function stripEmphasis(text: string): string {
+  return (text ?? '').replace(/\*\*(.+?)\*\*/g, '$1');
+}
+
 export function digestPreview(summary: string): string {
   const sections = parseDigest(summary);
   const first = sections.find((s) => s.kind === 'portal') ?? sections[0];
   // Звёздочки выделения ИИ ставит всегда; в списке уведомлений разметку никто
   // не разбирает, и они остались бы видимым мусором посреди предложения.
-  const text = (first?.items[0] ?? '').replace(/\*\*(.+?)\*\*/g, '$1');
+  const text = stripEmphasis(first?.items[0] ?? '');
   return text.length > 180 ? `${text.slice(0, 179)}…` : text;
 }

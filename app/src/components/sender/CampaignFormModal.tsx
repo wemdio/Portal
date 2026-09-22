@@ -72,13 +72,18 @@ export function CampaignFormModal({ campaign, onClose, onCreated }: Props) {
     null,
   );
 
-  // Кампания — это одно письмо. Follow-up'ы убраны: цепочку ведём не догоняющими
-  // письмами, а работой с ответами. Формат запроса к API прежний (список писем),
-  // и планировщик сам закрывает получателя после первого письма.
-  const [subject, setSubject] = useState('');
-  const [body, setBody] = useState('');
+  // Цепочка писем до пяти шагов. Движок (планировщик + очередь) многошаговость
+  // умеет всегда: follow-up уходит ответом в тред первого письма с «Re:», шаг
+  // без темы — норма. Форма раньше отправляла ровно один шаг.
+  const [letters, setLetters] = useState<{ subject: string; body: string; delayHours: number }[]>([
+    { subject: '', body: '', delayHours: 72 },
+  ]);
+  const MAX_LETTERS = 5;
   const [hourFrom, setHourFrom] = useState(campaign?.send_hour_from ?? 9);
   const [hourTo, setHourTo] = useState(campaign?.send_hour_to ?? 18);
+  const [timezone, setTimezone] = useState(campaign?.timezone ?? 'Europe/Moscow');
+  const [gapSeconds, setGapSeconds] = useState(180);
+  const [gapJitterSeconds, setGapJitterSeconds] = useState(120);
   // Будни по умолчанию: холодная рассылка в выходные бьёт по ответам и по
   // репутации домена. Но это умолчание, а не запрет — день включается кнопкой.
   const [weekdays, setWeekdays] = useState<number[]>(campaign?.send_weekdays ?? [...WORKDAYS]);
@@ -95,8 +100,18 @@ export function CampaignFormModal({ campaign, onClose, onCreated }: Props) {
       setHourFrom(details.campaign.send_hour_from);
       setHourTo(details.campaign.send_hour_to);
       setWeekdays(details.campaign.send_weekdays ?? []);
-      setSubject(details.steps[0]?.subject ?? '');
-      setBody(details.steps[0]?.body ?? '');
+      setTimezone(details.campaign.timezone);
+      setGapSeconds(details.campaign.gap_seconds);
+      setGapJitterSeconds(details.campaign.gap_jitter_seconds);
+      if (details.steps.length) {
+        setLetters(
+          details.steps.map((step) => ({
+            subject: step.subject,
+            body: step.body,
+            delayHours: step.delay_hours || 72,
+          })),
+        );
+      }
       setSaved(details.recipients);
       setReadOnly(!details.editable);
     } catch (err) {
@@ -141,8 +156,14 @@ export function CampaignFormModal({ campaign, onClose, onCreated }: Props) {
   // уже загруженной базе: письмо всегда сверяется с тем, что реально уедет.
   const columns = fileColumns ?? saved?.columns ?? null;
   const countsExact = fileColumns ? true : (saved?.exact ?? true);
-  const { unknownKeys } = letterIssues(subject, body, columns);
+  // Переменные проверяются по всей цепочке: неизвестная в любом шаге — ошибка.
+  const { unknownKeys } = letterIssues(letters.map((l) => `${l.subject}\n${l.body}`).join('\n\n'), '', columns);
   const baseReady = editing ? (saved?.total ?? 0) > 0 || recipientsFile != null : recipientsFile != null;
+
+  const firstLetter = letters[0];
+  const lettersDone = Boolean(firstLetter?.subject.trim() && firstLetter?.body.trim())
+    && letters.slice(1).every((letter) => Boolean(letter.body.trim()))
+    && unknownKeys.length === 0;
 
   /**
    * Готовность шагов — один список, из которого берутся и подсветка номера, и
@@ -154,7 +175,7 @@ export function CampaignFormModal({ campaign, onClose, onCreated }: Props) {
     { no: 1, title: 'название', done: Boolean(name.trim()) },
     { no: 2, title: 'база получателей', done: baseReady },
     { no: 3, title: 'ящики', done: mailboxes.length > 0 },
-    { no: 4, title: 'письмо', done: Boolean(subject.trim() && body.trim()) && unknownKeys.length === 0 },
+    { no: 4, title: 'письмо', done: lettersDone },
     { no: 5, title: 'дни отправки', done: weekdays.length > 0 },
   ];
   const missing = steps.filter((step) => !step.done);
@@ -162,10 +183,15 @@ export function CampaignFormModal({ campaign, onClose, onCreated }: Props) {
   /** Загрузить выбранный файл в кампанию и рассказать, что получилось. */
   const sendFile = async (id: string) => {
     const res = await uploadRecipients(id, recipientsFile as File, fileMode);
+    // Обрез молча подменял «в файле 50 000» на «загружено 20 000» — теперь об
+    // этом прямо сказано, иначе оператор считает базу большей, чем она есть.
+    const truncation = res.truncated != null && res.fileRows != null
+      ? ` В файле было ${res.fileRows} строк — загружены первые ${res.truncated}, остальное не попало в кампанию.`
+      : '';
     return (
       `${res.replaced ? 'База заменена' : 'Получателей добавлено'}: ${res.imported}. `
       + `Пропущено: ${res.skippedInvalid} с плохим адресом, ${res.skippedDuplicates} дублей, `
-      + `${res.skippedSuppressed} из стоп-листа.`
+      + `${res.skippedSuppressed} из стоп-листа.${truncation}`
     );
   };
 
@@ -175,10 +201,17 @@ export function CampaignFormModal({ campaign, onClose, onCreated }: Props) {
       ({ id } = await createCampaign({
         name,
         mailboxIds: mailboxes.map((m) => m.id),
-        steps: [{ delayDays: 0, subject, body }],
+        steps: letters.map((letter, index) => ({
+          delayHours: index === 0 ? 0 : letter.delayHours,
+          subject: letter.subject,
+          body: letter.body,
+        })),
+        timezone,
         sendHourFrom: hourFrom,
         sendHourTo: hourTo,
         sendWeekdays: weekdays,
+        gapSeconds,
+        gapJitterSeconds,
       }));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось создать кампанию');
@@ -210,10 +243,17 @@ export function CampaignFormModal({ campaign, onClose, onCreated }: Props) {
       await updateCampaign(campaignId, {
         name,
         mailboxIds: mailboxes.map((m) => m.id),
-        steps: [{ delayDays: 0, subject, body }],
+        steps: letters.map((letter, index) => ({
+          delayHours: index === 0 ? 0 : letter.delayHours,
+          subject: letter.subject,
+          body: letter.body,
+        })),
+        timezone,
         sendHourFrom: hourFrom,
         sendHourTo: hourTo,
         sendWeekdays: weekdays,
+        gapSeconds,
+        gapJitterSeconds,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось сохранить кампанию');
@@ -378,6 +418,12 @@ export function CampaignFormModal({ campaign, onClose, onCreated }: Props) {
                       : ''}
                     {' · '}стоп-лист проверим при загрузке
                   </p>
+                  {fileColumns.truncated != null && fileColumns.fileRows != null ? (
+                    <p className="text-amber-600">
+                      В файле {fileColumns.fileRows} строк, прочитано {fileColumns.truncated} — дальше первых
+                      {' '}20 000 кампания не возьмёт. Разбейте файл на части, если нужна вся база.
+                    </p>
+                  ) : null}
                   <p>
                     Почта — колонка «{fileColumns.emailHeader}»
                     {fileColumns.nameHeader
@@ -461,22 +507,41 @@ export function CampaignFormModal({ campaign, onClose, onCreated }: Props) {
               ) : null}
             </Step>
 
-            <LetterStep
-              no={4}
-              done={steps[3].done}
-              subject={subject}
-              body={body}
-              onSubject={setSubject}
-              onBody={setBody}
-              columns={columns}
-              countsExact={countsExact}
-              disabled={readOnly}
-              emptyHint={
-                editing
-                  ? 'В кампании пока нет получателей — загрузите базу (шаг 2), и здесь появятся её переменные.'
-                  : 'Загрузите базу (шаг 2) — здесь появятся переменные из её колонок.'
-              }
-            />
+            {letters.map((letter, index) => (
+              <LetterStep
+                key={index}
+                no={4}
+                done={Boolean((index === 0 ? letter.subject.trim() : true) && letter.body.trim())}
+                title={index === 0 ? 'Первое письмо' : `Письмо ${index + 1}`}
+                subject={letter.subject}
+                body={letter.body}
+                delayHours={index === 0 ? undefined : letter.delayHours}
+                onDelayHours={index === 0 ? undefined : (value) => setLetters((prev) => prev.map((l, i) => (i === index ? { ...l, delayHours: value } : l)))}
+                onRemove={index === 0 || readOnly ? undefined : () => setLetters((prev) => prev.filter((_, i) => i !== index))}
+                onSubject={(value) => setLetters((prev) => prev.map((l, i) => (i === index ? { ...l, subject: value } : l)))}
+                onBody={(value) => setLetters((prev) => prev.map((l, i) => (i === index ? { ...l, body: value } : l)))}
+                columns={columns}
+                countsExact={countsExact}
+                disabled={readOnly}
+                emptyHint={
+                  editing
+                    ? 'В кампании пока нет получателей — загрузите базу (шаг 2), и здесь появятся её переменные.'
+                    : 'Загрузите базу (шаг 2) — здесь появятся переменные из её колонок.'
+                }
+              />
+            ))}
+
+            {/* Добавить follow-up можно только при правке черновика/паузы: у
+                идущей кампании письма уже материализованы в очередь. */}
+            {!readOnly && letters.length < MAX_LETTERS ? (
+              <button
+                type="button"
+                onClick={() => setLetters((prev) => [...prev, { subject: '', body: '', delayHours: 72 }])}
+                className="w-full rounded-xl border border-dashed border-zinc-300 py-2.5 text-sm text-zinc-500 transition-colors hover:border-blue-400 hover:text-blue-600"
+              >
+                + Добавить письмо в цепочку ({letters.length} из {MAX_LETTERS})
+              </button>
+            ) : null}
 
             <ScheduleStep
               no={5}
@@ -484,9 +549,15 @@ export function CampaignFormModal({ campaign, onClose, onCreated }: Props) {
               hourFrom={hourFrom}
               hourTo={hourTo}
               weekdays={weekdays}
+              timezone={timezone}
+              gapSeconds={gapSeconds}
+              gapJitterSeconds={gapJitterSeconds}
               onHourFrom={setHourFrom}
               onHourTo={setHourTo}
               onWeekdays={setWeekdays}
+              onTimezone={setTimezone}
+              onGapSeconds={setGapSeconds}
+              onGapJitterSeconds={setGapJitterSeconds}
               disabled={readOnly}
             />
           </div>

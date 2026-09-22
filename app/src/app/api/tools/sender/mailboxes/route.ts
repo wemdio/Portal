@@ -96,7 +96,32 @@ export async function GET(req: NextRequest) {
       };
     });
 
-    return NextResponse.json({ mailboxes, total: count ?? 0 });
+    // Последняя проверочная отправка по ящикам страницы: одну строку на ящик
+    // (свежайшую), чтобы карточка сразу показывала, не переписывает ли
+    // провайдер заголовки.
+    const probeByMailbox = new Map<string, { status: string; passed: boolean | null; error: string | null; at: string }>();
+    const pageIds = mailboxes.map((m) => String((m as { id?: string }).id)).filter(Boolean);
+    if (pageIds.length) {
+      const { data: probeRows } = await supabaseAdmin
+        .from('sender_send_probes')
+        .select('mailbox_id, status, passed, error, created_at')
+        .in('mailbox_id', pageIds)
+        .order('created_at', { ascending: false })
+        .limit(pageIds.length * 3);
+      for (const row of (probeRows ?? []) as { mailbox_id: string; status: string; passed: boolean | null; error: string | null; created_at: string }[]) {
+        if (!probeByMailbox.has(row.mailbox_id)) {
+          probeByMailbox.set(row.mailbox_id, { status: row.status, passed: row.passed, error: row.error, at: row.created_at });
+        }
+      }
+    }
+
+    return NextResponse.json({
+      mailboxes: mailboxes.map((mailbox) => ({
+        ...mailbox,
+        probe: probeByMailbox.get(String((mailbox as { id?: string }).id)) ?? null,
+      })),
+      total: count ?? 0,
+    });
   });
 }
 
@@ -197,21 +222,25 @@ export async function POST(req: NextRequest) {
 
     let parsed;
     try {
-      const rows = parseMailboxFile(file.name, Buffer.from(await file.arrayBuffer()));
+      const parsedFile = parseMailboxFile(file.name, Buffer.from(await file.arrayBuffer()));
       // Провайдер не спрашивается у человека: его определяет разбор — по
       // колонкам файла, шапке выгрузки и, если файл промолчал, по DNS домена.
-      parsed = await parseMailboxRows(rows);
+      parsed = {
+        fileRows: parsedFile.totalRows,
+        truncated: parsedFile.totalRows > parsedFile.rows.length ? parsedFile.rows.length : null,
+        result: await parseMailboxRows(parsedFile.rows),
+      };
     } catch (e) {
       if (e instanceof FileParseError) return jsonError(e.message, 400);
       return jsonError(`Не удалось прочитать файл: ${e instanceof Error ? e.message : String(e)}`, 400);
     }
 
-    if (!parsed.mailboxes.length) {
-      return NextResponse.json({ imported: 0, detected: {}, errors: parsed.errors }, { status: 200 });
+    if (!parsed.result.mailboxes.length) {
+      return NextResponse.json({ imported: 0, detected: {}, errors: parsed.result.errors }, { status: 200 });
     }
 
     const nowIso = new Date().toISOString();
-    const rows = parsed.mailboxes.map((mailbox) => ({
+    const rows = parsed.result.mailboxes.map((mailbox) => ({
       provider: mailbox.provider,
       email: mailbox.email,
       display_name: mailbox.displayName,
@@ -244,14 +273,16 @@ export async function POST(req: NextRequest) {
     // Раньше провайдера называл он сам, и ошибка выбора всплывала только на
     // проверке входа; теперь решение принимает портал, и оно должно быть на виду.
     const detected: Record<string, number> = {};
-    for (const mailbox of parsed.mailboxes) {
+    for (const mailbox of parsed.result.mailboxes) {
       detected[mailbox.provider] = (detected[mailbox.provider] ?? 0) + 1;
     }
 
     return NextResponse.json({
       imported: data?.length ?? 0,
       detected,
-      errors: parsed.errors,
+      errors: parsed.result.errors,
+      fileRows: parsed.fileRows,
+      truncated: parsed.truncated,
     });
   });
 }
