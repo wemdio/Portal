@@ -482,6 +482,12 @@ export function ExpandedThread({
   // переписку урезанным ответом. Ref, а не state: колбэк не должен
   // пересоздаваться на каждое письмо.
   const shownThreadRef = useRef<ThreadMessage[] | null>(null);
+  // Номер последней начатой загрузки. Ответ только от неё меняет экран и
+  // ставит таймер: две загрузки могут пересечься (менеджер ответил, пока шёл
+  // автоповтор; двойной клик «Повторить»), и без этого запоздавший ответ
+  // оставлял бы второй таймер-сироту с лишними чтениями, а ответ по
+  // предыдущему письму мог лечь поверх нового.
+  const loadSeqRef = useRef(0);
   const [reloadTick, setReloadTick] = useState(0);
 
   const loadThread = useCallback(async () => {
@@ -492,6 +498,7 @@ export function ExpandedThread({
       clearTimeout(historyTimerRef.current);
       historyTimerRef.current = null;
     }
+    const seq = ++loadSeqRef.current;
     setThreadLoading(true);
     setThreadError('');
     setThreadAuthExpired(false);
@@ -499,6 +506,7 @@ export function ExpandedThread({
       const data = await clientApiFetch<ClientReplyThread>(
         `/campaigns/${campaignId}/replies/${emailId}/thread`,
       );
+      if (seq !== loadSeqRef.current) return;
       const deferred = data.history_deferred ?? null;
       // Отложенный ответ несёт одно письмо. Если на экране уже переписка
       // длиннее — оставляем её вместе с адресатами ответа: раньше после
@@ -519,6 +527,7 @@ export function ExpandedThread({
             Math.max(deferred.retry_after_ms + 500, HISTORY_MIN_DELAY_MS),
             HISTORY_MAX_DELAY_MS,
           );
+          if (historyTimerRef.current) clearTimeout(historyTimerRef.current);
           historyTimerRef.current = setTimeout(() => setReloadTick((t) => t + 1), delay);
         } else {
           setHistoryState('exhausted');
@@ -528,6 +537,7 @@ export function ExpandedThread({
         setHistoryState(null);
       }
     } catch (err) {
+      if (seq !== loadSeqRef.current) return;
       if (isAuthExpiredError(err)) setThreadAuthExpired(true);
       setThreadError(err instanceof Error ? err.message : 'Не удалось загрузить тред');
       // Упал сам повтор (обычная ошибка, не бюджет): обещание «догрузится»
@@ -536,7 +546,9 @@ export function ExpandedThread({
       historyAttemptsRef.current = 0;
       setHistoryState(null);
     } finally {
-      setThreadLoading(false);
+      // Индикатор гасит только последняя загрузка — иначе запоздавшая
+      // предыдущая выключила бы его, пока идёт актуальная.
+      if (seq === loadSeqRef.current) setThreadLoading(false);
     }
   }, [campaignId, emailId]);
 

@@ -186,6 +186,35 @@ describe('ExpandedThread — отложенная история', () => {
     });
     expect(clientApiFetch).toHaveBeenCalledTimes(3);
   });
+  it('пересёкшиеся загрузки: запоздавший ответ старой загрузки не ставит лишний повтор', async () => {
+    let resolveStale: (v: ClientReplyThread) => void = () => {};
+    clientApiFetch
+      .mockResolvedValueOnce(PARTIAL) // 1) первая загрузка — повтор через 5,5 с
+      .mockImplementationOnce(() => new Promise<ClientReplyThread>((r) => { resolveStale = r; })) // 2) автоповтор висит
+      .mockResolvedValueOnce({ ok: true }) // 3) POST ответа
+      .mockResolvedValueOnce(FULL); // 4) обновление после ответа — полная
+
+    await renderThread();
+    await act(async () => {
+      jest.advanceTimersByTime(5_500); // запускаем автоповтор, он повисает
+    });
+    await sendReply('Ответ, пока идёт автоповтор');
+    expect(screen.getByText('Наше первое письмо')).toBeInTheDocument();
+
+    // Автоповтор наконец ответил «история отложена» — это устаревший ответ.
+    await act(async () => {
+      resolveStale(PARTIAL);
+    });
+    await flush();
+
+    expect(screen.getByText('Наше первое письмо')).toBeInTheDocument();
+    expect(screen.queryByText(/Обновляем переписку|догрузится/)).not.toBeInTheDocument();
+    await act(async () => {
+      jest.advanceTimersByTime(60_000);
+    });
+    // 3 GET + 1 POST, ни одного лишнего чтения.
+    expect(clientApiFetch).toHaveBeenCalledTimes(4);
+  });
 });
 
 async function flush() {
@@ -202,3 +231,30 @@ async function sendReply(text: string) {
   fireEvent.click(screen.getByRole('button', { name: /Отправить/ }));
   await flush();
 }
+
+describe('ExpandedThread — смена письма посреди загрузки', () => {
+  beforeEach(() => {
+    clientApiFetch.mockReset();
+  });
+
+  it('ответ по предыдущему письму не ложится поверх нового', async () => {
+    let resolveOld: (v: ClientReplyThread) => void = () => {};
+    clientApiFetch
+      .mockImplementationOnce(() => new Promise<ClientReplyThread>((r) => { resolveOld = r; }))
+      .mockResolvedValueOnce({ ...FULL, messages: [message('m-new', 'Письмо нового лида')] });
+
+    const { ExpandedThread } = await import('@/components/client-replies/ExpandedThread');
+    const { rerender } = render(<ExpandedThread campaignId="cmp-1" emailId="email-old" />);
+    rerender(<ExpandedThread campaignId="cmp-1" emailId="email-new" />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByText('Письмо нового лида')).toBeInTheDocument();
+
+    await act(async () => {
+      resolveOld({ ...FULL, messages: [message('m-old', 'Письмо старого лида')] });
+    });
+    expect(screen.getByText('Письмо нового лида')).toBeInTheDocument();
+    expect(screen.queryByText('Письмо старого лида')).not.toBeInTheDocument();
+  });
+});
