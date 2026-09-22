@@ -116,9 +116,18 @@ interface LetterProps {
   /** Подпись, когда базы ещё нет: у создания и у правки она разная. */
   emptyHint: string;
   disabled?: boolean;
+  /** Название шага: «Первое письмо», «Письмо 2»… */
+  title?: string;
+  /** Через сколько часов после предыдущего письма уйдёт этот шаг. */
+  delayHours?: number;
+  onDelayHours?: (value: number) => void;
+  onRemove?: () => void;
 }
 
-/** Шаг «Первое письмо»: тема, текст и переменные из базы. */
+/**
+ * Шаг «Письмо» цепочки: тема, текст и переменные из базы. Пустая тема у
+ * follow-up — норма: письмо уйдёт ответом в тот же тред с «Re:».
+ */
 export function LetterStep({
   no,
   done,
@@ -130,6 +139,10 @@ export function LetterStep({
   countsExact = true,
   emptyHint,
   disabled = false,
+  title = 'Первое письмо',
+  delayHours,
+  onDelayHours,
+  onRemove,
 }: LetterProps) {
   const subjectRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
   const bodyRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
@@ -147,7 +160,45 @@ export function LetterStep({
   };
 
   return (
-    <Step no={no} title="Первое письмо" done={done}>
+    <Step
+      no={no}
+      title={title}
+      done={done}
+      hint={
+        delayHours != null && onDelayHours
+          ? `через ${delayHours} ч после предыдущего`
+          : undefined
+      }
+    >
+      {/* Задержка и удаление — атрибуты шага цепочки, а не письма: живут
+          в шапке шага, чтобы текст оставался только текстом. */}
+      {delayHours != null && onDelayHours ? (
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-sm text-zinc-600">
+          <span className="text-xs text-zinc-500">Отправить через</span>
+          <input
+            type="number"
+            min={1}
+            max={720}
+            value={delayHours}
+            disabled={disabled}
+            onChange={(e) => onDelayHours(Math.max(1, Math.round(Number(e.target.value) || 1)))}
+            className="w-16 rounded-lg border border-zinc-300 bg-white px-2 py-1 text-center text-sm text-zinc-900"
+          />
+          <span className="text-xs text-zinc-500">
+            ч после предыдущего письма (тему можно оставить пустой — уйдёт как «Re:» в тот же тред)
+          </span>
+          {onRemove ? (
+            <button
+              type="button"
+              onClick={onRemove}
+              disabled={disabled}
+              className="ml-auto text-xs text-zinc-400 transition-colors hover:text-red-600 disabled:opacity-50"
+            >
+              Убрать шаг
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       <div className="mb-2">
         <TemplateField
           value={subject}
@@ -155,7 +206,7 @@ export function LetterStep({
           variables={variables}
           fieldRef={subjectRef}
           onFocus={() => setLastField('subject')}
-          placeholder="Тема письма"
+          placeholder={delayHours != null ? 'Тема (пусто = «Re:» в тот же тред)' : 'Тема письма'}
           disabled={disabled}
           className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
         />
@@ -230,21 +281,59 @@ export function LetterStep({
   );
 }
 
+/** Часовые пояса кампаний: рынок рассылки плюс вся Россия для удобства. */
+export const TIMEZONES = [
+  'Europe/Moscow',
+  'Europe/Kaliningrad',
+  'Europe/Samara',
+  'Asia/Yekaterinburg',
+  'Asia/Omsk',
+  'Asia/Novosibirsk',
+  'Asia/Krasnoyarsk',
+  'Asia/Irkutsk',
+  'Asia/Vladivostok',
+  'Europe/Kyiv',
+  'Europe/Minsk',
+  'Europe/Astana',
+  'Europe/Warsaw',
+  'Europe/Berlin',
+  'Europe/Paris',
+  'Europe/London',
+  'Europe/Istanbul',
+  'Asia/Dubai',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+];
+
+/** Человекочитаемая метка пояса: «Europe/Moscow» → «Москва». */
+export function timezoneLabel(timezone: string): string {
+  const part = timezone.split('/').pop() ?? timezone;
+  return part.replace(/_/g, ' ');
+}
+
 interface ScheduleProps {
   no: number;
   done: boolean;
   hourFrom: number;
   hourTo: number;
   weekdays: number[];
+  timezone: string;
+  gapSeconds: number;
+  gapJitterSeconds: number;
   onHourFrom: (value: number) => void;
   onHourTo: (value: number) => void;
   onWeekdays: (days: number[]) => void;
+  onTimezone: (value: string) => void;
+  onGapSeconds: (value: number) => void;
+  onGapJitterSeconds: (value: number) => void;
   disabled?: boolean;
 }
 
 /**
- * Шаг «Когда отправлять». Часы и дни — одно решение, поэтому и на экране это
- * один шаг, а не две разрозненные строки полей.
+ * Шаг «Когда отправлять». Часы, дни, пояс и паузы между письмами — одно
+ * решение о ритме кампании, поэтому и на экране это один шаг.
  */
 export function ScheduleStep({
   no,
@@ -252,9 +341,15 @@ export function ScheduleStep({
   hourFrom,
   hourTo,
   weekdays,
+  timezone,
+  gapSeconds,
+  gapJitterSeconds,
   onHourFrom,
   onHourTo,
   onWeekdays,
+  onTimezone,
+  onGapSeconds,
+  onGapJitterSeconds,
   disabled = false,
 }: ScheduleProps) {
   const toggleWeekday = (id: number) => {
@@ -270,7 +365,7 @@ export function ScheduleStep({
       no={no}
       title="Когда отправлять"
       done={done}
-      hint={`${hourFrom}:00–${hourTo}:00 · ${weekdaysLabel(weekdays)} · Москва`}
+      hint={`${hourFrom}:00–${hourTo}:00 · ${weekdaysLabel(weekdays)} · ${timezoneLabel(timezone)}`}
     >
       <div className="flex flex-wrap items-center gap-2 text-sm text-zinc-600">
         <span className="w-10 text-xs uppercase tracking-wide text-zinc-500">Часы</span>
@@ -295,6 +390,21 @@ export function ScheduleStep({
             className="w-12 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none"
           />
         </div>
+        {/* Пояс обязателен: окно считается в локальном времени кампании, и без
+            выбора всё навсегда остаётся московским — для ENG-рынка это мимо
+            рабочих часов получателя. */}
+        <span className="ml-2 text-xs uppercase tracking-wide text-zinc-500">Пояс</span>
+        <select
+          value={timezone}
+          disabled={disabled}
+          onChange={(e) => onTimezone(e.target.value)}
+          className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-sm font-medium text-zinc-900 focus:outline-none"
+        >
+          {/* Текущий пояс кампании может быть не в списке — показываем и его. */}
+          {[...new Set([timezone, ...TIMEZONES])].map((tz) => (
+            <option key={tz} value={tz}>{timezoneLabel(tz)}</option>
+          ))}
+        </select>
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -349,6 +459,36 @@ export function ScheduleStep({
             Снять все
           </button>
         </div>
+      </div>
+
+      {/* Пауза между письмами одного ящика: базовая + случайная добавка, чтобы
+          отправка не выглядела машинной пачкой. Задаётся при создании и правится
+          здесь же — раньше после создания её нельзя было увидеть вообще. */}
+      <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-zinc-600">
+        <span className="w-10 text-xs uppercase tracking-wide text-zinc-500">Пауза</span>
+        <div className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-1.5">
+          <input
+            type="number"
+            min={0}
+            max={3600}
+            value={gapSeconds}
+            disabled={disabled}
+            onChange={(e) => onGapSeconds(Math.max(0, Math.round(Number(e.target.value) || 0)))}
+            className="w-14 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none"
+          />
+          <span className="text-xs text-zinc-400">±</span>
+          <input
+            type="number"
+            min={0}
+            max={3600}
+            value={gapJitterSeconds}
+            disabled={disabled}
+            onChange={(e) => onGapJitterSeconds(Math.max(0, Math.round(Number(e.target.value) || 0)))}
+            className="w-14 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none"
+          />
+          <span className="text-xs text-zinc-400">сек</span>
+        </div>
+        <span className="text-xs text-zinc-500">между письмами одного ящика (случайная добавка — «±»)</span>
       </div>
 
       {/* Кампания без дней не поедет вовсе — это стоит увидеть до нажатия

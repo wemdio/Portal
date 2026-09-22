@@ -43,7 +43,9 @@ export async function GET(req: NextRequest) {
 
     if (campaignId) query = query.eq('campaign_id', campaignId);
     if (mailboxId) query = query.eq('mailbox_id', mailboxId);
-    if (onlyReplied) query = query.gt('reply_count', 0);
+    // «С ответами» = ответ живого человека. Счётчик ответов включает автоответы
+    // и прогрев — фильтр по нему показывал бы пустые диалоги как «с ответами».
+    if (onlyReplied) query = query.eq('has_human_reply', true);
     if (search) query = query.ilike('recipient_email', `%${search}%`);
 
     const { data, error, count } = await query;

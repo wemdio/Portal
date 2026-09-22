@@ -26,6 +26,27 @@ export interface MailboxDto {
   last_send_at: string | null;
   /** Тег ящика, он же категория. Один ящик — один тег. */
   tag: MailboxTagRef | null;
+  /** Последняя проверочная отправка: не переписывает ли провайдер заголовки. */
+  probe: MailboxProbeDto | null;
+}
+
+/** Сводка пробы в строке ящика; полный разбор — GET /probe. */
+export interface MailboxProbeDto {
+  status: 'pending' | 'sent' | 'done' | 'failed';
+  passed: boolean | null;
+  error: string | null;
+  at: string;
+}
+
+/** Полный результат пробы: построчное сравнение заголовков. */
+export interface ProbeResultDto {
+  id: string;
+  status: 'pending' | 'sent' | 'done' | 'failed';
+  passed: boolean | null;
+  error: string | null;
+  sent_at: string | null;
+  received_at: string | null;
+  result: { check: string; expected: string | null; actual: string | null; ok: boolean; note: string | null }[];
 }
 
 /** Тег в строке ящика: только то, что нужно нарисовать чип. */
@@ -50,7 +71,20 @@ export interface CampaignDto {
   send_hour_to: number;
   send_weekdays: number[];
   created_at: string;
-  stats: { recipients: number; replied: number; sent: number; scheduled: number; failed: number } | null;
+  stats: CampaignStatsDto | null;
+}
+
+export interface CampaignStatsDto {
+  recipients: number;
+  replied: number;
+  bounced: number;
+  /** Кому реально ушло хотя бы одно письмо — знаменатель reply rate. */
+  reached: number;
+  replyRate: number | null;
+  bounceRate: number | null;
+  sent: number;
+  scheduled: number;
+  failed: number;
 }
 
 export interface ImportMailboxesResult {
@@ -58,6 +92,10 @@ export interface ImportMailboxesResult {
   /** Провайдер → сколько ящиков портал к нему отнёс. Ключи — значения колонки provider. */
   detected: Record<string, number>;
   errors: { line: number | null; email: string | null; message: string }[];
+  /** Сколько строк с данными было в файле до обреза лимитом. */
+  fileRows?: number;
+  /** Сколько строк реально прочитано, если файл обрезан лимитом. */
+  truncated?: number | null;
 }
 
 /** Строка представления sender_threads: одна переписка с получателем. */
@@ -97,6 +135,10 @@ export interface ImportRecipientsResult {
   skippedInvalid: number;
   skippedDuplicates: number;
   skippedSuppressed: number;
+  /** Сколько строк с данными было в файле до обреза лимитом. */
+  fileRows?: number;
+  /** Сколько строк реально прочитано, если файл обрезан лимитом. */
+  truncated?: number | null;
 }
 
 /** Кампания целиком — то, с чем открывается форма редактирования. */
@@ -105,11 +147,14 @@ export interface CampaignDetailsDto {
     id: string;
     name: string;
     status: CampaignDto['status'];
+    timezone: string;
     send_hour_from: number;
     send_hour_to: number;
     send_weekdays: number[];
+    gap_seconds: number;
+    gap_jitter_seconds: number;
   };
-  steps: { step_no: number; delay_days: number; subject: string; body: string }[];
+  steps: { step_no: number; delay_hours: number; subject: string; body: string }[];
   mailboxes: { id: string; email: string }[];
   recipients: {
     total: number;
@@ -122,7 +167,8 @@ export interface CampaignDetailsDto {
 }
 
 export interface StepInput {
-  delayDays: number;
+  /** Задержка от предыдущего шага в часах; у первого письма игнорируется. */
+  delayHours: number;
   subject: string;
   body: string;
 }
@@ -219,6 +265,16 @@ export function deleteMailbox(id: string) {
   return authFetchJson<{ ok: true }>(`${BASE}/mailboxes/${id}`, { method: 'DELETE' });
 }
 
+/** Завести проверочную отправку с ящика на контрольный адрес. */
+export function startMailboxProbe(id: string) {
+  return authFetchJson<{ ok: true }>(`${BASE}/mailboxes/${id}/probe`, { method: 'POST' });
+}
+
+/** Последняя проверочная отправка ящика с полным разбором заголовков. */
+export function fetchMailboxProbe(id: string) {
+  return authFetchJson<{ probe: ProbeResultDto | null }>(`${BASE}/mailboxes/${id}/probe`);
+}
+
 export type BulkMailboxAction = 'recheck' | 'enable' | 'disable' | 'delete' | 'tag';
 
 /**
@@ -241,10 +297,14 @@ export function createCampaign(body: {
   name: string;
   mailboxIds: string[];
   steps: StepInput[];
+  timezone: string;
   sendHourFrom: number;
   sendHourTo: number;
   /** Дни недели, когда кампании разрешено отправлять: 1 = понедельник … 7 = воскресенье. */
   sendWeekdays: number[];
+  /** Пауза между письмами одного ящика: базовая и случайная добавка, секунды. */
+  gapSeconds: number;
+  gapJitterSeconds: number;
 }) {
   return authFetchJson<{ id: string }>(`${BASE}/campaigns`, {
     method: 'POST',
@@ -314,9 +374,12 @@ export function updateCampaign(
     name: string;
     mailboxIds: string[];
     steps: StepInput[];
+    timezone: string;
     sendHourFrom: number;
     sendHourTo: number;
     sendWeekdays: number[];
+    gapSeconds: number;
+    gapJitterSeconds: number;
   },
 ) {
   return authFetchJson<{ ok: true; unstuck: number }>(`${BASE}/campaigns/${id}`, {
@@ -334,6 +397,10 @@ export function patchCampaign(id: string, action: 'start' | 'pause' | 'finish') 
   });
 }
 
+export function deleteCampaign(id: string) {
+  return authFetchJson<{ ok: true }>(`${BASE}/campaigns/${id}`, { method: 'DELETE' });
+}
+
 /** Что нашлось в базе получателей — ответ /recipients/preview. */
 export interface RecipientVariableDto {
   key: string;
@@ -349,6 +416,10 @@ export interface RecipientColumnsDto {
   invalid: number;
   duplicates: number;
   variables: RecipientVariableDto[];
+  /** Сколько строк с данными было в файле до обреза лимитом. */
+  fileRows?: number;
+  /** Сколько строк реально прочитано, если файл обрезан лимитом. */
+  truncated?: number | null;
 }
 
 export function previewRecipients(file: File) {

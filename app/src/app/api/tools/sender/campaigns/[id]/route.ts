@@ -7,7 +7,8 @@ import { withToolTrace } from '@/lib/toolTrace';
 export const dynamic = 'force-dynamic';
 
 interface StepInput {
-  delayDays?: number;
+  /** Задержка от предыдущего шага в часах; у первого письма игнорируется. */
+  delayHours?: number;
   subject?: string;
   body?: string;
 }
@@ -18,9 +19,12 @@ interface PatchBody {
   name?: string;
   mailboxIds?: string[];
   steps?: StepInput[];
+  timezone?: string;
   sendHourFrom?: number;
   sendHourTo?: number;
   sendWeekdays?: number[];
+  gapSeconds?: number;
+  gapJitterSeconds?: number;
 }
 
 const MAX_STEPS = 5;
@@ -126,9 +130,12 @@ async function updateSettings(id: string, body: PatchBody) {
     .from('sender_campaigns')
     .update({
       name,
+      timezone: body.timezone?.trim() || 'Europe/Moscow',
       send_hour_from: body.sendHourFrom ?? 9,
       send_hour_to: body.sendHourTo ?? 18,
       send_weekdays: body.sendWeekdays?.length ? body.sendWeekdays : [1, 2, 3, 4, 5],
+      gap_seconds: Math.max(0, Math.round(body.gapSeconds ?? 180)),
+      gap_jitter_seconds: Math.max(0, Math.round(body.gapJitterSeconds ?? 120)),
       updated_at: nowIso,
     })
     .eq('id', id);
@@ -147,7 +154,7 @@ async function updateSettings(id: string, body: PatchBody) {
     steps.map((step, index) => ({
       campaign_id: id,
       step_no: index + 1,
-      delay_days: index === 0 ? 0 : Math.max(1, Math.floor(step.delayDays ?? 3)),
+      delay_hours: index === 0 ? 0 : Math.max(1, Math.round(step.delayHours ?? 72)),
       subject: (step.subject ?? '').trim(),
       body: (step.body ?? '').trim(),
     })),
@@ -247,5 +254,33 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     }
 
     return NextResponse.json({ ok: true, status });
+  });
+}
+
+/**
+ * DELETE — убрать кампанию. Идущую удалить нельзя: письма физически уходят,
+ * и исчезновение кампании вместе с очередью скрыло бы факт отправки. Пауза
+ * или завершение — сначала, удаление — потом.
+ */
+export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  return withToolTrace({ request: req, operation: 'tools.sender.campaigns.delete' }, async () => {
+    const auth = await authenticateRequest(req.headers.get('authorization'));
+    if ('error' in auth) return auth.error;
+    if (!supabaseAdmin) return jsonError('Сервис не настроен', 503);
+
+    const { id } = await params;
+    const { data: campaign } = await supabaseAdmin
+      .from('sender_campaigns')
+      .select('id, status')
+      .eq('id', id)
+      .maybeSingle();
+    if (!campaign) return jsonError('Кампания не найдена', 404);
+    if (String(campaign.status) === 'running') {
+      return jsonError('Идущую кампанию удалить нельзя — сначала поставьте на паузу или завершите', 409);
+    }
+
+    const { error } = await supabaseAdmin.from('sender_campaigns').delete().eq('id', id);
+    if (error) return jsonError(error.message, 500);
+    return NextResponse.json({ ok: true });
   });
 }

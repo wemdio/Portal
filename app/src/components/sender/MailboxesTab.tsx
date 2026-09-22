@@ -6,18 +6,22 @@ import {
   bulkMailboxes,
   deleteMailbox,
   fetchMailboxes,
+  fetchMailboxProbe,
   fetchMailboxTags,
   googleWorkspaceStatus,
   syncGoogleWorkspace,
   importMailboxes,
   patchMailbox,
+  startMailboxProbe,
   type BulkMailboxAction,
   type ImportMailboxesResult,
   type MailboxDto,
   type MailboxTagDto,
+  type ProbeResultDto,
 } from './api';
 import { GOOGLE_STATE_LABELS, MAILBOX_STATUS_LABELS, providerLabel } from './labels';
 import { TagAssignMenu, TagChip, TagFilterMenu } from './MailboxTags';
+import { SenderModal } from './SenderModal';
 
 const PAGE_SIZE = 30;
 const EMPTY_SELECTION: ReadonlySet<string> = new Set();
@@ -180,6 +184,37 @@ export function MailboxesTab() {
     await load(page);
   };
 
+  // Проверочная отправка: письмо с ящика на контрольный адрес и разбор
+  // заголовков доставленного. Отправляет воркер на sender-хосте, здесь только
+  // заводим пробу и показываем результат, когда он готов.
+  const [probeBusy, setProbeBusy] = useState<string | null>(null);
+  const [probeDetail, setProbeDetail] = useState<ProbeResultDto | null>(null);
+
+  const runProbe = async (mailbox: MailboxDto) => {
+    setProbeBusy(mailbox.id);
+    setError(null);
+    setNotice(null);
+    try {
+      await startMailboxProbe(mailbox.id);
+      setNotice(`Проверочное письмо с ${mailbox.email} отправляется — результат появится в строке ящика через пару минут.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось запустить проверку');
+    } finally {
+      setProbeBusy(null);
+    }
+  };
+
+  const openProbeDetail = async (mailbox: MailboxDto) => {
+    setError(null);
+    try {
+      const { probe } = await fetchMailboxProbe(mailbox.id);
+      if (probe) setProbeDetail(probe);
+      else setNotice('Проверок отправки с этого ящика ещё не было.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить результат проверки');
+    }
+  };
+
   const remove = async (mailbox: MailboxDto) => {
     if (!window.confirm(`Убрать ящик ${mailbox.email} из инструмента?`)) return;
     await deleteMailbox(mailbox.id);
@@ -333,6 +368,11 @@ export function MailboxesTab() {
         {result ? (
           <div className="mt-4 rounded-lg bg-zinc-50 p-3 text-sm">
             <p className="text-zinc-900">Подключено ящиков: {result.imported}</p>
+            {result.truncated != null && result.fileRows != null ? (
+              <p className="mt-0.5 text-amber-600">
+                В файле {result.fileRows} строк, прочитано {result.truncated} — дальше первых 20 000 портал не берёт.
+              </p>
+            ) : null}
             {/* Провайдера выбрал портал, а не человек — значит, его решение
                 должно быть видно сразу, а не всплывать на проверке входа. */}
             {Object.keys(result.detected ?? {}).length ? (
@@ -527,6 +567,40 @@ export function MailboxesTab() {
                         {mailbox.last_error ? (
                           <div className="mt-0.5 text-xs text-amber-600">{mailbox.last_error}</div>
                         ) : null}
+                        {/* Имя отправителя в письмах («Иван <box@dom>»): правится
+                            прямо в строке, как лимит. */}
+                        <input
+                          type="text"
+                          defaultValue={mailbox.display_name ?? ''}
+                          placeholder="Имя отправителя"
+                          disabled={false}
+                          onBlur={(e) => {
+                            const next = e.target.value.trim();
+                            if (next !== (mailbox.display_name ?? '')) {
+                              void act(mailbox.id, { displayName: next });
+                            }
+                          }}
+                          className="mt-1 w-44 rounded-md border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-xs text-zinc-600"
+                        />
+                        {mailbox.probe ? (
+                          <button
+                            type="button"
+                            onClick={() => void openProbeDetail(mailbox)}
+                            className={`mt-1 block text-left text-xs ${
+                              mailbox.probe.status === 'done'
+                                ? mailbox.probe.passed ? 'text-emerald-600' : 'text-red-600'
+                                : 'text-amber-600'
+                            } underline-offset-2 hover:underline`}
+                          >
+                            {mailbox.probe.status === 'done'
+                              ? mailbox.probe.passed
+                                ? 'Проверка отправки: заголовки не тронуты'
+                                : 'Проверка отправки: провайдер переписывает заголовки'
+                              : mailbox.probe.status === 'failed'
+                                ? `Проверка отправки не прошла: ${mailbox.probe.error ?? 'без деталей'}`
+                                : 'Проверка отправки идёт…'}
+                          </button>
+                        ) : null}
                       </td>
                       <td className="px-3 py-2.5 text-zinc-600">
                         <div>{providerLabel(mailbox.provider)}</div>
@@ -608,9 +682,19 @@ export function MailboxesTab() {
                           <button
                             type="button"
                             onClick={() => void act(mailbox.id, { action: 'recheck' })}
+                            title="Проверить вход по SMTP/IMAP"
                             className="rounded-md px-2 py-1 text-xs text-blue-600 hover:bg-zinc-100"
                           >
                             Проверить
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void runProbe(mailbox)}
+                            disabled={probeBusy === mailbox.id}
+                            title="Отправить проверочное письмо на контрольный адрес и сравнить заголовки доставленного"
+                            className="rounded-md px-2 py-1 text-xs text-blue-600 hover:bg-zinc-100 disabled:opacity-50"
+                          >
+                            {probeBusy === mailbox.id ? '…' : 'Отправка'}
                           </button>
                           <button
                             type="button"
@@ -656,6 +740,63 @@ export function MailboxesTab() {
           </div>
         ) : null}
       </div>
+
+      {/* Разбор проверочной отправки: построчно, что отправили и что доставил
+          провайдер. Одно окно — для любого ящика, открытое из строки. */}
+      {probeDetail ? (
+        <SenderModal
+          title="Проверка отправки"
+          subtitle={
+            probeDetail.status === 'done'
+              ? probeDetail.passed
+                ? 'Заголовки доставленного письма совпадают с отправленными'
+                : 'Есть расхождения — провайдер меняет письмо при доставке'
+              : probeDetail.status === 'failed'
+                ? probeDetail.error ?? 'Проверка не прошла'
+                : 'Письмо отправлено, ждём доставки на контрольный адрес'
+          }
+          onClose={() => setProbeDetail(null)}
+          footer={
+            <button
+              type="button"
+              onClick={() => setProbeDetail(null)}
+              className="rounded-lg px-3 py-2 text-sm text-zinc-600 transition-colors hover:bg-zinc-100"
+            >
+              Закрыть
+            </button>
+          }
+        >
+          {probeDetail.status === 'done' && probeDetail.result?.length ? (
+            <table className="w-full text-sm">
+              <thead className="text-left text-xs uppercase text-zinc-500">
+                <tr className="border-b border-zinc-200">
+                  <th className="py-2 pr-3 font-medium">Проверка</th>
+                  <th className="py-2 pr-3 font-medium">Отправляли</th>
+                  <th className="py-2 pr-3 font-medium">Доставилось</th>
+                  <th className="py-2 font-medium">Итог</th>
+                </tr>
+              </thead>
+              <tbody>
+                {probeDetail.result.map((row, index) => (
+                  <tr key={`${row.check}-${index}`} className="border-b border-zinc-100 last:border-0">
+                    <td className="py-2 pr-3 font-medium text-zinc-900">{row.check}</td>
+                    <td className="py-2 pr-3 font-mono text-xs text-zinc-600">{row.expected ?? '—'}</td>
+                    <td className="py-2 pr-3 font-mono text-xs text-zinc-600">{row.actual ?? '—'}</td>
+                    <td className={`py-2 text-xs ${row.ok ? 'text-emerald-600' : 'text-red-600'}`}>
+                      {row.ok ? 'ок' : 'расхождение'}
+                      {row.note ? <div className="mt-0.5 font-sans text-zinc-500">{row.note}</div> : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p className="py-6 text-sm text-zinc-500">
+              {probeDetail.error ?? 'Результата пока нет — письмо ещё идёт до контрольного адреса.'}
+            </p>
+          )}
+        </SenderModal>
+      ) : null}
     </div>
   );
 }

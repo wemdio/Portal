@@ -3,7 +3,14 @@ import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { fetchNewReplies, type ReplyMailboxRow } from '@/lib/byoMailbox/imap';
 import { authForMailbox } from './mailboxAuth';
-import { classifyReply, extractBouncedRecipient } from './replyClassify';
+import {
+  bounceIsPermanent,
+  classifyReply,
+  extractBouncedRecipient,
+  extractBounceStatus,
+  isOwnMailboxReply,
+  isStopRequest,
+} from './replyClassify';
 import type { MailboxRow, ReplyKind } from './types';
 
 /**
@@ -83,6 +90,12 @@ async function applyReply(params: {
   kind: ReplyKind;
   recipientId: string | null;
   bouncedEmail: string | null;
+  /** Код из Status: отчёта о недоставке — по нему мягкий отбойник отличается от вечного. */
+  bounceStatus: string | null;
+  /** Текст ответа: в нём ищем просьбу больше не писать. */
+  replyBody: string | null;
+  replySubject: string | null;
+  replyFrom: string | null;
   campaignIds: string[];
   log: Log;
 }): Promise<void> {
@@ -91,6 +104,21 @@ async function applyReply(params: {
   const nowIso = new Date().toISOString();
 
   if (params.kind === 'human' && params.recipientId) {
+    // «Стоп»/«отпишитесь» — это отказ, а не диалог: обрываем цепочку и уносим
+    // адрес в глобальный стоп-лист, иначе следующая кампания напишет снова.
+    const stop = isStopRequest(params.replyBody, params.replySubject);
+    const stopEmail = params.replyFrom?.toLowerCase() ?? null;
+    if (stop && stopEmail) {
+      await db
+        .from('sender_suppressions')
+        .upsert({ email: stopEmail, reason: 'unsubscribe', note: 'попросил больше не писать' }, { onConflict: 'email' });
+      await db
+        .from('sender_recipients')
+        .update({ status: 'unsubscribed', next_step_at: null, updated_at: nowIso })
+        .eq('id', params.recipientId);
+      await cancelPendingMessages(params.recipientId);
+      return;
+    }
     await db
       .from('sender_recipients')
       .update({ status: 'replied', replied_at: nowIso, next_step_at: null, updated_at: nowIso })
@@ -100,11 +128,20 @@ async function applyReply(params: {
   }
 
   if (params.kind === 'bounce') {
+    // Мягкий отбойник (ящик переполнен, greylisting, временная недоступность)
+    // не выжигает адрес: suppress и 'bounced' — только за «адреса нет» (5.1.x).
+    if (!bounceIsPermanent(params.bounceStatus)) {
+      params.log('info', `Мягкий отбойник (${params.bounceStatus ?? 'без кода'}) для ${params.bouncedEmail ?? 'неизвестного'} — адрес не подавляем`);
+      return;
+    }
     const email = params.bouncedEmail;
     if (email) {
       await db
         .from('sender_suppressions')
-        .upsert({ email, reason: 'hard_bounce', note: 'отбойник из входящего письма' }, { onConflict: 'email' });
+        .upsert(
+          { email, reason: 'hard_bounce', note: `отбойник из входящего письма${params.bounceStatus ? ` (${params.bounceStatus})` : ''}` },
+          { onConflict: 'email' },
+        );
     }
     const recipientId = params.recipientId ?? (await findRecipientByEmail(email, params.campaignIds));
     if (recipientId) {
@@ -164,6 +201,12 @@ export async function processSenderReplies(opts?: { log?: Log }): Promise<boolea
   const mailboxes = (mailboxRows ?? []) as MailboxRow[];
   if (!mailboxes.length) return false;
 
+  // Прогревочная переписка ходит между нашими же ящиками: такие входящие
+  // помечаются 'warmup' и не считаются ответами, иначе reply rate захлёбывается
+  // шумом (на старте прода было 453 «ответа» при 7 отправленных письмах).
+  const { data: ownRows } = await db.from('sender_mailboxes').select('email');
+  const ownEmails = new Set((ownRows ?? []).map((row) => String(row.email).toLowerCase()));
+
   let found = false;
 
   for (const mailbox of mailboxes) {
@@ -191,17 +234,23 @@ export async function processSenderReplies(opts?: { log?: Log }): Promise<boolea
         const campaignIds = await campaignIdsOfMailbox(mailbox.id);
 
         for (const reply of result.replies) {
-          const kind = classifyReply({
+          let kind = classifyReply({
             fromEmail: reply.fromEmail,
             subject: reply.subject,
             body: reply.body,
           });
+          if (kind !== 'bounce' && isOwnMailboxReply(reply.fromEmail, ownEmails)) {
+            kind = 'warmup';
+          }
           const bouncedEmail = kind === 'bounce' ? extractBouncedRecipient(reply.body, mailbox.email) : null;
+          const bounceStatus = kind === 'bounce' ? extractBounceStatus(reply.body) : null;
           const recipientId =
-            (await findRecipientByThread(reply.inReplyTo)) ??
-            (kind === 'bounce'
-              ? await findRecipientByEmail(bouncedEmail, campaignIds)
-              : await findRecipientByEmail(reply.fromEmail, campaignIds));
+            kind === 'warmup'
+              ? null
+              : (await findRecipientByThread(reply.inReplyTo)) ??
+              (kind === 'bounce'
+                ? await findRecipientByEmail(bouncedEmail, campaignIds)
+                : await findRecipientByEmail(reply.fromEmail, campaignIds));
 
           await db.from('sender_replies').upsert(
             {
@@ -220,7 +269,19 @@ export async function processSenderReplies(opts?: { log?: Log }): Promise<boolea
             { onConflict: 'mailbox_id,uid', ignoreDuplicates: true },
           );
 
-          await applyReply({ kind, recipientId, bouncedEmail, campaignIds, log });
+          if (kind !== 'warmup') {
+            await applyReply({
+              kind,
+              recipientId,
+              bouncedEmail,
+              bounceStatus,
+              replyBody: reply.body,
+              replySubject: reply.subject,
+              replyFrom: reply.fromEmail,
+              campaignIds,
+              log,
+            });
+          }
         }
 
         found = true;

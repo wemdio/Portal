@@ -129,7 +129,11 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
   const now = new Date();
   const slots: MailboxSlot[] = [];
   for (const mailbox of mailboxes) {
-    slots.push({ mailbox, remaining: await remainingQuota(mailbox), cursor: new Date(now) });
+    // Курсоры всех ящиков не должны стартовать с одной секунды: иначе тысяча
+    // ящиков ставит первое письмо в один момент (всплеск в начале окна, потом
+    // простой). Случайный сдвиг до 45 минут размазывает старт по окну.
+    const startOffsetMs = Math.floor(Math.random() * 45 * 60 * 1000);
+    slots.push({ mailbox, remaining: await remainingQuota(mailbox), cursor: new Date(now.getTime() + startOffsetMs) });
   }
 
   let planned = 0;
