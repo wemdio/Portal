@@ -45,6 +45,23 @@ const EXCLUSION_LABELS: Record<string, string> = {
   no_outbound_mandate: 'нет outbound-мандата',
 };
 
+/**
+ * Причины, по которым строка ушла на ручную проверку.
+ *
+ * Показывались машинным кодом («no_corporate_email»): оператору он ничего не
+ * объясняет, а гадать по подчёркиваниям — не его работа.
+ */
+const REVIEW_LABELS: Record<string, string> = {
+  no_corporate_email: 'не нашли корпоративную почту',
+  generic_company: 'слишком общее описание компании',
+  low_geo_confidence: 'гео продаж подтверждено слабо',
+  letters_guard_failed: 'письма не прошли проверку правил',
+};
+
+function reviewLabel(reason: string): string {
+  return REVIEW_LABELS[reason] ?? reason;
+}
+
 const CONFIDENCE_STYLES: Record<string, string> = {
   high: 'border-emerald-200 bg-emerald-50 text-emerald-800',
   medium: 'border-amber-200 bg-amber-50 text-amber-800',
@@ -337,8 +354,8 @@ export function PolzaOutreachResults({
                             </div>
                           ) : null}
                           {row.review_reason ? (
-                            <div className="mt-0.5 max-w-[140px] truncate text-[11px] text-gray-400" title={row.review_reason}>
-                              {row.review_reason}
+                            <div className="mt-0.5 max-w-[140px] truncate text-[11px] text-gray-400" title={reviewLabel(row.review_reason)}>
+                              {reviewLabel(row.review_reason)}
                             </div>
                           ) : null}
                         </td>
@@ -354,7 +371,7 @@ export function PolzaOutreachResults({
                                 <EvidenceBlock row={row} />
                                 {row.review_reason ? (
                                   <div className="rounded-lg border border-amber-100 bg-amber-50 p-3 text-sm text-amber-900">
-                                    На ручную проверку: {row.review_reason}
+                                    На ручную проверку: {reviewLabel(row.review_reason)}
                                   </div>
                                 ) : null}
                               </div>

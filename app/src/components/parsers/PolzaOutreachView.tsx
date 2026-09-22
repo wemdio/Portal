@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { X } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch } from '@/lib/authFetch';
 import type { PolzaOutreachCompanyRow, PolzaOutreachConfig, PolzaOutreachFunnel, PolzaOutreachParserJob } from '@/types';
@@ -140,6 +141,14 @@ export function PolzaOutreachView() {
   const [deleteCandidate, setDeleteCandidate] = useState<string | null>(null);
 
   const activeJob = useMemo(() => jobs.find((job) => job.id === activeJobId) ?? null, [activeJobId, jobs]);
+
+  // Полосу ошибки читают один раз, а места она занимала до перезагрузки
+  // страницы — и следующая ошибка падала поверх прежней.
+  useEffect(() => {
+    if (!error) return undefined;
+    const timer = window.setTimeout(() => setError(null), 15_000);
+    return () => window.clearTimeout(timer);
+  }, [error]);
   const totalPages = Math.max(1, Math.ceil(resultsCount / RESULTS_LIMIT));
 
   const refreshJobs = useCallback(async () => {
@@ -363,7 +372,22 @@ export function PolzaOutreachView() {
 
   return (
     <div className="space-y-6">
-      {error ? <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div> : null}
+      {/* Полоса ошибки висела до перезагрузки страницы: прочитали один раз, а
+          место она занимала всегда — и поверх неё падала следующая. Теперь
+          уходит сама через 15 секунд, и её можно закрыть раньше. */}
+      {error ? (
+        <div className="flex items-start justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <span className="min-w-0 break-words">{error}</span>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            aria-label="Закрыть"
+            className="shrink-0 rounded p-0.5 text-red-400 transition hover:text-red-700"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      ) : null}
       {toast ? (
         <div
           className={`fixed bottom-4 right-4 z-50 max-w-[92vw] rounded-xl border px-4 py-3 text-sm shadow-lg ${
