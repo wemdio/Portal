@@ -45,6 +45,10 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
 
   try {
     const accountId = getResourceInstantlyAccountId(campaignId, accessRows, 'campaign');
+    // Одно чтение одной кампании на действие человека (вкладка «Ответы»,
+    // поиск, «ещё») — людская доля бюджета чтения (requestPriority ниже), а не
+    // фоновая: иначе при насыщенном фоне вкладка ловила бы
+    // «email read deferred: budget».
     const data = await listEmails({
       campaign_id: campaignId,
       // Instantly v2 фильтрует по `email_type`, а не `ue_type` (ue_type —
@@ -55,7 +59,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
       limit,
       starting_after: startingAfter,
       search,
-    }, { accountId, consumer: 'client_campaign_feed' });
+    }, { accountId, consumer: 'client_campaign_feed', requestPriority: 'interactive' });
 
     // Кросс-клиентская гигиена: Instantly клеит входящее к кампании по адресу
     // отправителя, не проверяя получателя — письма, пришедшие на ящик ДРУГОГО

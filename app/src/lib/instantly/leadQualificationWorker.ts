@@ -19,6 +19,7 @@ import * as instantly from './client';
 import { isFreeProvider } from '@/lib/emailValidation/shared';
 import { recipientMailboxIdentities } from '@/lib/clientCampaignReplies/participants';
 import { buildHandoffDraft } from './handoffLegend';
+import { leadBoardRequestText } from './leadBoardRequestText';
 import { signHandoffCallback } from './handoffCallback';
 import {
   getOrCreateBoard,
@@ -41,6 +42,7 @@ import {
 import type { Email, Lead } from './types';
 import { resolveLeadContactMetadata } from './leadContactMetadata';
 import { loadCachedLeadContacts } from './cachedLeadContacts';
+import { senderDisplayLeadName } from './leadReplyContacts';
 import { resolveEffectiveReplyOwner } from './replyOwnershipResolver';
 import { resolveInstantlyAccountId } from './accounts';
 import { randomUUID } from 'node:crypto';
@@ -1085,24 +1087,74 @@ export async function pollAndQualifyReplies(): Promise<number> {
 
 /** Discovery must not wait for AI, ownership recovery, or notification delivery.
  * A provider page is committed to the inbox before its cursor can move. */
-export async function discoverQualificationReplies(): Promise<number> {
-  if (!supabaseAdmin) throw new Error('Instantly reply intake database is not configured');
-  const campaigns = await getCampaignsByAccountCached();
-  const maxPages = Math.max(1, Math.min(20, Math.floor(envNumber('INSTANTLY_LEADS_EMAIL_PAGES', 5))));
+export interface DiscoveryCycleResult {
+  staged: number;
+  /**
+   * Хотя бы один аккаунт не прочитан из-за бюджета чтения писем (или его
+   * хранилища): цикл «не смог посмотреть», а не «посмотрел — пусто». Такой
+   * цикл не должен разгонять интервал простоя — см. discoveryCycleIsIdle.
+   */
+  deferred: boolean;
+}
+
+/**
+ * Обход аккаунтов одного цикла discovery. Ошибка одного аккаунта не мешает
+ * остальным (курсор упавшего сохраняется, fail-open нет). Чтение аккаунта
+ * передаётся параметром, чтобы обход можно было проверить без БД.
+ */
+export async function runDiscoveryAcrossAccounts(
+  campaigns: Map<string, Set<string>>,
+  discoverAccount: (accountId: string, campaignIds: Set<string>) => Promise<{ staged: number; pages: number; sweepComplete: boolean }>,
+): Promise<DiscoveryCycleResult> {
   let staged = 0;
+  let deferred = false;
   for (const [accountId, campaignIds] of campaigns) {
     if (!campaignIds.size) continue;
     try {
-      const result = await discoverReplyIntake(supabaseAdmin, { accountId, campaignIds, maxPages });
+      const result = await discoverAccount(accountId, campaignIds);
       staged += result.staged;
       if (result.pages) workerLog('info', `reply intake ${accountId}: pages=${result.pages}, staged=${result.staged}, sweepComplete=${result.sweepComplete}`);
     } catch (error) {
       // One inaccessible workspace must not prevent discovery in the others.
       // The failed account retains its cursor; there is no legacy fail-open.
+      if (readInstantlyEmailReadDeferral(error)) deferred = true;
       workerLog('error', `Durable reply discovery failed for ${accountId}`, error);
     }
   }
-  return staged;
+  return { staged, deferred };
+}
+
+/**
+ * Считать ли цикл discovery простоем (разгонять интервал до 15 минут).
+ *
+ * Простой — только когда мы реально посмотрели и нашли пусто. Отказ бюджета
+ * чтения простоем не является: запрос к Instantly даже не ушёл. Раньше такой
+ * цикл засчитывался как «новых ответов нет», и после нескольких отказов подряд
+ * воркер засыпал на 10–15 минут (прод 22.09: отказ в 19:33 → сон 600 с → 900 с).
+ * Если вебхук об ответе потерялся, это и есть время, на которое опаздывал
+ * запасной опрос.
+ */
+export function discoveryCycleIsIdle(cycle: {
+  staged: number;
+  errored: boolean;
+  deferred: boolean;
+  replyActivity: boolean;
+}): boolean {
+  return cycle.staged === 0 && !cycle.errored && !cycle.deferred && !cycle.replyActivity;
+}
+
+/** Один цикл discovery по всем аккаунтам — с признаком отказа бюджета. */
+export async function discoverQualificationRepliesCycle(): Promise<DiscoveryCycleResult> {
+  if (!supabaseAdmin) throw new Error('Instantly reply intake database is not configured');
+  const db = supabaseAdmin;
+  const campaigns = await getCampaignsByAccountCached();
+  const maxPages = Math.max(1, Math.min(20, Math.floor(envNumber('INSTANTLY_LEADS_EMAIL_PAGES', 5))));
+  return runDiscoveryAcrossAccounts(campaigns, (accountId, campaignIds) =>
+    discoverReplyIntake(db, { accountId, campaignIds, maxPages }));
+}
+
+export async function discoverQualificationReplies(): Promise<number> {
+  return (await discoverQualificationRepliesCycle()).staged;
 }
 
 let intakeDrainRunning = false;
@@ -1966,14 +2018,13 @@ export async function qualifyOneReply(
       // Шаг — тот же счёт, что ИИ видит в промпте («шаг N кампании»): наши
       // исходящие (ue_type=1) в треде. Заголовок письма — последний фолбэк
       // имени, если ни в базе, ни в собственной подписи его не нашли.
-      const stepNumber = result.threadContext
-        ? result.threadContext.threadEmails.filter((e) => (e.ue_type ?? 1) === 1).length
-        : null;
+      const outboundCount = result.threadContext?.threadEmails.filter((e) => (e.ue_type ?? 1) === 1).length ?? 0;
+      const stepNumber = outboundCount > 0 ? outboundCount : null;
       let fromName: string | null = null;
       const fromArr = effectiveReply.from_address_json;
       if (Array.isArray(fromArr) && fromArr.length > 0) {
         const n = fromArr[0]?.name;
-        if (typeof n === 'string' && n.trim().length > 0) fromName = n.trim();
+        fromName = senderDisplayLeadName(n);
       }
       await upsertBoardRow(db, {
         qualificationId: inserted.id,
@@ -1985,7 +2036,7 @@ export async function qualifyOneReply(
         companyName: companyName ?? null,
         phone: leadPhone ?? null,
         website: leadWebsite ?? null,
-        requestText: replyText || null,
+        requestText: leadBoardRequestText((result.threadContext?.replyEmail ?? effectiveReply).body),
         stepNumber,
         replyTimestamp: effectiveReply.timestamp_email ?? null,
       });

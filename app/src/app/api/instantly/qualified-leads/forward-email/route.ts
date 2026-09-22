@@ -77,7 +77,7 @@ export const POST = withAuth(async (req, user) => {
       const threadEmails = await instantly.listEmails({
         campaign_id: qual.campaign_id as string,
         limit: 50,
-      }, { consumer: 'qualified_leads_forward' });
+      }, { consumer: 'qualified_leads_forward', requestPriority: 'interactive' });
       const outbound = (threadEmails.items ?? []).find(
         (e) => e.thread_id === emailData.thread_id && ((e.ue_type ?? 1) === 1 || (e.ue_type ?? 1) === 3) && e.eaccount,
       );

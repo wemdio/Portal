@@ -26,7 +26,7 @@ export interface InstantlyRequestOptions {
    * 'bulk' — background exports/reports (own 6/60s share, never starves
    * fresh reply collection). All lanes share the common 18/60s cap.
    */
-  requestPriority?: 'fresh' | 'recovery' | 'bulk';
+  requestPriority?: 'fresh' | 'recovery' | 'bulk' | 'interactive';
   /**
    * Logical consumer label for hourly usage counters (instantly_api_usage_hourly):
    * discovery, qualification, ownership, others, client_feed, export, …

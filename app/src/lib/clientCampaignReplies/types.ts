@@ -69,5 +69,13 @@ export interface ClientReplyThread {
    * Lets the composer SHOW exactly who stays in copy before sending.
    */
   reply_all_cc?: Recipient[];
+  /**
+   * История переписки не загружена: общий бюджет чтения LIST /emails занят
+   * (его делят кабинет и воркер квалификации ответов). В `messages` тогда
+   * только само запрошенное письмо — оно читается отдельным запросом по id,
+   * бюджет его не держит. Кабинет показывает письмо сразу и сам повторяет
+   * запрос через `retry_after_ms`. Нет поля — переписка полная.
+   */
+  history_deferred?: { retry_after_ms: number } | null;
 }
 

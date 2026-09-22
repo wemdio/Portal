@@ -202,3 +202,88 @@ describe('emailScraper proxy retry on bot protection', () => {
     }
   });
 });
+
+describe('emailScraper proxy retry falls back to another subnet', () => {
+  const originalFetch = global.fetch;
+  const originalPriority = process.env.YANDEXMAPS_PROXY_URLS_PRIORITY;
+  const originalYandex = process.env.YANDEXMAPS_PROXY_URLS;
+  const RU = 'http://u:p@ru-node.invalid:8000';
+  const EU = 'http://u:p@eu-node.invalid:8000';
+
+  // ProxyAgent хранит адрес прокси под символом kProxy = { uri, protocol }.
+  const proxyHostOf = (init?: RequestInit): string | null => {
+    const d = (init as { dispatcher?: Record<symbol, unknown> } | undefined)?.dispatcher;
+    if (!d || d.constructor?.name !== 'ProxyAgent') return null;
+    for (const sym of Object.getOwnPropertySymbols(d)) {
+      const v = d[sym] as { uri?: string } | undefined;
+      if (v && typeof v === 'object' && typeof v.uri === 'string') return new URL(v.uri).hostname;
+    }
+    return null;
+  };
+
+  beforeEach(() => {
+    // Как на проде: YANDEXMAPS_PROXY_URLS содержит и RU-ноды тоже.
+    process.env.YANDEXMAPS_PROXY_URLS_PRIORITY = JSON.stringify([RU]);
+    process.env.YANDEXMAPS_PROXY_URLS = JSON.stringify([RU, EU]);
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('@/lib/enrich/proxyPool').resetProxyGroupsCache();
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    if (originalPriority === undefined) delete process.env.YANDEXMAPS_PROXY_URLS_PRIORITY;
+    else process.env.YANDEXMAPS_PROXY_URLS_PRIORITY = originalPriority;
+    if (originalYandex === undefined) delete process.env.YANDEXMAPS_PROXY_URLS;
+    else process.env.YANDEXMAPS_PROXY_URLS = originalYandex;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    require('@/lib/enrich/proxyPool').resetProxyGroupsCache();
+  });
+
+  it('opens a site through another subnet when every RU node is refused (eksis.ru case)', async () => {
+    const hosts: Array<string | null> = [];
+    global.fetch = jest.fn(async (_url: unknown, init?: RequestInit) => {
+      const host = proxyHostOf(init);
+      hosts.push(host);
+      if (host === 'eu-node.invalid') {
+        return new Response('<html><body>sales@eksis.ru</body></html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        });
+      }
+      return new Response('nope', { status: 403 });
+    }) as unknown as typeof fetch;
+
+    const result = await scrapeEmails('https://eksis.ru', {
+      timeout: 1_000,
+      maxPages: 1,
+      stopAtFirstUsableEmail: true,
+    });
+
+    expect(result.emails).toEqual(['sales@eksis.ru']);
+    expect(result.failureReason).toBeNull();
+    // Порядок важен: сначала RU, потом другая подсеть.
+    const proxied = hosts.filter(Boolean);
+    expect(proxied).toEqual(['ru-node.invalid', 'eu-node.invalid']);
+  });
+
+  it('gives up after one RU and one other-subnet attempt, keeping the 403 reason', async () => {
+    const hosts: Array<string | null> = [];
+    global.fetch = jest.fn(async (_url: unknown, init?: RequestInit) => {
+      hosts.push(proxyHostOf(init));
+      return new Response('nope', { status: 403 });
+    }) as unknown as typeof fetch;
+
+    const result = await scrapeEmails('https://sepco.ru', { timeout: 500, maxPages: 1 });
+
+    expect(result.emails).toEqual([]);
+    expect(result.failureReason).toBe('Сайт блокирует автоматические запросы (403)');
+    expect(hosts.filter(Boolean)).toEqual(['ru-node.invalid', 'eu-node.invalid']);
+  });
+
+  it('never picks a priority node as the other-subnet fallback', () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const pool = require('@/lib/enrich/proxyPool');
+    const picks = Array.from({ length: 10 }, () => pool.pickNonPriorityProxyUrl());
+    expect(new Set(picks)).toEqual(new Set([EU]));
+  });
+});

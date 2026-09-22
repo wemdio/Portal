@@ -77,10 +77,29 @@ export function pickProxyUrl(preferPriority = true): string {
   return priority[_priorityRR];
 }
 
+let _otherRR = 0;
+
+/**
+ * Нода из «другого» пула: fallback без приоритетных адресов.
+ *
+ * pickProxyUrl(false) для этого не годится — YANDEXMAPS_PROXY_URLS содержит и
+ * RU-ноды тоже, так что «второй шанс» в 3 случаях из 8 снова попадал бы в RU.
+ * А смысл второго шанса как раз в другой подсети: замер 23.09.2026 (98 сайтов
+ * × 8 нод) показал, что сайты режут прокси блоками по подсетям провайдера.
+ * eksis.ru не пускает ни одну RU-ноду, но открывается через 154.19x; mikron.ru
+ * наоборот — только через RU.
+ */
+export function pickNonPriorityProxyUrl(): string {
+  const { priority, fallback } = getProxyGroups();
+  const others = fallback.filter((u) => !priority.includes(u));
+  if (others.length === 0) return '';
+  _otherRR = (_otherRR + 1) % others.length;
+  return others[_otherRR];
+}
+
 const _proxyDispatchers = new Map<string, Dispatcher>();
 
-export async function getProxyDispatcher(preferPriority = true): Promise<Dispatcher | undefined> {
-  const url = pickProxyUrl(preferPriority);
+async function dispatcherFor(url: string): Promise<Dispatcher | undefined> {
   if (!url) return undefined;
   const existing = _proxyDispatchers.get(url);
   if (existing) return existing;
@@ -92,6 +111,15 @@ export async function getProxyDispatcher(preferPriority = true): Promise<Dispatc
   } catch {
     return undefined;
   }
+}
+
+export async function getProxyDispatcher(preferPriority = true): Promise<Dispatcher | undefined> {
+  return dispatcherFor(pickProxyUrl(preferPriority));
+}
+
+/** Dispatcher через ноду НЕ из приоритетного пула (см. pickNonPriorityProxyUrl). */
+export async function getNonPriorityProxyDispatcher(): Promise<Dispatcher | undefined> {
+  return dispatcherFor(pickNonPriorityProxyUrl());
 }
 
 /**

@@ -21,7 +21,7 @@ export class DatasetEmailReadDeferredError extends Error {
  * standalone copy did not — so an ordinary lane refusal read as broken storage
  * and aborted the whole nightly sync (16.09.2026). Keep the two lists in sync.
  */
-const RESERVE_REFUSAL_REASONS = ['budget', 'recovery_budget', 'bulk_budget', 'cooldown'];
+const RESERVE_REFUSAL_REASONS = ['budget', 'recovery_budget', 'bulk_budget', 'interactive_budget', 'cooldown'];
 
 export function createDatasetEmailReadBudget(env, {
   fetchImpl = globalThis.fetch,
