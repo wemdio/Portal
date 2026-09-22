@@ -17,6 +17,8 @@ import { getClientTranslation } from '@/lib/clientI18n';
 const STRINGS = [
   // /client/campaigns/[id]: «Кампания отправила N писем, ответили X%.»
   'писем',
+  // …и в auto-режиме (Mailganer) — «, открыли X%» между ними
+  ', открыли',
   // /client: пустое состояние
   'Запустите первую — мы покажем здесь её метрики (отправки, ответы, лиды) в реальном времени.',
   // /client/reports: подсказка
@@ -33,12 +35,12 @@ describe('каталог переводов — строки без «откры
     expect(getClientTranslation(source, 'es')).toEqual(expect.any(String));
   });
 
-  it('узел текста с пробелами по краям тоже переводится (так его отдаёт DOM)', () => {
+  it('узел с пробелами по краям тоже переводится (края сохраняются)', () => {
     expect(getClientTranslation(' писем ', 'en')).toBe(' letters ');
   });
 
-  it('в переводах нет следов открытий', () => {
-    for (const source of STRINGS) {
+  it('в переводах нет следов открытий (кроме auto-режима, где открытия показываются)', () => {
+    for (const source of STRINGS.filter((s) => s !== ', открыли')) {
       expect(getClientTranslation(source, 'en')).not.toMatch(/open/i);
       expect(getClientTranslation(source, 'es')).not.toMatch(/apertur/i);
     }

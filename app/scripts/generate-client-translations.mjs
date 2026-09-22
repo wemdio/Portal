@@ -43,6 +43,7 @@ const MANUAL_OVERRIDES = {
     // заменили переведённые формулировки с «открытиями» — держим их здесь,
     // чтобы регенерация каталога не оставила их без перевода.
     'писем': 'letters',
+    ', открыли': ', opened',
     'Запустите первую — мы покажем здесь её метрики (отправки, ответы, лиды) в реальном времени.': 'Launch the first one - we will show here its metrics (sends, replies, leads) in real time.',
     'Показываем последнее письмо — остальная переписка догрузится через несколько секунд.': 'Showing the latest email — the rest of the conversation will load in a few seconds.',
     'Обновляем переписку — новые письма появятся через несколько секунд.': 'Updating the conversation — new emails will appear in a few seconds.',
@@ -165,6 +166,7 @@ const MANUAL_OVERRIDES = {
     'Путь компаний от скоринга до подтверждённой передачи контактов в кампании.': 'Desde la puntuación de empresas hasta la entrega confirmada de contactos a las campañas.',
     'Отправки, ответы и лиды смотрите в разделе': 'Consulta los envíos, respuestas y leads en',
     'писем': 'cartas',
+    ', открыли': ', abiertas',
     'Запустите первую — мы покажем здесь её метрики (отправки, ответы, лиды) в реальном времени.': 'Lanza el primero - mostraremos aquí sus métricas (envíos, respuestas, leads) en tiempo real.',
     'Показываем последнее письмо — остальная переписка догрузится через несколько секунд.': 'Mostramos el último correo: el resto de la conversación se cargará en unos segundos.',
     'Обновляем переписку — новые письма появятся через несколько секунд.': 'Actualizando la conversación: los correos nuevos aparecerán en unos segundos.',
