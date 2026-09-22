@@ -106,7 +106,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   }
 
   const workbook = new ExcelJS.Workbook();
-  const sheet = workbook.addWorksheet('Англ. аутрич');
+  const sheet = workbook.addWorksheet('Английский автоаутрич');
   sheet.columns = COLUMNS;
   sheet.getRow(1).font = { bold: true };
   // Шапка не уезжает при прокрутке: строк бывает под тысячу, и без закрепления
