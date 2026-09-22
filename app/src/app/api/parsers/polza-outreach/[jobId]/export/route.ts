@@ -47,6 +47,31 @@ const COLUMNS: { header: string; key: string; width: number }[] = [
   { header: 'Письмо 4 — текст', key: 'letter4_body', width: 60 },
 ];
 
+/**
+ * Колонки файла для отправки.
+ *
+ * Полный лист со статусами, причинами отсева и цитатами отвечает на вопрос
+ * «почему выход такой» — он остаётся для разбора. Здесь другой вопрос: кому
+ * и что отправлять. Список уходит в автоматическую рассылку, и лишние
+ * колонки там только мешают.
+ */
+const READY_COLUMNS: { header: string; key: string; width: number }[] = [
+  { header: 'Компания', key: 'company_name', width: 28 },
+  { header: 'Почта', key: 'selected_company_email', width: 30 },
+  { header: 'Домен', key: 'normalized_domain', width: 24 },
+  { header: 'Страна', key: 'job_country_code', width: 10 },
+  { header: 'Вакансия', key: 'job_title', width: 34 },
+  { header: 'Ссылка на вакансию', key: 'job_source_url', width: 38 },
+  { header: 'Письмо 1 — тема', key: 'letter1_subject', width: 34 },
+  { header: 'Письмо 1 — текст', key: 'letter1_body', width: 60 },
+  { header: 'Письмо 2 — тема', key: 'letter2_subject', width: 34 },
+  { header: 'Письмо 2 — текст', key: 'letter2_body', width: 60 },
+  { header: 'Письмо 3 — тема', key: 'letter3_subject', width: 34 },
+  { header: 'Письмо 3 — текст', key: 'letter3_body', width: 60 },
+  { header: 'Письмо 4 — тема', key: 'letter4_subject', width: 34 },
+  { header: 'Письмо 4 — текст', key: 'letter4_body', width: 60 },
+];
+
 const STATUS_RU: Record<string, string> = {
   discovered: 'найдена',
   normalized: 'домен найден',
@@ -116,9 +141,10 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     return jsonError(error.message, 500);
   }
 
+  const forSending = statusFilter === 'ready';
   const workbook = new ExcelJS.Workbook();
-  const sheet = workbook.addWorksheet('Английский автоаутрич');
-  sheet.columns = COLUMNS;
+  const sheet = workbook.addWorksheet(forSending ? 'Готовые к отправке' : 'Английский автоаутрич');
+  sheet.columns = forSending ? READY_COLUMNS : COLUMNS;
   sheet.getRow(1).font = { bold: true };
   // Шапка не уезжает при прокрутке: строк бывает под тысячу, и без закрепления
   // к двадцатой колонке уже не помнишь, что в ней.
@@ -147,7 +173,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   }
 
   const buffer = await workbook.xlsx.writeBuffer();
-  const filename = `polza_outreach_${jobId.slice(0, 8)}.xlsx`;
+  const filename = `polza_outreach${forSending ? '_ready' : ''}_${jobId.slice(0, 8)}.xlsx`;
 
   return new NextResponse(buffer as ArrayBuffer, {
     headers: {

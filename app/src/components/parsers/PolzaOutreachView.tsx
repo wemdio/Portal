@@ -24,6 +24,31 @@ type ResultsResponse = {
 const RESULTS_LIMIT = 50;
 const EXPORT_LIMIT = 1000;
 
+/**
+ * Файл для отправки: компания, куда писать и что писать.
+ *
+ * Полная выгрузка со статусами, причинами отсева и цитатами нужна, когда
+ * разбираешься, почему выход такой. Для рассылки это мусор: список уходит в
+ * автоматическую отправку, и каждая лишняя колонка — это лишняя развилка при
+ * импорте.
+ */
+const READY_EXPORT_HEADER = [
+  'company_name',
+  'email',
+  'domain',
+  'job_country',
+  'job_title',
+  'job_url',
+  'letter_1_subject',
+  'letter_1_body',
+  'letter_2_subject',
+  'letter_2_body',
+  'letter_3_subject',
+  'letter_3_body',
+  'letter_4_subject',
+  'letter_4_body',
+];
+
 const EXPORT_HEADER = [
   'company_name',
   'domain',
@@ -87,6 +112,27 @@ function downloadBlob(content: string, mime: string, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
+function readyExportRow(row: PolzaOutreachCompanyRow) {
+  const letters = row.letters ?? [];
+  const letter = (n: number, field: 'subject' | 'body') => letters.find((l) => l.n === n)?.[field] ?? '';
+  return [
+    row.company_name,
+    row.selected_company_email ?? '',
+    row.normalized_domain ?? '',
+    row.job_country_code ?? '',
+    row.job_title ?? '',
+    row.job_source_url ?? '',
+    letter(1, 'subject'),
+    letter(1, 'body'),
+    letter(2, 'subject'),
+    letter(2, 'body'),
+    letter(3, 'subject'),
+    letter(3, 'body'),
+    letter(4, 'subject'),
+    letter(4, 'body'),
+  ];
+}
+
 function exportRow(row: PolzaOutreachCompanyRow) {
   const letters = row.letters ?? [];
   const letter = (n: number, field: 'subject' | 'body') => letters.find((l) => l.n === n)?.[field] ?? '';
@@ -134,9 +180,11 @@ export function PolzaOutreachView() {
   const [funnel, setFunnel] = useState<PolzaOutreachFunnel | null>(null);
   const [exclusionCounts, setExclusionCounts] = useState<Record<string, number> | null>(null);
   const [resultsPage, setResultsPage] = useState(1);
-  // «Только готовые» — режим отправки: в таблице и в обеих выгрузках остаются
-  // строки с доменом, почтой и цепочкой, остальное прячется.
-  const [readyOnly, setReadyOnly] = useState(false);
+  // Режим отправки включён с самого начала: инструмент существует ради
+  // готовых строк, а отсеянные компании нужны раз в десять запусков — когда
+  // разбираешься, почему выход меньше заказа. Они не исчезли, их показывает
+  // «Показать отсеянные».
+  const [readyOnly, setReadyOnly] = useState(true);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [actionsBusy, setActionsBusy] = useState(false);
   const [exportProgress, setExportProgress] = useState<string | null>(null);
@@ -351,8 +399,11 @@ export function PolzaOutreachView() {
         setToast({ tone: 'error', message: 'Нет данных для экспорта' });
         return;
       }
-      const lines = [EXPORT_HEADER.join(',')];
-      for (const item of items) lines.push(exportRow(item).map(csvCell).join(','));
+      const header = readyOnly ? READY_EXPORT_HEADER : EXPORT_HEADER;
+      const lines = [header.join(',')];
+      for (const item of items) {
+        lines.push((readyOnly ? readyExportRow(item) : exportRow(item)).map(csvCell).join(','));
+      }
       downloadBlob('\uFEFF' + lines.join('\n'), 'text/csv;charset=utf-8', `polza_outreach_${activeJobId.slice(0, 8)}.csv`);
       setToast({ tone: 'success', message: `CSV: ${items.length} строк` });
     } catch (e) {
@@ -361,7 +412,7 @@ export function PolzaOutreachView() {
       setActionsBusy(false);
       setExportProgress(null);
     }
-  }, [activeJobId, fetchAllResults]);
+  }, [activeJobId, fetchAllResults, readyOnly]);
 
   /**
    * Excel собирает сервер и отдаёт готовым файлом.

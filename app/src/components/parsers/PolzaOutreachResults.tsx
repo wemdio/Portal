@@ -4,7 +4,7 @@ import { Fragment, useState } from 'react';
 import type { PolzaOutreachCompanyRow, PolzaOutreachFunnel, ParserJobStatus } from '@/types';
 import { POLZA_STAGE_LABELS, PolzaOutreachStages } from '@/components/parsers/PolzaOutreachStages';
 import { PolzaOutreachStageModal } from '@/components/parsers/PolzaOutreachStageModal';
-import { ChevronDown, ChevronRight, Download, ExternalLink, FileText, Loader2, Mail, Square, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Download, ExternalLink, FileText, Filter, Loader2, Mail, Square, Trash2 } from 'lucide-react';
 
 type Props = {
   items: PolzaOutreachCompanyRow[];
@@ -246,21 +246,32 @@ export function PolzaOutreachResults({
             {exportProgress ? <span className="text-xs text-gray-500">{exportProgress}</span> : null}
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {/* Отсеянные компании нужны, когда разбираешься, почему выход
-                такой; когда пора отправлять — мешают. Переключатель отвечает
-                сразу за таблицу и за обе выгрузки: что видно, то и выгрузится. */}
+            {/* По умолчанию на экране и в выгрузках только готовые строки:
+                инструмент существует ради них, а список уходит в рассылку,
+                где лишняя компания — это лишнее письмо не туда. Отсеянные
+                никуда не делись, они за этой кнопкой — их смотрят, когда
+                разбираются, почему выход меньше заказа. */}
             <button
               type="button"
               onClick={() => onReadyOnlyChange(!readyOnly)}
               className={`inline-flex items-center rounded-lg border px-3 py-1.5 text-sm font-medium transition ${
                 readyOnly
-                  ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
-                  : 'border-gray-200 text-gray-700 hover:bg-gray-50'
+                  ? 'border-gray-200 text-gray-700 hover:bg-gray-50'
+                  : 'border-emerald-300 bg-emerald-50 text-emerald-800'
               }`}
             >
-              <Mail className="mr-1.5 h-4 w-4" />
-              Только готовые
-              {readyCount != null ? <span className="ml-1.5 text-xs opacity-70">{readyCount}</span> : null}
+              {readyOnly ? (
+                <>
+                  <Filter className="mr-1.5 h-4 w-4" />
+                  Показать отсеянные
+                </>
+              ) : (
+                <>
+                  <Mail className="mr-1.5 h-4 w-4" />
+                  Только готовые
+                  {readyCount != null ? <span className="ml-1.5 text-xs opacity-70">{readyCount}</span> : null}
+                </>
+              )}
             </button>
             <button
               type="button"
