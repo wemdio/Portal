@@ -1,7 +1,8 @@
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import {
-  discoverQualificationReplies,
+  discoverQualificationRepliesCycle,
+  discoveryCycleIsIdle,
   drainQualificationReplies,
   maybeReprocessOwnershipReviews,
   reconcileQualificationDeliveries,
@@ -49,7 +50,9 @@ const log = createWorkerLogger(WORKER_ID);
 // новых ответов нет. Вместо фиксированного тика: интервал растёт при простое
 // (30с → 60с → … → 15 мин) и мгновенно сбрасывается при (а) новых staged
 // ответах, (б) reply-событии из Instantly webhooks (instantly_activity_events,
-// push-события квоту не тратят), (в) ошибке цикла.
+// push-события квоту не тратят), (в) ошибке цикла, (г) отказе бюджета чтения
+// писем — цикл, который не смог посмотреть, простоем не считается
+// (discoveryCycleIsIdle).
 //
 // Потолок поднят со 180с до 900с: ночью по учёту 16.09.2026 на пустые опросы
 // уходило ~2 500 запросов в сутки при 160 push-событиях за то же время —
@@ -127,9 +130,13 @@ async function pollLoop(shouldStop: () => boolean): Promise<void> {
   while (!shouldStop()) {
     let staged = 0;
     let errored = false;
+    let deferred = false;
     try {
-      staged = await discoverQualificationReplies();
+      const cycle = await discoverQualificationRepliesCycle();
+      staged = cycle.staged;
+      deferred = cycle.deferred;
       if (staged > 0) log('info', `Staged ${staged} reply(s) in durable intake`);
+      if (deferred) log('info', 'Discovery deferred by the email read budget — retrying at the base interval, not counted as idle');
     } catch (err) {
       errored = true;
       log('error', 'Poll cycle failed', err);
@@ -141,7 +148,7 @@ async function pollLoop(shouldStop: () => boolean): Promise<void> {
       replyActivity = true;
     }
     activitySinceIso = new Date().toISOString();
-    if (staged > 0 || errored || replyActivity) {
+    if (!discoveryCycleIsIdle({ staged, errored, deferred, replyActivity })) {
       idleStreak = 0;
     } else if (DISCOVERY_ADAPTIVE_ENABLED) {
       idleStreak += 1;
