@@ -209,6 +209,22 @@ export function JobsList({
               const funnel = (job.progress_detail as { funnel?: { ready?: unknown } } | null)?.funnel;
               return typeof funnel?.ready === 'number' ? funnel.ready : null;
             })();
+            // Заказ и причина остановки, если конвейер их сообщает (англ.
+            // автоаутрич): «Готово: 43 из 100» честнее голой цифры, а
+            // «вакансий больше нет» объясняет, почему запуск встал раньше
+            // заказа — это не ошибка, а конец свежих вакансий в кэше.
+            const runDetail = job.progress_detail as { target?: unknown; stop_reason?: unknown } | null;
+            const readyTarget = typeof runDetail?.target === 'number' ? runDetail.target : null;
+            const shortOfTarget =
+              readyCount != null && readyTarget != null && readyCount < readyTarget;
+            const stopNote =
+              job.status === 'completed' && shortOfTarget
+                ? runDetail?.stop_reason === 'pool_exhausted'
+                  ? 'свежие вакансии кончились'
+                  : runDetail?.stop_reason === 'scan_limit'
+                    ? 'дошли до потолка просмотра'
+                    : null
+                : null;
             return (
               <div
                 key={job.id}
@@ -283,8 +299,10 @@ export function JobsList({
                         {readyCount != null ? (
                           <span className={readyCount > 0 ? 'text-emerald-600' : undefined}>
                             Готово: {readyCount}
+                            {readyTarget != null ? ` из ${readyTarget}` : ''}
                           </span>
                         ) : null}
+                        {stopNote ? <span className="text-gray-400">{stopNote}</span> : null}
                         {job.error_message ? (
                           <span className={`${stoppedByUser ? 'text-amber-700' : 'text-red-600'} line-clamp-1`}>
                             {stoppedByUser

@@ -24,6 +24,31 @@ type ResultsResponse = {
 const RESULTS_LIMIT = 50;
 const EXPORT_LIMIT = 1000;
 
+/**
+ * Файл для отправки: компания, куда писать и что писать.
+ *
+ * Полная выгрузка со статусами, причинами отсева и цитатами нужна, когда
+ * разбираешься, почему выход такой. Для рассылки это мусор: список уходит в
+ * автоматическую отправку, и каждая лишняя колонка — это лишняя развилка при
+ * импорте.
+ */
+const READY_EXPORT_HEADER = [
+  'company_name',
+  'email',
+  'domain',
+  'job_country',
+  'job_title',
+  'job_url',
+  'letter_1_subject',
+  'letter_1_body',
+  'letter_2_subject',
+  'letter_2_body',
+  'letter_3_subject',
+  'letter_3_body',
+  'letter_4_subject',
+  'letter_4_body',
+];
+
 const EXPORT_HEADER = [
   'company_name',
   'domain',
@@ -87,6 +112,27 @@ function downloadBlob(content: string, mime: string, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
+function readyExportRow(row: PolzaOutreachCompanyRow) {
+  const letters = row.letters ?? [];
+  const letter = (n: number, field: 'subject' | 'body') => letters.find((l) => l.n === n)?.[field] ?? '';
+  return [
+    row.company_name,
+    row.selected_company_email ?? '',
+    row.normalized_domain ?? '',
+    row.job_country_code ?? '',
+    row.job_title ?? '',
+    row.job_source_url ?? '',
+    letter(1, 'subject'),
+    letter(1, 'body'),
+    letter(2, 'subject'),
+    letter(2, 'body'),
+    letter(3, 'subject'),
+    letter(3, 'body'),
+    letter(4, 'subject'),
+    letter(4, 'body'),
+  ];
+}
+
 function exportRow(row: PolzaOutreachCompanyRow) {
   const letters = row.letters ?? [];
   const letter = (n: number, field: 'subject' | 'body') => letters.find((l) => l.n === n)?.[field] ?? '';
@@ -134,6 +180,11 @@ export function PolzaOutreachView() {
   const [funnel, setFunnel] = useState<PolzaOutreachFunnel | null>(null);
   const [exclusionCounts, setExclusionCounts] = useState<Record<string, number> | null>(null);
   const [resultsPage, setResultsPage] = useState(1);
+  // Режим отправки включён с самого начала: инструмент существует ради
+  // готовых строк, а отсеянные компании нужны раз в десять запусков — когда
+  // разбираешься, почему выход меньше заказа. Они не исчезли, их показывает
+  // «Показать отсеянные».
+  const [readyOnly, setReadyOnly] = useState(true);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [actionsBusy, setActionsBusy] = useState(false);
   const [exportProgress, setExportProgress] = useState<string | null>(null);
@@ -157,12 +208,14 @@ export function PolzaOutreachView() {
     setActiveJobId((prev) => prev ?? data.jobs?.[0]?.id ?? null);
   }, []);
 
+  const statusQuery = readyOnly ? '&status=ready' : '';
+
   const loadResults = useCallback(async (jobId: string, page: number) => {
     setResultsLoading(true);
     try {
       const offset = Math.max(0, (page - 1) * RESULTS_LIMIT);
       const data = await apiFetch<ResultsResponse>(
-        `/api/parsers/polza-outreach/${jobId}/results?limit=${RESULTS_LIMIT}&offset=${offset}`,
+        `/api/parsers/polza-outreach/${jobId}/results?limit=${RESULTS_LIMIT}&offset=${offset}${statusQuery}`,
         { method: 'GET' },
       );
       setResultsCount(data.count ?? 0);
@@ -172,7 +225,7 @@ export function PolzaOutreachView() {
     } finally {
       setResultsLoading(false);
     }
-  }, []);
+  }, [statusQuery]);
 
   /**
    * Все строки прогона — для разбора этапа.
@@ -197,7 +250,7 @@ export function PolzaOutreachView() {
     let total = Infinity;
     while (offset < total) {
       const data = await apiFetch<ResultsResponse>(
-        `/api/parsers/polza-outreach/${jobId}/results?limit=${EXPORT_LIMIT}&offset=${offset}`,
+        `/api/parsers/polza-outreach/${jobId}/results?limit=${EXPORT_LIMIT}&offset=${offset}${statusQuery}`,
         { method: 'GET' },
       );
       if (offset === 0) total = data.count ?? 0;
@@ -208,7 +261,7 @@ export function PolzaOutreachView() {
       setExportProgress(`Загрузка: ${Math.min(offset, total)} / ${total}`);
     }
     return all;
-  }, []);
+  }, [statusQuery]);
 
   useEffect(() => {
     void (async () => {
@@ -346,8 +399,11 @@ export function PolzaOutreachView() {
         setToast({ tone: 'error', message: 'Нет данных для экспорта' });
         return;
       }
-      const lines = [EXPORT_HEADER.join(',')];
-      for (const item of items) lines.push(exportRow(item).map(csvCell).join(','));
+      const header = readyOnly ? READY_EXPORT_HEADER : EXPORT_HEADER;
+      const lines = [header.join(',')];
+      for (const item of items) {
+        lines.push((readyOnly ? readyExportRow(item) : exportRow(item)).map(csvCell).join(','));
+      }
       downloadBlob('\uFEFF' + lines.join('\n'), 'text/csv;charset=utf-8', `polza_outreach_${activeJobId.slice(0, 8)}.csv`);
       setToast({ tone: 'success', message: `CSV: ${items.length} строк` });
     } catch (e) {
@@ -356,7 +412,7 @@ export function PolzaOutreachView() {
       setActionsBusy(false);
       setExportProgress(null);
     }
-  }, [activeJobId, fetchAllResults]);
+  }, [activeJobId, fetchAllResults, readyOnly]);
 
   /**
    * Excel собирает сервер и отдаёт готовым файлом.
@@ -370,7 +426,9 @@ export function PolzaOutreachView() {
     setActionsBusy(true);
     setExportProgress('Excel: собираю файл');
     try {
-      const res = await authFetch(`/api/parsers/polza-outreach/${activeJobId}/export`);
+      const res = await authFetch(
+        `/api/parsers/polza-outreach/${activeJobId}/export${readyOnly ? '?status=ready' : ''}`,
+      );
       if (!res.ok) {
         const body = await res.json().catch(() => null) as { error?: string } | null;
         throw new Error(body?.error ?? `Не удалось выгрузить (HTTP ${res.status})`);
@@ -391,7 +449,7 @@ export function PolzaOutreachView() {
       setActionsBusy(false);
       setExportProgress(null);
     }
-  }, [activeJobId]);
+  }, [activeJobId, readyOnly]);
 
   const stopJob = useCallback(async () => {
     if (!activeJobId) return;
@@ -478,6 +536,8 @@ export function PolzaOutreachView() {
           currentPage={resultsPage}
           totalPages={totalPages}
           onPageChange={handlePageChange}
+          readyOnly={readyOnly}
+          onReadyOnlyChange={setReadyOnly}
           actionsBusy={actionsBusy}
           exportProgress={exportProgress}
           onExportCsv={() => void exportCsv()}

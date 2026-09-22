@@ -4,6 +4,12 @@
  * Источник только jobhive (нативные ATS в кэше протухли 02.08.2026, план §3).
  * Дедуп по компании: одна строка на company_name, берём самую свежую вакансию.
  * Строки с country_code='remote'/NULL не берём — гео там недоказуемо.
+ *
+ * Раньше выборка отдавала ровно `limit` компаний и на этом конвейер
+ * заканчивался: из ста вакансий до готовой цепочки доходили единицы, а
+ * «лимит 100» в форме читался как «сто готовых компаний». Теперь выборка
+ * умеет отдавать кандидатов волнами — раннер берёт следующую, пока не наберёт
+ * нужное число готовых или пока кэш не кончится.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -29,9 +35,8 @@ const SDR_TITLE_TERMS = ['sdr', 'bdr', 'sales development', 'business developmen
 const SDR_TITLE_RE = new RegExp(`\\b(${SDR_TITLE_TERMS.join('|')})\\b`, 'i');
 const MIN_DESCRIPTION_CHARS = 300;
 const PAGE_SIZE = 500;
-// Страховочный потолок сканирования строк кэша: чтобы набрать `limit` компаний
-// после дедупа, просматриваем вакансии страницами до этого максимума.
-const MAX_SCAN_ROWS = 20000;
+/** Сколько строк кэша просматриваем за одну волну, прежде чем сдаться. */
+const MAX_SCAN_ROWS_PER_WAVE = 20000;
 
 type CacheRow = {
   id: string;
@@ -42,23 +47,48 @@ type CacheRow = {
   published_at: string | null;
   company_name: string;
   company_description: string | null;
+  company_site_url: string | null;
 };
+
+export interface VacancyWave {
+  candidates: PolzaOutreachVacancyCandidate[];
+  /** Смещение в кэше, с которого продолжать следующую волну. */
+  nextOffset: number;
+  /** Кэш закончился: следующих волн не будет. */
+  exhausted: boolean;
+}
+
+export interface SelectVacanciesOptions {
+  /** Сколько компаний нужно набрать в этой волне (по умолчанию config.limit). */
+  want?: number;
+  /** С какого места в кэше продолжать (конец прошлой волны). */
+  startOffset?: number;
+  /** Компании, уже взятые прошлыми волнами: ключ — нижний регистр названия. */
+  seenCompanies?: Set<string>;
+}
 
 export async function selectVacancies(
   db: SupabaseClient,
   config: PolzaOutreachConfig,
-): Promise<PolzaOutreachVacancyCandidate[]> {
+  options: SelectVacanciesOptions = {},
+): Promise<VacancyWave> {
+  const want = Math.max(1, options.want ?? config.limit);
+  const seen = options.seenCompanies ?? new Set<string>();
   const cutoff = new Date(Date.now() - config.posted_within_days * 86_400_000).toISOString();
   const now = new Date().toISOString();
   const countries = config.countries.map((c) => c.toLowerCase());
 
   const byCompany = new Map<string, PolzaOutreachVacancyCandidate>();
-  let offset = 0;
+  let offset = Math.max(0, options.startOffset ?? 0);
+  const scanStartedAt = offset;
+  let exhausted = false;
 
-  while (offset < MAX_SCAN_ROWS && byCompany.size < config.limit) {
+  while (offset - scanStartedAt < MAX_SCAN_ROWS_PER_WAVE && byCompany.size < want) {
     const query = db
       .from('eng_hiring_cache')
-      .select('id,vacancy_title,vacancy_description,vacancy_url,country_code,published_at,company_name,company_description')
+      .select(
+        'id,vacancy_title,vacancy_description,vacancy_url,country_code,published_at,company_name,company_description,company_site_url',
+      )
       .eq('source', 'jobhive')
       .gte('published_at', cutoff)
       .lte('published_at', now)
@@ -71,10 +101,15 @@ export async function selectVacancies(
     if (error) throw new Error(`polza outreach S1 cache select failed: ${error.message}`);
 
     const rows = (data ?? []) as unknown as CacheRow[];
-    if (rows.length === 0) break;
+    if (rows.length === 0) {
+      exhausted = true;
+      break;
+    }
 
+    let consumed = 0;
     for (const row of rows) {
-      if (byCompany.size >= config.limit) break;
+      consumed += 1;
+      if (byCompany.size >= want) break;
       // Точная проверка по границам слова: база отдала более широкий набор.
       if (!SDR_TITLE_RE.test(row.vacancy_title ?? '')) continue;
       const description = row.vacancy_description ?? '';
@@ -83,6 +118,7 @@ export async function selectVacancies(
       if (!company) continue;
 
       const key = company.toLowerCase();
+      if (seen.has(key)) continue;
       const candidate: PolzaOutreachVacancyCandidate = {
         vacancyId: row.id,
         jobTitle: row.vacancy_title,
@@ -91,6 +127,7 @@ export async function selectVacancies(
         jobPublishedAt: row.published_at,
         companyName: company,
         companyDescription: row.company_description,
+        companySiteUrl: row.company_site_url,
         vacancyDescription: description,
       };
       // Страницы идут от свежих к старым: первая встреченная вакансия компании
@@ -98,9 +135,15 @@ export async function selectVacancies(
       if (!byCompany.has(key)) byCompany.set(key, candidate);
     }
 
-    offset += rows.length;
-    if (rows.length < PAGE_SIZE) break;
+    // Смещение двигаем ровно на просмотренные строки: волна может оборваться
+    // на середине страницы, и следующая обязана продолжить с того же места,
+    // иначе непросмотренный хвост страницы потеряется навсегда.
+    offset += consumed;
+    if (rows.length < PAGE_SIZE) {
+      exhausted = true;
+      break;
+    }
   }
 
-  return [...byCompany.values()];
+  return { candidates: [...byCompany.values()], nextOffset: offset, exhausted };
 }

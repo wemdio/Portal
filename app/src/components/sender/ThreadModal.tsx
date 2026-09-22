@@ -1,8 +1,8 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { Loader2 } from 'lucide-react';
-import { fetchThread, type ThreadItemDto } from './api';
+import { useCallback, useEffect, useState } from 'react';
+import { Loader2, Send } from 'lucide-react';
+import { fetchThread, replyToThread, type ThreadItemDto } from './api';
 import { SenderModal } from './SenderModal';
 
 function formatAt(value: string | null): string {
@@ -16,6 +16,10 @@ function formatAt(value: string | null): string {
  * Переписка с получателем: наши письма и его ответы одной лентой, сверху вниз
  * по времени. Исходящее прижато вправо, входящее влево — как в любом
  * мессенджере, чтобы направление читалось без подписи.
+ *
+ * Ответ пишется прямо здесь (задача 4.1): письмо уходит с закреплённого ящика
+ * лида тем же тредом — раньше оператор переключался в почтовый клиент, и
+ * отправленный оттуда ответ в портале не появлялся.
  */
 export function ThreadModal({ recipientId, onClose }: { recipientId: string; onClose: () => void }) {
   const [items, setItems] = useState<ThreadItemDto[]>([]);
@@ -23,30 +27,46 @@ export function ThreadModal({ recipientId, onClose }: { recipientId: string; onC
   const [subtitle, setSubtitle] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [replyText, setReplyText] = useState('');
+  const [replying, setReplying] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetchThread(recipientId);
+      setItems(res.items);
+      setTitle(res.thread.recipient_name || res.thread.recipient_email);
+      setSubtitle(
+        [res.thread.recipient_email, res.thread.mailbox_email ? `через ${res.thread.mailbox_email}` : null, res.thread.campaign_name]
+          .filter(Boolean)
+          .join(' · '),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось открыть переписку');
+    } finally {
+      setLoading(false);
+    }
+  }, [recipientId]);
 
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await fetchThread(recipientId);
-        if (cancelled) return;
-        setItems(res.items);
-        setTitle(res.thread.recipient_name || res.thread.recipient_email);
-        setSubtitle(
-          [res.thread.recipient_email, res.thread.mailbox_email ? `через ${res.thread.mailbox_email}` : null, res.thread.campaign_name]
-            .filter(Boolean)
-            .join(' · '),
-        );
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : 'Не удалось открыть переписку');
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [recipientId]);
+    setLoading(true);
+    void load().finally(() => setLoading(false));
+  }, [load]);
+
+  const sendReply = async () => {
+    const text = replyText.trim();
+    if (!text) return;
+    setReplying(true);
+    setError(null);
+    try {
+      await replyToThread(recipientId, text);
+      setReplyText('');
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось отправить ответ');
+    } finally {
+      setReplying(false);
+    }
+  };
 
   return (
     <SenderModal title={title} subtitle={subtitle} size="wide" onClose={onClose}>
@@ -55,7 +75,7 @@ export function ThreadModal({ recipientId, onClose }: { recipientId: string; onC
           <Loader2 className="h-4 w-4 animate-spin" />
           Загрузка…
         </div>
-      ) : error ? (
+      ) : error && items.length === 0 ? (
         <p className="py-10 text-center text-sm text-red-600">{error}</p>
       ) : items.length === 0 ? (
         <p className="py-10 text-center text-sm text-zinc-500">Писем в этой переписке пока нет.</p>
@@ -87,6 +107,35 @@ export function ThreadModal({ recipientId, onClose }: { recipientId: string; onC
           })}
         </div>
       )}
+
+      {/* Ответ оператора: уходит с закреплённого ящика переписки, тем же тредом.
+          Кнопка неактивна, пока письмо пустое или предыдущее ещё отправляется. */}
+      <div className="mt-4 border-t border-zinc-200 pt-3">
+        <textarea
+          value={replyText}
+          onChange={(e) => setReplyText(e.target.value)}
+          rows={4}
+          placeholder="Ответ лиду — уйдёт с ящика переписки в тот же тред"
+          disabled={loading || replying}
+          className="w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 disabled:bg-zinc-50"
+        />
+        <div className="mt-2 flex items-center justify-between gap-3">
+          {error && items.length > 0 ? (
+            <span className="text-sm text-red-600">{error}</span>
+          ) : (
+            <span className="text-xs text-zinc-500">Письмо встанет в очередь и отправится воркером в течение минуты</span>
+          )}
+          <button
+            type="button"
+            onClick={() => void sendReply()}
+            disabled={replying || !replyText.trim() || loading}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-50"
+          >
+            {replying ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+            Ответить
+          </button>
+        </div>
+      </div>
     </SenderModal>
   );
 }
