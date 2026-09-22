@@ -2,6 +2,7 @@
 
 import { Fragment, useState } from 'react';
 import type { PolzaOutreachCompanyRow, PolzaOutreachFunnel, ParserJobStatus } from '@/types';
+import { PolzaOutreachStages } from '@/components/parsers/PolzaOutreachStages';
 import { ChevronDown, ChevronRight, Download, ExternalLink, FileText, Loader2, Mail, Square, Trash2 } from 'lucide-react';
 
 type Props = {
@@ -11,6 +12,8 @@ type Props = {
   exclusionCounts: Record<string, number> | null;
   loading: boolean;
   jobStatus: ParserJobStatus | null;
+  /** Текст ошибки запуска — показываем у этапа, на котором встали. */
+  jobError?: string | null;
   currentPage: number;
   totalPages: number;
   onPageChange: (page: number) => void;
@@ -90,15 +93,6 @@ function formatDate(value?: string | null) {
   }
 }
 
-function FunnelStep({ label, value, accent }: { label: string; value: number; accent?: boolean }) {
-  return (
-    <div className={`rounded-lg border px-3 py-2 ${accent ? 'border-emerald-200 bg-emerald-50' : 'border-gray-200 bg-gray-50'}`}>
-      <div className={`text-lg font-semibold leading-tight ${accent ? 'text-emerald-800' : 'text-gray-900'}`}>{value}</div>
-      <div className="text-[11px] leading-tight text-gray-500">{label}</div>
-    </div>
-  );
-}
-
 function LettersBlock({ row }: { row: PolzaOutreachCompanyRow }) {
   if (!row.letters?.length) {
     return <div className="text-sm text-gray-400">Письма не собирались.</div>;
@@ -154,6 +148,7 @@ export function PolzaOutreachResults({
   exclusionCounts,
   loading,
   jobStatus,
+  jobError,
   currentPage,
   totalPages,
   onPageChange,
@@ -169,28 +164,27 @@ export function PolzaOutreachResults({
 
   return (
     <div className="space-y-4">
-      {funnel ? (
+      {/* Цепочка этапов вместо ряда цифр: по плоской воронке не понять, где
+          сейчас работа и где она встала — все нули выглядят одинаково и когда
+          конвейер не запускали, и когда он упал на первом шаге. */}
+      <PolzaOutreachStages
+        funnel={funnel}
+        run={jobStatus ? { running, failed: jobStatus === 'failed' } : null}
+        error={jobError}
+      />
+
+      {exclusionCounts && Object.keys(exclusionCounts).length > 0 ? (
         <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-          <div className="mb-2 text-sm font-semibold text-gray-900">Воронка</div>
-          <div className="flex flex-wrap items-stretch gap-2">
-            <FunnelStep label="вакансий" value={funnel.vacancies} />
-            <FunnelStep label="домен найден" value={funnel.domain_found} />
-            <FunnelStep label="прошли ICP" value={funnel.icp_passed} />
-            <FunnelStep label="гео подтверждено" value={funnel.geo_confirmed} />
-            <FunnelStep label="почта" value={funnel.email_found} />
-            <FunnelStep label="готово" value={funnel.ready} accent />
+          <div className="mb-2 text-sm font-semibold text-gray-900">Почему отсеивались</div>
+          <div className="flex flex-wrap gap-2">
+            {Object.entries(exclusionCounts)
+              .sort((a, b) => b[1] - a[1])
+              .map(([reason, value]) => (
+                <span key={reason} className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-0.5 text-xs text-gray-600">
+                  {EXCLUSION_LABELS[reason] ?? reason}: {value}
+                </span>
+              ))}
           </div>
-          {exclusionCounts && Object.keys(exclusionCounts).length > 0 ? (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {Object.entries(exclusionCounts)
-                .sort((a, b) => b[1] - a[1])
-                .map(([reason, value]) => (
-                  <span key={reason} className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-0.5 text-xs text-gray-600">
-                    {EXCLUSION_LABELS[reason] ?? reason}: {value}
-                  </span>
-                ))}
-            </div>
-          ) : null}
         </div>
       ) : null}
 
