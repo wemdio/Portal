@@ -668,6 +668,19 @@ async function fetchPageWithRetry(
 }
 
 /**
+ * HTML одной страницы с той же обработкой кодировок (cp1251/koi8-r) и
+ * ретраями, что и обход в scrapeEmails. Нужен тем, кто читает сайт компании
+ * ради текста, а не почты (сигналы «Нашего автоаутрича»).
+ */
+export async function fetchSitePageHtml(
+  url: string,
+  options?: { timeout?: number; signal?: AbortSignal },
+): Promise<string | null> {
+  const result = await fetchPageWithRetry(url, options);
+  return result.html;
+}
+
+/**
  * Один ретрай через прокси, если сайт отказал нам по IP (403/429). Прямой
  * запрос к этому моменту уже отработал и провалился быстро — ответ пришёл,
  * просто отказной, так что удлинения строки почти нет.
