@@ -1,36 +1,31 @@
-FROM postgres:17-alpine
-
-# Клиент MinIO (mc) — им бэкапы уезжают в S3.
+# Клиент MinIO (mc) — им бэкапы уезжают в S3. Берём его из официального образа
+# MinIO, а не качаем по ссылке.
 #
-# 22.09.2026 сборка молча положила сюда не бинарник, а текст ошибки: адрес
-# dl.min.io/client/mc/release/linux-amd64/mc начал отдавать HTTP 410 Gone.
-# Виноват был не поставщик, а `curl -sSL` без `-f`: ответ с ошибкой curl
-# ошибкой не считает — он сохраняет ТЕЛО ответа в файл и выходит с нулевым
-# кодом. Дальше chmod +x делал «исполняемым» текстовый файл, образ собирался
-# зелёным, и ломалось всё только ночью, в проде:
+# 22.09.2026 бэкапы встали: mc в контейнере оказался не бинарником, а текстом
+# ошибки.
 #   /usr/local/bin/mc: line 1: 410: not found
 #   /usr/local/bin/mc: line 3: syntax error: unexpected "("
-# Бэкапы при этом не уезжали вовсе.
+# 410 — это HTTP 410 Gone: MinIO закрыл прямые ссылки на бинарник. Проверено в
+# тот же день, отвечают ошибкой все три известных адреса — и dl.min.io, и
+# dl.minio.io, и latest-релиз на GitHub. То есть чинить ссылку бесполезно, надо
+# менять способ доставки.
 #
-# Отсюда три правила ниже, каждое закрывает свою часть той аварии:
-#   -f             — ответ с ошибкой валит команду, а не пишется в файл;
-#   перебор ссылок — один умерший адрес больше не останавливает сборку;
-#   mc --version   — последнее слово за самим бинарником: не запустился —
-#                    образа не будет. Проверка в том же слое, иначе она
-#                    проверяла бы кэш предыдущей сборки.
-RUN apk add --no-cache curl ca-certificates \
-    && set -eux \
-    && for url in \
-         "https://dl.min.io/client/mc/release/linux-amd64/mc" \
-         "https://dl.minio.io/client/mc/release/linux-amd64/mc" \
-         "https://github.com/minio/mc/releases/latest/download/mc-linux-amd64" \
-       ; do \
-         echo "[mc] trying $url"; \
-         if curl -fsSL --retry 3 --retry-delay 2 -o /usr/local/bin/mc "$url"; then break; fi; \
-         echo "[mc] failed: $url"; \
-       done \
-    && chmod +x /usr/local/bin/mc \
-    && mc --version
+# Но первопричина была не в ссылке. `curl -sSL` без `-f` ответ с ошибкой
+# ошибкой не считает: он сохраняет ТЕЛО ответа в файл и выходит с нулевым
+# кодом. Дальше chmod +x делал «исполняемым» текстовый файл, образ собирался
+# зелёным, и ломалось всё ночью, в проде, когда бэкап пытался этот текст
+# запустить. Копии в S3 не уезжали вовсе.
+#
+# Копирование из образа закрывает обе беды разом: качать нечего, а если слоя с
+# бинарником в образе не окажется, сборка упадёт прямо на COPY. Проверка
+# `mc --version` ниже — последнее слово за самим бинарником.
+FROM minio/mc:latest AS mc
+
+FROM postgres:17-alpine
+
+RUN apk add --no-cache curl ca-certificates
+COPY --from=mc /usr/bin/mc /usr/local/bin/mc
+RUN chmod +x /usr/local/bin/mc && mc --version
 
 COPY backup.sh /backup.sh
 COPY entrypoint.sh /entrypoint.sh
