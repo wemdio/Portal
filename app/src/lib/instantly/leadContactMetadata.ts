@@ -1,4 +1,5 @@
 import { extractLeadReplyContacts, type LeadReplyContacts } from './leadReplyContacts';
+import { isPersonName } from '../enrich/extractors/nameQuality';
 import { joinLeadPhones, normalizeLeadPhone, normalizeLeadWebsite } from './leadContactValues';
 import type { Email, Lead } from './types';
 
@@ -121,6 +122,9 @@ function companyValue(value: unknown): string | null {
   const text = cleanValue(value);
   // Instantly's top-level organization is the workspace UUID, not the company.
   if (text && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(text)) return null;
+  // Imported "company" fields occasionally contain the contact's full name.
+  // Keep explicit legal names such as "ИП Иванов ...", but not a bare FIO.
+  if (text && isPersonName(text)) return null;
   return text && /\p{L}/u.test(text) && !/^(?:ооо|оао|пао|зао|ао|ип|llc|ltd|company name|название компании)$/i.test(text) && !/^(?:https?:|www\.)|@/i.test(text)
     ? text.slice(0, 200) : null;
 }

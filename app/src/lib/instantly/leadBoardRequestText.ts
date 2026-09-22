@@ -4,6 +4,7 @@ import type { Email } from './types';
 
 const QUOTE_BLOCKS = 'blockquote, .gmail_quote, .yahoo_quoted, .protonmail_quote, .moz-forward-container, .ms-outlook-mobile-reference-message';
 const ATTRIBUTION = /^.{1,160}\s+(?:писал(?:а|\(а\))?|написал(?:а|\(а\))?|пишет|wrote)\s+\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}(?::\d{2})?\s*:\s*$/iu;
+const YOU_WROTE = /^Вы\s+писали\s+(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+[а-яё]{3,})(?:[^\n]{0,120})?:\s*$/iu;
 const COLON_SIGNOFF = /^(?:с\s+(?:уважением|наилучшими\s+пожеланиями)|best\s+regards|kind\s+regards|regards|yours\s+sincerely|sincerely)\s*:/iu;
 
 /** Board-only projection. Never replace the original email used for contacts,
@@ -57,7 +58,7 @@ function cleanRequestText(text: string): string | null {
   // Another common dated attribution: "Name писал 2026-09-18 12:49:".
   // This display-only boundary must not change classifier behaviour.
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
-  const attribution = lines.findIndex((line) => ATTRIBUTION.test(line.trim()) || COLON_SIGNOFF.test(line.trim()));
+  const attribution = lines.findIndex((line) => ATTRIBUTION.test(line.trim()) || YOU_WROTE.test(line.trim()) || COLON_SIGNOFF.test(line.trim()));
   const current = attribution < 0 ? text : lines.slice(0, attribution).join('\n');
   // Empty means there is no separable current answer; do not resurrect history.
   return extractAuthoredReplyText(current).replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, '\n\n').trim() || null;

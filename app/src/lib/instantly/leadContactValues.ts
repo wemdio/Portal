@@ -42,7 +42,9 @@ export function normalizeLeadWebsite(value: unknown): string | null {
 /** Never cut a number/extension in half to fit the board/Telegram field. */
 export function joinLeadPhones(values: readonly (string | null)[], limit = 200): string | null {
   const unique = new Map<string, string>();
-  for (const value of values.flatMap((item) => item?.split(';') ?? [])) {
+  // Older saved values can be comma-separated. Keep commas before an extension
+  // label intact, but do not treat several numbers as one oversized number.
+  for (const value of values.flatMap((item) => item?.split(/;|,\s*(?=\+?\d|\()/u) ?? [])) {
     const phone = value.trim();
     const extension = /\s+доб\.\s*(\d+)$/.exec(phone);
     const digits = (extension ? phone.slice(0, extension.index) : phone).replace(/\D/g, '');

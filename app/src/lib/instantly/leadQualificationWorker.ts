@@ -42,6 +42,7 @@ import {
 import type { Email, Lead } from './types';
 import { resolveLeadContactMetadata } from './leadContactMetadata';
 import { loadCachedLeadContacts } from './cachedLeadContacts';
+import { senderDisplayLeadName } from './leadReplyContacts';
 import { resolveEffectiveReplyOwner } from './replyOwnershipResolver';
 import { resolveInstantlyAccountId } from './accounts';
 import { randomUUID } from 'node:crypto';
@@ -2017,14 +2018,13 @@ export async function qualifyOneReply(
       // Шаг — тот же счёт, что ИИ видит в промпте («шаг N кампании»): наши
       // исходящие (ue_type=1) в треде. Заголовок письма — последний фолбэк
       // имени, если ни в базе, ни в собственной подписи его не нашли.
-      const stepNumber = result.threadContext
-        ? result.threadContext.threadEmails.filter((e) => (e.ue_type ?? 1) === 1).length
-        : null;
+      const outboundCount = result.threadContext?.threadEmails.filter((e) => (e.ue_type ?? 1) === 1).length ?? 0;
+      const stepNumber = outboundCount > 0 ? outboundCount : null;
       let fromName: string | null = null;
       const fromArr = effectiveReply.from_address_json;
       if (Array.isArray(fromArr) && fromArr.length > 0) {
         const n = fromArr[0]?.name;
-        if (typeof n === 'string' && n.trim().length > 0) fromName = n.trim();
+        fromName = senderDisplayLeadName(n);
       }
       await upsertBoardRow(db, {
         qualificationId: inserted.id,

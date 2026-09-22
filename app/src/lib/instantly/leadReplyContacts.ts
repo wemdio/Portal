@@ -11,12 +11,41 @@ export interface LeadReplyContacts {
   website: string | null;
 }
 
+/** Sender display names are weaker than a signed name: keep plausible full
+ * names (including uncommon ones), but never copy a mailbox/brand/role into
+ * the board's personal-name column. */
+export function senderDisplayLeadName(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const value = raw.replace(/\s+/g, ' ').trim();
+  // Display names sometimes append a role, organization or address. Accept
+  // only a self-contained personal prefix; the suffix is not part of a name.
+  const prefix = value.split(/[,(]/u)[0].trim();
+  if (prefix && prefix !== value) {
+    const personal = senderDisplayLeadName(prefix);
+    if (personal) return personal;
+  }
+  if (!value || value.length > 80 || /[@<>/:\d]/u.test(value) ||
+    /\.(?:ru|com|net|org|by|kz|online|io)\b/iu.test(value) || isRoleTitle(value)) return null;
+  const words = value.split(' ');
+  if (words.some((word) => /^(?:info|support|contact|sales|admin|noreply|no-reply|service|team|company|agency|group|digital|solutions|generation|inbox|help|change|mister|bit|компания|организация|отдел|команда|служба|секретарь|агентство|группа|центр|магазин|решения|завод|стоматология|студия|эквайринг|фабрика|коммуникации)$/iu.test(word))) return null;
+  if (isPersonName(value)) return value;
+  if (words.length < 2 || words.length > 3) return null;
+  const cyrillic = words.every((word) => /^[А-ЯЁ][а-яё’-]{1,50}$/u.test(word));
+  const latin = words.every((word) => /^[A-Z][a-z’-]{1,50}$/.test(word));
+  if (latin) return value;
+  if (!cyrillic) return null;
+  if (words.length === 3 && words.some((word) => /(?:ович|евич|ьевич|овна|евна|ьевна|инична)$/iu.test(word))) return value;
+  return words.length === 2 && words.some((word) => /(?:ов|ев|ин|ова|ева|ина|ский|ская|енко|юк|ич|ян|дзе|швили)$/iu.test(word))
+    ? value : null;
+}
+
 // Unlike qualification, enrichment needs the sender's signature. Only history
 // boundaries belong here; an empty current reply must never fall back to history.
 const HISTORY_BOUNDARIES = [
   /^>/,
   /^On\s+.+\s+wrote:\s*$/i,
   /^On\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s/i,
+  /^Вы\s+писали\s+(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+[а-яё]{3,})(?:[^\n]{0,120})?:\s*$/iu,
   /^(?:Van|Verzonden|Aan|Onderwerp|De|Envoyé|À|Objet|Von|Gesendet|An|Betreff):\s+.+$/iu,
   /^\d{1,2}[./-]\d{1,2}[./-]\d{2,4},?\s+\d{1,2}:\d{2}.*(?:@|mailto:)/iu,
   /^(?:От|От кого|From|Sent|Отправлено|Кому|To|Subject|Тема):\s+.+$/i,
@@ -26,7 +55,7 @@ const HISTORY_BOUNDARIES = [
   /^(?:пн|вт|ср|чт|пт|сб|вс|понедельник|вторник|среда|четверг|пятница|суббота|воскресенье),?\s+\d{1,2}\s+[а-яё]{3,}\.?(?:\s+\d{4})?(?:\s*г\.)?[^\n]{0,160}:\s*$/iu,
   /^(?:Sent\s+from\s+my\s+(?:iPhone|iPad|Android)|Отправлено\s+из\s+(?:мобильной\s+)?(?:Почты\s+Mail|мобильной\s+Яндекс\.Почты))(?:[\s:.]|$)/iu,
 ];
-const SIGNOFF = /^(?:--|—|с\s+(?:уважением|наилучшими\s+пожеланиями)(?:[,.!].*)?|(?:best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:[,.!].*)?)$/iu;
+const SIGNOFF = /^(?:--|—|с\s+(?:уважением|наилучшими\s+пожеланиями)(?:[,.!:].*)?|(?:best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:[,.!:].*)?)$/iu;
 const SIGNOFF_PREFIX = /^(?:с\s+(?:уважением|наилучшими\s+пожеланиями)|best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:[\s,.!:-]+|$)/iu;
 const PHONE_LABEL = /(?:телефон|тел\s*[.:]|моб(?:ильный)?\s*[.:]|phone|mobile|telephone|whats\s*app|tel:|позвон|звоните|набери|свяжитесь|для\s+связи|(?:мой|наш)\s+номер|контакт|\b(?:call|reach|contact)\b|\b[mtp]\s*:)/iu;
 const NON_PHONE_LABEL = /(?:инн|кпп|огрн(?:ип)?|окпо|бик|снилс|р[/.]?с|к[/.]?с|vat|tax\s*(?:id|number)?|order|заказ[а-яё]*|заявк[аи]|сч[её]т[а-яё]*)\s*[:№#.-]?\s*$/iu;
@@ -114,6 +143,9 @@ function htmlText(html: string): string {
 }
 
 function phoneInLine(line: string, signature: boolean): string | null {
+  // "Наш номер в реестре ..." is an identifier, not an invitation to call.
+  if (/(?:^|\s)номер\s+(?:в\s+)?реестр(?:е|а|ов[а-яё]*)?(?=\s|[.:,;!?]|$)/iu.test(line) &&
+    !/(?:телефон|тел\s*[.:]|моб(?:ильный)?\s*[.:]|phone|mobile|tel:)/iu.test(line)) return null;
   const framed = PHONE_LABEL.test(line);
   const phones: string[] = [];
   const candidates = leadPhoneCandidates(line);
