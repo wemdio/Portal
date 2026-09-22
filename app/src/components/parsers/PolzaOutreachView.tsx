@@ -358,6 +358,41 @@ export function PolzaOutreachView() {
     }
   }, [activeJobId, fetchAllResults]);
 
+  /**
+   * Excel собирает сервер и отдаёт готовым файлом.
+   *
+   * CSV открывают в Excel, и там он рассыпается: письма содержат переносы
+   * строк и запятые, а локаль путает разделитель. Тащить exceljs в браузер
+   * ради этого незачем — он тяжёлый, и на странице парсеров ему делать нечего.
+   */
+  const exportXlsx = useCallback(async () => {
+    if (!activeJobId) return;
+    setActionsBusy(true);
+    setExportProgress('Excel: собираю файл');
+    try {
+      const res = await authFetch(`/api/parsers/polza-outreach/${activeJobId}/export`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => null) as { error?: string } | null;
+        throw new Error(body?.error ?? `Не удалось выгрузить (HTTP ${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `polza_outreach_${activeJobId.slice(0, 8)}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      setToast({ tone: 'success', message: 'Excel готов' });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ошибка выгрузки');
+    } finally {
+      setActionsBusy(false);
+      setExportProgress(null);
+    }
+  }, [activeJobId]);
+
   const stopJob = useCallback(async () => {
     if (!activeJobId) return;
     try {
@@ -446,6 +481,7 @@ export function PolzaOutreachView() {
           actionsBusy={actionsBusy}
           exportProgress={exportProgress}
           onExportCsv={() => void exportCsv()}
+          onExportXlsx={() => void exportXlsx()}
           onStopJob={activeJob?.id ? () => void stopJob() : undefined}
           onDeleteJob={activeJob?.id ? () => setDeleteCandidate(activeJob.id) : undefined}
         />

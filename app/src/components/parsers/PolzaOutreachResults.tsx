@@ -23,6 +23,7 @@ type Props = {
   actionsBusy: boolean;
   exportProgress: string | null;
   onExportCsv: () => void;
+  onExportXlsx?: () => void;
   onStopJob?: () => void;
   onDeleteJob?: () => void;
 };
@@ -176,6 +177,7 @@ export function PolzaOutreachResults({
   actionsBusy,
   exportProgress,
   onExportCsv,
+  onExportXlsx,
   onStopJob,
   onDeleteJob,
 }: Props) {
@@ -237,6 +239,14 @@ export function PolzaOutreachResults({
               className="inline-flex items-center rounded-lg border border-gray-200 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
             >
               <Download className="mr-1.5 h-4 w-4" /> CSV
+            </button>
+            <button
+              type="button"
+              onClick={onExportXlsx}
+              disabled={actionsBusy || !hasItems}
+              className="inline-flex items-center rounded-lg border border-gray-200 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              <Download className="mr-1.5 h-4 w-4" /> Excel
             </button>
             {running && onStopJob ? (
               <button
@@ -407,7 +417,10 @@ export function PolzaOutreachResults({
       </div>
 
       {totalPages > 1 ? (
-        <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-white px-6 py-3 text-sm shadow-sm">
+        <div className="flex items-center justify-center gap-4 rounded-xl border border-gray-200 bg-white px-6 py-3 text-sm shadow-sm">
+          {/* Кнопки стоят рядом с номером страницы, а не по краям полосы: на
+              широком экране между «Назад» и «Вперёд» было полтора метра пустоты,
+              и мышь ездила через весь экран ради одного клика. */}
           <button
             type="button"
             onClick={() => onPageChange(currentPage - 1)}

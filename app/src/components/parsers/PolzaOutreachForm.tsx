@@ -1,7 +1,7 @@
 'use client';
 
-import { useMemo, useState } from 'react';
-import { Loader2, Play, Send } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Check, ChevronDown, Loader2, Play, Send } from 'lucide-react';
 import type { PolzaOutreachConfig } from '@/types';
 import { POLZA_OUTREACH_DEFAULT_COUNTRIES } from '@/lib/polzaOutreach/types';
 
@@ -43,6 +43,31 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
   const [countries, setCountries] = useState<string[]>([...POLZA_OUTREACH_DEFAULT_COUNTRIES]);
   const [days, setDays] = useState<number>(30);
   const [limit, setLimit] = useState('100');
+  const [geoOpen, setGeoOpen] = useState(false);
+  const geoRef = useRef<HTMLDivElement>(null);
+
+  // Список закрывается по клику мимо и по Esc — как любое выпадающее меню.
+  useEffect(() => {
+    if (!geoOpen) return undefined;
+    const onPointer = (e: PointerEvent) => {
+      if (geoRef.current && !geoRef.current.contains(e.target as Node)) setGeoOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setGeoOpen(false); };
+    document.addEventListener('pointerdown', onPointer);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onPointer);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [geoOpen]);
+
+  const geoSummary = useCallback(() => {
+    if (countries.length === 0) return 'Страны не выбраны';
+    if (countries.length === GEO_OPTIONS.length) return 'Все страны';
+    return GEO_OPTIONS.filter((option) => countries.includes(option.code))
+      .map((option) => option.label)
+      .join(', ');
+  }, [countries]);
 
   const toggleCountry = (code: string) =>
     setCountries((prev) => (prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]));
@@ -52,7 +77,7 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
     return {
       countries: countries.length ? countries : [...POLZA_OUTREACH_DEFAULT_COUNTRIES],
       posted_within_days: days,
-      limit: Number.isFinite(parsed) ? Math.max(1, Math.min(300, Math.trunc(parsed))) : 100,
+      limit: Number.isFinite(parsed) ? Math.max(1, Math.min(1000, Math.trunc(parsed))) : 100,
     };
   }, [countries, days, limit]);
 
@@ -88,41 +113,66 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
         </button>
       </div>
 
-      <div className="mt-5">
-        <div className="mb-2 flex items-center justify-between">
-          <label className="block text-sm font-medium text-gray-700">
-            Гео вакансий <span className="font-normal text-gray-400">- remote не берём, гео должно быть доказуемо</span>
-          </label>
+      {/* Девятнадцать кнопок-стран занимали две строки и тянули на себя всё
+          внимание формы, хотя меняют их редко: обычно один-два раза под задачу.
+          Выпадающий список держит выбор в одной строке и показывает его
+          словами, а не набором подсвеченных кнопок, которые надо пересчитывать
+          глазами. */}
+      <div className="mt-5" ref={geoRef}>
+        <label className="mb-2 block text-sm font-medium text-gray-700">Гео вакансий</label>
+        <div className="relative">
           <button
             type="button"
-            onClick={() =>
-              setCountries((prev) =>
-                prev.length === GEO_OPTIONS.length ? [] : GEO_OPTIONS.map((option) => option.code),
-              )
-            }
-            className="text-xs font-medium text-violet-700 hover:text-violet-900"
+            onClick={() => setGeoOpen((v) => !v)}
+            className="flex w-full items-center justify-between gap-3 rounded-lg border border-gray-300 bg-white px-3 py-2 text-left text-sm text-gray-800 transition hover:border-violet-400"
           >
-            {countries.length === GEO_OPTIONS.length ? 'Снять все' : 'Выбрать все'}
+            <span className="min-w-0 truncate">{geoSummary()}</span>
+            <span className="flex shrink-0 items-center gap-2 text-xs text-gray-500">
+              {countries.length ? `${countries.length} из ${GEO_OPTIONS.length}` : null}
+              <ChevronDown className={`h-4 w-4 transition-transform ${geoOpen ? 'rotate-180' : ''}`} />
+            </span>
           </button>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {GEO_OPTIONS.map((option) => {
-            const selected = countries.includes(option.code);
-            return (
-              <button
-                key={option.code}
-                type="button"
-                onClick={() => toggleCountry(option.code)}
-                className={`rounded-full border px-3 py-1.5 text-sm font-medium transition-colors ${
-                  selected
-                    ? 'border-violet-600 bg-violet-600 text-white'
-                    : 'border-gray-300 bg-white text-gray-600 hover:border-violet-400 hover:text-violet-700'
-                }`}
-              >
-                {option.label}
-              </button>
-            );
-          })}
+
+          {geoOpen ? (
+            <div className="absolute left-0 right-0 z-30 mt-1 rounded-xl border border-gray-200 bg-white p-1.5 shadow-lg">
+              <div className="flex items-center justify-between px-2 py-1">
+                <span className="text-xs uppercase tracking-wide text-gray-500">Откуда берём вакансии</span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setCountries((prev) =>
+                      prev.length === GEO_OPTIONS.length ? [] : GEO_OPTIONS.map((option) => option.code),
+                    )
+                  }
+                  className="rounded-md px-1.5 py-0.5 text-xs font-medium text-violet-700 hover:bg-violet-50"
+                >
+                  {countries.length === GEO_OPTIONS.length ? 'Снять все' : 'Выбрать все'}
+                </button>
+              </div>
+              <div className="max-h-72 overflow-y-auto">
+                {GEO_OPTIONS.map((option) => {
+                  const selected = countries.includes(option.code);
+                  return (
+                    <button
+                      key={option.code}
+                      type="button"
+                      onClick={() => toggleCountry(option.code)}
+                      className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-100"
+                    >
+                      <span
+                        className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
+                          selected ? 'border-violet-600 bg-violet-600 text-white' : 'border-gray-300'
+                        }`}
+                      >
+                        {selected ? <Check className="h-3 w-3" /> : null}
+                      </span>
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -148,7 +198,7 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
           </div>
         </div>
         <label className="block">
-          <span className="mb-1 block text-sm font-medium text-gray-700">Компаний (лимит, 1–300)</span>
+          <span className="mb-1 block text-sm font-medium text-gray-700">Компаний (лимит, 1–1000)</span>
           <input
             value={limit}
             onChange={(e) => setLimit(e.target.value.replace(/\D/g, ''))}
