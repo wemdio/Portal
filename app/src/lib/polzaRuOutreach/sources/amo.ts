@@ -32,6 +32,8 @@ export interface AmoCandidate {
   domain: string;
   website: string | null;
   inn: string | null;
+  /** Почта контакта сделки, только если она на домене компании. */
+  contactEmail: string | null;
   statusName: string;
   priorContact: boolean;
   priorContactDate: string | null;
@@ -44,7 +46,7 @@ export async function loadAmoCandidates(db: SupabaseClient): Promise<AmoCandidat
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await db
       .from('amo_leads')
-      .select('amo_id,name,company_name,company_website,contact_email,status_name,pipeline_name,updated_at,closed_at,raw')
+      .select('amo_id,company_name,company_website,contact_email,status_name,pipeline_name,updated_at,closed_at,raw')
       .in('pipeline_name', PIPELINES)
       .in('status_name', STATUSES)
       .order('updated_at', { ascending: false })
@@ -66,8 +68,13 @@ export async function loadAmoCandidates(db: SupabaseClient): Promise<AmoCandidat
   const byDomain = new Map<string, AmoCandidate>();
   for (const lead of leads) {
     const website = typeof lead.company_website === 'string' ? lead.company_website : null;
-    const domain = normalizeDomain(website) ?? domainFromEmail(typeof lead.contact_email === 'string' ? lead.contact_email : null);
-    if (!domain) continue;
+    const email = typeof lead.contact_email === 'string' ? lead.contact_email.trim().toLowerCase() : null;
+    const domain = normalizeDomain(website) ?? domainFromEmail(email);
+    // Название сделки в AMO — не название компании («Заявки Coldy», адрес
+    // почты): без company_name обращаться в письме не к чему.
+    const companyName = typeof lead.company_name === 'string' ? lead.company_name.trim() : '';
+    if (!domain || !companyName) continue;
+    const emailDomain = domainFromEmail(email);
     const amoId = Number(lead.amo_id);
     const contactDate = (lead.closed_at ?? lead.updated_at) ? String(lead.closed_at ?? lead.updated_at) : null;
     const recentlyContacted = contactDate ? now - new Date(contactDate).getTime() < RECENT_CONTACT_DAYS * 86_400_000 : false;
@@ -75,10 +82,11 @@ export async function loadAmoCandidates(db: SupabaseClient): Promise<AmoCandidat
     const innField = raw.custom_fields_values?.find((f) => f.field_name === 'ИНН');
     const candidate: AmoCandidate = {
       amoId,
-      companyName: String(lead.company_name || lead.name || domain).trim(),
+      companyName,
       domain,
       website: website ?? `https://${domain}`,
       inn: normalizeInn(innField?.values?.[0]?.value),
+      contactEmail: email && emailDomain && (emailDomain === domain || emailDomain.endsWith(`.${domain}`)) ? email : null,
       statusName: String(lead.status_name ?? ''),
       priorContact: withNotes.has(amoId),
       priorContactDate: contactDate,
