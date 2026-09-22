@@ -31,7 +31,7 @@ const MIN_DESCRIPTION_CHARS = 300;
 const PAGE_SIZE = 500;
 // Страховочный потолок сканирования строк кэша: чтобы набрать `limit` компаний
 // после дедупа, просматриваем вакансии страницами до этого максимума.
-const MAX_SCAN_ROWS = 5000;
+const MAX_SCAN_ROWS = 20000;
 
 type CacheRow = {
   id: string;

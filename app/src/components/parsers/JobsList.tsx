@@ -202,6 +202,13 @@ export function JobsList({
             const partDetail = getPartitionDetail(job);
             const isPartitioning = job.status === 'running' && partDetail != null;
             const sourceStatsSummary = getSourceStatsSummary(job);
+            // Сколько получилось НА ВЫХОДЕ. «Обработано» отвечает на другой
+            // вопрос — сколько строк прошло через конвейер, — а спрашивают
+            // обычно про готовые: ради них прогон и затевался.
+            const readyCount = (() => {
+              const funnel = (job.progress_detail as { funnel?: { ready?: unknown } } | null)?.funnel;
+              return typeof funnel?.ready === 'number' ? funnel.ready : null;
+            })();
             return (
               <div
                 key={job.id}
@@ -271,6 +278,11 @@ export function JobsList({
                         {totalParsed != null ? (
                           <span>
                             Обработано: {totalParsed}
+                          </span>
+                        ) : null}
+                        {readyCount != null ? (
+                          <span className={readyCount > 0 ? 'text-emerald-600' : undefined}>
+                            Готово: {readyCount}
                           </span>
                         ) : null}
                         {job.error_message ? (

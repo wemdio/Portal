@@ -2,7 +2,8 @@
 
 import { Fragment, useState } from 'react';
 import type { PolzaOutreachCompanyRow, PolzaOutreachFunnel, ParserJobStatus } from '@/types';
-import { PolzaOutreachStages } from '@/components/parsers/PolzaOutreachStages';
+import { POLZA_STAGE_LABELS, PolzaOutreachStages } from '@/components/parsers/PolzaOutreachStages';
+import { PolzaOutreachStageModal } from '@/components/parsers/PolzaOutreachStageModal';
 import { ChevronDown, ChevronRight, Download, ExternalLink, FileText, Loader2, Mail, Square, Trash2 } from 'lucide-react';
 
 type Props = {
@@ -14,12 +15,15 @@ type Props = {
   jobStatus: ParserJobStatus | null;
   /** Текст ошибки запуска — показываем у этапа, на котором встали. */
   jobError?: string | null;
+  /** Строки всего прогона — для разбора этапа. */
+  loadAllRows?: () => Promise<PolzaOutreachCompanyRow[]>;
   currentPage: number;
   totalPages: number;
   onPageChange: (page: number) => void;
   actionsBusy: boolean;
   exportProgress: string | null;
   onExportCsv: () => void;
+  onExportXlsx?: () => void;
   onStopJob?: () => void;
   onDeleteJob?: () => void;
 };
@@ -44,6 +48,23 @@ const EXCLUSION_LABELS: Record<string, string> = {
   duplicate_domain: 'дубль домена',
   no_outbound_mandate: 'нет outbound-мандата',
 };
+
+/**
+ * Причины, по которым строка ушла на ручную проверку.
+ *
+ * Показывались машинным кодом («no_corporate_email»): оператору он ничего не
+ * объясняет, а гадать по подчёркиваниям — не его работа.
+ */
+const REVIEW_LABELS: Record<string, string> = {
+  no_corporate_email: 'не нашли корпоративную почту',
+  generic_company: 'слишком общее описание компании',
+  low_geo_confidence: 'гео продаж подтверждено слабо',
+  letters_guard_failed: 'письма не прошли проверку правил',
+};
+
+function reviewLabel(reason: string): string {
+  return REVIEW_LABELS[reason] ?? reason;
+}
 
 const CONFIDENCE_STYLES: Record<string, string> = {
   high: 'border-emerald-200 bg-emerald-50 text-emerald-800',
@@ -149,16 +170,19 @@ export function PolzaOutreachResults({
   loading,
   jobStatus,
   jobError,
+  loadAllRows,
   currentPage,
   totalPages,
   onPageChange,
   actionsBusy,
   exportProgress,
   onExportCsv,
+  onExportXlsx,
   onStopJob,
   onDeleteJob,
 }: Props) {
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [openStage, setOpenStage] = useState<number | null>(null);
   const running = jobStatus === 'running' || jobStatus === 'pending';
   const hasItems = items.length > 0;
 
@@ -166,12 +190,30 @@ export function PolzaOutreachResults({
     <div className="space-y-4">
       {/* Цепочка этапов вместо ряда цифр: по плоской воронке не понять, где
           сейчас работа и где она встала — все нули выглядят одинаково и когда
-          конвейер не запускали, и когда он упал на первом шаге. */}
-      <PolzaOutreachStages
-        funnel={funnel}
-        run={jobStatus ? { running, failed: jobStatus === 'failed' } : null}
-        error={jobError}
-      />
+          конвейер не запускали, и когда он упал на первом шаге.
+
+          Пока запуск не выбран, цепочки нет вовсе: шесть строк с нулями
+          занимают пол-экрана и не отвечают ни на один вопрос — этапы всегда
+          про конкретный прогон. */}
+      {jobStatus ? (
+        <PolzaOutreachStages
+          funnel={funnel}
+          run={{ running, failed: jobStatus === 'failed' }}
+          error={jobError}
+          onOpenStage={loadAllRows ? setOpenStage : undefined}
+        />
+      ) : null}
+
+      {openStage !== null && loadAllRows ? (
+        <PolzaOutreachStageModal
+          stageIndex={openStage}
+          stageLabel={POLZA_STAGE_LABELS[openStage] ?? 'Этап'}
+          loadRows={loadAllRows}
+          reviewLabel={reviewLabel}
+          exclusionLabel={(reason) => EXCLUSION_LABELS[reason] ?? reason}
+          onClose={() => setOpenStage(null)}
+        />
+      ) : null}
 
       {exclusionCounts && Object.keys(exclusionCounts).length > 0 ? (
         <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
@@ -203,6 +245,14 @@ export function PolzaOutreachResults({
               className="inline-flex items-center rounded-lg border border-gray-200 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
             >
               <Download className="mr-1.5 h-4 w-4" /> CSV
+            </button>
+            <button
+              type="button"
+              onClick={onExportXlsx}
+              disabled={actionsBusy || !hasItems}
+              className="inline-flex items-center rounded-lg border border-gray-200 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              <Download className="mr-1.5 h-4 w-4" /> Excel
             </button>
             {running && onStopJob ? (
               <button
@@ -337,8 +387,8 @@ export function PolzaOutreachResults({
                             </div>
                           ) : null}
                           {row.review_reason ? (
-                            <div className="mt-0.5 max-w-[140px] truncate text-[11px] text-gray-400" title={row.review_reason}>
-                              {row.review_reason}
+                            <div className="mt-0.5 max-w-[140px] truncate text-[11px] text-gray-400" title={reviewLabel(row.review_reason)}>
+                              {reviewLabel(row.review_reason)}
                             </div>
                           ) : null}
                         </td>
@@ -354,7 +404,7 @@ export function PolzaOutreachResults({
                                 <EvidenceBlock row={row} />
                                 {row.review_reason ? (
                                   <div className="rounded-lg border border-amber-100 bg-amber-50 p-3 text-sm text-amber-900">
-                                    На ручную проверку: {row.review_reason}
+                                    На ручную проверку: {reviewLabel(row.review_reason)}
                                   </div>
                                 ) : null}
                               </div>
@@ -373,7 +423,10 @@ export function PolzaOutreachResults({
       </div>
 
       {totalPages > 1 ? (
-        <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-white px-6 py-3 text-sm shadow-sm">
+        <div className="flex items-center justify-center gap-4 rounded-xl border border-gray-200 bg-white px-6 py-3 text-sm shadow-sm">
+          {/* Кнопки стоят рядом с номером страницы, а не по краям полосы: на
+              широком экране между «Назад» и «Вперёд» было полтора метра пустоты,
+              и мышь ездила через весь экран ради одного клика. */}
           <button
             type="button"
             onClick={() => onPageChange(currentPage - 1)}

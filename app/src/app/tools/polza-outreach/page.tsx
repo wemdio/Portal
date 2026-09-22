@@ -9,7 +9,7 @@ export default function PolzaOutreachPage() {
           колонки не помещаются. Переезд на свою страницу масштаб не меняет. */}
       <div className="space-y-6" style={{ zoom: 0.85 }}>
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Англ. аутрич (авто)</h1>
+          <h1 className="text-2xl font-bold text-gray-900">Английский автоаутрич</h1>
           <p className="mt-1 text-sm text-gray-500">
             Свежие вакансии SDR/BDR → компания и почта → цепочка из четырёх писем на английском
           </p>

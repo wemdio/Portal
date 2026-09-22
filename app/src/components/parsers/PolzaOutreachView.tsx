@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { X } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch } from '@/lib/authFetch';
 import type { PolzaOutreachCompanyRow, PolzaOutreachConfig, PolzaOutreachFunnel, PolzaOutreachParserJob } from '@/types';
@@ -140,6 +141,14 @@ export function PolzaOutreachView() {
   const [deleteCandidate, setDeleteCandidate] = useState<string | null>(null);
 
   const activeJob = useMemo(() => jobs.find((job) => job.id === activeJobId) ?? null, [activeJobId, jobs]);
+
+  // Полосу ошибки читают один раз, а места она занимала до перезагрузки
+  // страницы — и следующая ошибка падала поверх прежней.
+  useEffect(() => {
+    if (!error) return undefined;
+    const timer = window.setTimeout(() => setError(null), 15_000);
+    return () => window.clearTimeout(timer);
+  }, [error]);
   const totalPages = Math.max(1, Math.ceil(resultsCount / RESULTS_LIMIT));
 
   const refreshJobs = useCallback(async () => {
@@ -164,6 +173,23 @@ export function PolzaOutreachView() {
       setResultsLoading(false);
     }
   }, []);
+
+  /**
+   * Все строки прогона — для разбора этапа.
+   *
+   * Таблица листается по полусотне, а этап — это про весь прогон: показывать
+   * его по строкам, случайно оказавшихся на текущей странице, значило бы
+   * отвечать не на тот вопрос. Потолок ручки — тысяча строк, лимит запуска —
+   * триста компаний, так что в один запрос прогон помещается целиком.
+   */
+  const loadAllRows = useCallback(async (): Promise<PolzaOutreachCompanyRow[]> => {
+    if (!activeJobId) return [];
+    const data = await apiFetch<ResultsResponse>(
+      `/api/parsers/polza-outreach/${activeJobId}/results?limit=1000&offset=0`,
+      { method: 'GET' },
+    );
+    return data.items ?? [];
+  }, [activeJobId]);
 
   const fetchAllResults = useCallback(async (jobId: string) => {
     const all: PolzaOutreachCompanyRow[] = [];
@@ -332,6 +358,41 @@ export function PolzaOutreachView() {
     }
   }, [activeJobId, fetchAllResults]);
 
+  /**
+   * Excel собирает сервер и отдаёт готовым файлом.
+   *
+   * CSV открывают в Excel, и там он рассыпается: письма содержат переносы
+   * строк и запятые, а локаль путает разделитель. Тащить exceljs в браузер
+   * ради этого незачем — он тяжёлый, и на странице парсеров ему делать нечего.
+   */
+  const exportXlsx = useCallback(async () => {
+    if (!activeJobId) return;
+    setActionsBusy(true);
+    setExportProgress('Excel: собираю файл');
+    try {
+      const res = await authFetch(`/api/parsers/polza-outreach/${activeJobId}/export`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => null) as { error?: string } | null;
+        throw new Error(body?.error ?? `Не удалось выгрузить (HTTP ${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `polza_outreach_${activeJobId.slice(0, 8)}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      setToast({ tone: 'success', message: 'Excel готов' });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Ошибка выгрузки');
+    } finally {
+      setActionsBusy(false);
+      setExportProgress(null);
+    }
+  }, [activeJobId]);
+
   const stopJob = useCallback(async () => {
     if (!activeJobId) return;
     try {
@@ -363,7 +424,22 @@ export function PolzaOutreachView() {
 
   return (
     <div className="space-y-6">
-      {error ? <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div> : null}
+      {/* Полоса ошибки висела до перезагрузки страницы: прочитали один раз, а
+          место она занимала всегда — и поверх неё падала следующая. Теперь
+          уходит сама через 15 секунд, и её можно закрыть раньше. */}
+      {error ? (
+        <div className="flex items-start justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <span className="min-w-0 break-words">{error}</span>
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            aria-label="Закрыть"
+            className="shrink-0 rounded p-0.5 text-red-400 transition hover:text-red-700"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      ) : null}
       {toast ? (
         <div
           className={`fixed bottom-4 right-4 z-50 max-w-[92vw] rounded-xl border px-4 py-3 text-sm shadow-lg ${
@@ -398,12 +474,14 @@ export function PolzaOutreachView() {
           loading={resultsLoading}
           jobStatus={activeJob?.status ?? null}
           jobError={activeJob?.error_message ?? null}
+          loadAllRows={activeJobId ? loadAllRows : undefined}
           currentPage={resultsPage}
           totalPages={totalPages}
           onPageChange={handlePageChange}
           actionsBusy={actionsBusy}
           exportProgress={exportProgress}
           onExportCsv={() => void exportCsv()}
+          onExportXlsx={() => void exportXlsx()}
           onStopJob={activeJob?.id ? () => void stopJob() : undefined}
           onDeleteJob={activeJob?.id ? () => setDeleteCandidate(activeJob.id) : undefined}
         />
