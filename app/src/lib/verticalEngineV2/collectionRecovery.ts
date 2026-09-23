@@ -5,6 +5,9 @@ import { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
 import { isVeRelevanceTriageEnabled } from './relevanceTriageConfig';
 import { normalizeVeMaxEmailsPerCompany } from './companyContactCap';
 import { VE_COMPANY_CAP_FIELD } from './relevanceReserve';
+import { veCanWidenPlan } from './planWidening';
+import type { VeAdaptiveCollection } from './adaptiveCollection';
+import type { VeCollectTask } from './prompts/sourcePlan';
 
 /** Explicit continuation only: a terminal partial preview is never daily supply. */
 export function canResumePartialPreview(base: Record<string, unknown>): boolean {
@@ -35,12 +38,19 @@ export function canResumePartialPreview(base: Record<string, unknown>): boolean 
     reserve, ready: [], source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
     triage: isVeRelevanceTriageEnabled(typeof base.project_id === 'string' ? base.project_id : null),
   }).rows.length > 0) return true;
-  return Number(target.candidates_processed) < Number(target.max_candidates)
-    && Number(target.round) < Number(target.max_rounds)
-    && Array.isArray(info.tasks) && info.tasks.some((task) =>
-      task && (task.status === 'pending' || task.status === 'dispatched'
-        || (task.status === 'done' && (task.source === 'companies_directory' || task.catalog)
-          && !task.exhausted && !task.hit_ceiling)));
+  if (!(Number(target.candidates_processed) < Number(target.max_candidates)
+    && Number(target.round) < Number(target.max_rounds)) || !Array.isArray(info.tasks)) return false;
+  if (info.tasks.some((task) =>
+    task && (task.status === 'pending' || task.status === 'dispatched'
+      || (task.status === 'done' && (task.source === 'companies_directory' || task.catalog)
+        && !task.exhausted && !task.hit_ceiling)))) return true;
+  // План выбран до дна, но база ещё не расширяла срез сама (вторая очередь
+  // без придуманных порогов или подбор нового среза): её можно продолжить.
+  // Так остались 33 базы аудита 22.09 — «Продолжить подготовку» их не брала.
+  const planTasks = info.tasks.filter((task) => task && typeof task.task === 'object' && task.task)
+    .map((task) => task.task as VeCollectTask);
+  return target.status !== 'error'
+    && veCanWidenPlan(planTasks, info.adaptive_collection as VeAdaptiveCollection | undefined);
 }
 
 /** Only recognized preview failures may reuse a base; never supply/refill. */

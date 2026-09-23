@@ -15,6 +15,7 @@ import { withProviderUsage } from '@/lib/providerUsage';
 import type { SerperOrganicItem } from '@/lib/search/serperClient';
 import { createVeSearchCapacity, searchVeRelevanceWebsites, VeSearchProviderError } from '@/lib/verticalEngineV2/relevanceSearch';
 import { createVeCachedSearch, freshVeSearchCacheItems, VE_EMPTY_SEARCH_CACHE_TTL_MS, VE_SEARCH_CACHE_TTL_MS } from '@/lib/verticalEngineV2/relevanceSearchCache';
+import { resetProxyGroupsCache } from '@/lib/enrich/proxyPool';
 
 jest.mock('@/lib/clientDemo/personalize', () => ({ assertPublicWebsite: jest.fn() }));
 jest.mock('@/lib/enrich/websiteParser', () => ({
@@ -69,6 +70,10 @@ describe('llm rawCall retry', () => {
     process.env.VE_MODEL_GATE = 'openai/gpt-4o-mini';
     process.env.VE_MODEL_RELEVANCE_REVIEW = 'openai/gpt-5-mini';
     delete process.env.VE_LLM_TIMEOUT_MS;
+    // Чтение сайтов здесь — без пула RU-прокси, даже если он задан в .env:
+    // с пулом второй заход своей главной идёт ещё и через прокси.
+    for (const name of ['YANDEXMAPS_PROXY_URLS_PRIORITY', 'YANDEXMAPS_PROXY_URLS', 'PROXY_URLS']) delete process.env[name];
+    resetProxyGroupsCache();
     jest.useFakeTimers();
     // Isolate the process-wide coordinator, while exercising its real logic.
     const capacity = createVeLlmRateLimit();
@@ -78,6 +83,7 @@ describe('llm rawCall retry', () => {
 
   afterEach(() => {
     process.env = { ...envBackup };
+    resetProxyGroupsCache();
     setVeActiveJobSignal(null);
     global.fetch = originalFetch;
     jest.useRealTimers();

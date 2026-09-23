@@ -1,4 +1,5 @@
 /** Evidence-backed hypothesis triage. Uncertainty is retained, never silently accepted or discarded. */
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { z } from 'zod';
 import { getProviderUsageScope, ProviderUsageWriteError } from '@/lib/providerUsage';
 import { logInfo } from '@/lib/loggerServer';
@@ -54,7 +55,9 @@ const WEBSITE_UNCONFIRMED_REASON = 'Сайт не дал подтвержден�
 const WEBSITE_CONCURRENCY = 8;
 // Журнал длительностей фазы сайтов. Версия отделяет замеры, снятые при разной
 // форме волны: сравнивать барьер с пулом можно только внутри одной версии.
-const WEBSITE_TIMING_VERSION = 1;
+// 2 — ярлык таймаута сужен до своей стартовой страницы, появились второй заход
+// через прокси и задержка event loop; slowButUsable — только при готовом тексте.
+const WEBSITE_TIMING_VERSION = 2;
 // Границы гистограммы в миллисекундах; последняя корзина — всё, что больше.
 const WAVE_BUCKETS_MS = [1_000, 5_000, 15_000, 30_000, 60_000, 120_000] as const;
 /** Одна волна фазы сайтов. Ничего из этого не попадает в чекпойнт и в
@@ -77,12 +80,24 @@ export interface VeWebsiteWaveTiming {
    * в wallMs и не должно попадать в «сколько можно сэкономить». */
   saveMs: number;
   pagesRead: number;
+  /** RU-прокси: GET через прокси, своя главная открылась только через прокси,
+   * компания получила готовый текст с сайта, страницу которого принёс прокси
+   * (главную или реквизиты), не хватило пропуска. Пользу прокси показывает
+   * proxyVerified: спасённая главная без реквизитов ничего не даёт. */
+  proxyAttempts: number;
+  proxyRescued: number;
+  proxyVerified: number;
+  proxyDenied: number;
+  /** Худшая задержка event loop за волну: таймауты под нагрузкой бывают от
+   * самого процесса, а не от сайта. */
+  loopDelayMaxMs: number;
   outcomes: { ok: number; unavailable: number; providerError: number; deferred: number;
     timeoutPage: number; timeoutDeadline: number; slowButUsable: number };
 }
 function newWaveTiming(slots: number): VeWebsiteWaveTiming {
   return { slots, companies: 0, cached: 0, wallMs: 0, sumMs: 0, maxMs: 0, minMs: 0,
     buckets: WAVE_BUCKETS_MS.map(() => 0).concat(0), saveMs: 0, pagesRead: 0,
+    proxyAttempts: 0, proxyRescued: 0, proxyVerified: 0, proxyDenied: 0, loopDelayMaxMs: 0,
     outcomes: { ok: 0, unavailable: 0, providerError: 0, deferred: 0, timeoutPage: 0, timeoutDeadline: 0, slowButUsable: 0 } };
 }
 function recordWaveCompany(wave: VeWebsiteWaveTiming, ms: number, evidence: VeRelevanceEvidence): void {
@@ -93,6 +108,10 @@ function recordWaveCompany(wave: VeWebsiteWaveTiming, ms: number, evidence: VeRe
   const bucket = WAVE_BUCKETS_MS.findIndex((edge) => ms < edge);
   wave.buckets[bucket === -1 ? WAVE_BUCKETS_MS.length : bucket] += 1;
   wave.pagesRead += evidence.pages ?? 0;
+  wave.proxyAttempts += evidence.proxy?.attempts ?? 0;
+  wave.proxyRescued += evidence.proxy?.rescued ?? 0;
+  wave.proxyVerified += evidence.proxy?.verified ?? 0;
+  wave.proxyDenied += evidence.proxy?.denied ?? 0;
   const timedOut = evidence.reason === 'website_evidence_timeout';
   if (evidence.search_deferred) wave.outcomes.deferred += 1;
   else if (evidence.provider_error) wave.outcomes.providerError += 1;
@@ -100,8 +119,9 @@ function recordWaveCompany(wave: VeWebsiteWaveTiming, ms: number, evidence: VeRe
   else if (evidence.status === 'ok') wave.outcomes.ok += 1;
   else wave.outcomes.unavailable += 1;
   // Молчащая страница, после которой текст всё равно набрался: цена уплачена,
-  // а в ярлыках её не видно вовсе.
-  if (!timedOut && evidence.timeout) wave.outcomes.slowButUsable += 1;
+  // а в ярлыках её не видно вовсе. Без текста это не «пригодный» ответ, даже
+  // если ярлык окончательный (молчал каталог из поиска).
+  if (evidence.status === 'ok' && evidence.timeout) wave.outcomes.slowButUsable += 1;
 }
 /** Отдельный источник событий, а НЕ ve_provider_usage: сводка стоимости
  * считает любое незнакомое событие внутри того источника дефектом учёта
@@ -1141,6 +1161,9 @@ export async function findIrrelevantRows(input: {
       signal?.throwIfAborted(); const enriched: Entry[] = [];
       const wave = newWaveTiming(Math.min(WEBSITE_CONCURRENCY, review.length - start));
       const waveStartedAt = Date.now();
+      // Задержка event loop за волну: снимается и при отмене, таймер гистограммы не остаётся.
+      const loopDelay = monitorEventLoopDelay({ resolution: 20 });
+      loopDelay.enable();
       await Promise.all(review.slice(start, start + WEBSITE_CONCURRENCY).map(async (entry) => {
         if (stopProviderCalls) return;
         const cached = checkpoint.website_evidence[entry.key];
@@ -1213,7 +1236,10 @@ export async function findIrrelevantRows(input: {
           if (websiteTimeoutPending(checkpoint.website_evidence[entry.key])) delete decision.website_review_version;
           record(entry, decision);
         }
-      }));
+      })).finally(() => {
+        loopDelay.disable();
+        wave.loopDelayMaxMs = Math.round(loopDelay.max / 1e6);
+      });
       // Стена барьера снимается ДО save(): сохранение пул не отменяет, и
       // класть его в wallMs значило бы записать долговечность в простой.
       const waveWallMs = Date.now() - waveStartedAt;
