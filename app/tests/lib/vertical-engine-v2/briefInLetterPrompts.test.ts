@@ -564,6 +564,21 @@ describe('VE2 follow-up timing through generation and launch', () => {
     expect(failed.inserts).toEqual([]);
   });
 
+  it('writes 4 final letters by default, even when the legacy draft had 3; a longer legacy draft keeps its length', async () => {
+    for (const [saved, expected] of [[[], 4], [[0, 2, 4], 4], [[0, 2, 4, 6, 8], 5]] as Array<[number[], number]>) {
+      const db = timingDb(saved);
+      jest.mocked(callLLMWithSchema).mockClear().mockResolvedValueOnce({
+        data: { subject_options: ['Сотрудничество', 'Развитие клиники', 'Ваши приоритеты', 'Работа с клиентами', 'Новые возможности', 'Обсудим задачу'], letters: Array.from({ length: expected }, () => ({
+          a: { body: 'Здравствуйте. Обсудим сотрудничество?\nКоманда клиента', angle: 'Сотрудничество', cta_intent: 'check_relevance' },
+          b: { body: 'Здравствуйте. Кто отвечает за развитие?\nКоманда клиента', angle: 'Ответственный', cta_intent: 'identify_owner' },
+        })) },
+        ...usage,
+      });
+      await runTemplateStage(job('template'), context(db));
+      expect(JSON.stringify(jest.mocked(callLLMWithSchema).mock.calls[0][0])).toContain(`Write ${expected} emails`);
+    }
+  });
+
   it('preserves legacy gaps in direct final generation and maps them to Instantly delay on the preceding step', async () => {
     const db = timingDb([0, 0, 4, 8]);
     jest.mocked(callLLMWithSchema).mockResolvedValueOnce({

@@ -1240,6 +1240,7 @@ export async function runSearchParserJob(jobId: string) {
             try {
               const { emails, brand_name } = await fetchWebsiteEmails(lead.site, {
                 maxPages: ENRICH_EMAIL_MAX_PAGES_PER_SITE,
+                adaptiveRoutes: true,
               });
               const cleaned = emails.map((e) => e.trim()).filter(Boolean);
               const unique = Array.from(new Set(cleaned)).slice(0, 3);
