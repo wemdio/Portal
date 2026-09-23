@@ -21,8 +21,8 @@
  * другим НЕ передаётся (сегменты — независимые воронки).
  *
  * ИЗОЛЯЦИЯ: единственный санкционированный импорт из outreachos —
- * seenEmployers (обратный кросс-дедуп §4.2 дизайн-дока top-up'а: не писать
- * компаниям, которым OutreachOS писал за последние 45 дней). Mailganer-стек
+ * seenEmployers (обратный кросс-дедуп §4.2 дизайн-дока top-up'а: учитывать
+ * статусные сроки seen-журнала OutreachOS). Mailganer-стек
  * по-прежнему не импортируется нигде.
  */
 
@@ -186,9 +186,9 @@ export async function pullSegmentCandidates(
   const out: SegmentCandidate[] = [];
 
   // Обратный кросс-дедуп (§4.2 дизайн-дока 2026-08-11-outreachos-2gis-topup):
-  // компании, которым OutreachOS (HH+SJ или 2GIS top-up) писал за последние
-  // RECONTACT_AFTER_DAYS дней, этот пайплайн не трогает — общий ключ миров =
-  // домен сайта. Единое окно ре-контакта 45д (решение §7.3 дока).
+  // Компании из активного seen-окна OutreachOS этот пайплайн не трогает;
+  // общий ключ миров — домен сайта. Отправленные защищены 45 дней,
+  // no_email имеет короткое окно повторной проверки.
   const outreachosSeenDomains = await loadRecentlySeenDomains(RECONTACT_AFTER_DAYS);
 
   for (let s = 0; s < segments.length; s++) {
@@ -240,8 +240,8 @@ export async function pullSegmentCandidates(
           duplicateSiteDropped += 1;
           continue;
         }
-        // Домен в seen-журнале OutreachOS (45д) — пропускаем: компания уже
-        // получила письмо от основного пайплайна (или его 2GIS top-up'а).
+        // Домен в активном seen-журнале OutreachOS — пропускаем: компания уже
+        // обработана основным пайплайном (или его 2GIS top-up'ом).
         const domain = deriveDomain(card.website);
         if (domain && outreachosSeenDomains.has(domain)) {
           outreachosDropped += 1;
@@ -258,7 +258,7 @@ export async function pullSegmentCandidates(
       `[segments] ${segment.key}: pulled=${pulled}/${quota} ` +
         `(scanned=${scanned}, seen-id-отсев=${seenDropped}, seen-domain-отсев=${seenDomainDropped}, ` +
         `дубли-сайта-отсев=${duplicateSiteDropped}, недавние-проверки-отсев=${recentDropped}, ` +
-        `outreachos-${RECONTACT_AFTER_DAYS}д-отсев=${outreachosDropped})`,
+        `outreachos-seen-отсев=${outreachosDropped})`,
     );
   }
 
