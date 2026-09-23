@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { VeCollectTask } from './prompts/sourcePlan';
 import { collectionRoundLimit, type VeCollectionTargetProgress } from './collectionTarget';
+import { veContactLimitKey } from './companyContactCap';
 
 export const VE_ADAPTIVE_BATCH_SIZE = 100;
 /** Candidates are not recipients. Near the goal retain a useful 50-company
@@ -27,6 +28,8 @@ export const veReadyContactKeys = (rows: Array<Record<string, unknown>>) => [...
 export interface VeBatchSpend { ai_usd: number; serper_credits: number; estimated_total_usd: number; unknown_attempts: number; complete: boolean }
 export interface VeAdaptiveResult {
   id: string; source_key: string; source: string; candidates: number; new_ready: number;
+  /** Новые контакты в единицах цели (не больше K адресов на компанию). У партий до 23.09.2026 поля нет. */
+  new_target?: number;
   started_at: string; finished_at: string; spend: VeBatchSpend; poor: boolean;
 }
 export interface VeAdaptiveCollection {
@@ -47,7 +50,8 @@ export function validVeAdaptiveCollection(state: VeAdaptiveCollection): boolean 
     && (state.widenings === undefined || count(state.widenings, 2))
     && count(state.switches, 1000) && Array.isArray(state.completed) && state.completed.length <= 100
     && state.completed.every((batch) => batch && typeof batch.id === 'string' && typeof batch.source_key === 'string'
-      && count(batch.candidates, 100) && count(batch.new_ready, 1_000_000) && typeof batch.poor === 'boolean')
+      && count(batch.candidates, 100) && count(batch.new_ready, 1_000_000) && typeof batch.poor === 'boolean'
+      && (batch.new_target === undefined || count(batch.new_target, 1_000_000)))
     && (!state.pending || (typeof state.pending.id === 'string' && typeof state.pending.source_key === 'string'
       && count(state.pending.candidates, 100) && state.pending.candidates > 0 && date(state.pending.started_at)
       && Array.isArray(state.pending.ready_before) && state.pending.ready_before.every((key) => /^[a-f0-9]{64}$/.test(key))));
@@ -85,14 +89,41 @@ export function veAdaptiveLowYield(completed: VeAdaptiveResult[], sourceKey: str
   const windows = veAdaptiveYieldWindows(completed, sourceKey);
   return windows.length === 2 && windows.every((window) => window.poor);
 }
-export function finishVeAdaptiveBatch(state: VeAdaptiveCollection, readyRows: Array<Record<string, unknown>>, spend: VeBatchSpend, now = new Date().toISOString()): VeAdaptiveCollection {
+/**
+ * Сколько новых контактов партия добавила к цели: цель считает не больше K
+ * адресов одной компании (K — лимит специалиста, без него 3; null — без
+ * ограничения). Шестой адрес компании, у которой уже три, цели не прибавляет.
+ */
+function veAddedTargetContacts(rows: Array<Record<string, unknown>>, before: Set<string>, perCompany: number | null): number {
+  const companies = new Map<string, Map<string, boolean>>();
+  for (const row of rows) {
+    const email = String(row.email ?? '').trim().toLowerCase();
+    if (!email) continue;
+    const key = createHash('sha256').update(email).digest('hex');
+    const company = veContactLimitKey(row);
+    const emails = companies.get(company) ?? new Map<string, boolean>();
+    emails.set(key, before.has(key));
+    companies.set(company, emails);
+  }
+  const cap = perCompany ?? Number.POSITIVE_INFINITY;
+  let added = 0;
+  for (const emails of companies.values()) {
+    const old = [...emails.values()].filter(Boolean).length;
+    added += Math.min(cap, emails.size) - Math.min(cap, old);
+  }
+  return added;
+}
+export function finishVeAdaptiveBatch(state: VeAdaptiveCollection, readyRows: Array<Record<string, unknown>>, spend: VeBatchSpend,
+  now = new Date().toISOString(), perCompany: number | null = null): VeAdaptiveCollection {
   if (!state.pending) return state;
   const pending = state.pending;
   if (state.completed.some((item) => item.id === pending.id)) return { ...state, pending: undefined };
   const before = new Set(pending.ready_before);
   const added = veReadyContactKeys(readyRows).filter((key) => !before.has(key)).length;
   const result: VeAdaptiveResult = { id: pending.id, source_key: pending.source_key, source: pending.source,
-    candidates: pending.candidates, new_ready: added, started_at: pending.started_at, finished_at: now, spend, poor: false };
+    candidates: pending.candidates, new_ready: added,
+    new_target: Math.min(added, veAddedTargetContacts(readyRows, before, perCompany)),
+    started_at: pending.started_at, finished_at: now, spend, poor: false };
   // The batch is judged together with its predecessors until 50 companies.
   result.poor = veAdaptiveYieldWindows([...state.completed, result], pending.source_key, 1)[0]?.poor === true;
   const completed = [...state.completed, result].slice(-100);
@@ -104,19 +135,95 @@ export function finishVeAdaptiveBatch(state: VeAdaptiveCollection, readyRows: Ar
   if (!needsSwitch) delete next.replan_reason;
   return next;
 }
+
+/**
+ * Сухой источник (решение владельца 23.09.2026: останавливать сухую базу
+ * должен движок, а не специалист). Источник — стратегия выборки (source_key):
+ * тот же источник с другим запросом или срезом меряется отдельно. Сухой — если
+ * его последние не меньше VE_DRY_SOURCE_MIN_COMPANIES проверенных компаний
+ * дали меньше VE_DRY_SOURCE_MIN_CONTACTS новых готовых контактов в единицах цели.
+ *
+ * Замер 23.09.2026 по партиям Когнитуса (adaptive_collection.completed):
+ *
+ *   Фонды помощи аутизму, карты    1 814 компаний → 47 контактов (2,6 %)
+ *   Инклюзивные школы, карты       3 376 → 4 (два запроса)
+ *   Центры диагностики РАС, реестр 4 275 → 2
+ *   Фонды помощи аутизму, реестр   3 786 → 0
+ *
+ * Окно 1 500, а не меньше: у рабочих карт Фондов худшие 500 подряд компаний
+ * дали 4 контакта, худшие 1 000 — 13, худшие 1 500 — 36. На окне в 500 правило
+ * выключило бы единственный рабочий источник базы. Порог 5 на 1 500 — это
+ * 0,33 %: при таком выходе сотня контактов (порог узкого рынка) стоила бы
+ * 30 000 проверенных компаний, а у сухих источников замера окно даёт 0–4.
+ * История — последние 100 партий: если в них у источника меньше 1 500
+ * компаний (партии по 1–15 компаний), приговора нет и источник живой.
+ */
+export const VE_DRY_SOURCE_MIN_COMPANIES = 1_500;
+export const VE_DRY_SOURCE_MIN_CONTACTS = 5;
+export interface VeDrySource { source_key: string; source: string; companies: number; contacts: number }
+/** Итог последних ≥1 500 компаний источника, если он сухой; иначе null (в том числе пока компаний меньше). */
+export function veAdaptiveSourceDry(completed: VeAdaptiveResult[], sourceKey: string): VeDrySource | null {
+  let companies = 0, contacts = 0, source = '';
+  for (let index = completed.length - 1; index >= 0; index--) {
+    const batch = completed[index];
+    if (batch.source_key !== sourceKey) continue;
+    companies += batch.candidates;
+    contacts += Number.isSafeInteger(batch.new_target) ? batch.new_target! : batch.new_ready;
+    source ||= batch.source;
+    if (companies >= VE_DRY_SOURCE_MIN_COMPANIES) {
+      return contacts < VE_DRY_SOURCE_MIN_CONTACTS ? { source_key: sourceKey, source, companies, contacts } : null;
+    }
+  }
+  return null;
+}
+/** Все живые источники базы сухие: их итоги; иначе null. Без живых источников решает другое правило. */
+export function veDryLiveSources(completed: VeAdaptiveResult[], liveKeys: Iterable<string>): VeDrySource[] | null {
+  const keys = [...new Set(liveKeys)];
+  if (!keys.length) return null;
+  const dry: VeDrySource[] = [];
+  for (const key of keys) {
+    const verdict = veAdaptiveSourceDry(completed, key);
+    if (!verdict) return null;
+    dry.push(verdict);
+  }
+  return dry;
+}
+const VE_DRY_SOURCE_FROM: Record<string, string> = {
+  companies_directory: 'реестра', yandex_maps: 'Яндекс Карт', google_maps: 'Google Maps', hh_live: 'вакансий hh.ru',
+  eng_hiring: 'вакансий', pdl: 'каталога PDL', funded: 'каталога стартапов',
+};
+const ruPlural = (value: number, one: string, few: string, many: string) => {
+  const tens = value % 100, units = value % 10;
+  return tens >= 11 && tens <= 14 ? many : units === 1 ? one : units >= 2 && units <= 4 ? few : many;
+};
+/** «последние 1568 компаний из Яндекс Карт дали 4 контакта»; срезы одного источника сложены. */
+export function veDrySourcesSummary(dry: VeDrySource[]): string {
+  const bySource = new Map<string, { companies: number; contacts: number }>();
+  for (const item of dry) {
+    const label = VE_DRY_SOURCE_FROM[item.source] ?? item.source;
+    const total = bySource.get(label) ?? { companies: 0, contacts: 0 };
+    total.companies += item.companies; total.contacts += item.contacts;
+    bySource.set(label, total);
+  }
+  return [...bySource].map(([label, { companies, contacts }]) =>
+    `последние ${companies} ${ruPlural(companies, 'компания', 'компании', 'компаний')} из ${label} `
+      + `дали ${contacts} ${ruPlural(contacts, 'контакт', 'контакта', 'контактов')}`).join('; ');
+}
 /** Prefer an untried alternative after two poor complete batches, then the
- * best observed yield. Never discard the old source or its unprocessed rows. */
+ * best observed yield. Never discard the old source or its unprocessed rows.
+ * A dry source is never chosen; when every source is dry there is no choice. */
 export function chooseVeAdaptiveSource(state: VeAdaptiveCollection, available: string[]): string | undefined {
-  if (!available.length) return undefined;
-  if (state.active_source && available.includes(state.active_source) && !state.replan_needed) return state.active_source;
+  const live = available.filter((key) => !veAdaptiveSourceDry(state.completed, key));
+  if (!live.length) return undefined;
+  if (state.active_source && live.includes(state.active_source) && !state.replan_needed) return state.active_source;
   const stats = (key: string) => state.completed.filter((item) => item.source_key === key);
-  const candidates = available.filter((key) => !state.replan_needed || key !== state.active_source);
+  const candidates = live.filter((key) => !state.replan_needed || key !== state.active_source);
   return candidates.sort((a, b) => {
     const left = stats(a), right = stats(b);
     const rank = (key: string, items: VeAdaptiveResult[]) => !items.length ? 2 : veAdaptiveLowYield(state.completed, key) ? -1
       : items.reduce((sum, item) => sum + item.new_ready, 0) / Math.max(1, items.reduce((sum, item) => sum + item.candidates, 0));
     return rank(b, right) - rank(a, left);
-  })[0] ?? available[0];
+  })[0] ?? live[0];
 }
 
 /** Provider charges for the serial acquisition/checking window, including

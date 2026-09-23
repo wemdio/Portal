@@ -92,6 +92,7 @@ import { newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource,
 import { prioritizeVeCandidates } from '@/lib/verticalEngineV2/candidatePriority';
 import { veCompanyFactKey, VE_COMPANY_FACT_TTL_MS } from '@/lib/verticalEngineV2/companyFacts';
 import { previewRecoveryKind, openNextVeCollectionRound } from '@/lib/verticalEngineV2/collectionRecovery';
+import cognitus from './fixtures/cognitusAdaptiveBatches.json';
 
 const PROJECT = { id: 'p1', name: 'P', created_by: 'user-1', market: 'ru' };
 const VERTICAL = {
@@ -3581,6 +3582,226 @@ describe('base_collect: мелкие дефекты аудита 22.09', () => {
       expect(veShortHhQuery('инженер-технолог OR технолог производства OR инженер по качеству')).toBeNull();
       expect(veShortHhQuery('NAME:(технолог) AND завод')).toBeNull();
     });
+  });
+});
+
+/**
+ * Сухие источники (решение владельца 23.09.2026). Истории партий, гипотезы и
+ * задачи плана — с прода, проект Когнитус: 99a8fadd «Инклюзивные частные
+ * школы», 1806863e «Центры диагностики РАС», caf2581d «Фонды помощи аутизму».
+ * Срезы одного источника сведены в одну задачу, как в разборе: школы — карты
+ * 3 376 компаний → 4 контакта, РАС — реестр 4 275 → 2.
+ */
+describe('base_collect: сухие источники завершают базу сами', () => {
+  const HYPOTHESES = {
+    schools: { title: 'Инклюзивные частные школы', description: 'Частные школы и сады с инклюзией, где психологическая служба оценивает детей для адаптации обучения.' },
+    ras: { title: 'Центры диагностики РАС', description: 'Частные психологические и нейропсихологические центры, которые принимают детей с подозрением на аутизм и хотят стандартизировать заключения.' },
+    funds: { title: 'Фонды помощи аутизму', description: 'НКО и фонды, которые финансируют диагностику, обучают специалистов или развивают сеть помощи людям с РАС.' },
+  };
+  type Task = NonNullable<VeCollectInfo['plan']>['tasks'][number];
+  type TaskState = NonNullable<VeCollectInfo['tasks']>[number];
+  const PLAN = {
+    schools: {
+      r: { source: 'companies_directory', rationale: 'Частные школы и детские сады с инклюзивными программами (ОКВЭД 85.1, 85.11).',
+        directory_filters: { includeIp: false, okvedCodes: ['85.1', '85.11'] } },
+      h: { source: 'hh_live', rationale: 'Частные школы, нанимающие психологов и дефектологов.',
+        hh_query: { area: '113', text: 'педагог-психолог OR дефектолог OR инклюзивное образование' } },
+      m: { source: 'yandex_maps', rationale: 'Локальные частные инклюзивные школы и детские сады по рубрикам каталога.',
+        maps_query: { geo: 'Россия', queries: ['инклюзивная школа', 'инклюзивный детский сад', 'частная школа с инклюзией'] } },
+    },
+    ras: {
+      r: { source: 'companies_directory', rationale: 'Частные центры дополнительного образования детей по ОКВЭД 85.41 и 88.91.',
+        directory_filters: { okvedCodes: ['85.41', '88.91'] } },
+      h: { source: 'hh_live', rationale: 'Вакансии детских психологов, нейропсихологов и логопедов.',
+        hh_query: { text: 'детский психолог OR нейропсихолог OR логопед OR дефектолог AND коррекционный OR развитие OR диагностика' } },
+      g: { source: 'google_maps', rationale: 'Специализированные центры в Google Maps.',
+        maps_query: { geo: 'Россия', queries: ['детский коррекционный центр', 'центр диагностики аутизма', 'нейропсихологический центр'] } },
+      m: { source: 'yandex_maps', rationale: 'Локальные центры коррекции и диагностики.',
+        maps_query: { geo: 'Россия', queries: ['детский коррекционный центр', 'нейропсихологический центр для детей', 'центр ранней помощи детям', 'ABA-центр', 'логопедический центр детский'] } },
+    },
+    funds: {
+      r: { source: 'companies_directory', rationale: 'НКО и фонды по ОКВЭД общественных организаций.',
+        directory_filters: { okvedCodes: ['94', '94.9'] } },
+      h: { source: 'hh_live', rationale: 'Вакансии фондов и НКО в сфере помощи людям с аутизмом.',
+        hh_query: { text: '(аутизм OR РАС) AND (фонд OR НКО OR некоммерческая)' } },
+      m: { source: 'yandex_maps', rationale: 'Организации, связанные с аутизмом, из готового каталога Яндекса.',
+        maps_query: { geo: 'Россия', queries: ['аутизм центр', 'фонд помощи аутизму', 'РАС помощь'] } },
+    },
+  } as unknown as Record<'schools' | 'ras' | 'funds', Record<string, Task>>;
+  const spend = { ai_usd: 0, serper_credits: 0, estimated_total_usd: 0, unknown_attempts: 0, complete: true };
+  /** Партии с прода; срез r1/r2/m2 → задача своего источника. */
+  const history = (base: 'schools' | 'ras' | 'funds') => (cognitus[base] as string).split(', ').map((item, index) => {
+    const [slice, candidates, ready] = item.split(' ');
+    const task = PLAN[base][slice[0]];
+    return { id: `${base}-${index + 1}`, source_key: veSourceStrategyKey(task), source: task.source,
+      candidates: Number(candidates), new_ready: Number(ready), poor: false, spend,
+      started_at: '2026-09-22T05:00:00Z', finished_at: '2026-09-22T05:10:00Z' };
+  });
+  const orgs = (prefix: string, slug: string, count: number, from = 0) => Array.from({ length: count }, (_, index) => unifiedRow({
+    company: `${prefix} ${from + index}`, website: `${slug}${from + index}.test`, email: `info@${slug}${from + index}.test`,
+    source_detail: prefix }));
+  const readyOf = (rows: VeUnifiedRow[]) => rows.map((row) => ({ ...row, _email_status: 'ok',
+    _ve_company_name: { version: 1, source: row.company, website: row.website, status: 'ready', value: row.company } }));
+  const state = (task: Task, extra: Partial<TaskState> = {}): TaskState => ({ source: task.source, status: 'done',
+    child_job_id: null, rows: extra.harvest?.length ?? 0, task, harvest: [], ...extra });
+  const CATALOG = { version: 1 as const, filters: { countries: ['Россия'], categories: ['Детские коррекционные центры'] } };
+
+  /** Пробуждение, в котором дочерний конструктор уже проверил партию: ни одной новой компании по гипотезе. */
+  const finishBatch = async (args: { hypothesis: { title: string; description: string }; tasks: TaskState[];
+    completed: ReturnType<typeof history>; batch: VeUnifiedRow[]; batchTask: Task; ready: VeUnifiedRow[];
+    seen: VeUnifiedRow[]; replanAttempts?: number; widenings?: number }) => {
+    const readyRows = readyOf(args.ready);
+    const batchKey = veSourceStrategyKey(args.batchTask);
+    const processed = args.completed.reduce((sum, batch) => sum + batch.candidates, 0);
+    const info: VeCollectInfo = {
+      plan: { tasks: args.tasks.map((task) => task.task) }, tasks: args.tasks,
+      collection_mode: 'preview', ready_target: 500,
+      construct: { bc_job_id: 'bc-dry', status: 'dispatched', dispatched_at: '2026-09-23T09:00:00Z' },
+      search_policy: { version: 1, phase: 'paid', deferred_rows: [], construct_rows: args.batch },
+      adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: args.replanAttempts ?? 2,
+        ...(args.widenings ? { widenings: args.widenings } : {}), active_source: batchKey, completed: args.completed,
+        pending: { id: 'dry-pending', source_key: batchKey, source: args.batchTask.source, candidates: args.batch.length,
+          ready_before: veReadyContactKeys(readyRows), started_at: '2026-09-23T09:00:00Z' } },
+      target_progress: { ...createCollectionTarget('preview'), round: 5, candidates_processed: processed, ready_rows: readyRows.length },
+      target_checkpoint: { completed_round: 4, seen_rows: args.seen, processed_rows: args.seen.length },
+    };
+    const db = seed(info, {
+      ve_hypotheses: [{ id: 'h1', project_id: 'p1', vertical_id: 'v1', status: 'accepted', ...args.hypothesis }],
+      ve_bases: [{ ...makeBase(info), data: readyRows, row_count: readyRows.length, columns: [...VE_AUTO_COLLECT_COLUMNS] }],
+      base_constructor_jobs: [{ id: 'bc-dry', status: 'completed', selected_steps: ['split_emails', 'validate_emails'],
+        data: [['Компания', 'Сайт', 'Email', 'ИНН', 'Email Статус'],
+          ...args.batch.map((row) => [row.company, row.website, row.email, row.inn, 'ok'])] }],
+    });
+    // Все компании партии проверены и не подошли гипотезе.
+    mockFindIrrelevantRows.mockResolvedValueOnce({ flagged: new Set(args.batch.map((_, index) => index)), unchecked: new Set(),
+      coverage: { checkedCompanies: args.batch.length, totalCompanies: args.batch.length, complete: true }, tokensUsed: 0, costUsd: 0 });
+    await wakeQueued(db);
+    return db;
+  };
+  const wakeQueued = async (db: MockSupabaseClient) => {
+    const queued = db.getRows('ve_jobs').filter((row) => row.stage === 'base_collect').at(-1)!;
+    await db.from('ve_jobs').update({ status: 'running' }).eq('id', queued.id);
+    await runBaseCollectStage({ ...makeJob(), id: queued.id as string, payload: queued.payload as VeJob['payload'] },
+      { supabase: db as unknown as SupabaseClient });
+    return db.getRows('ve_bases')[0];
+  };
+  const infoOf = (db: MockSupabaseClient) => db.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+
+  // Школы: карты 3 376 компаний → 4 контакта, реестр исчерпан, вакансии разобраны.
+  const schools = () => {
+    const completed = history('schools');
+    const last = completed.pop()!;
+    const batch = orgs('Частная школа', 'school', last.candidates);
+    const ready = orgs('Инклюзивная школа', 'inclusive', 6, 100);
+    return { completed, batch, ready, hypothesis: HYPOTHESES.schools, batchTask: PLAN.schools.m, seen: [...ready],
+      tasks: [state(PLAN.schools.r, { exhausted: true, note: 'реестр исчерпан' }), state(PLAN.schools.h),
+        state(PLAN.schools.m, { catalog: CATALOG, harvest: batch })] };
+  };
+
+  it('школы: все живые источники сухие, расширять нечем — база завершается с понятной причиной', async () => {
+    const db = await finishBatch(schools());
+    const base = db.getRows('ve_bases')[0];
+    const info = infoOf(db);
+    expect(info.adaptive_collection?.completed.at(-1)).toMatchObject({ candidates: 58, new_ready: 0, new_target: 0 });
+    expect(base.status).toBe('analyzing');
+    expect(info.target_progress).toMatchObject({ status: 'limited', ready_rows: 6, round: 5 });
+    expect(info.target_progress?.reason).toBe('Источники перестали давать контакты: последние 1530 компаний из Яндекс Карт '
+      + 'дали 4 контакта. Расширить срез автоматически нечем. Сбор завершён, чтобы не тратить проверки впустую; '
+      + 'собрано 6 из 500, контакты сохранены.');
+    expect(info.adaptive_collection).toMatchObject({ replan_needed: false, note: 'Источники перестали давать контакты: сбор остановлен.' });
+    // Ни нового дочернего конструктора, ни подбора среза.
+    expect(db.getRows('base_constructor_jobs')).toHaveLength(1);
+    expect(callLLMWithSchema).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), { model: 'test-collection-model' });
+    // Терминальный статус с завершённым раундом: после анализа «Продолжить подготовку» доступна.
+    expect(canResumePartialPreview({ ...base, status: 'analyzed' })).toBe(true);
+  });
+
+  it('школы: пока подбор нового среза не израсходован, сухие источники сначала расширяют срез', async () => {
+    const db = await finishBatch({ ...schools(), replanAttempts: 1 });
+    const info = infoOf(db);
+    expect(info.target_progress).toMatchObject({ status: 'collecting', round: 6 });
+    expect(info.target_progress).not.toHaveProperty('reason');
+    expect(info.adaptive_collection).toMatchObject({ widenings: 1, replan_needed: true, replan_reason: 'plan_exhausted',
+      note: 'Источники перестали давать контакты: подбираем новый срез того же рынка.' });
+  });
+
+  it('школы после выкладки: история уже сухая — новую партию не покупаем, база завершается той же причиной', async () => {
+    // Состояние на проде 23.09: вся история партий есть, партии в полёте нет,
+    // в выдаче карт остались непросмотренные компании.
+    const { completed, ready, tasks } = schools();
+    const tail = orgs('Частная школа', 'school', 30, 500);
+    tasks[2].harvest = tail;
+    const readyRows = readyOf(ready);
+    const info: VeCollectInfo = { plan: { tasks: tasks.map((task) => task.task) }, tasks,
+      collection_mode: 'preview', ready_target: 500, search_policy: { version: 1, phase: 'paid', deferred_rows: [] },
+      adaptive_collection: { ...newVeAdaptiveCollection(), replan_attempts: 2, active_source: veSourceStrategyKey(PLAN.schools.m),
+        completed },
+      target_progress: { ...createCollectionTarget('preview'), round: 5, candidates_processed: 3_852, ready_rows: 6 },
+      target_checkpoint: { completed_round: 4, seen_rows: ready, processed_rows: ready.length } };
+    const db = seed(info, {
+      ve_hypotheses: [{ id: 'h1', project_id: 'p1', vertical_id: 'v1', status: 'accepted', ...HYPOTHESES.schools }],
+      ve_bases: [{ ...makeBase(info), data: readyRows, row_count: 6, columns: [...VE_AUTO_COLLECT_COLUMNS] }],
+    });
+    await wakeQueued(db);
+    const after = infoOf(db);
+    expect(db.getRows('base_constructor_jobs')).toHaveLength(0);
+    expect(after.adaptive_collection).not.toHaveProperty('pending');
+    expect(after.target_progress).toMatchObject({ status: 'limited', ready_rows: 6 });
+    expect(after.target_progress?.reason).toContain('Источники перестали давать контакты: последние 1530 компаний из Яндекс Карт дали 4 контакта.');
+    // Непросмотренные компании не потеряны: выдача карт цела.
+    expect(after.tasks![2].harvest).toHaveLength(30);
+  });
+
+  // РАС: реестр 4 275 → 2 (сухой, ещё читается), карты 1 049 → 2 (мало, но не доказано).
+  const ras = (extraMaps: number) => {
+    const completed = history('ras');
+    const last = completed.pop()!;
+    const mapsKey = veSourceStrategyKey(PLAN.ras.m);
+    // Карты и дальше дают ноль: те же партии по 60 компаний.
+    for (let index = 0; index < extraMaps; index++) completed.push({ ...last, id: `ras-extra-${index}`, candidates: 60 });
+    const batch = orgs('Коррекционный центр', 'correction', last.candidates);
+    const ready = orgs('Центр диагностики', 'diagnostics', 5, 100);
+    expect(last.source_key).toBe(mapsKey);
+    return { completed, batch, ready, hypothesis: HYPOTHESES.ras, batchTask: PLAN.ras.m, seen: [...ready],
+      tasks: [state(PLAN.ras.r), state(PLAN.ras.m, { catalog: CATALOG, harvest: batch }), state(PLAN.ras.h), state(PLAN.ras.g)] };
+  };
+
+  it('РАС: правило не срабатывает, пока у карт меньше 1 500 компаний, и завершает базу, когда карты тоже высохли', async () => {
+    const early = infoOf(await finishBatch(ras(0)));
+    expect(early.adaptive_collection?.completed.filter((batch) => batch.source_key === veSourceStrategyKey(PLAN.ras.m))
+      .reduce((sum, batch) => sum + batch.candidates, 0)).toBe(1_049);
+    expect(early.target_progress).toMatchObject({ status: 'collecting' });
+    expect(early.target_progress).not.toHaveProperty('reason');
+
+    const late = infoOf(await finishBatch(ras(8)));
+    expect(late.target_progress).toMatchObject({ status: 'limited', ready_rows: 5 });
+    expect(late.target_progress?.reason).toContain('Источники перестали давать контакты: последние 1576 компаний из реестра '
+      + 'дали 1 контакт; последние 1529 компаний из Яндекс Карт дали 2 контакта.');
+  });
+
+  it('фонды: карты с выходом 2,6 % держат базу, а следующая партия идёт из карт, не из сухого реестра', async () => {
+    // Партия 66: карты дали два бедных окна подряд и попросили смену источника.
+    // Раньше выбор уходил на реестр (0 из 3 786) — так шли 30 партий реестра подряд.
+    const completed = history('funds').slice(0, 66);
+    const last = completed.pop()!;
+    expect(last).toMatchObject({ source: 'yandex_maps', candidates: 50, new_ready: 0 });
+    const batch = orgs('Фонд помощи', 'fund', last.candidates);
+    const nextMaps = orgs('Благотворительный фонд', 'charity', 20, 100);
+    const registry = orgs('НКО поддержки', 'nko', 20, 200);
+    const ready = orgs('Фонд аутизм', 'autism', 53, 300);
+    const db = await finishBatch({ completed, batch, ready, hypothesis: HYPOTHESES.funds, batchTask: PLAN.funds.m,
+      seen: [...ready], replanAttempts: 2,
+      tasks: [state(PLAN.funds.r, { harvest: registry }), state(PLAN.funds.h),
+        state(PLAN.funds.m, { catalog: CATALOG, harvest: [...batch, ...nextMaps] })] });
+    const afterBatch = infoOf(db);
+    expect(afterBatch.target_progress).toMatchObject({ status: 'collecting', ready_rows: 53 });
+    expect(afterBatch.adaptive_collection?.replan_needed).toBe(true);
+
+    await wakeQueued(db);
+    const next = infoOf(db);
+    expect(next.adaptive_collection?.pending).toMatchObject({ source: 'yandex_maps', source_key: veSourceStrategyKey(PLAN.funds.m) });
+    const child = db.getRows('base_constructor_jobs').find((row) => row.status === 'pending')!;
+    expect((child.data as string[][]).slice(1).map((row) => row[0]).every((name) => name.startsWith('Благотворительный фонд'))).toBe(true);
   });
 });
 
