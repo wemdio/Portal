@@ -17,7 +17,7 @@ const MIN_MAIN_TEXT_TO_SKIP_ABOUT = Number(
   process.env.WEBSITE_ENRICHMENT_MIN_MAIN_TEXT_TO_SKIP_ABOUT ?? '220',
 );
 
-import { getProxyDispatcher } from '@/lib/enrich/proxyPool';
+import { getNonPriorityProxyDispatcher, getProxyDispatcher } from '@/lib/enrich/proxyPool';
 
 type Dispatcher = import('undici').Dispatcher;
 
@@ -746,7 +746,14 @@ function decodeHtml(body: ArrayBuffer, contentType: string | null): string {
 
 async function fetchHtml(
   url: string,
-  options?: { timeout?: number; signal?: AbortSignal; allowHttpErrors?: boolean; preferPriority?: boolean },
+  options?: {
+    timeout?: number;
+    signal?: AbortSignal;
+    allowHttpErrors?: boolean;
+    preferPriority?: boolean;
+    /** undefined keeps the legacy proxy selection; null explicitly fetches directly. */
+    dispatcher?: Dispatcher | null;
+  },
 ): Promise<{ html: string; status: number } | null> {
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
   const controller = new AbortController();
@@ -766,7 +773,10 @@ async function fetchHtml(
   try {
     // По умолчанию — приоритетная группа (RU). Retry-обёртка передаёт
     // preferPriority=false на второй попытке, чтобы уйти в fallback.
-    const dispatcher = await getProxyDispatcher(options?.preferPriority !== false);
+    const dispatcher = options?.dispatcher !== undefined
+      ? options.dispatcher
+      : await getProxyDispatcher(options?.preferPriority !== false);
+    if (controller.signal.aborted) return null;
     const fetchOpts: RequestInit & { dispatcher?: Dispatcher } = {
       method: 'GET',
       headers: {
@@ -781,11 +791,9 @@ async function fetchHtml(
 
     const res = await fetch(url, fetchOpts);
 
-    if (!options?.allowHttpErrors && res.status >= 400) return null;
-    if (res.status >= 500) return null;
-
     const contentType = res.headers.get('content-type');
-    if (!isHtmlLikeContentType(contentType)) {
+    if ((!options?.allowHttpErrors && res.status >= 400) || res.status >= 500 || !isHtmlLikeContentType(contentType)) {
+      await res.body?.cancel();
       return null;
     }
 
@@ -793,6 +801,8 @@ async function fetchHtml(
     const html = decodeHtml(body, contentType);
     return { html, status: res.status };
   } catch (err) {
+    // An adaptive retry cancels its losing route; this is not a website error.
+    if (externalSignal?.aborted) return null;
     const e = err as Error & { cause?: { code?: string; message?: string } };
     const causeCode = e.cause?.code ?? '';
     const causeMsg = e.cause?.message ?? '';
@@ -833,6 +843,69 @@ export async function fetchHtmlWithRetry(
     }
   }
   return null;
+}
+
+/**
+ * Search-only opt-in. Keep the RU-first attempt, then race direct access with
+ * a different proxy group within ONE retry window. A fast error must not beat
+ * a slower successful response. Cancel the loser and reuse the winning route
+ * for this origin during this crawl only (never across users/jobs/sites).
+ */
+function createAdaptiveHtmlFetcher(options: { timeout: number; signal?: AbortSignal }) {
+  const routesByOrigin = new Map<string, { priority: Dispatcher | null; preferred: Dispatcher | null }>();
+  const usable = (result: Awaited<ReturnType<typeof fetchHtml>>) =>
+    Boolean(result?.html.trim() && result.status < 400);
+
+  return async (url: string): Promise<Awaited<ReturnType<typeof fetchHtml>>> => {
+    if (options.signal?.aborted) return null;
+    const origin = new URL(url).origin;
+    let state = routesByOrigin.get(origin);
+    if (!state) {
+      const priority = (await getProxyDispatcher()) ?? null;
+      state = { priority, preferred: priority };
+      routesByOrigin.set(origin, state);
+    }
+    const preferred = state.preferred;
+    const first = await fetchHtml(url, { ...options, allowHttpErrors: true, dispatcher: preferred });
+    if (options.signal?.aborted) return null;
+    if (usable(first)) {
+      return first;
+    }
+    // A missing page is not a broken route. Do not repeat guessed /about etc.
+    if (first && [404, 410].includes(first.status)) return first;
+
+    const otherProxy = (await getNonPriorityProxyDispatcher()) ?? (await getProxyDispatcher(false));
+    const routes = [...new Set<Dispatcher | null>([
+      null, state.priority, ...(otherProxy ? [otherProxy] : []),
+    ])].filter((route) => route !== preferred).slice(0, 2);
+    // With no alternative configured, retain a second attempt on the same route.
+    if (routes.length === 0) routes.push(preferred);
+    if (options.signal?.aborted) return null;
+
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+    const results: Array<Awaited<ReturnType<typeof fetchHtml>>> = [];
+    try {
+      const winner = await Promise.any(routes.map(async (dispatcher, index) => {
+        const result = await fetchHtml(url, {
+          ...options, signal: controller.signal, allowHttpErrors: true, dispatcher,
+        });
+        results[index] = result;
+        if (!usable(result)) throw new Error('No usable HTML on this route');
+        return { result, dispatcher };
+      }));
+      if (options.signal?.aborted) return null;
+      state.preferred = winner.dispatcher;
+      return winner.result;
+    } catch {
+      // Keep any readable error-page HTML, as the legacy allowHttpErrors path did.
+      return options.signal?.aborted ? null : first ?? results.find((result) => result) ?? null;
+    } finally {
+      controller.abort();
+      options.signal?.removeEventListener('abort', onAbort);
+    }
+  };
 }
 
 function normalizeForDedupe(url: string): string {
@@ -889,19 +962,28 @@ function buildContactCandidates(baseUrl: string, discovered: string[]): string[]
 
 export async function fetchWebsiteEmails(
   rawUrl: string,
-  options?: { timeout?: number; signal?: AbortSignal; maxPages?: number },
+  options?: {
+    timeout?: number;
+    signal?: AbortSignal;
+    maxPages?: number;
+    /** Search parser only; other consumers retain the existing proxy/retry policy. */
+    adaptiveRoutes?: boolean;
+  },
 ): Promise<{ emails: string[]; checked_urls: string[]; brand_name: string | null }> {
   const url = normalizeUrl(rawUrl);
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
   const signal = options?.signal;
   const maxPages = Math.max(1, Math.min(12, options?.maxPages ?? 6));
+  const fetchPage = options?.adaptiveRoutes
+    ? createAdaptiveHtmlFetcher({ timeout, signal })
+    : (pageUrl: string) => fetchHtmlWithRetry(pageUrl, { timeout, signal, allowHttpErrors: true });
 
   const checked: string[] = [];
   const found = new Set<string>();
   let brandName: string | null = null;
 
   // 1) Fetch main page HTML to discover contact links + mailto in header/footer.
-  const main = await fetchHtmlWithRetry(url, { timeout, signal, allowHttpErrors: true });
+  const main = await fetchPage(url);
   if (main?.html) {
     checked.push(url);
     for (const e of extractEmailsFromHtml(main.html)) found.add(e);
@@ -914,7 +996,7 @@ export async function fetchWebsiteEmails(
       if (signal?.aborted) break;
       const normalized = normalizeForDedupe(candidate);
       if (checked.some((c) => normalizeForDedupe(c) === normalized)) continue;
-      const html = await fetchHtmlWithRetry(candidate, { timeout, signal, allowHttpErrors: true });
+      const html = await fetchPage(candidate);
       checked.push(candidate);
       if (html?.html) {
         for (const e of extractEmailsFromHtml(html.html)) found.add(e);
@@ -927,7 +1009,7 @@ export async function fetchWebsiteEmails(
     const candidates = buildContactCandidates(url, []);
     for (const candidate of candidates.slice(0, maxPages)) {
       if (signal?.aborted) break;
-      const html = await fetchHtmlWithRetry(candidate, { timeout, signal, allowHttpErrors: true });
+      const html = await fetchPage(candidate);
       checked.push(candidate);
       if (html?.html) {
         for (const e of extractEmailsFromHtml(html.html)) found.add(e);
@@ -985,7 +1067,7 @@ export async function fetchWebsiteEmails(
         if (signal?.aborted) break;
         const normalized = normalizeForDedupe(candidate);
         if (checked.some((c) => normalizeForDedupe(c) === normalized)) continue;
-        const html = await fetchHtmlWithRetry(candidate, { timeout, signal, allowHttpErrors: true });
+        const html = await fetchPage(candidate);
         checked.push(candidate);
         if (!html?.html) continue;
         brandName = extractBrandNameFromHtml(html.html) ?? brandName;
