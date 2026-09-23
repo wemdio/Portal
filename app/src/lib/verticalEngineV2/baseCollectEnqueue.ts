@@ -25,7 +25,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { collectionRoundLimit, createCollectionTarget, type VeCollectionMode } from './collectionTarget';
-import { canResumePartialPreview, openNextVeCollectionRound, previewRecoveryKind } from './collectionRecovery';
+import { canResumePartialPreview, grantVeResumeRoundBudget, openNextVeCollectionRound, previewRecoveryKind } from './collectionRecovery';
 import { normalizeVeMaxEmailsPerCompany } from './companyContactCap';
 import { resumeVeSavedEmailRecovery } from './savedEmailRecovery';
 
@@ -177,6 +177,8 @@ async function resumeFailedPreview(
   // Остальные виды либо требуют `completed_round === round - 1`, либо ставят
   // флаги повтора — те редактируют уже собранное и номер двигать не должны.
   if (previewRecoveryKind(saved) === 'catalog') openNextVeCollectionRound(info);
+  // «Продолжить подготовку» этой базы — новый бюджет раундов.
+  if (input.resumeBaseId === saved.id) grantVeResumeRoundBudget(info);
   if (info.preview_pipeline?.version === 1) {
     info.preview_pipeline = { ...info.preview_pipeline, revision: info.preview_pipeline.revision + 1 };
     delete info.preview_pipeline.error;

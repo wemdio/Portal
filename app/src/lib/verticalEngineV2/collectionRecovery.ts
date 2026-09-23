@@ -1,5 +1,8 @@
 import { isVeProviderBillingError } from './collectionErrors';
-import { collectionRoundLimit, type VeCollectionTargetProgress } from './collectionTarget';
+import {
+  collectionRoundLimit, veCollectionMaxRounds, VE_COLLECTION_ROUND_BUDGET, VE_COLLECTION_ROUND_CEILING,
+  type VeCollectionTargetProgress,
+} from './collectionTarget';
 import { buildVeRelevanceReviewBatch, readVeRelevanceReserve, readVeRelevanceSourceRows } from './relevanceReserve';
 import { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
 import { isVeRelevanceTriageEnabled } from './relevanceTriageConfig';
@@ -39,8 +42,10 @@ export function canResumePartialPreview(base: Record<string, unknown>): boolean 
     reserve, ready: [], source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
     triage: isVeRelevanceTriageEnabled(typeof base.project_id === 'string' ? base.project_id : null),
   }).rows.length > 0) return true;
-  if (!(Number(target.candidates_processed) < Number(target.max_candidates)
-    && Number(target.round) < Number(target.max_rounds)) || !Array.isArray(info.tasks)) return false;
+  // Предел раундов не препятствие: продолжение само даёт новый бюджет
+  // (grantVeResumeRoundBudget). Так b5934955 после круга повторной отправки
+  // стояла на 100 из 100 раундов с живым реестром, и дособрать её было нельзя.
+  if (!(Number(target.candidates_processed) < Number(target.max_candidates)) || !Array.isArray(info.tasks)) return false;
   // Старая задача карт (живой парсер до 16.09) тоже продолжаема: следующий
   // раунд читает её запросы из готового каталога.
   if (info.tasks.some((task) =>
@@ -52,6 +57,21 @@ export function canResumePartialPreview(base: Record<string, unknown>): boolean 
     .map((task) => task.task as VeCollectTask);
   return target.status !== 'error'
     && veCanWidenPlan(planTasks, info.adaptive_collection as VeAdaptiveCollection | undefined);
+}
+
+/**
+ * Явное «Продолжить подготовку» — новый бюджет раундов, один на нажатие:
+ * предел ставится от текущего раунда, а не прибавляется к прежнему, поэтому
+ * повторные нажатия без работы между ними бюджет не копят. Счёт холостых
+ * раундов тоже начинается заново.
+ */
+export function grantVeResumeRoundBudget(info: Record<string, unknown>): void {
+  const progress = info.target_progress as VeCollectionTargetProgress | undefined;
+  if (!progress || typeof progress !== 'object' || !Number.isSafeInteger(progress.round) || progress.round < 1) return;
+  const next: VeCollectionTargetProgress = { ...progress, max_rounds: Math.max(veCollectionMaxRounds(progress.max_rounds),
+    Math.min(VE_COLLECTION_ROUND_CEILING, progress.round + VE_COLLECTION_ROUND_BUDGET)) };
+  delete next.idle_streak;
+  info.target_progress = next;
 }
 
 /** Only recognized preview failures may reuse a base; never supply/refill. */
