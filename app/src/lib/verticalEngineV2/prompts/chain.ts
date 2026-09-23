@@ -1,5 +1,5 @@
 /**
- * Промпт-архитектура стадии chain: вертикаль + бриф → цепочка из 3–5 писем.
+ * Промпт-архитектура стадии chain: вертикаль + бриф → цепочка из 4 писем.
  *
  * Паттерн повторяет emailSequenceV2 (материалы → праймер-ack → задача),
  * но заточен под вертикаль: модель получает доказательства гипотез и пишет
@@ -228,7 +228,7 @@ const PRIMER_ACK: Record<VeChainLanguage, string> = {
 const TASK_PROMPTS: Record<VeChainLanguage, string> = {
   ru: `Ты — senior email outreach специалист с опытом запуска 400+ холодных B2B-кампаний (средний reply rate 8–18%).
 
-Напиши цепочку из 4 писем (допустимо 3–5) для холодной рассылки по вертикали, описанной в материалах выше. Клиент описан в брифе/профиле сайта из материалов — продаём его продукт/услугу; письма идут лицам, принимающим решения, в целевой вертикали.
+Напиши цепочку ровно из 4 писем для холодной рассылки по вертикали, описанной в материалах выше. Клиент описан в брифе/профиле сайта из материалов — продаём его продукт/услугу; письма идут лицам, принимающим решения, в целевой вертикали.
 
 ШАГ 0 — ОФФЕР (обязательная структура). Прежде чем писать, сформулируй про себя оффер из четырёх частей — в терминах самой вертикали:
 1. УСЛУГА ПРОСТЫМИ СЛОВАМИ: кто клиент — одна фраза, понятная постороннему («email-аутрич под ключ», «кадровое агентство по массовому подбору»), из брифа/профиля сайта; если в материалах есть блок «ОФФЕР КЛИЕНТА (offer_override)» — используй его формулировку дословно, не перепридумывай. Размытые ярлыки («внешняя команда», «партнёр по росту») запрещены.
@@ -315,7 +315,7 @@ ${'{{OPERATORS_HINT}}'}
 
   en: `You are a senior email outreach specialist with 400+ launched cold B2B campaigns (average reply rate 8–18%).
 
-Write a sequence of 4 emails (3–5 is acceptable) for a cold campaign targeting the vertical described in the materials above. The client is described in the brief/site profile in the materials — we sell their product/service; emails go to decision-makers in the target vertical.
+Write a sequence of exactly 4 emails for a cold campaign targeting the vertical described in the materials above. The client is described in the brief/site profile in the materials — we sell their product/service; emails go to decision-makers in the target vertical.
 
 How to use the materials:
 - The vertical and its synonyms are the audience: write as if you know their industry from the inside (their terms, their pains, their metrics).
