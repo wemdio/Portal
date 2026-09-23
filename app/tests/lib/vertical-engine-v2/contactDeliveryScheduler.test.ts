@@ -330,6 +330,43 @@ describe('VE2 contact delivery scheduler', () => {
     });
   });
 
+  it('keeps a broad hypothesis stream going after a batch stops at its own safety cap; an empty batch still stops it', async () => {
+    // Every batch is a new base with its own 10 000-candidate / round budget,
+    // so the cap is per batch. For a whole sector it is not the end of the market.
+    const cap = { status: 'limited', reason: 'Достигнут защитный предел кандидатов или раундов; цель ещё не набрана', ready_rows: 40 };
+    for (const [broad, appended, expected] of [[true, 40, 'active'], [false, 40, 'limited'], [true, 0, 'limited']] as const) {
+      const portal = createMockSupabase({
+        tables: {
+          ve_hypotheses: [{ id: 'hyp', project_id: 've', broad }],
+          ve_contact_supply_plans: [{ id: 'plan', project_id: 've', hypothesis_id: 'hyp', template_id: 'original-template', item_id: 'item', status: 'active', source_state: {} }],
+          ve_contact_supply_batches: [{ id: 'batch', plan_id: 'plan', base_id: 'supply-base', template_id: 'supply-template', status: 'appended', appended_count: appended }],
+          ve_bases: [{ id: 'supply-base', project_id: 've', status: 'analyzed', target_progress: cap, collect_info: { target_progress: cap } }],
+          ve_projects: [{ id: 've', ...COMPLETE_BINDING, launch_instantly_account_id: 'main' }],
+          project_periods: [{ id: COMPLETE_BINDING.portal_period_id, project_id: COMPLETE_BINDING.portal_project_id, status: 'active', contacts_done: '0', deadline: '2026-09-11' }],
+          ve_launch_queue_items: [{ id: 'item', project_id: 've', status: 'active', potential_pct: 70 }],
+          ve_launch_queue_campaigns: [{ id: 'campaign-row', item_id: 'item', campaign_id: 'original-campaign', segment: null }],
+        },
+        rpcHandlers: {
+          ve_contact_supply_approval_current: () => ({ data: true }),
+          ve_finish_contact_supply_batch: async (params, db) => {
+            await db.from('ve_contact_supply_plans').update({ status: params.p_status, source_state: { previous_base_id: 'supply-base' } }).eq('id', 'plan');
+            return { data: true };
+          },
+          ve_enqueue_contact_supply_batch: () => ({ data: { created: true } }),
+        },
+      });
+      const instantly = createMockSupabase({
+        tables: { client_campaign_presets: [{ id: 'preset-1', client_user_id: 'client', instantly_account_id: 'main' }] },
+        rpcHandlers: { client_blocklist_snapshot: () => ({ data: { count: 0, emails: [] } }) },
+      });
+      const input = { portalDb: portal as never, instantlyDb: instantly as never, veProjectId: 've', now: new Date('2026-09-07T06:00:00Z') };
+      await runProjectContactSupply(input);
+      expect([broad, appended, portal.getRows('ve_contact_supply_plans')[0].status]).toEqual([broad, appended, expected]);
+      await runProjectContactSupply(input);
+      expect(portal.rpcCalls.filter((call) => call.fn === 've_enqueue_contact_supply_batch')).toHaveLength(expected === 'active' ? 1 : 0);
+    }
+  });
+
   it('does not read or mutate the Portal DB without the Instantly client', async () => {
     const portal = createMockSupabase({
       tables: { ve_projects: [{ id: 've-1', ...COMPLETE_BINDING }] },

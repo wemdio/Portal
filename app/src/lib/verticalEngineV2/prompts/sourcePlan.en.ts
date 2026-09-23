@@ -37,6 +37,7 @@ RULES:
 - countries for pdl/funded — lowercased English country names; countries for eng_hiring — ATS codes from the list above; omit when the whole market is targeted.
 - funded_since — YYYY-MM-DD (e.g. "2026-01-01"); posted_within_days — whole days (7/30/90).
 - roles and maps queries — non-empty strings up to 300 characters.
+- BROAD HYPOTHESIS (marked [broad]) — a whole sector for daily refill; it needs many companies. Plan it as pdl by the sector's industries and google_maps by the sector's short categories. No sizes, no eng_hiring: a hiring signal is not needed.
 - Answer strictly in English, ONLY JSON, no markdown fences.`;
 
 const SYSTEM_CATALOG_REPAIR_EN = `You are a head of lead research at Polza agency planning lead sources for B2B outreach on the US/EU market.
@@ -66,7 +67,7 @@ ${input.verticalSummary ?? ''}
 Vertical synonyms: ${input.synonyms?.length ? input.synonyms.join(', ') : '—'}
 
 VERTICAL HYPOTHESES (non-rejected):
-${input.hypotheses.map((h) => `- ${h.tier != null ? `[tier ${h.tier}] ` : ''}${h.title}${h.description ? `: ${h.description}` : ''}`).join('\n')}
+${input.hypotheses.map((h) => `- ${h.broad ? '[broad] ' : h.tier != null ? `[tier ${h.tier}] ` : ''}${h.title}${h.description ? `: ${h.description}` : ''}`).join('\n')}
 
 COMPANY TYPES FROM VOCABULARY: ${input.companyTypes?.length ? input.companyTypes.join(', ') : '—'}
 
@@ -89,7 +90,7 @@ ${input.verticalSummary ?? ''}
 Vertical synonyms: ${input.synonyms?.length ? input.synonyms.join(', ') : '—'}
 
 VERTICAL HYPOTHESES (non-rejected; the plan must cover them):
-${input.hypotheses.map((h) => `- ${h.tier != null ? `[tier ${h.tier}] ` : ''}${h.title}${h.description ? `: ${h.description}` : ''}`).join('\n')}
+${input.hypotheses.map((h) => `- ${h.broad ? '[broad] ' : h.tier != null ? `[tier ${h.tier}] ` : ''}${h.title}${h.description ? `: ${h.description}` : ''}`).join('\n')}
 
 COMPANY TYPES FROM VOCABULARY: ${input.companyTypes?.length ? input.companyTypes.join(', ') : '—'}
 

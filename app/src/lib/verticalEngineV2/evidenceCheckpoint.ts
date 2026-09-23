@@ -8,6 +8,8 @@ const AcceptedHypothesisSchema = z.object({
   title: z.string(), description: z.string(), fit_rationale: z.string(),
   evidence: z.array(VeEvidenceItemSchema), seasonality: VeRuSeasonalitySchema.nullable(),
   potential_pct: z.number().int().min(0).max(100),
+  // Absent in checkpoints written before broad hypotheses: those are narrow.
+  broad: z.boolean().optional(),
 });
 
 // Bump the checkpoint version when verdict/prompt semantics change; a resumed

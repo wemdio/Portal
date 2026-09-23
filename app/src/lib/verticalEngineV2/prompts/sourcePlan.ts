@@ -68,6 +68,7 @@ const SYSTEM = `Ты — head of lead research в агентстве Polza, эк
 - revenueFrom/revenueTo — в рублях в год, если порог вообще уместен (см. правило о размере).
 - Не ставь hasEmail=true и не сужай выборку вручную: движок сам берёт компании с готовым адресом первыми, а остальных добирает по сайту. Жёсткий фильтр только урезал бы доступный рынок. includeIp=false по умолчанию для B2B.
 - НЕ СТАВЬ revenueFrom/revenueTo и employeesFrom/employeesTo, если размер компании прямо не назван в тексте гипотезы («крупные», «малые», «3–30 сотрудников», «сети»). Порог без такого основания код всё равно снимет. Размер компании — это ранжирование, а не отбор: релевантность и так отсеет мелочь, а порог режет рынок до дна. Замер: по нефтехимии «ОКВЭД 20.1 + выручка от 100 млн + штат от 50» дал 199 компаний вместо 2 863 доступных, и база встала на 13 контактах вместо 500. Отдельно: штат в реестре заполнен не у всех, и компания без этого поля отсекается порогом, даже если она крупная.
+- ШИРОКАЯ ГИПОТЕЗА (помечена [широкая]) — сектор целиком для ежедневного добора, компаний нужно много. План для неё: companies_directory по классам ОКВЭД — ровно две цифры («86», «46») — всех видов деятельности сектора и yandex_maps по коротким рубрикам сектора. Пороги выручки и штата не ставь, hh_live не бери: сигнал найма ей не нужен.
 - hh area — числовой id региона hh.ru (113 — Россия, 1 — Москва, 2 — СПб); не указывай, если вся Россия.
 - date_from/date_to — формат YYYY-MM-DD (например «2026-07-01»).
 - Запросы (hh text, maps queries) — непустые строки до 300 символов.
@@ -78,7 +79,7 @@ export interface SourcePlanPromptInput {
   verticalSummary?: string | null;
   synonyms?: string[];
   /** Неотклонённые гипотезы вертикали (rejected сюда не попадают). */
-  hypotheses: Array<{ title: string; description?: string | null; tier?: number | null }>;
+  hypotheses: Array<{ title: string; description?: string | null; tier?: number | null; broad?: boolean }>;
   /** Вокабуляр типов компаний из стадии vocab (опционально). */
   companyTypes?: string[];
 }
@@ -89,7 +90,7 @@ ${input.verticalSummary ?? ''}
 Синонимы вертикали: ${input.synonyms?.length ? input.synonyms.join(', ') : '—'}
 
 ГИПОТЕЗЫ ВЕРТИКАЛИ (неотклонённые; план обязан их покрывать):
-${input.hypotheses.map((h) => `- ${h.tier != null ? `[tier ${h.tier}] ` : ''}${h.title}${h.description ? `: ${h.description}` : ''}`).join('\n')}
+${input.hypotheses.map((h) => `- ${h.broad ? '[широкая] ' : h.tier != null ? `[tier ${h.tier}] ` : ''}${h.title}${h.description ? `: ${h.description}` : ''}`).join('\n')}
 
 ТИПЫ КОМПАНИЙ ИЗ ВОКАБУЛЯРА: ${input.companyTypes?.length ? input.companyTypes.join(', ') : '—'}
 

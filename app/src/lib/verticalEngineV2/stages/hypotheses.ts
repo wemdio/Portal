@@ -1,6 +1,7 @@
 /**
  * Стадия hypotheses — проход (a): мгновенный исчерпывающий список
- * гипотез-кандидатов (25–40, tier 1/2/3) из «генетической памяти» модели.
+ * гипотез-кандидатов (25–40, tier 1/2/3) из «генетической памяти» модели и
+ * отдельным блоком 3–5 широких гипотез уровня сектора для ежедневного добора.
  * Кандидаты сохраняются в job.result.candidates — их верифицирует стадия
  * evidence. На этом шаге поиск и доказательства НЕ используются.
  */
@@ -11,7 +12,13 @@ import {
   compileClientBriefIcpForPrompt,
   readClientBrief,
 } from '../clientBriefIntake';
-import { VeHypothesesBatchSchema, type VeBrandCloudOutput, type VeSiteProfileOutput } from '../schemas';
+import {
+  VeHypothesesBatchSchema,
+  type VeBrandCloudOutput,
+  type VeHypothesesBatchOutput,
+  type VeHypothesisCandidate,
+  type VeSiteProfileOutput,
+} from '../schemas';
 import { projectMarket, type VeMarket } from '../market';
 import { buildHypothesesInstantMessages } from '../prompts/hypotheses';
 import { buildHypothesesInstantMessagesEn } from '../prompts/hypotheses.en';
@@ -28,6 +35,37 @@ import {
   type VeStageResult,
 } from './shared';
 import type { VeCompetitorEntry } from './competitors';
+
+/* ─────────────── широкие гипотезы ─────────────── */
+
+/** Больше широких не берём: каждая — отдельная проверка источниками и отдельная база. */
+export const VE_BROAD_HYPOTHESES_MAX = 5;
+
+function candidateTitleKey(title: string): string {
+  return title.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Кандидаты стадии из ответа модели: широкие первыми и с признаком broad,
+ * узкие — как раньше и без него. Широкая с названием узкой или другой широкой
+ * отбрасывается: гипотезы проекта связываются с вертикалями по названию.
+ */
+export function combineHypothesisCandidates(output: VeHypothesesBatchOutput): VeHypothesisCandidate[] {
+  const narrow = output.hypotheses.map((candidate) => {
+    const copy: VeHypothesisCandidate = { ...candidate };
+    delete copy.broad;
+    return copy;
+  });
+  const seen = new Set(narrow.map((candidate) => candidateTitleKey(candidate.title)));
+  const broad: VeHypothesisCandidate[] = [];
+  for (const candidate of output.broad_hypotheses ?? []) {
+    const key = candidateTitleKey(candidate.title);
+    if (!key || seen.has(key) || broad.length >= VE_BROAD_HYPOTHESES_MAX) continue;
+    seen.add(key);
+    broad.push({ ...candidate, tier: 1, broad: true });
+  }
+  return [...broad, ...narrow];
+}
 
 /* ─────────────── калибровочные данные (best-effort) ─────────────── */
 
@@ -196,7 +234,7 @@ export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promi
   const clientBriefIcp = compileClientBriefIcpForPrompt(clientBriefRecord?.icp ?? null);
   if (clientBriefIcp) stageLog(ctx, '[hypotheses] рамка ЦА из брифа применена как ограничение');
 
-  stageLog(ctx, '[hypotheses] мгновенный проход: 25–40 кандидатов…');
+  stageLog(ctx, '[hypotheses] мгновенный проход: 3–5 широких и 25–40 кандидатов…');
   // Объект собираем переменной, а не литералом в вызове: поля portfolioProfile /
   // markupHistory добавляются в HypothesesPromptInput параллельным изменением —
   // так стадия компилируется и до, и после приземления промпт-контракта.
@@ -226,15 +264,17 @@ export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promi
   );
   addUsage(usage, llm);
 
-  const candidates = llm.data.hypotheses;
-  const tierCounts = candidates.reduce<Record<number, number>>((acc, h) => {
+  const candidates = combineHypothesisCandidates(llm.data);
+  const broadCount = candidates.filter((h) => h.broad).length;
+  const tierCounts = candidates.filter((h) => !h.broad).reduce<Record<number, number>>((acc, h) => {
     acc[h.tier] = (acc[h.tier] ?? 0) + 1;
     return acc;
   }, {});
-  stageLog(ctx, `[hypotheses] кандидатов: ${candidates.length} (tier: ${JSON.stringify(tierCounts)})`);
+  stageLog(ctx, `[hypotheses] кандидатов: ${candidates.length} (широких: ${broadCount}, tier: ${JSON.stringify(tierCounts)})`);
+  if (!broadCount) stageLog(ctx, '[hypotheses] модель не вернула широких гипотез — в проекте будут только узкие');
 
   return {
-    result: { candidates, tier_counts: tierCounts },
+    result: { candidates, tier_counts: tierCounts, broad_count: broadCount },
     tokensUsed: usage.tokensUsed,
     costUsd: usage.costUsd,
   };

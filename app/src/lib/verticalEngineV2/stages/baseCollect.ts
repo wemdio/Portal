@@ -94,7 +94,7 @@ import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { isVeProviderBillingError, isVeProviderConfigurationError } from '../collectionErrors';
 import { validVeAdaptiveCollection, newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys,
   readVeBatchSpend, veAdaptiveCandidateLimit, veAdaptiveLowYield, veAdaptiveYieldWindows, type VeAdaptiveCollection } from '../adaptiveCollection';
-import { stripUnfoundedSizeFilters, veDirectorySizeKeep, veHypothesisSizeBasis, veSecondQueueTasks, veTaskWithoutSizeFilters,
+import { stripUnfoundedSizeFilters, veBroadHypothesisPlan, veDirectorySizeKeep, veHypothesisSizeBasis, veSecondQueueTasks, veTaskWithoutSizeFilters,
   VE_PLAN_MAX_TASKS, VE_PLAN_WIDENING_LIMIT, VE_SIZE_FILTER_KEYS } from '../planWidening';
 import { prioritizeVeCandidates, readVeCandidateHints } from '../candidatePriority';
 import { isVeAcceptedEmailStatus } from '../emailPolicy';
@@ -999,11 +999,13 @@ async function buildPlan(
       .filter(Boolean);
   }
 
+  // Широкая гипотеза (сектор для ежедневного добора) — только в плане своей базы.
+  const broad = hypothesisId ? await readVeHypothesisBroad(ctx, hypothesisId) : false;
   const promptInput = {
     verticalName: vertical.name,
     verticalSummary: vertical.summary,
     synonyms: Array.isArray(vertical.synonyms) ? vertical.synonyms : [],
-    hypotheses,
+    hypotheses: broad ? hypotheses.map((h) => ({ ...h, broad: true })) : hypotheses,
     companyTypes,
   };
 
@@ -1032,9 +1034,11 @@ async function buildPlan(
   );
   // Запрет из промпта закреплён в коде: порог размера без основания в тексте
   // гипотезы в план не попадает (новый план и перепланирование).
-  const { plan, stripped } = stripUnfoundedSizeFilters(probed,
+  const { plan: sized, stripped } = stripUnfoundedSizeFilters(probed,
     hypotheses.map((h) => `${h.title} ${h.description ?? ''}`).join('\n'));
   if (stripped) stageLog(ctx, `[base_collect] план: сняты пороги выручки/штата без основания в гипотезе (${stripped} задач)`);
+  const { plan, changed: broadened } = broad ? veBroadHypothesisPlan(sized) : { plan: sized, changed: 0 };
+  if (broadened) stageLog(ctx, `[base_collect] план широкой гипотезы: классы ОКВЭД, без порогов размера и сигнала найма (${broadened} задач)`);
   return {
     plan,
     planRepair: withCatalog.planRepair,
@@ -3530,6 +3534,19 @@ async function readVeContactLimit(ctx: VeStageContext, job: VeJob, base: VeAutoB
 /** Источник ещё может дать кандидатов без нового плана. */
 function veTaskCanSupply(task: VeCollectTaskState): boolean {
   return task.status === 'pending' || task.status === 'dispatched' || isVeRenewableSourceTask(task);
+}
+
+/**
+ * Широкая ли гипотеза базы. Сбой чтения или колонки ещё нет (воркер обновился
+ * раньше миграции 20260923_0001) — обычная гипотеза, как до этой правки.
+ */
+async function readVeHypothesisBroad(ctx: VeStageContext, hypothesisId: string): Promise<boolean> {
+  try {
+    const { data, error } = await ctx.supabase.from('ve_hypotheses').select('broad').eq('id', hypothesisId).maybeSingle();
+    return !error && (data as { broad?: unknown } | null)?.broad === true;
+  } catch {
+    return false;
+  }
 }
 
 /** Сбой чтения не снимает порог: тогда он ослабляется, как обоснованный. */

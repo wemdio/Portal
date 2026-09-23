@@ -182,6 +182,8 @@ export interface VeHypothesis {
   seasonality?: VeRuSeasonality | null;
   potential_pct: number;
   status: VeHypothesisStatus;
+  /** Широкая гипотеза уровня сектора для ежедневного добора; нет до миграции 20260923_0001. */
+  broad?: boolean;
   created_at: string;
   updated_at: string;
 }

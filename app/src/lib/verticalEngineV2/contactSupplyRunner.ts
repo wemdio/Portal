@@ -67,15 +67,36 @@ function sourceOutcome(progress: SupplyProgress | null | undefined): { status: S
   return { status: 'error', reason: 'Сбор не подтвердил полный результат и состояние источников' };
 }
 
-function confirmedAppendOutcome(source: ReturnType<typeof sourceOutcome>, count: unknown) {
+/**
+ * Итог партии для плана добора. Каждая партия — новая база со своим бюджетом
+ * (10 000 кандидатов, раунды), поэтому пожизненного предела у потока нет;
+ * но партия, упёршаяся в свой предел, раньше останавливала поток навсегда.
+ * Для широкой гипотезы (сектор целиком) это не конец рынка: если партия
+ * принесла новых получателей, поток продолжается следующей партией. Партия
+ * без новых получателей и исчерпанные источники по-прежнему останавливают.
+ */
+export function confirmedAppendOutcome(source: { status: SupplyStop; reason: string | null }, count: unknown, broad = false) {
   if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) {
     throw new Error('Supply append result did not confirm an exact inserted count');
+  }
+  if (broad && count > 0 && source.status === 'limited') {
+    return { appendedCount: count, status: 'active' as const, reason: null };
   }
   return {
     appendedCount: count,
     status: count === 0 && source.status === 'active' ? 'limited' as const : source.status,
     reason: source.reason ?? (count === 0 ? 'Новых получателей после проверок и исключений нет' : null),
   };
+}
+
+/** Широкие гипотезы планов; до миграции 20260923_0001 колонки нет — все узкие. */
+async function readBroadHypothesisIds(db: SupabaseClient, hypothesisIds: string[]): Promise<Set<string>> {
+  if (!hypothesisIds.length) return new Set();
+  const { data, error } = await db.from('ve_hypotheses').select('id, broad').in('id', [...new Set(hypothesisIds)]);
+  // Ошибка чтения — поток ведёт себя как у узкой гипотезы, то есть как до правки.
+  if (error || !Array.isArray(data)) return new Set();
+  return new Set((data as Array<{ id?: unknown; broad?: unknown }>)
+    .filter((row) => row.broad === true && typeof row.id === 'string').map((row) => row.id as string));
 }
 
 async function loadSupplyContext(portalDb: SupabaseClient, instantlyDb: SupabaseClient, projectId: string, now: Date) {
@@ -160,6 +181,7 @@ export async function runProjectContactSupply(input: {
   if (!approved.length) return result;
   const context = await loadSupplyContext(portalDb, instantlyDb, veProjectId, now);
   if (!context.eligibleToday) return result;
+  const broadHypotheses = await readBroadHypothesisIds(portalDb, approved.map((plan) => plan.hypothesis_id));
   const batches = await readContactDeliveryPages<SupplyBatch>('contact supply batches', (from, to) => portalDb
     .from('ve_contact_supply_batches').select('id, plan_id, base_id, template_id, audit_id, status, appended_count, error', { count: 'exact' })
     .in('plan_id', approved.map((plan) => plan.id)).order('created_at', { ascending: false }).order('id', { ascending: true }).range(from, to));
@@ -180,8 +202,9 @@ export async function runProjectContactSupply(input: {
     // after its last key.
     const progress = rawBase.target_progress as SupplyProgress | null | undefined;
     const outcome = sourceOutcome(progress);
+    const broad = broadHypotheses.has(plan.hypothesis_id);
     if (batch.status === 'appended') {
-      const confirmed = confirmedAppendOutcome(outcome, batch.appended_count);
+      const confirmed = confirmedAppendOutcome(outcome, batch.appended_count, broad);
       await finishBatch(portalDb, batch, confirmed.status, confirmed.reason, now);
       if (confirmed.status !== 'active') result.stoppedPlans += 1;
       pendingWork = true;
@@ -270,7 +293,7 @@ export async function runProjectContactSupply(input: {
     const appended = await rpc(portalDb, 've_append_contact_supply_batch', {
       p_batch_id: batch.id, p_audit_id: audit.id, p_rows: rows, p_now: now.toISOString(),
     }) as { appended_count?: number } | null;
-    const confirmed = confirmedAppendOutcome(outcome, appended?.appended_count);
+    const confirmed = confirmedAppendOutcome(outcome, appended?.appended_count, broad);
     result.appendedRows += confirmed.appendedCount;
     // Zero useful rows alone is never evidence that the market is exhausted.
     await finishBatch(portalDb, batch, confirmed.status, confirmed.reason, now);
