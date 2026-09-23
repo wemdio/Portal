@@ -15,8 +15,8 @@ const TABLES = {
     table: 'polza_ru_cases',
     order: 'case_id',
     fields: [
-      'case_id', 'public_name', 'client_name_internal', 'anonymization_required', 'industry_tags', 'product_tags',
-      'sales_model_tags', 'geography_tags', 'allowed_profiles', 'case_text_short', 'case_text_long', 'metrics',
+      'case_id', 'public_name', 'client_name_internal', 'anonymization_required', 'industry_groups', 'allowed_chains',
+      'case_text_short', 'case_text_long', 'metrics',
       'source_file_or_url', 'source_location', 'verified_at', 'verified_by', 'status', 'expires_at',
       'legal_publication_approved', 'notes',
     ],
@@ -25,8 +25,8 @@ const TABLES = {
   claims: {
     table: 'polza_ru_offer_claims',
     order: 'claim_key',
-    fields: ['profile_code', 'claim_key', 'claim_text', 'status', 'approved_at', 'expires_at', 'approved_by'],
-    required: ['profile_code', 'claim_key', 'claim_text'],
+    fields: ['chain_type', 'claim_key', 'claim_text', 'status', 'approved_at', 'expires_at', 'approved_by'],
+    required: ['chain_type', 'claim_key', 'claim_text'],
   },
   senders: {
     table: 'polza_ru_senders',
@@ -37,7 +37,7 @@ const TABLES = {
 } as const;
 
 type TableKey = keyof typeof TABLES;
-const ARRAY_FIELDS = new Set(['industry_tags', 'product_tags', 'sales_model_tags', 'geography_tags', 'allowed_profiles']);
+const ARRAY_FIELDS = new Set(['industry_groups', 'allowed_chains']);
 
 function pick(key: TableKey, input: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};

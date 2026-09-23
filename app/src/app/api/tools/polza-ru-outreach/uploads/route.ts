@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic';
 const MAX_FILE_BYTES = 15 * 1024 * 1024;
 const CHUNK = 500;
 
-/** Загруженные каталоги выставок и выгрузки госконтрактов. */
+/** Загруженные каталоги выставок, выгрузки госконтрактов и списки грантов/акселераторов. */
 export async function GET(req: NextRequest) {
   const auth = await authed(req);
   if ('error' in auth) return auth.error;
@@ -27,7 +27,8 @@ export async function POST(req: NextRequest) {
   const form = await req.formData().catch(() => null);
   if (!form) return jsonError('Ожидается multipart/form-data', 400);
   const file = form.get('file');
-  const kind = form.get('kind') === 'contracts' ? 'contracts' : form.get('kind') === 'exhibitors' ? 'exhibitors' : null;
+  const rawKind = String(form.get('kind') ?? '');
+  const kind = rawKind === 'contracts' || rawKind === 'exhibitors' || rawKind === 'growth' ? rawKind : null;
   const title = String(form.get('title') ?? '').trim();
   if (!(file instanceof File) || !kind) return jsonError('Нужны файл и вид загрузки', 400);
   if (file.size > MAX_FILE_BYTES) return jsonError('Файл больше 15 МБ', 400);

@@ -1,6 +1,6 @@
 # «Наш автоаутрич» — русский сигнальный аутрич Polza
 
-Дата: 2026-09-22. Ветка: `polza-ru-outreach`. Статус: дизайн утверждён пользователем.
+Дата: 2026-09-22. Ветка: `polza-ru-outreach`. Статус: **заменён** 23.09.2026 — модель трёх ручных офферов уступила роутеру шести цепочек, см. `2026-09-23-polza-ru-outreach-chain-router-design.md`.
 
 Источник требований — комплект ТЗ `G:\polza-manual-outreach-3-specs-2026-09-22\`
 (00_START_HERE, LAUNCH_INSTRUCTIONS_INDEX, INSTRUCTION_02/03, SOURCE_CONNECTORS,
