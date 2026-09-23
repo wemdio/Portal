@@ -915,7 +915,8 @@ describe('llm rawCall retry', () => {
     expect(resumedSearch.decisions.get(0)).not.toHaveProperty('search_deferred');
 
     // An intermittent search timeout cannot discard a successful sibling's
-    // evidence or stop the next website batch. The failed subset retries alone.
+    // evidence or stop the next website batch. The failed company waits in the
+    // reserve with a deferred search; the pass itself is neither failed nor retried.
     const networkRows = Array.from({ length: 10 }, (_, i) => ({ company: `Network ${i}`, inn: String(7700000000 + i), category: 'ОКВЭД 86.21' }));
     const networkInput = { ...input, rows: networkRows };
     fetchMock.mockReset().mockResolvedValueOnce(reply({ decisions: [{ i: 0, status: 'relevant', reason: description, evidence_ids: [0] }] }))
@@ -927,11 +928,10 @@ describe('llm rawCall retry', () => {
         : { status: 'unavailable' as const, text: '', url: '', reason: 'not_confirmed' });
     const partial = await findIrrelevantRows({ ...networkInput, fetchEvidence: evidence });
     expect(evidence).toHaveBeenCalledTimes(10);
-    expect(partial.decisions.get(0)?.status).toBe('error');
+    expect(partial.decisions.get(0)).toMatchObject({ status: 'needs_review', search_deferred: true });
     expect(partial.decisions.get(1)?.status).toBe('relevant');
     expect(partial.decisions.get(9)?.status).toBe('needs_review');
-    expect(partial.retryable).toBe(true);
-    expect(partial.coverage.complete).toBe(false);
+    expect([partial.error, partial.retryable, partial.coverage.complete]).toEqual([undefined, false, true]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     evidence.mockClear().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'not_confirmed' });
     const extraRows = Array.from({ length: 33 }, (_, i) => ({ company: `Extra ${i}`, inn: String(7710000000 + i) }));
@@ -939,8 +939,8 @@ describe('llm rawCall retry', () => {
     const rotated = await findIrrelevantRows({ ...networkInput, rows: [...networkRows, ...extraRows], checkpoint: partial.checkpoint, fetchEvidence: evidence });
     expect(evidence).toHaveBeenCalledTimes(32);
     expect(evidence.mock.calls.every(([, options]) => options?.companyInn !== '7700000000')).toBe(true);
-    expect(rotated.retryable).toBe(true);
-    expect(rotated.decisions.get(0)?.status).toBe('error');
+    expect(rotated.retryable).toBe(false);
+    expect(rotated.decisions.get(0)).toMatchObject({ status: 'needs_review', search_deferred: true });
     expect(rotated.decisions.get(1)?.status).toBe('relevant');
     fetchMock.mockClear(); evidence.mockClear();
     await findIrrelevantRows({ ...networkInput, checkpoint: partial.checkpoint, fetchEvidence: evidence });
