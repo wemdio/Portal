@@ -59,10 +59,8 @@ export interface RuOutreachConfig {
   freshness_days: number;
   /** Сколько ГОТОВЫХ компаний нужно (а не сколько кандидатов просмотреть). */
   limit: number;
-  /** Пороги скоринга 0–100 (CEO: ≥90 пишем, 70–89 при почте и кейсе, 50–69 ручная проверка). */
+  /** Порог скоринга 0–100: от него пишем, ниже — пропуск. Ручную проверку CEO убрал 23.09.2026. */
   write_threshold: number;
-  conditional_threshold: number;
-  review_threshold: number;
   /** Нижний порог суммы госконтракта, ₽. */
   min_contract_amount: number;
   /** Общая база: выручка, ₽, и штат. */
@@ -89,9 +87,7 @@ export function sanitizeRuOutreachConfig(raw: Partial<RuOutreachConfig>): RuOutr
   const sources = Array.isArray(raw.sources)
     ? Array.from(new Set(raw.sources.filter((s): s is SourceCode => SOURCE_CODES.includes(s as SourceCode))))
     : [];
-  const write = clampInt(raw.write_threshold, 90, 0, 100);
-  const conditional = Math.min(write, clampInt(raw.conditional_threshold, 70, 0, 100));
-  const review = Math.min(conditional, clampInt(raw.review_threshold, 50, 0, 100));
+  const write = clampInt(raw.write_threshold, 70, 0, 100);
   const minRevenue = clampInt(raw.min_revenue, 30_000_000, 0, 1_000_000_000_000);
   const senderId = typeof raw.sender_id === 'string' && /^[0-9a-f-]{36}$/i.test(raw.sender_id) ? raw.sender_id : null;
   return {
@@ -99,8 +95,6 @@ export function sanitizeRuOutreachConfig(raw: Partial<RuOutreachConfig>): RuOutr
     freshness_days: clampInt(raw.freshness_days, DEFAULT_FRESHNESS_DAYS, 1, MAX_FRESHNESS_DAYS),
     limit: clampInt(raw.limit, DEFAULT_LIMIT, 1, MAX_LIMIT),
     write_threshold: write,
-    conditional_threshold: conditional,
-    review_threshold: review,
     min_contract_amount: clampInt(raw.min_contract_amount, 1_000_000, 0, 10_000_000_000),
     min_revenue: minRevenue,
     max_revenue: Math.max(minRevenue, clampInt(raw.max_revenue, 3_000_000_000, 0, 1_000_000_000_000)),
@@ -154,9 +148,7 @@ export const REASON_LABELS: Record<string, string> = {
   NOT_B2B: 'Не B2B',
   EXCLUDED_CATEGORY: 'Исключённая категория (кадровое агентство, конкурент, маркетплейс)',
   NO_CHAIN: 'Нет повода и низкий ЦА-балл',
-  SCORE_REVIEW: 'Скоринг в зоне ручной проверки',
   SCORE_TOO_LOW: 'Скоринг ниже порога',
-  SCORE_NEEDS_CASE: 'Скоринг средний, нет подходящего утверждённого кейса',
   EMAIL_NOT_FOUND: 'Не найдена корпоративная почта',
   SUPPRESSED_CONTACT: 'Почта в стоп-листе',
   SENDER_MISSING: 'Нет активной подписи отправителя',

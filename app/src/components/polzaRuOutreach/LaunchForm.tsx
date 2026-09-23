@@ -30,9 +30,7 @@ export function LaunchForm({ busy, senders, onStart }: Props) {
   const [sources, setSources] = useState<SourceCode[]>(DEFAULT_SOURCES);
   const [freshness, setFreshness] = useState(DEFAULT_FRESHNESS_DAYS);
   const [limit, setLimit] = useState(DEFAULT_LIMIT);
-  const [write, setWrite] = useState(90);
-  const [conditional, setConditional] = useState(70);
-  const [review, setReview] = useState(50);
+  const [write, setWrite] = useState(70);
   const [minContract, setMinContract] = useState(1_000_000);
   const [minRevenueM, setMinRevenueM] = useState(30);
   const [maxRevenueM, setMaxRevenueM] = useState(3000);
@@ -49,8 +47,6 @@ export function LaunchForm({ busy, senders, onStart }: Props) {
       freshness_days: freshness,
       limit,
       write_threshold: write,
-      conditional_threshold: conditional,
-      review_threshold: review,
       min_contract_amount: minContract,
       min_revenue: minRevenueM * 1_000_000,
       max_revenue: maxRevenueM * 1_000_000,
@@ -63,7 +59,7 @@ export function LaunchForm({ busy, senders, onStart }: Props) {
     <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
       <p className="max-w-4xl text-sm text-gray-600">
         Система сама выбирает цепочку по главному поводу компании: {CHAIN_TYPES.map((c) => CHAIN_LABELS[c]).join(' → ')}.
-        Открытые сделки и клиенты из AMO пропускаются. Почта ищется только у компаний, прошедших скоринг. Во всех цепочках 4 письма.
+        Открытые сделки и клиенты из AMO пропускаются. Почта ищется только у компаний, набравших порог скоринга. Во всех цепочках 4 письма.
       </p>
 
       <div className="mt-5">
@@ -110,22 +106,10 @@ export function LaunchForm({ busy, senders, onStart }: Props) {
         </div>
       </div>
 
-      <div className="mt-5">
-        <span className={label}>Пороги скоринга (0–100)</span>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <div>
-            <div className="mb-1 text-xs text-gray-500">Пишем сразу, от</div>
-            <input className={input} type="number" min={0} max={100} value={write} onChange={(e) => setWrite(Number(e.target.value))} />
-          </div>
-          <div>
-            <div className="mb-1 text-xs text-gray-500">Пишем, если есть почта и кейс, от</div>
-            <input className={input} type="number" min={0} max={100} value={conditional} onChange={(e) => setConditional(Number(e.target.value))} />
-          </div>
-          <div>
-            <div className="mb-1 text-xs text-gray-500">Ручная проверка, от (ниже — пропуск)</div>
-            <input className={input} type="number" min={0} max={100} value={review} onChange={(e) => setReview(Number(e.target.value))} />
-          </div>
-        </div>
+      <div className="mt-5 max-w-xs">
+        <label className={label}>Пишем от скоринга (0–100)</label>
+        <input className={input} type="number" min={0} max={100} value={write} onChange={(e) => setWrite(Number(e.target.value))} />
+        <p className="mt-1 text-xs text-gray-500">Ниже порога — пропуск, ручной проверки нет.</p>
       </div>
 
       {sources.includes('directory') && (

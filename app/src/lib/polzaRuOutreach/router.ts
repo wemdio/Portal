@@ -6,7 +6,8 @@
  * Нет повода и ЦА < 7 — цепочку не собираем.
  *
  * Скоринг (сумма 100): сила сигнала 30, свежесть 15, ЦА-балл 20, B2B 10,
- * размер 10, сайт 5, кейс 5, почта 5. Пороги берутся из формы запуска.
+ * размер 10, сайт 5, кейс 5, почта 5. Один порог из формы: от него пишем,
+ * ниже — пропуск (ручную проверку CEO убрал 23.09.2026).
  */
 
 import type { CaseRecord } from './libraries';
@@ -120,14 +121,10 @@ export function scoreCompany(i: ScoreInput): Score {
   return { total: Object.values(parts).reduce((a, b) => a + b, 0), parts };
 }
 
-export type Decision = 'write' | 'review' | 'skip' | 'needs_case';
+export type Decision = 'write' | 'skip';
 
-/** Пороги CEO: ≥write пишем; ≥conditional пишем при почте и кейсе; ≥review ручная проверка. */
-export function decide(total: number, t: { write: number; conditional: number; review: number }, hasCase: boolean, emailFound: boolean): Decision {
-  if (total >= t.write) return 'write';
-  if (total >= t.conditional) return hasCase && emailFound ? 'write' : hasCase ? 'review' : 'needs_case';
-  if (total >= t.review) return 'review';
-  return 'skip';
+export function decide(total: number, writeThreshold: number): Decision {
+  return total >= writeThreshold ? 'write' : 'skip';
 }
 
 /** Кейс по отраслевой группе; только утверждённые и разрешённые для этой цепочки. */

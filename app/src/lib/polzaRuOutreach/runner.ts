@@ -129,7 +129,6 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
     const config: RuOutreachConfig = sanitizeRuOutreachConfig((job.config ?? {}) as Partial<RuOutreachConfig>);
     const target = config.limit;
     const maxScan = maxCandidatesFor(target);
-    const thresholds = { write: config.write_threshold, conditional: config.conditional_threshold, review: config.review_threshold };
 
     await setProgress({
       status: 'running',
@@ -341,13 +340,9 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         signal_score: score.total,
         fit_reasons: [...base.fit_reasons, `Скоринг: ${Object.entries(score.parts).map(([k, v]) => `${k}=${v}`).join(', ')}`],
       };
-      const decision = decide(score.total, thresholds, Boolean(caseHit), true);
+      const decision = decide(score.total, config.write_threshold);
       if (decision === 'skip') {
         await finish(id, { stage: 'scored', status: 'rejected', reason: 'SCORE_TOO_LOW', detail: `${score.total}/100` }, patch);
-        return null;
-      }
-      if (decision === 'review' || decision === 'needs_case') {
-        await finish(id, { stage: 'scored', status: 'manual_review', reason: decision === 'review' ? 'SCORE_REVIEW' : 'SCORE_NEEDS_CASE', detail: `${score.total}/100` }, patch);
         return null;
       }
       await updateRow(id, { ...patch, pipeline_stage: 'scored' });
