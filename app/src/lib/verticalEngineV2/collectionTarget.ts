@@ -1,3 +1,5 @@
+import { isVeTransientProviderError } from './collectionErrors';
+
 /** Validated-recipient targets are distinct from candidate/cost safety caps. */
 export const VE_PREVIEW_READY_TARGET = 500;
 /** Small first cohort publishes checked contacts before the full preview. */
@@ -255,8 +257,12 @@ export function finishCollectionRound(
   delete next.idle_streak;
   const idleStreak = result.idle ? (Number.isSafeInteger(progress.idle_streak) ? Math.max(0, progress.idle_streak!) : 0) + 1 : 0;
   if (idleStreak) next.idle_streak = idleStreak;
-  if (result.error) return { ...next, status: 'error', reason: result.error };
-  if (result.readyRows >= progress.ready_target) return { ...next, status: 'target_reached' };
+  // Готовые контакты уже проверены: временный сбой поставщика после набранной
+  // цели не делает базу упавшей. 23.09.2026 база 6b5bf9e8 с 718 готовыми из 500
+  // ушла в failed на «Serper transient» и не дошла до «цель достигнута».
+  const reached = result.readyRows >= progress.ready_target;
+  if (result.error && !(reached && isVeTransientProviderError(result.error))) return { ...next, status: 'error', reason: result.error };
+  if (reached) return { ...next, status: 'target_reached' };
   if (result.exhausted) return { ...next, status: 'exhausted', reason: 'Источники выбранного плана исчерпаны' };
   // Холостой раунд бюджет раундов не расходует (см. VE_COLLECTION_ROUND_BUDGET).
   if (next.candidates_processed >= next.max_candidates || (!result.idle && next.round >= next.max_rounds)) {
