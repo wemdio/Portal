@@ -57,6 +57,7 @@ import {
   describeOwnershipConflicts,
   describePortalProjectTerm,
   findManualFactIssue,
+  loadNoPeriodPlanOwners,
   loadPortalProjectTerm,
   localIsoDate,
   PORTAL_TERM_TEXT,
@@ -636,9 +637,12 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   let projectTermDeadline: string | null = null;
   if (expectedPortalPeriodId === null) {
     try {
-      const { project: portalProject, periods } = await loadPortalProjectTerm(portalDb, portalProjectId);
+      const [{ project: portalProject, periods }, planOwners] = await Promise.all([
+        loadPortalProjectTerm(portalDb, portalProjectId),
+        loadNoPeriodPlanOwners(portalDb, portalProjectId),
+      ]);
       if (!portalProject) return { status: 404, body: { error: 'Проект Portal не найден' } };
-      const term = describePortalProjectTerm(portalProject, periods);
+      const term = describePortalProjectTerm(portalProject, periods, { bound: planOwners.includes(base.project_id) });
       if (!term.ok) return conflict(term.code, term.error);
       const manualFact = await findManualFactIssue(instantlyDb, portalProject);
       if (manualFact) return conflict(manualFact.code, manualFact.error);

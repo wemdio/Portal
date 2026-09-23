@@ -12,6 +12,7 @@ import type { VeBase, VeSegmentationAudit, VeTemplate } from './types';
 import {
   describePortalProjectTerm,
   findManualFactIssue,
+  loadNoPeriodPlanOwners,
   localIsoDate,
   PORTAL_PROJECT_TERM_COLUMNS,
   PORTAL_TERM_TEXT,
@@ -187,16 +188,16 @@ export async function buildVeContactDeliveryPreview(
       .select('id, status')
       .eq('project_id', input.portalProjectId);
     if (periodsError) return outcome(500, 'PORTAL_PERIOD_LOAD_FAILED', periodsError.message);
-    const { data: bindingRows, error: bindingError } = await portalDb
-      .from('ve_projects')
-      .select('id, portal_period_id')
-      .eq('portal_project_id', input.portalProjectId);
-    if (bindingError) return outcome(500, 'PORTAL_PROJECT_BINDING_LOAD_FAILED', bindingError.message);
-    const bindings = (bindingRows ?? []) as Array<{ id: string; portal_period_id?: string | null }>;
-    const boundHere = bindings.some((row) => row.id === base.project_id && !row.portal_period_id);
+    let planOwners: string[];
+    try {
+      planOwners = await loadNoPeriodPlanOwners(portalDb, input.portalProjectId);
+    } catch (error) {
+      return outcome(500, 'PORTAL_PROJECT_BINDING_LOAD_FAILED', error instanceof Error ? error.message : String(error));
+    }
+    const boundHere = planOwners.includes(base.project_id);
     const term = describePortalProjectTerm(project, (periodRows ?? []) as PortalPeriodStateRow[], { bound: boundHere });
     if (!term.ok) return outcome(409, term.code, term.error);
-    if (bindings.some((row) => row.id !== base.project_id && !row.portal_period_id)) {
+    if (planOwners.some((id) => id !== base.project_id)) {
       return outcome(
         409,
         'PORTAL_PROJECT_PLAN_TAKEN',

@@ -234,6 +234,7 @@ describe('VE2 launch for a Portal project without periods', () => {
   it.each([
     ['a missing deadline', { deadline: null }, 'PROJECT_DEADLINE_REQUIRED'],
     ['a passed deadline', { deadline: '2026-09-22' }, 'PROJECT_DEADLINE_PASSED'],
+    ['a passed deadline typed as DD.MM.YY', { deadline: '22.09.26' }, 'PROJECT_DEADLINE_PASSED'],
     ['a finished project', { status: 'Завершен' }, 'PORTAL_PROJECT_NOT_IN_WORK'],
   ])('refuses %s before binding or creating campaigns', async (_name, project, code) => {
     const { outcome, portal } = await launch(portalDb(project));
@@ -247,6 +248,23 @@ describe('VE2 launch for a Portal project without periods', () => {
     await portal.from('project_periods').insert({ id: 'period-1', project_id: STAFF_LINE_ID, status: 'active' });
     const { outcome } = await launch(portal);
     expect(outcome).toMatchObject({ status: 409, body: { code: 'PORTAL_PROJECT_HAS_ACTIVE_PERIOD' } });
+    expect(mockCreateCampaign).not.toHaveBeenCalled();
+  });
+
+  it('launches with a deadline typed as DD.MM.YY, as the project card hints', async () => {
+    const { outcome, portal } = await launch(portalDb({ deadline: '31.10.26' }));
+    expect(outcome.status).toBe(200);
+    expect(portal.rpcCalls.some((call) => call.fn === 've_bind_contact_delivery_plan')).toBe(true);
+  });
+
+  // The binding is immutable: a period created after a no-period launch cannot be adopted by this VE2 project.
+  it('does not promise a period binding to a VE2 project already bound without a period', async () => {
+    const portal = portalDb();
+    await portal.from('ve_projects').update({ portal_project_id: STAFF_LINE_ID, portal_period_id: null }).eq('id', VE_PROJECT_ID);
+    await portal.from('project_periods').insert({ id: 'period-1', project_id: STAFF_LINE_ID, status: 'active' });
+    const { outcome } = await launch(portal);
+    expect(outcome).toMatchObject({ status: 409, body: { code: 'PORTAL_PERIOD_CREATED_AFTER_LAUNCH' } });
+    expect(String(outcome.body.error)).not.toContain('Обновите страницу');
     expect(mockCreateCampaign).not.toHaveBeenCalled();
   });
 });
