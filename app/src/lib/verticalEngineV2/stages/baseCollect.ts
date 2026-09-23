@@ -93,7 +93,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { isVeProviderBillingError, isVeProviderConfigurationError } from '../collectionErrors';
 import { validVeAdaptiveCollection, newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys,
-  readVeBatchSpend, veAdaptiveCandidateLimit, type VeAdaptiveCollection } from '../adaptiveCollection';
+  readVeBatchSpend, veAdaptiveCandidateLimit, veAdaptiveLowYield, veAdaptiveYieldWindows, type VeAdaptiveCollection } from '../adaptiveCollection';
+import { stripUnfoundedSizeFilters, veDirectorySizeKeep, veHypothesisSizeBasis, veSecondQueueTasks, veTaskWithoutSizeFilters,
+  VE_PLAN_MAX_TASKS, VE_PLAN_WIDENING_LIMIT, VE_SIZE_FILTER_KEYS } from '../planWidening';
 import { prioritizeVeCandidates, readVeCandidateHints } from '../candidatePriority';
 import { isVeAcceptedEmailStatus } from '../emailPolicy';
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -839,6 +841,13 @@ function hasExistingSourceContact(row: VeUnifiedRow): boolean {
   return Boolean(normalized.website || normalized.email);
 }
 
+/** Расширенный срез (вторая очередь, новый срез при исчерпании плана) берёт
+ *  только компании с готовой почтой или сайтом — из любого источника, а не
+ *  только из реестра. Платный добор сайтов для него не запускается. */
+function keepWidenedSourceRow(task: VeCollectTask, row: VeUnifiedRow): boolean {
+  return !task.widened || hasExistingSourceContact(row);
+}
+
 function retainDeferredSourceRows(info: VeCollectInfo): void {
   if (info.search_policy?.phase !== 'existing') return;
   info.search_policy.deferred_rows = dedupUnifiedRows([
@@ -1006,7 +1015,7 @@ async function buildPlan(
   const withCatalog = await ensureCatalogSource(ctx, llm.data, promptInput, usage, market);
   // Проба идёт ПОСЛЕ починки «каталога нет вовсе»: чинить нечего, пока задачи
   // не существует, а добавленный срез проверяется на общих основаниях.
-  const { plan, sliceProbe } = await ensureSliceMatchesVertical(
+  const { plan: probed, sliceProbe } = await ensureSliceMatchesVertical(
     ctx,
     withCatalog.plan,
     vertical,
@@ -1014,6 +1023,11 @@ async function buildPlan(
     usage,
     market,
   );
+  // Запрет из промпта закреплён в коде: порог размера без основания в тексте
+  // гипотезы в план не попадает (новый план и перепланирование).
+  const { plan, stripped } = stripUnfoundedSizeFilters(probed,
+    hypotheses.map((h) => `${h.title} ${h.description ?? ''}`).join('\n'));
+  if (stripped) stageLog(ctx, `[base_collect] план: сняты пороги выручки/штата без основания в гипотезе (${stripped} задач)`);
   return {
     plan,
     planRepair: withCatalog.planRepair,
@@ -1306,6 +1320,7 @@ export async function fetchDirectoryRows(
   limit: number,
   excludedKeys: VeBaseExclusionKeys,
   startOffset = 0,
+  keep?: (row: Record<string, unknown>) => boolean,
 ): Promise<{
   rows: Record<string, unknown>[];
   excludedDuringFetch: number;
@@ -1338,6 +1353,9 @@ export async function fetchDirectoryRows(
     for (const r of res.rows) {
       if (rows.length >= limit) break;
       scanned += 1;
+      // Вторая очередь: ослабленный порог размера проверяется здесь, потому что
+      // реестр не умеет «порог или пустое поле».
+      if (keep && !keep(r)) continue;
       // Дубль другой базы: по email, имени (с ИНН-уточнением) или точно по ИНН.
       const pruned = pruneBaseRowAgainstExclusion(excludedKeys, mapDirectoryRow(r));
       if (!pruned) {
@@ -1745,8 +1763,8 @@ async function dispatchTask(
       for (const row of rows) {
         if (!row.yandex_id || row.yandex_id === state.catalog.after) throw new Error('yandex_maps: каталог не продвинул курсор');
         const mapped = pruneBaseRowAgainstExclusion(excluded, mapYandexRow(row));
-        if (mapped && normalizeCompanyForDedup(mapped.company)) state.harvest.push(mapped);
-        else state.excluded_during_fetch = (state.excluded_during_fetch ?? 0) + 1;
+        if (!mapped || !normalizeCompanyForDedup(mapped.company)) state.excluded_during_fetch = (state.excluded_during_fetch ?? 0) + 1;
+        else if (keepWidenedSourceRow(task, mapped)) state.harvest.push(mapped);
         state.catalog.after = row.yandex_id;
       }
       state.harvest = dedupUnifiedRows(state.harvest);
@@ -1764,6 +1782,7 @@ async function dispatchTask(
   // иначе повторная сборка сегмента заново скачивала уже собранные страницы.
   if (task.source === 'companies_directory') {
     const filters = mapDirectoryFilters(task.directory_filters);
+    const keep = veDirectorySizeKeep(task.directory_filters?.sizeOrUnknown);
     const excluded = await getExcludedKeys();
     // Компания с готовым адресом — это контакт, за который не нужно платить ни
     // обходом сайта, ни очередью SMTP-проверки. Такие берём ПЕРВЫМИ, и только
@@ -1772,7 +1791,7 @@ async function dispatchTask(
     // практически никогда, потому что лейн «с сайтом» упирался в потолок
     // сканирования раньше, чем исчерпывался.
     const firstFilters = existingContactsOnly ? { ...filters, hasEmail: true } : filters;
-    const first = await fetchDirectoryRows(ctx, firstFilters, limit, excluded, readDirectoryCursor(state, firstFilters));
+    const first = await fetchDirectoryRows(ctx, firstFilters, limit, excluded, readDirectoryCursor(state, firstFilters), keep);
     // Второй лейн запускаем и после потолка сканирования, а не только после
     // исчерпания: иначе недобор первого лейна навсегда оставляет партию пустой.
     const secondFilters = { ...filters, hasWebsite: true };
@@ -1780,7 +1799,7 @@ async function dispatchTask(
       ? await fetchDirectoryRows(ctx, secondFilters, limit - first.rows.length,
         addRowsToExclusionKeys({ inns: new Set(excluded.inns), emails: new Set(excluded.emails),
           receipts: new Set(excluded.receipts), websiteInns: new Map([...excluded.websiteInns].map(([key, values]) => [key, new Set(values)])) },
-        first.rows.map(mapDirectoryRow)), readDirectoryCursor(state, secondFilters)) : null;
+        first.rows.map(mapDirectoryRow)), readDirectoryCursor(state, secondFilters), keep) : null;
     const rows = [...first.rows, ...(second?.rows ?? [])];
     const excludedDuringFetch = first.excludedDuringFetch + (second?.excludedDuringFetch ?? 0);
     const exhausted = first.exhausted && (!existingContactsOnly || second?.exhausted === true);
@@ -1798,7 +1817,9 @@ async function dispatchTask(
     if (second) writeDirectoryCursor(state, secondFilters, second.nextOffset);
     if (existingContactsOnly) state.existing_contacts_only = true;
     else delete state.existing_contacts_only;
-    state.harvest = rows.map(mapDirectoryRow);
+    // Лейны «есть почта / есть сайт» уже дают контакт; фильтр страхует строки,
+    // чей адрес в реестре оказался невалидным.
+    state.harvest = rows.map(mapDirectoryRow).filter((row) => keepWidenedSourceRow(task, row));
     state.status = 'done';
     state.rows = state.harvest.length;
     state.child_job_id = null;
@@ -1837,7 +1858,7 @@ async function dispatchTask(
           : await fetchEngHiringRows(ctx, task.eng_hiring_query, limit);
     state.harvest = rows.map(
       task.source === 'pdl' ? mapPdlRow : task.source === 'funded' ? mapFundedRow : mapEngHiringRow,
-    );
+    ).filter((row) => keepWidenedSourceRow(task, row));
     state.status = 'done';
     state.rows = state.harvest.length;
     state.child_job_id = null;
@@ -2495,14 +2516,19 @@ async function prepareAdaptiveCandidates(ctx: VeStageContext, base: VeAutoBase, 
   const focus = info.hypotheses?.map((hypothesis) => hypothesis.title).join(' ') ?? '';
   return prioritizeVeCandidates(candidates, hints, focus);
 }
-function beginAdaptiveBatch(base: VeAutoBase, info: VeCollectInfo, id: string, rows: VeUnifiedRow[]): void {
+export function beginAdaptiveBatch(base: VeAutoBase, info: VeCollectInfo, id: string, rows: VeUnifiedRow[]): void {
   const policy = info.adaptive_collection;
   if (!policy || policy.pending || !rows.length) return;
   const sourceKey = candidateSourceKey(rows[0]) ?? policy.active_source ?? 'saved';
   const source = info.tasks?.find((task) => veSourceStrategyKey(task.task) === sourceKey)?.source ?? 'saved';
+  // The batch is measured before the per-company limit, so the baseline must be
+  // too: addresses already held back in the reserve are not new. Without them
+  // every batch "found" all old over-limit addresses again (6b475d8c: 16 of 16,
+  // f1bb9ccf: 5 of 5) and a dry source never looked poor.
+  const overCap = readVeRelevanceReserve(info.relevance_reserve).filter((row) => Boolean(row[VE_COMPANY_CAP_FIELD]));
   policy.pending = { id, source_key: sourceKey, source, candidates: rows.length,
-    ready_before: veReadyContactKeys(prepareSegmentationAudience({ rows: Array.isArray(base.data) ? base.data : [],
-      columns: base.columns ?? [], source: 'auto' }).rows),
+    ready_before: veReadyContactKeys([...prepareSegmentationAudience({ rows: Array.isArray(base.data) ? base.data : [],
+      columns: base.columns ?? [], source: 'auto' }).rows, ...overCap]),
     started_at: policy.last_completed_at ?? policy.started_at };
 }
 
@@ -2513,7 +2539,7 @@ function beginAdaptiveBatch(base: VeAutoBase, info: VeCollectInfo, id: string, r
  *  компаний из 2 863 по тому же ОКВЭД, задача встала с пометкой «реестр
  *  исчерпан», а 27 тысяч организаций той же отрасли в Яндекс.Картах остались
  *  недоступны — именно эти пороги считались ограничением, запрещающим карты. */
-const SIZE_FILTER_KEYS = ['revenueFrom', 'revenueTo', 'employeesFrom', 'employeesTo'] as const;
+const SIZE_FILTER_KEYS = [...VE_SIZE_FILTER_KEYS, 'sizeOrUnknown'] as const;
 
 /** Keep user/plan restrictions when trying a different query. Cross-source
  * fallback is allowed only when the original source has no numeric/geo scope
@@ -2528,7 +2554,11 @@ export function safeAlternativeTask(candidate: VeCollectTask, original: VeCollec
       // стоял у 326 задач из 331 и в одиночку запрещал уход на карты.
       .some(([key, value]) => !['okvedCodes', 'hasEmail', 'includeIp', ...SIZE_FILTER_KEYS].includes(key) && value !== undefined)
       || original.maps_query?.geo || original.pdl_filters?.countries?.length || original.pdl_filters?.sizes?.length
-      || original.funded_filters || original.eng_hiring_query || original.hh_query;
+      || original.funded_filters || original.eng_hiring_query
+      // Запрос вакансий — сигнал найма, а не граница рынка: по всей России
+      // (area 113 или пусто) он ничего не сужает. 9f82e79d стояла на 5
+      // контактах, потому что любая замена hh_live считалась нарушением.
+      || (original.hh_query?.area && !['113', ''].includes(original.hh_query.area.trim()));
     if (restricted) return null;
   }
   if (candidate.source === 'companies_directory' && original.source === candidate.source) return {
@@ -2565,42 +2595,52 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
     || ((!task.exhausted && !task.hit_ceiling) && (task.source === 'companies_directory' || !!task.catalog))
     || (task.harvest ?? []).some((row) => (info.search_policy?.phase !== 'existing' || hasExistingSourceContact(row))
       && !baseRowMatchesExclusion(consumed, row))));
-  const alternatives = available.filter((task) => {
-    const recent = policy.completed.filter((batch) => batch.source_key === veSourceStrategyKey(task.task)).slice(-2);
-    return veSourceStrategyKey(task.task) !== policy.active_source && !(recent.length === 2 && recent.every((batch) => batch.poor));
-  });
-  if (policy.replan_needed && alternatives.length) {
+  const alternatives = available.filter((task) => veSourceStrategyKey(task.task) !== policy.active_source
+    && !veAdaptiveLowYield(policy.completed, veSourceStrategyKey(task.task)));
+  const planExhausted = policy.replan_reason === 'plan_exhausted';
+  if (policy.replan_needed && !planExhausted && alternatives.length) {
     policy.active_source = chooseVeAdaptiveSource(policy, alternatives.map((task) => veSourceStrategyKey(task.task)));
-    policy.replan_needed = false; policy.switches += 1;
+    policy.replan_needed = false; delete policy.replan_reason; policy.switches += 1;
     policy.note = 'Низкий выход: автоматически переключились на другой источник из плана.';
     await persistCollectInfo(ctx, base.id, info);
     return;
   }
-  if (policy.replan_needed && policy.replan_attempts < 2 && tasks.length < 6) {
+  if (policy.replan_needed && policy.replan_attempts < 2 && tasks.length < VE_PLAN_MAX_TASKS) {
     const original = tasks.find((task) => veSourceStrategyKey(task.task) === policy.active_source) ?? tasks[0];
     if (!original) return;
     policy.replan_attempts += 1;
     // Save before paying: a retry/redeploy cannot reset the replan allowance.
     await persistCollectInfo(ctx, base.id, info);
     try {
-      const feedback = `Предыдущие партии дали низкий выход. Предложи ДРУГОЙ источник из готовых каталогов или другой запрос/срез. Не меняй целевую аудиторию, обязательные признаки, географию и ограничения исходной гипотезы. Не повторяй прежние задачи. Живые парсеры не добавляй. Предыдущий план: ${JSON.stringify(tasks.map((task) => task.task))}. Результаты последних партий (расходы оценочные): ${JSON.stringify(policy.completed.slice(-6))}`;
+      // Прежний план показываем без порогов размера: иначе модель повторяет
+      // их как «ограничение гипотезы», хотя их придумал планировщик.
+      const previous = JSON.stringify(tasks.map((task) => veTaskWithoutSizeFilters(task.task)));
+      const rules = 'Не меняй целевую аудиторию, обязательные признаки и географию гипотезы. Пороги выручки и штата ставь, только если размер компании прямо назван в тексте гипотезы. Не повторяй прежние задачи. Живые парсеры не добавляй.';
+      const feedback = planExhausted
+        ? `Источники плана исчерпаны, а цель базы не набрана. Предложи ДРУГОЙ срез того же рынка: соседние или более общие коды ОКВЭД, готовый каталог Яндекс Карт или другой запрос. ${rules} Предыдущий план (без порогов размера): ${previous}`
+        : `Предыдущие партии дали низкий выход. Предложи ДРУГОЙ источник из готовых каталогов или другой запрос/срез. ${rules} Предыдущий план (без порогов размера): ${previous}. Результаты последних партий (расходы оценочные): ${JSON.stringify(policy.completed.slice(-6))}`;
       const replacement = await buildPlan(job, ctx, vertical, usage, market, base.hypothesis_id ?? null, feedback);
       if (replacement.sliceProbe?.outcome === 'rejected') throw new Error('alternative_slice_rejected');
       const known = new Set(tasks.map((task) => veSourceStrategyKey(task.task)));
       const next = replacement.plan.tasks.map((task) => safeAlternativeTask(task, original.task))
         .find((task): task is VeCollectTask => !!task && !known.has(veSourceStrategyKey(task)));
       if (next) {
-        tasks.push({ source: next.source, task: next, status: 'pending', child_job_id: null, rows: 0 });
+        const task: VeCollectTask = planExhausted ? { ...next, widened: 'replan' } : next;
+        tasks.push({ source: task.source, task, status: 'pending', child_job_id: null, rows: 0 });
         info.tasks = tasks;
         info.plan = { tasks: tasks.map((task) => task.task) };
         policy.active_source = veSourceStrategyKey(next); policy.switches += 1; policy.replan_needed = false;
-        policy.note = 'Подобран новый поисковый срез с сохранением условий гипотезы. Проверяем пробную партию.';
+        delete policy.replan_reason;
+        policy.note = planExhausted
+          ? 'План исчерпан раньше цели: подобран новый срез с сохранением условий гипотезы. Проверяем пробную партию.'
+          : 'Подобран новый поисковый срез с сохранением условий гипотезы. Проверяем пробную партию.';
         delete policy.replan_error;
         // A changed population is not the original estimate's denominator.
         if (info.estimate) info.estimate = { ...info.estimate, remaining_ready_estimate: null,
           estimate_reason: 'После смены источника объём будет уточнён по новым проверенным партиям.' };
       } else {
-        policy.replan_needed = false; policy.replan_error = 'Подходящий новый срез не найден; сохранён прежний план.';
+        policy.replan_needed = false; delete policy.replan_reason;
+        policy.replan_error = 'Подходящий новый срез не найден; сохранён прежний план.';
       }
     } catch (error) {
       ctx.signal?.throwIfAborted();
@@ -2608,7 +2648,8 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
         || error instanceof VeLlmRateLimitError
         || isVeProviderBillingError(error) || isVeProviderConfigurationError(error)
         || (error instanceof Error && error.name === 'VeWorkerShutdownError')) throw error;
-      policy.replan_needed = false; policy.replan_error = 'Не удалось подготовить альтернативный срез; оплаченные результаты сохранены.';
+      policy.replan_needed = false; delete policy.replan_reason;
+      policy.replan_error = 'Не удалось подготовить альтернативный срез; оплаченные результаты сохранены.';
     }
     await persistCollectInfo(ctx, base.id, info);
     if (!policy.replan_error) return;
@@ -3460,6 +3501,60 @@ async function readVeContactLimit(ctx: VeStageContext, job: VeJob, base: VeAutoB
   } catch { return null; }
 }
 
+/** Источник ещё может дать кандидатов без нового плана. */
+function veTaskCanSupply(task: VeCollectTaskState): boolean {
+  return task.status === 'pending' || task.status === 'dispatched'
+    || ((task.source === 'companies_directory' || !!task.catalog) && task.status === 'done' && !task.exhausted && !task.hit_ceiling);
+}
+
+/** Сбой чтения не снимает порог: тогда он ослабляется, как обоснованный. */
+async function readVeHypothesisSizeBasis(ctx: VeStageContext, hypothesisId: string | null | undefined): Promise<boolean> {
+  if (!hypothesisId) return true;
+  try {
+    const { data, error } = await ctx.supabase.from('ve_hypotheses').select('title, description').eq('id', hypothesisId).maybeSingle();
+    if (error || !data) return true;
+    const row = data as { title?: unknown; description?: unknown };
+    return veHypothesisSizeBasis(`${typeof row.title === 'string' ? row.title : ''}\n${typeof row.description === 'string' ? row.description : ''}`);
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Открыть расширенный срез для исчерпанного плана. Вторая очередь — без LLM и
+ * без платных вызовов; если её нет, следующий заход один раз просит у
+ * планировщика новый срез (adaptCollectionSources). Состояние меняется только
+ * в памяти и сохраняется вместе с раундом.
+ */
+async function widenExhaustedPlan(ctx: VeStageContext, base: VeAutoBase, info: VeCollectInfo, tasks: VeCollectTaskState[]): Promise<boolean> {
+  const policy = info.adaptive_collection ?? newVeAdaptiveCollection();
+  const widenings = policy.widenings ?? 0;
+  if (widenings >= VE_PLAN_WIDENING_LIMIT) return false;
+  const sizeBasis = await readVeHypothesisSizeBasis(ctx, base.hypothesis_id);
+  const added = veSecondQueueTasks(tasks.map((task) => task.task), sizeBasis);
+  if (added.length) {
+    for (const task of added) tasks.push({ source: task.source, task, status: 'pending', child_job_id: null, rows: 0 });
+    policy.active_source = veSourceStrategyKey(added[0]);
+    policy.switches += 1;
+    policy.note = sizeBasis
+      ? 'План исчерпан раньше цели: открыта вторая очередь — пороги размера ослаблены, компании без данных о штате и выручке тоже берём.'
+      : 'План исчерпан раньше цели: открыта вторая очередь — тот же ОКВЭД без порогов размера, которых нет в гипотезе.';
+  } else if (policy.replan_attempts < 2 && tasks.length < VE_PLAN_MAX_TASKS) {
+    policy.replan_needed = true;
+    policy.replan_reason = 'plan_exhausted';
+    policy.note = 'План исчерпан раньше цели: подбираем новый срез того же рынка.';
+  } else return false;
+  policy.widenings = widenings + 1;
+  delete policy.replan_error;
+  info.adaptive_collection = policy;
+  info.tasks = tasks;
+  info.plan = { tasks: tasks.map((task) => task.task) };
+  // Прогноз считался по прежнему срезу; новый объём уточнят проверенные партии.
+  if (info.estimate) info.estimate = { ...info.estimate, remaining_ready_estimate: null,
+    estimate_reason: 'После расширения среза объём будет уточнён по новым проверенным партиям.' };
+  return true;
+}
+
 async function completeTargetRound(args: {
   ctx: VeStageContext; job: VeJob; base: VeAutoBase; info: VeCollectInfo;
   progress: VeCollectionTargetProgress; candidates: VeUnifiedRow[];
@@ -3537,7 +3632,7 @@ async function completeTargetRound(args: {
   const existingFirst = info.search_policy?.phase === 'existing';
   const discoveryPaused = info.source_contact_budget?.paused === true;
   const pendingDiscovery = !existingFirst && !discoveryPaused && (tasks.some((task) => task.status === 'done'
-    && hasPendingVeSourceContacts((task.harvest ?? []).filter((row) =>
+    && !task.task.widened && hasPendingVeSourceContacts((task.harvest ?? []).filter((row) =>
       pruneBaseRowAgainstExclusion(freshKeys, row) !== null), info.source_contact_recovery))
     || hasPendingVeSourceContacts((info.search_policy?.deferred_rows ?? []).filter((row) =>
       pruneBaseRowAgainstExclusion(freshKeys, row) !== null), info.source_contact_recovery));
@@ -3729,16 +3824,35 @@ async function completeTargetRound(args: {
     }
     stageLog(ctx, `[base_collect] имеющиеся данные проверены: ${readyRows.length}/${progress.ready_target} готовых контактов; дополнительный поиск включён только для недостающего объёма`);
   }
+  let widenedSliceDry = false;
   if (info.adaptive_collection?.pending && !continueSavedReview && !args.validationError && !taskError
     && cleaned.summary.status === 'complete' && !pipeline?.error && pendingBatches.length === 0) {
     const finishedAt = new Date().toISOString();
+    const batchSource = info.adaptive_collection.pending.source_key;
     const spend = await readVeBatchSpend(ctx.supabase, job.project_id, base.id, info.adaptive_collection.pending.started_at, finishedAt);
     // Measure the source BEFORE the per-company limit: its thresholds (5 % yield,
     // $0.05 per contact) were calibrated on uncapped counts, so judging a capped
     // batch by them would call every normal source weak and buy a replan.
     info.adaptive_collection = finishVeAdaptiveBatch(info.adaptive_collection, [...readyRows, ...overCapRows], spend, finishedAt);
-    if (info.adaptive_collection.replan_needed && !reviewOnly && readyRows.length < progress.ready_target
-      && !acquisitionLimited && info.adaptive_collection.replan_attempts < 2) {
+    const policy = info.adaptive_collection;
+    // Расширенный срез — последняя автоматическая попытка. Если и он дал две
+    // плохие партии, а живого источника кроме него нет, база завершается сама,
+    // а не перебирает срезы за счёт проверок.
+    widenedSliceDry = policy.replan_needed === true && !reviewOnly && readyRows.length < progress.ready_target
+      && tasks.some((task) => task.task.widened && veSourceStrategyKey(task.task) === batchSource)
+      && !tasks.some((task) => veSourceStrategyKey(task.task) !== batchSource && veTaskCanSupply(task)
+        && !veAdaptiveLowYield(policy.completed, veSourceStrategyKey(task.task)));
+    if (widenedSliceDry) {
+      const windows = veAdaptiveYieldWindows(policy.completed, batchSource);
+      const companies = windows.reduce((sum, window) => sum + window.candidates, 0);
+      const contacts = windows.reduce((sum, window) => sum + window.new_ready, 0);
+      policy.replan_needed = false; delete policy.replan_reason;
+      policy.note = 'Расширенный срез дал низкий выход двух партий подряд: сбор остановлен.';
+      next = { ...next, round: progress.round, status: 'limited',
+        reason: `Расширенный срез тоже дал низкий выход: последние ${companies} компаний дали ${contacts} новых готовых контактов. `
+          + `Сбор остановлен, чтобы не тратить проверки впустую. Собрано ${readyRows.length} из ${progress.ready_target}.` };
+    } else if (policy.replan_needed && !reviewOnly && readyRows.length < progress.ready_target
+      && !acquisitionLimited && policy.replan_attempts < 2) {
       next = { ...next, status: 'collecting', round: progress.round + 1 }; delete next.reason;
     }
   }
@@ -3812,6 +3926,28 @@ async function completeTargetRound(args: {
       info.target_progress = next;
       stageLog(ctx, `[base_collect] остановка по размеру рынка: собрано ${readyRows.length}, прогноз остатка ${projected}, цель ${progress.ready_target}`);
     }
+  }
+  // План кончился раньше цели — это повод расширить срез, а не остановка:
+  // сначала вторая очередь тех же ОКВЭД без придуманных порогов размера, затем
+  // один подбор нового среза. Не больше двух раз на базу; при повторном
+  // исчерпании база завершается с честной причиной.
+  // Состояние задач читаем заново: переход к платной фазе выше мог их открыть.
+  const sourcesRanOut = !reviewOnly && !args.hasBufferedCandidates && !pendingDiscovery
+    && pendingBatches.length === 0 && !tasks.some(veTaskCanSupply);
+  if (!widenedSliceDry && sourcesRanOut && (next.status === 'exhausted' || next.status === 'limited')
+    && !continueSavedReview && !args.validationError && !taskError && !pipeline?.error
+    && cleaned.summary.status === 'complete' && !acquisitionLimited
+    && readyRows.length < progress.ready_target && tasks.length > 0) {
+    if (await widenExhaustedPlan(ctx, base, info, tasks)) {
+      stageLog(ctx, `[base_collect] план исчерпан на ${readyRows.length}/${progress.ready_target}: срез расширен автоматически (${info.adaptive_collection?.widenings}/${VE_PLAN_WIDENING_LIMIT})`);
+      next = { ...next, status: 'collecting', round: progress.round + 1 };
+      delete next.reason;
+    } else if (info.adaptive_collection?.widenings) {
+      next = { ...next, reason: `${next.reason ?? 'Источники плана исчерпаны'}. Срез уже расширялся автоматически `
+        + `(${info.adaptive_collection.widenings} из ${VE_PLAN_WIDENING_LIMIT}): новых подходящих компаний не нашлось, дальше сбор сам не расширяется.` };
+    }
+    // info уже держит прежний объект раунда (см. остановку по размеру рынка выше).
+    info.target_progress = next;
   }
   if (next.status === 'collecting' && !continueSavedReview) {
     // One atomic checkpoint: prior validated output is durable BEFORE the next
@@ -4174,8 +4310,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
           receipts: new Set(keys.receipts), websiteInns: new Map([...keys.websiteInns].map(([key, values]) => [key, new Set(values)])) },
         info.preview_pipeline.batches.flatMap((batch) => batch.rows));
       };
+      // Расширенный срез берёт только компании с готовой почтой или сайтом:
+      // остальные потребовали бы платного поиска сайта ради второй очереди.
       await dispatchTask(ctx, state, project, limit, sourceExclusions, usage,
-        () => persistCollectInfo(ctx, baseId, info), existingFirst);
+        () => persistCollectInfo(ctx, baseId, info), existingFirst || Boolean(state.task.widened));
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +
@@ -4243,7 +4381,11 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // Do not buy website lookups for companies already excluded by another base.
   // Snapshot before adding same-base acquisition receipts: a previously seen
   // row may still legitimately recover its missing website in this base.
-  const discoveryCandidates = interleaved.filter((row) => pruneBaseRowAgainstExclusion(existingKeys, row) !== null);
+  // Расширенному срезу поиск сайта не покупаем: строка с одной почтой из него
+  // идёт как есть, как в бесплатной фазе.
+  const widenedSources = new Set(tasks.filter((task) => task.task.widened).map((task) => veSourceStrategyKey(task.task)));
+  const discoveryCandidates = interleaved.filter((row) => !widenedSources.has(candidateSourceKey(row) ?? '')
+    && pruneBaseRowAgainstExclusion(existingKeys, row) !== null);
   if (target) {
     addAcquisitionReceipts(existingKeys, info.target_checkpoint?.seen_rows ?? [], interleaved);
     addRowsToExclusionKeys(existingKeys, Array.isArray(base.data) ? base.data : []);
