@@ -293,6 +293,7 @@ blocks:
               # SERVER_PASSWORD), SENDER_REMOTE_DIR (default: /opt/portal-sender).
               # На хосте один раз создать .env по deploy/sender/.env.example.
               SENDER_HOST="${SENDER_SSH_HOST:-}"
+              SENDER_DEPLOY_SKIPPED=""
               if [ "$DEPLOY_SENDER" = 1 ] && [ -z "$SENDER_HOST" ]; then
                 # Не FATAL: блокировать деплой portal-хоста нельзя — он как раз
                 # убирает worker-sender из стека на 139, а пропуск sender-хоста
@@ -333,12 +334,32 @@ blocks:
                   done
                   return 1
                 }
+                # Сендер — малая часть функционала на отдельном хосте. Его
+                # недоступность (144 лежал с 21.09.2026) не должна останавливать
+                # выкладку портала: три попытки достучаться, дальше шаг
+                # пропускается, портал едет штатно, в health-чат — алерт.
+                SENDER_PROBE_OK=0
+                n=1
+                while [ "$n" -le 3 ]; do
+                  if sshpass -p "${SENDER_PASS}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20 -o ConnectionAttempts=1 ${SENDER_USER}@${SENDER_HOST} "true"; then
+                    SENDER_PROBE_OK=1
+                    break
+                  fi
+                  echo "[scheduled] Sender host ${SENDER_HOST} недоступен (попытка ${n}/3)" >&2
+                  n=$((n + 1))
+                  [ "$n" -le 3 ] && sleep 15
+                done
+                if [ "$SENDER_PROBE_OK" = 0 ]; then
+                  SENDER_DEPLOY_SKIPPED="хост ${SENDER_HOST} не ответил на 3 попытки SSH"
+                else
                 echo "[scheduled] Sender worker: deploying to ${SENDER_USER}@${SENDER_HOST}:${SENDER_PATH}"
-                run_ssh_sender "mkdir sender dir" \
-                  "sudo -n mkdir -p ${SENDER_PATH} && sudo -n chown -R ${SENDER_USER}:${SENDER_USER} ${SENDER_PATH}"
-                run_scp_sender "copy sender compose" \
-                  deploy/sender/docker-compose.yml "${SENDER_USER}@${SENDER_HOST}:${SENDER_PATH}/"
-                run_ssh_sender "sender compose pull + up" "set -e
+                if ! run_ssh_sender "mkdir sender dir" \
+                  "sudo -n mkdir -p ${SENDER_PATH} && sudo -n chown -R ${SENDER_USER}:${SENDER_USER} ${SENDER_PATH}"; then
+                  SENDER_DEPLOY_SKIPPED="не удалось создать ${SENDER_PATH} на ${SENDER_HOST}"
+                elif ! run_scp_sender "copy sender compose" \
+                  deploy/sender/docker-compose.yml "${SENDER_USER}@${SENDER_HOST}:${SENDER_PATH}/"; then
+                  SENDER_DEPLOY_SKIPPED="не удалось скопировать compose на ${SENDER_HOST}"
+                elif ! run_ssh_sender "sender compose pull + up" "set -e
                 cd ${SENDER_PATH}
                 if [ ! -f .env ]; then echo \"[sender] FATAL: нет .env в ${SENDER_PATH} — создай по deploy/sender/.env.example\"; exit 1; fi
                 printf '%s\n' \"${DOCKER_PASSWORD}\" | sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin
@@ -347,7 +368,13 @@ blocks:
                 sudo -n docker compose -f docker-compose.yml -p portal-sender --env-file .env pull
                 sudo -n docker compose -f docker-compose.yml -p portal-sender --env-file .env up -d
                 sudo -n docker ps --filter name=portal-worker-sender --format '{{.Names}} {{.Status}}'
-                "
+                "; then
+                  SENDER_DEPLOY_SKIPPED="docker compose pull/up на ${SENDER_HOST} не прошёл"
+                fi
+                fi
+                if [ -n "$SENDER_DEPLOY_SKIPPED" ]; then
+                  echo "[scheduled] !!! SENDER NOT DEPLOYED: ${SENDER_DEPLOY_SKIPPED}. Портал выкладывается штатно; на sender-хосте осталась прежняя версия (или он лежит)." >&2
+                fi
               else
                 echo "[scheduled] Sender host: пропущен (изменений нет или SENDER_SSH_HOST не задан)"
               fi
@@ -670,6 +697,17 @@ blocks:
                 fi
               else
                 echo "[scheduled] Dataset sync: изменений в app/scripts/instantly-dataset нет — /opt/instantly-dataset-sync не трогаем"
+              fi
+
+              if [ -n "$SENDER_DEPLOY_SKIPPED" ]; then
+                run_ssh "sender: health alert" "cd /home/Portal/prod 2>/dev/null || exit 0
+                bot_token=\$(grep -E '^TELEGRAM_HEALTH_BOT_TOKEN=' .env 2>/dev/null | tail -n1 | cut -d= -f2-)
+                [ -n \"\${bot_token}\" ] || bot_token=\$(grep -E '^TELEGRAM_BOT_TOKEN=' .env 2>/dev/null | tail -n1 | cut -d= -f2-)
+                chat_id=\$(grep -E '^TELEGRAM_HEALTH_CHAT_ID=' .env 2>/dev/null | tail -n1 | cut -d= -f2-)
+                if [ -z \"\${bot_token}\" ] || [ -z \"\${chat_id}\" ]; then echo '[sender] health alert skipped: no token/chat'; exit 0; fi
+                curl -fsS -X POST \"https://api.telegram.org/bot\${bot_token}/sendMessage\" \
+                  --data-urlencode \"chat_id=\${chat_id}\" \
+                  --data-urlencode \"text=⚠️ Scheduled deploy ${COMMIT_SHA}: портал задеплоен, но воркер «Рассылки» НЕ обновлён — ${SENDER_DEPLOY_SKIPPED}. Когда хост поднимется: следующий деплой с правкой sender или вручную docker compose -p portal-sender pull + up -d в /opt/portal-sender.\" >/dev/null || true" || true
               fi
 
               run_ssh "write last_deploy_sha" \
