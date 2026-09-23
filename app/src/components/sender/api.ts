@@ -508,6 +508,26 @@ export function addSuppressions(input: string, note?: string) {
   });
 }
 
+/**
+ * Большой список (загрузка файла) — частями: один запрос на десятки тысяч
+ * адресов упирается в размер тела и таймаут.
+ */
+export async function addSuppressionList(emails: string[], note?: string) {
+  const CHUNK = 5000;
+  let imported = 0;
+  let skippedExisting = 0;
+  for (let i = 0; i < emails.length; i += CHUNK) {
+    const res = await authFetchJson<{ imported: number; skippedExisting: number }>(`${BASE}/suppressions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ emails: emails.slice(i, i + CHUNK), note }),
+    });
+    imported += res.imported;
+    skippedExisting += res.skippedExisting;
+  }
+  return { imported, skippedExisting };
+}
+
 export function removeSuppression(email: string) {
   return authFetchJson<{ ok: true }>(`${BASE}/suppressions?email=${encodeURIComponent(email)}`, {
     method: 'DELETE',

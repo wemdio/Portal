@@ -107,6 +107,8 @@ export function fetchReplies(
 export interface ThreadResponse {
   messages: { fromUs: boolean; text: string; timestamp?: string }[];
   contextComplete: boolean;
+  /** Адреса, на которые адресат перенаправил в последнем ответе. */
+  referredEmails: string[];
 }
 
 export function fetchThread(qualificationId: string, projectId: string) {
@@ -121,6 +123,8 @@ export interface GenerateResponse {
   factsUsed: string;
   sources: { url: string; title?: string }[];
   contextComplete: boolean;
+  /** Кому адресован черновик, если не тому, кто ответил; null — в ту же переписку. */
+  recipientEmail: string | null;
 }
 
 /** Сохранённый неотправленный черновик ИИ по письму. */
@@ -130,18 +134,27 @@ export function fetchOpenDraft(qualificationId: string) {
   );
 }
 
-export function generateReply(qualificationId: string, projectId: string) {
+/** recipientEmail — новый контакт из ответа; null — ответ в ту же переписку. */
+export function generateReply(qualificationId: string, projectId: string, recipientEmail: string | null = null) {
   return fetchWithAuth<GenerateResponse>(`${BASE}/replies/${qualificationId}/generate`, {
     method: 'POST',
-    body: JSON.stringify({ projectId }),
+    body: JSON.stringify({ projectId, recipientEmail }),
   });
 }
 
 /** draftId — ответ по сгенерированному черновику; null — ответ, написанный вручную. */
-export function sendReply(qualificationId: string, input: { draftId: string | null; projectId: string; text: string }) {
+export function sendReply(
+  qualificationId: string,
+  input: { draftId: string | null; projectId: string; text: string; toEmail?: string | null },
+) {
   return fetchWithAuth<{ ok: true }>(`${BASE}/replies/${qualificationId}/send`, {
     method: 'POST',
-    body: JSON.stringify({ draftId: input.draftId ?? undefined, projectId: input.projectId, text: input.text }),
+    body: JSON.stringify({
+      draftId: input.draftId ?? undefined,
+      projectId: input.projectId,
+      text: input.text,
+      toEmail: input.toEmail ?? undefined,
+    }),
   });
 }
 

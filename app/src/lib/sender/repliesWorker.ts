@@ -6,6 +6,7 @@ import { authForMailbox } from './mailboxAuth';
 import {
   bounceIsPermanent,
   classifyReply,
+  corporateDomain,
   extractBouncedRecipient,
   extractBounceStatus,
   isOwnMailboxReply,
@@ -74,6 +75,31 @@ async function findRecipientByEmail(email: string | null, campaignIds: string[])
     .limit(1)
     .maybeSingle();
   return data ? String(data.id) : null;
+}
+
+/**
+ * Писали ли мы когда-нибудь этому человеку или в его компанию — в любой
+ * кампании. Нет — значит, письмо не ответ на рассылку, а прогрев чужой сети
+ * Instantly: те ящики переписываются с нашими, но в базах их нет. Коллега лида
+ * с того же корпоративного домена проходит и остаётся живым ответом.
+ */
+async function wasEverContacted(email: string | null): Promise<boolean> {
+  if (!supabaseAdmin || !email) return false;
+  const address = email.toLowerCase();
+  const { data: exact } = await supabaseAdmin
+    .from('sender_recipients')
+    .select('id')
+    .eq('email', address)
+    .limit(1);
+  if (exact?.length) return true;
+  const domain = corporateDomain(address);
+  if (!domain) return false;
+  const { data: sameCompany } = await supabaseAdmin
+    .from('sender_recipients')
+    .select('id')
+    .eq('email_domain', domain)
+    .limit(1);
+  return Boolean(sameCompany?.length);
 }
 
 /** Отменяет ещё не отправленные письма лида: после ответа дожимать нельзя. */
@@ -251,6 +277,17 @@ export async function processSenderReplies(opts?: { log?: Log }): Promise<boolea
               (kind === 'bounce'
                 ? await findRecipientByEmail(bouncedEmail, campaignIds)
                 : await findRecipientByEmail(reply.fromEmail, campaignIds));
+          // Не ответ на наше письмо и не от того, кому мы писали, — прогрев
+          // чужой сети. Иначе он копился бы во «Входящих без привязки» и в
+          // метриках (453 «ответа» при 7 письмах на старте прода).
+          if (
+            !recipientId &&
+            kind !== 'bounce' &&
+            kind !== 'warmup' &&
+            !(await wasEverContacted(reply.fromEmail))
+          ) {
+            kind = 'warmup';
+          }
 
           await db.from('sender_replies').upsert(
             {
