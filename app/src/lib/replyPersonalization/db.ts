@@ -65,12 +65,19 @@ export async function getProjectCampaignIds(projectId: string): Promise<string[]
   return [...ids];
 }
 
+export interface CampaignCatalogEntry {
+  accountId: string;
+  /** Название из каталога; пустая строка — кампания ещё не попала в каталог. */
+  name: string;
+}
+
 /**
- * Instantly-аккаунт каждой кампании — из каталога, который синк заполняет по
- * всем аккаунтам. Кампания, ещё не попавшая в каталог, считается основной.
+ * Instantly-аккаунт и название каждой кампании — из каталога, который синк
+ * заполняет по всем аккаунтам. Кампания, ещё не попавшая в каталог, считается
+ * основной.
  */
-export async function getCampaignAccountIds(campaignIds: string[]): Promise<Map<string, string>> {
-  const result = new Map<string, string>();
+export async function getCampaignCatalog(campaignIds: string[]): Promise<Map<string, CampaignCatalogEntry>> {
+  const result = new Map<string, CampaignCatalogEntry>();
   if (!campaignIds.length) return result;
   // Каталог с аккаунтами ведёт синк в базе Instantly (instantly-migrations,
   // 20260520_0001). В основной базе лежит старая копия таблицы без колонки
@@ -78,14 +85,22 @@ export async function getCampaignAccountIds(campaignIds: string[]): Promise<Map<
   const { instantly } = requireClients();
   const { data, error } = await instantly
     .from('instantly_campaign_catalog')
-    .select('id, instantly_account_id')
+    .select('id, name, instantly_account_id')
     .in('id', campaignIds);
   if (error) throw new Error(`campaign catalog query failed: ${error.message}`);
   for (const row of data ?? []) {
-    result.set(row.id as string, (row.instantly_account_id as string) || 'main');
+    result.set(row.id as string, {
+      accountId: (row.instantly_account_id as string) || 'main',
+      name: (row.name as string) ?? '',
+    });
   }
-  for (const id of campaignIds) if (!result.has(id)) result.set(id, 'main');
+  for (const id of campaignIds) if (!result.has(id)) result.set(id, { accountId: 'main', name: '' });
   return result;
+}
+
+export async function getCampaignAccountIds(campaignIds: string[]): Promise<Map<string, string>> {
+  const catalog = await getCampaignCatalog(campaignIds);
+  return new Map([...catalog].map(([id, entry]) => [id, entry.accountId]));
 }
 
 /**
@@ -284,24 +299,44 @@ function mapQualificationRow(row: Record<string, unknown>): QualificationRow {
     instantlyEmailId: (row.instantly_email_id as string) ?? null,
     eaccount: (row.eaccount as string) ?? null,
     replyTimestamp: (row.reply_timestamp as string) ?? null,
+    qualificationStatus: (row.status as string) ?? null,
   };
 }
 
 const QUALIFICATION_COLUMNS =
-  'id, campaign_id, campaign_name, lead_email, company_name, thread_id, reply_subject, reply_body, last_outbound_preview, instantly_email_id, eaccount, reply_timestamp';
+  'id, campaign_id, campaign_name, lead_email, company_name, thread_id, reply_subject, reply_body, last_outbound_preview, instantly_email_id, eaccount, reply_timestamp, status';
 
-/** Read-only: уже синхронизированные квалификатором ответы (кампании проектов квалификатор читает только с 'main'). */
-export async function listSyncedQualifications(campaignIds: string[], limit = 50): Promise<QualificationRow[]> {
-  if (!campaignIds.length) return [];
+/**
+ * Строка поиска для фильтра PostgREST `or(...)`: запятые, скобки и
+ * спецсимволы шаблона ломают сам фильтр, поэтому их просто выкидываем.
+ */
+function sanitizeSearch(value: string): string {
+  return value.replace(/[,()%*\\"]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Read-only: уже синхронизированные квалификатором ответы (кампании проектов
+ * квалификатор читает только с 'main'). Все ответы, включая отказы, — без
+ * фильтра по статусу квалификации. Отдаёт первые `limit` строк по дате и общее
+ * число подходящих.
+ */
+export async function listSyncedQualifications(
+  campaignIds: string[],
+  options: { limit: number; search?: string },
+): Promise<{ rows: QualificationRow[]; total: number }> {
+  if (!campaignIds.length) return { rows: [], total: 0 };
   const { instantly } = requireClients();
-  const { data, error } = await instantly
+  let query = instantly
     .from('instantly_lead_qualifications')
-    .select(QUALIFICATION_COLUMNS)
-    .in('campaign_id', campaignIds)
+    .select(QUALIFICATION_COLUMNS, { count: 'exact' })
+    .in('campaign_id', campaignIds);
+  const search = sanitizeSearch(options.search ?? '');
+  if (search) query = query.or(`lead_email.ilike.*${search}*,company_name.ilike.*${search}*`);
+  const { data, error, count } = await query
     .order('reply_timestamp', { ascending: false })
-    .limit(limit);
+    .limit(options.limit);
   if (error) throw new Error(`qualifications query failed: ${error.message}`);
-  return (data ?? []).map(mapQualificationRow);
+  return { rows: (data ?? []).map(mapQualificationRow), total: count ?? data?.length ?? 0 };
 }
 
 export async function getQualificationById(id: string): Promise<QualificationRow | null> {

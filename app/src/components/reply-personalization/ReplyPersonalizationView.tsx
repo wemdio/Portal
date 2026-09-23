@@ -1,12 +1,21 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Globe, RefreshCw, Search, Settings, X } from 'lucide-react';
 import { fetchProjects, fetchReplies, type ProjectListItem } from './api';
 import { GlobalKnowledgeForm } from './GlobalKnowledgeForm';
 import { KnowledgeBaseForm } from './KnowledgeBaseForm';
 import { ReplyDetailPanel } from './ReplyDetailPanel';
-import type { ReplyListItem } from '@/lib/replyPersonalization/types';
+import type { ReplyCampaignOption, ReplyListItem } from '@/lib/replyPersonalization/types';
+
+/** Писем за раз; «Показать ещё» догружает следующую сотню. */
+const REPLIES_PAGE_SIZE = 100;
+
+const LIST_STATUS_BADGE: Record<ReplyListItem['listStatus'], { label: string; className: string }> = {
+  new: { label: 'новый', className: 'bg-blue-100 text-blue-700' },
+  sent: { label: 'отправлено', className: 'bg-emerald-100 text-emerald-700' },
+  skipped: { label: 'пропущено', className: 'bg-gray-100 text-gray-500' },
+};
 
 /** Палитра аватаров проектов — как кружки аккаунтов в анализаторе тг-переписок. */
 const AVATAR_COLORS = [
@@ -72,43 +81,84 @@ export function ReplyPersonalizationView() {
     loadProjects();
   }, [loadProjects]);
 
-  const loadReplies = useCallback(async (projectId: string) => {
+  // Фильтры списка писем — как в Instantly: кампания и поиск по почте ответившего.
+  const [campaigns, setCampaigns] = useState<ReplyCampaignOption[]>([]);
+  const [campaignFilter, setCampaignFilter] = useState('');
+  const [replyQuery, setReplyQuery] = useState('');
+  /** replyQuery после паузы в наборе — чтобы не дёргать сервер на каждую букву. */
+  const [replySearch, setReplySearch] = useState('');
+  const [limit, setLimit] = useState(REPLIES_PAGE_SIZE);
+  const [total, setTotal] = useState<number | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  /** Номер последнего запроса: ответ на устаревший фильтр не должен перетереть свежий. */
+  const requestSeq = useRef(0);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const next = replyQuery.trim();
+      if (next === replySearch) return;
+      setReplySearch(next);
+      setLimit(REPLIES_PAGE_SIZE);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [replyQuery, replySearch]);
+
+  const projectId = project?.id ?? null;
+
+  const reloadReplies = useCallback(async () => {
+    if (!projectId) return;
+    const seq = ++requestSeq.current;
     setItemsLoading(true);
     try {
-      const res = await fetchReplies(projectId);
+      const res = await fetchReplies(projectId, { campaignId: campaignFilter || null, search: replySearch, limit });
+      if (seq !== requestSeq.current) return;
       setItems(res.replies);
+      setCampaigns(res.campaigns);
+      setTotal(res.total);
+      setHasMore(res.hasMore);
       setMissingReason(res.missingReason);
-      setSelectedId((current) => current ?? res.replies[0]?.id ?? null);
+      setSelectedId((current) =>
+        current && res.replies.some((r) => r.id === current) ? current : (res.replies[0]?.id ?? null),
+      );
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Не удалось загрузить письма');
+      if (seq === requestSeq.current) setError(err instanceof Error ? err.message : 'Не удалось загрузить письма');
     } finally {
-      setItemsLoading(false);
+      if (seq === requestSeq.current) setItemsLoading(false);
     }
+  }, [projectId, campaignFilter, replySearch, limit]);
+
+  useEffect(() => {
+    reloadReplies();
+  }, [reloadReplies]);
+
+  const selectProject = useCallback((p: ProjectListItem) => {
+    setProject(p);
+    setItems([]);
+    setCampaigns([]);
+    setTotal(null);
+    setHasMore(false);
+    setSelectedId(null);
+    setMissingReason(null);
+    setCampaignFilter('');
+    setReplyQuery('');
+    setReplySearch('');
+    setLimit(REPLIES_PAGE_SIZE);
+    // Окно базы знаний открываем само только тем, кому без него не ответить.
+    if (p.missingReason) setKbModalOpen(true);
   }, []);
 
-  const selectProject = useCallback(
-    (p: ProjectListItem) => {
-      setProject(p);
-      setItems([]);
-      setSelectedId(null);
-      setMissingReason(null);
-      // Окно базы знаний открываем само только тем, кому без него не ответить.
-      if (p.missingReason) setKbModalOpen(true);
-      loadReplies(p.id);
-    },
-    [loadReplies],
-  );
-
   const handleHandled = useCallback(() => {
-    if (project) loadReplies(project.id);
-  }, [project, loadReplies]);
+    reloadReplies();
+  }, [reloadReplies]);
 
   const handleKbSaved = useCallback(() => {
     // Пометку пересчитает сервер: сохранение базы знаний ещё не значит, что
     // бриф появился (могли сохранить только тон или пример).
     loadProjects();
-    if (project) loadReplies(project.id);
-  }, [loadProjects, loadReplies, project]);
+    reloadReplies();
+  }, [loadProjects, reloadReplies]);
+
+  const filtersActive = Boolean(campaignFilter || replySearch);
 
   const selected = items.find((i) => i.id === selectedId) ?? null;
 
@@ -205,7 +255,8 @@ export function ReplyPersonalizationView() {
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setProject(p);
+                      // Фильтры прошлого проекта (кампания, поиск) к этому не относятся.
+                      if (project?.id !== p.id) selectProject(p);
                       setKbModalOpen(true);
                     }}
                     title="Настройки проекта (база знаний)"
@@ -228,12 +279,12 @@ export function ReplyPersonalizationView() {
       <div className="flex min-h-0 flex-col border-r border-gray-200 bg-white">
         <div className="flex items-center justify-between gap-2 border-b border-gray-100 px-3 py-2.5">
           <h2 className="text-sm font-semibold text-gray-900">
-            {project ? `Письма (${items.length})` : 'Письма'}
+            {project ? `Письма (${total ?? `${items.length}${hasMore ? '+' : ''}`})` : 'Письма'}
           </h2>
           {project ? (
             <button
               type="button"
-              onClick={() => loadReplies(project.id)}
+              onClick={() => reloadReplies()}
               disabled={itemsLoading}
               title="Обновить список"
               className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 disabled:opacity-50"
@@ -242,6 +293,51 @@ export function ReplyPersonalizationView() {
             </button>
           ) : null}
         </div>
+        {project && !missingReason ? (
+          <div className="space-y-2 border-b border-gray-100 px-3 py-2">
+            {campaigns.length > 1 ? (
+              <select
+                value={campaignFilter}
+                onChange={(e) => {
+                  setCampaignFilter(e.target.value);
+                  setLimit(REPLIES_PAGE_SIZE);
+                }}
+                aria-label="Кампания"
+                className="w-full truncate rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm text-gray-900 focus:border-blue-400 focus:outline-none"
+              >
+                <option value="">Все кампании ({campaigns.length})</option>
+                {campaigns.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            ) : null}
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" aria-hidden />
+              <input
+                value={replyQuery}
+                onChange={(e) => setReplyQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') setReplyQuery('');
+                }}
+                placeholder="Найти по почте или компании"
+                aria-label="Найти письмо по почте"
+                className="w-full rounded-lg border border-gray-200 bg-white py-1.5 pl-8 pr-7 text-sm text-gray-900 focus:border-blue-400 focus:outline-none"
+              />
+              {replyQuery ? (
+                <button
+                  type="button"
+                  onClick={() => setReplyQuery('')}
+                  aria-label="Очистить поиск"
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden />
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
         <div className="flex-1 overflow-y-auto">
           {!project ? (
             <div className="p-3 text-sm text-gray-500">Выберите проект слева.</div>
@@ -253,9 +349,12 @@ export function ReplyPersonalizationView() {
           ) : itemsLoading && items.length === 0 ? (
             <div className="p-3 text-sm text-gray-500">Загрузка...</div>
           ) : items.length === 0 ? (
-            <div className="p-3 text-sm text-gray-500">Пока никто не ответил.</div>
+            <div className="p-3 text-sm text-gray-500">
+              {filtersActive ? 'По этому фильтру писем нет.' : 'Пока никто не ответил.'}
+            </div>
           ) : (
-            items.map((item) => (
+            <>
+            {items.map((item) => (
               <button
                 key={item.id}
                 type="button"
@@ -271,19 +370,38 @@ export function ReplyPersonalizationView() {
                     {item.companyName || item.leadEmail}
                   </span>
                   <span
-                    className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                      item.listStatus === 'sent'
-                        ? 'bg-emerald-100 text-emerald-700'
-                        : 'bg-blue-100 text-blue-700'
-                    }`}
+                    className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${LIST_STATUS_BADGE[item.listStatus].className}`}
                   >
-                    {item.listStatus === 'sent' ? 'отправлено' : 'новый'}
+                    {LIST_STATUS_BADGE[item.listStatus].label}
                   </span>
                 </div>
+                {item.companyName ? (
+                  <div className="truncate text-[11px] text-gray-400">{item.leadEmail}</div>
+                ) : null}
                 <div className="mt-0.5 truncate text-xs text-gray-500">{item.replyBody}</div>
-                <div className="mt-0.5 text-[11px] text-gray-400">{formatDate(item.replyTimestamp)}</div>
+                <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-gray-400">
+                  <span className="shrink-0">{formatDate(item.replyTimestamp)}</span>
+                  {!campaignFilter && item.campaignName ? (
+                    <span className="truncate" title={item.campaignName}>
+                      · {item.campaignName}
+                    </span>
+                  ) : null}
+                </div>
               </button>
-            ))
+            ))}
+            {hasMore ? (
+              <div className="p-3">
+                <button
+                  type="button"
+                  onClick={() => setLimit((current) => current + REPLIES_PAGE_SIZE)}
+                  disabled={itemsLoading}
+                  className="w-full rounded-lg border border-gray-200 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {itemsLoading ? 'Загрузка...' : 'Показать ещё'}
+                </button>
+              </div>
+            ) : null}
+            </>
           )}
         </div>
       </div>

@@ -1,5 +1,5 @@
 import { supabase } from '@/lib/supabaseClient';
-import type { DraftStatus, ReplyListItem } from '@/lib/replyPersonalization/types';
+import type { DraftStatus, ReplyCampaignOption, ReplyListItem } from '@/lib/replyPersonalization/types';
 
 const BASE = '/api/tools/reply-personalization';
 
@@ -83,10 +83,25 @@ export function fetchGlobalKnowledgeBase() {
   return fetchWithAuth<GlobalSettingsResponse>(`${BASE}/global-kb`);
 }
 
-export function fetchReplies(projectId: string) {
-  return fetchWithAuth<{ replies: ReplyListItem[]; missingReason: string | null }>(
-    `${BASE}/projects/${projectId}/replies`,
-  );
+export interface RepliesResponse {
+  replies: ReplyListItem[];
+  campaigns: ReplyCampaignOption[];
+  /** Писем по фильтру всего; null — точно не посчитать. */
+  total: number | null;
+  hasMore: boolean;
+  missingReason: string | null;
+}
+
+export function fetchReplies(
+  projectId: string,
+  filters: { campaignId?: string | null; search?: string; limit?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (filters.campaignId) query.set('campaignId', filters.campaignId);
+  if (filters.search?.trim()) query.set('q', filters.search.trim());
+  if (filters.limit) query.set('limit', String(filters.limit));
+  const suffix = query.toString() ? `?${query}` : '';
+  return fetchWithAuth<RepliesResponse>(`${BASE}/projects/${projectId}/replies${suffix}`);
 }
 
 export interface ThreadResponse {
