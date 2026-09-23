@@ -5,6 +5,31 @@ export class VeWorkerShutdownError extends Error {
   }
 }
 
+/**
+ * The inactivity guard's abort reason. The stage did not fail by itself: the
+ * worker retries it without spending an attempt. The message keeps "timeout"
+ * for the retryable-error rules.
+ */
+export class VeJobInactivityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VeJobInactivityError';
+  }
+}
+
+/** Short census of what the event loop is waiting on, e.g. "TCPSocketWrap×31, Timeout×12, GetAddrInfoReqWrap×4". */
+export function summarizeVeActiveResources(
+  resources: readonly string[] = typeof process.getActiveResourcesInfo === 'function' ? process.getActiveResourcesInfo() : [],
+  limit = 8,
+): string {
+  const counts = new Map<string, number>();
+  for (const name of resources) counts.set(name, (counts.get(name) ?? 0) + 1);
+  const entries = [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  const shown = entries.slice(0, limit).map(([name, count]) => `${name}×${count}`);
+  if (entries.length > limit) shown.push(`+${entries.length - limit} kinds`);
+  return shown.join(', ') || 'none';
+}
+
 /** Let an in-flight operation save its result before cooperative shutdown. */
 export function createVeJobShutdown(options: {
   abort: AbortController;
@@ -94,8 +119,10 @@ export function createVeJobWatchdog(options: {
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
       timedOut = true;
-      options.abort.abort(new Error(`${options.reason ?? 'VE2 research inactivity timeout'} after ${options.idleMs}ms`));
-      options.onTimeout();
+      // Report before aborting: the abort releases the stalled awaits and
+      // would erase what they were waiting on.
+      try { options.onTimeout(); }
+      finally { options.abort.abort(new VeJobInactivityError(`${options.reason ?? 'VE2 research inactivity timeout'} after ${options.idleMs}ms`)); }
     }, options.idleMs);
     idleTimer.unref?.();
   };

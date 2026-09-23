@@ -37,16 +37,25 @@ export function prioritizeVeCandidates<T extends Candidate>(rows: T[], hints: Ve
   return (preserveOrder ? scored : scored.sort((a, b) => b.score - a.score || a.index - b.index)).map((entry) => entry.row);
 }
 
+/**
+ * Keys per request. A key is 64 hex characters plus an encoded comma (67 bytes
+ * in the URL): 200 keys made a 13.6 KB URL, the gateway answered 414 and every
+ * hint of the tick was lost (23.09.2026). 60 keys keep the URL near 4.4 KB.
+ */
+export const VE_CANDIDATE_HINT_KEYS_PER_REQUEST = 60;
+const VE_CANDIDATE_HINT_KEYS_PER_TICK = 2000;
+
 export async function readVeCandidateHints(rows: Candidate[], db: SupabaseClient, signal?: AbortSignal): Promise<VeCandidateHint[]> {
-  const keys = [...new Set(rows.map(veCompanyFactKey).filter((key): key is string => !!key))];
+  const keys = [...new Set(rows.map(veCompanyFactKey).filter((key): key is string => !!key))]
+    .slice(0, VE_CANDIDATE_HINT_KEYS_PER_TICK);
   const hints: VeCandidateHint[] = [];
   // Bound one scheduling tick; remaining candidates stay saved for later ticks.
-  for (let start = 0; start < Math.min(keys.length, 2000); start += 200) {
+  for (let start = 0; start < keys.length; start += VE_CANDIDATE_HINT_KEYS_PER_REQUEST) {
     signal?.throwIfAborted();
     try {
       const { data, error } = await db.from('ve_company_fact_pages')
         .select('company_key,observed_at,website:page->>url,facts:page->>text,inns:page->inns,owner_inns:page->ownerInns')
-        .in('company_key', keys.slice(start, start + 200)).eq('reader_version', 1)
+        .in('company_key', keys.slice(start, start + VE_CANDIDATE_HINT_KEYS_PER_REQUEST)).eq('reader_version', 1)
         .gt('expires_at', new Date().toISOString()).order('observed_at', { ascending: false }).limit(2000)
         .abortSignal(signal ? AbortSignal.any([signal, AbortSignal.timeout(2000)]) : AbortSignal.timeout(2000));
       signal?.throwIfAborted();
