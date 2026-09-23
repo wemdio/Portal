@@ -1,8 +1,24 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
-import { Loader2, Plus, Search, ShieldOff, Trash2 } from 'lucide-react';
-import { addSuppressions, fetchSuppressions, removeSuppression, type SuppressionDto } from './api';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Loader2, Plus, Search, ShieldOff, Trash2, Upload } from 'lucide-react';
+import { readXlsxRows } from '@/lib/spreadsheet/parseCSV';
+import { addSuppressionList, addSuppressions, fetchSuppressions, removeSuppression, type SuppressionDto } from './api';
+
+const EMAIL_IN_TEXT = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
+
+/**
+ * Адреса из файла стоп-листа. Колонку не угадываем: выгрузки бывают из
+ * разных систем с разными заголовками, а адрес в любой ячейке — это адрес,
+ * который писать нельзя.
+ */
+async function emailsFromFile(file: File): Promise<string[]> {
+  const ext = file.name.split('.').pop()?.toLowerCase();
+  const text = ext === 'xlsx' || ext === 'xls'
+    ? (await readXlsxRows(await file.arrayBuffer())).map((row) => row.join(' ')).join('\n')
+    : await file.text();
+  return [...new Set((text.match(EMAIL_IN_TEXT) ?? []).map((e) => e.toLowerCase().replace(/\.+$/, '')))];
+}
 
 const SEARCH_DEBOUNCE_MS = 300;
 
@@ -31,6 +47,7 @@ export function StoplistTab() {
   const [timer, setTimer] = useState<number | null>(null);
   const [addText, setAddText] = useState('');
   const [adding, setAdding] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const load = useCallback(
     async (targetPage: number) => {
@@ -89,6 +106,30 @@ export function StoplistTab() {
     }
   };
 
+  const addFromFile = async (file: File) => {
+    setAdding(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const emails = await emailsFromFile(file);
+      if (!emails.length) {
+        setError(`В файле «${file.name}» не нашлось ни одного адреса.`);
+        return;
+      }
+      const res = await addSuppressionList(emails, `Файл: ${file.name}`);
+      setNotice(
+        `Из файла «${file.name}» добавлено в стоп-лист: ${res.imported} из ${emails.length}`
+          + `${res.skippedExisting ? ` (уже стояли: ${res.skippedExisting})` : ''}.`,
+      );
+      await load(page);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить файл');
+    } finally {
+      setAdding(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
   const remove = async (email: string) => {
     if (!window.confirm(`Вернуть ${email} в рассылку? Новые кампании смогут ему писать.`)) return;
     setError(null);
@@ -113,7 +154,8 @@ export function StoplistTab() {
           Добавить в стоп-лист
         </h2>
         <p className="mt-1 text-sm text-zinc-500">
-          Один адрес или список — каждый с новой строки или через запятую. Адрес не получает новых писем ни
+          Один адрес или список — каждый с новой строки или через запятую, либо файлом (CSV, TXT, Excel):
+          из файла берутся все адреса, в какой бы колонке они ни стояли. Адрес не получает новых писем ни
           в одной кампании.
         </p>
         <div className="mt-3 flex flex-wrap items-start gap-3">
@@ -132,6 +174,25 @@ export function StoplistTab() {
           >
             {adding ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
             Добавить
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,.tsv,.txt,.xlsx,.xls"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void addFromFile(file);
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={adding}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50"
+          >
+            <Upload className="h-4 w-4" />
+            Загрузить файл
           </button>
         </div>
       </div>

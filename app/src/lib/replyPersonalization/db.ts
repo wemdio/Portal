@@ -408,6 +408,7 @@ function mapDraftRow(row: Record<string, unknown>): DraftRow {
     model: (row.model as string) ?? null,
     createdAt: row.created_at as string,
     sentAt: (row.sent_at as string) ?? null,
+    recipientEmail: (row.recipient_email as string) ?? null,
   };
 }
 
@@ -424,11 +425,14 @@ export async function insertDraft(input: {
   model: string;
   latencyMs: number;
   createdBy: string;
+  /** Новый контакт вместо ответившего; null — ответ в ту же переписку. */
+  recipientEmail?: string | null;
 }): Promise<DraftRow> {
   const { admin } = requireClients();
   const { data, error } = await admin
     .from('reply_personalization_drafts')
     .insert({
+      recipient_email: input.recipientEmail ?? null,
       project_id: input.projectId,
       qualification_id: input.qualificationId,
       campaign_id: input.campaignId,
@@ -505,11 +509,12 @@ export async function getDraftById(draftId: string): Promise<DraftRow | null> {
   return data ? mapDraftRow(data) : null;
 }
 
-export async function markDraftSent(draftId: string): Promise<void> {
+/** recipientEmail — кому ушло на самом деле (null — в ту же переписку). */
+export async function markDraftSent(draftId: string, recipientEmail: string | null = null): Promise<void> {
   const { admin } = requireClients();
   const { error } = await admin
     .from('reply_personalization_drafts')
-    .update({ status: 'sent', sent_at: new Date().toISOString() })
+    .update({ status: 'sent', sent_at: new Date().toISOString(), recipient_email: recipientEmail })
     .eq('id', draftId);
   if (error) throw new Error(`draft sent-update failed: ${error.message}`);
 }

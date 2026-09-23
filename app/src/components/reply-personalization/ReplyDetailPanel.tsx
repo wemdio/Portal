@@ -73,6 +73,10 @@ export function ReplyDetailPanel({
   const [error, setError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [skipping, setSkipping] = useState(false);
+  /** Адреса, на которые адресат перенаправил («пишите Екатерине, почта ...»). */
+  const [referredEmails, setReferredEmails] = useState<string[]>([]);
+  /** Кому пишем: null — ответ в ту же переписку, иначе новый контакт из ответа. */
+  const [recipient, setRecipient] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -83,6 +87,7 @@ export function ReplyDetailPanel({
         if (cancelled) return;
         setThread(res.messages);
         setThreadIncomplete(!res.contextComplete);
+        setReferredEmails(res.referredEmails ?? []);
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Не удалось загрузить переписку');
@@ -109,6 +114,7 @@ export function ReplyDetailPanel({
     const apply = (found: (GenerateResponse & { createdAt: string }) | null) => {
       if (!found) return false;
       setDraft(found);
+      setRecipient(found.recipientEmail ?? null);
       // Свой текст главнее: он мог быть правкой этого же черновика.
       if (!readStore(TEXT_KEY(item.id))) setDraftText(found.text);
       return true;
@@ -158,7 +164,7 @@ export function ReplyDetailPanel({
     setError(null);
     writeStore(GEN_KEY(qualificationId), String(Date.now()));
     try {
-      const result = await generateReply(qualificationId, projectId);
+      const result = await generateReply(qualificationId, projectId, recipient);
       // Новый черновик заменяет набранный текст — и в браузере тоже.
       writeStore(TEXT_KEY(qualificationId), null);
       setDraft(result);
@@ -228,6 +234,40 @@ export function ReplyDetailPanel({
           </p>
         ) : null}
       </div>
+
+      {/* Кому: адресат прислал новый адрес — можно написать туда, а не ему.
+          Черновик пишется под выбранного получателя, поэтому после смены
+          его нужно сгенерировать заново. */}
+      {referredEmails.length > 0 ? (
+        <div className="border-t border-gray-100 px-4 pt-3">
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="text-gray-500">Кому:</span>
+            {[null, ...referredEmails].map((email) => {
+              const isActive = recipient === email;
+              return (
+                <button
+                  key={email ?? 'lead'}
+                  type="button"
+                  onClick={() => setRecipient(email)}
+                  aria-pressed={isActive}
+                  className={`rounded-full border px-2 py-0.5 transition ${
+                    isActive
+                      ? 'border-blue-500 bg-blue-50 text-blue-700'
+                      : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  {email ? `${email} · новый контакт` : `${item.leadEmail} · ответить в переписку`}
+                </button>
+              );
+            })}
+          </div>
+          {draft && (draft.recipientEmail ?? null) !== recipient ? (
+            <p className="mt-1 text-xs text-amber-600">
+              Черновик написан для {draft.recipientEmail ?? item.leadEmail} — нажмите «Сгенерировать заново».
+            </p>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* Ответ: сверху — помощь ИИ (сгенерировать / пропустить), под ней
           поле ответа, которое видно всегда. Раньше написать ответ можно было
@@ -304,6 +344,8 @@ export function ReplyDetailPanel({
           qualificationId={item.id}
           projectId={projectId}
           draftId={draft?.draftId ?? null}
+          toEmail={recipient ?? item.leadEmail}
+          newContact={recipient !== null}
         />
       </div>
     </div>

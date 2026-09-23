@@ -15,10 +15,38 @@ const AUTO_BODY = /(я в отпуске|вернусь|out of the office|curren
 /** Прогрев ходит по своим ящикам со служебными метками в теме. */
 const WARMUP_SUBJECTS = /(warm-?up|warmy|mailreach|instantly.*warm|\[wu-)/i;
 
+/**
+ * Метка прогрева Instantly в конце темы: «… | fat--effect 8RPM8Z3»,
+ * «… | T77FWPB 8RPM8Z3» — слово-код письма и фильтр-тег аккаунта заглавными
+ * латинскими буквами с цифрами. Так выглядели все 552 «ответа» от чужих
+ * доменов на проде 24.09.2026.
+ */
+// Тег обязан содержать и букву, и цифру: «| Заказ 12345678» — не прогрев.
+const INSTANTLY_WARMUP_TAG = /\|\s*\S+\s+(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]{6,8}\s*$/;
+
 /** Адрес нашего же парка: письма между своими ящиками — прогрев, не ответы. */
 export function isOwnMailboxReply(fromEmail: string | null, ownEmails: ReadonlySet<string>): boolean {
   if (!fromEmail) return false;
   return ownEmails.has(fromEmail.toLowerCase());
+}
+
+/**
+ * Публичные почтовые сервисы: совпадение домена тут ничего не говорит — с
+ * gmail.com пишут все подряд. Для них нужен точный адрес. Список тот же, что
+ * в миграции 20260924_0002 (перенос накопленного прогрева).
+ */
+const PUBLIC_MAIL_DOMAINS = new Set([
+  'gmail.com', 'googlemail.com', 'yandex.ru', 'yandex.com', 'ya.ru', 'mail.ru', 'bk.ru',
+  'inbox.ru', 'list.ru', 'internet.ru', 'rambler.ru', 'outlook.com', 'hotmail.com',
+  'live.com', 'icloud.com', 'me.com', 'yahoo.com', 'proton.me', 'protonmail.com',
+  'gmx.com', 'aol.com',
+]);
+
+/** Корпоративный домен адреса; null — адреса нет или это публичная почта. */
+export function corporateDomain(email: string | null): string | null {
+  const domain = (email ?? '').toLowerCase().split('@')[1]?.trim();
+  if (!domain || PUBLIC_MAIL_DOMAINS.has(domain)) return null;
+  return domain;
 }
 
 export interface ReplyInput {
@@ -42,7 +70,7 @@ export function classifyReply(input: ReplyInput): ReplyKind {
   if (BOUNCE_SENDERS.test(from) || BOUNCE_SUBJECTS.test(subject)) return 'bounce';
   if (BOUNCE_BODY.test(body) && BOUNCE_SENDERS.test(from)) return 'bounce';
 
-  if (WARMUP_SUBJECTS.test(subject)) return 'warmup';
+  if (WARMUP_SUBJECTS.test(subject) || INSTANTLY_WARMUP_TAG.test(subject)) return 'warmup';
   if (AUTO_SUBJECTS.test(subject) || AUTO_BODY.test(body)) return 'auto_reply';
 
   return from ? 'human' : 'unknown';
