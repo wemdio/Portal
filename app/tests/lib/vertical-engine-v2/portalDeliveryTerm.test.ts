@@ -24,6 +24,32 @@ const STAFF_LINE = {
   contacts_done: '25905',
 };
 const TODAY = '2026-09-23';
+// The same cases drive the SQL smoke of ve_try_iso_date: TS and SQL must read a card deadline alike.
+const DEADLINE_CASES = JSON.parse(
+  fs.readFileSync(path.resolve(__dirname, '../../helpers/projectDeadlineCases.json'), 'utf8'),
+) as { accepted: Array<[string, string]>; rejected: string[] };
+
+describe('project card deadline formats', () => {
+  it.each(DEADLINE_CASES.accepted)('plans a deadline typed as %j up to %s', (raw, iso) => {
+    expect(describePortalProjectTerm({ ...STAFF_LINE, deadline: raw }, [], { today: TODAY })).toMatchObject({ ok: true, deadline: iso });
+  });
+
+  it.each(DEADLINE_CASES.rejected)('rejects %j as not a date', (raw) => {
+    expect(describePortalProjectTerm({ ...STAFF_LINE, deadline: raw }, [], { today: TODAY })).toEqual({
+      ok: false,
+      code: 'PROJECT_DEADLINE_INVALID',
+      error: PORTAL_TERM_TEXT.deadlineInvalid(raw.trim()),
+    });
+  });
+
+  it('compares a DD.MM.YY deadline with today as a date, not as text', () => {
+    expect(describePortalProjectTerm({ ...STAFF_LINE, deadline: '22.09.26' }, [], { today: TODAY })).toEqual({
+      ok: false,
+      code: 'PROJECT_DEADLINE_PASSED',
+      error: 'Дедлайн проекта (22.09.2026) уже прошёл. Обновите поле «Дедлайн» в карточке проекта.',
+    });
+  });
+});
 
 describe('Portal project term without periods', () => {
   it('lets Staff Line launch although its accumulated fact is far above the obligation', () => {

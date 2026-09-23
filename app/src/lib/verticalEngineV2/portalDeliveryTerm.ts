@@ -9,7 +9,8 @@
  *
  * Список рабочих статусов повторён в SQL ve_contact_delivery_term
  * (supabase/migrations/20260924_0010_ve_contact_delivery_without_period.sql);
- * их совпадение проверяет тест миграции.
+ * их совпадение проверяет тест миграции. Разбор «Дедлайна» повторён в SQL
+ * ve_try_iso_date (20260924_0011); общие случаи — tests/helpers/projectDeadlineCases.json.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -122,6 +123,16 @@ export function isIsoCalendarDate(value: string): boolean {
   return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
 }
 
+/** «Дедлайн» карточки как YYYY-MM-DD: ISO или ДД.ММ.ГГ(ГГ), как подсказывает редактор карточки. */
+export function parseProjectDeadline(value: string): string | null {
+  if (isIsoCalendarDate(value)) return value;
+  const match = /^(\d{1,2})\.(\d{1,2})\.(\d{2}|\d{4})$/.exec(value);
+  if (!match) return null;
+  const year = match[3].length === 2 ? `20${match[3]}` : match[3];
+  const iso = `${year}-${match[2].padStart(2, '0')}-${match[1].padStart(2, '0')}`;
+  return isIsoCalendarDate(iso) ? iso : null;
+}
+
 function formatRuDate(value: string): string {
   const [year, month, day] = value.split('-');
   return day && month && year ? `${day}.${month}.${year}` : value;
@@ -170,10 +181,11 @@ export function describePortalProjectTerm(
   if (!(LAUNCHABLE_PORTAL_PROJECT_STATUSES as readonly string[]).includes(status)) {
     return cardIssue('PORTAL_PROJECT_NOT_IN_WORK', PORTAL_TERM_TEXT.notInWork(status));
   }
-  const deadline = clean(project.deadline);
-  if (!deadline) return cardIssue('PROJECT_DEADLINE_REQUIRED', PORTAL_TERM_TEXT.deadlineRequired);
-  if (!isIsoCalendarDate(deadline)) {
-    return cardIssue('PROJECT_DEADLINE_INVALID', PORTAL_TERM_TEXT.deadlineInvalid(deadline));
+  const rawDeadline = clean(project.deadline);
+  if (!rawDeadline) return cardIssue('PROJECT_DEADLINE_REQUIRED', PORTAL_TERM_TEXT.deadlineRequired);
+  const deadline = parseProjectDeadline(rawDeadline);
+  if (!deadline) {
+    return cardIssue('PROJECT_DEADLINE_INVALID', PORTAL_TERM_TEXT.deadlineInvalid(rawDeadline));
   }
   if (options.today && deadline < options.today) {
     return cardIssue('PROJECT_DEADLINE_PASSED', PORTAL_TERM_TEXT.deadlinePassed(deadline));
@@ -202,6 +214,18 @@ export async function loadPortalProjectTerm(
     project: (projectRead.data as PortalProjectTermRow | null) ?? null,
     periods: (periodsRead.data ?? []) as PortalPeriodStateRow[],
   };
+}
+
+/** VE2-проекты, чей план закреплён за этим проектом Portal без периода. */
+export async function loadNoPeriodPlanOwners(portalDb: SupabaseClient, portalProjectId: string): Promise<string[]> {
+  const { data, error } = await portalDb
+    .from('ve_projects')
+    .select('id, portal_period_id')
+    .eq('portal_project_id', portalProjectId);
+  if (error) throw new Error(`VE2 project bindings read failed: ${error.message}`);
+  return ((data ?? []) as Array<{ id: string; portal_period_id?: string | null }>)
+    .filter((row) => !row.portal_period_id)
+    .map((row) => row.id);
 }
 
 /**
