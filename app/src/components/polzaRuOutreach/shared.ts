@@ -14,6 +14,8 @@ export interface RuJob {
   progress_detail: {
     pool?: number;
     chains?: Record<string, number>;
+    /** Компании с вакансиями продаж: сколько в SDR, сколько ушло в общую очередь. */
+    sdr?: { any_sales_vacancy: number; strict_sdr: number; broad_to_general_queue: number };
     scanned?: number;
     ready?: number;
     target?: number;
