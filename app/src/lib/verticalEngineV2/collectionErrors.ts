@@ -20,6 +20,16 @@ export function isVeProviderConfigurationError(error: unknown): boolean {
     || (/\bSerper\b/i.test(message) && /(?:missing|invalid|absent|rejected)[\s_-]+(?:api[\s_-]+)?key|api[\s_-]+key.{0,30}(?:missing|invalid|absent|rejected)/i.test(message));
 }
 
+/** Временный сбой поставщика (поиск, ИИ): повтор имеет смысл, действие человека не нужно. */
+export function isVeTransientProviderError(error: unknown): boolean {
+  const message = errorMessage(error);
+  if (!message || isVeProviderBillingError(message) || isVeProviderConfigurationError(message)) return false;
+  return /\bSerper transient:/i.test(message)
+    || /\bRequesty\s*(?:HTTP\s*)?[:(]?\s*(?:408|425|429|5\d\d)\b/i.test(message)
+    || /provider is currently unavailable/i.test(message)
+    || /не завершен\w*:\s*(?:provider|timeout)\b/i.test(message);
+}
+
 export interface VeCollectionFailure {
   kind: 'billing' | 'configuration' | 'provider' | 'incomplete_checks' | 'name_cleanup' | 'source' | 'unknown';
   message: string;
