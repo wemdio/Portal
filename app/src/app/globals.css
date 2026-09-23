@@ -1726,6 +1726,35 @@ body:has(.client-portal) {
   }
 }
 
+/* Окно сводки обновлений (см. components/changelog/ChangelogModal).
+   Карточка плавно поднимается снизу, фон проявляется; при закрытии —
+   обратный путь. Переходы, а не keyframes: закрытие должно проиграться
+   в обратную сторону, и управляется оно атрибутом data-open. */
+.portal-changelog-backdrop {
+  opacity: 0;
+  transition: opacity 300ms ease-out;
+}
+.portal-changelog-card {
+  opacity: 0;
+  transform: translateY(48px);
+  transition:
+    transform 450ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 300ms ease-out;
+}
+.portal-changelog-backdrop[data-open='true'] {
+  opacity: 1;
+}
+.portal-changelog-backdrop[data-open='true'] .portal-changelog-card {
+  opacity: 1;
+  transform: translateY(0);
+}
+@media (prefers-reduced-motion: reduce) {
+  .portal-changelog-backdrop,
+  .portal-changelog-card {
+    transition: none;
+  }
+}
+
 /* ─── Палитра рядов графиков раздела «Деньги» ──────────────────────────────
    Цвета лежат здесь, а не константами в JS, ровно по одной причине: тёмная
    тема портала — это переопределение под `html[data-portal-theme='dark']
