@@ -399,6 +399,14 @@ html[data-portal-theme="dark"] .ve2 {
   border-color: var(--ve2-line-strong);
   box-shadow: inset 3px 0 0 var(--ve2-fg);
 }
+.ve2-broad-action {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+}
+.ve2-vertical-header.ve2-broad-empty {
+  margin-bottom: 0;
+}
 .ve2-vertical-header {
   display: grid;
   gap: 12px;

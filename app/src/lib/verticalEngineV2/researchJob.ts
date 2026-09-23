@@ -9,6 +9,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { VE_BROAD_HYPOTHESES_STAGE } from './broadHypotheses';
 
 export const VE_RESEARCH_STAGES = [
   'site_profile',
@@ -26,7 +27,8 @@ export type VeResearchEnqueueResult =
 /**
  * Поставить джобу site_profile и переключить проект в 'researching'.
  * Дедуп: pending/running джоба любой research-стадии этого проекта → conflict,
- * новую не создаём.
+ * новую не создаём. Идущее добавление широких гипотез — тоже conflict: иначе
+ * новые проверенные гипотезы легли бы рядом с только что добавленными.
  */
 export async function enqueueVeResearchJob(
   supabase: SupabaseClient,
@@ -36,7 +38,7 @@ export async function enqueueVeResearchJob(
     .from('ve_jobs')
     .select('id')
     .eq('project_id', projectId)
-    .in('stage', VE_RESEARCH_STAGES)
+    .in('stage', [...VE_RESEARCH_STAGES, VE_BROAD_HYPOTHESES_STAGE])
     .in('status', ['pending', 'running'])
     .limit(1);
   if (activeErr) return { ok: false, reason: 'db', message: activeErr.message };
@@ -49,6 +51,9 @@ export async function enqueueVeResearchJob(
     .insert({ project_id: projectId, stage: 'site_profile', status: 'pending', payload: {} })
     .select()
     .single();
+  // Индекс в БД держит одну такую задачу на проект: параллельный запуск
+  // исследования или добавление широких успели раньше.
+  if (jobErr?.code === '23505') return { ok: false, reason: 'conflict' };
   if (jobErr || !job) {
     return { ok: false, reason: 'db', message: jobErr?.message ?? 'enqueue failed' };
   }
