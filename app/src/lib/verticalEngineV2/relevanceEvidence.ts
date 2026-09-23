@@ -5,6 +5,7 @@ import { getProxyGroups, pickProxyUrl, tryAcquireProxySlot } from '@/lib/enrich/
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
 import { deriveWebsiteFromEmail } from '@/lib/leadBoard/deriveWebsite';
+import { isBlockedCompanyWebsiteDomain } from '@/lib/companiesDirectory/contactPolicy';
 import type { SerperOrganicItem } from '@/lib/search/serperClient';
 import { normalizeVeCompanyInn, normalizeVeCompanyName } from './collectionIdentity';
 import { parseVeEvidencePage, rankVeEvidenceLinks, selectVeEvidenceText, type VeEvidencePage } from './relevancePage';
@@ -111,7 +112,7 @@ export function veOfficialWebsiteCandidates(raw: string): URL[] {
     if (!candidate || candidate.includes('@')) continue;
     if (/^[a-z][a-z\d+.-]*:/i.test(candidate) && !/^https?:\/\//i.test(candidate)) continue;
     const parsed = allowedUrl(/^https?:\/\//i.test(candidate) ? candidate : `https://${candidate}`);
-    if (parsed && !DIRECTORY_HOST.test(parsed.hostname) && !candidates.has(siteHost(parsed))) candidates.set(siteHost(parsed), parsed);
+    if (parsed && !isVeNonOfficialWebsiteHost(parsed.hostname) && !candidates.has(siteHost(parsed))) candidates.set(siteHost(parsed), parsed);
     if (candidates.size >= MAX_DOMAINS) break;
   }
   return [...candidates.values()];
@@ -119,6 +120,35 @@ export function veOfficialWebsiteCandidates(raw: string): URL[] {
 
 function siteHost(url: URL): string { return url.hostname.replace(/^www\./, ''); }
 const DIRECTORY_HOST = /(?:^|\.)(?:rusprofile\.ru|list-org\.com|saby\.ru|sbis\.ru|spark-interfax\.ru|companium\.ru|checko\.ru|zachestnyibiznes\.ru|egrul\.nalog\.ru|2gis\.ru|yandex\.ru|google\.com|vk\.com|ok\.ru|hh\.ru|headhunter\.ru|superjob\.ru|rabota\.ru|t\.me|instagram\.com|facebook\.com|prodoctorov\.ru|zoon\.ru|companies\.rbc\.ru|check\.tochka\.com|e-ecolog\.ru|xfirm\.ru|tbank\.ru|ruspeach\.com)$/i;
+/**
+ * Каталоги, справочники, доски вакансий, новостные сайты и страницы-визитки на
+ * общих платформах. Страница такого сайта о компании печатает её ИНН и
+ * название, поэтому проходила проверку владельца как «официальный сайт».
+ * Список — из памяти фактов прода (ve_company_fact_pages, 22.09.2026): эти
+ * хосты «подтверждались» сразу у десятков разных компаний. Общий список
+ * реестра (contactPolicy) добавляется к нему целиком.
+ */
+const NOT_OFFICIAL_HOSTS = [
+  // Справочники и карточки юрлиц.
+  '1cont.ru', 'bbnt.ru', 'bankatm.ru', 'comfex.ru', 'contragents.klerk.ru', 'datanewton.ru', 'energybase.ru',
+  'focus.kontur.ru', 'jsprav.ru', 'kachestvorb.ru', 'omskatalog.ru', 'platiuslugi.ru', 'regtorg.ru', 'spravker.ru',
+  'tapki.com', 'tourismanalytics.ru', 'w.minsk.by', 'export31.ru', 'candy-factory.ru', 'star-pro.ru',
+  'xn--b1aedfedwrdfl5a6k.xn--p1ai', // производитель.рф
+  // Отраслевые каталоги клиник, санаториев, гостиниц и приложений.
+  '32top.ru', 'diagnocenter.ru', 'htlpro.ru', 'krasotaimedicina.ru', 'like.doctor', 'meddoclab.ru', 'medadvisor.ru',
+  'rusapp.ru', 'sanatoria.ru', 'topdent.ru',
+  // Вакансии и новости.
+  'hr-vacancycenter.ru', 'rabotaczn.ru', 'upvacancy.ru', 'daily-nn.ru', 'ekbcash.ru', 'mkond.ru', 'tek-all.ru',
+  // Страницы на общих платформах: блог, ссылка-визитка, деловая соцсеть.
+  'dzen.ru', 'taplink.cc', 'taplink.ru', 'tenchat.ru', 'vk.link',
+];
+
+/** Этот хост не может быть официальным сайтом компании: каталог, агрегатор или соцсеть. */
+export function isVeNonOfficialWebsiteHost(hostname: string): boolean {
+  const host = hostname.trim().toLowerCase().replace(/\.$/, '');
+  return DIRECTORY_HOST.test(host) || isBlockedCompanyWebsiteDomain(host)
+    || NOT_OFFICIAL_HOSTS.some((domain) => host === domain || host.endsWith(`.${domain}`));
+}
 
 /** No-INN discovery needs the complete brand in the site's own title AND a
  * geographic clue from the original source. Search snippets cannot verify it. */
@@ -354,7 +384,7 @@ export async function fetchVeRelevanceEvidence(
       if (record.company_key !== factKey) continue;
       const page = freshVeCompanyFact(record);
       const url = page && allowedUrl(page.url);
-      if (page && url && !DIRECTORY_HOST.test(url.hostname)) cachedPages.set(veFactPageKey(page.url), page);
+      if (page && url && !isVeNonOfficialWebsiteHost(url.hostname)) cachedPages.set(veFactPageKey(page.url), page);
     }
     // Recover the confirmed company website without buying another search.
     // Раньше память фактов подключалась только при ПУСТОМ website: компания с
@@ -677,7 +707,7 @@ export async function fetchVeRelevanceEvidence(
       const found: URL[] = [];
       for (const item of results.slice(0, 6)) {
         const url = typeof item.link === 'string' ? allowedUrl(item.link) : null;
-        if (!url || DIRECTORY_HOST.test(url.hostname) || /\.(?:pdf|docx?|zip)$/i.test(url.pathname)
+        if (!url || isVeNonOfficialWebsiteHost(url.hostname) || /\.(?:pdf|docx?|zip)$/i.test(url.pathname)
           || found.some((other) => siteHost(other) === siteHost(url))) continue;
         found.push(url);
         if (found.length >= MAX_DOMAINS) break;
