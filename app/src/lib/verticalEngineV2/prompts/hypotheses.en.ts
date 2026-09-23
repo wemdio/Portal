@@ -41,7 +41,7 @@ COVERAGE COMPLETENESS (mandatory self-check before answering):
 HARD REQUIREMENTS:
 - 25–40 hypotheses total; tier 2 ≥ 8; tier 3 ≥ 8. Fewer than 25 — you didn't push hard enough.
 - Each hypothesis is a SPECIFIC segment (company type + role/scenario), not "every company in IT".
-- description: 1–3 sentences — who they are and which of the client's pains the product solves for them.
+- description: 1–3 sentences. First who they are: the activity, the company type (manufacturer, chain operator, distributor…), products or sub-sectors, and explicit selection conditions when needed (for example "chains of 5+ locations"). Then, in a separate sentence, which of the client's pains the product solves. Companies are later selected by this description, so do NOT write work processes, software and government systems, regulation, warehouses, sales channels or hiring as company attributes via "with …" (bad: "plants with ERP, raw-material warehouses and retail-chain supplies", "factories hiring workers"): such words exclude fitting companies whose websites do not say so. They belong in the pain sentence or in the rationale. Do NOT make headcount, revenue or volume a selection condition either (bad: "200+ employees"): size is ranking, not selection, and selection by website cannot see it; for a segment of large companies the word "large" is enough.
 - fit_rationale: MANDATORY, 2–3 lines — the "WHY THIS IS A MARKET FOR THE CLIENT" chain: who the segment's buyer is (decision-maker, by role) → their goal → their pain that the client's product removes → the client's concrete offer to them → why the economics work (typical deal/LTV of the segment's client pays back the channel cost). This is NOT a segment description (that's description): description says "who they are", fit_rationale proves why our client specifically can sell to them. All five links are mandatory: decision-maker, their goal, their pain, the offer, and the economics. Tautologies are forbidden: "the segment is big", "they need sales", "they have budget" — these are fillers, not justification.
 - rationale: why this segment should buy — pain/trigger/budget/signal.
 - potential_pct: expert estimate of segment potential 0–100 BEFORE verification (the sum across all ≠ 100; these are independent estimates).
@@ -107,7 +107,7 @@ FORMAT — JSON ONLY:
     {
       "tier": 1|2|3,
       "title": string,          // short segment name, 2-6 words
-      "description": string,    // who they are and which pain the client's product solves — up to 300 chars
+      "description": string,    // who they are (activity, type, products, explicit conditions like "chains of 5+ locations"), then in a separate sentence the pain the client's product solves; processes, systems, channels, hiring and headcount are not company attributes — up to 300 chars
       "fit_rationale": string,  // MANDATORY: the chain decision-maker → their goal → their pain the client's product removes → the client's concrete offer → why the economics work (or an honest "questionable"). Not a segment description, no tautologies — up to 350 chars
       "rationale": string,      // why they should buy: pain/trigger/budget; + "RISK: …" (economics / incompatible sales motion / similarity to specialist-rejected topics) — up to 200 chars
       "potential_pct": number,  // 0-100, before verification

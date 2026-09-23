@@ -230,6 +230,39 @@ describe('VE2 calibrated relevance triage', () => {
     expect(restored).toEqual(expect.objectContaining({ rubric: 1, company: 1 }));
   });
 
+  it('rebuilds a checklist saved under the old rubric rules once, without context requirements or the vertical summary', async () => {
+    const summary = 'Покупают продукт для контроля смен, складов сырья и поставок в федеральные сети.';
+    const calls = provider();
+    const first = await findIrrelevantRows({ ...input, verticalSummary: summary, rows: [rows[2]] });
+    expect(calls.rubric).toBe(1);
+    // The saved checklist predates the closed list of structural requirements.
+    const old = JSON.parse(JSON.stringify(first.checkpoint)) as VeRelevanceCheckpoint;
+    old.triage = { version: 1, rubric: { ...rubric, requirements: ['The company supplies federal retail chains.'] } };
+    const prompts: Array<[string, string]> = [];
+    const rebuilt = provider();
+    const answer = global.fetch as jest.Mock;
+    global.fetch = jest.fn(async (url: string, init: { body: string }) => {
+      const messages = JSON.parse(init.body).messages as Array<{ content: string }> | undefined;
+      if (messages?.[0]?.content.startsWith('You convert ONE B2B')) prompts.push([messages[0].content, messages[1].content]);
+      return answer(url, init);
+    }) as unknown as typeof fetch;
+    const second = await findIrrelevantRows({ ...input, verticalSummary: summary, rows: [{ ...rows[2], inn: '7700000301' }], checkpoint: old });
+    expect(rebuilt.rubric).toBe(1);
+    expect(second.checkpoint.triage?.version).toBe(2);
+    await findIrrelevantRows({ ...input, verticalSummary: summary, rows: [{ ...rows[2], inn: '7700000302' }], checkpoint: second.checkpoint });
+    expect(rebuilt.rubric).toBe(1);
+    expect(prompts).toHaveLength(1);
+    const [system, user] = prompts[0];
+    expect(system).toContain('CONTEXT is never a requirement');
+    for (const word of ['Mercury', 'shifts', 'warehouses', 'retail chains', 'hiring', 'loyalty', 'size words or figures']) expect(system).toContain(word);
+    expect(system).toContain('The company operates fewer than N locations.');
+    expect(system).not.toContain('IS or HAS');
+    // A headcount is not a requirement: the checklist would demand a fact the gate never sees.
+    expect(system).not.toMatch(/requirements: ONLY[^\n]*headcount/);
+    expect(user).toContain('Target hypothesis: Производители насосов');
+    expect(user).not.toContain(summary);
+  });
+
   it('never throws the balance refusal past the gate, so the paid pass keeps its checkpoint', async () => {
     // Both paths hit an empty balance. `runTriage` has no handler of its own:
     // an escaping error would skip the gate's save and lose the whole pass.

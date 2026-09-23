@@ -1,7 +1,7 @@
 import { isVeAcceptedEmailStatus } from './emailPolicy';
 import { normalizeVeCompanyInn, veCompanyIdentityKey } from './collectionIdentity';
 import { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
-import { VE_RELEVANCE_WEBSITE_VERSION } from './relevanceDecision';
+import { VE_RELEVANCE_RULES_VERSION, VE_RELEVANCE_WEBSITE_VERSION } from './relevanceDecision';
 import { VE_RELEVANCE_TRIAGE_VERSION } from './relevanceTriageConfig';
 
 /** Validated address of a relevant company kept out of the ready base only by the
@@ -154,6 +154,17 @@ function awaitsVeTriage(row: Record<string, unknown>): boolean {
   return decision?.status === 'needs_review' && decision.triage_version !== VE_RELEVANCE_TRIAGE_VERSION;
 }
 
+/** Saved uncertainty not yet checked under the current selection rules
+ * (VE_RELEVANCE_RULES_VERSION). One pass per company: the gate rechecks a
+ * rejected admission from its saved quotes and stamps everything else, so
+ * this needs no site, INN or paid search either. */
+function awaitsVeRulesReview(row: Record<string, unknown>): boolean {
+  if (!isVeAcceptedEmailStatus(row._email_status)) return false;
+  const decision = row._ve_relevance && typeof row._ve_relevance === 'object'
+    ? row._ve_relevance as { status?: unknown; rules_version?: unknown } : null;
+  return decision?.status === 'needs_review' && decision.rules_version !== VE_RELEVANCE_RULES_VERSION;
+}
+
 /** Отпечаток отбора сохранённой проверки: «этот проход повторяет предыдущий».
  *
  * Здесь ТОЛЬКО то, что сама проверка способна изменить: состав выбранных строк
@@ -183,7 +194,11 @@ export function veSavedReviewSignature(
       // Быстрый проход, который лишь пометил компанию просмотренной, — тоже
       // продвижение; элемент существует только при включённом триаже, поэтому
       // отпечатки, снятые без него, остаются сравнимыми.
-      ...(options.triage ? [decision?.triage_version ?? null] : [])];
+      ...(options.triage ? [decision?.triage_version ?? null] : []),
+      // Отметка правил отбора — тоже продвижение. Элемент есть только у
+      // отмеченных строк: отпечатки строк без отметки прежние, лишнего
+      // прохода после раскатки нет.
+      ...(decision?.rules_version !== undefined ? [decision.rules_version] : [])];
   }).sort();
 }
 
@@ -217,10 +232,13 @@ export function buildVeRelevanceReviewBatch(input: {
   const selected = new Set(input.reserve.filter((row) => {
     if (!needsVeRelevanceReview(row)) return false;
     const untriaged = input.triage === true && awaitsVeTriage(row);
+    // A deferred search stays excluded without paid search, also for the rules
+    // pass: a rejected admission waits for that website work, so selecting it
+    // would only repeat the same pass.
     if (!untriaged && input.allowPaidSearch === false
       && (row._ve_relevance as { search_deferred?: unknown } | undefined)?.search_deferred === true) return false;
     if (!input.automatic) return true;
-    return untriaged || canAutomaticallyReview(row, withEvidence.has(veRelevanceCompanyKey(row)));
+    return untriaged || awaitsVeRulesReview(row) || canAutomaticallyReview(row, withEvidence.has(veRelevanceCompanyKey(row)));
   }).map(veRelevanceCompanyKey));
   return {
     rows: saved.filter((row) => selected.has(veRelevanceCompanyKey(row))),

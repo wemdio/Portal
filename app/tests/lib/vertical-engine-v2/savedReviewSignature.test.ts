@@ -10,7 +10,7 @@
  * контактов 110 компаний, не обращаясь к провайдеру ни разу.
  */
 
-import { veSavedReviewSignature } from '@/lib/verticalEngineV2/relevanceReserve';
+import { veRelevanceRowKey, veSavedReviewSignature } from '@/lib/verticalEngineV2/relevanceReserve';
 
 const decision = (extra: Record<string, unknown> = {}) => ({
   version: 2, status: 'needs_review', reason: 'Нет сведений о деятельности', evidence: [],
@@ -49,11 +49,20 @@ describe('veSavedReviewSignature', () => {
       { ...decision(), website_review_version: 4 },
       { ...decision(), search_deferred: true },
       { ...decision(), triage_version: 2 },
+      // Отметка правил отбора выводит строку из разового прохода.
+      { ...decision(), rules_version: 2 },
     ]) {
       expect(sign([{ ...mainRow, _ve_relevance: changed }, siblingRow])).not.toBe(before);
     }
     // Состав отбора: выбывшая или добавившаяся компания — тоже изменение.
     expect(sign([mainRow])).not.toBe(before);
+  });
+
+  it('у строк без отметки правил отбора отпечаток прежний: раскатка не даёт лишнего прохода', () => {
+    expect(veSavedReviewSignature([mainRow], { triage: true }))
+      .toEqual([[veRelevanceRowKey(mainRow), true, 'needs_review', 0, null, null, 1]]);
+    expect(veSavedReviewSignature([mainRow], { triage: false }))
+      .toEqual([[veRelevanceRowKey(mainRow), true, 'needs_review', 0, null, null]]);
   });
 
   it('не зависит от порядка строк и от версии триажа при выключенном триаже', () => {

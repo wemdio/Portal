@@ -9,6 +9,7 @@ import { claimVeJob, createVeJobPool, createVeProjectUsageAccumulator, canRunVeJ
 import type { VeJob } from '@/lib/verticalEngineV2/types';
 import { runVeOutreachPreparations } from '@/lib/verticalEngineV2/outreachPreparation';
 import { autoResumeVeTransientPreparations, enqueueVeContactReprojections } from '@/lib/verticalEngineV2/outreachSetup';
+import { VE_RELEVANCE_RULES_VERSION } from '@/lib/verticalEngineV2/relevanceDecision';
 
 let mockRouteDb = createMockSupabase();
 jest.mock('@/lib/supabaseAdmin', () => ({ get supabaseAdmin() { return mockRouteDb; } }));
@@ -157,7 +158,9 @@ describe('VE2 base collection enqueue recovery', () => {
 
     // A terminal partial preview is resumed only by an explicit Continue for
     // that saved base. Routine enqueue still reuses it without daily spending.
-    for (const mode of ['continue', 'routine', 'launched', 'checked'] as const) {
+    // 'rules': a completed website check from before the current selection
+    // rules is resumable once, for the gate's one-time recheck of saved quotes.
+    for (const mode of ['continue', 'routine', 'launched', 'checked', 'rules'] as const) {
       let partialClaimed = false;
       const partialSave = jest.fn(() => ({ data: true }));
       const target = { mode: 'preview', status: 'limited', ready_rows: 0, ready_target: 500,
@@ -170,7 +173,8 @@ describe('VE2 base collection enqueue recovery', () => {
           collect_info: { collection_mode: 'preview', target_progress: target, target_checkpoint: { completed_round: 1 },
             relevance_reserve: { version: 1, rows: [{ company: 'Plant', website: 'plant.test', email: 'info@plant.test',
               _email_status: 'ok', _ve_relevance: { status: 'needs_review', review_attempts: 1,
-                website_review_version: mode === 'checked' ? 4 : 3 } }] } } }],
+                website_review_version: mode === 'checked' || mode === 'rules' ? 4 : 3,
+                ...(mode === 'rules' ? {} : { rules_version: VE_RELEVANCE_RULES_VERSION }) } }] } } }],
         ve_templates: mode === 'launched' ? [{ id: 'live-template', base_id: 'saved-partial', launch_info: { campaign_id: 'live' } }] : [],
       }, rpcHandlers: {
         ve_claim_outreach_preparation: () => {
@@ -188,8 +192,8 @@ describe('VE2 base collection enqueue recovery', () => {
       } else await runVeOutreachPreparations(partialClient);
       expect(partialDb.getRows('ve_bases')).toHaveLength(1);
       const jobs = partialDb.getRows('ve_jobs');
-      expect(jobs).toHaveLength(mode === 'continue' ? 1 : 0);
-      if (mode === 'continue') {
+      expect(jobs).toHaveLength(mode === 'continue' || mode === 'rules' ? 1 : 0);
+      if (mode === 'continue' || mode === 'rules') {
         expect(jobs[0]).toMatchObject({ stage: 'base_collect', status: 'pending',
           payload: { base_id: 'saved-partial', hypothesis_id: 'h1', collection_mode: 'preview' } });
         expect(partialDb.getRows('ve_bases')[0]).toMatchObject({ status: 'collecting',
