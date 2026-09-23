@@ -3,6 +3,11 @@ import { z } from 'zod';
 // v4 separates explicit buyer requirements from benefits offered by the seller.
 // Only unresolved saved companies receive a bounded follow-up under this policy.
 export const VE_RELEVANCE_WEBSITE_VERSION = 4;
+/** Версия правил отбора (что проверка требует доказать), не путать с версией
+ * проверки сайта. Нет поля — версия 1. Смена версии не выбрасывает оплаченные
+ * вердикты: гейт один раз перепроверяет отклонённые предложения по их же
+ * сохранённым цитатам, остальным неопределённым ставит отметку. */
+export const VE_RELEVANCE_RULES_VERSION = 2;
 
 export const veRelevanceDecisionSchema = z.object({
   version: z.literal(2),
@@ -18,6 +23,8 @@ export const veRelevanceDecisionSchema = z.object({
   /** The calibrated triage has seen this company under that policy (relevanceTriage.ts).
    * Additive and tolerant: an unknown value must never invalidate a paid checkpoint. */
   triage_version: z.number().int().positive().optional().catch(undefined),
+  /** needs_review, уже проверенный по этой версии правил отбора (VE_RELEVANCE_RULES_VERSION). */
+  rules_version: z.number().int().positive().optional().catch(undefined),
   /** Present only when the triage itself decided. `final`: a reject that is not re-reviewed. */
   triage: z.object({ outcome: z.enum(['admit', 'reject']), activity: z.number().min(0).max(1),
     final: z.literal(true).optional() }).optional().catch(undefined),
