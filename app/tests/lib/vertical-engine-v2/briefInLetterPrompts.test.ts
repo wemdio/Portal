@@ -515,6 +515,28 @@ describe('VE2 follow-up timing through generation and launch', () => {
     });
   });
 
+  it('asks for exactly 4 letters and retries once when the model returns 3', async () => {
+    const db = timingDb([]);
+    jest.mocked(callLLMTextWithFallback).mockReset()
+      .mockResolvedValueOnce({ ...textResult, text: rawLetters(3) })
+      .mockResolvedValue(textResult);
+    await runChainStage(job('chain'), context(db));
+    const calls = jest.mocked(callLLMTextWithFallback).mock.calls;
+    expect(JSON.stringify(calls[0][0])).toContain('ровно из 4 писем');
+    expect(JSON.stringify(calls[1][0])).toContain('ровно 4 письма');
+    expect(db.inserts.find((entry) => entry.table === 've_chains')!.rows[0].letters).toHaveLength(4);
+  });
+
+  it('keeps the longer answer when the retry comes back even shorter', async () => {
+    const db = timingDb([]);
+    jest.mocked(callLLMTextWithFallback).mockReset()
+      .mockResolvedValueOnce({ ...textResult, text: rawLetters(3) })
+      .mockResolvedValueOnce({ ...textResult, text: rawLetters(2) })
+      .mockResolvedValue({ ...textResult, text: rawLetters(3) });
+    await runChainStage(job('chain'), context(db));
+    expect(db.inserts.find((entry) => entry.table === 've_chains')!.rows[0].letters).toHaveLength(3);
+  });
+
   it('uses short defaults and keeps the latest manual gaps through regeneration, including language changes and read failure', async () => {
     expect(waitsOf(buildChainLetters(rawLetters(6)).letters)).toEqual([0, 1, 3, 5, 7, 9]);
     const manual = normalizeVeChainLetters(sourceLetters([8, 0, 2.9, 120])).letters!;

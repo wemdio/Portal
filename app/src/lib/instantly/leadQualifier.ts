@@ -1207,6 +1207,28 @@ function serviceAcknowledgementSegments(authoredBody: string): string[] {
 function classifySystemEnvelope(sender: string, subject: string, text: string): MachineReplyKind | null {
   const body = text.replace(/\r\n?/g, '\n').trim();
   if (body.length > 80_000) return null;
+  // WMD creates a new support ticket even when no person has replied to our
+  // offer. Its later notifications may arrive at a different mailbox, so this
+  // complete machine envelope must be recognized before project ownership.
+  // Match the whole notice and the same ticket number in subject and body:
+  // extra authored text must continue through ordinary qualification.
+  const wmdTicket = /^Создано сообщение \[#(\d{1,12})\] на WMD\.RU$/iu.exec(subject);
+  if (sender === 'support@wmd.ru' && wmdTicket) {
+    const lines = body.split('\n').map((line) => line.trim());
+    const notice = /^На интернет-портале WMD\.RU по вашему вопросу \(обращению\) создано сообщение №(\d{1,12}) в категории «Техническая поддержка»\.$/iu.exec(lines[1] ?? '');
+    if (lines.length === 14 && notice?.[1] === wmdTicket[1] &&
+        /^Уважаемый\(ая\) [^!\n]{2,120}!$/u.test(lines[0]) &&
+        /^Просим вас не отвечать на это уведомление - оно выслано автоматически\. Всю историю сообщений Вы можете проследить по данной ссылке: https:\/\/www\.wmd\.ru\/troubletickets\/[a-f\d]{32}\.html$/iu.test(lines[2]) &&
+        lines[3] === '' && lines[4] === '--' &&
+        lines[5] === 'С вопросами и предложениями обращайтесь через форму обратной связи: https://www.wmd.ru/contacts.html' &&
+        lines[6] === '' && lines[7] === 'С уважением и наилучшими пожеланиями,' &&
+        lines[8] === 'команда WMD.RU.' &&
+        lines[9] === 'WMD.RU - оборудование для беспроводной связи' &&
+        lines[10] === 'Москва: +7 (495) 916-72-53' &&
+        lines[11] === 'Воронеж: +7 (473) 22-09-000' &&
+        lines[12] === 'Ростов-на-Дону: +7 (863) 280-01-01' &&
+        lines[13] === 'https://www.wmd.ru/') return 'service_acknowledgement';
+  }
   const opened = /^HR Case (HRC\d+) has been opened$/i.exec(subject);
   if (opened && /^[^@\s]+@(?:[a-z0-9-]+\.)*service-now\.com$/i.test(sender)) {
     const envelope = /^(HRC\d+)\s+\[https:\/\/[a-z0-9.-]+\.service-now\.com\/[^\]\s]+\]\s*Opened by:[^\n]+\nState:\s*Ready\s*\n\s*Short Description:[\s\S]*?\nDescription:[\s\S]*?\nComments:\s*\nRegards,\s*\nOneSC\s*\nRef:MSG[a-z0-9_]+$/i.exec(body);

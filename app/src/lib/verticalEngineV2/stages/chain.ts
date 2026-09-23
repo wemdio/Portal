@@ -197,7 +197,10 @@ export const VeChainCritiqueSchema = z.object({
     .default([]),
 });
 
-const RETRY_HINT = `Ты вернул слишком мало писем или нарушил формат. Нужно 3–5 писем, каждое блоком «---LETTER N---» + строка темы, плюс вариант B каждого письма блоком «---LETTER N B---» сразу после него. Верни цепочку заново, целиком, без пояснений.`;
+/** Сколько писем в цепочке: специалисты работают с 4 письмами. */
+export const VE_CHAIN_TARGET_LETTERS = 4;
+
+const RETRY_HINT = `Ты вернул слишком мало писем или нарушил формат. Нужно ровно 4 письма, каждое блоком «---LETTER N---» + строка темы, плюс вариант B каждого письма блоком «---LETTER N B---» сразу после него. Верни цепочку заново, целиком, без пояснений.`;
 
 export async function runChainStage(job: VeJob, ctx: VeStageContext): Promise<VeStageResult> {
   const usage = newUsage();
@@ -300,8 +303,11 @@ export async function runChainStage(job: VeJob, ctx: VeStageContext): Promise<Ve
   addUsage(usage, llm);
   let { parsed, letters } = buildChainLetters(llm.text);
 
-  if (parsed.length < 3) {
-    stageLog(ctx, `[chain] распознано ${parsed.length} писем — retry с фидбэком`);
+  // Цепочка — ровно 4 письма (специалисты ждут 4). Меньше — один повтор с
+  // подсказкой; если и повтор короче, берём лучший из ответов (не меньше 3).
+  if (parsed.length < VE_CHAIN_TARGET_LETTERS) {
+    stageLog(ctx, `[chain] распознано ${parsed.length} писем из ${VE_CHAIN_TARGET_LETTERS} — retry с фидбэком`);
+    const first = { parsed, letters, llm };
     const retryMessages: LLMMessage[] = [
       ...messages,
       { role: 'assistant', content: llm.text.slice(0, 2000) },
@@ -310,6 +316,7 @@ export async function runChainStage(job: VeJob, ctx: VeStageContext): Promise<Ve
     llm = await callLLMTextWithFallback(retryMessages, { model, maxTokens: 16384, log: (m) => stageLog(ctx, m) });
     addUsage(usage, llm);
     ({ parsed, letters } = buildChainLetters(llm.text));
+    if (parsed.length < first.parsed.length) ({ parsed, letters, llm } = first);
   }
   if (parsed.length < 3) {
     // Диагностика в ошибку (пишется в ve_jobs.error): начало сырого ответа,
