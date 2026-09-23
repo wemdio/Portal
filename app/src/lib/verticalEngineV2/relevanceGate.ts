@@ -544,6 +544,11 @@ export async function findIrrelevantRows(input: {
         reason: sliceWholeChars(SEMANTIC_REJECTION_REASON + review.result.reason, 0, 400) });
   };
   const resumeSemantic = (entry: Entry, review: SemanticReview) => {
+    // Резерв без ответа и без ошибки модели: воркер остановили между оплатой
+    // и ответом. Карантин получала и «failed» без кода — так прежний resume
+    // закрывал такую попытку (7 компаний f1bb9ccf: DeepSeek ответил
+    // direct_match, контрольную проверку прервали).
+    const interrupted = review.status === 'started' || (review.status === 'failed' && !review.failure_code);
     // Normalize BEFORE changing status: an interrupted legacy reservation may
     // have been charged and cannot turn back into a free initial attempt.
     review.attempts = semanticAttempts(review);
@@ -557,6 +562,15 @@ export async function findIrrelevantRows(input: {
       review.status = 'pending';
       record(entry, errorDecision('Ожидается повторная смысловая проверка после отказа провайдера.', entry.attempts));
       return;
+    }
+    if (interrupted && review.attempts >= MAX_SEMANTIC_ATTEMPTS && !review.interrupted) {
+      // Попыткой считается полученный ответ или ошибка модели, а не остановка
+      // воркера. Возврат разовый: повторные обрывы на той же компании не
+      // покупают проверку без конца, вторая остановка ведёт в карантин.
+      // Прерванная первая попытка карантином не грозит и не возвращается:
+      // её повтор и так идёт к контрольной модели.
+      review.interrupted = true;
+      review.attempts -= 1;
     }
     if (review.attempts >= MAX_SEMANTIC_ATTEMPTS) { review.status = 'failed'; quarantineSemantic(entry); return; }
     review.status = 'pending';
