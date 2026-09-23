@@ -7,6 +7,7 @@
  * тестом сам замер: занятость слотов, простой на барьере и разделение одного
  * ярлыка таймаута на постраничный и общий дедлайн.
  */
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { findIrrelevantRows, journalWaveTiming, type VeWebsiteWaveTiming } from '@/lib/verticalEngineV2/relevanceGate';
 import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEvidence';
 import { VeOperationTimeoutError } from '@/lib/verticalEngineV2/operationDeadline';
@@ -16,6 +17,11 @@ import type { VeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
 
 jest.mock('@/lib/loggerServer', () => ({ logInfo: jest.fn(async () => undefined) }));
 const logInfoMock = logInfo as jest.MockedFunction<typeof logInfo>;
+jest.mock('node:perf_hooks', () => {
+  const actual = jest.requireActual('node:perf_hooks');
+  return { ...actual, monitorEventLoopDelay: jest.fn((options) => actual.monitorEventLoopDelay(options)) };
+});
+const loopDelayMock = monitorEventLoopDelay as jest.MockedFunction<typeof monitorEventLoopDelay>;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 /** Строки без сведений о деятельности уходят в needs_review без единого
@@ -28,7 +34,7 @@ const gate = (over: Partial<Parameters<typeof findIrrelevantRows>[0]>) => findIr
   language: 'ru' as const, ...over,
 } as Parameters<typeof findIrrelevantRows>[0]);
 
-beforeEach(() => logInfoMock.mockClear());
+beforeEach(() => { logInfoMock.mockClear(); loopDelayMock.mockClear(); });
 
 describe('журнал длительностей фазы сайтов', () => {
   it('показывает простой слотов: стена волны равна самому медленному, а не сумме', async () => {
@@ -96,6 +102,7 @@ describe('журнал длительностей фазы сайтов', () => 
   it('строка журнала уходит отдельным источником и только внутри области учёта', async () => {
     const wave: VeWebsiteWaveTiming = { slots: 8, companies: 8, cached: 0, wallMs: 41_000, sumMs: 9_000,
       maxMs: 40_500, minMs: 120, buckets: [3, 2, 1, 1, 0, 0, 1], saveMs: 800, pagesRead: 19,
+      proxyAttempts: 2, proxyRescued: 1, proxyVerified: 1, proxyDenied: 0, loopDelayMaxMs: 37,
       outcomes: { ok: 2, unavailable: 3, providerError: 0, deferred: 0, timeoutPage: 2, timeoutDeadline: 1, slowButUsable: 1 } };
     journalWaveTiming(wave);
     expect(logInfoMock).not.toHaveBeenCalled();
@@ -104,8 +111,59 @@ describe('журнал длительностей фазы сайтов', () => 
     expect(logInfoMock).toHaveBeenCalledTimes(1);
     const [event, , context] = logInfoMock.mock.calls[0];
     expect(event).toBe('ve2_website_wave');
-    expect(context).toEqual(expect.objectContaining({ version: 1, projectId: 'p1', baseId: 'b1', jobId: 'j1',
-      stage: 'base_collect', slots: 8, wallMs: 41_000, sumMs: 9_000 }));
+    // Версия 2: другой ярлык таймаута и новые поля — сравнивать с версией 1 нельзя.
+    expect(context).toEqual(expect.objectContaining({ version: 2, projectId: 'p1', baseId: 'b1', jobId: 'j1',
+      stage: 'base_collect', slots: 8, wallMs: 41_000, sumMs: 9_000,
+      proxyAttempts: 2, proxyRescued: 1, proxyVerified: 1, proxyDenied: 0, loopDelayMaxMs: 37 }));
+  });
+
+  it('медленная страница считается «пригодной» только при готовом тексте; прокси и задержка цикла — в волне', async () => {
+    const waves: VeWebsiteWaveTiming[] = [];
+    // Готовый текст ведёт гейт к платной классификации — её не ждём:
+    // волна уже записана, дальше этап отменяется.
+    const stop = new AbortController();
+    const originalFetch = global.fetch;
+    global.fetch = jest.fn(async () => { throw new Error('network is not allowed in this test'); }) as never;
+    // Гистограмма волны — заглушка с известным максимумом (в наносекундах).
+    const histogram = { enable: jest.fn(), disable: jest.fn(), max: 37e6 };
+    loopDelayMock.mockImplementationOnce(() => histogram as never);
+    try {
+      await gate({
+        signal: stop.signal,
+        onWebsiteTiming: (wave) => { waves.push(wave); stop.abort(); },
+        fetchEvidence: (async (website: string) => {
+          if (website.includes('company-1.test')) return { status: 'ok', text: 'Производим насосы на собственном заводе.', url: website,
+            reason: 'identity_verified_website', timeout: 'page', pages: 3, proxy: { attempts: 2, rescued: 1, verified: 1, denied: 0 } };
+          // Молчал только каталог из поиска: ответ окончательный, текста нет.
+          if (/company-[23]\.test/.test(website)) return { status: 'unavailable', text: '', url: website,
+            reason: 'website_identity_unverified', timeout: 'page', pages: 4, proxy: { attempts: 0, rescued: 0, verified: 0, denied: 1 } };
+          if (website.includes('company-4.test')) return { status: 'unavailable', text: '', url: website,
+            reason: 'website_evidence_timeout', timeout: 'page', pages: 2, proxy: { attempts: 1, rescued: 0, verified: 0, denied: 0 } };
+          return { status: 'unavailable', text: '', url: website, reason: 'no_usable_website_text', pages: 1 };
+        }) as unknown as typeof fetchVeRelevanceEvidence,
+      }).catch(() => undefined);
+    } finally {
+      global.fetch = originalFetch;
+    }
+    expect(waves).toHaveLength(1);
+    expect(waves[0].outcomes).toEqual(expect.objectContaining({ ok: 1, slowButUsable: 1, timeoutPage: 1, unavailable: 6 }));
+    expect(waves[0]).toEqual(expect.objectContaining({ proxyAttempts: 3, proxyRescued: 1, proxyVerified: 1, proxyDenied: 2 }));
+    // Задержка цикла снята за волну и переведена в миллисекунды.
+    expect(histogram.enable).toHaveBeenCalledTimes(1);
+    expect(histogram.disable).toHaveBeenCalledTimes(1);
+    expect(waves[0].loopDelayMaxMs).toBe(37);
+  });
+
+  it('гистограмма задержки выключается и при отмене волны', async () => {
+    const stop = new AbortController();
+    await expect(gate({
+      signal: stop.signal,
+      onWebsiteTiming: () => undefined,
+      fetchEvidence: (async () => { stop.abort(); throw stop.signal.reason; }) as unknown as typeof fetchVeRelevanceEvidence,
+    })).rejects.toBeDefined();
+    expect(loopDelayMock).toHaveBeenCalled();
+    // Повторное выключение возвращает false: таймер гистограммы уже снят.
+    for (const { value: histogram } of loopDelayMock.mock.results) expect(histogram.disable()).toBe(false);
   });
 });
 
@@ -118,7 +176,11 @@ describe('разделение таймаута в доказательства�
     search: (async () => []) as never,
   });
 
-  it('постраничный дедлайн и общий дедлайн различимы, а ярлык причины не меняется', async () => {
+  // Проверяет только разделение телеметрии: ошибка приходит из адаптера
+  // страницы, и ярлык в обоих случаях даёт молчание своей главной. Настоящее
+  // срабатывание общего дедлайна после прочитанного сайта — в
+  // relevanceEvidenceProxy.test.ts.
+  it('телеметрия различает постраничный и общий дедлайн, ярлык — таймаут своей главной', async () => {
     const perPage = await run(new VeOperationTimeoutError('relevance evidence page', 5_000));
     expect(perPage.reason).toBe('website_evidence_timeout');
     expect(perPage.timeout).toBe('page');
