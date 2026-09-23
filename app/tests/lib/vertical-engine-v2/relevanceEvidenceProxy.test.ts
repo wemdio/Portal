@@ -99,11 +99,14 @@ const setPool = (configured: boolean) => {
 };
 
 beforeEach(() => {
+  // Повтор через прокси выключен по умолчанию; здесь проверяется включённый режим.
+  process.env.VE_EVIDENCE_PROXY_RETRY = '1';
   setPool(true);
   mockTransport.resolve.mockReset().mockResolvedValue(['93.184.216.34']);
   mockTransport.fetch.mockReset();
 });
 afterEach(() => {
+  delete process.env.VE_EVIDENCE_PROXY_RETRY;
   // Пропуск в пул возвращается всегда, в том числе после сбоя прокси.
   expect(proxySlotsInFlight()).toBe(0);
   for (const name of PROXY_ENV) {
@@ -877,4 +880,17 @@ describe('настоящий транспорт через прокси', () => 
     expect(mockTransport.fetch).toHaveBeenCalledTimes(1);
     expect(mockTransport.fetch.mock.calls.some(([, init]) => viaProxy(init))).toBe(false);
   });
+});
+
+describe('повтор через прокси выключен по умолчанию', () => {
+  it('без VE_EVIDENCE_PROXY_RETRY=1 молчащая своя главная не идёт в прокси', async () => {
+    delete process.env.VE_EVIDENCE_PROXY_RETRY;
+    const fetchPage = jest.fn(async (_url: string, signal: AbortSignal, route?: string) => {
+      if (route === 'proxy') throw new Error('proxy must not be used');
+      return new Promise<never>((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    });
+    const evidence = await fetchVeRelevanceEvidence('sibdobrodar.ru', { ...DOBRODAR, fetchPage, search: noSearch() as never });
+    expect(fetchPage.mock.calls.some((call) => call[2] === 'proxy')).toBe(false);
+    expect(evidence.proxy?.attempts ?? 0).toBe(0);
+  }, 30_000);
 });
