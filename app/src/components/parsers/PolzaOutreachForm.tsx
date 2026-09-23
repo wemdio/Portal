@@ -51,7 +51,6 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
   const [minEmp, setMinEmp] = useState('3');
   const [maxEmp, setMaxEmp] = useState('200');
   const [writeT, setWriteT] = useState('75');
-  const [reviewT, setReviewT] = useState('55');
   const toggleSource = (s: 'hiring' | 'yc') =>
     setSources((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
   const geoRef = useRef<HTMLDivElement>(null);
@@ -93,9 +92,8 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
       min_employees: Number(minEmp) || 3,
       max_employees: Number(maxEmp) || 200,
       write_threshold: Number(writeT) || 75,
-      review_threshold: Number(reviewT) || 55,
     };
-  }, [countries, days, limit, sources, ycFrom, minEmp, maxEmp, writeT, reviewT]);
+  }, [countries, days, limit, sources, ycFrom, minEmp, maxEmp, writeT]);
 
   const canStart = countries.length > 0 && sources.length > 0;
   const submit = () => {
@@ -266,11 +264,10 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
             <input value={maxEmp} onChange={(e) => setMaxEmp(e.target.value.replace(/\D/g, ''))} inputMode="numeric" className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-violet-400 focus:outline-none focus:ring-1 focus:ring-violet-400" />
           </div>
         </label>
-        <label className="block md:w-56">
-          <span className="mb-1 block text-sm font-medium text-gray-700">Lead Score: write now / manual</span>
+        <label className="block md:w-40">
+          <span className="mb-1 block text-sm font-medium text-gray-700">Lead Score: пишем от</span>
           <div className="flex gap-2">
             <input value={writeT} onChange={(e) => setWriteT(e.target.value.replace(/\D/g, ''))} inputMode="numeric" className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-violet-400 focus:outline-none focus:ring-1 focus:ring-violet-400" />
-            <input value={reviewT} onChange={(e) => setReviewT(e.target.value.replace(/\D/g, ''))} inputMode="numeric" className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-violet-400 focus:outline-none focus:ring-1 focus:ring-violet-400" />
           </div>
         </label>
       </div>

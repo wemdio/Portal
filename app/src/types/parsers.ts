@@ -294,7 +294,6 @@ export interface PolzaOutreachConfig {
   min_employees?: number;
   max_employees?: number;
   write_threshold?: number;
-  review_threshold?: number;
 }
 
 export interface PolzaOutreachParserJob {
@@ -361,7 +360,7 @@ export interface PolzaOutreachCompanyRow {
   country?: string | null;
   lead_score?: number | null;
   score_breakdown?: Record<string, number> | null;
-  lead_status?: 'write_now' | 'manual_check' | 'skip' | null;
+  lead_status?: 'write_now' | 'skip' | null;
   recommended_case?: string | null;
   case_reason?: string | null;
   case_snippet?: string | null;

@@ -154,7 +154,7 @@ export async function runPolzaOutreachJob(jobId: string): Promise<void> {
     const config: PolzaOutreachConfig = sanitizePolzaOutreachConfig((job.config ?? {}) as Partial<PolzaOutreachConfig>);
     const target = config.limit;
     const maxCandidates = maxCandidatesFor(target);
-    const thresholds = { write: config.write_threshold, review: config.review_threshold };
+    const thresholds = { write: config.write_threshold };
 
     await setProgress({
       status: 'running',
@@ -333,10 +333,6 @@ export async function runPolzaOutreachJob(jobId: string): Promise<void> {
         cta_type: 'route',
       };
       if (status === 'skip') return exclude(ST.s4Analyzed, 'low_score', patch);
-      if (status === 'manual_check') {
-        await updateRow(id, { ...patch, status: 'needs_review', stage: ST.s4Analyzed, review_reason: 'manual_check' });
-        return null;
-      }
       totals.writeNow += 1;
       await updateRow(id, { ...patch, status: 'qualified', stage: ST.s4Analyzed });
       return { id, c, domain, website, site, triggers, score, scoreInput, caseHit: routed?.record ?? null, caseReason: routed?.reason ?? null };
@@ -352,13 +348,13 @@ export async function runPolzaOutreachJob(jobId: string): Promise<void> {
       if (!email.email) {
         const score = scoreLead({ ...q.scoreInput, hasEmail: false });
         await updateRow(q.id, {
-          status: 'needs_review',
+          status: 'excluded',
           stage: ST.s5Email,
-          review_reason: 'no_corporate_email',
+          exclusion_reason: 'no_corporate_email',
           lead_score: score.total,
           score_breakdown: score.breakdown,
           data_quality_score: score.dataQuality,
-          lead_status: 'manual_check',
+          lead_status: 'skip',
         });
         return;
       }

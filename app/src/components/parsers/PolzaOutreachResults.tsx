@@ -55,6 +55,7 @@ const EXCLUSION_LABELS: Record<string, string> = {
   not_b2b: 'не B2B',
   no_trigger: 'нет повода написать',
   low_score: 'Lead Score ниже порога',
+  no_corporate_email: 'не нашли корпоративную почту',
 };
 
 /**
@@ -162,7 +163,7 @@ function ScoreBlock({ row }: { row: PolzaOutreachCompanyRow }) {
     <div className="rounded-lg border border-violet-100 bg-violet-50/50 p-4 text-sm text-gray-800">
       <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-violet-800">
         Lead Score {row.lead_score ?? '—'}/100
-        {row.lead_status ? ` · ${row.lead_status === 'write_now' ? 'write now' : row.lead_status === 'manual_check' ? 'manual check' : 'skip'}` : ''}
+        {row.lead_status ? ` · ${row.lead_status === 'write_now' ? 'write now' : 'skip'}` : ''}
       </div>
       <div className="mb-2 flex flex-wrap gap-2 text-xs">
         {Object.entries(breakdown).map(([k, v]) => (

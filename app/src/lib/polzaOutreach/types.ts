@@ -54,9 +54,8 @@ export interface PolzaOutreachConfig {
   yc_batch_from_year: number;
   min_employees: number;
   max_employees: number;
-  /** Lead Score: ≥write — write now, ≥review — manual check, ниже — skip. */
+  /** Lead Score: ≥write — write now, ниже — skip (ручной проверки нет). */
   write_threshold: number;
-  review_threshold: number;
 }
 
 /** Санитизация конфига задачи: один и тот же код в API-роуте и в раннере. */
@@ -98,7 +97,6 @@ export function sanitizePolzaOutreachConfig(raw: Partial<PolzaOutreachConfig>): 
     min_employees: minEmployees,
     max_employees: Math.max(minEmployees, clamp(raw.max_employees, 200, 1, 100_000)),
     write_threshold: write,
-    review_threshold: Math.min(write, clamp(raw.review_threshold, 55, 0, 100)),
   };
 }
 

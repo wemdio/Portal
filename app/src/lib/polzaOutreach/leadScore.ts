@@ -7,7 +7,8 @@
  *   Firmographic до 25 — 3–10 чел. 5, 11–50 — 15, 51–200 — 20; страна из списка CEO 5;
  *   Trigger до 25     — найм sales/GTM 15, YC 15, запуск продукта 10, стек продаж 5;
  *   Data quality до 10 — сайт 3, корпоративная почта 3, описание 2, ссылка на повод 2.
- * Статус: ≥75 write now, 55–74 manual check, ниже — skip (пороги из формы).
+ * Статус: ≥75 write now, ниже — skip (порог из формы). Ручную проверку CEO
+ * убрал 23.09.2026: промежуточная зона только копила строки без решения.
  */
 
 import { POLZA_OUTREACH_PRIORITY_COUNTRIES } from './types';
@@ -84,11 +85,10 @@ export function scoreLead(i: ScoreInput): LeadScore {
   };
 }
 
-export type LeadStatus = 'write_now' | 'manual_check' | 'skip';
+export type LeadStatus = 'write_now' | 'skip';
 
-export function leadStatus(total: number, t: { write: number; review: number }): LeadStatus {
+export function leadStatus(total: number, t: { write: number }): LeadStatus {
   if (total >= t.write) return 'write_now';
-  if (total >= t.review) return 'manual_check';
   return 'skip';
 }
 
