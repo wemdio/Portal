@@ -28,6 +28,8 @@ export interface ClusterHypothesisInput {
   description?: string;
   /** Тир гипотезы (1–3) — используется только в тай-брейке ранжирования. */
   tier?: number;
+  /** Широкая гипотеза уровня сектора: всегда отдельная вертикаль. */
+  broad?: boolean;
 }
 
 export interface AppliedVertical {
@@ -82,7 +84,10 @@ function uniquePush(list: string[], values: string[]): string[] {
  *    задаёт): min(95, max(% участников) + 2 × (число участников − 1)) —
  *    max плюс небольшой бонус за ширину; кап 95 делает плато невозможным;
  *  - rank — по убыванию potential_pct (1 = лучшая); тай-брейки: больше
- *    участников → наличие более низкого тира → имя.
+ *    участников → наличие более низкого тира → имя;
+ *  - широкая гипотеза (broad) в решения модели не входит и всегда становится
+ *    отдельной вертикалью: её база и план строятся по сектору целиком, а узкий
+ *    сегмент рядом с ней сузил бы и то, и другое.
  *  Отклонённые гипотезы сюда не попадают: стадия evidence пишет в
  *  ve_hypotheses только принятые, поэтому функция работает со всем входом.
  */
@@ -93,7 +98,7 @@ export function applyClusteringDecisions(
   const byNorm = new Map<string, ClusterHypothesisInput>();
   for (const h of hypotheses) {
     const k = normKey(h.title);
-    if (k && !byNorm.has(k)) byNorm.set(k, h);
+    if (k && !byNorm.has(k) && !h.broad) byNorm.set(k, h);
   }
 
   interface MutableGroup extends AppliedVertical {
@@ -203,22 +208,29 @@ export async function runClusteringStage(job: VeJob, ctx: VeStageContext): Promi
     throw new Error('Нет верифицированных гипотез: сначала выполните стадию evidence');
   }
 
-  const llm = await callLLMWithSchema(
-    (market === 'us' ? buildClusteringMessagesEn : buildClusteringMessages)({
-      hypotheses: hypotheses.map((h) => ({
-        title: h.title,
-        tier: h.tier,
-        description: h.description,
-        potential_pct: h.potential_pct,
-        evidence_count: Array.isArray(h.evidence) ? h.evidence.length : 0,
-      })),
-    }),
-    VeClusteringSchema,
-    { model: getVeModel('research'), maxTokens: 8192 },
-  );
-  addUsage(usage, llm);
+  // Широкие гипотезы — каждая своя вертикаль (см. applyClusteringDecisions):
+  // модели их не показываем.
+  const narrow = hypotheses.filter((h) => !h.broad);
+  let decisions: VeClusteringDecision[] = [];
+  if (narrow.length) {
+    const llm = await callLLMWithSchema(
+      (market === 'us' ? buildClusteringMessagesEn : buildClusteringMessages)({
+        hypotheses: narrow.map((h) => ({
+          title: h.title,
+          tier: h.tier,
+          description: h.description,
+          potential_pct: h.potential_pct,
+          evidence_count: Array.isArray(h.evidence) ? h.evidence.length : 0,
+        })),
+      }),
+      VeClusteringSchema,
+      { model: getVeModel('research'), maxTokens: 8192 },
+    );
+    addUsage(usage, llm);
+    decisions = llm.data.verticals;
+  }
 
-  const verticals = applyClusteringDecisions(hypotheses, llm.data.verticals);
+  const verticals = applyClusteringDecisions(hypotheses, decisions);
   stageLog(ctx, `[clustering] вертикалей: ${verticals.length} из ${hypotheses.length} гипотез`);
 
   // Идемпотентная перезапись: отвязываем гипотезы, сносим старые вертикали.

@@ -150,3 +150,46 @@ export function veCanWidenPlan(tasks: VeCollectTask[], policy: Pick<VeAdaptiveCo
   });
   return secondQueue || ((policy?.replan_attempts ?? 0) < 2 && tasks.length < VE_PLAN_MAX_TASKS);
 }
+
+/** Класс ОКВЭД из кода группы или подгруппы: «86.23» → «86». Прочее — как есть. */
+function veOkvedClass(code: string): string {
+  const match = /^\s*(\d{2})(?:\.[\d.]*)?\s*$/.exec(code);
+  return match ? match[1] : code;
+}
+
+/**
+ * План широкой гипотезы — сектор целиком для ежедневного добора: реестр по
+ * классам ОКВЭД (две цифры) без порогов выручки и штата, каталог карт по
+ * рубрикам сектора. Сигнал найма (hh_live, eng_hiring) такой гипотезе не
+ * нужен и сужал бы поток; если кроме него в плане ничего нет, план не
+ * обнуляем. Задачи, совпавшие после расширения, остаются в одном экземпляре.
+ */
+export function veBroadHypothesisPlan(plan: VeSourcePlan): { plan: VeSourcePlan; changed: number } {
+  const hiring = (task: VeCollectTask) => task.source === 'hh_live' || task.source === 'eng_hiring';
+  const kept = plan.tasks.some((task) => !hiring(task)) ? plan.tasks.filter((task) => !hiring(task)) : plan.tasks;
+  let changed = plan.tasks.length - kept.length;
+  const known = new Set<string>();
+  const tasks: VeCollectTask[] = [];
+  for (const task of kept) {
+    let next = task;
+    const filters = task.directory_filters;
+    if (task.source === 'companies_directory' && filters) {
+      const okvedCodes = filters.okvedCodes?.length ? [...new Set(filters.okvedCodes.map(veOkvedClass))] : filters.okvedCodes;
+      const broadened = { ...(scoped(filters) ? withoutSize(filters) : filters), ...(okvedCodes ? { okvedCodes } : {}) };
+      if (JSON.stringify(broadened) !== JSON.stringify(filters)) next = { ...task, directory_filters: broadened };
+    } else if (task.source === 'pdl' && task.pdl_filters?.sizes?.length) {
+      const rest = { ...task.pdl_filters };
+      delete rest.sizes;
+      next = { ...task, pdl_filters: rest };
+    }
+    const key = veSourceStrategyKey(next);
+    if (known.has(key)) {
+      changed += 1;
+      continue;
+    }
+    known.add(key);
+    if (next !== task) changed += 1;
+    tasks.push(next);
+  }
+  return { plan: changed ? { ...plan, tasks } : plan, changed };
+}

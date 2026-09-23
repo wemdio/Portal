@@ -110,6 +110,30 @@ async function optionalRead<T>(ctx: VeStageContext, label: string, read: () => P
   }
 }
 
+/** Цели merge: широкая гипотеза сливается только с широкой, узкая — только с узкой. */
+export function veEvidenceMergeTitles(
+  candidates: Array<Pick<VeHypothesisCandidate, 'title' | 'broad'>>,
+  candidate: Pick<VeHypothesisCandidate, 'broad'>,
+): string[] {
+  return candidates.filter((other) => (other.broad === true) === (candidate.broad === true)).map((other) => other.title);
+}
+
+/**
+ * Вердикт, который применяет стадия. Широкая гипотеза — сектор, взятый целиком
+ * намеренно (база для ежедневного добора): за общность она не выбывает и не
+ * растворяется в узкой, а узкая не сливается в широкую — иначе узкий сегмент
+ * пропал бы из списка. Merge без найденной цели того же вида — keep, как раньше.
+ */
+export function veEffectiveEvidenceVerdict(
+  candidate: Pick<VeHypothesisCandidate, 'broad'>,
+  verdict: 'keep' | 'merge' | 'drop',
+  mergeTarget: { broad?: boolean } | undefined,
+): 'keep' | 'merge' | 'drop' {
+  if (verdict === 'drop') return candidate.broad === true ? 'keep' : 'drop';
+  if (verdict === 'merge' && mergeTarget && (mergeTarget.broad === true) === (candidate.broad === true)) return 'merge';
+  return 'keep';
+}
+
 function normTitle(t: string): string {
   return t.toLowerCase().replace(/\s+/g, ' ').trim();
 }
@@ -297,7 +321,6 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
   if (!candidates.length) {
     throw new Error('Нет кандидатов: сначала выполните стадию hypotheses');
   }
-  const allTitles = candidates.map((c) => c.title);
 
   const model = getVeModel('research');
   const inputHash = evidenceInputHash({ project_id: job.project_id, market, profile, candidates, model });
@@ -391,7 +414,7 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
         const verdictInput = {
           candidate,
           profile,
-          allCandidateTitles: allTitles,
+          allCandidateTitles: veEvidenceMergeTitles(candidates, candidate),
           sources,
           searchResults,
           todayMoscow,
@@ -409,11 +432,18 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
         // read-only anchor can time out; next_index remains the unfinished candidate.
         await saveCheckpoint(ctx, job, checkpoint, candidates.length, `${candidate.title}: ответ модели получен`);
         const v = llm.data;
+        const mergeTarget = v.verdict === 'merge' && v.merge_with_title
+          ? accepted.find((a) => normTitle(a.title) === normTitle(v.merge_with_title as string))
+          : undefined;
+        const verdict = veEffectiveEvidenceVerdict(candidate, v.verdict, mergeTarget);
 
-        if (v.verdict === 'drop') {
+        if (verdict === 'drop') {
           checkpoint.dropped += 1;
           stageLog(ctx, `[evidence] drop: ${v.reason}`);
           return;
+        }
+        if (v.verdict === 'drop') {
+          stageLog(ctx, `[evidence] «${candidate.title}»: широкая гипотеза остаётся, хотя модель предлагала отбросить: ${v.reason}`);
         }
 
         // Кодовая пост-верификация: URL обязан быть среди скачанных источников,
@@ -456,7 +486,7 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
         }
 
         if (v.verdict === 'merge' && v.merge_with_title) {
-          const target = accepted.find((a) => normTitle(a.title) === normTitle(v.merge_with_title as string));
+          const target = verdict === 'merge' ? mergeTarget : undefined;
           if (target) {
             target.evidence = [...target.evidence, ...check.valid].slice(0, MAX_EVIDENCE_PER_HYPOTHESIS);
             target.potential_pct = Math.max(target.potential_pct, finalPct);
@@ -470,8 +500,8 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
             checkpoint.merged += 1;
             return;
           }
-          // Цель мержа не найдена среди принятых — трактуем как keep.
-          stageLog(ctx, `[evidence] merge-цель «${v.merge_with_title}» не найдена, keep`);
+          // Цель мержа не найдена среди принятых того же вида — трактуем как keep.
+          stageLog(ctx, `[evidence] merge-цель «${v.merge_with_title}» не найдена среди гипотез того же вида, keep`);
         }
 
         accepted.push({
@@ -484,13 +514,23 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
           evidence: check.valid.slice(0, MAX_EVIDENCE_PER_HYPOTHESIS),
           seasonality,
           potential_pct: finalPct,
+          ...(candidate.broad ? { broad: true } : {}),
         });
       } catch (e) {
         throwIfCancelled(ctx, e);
         if (e instanceof EvidenceCheckpointWriteError || e instanceof VeOperationTimeoutError || (e instanceof Error && e.name === 'TimeoutError')) throw e;
         if (isRetryableStageError(e instanceof Error ? e.message : String(e))) throw e;
-        checkpoint.dropped += 1;
         stageLog(ctx, `[evidence] stage_error по «${candidate.title}»: ${e instanceof Error ? e.message : String(e)}`);
+        if (candidate.broad) {
+          // Широкая остаётся и без проверки: без доказательств — с тем же капом 20%.
+          accepted.push({
+            tier: candidate.tier, title: candidate.title, description: candidate.description,
+            fit_rationale: candidate.fit_rationale, evidence: [], seasonality: null,
+            potential_pct: Math.min(candidate.potential_pct, 20), broad: true,
+          });
+          return;
+        }
+        checkpoint.dropped += 1;
       }
     })();
     checkpoint.next_index = i + 1;
@@ -541,9 +581,19 @@ export async function runEvidenceStage(job: VeJob, ctx: VeStageContext): Promise
       seasonality: a.seasonality,
       potential_pct: a.potential_pct,
       status: 'proposed',
+      // У всех строк: при вставке массива отсутствующий ключ стал бы NULL.
+      broad: a.broad === true,
     }));
     throwIfCancelled(ctx);
-    const { error: insError } = await ctx.supabase.from('ve_hypotheses').insert(rows);
+    let { error: insError } = await ctx.supabase.from('ve_hypotheses').insert(rows);
+    if (insError && insError.message.includes('broad')) {
+      // Воркер обновился раньше миграции 20260923_0001: проверенные гипотезы
+      // не теряем, признак широкой появится при следующем исследовании.
+      stageLog(ctx, '[evidence] колонки broad ещё нет — широкие гипотезы сохранены как обычные');
+      throwIfCancelled(ctx);
+      ({ error: insError } = await ctx.supabase.from('ve_hypotheses')
+        .insert(rows.map(({ broad: _broad, ...row }) => row)));
+    }
     if (insError) throw new Error(`ve_hypotheses insert: ${insError.message}`);
     throwIfCancelled(ctx);
   }

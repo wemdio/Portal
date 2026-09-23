@@ -2772,6 +2772,42 @@ describe('base_collect: план кончился раньше цели', () => 
     }
   });
 
+  it('план широкой гипотезы — классы ОКВЭД и каталог без порогов и без сигнала найма', async () => {
+    // Задачи — из планов баз «Франшизы медклиник» (b5df5b70) и «Медицинские
+    // лаборатории» (433aa426) проекта «Велл Медиа»: там они узкие, здесь сектор.
+    const franchise = { source: 'companies_directory' as const, rationale: 'Юрлица медцентров, стоматологий и лабораторий.',
+      directory_filters: { hasEmail: false, includeIp: false, okvedCodes: ['86'], revenueFrom: 50_000_000, employeesFrom: 20 } };
+    const beauty = { source: 'companies_directory' as const, rationale: 'Косметологические сети.',
+      directory_filters: { hasEmail: false, includeIp: false, okvedCodes: ['96.02', '86.23'], revenueFrom: 30_000_000, employeesFrom: 15 } };
+    const hiring = { source: 'hh_live' as const, rationale: 'Компании, нанимающие роли по франчайзингу.',
+      hh_query: { text: '"директор по франчайзингу" (клиника OR стоматология)', date_from: '2026-08-18', date_to: '2026-09-17' } };
+    const labs = { source: 'yandex_maps' as const, rationale: 'Точки медицинских лабораторий и пунктов анализов.',
+      maps_query: { geo: 'Россия', queries: ['медицинская лаборатория', 'пункт приема анализов', 'анализы'] } };
+    jest.mocked(searchRows).mockResolvedValue({ rows: [] });
+    const sector = { title: 'Частная медицина', description: 'Частные клиники, медцентры, стоматологии, лаборатории и диагностические центры. Общая боль — пациент дорожает.' };
+    for (const broad of [true, false]) {
+      jest.mocked(callLLMWithSchema).mockClear();
+      const db = seed({ collection_mode: 'preview' }, { ve_hypotheses: [{ id: 'h1', project_id: 'p1', vertical_id: 'v1',
+        status: 'accepted', broad, ...sector }] });
+      jest.mocked(callLLMWithSchema).mockResolvedValueOnce(planLlmReply([franchise, beauty, hiring, labs]));
+      const info = (await wake(db)).collect_info as VeCollectInfo;
+      const prompt = String(jest.mocked(callLLMWithSchema).mock.calls[0][0].at(-1)?.content);
+      if (!broad) {
+        // Узкая — как раньше: коды группы и найм остаются, пороги сняты (в тексте о размере ни слова).
+        expect(prompt).not.toContain('[широкая]');
+        expect(info.plan?.tasks.map((task) => task.source)).toEqual(['companies_directory', 'companies_directory', 'hh_live', 'yandex_maps']);
+        expect(info.plan?.tasks[1].directory_filters?.okvedCodes).toEqual(['96.02', '86.23']);
+        continue;
+      }
+      expect(prompt).toContain('[широкая] Частная медицина');
+      expect(info.plan?.tasks).toEqual([
+        { ...franchise, directory_filters: { hasEmail: false, includeIp: false, okvedCodes: ['86'] } },
+        { ...beauty, directory_filters: { hasEmail: false, includeIp: false, okvedCodes: ['96', '86'] } },
+        labs,
+      ]);
+    }
+  });
+
   it('analyzed-база с исчерпанным реестром с порогами продолжается и открывает расширенный срез', async () => {
     const info = exhaustedInfo(SWEETS_TASK, {
       target_progress: { ...createCollectionTarget('preview'), status: 'limited', round: 11, max_rounds: 100, candidates_processed: processed.length,
