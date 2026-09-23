@@ -62,7 +62,8 @@ export function OutreachLaunchPanel({
     onPresetChange(launch.presetId);
   }, [launch.presetId, onPresetChange]);
   const request = useMemo<VeOutreachLaunchRequest | null>(() => {
-    if (!launch.presetId || !launch.portalProjectId || !launch.activePortalPeriod?.id || !launch.targetContacts)
+    // null — проект Portal без периодов; undefined — проект сейчас выбрать нельзя.
+    if (!launch.presetId || !launch.portalProjectId || launch.expectedPortalPeriodId === undefined || !launch.targetContacts)
       return null;
     const ids = snapshot.setup.selected_hypothesis_ids;
     if (!ids.length) return null;
@@ -84,11 +85,11 @@ export function OutreachLaunchPanel({
       setup_revision: snapshot.setup.revision,
       preset_id: launch.presetId,
       portal_project_id: launch.portalProjectId,
-      expected_portal_period_id: launch.activePortalPeriod.id,
+      expected_portal_period_id: launch.expectedPortalPeriodId,
       target_contacts: launch.targetContacts,
       items,
     };
-  }, [snapshot, launch.presetId, launch.portalProjectId, launch.activePortalPeriod, launch.targetContacts]);
+  }, [snapshot, launch.presetId, launch.portalProjectId, launch.expectedPortalPeriodId, launch.targetContacts]);
   const requestKey = request ? JSON.stringify(request) : '';
   const preflight = preflightState?.key === requestKey ? preflightState.result : null;
   const confirmationKey = preflight?.ready

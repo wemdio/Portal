@@ -384,3 +384,260 @@ describe('POST Vertical Engine v2 contact-delivery preview', () => {
     expect((await response.json()).preview).toMatchObject({ sender_capacity: 1, remaining_workdays: 3, required_daily: 5, effective_daily: 1 });
   });
 });
+
+describe('contact-delivery preview for a Portal project without periods', () => {
+  beforeAll(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-09-06T21:30:00.000Z'));
+  });
+
+  afterAll(() => {
+    jest.useRealTimers();
+  });
+
+  // Staff Line · «Аутрич»: периодов нет, накопленный факт 25 905 при
+  // обязательстве 4 000. Дедлайн сдвинут под замороженные часы теста.
+  async function withoutPeriod(
+    options: {
+      deadline?: string | null;
+      contactsDone?: string;
+      periods?: Array<{ id: string; status: string }>;
+      links?: boolean;
+      otherPlan?: boolean;
+    } = {},
+    seedOptions: Parameters<typeof seed>[0] = {},
+  ) {
+    seed(seedOptions);
+    await mockPortalDb.from('project_periods').delete().eq('project_id', PORTAL_PROJECT_ID);
+    await mockPortalDb.from('projects').update({
+      client: 'Staff Line',
+      name: 'Аутрич',
+      status: 'В работе',
+      deadline: options.deadline === undefined ? '2026-09-11' : options.deadline,
+      launch_date: '2026-08-30',
+      contacts_obligation: '4000',
+      contacts_done: options.contactsDone ?? '25905',
+    }).eq('id', PORTAL_PROJECT_ID);
+    for (const period of options.periods ?? []) {
+      await mockPortalDb.from('project_periods').insert({
+        id: period.id, project_id: PORTAL_PROJECT_ID, name: 'Период', status: period.status,
+        contacts_done: '0', deadline: '2026-09-30',
+      });
+    }
+    if (options.links !== false) {
+      await mockInstantlyDb.from('project_instantly_campaigns').insert({
+        project_id: PORTAL_PROJECT_ID, campaign_id: 'legacy-staff-line-campaign',
+      });
+    }
+    if (options.otherPlan) {
+      await mockPortalDb.from('ve_projects').insert({
+        id: 'another-ve-project', portal_project_id: PORTAL_PROJECT_ID, portal_period_id: null,
+      });
+    }
+  }
+
+  function noPeriodRequest(overrides: Record<string, unknown> = {}) {
+    return request({ expected_portal_period_id: null, target_contacts: 4000, ...overrides });
+  }
+
+  it('plans to the card deadline from the VE2 target, ignoring the accumulated project fact', async () => {
+    await withoutPeriod();
+    const writesBefore = [mockPortalDb.mutations.length, mockInstantlyDb.mutations.length];
+    const response = await POST(noPeriodRequest(), { params: Promise.resolve({ id: TEMPLATE_ID }) });
+    expect(response.status).toBe(200);
+    const { preview } = await response.json();
+    expect(preview).toMatchObject({
+      portal_project_id: PORTAL_PROJECT_ID,
+      portal_project_name: 'Staff Line',
+      portal_period_id: null,
+      portal_period_label: null,
+      deadline: '2026-09-11',
+      contacts_done_count: 0,
+      target_contacts: 4000,
+      remaining: 4000,
+      remaining_workdays: 5,
+      required_daily: 800,
+      effective_daily: 2,
+      period: null,
+      project_term: {
+        deadline: '2026-09-11',
+        starts_at: '2026-08-30',
+        contacts_obligation: '4000',
+        contacts_done_total: 25905,
+      },
+    });
+    expect([mockPortalDb.mutations.length, mockInstantlyDb.mutations.length]).toEqual(writesBefore);
+  });
+
+  it('counts only first contacts of this VE2 project campaigns as the plan fact', async () => {
+    await withoutPeriod();
+    await mockPortalDb.from('ve_launch_queue_items').insert({ id: 'item-a', project_id: VE_PROJECT_ID, status: 'active' });
+    await mockPortalDb.from('ve_launch_queue_campaigns').insert({ id: 'child-a', item_id: 'item-a', campaign_id: 'campaign-a' });
+    await mockInstantlyDb.from('instantly_campaign_catalog').insert({ id: 'campaign-a', new_leads_contacted_count: 7 });
+    const response = await POST(noPeriodRequest(), { params: Promise.resolve({ id: TEMPLATE_ID }) });
+    expect(response.status).toBe(200);
+    expect((await response.json()).preview).toMatchObject({ contacts_done_count: 7, remaining: 3993 });
+  });
+
+  it.each([
+    {
+      name: 'a missing card deadline (ENagency)',
+      arrange: () => withoutPeriod({ deadline: null }),
+      code: 'PROJECT_DEADLINE_REQUIRED',
+      error: 'В карточке проекта не заполнено поле «Дедлайн». Укажите дату в формате ГГГГ-ММ-ДД — темп рассчитается до неё.',
+    },
+    {
+      name: 'a deadline that is not a date',
+      arrange: () => withoutPeriod({ deadline: '05.18.2026' }),
+      code: 'PROJECT_DEADLINE_INVALID',
+      error: expect.stringContaining('«Дедлайн»'),
+    },
+    {
+      name: 'a passed deadline',
+      arrange: () => withoutPeriod({ deadline: '2026-09-04' }),
+      code: 'PROJECT_DEADLINE_PASSED',
+      error: 'Дедлайн проекта (04.09.2026) уже прошёл. Обновите поле «Дедлайн» в карточке проекта.',
+    },
+    {
+      // Часы теста 2026-09-06T21:30Z — это уже 07.09 00:30 по Москве, часовому поясу отправки.
+      name: 'a deadline that ended at midnight in the delivery timezone',
+      arrange: () => withoutPeriod({ deadline: '2026-09-06' }),
+      code: 'PROJECT_DEADLINE_PASSED',
+      error: 'Дедлайн проекта (06.09.2026) уже прошёл. Обновите поле «Дедлайн» в карточке проекта.',
+    },
+    {
+      name: 'only closed periods',
+      arrange: () => withoutPeriod({ periods: [{ id: 'closed-1', status: 'closed' }] }),
+      code: 'PORTAL_PERIODS_CLOSED',
+      error: 'Все периоды проекта закрыты. Откройте новый период в карточке проекта.',
+    },
+    {
+      name: 'an active period requested as a project without periods',
+      arrange: () => withoutPeriod({ periods: [{ id: 'active-1', status: 'active' }] }),
+      code: 'PORTAL_PROJECT_HAS_ACTIVE_PERIOD',
+      error: expect.stringContaining('активный период'),
+    },
+    {
+      name: 'a second VE2 project on the same Portal project',
+      arrange: () => withoutPeriod({ otherPlan: true }),
+      code: 'PORTAL_PROJECT_PLAN_TAKEN',
+      error: expect.stringContaining('уже привязан'),
+    },
+    {
+      name: 'a hand-kept fact without campaign links (Law Russia)',
+      arrange: () => withoutPeriod({ contactsDone: '10860', links: false }),
+      code: 'PORTAL_PROJECT_MANUAL_FACT',
+      error: expect.stringContaining('ведётся вручную'),
+    },
+  ])('refuses $name with a plain reason', async ({ arrange, code, error }) => {
+    await arrange();
+    const writesBefore = [mockPortalDb.mutations.length, mockInstantlyDb.mutations.length];
+    const response = await POST(noPeriodRequest(), { params: Promise.resolve({ id: TEMPLATE_ID }) });
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ code, error });
+    expect([mockPortalDb.mutations.length, mockInstantlyDb.mutations.length]).toEqual(writesBefore);
+  });
+
+  // Для уже идущего плана правка карточки возвращает загрузку, только пока
+  // кампании плана не завершились: иначе пакет уходит из портфеля.
+  it.each([
+    {
+      name: 'a passed deadline',
+      project: { deadline: '2026-09-04' },
+      code: 'PROJECT_DEADLINE_PASSED',
+      error: 'Дедлайн проекта (04.09.2026) уже прошёл. Обновите поле «Дедлайн» в карточке проекта. Загрузка продолжится сама, если к этому времени кампании плана ещё не завершились; иначе понадобится новый запуск.',
+    },
+    {
+      name: 'a finished project',
+      project: { status: 'Завершен' },
+      code: 'PORTAL_PROJECT_NOT_IN_WORK',
+      error: 'Проект в Portal не в работе (статус «Завершен»). Верните рабочий статус в карточке проекта. Загрузка продолжится сама, если к этому времени кампании плана ещё не завершились; иначе понадобится новый запуск.',
+    },
+  ])('pauses a bound plan on $name without promising an unconditional resume', async ({ project, code, error }) => {
+    await withoutPeriod();
+    await mockPortalDb.from('projects').update(project).eq('id', PORTAL_PROJECT_ID);
+    await mockPortalDb.from('ve_projects').update({
+      portal_project_id: PORTAL_PROJECT_ID, portal_period_id: null, target_contacts: 4000, launch_preset_id: PRESET_ID,
+      sender_daily_capacity: 2, delivery_schedule_days: [1, 2, 3, 4, 5], delivery_timezone: 'Europe/Moscow',
+    }).eq('id', VE_PROJECT_ID);
+    const response = await POST(noPeriodRequest(), { params: Promise.resolve({ id: TEMPLATE_ID }) });
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ code, error });
+  });
+
+  it('still rejects a request that does not state the period at all', async () => {
+    await withoutPeriod();
+    const response = await POST(request({ expected_portal_period_id: undefined }), { params: Promise.resolve({ id: TEMPLATE_ID }) });
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ code: 'PORTAL_PERIOD_REQUIRED' });
+  });
+
+  it('approves supply with an explicit NULL period', async () => {
+    await withoutPeriod({}, { supplyRevision: 'reviewed' });
+    const response = await POST_SUPPLY(request({
+      action: 'approve', confirm_customer_approval: true, expected_preview_revision: 'reviewed',
+      segmentation_audit_id: AUDIT_ID, expected_portal_period_id: null, target_contacts: 4000,
+    }), { params: Promise.resolve({ id: TEMPLATE_ID }) });
+    expect(response.status).toBe(200);
+    expect(mockPortalDb.rpcCalls.find((call) => call.fn === 've_approve_contact_supply')?.params).toMatchObject({
+      p_portal_project_id: PORTAL_PROJECT_ID, p_portal_period_id: null, p_target_contacts: 4000,
+    });
+  });
+
+  async function supplyStatus() {
+    const response = await GET_SUPPLY(new Request(`http://portal.test/templates/${TEMPLATE_ID}/supply`) as NextRequest, { params: Promise.resolve({ id: TEMPLATE_ID }) });
+    expect(response.status).toBe(200);
+    return response.json();
+  }
+
+  async function launchedPlanWithoutPeriod() {
+    await withoutPeriod({}, { supplyRevision: 'reviewed' });
+    await mockPortalDb.from('ve_bases').update({ collect_info: { collection_mode: 'preview' } }).eq('id', BASE_ID);
+    await mockPortalDb.from('ve_contact_supply_plans').insert({
+      id: 'supply-plan-1', template_id: TEMPLATE_ID, project_id: VE_PROJECT_ID, item_id: 'item-a',
+      preview_audit_id: AUDIT_ID, status: 'active', approved_at: '2026-09-06T12:00:00.000Z', last_error: null, source_state: {},
+      approval_snapshot: { preset_id: PRESET_ID, portal_project_id: PORTAL_PROJECT_ID, portal_period_id: null, target_contacts: 4000 },
+    });
+    await mockPortalDb.from('ve_launch_queue_items').insert({ id: 'item-a', project_id: VE_PROJECT_ID, status: 'active', potential_pct: 50 });
+    await mockPortalDb.from('ve_launch_queue_campaigns').insert({ id: 'child-a', item_id: 'item-a', campaign_id: 'campaign-a' });
+    await mockInstantlyDb.from('instantly_campaign_catalog').insert({ id: 'campaign-a', new_leads_contacted_count: 0 });
+    await mockPortalDb.from('ve_contact_delivery_daily_runs').insert([
+      { id: 'foreign-period-run', ve_project_id: VE_PROJECT_ID, portal_period_id: 'some-period', run_date: '2026-09-07', effective_count: 99 },
+      // effective_count отличается от расчётного effective_daily (2): видно, что запуск найден.
+      { id: 'today', ve_project_id: VE_PROJECT_ID, portal_period_id: null, run_date: '2026-09-07', effective_count: 5 },
+    ]);
+    // PostgREST never matches `eq.null`; model that so the status must use `is`.
+    const from = mockPortalDb.from;
+    mockPortalDb.from = (table: string) => {
+      const builder = from(table);
+      if (table === 've_contact_delivery_daily_runs') {
+        const eq = builder.eq;
+        builder.eq = (column: string, value: unknown) => eq(column, value === null ? '\u0000eq-null-matches-nothing' : value);
+      }
+      return builder;
+    };
+  }
+
+  it('reads today’s run of a plan without period through IS NULL', async () => {
+    await launchedPlanWithoutPeriod();
+    const status = await supplyStatus();
+    expect(status.plan).toMatchObject({ portal_period_id: null, target_contacts: 4000 });
+    expect(status.metrics).toMatchObject({ project_daily_plan: 5, project_first_contacted: 0, business_date: '2026-09-07' });
+  });
+
+  it('shows the exact reason when a period was created after the launch', async () => {
+    await launchedPlanWithoutPeriod();
+    await mockPortalDb.from('ve_projects').update({
+      portal_project_id: PORTAL_PROJECT_ID, portal_period_id: null, target_contacts: 4000, launch_preset_id: PRESET_ID,
+      sender_daily_capacity: 2, delivery_schedule_days: [1, 2, 3, 4, 5], delivery_timezone: 'Europe/Moscow',
+    }).eq('id', VE_PROJECT_ID);
+    await mockPortalDb.from('project_periods').insert({
+      id: 'new-period', project_id: PORTAL_PROJECT_ID, name: 'Октябрь', status: 'active', contacts_done: '0', deadline: '2026-10-31',
+    });
+    const status = await supplyStatus();
+    expect(status.metrics).toBeNull();
+    expect(status.metrics_error).toBe(
+      'План и запас не пересчитаны: Проекту в Portal создан период. Загрузка новых контактов по этому плану остановлена: план рассчитан на проект без периодов. Уже загруженные контакты продолжают отправляться.',
+    );
+  });
+});

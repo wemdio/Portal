@@ -78,7 +78,8 @@ export interface VeTemplateLaunchInfo {
   created_at: string;
   /** Explicit operational ownership snapshot; never inferred from names. */
   portal_project_id?: string;
-  portal_period_id?: string;
+  /** null — запуск по проекту без периодов (сроком служит карточка проекта). */
+  portal_period_id?: string | null;
   target_contacts?: number;
   /** Immutable Instantly capacity scope captured from the chosen preset. */
   instantly_account_id?: string;
@@ -169,7 +170,9 @@ export function parseLaunchInfo(raw: unknown): VeTemplateLaunchInfo | null {
       : {}),
     ...(typeof r.portal_period_id === 'string' && r.portal_period_id.trim()
       ? { portal_period_id: r.portal_period_id.trim() }
-      : {}),
+      : r.portal_period_id === null && typeof r.portal_project_id === 'string' && r.portal_project_id.trim()
+        ? { portal_period_id: null }
+        : {}),
     ...(typeof r.target_contacts === 'number' && Number.isSafeInteger(r.target_contacts) && r.target_contacts > 0
       ? { target_contacts: r.target_contacts }
       : {}),

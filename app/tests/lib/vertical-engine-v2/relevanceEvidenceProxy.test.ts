@@ -19,7 +19,8 @@
 import { fetchVeRelevanceEvidence, type VeEvidenceRoute } from '@/lib/verticalEngineV2/relevanceEvidence';
 import { parseVeEvidencePage, type VeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
 import { VeOperationTimeoutError } from '@/lib/verticalEngineV2/operationDeadline';
-import { proxySlotsInFlight, resetProxyGroupsCache, tryAcquireProxySlot } from '@/lib/enrich/proxyPool';
+import { proxySlotsInFlight, reportProxyNodeResult, resetProxyGroupsCache, resetProxyNodeHealth, tryAcquireProxySlot } from '@/lib/enrich/proxyPool';
+import { ProxyTunnelError } from '@/lib/enrich/boundedProxyAgent';
 import { veCompanyFactKey, veFactPageKey } from '@/lib/verticalEngineV2/companyFacts';
 
 const mockTransport = {
@@ -92,21 +93,37 @@ function recorder(handler: (url: string, route: VeEvidenceRoute) => VeEvidencePa
 // становятся остальные), а next/jest подгружает ../.env: чистим все три.
 const PROXY_ENV = ['YANDEXMAPS_PROXY_URLS_PRIORITY', 'YANDEXMAPS_PROXY_URLS', 'PROXY_URLS'] as const;
 const originalEnv = Object.fromEntries(PROXY_ENV.map((name) => [name, process.env[name]]));
+const RU_NODE = 'http://user:pass@ru-proxy.invalid:8000';
 const setPool = (configured: boolean) => {
   for (const name of PROXY_ENV) delete process.env[name];
-  if (configured) process.env.YANDEXMAPS_PROXY_URLS_PRIORITY = '["http://user:pass@ru-proxy.invalid:8000"]';
+  if (configured) process.env.YANDEXMAPS_PROXY_URLS_PRIORITY = JSON.stringify([RU_NODE]);
   resetProxyGroupsCache();
 };
+const originalRetry = process.env.VE_EVIDENCE_PROXY_RETRY;
+/** Нода трижды подряд закрыла CONNECT без ответа и выбыла. */
+const tripNode = () => {
+  const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  for (let i = 0; i < 3; i += 1) reportProxyNodeResult(RU_NODE, 'down', 'UND_ERR_SOCKET');
+  warn.mockRestore();
+};
+// Ошибки fetch из undici, как их видит читатель: код — в cause.
+const tunnelClosed = () => new TypeError('fetch failed', { cause: new ProxyTunnelError('proxy_tunnel_failed: UND_ERR_SOCKET',
+  { cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }) }) });
+const connectAnswered = (status: number) => new TypeError('fetch failed',
+  { cause: Object.assign(new Error(`Proxy response (${status}) !== 200 when HTTP Tunneling`), { code: 'UND_ERR_ABORTED' }) });
 
 beforeEach(() => {
-  // Повтор через прокси выключен по умолчанию; здесь проверяется включённый режим.
-  process.env.VE_EVIDENCE_PROXY_RETRY = '1';
+  // Повтор через прокси включён по умолчанию; выключатель — отдельные тесты ниже.
+  delete process.env.VE_EVIDENCE_PROXY_RETRY;
+  resetProxyNodeHealth();
   setPool(true);
   mockTransport.resolve.mockReset().mockResolvedValue(['93.184.216.34']);
   mockTransport.fetch.mockReset();
 });
 afterEach(() => {
-  delete process.env.VE_EVIDENCE_PROXY_RETRY;
+  if (originalRetry === undefined) delete process.env.VE_EVIDENCE_PROXY_RETRY;
+  else process.env.VE_EVIDENCE_PROXY_RETRY = originalRetry;
+  resetProxyNodeHealth();
   // Пропуск в пул возвращается всегда, в том числе после сбоя прокси.
   expect(proxySlotsInFlight()).toBe(0);
   for (const name of PROXY_ENV) {
@@ -237,6 +254,81 @@ describe('второй заход через RU-прокси', () => {
     // Отказ в пропуске — наш лимит, а не ответ сайта: окончательного «не
     // подтверждено» по нему не ставим.
     expect(result.reason).toBe('website_evidence_timeout');
+  });
+
+  it('все RU-ноды выбыли: пропуск не берётся, свой молчащий сайт получает прямой повтор и ярлык таймаута', async () => {
+    tripNode();
+    jest.mocked(tryAcquireProxySlot).mockClear();
+    const { calls, fetchPage } = recorder(() => { throw pageTimeout(); });
+    const result = await fetchVeRelevanceEvidence('konfetkavpk.ru', {
+      companyInn: '5023005244', focus: FOCUS, fetchPage, search: noSearch() as never,
+    });
+    expect(tryAcquireProxySlot).not.toHaveBeenCalled();
+    expect(calls).toEqual([
+      { url: 'https://konfetkavpk.ru/', route: 'direct' },
+      { url: 'https://konfetkavpk.ru/', route: 'direct' },
+    ]);
+    // Нет живой ноды — наш предел, а не ответ сайта: гейт повторит компанию.
+    expect(result.reason).toBe('website_evidence_timeout');
+    expect(result.proxy).toEqual({ attempts: 0, rescued: 0, verified: 0, denied: 0, unavailable: 1 });
+  });
+
+  it('нода выбыла, пока читалась главная: реквизиты молчащего сайта не читаются, ярлык — таймаут', async () => {
+    // Три ссылки на реквизиты: без выхода из цикла по «нет живой ноды» каждая
+    // считалась бы ещё одним unavailable.
+    const home = `${DOBRODAR_HOME}<nav><a href="/rekvizity">Реквизиты</a><a href="/o-kompanii">О компании</a></nav>`;
+    const { calls, fetchPage } = recorder((url, route) => {
+      if (route === 'direct') throw pageTimeout();
+      tripNode();
+      return html(url, home);
+    });
+    const result = await fetchVeRelevanceEvidence('sibdobrodar.ru', { ...DOBRODAR, fetchPage, search: noSearch() as never });
+    expect(calls).toEqual([
+      { url: 'https://sibdobrodar.ru/', route: 'direct' },
+      { url: 'https://sibdobrodar.ru/', route: 'direct' },
+      { url: 'https://sibdobrodar.ru/', route: 'proxy' },
+    ]);
+    expect(result.reason).toBe('website_evidence_timeout');
+    expect(result.proxy).toEqual({ attempts: 1, rescued: 1, verified: 0, denied: 0, unavailable: 1 });
+  });
+
+  it('нода закрыла CONNECT без ответа в гонке с прямым повтором: сбой прокси в телеметрии, ярлык — таймаут', async () => {
+    const { calls, fetchPage } = recorder((_url, route) => { throw route === 'proxy' ? tunnelClosed() : pageTimeout(); });
+    const result = await fetchVeRelevanceEvidence('konfetkavpk.ru', {
+      companyInn: '5023005244', focus: FOCUS, fetchPage, search: noSearch() as never,
+    });
+    expect(calls.map((call) => call.route)).toEqual(['direct', 'direct', 'proxy']);
+    expect(result.reason).toBe('website_evidence_timeout');
+    expect(result.proxy).toEqual({ attempts: 1, rescued: 0, verified: 0, denied: 0, failed: 1 });
+  });
+
+  it('сертификат сайта через прокси не принят: это ответ сайта, а не сбой прокси', async () => {
+    const { calls, fetchPage } = recorder((_url, route) => {
+      throw route === 'proxy' ? code('certificate has expired', 'CERT_HAS_EXPIRED') : pageTimeout();
+    });
+    const result = await fetchVeRelevanceEvidence('konfetkavpk.ru', {
+      companyInn: '5023005244', focus: FOCUS, fetchPage, search: noSearch() as never,
+    });
+    expect(calls.map((call) => call.route)).toEqual(['direct', 'direct', 'proxy']);
+    expect(result.proxy).toEqual({ attempts: 1, rescued: 0, verified: 0, denied: 0 });
+  });
+
+  // Вину ноды по закрытию CONNECT без ответа метит сам транспорт (стенд в
+  // relevanceEvidenceProxyTunnel.test.ts); 407 узнаётся по тексту undici.
+  it.each([
+    ['нода не пустила по паролю (407): сайт не отвечал, ярлык — таймаут', 407, 'website_evidence_timeout'],
+    ['502 на CONNECT — голос сайта за нодой: ответ окончательный', 502, 'website_identity_unverified'],
+  ])('реквизиты сайта, открытого только через прокси: %s', async (_label, status, reason) => {
+    const { calls, fetchPage } = recorder((url, route) => {
+      if (route === 'direct') throw pageTimeout();
+      if (url === 'https://sibdobrodar.ru/') return html(url, DOBRODAR_HOME);
+      throw connectAnswered(status);
+    });
+    const result = await fetchVeRelevanceEvidence('sibdobrodar.ru', { ...DOBRODAR, fetchPage, search: noSearch() as never });
+    expect(calls.filter((call) => call.route === 'proxy').map((call) => call.url))
+      .toEqual(['https://sibdobrodar.ru/', 'https://sibdobrodar.ru/contacts']);
+    expect(result.proxy).toEqual({ attempts: 2, rescued: 1, verified: 0, denied: 0, failed: 1 });
+    expect(result.reason).toBe(reason);
   });
 
   it('первый таймаут от нагрузки: прямой повтор идёт вместе с прокси и открывает сайт, который через прокси висит', async () => {
@@ -409,6 +501,8 @@ describe('второй заход через RU-прокси', () => {
   it.each([
     ['не хватило пропуска', 'denied', { attempts: 1, rescued: 1, verified: 1, denied: 1 }],
     ['прокси не открыл страницу', 'failed', { attempts: 2, rescued: 1, verified: 1, denied: 0 }],
+    // Нода выбыла, пока читалась главная: это не нехватка пропуска.
+    ['нет живой ноды', 'unavailable', { attempts: 1, rescued: 1, verified: 1, denied: 0, unavailable: 1 }],
   ])('после 403 реквизиты без прокси (%s) читаются напрямую, как раньше', async (_label, kind, telemetry) => {
     // 403 бывает только на главной: напрямую /contacts отвечает, как без пула.
     const INN = '7700000001';
@@ -416,6 +510,7 @@ describe('второй заход через RU-прокси', () => {
       if (url === 'https://rossetimr.ru/') {
         if (route === 'direct') throw new Error('website_blocked_http_403');
         if (kind === 'denied') jest.mocked(tryAcquireProxySlot).mockReturnValueOnce(null);
+        if (kind === 'unavailable') tripNode();
         return html(url, ROSSETI_HOME);
       }
       if (url === 'https://rossetimr.ru/contacts') {
@@ -428,6 +523,34 @@ describe('второй заход через RU-прокси', () => {
     expect(calls).toContainEqual({ url: 'https://rossetimr.ru/contacts', route: 'direct' });
     expect(result.reason).toBe('identity_verified_website');
     expect(result.proxy).toEqual(telemetry);
+  });
+
+  it('после 403 три захода через прокси исчерпаны: следующая страница идёт напрямую по лимиту, даже если нода уже выбыла', async () => {
+    const INN = '7700000001';
+    let proxyReads = 0;
+    const { calls, fetchPage } = recorder((url, route) => {
+      if (url === 'https://rossetimr.ru/') {
+        if (route === 'direct') throw new Error('website_blocked_http_403');
+        proxyReads += 1;
+        return html(url, `${ROSSETI_HOME}<nav><a href="/rekvizity">Реквизиты</a><a href="/o-kompanii">О компании</a></nav>`);
+      }
+      if (route === 'direct') return html(url, rossetiContacts(INN));
+      // Третий заход через прокси — последний по лимиту; после него нода выбывает.
+      proxyReads += 1;
+      if (proxyReads === 3) tripNode();
+      return html(url, '<title>Страница</title><main><p>Реквизиты компании.</p></main>');
+    });
+    const result = await fetchVeRelevanceEvidence('https://rossetimr.ru', { companyInn: INN, focus: FOCUS, fetchPage, search: noSearch() as never });
+    expect(calls.slice(0, 5)).toEqual([
+      { url: 'https://rossetimr.ru/', route: 'direct' },
+      { url: 'https://rossetimr.ru/', route: 'proxy' },
+      { url: 'https://rossetimr.ru/rekvizity', route: 'proxy' },
+      { url: 'https://rossetimr.ru/contacts', route: 'proxy' },
+      { url: 'https://rossetimr.ru/o-kompanii', route: 'direct' },
+    ]);
+    expect(result.reason).toBe('identity_verified_website');
+    // Прямой заход — из-за лимита, а не из-за выбывшей ноды: unavailable нет.
+    expect(result.proxy).toEqual({ attempts: 3, rescued: 1, verified: 1, denied: 0 });
   });
 
   it('403 напрямую, через прокси молчание: сайт ответил сам, ответ окончательный', async () => {
@@ -804,15 +927,19 @@ describe('настоящий транспорт через прокси', () => 
     expect(viaProxy({ dispatcher: proxied })).toBe(true);
     expect(proxied.destroyed).toBe(false);
     expect(mockTransport.fetch.mock.calls[1][1]).toEqual(expect.objectContaining({ redirect: 'manual' }));
-    // undici не отменяет CONNECT вместе с запросом: без предела соединение с
-    // прокси висело бы до его ответа уже после возврата пропуска. Здесь
-    // проверяется только конфигурация; что undici по ней закрывает CONNECT и
-    // простаивающие туннели, проверено замером на локальном CONNECT-прокси
-    // (в набор не входит: он ждал бы секунды реального времени).
+    // undici не отменяет CONNECT вместе с запросом и сам повторяет туннель,
+    // закрытый без ответа. Здесь — только конфигурация; как агент по ней
+    // обрывает туннель, проверяет стенд на настоящем undici
+    // (tests/lib/enrich/boundedProxyAgent.test.ts).
     const { options } = proxied as unknown as { options: { uri: string; keepAliveTimeout: number; keepAliveMaxTimeout: number;
+      proxyTls: object; requestTls: object; factory: unknown;
       clientFactory: (origin: URL, o: object) => { options: Record<string, unknown> } } };
     expect(options.uri).toBe('http://user:pass@ru-proxy.invalid:8000');
-    expect(options.clientFactory(new URL(options.uri), {}).options).toEqual(expect.objectContaining({ connections: 6, headersTimeout: 6_000 }));
+    // TCP до ноды — 3 с; CONNECT и TLS к сайту через туннель — в окне страницы.
+    expect(options.proxyTls).toEqual({ timeout: 3_000 });
+    expect(options.requestTls).toEqual({ timeout: 5_000 });
+    expect(typeof options.factory).toBe('function');
+    expect(options.clientFactory(new URL(options.uri), {}).options).toEqual(expect.objectContaining({ connections: 6, headersTimeout: 5_000 }));
     // Готовый туннель уходит к пулу сайта и вне лимита выше жил бы по
     // подсказке Keep-Alive сайта (до 600 с): держим его не дольше секунды.
     expect(options).toEqual(expect.objectContaining({ keepAliveTimeout: 1_000, keepAliveMaxTimeout: 1_000 }));
@@ -882,15 +1009,26 @@ describe('настоящий транспорт через прокси', () => 
   });
 });
 
-describe('повтор через прокси выключен по умолчанию', () => {
-  it('без VE_EVIDENCE_PROXY_RETRY=1 молчащая своя главная не идёт в прокси', async () => {
-    delete process.env.VE_EVIDENCE_PROXY_RETRY;
-    const fetchPage = jest.fn(async (_url: string, signal: AbortSignal, route?: string) => {
-      if (route === 'proxy') throw new Error('proxy must not be used');
-      return new Promise<never>((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
-    });
+describe('выключатель повтора через прокси', () => {
+  const silentOwnHome = () => recorder((url, route) => {
+    if (route === 'direct') throw pageTimeout();
+    return html(url, homeWithInn(DOBRODAR.companyInn));
+  });
+
+  it('VE_EVIDENCE_PROXY_RETRY не задан: молчащая своя главная идёт в прокси', async () => {
+    const { calls, fetchPage } = silentOwnHome();
     const evidence = await fetchVeRelevanceEvidence('sibdobrodar.ru', { ...DOBRODAR, fetchPage, search: noSearch() as never });
-    expect(fetchPage.mock.calls.some((call) => call[2] === 'proxy')).toBe(false);
-    expect(evidence.proxy?.attempts ?? 0).toBe(0);
-  }, 30_000);
+    expect(calls.map((call) => call.route)).toEqual(['direct', 'direct', 'proxy']);
+    expect(evidence.status).toBe('ok');
+    expect(evidence.proxy).toEqual({ attempts: 1, rescued: 1, verified: 1, denied: 0 });
+  });
+
+  it('VE_EVIDENCE_PROXY_RETRY=0: молчащая своя главная в прокси не идёт', async () => {
+    process.env.VE_EVIDENCE_PROXY_RETRY = '0';
+    const { calls, fetchPage } = silentOwnHome();
+    const evidence = await fetchVeRelevanceEvidence('sibdobrodar.ru', { ...DOBRODAR, fetchPage, search: noSearch() as never });
+    expect(calls.some((call) => call.route === 'proxy')).toBe(false);
+    expect(evidence.reason).toBe('website_evidence_timeout');
+    expect(evidence.proxy).toBeUndefined();
+  });
 });

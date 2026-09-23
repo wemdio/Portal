@@ -1,5 +1,5 @@
 import type { Dispatcher } from 'undici';
-import { ProxyAgent } from 'undici';
+import { createBoundedProxyAgent, isProxyNodeFault, isProxyTunnelTimeout } from '@/lib/enrich/boundedProxyAgent';
 import { logInfo, logWarn, logError } from '@/lib/loggerServer';
 import type { Span } from '@/lib/tracer';
 import { buildHhTitleOnlyQuery, getHhReportedFound, matchesHhVacancyTitle } from '@/lib/parsers/hhRelevance';
@@ -189,14 +189,22 @@ type ProxyEntry = {
 const PROXY_COOLDOWN_MS = 60_000;
 const PROXY_MAX_CONSECUTIVE_FAILURES = 3;
 
+// Туннель через ноду ограничен самым длинным окном запроса: голый ProxyAgent
+// на ноде, закрывшей CONNECT без ответа, переподключался бы без конца, в том
+// числе в воркере VE2 (стадия досье читает hh.ru отсюда).
+const PROXY_TUNNEL_TIMEOUT_MS = Math.max(REQUEST_TIMEOUT_MS, VACANCY_REQUEST_TIMEOUT_MS, EMPLOYER_REQUEST_TIMEOUT_MS);
+
 const PROXY_ENTRIES: ProxyEntry[] = PROXY_URLS.map((url) => ({
   url,
-  dispatcher: new ProxyAgent(url),
+  dispatcher: createBoundedProxyAgent(url, { tunnelTimeoutMs: PROXY_TUNNEL_TIMEOUT_MS }),
   failedAt: 0,
   consecutiveFailures: 0,
 }));
 
 function isProxyConnectionError(err: unknown): boolean {
+  // Нода закрыла CONNECT без ответа, сбросила его или отвергла логин (407):
+  // такие ошибки помечает ограниченный агент.
+  if (isProxyNodeFault(err)) return true;
   if (!(err instanceof Error)) return false;
   const cause = (err as Error & { cause?: Error & { code?: string } }).cause;
   const code = cause?.code ?? '';
@@ -725,6 +733,7 @@ export async function fetchWithRetry<T>(
   let count5xx = 0;
   let countTimeout = 0;
   let countProxyFail = 0;
+  let countNetwork = 0;
   let countCaptcha = 0;
   let countOauth403 = 0;
   let countAntiBot403 = 0;
@@ -850,7 +859,7 @@ export async function fetchWithRetry<T>(
         break;
       }
 
-      if (err instanceof Error && err.name === 'AbortError') {
+      if (err instanceof Error && (err.name === 'AbortError' || isProxyTunnelTimeout(err))) {
         countTimeout += 1;
         lastError = new Error('HH API: таймаут запроса');
       } else if (err instanceof HHApiError) {
@@ -859,6 +868,7 @@ export async function fetchWithRetry<T>(
       } else {
         const reason = getFetchFailureReason(err);
         const isGenericFetchFailed = err instanceof Error && err.message === 'fetch failed';
+        countNetwork += 1;
         if (isGenericFetchFailed && reason) {
           lastError = new Error(`Ошибка сети: ${reason}`);
           logError('hh.fetch_failed', err as Error, { url, reason, attempt: attempt + 1, maxRetries });
@@ -886,6 +896,7 @@ export async function fetchWithRetry<T>(
     count5xx,
     countTimeout,
     countProxyFail,
+    countNetwork,
     countCaptcha,
     countOauth403,
     countAntiBot403,
@@ -909,6 +920,7 @@ function buildRetryExhaustedMessage(stats: {
   count5xx: number;
   countTimeout: number;
   countProxyFail: number;
+  countNetwork: number;
   countCaptcha: number;
   countOauth403: number;
   countAntiBot403: number;
@@ -943,6 +955,7 @@ function buildRetryExhaustedMessage(stats: {
     if (stats.count5xx) details.push(`5xx × ${stats.count5xx}`);
     if (stats.countTimeout) details.push(`таймаут × ${stats.countTimeout}`);
     if (stats.countProxyFail) details.push(`прокси недоступен × ${stats.countProxyFail}`);
+    if (stats.countNetwork) details.push(`ошибка сети × ${stats.countNetwork}`);
     parts.push(`HH API: ${stats.totalAttempts} попыток неуспешны (${details.join(', ')})`);
   }
 

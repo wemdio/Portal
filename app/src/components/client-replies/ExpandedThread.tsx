@@ -4,8 +4,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowDownLeft,
   ArrowUpRight,
+  ExternalLink,
   Forward,
   Loader2,
+  Paperclip,
   RefreshCw,
   Reply,
   Send,
@@ -154,6 +156,62 @@ function ThreadMessageCard({ msg }: { msg: ThreadMessage }) {
           (пусто)
         </p>
       )}
+      {msg.image_links?.length > 0 && (
+        <div className="mt-2 space-y-2" role="group" aria-label="Изображения из письма">
+          {msg.image_links.map((link) => (
+            <ThreadImagePreview key={link.url} url={link.url} name={link.name} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ThreadImagePreview({ url, name }: { url: string; name: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  return (
+    <div className="rounded-md border border-white/10 px-2.5 py-2">
+      <div className="flex flex-wrap items-center gap-2 text-[11px]">
+        <Paperclip className="h-3.5 w-3.5 shrink-0" aria-hidden />
+        <span className="min-w-0 flex-1 truncate" style={{ color: 'var(--cp-paper-mute)' }} title={name}>
+          {name}
+        </span>
+        <button
+          type="button"
+          className="ds-btn-ghost rounded px-2 py-1 text-[11px] underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? 'Скрыть' : 'Показать изображение'}
+        </button>
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 rounded px-1 py-1 text-[11px] underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+          style={{ color: 'var(--cp-paper)' }}
+        >
+          Открыть отдельно <ExternalLink className="h-3 w-3" aria-hidden />
+        </a>
+      </div>
+      {expanded && (failed ? (
+        <p className="mt-2 text-[11px]" style={{ color: 'var(--cp-paper-mute)' }}>
+          Не удалось загрузить изображение здесь. Откройте его отдельно.
+        </p>
+      ) : (
+        // External email images must load only after an explicit click.
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={url}
+          alt={`Изображение из письма: ${name}`}
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          onError={() => setFailed(true)}
+          className="mt-2 max-h-[32rem] max-w-full rounded object-contain"
+        />
+      ))}
     </div>
   );
 }

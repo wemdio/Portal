@@ -13,6 +13,7 @@ import { fetchVeRelevanceEvidence } from '@/lib/verticalEngineV2/relevanceEviden
 import { VeOperationTimeoutError } from '@/lib/verticalEngineV2/operationDeadline';
 import { withProviderUsage } from '@/lib/providerUsage';
 import { logInfo } from '@/lib/loggerServer';
+import { reportProxyNodeResult, resetProxyGroupsCache, resetProxyNodeHealth } from '@/lib/enrich/proxyPool';
 import type { VeEvidencePage } from '@/lib/verticalEngineV2/relevancePage';
 
 jest.mock('@/lib/loggerServer', () => ({ logInfo: jest.fn(async () => undefined) }));
@@ -102,19 +103,37 @@ describe('журнал длительностей фазы сайтов', () => 
   it('строка журнала уходит отдельным источником и только внутри области учёта', async () => {
     const wave: VeWebsiteWaveTiming = { slots: 8, companies: 8, cached: 0, wallMs: 41_000, sumMs: 9_000,
       maxMs: 40_500, minMs: 120, buckets: [3, 2, 1, 1, 0, 0, 1], saveMs: 800, pagesRead: 19,
-      proxyAttempts: 2, proxyRescued: 1, proxyVerified: 1, proxyDenied: 0, loopDelayMaxMs: 37,
+      proxyAttempts: 2, proxyRescued: 1, proxyVerified: 1, proxyDenied: 0, proxyFailed: 1, proxyUnavailable: 0, loopDelayMaxMs: 37,
       outcomes: { ok: 2, unavailable: 3, providerError: 0, deferred: 0, timeoutPage: 2, timeoutDeadline: 1, slowButUsable: 1 } };
-    journalWaveTiming(wave);
-    expect(logInfoMock).not.toHaveBeenCalled();
-    await withProviderUsage({ projectId: 'p1', baseId: 'b1', jobId: 'j1', stage: 'base_collect' },
-      async () => undefined, async () => { journalWaveTiming(wave); });
-    expect(logInfoMock).toHaveBeenCalledTimes(1);
-    const [event, , context] = logInfoMock.mock.calls[0];
-    expect(event).toBe('ve2_website_wave');
-    // Версия 2: другой ярлык таймаута и новые поля — сравнивать с версией 1 нельзя.
-    expect(context).toEqual(expect.objectContaining({ version: 2, projectId: 'p1', baseId: 'b1', jobId: 'j1',
-      stage: 'base_collect', slots: 8, wallMs: 41_000, sumMs: 9_000,
-      proxyAttempts: 2, proxyRescued: 1, proxyVerified: 1, proxyDenied: 0, loopDelayMaxMs: 37 }));
+    // Три RU-ноды, вторая выбыла: в журнал идёт её номер, а не адрес.
+    const nodes = ['http://user:secret@10.1.1.1:8000', 'http://user:secret@10.1.1.2:8000', 'http://user:secret@10.1.1.3:8000'];
+    const savedPriority = process.env.YANDEXMAPS_PROXY_URLS_PRIORITY;
+    process.env.YANDEXMAPS_PROXY_URLS_PRIORITY = JSON.stringify(nodes);
+    resetProxyGroupsCache();
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    for (let i = 0; i < 3; i += 1) reportProxyNodeResult(nodes[1], 'down', 'UND_ERR_SOCKET');
+    warn.mockRestore();
+    try {
+      journalWaveTiming(wave);
+      expect(logInfoMock).not.toHaveBeenCalled();
+      await withProviderUsage({ projectId: 'p1', baseId: 'b1', jobId: 'j1', stage: 'base_collect' },
+        async () => undefined, async () => { journalWaveTiming(wave); });
+      expect(logInfoMock).toHaveBeenCalledTimes(1);
+      const [event, , context] = logInfoMock.mock.calls[0];
+      expect(event).toBe('ve2_website_wave');
+      // Версия 3: повтор через прокси по умолчанию и выбывание нод меняют форму
+      // волны — сравнивать с версиями 1 и 2 нельзя.
+      expect(context).toEqual(expect.objectContaining({ version: 3, projectId: 'p1', baseId: 'b1', jobId: 'j1',
+        stage: 'base_collect', slots: 8, wallMs: 41_000, sumMs: 9_000,
+        proxyAttempts: 2, proxyRescued: 1, proxyVerified: 1, proxyDenied: 0, proxyFailed: 1, proxyUnavailable: 0,
+        proxyNodesOut: [2], loopDelayMaxMs: 37 }));
+      expect(JSON.stringify(context)).not.toMatch(/secret|10\.1\.1/);
+    } finally {
+      resetProxyNodeHealth();
+      if (savedPriority === undefined) delete process.env.YANDEXMAPS_PROXY_URLS_PRIORITY;
+      else process.env.YANDEXMAPS_PROXY_URLS_PRIORITY = savedPriority;
+      resetProxyGroupsCache();
+    }
   });
 
   it('медленная страница считается «пригодной» только при готовом тексте; прокси и задержка цикла — в волне', async () => {
@@ -138,7 +157,10 @@ describe('журнал длительностей фазы сайтов', () => 
           if (/company-[23]\.test/.test(website)) return { status: 'unavailable', text: '', url: website,
             reason: 'website_identity_unverified', timeout: 'page', pages: 4, proxy: { attempts: 0, rescued: 0, verified: 0, denied: 1 } };
           if (website.includes('company-4.test')) return { status: 'unavailable', text: '', url: website,
-            reason: 'website_evidence_timeout', timeout: 'page', pages: 2, proxy: { attempts: 1, rescued: 0, verified: 0, denied: 0 } };
+            reason: 'website_evidence_timeout', timeout: 'page', pages: 2, proxy: { attempts: 1, rescued: 0, verified: 0, denied: 0, failed: 1 } };
+          // Все RU-ноды выбыли: пропуск не брался, ярлык — таймаут.
+          if (website.includes('company-5.test')) return { status: 'unavailable', text: '', url: website,
+            reason: 'website_evidence_timeout', timeout: 'page', pages: 2, proxy: { attempts: 0, rescued: 0, verified: 0, denied: 0, unavailable: 1 } };
           return { status: 'unavailable', text: '', url: website, reason: 'no_usable_website_text', pages: 1 };
         }) as unknown as typeof fetchVeRelevanceEvidence,
       }).catch(() => undefined);
@@ -146,8 +168,9 @@ describe('журнал длительностей фазы сайтов', () => 
       global.fetch = originalFetch;
     }
     expect(waves).toHaveLength(1);
-    expect(waves[0].outcomes).toEqual(expect.objectContaining({ ok: 1, slowButUsable: 1, timeoutPage: 1, unavailable: 6 }));
-    expect(waves[0]).toEqual(expect.objectContaining({ proxyAttempts: 3, proxyRescued: 1, proxyVerified: 1, proxyDenied: 2 }));
+    expect(waves[0].outcomes).toEqual(expect.objectContaining({ ok: 1, slowButUsable: 1, timeoutPage: 2, unavailable: 5 }));
+    expect(waves[0]).toEqual(expect.objectContaining({ proxyAttempts: 3, proxyRescued: 1, proxyVerified: 1, proxyDenied: 2,
+      proxyFailed: 1, proxyUnavailable: 1 }));
     // Задержка цикла снята за волну и переведена в миллисекунды.
     expect(histogram.enable).toHaveBeenCalledTimes(1);
     expect(histogram.disable).toHaveBeenCalledTimes(1);

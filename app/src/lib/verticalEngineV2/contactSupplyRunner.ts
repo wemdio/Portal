@@ -12,6 +12,7 @@ import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import type { VeBase, VeSegmentationAudit, VeTemplate } from './types';
 import { hasPendingSupplyNames } from './contactSupplyNameRecovery';
 import { isVeProviderBillingError } from './collectionErrors';
+import { describePortalProjectTerm, loadPortalProjectTerm, localIsoDate } from './portalDeliveryTerm';
 
 const BUFFER_WORKDAYS = 2;
 export { buildContactSupplyRequests } from './contactSupplyPlanner';
@@ -101,18 +102,35 @@ async function readBroadHypothesisIds(db: SupabaseClient, hypothesisIds: string[
 
 async function loadSupplyContext(portalDb: SupabaseClient, instantlyDb: SupabaseClient, projectId: string, now: Date) {
   const { data: project, error: projectError } = await portalDb.from('ve_projects')
-    .select('id, portal_project_id, portal_period_id, target_contacts, launch_preset_id, launch_instantly_account_id')
+    .select('id, portal_project_id, portal_period_id, target_contacts, launch_preset_id, launch_instantly_account_id, delivery_timezone')
     .eq('id', projectId).maybeSingle();
-  if (projectError || !project?.portal_project_id || !project.portal_period_id || !project.launch_preset_id
+  if (projectError || !project?.portal_project_id || !project.launch_preset_id
     || !Number.isSafeInteger(project.target_contacts) || project.target_contacts <= 0) {
     throw new Error('Continuous supply requires an explicitly bound delivery plan');
   }
-  const { data: period, error: periodError } = await portalDb.from('project_periods')
-    .select('id, project_id, status, contacts_done, deadline')
-    .eq('id', project.portal_period_id).eq('project_id', project.portal_project_id).eq('status', 'active').maybeSingle();
-  const contactsDone = parseExactNonNegativeContactCount(period?.contacts_done);
-  if (periodError || !period || contactsDone === null || typeof period.deadline !== 'string') {
-    throw new Error('Continuous supply requires the current active period and exact fulfillment facts');
+  // Без периода факт плана — первые контакты кампаний этого VE2-проекта,
+  // он известен после сверки кампаний ниже; дедлайн — из карточки проекта.
+  let contactsDone: number | null = null;
+  let deadline: string;
+  if (project.portal_period_id) {
+    const { data: period, error: periodError } = await portalDb.from('project_periods')
+      .select('id, project_id, status, contacts_done, deadline')
+      .eq('id', project.portal_period_id).eq('project_id', project.portal_project_id).eq('status', 'active').maybeSingle();
+    contactsDone = parseExactNonNegativeContactCount(period?.contacts_done);
+    if (periodError || !period || contactsDone === null || typeof period.deadline !== 'string') {
+      throw new Error('Continuous supply requires the current active period and exact fulfillment facts');
+    }
+    deadline = period.deadline;
+  } else {
+    const { project: portalProject, periods } = await loadPortalProjectTerm(portalDb, project.portal_project_id);
+    if (!portalProject) throw new Error('Проект Portal не найден. Пополнение остановлено.');
+    const term = describePortalProjectTerm(portalProject, periods, {
+      bound: true,
+      today: localIsoDate(now, typeof project.delivery_timezone === 'string' && project.delivery_timezone.trim()
+        ? project.delivery_timezone.trim() : 'Europe/Moscow'),
+    });
+    if (!term.ok) throw new Error(term.error);
+    deadline = term.deadline;
   }
   const { data: preset, error: presetError } = await instantlyDb.from('client_campaign_presets')
     .select('client_user_id, instantly_account_id, daily_limit, daily_max_leads, schedule_days, schedule_timezone')
@@ -122,7 +140,7 @@ async function loadSupplyContext(portalDb: SupabaseClient, instantlyDb: Supabase
     throw new Error('Continuous supply preset/workspace scope is not current');
   }
   const settings = await loadContactDeliverySettings(portalDb, projectId, {
-    portalProjectId: project.portal_project_id, portalPeriodId: project.portal_period_id,
+    portalProjectId: project.portal_project_id, portalPeriodId: project.portal_period_id ?? null,
     targetContacts: project.target_contacts, presetId: project.launch_preset_id,
   }, preset);
   const [inventory, rows, blocked, items] = await Promise.all([
@@ -137,13 +155,14 @@ async function loadSupplyContext(portalDb: SupabaseClient, instantlyDb: Supabase
     .from('ve_launch_queue_campaigns').select('id, item_id, campaign_id, segment', { count: 'exact' })
     .in('item_id', items.map((item) => item.id)).order('id', { ascending: true }).range(from, to)) : [];
   const activeCampaignRows = new Set(inventory.activeCampaignRowIds);
+  const planContactsDone = contactsDone ?? inventory.observedFirstContacted;
   const committed = rows.filter((row) => ['accepted', 'attempting', 'uncertain'].includes(row.status)).length;
-  const outstanding = Math.max(0, committed - Math.min(inventory.observedFirstContacted, contactsDone));
+  const outstanding = Math.max(0, committed - Math.min(inventory.observedFirstContacted, planContactsDone));
   const plan = buildContactDeliveryPlan({
-    now, timezone: settings.timezone, deadline: period.deadline, scheduleDays: settings.scheduleDays,
-    contactsObligation: project.target_contacts, contactsDone, dailyCapacity: settings.dailyCapacity,
+    now, timezone: settings.timezone, deadline, scheduleDays: settings.scheduleDays,
+    contactsObligation: project.target_contacts, contactsDone: planContactsDone, dailyCapacity: settings.dailyCapacity,
     // Forecast demand independently of today's shortage, which this loop fills.
-    availableContacts: Math.max(0, project.target_contacts - contactsDone), outstandingContacts: outstanding,
+    availableContacts: Math.max(0, project.target_contacts - planContactsDone), outstandingContacts: outstanding,
   });
   const bufferTarget = plan.days.slice(0, BUFFER_WORKDAYS).reduce((sum, day) => sum + day.quota, 0);
   const campaignItems = new Map(campaigns.map((campaign) => [campaign.id, campaign.item_id]));

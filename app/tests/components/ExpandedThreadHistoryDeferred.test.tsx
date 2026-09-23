@@ -30,6 +30,7 @@ function message(id: string, body: string): ThreadMessage {
     from_email: 'lead@example.com',
     from_name: 'Лид',
     body_text: body,
+    image_links: [],
     to_recipients: [],
     cc_recipients: [],
   };
@@ -67,6 +68,31 @@ describe('ExpandedThread — отложенная история', () => {
 
   afterEach(() => {
     jest.useRealTimers();
+  });
+
+  it('показывает ссылку на скриншот и загружает превью только по нажатию', async () => {
+    clientApiFetch.mockResolvedValue({
+      ...FULL,
+      messages: [{
+        ...message('m-image', 'Посмотрите скриншот.'),
+        image_links: [{ url: 'https://files.example.test/attachments/image.png', name: 'image.png' }],
+      }],
+    });
+
+    await renderThread();
+
+    expect(screen.getByText('image.png')).toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: /изображение из письма/i })).not.toBeInTheDocument();
+    const original = screen.getByRole('link', { name: /открыть отдельно/i });
+    expect(original).toHaveAttribute('href', 'https://files.example.test/attachments/image.png');
+    expect(original).toHaveAttribute('rel', 'noopener noreferrer');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Показать изображение' }));
+    expect(screen.getByRole('img', { name: /изображение из письма/i })).toHaveAttribute(
+      'src', 'https://files.example.test/attachments/image.png',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Скрыть' }));
+    expect(screen.queryByRole('img', { name: /изображение из письма/i })).not.toBeInTheDocument();
   });
 
   it('показывает письмо сразу и сам догружает переписку', async () => {

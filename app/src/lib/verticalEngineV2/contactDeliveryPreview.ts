@@ -9,11 +9,23 @@ import { loadContactDeliverySettings } from './contactDeliveryConfig';
 import { loadVeContactDeliveryCampaignInventory, loadVeContactDeliveryRows } from './contactDeliveryInventory';
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import type { VeBase, VeSegmentationAudit, VeTemplate } from './types';
+import {
+  describePortalProjectTerm,
+  findManualFactIssue,
+  localIsoDate,
+  PORTAL_PROJECT_TERM_COLUMNS,
+  PORTAL_TERM_TEXT,
+  type PortalPeriodStateRow,
+  type PortalProjectTermOk,
+  type PortalProjectTermRow,
+  withBoundResumeNote,
+} from './portalDeliveryTerm';
 
 export type ContactDeliveryPreviewRequest = {
   templateId: string;
   portalProjectId: string;
-  expectedPortalPeriodId: string;
+  /** null — проект без периодов: сроком служит карточка проекта. */
+  expectedPortalPeriodId: string | null;
   targetContacts: number;
   presetId: string;
   segmentationAuditId?: string | null;
@@ -25,12 +37,7 @@ export type ContactDeliveryPreviewOutcome = {
   body: Record<string, unknown>;
 };
 
-type PortalProjectRow = {
-  id: string;
-  client?: string | null;
-  name?: string | null;
-  status?: string | null;
-};
+type PortalProjectRow = PortalProjectTermRow;
 
 type PortalPeriodRow = {
   id: string;
@@ -89,7 +96,7 @@ export async function buildVeContactDeliveryPreview(
   if (!cleanString(input.portalProjectId)) {
     return outcome(400, 'PORTAL_PROJECT_REQUIRED', 'Выберите проект Portal');
   }
-  if (!cleanString(input.expectedPortalPeriodId)) {
+  if (input.expectedPortalPeriodId !== null && !cleanString(input.expectedPortalPeriodId)) {
     return outcome(400, 'PORTAL_PERIOD_REQUIRED', 'У проекта нет выбранного активного периода');
   }
   if (!Number.isSafeInteger(input.targetContacts) || input.targetContacts <= 0) {
@@ -125,46 +132,89 @@ export async function buildVeContactDeliveryPreview(
 
   const { data: projectRow, error: projectError } = await portalDb
     .from('projects')
-    .select('id, client, name, status')
+    .select(PORTAL_PROJECT_TERM_COLUMNS)
     .eq('id', input.portalProjectId)
     .maybeSingle();
   if (projectError) return outcome(500, 'PORTAL_PROJECT_LOAD_FAILED', projectError.message);
   if (!projectRow) return outcome(404, 'PORTAL_PROJECT_NOT_FOUND', 'Проект Portal не найден');
   const project = projectRow as PortalProjectRow;
 
-  // The explicit id + project FK + active status are one identity boundary.
-  // Never infer this link from a client/project name.
-  const { data: periodRow, error: periodError } = await portalDb
-    .from('project_periods')
-    .select('id, project_id, name, status, contacts_obligation, contacts_done, deadline')
-    .eq('id', input.expectedPortalPeriodId)
-    .eq('project_id', input.portalProjectId)
-    .eq('status', 'active')
-    .maybeSingle();
-  if (periodError) return outcome(500, 'PORTAL_PERIOD_LOAD_FAILED', periodError.message);
-  if (!periodRow) {
-    return outcome(
-      409,
-      'PORTAL_PERIOD_NOT_ACTIVE',
-      'Выбранный период больше не является активным периодом этого проекта',
-    );
-  }
-  const period = periodRow as PortalPeriodRow;
-  const contactsDone = parseExactNonNegativeContactCount(period.contacts_done);
-  if (contactsDone === null) {
-    return outcome(
-      409,
-      'CONTACTS_DONE_AMBIGUOUS',
-      'В активном периоде факт первых контактов должен быть указан одним целым числом',
-    );
-  }
-  const deadline = cleanString(period.deadline);
-  if (!deadline || !isValidIsoDate(deadline)) {
-    return outcome(
-      409,
-      'PERIOD_DEADLINE_REQUIRED',
-      'В активном периоде должна быть указана корректная дата дедлайна',
-    );
+  let period: PortalPeriodRow | null = null;
+  let projectTerm: PortalProjectTermOk | null = null;
+  let projectPlanBound = false;
+  // Без периода факт плана — первые контакты кампаний этого VE2-проекта;
+  // он известен только после сверки кампаний ниже.
+  let contactsDone: number | null;
+  let deadline: string;
+  if (input.expectedPortalPeriodId !== null) {
+    // The explicit id + project FK + active status are one identity boundary.
+    // Never infer this link from a client/project name.
+    const { data: periodRow, error: periodError } = await portalDb
+      .from('project_periods')
+      .select('id, project_id, name, status, contacts_obligation, contacts_done, deadline')
+      .eq('id', input.expectedPortalPeriodId)
+      .eq('project_id', input.portalProjectId)
+      .eq('status', 'active')
+      .maybeSingle();
+    if (periodError) return outcome(500, 'PORTAL_PERIOD_LOAD_FAILED', periodError.message);
+    if (!periodRow) {
+      return outcome(
+        409,
+        'PORTAL_PERIOD_NOT_ACTIVE',
+        'Выбранный период больше не является активным периодом этого проекта',
+      );
+    }
+    period = periodRow as PortalPeriodRow;
+    contactsDone = parseExactNonNegativeContactCount(period.contacts_done);
+    if (contactsDone === null) {
+      return outcome(
+        409,
+        'CONTACTS_DONE_AMBIGUOUS',
+        'В активном периоде факт первых контактов должен быть указан одним целым числом',
+      );
+    }
+    deadline = cleanString(period.deadline);
+    if (!deadline || !isValidIsoDate(deadline)) {
+      return outcome(
+        409,
+        'PERIOD_DEADLINE_REQUIRED',
+        'В активном периоде должна быть указана корректная дата дедлайна',
+      );
+    }
+  } else {
+    const { data: periodRows, error: periodsError } = await portalDb
+      .from('project_periods')
+      .select('id, status')
+      .eq('project_id', input.portalProjectId);
+    if (periodsError) return outcome(500, 'PORTAL_PERIOD_LOAD_FAILED', periodsError.message);
+    const { data: bindingRows, error: bindingError } = await portalDb
+      .from('ve_projects')
+      .select('id, portal_period_id')
+      .eq('portal_project_id', input.portalProjectId);
+    if (bindingError) return outcome(500, 'PORTAL_PROJECT_BINDING_LOAD_FAILED', bindingError.message);
+    const bindings = (bindingRows ?? []) as Array<{ id: string; portal_period_id?: string | null }>;
+    const boundHere = bindings.some((row) => row.id === base.project_id && !row.portal_period_id);
+    const term = describePortalProjectTerm(project, (periodRows ?? []) as PortalPeriodStateRow[], { bound: boundHere });
+    if (!term.ok) return outcome(409, term.code, term.error);
+    if (bindings.some((row) => row.id !== base.project_id && !row.portal_period_id)) {
+      return outcome(
+        409,
+        'PORTAL_PROJECT_PLAN_TAKEN',
+        'Проект Portal уже привязан к другому проекту движка. Запускайте из того проекта или выберите другой проект Portal.',
+      );
+    }
+    if (!boundHere) {
+      try {
+        const manualFact = await findManualFactIssue(instantlyDb, project);
+        if (manualFact) return outcome(409, manualFact.code, manualFact.error);
+      } catch {
+        return outcome(500, 'PORTAL_PROJECT_LINKS_UNAVAILABLE', 'Не удалось проверить кампании, привязанные к проекту Portal');
+      }
+    }
+    projectTerm = term;
+    projectPlanBound = boundHere;
+    contactsDone = null;
+    deadline = term.deadline;
   }
 
   const { data: presetRow, error: presetError } = await instantlyDb
@@ -197,6 +247,9 @@ export async function buildVeContactDeliveryPreview(
     return outcome(409, 'CONTACT_DELIVERY_PLAN_INVALID', error instanceof Error ? error.message : 'Настройки плана недоступны');
   }
   const { dailyCapacity: senderCapacity, scheduleDays, timezone } = settings;
+  if (projectTerm && deadline < localIsoDate(input.now ?? new Date(), timezone)) {
+    return outcome(409, 'PROJECT_DEADLINE_PASSED', withBoundResumeNote(PORTAL_TERM_TEXT.deadlinePassed(deadline), projectPlanBound));
+  }
 
   let audits: VeSegmentationAudit[] = [];
   const auditId = cleanString(input.segmentationAuditId);
@@ -268,6 +321,7 @@ export async function buildVeContactDeliveryPreview(
   let reserveRemaining: number;
   let outstandingCount: number;
   let prospectiveReady: number;
+  let planContactsDone: number;
   try {
     const [inventory, rows] = await Promise.all([
       loadVeContactDeliveryCampaignInventory(portalDb, instantlyDb, base.project_id),
@@ -280,8 +334,9 @@ export async function buildVeContactDeliveryPreview(
     const readyRows = rows.filter((row) => row.status === 'ready' && !blockedEmails.has(row.email_normalized));
     readyRemaining = readyRows.filter((row) => activeRows.has(row.campaign_row_id)).length + prospective;
     reserveRemaining = readyRows.length + prospective;
+    planContactsDone = contactsDone ?? inventory.observedFirstContacted;
     const committed = rows.filter((row) => ['accepted', 'attempting', 'uncertain'].includes(row.status)).length;
-    outstandingCount = Math.max(0, committed - Math.min(inventory.observedFirstContacted, contactsDone));
+    outstandingCount = Math.max(0, committed - Math.min(inventory.observedFirstContacted, planContactsDone));
   } catch {
     return outcome(500, 'DELIVERY_INVENTORY_UNAVAILABLE', 'Не удалось полностью сверить запас и уже загруженные контакты');
   }
@@ -294,7 +349,7 @@ export async function buildVeContactDeliveryPreview(
       deadline,
       scheduleDays,
       contactsObligation: input.targetContacts,
-      contactsDone,
+      contactsDone: planContactsDone,
       dailyCapacity: senderCapacity,
       availableContacts: readyRemaining,
       outstandingContacts: outstandingCount,
@@ -313,7 +368,7 @@ export async function buildVeContactDeliveryPreview(
     : 0;
   const effectiveDaily = plan.days[0]?.quota ?? 0;
   const portalProjectName = projectDisplayName(project);
-  const portalPeriodLabel = cleanString(period.name) || null;
+  const portalPeriodLabel = period ? cleanString(period.name) || null : null;
 
   return {
     status: 200,
@@ -321,10 +376,10 @@ export async function buildVeContactDeliveryPreview(
       preview: {
         portal_project_id: project.id,
         portal_project_name: portalProjectName,
-        portal_period_id: period.id,
+        portal_period_id: period?.id ?? null,
         portal_period_label: portalPeriodLabel,
         deadline,
-        contacts_done_count: contactsDone,
+        contacts_done_count: planContactsDone,
         contacts_obligation: input.targetContacts,
         target_contacts: input.targetContacts,
         remaining: plan.remainingContacts,
@@ -350,14 +405,25 @@ export async function buildVeContactDeliveryPreview(
           name: portalProjectName,
           status: cleanString(project.status) || null,
         },
-        period: {
-          id: period.id,
-          label: portalPeriodLabel,
-          status: period.status,
-          deadline,
-          contacts_obligation: period.contacts_obligation ?? null,
-          contacts_done: contactsDone,
-        },
+        period: period
+          ? {
+              id: period.id,
+              label: portalPeriodLabel,
+              status: period.status,
+              deadline,
+              contacts_obligation: period.contacts_obligation ?? null,
+              contacts_done: planContactsDone,
+            }
+          : null,
+        // Только для показа: обязательство и накопленный факт карточки в план не входят.
+        project_term: projectTerm
+          ? {
+              deadline: projectTerm.deadline,
+              starts_at: projectTerm.startsAt,
+              contacts_obligation: projectTerm.obligationText,
+              contacts_done_total: projectTerm.factTotal,
+            }
+          : null,
       },
     },
   };

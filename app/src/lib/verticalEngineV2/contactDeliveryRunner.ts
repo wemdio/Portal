@@ -6,7 +6,9 @@
  * verifies campaign ownership first, asks the DB for one frozen daily batch,
  * fences every provider attempt, and persists exact accepted/uncertain row ids.
  * `projects/project_periods.contacts_done` remains the fulfillment fact; an
- * accepted upload here is only a technical delivery event.
+ * accepted upload here is only a technical delivery event. A plan bound to a
+ * Portal project without periods uses the project card as its term and the
+ * first-contacted count of its own campaigns as the plan fact.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -17,6 +19,8 @@ import {
   type AppendLeadsResult,
 } from '@/lib/clientLaunch/appendLeads';
 import {
+  checkCampaignProjectOwnershipConflicts,
+  claimCampaignProjectOwnership,
   reservePeriodCampaignLinks,
   type CampaignProjectOwnershipResult,
   type PeriodCampaignReservation,
@@ -25,6 +29,13 @@ import type { LeadCreatePayload } from '@/lib/instantly/types';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { loadVeContactDeliveryCampaignInventory } from './contactDeliveryInventory';
 import { activateDeliveredContactCampaigns } from './contactDeliveryActivation';
+import {
+  claimProjectCampaignLinks,
+  describeOwnershipConflicts,
+  describePortalProjectTerm,
+  loadPortalProjectTerm,
+  localIsoDate,
+} from './portalDeliveryTerm';
 
 interface BoundVeProject {
   id: string;
@@ -83,6 +94,9 @@ export interface ContactDeliveryRunnerDeps {
   ) => Promise<CampaignProjectOwnershipResult>;
   appendLeads: typeof appendLeadsToClientCampaign;
   createAttemptId: () => string;
+  /** Plans without a period own campaigns through the legacy project link. */
+  checkCampaignProjectOwnershipConflicts?: typeof checkCampaignProjectOwnershipConflicts;
+  claimCampaignProjectOwnership?: typeof claimCampaignProjectOwnership;
 }
 
 export type ContactDeliveryDayStatus =
@@ -109,6 +123,8 @@ const DEFAULT_DEPS: ContactDeliveryRunnerDeps = {
   reservePeriodCampaignLinks,
   appendLeads: appendLeadsToClientCampaign,
   createAttemptId: randomUUID,
+  checkCampaignProjectOwnershipConflicts,
+  claimCampaignProjectOwnership,
 };
 
 function asObject(value: unknown): Record<string, unknown> | null {
@@ -231,12 +247,14 @@ async function loadPreflight(
   portalDb: SupabaseClient,
   instantlyDb: SupabaseClient,
   veProjectId: string,
+  now: Date,
 ): Promise<{
   project: BoundVeProject;
-  period: ActivePeriod;
+  period: ActivePeriod | null;
   clientUserId: string;
   observedFirstContacted: number;
   instantlyAccountId: string;
+  activeCampaignIds: string[];
   links: PeriodCampaignReservation[];
 }> {
   const { data: projectData, error: projectError } = await portalDb
@@ -251,7 +269,6 @@ async function loadPreflight(
   if (
     !project ||
     !project.portal_project_id ||
-    !project.portal_period_id ||
     !project.launch_preset_id ||
     !nonEmptyString(project.launch_instantly_account_id) ||
     !Number.isSafeInteger(project.target_contacts) ||
@@ -260,17 +277,31 @@ async function loadPreflight(
     throw new Error('VE2 delivery plan is not explicitly bound');
   }
 
-  const { data: periodData, error: periodError } = await portalDb
-    .from('project_periods')
-    .select('id, project_id, status, contacts_done, deadline')
-    .eq('id', project.portal_period_id)
-    .eq('project_id', project.portal_project_id)
-    .eq('status', 'active')
-    .maybeSingle();
-  if (periodError) throw new Error(`delivery period read failed: ${periodError.message}`);
-  const period = periodData as ActivePeriod | null;
-  if (!period) throw new Error('bound Portal project period is not active');
+  let period: ActivePeriod | null = null;
+  if (project.portal_period_id) {
+    const { data: periodData, error: periodError } = await portalDb
+      .from('project_periods')
+      .select('id, project_id, status, contacts_done, deadline')
+      .eq('id', project.portal_period_id)
+      .eq('project_id', project.portal_project_id)
+      .eq('status', 'active')
+      .maybeSingle();
+    if (periodError) throw new Error(`delivery period read failed: ${periodError.message}`);
+    period = periodData as ActivePeriod | null;
+    if (!period) throw new Error('bound Portal project period is not active');
+  } else {
+    // Stop before ownership and reservation when the project card no longer
+    // authorizes delivery; the reason is the specialist-facing text.
+    const { project: portalProject, periods } = await loadPortalProjectTerm(portalDb, project.portal_project_id);
+    if (!portalProject) throw new Error('Проект Portal не найден. Загрузка новых контактов остановлена.');
+    const term = describePortalProjectTerm(portalProject, periods, {
+      bound: true,
+      today: localIsoDate(now, project.delivery_timezone?.trim() || 'Europe/Moscow'),
+    });
+    if (!term.ok) throw new Error(term.error);
+  }
 
+  const periodId = period?.id ?? null;
   const inventory = await loadVeContactDeliveryCampaignInventory(portalDb, instantlyDb, veProjectId);
   if (inventory.activeCampaignIds.length === 0) throw new Error('VE2 project has no active launch bundle');
 
@@ -297,8 +328,9 @@ async function loadPreflight(
     clientUserId,
     observedFirstContacted: inventory.observedFirstContacted,
     instantlyAccountId,
-    links: inventory.activeCampaignIds.map((campaignId) => ({
-      periodId: period.id,
+    activeCampaignIds: inventory.activeCampaignIds,
+    links: !periodId ? [] : inventory.activeCampaignIds.map((campaignId) => ({
+      periodId,
       campaignId,
       matchSource: 'manual',
       baselineContacts: 0,
@@ -338,19 +370,35 @@ export async function runContactDeliveryDay(input: {
   deps?: ContactDeliveryRunnerDeps;
 }): Promise<ContactDeliveryDayResult> {
   const deps = input.deps ?? DEFAULT_DEPS;
-  const preflight = await loadPreflight(input.portalDb, input.instantlyDb, input.veProjectId);
+  const preflight = await loadPreflight(input.portalDb, input.instantlyDb, input.veProjectId, input.now ?? new Date());
 
   // Cross-database ownership is established before the main DB can expose a
   // provider batch. A conflict therefore cannot consume or strand drip rows.
-  const ownership = await deps.reservePeriodCampaignLinks(
-    input.instantlyDb,
-    preflight.project.portal_project_id as string,
-    preflight.links,
-  );
-  if (ownership.status === 'conflict') {
-    throw new Error(
-      `delivery campaign ownership conflict: ${ownership.conflictingProjectIds.join(', ')}`,
+  if (preflight.period) {
+    const ownership = await deps.reservePeriodCampaignLinks(
+      input.instantlyDb,
+      preflight.project.portal_project_id as string,
+      preflight.links,
     );
+    if (ownership.status === 'conflict') {
+      throw new Error(
+        `delivery campaign ownership conflict: ${ownership.conflictingProjectIds.join(', ')}`,
+      );
+    }
+  } else {
+    const conflicts = await claimProjectCampaignLinks(
+      input.instantlyDb,
+      preflight.project.portal_project_id as string,
+      preflight.activeCampaignIds,
+      `Vertical Engine v2 delivery · ${input.veProjectId}`,
+      {
+        check: deps.checkCampaignProjectOwnershipConflicts,
+        claim: deps.claimCampaignProjectOwnership,
+      },
+    );
+    if (conflicts.length > 0) {
+      throw new Error(`delivery campaign ownership conflict: ${describeOwnershipConflicts(conflicts)}`);
+    }
   }
 
   const { data: reserveData, error: reserveError } = await input.portalDb.rpc(

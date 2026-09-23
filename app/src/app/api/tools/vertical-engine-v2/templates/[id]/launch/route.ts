@@ -28,6 +28,13 @@ import {
   type VeInstantlyTagMapping,
 } from '@/lib/verticalEngineV2/launchPresets';
 import type { CustomTag } from '@/lib/instantly/types';
+import {
+  describePortalProjectTerm,
+  LAUNCHABLE_PORTAL_PROJECT_STATUSES,
+  localIsoDate,
+  PORTAL_PROJECT_TERM_COLUMNS,
+  type PortalProjectTermRow,
+} from '@/lib/verticalEngineV2/portalDeliveryTerm';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -45,19 +52,39 @@ interface LaunchPresetRow {
   email_account_ids?: unknown;
 }
 
-interface PortalProjectOptionRow {
-  id: string;
-  client?: string | null;
-  name?: string | null;
-}
+type PortalProjectOptionRow = PortalProjectTermRow;
 
-interface PortalActivePeriodRow {
+interface PortalPeriodOptionRow {
   id: string;
   project_id: string;
   name?: string | null;
+  status?: string | null;
   period_start?: string | null;
   deadline?: string | null;
   contacts_done?: string | number | null;
+}
+
+// Причины, по которым закреплённый план сейчас нельзя вести. Остальные отказы
+// предпросмотра (например, у этого шаблона ещё нет аудита) план не блокируют.
+const BOUND_PLAN_TERM_CODES = new Set([
+  'PORTAL_PROJECT_NOT_FOUND',
+  'PORTAL_PERIOD_NOT_ACTIVE',
+  'CONTACTS_DONE_AMBIGUOUS',
+  'PERIOD_DEADLINE_REQUIRED',
+  'PORTAL_PROJECT_HAS_ACTIVE_PERIOD',
+  'PORTAL_PERIODS_CLOSED',
+  'PORTAL_PERIOD_CREATED_AFTER_LAUNCH',
+  'PORTAL_PROJECT_NOT_IN_WORK',
+  'PROJECT_DEADLINE_REQUIRED',
+  'PROJECT_DEADLINE_INVALID',
+  'PROJECT_DEADLINE_PASSED',
+  'PORTAL_PROJECT_PLAN_TAKEN',
+  'CONTACT_DELIVERY_PLAN_INVALID',
+]);
+
+function cleanText(value: unknown): string | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
 function portalProjectOptionName(project: PortalProjectOptionRow): string {
@@ -164,8 +191,8 @@ export async function GET(
 
       const { data: portalProjectRows, error: portalProjectsError } = await supabaseAdmin
         .from('projects')
-        .select('id, client, name, status')
-        .in('status', ['В работе', 'Тестирование', 'Подготовка', 'На паузе']);
+        .select(PORTAL_PROJECT_TERM_COLUMNS)
+        .in('status', [...LAUNCHABLE_PORTAL_PROJECT_STATUSES]);
       if (portalProjectsError) {
         await logError(
           'tools.vertical-engine-v2.template.launch.portal_projects_failed',
@@ -176,30 +203,34 @@ export async function GET(
       }
       const portalProjectsRaw = (portalProjectRows ?? []) as PortalProjectOptionRow[];
       const portalProjectIds = portalProjectsRaw.map((project) => project.id);
-      let activePeriods: PortalActivePeriodRow[] = [];
+      // Все периоды, а не только активные: проект без периодов запускается
+      // по карточке проекта, а проект с одними закрытыми — нет.
+      let periods: PortalPeriodOptionRow[] = [];
       if (portalProjectIds.length > 0) {
-        const { data: activePeriodRows, error: activePeriodsError } = await supabaseAdmin
+        const { data: periodRows, error: periodsError } = await supabaseAdmin
           .from('project_periods')
-          .select('id, project_id, name, period_start, deadline, contacts_done')
-          .in('project_id', portalProjectIds)
-          .eq('status', 'active');
-        if (activePeriodsError) {
+          .select('id, project_id, name, status, period_start, deadline, contacts_done')
+          .in('project_id', portalProjectIds);
+        if (periodsError) {
           await logError(
             'tools.vertical-engine-v2.template.launch.portal_periods_failed',
-            activePeriodsError,
+            periodsError,
             { templateId },
           );
-          return jsonError('Не удалось загрузить активные периоды Portal', 500);
+          return jsonError('Не удалось загрузить периоды Portal', 500);
         }
-        activePeriods = (activePeriodRows ?? []) as PortalActivePeriodRow[];
+        periods = (periodRows ?? []) as PortalPeriodOptionRow[];
       }
-      const activePeriodByProjectId = new Map(
-        activePeriods.map((period) => [period.project_id, period] as const),
-      );
+      const periodsByProjectId = new Map<string, PortalPeriodOptionRow[]>();
+      for (const period of periods) {
+        periodsByProjectId.set(period.project_id, [...(periodsByProjectId.get(period.project_id) ?? []), period]);
+      }
+      const today = localIsoDate(new Date(), 'Europe/Moscow');
       const portalProjects = portalProjectsRaw
         .map((project) => {
-          const period = activePeriodByProjectId.get(project.id) ?? null;
-          return {
+          const projectPeriods = periodsByProjectId.get(project.id) ?? [];
+          const period = projectPeriods.find((candidate) => candidate.status === 'active') ?? null;
+          const option = {
             id: project.id,
             name: portalProjectOptionName(project),
             active_period: period
@@ -211,6 +242,19 @@ export async function GET(
                   contacts_done_count: parseExactNonNegativeContactCount(period.contacts_done),
                 }
               : null,
+          };
+          if (period) return option;
+          const term = describePortalProjectTerm(project, projectPeriods, { today });
+          return {
+            ...option,
+            ...(projectPeriods.length > 0 ? { periods_closed: true } : {}),
+            project_term: {
+              deadline: cleanText(project.deadline),
+              starts_at: cleanText(project.launch_date),
+              contacts_obligation: cleanText(project.contacts_obligation),
+              contacts_done_total: parseExactNonNegativeContactCount(project.contacts_done),
+              issue: term.ok ? null : term.error,
+            },
           };
         })
         .sort((left, right) => left.name.localeCompare(right.name, 'ru') || left.id.localeCompare(right.id));
@@ -339,11 +383,15 @@ export async function GET(
         : [];
 
       let deliveryPlan: Record<string, unknown> | null = null;
+      let deliveryPlanBinding: Record<string, unknown> | null = null;
+      let deliveryPlanIssue: string | null = null;
+      const boundPeriodId =
+        typeof projectRow.portal_period_id === 'string' && projectRow.portal_period_id
+          ? projectRow.portal_period_id
+          : null;
       if (
         typeof projectRow.portal_project_id === 'string' &&
         projectRow.portal_project_id &&
-        typeof projectRow.portal_period_id === 'string' &&
-        projectRow.portal_period_id &&
         typeof projectRow.target_contacts === 'number' &&
         Number.isSafeInteger(projectRow.target_contacts) &&
         projectRow.target_contacts > 0 &&
@@ -356,7 +404,7 @@ export async function GET(
           {
             templateId,
             portalProjectId: projectRow.portal_project_id,
-            expectedPortalPeriodId: projectRow.portal_period_id,
+            expectedPortalPeriodId: boundPeriodId,
             targetContacts: projectRow.target_contacts,
             presetId: projectRow.launch_preset_id,
           },
@@ -364,16 +412,31 @@ export async function GET(
         const preview = boundPreview.body.preview;
         if (boundPreview.status === 200 && preview && typeof preview === 'object') {
           deliveryPlan = preview as Record<string, unknown>;
-        } else if (boundPreview.status >= 500) {
-          await logError(
-            'tools.vertical-engine-v2.template.launch.delivery_plan_failed',
-            new Error(
-              typeof boundPreview.body.error === 'string'
-                ? boundPreview.body.error
-                : 'Bound delivery plan preview failed',
-            ),
-            { templateId, veProjectId: projectRow.id },
-          );
+        } else {
+          // План закреплён навсегда: другой проект выбрать нельзя, поэтому
+          // форма фиксирует привязку и показывает причину, а не «пустой» выбор.
+          deliveryPlanBinding = {
+            portal_project_id: projectRow.portal_project_id,
+            portal_period_id: boundPeriodId,
+            target_contacts: projectRow.target_contacts,
+          };
+          if (boundPreview.status >= 500) {
+            await logError(
+              'tools.vertical-engine-v2.template.launch.delivery_plan_failed',
+              new Error(
+                typeof boundPreview.body.error === 'string'
+                  ? boundPreview.body.error
+                  : 'Bound delivery plan preview failed',
+              ),
+              { templateId, veProjectId: projectRow.id },
+            );
+          } else if (
+            typeof boundPreview.body.code === 'string' &&
+            BOUND_PLAN_TERM_CODES.has(boundPreview.body.code) &&
+            typeof boundPreview.body.error === 'string'
+          ) {
+            deliveryPlanIssue = boundPreview.body.error;
+          }
         }
       }
 
@@ -383,6 +446,9 @@ export async function GET(
         mailbox_tag_options: mailboxTagOptions,
         portal_projects: portalProjects,
         delivery_plan: deliveryPlan,
+        ...(deliveryPlanBinding
+          ? { delivery_plan_binding: deliveryPlanBinding, delivery_plan_issue: deliveryPlanIssue }
+          : {}),
         bound_preset_id:
           typeof projectRow.launch_preset_id === 'string' && projectRow.launch_preset_id
             ? projectRow.launch_preset_id
@@ -434,20 +500,23 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       const confirmSegmentation = body?.confirm_segmentation === true;
       const portalProjectId =
         typeof body?.portal_project_id === 'string' ? body.portal_project_id.trim() : '';
+      // Явный null — проект без периодов; отсутствующее поле — ошибка запроса.
       const expectedPortalPeriodId =
-        typeof body?.expected_portal_period_id === 'string'
-          ? body.expected_portal_period_id.trim()
-          : '';
+        body?.expected_portal_period_id === null
+          ? null
+          : typeof body?.expected_portal_period_id === 'string'
+            ? body.expected_portal_period_id.trim()
+            : '';
       const targetContacts = body?.target_contacts;
       if (
         !portalProjectId ||
-        !expectedPortalPeriodId ||
+        expectedPortalPeriodId === '' ||
         typeof targetContacts !== 'number' ||
         !Number.isSafeInteger(targetContacts) ||
         targetContacts <= 0
       ) {
         return jsonError(
-          'Укажите Portal-проект, его активный период и точное обязательство по контактам',
+          'Укажите проект Portal, его активный период (если у проекта есть периоды) и точную цель по контактам',
           400,
         );
       }
