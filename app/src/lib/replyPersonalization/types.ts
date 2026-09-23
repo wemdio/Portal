@@ -40,6 +40,12 @@ export interface QualificationRow {
   instantlyEmailId: string | null;
   eaccount: string | null;
   replyTimestamp: string | null;
+  /**
+   * Вердикт квалификатора ('lead', 'not_lead', …) — только для синхронизированных
+   * писем; у писем с живых аккаунтов null. Список его не фильтрует: отказы тоже
+   * бывает нужно обработать.
+   */
+  qualificationStatus?: string | null;
 }
 
 export interface ThreadMessage {
@@ -66,8 +72,16 @@ export interface DraftRow {
 
 /** Строка списка «кто ответил» на экране инструмента. */
 export interface ReplyListItem extends QualificationRow {
-  /** 'new' — ни одного 'sent' черновика по этому qualification_id. */
-  listStatus: 'new' | 'sent';
+  /** По последнему черновику: 'sent' — ответили, 'skipped' — пропустили, иначе 'new'. */
+  listStatus: 'new' | 'sent' | 'skipped';
+}
+
+/** Кампания проекта для кнопок-фильтров над списком писем. */
+export interface ReplyCampaignOption {
+  id: string;
+  name: string;
+  /** Ответов в кампании с учётом поиска; null — кампания живого аккаунта, не посчитать. */
+  replyCount: number | null;
 }
 
 export interface GenerateDraftResult {

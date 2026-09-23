@@ -31,33 +31,62 @@ function toQualificationRow(email: Email & { lead: string }, campaignId: string)
     instantlyEmailId: email.id,
     eaccount: email.eaccount ?? null,
     replyTimestamp: email.timestamp_created ?? null,
+    qualificationStatus: null,
   };
 }
 
+/** Страниц на кампанию за один запрос списка — чтобы «Показать ещё» не выжирал лимит /emails. */
+const MAX_PAGES_PER_CAMPAIGN = 5;
+
+/**
+ * Первые `limit` ответов по кампаниям живого аккаунта, свежие сверху.
+ * `hasMore` — у какой-то кампании остались непрочитанные страницы.
+ */
 export async function listLiveReplies(params: {
   campaignIds: string[];
   accountId: string;
-  limit?: number;
-}): Promise<QualificationRow[]> {
-  if (!params.campaignIds.length) return [];
+  limit: number;
+  search?: string;
+}): Promise<{ rows: QualificationRow[]; hasMore: boolean }> {
+  if (!params.campaignIds.length) return { rows: [], hasMore: false };
   const results: QualificationRow[] = [];
+  let hasMore = false;
+  const search = params.search?.trim() || undefined;
   for (const campaignId of params.campaignIds) {
     try {
-      const response = await listEmails(
-        { campaign_id: campaignId, email_type: 'received', sort_order: 'desc' },
-        { accountId: params.accountId, timeoutMs: 20_000, requestPriority: 'fresh', consumer: 'personalization_feed' },
-      );
-      for (const email of response.items ?? []) {
-        if (!email.id || !email.lead) continue;
-        results.push(toQualificationRow({ ...email, lead: email.lead }, campaignId));
+      let cursor: string | undefined;
+      let fetched = 0;
+      for (let page = 0; page < MAX_PAGES_PER_CAMPAIGN; page += 1) {
+        const response = await listEmails(
+          {
+            campaign_id: campaignId,
+            email_type: 'received',
+            sort_order: 'desc',
+            limit: 100,
+            search,
+            starting_after: cursor,
+          },
+          { accountId: params.accountId, timeoutMs: 20_000, requestPriority: 'fresh', consumer: 'personalization_feed' },
+        );
+        for (const email of response.items ?? []) {
+          if (!email.id || !email.lead) continue;
+          results.push(toQualificationRow({ ...email, lead: email.lead }, campaignId));
+        }
+        fetched += response.items?.length ?? 0;
+        cursor = response.next_starting_after;
+        if (!cursor || !response.items?.length) break;
+        if (fetched >= params.limit) {
+          hasMore = true;
+          break;
+        }
       }
+      if (cursor && fetched < params.limit) hasMore = true;
     } catch {
       // Одна недоступная кампания не должна ронять список остальных.
     }
   }
-  return results
-    .sort((a, b) => (b.replyTimestamp ?? '').localeCompare(a.replyTimestamp ?? ''))
-    .slice(0, params.limit ?? 50);
+  const sorted = results.sort((a, b) => (b.replyTimestamp ?? '').localeCompare(a.replyTimestamp ?? ''));
+  return { rows: sorted.slice(0, params.limit), hasMore: hasMore || sorted.length > params.limit };
 }
 
 /**
