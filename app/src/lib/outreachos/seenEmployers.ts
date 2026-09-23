@@ -25,11 +25,11 @@ export interface SeenEmployerUpsert {
 }
 
 /**
- * Окно «не контактировать одну компанию чаще, чем раз в N дней». 45 = 1.5 месяца.
- * Повторный аутрич РАЗРЕШЁН — просто не чаще окна (компания старше окна снова
- * eligible). Меняется одной строкой. Можно вынести в конфиг, если понадобится.
+ * Загруженные и отсеянные LLM компании защищены 45 дней.
+ * Компании без email можно проверить вновь через 7 дней.
  */
 export const RECONTACT_AFTER_DAYS = 45;
+export const NO_EMAIL_RETRY_AFTER_DAYS = 7;
 
 export interface RecentlySeen {
   ids: Set<string>;
@@ -37,23 +37,39 @@ export interface RecentlySeen {
 }
 
 /**
- * Кого контактировали за последние RECONTACT_AFTER_DAYS дней (по last_status_at).
- * Эти компании в текущем прогоне пропускаем. Дедуп по ДВУМ осям: hh_employer_id
- * И домен сайта — вторая ось ловит компанию, пере-зарегавшуюся на HH с новым id.
- * Компании с последним контактом старше окна в выборку НЕ попадают → снова eligible.
+ * Статусный срок считается по last_status_at. Дедуп по ДВУМ осям:
+ * hh_employer_id И домен сайта — вторая ось ловит компанию с новым HH id.
  */
-export async function loadRecentlySeen(withinDays = RECONTACT_AFTER_DAYS): Promise<RecentlySeen> {
-  const empty: RecentlySeen = { ids: new Set(), domains: new Set() };
-  if (!supabaseAdmin) return empty;
-  const cutoff = new Date(Date.now() - withinDays * 86_400_000).toISOString();
+interface SeenRow {
+  hh_employer_id: string | null;
+  domain: string | null;
+  status: SeenStatus;
+  last_status_at: string;
+}
+
+export function isWithinSeenWindow(row: Pick<SeenRow, 'status' | 'last_status_at'>, now: number, withinDays = RECONTACT_AFTER_DAYS): boolean {
+  const ttl = row.status === 'no_email'
+    ? Math.min(withinDays, NO_EMAIL_RETRY_AFTER_DAYS)
+    : withinDays;
+  return new Date(row.last_status_at).getTime() >= now - ttl * 86_400_000;
+}
+
+async function loadActiveSeenRows(withinDays: number): Promise<SeenRow[]> {
+  if (!supabaseAdmin) return [];
+  const now = Date.now();
+  const cutoff = new Date(now - withinDays * 86_400_000).toISOString();
   const { data, error } = await supabaseAdmin
     .from('outreachos_seen_employers')
-    .select('hh_employer_id, domain')
+    .select('hh_employer_id, domain, status, last_status_at')
     .gte('last_status_at', cutoff);
-  if (error || !data) return empty;
+  if (error || !data) return [];
+  return (data as SeenRow[]).filter((row) => isWithinSeenWindow(row, now, withinDays));
+}
+
+export async function loadRecentlySeen(withinDays = RECONTACT_AFTER_DAYS): Promise<RecentlySeen> {
   const ids = new Set<string>();
   const domains = new Set<string>();
-  for (const r of data as { hh_employer_id: string | null; domain: string | null }[]) {
+  for (const r of await loadActiveSeenRows(withinDays)) {
     if (r.hh_employer_id) ids.add(r.hh_employer_id);
     if (r.domain) domains.add(r.domain.toLowerCase());
   }
@@ -64,19 +80,12 @@ export async function loadRecentlySeen(withinDays = RECONTACT_AFTER_DAYS): Promi
  * Только домены seen-окна (без hh_employer_id) — лёгкий вариант loadRecentlySeen
  * для кросс-пайплайнного дедупа: gisSignalOutreach (§4.2 дизайн-дока top-up'а)
  * отсекает карточки, чей домен OutreachOS уже контактировал за окно.
- * Та же семантика окна (last_status_at >= now − withinDays), тот же fail-open
+ * Те же сроки по статусам, тот же fail-open
  * (сбой БД → пустой Set, как у loadRecentlySeen).
  */
 export async function loadRecentlySeenDomains(withinDays = RECONTACT_AFTER_DAYS): Promise<Set<string>> {
   const domains = new Set<string>();
-  if (!supabaseAdmin) return domains;
-  const cutoff = new Date(Date.now() - withinDays * 86_400_000).toISOString();
-  const { data, error } = await supabaseAdmin
-    .from('outreachos_seen_employers')
-    .select('domain')
-    .gte('last_status_at', cutoff);
-  if (error || !data) return domains;
-  for (const r of data as { domain: string | null }[]) {
+  for (const r of await loadActiveSeenRows(withinDays)) {
     if (r.domain) domains.add(r.domain.toLowerCase());
   }
   return domains;
