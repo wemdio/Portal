@@ -256,6 +256,14 @@ export function setVeActiveJobSignal(signal: AbortSignal | null): void {
   activeJobSignal = signal;
 }
 
+/**
+ * Only the job whose async context is running, never the single-flight global:
+ * with 16 parallel jobs a fallback would abort another job's database reads.
+ */
+export function getVeScopedJobSignal(): AbortSignal | null {
+  return jobSignals.getStore() ?? null;
+}
+
 /** Capture once per operation so late work cannot inherit the next job's signal. */
 export function getVeActiveJobSignal(): AbortSignal | null {
   return jobSignals.getStore() ?? activeJobSignal;

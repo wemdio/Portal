@@ -29,17 +29,19 @@
 
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop, startWorkerHeartbeat } from './_shared';
 import { markSegmentationAuditFailed, runVeStage } from '@/lib/verticalEngineV2/stages';
-import { withVeActiveJobSignal } from '@/lib/verticalEngineV2/llm';
-import { VeLlmRateLimitError } from '@/lib/verticalEngineV2/llmRateLimit';
+import { getVeScopedJobSignal, withVeActiveJobSignal } from '@/lib/verticalEngineV2/llm';
+import { createVeStageSupabase, describeVeStageDbActivity } from '@/lib/verticalEngineV2/stageDb';
+import { supabaseAdminFetchWithRetry } from '@/lib/supabaseAdmin';
 import { withVeCostTelemetry } from '@/lib/verticalEngineV2/costTelemetry';
 import { normalizeVeMarket } from '@/lib/verticalEngineV2/market';
-import {
-  isRetryableStageError,
-  maxAttemptsFor,
-  retryRunAfter,
-} from '@/lib/verticalEngineV2/jobRetry';
+import { clearVeJobInterruptions, planVeJobFailure, VE_JOB_FREE_INTERRUPTIONS } from '@/lib/verticalEngineV2/jobRetry';
 import { transitionVeJobFailure } from '@/lib/verticalEngineV2/jobFailureTransition';
-import { createVeJobShutdown, createVeJobWatchdog } from '@/lib/verticalEngineV2/workerLiveness';
+import {
+  createVeJobShutdown,
+  createVeJobWatchdog,
+  summarizeVeActiveResources,
+  VeJobInactivityError,
+} from '@/lib/verticalEngineV2/workerLiveness';
 import { claimVeJob, createVeJobPool, createVeProjectUsageAccumulator, veJobConcurrency } from '@/lib/verticalEngineV2/jobQueue';
 import { VePreviewCheckpointConflict } from '@/lib/verticalEngineV2/relevanceCheckpoint';
 import {
@@ -90,6 +92,19 @@ const HEARTBEAT_PATH = process.env.VE_WORKER_HEARTBEAT_PATH ?? '/tmp/vertical-en
 
 const log = createWorkerLogger(WORKER_ID);
 const db = requireSupabaseAdmin(log);
+/**
+ * Stages read and write through this client: headers must arrive and the body
+ * must keep moving within the deadline, and the job's abort releases the
+ * request. The shared `db` keeps the worker's own bookkeeping (cancel polls,
+ * failure transitions, usage journal), which must still work after a job was
+ * aborted.
+ */
+const stageDb = createVeStageSupabase({
+  url: process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  jobSignal: getVeScopedJobSignal,
+  fetchImpl: supabaseAdminFetchWithRetry,
+});
 const shouldStop = setupGracefulShutdown(log);
 
 /**
@@ -265,7 +280,11 @@ async function handleJob(job: VeJob) {
     reason: `VE2 ${job.stage} inactivity timeout`,
     // A cancel of one base must not recycle a process that runs 16 jobs.
     escalateExternalAbort: isResearch,
-    onTimeout: () => log('error', `Inactivity timeout: job ${job.id} (${job.stage}) after ${idleMs}ms; last activity: ${lastActivity}`),
+    // Where the job stood: its last log line, its database requests, and what
+    // the whole process is waiting on (sockets, DNS lookups, file reads).
+    onTimeout: () => log('error', `Inactivity timeout: job ${job.id} (${job.stage}) after ${idleMs}ms; `
+      + `last activity: ${lastActivity}; db: ${describeVeStageDbActivity(abort.signal)}; `
+      + `active resources: ${summarizeVeActiveResources()}`),
     onUnresponsive: (waitedMs) => {
       log('error', `Job ${job.id} (${job.stage}) ignored abort for ${waitedMs}ms; exiting without starting another job`);
       process.exit(1);
@@ -314,7 +333,7 @@ async function handleJob(job: VeJob) {
     if (isResearch) abort.signal.throwIfAborted();
 
     stageResult = await withVeActiveJobSignal(abort.signal, () => withVeCostTelemetry(db, job, () => runVeStage(job, {
-      supabase: db,
+      supabase: stageDb,
       market,
       signal: abort.signal,
       onCheckpoint: () => { watchdog.touch(); shutdown.checkpoint(); },
@@ -322,10 +341,17 @@ async function handleJob(job: VeJob) {
       log: (msg) => {
         lastActivity = msg.slice(0, 500);
         watchdog.touch();
-        log('info', `[${job.stage}] ${msg}`);
+        log('info', `[${job.stage} ${job.id.slice(0, 8)}] ${msg}`);
       },
     }), () => watchdog.touch()));
     if (isResearch) abort.signal.throwIfAborted();
+  } catch (error) {
+    // The inactivity guard aborted a silent stage: whatever the stage threw
+    // afterwards is that interruption, not a failure of its own.
+    if (abort.signal.reason instanceof VeJobInactivityError && !(error instanceof VePreviewCheckpointConflict)) {
+      throw abort.signal.reason;
+    }
+    throw error;
   } finally {
     // Deliberately guard execution, not the legacy non-atomic done→enqueue
     // finalization. Never kill between those writes as a recovery strategy.
@@ -352,10 +378,13 @@ async function handleJob(job: VeJob) {
     .maybeSingle();
   if (current && (current as { status: string }).status !== 'running') {
     const cancelled = (current as { status: string }).status === 'cancelled';
+    // This run ended normally, so earlier interruptions are no longer "in a row".
+    const payload = clearVeJobInterruptions(job.payload);
     // Evidence keeps cumulative usage in its durable checkpoint until the
     // entire stage finishes. A yield must not account it, finalize the job or
     // enqueue clustering; even a zero-usage bookkeeping write is unnecessary.
     if (job.stage === 'evidence' && (current as { status: string }).status === 'pending') {
+      if (payload) await db.from('ve_jobs').update({ payload }).eq('id', job.id);
       log('info', `Job ${job.id} (evidence) → yielded with saved checkpoint`);
       return;
     }
@@ -365,6 +394,7 @@ async function handleJob(job: VeJob) {
         tokens_used: (job.tokens_used ?? 0) + tokensUsed,
         cost_usd: Number(job.cost_usd ?? 0) + costUsd,
         updated_at: new Date().toISOString(),
+        ...(payload ? { payload } : {}),
       })
       .eq('id', job.id);
     await accumulateProjectUsage(job.project_id, tokensUsed, costUsd);
@@ -433,13 +463,13 @@ async function failJob(job: VeJob, err: unknown) {
     log('info', `Job ${job.id} (${job.stage}) aborted by user cancel`);
     return;
   }
-  // attempts — число фейлов, а не клеймов: инкремент только здесь.
-  const retryable = isRetryableStageError(msg);
-  const attemptCap = maxAttemptsFor(msg);
-  const rateLimit = err instanceof VeLlmRateLimitError ? err : undefined;
-  const nextAttempts = job.attempts + Number(!rateLimit?.deferred);
-  const finalFail = nextAttempts >= attemptCap;
-  log('error', `Job ${job.id} (${job.stage}) failed (attempt ${nextAttempts}/${attemptCap}${retryable ? ', retryable' : ''}): ${msg}`);
+  // attempts — число фейлов, а не клеймов: инкремент только здесь. Зависание
+  // и таймаут/обрыв запроса стадии к БД попытку не тратят (до предела подряд).
+  const plan = planVeJobFailure(job, err);
+  const finalFail = plan.status === 'failed';
+  log('error', plan.interruption?.free
+    ? `Job ${job.id} (${job.stage}) interrupted (${plan.interruption.count}/${VE_JOB_FREE_INTERRUPTIONS} in a row, attempt not spent): ${msg}`
+    : `Job ${job.id} (${job.stage}) failed (attempt ${plan.attempts}/${plan.attemptCap}${plan.retryable ? ', retryable' : ''}): ${msg}`);
 
   // Release the active-audit slot before the generic job transition. If the
   // process dies between these writes, a recovered old job sees terminal
@@ -450,14 +480,15 @@ async function failJob(job: VeJob, err: unknown) {
 
   const transition = await transitionVeJobFailure(db, {
     jobId: job.id,
-    status: finalFail ? 'failed' : 'pending',
-    attempts: nextAttempts,
+    status: plan.status,
+    attempts: plan.attempts,
     error: msg.slice(0, 500),
     finishedAt: finalFail ? new Date().toISOString() : null,
     // Транзиентные ошибки пережидаем с бэкоффом (run_after в будущем), чтобы
     // провайдер успел восстановиться; постоянные клеймим сразу, как раньше.
-    runAfter: retryRunAfter(nextAttempts, retryable, Date.now(), rateLimit, job.id),
+    runAfter: plan.runAfter,
     updatedAt: new Date().toISOString(),
+    ...(plan.payload ? { payload: plan.payload } : {}),
   });
   if (transition.error) throw new Error(`ve_jobs fail transition: ${transition.error}`);
   if (!transition.transitioned) {
@@ -536,7 +567,8 @@ const jobPool = createVeJobPool({
 async function main() {
   // Each active job installs and removes its own two shutdown listeners.
   if (process.getMaxListeners() > 0) process.setMaxListeners(Math.max(process.getMaxListeners(), JOB_CONCURRENCY + 8));
-  log('info', `Vertical Engine v2 worker starting (${JOB_CONCURRENCY} concurrent jobs; at most 4 independent bases per project)…`);
+  log('info', `Vertical Engine v2 worker starting (${JOB_CONCURRENCY} concurrent jobs; at most 4 independent bases per project; `
+    + `libuv pool ${process.env.UV_THREADPOOL_SIZE ?? '4 (default)'})…`);
 
   const heartbeat = startWorkerHeartbeat(HEARTBEAT_PATH);
   log('info', `Heartbeat ticker started → ${HEARTBEAT_PATH} (every 30s)`);

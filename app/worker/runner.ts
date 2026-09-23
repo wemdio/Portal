@@ -8,6 +8,19 @@
 
 const kind = String(process.env.WORKER_KIND ?? 'all').trim().toLowerCase();
 
+/**
+ * libuv reads UV_THREADPOOL_SIZE once, when the pool is first used; here no
+ * worker module has been loaded yet. VE2 runs up to 16 jobs whose website
+ * reads resolve dead domains (getaddrinfo holds a pool thread until the
+ * resolver gives up), while undici inflates every gzip database response on
+ * the same pool: with the default 4 threads a body of a few dozen bytes waits
+ * for as long as the pool stays busy (23.09.2026). An explicit value from the
+ * environment wins.
+ */
+if ((kind === 'verticalenginev2' || kind === 'vertical-engine-v2') && !process.env.UV_THREADPOOL_SIZE) {
+  process.env.UV_THREADPOOL_SIZE = '16';
+}
+
 function run(modulePath: string) {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   require(modulePath);
