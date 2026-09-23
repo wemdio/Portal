@@ -105,7 +105,8 @@ import { OKVED2_TREE, reduceToTopCodes } from '@/lib/companiesSearch/okved2';
 import { applyFundedFilters } from '@/lib/funded/queryFilters';
 import { buildRolesRegex } from '@/lib/parsers/atsFilters';
 import { domainToSiteUrl, resolveCompanyDomainViaPdl } from '@/lib/parsers/companyDomainResolver';
-import { readVeYandexCatalogPage, resolveVeYandexCatalogFilters, type VeYandexCatalogCheckpoint } from '../yandexCatalog';
+import { readVeYandexCatalogPage, resolveVeYandexCatalogFilters, veRuMapsUseCatalog, type VeYandexCatalogCheckpoint } from '../yandexCatalog';
+import { isVeLegacyMapsTask, isVeRenewableSourceTask, reopenVeSourceTask } from '../sourceRenewal';
 import { extractEmail, extractEmails } from '@/lib/tools/dfybUtils';
 import { applyVeSourceContacts, normalizeVeSourceContacts, hasPendingVeSourceContacts, pendingVeSourceContacts, recoverVeSourceContacts, countVeSourceDiscoveryContacts, evaluateVeSourceDiscoveryBudget, veSourceDiscoveryLimit, VE_SOURCE_DISCOVERY_NO_GROWTH_LIMIT, type VeSourceContactCheckpoint, type VeSourceDiscoveryBudget } from '../sourceContacts';
 import {
@@ -1012,7 +1013,10 @@ async function buildPlan(
   );
   addUsage(usage, llm);
 
-  const withCatalog = await ensureCatalogSource(ctx, llm.data, promptInput, usage, market);
+  // Рынок РФ: живой Google Maps заменяется готовым каталогом Яндекс Карт.
+  const ruMaps = market === 'us' ? null : veRuMapsUseCatalog(llm.data);
+  if (ruMaps?.replaced) stageLog(ctx, `[base_collect] план: ${ruMaps.replaced} задач Google Maps переведены на готовый каталог Яндекс Карт`);
+  const withCatalog = await ensureCatalogSource(ctx, ruMaps?.plan ?? llm.data, promptInput, usage, market);
   // Проба идёт ПОСЛЕ починки «каталога нет вовсе»: чинить нечего, пока задачи
   // не существует, а добавленный срез проверяется на общих основаниях.
   const { plan: probed, sliceProbe } = await ensureSliceMatchesVertical(
@@ -1747,7 +1751,7 @@ async function dispatchTask(
     if (!task.maps_query?.queries?.length) throw new Error('yandex_maps: в задаче нет maps_query.queries');
     if (!state.catalog) {
       const filters = await resolveVeYandexCatalogFilters({ db: ctx.supabase, query: task.maps_query,
-        signal: ctx.signal, onUsage: (used) => addUsage(usage, used) });
+        context: task.rationale, signal: ctx.signal, onUsage: (used) => addUsage(usage, used) });
       state.catalog = { version: 1, filters };
       await save(); // Reuse the resolved filter after a read failure/redeploy.
     }
@@ -2592,7 +2596,7 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
   const tasks = info.tasks ?? [];
   const consumed = buildBaseExclusionKeysFromRows(info.target_checkpoint?.seen_rows ?? []);
   const available = tasks.filter((task) => task.status !== 'failed' && (task.status !== 'done'
-    || ((!task.exhausted && !task.hit_ceiling) && (task.source === 'companies_directory' || !!task.catalog))
+    || isVeRenewableSourceTask(task)
     || (task.harvest ?? []).some((row) => (info.search_policy?.phase !== 'existing' || hasExistingSourceContact(row))
       && !baseRowMatchesExclusion(consumed, row))));
   const alternatives = available.filter((task) => veSourceStrategyKey(task.task) !== policy.active_source
@@ -3503,8 +3507,7 @@ async function readVeContactLimit(ctx: VeStageContext, job: VeJob, base: VeAutoB
 
 /** Источник ещё может дать кандидатов без нового плана. */
 function veTaskCanSupply(task: VeCollectTaskState): boolean {
-  return task.status === 'pending' || task.status === 'dispatched'
-    || ((task.source === 'companies_directory' || !!task.catalog) && task.status === 'done' && !task.exhausted && !task.hit_ceiling);
+  return task.status === 'pending' || task.status === 'dispatched' || isVeRenewableSourceTask(task);
 }
 
 /** Сбой чтения не снимает порог: тогда он ослабляется, как обоснованный. */
@@ -3617,9 +3620,9 @@ async function completeTargetRound(args: {
       ...('address' in row ? { address: cell(row.address) } : {}), ...('source_detail' in row ? { source_detail: cell(row.source_detail) } : {}) };
     seen.set(JSON.stringify(compact), compact);
   }
-  const renewableDirectory = tasks.some((task) =>
-    (task.source === 'companies_directory' || !!task.catalog) && task.status === 'done' && !task.exhausted && !task.hit_ceiling,
-  );
+  // Старая задача карт тоже продолжаема: следующий раунд читает её запросы
+  // из готового каталога (sourceRenewal).
+  const renewableDirectory = tasks.some(isVeRenewableSourceTask);
   const exhausted = !args.hasBufferedCandidates && tasks.length > 0 && tasks.every((task) =>
     (task.source === 'companies_directory' || !!task.catalog) && task.status === 'done' && task.exhausted && !task.hit_ceiling,
   );
@@ -3956,13 +3959,12 @@ async function completeTargetRound(args: {
     if (info.search_policy) delete info.search_policy.construct_rows;
     delete stats.finished_at;
     info.tasks = pipeline || info.adaptive_collection ? tasks : tasks.map((state) =>
-      (state.source === 'companies_directory' || !!state.catalog) && !state.exhausted && !state.hit_ceiling
+      ((state.source === 'companies_directory' || !!state.catalog) && !state.exhausted && !state.hit_ceiling)
+        || isVeLegacyMapsTask(state)
         // Закладку выдачи переносим вместе с задачей. Без неё следующий раунд
         // читает реестр с первой страницы и заново просматривает уже
         // просмотренные компании — ровно то, против чего закладка и вводилась.
-        ? { source: state.source, task: state.task, status: 'pending', child_job_id: null, rows: 0,
-          ...(state.catalog ? { catalog: state.catalog } : {}),
-          ...(state.directory_cursors ? { directory_cursors: state.directory_cursors } : {}) }
+        ? reopenVeSourceTask(state)
         : state,
     );
     info.limit = collectionRoundLimit(next);
@@ -4287,9 +4289,15 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     // candidates have all been consumed/reserved, never drop its unused tail.
     for (const state of tasks) {
       if (canAcquire && (info.preview_pipeline?.batches.length ?? 0) < PREVIEW_IN_FLIGHT
-        && (state.source === 'companies_directory' || !!state.catalog) && state.status === 'done' && !state.exhausted && !state.hit_ceiling
+        && isVeRenewableSourceTask(state)
         && !(state.harvest ?? []).some((row) => (!existingFirst || hasExistingSourceContact(row))
           && !baseRowMatchesExclusion(consumedKeys, row) && !baseRowMatchesExclusion(reservedKeys, row))) {
+        if (isVeLegacyMapsTask(state)) {
+          // Старая задача карт: её строки уже разобраны, дальше читаем каталог.
+          if (state.child_job_id) state.legacy_child_job_id = state.child_job_id;
+          state.child_job_id = null;
+          state.harvest = []; state.rows = 0;
+        }
         state.status = 'pending';
         if (state.catalog) { state.harvest = []; state.rows = 0; }
       }
