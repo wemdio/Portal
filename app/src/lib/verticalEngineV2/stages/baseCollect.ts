@@ -113,6 +113,7 @@ import {
   mergeVeSourceFactText, normalizeVeCompanyInn, normalizeVeCompanyName, normalizeVeWebsiteHost,
   veCompanyWebsiteKey, veAcquisitionReceipt,
 } from '../collectionIdentity';
+import { buildVeSeenCompanies, veSeenCompanyCovers, type VeSeenCompanies } from '../seenCompanies';
 import { getVeDirectorySegmentStats } from '../dossierData';
 import { callLLMWithSchema, getVeModel } from '../llm';
 import { projectMarket, type VeMarket } from '../market';
@@ -132,7 +133,8 @@ import { companyNameSource, isCompanyNameReady, VE_COMPANY_NAME_FIELD, type VeCo
 import { prepareSegmentationAudience } from '../segmentationAudit';
 import { isContactSupplyActive } from '../contactSupplyEligibility';
 import {
-  collectionRoundLimit, createCollectionTarget, finishCollectionRound, updateCollectionEstimate,
+  collectionRoundLimit, createCollectionTarget, finishCollectionRound, updateCollectionEstimate, veCollectionMaxRounds,
+  VE_COLLECTION_ROUND_BUDGET,
   VE_SOURCE_POPULATION_MAX_AGE_MS,
   VE_PREVIEW_FIRST_CANDIDATES,
   VE_PREVIEW_READY_TARGET,
@@ -1802,7 +1804,8 @@ async function dispatchTask(
     const second = existingContactsOnly && !first.error && (first.exhausted || first.hitCeiling) && first.rows.length < limit
       ? await fetchDirectoryRows(ctx, secondFilters, limit - first.rows.length,
         addRowsToExclusionKeys({ inns: new Set(excluded.inns), emails: new Set(excluded.emails),
-          receipts: new Set(excluded.receipts), websiteInns: new Map([...excluded.websiteInns].map(([key, values]) => [key, new Set(values)])) },
+          receipts: new Set(excluded.receipts), websiteInns: new Map([...excluded.websiteInns].map(([key, values]) => [key, new Set(values)])),
+          ...(excluded.seen ? { seen: excluded.seen } : {}) },
         first.rows.map(mapDirectoryRow)), readDirectoryCursor(state, secondFilters), keep) : null;
     const rows = [...first.rows, ...(second?.rows ?? [])];
     const excludedDuringFetch = first.excludedDuringFetch + (second?.excludedDuringFetch ?? 0);
@@ -2013,6 +2016,8 @@ async function pollTask(ctx: VeStageContext, state: VeCollectTaskState, limit: n
 export interface VeBaseExclusionKeys {
   /** Exact observations consumed by THIS base only, including rows without IDs. */
   receipts?: Set<string>;
+  /** Компании, уже отправленные ЭТОЙ базой, с их адресами и сайтами (seenCompanies.ts). */
+  seen?: VeSeenCompanies;
   /** Пара «имя + сайт» → ИНН'ы; пустая строка означает неизвестный ИНН. */
   websiteInns: Map<string, Set<string>>;
   /** Все ИНН других баз (матч «то же юрлицо, другое написание»). */
@@ -2050,11 +2055,15 @@ export function pruneBaseRowAgainstExclusion(
   if (keys.receipts?.has(veAcquisitionReceipt(row))) return null;
   if (baseRowMatchesCompanyExclusion(keys, row)) return null;
   const emails = extractEmails(row.email);
-  if (emails.length === 0) return row;
   const freshEmails = emails.filter((email) => !keys.emails.has(email));
-  if (freshEmails.length === 0) return null;
+  if (emails.length > 0 && freshEmails.length === 0) return null;
+  // Эта база уже отправляла компанию, а после вычёркивания занятых адресов
+  // строка не несёт ни нового адреса, ни нового сайта.
+  if (keys.seen && veSeenCompanyCovers(keys.seen, row, freshEmails)) return null;
   if (freshEmails.length === emails.length) return row;
-  return { ...row, email: freshEmails.join(', ') };
+  const pruned = { ...row, email: freshEmails.join(', ') };
+  // Отметка прошлого раунда записана на уже урезанную строку.
+  return keys.receipts?.has(veAcquisitionReceipt(pruned)) ? null : pruned;
 }
 
 /** Строка исключена целиком: занято юрлицо или все найденные email. */
@@ -2065,7 +2074,10 @@ export function baseRowMatchesExclusion(
   if (keys.receipts?.has(veAcquisitionReceipt(row))) return true;
   if (baseRowMatchesCompanyExclusion(keys, row)) return true;
   const emails = extractEmails(row.email);
-  return emails.length > 0 && emails.every((email) => keys.emails.has(email));
+  const freshEmails = emails.filter((email) => !keys.emails.has(email));
+  if (emails.length > 0 && freshEmails.length === 0) return true;
+  if (keys.seen && veSeenCompanyCovers(keys.seen, row, freshEmails)) return true;
+  return freshEmails.length < emails.length && !!keys.receipts?.has(veAcquisitionReceipt({ ...row, email: freshEmails.join(', ') }));
 }
 
 function normalizedUploadColumn(value: string): string {
@@ -2143,8 +2155,15 @@ export function buildBaseExclusionKeysFromRows(rows: unknown[]): VeBaseExclusion
   );
 }
 
+/** seen_rows только заменяется целиком, поэтому индекс одного checkpoint'а строится
+ * один раз за тик, а не на каждую сверку (17,8 тыс. отметок у b5934955). */
+const seenCompaniesByCheckpoint = new WeakMap<object, VeSeenCompanies>();
+
 function addAcquisitionReceipts(keys: VeBaseExclusionKeys, rows: Array<Partial<VeUnifiedRow>>, source: VeUnifiedRow[] = []): VeBaseExclusionKeys {
   keys.receipts = new Set(rows.map(veAcquisitionReceipt));
+  let seen = seenCompaniesByCheckpoint.get(rows);
+  if (!seen) seenCompaniesByCheckpoint.set(rows, seen = buildVeSeenCompanies(rows));
+  keys.seen = seen;
   const legacyMatches = new Map<string, VeUnifiedRow[]>();
   for (const row of source) {
     const legacy = veAcquisitionReceipt({ company: row.company, website: row.website, inn: row.inn, email: row.email });
@@ -2692,7 +2711,7 @@ const VE_NARROW_MARKET_MIN_PROJECTED = 100;
 const VE_NARROW_MARKET_MIN_COMPANIES = 300;
 const PREVIEW_BATCH_SIZE = 200;
 const PREVIEW_IN_FLIGHT = 2;
-const PREVIEW_MAX_BATCHES = 100;
+const PREVIEW_MAX_BATCHES = VE_COLLECTION_ROUND_BUDGET;
 
 /** One parent writer, at most two independently resumable constructor jobs. */
 async function preparePreviewBatches(args: {
@@ -3614,6 +3633,11 @@ async function completeTargetRound(args: {
       args.candidates.map((row) => ({ ...row, _ve_source_candidate: true }))),
   };
   info.relevance_summary = summarizeVeRelevanceReserve(reserveRows);
+  // Бюджет раундов расходует только раунд, отправивший в проверку что-то новое
+  // для базы. Повторный проход того же раунда (проверка, названия, резерв)
+  // считается, как и раньше, обычным раундом.
+  const priorAcquired = addAcquisitionReceipts(buildBaseExclusionKeysFromRows([]), prior?.seen_rows ?? []);
+  const idleRound = !validationRetry && args.candidates.every((row) => baseRowMatchesExclusion(priorAcquired, row));
   const seen = new Map<string, Partial<VeUnifiedRow> & Pick<VeUnifiedRow, 'company' | 'inn' | 'email' | 'website'>>();
   for (const row of [...(prior?.seen_rows ?? []), ...args.candidates, ...args.rows]) {
     const compact = { company: cell(row.company), inn: cell(row.inn), email: cell(row.email), website: cell(row.website),
@@ -3652,6 +3676,7 @@ async function completeTargetRound(args: {
       exhausted: reviewOnly ? false : exhausted && !discoveryPaused && !pendingDiscovery && pendingBatches.length === 0 && !pendingSources,
       canContinue: !reviewOnly && (args.hasBufferedCandidates || pendingDiscovery || renewableDirectory || pendingBatches.length > 0 || pendingSources),
       error: phaseError ?? pipeline?.error ?? null,
+      idle: idleRound,
     });
     // The other child is already paid for. Drain it even if this batch reaches
     // the goal or fails; do not orphan its results or start replacement work.
@@ -3798,12 +3823,13 @@ async function completeTargetRound(args: {
   const existingBuffered = tasks.some((task) => task.status === 'done' && (task.harvest ?? []).some((row) =>
     hasExistingSourceContact(row) && pruneBaseRowAgainstExclusion(freshKeys, row) !== null
       && !baseRowMatchesExclusion(consumedExisting, row)));
-  const acquisitionLimited = stats.rows_total >= progress.max_candidates || progress.round >= progress.max_rounds;
+  // Предел берём у итога раунда: холостой раунд его сдвигает (finishCollectionRound).
+  const acquisitionLimited = stats.rows_total >= progress.max_candidates || progress.round >= next.max_rounds;
   if (existingFirst && !reviewOnly && !continueSavedReview && !args.validationError && !taskError && !pipeline?.error
     && cleaned.summary.status === 'complete' && readyRows.length < progress.ready_target
     && !pendingSources && !pendingBatches.length && (acquisitionLimited || (!renewableDirectory && !existingBuffered))) {
     info.search_policy!.phase = 'paid';
-    const canAcquirePaid = stats.rows_total < progress.max_candidates && progress.round < progress.max_rounds
+    const canAcquirePaid = stats.rows_total < progress.max_candidates && progress.round < next.max_rounds
       && (tasks.some((task) => task.existing_contacts_only)
         || hasPendingVeSourceContacts(info.search_policy!.deferred_rows, info.source_contact_recovery));
     // The directory's previous exhaustion referred to its site/email lanes,
@@ -4097,8 +4123,9 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     if (isRefill || info.refill) throw new Error('Target collection cannot use legacy refill');
     if (!base.hypothesis_id || base.project_id !== job.project_id) throw new Error('Target collection requires a scoped hypothesis base');
     target = createCollectionTarget(mode, info.ready_target ?? job.payload?.ready_target as number | undefined);
-    target.max_rounds = PREVIEW_MAX_BATCHES;
     const previous = info.target_progress;
+    // Холостые раунды и «Продолжить подготовку» двигают предел базы вверх.
+    target.max_rounds = veCollectionMaxRounds(previous?.max_rounds);
     if (previous) {
       const firstRoundCandidates = previous.first_round_candidates ?? 2_000;
       if (!Number.isSafeInteger(previous.round) || previous.round < 1 || previous.round > target.max_rounds
@@ -4116,6 +4143,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       // already running for an older target (e.g. 1000 ready contacts).
       target.ready_target = previous.ready_target;
       target.first_round_candidates = firstRoundCandidates;
+      if (Number.isSafeInteger(previous.idle_streak) && previous.idle_streak! > 0) target.idle_streak = previous.idle_streak;
     }
     info.collection_mode = mode;
     info.ready_target = target.ready_target;
@@ -4315,7 +4343,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
         if (!info.preview_pipeline) return keys;
         // A separate set keeps reserved rows available to the import path.
         return addRowsToExclusionKeys({ inns: new Set(keys.inns), emails: new Set(keys.emails),
-          receipts: new Set(keys.receipts), websiteInns: new Map([...keys.websiteInns].map(([key, values]) => [key, new Set(values)])) },
+          receipts: new Set(keys.receipts), ...(keys.seen ? { seen: keys.seen } : {}),
+          websiteInns: new Map([...keys.websiteInns].map(([key, values]) => [key, new Set(values)])) },
         info.preview_pipeline.batches.flatMap((batch) => batch.rows));
       };
       // Расширенный срез берёт только компании с готовой почтой или сайтом:
@@ -4457,7 +4486,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     }
   }
   delete info.source_contact_discovery;
-  if (target && info.source_contact_recovery) target.max_rounds = PREVIEW_MAX_BATCHES;
+  if (target && info.source_contact_recovery) target.max_rounds = Math.max(target.max_rounds, PREVIEW_MAX_BATCHES);
   const considered = prepared.filter((row, index) => ownsLegacyInput
     || ((existingFirst ? hasExistingSourceContact(row) : hasExistingSourceContact(row) || !pendingSourceRows.has(interleaved[index]))
       // An unsuccessful lookup must not move empty source rows into another

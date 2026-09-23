@@ -4,6 +4,23 @@ export const VE_PREVIEW_READY_TARGET = 500;
 export const VE_PREVIEW_FIRST_CANDIDATES = 100;
 export const VE_COLLECTION_MAX_CANDIDATES = 10_000;
 export const VE_COLLECTION_MAX_ROUNDS = 5;
+/**
+ * Бюджет раундов сборки — защита от бесконечного цикла, а не цель. Раунд
+ * расходует его, только если отправил в проверку новые для базы компании:
+ * холостой (пустой или из уже проверенных) бюджет не тратит, но таких подряд
+ * допускается не больше VE_COLLECTION_MAX_IDLE_ROUNDS. «Продолжить подготовку»
+ * даёт новый бюджет от текущего раунда.
+ */
+export const VE_COLLECTION_ROUND_BUDGET = 100;
+export const VE_COLLECTION_MAX_IDLE_ROUNDS = 5;
+/** Санитарный потолок сохранённого предела: больше не бывает даже после продолжений. */
+export const VE_COLLECTION_ROUND_CEILING = 10_000;
+
+/** Сохранённый предел раундов базы; меньше бюджета (старые 5) или испорченный — бюджет. */
+export function veCollectionMaxRounds(stored: unknown): number {
+  return typeof stored === 'number' && Number.isSafeInteger(stored)
+    && stored > VE_COLLECTION_ROUND_BUDGET && stored <= VE_COLLECTION_ROUND_CEILING ? stored : VE_COLLECTION_ROUND_BUDGET;
+}
 export interface VeRemainingReadyEstimate {
   contacts: number;
   as_of: string;
@@ -104,6 +121,8 @@ export interface VeCollectionTargetProgress {
   max_candidates: number;
   /** Persisted per run so a redeploy never shrinks an in-flight constructor's input. */
   first_round_candidates?: number;
+  /** Холостых раундов подряд: без новых для базы компаний. */
+  idle_streak?: number;
   status: 'collecting' | 'target_reached' | 'exhausted' | 'limited' | 'error';
   reason?: string;
 }
@@ -135,17 +154,25 @@ export function collectionRoundLimit(progress: VeCollectionTargetProgress): numb
 
 export function finishCollectionRound(
   progress: VeCollectionTargetProgress,
-  result: { candidates: number; readyRows: number; exhausted: boolean; canContinue: boolean; error: string | null; validationRetry?: boolean },
+  result: {
+    candidates: number; readyRows: number; exhausted: boolean; canContinue: boolean; error: string | null; validationRetry?: boolean;
+    /** Раунд не отправил ни одной новой для базы компании (или был пустым). */
+    idle?: boolean;
+  },
 ): VeCollectionTargetProgress {
   const next = {
     ...progress, ready_rows: result.readyRows,
     candidates_processed: progress.candidates_processed + result.candidates,
   };
   delete next.reason;
+  delete next.idle_streak;
+  const idleStreak = result.idle ? (Number.isSafeInteger(progress.idle_streak) ? Math.max(0, progress.idle_streak!) : 0) + 1 : 0;
+  if (idleStreak) next.idle_streak = idleStreak;
   if (result.error) return { ...next, status: 'error', reason: result.error };
   if (result.readyRows >= progress.ready_target) return { ...next, status: 'target_reached' };
   if (result.exhausted) return { ...next, status: 'exhausted', reason: 'Источники выбранного плана исчерпаны' };
-  if (next.candidates_processed >= next.max_candidates || next.round >= next.max_rounds) {
+  // Холостой раунд бюджет раундов не расходует (см. VE_COLLECTION_ROUND_BUDGET).
+  if (next.candidates_processed >= next.max_candidates || (!result.idle && next.round >= next.max_rounds)) {
     return { ...next, status: 'limited', reason: 'Достигнут защитный предел кандидатов или раундов; цель ещё не набрана' };
   }
   if (!result.canContinue) {
@@ -160,5 +187,11 @@ export function finishCollectionRound(
       + 'но за раунд не набралось ни одного кандидата. Это остановка по пустому раунду, а не доказательство, '
       + 'что подходящие компании кончились' };
   }
-  return { ...next, round: next.round + 1, status: 'collecting' };
+  if (idleStreak >= VE_COLLECTION_MAX_IDLE_ROUNDS) {
+    return { ...next, status: 'limited', reason: `${idleStreak} проходов подряд не принесли ни одной новой компании: `
+      + 'источники отдают только уже проверенные. Сбор остановлен, чтобы не ходить по кругу; это не доказательство, '
+      + 'что подходящие компании кончились' };
+  }
+  const maxRounds = result.idle ? Math.min(VE_COLLECTION_ROUND_CEILING, next.max_rounds + 1) : next.max_rounds;
+  return { ...next, round: next.round + 1, max_rounds: maxRounds, status: 'collecting' };
 }
