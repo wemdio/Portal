@@ -3065,3 +3065,120 @@ describe('base_collect: старая задача карт продолжает�
     expect(db.rpcCalls.some((call) => call.fn === 'yandex_maps_catalog_search')).toBe(false);
   });
 });
+
+describe('base_collect: круг повторной отправки одних и тех же компаний', () => {
+  // Настоящие строки базы b5934955 «Промышленное производство» (аудит 22.09):
+  // 91 партия подряд уходили 2–3 из этих компаний, ни одного нового контакта.
+  const ALROSA = unifiedRow({ company: 'АК "АЛРОСА" (ПАО)', inn: '1433000147',
+    email: 'info@alrosa.ru, merkav@rambler.ru, slobodyanyukme@alrosa.ru',
+    website: 'zakupki.alrosa.ru, alrosa.ru, alois.ru, metallokonstrukcii.alois.ru, alois-kovka.ru',
+    source_detail: 'реестр', address: '678174, Респ. Саха, г. Мирный, ул. Ленина' });
+  // Соседняя база проекта beaee143: та же АЛРОСА под другим названием и без ИНН.
+  const NEIGHBOUR = { company: 'АЛРОСА', inn: '', email: 'info@alrosa.ru',
+    website: 'https://www.alrosa.ru/hr/pochemu-alrosa/', address: 'Мирный (Республика Саха (Якутия))', _email_status: 'ok' };
+  const KREZOL = unifiedRow({ company: 'ООО "КРЕЗОЛ-НЕФТЕСЕРВИС"', inn: '0273094417',
+    email: 'kns@krezol.ru, l.kuzmina@krezol.ru, df@krezol.ru', website: 'krezol-ns.ru', source_detail: 'реестр',
+    address: '450027, г. Уфа, ул. Трамвайная' });
+  const HERGU = unifiedRow({ company: 'ООО "ХЭРГУ"', inn: '2825000414',
+    email: 'amur-gold@mail.ru, callcentreblg@mail.ru, rabota.rosszoloto@bk.ru', website: 'rosszoloto.ru',
+    source_detail: 'реестр', address: '675002, Амурская обл., г. Благовещенск' });
+  // Адрес ХЭРГУ уже стоит в готовой базе у другой компании этой же базы.
+  const OWN_READY = { ...unifiedRow({ company: 'АО "Росзолото"', inn: '2801000001', email: 'rabota.rosszoloto@bk.ru',
+    website: 'rosszoloto.ru' }), _email_status: 'ok',
+  _ve_company_name: { version: 1, source: 'АО "Росзолото"', website: 'rosszoloto.ru', status: 'ready', value: 'Росзолото' } };
+  const FRESH = unifiedRow({ company: 'ООО "УРАЛМЕТ"', inn: '6670000001', email: 'info@uralmet.test',
+    website: 'uralmet.test', source_detail: 'реестр' });
+  // Строка карт без ИНН и без сайта: узнаётся только по отметке урезанной строки.
+  const CAFE = unifiedRow({ company: 'Кафе Уют', email: 'info@uyut.test, booking@uyut.test',
+    address: 'Казань, ул. Баумана, 1', source_detail: 'Яндекс Карты' });
+  const constructorCompanies = (db: MockSupabaseClient) => db.getRows('base_constructor_jobs')
+    .flatMap((job) => (job.data as string[][]).slice(1).map((row) => row[0]));
+
+  it('компания с адресом, занятым другой базой, и сырой вариант уже отправленной строки не уходят снова', async () => {
+    // Так движок отправил эти строки в прошлых раундах: АЛРОСА — без занятого
+    // соседями адреса и с обработанным сайтом; «Крезол» — сырой (партия №5);
+    // ХЭРГУ — отметкой старого формата из четырёх полей.
+    const sentAlrosa = pruneBaseRowAgainstExclusion(buildBaseExclusionKeysFromRows([NEIGHBOUR]), normalizeVeSourceContacts(ALROSA))!;
+    expect(sentAlrosa).toMatchObject({ email: 'merkav@rambler.ru, slobodyanyukme@alrosa.ru',
+      website: 'https://zakupki.alrosa.ru/, https://alrosa.ru/, https://alois.ru/' });
+    const sentHergu = normalizeVeSourceContacts({ ...HERGU, email: 'amur-gold@mail.ru, callcentreblg@mail.ru' });
+    const legacyHergu = { company: sentHergu.company, inn: sentHergu.inn, email: sentHergu.email, website: sentHergu.website };
+    const cafeNeighbour = { company: 'Уют', email: 'info@uyut.test', _email_status: 'ok' };
+    const sentCafe = { ...CAFE, email: 'booking@uyut.test' };
+    const info: VeCollectInfo = { ...collectInfo([ALROSA, KREZOL, HERGU, CAFE, FRESH]), collection_mode: 'preview',
+      target_progress: { ...createCollectionTarget('preview'), round: 11, candidates_processed: 900, ready_rows: 1 },
+      target_checkpoint: { completed_round: 10, seen_rows: [sentAlrosa, KREZOL, legacyHergu, sentCafe], processed_rows: 4 } };
+    info.tasks![0].exhausted = true;
+    const db = seed(info, { ve_bases: [{ ...makeBase(info), data: [OWN_READY], row_count: 1, columns: [...VE_AUTO_COLLECT_COLUMNS] },
+      { ...makeBase({}), id: 'beaee143', hypothesis_id: 'h2', status: 'analyzed', columns: [...VE_AUTO_COLLECT_COLUMNS],
+        data: [NEIGHBOUR, cafeNeighbour] }] });
+    await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
+    expect(constructorCompanies(db)).toEqual([FRESH.company]);
+  });
+
+  it('холостой раунд не тратит бюджет раундов, а несколько холостых подряд честно останавливают сбор', () => {
+    const atLimit = { ...createCollectionTarget('preview'), round: 100, max_rounds: 100, candidates_processed: 1414, ready_rows: 83 };
+    const round = { readyRows: 83, exhausted: false, canContinue: true, error: null };
+    // Раунд с новыми компаниями на пределе по-прежнему последний.
+    expect(finishCollectionRound(atLimit, { ...round, candidates: 3 }))
+      .toMatchObject({ status: 'limited', reason: expect.stringContaining('защитный предел') });
+    // Холостой раунд (ничего нового или пусто) бюджет не расходует.
+    const idle = finishCollectionRound(atLimit, { ...round, candidates: 0, validationRetry: true, idle: true } as Parameters<typeof finishCollectionRound>[1]);
+    expect(idle).toMatchObject({ status: 'collecting', round: 101, max_rounds: 101 });
+    // Защита от бесконечного круга: холостые раунды подряд ограничены.
+    let progress = idle;
+    let idleRounds = 1;
+    while (progress.status === 'collecting' && idleRounds < 50) {
+      progress = finishCollectionRound(progress, { ...round, candidates: 0, validationRetry: true, idle: true } as Parameters<typeof finishCollectionRound>[1]);
+      idleRounds += 1;
+    }
+    expect(idleRounds).toBeLessThanOrEqual(10);
+    expect(progress).toMatchObject({ status: 'limited', reason: expect.stringContaining('подряд') });
+    expect(progress.reason).toContain('не принесли ни одной новой компании');
+    // Раунд с новыми компаниями сбрасывает счёт холостых.
+    const fresh = finishCollectionRound({ ...idle, round: 50, max_rounds: 100 }, { ...round, candidates: 40 });
+    expect(fresh).toMatchObject({ status: 'collecting', round: 51, max_rounds: 100 });
+    expect(finishCollectionRound(fresh, { ...round, candidates: 0, validationRetry: true, idle: true } as Parameters<typeof finishCollectionRound>[1]))
+      .toMatchObject({ status: 'collecting', round: 52, max_rounds: 101 });
+  });
+
+  it('analyzed-база на пределе раундов с живым реестром после «Продолжить подготовку» получает новый бюджет и открывает раунд', async () => {
+    const processed = [
+      unifiedRow({ company: 'Завод Прогресс', inn: '7700000411', website: 'progress.test', email: 'info@progress.test', source_detail: 'реестр' }),
+      unifiedRow({ company: 'Литейный завод Урал', inn: '7700000412', website: 'lit-ural.test', email: 'sales@lit-ural.test', source_detail: 'реестр' }),
+    ];
+    const ready = processed.map((row) => ({ ...row, _email_status: 'ok',
+      _ve_company_name: { version: 1, source: row.company, website: row.website, status: 'ready', value: row.company } }));
+    const info: VeCollectInfo = { ...collectInfo(processed), collection_mode: 'preview', ready_target: 500,
+      adaptive_collection: newVeAdaptiveCollection(), search_policy: { version: 1, phase: 'paid', deferred_rows: [] },
+      // Состояние b5934955 после круга: 100 из 100 раундов, реестр не исчерпан.
+      target_progress: { ...createCollectionTarget('preview'), status: 'limited', round: 100, max_rounds: 100,
+        candidates_processed: 1414, ready_rows: ready.length, reason: 'Достигнут защитный предел кандидатов или раундов; цель ещё не набрана' },
+      target_checkpoint: { completed_round: 100, seen_rows: processed, processed_rows: processed.length } };
+    const db = seed(info, { ve_bases: [{ ...makeBase(info), status: 'analyzed', data: ready, row_count: ready.length,
+      columns: [...VE_AUTO_COLLECT_COLUMNS] }] });
+    await db.from('ve_jobs').update({ status: 'done' }).eq('id', makeJob().id);
+    expect(canResumePartialPreview(db.getRows('ve_bases')[0])).toBe(true);
+    await expect(enqueueVeBaseCollect(db as unknown as SupabaseClient, { projectId: 'p1', verticalId: 'v1',
+      verticalName: VERTICAL.name, hypothesisIds: ['h1'], collectionMode: 'preview', limit: 2000, resumeBaseId: 'b1' }))
+      .resolves.toMatchObject({ ok: true, created: true });
+    expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).target_progress?.max_rounds).toBeGreaterThanOrEqual(200);
+    const wake = async () => {
+      const queued = db.getRows('ve_jobs').filter((row) => row.stage === 'base_collect' && row.status === 'pending').at(-1)!;
+      await db.from('ve_jobs').update({ status: 'running' }).eq('id', queued.id);
+      await runBaseCollectStage({ ...makeJob(), id: queued.id as string, payload: queued.payload as VeJob['payload'] },
+        { supabase: db as unknown as SupabaseClient });
+      return db.getRows('ve_bases')[0];
+    };
+    let base = await wake();
+    expect(base.status).toBe('collecting');
+    expect((base.collect_info as VeCollectInfo).target_progress).toMatchObject({ status: 'collecting', round: 101 });
+    // Следующий раунд читает реестр дальше и отдаёт новую компанию в конструктор.
+    jest.mocked(searchRows).mockResolvedValue({ rows: [
+      { name: 'Завод Новый', inn: '7700000413', email: 'info@novy.test', website: 'novy.test', employees_count: 120, revenue: 900_000_000 },
+    ] });
+    base = await wake();
+    expect(base.status).toBe('collecting');
+    expect(constructorCompanies(db)).toEqual(['Завод Новый']);
+  });
+});
