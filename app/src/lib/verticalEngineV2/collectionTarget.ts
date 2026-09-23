@@ -23,6 +23,10 @@ export function veCollectionMaxRounds(stored: unknown): number {
 }
 export interface VeRemainingReadyEstimate {
   contacts: number;
+  /** Новых компаний, на которые придутся эти контакты; рядом с контактами. */
+  companies?: number;
+  /** Непросмотренных компаний, оставшихся в измеренном срезе источника. */
+  remaining_companies?: number;
   as_of: string;
   scope: string;
   confidence: 'low';
@@ -31,6 +35,9 @@ export interface VeRemainingReadyEstimate {
   source_population?: number;
   candidates_processed?: number;
   ready_rows?: number;
+  /** Сколько из обработанных компаний входит в измеренный срез. */
+  processed_in_population?: number;
+  ready_companies?: number;
 }
 
 export interface VeObservedContactYield {
@@ -38,6 +45,8 @@ export interface VeObservedContactYield {
   ready: number;
   contacts_per_candidate: number;
   as_of: string;
+  /** Компаний с готовым контактом. Absent on legacy observations. */
+  ready_companies?: number;
 }
 
 export interface VeCollectionEstimate {
@@ -49,6 +58,18 @@ export interface VeCollectionEstimate {
   population_as_of?: string;
   population_filters?: string;
   population_matches_source?: boolean;
+  /**
+   * 'plan_union' — объединение реестровых срезов плана тем же условием, что и
+   * выборка (ve_directory_plan_population). Старые оценки без поля считались
+   * другим условием и пересчитываются при следующей партии.
+   */
+  population_method?: 'plan_union';
+  /** Компаний среза, ещё не взятых другими базами проекта: основа прогноза. */
+  available_companies?: number | null;
+  /** Компаний в каждом реестровом срезе плана, по порядку задач. */
+  slice_companies?: number[];
+  /** Источники плана без размера (карты, вакансии): в прогноз не входят. */
+  unsized_sources?: string[];
   note?: string;
   estimate_reason?: string;
   observed_yield?: VeObservedContactYield | null;
@@ -57,55 +78,96 @@ export interface VeCollectionEstimate {
 
 export const VE_SOURCE_POPULATION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
+const VE_REMAINING_SCOPE = 'Считаются компании реестра под условия гипотезы, без повторов и без компаний других баз проекта. '
+  + 'Это прогноз по текущему выходу, а не гарантированный остаток.';
+
 /** Observed-yield scenario, not an inventory count or confidence interval. */
 export function estimateRemainingReady(input: {
   population: number | null; candidatesProcessed: number; readyRows: number; eligible: boolean; asOf: string;
   populationAsOf?: string;
+  /** Компании среза, уже просмотренные базой. Без поля — все обработанные. */
+  processedInPopulation?: number;
+  /** Компаний с готовым контактом: прогноз в компаниях рядом с контактами. */
+  readyCompanies?: number;
+  scope?: string;
 }): VeRemainingReadyEstimate | null {
+  const seen = input.processedInPopulation ?? input.candidatesProcessed;
   if (!input.eligible || !Number.isSafeInteger(input.population) || input.population === null
     || !Number.isSafeInteger(input.candidatesProcessed) || input.candidatesProcessed < 100
-    || input.population < input.candidatesProcessed || !Number.isSafeInteger(input.readyRows) || input.readyRows <= 0
+    || !Number.isSafeInteger(seen) || seen < 0 || input.population < seen
+    || !Number.isSafeInteger(input.readyRows) || input.readyRows <= 0
     || !Number.isFinite(Date.parse(input.asOf))) return null;
-  const contacts = Math.round((input.population - input.candidatesProcessed) * input.readyRows / input.candidatesProcessed);
+  // Остаток — компании, на которые база ещё не смотрела, а выход — готовые
+  // контакты на обработанную компанию: охват, а не лишние адреса тех же компаний.
+  const remaining = input.population - seen;
+  const contacts = Math.round(remaining * input.readyRows / input.candidatesProcessed);
   if (!Number.isSafeInteger(contacts) || contacts < 0) return null;
+  const readyCompanies = Number.isSafeInteger(input.readyCompanies) && input.readyCompanies! >= 0 ? input.readyCompanies : undefined;
   return {
     contacts,
+    ...(readyCompanies !== undefined ? { companies: Math.round(remaining * readyCompanies / input.candidatesProcessed) } : {}),
+    remaining_companies: remaining,
     as_of: input.asOf, confidence: 'low',
-    scope: 'Один реестровый срез при сохранении наблюдаемого выхода после проверок; сценарий, не подтверждённый остаток',
+    scope: input.scope ?? 'Один реестровый срез при сохранении наблюдаемого выхода после проверок; сценарий, не подтверждённый остаток',
     ...(input.populationAsOf ? {
       population_as_of: input.populationAsOf, source_population: input.population,
       candidates_processed: input.candidatesProcessed, ready_rows: input.readyRows,
+      ...(input.processedInPopulation !== undefined ? { processed_in_population: input.processedInPopulation } : {}),
+      ...(readyCompanies !== undefined ? { ready_companies: readyCompanies } : {}),
     } : {}),
   };
 }
 
-/** A completed cohort changes the forecast; UI polling never buys new data. */
+/** Размер среза, по которому можно прогнозировать: посчитан условием выборки. */
+export function veEstimatePopulation(estimate: VeCollectionEstimate | null | undefined): number | null {
+  if (!estimate || estimate.version !== 2 || estimate.population_method !== 'plan_union'
+    || estimate.population_matches_source !== true) return null;
+  const value = estimate.available_companies ?? estimate.unique_companies;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+/**
+ * Прогноз пересчитывается на каждой партии по всем обработанным компаниям.
+ * Раньше он считался только на полностью проверенной партии, а база почти
+ * всегда заканчивается на оборванной — число не появлялось никогда (68 баз из
+ * 83 на 22.09.2026). UI polling never buys new data.
+ */
 export function updateCollectionEstimate(estimate: VeCollectionEstimate, input: {
-  candidates: number; ready: number; complete: boolean; identitiesComplete: boolean;
-  externalExclusions: boolean; asOf: string;
+  /** Все обработанные базой компании: знаменатель выхода. */
+  candidates: number;
+  /** Из них компании реестра (с ИНН): они уже вычтены из остатка среза. */
+  sourceCandidates: number;
+  /** Готовые контакты в единицах цели: лишние адреса одной компании рынок не расширяют. */
+  ready: number;
+  readyCompanies: number;
+  /** Последняя партия проверена полностью. Незавершённая оценку не отменяет. */
+  complete: boolean;
+  asOf: string;
 }): VeCollectionEstimate {
   const validCounts = Number.isSafeInteger(input.candidates) && input.candidates > 0
     && Number.isSafeInteger(input.ready) && input.ready >= 0;
-  const observed = input.complete && validCounts ? {
+  const observed = validCounts ? {
     candidates: input.candidates, ready: input.ready, contacts_per_candidate: input.ready / input.candidates, as_of: input.asOf,
+    ...(Number.isSafeInteger(input.readyCompanies) && input.readyCompanies >= 0 ? { ready_companies: input.readyCompanies } : {}),
   } : null;
-  const populationTime = Date.parse(estimate.population_as_of ?? '');
-  const age = Date.parse(input.asOf) - populationTime;
-  const reason = !input.complete ? 'Проверка текущей партии ещё не завершена.'
-    : !input.identitiesComplete ? 'Недостаточно идентификаторов компаний для сопоставления выборки и источника.'
-      : input.externalExclusions ? 'Нельзя точно вычесть пересечения с ранее собранными базами из остатка источника.'
-        : estimate.version !== 2 || !estimate.population_matches_source || estimate.unique_companies === null
-          ? estimate.note ?? 'Размер сопоставимого источника пока неизвестен.'
-          : !Number.isFinite(age) || age < 0 || age > VE_SOURCE_POPULATION_MAX_AGE_MS
-            ? 'Счётчик источника требует обновления при следующей партии.'
-            : !validCounts || input.candidates < 100 ? 'Для оценки нужно проверить не менее 100 компаний.'
-              : input.ready === 0 ? 'Пока нет готовых контактов для оценки выхода.'
-                : estimate.unique_companies < input.candidates ? 'Счётчик источника меньше обработанной выборки; требуется сверка.' : null;
+  const population = veEstimatePopulation(estimate);
+  const age = Date.parse(input.asOf) - Date.parse(estimate.population_as_of ?? '');
+  const reason = population === null ? estimate.note ?? 'Размер сопоставимого источника пока неизвестен.'
+    : !Number.isFinite(age) || age < 0 || age > VE_SOURCE_POPULATION_MAX_AGE_MS
+      ? 'Счётчик источника требует обновления при следующей партии.'
+      : !validCounts || input.candidates < 100 ? 'Для оценки нужно проверить не менее 100 компаний.'
+        : input.ready === 0 ? 'Пока нет готовых контактов для оценки выхода.'
+          : population < input.sourceCandidates ? 'Счётчик источника меньше обработанной выборки; требуется сверка.' : null;
+  const scope = [VE_REMAINING_SCOPE,
+    estimate.unsized_sources?.length ? `В прогноз не входят источники без размера рынка: ${estimate.unsized_sources.join(', ')}.` : '',
+    input.complete ? '' : 'Последняя партия проверена не полностью, поэтому прогноз может быть занижен.',
+  ].filter(Boolean).join(' ');
   return {
     ...estimate, observed_yield: observed,
     remaining_ready_estimate: reason ? null : estimateRemainingReady({
-      population: estimate.unique_companies, candidatesProcessed: input.candidates, readyRows: input.ready,
-      eligible: true, asOf: input.asOf, populationAsOf: estimate.population_as_of,
+      population, candidatesProcessed: input.candidates, processedInPopulation: input.sourceCandidates,
+      readyRows: input.ready, readyCompanies: input.readyCompanies,
+      eligible: true, asOf: input.asOf, populationAsOf: estimate.population_as_of, scope,
     }),
     estimate_reason: reason ?? undefined,
   };
