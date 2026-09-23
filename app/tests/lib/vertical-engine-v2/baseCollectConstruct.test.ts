@@ -14,8 +14,6 @@
 
 jest.mock('@/lib/companiesSearch/rpcSearch', () => ({
   searchRows: jest.fn(),
-  // Точная сверка размера среза: без неё population_matches_source всегда
-  // false, и прогноз по размеру рынка не считается.
   searchCount: jest.fn(async () => ({ count: 9_120 })),
 }));
 
@@ -197,19 +195,15 @@ function seed(
       ...extraTables,
     },
     rpcHandlers: {
-      ve_directory_segment_stats: () => ({
+      // Размер реестровой части плана — тем же условием, что и выборка.
+      ve_directory_plan_population: () => ({
         data: {
           directory_rows_total: 9_120,
           companies_unique_total: 8_410,
-          // Known-any-row contact counts are dossier semantics.
-          companies_with_email: 7_000,
-          companies_with_phone: 7_250,
-          companies_with_any_contact: 7_900,
-          // Exact-plan estimate must use contacts on rows that themselves
-          // match the hypothesis filters.
-          matched_companies_with_email: 6_842,
-          matched_companies_with_phone: 7_105,
-          matched_companies_with_any_contact: 7_700,
+          companies_available: 8_410,
+          companies_with_email: 6_842,
+          companies_with_phone: 7_105,
+          slice_companies: [8_410],
         },
       }),
     },
@@ -912,7 +906,10 @@ describe('base_collect CONSTRUCT step order', () => {
     const expectedTask = { ...proposed, directory_filters: { ...proposed.directory_filters, includeIp: false } };
     expect(replanned.tasks?.at(-1)?.task).toEqual(expectedTask);
     expect(replanned.adaptive_collection).toMatchObject({ replan_attempts: 1, active_source: veSourceStrategyKey(expectedTask) });
-    expect(replanned.estimate?.unique_companies).toBeNull();
+    // Размер пересчитан одним вызовом по объединению прежнего и нового срезов;
+    // прежний прогноз к новому плану не переносится.
+    expect(replanned.estimate?.remaining_ready_estimate ?? null).toBeNull();
+    expect(replanDb.rpcCalls.filter((call) => call.fn === 've_directory_plan_population').at(-1)?.params.p_slices).toHaveLength(2);
     const planCalls = jest.mocked(callLLMWithSchema).mock.calls.length;
     expect(jest.mocked(callLLMWithSchema).mock.calls.at(-1)?.[2]).toEqual({ model: 'test-collection-model' });
     await replanDb.from('ve_jobs').update({ status: 'running' }).eq('id', makeJob().id);
@@ -1366,15 +1363,16 @@ describe('base_collect CONSTRUCT step order', () => {
 
     await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
 
+    // Размер среза — тем же условием, что и выборка (точный ОКВЭД с запасным),
+    // а не приблизительным ОКВЭД ve_directory_segment_stats.
     expect(db.rpcCalls).toEqual([
       {
-        fn: 've_directory_segment_stats',
-        params: expect.objectContaining({
-          p_okved_prefixes: ['86.1', '86.2', '86.9'],
-          p_include_ip: false,
+        fn: 've_directory_plan_population',
+        params: {
           // Email is a funnel output here, not a filter on the population.
-          p_require_email: false,
-        }),
+          p_slices: [{ okved_prefixes: ['86.1', '86.2', '86.9'], region_codes: null, include_ip: false, has_email: false }],
+          p_exclude_inns: null,
+        },
       },
     ]);
     const estimatePatch = db.updates.find((update) => {
@@ -1383,9 +1381,12 @@ describe('base_collect CONSTRUCT step order', () => {
     });
     expect((estimatePatch?.patch.collect_info as VeCollectInfo).estimate).toMatchObject({
       unique_companies: 8_410,
+      available_companies: 8_410,
       companies_with_email: 6_842,
       companies_with_phone: 7_105,
       directory_rows_total: 9_120,
+      population_method: 'plan_union',
+      population_matches_source: true,
     });
 
     // Catalog sources use the stored dictionary and a read-only cursor RPC.
@@ -1984,25 +1985,40 @@ describe('base_collect CONSTRUCT import', () => {
     expect(info.company_contact_cap).toMatchObject({ limit: 5, over_cap_rows: 632, companies: 39 });
   });
 
-  // Второй раунд по уже измеренному срезу источника: 900 компаний обработано,
-  // в срезе uniqueCompanies. Возвращает итог раунда.
-  const narrowPlants = Array.from({ length: 320 }, (_, i) => unifiedRow({
-    company: `Завод ${i}`, website: `plant${i}.test`, email: `mail@plant${i}.test`, inn: `77000200${i}`,
+  // Очередная партия в сотню компаний по уже измеренному срезу источника; в
+  // срезе uniqueCompanies. Возвращает итог раунда.
+  const narrowPlants = Array.from({ length: 100 }, (_, i) => unifiedRow({
+    company: `Завод ${i}`, website: `plant${i}.test`, email: `mail@plant${i}.test`, inn: `77${String(i).padStart(8, '0')}`,
     source_detail: 'Производит промышленные насосы на собственной площадке.',
   }));
-  const runNarrowMarketRound = async (uniqueCompanies: number, constructorRows: string[][]) => {
+  // Компании, проверенные прежними партиями: партия берёт не больше сотни, а
+  // правило узкого рынка смотрит на все обработанные компании базы.
+  const priorPlants = Array.from({ length: 220 }, (_, i) => unifiedRow({
+    company: `Прежний завод ${i}`, website: `prior${i}.test`, inn: `78${String(i).padStart(8, '0')}`, source_detail: 'реестр' }));
+  const narrowHistory = (widenings: number): Partial<VeCollectInfo> => ({
+    adaptive_collection: { ...newVeAdaptiveCollection(), widenings },
+    relevance_reserve: { version: 1, rows: [], source_rows: priorPlants },
+  });
+  // Срез уже расширялся дважды: расширять автоматически больше нечем.
+  const noWidening = narrowHistory(2);
+  const populationReply = (unique: number, available = unique, slices = [unique]) => ({ data: {
+    directory_rows_total: unique, companies_unique_total: unique, companies_available: available,
+    companies_with_email: unique, companies_with_phone: unique, slice_companies: slices } });
+  const runNarrowMarket = async (population: ReturnType<typeof populationReply>, constructorRows: string[][],
+    extra: Partial<VeCollectInfo> = noWidening, otherBases: Array<Record<string, unknown>> = []) => {
     const info: VeCollectInfo = {
       ...collectInfo(narrowPlants, { bc_job_id: 'bc-narrow', status: 'dispatched', dispatched_at: '2026-09-20T00:00:00Z' }),
       collection_mode: 'preview', ready_target: 500,
       target_progress: { ...createCollectionTarget('preview'), round: 2, candidates_processed: 900 },
       target_checkpoint: { completed_round: 1, seen_rows: [], processed_rows: 900, low_relevance: 0, relevance_unchecked: 0 },
-      // Срез источника уже измерен: столько компаний всего сопоставимо плану.
-      estimate: { version: 2, unique_companies: uniqueCompanies, companies_with_email: uniqueCompanies,
-        population_matches_source: true, population_as_of: new Date().toISOString() },
+      // Прежняя оценка: посчитана до исправления, при сборке пересчитается.
+      estimate: { version: 2, unique_companies: 0, companies_with_email: 0,
+        population_matches_source: false, population_as_of: new Date().toISOString() },
       stats: { tasks_total: 1, tasks_done: 1, tasks_failed: 0, rows_total: 900, excluded_existing_bases: 0, excluded_during_fetch: 0 },
+      ...extra,
     };
     const db = createMockSupabase({ tables: {
-      ve_bases: [makeBase(info)], ve_verticals: [VERTICAL], ve_projects: [PROJECT],
+      ve_bases: [makeBase(info), ...otherBases], ve_verticals: [VERTICAL], ve_projects: [PROJECT],
       ve_hypotheses: [{ id: 'h1', project_id: 'p1', vertical_id: 'v1', title: 'Сети частных клиник',
         description: 'Частные клиники с собственным сайтом и действующим бизнесом.', status: 'accepted' }],
       ve_jobs: [makeJob() as unknown as Record<string, unknown>],
@@ -2010,37 +2026,35 @@ describe('base_collect CONSTRUCT import', () => {
         selected_steps: ['find_emails', 'split_emails', 'dedup_email', 'validate_emails'],
         data: [['Компания', 'Сайт', 'Email', 'ИНН', 'Email Статус'], ...constructorRows],
         result_stats: { total_rows: constructorRows.length, emails_found: constructorRows.length } }],
-    }, rpcHandlers: {
-      // Тот же срез реестра, но разного размера: узкий и широкий рынок.
-      ve_directory_segment_stats: () => ({ data: { directory_rows_total: 9_120, companies_unique_total: uniqueCompanies,
-        companies_with_email: uniqueCompanies, companies_with_phone: uniqueCompanies, companies_with_any_contact: uniqueCompanies,
-        matched_companies_with_email: uniqueCompanies, matched_companies_with_phone: uniqueCompanies,
-        matched_companies_with_any_contact: uniqueCompanies } }),
-    } });
+    }, rpcHandlers: { ve_directory_plan_population: () => population } });
     await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
     const patch = db.updates.filter((u) => u.table === 've_bases' && (u.patch.collect_info as VeCollectInfo)?.target_progress).at(-1)!.patch;
-    return (patch.collect_info as VeCollectInfo).target_progress!;
+    return { info: patch.collect_info as VeCollectInfo, db };
   };
+  const runNarrowMarketRound = async (uniqueCompanies: number, constructorRows: string[][], extra: Partial<VeCollectInfo> = noWidening) =>
+    (await runNarrowMarket(populationReply(uniqueCompanies), constructorRows, extra)).info.target_progress!;
+  // Выход как у реальных баз: годной почтой заканчивается меньше десятой части компаний.
+  const lowYieldRows = narrowPlants.map((row, i) => [row.company, row.website, row.email, row.inn, i < 30 ? 'ok' : 'invalid']);
 
   it('stops a hypothesis whose market cannot reach the target instead of grinding to the candidate cap', async () => {
     // Узкая гипотеза раньше шла к потолку в 10 000 компаний: каждый следующий
     // раунд просил БОЛЬШЕ компаний, и за каждую платили чтением сайта и SMTP.
     // Реалистичный выход: годной почтой заканчивается меньше десятой части компаний.
-    const constructorRows = narrowPlants.map((row, i) => [row.company, row.website, row.email, row.inn, i < 30 ? 'ok' : 'invalid']);
-    const run = (uniqueCompanies: number) => runNarrowMarketRound(uniqueCompanies, constructorRows);
-    // Срез почти исчерпан: 900 компаний из 1000, выход низкий — добор до 500 невозможен.
+    const run = (uniqueCompanies: number) => runNarrowMarketRound(uniqueCompanies, lowYieldRows);
+    // 320 компаний из 1000 проверено, выход низкий: остаток даст ~64 контакта,
+    // до сотни не дотянуть. Срез уже расширялся дважды — база завершается.
     const stopped = await run(1000);
     expect(stopped.status).toBe('limited');
     expect(stopped.reason).toContain('Рынок гипотезы исчерпан');
+    expect(stopped.reason).toContain('осталось примерно 64 контактов (≈64 компаний)');
+    expect(stopped.reason).toContain('Срез уже расширялся автоматически (2 из 2)');
     // Статус терминальный и раунд совпадает с завершённым: «Продолжить подготовку» доступна.
     expect(stopped.round).toBe(2);
     // Широкий срез не останавливаем.
     expect((await run(200_000)).status).not.toBe('limited');
-    // Узкая, но полезная база продолжает сбор. 7 500 компаний в срезе при том же
-    // выходе дают около 250 контактов — по прежнему порогу «меньше 60% цели»
-    // (то есть меньше 300) движок бы её срезал, хотя студия считает такие базы
-    // нормальными: узкая гипотеза на 200-300 контактов это маленькая, но
-    // полезная база. Порог теперь абсолютный, сто контактов.
+    // Узкая, но полезная база продолжает сбор: 7 500 компаний в срезе при том же
+    // выходе дают сотни контактов. Порог абсолютный, сто контактов, а не доля
+    // цели: узкая гипотеза на 200-300 контактов — маленькая, но полезная база.
     expect((await run(7_500)).status).not.toBe('limited');
   });
 
@@ -2055,6 +2069,92 @@ describe('base_collect CONSTRUCT import', () => {
     expect(stopped).toMatchObject({ status: 'limited', ready_rows: 60, ready_contacts: 120, ready_companies: 20 });
     expect(stopped.reason).toContain('Рынок гипотезы исчерпан');
     expect(stopped.reason).toContain('сверх собранных 60');
+  });
+
+  // Реальный срез базы f1bb9ccf «Мясопереработка»: ОКВЭД 10.1, выручка от 100 млн,
+  // штат от 20. С порогами — 954 компании (замер на проде 23.09.2026), без них 3 380.
+  const MEAT_101 = { source: 'companies_directory' as const, rationale: 'Мясопереработка из реестра',
+    directory_filters: { includeIp: false, okvedCodes: ['10.1'], revenueFrom: 100_000_000, employeesFrom: 20 } };
+  const withTasks = (...tasks: NonNullable<VeCollectInfo['plan']>['tasks']): Partial<VeCollectInfo> => ({
+    plan: { tasks },
+    tasks: tasks.map((task, index) => index === 0
+      ? { source: task.source, status: 'done' as const, child_job_id: null, rows: narrowPlants.length, task, harvest: narrowPlants }
+      : { source: task.source, status: 'done' as const, child_job_id: null, rows: 0, task }),
+  });
+
+  it('does not stop a narrow slice while it can still widen: opens the second queue or asks for a new slice', async () => {
+    // По прогнозу срез мал (954 компании: ещё ~59 контактов сверх 30), но пороги
+    // выручки и штата придумал планировщик. Раньше база здесь завершалась.
+    const widened = await runNarrowMarket(populationReply(954), lowYieldRows, { ...narrowHistory(0), ...withTasks(MEAT_101) });
+    expect(widened.info.target_progress).toMatchObject({ status: 'collecting', round: 3 });
+    expect(widened.info.target_progress).not.toHaveProperty('reason');
+    expect(widened.info.tasks).toHaveLength(2);
+    expect(widened.info.tasks![1]).toMatchObject({ status: 'pending', task: { widened: 'second_queue',
+      directory_filters: { includeIp: false, okvedCodes: ['10.1'] } } });
+    expect(widened.info.tasks![1].task.directory_filters).not.toHaveProperty('revenueFrom');
+    expect(widened.info.adaptive_collection).toMatchObject({ widenings: 1 });
+    expect(widened.info.adaptive_collection?.note).toContain('Текущий срез мал для базы по прогнозу');
+    // Второй очереди нет (порогов нет) — один раз просим новый срез того же рынка.
+    const replan = await runNarrowMarket(populationReply(1000), lowYieldRows, narrowHistory(0));
+    expect(replan.info.target_progress).toMatchObject({ status: 'collecting' });
+    expect(replan.info.adaptive_collection).toMatchObject({ widenings: 1, replan_needed: true, replan_reason: 'plan_exhausted' });
+  });
+
+  it('forecasts after an interrupted last batch: unchecked companies no longer hide the estimate', async () => {
+    // Десяти компаниям партии конструктор не вернул строк: партия не разобрана
+    // до конца. Так заканчивается почти каждая база (68 из 83 на 22.09.2026),
+    // и прогноза не было ни у одной.
+    const { info } = await runNarrowMarket(populationReply(7_500), lowYieldRows.slice(0, 90));
+    expect(info.relevance_summary?.unchecked).toBeGreaterThan(0);
+    expect(info.estimate?.estimate_reason).toBeUndefined();
+    expect(info.estimate?.remaining_ready_estimate).toMatchObject({
+      // (7 500 − 320 просмотренных) × 30 готовых / 320 обработанных.
+      contacts: 673, companies: 673, remaining_companies: 7_180, source_population: 7_500, confidence: 'low',
+    });
+    expect(info.estimate?.remaining_ready_estimate?.scope).toContain('Последняя партия проверена не полностью');
+  });
+
+  it('counts overlapping registry slices once and leaves out companies of other bases in the project', async () => {
+    // План с двумя пересекающимися срезами: 86.2 входит в 86. Реальные размеры
+    // с прода: 26 337 и 52 992 компании, объединение — 52 992, а не 79 329.
+    const dentistry = { source: 'companies_directory' as const, rationale: 'Стоматологии', directory_filters: { includeIp: false, okvedCodes: ['86.2'] } };
+    const health = { source: 'companies_directory' as const, rationale: 'Медицина', directory_filters: { includeIp: false, okvedCodes: ['86'] } };
+    const otherBase = { ...makeBase({}), id: 'b2', hypothesis_id: 'h2', source: 'upload', status: 'analyzed',
+      columns: ['company', 'email', 'inn'],
+      data: [{ company: 'Клиника соседей', email: 'hi@neighbour.test', inn: '7799000001' },
+        // Эту компанию база уже проверила сама: она вычитается как просмотренная, а не как чужая.
+        { company: priorPlants[5].company, email: 'hi@prior5.test', inn: priorPlants[5].inn }] };
+    const { info, db } = await runNarrowMarket(populationReply(52_992, 52_991, [26_337, 52_992]), lowYieldRows,
+      { ...noWidening, ...withTasks(dentistry, health) }, [otherBase]);
+    const calls = db.rpcCalls.filter((call) => call.fn === 've_directory_plan_population');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].params).toEqual({
+      p_slices: [
+        { okved_prefixes: ['86.2'], region_codes: null, include_ip: false, has_email: false },
+        { okved_prefixes: ['86'], region_codes: null, include_ip: false, has_email: false },
+      ],
+      p_exclude_inns: ['7799000001'],
+    });
+    expect(info.estimate).toMatchObject({ population_matches_source: true, unique_companies: 52_992,
+      available_companies: 52_991, slice_companies: [26_337, 52_992] });
+    expect(info.estimate?.note).toBeUndefined();
+    expect(info.estimate?.remaining_ready_estimate).toMatchObject({
+      source_population: 52_991, remaining_companies: 52_991 - 320, contacts: Math.round((52_991 - 320) * 30 / 320) });
+  });
+
+  it('forecasts the registry part of a plan with a sizeless source and does not stop while that source is live', async () => {
+    // Раньше прогноз требовал плана из одной задачи: 81 база из 89 его не имела.
+    const maps = { source: 'yandex_maps' as const, rationale: 'Каталог карт', maps_query: { queries: ['Насосы'], geo: 'Россия' } };
+    const live = await runNarrowMarket(populationReply(1000), lowYieldRows, { ...noWidening, ...withTasks(DIRECTORY_TASK, maps) });
+    expect(live.info.estimate).toMatchObject({ population_matches_source: true, unsized_sources: ['Яндекс Карты'] });
+    expect(live.info.estimate?.remaining_ready_estimate).toMatchObject({ contacts: 64, companies: 64 });
+    expect(live.info.estimate?.remaining_ready_estimate?.scope).toContain('источники без размера рынка: Яндекс Карты');
+    // Размер карт неизвестен: пока каталог жив, малый реестр — не повод завершать базу.
+    expect(live.info.target_progress?.status).toBe('collecting');
+    const exhaustedMaps = { ...noWidening, ...withTasks(DIRECTORY_TASK, maps) };
+    exhaustedMaps.tasks![1].exhausted = true;
+    const stopped = await runNarrowMarket(populationReply(1000), lowYieldRows, exhaustedMaps);
+    expect(stopped.info.target_progress).toMatchObject({ status: 'limited', reason: expect.stringContaining('Рынок гипотезы исчерпан') });
   });
 
   it('does not claim launch-ready recipients after a failed partial validation', async () => {
