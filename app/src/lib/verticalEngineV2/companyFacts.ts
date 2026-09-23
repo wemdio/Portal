@@ -75,8 +75,10 @@ export async function readVeCompanyFacts(keys: string[], signal?: AbortSignal, d
   } catch { signal?.throwIfAborted(); return []; }
 }
 
-export async function writeVeCompanyFacts(key: string, pages: VeEvidencePage[], observedAt: string): Promise<void> {
-  if (!supabaseAdmin) return;
+/** The job signal cancels the write together with the job: the caller no
+ * longer waits for it after its own bound (fetchVeRelevanceEvidence). */
+export async function writeVeCompanyFacts(key: string, pages: VeEvidencePage[], observedAt: string, signal?: AbortSignal): Promise<void> {
+  if (!supabaseAdmin || signal?.aborted) return;
   const rows = pages.flatMap((page) => {
     const parsed = pageSchema.safeParse({ ...page, text: selectVeEvidenceText(page.document?.text ?? page.text) });
     return parsed.success ? [{ company_key: key, page_key: veFactPageKey(page.url), reader_version: VERSION,
@@ -86,7 +88,7 @@ export async function writeVeCompanyFacts(key: string, pages: VeEvidencePage[], 
   try {
     // Each page has its own key; independent hypotheses cannot replace the
     // entire company dossier and erase one another's freshly read pages.
-    await supabaseAdmin.from('ve_company_fact_pages').upsert(rows, { onConflict: 'company_key,page_key' }).abortSignal(deadline());
+    await supabaseAdmin.from('ve_company_fact_pages').upsert(rows, { onConflict: 'company_key,page_key' }).abortSignal(deadline(signal));
   } catch { /* Optional accelerator: the verified result remains usable. */ }
 }
 

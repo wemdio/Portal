@@ -1283,7 +1283,8 @@ describe('llm rawCall retry', () => {
       companyFacts: { read: readFacts, write: writeFacts } };
     expect((await fetchVeRelevanceEvidence(sharedRoot, { ...factsOptions, focus: 'Сеть частных клиник' })).status).toBe('ok');
     expect(records.length).toBeGreaterThan(0);
-    expect(readFacts).toHaveBeenCalledWith([sharedKey], undefined);
+    // Чтение памяти идёт под собственным пределом: адаптер получает его сигнал.
+    expect(readFacts).toHaveBeenCalledWith([sharedKey], expect.any(AbortSignal));
     const requests = factsTransport.mock.calls.length;
     const firstObservation = records[0].observed_at;
     const secondHypothesis = await fetchVeRelevanceEvidence('', { ...factsOptions, focus: 'Производство оборудования собственный завод' });
