@@ -68,6 +68,8 @@ export interface DraftRow {
   model: string | null;
   createdAt: string;
   sentAt: string | null;
+  /** Кому адресован ответ, если не тому, кто ответил; null — в ту же переписку. */
+  recipientEmail: string | null;
 }
 
 /** Строка списка «кто ответил» на экране инструмента. */
@@ -90,4 +92,6 @@ export interface GenerateDraftResult {
   factsUsed: string;
   sources: { url: string; title?: string }[];
   contextComplete: boolean;
+  /** Кому адресован черновик, если не тому, кто ответил; null — в ту же переписку. */
+  recipientEmail: string | null;
 }

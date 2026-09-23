@@ -18,7 +18,7 @@ export const POST = withAuth(async (req: NextRequest, user, params) => {
   if (!qualificationId) return NextResponse.json({ error: 'qualificationId is required' }, { status: 400 });
 
   const body = (await req.json().catch(() => null)) as
-    | { draftId?: string; projectId?: string; text?: string }
+    | { draftId?: string; projectId?: string; text?: string; toEmail?: string | null }
     | null;
   if (typeof body?.text !== 'string' || !body.text.trim()) {
     return NextResponse.json({ error: 'text is required' }, { status: 400 });
@@ -55,7 +55,7 @@ export const POST = withAuth(async (req: NextRequest, user, params) => {
   }
 
   try {
-    await sendDraft(draftId, body.text);
+    await sendDraft(draftId, body.text, typeof body.toEmail === 'string' ? body.toEmail : null);
     return NextResponse.json({ ok: true });
   } catch (err) {
     if (err instanceof SendDraftError) {
