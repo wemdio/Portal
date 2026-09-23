@@ -1,7 +1,8 @@
 import { Resolver } from 'node:dns/promises';
 import { isIP } from 'node:net';
-import { Agent, fetch, Pool, ProxyAgent, type Dispatcher } from 'undici';
-import { getProxyGroups, pickProxyUrl, tryAcquireProxySlot } from '@/lib/enrich/proxyPool';
+import { Agent, fetch, type Dispatcher } from 'undici';
+import { createBoundedProxyAgent, isProxyNodeFault } from '@/lib/enrich/boundedProxyAgent';
+import { getProxyGroups, hasLiveProxy, pickProxyUrl, reportProxyNodeResult, tryAcquireProxySlot } from '@/lib/enrich/proxyPool';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
 import { deriveWebsiteFromEmail } from '@/lib/leadBoard/deriveWebsite';
@@ -35,8 +36,11 @@ export interface VeRelevanceEvidence {
   /** Телеметрия RU-прокси; в чекпойнт не попадает. attempts — все GET через
    * прокси, rescued — своя главная открылась через прокси, а прямой повтор в
    * том же окне не ответил, verified — компания получила готовый текст с сайта,
-   * страницу которого принёс прокси, denied — не хватило пропуска. */
-  proxy?: { attempts: number; rescued: number; verified: number; denied: number };
+   * страницу которого принёс прокси, denied — не хватило пропуска, failed —
+   * заход через прокси кончился ошибкой без ответа сайта (туннель, нода),
+   * unavailable — живой RU-ноды не было (все выбыли). failed и unavailable
+   * есть только при значении больше 0. */
+  proxy?: { attempts: number; rescued: number; verified: number; denied: number; failed?: number; unavailable?: number };
 }
 
 /** direct — с нашего адреса (США), proxy — второй заход через RU-прокси. */
@@ -87,10 +91,9 @@ const MAX_DOMAINS = 3;
 // после молчания. Главные ИНН владельца почти не печатают (0 из 17 в замере),
 // без реквизитов спасённая главная подтверждается только брендом.
 const MAX_PROXY_READS = 3;
-// CONNECT к прокси undici не отменяет вместе с запросом: без своего предела
-// соединение с прокси висело бы до его ответа (до 300 с) уже после возврата
-// пропуска. Здесь оно живёт не дольше постраничного предела с запасом.
-const PROXY_CONNECT_TIMEOUT_MS = 6_000;
+// Туннель через ноду (CONNECT и TLS к сайту) ограничен окном страницы: undici
+// не отменяет CONNECT вместе с запросом, а сбой туннеля без предела повторял
+// бы сам (boundedProxyAgent).
 const PROXY_CONNECTIONS_PER_NODE = 6;
 // Готовый туннель после чтения переходит к пулу сайта и вне лимита выше жил бы
 // по подсказке Keep-Alive сайта (до 600 с). Держим его не дольше секунды.
@@ -220,6 +223,13 @@ function connectionFailure(error: unknown): boolean {
   return /\b(?:ENOTFOUND|ENODATA|ECONNREFUSED)\b|website_address_unavailable/.test(text) || TLS_FAILURE.test(text);
 }
 
+/** Заход через прокси не дошёл до сайта: туннель, нода, нет живой ноды.
+ * Молчание сайта, его ответ, сертификат и наша проверка адреса сюда не входят. */
+function proxyFailure(error: unknown): boolean {
+  const text = failureText(error);
+  return /fetch failed|PORTAL_PROXY_TUNNEL|website_proxy_unavailable/.test(text) && !TLS_FAILURE.test(text);
+}
+
 function transientPageFailure(error: unknown): boolean {
   // undici пишет «fetch failed» и для сертификата: такой отказ не повторяем,
   // иначе быстрые мёртвые домены съедают повторы молчащего своего сайта.
@@ -327,8 +337,9 @@ async function fetchEvidencePage(initialUrl: URL, signal: AbortSignal, focus?: s
 }
 
 const sharedPageReader = createVeSharedPageReader((url, signal) => fetchEvidencePage(url, signal));
-// Свои диспетчеры к тем же нодам пула, а не общие из proxyPool: только здесь
-// у CONNECT есть предел времени и числа соединений к ноде.
+// Свои диспетчеры к тем же нодам пула, а не общие из proxyPool: здесь туннель
+// короче (окно страницы), а соединений к ноде не больше шести. Выбор ноды и
+// её выбывание — общие с пулом.
 const proxyAgents = new Map<string, Dispatcher>();
 function evidenceProxyDispatcher(): Dispatcher | undefined {
   const uri = pickProxyUrl(true);
@@ -336,10 +347,9 @@ function evidenceProxyDispatcher(): Dispatcher | undefined {
   let agent = proxyAgents.get(uri);
   if (!agent) {
     try {
-      agent = new ProxyAgent({
-        uri, keepAliveTimeout: PROXY_TUNNEL_IDLE_MS, keepAliveMaxTimeout: PROXY_TUNNEL_IDLE_MS,
-        clientFactory: (origin, options) => new Pool(origin,
-          { ...options, connections: PROXY_CONNECTIONS_PER_NODE, headersTimeout: PROXY_CONNECT_TIMEOUT_MS }),
+      agent = createBoundedProxyAgent(uri, {
+        tunnelTimeoutMs: PAGE_TIMEOUT_MS, connectionsPerNode: PROXY_CONNECTIONS_PER_NODE, tunnelIdleMs: PROXY_TUNNEL_IDLE_MS,
+        onNodeResult: (kind, detail) => reportProxyNodeResult(uri, kind, detail),
       });
     } catch {
       return undefined;
@@ -347,6 +357,12 @@ function evidenceProxyDispatcher(): Dispatcher | undefined {
     proxyAgents.set(uri, agent);
   }
   return agent;
+}
+/** Только для тестов: закрыть диспетчеры к нодам. */
+export async function destroyVeEvidenceProxyAgentsForTests(): Promise<void> {
+  const agents = [...proxyAgents.values()];
+  proxyAgents.clear();
+  await Promise.all(agents.map((agent) => agent.destroy().catch(() => undefined)));
 }
 // Отдельный экземпляр: прямой и проксированный полёт одного адреса не сливаются.
 const proxyPageReader = createVeSharedPageReader(async (url, signal) => {
@@ -449,13 +465,15 @@ export async function fetchVeRelevanceEvidence(
   // молчания, реквизиты идут той же гонкой прямого пути и прокси: такой сайт
   // нашему адресу отвечает через раз (sibdobrodar.ru: /contacts напрямую
   // молчит, через прокси — 200 за 2,8 с).
-  // Повтор через RU-прокси выключен по умолчанию (VE_EVIDENCE_PROXY_RETRY=1 включает):
-  // 23.09 после выкладки ProxyAgent при закрытом без ответа CONNECT бесконечно
-  // переподключался и держал воркер VE2 под нагрузкой, задачи сбора зависали.
-  const proxyRoute = process.env.VE_EVIDENCE_PROXY_RETRY === '1'
+  // 23.09 голый ProxyAgent на ноде, закрывшей CONNECT без ответа, бесконечно
+  // переподключался, и повтор выключили. Теперь туннель ограничен окном и
+  // одним CONNECT на чтение, а мёртвая нода выбывает (boundedProxyAgent,
+  // proxyPool). Повтор включён; VE_EVIDENCE_PROXY_RETRY=0 выключает.
+  const proxyRoute = process.env.VE_EVIDENCE_PROXY_RETRY !== '0'
     && (Boolean(opts.fetchPage) || !opts.fetchText) && getProxyGroups().priority.length > 0;
   let proxyUsed = false;
   const proxy = { attempts: 0, rescued: 0, verified: 0, denied: 0 };
+  let proxyFailed = 0, proxyUnavailable = 0;
   // Стартовые адреса (свой кандидат или найденный поиском), которые напрямую
   // не ответили вовсе: молчание или обрыв соединения. /contacts и реквизиты
   // такого хоста молчат так же (замер: 10 из 10), читать их — терять по 5 с
@@ -470,7 +488,7 @@ export async function fetchVeRelevanceEvidence(
   // Хосты, страницу которых принёс прокси: по ним считается польза прокси.
   const proxyHosts = new Set<string>();
   // Страницы реквизитов slow-хоста, которые прочитаны только напрямую (прокси
-  // не досталось: нет пула, пропуска или лимита) и промолчали без ответа сайта.
+  // не досталось: нет пула, живой ноды, пропуска или лимита) и промолчали без ответа сайта.
   const directQuiet = new Set<string>();
   // Ярлык таймаута — только когда молчит стартовая страница собственного
   // сайта. Молчание каталога из поиска или внутренней страницы повтор не
@@ -526,6 +544,8 @@ export async function fetchVeRelevanceEvidence(
                 resolve({ page, route });
               }, (error: unknown) => {
                 if (signal.aborted) return;
+                // Проигравший полёт отменён нами — это не сбой прокси.
+                if (route === 'proxy' && !controller.signal.aborted && proxyFailure(error)) proxyFailed += 1;
                 errors.set(route, error);
                 if (errors.size < routes.length) return;
                 signal.removeEventListener('abort', stop);
@@ -551,24 +571,33 @@ export async function fetchVeRelevanceEvidence(
         // slow-хост без пула читается напрямую, как раньше.
         if (via && (via !== 'slow' || proxyRoute) && !cachedPages.has(veFactPageKey(url.href))) {
           const capped = proxy.attempts >= MAX_PROXY_READS;
-          release = capped ? undefined : tryAcquireProxySlot() ?? undefined;
+          // Все RU-ноды выбыли — путь тот же, что при нехватке пропуска.
+          const live = capped || hasLiveProxy(true);
+          if (!live) proxyUnavailable += 1;
+          release = capped || !live ? undefined : tryAcquireProxySlot() ?? undefined;
           if (release && via === 'slow') {
             proxy.attempts += 1;
             first = ['direct', 'proxy'];
           } else if (release) {
             proxy.attempts += 1;
-            const { page } = await attempt(['proxy']);
+            const { page, error } = await attempt(['proxy']);
             release();
             release = undefined;
             if (page) return page;
-            // Сайт через прокси уже отвечал: это частичное чтение, ответ окончательный.
-            if (via === 'silent') return undefined;
+            if (via === 'silent') {
+              // Нода не пустила в туннель — сайт не отвечал вовсе, ярлык
+              // таймаута и повтор гейта. Ответ сайта через прокси, его
+              // молчание или 5xx на CONNECT — частичное чтение, ответ окончательный.
+              if (isProxyNodeFault(error)) ownSilent = true;
+              return undefined;
+            }
           } else if (via === 'silent') {
-            // Напрямую такой сайт промолчит так же. Нехватка пропуска — наш
-            // лимит, а не ответ сайта: ярлык остаётся таймаутом, гейт повторит.
-            if (!capped) { proxy.denied += 1; ownSilent = true; }
+            // Напрямую такой сайт промолчит так же. Нехватка пропуска или
+            // живой ноды — наш предел, а не ответ сайта: ярлык остаётся
+            // таймаутом, гейт повторит.
+            if (!capped) { if (live) proxy.denied += 1; ownSilent = true; }
             return undefined;
-          } else if (!capped) proxy.denied += 1;
+          } else if (!capped && live) proxy.denied += 1;
           // После 403 — та же страница напрямую, как раньше: отказ приходит за 0,3–0,6 с.
         }
         let result = await attempt(first);
@@ -580,13 +609,16 @@ export async function fetchVeRelevanceEvidence(
         // Свой второй заход не ждёт бюджета повторов: его могли съесть быстрые
         // отказы соседних доменов, пока своя главная молчала.
         if (own && proxyRoute && !proxyUsed && (pageTimeout || blockedByAddress(result.error))) {
-          // Пропуск без ожидания: нет свободного — остаёмся на прямом пути.
-          release = tryAcquireProxySlot() ?? undefined;
+          // Пропуск без ожидания: нет свободного или все ноды выбыли —
+          // остаёмся на прямом пути.
+          const live = hasLiveProxy(true);
+          release = live ? tryAcquireProxySlot() ?? undefined : undefined;
           if (release) {
             proxyUsed = true;
             proxy.attempts += 1;
             second = pageTimeout ? ['direct', 'proxy'] : ['proxy'];
-          } else proxy.denied += 1;
+          } else if (live) proxy.denied += 1;
+          else proxyUnavailable += 1;
         }
         if (!second && retries < MAX_PAGE_RETRIES && transientPageFailure(result.error)) second = ['direct'];
         if (second) {
@@ -652,14 +684,14 @@ export async function fetchVeRelevanceEvidence(
           .find((link) => !pages.has(link.url) && readable(link.url));
         const url = next ? allowedUrl(next.url) : null;
         if (!url) break;
-        const denied = proxy.denied;
+        const refused = proxy.denied + proxyUnavailable;
         requisites.push(url.href);
         const page = await read(url, signal, 'page', viaProxy);
         if (page) sitePages.push(page);
-        // Молчащий сайт без пропуска в прокси дальше не читаем: ярлык — таймаут.
-        if (identity() !== 'unknown' || (viaProxy === 'silent' && proxy.denied > denied)) break;
+        // Молчащий сайт без пропуска или живой ноды дальше не читаем: ярлык — таймаут.
+        if (identity() !== 'unknown' || (viaProxy === 'silent' && proxy.denied + proxyUnavailable > refused)) break;
       }
-      // Реквизиты slow-хоста без прокси (нет пула, пропуска или лимита) все
+      // Реквизиты slow-хоста без прокси (нет пула, живой ноды, пропуска или лимита) все
       // промолчали напрямую: это наш предел, а не ответ сайта — ярлык
       // остаётся таймаутом, и гейт повторит компанию, как до прокси.
       if (viaProxy === 'slow' && identity() === 'unknown' && requisites.length
@@ -753,7 +785,8 @@ export async function fetchVeRelevanceEvidence(
   // Общий дедлайн бьёт компанию целиком, постраничный — только одну страницу.
   // Когда случилось и то и другое, отвечает тот, кто закончил работу.
   const timeout = deadlineTimedOut ? 'deadline' as const : pageTimedOut ? 'page' as const : undefined;
-  const proxyTelemetry = () => (proxy.attempts || proxy.denied ? { proxy: { ...proxy } } : {});
+  const proxyTelemetry = () => (proxy.attempts || proxy.denied || proxyUnavailable ? { proxy: { ...proxy,
+    ...(proxyFailed ? { failed: proxyFailed } : {}), ...(proxyUnavailable ? { unavailable: proxyUnavailable } : {}) } } : {});
   if (searchDeferred) return { status: 'unavailable', text: '', url: supplied[0]?.href ?? '',
     reason: 'paid_search_deferred', search_deferred: true, pages: pages.size, ...(timeout ? { timeout } : {}), ...proxyTelemetry() };
   if (providerError) return {
