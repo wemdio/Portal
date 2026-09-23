@@ -20,6 +20,13 @@ export interface SenderProfile {
   telegram: string | null;
 }
 
+/**
+ * Кейс идёт в письмо, только если лидов в нём от этого числа (решение
+ * 24.09.2026): слабый кейс в письме работает против нас. Кейс без числа
+ * лидов не идёт тоже.
+ */
+export const MIN_CASE_LEADS = 8;
+
 export interface CaseRecord {
   case_id: string;
   public_name: string;
@@ -64,7 +71,8 @@ export async function loadLibraries(db: SupabaseClient, senderId: string | null)
     .from('polza_ru_cases')
     .select('*')
     .eq('status', 'approved')
-    .eq('legal_publication_approved', true);
+    .eq('legal_publication_approved', true)
+    .gte('leads_count', MIN_CASE_LEADS);
   if (casesErr) throw new Error(`cases load failed: ${casesErr.message}`);
 
   const { data: claims, error: claimsErr } = await db
