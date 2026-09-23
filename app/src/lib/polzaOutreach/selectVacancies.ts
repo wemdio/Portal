@@ -1,5 +1,5 @@
 /**
- * S1 — выборка свежих SDR/BDR-вакансий из eng_hiring_cache.
+ * S1 — выборка свежих sales/GTM-вакансий из eng_hiring_cache.
  *
  * Источник только jobhive (нативные ATS в кэше протухли 02.08.2026, план §3).
  * Дедуп по компании: одна строка на company_name, берём самую свежую вакансию.
@@ -31,7 +31,13 @@ import type { PolzaOutreachConfig, PolzaOutreachVacancyCandidate } from './types
  * теряется ни одна нужная вакансия — отсеиваются только лишние, вроде
  * «Ambassador» при поиске «bdr».
  */
-const SDR_TITLE_TERMS = ['sdr', 'bdr', 'sales development', 'business development', 'outbound sales'];
+// v2 (CEO 23.09.2026): не только SDR/BDR, а весь sales/GTM-найм — AE, Growth,
+// Partnerships, GTM. Подтверждение, что роль про новые продажи, даёт разбор
+// текста вакансии (analyzeVacancy), а не название.
+const SDR_TITLE_TERMS = [
+  'sdr', 'bdr', 'sales development', 'business development', 'outbound sales', 'account executive',
+  'growth', 'partnerships', 'partnership manager', 'go-to-market', 'gtm', 'head of sales', 'vp of sales', 'vp sales',
+];
 const SDR_TITLE_RE = new RegExp(`\\b(${SDR_TITLE_TERMS.join('|')})\\b`, 'i');
 const MIN_DESCRIPTION_CHARS = 300;
 const PAGE_SIZE = 500;

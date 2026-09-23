@@ -11,7 +11,7 @@ export default function PolzaOutreachPage() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Английский автоаутрич</h1>
           <p className="mt-1 text-sm text-gray-500">
-            Свежие вакансии SDR/BDR → компания и почта → цепочка из четырёх писем на английском
+            Найм в sales/GTM и стартапы YC → Lead Score → почта → цепочка из четырёх писем на английском
           </p>
         </div>
         <PolzaOutreachView />
