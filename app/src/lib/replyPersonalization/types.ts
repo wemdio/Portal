@@ -76,10 +76,12 @@ export interface ReplyListItem extends QualificationRow {
   listStatus: 'new' | 'sent' | 'skipped';
 }
 
-/** Кампания проекта для фильтра над списком писем. */
+/** Кампания проекта для кнопок-фильтров над списком писем. */
 export interface ReplyCampaignOption {
   id: string;
   name: string;
+  /** Ответов в кампании с учётом поиска; null — кампания живого аккаунта, не посчитать. */
+  replyCount: number | null;
 }
 
 export interface GenerateDraftResult {

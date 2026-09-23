@@ -339,6 +339,31 @@ export async function listSyncedQualifications(
   return { rows: (data ?? []).map(mapQualificationRow), total: count ?? data?.length ?? 0 };
 }
 
+/**
+ * Сколько ответов в каждой кампании (с учётом поиска) — для кнопок кампаний
+ * над списком. Только счётчики, строки не читаются.
+ */
+export async function countSyncedQualificationsByCampaign(
+  campaignIds: string[],
+  search?: string,
+): Promise<Map<string, number>> {
+  const { instantly } = requireClients();
+  const cleaned = sanitizeSearch(search ?? '');
+  const counts = await Promise.all(
+    campaignIds.map(async (campaignId) => {
+      let query = instantly
+        .from('instantly_lead_qualifications')
+        .select('id', { count: 'exact', head: true })
+        .eq('campaign_id', campaignId);
+      if (cleaned) query = query.or(`lead_email.ilike.*${cleaned}*,company_name.ilike.*${cleaned}*`);
+      const { count, error } = await query;
+      if (error) throw new Error(`qualifications count failed: ${error.message}`);
+      return [campaignId, count ?? 0] as const;
+    }),
+  );
+  return new Map(counts);
+}
+
 export async function getQualificationById(id: string): Promise<QualificationRow | null> {
   const { instantly } = requireClients();
   const { data, error } = await instantly

@@ -8,7 +8,7 @@ import { KnowledgeBaseForm } from './KnowledgeBaseForm';
 import { ReplyDetailPanel } from './ReplyDetailPanel';
 import type { ReplyCampaignOption, ReplyListItem } from '@/lib/replyPersonalization/types';
 
-/** Писем за раз; «Показать ещё» догружает следующую сотню. */
+/** Писем за раз; при прокрутке к концу списка догружается следующая сотня. */
 const REPLIES_PAGE_SIZE = 100;
 
 const LIST_STATUS_BADGE: Record<ReplyListItem['listStatus'], { label: string; className: string }> = {
@@ -121,7 +121,11 @@ export function ReplyPersonalizationView() {
         current && res.replies.some((r) => r.id === current) ? current : (res.replies[0]?.id ?? null),
       );
     } catch (err) {
-      if (seq === requestSeq.current) setError(err instanceof Error ? err.message : 'Не удалось загрузить письма');
+      if (seq === requestSeq.current) {
+        setError(err instanceof Error ? err.message : 'Не удалось загрузить письма');
+        // Иначе догрузка при прокрутке будет повторять упавший запрос по кругу.
+        setHasMore(false);
+      }
     } finally {
       if (seq === requestSeq.current) setItemsLoading(false);
     }
@@ -159,6 +163,29 @@ export function ReplyPersonalizationView() {
   }, [loadProjects, reloadReplies]);
 
   const filtersActive = Boolean(campaignFilter || replySearch);
+  /** Число на кнопке «Все кампании»; null — есть кампании без счётчика. */
+  const allCampaignsCount = campaigns.every((c) => c.replyCount !== null)
+    ? campaigns.reduce((sum, c) => sum + (c.replyCount ?? 0), 0)
+    : null;
+
+  // Догрузка при прокрутке: как только низ списка показался, просим следующую
+  // сотню. Пока идёт загрузка, не следим — иначе один показ даст несколько страниц.
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const target = loadMoreRef.current;
+    if (!hasMore || itemsLoading || !target) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          observer.disconnect();
+          setLimit((current) => current + REPLIES_PAGE_SIZE);
+        }
+      },
+      { rootMargin: '300px' },
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [hasMore, itemsLoading, items]);
 
   const selected = items.find((i) => i.id === selectedId) ?? null;
 
@@ -295,24 +322,6 @@ export function ReplyPersonalizationView() {
         </div>
         {project && !missingReason ? (
           <div className="space-y-2 border-b border-gray-100 px-3 py-2">
-            {campaigns.length > 1 ? (
-              <select
-                value={campaignFilter}
-                onChange={(e) => {
-                  setCampaignFilter(e.target.value);
-                  setLimit(REPLIES_PAGE_SIZE);
-                }}
-                aria-label="Кампания"
-                className="w-full truncate rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm text-gray-900 focus:border-blue-400 focus:outline-none"
-              >
-                <option value="">Все кампании ({campaigns.length})</option>
-                {campaigns.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-            ) : null}
             <div className="relative">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" aria-hidden />
               <input
@@ -336,6 +345,35 @@ export function ReplyPersonalizationView() {
                 </button>
               ) : null}
             </div>
+            {campaigns.length > 1 ? (
+              <div className="flex max-h-28 flex-wrap gap-1 overflow-y-auto" role="group" aria-label="Кампании">
+                {[{ id: '', name: 'Все кампании', replyCount: allCampaignsCount }, ...campaigns].map((c) => {
+                  const isActive = campaignFilter === c.id;
+                  return (
+                    <button
+                      key={c.id || 'all'}
+                      type="button"
+                      onClick={() => {
+                        setCampaignFilter(c.id);
+                        setLimit(REPLIES_PAGE_SIZE);
+                      }}
+                      title={c.name}
+                      aria-pressed={isActive}
+                      className={`flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition ${
+                        isActive
+                          ? 'border-blue-500 bg-blue-50 text-blue-700'
+                          : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+                      }`}
+                    >
+                      <span className="truncate">{c.name}</span>
+                      {c.replyCount !== null ? (
+                        <span className={isActive ? 'text-blue-500' : 'text-gray-400'}>{c.replyCount}</span>
+                      ) : null}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
           </div>
         ) : null}
         <div className="flex-1 overflow-y-auto">
@@ -390,15 +428,8 @@ export function ReplyPersonalizationView() {
               </button>
             ))}
             {hasMore ? (
-              <div className="p-3">
-                <button
-                  type="button"
-                  onClick={() => setLimit((current) => current + REPLIES_PAGE_SIZE)}
-                  disabled={itemsLoading}
-                  className="w-full rounded-lg border border-gray-200 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                >
-                  {itemsLoading ? 'Загрузка...' : 'Показать ещё'}
-                </button>
+              <div ref={loadMoreRef} className="p-3 text-center text-xs text-gray-400">
+                Загрузка...
               </div>
             ) : null}
             </>

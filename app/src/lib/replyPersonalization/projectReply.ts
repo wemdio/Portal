@@ -1,10 +1,17 @@
-import { getCampaignAccountIds, getCampaignCatalog, getProjectCampaignIds, getQualificationById, listSyncedQualifications } from './db';
+import {
+  countSyncedQualificationsByCampaign,
+  getCampaignAccountIds,
+  getCampaignCatalog,
+  getProjectCampaignIds,
+  getQualificationById,
+  listSyncedQualifications,
+} from './db';
 import { getLiveReply, listLiveReplies } from './liveReplyList';
 import type { QualificationRow, ReplyCampaignOption } from './types';
 
-/** Сколько писем отдаём за раз; «Показать ещё» просит следующую сотню. */
+/** Сколько писем отдаём за раз; прокрутка до конца списка просит следующую сотню. */
 export const LIST_PAGE_SIZE = 100;
-/** Потолок одного запроса, чтобы «Показать ещё» не превращался в выгрузку всей базы. */
+/** Потолок одного запроса, чтобы догрузка не превращалась в выгрузку всей базы. */
 const LIST_MAX_LIMIT = 2000;
 
 export interface ProjectRepliesPage {
@@ -29,9 +36,19 @@ export async function listProjectReplies(
   const projectCampaignIds = await getProjectCampaignIds(projectId);
   const catalog = await getCampaignCatalog(projectCampaignIds);
 
+  // Счётчики — по всем кампаниям проекта, независимо от выбранной: кнопки
+  // кампаний над списком показывают, куда переключаться.
+  const syncedCampaignIds = projectCampaignIds.filter((id) => catalog.get(id)?.accountId === 'main');
+  const counts = await countSyncedQualificationsByCampaign(syncedCampaignIds, options.search);
+
+  // Сверху кампании, где больше ответов; без счётчика (живые аккаунты) — в конце.
   const campaigns: ReplyCampaignOption[] = projectCampaignIds
-    .map((id) => ({ id, name: catalog.get(id)?.name || `Кампания ${id.slice(0, 8)}` }))
-    .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    .map((id) => ({
+      id,
+      name: catalog.get(id)?.name || `Кампания ${id.slice(0, 8)}`,
+      replyCount: counts.get(id) ?? null,
+    }))
+    .sort((a, b) => (b.replyCount ?? -1) - (a.replyCount ?? -1) || a.name.localeCompare(b.name, 'ru'));
 
   // Чужую кампанию через фильтр не подсунуть: берём только кампании проекта.
   const campaignIds = options.campaignId
