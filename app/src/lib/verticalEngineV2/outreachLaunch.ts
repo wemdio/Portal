@@ -16,7 +16,8 @@ const itemSchema = z.object({
 }).strict();
 export const outreachLaunchRequestSchema = z.object({
   setup_revision: z.number().int().positive(), preset_id: z.string().min(1).max(200),
-  portal_project_id: z.string().uuid(), expected_portal_period_id: z.string().uuid(),
+  // null — проект Portal без периодов; поле обязательно, чтобы режим был выбран явно.
+  portal_project_id: z.string().uuid(), expected_portal_period_id: z.string().uuid().nullable(),
   target_contacts: z.number().int().positive().max(1_000_000), items: z.array(itemSchema).min(1).max(50),
 }).strict();
 export type VeOutreachLaunchRequest = z.infer<typeof outreachLaunchRequestSchema>;
@@ -211,7 +212,7 @@ export async function runVeOutreachStartStage(job: VeJob, ctx: VeStageContext, i
     }
     if (!launch || launch.reconciliation_required || launch.segmentation_audit_id !== item.segmentation_audit_id
       || launch.preset_id !== request.preset_id || launch.portal_project_id !== request.portal_project_id
-      || launch.portal_period_id !== request.expected_portal_period_id || launch.target_contacts !== request.target_contacts) fail('Сохранённые кампании не соответствуют этому запуску. Нужна сверка.');
+      || (launch.portal_period_id ?? null) !== request.expected_portal_period_id || launch.target_contacts !== request.target_contacts) fail('Сохранённые кампании не соответствуют этому запуску. Нужна сверка.');
     const { data: queue, error: queueError } = await db.from('ve_launch_queue_items').select('id,status,plan_version')
       .eq('template_id', item.template_id).eq('project_id', job.project_id).maybeSingle();
     if (queueError || !queue) fail('Кампании сохранены, но очередь активации пока недоступна.');
