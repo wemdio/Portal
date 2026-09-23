@@ -73,6 +73,9 @@ const checkpointSchema = z.object({
     // Разовая перепроверка по новым правилам: отказ DeepSeek здесь решает
     // вторая модель. Добавочное поле, старый воркер его отбросит.
     recheck: z.literal(true).optional().catch(undefined),
+    // Попытка, оборванная остановкой воркера (ни ответа, ни ошибки модели),
+    // уже один раз возвращена. Добавочное поле, старый воркер его отбросит.
+    interrupted: z.literal(true).optional().catch(undefined),
   })).default({}),
   semantic_review_refs: z.record(hashSchema, hashSchema).default({}),
   // One paid checklist per hypothesis for the calibrated triage. Optional and

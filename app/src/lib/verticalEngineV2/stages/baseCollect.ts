@@ -617,6 +617,10 @@ export interface VeCollectTaskState {
   error?: string;
   /** Реестр: строк пропущено на выборке как уже собранные в других базах проекта. */
   excluded_during_fetch?: number;
+  /** Реестр и каталог: строк пропущено на выборке — эта база их уже просматривала. */
+  already_seen_during_fetch?: number;
+  /** hh_live: длинный запрос не нашёл вакансий, задача повторена по этому короткому (один раз). */
+  hh_short_query?: string;
   /**
    * Реестр: закладка выдачи — сколько строк уже просканировано, отдельно для
    * каждого набора фильтров (фаза existing/paid × лейн «есть почта»/«есть
@@ -814,8 +818,12 @@ export interface VeCollectInfo {
     excluded_existing_bases_before_construct?: number;
     /** Строк отсеяно свежей проверкой после конструктора. */
     excluded_existing_bases_after_construct?: number;
+    /** Строк не отправлено снова: эта база их уже просматривала (свои прошлые раунды, не другие базы). */
+    excluded_already_seen?: number;
     /** Реестр: строк пропущено ещё на выборке (уже собраны в других базах проекта). */
     excluded_during_fetch: number;
+    /** Реестр и каталог: строк пропущено на выборке, потому что эта база их уже просматривала. */
+    already_seen_during_fetch?: number;
     /** Строк после конструктора и relevance-gate (до launch-фильтра). */
     processed_rows?: number;
     /**
@@ -1335,6 +1343,8 @@ export async function fetchDirectoryRows(
 ): Promise<{
   rows: Record<string, unknown>[];
   excludedDuringFetch: number;
+  /** Пропущено, потому что эта база уже просматривала строку (не другие базы). */
+  alreadySeenDuringFetch: number;
   exhausted: boolean;
   hitCeiling: boolean;
   /** Сколько строк выдачи просканировано суммарно — закладка следующего захода. */
@@ -1343,6 +1353,7 @@ export async function fetchDirectoryRows(
 }> {
   const rows: Record<string, unknown>[] = [];
   let excludedDuringFetch = 0;
+  let alreadySeenDuringFetch = 0;
   let offset = Number.isSafeInteger(startOffset) && startOffset > 0 ? startOffset : 0;
   let page = 0;
   for (; page < MAX_DIRECTORY_PAGES && rows.length < limit; page += 1) {
@@ -1355,7 +1366,7 @@ export async function fetchDirectoryRows(
       // Страницы до сбоя разобраны полностью, и offset двигался только по ним.
       // Отдаём префикс вместе с его закладкой: строки уже оплачены сканом, а
       // выбросить их — значит на следующем заходе листать тот же кусок заново.
-      return { rows, excludedDuringFetch, exhausted: false, hitCeiling: false, nextOffset: offset, error: res.error };
+      return { rows, excludedDuringFetch, alreadySeenDuringFetch, exhausted: false, hitCeiling: false, nextOffset: offset, error: res.error };
     }
     // Смещение двигаем по ПРОСМОТРЕННЫМ строкам, а не по всей странице:
     // закладка не имеет права перешагнуть строки, которые мы не разобрали —
@@ -1368,9 +1379,11 @@ export async function fetchDirectoryRows(
       // реестр не умеет «порог или пустое поле».
       if (keep && !keep(r)) continue;
       // Дубль другой базы: по email, имени (с ИНН-уточнением) или точно по ИНН.
-      const pruned = pruneBaseRowAgainstExclusion(excludedKeys, mapDirectoryRow(r));
+      const mapped = mapDirectoryRow(r);
+      const pruned = pruneBaseRowAgainstExclusion(excludedKeys, mapped);
       if (!pruned) {
-        excludedDuringFetch += 1;
+        if (excludedByOtherBases(excludedKeys, mapped)) excludedDuringFetch += 1;
+        else alreadySeenDuringFetch += 1;
         continue;
       }
       rows.push(pruned.email === cell(r.email) ? r : { ...r, email: pruned.email });
@@ -1389,7 +1402,10 @@ export async function fetchDirectoryRows(
       `[base_collect] реестр: ${excludedDuringFetch} строк пропущено на выборке — компании уже есть в других базах проекта`,
     );
   }
-  return { rows, excludedDuringFetch, exhausted, hitCeiling, nextOffset: offset };
+  if (alreadySeenDuringFetch > 0) {
+    stageLog(ctx, `[base_collect] реестр: ${alreadySeenDuringFetch} строк пропущено на выборке — эта база их уже просматривала`);
+  }
+  return { rows, excludedDuringFetch, alreadySeenDuringFetch, exhausted, hitCeiling, nextOffset: offset };
 }
 
 /**
@@ -1773,8 +1789,10 @@ async function dispatchTask(
       if (!rows.length) state.exhausted = true;
       for (const row of rows) {
         if (!row.yandex_id || row.yandex_id === state.catalog.after) throw new Error('yandex_maps: каталог не продвинул курсор');
-        const mapped = pruneBaseRowAgainstExclusion(excluded, mapYandexRow(row));
-        if (!mapped || !normalizeCompanyForDedup(mapped.company)) state.excluded_during_fetch = (state.excluded_during_fetch ?? 0) + 1;
+        const source = mapYandexRow(row);
+        const mapped = pruneBaseRowAgainstExclusion(excluded, source);
+        if (!mapped && !excludedByOtherBases(excluded, source)) state.already_seen_during_fetch = (state.already_seen_during_fetch ?? 0) + 1;
+        else if (!mapped || !normalizeCompanyForDedup(mapped.company)) state.excluded_during_fetch = (state.excluded_during_fetch ?? 0) + 1;
         else if (keepWidenedSourceRow(task, mapped)) state.harvest.push(mapped);
         state.catalog.after = row.yandex_id;
       }
@@ -1808,12 +1826,11 @@ async function dispatchTask(
     const secondFilters = { ...filters, hasWebsite: true };
     const second = existingContactsOnly && !first.error && (first.exhausted || first.hitCeiling) && first.rows.length < limit
       ? await fetchDirectoryRows(ctx, secondFilters, limit - first.rows.length,
-        addRowsToExclusionKeys({ inns: new Set(excluded.inns), emails: new Set(excluded.emails),
-          receipts: new Set(excluded.receipts), websiteInns: new Map([...excluded.websiteInns].map(([key, values]) => [key, new Set(values)])),
-          ...(excluded.seen ? { seen: excluded.seen } : {}) },
-        first.rows.map(mapDirectoryRow)), readDirectoryCursor(state, secondFilters), keep) : null;
+        addRowsToExclusionKeys(copyExclusionKeys(excluded), first.rows.map(mapDirectoryRow)),
+        readDirectoryCursor(state, secondFilters), keep) : null;
     const rows = [...first.rows, ...(second?.rows ?? [])];
     const excludedDuringFetch = first.excludedDuringFetch + (second?.excludedDuringFetch ?? 0);
+    const alreadySeenDuringFetch = first.alreadySeenDuringFetch + (second?.alreadySeenDuringFetch ?? 0);
     const exhausted = first.exhausted && (!existingContactsOnly || second?.exhausted === true);
     const hitCeiling = first.hitCeiling || second?.hitCeiling === true;
     const error = first.error ?? second?.error;
@@ -1836,6 +1853,7 @@ async function dispatchTask(
     state.rows = state.harvest.length;
     state.child_job_id = null;
     if (excludedDuringFetch > 0) state.excluded_during_fetch = excludedDuringFetch;
+    if (alreadySeenDuringFetch > 0) state.already_seen_during_fetch = alreadySeenDuringFetch;
     if (exhausted) {
       // Выдача под фильтры кончилась раньше limit — сегмент собран целиком,
       // повторные сборки ничего не добавят. Пометка для UI + сигнал финальному
@@ -1887,7 +1905,7 @@ async function dispatchTask(
     const q = task.hh_query;
     if (!q?.text) throw new Error('hh_live: в задаче нет hh_query.text');
     // Россия по умолчанию: LLM может не указать area, а план — только рынок РФ/СНГ.
-    const config: Record<string, unknown> = { text: q.text, per_page: 100, area: q.area ?? '113' };
+    const config: Record<string, unknown> = { text: state.hh_short_query ?? q.text, per_page: 100, area: q.area ?? '113' };
     if (q.date_from) config.date_from = q.date_from;
     if (q.date_to) config.date_to = q.date_to;
     state.child_job_id = await insertChildJob(ctx, CHILD_JOB_TABLE.hh_live, {
@@ -1947,7 +1965,7 @@ async function readChildRows(
       .eq('job_id', jobId)
       .limit(limit);
     if (error) throw new Error(`hh_vacancies read: ${error.message}`);
-    const queryText = state.task.hh_query?.text ?? '';
+    const queryText = state.hh_short_query ?? state.task.hh_query?.text ?? '';
     return (data ?? []).map((r) => mapHhRow(r as Record<string, unknown>, queryText));
   }
 
@@ -1968,6 +1986,19 @@ async function readChildRows(
     .limit(limit);
   if (error) throw new Error(`google_maps_places read: ${error.message}`);
   return (data ?? []).map((r) => mapGoogleRow(r as Record<string, unknown>));
+}
+
+/**
+ * hh.ru находит вакансии, где есть ВСЕ слова запроса: «инженер технолог
+ * производство завод рабочий качество HSE» у b5934955 не нашёл ни одной.
+ * Короткий запрос — первые три слова; запрос на языке поиска hh (OR, AND,
+ * NOT, кавычки, скобки, поля) составлен намеренно и не меняется.
+ */
+export function veShortHhQuery(text: string): string | null {
+  const query = text.trim();
+  if (/\b(?:OR|AND|NOT)\b|["()!*]|\b[A-Z_]+:/.test(query)) return null;
+  const words = query.split(/\s+/).filter(Boolean);
+  return words.length > 3 ? words.slice(0, 3).join(' ') : null;
 }
 
 /** Опросить дочернюю джобу задачи: completed → harvest, failed/stopped → failed. */
@@ -1992,6 +2023,20 @@ async function pollTask(ctx: VeStageContext, state: VeCollectTaskState, limit: n
   const status = String(row.status ?? '');
   if (status === 'completed') {
     state.harvest = await readChildRows(ctx, state, limit);
+    const shorter = state.source === 'hh_live' && state.harvest.length === 0 && !state.hh_short_query
+      ? veShortHhQuery(state.task.hh_query?.text ?? '') : null;
+    if (shorter) {
+      // Пустая выдача по длинному запросу — не исчерпание рынка: задача
+      // повторяется один раз по короткому запросу (hh.ru бесплатен, вакансии
+      // той же роли просто перестают требовать все семь слов разом).
+      state.hh_short_query = shorter;
+      state.status = 'pending';
+      state.child_job_id = null;
+      state.rows = 0;
+      state.note = `hh.ru не нашёл вакансий по длинному запросу — повтор по короткому «${shorter}»`;
+      stageLog(ctx, `[base_collect] hh_live: 0 вакансий по «${state.task.hh_query?.text ?? ''}», повтор по «${shorter}»`);
+      return;
+    }
     state.status = 'done';
     state.rows = state.harvest.length;
   } else if (isChildFailed(state.source, status)) {
@@ -2029,6 +2074,24 @@ export interface VeBaseExclusionKeys {
   inns: Set<string>;
   /** Все email других баз: один и тот же контакт не должен попасть в разные запуски. */
   emails: Set<string>;
+  /**
+   * Те же ключи без строк самой базы. Нужны только счётчикам: у 6b475d8c
+   * «компании уже есть в других базах» — 1 100 строк, и почти все они были
+   * собственными уже просмотренными строками базы.
+   */
+  otherBases?: VeBaseExclusionKeys;
+}
+
+/** Независимая копия: добавление ключей в неё не меняет исходные. */
+function copyExclusionKeys(keys: VeBaseExclusionKeys): VeBaseExclusionKeys {
+  return { inns: new Set(keys.inns), emails: new Set(keys.emails), receipts: new Set(keys.receipts),
+    websiteInns: new Map([...keys.websiteInns].map(([key, values]) => [key, new Set(values)])),
+    ...(keys.seen ? { seen: keys.seen } : {}), ...(keys.otherBases ? { otherBases: keys.otherBases } : {}) };
+}
+
+/** Исключённую строку занимает другая база проекта, а не прошлый раунд этой же базы. */
+function excludedByOtherBases(keys: VeBaseExclusionKeys, row: VeUnifiedRow): boolean {
+  return !keys.otherBases || pruneBaseRowAgainstExclusion(keys.otherBases, row) === null;
 }
 
 /** Совпадение юрлица исключает строку целиком, независимо от её контактов. */
@@ -2904,6 +2967,88 @@ async function importConstructRows(ctx: VeStageContext, bcJobId: string): Promis
       ? stats.emails_found
       : rows.filter((r) => r.email !== '').length;
   return { rows, emailStatuses, emailsFound, validCount, hasDescription: idxByKey.has('description') };
+}
+
+/**
+ * Запись конструктора пережила свой раунд: раунд закрыт (completed_round ===
+ * round), а construct всё ещё dispatched. У 3cfcfbbd задача d0abb3ea
+ * завершилась 16.09 за полминуты, но раунд закрылся без её результата, и
+ * запись висела неделю: адаптивный режим не включался, а каждое продолжение
+ * снова ждало давно готовую задачу. Сверяем запись с base_constructor_jobs:
+ * готовые строки переносим в резерв непроверенными (их разберёт обычная
+ * проверка резерва — без нового обхода сайтов), запись снимаем. Идущую задачу
+ * не трогаем.
+ */
+async function settleStaleConstruct(ctx: VeStageContext, base: VeAutoBase, info: VeCollectInfo,
+  target: VeCollectionTargetProgress | null): Promise<void> {
+  const construct = info.construct;
+  if (!target || info.preview_pipeline || construct?.status !== 'dispatched' || !construct.bc_job_id
+    || info.target_checkpoint?.completed_round !== target.round) return;
+  const bc = await readConstructJobStatus(ctx, construct.bc_job_id);
+  if (bc && !['completed', 'failed', 'cancelled'].includes(bc.status)) return;
+  // Задача без split_emails отдаёт статус первого адреса склеенной ячейки: такой
+  // результат не переносим (основной путь пересобирает его по той же причине).
+  const imported = bc && (bc.selected_steps?.includes('split_emails') ?? true)
+    ? await importConstructRows(ctx, construct.bc_job_id) : null;
+  const reserve = readVeRelevanceReserve(info.relevance_reserve);
+  const known = new Set([...reserve, ...(Array.isArray(base.data) ? base.data as Array<Record<string, unknown>> : [])]
+    .map(veRelevanceRowKey));
+  const moved = (imported?.rows ?? []).flatMap((row, index) => {
+    const status = imported!.emailStatuses[index];
+    const saved: Record<string, unknown> = { ...row, ...(status ? { _email_status: status } : {}), _relevance_unchecked: true };
+    if (!cell(row.description)) delete saved.description;
+    return known.has(veRelevanceRowKey(saved)) ? [] : [saved];
+  });
+  if (moved.length) {
+    info.relevance_reserve = { ...(info.relevance_reserve ?? { version: 1 }), version: 1, rows: mergeVeRelevanceRows(reserve, moved) };
+  }
+  delete info.construct;
+  if (info.search_policy) delete info.search_policy.construct_rows;
+  await persistCollectInfo(ctx, base.id, info);
+  stageLog(ctx, `[base_collect] конструктор ${construct.bc_job_id} (${bc?.status ?? 'не найден'}) остался от закрытого раунда: `
+    + (moved.length ? `${moved.length} строк перенесено в резерв на проверку` : 'переносить нечего') + ', запись снята');
+}
+
+/** Голый код ОКВЭД в поле деятельности — так строки реестра сохранялись до 21.09. */
+const BARE_OKVED_CODE = /^\d{2}(?:\.\d{1,2}){0,2}$/;
+/** Справочник ОКВЭД не меняется между тиками: код → название (null — кода нет в справочнике). */
+const okvedNameCache = new Map<string, string | null>();
+
+/**
+ * Название ОКВЭД в сохранённые строки реестра. 82db5cf21 кладёт название
+ * только в новые выборки, а у 1a69cda6 в запасе реестра остались 200 строк с
+ * одним «35.1»: быстрой проверке и классификатору такой код ничего не
+ * говорит. Название берём из okved_reference — бесплатно. Меняем только
+ * строки, которые ещё не ушли в проверку (запас задач и отложенные строки):
+ * category входит в ключ сохранённого вердикта, и в резерве оплаченный
+ * вердикт пропал бы. Отметки выборки (company/сайт/ИНН/почта) не меняются.
+ */
+async function nameBareOkvedCodes(ctx: VeStageContext, info: VeCollectInfo): Promise<number> {
+  const groups = [...(info.tasks ?? []).map((task) => task.harvest ?? []), info.search_policy?.deferred_rows ?? []];
+  // Только строки реестра: число в category другого источника — не код ОКВЭД.
+  const bare = (row: VeUnifiedRow) => {
+    const code = cell(row.category);
+    return BARE_OKVED_CODE.test(code) && cell(row.source_detail).split('\n')[0] === 'реестр' ? code : null;
+  };
+  const missing = new Set(groups.flatMap((rows) => rows.map(bare)).filter((code): code is string => !!code && !okvedNameCache.has(code)));
+  if (missing.size) {
+    const { data, error } = await ctx.supabase.from('okved_reference').select('code, name').in('code', [...missing]);
+    // Без справочника строки остаются как были: это подсказка, а не условие сбора.
+    if (error) { stageLog(ctx, `[base_collect] справочник ОКВЭД недоступен: ${error.message}`); return 0; }
+    for (const code of missing) okvedNameCache.set(code, null);
+    for (const row of (data ?? []) as Array<{ code?: unknown; name?: unknown }>) {
+      if (typeof row.code === 'string' && cell(row.name)) okvedNameCache.set(row.code, cell(row.name));
+    }
+  }
+  let named = 0;
+  for (const rows of groups) rows.forEach((row, index) => {
+    const code = bare(row);
+    const name = code ? okvedNameCache.get(code) : null;
+    if (!code || !name) return;
+    rows[index] = { ...row, category: `${name}\n${code}` };
+    named += 1;
+  });
+  return named;
 }
 
 /* ─────────────────────────── Стадия ─────────────────────────── */
@@ -3868,6 +4013,7 @@ async function completeTargetRound(args: {
       // «выброшено» ни к нему не относятся, ни закладку по ним досеять нельзя:
       // строки чужого лейна не покрывают строки нового.
       delete task.excluded_during_fetch;
+      delete task.already_seen_during_fetch;
     }
     const saved = buildVeRelevanceReviewBatch({ reserve: reserveRows, ready: cleaned.rows,
       source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true, triage: triageEnabled });
@@ -4221,6 +4367,12 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     resumeHeldSupplyTimers(info);
     await persistCollectInfo(ctx, baseId, info);
   }
+  await settleStaleConstruct(ctx, base, info, target);
+  const namedOkved = await nameBareOkvedCodes(ctx, info);
+  if (namedOkved) {
+    await persistCollectInfo(ctx, baseId, info);
+    stageLog(ctx, `[base_collect] ${namedOkved} сохранённых строк реестра получили название ОКВЭД вместо голого кода`);
+  }
 
   const { data: verticalRow, error: vError } = await ctx.supabase
     .from('ve_verticals')
@@ -4329,7 +4481,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   let excludedKeysCache: VeBaseExclusionKeys | null = null;
   const getExcludedKeys = async (): Promise<VeBaseExclusionKeys> => {
     if (!excludedKeysCache) {
-      excludedKeysCache = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId, target ? base.hypothesis_id : undefined);
+      const otherBases = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId, target ? base.hypothesis_id : undefined);
+      excludedKeysCache = target ? { ...copyExclusionKeys(otherBases), otherBases } : otherBases;
       if (target) {
         addRowsToExclusionKeys(excludedKeysCache, info.target_checkpoint?.seen_rows ?? []);
         addAcquisitionReceipts(excludedKeysCache, info.target_checkpoint?.seen_rows ?? [], info.tasks?.flatMap((task) => task.harvest ?? []) ?? []);
@@ -4375,10 +4528,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
         const keys = await getExcludedKeys();
         if (!info.preview_pipeline) return keys;
         // A separate set keeps reserved rows available to the import path.
-        return addRowsToExclusionKeys({ inns: new Set(keys.inns), emails: new Set(keys.emails),
-          receipts: new Set(keys.receipts), ...(keys.seen ? { seen: keys.seen } : {}),
-          websiteInns: new Map([...keys.websiteInns].map(([key, values]) => [key, new Set(values)])) },
-        info.preview_pipeline.batches.flatMap((batch) => batch.rows));
+        return addRowsToExclusionKeys(copyExclusionKeys(keys), info.preview_pipeline.batches.flatMap((batch) => batch.rows));
       };
       // Расширенный срез берёт только компании с готовой почтой или сайтом:
       // остальные потребовали бы платного поиска сайта ради второй очереди.
@@ -4447,7 +4597,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // Source pagination excludes consumed legal entities; publication instead
   // compares exact same-base observations. A newly recovered website/email is
   // new evidence even when the old unusable row already had an INN.
-  const existingKeys = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId, target ? base.hypothesis_id : undefined);
+  const otherBaseKeys = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId, target ? base.hypothesis_id : undefined);
+  // Свои строки добавляются в копию: счётчики ниже отделяют «заняты другими
+  // базами» от «уже просмотрены этой базой».
+  const existingKeys = target ? copyExclusionKeys(otherBaseKeys) : otherBaseKeys;
   // Do not buy website lookups for companies already excluded by another base.
   // Snapshot before adding same-base acquisition receipts: a previously seen
   // row may still legitimately recover its missing website in this base.
@@ -4525,12 +4678,19 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       // An unsuccessful lookup must not move empty source rows into another
       // paid enrichment lane. Keep them in harvest/deferred storage instead.
       && (!info.source_contact_budget || hasExistingSourceContact(row))));
-  const kept = considered
-    .map((row) => pruneBaseRowAgainstExclusion(existingKeys, row))
-    .filter((row): row is VeUnifiedRow => row !== null);
-  const excludedExisting = considered.length - kept.length;
+  let excludedExisting = 0, excludedAlreadySeen = 0;
+  const kept = considered.flatMap((row) => {
+    const pruned = pruneBaseRowAgainstExclusion(existingKeys, row);
+    if (pruned) return [pruned];
+    if (existingKeys === otherBaseKeys || pruneBaseRowAgainstExclusion(otherBaseKeys, row) === null) excludedExisting += 1;
+    else excludedAlreadySeen += 1;
+    return [];
+  });
   if (excludedExisting > 0) {
     stageLog(ctx, `[base_collect] исключено ${excludedExisting} строк — компании уже есть в других базах проекта`);
+  }
+  if (excludedAlreadySeen > 0) {
+    stageLog(ctx, `[base_collect] пропущено ${excludedAlreadySeen} строк — эта база их уже просматривала`);
   }
   // Кап — после дедупа и исключения, как раньше после дедупа (limit уже
   // посчитан выше — тот же totalRowsCap(job)).
@@ -4570,7 +4730,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     rows_total: merged.length,
     excluded_existing_bases: excludedExisting,
     excluded_existing_bases_before_construct: excludedExisting,
+    ...(excludedAlreadySeen ? { excluded_already_seen: excludedAlreadySeen } : {}),
     excluded_during_fetch: tasks.reduce((sum, t) => sum + (t.excluded_during_fetch ?? 0), 0),
+    ...(tasks.some((t) => t.already_seen_during_fetch)
+      ? { already_seen_during_fetch: tasks.reduce((sum, t) => sum + (t.already_seen_during_fetch ?? 0), 0) } : {}),
     finished_at: new Date().toISOString(),
   };
 

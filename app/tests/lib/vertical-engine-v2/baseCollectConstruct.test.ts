@@ -64,6 +64,7 @@ import {
   mapGoogleRow,
   pruneBaseRowAgainstExclusion,
   runBaseCollectStage,
+  veShortHhQuery,
   VE_AUTO_COLLECT_COLUMNS,
   type VeCollectInfo,
   type VeUnifiedRow,
@@ -3313,3 +3314,176 @@ describe('base_collect: круг повторной отправки одних 
     expect(constructorCompanies(db)).toEqual(['Завод Новый']);
   });
 });
+
+/**
+ * Мелкие дефекты, найденные аудитом 22.09.2026. Строки, коды ОКВЭД, запрос hh и
+ * результат конструктора — настоящие, из разобранных баз прода.
+ */
+describe('base_collect: мелкие дефекты аудита 22.09', () => {
+  const pendingWake = async (db: MockSupabaseClient, logs: string[] = []) => {
+    const queued = db.getRows('ve_jobs').filter((row) => row.stage === 'base_collect' && row.status !== 'done').at(-1)!;
+    await db.from('ve_jobs').update({ status: 'running' }).eq('id', queued.id);
+    await runBaseCollectStage({ ...makeJob(), id: queued.id as string, payload: queued.payload as VeJob['payload'] },
+      { supabase: db as unknown as SupabaseClient, log: (message: string) => logs.push(message) });
+    return db.getRows('ve_bases')[0];
+  };
+  const constructorCompanies = (db: MockSupabaseClient) => db.getRows('base_constructor_jobs')
+    .flatMap((job) => (job.data as string[][]).slice(1).map((row) => row[0]));
+
+  describe('«уже есть в других базах» считает только другие базы', () => {
+    // 6b475d8c «Кондитерские фабрики»: 1 100 «исключений» — почти все свои уже
+    // просмотренные строки. Строки — из её seen_rows и из соседней базы 8026034e.
+    const OWN = unifiedRow({ company: 'ООО "АПЕКС ПЛЮС"', inn: '6168060650', email: 'apex@apexplus.ru, tender@apexplus.ru',
+      website: 'apexplus.ru', source_detail: 'реестр' });
+    const OTHER = unifiedRow({ company: 'ООО "ЕВРОХЛЕБ"', inn: '7839321110', email: 'zakaz@evrohleb.ru',
+      website: 'https://evrohleb.ru/', source_detail: 'реестр' });
+    const FRESH = unifiedRow({ company: 'ООО "СКИДКИНО"', inn: '5837078851', email: 'anastasia.ismatova@mail.ru',
+      website: 'karavan58.ru', source_detail: 'реестр' });
+    const neighbour = { ...makeBase({}), id: '8026034e', hypothesis_id: 'h2', status: 'collecting',
+      columns: [...VE_AUTO_COLLECT_COLUMNS], data: [{ ...OTHER, _email_status: 'ok' }] };
+    const target = { collection_mode: 'preview' as const,
+      target_progress: { ...createCollectionTarget('preview'), round: 2, candidates_processed: 100, ready_rows: 3 },
+      target_checkpoint: { completed_round: 1, seen_rows: [OWN], processed_rows: 1 } };
+
+    it('при разборе запаса: свои просмотренные строки — отдельный счётчик', async () => {
+      const info: VeCollectInfo = { ...collectInfo([OWN, OTHER, FRESH]), ...target };
+      info.tasks![0].exhausted = true;
+      const db = seed(info, { ve_bases: [makeBase(info), neighbour] });
+      const logs: string[] = [];
+      await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient, log: (message) => logs.push(message) });
+      expect(constructorCompanies(db)).toEqual([FRESH.company]);
+      expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).stats)
+        .toMatchObject({ excluded_existing_bases: 1, excluded_existing_bases_before_construct: 1, excluded_already_seen: 1 });
+      expect(logs).toContain('[base_collect] исключено 1 строк — компании уже есть в других базах проекта');
+      expect(logs).toContain('[base_collect] пропущено 1 строк — эта база их уже просматривала');
+    });
+
+    it('на выборке реестра: то же разделение', async () => {
+      const info: VeCollectInfo = { ...collectInfo([]), ...target, search_policy: { version: 1, phase: 'paid', deferred_rows: [] } };
+      Object.assign(info.tasks![0], { status: 'pending', rows: 0 });
+      const db = seed(info, { ve_bases: [makeBase(info), neighbour] });
+      const directoryRow = (row: VeUnifiedRow) => ({ name: row.company, inn: row.inn, email: row.email, website: row.website,
+        okved_code: '10.82', okved_name: 'Производство какао, шоколада и сахаристых кондитерских изделий' });
+      jest.mocked(searchRows).mockResolvedValueOnce({ rows: [OWN, OTHER, FRESH].map(directoryRow) } as never)
+        .mockResolvedValue({ rows: [] } as never);
+      const logs: string[] = [];
+      await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient, log: (message) => logs.push(message) });
+      const task = (db.getRows('ve_bases')[0].collect_info as VeCollectInfo).tasks![0];
+      expect(task.harvest!.map((row) => row.company)).toEqual([FRESH.company]);
+      expect(task).toMatchObject({ excluded_during_fetch: 1, already_seen_during_fetch: 1 });
+      expect(logs).toContain('[base_collect] реестр: 1 строк пропущено на выборке — компании уже есть в других базах проекта');
+      expect(logs).toContain('[base_collect] реестр: 1 строк пропущено на выборке — эта база их уже просматривала');
+    });
+  });
+
+  it('сохранённые строки реестра с голым кодом ОКВЭД получают название, строки резерва с вердиктом — нет', async () => {
+    // 1a69cda6 «Энергетические компании»: 200 строк запаса реестра с одним «35.1».
+    const ROSENERGOATOM = unifiedRow({ company: 'АО "КОНЦЕРН РОСЭНЕРГОАТОМ"', inn: '7721632827', email: 'info@rosenergoatom.ru',
+      website: 'rosenergoatom.ru', address: '109507, г. Москва, ул. Ферганская, Д.25', category: '35.1', source_detail: 'реестр' });
+    const MOSENERGOSBYT = unifiedRow({ company: 'АО "МОСЭНЕРГОСБЫТ"', inn: '7736520080', email: 'info@mosenergosbyt.ru',
+      website: 'mosenergosbyt.ru', category: '35.1', source_detail: 'реестр' });
+    // Уже проверенная строка резерва: её category входит в ключ оплаченного вердикта.
+    const checked = { ...unifiedRow({ company: 'ПАО "РОССЕТИ"', inn: '4716016979', email: 'info@rosseti.ru', category: '35.1' }),
+      _email_status: 'ok', _ve_relevance: { version: 2, status: 'needs_review', reason: 'Нет сведений о деятельности', evidence: [],
+        context_hash: 'c'.repeat(64), review_attempts: 1 } };
+    const info: VeCollectInfo = { ...collectInfo([ROSENERGOATOM, MOSENERGOSBYT]), collection_mode: 'preview',
+      relevance_reserve: { version: 1, rows: [checked] },
+      target_progress: { ...createCollectionTarget('preview'), round: 2, candidates_processed: 100 },
+      target_checkpoint: { completed_round: 1, seen_rows: [], processed_rows: 0 } };
+    info.tasks![0].exhausted = true;
+    const db = seed(info, { okved_reference: [
+      { code: '35.1', name: 'Производство, передача и распределение электроэнергии', parent_code: '35', section: 'D', level: 2 },
+      { code: '35.11', name: 'Производство электроэнергии', parent_code: '35.1', section: 'D', level: 3 }] });
+    await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
+    const saved = db.getRows('ve_bases')[0].collect_info as VeCollectInfo;
+    expect(saved.tasks![0].harvest!.map((row) => row.category))
+      .toEqual(Array(2).fill('Производство, передача и распределение электроэнергии\n35.1'));
+    // Классификатору уходит название, а не код.
+    const grid = db.getRows('base_constructor_jobs')[0].data as string[][];
+    const categoryIndex = grid[0].indexOf('Категория');
+    expect(grid.slice(1).map((row) => row[categoryIndex]))
+      .toEqual(Array(2).fill('Производство, передача и распределение электроэнергии\n35.1'));
+    expect(readVeRelevanceReserveRows(saved)[0]).toMatchObject({ category: '35.1', _ve_relevance: { status: 'needs_review' } });
+  });
+
+  it('«Продолжить подготовку» снимает запись конструктора, пережившую раунд, и переносит его результат в проверку', async () => {
+    // 3cfcfbbd «Малые агентства недвижимости»: задача d0abb3ea завершилась
+    // 16.09, раунд закрылся без её результата, запись dispatched висела неделю.
+    const BC_JOB = 'd0abb3ea-9c68-47b1-a921-a81d58990db6';
+    const PSG = unifiedRow({ company: 'ООО "ПСГ"', inn: '8614000871', email: 'pypova@mail.ru, priobstroygarant@yandex.ru',
+      address: '628109, Ханты-Мансийский АО., Октябрьский р-н, с. Перегребное, ул. Строителей, д. 51', category: '68.32',
+      employees: '17', revenue: '52636000', source_detail: 'реестр' });
+    const output = (email: string, status: string) => ['ООО "ПСГ"', '', email, '+7 (34678) 3-82-90', '', PSG.address, '68.32', '17',
+      '52636000', '8614000871', 'реестр', '', status, 'free'];
+    const info: VeCollectInfo = { ...collectInfo([PSG], { bc_job_id: BC_JOB, status: 'dispatched', dispatched_at: '2026-09-16T13:55:22.519Z' }),
+      collection_mode: 'preview', ready_target: 500, limit: 5_000,
+      search_policy: { version: 1, phase: 'paid', deferred_rows: [] },
+      target_progress: { ...createCollectionTarget('preview'), round: 2, status: 'limited', max_rounds: 100,
+        candidates_processed: 70, ready_rows: 0, reason: 'Нет подтверждённого продолжения источников; исчерпание рынка не доказано' },
+      target_checkpoint: { completed_round: 2, seen_rows: [PSG], processed_rows: 84 } };
+    info.tasks![0].exhausted = true;
+    const db = seed(info, {
+      ve_bases: [{ ...makeBase(info), status: 'analyzed', columns: [...VE_AUTO_COLLECT_COLUMNS] }],
+      base_constructor_jobs: [{ id: BC_JOB, status: 'completed', error_message: null,
+        selected_steps: ['find_emails', 'enrich_descriptions', 'split_emails', 'dedup_email', 'validate_emails'],
+        data: [['Компания', 'Сайт', 'Email', 'Телефон', 'Вакансия', 'Адрес', 'Категория', 'Сотрудники', 'Выручка', 'ИНН', 'Источник',
+          'Описание', 'Email Статус', 'Email Провайдер'],
+        output('pypova@mail.ru', 'catch_all'), output('priobstroygarant@yandex.ru', 'ok'), output('priobstroygarant@yande.ru', 'catch_all')] }],
+    });
+    await db.from('ve_jobs').update({ status: 'done' }).eq('id', makeJob().id);
+    await expect(enqueueVeBaseCollect(db as unknown as SupabaseClient, { projectId: 'p1', verticalId: 'v1',
+      verticalName: VERTICAL.name, hypothesisIds: ['h1'], collectionMode: 'preview', limit: 2000, resumeBaseId: 'b1' }))
+      .resolves.toMatchObject({ ok: true, created: true, base: { id: 'b1' } });
+    const logs: string[] = [];
+    const base = await pendingWake(db, logs);
+    const saved = base.collect_info as VeCollectInfo;
+    expect(saved.construct).toBeUndefined();
+    expect(logs).toContain(`[base_collect] конструктор ${BC_JOB} (completed) остался от закрытого раунда: 3 строк перенесено в резерв на проверку, запись снята`);
+    // Результат конструктора прошёл обычную проверку резерва, а не пропал.
+    const reviewed = mockFindIrrelevantRows.mock.calls.flatMap(([input]) => (input as { rows: Array<{ email: string }> }).rows.map((row) => row.email));
+    expect(reviewed).toEqual(expect.arrayContaining(['priobstroygarant@yandex.ru', 'pypova@mail.ru']));
+    expect((base.data as Array<{ email: string; _email_status: string }>).map((row) => [row.email, row._email_status]))
+      .toContainEqual(['priobstroygarant@yandex.ru', 'ok']);
+    // Новый обход того же входа не покупается.
+    expect(db.getRows('base_constructor_jobs')).toHaveLength(1);
+  });
+
+  describe('hh_live: длинный запрос без вакансий — не исчерпание', () => {
+    // b5934955: семь обязательных слов — 0 вакансий, задача закрылась пустой.
+    const HH_TASK = { source: 'hh_live' as const, rationale: 'Работодатели, нанимающие инженеров и технологов на производство',
+      hh_query: { text: 'инженер технолог производство завод рабочий качество HSE', date_from: '2026-08-16', date_to: '2026-09-15' } };
+
+    it('повторяет задачу один раз по короткому запросу', async () => {
+      const info: VeCollectInfo = { plan: { tasks: [HH_TASK] }, tasks: [{ source: 'hh_live', status: 'dispatched',
+        child_job_id: '6d5a83ab-241e-4545-aa02-2db7cd4babf8', rows: 0, task: HH_TASK, dispatched_at: new Date().toISOString() }] };
+      const db = seed(info, { parser_jobs: [{ id: '6d5a83ab-241e-4545-aa02-2db7cd4babf8', status: 'completed', started_at: null }],
+        hh_vacancies: [] });
+      let base = await pendingWake(db);
+      expect(base.status).toBe('collecting');
+      expect((base.collect_info as VeCollectInfo).tasks![0]).toMatchObject({ status: 'pending', child_job_id: null,
+        hh_short_query: 'инженер технолог производство' });
+      base = await pendingWake(db);
+      const retry = db.getRows('parser_jobs').find((row) => row.id !== '6d5a83ab-241e-4545-aa02-2db7cd4babf8')!;
+      expect(retry.config).toMatchObject({ text: 'инженер технолог производство', date_from: '2026-08-16', date_to: '2026-09-15' });
+      expect((base.collect_info as VeCollectInfo).tasks![0]).toMatchObject({ status: 'dispatched', child_job_id: retry.id,
+        task: HH_TASK });
+      // Вторая пустая выдача — честный конец задачи, без третьего запроса.
+      await db.from('parser_jobs').update({ status: 'completed' }).eq('id', retry.id);
+      await pendingWake(db).catch(() => undefined);
+      expect(db.getRows('parser_jobs')).toHaveLength(2);
+      expect((db.getRows('ve_bases')[0].collect_info as VeCollectInfo).tasks![0]).toMatchObject({ status: 'done', rows: 0 });
+    });
+
+    it('не трогает короткие запросы и запросы на языке поиска hh', () => {
+      expect(veShortHhQuery(HH_TASK.hh_query.text)).toBe('инженер технолог производство');
+      expect(veShortHhQuery('инженер-технолог')).toBeNull();
+      expect(veShortHhQuery('технолог пищевого производства')).toBeNull();
+      expect(veShortHhQuery('инженер-технолог OR технолог производства OR инженер по качеству')).toBeNull();
+      expect(veShortHhQuery('NAME:(технолог) AND завод')).toBeNull();
+    });
+  });
+});
+
+function readVeRelevanceReserveRows(info: VeCollectInfo): Array<Record<string, unknown>> {
+  return (info.relevance_reserve as { rows?: Array<Record<string, unknown>> } | undefined)?.rows ?? [];
+}

@@ -646,7 +646,8 @@ describe('llm rawCall retry', () => {
       review.status = ['interrupted', 'exhausted'].includes(outcome) ? 'started' : 'failed';
       review.failure_code = 'invalid_response';
       delete review.result; delete review.attempts;
-      if (outcome === 'exhausted') review.attempts = 2;
+      // Обрыв без ответа модели возвращается один раз; «exhausted» — уже возвращённый.
+      if (outcome === 'exhausted') Object.assign(review, { attempts: 2, interrupted: true });
       fetchMock.mockReset();
       if (outcome === 'billing') fetchMock.mockResolvedValueOnce(httpResponse(402, {}));
       else if (outcome === 'transport') fetchMock.mockRejectedValueOnce(new Error('fetch failed'));
