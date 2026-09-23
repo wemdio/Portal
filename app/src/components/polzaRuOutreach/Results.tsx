@@ -105,6 +105,13 @@ function Details({ row }: { row: RuRow }) {
             {row.reason_detail ? <div className="mt-1 text-xs">{row.reason_detail}</div> : null}
           </div>
         )}
+        {(row.ta_score != null || row.priority_score != null) && (
+          <div className="text-gray-800">
+            Скоринг: <b>{row.priority_score ?? '—'}</b>/100 · ЦА-балл: <b>{row.ta_score ?? '—'}</b>/10
+            {row.ta_reason ? <span className="text-gray-500"> — {row.ta_reason}</span> : null}
+            {row.amo_status && row.amo_status !== 'none' ? <span className="text-gray-500"> · AMO: {row.amo_status}</span> : null}
+          </div>
+        )}
         {row.evidence_quote && (
           <div>
             <div className="text-xs text-gray-500">Доказательство ({row.evidence_level})</div>
@@ -148,7 +155,8 @@ function Details({ row }: { row: RuRow }) {
         <div className="text-xs text-gray-500">
           Почта: {row.recipient_email ?? '—'} {row.recipient_role ? `(${row.recipient_role})` : ''}
           {row.is_routing ? ' · письмо 1 в варианте «кому переслать»' : ''}
-          {row.case_id ? ` · кейс ${row.case_id}` : ' · без кейса'}
+          {row.case_id ? ` · кейс ${row.case_id}${row.case_match_reason ? ` (${row.case_match_reason})` : ''}` : ' · без кейса'}
+          {row.email_verification ? ` · почта: ${row.email_verification === 'crm_contact' ? 'контакт из AMO' : 'найдена на сайте'}` : ''}
         </div>
         {row.qa_flags?.length > 0 && <div className="text-xs text-red-700">QA: {row.qa_flags.join(', ')}</div>}
       </div>
@@ -168,7 +176,7 @@ export function ResultsTable({ rows }: { rows: RuRow[] }) {
             <th className="w-8 px-3 py-2" />
             <th className="px-3 py-2">Компания</th>
             <th className="px-3 py-2">Сигнал</th>
-            <th className="px-3 py-2">Режим</th>
+            <th className="px-3 py-2">Цепочка</th>
             <th className="px-3 py-2">Почта</th>
             <th className="px-3 py-2">Статус</th>
           </tr>
@@ -191,10 +199,10 @@ export function ResultsTable({ rows }: { rows: RuRow[] }) {
                     <div className="text-gray-900">{row.signal_type ? SIGNAL_LABELS[row.signal_type] ?? row.signal_type : '—'}</div>
                     <div className="max-w-xs truncate text-xs text-gray-500">
                       {row.signal_title ?? ''}
-                      {row.signal_score != null ? ` · скоринг ${row.signal_score}` : ''}
+                      {row.priority_score != null ? ` · скоринг ${row.priority_score}` : ''}
                     </div>
                   </td>
-                  <td className="px-3 py-2 text-xs text-gray-600">{row.generation_mode ? MODE_LABELS[row.generation_mode] ?? row.generation_mode : '—'}</td>
+                  <td className="px-3 py-2 text-xs text-gray-600">{row.chain_type ? MODE_LABELS[row.chain_type] ?? row.chain_type : '—'}</td>
                   <td className="px-3 py-2 text-xs text-gray-700">{row.recipient_email ?? '—'}</td>
                   <td className="px-3 py-2">
                     <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_TONE[row.row_status]}`}>

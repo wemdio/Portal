@@ -6,8 +6,8 @@ import { STAGES, type Stage } from '@/lib/polzaRuOutreach/types';
 export const dynamic = 'force-dynamic';
 
 const LIST_COLUMNS =
-  'id,profile_code,source_type,source_url,source_urls,company_name,company_brand,inn,normalized_domain,company_website,' +
-  'prior_contact,prior_contact_date,signal_type,signal_date,signal_title,evidence_quote,evidence_level,market_evidence_quote,' +
+  'id,chain_type,source_type,source_url,source_urls,company_name,company_brand,inn,normalized_domain,company_website,' +
+  'prior_contact,prior_contact_date,amo_status,ta_score,ta_reason,priority_score,case_match_reason,campaign_hypothesis,email_verification,signal_type,signal_date,signal_title,evidence_quote,evidence_level,market_evidence_quote,' +
   'target_market,signals,fit_reasons,signal_score,generation_mode,recipient_email,email_type,recipient_role,is_routing,' +
   'letters,subject_b,case_id,offer_version,template_version,qa_status,qa_flags,row_status,pipeline_stage,reason_code,reason_detail,created_at';
 

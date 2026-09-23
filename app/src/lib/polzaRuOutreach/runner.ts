@@ -1,44 +1,49 @@
 /**
  * Раннер «Нашего автоаутрича» (parser_type='polza_ru_outreach').
  *
- * Волны кандидатов идут через общий конвейер, пока не наберётся заказанное
- * число ГОТОВЫХ компаний или не кончится пул (как у английского автоаутрича:
- * оператор заказывает результат, а не размер выборки). Каждая строка журнала
- * проходит этапы:
+ * Поток (RU_OUTREACH_HANDOFF §6): компания из источников → AMO и стоп-лист →
+ * сайт и сигналы → тип цепочки → кейс → скоринг → почта → 4 письма → QA → выгрузка.
  *
- *   candidates_loaded → source_checked → company_resolved → deduplicated →
- *   icp_checked / evidence_classified (оффер) → recipient_resolved →
- *   sequence_assembled → qa_checked → ready
+ * Волна идёт в две фазы — это и есть pre-LPR rerank CEO:
+ *  1. все кандидаты волны проходят проверки, разбор сайта и скоринг;
+ *  2. почту ищем только у прошедших порог, начиная с самых сильных, и
+ *     останавливаемся, как только набрано заказанное число готовых компаний.
  *
  * Отсеянная строка остаётся в журнале с этапом, кодом и пояснением — по ним
- * считается воронка. Ошибка одной строки не валит запуск; сбой источника или
- * библиотек — валит (status=failed), повтор начинается с чистого журнала.
+ * считается воронка. Ошибка одной строки не валит запуск.
  */
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { analyzeVacancy, findOutboundMarker, type VacancyAnalysis } from './analyze';
+import { collectCandidates, type Candidate } from './collect';
 import { companyBrand, isSuppressed, loadPreviouslyExported, normalizeDomain, siteUrl, type ExportedIndex } from './company';
-import { findRuCompanyEmail, type RuEmailResult } from './findEmail';
+import { findRuCompanyEmail } from './findEmail';
+import { buildChain, buildSegmentsHypothesis, openingSentence, type ChainInput } from './letters/chains';
 import type { LetterContext } from './letters/common';
-import { caseTagVocabulary, loadLibraries, pickCase } from './libraries';
-import type { Candidate, ProfileHandler, QualifyResult, RowPatch, RunContext, WorkRow } from './pipeline';
-import { createAutomationProfile } from './profiles/automation';
-import { createSdrProfile } from './profiles/sdr';
-import { createSignalsProfile } from './profiles/signals';
+import { loadLibraries, type CaseRecord } from './libraries';
 import { runQa } from './qa';
+import { decide, routeCase, routeChain, scoreCompany, type Route, type Score } from './router';
+import { amoLookup, loadAmoIndex, type AmoIndex, type AmoRecord } from './sources/amo';
+import { loadSizeByInn } from './sources/directory';
+import { fetchEmployerSite, fetchVacancyCard } from './sources/hhCard';
+import { analyzeSite, EMPTY_SITE, type SiteAnalysis } from './sources/siteSignals';
 import {
   sanitizeRuOutreachConfig,
   STAGES,
   TEMPLATE_VERSION,
-  type ProfileCode,
   type RuOutreachConfig,
+  type Signal,
   type Stage,
 } from './types';
 
-const ROW_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.POLZA_RU_OUTREACH_CONCURRENCY ?? '4')));
+const ENRICH_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.POLZA_RU_OUTREACH_CONCURRENCY ?? '4')));
+const EMAIL_CONCURRENCY = 4;
 const MIN_WAVE = 20;
 const MAX_WAVE = 200;
-const BLIND_YIELD_GUESS = 0.1;
+const BLIND_YIELD_GUESS = 0.08;
 const DB_CHUNK = 100;
+const DAY = 86_400_000;
+const LEADERSHIP_TITLE = /(руководител\S* отдела продаж|(^|[^а-яё])роп([^а-яё]|$)|коммерческ\S* директор|директор по продажам|head of sales)/i;
 
 class CancelledError extends Error {}
 
@@ -49,19 +54,13 @@ function log(level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) {
 }
 
 export function maxCandidatesFor(target: number): number {
-  return Math.min(4000, Math.max(300, target * 30));
+  return Math.min(5000, Math.max(300, target * 40));
 }
 
 export function nextWaveSize(target: number, totals: { scanned: number; ready: number }): number {
   const missing = Math.max(1, target - totals.ready);
   const rate = totals.scanned > 0 && totals.ready > 0 ? totals.ready / totals.scanned : BLIND_YIELD_GUESS;
   return Math.max(MIN_WAVE, Math.min(MAX_WAVE, Math.ceil(missing / Math.max(0.02, rate))));
-}
-
-function profileFor(code: ProfileCode): ProfileHandler {
-  if (code === 'automated_outreach_v1') return createAutomationProfile();
-  if (code === 'signals_v1') return createSignalsProfile();
-  return createSdrProfile();
 }
 
 async function runPool<T>(items: T[], concurrency: number, worker: (item: T) => Promise<void>): Promise<void> {
@@ -77,9 +76,28 @@ async function runPool<T>(items: T[], concurrency: number, worker: (item: T) => 
   );
 }
 
-/** Сколько строк дошло до каждого этапа (включительно) — воронка в прогрессе. */
-function emptyFunnel(): Record<Stage, number> {
-  return Object.fromEntries(STAGES.map((s) => [s, 0])) as Record<Stage, number>;
+interface Rejection {
+  stage: Stage;
+  status: 'rejected' | 'manual_review' | 'failed';
+  reason: string;
+  detail?: string;
+}
+
+/** Всё, что известно о компании после фазы 1. */
+interface Qualified {
+  id: string;
+  candidate: Candidate;
+  domain: string;
+  website: string;
+  brand: string;
+  amo: AmoRecord | null;
+  site: SiteAnalysis;
+  vacancy: VacancyAnalysis | null;
+  signals: Signal[];
+  route: Route;
+  caseHit: { record: CaseRecord; reason: string } | null;
+  score: Score;
+  marketQuote: string | null;
 }
 
 export async function runRuOutreachJob(jobId: string): Promise<void> {
@@ -109,9 +127,9 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
     const { data: job, error: jobErr } = await db.from('parser_jobs').select('config').eq('id', jobId).single();
     if (jobErr || !job) throw new Error(jobErr?.message ?? 'Job not found');
     const config: RuOutreachConfig = sanitizeRuOutreachConfig((job.config ?? {}) as Partial<RuOutreachConfig>);
-    const profile = profileFor(config.profile_code);
     const target = config.limit;
     const maxScan = maxCandidatesFor(target);
+    const thresholds = { write: config.write_threshold, conditional: config.conditional_threshold, review: config.review_threshold };
 
     await setProgress({
       status: 'running',
@@ -125,23 +143,23 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
     // Повтор после падения воркера — с чистого журнала, иначе дубли в воронке.
     await db.from('polza_ru_outreach_companies').delete().eq('job_id', jobId);
 
-    const libraries = await loadLibraries(db, config.profile_code, config.sender_id);
+    const libraries = await loadLibraries(db, config.sender_id);
     if (!libraries.sender) throw new Error('Нет активной подписи отправителя — добавьте её во вкладке «Библиотеки»');
     const sender = libraries.sender;
-    const ctx: RunContext = { db, jobId, config, libraries, tagVocabulary: caseTagVocabulary(libraries.cases), log };
+    const amo: AmoIndex = await loadAmoIndex(db);
     const exported: ExportedIndex = config.include_previously_exported
       ? { domains: new Set(), inns: new Set() }
       : await loadPreviouslyExported(db, jobId);
+    const pool = await collectCandidates(db, config, amo, maxScan);
+    log('info', `job ${jobId}: pool=${pool.length}, target=${target}, sources=${config.sources.join(',')}`);
 
-    const poolSize = await profile.prepare(ctx);
-    log('info', `job ${jobId} ${config.profile_code}: pool=${poolSize}, target=${target}`);
-
-    const funnel = emptyFunnel();
+    const funnel = Object.fromEntries(STAGES.map((s) => [s, 0])) as Record<Stage, number>;
     const reasons: Record<string, number> = {};
+    const chains: Record<string, number> = {};
     const totals = { scanned: 0, ready: 0 };
-    const seenKeys = new Set<string>();
     const seenDomains = new Set<string>();
     const seenInns = new Set<string>();
+    let cursor = 0;
     let waveNo = 0;
     let processed = 0;
 
@@ -151,245 +169,360 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         progress_percent: Math.min(97, 3 + Math.round(94 * Math.max(totals.ready / target, Math.min(1, totals.scanned / maxScan)))),
         total_found: totals.scanned,
         total_parsed: totals.ready,
-        progress_detail: {
-          profile_code: config.profile_code,
-          wave: waveNo,
-          target,
-          pool: poolSize,
-          scanned: totals.scanned,
-          ready: totals.ready,
-          funnel,
-          reasons,
-          offer_version: libraries.offerVersion,
-          ...extra,
-        },
+        progress_detail: { wave: waveNo, target, pool: pool.length, scanned: totals.scanned, ready: totals.ready, funnel, reasons, chains, offer_version: libraries.offerVersion, ...extra },
       });
     };
-
-    const reach = (stage: Stage) => {
-      funnel[stage] += 1;
+    const reach = (...stages: Stage[]) => {
+      for (const s of stages) funnel[s] += 1;
+    };
+    const finish = async (id: string, r: Rejection, patch: Record<string, unknown> = {}) => {
+      reasons[r.reason] = (reasons[r.reason] ?? 0) + 1;
+      await updateRow(id, { ...patch, row_status: r.status, pipeline_stage: r.stage, reason_code: r.reason, reason_detail: r.detail ?? null });
     };
 
-    const finish = async (row: WorkRow, res: Extract<QualifyResult, { ok: false }>) => {
-      reasons[res.reason] = (reasons[res.reason] ?? 0) + 1;
-      await updateRow(row.id, {
-        ...(res.patch ?? {}),
-        row_status: res.status,
-        pipeline_stage: res.stage,
-        reason_code: res.reason,
-        reason_detail: res.detail ?? null,
+    // ── Фаза 1: проверки, сайт, сигналы, цепочка, скоринг ──
+    const qualify = async (id: string, c: Candidate, size: Map<string, { revenue: number | null; employees: number | null }>): Promise<Qualified | null> => {
+      reach('candidates_loaded');
+      const amoByInn = c.inn ? amoLookup(amo, null, c.inn) : null;
+      if (amoByInn && (amoByInn.status === 'open_deal' || amoByInn.status === 'client')) {
+        await finish(id, { stage: 'amo_checked', status: 'rejected', reason: amoByInn.status === 'client' ? 'AMO_CLIENT' : 'AMO_OPEN_DEAL', detail: amoByInn.statusName }, { amo_status: amoByInn.status });
+        return null;
+      }
+
+      // Вакансии hh: живая карточка и цитата функции продаж.
+      let vacancy: VacancyAnalysis | null = null;
+      const signals: Signal[] = [...c.signals];
+      let employerIdFromCard: string | null = null;
+      if (c.vacancies.length) {
+        for (const ref of c.vacancies.slice(0, 2)) {
+          const res = await fetchVacancyCard(ref.vacancy_id);
+          if (!res.ok || res.card.archived || res.card.descriptionText.length < 200) continue;
+          const published = res.card.publishedAt ? new Date(res.card.publishedAt).getTime() : NaN;
+          if (Number.isFinite(published) && published < Date.now() - config.freshness_days * DAY) continue;
+          vacancy = await analyzeVacancy({ title: res.card.title, description: res.card.descriptionText, companyName: c.companyName });
+          if (vacancy.excludedCategory === 'recruitment_agency' || vacancy.excludedCategory === 'leadgen_competitor') {
+            await finish(id, { stage: 'enriched', status: 'rejected', reason: 'EXCLUDED_CATEGORY', detail: vacancy.excludedCategory });
+            return null;
+          }
+          const quote = vacancy.sdrQuote ?? findOutboundMarker(`${res.card.title}\n${res.card.descriptionText}`);
+          const strong = Boolean(quote) || Boolean(vacancy.marketQuote) || LEADERSHIP_TITLE.test(res.card.title) || c.vacancyCount >= 2;
+          if (strong && vacancy.excludedCategory !== 'inbound_retail_only') {
+            signals.push({ type: 'sales_hiring', source: 'hh', title: res.card.title, date: res.card.publishedAt, url: res.card.url, quote: quote ?? null, level: quote ? 'A' : 'B', meta: { vacancy_count: c.vacancyCount } });
+          }
+          if (res.card.employerId && !c.hhEmployerId) employerIdFromCard = res.card.employerId;
+          break;
+        }
+      }
+      reach('amo_checked');
+
+      // Домен.
+      let website = c.website;
+      let domain = normalizeDomain(website);
+      const employerId = c.hhEmployerId ?? employerIdFromCard;
+      if (!domain && employerId) {
+        website = await fetchEmployerSite(employerId);
+        domain = normalizeDomain(website);
+      }
+      if (!domain) {
+        await finish(id, { stage: 'company_resolved', status: 'rejected', reason: 'DOMAIN_NOT_FOUND' }, { signals });
+        return null;
+      }
+      const site_url = website && /^https?:\/\//i.test(website) ? website : siteUrl(domain);
+      await updateRow(id, { normalized_domain: domain, company_website: site_url, pipeline_stage: 'company_resolved' });
+
+      // AMO по домену: клиент, открытая сделка, свежий отказ — не пишем.
+      const amoRec = amoLookup(amo, domain, c.inn) ?? c.amo;
+      if (amoRec && amoRec.status !== 'lost' && amoRec.status !== 'none') {
+        const reason = amoRec.status === 'client' ? 'AMO_CLIENT' : amoRec.status === 'open_deal' ? 'AMO_OPEN_DEAL' : 'CRM_RECENT_CONTACT';
+        await finish(id, { stage: 'amo_checked', status: 'rejected', reason, detail: amoRec.statusName }, { amo_status: amoRec.status });
+        return null;
+      }
+      reach('company_resolved');
+
+      if (seenDomains.has(domain) || (c.inn && seenInns.has(c.inn))) {
+        await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'DUPLICATE_COMPANY' });
+        return null;
+      }
+      seenDomains.add(domain);
+      if (c.inn) seenInns.add(c.inn);
+      if (exported.domains.has(domain) || (c.inn && exported.inns.has(c.inn))) {
+        await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'PREVIOUSLY_EXPORTED' });
+        return null;
+      }
+      reach('deduplicated');
+
+      // Сайт: один обход, один разбор.
+      const site = await analyzeSite(site_url).catch((err) => {
+        log('warn', `site analysis failed for ${domain}`, err instanceof Error ? err.message : err);
+        return EMPTY_SITE;
       });
+      if (!site.reachable) {
+        await finish(id, { stage: 'enriched', status: 'rejected', reason: 'SITE_UNREACHABLE', detail: site_url }, { signals });
+        return null;
+      }
+      if (site.excludedCategory) {
+        await finish(id, { stage: 'enriched', status: 'rejected', reason: site.excludedCategory === 'b2c_only' ? 'NOT_B2B' : 'EXCLUDED_CATEGORY', detail: site.excludedCategory });
+        return null;
+      }
+      const since = Date.now() - config.freshness_days * DAY;
+      for (const f of site.facts) {
+        const standing = f.type === 'partner_program' || f.type === 'dealer_search';
+        if (standing || (f.date && new Date(f.date).getTime() >= since)) signals.push(f);
+      }
+      const isB2b = site.isB2b || Boolean(vacancy?.isB2b && vacancy.b2bQuote) || signals.some((s) => s.type === 'contract_won' || s.type === 'trade_show_exhibitor');
+      if (!isB2b || vacancy?.excludedCategory === 'b2c_only') {
+        await finish(id, { stage: 'enriched', status: 'rejected', reason: 'NOT_B2B' }, { signals, ta_score: site.taScore, ta_reason: site.taReason });
+        return null;
+      }
+      // Бренд: у кандидата из Директа есть только домен — название берём со страницы.
+      const onlyDomainName = c.companyName === domain;
+      const brand = site.brand ?? (onlyDomainName ? null : companyBrand(c.companyName));
+      if (!brand) {
+        await finish(id, { stage: 'enriched', status: 'rejected', reason: 'COMPANY_AMBIGUOUS' }, { signals });
+        return null;
+      }
+      reach('enriched');
+
+      const reactivation = Boolean(amoRec && amoRec.status === 'lost' && amoRec.priorContact);
+      const route = routeChain({ signals, reactivation, taScore: site.taScore });
+      const marketQuote = vacancy?.marketQuote ?? site.customerQuote ?? null;
+      const known = c.inn ? size.get(c.inn) : undefined;
+      const base = {
+        company_brand: brand,
+        signals,
+        amo_status: amoRec?.status ?? 'none',
+        prior_contact: reactivation,
+        prior_contact_date: reactivation ? amoRec?.lastContactAt ?? null : null,
+        ta_score: site.taScore,
+        ta_reason: site.taReason,
+        market_evidence_quote: marketQuote,
+        target_market: vacancy?.targetMarket ?? null,
+        fit_reasons: [
+          ...(site.b2bQuote ? [`B2B: «${site.b2bQuote}»`] : []),
+          ...(site.productSummary ? [`Продукт: ${site.productSummary}`] : []),
+          ...(site.industryGroup ? [`Отрасль: ${site.industryGroup}`] : []),
+          ...(site.hasAdPixel ? ['На сайте стоят рекламные счётчики'] : []),
+        ],
+      };
+      if (!route) {
+        await finish(id, { stage: 'scored', status: 'rejected', reason: 'NO_CHAIN', detail: `ЦА ${site.taScore}/10` }, base);
+        return null;
+      }
+      const caseHit = routeCase(libraries.cases, site.industryGroup, route.chain);
+      const score = scoreCompany({
+        chain: route.chain,
+        primary: route.primary,
+        freshnessDays: config.freshness_days,
+        taScore: site.taScore,
+        isB2b,
+        revenue: c.revenue ?? known?.revenue ?? null,
+        employees: c.employees ?? known?.employees ?? null,
+        hasAdPixel: site.hasAdPixel,
+        siteReachable: true,
+        hasCase: Boolean(caseHit),
+        // Скоринг до поиска почты — оптимистичный: почту ищем только у прошедших.
+        emailFound: true,
+      });
+      chains[route.chain] = (chains[route.chain] ?? 0) + 1;
+      const p = route.primary;
+      const patch = {
+        ...base,
+        chain_type: route.chain,
+        signal_type: p?.type ?? null,
+        signal_date: p?.date ?? null,
+        signal_title: p?.title ?? null,
+        source_url: p?.url ?? c.sourceUrls[0] ?? null,
+        evidence_quote: p?.quote ?? null,
+        evidence_level: p ? p.level : 'NONE',
+        generation_mode: route.chain,
+        case_id: caseHit?.record.case_id ?? null,
+        case_match_reason: caseHit?.reason ?? null,
+        priority_score: score.total,
+        signal_score: score.total,
+        fit_reasons: [...base.fit_reasons, `Скоринг: ${Object.entries(score.parts).map(([k, v]) => `${k}=${v}`).join(', ')}`],
+      };
+      const decision = decide(score.total, thresholds, Boolean(caseHit), true);
+      if (decision === 'skip') {
+        await finish(id, { stage: 'scored', status: 'rejected', reason: 'SCORE_TOO_LOW', detail: `${score.total}/100` }, patch);
+        return null;
+      }
+      if (decision === 'review' || decision === 'needs_case') {
+        await finish(id, { stage: 'scored', status: 'manual_review', reason: decision === 'review' ? 'SCORE_REVIEW' : 'SCORE_NEEDS_CASE', detail: `${score.total}/100` }, patch);
+        return null;
+      }
+      await updateRow(id, { ...patch, pipeline_stage: 'scored' });
+      reach('scored');
+      return { id, candidate: c, domain, website: site_url, brand, amo: amoRec, site, vacancy, signals, route, caseHit, score, marketQuote };
     };
 
-    const processRow = async (row: WorkRow) => {
-      const c = row.candidate;
+    // ── Фаза 2: почта, письма, QA ──
+    const finalize = async (q: Qualified) => {
+      if (totals.ready >= target) {
+        await updateRow(q.id, { row_status: 'manual_review', reason_code: 'LIMIT_REACHED', reason_detail: 'лимит готовых компаний уже набран' });
+        return;
+      }
+      const email = q.route.chain === 'reactivation' && q.amo?.contactEmail
+        ? { email: q.amo.contactEmail, emailType: 'person' as const, isRouting: false, recipientRole: 'Контакт из AMO', sourceUrl: null }
+        : await findRuCompanyEmail(q.website, q.domain);
+      if (!email.email) {
+        await finish(q.id, { stage: 'recipient_resolved', status: 'rejected', reason: 'EMAIL_NOT_FOUND' });
+        return;
+      }
+      if (await isSuppressed(db, email.email)) {
+        await finish(q.id, { stage: 'recipient_resolved', status: 'rejected', reason: 'SUPPRESSED_CONTACT', detail: email.email });
+        return;
+      }
+      await updateRow(q.id, {
+        recipient_email: email.email,
+        email_type: email.emailType,
+        email_verification: q.route.chain === 'reactivation' && q.amo?.contactEmail ? 'crm_contact' : 'found_on_site',
+        email_source_url: email.sourceUrl,
+        recipient_role: email.recipientRole,
+        is_routing: email.isRouting,
+        pipeline_stage: 'recipient_resolved',
+      });
+      reach('recipient_resolved');
+
+      const chainInput: ChainInput = {
+        chain: q.route.chain,
+        signal: q.route.primary,
+        priorContact: q.route.chain === 'reactivation',
+        marketQuote: q.marketQuote,
+        productSummary: q.site.productSummary,
+      };
+      const letterCtx: LetterContext = {
+        brand: q.brand,
+        sender,
+        isRouting: email.isRouting,
+        caseRecord: q.caseHit?.record ?? null,
+        claims: libraries.claims.filter((cl) => cl.chain_type === 'all' || cl.chain_type === q.route.chain),
+      };
+      const hypothesis = !q.caseHit && q.marketQuote
+        ? await buildSegmentsHypothesis({ brand: q.brand, productSummary: q.site.productSummary, marketQuote: q.marketQuote }).catch(() => null)
+        : null;
+      const chain = buildChain(letterCtx, chainInput, hypothesis);
+      reach('sequence_assembled');
+
+      const opening = openingSentence(chainInput, q.brand);
+      const usedClaims = libraries.claims.filter((cl) => chain.claimIds.includes(cl.id));
+      const qa = runQa({
+        letters: chain.letters,
+        amoStatus: q.amo?.status ?? null,
+        sender,
+        priorContact: chainInput.priorContact,
+        caseText: q.caseHit?.record.case_text_short.trim() ?? null,
+        claimTexts: usedClaims.map((cl) => cl.claim_text),
+        allowedFacts: [
+          q.brand,
+          ...(opening ? [opening] : []),
+          ...q.signals.flatMap((s) => [s.title, s.quote ?? '']).filter(Boolean),
+          ...(q.marketQuote ? [q.marketQuote] : []),
+        ],
+        targetMarket: q.vacancy?.targetMarket ?? null,
+        marketQuote: q.marketQuote,
+        recipientEmail: email.email,
+      });
+      const base = {
+        letters: chain.letters,
+        subject_b: chain.subjectB,
+        case_id: chain.caseId,
+        campaign_hypothesis: chain.campaignHypothesis,
+        offer_version: libraries.offerVersion,
+        offer_claim_ids: chain.claimIds,
+        sender_id: sender.id,
+        template_version: TEMPLATE_VERSION,
+        qa_status: qa.status,
+        qa_flags: qa.flags,
+      };
+      if (qa.status !== 'passed') {
+        const reason = qa.flags.some((f) => f.includes('placeholder'))
+          ? 'QA_PLACEHOLDER_LEFT'
+          : qa.flags.some((f) => /unsupported|false_prior|market_without/.test(f))
+            ? 'QA_FACT_UNSUPPORTED'
+            : 'QA_FAILED';
+        await finish(q.id, { stage: 'qa_checked', status: 'manual_review', reason, detail: qa.flags.join('; ') }, base);
+        return;
+      }
+      reach('qa_checked');
+      if (totals.ready >= target) {
+        await updateRow(q.id, { ...base, row_status: 'manual_review', pipeline_stage: 'qa_checked', reason_code: 'LIMIT_REACHED', reason_detail: 'лимит готовых компаний уже набран' });
+        return;
+      }
+      totals.ready += 1;
+      reach('ready');
+      await updateRow(q.id, { ...base, row_status: 'ready', pipeline_stage: 'ready', reason_code: null, reason_detail: null });
+    };
+
+    const safe = async (id: string, fn: () => Promise<void>) => {
       try {
-        reach('candidates_loaded');
-        // ── источник ──
-        const sourceFail = profile.checkSource ? await profile.checkSource(row, ctx) : null;
-        if (sourceFail && !sourceFail.ok) return finish(row, sourceFail);
-        reach('source_checked');
-
-        // ── компания и домен ──
-        let website = c.website;
-        let domain = normalizeDomain(website);
-        if (!domain && profile.resolveWebsite) {
-          website = await profile.resolveWebsite(row, ctx);
-          domain = normalizeDomain(website);
-        }
-        if (!domain) {
-          return finish(row, { ok: false, stage: 'company_resolved', status: 'rejected', reason: 'DOMAIN_NOT_FOUND' });
-        }
-        row.domain = domain;
-        row.website = website && /^https?:\/\//i.test(website) ? website : siteUrl(domain);
-        await updateRow(row.id, { normalized_domain: domain, company_website: row.website, pipeline_stage: 'company_resolved' });
-        reach('company_resolved');
-
-        // ── дедуп: внутри запуска и против прошлых выгрузок любого оффера ──
-        if (seenDomains.has(domain) || (c.inn && seenInns.has(c.inn))) {
-          return finish(row, { ok: false, stage: 'deduplicated', status: 'rejected', reason: 'DUPLICATE_COMPANY' });
-        }
-        seenDomains.add(domain);
-        if (c.inn) seenInns.add(c.inn);
-        if (exported.domains.has(domain) || (c.inn && exported.inns.has(c.inn))) {
-          return finish(row, { ok: false, stage: 'deduplicated', status: 'rejected', reason: 'PREVIOUSLY_EXPORTED' });
-        }
-        reach('deduplicated');
-
-        // ── ICP / fit / сигнал ──
-        const q = await profile.qualify(row, ctx);
-        if (!q.ok) return finish(row, q);
-        reach('icp_checked');
-        reach('evidence_classified');
-        const patch: RowPatch = { ...q.patch };
-        await updateRow(row.id, { ...patch, pipeline_stage: 'evidence_classified' });
-
-        // ── адресат ──
-        let email: RuEmailResult;
-        if (c.crmEmail) {
-          // Человек из сделки AMO: с ним уже говорили, это не общий ящик.
-          email = { email: c.crmEmail, emailType: 'person', isRouting: false, recipientRole: 'Контакт из AMO', sourceUrl: null };
-        } else {
-          email = await findRuCompanyEmail(row.website, domain);
-        }
-        if (!email.email) {
-          return finish(row, { ok: false, stage: 'recipient_resolved', status: 'rejected', reason: 'EMAIL_NOT_FOUND', patch });
-        }
-        if (await isSuppressed(db, email.email)) {
-          return finish(row, { ok: false, stage: 'recipient_resolved', status: 'rejected', reason: 'SUPPRESSED_CONTACT', detail: email.email, patch });
-        }
-        const gate = profile.gateAfterEmail?.(row, patch, email.emailType, ctx) ?? null;
-        if (gate && !gate.ok) return finish(row, { ...gate, patch: { ...patch, ...(gate.patch ?? {}) } });
-        await updateRow(row.id, {
-          signal_score: patch.signal_score ?? null,
-          recipient_email: email.email,
-          email_type: email.emailType,
-          email_source_url: email.sourceUrl,
-          recipient_role: email.recipientRole,
-          is_routing: email.isRouting,
-          pipeline_stage: 'recipient_resolved',
-        });
-        reach('recipient_resolved');
-
-        // ── цепочка ──
-        const brand = companyBrand(c.companyName);
-        const caseRecord = pickCase(libraries.cases, q.tags);
-        const letterCtx: LetterContext = {
-          brand,
-          sender,
-          isRouting: email.isRouting,
-          caseRecord,
-          claims: libraries.claims,
-        };
-        const chain = await profile.assemble(row, letterCtx, q.letterInput, ctx);
-        reach('sequence_assembled');
-
-        // ── QA ──
-        const usedClaims = libraries.claims.filter((cl) => chain.claimIds.includes(cl.id));
-        const qa = runQa({
-          profile: config.profile_code,
-          letters: chain.letters,
-          sender,
-          priorContact: Boolean(patch.prior_contact),
-          caseText: caseRecord?.case_text_short.trim() ?? null,
-          claimTexts: usedClaims.map((cl) => cl.claim_text),
-          allowedFacts: [brand, ...q.allowedFacts],
-          targetMarket: patch.target_market ?? null,
-          marketQuote: patch.market_evidence_quote ?? null,
-          recipientEmail: email.email,
-        });
-        const base = {
-          company_brand: brand,
-          letters: chain.letters,
-          subject_b: chain.subjectB,
-          case_id: chain.caseId,
-          offer_version: libraries.offerVersion,
-          offer_claim_ids: chain.claimIds,
-          sender_id: sender.id,
-          template_version: TEMPLATE_VERSION[config.profile_code],
-          qa_status: qa.status,
-          qa_flags: qa.flags,
-        };
-        if (qa.status !== 'passed') {
-          reasons.QA_FAILED = (reasons.QA_FAILED ?? 0) + 1;
-          await updateRow(row.id, {
-            ...base,
-            row_status: 'manual_review',
-            pipeline_stage: 'qa_checked',
-            reason_code: qa.flags.some((f) => f.includes('placeholder')) ? 'QA_PLACEHOLDER_LEFT' : qa.flags.some((f) => f.includes('unsupported') || f.includes('false_prior') || f.includes('market_without')) ? 'QA_FACT_UNSUPPORTED' : 'QA_FAILED',
-            reason_detail: qa.flags.join('; '),
-          });
-          return;
-        }
-        reach('qa_checked');
-        // Лимит считает готовые строки: лишняя готовая сверх цели не нужна.
-        if (totals.ready >= target) {
-          await updateRow(row.id, { ...base, row_status: 'manual_review', pipeline_stage: 'qa_checked', reason_code: 'LIMIT_REACHED', reason_detail: 'лимит готовых компаний уже набран' });
-          return;
-        }
-        totals.ready += 1;
-        reach('ready');
-        await updateRow(row.id, { ...base, row_status: 'ready', pipeline_stage: 'ready', reason_code: null, reason_detail: null });
+        await fn();
       } catch (err) {
         if (err instanceof CancelledError) throw err;
         reasons.PROCESSING_ERROR = (reasons.PROCESSING_ERROR ?? 0) + 1;
-        await updateRow(row.id, {
-          row_status: 'failed',
-          reason_code: 'PROCESSING_ERROR',
-          reason_detail: err instanceof Error ? err.message.slice(0, 500) : String(err),
-        });
+        await updateRow(id, { row_status: 'failed', reason_code: 'PROCESSING_ERROR', reason_detail: err instanceof Error ? err.message.slice(0, 500) : String(err) });
       } finally {
-        profile.release?.(row);
         processed += 1;
         if (processed % 5 === 0) await publish('processing');
       }
     };
 
-    let exhausted = false;
-    while (totals.ready < target && totals.scanned < maxScan && !exhausted) {
+    while (totals.ready < target && totals.scanned < maxScan && cursor < pool.length) {
       await ensureNotCancelled();
       waveNo += 1;
       const want = Math.min(nextWaveSize(target, totals), maxScan - totals.scanned);
-      const raw = profile.nextWave(want);
-      if (!raw.length) {
-        exhausted = true;
-        break;
-      }
-      const wave: Candidate[] = [];
-      for (const cand of raw) {
-        if (seenKeys.has(cand.key)) continue;
-        seenKeys.add(cand.key);
-        wave.push(cand);
-      }
-      if (!wave.length) continue;
+      const wave = pool.slice(cursor, cursor + want);
+      cursor += wave.length;
 
-      const ids = new Map<number, string>();
+      const ids: string[] = [];
       for (let i = 0; i < wave.length; i += DB_CHUNK) {
         const chunk = wave.slice(i, i + DB_CHUNK);
         const { data, error } = await db
           .from('polza_ru_outreach_companies')
           .insert(
-            chunk.map((cand) => ({
+            chunk.map((c) => ({
               job_id: jobId,
-              profile_code: config.profile_code,
-              source_type: cand.sourceType,
-              source_record_id: cand.sourceRecordId,
-              source_url: cand.sourceUrl,
-              source_urls: cand.sourceUrls,
-              company_name: cand.companyName,
-              company_brand: companyBrand(cand.companyName),
-              inn: cand.inn,
-              hh_employer_id: cand.hhEmployerId,
-              crm_lead_id: cand.crmLeadId,
-              signals: cand.signals,
+              source_type: c.sources.join('+'),
+              source_record_id: c.sourceRecordId,
+              source_url: c.sourceUrls[0] ?? null,
+              source_urls: c.sourceUrls,
+              company_name: c.companyName,
+              inn: c.inn,
+              hh_employer_id: c.hhEmployerId,
+              crm_lead_id: c.amo?.amoId ?? null,
+              signals: c.signals,
               row_status: 'processing',
               pipeline_stage: 'candidates_loaded',
             })),
           )
           .select('id');
         if (error) throw new Error(`journal insert failed: ${error.message}`);
-        (data ?? []).forEach((r, j) => ids.set(i + j, String(r.id)));
+        for (const r of data ?? []) ids.push(String(r.id));
       }
-      const rows: WorkRow[] = wave
-        .map((candidate, i) => ({ id: ids.get(i) ?? '', candidate, domain: null, website: null }))
-        .filter((r) => r.id);
-      totals.scanned += rows.length;
-      await publish('processing', { wave_size: rows.length });
-      log('info', `wave ${waveNo}: ${rows.length} candidates (ready ${totals.ready}/${target})`);
+      totals.scanned += wave.length;
+      const size = await loadSizeByInn(db, wave.map((c) => c.inn).filter((x): x is string => Boolean(x)));
+      await publish('enriching', { wave_size: wave.length });
+      log('info', `wave ${waveNo}: ${wave.length} candidates (ready ${totals.ready}/${target})`);
 
-      // Внутри волны строки независимы; отмену проверяем между строками.
-      await runPool(rows, ROW_CONCURRENCY, async (row) => {
-        if (totals.ready >= target) {
-          await updateRow(row.id, { row_status: 'rejected', reason_code: 'LIMIT_REACHED', reason_detail: 'лимит готовых компаний набран раньше' });
-          return;
-        }
+      const qualified: Qualified[] = [];
+      await runPool(wave.map((c, i) => ({ c, id: ids[i] })).filter((x) => x.id), ENRICH_CONCURRENCY, async ({ c, id }) => {
         await ensureNotCancelled();
-        await processRow(row);
+        await safe(id, async () => {
+          const q = await qualify(id, c, size);
+          if (q) qualified.push(q);
+        });
+      });
+
+      // Pre-LPR rerank: почту ищем от самых сильных к слабым.
+      qualified.sort((a, b) => b.score.total - a.score.total);
+      await publish('finding_emails', { qualified: qualified.length });
+      await runPool(qualified, EMAIL_CONCURRENCY, async (q) => {
+        await ensureNotCancelled();
+        await safe(q.id, () => finalize(q));
       });
     }
 
-    const stopReason = totals.ready >= target ? 'target_reached' : exhausted ? 'pool_exhausted' : 'scan_limit';
-    log('info', `job ${jobId} done: scanned=${totals.scanned} ready=${totals.ready}/${target} (${stopReason})`, reasons);
+    const stopReason = totals.ready >= target ? 'target_reached' : cursor >= pool.length ? 'pool_exhausted' : 'scan_limit';
+    log('info', `job ${jobId} done: scanned=${totals.scanned} ready=${totals.ready}/${target} (${stopReason})`, { reasons, chains });
     await setProgress({
       status: 'completed',
       progress_stage: 'completed',
@@ -398,18 +531,7 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
       total_parsed: totals.ready,
       completed_at: new Date().toISOString(),
       error_message: null,
-      progress_detail: {
-        profile_code: config.profile_code,
-        wave: waveNo,
-        target,
-        pool: poolSize,
-        scanned: totals.scanned,
-        ready: totals.ready,
-        stop_reason: stopReason,
-        funnel,
-        reasons,
-        offer_version: libraries.offerVersion,
-      },
+      progress_detail: { wave: waveNo, target, pool: pool.length, scanned: totals.scanned, ready: totals.ready, stop_reason: stopReason, funnel, reasons, chains, offer_version: libraries.offerVersion },
     });
   } catch (err) {
     if (err instanceof CancelledError) {
@@ -419,12 +541,7 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
     log('error', `job ${jobId} failed`, err);
     await db
       .from('parser_jobs')
-      .update({
-        status: 'failed',
-        progress_stage: 'failed',
-        completed_at: new Date().toISOString(),
-        error_message: err instanceof Error ? err.message : 'Unknown error',
-      })
+      .update({ status: 'failed', progress_stage: 'failed', completed_at: new Date().toISOString(), error_message: err instanceof Error ? err.message : 'Unknown error' })
       .eq('id', jobId);
   }
 }

@@ -14,7 +14,7 @@
  */
 
 import { acceptQuote } from './evidence';
-import { asBool, asString, asStringArray, callJson } from './llm';
+import { asBool, asString, callJson } from './llm';
 
 const MAX_DESCRIPTION_CHARS = 7000;
 
@@ -27,7 +27,6 @@ export interface VacancyAnalysis {
   b2bQuote: string | null;
   excludedCategory: 'recruitment_agency' | 'leadgen_competitor' | 'b2c_only' | 'inbound_retail_only' | null;
   productSummary: string | null;
-  tags: string[];
 }
 
 const SYSTEM = `Ты разбираешь вакансию российской компании для B2B-аутрича Polza Agency (мы продаём компаниям привлечение B2B-клиентов через email-аутрич). Верни СТРОГИЙ JSON:
@@ -39,7 +38,6 @@ const SYSTEM = `Ты разбираешь вакансию российской 
   "b2b_quote": string,          // ДОСЛОВНАЯ цитата про клиентов-организаций; ""
   "excluded_category": string,  // "recruitment_agency" (вакансия размещена кадровым агентством за клиента) | "leadgen_competitor" (работодатель сам агентство лидогенерации/аутрича/колл-центр продаж на аутсорсе) | "b2c_only" (продажи только частным лицам) | "inbound_retail_only" (только входящие заявки, торговый зал, розница, работа с текущей базой) | ""
   "product_summary": string,    // что продаёт компания, 3–10 слов; ""
-  "tags": string[]              // теги отрасли/продукта ТОЛЬКО из словаря ниже
 }
 Жёсткие правила:
 - Цитаты копируй символ в символ из текста вакансии. Не перефразируй.
@@ -51,11 +49,9 @@ export async function analyzeVacancy(input: {
   title: string;
   description: string;
   companyName: string;
-  tagVocabulary: string[];
 }): Promise<VacancyAnalysis> {
   const source = `${input.title}\n${input.description}`;
   const user = [
-    `СЛОВАРЬ ТЕГОВ: ${JSON.stringify(input.tagVocabulary)}`,
     `КОМПАНИЯ: ${input.companyName}`,
     `ВАКАНСИЯ: ${input.title}`,
     '',
@@ -66,7 +62,6 @@ export async function analyzeVacancy(input: {
 
   const marketQuote = acceptQuote(source, asString(raw.market_quote));
   const excluded = asString(raw.excluded_category);
-  const vocabulary = new Set(input.tagVocabulary);
   const b2bQuote = acceptQuote(source, asString(raw.b2b_quote));
   return {
     sdrQuote: acceptQuote(source, asString(raw.sdr_quote)),
@@ -78,7 +73,6 @@ export async function analyzeVacancy(input: {
       (c) => c === excluded,
     ) ?? null,
     productSummary: asString(raw.product_summary).slice(0, 120) || null,
-    tags: asStringArray(raw.tags).map((t) => t.toLowerCase()).filter((t) => vocabulary.has(t)),
   };
 }
 

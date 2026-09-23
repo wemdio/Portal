@@ -9,7 +9,6 @@
 
 import { createHash } from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { ProfileCode } from './types';
 
 export interface SenderProfile {
   id: string;
@@ -24,16 +23,14 @@ export interface SenderProfile {
 export interface CaseRecord {
   case_id: string;
   public_name: string;
-  industry_tags: string[];
-  product_tags: string[];
-  sales_model_tags: string[];
-  allowed_profiles: string[];
+  industry_groups: string[];
+  allowed_chains: string[];
   case_text_short: string;
 }
 
 export interface OfferClaim {
   id: string;
-  profile_code: string;
+  chain_type: string;
   claim_key: string;
   claim_text: string;
 }
@@ -51,11 +48,7 @@ function isActive(expiresAt: unknown, now: number): boolean {
   return Number.isFinite(t) && t > now;
 }
 
-export async function loadLibraries(
-  db: SupabaseClient,
-  profile: ProfileCode,
-  senderId: string | null,
-): Promise<Libraries> {
+export async function loadLibraries(db: SupabaseClient, senderId: string | null): Promise<Libraries> {
   const now = Date.now();
 
   const sendersQuery = db.from('polza_ru_senders').select('*').eq('status', 'active');
@@ -77,8 +70,7 @@ export async function loadLibraries(
   const { data: claims, error: claimsErr } = await db
     .from('polza_ru_offer_claims')
     .select('*')
-    .eq('status', 'approved')
-    .in('profile_code', [profile, 'all']);
+    .eq('status', 'approved');
   if (claimsErr) throw new Error(`offer claims load failed: ${claimsErr.message}`);
 
   const activeClaims = (claims ?? []).filter((c) => isActive(c.expires_at, now));
@@ -101,19 +93,16 @@ export async function loadLibraries(
       : null,
     cases: (cases ?? [])
       .filter((c) => isActive(c.expires_at, now))
-      .filter((c) => Array.isArray(c.allowed_profiles) && c.allowed_profiles.includes(profile))
       .map((c) => ({
         case_id: String(c.case_id),
         public_name: String(c.public_name),
-        industry_tags: (c.industry_tags ?? []) as string[],
-        product_tags: (c.product_tags ?? []) as string[],
-        sales_model_tags: (c.sales_model_tags ?? []) as string[],
-        allowed_profiles: (c.allowed_profiles ?? []) as string[],
+        industry_groups: (c.industry_groups ?? []) as string[],
+        allowed_chains: (c.allowed_chains ?? []) as string[],
         case_text_short: String(c.case_text_short),
       })),
     claims: activeClaims.map((c) => ({
       id: String(c.id),
-      profile_code: String(c.profile_code),
+      chain_type: String(c.chain_type),
       claim_key: String(c.claim_key),
       claim_text: String(c.claim_text),
     })),
@@ -133,31 +122,4 @@ export function formatSignature(sender: SenderProfile): string {
 /** Имя для самопредставления в письмах 2–3 («Егор, Polza Agency»). */
 export function senderFirstName(sender: SenderProfile): string {
   return sender.sender_name.trim().split(/\s+/)[0] ?? sender.sender_name;
-}
-
-/**
- * Кейс под компанию — детерминированно по пересечению тегов. «Примерно похожий»
- * кейс не берётся: без пересечения тегов письмо 2 идёт без кейса (правила RU, письмо 2).
- */
-export function pickCase(cases: CaseRecord[], companyTags: string[]): CaseRecord | null {
-  const tags = new Set(companyTags.map((t) => t.toLowerCase().trim()).filter(Boolean));
-  if (!tags.size) return null;
-  let best: { c: CaseRecord; score: number } | null = null;
-  for (const c of cases) {
-    const all = [...c.industry_tags, ...c.product_tags, ...c.sales_model_tags].map((t) => t.toLowerCase().trim());
-    const score = all.filter((t) => tags.has(t)).length;
-    if (score > 0 && (!best || score > best.score)) best = { c, score };
-  }
-  return best?.c ?? null;
-}
-
-/** Все теги активных кейсов — словарь, из которого LLM выбирает теги компании. */
-export function caseTagVocabulary(cases: CaseRecord[]): string[] {
-  const set = new Set<string>();
-  for (const c of cases) {
-    for (const t of [...c.industry_tags, ...c.product_tags, ...c.sales_model_tags]) {
-      if (t.trim()) set.add(t.toLowerCase().trim());
-    }
-  }
-  return Array.from(set).sort();
 }
