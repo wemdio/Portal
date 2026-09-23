@@ -16,7 +16,8 @@ export interface VeContactSupplyStatus {
     launched: boolean;
     preset_id: string;
     portal_project_id: string;
-    portal_period_id: string;
+    /** null — проект Portal без периодов. */
+    portal_period_id: string | null;
     target_contacts: number;
     error: string | null;
   };
@@ -66,15 +67,19 @@ export async function loadVeContactSupplyStatus(db: SupabaseClient, instantlyDb:
   result.plan = {
     id: plan.id, status: plan.status, current: current === true, approved_at: plan.approved_at,
     launched: Boolean(plan.item_id), preset_id: binding.preset_id, portal_project_id: binding.portal_project_id,
-    portal_period_id: binding.portal_period_id, target_contacts: binding.target_contacts, error: plan.last_error,
+    portal_period_id: binding.portal_period_id ?? null, target_contacts: binding.target_contacts, error: plan.last_error,
   };
   const preview = await buildVeContactDeliveryPreview(db, instantlyDb, {
     templateId, presetId: binding.preset_id, portalProjectId: binding.portal_project_id,
-    expectedPortalPeriodId: binding.portal_period_id, targetContacts: binding.target_contacts,
+    expectedPortalPeriodId: binding.portal_period_id ?? null, targetContacts: binding.target_contacts,
     segmentationAuditId: plan.preview_audit_id,
   });
   if (preview.status !== 200) {
-    result.metrics_error = 'Не удалось пересчитать план и запас. Проверьте активный период и аудит.';
+    // Точная причина (закрытый период, новый период у проекта без периодов,
+    // дедлайн карточки) важнее общего совета.
+    result.metrics_error = typeof preview.body.error === 'string' && preview.status < 500
+      ? `План и запас не пересчитаны: ${preview.body.error}`
+      : 'Не удалось пересчитать план и запас. Проверьте проект, период и аудит.';
     return result;
   }
   const p = preview.body.preview as Record<string, number | string>;
@@ -92,8 +97,12 @@ export async function loadVeContactSupplyStatus(db: SupabaseClient, instantlyDb:
       .select('id, potential_pct', { count: 'exact' }).eq('project_id', plan.project_id).eq('status', 'active')
       .order('id').range(from, to),
   );
-  const { data: dayRun, error: dayError } = await db.from('ve_contact_delivery_daily_runs')
-    .select('effective_count').eq('ve_project_id', plan.project_id).eq('portal_period_id', binding.portal_period_id)
+  const dayRunQuery = db.from('ve_contact_delivery_daily_runs')
+    .select('effective_count').eq('ve_project_id', plan.project_id);
+  // PostgREST не сравнивает с NULL через eq: запуск без периода ищем через is.
+  const { data: dayRun, error: dayError } = await (binding.portal_period_id
+    ? dayRunQuery.eq('portal_period_id', binding.portal_period_id)
+    : dayRunQuery.is('portal_period_id', null))
     .eq('run_date', p.business_date).maybeSingle();
   if (dayError) throw new Error('Не удалось сверить сегодняшний план');
   const timezone = String(p.delivery_timezone);

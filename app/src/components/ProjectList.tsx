@@ -2693,9 +2693,9 @@ export function ProjectList() {
                     className="mt-0.5 accent-blue-600"
                   />
                   <span>
-                    <span className="block font-medium">Тегать лида проекта в Telegram-карточке</span>
+                    <span className="block font-medium">Тегать лида проекта и разрешить передачу</span>
                     <span className="mt-0.5 block text-[10px] text-zinc-400">
-                      Вместе со специалистом будет упомянут сотрудник из поля «Лид (PM)». По умолчанию выключено.
+                      Сотрудник из поля «Лид (PM)» будет упомянут вместе со специалистом и сможет редактировать и отправлять ручную передачу лида. По умолчанию выключено.
                     </span>
                   </span>
                 </label>

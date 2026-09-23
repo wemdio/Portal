@@ -5,6 +5,7 @@ import { verifyHandoffCallback } from '@/lib/instantly/handoffCallback';
 import { handoffBotToken, answerCallback, editHandoffMessage } from '@/lib/instantly/handoffTelegram';
 import { sendHandoffNow, type PendingHandoffRow } from '@/lib/instantly/handoffSender';
 import { handleHandoffEditor, type HandoffEditUpdate } from '@/lib/instantly/handoffEditor';
+import { canActOnManualHandoff } from '@/lib/instantly/handoffAuthorization';
 
 export const dynamic = 'force-dynamic';
 
@@ -24,7 +25,7 @@ interface TgUpdate {
  * Security: the endpoint is public, so we verify Telegram's secret_token header
  * (set via setWebhook) — without it, anyone could POST a forged press carrying
  * the responsible specialist's from.id. Fail-closed if the secret isn't configured.
- * Only the responsible specialist (telegram_id) may trigger the send. Idempotent
+ * Only the responsible specialist or opted-in project lead may trigger the send. Idempotent
  * via the pending row's status. Сама отправка — lib/instantly/handoffSender
  * (общая с авто-режимом воркера при projects.handoff_auto_send=ON).
  */
@@ -80,20 +81,12 @@ export async function POST(req: NextRequest) {
     return OK();
   }
 
-  // Only the responsible specialist may press.
-  let allowed = false;
-  if (pending.responsible_user_id && supabaseAdmin && fromId != null) {
-    const { data: link } = await supabaseAdmin
-      .from('telegram_links')
-      .select('telegram_id')
-      .eq('user_id', pending.responsible_user_id)
-      .maybeSingle();
-    if (link?.telegram_id != null && String(link.telegram_id) === String(fromId)) {
-      allowed = true;
-    }
-  }
+  // One shared access check for the button and the editor/confirmed preview.
+  const allowed = supabaseAdmin && chatId != null && pending.tg_chat_id != null &&
+    String(pending.tg_chat_id) === String(chatId) &&
+    await canActOnManualHandoff(supabaseAdmin, instDb, pending as PendingHandoffRow, fromId);
   if (!allowed) {
-    await answerCallback(token, cq.id, 'Передать может только ответственный за проект специалист', true);
+    await answerCallback(token, cq.id, 'Передать может только ответственный специалист или лид проекта с разрешением', true);
     return OK();
   }
 

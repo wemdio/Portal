@@ -46,7 +46,9 @@ export async function POST(
       const result = await buildVeContactDeliveryPreview(supabaseAdmin, supabaseInstantly, {
         templateId,
         portalProjectId: stringField(body.portal_project_id),
-        expectedPortalPeriodId: stringField(body.expected_portal_period_id),
+        // Явный null — проект без периодов; отсутствующее поле даёт 400.
+        expectedPortalPeriodId:
+          body.expected_portal_period_id === null ? null : stringField(body.expected_portal_period_id),
         targetContacts:
           typeof body.target_contacts === 'number' ? body.target_contacts : Number.NaN,
         presetId: stringField(body.preset_id),

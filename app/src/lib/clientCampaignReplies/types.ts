@@ -44,6 +44,12 @@ export interface Recipient {
   name: string | null;
 }
 
+/** A linked image found in the original email HTML (never raw HTML). */
+export interface ThreadImageLink {
+  url: string;
+  name: string;
+}
+
 export interface ThreadMessage {
   id: string;
   direction: ThreadDirection;
@@ -52,6 +58,7 @@ export interface ThreadMessage {
   from_email: string | null;
   from_name: string | null;
   body_text: string | null;
+  image_links: ThreadImageLink[];
   /** Direct recipients (To) of this message — so the client sees who was looped in. */
   to_recipients: Recipient[];
   /** Carbon-copy (CC) recipients of this message. */
@@ -78,4 +85,3 @@ export interface ClientReplyThread {
    */
   history_deferred?: { retry_after_ms: number } | null;
 }
-

@@ -1,10 +1,12 @@
 import type { Email } from '@/lib/instantly/types';
-import type { ClientReply, ThreadMessage } from './types';
+import type { ClientReply, ThreadImageLink, ThreadMessage } from './types';
 import { getEmailRecipients } from './participants';
 
 /** Hard cap on body text we return to the browser. */
 const MAX_BODY_TEXT_CHARS = 20_000;
 const MAX_PREVIEW_CHARS = 200;
+const MAX_IMAGE_LINKS = 8;
+const MAX_IMAGE_URL_CHARS = 2048;
 
 const NAMED_HTML_ENTITIES: Record<string, string> = {
   nbsp: ' ',
@@ -61,6 +63,39 @@ export function extractBodyText(body: Email['body']): string | null {
     }
   }
   return null;
+}
+
+/** Preserve image attachment links without sending untrusted email HTML to the browser. */
+export function extractImageLinks(body: Email['body']): ThreadImageLink[] {
+  const html = typeof body === 'string' ? body : body?.html;
+  if (!html || !html.includes('<')) return [];
+
+  const links: ThreadImageLink[] = [];
+  const seen = new Set<string>();
+  // Only read quoted hrefs from anchors. Never render the original HTML or
+  // infer an attachment from <img> tags (often mail-client icons/trackers).
+  for (const match of html.slice(0, 200_000).matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a\s*>/gi)) {
+    if (links.length >= MAX_IMAGE_LINKS) break;
+    const hrefMatch = match[1].match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+    const href = (hrefMatch?.[1] ?? hrefMatch?.[2] ?? '')
+      .replace(/&#(\d+);/g, (m, dec: string) => decodeCodePoint(Number(dec), m))
+      .replace(/&#x([0-9a-f]+);/gi, (m, hex: string) => decodeCodePoint(parseInt(hex, 16), m))
+      .replace(/&amp;/gi, '&')
+      .trim();
+    if (!href || href.length > MAX_IMAGE_URL_CHARS) continue;
+    try {
+      const url = new URL(href);
+      if (url.protocol !== 'https:' || url.username || url.password) continue;
+      const fileName = decodeURIComponent(url.pathname.split('/').pop() ?? '');
+      if (!/\.(?:png|jpe?g|gif|webp)$/i.test(fileName) || seen.has(url.href)) continue;
+      seen.add(url.href);
+      const label = htmlToText(match[2]);
+      links.push({ url: url.href, name: label && label.length <= 120 ? label : fileName });
+    } catch {
+      // Ignore malformed links rather than exposing them to the client.
+    }
+  }
+  return links;
 }
 
 function clamp(text: string | null, max: number): string | null {
@@ -134,5 +169,6 @@ export function mapInstantlyEmailToThreadMessage(email: Email): ThreadMessage {
     body_text: bodyText,
     to_recipients: to,
     cc_recipients: cc,
+    image_links: extractImageLinks(email.body),
   };
 }

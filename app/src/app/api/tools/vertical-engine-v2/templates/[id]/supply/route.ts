@@ -40,7 +40,7 @@ export async function POST(req: NextRequest, { params }: Context) {
         templateId, userId: authed.auth.userId, confirmed: input.confirm_customer_approval === true,
         reviewedRevision: clean(input.expected_preview_revision),
         presetId: clean(input.preset_id), portalProjectId: clean(input.portal_project_id),
-        expectedPortalPeriodId: clean(input.expected_portal_period_id),
+        expectedPortalPeriodId: input.expected_portal_period_id === null ? null : clean(input.expected_portal_period_id),
         targetContacts: typeof input.target_contacts === 'number' ? input.target_contacts : NaN,
         segmentationAuditId: clean(input.segmentation_audit_id),
       });

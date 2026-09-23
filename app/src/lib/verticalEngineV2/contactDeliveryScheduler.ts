@@ -93,8 +93,8 @@ export async function runBoundContactDeliveries(input: {
     .from('ve_projects')
     .select('id')
     .in('id', activeProjectIds)
+    // A NULL period is a Portal project without periods; the SQL term decides.
     .not('portal_project_id', 'is', null)
-    .not('portal_period_id', 'is', null)
     .gt('target_contacts', 0)
     .not('delivery_schedule_days', 'is', null)
     .not('delivery_timezone', 'is', null)

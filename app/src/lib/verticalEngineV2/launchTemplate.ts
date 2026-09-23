@@ -52,6 +52,15 @@ import {
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import { loadContactDeliverySettings } from './contactDeliveryConfig';
 import { loadVeContactDeliveryRows } from './contactDeliveryInventory';
+import {
+  claimProjectCampaignLinks,
+  describeOwnershipConflicts,
+  describePortalProjectTerm,
+  findManualFactIssue,
+  loadPortalProjectTerm,
+  localIsoDate,
+  PORTAL_TERM_TEXT,
+} from './portalDeliveryTerm';
 
 export type VeLaunchLocale = 'ru' | 'en';
 
@@ -128,9 +137,9 @@ const MESSAGES: Record<VeLaunchLocale, VeLaunchMessages> = {
     segmentationAuditIncomplete: 'Аудит сегментации не завершён полностью. Повторите проверку.',
     launchInProgress: 'Для этого шаблона уже выполняется запуск. Дождитесь его завершения.',
     launchUncertain: 'Предыдущий запуск мог создать кампанию. Проверьте результат вручную перед повтором.',
-    deliveryPlanRequired: 'Укажите Portal-проект, активный период и точное обязательство по контактам.',
+    deliveryPlanRequired: 'Укажите проект Portal, его активный период (если у проекта есть периоды) и точную цель по контактам.',
     deliveryPlanFailed: 'Не удалось закрепить план ежедневной загрузки контактов.',
-    campaignOwnershipFailed: 'Не удалось связать созданные кампании с периодом Portal-проекта.',
+    campaignOwnershipFailed: 'Не удалось связать созданные кампании с проектом Portal.',
   },
   en: {
     templateNotFound: 'Template not found',
@@ -169,9 +178,9 @@ const MESSAGES: Record<VeLaunchLocale, VeLaunchMessages> = {
     segmentationAuditIncomplete: 'The segmentation audit is incomplete. Run it again before launch.',
     launchInProgress: 'A launch is already running for this template. Wait for it to finish.',
     launchUncertain: 'A previous launch may have created a campaign. Review it manually before retrying.',
-    deliveryPlanRequired: 'Select a Portal project, its active period, and an exact contact commitment.',
+    deliveryPlanRequired: 'Select a Portal project, its active period (when the project has periods), and an exact contact target.',
     deliveryPlanFailed: 'Failed to bind the daily contact delivery plan.',
-    campaignOwnershipFailed: 'Failed to link the created campaigns to the Portal project period.',
+    campaignOwnershipFailed: 'Failed to link the created campaigns to the Portal project.',
   },
 };
 
@@ -192,7 +201,8 @@ export interface VeTemplateLaunchInput {
   eventPrefix: string;
   /** Explicit operational project/period; never inferred from a client name. */
   portalProjectId: string;
-  expectedPortalPeriodId: string;
+  /** null — the project has no periods and its card is the term. */
+  expectedPortalPeriodId: string | null;
   /** Exact specialist-confirmed integer; legacy range strings are never parsed. */
   targetContacts: number;
 }
@@ -396,8 +406,8 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   if (
     typeof portalProjectId !== 'string' ||
     !portalProjectId.trim() ||
-    typeof expectedPortalPeriodId !== 'string' ||
-    !expectedPortalPeriodId.trim() ||
+    (expectedPortalPeriodId !== null &&
+      (typeof expectedPortalPeriodId !== 'string' || !expectedPortalPeriodId.trim())) ||
     !Number.isSafeInteger(targetContacts) ||
     targetContacts <= 0
   ) {
@@ -621,6 +631,24 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   }
   const segmentsMaterialized = groups.some((group) => group.segment !== null);
 
+  // A project without periods is its own term. Check it and the manual fact
+  // before the first write here or in Instantly.
+  let projectTermDeadline: string | null = null;
+  if (expectedPortalPeriodId === null) {
+    try {
+      const { project: portalProject, periods } = await loadPortalProjectTerm(portalDb, portalProjectId);
+      if (!portalProject) return { status: 404, body: { error: 'Проект Portal не найден' } };
+      const term = describePortalProjectTerm(portalProject, periods);
+      if (!term.ok) return conflict(term.code, term.error);
+      const manualFact = await findManualFactIssue(instantlyDb, portalProject);
+      if (manualFact) return conflict(manualFact.code, manualFact.error);
+      projectTermDeadline = term.deadline;
+    } catch (error) {
+      await logError(`${eventPrefix}.portal_project_term_failed`, error, { userId, templateId, portalProjectId });
+      return { status: 500, body: { error: 'Не удалось проверить проект Portal перед запуском.' } };
+    }
+  }
+
   // A project gets one immutable preset/workspace scope on its first launch
   // attempt. The compare-and-set helper closes simultaneous first-choice
   // races. Any later mismatch fails before reservation and every Instantly
@@ -662,6 +690,9 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   }
   const { scheduleDays: deliveryScheduleDays, timezone: deliveryTimezone, dailyCapacity: senderDailyCapacity } = deliverySettings;
   const deliveryPlanBoundAt = new Date().toISOString();
+  if (projectTermDeadline && projectTermDeadline < localIsoDate(new Date(deliveryPlanBoundAt), deliveryTimezone)) {
+    return conflict('PROJECT_DEADLINE_PASSED', PORTAL_TERM_TEXT.deadlinePassed(projectTermDeadline));
+  }
   const { data: deliveryPlanData, error: deliveryPlanError } = await portalDb.rpc(
     've_bind_contact_delivery_plan',
     {
@@ -940,22 +971,34 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
 
   if (!ambiguousGroupFailure) {
     try {
-      const ownership = await reservePeriodCampaignLinks(
-        instantlyDb,
-        portalProjectId,
-        campaigns.map((campaign) => ({
-          periodId: expectedPortalPeriodId,
-          campaignId: campaign.campaign_id,
-          matchSource: 'manual' as const,
-          baselineContacts: 0,
-          matchConfidence: 1,
-          matchReason: 'Vertical Engine v2 explicit contact-delivery plan',
-        })),
-      );
-      if (ownership.status === 'conflict') {
-        throw new Error(
-          `campaign ownership conflict: ${ownership.conflictingProjectIds.join(', ') || 'unknown project'}`,
+      if (expectedPortalPeriodId !== null) {
+        const ownership = await reservePeriodCampaignLinks(
+          instantlyDb,
+          portalProjectId,
+          campaigns.map((campaign) => ({
+            periodId: expectedPortalPeriodId,
+            campaignId: campaign.campaign_id,
+            matchSource: 'manual' as const,
+            baselineContacts: 0,
+            matchConfidence: 1,
+            matchReason: 'Vertical Engine v2 explicit contact-delivery plan',
+          })),
         );
+        if (ownership.status === 'conflict') {
+          throw new Error(
+            `campaign ownership conflict: ${ownership.conflictingProjectIds.join(', ') || 'unknown project'}`,
+          );
+        }
+      } else {
+        const conflicts = await claimProjectCampaignLinks(
+          instantlyDb,
+          portalProjectId,
+          campaigns.map((campaign) => campaign.campaign_id),
+          'Vertical Engine v2 explicit contact-delivery plan',
+        );
+        if (conflicts.length > 0) {
+          throw new Error(`campaign ownership conflict: ${describeOwnershipConflicts(conflicts)}`);
+        }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : t.campaignOwnershipFailed;

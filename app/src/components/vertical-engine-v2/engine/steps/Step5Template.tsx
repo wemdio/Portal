@@ -26,6 +26,7 @@ import {
   veEnginePost,
   vePreviewDeliveryPlan,
   type VeBaseSummary,
+  type VeDeliveryPlanBindingDto,
   type VeDeliveryPlanPreviewDto,
   type VeJobSummary,
   type VePortalProjectOptionDto,
@@ -298,6 +299,10 @@ interface VeLaunchPresetsResponse {
   portal_projects?: VePortalProjectOptionDto[];
   /** Present when this VE-project is already immutably bound to a Portal period. */
   delivery_plan?: VeDeliveryPlanPreviewDto | null;
+  /** Immutable binding whose plan could not be recalculated right now. */
+  delivery_plan_binding?: VeDeliveryPlanBindingDto | null;
+  /** Why the bound plan cannot deliver now (closed period, project card). */
+  delivery_plan_issue?: string | null;
   error?: string;
 }
 
@@ -326,12 +331,20 @@ function parseExactTarget(value: string): number | null {
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
+/** Календарная дата карточки проекта без часового сдвига: 2026-09-30 → 30.09.2026. */
+function formatCalendarDate(value: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  return match ? `${match[3]}.${match[2]}.${match[1]}` : value;
+}
+
 function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isValidDeliveryPreview(value: VeDeliveryPlanPreviewDto | null): value is VeDeliveryPlanPreviewDto {
-  if (!value || !value.portal_project_id || !value.portal_period_id || !value.deadline) return false;
+  if (!value || !value.portal_project_id || !value.deadline) return false;
+  // null — план по проекту без периодов; отсутствующее поле — старый ответ.
+  if (value.portal_period_id !== null && !value.portal_period_id) return false;
   return [
     value.contacts_done_count,
     value.target_contacts,
@@ -347,6 +360,20 @@ function isValidDeliveryPreview(value: VeDeliveryPlanPreviewDto | null): value i
 }
 
 function portalProjectFromBoundPlan(plan: VeDeliveryPlanPreviewDto): VePortalProjectOptionDto {
+  if (plan.portal_period_id === null) {
+    return {
+      id: plan.portal_project_id,
+      name: plan.portal_project_name?.trim() || 'Проект клиента',
+      active_period: null,
+      project_term: {
+        deadline: plan.deadline,
+        starts_at: plan.project_term?.starts_at ?? null,
+        contacts_obligation: plan.project_term?.contacts_obligation ?? null,
+        contacts_done_total: plan.project_term?.contacts_done_total ?? null,
+        issue: null,
+      },
+    };
+  }
   return {
     id: plan.portal_project_id,
     name: plan.portal_project_name?.trim() || 'Проект клиента',
@@ -357,6 +384,30 @@ function portalProjectFromBoundPlan(plan: VeDeliveryPlanPreviewDto): VePortalPro
       contacts_done_count: plan.contacts_done_count,
     },
   };
+}
+
+/** Проект закреплённого плана, которого нет среди рабочих проектов Portal. */
+function portalProjectFromBinding(binding: VeDeliveryPlanBindingDto, issue: string | null): VePortalProjectOptionDto {
+  return {
+    id: binding.portal_project_id,
+    name: 'Проект клиента',
+    active_period: null,
+    project_term: {
+      deadline: null,
+      issue: issue ?? 'Проекта закреплённого плана нет среди проектов Portal в работе. Проверьте статус в карточке проекта.',
+    },
+  };
+}
+
+/**
+ * Какой период передать серверу: id активного периода, null для проекта без
+ * периодов, undefined — проект сейчас выбрать нельзя.
+ */
+function expectedPeriodFor(project: VePortalProjectOptionDto | null): string | null | undefined {
+  if (!project) return undefined;
+  if (project.active_period) return project.active_period.id;
+  if (project.project_term && !project.periods_closed && !project.project_term.issue) return null;
+  return undefined;
 }
 
 /**
@@ -385,6 +436,7 @@ export function useTemplateLaunch(
   const [portalProjectId, setPortalProjectId] = useState('');
   const [targetContactsInput, setTargetContactsInput] = useState('');
   const [deliveryPlanLocked, setDeliveryPlanLocked] = useState(false);
+  const [deliveryPlanIssue, setDeliveryPlanIssue] = useState<string | null>(null);
   const [deliveryPreview, setDeliveryPreview] = useState<VeDeliveryPlanPreviewDto | null>(null);
   const [deliveryPreviewState, setDeliveryPreviewState] = useState<DeliveryPreviewState>('idle');
   const [deliveryPreviewError, setDeliveryPreviewError] = useState<string | null>(null);
@@ -403,16 +455,25 @@ export function useTemplateLaunch(
 
   const selectedPortalProject = portalProjects?.find((project) => project.id === portalProjectId) ?? null;
   const activePortalPeriod = selectedPortalProject?.active_period ?? null;
+  const projectTerm = !activePortalPeriod ? selectedPortalProject?.project_term ?? null : null;
+  const expectedPortalPeriodId = deliveryPlanIssue ? undefined : expectedPeriodFor(selectedPortalProject);
   const targetContacts = parseExactTarget(targetContactsInput);
   const activePeriodIssue = !selectedPortalProject
     ? null
-    : !activePortalPeriod
-      ? 'У проекта нет активного периода.'
-      : !activePortalPeriod.deadline
-        ? 'В активном периоде не задан дедлайн.'
-        : !isNonNegativeInteger(activePortalPeriod.contacts_done_count)
-          ? 'В активном периоде нет числового факта первых контактов.'
-          : null;
+    : deliveryPlanIssue
+      ? deliveryPlanIssue
+      : activePortalPeriod
+        ? !activePortalPeriod.deadline
+          ? 'В активном периоде не задан дедлайн.'
+          : !isNonNegativeInteger(activePortalPeriod.contacts_done_count)
+            ? 'В активном периоде нет числового факта первых контактов.'
+            : null
+        : projectTerm
+          ? projectTerm.issue ??
+            (selectedPortalProject.periods_closed
+              ? 'Все периоды проекта закрыты. Откройте новый период в карточке проекта.'
+              : null)
+          : 'У проекта нет активного периода.';
 
   const clearDeliveryPreview = useCallback(() => {
     setDeliveryPreview(null);
@@ -438,6 +499,7 @@ export function useTemplateLaunch(
     setPortalProjectId('');
     setTargetContactsInput('');
     setDeliveryPlanLocked(false);
+    setDeliveryPlanIssue(null);
     clearDeliveryPreview();
     void Promise.resolve()
       .then(() => request.active
@@ -463,6 +525,8 @@ export function useTemplateLaunch(
         setMailboxTagOptions(response.data.mailbox_tag_options ?? []);
 
         const boundDeliveryPlan = response.data.delivery_plan ?? null;
+        const boundBinding = boundDeliveryPlan ? null : response.data.delivery_plan_binding ?? null;
+        const boundIssue = boundBinding ? response.data.delivery_plan_issue?.trim() || null : null;
         const deliveryContractAvailable =
           response.data.portal_projects !== undefined || response.data.delivery_plan !== undefined;
         if (deliveryContractAvailable) {
@@ -470,10 +534,17 @@ export function useTemplateLaunch(
           if (boundDeliveryPlan && !projects.some((project) => project.id === boundDeliveryPlan.portal_project_id)) {
             projects.push(portalProjectFromBoundPlan(boundDeliveryPlan));
           }
+          if (boundBinding && !projects.some((project) => project.id === boundBinding.portal_project_id)) {
+            projects.push(portalProjectFromBinding(boundBinding, boundIssue));
+          }
+          // A bound plan is immutable: keep its project and target even when
+          // the plan cannot be recalculated right now, and show why.
+          const bound = boundDeliveryPlan ?? boundBinding;
           setPortalProjects(projects);
-          setPortalProjectId(boundDeliveryPlan?.portal_project_id ?? '');
-          setTargetContactsInput(boundDeliveryPlan ? String(boundDeliveryPlan.target_contacts) : '');
-          setDeliveryPlanLocked(Boolean(boundDeliveryPlan));
+          setPortalProjectId(bound?.portal_project_id ?? '');
+          setTargetContactsInput(bound ? String(bound.target_contacts) : '');
+          setDeliveryPlanLocked(Boolean(bound));
+          setDeliveryPlanIssue(boundIssue);
           const validBoundDeliveryPlan = isValidDeliveryPreview(boundDeliveryPlan) ? boundDeliveryPlan : null;
           setDeliveryPreview(validBoundDeliveryPlan);
           setDeliveryPreviewState(validBoundDeliveryPlan ? 'ready' : 'idle');
@@ -547,13 +618,13 @@ export function useTemplateLaunch(
   }, [clearDeliveryPreview]);
 
   useEffect(() => {
-    const periodId = activePortalPeriod?.id ?? '';
+    const periodId = expectedPortalPeriodId;
     if (
       !formOpen ||
       !template ||
       !presetId ||
       !portalProjectId ||
-      !periodId ||
+      periodId === undefined ||
       !segmentationAuditId ||
       targetContacts === null ||
       activePeriodIssue
@@ -580,7 +651,7 @@ export function useTemplateLaunch(
             !ok ||
             !isValidDeliveryPreview(preview) ||
             preview.portal_project_id !== portalProjectId ||
-            preview.portal_period_id !== periodId ||
+            (preview.portal_period_id ?? null) !== periodId ||
             preview.target_contacts !== targetContacts
           ) {
             setDeliveryPreview(null);
@@ -606,7 +677,7 @@ export function useTemplateLaunch(
     };
   }, [
     activePeriodIssue,
-    activePortalPeriod?.id,
+    expectedPortalPeriodId,
     formOpen,
     portalProjectId,
     presetId,
@@ -618,10 +689,10 @@ export function useTemplateLaunch(
   const deliveryPlanReady = Boolean(
     deliveryPreviewState === 'ready' &&
       deliveryPreview &&
-      activePortalPeriod &&
+      expectedPortalPeriodId !== undefined &&
       targetContacts !== null &&
       deliveryPreview.portal_project_id === portalProjectId &&
-      deliveryPreview.portal_period_id === activePortalPeriod.id &&
+      (deliveryPreview.portal_period_id ?? null) === expectedPortalPeriodId &&
       deliveryPreview.target_contacts === targetContacts,
   );
 
@@ -691,6 +762,8 @@ export function useTemplateLaunch(
     portalProjectId,
     selectedPortalProject,
     activePortalPeriod,
+    projectTerm,
+    expectedPortalPeriodId,
     selectPortalProject,
     targetContactsInput,
     targetContacts,
@@ -753,6 +826,9 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
   const periodLabel = preview?.portal_period_label?.trim() || period?.label?.trim() || 'Активный период';
   const periodDeadline = preview?.deadline ?? period?.deadline ?? null;
   const periodDone = preview?.contacts_done_count ?? period?.contacts_done_count ?? null;
+  // Проект без периодов: сроком служит карточка проекта.
+  const term = !period ? preview?.project_term ?? launch.projectTerm : null;
+  const termDeadline = preview?.deadline ?? term?.deadline ?? null;
 
   return (
     <section className="border-t border-gray-200 pt-3" aria-labelledby="ve2-delivery-plan-title">
@@ -800,7 +876,7 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
             </div>
             <div>
               <label htmlFor="ve2-delivery-target" className="ve2-label">
-                Цель контактов за период
+                {term ? 'Цель контактов до дедлайна' : 'Цель контактов за период'}
               </label>
               <input
                 id="ve2-delivery-target"
@@ -829,6 +905,24 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
                 факт первых контактов{' '}
                 {isNonNegativeInteger(periodDone) ? periodDone.toLocaleString('ru-RU') : 'не задан'}
               </p>
+            ) : term && !launch.selectedPortalProject.periods_closed ? (
+              <>
+                <p className="mt-2 text-xs text-gray-600">
+                  Без периода
+                  <span className="text-gray-400"> · </span>
+                  дедлайн {termDeadline ? formatCalendarDate(termDeadline) : 'не задан'}
+                  <span className="text-gray-400"> · </span>
+                  обязательство в карточке «{term.contacts_obligation?.trim() || 'не указано'}»
+                  <span className="text-gray-400"> · </span>
+                  всего контактов по проекту{' '}
+                  {isNonNegativeInteger(term.contacts_done_total) ? term.contacts_done_total.toLocaleString('ru-RU') : 'нет данных'}{' '}
+                  (в расчёт не входит)
+                </p>
+                {/* Перепривязки плана к периоду нет: созданный период останавливает загрузку. */}
+                <p className="mt-1 text-xs text-gray-500">
+                  Продлевайте проект полем «Дедлайн» в карточке. Если создать проекту период, загрузка по этому плану остановится.
+                </p>
+              </>
             ) : null
           ) : (
             <p className="mt-2 text-xs text-gray-500">Выберите проект явно, период подставится из Portal.</p>
