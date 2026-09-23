@@ -85,7 +85,8 @@ function fetchOnce(url: RequestInfo | URL, init?: RequestInit): Promise<Response
   return fetch(url, { ...init, signal }).finally(() => clearTimeout(timer));
 }
 
-async function fetchWithRetry(url: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+/** Retrying fetch of the admin client (headers-only timeout); reused by clients with stricter bounds. */
+export async function supabaseAdminFetchWithRetry(url: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const method = (init?.method || 'GET').toUpperCase();
   let lastError: unknown;
 
@@ -117,6 +118,6 @@ async function fetchWithRetry(url: RequestInfo | URL, init?: RequestInit): Promi
 export const supabaseAdmin = isValidHttpUrl(supabaseUrl) && supabaseServiceRoleKey
   ? createClient(supabaseUrl, supabaseServiceRoleKey, {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-      global: { fetch: fetchWithRetry },
+      global: { fetch: supabaseAdminFetchWithRetry },
     })
   : null;

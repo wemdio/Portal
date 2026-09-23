@@ -8,6 +8,8 @@ export interface VeJobFailureTransitionInput {
   finishedAt: string | null;
   runAfter: string;
   updatedAt: string;
+  /** Written together with the transition (the interruption counter). */
+  payload?: Record<string, unknown>;
 }
 
 export interface VeJobFailureTransitionResult {
@@ -35,6 +37,7 @@ export async function transitionVeJobFailure(
       finished_at: input.finishedAt,
       run_after: input.runAfter,
       updated_at: input.updatedAt,
+      ...(input.payload ? { payload: input.payload } : {}),
     })
     .eq('id', input.jobId)
     .eq('status', 'running')
