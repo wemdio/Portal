@@ -16,7 +16,7 @@ const TABLES = {
     order: 'case_id',
     fields: [
       'case_id', 'public_name', 'client_name_internal', 'anonymization_required', 'industry_groups', 'allowed_chains',
-      'case_text_short', 'case_text_long', 'metrics',
+      'case_text_short', 'case_text_long', 'case_text_en', 'case_segment_en', 'case_url', 'metrics',
       'source_file_or_url', 'source_location', 'verified_at', 'verified_by', 'status', 'expires_at',
       'legal_publication_approved', 'notes',
     ],

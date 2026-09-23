@@ -16,6 +16,8 @@ const GEO_OPTIONS: { code: string; label: string }[] = [
   { code: 'gb', label: 'UK' },
   { code: 'de', label: 'Германия' },
   { code: 'nl', label: 'Нидерланды' },
+  { code: 'sg', label: 'Сингапур' },
+  { code: 'au', label: 'Австралия' },
   { code: 'fr', label: 'Франция' },
   { code: 'se', label: 'Швеция' },
   { code: 'ie', label: 'Ирландия' },
@@ -44,6 +46,14 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
   const [days, setDays] = useState<number>(30);
   const [limit, setLimit] = useState('100');
   const [geoOpen, setGeoOpen] = useState(false);
+  const [sources, setSources] = useState<Array<'hiring' | 'yc'>>(['hiring', 'yc']);
+  const [ycFrom, setYcFrom] = useState('2023');
+  const [minEmp, setMinEmp] = useState('3');
+  const [maxEmp, setMaxEmp] = useState('200');
+  const [writeT, setWriteT] = useState('75');
+  const [reviewT, setReviewT] = useState('55');
+  const toggleSource = (s: 'hiring' | 'yc') =>
+    setSources((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
   const geoRef = useRef<HTMLDivElement>(null);
 
   // Список закрывается по клику мимо и по Esc — как любое выпадающее меню.
@@ -78,10 +88,16 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
       countries: countries.length ? countries : [...POLZA_OUTREACH_DEFAULT_COUNTRIES],
       posted_within_days: days,
       limit: Number.isFinite(parsed) ? Math.max(1, Math.min(1000, Math.trunc(parsed))) : 100,
+      sources,
+      yc_batch_from_year: Number(ycFrom) || 2023,
+      min_employees: Number(minEmp) || 3,
+      max_employees: Number(maxEmp) || 200,
+      write_threshold: Number(writeT) || 75,
+      review_threshold: Number(reviewT) || 55,
     };
-  }, [countries, days, limit]);
+  }, [countries, days, limit, sources, ycFrom, minEmp, maxEmp, writeT, reviewT]);
 
-  const canStart = countries.length > 0;
+  const canStart = countries.length > 0 && sources.length > 0;
   const submit = () => {
     if (!busy && canStart) void onStart(config);
   };
@@ -97,9 +113,9 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
             Polza аутрич
           </h2>
           <p className="mt-1 max-w-3xl text-sm text-gray-500">
-            IT-компании, которые прямо сейчас нанимают SDR/BDR: домен, ICP-фильтр, гео продаж из текста вакансии
-            с цитатой-доказательством, корпоративная почта и готовая цепочка из 4 писем. Сколько закажете готовых —
-            столько и соберём, пока хватает свежих вакансий. Без отправки — только генерация и выгрузка.
+            B2B-компании с поводом написать: найм в sales/GTM или стартап YC. Сайт, размер и отрасль → Lead Score
+            (fit, размер, повод, полнота данных) → почта только у «write now» → кейс по отрасли → цепочка из 4 писем.
+            Сколько закажете готовых — столько и соберём, пока хватает кандидатов. Без отправки — только генерация и выгрузка.
           </p>
         </div>
         <button
@@ -223,6 +239,40 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
             })}
           </div>
         </div>
+      </div>
+
+      <div className="mt-5 flex flex-col gap-5 md:flex-row md:flex-wrap md:items-end">
+        <div className="shrink-0">
+          <span className="mb-2 block text-sm font-medium text-gray-700">Источники</span>
+          <div className="flex gap-4 py-2 text-sm text-gray-700">
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={sources.includes('hiring')} onChange={() => toggleSource('hiring')} />
+              Вакансии sales/GTM
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={sources.includes('yc')} onChange={() => toggleSource('yc')} />
+              Стартапы YC
+            </label>
+          </div>
+        </div>
+        <label className="block md:w-40">
+          <span className="mb-1 block text-sm font-medium text-gray-700">YC: батч не старше</span>
+          <input value={ycFrom} onChange={(e) => setYcFrom(e.target.value.replace(/\D/g, ''))} inputMode="numeric" className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-violet-400 focus:outline-none focus:ring-1 focus:ring-violet-400" />
+        </label>
+        <label className="block md:w-44">
+          <span className="mb-1 block text-sm font-medium text-gray-700">Сотрудников от / до</span>
+          <div className="flex gap-2">
+            <input value={minEmp} onChange={(e) => setMinEmp(e.target.value.replace(/\D/g, ''))} inputMode="numeric" className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-violet-400 focus:outline-none focus:ring-1 focus:ring-violet-400" />
+            <input value={maxEmp} onChange={(e) => setMaxEmp(e.target.value.replace(/\D/g, ''))} inputMode="numeric" className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-violet-400 focus:outline-none focus:ring-1 focus:ring-violet-400" />
+          </div>
+        </label>
+        <label className="block md:w-56">
+          <span className="mb-1 block text-sm font-medium text-gray-700">Lead Score: write now / manual</span>
+          <div className="flex gap-2">
+            <input value={writeT} onChange={(e) => setWriteT(e.target.value.replace(/\D/g, ''))} inputMode="numeric" className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-violet-400 focus:outline-none focus:ring-1 focus:ring-violet-400" />
+            <input value={reviewT} onChange={(e) => setReviewT(e.target.value.replace(/\D/g, ''))} inputMode="numeric" className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-violet-400 focus:outline-none focus:ring-1 focus:ring-violet-400" />
+          </div>
+        </label>
       </div>
     </div>
   );
