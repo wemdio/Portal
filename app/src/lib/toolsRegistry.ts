@@ -455,9 +455,9 @@ export const TOOLS_CONFIG: Record<ToolId, ToolConfig> = {
     title: 'Английский автоаутрич',
     title_en: 'English outreach (auto)',
     description:
-      'Свежие вакансии SDR/BDR → компания и почта → цепочка из четырёх писем на английском.',
+      'Найм в sales/GTM и стартапы YC → сайт, Lead Score, кейс → почта → цепочка из четырёх писем на английском.',
     description_en:
-      'Fresh SDR/BDR job posts → company and mailbox → a four-email English sequence.',
+      'Sales/GTM hiring and YC startups → website, lead score, case → mailbox → a four-email English sequence.',
     href: '/tools/polza-outreach',
     accentColor: 'blue',
     badge: 'В разработке',

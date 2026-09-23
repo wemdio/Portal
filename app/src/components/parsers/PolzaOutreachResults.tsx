@@ -48,8 +48,13 @@ const EXCLUSION_LABELS: Record<string, string> = {
   generic_marketing: 'generic marketing',
   b2c_or_education: 'B2C/образование/маркетплейс',
   size_11_50: 'размер 11–50',
+  size_out_of_range: 'размер вне 3–200',
   duplicate_domain: 'дубль домена',
   no_outbound_mandate: 'нет outbound-мандата',
+  site_unreachable: 'сайт не открылся',
+  not_b2b: 'не B2B',
+  no_trigger: 'нет повода написать',
+  low_score: 'Lead Score ниже порога',
 };
 
 /**
@@ -63,6 +68,8 @@ const REVIEW_LABELS: Record<string, string> = {
   generic_company: 'слишком общее описание компании',
   low_geo_confidence: 'гео продаж подтверждено слабо',
   letters_guard_failed: 'письма не прошли проверку правил',
+  manual_check: 'Lead Score в зоне ручной проверки',
+  limit_reached: 'лимит готовых уже набран',
 };
 
 function reviewLabel(reason: string): string {
@@ -134,6 +141,59 @@ function LettersBlock({ row }: { row: PolzaOutreachCompanyRow }) {
           <pre className="whitespace-pre-wrap break-words font-sans text-sm text-gray-700">{letter.body}</pre>
         </div>
       ))}
+    </div>
+  );
+}
+
+const TRIGGER_LABELS: Record<string, string> = {
+  hiring: 'найм sales/GTM',
+  yc: 'YC',
+  launch: 'запуск продукта',
+  tech_stack: 'стек продаж',
+};
+
+const BLOCK_LABELS: Record<string, string> = { fit: 'fit', firmographic: 'размер/страна', trigger: 'повод', data_quality: 'данные' };
+
+/** Lead Score, поводы и поля персонализации CEO — почему компании пишем именно так. */
+function ScoreBlock({ row }: { row: PolzaOutreachCompanyRow }) {
+  if (row.lead_score == null && !row.trigger_list?.length) return null;
+  const breakdown = row.score_breakdown ?? {};
+  return (
+    <div className="rounded-lg border border-violet-100 bg-violet-50/50 p-4 text-sm text-gray-800">
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-violet-800">
+        Lead Score {row.lead_score ?? '—'}/100
+        {row.lead_status ? ` · ${row.lead_status === 'write_now' ? 'write now' : row.lead_status === 'manual_check' ? 'manual check' : 'skip'}` : ''}
+      </div>
+      <div className="mb-2 flex flex-wrap gap-2 text-xs">
+        {Object.entries(breakdown).map(([k, v]) => (
+          <span key={k} className="rounded-full bg-white px-2 py-0.5 text-gray-700">
+            {BLOCK_LABELS[k] ?? k}: {v}
+          </span>
+        ))}
+        {[row.employee_range ? `${row.employee_range} чел.` : null, row.industry, row.country].filter(Boolean).map((x) => (
+          <span key={String(x)} className="rounded-full bg-white px-2 py-0.5 text-gray-500">{x}</span>
+        ))}
+      </div>
+      {row.trigger_list?.length ? (
+        <ul className="mb-2 space-y-0.5">
+          {row.trigger_list.map((t, i) => (
+            <li key={i}>
+              <b>{TRIGGER_LABELS[t.type] ?? t.type}</b>: {t.title}
+              {t.url ? (
+                <a href={t.url} target="_blank" rel="noreferrer" className="ml-1 text-violet-700 underline">ссылка</a>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {row.company_context ? <div><span className="text-gray-500">Компания:</span> {row.company_context}</div> : null}
+      {row.likely_gtm_problem ? <div><span className="text-gray-500">Вероятная GTM-боль:</span> {row.likely_gtm_problem}</div> : null}
+      {row.outreach_angle ? <div><span className="text-gray-500">Угол:</span> {row.outreach_angle}</div> : null}
+      {row.segments?.length ? <div><span className="text-gray-500">Сегменты:</span> {row.segments.join('; ')}</div> : null}
+      <div className="mt-1">
+        <span className="text-gray-500">Кейс:</span>{' '}
+        {row.recommended_case ? `${row.recommended_case} (${row.case_reason ?? ''})` : 'нет утверждённого кейса этой отрасли — письмо 3 без кейса'}
+      </div>
     </div>
   );
 }
@@ -436,6 +496,7 @@ export function PolzaOutreachResults({
                                 <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">
                                   Вакансия от {formatDate(row.job_published_at)} · {row.job_country_code?.toUpperCase() ?? '—'}
                                 </div>
+                                <ScoreBlock row={row} />
                                 <EvidenceBlock row={row} />
                                 {row.review_reason ? (
                                   <div className="rounded-lg border border-amber-100 bg-amber-50 p-3 text-sm text-amber-900">

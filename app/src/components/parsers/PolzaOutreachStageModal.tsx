@@ -59,7 +59,7 @@ function describe(
       return {
         row,
         passed: true,
-        detail: [row.job_title, row.job_country_code?.toUpperCase()].filter(Boolean).join(' · ') || '—',
+        detail: [row.source_list?.length ? row.source_list.join(' + ') : row.source_type, row.job_title, row.job_country_code?.toUpperCase()].filter(Boolean).join(' · ') || '—',
         reason: null,
       };
     case 1: {
@@ -73,16 +73,21 @@ function describe(
     }
     case 2: {
       const passed = row.status !== 'excluded';
-      return { row, passed, detail: row.service_line ?? '—', reason: passed ? null : excluded };
-    }
-    case 3: {
-      const geo = row.target_sales_geo ?? '';
-      const passed = Boolean(geo);
       return {
         row,
         passed,
-        detail: geo ? `${geo}${row.target_sales_geo_confidence ? ` (${row.target_sales_geo_confidence})` : ''}` : '—',
-        reason: passed ? null : (excluded ?? 'гео продаж не подтверждено'),
+        detail: [row.employee_range ? `${row.employee_range} чел.` : null, row.industry, row.country].filter(Boolean).join(' · ') || '—',
+        reason: passed ? null : excluded,
+      };
+    }
+    case 3: {
+      const passed = row.lead_status === 'write_now' || row.stage === 's5_email' || row.stage === 's6_letters';
+      const score = row.lead_score != null ? `${row.lead_score}/100` : null;
+      return {
+        row,
+        passed,
+        detail: [score, row.primary_trigger].filter(Boolean).join(' · ') || '—',
+        reason: passed ? null : (excluded ?? (row.review_reason ? reviewLabel(row.review_reason) : 'Lead Score ниже порога')),
       };
     }
     case 4: {
