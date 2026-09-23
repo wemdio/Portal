@@ -3189,6 +3189,7 @@ async function checkCollectedRelevance(args: {
       language: market === 'us' ? 'en' : 'ru',
       log: (m) => stageLog(ctx, m),
       signal: ctx.signal,
+      onActivity: ctx.onActivity,
       checkpointScope: JSON.stringify([
         job.project_id, base.id, base.vertical_id, base.hypothesis_id ?? null,
       ]),

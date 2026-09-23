@@ -9,7 +9,8 @@ import { isVeProviderBillingError } from './collectionErrors';
 import { VeLlmRateLimitError, type VeLlmRateLimit } from './llmRateLimit';
 import { readRelevanceCheckpoint, relevanceHash, VeRelevanceCheckpointError, type VeRelevanceCheckpoint, type VeRelevanceFailureCode } from './relevanceCheckpoint';
 import { VE_RELEVANCE_RULES_VERSION, VE_RELEVANCE_WEBSITE_VERSION, veRelevanceDecisionSchema, type VeRelevanceDecision } from './relevanceDecision';
-import { fetchVeRelevanceEvidence, type VeRelevanceEvidence } from './relevanceEvidence';
+import { fetchVeRelevanceEvidence, VE_RELEVANCE_EVIDENCE_MAX_MS, type VeRelevanceEvidence } from './relevanceEvidence';
+import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
 import { normalizeVeCompanyInn, veCompanyIdentityKey } from './collectionIdentity';
 import { reviewVeRelevanceEvidence, VE_RELEVANCE_SCOPE_NOTE, VE_RELEVANCE_TARGET_RULES, type VeRelevanceReviewCompany, type VeRelevanceReviewResult } from './relevanceReview';
 import { triageVeCompanies, veTriageAvailable, veTriageReason, veTriageRubricMessages, veTriageRubricModel, veTriageRubricSchema,
@@ -53,6 +54,10 @@ const SEMANTIC_QUARANTINE_REASON = 'Смысловую проверку не у�
 const WEBSITE_TIMEOUT_REASON = 'Сайт не ответил вовремя. Подтвердить соответствие компании пока не удалось; контакт сохранён в резерве.';
 const WEBSITE_UNCONFIRMED_REASON = 'Сайт не дал подтверждения; недостаточно подтверждённых данных.';
 const WEBSITE_CONCURRENCY = 8;
+// Предел одной компании в волне сайтов: потолок читателя и запас на очередь
+// event loop. Сработал — компания получает ярлык таймаута, волна идёт дальше.
+const WEBSITE_COMPANY_DEADLINE_MS = VE_RELEVANCE_EVIDENCE_MAX_MS + 20_000;
+const WEBSITE_COMPANY_DEADLINE_LABEL = 'relevance website company';
 // Журнал длительностей фазы сайтов. Версия отделяет замеры, снятые при разной
 // форме волны: сравнивать барьер с пулом можно только внутри одной версии.
 // 2 — ярлык таймаута сужен до своей стартовой страницы, появились второй заход
@@ -318,6 +323,9 @@ export async function findIrrelevantRows(input: {
    * с настоящим читателем сайтов: секунды оффлайн-адаптера синтетические и
    * замер бы испортили. */
   onWebsiteTiming?: (timing: VeWebsiteWaveTiming) => void;
+  /** Каждая компания, дочитанная в волне сайтов: сторож неактивности воркера
+   * видит работу волны, а не только её конец. */
+  onActivity?: () => void;
   /** Opt-in calibrated triage before the LLM (isVeRelevanceTriageEnabled). Does
    * not enter the context hash: saved verdicts stay valid when it is toggled. */
   triage?: boolean;
@@ -1191,11 +1199,26 @@ export async function findIrrelevantRows(input: {
           return;
         }
         const companyStartedAt = Date.now();
-        const evidence = stripUnstorableJsonChars(await (input.fetchEvidence ?? fetchVeRelevanceEvidence)(entry.fields.website, { signal: signal ?? undefined,
-          companyInn: entry.identity, companyName: entry.fields.company,
-          companyAddress: entry.group.rows.map((row) => rowText(row, ['address', 'адрес'])).find(Boolean),
-          companyEmail: entry.group.rows.map((row) => rowText(row, ['email', 'e-mail', 'почта'])).find(Boolean), focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' '),
-          allowPaidSearch: input.allowPaidSearch }));
+        const readEvidence = input.fetchEvidence ?? fetchVeRelevanceEvidence;
+        let evidence: VeRelevanceEvidence;
+        try {
+          // Волна ждёт каждую компанию (Promise.all): одна неограниченная
+          // компания держала бы всю волну и сохранение без конца. Собственный
+          // предел и сигнал задачи — снаружи, какой бы ни была её внутренность.
+          evidence = stripUnstorableJsonChars(await withVeDeadline(WEBSITE_COMPANY_DEADLINE_LABEL, WEBSITE_COMPANY_DEADLINE_MS, signal,
+            (companySignal) => readEvidence(entry.fields.website, { signal: companySignal,
+              companyInn: entry.identity, companyName: entry.fields.company,
+              companyAddress: entry.group.rows.map((row) => rowText(row, ['address', 'адрес'])).find(Boolean),
+              companyEmail: entry.group.rows.map((row) => rowText(row, ['email', 'e-mail', 'почта'])).find(Boolean), focus: [input.hypothesisTitle, input.hypothesisDescription].filter(Boolean).join(' '),
+              allowPaidSearch: input.allowPaidSearch })));
+        } catch (error) {
+          signal?.throwIfAborted();
+          if (!(error instanceof VeOperationTimeoutError) || error.label !== WEBSITE_COMPANY_DEADLINE_LABEL) throw error;
+          // Тот же ярлык, что у истёкшего общего дедлайна читателя: компания
+          // остаётся в резерве и получает ограниченный повтор (read_error_attempts).
+          evidence = { status: 'unavailable', text: '', url: entry.fields.website, reason: 'website_evidence_timeout', timeout: 'deadline', pages: 0 };
+        }
+        input.onActivity?.();
         // Занятость слота снимается ДО throwIfAborted: иначе отменённая волна
         // не оставит следа ровно в тех случаях, ради которых замер и делается.
         recordWaveCompany(wave, Date.now() - companyStartedAt, evidence);
