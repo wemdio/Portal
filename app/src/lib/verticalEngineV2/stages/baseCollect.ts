@@ -120,7 +120,7 @@ import { projectMarket, type VeMarket } from '../market';
 import { findIrrelevantRows, type VeRelevanceDecision } from '../relevanceGate';
 import { isVePaidWebsiteSearchEnabled } from '../paidSearchPolicy';
 import { isVeRelevanceTriageEnabled } from '../relevanceTriageConfig';
-import { capVeContactsPerCompany, normalizeVeMaxEmailsPerCompany, stripVeCompanyCapMarker, veContactLimitKey, VE_COMPANY_CAP_FIELD } from '../companyContactCap';
+import { capVeContactsPerCompany, countVeTargetContacts, normalizeVeMaxEmailsPerCompany, stripVeCompanyCapMarker, veContactLimitKey, VE_COMPANY_CAP_FIELD } from '../companyContactCap';
 import { relevanceHash, VeRelevanceCheckpointError, VePreviewCheckpointConflict, type VeRelevanceCheckpoint } from '../relevanceCheckpoint';
 import {
   buildVeRelevanceReviewBatch, mergeVeRelevanceRows, needsVeRelevanceReview, readVeRelevanceReserve, readVeRelevanceSourceRows, summarizeVeRelevanceReserve,
@@ -134,6 +134,7 @@ import { prepareSegmentationAudience } from '../segmentationAudit';
 import { isContactSupplyActive } from '../contactSupplyEligibility';
 import {
   collectionRoundLimit, createCollectionTarget, finishCollectionRound, updateCollectionEstimate, veCollectionMaxRounds,
+  withVeTargetComposition,
   VE_COLLECTION_ROUND_BUDGET,
   VE_SOURCE_POPULATION_MAX_AGE_MS,
   VE_PREVIEW_FIRST_CANDIDATES,
@@ -3438,8 +3439,10 @@ async function applyVeContactCapToFinishedBase(
       ? { ...row, [VE_COMPANY_CAP_FIELD]: { limit } } : row);
   const readyRows = prepareSegmentationAudience({ rows: kept, columns, source: 'auto' }).rows;
   const belowTarget = readyRows.length < target.ready_target;
-  const next: VeCollectionTargetProgress = { ...target, ready_rows: readyRows.length,
-    status: belowTarget ? 'limited' : 'target_reached' };
+  // С лимитом засчитывается каждая готовая строка; прежние поля состава
+  // (адресов больше, чем засчитано) после капа устарели.
+  const next = withVeTargetComposition({ ...target, ready_rows: readyRows.length,
+    status: belowTarget ? 'limited' : 'target_reached' }, countVeTargetContacts(readyRows, { limit, mode: 'preview' }), readyRows.length);
   if (belowTarget) {
     // Кап — это то, что случилось с базой ПОСЛЕДНИМ, а не причина, по которой
     // сбор остановился. Раньше эта строка затирала причину целиком, и карточка
@@ -3721,18 +3724,24 @@ async function completeTargetRound(args: {
   const namesChecked = [...nameCompanies.values()].filter((row) => VE_COMPANY_NAME_FIELD in row && isCompanyNameReady(row)).length;
   info.company_name_cleanup = { status: 'partial', companies: nameCompanies.size, checked: namesChecked, failed: nameCompanies.size - namesChecked,
     error: 'Очистка названий завершилась не полностью' };
-  info.target_progress = finish(prepareSegmentationAudience({ rows: pendingRows, columns, source: 'auto' }).rows.length,
-    'Очистка названий завершилась не полностью');
+  const pendingReady = prepareSegmentationAudience({ rows: pendingRows, columns, source: 'auto' }).rows;
+  const pendingCount = countVeTargetContacts(pendingReady, { limit: contactLimit, mode: progress.mode });
+  info.target_progress = withVeTargetComposition(finish(pendingCount.counted, 'Очистка названий завершилась не полностью'),
+    pendingCount, pendingReady.length);
   info.target_checkpoint = checkpoint;
   info.stats = stats;
   await persistCollectInfo(ctx, base.id, info, {
     data: pendingRows, columns,
-    sample_rows: prepareSegmentationAudience({ rows: pendingRows, columns, source: 'auto' }).rows.slice(0, SAMPLE_ROWS),
+    sample_rows: pendingReady.slice(0, SAMPLE_ROWS),
     row_count: pendingRows.length,
   });
   ctx.signal?.throwIfAborted();
   const cleaned = await cleanCollectedCompanyNames(ctx, job, info, pendingRows, args.usage);
   const readyRows = prepareSegmentationAudience({ rows: cleaned.rows, columns, source: 'auto' }).rows;
+  // Цель считает охват компаний. Без лимита специалиста в неё идут не больше
+  // трёх адресов одной компании; сама база при этом хранит все адреса.
+  const targetCount = countVeTargetContacts(readyRows, { limit: contactLimit, mode: progress.mode });
+  const targetRows = targetCount.counted;
   const nameRetry = job.result?.company_name_retry as { context?: unknown; attempts?: unknown } | undefined;
   const nameAttempts = nameRetry?.context === cleaned.checkpoint.context
     ? Number.isSafeInteger(nameRetry.attempts) && Number(nameRetry.attempts) >= 0 ? Number(nameRetry.attempts) : 3
@@ -3740,8 +3749,8 @@ async function completeTargetRound(args: {
   if (cleaned.summary.retryable && nameAttempts < 3) {
     // Resume only missing names. Preserve paid classification/SMTP and the
     // successful name batches, with a durable cap across worker restarts.
-    info.target_progress = { ...progress, status: 'collecting', ready_rows: readyRows.length,
-      candidates_processed: stats.rows_total };
+    info.target_progress = withVeTargetComposition({ ...progress, status: 'collecting', ready_rows: targetRows,
+      candidates_processed: stats.rows_total }, targetCount, readyRows.length);
     delete info.target_progress.reason;
     await persistCollectInfo(ctx, base.id, info, {
       data: cleaned.rows, columns, row_count: cleaned.rows.length, sample_rows: readyRows.slice(0, SAMPLE_ROWS),
@@ -3763,15 +3772,15 @@ async function completeTargetRound(args: {
   }
   if (pipeline && cleaned.summary.status === 'complete') {
     if (readyRows.length > 0 && !pipeline.first_ready_at) pipeline.first_ready_at = new Date().toISOString();
-    if (readyRows.length >= progress.ready_target && !pipeline.target_reached_at) pipeline.target_reached_at = new Date().toISOString();
+    if (targetRows >= progress.ready_target && !pipeline.target_reached_at) pipeline.target_reached_at = new Date().toISOString();
   }
-  let next = finish(readyRows.length, cleaned.summary.error);
+  let next = finish(targetRows, cleaned.summary.error);
   const reviewablePending = reserveRows.some((row) => isVeAcceptedEmailStatus(row._email_status)
     && (row._ve_relevance as { status?: unknown } | undefined)?.status === 'needs_review');
   const pendingAutomaticEmails = hasPendingVeSavedEmailRecovery(reserveRows, info.saved_email_recovery);
   const emailValidationCanContinue = pendingAutomaticEmails && args.validationError === 'Проверка email завершилась не полностью';
   const reviewEligible = !reviewOnly && (!args.validationError || emailValidationCanContinue) && !taskError
-    && readyRows.length < progress.ready_target;
+    && targetRows < progress.ready_target;
   const triageEnabled = isVeRelevanceTriageEnabled(job.project_id);
   const automaticBatch = reviewEligible ? buildVeRelevanceReviewBatch({
     reserve: reserveRows, ready: cleaned.rows, source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
@@ -3805,14 +3814,14 @@ async function completeTargetRound(args: {
   if (continueSavedReview) {
     // Same acquisition round, same candidates: the next job wake only improves
     // already paid-for contacts. This marker is saved atomically with rows.
-    next = { ...progress, ready_rows: readyRows.length, candidates_processed: stats.rows_total, status: 'collecting' };
+    next = { ...progress, ready_rows: targetRows, candidates_processed: stats.rows_total, status: 'collecting' };
     delete next.reason;
     info.relevance_review_requested = true;
   } else {
     delete info.relevance_review_requested;
     if (reviewOnly && !args.validationError && cleaned.summary.status === 'complete'
-      && readyRows.length < progress.ready_target && reviewablePending) {
-      next = { ...progress, ready_rows: readyRows.length, candidates_processed: stats.rows_total, status: 'limited',
+      && targetRows < progress.ready_target && reviewablePending) {
+      next = { ...progress, ready_rows: targetRows, candidates_processed: stats.rows_total, status: 'limited',
         reason: 'Уточнение сохранённых контактов завершено. Неопределённые контакты остались в резерве; новый сбор в этой операции не запускается.' };
     }
   }
@@ -3826,7 +3835,7 @@ async function completeTargetRound(args: {
   // Предел берём у итога раунда: холостой раунд его сдвигает (finishCollectionRound).
   const acquisitionLimited = stats.rows_total >= progress.max_candidates || progress.round >= next.max_rounds;
   if (existingFirst && !reviewOnly && !continueSavedReview && !args.validationError && !taskError && !pipeline?.error
-    && cleaned.summary.status === 'complete' && readyRows.length < progress.ready_target
+    && cleaned.summary.status === 'complete' && targetRows < progress.ready_target
     && !pendingSources && !pendingBatches.length && (acquisitionLimited || (!renewableDirectory && !existingBuffered))) {
     info.search_policy!.phase = 'paid';
     const canAcquirePaid = stats.rows_total < progress.max_candidates && progress.round < next.max_rounds
@@ -3851,7 +3860,7 @@ async function completeTargetRound(args: {
       next = { ...next, status: 'collecting', round: continueSavedReview ? progress.round : progress.round + 1 };
       delete next.reason;
     }
-    stageLog(ctx, `[base_collect] имеющиеся данные проверены: ${readyRows.length}/${progress.ready_target} готовых контактов; дополнительный поиск включён только для недостающего объёма`);
+    stageLog(ctx, `[base_collect] имеющиеся данные проверены: ${targetRows}/${progress.ready_target} готовых контактов; дополнительный поиск включён только для недостающего объёма`);
   }
   let widenedSliceDry = false;
   if (info.adaptive_collection?.pending && !continueSavedReview && !args.validationError && !taskError
@@ -3867,7 +3876,7 @@ async function completeTargetRound(args: {
     // Расширенный срез — последняя автоматическая попытка. Если и он дал две
     // плохие партии, а живого источника кроме него нет, база завершается сама,
     // а не перебирает срезы за счёт проверок.
-    widenedSliceDry = policy.replan_needed === true && !reviewOnly && readyRows.length < progress.ready_target
+    widenedSliceDry = policy.replan_needed === true && !reviewOnly && targetRows < progress.ready_target
       && tasks.some((task) => task.task.widened && veSourceStrategyKey(task.task) === batchSource)
       && !tasks.some((task) => veSourceStrategyKey(task.task) !== batchSource && veTaskCanSupply(task)
         && !veAdaptiveLowYield(policy.completed, veSourceStrategyKey(task.task)));
@@ -3879,13 +3888,14 @@ async function completeTargetRound(args: {
       policy.note = 'Расширенный срез дал низкий выход двух партий подряд: сбор остановлен.';
       next = { ...next, round: progress.round, status: 'limited',
         reason: `Расширенный срез тоже дал низкий выход: последние ${companies} компаний дали ${contacts} новых готовых контактов. `
-          + `Сбор остановлен, чтобы не тратить проверки впустую. Собрано ${readyRows.length} из ${progress.ready_target}.` };
-    } else if (policy.replan_needed && !reviewOnly && readyRows.length < progress.ready_target
+          + `Сбор остановлен, чтобы не тратить проверки впустую. Собрано ${targetRows} из ${progress.ready_target}.` };
+    } else if (policy.replan_needed && !reviewOnly && targetRows < progress.ready_target
       && !acquisitionLimited && policy.replan_attempts < 2) {
       next = { ...next, status: 'collecting', round: progress.round + 1 }; delete next.reason;
     }
   }
   stats.launchable_rows = readyRows.length;
+  next = withVeTargetComposition(next, targetCount, readyRows.length);
   info.target_progress = next;
   if (cleaned.summary.status === 'complete') {
     delete info.company_name_recovery;
@@ -3908,6 +3918,7 @@ async function completeTargetRound(args: {
     // not retain directory row ids, so missing INN cannot prove that fallback.
     const identitiesComplete = sourceRows.length > 0 && sourceRows.every((row) => Boolean(normalizeVeCompanyInn(cell(row.inn))));
     info.estimate = updateCollectionEstimate(info.estimate, {
+      // Прогноз запаса для запуска остаётся в адресах, как и состав базы в сводке.
       candidates: candidateCompanies.size, ready: readyRows.length,
       asOf: new Date().toISOString(), identitiesComplete,
       // unchecked выделен из error и перечислен здесь явно: выборка с
@@ -3931,29 +3942,30 @@ async function completeTargetRound(args: {
     // обнуляется, пока в резерве есть хоть одна непроверенная строка, а такая
     // строка есть почти всегда (компания, по которой конструктор не нашёл
     // почту). Для решения «рынок мал» достаточно размера сопоставимого среза
-    // источника и наблюдаемого выхода.
+    // источника и наблюдаемого выхода. Выход — в единицах цели (targetRows):
+    // лишние адреса тех же компаний рынок не расширяют.
     const population = info.estimate.population_matches_source === true
       && Number.isSafeInteger(info.estimate.unique_companies) ? Number(info.estimate.unique_companies) : null;
     const processedCompanies = candidateCompanies.size;
     const projected = population !== null && processedCompanies >= VE_NARROW_MARKET_MIN_COMPANIES
-      && population >= processedCompanies && readyRows.length > 0
-      ? Math.round((population - processedCompanies) * readyRows.length / processedCompanies) : null;
+      && population >= processedCompanies && targetRows > 0
+      ? Math.round((population - processedCompanies) * targetRows / processedCompanies) : null;
     // Останавливаем только раунд, за которым не осталось уже оплаченной работы:
     // недокачанный дочерний конструктор или неразобранный запас дороже одного
     // лишнего раунда, а на следующем пробуждении оценка повторится.
     if (projected !== null && next.status === 'collecting' && !reviewOnly && !continueSavedReview
       && progress.round >= 2 && pendingBatches.length === 0 && !pendingSources && !pendingDiscovery
       && !args.hasBufferedCandidates && !info.adaptive_collection?.pending
-      && readyRows.length + projected < VE_NARROW_MARKET_MIN_PROJECTED) {
+      && targetRows + projected < VE_NARROW_MARKET_MIN_PROJECTED) {
       next = { ...next, round: progress.round, status: 'limited',
         reason: `Рынок гипотезы исчерпан: по текущему срезу источника осталось примерно ${projected} контактов `
-          + `сверх собранных ${readyRows.length}, то есть база не наберёт и ${VE_NARROW_MARKET_MIN_PROJECTED}. `
+          + `сверх собранных ${targetRows}, то есть база не наберёт и ${VE_NARROW_MARKET_MIN_PROJECTED}. `
           + 'Сбор остановлен, чтобы не тратить проверки впустую. Добавьте источник или уточните гипотезу.' };
       // Локальная переменная уже скопирована в info выше: без этой записи
       // статус и причина не сохранились бы, а «Продолжить подготовку» не
       // увидела бы базу (там требуется терминальный статус раунда).
       info.target_progress = next;
-      stageLog(ctx, `[base_collect] остановка по размеру рынка: собрано ${readyRows.length}, прогноз остатка ${projected}, цель ${progress.ready_target}`);
+      stageLog(ctx, `[base_collect] остановка по размеру рынка: собрано ${targetRows}, прогноз остатка ${projected}, цель ${progress.ready_target}`);
     }
   }
   // План кончился раньше цели — это повод расширить срез, а не остановка:
@@ -3966,9 +3978,9 @@ async function completeTargetRound(args: {
   if (!widenedSliceDry && sourcesRanOut && (next.status === 'exhausted' || next.status === 'limited')
     && !continueSavedReview && !args.validationError && !taskError && !pipeline?.error
     && cleaned.summary.status === 'complete' && !acquisitionLimited
-    && readyRows.length < progress.ready_target && tasks.length > 0) {
+    && targetRows < progress.ready_target && tasks.length > 0) {
     if (await widenExhaustedPlan(ctx, base, info, tasks)) {
-      stageLog(ctx, `[base_collect] план исчерпан на ${readyRows.length}/${progress.ready_target}: срез расширен автоматически (${info.adaptive_collection?.widenings}/${VE_PLAN_WIDENING_LIMIT})`);
+      stageLog(ctx, `[base_collect] план исчерпан на ${targetRows}/${progress.ready_target}: срез расширен автоматически (${info.adaptive_collection?.widenings}/${VE_PLAN_WIDENING_LIMIT})`);
       next = { ...next, status: 'collecting', round: progress.round + 1 };
       delete next.reason;
     } else if (info.adaptive_collection?.widenings) {
@@ -4139,6 +4151,10 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       target.round = previous.round;
       target.candidates_processed = previous.candidates_processed;
       target.ready_rows = previous.ready_rows;
+      // Состав готовой базы переживает раунд вместе со счётчиком цели.
+      for (const field of ['ready_companies', 'ready_contacts', 'counted_per_company'] as const) {
+        if (Number.isSafeInteger(previous[field]) && previous[field]! >= 0) target[field] = previous[field];
+      }
       // A new preview default must not change the input scope of a constructor
       // already running for an older target (e.g. 1000 ready contacts).
       target.ready_target = previous.ready_target;
@@ -4623,7 +4639,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   if (target) {
     candidateStats.rows_total += target.candidates_processed;
     candidateStats.processed_rows = info.target_checkpoint?.processed_rows ?? 0;
-    candidateStats.launchable_rows = target.ready_rows;
+    candidateStats.launchable_rows = target.ready_contacts ?? target.ready_rows;
   }
   delete candidateStats.finished_at;
   const candidateStatsChanged = !sameCollectSnapshot(info.stats, candidateStats);
