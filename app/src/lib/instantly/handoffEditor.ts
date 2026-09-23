@@ -4,6 +4,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { signHandoffEdit, verifyHandoffEdit } from './handoffCallback';
 import { answerCallback, postHandoffEditor } from './handoffTelegram';
 import { HANDOFF_AUTO_SEND_MARKER, sendHandoffNow, type PendingHandoffRow } from './handoffSender';
+import { canActOnManualHandoff } from './handoffAuthorization';
 
 interface Message {
   message_id?: number; message_thread_id?: number; text?: string;
@@ -49,10 +50,9 @@ export async function handleHandoffEditor(update: HandoffEditUpdate, token: stri
   if (error) { await tell('Редактор временно недоступен. Ничего не отправлено.'); return true; }
   if (!data) { if (cq) await tell('Кнопка устарела. Откройте редактор из карточки лида.'); return true; }
   const row = data as Row;
-  const { data: link, error: linkError } = await main.from('telegram_links').select('telegram_id')
-    .eq('user_id', row.responsible_user_id ?? '').maybeSingle();
-  if (linkError || !link || String(link.telegram_id) !== String(from) || String(row.tg_chat_id) !== String(chat)) {
-    await tell('Изменить ответ может только ответственный специалист в чате передачи.'); return true;
+  if (String(row.tg_chat_id) !== String(chat) ||
+    !await canActOnManualHandoff(main, db, row, from)) {
+    await tell('Изменить ответ может только ответственный специалист или лид проекта с разрешением в чате передачи.'); return true;
   }
   const { data: qual, error: qualError } = await db.from('instantly_lead_qualifications')
     .select('status, queue_archived_at').eq('id', row.qualification_id).maybeSingle();
