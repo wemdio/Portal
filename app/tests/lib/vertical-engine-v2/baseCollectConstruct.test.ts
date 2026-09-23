@@ -1456,7 +1456,9 @@ describe('base_collect CONSTRUCT step order', () => {
         abortSignal: async () => ({ data: dictionaries.getRows(table).slice(start, end + 1), error: null }),
       };
       return query;
-    } } as unknown as SupabaseClient;
+    },
+    // Проверка «в рубрике есть организации в выбранной географии».
+    rpc: () => ({ abortSignal: async () => ({ data: 1, error: null }) }) } as unknown as SupabaseClient;
     const modelCalls = (callLLMWithSchema as jest.Mock).mock.calls.length;
     expect(await resolveVeYandexCatalogFilters({ db: dictionaryDb, query: catalogTask.maps_query })).toEqual(filters);
     expect((callLLMWithSchema as jest.Mock).mock.calls).toHaveLength(modelCalls);
@@ -2841,5 +2843,225 @@ describe('base_collect: план кончился раньше цели', () => 
     expect(result.target_progress).toMatchObject({ status: 'exhausted', ready_rows: 3 });
     expect(result.target_progress?.reason).toContain('Срез уже расширялся автоматически (2 из 2)');
     expect(db.getRows('base_constructor_jobs')).toHaveLength(0);
+  });
+});
+
+/**
+ * Старые задачи Яндекс Карт (аудит 22.09.2026). До 16.09 карты собирал живой
+ * парсер: одна ссылка «<запрос> Россия» на запрос — 1 компания на «агентство
+ * недвижимости» у 3cfcfbbd (задание yandex_maps_jobs 30328b8c). С 16.09 карты
+ * читаются из готового каталога, но закрытая задача без закладки каталога
+ * нигде не считалась продолжаемой: база вставала с «Нет подтверждённого
+ * продолжения». План, запросы и числа — с прода.
+ */
+describe('base_collect: старая задача карт продолжается чтением каталога', () => {
+  const LEGACY_JOB = '30328b8c-8af9-4599-b7f7-1072573be7db';
+  const REALTY_DIRECTORY = { source: 'companies_directory' as const,
+    rationale: 'Собираем малые агентства и посредников по операциям с недвижимостью, чтобы найти региональные АН с 3–30 агентами для продажи единого каталога новостроек и комиссий.',
+    directory_filters: { hasEmail: false, includeIp: false, revenueTo: 300_000_000, okvedCodes: ['68.3'], employeesTo: 50, employeesFrom: 3 } };
+  const REALTY_MAPS = { source: 'yandex_maps' as const,
+    rationale: 'Собираем локальные агентства недвижимости с карточками и телефонами, чтобы добрать малые региональные АН, которые могут не выделяться чисто по ОКВЭД в реестре.',
+    maps_query: { geo: 'Россия', queries: ['агентство недвижимости'] } };
+  const directoryRows = [
+    unifiedRow({ company: 'ООО Агентство Квартал', inn: '1655000001', website: 'kvartal-an.test', email: 'info@kvartal-an.test' }),
+    unifiedRow({ company: 'ООО Риелторское бюро Ключ', inn: '1655000002', website: 'klyuch-an.test', email: 'office@klyuch-an.test' }),
+  ];
+  const parserRow = unifiedRow({ company: 'Агентство недвижимости Новый адрес', website: 'novyi-adres.test',
+    email: 'hello@novyi-adres.test', address: 'Москва, Тверская улица, 7', source_detail: 'яндекс.карты' });
+  const legacyTasks = (): NonNullable<VeCollectInfo['tasks']> => [
+    { source: 'companies_directory', status: 'done', child_job_id: null, rows: 2, task: REALTY_DIRECTORY,
+      harvest: directoryRows, exhausted: true, note: 'реестр исчерпан' },
+    // Так лежит задача на проде: done, id завершённого парсера, 1 строка, без catalog.
+    { source: 'yandex_maps', status: 'done', child_job_id: LEGACY_JOB, rows: 1, task: REALTY_MAPS,
+      harvest: [parserRow], dispatched_at: '2026-09-09T17:09:25.546Z' },
+  ];
+  // Справочник и организации каталога. Числа рубрик — из
+  // yandex_maps_catalog_rubrics; в России у «агентство недвижимости» (34 во
+  // всём каталоге) и «Агентство недвижимости» (101) нет ни одной организации,
+  // у «Агентства недвижимости» — 33 644. Функция каталога сравнивает рубрики
+  // без учёта регистра, как и настоящая.
+  const RUBRICS: Array<[string, number]> = [['Агентства недвижимости', 40_367], ['агентство недвижимости', 34],
+    ['Агентство недвижимости', 101], ['Недвижимость', 148_830], ['Коммерческая недвижимость', 15_853]];
+  const RU_COUNTS: Record<string, number> = { 'агентства недвижимости': 33_644, недвижимость: 120_000,
+    'коммерческая недвижимость': 12_000 };
+  const ORGANIZATIONS = [
+    { yandex_id: '1000000001', name: 'АН Квадратный метр', website: 'kv-metr.test', email: 'sale@kv-metr.test',
+      address: 'Казань, улица Баумана, 1', categories: 'Агентства недвижимости' },
+    { yandex_id: '1000000002', name: 'Риелторский центр Дом', website: 'rc-dom.test', email: 'info@rc-dom.test',
+      address: 'Самара, улица Куйбышева, 2', categories: 'Агентства недвижимости' },
+  ];
+  const installCatalog = (db: MockSupabaseClient, rubrics = RUBRICS) => {
+    const originalFrom = db.from, originalRpc = db.rpc;
+    db.from = ((table: string) => {
+      if (table !== 'yandex_maps_catalog_rubrics' && table !== 'yandex_maps_catalog_places') return originalFrom(table);
+      const rows = table === 'yandex_maps_catalog_rubrics' ? rubrics.map(([rubric, companies]) => ({ rubric, companies }))
+        : [{ country: 'Россия', region: 'Москва и Московская область', city: 'Москва' }];
+      let start = 0, end = 999;
+      const query = { select: () => query, order: () => query,
+        range: (from: number, to: number) => { start = from; end = to; return query; },
+        abortSignal: async () => ({ data: rows.slice(start, end + 1), error: null }) };
+      return query;
+    }) as unknown as typeof db.from;
+    db.rpc = ((name: string, params: Record<string, unknown>) => {
+      const tokens = ((params.p_categories as string[] | null) ?? []).map((label) => label.toLowerCase());
+      const operation = name === 'yandex_maps_catalog_count'
+        ? Promise.resolve({ data: Math.min(Number(params.p_cap ?? Infinity), tokens.reduce((sum, token) => sum + (RU_COUNTS[token] ?? 0), 0)), error: null })
+        : name === 'yandex_maps_catalog_search'
+          ? Promise.resolve({ data: ORGANIZATIONS.filter((row) => tokens.includes(row.categories.toLowerCase())
+            && (!params.p_after || row.yandex_id > String(params.p_after))).slice(0, Number(params.p_limit)), error: null })
+          : originalRpc(name, params);
+      if (name.startsWith('yandex_maps_catalog')) db.rpcCalls.push({ fn: name, params });
+      return Object.assign(operation, { abortSignal: () => operation });
+    }) as typeof db.rpc;
+    return db;
+  };
+  const wake = async (db: MockSupabaseClient) => {
+    const queued = db.getRows('ve_jobs').filter((row) => row.stage === 'base_collect').at(-1)!;
+    await db.from('ve_jobs').update({ status: 'running' }).eq('id', queued.id);
+    await runBaseCollectStage({ ...makeJob(), id: queued.id as string, payload: queued.payload as VeJob['payload'] },
+      { supabase: db as unknown as SupabaseClient });
+    return db.getRows('ve_bases')[0];
+  };
+  const expectCatalogRead = (db: MockSupabaseClient, info: VeCollectInfo) => {
+    // Запросы задачи перенесены, фильтр подобран по справочнику: рубрика с
+    // организациями в России, а не пустая в единственном числе.
+    expect(info.tasks![1]).toMatchObject({ source: 'yandex_maps', task: { maps_query: REALTY_MAPS.maps_query },
+      legacy_child_job_id: LEGACY_JOB, child_job_id: null,
+      catalog: { version: 1, filters: { categories: ['Агентства недвижимости'], countries: ['Россия'] } } });
+    expect(info.tasks![1].harvest!.map((row) => row.company)).toEqual(['АН Квадратный метр', 'Риелторский центр Дом']);
+    expect(db.rpcCalls.filter((call) => call.fn === 'yandex_maps_catalog_search')[0].params)
+      .toMatchObject({ p_categories: ['Агентства недвижимости'], p_countries: ['Россия'] });
+    // Никакого живого парсера: ни новой задачи карт, ни Google Maps.
+    expect(db.getRows('yandex_maps_jobs')).toHaveLength(0);
+    expect(db.getRows('google_maps_jobs')).toHaveLength(0);
+    const child = db.getRows('base_constructor_jobs').find((row) => row.status === 'pending')!;
+    expect((child.data as string[][]).slice(1).map((row) => row[0]).sort()).toEqual(['АН Квадратный метр', 'Риелторский центр Дом']);
+  };
+
+  it('реестр исчерпан, старая задача карт закрыта: раунд продолжается чтением каталога, а не limited', async () => {
+    const info: VeCollectInfo = {
+      collection_mode: 'preview', ready_target: 500, limit: 2_000,
+      plan: { tasks: [REALTY_DIRECTORY, REALTY_MAPS] }, tasks: legacyTasks(),
+      search_policy: { version: 1, phase: 'paid', deferred_rows: [] },
+      construct: { bc_job_id: 'bc-realty', status: 'dispatched', dispatched_at: '2026-09-09T17:30:00Z' },
+      target_progress: { ...createCollectionTarget('preview'), round: 1 },
+      target_checkpoint: { completed_round: 0, seen_rows: [], processed_rows: 0 },
+    };
+    const candidates = [...directoryRows, parserRow];
+    const db = installCatalog(seed(info, { base_constructor_jobs: [{ id: 'bc-realty', status: 'completed', error_message: null,
+      selected_steps: ['find_emails', 'split_emails', 'dedup_email', 'validate_emails'],
+      data: [['Компания', 'Сайт', 'Email', 'ИНН', 'Email Статус'],
+        ...candidates.map((row) => [row.company, row.website, row.email, row.inn, 'ok'])] }] }));
+
+    let base = await wake(db);
+    let saved = base.collect_info as VeCollectInfo;
+    expect(saved.target_progress).toMatchObject({ status: 'collecting', round: 2 });
+    expect(saved.target_progress?.reason).toBeUndefined();
+    expect(base.status).toBe('collecting');
+    // Задача переоткрыта как чтение каталога: те же запросы, id парсера сохранён.
+    expect(saved.tasks![1]).toEqual({ source: 'yandex_maps', task: REALTY_MAPS, status: 'pending', child_job_id: null,
+      rows: 0, legacy_child_job_id: LEGACY_JOB });
+    expect(saved.tasks![0]).toMatchObject({ status: 'done', exhausted: true });
+
+    base = await wake(db);
+    saved = base.collect_info as VeCollectInfo;
+    expectCatalogRead(db, saved);
+  });
+
+  it.each([
+    ['с резервом needs_review: сначала перепроверка резерва', true],
+    ['без резерва: сразу к источникам', false],
+  ])('«Продолжить подготовку» analyzed-базы вида 3cfcfbbd %s, затем чтение каталога', async (_label, withReserve) => {
+    const needsReview = (row: VeUnifiedRow) => ({ ...row, _email_status: 'ok', _ve_relevance: { version: 2 as const,
+      status: 'needs_review' as const, reason: 'Нет сведений о числе агентов; требуется подтверждение по сайту.', evidence: [],
+      context_hash: 'c'.repeat(64), review_attempts: 0 } });
+    const info: VeCollectInfo = {
+      collection_mode: 'preview', ready_target: 500, limit: 5_000,
+      plan: { tasks: [REALTY_DIRECTORY, REALTY_MAPS] }, tasks: legacyTasks(),
+      search_policy: { version: 1, phase: 'paid', deferred_rows: [] },
+      relevance_reserve: { version: 1, rows: withReserve ? directoryRows.map(needsReview) : [] },
+      target_progress: { ...createCollectionTarget('preview'), round: 2, status: 'limited', max_rounds: 100,
+        candidates_processed: 70, ready_rows: 0, reason: 'Нет подтверждённого продолжения источников; исчерпание рынка не доказано' },
+      target_checkpoint: { completed_round: 2, seen_rows: [...directoryRows, parserRow], processed_rows: 84 },
+      stats: { tasks_total: 2, tasks_done: 2, tasks_failed: 0, rows_total: 70, excluded_existing_bases: 70,
+        excluded_during_fetch: 0, finished_at: '2026-09-22T11:26:28.055Z' },
+    };
+    const db = installCatalog(seed(info, { ve_bases: [{ ...makeBase(info), status: 'analyzed', columns: [...VE_AUTO_COLLECT_COLUMNS] }] }));
+    await db.from('ve_jobs').update({ status: 'done' }).eq('id', makeJob().id);
+    // Без сохранённого резерва базу тоже можно продолжить: из-за старой задачи карт.
+    expect(canResumePartialPreview(db.getRows('ve_bases')[0])).toBe(true);
+    await expect(enqueueVeBaseCollect(db as unknown as SupabaseClient, { projectId: 'p1', verticalId: 'v1',
+      verticalName: VERTICAL.name, hypothesisIds: ['h1'], collectionMode: 'preview', limit: 2000, resumeBaseId: 'b1' }))
+      .resolves.toMatchObject({ ok: true, created: true, base: { id: 'b1' } });
+
+    // Первый заход — перепроверка сохранённого резерва, без источников.
+    let base = await wake(db);
+    let saved = base.collect_info as VeCollectInfo;
+    expect(mockFindIrrelevantRows).toHaveBeenCalledTimes(withReserve ? 1 : 0);
+    expect(db.rpcCalls.some((call) => call.fn === 'yandex_maps_catalog_search')).toBe(false);
+    expect(base.status).toBe('collecting');
+    expect(saved.target_progress).toMatchObject({ status: 'collecting', round: 3, ready_rows: withReserve ? 2 : 0 });
+    expect(saved.relevance_review_requested).toBeUndefined();
+    expect(saved.tasks![1]).toMatchObject({ status: 'pending', child_job_id: null, legacy_child_job_id: LEGACY_JOB });
+
+    // Второй — открывает задачу карт через готовый каталог.
+    base = await wake(db);
+    saved = base.collect_info as VeCollectInfo;
+    expectCatalogRead(db, saved);
+  });
+
+  it('адаптивная база (вид 905753d2): старая задача карт открывается добором, а не остаётся закрытой', async () => {
+    const info: VeCollectInfo = {
+      collection_mode: 'preview', ready_target: 500, limit: 100,
+      plan: { tasks: [REALTY_DIRECTORY, REALTY_MAPS] }, tasks: legacyTasks(),
+      adaptive_collection: newVeAdaptiveCollection(),
+      search_policy: { version: 1, phase: 'paid', deferred_rows: [] },
+      target_progress: { ...createCollectionTarget('preview'), round: 7, candidates_processed: 3 },
+      target_checkpoint: { completed_round: 6, seen_rows: [...directoryRows, parserRow], processed_rows: 3 },
+    };
+    const db = installCatalog(seed(info));
+    const saved = (await wake(db)).collect_info as VeCollectInfo;
+    expect(saved.adaptive_collection?.active_source).toBe(veSourceStrategyKey(REALTY_MAPS));
+    expectCatalogRead(db, saved);
+  });
+
+  it('следующий раунд после сбоя каталога тоже переоткрывает старую задачу карт', () => {
+    const info = {
+      tasks: legacyTasks(),
+      target_progress: { ...createCollectionTarget('preview'), round: 2, status: 'error', reason: 'x' },
+      target_checkpoint: { completed_round: 2 },
+    } as unknown as Record<string, unknown>;
+    expect(openNextVeCollectionRound(info)).toBe(true);
+    expect((info.tasks as VeCollectInfo['tasks'])![1]).toEqual({ source: 'yandex_maps', task: REALTY_MAPS,
+      status: 'pending', child_job_id: null, rows: 0, legacy_child_job_id: LEGACY_JOB });
+  });
+
+  it('рынок РФ: задача Google Maps из плана уходит в готовый каталог Яндекс Карт, а не в живой поиск', async () => {
+    const google = { source: 'google_maps' as const, rationale: REALTY_MAPS.rationale, maps_query: REALTY_MAPS.maps_query };
+    const db = installCatalog(seed({ collection_mode: 'preview' }));
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce({ data: { tasks: [google] }, tokensUsed: 10, costUsd: 0.01,
+      promptTokens: 5, completionTokens: 5, rawResponse: '' });
+    const saved = (await wake(db)).collect_info as VeCollectInfo;
+    expect(saved.plan?.tasks).toEqual([{ ...google, source: 'yandex_maps' }]);
+    expect(saved.tasks![0]).toMatchObject({ source: 'yandex_maps',
+      catalog: { filters: { categories: ['Агентства недвижимости'], countries: ['Россия'] } } });
+    expect(db.getRows('google_maps_jobs')).toHaveLength(0);
+    expect(db.getRows('base_constructor_jobs')).toHaveLength(1);
+  });
+
+  it('пустой выбор рубрик — ошибка задачи с причиной, а не «каталог исчерпан»', async () => {
+    // В справочнике только пустые в России формы запроса, модель выбирает их же.
+    const lonely = { ...REALTY_MAPS, maps_query: { geo: 'Россия', queries: ['агентство недвижимости'] } };
+    const info: VeCollectInfo = { plan: { tasks: [lonely] }, tasks: [{ source: 'yandex_maps', status: 'pending',
+      child_job_id: null, rows: 0, task: lonely }] };
+    const db = installCatalog(seed(info), [['агентство недвижимости', 34], ['Агентство недвижимости', 101]]);
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce({ data: { category_ids: [0, 1], place_ids: [] }, tokensUsed: 0,
+      costUsd: 0, promptTokens: 0, completionTokens: 0, rawResponse: '' });
+    await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient }).catch(() => undefined);
+    const task = (db.getRows('ve_bases')[0].collect_info as VeCollectInfo).tasks![0];
+    expect(task.status).toBe('failed');
+    expect(task.exhausted).not.toBe(true);
+    expect(task.error).toContain('нет организаций по рубрикам «агентство недвижимости», «Агентство недвижимости» в географии «Россия»');
+    expect(db.rpcCalls.some((call) => call.fn === 'yandex_maps_catalog_search')).toBe(false);
   });
 });
