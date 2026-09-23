@@ -1,5 +1,5 @@
 /** Executable PostgreSQL smoke for VE2 contact delivery on a Portal project
- * without periods (migration 20260924_0010); never connects to Portal/prod.
+ * without periods (migrations 20260924_0010, 20260924_0011); never connects to Portal/prod.
  *
  * Run from app/: node scripts/vertical-engine-v2/contact-delivery-without-period-sql-smoke.mjs
  * Supply PGLITE_MODULE when @electric-sql/pglite is installed outside this repo.
@@ -59,6 +59,7 @@ try {
     '20260902_0001_vertical_engine_v2_contact_delivery.sql',
     '20260903_0001_vertical_engine_v2_contact_supply.sql',
     '20260924_0010_ve_contact_delivery_without_period.sql',
+    '20260924_0011_ve_project_deadline_card_formats.sql',
   ]) {
     await db.exec(migration(name));
   }
@@ -71,8 +72,12 @@ try {
   await rows(`insert into public.projects values ($1,'Staff Line','Аутрич','В работе','2030-09-30','2030-08-30','4000','25905')`, [STAFF]);
 
   // ── Помощники ──
-  check((await one(`select public.ve_try_iso_date('2030-09-30')::text as d`)).d === '2030-09-30', 'try_iso_date parses an ISO date');
-  for (const bad of ['05.18.2026', '2026-02-30', '2026-13-01', '', ' ', 'завтра', '0000-01-01', null]) {
+  const deadlineCases = JSON.parse(readFileSync(resolve(root, 'app/tests/helpers/projectDeadlineCases.json'), 'utf8'));
+  for (const [raw, iso] of deadlineCases.accepted) {
+    const parsed = (await one('select public.ve_try_iso_date($1)::text as d', [raw])).d;
+    check(parsed === iso, `try_iso_date parses ${JSON.stringify(raw)}`, String(parsed));
+  }
+  for (const bad of [...deadlineCases.rejected, '', ' ', null]) {
     check((await one('select public.ve_try_iso_date($1) as d', [bad])).d === null, `try_iso_date rejects ${JSON.stringify(bad)}`);
   }
   const PERIOD_X = '11111111-1111-4111-8111-111111111111';
@@ -174,8 +179,16 @@ try {
       check((await one('select status from public.ve_contact_delivery_term($1,null,$2)', [STAFF, VE])).status === 'active', `term: status «${status}» is a working one`);
     });
   }
-  // Пустой или не-ISO «Дедлайн» — пауза, как прошедший дедлайн: слот не держится.
-  for (const bad of ['05.18.2026', '31.10.30', '', null]) {
+  // «Дедлайн» в формате подсказки карточки (ДД.ММ.ГГ) — обычный срок плана.
+  await inRollback(async () => {
+    await rows(`update public.projects set deadline='31.10.30' where id=$1`, [STAFF]);
+    const cardTerm = await one('select status, deadline::text as deadline from public.ve_contact_delivery_term($1,null,$2)', [STAFF, VE]);
+    check(cardTerm?.status === 'active' && cardTerm.deadline === '2030-10-31', 'term: a DD.MM.YY card deadline is the plan deadline', JSON.stringify(cardTerm));
+    check((await one(activationSql, [ITEM, 'c2c2c2c2-c2c2-4c2c-8c2c-c2c2c2c2c2c2', now])).a?.reason !== 'delivery_not_active',
+      'activation goes on with a DD.MM.YY card deadline');
+  });
+  // Пустой или не-дата «Дедлайн» — пауза, как прошедший дедлайн: слот не держится.
+  for (const bad of ['05.18.2026', '31.02.30', '', null]) {
     await inRollback(async () => {
       await rows('update public.projects set deadline=$2 where id=$1', [STAFF, bad]);
       const badTerm = await one('select status, deadline from public.ve_contact_delivery_term($1,null,$2)', [STAFF, VE]);
@@ -232,7 +245,7 @@ try {
     check(held === 'active', 'hold slot keeps continuous supply of a plan without period', held);
   });
   await inRollback(async () => {
-    await rows(`update public.projects set deadline='31.10.30' where id=$1`, [STAFF]);
+    await rows(`update public.projects set deadline='31.02.30' where id=$1`, [STAFF]);
     const released = (await one(releaseItem, [ITEM, now]))?.status;
     check(released === 'released', 'hold slot lets a plan without a valid deadline go', released);
   });

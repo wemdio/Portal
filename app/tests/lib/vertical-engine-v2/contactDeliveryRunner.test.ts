@@ -416,9 +416,9 @@ describe('VE2 contact delivery runner for a Portal project without periods', () 
     },
     {
       name: 'a card deadline that is not a date',
-      project: { deadline: '31.10.26' },
+      project: { deadline: '31.02.26' },
       periods: [],
-      error: 'В карточке проекта в поле «Дедлайн» указана не дата («31.10.26»). Укажите дату в формате ГГГГ-ММ-ДД — темп рассчитается до неё. Загрузка продолжится сама, если к этому времени кампании плана ещё не завершились; иначе понадобится новый запуск.',
+      error: 'В карточке проекта в поле «Дедлайн» указана не дата («31.02.26»). Укажите дату в формате ГГГГ-ММ-ДД — темп рассчитается до неё. Загрузка продолжится сама, если к этому времени кампании плана ещё не завершились; иначе понадобится новый запуск.',
     },
   ])('pauses on $name before ownership, reservation and uploads', async ({ project, periods, error, now }: {
     project: Record<string, unknown>; periods: Array<Record<string, unknown>>; error: string; now?: string;
