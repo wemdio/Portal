@@ -1,7 +1,7 @@
 'use client';
 
 import { authFetch, authFetchJson } from '@/lib/authFetch';
-import type { Letter, ProfileCode, RuOutreachConfig, Signal } from '@/lib/polzaRuOutreach/types';
+import { CHAIN_LABELS, type ChainType, type Letter, type RuOutreachConfig, type Signal } from '@/lib/polzaRuOutreach/types';
 
 export const API = '/api/tools/polza-ru-outreach';
 
@@ -12,8 +12,8 @@ export interface RuJob {
   progress_stage: string | null;
   progress_percent: number | null;
   progress_detail: {
-    profile_code?: ProfileCode;
     pool?: number;
+    chains?: Record<string, number>;
     scanned?: number;
     ready?: number;
     target?: number;
@@ -29,7 +29,7 @@ export interface RuJob {
 
 export interface RuRow {
   id: string;
-  profile_code: ProfileCode;
+  chain_type: ChainType | null;
   source_type: string;
   source_url: string | null;
   source_urls: string[];
@@ -39,6 +39,13 @@ export interface RuRow {
   normalized_domain: string | null;
   company_website: string | null;
   prior_contact: boolean;
+  amo_status: string | null;
+  ta_score: number | null;
+  ta_reason: string | null;
+  priority_score: number | null;
+  case_match_reason: string | null;
+  campaign_hypothesis: string | null;
+  email_verification: string | null;
   signal_type: string | null;
   signal_date: string | null;
   signal_title: string | null;
@@ -94,9 +101,10 @@ export const STATUS_LABELS: Record<RuRow['row_status'], string> = {
 };
 
 export const SIGNAL_LABELS: Record<string, string> = {
-  sdr_hiring: 'найм SDR',
   sales_hiring: 'вакансия продаж',
-  multiple_sales_vacancies: 'несколько вакансий продаж',
+  ad_running: 'реклама в Яндекс.Директе',
+  grant_or_accelerator: 'грант / акселератор',
+  crm_lost: 'старый отказ в AMO',
   trade_show_exhibitor: 'участник выставки',
   contract_won: 'госконтракт',
   product_launch: 'новый продукт',
@@ -107,17 +115,9 @@ export const SIGNAL_LABELS: Record<string, string> = {
   dealer_search: 'ищут дилеров',
   export_launch: 'экспорт',
   new_case: 'новый кейс',
-  multiple_products: 'несколько продуктов',
-  multiple_regions: 'несколько регионов',
-  crm_record: 'сделка в AMO',
 };
 
-export const MODE_LABELS: Record<string, string> = {
-  evidence: 'персонализация по факту',
-  generic_market: 'без рынка (рынок не подтверждён)',
-  relationship: 'уже общались (AMO)',
-  generic_fit: 'общая',
-};
+export const MODE_LABELS: Record<string, string> = CHAIN_LABELS;
 
 export function fmtDate(value: string | null | undefined): string {
   if (!value) return '—';

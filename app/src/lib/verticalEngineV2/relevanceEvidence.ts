@@ -67,6 +67,16 @@ const PAGE_TIMEOUT_MS = 5_000;
 // Константы, чтобы строка не разъехалась между постановкой и разбором.
 const PAGE_DEADLINE_LABEL = 'relevance evidence page';
 const TOTAL_DEADLINE_LABEL = 'relevance website evidence';
+// Память фактов — ускоритель: её чтение стоит до общего дедлайна, запись —
+// после него. Без своего предела и без сигнала задачи зависшая запись держала
+// волну сайтов гейта (Promise.all) бесконечно и не отпускала её по отмене:
+// 23.09.2026 задача базы 02af77df пять раз подряд висела по 20 минут на одной
+// волне, воркер перезапускался. Результат проверки от памяти не зависит.
+const FACTS_TIMEOUT_MS = 5_000;
+const FACTS_READ_LABEL = 'relevance company facts read';
+const FACTS_WRITE_LABEL = 'relevance company facts write';
+/** Потолок одного вызова fetchVeRelevanceEvidence: чтение памяти, общий дедлайн, запись памяти. */
+export const VE_RELEVANCE_EVIDENCE_MAX_MS = FACTS_TIMEOUT_MS + TOTAL_TIMEOUT_MS + FACTS_TIMEOUT_MS;
 const MAX_BODY_BYTES = 1_048_576;
 const MAX_TEXT_CHARS = 6_000;
 const MAX_PAGE_READS = 10;
@@ -380,7 +390,15 @@ export async function fetchVeRelevanceEvidence(
     ? { read: readVeCompanyFacts, write: writeVeCompanyFacts } : undefined);
   const cachedPages = new Map<string, VeEvidencePage>();
   if (factKey && factStore) {
-    for (const record of await factStore.read([factKey], opts.signal)) {
+    let records: Awaited<ReturnType<typeof readVeCompanyFacts>> = [];
+    try {
+      records = await withVeDeadline(FACTS_READ_LABEL, FACTS_TIMEOUT_MS, opts.signal, (signal) => factStore.read([factKey], signal));
+    } catch (error) {
+      opts.signal?.throwIfAborted();
+      // Недоступная память — обычное чтение сайта, а не сбой компании.
+      if (!(error instanceof VeOperationTimeoutError)) throw error;
+    }
+    for (const record of records) {
       if (record.company_key !== factKey) continue;
       const page = freshVeCompanyFact(record);
       const url = page && allowedUrl(page.url);
@@ -431,7 +449,11 @@ export async function fetchVeRelevanceEvidence(
   // молчания, реквизиты идут той же гонкой прямого пути и прокси: такой сайт
   // нашему адресу отвечает через раз (sibdobrodar.ru: /contacts напрямую
   // молчит, через прокси — 200 за 2,8 с).
-  const proxyRoute = (Boolean(opts.fetchPage) || !opts.fetchText) && getProxyGroups().priority.length > 0;
+  // Повтор через RU-прокси выключен по умолчанию (VE_EVIDENCE_PROXY_RETRY=1 включает):
+  // 23.09 после выкладки ProxyAgent при закрытом без ответа CONNECT бесконечно
+  // переподключался и держал воркер VE2 под нагрузкой, задачи сбора зависали.
+  const proxyRoute = process.env.VE_EVIDENCE_PROXY_RETRY === '1'
+    && (Boolean(opts.fetchPage) || !opts.fetchText) && getProxyGroups().priority.length > 0;
   let proxyUsed = false;
   const proxy = { attempts: 0, rescued: 0, verified: 0, denied: 0 };
   // Стартовые адреса (свой кандидат или найденный поиском), которые напрямую
@@ -749,7 +771,16 @@ export async function fetchVeRelevanceEvidence(
     const shareable = [...verified.values()].filter((sitePages) => inn
       || discoveredNameMatches(sitePages, opts.companyName ?? '', opts.companyAddress ?? '')).flat();
     const observations = shareable.filter((page) => freshPages.has(page.url));
-    if (observations.length) await factStore.write(factKey, observations, observedAt);
+    if (observations.length) {
+      try {
+        await withVeDeadline(FACTS_WRITE_LABEL, FACTS_TIMEOUT_MS, opts.signal,
+          (signal) => factStore.write(factKey, observations, observedAt, signal));
+      } catch (error) {
+        opts.signal?.throwIfAborted();
+        // Проверенный текст уже получен; незаписанная память его не отменяет.
+        if (!(error instanceof VeOperationTimeoutError)) throw error;
+      }
+    }
   }
   const perPage = Math.floor((MAX_TEXT_CHARS - unique.reduce((n, page) => n + page.url.length + 8, 0)) / Math.max(1, unique.length));
   const text = unique.map((page) => `URL: ${page.url}\n${selectVeEvidenceText(page.text, opts.focus, Math.max(200, perPage))}`).join('\n\n').slice(0, MAX_TEXT_CHARS);

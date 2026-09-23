@@ -1,5 +1,6 @@
 /**
- * Загруженные файлы сигналов: каталоги выставок и выгрузки госконтрактов ЕИС.
+ * Загруженные файлы сигналов: каталоги выставок, выгрузки госконтрактов ЕИС и
+ * списки получателей грантов / участников акселераторов (Сколково, ФРИИ …).
  *
  * У обоих источников нет доступного API (проверено 22.09.2026): каталог
  * экспонентов у каждой выставки свой, ЕИС не отвечает из-за рубежа, а
@@ -14,7 +15,7 @@ import * as XLSX from 'xlsx';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { normalizeInn } from '../company';
 
-export type UploadKind = 'exhibitors' | 'contracts';
+export type UploadKind = 'exhibitors' | 'contracts' | 'growth';
 
 type Field = 'company_name' | 'company_website' | 'inn' | 'record_url' | 'record_date' | 'stand' | 'category'
   | 'contract_number' | 'subject' | 'amount' | 'customer';
@@ -108,6 +109,12 @@ export function parseSignalFile(buffer: Buffer, kind: UploadKind): ParsedSignalR
             customer: picked.customer ? String(picked.customer).trim() : null,
             extra,
           }
+        : kind === 'growth'
+        ? {
+            program: picked.category ? String(picked.category).trim() : null,
+            subject: picked.subject ? String(picked.subject).trim() : null,
+            extra,
+          }
         : {
             stand: picked.stand ? String(picked.stand).trim() : null,
             category: picked.category ? String(picked.category).trim() : null,
@@ -146,18 +153,20 @@ export interface SignalUploadRow {
 
 /**
  * Строки загрузок в окне свежести. Выставка — по дате события: окно контакта
- * T−90…T+14 (SPEC §4.1); контракт — по дате заключения за последние N дней.
+ * T−90…T+14 (SPEC §4.1); контракт и грант — по дате записи за последние N дней
+ * (у гранта без даты — по дате загрузки списка).
  */
 export async function loadSignalRows(db: SupabaseClient, kind: UploadKind, freshnessDays: number): Promise<SignalUploadRow[]> {
   const { data: uploads, error: upErr } = await db
     .from('polza_ru_signal_uploads')
-    .select('id,title,event_start,event_end,official_url,catalog_year')
+    .select('id,title,event_start,event_end,official_url,catalog_year,created_at')
     .eq('kind', kind);
   if (upErr) throw new Error(`signal uploads load failed: ${upErr.message}`);
 
   const now = Date.now();
   const day = 86_400_000;
   const activeUploads = (uploads ?? []).filter((u) => {
+    if (kind === 'growth') return true;
     if (kind !== 'exhibitors') return true;
     if (!u.event_start) return false;
     const start = new Date(String(u.event_start)).getTime();
@@ -175,14 +184,17 @@ export async function loadSignalRows(db: SupabaseClient, kind: UploadKind, fresh
       .select('id,upload_id,kind,company_name,company_website,inn,details,record_url,record_date')
       .in('upload_id', Array.from(uploadById.keys()))
       .range(from, from + PAGE - 1);
-    if (kind === 'contracts') {
-      q = q.gte('record_date', new Date(now - freshnessDays * day).toISOString().slice(0, 10));
-    }
+    const sinceDate = new Date(now - freshnessDays * day).toISOString().slice(0, 10);
+    if (kind === 'contracts') q = q.gte('record_date', sinceDate);
     const { data, error } = await q;
     if (error) throw new Error(`signal rows load failed: ${error.message}`);
     for (const r of data ?? []) {
       const u = uploadById.get(String(r.upload_id));
       if (!u) continue;
+      if (kind === 'growth') {
+        const date = r.record_date ?? String(u.created_at ?? '').slice(0, 10);
+        if (!date || date < sinceDate) continue;
+      }
       rows.push({
         id: String(r.id),
         upload_id: String(r.upload_id),
