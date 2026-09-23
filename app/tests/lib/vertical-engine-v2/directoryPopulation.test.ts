@@ -15,6 +15,7 @@ import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { getVeDirectoryPlanPopulation, veDirectoryPopulationSlice } from '@/lib/verticalEngineV2/directoryPopulation';
 import { veSecondQueueTask } from '@/lib/verticalEngineV2/planWidening';
+import { collectDossierCounters, getVeDirectorySegmentStats } from '@/lib/verticalEngineV2/dossierData';
 
 const migration = fs.readFileSync(path.resolve(process.cwd(), '..', 'supabase', 'migrations',
   '20260923_0002_ve_directory_plan_population.sql'), 'utf8');
@@ -59,6 +60,45 @@ describe('directory population slice', () => {
     const broken = createMockSupabase({ tables: {}, rpcHandlers: { ve_directory_plan_population: () => ({ data: {
       companies_unique_total: 10, companies_available: 11 } }) } });
     expect((await getVeDirectoryPlanPopulation(broken as unknown as SupabaseClient, slices)).error).toBeTruthy();
+  });
+});
+
+describe('vertical dossier registry size', () => {
+  // Прод 23.09.2026, только чтение: прежний счётчик досье по приблизительному
+  // ОКВЭД давал 0, условие выборки — 86.2: 26 337 компаний, 86: 52 992.
+  const OLD_ZERO = { directory_rows_total: 0, companies_unique_total: 0, companies_with_email: 0,
+    companies_with_phone: 0, companies_with_any_contact: 0 };
+  const population = (params: Record<string, unknown>) => {
+    const [slice] = params.p_slices as Array<{ okved_prefixes: string[] }>;
+    return { data: slice.okved_prefixes[0] === '86.2'
+      ? { directory_rows_total: 27_848, companies_unique_total: 26_337, companies_available: 26_337,
+        companies_with_email: 20_354, companies_with_phone: 17_924, slice_companies: [26_337] }
+      : { directory_rows_total: 60_429, companies_unique_total: 52_992, companies_available: 52_992,
+        companies_with_email: 44_604, companies_with_phone: 39_192, slice_companies: [52_992] } };
+  };
+  const mockDb = () => createMockSupabase({ tables: {}, rpcHandlers: {
+    ve_directory_segment_stats: () => ({ data: OLD_ZERO }), ve_directory_plan_population: population } });
+
+  it('counts the slice with the same condition as collection, not the approximate OKVED', async () => {
+    const db = mockDb();
+    const stats = await getVeDirectorySegmentStats({ okvedCodes: ['86.2'], includeIp: false }, db as unknown as SupabaseClient);
+    expect(stats).toMatchObject({ directory_rows_total: 27_848, companies_unique_total: 26_337, companies_with_email: 20_354 });
+    expect(db.rpcCalls).toEqual([{ fn: 've_directory_plan_population', params: {
+      p_slices: [{ okved_prefixes: ['86.2'], region_codes: null, include_ip: false, has_email: false }], p_exclude_inns: null } }]);
+  });
+
+  it('keeps the saved dossier counters shape for «Частная медицина»', async () => {
+    const db = mockDb();
+    const counters = await collectDossierCounters({ verticalName: 'Частная медицина', synonyms: [], roleTitles: [] },
+      { supabase: db as unknown as SupabaseClient, fetchImpl: (async () => ({ ok: false })) as unknown as typeof fetch });
+    expect(counters).toMatchObject({ companies_total: 52_992, companies_unique_total: 52_992, directory_rows_total: 60_429,
+      companies_with_email: 44_604, companies_with_phone: 39_192, companies_with_any_contact: null });
+    expect(counters.companies_note).toContain('тем же условием, что и при сборе базы');
+    const broken = createMockSupabase({ tables: {}, rpcHandlers: { ve_directory_plan_population: () => ({ data: null, error: { message: 'timeout' } }) } });
+    const failed = await collectDossierCounters({ verticalName: 'Частная медицина', synonyms: [], roleTitles: [] },
+      { supabase: broken as unknown as SupabaseClient, fetchImpl: (async () => ({ ok: false })) as unknown as typeof fetch });
+    expect(failed).toMatchObject({ companies_total: null, companies_unique_total: null });
+    expect(failed.companies_note).toContain('timeout');
   });
 });
 

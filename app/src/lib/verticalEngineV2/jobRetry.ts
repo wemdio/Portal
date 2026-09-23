@@ -13,7 +13,10 @@
  */
 
 import { isVeProviderBillingError, isVeProviderConfigurationError } from './collectionErrors';
-import { veRateLimitDelay, type VeLlmRateLimit } from './llmRateLimit';
+import { VeLlmRateLimitError, veRateLimitDelay, type VeLlmRateLimit } from './llmRateLimit';
+import { isVeStageDbInterruption } from './stageDb';
+import type { VeJob } from './types';
+import { VeJobInactivityError } from './workerLiveness';
 
 /** Попытки для постоянных ошибок — как было до автоповтора. */
 export const PERMANENT_MAX_ATTEMPTS = 3;
@@ -30,7 +33,8 @@ export function isRetryableStageError(msg: string): boolean {
     /\bSerper transient:/i.test(msg) ||
     /\b(5\d\d|429)\b/.test(msg) ||
     /provider is currently unavailable/i.test(msg) ||
-    /econnreset|econnrefused|etimedout|enotfound|network|fetch failed|socket hang up|timeout|aborted/i.test(msg)
+    /econnreset|econnrefused|etimedout|enotfound|network|fetch failed|socket hang up|timeout|aborted/i.test(msg) ||
+    isVeStageDbInterruption(msg)
   );
 }
 
@@ -54,4 +58,67 @@ export function retryRunAfter(attempts: number, retryable: boolean, nowMs = Date
   const delay = Math.max(rateLimit?.deferred ? 0 : Math.min(RETRY_BACKOFF_BASE_MS * 2 ** Math.max(0, attempts - 1), RETRY_BACKOFF_MAX_MS),
     rateLimit ? veRateLimitDelay(rateLimit, scope, nowMs) : 0);
   return new Date(nowMs + delay).toISOString();
+}
+
+/**
+ * Interruptions in a row that do not spend an attempt. Before 23.09.2026 a
+ * hang ended in a process exit, and startup recovery returned the job to the
+ * queue without counting it; the bounded stage database turned the same hang
+ * into an ordinary failure, and five of them failed a base that was still
+ * collecting. The limit only stops an endless loop of the same hang: after it
+ * each further interruption counts as a normal failed attempt.
+ */
+export const VE_JOB_FREE_INTERRUPTIONS = 10;
+
+/** The stage was interrupted (inactivity guard, its database request timed out or lost the connection); it did not fail by itself. */
+export function isVeJobInterruption(error: unknown): boolean {
+  if (error instanceof VeJobInactivityError) return true;
+  return isVeStageDbInterruption(error instanceof Error ? error.message : String(error));
+}
+
+/** Consecutive interruptions, kept in the job payload (no column needed; stages ignore unknown keys). */
+export function veJobInterruptions(payload: Record<string, unknown> | null | undefined): number {
+  const value = payload?.interruptions;
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : 0;
+}
+
+/** A stage run that ended normally closes the series; null when there is nothing to reset. */
+export function clearVeJobInterruptions(payload: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
+  if (!payload || !veJobInterruptions(payload)) return null;
+  const next = { ...payload };
+  delete next.interruptions;
+  return next;
+}
+
+export interface VeJobFailurePlan {
+  status: 'pending' | 'failed';
+  attempts: number;
+  attemptCap: number;
+  retryable: boolean;
+  runAfter: string;
+  /** Present for an interruption: the payload with the updated counter. */
+  payload?: Record<string, unknown>;
+  interruption: { count: number; free: boolean } | null;
+}
+
+/** How the worker records a failed stage run (attempts, next run, final failure). */
+export function planVeJobFailure(job: Pick<VeJob, 'id' | 'attempts' | 'payload'>, error: unknown, nowMs = Date.now()): VeJobFailurePlan {
+  const msg = error instanceof Error ? error.message : String(error);
+  const retryable = isRetryableStageError(msg);
+  const attemptCap = maxAttemptsFor(msg);
+  const rateLimit = error instanceof VeLlmRateLimitError ? error : undefined;
+  const interrupted = isVeJobInterruption(error);
+  const count = interrupted ? veJobInterruptions(job.payload) + 1 : 0;
+  const free = interrupted && count <= VE_JOB_FREE_INTERRUPTIONS;
+  const attempts = job.attempts + Number(!rateLimit?.deferred && !free);
+  const finalFail = !free && attempts >= attemptCap;
+  return {
+    status: finalFail ? 'failed' : 'pending',
+    attempts,
+    attemptCap,
+    retryable,
+    runAfter: free ? retryRunAfter(count, true, nowMs) : retryRunAfter(attempts, retryable, nowMs, rateLimit, job.id),
+    ...(interrupted ? { payload: { ...job.payload, interruptions: count } } : {}),
+    interruption: interrupted ? { count, free } : null,
+  };
 }

@@ -91,19 +91,27 @@ export const VeBroadHypothesisCandidateSchema = VeHypothesisCandidateSchema.exte
   tier: z.union([z.literal(1), z.literal(2), z.literal(3)]).default(1),
 });
 
+/**
+ * Блок broad_hypotheses. Необязателен и ответ не валит: без блока или с
+ * неполной широкой гипотезой узкие кандидаты идут как раньше, а не на повтор
+ * дорогого вызова (25–40 кандидатов). Неполная широкая просто отбрасывается.
+ */
+const VeBroadHypothesesBlockSchema = z.unknown().optional().transform((value) => (Array.isArray(value) ? value : []).flatMap((item) => {
+  const parsed = VeBroadHypothesisCandidateSchema.safeParse(item);
+  return parsed.success ? [parsed.data] : [];
+}));
+
 export const VeHypothesesBatchSchema = z.object({
-  /**
-   * Необязателен и ответ не валит: без блока или с неполной широкой гипотезой
-   * узкие кандидаты идут как раньше, а не на повтор дорогого вызова (25–40
-   * кандидатов). Неполная широкая просто отбрасывается.
-   */
-  broad_hypotheses: z.unknown().optional().transform((value) => (Array.isArray(value) ? value : []).flatMap((item) => {
-    const parsed = VeBroadHypothesisCandidateSchema.safeParse(item);
-    return parsed.success ? [parsed.data] : [];
-  })),
+  broad_hypotheses: VeBroadHypothesesBlockSchema,
   hypotheses: z.array(VeHypothesisCandidateSchema).min(1),
 });
 export type VeHypothesesBatchOutput = z.infer<typeof VeHypothesesBatchSchema>;
+
+/** Отдельная генерация широких для уже исследованного проекта: только блок широких. */
+export const VeBroadHypothesesOnlySchema = z.object({
+  broad_hypotheses: VeBroadHypothesesBlockSchema,
+});
+export type VeBroadHypothesesOnlyOutput = z.infer<typeof VeBroadHypothesesOnlySchema>;
 
 /* ─────────────────────── evidence (проход b) ─────────────────────── */
 

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/sender/apiHelpers';
-import { describeSavedRecipients } from '@/lib/sender/recipientImport';
+import { describeSavedRecipients, mergeVariableStats } from '@/lib/sender/recipientImport';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
@@ -29,9 +29,11 @@ interface PatchBody {
 
 const MAX_STEPS = 5;
 /**
- * Сколько получателей читаем, чтобы собрать переменные письма для формы.
- * Набор ключей одинаков у всей базы, поэтому выборки хватает; точные счётчики
- * «заполнено у N» при базе больше этого числа форма не показывает.
+ * Сколько получателей читаем ради примеров значений в подсказках формы.
+ * Сами ключи и счётчики «заполнено у N» считаются по всей базе
+ * (sender_campaign_var_stats): по выборке колонка, которой не оказалось в
+ * последней тысяче строк, считалась «неизвестной», и кампанию нельзя было
+ * сохранить.
  */
 const VARS_SAMPLE = 1000;
 
@@ -101,6 +103,29 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     const rows = (sample ?? []) as { email: string; name: string | null; vars: Record<string, string> }[];
     const total = count ?? 0;
 
+    // Выборка покрывает всю базу — считать нечего. Иначе добираем ключи и
+    // счётчики по всем строкам; не посчиталось — остаёмся на выборке.
+    let columns = describeSavedRecipients(rows);
+    let exact = total <= VARS_SAMPLE;
+    if (!exact) {
+      const [{ data: stats, error: statsError }, { count: namedCount }] = await Promise.all([
+        db.rpc('sender_campaign_var_stats', { p_campaign_id: id }),
+        db
+          .from('sender_recipients')
+          .select('id', { count: 'exact', head: true })
+          .eq('campaign_id', id)
+          .not('name', 'is', null)
+          .neq('name', ''),
+      ]);
+      if (!statsError && Array.isArray(stats)) {
+        columns = mergeVariableStats(columns, stats as { key: string; filled: number }[], {
+          total,
+          named: namedCount ?? 0,
+        });
+        exact = true;
+      }
+    }
+
     return NextResponse.json({
       campaign,
       steps: steps ?? [],
@@ -110,8 +135,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         total,
         // Счётчики «заполнено у N» честны, только если посчитаны по всей
         // базе; иначе форма покажет переменные без цифр, а не цифры наугад.
-        exact: total <= VARS_SAMPLE,
-        columns: describeSavedRecipients(rows),
+        exact,
+        columns,
       },
       editable: EDITABLE_STATUSES.includes(String(campaign.status)),
     });

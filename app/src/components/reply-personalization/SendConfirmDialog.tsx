@@ -9,6 +9,8 @@ export function SendConfirmDialog({
   qualificationId,
   draftId,
   projectId,
+  toEmail,
+  newContact,
   onCancel,
   onSent,
 }: {
@@ -18,6 +20,10 @@ export function SendConfirmDialog({
   /** null — ответ написан вручную, без черновика от ИИ. */
   draftId: string | null;
   projectId: string;
+  /** Кому уйдёт письмо — показываем в окне подтверждения. */
+  toEmail: string;
+  /** Новый контакт вместо ответившего — письмо уйдёт на его адрес. */
+  newContact: boolean;
   onCancel: () => void;
   onSent: () => void;
 }) {
@@ -31,7 +37,7 @@ export function SendConfirmDialog({
     setError(null);
     try {
       // Уходит ровно тот текст, что показан в модалке (с правками сотрудника).
-      await sendReply(qualificationId, { draftId, projectId, text });
+      await sendReply(qualificationId, { draftId, projectId, text, toEmail: newContact ? toEmail : null });
       onSent();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось отправить письмо');
@@ -46,7 +52,8 @@ export function SendConfirmDialog({
       <div className="relative mx-4 w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
         <h3 className="text-center text-lg font-semibold text-zinc-900">Отправить этот ответ?</h3>
         <p className="mt-2 text-center text-sm text-zinc-500">
-          Письмо уйдёт получателю через Instantly. Проверьте текст в последний раз:
+          Письмо уйдёт через Instantly на <span className="font-medium text-zinc-800">{toEmail}</span>
+          {newContact ? ' — новому контакту, а не тому, кто ответил' : ''}. Проверьте текст в последний раз:
         </p>
         <div className="mt-3 max-h-64 overflow-y-auto whitespace-pre-wrap rounded-lg bg-zinc-50 p-3 text-sm text-zinc-700">
           {text}

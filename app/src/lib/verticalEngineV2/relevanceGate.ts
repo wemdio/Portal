@@ -53,6 +53,13 @@ const SEMANTIC_REJECTION_REASON = 'Смысловое соответствие �
 const SEMANTIC_QUARANTINE_REASON = 'Смысловую проверку не удалось завершить после повторной попытки; контакт сохранён в резерве.';
 const WEBSITE_TIMEOUT_REASON = 'Сайт не ответил вовремя. Подтвердить соответствие компании пока не удалось; контакт сохранён в резерве.';
 const WEBSITE_UNCONFIRMED_REASON = 'Сайт не дал подтверждения; недостаточно подтверждённых данных.';
+// Временный сбой поиска — дело одной компании, а не всей базы. Раньше он
+// оставлял компанию в статусе error и объявлял «сбоем» весь проход, даже если
+// сама компания в этот проход не читалась (цель уже набрана или её очередь не
+// дошла): 23.09.2026 база 6b5bf9e8 с 718 готовыми из 500 падала на сбое одной
+// клиники от 10.09, база ba3dc535 — на одном сбое от 22.09. Теперь компания
+// уходит в резерв с отложенным поиском и получает свои ограниченные повторы.
+const SEARCH_RETRY_REASON = 'Поиск сайта временно не ответил. Компания отложена в резерв и будет проверена позже; контакт сохранён.';
 const WEBSITE_CONCURRENCY = 8;
 // Предел одной компании в волне сайтов: потолок читателя и запас на очередь
 // event loop. Сработал — компания получает ярлык таймаута, волна идёт дальше.
@@ -381,6 +388,13 @@ export async function findIrrelevantRows(input: {
     signal?.throwIfAborted();
   };
   const record = (entry: Entry, decision: VeRelevanceDecision) => { current.set(entry, decision); if (entry.cacheable) checkpoint.verdicts[entry.key] = decision; };
+  /** Временный сбой поиска: компания в резерве с отложенным поиском, проход не «падает». */
+  const deferSearch = (entry: Entry): VeRelevanceDecision => {
+    const decision: VeRelevanceDecision = { ...(current.get(entry) ?? errorDecision(SEARCH_RETRY_REASON, entry.attempts)),
+      status: 'needs_review', evidence: [], search_deferred: true, reason: SEARCH_RETRY_REASON };
+    delete decision.website_review_version;
+    return decision;
+  };
   const failure = (batchHash: string, companies: number, code: VeRelevanceFailureCode) => {
     if (!companies) return;
     checkpoint.failures.push({ batch_hash: batchHash, companies, code });
@@ -1236,13 +1250,15 @@ export async function findIrrelevantRows(input: {
         if (evidence.provider_error) {
           currentSearchFailures.add(entry.key);
           const provider = evidence.provider_error;
+          const transient = provider.kind === 'transient';
           // Transient search failure belongs to this company. Preserve it for
           // a bounded retry, but finish siblings and their paid refinements.
           // The shared search circuit prevents an outage from flooding Serper.
-          stopProviderCalls ||= provider.kind !== 'transient';
-          transientFailure ||= provider.kind === 'transient'; permanentFailure ||= provider.kind !== 'transient';
-          if (provider.kind === 'billing' || !result.error
-            || (provider.kind === 'configuration' && !/^(?:Serper billing:|Requesty 402:)/.test(result.error))) result.error = provider.message;
+          // It neither fails the pass nor schedules a stage retry (SEARCH_RETRY_REASON).
+          stopProviderCalls ||= !transient;
+          permanentFailure ||= !transient;
+          if (!transient && (provider.kind === 'billing' || !result.error
+            || (provider.kind === 'configuration' && !/^(?:Serper billing:|Requesty 402:)/.test(result.error)))) result.error = provider.message;
           failure(entry.key, 1, provider.kind === 'transient' ? 'provider' : provider.kind);
           checkpoint.website_evidence[entry.key] = {
             reader_version: 1, reader_revision: VE_RELEVANCE_WEBSITE_VERSION, status: 'error', text: '', url: sliceWholeChars(evidence.url, 0, 1000),
@@ -1250,7 +1266,7 @@ export async function findIrrelevantRows(input: {
             provider_error_attempts: (cached?.provider_error?.kind === provider.kind ? cached.provider_error_attempts ?? 0 : 0) + 1,
             review_attempt: reviewAttempt, review_attempts: entry.attempts, refined: true,
           };
-          record(entry, errorDecision(sliceWholeChars(provider.message, 0, 400), entry.attempts));
+          record(entry, transient ? deferSearch(entry) : errorDecision(sliceWholeChars(provider.message, 0, 400), entry.attempts));
           return;
         }
         entry.attempts += 1;
@@ -1313,6 +1329,13 @@ export async function findIrrelevantRows(input: {
         Math.max(1, entry.attempts)), status: 'needs_review', website_review_version: VE_RELEVANCE_WEBSITE_VERSION };
       record(entry, decision);
       deferredProviderRecovery = true;
+    } else if (decision.status === 'error' && website?.provider_error?.kind === 'transient') {
+      // Сохранённый сбой поиска, до которого этот проход не дошёл (предел
+      // сайтов, цель набрана, очередь) или записанный прежней версией. Это не
+      // сбой прохода: компания ждёт в резерве свой следующий повтор.
+      decision = deferSearch(entry);
+      record(entry, decision);
+      deferredProviderRecovery = true;
     }
     if (decision.status === 'error' && website?.provider_error && website.provider_error.kind !== 'transient'
       && !currentSearchFailures.has(entry.key)) {
@@ -1326,19 +1349,11 @@ export async function findIrrelevantRows(input: {
       record(entry, decision);
       deferredProviderRecovery = true;
     }
-    if (decision.status === 'error' && website?.provider_error) {
-      // A failed company may have been rotated behind this pass's website cap.
-      // Its unresolved failure still needs a durable retry, not a false success
-      // or a non-retryable incomplete-coverage stop.
-      // Строка, исчерпавшая оплаченные попытки по временному сбою, остаётся
-      // непроверенной и в запуск не пойдёт — но и повторять из-за неё весь
-      // этап больше нельзя: джоба возвращалась бы в очередь бесконечно и
-      // каждый раз платила заново. Отказ по балансу или ключу этим не
-      // затрагивается: он требует действия человека, а не тихого забвения.
-      if (!(searchAttemptsExhausted(website) && website.provider_error.kind === 'transient')) {
-        transientFailure ||= website.provider_error.kind === 'transient';
-        permanentFailure ||= website.provider_error.kind !== 'transient';
-      }
+    if (decision.status === 'error' && website?.provider_error && website.provider_error.kind !== 'transient') {
+      // Сюда доходит только свежий отказ по балансу или ключу: он требует
+      // действия человека, а не тихого забвения. Временные сбои поиска выше
+      // уже стали резервом с отложенным поиском и проход не останавливают.
+      permanentFailure = true;
       result.error ??= website.provider_error.message;
     }
     if (website?.reader_revision === VE_RELEVANCE_WEBSITE_VERSION && website.refined && !website.provider_error && !website.search_deferred
@@ -1377,6 +1392,8 @@ export async function findIrrelevantRows(input: {
       if (decision.status === 'error') { result.errored.add(index); result.unchecked.add(index); }
     }
   }
+  const searchRetries = [...currentSearchFailures].filter((key) => checkpoint.website_evidence[key]?.provider_error?.kind === 'transient').length;
+  if (searchRetries) input.log?.('[relevanceGate] поиск сайта временно не ответил: ' + searchRetries + ' компаний отложены в резерв, повтор в следующем проходе');
   if (rulesRechecked.size || rulesDeferred) {
     const admitted = [...rulesRechecked].filter((entry) => current.get(entry)?.status === 'relevant').length;
     input.log?.('[relevanceGate] перепроверка отказов по новым правилам отбора: ' + rulesRechecked.size + ' компаний, допущено '
