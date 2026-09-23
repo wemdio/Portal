@@ -1191,8 +1191,13 @@ function DialogsTab({ campaignId }: {
     return map;
   }, [accounts]);
 
-  const fetchDialogs = useCallback(async () => {
-    setLoading(true);
+  /**
+   * `silent` — перечитать фоном после действия оператора: без «Загрузка...»
+   * вместо списка. Иначе раскрытая переписка схлопывалась, прокрутка уезжала
+   * наверх, и после каждой пометки место приходилось искать заново.
+   */
+  const fetchDialogs = useCallback(async (options?: { silent?: boolean }) => {
+    if (!options?.silent) setLoading(true);
     const params = new URLSearchParams({ campaign_id: campaignId, limit: String(limit), offset: String(offset) });
     if (query.trim()) params.set('q', query.trim());
     if (filterStatus) params.set('status', filterStatus);
@@ -1262,9 +1267,22 @@ function DialogsTab({ campaignId }: {
     }
   };
 
+  /** Точечно поправить диалоги на экране, не перечитывая список. */
+  const patchDialogs = (match: (d: OutreachDialog) => boolean, patch: Partial<OutreachDialog>) => {
+    setDialogs((cur) => cur.map((d) => (match(d) ? { ...d, ...patch } : d)));
+  };
+
   const deleteDialog = async (id: string) => {
-    await authFetch(`${API_BASE}/dialogs/${id}`, { method: 'DELETE' });
-    void fetchDialogs();
+    const before = dialogs;
+    setDialogs((cur) => cur.filter((d) => d.id !== id));
+    setTotal((cur) => Math.max(0, cur - 1));
+    const res = await authFetch(`${API_BASE}/dialogs/${id}`, { method: 'DELETE' }).catch(() => null);
+    if (!res?.ok) {
+      // Не удалилось — возвращаем как было, иначе диалог пропал бы только с экрана.
+      setDialogs(before);
+      setTotal((cur) => cur + 1);
+      setDialogSaveError({ id, message: 'не удалось удалить диалог' });
+    }
   };
 
   /**
@@ -1313,10 +1331,14 @@ function DialogsTab({ campaignId }: {
         alert(body?.error ?? `Не удалось поставить передачу в очередь (${res.status})`);
         return;
       }
-      alert(`Поставлено в очередь. В ближайшие секунды уйдёт в ${body?.target_chat} с аккаунта, который вёл переписку.`);
-      // Перечитываем список: иначе кнопки остались бы на экране, приглашая
-      // поставить в очередь то же самое ещё раз.
-      void fetchDialogs();
+      // Карточка сразу показывает «в очереди» вместо кнопок передачи — иначе
+      // они приглашали бы поставить то же самое ещё раз. Список не
+      // перечитываем: оператор остаётся на том же месте.
+      patchDialogs((d) => d.id === dialog.id, {
+        forward: { kind, status: 'pending', sent_at: null, error_message: null },
+      });
+      // Воркер отправляет за секунды — чуть позже тихо подтягиваем «отправлено».
+      window.setTimeout(() => void fetchDialogs({ silent: true }), 20_000);
     } finally {
       setForwarding(null);
     }
@@ -1345,10 +1367,13 @@ function DialogsTab({ campaignId }: {
         // Чаще всего это «воркер успел отправить» — оператору важно узнать
         // именно это, а не общее «не получилось»: сообщение уже у менеджера.
         alert(body?.error ?? `Не удалось отменить передачу (${res.status})`);
-        void fetchDialogs();
+        // Узнаём фоном, что с задачей на самом деле, — без перезагрузки экрана.
+        void fetchDialogs({ silent: true });
         return;
       }
-      void fetchDialogs();
+      patchDialogs((d) => d.id === dialog.id, {
+        forward: dialog.forward ? { ...dialog.forward, status: 'cancelled' } : null,
+      });
     } finally {
       setCancelling(null);
     }
@@ -1359,14 +1384,23 @@ function DialogsTab({ campaignId }: {
     // Глобальный блок-лист по tg_user_id: запись применяется ко всем кампаниям и
     // аккаунтам пользователя; API сам выставит can_send=false на всех существующих
     // диалогах с этим tg_user_id (RLS отфильтрует только свои).
-    await authFetch(`${API_BASE}/blocked-users`, {
+    // Сразу гасим «можно писать» у всех диалогов этого человека на экране —
+    // так же поступит и сервер; запрос уходит фоном.
+    const before = dialogs;
+    const sameUser = (d: OutreachDialog) => d.tg_user_id === dialog.tg_user_id;
+    patchDialogs(sameUser, { can_send: false });
+    setDialogSaveError((cur) => (cur?.id === dialog.id ? null : cur));
+    const res = await authFetch(`${API_BASE}/blocked-users`, {
       method: 'POST',
       body: JSON.stringify({
         tg_user_id: dialog.tg_user_id,
         tg_username: username || null,
       }),
-    });
-    void fetchDialogs();
+    }).catch(() => null);
+    if (!res?.ok) {
+      setDialogs((cur) => cur.map((d) => (sameUser(d) ? (before.find((b) => b.id === d.id) ?? d) : d)));
+      setDialogSaveError({ id: dialog.id, message: 'не удалось добавить в чёрный список' });
+    }
   };
 
   const sendMessage = async (id: string) => {
@@ -1377,7 +1411,8 @@ function DialogsTab({ campaignId }: {
       body: JSON.stringify({ message: sendText }),
     });
     setSendText(''); setSending(false);
-    void fetchDialogs();
+    // Новое сообщение подтягиваем фоном — переписка остаётся раскрытой.
+    void fetchDialogs({ silent: true });
   };
 
   const exportDialogs = async (format: 'json' | 'html') => {
