@@ -221,7 +221,9 @@ function companyFromSignature(signature: string[], website: string | null): stri
   if (groupIndex >= 0) {
     const brand = signature[groupIndex + 1]?.trim() ?? '';
     if (brand.length >= 3 && brand.length <= 70 && /^[\p{Lu}\p{N}][\p{L}\p{N} &'’.,-]+$/u.test(brand) &&
-        !isPersonName(brand) && !PHONE_LABEL.test(brand) && !websitesInLine(brand).length) return brand;
+        !isPersonName(brand) && !isRoleTitle(brand) &&
+        !/^(?:отдел|департамент|служба|команда|управление|контакты|телефон|почта|сайт)(?:\s|$)/iu.test(brand) &&
+        !PHONE_LABEL.test(brand) && !websitesInLine(brand).length) return brand;
   }
   return signature.map((line) => brandedCompany(line, website)).find(Boolean) ?? null;
 }
@@ -258,7 +260,10 @@ function signatureNameInLine(line: string): string | null {
   const linkedIn = /^(\p{Lu}[\p{L}’'-]+\s+\p{Lu}[\p{L}’'-]+)\s*<https:\/\/(?:www\.)?linkedin\.com\/in\/([a-z0-9-]+)\/?>(?:\s|$)/u.exec(value);
   if (linkedIn) {
     const [first, last] = linkedIn[1].toLowerCase().split(/\s+/u);
-    if (linkedIn[2].startsWith(`${first}-${last.slice(0, 2)}`)) return linkedIn[1];
+    const slug = linkedIn[2];
+    const fullNameSlug = `${first}-${last}`;
+    if (slug === `${first}-${last.slice(0, 2)}` || slug === fullNameSlug ||
+        slug.startsWith(`${fullNameSlug}-`)) return linkedIn[1];
   }
   return isPersonName(value) && !isRoleTitle(value) &&
     !/(?:^|\s)(?:команда|компания|организация|магазин|отдел|team|company|department)(?:\s|$)/iu.test(value) &&
