@@ -52,7 +52,13 @@ function okvedPrefixes(codes: string[] | undefined): string[] | null {
 /** Реестровая задача плана → срез для подсчёта; прочие источники размера не имеют. */
 export function veDirectoryPopulationSlice(task: VeCollectTask): VeDirectoryPopulationSlice | null {
   if (task.source !== 'companies_directory') return null;
-  const filters = task.directory_filters ?? {};
+  return veDirectoryFiltersSlice(task.directory_filters ?? {});
+}
+
+/** Фильтры реестра → срез. Им же считает досье, чтобы его число совпадало с выборкой. */
+export function veDirectoryFiltersSlice(
+  filters: NonNullable<VeCollectTask['directory_filters']>,
+): VeDirectoryPopulationSlice {
   const regions = (filters.regionCodes ?? []).map((code) => code.trim()).filter(Boolean);
   const slice: VeDirectoryPopulationSlice = {
     okved_prefixes: okvedPrefixes(filters.okvedCodes),
