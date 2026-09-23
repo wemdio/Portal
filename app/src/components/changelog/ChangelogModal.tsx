@@ -32,7 +32,7 @@ export function ChangelogModal() {
   const [showMissed, setShowMissed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [closed, setClosed] = useState(false);
-  const [visible, setVisible] = useState(false);
+  const [closing, setClosing] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -48,20 +48,12 @@ export function ChangelogModal() {
 
   useEffect(() => { void load(); }, [load]);
 
-  // Окно сначала монтируется скрытым, и только на следующем кадре получает
-  // data-open — иначе браузер не увидит начального положения и переход не
-  // проиграется, окно просто возникнет.
-  useEffect(() => {
-    if (!latest) return;
-    const frame = requestAnimationFrame(() => setVisible(true));
-    return () => cancelAnimationFrame(frame);
-  }, [latest]);
-
-  // Закрытие — сначала уводим окно вниз, потом снимаем его со страницы.
-  // Время чуть больше самого долгого перехода в globals.css.
+  // Появление проигрывает CSS сам при монтировании (globals.css). Закрытие —
+  // сначала уводим окно вниз, потом снимаем его со страницы; время равно
+  // длительности анимации ухода.
   const close = () => {
-    setVisible(false);
-    setTimeout(() => setClosed(true), 450);
+    setClosing(true);
+    setTimeout(() => setClosed(true), 300);
   };
 
   const confirm = async () => {
@@ -81,7 +73,7 @@ export function ChangelogModal() {
   return (
     <div
       className="portal-changelog-backdrop fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/40 p-4 backdrop-blur-sm sm:items-center"
-      data-open={visible}
+      data-closing={closing}
       role="dialog"
       aria-modal="true"
       aria-label="Обновления портала"
