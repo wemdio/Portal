@@ -15,6 +15,8 @@ export type VeStage =
   | 'hypotheses'
   | 'evidence'
   | 'clustering'
+  /** Добавить широкие гипотезы в уже исследованный проект (ничего не удаляет). */
+  | 'broad_hypotheses'
   | 'chain'
   | 'vocab'
   | 'base_analyze'
