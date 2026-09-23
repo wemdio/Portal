@@ -93,7 +93,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
 import { isVeProviderBillingError, isVeProviderConfigurationError } from '../collectionErrors';
 import { validVeAdaptiveCollection, newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys,
-  readVeBatchSpend, veAdaptiveCandidateLimit, veAdaptiveLowYield, veAdaptiveYieldWindows, type VeAdaptiveCollection } from '../adaptiveCollection';
+  readVeBatchSpend, veAdaptiveCandidateLimit, veAdaptiveLowYield, veAdaptiveYieldWindows, veAdaptiveSourceDry, veDryLiveSources,
+  veDrySourcesSummary, type VeAdaptiveCollection } from '../adaptiveCollection';
 import { stripUnfoundedSizeFilters, veBroadHypothesisPlan, veDirectorySizeKeep, veHypothesisSizeBasis, veSecondQueueTasks, veTaskWithoutSizeFilters,
   VE_PLAN_MAX_TASKS, VE_PLAN_WIDENING_LIMIT, VE_SIZE_FILTER_KEYS } from '../planWidening';
 import { prioritizeVeCandidates, readVeCandidateHints } from '../candidatePriority';
@@ -2582,6 +2583,10 @@ async function prepareAdaptiveCandidates(ctx: VeStageContext, base: VeAutoBase, 
       }
       policy.active_source = selected;
       candidates = available.filter((row) => candidateSourceKey(row) === selected);
+    } else if (keys.length) {
+      // Все источники этих строк сухие: партию из них не берём, раунд выйдет
+      // пустым, и правило сухих источников завершит базу с причиной.
+      return [];
     }
   }
   const hints = await readVeCandidateHints(candidates, ctx.supabase, ctx.signal);
@@ -2668,7 +2673,8 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
     || (task.harvest ?? []).some((row) => (info.search_policy?.phase !== 'existing' || hasExistingSourceContact(row))
       && !baseRowMatchesExclusion(consumed, row))));
   const alternatives = available.filter((task) => veSourceStrategyKey(task.task) !== policy.active_source
-    && !veAdaptiveLowYield(policy.completed, veSourceStrategyKey(task.task)));
+    && !veAdaptiveLowYield(policy.completed, veSourceStrategyKey(task.task))
+    && !veAdaptiveSourceDry(policy.completed, veSourceStrategyKey(task.task)));
   const planExhausted = policy.replan_reason === 'plan_exhausted';
   if (policy.replan_needed && !planExhausted && alternatives.length) {
     policy.active_source = chooseVeAdaptiveSource(policy, alternatives.map((task) => veSourceStrategyKey(task.task)));
@@ -2726,8 +2732,17 @@ async function adaptCollectionSources(ctx: VeStageContext, job: VeJob, base: VeA
     await persistCollectInfo(ctx, base.id, info);
     if (!policy.replan_error) return;
   }
-  if (!policy.active_source || !available.some((task) => veSourceStrategyKey(task.task) === policy.active_source)) {
-    policy.active_source = chooseVeAdaptiveSource(policy, available.map((task) => veSourceStrategyKey(task.task)));
+  const activeDry = !!policy.active_source && !!veAdaptiveSourceDry(policy.completed, policy.active_source);
+  if (!policy.active_source || activeDry || !available.some((task) => veSourceStrategyKey(task.task) === policy.active_source)) {
+    const chosen = chooseVeAdaptiveSource(policy, available.map((task) => veSourceStrategyKey(task.task)));
+    // Сухие все: прежний источник остаётся активным, чтобы не открыть разом
+    // все задачи плана. Партии из него не будет (prepareAdaptiveCandidates).
+    if (activeDry && !chosen) return;
+    if (activeDry) {
+      policy.switches += 1;
+      policy.note = 'Источник перестал давать контакты: следующая партия — из другого источника плана.';
+    }
+    policy.active_source = chosen;
     await persistCollectInfo(ctx, base.id, info);
   }
 }
@@ -3697,13 +3712,14 @@ async function readVeHypothesisSizeBasis(ctx: VeStageContext, hypothesisId: stri
  */
 async function widenExhaustedPlan(
   ctx: VeStageContext, base: VeAutoBase, info: VeCollectInfo, tasks: VeCollectTaskState[],
-  /** narrow_market: план жив, но по прогнозу срез мал для базы. */
-  cause: 'plan_exhausted' | 'narrow_market' = 'plan_exhausted',
+  /** narrow_market: план жив, но по прогнозу срез мал для базы; dry_sources: все живые источники сухие. */
+  cause: 'plan_exhausted' | 'narrow_market' | 'dry_sources' = 'plan_exhausted',
 ): Promise<boolean> {
   const policy = info.adaptive_collection ?? newVeAdaptiveCollection();
   const widenings = policy.widenings ?? 0;
   if (widenings >= VE_PLAN_WIDENING_LIMIT) return false;
-  const lead = cause === 'narrow_market' ? 'Текущий срез мал для базы по прогнозу' : 'План исчерпан раньше цели';
+  const lead = cause === 'narrow_market' ? 'Текущий срез мал для базы по прогнозу'
+    : cause === 'dry_sources' ? 'Источники перестали давать контакты' : 'План исчерпан раньше цели';
   const sizeBasis = await readVeHypothesisSizeBasis(ctx, base.hypothesis_id);
   const added = veSecondQueueTasks(tasks.map((task) => task.task), sizeBasis);
   if (added.length) {
@@ -4021,7 +4037,9 @@ async function completeTargetRound(args: {
     // Measure the source BEFORE the per-company limit: its thresholds (5 % yield,
     // $0.05 per contact) were calibrated on uncapped counts, so judging a capped
     // batch by them would call every normal source weak and buy a replan.
-    info.adaptive_collection = finishVeAdaptiveBatch(info.adaptive_collection, [...readyRows, ...overCapRows], spend, finishedAt);
+    // Сухость источника меряется в единицах цели: targetCount.perCompany — тот же K, что у счётчика цели.
+    info.adaptive_collection = finishVeAdaptiveBatch(info.adaptive_collection, [...readyRows, ...overCapRows], spend, finishedAt,
+      targetCount.perCompany);
     const policy = info.adaptive_collection;
     // Расширенный срез — последняя автоматическая попытка. Если и он дал две
     // плохие партии, а живого источника кроме него нет, база завершается сама,
@@ -4029,7 +4047,8 @@ async function completeTargetRound(args: {
     widenedSliceDry = policy.replan_needed === true && !reviewOnly && targetRows < progress.ready_target
       && tasks.some((task) => task.task.widened && veSourceStrategyKey(task.task) === batchSource)
       && !tasks.some((task) => veSourceStrategyKey(task.task) !== batchSource && veTaskCanSupply(task)
-        && !veAdaptiveLowYield(policy.completed, veSourceStrategyKey(task.task)));
+        && !veAdaptiveLowYield(policy.completed, veSourceStrategyKey(task.task))
+        && !veAdaptiveSourceDry(policy.completed, veSourceStrategyKey(task.task)));
     if (widenedSliceDry) {
       const windows = veAdaptiveYieldWindows(policy.completed, batchSource);
       const companies = windows.reduce((sum, window) => sum + window.candidates, 0);
@@ -4061,6 +4080,8 @@ async function completeTargetRound(args: {
     // at a worker checkpoint, never as a side effect of an interface read.
     await refreshPlanPopulation(ctx, base, info, freshKeys);
   }
+  // Правило узкого рынка уже расширило срез или завершило базу в этом раунде.
+  let marketDecided = false;
   if (info.estimate) {
     const sourceRows = readVeRelevanceSourceRows(info.relevance_reserve);
     const candidateCompanies = new Set(sourceRows.map(veRelevanceCompanyKey));
@@ -4093,7 +4114,9 @@ async function completeTargetRound(args: {
     const projected = forecast?.contacts ?? null;
     // Размер известен только у реестра. Пока жив источник без размера
     // (каталог карт), прогноз по реестру не говорит, что рынок кончился.
-    const unsizedLive = tasks.some((task) => task.source !== 'companies_directory' && veTaskCanSupply(task));
+    // Сухой источник (veAdaptiveSourceDry) живым не считается.
+    const unsizedLive = tasks.some((task) => task.source !== 'companies_directory' && veTaskCanSupply(task)
+      && !(info.adaptive_collection && veAdaptiveSourceDry(info.adaptive_collection.completed, veSourceStrategyKey(task.task))));
     // Останавливаем только раунд, за которым не осталось уже оплаченной работы:
     // недокачанный дочерний конструктор или неразобранный запас дороже одного
     // лишнего раунда, а на следующем пробуждении оценка повторится.
@@ -4104,6 +4127,7 @@ async function completeTargetRound(args: {
       // Мал текущий срез, а не обязательно рынок: сначала то же расширение,
       // что и при исчерпанном плане (вторая очередь, затем новый срез).
       // Останавливаем, только когда расширять больше нечем.
+      marketDecided = true;
       if (!acquisitionLimited && await widenExhaustedPlan(ctx, base, info, tasks, 'narrow_market')) {
         stageLog(ctx, `[base_collect] срез мал: прогноз ${projected} сверх ${targetRows}; срез расширен автоматически (${info.adaptive_collection?.widenings}/${VE_PLAN_WIDENING_LIMIT})`);
       } else {
@@ -4123,6 +4147,53 @@ async function completeTargetRound(args: {
       }
     }
   }
+  // Сухие источники (решение владельца 23.09.2026). Размер каталога карт в
+  // прогноз не входит, поэтому правило узкого рынка молчит, пока жива задача
+  // карт — даже когда тысячи компаний из неё дают единицы контактов (Когнитус:
+  // школы 3 376 компаний карт → 4 контакта, РАС 4 275 компаний реестра → 2).
+  // Здесь решает фактический выход каждого источника: когда все живые
+  // источники сухие, база сначала расширяет срез (как при исчерпанном плане),
+  // а когда расширять нечем — честно завершается.
+  let drySourcesStop = false;
+  const adaptive = info.adaptive_collection;
+  const emptyRound = next.status === 'limited' && args.candidates.length === 0 && !acquisitionLimited && !discoveryPaused;
+  if (adaptive && !adaptive.pending && !widenedSliceDry && !marketDecided && !reviewOnly && !continueSavedReview
+    && !args.validationError && !taskError && !pipeline?.error && cleaned.summary.status === 'complete'
+    && pendingBatches.length === 0 && targetRows < progress.ready_target
+    && !(adaptive.replan_needed && adaptive.replan_reason === 'plan_exhausted')
+    && (next.status === 'collecting' || emptyRound)) {
+    // Живой источник — задача, которая ещё может читать, или непросмотренные
+    // строки в её выдаче. Исчерпанные источники в решение не входят.
+    const liveKeys = tasks.filter((task) => task.status !== 'failed' && (veTaskCanSupply(task)
+      || (task.harvest ?? []).some((row) => pruneBaseRowAgainstExclusion(freshKeys, row) !== null
+        && !baseRowMatchesExclusion(consumedExisting, row))))
+      .map((task) => veSourceStrategyKey(task.task));
+    const dry = veDryLiveSources(adaptive.completed, liveKeys);
+    if (dry) {
+      const summary = veDrySourcesSummary(dry);
+      // Низкий выход партии больше не повод для отдельного подбора среза:
+      // все источники сухие, дальше решает расширение.
+      if (adaptive.replan_needed) { adaptive.replan_needed = false; delete adaptive.replan_reason; }
+      if (!acquisitionLimited && await widenExhaustedPlan(ctx, base, info, tasks, 'dry_sources')) {
+        stageLog(ctx, `[base_collect] источники сухие (${summary}); срез расширен автоматически (${info.adaptive_collection?.widenings}/${VE_PLAN_WIDENING_LIMIT})`);
+        if (next.status !== 'collecting') {
+          next = { ...next, status: 'collecting', round: progress.round + 1 };
+          delete next.reason;
+        }
+      } else {
+        drySourcesStop = true;
+        const widenings = adaptive.widenings ?? 0;
+        adaptive.note = 'Источники перестали давать контакты: сбор остановлен.';
+        next = { ...next, round: progress.round, status: 'limited',
+          reason: `Источники перестали давать контакты: ${summary}. `
+            + (widenings ? `Срез уже расширялся автоматически (${widenings} из ${VE_PLAN_WIDENING_LIMIT}), дальше расширять некуда. `
+              : 'Расширить срез автоматически нечем. ')
+            + `Сбор завершён, чтобы не тратить проверки впустую; собрано ${targetRows} из ${progress.ready_target}, контакты сохранены.` };
+        stageLog(ctx, `[base_collect] остановка по сухим источникам: ${summary}; собрано ${targetRows}/${progress.ready_target}`);
+      }
+      info.target_progress = next;
+    }
+  }
   // План кончился раньше цели — это повод расширить срез, а не остановка:
   // сначала вторая очередь тех же ОКВЭД без придуманных порогов размера, затем
   // один подбор нового среза. Не больше двух раз на базу; при повторном
@@ -4130,7 +4201,7 @@ async function completeTargetRound(args: {
   // Состояние задач читаем заново: переход к платной фазе выше мог их открыть.
   const sourcesRanOut = !reviewOnly && !args.hasBufferedCandidates && !pendingDiscovery
     && pendingBatches.length === 0 && !tasks.some(veTaskCanSupply);
-  if (!widenedSliceDry && sourcesRanOut && (next.status === 'exhausted' || next.status === 'limited')
+  if (!widenedSliceDry && !drySourcesStop && sourcesRanOut && (next.status === 'exhausted' || next.status === 'limited')
     && !continueSavedReview && !args.validationError && !taskError && !pipeline?.error
     && cleaned.summary.status === 'complete' && !acquisitionLimited
     && targetRows < progress.ready_target && tasks.length > 0) {
@@ -4697,7 +4768,8 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   if (merged.length === 0 && target && info.adaptive_collection && !info.adaptive_collection.pending
     && !info.preview_pipeline?.error && !failed.length && target.ready_rows < target.ready_target) {
     const nextSource = tasks.find((task) => task.status === 'pending'
-      && veSourceStrategyKey(task.task) !== info.adaptive_collection!.active_source);
+      && veSourceStrategyKey(task.task) !== info.adaptive_collection!.active_source
+      && !veAdaptiveSourceDry(info.adaptive_collection!.completed, veSourceStrategyKey(task.task)));
     if (nextSource) {
       info.adaptive_collection.active_source = veSourceStrategyKey(nextSource.task);
       info.adaptive_collection.switches += 1;
