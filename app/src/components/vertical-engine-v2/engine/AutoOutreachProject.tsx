@@ -48,7 +48,7 @@ type ProjectData = Required<
   >
 >;
 
-function AudienceSummary({
+export function AudienceSummary({
   base,
   presetId,
   preparationState,
@@ -122,9 +122,20 @@ function AudienceSummary({
           <p className="ve2-stat-v">
             {data.estimate ? `~${data.estimate.contacts.toLocaleString('ru-RU')}` : 'Не рассчитан'}
           </p>
-          <p className="ve2-stat-k">Можно собрать дополнительно</p>
+          <p className="ve2-stat-k">
+            {data.estimate?.companies !== undefined
+              ? `Ещё соберётся контактов (≈${data.estimate.companies.toLocaleString('ru-RU')} компаний)`
+              : 'Можно собрать дополнительно'}
+          </p>
         </div>
       </div>
+      {data.estimate ? (
+        <p className={HE.muted}>
+          ~{data.estimate.contacts.toLocaleString('ru-RU')} ещё соберётся контактов
+          {data.estimate.companies !== undefined ? ` (≈${data.estimate.companies.toLocaleString('ru-RU')} компаний)` : ''}, оценка
+          на {formatDate(data.estimate.as_of)}; это новые компании, а не дополнительные адреса уже найденных.
+        </p>
+      ) : null}
       <p className={HE.muted}>{partial
         ? waiting ? 'Это промежуточный результат, а не готовое превью. Текущий этап подготовки указан выше.'
           : collecting
@@ -154,7 +165,12 @@ function AudienceSummary({
           ) : null}
           <p className={HE.muted}>
             {data.estimate
-              ? `Оценка с низкой уверенностью от ${formatDate(data.estimate.as_of)}. Она предполагает такой же выход в оставшейся части источника.`
+              ? `Оценка с низкой уверенностью от ${formatDate(data.estimate.as_of)}. `
+                + (data.estimate.remaining_companies !== undefined
+                  ? `В срезе реестра осталось ${data.estimate.remaining_companies.toLocaleString('ru-RU')} компаний, которые база ещё не смотрела; `
+                  : '')
+                + `прогноз предполагает у них такой же выход, как у уже проверенных. ${data.estimate.scope}`
+                + (data.client_exclusions_applied ? ' Список исключений клиента применится при загрузке и в прогноз не входит.' : '')
               : data.estimate_reason}
           </p>
           <p className={HE.muted}>

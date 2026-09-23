@@ -100,8 +100,7 @@ import { prioritizeVeCandidates, readVeCandidateHints } from '../candidatePriori
 import { isVeAcceptedEmailStatus } from '../emailPolicy';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
-import { searchCount, searchRows } from '@/lib/companiesSearch/rpcSearch';
-import { OKVED2_TREE, reduceToTopCodes } from '@/lib/companiesSearch/okved2';
+import { searchRows } from '@/lib/companiesSearch/rpcSearch';
 import { applyFundedFilters } from '@/lib/funded/queryFilters';
 import { buildRolesRegex } from '@/lib/parsers/atsFilters';
 import { domainToSiteUrl, resolveCompanyDomainViaPdl } from '@/lib/parsers/companyDomainResolver';
@@ -114,7 +113,7 @@ import {
   veCompanyWebsiteKey, veAcquisitionReceipt,
 } from '../collectionIdentity';
 import { buildVeSeenCompanies, veSeenCompanyCovers, type VeSeenCompanies } from '../seenCompanies';
-import { getVeDirectorySegmentStats } from '../dossierData';
+import { getVeDirectoryPlanPopulation, veDirectoryPopulationSlice, veUnsizedSourceLabels } from '../directoryPopulation';
 import { callLLMWithSchema, getVeModel } from '../llm';
 import { projectMarket, type VeMarket } from '../market';
 import { findIrrelevantRows, type VeRelevanceDecision } from '../relevanceGate';
@@ -133,7 +132,8 @@ import { companyNameSource, isCompanyNameReady, VE_COMPANY_NAME_FIELD, type VeCo
 import { prepareSegmentationAudience } from '../segmentationAudit';
 import { isContactSupplyActive } from '../contactSupplyEligibility';
 import {
-  collectionRoundLimit, createCollectionTarget, finishCollectionRound, updateCollectionEstimate, veCollectionMaxRounds,
+  collectionRoundLimit, createCollectionTarget, estimateRemainingReady, finishCollectionRound, updateCollectionEstimate,
+  veCollectionMaxRounds, veEstimatePopulation,
   withVeTargetComposition,
   VE_COLLECTION_ROUND_BUDGET,
   VE_SOURCE_POPULATION_MAX_AGE_MS,
@@ -499,89 +499,70 @@ export function mapDirectoryFilters(
 
 function directoryEstimateScope(plan: VeSourcePlan): string {
   return JSON.stringify(plan.tasks.map((task) => task.source === 'companies_directory'
-    ? { source: task.source, filters: mapDirectoryFilters(task.directory_filters) } : { source: task.source }));
+    ? { source: task.source, slice: veDirectoryPopulationSlice(task) } : { source: task.source }));
 }
 
 function needsDirectoryEstimateRefresh(plan: VeSourcePlan, estimate: VeCollectionEstimate | undefined): boolean {
   const age = Date.now() - Date.parse(estimate?.population_as_of ?? '');
-  return !estimate || estimate.version !== 2 || estimate.population_filters !== directoryEstimateScope(plan)
+  return !estimate || estimate.version !== 2 || estimate.population_method !== 'plan_union'
+    || estimate.population_filters !== directoryEstimateScope(plan)
     || !Number.isFinite(age) || age < 0 || age > VE_SOURCE_POPULATION_MAX_AGE_MS;
 }
 
 /**
- * Оценить company-level размер реестровой части плана. Складывать два
- * независимых среза нельзя: одна компания может проходить оба фильтра, а RPC
- * считает каждый срез отдельно. Поэтому точную цифру сохраняем только для
- * плана с одной directory-задачей; во всех остальных случаях UI получает
- * честную причину вместо ложной суммы.
+ * Размер реестровой части плана — компаний в объединении всех реестровых
+ * срезов, тем же условием, что и выборка (ve_directory_plan_population):
+ * компания, попавшая в два среза, считается один раз. Компании других баз
+ * проекта выборка пропускает, поэтому в доступный остаток они не входят.
+ * Карты и вакансии размера не сообщают: прогноз честно ограничен реестром.
  */
 async function estimatePlanDirectorySegment(
   plan: VeSourcePlan,
   supabase: SupabaseClient,
+  excludeInns: Iterable<string> = [],
 ): Promise<NonNullable<VeCollectInfo['estimate']>> {
-  const directoryTasks = plan.tasks.filter((task) => task.source === 'companies_directory');
-  const populationAsOf = new Date().toISOString();
-  const populationFilters = directoryEstimateScope(plan);
-  const provenance = { version: 2 as const, population_as_of: populationAsOf, population_filters: populationFilters };
-  if (directoryTasks.length === 0) {
+  const slices = plan.tasks.map(veDirectoryPopulationSlice).filter((slice) => slice !== null);
+  const unsized = veUnsizedSourceLabels(plan.tasks);
+  const provenance = { version: 2 as const, population_method: 'plan_union' as const,
+    population_as_of: new Date().toISOString(), population_filters: directoryEstimateScope(plan),
+    ...(unsized.length ? { unsized_sources: unsized } : {}) };
+  if (slices.length === 0) {
     return {
-      ...provenance,
+      ...provenance, population_matches_source: false,
       unique_companies: null,
       companies_with_email: null,
-      note: 'В плане нет реестрового среза: размер оценивается по фактическим результатам источников.',
+      note: `Оценки нет: у источников этой базы (${unsized.join(', ') || 'без реестра'}) нет размера рынка, объём виден только по фактическим результатам.`,
     };
   }
-  if (directoryTasks.length > 1) {
-    return {
-      ...provenance,
-      unique_companies: null,
-      companies_with_email: null,
-      note: 'В плане несколько пересекающихся реестровых срезов; их размеры не складываются.',
-    };
-  }
-
-  const filters = mapDirectoryFilters(directoryTasks[0].directory_filters);
-  // Match the fetcher's expansion of letter sections/top-level OKVED prefixes.
-  const okvedCodes = reduceToTopCodes(new Set(filters.okvedCodes ?? [])).flatMap((code) =>
-    /^[A-Z]$/i.test(code) ? OKVED2_TREE.find((node) => node.code === code)?.children?.map((child) => child.code) ?? [code] : [code]);
-  const stats = await getVeDirectorySegmentStats(
-    {
-      okvedCodes,
-      includeIp: filters.includeIp,
-      regionCodes: filters.regionCodes,
-      revenueFrom: filters.revenueFrom ?? undefined,
-      revenueTo: filters.revenueTo ?? undefined,
-      employeesFrom: filters.employeesFrom ?? undefined,
-      employeesTo: filters.employeesTo ?? undefined,
-      // Population and measured yield must cover the same email-filtered slice.
-      requireEmail: filters.hasEmail === true,
-    },
-    supabase,
-  );
-  // The company counter and fetch RPC have historically differed in empty-email
-  // handling. Verify exact fetch-row coverage before extrapolating, without
-  // changing the shared search RPC used by ENG and other Portal tools.
-  let matchingPopulation = false;
-  let coverageError: string | undefined;
-  try {
-    const exact = await searchCount(filters);
-    matchingPopulation = !exact.error && !stats.error && Number.isSafeInteger(exact.count)
-      && exact.count >= 0 && exact.count === stats.directory_rows_total && plan.tasks.length === 1;
-    if (!matchingPopulation) coverageError = exact.error
-      ? 'Не удалось сверить размер источника с фильтрами сбора.'
-      : 'Размер источника и выборка не совпадают по фильтрам; прогноз не рассчитан.';
-  } catch {
-    coverageError = 'Не удалось сверить размер источника с фильтрами сбора.';
-  }
+  const population = await getVeDirectoryPlanPopulation(supabase, slices, excludeInns);
   return {
-    ...provenance, population_matches_source: matchingPopulation,
-    unique_companies: stats.companies_unique_total,
-    companies_with_email: stats.matched_companies_with_email ?? null,
-    companies_with_phone: stats.matched_companies_with_phone ?? null,
-    directory_rows_total: stats.directory_rows_total,
-    ...(stats.error ? { note: `Оценка реестрового среза недоступна: ${stats.error}` }
-      : coverageError ? { note: coverageError } : {}),
+    ...provenance, population_matches_source: !population.error,
+    unique_companies: population.companies_unique_total,
+    available_companies: population.companies_available,
+    companies_with_email: population.companies_with_email,
+    companies_with_phone: population.companies_with_phone,
+    directory_rows_total: population.directory_rows_total,
+    slice_companies: population.slice_companies,
+    ...(population.error ? { note: `Оценка реестрового среза недоступна: ${population.error}` } : {}),
   };
+}
+
+/**
+ * Пересчитать размер среза с исключением компаний других баз проекта. Свои
+ * уже просмотренные компании из исключений убираем: прогноз вычитает их сам.
+ */
+async function refreshPlanPopulation(
+  ctx: VeStageContext,
+  base: Pick<VeAutoBase, 'id' | 'project_id' | 'hypothesis_id'>,
+  info: VeCollectInfo,
+  otherBases?: VeBaseExclusionKeys,
+): Promise<void> {
+  if (!info.plan) return;
+  const hasDirectory = info.plan.tasks.some((task) => task.source === 'companies_directory');
+  const keys = otherBases ?? (hasDirectory ? await loadOtherBaseExclusionKeys(ctx, base.project_id, base.id, base.hypothesis_id) : null);
+  const own = new Set(readVeRelevanceSourceRows(info.relevance_reserve).map((row) => normalizeVeCompanyInn(cell(row.inn))).filter(Boolean));
+  info.estimate = await estimatePlanDirectorySegment(info.plan, ctx.supabase,
+    [...(keys?.inns ?? [])].filter((inn) => !own.has(inn)));
 }
 
 /** maps_query → inputLines Google Maps (гео доклеивается к каждому запросу). */
@@ -3713,23 +3694,28 @@ async function readVeHypothesisSizeBasis(ctx: VeStageContext, hypothesisId: stri
  * планировщика новый срез (adaptCollectionSources). Состояние меняется только
  * в памяти и сохраняется вместе с раундом.
  */
-async function widenExhaustedPlan(ctx: VeStageContext, base: VeAutoBase, info: VeCollectInfo, tasks: VeCollectTaskState[]): Promise<boolean> {
+async function widenExhaustedPlan(
+  ctx: VeStageContext, base: VeAutoBase, info: VeCollectInfo, tasks: VeCollectTaskState[],
+  /** narrow_market: план жив, но по прогнозу срез мал для базы. */
+  cause: 'plan_exhausted' | 'narrow_market' = 'plan_exhausted',
+): Promise<boolean> {
   const policy = info.adaptive_collection ?? newVeAdaptiveCollection();
   const widenings = policy.widenings ?? 0;
   if (widenings >= VE_PLAN_WIDENING_LIMIT) return false;
+  const lead = cause === 'narrow_market' ? 'Текущий срез мал для базы по прогнозу' : 'План исчерпан раньше цели';
   const sizeBasis = await readVeHypothesisSizeBasis(ctx, base.hypothesis_id);
   const added = veSecondQueueTasks(tasks.map((task) => task.task), sizeBasis);
   if (added.length) {
     for (const task of added) tasks.push({ source: task.source, task, status: 'pending', child_job_id: null, rows: 0 });
     policy.active_source = veSourceStrategyKey(added[0]);
     policy.switches += 1;
-    policy.note = sizeBasis
-      ? 'План исчерпан раньше цели: открыта вторая очередь — пороги размера ослаблены, компании без данных о штате и выручке тоже берём.'
-      : 'План исчерпан раньше цели: открыта вторая очередь — тот же ОКВЭД без порогов размера, которых нет в гипотезе.';
+    policy.note = `${lead}: открыта вторая очередь — ` + (sizeBasis
+      ? 'пороги размера ослаблены, компании без данных о штате и выручке тоже берём.'
+      : 'тот же ОКВЭД без порогов размера, которых нет в гипотезе.');
   } else if (policy.replan_attempts < 2 && tasks.length < VE_PLAN_MAX_TASKS) {
     policy.replan_needed = true;
     policy.replan_reason = 'plan_exhausted';
-    policy.note = 'План исчерпан раньше цели: подбираем новый срез того же рынка.';
+    policy.note = `${lead}: подбираем новый срез того же рынка.`;
   } else return false;
   policy.widenings = widenings + 1;
   delete policy.replan_error;
@@ -4072,63 +4058,68 @@ async function completeTargetRound(args: {
   if (info.plan && needsDirectoryEstimateRefresh(info.plan, info.estimate)) {
     // A long-running batch can outlive its initial source snapshot. Refresh only
     // at a worker checkpoint, never as a side effect of an interface read.
-    info.estimate = await estimatePlanDirectorySegment(info.plan, ctx.supabase);
+    await refreshPlanPopulation(ctx, base, info, freshKeys);
   }
   if (info.estimate) {
     const sourceRows = readVeRelevanceSourceRows(info.relevance_reserve);
     const candidateCompanies = new Set(sourceRows.map(veRelevanceCompanyKey));
-    // Company-level population uses INN, with row-id fallback. Source rows do
-    // not retain directory row ids, so missing INN cannot prove that fallback.
-    const identitiesComplete = sourceRows.length > 0 && sourceRows.every((row) => Boolean(normalizeVeCompanyInn(cell(row.inn))));
+    // Компании реестра — строки с ИНН: остальные источники ИНН не отдают. Они
+    // уже вычтены из остатка среза; компании карт и вакансий в нём не лежат.
+    const sourceCompanies = new Set(sourceRows.map((row) => normalizeVeCompanyInn(cell(row.inn))).filter(Boolean)).size;
+    const readyCompanies = targetCount.companies;
+    const asOf = new Date().toISOString();
     info.estimate = updateCollectionEstimate(info.estimate, {
-      // Прогноз запаса для запуска остаётся в адресах, как и состав базы в сводке.
-      candidates: candidateCompanies.size, ready: readyRows.length,
-      asOf: new Date().toISOString(), identitiesComplete,
-      // unchecked выделен из error и перечислен здесь явно: выборка с
-      // неразобранным остатком считается незавершённой, как и прежде.
+      // Выход — в единицах цели: лишние адреса тех же компаний рынок не расширяют.
+      candidates: candidateCompanies.size, sourceCandidates: sourceCompanies, ready: targetRows, readyCompanies, asOf,
+      // Незавершённая партия оценку больше не отменяет: база почти всегда
+      // заканчивается на оборванной, и числа не было ни у одной. Флаг только
+      // помечает, что выход может быть занижен неразобранным остатком.
       complete: !args.validationError && !taskError && !continueSavedReview
         && info.relevance_summary.needs_review === 0 && info.relevance_summary.error === 0
         && info.relevance_summary.unchecked === 0
         && info.relevance_summary.email_retryable === 0 && cleaned.summary.status === 'complete',
-      // Earlier rounds of THIS base are represented in the cumulative source
-      // cohort. Other bases can consume unseen parts of the same population;
-      // their global exclusion keys do not prove an exact remaining source size.
-      externalExclusions: freshKeys.inns.size > 0 || freshKeys.emails.size > 0 || freshKeys.websiteInns.size > 0
-        || Boolean(args.stats.excluded_existing_bases),
     });
     // Рынок гипотезы меньше цели. Раньше движок всё равно шёл к 500: каждый
     // следующий раунд просил БОЛЬШЕ компаний (collectionRoundLimit делит
     // недостачу на наблюдаемый выход), и узкая гипотеза упиралась в потолок
     // 10 000 компаний — а это чтение сайтов и SMTP-проверки за каждую из них.
-    //
-    // Прогноз считаем здесь же, а не берём remaining_ready_estimate: тот
-    // обнуляется, пока в резерве есть хоть одна непроверенная строка, а такая
-    // строка есть почти всегда (компания, по которой конструктор не нашёл
-    // почту). Для решения «рынок мал» достаточно размера сопоставимого среза
-    // источника и наблюдаемого выхода. Выход — в единицах цели (targetRows):
-    // лишние адреса тех же компаний рынок не расширяют.
-    const population = info.estimate.population_matches_source === true
-      && Number.isSafeInteger(info.estimate.unique_companies) ? Number(info.estimate.unique_companies) : null;
-    const processedCompanies = candidateCompanies.size;
-    const projected = population !== null && processedCompanies >= VE_NARROW_MARKET_MIN_COMPANIES
-      && population >= processedCompanies && targetRows > 0
-      ? Math.round((population - processedCompanies) * targetRows / processedCompanies) : null;
+    // Прогноз тот же, что в карточке, но на выборке не меньше 300 компаний.
+    const forecast = estimateRemainingReady({
+      population: veEstimatePopulation(info.estimate), candidatesProcessed: candidateCompanies.size,
+      processedInPopulation: sourceCompanies, readyRows: targetRows, readyCompanies, asOf,
+      eligible: candidateCompanies.size >= VE_NARROW_MARKET_MIN_COMPANIES,
+    });
+    const projected = forecast?.contacts ?? null;
+    // Размер известен только у реестра. Пока жив источник без размера
+    // (каталог карт), прогноз по реестру не говорит, что рынок кончился.
+    const unsizedLive = tasks.some((task) => task.source !== 'companies_directory' && veTaskCanSupply(task));
     // Останавливаем только раунд, за которым не осталось уже оплаченной работы:
     // недокачанный дочерний конструктор или неразобранный запас дороже одного
     // лишнего раунда, а на следующем пробуждении оценка повторится.
     if (projected !== null && next.status === 'collecting' && !reviewOnly && !continueSavedReview
       && progress.round >= 2 && pendingBatches.length === 0 && !pendingSources && !pendingDiscovery
-      && !args.hasBufferedCandidates && !info.adaptive_collection?.pending
+      && !args.hasBufferedCandidates && !info.adaptive_collection?.pending && !unsizedLive
       && targetRows + projected < VE_NARROW_MARKET_MIN_PROJECTED) {
-      next = { ...next, round: progress.round, status: 'limited',
-        reason: `Рынок гипотезы исчерпан: по текущему срезу источника осталось примерно ${projected} контактов `
-          + `сверх собранных ${targetRows}, то есть база не наберёт и ${VE_NARROW_MARKET_MIN_PROJECTED}. `
-          + 'Сбор остановлен, чтобы не тратить проверки впустую. Добавьте источник или уточните гипотезу.' };
-      // Локальная переменная уже скопирована в info выше: без этой записи
-      // статус и причина не сохранились бы, а «Продолжить подготовку» не
-      // увидела бы базу (там требуется терминальный статус раунда).
-      info.target_progress = next;
-      stageLog(ctx, `[base_collect] остановка по размеру рынка: собрано ${targetRows}, прогноз остатка ${projected}, цель ${progress.ready_target}`);
+      // Мал текущий срез, а не обязательно рынок: сначала то же расширение,
+      // что и при исчерпанном плане (вторая очередь, затем новый срез).
+      // Останавливаем, только когда расширять больше нечем.
+      if (!acquisitionLimited && await widenExhaustedPlan(ctx, base, info, tasks, 'narrow_market')) {
+        stageLog(ctx, `[base_collect] срез мал: прогноз ${projected} сверх ${targetRows}; срез расширен автоматически (${info.adaptive_collection?.widenings}/${VE_PLAN_WIDENING_LIMIT})`);
+      } else {
+        const widenings = info.adaptive_collection?.widenings ?? 0;
+        next = { ...next, round: progress.round, status: 'limited',
+          reason: `Рынок гипотезы исчерпан: по реестру осталось примерно ${projected} контактов`
+            + `${forecast?.companies !== undefined ? ` (≈${forecast.companies} компаний)` : ''} сверх собранных ${targetRows}, `
+            + `то есть база не наберёт и ${VE_NARROW_MARKET_MIN_PROJECTED}. `
+            + (widenings ? `Срез уже расширялся автоматически (${widenings} из ${VE_PLAN_WIDENING_LIMIT}), дальше расширять некуда. `
+              : 'Расширить срез автоматически нечем. ')
+            + 'Сбор завершён, чтобы не тратить проверки впустую; собранные контакты сохранены.' };
+        // Локальная переменная уже скопирована в info выше: без этой записи
+        // статус и причина не сохранились бы, а «Продолжить подготовку» не
+        // увидела бы базу (там требуется терминальный статус раунда).
+        info.target_progress = next;
+        stageLog(ctx, `[base_collect] остановка по размеру рынка: собрано ${targetRows}, прогноз остатка ${projected}, цель ${progress.ready_target}`);
+      }
     }
   }
   // План кончился раньше цели — это повод расширить срез, а не остановка:
@@ -4434,7 +4425,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     if (planRepair) info.plan_repair = planRepair;
     if (sliceProbe) info.slice_probe = sliceProbe;
     info.hypotheses = usedHypotheses;
-    info.estimate = await estimatePlanDirectorySegment(plan, ctx.supabase);
+    await refreshPlanPopulation(ctx, base, info);
 
     // Отказ пробы: срез не про эту вертикаль и перепланирование не помогло.
     // Сохраняем провенанс и валим сбор ДО дозвона до коллекторов — час
@@ -4469,7 +4460,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
   // Базы, чей план был сохранён до появления estimate, получают его при
   // следующем безопасном тике, не переигрывая LLM-план и сбор источников.
   if (info.plan && needsDirectoryEstimateRefresh(info.plan, info.estimate)) {
-    info.estimate = await estimatePlanDirectorySegment(info.plan, ctx.supabase);
+    await refreshPlanPopulation(ctx, base, info);
     await persistCollectInfo(ctx, baseId, info);
   }
   const tasks = info.tasks ?? [];
