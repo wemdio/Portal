@@ -12,6 +12,9 @@ import type { VeBase, VeChainLanguage, VeChainLetter, VeJob, VeOperatorMapping, 
 import type { VeChainLetterAB } from './chain';
 import { addUsage, newUsage, payloadString, readProject, type VeStageContext, type VeStageResult } from './shared';
 
+/** Сколько финальных писем пишем по умолчанию. */
+export const VE_FINAL_LETTER_COUNT = 4;
+
 /* ───────────────── Pure-часть: операторы персонализации ───────────────── */
 
 export { extractPersonalizationOperators, mapOperatorsToColumns } from '../letterPersonalization';
@@ -241,7 +244,8 @@ export async function runTemplateStage(job: VeJob, ctx: VeStageContext): Promise
   const languageValue = job.payload.language ?? (brief as Record<string, unknown>).language ?? legacyChain?.language;
   const language: VeChainLanguage = languageValue === 'en' || languageValue === 'pl' ? languageValue : 'ru';
   const requestedCount = job.payload.letter_count;
-  const letterCount = typeof requestedCount === 'number' && Number.isInteger(requestedCount) && requestedCount >= 3 && requestedCount <= 6 ? requestedCount : savedTiming.length >= 3 && savedTiming.length <= 6 ? savedTiming.length : 3;
+  // Специалисты работают с 4 письмами: старый черновик из 3 писем число не уменьшает.
+  const letterCount = typeof requestedCount === 'number' && Number.isInteger(requestedCount) && requestedCount >= 3 && requestedCount <= 6 ? requestedCount : savedTiming.length > VE_FINAL_LETTER_COUNT && savedTiming.length <= 6 ? savedTiming.length : VE_FINAL_LETTER_COUNT;
   let clientCase: Awaited<ReturnType<typeof selectCaseForVertical>> = null;
   try { clientCase = await selectCaseForVertical(ctx.supabase, job.project_id, { name: vertical.name, synonyms: vertical.synonyms }); } catch { /* A missing optional case never authorises inventing one. */ }
   const columns = Array.isArray(base.columns) ? base.columns : [];
