@@ -188,8 +188,16 @@ function phoneInLine(line: string, signature: boolean): string | null {
 }
 
 function explicitCompany(line: string): string | null {
+  line = line.replace(SIGNOFF_PREFIX, '').trim();
   if (/(?:переписк|конфиденциал|подлежит|disclaimer|confidential)/iu.test(line)) return null;
   if (/(?:^|\s)(?:оказывает|предоставляет|предлагает|производит|занимается|работает|осуществляет|поставляет|является|provides|offers|specializes|manufactures|works|delivers)(?:\s|$)/iu.test(line)) return null;
+  // Legal names in the sender's own job title are still company names. The
+  // previous role pattern required a word *between* "директор" and "ООО" and
+  // missed the common "Директор ООО «... »" signature.
+  const legalInRole = /^(?:(?:\p{Lu}[\p{L}’'-]+\s+){1,3},\s*)?(?:(?:генеральный|коммерческий|региональный|исполнительный)\s+)?(?:директор|руководитель|начальник|специалист|менеджер|помощник|ассистент|заместитель|группа\s+развития\s+деятельности)\s+(?:[^\n]{0,90}?\s+)?((?:ООО|АО|ПАО|ЗАО|ОАО|ИП|ТОО)\s+[«"“][^»"”\n]{2,90}[»"”])\s*[.,]?$/iu.exec(line);
+  if (legalInRole) return legalInRole[1].replace(/\s+/g, ' ');
+  const agencyInRole = /^(?:[\p{L}’'-]+(?:\s+[\p{L}’'-]+){1,2},\s*)?(?:директор|руководитель)\s+(Агентства\s+недвижимости\s+[«"“][^»"”\n]{2,70}[»"”])\s*[.,]?$/iu.exec(line);
+  if (agencyInRole) return agencyInRole[1].replace(/^Агентства/iu, 'Агентство').replace(/\s+/g, ' ');
   const label = /^(?:компания|организация|company|organisation|organization|магазин)(?:\s*:\s*|\s+)(.+)$/iu.exec(line);
   // Accept a legal name inside a job title, not arbitrary narrative mentions.
   const role = /^(?:специалист|менеджер|руководитель|директор|начальник|помощник|ассистент|заместитель|генеральный директор|региональный менеджер)\s+.{0,100}?\s+((?:ООО|АО|ПАО|ЗАО|ОАО|ИП|ТОО)\s+[«"“].+?[»"”])\s*$/iu.exec(line);
@@ -200,6 +208,33 @@ function explicitCompany(line: string): string | null {
   if (!/[\p{L}]/u.test(value) || PHONE_LABEL.test(value) || websitesInLine(value).length) return null;
   if (/^(?:мы|нам|вам|we|please|our|you)\s/iu.test(value)) return null;
   return value || null;
+}
+
+function companyFromSignature(signature: string[], website: string | null): string | null {
+  const explicit = signature.flatMap((_, index) => [1, 2, 3].map((length) =>
+    explicitCompany(signature.slice(Math.max(0, index - length + 1), index + 1).join(' ')))).find(Boolean);
+  if (explicit) return explicit;
+  // Two-line corporate signatures often put the brand immediately after its
+  // explicit label, with the website on a later line. Do not infer a company
+  // from an arbitrary capitalized word or from the email domain alone.
+  const groupIndex = signature.findIndex((line) => /^группа\s+компаний\s*[:—-]?$/iu.test(line));
+  if (groupIndex >= 0) {
+    const brand = signature[groupIndex + 1]?.trim() ?? '';
+    if (brand.length >= 3 && brand.length <= 70 && /^[\p{Lu}\p{N}][\p{L}\p{N} &'’.,-]+$/u.test(brand) &&
+        !isPersonName(brand) && !PHONE_LABEL.test(brand) && !websitesInLine(brand).length) return brand;
+  }
+  return signature.map((line) => brandedCompany(line, website)).find(Boolean) ?? null;
+}
+
+function companyFromSelfIntroduction(body: string[]): string | null {
+  const text = body.join('\n');
+  const museum = /(?:^|[\s,.])[Яя]\s+управляющ(?:ий|ая)\s+[Мм]узея\s+([\p{Lu}\p{N}][\p{L}\p{N}-]{1,60}(?:\s+[\p{Lu}\p{N}][\p{L}\p{N}-]{1,60}){0,2})(?=[.!?\n]|$)/u.exec(text);
+  if (museum) return `Музей ${museum[1]}`;
+  // Require a first-person introduction, a job function and a distinct
+  // capitalized employer at the end of that sentence. Mere mentions of a
+  // company in the reply (or in quoted history) are not self-identification.
+  const employer = /(?:^|[.!?\n])\s*[Мм]еня\s+зовут\s+\p{Lu}[\p{L}’'-]{1,40},\s*(?:[Яя]\s+)?[Сс]пециалист\s+по\s+[^.!?\n]{5,120}?\s+(\p{Lu}[\p{L}\p{N}-]{3,60})\s*[.!?](?=\s|$)/u.exec(text);
+  return employer?.[1] ?? null;
 }
 
 function brandedCompany(line: string, website: string | null): string | null {
@@ -215,6 +250,16 @@ function signatureNameInLine(line: string): string | null {
     .replace(SIGNOFF_PREFIX, '')
     .replace(/^(?:фио|имя|name)\s*:\s*/iu, '')
     .replace(/[.,;:!]+$/u, '').trim();
+  const namedRole = /^(\p{Lu}[\p{L}’'-]+(?:\s+\p{Lu}[\p{L}’'-]+){1,2}),\s*(?:[Дд]иректор|[Рр]уководитель|[Мм]енеджер|[Сс]пециалист)(?:\s|$)/u.exec(value);
+  if (namedRole && isPersonName(namedRole[1])) return namedRole[1];
+  // Some corporate signatures link the author's *personal* LinkedIn profile
+  // directly after their name. A matching name/profile slug is stronger than
+  // generic Latin-name morphology (which misses uncommon surnames).
+  const linkedIn = /^(\p{Lu}[\p{L}’'-]+\s+\p{Lu}[\p{L}’'-]+)\s*<https:\/\/(?:www\.)?linkedin\.com\/in\/([a-z0-9-]+)\/?>(?:\s|$)/u.exec(value);
+  if (linkedIn) {
+    const [first, last] = linkedIn[1].toLowerCase().split(/\s+/u);
+    if (linkedIn[2].startsWith(`${first}-${last.slice(0, 2)}`)) return linkedIn[1];
+  }
   return isPersonName(value) && !isRoleTitle(value) &&
     !/(?:^|\s)(?:команда|компания|организация|магазин|отдел|team|company|department)(?:\s|$)/iu.test(value) &&
     value.split(/\s+/).every((word) => /^\p{Lu}[\p{L}’'-]*$/u.test(word)) ? value : null;
@@ -298,9 +343,7 @@ function extractFromText(text: string): LeadReplyContacts {
     leadName: replyLeadName(body, nameStart < 0 ? [] : lines.slice(nameStart)),
     bodyPhone: joinLeadPhones(body.map((line) => phoneInLine(line, false))),
     signaturePhone: joinLeadPhones(signature.map((line) => phoneInLine(line, true))),
-    companyName: signature.flatMap((_, index) => [1, 2, 3].map((length) =>
-      explicitCompany(signature.slice(Math.max(0, index - length + 1), index + 1).join(' ')))).find(Boolean)
-      ?? signature.map((line) => brandedCompany(line, signatureSite)).find(Boolean) ?? null,
+    companyName: companyFromSignature(signature, signatureSite) ?? companyFromSelfIntroduction(body),
     website: signatureSite ?? bodySite,
   };
 }
