@@ -592,8 +592,8 @@ describe('llm rawCall retry', () => {
     const classification = reply({ decisions: [{ i: 0, status: 'relevant', reason: 'Makes equipment',
       evidence: [{ field: 'description', quote: description }] }] });
     const confirmation = reply({ reviews: [{ i: 0, result: 'direct_match', reason: description }] });
-    // Admission/contradiction gets one durably reserved GPT check. Missing facts do not
-    // trigger a costly second opinion and are never turned into acceptance.
+    // Admission, contradiction and a cheap rejection of a proposed admission each get one
+    // durably reserved GPT check; only the established reviewer's match admits.
     const noWebsite = jest.fn().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'offline' });
     delete process.env.VE_MODEL_GATE;
     delete process.env.VE_MODEL_RELEVANCE_REVIEW;
@@ -608,9 +608,8 @@ describe('llm rawCall retry', () => {
         }
       } });
       const models = fetchMock.mock.calls.map((call) => JSON.parse(call[1].body).model);
-      expect(models).toEqual(firstResult !== 'insufficient'
-        ? [VE_COLLECTION_MODEL, VE_COLLECTION_MODEL, 'openai/gpt-5-mini'] : [VE_COLLECTION_MODEL, VE_COLLECTION_MODEL]);
-      expect(checked.decisions.get(0)?.status).toBe(firstResult !== 'insufficient' ? 'relevant' : 'needs_review');
+      expect(models).toEqual([VE_COLLECTION_MODEL, VE_COLLECTION_MODEL, 'openai/gpt-5-mini']);
+      expect(checked.decisions.get(0)?.status).toBe('relevant');
       expect(fetchMock.mock.calls.slice(0, 2).map((call) => JSON.parse(call[1].body).response_format.type))
         .toEqual(['json_schema', 'json_schema']);
       await findIrrelevantRows({ ...input, fetchEvidence: noWebsite, checkpoint: checked.checkpoint });

@@ -1,0 +1,276 @@
+{
+ "version": 2,
+ "context_hash": "3cc71ba794c261d7f56aa02d93fd1f46ad943dfd10d3e8be11d1432887e52c17",
+ "verdicts": {
+  "9e568f5585fe523e28c4b3df3d3a0eaa14be3376bfad43b62a70d1bd60463138": {
+   "version": 2,
+   "status": "relevant",
+   "reason": "Старые правила",
+   "evidence": [
+    {
+     "field": "website_text",
+     "quote": "Колбасный завод «Север» выпускает варёные и копчёные колбасы, сосиски и деликатесы на собственном производстве."
+    }
+   ],
+   "context_hash": "3cc71ba794c261d7f56aa02d93fd1f46ad943dfd10d3e8be11d1432887e52c17",
+   "review_attempts": 1,
+   "website_review_version": 4
+  },
+  "1de34352a9a495abe4861da9e368779e3c87e5251aa1e306fa481cab7eb04bb1": {
+   "version": 2,
+   "status": "needs_review",
+   "reason": "Сайт не дал подтверждения; недостаточно подтверждённых данных.",
+   "evidence": [],
+   "context_hash": "3cc71ba794c261d7f56aa02d93fd1f46ad943dfd10d3e8be11d1432887e52c17",
+   "review_attempts": 1,
+   "website_review_version": 4,
+   "triage_version": 1
+  },
+  "c18a9002fb2748dac763a873ebc3ac6bd074ffd7690a07ebc94499d10526fe21": {
+   "version": 2,
+   "status": "needs_review",
+   "reason": "Смысловое соответствие не подтверждено: Старые правила",
+   "evidence": [
+    {
+     "field": "description",
+     "quote": "Предприятие оснащено коптильными и сушильными печами, аппаратом сублимационной сушки и пельменным агрегатом, что позволяет нам выпускать широкий перечень продукции."
+    }
+   ],
+   "context_hash": "3cc71ba794c261d7f56aa02d93fd1f46ad943dfd10d3e8be11d1432887e52c17",
+   "review_attempts": 0,
+   "triage_version": 1
+  },
+  "230a65f2f3e878d5af0ed8509b2860b8a883fba30d124319619be8419880f021": {
+   "version": 2,
+   "status": "relevant",
+   "reason": "Старые правила",
+   "evidence": [
+    {
+     "field": "description",
+     "quote": "Мясокомбинат производит колбасы и сосиски на собственном заводе."
+    }
+   ],
+   "context_hash": "3cc71ba794c261d7f56aa02d93fd1f46ad943dfd10d3e8be11d1432887e52c17",
+   "review_attempts": 0
+  },
+  "06356eb1085224c183f3355c219efaab15a22845008702664ae472bcd35f4ae5": {
+   "version": 2,
+   "status": "needs_review",
+   "reason": "Смысловое соответствие не подтверждено: Старые правила",
+   "evidence": [
+    {
+     "field": "website_text",
+     "quote": "Мясоперерабатывающий цех «Лидер» производит пельмени, котлеты, фарш и мясные полуфабрикаты для магазинов области."
+    }
+   ],
+   "context_hash": "3cc71ba794c261d7f56aa02d93fd1f46ad943dfd10d3e8be11d1432887e52c17",
+   "review_attempts": 1,
+   "website_review_version": 4,
+   "triage_version": 1
+  }
+ },
+ "website_evidence": {
+  "1de34352a9a495abe4861da9e368779e3c87e5251aa1e306fa481cab7eb04bb1": {
+   "reader_version": 1,
+   "reader_revision": 4,
+   "status": "unavailable",
+   "text": "",
+   "url": "",
+   "reason": "offline",
+   "review_attempt": "6b10a2f958a4eb47742ae89dfa55bf2fd046fc6aa176166080beb4b3e5178baf",
+   "review_attempts": 1,
+   "refined": true
+  },
+  "9e568f5585fe523e28c4b3df3d3a0eaa14be3376bfad43b62a70d1bd60463138": {
+   "reader_version": 1,
+   "reader_revision": 4,
+   "status": "ok",
+   "text": "",
+   "url": "https://sever.test/",
+   "reason": "ok",
+   "review_attempt": "6b10a2f958a4eb47742ae89dfa55bf2fd046fc6aa176166080beb4b3e5178baf",
+   "review_attempts": 1,
+   "refined": true
+  },
+  "06356eb1085224c183f3355c219efaab15a22845008702664ae472bcd35f4ae5": {
+   "reader_version": 1,
+   "reader_revision": 4,
+   "status": "ok",
+   "text": "",
+   "url": "https://leader.test/",
+   "reason": "ok",
+   "review_attempt": "6b10a2f958a4eb47742ae89dfa55bf2fd046fc6aa176166080beb4b3e5178baf",
+   "review_attempts": 1,
+   "refined": true
+  }
+ },
+ "citation_repairs": {},
+ "semantic_reviews": {
+  "cbfdcb946ace570b2a9e2950c2af9b4a4d9115d194fdb85bc1b8177b0fef55b5": {
+   "company_key": "1de34352a9a495abe4861da9e368779e3c87e5251aa1e306fa481cab7eb04bb1",
+   "proposal": {
+    "version": 2,
+    "status": "relevant",
+    "reason": "Собственное производство",
+    "evidence": [
+     {
+      "field": "description",
+      "quote": "Выпускаем колбасы, деликатесы и полуфабрикаты под брендом \"Элита Юга\". Используем только натуральное сырьё, без ГМО и соевых заменителей."
+     }
+    ],
+    "context_hash": "3cc71ba794c261d7f56aa02d93fd1f46ad943dfd10d3e8be11d1432887e52c17",
+    "review_attempts": 0
+   },
+   "status": "finished",
+   "attempts": 1,
+   "result": {
+    "result": "insufficient",
+    "reason": "Старые правила"
+   }
+  },
+  "6a713650c109b47f2a60a7165d1839af356c5e35aaca365e691974126ba38d9f": {
+   "company_key": "c18a9002fb2748dac763a873ebc3ac6bd074ffd7690a07ebc94499d10526fe21",
+   "proposal": {
+    "version": 2,
+    "status": "relevant",
+    "reason": "Собственное производство",
+    "evidence": [
+     {
+      "field": "description",
+      "quote": "Предприятие оснащено коптильными и сушильными печами, аппаратом сублимационной сушки и пельменным агрегатом, что позволяет нам выпускать широкий перечень продукции."
+     }
+    ],
+    "context_hash": "3cc71ba794c261d7f56aa02d93fd1f46ad943dfd10d3e8be11d1432887e52c17",
+    "review_attempts": 0
+   },
+   "status": "finished",
+   "attempts": 1,
+   "result": {
+    "result": "insufficient",
+    "reason": "Старые правила"
+   }
+  },
+  "be5fa53d0e524db6211f2877f99697854d352832757def1cf6312f564065a5ca": {
+   "company_key": "230a65f2f3e878d5af0ed8509b2860b8a883fba30d124319619be8419880f021",
+   "proposal": {
+    "version": 2,
+    "status": "relevant",
+    "reason": "Собственное производство",
+    "evidence": [
+     {
+      "field": "description",
+      "quote": "Мясокомбинат производит колбасы и сосиски на собственном заводе."
+     }
+    ],
+    "context_hash": "3cc71ba794c261d7f56aa02d93fd1f46ad943dfd10d3e8be11d1432887e52c17",
+    "review_attempts": 0
+   },
+   "status": "finished",
+   "attempts": 2,
+   "result": {
+    "result": "direct_match",
+    "reason": "Старые правила"
+   }
+  },
+  "228d425f670c4c5509fcb1e466aece7cebe72cd15b6ddfd2bc0f40d587e12b5d": {
+   "company_key": "06356eb1085224c183f3355c219efaab15a22845008702664ae472bcd35f4ae5",
+   "proposal": {
+    "version": 2,
+    "status": "relevant",
+    "reason": "Собственное производство",
+    "evidence": [
+     {
+      "field": "description",
+      "quote": "Цех «Лидер»: пельмени, котлеты и фарш."
+     }
+    ],
+    "context_hash": "3cc71ba794c261d7f56aa02d93fd1f46ad943dfd10d3e8be11d1432887e52c17",
+    "review_attempts": 0
+   },
+   "status": "finished",
+   "attempts": 1,
+   "result": {
+    "result": "insufficient",
+    "reason": "Старые правила"
+   }
+  },
+  "268f15065cdbd1b220e013a22200c09bc9435e6f7f6717e13a48f7bffcab2b93": {
+   "company_key": "9e568f5585fe523e28c4b3df3d3a0eaa14be3376bfad43b62a70d1bd60463138",
+   "proposal": {
+    "version": 2,
+    "status": "relevant",
+    "reason": "Производство по сайту",
+    "evidence": [
+     {
+      "field": "website_text",
+      "quote": "Колбасный завод «Север» выпускает варёные и копчёные колбасы, сосиски и деликатесы на собственном производстве."
+     }
+    ],
+    "context_hash": "3cc71ba794c261d7f56aa02d93fd1f46ad943dfd10d3e8be11d1432887e52c17",
+    "review_attempts": 1
+   },
+   "status": "finished",
+   "attempts": 2,
+   "result": {
+    "result": "direct_match",
+    "reason": "Старые правила"
+   }
+  },
+  "7200108034db2295e8504ed60cd1f27fe1ceaac17a085b03f64953be427ee21f": {
+   "company_key": "06356eb1085224c183f3355c219efaab15a22845008702664ae472bcd35f4ae5",
+   "proposal": {
+    "version": 2,
+    "status": "relevant",
+    "reason": "Производство по сайту",
+    "evidence": [
+     {
+      "field": "website_text",
+      "quote": "Мясоперерабатывающий цех «Лидер» производит пельмени, котлеты, фарш и мясные полуфабрикаты для магазинов области."
+     }
+    ],
+    "context_hash": "3cc71ba794c261d7f56aa02d93fd1f46ad943dfd10d3e8be11d1432887e52c17",
+    "review_attempts": 1
+   },
+   "status": "finished",
+   "attempts": 1,
+   "result": {
+    "result": "insufficient",
+    "reason": "Старые правила"
+   }
+  }
+ },
+ "semantic_review_refs": {
+  "1de34352a9a495abe4861da9e368779e3c87e5251aa1e306fa481cab7eb04bb1": "cbfdcb946ace570b2a9e2950c2af9b4a4d9115d194fdb85bc1b8177b0fef55b5",
+  "c18a9002fb2748dac763a873ebc3ac6bd074ffd7690a07ebc94499d10526fe21": "6a713650c109b47f2a60a7165d1839af356c5e35aaca365e691974126ba38d9f",
+  "230a65f2f3e878d5af0ed8509b2860b8a883fba30d124319619be8419880f021": "be5fa53d0e524db6211f2877f99697854d352832757def1cf6312f564065a5ca",
+  "06356eb1085224c183f3355c219efaab15a22845008702664ae472bcd35f4ae5": "7200108034db2295e8504ed60cd1f27fe1ceaac17a085b03f64953be427ee21f",
+  "9e568f5585fe523e28c4b3df3d3a0eaa14be3376bfad43b62a70d1bd60463138": "268f15065cdbd1b220e013a22200c09bc9435e6f7f6717e13a48f7bffcab2b93"
+ },
+ "failures": [],
+ "triage": {
+  "version": 1,
+  "rubric": {
+   "activity": "The company itself manufactures the target products.",
+   "requirements": [],
+   "conflicts": [
+    "The company only resells products made by others."
+   ],
+   "adjacent": [],
+   "activity_label": "целевое производство",
+   "conflict_labels": [
+    "перепродажа"
+   ]
+  }
+ },
+ "triage_activity": {
+  "1de34352a9a495abe4861da9e368779e3c87e5251aa1e306fa481cab7eb04bb1": 0.2,
+  "c18a9002fb2748dac763a873ebc3ac6bd074ffd7690a07ebc94499d10526fe21": 0.2,
+  "230a65f2f3e878d5af0ed8509b2860b8a883fba30d124319619be8419880f021": 0.2,
+  "06356eb1085224c183f3355c219efaab15a22845008702664ae472bcd35f4ae5": 0.2,
+  "9e568f5585fe523e28c4b3df3d3a0eaa14be3376bfad43b62a70d1bd60463138": 0.2
+ },
+ "triage_seen": {
+  "version": 1,
+  "keys": {}
+ }
+}
