@@ -32,6 +32,10 @@ export interface VeAdaptiveResult {
 export interface VeAdaptiveCollection {
   version: 1; started_at: string; active_source?: string; replan_attempts: number; replan_needed?: boolean;
   replan_error?: string; switches: number; note?: string; completed: VeAdaptiveResult[];
+  /** Сколько раз раунд открывался заново, потому что план кончился раньше цели. */
+  widenings?: number;
+  /** Повод перепланирования: низкий выход или исчерпанный план. */
+  replan_reason?: 'low_yield' | 'plan_exhausted';
   /** Private baseline: never return recipient hashes through project polling. */
   pending?: { id: string; source_key: string; source: string; candidates: number; ready_before: string[]; started_at: string };
   last_completed_at?: string;
@@ -40,6 +44,7 @@ export function validVeAdaptiveCollection(state: VeAdaptiveCollection): boolean 
   const count = (value: unknown, max: number) => Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= max;
   const date = (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value));
   return state?.version === 1 && date(state.started_at) && count(state.replan_attempts, 2)
+    && (state.widenings === undefined || count(state.widenings, 2))
     && count(state.switches, 1000) && Array.isArray(state.completed) && state.completed.length <= 100
     && state.completed.every((batch) => batch && typeof batch.id === 'string' && typeof batch.source_key === 'string'
       && count(batch.candidates, 100) && count(batch.new_ready, 1_000_000) && typeof batch.poor === 'boolean')
@@ -50,22 +55,54 @@ export function validVeAdaptiveCollection(state: VeAdaptiveCollection): boolean 
 export function newVeAdaptiveCollection(): VeAdaptiveCollection {
   return { version: 1, started_at: new Date().toISOString(), replan_attempts: 0, switches: 0, completed: [] };
 }
+/** Evidence window: a verdict needs at least this many checked companies. */
+export const VE_ADAPTIVE_WINDOW_CANDIDATES = 50;
+export interface VeAdaptiveYieldWindow { candidates: number; new_ready: number; spend_usd: number; spend_complete: boolean; poor: boolean }
+/** Latest-first windows of one source's batches, each of at least 50 companies.
+ * A narrow slice's tail comes in batches of 1–25 companies: judged one by one,
+ * no batch was ever large enough to count as poor and the source never changed. */
+export function veAdaptiveYieldWindows(completed: VeAdaptiveResult[], sourceKey: string, limit = 2): VeAdaptiveYieldWindow[] {
+  const windows: VeAdaptiveYieldWindow[] = [];
+  let current: Omit<VeAdaptiveYieldWindow, 'poor'> | null = null;
+  for (let index = completed.length - 1; index >= 0 && windows.length < limit; index--) {
+    const batch = completed[index];
+    if (batch.source_key !== sourceKey) continue;
+    current ??= { candidates: 0, new_ready: 0, spend_usd: 0, spend_complete: true };
+    current.candidates += batch.candidates;
+    current.new_ready += batch.new_ready;
+    current.spend_usd += Number.isFinite(batch.spend?.estimated_total_usd) ? batch.spend.estimated_total_usd : 0;
+    current.spend_complete &&= batch.spend?.complete === true;
+    if (current.candidates < VE_ADAPTIVE_WINDOW_CANDIDATES) continue;
+    const poor = current.new_ready / current.candidates < VE_ADAPTIVE_MIN_YIELD
+      || (current.spend_complete && current.spend_usd > 0 && current.spend_usd / Math.max(1, current.new_ready) > VE_ADAPTIVE_MAX_COST_PER_CONTACT);
+    windows.push({ ...current, poor });
+    current = null;
+  }
+  return windows;
+}
+/** Two consecutive poor windows of at least 50 companies each. */
+export function veAdaptiveLowYield(completed: VeAdaptiveResult[], sourceKey: string): boolean {
+  const windows = veAdaptiveYieldWindows(completed, sourceKey);
+  return windows.length === 2 && windows.every((window) => window.poor);
+}
 export function finishVeAdaptiveBatch(state: VeAdaptiveCollection, readyRows: Array<Record<string, unknown>>, spend: VeBatchSpend, now = new Date().toISOString()): VeAdaptiveCollection {
   if (!state.pending) return state;
   const pending = state.pending;
   if (state.completed.some((item) => item.id === pending.id)) return { ...state, pending: undefined };
   const before = new Set(pending.ready_before);
   const added = veReadyContactKeys(readyRows).filter((key) => !before.has(key)).length;
-  const poor = pending.candidates >= 50 && (added / pending.candidates < VE_ADAPTIVE_MIN_YIELD
-    || (spend.complete && spend.estimated_total_usd > 0 && spend.estimated_total_usd / Math.max(1, added) > VE_ADAPTIVE_MAX_COST_PER_CONTACT));
   const result: VeAdaptiveResult = { id: pending.id, source_key: pending.source_key, source: pending.source,
-    candidates: pending.candidates, new_ready: added, started_at: pending.started_at, finished_at: now, spend, poor };
+    candidates: pending.candidates, new_ready: added, started_at: pending.started_at, finished_at: now, spend, poor: false };
+  // The batch is judged together with its predecessors until 50 companies.
+  result.poor = veAdaptiveYieldWindows([...state.completed, result], pending.source_key, 1)[0]?.poor === true;
   const completed = [...state.completed, result].slice(-100);
-  const recent = completed.filter((item) => item.source_key === pending.source_key).slice(-2);
-  const needsSwitch = recent.length === 2 && recent.every((item) => item.poor);
-  return { ...state, pending: undefined, completed, last_completed_at: now, replan_needed: needsSwitch,
+  const needsSwitch = veAdaptiveLowYield(completed, pending.source_key);
+  const next: VeAdaptiveCollection = { ...state, pending: undefined, completed, last_completed_at: now, replan_needed: needsSwitch,
+    replan_reason: 'low_yield',
     note: needsSwitch ? 'Низкий выход двух партий подряд: выбираем другой источник или поисковый срез.'
       : `Партия проверена: ${added} новых готовых контактов из ${pending.candidates} компаний.` };
+  if (!needsSwitch) delete next.replan_reason;
+  return next;
 }
 /** Prefer an untried alternative after two poor complete batches, then the
  * best observed yield. Never discard the old source or its unprocessed rows. */
@@ -76,9 +113,9 @@ export function chooseVeAdaptiveSource(state: VeAdaptiveCollection, available: s
   const candidates = available.filter((key) => !state.replan_needed || key !== state.active_source);
   return candidates.sort((a, b) => {
     const left = stats(a), right = stats(b);
-    const rank = (items: VeAdaptiveResult[]) => !items.length ? 2 : items.length >= 2 && items.slice(-2).every((item) => item.poor) ? -1
+    const rank = (key: string, items: VeAdaptiveResult[]) => !items.length ? 2 : veAdaptiveLowYield(state.completed, key) ? -1
       : items.reduce((sum, item) => sum + item.new_ready, 0) / Math.max(1, items.reduce((sum, item) => sum + item.candidates, 0));
-    return rank(right) - rank(left);
+    return rank(b, right) - rank(a, left);
   })[0] ?? available[0];
 }
 

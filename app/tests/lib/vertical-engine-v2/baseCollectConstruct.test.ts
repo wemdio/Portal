@@ -248,6 +248,9 @@ describe('base_collect CONSTRUCT step order', () => {
     const info: VeCollectInfo = {
       ...collectInfo([ready, pending], { status: 'done', bc_job_id: 'bc-saved' }),
       collection_mode: 'preview', ready_target: 1000,
+      // Срез уже расширялся дважды: здесь проверяется только восстановление, а
+      // исчерпанный план такой базы больше не расширяется сам.
+      adaptive_collection: { ...newVeAdaptiveCollection(), widenings: 2 },
       target_progress: { ...createCollectionTarget('preview'), status: 'error', ready_rows: 1, candidates_processed: 2 },
       target_checkpoint: { completed_round: 1, seen_rows: [ready, pending], processed_rows: 2, relevance_unchecked: 1 },
       stats: { tasks_total: 1, tasks_done: 1, tasks_failed: 0, rows_total: 2, excluded_existing_bases: 0,
@@ -314,6 +317,8 @@ describe('base_collect CONSTRUCT step order', () => {
     // SMTP. Persist a retry cap so worker restarts cannot create an endless loop.
     for (const recoverNames of [true, false]) {
       const nameInfo: VeCollectInfo = { ...collectInfo([ready], { status: 'done', bc_job_id: 'bc-names' }),
+        // Расширение среза уже израсходовано: проверяется только очистка названий.
+        adaptive_collection: { ...newVeAdaptiveCollection(), widenings: 2 },
         collection_mode: 'preview', target_progress: { ...createCollectionTarget('preview'), candidates_processed: 1 },
         target_checkpoint: { completed_round: 1, seen_rows: [ready], processed_rows: 1 },
         company_name_recovery: { validation_error: null, has_buffered_candidates: false,
@@ -394,6 +399,8 @@ describe('base_collect CONSTRUCT step order', () => {
       const unknown = { ...unifiedRow({ company: 'Clinic Unknown', website: 'unknown.test', email: 'mail@unknown.test' }),
         _email_status: 'unknown', _relevance_unchecked: true };
       const overlapInfo: VeCollectInfo = { ...collectInfo([]), collection_mode: 'preview', ready_target: 500,
+        // Расширение среза уже израсходовано: проверяется дочерняя проверка почт.
+        adaptive_collection: { ...newVeAdaptiveCollection(), widenings: 2 },
         validation_retry: true, target_progress: { ...createCollectionTarget('preview'), candidates_processed: count + 1 },
         target_checkpoint: { completed_round: 1, seen_rows: [], processed_rows: count + 1 },
         relevance_reserve: { version: 1, rows: [...reviewRows, unknown], source_rows: [] } };
@@ -608,6 +615,8 @@ describe('base_collect CONSTRUCT step order', () => {
     // source rows without routing empty failures into paid enrichment instead.
     for (const pipelined of [false, true]) {
       const budgetInfo: VeCollectInfo = { ...collectInfo([knownInn, ...excludedSources]), collection_mode: 'preview',
+        // Автоматическое расширение среза уже израсходовано: проверяется остановка по добору сайтов.
+        adaptive_collection: { ...newVeAdaptiveCollection(), widenings: 2 },
         search_policy: { version: 1, phase: 'paid', deferred_rows: [knownInn] },
         target_progress: createCollectionTarget('preview'),
         source_contact_budget: { version: 2, checked_at_growth: 0, ready_high_water: 0, paused: false },
@@ -1078,6 +1087,8 @@ describe('base_collect CONSTRUCT step order', () => {
     }
 
     const raceInfo: VeCollectInfo = { ...collectInfo(harvest.slice(0, 2)), collection_mode: 'preview',
+      // Расширение среза уже израсходовано: проверяется гонка ревизий, а не исчерпание.
+      adaptive_collection: { ...newVeAdaptiveCollection(), widenings: 2 },
       target_progress: createCollectionTarget('preview'), preview_pipeline: { version: 1, revision: 0, batches: [] } };
     raceInfo.tasks![0].exhausted = true;
     const raceDb = seed(raceInfo);
@@ -1115,6 +1126,8 @@ describe('base_collect CONSTRUCT step order', () => {
     expect(rolling.getRows('ve_bases')[0].collect_info).not.toHaveProperty('preview_pipeline');
 
     const stopInfo: VeCollectInfo = { ...collectInfo(harvest.slice(0, 2)), collection_mode: 'preview',
+      // Расширение среза уже израсходовано: проверяется остановка воркера, а не исчерпание.
+      adaptive_collection: { ...newVeAdaptiveCollection(), widenings: 2 },
       target_progress: createCollectionTarget('preview'), preview_pipeline: { version: 1, revision: 0, batches: [] } };
     stopInfo.tasks![0].exhausted = true;
     const stopDb = seed(stopInfo);
@@ -2530,5 +2543,303 @@ describe('base_collect: ливлок сохранённой проверки', (
     // Контакты никуда не делись: раунд завершается честно, резерв цел.
     expect(second.relevance_reserve!.rows).toHaveLength(3);
     expect(second.relevance_summary).toMatchObject({ total: 3, needs_review: 3 });
+  });
+});
+
+/**
+ * План кончился раньше цели (аудит 22.09.2026, 33 базы). Тексты гипотез и
+ * фильтры реестра — с прода: f1bb9ccf «Мясопереработка» (порог придуман,
+ * 954 компании вместо 3 389) и 6b475d8c «Кондитерские фабрики» (гипотеза
+ * «Крупные производители», размер законен).
+ */
+describe('base_collect: план кончился раньше цели', () => {
+  const MEAT = { title: 'Мясопереработка', description: 'Производители колбас, мясных полуфабрикатов, охлажденного мяса и деликатесов с Меркурием и сложной прослеживаемостью партий.' };
+  const SWEETS = { title: 'Кондитерские фабрики', description: 'Крупные производители конфет, шоколада, печенья и снеков с рецептурами, сменами, складами сырья и поставками в федеральные сети.' };
+  const MEAT_TASK = { source: 'companies_directory' as const,
+    rationale: 'Собираем мясоперерабатывающие производства по ОКВЭД 10.1 под гипотезу про колбасы, полуфабрикаты и Меркурий.',
+    directory_filters: { includeIp: false, okvedCodes: ['10.1'], revenueFrom: 100_000_000, employeesFrom: 20 } };
+  const SWEETS_TASK = { source: 'companies_directory' as const,
+    rationale: 'Собираем крупные кондитерские фабрики для гипотезы про рецептуры, партии и поставки в сети.',
+    directory_filters: { includeIp: false, okvedCodes: ['10.7', '10.8'], revenueFrom: 300_000_000, employeesFrom: 50 } };
+  const hypothesis = (text: { title: string; description: string }) =>
+    ({ ve_hypotheses: [{ id: 'h1', project_id: 'p1', vertical_id: 'v1', status: 'accepted', ...text }] });
+  const processed = [
+    unifiedRow({ company: 'Мясокомбинат Восток', inn: '7700000011', website: 'vostok.test', email: 'info@vostok.test' }),
+    unifiedRow({ company: 'Колбасный завод Юг', inn: '7700000012', website: 'yug.test', email: 'sales@yug.test' }),
+  ];
+  const ready = processed.map((row) => ({ ...row, _email_status: 'ok',
+    _ve_company_name: { version: 1, source: row.company, website: row.website, status: 'ready', value: row.company } }));
+  const exhaustedInfo = (task: VeCollectInfo['plan'] extends infer P ? P extends { tasks: Array<infer T> } ? T : never : never,
+    extra: Partial<VeCollectInfo> = {}): VeCollectInfo => ({
+    plan: { tasks: [task] },
+    tasks: [{ source: task.source, status: 'done', child_job_id: null, rows: processed.length, task, harvest: processed,
+      exhausted: true, note: 'реестр исчерпан' }],
+    collection_mode: 'preview', ready_target: 500, adaptive_collection: newVeAdaptiveCollection(),
+    search_policy: { version: 1, phase: 'paid', deferred_rows: [] },
+    target_progress: { ...createCollectionTarget('preview'), round: 3, candidates_processed: processed.length, ready_rows: ready.length },
+    target_checkpoint: { completed_round: 2, seen_rows: processed, processed_rows: processed.length },
+    ...extra,
+  });
+  const seedBase = (info: VeCollectInfo, text: { title: string; description: string }, base: Record<string, unknown> = {},
+    others: Array<Record<string, unknown>> = []) =>
+    seed(info, { ...hypothesis(text), ve_bases: [{ ...makeBase(info), data: ready, row_count: ready.length,
+      columns: [...VE_AUTO_COLLECT_COLUMNS], ...base }, ...others] });
+  const wake = async (db: MockSupabaseClient) => {
+    const queued = db.getRows('ve_jobs').filter((row) => row.stage === 'base_collect').at(-1)!;
+    await db.from('ve_jobs').update({ status: 'running' }).eq('id', queued.id);
+    await runBaseCollectStage({ ...makeJob(), id: queued.id as string, payload: queued.payload as VeJob['payload'] },
+      { supabase: db as unknown as SupabaseClient });
+    return db.getRows('ve_bases')[0];
+  };
+  const completeConstructor = async (db: MockSupabaseClient) => {
+    const child = db.getRows('base_constructor_jobs').find((row) => row.status === 'pending')!;
+    const grid = child.data as string[][];
+    await db.from('base_constructor_jobs').update({ status: 'completed',
+      data: [[...grid[0], 'Email Статус'], ...grid.slice(1).map((row) => [...row, 'ok'])] }).eq('id', child.id);
+  };
+  const planLlmReply = (tasks: unknown[]) => ({ data: { tasks }, tokensUsed: 10, costUsd: 0.01,
+    promptTokens: 5, completionTokens: 5, rawResponse: '' });
+
+  it('исчерпанный реестр с придуманным порогом открывает срез без порогов, повторное исчерпание честно завершает базу', async () => {
+    const db = seedBase(exhaustedInfo(MEAT_TASK), MEAT);
+    let base = await wake(db);
+    let info = base.collect_info as VeCollectInfo;
+    expect(base.status).toBe('collecting');
+    expect(info.target_progress).toMatchObject({ status: 'collecting', round: 4 });
+    expect(info.tasks).toHaveLength(2);
+    const second = info.tasks![1];
+    expect(second).toMatchObject({ status: 'pending', task: { widened: 'second_queue',
+      directory_filters: { includeIp: false, okvedCodes: ['10.1'] } } });
+    expect(second.task.directory_filters).not.toHaveProperty('revenueFrom');
+    expect(second.task.directory_filters).not.toHaveProperty('employeesFrom');
+    expect(info.adaptive_collection).toMatchObject({ widenings: 1, active_source: veSourceStrategyKey(second.task) });
+    expect(info.plan?.tasks).toHaveLength(2);
+    expect(searchRows).not.toHaveBeenCalled();
+
+    // Вторая очередь: тот же ОКВЭД без порогов, сначала компании с готовой почтой.
+    jest.mocked(searchRows).mockResolvedValue({ rows: [
+      { name: 'Колбасный цех Север', inn: '7700000101', email: 'sales@sever.test', website: 'sever.test', employees_count: null, revenue: null },
+      { name: 'Мясной двор Запад', inn: '7700000102', email: 'info@zapad.test', website: 'zapad.test', employees_count: 8, revenue: 40_000_000 },
+    ] });
+    base = await wake(db);
+    const filters = jest.mocked(searchRows).mock.calls[0][0];
+    expect(filters).toMatchObject({ okvedCodes: ['10.1'], hasEmail: true, includeIp: false });
+    expect(filters.revenueFrom).toBeUndefined();
+    expect(filters.employeesFrom).toBeUndefined();
+    expect(db.getRows('base_constructor_jobs')).toHaveLength(1);
+    expect((base.collect_info as VeCollectInfo).tasks![1]).toMatchObject({ exhausted: true, rows: 2 });
+
+    await completeConstructor(db);
+    base = await wake(db);
+    info = base.collect_info as VeCollectInfo;
+    expect(base).toMatchObject({ status: 'collecting', row_count: 4 });
+    // Второй очереди больше нет: один раз просим у планировщика новый срез.
+    expect(info.adaptive_collection).toMatchObject({ widenings: 2, replan_needed: true, replan_reason: 'plan_exhausted' });
+
+    // Планировщик снова предлагает тот же ОКВЭД с выдуманным порогом: порог
+    // снимается кодом, такой срез уже пройден — новых компаний нет.
+    jest.mocked(callLLMWithSchema).mockResolvedValueOnce(planLlmReply([MEAT_TASK]));
+    base = await wake(db);
+    info = base.collect_info as VeCollectInfo;
+    const feedback = String(jest.mocked(callLLMWithSchema).mock.calls
+      .map((call) => call[0].at(-1)?.content).find((content) => String(content).includes('Источники плана исчерпаны')));
+    expect(feedback).toContain('Предыдущий план (без порогов размера)');
+    expect(feedback).not.toContain('revenueFrom');
+    expect(feedback).not.toContain('employeesFrom');
+    expect(base.status).toBe('analyzing');
+    expect(info.target_progress).toMatchObject({ status: 'exhausted', ready_rows: 4 });
+    expect(info.target_progress?.reason).toContain('Срез уже расширялся автоматически (2 из 2)');
+    expect(info.adaptive_collection).toMatchObject({ widenings: 2, replan_attempts: 1 });
+    expect(db.getRows('base_constructor_jobs')).toHaveLength(1);
+    expect(db.getRows('ve_jobs').filter((row) => row.stage === 'base_analyze')).toHaveLength(1);
+  });
+
+  it('новый план не сохраняет порог без основания, а обоснованный — сохраняет и расширяет по правилу', async () => {
+    jest.mocked(searchRows).mockResolvedValue({ rows: [] });
+    for (const [text, task] of [[MEAT, MEAT_TASK], [SWEETS, SWEETS_TASK]] as const) {
+      const db = seed({ collection_mode: 'preview' }, hypothesis(text));
+      jest.mocked(callLLMWithSchema).mockResolvedValueOnce(planLlmReply([task]));
+      let info = (await wake(db)).collect_info as VeCollectInfo;
+      if (text === MEAT) {
+        expect(info.plan?.tasks[0].directory_filters).toEqual({ includeIp: false, okvedCodes: ['10.1'] });
+        continue;
+      }
+      expect(info.plan?.tasks[0].directory_filters).toEqual(SWEETS_TASK.directory_filters);
+      // Сначала лейны с готовыми контактами, затем полный срез; оба пусты —
+      // вторая очередь: порог вдвое мягче, пустые поля проходят.
+      expect(info.search_policy?.phase).toBe('paid');
+      info = (await wake(db)).collect_info as VeCollectInfo;
+      expect(info.tasks![1].task.directory_filters).toEqual({ includeIp: false, okvedCodes: ['10.7', '10.8'],
+        sizeOrUnknown: { revenueFrom: 150_000_000, employeesFrom: 25 } });
+      expect(info.target_progress?.status).toBe('collecting');
+    }
+  });
+
+  it('analyzed-база с исчерпанным реестром с порогами продолжается и открывает расширенный срез', async () => {
+    const info = exhaustedInfo(SWEETS_TASK, {
+      target_progress: { ...createCollectionTarget('preview'), status: 'limited', round: 11, max_rounds: 100, candidates_processed: processed.length,
+        ready_rows: ready.length, reason: 'Добор сайтов закрыт: последние 120 платных поисков не дали ни одного готового контакта' },
+      target_checkpoint: { completed_round: 11, seen_rows: processed, processed_rows: processed.length },
+      source_contact_budget: { version: 2, checked_at_growth: 0, ready_high_water: 0, paused: true },
+    });
+    // Соседняя гипотеза проекта уже забрала «Зарю»: общий рынок не ломает дедуп.
+    const neighbour = { ...makeBase({}), id: 'b-neighbour', hypothesis_id: 'h2', status: 'analyzed', columns: [...VE_AUTO_COLLECT_COLUMNS],
+      data: [{ ...unifiedRow({ company: 'Кондитерская фабрика Заря', inn: '7700000202', email: 'sales@zarya.test', website: 'zarya.test' }),
+        _email_status: 'ok' }] };
+    const db = seedBase(info, SWEETS, { status: 'analyzed' }, [neighbour]);
+    await db.from('ve_jobs').update({ status: 'done' }).eq('id', makeJob().id);
+    expect(canResumePartialPreview(db.getRows('ve_bases').find((row) => row.id === 'b1')!)).toBe(true);
+    await expect(enqueueVeBaseCollect(db as unknown as SupabaseClient, { projectId: 'p1', verticalId: 'v1',
+      verticalName: VERTICAL.name, hypothesisIds: ['h1'], collectionMode: 'preview', limit: 2000, resumeBaseId: 'b1' }))
+      .resolves.toMatchObject({ ok: true, created: true });
+    let base = await wake(db);
+    expect(base.status).toBe('collecting');
+    const second = (base.collect_info as VeCollectInfo).tasks![1];
+    expect(second.task.directory_filters).toEqual({ includeIp: false, okvedCodes: ['10.7', '10.8'],
+      sizeOrUnknown: { revenueFrom: 150_000_000, employeesFrom: 25 } });
+
+    jest.mocked(searchRows).mockResolvedValue({ rows: [
+      { name: 'Фабрика без отчётности', inn: '7700000201', email: 'info@nodata.test', website: 'nodata.test', employees_count: null, revenue: null },
+      { name: 'Кондитерская фабрика Заря', inn: '7700000202', email: 'sales@zarya.test', website: 'zarya.test', employees_count: 30, revenue: 200_000_000 },
+      { name: 'Пекарня у дома', inn: '7700000203', email: 'hello@bakery.test', website: 'bakery.test', employees_count: 10, revenue: 400_000_000 },
+      { name: 'Торговый дом Сладость', inn: '7700000204', email: 'td@sweet.test', website: 'sweet.test', employees_count: 100, revenue: 50_000_000 },
+      // Адрес в реестре есть, но это не почта: без сайта такой контакт не берём.
+      { name: 'Фабрика с битой почтой', inn: '7700000205', email: 'нет', website: '', employees_count: null, revenue: null },
+    ] });
+    base = await wake(db);
+    expect(jest.mocked(searchRows).mock.calls[0][0]).not.toHaveProperty('revenueFrom');
+    const harvest = (base.collect_info as VeCollectInfo).tasks![1].harvest!;
+    // Проходят пустой штат/выручка и компания в ослабленных границах; мелкая
+    // пекарня и торговый дом с малой выручкой отсеяны, «Заря» уже в соседней
+    // базе, у фабрики с битой почтой нет готового контакта.
+    expect(harvest.map((row) => row.company)).toEqual(['Фабрика без отчётности']);
+    const child = db.getRows('base_constructor_jobs')[0];
+    expect((child.data as string[][]).slice(1).map((row) => row[0])).toEqual(['Фабрика без отчётности']);
+  });
+
+  it('расширенный срез с двумя плохими партиями завершает базу с понятной причиной', async () => {
+    const second = { ...MEAT_TASK, widened: 'second_queue' as const,
+      directory_filters: { includeIp: false, okvedCodes: ['10.1'] } };
+    const secondKey = veSourceStrategyKey(second);
+    const candidates = Array.from({ length: 50 }, (_, index) => unifiedRow({ company: `Цех ${index}`,
+      inn: String(7700001000 + index), website: `ceh${index}.test`, email: `info@ceh${index}.test` }));
+    const info = exhaustedInfo(MEAT_TASK, {
+      construct: { bc_job_id: 'bc-dry', status: 'dispatched', dispatched_at: '2026-09-22T00:00:00Z' },
+      search_policy: { version: 1, phase: 'paid', deferred_rows: [], construct_rows: candidates },
+      adaptive_collection: { ...newVeAdaptiveCollection(), widenings: 1, active_source: secondKey,
+        completed: [{ id: 'dry-1', source_key: secondKey, source: 'companies_directory', candidates: 60, new_ready: 0,
+          started_at: '2026-09-22T00:00:00Z', finished_at: '2026-09-22T00:10:00Z', poor: true,
+          spend: { ai_usd: 0, serper_credits: 0, estimated_total_usd: 0, unknown_attempts: 0, complete: true } }],
+        pending: { id: 'dry-2', source_key: secondKey, source: 'companies_directory', candidates: 50,
+          ready_before: veReadyContactKeys(ready), started_at: '2026-09-22T00:10:00Z' } },
+    });
+    info.tasks!.push({ source: 'companies_directory', status: 'done', child_job_id: null, rows: candidates.length,
+      task: second, harvest: candidates });
+    info.plan = { tasks: [MEAT_TASK, second] };
+    const db = seedBase(info, MEAT);
+    await db.from('base_constructor_jobs').insert({ id: 'bc-dry', status: 'completed', selected_steps: ['split_emails', 'validate_emails'],
+      data: [['Компания', 'Сайт', 'Email', 'ИНН', 'Email Статус'],
+        ...candidates.map((row) => [row.company, row.website, row.email, row.inn, 'ok'])] });
+    // Все 50 компаний — не колбасные производства.
+    mockFindIrrelevantRows.mockResolvedValueOnce({ flagged: new Set(candidates.map((_, index) => index)), unchecked: new Set(),
+      coverage: { checkedCompanies: 50, totalCompanies: 50, complete: true }, tokensUsed: 0, costUsd: 0 });
+    const base = await wake(db);
+    const result = base.collect_info as VeCollectInfo;
+    expect(result.adaptive_collection?.completed.map((batch) => batch.new_ready)).toEqual([0, 0]);
+    expect(base.status).toBe('analyzing');
+    expect(result.target_progress).toMatchObject({ status: 'limited', ready_rows: 2 });
+    expect(result.target_progress?.reason).toContain('Расширенный срез тоже дал низкий выход: последние 110 компаний дали 0 новых готовых контактов');
+    expect(result.adaptive_collection?.replan_needed).toBe(false);
+    expect(callLLMWithSchema).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), { model: 'test-collection-model' });
+  });
+
+  it('новый срез из каталога Яндекс Карт берёт только компании с сайтом или почтой', async () => {
+    // Планировщик при исчерпании плана может выбрать не реестр, а каталог карт.
+    // Компания без сайта и почты оттуда ушла бы в платный поиск сайта (Serper).
+    const catalogTask = { source: 'yandex_maps' as const, widened: 'replan' as const,
+      rationale: 'Новый срез того же рынка: мясокомбинаты из готового каталога Яндекс Карт.',
+      maps_query: { queries: ['Мясокомбинаты'], geo: 'Россия' } };
+    const info = exhaustedInfo(MEAT_TASK, { adaptive_collection: { ...newVeAdaptiveCollection(),
+      widenings: 2, replan_attempts: 1, switches: 1, active_source: veSourceStrategyKey(catalogTask) } });
+    info.tasks!.push({ source: 'yandex_maps', status: 'pending', child_job_id: null, rows: 0, task: catalogTask,
+      catalog: { version: 1, filters: { categories: ['Мясокомбинаты'], countries: ['Россия'] } } });
+    info.plan = { tasks: [MEAT_TASK, catalogTask] };
+    const db = seedBase(info, MEAT);
+    const page = [
+      { yandex_id: '1', name: 'Мясокомбинат Ромашка', website: 'romashka.test', email: 'info@romashka.test',
+        address: 'Москва, Мясная улица, 1', categories: 'Мясокомбинаты' },
+      { yandex_id: '2', name: 'Колбасный цех Безсайтов', address: 'Москва, Колбасная улица, 2', categories: 'Мясокомбинаты' },
+      { yandex_id: '3', name: 'Мясная лавка Почтовая', email: 'shop@pochta-lavka.test',
+        address: 'Москва, Почтовая улица, 3', categories: 'Мясокомбинаты' },
+    ];
+    const originalRpc = db.rpc;
+    db.rpc = ((name: string, params: Record<string, unknown>) => {
+      const operation = name === 'yandex_maps_catalog_search'
+        ? Promise.resolve({ data: params.p_after ? [] : page, error: null }) : originalRpc(name, params);
+      return Object.assign(operation, { abortSignal: () => operation });
+    }) as typeof db.rpc;
+
+    const base = await wake(db);
+    const catalog = (base.collect_info as VeCollectInfo).tasks![1];
+    expect(catalog).toMatchObject({ status: 'done', exhausted: true, rows: 2, catalog: { after: '3' } });
+    expect(catalog.harvest!.map((row) => row.company)).toEqual(['Мясокомбинат Ромашка', 'Мясная лавка Почтовая']);
+    // Компания без контакта — не «исключена соседней базой», её просто не берём.
+    expect(catalog.excluded_during_fetch).toBeUndefined();
+    const child = db.getRows('base_constructor_jobs')[0];
+    expect((child.data as string[][]).slice(1).map((row) => row[0]).sort())
+      .toEqual(['Мясная лавка Почтовая', 'Мясокомбинат Ромашка']);
+    expect(fetchVeRelevanceEvidence).not.toHaveBeenCalledWith('', expect.anything());
+  });
+
+  it('новый срез из каталога PDL тоже берёт только компании с сайтом', async () => {
+    const pdlTask = { source: 'pdl' as const, widened: 'replan' as const, rationale: 'Meat processors from the PDL catalog.',
+      pdl_filters: { industries: ['food production'] } };
+    const info = exhaustedInfo(MEAT_TASK, { adaptive_collection: { ...newVeAdaptiveCollection(),
+      widenings: 2, replan_attempts: 1, switches: 1, active_source: veSourceStrategyKey(pdlTask) } });
+    info.tasks!.push({ source: 'pdl', status: 'pending', child_job_id: null, rows: 0, task: pdlTask });
+    info.plan = { tasks: [MEAT_TASK, pdlTask] };
+    const db = seedBase(info, MEAT);
+    const originalRpc = db.rpc;
+    db.rpc = ((name: string, params: Record<string, unknown>) => {
+      const operation = name === 'search_pdl_companies' ? Promise.resolve({ data: [
+        { id: '1', name: 'Prime Meats', website: 'primemeats.test', industry: 'food production', country: 'united states' },
+        { id: '2', name: 'Nameless Sausage Co', website: '', industry: 'food production', country: 'united states' },
+      ], error: null }) : originalRpc(name, params);
+      return Object.assign(operation, { abortSignal: () => operation });
+    }) as typeof db.rpc;
+    const base = await wake(db);
+    const pdl = (base.collect_info as VeCollectInfo).tasks![1];
+    expect(pdl).toMatchObject({ status: 'done', rows: 1 });
+    expect(pdl.harvest!.map((row) => row.company)).toEqual(['Prime Meats']);
+    expect(fetchVeRelevanceEvidence).not.toHaveBeenCalledWith('', expect.anything());
+  });
+
+  it('расширенный срез не покупает поиск сайта для компании с одной почтой и честно завершает базу', async () => {
+    const second = { ...MEAT_TASK, widened: 'second_queue' as const,
+      directory_filters: { includeIp: false, okvedCodes: ['10.1'] } };
+    // Почта есть, сайта нет. Раньше добор сайтов гейтился только глобальной
+    // фазой сбора, и такая строка расширенного среза уходила в платный поиск.
+    const mailOnly = unifiedRow({ company: 'Мясная лавка Почтовая', inn: '7700000301',
+      email: 'shop@pochta-lavka.test', address: 'Москва, Почтовая улица, 3' });
+    const info = exhaustedInfo(MEAT_TASK, {
+      adaptive_collection: { ...newVeAdaptiveCollection(), widenings: 2, switches: 1, active_source: veSourceStrategyKey(second) },
+      target_progress: { ...createCollectionTarget('preview'), round: 3, candidates_processed: 3, ready_rows: 3 },
+      target_checkpoint: { completed_round: 2, seen_rows: [...processed, mailOnly], processed_rows: 3 },
+    });
+    info.tasks!.push({ source: 'companies_directory', status: 'done', child_job_id: null, rows: 1, task: second,
+      harvest: [mailOnly], exhausted: true, note: 'реестр исчерпан' });
+    info.plan = { tasks: [MEAT_TASK, second] };
+    const readyMail = { ...mailOnly, _email_status: 'ok',
+      _ve_company_name: { version: 1, source: mailOnly.company, website: '', status: 'ready', value: mailOnly.company } };
+    const db = seedBase(info, MEAT, { data: [...ready, readyMail], row_count: 3 });
+
+    const base = await wake(db);
+    const result = base.collect_info as VeCollectInfo;
+    expect(fetchVeRelevanceEvidence).not.toHaveBeenCalledWith('', expect.anything());
+    expect(result.source_contact_recovery).toBeUndefined();
+    expect(base.status).toBe('analyzing');
+    expect(result.target_progress).toMatchObject({ status: 'exhausted', ready_rows: 3 });
+    expect(result.target_progress?.reason).toContain('Срез уже расширялся автоматически (2 из 2)');
+    expect(db.getRows('base_constructor_jobs')).toHaveLength(0);
   });
 });
