@@ -123,8 +123,33 @@ export interface VeCollectionTargetProgress {
   first_round_candidates?: number;
   /** Холостых раундов подряд: без новых для базы компаний. */
   idle_streak?: number;
+  /** Компаний в готовой базе. */
+  ready_companies?: number;
+  /** Адресов в готовой базе — только когда в цель (ready_rows) засчитаны не все. */
+  ready_contacts?: number;
+  /** Сколько адресов одной компании засчитывается в цель; рядом с ready_contacts. */
+  counted_per_company?: number;
   status: 'collecting' | 'target_reached' | 'exhausted' | 'limited' | 'error';
   reason?: string;
+}
+
+/**
+ * Состав готовой базы рядом с засчитанными в цель контактами (ready_rows).
+ * Число адресов пишется, только когда оно больше засчитанного: иначе оно
+ * совпадает с ready_rows и старые поля не должны его пережить.
+ */
+export function withVeTargetComposition(
+  progress: VeCollectionTargetProgress,
+  count: { counted: number; companies: number; perCompany: number | null }, contacts: number,
+): VeCollectionTargetProgress {
+  const next: VeCollectionTargetProgress = { ...progress, ready_companies: count.companies };
+  delete next.ready_contacts;
+  delete next.counted_per_company;
+  if (contacts > count.counted && count.perCompany !== null) {
+    next.ready_contacts = contacts;
+    next.counted_per_company = count.perCompany;
+  }
+  return next;
 }
 
 export function createCollectionTarget(mode: VeCollectionMode, readyTarget?: number): VeCollectionTargetProgress {
