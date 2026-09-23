@@ -1728,31 +1728,36 @@ body:has(.client-portal) {
 
 /* Окно сводки обновлений (см. components/changelog/ChangelogModal).
    Карточка плавно поднимается снизу, фон проявляется; при закрытии —
-   обратный путь. Переходы, а не keyframes: закрытие должно проиграться
-   в обратную сторону, и управляется оно атрибутом data-open. */
+   обратный путь. Keyframes, а не переходы по атрибуту: анимация при
+   монтировании проигрывается всегда, а переход срабатывал только если
+   браузер успел нарисовать начальное положение — и окно возникало резко. */
+@keyframes portal-changelog-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes portal-changelog-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes portal-changelog-rise {
+  from { opacity: 0; transform: translateY(64px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes portal-changelog-sink {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(64px); }
+}
 .portal-changelog-backdrop {
-  opacity: 0;
-  transition: opacity 300ms ease-out;
+  animation: portal-changelog-fade-in 350ms ease-out both;
 }
 .portal-changelog-card {
-  opacity: 0;
-  transform: translateY(48px);
-  transition:
-    transform 450ms cubic-bezier(0.16, 1, 0.3, 1),
-    opacity 300ms ease-out;
+  animation: portal-changelog-rise 550ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
-.portal-changelog-backdrop[data-open='true'] {
-  opacity: 1;
+.portal-changelog-backdrop[data-closing='true'] {
+  animation: portal-changelog-fade-out 300ms ease-in both;
 }
-.portal-changelog-backdrop[data-open='true'] .portal-changelog-card {
-  opacity: 1;
-  transform: translateY(0);
-}
-@media (prefers-reduced-motion: reduce) {
-  .portal-changelog-backdrop,
-  .portal-changelog-card {
-    transition: none;
-  }
+.portal-changelog-backdrop[data-closing='true'] .portal-changelog-card {
+  animation: portal-changelog-sink 300ms ease-in both;
 }
 
 /* ─── Палитра рядов графиков раздела «Деньги» ──────────────────────────────
