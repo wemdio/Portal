@@ -185,6 +185,7 @@ export async function runOutreachOsDailyPipeline(
     const onVacancies = buildHhArchiveSinkCallback(sinkJobId);
 
     const since = new Date(Date.now() - config.window_hours * 3600_000);
+    const seen = await loadRecentlySeen();
     const employers = await findNewHhEmployers({
       since,
       area: config.area,
@@ -192,6 +193,8 @@ export async function runOutreachOsDailyPipeline(
       excludePatterns: buildExcludePatterns(config.extra_exclude),
       maxEmployees: config.max_employees ?? undefined,
       limit: config.daily_limit,
+      exhaustive: true,
+      skipEmployerIds: seen.ids,
       log: (m) => log(`[hh] ${m}`),
       onVacancies,
     });
@@ -220,17 +223,15 @@ export async function runOutreachOsDailyPipeline(
       log(`Suppression-отсев клиентов: -${b2cFiltered.length - icp.length} → ${icp.length}`);
     }
 
-    // 4. Дедуп по окну: компании, контактированные за последние
-    //    RECONTACT_AFTER_DAYS дней, пропускаем (не пишем одной компании чаще
-    //    раза в 1.5 месяца). По hh_employer_id И по домену сайта. Компании
-    //    старше окна — снова eligible (повторный аутрич разрешён).
-    const seen = await loadRecentlySeen();
+    // 4. Дедуп по статусному окну: для отправленных и LLM-шума —
+    //    RECONTACT_AFTER_DAYS, для no_email — короткий срок повторной проверки.
+    //    Проверяем HH id И домен сайта.
     const fresh = icp.filter((e) => {
       if (seen.ids.has(e.id)) return false;
       const d = deriveDomain(e.siteUrl);
       return !(d && seen.domains.has(d));
     });
-    log(`Новых (не контактированы за ${RECONTACT_AFTER_DAYS}д): ${fresh.length}`);
+    log(`Доступных после seen-дедупа (отправленные: ${RECONTACT_AFTER_DAYS}д): ${fresh.length}`);
 
     // 5. Сетка → base_constructor_jobs (чистка/валидация без ta_scoring/persona).
     //    Вставка + poll-цикл вынесены в runBaseConstructorJob — тот же helper
@@ -293,8 +294,8 @@ export async function runOutreachOsDailyPipeline(
     //     ловят ~4%, но онлайн-школа с нейтральным доменом от B2B неотличима.
     //     Классифицируем УНИКАЛЬНЫЕ компании (не лиды), выкидываем лиды шумовых.
     //     Fail-open: сбой LLM = едем без этого фильтра, лиды не теряем.
-    //     Шумовые компании остаются в fresh → попадут в markSeen (45д не трогаем
-    //     — им и не надо писать; спустя окно их снова классифицирует LLM).
+    //     Шумовые компании остаются в fresh → попадут в markSeen как skipped.
+    //     После 45 дней их снова классифицирует LLM.
     // Контекст HH по домену: индустрии/описание/вакансия из fresh (HhEmployer[])
     // — они не доходят до грида (тот несёт только Компания/Сайт/Город/Email),
     // поэтому классификатору их отдаём отдельным маппингом по домену сайта.
@@ -517,11 +518,11 @@ export async function runOutreachOsDailyPipeline(
     //    Instantly, возможно несколькими chunk'ами по 1000); если он затем
     //    частично/полностью упадёт, эти компании НЕЛЬЗЯ пере-залить на следующем
     //    прогоне (клиент чистит кампанию → skip_if_in_campaign не спасёт). Поэтому
-    //    окно 45 дней ставится РАНЬШЕ, чем хоть один лид попал в Instantly.
+    //    окно seen ставится РАНЬШЕ, чем хоть один лид попал в Instantly.
     //    Ранние сбои (HH/конструктор, выше) сюда не доходят → корректно ретраятся.
     //    Если markSeen упадёт — append (ниже) не выполнится → компании ретраятся,
     //    в Instantly чисто. Цена: при чистом полном сбое append (ничего не залито)
-    //    эти компании на 45 дней не трогаем — осознанно (под-контакт ОК,
+    //    кандидатов с email на 45 дней не трогаем — осознанно (под-контакт ОК,
     //    пере-контакт — нет; требование «не чаще раза в 1.5 месяца»).
     const leadDomains = new Set(
       keptLeads.map((l) => deriveDomain(l.website ?? null)).filter((d): d is string => !!d),
