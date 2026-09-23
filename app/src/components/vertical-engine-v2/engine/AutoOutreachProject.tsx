@@ -30,7 +30,13 @@ import { PreparationProgress, getPreparationPresentation, type PreparationPresen
 import { selectHypothesisLetters } from './letterSelection';
 import { isPartialPreview } from './collectionProgress';
 import { ContactLimitField } from './ContactLimitField';
-import { VE_BROAD_HYPOTHESES_NOTE, VE_BROAD_HYPOTHESES_TITLE, groupVeHypotheses } from './hypothesisGroups';
+import {
+  VE_BROAD_HYPOTHESES_EMPTY_NOTE,
+  VE_BROAD_HYPOTHESES_NOTE,
+  VE_BROAD_HYPOTHESES_TITLE,
+  groupVeHypotheses,
+  veBroadHypothesesAction,
+} from './hypothesisGroups';
 
 const LABELS = ['Гипотезы', 'Письма', 'Базы и объём', 'Запуск', 'Результаты'];
 const RUN_LABELS = {
@@ -190,6 +196,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [researchBusy, setResearchBusy] = useState(false);
+  const [broadRequesting, setBroadRequesting] = useState(false);
   const [activeHypothesis, setActiveHypothesis] = useState('');
   const [presetId, setPresetId] = useState('');
   const dirtyRef = useRef(false);
@@ -340,6 +347,19 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
       setResearchBusy(false);
     }
   };
+  const addBroadHypotheses = async () => {
+    setBroadRequesting(true);
+    setError('');
+    try {
+      const result = await veEnginePost<VeJobResponse>(`${VE_API}/projects/${projectId}/broad-hypotheses`);
+      if (!result.ok) setError(result.data.error ?? 'Не удалось запустить добавление широких гипотез');
+      else await refresh();
+    } catch {
+      setError('Не удалось запустить добавление широких гипотез. Проверьте соединение');
+    } finally {
+      setBroadRequesting(false);
+    }
+  };
   const saveOffer = async (value: string) => {
     try {
       const result = await veEnginePatch<VeProjectResponse>(`${VE_API}/projects/${projectId}`, {
@@ -425,6 +445,28 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
       </label>
     ) : null;
   const hypothesisGroups = groupVeHypotheses(detail.verticals, detail.hypotheses);
+  const broadAction = veBroadHypothesesAction({
+    jobs: detail.jobs,
+    hypotheses: detail.hypotheses,
+    requesting: broadRequesting,
+    researchRunning,
+  });
+  // Широкие дописываются только к исследованному проекту: без вертикалей кнопки нет.
+  const broadControl = detail.verticals.length ? (
+    <div className="ve2-broad-action">
+      <button
+        type="button"
+        className={HE.btnGhost}
+        disabled={broadAction.disabled}
+        aria-busy={broadAction.running || undefined}
+        onClick={() => void addBroadHypotheses()}
+      >
+        {broadAction.label}
+      </button>
+      {broadAction.error ? <p className="ve2-t-dan" role="alert">{broadAction.error}</p> : null}
+      {broadAction.note ? <p className={HE.muted}>{broadAction.note}</p> : null}
+    </div>
+  ) : null;
   const renderHypothesis = (h: (typeof detail.hypotheses)[number]) => (
     <div
       key={h.id}
@@ -570,8 +612,17 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                         <span className="ve2-vertical-count">Гипотез: {hypothesisGroups.broad.length}</span>
                       </div>
                       <p className={HE.muted}>{VE_BROAD_HYPOTHESES_NOTE}</p>
+                      {broadControl}
                     </header>
                     <div className="ve2-hypothesis-list">{hypothesisGroups.broad.map(renderHypothesis)}</div>
+                  </section>
+                ) : broadControl ? (
+                  <section className="ve2-vertical-group ve2-broad-group" aria-labelledby="broad-hypotheses-title">
+                    <header className="ve2-vertical-header ve2-broad-empty">
+                      <h3 id="broad-hypotheses-title" className="ve2-vertical-title">{VE_BROAD_HYPOTHESES_TITLE}</h3>
+                      <p className={HE.muted}>{VE_BROAD_HYPOTHESES_EMPTY_NOTE}</p>
+                      {broadControl}
+                    </header>
                   </section>
                 ) : null}
                 {hypothesisGroups.verticals.map(({ vertical, hypotheses }) => {

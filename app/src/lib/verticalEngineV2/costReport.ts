@@ -28,7 +28,7 @@ export interface VeCostReportInput {
   snapshotAdvanced?: boolean;
 }
 
-const RESEARCH = new Set(['site_profile', 'competitors', 'brand_cloud', 'hypotheses', 'evidence', 'clustering']);
+const RESEARCH = new Set(['site_profile', 'competitors', 'brand_cloud', 'hypotheses', 'evidence', 'clustering', 'broad_hypotheses']);
 const CONSTRUCTOR_NO_AI_SEARCH = new Set([
   'find_emails', 'enrich_descriptions', 'split_emails', 'dedup_email', 'validate_emails', 'cap_emails_per_company',
 ]);

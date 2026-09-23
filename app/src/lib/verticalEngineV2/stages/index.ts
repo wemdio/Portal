@@ -12,6 +12,7 @@ import { runBrandCloudStage } from './brandCloud';
 import { runHypothesesStage } from './hypotheses';
 import { runEvidenceStage } from './evidence';
 import { runClusteringStage } from './clustering';
+import { runBroadHypothesesStage } from './broadHypotheses';
 import { runChainStage } from './chain';
 import { runVocabStage } from './vocab';
 import { runBaseAnalyzeStage } from './baseAnalyze';
@@ -38,6 +39,8 @@ export async function runVeStage(job: VeJob, ctx: VeStageContext): Promise<VeSta
       return runEvidenceStage(job, ctx);
     case 'clustering':
       return runClusteringStage(job, ctx);
+    case 'broad_hypotheses':
+      return runBroadHypothesesStage(job, ctx);
     case 'chain':
       return runChainStage(job, ctx);
     case 'vocab':
@@ -68,6 +71,7 @@ export { runBrandCloudStage } from './brandCloud';
 export { runHypothesesStage } from './hypotheses';
 export { runEvidenceStage } from './evidence';
 export { runClusteringStage, applyClusteringDecisions } from './clustering';
+export { runBroadHypothesesStage } from './broadHypotheses';
 export type { AppliedVertical, ClusterHypothesisInput } from './clustering';
 export { runChainStage, parsedToChainLetters, CHAIN_WAIT_DAYS } from './chain';
 export { runVocabStage } from './vocab';

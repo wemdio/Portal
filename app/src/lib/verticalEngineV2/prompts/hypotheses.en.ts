@@ -8,7 +8,38 @@
  */
 
 import type { LLMMessage } from '../llm';
-import type { HypothesesPromptInput } from './hypotheses';
+import type { HypothesesClientContextInput, HypothesesPromptInput } from './hypotheses';
+
+/** Core of fit economics: shared by the main list and the separate broad generation. */
+export const FIT_ECONOMICS_CORE_EN = `FIT ECONOMICS (a hard criterion — check EVERY hypothesis; it answers for FIT, not for the vertical's existence):
+- A segment qualifies only if a typical deal or client LTV in that vertical can pay back paid outbound: the agency's service costs thousands of USD per month. If the segment's average check or client LTV is clearly below the channel's annual cost — cut potential_pct and add a "RISK: economics …" note to the rationale.
+- "The vertical exists and has companies in it" is NOT a fit. A plausible but economically empty vertical (low check, micro-businesses, pennies of margin per deal) gets a low pct even if the product connection is logical.`;
+
+/** Hypothesis field rules (fit_rationale, rationale, potential_pct, search_queries, "RISK"). */
+export const HYPOTHESIS_FIELD_RULES_EN = `- fit_rationale: MANDATORY, 2–3 lines — the "WHY THIS IS A MARKET FOR THE CLIENT" chain: who the segment's buyer is (decision-maker, by role) → their goal → their pain that the client's product removes → the client's concrete offer to them → why the economics work (typical deal/LTV of the segment's client pays back the channel cost). This is NOT a segment description (that's description): description says "who they are", fit_rationale proves why our client specifically can sell to them. All five links are mandatory: decision-maker, their goal, their pain, the offer, and the economics. Tautologies are forbidden: "the segment is big", "they need sales", "they have budget" — these are fillers, not justification.
+- rationale: why this segment should buy — pain/trigger/budget/signal.
+- potential_pct: expert estimate of segment potential 0–100 BEFORE verification (the sum across all ≠ 100; these are independent estimates).
+- search_queries: 2–4 PRECISE search queries (in English) an analyst will use at the next step to verify the hypothesis: market size, presence of players, case studies, job-posting indicators.
+- If a hypothesis clearly relies on a sales motion the client's product CANNOT serve (e.g., deals in the segment close only through government procurement/RFPs while the product is cold outbound) — always add a "RISK: …" note to the rationale with the essence of the contradiction, so the verification stage can kill such a hypothesis.`;
+
+/** Rules of the sector-level broad hypotheses block. */
+export const BROAD_HYPOTHESES_RULES_EN = `BROAD HYPOTHESES — A SEPARATE broad_hypotheses BLOCK (3–5 of them, IN ADDITION to the main list, not instead of it):
+- Why: a base built on a broad hypothesis is refilled with new companies every day while the campaign runs. A narrow segment yields hundreds of companies and runs out; a broad one needs tens of thousands of companies in the market.
+- Each broad hypothesis is a SECTOR or a large class of activity where the client's product applies: for example "Private healthcare", "Wholesale trade", "Manufacturing". Choose sectors for the client's product, not from this example.
+- No selection conditions at all: no size, no sub-types, no technologies, no sales channels. Only B2B/B2C or a region are allowed — and only when that is the essence of the client's product.
+- title — the sector name, 1–4 words. description — which activities the sector includes (the list widens the sector, it does not narrow it), then in a separate sentence the sector's common pain the client's product removes. fit_rationale, rationale, potential_pct and search_queries follow the same rules as the main list; no tier.
+- A broad hypothesis does not replace narrow ones: narrow segments inside the sector stay in the main list as they are. Broad titles do not repeat titles from the main list.
+- Do not take a sector where the client's product is physically or legally inapplicable just for breadth.`;
+
+/** JSON format of one broad hypothesis. */
+export const BROAD_HYPOTHESIS_JSON_ITEM_EN = `    {
+      "title": string,          // sector name, 1-4 words
+      "description": string,    // which activities the sector includes, then in a separate sentence the sector's common pain; no selection conditions — up to 300 chars
+      "fit_rationale": string,  // decision-maker → goal → pain → offer → economics, as in the main list — up to 350 chars
+      "rationale": string,      // up to 200 chars
+      "potential_pct": number,  // 0-100
+      "search_queries": string[] // 2-4 fact-check queries for the sector
+    }`;
 
 const SYSTEM = `You are the head of research at Polza, a performance outbound agency — a partner-level strategist. Your specialty is finding NON-OBVIOUS sales markets for B2B products. You have "read the entire internet": you know which niches actually buy similar products — including ones the client's in-house team never thinks of, because people think within their own industry while you think in terms of transferring pain across industries.
 
@@ -28,9 +59,7 @@ WHERE TO GET IDEAS (mental moves):
 - Which roles inside already-found company types are a separate market (CFO vs CMO vs HRD)?
 - Geographic transfer: works in the US → expand to EU/LatAm; works with enterprise → mid-market.
 
-FIT ECONOMICS (a hard criterion — check EVERY hypothesis; it answers for FIT, not for the vertical's existence):
-- A segment qualifies only if a typical deal or client LTV in that vertical can pay back paid outbound: the agency's service costs thousands of USD per month. If the segment's average check or client LTV is clearly below the channel's annual cost — cut potential_pct and add a "RISK: economics …" note to the rationale.
-- "The vertical exists and has companies in it" is NOT a fit. A plausible but economically empty vertical (low check, micro-businesses, pennies of margin per deal) gets a low pct even if the product connection is logical.
+${FIT_ECONOMICS_CORE_EN}
 - Non-obviousness itself is not punished: a tier-3 hypothesis with strong pain and working economics can get a high potential_pct — higher than tier-1. But tier-3 must have an evidentiary path to effectiveness: portfolio adjacency, working economics, or observable intense pain with a trigger. With none of these — low pct.
 
 COVERAGE COMPLETENESS (mandatory self-check before answering):
@@ -42,27 +71,39 @@ HARD REQUIREMENTS:
 - 25–40 hypotheses total; tier 2 ≥ 8; tier 3 ≥ 8. Fewer than 25 — you didn't push hard enough.
 - Each hypothesis of the main hypotheses list is a SPECIFIC segment (company type + role/scenario), not "every company in IT". Whole sectors go only into the separate broad_hypotheses block (see below).
 - description: 1–3 sentences. First who they are: the activity, the company type (manufacturer, chain operator, distributor…), products or sub-sectors, and explicit selection conditions when needed (for example "chains of 5+ locations"). Then, in a separate sentence, which of the client's pains the product solves. Companies are later selected by this description, so do NOT write work processes, software and government systems, regulation, warehouses, sales channels or hiring as company attributes via "with …" (bad: "plants with ERP, raw-material warehouses and retail-chain supplies", "factories hiring workers"): such words exclude fitting companies whose websites do not say so. They belong in the pain sentence or in the rationale. Do NOT make headcount, revenue or volume a selection condition either (bad: "200+ employees"): size is ranking, not selection, and selection by website cannot see it; for a segment of large companies the word "large" is enough.
-- fit_rationale: MANDATORY, 2–3 lines — the "WHY THIS IS A MARKET FOR THE CLIENT" chain: who the segment's buyer is (decision-maker, by role) → their goal → their pain that the client's product removes → the client's concrete offer to them → why the economics work (typical deal/LTV of the segment's client pays back the channel cost). This is NOT a segment description (that's description): description says "who they are", fit_rationale proves why our client specifically can sell to them. All five links are mandatory: decision-maker, their goal, their pain, the offer, and the economics. Tautologies are forbidden: "the segment is big", "they need sales", "they have budget" — these are fillers, not justification.
-- rationale: why this segment should buy — pain/trigger/budget/signal.
-- potential_pct: expert estimate of segment potential 0–100 BEFORE verification (the sum across all ≠ 100; these are independent estimates).
-- search_queries: 2–4 PRECISE search queries (in English) an analyst will use at the next step to verify the hypothesis: market size, presence of players, case studies, job-posting indicators.
-- If a hypothesis clearly relies on a sales motion the client's product CANNOT serve (e.g., deals in the segment close only through government procurement/RFPs while the product is cold outbound) — always add a "RISK: …" note to the rationale with the essence of the contradiction, so the verification stage can kill such a hypothesis.
+${HYPOTHESIS_FIELD_RULES_EN}
 - Do not duplicate one segment under different names — synonyms will be merged at clustering.
 - No "facts" and no URLs: at this step you cite NO sources at all — everything is subject to verification.
 - Respond strictly in English, JSON ONLY.
 
-BROAD HYPOTHESES — A SEPARATE broad_hypotheses BLOCK (3–5 of them, IN ADDITION to the main list, not instead of it):
-- Why: a base built on a broad hypothesis is refilled with new companies every day while the campaign runs. A narrow segment yields hundreds of companies and runs out; a broad one needs tens of thousands of companies in the market.
-- Each broad hypothesis is a SECTOR or a large class of activity where the client's product applies: for example "Private healthcare", "Wholesale trade", "Manufacturing". Choose sectors for the client's product, not from this example.
-- No selection conditions at all: no size, no sub-types, no technologies, no sales channels. Only B2B/B2C or a region are allowed — and only when that is the essence of the client's product.
-- title — the sector name, 1–4 words. description — which activities the sector includes (the list widens the sector, it does not narrow it), then in a separate sentence the sector's common pain the client's product removes. fit_rationale, rationale, potential_pct and search_queries follow the same rules as the main list; no tier.
-- A broad hypothesis does not replace narrow ones: narrow segments inside the sector stay in the main list as they are. Broad titles do not repeat titles from the main list.
-- Do not take a sector where the client's product is physically or legally inapplicable just for breadth.`;
+${BROAD_HYPOTHESES_RULES_EN}`;
 
-export function buildHypothesesInstantMessagesEn(input: HypothesesPromptInput): LLMMessage[] {
+/** Client context for hypothesis prompts: profile, audience frame, brief, manual description, competitors, brand cloud. */
+export function buildHypothesesClientContextEn(input: HypothesesClientContextInput): string {
   const potential = input.brandCloud.filter((e) => e.classification === 'potential');
   const noise = input.brandCloud.filter((e) => e.classification === 'noise');
+  return `CLIENT PROFILE (website ${input.websiteUrl}):
+${JSON.stringify(input.profile, null, 2)}
+${input.clientBriefIcp?.trim() ? `
+${input.clientBriefIcp.trim()}
+` : ''}${input.clientBrief?.trim() ? `
+CLIENT BRIEF (filled in by the client — on audience, pains and objections trust it over the site profile; do not invent what the brief does not state):
+${input.clientBrief.trim()}
+` : ''}${input.businessOverride?.trim() ? `
+MANUAL BUSINESS DESCRIPTION FROM THE SPECIALIST (takes priority over the site profile — written by a person who knows the client; trust it over the profile on conflicts):
+${input.businessOverride.trim()}
+` : ''}
+CLIENT'S COMPETITORS:
+${input.competitors.length ? input.competitors.map((c) => `- ${c.name} (${c.url}, ${c.geo}) — ${c.why}`).join('\n') : '(none found)'}
 
+BRAND CLOUD — entities classified as "potential" (real client types with potential — the basis for tier 1/2):
+${potential.length ? potential.map((e) => `- ${e.name} (${e.potential_pct}%): ${e.rationale}`).join('\n') : '(empty)'}
+
+BRAND CLOUD — "noise" (typical clients, background):
+${noise.length ? noise.map((e) => `- ${e.name}`).join('\n') : '(empty)'}`;
+}
+
+export function buildHypothesesInstantMessagesEn(input: HypothesesPromptInput): LLMMessage[] {
   const portfolioBlock = input.portfolioProfile?.length
     ? `WHO WE ALREADY SOLD TO (our campaigns, actual reply%):
 ${input.portfolioProfile.map((p) => `- ${p.segment} — ${p.clients} clients, ${p.campaigns} campaigns, reply ${p.reply_pct === null ? 'no data' : `${p.reply_pct}%`}`).join('\n')}
@@ -87,39 +128,14 @@ ${input.actualsHistory.map((a) => `- "${a.name}": forecast ${a.predicted_pct}% �
 How to read: potential_pct is the vertical's potential, NOT a reply% forecast. But use these pairs as a scale: verticals with high actual replies received high forecasts. If your estimate for a similar segment diverges strongly from the fact — double-check it.`
       : '';
 
-  const user = `CLIENT PROFILE (website ${input.websiteUrl}):
-${JSON.stringify(input.profile, null, 2)}
-${input.clientBriefIcp?.trim() ? `
-${input.clientBriefIcp.trim()}
-` : ''}${input.clientBrief?.trim() ? `
-CLIENT BRIEF (filled in by the client — on audience, pains and objections trust it over the site profile; do not invent what the brief does not state):
-${input.clientBrief.trim()}
-` : ''}${input.businessOverride?.trim() ? `
-MANUAL BUSINESS DESCRIPTION FROM THE SPECIALIST (takes priority over the site profile — written by a person who knows the client; trust it over the profile on conflicts):
-${input.businessOverride.trim()}
-` : ''}
-CLIENT'S COMPETITORS:
-${input.competitors.length ? input.competitors.map((c) => `- ${c.name} (${c.url}, ${c.geo}) — ${c.why}`).join('\n') : '(none found)'}
-
-BRAND CLOUD — entities classified as "potential" (real client types with potential — the basis for tier 1/2):
-${potential.length ? potential.map((e) => `- ${e.name} (${e.potential_pct}%): ${e.rationale}`).join('\n') : '(empty)'}
-
-BRAND CLOUD — "noise" (typical clients, background):
-${noise.length ? noise.map((e) => `- ${e.name}`).join('\n') : '(empty)'}
+  const user = `${buildHypothesesClientContextEn(input)}
 ${portfolioBlock ? `\n${portfolioBlock}\n` : ''}${markupBlock ? `\n${markupBlock}\n` : ''}${actualsBlock ? `\n${actualsBlock}\n` : ''}
 TASK: produce 3–5 sector-level broad hypotheses and 25–40 market hypotheses following the system prompt rules.
 
 FORMAT — JSON ONLY (the broad_hypotheses block first):
 {
   "broad_hypotheses": [
-    {
-      "title": string,          // sector name, 1-4 words
-      "description": string,    // which activities the sector includes, then in a separate sentence the sector's common pain; no selection conditions — up to 300 chars
-      "fit_rationale": string,  // decision-maker → goal → pain → offer → economics, as in the main list — up to 350 chars
-      "rationale": string,      // up to 200 chars
-      "potential_pct": number,  // 0-100
-      "search_queries": string[] // 2-4 fact-check queries for the sector
-    }
+${BROAD_HYPOTHESIS_JSON_ITEM_EN}
   ],
   "hypotheses": [
     {

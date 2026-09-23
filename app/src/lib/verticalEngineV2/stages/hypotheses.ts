@@ -20,10 +20,11 @@ import {
   type VeSiteProfileOutput,
 } from '../schemas';
 import { projectMarket, type VeMarket } from '../market';
-import { buildHypothesesInstantMessages } from '../prompts/hypotheses';
+import { buildHypothesesInstantMessages, type HypothesesClientContextInput } from '../prompts/hypotheses';
 import { buildHypothesesInstantMessagesEn } from '../prompts/hypotheses.en';
 import { getPortfolioProfile, type VePortfolioEntry } from '../datasetStats';
-import type { VeJob } from '../types';
+import { VE_BROAD_HYPOTHESES_MAX } from '../broadHypotheses';
+import type { VeJob, VeProject } from '../types';
 import {
   addUsage,
   latestDoneJobResult,
@@ -38,8 +39,7 @@ import type { VeCompetitorEntry } from './competitors';
 
 /* ─────────────── широкие гипотезы ─────────────── */
 
-/** Больше широких не берём: каждая — отдельная проверка источниками и отдельная база. */
-export const VE_BROAD_HYPOTHESES_MAX = 5;
+export { VE_BROAD_HYPOTHESES_MAX };
 
 function candidateTitleKey(title: string): string {
   return title.toLowerCase().replace(/\s+/g, ' ').trim();
@@ -193,16 +193,21 @@ export async function loadActualsHistory(ctx: VeStageContext): Promise<VeActuals
   }
 }
 
-export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promise<VeStageResult> {
-  const usage = newUsage();
-  const project = await readProject(ctx.supabase, job.project_id);
+/**
+ * Контекст клиента для генерации гипотез: профиль сайта, конкуренты и brand
+ * cloud из прошлых стадий, бриф клиента и ручное описание бизнеса. Общий для
+ * полного прохода и отдельной генерации широких (stages/broadHypotheses.ts).
+ */
+export async function loadHypothesesClientContext(
+  ctx: VeStageContext,
+  project: VeProject,
+  logTag = '[hypotheses]',
+): Promise<HypothesesClientContextInput> {
   const profile = readSiteProfile<VeSiteProfileOutput>(project);
-  // Рынок: ctx.market (воркер), фолбэк — колонка ve_projects.market.
-  const market = ctx.market ?? projectMarket(project);
 
   const competitorsResult = await latestDoneJobResult<{ competitors?: VeCompetitorEntry[] }>(
     ctx.supabase,
-    job.project_id,
+    project.id,
     'competitors',
   );
   const competitors = (competitorsResult?.competitors ?? []).map((c) => ({
@@ -214,10 +219,39 @@ export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promi
 
   const brandCloudResult = await latestDoneJobResult<{ entities?: VeBrandCloudOutput['entities'] }>(
     ctx.supabase,
-    job.project_id,
+    project.id,
     'brand_cloud',
   );
   const brandCloud = brandCloudResult?.entities ?? [];
+
+  const clientBriefRecord = readClientBrief(project);
+  const clientBrief = compileClientBriefForPrompt(clientBriefRecord);
+  // Рамка ЦА идёт отдельным блоком-ограничением: список «исключить» клиент
+  // задал прямо, и такие сегменты не должны появляться даже с низким процентом.
+  const clientBriefIcp = compileClientBriefIcpForPrompt(clientBriefRecord?.icp ?? null);
+  if (clientBriefIcp) stageLog(ctx, `${logTag} рамка ЦА из брифа применена как ограничение`);
+
+  return {
+    profile,
+    websiteUrl: project.website_url,
+    brandCloud,
+    competitors,
+    // Ручное описание бизнеса (спасение тонких сайтов) — поверх профиля.
+    ...(typeof project.brief?.business_override === 'string' && project.brief.business_override.trim()
+      ? { businessOverride: project.brief.business_override.trim() }
+      : {}),
+    // Бриф клиента: ЦА, боли и возражения из первых рук — на сайте их нет.
+    ...(clientBrief ? { clientBrief } : {}),
+    ...(clientBriefIcp ? { clientBriefIcp } : {}),
+  };
+}
+
+export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promise<VeStageResult> {
+  const usage = newUsage();
+  const project = await readProject(ctx.supabase, job.project_id);
+  // Рынок: ctx.market (воркер), фолбэк — колонка ve_projects.market.
+  const market = ctx.market ?? projectMarket(project);
+  const clientContext = await loadHypothesesClientContext(ctx, project);
 
   // Калибровочные данные — best-effort: сбой любого источника → undefined,
   // мгновенный проход продолжается без калибровки.
@@ -227,32 +261,15 @@ export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promi
     loadActualsHistory(ctx),
   ]);
 
-  const clientBriefRecord = readClientBrief(project);
-  const clientBrief = compileClientBriefForPrompt(clientBriefRecord);
-  // Рамка ЦА идёт отдельным блоком-ограничением: список «исключить» клиент
-  // задал прямо, и такие сегменты не должны появляться даже с низким процентом.
-  const clientBriefIcp = compileClientBriefIcpForPrompt(clientBriefRecord?.icp ?? null);
-  if (clientBriefIcp) stageLog(ctx, '[hypotheses] рамка ЦА из брифа применена как ограничение');
-
   stageLog(ctx, '[hypotheses] мгновенный проход: 3–5 широких и 25–40 кандидатов…');
   // Объект собираем переменной, а не литералом в вызове: поля portfolioProfile /
   // markupHistory добавляются в HypothesesPromptInput параллельным изменением —
   // так стадия компилируется и до, и после приземления промпт-контракта.
   const promptInput = {
-    profile,
-    websiteUrl: project.website_url,
-    brandCloud,
-    competitors,
+    ...clientContext,
     ...(portfolioProfile ? { portfolioProfile } : {}),
     ...(markupHistory ? { markupHistory } : {}),
     ...(actualsHistory ? { actualsHistory } : {}),
-    // Ручное описание бизнеса (спасение тонких сайтов) — поверх профиля.
-    ...(typeof project.brief?.business_override === 'string' && project.brief.business_override.trim()
-      ? { businessOverride: project.brief.business_override.trim() }
-      : {}),
-    // Бриф клиента: ЦА, боли и возражения из первых рук — на сайте их нет.
-    ...(clientBrief ? { clientBrief } : {}),
-    ...(clientBriefIcp ? { clientBriefIcp } : {}),
   };
   const llm = await callLLMWithSchema(
     (market === 'us' ? buildHypothesesInstantMessagesEn : buildHypothesesInstantMessages)(promptInput),
