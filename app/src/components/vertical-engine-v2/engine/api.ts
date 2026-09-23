@@ -103,7 +103,10 @@ export interface VeCollectStatsDto {
   relevance_total_companies?: number | null;
   relevance_coverage_complete?: boolean | null;
   excluded_existing_bases?: number | null;
+  /** Строки, которые эта база уже просматривала в прошлых раундах (не другие базы). */
+  excluded_already_seen?: number | null;
   excluded_during_fetch?: number | null;
+  already_seen_during_fetch?: number | null;
   finished_at?: string | null;
 }
 

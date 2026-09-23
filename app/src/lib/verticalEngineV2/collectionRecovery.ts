@@ -1,10 +1,17 @@
 import { isVeProviderBillingError } from './collectionErrors';
-import { collectionRoundLimit, type VeCollectionTargetProgress } from './collectionTarget';
+import {
+  collectionRoundLimit, veCollectionMaxRounds, VE_COLLECTION_ROUND_BUDGET, VE_COLLECTION_ROUND_CEILING,
+  type VeCollectionTargetProgress,
+} from './collectionTarget';
 import { buildVeRelevanceReviewBatch, readVeRelevanceReserve, readVeRelevanceSourceRows } from './relevanceReserve';
 import { needsVeSavedEmailReview } from './savedEmailReviewEligibility';
 import { isVeRelevanceTriageEnabled } from './relevanceTriageConfig';
 import { normalizeVeMaxEmailsPerCompany } from './companyContactCap';
 import { VE_COMPANY_CAP_FIELD } from './relevanceReserve';
+import { veCanWidenPlan } from './planWidening';
+import { isVeRenewableSourceTask, reopenVeSourceTask } from './sourceRenewal';
+import type { VeAdaptiveCollection } from './adaptiveCollection';
+import type { VeCollectTask } from './prompts/sourcePlan';
 
 /** Explicit continuation only: a terminal partial preview is never daily supply. */
 export function canResumePartialPreview(base: Record<string, unknown>): boolean {
@@ -35,12 +42,36 @@ export function canResumePartialPreview(base: Record<string, unknown>): boolean 
     reserve, ready: [], source: readVeRelevanceSourceRows(info.relevance_reserve), automatic: true,
     triage: isVeRelevanceTriageEnabled(typeof base.project_id === 'string' ? base.project_id : null),
   }).rows.length > 0) return true;
-  return Number(target.candidates_processed) < Number(target.max_candidates)
-    && Number(target.round) < Number(target.max_rounds)
-    && Array.isArray(info.tasks) && info.tasks.some((task) =>
-      task && (task.status === 'pending' || task.status === 'dispatched'
-        || (task.status === 'done' && (task.source === 'companies_directory' || task.catalog)
-          && !task.exhausted && !task.hit_ceiling)));
+  // Предел раундов не препятствие: продолжение само даёт новый бюджет
+  // (grantVeResumeRoundBudget). Так b5934955 после круга повторной отправки
+  // стояла на 100 из 100 раундов с живым реестром, и дособрать её было нельзя.
+  if (!(Number(target.candidates_processed) < Number(target.max_candidates)) || !Array.isArray(info.tasks)) return false;
+  // Старая задача карт (живой парсер до 16.09) тоже продолжаема: следующий
+  // раунд читает её запросы из готового каталога.
+  if (info.tasks.some((task) =>
+    task && (task.status === 'pending' || task.status === 'dispatched' || isVeRenewableSourceTask(task)))) return true;
+  // План выбран до дна, но база ещё не расширяла срез сама (вторая очередь
+  // без придуманных порогов или подбор нового среза): её можно продолжить.
+  // Так остались 33 базы аудита 22.09 — «Продолжить подготовку» их не брала.
+  const planTasks = info.tasks.filter((task) => task && typeof task.task === 'object' && task.task)
+    .map((task) => task.task as VeCollectTask);
+  return target.status !== 'error'
+    && veCanWidenPlan(planTasks, info.adaptive_collection as VeAdaptiveCollection | undefined);
+}
+
+/**
+ * Явное «Продолжить подготовку» — новый бюджет раундов, один на нажатие:
+ * предел ставится от текущего раунда, а не прибавляется к прежнему, поэтому
+ * повторные нажатия без работы между ними бюджет не копят. Счёт холостых
+ * раундов тоже начинается заново.
+ */
+export function grantVeResumeRoundBudget(info: Record<string, unknown>): void {
+  const progress = info.target_progress as VeCollectionTargetProgress | undefined;
+  if (!progress || typeof progress !== 'object' || !Number.isSafeInteger(progress.round) || progress.round < 1) return;
+  const next: VeCollectionTargetProgress = { ...progress, max_rounds: Math.max(veCollectionMaxRounds(progress.max_rounds),
+    Math.min(VE_COLLECTION_ROUND_CEILING, progress.round + VE_COLLECTION_ROUND_BUDGET)) };
+  delete next.idle_streak;
+  info.target_progress = next;
 }
 
 /** Only recognized preview failures may reuse a base; never supply/refill. */
@@ -142,17 +173,14 @@ export function openNextVeCollectionRound(info: Record<string, unknown>): boolea
   const stats = info.stats as Record<string, unknown> | undefined;
   if (stats && typeof stats === 'object') delete stats.finished_at;
   // Живые лейны реестра и каталога снова читают СВОЮ закладку — тот же сброс,
-  // что делает стадия на границе раунда. Исчерпанные и упёршиеся в потолок
-  // остаются как есть, как и задачи, которые возобновление уже подняло.
+  // что делает стадия на границе раунда; старая задача карт открывается как
+  // чтение каталога. Исчерпанные и упёршиеся в потолок остаются как есть, как
+  // и задачи, которые возобновление уже подняло.
   const tasks = info.tasks;
   if (Array.isArray(tasks) && !info.preview_pipeline && !info.adaptive_collection) {
     info.tasks = tasks.map((state) => {
       const task = state as Record<string, unknown> | null;
-      if (!task || task.status !== 'done' || task.exhausted || task.hit_ceiling
-        || !(task.source === 'companies_directory' || !!task.catalog)) return state;
-      return { source: task.source, task: task.task, status: 'pending', child_job_id: null, rows: 0,
-        ...(task.catalog ? { catalog: task.catalog } : {}),
-        ...(task.directory_cursors ? { directory_cursors: task.directory_cursors } : {}) };
+      return task && isVeRenewableSourceTask(task) ? reopenVeSourceTask(task) : state;
     });
   }
   info.limit = collectionRoundLimit(next);

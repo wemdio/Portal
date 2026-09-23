@@ -13,10 +13,9 @@
  *      что «новые за 24 часа» — это date_from = (now − 24h), без явного
  *      фильтра по индустрии/ключевикам, который можно опционально добавить.
  *
- *   2. HH ограничивает выдачу 2000 элементов (20 страниц × 100). Для нашего
- *      объёма 20k/мес ≈ 700/день — 2000 вакансий гарантированно содержат
- *      больше 700 уникальных работодателей. Если очень понадобится больше —
- *      придётся итерировать по регионам или индустриям; пока не нужно.
+ *   2. HH ограничивает выдачу 2000 элементов (20 страниц × 100). Для
+ *      OutreachOS переполненные запросы делятся по времени, пока каждая
+ *      часть не помещается в это окно.
  *
  *   3. Детали работодателя (site_url, employee_count) запрашиваются вторым
  *      запросом /employers/{id}, потому что /vacancies возвращает только
@@ -58,6 +57,10 @@ export interface HhAutoParserConfig {
   maxEmployees?: number;
   /** Hard cap on returned employers, applied after filtering. */
   limit?: number;
+  /** Exhaust the HH 2000-vacancy window by splitting searches by publication time. */
+  exhaustive?: boolean;
+  /** Avoid expensive /employers requests for IDs still blocked by the caller's seen window. */
+  skipEmployerIds?: ReadonlySet<string>;
   /** Optional logger for observability. */
   log?: (msg: string) => void;
   /**
@@ -269,6 +272,8 @@ async function searchVacancyPages(
   params: URLSearchParams,
   log: (m: string) => void,
   onVacancies?: (batch: HhArchiveSinkVacancy[]) => Promise<void>,
+  firstPage?: HhVacancyResponse,
+  exhaustive = false,
 ): Promise<Map<string, CandidateEmployer>> {
   const employers = new Map<string, CandidateEmployer>();
   let page = 0;
@@ -278,7 +283,9 @@ async function searchVacancyPages(
     params.set('page', String(page));
 
     const url = `${HH_API_BASE}/vacancies?${params.toString()}`;
-    const data = await fetchJson<HhVacancyResponse>(url);
+    const data = page === 0 && firstPage
+      ? firstPage
+      : await fetchVacancyPage(url, exhaustive);
     if (!data || !data.items || data.items.length === 0) break;
 
     const sinkBatch: HhArchiveSinkVacancy[] = [];
@@ -337,6 +344,51 @@ async function searchVacancyPages(
   return employers;
 }
 
+async function fetchVacancyPage(url: string, exhaustive: boolean): Promise<HhVacancyResponse | null> {
+  for (let attempt = 1; attempt <= (exhaustive ? 3 : 1); attempt++) {
+    const data = await fetchJson<HhVacancyResponse>(url);
+    if (data?.items && (!exhaustive || typeof data.found === 'number')) return data;
+    if (attempt < 3 && exhaustive) await sleep(attempt * 1000);
+  }
+  if (exhaustive) throw new Error(`HH vacancy search failed after retries: ${url}`);
+  return null;
+}
+
+/** HH caps each search at 2000 vacancies; partition only the searches that exceed it. */
+async function searchCompleteVacancyWindow(
+  params: URLSearchParams,
+  from: Date,
+  to: Date,
+  log: (m: string) => void,
+  onVacancies?: (batch: HhArchiveSinkVacancy[]) => Promise<void>,
+): Promise<Map<string, CandidateEmployer>> {
+  const windowParams = new URLSearchParams(params);
+  windowParams.set('date_from', formatDateFrom(from));
+  windowParams.set('date_to', formatDateFrom(to));
+  windowParams.set('per_page', String(PAGE_SIZE));
+  windowParams.set('page', '0');
+  const firstPage = await fetchVacancyPage(`${HH_API_BASE}/vacancies?${windowParams.toString()}`, true);
+  if (!firstPage) throw new Error('HH vacancy search returned no first page');
+
+  if ((firstPage.found ?? 0) > MAX_PAGES * PAGE_SIZE) {
+    const fromSeconds = Math.floor(from.getTime() / 1000);
+    const toSeconds = Math.floor(to.getTime() / 1000);
+    if (toSeconds - fromSeconds <= 1) {
+      throw new Error(`HH vacancy search still exceeds 2000 results in one second: ${windowParams.toString()}`);
+    }
+    const middleSeconds = Math.floor((fromSeconds + toSeconds) / 2);
+    log(`HH: ${firstPage.found} vacancies exceed page limit; splitting ${formatDateFrom(from)} → ${formatDateFrom(to)}`);
+    // Overlap the boundary second: HH date filters can include both endpoints.
+    // Employer IDs are deduplicated when the two halves are merged.
+    const newer = await searchCompleteVacancyWindow(params, new Date(middleSeconds * 1000), to, log, onVacancies);
+    const older = await searchCompleteVacancyWindow(params, from, new Date(middleSeconds * 1000), log, onVacancies);
+    for (const [id, employer] of older) if (!newer.has(id)) newer.set(id, employer);
+    return newer;
+  }
+
+  return searchVacancyPages(windowParams, log, onVacancies, firstPage, true);
+}
+
 /** Pull /employers/{id} details for one candidate. Returns null on HH error. */
 async function fetchEmployerDetails(empId: string): Promise<HhEmployerResponse | null> {
   return fetchJson<HhEmployerResponse>(`${HH_API_BASE}/employers/${empId}`);
@@ -366,6 +418,7 @@ export async function findNewHhEmployers(
   const log = config.log ?? (() => undefined);
   const area = config.area ?? '113';
   const since = formatDateFrom(config.since);
+  const until = new Date();
 
   log(`HH: collecting vacancies since ${since}, area=${area}`);
 
@@ -389,7 +442,9 @@ export async function findNewHhEmployers(
   const candidates = new Map<string, CandidateEmployer>();
   for (let i = 0; i < queries.length; i++) {
     log(`HH: query ${i + 1}/${queries.length}: ${queries[i].toString()}`);
-    const part = await searchVacancyPages(queries[i], log, config.onVacancies);
+    const part = config.exhaustive
+      ? await searchCompleteVacancyWindow(queries[i], config.since, until, log, config.onVacancies)
+      : await searchVacancyPages(queries[i], log, config.onVacancies);
     for (const [id, emp] of part) {
       if (!candidates.has(id)) candidates.set(id, emp);
     }
@@ -402,11 +457,12 @@ export async function findNewHhEmployers(
   const excludePatterns = config.excludePatterns ?? [];
   const afterNameFilter: CandidateEmployer[] = [];
   for (const c of candidates.values()) {
+    if (config.skipEmployerIds?.has(c.id)) continue;
     if (excludePatterns.some((p) => p.test(c.name))) continue;
     afterNameFilter.push(c);
   }
 
-  log(`HH: ${afterNameFilter.length} employers after name-exclude filter`);
+  log(`HH: ${afterNameFilter.length} employers after seen-id/name-exclude filter`);
 
   // 4) Жёсткий лимит «обогащать максимум N» — чтобы не дёргать /employers
   //    по 2000 раз, если клиенту хватит 700. Берём limit × 2 как буфер

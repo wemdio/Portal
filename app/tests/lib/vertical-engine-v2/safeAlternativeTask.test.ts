@@ -48,4 +48,20 @@ describe('safeAlternativeTask', () => {
     // А настоящее ограничение плана по-прежнему запрещает: карты не умеют в регион реестра.
     expect(safeAlternativeTask(maps, directory({ okvedCodes: ['20.1'], regionCodes: ['77'] }))).toBeNull();
   });
+
+  it('исходную задачу hh_live можно заменить реестром или каталогом', () => {
+    // 9f82e79d «Риелторские франшизы»: активным источником был поиск вакансий
+    // по всей России, и любая замена считалась нарушением его «ограничений».
+    const hh = { source: 'hh_live', rationale: 'Агентства, нанимающие риелторов по новостройкам',
+      hh_query: { area: '113', text: 'агент по недвижимости новостройки OR риелтор новостройки' } } as unknown as VeCollectTask;
+    expect(safeAlternativeTask(directory({ okvedCodes: ['68.31'] }), hh)?.directory_filters?.okvedCodes).toEqual(['68.31']);
+    const maps = { source: 'yandex_maps', rationale: 'агентства',
+      maps_query: { queries: ['агентство недвижимости'] } } as unknown as VeCollectTask;
+    expect(safeAlternativeTask(maps, hh)).toEqual(maps);
+    expect(safeAlternativeTask(maps, { ...hh, hh_query: { text: 'риелтор' } } as VeCollectTask)).toEqual(maps);
+    // Регион поиска вакансий — настоящая граница: реестр без региона её не исполнит.
+    expect(safeAlternativeTask(directory({ okvedCodes: ['68.31'] }), { ...hh, hh_query: { ...hh.hh_query!, area: '1' } } as VeCollectTask)).toBeNull();
+    // Живой парсер вакансий взамен по-прежнему не предлагается.
+    expect(safeAlternativeTask(hh, directory({ okvedCodes: ['68.3'] }))).toBeNull();
+  });
 });

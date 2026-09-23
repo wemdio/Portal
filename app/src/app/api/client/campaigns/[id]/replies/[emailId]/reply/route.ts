@@ -96,7 +96,7 @@ export async function POST(
 
     let eaccount = findEaccountForReply({ originalEmail: original, threadEmails: [] });
     if (!eaccount && original.thread_id && leadEmail) {
-      const thread = await listEmails({ campaign_id: campaignId, lead_id: leadEmail, limit: 100 }, { ...instantlyRequestOptions, consumer: 'client_reply_send' });
+      const thread = await listEmails({ campaign_id: campaignId, lead_id: leadEmail, limit: 100 }, { ...instantlyRequestOptions, consumer: 'client_reply_send', requestPriority: 'interactive' });
       eaccount = findEaccountForReply({ originalEmail: original, threadEmails: thread.items ?? [] });
     }
     if (!eaccount) {

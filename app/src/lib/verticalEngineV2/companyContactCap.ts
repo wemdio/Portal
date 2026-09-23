@@ -65,6 +65,44 @@ export function capVeContactsPerCompany<T extends Record<string, unknown>>(
   return { kept: rows.filter((_, index) => keep.has(index)), overCap: rows.filter((_, index) => !keep.has(index)) };
 }
 
+/**
+ * Сколько адресов одной компании засчитывается в цель превью, когда специалист
+ * лимит не задал. Охват меряется компаниями: второй и третий адрес той же
+ * компании — плотность, а не прогресс (16.09.2026 база закрылась «цель
+ * достигнута» на 771 адресе 39 компаний). 3 — значение, применённое к базам
+ * 20.09. Готовую базу это не режет: все проверенные адреса остаются в ней.
+ */
+export const VE_TARGET_EMAILS_PER_COMPANY_DEFAULT = 3;
+
+export interface VeTargetContactCount {
+  /** Засчитано в цель сбора. */
+  counted: number;
+  /** Компаний среди готовых строк. */
+  companies: number;
+  /** Сколько адресов одной компании засчитывается; null — все. */
+  perCompany: number | null;
+}
+
+/**
+ * Готовые строки в единицах цели. С лимитом специалиста готовую базу уже
+ * выбрал сам лимит (completeTargetRound), поэтому засчитывается каждая строка —
+ * как и раньше. Ежедневная поставка считает адреса: её цель — объём отправки.
+ */
+export function countVeTargetContacts(
+  rows: Array<Record<string, unknown>>, options: { limit: number | null; mode?: string },
+): VeTargetContactCount {
+  const perCompany = new Map<string, number>();
+  for (const row of rows) {
+    const key = veContactLimitKey(row);
+    perCompany.set(key, (perCompany.get(key) ?? 0) + 1);
+  }
+  const limit = normalizeVeMaxEmailsPerCompany(options.limit);
+  if (limit !== null || options.mode !== 'preview') return { counted: rows.length, companies: perCompany.size, perCompany: limit };
+  let counted = 0;
+  for (const count of perCompany.values()) counted += Math.min(count, VE_TARGET_EMAILS_PER_COMPANY_DEFAULT);
+  return { counted, companies: perCompany.size, perCompany: VE_TARGET_EMAILS_PER_COMPANY_DEFAULT };
+}
+
 /** The marker is recomputed by every partition and never trusted from storage. */
 export function stripVeCompanyCapMarker<T extends Record<string, unknown>>(row: T): T {
   if (!(VE_COMPANY_CAP_FIELD in row)) return row;

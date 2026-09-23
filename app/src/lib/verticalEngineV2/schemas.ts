@@ -78,10 +78,29 @@ export const VeHypothesisCandidateSchema = z.object({
   potential_pct: z.number().int().min(0).max(100),
   /** Точные поисковые запросы для стадии верификации. */
   search_queries: z.array(z.string()).default([]),
+  /**
+   * Широкая гипотеза уровня сектора для ежедневного добора. Ставит код по
+   * блоку ответа (broad_hypotheses), а не модель у отдельной гипотезы.
+   */
+  broad: z.boolean().optional(),
 });
 export type VeHypothesisCandidate = z.infer<typeof VeHypothesisCandidateSchema>;
 
+/** Широкая гипотеза: сектор целиком; тир у неё не спрашиваем — это прямой рынок. */
+export const VeBroadHypothesisCandidateSchema = VeHypothesisCandidateSchema.extend({
+  tier: z.union([z.literal(1), z.literal(2), z.literal(3)]).default(1),
+});
+
 export const VeHypothesesBatchSchema = z.object({
+  /**
+   * Необязателен и ответ не валит: без блока или с неполной широкой гипотезой
+   * узкие кандидаты идут как раньше, а не на повтор дорогого вызова (25–40
+   * кандидатов). Неполная широкая просто отбрасывается.
+   */
+  broad_hypotheses: z.unknown().optional().transform((value) => (Array.isArray(value) ? value : []).flatMap((item) => {
+    const parsed = VeBroadHypothesisCandidateSchema.safeParse(item);
+    return parsed.success ? [parsed.data] : [];
+  })),
   hypotheses: z.array(VeHypothesisCandidateSchema).min(1),
 });
 export type VeHypothesesBatchOutput = z.infer<typeof VeHypothesesBatchSchema>;

@@ -1327,6 +1327,10 @@ services:
       - HEALTH_JOB_STUCK_MIN=${HEALTH_JOB_STUCK_MIN:-20}
       - HEALTH_SERVER_IP=${HEALTH_SERVER_IP:-139.60.162.12}
       - PROXY_URLS=${PROXY_URLS}
+      # RU-пул: на него завязан ретрай 403 в почтовом скрапере, без присмотра
+      # его протухание выглядит как тихое падение находимости почт.
+      - YANDEXMAPS_PROXY_URLS_PRIORITY=${YANDEXMAPS_PROXY_URLS_PRIORITY}
+      - HEALTH_PROXY_ALERT_MENTION=${HEALTH_PROXY_ALERT_MENTION:-@Jacob_brown}
       - S3_ENDPOINT=${S3_ENDPOINT}
       - S3_BUCKET=${S3_BUCKET}
       # Порог не про свободное место на диске (под базой 874 ГБ, из них

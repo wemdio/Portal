@@ -2010,6 +2010,13 @@ function EmailAccountsPicker({
   );
 }
 
+/**
+ * Тумблера «Отслеживать открытия писем» здесь больше нет: метрику открытий
+ * убрали из клиентской статистики как недостоверную (см. lib/clientOpenMetrics.ts),
+ * а настройка без видимого результата только путает. Поле open_tracking
+ * осталось в behavior — оно приходит из пресета менеджера и уходит в payload
+ * как раньше, просто клиент его больше не переключает.
+ */
 function BehaviorEditor({
   behavior,
   onChange,
@@ -2023,12 +2030,6 @@ function BehaviorEditor({
 
   return (
     <div className="space-y-3">
-      <BehaviorToggle
-        checked={behavior.open_tracking}
-        label="Отслеживать открытия писем"
-        description="Система будет считать открытия писем в статистике кампании."
-        onToggle={() => toggle('open_tracking')}
-      />
       <BehaviorToggle
         checked={behavior.stop_on_reply}
         label="Останавливать цепочку при ответе"

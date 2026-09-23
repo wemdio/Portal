@@ -5,7 +5,7 @@ import { prepareSegmentationAudience } from './segmentationAudit';
 import type { VeBase } from './types';
 import {
   estimateRemainingReady,
-  VE_SOURCE_POPULATION_MAX_AGE_MS,
+  veEstimatePopulation,
   type VeCollectionEstimate,
   type VeCollectionTargetProgress,
   type VeObservedContactYield,
@@ -78,31 +78,30 @@ export function buildVeBaseAudienceSummary(base: VeAudienceBase, context: {
     : null;
   const validObserved = savedObserved ?? measuredObserved;
   const forecast = info?.remaining_ready_estimate;
-  const age = now.getTime() - Date.parse(forecast?.population_as_of ?? '');
-  const expected = savedObserved ? estimateRemainingReady({
-    population: info?.unique_companies ?? null, candidatesProcessed: savedObserved.candidates, readyRows: savedObserved.ready,
+  const population = veEstimatePopulation(info);
+  // Прогноз показываем, только если он пересчитывается из сохранённых вместе с
+  // ним чисел. Возраст не ограничиваем: у завершённой базы следующей партии не
+  // будет, и карточка показывает дату оценки, а не прячет число.
+  const expected = savedObserved && forecast ? estimateRemainingReady({
+    population, candidatesProcessed: savedObserved.candidates, readyRows: savedObserved.ready,
+    processedInPopulation: forecast.processed_in_population, readyCompanies: forecast.ready_companies,
     eligible: true, asOf: savedObserved.as_of, populationAsOf: info?.population_as_of,
   }) : null;
-  let estimate = info?.version === 2 && info.population_matches_source && savedObserved && forecast
-    && validCount(forecast.contacts) && validCount(forecast.source_population)
-    && forecast.contacts === expected?.contacts && forecast.source_population === info.unique_companies
-    && forecast.population_as_of === info.population_as_of && forecast.confidence === 'low'
-    && forecast.candidates_processed === savedObserved.candidates && forecast.ready_rows === savedObserved.ready
-    && forecast.as_of === savedObserved.as_of && typeof forecast.scope === 'string'
-    && Number.isFinite(age) && age >= 0 && age <= VE_SOURCE_POPULATION_MAX_AGE_MS ? forecast : null;
-  let reason = estimate ? null : info?.estimate_reason ?? info?.note
-    ?? (forecast ? 'Счётчик источника требует обновления при следующей партии.' : 'Пока недостаточно данных для оценки дополнительного объёма.');
-  if (!estimate && terminalTarget) {
-    reason = info?.population_matches_source === false
-      ? 'Дополнительный объём пока нельзя надёжно оценить: источники и фильтры этой базы не совпадают с одним измеримым срезом.'
-      : info?.note ?? 'Текущая партия завершена. Для оценки дополнительного объёма нужен новый сопоставимый срез источника.';
-  }
-  // The measured source population has no client blocklist/campaign predicate.
-  // Known client exclusions cannot be silently ignored in a remaining forecast.
-  if ((context.blocked?.size ?? 0) > 0 || (context.allocated?.size ?? 0) > 0) {
-    estimate = null;
-    reason = 'Готовый запас пересчитан с исключениями. Для прогноза остатка нужно сверить источник с блокировками и ранее распределёнными контактами.';
-  }
+  const estimate = savedObserved && forecast && expected && validCount(forecast.contacts)
+    && forecast.contacts === expected.contacts && forecast.companies === expected.companies
+    && forecast.source_population === population && forecast.population_as_of === info?.population_as_of
+    && forecast.confidence === 'low' && forecast.candidates_processed === savedObserved.candidates
+    && forecast.ready_rows === savedObserved.ready && forecast.as_of === savedObserved.as_of
+    && typeof forecast.scope === 'string' ? forecast : null;
+  const legacy = info && info.population_method !== 'plan_union';
+  const reason = estimate ? null
+    : legacy && terminalTarget ? 'Оценка для этой базы не рассчитывалась: она собрана до исправления счётчика источника.'
+      : info?.estimate_reason ?? info?.note
+        ?? (terminalTarget ? 'Текущая партия завершена. Для оценки дополнительного объёма нужен новый сопоставимый срез источника.'
+          : 'Пока недостаточно данных для оценки дополнительного объёма.');
+  // Исключения клиента прогноз не отменяют: распределённые контакты — уже
+  // собранные компании, а в прогнозе только новые. Список исключений клиента
+  // применится при загрузке (client_exclusions_applied).
   return {
     base_id: base.id, hypothesis_id: base.hypothesis_id,
     ready: audience.leads.length - blocked - allocated, checked_ready: audience.leads.length,

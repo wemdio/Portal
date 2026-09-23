@@ -7,6 +7,7 @@ import { loadVeProjectDetail } from '@/lib/verticalEngineV2/projectDetail';
 import { selectHypothesisLetters } from '@/components/vertical-engine-v2/engine/letterSelection';
 import { getPreparationPresentation } from '@/components/vertical-engine-v2/engine/PreparationProgress';
 import type { VeOutreachPreparation } from '@/lib/verticalEngineV2/outreachSetup';
+import { groupVeHypotheses } from '@/components/vertical-engine-v2/engine/hypothesisGroups';
 
 jest.mock('@/lib/verticalEngineV2/actualsReconcile', () => ({ reconcileProjectVerticals: jest.fn(async () => {}) }));
 
@@ -191,5 +192,22 @@ describe('VE2 collection progress presentation', () => {
     expect(getCollectionProgress(collecting.collect_info)).toMatchObject({ candidates: null, sourceRows: null });
     collecting.collect_info.stats = { rows_total: 0 };
     expect(getCollectionProgress(collecting.collect_info).candidates).toBe(0);
+  });
+
+  it('shows broad hypotheses as a separate block above the verticals; projects without them list as before', () => {
+    const verticals = [{ id: 'v-med', name: 'Частная медицина' }, { id: 'v-lab', name: 'Лаборатории' }, { id: 'v-empty', name: 'Пустая' }];
+    const hypotheses = [
+      { id: 'labs', vertical_id: 'v-lab', broad: false },
+      { id: 'medicine', vertical_id: 'v-med', broad: true },
+      { id: 'franchise', vertical_id: 'v-lab' },
+      { id: 'unclustered', vertical_id: null, broad: true },
+    ];
+    const groups = groupVeHypotheses(verticals, hypotheses);
+    expect(groups.broad.map((h) => h.id)).toEqual(['medicine']);
+    expect(groups.verticals.map(({ vertical, hypotheses: own }) => [vertical.id, own.map((h) => h.id)]))
+      .toEqual([['v-lab', ['labs', 'franchise']], ['v-empty', []]]);
+    const old = groupVeHypotheses(verticals, hypotheses.map(({ broad: _broad, ...h }) => h));
+    expect(old.broad).toEqual([]);
+    expect(old.verticals.map(({ vertical }) => vertical.id)).toEqual(['v-med', 'v-lab', 'v-empty']);
   });
 });

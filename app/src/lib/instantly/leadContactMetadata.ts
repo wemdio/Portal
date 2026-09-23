@@ -1,5 +1,6 @@
 import { extractLeadReplyContacts, type LeadReplyContacts } from './leadReplyContacts';
-import { normalizeLeadPhone, normalizeLeadWebsite } from './leadContactValues';
+import { isPersonName } from '../enrich/extractors/nameQuality';
+import { joinLeadPhones, normalizeLeadPhone, normalizeLeadWebsite } from './leadContactValues';
 import type { Email, Lead } from './types';
 
 export { normalizeLeadWebsite } from './leadContactValues';
@@ -121,6 +122,9 @@ function companyValue(value: unknown): string | null {
   const text = cleanValue(value);
   // Instantly's top-level organization is the workspace UUID, not the company.
   if (text && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(text)) return null;
+  // Imported "company" fields occasionally contain the contact's full name.
+  // Keep explicit legal names such as "ИП Иванов ...", but not a bare FIO.
+  if (text && isPersonName(text)) return null;
   return text && /\p{L}/u.test(text) && !/^(?:ооо|оао|пао|зао|ао|ип|llc|ltd|company name|название компании)$/i.test(text) && !/^(?:https?:|www\.)|@/i.test(text)
     ? text.slice(0, 200) : null;
 }
@@ -150,7 +154,12 @@ export function resolveLeadContactMetadata(input: {
   return {
     leadName: [firstName, lastName].filter(Boolean).join(' ') || reply.leadName,
     companyName: firstField(sources, COMPANY_KEYS, companyValue, 'company') || companyValue(reply.companyName),
-    phone: firstField(sources, PHONE_KEYS, normalizeLeadPhone, 'phone') || normalizeLeadPhone(reply.bodyPhone) || normalizeLeadPhone(reply.signaturePhone),
+    // Uploaded phones keep their order, but must not hide additional numbers
+    // from the same contact's reply/signature. History is excluded upstream.
+    phone: joinLeadPhones([
+      ...sources.flatMap((source) => fieldValues(source, PHONE_KEYS, 'phone').map(normalizeLeadPhone)),
+      reply.bodyPhone, reply.signaturePhone,
+    ]),
     // An explicit uploaded website is stronger than a provider's inferred
     // company domain, even when that domain is in the top-level lead fields.
     website: firstField(sources, WEBSITE_KEYS, normalizeLeadWebsite, 'website') ||

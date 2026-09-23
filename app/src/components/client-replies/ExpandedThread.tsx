@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowDownLeft,
   ArrowUpRight,
@@ -444,6 +444,16 @@ export interface ExpandedThreadProps {
   className?: string;
 }
 
+/**
+ * Повторы, когда сервер отдал только последнее письмо, а историю отложил
+ * бюджетом чтения. Три попытки покрывают типичное окно бюджета (1,8–15 с по
+ * логам недели 14.09); отказ хранилища бюджета приходит с 30 с — это одна
+ * попытка. Потолок задержки — чтобы битый retry_after не подвесил карточку.
+ */
+const HISTORY_MAX_RETRIES = 3;
+const HISTORY_MIN_DELAY_MS = 2_000;
+const HISTORY_MAX_DELAY_MS = 35_000;
+
 export function ExpandedThread({
   campaignId,
   emailId,
@@ -459,8 +469,36 @@ export function ExpandedThread({
   const [threadError, setThreadError] = useState('');
   const [threadAuthExpired, setThreadAuthExpired] = useState(false);
   const [actionMode, setActionMode] = useState<ActionMode>(null);
+  // История переписки отложена бюджетом чтения (см. history_deferred в
+  // ClientReplyThread):
+  //   'waiting'    — на экране только запрошенное письмо, повтор запланирован;
+  //   'refreshing' — на экране уже переписка длиннее, её не затираем одним
+  //                  письмом, повтор запланирован (обычно после «Ответить»);
+  //   'exhausted'  — повторы кончились, дальше только руками.
+  const [historyState, setHistoryState] = useState<'waiting' | 'refreshing' | 'exhausted' | null>(null);
+  const historyAttemptsRef = useRef(0);
+  const historyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Что сейчас на экране — нужно loadThread, чтобы не заменить полную
+  // переписку урезанным ответом. Ref, а не state: колбэк не должен
+  // пересоздаваться на каждое письмо.
+  const shownThreadRef = useRef<ThreadMessage[] | null>(null);
+  // Номер последней начатой загрузки. Ответ только от неё меняет экран и
+  // ставит таймер: две загрузки могут пересечься (менеджер ответил, пока шёл
+  // автоповтор; двойной клик «Повторить»), и без этого запоздавший ответ
+  // оставлял бы второй таймер-сироту с лишними чтениями, а ответ по
+  // предыдущему письму мог лечь поверх нового.
+  const loadSeqRef = useRef(0);
+  const [reloadTick, setReloadTick] = useState(0);
 
   const loadThread = useCallback(async () => {
+    // Любая загрузка отменяет запланированный повтор: иначе после «Ответить»
+    // или ручного «Повторить» таймер выстрелил бы лишним запросом поверх уже
+    // полученной переписки и отнял слот бюджета чтения.
+    if (historyTimerRef.current) {
+      clearTimeout(historyTimerRef.current);
+      historyTimerRef.current = null;
+    }
+    const seq = ++loadSeqRef.current;
     setThreadLoading(true);
     setThreadError('');
     setThreadAuthExpired(false);
@@ -468,26 +506,81 @@ export function ExpandedThread({
       const data = await clientApiFetch<ClientReplyThread>(
         `/campaigns/${campaignId}/replies/${emailId}/thread`,
       );
-      setThread(data.messages);
-      setReplyTo(data.reply_to ?? null);
-      setReplyAllCc(data.reply_all_cc ?? []);
+      if (seq !== loadSeqRef.current) return;
+      const deferred = data.history_deferred ?? null;
+      // Отложенный ответ несёт одно письмо. Если на экране уже переписка
+      // длиннее — оставляем её вместе с адресатами ответа: раньше после
+      // «Ответить» вся история схлопывалась в одну карточку до следующего
+      // повтора.
+      const keepShown = deferred != null && (shownThreadRef.current?.length ?? 0) > data.messages.length;
+      if (!keepShown) {
+        shownThreadRef.current = data.messages;
+        setThread(data.messages);
+        setReplyTo(data.reply_to ?? null);
+        setReplyAllCc(data.reply_all_cc ?? []);
+      }
+      if (deferred) {
+        if (historyAttemptsRef.current < HISTORY_MAX_RETRIES) {
+          historyAttemptsRef.current += 1;
+          setHistoryState(keepShown ? 'refreshing' : 'waiting');
+          const delay = Math.min(
+            Math.max(deferred.retry_after_ms + 500, HISTORY_MIN_DELAY_MS),
+            HISTORY_MAX_DELAY_MS,
+          );
+          if (historyTimerRef.current) clearTimeout(historyTimerRef.current);
+          historyTimerRef.current = setTimeout(() => setReloadTick((t) => t + 1), delay);
+        } else {
+          setHistoryState('exhausted');
+        }
+      } else {
+        historyAttemptsRef.current = 0;
+        setHistoryState(null);
+      }
     } catch (err) {
+      if (seq !== loadSeqRef.current) return;
       if (isAuthExpiredError(err)) setThreadAuthExpired(true);
       setThreadError(err instanceof Error ? err.message : 'Не удалось загрузить тред');
+      // Упал сам повтор (обычная ошибка, не бюджет): обещание «догрузится»
+      // больше неправда, и новых попыток не будет. Убираем заметку — остаётся
+      // строка ошибки со своей кнопкой «Повторить».
+      historyAttemptsRef.current = 0;
+      setHistoryState(null);
     } finally {
-      setThreadLoading(false);
+      // Индикатор гасит только последняя загрузка — иначе запоздавшая
+      // предыдущая выключила бы его, пока идёт актуальная.
+      if (seq === loadSeqRef.current) setThreadLoading(false);
     }
+  }, [campaignId, emailId]);
+
+  // Ручной повтор (кнопка) начинает счёт попыток заново.
+  const retryThread = useCallback(() => {
+    historyAttemptsRef.current = 0;
+    void loadThread();
+  }, [loadThread]);
+
+  // Другое письмо или размонтирование — отложенный повтор больше не нужен, и
+  // «что на экране» относится к прошлому письму. Объявлен ДО эффекта загрузки:
+  // эффекты идут по порядку, сброс должен случиться раньше первого запроса.
+  // Состояние заметки сбрасывать не нужно: первый же ответ /thread для нового
+  // письма перезапишет его.
+  useEffect(() => {
+    historyAttemptsRef.current = 0;
+    shownThreadRef.current = null;
+    return () => {
+      if (historyTimerRef.current) clearTimeout(historyTimerRef.current);
+      historyTimerRef.current = null;
+    };
   }, [campaignId, emailId]);
 
   useEffect(() => {
     void loadThread();
-  }, [loadThread]);
+  }, [loadThread, reloadTick]);
 
   return (
     <div className={className ?? 'mt-5 space-y-3'}>
       <hr className="neu-divider" />
 
-      {threadLoading && (
+      {threadLoading && historyState !== 'waiting' && historyState !== 'refreshing' && (
         <div
           className="flex items-center gap-2 text-[11px]"
           style={{ color: 'var(--cp-paper-faint)' }}
@@ -510,7 +603,7 @@ export function ExpandedThread({
             </span>
             <button
               type="button"
-              onClick={() => void loadThread()}
+              onClick={retryThread}
               className="ds-btn-ghost inline-flex items-center gap-1 px-2 py-0.5 text-[10px]"
             >
               <RefreshCw className="h-2.5 w-2.5" aria-hidden />
@@ -582,6 +675,33 @@ export function ExpandedThread({
             onAfterAction?.();
           }}
         />
+      )}
+
+      {historyState && thread && thread.length > 0 && (
+        <div className="flex items-center gap-2 text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
+          {historyState === 'waiting' || historyState === 'refreshing' ? (
+            <>
+              <Loader2 className="h-3 w-3 animate-spin shrink-0" aria-hidden />
+              <span>
+                {historyState === 'waiting'
+                  ? 'Показываем последнее письмо — остальная переписка догрузится через несколько секунд.'
+                  : 'Обновляем переписку — новые письма появятся через несколько секунд.'}
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="flex-1">Переписку сейчас не удалось загрузить полностью — повторите через минуту.</span>
+              <button
+                type="button"
+                onClick={retryThread}
+                className="ds-btn-ghost inline-flex items-center gap-1 px-2 py-0.5 text-[10px]"
+              >
+                <RefreshCw className="h-2.5 w-2.5" aria-hidden />
+                Повторить
+              </button>
+            </>
+          )}
+        </div>
       )}
 
       {thread && thread.length > 0 ? (

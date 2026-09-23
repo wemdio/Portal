@@ -15,6 +15,7 @@ import { withProviderUsage } from '@/lib/providerUsage';
 import type { SerperOrganicItem } from '@/lib/search/serperClient';
 import { createVeSearchCapacity, searchVeRelevanceWebsites, VeSearchProviderError } from '@/lib/verticalEngineV2/relevanceSearch';
 import { createVeCachedSearch, freshVeSearchCacheItems, VE_EMPTY_SEARCH_CACHE_TTL_MS, VE_SEARCH_CACHE_TTL_MS } from '@/lib/verticalEngineV2/relevanceSearchCache';
+import { resetProxyGroupsCache } from '@/lib/enrich/proxyPool';
 
 jest.mock('@/lib/clientDemo/personalize', () => ({ assertPublicWebsite: jest.fn() }));
 jest.mock('@/lib/enrich/websiteParser', () => ({
@@ -69,6 +70,10 @@ describe('llm rawCall retry', () => {
     process.env.VE_MODEL_GATE = 'openai/gpt-4o-mini';
     process.env.VE_MODEL_RELEVANCE_REVIEW = 'openai/gpt-5-mini';
     delete process.env.VE_LLM_TIMEOUT_MS;
+    // Чтение сайтов здесь — без пула RU-прокси, даже если он задан в .env:
+    // с пулом второй заход своей главной идёт ещё и через прокси.
+    for (const name of ['YANDEXMAPS_PROXY_URLS_PRIORITY', 'YANDEXMAPS_PROXY_URLS', 'PROXY_URLS']) delete process.env[name];
+    resetProxyGroupsCache();
     jest.useFakeTimers();
     // Isolate the process-wide coordinator, while exercising its real logic.
     const capacity = createVeLlmRateLimit();
@@ -78,6 +83,7 @@ describe('llm rawCall retry', () => {
 
   afterEach(() => {
     process.env = { ...envBackup };
+    resetProxyGroupsCache();
     setVeActiveJobSignal(null);
     global.fetch = originalFetch;
     jest.useRealTimers();
@@ -592,8 +598,8 @@ describe('llm rawCall retry', () => {
     const classification = reply({ decisions: [{ i: 0, status: 'relevant', reason: 'Makes equipment',
       evidence: [{ field: 'description', quote: description }] }] });
     const confirmation = reply({ reviews: [{ i: 0, result: 'direct_match', reason: description }] });
-    // Admission/contradiction gets one durably reserved GPT check. Missing facts do not
-    // trigger a costly second opinion and are never turned into acceptance.
+    // Admission, contradiction and a cheap rejection of a proposed admission each get one
+    // durably reserved GPT check; only the established reviewer's match admits.
     const noWebsite = jest.fn().mockResolvedValue({ status: 'unavailable', text: '', url: '', reason: 'offline' });
     delete process.env.VE_MODEL_GATE;
     delete process.env.VE_MODEL_RELEVANCE_REVIEW;
@@ -608,9 +614,8 @@ describe('llm rawCall retry', () => {
         }
       } });
       const models = fetchMock.mock.calls.map((call) => JSON.parse(call[1].body).model);
-      expect(models).toEqual(firstResult !== 'insufficient'
-        ? [VE_COLLECTION_MODEL, VE_COLLECTION_MODEL, 'openai/gpt-5-mini'] : [VE_COLLECTION_MODEL, VE_COLLECTION_MODEL]);
-      expect(checked.decisions.get(0)?.status).toBe(firstResult !== 'insufficient' ? 'relevant' : 'needs_review');
+      expect(models).toEqual([VE_COLLECTION_MODEL, VE_COLLECTION_MODEL, 'openai/gpt-5-mini']);
+      expect(checked.decisions.get(0)?.status).toBe('relevant');
       expect(fetchMock.mock.calls.slice(0, 2).map((call) => JSON.parse(call[1].body).response_format.type))
         .toEqual(['json_schema', 'json_schema']);
       await findIrrelevantRows({ ...input, fetchEvidence: noWebsite, checkpoint: checked.checkpoint });
@@ -641,7 +646,8 @@ describe('llm rawCall retry', () => {
       review.status = ['interrupted', 'exhausted'].includes(outcome) ? 'started' : 'failed';
       review.failure_code = 'invalid_response';
       delete review.result; delete review.attempts;
-      if (outcome === 'exhausted') review.attempts = 2;
+      // Обрыв без ответа модели возвращается один раз; «exhausted» — уже возвращённый.
+      if (outcome === 'exhausted') Object.assign(review, { attempts: 2, interrupted: true });
       fetchMock.mockReset();
       if (outcome === 'billing') fetchMock.mockResolvedValueOnce(httpResponse(402, {}));
       else if (outcome === 'transport') fetchMock.mockRejectedValueOnce(new Error('fetch failed'));

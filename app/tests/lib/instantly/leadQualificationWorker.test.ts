@@ -68,15 +68,12 @@ jest.mock('@/lib/instantly/handoffTelegram', () => ({
 
 jest.mock('@/lib/instantly/leadQualifier', () => ({
   __esModule: true,
+  extractAuthoredReplyText: (text: string) => jest.requireActual('@/lib/instantly/leadQualifier').extractAuthoredReplyText(text),
   qualifyReply: (...args: unknown[]) => qualifyReply(...args),
   fetchBriefByCampaign: (...args: unknown[]) => fetchBriefByCampaign(...args),
   fetchThreadContext: (...args: unknown[]) => fetchThreadContext(...args),
   classifyMachineReply: (...args: unknown[]) => classifyMachineReply(...args),
-  getBodyText: (body: Email['body']) => {
-    if (!body) return '';
-    if (typeof body === 'string') return body;
-    return body.text ?? body.html ?? '';
-  },
+  getBodyText: (body: Email['body']) => jest.requireActual('@/lib/instantly/leadQualifier').getBodyText(body),
   isAutoReplyOrUnsubscribe: () => false,
   isJunkReply: () => false,
 }));
@@ -1032,6 +1029,39 @@ describe('pollAndQualifyReplies', () => {
     process.env.GUEST_TOKEN_SECRET = 'test-board-secret';
     const { resolveLeadContactMetadata } = await import('@/lib/instantly/leadContactMetadata');
     const introduction = 'Доброго дня! Меня зовут Евгений, руководитель IT-отдела. Вопрос актуальный.';
+    const footer = 'С уважением,\nАдминистратор Дарина.\n8(900)111-22-33\n8 901 22 23 344';
+    const contactReply = introduction + '\n\n> Наше старое письмо\n> Телефон: +7 999 888-77-66\n\n' + footer;
+    const { leadBoardRequestText } = await import('@/lib/instantly/leadBoardRequestText');
+    for (const [body, expected] of [
+      [contactReply, introduction],
+      [{ text: 'Пришлите каталог.\n\nОтправлено из мобильной Почты Mail' }, 'Пришлите каталог.'],
+      [{ text: 'Нужны цены.\n\nИ условия доставки.\nС уважением,\nИван' }, 'Нужны цены.\n\nИ условия доставки.'],
+      [{ text: 'Olga Example писал 2026-09-18 12:49:\n> Наш старый ответ' }, null],
+      [{ text: '> Только цитата' }, null],
+      [{ html: '<p>Нужны цены.</p><div class="gmail_quote">Старое предложение</div>' }, 'Нужны цены.'],
+      ['<p>Пришлите каталог.</p><blockquote>Старое письмо</blockquote>', 'Пришлите каталог.'],
+      [{ html: '<p>Добрый день.</p><blockquote>Какой объём нужен?</blockquote><p>Нужно 200 единиц, пришлите расчёт.</p>' }, 'Добрый день.\n\nНужно 200 единиц, пришлите расчёт.'],
+      [{ html: '<blockquote>Пришлём каталог?</blockquote><p>Пришлите каталог.</p>' }, 'Пришлите каталог.'],
+      [{ text: '> Пришлём каталог?\nПришлите каталог.', html: '<blockquote>Пришлём каталог?</blockquote><p>Пришлите каталог.</p>' }, 'Пришлите каталог.'],
+      [{ html: '<div class="moz-cite-prefix">On Monday, Sender wrote:</div><br><blockquote>История</blockquote><p>Нужны цены.</p>' }, 'Нужны цены.'],
+      [{ html: '<p>Пришлите каталог.</p><div class="gmail_attr">On Monday, Sender wrote:</div><p>Старое письмо без обёртки</p>' }, 'Пришлите каталог.'],
+      [{ html: '<p>Пришлите каталог.</p><div>From: sender@example.org</div><blockquote>Вложенная цитата</blockquote><p>Чужой текст после цитаты</p>' }, 'Пришлите каталог.'],
+      ['Пришлите каталог.\nС уважением:\nИван Петров\nТелефон: +7 999 888-77-66', 'Пришлите каталог.'],
+    ] as const) {
+      expect(leadBoardRequestText(body)).toBe(expected);
+    }
+    for (const [replyBody, expectedPhone] of [
+      [{ text: contactReply }, '8(900)111-22-33; 8 901 22 23 344'],
+      [{ text: introduction + '\n> С уважением,\n> 8(900)111-22-33' }, null],
+      [{ text: introduction + '\nFrom: sender@example.org\nС уважением,\n8(900)111-22-33' }, null],
+      [{ text: introduction + '\n> Старое письмо\nЧужая неразмеченная история\n' + footer }, null],
+      [{ text: introduction + '\nFrom: sender@example.org\nTo: lead@example.com\nSubject: Previous conversation\n> Вложенная цитата\n' + footer }, null],
+      [{ text: 'Телефон: 8(900)111-22-33', html: '<p>Телефон: 8(900)111-22-33</p><p>Моб.: 8 901 22 23 344</p><blockquote>Телефон: +7 999 888-77-66</blockquote>' }, '8(900)111-22-33; 8 901 22 23 344'],
+    ] as const) {
+      expect(resolveLeadContactMetadata({
+        leads: [], leadEmail: 'lead@example.com', campaignId: 'linked-campaign', replyBody,
+      }).phone).toBe(expectedPhone);
+    }
     for (const [replyBody, expectedName] of [
       [{ text: introduction }, 'Евгений'],
       [{ html: '<p>Доброго дня! Меня зовут <b>Евгений</b>, руководитель IT-отдела.</p>' }, 'Евгений'],
@@ -1066,7 +1096,7 @@ describe('pollAndQualifyReplies', () => {
       objectionHandleable: false,
       objectionDraft: null,
       threadContext: {
-        replyEmail: replyEmail({ id: 'lead-email', body: { text: introduction } }),
+        replyEmail: replyEmail({ id: 'lead-email', body: { text: contactReply } }),
         threadEmails: [
           replyEmail({ id: 'out-1', ue_type: 1 }),
           replyEmail({ id: 'out-2', ue_type: 1 }),
@@ -1101,7 +1131,7 @@ describe('pollAndQualifyReplies', () => {
         lead_email: 'lead@example.com',
         lead_name: 'Иван Петров',
         company_name: 'ACME',
-        phone: '+7 900 111-22-33',
+        phone: '+7 900 111-22-33; 8 901 22 23 344',
         website: 'acme.ru',
         request_text: introduction,
         step_number: 2,
@@ -1116,7 +1146,7 @@ describe('pollAndQualifyReplies', () => {
     expect(sendLeadTelegramAlert).toHaveBeenCalledWith(
       expect.objectContaining({
         boardLink: expect.stringMatching(/\/leads-board\/lb_/),
-        phone: '+7 900 111-22-33',
+        phone: '+7 900 111-22-33; 8 901 22 23 344',
         website: 'acme.ru',
       }),
     );
@@ -3399,6 +3429,247 @@ describe('pollAndQualifyReplies', () => {
         maxAgeMs: 24 * 60 * 60 * 1000,
       })).toBe(0);
       expect(sendLeadTelegramAlert).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // Ответил коллега с другого адреса (писали на info@, ответил zamkomdir@):
+  // поиск треда по адресу лида пуст навсегда. Прод 22.09: 5 таких событий
+  // крутились по кругу и съедали ~12 из 18 чтений LIST /emails в минуту.
+  // Вебхук несёт id письма — берём его по id и разбираем как поллинг.
+  describe('webhook: ответ коллеги с другого адреса', () => {
+    const colleagueReply = () => replyEmail({
+      id: 'colleague-reply',
+      campaign_id: 'linked-campaign',
+      from_address_email: 'zamkomdir@lead.example',
+      thread_id: 'provider-thread-1',
+      ue_type: 2,
+      body: { text: 'Пишите мне в понедельник на почту, я коммерческий директор.' },
+    });
+
+    async function insertColleagueEvent() {
+      await mockInstantlyDb!.from('instantly_webhook_events').insert({
+        id: 'colleague-event',
+        event_type: 'reply_received',
+        email_id: 'colleague-reply',
+        campaign_id: 'linked-campaign',
+        lead_email: 'info@lead.example',
+        thread_id: null,
+        created_at: '2026-08-21T00:00:00.000Z',
+        processed: false,
+      });
+    }
+
+    it('находит письмо по id и разбирает его, не возвращая событие в очередь', async () => {
+      await insertColleagueEvent();
+      // По адресу лида — пусто; по реальному отправителю — переписка находится
+      // (так ведёт себя поиск Instantly: он сопоставляет отправителя).
+      fetchThreadContext.mockImplementation(async (_campaign: string, lead: string) =>
+        lead === 'info@lead.example'
+          ? null
+          : { replyEmail: colleagueReply(), threadEmails: [colleagueReply()], lastOutbound: null });
+      getEmail.mockResolvedValue(colleagueReply());
+
+      await withWebhookDrainEnabled(async () => {
+        const { drainWebhookQueue } = await import('@/lib/instantly/leadQualificationWorker');
+        await drainWebhookQueue();
+      });
+
+      expect(getEmail).toHaveBeenCalledWith('colleague-reply', expect.objectContaining({ accountId: expect.any(String) }));
+      expect(mockInstantlyDb!.getRows('instantly_webhook_events')).toEqual([
+        expect.objectContaining({ id: 'colleague-event', processed: true }),
+      ]);
+      // Письмо дошло до разбора под своим настоящим id (как у поллинга).
+      const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+      expect(rows).toEqual([expect.objectContaining({ instantly_email_id: 'colleague-reply' })]);
+      // Реально разобрано, а не записано ошибкой терминального пути.
+      expect(['lead', 'not_lead', 'pending']).toContain(rows[0].status);
+      expect(String(rows[0].error_message ?? '')).not.toContain('provider thread context is not available yet');
+      // Переписку искали по реальному отправителю (как сделал бы разбор
+      // поллинга) и отдали разбору её — без повторного поиска внутри.
+      expect(fetchThreadContext).toHaveBeenCalledWith(
+        'linked-campaign', 'zamkomdir@lead.example', 'provider-thread-1', expect.anything(),
+      );
+      expect(fetchThreadContext).toHaveBeenCalledTimes(2);
+    });
+
+    it('лид ответил снова, а индекс ещё отдаёт его прошлое письмо: прежнее поведение, без подмены текста', async () => {
+      // Ревью 23.09 (2 из 3): если сразу идти по id, разбор при отстающем
+      // индексе получил бы переписку с ПРОШЛЫМ письмом и сохранил бы чужой
+      // текст и вердикт под новым id. Для ответа самого лида оставляем прежний
+      // путь: найденное письмо → дедуп → новое подберёт поллинг.
+      const oldLeadReply = replyEmail({
+        id: 'old-lead-reply', campaign_id: 'linked-campaign',
+        from_address_email: 'info@lead.example', thread_id: 'provider-thread-1', ue_type: 2,
+        body: { text: 'Спасибо, подумаем.' },
+      });
+      await mockInstantlyDb!.from('instantly_lead_qualifications').insert({
+        instantly_email_id: 'old-lead-reply', campaign_id: 'linked-campaign',
+        lead_email: 'info@lead.example', status: 'not_lead',
+      });
+      await insertColleagueEvent();
+      fetchThreadContext.mockResolvedValue({ replyEmail: oldLeadReply, threadEmails: [oldLeadReply], lastOutbound: null });
+      getEmail.mockResolvedValue(replyEmail({
+        id: 'colleague-reply', campaign_id: 'linked-campaign',
+        from_address_email: 'info@lead.example', thread_id: 'provider-thread-1', ue_type: 2,
+        body: { text: 'Давайте созвонимся завтра, пришлите КП.' },
+      }));
+
+      await withWebhookDrainEnabled(async () => {
+        const { drainWebhookQueue } = await import('@/lib/instantly/leadQualificationWorker');
+        await drainWebhookQueue();
+      });
+
+      const ids = mockInstantlyDb!.getRows('instantly_lead_qualifications').map((r) => r.instantly_email_id);
+      expect(ids).toEqual(['old-lead-reply']);
+      expect(qualifyReply).not.toHaveBeenCalled();
+      expect(mockInstantlyDb!.getRows('instantly_webhook_events')).toEqual([
+        expect.objectContaining({ id: 'colleague-event', processed: true }),
+      ]);
+    });
+
+    it('переписка коллеги по его адресу ещё не ищется: событие ждёт индекса, без разбора', async () => {
+      await insertColleagueEvent();
+      fetchThreadContext.mockResolvedValue(null);
+      getEmail.mockResolvedValue(colleagueReply());
+
+      await withWebhookDrainEnabled(async () => {
+        const { drainWebhookQueue } = await import('@/lib/instantly/leadQualificationWorker');
+        expect(await drainWebhookQueue()).toBe(0);
+      });
+
+      expect(mockInstantlyDb!.getRows('instantly_webhook_events')).toEqual([
+        expect.objectContaining({ id: 'colleague-event', processed: false }),
+      ]);
+      expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toHaveLength(0);
+      expect(qualifyReply).not.toHaveBeenCalled();
+    });
+
+    it('ответ коллеги в ящик ДРУГОГО клиента остаётся под защитой: без ИИ и без уведомлений', async () => {
+      // Ревью 23.09: Instantly привязал ответ по домену к нашей кампании, но
+      // пришёл он в ящик, с которого эта кампания не писала. Поллинг такое
+      // откладывает (cross-client guard по ящикам кампании из переписки).
+      // Путь по id обязан вести себя так же — раньше он передавал заглушку без
+      // ящиков кампании, и письмо уходило в ИИ и в Telegram чужому проекту.
+      const cross = replyEmail({
+        id: 'colleague-reply',
+        campaign_id: 'linked-campaign',
+        from_address_email: 'head_market@lead.example',
+        eaccount: 'kirill@other-client.example',
+        to_address_email_list: 'kirill@other-client.example',
+        thread_id: 'cross-thread',
+        ue_type: 2,
+        body: { text: 'Расскажите подробнее, интересно, пришлите КП.' },
+      });
+      await insertColleagueEvent();
+      fetchThreadContext.mockImplementation(async (_campaign: string, lead: string) =>
+        lead === 'info@lead.example'
+          ? null
+          : { replyEmail: cross, threadEmails: [], lastOutbound: null,
+              campaignOutboundMailboxes: ['sender@our-campaign.example'] });
+      getEmail.mockResolvedValue(cross);
+      qualifyReply.mockResolvedValue({
+        isLead: true, customCriteriaMatched: false, proposalSeen: false,
+        interestSignals: ['requested_proposal'], reason: 'Просит КП', confidence: 0.95,
+        needsReview: false, objectionHandleable: false, objectionDraft: null,
+        threadContext: { replyEmail: cross, threadEmails: [cross], lastOutbound: null },
+      });
+
+      await withWebhookDrainEnabled(async () => {
+        const { drainWebhookQueue } = await import('@/lib/instantly/leadQualificationWorker');
+        await drainWebhookQueue();
+      });
+
+      const rows = mockInstantlyDb!.getRows('instantly_lead_qualifications');
+      expect(rows).toEqual([expect.objectContaining({ instantly_email_id: 'colleague-reply', status: 'pending' })]);
+      expect(qualifyReply).not.toHaveBeenCalled();
+      expect(sendLeadTelegramAlert).not.toHaveBeenCalled();
+    });
+
+    it('лид уже отвечал раньше: поиск находит его старое письмо, но разбирается новое из вебхука', async () => {
+      const oldLeadReply = replyEmail({
+        id: 'old-lead-reply',
+        campaign_id: 'linked-campaign',
+        from_address_email: 'info@lead.example',
+        thread_id: 'provider-thread-1',
+        ue_type: 2,
+        body: { text: 'Спасибо, передам коллеге.' },
+      });
+      await mockInstantlyDb!.from('instantly_lead_qualifications').insert({
+        instantly_email_id: 'old-lead-reply', campaign_id: 'linked-campaign',
+        lead_email: 'info@lead.example', status: 'not_lead',
+      });
+      await insertColleagueEvent();
+      fetchThreadContext.mockImplementation(async (_campaign: string, lead: string) =>
+        lead === 'info@lead.example'
+          ? { replyEmail: oldLeadReply, threadEmails: [oldLeadReply], lastOutbound: null }
+          : { replyEmail: colleagueReply(), threadEmails: [oldLeadReply, colleagueReply()], lastOutbound: null });
+      getEmail.mockResolvedValue(colleagueReply());
+
+      await withWebhookDrainEnabled(async () => {
+        const { drainWebhookQueue } = await import('@/lib/instantly/leadQualificationWorker');
+        await drainWebhookQueue();
+      });
+
+      expect(getEmail).toHaveBeenCalledWith('colleague-reply', expect.anything());
+      const ids = mockInstantlyDb!.getRows('instantly_lead_qualifications').map((r) => r.instantly_email_id);
+      expect(ids).toEqual(expect.arrayContaining(['old-lead-reply', 'colleague-reply']));
+    });
+
+    it('письмо другой кампании: событие закрыто, ничего не разобрано и не зациклено', async () => {
+      await insertColleagueEvent();
+      fetchThreadContext.mockResolvedValue(null);
+      getEmail.mockResolvedValue({ ...colleagueReply(), campaign_id: 'some-other-campaign' });
+
+      await withWebhookDrainEnabled(async () => {
+        const { drainWebhookQueue } = await import('@/lib/instantly/leadQualificationWorker');
+        expect(await drainWebhookQueue()).toBe(0);
+      });
+
+      expect(mockInstantlyDb!.getRows('instantly_webhook_events')).toEqual([
+        expect.objectContaining({ id: 'colleague-event', processed: true }),
+      ]);
+      expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toHaveLength(0);
+    });
+
+    it('письмо по id не отдаётся (404): прежнее поведение — событие переоткрыто', async () => {
+      const { InstantlyApiError } = await import('@/lib/instantly/errors');
+      await insertColleagueEvent();
+      fetchThreadContext.mockResolvedValue(null);
+      getEmail.mockRejectedValue(new InstantlyApiError('Instantly API 404: email not found', 404));
+
+      await withWebhookDrainEnabled(async () => {
+        const { drainWebhookQueue } = await import('@/lib/instantly/leadQualificationWorker');
+        expect(await drainWebhookQueue()).toBe(0);
+      });
+
+      expect(mockInstantlyDb!.getRows('instantly_webhook_events')).toEqual([
+        expect.objectContaining({ id: 'colleague-event', processed: false }),
+      ]);
+      expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toHaveLength(0);
+    });
+
+    it('старое письмо коллеги, доставленное заново: событие закрыто сразу, без поиска по отправителю', async () => {
+      // Ревью 23.09 (2 из 3): суточное окно событие проверяет по времени
+      // вебхука. Старое письмо, доставленное заново, иначе крутилось бы в
+      // очереди до суток, и каждый круг стоил бы лишний поиск по отправителю.
+      await insertColleagueEvent();
+      fetchThreadContext.mockResolvedValue(null);
+      getEmail.mockResolvedValue(colleagueReply());
+      mockReplyAutomationExpired.mockImplementation(
+        (_notBefore: number, row: { id?: string }) => row?.id === 'colleague-reply',
+      );
+
+      await withWebhookDrainEnabled(async () => {
+        const { drainWebhookQueue } = await import('@/lib/instantly/leadQualificationWorker');
+        expect(await drainWebhookQueue()).toBe(0);
+      });
+
+      expect(mockInstantlyDb!.getRows('instantly_webhook_events')).toEqual([
+        expect.objectContaining({ id: 'colleague-event', processed: true }),
+      ]);
+      expect(fetchThreadContext).toHaveBeenCalledTimes(1);
+      expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toHaveLength(0);
+      expect(qualifyReply).not.toHaveBeenCalled();
     });
   });
 

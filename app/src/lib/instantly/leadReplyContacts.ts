@@ -11,12 +11,50 @@ export interface LeadReplyContacts {
   website: string | null;
 }
 
+const YOU_WROTE = /^Вы\s+писали\s+(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+[а-яё]{3,})(?:[^\n]{0,120})?:\s*$/iu;
+const EXTRA_DISPLAY_GIVEN_NAMES = new Set(['аружан', 'варя', 'maxime', 'raheel']);
+
+/** Sender display names are weaker than a signed name: keep plausible full
+ * names (including uncommon ones), but never copy a mailbox/brand/role into
+ * the board's personal-name column. */
+export function senderDisplayLeadName(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const value = raw.replace(/\s+/g, ' ').trim()
+    .replace(/[\p{Extended_Pictographic}\uFE0F]+$/gu, '').trim();
+  // Display names sometimes append a role, organization or address. Accept
+  // only a self-contained personal prefix; the suffix is not part of a name.
+  const prefix = value.split(/[,(]/u)[0].trim();
+  if (prefix && prefix !== value) {
+    const personal = senderDisplayLeadName(prefix);
+    if (personal) return personal;
+  }
+  if (!value || value.length > 80 || /[@<>/:\d]/u.test(value) ||
+    /\.(?:ru|com|net|org|by|kz|online|io)\b/iu.test(value) || isRoleTitle(value)) return null;
+  const words = value.split(' ');
+  if (words.some((word) => /^(?:info|support|contact|sales|admin|noreply|no-reply|service|team|company|agency|group|digital|solutions|generation|inbox|help|change|mister|bit|компания|организация|отдел|команда|служба|секретарь|агентство|группа|центр|магазин|решения|завод|стоматология|студия|эквайринг|фабрика|коммуникации)$/iu.test(word))) return null;
+  if (isPersonName(value)) return value;
+  if (words.length < 2 || words.length > 3) return null;
+  const cyrillic = words.every((word) => /^[А-ЯЁ][а-яё’-]{1,50}$/u.test(word));
+  const latin = words.every((word) => /^[A-Z][a-z’-]{1,50}$/.test(word));
+  if (latin) {
+    const hasKnownGiven = words.some((word) => EXTRA_DISPLAY_GIVEN_NAMES.has(word.toLowerCase()));
+    const hasSurname = words.some((word) => /(?:ov|ova|ev|eva|in|ina|enko|chuk|yuk|son|sen|ez|yan|ian|vich|shvili|dze)$/i.test(word));
+    return hasKnownGiven || hasSurname ? value : null;
+  }
+  if (!cyrillic) return null;
+  if (words.some((word) => EXTRA_DISPLAY_GIVEN_NAMES.has(word.toLowerCase()))) return value;
+  if (words.length === 3 && words.some((word) => /(?:ович|евич|ьевич|овна|евна|ьевна|инична)$/iu.test(word))) return value;
+  return words.length === 2 && words.some((word) => /(?:ов|ев|ин|ова|ева|ина|енко|юк|ич|ян|дзе|швили)$/iu.test(word))
+    ? value : null;
+}
+
 // Unlike qualification, enrichment needs the sender's signature. Only history
 // boundaries belong here; an empty current reply must never fall back to history.
 const HISTORY_BOUNDARIES = [
   /^>/,
   /^On\s+.+\s+wrote:\s*$/i,
   /^On\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s/i,
+  YOU_WROTE,
   /^(?:Van|Verzonden|Aan|Onderwerp|De|Envoyé|À|Objet|Von|Gesendet|An|Betreff):\s+.+$/iu,
   /^\d{1,2}[./-]\d{1,2}[./-]\d{2,4},?\s+\d{1,2}:\d{2}.*(?:@|mailto:)/iu,
   /^(?:От|От кого|From|Sent|Отправлено|Кому|To|Subject|Тема):\s+.+$/i,
@@ -26,7 +64,7 @@ const HISTORY_BOUNDARIES = [
   /^(?:пн|вт|ср|чт|пт|сб|вс|понедельник|вторник|среда|четверг|пятница|суббота|воскресенье),?\s+\d{1,2}\s+[а-яё]{3,}\.?(?:\s+\d{4})?(?:\s*г\.)?[^\n]{0,160}:\s*$/iu,
   /^(?:Sent\s+from\s+my\s+(?:iPhone|iPad|Android)|Отправлено\s+из\s+(?:мобильной\s+)?(?:Почты\s+Mail|мобильной\s+Яндекс\.Почты))(?:[\s:.]|$)/iu,
 ];
-const SIGNOFF = /^(?:--|—|с\s+(?:уважением|наилучшими\s+пожеланиями)(?:[,.!].*)?|(?:best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:[,.!].*)?)$/iu;
+const SIGNOFF = /^(?:--|—|с\s+(?:уважением|наилучшими\s+пожеланиями)(?:[,.!:].*)?|(?:best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:[,.!:].*)?)$/iu;
 const SIGNOFF_PREFIX = /^(?:с\s+(?:уважением|наилучшими\s+пожеланиями)|best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:[\s,.!:-]+|$)/iu;
 const PHONE_LABEL = /(?:телефон|тел\s*[.:]|моб(?:ильный)?\s*[.:]|phone|mobile|telephone|whats\s*app|tel:|позвон|звоните|набери|свяжитесь|для\s+связи|(?:мой|наш)\s+номер|контакт|\b(?:call|reach|contact)\b|\b[mtp]\s*:)/iu;
 const NON_PHONE_LABEL = /(?:инн|кпп|огрн(?:ип)?|окпо|бик|снилс|р[/.]?с|к[/.]?с|vat|tax\s*(?:id|number)?|order|заказ[а-яё]*|заявк[аи]|сч[её]т[а-яё]*)\s*[:№#.-]?\s*$/iu;
@@ -36,7 +74,23 @@ const URL_CANDIDATE = /https?:\/\/[^\s<>"'()[\]{}]+|(?<![\p{L}\p{N}@._-])(?:www\
 function currentLines(text: string): string[] {
   const lines = text.replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ').split('\n');
   const end = lines.findIndex((line) => HISTORY_BOUNDARIES.some((re) => re.test(line.trim())));
-  return lines.slice(0, end < 0 ? lines.length : end).map((line) => line.trim());
+  if (end < 0) return lines.map((line) => line.trim());
+  const current = lines.slice(0, end);
+  // Some clients put the current author's signature AFTER the quoted thread.
+  // Recover only an explicitly unquoted sign-off after a fully marked quote
+  // block. An unquoted From/To/forwarding header opens another author's
+  // message; even its nested quotes do not make the footer ours again.
+  const lastQuoted = lines.findLastIndex((line) => /^>/.test(line.trim()));
+  if (lastQuoted >= end && lines.slice(end, lastQuoted + 1).every((line) =>
+    !line.trim() || /^>/.test(line.trim()))) {
+    const tail = lines.slice(lastQuoted + 1);
+    const first = tail.find((line) => line.trim())?.trim() ?? '';
+    if (SIGNOFF.test(first) || (SIGNOFF_PREFIX.test(first) && signatureNameInLine(first) !== null)) {
+      // Apply the same history boundary to the recovered footer, too.
+      current.push(...currentLines(tail.join('\n')));
+    }
+  }
+  return current.map((line) => line.trim());
 }
 
 function companyWebsite(raw: string): string | null {
@@ -59,7 +113,15 @@ function websitesInLine(line: string): string[] {
 
 function htmlText(html: string): string {
   const $ = load(html);
-  $('script, style, head, blockquote, .gmail_quote, .yahoo_quoted, .protonmail_quote, .moz-forward-container, .ms-outlook-mobile-reference-message').remove();
+  $('script, style, head').remove();
+  const quotes = $('blockquote, .gmail_quote, .yahoo_quoted, .protonmail_quote, .moz-forward-container, .ms-outlook-mobile-reference-message');
+  quotes.each((_, quote) => {
+    let previous = quote.prev;
+    while (previous && ((previous.type === 'text' && !previous.data.trim()) ||
+      previous.type === 'comment' || $(previous).is('br'))) previous = previous.prev;
+    if (previous && YOU_WROTE.test($(previous).text().trim())) $(previous).remove();
+  });
+  quotes.remove();
   // Outlook's reply marker is a sibling of the old message, not its wrapper.
   // Remove following siblings at every enclosing level without losing the top reply.
   $('#divRplyFwdMsg, #stopSpelling, .OutlookMessageHeader, .moz-cite-prefix').each((_, marker) => {
@@ -98,10 +160,17 @@ function htmlText(html: string): string {
 }
 
 function phoneInLine(line: string, signature: boolean): string | null {
+  // "Наш номер в реестре ..." is an identifier, not an invitation to call.
+  const registry = /(?:^|\s)номер\s+(?:в\s+)?реестр(?:е|а|ов[а-яё]*)?(?=\s|[.:,;!?]|$)/iu.exec(line);
+  const nextPhoneLabel = registry
+    ? [...line.matchAll(/(?:телефон|тел\s*[.:]|моб(?:ильный)?\s*[.:]|phone|mobile|tel:)/giu)]
+      .find((match) => match.index > registry.index)?.index ?? line.length
+    : 0;
   const framed = PHONE_LABEL.test(line);
   const phones: string[] = [];
   const candidates = leadPhoneCandidates(line);
   for (const { value, digits, start, end } of candidates) {
+    if (registry && start >= registry.index && start < nextPhoneLabel) continue;
     const before = line.slice(0, start);
     const after = line.slice(end);
     if (NON_PHONE_LABEL.test(before) || after.startsWith('@')) continue;
@@ -255,8 +324,8 @@ export function extractLeadReplyContacts(body: Email['body']): LeadReplyContacts
     const fallback = extractFromText(htmlText(html));
     return {
       leadName: primary.leadName ?? fallback.leadName,
-      bodyPhone: primary.bodyPhone ?? fallback.bodyPhone,
-      signaturePhone: primary.signaturePhone ?? fallback.signaturePhone,
+      bodyPhone: joinLeadPhones([primary.bodyPhone, fallback.bodyPhone]),
+      signaturePhone: joinLeadPhones([primary.signaturePhone, fallback.signaturePhone]),
       companyName: primary.companyName ?? fallback.companyName,
       website: primary.website ?? fallback.website,
     };

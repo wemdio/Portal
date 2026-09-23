@@ -41,7 +41,7 @@ import {
 import { HE, StatusDot, Spinner } from '../design';
 import { SeasonalityDetail } from '../SeasonalitySummary';
 import { StatusBox, TIER_META, formatDate } from '../ui';
-import { collectCount, collectTaskDone, collectTaskFailed, getCollectionProgress, getCollectionQueue, isPartialPreview } from '../collectionProgress';
+import { collectCount, collectTaskDone, collectTaskFailed, describeReadyComposition, getCollectionProgress, getCollectionQueue, isPartialPreview } from '../collectionProgress';
 import type { PreparationPresentation } from '../PreparationProgress';
 
 /** Как часто дёргать reload детали во время автосборки (как POLL_INTERVAL_MS родителя). */
@@ -899,7 +899,7 @@ export function BaseRow({ base, job, hypothesisTitle, queued, preparationState, 
         <span className="ve2-tag">{base.source === 'auto' ? 'авто' : 'загрузка'}</span>
         {partialPreview && hasReadyContacts ? (
           <span className="shrink-0 font-mono text-xs text-gray-700">
-            Проверенных контактов: {(base.collect_info?.target_progress?.ready_rows ?? previewRows.length).toLocaleString('ru-RU')}
+            Проверенных контактов: {(base.collect_info?.target_progress?.ready_contacts ?? base.collect_info?.target_progress?.ready_rows ?? previewRows.length).toLocaleString('ru-RU')}
           </span>
         ) : base.status !== 'collecting' ? (
           <span className="shrink-0 font-mono text-xs text-gray-700">{base.row_count.toLocaleString('ru-RU')} строк</span>
@@ -1202,6 +1202,7 @@ function readCollectInfo(info: VeCollectInfo | null | undefined) {
  */
 function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBaseSummary; job?: VeJobSummary; useDefaultLimit?: boolean }) {
   const target = base.collect_info?.target_progress;
+  const composition = describeReadyComposition(target);
   const nameCleanup = base.collect_info?.company_name_cleanup;
   const adaptive = base.collect_info?.adaptive_collection;
   const lastBatch = adaptive?.last_batch;
@@ -1248,6 +1249,7 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
       {target ? (
         <div className="mb-2" role="status">
           <p className="font-medium">{target.mode === 'preview' ? isPartialPreview(base) ? 'Проверено сейчас — превью не завершено' : 'Готово для превью' : 'Проверено и подготовлено'}: {target.ready_rows.toLocaleString('ru-RU')} / {target.ready_target.toLocaleString('ru-RU')} контактов</p>
+          {composition ? <p className="mt-1 text-gray-700">{composition}</p> : null}
           {target.mode === 'preview' && base.status === 'collecting' ? (
             <p className="mt-1 text-gray-700">
               {target.ready_rows > 0
@@ -1260,7 +1262,7 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
               : emailsInProgress ? 'Повторяем незавершённую проверку сохранённых email. Контакты сохранены; новый сбор не запускается.'
               : relevanceInProgress ? 'Автоматически проверяем деятельность компаний: ищем сайты по ИНН и читаем подтверждённые страницы.'
               : target.status === 'collecting' ? `Проход ${target.round} из ${target.max_rounds}. Добираем контакты после проверок.`
-              : target.status === 'target_reached' ? `Цель превью достигнута. В готовой базе ${target.ready_rows.toLocaleString('ru-RU')} контактов; отправка ещё не включена.`
+              : target.status === 'target_reached' ? `Цель превью достигнута. В готовой базе ${(target.ready_contacts ?? target.ready_rows).toLocaleString('ru-RU')} контактов; отправка ещё не включена.`
               : target.status === 'exhausted' ? 'Источники текущего плана закончились. Это не оценка всего рынка.'
               : target.status === 'limited' ? target.reason || 'Сбор остановлен защитным лимитом. Это не означает, что контакты закончились.'
               : 'Подготовка превью остановлена. Непроверенные контакты не попадут в запуск.'}

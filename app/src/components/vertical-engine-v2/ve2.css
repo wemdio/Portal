@@ -394,6 +394,11 @@ html[data-portal-theme="dark"] .ve2 {
   border-radius: 12px;
   background: var(--ve2-surface);
 }
+/* Широкие гипотезы — отдельный блок над вертикалями. */
+.ve2-broad-group {
+  border-color: var(--ve2-line-strong);
+  box-shadow: inset 3px 0 0 var(--ve2-fg);
+}
 .ve2-vertical-header {
   display: grid;
   gap: 12px;

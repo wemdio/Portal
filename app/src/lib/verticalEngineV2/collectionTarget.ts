@@ -4,8 +4,29 @@ export const VE_PREVIEW_READY_TARGET = 500;
 export const VE_PREVIEW_FIRST_CANDIDATES = 100;
 export const VE_COLLECTION_MAX_CANDIDATES = 10_000;
 export const VE_COLLECTION_MAX_ROUNDS = 5;
+/**
+ * Бюджет раундов сборки — защита от бесконечного цикла, а не цель. Раунд
+ * расходует его, только если отправил в проверку новые для базы компании:
+ * холостой (пустой или из уже проверенных) бюджет не тратит, но таких подряд
+ * допускается не больше VE_COLLECTION_MAX_IDLE_ROUNDS. «Продолжить подготовку»
+ * даёт новый бюджет от текущего раунда.
+ */
+export const VE_COLLECTION_ROUND_BUDGET = 100;
+export const VE_COLLECTION_MAX_IDLE_ROUNDS = 5;
+/** Санитарный потолок сохранённого предела: больше не бывает даже после продолжений. */
+export const VE_COLLECTION_ROUND_CEILING = 10_000;
+
+/** Сохранённый предел раундов базы; меньше бюджета (старые 5) или испорченный — бюджет. */
+export function veCollectionMaxRounds(stored: unknown): number {
+  return typeof stored === 'number' && Number.isSafeInteger(stored)
+    && stored > VE_COLLECTION_ROUND_BUDGET && stored <= VE_COLLECTION_ROUND_CEILING ? stored : VE_COLLECTION_ROUND_BUDGET;
+}
 export interface VeRemainingReadyEstimate {
   contacts: number;
+  /** Новых компаний, на которые придутся эти контакты; рядом с контактами. */
+  companies?: number;
+  /** Непросмотренных компаний, оставшихся в измеренном срезе источника. */
+  remaining_companies?: number;
   as_of: string;
   scope: string;
   confidence: 'low';
@@ -14,6 +35,9 @@ export interface VeRemainingReadyEstimate {
   source_population?: number;
   candidates_processed?: number;
   ready_rows?: number;
+  /** Сколько из обработанных компаний входит в измеренный срез. */
+  processed_in_population?: number;
+  ready_companies?: number;
 }
 
 export interface VeObservedContactYield {
@@ -21,6 +45,8 @@ export interface VeObservedContactYield {
   ready: number;
   contacts_per_candidate: number;
   as_of: string;
+  /** Компаний с готовым контактом. Absent on legacy observations. */
+  ready_companies?: number;
 }
 
 export interface VeCollectionEstimate {
@@ -32,6 +58,18 @@ export interface VeCollectionEstimate {
   population_as_of?: string;
   population_filters?: string;
   population_matches_source?: boolean;
+  /**
+   * 'plan_union' — объединение реестровых срезов плана тем же условием, что и
+   * выборка (ve_directory_plan_population). Старые оценки без поля считались
+   * другим условием и пересчитываются при следующей партии.
+   */
+  population_method?: 'plan_union';
+  /** Компаний среза, ещё не взятых другими базами проекта: основа прогноза. */
+  available_companies?: number | null;
+  /** Компаний в каждом реестровом срезе плана, по порядку задач. */
+  slice_companies?: number[];
+  /** Источники плана без размера (карты, вакансии): в прогноз не входят. */
+  unsized_sources?: string[];
   note?: string;
   estimate_reason?: string;
   observed_yield?: VeObservedContactYield | null;
@@ -40,55 +78,96 @@ export interface VeCollectionEstimate {
 
 export const VE_SOURCE_POPULATION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
+const VE_REMAINING_SCOPE = 'Считаются компании реестра под условия гипотезы, без повторов и без компаний других баз проекта. '
+  + 'Это прогноз по текущему выходу, а не гарантированный остаток.';
+
 /** Observed-yield scenario, not an inventory count or confidence interval. */
 export function estimateRemainingReady(input: {
   population: number | null; candidatesProcessed: number; readyRows: number; eligible: boolean; asOf: string;
   populationAsOf?: string;
+  /** Компании среза, уже просмотренные базой. Без поля — все обработанные. */
+  processedInPopulation?: number;
+  /** Компаний с готовым контактом: прогноз в компаниях рядом с контактами. */
+  readyCompanies?: number;
+  scope?: string;
 }): VeRemainingReadyEstimate | null {
+  const seen = input.processedInPopulation ?? input.candidatesProcessed;
   if (!input.eligible || !Number.isSafeInteger(input.population) || input.population === null
     || !Number.isSafeInteger(input.candidatesProcessed) || input.candidatesProcessed < 100
-    || input.population < input.candidatesProcessed || !Number.isSafeInteger(input.readyRows) || input.readyRows <= 0
+    || !Number.isSafeInteger(seen) || seen < 0 || input.population < seen
+    || !Number.isSafeInteger(input.readyRows) || input.readyRows <= 0
     || !Number.isFinite(Date.parse(input.asOf))) return null;
-  const contacts = Math.round((input.population - input.candidatesProcessed) * input.readyRows / input.candidatesProcessed);
+  // Остаток — компании, на которые база ещё не смотрела, а выход — готовые
+  // контакты на обработанную компанию: охват, а не лишние адреса тех же компаний.
+  const remaining = input.population - seen;
+  const contacts = Math.round(remaining * input.readyRows / input.candidatesProcessed);
   if (!Number.isSafeInteger(contacts) || contacts < 0) return null;
+  const readyCompanies = Number.isSafeInteger(input.readyCompanies) && input.readyCompanies! >= 0 ? input.readyCompanies : undefined;
   return {
     contacts,
+    ...(readyCompanies !== undefined ? { companies: Math.round(remaining * readyCompanies / input.candidatesProcessed) } : {}),
+    remaining_companies: remaining,
     as_of: input.asOf, confidence: 'low',
-    scope: 'Один реестровый срез при сохранении наблюдаемого выхода после проверок; сценарий, не подтверждённый остаток',
+    scope: input.scope ?? 'Один реестровый срез при сохранении наблюдаемого выхода после проверок; сценарий, не подтверждённый остаток',
     ...(input.populationAsOf ? {
       population_as_of: input.populationAsOf, source_population: input.population,
       candidates_processed: input.candidatesProcessed, ready_rows: input.readyRows,
+      ...(input.processedInPopulation !== undefined ? { processed_in_population: input.processedInPopulation } : {}),
+      ...(readyCompanies !== undefined ? { ready_companies: readyCompanies } : {}),
     } : {}),
   };
 }
 
-/** A completed cohort changes the forecast; UI polling never buys new data. */
+/** Размер среза, по которому можно прогнозировать: посчитан условием выборки. */
+export function veEstimatePopulation(estimate: VeCollectionEstimate | null | undefined): number | null {
+  if (!estimate || estimate.version !== 2 || estimate.population_method !== 'plan_union'
+    || estimate.population_matches_source !== true) return null;
+  const value = estimate.available_companies ?? estimate.unique_companies;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+/**
+ * Прогноз пересчитывается на каждой партии по всем обработанным компаниям.
+ * Раньше он считался только на полностью проверенной партии, а база почти
+ * всегда заканчивается на оборванной — число не появлялось никогда (68 баз из
+ * 83 на 22.09.2026). UI polling never buys new data.
+ */
 export function updateCollectionEstimate(estimate: VeCollectionEstimate, input: {
-  candidates: number; ready: number; complete: boolean; identitiesComplete: boolean;
-  externalExclusions: boolean; asOf: string;
+  /** Все обработанные базой компании: знаменатель выхода. */
+  candidates: number;
+  /** Из них компании реестра (с ИНН): они уже вычтены из остатка среза. */
+  sourceCandidates: number;
+  /** Готовые контакты в единицах цели: лишние адреса одной компании рынок не расширяют. */
+  ready: number;
+  readyCompanies: number;
+  /** Последняя партия проверена полностью. Незавершённая оценку не отменяет. */
+  complete: boolean;
+  asOf: string;
 }): VeCollectionEstimate {
   const validCounts = Number.isSafeInteger(input.candidates) && input.candidates > 0
     && Number.isSafeInteger(input.ready) && input.ready >= 0;
-  const observed = input.complete && validCounts ? {
+  const observed = validCounts ? {
     candidates: input.candidates, ready: input.ready, contacts_per_candidate: input.ready / input.candidates, as_of: input.asOf,
+    ...(Number.isSafeInteger(input.readyCompanies) && input.readyCompanies >= 0 ? { ready_companies: input.readyCompanies } : {}),
   } : null;
-  const populationTime = Date.parse(estimate.population_as_of ?? '');
-  const age = Date.parse(input.asOf) - populationTime;
-  const reason = !input.complete ? 'Проверка текущей партии ещё не завершена.'
-    : !input.identitiesComplete ? 'Недостаточно идентификаторов компаний для сопоставления выборки и источника.'
-      : input.externalExclusions ? 'Нельзя точно вычесть пересечения с ранее собранными базами из остатка источника.'
-        : estimate.version !== 2 || !estimate.population_matches_source || estimate.unique_companies === null
-          ? estimate.note ?? 'Размер сопоставимого источника пока неизвестен.'
-          : !Number.isFinite(age) || age < 0 || age > VE_SOURCE_POPULATION_MAX_AGE_MS
-            ? 'Счётчик источника требует обновления при следующей партии.'
-            : !validCounts || input.candidates < 100 ? 'Для оценки нужно проверить не менее 100 компаний.'
-              : input.ready === 0 ? 'Пока нет готовых контактов для оценки выхода.'
-                : estimate.unique_companies < input.candidates ? 'Счётчик источника меньше обработанной выборки; требуется сверка.' : null;
+  const population = veEstimatePopulation(estimate);
+  const age = Date.parse(input.asOf) - Date.parse(estimate.population_as_of ?? '');
+  const reason = population === null ? estimate.note ?? 'Размер сопоставимого источника пока неизвестен.'
+    : !Number.isFinite(age) || age < 0 || age > VE_SOURCE_POPULATION_MAX_AGE_MS
+      ? 'Счётчик источника требует обновления при следующей партии.'
+      : !validCounts || input.candidates < 100 ? 'Для оценки нужно проверить не менее 100 компаний.'
+        : input.ready === 0 ? 'Пока нет готовых контактов для оценки выхода.'
+          : population < input.sourceCandidates ? 'Счётчик источника меньше обработанной выборки; требуется сверка.' : null;
+  const scope = [VE_REMAINING_SCOPE,
+    estimate.unsized_sources?.length ? `В прогноз не входят источники без размера рынка: ${estimate.unsized_sources.join(', ')}.` : '',
+    input.complete ? '' : 'Последняя партия проверена не полностью, поэтому прогноз может быть занижен.',
+  ].filter(Boolean).join(' ');
   return {
     ...estimate, observed_yield: observed,
     remaining_ready_estimate: reason ? null : estimateRemainingReady({
-      population: estimate.unique_companies, candidatesProcessed: input.candidates, readyRows: input.ready,
-      eligible: true, asOf: input.asOf, populationAsOf: estimate.population_as_of,
+      population, candidatesProcessed: input.candidates, processedInPopulation: input.sourceCandidates,
+      readyRows: input.ready, readyCompanies: input.readyCompanies,
+      eligible: true, asOf: input.asOf, populationAsOf: estimate.population_as_of, scope,
     }),
     estimate_reason: reason ?? undefined,
   };
@@ -104,8 +183,35 @@ export interface VeCollectionTargetProgress {
   max_candidates: number;
   /** Persisted per run so a redeploy never shrinks an in-flight constructor's input. */
   first_round_candidates?: number;
+  /** Холостых раундов подряд: без новых для базы компаний. */
+  idle_streak?: number;
+  /** Компаний в готовой базе. */
+  ready_companies?: number;
+  /** Адресов в готовой базе — только когда в цель (ready_rows) засчитаны не все. */
+  ready_contacts?: number;
+  /** Сколько адресов одной компании засчитывается в цель; рядом с ready_contacts. */
+  counted_per_company?: number;
   status: 'collecting' | 'target_reached' | 'exhausted' | 'limited' | 'error';
   reason?: string;
+}
+
+/**
+ * Состав готовой базы рядом с засчитанными в цель контактами (ready_rows).
+ * Число адресов пишется, только когда оно больше засчитанного: иначе оно
+ * совпадает с ready_rows и старые поля не должны его пережить.
+ */
+export function withVeTargetComposition(
+  progress: VeCollectionTargetProgress,
+  count: { counted: number; companies: number; perCompany: number | null }, contacts: number,
+): VeCollectionTargetProgress {
+  const next: VeCollectionTargetProgress = { ...progress, ready_companies: count.companies };
+  delete next.ready_contacts;
+  delete next.counted_per_company;
+  if (contacts > count.counted && count.perCompany !== null) {
+    next.ready_contacts = contacts;
+    next.counted_per_company = count.perCompany;
+  }
+  return next;
 }
 
 export function createCollectionTarget(mode: VeCollectionMode, readyTarget?: number): VeCollectionTargetProgress {
@@ -135,17 +241,25 @@ export function collectionRoundLimit(progress: VeCollectionTargetProgress): numb
 
 export function finishCollectionRound(
   progress: VeCollectionTargetProgress,
-  result: { candidates: number; readyRows: number; exhausted: boolean; canContinue: boolean; error: string | null; validationRetry?: boolean },
+  result: {
+    candidates: number; readyRows: number; exhausted: boolean; canContinue: boolean; error: string | null; validationRetry?: boolean;
+    /** Раунд не отправил ни одной новой для базы компании (или был пустым). */
+    idle?: boolean;
+  },
 ): VeCollectionTargetProgress {
   const next = {
     ...progress, ready_rows: result.readyRows,
     candidates_processed: progress.candidates_processed + result.candidates,
   };
   delete next.reason;
+  delete next.idle_streak;
+  const idleStreak = result.idle ? (Number.isSafeInteger(progress.idle_streak) ? Math.max(0, progress.idle_streak!) : 0) + 1 : 0;
+  if (idleStreak) next.idle_streak = idleStreak;
   if (result.error) return { ...next, status: 'error', reason: result.error };
   if (result.readyRows >= progress.ready_target) return { ...next, status: 'target_reached' };
   if (result.exhausted) return { ...next, status: 'exhausted', reason: 'Источники выбранного плана исчерпаны' };
-  if (next.candidates_processed >= next.max_candidates || next.round >= next.max_rounds) {
+  // Холостой раунд бюджет раундов не расходует (см. VE_COLLECTION_ROUND_BUDGET).
+  if (next.candidates_processed >= next.max_candidates || (!result.idle && next.round >= next.max_rounds)) {
     return { ...next, status: 'limited', reason: 'Достигнут защитный предел кандидатов или раундов; цель ещё не набрана' };
   }
   if (!result.canContinue) {
@@ -160,5 +274,11 @@ export function finishCollectionRound(
       + 'но за раунд не набралось ни одного кандидата. Это остановка по пустому раунду, а не доказательство, '
       + 'что подходящие компании кончились' };
   }
-  return { ...next, round: next.round + 1, status: 'collecting' };
+  if (idleStreak >= VE_COLLECTION_MAX_IDLE_ROUNDS) {
+    return { ...next, status: 'limited', reason: `${idleStreak} проходов подряд не принесли ни одной новой компании: `
+      + 'источники отдают только уже проверенные. Сбор остановлен, чтобы не ходить по кругу; это не доказательство, '
+      + 'что подходящие компании кончились' };
+  }
+  const maxRounds = result.idle ? Math.min(VE_COLLECTION_ROUND_CEILING, next.max_rounds + 1) : next.max_rounds;
+  return { ...next, round: next.round + 1, max_rounds: maxRounds, status: 'collecting' };
 }

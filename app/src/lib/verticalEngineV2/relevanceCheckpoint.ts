@@ -67,6 +67,15 @@ const checkpointSchema = z.object({
     attempts: z.number().int().min(0).max(2).optional(),
     result: veRelevanceReviewResultSchema.optional(),
     failure_code: relevanceFailureCodeSchema.optional(),
+    // Версия правил отбора, по которой оплачена попытка; нет поля — версия 1.
+    // Добавочное поле: старый воркер его просто отбросит.
+    rules: z.number().int().positive().optional().catch(undefined),
+    // Разовая перепроверка по новым правилам: отказ DeepSeek здесь решает
+    // вторая модель. Добавочное поле, старый воркер его отбросит.
+    recheck: z.literal(true).optional().catch(undefined),
+    // Попытка, оборванная остановкой воркера (ни ответа, ни ошибки модели),
+    // уже один раз возвращена. Добавочное поле, старый воркер его отбросит.
+    interrupted: z.literal(true).optional().catch(undefined),
   })).default({}),
   semantic_review_refs: z.record(hashSchema, hashSchema).default({}),
   // One paid checklist per hypothesis for the calibrated triage. Optional and
