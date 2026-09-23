@@ -1902,49 +1902,131 @@ describe('base_collect CONSTRUCT import', () => {
     expect(normalizeVeMaxEmailsPerCompany(3)).toBe(3);
   });
 
-  it('stops a hypothesis whose market cannot reach the target instead of grinding to the candidate cap', async () => {
-    // Узкая гипотеза раньше шла к потолку в 10 000 компаний: каждый следующий
-    // раунд просил БОЛЬШЕ компаний, и за каждую платили чтением сайта и SMTP.
-    const description = 'Производит промышленные насосы на собственной площадке.';
-    const harvest = Array.from({ length: 320 }, (_, i) => unifiedRow({
-      company: `Завод ${i}`, website: `plant${i}.test`, email: `mail@plant${i}.test`, inn: `77000200${i}`,
-      source_detail: description,
-    }));
-    const dispatched: NonNullable<VeCollectInfo['construct']> = { bc_job_id: 'bc-narrow', status: 'dispatched', dispatched_at: '2026-09-20T00:00:00Z' };
-    const narrow = (population: number): VeCollectInfo => ({
-      ...collectInfo(harvest, dispatched),
+  // База 1a69cda6 «Энергетические компании», 16.09.2026: 771 адрес от 39 компаний
+  // (у первой 123) закрылись «цель достигнута». Распределение адресов по
+  // компаниям — с прода; ИНН, названия и почты подставные.
+  const ENERGY_ADDRESSES_PER_COMPANY = [123, 80, 73, 69, 55, 41, 37, 36, 35, 31, 29, 27, 26, 12, 12, 11, 11, 10, 7, 6, 6,
+    5, 5, 4, 3, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+  const denseEnergyBase = (limit: number | null) => {
+    const companies = ENERGY_ADDRESSES_PER_COMPANY.map((_, i) => ({
+      company: `Энергокомпания ${i + 1}`, website: `energy${i + 1}.test`, inn: `77010${String(i + 1).padStart(5, '0')}` }));
+    const contacts = companies.flatMap((company, i) => Array.from({ length: ENERGY_ADDRESSES_PER_COMPANY[i] }, (_, k) =>
+      [company.company, company.website, `m${k + 1}@${company.website}`, company.inn, 'ok']));
+    const info: VeCollectInfo = {
+      ...collectInfo(companies.map((company) => unifiedRow(company)),
+        { bc_job_id: 'bc-energy', status: 'dispatched', dispatched_at: '2026-09-16T00:00:00Z' }),
+      collection_mode: 'preview', target_progress: createCollectionTarget('preview'), ready_target: 500,
+    };
+    const db = seed(info, { ve_bases: [{ ...makeBase(info), max_emails_per_company: limit }],
+      base_constructor_jobs: [{ id: 'bc-energy', status: 'completed', selected_steps: ['find_emails', 'split_emails', 'dedup_email', 'validate_emails'],
+        data: [['Компания', 'Сайт', 'Email', 'ИНН', 'Email Статус'], ...contacts] }] });
+    return { db, total: contacts.length };
+  };
+
+  it('counts at most three addresses of a company toward the goal when no limit is set, and keeps every address in the base', async () => {
+    const { db, total } = denseEnergyBase(null);
+    expect(total).toBe(771);
+    await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
+    const patch = db.updates.filter((update) => update.table === 've_bases' && Array.isArray(update.patch.data)).at(-1)!.patch;
+    const info = patch.collect_info as VeCollectInfo;
+    // Плотность — не охват: 39 компаний дают в цель 92 контакта (не больше 3 × 39 = 117).
+    expect(info.target_progress).toMatchObject({ status: 'collecting', ready_rows: 92, ready_target: 500,
+      ready_companies: 39, ready_contacts: 771, counted_per_company: 3 });
+    expect(info.target_progress!.ready_rows).toBeLessThanOrEqual(117);
+    expect(patch.status).toBe('collecting');
+    expect(db.getRows('ve_jobs').find((row) => row.id === 'job-1')?.status).toBe('pending');
+    // Выдача прежняя: без лимита специалиста готовая база хранит все 771 адрес.
+    expect(patch.data).toHaveLength(771);
+    expect(patch.row_count).toBe(771);
+    expect(info.stats?.launchable_rows).toBe(771);
+    expect(info.company_contact_cap).toBeUndefined();
+    expect(info.relevance_reserve?.rows.some((row) => row._ve_company_cap)).toBe(false);
+  });
+
+  it('«Продолжить подготовку» недобранной плотной базы считает её недобранной и продолжает сбор', async () => {
+    const { db } = denseEnergyBase(null);
+    await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
+    const patch = db.updates.filter((update) => update.table === 've_bases' && Array.isArray(update.patch.data)).at(-1)!.patch;
+    const info = patch.collect_info as VeCollectInfo;
+    // Сбор остановился недобранным: 92 из 500 в цели при 771 адресе в базе.
+    // «Продолжить подготовку» пересчитывает сохранённые строки тем же правилом:
+    // база остаётся недобранной и идёт дальше, а не закрывается «цель
+    // достигнута» на тех же 771 адресах.
+    const stopped: VeCollectInfo = { ...info, target_progress: { ...info.target_progress!, ready_rows: 92,
+      round: info.target_checkpoint!.completed_round, status: 'limited', reason: 'Достигнут защитный предел кандидатов или раундов; цель ещё не набрана' } };
+    const resumeDb = seed(stopped, { ve_bases: [{ ...makeBase(stopped), status: 'analyzed', data: patch.data,
+      columns: patch.columns, row_count: patch.row_count, max_emails_per_company: null }] });
+    await resumeDb.from('ve_jobs').update({ status: 'done' }).eq('id', makeJob().id);
+    expect(canResumePartialPreview(resumeDb.getRows('ve_bases')[0])).toBe(true);
+    await expect(enqueueVeBaseCollect(resumeDb as unknown as SupabaseClient, { projectId: 'p1', verticalId: 'v1',
+      verticalName: VERTICAL.name, hypothesisIds: ['h1'], collectionMode: 'preview', limit: 2000, resumeBaseId: 'b1' }))
+      .resolves.toMatchObject({ ok: true, base: { id: 'b1' } });
+    const resumeJob = resumeDb.getRows('ve_jobs').find((row) => row.status === 'pending')! as unknown as VeJob;
+    await resumeDb.from('ve_jobs').update({ status: 'running' }).eq('id', resumeJob.id);
+    await runBaseCollectStage({ ...resumeJob, status: 'running' }, { supabase: resumeDb as unknown as SupabaseClient });
+    const resumed = resumeDb.getRows('ve_bases')[0];
+    expect((resumed.collect_info as VeCollectInfo).target_progress).toMatchObject({ status: 'collecting', ready_rows: 92, ready_contacts: 771 });
+    expect(resumed.status).toBe('collecting');
+    expect(resumed.row_count).toBe(771);
+  });
+
+  it('keeps the specialist limit as the goal measure: every address of the capped base counts', async () => {
+    const { db } = denseEnergyBase(5);
+    await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
+    const patch = db.updates.filter((update) => update.table === 've_bases' && Array.isArray(update.patch.data)).at(-1)!.patch;
+    const info = patch.collect_info as VeCollectInfo;
+    // Лимит 5, а не 3 по умолчанию: в базе и в цели одни и те же 139 адресов.
+    expect(patch.data).toHaveLength(139);
+    expect(info.target_progress).toMatchObject({ status: 'collecting', ready_rows: 139, ready_companies: 39 });
+    expect(info.target_progress).not.toHaveProperty('ready_contacts');
+    expect(info.target_progress).not.toHaveProperty('counted_per_company');
+    expect(info.company_contact_cap).toMatchObject({ limit: 5, over_cap_rows: 632, companies: 39 });
+  });
+
+  // Второй раунд по уже измеренному срезу источника: 900 компаний обработано,
+  // в срезе uniqueCompanies. Возвращает итог раунда.
+  const narrowPlants = Array.from({ length: 320 }, (_, i) => unifiedRow({
+    company: `Завод ${i}`, website: `plant${i}.test`, email: `mail@plant${i}.test`, inn: `77000200${i}`,
+    source_detail: 'Производит промышленные насосы на собственной площадке.',
+  }));
+  const runNarrowMarketRound = async (uniqueCompanies: number, constructorRows: string[][]) => {
+    const info: VeCollectInfo = {
+      ...collectInfo(narrowPlants, { bc_job_id: 'bc-narrow', status: 'dispatched', dispatched_at: '2026-09-20T00:00:00Z' }),
       collection_mode: 'preview', ready_target: 500,
       target_progress: { ...createCollectionTarget('preview'), round: 2, candidates_processed: 900 },
       target_checkpoint: { completed_round: 1, seen_rows: [], processed_rows: 900, low_relevance: 0, relevance_unchecked: 0 },
       // Срез источника уже измерен: столько компаний всего сопоставимо плану.
-      estimate: { version: 2, unique_companies: population, companies_with_email: population,
+      estimate: { version: 2, unique_companies: uniqueCompanies, companies_with_email: uniqueCompanies,
         population_matches_source: true, population_as_of: new Date().toISOString() },
       stats: { tasks_total: 1, tasks_done: 1, tasks_failed: 0, rows_total: 900, excluded_existing_bases: 0, excluded_during_fetch: 0 },
-    });
-    // Реалистичный выход: годной почтой заканчивается меньше десятой части компаний.
-    const constructorRows = harvest.map((row, i) => [row.company, row.website, row.email, row.inn, i < 30 ? 'ok' : 'invalid']);
-    const run = async (uniqueCompanies: number) => {
-      const info = narrow(uniqueCompanies);
-      const db = createMockSupabase({ tables: {
-        ve_bases: [makeBase(info)], ve_verticals: [VERTICAL], ve_projects: [PROJECT],
-        ve_hypotheses: [{ id: 'h1', project_id: 'p1', vertical_id: 'v1', title: 'Сети частных клиник',
-          description: 'Частные клиники с собственным сайтом и действующим бизнесом.', status: 'accepted' }],
-        ve_jobs: [makeJob() as unknown as Record<string, unknown>],
-        base_constructor_jobs: [{ id: 'bc-narrow', status: 'completed', error_message: null,
-          selected_steps: ['find_emails', 'split_emails', 'dedup_email', 'validate_emails'],
-          data: [['Компания', 'Сайт', 'Email', 'ИНН', 'Email Статус'], ...constructorRows],
-          result_stats: { total_rows: constructorRows.length, emails_found: constructorRows.length } }],
-      }, rpcHandlers: {
-        // Тот же срез реестра, но разного размера: узкий и широкий рынок.
-        ve_directory_segment_stats: () => ({ data: { directory_rows_total: 9_120, companies_unique_total: uniqueCompanies,
-          companies_with_email: uniqueCompanies, companies_with_phone: uniqueCompanies, companies_with_any_contact: uniqueCompanies,
-          matched_companies_with_email: uniqueCompanies, matched_companies_with_phone: uniqueCompanies,
-          matched_companies_with_any_contact: uniqueCompanies } }),
-      } });
-      await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
-      const patch = db.updates.filter((u) => u.table === 've_bases' && (u.patch.collect_info as VeCollectInfo)?.target_progress).at(-1)!.patch;
-      return (patch.collect_info as VeCollectInfo).target_progress!;
     };
+    const db = createMockSupabase({ tables: {
+      ve_bases: [makeBase(info)], ve_verticals: [VERTICAL], ve_projects: [PROJECT],
+      ve_hypotheses: [{ id: 'h1', project_id: 'p1', vertical_id: 'v1', title: 'Сети частных клиник',
+        description: 'Частные клиники с собственным сайтом и действующим бизнесом.', status: 'accepted' }],
+      ve_jobs: [makeJob() as unknown as Record<string, unknown>],
+      base_constructor_jobs: [{ id: 'bc-narrow', status: 'completed', error_message: null,
+        selected_steps: ['find_emails', 'split_emails', 'dedup_email', 'validate_emails'],
+        data: [['Компания', 'Сайт', 'Email', 'ИНН', 'Email Статус'], ...constructorRows],
+        result_stats: { total_rows: constructorRows.length, emails_found: constructorRows.length } }],
+    }, rpcHandlers: {
+      // Тот же срез реестра, но разного размера: узкий и широкий рынок.
+      ve_directory_segment_stats: () => ({ data: { directory_rows_total: 9_120, companies_unique_total: uniqueCompanies,
+        companies_with_email: uniqueCompanies, companies_with_phone: uniqueCompanies, companies_with_any_contact: uniqueCompanies,
+        matched_companies_with_email: uniqueCompanies, matched_companies_with_phone: uniqueCompanies,
+        matched_companies_with_any_contact: uniqueCompanies } }),
+    } });
+    await runBaseCollectStage(makeJob(), { supabase: db as unknown as SupabaseClient });
+    const patch = db.updates.filter((u) => u.table === 've_bases' && (u.patch.collect_info as VeCollectInfo)?.target_progress).at(-1)!.patch;
+    return (patch.collect_info as VeCollectInfo).target_progress!;
+  };
+
+  it('stops a hypothesis whose market cannot reach the target instead of grinding to the candidate cap', async () => {
+    // Узкая гипотеза раньше шла к потолку в 10 000 компаний: каждый следующий
+    // раунд просил БОЛЬШЕ компаний, и за каждую платили чтением сайта и SMTP.
+    // Реалистичный выход: годной почтой заканчивается меньше десятой части компаний.
+    const constructorRows = narrowPlants.map((row, i) => [row.company, row.website, row.email, row.inn, i < 30 ? 'ok' : 'invalid']);
+    const run = (uniqueCompanies: number) => runNarrowMarketRound(uniqueCompanies, constructorRows);
     // Срез почти исчерпан: 900 компаний из 1000, выход низкий — добор до 500 невозможен.
     const stopped = await run(1000);
     expect(stopped.status).toBe('limited');
@@ -1959,6 +2041,19 @@ describe('base_collect CONSTRUCT import', () => {
     // нормальными: узкая гипотеза на 200-300 контактов это маленькая, но
     // полезная база. Порог теперь абсолютный, сто контактов.
     expect((await run(7_500)).status).not.toBe('limited');
+  });
+
+  it('forecasts a narrow market in goal units: extra addresses of the same companies do not widen it', async () => {
+    // 20 заводов по 6 проверенных адресов: 120 строк, но в цель идут по 3 адреса
+    // компании — 60. Срез в 400 компаний при таком выходе даёт ещё ~15 контактов,
+    // то есть база не наберёт и 100. По строкам прогноз был бы 150, и сбор шёл бы дальше.
+    const denseRows = narrowPlants.flatMap((row, i) => i < 20
+      ? Array.from({ length: 6 }, (_, k) => [row.company, row.website, `m${k + 1}@${row.website}`, row.inn, 'ok'])
+      : [[row.company, row.website, row.email, row.inn, 'invalid']]);
+    const stopped = await runNarrowMarketRound(400, denseRows);
+    expect(stopped).toMatchObject({ status: 'limited', ready_rows: 60, ready_contacts: 120, ready_companies: 20 });
+    expect(stopped.reason).toContain('Рынок гипотезы исчерпан');
+    expect(stopped.reason).toContain('сверх собранных 60');
   });
 
   it('does not claim launch-ready recipients after a failed partial validation', async () => {
@@ -2674,6 +2769,42 @@ describe('base_collect: план кончился раньше цели', () => 
       expect(info.tasks![1].task.directory_filters).toEqual({ includeIp: false, okvedCodes: ['10.7', '10.8'],
         sizeOrUnknown: { revenueFrom: 150_000_000, employeesFrom: 25 } });
       expect(info.target_progress?.status).toBe('collecting');
+    }
+  });
+
+  it('план широкой гипотезы — классы ОКВЭД и каталог без порогов и без сигнала найма', async () => {
+    // Задачи — из планов баз «Франшизы медклиник» (b5df5b70) и «Медицинские
+    // лаборатории» (433aa426) проекта «Велл Медиа»: там они узкие, здесь сектор.
+    const franchise = { source: 'companies_directory' as const, rationale: 'Юрлица медцентров, стоматологий и лабораторий.',
+      directory_filters: { hasEmail: false, includeIp: false, okvedCodes: ['86'], revenueFrom: 50_000_000, employeesFrom: 20 } };
+    const beauty = { source: 'companies_directory' as const, rationale: 'Косметологические сети.',
+      directory_filters: { hasEmail: false, includeIp: false, okvedCodes: ['96.02', '86.23'], revenueFrom: 30_000_000, employeesFrom: 15 } };
+    const hiring = { source: 'hh_live' as const, rationale: 'Компании, нанимающие роли по франчайзингу.',
+      hh_query: { text: '"директор по франчайзингу" (клиника OR стоматология)', date_from: '2026-08-18', date_to: '2026-09-17' } };
+    const labs = { source: 'yandex_maps' as const, rationale: 'Точки медицинских лабораторий и пунктов анализов.',
+      maps_query: { geo: 'Россия', queries: ['медицинская лаборатория', 'пункт приема анализов', 'анализы'] } };
+    jest.mocked(searchRows).mockResolvedValue({ rows: [] });
+    const sector = { title: 'Частная медицина', description: 'Частные клиники, медцентры, стоматологии, лаборатории и диагностические центры. Общая боль — пациент дорожает.' };
+    for (const broad of [true, false]) {
+      jest.mocked(callLLMWithSchema).mockClear();
+      const db = seed({ collection_mode: 'preview' }, { ve_hypotheses: [{ id: 'h1', project_id: 'p1', vertical_id: 'v1',
+        status: 'accepted', broad, ...sector }] });
+      jest.mocked(callLLMWithSchema).mockResolvedValueOnce(planLlmReply([franchise, beauty, hiring, labs]));
+      const info = (await wake(db)).collect_info as VeCollectInfo;
+      const prompt = String(jest.mocked(callLLMWithSchema).mock.calls[0][0].at(-1)?.content);
+      if (!broad) {
+        // Узкая — как раньше: коды группы и найм остаются, пороги сняты (в тексте о размере ни слова).
+        expect(prompt).not.toContain('[широкая]');
+        expect(info.plan?.tasks.map((task) => task.source)).toEqual(['companies_directory', 'companies_directory', 'hh_live', 'yandex_maps']);
+        expect(info.plan?.tasks[1].directory_filters?.okvedCodes).toEqual(['96.02', '86.23']);
+        continue;
+      }
+      expect(prompt).toContain('[широкая] Частная медицина');
+      expect(info.plan?.tasks).toEqual([
+        { ...franchise, directory_filters: { hasEmail: false, includeIp: false, okvedCodes: ['86'] } },
+        { ...beauty, directory_filters: { hasEmail: false, includeIp: false, okvedCodes: ['96', '86'] } },
+        labs,
+      ]);
     }
   });
 

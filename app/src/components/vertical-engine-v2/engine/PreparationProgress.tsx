@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import type { VeOutreachPreparation } from '@/lib/verticalEngineV2/outreachSetup';
 import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors';
 import type { VeBaseSummary, VeCollectInfo, VeJobSummary } from './api';
-import { collectCount, getCollectionProgress, isPartialPreview } from './collectionProgress';
+import { collectCount, describeReadyComposition, getCollectionProgress, isPartialPreview } from './collectionProgress';
 import { HE, StatusDot } from './design';
 
 interface PreparationProgressProps {
@@ -70,6 +70,7 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
     return job && ['pending', 'running'].includes(job.status);
   });
   const target = base?.collect_info?.target_progress;
+  const composition = describeReadyComposition(target);
   if (base?.status === 'analyzed' && target && isPartialPreview(base) && !hasLiveJob && preparation.status !== 'pending') return {
     title: `Сбор остановлен: ${target.ready_rows.toLocaleString('ru-RU')} из ${target.ready_target.toLocaleString('ru-RU')} контактов`,
     description: `${preparation.status === 'ready' ? 'Письма подготовлены. ' : ''}Сейчас добор не идёт. `
@@ -78,6 +79,7 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
           : target.reason?.startsWith('Нет подтверждённого продолжения источников')
             ? 'По текущему плану система не смогла продолжить добор. Это не означает, что подходящих компаний больше нет. '
             : (target.reason ? target.reason.replace(/[.\s]+$/, '') + '. ' : 'Цель превью пока не достигнута. '))
+      + (composition ? composition + ' ' : '')
       + (target.ready_rows > 0 ? 'Проверенная часть сохранена и доступна для скачивания. '
         : 'Кандидаты сохранены, но контактов, прошедших все проверки, пока нет. ')
       + 'Продолжение повторит только доступные незавершённые этапы.',
@@ -222,6 +224,7 @@ export function PreparationProgress(props: PreparationProgressProps) {
   const target = props.base?.collect_info?.target_progress;
   const savedCandidates = collectCount(target?.candidates_processed);
   const savedReady = collectCount(target?.ready_rows);
+  const composition = describeReadyComposition(target);
   const goal = collectCount(target?.ready_target ?? props.base?.collect_info?.ready_target);
   const collecting = props.base?.status === 'collecting' && state.tone !== 'err';
   const stepPercent = collecting && state.tone === 'info' ? progress.stepPercent : null;
@@ -244,6 +247,7 @@ export function PreparationProgress(props: PreparationProgressProps) {
         {goal !== null ? <span>Цель превью: {goal.toLocaleString('ru-RU')} готовых контактов</span> : null}
         {progress.candidates !== null ? <span>Кандидатов: {progress.candidates.toLocaleString('ru-RU')}</span> : null}
         {savedReady !== null ? <span>Прошли все проверки: {savedReady.toLocaleString('ru-RU')}</span> : null}
+        {composition ? <span>{composition}</span> : null}
       </div> : null}
       {collecting && (elapsed || Number.isFinite(updated)) ? <p className={HE.muted}>
         {elapsed ? `С момента создания базы: ${elapsed}. ` : ''}
