@@ -14,7 +14,7 @@
  */
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { analyzeVacancy, findOutboundMarker, type VacancyAnalysis } from './analyze';
+import { analyzeVacancy, findStrictOutboundDuty, isSdrRoleTitle, type VacancyAnalysis } from './analyze';
 import { collectCandidates, type Candidate } from './collect';
 import { companyBrand, isSuppressed, loadPreviouslyExported, normalizeDomain, siteUrl, type ExportedIndex } from './company';
 import { findRuCompanyEmail } from './findEmail';
@@ -31,6 +31,7 @@ import {
   sanitizeRuOutreachConfig,
   STAGES,
   TEMPLATE_VERSION,
+  letterCountFor,
   type RuOutreachConfig,
   type Signal,
   type Stage,
@@ -43,7 +44,6 @@ const MAX_WAVE = 200;
 const BLIND_YIELD_GUESS = 0.08;
 const DB_CHUNK = 100;
 const DAY = 86_400_000;
-const LEADERSHIP_TITLE = /(руководител\S* отдела продаж|(^|[^а-яё])роп([^а-яё]|$)|коммерческ\S* директор|директор по продажам|head of sales)/i;
 
 class CancelledError extends Error {}
 
@@ -155,6 +155,9 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
     const funnel = Object.fromEntries(STAGES.map((s) => [s, 0])) as Record<Stage, number>;
     const reasons: Record<string, number> = {};
     const chains: Record<string, number> = {};
+    // Отчёт о попадании в SDR (SDR_ENTERPRISE_PROOF_AND_OFFER_ROUTING §3):
+    // уникальные компании, а не вакансии — видно, не «пылесосит» ли SDR поток.
+    const sdr = { any_sales_vacancy: 0, strict_sdr: 0, broad_to_general_queue: 0 };
     const totals = { scanned: 0, ready: 0 };
     const seenDomains = new Set<string>();
     const seenInns = new Set<string>();
@@ -168,7 +171,7 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         progress_percent: Math.min(97, 3 + Math.round(94 * Math.max(totals.ready / target, Math.min(1, totals.scanned / maxScan)))),
         total_found: totals.scanned,
         total_parsed: totals.ready,
-        progress_detail: { wave: waveNo, target, pool: pool.length, scanned: totals.scanned, ready: totals.ready, funnel, reasons, chains, offer_version: libraries.offerVersion, ...extra },
+        progress_detail: { wave: waveNo, target, pool: pool.length, scanned: totals.scanned, ready: totals.ready, funnel, reasons, chains, sdr, offer_version: libraries.offerVersion, ...extra },
       });
     };
     const reach = (...stages: Stage[]) => {
@@ -193,23 +196,53 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
       const signals: Signal[] = [...c.signals];
       let employerIdFromCard: string | null = null;
       if (c.vacancies.length) {
+        // Смотрим до двух свежих карточек: у компании может быть и РОП, и SDR —
+        // строгий SDR-сигнал ищем среди всех, одна компания = одна цепочка.
+        let broad: Signal | null = null;
         for (const ref of c.vacancies.slice(0, 2)) {
           const res = await fetchVacancyCard(ref.vacancy_id);
           if (!res.ok || res.card.archived || res.card.descriptionText.length < 200) continue;
           const published = res.card.publishedAt ? new Date(res.card.publishedAt).getTime() : NaN;
           if (Number.isFinite(published) && published < Date.now() - config.freshness_days * DAY) continue;
-          vacancy = await analyzeVacancy({ title: res.card.title, description: res.card.descriptionText, companyName: c.companyName });
-          if (vacancy.excludedCategory === 'recruitment_agency' || vacancy.excludedCategory === 'leadgen_competitor') {
-            await finish(id, { stage: 'enriched', status: 'rejected', reason: 'EXCLUDED_CATEGORY', detail: vacancy.excludedCategory });
+          const analysis = await analyzeVacancy({ title: res.card.title, description: res.card.descriptionText, companyName: c.companyName });
+          if (analysis.excludedCategory === 'recruitment_agency' || analysis.excludedCategory === 'leadgen_competitor') {
+            await finish(id, { stage: 'enriched', status: 'rejected', reason: 'EXCLUDED_CATEGORY', detail: analysis.excludedCategory });
             return null;
           }
-          const quote = vacancy.sdrQuote ?? findOutboundMarker(`${res.card.title}\n${res.card.descriptionText}`);
-          const strong = Boolean(quote) || Boolean(vacancy.marketQuote) || LEADERSHIP_TITLE.test(res.card.title) || c.vacancyCount >= 2;
-          if (strong && vacancy.excludedCategory !== 'inbound_retail_only') {
-            signals.push({ type: 'sales_hiring', source: 'hh', title: res.card.title, date: res.card.publishedAt, url: res.card.url, quote: quote ?? null, level: quote ? 'A' : 'B', meta: { vacancy_count: c.vacancyCount } });
+          vacancy ??= analysis;
+          if (res.card.employerId && !c.hhEmployerId) employerIdFromCard ??= res.card.employerId;
+
+          // Строгий SDR (Максим 23.09, SDR_ENTERPRISE_PROOF_AND_OFFER_ROUTING §3):
+          // роль первичного outbound И цитата холодного поиска новых B2B-клиентов.
+          const duty = analysis.sdrQuote ?? findStrictOutboundDuty(`${res.card.title}\n${res.card.descriptionText}`);
+          const sdrTitle = isSdrRoleTitle(res.card.title);
+          const inboundOnly = analysis.excludedCategory === 'inbound_retail_only' || analysis.excludedCategory === 'b2c_only';
+          if (sdrTitle && duty && analysis.isB2b && !inboundOnly) {
+            vacancy = analysis;
+            signals.push({
+              type: 'sales_hiring', source: 'hh', title: res.card.title, date: res.card.publishedAt, url: res.card.url, quote: duty, level: 'A',
+              meta: { vacancy_count: c.vacancyCount, role_match_rule: 'sdr_title+b2b_outbound_duty', override_reason: 'strict_sdr_signal' },
+            });
+            broad = null;
+            break;
           }
-          if (res.card.employerId && !c.hhEmployerId) employerIdFromCard = res.card.employerId;
-          break;
+          // Обычная вакансия продаж — не повод для SDR-цепочки: компания идёт
+          // по остальным поводам. Причину храним для отчёта «сколько ушло в общую очередь».
+          broad ??= {
+            type: 'sales_hiring_broad', source: 'hh', title: res.card.title, date: res.card.publishedAt, url: res.card.url, quote: duty ?? null, level: 'C',
+            meta: {
+              sdr_override: false,
+              non_sdr_reason: !sdrTitle ? 'title_not_sdr' : !duty ? 'no_b2b_outbound_duty' : inboundOnly ? 'inbound_or_b2c' : 'not_b2b',
+            },
+          };
+        }
+        if (broad) signals.push(broad);
+        if (signals.some((s) => s.type === 'sales_hiring')) {
+          sdr.any_sales_vacancy += 1;
+          sdr.strict_sdr += 1;
+        } else if (broad) {
+          sdr.any_sales_vacancy += 1;
+          sdr.broad_to_general_queue += 1;
         }
       }
       reach('amo_checked');
@@ -318,7 +351,9 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         employees: c.employees ?? known?.employees ?? null,
         hasAdPixel: site.hasAdPixel,
         siteReachable: true,
-        hasCase: Boolean(caseHit),
+        // SDR-цепочке кейс по отрасли не нужен (Максим 23.09): письмо 2 —
+        // механика, балл за доказательство не снимаем.
+        hasCase: route.chain === 'hiring' || Boolean(caseHit),
         // Скоринг до поиска почты — оптимистичный: почту ищем только у прошедших.
         emailFound: true,
       });
@@ -402,6 +437,7 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
       const usedClaims = libraries.claims.filter((cl) => chain.claimIds.includes(cl.id));
       const qa = runQa({
         letters: chain.letters,
+        expectedLetters: letterCountFor(q.route.chain),
         amoStatus: q.amo?.status ?? null,
         sender,
         priorContact: chainInput.priorContact,

@@ -18,6 +18,8 @@ import { LETTER_COUNT } from './types';
 
 export interface QaInput {
   letters: Letter[];
+  /** Сколько писем должно быть в цепочке: SDR — три, остальные — четыре. */
+  expectedLetters?: number;
   /** Статус компании в AMO: открытая сделка и клиент блокируют выгрузку. */
   amoStatus: string | null;
   sender: SenderProfile;
@@ -60,7 +62,8 @@ function stripAll(text: string, pieces: string[]): string {
 
 export function runQa(input: QaInput): QaResult {
   const flags: string[] = [];
-  if (input.letters.length !== LETTER_COUNT) flags.push(`letter_count:${input.letters.length}/${LETTER_COUNT}`);
+  const expected = input.expectedLetters ?? LETTER_COUNT;
+  if (input.letters.length !== expected) flags.push(`letter_count:${input.letters.length}/${expected}`);
   if (input.amoStatus === 'open_deal' || input.amoStatus === 'client') flags.push(`amo_blocked:${input.amoStatus}`);
   if (!input.recipientEmail || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(input.recipientEmail)) flags.push('email_invalid');
 

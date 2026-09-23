@@ -16,7 +16,7 @@ export type ChainType = (typeof CHAIN_TYPES)[number];
 
 export const CHAIN_LABELS: Record<ChainType, string> = {
   reactivation: 'Возврат (старый отказ в AMO)',
-  hiring: 'Найм в продажи',
+  hiring: 'Найм SDR/BDR',
   ad_budget: 'Рекламный бюджет',
   event: 'Выставка / событие',
   growth_event: 'Рост: продукт, регион, контракт, грант',
@@ -24,7 +24,15 @@ export const CHAIN_LABELS: Record<ChainType, string> = {
 };
 
 export const LETTER_COUNT = 4;
-export const TEMPLATE_VERSION = 'chains_v1@2026-09-23';
+export const TEMPLATE_VERSION = 'chains_v2@2026-09-23';
+
+/**
+ * Писем в цепочке: SDR-цепочка («найм») — три письма по инструкции Максима
+ * (INSTRUCTION_02 от 23.09.2026), остальные цепочки CEO — четыре.
+ */
+export function letterCountFor(chain: ChainType): number {
+  return chain === 'hiring' ? 3 : LETTER_COUNT;
+}
 
 /** Отраслевые группы роутера кейсов (таблица CEO). */
 export const INDUSTRY_GROUPS = ['it_saas', 'manufacturing', 'hr_education', 'horeca', 'auto_logistics', 'digital_agency'] as const;
@@ -162,7 +170,13 @@ export const REASON_LABELS: Record<string, string> = {
 export type EvidenceLevel = 'A' | 'B' | 'C' | 'NONE';
 
 export type SignalType =
+  /** Строгий SDR-сигнал: роль первичного outbound + цитата холодного поиска новых B2B-клиентов. */
   | 'sales_hiring'
+  /**
+   * Обычная вакансия продаж (РОП, менеджер, BDM без SDR-функции). В роутинге
+   * не участвует — компания идёт по остальным поводам; хранится для отчёта.
+   */
+  | 'sales_hiring_broad'
   | 'ad_running'
   | 'trade_show_exhibitor'
   | 'contract_won'

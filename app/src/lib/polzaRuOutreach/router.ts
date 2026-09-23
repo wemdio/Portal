@@ -90,7 +90,6 @@ export interface Score {
 export function scoreCompany(i: ScoreInput): Score {
   const now = Date.now();
   let strength = STRENGTH[i.chain];
-  if (i.chain === 'hiring' && i.primary?.level !== 'A') strength = 20;
   if (i.chain === 'growth_event' && i.primary && !i.primary.date) strength = 15;
   // У «Только профиль» повода нет: его «сигнал» — само сходство с клиентом Polza.
   // Без этого цепочка из таблицы CEO никогда не дотягивала бы до порогов.
@@ -129,7 +128,10 @@ export function decide(total: number, writeThreshold: number): Decision {
 
 /** Кейс по отраслевой группе; только утверждённые и разрешённые для этой цепочки. */
 export function routeCase(cases: CaseRecord[], group: IndustryGroup | null, chain: ChainType): { record: CaseRecord; reason: string } | null {
-  if (!group) return null;
+  // SDR-цепочке отраслевой кейс не подбираем: доказательство там — роли, до
+  // которых доходили в клиентских кампаниях, и только с апрувом
+  // (SDR_ENTERPRISE_PROOF_AND_OFFER_ROUTING §2).
+  if (!group || chain === 'hiring') return null;
   const hit = cases.find((c) => c.industry_groups.includes(group) && (!c.allowed_chains.length || c.allowed_chains.includes(chain)));
   return hit ? { record: hit, reason: `отраслевая группа «${group}»` } : null;
 }

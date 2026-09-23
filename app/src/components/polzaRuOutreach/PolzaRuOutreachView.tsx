@@ -284,6 +284,14 @@ export function PolzaRuOutreachView() {
                 </div>
               )}
 
+              {detail?.sdr && detail.sdr.any_sales_vacancy > 0 && (
+                <p className="text-xs text-gray-500">
+                  Вакансии продаж: у {detail.sdr.any_sales_vacancy} компаний. В SDR-цепочку — {detail.sdr.strict_sdr}{' '}
+                  (роль SDR/BDR и холодный поиск новых B2B-клиентов), остальные {detail.sdr.broad_to_general_queue} идут
+                  по другим поводам.
+                </p>
+              )}
+
               <Funnel
                 funnel={results?.funnel ?? null}
                 reasons={results?.reason_counts ?? null}
