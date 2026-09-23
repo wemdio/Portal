@@ -4537,9 +4537,9 @@ export async function reconcileLeadHandoffJobs(options: {
  * and a responsible specialist, post the handoff card to Telegram with a
  * "Передать клиенту" button. Текст передачи — легенда проекта ДОСЛОВНО (без ИИ,
  * спецы полностью контролируют формулировку). The press (handled by
- * /api/telegram/handoff/webhook) is what actually sends it — only the responsible
- * specialist may press. Gated by LEAD_HANDOFF_ENABLED; never throws into the
- * qualification flow.
+ * /api/telegram/handoff/webhook) is what actually sends it. The responsible
+ * specialist or an opted-in project lead may press. Gated by
+ * LEAD_HANDOFF_ENABLED; never throws into the qualification flow.
  */
 export async function maybePostLeadHandoff(opts: {
   instantlyDb: NonNullable<typeof supabaseAdmin>;
@@ -4630,7 +4630,7 @@ export async function maybePostLeadHandoff(opts: {
 
     const { data: projectRow, error: projectsError } = await main
       .from('projects')
-      .select('handoff_email, handoff_legend, handoff_ai_adapt, handoff_auto_send, specialist_user_id')
+      .select('handoff_email, handoff_legend, handoff_ai_adapt, handoff_auto_send, specialist_user_id, tag_project_lead_in_telegram')
       .eq('id', projectId)
       .maybeSingle();
     if (projectsError) {
@@ -4640,7 +4640,7 @@ export async function maybePostLeadHandoff(opts: {
     const project = projectRow &&
       Boolean((projectRow.handoff_email as string | null)?.trim()) &&
       Boolean((projectRow.handoff_legend as string | null)?.trim())
-      ? projectRow as { handoff_email: string; handoff_legend: string; handoff_ai_adapt: boolean; handoff_auto_send: boolean; specialist_user_id: string | null }
+      ? projectRow as { handoff_email: string; handoff_legend: string; handoff_ai_adapt: boolean; handoff_auto_send: boolean; specialist_user_id: string | null; tag_project_lead_in_telegram: boolean }
       : undefined;
     if (!project) return { disposition: 'skipped', detail: 'handoff is not configured' };
 
@@ -4711,7 +4711,7 @@ export async function maybePostLeadHandoff(opts: {
       boardLink ? `📋 <a href="${escapeHtml(boardLink)}">Все лиды проекта</a>` : '',
       autoSend
         ? '⚡ Автопередача включена — отправляется автоматически, без кнопки-подтверждения.'
-        : 'Нажмите «Передать клиенту» — письмо уйдёт лиду, клиент в копии. Нажать может только ответственный.',
+        : `Нажмите «Передать клиенту» — письмо уйдёт лиду, клиент в копии. Нажать может ответственный${project.tag_project_lead_in_telegram ? ' или лид проекта' : ''}.`,
     ].filter(Boolean).join('\n');
 
     // Recovery must reply to the persisted alert, including after a restart.
