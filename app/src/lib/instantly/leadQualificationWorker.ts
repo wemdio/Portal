@@ -3020,6 +3020,81 @@ export async function maybeReprocessOwnershipReviews(): Promise<number> {
 }
 
 /**
+ * Ответ коллеги из вебхука — с перепиской, найденной по его настоящему адресу.
+ *
+ * Берём письмо по id (fetchWebhookReplyById) и, если отвечал не сам лид, ищем
+ * переписку поиском по адресу отправителя — так же, как это сделал бы разбор
+ * поллинга (поиск Instantly сопоставляет отправителя; проверено на проде
+ * 23.09 на двух таких ответах). Контекст возвращаем, только если в нём ровно
+ * это письмо: иначе при отстающем индексе разбор получил бы чужой текст под
+ * этим id. Настоящая переписка нужна и для cross-client guard — из неё
+ * берутся ящики кампании; заглушка без них пропустила бы ответ в ящик ДРУГОГО
+ * клиента в ИИ и в Telegram чужого проекта (ревью 23.09).
+ *
+ * 'expired' — письмо старше суточного окна (повторная доставка старой почты):
+ * автоматике оно уже не положено, искать переписку незачем; 'lead_own' —
+ * отвечал сам лид: новая логика не нужна, остаётся прежнее поведение;
+ * 'not_indexed' — переписка по отправителю ещё не отдаётся; 'not_ours' / null —
+ * как у fetchWebhookReplyById.
+ */
+export async function resolveColleagueWebhookReply(
+  emailId: string | null,
+  campaignId: string,
+  leadEmail: string,
+  accountId: string,
+  notBefore: number,
+): Promise<{ reply: Email; ctx: ThreadContext } | 'expired' | 'lead_own' | 'not_indexed' | 'not_ours' | null> {
+  const byId = await fetchWebhookReplyById(emailId, campaignId, accountId);
+  if (!byId || byId === 'not_ours') return byId;
+  // Суточное окно событие проверяет по времени прихода вебхука, а не письма:
+  // старое письмо, доставленное заново, иначе крутилось бы в очереди до суток
+  // (ревью 23.09, 2 из 3).
+  if (replyAutomationExpired(notBefore, byId)) return 'expired';
+  const sender = (byId.from_address_email ?? '').trim().toLowerCase();
+  if (!sender || sender === leadEmail.trim().toLowerCase()) return 'lead_own';
+  const senderCtx = await fetchThreadContext(campaignId, sender, byId.thread_id ?? null, accountId);
+  if (!senderCtx || senderCtx.replyEmail.id !== byId.id) return 'not_indexed';
+  return {
+    reply: { ...senderCtx.replyEmail, campaign_id: senderCtx.replyEmail.campaign_id ?? campaignId } as Email,
+    ctx: senderCtx,
+  };
+}
+
+/**
+ * Ответ из вебхука по его id — для случая, когда поиск треда по адресу лида
+ * пуст (ответил коллега с другого адреса). GET /emails/{id} не проходит через
+ * бюджет LIST /emails.
+ *
+ * null — id нет или письмо по id не отдаётся (404): пусть работает обычный
+ * transient-путь. 'not_ours' — письмо есть, но это не входящее этой кампании:
+ * квалифицировать его от имени этой кампании нельзя. Прочие ошибки (сеть,
+ * 5xx, 429) пробрасываются — их классифицирует общий обработчик.
+ */
+export async function fetchWebhookReplyById(
+  emailId: string | null,
+  campaignId: string,
+  accountId: string,
+): Promise<Email | 'not_ours' | null> {
+  const id = emailId?.trim();
+  if (!id) return null;
+  let email: Email | null;
+  try {
+    // Те же рамки, что у пути восстановления: зависший провайдер не держит
+    // последовательную очередь вебхуков 90 с, а 429 уходит в общий transient-путь.
+    email = await instantly.getEmail(id, {
+      accountId, retryRateLimits: false, timeoutMs: 20_000, timeoutIncludesBody: true,
+    });
+  } catch (error) {
+    if (error instanceof InstantlyApiError && error.status === 404) return null;
+    throw error;
+  }
+  if (!email?.id) return null;
+  const inbound = (email.ue_type ?? 2) === 2;
+  if (!inbound || email.campaign_id !== campaignId) return 'not_ours';
+  return email;
+}
+
+/**
  * Real-time путь (additive, флаг INSTANTLY_WEBHOOK_DRAIN_ENABLED, default OFF):
  * разгребает reply-события, которые вебхук-приёмник положил в
  * instantly_webhook_events, и квалифицирует их СРАЗУ — через ТУ ЖЕ qualifyOneReply,
@@ -3124,23 +3199,63 @@ export async function drainWebhookQueue(): Promise<number> {
       if (fetched > 0) await new Promise((r) => setTimeout(r, interDelay));
       fetched++;
       // Один вызов Instantly: проверка готовности + источник настоящего id письма.
-      const ctx = await fetchThreadContext(campaignId, leadEmail, row.thread_id, accountId);
-      if (!ctx) {
-        // Without the authoritative provider email id we cannot create the
-        // durable qualification retry row yet. The shared transient path below
-        // reopens the event until Instantly has indexed the thread.
-        throw new Error(
-          `${OWNERSHIP_DEFER_ERROR_PREFIX} for webhook event ${row.id}: ` +
-          'provider thread context is not available yet',
+      const found = await fetchThreadContext(campaignId, leadEmail, row.thread_id, accountId);
+      // Вебхук — про конкретное письмо (row.email_id). Поиск треда идёт по
+      // адресу лида, а поиск Instantly сопоставляет ОТПРАВИТЕЛЯ, поэтому ответ
+      // коллеги со своего адреса (писали на info@, ответил zamkomdir@) этим
+      // поиском не находится: событие крутилось до суточного отсечения по 1–2
+      // чтения LIST за круг (прод 22.09: 5 событий, ~12 из 18 чтений в минуту
+      // на main), а сам ответ разбирал только поллинг. Если лид отвечал
+      // раньше, поиск отдаёт ЕГО прошлое письмо. В обоих случаях берём письмо
+      // по id из вебхука (GET, не бюджет LIST).
+      const webhookEmailId = row.email_id?.trim() || null;
+      const foundIsThisEmail = !!found && (!webhookEmailId || found.replyEmail.id === webhookEmailId);
+      let reply: Email;
+      let ctx: ThreadContext;
+      if (found && foundIsThisEmail) {
+        // Берём НАСТОЯЩЕЕ письмо-ответ из треда: его id совпадёт с тем, что взял бы
+        // поллинг (reply.id) → обе ветки сходятся на одном instantly_email_id.
+        ctx = found;
+        reply = {
+          ...found.replyEmail,
+          campaign_id: found.replyEmail.campaign_id ?? campaignId,
+        } as Email;
+      } else {
+        const colleague = await resolveColleagueWebhookReply(
+          webhookEmailId, campaignId, leadEmail, accountId, notBefore,
         );
+        if (typeof colleague === 'object' && colleague) {
+          reply = colleague.reply;
+          ctx = colleague.ctx;
+        } else if (found) {
+          // Отвечал сам лид (например, второй раз, а индекс ещё не отдаёт новое
+          // письмо), переписка коллеги пока не ищется или по id ничего
+          // пригодного — прежнее поведение: найденное поиском письмо. Дедуп его
+          // пропустит, новое подберёт поллинг, когда Instantly его проиндексирует.
+          ctx = found;
+          reply = {
+            ...found.replyEmail,
+            campaign_id: found.replyEmail.campaign_id ?? campaignId,
+          } as Email;
+        } else if (colleague === 'not_ours') {
+          // Письмо есть, но это не входящее этой кампании (перепривязано к
+          // другой кампании или лежит вне кампаний) — его подберут поллинг
+          // другой кампании или сборщик «вне кампании». Событие закрываем.
+          workerLog('info', `drain: webhook event ${row.id} points to an email outside campaign ${campaignId} — acked`);
+          continue;
+        } else if (colleague === 'expired') {
+          // Старое письмо, доставленное заново: автоматике не положено, закрываем.
+          continue;
+        } else {
+          // Без id в вебхуке, письмо ещё не отдаётся по id, отвечал сам лид или
+          // переписка коллеги ещё не ищется — ждём индекса Instantly: общий
+          // transient-путь ниже переоткроет событие (до суточного отсечения).
+          throw new Error(
+            `${OWNERSHIP_DEFER_ERROR_PREFIX} for webhook event ${row.id}: ` +
+            'provider thread context is not available yet',
+          );
+        }
       }
-
-      // Берём НАСТОЯЩЕЕ письмо-ответ из треда: его id совпадёт с тем, что взял бы
-      // поллинг (reply.id) → обе ветки сходятся на одном instantly_email_id.
-      const reply = {
-        ...ctx.replyEmail,
-        campaign_id: ctx.replyEmail.campaign_id ?? campaignId,
-      } as Email;
       if (!reply.id) continue; // без id невозможен дедуп-конвердж — пропускаем
       if (replyAutomationExpired(notBefore, reply)) continue;
 
