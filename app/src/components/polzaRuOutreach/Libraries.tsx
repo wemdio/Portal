@@ -31,6 +31,7 @@ const FIELDS: Record<TableKey, Field[]> = {
     { key: 'case_text_en', label: 'Текст для английских писем', type: 'textarea', hint: 'вставляется после «For a similar … company, we helped …»; с маленькой буквы, без точки' },
     { key: 'case_segment_en', label: 'Сегмент для английских писем', type: 'text', hint: 'например: B2B software, industrial manufacturing' },
     { key: 'case_url', label: 'Ссылка на кейс', type: 'text' },
+    { key: 'leads_count', label: 'Сколько лидов дал кейс', type: 'text', hint: 'в письма идут только кейсы от 8 лидов; пусто — кейс не используется' },
     { key: 'industry_groups', label: 'Отраслевые группы', type: 'multi', options: INDUSTRY_GROUPS.map((g) => [g, INDUSTRY_GROUP_LABELS[g]] as [string, string]), hint: 'по ним кейс подбирается к компании' },
     { key: 'allowed_chains', label: 'В каких цепочках можно', type: 'multi', options: CHAIN_TYPES.map((c) => [c, CHAIN_LABELS[c]] as [string, string]), hint: 'ничего не отмечено — во всех' },
     { key: 'status', label: 'Статус', type: 'select', options: STATUS_OPTIONS },
@@ -42,7 +43,7 @@ const FIELDS: Record<TableKey, Field[]> = {
   ],
   claims: [
     { key: 'chain_type', label: 'Цепочка', type: 'select', options: [['all', 'все цепочки'], ...CHAIN_TYPES.map((c) => [c, CHAIN_LABELS[c]] as [string, string])] },
-    { key: 'claim_key', label: 'Куда вставлять', type: 'select', options: [['letter2_value', 'письмо 2, после описания подхода']] },
+    { key: 'claim_key', label: 'Куда вставлять', type: 'select', options: [['letter2_value', 'письмо 2, после описания подхода'], ['sdr_role_proof', 'SDR, письмо 2: до каких ролей доходили в кампаниях клиентов']] },
     { key: 'claim_text', label: 'Текст утверждения', type: 'textarea', hint: 'все цифры, сроки и гарантии — только отсюда' },
     { key: 'status', label: 'Статус', type: 'select', options: STATUS_OPTIONS },
     { key: 'approved_by', label: 'Кто утвердил', type: 'text' },
@@ -63,8 +64,8 @@ const FIELDS: Record<TableKey, Field[]> = {
 const TITLES: Record<TableKey, { title: string; hint: string; summary: (r: Rec) => string }> = {
   cases: {
     title: 'Кейсы',
-    hint: 'В письмо 3 попадает только утверждённый кейс с разрешением на публикацию и совпадающей отраслевой группой. Нет подходящего — письмо 3 идёт без кейса. Черновики из базы знаний нужно сверить и утвердить.',
-    summary: (r) => `${r.public_name} — ${r.case_text_short}`,
+    hint: 'В письмо 3 попадает только утверждённый кейс с разрешением на публикацию, совпадающей отраслевой группой и от 8 лидов. Нет подходящего — письмо 3 идёт без кейса.',
+    summary: (r) => `${r.public_name}${r.leads_count != null && r.leads_count !== '' ? ` · ${r.leads_count} лидов` : ' · лиды не указаны'} — ${r.case_text_short}`,
   },
   claims: {
     title: 'Утверждения оффера',

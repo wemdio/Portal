@@ -18,7 +18,7 @@ const TABLES = {
       'case_id', 'public_name', 'client_name_internal', 'anonymization_required', 'industry_groups', 'allowed_chains',
       'case_text_short', 'case_text_long', 'case_text_en', 'case_segment_en', 'case_url', 'metrics',
       'source_file_or_url', 'source_location', 'verified_at', 'verified_by', 'status', 'expires_at',
-      'legal_publication_approved', 'notes',
+      'legal_publication_approved', 'notes', 'leads_count',
     ],
     required: ['case_id', 'public_name', 'case_text_short'],
   },
@@ -38,6 +38,7 @@ const TABLES = {
 
 type TableKey = keyof typeof TABLES;
 const ARRAY_FIELDS = new Set(['industry_groups', 'allowed_chains']);
+const INTEGER_FIELDS = new Set(['leads_count']);
 
 function pick(key: TableKey, input: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -46,6 +47,10 @@ function pick(key: TableKey, input: Record<string, unknown>): Record<string, unk
     let v = input[f];
     if (ARRAY_FIELDS.has(f) && typeof v === 'string') v = v.split(',').map((s) => s.trim()).filter(Boolean);
     if (v === '') v = null;
+    if (INTEGER_FIELDS.has(f) && v !== null) {
+      const n = Number(String(v).replace(/\s+/g, ''));
+      v = Number.isInteger(n) && n >= 0 ? n : null;
+    }
     out[f] = v;
   }
   return out;
