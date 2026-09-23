@@ -6,6 +6,7 @@ import { isVeRelevanceTriageEnabled } from './relevanceTriageConfig';
 import { normalizeVeMaxEmailsPerCompany } from './companyContactCap';
 import { VE_COMPANY_CAP_FIELD } from './relevanceReserve';
 import { veCanWidenPlan } from './planWidening';
+import { isVeRenewableSourceTask, reopenVeSourceTask } from './sourceRenewal';
 import type { VeAdaptiveCollection } from './adaptiveCollection';
 import type { VeCollectTask } from './prompts/sourcePlan';
 
@@ -40,10 +41,10 @@ export function canResumePartialPreview(base: Record<string, unknown>): boolean 
   }).rows.length > 0) return true;
   if (!(Number(target.candidates_processed) < Number(target.max_candidates)
     && Number(target.round) < Number(target.max_rounds)) || !Array.isArray(info.tasks)) return false;
+  // Старая задача карт (живой парсер до 16.09) тоже продолжаема: следующий
+  // раунд читает её запросы из готового каталога.
   if (info.tasks.some((task) =>
-    task && (task.status === 'pending' || task.status === 'dispatched'
-      || (task.status === 'done' && (task.source === 'companies_directory' || task.catalog)
-        && !task.exhausted && !task.hit_ceiling)))) return true;
+    task && (task.status === 'pending' || task.status === 'dispatched' || isVeRenewableSourceTask(task)))) return true;
   // План выбран до дна, но база ещё не расширяла срез сама (вторая очередь
   // без придуманных порогов или подбор нового среза): её можно продолжить.
   // Так остались 33 базы аудита 22.09 — «Продолжить подготовку» их не брала.
@@ -152,17 +153,14 @@ export function openNextVeCollectionRound(info: Record<string, unknown>): boolea
   const stats = info.stats as Record<string, unknown> | undefined;
   if (stats && typeof stats === 'object') delete stats.finished_at;
   // Живые лейны реестра и каталога снова читают СВОЮ закладку — тот же сброс,
-  // что делает стадия на границе раунда. Исчерпанные и упёршиеся в потолок
-  // остаются как есть, как и задачи, которые возобновление уже подняло.
+  // что делает стадия на границе раунда; старая задача карт открывается как
+  // чтение каталога. Исчерпанные и упёршиеся в потолок остаются как есть, как
+  // и задачи, которые возобновление уже подняло.
   const tasks = info.tasks;
   if (Array.isArray(tasks) && !info.preview_pipeline && !info.adaptive_collection) {
     info.tasks = tasks.map((state) => {
       const task = state as Record<string, unknown> | null;
-      if (!task || task.status !== 'done' || task.exhausted || task.hit_ceiling
-        || !(task.source === 'companies_directory' || !!task.catalog)) return state;
-      return { source: task.source, task: task.task, status: 'pending', child_job_id: null, rows: 0,
-        ...(task.catalog ? { catalog: task.catalog } : {}),
-        ...(task.directory_cursors ? { directory_cursors: task.directory_cursors } : {}) };
+      return task && isVeRenewableSourceTask(task) ? reopenVeSourceTask(task) : state;
     });
   }
   info.limit = collectionRoundLimit(next);
