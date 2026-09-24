@@ -436,6 +436,30 @@ function normalizeBulkLeadImportResult(
   };
 }
 
+/** Billing is a preflight hint; the import response remains authoritative under concurrent uploads. */
+export async function getWorkspaceContactCapacity(requestOptions?: InstantlyRequestOptions): Promise<{
+  limit: number; used: number; remaining: number;
+} | null> {
+  let raw: { subscriptions?: { outreach?: { total_lead_limit?: unknown; current_lead_count?: unknown } } };
+  try {
+    raw = await request('/workspace-billing/plan-details', {}, {
+      ...requestOptions, timeoutMs: 10_000, timeoutIncludesBody: true, retryRateLimits: false,
+    });
+  } catch (error) {
+    // Existing keys may not grant workspace_billing:read. Do not change their
+    // permissions or confuse an unavailable preflight with an exhausted plan.
+    // A read outage is also inconclusive; the upload response remains authoritative.
+    if (!(error instanceof InstantlyApiError) || [403, 404, 429].includes(error.status) || error.status >= 500) return null;
+    throw error;
+  }
+  const plan = raw?.subscriptions?.outreach;
+  const limit = plan?.total_lead_limit;
+  const used = plan?.current_lead_count;
+  if (typeof limit !== 'number' || typeof used !== 'number' || !Number.isSafeInteger(limit)
+    || !Number.isSafeInteger(used) || limit < 0 || used < 0) return null;
+  return { limit, used, remaining: Math.max(0, limit - used) };
+}
+
 export async function createLeads(
   leads: LeadCreatePayload[],
   options?: {

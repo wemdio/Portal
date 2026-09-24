@@ -33,7 +33,7 @@ export function isRetryableStageError(msg: string): boolean {
     /\bSerper transient:/i.test(msg) ||
     /\b(5\d\d|429)\b/.test(msg) ||
     /provider is currently unavailable/i.test(msg) ||
-    /econnreset|econnrefused|etimedout|enotfound|network|fetch failed|socket hang up|timeout|aborted/i.test(msg) ||
+    /econnreset|econnrefused|etimedout|enotfound|network|fetch failed|socket hang up|timeout|tim(?:ed|ing)\s+out|aborted/i.test(msg) ||
     isVeStageDbInterruption(msg)
   );
 }

@@ -1,4 +1,4 @@
-import { extractLeadReplyContacts, type LeadReplyContacts } from './leadReplyContacts';
+import { extractLeadReplyContacts, senderDisplayLeadName, type LeadReplyContacts } from './leadReplyContacts';
 import { isPersonName } from '../enrich/extractors/nameQuality';
 import { joinLeadPhones, normalizeLeadPhone, normalizeLeadWebsite } from './leadContactValues';
 import type { Email, Lead } from './types';
@@ -152,7 +152,7 @@ export function resolveLeadContactMetadata(input: {
   const lastName = firstField(sources, ['last_name', 'фамилия'], cleanValue);
   const emailDomain = normalizeEmail(input.leadEmail).match(/^[^@\s]+@([^@\s]+)$/)?.[1];
   return {
-    leadName: [firstName, lastName].filter(Boolean).join(' ') || reply.leadName,
+    leadName: senderDisplayLeadName([firstName, lastName].filter(Boolean).join(' ')) || reply.leadName,
     companyName: firstField(sources, COMPANY_KEYS, companyValue, 'company') || companyValue(reply.companyName),
     // Uploaded phones keep their order, but must not hide additional numbers
     // from the same contact's reply/signature. History is excluded upstream.

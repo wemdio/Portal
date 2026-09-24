@@ -44,6 +44,7 @@ jest.mock('@/lib/verticalEngineV2/stages/segmentationAudit', () => ({
   prepareAuditSnapshot: jest.fn(() => ({ audience: { leads: [] } })),
 }));
 
+import { GET as getUpload, POST as retryUpload } from '@/app/api/tools/vertical-engine-v2/templates/[id]/upload/route';
 import { GET as getAudit, PATCH, POST as createAudit } from '@/app/api/tools/vertical-engine-v2/templates/[id]/segmentation-audit/route';
 import { GET as getBaseTemplate } from '@/app/api/tools/vertical-engine-v2/bases/[id]/template/route';
 import { activateApprovedLaunchCampaigns, activateDeliveredContactCampaigns } from '@/lib/verticalEngineV2/contactDeliveryActivation';
@@ -81,6 +82,7 @@ function seed(known = true) {
     ve_contact_delivery_rows: [{ id: 'existing-row', ve_project_id: 've-project-1',
       campaign_row_id: 'another-campaign-row', email_normalized: 'reserved@example.test', status: 'ready' }],
   }, rpcHandlers: {
+    ve_retry_contact_delivery_upload: () => ({ data: { ok: true } }),
     ve_resolve_template_launch: () => ({ data: { resolved: true, audit_row: audit } }),
     ve_resolve_template_contact_delivery: () => ({ data: { resolved: true, audit_row: audit } }),
   } });
@@ -250,4 +252,30 @@ describe('recovery of a plan bound to a Portal project without periods', () => {
     expect(mockClaimOwnership).not.toHaveBeenCalled();
     expect(mockPortalDb.rpcCalls).toHaveLength(0);
   });
+});
+
+
+it('shows the durable project upload pause and requests retry without contacting Instantly', async () => {
+  const runId = '50000000-0000-4000-8000-000000000001';
+  const blockedAt = '2026-09-24T07:00:00.123456+00:00';
+  await mockPortalDb.from('ve_contact_delivery_daily_runs').insert({ id: runId,
+    ve_project_id: 've-project-1', run_date: '2026-09-24', upload_blocked_at: blockedAt,
+    accepted_count: 12, uncertain_count: 2, skipped_count: 1, reserved_count: 20 });
+  const context = { params: Promise.resolve({ id: 'template-1' }) };
+  const status = await getUpload(new Request('http://x/upload') as NextRequest, context);
+  expect(status.status).toBe(200);
+  expect(await status.json()).toEqual({ blocked: {
+    run_id: runId, blocked_at: blockedAt, run_date: '2026-09-24', accepted: 12, pending: 5, uncertain: 2,
+  } });
+  const response = await retryUpload(new Request('http://x/upload', { method: 'POST', body: JSON.stringify({
+    action: 'retry', run_id: runId, blocked_at: blockedAt, project_id: 'foreign-project', actor_id: 'foreign-user',
+  }) }) as NextRequest, context);
+  expect(response.status).toBe(200);
+  expect(mockPortalDb.rpcCalls.at(-1)).toMatchObject({ fn: 've_retry_contact_delivery_upload', params: {
+    p_run_id: runId, p_blocked_at: blockedAt, p_ve_project_id: 've-project-1', p_actor_id: 'staff-1',
+  } });
+  expect(mockCreateLeads).not.toHaveBeenCalled();
+  expect(mockActivateCampaign).not.toHaveBeenCalled();
+  const invalid = await retryUpload(new Request('http://x/upload', { method: 'POST', body: '{}' }) as NextRequest, context);
+  expect(invalid.status).toBe(400);
 });

@@ -30,6 +30,14 @@ export function isVeTransientProviderError(error: unknown): boolean {
     || /не завершен\w*:\s*(?:provider|timeout)\b/i.test(message);
 }
 
+/** Only transport/rate-limit failures of the directory may reopen its saved task. */
+export function isVeTransientDirectoryError(error: unknown): boolean {
+  const message = errorMessage(error);
+  return /\bcompanies_directory:/i.test(message)
+    && !/\b(?:400|401|402|403|404|422)\b/.test(message)
+    && /\b(?:408|429|5\d\d)\b|timeout|tim(?:ed|ing)\s+out|econnreset|econnrefused|etimedout|enotfound|network|fetch failed|socket hang up/i.test(message);
+}
+
 export interface VeCollectionFailure {
   kind: 'billing' | 'configuration' | 'provider' | 'incomplete_checks' | 'name_cleanup' | 'source' | 'unknown';
   message: string;

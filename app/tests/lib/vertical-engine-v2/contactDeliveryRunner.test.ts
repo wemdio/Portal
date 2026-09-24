@@ -22,7 +22,7 @@ const ITEM_ID = '40000000-0000-0000-0000-000000000001';
 const RUN_ID = '50000000-0000-0000-0000-000000000001';
 const ATTEMPT_ID = '60000000-0000-0000-0000-000000000001';
 
-function portalDb(options: { replayAfterFirst?: boolean; awaitingDelivery?: boolean } = {}) {
+function portalDb(options: { replayAfterFirst?: boolean; awaitingDelivery?: boolean; capacityBlocked?: boolean; twoBatches?: boolean } = {}) {
   let reserveCalls = 0;
   return createMockSupabase({
     tables: {
@@ -68,6 +68,7 @@ function portalDb(options: { replayAfterFirst?: boolean; awaitingDelivery?: bool
     rpcHandlers: {
       ve_reserve_contact_delivery_day: () => {
         reserveCalls += 1;
+        if (options.capacityBlocked) return { data: { status: 'capacity_blocked', run_id: RUN_ID, run_date: '2026-09-07', batches: [] } };
         if (options.awaitingDelivery) {
           return { data: { status: 'awaiting_delivery', run_id: RUN_ID, run_date: '2026-09-07', batches: [] } };
         }
@@ -85,11 +86,13 @@ function portalDb(options: { replayAfterFirst?: boolean; awaitingDelivery?: bool
                 row_ids: ['row-1', 'row-2'],
                 leads: [{ email: 'one@example.test' }, { email: 'two@example.test' }],
               },
+              ...(options.twoBatches ? [{ campaign_id: 'campaign-b', row_ids: ['row-3'], leads: [{ email: 'three@example.test' }] }] : []),
             ],
           },
         };
       },
       ve_mark_contact_delivery_attempt: () => ({ data: { marked: true } }),
+      ve_finalize_contact_delivery_capacity: () => ({ data: { finalized: true } }),
       ve_finalize_contact_delivery_attempt: () => ({ data: { finalized: true } }),
     },
   });
@@ -229,26 +232,28 @@ describe('VE2 contact delivery runner', () => {
     expect(appendLeads).not.toHaveBeenCalled();
   });
 
-  it('terminally skips known blocklist cuts instead of reselecting them ahead of good contacts tomorrow', async () => {
-    const portal = portalDb();
-    const result = await runContactDeliveryDay({
-      portalDb: portal as never,
-      instantlyDb: instantlyDb() as never,
-      veProjectId: VE_PROJECT_ID,
-      deps: {
-        reservePeriodCampaignLinks: async () => ({ status: 'claimed', conflictingProjectIds: [] }),
-        appendLeads: async () => ({
-          accepted: 1, skipped: 1, attemptedIndexes: [1], acceptedIndexes: [1],
-          skippedIndexes: [0], identityComplete: true,
-        }),
-        createAttemptId: () => ATTEMPT_ID,
-      },
-    });
-    expect(result).toMatchObject({ status: 'completed', accepted: 1, skipped: 1 });
-    expect(portal.rpcCalls.at(-1)?.params).toMatchObject({
-      p_accepted_row_ids: ['row-2'], p_skipped_row_ids: ['row-1'], p_released_row_ids: [],
-    });
-  });
+  it.each([{ source: 'local', attempted: [1] }, { source: 'workspace', attempted: [0, 1] }])(
+    'terminally skips $source blocklist cuts instead of retrying them tomorrow', async ({ attempted }) => {
+      const portal = portalDb();
+      const result = await runContactDeliveryDay({
+        portalDb: portal as never,
+        instantlyDb: instantlyDb() as never,
+        veProjectId: VE_PROJECT_ID,
+        deps: {
+          reservePeriodCampaignLinks: async () => ({ status: 'claimed', conflictingProjectIds: [] }),
+          appendLeads: async () => ({
+            accepted: 1, skipped: 1, attemptedIndexes: attempted, acceptedIndexes: [1],
+            skippedIndexes: [0], identityComplete: true,
+          }),
+          createAttemptId: () => ATTEMPT_ID,
+        },
+      });
+      expect(result).toMatchObject({ status: 'completed', accepted: 1, skipped: 1 });
+      expect(portal.rpcCalls.at(-1)?.params).toMatchObject({
+        p_accepted_row_ids: ['row-2'], p_skipped_row_ids: ['row-1'], p_released_row_ids: [],
+      });
+    },
+  );
 
   it('rejects a changed workspace before claiming campaign ownership or reserving delivery rows', async () => {
     const portal = portalDb();
@@ -433,5 +438,62 @@ describe('VE2 contact delivery runner for a Portal project without periods', () 
     expect(deps.claimCampaignProjectOwnership).not.toHaveBeenCalled();
     expect(portal.rpcCalls).toEqual([]);
     expect(deps.appendLeads).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('VE2 workspace capacity pause', () => {
+  const deps = (appendLeads: jest.Mock) => ({ appendLeads, createAttemptId: () => ATTEMPT_ID,
+    reservePeriodCampaignLinks: jest.fn(async () => ({ status: 'claimed' as const, conflictingProjectIds: [] })) });
+  const run = (portal: ReturnType<typeof portalDb>, append: jest.Mock) => runContactDeliveryDay({
+    portalDb: portal as never, instantlyDb: instantlyDb() as never, veProjectId: VE_PROJECT_ID,
+    now: new Date('2026-09-07T06:00:00Z'), deps: deps(append),
+  });
+
+  it('persists a capacity pause with exact accepted and deferred rows and stops sibling campaigns', async () => {
+    const portal = portalDb({ twoBatches: true });
+    const append = jest.fn().mockResolvedValue({ accepted: 1, skipped: 0, attemptedIndexes: [0, 1],
+      acceptedIndexes: [1], deferredIndexes: [0], identityComplete: true, capacityBlocked: true });
+    expect(await run(portal, append)).toMatchObject({ status: 'capacity_blocked', accepted: 1, skipped: 0 });
+    expect(append).toHaveBeenCalledTimes(1);
+    expect(append).toHaveBeenCalledWith(expect.objectContaining({ pauseOnWorkspaceCapacity: true }));
+    expect(portal.rpcCalls.at(-1)).toMatchObject({ fn: 've_finalize_contact_delivery_capacity', params: {
+      p_accepted_row_ids: ['row-2'], p_released_row_ids: ['row-1'], p_uncertain_row_ids: [], p_skipped_row_ids: [],
+    } });
+    expect(portal.rpcCalls.filter((call) => call.fn === 've_mark_contact_delivery_attempt')).toHaveLength(1);
+  });
+
+  it('leaves unknown identities protected when a partial upload exhausts the plan', async () => {
+    const portal = portalDb();
+    const append = jest.fn().mockResolvedValue({ accepted: 1, skipped: 0, attemptedIndexes: [0, 1],
+      acceptedIndexes: null, identityComplete: false, capacityBlocked: true });
+    expect(await run(portal, append)).toMatchObject({ status: 'uncertain', uncertain: 2 });
+    expect(portal.rpcCalls.at(-1)).toMatchObject({ fn: 've_finalize_contact_delivery_capacity', params: {
+      p_accepted_row_ids: [], p_released_row_ids: [], p_uncertain_row_ids: ['row-1', 'row-2'],
+    } });
+  });
+
+  it('releases definitively refused contacts from a partial error for explicit retry', async () => {
+    const portal = portalDb();
+    const append = jest.fn().mockRejectedValue(new AppendLeadsPartialError('Contact limit reached', {
+      accepted: 0, skipped: 0, attemptedIndexes: [0, 1], acceptedIndexes: [], deferredIndexes: [0, 1],
+      identityComplete: true, capacityBlocked: true,
+    }));
+    expect(await run(portal, append)).toMatchObject({ status: 'capacity_blocked', uncertain: 0 });
+    expect(portal.rpcCalls.at(-1)?.params).toMatchObject({ p_released_row_ids: ['row-1', 'row-2'], p_uncertain_row_ids: [] });
+  });
+
+  it('does not call the provider on later ticks of a paused project', async () => {
+    const append = jest.fn();
+    expect(await run(portalDb({ capacityBlocked: true }), append)).toMatchObject({ status: 'capacity_blocked' });
+    expect(append).not.toHaveBeenCalled();
+  });
+
+  it('never releases contacts when a resolved provider result has invalid identities', async () => {
+    const portal = portalDb();
+    const append = jest.fn().mockResolvedValue({ accepted: 1, skipped: 0, attemptedIndexes: [0, 1],
+      acceptedIndexes: [9], identityComplete: true });
+    expect(await run(portal, append)).toMatchObject({ status: 'uncertain' });
+    expect(portal.rpcCalls.at(-1)?.params).toMatchObject({ p_released_row_ids: [], p_uncertain_row_ids: ['row-1', 'row-2'] });
   });
 });

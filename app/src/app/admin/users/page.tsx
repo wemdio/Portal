@@ -959,6 +959,10 @@ export default function UsersPage() {
   const [modalEmail, setModalEmail] = useState('');
   const [toolVisibility, setToolVisibility] = useState<Record<string, boolean>>({});
   const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
+  const [accountBlocked, setAccountBlocked] = useState(false);
+  const [accountProtected, setAccountProtected] = useState(false);
+  const [blockStatusLoaded, setBlockStatusLoaded] = useState(false);
+  const [blocking, setBlocking] = useState(false);
 
   const [clientCampaigns, setClientCampaigns] = useState<string[]>([]);
   const [clientCampaignBaseline, setClientCampaignBaseline] = useState<string[]>([]);
@@ -1209,13 +1213,16 @@ export default function UsersPage() {
     setClientCampaigns([]);
     setClientCampaignBaseline([]);
     setClientAccessLoaded(false);
+    setAccountBlocked(false);
+    setAccountProtected(false);
+    setBlockStatusLoaded(false);
     try {
       const isClient = user.role === 'client';
       // Per-call catch so one failing endpoint does not blow away state derived
       // from the others. Without this, a 500 on /client-access would reset the
       // already-loaded tariff/subscription back to "Не оплачена" defaults via
       // the outer catch, even though the tariff fetch itself succeeded.
-      const [toolsRes, accessRes, tariffRes] = await Promise.all([
+      const [toolsRes, accessRes, tariffRes, blockRes] = await Promise.all([
         apiFetch<{ visibility: Record<string, boolean> }>(
           `/api/admin/users/${user.id}/tools`
         ).catch((err) => {
@@ -1242,8 +1249,15 @@ export default function UsersPage() {
               return { tariff: null as AdminUserTariffPayload | null };
             })
           : Promise.resolve({ tariff: null as AdminUserTariffPayload | null }),
+        apiFetch<{ blocked: boolean; protected: boolean }>(`/api/admin/users/${user.id}/block`).catch((err) => {
+          void logError('admin.users.modal.block-status.fetch.failed', err, { targetUserId: user.id });
+          return null;
+        }),
       ]);
       setToolVisibility(toolsRes.visibility ?? {});
+      setAccountBlocked(blockRes?.blocked === true);
+      setAccountProtected(blockRes?.protected === true);
+      setBlockStatusLoaded(blockRes !== null);
       const campaigns = accessRes.rows.filter((r) => r.resource_type === 'campaign').map((r) => r.resource_id);
       setClientCampaigns(campaigns);
       setClientCampaignBaseline(campaigns);
@@ -1306,6 +1320,9 @@ export default function UsersPage() {
       setClientCampaigns([]);
       setClientCampaignBaseline([]);
       setClientAccessLoaded(false);
+      setAccountBlocked(false);
+      setAccountProtected(false);
+      setBlockStatusLoaded(false);
       setTariffType(TARIFF_LAUNCH);
       setClientIsTestShop(false);
       setCustomLimits({ ...TARIFF_DEFAULTS[TARIFF_FLOW] });
@@ -1550,6 +1567,40 @@ export default function UsersPage() {
       setError(getErrorMessage(err) || 'Ошибка удаления пользователя');
     } finally {
       setDeleting(false);
+    }
+  }
+
+  async function handleToggleBlock() {
+    if (!actionModalUserId || !blockStatusLoaded || accountProtected || actionModalUserId === currentUserId) return;
+    const nextBlocked = !accountBlocked;
+    const target = users.find((user) => user.id === actionModalUserId);
+    if (nextBlocked && !window.confirm(
+      `Заблокировать пользователя ${target?.full_name || target?.email || ''}? Активные сессии будут завершены.`,
+    )) {
+      return;
+    }
+
+    setBlocking(true);
+    setError('');
+    setSaveSuccessMessage(null);
+    try {
+      const result = await apiFetch<{ ok: true; blocked: boolean }>(
+        `/api/admin/users/${actionModalUserId}/block`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ blocked: nextBlocked }),
+        },
+      );
+      setAccountBlocked(result.blocked);
+      setSaveSuccessMessage(result.blocked ? 'Пользователь заблокирован' : 'Пользователь разблокирован');
+    } catch (err: unknown) {
+      void logError('admin.users.block-toggle.failed', err, {
+        targetUserId: actionModalUserId,
+        blocked: nextBlocked,
+      });
+      setError(getErrorMessage(err) || 'Ошибка изменения блокировки');
+    } finally {
+      setBlocking(false);
     }
   }
 
@@ -1927,9 +1978,22 @@ export default function UsersPage() {
             >
               <div className="px-7 py-5 border-b border-gray-200 shrink-0 space-y-3">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-lg font-semibold text-gray-900">
-                    {userForModal.full_name || userForModal.email || 'Пользователь'}
-                  </h3>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-lg font-semibold text-gray-900">
+                      {userForModal.full_name || userForModal.email || 'Пользователь'}
+                    </h3>
+                    {blockStatusLoaded && (
+                      <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                        accountProtected
+                          ? 'bg-blue-50 text-blue-700'
+                          : accountBlocked
+                            ? 'bg-red-50 text-red-700'
+                            : 'bg-green-50 text-green-700'
+                      }`}>
+                        {accountProtected ? 'Системный' : accountBlocked ? 'Заблокирован' : 'Активен'}
+                      </span>
+                    )}
+                  </div>
                   <button
                   type="button"
                   onClick={() => {
@@ -2330,6 +2394,26 @@ export default function UsersPage() {
                       Бриф клиента
                     </Link>
                   </>
+                )}
+                {actionModalUserId !== currentUserId && (
+                  <button
+                    type="button"
+                    onClick={() => void handleToggleBlock()}
+                    disabled={!blockStatusLoaded || accountProtected || blocking}
+                    className={`px-3 py-2 border rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed ${
+                      accountBlocked
+                        ? 'border-green-200 text-green-700 hover:bg-green-50'
+                        : 'border-amber-200 text-amber-700 hover:bg-amber-50'
+                    }`}
+                  >
+                    {accountProtected
+                      ? 'Системный аккаунт'
+                      : blocking
+                        ? 'Сохранение...'
+                        : accountBlocked
+                          ? 'Разблокировать'
+                          : 'Заблокировать'}
+                  </button>
                 )}
                 {actionModalUserId !== currentUserId && (
                   <button

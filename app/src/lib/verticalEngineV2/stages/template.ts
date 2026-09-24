@@ -7,7 +7,7 @@ import { buildVeFinalPersonalization, normalizeVeFinalLetters } from '../finalLe
 import { applyVeChainTiming } from '../chainTiming';
 import { compileClientBriefForLetters, splitBriefForLetterPrompt } from '../clientBriefIntake';
 import { selectCaseForVertical } from '../caseBank';
-import { extractNumberFacts, findUnverifiedNumbers } from '../letterChecks';
+import { checkLetterPresentation, extractNumberFacts, findUnverifiedNumbers } from '../letterChecks';
 import type { VeBase, VeChainLanguage, VeChainLetter, VeJob, VeOperatorMapping, VeSegmentVariant, VeTemplate, VeVertical } from '../types';
 import type { VeChainLetterAB } from './chain';
 import { addUsage, newUsage, payloadString, readProject, type VeStageContext, type VeStageResult } from './shared';
@@ -264,6 +264,9 @@ export async function runTemplateStage(job: VeJob, ctx: VeStageContext): Promise
       if (normalizedWords(letter.a.body) === normalizedWords(letter.b.body) || normalizedWords(letter.a.angle) === normalizedWords(letter.b.angle) || letter.a.cta_intent === letter.b.cta_intent) ctx.addIssue({ code: 'custom', path: ['letters', index], message: 'A and B need distinct bodies, angles and CTA intents.' });
       for (const side of ['a', 'b'] as const) {
         const body = letter[side].body;
+        for (const issue of checkLetterPresentation(body, language)) {
+          ctx.addIssue({ code: 'custom', path: ['letters', index, side, 'body'], message: issue.detail });
+        }
         if (countWords(body) > (index === 0 ? 70 : 80) || (body.match(/\?/g) ?? []).length !== 1 || /[—–]/.test(body)) ctx.addIssue({ code: 'custom', path: ['letters', index, side], message: 'Respect the word limit, exactly one question, and no em/en dashes.' });
         if (findUnverifiedNumbers(body, facts).length) ctx.addIssue({ code: 'custom', path: ['letters', index, side], message: 'Remove numerical facts not found in the supplied material.' });
       }
