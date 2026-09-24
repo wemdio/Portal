@@ -293,6 +293,7 @@ blocks:
               # SERVER_PASSWORD), SENDER_REMOTE_DIR (default: /opt/portal-sender).
               # На хосте один раз создать .env по deploy/sender/.env.example.
               SENDER_HOST="${SENDER_SSH_HOST:-}"
+              SENDER_DEPLOY_SKIPPED=""
               if [ "$DEPLOY_SENDER" = 1 ] && [ -z "$SENDER_HOST" ]; then
                 # Не FATAL: блокировать деплой portal-хоста нельзя — он как раз
                 # убирает worker-sender из стека на 139, а пропуск sender-хоста
@@ -305,49 +306,82 @@ blocks:
                 SENDER_USER="${SENDER_SSH_USER:-$USER}"
                 SENDER_PASS="${SENDER_SSH_PASSWORD:-$SERVER_PASSWORD}"
                 SENDER_PATH="${SENDER_REMOTE_DIR:-/opt/portal-sender}"
-                run_ssh_sender() {
-                  desc="$1"
-                  remote="$2"
-                  n=1
-                  while [ "$n" -le "$SSH_RETRIES" ]; do
-                    if sshpass -p "${SENDER_PASS}" ssh ${SSH_BASE} ${SENDER_USER}@${SENDER_HOST} "$remote"; then
-                      return 0
+                # Bound the whole optional sender phase, including hung SSH/pull.
+                # Pull and up use separate sessions: a timed-out download can
+                # never later continue into a container restart on its own.
+                SENDER_DEADLINE=$((SECONDS + 300))
+                run_sender_bounded() {
+                  local desc="$1" limit="$2" attempts="$3" n=1 remaining status
+                  shift 3
+                  while [ "$n" -le "$attempts" ]; do
+                    remaining=$((SENDER_DEADLINE - SECONDS))
+                    if [ "$remaining" -le 0 ]; then
+                      echo "[scheduled] ${desc}: sender budget exhausted" >&2
+                      return 124
                     fi
-                    echo "[scheduled] ${desc}: SSH (sender) не удалась (попытка ${n}/${SSH_RETRIES})" >&2
+                    [ "$limit" -le "$remaining" ] || limit="$remaining"
+                    if timeout --kill-after=10s "${limit}s" "$@"; then
+                      return 0
+                    else
+                      status=$?
+                    fi
+                    echo "[scheduled] ${desc}: sender attempt ${n}/${attempts} failed (exit ${status})" >&2
                     n=$((n + 1))
-                    [ "$n" -le "$SSH_RETRIES" ] && sleep "$SSH_RETRY_PAUSE"
+                    [ "$n" -le "$attempts" ] || return "$status"
+                    remaining=$((SENDER_DEADLINE - SECONDS))
+                    [ "$remaining" -gt "$SSH_RETRY_PAUSE" ] || return 124
+                    sleep "$SSH_RETRY_PAUSE"
                   done
-                  return 1
+                }
+                run_ssh_sender() {
+                  local desc="$1" remote="$2" limit="${3:-60}" attempts="${4:-2}"
+                  run_sender_bounded "$desc" "$limit" "$attempts" \
+                    sshpass -p "${SENDER_PASS}" ssh ${SSH_LONG} ${SENDER_USER}@${SENDER_HOST} "$remote"
                 }
                 run_scp_sender() {
-                  desc="$1"
+                  local desc="$1"
                   shift
-                  n=1
-                  while [ "$n" -le "$SSH_RETRIES" ]; do
-                    if sshpass -p "${SENDER_PASS}" scp ${SSH_BASE} "$@"; then
-                      return 0
-                    fi
-                    echo "[scheduled] ${desc}: scp (sender) не удалась (попытка ${n}/${SSH_RETRIES})" >&2
-                    n=$((n + 1))
-                    [ "$n" -le "$SSH_RETRIES" ] && sleep "$SSH_RETRY_PAUSE"
-                  done
-                  return 1
+                  run_sender_bounded "$desc" 60 2 \
+                    sshpass -p "${SENDER_PASS}" scp ${SSH_BASE} "$@"
                 }
+                SENDER_PROBE_OK=0
+                if run_ssh_sender "sender preflight" "true" 25 2; then
+                  SENDER_PROBE_OK=1
+                fi
+                if [ "$SENDER_PROBE_OK" = 0 ]; then
+                  SENDER_DEPLOY_SKIPPED="хост ${SENDER_HOST} не ответил на проверку SSH"
+                else
                 echo "[scheduled] Sender worker: deploying to ${SENDER_USER}@${SENDER_HOST}:${SENDER_PATH}"
-                run_ssh_sender "mkdir sender dir" \
-                  "sudo -n mkdir -p ${SENDER_PATH} && sudo -n chown -R ${SENDER_USER}:${SENDER_USER} ${SENDER_PATH}"
-                run_scp_sender "copy sender compose" \
-                  deploy/sender/docker-compose.yml "${SENDER_USER}@${SENDER_HOST}:${SENDER_PATH}/"
-                run_ssh_sender "sender compose pull + up" "set -e
+                if ! run_ssh_sender "mkdir sender dir" \
+                  "sudo -n mkdir -p ${SENDER_PATH} && sudo -n chown -R ${SENDER_USER}:${SENDER_USER} ${SENDER_PATH}"; then
+                  SENDER_DEPLOY_SKIPPED="не удалось создать ${SENDER_PATH} на ${SENDER_HOST}"
+                elif ! run_scp_sender "copy sender compose" \
+                  deploy/sender/docker-compose.yml "${SENDER_USER}@${SENDER_HOST}:${SENDER_PATH}/"; then
+                  SENDER_DEPLOY_SKIPPED="не удалось скопировать compose на ${SENDER_HOST}"
+                elif ! run_ssh_sender "sender image pull" "set -e
                 cd ${SENDER_PATH}
                 if [ ! -f .env ]; then echo \"[sender] FATAL: нет .env в ${SENDER_PATH} — создай по deploy/sender/.env.example\"; exit 1; fi
-                printf '%s\n' \"${DOCKER_PASSWORD}\" | sudo -n docker login -u \"${DOCKER_USERNAME}\" --password-stdin
-                export DOCKER_CLIENT_TIMEOUT=300
-                export COMPOSE_HTTP_TIMEOUT=300
-                sudo -n docker compose -f docker-compose.yml -p portal-sender --env-file .env pull
-                sudo -n docker compose -f docker-compose.yml -p portal-sender --env-file .env up -d
+                printf '%s\n' \"${DOCKER_PASSWORD}\" | sudo -n timeout --kill-after=5s 30s docker login -u \"${DOCKER_USERNAME}\" --password-stdin
+                sudo -n timeout --kill-after=10s 180s docker compose -f docker-compose.yml -p portal-sender --env-file .env pull
+                " 240 1; then
+                  SENDER_DEPLOY_SKIPPED="скачивание образа на ${SENDER_HOST} не завершилось; запуск контейнера не запрашивался"
+                elif [ "$((SENDER_DEADLINE - SECONDS))" -lt 210 ]; then
+                  # Compose grants the old worker 2m to drain. Do not start a
+                  # restart if the phase budget cannot cover that grace period.
+                  SENDER_DEPLOY_SKIPPED="образ скачан, но бюджета недостаточно для безопасного перезапуска sender; контейнер не трогали"
+                elif ! run_ssh_sender "sender compose up" "set -e
+                cd ${SENDER_PATH}
+                sudo -n timeout --kill-after=10s 180s docker compose -f docker-compose.yml -p portal-sender --env-file .env up -d --pull never
                 sudo -n docker ps --filter name=portal-worker-sender --format '{{.Names}} {{.Status}}'
-                "
+                " 210 1; then
+                  # An ambiguous up must not be blindly replayed: it may have
+                  # already recreated the container before the SSH reply failed.
+                  SENDER_DEPLOY_SKIPPED="результат обновления контейнера на ${SENDER_HOST} не подтверждён; требуется проверка состояния"
+                fi
+                fi
+                if [ -n "$SENDER_DEPLOY_SKIPPED" ]; then
+                  echo "[scheduled] !!! SENDER NOT DEPLOYED: ${SENDER_DEPLOY_SKIPPED}. Портал выкладывается штатно; состояние sender указано в причине выше." >&2
+                fi
               else
                 echo "[scheduled] Sender host: пропущен (изменений нет или SENDER_SSH_HOST не задан)"
               fi
@@ -670,6 +704,17 @@ blocks:
                 fi
               else
                 echo "[scheduled] Dataset sync: изменений в app/scripts/instantly-dataset нет — /opt/instantly-dataset-sync не трогаем"
+              fi
+
+              if [ -n "$SENDER_DEPLOY_SKIPPED" ]; then
+                run_ssh "sender: health alert" "cd /home/Portal/prod 2>/dev/null || exit 0
+                bot_token=\$(grep -E '^TELEGRAM_HEALTH_BOT_TOKEN=' .env 2>/dev/null | tail -n1 | cut -d= -f2-)
+                [ -n \"\${bot_token}\" ] || bot_token=\$(grep -E '^TELEGRAM_BOT_TOKEN=' .env 2>/dev/null | tail -n1 | cut -d= -f2-)
+                chat_id=\$(grep -E '^TELEGRAM_HEALTH_CHAT_ID=' .env 2>/dev/null | tail -n1 | cut -d= -f2-)
+                if [ -z \"\${bot_token}\" ] || [ -z \"\${chat_id}\" ]; then echo '[sender] health alert skipped: no token/chat'; exit 0; fi
+                curl -fsS --connect-timeout 5 --max-time 15 -X POST \"https://api.telegram.org/bot\${bot_token}/sendMessage\" \
+                  --data-urlencode \"chat_id=\${chat_id}\" \
+                  --data-urlencode \"text=⚠️ Scheduled deploy ${COMMIT_SHA}: портал задеплоен, но обновление воркера «Рассылки» НЕ подтверждено — ${SENDER_DEPLOY_SKIPPED}. Когда хост поднимется: следующий деплой с правкой sender или вручную docker compose -p portal-sender pull + up -d в /opt/portal-sender.\" >/dev/null || true" || true
               fi
 
               run_ssh "write last_deploy_sha" \
