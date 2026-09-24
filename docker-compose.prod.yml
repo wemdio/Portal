@@ -753,6 +753,7 @@ services:
       - OPENROUTER_HYPOTHESIS_ENGINE_API_KEY=${OPENROUTER_HYPOTHESIS_ENGINE_API_KEY}
       - OPENROUTER_BRIEF_API_KEY=${OPENROUTER_BRIEF_API_KEY}
       - VE_MODEL_RESEARCH=openai/gpt-5.5
+      - VE_MODEL_HYPOTHESES=${VE_MODEL_HYPOTHESES:-vertex/gemini-3.8-flash}
       - VE_MODEL_CHAIN=google/gemini-3.1-pro-preview
       - VE_MODEL_BULK=openai/gpt-5.5
       - VE_MODEL_COLLECTION=${VE_MODEL_COLLECTION:-deepinfra/deepseek-v4-flash-0731}

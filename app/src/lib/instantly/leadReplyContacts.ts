@@ -1,6 +1,7 @@
 import { load } from 'cheerio';
 import { isPersonName, isRoleTitle } from '../enrich/extractors/nameQuality';
 import { joinLeadPhones, leadPhoneCandidates, normalizeLeadWebsite } from './leadContactValues';
+import { removeLeadReplyQuotes } from './leadReplyHtml';
 import type { Email } from './types';
 
 export interface LeadReplyContacts {
@@ -64,7 +65,7 @@ const HISTORY_BOUNDARIES = [
   /^(?:пн|вт|ср|чт|пт|сб|вс|понедельник|вторник|среда|четверг|пятница|суббота|воскресенье),?\s+\d{1,2}\s+[а-яё]{3,}\.?(?:\s+\d{4})?(?:\s*г\.)?[^\n]{0,160}:\s*$/iu,
   /^(?:Sent\s+from\s+my\s+(?:iPhone|iPad|Android)|Отправлено\s+из\s+(?:мобильной\s+)?(?:Почты\s+Mail|мобильной\s+Яндекс\.Почты))(?:[\s:.]|$)/iu,
 ];
-const SIGNOFF = /^(?:--|—|с\s+(?:уважением|наилучшими\s+пожеланиями)(?:[,.!:].*)?|(?:best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:[,.!:].*)?)$/iu;
+const SIGNOFF = /^(?:--|—|с\s+(?:уважением|наилучшими\s+пожеланиями)(?:\s*[,.!:].*)?|(?:best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:\s*[,.!:].*)?)$/iu;
 const SIGNOFF_PREFIX = /^(?:с\s+(?:уважением|наилучшими\s+пожеланиями)|best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:[\s,.!:-]+|$)/iu;
 const PHONE_LABEL = /(?:телефон|тел\s*[.:]|моб(?:ильный)?\s*[.:]|phone|mobile|telephone|whats\s*app|tel:|позвон|звоните|набери|свяжитесь|для\s+связи|(?:мой|наш)\s+номер|контакт|\b(?:call|reach|contact)\b|\b[mtp]\s*:)/iu;
 const NON_PHONE_LABEL = /(?:инн|кпп|огрн(?:ип)?|окпо|бик|снилс|р[/.]?с|к[/.]?с|vat|tax\s*(?:id|number)?|order|заказ[а-яё]*|заявк[аи]|сч[её]т[а-яё]*)\s*[:№#.-]?\s*$/iu;
@@ -107,6 +108,11 @@ function websitesInLine(line: string): string[] {
     .replace(/[^\s<>]+@[^\s<>]+/gu, '');
   return [...line.matchAll(URL_CANDIDATE)]
     .filter((match) => line[match.index + match[0].length] !== '@')
+    // Copied logos sometimes mix Latin and Cyrillic lookalikes in a domain
+    // label. Do not manufacture a different punycode site from that display;
+    // the real bracketed URL/href remains a separate candidate below.
+    .filter((match) => !match[0].replace(/^https?:\/\//iu, '').split('/')[0].split('.')
+      .some((label) => /[a-z]/iu.test(label) && /[а-яё]/iu.test(label)))
     .map((match) => companyWebsite(match[0]))
     .filter((value): value is string => value !== null);
 }
@@ -114,14 +120,7 @@ function websitesInLine(line: string): string[] {
 function htmlText(html: string): string {
   const $ = load(html);
   $('script, style, head').remove();
-  const quotes = $('blockquote, .gmail_quote, .yahoo_quoted, .protonmail_quote, .moz-forward-container, .ms-outlook-mobile-reference-message');
-  quotes.each((_, quote) => {
-    let previous = quote.prev;
-    while (previous && ((previous.type === 'text' && !previous.data.trim()) ||
-      previous.type === 'comment' || $(previous).is('br'))) previous = previous.prev;
-    if (previous && YOU_WROTE.test($(previous).text().trim())) $(previous).remove();
-  });
-  quotes.remove();
+  removeLeadReplyQuotes($, true);
   // Outlook's reply marker is a sibling of the old message, not its wrapper.
   // Remove following siblings at every enclosing level without losing the top reply.
   $('#divRplyFwdMsg, #stopSpelling, .OutlookMessageHeader, .moz-cite-prefix').each((_, marker) => {
@@ -181,7 +180,13 @@ function phoneInLine(line: string, signature: boolean): string | null {
     if (!framed && !formatted && !russianFull) continue;
     const residue = (line.slice(0, start) + line.slice(end))
       .replace(/[:;,|/()<>.]/g, ' ').replace(/^[\s-]+|[\s-]+$/g, '').trim();
-    if (!signature && !framed && residue && !isPersonName(residue)) continue;
+    // Contact directories can contain email + phone + name (department).
+    // Require a standalone personal name after removing these contact fields;
+    // do not accept arbitrary prose just because it contains a long number.
+    const contactName = (line.slice(0, start) + line.slice(end))
+      .replace(/\S+@\S+/gu, '').replace(/\([^)]*(?:\)|$)/gu, '')
+      .replace(/[:;,|/<>.]/gu, ' ').trim();
+    if (!signature && !framed && residue && !isPersonName(residue) && !signatureNameInLine(contactName)) continue;
     phones.push(value);
   }
   return joinLeadPhones(phones);
@@ -214,6 +219,19 @@ function companyFromSignature(signature: string[], website: string | null): stri
   const explicit = signature.flatMap((_, index) => [1, 2, 3].map((length) =>
     explicitCompany(signature.slice(Math.max(0, index - length + 1), index + 1).join(' ')))).find(Boolean);
   if (explicit) return explicit;
+  for (const [index, line] of signature.entries()) {
+    // A branded domain in an explicit team signature is not a personal name.
+    // Use the validated website host, never an arbitrary label/email local part.
+    if (website && /^(?:команда|team)\s+\S/iu.test(line) && websitesInLine(line).length) {
+      const host = new URL(website).hostname.replace(/^www\./, '');
+      if (websitesInLine(line).some((site) => new URL(site).hostname.replace(/^www\./, '') === host)) return host;
+    }
+    // A business descriptor immediately below a signed name and above contact
+    // details is strong evidence; arbitrary capitalized footer prose is not.
+    if (index > 0 && signatureNameInLine(signature[index - 1]) &&
+      /^[\p{Lu}][\p{L} &'’-]{1,60}\s+(?:консалт|консалтинг|consulting|consultancy)$/iu.test(line) &&
+      signature.slice(index + 1, index + 4).some((item) => phoneInLine(item, true) || websitesInLine(item).length)) return line;
+  }
   // Two-line corporate signatures often put the brand immediately after its
   // explicit label, with the website on a later line. Do not infer a company
   // from an arbitrary capitalized word or from the email domain alone.
@@ -265,7 +283,7 @@ function signatureNameInLine(line: string): string | null {
     if (slug === `${first}-${last.slice(0, 2)}` || slug === fullNameSlug ||
         slug.startsWith(`${fullNameSlug}-`)) return linkedIn[1];
   }
-  return isPersonName(value) && !isRoleTitle(value) &&
+  return senderDisplayLeadName(value) && !isRoleTitle(value) &&
     !/(?:^|\s)(?:команда|компания|организация|магазин|отдел|team|company|department)(?:\s|$)/iu.test(value) &&
     value.split(/\s+/).every((word) => /^\p{Lu}[\p{L}’'-]*$/u.test(word)) ? value : null;
 }
@@ -300,7 +318,10 @@ function introducedLeadName(body: string[]): string | null {
 }
 
 function replyLeadName(body: string[], signature: string[]): string | null {
-  const introduced = introducedLeadName(body);
+  const contactCards = body.map((line) => /^(\p{Lu}[\p{L}’'-]+(?:\s+\p{Lu}[\p{L}’'-]+){1,2})\s+[^\s<>]+@[^\s<>]+(?:\s+\[[^\]]+\])?\s*$/u.exec(line)?.[1])
+    .filter((value): value is string => Boolean(value && signatureNameInLine(value)));
+  const uniqueCards = new Set(contactCards);
+  const introduced = introducedLeadName(body) ?? (uniqueCards.size === 1 ? contactCards[0] : null);
   const signed = signatureLeadName(signature);
   if (!introduced || !signed) return signed ?? introduced;
   // "Меня зовут Евгений" + "Евгений Иванов" is one person; two different
@@ -327,6 +348,9 @@ function extractFromText(text: string): LeadReplyContacts {
       const tail = lines.slice(index + 1);
       const site = tail.flatMap(websitesInLine)[0] ?? null;
       const company = explicitCompany(line) || brandedCompany(line, site);
+      // Unmarked personal footer: name, role, then actual contact details.
+      if (signatureNameInLine(line) && isRoleTitle(tail[0] ?? '') &&
+        tail.slice(1, 4).some((item) => phoneInLine(item, true) || websitesInLine(item).length)) return true;
       return Boolean(company && tail.some((item) => websitesInLine(item).length || phoneInLine(item, true) || /\S+@\S+\.\S+/.test(item)));
     });
     // Include standalone names immediately above a confirmed company/contact

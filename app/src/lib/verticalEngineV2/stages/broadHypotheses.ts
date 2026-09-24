@@ -2,12 +2,14 @@
  * Стадия broad_hypotheses: добавить широкие гипотезы уровня сектора в уже
  * исследованный проект. Повторное исследование удаляет вертикали, а с ними
  * базы, шаблоны и цепочки, поэтому широкие дописываются отдельно: один вызов
- * модели стадии hypotheses с тем же контекстом клиента и списком того, что
+ * модели research с тем же контекстом клиента и списком того, что
  * уже есть в проекте; каждая новая широкая — своя вертикаль, как при
  * кластеризации. Существующие гипотезы, вертикали, базы и выбор гипотез не
  * меняются. Проверки источниками нет: доказательств 0, обоснование и
  * потенциал — от генератора.
  */
+
+import { z } from 'zod';
 
 import { callLLMWithSchema, getVeModel } from '../llm';
 import { VeBroadHypothesesOnlySchema } from '../schemas';
@@ -20,9 +22,7 @@ import {
   countActiveBroadHypotheses,
   selectNewBroadCandidates,
 } from '../broadHypotheses';
-import type { VeHypothesisCandidate } from '../schemas';
 import type { VeJob } from '../types';
-import { computeVerticalPct } from './clustering';
 import { loadHypothesesClientContext } from './hypotheses';
 import { addUsage, newUsage, readProject, stageLog, type VeStageContext, type VeStageResult } from './shared';
 
@@ -49,74 +49,42 @@ async function reportOutcome(ctx: VeStageContext, jobId: string, added: number, 
   }
 }
 
-/**
- * Записать новые широкие: вертикали пачкой, затем гипотезы пачкой. Всё или
- * ничего — повтор задачи ничего не стирает, поэтому осколок записи при
- * упавшей задаче остался бы навсегда. Отмена после ответа модели запись уже
- * не прерывает: секторы появятся все.
- */
-async function writeBroadHypotheses(
-  ctx: VeStageContext,
-  projectId: string,
-  added: readonly VeHypothesisCandidate[],
-  verticals: readonly ExistingVertical[],
-): Promise<Array<{ title: string; hypothesis_id: string; vertical_id: string }>> {
-  ctx.signal?.throwIfAborted();
-  // Новые вертикали — после существующих: их порядок и ранги не меняются.
-  const lastRank = verticals.reduce((max, v) => Math.max(max, typeof v.rank === 'number' ? v.rank : 0), verticals.length);
-  const { data: verticalRows, error: verticalError } = await ctx.supabase
-    .from('ve_verticals')
-    .insert(added.map((candidate, i) => ({
-      project_id: projectId,
-      name: candidate.title,
-      summary: candidate.description,
-      synonyms: [candidate.title],
-      potential_pct: computeVerticalPct([candidate.potential_pct]),
-      rank: lastRank + i + 1,
-    })))
-    .select('id, name');
-  // Названия в пачке различны (повторы отсеяны), по ним и сопоставляем.
-  const verticalIds = new Map(((verticalRows ?? []) as Array<{ id: string; name: string }>).map((v) => [v.name, v.id]));
-  // Вертикаль без гипотезы показалась бы пустой группой: убираем созданные этой задачей.
-  const removeVerticals = async () => {
-    if (!verticalIds.size) return;
-    const { error } = await ctx.supabase.from('ve_verticals').delete().eq('project_id', projectId).in('id', [...verticalIds.values()]);
-    if (error) stageLog(ctx, `[broad_hypotheses] не удалось убрать пустые вертикали: ${error.message}`);
-  };
-  if (verticalError || added.some((candidate) => !verticalIds.has(candidate.title))) {
-    await removeVerticals();
-    throw new Error(`ve_verticals insert: ${verticalError?.message ?? 'не вернулись созданные вертикали'}`);
-  }
+// The receipt is committed in the same transaction as both kinds of rows.
+// It survives worker recovery, including a lost successful RPC response.
+const BroadCommitSchema = z.object({
+  broad_hypotheses_committed: z.literal(true),
+  added: z.array(z.object({ title: z.string(), hypothesis_id: z.string().uuid(), vertical_id: z.string().uuid() })),
+  duplicates: z.array(z.string()),
+  requested: z.number().int().min(0).max(VE_BROAD_HYPOTHESES_MAX),
+  tokensUsed: z.number().int().nonnegative(),
+  costUsd: z.number().nonnegative(),
+});
 
-  const { data: hypothesisRows, error: hypothesisError } = await ctx.supabase
-    .from('ve_hypotheses')
-    .insert(added.map((candidate) => ({
-      project_id: projectId,
-      vertical_id: verticalIds.get(candidate.title),
-      tier: 1,
-      title: candidate.title,
-      description: candidate.description,
-      fit_rationale: candidate.fit_rationale,
-      evidence: [],
-      seasonality: null,
-      potential_pct: candidate.potential_pct,
-      status: 'proposed',
-      broad: true,
-    })))
-    .select('id, title');
-  if (hypothesisError) {
-    await removeVerticals();
-    throw new Error(`ve_hypotheses insert: ${hypothesisError.message}`);
-  }
-  const hypothesisIds = new Map(((hypothesisRows ?? []) as Array<{ id: string; title: string }>).map((h) => [h.title, h.id]));
-  return added.map((candidate) => ({
-    title: candidate.title,
-    hypothesis_id: hypothesisIds.get(candidate.title) ?? '',
-    vertical_id: verticalIds.get(candidate.title) as string,
-  }));
+type BroadCommit = z.infer<typeof BroadCommitSchema>;
+
+async function finishCommit(ctx: VeStageContext, job: VeJob, result: BroadCommit): Promise<VeStageResult> {
+  await reportOutcome(ctx, job.id, result.added.length,
+    result.added.length
+      ? `Добавлено широких гипотез: ${result.added.length}`
+      : result.duplicates.length
+        ? 'Новых секторов не нашлось: предложенные уже есть в проекте'
+        : 'Модель не предложила новых секторов для этого проекта');
+  // The worker accounts usage after finalization; recovery must retain the
+  // already paid call, while a replay of an accounted job adds no usage.
+  return {
+    result,
+    tokensUsed: Math.max(0, result.tokensUsed - (job.tokens_used ?? 0)),
+    costUsd: Math.max(0, result.costUsd - Number(job.cost_usd ?? 0)),
+  };
 }
 
 export async function runBroadHypothesesStage(job: VeJob, ctx: VeStageContext): Promise<VeStageResult> {
+  const { data: saved, error: savedError } = await ctx.supabase.from('ve_jobs')
+    .select('result').eq('id', job.id).eq('project_id', job.project_id).eq('stage', 'broad_hypotheses').single();
+  if (savedError || !saved) throw new Error(`ve_jobs broad receipt: ${savedError?.message ?? 'job not found'}`);
+  if (saved.result?.broad_hypotheses_committed === true) {
+    return finishCommit(ctx, job, BroadCommitSchema.parse(saved.result));
+  }
   const usage = newUsage();
   const project = await readProject(ctx.supabase, job.project_id);
   const market = ctx.market ?? projectMarket(project);
@@ -165,7 +133,7 @@ export async function runBroadHypothesesStage(job: VeJob, ctx: VeStageContext): 
   const llm = await callLLMWithSchema(
     (market === 'us' ? buildBroadHypothesesMessagesEn : buildBroadHypothesesMessages)(promptInput),
     VeBroadHypothesesOnlySchema,
-    { model: getVeModel('research'), maxTokens: 8192, signal: ctx.signal },
+    { model: getVeModel('research'), maxTokens: 8192, requireCompleteJson: true, signal: ctx.signal },
   );
   addUsage(usage, llm);
 
@@ -179,22 +147,20 @@ export async function runBroadHypothesesStage(job: VeJob, ctx: VeStageContext): 
   const { added, duplicates } = selectNewBroadCandidates(llm.data.broad_hypotheses, existingTitles, slots);
   if (duplicates.length) stageLog(ctx, `[broad_hypotheses] повторы отброшены: ${duplicates.join('; ')}`);
 
-  const written = added.length ? await writeBroadHypotheses(ctx, job.project_id, added, verticals) : [];
-
-  stageLog(ctx, `[broad_hypotheses] добавлено: ${written.length} из ${llm.data.broad_hypotheses.length} предложенных`);
-  await reportOutcome(
-    ctx,
-    job.id,
-    written.length,
-    written.length
-      ? `Добавлено широких гипотез: ${written.length}`
-      : duplicates.length
-        ? 'Новых секторов не нашлось: предложенные уже есть в проекте'
-        : 'Модель не предложила новых секторов для этого проекта',
-  );
-  return {
-    result: { added: written, duplicates, requested: slots },
-    tokensUsed: usage.tokensUsed,
-    costUsd: usage.costUsd,
-  };
+  ctx.signal?.throwIfAborted();
+  // Cancellation is checked by the transaction as well. Once it starts,
+  // commit all sectors plus the receipt together; never compensate deletes.
+  const { data, error } = await ctx.supabase.rpc('ve_commit_broad_hypotheses', {
+    p_job_id: job.id,
+    p_project_id: job.project_id,
+    p_candidates: added,
+    p_duplicates: duplicates,
+    p_requested: slots,
+    p_tokens_used: (job.tokens_used ?? 0) + usage.tokensUsed,
+    p_cost_usd: Number(job.cost_usd ?? 0) + usage.costUsd,
+  });
+  if (error) throw new Error(`ve_commit_broad_hypotheses: ${error.message}`);
+  const committed = BroadCommitSchema.parse(data);
+  stageLog(ctx, `[broad_hypotheses] добавлено: ${committed.added.length} из ${llm.data.broad_hypotheses.length} предложенных`);
+  return finishCommit(ctx, job, committed);
 }

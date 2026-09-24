@@ -60,6 +60,7 @@ try {
     '20260903_0001_vertical_engine_v2_contact_supply.sql',
     '20260924_0010_ve_contact_delivery_without_period.sql',
     '20260924_0011_ve_project_deadline_card_formats.sql',
+    '20260924_0013_ve_instantly_upload_capacity.sql',
   ]) {
     await db.exec(migration(name));
   }
@@ -220,6 +221,71 @@ try {
     } catch (error) {
       check(false, 'mark attempt without period passes the pre-send barrier', error.message);
     }
+  });
+  // Capacity refusal, partial acceptance, restart, explicit retry and exact
+  // idempotency are exercised against PostgreSQL, not migration text matching.
+  await inRollback(async () => {
+    await rows(`update public.projects set deadline='2099-12-31' where id=$1`, [STAFF]);
+    await rows('update public.ve_contact_delivery_daily_runs set run_date=timezone(timezone, now())::date where id=$1', [day.run_id]);
+    const dbNow = (await one('select now()::text as t')).t;
+    const attempt = 'a7a7a7a7-a7a7-4a7a-8a7a-a7a7a7a7a7a7';
+    const retryAttempt = 'b7b7b7b7-b7b7-4b7b-8b7b-b7b7b7b7b7b7';
+    const ids = day.batches[0].row_ids.slice(0, 4);
+    const markSql = `select public.ve_mark_contact_delivery_attempt($1,$2,'camp-1',$3::uuid[]) as r`;
+    const blockSql = `select public.ve_finalize_contact_delivery_capacity($1,$2,'camp-1',$3::uuid[],$4::uuid[],$5::uuid[],$6::uuid[],'INSTANTLY_CONTACT_CAPACITY') as r`;
+    const retrySql = `select public.ve_retry_contact_delivery_upload($1,$2,$3::timestamptz,$4,$5::timestamptz) as r`;
+    check((await one(markSql, [day.run_id, attempt, ids])).r.marked, 'capacity: initial attempt fenced');
+    const outcomes = [day.run_id, attempt, [ids[0]], [ids[1]], [ids[2]], [ids[3]]];
+    await one(blockSql, outcomes);
+    const blockedAt = (await one('select upload_blocked_at::text as t from public.ve_contact_delivery_daily_runs where id=$1', [day.run_id])).t;
+    check(Boolean(blockedAt), 'capacity: pause and outcomes committed together');
+    const blocked = (await one(reserveSql, [VE, dbNow])).r;
+    check(blocked.status === 'capacity_blocked' && blocked.batches.length === 0, 'capacity: restart returns no provider work');
+    check(!(await one(markSql, [day.run_id, retryAttempt, day.batches[0].row_ids.slice(4)])).r.marked,
+      'capacity: stale worker snapshot cannot start sibling rows while blocked');
+    await expectError('capacity: stale UI cannot resume a newer pause', retrySql,
+      [VE, day.run_id, '2000-01-01T00:00:00Z', USER, dbNow], /Состояние загрузки изменилось/);
+    const retryArgs = [VE, day.run_id, blockedAt, USER, dbNow];
+    check((await one(retrySql, retryArgs)).r.ok, 'capacity: explicit retry accepted');
+    check((await one(retrySql, retryArgs)).r.replayed, 'capacity: duplicate click is idempotent');
+    // A timed-out finalization response may be replayed after the UI resumes.
+    check((await one(blockSql, outcomes)).r.replayed, 'capacity: lost finalization response replays safely');
+    check((await one('select upload_blocked_at from public.ve_contact_delivery_daily_runs where id=$1', [day.run_id])).upload_blocked_at === null,
+      'capacity: finalization replay never recreates a cleared pause');
+    const resumed = (await one(reserveSql, [VE, dbNow])).r;
+    const retryIds = resumed.batches.flatMap((batch) => batch.row_ids);
+    check(resumed.status === 'reserved' && retryIds.length === 17 && retryIds.includes(ids[3])
+      && !retryIds.some((id) => ids.slice(0, 3).includes(id)), 'capacity: resume only released and untouched identities within frozen quota', JSON.stringify(resumed));
+    check(resumed.effective_count === 20 && resumed.run_id === day.run_id, 'capacity: retry creates no extra daily allowance');
+    check((await one(markSql, [day.run_id, retryAttempt, retryIds])).r.marked, 'capacity: resumed rows fenced exactly once');
+    check(!(await one(markSql, [day.run_id, retryAttempt, retryIds])).r.marked, 'capacity: worker replay cannot repeat upload');
+    await one(`select public.ve_finalize_contact_delivery_attempt($1,$2,'camp-1',$3::uuid[],'{}','{}','{}',null)`, [day.run_id, retryAttempt, retryIds]);
+    const after = (await one(reserveSql, [VE, dbNow])).r;
+    check(after.status === 'replayed' && after.batches.length === 0, 'capacity: completed retry cannot upload again');
+    const totals = await one('select accepted_count,uncertain_count,skipped_count,reserved_count from public.ve_contact_delivery_daily_runs where id=$1', [day.run_id]);
+    check(totals.accepted_count === 18 && totals.uncertain_count === 1 && totals.skipped_count === 1 && totals.reserved_count === 20,
+      'capacity: accepted and uncertain counts survive retry without duplicates', JSON.stringify(totals));
+    const nextMonday = (await one("select (date_trunc('week', now()) + interval '7 days 9 hours')::text as t")).t;
+    const nextDaily = (await one(reserveSql, [VE, nextMonday])).r;
+    check(nextDaily.status === 'reserved' && nextDaily.committed_count === 19 && nextDaily.ready_remaining === 10
+      && nextDaily.effective_count > 0 && nextDaily.effective_count <= 10,
+      'daily refill: blocklist skip is not counted as delivered and ready stock remains eligible', JSON.stringify(nextDaily));
+    check(!nextDaily.batches.flatMap((batch) => batch.row_ids).some((id) => day.batches[0].row_ids.includes(id)),
+      'daily refill: accepted, skipped and uncertain identities are never selected again');
+  });
+  await inRollback(async () => {
+    // Next-day retry must go through the normal schedule/quota calculation.
+    await rows(`update public.ve_contact_delivery_daily_runs set upload_blocked_at=$2 where id=$1`, [day.run_id, now]);
+    check((await one(reserveSql, [VE, nextDay])).r.status === 'capacity_blocked', 'capacity: pause survives a day boundary');
+    await one(`select public.ve_retry_contact_delivery_upload($1,$2,$3::timestamptz,$4,$5::timestamptz)`, [VE, day.run_id, now, USER, nextDay]);
+    const next = (await one(reserveSql, [VE, nextDay])).r;
+    check(next.status === 'reserved' && next.run_id !== day.run_id && next.effective_count === 20,
+      'capacity: later retry uses a fresh ordinary daily quota', JSON.stringify(next));
+    await rows(`update public.ve_contact_delivery_daily_runs set upload_blocked_at=$2 where id=$1`, [next.run_id, nextDay]);
+    await rows(`update public.projects set status='Завершен' where id=$1`, [STAFF]);
+    await expectError('capacity: retry cannot bypass a closed project',
+      `select public.ve_retry_contact_delivery_upload($1,$2,$3::timestamptz,$4,$5::timestamptz)`,
+      [VE, next.run_id, nextDay, USER, nextDay], /Срок проекта завершён/);
   });
   await expectError('project with a VE2 plan cannot be deleted', 'delete from public.projects where id=$1', [STAFF], /ve_projects_portal_project_fkey/);
   await commit();

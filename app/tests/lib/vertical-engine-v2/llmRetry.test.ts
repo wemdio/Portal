@@ -122,6 +122,10 @@ describe('llm rawCall retry', () => {
     expect(getVeModel('collection')).toBe('test-collection-override');
     process.env.VE_MODEL_COLLECTION = '  ';
     expect(getVeModel('collection')).toBe(VE_COLLECTION_MODEL);
+    delete process.env.VE_MODEL_HYPOTHESES;
+    expect(getVeModel('hypotheses')).toBe('test-research-model');
+    process.env.VE_MODEL_HYPOTHESES = '  vertex/gemini-3.8-flash  ';
+    expect(getVeModel('hypotheses')).toBe('vertex/gemini-3.8-flash');
     expect((['bulk', 'research', 'chain'] as const).map(getVeModel))
       .toEqual(['openai/gpt-5.5', 'test-research-model', 'test-chain-model']);
 

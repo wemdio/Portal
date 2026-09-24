@@ -542,7 +542,7 @@ export async function runVeRefillAppend(args: {
           campaignId: pick.campaignId,
           leads: toSend,
           contextLabel: `VE2 auto-refill · ${base.id}`,
-          skipIfInCampaign: true,
+          skipIfInCampaign: false,
         });
         reservedRows = selectAttemptedRows(candidateRows, appended.attemptedIndexes);
         runStats.attempted = reservedRows.length;

@@ -1,15 +1,18 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { VeTemplate } from '@/lib/verticalEngineV2/types';
 import type { VeOutreachSetupResponse } from '@/lib/verticalEngineV2/outreachSetup';
+import { ContactUploadNotice } from '@/components/vertical-engine-v2/engine/ContactUploadNotice';
 import { OutreachLaunchPanel } from '@/components/vertical-engine-v2/engine/OutreachLaunchPanel';
 
 const mockVeEnginePost = jest.fn();
+const mockVeEngineCall = jest.fn();
 // Поля useTemplateLaunch, которые читает панель автоаутрича.
 const mockLaunch: Record<string, unknown> = {};
 
 jest.mock('@/components/vertical-engine-v2/engine/api', () => ({
   VE_API: '/api/tools/vertical-engine-v2',
+  veEngineCall: (...args: unknown[]) => mockVeEngineCall(...args),
   veEnginePost: (...args: unknown[]) => mockVeEnginePost(...args),
 }));
 
@@ -140,5 +143,43 @@ describe('VE2 auto-outreach launch panel', () => {
     expect(await screen.findByText('Одобрите все выбранные базы, выберите клиента, проект и цель за период.')).toBeInTheDocument();
     expect(mockVeEnginePost).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'Запустить аутрич' })).toBeDisabled();
+  });
+});
+
+
+describe('VE2 contact upload capacity notice', () => {
+  const blocked = { run_id: 'run-1', blocked_at: '2026-09-24T07:00:00.123456Z',
+    run_date: '2026-09-24', accepted: 12, pending: 5, uncertain: 2 };
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockVeEngineCall.mockResolvedValue({ ok: true, data: { blocked } });
+  });
+
+  it('shows the reason, preserves unknown contacts and disables duplicate retry while pending', async () => {
+    let resolve!: (value: unknown) => void;
+    mockVeEnginePost.mockImplementation(() => new Promise((done) => { resolve = done; }));
+    render(<ContactUploadNotice templateId="template-1" />);
+    const button = await screen.findByRole('button', { name: 'Дозалить контакты проекта' });
+    expect(screen.getByText('Нет места для контактов в Instantly')).toBeInTheDocument();
+    expect(screen.getByText(/Результат для 2 контактов не подтверждён/)).toBeInTheDocument();
+    await userEvent.click(button);
+    expect(button).toBeDisabled();
+    await userEvent.click(button);
+    expect(mockVeEnginePost).toHaveBeenCalledTimes(1);
+    expect(mockVeEnginePost).toHaveBeenCalledWith('/api/tools/vertical-engine-v2/templates/template-1/upload', {
+      action: 'retry', run_id: blocked.run_id, blocked_at: blocked.blocked_at,
+    });
+    await act(async () => { resolve({ ok: true, data: { ok: true, queued: true } }); });
+    expect(await screen.findByText(/Дозаливка запрошена/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Дозалить контакты проекта' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the retry available and displays server refusal instead of claiming success', async () => {
+    mockVeEnginePost.mockResolvedValue({ ok: false, data: { error: 'Срок проекта завершён' } });
+    render(<ContactUploadNotice templateId="template-1" />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Дозалить контакты проекта' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Срок проекта завершён');
+    expect(screen.getByRole('button', { name: 'Дозалить контакты проекта' })).toBeEnabled();
+    expect(screen.queryByText(/Дозаливка запрошена/)).not.toBeInTheDocument();
   });
 });

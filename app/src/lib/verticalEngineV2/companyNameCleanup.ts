@@ -35,8 +35,13 @@ const SYSTEM = `Подготовь названия компаний для пе
 элемент на каждый входной idx. Не меняй индексы, не пропускай строки, не добавляй
 нумерацию, пояснения, HTML или шаблонные переменные в name.`;
 
+/** A discretionary line break inside a word is not part of the company name. */
+function displayName(value: string): string {
+  return value.replace(/\u00ad/g, '').replace(/\s+/g, ' ').trim();
+}
+
 function words(value: string): string[] {
-  return value.normalize('NFKC').toLocaleLowerCase().replace(/ё/g, 'е').match(/[\p{L}\p{N}]+/gu) ?? [];
+  return displayName(value).normalize('NFKC').toLocaleLowerCase().replace(/ё/g, 'е').match(/[\p{L}\p{N}]+/gu) ?? [];
 }
 
 /** No invented brand tokens. Punctuation/case may change; meaningful word order may not. */
@@ -136,7 +141,7 @@ export async function cleanVeCompanyNames(input: {
       const result = await callLLMWithSchema([
         { role: 'system', content: SYSTEM },
         { role: 'user', content: JSON.stringify({ language: input.language,
-          companies: batch.map((group, idx) => ({ idx, name: group.source.replace(/\s+/g, ' '), domain: group.website })) }) },
+          companies: batch.map((group, idx) => ({ idx, name: displayName(group.source), domain: group.website })) }) },
       ], schema, { model, maxTokens: 4096, requireCompleteJson: true, signal,
         jsonSchema: veNativeJsonSchema(model, 've_company_names', schema) });
       signal?.throwIfAborted();
@@ -148,8 +153,9 @@ export async function cleanVeCompanyNames(input: {
         // A renamed/expanded brand cannot invalidate its successful siblings.
         // The prompt explicitly permits the original words when a safe shorter
         // name is unclear. Never infer a brand from the domain or drop words by
-        // heuristic; normalize whitespace only, and apply the same safety gate.
-        const value = faithfulName(item.name, group.source) ? item.name : group.source.replace(/\s+/g, ' ').trim();
+        // heuristic; remove layout whitespace/soft hyphens, then use the same
+        // safety gate. Source identity and paid checkpoints stay unchanged.
+        const value = faithfulName(item.name, group.source) ? item.name : displayName(group.source);
         if (faithfulName(value, group.source)) {
           checkpoint.names[group.key] = value;
           if (value !== item.name) preserved += 1;
