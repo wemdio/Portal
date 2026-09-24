@@ -88,6 +88,7 @@ async function request<T>(
     // 'pending' survives into the catch only for transport/timeout failures;
     // every explicit outcome below overwrites it before throwing/returning.
     let attemptStatus: InstantlyUsageStatus | 'pending' = 'pending';
+    let transportStarted = false;
     if (isEmailList) {
       await reserveInstantlyEmailRead(resolveInstantlyAccountId(requestOptions?.accountId),
         requestOptions?.requestPriority ?? 'fresh', emailReadDeadline, requestOptions?.consumer ?? 'unspecified');
@@ -95,6 +96,7 @@ async function request<T>(
     const headers: HeadersInit = { Authorization: `Bearer ${apiKey}` };
     const controller = new AbortController();
     const remainingTimeoutMs = emailReadDeadline === undefined ? timeoutMs : Math.max(1, emailReadDeadline - Date.now());
+    const attemptDeadline = Date.now() + remainingTimeoutMs;
     const timeoutId = setTimeout(() => controller.abort(), remainingTimeoutMs);
     const timeoutIncludesBody = isEmailList || requestOptions?.timeoutIncludesBody === true;
     const init: RequestInit = { method: options.method ?? 'GET', headers, signal: controller.signal };
@@ -110,7 +112,11 @@ async function request<T>(
       // network error is ambiguous: the provider may already have applied the
       // request. The hook is intentionally write-ahead and may fire again on
       // a 429 retry; callers must make their record idempotent.
-      requestOptions?.onRequestAttempt?.();
+      await requestOptions?.onRequestAttempt?.();
+      // A suspended process may resume before its overdue timer callback runs.
+      if (Date.now() >= attemptDeadline) controller.abort();
+      controller.signal.throwIfAborted();
+      transportStarted = true;
       const res = await fetch(url.toString(), init);
       if (timeoutIncludesBody) controller.signal.throwIfAborted();
       // Existing callers keep their original headers-only timeout. Recovery
@@ -156,7 +162,7 @@ async function request<T>(
       attemptStatus = 'ok';
       return body;
     } catch (error) {
-      if (attemptStatus === 'pending') {
+      if (attemptStatus === 'pending' && transportStarted) {
         attemptStatus = error instanceof InstantlyApiError ? 'http_error' : 'network_error';
       }
       throw error;
@@ -528,6 +534,8 @@ export async function createLeads(
 
 export async function listLeads(body: {
   campaign_id?: string;
+  /** Exact email filter used for durable upload reconciliation. */
+  contacts?: string[];
   lead_list_id?: string;
   search?: string;
   interest_status?: number;

@@ -91,7 +91,7 @@ function portalDb(options: { replayAfterFirst?: boolean; awaitingDelivery?: bool
           },
         };
       },
-      ve_mark_contact_delivery_attempt: () => ({ data: { marked: true } }),
+      ve_begin_recoverable_contact_delivery: () => ({ data: { marked: true } }),
       ve_finalize_contact_delivery_capacity: () => ({ data: { finalized: true } }),
       ve_finalize_contact_delivery_attempt: () => ({ data: { finalized: true } }),
     },
@@ -152,7 +152,7 @@ describe('VE2 contact delivery runner', () => {
     );
     expect(portal.rpcCalls.map((call) => call.fn)).toEqual([
       've_reserve_contact_delivery_day',
-      've_mark_contact_delivery_attempt',
+      've_begin_recoverable_contact_delivery',
       've_finalize_contact_delivery_attempt',
     ]);
     expect(portal.rpcCalls[0].params.p_observed_ve_first_contacted).toBe(10);
@@ -460,7 +460,7 @@ describe('VE2 workspace capacity pause', () => {
     expect(portal.rpcCalls.at(-1)).toMatchObject({ fn: 've_finalize_contact_delivery_capacity', params: {
       p_accepted_row_ids: ['row-2'], p_released_row_ids: ['row-1'], p_uncertain_row_ids: [], p_skipped_row_ids: [],
     } });
-    expect(portal.rpcCalls.filter((call) => call.fn === 've_mark_contact_delivery_attempt')).toHaveLength(1);
+    expect(portal.rpcCalls.filter((call) => call.fn === 've_begin_recoverable_contact_delivery')).toHaveLength(1);
   });
 
   it('leaves unknown identities protected when a partial upload exhausts the plan', async () => {
@@ -495,5 +495,58 @@ describe('VE2 workspace capacity pause', () => {
       acceptedIndexes: [9], identityComplete: true });
     expect(await run(portal, append)).toMatchObject({ status: 'uncertain' });
     expect(portal.rpcCalls.at(-1)?.params).toMatchObject({ p_released_row_ids: [], p_uncertain_row_ids: ['row-1', 'row-2'] });
+  });
+});
+
+describe('VE2 ambiguous upload reconciliation', () => {
+  it('uses exact campaign membership, complete search pagination and fails closed on unreadable evidence', async () => {
+    const { reconcileContactDeliveries } = await import('@/lib/verticalEngineV2/contactDeliveryReconciliation');
+    const claim = { token: 'recovery-1', email: 'one@example.test', campaign_id: 'campaign-a', account_id: 'workspace-1', mailbox_ids: ['sender@example.test'] };
+    const lead = { id: 'lead-1', campaign: 'campaign-a', email: ' ONE@example.test ' };
+    const other = { id: 'lead-2', campaign: 'campaign-a', email: 'someone@example.test' };
+    const cases = [
+      { pages: [{ items: [lead] }], accepted: true },
+      { pages: [{ items: [other], next_starting_after: 'cursor-1' }, { items: [] }], absent: true },
+      { pages: [{ items: [{ ...lead, campaign: 'other-campaign' }] }], error: true },
+      { pages: [{ items: [{ ...lead, campaign: undefined }] }], error: true },
+      { pages: [{ items: [{ ...lead, campaign_id: 'other-campaign' }] }], error: true },
+      { pages: [{}], error: true },
+      { pages: [{ items: [] }], wrongSender: true, error: true },
+      { pages: [new Error('API unavailable')], error: true },
+      { pages: [{ items: [other], next_starting_after: 'cursor-1' }, new Error('page timeout')], error: true },
+      { pages: [{ items: [other], next_starting_after: 'cursor-1' }, { items: [{ ...other, id: 'lead-3' }], next_starting_after: 'cursor-1' }], error: true },
+      { pages: [{ items: Array.from({ length: 100 }, (_, i) => ({ ...other, id: `lead-${i}` })) }], error: true },
+    ];
+    for (const scenario of cases) {
+      let claims = 0;
+      const portal = createMockSupabase({ rpcHandlers: {
+        ve_claim_contact_delivery_reconciliation: () => ({ data: claims++ === 0 ? claim : null }),
+        ve_finish_contact_delivery_reconciliation: (params) => ({ data: { status: params.p_error ? 'inconclusive' : params.p_absent ? 'missing' : 'present' } }),
+      } });
+      const getCampaign = jest.fn().mockResolvedValue({ id: claim.campaign_id, email_list: scenario.wrongSender ? ['wrong@example.test'] : claim.mailbox_ids });
+      const listLeads = jest.fn();
+      for (const page of scenario.pages) {
+        if (page instanceof Error) listLeads.mockRejectedValueOnce(page);
+        else listLeads.mockResolvedValueOnce(page);
+      }
+      const result = await reconcileContactDeliveries({ portalDb: portal as never, veProjectId: VE_PROJECT_ID, deps: { getCampaign, listLeads } });
+      const finish = portal.rpcCalls.find((call) => call.fn === 've_finish_contact_delivery_reconciliation')?.params;
+      expect(result.accepted).toBe(scenario.accepted ? 1 : 0);
+      expect(result.released).toBe(0); // First absent read is only evidence, DB decides release.
+      expect(finish).toMatchObject({ p_token: claim.token, p_absent: scenario.absent === true,
+        p_provider_lead_id: scenario.accepted ? lead.id : null });
+      expect(Boolean(finish?.p_error)).toBe(scenario.error === true);
+      expect(getCampaign).toHaveBeenCalledWith('campaign-a', expect.objectContaining({ accountId: 'workspace-1', timeoutIncludesBody: true, retryRateLimits: false }));
+      if (!scenario.wrongSender) expect(listLeads).toHaveBeenCalledWith(expect.objectContaining({ campaign_id: 'campaign-a', contacts: ['one@example.test'] }), expect.anything());
+      if (scenario.absent) expect(listLeads.mock.calls[1][0].starting_after).toBe('cursor-1');
+    }
+    // Lost/failed DB writes never become upload work or an accepted result.
+    const unavailable = createMockSupabase({ rpcHandlers: {
+      ve_claim_contact_delivery_reconciliation: () => ({ data: claim }),
+      ve_finish_contact_delivery_reconciliation: () => ({ data: null, error: { message: 'DB reply lost' } }),
+    } });
+    await expect(reconcileContactDeliveries({ portalDb: unavailable as never, veProjectId: VE_PROJECT_ID,
+      deps: { getCampaign: jest.fn().mockResolvedValue({ id: claim.campaign_id, email_list: claim.mailbox_ids }), listLeads: jest.fn().mockResolvedValue({ items: [lead] }) },
+    })).rejects.toThrow('DB reply lost');
   });
 });

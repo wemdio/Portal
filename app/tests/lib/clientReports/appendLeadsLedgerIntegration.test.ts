@@ -18,9 +18,9 @@ jest.mock('@/lib/supabaseInstantly', () => ({ get supabaseInstantly() { return i
 jest.mock('@/lib/instantly/client', () => ({
   getWorkspaceContactCapacity: (...args: unknown[]) => capacityMock(...args),
   createCampaign: (...args: unknown[]) => createCampaignMock(...args),
-  createLeads: (...args: unknown[]) => {
-    const requestOptions = args[2] as { onRequestAttempt?: () => void } | undefined;
-    requestOptions?.onRequestAttempt?.();
+  createLeads: async (...args: unknown[]) => {
+    const requestOptions = args[2] as { onRequestAttempt?: () => void | Promise<void> } | undefined;
+    await requestOptions?.onRequestAttempt?.();
     return createLeadsMock(...args);
   },
   listLeads: jest.fn(),
@@ -88,6 +88,19 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
 
   const capacityInput = { userId: 'client-1', campaignId: 'campaign-1', leads,
     entitlementMode: 'managed_contract' as const, pauseOnWorkspaceCapacity: true, skipIfInCampaign: false };
+
+
+  it('renews the VE2 lease before transport and keeps an expired lease unattempted', async () => {
+    const beforeProviderRequest = jest.fn().mockRejectedValue(new Error('lease expired'));
+    await expect(appendLeadsToClientCampaign({ ...capacityInput, beforeProviderRequest }))
+      .rejects.toMatchObject({ partialResult: { attemptedIndexes: [], acceptedIndexes: [] } });
+    expect(createLeadsMock).not.toHaveBeenCalled();
+    beforeProviderRequest.mockResolvedValue(undefined);
+    await appendLeadsToClientCampaign({ ...capacityInput, beforeProviderRequest });
+    expect(createLeadsMock).toHaveBeenCalledWith(leads, expect.anything(), expect.objectContaining({
+      timeoutIncludesBody: true, timeoutMs: 90_000, retryRateLimits: false,
+    }));
+  });
 
   it('continues with the untouched tail when workspace blocklist rejections leave free slots', async () => {
     capacityMock.mockResolvedValue({ limit: 1000, used: 999, remaining: 1 });
