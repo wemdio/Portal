@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Globe, RefreshCw, Search, Settings, X } from 'lucide-react';
-import { fetchProjects, fetchReplies, type ProjectListItem } from './api';
+import { fetchOthers, fetchProjects, fetchReplies, type ProjectListItem } from './api';
 import { GlobalKnowledgeForm } from './GlobalKnowledgeForm';
 import { KnowledgeBaseForm } from './KnowledgeBaseForm';
 import { ReplyDetailPanel } from './ReplyDetailPanel';
@@ -10,6 +10,19 @@ import type { ReplyCampaignOption, ReplyListItem } from '@/lib/replyPersonalizat
 
 /** Писем за раз; при прокрутке к концу списка догружается следующая сотня. */
 const REPLIES_PAGE_SIZE = 100;
+
+type ListTab = 'replies' | 'others';
+
+/** Полный адрес ищет сам Instantly; часть адреса или текста — среди загруженных писем Others. */
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+/** Догруженная страница Others без повторов и по дате: пачки ящиков листаются независимо. */
+function mergeReplies(current: ReplyListItem[], next: ReplyListItem[]): ReplyListItem[] {
+  const seen = new Set(current.map((item) => item.id));
+  return [...current, ...next.filter((item) => !seen.has(item.id))].sort((a, b) =>
+    (b.replyTimestamp ?? '').localeCompare(a.replyTimestamp ?? ''),
+  );
+}
 
 const LIST_STATUS_BADGE: Record<ReplyListItem['listStatus'], { label: string; className: string }> = {
   new: { label: 'новый', className: 'bg-blue-100 text-blue-700' },
@@ -105,6 +118,13 @@ export function ReplyPersonalizationView() {
 
   const projectId = project?.id ?? null;
 
+  /** Вкладка списка: ответы проекта или папка Others в Instantly. */
+  const [tab, setTab] = useState<ListTab>('replies');
+  const tabRef = useRef<ListTab>('replies');
+  useEffect(() => {
+    tabRef.current = tab;
+  }, [tab]);
+
   const reloadReplies = useCallback(async () => {
     if (!projectId) return;
     const seq = ++requestSeq.current;
@@ -117,9 +137,12 @@ export function ReplyPersonalizationView() {
       setTotal(res.total);
       setHasMore(res.hasMore);
       setMissingReason(res.missingReason);
-      setSelectedId((current) =>
-        current && res.replies.some((r) => r.id === current) ? current : (res.replies[0]?.id ?? null),
-      );
+      // Пока открыта вкладка Others, выбранное там письмо не сбиваем.
+      if (tabRef.current === 'replies') {
+        setSelectedId((current) =>
+          current && res.replies.some((r) => r.id === current) ? current : (res.replies[0]?.id ?? null),
+        );
+      }
     } catch (err) {
       if (seq === requestSeq.current) {
         setError(err instanceof Error ? err.message : 'Не удалось загрузить письма');
@@ -135,7 +158,71 @@ export function ReplyPersonalizationView() {
     reloadReplies();
   }, [reloadReplies]);
 
+  // Вкладка Others — папка Others в Instantly по ящикам проекта. Грузится из
+  // Instantly только когда её открыли, дальше — страницами по курсору.
+  const [othersItems, setOthersItems] = useState<ReplyListItem[]>([]);
+  const [othersCursor, setOthersCursor] = useState<string | null>(null);
+  const [othersLoading, setOthersLoading] = useState(false);
+  const [othersNotices, setOthersNotices] = useState<string[]>([]);
+  /** Проект и поиск, для которых загружена первая страница; null — ещё не грузили. */
+  const [othersLoadedKey, setOthersLoadedKey] = useState<string | null>(null);
+  const othersSeq = useRef(0);
+  const othersServerSearch = EMAIL_RE.test(replySearch) ? replySearch : '';
+  const othersKey = projectId ? `${projectId}|${othersServerSearch}` : null;
+
+  const loadOthers = useCallback(
+    async (cursor: string | null, fresh = false) => {
+      if (!projectId) return;
+      const key = `${projectId}|${othersServerSearch}`;
+      const seq = ++othersSeq.current;
+      setOthersLoading(true);
+      try {
+        const res = await fetchOthers(projectId, { cursor, search: othersServerSearch, fresh });
+        if (seq !== othersSeq.current) return;
+        setOthersItems((current) => (cursor ? mergeReplies(current, res.replies) : res.replies));
+        setOthersCursor(res.nextCursor);
+        setOthersNotices(res.notices);
+        setMissingReason(res.missingReason);
+        if (!cursor && tabRef.current === 'others') {
+          setSelectedId((current) =>
+            current && res.replies.some((r) => r.id === current) ? current : (res.replies[0]?.id ?? null),
+          );
+        }
+      } catch (err) {
+        if (seq === othersSeq.current) {
+          setError(err instanceof Error ? err.message : 'Не удалось загрузить Others');
+          // Иначе догрузка при прокрутке будет повторять упавший запрос по кругу.
+          setOthersCursor(null);
+        }
+      } finally {
+        if (seq === othersSeq.current) {
+          setOthersLoading(false);
+          setOthersLoadedKey(key);
+        }
+      }
+    },
+    [projectId, othersServerSearch],
+  );
+
+  useEffect(() => {
+    if (tab === 'others' && othersKey && othersLoadedKey !== othersKey) void loadOthers(null);
+  }, [tab, othersKey, othersLoadedKey, loadOthers]);
+
+  const othersVisible = useMemo(() => {
+    const q = replySearch.toLowerCase();
+    if (!q || othersServerSearch) return othersItems;
+    return othersItems.filter((i) =>
+      [i.leadEmail, i.replySubject, i.replyBody, i.eaccount].some((v) => (v ?? '').toLowerCase().includes(q)),
+    );
+  }, [othersItems, replySearch, othersServerSearch]);
+
   const selectProject = useCallback((p: ProjectListItem) => {
+    othersSeq.current += 1;
+    setOthersItems([]);
+    setOthersCursor(null);
+    setOthersNotices([]);
+    setOthersLoadedKey(null);
+    setOthersLoading(false);
     setProject(p);
     setItems([]);
     setCampaigns([]);
@@ -151,9 +238,24 @@ export function ReplyPersonalizationView() {
     if (p.missingReason) setKbModalOpen(true);
   }, []);
 
-  const handleHandled = useCallback(() => {
-    reloadReplies();
-  }, [reloadReplies]);
+  const handleHandled = useCallback(
+    (id: string, status: 'sent' | 'skipped') => {
+      // Статус хранится у нас: письмо Others меняем на месте, не перечитывая
+      // Instantly. Основной список на своей вкладке перечитываем, как раньше.
+      const mark = (list: ReplyListItem[]) => list.map((i) => (i.id === id ? { ...i, listStatus: status } : i));
+      setOthersItems(mark);
+      if (tabRef.current === 'replies') reloadReplies();
+      else setItems(mark);
+    },
+    [reloadReplies],
+  );
+
+  const switchTab = (next: ListTab) => {
+    if (next === tab) return;
+    setTab(next);
+    const list = next === 'others' ? othersVisible : items;
+    setSelectedId(list[0]?.id ?? null);
+  };
 
   const handleKbSaved = useCallback(() => {
     // Пометку пересчитает сервер: сохранение базы знаний ещё не значит, что
@@ -168,26 +270,37 @@ export function ReplyPersonalizationView() {
     ? campaigns.reduce((sum, c) => sum + (c.replyCount ?? 0), 0)
     : null;
 
+  const listItems = tab === 'others' ? othersVisible : items;
+  const listLoading = tab === 'others' ? othersLoading : itemsLoading;
+  const listHasMore = tab === 'others' ? othersCursor !== null : hasMore;
+  // Пока в Others ищем среди загруженного, сами Instantly дальше не листаем:
+  // пустая выдача поиска выкачала бы всю папку. Дальше — по кнопке.
+  const autoLoadMore = !(tab === 'others' && replySearch && !othersServerSearch);
+  const loadMore = useCallback(() => {
+    if (tab === 'others') void loadOthers(othersCursor);
+    else setLimit((current) => current + REPLIES_PAGE_SIZE);
+  }, [tab, loadOthers, othersCursor]);
+
   // Догрузка при прокрутке: как только низ списка показался, просим следующую
   // сотню. Пока идёт загрузка, не следим — иначе один показ даст несколько страниц.
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const target = loadMoreRef.current;
-    if (!hasMore || itemsLoading || !target) return;
+    if (!listHasMore || listLoading || !autoLoadMore || !target) return;
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries.some((entry) => entry.isIntersecting)) {
           observer.disconnect();
-          setLimit((current) => current + REPLIES_PAGE_SIZE);
+          loadMore();
         }
       },
       { rootMargin: '300px' },
     );
     observer.observe(target);
     return () => observer.disconnect();
-  }, [hasMore, itemsLoading, items]);
+  }, [listHasMore, listLoading, autoLoadMore, listItems, loadMore]);
 
-  const selected = items.find((i) => i.id === selectedId) ?? null;
+  const selected = listItems.find((i) => i.id === selectedId) ?? null;
 
   // Поиск по списку проектов: их 60, и листать до нужного дольше, чем набрать
   // пару букв. Ищем по вхождению без учёта регистра и ё/е.
@@ -304,19 +417,41 @@ export function ReplyPersonalizationView() {
 
       {/* Колонка 2: письма */}
       <div className="flex min-h-0 flex-col border-r border-gray-200 bg-white">
-        <div className="flex items-center justify-between gap-2 border-b border-gray-100 px-3 py-2.5">
-          <h2 className="text-sm font-semibold text-gray-900">
-            {project ? `Письма (${total ?? `${items.length}${hasMore ? '+' : ''}`})` : 'Письма'}
-          </h2>
+        <div className="flex items-center justify-between gap-2 border-b border-gray-100 px-3 py-2">
+          {project ? (
+            <div className="flex items-center gap-1" role="group" aria-label="Папка писем">
+              {(
+                [
+                  ['replies', 'Ответы', total ?? `${items.length}${hasMore ? '+' : ''}`],
+                  ['others', 'Others', othersLoadedKey ? `${othersVisible.length}${othersCursor ? '+' : ''}` : null],
+                ] as const
+              ).map(([id, label, count]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => switchTab(id)}
+                  aria-pressed={tab === id}
+                  className={`rounded-md px-2 py-1 text-sm font-semibold transition ${
+                    tab === id ? 'bg-gray-100 text-gray-900' : 'text-gray-400 hover:text-gray-700'
+                  }`}
+                >
+                  {label}
+                  {count !== null ? <span className="ml-1 font-normal text-gray-400">{count}</span> : null}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <h2 className="text-sm font-semibold text-gray-900">Письма</h2>
+          )}
           {project ? (
             <button
               type="button"
-              onClick={() => reloadReplies()}
-              disabled={itemsLoading}
+              onClick={() => (tab === 'others' ? void loadOthers(null, true) : reloadReplies())}
+              disabled={listLoading}
               title="Обновить список"
               className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 disabled:opacity-50"
             >
-              <RefreshCw className={`h-4 w-4 ${itemsLoading ? 'animate-spin' : ''}`} aria-hidden />
+              <RefreshCw className={`h-4 w-4 ${listLoading ? 'animate-spin' : ''}`} aria-hidden />
             </button>
           ) : null}
         </div>
@@ -330,7 +465,7 @@ export function ReplyPersonalizationView() {
                 onKeyDown={(e) => {
                   if (e.key === 'Escape') setReplyQuery('');
                 }}
-                placeholder="Найти по почте или компании"
+                placeholder={tab === 'others' ? 'Найти по почте или тексту' : 'Найти по почте или компании'}
                 aria-label="Найти письмо по почте"
                 className="w-full rounded-lg border border-gray-200 bg-white py-1.5 pl-8 pr-7 text-sm text-gray-900 focus:border-blue-400 focus:outline-none"
               />
@@ -345,7 +480,14 @@ export function ReplyPersonalizationView() {
                 </button>
               ) : null}
             </div>
-            {campaigns.length > 1 ? (
+            {tab === 'others' && othersNotices.length ? (
+              <div className="space-y-0.5 text-[11px] text-amber-600">
+                {othersNotices.map((notice) => (
+                  <p key={notice}>{notice}</p>
+                ))}
+              </div>
+            ) : null}
+            {tab === 'replies' && campaigns.length > 1 ? (
               <div className="flex max-h-28 flex-wrap gap-1 overflow-y-auto" role="group" aria-label="Кампании">
                 {[{ id: '', name: 'Все кампании', replyCount: allCampaignsCount }, ...campaigns].map((c) => {
                   const isActive = campaignFilter === c.id;
@@ -384,15 +526,22 @@ export function ReplyPersonalizationView() {
               {missingReason} — ИИ не из чего собрать ответ. Заполните бриф в карточке проекта или
               нажмите шестерёнку у проекта слева и вставьте его там.
             </div>
-          ) : itemsLoading && items.length === 0 ? (
+          ) : listLoading && listItems.length === 0 ? (
             <div className="p-3 text-sm text-gray-500">Загрузка...</div>
-          ) : items.length === 0 ? (
-            <div className="p-3 text-sm text-gray-500">
-              {filtersActive ? 'По этому фильтру писем нет.' : 'Пока никто не ответил.'}
-            </div>
           ) : (
             <>
-            {items.map((item) => (
+            {listItems.length === 0 ? (
+              <div className="p-3 text-sm text-gray-500">
+                {tab === 'others'
+                  ? replySearch
+                    ? 'По этому поиску писем нет.'
+                    : 'В Others по ящикам проекта писем нет.'
+                  : filtersActive
+                    ? 'По этому фильтру писем нет.'
+                    : 'Пока никто не ответил.'}
+              </div>
+            ) : null}
+            {listItems.map((item) => (
               <button
                 key={item.id}
                 type="button"
@@ -416,10 +565,20 @@ export function ReplyPersonalizationView() {
                 {item.companyName ? (
                   <div className="truncate text-[11px] text-gray-400">{item.leadEmail}</div>
                 ) : null}
+                {/* В Others тема отличает ответ («Re: …») от прогрева и рассылок. */}
+                {item.source === 'others' && item.replySubject ? (
+                  <div className="mt-0.5 truncate text-xs text-gray-700">{item.replySubject}</div>
+                ) : null}
                 <div className="mt-0.5 truncate text-xs text-gray-500">{item.replyBody}</div>
                 <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-gray-400">
                   <span className="shrink-0">{formatDate(item.replyTimestamp)}</span>
-                  {!campaignFilter && item.campaignName ? (
+                  {item.source === 'others' ? (
+                    item.eaccount ? (
+                      <span className="truncate" title={item.eaccount}>
+                        · на {item.eaccount}
+                      </span>
+                    ) : null
+                  ) : !campaignFilter && item.campaignName ? (
                     <span className="truncate" title={item.campaignName}>
                       · {item.campaignName}
                     </span>
@@ -427,10 +586,23 @@ export function ReplyPersonalizationView() {
                 </div>
               </button>
             ))}
-            {hasMore ? (
-              <div ref={loadMoreRef} className="p-3 text-center text-xs text-gray-400">
-                Загрузка...
-              </div>
+            {listHasMore ? (
+              autoLoadMore ? (
+                <div ref={loadMoreRef} className="p-3 text-center text-xs text-gray-400">
+                  Загрузка...
+                </div>
+              ) : (
+                <div className="p-3 text-center">
+                  <button
+                    type="button"
+                    onClick={loadMore}
+                    disabled={listLoading}
+                    className="text-xs text-blue-600 hover:underline disabled:opacity-50"
+                  >
+                    {listLoading ? 'Загрузка...' : 'Искать в более старых письмах'}
+                  </button>
+                </div>
+              )
             ) : null}
             </>
           )}

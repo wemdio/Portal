@@ -12,7 +12,7 @@ import {
 import { forwardEmail, getEmail, replyToEmail, sendTestEmail } from '@/lib/instantly/client';
 import { isNotPartOfCampaignError } from '@/lib/instantly/notPartOfCampaign';
 import { getDraftById, markDraftSent, updateDraftText } from './db';
-import { fetchFullThread } from './instantlyThread';
+import { fetchReplyThread } from './instantlyThread';
 import { resolveProjectReply } from './projectReply';
 import { findReferredEmails } from './referredContact';
 import type { QualificationRow } from './types';
@@ -101,14 +101,7 @@ export async function sendDraft(draftId: string, finalText: string, toEmail: str
   const subject = replySubject(qualification.replySubject);
 
   if (newContact) {
-    const thread = qualification.threadId
-      ? await fetchFullThread({
-          campaignId: qualification.campaignId,
-          leadEmail: qualification.leadEmail,
-          threadId: qualification.threadId,
-          accountId,
-        })
-      : null;
+    const thread = await fetchReplyThread(qualification, accountId);
     const lastInbound = [...(thread ?? [])].reverse().find((m) => !m.fromUs)?.text ?? qualification.replyBody ?? '';
     const referred = findReferredEmails(lastInbound, [qualification.leadEmail, qualification.eaccount]);
     if (!referred.includes(newContact)) {
@@ -126,15 +119,34 @@ export async function sendDraft(draftId: string, finalText: string, toEmail: str
   const bodyText = appendQuotedHistoryText(finalText, quoteSrc);
 
   if (!newContact) {
-    await replyToEmail(
-      {
-        reply_to_uuid: qualification.instantlyEmailId,
-        eaccount: qualification.eaccount,
-        subject,
-        body: { html: bodyHtml, text: bodyText },
-      },
-      { accountId },
-    );
+    // Письмо вне кампании (папка Others, «сироты» сторожа): на reply Instantly
+    // отвечает 400 «not part of an Instantly campaign». Отправляем новым
+    // письмом с того же ящика, как кабинет клиента и передача лида; заведомо
+    // провальный reply не тратим.
+    const eaccount = qualification.eaccount;
+    const sendAsNewLetter = () =>
+      sendTestEmail(
+        { eaccount, to_address_email_list: qualification.leadEmail, subject, body: { html: bodyHtml } },
+        { accountId },
+      );
+    if (qualification.outOfCampaign) {
+      await sendAsNewLetter();
+    } else {
+      try {
+        await replyToEmail(
+          {
+            reply_to_uuid: qualification.instantlyEmailId,
+            eaccount,
+            subject,
+            body: { html: bodyHtml, text: bodyText },
+          },
+          { accountId },
+        );
+      } catch (err) {
+        if (!isNotPartOfCampaignError(err)) throw err;
+        await sendAsNewLetter();
+      }
+    }
   } else {
     // Новому контакту — пересылкой без исходного письма: оно уходит с того же
     // ящика и остаётся в той же ветке Instantly. Письмо вне кампании Instantly
