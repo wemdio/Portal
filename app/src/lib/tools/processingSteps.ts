@@ -465,7 +465,7 @@ export interface StepFindEmailsOptions {
    * когда stopAtFirstUsableEmail=false.
    */
   maxEmailsPerSite?: number | null;
-  /** Maximum pages to crawl (default 5; scraper enforces its own hard ceiling). */
+  /** Explicit page limit; default 5, extended to 10 only for reachable sites without email. */
   maxPages?: number;
   /** Optional deadline for the whole site, retaining addresses found before it. */
   siteTimeoutMs?: number;
@@ -663,6 +663,9 @@ export async function stepFindEmails(
       const scraping = scrapeEmails(item.url, {
         timeout: 15_000,
         maxPages: options?.maxPages ?? 5,
+        // Keep explicit budgets (e.g. VE2's 4-page scan). For the default
+        // constructor pass, continue only reachable sites that are still empty.
+        ...(options?.maxPages === undefined ? { emptyResultMaxPages: 10 } : {}),
         stopAtFirstUsableEmail,
         locale,
         ...(options?.reuseWebsiteDescription ? { includeDescription: true } : {}),

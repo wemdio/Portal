@@ -808,6 +808,12 @@ export async function scrapeEmails(
     signal?: AbortSignal;
     maxPages?: number;
     /**
+     * Optional total page limit for a deeper pass when the initial budget
+     * found no usable email but at least one page returned readable HTML.
+     * Continues the same crawl without fetching checked URLs again.
+     */
+    emptyResultMaxPages?: number;
+    /**
      * When true, scraping returns as soon as ≥1 email survives the
      * `filterJunkEmails` filter. Skips the rest of the candidate
      * page crawl. Used by base-constructor's `find_emails` step where
@@ -834,7 +840,8 @@ export async function scrapeEmails(
   const url = normalizeUrl(rawUrl);
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
   const signal = options?.signal;
-  const maxPages = Math.max(1, Math.min(20, options?.maxPages ?? DEFAULT_MAX_PAGES));
+  let maxPages = Math.max(1, Math.min(20, options?.maxPages ?? DEFAULT_MAX_PAGES));
+  const emptyResultMaxPages = Math.max(maxPages, Math.min(20, options?.emptyResultMaxPages ?? maxPages));
   const stopAtFirstUsableEmail = options?.stopAtFirstUsableEmail === true;
   const locale = options?.locale === 'en' ? 'en' : 'ru';
   const acceptLanguage = locale === 'en' ? EN_ACCEPT_LANGUAGE : DEFAULT_ACCEPT_LANGUAGE;
@@ -845,19 +852,17 @@ export async function scrapeEmails(
   const allEmails = new Set<string>();
   const checkedUrls: string[] = [];
   const checkedNormalized = new Set<string>();
+  let hasReadablePage = false;
 
-  // Helper: have we collected at least one email that survives the
-  // junk filter? Cheap enough to call between pages — filterJunkEmails
-  // is pure regex on a small set. Used for early-exit when caller
-  // opted in via stopAtFirstUsableEmail.
+  // The deeper pass also needs this check when early stopping is disabled.
   const hasUsableEmail = (): boolean =>
-    stopAtFirstUsableEmail &&
     allEmails.size > 0 &&
     filterJunkEmails(Array.from(allEmails)).length > 0;
 
   const normalizeForDedupe = (u: string) => u.replace(/[#?].*$/, '').replace(/\/+$/, '');
 
   const processPage = (html: string) => {
+    hasReadablePage = true;
     for (const e of extractEmailsFromHtmlAdvanced(html)) allEmails.add(e);
   };
 
@@ -909,7 +914,7 @@ export async function scrapeEmails(
     // fetches per company. The typical healthy B2B site has its
     // contact email on the homepage or in the header, so this lands
     // on most rows. Opt-in per caller via stopAtFirstUsableEmail.
-    if (hasUsableEmail()) {
+    if (stopAtFirstUsableEmail && hasUsableEmail()) {
       const allEmailsRawEarly = Array.from(allEmails);
       return {
         emails: filterJunkEmails(allEmailsRawEarly),
@@ -958,10 +963,13 @@ export async function scrapeEmails(
   // main-page check above. Bail on first satisfied iteration.
   for (const candidate of candidateUrls) {
     if (signal?.aborted) break;
-    if (checkedUrls.length >= maxPages) break;
+    if (checkedUrls.length >= maxPages) {
+      if (!hasReadablePage || hasUsableEmail() || maxPages >= emptyResultMaxPages) break;
+      maxPages = emptyResultMaxPages;
+    }
     const html = await tryFetch(candidate);
     if (html) processPage(html);
-    if (hasUsableEmail()) break;
+    if (stopAtFirstUsableEmail && hasUsableEmail()) break;
   }
 
   // 4. Filter and return

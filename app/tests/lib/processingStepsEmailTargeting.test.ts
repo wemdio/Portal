@@ -121,6 +121,13 @@ describe('stepFindEmails', () => {
     const out = await stepFindEmails(data, noopProgress);
     expect(out[0]).toEqual(['Сайт', 'Email']); // нет FOUND_EMAIL_COL
     expect(out[1][1]).toBe('found@example.com');
+    expect(scrapeEmails).toHaveBeenLastCalledWith('acme.com', expect.objectContaining({
+      maxPages: 5, emptyResultMaxPages: 10,
+    }));
+    await stepFindEmails(data, noopProgress, undefined, { maxPages: 4 });
+    const explicitOptions = (scrapeEmails as jest.Mock).mock.calls[1][1];
+    expect(explicitOptions).toEqual(expect.objectContaining({ maxPages: 4 }));
+    expect(explicitOptions).not.toHaveProperty('emptyResultMaxPages');
   });
 
   it('target="separate" без исходной email-колонки → fallback на создание "Email" (single column)', async () => {

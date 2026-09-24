@@ -37,6 +37,7 @@ describe('emailScraper direct fetching', () => {
     const result = await scrapeEmails('https://acme.ru', {
       timeout: 1_000,
       maxPages: 1,
+      emptyResultMaxPages: 10,
       stopAtFirstUsableEmail: true,
       includeDescription: true,
     });
@@ -102,22 +103,49 @@ describe('emailScraper failure reasons', () => {
       throw tlsError;
     }) as unknown as typeof fetch;
 
-    const result = await scrapeEmails('https://expired.ru', { timeout: 500, maxPages: 1 });
+    const result = await scrapeEmails('https://expired.ru', {
+      timeout: 500, maxPages: 1, emptyResultMaxPages: 10,
+    });
 
     expect(result.emails).toEqual([]);
     expect(result.failureReason).toBe('Сертификат сайта не прошёл проверку');
+    expect(result.pagesScanned).toBe(1); // Unreadable sites never get the deeper pass.
   });
 
-  it('leaves failureReason empty when the site opened and simply has no email', async () => {
-    global.fetch = jest.fn(async () => new Response('<html><body>нет почты</body></html>', {
-      status: 200,
-      headers: { 'content-type': 'text/html; charset=utf-8' },
-    })) as unknown as typeof fetch;
+  it('deepens readable sites without email within the total page budget', async () => {
+    // Same crawl, with a strict total budget: the sixth/tenth page can
+    // recover a blank, while an eleventh page is never requested.
+    for (const scenario of [
+      { emailPage: 0, stopEarly: true, deeperLimit: undefined, expectedPages: 5 },
+      { emailPage: 0, stopEarly: true, deeperLimit: 10, expectedPages: 10 },
+      { emailPage: 6, stopEarly: true, deeperLimit: 10, expectedPages: 6 },
+      { emailPage: 10, stopEarly: true, deeperLimit: 10, expectedPages: 10 },
+      { emailPage: 11, stopEarly: true, deeperLimit: 10, expectedPages: 10 },
+      { emailPage: 2, stopEarly: false, deeperLimit: 10, expectedPages: 5 },
+    ]) {
+      const urls: string[] = [];
+      global.fetch = jest.fn(async (url: string) => {
+        urls.push(url);
+        const email = urls.length === scenario.emailPage ? 'sales@empty.ru' : 'test@example.com';
+        return new Response(`<html><body>${email}</body></html>`, {
+          status: 200,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        });
+      }) as unknown as typeof fetch;
 
-    const result = await scrapeEmails('https://empty.ru', { timeout: 500, maxPages: 1 });
+      const result = await scrapeEmails('https://empty.ru', {
+        timeout: 500, maxPages: 5,
+        emptyResultMaxPages: scenario.deeperLimit,
+        stopAtFirstUsableEmail: scenario.stopEarly,
+      });
 
-    expect(result.emails).toEqual([]);
-    expect(result.failureReason).toBeNull();
+      const found = scenario.emailPage > 0 && scenario.emailPage <= scenario.expectedPages;
+      expect(result.emails).toEqual(found ? ['sales@empty.ru'] : []);
+      expect(result.failureReason).toBeNull();
+      expect(result.pagesScanned).toBe(scenario.expectedPages);
+      expect(urls).toHaveLength(scenario.expectedPages);
+      expect(new Set(urls).size).toBe(urls.length); // No second fetch of the first five pages.
+    }
   });
 });
 
