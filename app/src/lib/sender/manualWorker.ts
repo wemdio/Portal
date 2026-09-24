@@ -38,13 +38,14 @@ function fromHeader(mailbox: MailboxRow): string {
 }
 
 /** Один проход дренажа ручных ответов. */
-export async function processManualMessages(opts?: { log?: Log; batchSize?: number }): Promise<number> {
+export async function processManualMessages(opts: { egressIp: string; log?: Log; batchSize?: number }): Promise<number> {
   if (!supabaseAdmin) return 0;
   const db = supabaseAdmin;
-  const log: Log = opts?.log ?? (() => {});
+  const log: Log = opts.log ?? (() => {});
 
   const { data: claimed, error: claimError } = await db.rpc('claim_sender_manual_messages', {
-    p_limit: opts?.batchSize ?? 5,
+    p_limit: opts.batchSize ?? 5,
+    p_egress_ip: opts.egressIp,
   });
   if (claimError) {
     log('warn', `Ручные ответы не забрались из очереди: ${claimError.message}`);
@@ -58,6 +59,12 @@ export async function processManualMessages(opts?: { log?: Log; batchSize?: numb
     const nowIso = new Date().toISOString();
     const { data: row } = await db.from('sender_mailboxes').select('*').eq('id', message.mailbox_id).maybeSingle();
     const mailbox = row as MailboxRow | null;
+
+    if (mailbox && mailbox.egress_ip !== opts.egressIp) {
+      // Ящик перенесли между claim и отправкой — ответ уйдёт с нового адреса.
+      await db.from('sender_manual_messages').update({ status: 'queued', updated_at: nowIso }).eq('id', message.id);
+      continue;
+    }
 
     if (!mailbox || mailbox.status !== 'verified' || !mailbox.enabled) {
       await db.from('sender_manual_messages')

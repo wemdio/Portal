@@ -7,8 +7,8 @@ import type { MailboxRow, MessageRow, RecipientRow, StepRow } from './types';
 
 /**
  * Отправка писем из очереди. Письмо берётся атомарно (claim_sender_messages,
- * FOR UPDATE SKIP LOCKED), поэтому параллельные воркеры — сейчас один сервер,
- * дальше несколько — не отправят одно письмо дважды.
+ * FOR UPDATE SKIP LOCKED) и только для ящиков адреса этого воркера: у каждого
+ * адреса отправки свой воркер, и ящик входит в почту всегда с одного адреса.
  */
 
 type Log = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => void;
@@ -98,13 +98,20 @@ async function afterSend(message: MessageRow, mailbox: MailboxRow, sentAt: strin
  * Один проход отправки. Возвращает true, если что-то отправили — тогда воркер
  * сразу делает следующий проход, не выжидая интервал опроса.
  */
-export async function processSenderBatch(opts?: { batchSize?: number; log?: Log }): Promise<boolean> {
+export async function processSenderBatch(opts: { egressIp: string; batchSize?: number; log?: Log }): Promise<boolean> {
   if (!supabaseAdmin) return false;
   const db = supabaseAdmin;
-  const log: Log = opts?.log ?? (() => {});
-  const batchSize = opts?.batchSize ?? 20;
+  const log: Log = opts.log ?? (() => {});
+  const batchSize = opts.batchSize ?? 20;
 
-  const { data: claimed } = await db.rpc('claim_sender_messages', { p_limit: batchSize });
+  const { data: claimed, error: claimError } = await db.rpc('claim_sender_messages', {
+    p_limit: batchSize,
+    p_egress_ip: opts.egressIp,
+  });
+  if (claimError) {
+    log('warn', `Очередь писем не забралась: ${claimError.message}`);
+    return false;
+  }
   const messages = (claimed ?? []) as MessageRow[];
   if (!messages.length) return false;
 
@@ -117,6 +124,13 @@ export async function processSenderBatch(opts?: { batchSize?: number; log?: Log 
       const { data } = await db.from('sender_mailboxes').select('*').eq('id', message.mailbox_id).maybeSingle();
       mailbox = (data as MailboxRow | null) ?? null;
       mailboxCache.set(message.mailbox_id, mailbox);
+    }
+
+    if (mailbox && mailbox.egress_ip !== opts.egressIp) {
+      // Ящик перенесли на другой адрес между claim и отправкой: письмо уйдёт
+      // с нового адреса его воркером, а не с нашего.
+      await db.from('sender_messages').update({ status: 'scheduled' }).eq('id', message.id);
+      continue;
     }
 
     if (!mailbox || mailbox.status !== 'verified') {
