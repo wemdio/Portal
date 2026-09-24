@@ -1,4 +1,4 @@
-import { isVeProviderBillingError } from './collectionErrors';
+import { isVeProviderBillingError, isVeTransientDirectoryError } from './collectionErrors';
 import {
   collectionRoundLimit, veCollectionMaxRounds, VE_COLLECTION_ROUND_BUDGET, VE_COLLECTION_ROUND_CEILING,
   type VeCollectionTargetProgress,
@@ -94,7 +94,8 @@ export function previewRecoveryKind(base: Record<string, unknown>): 'validation'
   // The inactivity watchdog (19.09.2026) fails the same way after its retries:
   // the round is still `collecting` and every checkpoint is intact.
   if ((base.error === 'Provider usage journal could not be saved.'
-    || /^(?:Requesty 429|VE2 [a-z_]+ inactivity timeout)\b/.test(String(base.error ?? '')))
+    || /^(?:Requesty 429|VE2 [a-z_]+ inactivity timeout)\b/.test(String(base.error ?? ''))
+    || isVeTransientDirectoryError(base.error))
     && progress.status === 'collecting'
     && typeof progress.round === 'number' && Number.isSafeInteger(progress.round) && progress.round > 0
     && (checkpoint?.completed_round ?? 0) === progress.round
@@ -130,6 +131,10 @@ export function previewRecoveryKind(base: Record<string, unknown>): 'validation'
   if (progress.status === 'error' && Array.isArray(info.tasks) && info.tasks.some((task) =>
     task?.source === 'yandex_maps' && (task.status === 'failed' || task.status === 'pending')
     && task.task?.maps_query?.queries?.length)) return 'catalog';
+  if (progress.status === 'error' && Array.isArray(info.tasks) && info.tasks.some((task) =>
+    task?.source === 'companies_directory' && task.status === 'failed' && isVeTransientDirectoryError(task.error))
+    && typeof progress.round === 'number' && Number.isSafeInteger(progress.round) && progress.round > 0
+    && ((checkpoint?.completed_round ?? 0) === progress.round - 1 || checkpoint?.completed_round === progress.round)) return 'catalog';
   return null;
 }
 

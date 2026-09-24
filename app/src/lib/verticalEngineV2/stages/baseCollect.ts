@@ -91,7 +91,7 @@ import { VeLlmRateLimitError, veRateLimitDelay } from '../llmRateLimit';
 
 import { createHash, randomUUID } from 'node:crypto';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
-import { isVeProviderBillingError, isVeProviderConfigurationError } from '../collectionErrors';
+import { isVeProviderBillingError, isVeProviderConfigurationError, isVeTransientDirectoryError } from '../collectionErrors';
 import { validVeAdaptiveCollection, newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys,
   readVeBatchSpend, veAdaptiveCandidateLimit, veAdaptiveLowYield, veAdaptiveYieldWindows, veAdaptiveSourceDry, veDryLiveSources,
   veDrySourcesSummary, type VeAdaptiveCollection } from '../adaptiveCollection';
@@ -1820,12 +1820,18 @@ async function dispatchTask(
     // Падаем только когда фиксировать нечего: иначе таймаут шлюза на
     // очередной странице уносил и собранные строки, и задачу, и всю базу
     // (прод 21.09, база 3cd77243: 400 компаний и 10 590 просмотренных строк).
-    if (error && rows.length === 0) throw new Error(`companies_directory: ${error}`);
     // Закладка и строки фиксируются одной записью: смещение двигается ровно по
     // тем строкам, которые ушли в harvest, поэтому перешагнуть неразобранное
     // оно не может — ни при успехе лейна, ни при обрыве.
     writeDirectoryCursor(state, firstFilters, first.nextOffset);
     if (second) writeDirectoryCursor(state, secondFilters, second.nextOffset);
+    if (error && rows.length === 0) {
+      // Even an empty prefix can have skipped many already checked companies.
+      // Keep that progress and any old harvest before the worker retries with
+      // its bounded backoff; the failed page itself has not been advanced.
+      await save();
+      throw new Error(`companies_directory: ${error}`);
+    }
     if (existingContactsOnly) state.existing_contacts_only = true;
     else delete state.existing_contacts_only;
     // Лейны «есть почта / есть сайт» уже дают контакт; фильтр страхует строки,
@@ -4605,6 +4611,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     } catch (e) {
       ctx.signal?.throwIfAborted();
       if (e instanceof VeRelevanceCheckpointError || (e instanceof Error && e.name === 'VeWorkerShutdownError')) throw e;
+      if (state.source === 'companies_directory' && isVeTransientDirectoryError(e)) throw e;
       state.status = 'failed';
       state.error = e instanceof Error ? e.message : String(e);
       stageLog(ctx, `[base_collect] dispatch ${state.source} упал: ${state.error}`);
@@ -5213,7 +5220,7 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
     if (error instanceof VePreviewCheckpointConflict) throw error;
     // The generic worker persists Retry-After. A waiting job must not leave
     // the base's progress looking like a terminal preparation failure.
-    if (error instanceof VeLlmRateLimitError) throw error;
+    if (error instanceof VeLlmRateLimitError || isVeTransientDirectoryError(error)) throw error;
     if (error instanceof VeRelevanceRetryScheduled) {
       return { result: { base_id: error.baseId, waiting: true, relevance_retry: true },
         tokensUsed: error.usage.tokensUsed, costUsd: error.usage.costUsd };
