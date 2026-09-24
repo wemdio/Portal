@@ -34,9 +34,11 @@ const expectError = async (name, sql, args, pattern) => {
     await db.exec(inTransaction ? 'rollback to savepoint expect_error' : 'rollback');
   }
 };
+let scenarioNumber = 0;
 const inRollback = async (run) => {
-  await db.exec('savepoint scenario');
-  try { await run(); } finally { await db.exec('rollback to savepoint scenario'); }
+  const savepoint = `scenario_${++scenarioNumber}`;
+  await db.exec(`savepoint ${savepoint}`);
+  try { await run(); } finally { await db.exec(`rollback to savepoint ${savepoint}; release savepoint ${savepoint}`); }
 };
 
 try {
@@ -61,6 +63,7 @@ try {
     '20260924_0010_ve_contact_delivery_without_period.sql',
     '20260924_0011_ve_project_deadline_card_formats.sql',
     '20260924_0013_ve_instantly_upload_capacity.sql',
+    '20260924_0014_ve_contact_delivery_reconciliation.sql',
   ]) {
     await db.exec(migration(name));
   }
@@ -286,6 +289,84 @@ try {
     await expectError('capacity: retry cannot bypass a closed project',
       `select public.ve_retry_contact_delivery_upload($1,$2,$3::timestamptz,$4,$5::timestamptz)`,
       [VE, next.run_id, nextDay, USER, nextDay], /Срок проекта завершён/);
+  });
+  // Live SQL: lease/crash recovery, two independent negative observations,
+  // immutable attempts, same-day quota and capacity pause survive a restart.
+  await inRollback(async () => {
+    await rows(`update public.projects set deadline='2099-12-31' where id=$1`, [STAFF]);
+    await rows('update public.ve_contact_delivery_daily_runs set run_date=timezone(timezone, now())::date where id=$1', [day.run_id]);
+    const dbNow = (await one('select now()::text as t')).t;
+    const attempt = 'c7c7c7c7-c7c7-4c7c-8c7c-c7c7c7c7c7c7';
+    const ids = day.batches[0].row_ids.slice(0, 3);
+    const beginSql = `select public.ve_begin_recoverable_contact_delivery($1,$2,'camp-1',$3::uuid[]) as r`;
+    const claimSql = `select public.ve_claim_contact_delivery_reconciliation($1) as r`;
+    const finishSql = `select public.ve_finish_contact_delivery_reconciliation($1,$2,$3,$4) as r`;
+    check((await one(beginSql, [day.run_id, attempt, ids])).r.marked, 'recovery: new attempt owns a lease');
+    check((await one(`select public.ve_renew_contact_delivery_request($1,$2) as r`, [day.run_id, attempt])).r,
+      'recovery: live provider attempt may renew');
+    check((await one(claimSql, [VE])).r === null, 'recovery: live attempt cannot be claimed');
+    const finalizeSql = `select public.ve_finalize_contact_delivery_attempt($1,$2,'camp-1','{}','{}',$3::uuid[],$4::uuid[],'timeout') as r`;
+    await one(finalizeSql, [day.run_id, attempt, ids.slice(0, 2), ids.slice(2)]);
+    check((await one(claimSql, [VE])).r === null, 'recovery: finalized timeout waits for indexing to settle');
+    await rows("update public.ve_contact_delivery_attempts set finalized_at=now()-interval '11 minutes' where id=$1", [attempt]);
+    const first = (await one(claimSql, [VE])).r;
+    check(Boolean(first?.token) && first.account_id === 'main' && first.campaign_id === 'camp-1', 'recovery: claim binds exact workspace/campaign');
+    const firstRow = (await one('select row_id from public.ve_contact_delivery_reconciliations where id=$1', [first.token])).row_id;
+    check((await one(finishSql, [first.token, 'remote-lead', false, null])).r.status === 'present', 'recovery: confirmed membership accepted');
+    check((await one(finishSql, [first.token, 'remote-lead', false, null])).r.replayed, 'recovery: lost save reply is idempotent');
+    check((await one(finalizeSql, [day.run_id, attempt, ids.slice(0, 2), ids.slice(2)])).r.replayed,
+      'recovery: original attempt remains replayable after reconciliation');
+    const resumed = (await one(reserveSql, [VE, dbNow])).r;
+    check(resumed.status === 'reserved' && resumed.run_id === day.run_id && resumed.effective_count === 20
+      && resumed.batches.flatMap((b) => b.row_ids).includes(ids[2]), 'recovery: accepted proof resumes only untouched tail within frozen quota');
+    const missing = (await one(claimSql, [VE])).r;
+    check((await one(finishSql, [missing.token, null, true, null])).r.status === 'missing', 'recovery: single absent read never releases');
+    check((await one(claimSql, [VE])).r === null, 'recovery: another worker cannot bypass the observation interval');
+    const missingRow = (await one('select row_id from public.ve_contact_delivery_reconciliations where id=$1', [missing.token])).row_id;
+    await rows("update public.ve_contact_delivery_rows set recovery_checked_at=now()-interval '6 minutes',recovery_missing_since=now()-interval '6 minutes' where id=$1", [missingRow]);
+    const failed = (await one(claimSql, [VE])).r;
+    await one(finishSql, [failed.token, null, false, 'API unavailable']);
+    check((await one('select status,recovery_missing_since from public.ve_contact_delivery_rows where id=$1', [missingRow])).recovery_missing_since === null,
+      'recovery: outage resets negative evidence, row stays fenced');
+    await rows("update public.ve_contact_delivery_rows set recovery_checked_at=now()-interval '6 minutes' where id=$1", [missingRow]);
+    const stale = (await one(claimSql, [VE])).r;
+    await rows("update public.ve_contact_delivery_rows set recovery_checked_at=now()-interval '6 minutes' where id=$1", [missingRow]);
+    const newer = (await one(claimSql, [VE])).r;
+    check((await one(finishSql, [stale.token, null, true, null])).r.status === 'inconclusive', 'recovery: old claim token cannot overwrite newer ownership');
+    await one(finishSql, [newer.token, null, true, null]);
+    await rows("update public.ve_contact_delivery_rows set recovery_checked_at=now()-interval '6 minutes',recovery_missing_since=now()-interval '6 minutes' where id=$1", [missingRow]);
+    await rows('update public.ve_contact_delivery_daily_runs set upload_blocked_at=now() where id=$1', [day.run_id]);
+    const confirmedMissing = (await one(claimSql, [VE])).r;
+    await inRollback(async () => {
+      await rows("update public.ve_contact_delivery_daily_runs set run_date=run_date-1 where id=$1", [day.run_id]);
+      await one(finishSql, [confirmedMissing.token, null, true, null]);
+      const old = await one('select status,run_id,attempt_id from public.ve_contact_delivery_rows where id=$1', [missingRow]);
+      check(old.status === 'ready' && old.run_id === null && old.attempt_id === null, 'recovery: old-day absence returns to ordinary daily planner');
+    });
+    check((await one(finishSql, [confirmedMissing.token, null, true, null])).r.status === 'released', 'recovery: two spaced absent observations release exact row');
+    check((await one(reserveSql, [VE, dbNow])).r.status === 'capacity_blocked', 'recovery: automatic reconciliation never clears workspace pause');
+    const totals = await one('select accepted_count,uncertain_count,reserved_count from public.ve_contact_delivery_daily_runs where id=$1', [day.run_id]);
+    check(totals.accepted_count === 1 && totals.uncertain_count === 0 && totals.reserved_count === 20, 'recovery: counts recomputed without increasing quota');
+    check((await one('select status from public.ve_contact_delivery_rows where id=$1', [firstRow])).status === 'accepted', 'recovery: accepted contact remains excluded from retry');
+  });
+  await inRollback(async () => {
+    await rows(`update public.projects set deadline='2099-12-31' where id=$1`, [STAFF]);
+    await rows('update public.ve_contact_delivery_daily_runs set run_date=timezone(timezone, now())::date where id=$1', [day.run_id]);
+    const attempt = 'd7d7d7d7-d7d7-4d7d-8d7d-d7d7d7d7d7d7';
+    const ids = day.batches[0].row_ids.slice(0, 2);
+    await one(`select public.ve_begin_recoverable_contact_delivery($1,$2,'camp-1',$3::uuid[])`, [day.run_id, attempt, ids]);
+    await rows("update public.ve_contact_delivery_attempts set request_lease_until=now()-interval '6 minutes' where id=$1", [attempt]);
+    check(!(await one('select public.ve_renew_contact_delivery_request($1,$2) as r', [day.run_id, attempt])).r, 'recovery: delayed worker cannot renew expired lease');
+    await one('select public.ve_claim_contact_delivery_reconciliation($1)', [VE]);
+    const retired = await one('select status,uncertain_row_ids from public.ve_contact_delivery_attempts where id=$1', [attempt]);
+    check(retired.status === 'finalized' && retired.uncertain_row_ids.length === 2, 'recovery: crashed attempt becomes uncertain before membership checks');
+    check(!(await one('select public.ve_renew_contact_delivery_request($1,$2) as r', [day.run_id, attempt])).r, 'recovery: retired attempt cannot send a late chunk');
+    const legacy = 'e7e7e7e7-e7e7-4e7e-8e7e-e7e7e7e7e7e7';
+    await one(`select public.ve_mark_contact_delivery_attempt($1,$2,'camp-1',$3::uuid[])`, [day.run_id, legacy, day.batches[0].row_ids.slice(2, 3)]);
+    await rows("update public.ve_contact_delivery_attempts set started_at=now()-interval '1 day' where id=$1", [legacy]);
+    await one('select public.ve_claim_contact_delivery_reconciliation($1)', [VE]);
+    check((await one('select status from public.ve_contact_delivery_attempts where id=$1', [legacy])).status === 'attempting',
+      'recovery: legacy attempt without a lease cannot be presumed stopped');
   });
   await expectError('project with a VE2 plan cannot be deleted', 'delete from public.projects where id=$1', [STAFF], /ve_projects_portal_project_fkey/);
   await commit();

@@ -62,7 +62,7 @@ export function ContactUploadNotice({ templateId }: { templateId: string }) {
       <p className="font-medium">Нет места для контактов в Instantly</p>
       <p className="mt-1">Загрузка новых контактов проекта приостановлена. Освободите место в рабочем пространстве Instantly или увеличьте тариф, затем запросите дозаливку.</p>
       <p className="mt-1">План проекта на {blocked.run_date.split('-').reverse().join('.')}: загружено {blocked.accepted.toLocaleString('ru-RU')}, осталось {blocked.pending.toLocaleString('ru-RU')}. Остаток сохранён и будет загружаться по дневному плану.</p>
-      {blocked.uncertain > 0 ? <p className="mt-1">Результат для {blocked.uncertain.toLocaleString('ru-RU')} контактов не подтверждён. Они исключены из повторной загрузки.</p> : null}
+      {blocked.uncertain > 0 ? <p className="mt-1">Результат для {blocked.uncertain.toLocaleString('ru-RU')} контактов не подтверждён. Повторная загрузка заблокирована до автоматической сверки с Instantly.</p> : null}
       <button type="button" className={`${HE.btnGhost} mt-3`} disabled={busy} onClick={() => void retry()}>
         {busy ? 'Запрашиваем дозаливку…' : 'Дозалить контакты проекта'}
       </button>

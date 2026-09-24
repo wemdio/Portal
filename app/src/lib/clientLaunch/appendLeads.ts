@@ -79,6 +79,8 @@ export interface AppendLeadsToClientCampaignInput {
   expectedInstantlyAccountId?: string;
   /** VE2 keeps capacity omissions in its durable ready reserve for explicit retry. */
   pauseOnWorkspaceCapacity?: boolean;
+  /** Trusted VE2 lease fence; runs just before each HTTP attempt, after rate admission. */
+  beforeProviderRequest?: () => Promise<void>;
   /** Durable reporting provenance for this append operation. */
   ledgerSource?: {
     kind: string;
@@ -375,7 +377,9 @@ export async function appendLeadsToClientCampaign(
         },
         {
           ...instantlyRequestOptions,
-          onRequestAttempt: () => {
+          ...(input.beforeProviderRequest ? { timeoutMs: 90_000, timeoutIncludesBody: true, retryRateLimits: false } : {}),
+          onRequestAttempt: async () => {
+            await input.beforeProviderRequest?.();
             for (const index of sentInputIndexes.slice(offset, offset + chunk.length)) {
               attemptedIndexes.add(index);
             }

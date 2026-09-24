@@ -160,7 +160,12 @@ describe('VE2 contact delivery scheduler', () => {
       return {};
     });
 
+    const reconcile = jest.fn(async ({ veProjectId }: { veProjectId: string }) => {
+      if (veProjectId === 've-1') throw new Error('reconciliation API unavailable');
+      return { accepted: 1, released: 1, errors: [] };
+    });
     const result = await runBoundContactDeliveries({
+      reconcile,
       portalDb: portal as never,
       instantlyDb: {} as never,
       now: new Date('2026-09-02T12:00:00.000Z'),
@@ -171,6 +176,8 @@ describe('VE2 contact delivery scheduler', () => {
 
     expect(runProject.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-1', 've-2']);
     expect(runSupply.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-1', 've-2']);
+    expect(reconcile.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-1', 've-2']);
+    expect(reconcile.mock.invocationCallOrder[1]).toBeLessThan(runProject.mock.invocationCallOrder[1]);
     expect(result).toEqual({
       skipped: false,
       eligibleProjects: 2,
