@@ -232,26 +232,28 @@ describe('VE2 contact delivery runner', () => {
     expect(appendLeads).not.toHaveBeenCalled();
   });
 
-  it('terminally skips known blocklist cuts instead of reselecting them ahead of good contacts tomorrow', async () => {
-    const portal = portalDb();
-    const result = await runContactDeliveryDay({
-      portalDb: portal as never,
-      instantlyDb: instantlyDb() as never,
-      veProjectId: VE_PROJECT_ID,
-      deps: {
-        reservePeriodCampaignLinks: async () => ({ status: 'claimed', conflictingProjectIds: [] }),
-        appendLeads: async () => ({
-          accepted: 1, skipped: 1, attemptedIndexes: [1], acceptedIndexes: [1],
-          skippedIndexes: [0], identityComplete: true,
-        }),
-        createAttemptId: () => ATTEMPT_ID,
-      },
-    });
-    expect(result).toMatchObject({ status: 'completed', accepted: 1, skipped: 1 });
-    expect(portal.rpcCalls.at(-1)?.params).toMatchObject({
-      p_accepted_row_ids: ['row-2'], p_skipped_row_ids: ['row-1'], p_released_row_ids: [],
-    });
-  });
+  it.each([{ source: 'local', attempted: [1] }, { source: 'workspace', attempted: [0, 1] }])(
+    'terminally skips $source blocklist cuts instead of retrying them tomorrow', async ({ attempted }) => {
+      const portal = portalDb();
+      const result = await runContactDeliveryDay({
+        portalDb: portal as never,
+        instantlyDb: instantlyDb() as never,
+        veProjectId: VE_PROJECT_ID,
+        deps: {
+          reservePeriodCampaignLinks: async () => ({ status: 'claimed', conflictingProjectIds: [] }),
+          appendLeads: async () => ({
+            accepted: 1, skipped: 1, attemptedIndexes: attempted, acceptedIndexes: [1],
+            skippedIndexes: [0], identityComplete: true,
+          }),
+          createAttemptId: () => ATTEMPT_ID,
+        },
+      });
+      expect(result).toMatchObject({ status: 'completed', accepted: 1, skipped: 1 });
+      expect(portal.rpcCalls.at(-1)?.params).toMatchObject({
+        p_accepted_row_ids: ['row-2'], p_skipped_row_ids: ['row-1'], p_released_row_ids: [],
+      });
+    },
+  );
 
   it('rejects a changed workspace before claiming campaign ownership or reserving delivery rows', async () => {
     const portal = portalDb();

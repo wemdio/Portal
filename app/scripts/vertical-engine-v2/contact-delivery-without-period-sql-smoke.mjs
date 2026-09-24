@@ -265,6 +265,13 @@ try {
     const totals = await one('select accepted_count,uncertain_count,skipped_count,reserved_count from public.ve_contact_delivery_daily_runs where id=$1', [day.run_id]);
     check(totals.accepted_count === 18 && totals.uncertain_count === 1 && totals.skipped_count === 1 && totals.reserved_count === 20,
       'capacity: accepted and uncertain counts survive retry without duplicates', JSON.stringify(totals));
+    const nextMonday = (await one("select (date_trunc('week', now()) + interval '7 days 9 hours')::text as t")).t;
+    const nextDaily = (await one(reserveSql, [VE, nextMonday])).r;
+    check(nextDaily.status === 'reserved' && nextDaily.committed_count === 19 && nextDaily.ready_remaining === 10
+      && nextDaily.effective_count > 0 && nextDaily.effective_count <= 10,
+      'daily refill: blocklist skip is not counted as delivered and ready stock remains eligible', JSON.stringify(nextDaily));
+    check(!nextDaily.batches.flatMap((batch) => batch.row_ids).some((id) => day.batches[0].row_ids.includes(id)),
+      'daily refill: accepted, skipped and uncertain identities are never selected again');
   });
   await inRollback(async () => {
     // Next-day retry must go through the normal schedule/quota calculation.

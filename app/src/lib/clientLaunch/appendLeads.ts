@@ -324,16 +324,15 @@ export async function appendLeadsToClientCampaign(
   });
 
   const tariffSkippedCount = Math.max(0, allowedLeads.length - leadsToSend.length);
+  let workspaceRemaining: number | null = null;
   if (input.pauseOnWorkspaceCapacity) {
     const capacity = await getWorkspaceContactCapacity(instantlyRequestOptions);
-    if (capacity && capacity.remaining < leadsToSend.length) {
-      capacityBlocked = true;
-      leadsToSend = leadsToSend.slice(0, capacity.remaining);
-    }
+    workspaceRemaining = capacity?.remaining ?? null;
   }
 
-  for (let offset = 0; offset < leadsToSend.length; offset += PROVIDER_APPEND_BATCH_SIZE) {
-    const chunk = leadsToSend.slice(offset, offset + PROVIDER_APPEND_BATCH_SIZE);
+  for (let offset = 0; offset < leadsToSend.length;) {
+    if (workspaceRemaining === 0) { capacityBlocked = true; break; }
+    const chunk = leadsToSend.slice(offset, offset + Math.min(PROVIDER_APPEND_BATCH_SIZE, workspaceRemaining ?? PROVIDER_APPEND_BATCH_SIZE));
     const ledgerContext = {
       clientUserId: userId,
       campaignId,
@@ -363,11 +362,17 @@ export async function appendLeadsToClientCampaign(
 
     let chunkAccepted: number;
     let chunkCapacityBlocked = false;
+    let knownPermanentRejections = 0;
     let createdLeads: Array<{ id: string; email: string; index: number }> = [];
     try {
       const leadResult = await createLeads(
         chunk,
-        { campaign_id: campaignId, skip_if_in_campaign: skipIfInCampaign },
+        {
+          campaign_id: campaignId, skip_if_in_campaign: skipIfInCampaign,
+          // Omitting a flag must not inherit a workspace/import setting that
+          // suppresses contacts merely because another client's campaign has them.
+          ...(!skipIfInCampaign ? { skip_if_in_workspace: false, skip_if_in_list: false } : {}),
+        },
         {
           ...instantlyRequestOptions,
           onRequestAttempt: () => {
@@ -379,8 +384,19 @@ export async function appendLeadsToClientCampaign(
       );
       chunkAccepted = leadResult.leads_uploaded;
       createdLeads = leadResult.created_leads ?? [];
-      if (input.pauseOnWorkspaceCapacity && leadResult.remaining_in_plan === 0) {
-        chunkCapacityBlocked = true; capacityBlocked = true;
+      if (input.pauseOnWorkspaceCapacity) {
+        // Blocklisted/invalid contacts consume no storage. Continue through the
+        // untouched tail while slots remain, bounded by the original daily batch.
+        const remaining = leadResult.remaining_in_plan;
+        workspaceRemaining = typeof remaining === 'number' && Number.isSafeInteger(remaining) && remaining >= 0
+          ? remaining : workspaceRemaining === null ? null : Math.max(0, workspaceRemaining - chunkAccepted);
+        chunkCapacityBlocked = workspaceRemaining === 0;
+        capacityBlocked = chunkCapacityBlocked;
+        // Only explicit provider reasons prove permanent omissions. Do not use
+        // skipped_count: older API responses synthesize it from total - accepted.
+        knownPermanentRejections = [leadResult.in_blocklist, leadResult.duplicated_leads,
+          leadResult.invalid_email_count, leadResult.incomplete_count, leadResult.duplicate_email_count]
+          .reduce((sum, value) => sum + (Number.isSafeInteger(value) && value >= 0 ? value : 0), 0);
       }
     } catch (err) {
       if (input.pauseOnWorkspaceCapacity && isInstantlyContactCapacityError(err)) {
@@ -405,6 +421,10 @@ export async function appendLeadsToClientCampaign(
     }
 
     const chunkSkipped = Math.max(0, chunk.length - chunkAccepted);
+    // If every omitted contact has a permanent reason, the exact complement
+    // of created_leads is safe to skip. Mixed capacity/blocklist counts cannot
+    // identify which omission is which: keep that complement retryable.
+    const deferOmissions = chunkCapacityBlocked && knownPermanentRejections !== chunkSkipped;
     const identity = buildAcceptedIdentitySnapshot({
       requested: chunk,
       accepted: chunkAccepted,
@@ -414,7 +434,7 @@ export async function appendLeadsToClientCampaign(
     // result even if the terminal journal write below is temporarily unavailable,
     // so callers never mistake a delivered chunk for an untouched one.
     accepted += chunkAccepted;
-    externalSkipped += chunkCapacityBlocked ? 0 : chunkSkipped;
+    externalSkipped += deferOmissions ? 0 : chunkSkipped;
     if (identity.identityComplete) {
       const acceptedChunkIndexes = new Set(identity.acceptedIdentities.map((entry) => entry.index));
       for (const acceptedIdentity of identity.acceptedIdentities) {
@@ -423,7 +443,7 @@ export async function appendLeadsToClientCampaign(
       }
       for (let index = 0; index < chunk.length; index += 1) {
         if (!acceptedChunkIndexes.has(index)) {
-          (chunkCapacityBlocked ? deferredIndexes : skippedIndexes).add(sentInputIndexes[offset + index]);
+          (deferOmissions ? deferredIndexes : skippedIndexes).add(sentInputIndexes[offset + index]);
         }
       }
     } else {
@@ -434,7 +454,7 @@ export async function appendLeadsToClientCampaign(
         ...ledgerContext,
         batchId,
         accepted: chunkAccepted,
-        skipped: chunkCapacityBlocked ? 0 : chunkSkipped,
+        skipped: deferOmissions ? 0 : chunkSkipped,
         createdLeads,
         finishedAt: new Date().toISOString(),
       });
@@ -447,6 +467,7 @@ export async function appendLeadsToClientCampaign(
         currentResult(),
       );
     }
+    offset += chunk.length;
     if (chunkCapacityBlocked) break;
   }
 

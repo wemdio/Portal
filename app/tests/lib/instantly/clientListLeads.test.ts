@@ -117,12 +117,15 @@ describe('listLeads → Instantly POST /leads/list body shape', () => {
 
     await expect(createLeads(
       [{ email: 'person@example.test' }],
-      { campaign_id: 'campaign-1' },
+      { campaign_id: 'campaign-1', skip_if_in_workspace: false, skip_if_in_campaign: false, skip_if_in_list: false },
       { skipRateLimiter: true, onRequestAttempt },
     )).rejects.toThrow('provider timeout');
 
     expect(onRequestAttempt).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastFetchBody()).toMatchObject({
+      campaign_id: 'campaign-1', skip_if_in_workspace: false, skip_if_in_campaign: false, skip_if_in_list: false,
+    });
     // Не-emails запрос не резервирует email-read бюджет. Hourly-счётчик
     // (instantly_bump_api_usage) — отдельный fire-and-forget RPC, ему можно.
     const budgetRpcNames = mockEmailBudgetRpc.mock.calls.map((c) => c[0]);

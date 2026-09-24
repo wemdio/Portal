@@ -79,7 +79,7 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
       ],
     } });
     capacityMock.mockReset().mockResolvedValue(null);
-    createLeadsMock.mockResolvedValue({ leads_uploaded: 2 });
+    createLeadsMock.mockReset().mockResolvedValue({ leads_uploaded: 2 });
     resolveEffectiveLimitsMock.mockReturnValue({ max_contacts: 5000 });
     getClientTariffRowMock.mockResolvedValue({ status: 'active' });
     getClientStatusMock.mockReturnValue('active');
@@ -87,7 +87,46 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
   });
 
   const capacityInput = { userId: 'client-1', campaignId: 'campaign-1', leads,
-    entitlementMode: 'managed_contract' as const, pauseOnWorkspaceCapacity: true };
+    entitlementMode: 'managed_contract' as const, pauseOnWorkspaceCapacity: true, skipIfInCampaign: false };
+
+  it('continues with the untouched tail when workspace blocklist rejections leave free slots', async () => {
+    capacityMock.mockResolvedValue({ limit: 1000, used: 999, remaining: 1 });
+    createLeadsMock.mockResolvedValueOnce({ leads_uploaded: 0, in_blocklist: 1, remaining_in_plan: 1 })
+      .mockResolvedValueOnce({ leads_uploaded: 1, remaining_in_plan: 0 });
+    const result = await appendLeadsToClientCampaign(capacityInput);
+    expect(createLeadsMock.mock.calls.map(([chunk]) => chunk)).toEqual([[leads[0]], [leads[1]]]);
+    expect(createLeadsMock.mock.calls.every(([, options]) => options.skip_if_in_workspace === false
+      && options.skip_if_in_campaign === false && options.skip_if_in_list === false)).toBe(true);
+    expect(result).toMatchObject({ accepted: 1, skipped: 1, skippedIndexes: [0], acceptedIndexes: [1],
+      attemptedIndexes: [0, 1], deferredIndexes: [], capacityBlocked: true });
+  });
+
+  it.each([100, 0])('treats a fully explained blocklist omission as a skip even with %s slots left', async (remaining) => {
+    createLeadsMock.mockResolvedValue({ leads_uploaded: 1, in_blocklist: 1, remaining_in_plan: remaining,
+      created_leads: [{ id: 'external-two', email: 'two@example.com', index: 1 }] });
+    expect(await appendLeadsToClientCampaign(capacityInput)).toMatchObject({
+      accepted: 1, skipped: 1, skippedIndexes: [0], acceptedIndexes: [1], deferredIndexes: [],
+      capacityBlocked: remaining === 0, identityComplete: true,
+    });
+  });
+
+  it('finishes an entirely blocklisted reserve without inventing a full workspace', async () => {
+    capacityMock.mockResolvedValue({ limit: 1000, used: 999, remaining: 1 });
+    createLeadsMock.mockResolvedValue({ leads_uploaded: 0, in_blocklist: 1, remaining_in_plan: 1 });
+    expect(await appendLeadsToClientCampaign(capacityInput)).toMatchObject({
+      accepted: 0, skipped: 2, skippedIndexes: [0, 1], deferredIndexes: [], capacityBlocked: false,
+    });
+    expect(createLeadsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not guess which identities were blocked when capacity and blocklist rejections are mixed', async () => {
+    const extra = { email: 'three@example.com' };
+    createLeadsMock.mockResolvedValue({ leads_uploaded: 1, in_blocklist: 1, remaining_in_plan: 0,
+      created_leads: [{ id: 'external-one', email: 'one@example.com', index: 0 }] });
+    expect(await appendLeadsToClientCampaign({ ...capacityInput, leads: [...leads, extra] })).toMatchObject({
+      accepted: 1, acceptedIndexes: [0], skippedIndexes: [], deferredIndexes: [1, 2], capacityBlocked: true,
+    });
+  });
 
   it('pauses before the provider call when the workspace has no free storage', async () => {
     capacityMock.mockResolvedValue({ limit: 1000, used: 1000, remaining: 0 });
