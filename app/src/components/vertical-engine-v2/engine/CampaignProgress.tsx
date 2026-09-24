@@ -82,7 +82,7 @@ export function CampaignProgress({ template, title, required }: CampaignProgress
           {metrics.uncertain > 0 ? (
             <StatusBox tone="info">
               Для {count(metrics.uncertain)} контактов результат загрузки ещё не подтверждён.
-              Повторная загрузка этих контактов заблокирована.
+              Повторная загрузка заблокирована до автоматической сверки с Instantly.
             </StatusBox>
           ) : null}
           <p className={HE.faint}>

@@ -132,6 +132,24 @@ describe('listLeads → Instantly POST /leads/list body shape', () => {
     expect(budgetRpcNames).not.toContain('instantly_reserve_email_read');
     expect(budgetRpcNames).not.toContain('instantly_defer_email_reads');
 
+    // A durable async lease denial must settle before fetch, not race it.
+    fetchMock.mockClear();
+    const denied = jest.fn(async () => { throw new Error('lease expired'); });
+    await expect(createLeads([{ email: 'person@example.test' }], { campaign_id: 'campaign-1' }, {
+      skipRateLimiter: true, onRequestAttempt: denied,
+    })).rejects.toThrow('lease expired');
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // A resumed process checks elapsed time even before overdue timers run.
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(1000);
+    try {
+      await expect(createLeads([{ email: 'person@example.test' }], { campaign_id: 'campaign-1' }, {
+        skipRateLimiter: true, timeoutMs: 100,
+        onRequestAttempt: async () => { clock.mockReturnValue(2000); },
+      })).rejects.toMatchObject({ name: 'AbortError' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); }
+
     // Read admission is a separate hard gate, including skipRateLimiter callers.
     fetchMock.mockClear();
     onRequestAttempt.mockClear();
@@ -202,6 +220,7 @@ describe('listLeads → Instantly POST /leads/list body shape', () => {
       limit: 50,
       starting_after: 'cursor-1',
       search: 'foo@bar.com',
+      contacts: ['foo@bar.com'],
       interest_status: 1,
     });
 
@@ -212,6 +231,7 @@ describe('listLeads → Instantly POST /leads/list body shape', () => {
       limit: 50,
       starting_after: 'cursor-1',
       search: 'foo@bar.com',
+      contacts: ['foo@bar.com'],
       interest_status: 1,
     });
     expect(body).not.toHaveProperty('lead_list_id');

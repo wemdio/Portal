@@ -4,6 +4,7 @@ import {
   type ContactDeliveryDayResult,
 } from '@/lib/verticalEngineV2/contactDeliveryRunner';
 import { runProjectContactSupply } from './contactSupplyRunner';
+import { reconcileContactDeliveries } from './contactDeliveryReconciliation';
 
 export type ContactDeliverySchedulerLog = (
   level: 'info' | 'warn' | 'error',
@@ -48,6 +49,7 @@ export async function runBoundContactDeliveries(input: {
   now?: Date;
   runProject?: RunContactDeliveryProject;
   runSupply?: typeof runProjectContactSupply;
+  reconcile?: typeof reconcileContactDeliveries;
   /** Finish an already attempted delivery, then leave remaining work for restart. */
   shouldStop?: () => boolean;
   log: ContactDeliverySchedulerLog;
@@ -111,6 +113,16 @@ export async function runBoundContactDeliveries(input: {
   let attemptedProjects = 0;
 
   for (const project of projects) {
+    if (input.shouldStop?.()) break;
+    try {
+      const recovery = await (input.reconcile ?? reconcileContactDeliveries)({
+        portalDb: input.portalDb, veProjectId: project.id, shouldStop: input.shouldStop,
+      });
+      if (recovery.errors.length) input.log('warn', `VE2 contact reconciliation project ${project.id} incomplete`, recovery.errors);
+      if (recovery.accepted || recovery.released) input.log('info', `VE2 contact reconciliation project ${project.id}`, recovery);
+    } catch (error) {
+      input.log('error', `VE2 contact reconciliation project ${project.id} failed`, error);
+    }
     if (input.shouldStop?.()) break;
     try {
       await (input.runSupply ?? runProjectContactSupply)({

@@ -445,7 +445,7 @@ export async function runContactDeliveryDay(input: {
   for (const batch of reservation.batches) {
     const attemptId = deps.createAttemptId();
     const { data: markData, error: markError } = await input.portalDb.rpc(
-      've_mark_contact_delivery_attempt',
+      've_begin_recoverable_contact_delivery',
       {
         p_run_id: reservation.run_id,
         p_attempt_id: attemptId,
@@ -471,6 +471,12 @@ export async function runContactDeliveryDay(input: {
         entitlementMode: 'managed_contract',
         expectedInstantlyAccountId: preflight.instantlyAccountId,
         pauseOnWorkspaceCapacity: true,
+        beforeProviderRequest: async () => {
+          const { data, error } = await input.portalDb.rpc('ve_renew_contact_delivery_request', {
+            p_run_id: reservation.run_id, p_attempt_id: attemptId,
+          });
+          if (error || data !== true) throw new Error(error?.message ?? 'Delivery attempt lease expired');
+        },
         ledgerSource: {
           kind: 've2_contact_delivery',
           runId: reservation.run_id,
