@@ -64,6 +64,7 @@ interface DeliveryBatch {
 }
 
 type ReserveStatus =
+  | 'capacity_blocked'
   | 'reserved'
   | 'replayed'
   | 'not_scheduled'
@@ -100,6 +101,7 @@ export interface ContactDeliveryRunnerDeps {
 }
 
 export type ContactDeliveryDayStatus =
+  | 'capacity_blocked'
   | 'completed'
   | 'uncertain'
   | 'failed'
@@ -165,6 +167,7 @@ function parseReservation(data: unknown): DeliveryReservation {
   const status = row?.status;
   if (
     status !== 'reserved' &&
+    status !== 'capacity_blocked' &&
     status !== 'replayed' &&
     status !== 'not_scheduled' &&
     status !== 'fulfilled' &&
@@ -209,14 +212,16 @@ function classifyAppendResult(
   const attempted = new Set(attemptedIndexes);
   const knownSkippedIndexes = normalizeIndexes(result.skippedIndexes ?? [], rowIds.length);
   const knownSkipped = new Set(knownSkippedIndexes);
+  const deferred = new Set(normalizeIndexes(result.deferredIndexes ?? [], rowIds.length));
+  if ([...deferred].some((index) => knownSkipped.has(index))) throw new Error('append deferred a permanently skipped contact');
   const skipped = knownSkippedIndexes.map((index) => rowIds[index]);
-  const released = rowIds.filter((_, index) => !attempted.has(index) && !knownSkipped.has(index));
+  const released = rowIds.filter((_, index) => deferred.has(index) || (!attempted.has(index) && !knownSkipped.has(index)));
 
   if (!result.identityComplete || result.acceptedIndexes === null) {
     return {
       accepted: [],
       skipped,
-      uncertain: attemptedIndexes.filter((index) => !knownSkipped.has(index)).map((index) => rowIds[index]),
+      uncertain: attemptedIndexes.filter((index) => !knownSkipped.has(index) && !deferred.has(index)).map((index) => rowIds[index]),
       released,
       error: ambiguous ? 'provider outcome is ambiguous' : 'provider identity is incomplete',
     };
@@ -226,13 +231,13 @@ function classifyAppendResult(
   if (acceptedIndexes.some((index) => !attempted.has(index))) {
     throw new Error('append accepted a contact whose provider request was not attempted');
   }
-  if (acceptedIndexes.some((index) => knownSkipped.has(index))) {
+  if (acceptedIndexes.some((index) => knownSkipped.has(index) || deferred.has(index))) {
     throw new Error('append classified the same contact as both accepted and skipped');
   }
   const acceptedSet = new Set(acceptedIndexes);
   const accepted = acceptedIndexes.map((index) => rowIds[index]);
   const remainder = attemptedIndexes
-    .filter((index) => !acceptedSet.has(index) && !knownSkipped.has(index))
+    .filter((index) => !acceptedSet.has(index) && !knownSkipped.has(index) && !deferred.has(index))
     .map((index) => rowIds[index]);
   return {
     accepted,
@@ -349,7 +354,8 @@ async function finalizeAttempt(
     outcome: AttemptFinalizeInput;
   },
 ): Promise<void> {
-  const { error } = await portalDb.rpc('ve_finalize_contact_delivery_attempt', {
+  const { error } = await portalDb.rpc(input.outcome.error === 'INSTANTLY_CONTACT_CAPACITY'
+    ? 've_finalize_contact_delivery_capacity' : 've_finalize_contact_delivery_attempt', {
     p_run_id: input.runId,
     p_attempt_id: input.attemptId,
     p_campaign_id: input.campaignId,
@@ -434,6 +440,7 @@ export async function runContactDeliveryDay(input: {
   let skipped = 0;
   let uncertain = 0;
   const errors: string[] = [];
+  let capacityBlocked = false;
 
   for (const batch of reservation.batches) {
     const attemptId = deps.createAttemptId();
@@ -450,6 +457,7 @@ export async function runContactDeliveryDay(input: {
     if (!parseMarked(markData)) continue;
 
     let outcome: AttemptFinalizeInput;
+    let receivedResult = false;
     try {
       const appendResult = await deps.appendLeads({
         userId: preflight.clientUserId,
@@ -462,28 +470,33 @@ export async function runContactDeliveryDay(input: {
         skipIfInCampaign: false,
         entitlementMode: 'managed_contract',
         expectedInstantlyAccountId: preflight.instantlyAccountId,
+        pauseOnWorkspaceCapacity: true,
         ledgerSource: {
           kind: 've2_contact_delivery',
           runId: reservation.run_id,
           campaignName: batch.campaign_id,
         },
       });
+      receivedResult = true;
       outcome = classifyAppendResult(batch.row_ids, appendResult, false);
+      capacityBlocked = appendResult.capacityBlocked === true;
     } catch (error) {
       if (error instanceof AppendLeadsPartialError) {
         outcome = classifyAppendResult(batch.row_ids, error.partialResult, true);
+        capacityBlocked = error.partialResult.capacityBlocked === true;
         outcome.error = error.message.slice(0, 500);
       } else {
         outcome = {
           accepted: [],
           skipped: [],
-          uncertain: [],
-          released: [...batch.row_ids],
+          uncertain: receivedResult ? [...batch.row_ids] : [],
+          released: receivedResult ? [] : [...batch.row_ids],
           error: (error instanceof Error ? error.message : String(error)).slice(0, 500),
         };
       }
       errors.push(outcome.error ?? 'delivery append failed');
     }
+    if (capacityBlocked) outcome.error = 'INSTANTLY_CONTACT_CAPACITY';
 
     await finalizeAttempt(input.portalDb, {
       runId: reservation.run_id,
@@ -494,6 +507,9 @@ export async function runContactDeliveryDay(input: {
     accepted += outcome.accepted.length;
     skipped += outcome.skipped.length;
     uncertain += outcome.uncertain.length;
+    // Untouched sibling batches remain reserved. Explicit retry can resume
+    // them after a crash as well, without creating fake provider attempts.
+    if (capacityBlocked) break;
   }
 
   const activation = await activateDeliveredContactCampaigns({
@@ -501,7 +517,8 @@ export async function runContactDeliveryDay(input: {
   });
   errors.push(...activation.errors);
   return {
-    status: uncertain > 0 || activation.errors.length > 0 ? 'uncertain' : errors.length > 0 ? 'failed' : 'completed',
+    status: uncertain > 0 || activation.errors.length > 0 ? 'uncertain' : capacityBlocked ? 'capacity_blocked'
+      : errors.length > 0 ? 'failed' : 'completed',
     runId: reservation.run_id,
     runDate: reservation.run_date,
     accepted,

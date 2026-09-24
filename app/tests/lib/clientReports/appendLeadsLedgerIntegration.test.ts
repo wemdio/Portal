@@ -5,6 +5,7 @@ import { createMockSupabase, type MockSupabaseClient } from '@/../tests/helpers/
 let mainDb: MockSupabaseClient = createMockSupabase();
 let instantlyDb: MockSupabaseClient = createMockSupabase();
 const createLeadsMock = jest.fn();
+const capacityMock = jest.fn();
 const createCampaignMock = jest.fn();
 const resolveEffectiveLimitsMock = jest.fn(() => ({ max_contacts: 5000 }));
 const getClientTariffRowMock = jest.fn(async () => ({ status: 'active' }));
@@ -15,6 +16,7 @@ const MAILGANER_CLIENT_ID = '0a6d90e1-91d0-404e-b508-6b031bda7cfd';
 jest.mock('@/lib/supabaseAdmin', () => ({ get supabaseAdmin() { return mainDb; } }));
 jest.mock('@/lib/supabaseInstantly', () => ({ get supabaseInstantly() { return instantlyDb; } }));
 jest.mock('@/lib/instantly/client', () => ({
+  getWorkspaceContactCapacity: (...args: unknown[]) => capacityMock(...args),
   createCampaign: (...args: unknown[]) => createCampaignMock(...args),
   createLeads: (...args: unknown[]) => {
     const requestOptions = args[2] as { onRequestAttempt?: () => void } | undefined;
@@ -47,6 +49,7 @@ jest.mock('@/lib/loggerServer', () => ({
   logError: jest.fn(async () => undefined),
 }));
 
+import { InstantlyApiError } from '@/lib/instantly/errors';
 import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
 import { runClientLaunch } from '@/lib/clientLaunch/runLaunch';
 
@@ -75,11 +78,70 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
         },
       ],
     } });
+    capacityMock.mockReset().mockResolvedValue(null);
     createLeadsMock.mockResolvedValue({ leads_uploaded: 2 });
     resolveEffectiveLimitsMock.mockReturnValue({ max_contacts: 5000 });
     getClientTariffRowMock.mockResolvedValue({ status: 'active' });
     getClientStatusMock.mockReturnValue('active');
     mockBlockedEmails = new Set();
+  });
+
+  const capacityInput = { userId: 'client-1', campaignId: 'campaign-1', leads,
+    entitlementMode: 'managed_contract' as const, pauseOnWorkspaceCapacity: true };
+
+  it('pauses before the provider call when the workspace has no free storage', async () => {
+    capacityMock.mockResolvedValue({ limit: 1000, used: 1000, remaining: 0 });
+    const result = await appendLeadsToClientCampaign(capacityInput);
+    expect(result).toMatchObject({ accepted: 0, skipped: 0, capacityBlocked: true, attemptedIndexes: [], skippedIndexes: [] });
+    expect(createLeadsMock).not.toHaveBeenCalled();
+    expect(mainDb.getRows('client_campaign_append_batches')).toHaveLength(0);
+  });
+
+  it('uploads only the available prefix and keeps the rest outside permanent tariff skips', async () => {
+    capacityMock.mockResolvedValue({ limit: 1000, used: 999, remaining: 1 });
+    createLeadsMock.mockResolvedValue({ leads_uploaded: 1, remaining_in_plan: 0 });
+    const result = await appendLeadsToClientCampaign(capacityInput);
+    expect(createLeadsMock.mock.calls[0][0]).toEqual([leads[0]]);
+    expect(result).toMatchObject({ accepted: 1, acceptedIndexes: [0], attemptedIndexes: [0], skippedIndexes: [], capacityBlocked: true });
+    expect(mainDb.getRows('client_campaign_append_batches')[0]).toMatchObject({ tariff_skipped_count: 0 });
+  });
+
+  it('does not stop before all available provider chunks are uploaded', async () => {
+    capacityMock.mockResolvedValue({ limit: 1100, used: 0, remaining: 1100 });
+    createLeadsMock.mockImplementation(async (chunk) => ({ leads_uploaded: chunk.length }));
+    const result = await appendLeadsToClientCampaign({ ...capacityInput,
+      leads: Array.from({ length: 1101 }, (_, i) => ({ email: `lead-${i}@example.com` })) });
+    expect(createLeadsMock.mock.calls.map((call) => call[0].length)).toEqual([1000, 100]);
+    expect(result).toMatchObject({ accepted: 1100, capacityBlocked: true, skipped: 0 });
+    expect(result.attemptedIndexes).toHaveLength(1100);
+  });
+
+  it('preserves exact partial acceptance when the plan fills during a request', async () => {
+    createLeadsMock.mockResolvedValue({ leads_uploaded: 1, remaining_in_plan: 0,
+      created_leads: [{ id: 'external-two', email: 'two@example.com', index: 1 }] });
+    const result = await appendLeadsToClientCampaign(capacityInput);
+    expect(result).toMatchObject({ accepted: 1, acceptedIndexes: [1], deferredIndexes: [0],
+      attemptedIndexes: [0, 1], skippedIndexes: [], skipped: 0, identityComplete: true, capacityBlocked: true });
+    expect(mainDb.getRows('client_campaign_append_batches')[0]).toMatchObject({ accepted_count: 1, skipped_count: 0 });
+  });
+
+  it('keeps incomplete partial identities uncertain even if the response reports no space', async () => {
+    createLeadsMock.mockResolvedValue({ leads_uploaded: 1, remaining_in_plan: 0 });
+    expect(await appendLeadsToClientCampaign(capacityInput)).toMatchObject({
+      identityComplete: false, acceptedIndexes: null, deferredIndexes: [], capacityBlocked: true, attemptedIndexes: [0, 1],
+    });
+  });
+
+  it.each([
+    [new InstantlyApiError('Contact limit reached', 400), true],
+    [new InstantlyApiError('No active paid plan', 402), false],
+    [new InstantlyApiError('Lead request rate limit reached', 429), false],
+    [new Error('Contact limit reached: proxy timeout'), false],
+  ])('defers only a definitive storage refusal: %s', async (error, blocked) => {
+    createLeadsMock.mockRejectedValueOnce(error);
+    await expect(appendLeadsToClientCampaign(capacityInput)).rejects.toMatchObject({ partialResult: {
+      capacityBlocked: blocked, deferredIndexes: blocked ? [0, 1] : [], attemptedIndexes: [0, 1], accepted: 0,
+    } });
   });
 
   it('persists submitted identities and a terminal confirmation independently of the external contact list', async () => {

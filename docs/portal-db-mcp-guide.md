@@ -1,5 +1,15 @@
 # Portal DB — read-only Q&A
 
+## Пауза загрузки VE2 при заполнении Instantly
+
+После миграции `20260924_0013_ve_instantly_upload_capacity.sql` заполнение тарифа сохраняется в `ve_contact_delivery_daily_runs.upload_blocked_at`. Это пауза **загрузки новых контактов всего VE2-проекта**, не пауза поиска и не остановка уже запущенных писем. Нулевой `remaining_in_plan` или явный отказ провайдера фиксируется вместе с исходом партии; неизвестный остаток не считается нулём.
+
+`accepted_count` — подтверждённо загруженные контакты суточного плана; `uncertain_count` — неопределённый результат, запрещённый к повторной отправке. Остаток плана для интерфейса: `reserved_count - accepted_count - skipped_count - uncertain_count`; он включает неотправленные `reserved` и возвращённые в `ready` строки. Нельзя считать все `ready` строками этого суточного запуска: у возвращённых строк `run_id = NULL`, точные ID сохранены в `ve_contact_delivery_attempts.released_row_ids`.
+
+Кнопка «Дозалить контакты проекта» вызывает защищённый API `POST /api/tools/vertical-engine-v2/templates/:id/upload`. RPC `ve_retry_contact_delivery_upload` сверяет проект и версию паузы, срок и согласование, сохраняет `upload_retry_requested_at/by`. В тот же день повторно используется исходный резерв; на следующий — обычный расчёт дневного плана. `accepted`, `skipped`, `uncertain` и выполняющаяся попытка не сбрасываются. Дозаливку выполняет VE2 worker, обычно на проходе раз в 5 минут. Читать состояние можно через GET того же API или read-only SQL; MCP не предназначен для вызова изменяющих RPC.
+
+Проверка остатка использует [официальный Instantly Workspace Billing API](https://developer.instantly.ai/api-reference/workspacebilling/get-workspace-plan-details.md), ответ загрузки — [Bulk Lead Import](https://developer.instantly.ai/api-reference/lead/add-leads-in-bulk-to-a-campaign-or-list.md). Если ключ не имеет billing scope или проверка временно недоступна, основанием остаётся ответ загрузки. Обычный HTTP 402 (неактивный платный план), 429 или таймаут не доказывают заполнение хранилища. Механизм включён только для VE2, остальные вызовы общего append сохраняют прежний режим.
+
 ## Учёт провайдеров Vertical Engine v2
 
 `ve_jobs.payload.provider_usage_origin` хранит безопасные runId/startedAt первого измеренного запуска. Отчёт проверяет сохранность этого начала, чтобы удаление старых записей не превращало поздний остаток журнала в полный расход.

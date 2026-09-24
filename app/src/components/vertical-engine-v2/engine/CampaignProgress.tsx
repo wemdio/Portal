@@ -4,6 +4,7 @@ import type { VeContactSupplyStatus } from '@/lib/verticalEngineV2/contactSupply
 import { parseLaunchInfo } from '@/lib/verticalEngineV2/launchHandoff';
 import type { VeTemplate } from '@/lib/verticalEngineV2/types';
 import { useContactSupply } from './ContactSupplyPanel';
+import { ContactUploadNotice } from './ContactUploadNotice';
 import { HE } from './design';
 import { StatusBox } from './ui';
 
@@ -41,6 +42,7 @@ export function CampaignProgress({ template, title, required }: CampaignProgress
   return (
     <article className="border-t border-[var(--ve2-line)] pt-5 space-y-3">
       <h3 className="ve2-h3">{title}</h3>
+      <ContactUploadNotice key={template.id} templateId={template.id} />
 
       {plan ? (
         <div className="space-y-2">
