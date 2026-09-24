@@ -46,11 +46,11 @@ export interface PolzaDomainResolution {
 }
 
 /** Страны кэша (us/gb/...) → полное имя страны, как оно лежит в pdl_companies. */
-const PDL_COUNTRY_BY_CODE: Record<string, string> = {
+export const PDL_COUNTRY_BY_CODE: Record<string, string> = {
   us: 'united states', gb: 'united kingdom', ca: 'canada', de: 'germany', fr: 'france',
   nl: 'netherlands', ie: 'ireland', es: 'spain', se: 'sweden', ch: 'switzerland',
   be: 'belgium', dk: 'denmark', no: 'norway', fi: 'finland', at: 'austria',
-  it: 'italy', pl: 'poland', pt: 'portugal', cz: 'czechia',
+  it: 'italy', pl: 'poland', pt: 'portugal', cz: 'czechia', sg: 'singapore', au: 'australia',
 };
 
 /** Хостинги вакансий и соцсети: это не сайт компании, даже если ATS отдал их. */
@@ -175,6 +175,36 @@ async function lookupPdlSize(
     if (sizes.size === 1) return [...sizes][0];
   }
   return null;
+}
+
+export interface PdlProfile {
+  size: string | null;
+  industry: string | null;
+  country: string | null;
+}
+
+/**
+ * Размер, отрасль и страна из PDL по уже известному домену — для Lead Score.
+ * Тот же приём, что у lookupPdlSize: запрос по имени, сверка сайта на клиенте.
+ */
+export async function lookupPdlProfile(db: SupabaseClient, companyName: string, domain: string): Promise<PdlProfile> {
+  for (const variant of companyNameVariants(companyName).slice(0, 2)) {
+    const { data, error } = await db
+      .from('pdl_companies')
+      .select('name,website,size,industry,country')
+      .ilike('name', pdlPattern(variant))
+      .limit(50);
+    if (error || !Array.isArray(data)) continue;
+    const hit = data.find((row) => cleanPdlWebsite(row?.website) === domain);
+    if (hit) {
+      return {
+        size: hit.size ? String(hit.size) : null,
+        industry: hit.industry ? String(hit.industry) : null,
+        country: hit.country ? String(hit.country) : null,
+      };
+    }
+  }
+  return { size: null, industry: null, country: null };
 }
 
 /**

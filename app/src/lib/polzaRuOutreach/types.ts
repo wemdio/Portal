@@ -1,89 +1,88 @@
 /**
  * «Наш автоаутрич» — русский сигнальный аутрич Polza. Общие типы конвейера.
  *
- * Три независимых ручных оффера (профиля). Профиль фиксируется точкой запуска:
- * неподходящая компания получает rejected/manual_review с причиной и никогда
- * не переводится в другой оффер (LAUNCH_INSTRUCTIONS_INDEX, «Модель запуска»).
+ * Тип цепочки система выбирает сама по главному поводу компании
+ * (RU_OUTREACH_HANDOFF CEO, 23.09.2026): reactivation → hiring → ad_budget →
+ * event → growth_event → icp_only. Во всех цепочках четыре письма:
+ * повод → боль и что делает Polza → доказательство → мягкое закрытие.
  *
- *   sdr_hiring_v1          — компания нанимает SDR / активные продажи; 3 письма
- *   automated_outreach_v1  — автоматизированный аутрич по нескольким сегментам; 3 письма
- *   signals_v1             — прочий подтверждённый realtime-сигнал; 4 письма
- *
- * Дизайн: docs/superpowers/specs/2026-09-22-polza-ru-outreach-design.md.
+ * Дизайн: docs/superpowers/specs/2026-09-23-polza-ru-outreach-chain-router-design.md.
  */
 
 export const RU_OUTREACH_PARSER_TYPE = 'polza_ru_outreach' as const;
 
-export const PROFILE_CODES = ['sdr_hiring_v1', 'automated_outreach_v1', 'signals_v1'] as const;
-export type ProfileCode = (typeof PROFILE_CODES)[number];
+export const CHAIN_TYPES = ['reactivation', 'hiring', 'ad_budget', 'event', 'growth_event', 'icp_only'] as const;
+export type ChainType = (typeof CHAIN_TYPES)[number];
 
-export const PROFILE_LABELS: Record<ProfileCode, string> = {
-  sdr_hiring_v1: 'Найм SDR',
-  automated_outreach_v1: 'Автоматизация аутрича',
-  signals_v1: 'По сигналам',
+export const CHAIN_LABELS: Record<ChainType, string> = {
+  reactivation: 'Возврат (старый отказ в AMO)',
+  hiring: 'Найм SDR/BDR',
+  ad_budget: 'Рекламный бюджет',
+  event: 'Выставка / событие',
+  growth_event: 'Рост: продукт, регион, контракт, грант',
+  icp_only: 'Только профиль (высокий ЦА-балл)',
 };
 
-export const LETTER_COUNT: Record<ProfileCode, number> = {
-  sdr_hiring_v1: 3,
-  automated_outreach_v1: 3,
-  signals_v1: 4,
+export const LETTER_COUNT = 4;
+export const TEMPLATE_VERSION = 'chains_v2@2026-09-23';
+
+/**
+ * Писем в цепочке: SDR-цепочка («найм») — три письма по инструкции Максима
+ * (INSTRUCTION_02 от 23.09.2026), остальные цепочки CEO — четыре.
+ */
+export function letterCountFor(chain: ChainType): number {
+  return chain === 'hiring' ? 3 : LETTER_COUNT;
+}
+
+/** Отраслевые группы роутера кейсов (таблица CEO). */
+export const INDUSTRY_GROUPS = ['it_saas', 'manufacturing', 'hr_education', 'horeca', 'auto_logistics', 'digital_agency'] as const;
+export type IndustryGroup = (typeof INDUSTRY_GROUPS)[number];
+
+export const INDUSTRY_GROUP_LABELS: Record<IndustryGroup, string> = {
+  it_saas: 'SaaS / IT / автоматизация',
+  manufacturing: 'производство / оборудование / стройка',
+  hr_education: 'HR / рекрутинг / обучение',
+  horeca: 'HoReCa / локальные сети',
+  auto_logistics: 'маркетплейсы / авто / логистика',
+  digital_agency: 'digital / event / маркетинг / агентства',
 };
 
-export const TEMPLATE_VERSION: Record<ProfileCode, string> = {
-  sdr_hiring_v1: 'sdr_hiring_v1@2026-09-22',
-  automated_outreach_v1: 'automated_outreach_v1@2026-09-22',
-  signals_v1: 'signals_v1@2026-09-22',
-};
-
-export const SOURCE_CODES = ['hh', 'crm', 'hh_multi', 'hh_sales', 'contracts', 'exhibitors', 'site_news'] as const;
+export const SOURCE_CODES = ['hh', 'direct', 'crm', 'exhibitors', 'contracts', 'growth', 'site_news', 'directory'] as const;
 export type SourceCode = (typeof SOURCE_CODES)[number];
 
 export const SOURCE_LABELS: Record<SourceCode, string> = {
-  hh: 'Вакансии hh.ru',
-  crm: 'AMO: прошлые лиды и клиенты',
-  hh_multi: 'hh.ru: несколько вакансий продаж',
-  hh_sales: 'hh.ru: вакансии продаж',
-  contracts: 'Госконтракты (загруженные выгрузки ЕИС)',
+  hh: 'hh.ru: вакансии продаж',
+  direct: 'Яндекс.Директ: компании в рекламной выдаче',
+  crm: 'AMO: старые отказы',
   exhibitors: 'Выставки (загруженные каталоги)',
-  site_news: 'Новости и разделы партнёрам/дилерам на сайтах',
+  contracts: 'Госконтракты (загруженные выгрузки ЕИС)',
+  growth: 'Гранты / акселераторы (загруженные списки)',
+  site_news: 'Новости на сайтах компаний прошлых запусков',
+  directory: 'Общая база компаний (по профилю)',
 };
-
-/** Какие источники разрешены профилю (SOURCE_CONNECTORS §12, дизайн §1). */
-export const PROFILE_SOURCES: Record<ProfileCode, SourceCode[]> = {
-  sdr_hiring_v1: ['hh'],
-  automated_outreach_v1: ['crm', 'hh_multi'],
-  signals_v1: ['hh_sales', 'contracts', 'exhibitors', 'site_news'],
-};
-
-export type RelationshipFilter = 'cold' | 'prior_contact' | 'mixed';
 
 export interface RuOutreachConfig {
-  profile_code: ProfileCode;
   sources: SourceCode[];
   /** Окно свежести сигнала, дней (дата источника, не дата загрузки). */
   freshness_days: number;
   /** Сколько ГОТОВЫХ компаний нужно (а не сколько кандидатов просмотреть). */
   limit: number;
-  relationship_filter: RelationshipFilter;
-  /** Порог скоринга компании для оффера «по сигналам» (SPEC §10). */
-  min_signal_score: number;
-  /** Нижний порог суммы госконтракта, ₽ (SPEC §5.3 «выше порога сегмента»). */
+  /** Порог скоринга 0–100: от него пишем, ниже — пропуск. Ручную проверку CEO убрал 23.09.2026. */
+  write_threshold: number;
+  /** Нижний порог суммы госконтракта, ₽. */
   min_contract_amount: number;
+  /** Общая база: выручка, ₽, и штат. */
+  min_revenue: number;
+  max_revenue: number;
+  min_employees: number;
   include_previously_exported: boolean;
   sender_id: string | null;
 }
 
-export const DEFAULT_FRESHNESS: Record<ProfileCode, number> = {
-  sdr_hiring_v1: 45,
-  automated_outreach_v1: 60,
-  signals_v1: 30,
-};
-export const MIN_FRESHNESS_DAYS = 1;
+export const DEFAULT_FRESHNESS_DAYS = 45;
 export const MAX_FRESHNESS_DAYS = 180;
 export const DEFAULT_LIMIT = 50;
 export const MAX_LIMIT = 500;
-export const DEFAULT_MIN_SIGNAL_SCORE = 8;
-export const DEFAULT_MIN_CONTRACT_AMOUNT = 1_000_000;
 
 function clampInt(value: unknown, fallback: number, min: number, max: number): number {
   const n = Number(value);
@@ -93,27 +92,21 @@ function clampInt(value: unknown, fallback: number, min: number, max: number): n
 
 /** Санитизация конфига: один код в API-роуте и в раннере. */
 export function sanitizeRuOutreachConfig(raw: Partial<RuOutreachConfig>): RuOutreachConfig {
-  const profile: ProfileCode = PROFILE_CODES.includes(raw.profile_code as ProfileCode)
-    ? (raw.profile_code as ProfileCode)
-    : 'sdr_hiring_v1';
-  const allowed = PROFILE_SOURCES[profile];
   const sources = Array.isArray(raw.sources)
-    ? Array.from(new Set(raw.sources.filter((s): s is SourceCode => allowed.includes(s as SourceCode))))
+    ? Array.from(new Set(raw.sources.filter((s): s is SourceCode => SOURCE_CODES.includes(s as SourceCode))))
     : [];
-  const relationship: RelationshipFilter =
-    raw.relationship_filter === 'cold' || raw.relationship_filter === 'prior_contact'
-      ? raw.relationship_filter
-      : 'mixed';
+  const write = clampInt(raw.write_threshold, 70, 0, 100);
+  const minRevenue = clampInt(raw.min_revenue, 30_000_000, 0, 1_000_000_000_000);
   const senderId = typeof raw.sender_id === 'string' && /^[0-9a-f-]{36}$/i.test(raw.sender_id) ? raw.sender_id : null;
-
   return {
-    profile_code: profile,
-    sources: sources.length ? sources : [...allowed],
-    freshness_days: clampInt(raw.freshness_days, DEFAULT_FRESHNESS[profile], MIN_FRESHNESS_DAYS, MAX_FRESHNESS_DAYS),
+    sources: sources.length ? sources : ['hh', 'direct', 'crm', 'site_news'],
+    freshness_days: clampInt(raw.freshness_days, DEFAULT_FRESHNESS_DAYS, 1, MAX_FRESHNESS_DAYS),
     limit: clampInt(raw.limit, DEFAULT_LIMIT, 1, MAX_LIMIT),
-    relationship_filter: relationship,
-    min_signal_score: clampInt(raw.min_signal_score, DEFAULT_MIN_SIGNAL_SCORE, 0, 15),
-    min_contract_amount: clampInt(raw.min_contract_amount, DEFAULT_MIN_CONTRACT_AMOUNT, 0, 10_000_000_000),
+    write_threshold: write,
+    min_contract_amount: clampInt(raw.min_contract_amount, 1_000_000, 0, 10_000_000_000),
+    min_revenue: minRevenue,
+    max_revenue: Math.max(minRevenue, clampInt(raw.max_revenue, 3_000_000_000, 0, 1_000_000_000_000)),
+    min_employees: clampInt(raw.min_employees, 10, 0, 100_000),
     include_previously_exported: raw.include_previously_exported === true,
     sender_id: senderId,
   };
@@ -124,11 +117,11 @@ export type RowStatus = 'processing' | 'ready' | 'rejected' | 'manual_review' | 
 /** Этапы конвейера (поле pipeline_stage). Порядок = порядок воронки. */
 export const STAGES = [
   'candidates_loaded',
-  'source_checked',
+  'amo_checked',
   'company_resolved',
   'deduplicated',
-  'icp_checked',
-  'evidence_classified',
+  'enriched',
+  'scored',
   'recipient_resolved',
   'sequence_assembled',
   'qa_checked',
@@ -138,44 +131,34 @@ export type Stage = (typeof STAGES)[number];
 
 export const STAGE_LABELS: Record<Stage, string> = {
   candidates_loaded: 'Кандидаты',
-  source_checked: 'Источник проверен',
+  amo_checked: 'Проверка AMO',
   company_resolved: 'Компания и домен',
   deduplicated: 'Без повторов',
-  icp_checked: 'Прошли ICP',
-  evidence_classified: 'Сигнал и режим',
+  enriched: 'Сайт и сигналы',
+  scored: 'Прошли скоринг',
   recipient_resolved: 'Найдена почта',
   sequence_assembled: 'Цепочка собрана',
   qa_checked: 'Прошли QA',
   ready: 'Готово',
 };
 
-/** Коды отсева и ручной проверки (INSTRUCTION_02 §9, INSTRUCTION_03 §11 + сигналы). */
+/** Коды отсева и ручной проверки. */
 export const REASON_LABELS: Record<string, string> = {
-  SOURCE_RECORD_INVALID: 'Запись источника неполная',
-  VACANCY_INVALID: 'Вакансия недоступна',
-  VACANCY_STALE: 'Вакансия старше окна свежести',
-  VACANCY_CLOSED: 'Вакансия закрыта или в архиве',
-  JOB_FUNCTION_NOT_SDR: 'Вакансия не про активные продажи',
-  SDR_EVIDENCE_MISSING: 'Нет цитаты про холодный поиск / лидогенерацию',
-  EMPLOYER_AMBIGUOUS: 'Работодатель не определён',
-  COMPANY_AMBIGUOUS: 'Компания не определена однозначно',
+  AMO_OPEN_DEAL: 'Открытая сделка в AMO',
+  AMO_CLIENT: 'Действующий клиент',
+  CRM_RECENT_CONTACT: 'Отказ в AMO меньше 30 дней назад',
+  VACANCY_CLOSED: 'Вакансия закрыта',
+  COMPANY_AMBIGUOUS: 'Не удалось подтвердить название компании',
   DUPLICATE_COMPANY: 'Повтор компании в запуске',
   PREVIOUSLY_EXPORTED: 'Уже выгружалась раньше',
-  NOT_B2B: 'Не B2B',
-  EXCLUDED_CATEGORY: 'Исключённая категория (кадровое агентство, конкурент, B2C)',
-  AUTOMATION_FIT_TOO_WEAK: 'Мало признаков для автоматизации (нужно ≥2)',
-  SEGMENTS_NOT_IDENTIFIABLE: 'Не видно нескольких сегментов',
-  RELATIONSHIP_NOT_CONFIRMED: 'Прошлое общение не подтверждено AMO',
-  CRM_RECENT_CONTACT: 'Сделка в AMO закрыта меньше 30 дней назад',
-  SITE_UNREACHABLE: 'Сайт компании не открылся',
-  SIGNAL_TOO_WEAK: 'Скоринг сигнала ниже порога',
-  SIGNAL_STALE: 'Сигнал старше окна свежести',
-  SIGNAL_EVIDENCE_AMBIGUOUS: 'Сигнал без дословного подтверждения',
   DOMAIN_NOT_FOUND: 'Не найден сайт компании',
+  SITE_UNREACHABLE: 'Сайт компании не открылся',
+  NOT_B2B: 'Не B2B',
+  EXCLUDED_CATEGORY: 'Исключённая категория (кадровое агентство, конкурент, маркетплейс)',
+  NO_CHAIN: 'Нет повода и низкий ЦА-балл',
+  SCORE_TOO_LOW: 'Скоринг ниже порога',
   EMAIL_NOT_FOUND: 'Не найдена корпоративная почта',
-  EMAIL_INVALID: 'Почта некорректна',
   SUPPRESSED_CONTACT: 'Почта в стоп-листе',
-  TEMPLATE_DATA_MISSING: 'Не хватает данных для шаблона',
   SENDER_MISSING: 'Нет активной подписи отправителя',
   QA_FACT_UNSUPPORTED: 'QA: неподтверждённый факт',
   QA_PLACEHOLDER_LEFT: 'QA: остались переменные',
@@ -187,11 +170,17 @@ export const REASON_LABELS: Record<string, string> = {
 export type EvidenceLevel = 'A' | 'B' | 'C' | 'NONE';
 
 export type SignalType =
-  | 'sdr_hiring'
+  /** Строгий SDR-сигнал: роль первичного outbound + цитата холодного поиска новых B2B-клиентов. */
   | 'sales_hiring'
-  | 'multiple_sales_vacancies'
+  /**
+   * Обычная вакансия продаж (РОП, менеджер, BDM без SDR-функции). В роутинге
+   * не участвует — компания идёт по остальным поводам; хранится для отчёта.
+   */
+  | 'sales_hiring_broad'
+  | 'ad_running'
   | 'trade_show_exhibitor'
   | 'contract_won'
+  | 'grant_or_accelerator'
   | 'product_launch'
   | 'new_region'
   | 'new_office'
@@ -200,22 +189,20 @@ export type SignalType =
   | 'dealer_search'
   | 'export_launch'
   | 'new_case'
-  | 'multiple_products'
-  | 'multiple_regions'
-  | 'b2b_product';
+  | 'crm_lost';
 
 /** Один найденный факт о компании с доказательством. */
 export interface Signal {
   type: SignalType;
   source: SourceCode;
-  /** Должность, название выставки, предмет контракта, заголовок новости. */
+  /** Должность, выставка, предмет контракта, запрос Директа, заголовок новости. */
   title: string;
   date: string | null;
   url: string | null;
   /** Дословная цитата из первоисточника (A) или пусто для структурного поля (B). */
   quote: string | null;
   level: EvidenceLevel;
-  /** Доп. поля источника: сумма и заказчик контракта, даты выставки и т.п. */
+  /** Доп. поля источника: заказчик контракта, даты выставки и т.п. */
   meta?: Record<string, unknown>;
 }
 

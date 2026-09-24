@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Download, Loader2, RefreshCw, Square, Trash2 } from 'lucide-react';
-import { PROFILE_LABELS, REASON_LABELS, type RuOutreachConfig, type Stage } from '@/lib/polzaRuOutreach/types';
+import { CHAIN_LABELS, REASON_LABELS, type ChainType, type RuOutreachConfig, type Stage } from '@/lib/polzaRuOutreach/types';
 import { LaunchForm } from './LaunchForm';
 import { Libraries } from './Libraries';
 import { Funnel, ResultsTable } from './Results';
@@ -208,7 +208,7 @@ export function PolzaRuOutreachView() {
                     className={`flex cursor-pointer items-center justify-between gap-3 px-2 py-2 text-sm ${j.id === activeId ? 'bg-violet-50' : 'hover:bg-gray-50'}`}
                   >
                     <div className="min-w-0">
-                      <span className="font-medium text-gray-900">{PROFILE_LABELS[j.config?.profile_code ?? 'sdr_hiring_v1']}</span>
+                      <span className="font-medium text-gray-900">Запуск на {j.config?.limit ?? '—'}</span>
                       <span className="ml-2 text-xs text-gray-500">{fmtDateTime(j.created_at)}</span>
                       <span className="ml-2 text-xs text-gray-500">
                         готово {j.total_parsed ?? 0} из {j.config?.limit ?? '—'} · просмотрено {j.total_found ?? 0}
@@ -240,7 +240,7 @@ export function PolzaRuOutreachView() {
             <div className="space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="text-sm text-gray-700">
-                  <b>{PROFILE_LABELS[active.config?.profile_code ?? 'sdr_hiring_v1']}</b> · {JOB_STATUS[active.status]}
+                  <b>Запуск</b> · {JOB_STATUS[active.status]}
                   {running && <> · {active.progress_percent ?? 0}% · в пуле {detail?.pool ?? '…'} компаний</>}
                   {detail?.stop_reason === 'pool_exhausted' && ' · кандидаты закончились раньше лимита'}
                   {detail?.stop_reason === 'scan_limit' && ' · достигнут потолок просмотра'}
@@ -272,6 +272,25 @@ export function PolzaRuOutreachView() {
                   </button>
                 </div>
               </div>
+
+              {detail?.chains && Object.keys(detail.chains).length > 0 && (
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <span className="text-gray-500">Цепочки после скоринга:</span>
+                  {Object.entries(detail.chains).map(([c, n]) => (
+                    <span key={c} className="rounded-full bg-violet-50 px-2 py-0.5 text-violet-700">
+                      {CHAIN_LABELS[c as ChainType] ?? c}: {n}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {detail?.sdr && detail.sdr.any_sales_vacancy > 0 && (
+                <p className="text-xs text-gray-500">
+                  Вакансии продаж: у {detail.sdr.any_sales_vacancy} компаний. В SDR-цепочку — {detail.sdr.strict_sdr}{' '}
+                  (роль SDR/BDR и холодный поиск новых B2B-клиентов), остальные {detail.sdr.broad_to_general_queue} идут
+                  по другим поводам.
+                </p>
+              )}
 
               <Funnel
                 funnel={results?.funnel ?? null}

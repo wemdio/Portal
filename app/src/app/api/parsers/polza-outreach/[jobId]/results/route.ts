@@ -58,7 +58,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   // Одна выборка всех строк дешевле восьми head-запросов: строк ≤ 300 на джобу.
   const { data: allRows, error: allErr } = await supabase
     .from('polza_outreach_companies')
-    .select('status,stage,exclusion_reason,normalized_domain,selected_company_email,target_sales_geo_confidence')
+    .select('status,stage,exclusion_reason,normalized_domain,selected_company_email,lead_status')
     .eq('job_id', jobId);
   if (allErr) {
     await logError('parser.polza_outreach.summary.fetch.failed', allErr, { jobId }, logMeta);
@@ -69,9 +69,10 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     vacancies: allRows?.length ?? 0,
     domain_found: allRows?.filter((r) => r.normalized_domain).length ?? 0,
     icp_passed: allRows?.filter((r) => STAGE_ICP_PASSED.includes(String(r.stage))).length ?? 0,
+    // v2: поле воронки geo_confirmed = «Lead Score: write now» (до поиска почты).
     geo_confirmed:
       allRows?.filter(
-        (r) => r.target_sales_geo_confidence === 'high' || r.target_sales_geo_confidence === 'medium',
+        (r) => r.lead_status === 'write_now' || r.stage === 's5_email' || r.stage === 's6_letters',
       ).length ?? 0,
     email_found: allRows?.filter((r) => r.selected_company_email).length ?? 0,
     ready: allRows?.filter((r) => r.status === 'ready').length ?? 0,

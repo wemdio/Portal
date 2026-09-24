@@ -1,5 +1,5 @@
 import { supabase } from '@/lib/supabaseClient';
-import type { DraftStatus, ReplyListItem } from '@/lib/replyPersonalization/types';
+import type { DraftStatus, ReplyCampaignOption, ReplyListItem } from '@/lib/replyPersonalization/types';
 
 const BASE = '/api/tools/reply-personalization';
 
@@ -83,15 +83,32 @@ export function fetchGlobalKnowledgeBase() {
   return fetchWithAuth<GlobalSettingsResponse>(`${BASE}/global-kb`);
 }
 
-export function fetchReplies(projectId: string) {
-  return fetchWithAuth<{ replies: ReplyListItem[]; missingReason: string | null }>(
-    `${BASE}/projects/${projectId}/replies`,
-  );
+export interface RepliesResponse {
+  replies: ReplyListItem[];
+  campaigns: ReplyCampaignOption[];
+  /** Писем по фильтру всего; null — точно не посчитать. */
+  total: number | null;
+  hasMore: boolean;
+  missingReason: string | null;
+}
+
+export function fetchReplies(
+  projectId: string,
+  filters: { campaignId?: string | null; search?: string; limit?: number } = {},
+) {
+  const query = new URLSearchParams();
+  if (filters.campaignId) query.set('campaignId', filters.campaignId);
+  if (filters.search?.trim()) query.set('q', filters.search.trim());
+  if (filters.limit) query.set('limit', String(filters.limit));
+  const suffix = query.toString() ? `?${query}` : '';
+  return fetchWithAuth<RepliesResponse>(`${BASE}/projects/${projectId}/replies${suffix}`);
 }
 
 export interface ThreadResponse {
   messages: { fromUs: boolean; text: string; timestamp?: string }[];
   contextComplete: boolean;
+  /** Адреса, на которые адресат перенаправил в последнем ответе. */
+  referredEmails: string[];
 }
 
 export function fetchThread(qualificationId: string, projectId: string) {
@@ -106,6 +123,8 @@ export interface GenerateResponse {
   factsUsed: string;
   sources: { url: string; title?: string }[];
   contextComplete: boolean;
+  /** Кому адресован черновик, если не тому, кто ответил; null — в ту же переписку. */
+  recipientEmail: string | null;
 }
 
 /** Сохранённый неотправленный черновик ИИ по письму. */
@@ -115,18 +134,27 @@ export function fetchOpenDraft(qualificationId: string) {
   );
 }
 
-export function generateReply(qualificationId: string, projectId: string) {
+/** recipientEmail — новый контакт из ответа; null — ответ в ту же переписку. */
+export function generateReply(qualificationId: string, projectId: string, recipientEmail: string | null = null) {
   return fetchWithAuth<GenerateResponse>(`${BASE}/replies/${qualificationId}/generate`, {
     method: 'POST',
-    body: JSON.stringify({ projectId }),
+    body: JSON.stringify({ projectId, recipientEmail }),
   });
 }
 
 /** draftId — ответ по сгенерированному черновику; null — ответ, написанный вручную. */
-export function sendReply(qualificationId: string, input: { draftId: string | null; projectId: string; text: string }) {
+export function sendReply(
+  qualificationId: string,
+  input: { draftId: string | null; projectId: string; text: string; toEmail?: string | null },
+) {
   return fetchWithAuth<{ ok: true }>(`${BASE}/replies/${qualificationId}/send`, {
     method: 'POST',
-    body: JSON.stringify({ draftId: input.draftId ?? undefined, projectId: input.projectId, text: input.text }),
+    body: JSON.stringify({
+      draftId: input.draftId ?? undefined,
+      projectId: input.projectId,
+      text: input.text,
+      toEmail: input.toEmail ?? undefined,
+    }),
   });
 }
 

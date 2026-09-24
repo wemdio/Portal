@@ -36,6 +36,11 @@ const MANDATE_MARKERS: RegExp[] = [
   /\bsales\s+engagement\b/i,
   /\b(account\s+research|qualified\s+leads?|sqls?|mqls?)\b/i,
   /\b(hubspot|salesforce|outreach\.io|salesloft|apollo)\b/i,
+  // v2: AE / Growth / Partnerships / GTM — новые продажи, не только прозвон.
+  /\bnew\s+(?:business|customers|logos|revenue)\b/i,
+  /\b(?:go-to-market|gtm)\s+(?:strategy|motion|plan)\b/i,
+  /\b(?:channel|strategic)\s+partnerships?\b/i,
+  /\bclos(?:e|ing)\s+(?:new\s+)?(?:deals|business)\b/i,
 ];
 
 const SYSTEM_PROMPT = `You analyze a sales job posting for a B2B outbound qualification pipeline.
@@ -43,8 +48,8 @@ const SYSTEM_PROMPT = `You analyze a sales job posting for a B2B outbound qualif
 Given the job title, the job description, the company name and the office country, return STRICT JSON (no markdown, no commentary) with exactly this shape:
 
 {
-  "outbound_mandate": boolean,        // true if the role includes cold email / cold calling / outbound prospecting / pipeline generation / booking meetings
-  "outbound_evidence": string,        // VERBATIM quote (max 200 chars) copied character-for-character from the job text proving the outbound mandate; "" if none
+  "outbound_mandate": boolean,        // true if the role is a NEW-BUSINESS sales/GTM role: cold email / cold calling / outbound prospecting / pipeline generation / booking meetings / closing new customers / building partnerships or channels / owning go-to-market or growth of new revenue. false for account management of existing customers, support, pure marketing content, or non-commercial roles
+  "outbound_evidence": string,        // VERBATIM quote (max 200 chars) copied character-for-character from the job text proving that new-business sales/GTM function; "" if none
   "service_line": string | null,      // what product/service of THIS company the SDR is hired to sell (e.g. "dedicated engineering teams", "custom software development", "AI development services"); null if unclear
   "service_line_confident": boolean,  // true only if the service line is clearly stated or unambiguously implied in the posting
   "target_sales_geo": string | null,  // the market the SDR will SELL into (not the office location): "North America", "DACH", "UK", "EMEA", "Europe", or a country; null if not determinable

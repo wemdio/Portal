@@ -1,10 +1,12 @@
 -- «Наш автоаутрич» (parser_type='polza_ru_outreach'): русский сигнальный аутрич
--- Polza по трём офферам — найм SDR, автоматизация аутрича, сигналы.
+-- Polza. Тип цепочки система выбирает сама по поводу компании (reactivation,
+-- hiring, ad_budget, event, growth_event, icp_only) — RU_OUTREACH_HANDOFF CEO
+-- от 23.09.2026.
 --
 -- polza_ru_outreach_companies — журнал запуска: строка на компанию, отсеянные
 -- строки остаются с этапом и причиной (по ним считается воронка). Готовые
 -- строки (row_status='ready') — это и есть «выгруженные» компании: по ним
--- следующий запуск любого оффера отсекает повторы.
+-- следующий запуск отсекает повторы.
 --
 -- Библиотеки (офферы, кейсы, подписи) — versioned-данные, которые генератор
 -- берёт как есть. Неутверждённая или истёкшая запись для генератора не
@@ -14,8 +16,8 @@
 create table if not exists public.polza_ru_outreach_companies (
   id uuid primary key default gen_random_uuid(),
   job_id uuid not null references public.parser_jobs(id) on delete cascade,
-  profile_code text not null
-    check (profile_code in ('sdr_hiring_v1', 'automated_outreach_v1', 'signals_v1')),
+  chain_type text
+    check (chain_type in ('reactivation', 'hiring', 'ad_budget', 'event', 'growth_event', 'icp_only')),
 
   -- источник
   source_type text not null,
@@ -33,6 +35,7 @@ create table if not exists public.polza_ru_outreach_companies (
   crm_lead_id bigint,
 
   -- отношения (только по AMO)
+  amo_status text,
   prior_contact boolean not null default false,
   prior_contact_date timestamptz,
 
@@ -47,10 +50,14 @@ create table if not exists public.polza_ru_outreach_companies (
   signals jsonb not null default '[]'::jsonb,
   fit_reasons jsonb not null default '[]'::jsonb,
   signal_score integer,
+  ta_score integer,
+  ta_reason text,
+  priority_score integer,
   generation_mode text,
 
   -- адресат
   recipient_email text,
+  email_verification text,
   email_type text,
   email_source_url text,
   recipient_role text,
@@ -60,6 +67,8 @@ create table if not exists public.polza_ru_outreach_companies (
   letters jsonb,
   subject_b text,
   case_id text,
+  case_match_reason text,
+  campaign_hypothesis text,
   offer_version text,
   offer_claim_ids text[] not null default '{}',
   sender_id uuid,
@@ -110,8 +119,8 @@ grant select, insert, update, delete on public.polza_ru_outreach_companies to au
 -- ── Утверждённые коммерческие утверждения оффера ────────────────────────────
 create table if not exists public.polza_ru_offer_claims (
   id uuid primary key default gen_random_uuid(),
-  profile_code text not null
-    check (profile_code in ('sdr_hiring_v1', 'automated_outreach_v1', 'signals_v1', 'all')),
+  chain_type text not null default 'all'
+    check (chain_type in ('reactivation', 'hiring', 'ad_budget', 'event', 'growth_event', 'icp_only', 'all')),
   claim_key text not null,
   claim_text text not null,
   status text not null default 'draft' check (status in ('draft', 'approved', 'expired')),
@@ -133,7 +142,11 @@ create table if not exists public.polza_ru_cases (
   product_tags text[] not null default '{}',
   sales_model_tags text[] not null default '{}',
   geography_tags text[] not null default '{}',
-  allowed_profiles text[] not null default '{}',
+  -- отраслевые группы роутера кейсов: it_saas, manufacturing, hr_education,
+  -- horeca, auto_logistics, digital_agency
+  industry_groups text[] not null default '{}',
+  -- пусто = кейс разрешён во всех типах цепочек
+  allowed_chains text[] not null default '{}',
   case_text_short text not null,
   case_text_long text,
   metrics jsonb not null default '[]'::jsonb,
@@ -168,10 +181,11 @@ insert into public.polza_ru_senders (sender_name, sender_title, company_name, ph
 select 'Егор', 'Коммерческий директор', 'Polza Agency', '+7 (495) 120-29-71', 'https://polzaagency.ru', '@ROP_PolzaAgency', 'active', true
 where not exists (select 1 from public.polza_ru_senders);
 
--- ── Загруженные файлы сигналов: каталоги выставок и выгрузки контрактов ─────
+-- ── Загруженные файлы сигналов: каталоги выставок, выгрузки контрактов,
+-- списки грантов/акселераторов (российского источника в портале нет) ─────
 create table if not exists public.polza_ru_signal_uploads (
   id uuid primary key default gen_random_uuid(),
-  kind text not null check (kind in ('exhibitors', 'contracts')),
+  kind text not null check (kind in ('exhibitors', 'contracts', 'growth')),
   title text not null,
   event_start date,
   event_end date,
@@ -186,7 +200,7 @@ create table if not exists public.polza_ru_signal_uploads (
 create table if not exists public.polza_ru_signal_rows (
   id uuid primary key default gen_random_uuid(),
   upload_id uuid not null references public.polza_ru_signal_uploads(id) on delete cascade,
-  kind text not null check (kind in ('exhibitors', 'contracts')),
+  kind text not null check (kind in ('exhibitors', 'contracts', 'growth')),
   company_name text not null,
   company_website text,
   inn text,
@@ -299,3 +313,67 @@ $$;
 
 revoke all on function public.polza_ru_hh_employers(text, timestamptz, integer) from public;
 grant execute on function public.polza_ru_hh_employers(text, timestamptz, integer) to service_role;
+
+-- ── Черновики кейсов из базы знаний (kb_documents, he_cases, ve_cases) ──────
+-- status='draft' и legal_publication_approved=false: генератор их не видит,
+-- пока команда не сверит цифры и не утвердит публикацию во вкладке
+-- «Библиотеки». Comindware сознательно не заведён: в переписке клиент запретил
+-- использовать бренд и отзыв. Reelscut, StaffLine, «Хвойный Остров» — в базе
+-- нет итоговых цифр, их кейсы команда заводит сама.
+insert into public.polza_ru_cases
+  (case_id, public_name, industry_groups, case_text_short, source_file_or_url, status, legal_publication_approved, notes)
+values
+  ('bpmsoft_telecom', 'Умные Новации (BPMSoft)', '{it_saas}',
+   'для «Умных Новаций», которые продают телеком-операторам CRM на платформе BPMSoft, собрали и проверили базу из 830 компаний и провели 4 итерации тестов офферов — 240 ответов, 25 MQL и 21 SQL.',
+   'kb_documents: «Умные Новации — CRM Telecom 360»', 'draft', false, 'Черновик 23.09.2026 по базе знаний: сверить цифры и разрешение клиента.'),
+  ('kkzsk', 'ККЗСК', '{manufacturing}',
+   'для производителя металлоконструкций ККЗСК собрали базу контактов через HeadHunter и запустили персонализированные цепочки — 24 лида при 13,6% ответов.',
+   'he_cases: ККЗСК', 'draft', false, 'Черновик 23.09.2026: проверить написание названия (в базе «ККЗСК», у CEO «КЗСК»).'),
+  ('uremont', 'Uremont', '{auto_logistics}',
+   'для Uremont, платформы обслуживания корпоративных автопарков, провели 12 кампаний по базе из 11 535 контактов — 28 квалифицированных лидов.',
+   'he_cases: Uremont', 'draft', false, 'Черновик 23.09.2026 по базе знаний.'),
+  ('drink_and_eat', 'Чашка-вкусняшка (Drink-and-eat)', '{horeca}',
+   'для производителя съедобных стаканчиков «Чашка-вкусняшка» вышли на кофейни, кафе, рестораны и отели — 87,5 квалифицированных лидов за 2 месяца.',
+   'kb_documents: «Чашка-вкусняшка (Drink-and-eat)»', 'draft', false, 'Черновик 23.09.2026: в источнике дробное «87,5 лидов» — уточнить цифру.'),
+  ('victory_group', 'Victory Group', '{digital_agency}',
+   'для digital-агентства Victory Group, которое работает со стоматологиями и девелоперами, получили 54 лида.',
+   've_cases: Victory Group', 'draft', false, 'Черновик 23.09.2026: в источнике нет периода — уточнить.'),
+  ('compass_c', 'Компас С', '{manufacturing}',
+   'для дистрибьютора принтеров этикеток и сканеров штрих-кода «Компас С» вышли на реселлеров и интеграторов — 10 лидов за месяц.',
+   'kb_documents: «Компас С (Compass-c)»', 'draft', false, 'Черновик 23.09.2026 по базе знаний.')
+on conflict (case_id) do nothing;
+
+-- ── Кандидаты для цепочки «Только профиль» из общей базы компаний ───────────
+-- Случайная выборка компаний с сайтом, выручкой и штатом в заданных пределах;
+-- розница, общепит, гостиницы и бытовые услуги (ОКВЭД 47/55/56/96) — не B2B.
+-- Полный проход таблицы ~0,7 с (замер 23.09.2026), поэтому один вызов на запуск.
+create or replace function public.polza_ru_directory_candidates(
+  p_min_revenue bigint,
+  p_max_revenue bigint,
+  p_min_employees integer,
+  p_limit integer
+)
+returns table (
+  inn text,
+  name text,
+  website text,
+  revenue bigint,
+  employees_count integer,
+  okved_code text
+)
+language sql
+volatile
+set statement_timeout = '60s'
+as $$
+  select d.inn, d.name, d.website, d.revenue, d.employees_count, d.okved_code
+  from public.companies_directory d
+  where d.website is not null and d.website <> ''
+    and d.revenue between p_min_revenue and p_max_revenue
+    and coalesce(d.employees_count, 0) >= p_min_employees
+    and coalesce(d.okved_code, '') !~ '^(47|55|56|96)'
+  order by random()
+  limit least(greatest(p_limit, 1), 5000);
+$$;
+
+revoke all on function public.polza_ru_directory_candidates(bigint, bigint, integer, integer) from public;
+grant execute on function public.polza_ru_directory_candidates(bigint, bigint, integer, integer) to service_role;

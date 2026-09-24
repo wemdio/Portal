@@ -283,12 +283,17 @@ export interface EngHiringVacancyRow {
   created_at: string;
 }
 
-// ── Polza ENG outreach (SDR hiring-trigger MVP) ──
+// ── Polza ENG outreach (v2: trigger router CEO, 23.09.2026) ──
 
 export interface PolzaOutreachConfig {
   countries: string[];
   posted_within_days: number;
   limit: number;
+  sources?: Array<'hiring' | 'yc'>;
+  yc_batch_from_year?: number;
+  min_employees?: number;
+  max_employees?: number;
+  write_threshold?: number;
 }
 
 export interface PolzaOutreachParserJob {
@@ -341,6 +346,24 @@ export interface PolzaOutreachCompanyRow {
   stage?: string | null;
   exclusion_reason?: string | null;
   review_reason?: string | null;
+  source_list?: string[] | null;
+  trigger_list?: Array<{ type: string; title: string; url: string | null; date: string | null; quote: string | null }> | null;
+  primary_trigger?: string | null;
+  trigger_evidence_url?: string | null;
+  trigger_phrase?: string | null;
+  company_context?: string | null;
+  likely_gtm_problem?: string | null;
+  outreach_angle?: string | null;
+  segments?: string[] | null;
+  employee_range?: string | null;
+  industry?: string | null;
+  country?: string | null;
+  lead_score?: number | null;
+  score_breakdown?: Record<string, number> | null;
+  lead_status?: 'write_now' | 'skip' | null;
+  recommended_case?: string | null;
+  case_reason?: string | null;
+  case_snippet?: string | null;
   created_at: string;
 }
 

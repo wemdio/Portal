@@ -1,18 +1,14 @@
 /**
  * S3 — дешёвый ICP-фильтр (до LLM, чтобы не платить за заведомо мусорные строки).
- * Исключения по спеке §3.4: конкуренты-лидгенщики, стаффинг без разработки,
- * generic digital marketing, B2C/образование/маркетплейсы, размер 11–50
- * (Глеб работает по ним сам), дубль домена в этом же запуске.
+ * Исключения (en-outreach-flow-improvements §2 шаг 3): конкуренты-лидгенщики,
+ * стаффинг/RPO/HR-агентства/джоб-борды, generic digital marketing,
+ * B2C/образование/маркетплейсы, размер вне 3–200 (по умолчанию), дубль домена.
+ * Исключение «11–50» снято 23.09.2026: у CEO это одна из лучших групп.
  *
  * Правила намеренно консервативные: срабатывание = исключение компании,
  * поэтому паттерны требуют явного отраслевого маркера, а не слова из
  * описания обязанностей SDR (там «outbound» и «leads» — норма, не признак агентства).
  */
-
-import type { PolzaOutreachVacancyCandidate } from './types';
-
-/** Корзина PDL, соответствующая исключению «10–50 сотрудников» из спеки. */
-const EXCLUDED_SIZE_BUCKETS = new Set(['11-50']);
 
 // Прямые конкуренты: лидген / appointment setting / outbound-агентства.
 const COMPETITOR_NAME_RE =
@@ -24,7 +20,7 @@ const COMPETITOR_SELF_RE =
   /\b(?:we\s+(?:are|'re)|our\s+(?:company|team|agency)|join(?:ing)?)[^.]{0,60}?\b(?:lead\s*gen(?:eration)?|appointment[-\s]?setting|outbound|demand\s*generation|b2b\s*outreach)\s+(?:agency|agencies|company|companies|firm|partner|provider|services?)\b/i;
 
 const STAFFING_NAME_RE =
-  /\b(staffing|recruitment|recruiting|recruiter|headhunt|employment\s+agency|hr\s+agency|talent\s+acquisition\s+(?:agency|firm|partner))\b/i;
+  /\b(staffing|recruitment|recruiting|recruiter|headhunt|employment\s+agency|hr\s+agency|rpo|job\s*board|talent\s+acquisition\s+(?:agency|firm|partner))\b/i;
 
 const MARKETING_NAME_RE =
   /\b(digital\s+marketing|marketing\s+agency|creative\s+agency|advertising\s+agency|media\s+agency|\bseo\b|\bppc\b|performance\s+marketing\s+agency|growth\s+marketing\s+agency)\b/i;
@@ -37,12 +33,18 @@ export type IcpExclusionReason =
   | 'staffing_agency'
   | 'generic_marketing'
   | 'b2c_or_education'
-  | 'size_11_50'
+  | 'size_out_of_range'
   | 'duplicate_domain';
 
-export interface IcpFilterInput extends PolzaOutreachVacancyCandidate {
+export interface IcpFilterInput {
+  companyName: string;
+  companyDescription: string | null;
+  vacancyDescription: string | null;
   normalizedDomain: string | null;
-  companySize: string | null;
+  /** Оценка штата: команда YC или середина корзины PDL; null — неизвестно. */
+  employees: number | null;
+  minEmployees: number;
+  maxEmployees: number;
 }
 
 export interface IcpFilterResult {
@@ -50,10 +52,7 @@ export interface IcpFilterResult {
   reason: IcpExclusionReason | null;
 }
 
-export function icpFilter(
-  input: IcpFilterInput,
-  seenDomains: Set<string>,
-): IcpFilterResult {
+export function icpFilter(input: IcpFilterInput, seenDomains: Set<string>): IcpFilterResult {
   const name = input.companyName ?? '';
   const description = `${input.companyDescription ?? ''}\n${input.vacancyDescription ?? ''}`;
 
@@ -69,8 +68,8 @@ export function icpFilter(
   if (B2C_EDUCATION_NAME_RE.test(name)) {
     return { exclude: true, reason: 'b2c_or_education' };
   }
-  if (input.companySize && EXCLUDED_SIZE_BUCKETS.has(input.companySize)) {
-    return { exclude: true, reason: 'size_11_50' };
+  if (input.employees != null && (input.employees < input.minEmployees || input.employees > input.maxEmployees)) {
+    return { exclude: true, reason: 'size_out_of_range' };
   }
   if (input.normalizedDomain) {
     if (seenDomains.has(input.normalizedDomain)) {

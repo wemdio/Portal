@@ -1,8 +1,10 @@
 import { buildReplyPrompt } from './buildPrompt';
+import { fetchCampaignSteps } from './campaignSequence';
 import { getGlobalKnowledgeBase, getGlobalSystemPrompt, getKnowledgeBaseOrEmpty, getProjectBrief, insertDraft, resolveBrief } from './db';
 import { generateReplyWithSearch } from './geminiClient';
 import { fetchFullThread } from './instantlyThread';
 import { resolveProjectReply } from './projectReply';
+import { findReferredEmails } from './referredContact';
 import type { GenerateDraftResult, ThreadMessage } from './types';
 
 export class GenerateDraftError extends Error {
@@ -32,6 +34,8 @@ export async function generateDraftForQualification(
   projectId: string,
   qualificationId: string,
   userId: string,
+  /** Новый контакт из ответа адресата; null/пусто — ответ в ту же переписку. */
+  recipientEmail: string | null = null,
 ): Promise<GenerateDraftResult> {
   const startedAt = Date.now();
 
@@ -55,15 +59,18 @@ export async function generateDraftForQualification(
   const { qualification, accountId } = reply;
 
   let contextComplete = true;
-  let thread: ThreadMessage[] | null = null;
-  if (qualification.threadId) {
-    thread = await fetchFullThread({
-      campaignId: qualification.campaignId,
-      leadEmail: qualification.leadEmail,
-      threadId: qualification.threadId,
-      accountId,
-    });
-  }
+  const [fullThread, campaignSteps] = await Promise.all([
+    qualification.threadId
+      ? fetchFullThread({
+          campaignId: qualification.campaignId,
+          leadEmail: qualification.leadEmail,
+          threadId: qualification.threadId,
+          accountId,
+        })
+      : Promise.resolve(null),
+    fetchCampaignSteps(qualification.campaignId, accountId),
+  ]);
+  let thread: ThreadMessage[] | null = fullThread;
   if (!thread) {
     contextComplete = false;
     thread = fallbackThread(qualification);
@@ -72,7 +79,29 @@ export async function generateDraftForQualification(
     throw new GenerateDraftError('Нет текста переписки для генерации ответа', 422);
   }
 
-  const messages = buildReplyPrompt({ kb, globalKb, systemPrompt, brief, qualification, thread, contextComplete });
+  // Новый адрес принимаем, только если он есть в ответе адресата: иначе через
+  // инструмент можно было бы написать от имени проекта кому угодно.
+  const recipient = recipientEmail?.trim().toLowerCase() || null;
+  if (recipient && recipient !== qualification.leadEmail.toLowerCase()) {
+    const lastInbound = [...thread].reverse().find((m) => !m.fromUs)?.text ?? qualification.replyBody ?? '';
+    const referred = findReferredEmails(lastInbound, [qualification.leadEmail, qualification.eaccount]);
+    if (!referred.includes(recipient)) {
+      throw new GenerateDraftError('Этого адреса нет в ответе адресата', 422);
+    }
+  }
+  const newContact = recipient && recipient !== qualification.leadEmail.toLowerCase() ? recipient : null;
+
+  const messages = buildReplyPrompt({
+    kb,
+    globalKb,
+    systemPrompt,
+    brief,
+    qualification,
+    thread,
+    contextComplete,
+    campaignSteps,
+    recipientEmail: newContact,
+  });
   const result = await generateReplyWithSearch(messages);
 
   const draft = await insertDraft({
@@ -88,6 +117,7 @@ export async function generateDraftForQualification(
     model: result.model,
     latencyMs: Date.now() - startedAt,
     createdBy: userId,
+    recipientEmail: newContact,
   });
 
   return {
@@ -96,5 +126,6 @@ export async function generateDraftForQualification(
     factsUsed: draft.factsUsed ?? '',
     sources: draft.sources,
     contextComplete: draft.contextComplete,
+    recipientEmail: draft.recipientEmail,
   };
 }

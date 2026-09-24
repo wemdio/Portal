@@ -1,13 +1,16 @@
 /**
- * Polza ENG outreach MVP — общие типы конвейера.
+ * Английский автоаутрич — общие типы конвейера.
+ *
+ * v2 по en-outreach-flow-improvements CEO (23.09.2026):
+ *   компания → fit → поводы → данные → Lead Score → кейс → угол → цепочка.
  *
  * Конвейер (стадии S1..S6, app/src/lib/polzaOutreach/runner.ts):
- *   S1 selectVacancies  — свежие SDR/BDR-вакансии из eng_hiring_cache (source=jobhive)
- *   S2 resolveDomain    — домен компании через PDL-резолвер
- *   S3 icpFilter        — дешёвые исключения по названию/описанию/домену/размеру
- *   S4 analyzeVacancy   — LLM: outbound-мандат + гео продаж + услуга, с цитатами
- *   S5 findEmail        — корпоративная почта на сайте компании
- *   S6 buildLetters     — цепочка «SDR hiring-trigger» + детерминированные гарды
+ *   S1 candidates       — вакансии sales/GTM (eng_hiring_cache) + стартапы YC (funded_companies)
+ *   S2 resolveDomain    — домен компании; PDL даёт размер, страну, отрасль
+ *   S3 icpFilter        — жёсткие отсевы: агентства/стаффинг/B2C, размер вне 3–200
+ *   S4 score            — сайт + вакансия → поводы, fit, Lead Score v1, статус
+ *   S5 findEmail        — корпоративная почта (только для write now)
+ *   S6 buildLetters     — 4 письма CEO + детерминированные гарды
  *
  * Статусы строки: discovered → normalized → excluded | needs_review | qualified → ready.
  * Каждая стадия дописывает результат и не удаляет отсеянные строки — по ним
@@ -18,11 +21,17 @@ export type PolzaOutreachGeoConfidence = 'high' | 'medium' | 'low';
 
 /** Гео-выборка MVP (спека §4/шаг 2 плана). `remote` и NULL не берём — гео недоказуемо. */
 export const POLZA_OUTREACH_GEO_CODES = [
-  'us', 'ca', 'gb', 'de', 'nl', 'fr', 'se', 'ie', 'es', 'ch',
+  'us', 'gb', 'ca', 'de', 'nl', 'sg', 'au', 'fr', 'se', 'ie', 'es', 'ch',
   'be', 'dk', 'no', 'fi', 'at', 'it', 'pl', 'pt', 'cz',
 ] as const;
 
-export const POLZA_OUTREACH_DEFAULT_COUNTRIES: string[] = [...POLZA_OUTREACH_GEO_CODES];
+/** Страны MVP-фильтра CEO: +5 баллов в Lead Score. */
+export const POLZA_OUTREACH_PRIORITY_COUNTRIES = ['us', 'gb', 'ca', 'de', 'nl', 'sg', 'au'] as const;
+
+export const POLZA_OUTREACH_DEFAULT_COUNTRIES: string[] = [...POLZA_OUTREACH_PRIORITY_COUNTRIES];
+
+export const POLZA_OUTREACH_SOURCES = ['hiring', 'yc'] as const;
+export type PolzaOutreachSource = (typeof POLZA_OUTREACH_SOURCES)[number];
 
 export const POLZA_OUTREACH_DEFAULT_POSTED_WITHIN_DAYS = 30;
 export const POLZA_OUTREACH_MIN_POSTED_WITHIN_DAYS = 1;
@@ -40,6 +49,13 @@ export interface PolzaOutreachConfig {
   countries: string[];
   posted_within_days: number;
   limit: number;
+  sources: PolzaOutreachSource[];
+  /** YC: батчи не старше этого года. */
+  yc_batch_from_year: number;
+  min_employees: number;
+  max_employees: number;
+  /** Lead Score: ≥write — write now, ниже — skip (ручной проверки нет). */
+  write_threshold: number;
 }
 
 /** Санитизация конфига задачи: один и тот же код в API-роуте и в раннере. */
@@ -61,6 +77,12 @@ export function sanitizePolzaOutreachConfig(raw: Partial<PolzaOutreachConfig>): 
     return Math.max(min, Math.min(max, Math.trunc(n)));
   };
 
+  const sources = Array.isArray(raw.sources)
+    ? Array.from(new Set(raw.sources.filter((s): s is PolzaOutreachSource => POLZA_OUTREACH_SOURCES.includes(s as PolzaOutreachSource))))
+    : [];
+  const minEmployees = clamp(raw.min_employees, 3, 1, 100_000);
+  const write = clamp(raw.write_threshold, 75, 0, 100);
+
   return {
     countries: countries.length ? countries : [...POLZA_OUTREACH_DEFAULT_COUNTRIES],
     posted_within_days: clamp(
@@ -70,6 +92,11 @@ export function sanitizePolzaOutreachConfig(raw: Partial<PolzaOutreachConfig>): 
       POLZA_OUTREACH_MAX_POSTED_WITHIN_DAYS,
     ),
     limit: clamp(raw.limit, POLZA_OUTREACH_DEFAULT_LIMIT, POLZA_OUTREACH_MIN_LIMIT, POLZA_OUTREACH_MAX_LIMIT),
+    sources: sources.length ? sources : [...POLZA_OUTREACH_SOURCES],
+    yc_batch_from_year: clamp(raw.yc_batch_from_year, 2023, 2005, 2100),
+    min_employees: minEmployees,
+    max_employees: Math.max(minEmployees, clamp(raw.max_employees, 200, 1, 100_000)),
+    write_threshold: write,
   };
 }
 
@@ -88,6 +115,7 @@ export const POLZA_OUTREACH_STAGES = {
   s1Selected: 's1_selected',
   s2Domain: 's2_domain',
   s3Icp: 's3_icp',
+  /** Исторически «разбор вакансии»; в v2 — поводы и Lead Score. */
   s4Analyzed: 's4_analyzed',
   s5Email: 's5_email',
   s6Letters: 's6_letters',

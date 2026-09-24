@@ -32,6 +32,7 @@ export function ChangelogModal() {
   const [showMissed, setShowMissed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [closed, setClosed] = useState(false);
+  const [closing, setClosing] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -47,6 +48,14 @@ export function ChangelogModal() {
 
   useEffect(() => { void load(); }, [load]);
 
+  // Появление проигрывает CSS сам при монтировании (globals.css). Закрытие —
+  // сначала уводим окно вниз, потом снимаем его со страницы; время равно
+  // длительности анимации ухода.
+  const close = () => {
+    setClosing(true);
+    setTimeout(() => setClosed(true), 300);
+  };
+
   const confirm = async () => {
     setBusy(true);
     try {
@@ -54,7 +63,7 @@ export function ChangelogModal() {
     } finally {
       // Закрываем в любом случае: если отметка не дошла, окно вернётся при
       // следующем заходе — это лучше, чем окно, которое не закрывается.
-      setClosed(true);
+      close();
       setBusy(false);
     }
   };
@@ -63,12 +72,13 @@ export function ChangelogModal() {
 
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/40 p-4 backdrop-blur-sm sm:items-center"
+      className="portal-changelog-backdrop fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/40 p-4 backdrop-blur-sm sm:items-center"
+      data-closing={closing}
       role="dialog"
       aria-modal="true"
       aria-label="Обновления портала"
     >
-      <div className="my-auto flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+      <div className="portal-changelog-card my-auto flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
         <div className="flex items-start justify-between gap-4 border-b border-gray-200 px-6 py-4">
           <div className="flex items-start gap-3">
             <span className="mt-0.5 rounded-lg bg-indigo-50 p-2 text-indigo-600">
@@ -90,7 +100,7 @@ export function ChangelogModal() {
           </div>
           <button
             type="button"
-            onClick={() => setClosed(true)}
+            onClick={close}
             aria-label="Закрыть"
             title="Закрыть без отметки — окно вернётся при следующем заходе"
             className="rounded-lg p-1.5 text-gray-400 transition hover:bg-gray-100 hover:text-gray-700"

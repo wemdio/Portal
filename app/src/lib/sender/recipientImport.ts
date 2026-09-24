@@ -172,15 +172,7 @@ export function describeSavedRecipients(
     }
   }
 
-  // Порядок как в форме после загрузки файла: сначала почта и имя, дальше
-  // колонки базы по алфавиту — иначе набор чипов прыгает от выборки к выборке.
-  const fixed = [EMAIL_VAR, ...NAME_VARS] as string[];
-  variables.sort((a, b) => {
-    const ai = fixed.indexOf(a.key);
-    const bi = fixed.indexOf(b.key);
-    if (ai !== -1 || bi !== -1) return (ai === -1 ? fixed.length : ai) - (bi === -1 ? fixed.length : bi);
-    return a.key.localeCompare(b.key);
-  });
+  sortVariables(variables);
 
   return {
     emailHeader: null,
@@ -190,4 +182,55 @@ export function describeSavedRecipients(
     duplicates: 0,
     variables,
   };
+}
+
+/**
+ * Порядок как в форме после загрузки файла: сначала почта и имя, дальше
+ * колонки базы по алфавиту — иначе набор чипов прыгает от выборки к выборке.
+ */
+function sortVariables(variables: RecipientVariable[]): void {
+  const fixed = [EMAIL_VAR, ...NAME_VARS] as string[];
+  variables.sort((a, b) => {
+    const ai = fixed.indexOf(a.key);
+    const bi = fixed.indexOf(b.key);
+    if (ai !== -1 || bi !== -1) return (ai === -1 ? fixed.length : ai) - (bi === -1 ? fixed.length : bi);
+    return a.key.localeCompare(b.key);
+  });
+}
+
+/**
+ * Дополнить сводку по выборке точными цифрами по всей базе.
+ *
+ * `stats` — ключи колонок базы и у скольких они заполнены (по всем строкам).
+ * Ключ, которого не было в выборке, добавляется без примера значения: главное,
+ * что форма его знает и не считает переменную письма «неизвестной». Почта есть
+ * у всех; имя и first_name берутся из колонки имени, если в базе нет своих.
+ */
+export function mergeVariableStats(
+  summary: RecipientColumnsSummary,
+  stats: { key: string; filled: number }[],
+  counts: { total: number; named: number },
+): RecipientColumnsSummary {
+  const variables = summary.variables.map((v) => ({ ...v }));
+  const index = new Map(variables.map((v) => [v.key, v]));
+  const upsert = (key: string, filled: number) => {
+    const existing = index.get(key);
+    if (existing) {
+      existing.filled = filled;
+      return;
+    }
+    const added: RecipientVariable = { key, header: null, filled, sample: null };
+    index.set(key, added);
+    variables.push(added);
+  };
+
+  const fromBase = new Map(stats.map((s) => [s.key, Number(s.filled) || 0]));
+  for (const [key, filled] of fromBase) upsert(key, filled);
+  upsert(EMAIL_VAR, counts.total);
+  if (counts.named > 0) {
+    for (const key of NAME_VARS) upsert(key, Math.max(fromBase.get(key) ?? 0, counts.named));
+  }
+
+  sortVariables(variables);
+  return { ...summary, recipients: counts.total, variables };
 }

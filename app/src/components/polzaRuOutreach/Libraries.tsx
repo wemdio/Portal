@@ -3,11 +3,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Loader2, Plus, Trash2, Upload } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
-import { PROFILE_CODES, PROFILE_LABELS } from '@/lib/polzaRuOutreach/types';
+import { CHAIN_LABELS, CHAIN_TYPES, INDUSTRY_GROUP_LABELS, INDUSTRY_GROUPS } from '@/lib/polzaRuOutreach/types';
 import { API, api, fmtDate } from './shared';
 
 type Rec = Record<string, unknown> & { id: string };
-type FieldType = 'text' | 'textarea' | 'tags' | 'date' | 'bool' | 'select' | 'profiles';
+type FieldType = 'text' | 'textarea' | 'date' | 'bool' | 'select' | 'multi';
 interface Field {
   key: string;
   label: string;
@@ -27,29 +27,23 @@ const FIELDS: Record<TableKey, Field[]> = {
   cases: [
     { key: 'case_id', label: 'ID кейса', type: 'text', hint: 'короткий латиницей, например it_integrator_2026' },
     { key: 'public_name', label: 'Название для писем', type: 'text' },
-    { key: 'case_text_short', label: 'Текст для письма (1–2 предложения)', type: 'textarea', hint: 'вставляется в письмо 2 дословно после «Для примера:»' },
-    { key: 'industry_tags', label: 'Отрасли (через запятую)', type: 'tags', hint: 'по ним кейс подбирается к компании' },
-    { key: 'product_tags', label: 'Продукты (через запятую)', type: 'tags' },
-    { key: 'sales_model_tags', label: 'Модель продаж (через запятую)', type: 'tags' },
-    { key: 'allowed_profiles', label: 'В каких офферах можно', type: 'profiles' },
+    { key: 'case_text_short', label: 'Текст для письма (1–2 предложения)', type: 'textarea', hint: 'вставляется в письмо 3 дословно после «Для примера:», с маленькой буквы' },
+    { key: 'case_text_en', label: 'Текст для английских писем', type: 'textarea', hint: 'вставляется после «For a similar … company, we helped …»; с маленькой буквы, без точки' },
+    { key: 'case_segment_en', label: 'Сегмент для английских писем', type: 'text', hint: 'например: B2B software, industrial manufacturing' },
+    { key: 'case_url', label: 'Ссылка на кейс', type: 'text' },
+    { key: 'leads_count', label: 'Сколько лидов дал кейс', type: 'text', hint: 'в письма идут только кейсы от 8 лидов; пусто — кейс не используется' },
+    { key: 'industry_groups', label: 'Отраслевые группы', type: 'multi', options: INDUSTRY_GROUPS.map((g) => [g, INDUSTRY_GROUP_LABELS[g]] as [string, string]), hint: 'по ним кейс подбирается к компании' },
+    { key: 'allowed_chains', label: 'В каких цепочках можно', type: 'multi', options: CHAIN_TYPES.map((c) => [c, CHAIN_LABELS[c]] as [string, string]), hint: 'ничего не отмечено — во всех' },
     { key: 'status', label: 'Статус', type: 'select', options: STATUS_OPTIONS },
-    { key: 'legal_publication_approved', label: 'Разрешено публиковать', type: 'bool' },
+    { key: 'legal_publication_approved', label: 'Клиент разрешил упоминать', type: 'bool' },
     { key: 'verified_by', label: 'Кто проверил цифры', type: 'text' },
     { key: 'expires_at', label: 'Действует до', type: 'date' },
     { key: 'source_file_or_url', label: 'Источник цифр', type: 'text' },
     { key: 'notes', label: 'Заметки', type: 'textarea' },
   ],
   claims: [
-    { key: 'profile_code', label: 'Оффер', type: 'select', options: [['all', 'все офферы'], ...PROFILE_CODES.map((p) => [p, PROFILE_LABELS[p]] as [string, string])] },
-    {
-      key: 'claim_key',
-      label: 'Куда вставлять',
-      type: 'select',
-      options: [
-        ['letter2_value', 'письмо 2 (SDR, сигналы)'],
-        ['letter1_value', 'письмо 1 (автоматизация)'],
-      ],
-    },
+    { key: 'chain_type', label: 'Цепочка', type: 'select', options: [['all', 'все цепочки'], ...CHAIN_TYPES.map((c) => [c, CHAIN_LABELS[c]] as [string, string])] },
+    { key: 'claim_key', label: 'Куда вставлять', type: 'select', options: [['letter2_value', 'письмо 2, после описания подхода'], ['sdr_role_proof', 'SDR, письмо 2: до каких ролей доходили в кампаниях клиентов']] },
     { key: 'claim_text', label: 'Текст утверждения', type: 'textarea', hint: 'все цифры, сроки и гарантии — только отсюда' },
     { key: 'status', label: 'Статус', type: 'select', options: STATUS_OPTIONS },
     { key: 'approved_by', label: 'Кто утвердил', type: 'text' },
@@ -70,8 +64,8 @@ const FIELDS: Record<TableKey, Field[]> = {
 const TITLES: Record<TableKey, { title: string; hint: string; summary: (r: Rec) => string }> = {
   cases: {
     title: 'Кейсы',
-    hint: 'В письмо попадает только утверждённый кейс с разрешением на публикацию и совпадающими тегами. Нет подходящего — письмо 2 идёт без кейса.',
-    summary: (r) => `${r.public_name} — ${r.case_text_short}`,
+    hint: 'В письмо 3 попадает только утверждённый кейс с разрешением на публикацию, совпадающей отраслевой группой и от 8 лидов. Нет подходящего — письмо 3 идёт без кейса.',
+    summary: (r) => `${r.public_name}${r.leads_count != null && r.leads_count !== '' ? ` · ${r.leads_count} лидов` : ' · лиды не указаны'} — ${r.case_text_short}`,
   },
   claims: {
     title: 'Утверждения оффера',
@@ -92,8 +86,7 @@ function toForm(fields: Field[], rec: Rec | null): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const f of fields) {
     const v = rec?.[f.key];
-    if (f.type === 'tags') out[f.key] = Array.isArray(v) ? v.join(', ') : '';
-    else if (f.type === 'profiles') out[f.key] = Array.isArray(v) ? v : [];
+    if (f.type === 'multi') out[f.key] = Array.isArray(v) ? v : [];
     else if (f.type === 'bool') out[f.key] = Boolean(v);
     else if (f.type === 'date') out[f.key] = typeof v === 'string' ? v.slice(0, 10) : '';
     else if (f.type === 'select') out[f.key] = v ?? f.options?.[0]?.[0] ?? '';
@@ -125,9 +118,9 @@ function RecordForm({ table, initial, onSave, onCancel }: { table: TableKey; ini
                   </option>
                 ))}
               </select>
-            ) : f.type === 'profiles' ? (
+            ) : f.type === 'multi' ? (
               <div className="flex flex-wrap gap-3">
-                {PROFILE_CODES.map((p) => {
+                {f.options?.map(([p, l]) => {
                   const list = (values[f.key] as string[]) ?? [];
                   return (
                     <label key={p} className="flex items-center gap-1.5 text-sm text-gray-700">
@@ -136,7 +129,7 @@ function RecordForm({ table, initial, onSave, onCancel }: { table: TableKey; ini
                         checked={list.includes(p)}
                         onChange={() => set(f.key, list.includes(p) ? list.filter((x) => x !== p) : [...list, p])}
                       />
-                      {PROFILE_LABELS[p]}
+                      {l}
                     </label>
                   );
                 })}
@@ -249,7 +242,7 @@ function LibrarySection({ table, rows, onChanged, onError }: { table: TableKey; 
 }
 
 function UploadsSection({ uploads, onChanged, onError }: { uploads: Rec[]; onChanged: () => void; onError: (m: string) => void }) {
-  const [kind, setKind] = useState<'exhibitors' | 'contracts'>('exhibitors');
+  const [kind, setKind] = useState<'exhibitors' | 'contracts' | 'growth'>('exhibitors');
   const [title, setTitle] = useState('');
   const [eventStart, setEventStart] = useState('');
   const [eventEnd, setEventEnd] = useState('');
@@ -297,17 +290,19 @@ function UploadsSection({ uploads, onChanged, onError }: { uploads: Rec[]; onCha
 
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-      <div className="text-base font-semibold text-gray-900">Файлы сигналов: выставки и госконтракты</div>
+      <div className="text-base font-semibold text-gray-900">Файлы сигналов: выставки, госконтракты, гранты</div>
       <p className="mt-0.5 max-w-3xl text-sm text-gray-500">
-        Каталог участников выставки (с официального сайта) или выгрузка результатов поиска контрактов из ЕИС — Excel или CSV.
+        Каталог участников выставки (с официального сайта), выгрузка результатов поиска контрактов из ЕИС или список
+        получателей грантов / участников акселератора (Сколково, ФРИИ и т.п.) — Excel или CSV.
         Нужна колонка с названием компании; сайт, ИНН, дата, предмет, сумма и заказчик распознаются по заголовкам.
       </p>
       <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
-        <select className={inputCls} value={kind} onChange={(e) => setKind(e.target.value as 'exhibitors' | 'contracts')}>
+        <select className={inputCls} value={kind} onChange={(e) => setKind(e.target.value as 'exhibitors' | 'contracts' | 'growth')}>
           <option value="exhibitors">Каталог выставки</option>
           <option value="contracts">Выгрузка контрактов ЕИС</option>
+          <option value="growth">Список грантов / акселератора</option>
         </select>
-        <input className={inputCls} placeholder={kind === 'exhibitors' ? 'Название выставки' : 'Название выгрузки'} value={title} onChange={(e) => setTitle(e.target.value)} />
+        <input className={inputCls} placeholder={kind === 'exhibitors' ? 'Название выставки' : kind === 'growth' ? 'Название программы (попадёт в письмо)' : 'Название выгрузки'} value={title} onChange={(e) => setTitle(e.target.value)} />
         <input className={inputCls} type="file" accept=".xlsx,.xls,.csv" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
         {kind === 'exhibitors' && (
           <>
@@ -334,7 +329,7 @@ function UploadsSection({ uploads, onChanged, onError }: { uploads: Rec[]; onCha
         {uploads.map((u) => (
           <div key={u.id} className="flex items-center justify-between gap-3 py-2 text-sm">
             <div className="min-w-0 text-gray-800">
-              <span className="mr-2 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{u.kind === 'exhibitors' ? 'выставка' : 'контракты'}</span>
+              <span className="mr-2 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{u.kind === 'exhibitors' ? 'выставка' : u.kind === 'growth' ? 'гранты' : 'контракты'}</span>
               {String(u.title)}
               {u.event_start ? <span className="ml-2 text-xs text-gray-500">{fmtDate(String(u.event_start))}</span> : null}
               <span className="ml-2 text-xs text-gray-500">строк: {String(u.rows_total)}</span>

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import { fetchFullThread } from '@/lib/replyPersonalization/instantlyThread';
 import { resolveProjectReply } from '@/lib/replyPersonalization/projectReply';
+import { findReferredEmails } from '@/lib/replyPersonalization/referredContact';
 import type { ThreadMessage } from '@/lib/replyPersonalization/types';
 
 export const dynamic = 'force-dynamic';
@@ -17,6 +18,7 @@ const CACHE_TTL_MS = 5 * 60 * 1000;
 interface CachedThread {
   messages: ThreadMessage[];
   contextComplete: boolean;
+  referredEmails: string[];
   expiresAt: number;
 }
 
@@ -45,7 +47,11 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
 
   const cached = THREAD_CACHE.get(qualificationId);
   if (cached && cached.expiresAt > Date.now()) {
-    return NextResponse.json({ messages: cached.messages, contextComplete: cached.contextComplete });
+    return NextResponse.json({
+      messages: cached.messages,
+      contextComplete: cached.contextComplete,
+      referredEmails: cached.referredEmails,
+    });
   }
 
   const reply = await resolveProjectReply(projectId, qualificationId);
@@ -67,8 +73,12 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
     messages = fallbackThread(qualification);
   }
 
-  pruneCache();
-  THREAD_CACHE.set(qualificationId, { messages, contextComplete, expiresAt: Date.now() + CACHE_TTL_MS });
+  // Новый контакт ищем в последнем ответе адресата: «пишите Екатерине, почта ...».
+  const lastInbound = [...messages].reverse().find((m) => !m.fromUs)?.text ?? qualification.replyBody ?? '';
+  const referredEmails = findReferredEmails(lastInbound, [qualification.leadEmail, qualification.eaccount]);
 
-  return NextResponse.json({ messages, contextComplete });
+  pruneCache();
+  THREAD_CACHE.set(qualificationId, { messages, contextComplete, referredEmails, expiresAt: Date.now() + CACHE_TTL_MS });
+
+  return NextResponse.json({ messages, contextComplete, referredEmails });
 });

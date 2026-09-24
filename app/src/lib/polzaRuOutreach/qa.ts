@@ -13,12 +13,15 @@
  */
 
 import { formatSignature, type SenderProfile } from './libraries';
-import type { Letter, ProfileCode, QaResult } from './types';
+import type { Letter, QaResult } from './types';
 import { LETTER_COUNT } from './types';
 
 export interface QaInput {
-  profile: ProfileCode;
   letters: Letter[];
+  /** Сколько писем должно быть в цепочке: SDR — три, остальные — четыре. */
+  expectedLetters?: number;
+  /** Статус компании в AMO: открытая сделка и клиент блокируют выгрузку. */
+  amoStatus: string | null;
   sender: SenderProfile;
   priorContact: boolean;
   caseText: string | null;
@@ -41,6 +44,8 @@ const FORBIDDEN: Array<[RegExp, string]> = [
   [/мы лучшие|революцион/i, 'forbidden:superlative'],
   [/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u, 'forbidden:emoji'],
   [/\bjson\b|```|\bundefined\b|\bnull\b|confidence|\bTODO\b/i, 'internal_text'],
+  // Внутренняя кухня конвейера не должна утекать в письмо (RU_OUTREACH_HANDOFF §3.6).
+  [/\b(score|scoring|pipeline|validation|pre-scoring|rerank|icp|llm|evidence|lead_score)\b|скоринг|ца-балл/i, 'internal_words'],
 ];
 
 const CANDIDATE_LIKE_SUBJECT = /резюме|отклик|кандидат|соискател|ваканси[ияю]\s+[«"]?[^»"]{40,}/i;
@@ -57,8 +62,9 @@ function stripAll(text: string, pieces: string[]): string {
 
 export function runQa(input: QaInput): QaResult {
   const flags: string[] = [];
-  const expected = LETTER_COUNT[input.profile];
+  const expected = input.expectedLetters ?? LETTER_COUNT;
   if (input.letters.length !== expected) flags.push(`letter_count:${input.letters.length}/${expected}`);
+  if (input.amoStatus === 'open_deal' || input.amoStatus === 'client') flags.push(`amo_blocked:${input.amoStatus}`);
   if (!input.recipientEmail || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(input.recipientEmail)) flags.push('email_invalid');
 
   const signature = `С уважением,\n${formatSignature(input.sender)}`;
@@ -102,7 +108,7 @@ export function runQa(input: QaInput): QaResult {
     flags.push('case_text_mismatch');
   }
 
-  if (input.profile === 'signals_v1' && bodyWords.length === 4) {
+  if (bodyWords.length === 4) {
     if (!(bodyWords[3] < bodyWords[1] && bodyWords[3] < bodyWords[2])) flags.push('L4:not_shortest');
   }
 
