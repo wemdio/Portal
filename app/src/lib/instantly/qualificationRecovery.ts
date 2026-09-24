@@ -43,7 +43,12 @@ export function qualificationRecoveryBackoff(
     const delay = Math.max(10_000, Math.min(60_000, readDeferral.retryAfterMs)) + hash % 5_001;
     return {
       recovery_failure_kind: 'local_read_quota',
-      recovery_failure_count: 0,
+      // Admission failure is not a new ownership attempt, nor evidence that
+      // the earlier conflict disappeared. Preserve that streak across quota
+      // waits; otherwise alternating quota/ownership outcomes retry forever
+      // at the first-step delay. Other provider failures retain the old reset.
+      recovery_failure_count: ['ownership', 'local_read_quota'].includes(previous.recovery_failure_kind ?? '')
+        ? Math.min(30, Math.max(0, previous.recovery_failure_count ?? 0)) : 0,
       recovery_next_at: new Date(nowMs + delay).toISOString(),
     };
   }
@@ -58,7 +63,8 @@ export function qualificationRecoveryBackoff(
                 : /checkpoint (?:busy|unavailable)/i.test(message) ? 'checkpoint_unavailable'
                   : /ownership|page budget/i.test(message) ? 'ownership'
                     : 'dependency_unavailable';
-  const count = previous.recovery_failure_kind === kind
+  const count = previous.recovery_failure_kind === kind ||
+    (kind === 'ownership' && previous.recovery_failure_kind === 'local_read_quota')
     ? Math.min(30, Math.max(0, previous.recovery_failure_count ?? 0) + 1) : 1;
   const blocked = ['ai_budget_exhausted', 'ai_final_budget_exhausted', 'evidence_blocked', 'source_missing'].includes(kind);
   // Cheap rechecks may discover changed source/owner/input; they cannot reset
