@@ -5,7 +5,7 @@ import { Plus, Search, Trash2 } from 'lucide-react';
 import { INDUSTRY_GROUPS, INDUSTRY_GROUP_LABELS } from '@/lib/polzaRuOutreach/types';
 import { LibraryRecordForm } from './LibraryRecordForm';
 import { UploadsSection } from './UploadsSection';
-import { WorkArea } from './WorkArea';
+import { WorkArea } from '@/components/ui/WorkArea';
 import { TABLE_META, statusLabel, statusOptionsFor, type TableKey } from './libraryFields';
 import {
   EMPTY_QUERY,

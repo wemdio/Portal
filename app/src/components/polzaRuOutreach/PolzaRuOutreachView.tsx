@@ -7,7 +7,7 @@ import { JobDetail } from './JobDetail';
 import { JobList } from './JobList';
 import { LaunchPanel } from './LaunchPanel';
 import { Libraries } from './Libraries';
-import { WorkArea } from './WorkArea';
+import { WorkArea } from '@/components/ui/WorkArea';
 import { API, RESULTS_PAGE, api, downloadFile, type ResultsFilter, type ResultsResponse, type RuJob } from './shared';
 
 type Tab = 'launch' | 'libraries';

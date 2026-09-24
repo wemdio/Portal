@@ -1,13 +1,14 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { X } from 'lucide-react';
+import { Play, X } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch } from '@/lib/authFetch';
 import type { PolzaOutreachCompanyRow, PolzaOutreachConfig, PolzaOutreachFunnel, PolzaOutreachParserJob } from '@/types';
-import { JobsList } from '@/components/parsers/JobsList';
-import { PolzaOutreachForm } from '@/components/parsers/PolzaOutreachForm';
+import { PolzaOutreachLaunchPanel } from '@/components/parsers/PolzaOutreachLaunchPanel';
 import { PolzaOutreachResults } from '@/components/parsers/PolzaOutreachResults';
+import { JobRail, type JobRailItem } from '@/components/ui/JobRail';
+import { WorkArea } from '@/components/ui/WorkArea';
 
 type JobsResponse = { jobs: PolzaOutreachParserJob[] };
 type CreateJobResponse = { job: PolzaOutreachParserJob };
@@ -95,6 +96,14 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** Дата запуска в колонке: день, месяц и время — этого хватает, чтобы отличить соседние. */
+function fmtJobDate(value: string): string {
+  const d = new Date(value);
+  return Number.isNaN(d.getTime())
+    ? value
+    : d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
 function csvCell(value: unknown) {
   const text = String(value ?? '').replaceAll('\r', ' ').replaceAll('\n', ' ').replaceAll('\t', ' ');
   return `"${text.replaceAll('"', '""')}"`;
@@ -171,7 +180,7 @@ export function PolzaOutreachView() {
   const [jobs, setJobs] = useState<PolzaOutreachParserJob[]>([]);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
+  const [panel, setPanel] = useState<{ initial: PolzaOutreachConfig | null; seq: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ tone: 'success' | 'error'; message: string } | null>(null);
 
@@ -192,6 +201,23 @@ export function PolzaOutreachView() {
   const [deleteCandidate, setDeleteCandidate] = useState<string | null>(null);
 
   const activeJob = useMemo(() => jobs.find((job) => job.id === activeJobId) ?? null, [activeJobId, jobs]);
+
+  const railItems = useMemo<JobRailItem[]>(
+    () =>
+      jobs.map((job) => {
+        const target = job.config?.limit ?? null;
+        const done = job.total_parsed ?? 0;
+        return {
+          id: job.id,
+          status: job.status,
+          title: target ? `На ${target} компаний` : 'Запуск',
+          subtitle: `${fmtJobDate(job.created_at)} · готово ${done}${target ? ` из ${target}` : ''}`,
+          percent: job.status === 'completed' ? 100 : job.progress_percent ?? 0,
+          deletable: job.status !== 'running' && job.status !== 'pending',
+        };
+      }),
+    [jobs],
+  );
 
   // Полосу ошибки читают один раз, а места она занимала до перезагрузки
   // страницы — и следующая ошибка падала поверх прежней.
@@ -370,14 +396,14 @@ export function PolzaOutreachView() {
   );
 
   const manualRefresh = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      await refreshJobs();
-      if (activeJobId) await loadResults(activeJobId, resultsPage);
-    } finally {
-      setRefreshing(false);
-    }
+    await refreshJobs();
+    if (activeJobId) await loadResults(activeJobId, resultsPage);
   }, [activeJobId, loadResults, refreshJobs, resultsPage]);
+
+  const openPanel = useCallback(
+    (initial: PolzaOutreachConfig | null) => setPanel((prev) => ({ initial, seq: (prev?.seq ?? 0) + 1 })),
+    [],
+  );
 
   const handlePageChange = useCallback(
     (page: number) => {
@@ -511,19 +537,38 @@ export function PolzaOutreachView() {
         </div>
       ) : null}
 
-      <PolzaOutreachForm onStart={start} busy={busy} />
-
-      <div className="grid grid-cols-1 items-start gap-6 xl:grid-cols-[380px_minmax(0,1fr)]">
-        <JobsList
-          jobs={jobs}
-          activeJobId={activeJobId}
-          activeJobParsedCount={resultsCount}
-          onSelect={(id) => setActiveJobId(id)}
-          onRefresh={() => void manualRefresh()}
-          busy={busy}
-          refreshing={refreshing}
-        />
-
+      {jobs.length === 0 ? (
+        <div className="rounded-xl border border-gray-200 bg-white p-8 text-center shadow-sm">
+          <div className="text-base font-semibold text-gray-900">Запусков ещё не было</div>
+          <p className="mx-auto mt-1 max-w-xl text-sm text-gray-500">
+            Соберём B2B-компании с поводом написать — найм в sales/GTM или свежий батч YC, — отберём по Lead Score, найдём почту и напишем
+            цепочку из четырёх писем на английском. Без отправки: на выходе таблица и выгрузка.
+          </p>
+          <button
+            type="button"
+            onClick={() => openPanel(null)}
+            className="mt-4 inline-flex items-center rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700"
+          >
+            <Play className="mr-2 h-4 w-4" /> Новый запуск
+          </button>
+        </div>
+      ) : (
+      <WorkArea
+        aside={
+          <JobRail
+            items={railItems}
+            activeId={activeJobId}
+            onSelect={(id) => setActiveJobId(id)}
+            onNew={() => openPanel(null)}
+            onRefresh={() => void manualRefresh()}
+            onRepeat={(id) => {
+              const job = jobs.find((j) => j.id === id);
+              if (job) openPanel(job.config ?? null);
+            }}
+            onDelete={(id) => setDeleteCandidate(id)}
+          />
+        }
+      >
         <PolzaOutreachResults
           items={results}
           count={resultsCount}
@@ -545,7 +590,18 @@ export function PolzaOutreachView() {
           onStopJob={activeJob?.id ? () => void stopJob() : undefined}
           onDeleteJob={activeJob?.id ? () => setDeleteCandidate(activeJob.id) : undefined}
         />
-      </div>
+      </WorkArea>
+      )}
+
+      {panel ? (
+        <PolzaOutreachLaunchPanel
+          key={panel.seq}
+          busy={busy}
+          initial={panel.initial}
+          onClose={() => setPanel(null)}
+          onStart={start}
+        />
+      ) : null}
 
       {deleteCandidate ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">

@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { Loader2 } from 'lucide-react';
-import { SidePanel } from './SidePanel';
+import { SidePanel } from '@/components/ui/SidePanel';
 import { FIELDS, type Field, type TableKey } from './libraryFields';
 import type { Rec } from './libraryFilters';
 

@@ -13,7 +13,7 @@ import {
   type RuOutreachConfig,
   type SourceCode,
 } from '@/lib/polzaRuOutreach/types';
-import { SidePanel } from './SidePanel';
+import { SidePanel } from '@/components/ui/SidePanel';
 
 interface Props {
   open: boolean;
