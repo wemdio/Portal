@@ -17,10 +17,10 @@ type Log = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => v
 
 const BATCH = 10;
 
-export async function verifyPendingMailboxes(opts?: { log?: Log }): Promise<number> {
+export async function verifyPendingMailboxes(opts: { egressIp: string; log?: Log }): Promise<number> {
   if (!supabaseAdmin) return 0;
   const db = supabaseAdmin;
-  const log: Log = opts?.log ?? (() => {});
+  const log: Log = opts.log ?? (() => {});
 
   const { data } = await db
     .from('sender_mailboxes')
@@ -29,6 +29,9 @@ export async function verifyPendingMailboxes(opts?: { log?: Log }): Promise<numb
     // Невыбранные ящики не проверяем: вход в ящик — это лишний логин у
     // провайдера, а на каталоге в двести адресов таких логинов были бы сотни.
     .eq('enabled', true)
+    // Вход в ящик — только с его адреса: проверка с чужого адреса и есть тот
+    // «вход из необычного места», от которого закрепление защищает.
+    .eq('egress_ip', opts.egressIp)
     .order('created_at')
     .limit(BATCH);
 

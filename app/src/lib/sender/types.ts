@@ -29,6 +29,8 @@ export interface MailboxRow {
   google_state: 'active' | 'suspended' | 'missing' | null;
   /** Админ Workspace, из чьего каталога пришёл ящик (их может быть несколько). */
   google_account: string | null;
+  /** Адрес отправки, за которым закреплён ящик; null — ещё не выдан. */
+  egress_ip: string | null;
   status: MailboxStatus;
   daily_campaign_limit: number;
   daily_total_limit: number;
