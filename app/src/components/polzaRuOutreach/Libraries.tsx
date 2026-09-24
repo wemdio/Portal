@@ -1,174 +1,73 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
-import { Loader2, Plus, Trash2, Upload } from 'lucide-react';
-import { authFetch } from '@/lib/authFetch';
-import { CHAIN_LABELS, CHAIN_TYPES, INDUSTRY_GROUP_LABELS, INDUSTRY_GROUPS } from '@/lib/polzaRuOutreach/types';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Plus, Search, Trash2 } from 'lucide-react';
+import { INDUSTRY_GROUPS, INDUSTRY_GROUP_LABELS } from '@/lib/polzaRuOutreach/types';
+import { LibraryRecordForm } from './LibraryRecordForm';
+import { UploadsSection } from './UploadsSection';
+import { WorkArea } from '@/components/ui/WorkArea';
+import { TABLE_META, statusLabel, statusOptionsFor, type TableKey } from './libraryFields';
+import {
+  EMPTY_QUERY,
+  MIN_CASE_LEADS,
+  applyListQuery,
+  isBelowLeadBar,
+  leadsOf,
+  paginate,
+  type ListQuery,
+  type Rec,
+  type SortKey,
+} from './libraryFilters';
 import { API, api, fmtDate } from './shared';
 
-type Rec = Record<string, unknown> & { id: string };
-type FieldType = 'text' | 'textarea' | 'date' | 'bool' | 'select' | 'multi';
-interface Field {
-  key: string;
-  label: string;
-  type: FieldType;
-  options?: Array<[string, string]>;
-  hint?: string;
-}
-type TableKey = 'cases' | 'claims' | 'senders';
-
-const STATUS_OPTIONS: Array<[string, string]> = [
-  ['draft', 'черновик'],
-  ['approved', 'утверждено'],
-  ['expired', 'истекло'],
-];
-
-const FIELDS: Record<TableKey, Field[]> = {
-  cases: [
-    { key: 'case_id', label: 'ID кейса', type: 'text', hint: 'короткий латиницей, например it_integrator_2026' },
-    { key: 'public_name', label: 'Название для писем', type: 'text' },
-    { key: 'case_text_short', label: 'Текст для письма (1–2 предложения)', type: 'textarea', hint: 'вставляется в письмо 3 дословно после «Для примера:», с маленькой буквы' },
-    { key: 'case_text_en', label: 'Текст для английских писем', type: 'textarea', hint: 'вставляется после «For a similar … company, we helped …»; с маленькой буквы, без точки' },
-    { key: 'case_segment_en', label: 'Сегмент для английских писем', type: 'text', hint: 'например: B2B software, industrial manufacturing' },
-    { key: 'case_url', label: 'Ссылка на кейс', type: 'text' },
-    { key: 'leads_count', label: 'Сколько лидов дал кейс', type: 'text', hint: 'в письма идут только кейсы от 8 лидов; пусто — кейс не используется' },
-    { key: 'industry_groups', label: 'Отраслевые группы', type: 'multi', options: INDUSTRY_GROUPS.map((g) => [g, INDUSTRY_GROUP_LABELS[g]] as [string, string]), hint: 'по ним кейс подбирается к компании' },
-    { key: 'allowed_chains', label: 'В каких цепочках можно', type: 'multi', options: CHAIN_TYPES.map((c) => [c, CHAIN_LABELS[c]] as [string, string]), hint: 'ничего не отмечено — во всех' },
-    { key: 'status', label: 'Статус', type: 'select', options: STATUS_OPTIONS },
-    { key: 'legal_publication_approved', label: 'Клиент разрешил упоминать', type: 'bool' },
-    { key: 'verified_by', label: 'Кто проверил цифры', type: 'text' },
-    { key: 'expires_at', label: 'Действует до', type: 'date' },
-    { key: 'source_file_or_url', label: 'Источник цифр', type: 'text' },
-    { key: 'notes', label: 'Заметки', type: 'textarea' },
-  ],
-  claims: [
-    { key: 'chain_type', label: 'Цепочка', type: 'select', options: [['all', 'все цепочки'], ...CHAIN_TYPES.map((c) => [c, CHAIN_LABELS[c]] as [string, string])] },
-    { key: 'claim_key', label: 'Куда вставлять', type: 'select', options: [['letter2_value', 'письмо 2, после описания подхода'], ['sdr_role_proof', 'SDR, письмо 2: до каких ролей доходили в кампаниях клиентов']] },
-    { key: 'claim_text', label: 'Текст утверждения', type: 'textarea', hint: 'все цифры, сроки и гарантии — только отсюда' },
-    { key: 'status', label: 'Статус', type: 'select', options: STATUS_OPTIONS },
-    { key: 'approved_by', label: 'Кто утвердил', type: 'text' },
-    { key: 'expires_at', label: 'Действует до', type: 'date' },
-  ],
-  senders: [
-    { key: 'sender_name', label: 'Имя', type: 'text' },
-    { key: 'sender_title', label: 'Должность', type: 'text' },
-    { key: 'company_name', label: 'Компания', type: 'text' },
-    { key: 'phone', label: 'Телефон', type: 'text' },
-    { key: 'website', label: 'Сайт', type: 'text' },
-    { key: 'telegram', label: 'Telegram', type: 'text' },
-    { key: 'status', label: 'Статус', type: 'select', options: [['active', 'активна'], ['inactive', 'выключена']] },
-    { key: 'is_default', label: 'По умолчанию', type: 'bool' },
-  ],
-};
-
-const TITLES: Record<TableKey, { title: string; hint: string; summary: (r: Rec) => string }> = {
-  cases: {
-    title: 'Кейсы',
-    hint: 'В письмо 3 попадает только утверждённый кейс с разрешением на публикацию, совпадающей отраслевой группой и от 8 лидов. Нет подходящего — письмо 3 идёт без кейса.',
-    summary: (r) => `${r.public_name}${r.leads_count != null && r.leads_count !== '' ? ` · ${r.leads_count} лидов` : ' · лиды не указаны'} — ${r.case_text_short}`,
-  },
-  claims: {
-    title: 'Утверждения оффера',
-    hint: 'Цифры, цены, сроки и гарантии. Без утверждённой записи письма остаются без цифр.',
-    summary: (r) => String(r.claim_text),
-  },
-  senders: {
-    title: 'Подписи',
-    hint: 'Подпись берётся целиком из профиля и не смешивается с другой.',
-    summary: (r) => [r.sender_name, r.sender_title, r.company_name, r.phone, r.website, r.telegram].filter(Boolean).join(' · '),
-  },
-};
+type SectionKey = TableKey | 'uploads';
 
 const inputCls =
-  'w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-violet-400 focus:outline-none focus:ring-1 focus:ring-violet-400';
+  'rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-900 focus:border-violet-400 focus:outline-none focus:ring-1 focus:ring-violet-400';
 
-function toForm(fields: Field[], rec: Rec | null): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const f of fields) {
-    const v = rec?.[f.key];
-    if (f.type === 'multi') out[f.key] = Array.isArray(v) ? v : [];
-    else if (f.type === 'bool') out[f.key] = Boolean(v);
-    else if (f.type === 'date') out[f.key] = typeof v === 'string' ? v.slice(0, 10) : '';
-    else if (f.type === 'select') out[f.key] = v ?? f.options?.[0]?.[0] ?? '';
-    else out[f.key] = v ?? '';
-  }
-  return out;
+const SORT_OPTIONS: Array<[SortKey, string]> = [
+  ['default', 'Порядок по умолчанию'],
+  ['name', 'По названию'],
+  ['updated', 'Сначала изменённые'],
+];
+
+const CASE_SORT_OPTIONS: Array<[SortKey, string]> = [
+  ['default', 'Порядок по умолчанию'],
+  ['leads_desc', 'Лидов больше'],
+  ['leads_asc', 'Лидов меньше'],
+  ['name', 'По названию'],
+  ['updated', 'Сначала изменённые'],
+];
+
+function Badge({ tone, children }: { tone: 'ok' | 'muted' | 'warn'; children: React.ReactNode }) {
+  const cls =
+    tone === 'ok' ? 'bg-emerald-50 text-emerald-700' : tone === 'warn' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600';
+  return <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${cls}`}>{children}</span>;
 }
 
-function RecordForm({ table, initial, onSave, onCancel }: { table: TableKey; initial: Rec | null; onSave: (v: Record<string, unknown>) => Promise<void>; onCancel: () => void }) {
-  const fields = FIELDS[table];
-  const [values, setValues] = useState<Record<string, unknown>>(() => toForm(fields, initial));
-  const [saving, setSaving] = useState(false);
-  const set = (k: string, v: unknown) => setValues((prev) => ({ ...prev, [k]: v }));
-  return (
-    <div className="mt-3 rounded-lg border border-violet-200 bg-violet-50/40 p-4">
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        {fields.map((f) => (
-          <div key={f.key} className={f.type === 'textarea' ? 'md:col-span-2' : ''}>
-            <label className="mb-1 block text-xs font-medium text-gray-700">{f.label}</label>
-            {f.type === 'textarea' ? (
-              <textarea className={inputCls} rows={3} value={String(values[f.key] ?? '')} onChange={(e) => set(f.key, e.target.value)} />
-            ) : f.type === 'bool' ? (
-              <input type="checkbox" checked={Boolean(values[f.key])} onChange={(e) => set(f.key, e.target.checked)} />
-            ) : f.type === 'select' ? (
-              <select className={inputCls} value={String(values[f.key] ?? '')} onChange={(e) => set(f.key, e.target.value)}>
-                {f.options?.map(([v, l]) => (
-                  <option key={v} value={v}>
-                    {l}
-                  </option>
-                ))}
-              </select>
-            ) : f.type === 'multi' ? (
-              <div className="flex flex-wrap gap-3">
-                {f.options?.map(([p, l]) => {
-                  const list = (values[f.key] as string[]) ?? [];
-                  return (
-                    <label key={p} className="flex items-center gap-1.5 text-sm text-gray-700">
-                      <input
-                        type="checkbox"
-                        checked={list.includes(p)}
-                        onChange={() => set(f.key, list.includes(p) ? list.filter((x) => x !== p) : [...list, p])}
-                      />
-                      {l}
-                    </label>
-                  );
-                })}
-              </div>
-            ) : (
-              <input className={inputCls} type={f.type === 'date' ? 'date' : 'text'} value={String(values[f.key] ?? '')} onChange={(e) => set(f.key, e.target.value)} />
-            )}
-            {f.hint ? <div className="mt-0.5 text-xs text-gray-500">{f.hint}</div> : null}
-          </div>
-        ))}
-      </div>
-      <div className="mt-4 flex gap-2">
-        <button
-          type="button"
-          disabled={saving}
-          onClick={async () => {
-            setSaving(true);
-            try {
-              await onSave(values);
-            } finally {
-              setSaving(false);
-            }
-          }}
-          className="inline-flex items-center rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50"
-        >
-          {saving ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : null}
-          Сохранить
-        </button>
-        <button type="button" onClick={onCancel} className="rounded-lg px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100">
-          Отмена
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function LibrarySection({ table, rows, onChanged, onError }: { table: TableKey; rows: Rec[]; onChanged: () => void; onError: (m: string) => void }) {
+function LibrarySection({
+  table,
+  rows,
+  onChanged,
+  onError,
+}: {
+  table: TableKey;
+  rows: Rec[];
+  onChanged: () => void;
+  onError: (m: string) => void;
+}) {
+  const meta = TABLE_META[table];
   const [editing, setEditing] = useState<Rec | 'new' | null>(null);
-  const meta = TITLES[table];
+  const [query, setQuery] = useState<ListQuery>(EMPTY_QUERY);
+  const [pageRaw, setPage] = useState(0);
+
+  const filtered = useMemo(() => applyListQuery(rows, query, meta.searchFields), [rows, query, meta.searchFields]);
+  const { rows: pageRows, page, totalPages, from } = paginate(filtered, pageRaw);
+
+  const patch = (part: Partial<ListQuery>) => {
+    setQuery((prev) => ({ ...prev, ...part }));
+    setPage(0);
+  };
 
   const save = async (values: Record<string, unknown>) => {
     try {
@@ -194,152 +93,141 @@ function LibrarySection({ table, rows, onChanged, onError }: { table: TableKey; 
     }
   };
 
+  const sortOptions = meta.isCases ? CASE_SORT_OPTIONS : SORT_OPTIONS;
+  const filtersOn = query.query !== '' || query.status !== '' || query.industry !== '';
+
   return (
-    <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-      <div className="flex items-start justify-between gap-4">
+    <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+      <div className="flex items-start justify-between gap-4 border-b border-gray-200 p-5">
         <div>
           <div className="text-base font-semibold text-gray-900">{meta.title}</div>
           <p className="mt-0.5 max-w-3xl text-sm text-gray-500">{meta.hint}</p>
         </div>
-        <button type="button" onClick={() => setEditing('new')} className="inline-flex shrink-0 items-center rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50">
+        <button
+          type="button"
+          onClick={() => setEditing('new')}
+          className="inline-flex shrink-0 items-center rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-700"
+        >
           <Plus className="mr-1 h-4 w-4" /> Добавить
         </button>
       </div>
-      {editing === 'new' && <RecordForm table={table} initial={null} onSave={save} onCancel={() => setEditing(null)} />}
-      <div className="mt-3 divide-y divide-gray-100">
-        {rows.length === 0 && <div className="py-3 text-sm text-gray-500">Пока пусто.</div>}
-        {rows.map((r) => (
-          <div key={r.id} className="py-2.5">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0 text-sm text-gray-800">
-                <span
-                  className={`mr-2 rounded-full px-2 py-0.5 text-xs ${
-                    r.status === 'approved' || r.status === 'active' ? 'bg-emerald-50 text-emerald-700' : 'bg-gray-100 text-gray-600'
-                  }`}
-                >
-                  {String(STATUS_OPTIONS.find(([v]) => v === r.status)?.[1] ?? (r.status === 'active' ? 'активна' : r.status === 'inactive' ? 'выключена' : r.status))}
-                </span>
-                {r.is_default ? <span className="mr-2 text-xs text-violet-700">по умолчанию</span> : null}
-                {r.case_id ? <span className="mr-2 font-mono text-xs text-gray-500">{String(r.case_id)}</span> : null}
-                {r.expires_at ? <span className="mr-2 text-xs text-gray-500">до {fmtDate(String(r.expires_at))}</span> : null}
-                {meta.summary(r)}
-              </div>
-              <div className="flex shrink-0 gap-1">
-                <button type="button" onClick={() => setEditing(r)} className="rounded-md px-2 py-1 text-xs text-violet-700 hover:bg-violet-50">
-                  Изменить
-                </button>
-                <button type="button" onClick={() => remove(r.id)} className="rounded-md p-1 text-gray-400 hover:bg-red-50 hover:text-red-600" aria-label="Удалить">
-                  <Trash2 className="h-4 w-4" />
-                </button>
-              </div>
-            </div>
-            {editing !== 'new' && editing?.id === r.id && <RecordForm table={table} initial={r} onSave={save} onCancel={() => setEditing(null)} />}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
 
-function UploadsSection({ uploads, onChanged, onError }: { uploads: Rec[]; onChanged: () => void; onError: (m: string) => void }) {
-  const [kind, setKind] = useState<'exhibitors' | 'contracts' | 'growth'>('exhibitors');
-  const [title, setTitle] = useState('');
-  const [eventStart, setEventStart] = useState('');
-  const [eventEnd, setEventEnd] = useState('');
-  const [officialUrl, setOfficialUrl] = useState('');
-  const [file, setFile] = useState<File | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState<string | null>(null);
-
-  const upload = async () => {
-    if (!file) return;
-    setBusy(true);
-    setDone(null);
-    try {
-      const form = new FormData();
-      form.set('file', file);
-      form.set('kind', kind);
-      form.set('title', title);
-      form.set('event_start', eventStart);
-      form.set('event_end', eventEnd);
-      form.set('official_url', officialUrl);
-      if (eventStart) form.set('catalog_year', eventStart.slice(0, 4));
-      const res = await authFetch(`${API}/uploads`, { method: 'POST', body: form });
-      const body = (await res.json().catch(() => null)) as { error?: string; rows?: number } | null;
-      if (!res.ok) throw new Error(body?.error ?? `HTTP ${res.status}`);
-      setDone(`Загружено строк: ${body?.rows ?? 0}`);
-      setFile(null);
-      setTitle('');
-      onChanged();
-    } catch (e) {
-      onError(e instanceof Error ? e.message : 'Не удалось загрузить');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const remove = async (id: string) => {
-    if (!window.confirm('Удалить загрузку со всеми строками?')) return;
-    try {
-      await api(`${API}/uploads?id=${id}`, { method: 'DELETE' });
-      onChanged();
-    } catch (e) {
-      onError(e instanceof Error ? e.message : 'Не удалось удалить');
-    }
-  };
-
-  return (
-    <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-      <div className="text-base font-semibold text-gray-900">Файлы сигналов: выставки, госконтракты, гранты</div>
-      <p className="mt-0.5 max-w-3xl text-sm text-gray-500">
-        Каталог участников выставки (с официального сайта), выгрузка результатов поиска контрактов из ЕИС или список
-        получателей грантов / участников акселератора (Сколково, ФРИИ и т.п.) — Excel или CSV.
-        Нужна колонка с названием компании; сайт, ИНН, дата, предмет, сумма и заказчик распознаются по заголовкам.
-      </p>
-      <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
-        <select className={inputCls} value={kind} onChange={(e) => setKind(e.target.value as 'exhibitors' | 'contracts' | 'growth')}>
-          <option value="exhibitors">Каталог выставки</option>
-          <option value="contracts">Выгрузка контрактов ЕИС</option>
-          <option value="growth">Список грантов / акселератора</option>
+      <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 px-5 py-3">
+        <span className="relative min-w-[200px] flex-1">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+          <input
+            className={`${inputCls} w-full pl-8`}
+            placeholder={meta.searchPlaceholder}
+            value={query.query}
+            onChange={(e) => patch({ query: e.target.value })}
+          />
+        </span>
+        <select className={inputCls} value={query.status} onChange={(e) => patch({ status: e.target.value })}>
+          <option value="">Любой статус</option>
+          {statusOptionsFor(table).map(([v, l]) => (
+            <option key={v} value={v}>
+              {l}
+            </option>
+          ))}
         </select>
-        <input className={inputCls} placeholder={kind === 'exhibitors' ? 'Название выставки' : kind === 'growth' ? 'Название программы (попадёт в письмо)' : 'Название выгрузки'} value={title} onChange={(e) => setTitle(e.target.value)} />
-        <input className={inputCls} type="file" accept=".xlsx,.xls,.csv" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
-        {kind === 'exhibitors' && (
-          <>
-            <input className={inputCls} type="date" value={eventStart} onChange={(e) => setEventStart(e.target.value)} title="Дата начала" />
-            <input className={inputCls} type="date" value={eventEnd} onChange={(e) => setEventEnd(e.target.value)} title="Дата окончания" />
-            <input className={inputCls} placeholder="Ссылка на официальный каталог" value={officialUrl} onChange={(e) => setOfficialUrl(e.target.value)} />
-          </>
+        {meta.isCases && (
+          <select className={inputCls} value={query.industry} onChange={(e) => patch({ industry: e.target.value })}>
+            <option value="">Любая отрасль</option>
+            {INDUSTRY_GROUPS.map((g) => (
+              <option key={g} value={g}>
+                {INDUSTRY_GROUP_LABELS[g]}
+              </option>
+            ))}
+          </select>
+        )}
+        <select className={inputCls} value={query.sort} onChange={(e) => patch({ sort: e.target.value as SortKey })}>
+          {sortOptions.map(([v, l]) => (
+            <option key={v} value={v}>
+              {l}
+            </option>
+          ))}
+        </select>
+        {filtersOn && (
+          <button type="button" onClick={() => patch(EMPTY_QUERY)} className="rounded-md px-2 py-1 text-xs text-gray-600 hover:bg-gray-100">
+            Сбросить
+          </button>
         )}
       </div>
-      <div className="mt-3 flex items-center gap-3">
-        <button
-          type="button"
-          disabled={busy || !file || !title || (kind === 'exhibitors' && !eventStart)}
-          onClick={upload}
-          className="inline-flex items-center rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50"
-        >
-          {busy ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Upload className="mr-1.5 h-4 w-4" />}
-          Загрузить
-        </button>
-        {done && <span className="text-sm text-emerald-700">{done}</span>}
-      </div>
-      <div className="mt-4 divide-y divide-gray-100">
-        {uploads.length === 0 && <div className="py-3 text-sm text-gray-500">Загрузок пока нет.</div>}
-        {uploads.map((u) => (
-          <div key={u.id} className="flex items-center justify-between gap-3 py-2 text-sm">
-            <div className="min-w-0 text-gray-800">
-              <span className="mr-2 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{u.kind === 'exhibitors' ? 'выставка' : u.kind === 'growth' ? 'гранты' : 'контракты'}</span>
-              {String(u.title)}
-              {u.event_start ? <span className="ml-2 text-xs text-gray-500">{fmtDate(String(u.event_start))}</span> : null}
-              <span className="ml-2 text-xs text-gray-500">строк: {String(u.rows_total)}</span>
+
+      <div className="divide-y divide-gray-100">
+        {rows.length === 0 && <div className="px-5 py-4 text-sm text-gray-500">Пока пусто.</div>}
+        {rows.length > 0 && filtered.length === 0 && (
+          <div className="px-5 py-4 text-sm text-gray-500">Ничего не нашлось. Смягчите фильтры или очистите поиск.</div>
+        )}
+        {pageRows.map((r) => {
+          const belowBar = meta.isCases && isBelowLeadBar(r);
+          const leads = leadsOf(r);
+          return (
+            <div key={r.id} className={`px-5 py-3 ${belowBar ? 'border-l-4 border-amber-300' : ''}`}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="truncate text-sm font-medium text-gray-900">{meta.primary(r) || '—'}</span>
+                    {r.case_id ? <span className="font-mono text-xs text-gray-500">{String(r.case_id)}</span> : null}
+                    <Badge tone={r.status === 'approved' || r.status === 'active' ? 'ok' : 'muted'}>{statusLabel(table, r.status)}</Badge>
+                    {meta.isCases && <Badge tone="muted">{leads === null ? 'лиды не указаны' : `${leads} лидов`}</Badge>}
+                    {belowBar && <Badge tone="warn">в письма не идёт: меньше {MIN_CASE_LEADS} лидов</Badge>}
+                    {r.is_default ? <Badge tone="muted">по умолчанию</Badge> : null}
+                    {r.expires_at ? <span className="text-xs text-gray-500">до {fmtDate(String(r.expires_at))}</span> : null}
+                  </div>
+                  <p className="mt-0.5 truncate text-sm text-gray-500">{meta.secondary(r)}</p>
+                </div>
+                <div className="flex shrink-0 gap-1">
+                  <button type="button" onClick={() => setEditing(r)} className="rounded-md px-2 py-1 text-xs text-violet-700 hover:bg-violet-50">
+                    Изменить
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void remove(r.id)}
+                    className="rounded-md p-1 text-gray-400 hover:bg-red-50 hover:text-red-600"
+                    aria-label="Удалить"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
             </div>
-            <button type="button" onClick={() => remove(u.id)} className="rounded-md p-1 text-gray-400 hover:bg-red-50 hover:text-red-600" aria-label="Удалить">
-              <Trash2 className="h-4 w-4" />
-            </button>
-          </div>
-        ))}
+          );
+        })}
       </div>
+
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between gap-3 border-t border-gray-200 px-5 py-3">
+          <span className="text-xs text-gray-500">
+            {from + 1}–{from + pageRows.length} из {filtered.length}
+          </span>
+          <span className="flex items-center gap-1">
+            <button
+              type="button"
+              disabled={page === 0}
+              onClick={() => setPage(page - 1)}
+              className="rounded-md px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-40 disabled:hover:bg-transparent"
+            >
+              Назад
+            </button>
+            <span className="px-1 text-xs text-gray-500">
+              стр. {page + 1} из {totalPages}
+            </span>
+            <button
+              type="button"
+              disabled={page >= totalPages - 1}
+              onClick={() => setPage(page + 1)}
+              className="rounded-md px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-40 disabled:hover:bg-transparent"
+            >
+              Вперёд
+            </button>
+          </span>
+        </div>
+      )}
+
+      {editing && (
+        <LibraryRecordForm table={table} record={editing === 'new' ? null : editing} onSave={save} onClose={() => setEditing(null)} />
+      )}
     </div>
   );
 }
@@ -347,13 +235,11 @@ function UploadsSection({ uploads, onChanged, onError }: { uploads: Rec[]; onCha
 export function Libraries({ onError, onSendersChanged }: { onError: (m: string) => void; onSendersChanged: () => void }) {
   const [data, setData] = useState<Record<TableKey, Rec[]> | null>(null);
   const [uploads, setUploads] = useState<Rec[]>([]);
+  const [section, setSection] = useState<SectionKey>('cases');
 
   const load = useCallback(async () => {
     try {
-      const [libs, ups] = await Promise.all([
-        api<Record<TableKey, Rec[]>>(`${API}/libraries`),
-        api<{ uploads: Rec[] }>(`${API}/uploads`),
-      ]);
+      const [libs, ups] = await Promise.all([api<Record<TableKey, Rec[]>>(`${API}/libraries`), api<{ uploads: Rec[] }>(`${API}/uploads`)]);
       setData(libs);
       setUploads(ups.uploads ?? []);
     } catch (e) {
@@ -367,20 +253,54 @@ export function Libraries({ onError, onSendersChanged }: { onError: (m: string) 
   }, [load]);
 
   if (!data) return <div className="text-sm text-gray-500">Загрузка…</div>;
+
+  const counts: Record<SectionKey, number> = {
+    cases: data.cases?.length ?? 0,
+    claims: data.claims?.length ?? 0,
+    senders: data.senders?.length ?? 0,
+    uploads: uploads.length,
+  };
+
+  const menu: Array<[SectionKey, string]> = [
+    ['cases', TABLE_META.cases.short],
+    ['claims', TABLE_META.claims.short],
+    ['senders', TABLE_META.senders.short],
+    ['uploads', 'Файлы сигналов'],
+  ];
+
   return (
-    <div className="space-y-5">
-      <LibrarySection table="cases" rows={data.cases} onChanged={load} onError={onError} />
-      <LibrarySection table="claims" rows={data.claims} onChanged={load} onError={onError} />
-      <LibrarySection
-        table="senders"
-        rows={data.senders}
-        onChanged={() => {
-          void load();
-          onSendersChanged();
-        }}
-        onError={onError}
-      />
-      <UploadsSection uploads={uploads} onChanged={load} onError={onError} />
-    </div>
+    <WorkArea
+      aside={
+        <nav className="flex gap-1 overflow-x-auto rounded-xl border border-gray-200 bg-white p-2 shadow-sm lg:flex-col lg:overflow-visible">
+          {menu.map(([key, title]) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => setSection(key)}
+              className={`flex shrink-0 items-center justify-between gap-3 rounded-lg px-3 py-2 text-sm lg:w-full ${
+                section === key ? 'bg-violet-50 font-medium text-violet-700' : 'text-gray-700 hover:bg-gray-50'
+              }`}
+            >
+              <span>{title}</span>
+              <span className="text-xs text-gray-500">{counts[key]}</span>
+            </button>
+          ))}
+        </nav>
+      }
+    >
+      {section === 'uploads' ? (
+        <UploadsSection uploads={uploads} onChanged={load} onError={onError} />
+      ) : (
+        <LibrarySection
+          table={section}
+          rows={data[section] ?? []}
+          onChanged={() => {
+            void load();
+            if (section === 'senders') onSendersChanged();
+          }}
+          onError={onError}
+        />
+      )}
+    </WorkArea>
   );
 }
