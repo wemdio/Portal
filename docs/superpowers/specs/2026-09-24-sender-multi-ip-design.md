@@ -131,11 +131,11 @@ IMAP, токены Google, запросы в БД — выходит с этог
 
 ### Обслуживание ящиков — только своего адреса
 
-- `claim_sender_messages(p_limit, p_stale_after_seconds, p_egress_ip)` —
+- `claim_sender_messages(p_limit, p_egress_ip, p_stale_after_seconds default 600)` —
   добавлено условие `mb.egress_ip = p_egress_ip`. Старая сигнатура удаляется:
   если старый воркер переживёт миграцию, он ничего не заберёт. Пауза лучше, чем
   письмо с чужого адреса.
-- `claim_sender_manual_messages(p_limit, p_stale_after_seconds, p_egress_ip)` —
+- `claim_sender_manual_messages(p_limit, p_egress_ip, p_stale_after_seconds default 600)` —
   добавлены join на ящик и тот же фильтр.
 - Проверка ящиков, опрос ответов и проверочные отправки выбирают только ящики
   с `egress_ip = мой адрес`.
