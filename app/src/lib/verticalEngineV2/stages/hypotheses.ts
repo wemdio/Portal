@@ -277,7 +277,7 @@ export async function runHypothesesStage(job: VeJob, ctx: VeStageContext): Promi
     // 25–40 гипотез с description/fit_rationale/rationale/search_queries на
     // русском — кириллические BPE-токены дорогие, 8–16k обрезало бы JSON
     // посередине (поймали на проде: Unterminated string).
-    { model: getVeModel('research'), maxTokens: 32768 },
+    { model: getVeModel('hypotheses'), maxTokens: 32768 },
   );
   addUsage(usage, llm);
 

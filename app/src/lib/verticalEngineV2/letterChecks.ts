@@ -18,7 +18,7 @@
 export interface VeLetterRuleViolation {
   /** Номер письма (1-based), вариант в detail ('A'/'B'). */
   letter: number;
-  rule: 'dash' | 'greeting' | 'cta' | 'stop_phrase' | 'unverified_number' | 'tell';
+  rule: 'dash' | 'greeting' | 'paragraphs' | 'cta' | 'stop_phrase' | 'unverified_number' | 'tell';
   detail: string;
 }
 
@@ -37,6 +37,34 @@ const TELLS_EN: Array<{ re: RegExp; label: string }> = [
 ];
 
 const GREETING_RE = /^(здравствуйте|здравствуй|добрый\s+день|доброе\s+утро|добрый\s+вечер|доброго\s+(дня|времени)|привет|hi\b|hello\b|hey\b|dear\b|good\s+(morning|afternoon|day)|dzień\s+dobry|cześć|witam)/i;
+// Match the whole greeting line, including optional name/operator after a comma.
+// Horizontal whitespace includes NBSP; periods in names/initials are allowed.
+const GREETING_RU_RE = /^(добрый[^\S\r\n]+день|доброго[^\S\r\n]+дня)(?:[^\S\r\n]*,[^\r\n!?]+)?[!.]?$/i;
+
+/** Generation-only checks, shared by direct final letters and the legacy chain.
+ * Do not apply to saved templates or manual edits: those keep their exact text.
+ */
+export function checkLetterPresentation(
+  body: string,
+  language: string,
+): Array<Pick<VeLetterRuleViolation, 'rule' | 'detail'>> {
+  const issues: Array<Pick<VeLetterRuleViolation, 'rule' | 'detail'>> = [];
+  const paragraphs = body.replace(/\r\n?/g, '\n').trim().split(/\n[^\S\r\n]*\n+/).map((p) => p.trim()).filter(Boolean);
+  const firstLine = paragraphs[0]?.split('\n')[0] ?? '';
+  // Only Russian greetings have a prescribed wording. Do not introduce a
+  // closed greeting vocabulary for English/Polish final generation.
+  if (language === 'ru' && !GREETING_RU_RE.test(firstLine)) {
+    issues.push({ rule: 'greeting', detail: 'Начни письмо отдельной строкой «Добрый день» или «Доброго дня» (имя можно добавить после запятой); «Здравствуйте» и «Здравствуй» не используй.' });
+  }
+  // At least greeting / main message / question / signature. A short follow-up
+  // may combine reason and offer; the signature may itself span several blocks.
+  const questionIndex = paragraphs.findIndex((p) => p.includes('?'));
+  if (paragraphs.length < 4 || questionIndex < 2 || questionIndex >= paragraphs.length - 1
+    || paragraphs.slice(0, questionIndex + 1).some((p) => p.includes('\n'))) {
+    issues.push({ rule: 'paragraphs', detail: 'Separate greeting, reason/offer, CTA question and signature with a blank line (two newline characters). Put the question in its own paragraph before the signature. Keep single line breaks only inside the supplied signature.' });
+  }
+  return issues;
+}
 
 /** Стоп-фразы регламента (RU): точные формулировки + рекламные клише. */
 const STOP_PHRASES_RU = [
@@ -121,9 +149,13 @@ export function checkLetterRules(
     if (subject.includes('—') || subject.includes('–') || letter.body.includes('—') || letter.body.includes('–')) {
       violations.push({ letter: i + 1, rule: 'dash', detail: `письмо ${tag}: тире («—»/«–») запрещено — замени запятой, двоеточием или точкой` });
     }
-    const firstLine = letter.body.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
-    if (!GREETING_RE.test(firstLine)) {
-      violations.push({ letter: i + 1, rule: 'greeting', detail: `письмо ${tag}: первая строка тела должна быть приветствием («Здравствуйте, …», «Добрый день»)` });
+    for (const issue of checkLetterPresentation(letter.body, language)) {
+      violations.push({ letter: i + 1, rule: issue.rule, detail: `письмо ${tag}: ${issue.detail}` });
+    }
+    // Preserve the existing non-Russian greeting check on the legacy chain only.
+    const firstLine = letter.body.split('\n').map((line) => line.trim()).find(Boolean) ?? '';
+    if (language !== 'ru' && !GREETING_RE.test(firstLine)) {
+      violations.push({ letter: i + 1, rule: 'greeting', detail: `письмо ${tag}: первая строка тела должна быть приветствием на языке письма` });
     }
     const questions = (letter.body.match(/\?/g) ?? []).length;
     if (questions !== 1) {
