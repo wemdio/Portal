@@ -2,7 +2,7 @@ import { buildReplyPrompt } from './buildPrompt';
 import { fetchCampaignSteps } from './campaignSequence';
 import { getGlobalKnowledgeBase, getGlobalSystemPrompt, getKnowledgeBaseOrEmpty, getProjectBrief, insertDraft, resolveBrief } from './db';
 import { generateReplyWithSearch } from './geminiClient';
-import { fetchFullThread } from './instantlyThread';
+import { fetchReplyThread } from './instantlyThread';
 import { resolveProjectReply } from './projectReply';
 import { findReferredEmails } from './referredContact';
 import type { GenerateDraftResult, ThreadMessage } from './types';
@@ -60,14 +60,7 @@ export async function generateDraftForQualification(
 
   let contextComplete = true;
   const [fullThread, campaignSteps] = await Promise.all([
-    qualification.threadId
-      ? fetchFullThread({
-          campaignId: qualification.campaignId,
-          leadEmail: qualification.leadEmail,
-          threadId: qualification.threadId,
-          accountId,
-        })
-      : Promise.resolve(null),
+    fetchReplyThread(qualification, accountId),
     fetchCampaignSteps(qualification.campaignId, accountId),
   ]);
   let thread: ThreadMessage[] | null = fullThread;

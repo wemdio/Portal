@@ -300,11 +300,12 @@ function mapQualificationRow(row: Record<string, unknown>): QualificationRow {
     eaccount: (row.eaccount as string) ?? null,
     replyTimestamp: (row.reply_timestamp as string) ?? null,
     qualificationStatus: (row.status as string) ?? null,
+    outOfCampaign: row.reply_out_of_campaign === true,
   };
 }
 
 const QUALIFICATION_COLUMNS =
-  'id, campaign_id, campaign_name, lead_email, company_name, thread_id, reply_subject, reply_body, last_outbound_preview, instantly_email_id, eaccount, reply_timestamp, status';
+  'id, campaign_id, campaign_name, lead_email, company_name, thread_id, reply_subject, reply_body, last_outbound_preview, instantly_email_id, eaccount, reply_timestamp, status, reply_out_of_campaign';
 
 /**
  * Строка поиска для фильтра PostgREST `or(...)`: запятые, скобки и
@@ -373,6 +374,27 @@ export async function getQualificationById(id: string): Promise<QualificationRow
     .maybeSingle();
   if (error) throw new Error(`qualification lookup failed: ${error.message}`);
   return data ? mapQualificationRow(data) : null;
+}
+
+/**
+ * id строк квалификатора по id писем Instantly: письмо, которое сторож Others
+ * уже перенёс в основной список, во вкладке Others — та же строка, с тем же
+ * черновиком и статусом.
+ */
+export async function findQualificationIdsByEmailIds(emailIds: string[]): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  const { instantly } = requireClients();
+  for (let i = 0; i < emailIds.length; i += 50) {
+    const { data, error } = await instantly
+      .from('instantly_lead_qualifications')
+      .select('id, instantly_email_id')
+      .in('instantly_email_id', emailIds.slice(i, i + 50));
+    if (error) throw new Error(`qualification lookup by email failed: ${error.message}`);
+    for (const row of data ?? []) {
+      if (row.instantly_email_id) result.set(row.instantly_email_id as string, row.id as string);
+    }
+  }
+  return result;
 }
 
 /** Последний статус на каждый qualification_id ('skipped' исключается из выдачи целиком в вызывающем коде). */

@@ -1,5 +1,5 @@
 import { supabase } from '@/lib/supabaseClient';
-import type { DraftStatus, ReplyCampaignOption, ReplyListItem } from '@/lib/replyPersonalization/types';
+import type { DraftStatus, OthersPage, ReplyCampaignOption, ReplyListItem } from '@/lib/replyPersonalization/types';
 
 const BASE = '/api/tools/reply-personalization';
 
@@ -102,6 +102,22 @@ export function fetchReplies(
   if (filters.limit) query.set('limit', String(filters.limit));
   const suffix = query.toString() ? `?${query}` : '';
   return fetchWithAuth<RepliesResponse>(`${BASE}/projects/${projectId}/replies${suffix}`);
+}
+
+/**
+ * Страница папки Others по ящикам проекта. cursor — из прошлой страницы;
+ * search — полный адрес (его ищет сам Instantly); fresh — мимо минутного кэша.
+ */
+export function fetchOthers(
+  projectId: string,
+  options: { cursor?: string | null; search?: string; fresh?: boolean } = {},
+) {
+  const query = new URLSearchParams();
+  if (options.cursor) query.set('cursor', options.cursor);
+  if (options.search?.trim()) query.set('q', options.search.trim());
+  if (options.fresh) query.set('fresh', '1');
+  const suffix = query.toString() ? `?${query}` : '';
+  return fetchWithAuth<OthersPage>(`${BASE}/projects/${projectId}/others${suffix}`);
 }
 
 export interface ThreadResponse {

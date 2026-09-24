@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
-import { fetchFullThread } from '@/lib/replyPersonalization/instantlyThread';
+import { fetchReplyThread } from '@/lib/replyPersonalization/instantlyThread';
 import { resolveProjectReply } from '@/lib/replyPersonalization/projectReply';
 import { findReferredEmails } from '@/lib/replyPersonalization/referredContact';
 import type { ThreadMessage } from '@/lib/replyPersonalization/types';
@@ -59,15 +59,7 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
   const { qualification, accountId } = reply;
 
   let contextComplete = true;
-  let messages: ThreadMessage[] | null = null;
-  if (qualification.threadId) {
-    messages = await fetchFullThread({
-      campaignId: qualification.campaignId,
-      leadEmail: qualification.leadEmail,
-      threadId: qualification.threadId,
-      accountId,
-    });
-  }
+  let messages: ThreadMessage[] | null = await fetchReplyThread(qualification, accountId);
   if (!messages || messages.length === 0) {
     contextComplete = false;
     messages = fallbackThread(qualification);

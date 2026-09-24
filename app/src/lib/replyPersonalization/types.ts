@@ -46,6 +46,11 @@ export interface QualificationRow {
    * бывает нужно обработать.
    */
   qualificationStatus?: string | null;
+  /**
+   * Instantly не привязал письмо к кампании (папка Others, «сироты» сторожа):
+   * ответить в тред нельзя, ответ уходит отдельным письмом с того же ящика.
+   */
+  outOfCampaign?: boolean;
 }
 
 export interface ThreadMessage {
@@ -76,6 +81,18 @@ export interface DraftRow {
 export interface ReplyListItem extends QualificationRow {
   /** По последнему черновику: 'sent' — ответили, 'skipped' — пропустили, иначе 'new'. */
   listStatus: 'new' | 'sent' | 'skipped';
+  /** 'others' — строка вкладки Others (папка Others в Instantly). */
+  source?: 'others';
+}
+
+/** Страница вкладки Others. */
+export interface OthersPage {
+  replies: ReplyListItem[];
+  /** Курсор следующей страницы; null — дальше писем нет. */
+  nextCursor: string | null;
+  /** Что загрузить не удалось — показываем над списком. */
+  notices: string[];
+  missingReason: string | null;
 }
 
 /** Кампания проекта для кнопок-фильтров над списком писем. */
