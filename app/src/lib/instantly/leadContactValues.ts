@@ -87,7 +87,7 @@ export function leadPhoneCandidates(line: string): LeadPhoneCandidate[] {
     const digits = base.replace(/\D/g, '');
     if (digits.length < 7 || digits.length > 15 || /^(\d)\1+$/.test(digits) ||
       /^\d{1,2}[.:]\d{2}\s*[-–—]\s*\d{1,2}[.:]\d{2}$/.test(base) ||
-      /(?<!\d)(?:\d{4}[./-]\d{1,2}[./-]\d{1,2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4})(?!\d)/.test(base) ||
+      /^(?:\d{4}[./-]\d{1,2}[./-]\d{1,2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4})$/.test(base) ||
       (base.match(/\(/g)?.length ?? 0) !== (base.match(/\)/g)?.length ?? 0)) continue;
     result.push({ value: extension ? `${base} доб. ${extension}` : base, digits, start: match.index, end });
   }

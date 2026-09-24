@@ -2008,10 +2008,24 @@ export async function qualifyOneReply(
     `Classified ${leadEmail} in campaign ${campaignId}: ${status} (confidence: ${result.confidence.toFixed(2)})${inserted?.id ? '' : ' [dedup-skip]'}`,
   );
 
-  // Гостевая таблица лидов проекта (lead board): авто-строка при каждом новом
-  // лиде project-linked кампании. Неудача НЕ роняет квалификацию/алерт —
-  // логируем и едем дальше.
+  let specialistLeadSideEffectsAllowed = false;
+  let specialistThreadClaim: SpecialistAlertClaimDecision | null = null;
   if (status === 'lead' && inserted?.id && qualifiedProjectId) {
+    const threadClaim = await claimSpecialistThreadAlert(db, inserted.id, handoffEnabled());
+    specialistThreadClaim = threadClaim;
+    if (threadClaim.status === 'alert') {
+      specialistLeadSideEffectsAllowed = true;
+    } else if (threadClaim.status === 'duplicate') {
+      workerLog('info', `Lead specialist side effects ${inserted.id} suppressed: thread already belongs to qualification ${threadClaim.winnerQualificationId}`);
+    } else {
+      workerLog('warn', `${threadClaim.reason} — specialist lead side effects deferred`);
+    }
+  }
+
+  // One board row per elected project/thread, even for subsequent positive
+  // replies. A failed claim is recovered with delivery, not a duplicate row.
+  if (status === 'lead' && inserted?.id && qualifiedProjectId && specialistThreadClaim && specialistThreadClaim.status !== 'retry' &&
+    !(await qualificationAutomationBlocked(db, { qualificationId: inserted.id }))) {
     try {
       const boardProjectId = qualifiedProjectId;
       await getOrCreateBoard(db, boardProjectId);
@@ -2027,7 +2041,9 @@ export async function qualifyOneReply(
         fromName = senderDisplayLeadName(n);
       }
       await upsertBoardRow(db, {
-        qualificationId: inserted.id,
+        qualificationId: specialistThreadClaim.status === 'duplicate'
+          ? specialistThreadClaim.winnerQualificationId : inserted.id,
+        sourceQualificationId: inserted.id,
         projectId: boardProjectId,
         campaignId,
         campaignName,
@@ -2042,27 +2058,6 @@ export async function qualifyOneReply(
       });
     } catch (err) {
       workerLog('warn', `lead board row upsert failed for ${leadEmail} (campaign ${campaignId}): ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  let specialistLeadSideEffectsAllowed = false;
-  let specialistThreadClaim: SpecialistAlertClaimDecision | null = null;
-  if (status === 'lead' && inserted?.id && qualifiedProjectId) {
-    const threadClaim = await claimSpecialistThreadAlert(
-      db,
-      inserted.id,
-      handoffEnabled(),
-    );
-    specialistThreadClaim = threadClaim;
-    if (threadClaim.status === 'alert') {
-      specialistLeadSideEffectsAllowed = true;
-    } else if (threadClaim.status === 'duplicate') {
-      workerLog(
-        'info',
-        `Lead specialist side effects ${inserted.id} suppressed: thread already belongs to qualification ${threadClaim.winnerQualificationId}`,
-      );
-    } else {
-      workerLog('warn', `${threadClaim.reason} — specialist lead side effects deferred`);
     }
   }
 
@@ -3961,12 +3956,42 @@ type RecoverableLeadQualification = {
   reply_subject: string | null;
   reply_body: string | null;
   reply_preview: string | null;
+  reply_recovery_snapshot?: unknown;
   last_outbound_preview: string | null;
   reply_timestamp: string | null;
   ai_reason: string | null;
   created_at: string;
   updated_at: string;
 };
+
+/** Restore a board write deferred by the thread claim, using saved sources
+ * only. This never requalifies a reply, reads Instantly or sends notifications. */
+async function recoverLeadBoardRow(
+  db: NonNullable<typeof supabaseAdmin>, lead: RecoverableLeadQualification,
+  threadClaim: SpecialistAlertClaimDecision,
+): Promise<void> {
+  if (!lead.qualified_project_id || threadClaim.status === 'retry') return;
+  try {
+    if (await qualificationAutomationBlocked(db, { qualificationId: lead.id })) return;
+    const body = qualificationReplySnapshot(lead)?.body ?? lead.reply_body ?? lead.reply_preview ?? '';
+    const metadata = resolveLeadContactMetadata({
+      leads: [], leadEmail: lead.lead_email, campaignId: lead.campaign_id, replyBody: body,
+    });
+    await getOrCreateBoard(db, lead.qualified_project_id);
+    await upsertBoardRow(db, {
+      qualificationId: threadClaim.status === 'duplicate' ? threadClaim.winnerQualificationId : lead.id,
+      sourceQualificationId: lead.id,
+      projectId: lead.qualified_project_id,
+      campaignId: lead.campaign_id, campaignName: lead.campaign_name,
+      leadEmail: lead.lead_email, leadName: senderDisplayLeadName(lead.lead_name) ?? metadata.leadName,
+      companyName: lead.company_name ?? metadata.companyName,
+      phone: metadata.phone, website: metadata.website,
+      requestText: leadBoardRequestText(body), stepNumber: null, replyTimestamp: lead.reply_timestamp,
+    });
+  } catch (error) {
+    workerLog('warn', `lead board delivery recovery failed for ${lead.id}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 
 type LeadDeliveryLogRow = {
   id: string;
@@ -4042,7 +4067,7 @@ export async function reconcileLeadNotificationDeliveries(
   while (true) {
     const { data: leadRows, error: leadRowsError } = await instantlyDb
       .from('instantly_lead_qualifications')
-      .select('id, campaign_id, qualified_project_id, qualified_project_owner_proven, thread_id, instantly_email_id, eaccount, lead_email, lead_name, company_name, campaign_name, reply_subject, reply_body, reply_preview, last_outbound_preview, reply_timestamp, ai_reason, created_at, updated_at')
+      .select('id, campaign_id, qualified_project_id, qualified_project_owner_proven, thread_id, instantly_email_id, eaccount, lead_email, lead_name, company_name, campaign_name, reply_subject, reply_body, reply_preview, reply_recovery_snapshot, last_outbound_preview, reply_timestamp, ai_reason, created_at, updated_at')
       .eq('status', 'lead')
       .is('queue_archived_at', null)
       // A cold retry preserves created_at but refreshes updated_at. Its first
@@ -4191,6 +4216,7 @@ export async function reconcileLeadNotificationDeliveries(
         lead.id,
         handoffEnabled(),
       );
+      await recoverLeadBoardRow(instantlyDb, lead, threadClaim);
       if (threadClaim.status === 'duplicate') {
         workerLog(
           'info',
