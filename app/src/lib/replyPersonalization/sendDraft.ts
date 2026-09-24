@@ -2,12 +2,20 @@
 // (replyToEmail / forwardEmail / sendTestEmail) — не через handoffSender.ts
 // (это бизнес-логика квалификатора, её мы не трогаем).
 
-import { forwardEmail, replyToEmail, sendTestEmail } from '@/lib/instantly/client';
+import { textToReplyHtml } from '@/lib/clientCampaignReplies/bodyHtml';
+import { extractBodyText } from '@/lib/clientCampaignReplies/mapEmail';
+import {
+  appendQuotedHistoryHtml,
+  appendQuotedHistoryText,
+  type QuoteSource,
+} from '@/lib/clientCampaignReplies/quoteHistory';
+import { forwardEmail, getEmail, replyToEmail, sendTestEmail } from '@/lib/instantly/client';
 import { isNotPartOfCampaignError } from '@/lib/instantly/notPartOfCampaign';
 import { getDraftById, markDraftSent, updateDraftText } from './db';
 import { fetchFullThread } from './instantlyThread';
 import { resolveProjectReply } from './projectReply';
 import { findReferredEmails } from './referredContact';
+import type { QualificationRow } from './types';
 
 /** Щедрый верхний предел тела письма: реальный ответ 90-170 слов, это защита от мусора, не лимит стиля. */
 const MAX_SEND_TEXT_LENGTH = 100_000;
@@ -24,8 +32,41 @@ export function replySubject(subject: string | null): string {
   return base ? `Re: ${base}` : 'Re:';
 }
 
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+/**
+ * Письмо лида для цитаты под нашим ответом. Без неё адресат видит ответ
+ * отдельным письмом, без переписки, на которую он отвечает (то же, что чинили
+ * в кабинете клиента, см. quoteHistory).
+ *
+ * Тело тянем живьём: reply_body у писем с живых аккаунтов — превью на 500
+ * символов (liveReplyList), цитировать обрезок нельзя. Сбой запроса не должен
+ * ронять отправку — откатываемся на сохранённые поля.
+ */
+async function buildQuoteSource(
+  qualification: QualificationRow,
+  accountId: string,
+): Promise<QuoteSource> {
+  const fallback: QuoteSource = {
+    bodyText: qualification.replyBody,
+    fromEmail: qualification.leadEmail,
+    timestamp: qualification.replyTimestamp,
+  };
+  if (!qualification.instantlyEmailId) return fallback;
+  try {
+    const original = await getEmail(qualification.instantlyEmailId, {
+      accountId,
+      requestPriority: 'interactive',
+      consumer: 'personalization_send',
+    });
+    if (!original) return fallback;
+    return {
+      bodyText: extractBodyText(original.body) ?? qualification.replyBody,
+      fromName: original.from_address_json?.[0]?.name ?? null,
+      fromEmail: original.from_address_email ?? qualification.leadEmail,
+      timestamp: original.timestamp_email ?? original.timestamp_created ?? qualification.replyTimestamp,
+    };
+  } catch {
+    return fallback;
+  }
 }
 
 /**
@@ -77,13 +118,20 @@ export async function sendDraft(draftId: string, finalText: string, toEmail: str
 
   await updateDraftText(draftId, finalText);
 
+  // Instantly рендерит тело как HTML: голый { text } с \n схлопывается в один
+  // сплошной абзац («простыня» в письме адресата). Шлём HTML с <br> и text как
+  // fallback, к обоим — процитированное письмо лида.
+  const quoteSrc = await buildQuoteSource(qualification, accountId);
+  const bodyHtml = appendQuotedHistoryHtml(textToReplyHtml(finalText), quoteSrc);
+  const bodyText = appendQuotedHistoryText(finalText, quoteSrc);
+
   if (!newContact) {
     await replyToEmail(
       {
         reply_to_uuid: qualification.instantlyEmailId,
         eaccount: qualification.eaccount,
         subject,
-        body: { text: finalText },
+        body: { html: bodyHtml, text: bodyText },
       },
       { accountId },
     );
@@ -99,7 +147,9 @@ export async function sendDraft(draftId: string, finalText: string, toEmail: str
           eaccount: qualification.eaccount,
           to_address_email_list: newContact,
           subject,
-          body: { text: finalText },
+          // Новому контакту цитату не подкладываем (include_original_body:
+          // false выше — осознанное решение), но переносы строк сохраняем.
+          body: { html: textToReplyHtml(finalText), text: finalText },
           include_original_body: false,
         },
         { accountId },
@@ -111,7 +161,7 @@ export async function sendDraft(draftId: string, finalText: string, toEmail: str
           eaccount: qualification.eaccount,
           to_address_email_list: newContact,
           subject,
-          body: { html: escapeHtml(finalText).replace(/\r?\n/g, '<br>\n') },
+          body: { html: textToReplyHtml(finalText) },
         },
         { accountId },
       );
