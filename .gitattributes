@@ -1,2 +1,3 @@
 # Файлы для Linux-хоста: перевод строки только LF, иначе `#!/bin/sh` не запустится.
 deploy/cron/** text eol=lf
+deploy/sender/** text eol=lf

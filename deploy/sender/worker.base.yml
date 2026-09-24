@@ -1,25 +1,22 @@
-# Воркер инструмента «Рассылка» — изолированный email-хост (144.31.54.166).
+# Воркер «Рассылки» — общее описание для всех адресов отправки сервера.
 #
-# Почему отдельный сервер: массовые SMTP/IMAP-подключения к провайдерам ящиков
+# Сам по себе не запускается: render-compose.sh собирает docker-compose.yml, где
+# на каждый адрес из SENDER_EGRESS_IPS (.env) — сервис `extends` этого описания
+# со своим SENDER_EGRESS_IP и своя сеть с исходящим NAT на этот адрес. Весь
+# трафик воркера (SMTP, IMAP, Google) выходит с его адреса, а сам воркер
+# обслуживает только ящики, закреплённые за этим адресом.
+#
+# Почему отдельные серверы: массовые SMTP/IMAP-подключения к провайдерам ящиков
 # не должны идти с IP основного портала (139.60.162.24), иначе хостер банит
-# весь интернет сервера. Этот compose живёт ТОЛЬКО на sender-хосте и никогда
-# не добавляется в docker-compose.prod.yml стека портала.
+# весь интернет сервера. Этот файл живёт ТОЛЬКО на sender-хостах и никогда не
+# добавляется в docker-compose.prod.yml стека портала.
 #
-# Воркер общается с порталом исключительно через БД (Supabase): проверка
-# ящиков, планировщик цепочки, отправка, чтение ответов. Очередь берётся
-# атомарно, поэтому позже контейнер можно размножить на несколько серверов.
-#
-# Деплой: Semaphore scheduled-deploy (цель SENDER_SSH_HOST), каталог
-# /opt/portal-sender, .env — по deploy/sender/.env.example.
-#
-# Usage:
-#   cp .env.example .env   # fill in secrets
-#   docker compose -p portal-sender --env-file .env up -d
+# Деплой: Semaphore scheduled-deploy (цели SENDER_SSH_HOST, SENDER_SSH_HOST_2…),
+# каталог /opt/portal-sender, .env — по deploy/sender/.env.example.
 
 services:
-  worker-sender:
+  worker:
     image: ${DOCKER_USERNAME}/portal-worker:prod
-    container_name: portal-worker-sender
     env_file:
       - .env
     environment:
@@ -46,16 +43,19 @@ services:
       - SENDER_PROBE_IMAP_USER=${SENDER_PROBE_IMAP_USER:-}
       - SENDER_PROBE_IMAP_PASSWORD=${SENDER_PROBE_IMAP_PASSWORD:-}
       # Алерты мониторинга в TG: отправка встала, ящики отваливаются, bounce
-      # rate домена. Без чата монитор работает (автопауза), но молчит.
+      # rate домена, адрес отправки молчит. Без чата монитор работает
+      # (автопауза), но молчит.
       - SENDER_ALERTS_TELEGRAM_CHAT_ID=${SENDER_ALERTS_TELEGRAM_CHAT_ID:-}
       - SENDER_ALERTS_TELEGRAM_BOT_TOKEN=${SENDER_ALERTS_TELEGRAM_BOT_TOKEN:-}
       - SENDER_MONITOR_INTERVAL_MS=${SENDER_MONITOR_INTERVAL_MS:-300000}
+      # Подпись сервера на экране «Адреса отправки».
+      - SENDER_HOST_LABEL=${SENDER_HOST_LABEL:-}
       - WORKER_KIND=sender
     stop_grace_period: 2m
     # autoheal + heartbeat — защита от event-loop hang (инциденты tgOutreach
     # 35ч и yandexmaps 27.07.2026: процесс жив, письма не идут). Heartbeat
     # пишет независимый setInterval в worker/sender.ts; healthcheck читает
-    # mtime файла, autoheal делает рестарт.
+    # mtime файла, autoheal (сервис в собранном compose) делает рестарт.
     labels:
       - autoheal=true
     healthcheck:
