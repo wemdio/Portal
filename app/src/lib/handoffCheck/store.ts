@@ -20,7 +20,10 @@ export interface HandoffCheckRow {
   stated_source: string | null;
   status: HandoffCheckStatus;
   problems: Problem[];
+  /** id нашего предупреждения в чате; 0 — ответ отправляется (см. `REPLY_PENDING`). */
   reply_message_id: number | null;
+  /** Когда в чат впервые ушло предупреждение (проблемы или нет ссылки) — от него считаем напоминание. */
+  warned_at: string | null;
   first_checked_at: string;
   last_checked_at: string;
   reminded_at: string | null;
@@ -40,6 +43,7 @@ export type HandoffCheckUpsert = {
   status: HandoffCheckStatus;
   problems?: Problem[];
   reply_message_id?: number | null;
+  warned_at?: string | null;
   last_checked_at?: string;
   reminded_at?: string | null;
   resolved_at?: string | null;
@@ -87,4 +91,16 @@ export async function listOpen(db: SupabaseClient): Promise<HandoffCheckRow[]> {
     .order('first_checked_at', { ascending: true });
   if (error) throw error;
   return (data ?? []) as HandoffCheckRow[];
+}
+
+/** Самая ранняя проверка в таблице — момент первого запуска бота; null — таблица пуста. */
+export async function earliestCheckAt(db: SupabaseClient): Promise<string | null> {
+  const { data, error } = await db
+    .from(TABLE)
+    .select('first_checked_at')
+    .order('first_checked_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as { first_checked_at: string } | null)?.first_checked_at ?? null;
 }

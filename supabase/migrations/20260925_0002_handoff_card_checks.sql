@@ -12,6 +12,7 @@ create table if not exists public.handoff_card_checks (
   status text not null check (status in ('ok', 'problems', 'no_link', 'resolved', 'expired')),
   problems jsonb not null default '[]'::jsonb,
   reply_message_id bigint,
+  warned_at timestamptz,
   first_checked_at timestamptz not null default now(),
   last_checked_at timestamptz not null default now(),
   reminded_at timestamptz,

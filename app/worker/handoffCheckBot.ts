@@ -16,6 +16,8 @@ import {
   type WorkerLogger,
 } from './_shared';
 import {
+  getChatMember,
+  getMe,
   getUpdates,
   getWebhookInfo,
   sendMessage,
@@ -27,9 +29,16 @@ import { parseHandoff } from '@/lib/handoffCheck/parseHandoff';
 import { checkCard } from '@/lib/handoffCheck/checkCard';
 import { fetchCard } from '@/lib/handoffCheck/amoApi';
 import { noLinkReply, problemsReply, reminderReply, resolvedReply } from '@/lib/handoffCheck/formatReply';
-import { getCheck, listOpen, upsertCheck, type HandoffCheckRow, type HandoffCheckUpsert } from '@/lib/handoffCheck/store';
 import {
-  EXPIRE_AFTER_MS,
+  earliestCheckAt,
+  getCheck,
+  listOpen,
+  upsertCheck,
+  type HandoffCheckRow,
+  type HandoffCheckUpsert,
+} from '@/lib/handoffCheck/store';
+import {
+  REPLY_PENDING,
   chatVisibleProblems,
   decide,
   isDailyPassDue,
@@ -65,6 +74,8 @@ interface Ctx {
   log: WorkerLogger;
   shouldStop: () => boolean;
   alerts: AlertOnce;
+  /** Момент первого запуска бота: более ранние сообщения не проверяем (спека §10). */
+  launchedAtMs: number;
 }
 
 /** Алерт в health-чат один раз на состояние, пока оно не прошло. */
@@ -122,7 +133,7 @@ function replyText(kind: ReplyKind, decision: Decision, amoUrl: string): string 
   return problemsReply(problems, amoUrl);
 }
 
-/** Реплай на сообщение о передаче; null — не отправилось (перепроверка повторит). */
+/** Реплай на сообщение о передаче; null — не отправилось. */
 async function sendReply(ctx: Ctx, messageId: number, text: string): Promise<number | null> {
   try {
     const sent = await sendMessage(TOKEN, {
@@ -132,9 +143,10 @@ async function sendReply(ctx: Ctx, messageId: number, text: string): Promise<num
       replyToMessageId: messageId,
       disableWebPagePreview: true,
     });
+    ctx.alerts.clear('send-failed');
     return sent.message_id;
   } catch (error) {
-    ctx.log('error', `reply to message ${messageId} failed`, error);
+    await ctx.alerts.raise('send-failed', `не удалось ответить в ветку (сообщение ${messageId})`, error);
     return null;
   }
 }
@@ -154,6 +166,46 @@ function authorOf(message: TelegramMessage): string | null {
 
 // ── Применение решения ───────────────────────────────────────────────────────
 
+function isWarning(reply: ReplyKind | null): boolean {
+  return reply === 'problems' || reply === 'no_link';
+}
+
+/** Строка с итогом решения — пишется ДО отправки ответа. */
+function claimedRow(prev: PrevState | null, decision: Decision, fields: HandoffCheckUpsert, nowIso: string): HandoffCheckUpsert {
+  const replyMessageId =
+    decision.replyMessageId === 'new'
+      ? REPLY_PENDING
+      : decision.replyMessageId === 'clear'
+        ? null
+        : (prev?.reply_message_id ?? null);
+  return {
+    ...fields,
+    status: decision.status,
+    problems: decision.problems,
+    reply_message_id: replyMessageId,
+    warned_at: prev?.warned_at ?? (isWarning(decision.reply) ? nowIso : null),
+    reminded_at: decision.markReminded ? nowIso : (prev?.reminded_at ?? null),
+    resolved_at: decision.markResolved ? nowIso : (prev?.resolved_at ?? null),
+    last_checked_at: nowIso,
+  };
+}
+
+/** Ответ не ушёл — откатываем то, что было записано в расчёте на него. */
+function revertAfterFailedSend(prev: PrevState | null, decision: Decision): Partial<HandoffCheckUpsert> {
+  if (decision.reply === 'reminder') return { reminded_at: prev?.reminded_at ?? null };
+  if (decision.reply === 'resolved' && prev) {
+    // Предупреждение остаётся в чате — ежедневный проход попробует снова.
+    return {
+      status: prev.status,
+      problems: prev.problems,
+      reply_message_id: prev.reply_message_id,
+      resolved_at: prev.resolved_at,
+    };
+  }
+  // Предупреждения в чате нет — ежедневный проход (или правка) отправит его заново.
+  return { reply_message_id: null, warned_at: prev?.warned_at ?? null };
+}
+
 async function applyDecision(
   ctx: Ctx,
   prev: PrevState | null,
@@ -162,28 +214,19 @@ async function applyDecision(
   fields: HandoffCheckUpsert,
 ): Promise<void> {
   const nowIso = new Date().toISOString();
-  const sentId = decision.reply
-    ? await sendReply(ctx, target.messageId, replyText(decision.reply, decision, target.amoUrl))
-    : null;
+  // Сначала запись, потом ответ: если процесс упадёт между ними, повтор
+  // обновления увидит «ответ уже отправляется» и не ответит второй раз.
+  await upsertCheck(ctx.db, claimedRow(prev, decision, fields, nowIso));
+  if (!decision.reply) return;
 
-  const keptReplyId = prev?.reply_message_id ?? null;
-  const replyMessageId =
-    decision.replyMessageId === 'new' ? sentId : decision.replyMessageId === 'clear' ? null : keptReplyId;
-  // Напоминание не ушло — не отмечаем, завтра попробуем снова.
-  const remindedAt = decision.markReminded && sentId != null ? nowIso : (prev?.reminded_at ?? null);
+  const sentId = await sendReply(ctx, target.messageId, replyText(decision.reply, decision, target.amoUrl));
+  ctx.log('info', `message ${target.messageId}: ${decision.reply} reply ${sentId != null ? 'sent' : 'FAILED'}`);
 
-  await upsertCheck(ctx.db, {
-    ...fields,
-    status: decision.status,
-    problems: decision.problems,
-    reply_message_id: replyMessageId,
-    reminded_at: remindedAt,
-    ...(decision.markResolved ? { resolved_at: nowIso } : {}),
-    last_checked_at: nowIso,
-  });
-
-  if (decision.reply) {
-    ctx.log('info', `message ${target.messageId}: ${decision.reply} reply ${sentId != null ? 'sent' : 'FAILED'}`);
+  const key = { chat_id: fields.chat_id, message_id: fields.message_id, status: decision.status };
+  if (sentId == null) {
+    await upsertCheck(ctx.db, { ...key, ...revertAfterFailedSend(prev, decision) });
+  } else if (decision.replyMessageId === 'new') {
+    await upsertCheck(ctx.db, { ...key, reply_message_id: sentId });
   }
 }
 
@@ -193,13 +236,9 @@ function isWatchedMessage(message: TelegramMessage): boolean {
   return message.chat.id === CHAT_ID && message.message_thread_id === THREAD_ID;
 }
 
-/**
- * Сообщения старше окна проверки не трогаем (спека §10: задним числом не
- * проверяем) — в том числе правку давнего сообщения, по которому строки нет.
- */
-function isTooOld(message: TelegramMessage, now: Date): boolean {
-  if (!message.date) return false;
-  return now.getTime() - message.date * 1000 > EXPIRE_AFTER_MS;
+/** Отправлено до первого запуска бота — задним числом не проверяем (правки тоже: `date` у правки — исходная). */
+function isBeforeLaunch(ctx: Ctx, message: TelegramMessage): boolean {
+  return message.date != null && message.date * 1000 < ctx.launchedAtMs;
 }
 
 export async function handleUpdate(ctx: Ctx, update: TelegramUpdate): Promise<void> {
@@ -211,12 +250,13 @@ export async function handleUpdate(ctx: Ctx, update: TelegramUpdate): Promise<vo
   const parsed = parseHandoff(text);
   if (!parsed.isHandoff) return;
 
-  const now = new Date();
   const prev = await getCheck(ctx.db, CHAT_ID, message.message_id);
-  if (!prev && isTooOld(message, now)) return;
+  // Уже проверявшиеся сообщения продолжаем вести, даже если отправлены
+  // чуть раньше первой записи в таблице.
+  if (!prev && isBeforeLaunch(ctx, message)) return;
 
   const outcome = await evaluate(ctx, parsed.amoId, { amount: parsed.statedAmount, source: parsed.statedSource });
-  const decision = decide(prev, outcome, 'message', now);
+  const decision = decide(prev, outcome, 'message', new Date());
   await applyDecision(
     ctx,
     prev,
@@ -244,8 +284,9 @@ async function recheckRow(ctx: Ctx, row: HandoffCheckRow, now: Date): Promise<vo
     await upsertCheck(ctx.db, { ...key, status: 'expired', last_checked_at: now.toISOString() });
     return;
   }
-  // Нет ссылки — ждём правку сообщения, AMO проверять нечего.
-  if (row.status === 'no_link' || row.amo_id == null) return;
+  // Нет ссылки — ждём правку сообщения, AMO проверять нечего. (Строка
+  // `no_link` со ссылкой — правка добавила ссылку, но «✅» не ушёл: проверяем.)
+  if (row.amo_id == null) return;
 
   const stated = {
     amount: row.stated_amount == null ? null : Number(row.stated_amount),
@@ -257,32 +298,41 @@ async function recheckRow(ctx: Ctx, row: HandoffCheckRow, now: Date): Promise<vo
   await applyDecision(ctx, row, decision, { messageId: row.message_id, amoUrl }, { ...key, status: decision.status });
 }
 
-async function runDailyPass(ctx: Ctx, now: Date): Promise<void> {
+/** Возвращает число строк, которые не удалось перепроверить. */
+async function runDailyPass(ctx: Ctx, now: Date): Promise<number> {
   const rows = await listOpen(ctx.db);
   // Строки, уже проверенные после сегодняшних 10:00 (правкой или прошлым
   // запуском воркера до рестарта), повторно не трогаем.
   const passStart = todayDailyPassStart(now).getTime();
   const due = rows.filter((row) => Date.parse(row.last_checked_at) < passStart);
   ctx.log('info', `daily pass: ${due.length} of ${rows.length} open checks`);
+  let failed = 0;
   for (const row of due) {
-    if (ctx.shouldStop()) return;
+    if (ctx.shouldStop()) break;
     try {
       await recheckRow(ctx, row, now);
     } catch (error) {
+      failed += 1;
       ctx.log('error', `daily recheck failed for message ${row.message_id}`, error);
     }
   }
+  return failed;
 }
 
-/** Возвращает ключ даты последнего успешного прохода. */
+/** Возвращает ключ даты последнего прохода. */
 async function maybeRunDailyPass(ctx: Ctx, lastPassKey: string | null): Promise<string | null> {
   const now = new Date();
   if (!isDailyPassDue(now, lastPassKey)) return lastPassKey;
   try {
-    await runDailyPass(ctx, now);
+    const failed = await runDailyPass(ctx, now);
+    if (failed > 0) {
+      await ctx.alerts.raise('daily-failed', `ежедневная перепроверка: ${failed} строк с ошибкой`, 'see worker logs');
+    } else {
+      ctx.alerts.clear('daily-failed');
+    }
     return moscowDateKey(now);
   } catch (error) {
-    ctx.log('error', 'daily pass failed; will retry', error);
+    await ctx.alerts.raise('daily-failed', 'ежедневная перепроверка не запустилась; повторим', error);
     return lastPassKey;
   }
 }
@@ -313,6 +363,36 @@ async function waitUntilNoWebhook(ctx: Ctx): Promise<void> {
   }
 }
 
+/** С включённой приватностью бот-не-админ не видит обычных сообщений группы. */
+async function checkPrivacy(ctx: Ctx): Promise<void> {
+  try {
+    const me = await getMe(TOKEN);
+    if (me.can_read_all_group_messages) return;
+    const member = await getChatMember(TOKEN, CHAT_ID, me.id);
+    if (member.status === 'administrator' || member.status === 'creator') return;
+    await ctx.alerts.raise(
+      'privacy',
+      'у бота включена приватность и он не админ — он не видит сообщения ветки; выключите /setprivacy в BotFather или сделайте его админом',
+      `chat member status: ${member.status}`,
+    );
+  } catch (error) {
+    ctx.log('warn', 'privacy check failed', error);
+  }
+}
+
+/** Первый запуск = самая ранняя строка таблицы; таблица пуста — этот запуск. */
+async function resolveLaunchedAt(db: Db, log: WorkerLogger): Promise<number> {
+  const now = Date.now();
+  try {
+    const earliest = await earliestCheckAt(db);
+    const earliestMs = earliest ? Date.parse(earliest) : Number.NaN;
+    return Number.isFinite(earliestMs) ? Math.min(earliestMs, now) : now;
+  } catch (error) {
+    log('warn', 'cannot read earliest check; treating this start as launch', error);
+    return now;
+  }
+}
+
 async function pollUpdates(ctx: Ctx, offset: number): Promise<number> {
   let updates: TelegramUpdate[];
   try {
@@ -336,8 +416,9 @@ async function pollUpdates(ctx: Ctx, offset: number): Promise<number> {
     next = Math.max(next, update.update_id + 1);
     try {
       await handleUpdate(ctx, update);
+      ctx.alerts.clear('update-failed');
     } catch (error) {
-      ctx.log('error', `update ${update.update_id} failed`, error);
+      await ctx.alerts.raise('update-failed', `не удалось обработать сообщение (update ${update.update_id})`, error);
     }
   }
   return next;
@@ -355,10 +436,12 @@ async function main(): Promise<void> {
     return;
   }
 
-  const ctx: Ctx = { db: requireSupabaseAdmin(log), log, shouldStop, alerts };
+  const db = requireSupabaseAdmin(log);
+  const ctx: Ctx = { db, log, shouldStop, alerts, launchedAtMs: await resolveLaunchedAt(db, log) };
   await waitUntilNoWebhook(ctx);
+  await checkPrivacy(ctx);
 
-  log('info', `long polling started (chat ${CHAT_ID}, thread ${THREAD_ID})`);
+  log('info', `long polling started (chat ${CHAT_ID}, thread ${THREAD_ID}, launched ${new Date(ctx.launchedAtMs).toISOString()})`);
   let offset = 0;
   let lastPassKey: string | null = null;
   while (!shouldStop()) {

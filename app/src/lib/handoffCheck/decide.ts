@@ -15,7 +15,7 @@ import type { HandoffCheckRow, HandoffCheckStatus } from './store';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** Напоминание — одно, не раньше чем через 3 дня после первой проверки. */
+/** Напоминание — одно, не раньше чем через 3 дня после первого предупреждения в чате. */
 export const REMINDER_AFTER_MS = 3 * DAY_MS;
 /** Через 14 дней после первой проверки перестаём проверять. */
 export const EXPIRE_AFTER_MS = 14 * DAY_MS;
@@ -23,6 +23,13 @@ export const EXPIRE_AFTER_MS = 14 * DAY_MS;
 /** Москва живёт в UTC+3 без перехода на летнее время (с 2014 года). */
 const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
 export const DAILY_PASS_HOUR_MSK = 10;
+
+/**
+ * `reply_message_id` на время отправки: строка сохраняется ДО ответа, чтобы
+ * после падения процесса между отправкой и записью повтор не ответил дважды.
+ * Для решений 0 значит «предупреждение в чате есть» (id неизвестен).
+ */
+export const REPLY_PENDING = 0;
 
 export const AMO_UNAVAILABLE_PROBLEM: Problem = {
   code: 'AMO_UNAVAILABLE',
@@ -41,7 +48,7 @@ export type ReplyKind = 'problems' | 'no_link' | 'resolved' | 'reminder';
 
 export type PrevState = Pick<
   HandoffCheckRow,
-  'status' | 'problems' | 'reply_message_id' | 'first_checked_at' | 'reminded_at'
+  'status' | 'problems' | 'reply_message_id' | 'warned_at' | 'first_checked_at' | 'reminded_at' | 'resolved_at'
 >;
 
 export interface Decision {
@@ -71,12 +78,12 @@ export function chatVisibleProblems(problems: Problem[]): Problem[] {
   return problems.filter((problem) => problem.code !== 'AMO_UNAVAILABLE');
 }
 
-/** Набор проблем без учёта порядка — чтобы не повторять ответ на такую же правку. */
+/**
+ * Набор кодов проблем без учёта порядка — чтобы не повторять ответ на такую же
+ * правку. Тексты не сравниваем: в них меняющиеся значения (суммы, этапы).
+ */
 export function problemsSignature(problems: Problem[]): string {
-  return chatVisibleProblems(problems)
-    .map((problem) => `${problem.code}:${problem.text}`)
-    .sort()
-    .join('\n');
+  return [...new Set(chatVisibleProblems(problems).map((problem) => problem.code))].sort().join(',');
 }
 
 function toldState(prev: PrevState | null): Told {
@@ -89,17 +96,13 @@ function toldState(prev: PrevState | null): Told {
   return { kind: 'none' };
 }
 
-function ageMs(prev: PrevState, now: Date): number {
-  return now.getTime() - Date.parse(prev.first_checked_at);
-}
-
 export function isExpired(prev: PrevState, now: Date): boolean {
-  return ageMs(prev, now) > EXPIRE_AFTER_MS;
+  return now.getTime() - Date.parse(prev.first_checked_at) > EXPIRE_AFTER_MS;
 }
 
 function isReminderDue(prev: PrevState | null, now: Date): boolean {
-  if (!prev || prev.reply_message_id == null || prev.reminded_at) return false;
-  return ageMs(prev, now) >= REMINDER_AFTER_MS;
+  if (!prev || prev.reply_message_id == null || prev.reminded_at || !prev.warned_at) return false;
+  return now.getTime() - Date.parse(prev.warned_at) >= REMINDER_AFTER_MS;
 }
 
 const SILENT = { reply: null, markReminded: false, markResolved: false } as const;

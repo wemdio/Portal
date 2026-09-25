@@ -142,8 +142,11 @@ export async function fetchCard(db: SupabaseClient, amoId: number): Promise<Card
     throw new AmoUnavailableError(`AMO request failed: HTTP ${response.status}`);
   }
 
+  // 200 с нечитаемым телом — сбой (обрезанный ответ, прокси), а не «сделки нет».
   const lead = (await response.json().catch(() => null)) as AmoLeadResponse | null;
-  if (!lead || typeof lead.id !== 'number') return NOT_FOUND;
+  if (!lead || typeof lead.id !== 'number') {
+    throw new AmoUnavailableError('AMO returned an unreadable lead body');
+  }
 
   const pipelineId = typeof lead.pipeline_id === 'number' ? lead.pipeline_id : null;
   const statusId = typeof lead.status_id === 'number' ? lead.status_id : null;

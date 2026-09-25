@@ -44,6 +44,9 @@ async function callApi<T>(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    // getUpdates ждёт до 25 с — таймаут с запасом, чтобы зависший запрос не
+    // останавливал воркер навсегда.
+    signal: AbortSignal.timeout(40_000),
   });
   const payload = (await response.json().catch(() => null)) as {
     ok?: boolean;
@@ -95,4 +98,18 @@ export async function sendMessage(
 
 export async function getWebhookInfo(token: string): Promise<{ url: string }> {
   return callApi<{ url: string }>(token, 'getWebhookInfo', {});
+}
+
+export async function getMe(
+  token: string,
+): Promise<{ id: number; username?: string; can_read_all_group_messages?: boolean }> {
+  return callApi(token, 'getMe', {});
+}
+
+export async function getChatMember(
+  token: string,
+  chatId: number,
+  userId: number,
+): Promise<{ status: string }> {
+  return callApi<{ status: string }>(token, 'getChatMember', { chat_id: chatId, user_id: userId });
 }
