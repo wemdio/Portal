@@ -7,6 +7,9 @@ import {
   CHAIN_TYPES,
   DEFAULT_FRESHNESS_DAYS,
   DEFAULT_LIMIT,
+  DEFAULT_MIN_TA_SCORE,
+  DEFAULT_WRITE_THRESHOLD,
+  MAX_FRESHNESS_DAYS,
   MAX_LIMIT,
   SOURCE_CODES,
   SOURCE_LABELS,
@@ -26,11 +29,46 @@ const label = 'mb-1 block text-sm font-medium text-gray-700';
 
 const DEFAULT_SOURCES: SourceCode[] = ['hh', 'direct', 'crm', 'site_news'];
 
+function Slider({
+  title,
+  hint,
+  value,
+  min,
+  max,
+  step = 1,
+  suffix = '',
+  onChange,
+}: {
+  title: string;
+  hint: string;
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  suffix?: string;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div>
+      <div className="mb-1 flex items-baseline justify-between">
+        <span className="text-sm font-medium text-gray-700">{title}</span>
+        <span className="text-sm font-semibold tabular-nums text-violet-700">
+          {value}
+          {suffix}
+        </span>
+      </div>
+      <input type="range" className="w-full accent-violet-600" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} />
+      <p className="mt-1 text-xs text-gray-500">{hint}</p>
+    </div>
+  );
+}
+
 export function LaunchForm({ busy, senders, onStart }: Props) {
   const [sources, setSources] = useState<SourceCode[]>(DEFAULT_SOURCES);
   const [freshness, setFreshness] = useState(DEFAULT_FRESHNESS_DAYS);
   const [limit, setLimit] = useState(DEFAULT_LIMIT);
-  const [write, setWrite] = useState(70);
+  const [write, setWrite] = useState(DEFAULT_WRITE_THRESHOLD);
+  const [minTa, setMinTa] = useState(DEFAULT_MIN_TA_SCORE);
   const [minContract, setMinContract] = useState(1_000_000);
   const [minRevenueM, setMinRevenueM] = useState(30);
   const [maxRevenueM, setMaxRevenueM] = useState(3000);
@@ -47,6 +85,7 @@ export function LaunchForm({ busy, senders, onStart }: Props) {
       freshness_days: freshness,
       limit,
       write_threshold: write,
+      min_ta_score: minTa,
       min_contract_amount: minContract,
       min_revenue: minRevenueM * 1_000_000,
       max_revenue: maxRevenueM * 1_000_000,
@@ -58,8 +97,9 @@ export function LaunchForm({ busy, senders, onStart }: Props) {
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
       <p className="max-w-4xl text-sm text-gray-600">
-        Система сама выбирает цепочку по главному поводу компании: {CHAIN_TYPES.map((c) => CHAIN_LABELS[c]).join(' → ')}.
-        Открытые сделки и клиенты из AMO пропускаются. Почта ищется только у компаний, набравших порог скоринга. Во всех цепочках 4 письма.
+        Система сравнивает все поводы компании и выбирает лучший оффер: {CHAIN_TYPES.map((c) => CHAIN_LABELS[c]).join(', ')}.
+        «Возврат» — всегда первый, если с компанией уже говорили. Открытые сделки и клиенты из AMO пропускаются. Спорные компании
+        помечаются, очень спорные уходят в отдельную вкладку и в Instantly не попадают.
       </p>
 
       <div className="mt-5">
@@ -74,18 +114,16 @@ export function LaunchForm({ busy, senders, onStart }: Props) {
         </div>
         <p className="mt-2 text-xs text-gray-500">
           Выставки, госконтракты и гранты берутся из файлов вкладки «Библиотеки». Общая база даёт компании без повода — они
-          попадут в цепочку «Только профиль», только если сайт получит ЦА-балл от 7.
+          попадут в цепочку «Только профиль», только если сайт получит ЦА-балл от 7. Тендеры — из файлов «Библиотек». Новости и
+          рост выручки проверяются у каждой компании и удлиняют запуск.
         </p>
       </div>
 
       <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <div>
-          <label className={label}>Свежесть повода, дней</label>
-          <input className={input} type="number" min={1} max={180} value={freshness} onChange={(e) => setFreshness(Number(e.target.value))} />
-        </div>
-        <div>
           <label className={label}>Сколько готовых компаний</label>
           <input className={input} type="number" min={1} max={MAX_LIMIT} value={limit} onChange={(e) => setLimit(Number(e.target.value))} />
+          <p className="mt-1 text-xs text-gray-500">Готовые уходят в Instantly. На 500 запуск идёт несколько часов и заметно дороже по ИИ.</p>
         </div>
         <div>
           <label className={label}>Подпись</label>
@@ -106,31 +144,37 @@ export function LaunchForm({ busy, senders, onStart }: Props) {
         </div>
       </div>
 
-      <div className="mt-5 max-w-xs">
-        <label className={label}>Пишем от скоринга (0–100)</label>
-        <input className={input} type="number" min={0} max={100} value={write} onChange={(e) => setWrite(Number(e.target.value))} />
-        <p className="mt-1 text-xs text-gray-500">Ниже порога — пропуск, ручной проверки нет.</p>
+      <div className="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-3">
+        <Slider title="Пишем от оценки" hint="Оценка компании 0–100. Ниже — отсев." value={write} min={0} max={100} onChange={setWrite} />
+        <Slider
+          title="Похожесть на клиента от"
+          hint="Балл 0–10 по сайту. Ниже — отсев из любого источника; «Только профиль» — не ниже 7."
+          value={minTa}
+          min={0}
+          max={10}
+          onChange={setMinTa}
+        />
+        <Slider title="Свежесть повода" hint="Повод старше — не повод." value={freshness} min={7} max={MAX_FRESHNESS_DAYS} suffix=" дн." onChange={setFreshness} />
       </div>
 
-      {sources.includes('directory') && (
-        <div className="mt-5">
-          <span className={label}>Общая база: размер компаний</span>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <div>
-              <div className="mb-1 text-xs text-gray-500">Выручка от, млн ₽</div>
-              <input className={input} type="number" min={0} value={minRevenueM} onChange={(e) => setMinRevenueM(Number(e.target.value))} />
-            </div>
-            <div>
-              <div className="mb-1 text-xs text-gray-500">Выручка до, млн ₽</div>
-              <input className={input} type="number" min={0} value={maxRevenueM} onChange={(e) => setMaxRevenueM(Number(e.target.value))} />
-            </div>
-            <div>
-              <div className="mb-1 text-xs text-gray-500">Сотрудников от</div>
-              <input className={input} type="number" min={0} value={minEmployees} onChange={(e) => setMinEmployees(Number(e.target.value))} />
-            </div>
+      <div className="mt-5">
+        <span className={label}>Размер компаний (для всех источников)</span>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <div>
+            <div className="mb-1 text-xs text-gray-500">Выручка от, млн ₽</div>
+            <input className={input} type="number" min={0} value={minRevenueM} onChange={(e) => setMinRevenueM(Number(e.target.value))} />
+          </div>
+          <div>
+            <div className="mb-1 text-xs text-gray-500">Выручка до, млн ₽</div>
+            <input className={input} type="number" min={0} value={maxRevenueM} onChange={(e) => setMaxRevenueM(Number(e.target.value))} />
+          </div>
+          <div>
+            <div className="mb-1 text-xs text-gray-500">Сотрудников от</div>
+            <input className={input} type="number" min={0} value={minEmployees} onChange={(e) => setMinEmployees(Number(e.target.value))} />
           </div>
         </div>
-      )}
+        <p className="mt-1 text-xs text-gray-500">Известный размер вне рамок — отсев. Неизвестный — компания проходит с пометкой «Сомнения в компании».</p>
+      </div>
 
       <div className="mt-5 flex flex-wrap items-center justify-between gap-4">
         <label className="flex items-center gap-2 text-sm text-gray-700">
