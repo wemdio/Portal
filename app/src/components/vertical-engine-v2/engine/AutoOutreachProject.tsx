@@ -797,12 +797,13 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                             </div>
                           </details>
                         ) : null}
-                        <label className="flex items-start gap-3">
+                        <label className={`flex items-start gap-3${!review ? ' cursor-not-allowed ' + HE.muted : ''}`}>
                           <input
                             type="checkbox"
                             className="ve2-cbx mt-1"
                             checked={approved}
                             disabled={!review || busy || locked}
+                            aria-describedby={!review ? `approval-pending-${base.id}` : undefined}
                             onChange={(e) =>
                               void change({
                                 action: 'approve',
@@ -813,10 +814,12 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                               })
                             }
                           />
-                          <span>Одобряю базу для запуска</span>
+                          <span>{review ? 'Одобряю базу для запуска' : 'Одобрение пока недоступно'}</span>
                         </label>
                         {!review ? (
-                          <p className={HE.muted}>Одобрение станет доступно после подготовки итоговых писем.</p>
+                          <p id={`approval-pending-${base.id}`} className={HE.muted}>
+                            {preparationState.title}. Для одобрения должны быть готовы база и итоговые письма.
+                          </p>
                         ) : null}
                       </>
                     ) : null}

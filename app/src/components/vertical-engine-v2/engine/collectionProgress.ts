@@ -77,7 +77,7 @@ export function getCollectionQueue(
 
 export function getCollectionProgress(
   info: VeCollectInfo | null | undefined,
-  job?: Pick<VeJobSummary, 'stage' | 'status' | 'progress' | 'payload'>,
+  job?: Pick<VeJobSummary, 'stage' | 'status' | 'progress' | 'payload'> & Partial<Pick<VeJobSummary, 'started_at'>>,
 ) {
   const tasks = Array.isArray(info?.tasks) ? info.tasks : [];
   const completedCounts = tasks.filter((task) => task && collectTaskDone(task.status))
@@ -86,7 +86,14 @@ export function getCollectionProgress(
   const candidates = collectCount(info?.stats?.rows_total);
   const construct = info?.construct;
   const snapshot = construct?.progress;
+  const checkpointAt = Date.parse(job?.progress?.updated_at ?? '');
+  const startedAt = Date.parse(job?.started_at ?? '');
+  // A checkpoint from a previous claim must not override the current phase.
+  const relevanceUpdatedAt = job?.stage === 'base_collect' && job.status === 'running'
+    && job.progress?.phase === 'relevance_review' && Number.isFinite(checkpointAt)
+    && Number.isFinite(startedAt) && checkpointAt >= startedAt ? checkpointAt : null;
   const phase = info?.source_contact_discovery ? 'discovering_sites' : info?.company_name_recovery ? 'cleaning_names'
+    : relevanceUpdatedAt !== null ? 'reviewing_relevance'
     : info?.saved_email_review_pending ? 'reviewing_emails'
     : info?.relevance_review_requested || job?.payload?.review_relevance ? 'reviewing_relevance' : !construct
     ? (tasks.length > 0 || (Array.isArray(info?.plan?.tasks) && info.plan.tasks.length > 0) ? 'collecting' : 'planning')
@@ -106,6 +113,7 @@ export function getCollectionProgress(
     ? { done: namesDone, total: namesTotal } : null;
   return {
     phase, candidates, sourceRows, stepPercent, nameProgress,
+    relevanceUpdatedAt: phase === 'reviewing_relevance' ? relevanceUpdatedAt : null,
     stepKey: typeof snapshot?.current_step_key === 'string' ? snapshot.current_step_key : null,
   } as const;
 }

@@ -52,7 +52,7 @@ const COLLECT_PHASES: Record<ReturnType<typeof getCollectionProgress>['phase'], 
   processing: ['Обогащаем и проверяем контакты', 'Ищем недостающие данные, проверяем email и исключаем дубли. В итоговую базу попадут только контакты, прошедшие все проверки.'],
   finishing: ['Проверяем соответствие гипотезе', 'Система автоматически проверяет, чем занимаются компании и соответствуют ли они выбранной гипотезе. Неподтверждённые контакты не входят в готовую базу.'],
   cleaning_names: ['Подготавливаем названия компаний для писем', 'Контакты уже отобраны. Приводим названия компаний к виду, который можно использовать в обращении, затем разберём состав базы.'],
-  reviewing_relevance: ['Проверяем соответствие компаний гипотезе', 'Система автоматически проверяет сведения о сохранённых компаниях и подтверждения на их сайтах. Контакты без подтверждения не попадут в готовую базу.'],
+  reviewing_relevance: ['Проверяем соответствие компаний гипотезе', 'Проверяем сведения о компаниях и подтверждения на их сайтах. Число готовых контактов обновится после завершения проверок. Контакты без подтверждения не попадут в готовую базу.'],
   reviewing_emails: ['Проверяем сохранённые email', 'Продолжаем проверку уже найденных адресов. После неё система завершит отбор компаний под гипотезу и разберёт состав базы.'],
   construct_failed: ['Обработка контактов остановлена', 'Обработчик сообщил об остановке. Причина появится после обновления состояния подготовки.'],
 };
@@ -214,7 +214,7 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
       currentStep: 0, tone: 'info',
     };
   }
-  const [title, description] = info?.validation_retry && !info.company_name_recovery && !info.saved_email_review_pending
+  const [title, description] = info?.validation_retry && phase !== 'reviewing_relevance' && !info.company_name_recovery && !info.saved_email_review_pending
     ? ['Продолжаем проверку сохранённых контактов', 'Система продолжает автоматическую проверку уже найденных контактов: соответствие компаний гипотезе и пригодность email для рассылки. После проверки начнётся разбор базы.']
     : COLLECT_PHASES[phase];
   return { title, description, currentStep: 0, tone: phase === 'construct_failed' ? 'err' : phase === 'construct_queued' ? 'muted' : 'info' };
@@ -237,8 +237,8 @@ export function PreparationProgress(props: PreparationProgressProps) {
   const composition = describeReadyComposition(target);
   const collecting = props.base?.status === 'collecting' && state.tone !== 'err';
   const stepPercent = collecting && state.tone === 'info' ? progress.stepPercent : null;
-  const started = Date.parse(props.base?.created_at ?? '');
-  const updated = Date.parse(props.base?.updated_at ?? '');
+  const started = Date.parse(job?.status === 'running' ? job.started_at ?? '' : '');
+  const updated = progress.relevanceUpdatedAt ?? Date.parse(props.base?.updated_at ?? '');
   const minutes = now !== null && Number.isFinite(started) && now >= started ? Math.floor((now - started) / 60_000) : null;
   const elapsed = minutes === null ? null : minutes < 1 ? 'меньше минуты' : minutes < 60 ? `${minutes} мин` : `${Math.floor(minutes / 60)} ч ${minutes % 60} мин`;
   return (
@@ -259,8 +259,8 @@ export function PreparationProgress(props: PreparationProgressProps) {
         {composition ? <span>{composition}</span> : null}
       </div> : null}
       {collecting && (elapsed || Number.isFinite(updated)) ? <p className={HE.muted}>
-        {elapsed ? `С момента создания базы: ${elapsed}. ` : ''}
-        {Number.isFinite(updated) ? `Статус обновлён ${new Date(updated).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} МСК. ` : ''}
+        {elapsed ? `Текущая попытка: ${elapsed}. ` : ''}
+        {Number.isFinite(updated) ? `${progress.relevanceUpdatedAt !== null ? 'Последнее сохранение проверки:' : 'Статус обновлён'} ${new Date(updated).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', ...(progress.relevanceUpdatedAt !== null ? { second: '2-digit' } : {}) })} МСК. ` : ''}
         Время завершения пока неизвестно.
       </p> : null}
       <ol className="ve2-preparation-steps" aria-label="Этапы подготовки">
