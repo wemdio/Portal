@@ -6,7 +6,7 @@
  */
 
 import { acceptQuote } from '../evidence';
-import { asString, callJson } from '../llm';
+import { asBool, asString, callJson } from '../llm';
 import type { Signal, SignalType } from '../types';
 
 const TIMEOUT_MS = 10_000;
@@ -31,11 +31,18 @@ const NEWS_TYPES: Record<string, SignalType> = {
 function decode(text: string): string {
   return text
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
-    .replace(/&amp;/g, '&')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&laquo;/g, '«')
+    .replace(/&raquo;/g, '»')
+    .replace(/&ndash;/g, '–')
+    .replace(/&mdash;/g, '—')
+    .replace(/&#(\d+);/g, (_, c: string) => String.fromCodePoint(Number(c)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, c: string) => String.fromCodePoint(parseInt(c, 16)))
+    .replace(/&amp;/g, '&')
     .trim();
 }
 
@@ -87,7 +94,7 @@ export async function findNewsSignals(brand: string, freshnessDays: number): Pro
   for (const v of verdicts) {
     const item = items[Number(v.n) - 1];
     const type = NEWS_TYPES[asString(v.type)];
-    if (!item || !type || v.about_company !== true) continue;
+    if (!item || !type || !asBool(v.about_company)) continue;
     const quote = acceptQuote(item.title, item.title);
     if (!quote) continue;
     out.push({ type, source: 'news', title: item.title, date: item.date, url: item.link, quote, level: 'A', meta: { news: true } });
