@@ -81,17 +81,17 @@ export interface Route {
   runnerUp: string | null;
 }
 
-function ageDays(s: Signal | null): number | null {
+function ageDays(s: Signal | null, now: number): number | null {
   if (!s?.date) return null;
   const t = new Date(s.date).getTime();
-  return Number.isFinite(t) ? (Date.now() - t) / DAY : null;
+  return Number.isFinite(t) ? (now - t) / DAY : null;
 }
 
-function freshnessPoints(s: Signal | null, chain: ChainType, freshnessDays: number): number {
-  const age = ageDays(s);
+function freshnessPoints(s: Signal | null, chain: ChainType, freshnessDays: number, now: number): number {
+  const age = ageDays(s, now);
   if (age === null) return 0;
-  // Выставка впереди — лучшее окно для встреч.
-  if (chain === 'event' && age < 0) return 20;
+  // Выставка впереди — лучшее окно для встреч; дальше 90 дней вперёд — слабее.
+  if (chain === 'event' && age < 0) return age >= -90 ? 20 : 10;
   if (age <= 14) return 20;
   return age <= freshnessDays ? 10 : 0;
 }
@@ -131,20 +131,21 @@ interface Candidate {
   parts: string;
 }
 
-function evaluate(chain: ChainType, signals: Signal[], i: RouteInput): Candidate {
+function evaluate(chain: ChainType, signals: Signal[], i: RouteInput, now: number): Candidate {
   // Лучший повод цепочки — самый свежий и надёжный.
   const ranked = [...signals].sort(
     (a, b) =>
-      freshnessPoints(b, chain, i.freshnessDays) + evidencePoints(b) - (freshnessPoints(a, chain, i.freshnessDays) + evidencePoints(a)),
+      freshnessPoints(b, chain, i.freshnessDays, now) + evidencePoints(b) - (freshnessPoints(a, chain, i.freshnessDays, now) + evidencePoints(a)),
   );
-  // У найма цитата функции продаж сильнее голого названия должности.
-  const primary = chain === 'hiring' ? (signals.find((s) => s.level === 'A') ?? ranked[0] ?? null) : (ranked[0] ?? null);
+  // У найма цитата функции продаж сильнее голого названия должности, но берём её из уже отсортированных по свежести.
+  const primary = chain === 'hiring' ? (ranked.find((s) => s.level === 'A') ?? ranked[0] ?? null) : (ranked[0] ?? null);
   const strength = strengthPoints(chain, primary, i.taScore);
-  const fresh = chain === 'icp_only' ? 10 : freshnessPoints(primary, chain, i.freshnessDays);
+  const fresh = chain === 'icp_only' ? 0 : freshnessPoints(primary, chain, i.freshnessDays, now);
   const evidence = evidencePoints(primary);
   const kase = chain === 'hiring' || i.hasCaseFor(chain) ? 15 : 0;
   const size = sizePoints(chain, i);
-  const extra = signals.length > 1 ? 5 : 0;
+  const distinctFacts = new Set(signals.map((s) => s.title.trim().toLowerCase())).size;
+  const extra = distinctFacts > 1 ? 5 : 0;
   const fit = Math.min(100, strength + fresh + evidence + kase + size + extra);
   const parts = [
     `повод ${strength}`,
@@ -152,15 +153,16 @@ function evaluate(chain: ChainType, signals: Signal[], i: RouteInput): Candidate
     `доказательство ${evidence}`,
     kase ? `кейс ${kase}` : 'без кейса',
     `размер ${size}`,
-    ...(extra ? [`поводов ${signals.length}`] : []),
+    ...(extra ? [`поводов ${distinctFacts}`] : []),
   ].join(', ');
   return { chain, primary, fit, parts };
 }
 
 export function routeChain(input: RouteInput): Route | null {
+  const now = Date.now();
   const usable = input.signals.filter((s) => s.level === 'A' || s.level === 'B');
   if (input.reactivation) {
-    const lost = usable.filter((s) => s.type === 'crm_lost').sort((a, b) => (ageDays(a) ?? 1e9) - (ageDays(b) ?? 1e9));
+    const lost = usable.filter((s) => s.type === 'crm_lost').sort((a, b) => (ageDays(a, now) ?? 1e9) - (ageDays(b, now) ?? 1e9));
     return { chain: 'reactivation', primary: lost[0] ?? null, fit: 100, reason: 'возврат: был записанный разговор в AMO', runnerUp: null };
   }
 
@@ -174,11 +176,11 @@ export function routeChain(input: RouteInput): Route | null {
   for (const chain of CEO_ORDER) {
     if (chain === 'reactivation') continue;
     if (chain === 'icp_only') {
-      if (input.taScore >= 7) candidates.push(evaluate('icp_only', [], input));
+      if (input.taScore >= 7) candidates.push(evaluate('icp_only', [], input, now));
       continue;
     }
     const list = byChain.get(chain);
-    if (list?.length) candidates.push(evaluate(chain, list, input));
+    if (list?.length) candidates.push(evaluate(chain, list, input, now));
   }
   if (!candidates.length) return null;
 
