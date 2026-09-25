@@ -29,12 +29,12 @@ describe('AudienceSummary remaining-market estimate', () => {
   it('shows contacts next to companies, the estimate date and that these are new companies', async () => {
     mockVeEngineCall.mockResolvedValue({ ok: true, data: summary });
     render(<AudienceSummary base={base} presetId="" preparationState={{ title: '', description: '', currentStep: null, tone: 'ok' }} />);
-    expect(await screen.findByText('~97')).toBeInTheDocument();
-    expect(screen.getByText('Ещё соберётся контактов (≈73 компаний)')).toBeInTheDocument();
-    const line = screen.getByText((_, node) => node?.tagName === 'P'
-      && (node.textContent ?? '').startsWith('~97 ещё соберётся контактов (≈73 компаний), оценка'));
-    expect(line.textContent).toContain('это новые компании, а не дополнительные адреса уже найденных');
-    expect(line.textContent).toMatch(/оценка\s+на\s+\S+/);
+    const line = await screen.findByText((_, node) => node?.tagName === 'P'
+      && (node.textContent ?? '').startsWith('Предварительная оценка добора: ~97 контактов (≈73 компаний)'));
+    expect(line.textContent).toContain('Это оценка новых компаний, а не дополнительных адресов уже найденных');
+    expect(line.textContent).toContain('не означает, что добор идёт');
+    expect(line.closest('details')).not.toHaveAttribute('open');
+    expect(screen.getByText(/Оценка с низкой уверенностью от/)).toBeInTheDocument();
     expect(screen.getByText(/осталось 2\s426 компаний, которые база ещё не смотрела/)).toBeInTheDocument();
   });
 });

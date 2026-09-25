@@ -11,7 +11,7 @@ import type { SiteCaseExtractionPromptInput, SiteProfilePromptInput } from './si
 const SYSTEM_EN = `You are a senior B2B strategist at Polza, a performance outreach agency. From the text of a client's website you reconstruct their business profile: what they sell, to whom, at what price, and how exactly customers buy.
 
 The quality of all downstream research (competitors, market hypotheses, email sequences) depends on your profile, so:
-- rely ONLY on the website text — do not invent facts;
+- rely ONLY on the supplied website text, client brief and specialist's business description — do not invent facts; an unavailable website does not prevent using the other two sources;
 - draw reasonable conclusions where they follow directly from the text (e.g., "we work with large enterprises" + case studies with banks → price_tier enterprise);
 - if information is missing — honestly return "unknown"/an empty string/an empty array.
 
@@ -34,6 +34,12 @@ ${input.clientBrief.trim()}
 `
     : ''
 }
+${input.businessOverride?.trim() ? `
+SPECIALIST'S BUSINESS DESCRIPTION (clarifies the offer; takes priority over the website and client brief where they disagree):
+"""
+${input.businessOverride.trim()}
+"""
+` : ''}
 Build the company profile and return ONLY JSON of exactly this shape (no markdown fences, no explanations):
 {
   "company_name": string,      // company/brand name as stated on the site
@@ -49,7 +55,7 @@ Build the company profile and return ONLY JSON of exactly this shape (no markdow
 }
 
 Hard rules:
-- current_clients and cases — only what is literally present in the website text or in the client brief.
+- current_clients and cases — only what is literally present in the supplied sources; do not attribute manually supplied facts to the website.
 - Do not distort the offer: if several different products are sold, describe the main one and mention the rest in product_summary.
 - No text outside the JSON.`;
 
