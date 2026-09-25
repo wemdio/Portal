@@ -48,7 +48,8 @@ export function joinLeadPhones(values: readonly (string | null)[], limit = 200):
     const phone = value.trim();
     const extension = /\s+доб\.\s*(\d+)$/.exec(phone);
     const digits = (extension ? phone.slice(0, extension.index) : phone).replace(/\D/g, '');
-    const base = /^[78]\d{10}$/.test(digits) ? `7${digits.slice(1)}` : digits;
+    const canonical = /^007\d{10}$/.test(digits) ? digits.slice(2) : digits;
+    const base = /^[78]\d{10}$/.test(canonical) ? `7${canonical.slice(1)}` : canonical;
     const key = `${base}:${extension?.[1] ?? ''}`;
     if (!phone || !base || unique.has(key)) continue;
     if (!extension && [...unique.keys()].some((existing) => existing.startsWith(`${base}:`))) continue;
@@ -75,6 +76,10 @@ export function leadPhoneCandidates(line: string): LeadPhoneCandidate[] {
     let base = match[0].trim().replace(/[.]+$/, '');
     let extension: string | undefined;
     let end = match.index + match[0].length;
+    // A parenthesized local number is not an extension or one 17-digit phone:
+    // "+7... (26-49-30)". Keep the complete number; don't guess its local area.
+    const localAlias = /^(.*\d)\s+\((\d{2,3}(?:-\d{2,3}){1,2})\)$/.exec(base);
+    if (localAlias && /^[78]\d{10}$/.test(localAlias[1].replace(/\D/g, ''))) base = localAlias[1].trim();
     // Never extract a numeric substring of a registry id or a timestamp.
     // The latter used to turn "2026-09-24 12:47" into a phone.
     if (/[\p{L}\p{N}_/-]$/u.test(line.slice(0, match.index)) ||
