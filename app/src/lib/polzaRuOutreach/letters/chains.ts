@@ -59,6 +59,15 @@ export function openingSentence(input: ChainInput, brand: string): string | null
     }
     case 'growth_event': {
       if (!s) return null;
+      if (s.source === 'news' && s.quote) return `Увидел новость: «${s.quote}».`;
+      if (s.type === 'tender_won') {
+        const subject = s.title && wordCount(s.title) <= 15 ? s.title : null;
+        return `Увидел, что ${b} выиграла тендер${subject ? ` «${subject}»` : ''}.`;
+      }
+      // Цифры роста в письмо не несём: QA режет числа не из разрешённых источников.
+      if (s.type === 'revenue_growth') return `Увидел по открытой отчётности, что ${b} заметно выросла за последний год.`;
+      if (s.type === 'new_office' && s.source === 'gis') return `Увидел, что у ${b} несколько филиалов.`;
+      if (s.type === 'new_office' && s.source === 'ymaps') return `Увидел, что у ${b} появилась новая точка: ${s.title}.`;
       if (s.type === 'contract_won') {
         const customer = typeof s.meta?.customer === 'string' ? s.meta.customer : null;
         const subject = s.title && wordCount(s.title) <= 15 ? s.title : null;
