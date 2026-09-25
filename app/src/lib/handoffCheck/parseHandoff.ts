@@ -1,6 +1,7 @@
 /**
  * Разбор сообщения из ветки «Передача проектов». Пример — в спеке. Сообщение
- * пишут руками по шаблону, поэтому разбор терпим к пробелам, регистру и «к»/«k».
+ * пишут руками по шаблону, поэтому разбор терпим к пробелам, регистру, «к»/«k»
+ * и тире вместо двоеточия.
  */
 export interface ParsedHandoff {
   isHandoff: boolean;
@@ -12,19 +13,36 @@ export interface ParsedHandoff {
   statedSource: string | null;
 }
 
-const MARKERS = [
-  /(^|\n)\s*продажа\s*($|\n)/i,
-  /стоимость\s*:/i,
-  /кто\s+завел\s*:/i,
-  /откуда\s+лид\s*:/i,
-  /ссылка\s+на\s+амо/i,
+// Разделитель после «Стоимость»/«Откуда лид» — двоеточие или любое тире
+// (дефис, en-dash, em-dash): в чате его часто подставляет автозамена телефона.
+const SEP = '[:—–-]';
+
+/** Строка, где после удаления всего кроме букв остаётся ровно «продажа» — терпимо к эмодзи и знакам («Продажа 🎉», «# Продажа»). */
+function hasProdazhaLine(text: string): boolean {
+  return text.split('\n').some((line) => {
+    const lettersOnly = line.replace(/[^a-zа-яё]/gi, '').toLowerCase();
+    return lettersOnly === 'продажа';
+  });
+}
+
+const MARKER_CHECKS: Array<(text: string) => boolean> = [
+  hasProdazhaLine,
+  (t) => new RegExp(`стоимость\\s*${SEP}`, 'i').test(t),
+  (t) => /кто\s+завел\s*:/i.test(t),
+  (t) => new RegExp(`откуда\\s+лид\\s*${SEP}`, 'i').test(t),
+  (t) => /ссылка\s+на\s+амо/i.test(t),
 ];
 
-const AMO_LINK = /https?:\/\/[a-z0-9-]+\.amocrm\.(?:ru|com)\/leads\/detail\/(\d+)/i;
+const AMOUNT_LINE_RE = new RegExp(`стоимость\\s*${SEP}\\s*(.+)`, 'i');
+const SOURCE_LINE_RE = new RegExp(`откуда\\s+лид\\s*${SEP}\\s*(.+)`, 'i');
 
-// Число: либо разбитое пробелами по тысячам («259 000»), либо слитное («259»,
-// «259000»); опциональная десятичная часть через запятую/точку («1,2»).
-const NUMBER_RE = /(\d{1,3}(?:[  ]\d{3})+|\d+)([.,]\d+)?/;
+// Схема необязательна — сообщения часто вставляют ссылку без «https://».
+const AMO_LINK = /(?:https?:\/\/)?([a-z0-9-]+\.amocrm\.(?:ru|com)\/leads\/detail\/(\d+))/i;
+
+// Число: необязательный минус, затем либо разбитое пробелами по тысячам
+// («259 000»), либо слитное («259», «259000»); опциональная десятичная часть
+// через запятую/точку («1,2»).
+const NUMBER_RE = /(-)?(\d{1,3}(?:[  ]\d{3})+|\d+)([.,]\d+)?/;
 
 // Суффикс сразу после числа (с необязательными пробелами перед ним). Отрицательный
 // lookahead отсекает случайное совпадение внутри другого слова («метров» не даёт «м»).
@@ -35,7 +53,7 @@ const MILLION_SUFFIXES = new Set(['млн', 'млн.', 'm', 'м']);
 
 /**
  * «259k», «179 к», «259 000», «1,2 млн», «250 тыс», «259000 руб» → рубли;
- * не нашли число или получили ≤ 0 → null.
+ * не нашли число, получили ≤ 0 или отрицательное → null.
  */
 export function parseAmount(raw: string): number | null {
   if (!raw) return null;
@@ -43,11 +61,13 @@ export function parseAmount(raw: string): number | null {
   const numberMatch = NUMBER_RE.exec(raw);
   if (!numberMatch) return null;
 
-  const integerPart = numberMatch[1].replace(/[  ]/g, '');
-  const decimalPart = numberMatch[2] ? numberMatch[2].slice(1) : null;
+  const isNegative = Boolean(numberMatch[1]);
+  const integerPart = numberMatch[2].replace(/[  ]/g, '');
+  const decimalPart = numberMatch[3] ? numberMatch[3].slice(1) : null;
   const numericText = decimalPart ? `${integerPart}.${decimalPart}` : integerPart;
   let value = Number.parseFloat(numericText);
   if (!Number.isFinite(value)) return null;
+  if (isNegative) value = -value;
 
   const rest = raw.slice(numberMatch.index + numberMatch[0].length);
   const suffixMatch = SUFFIX_RE.exec(rest);
@@ -62,19 +82,19 @@ export function parseAmount(raw: string): number | null {
 }
 
 export function parseHandoff(text: string): ParsedHandoff {
-  const markerCount = MARKERS.filter((re) => re.test(text)).length;
+  const markerCount = MARKER_CHECKS.filter((check) => check(text)).length;
   const isHandoff = markerCount >= 2;
 
   const linkMatch = AMO_LINK.exec(text);
-  const amoId = linkMatch ? Number(linkMatch[1]) : null;
-  const amoUrl = linkMatch ? linkMatch[0] : null;
+  const amoId = linkMatch ? Number(linkMatch[2]) : null;
+  const amoUrl = linkMatch ? `https://${linkMatch[1]}` : null;
 
   // «.» без флага «s» не переходит через перевод строки — значение само
   // обрезается до конца строки.
-  const amountLine = /стоимость\s*:\s*(.+)/i.exec(text);
+  const amountLine = AMOUNT_LINE_RE.exec(text);
   const statedAmount = amountLine ? parseAmount(amountLine[1].trim()) : null;
 
-  const sourceLine = /откуда\s+лид\s*:\s*(.+)/i.exec(text);
+  const sourceLine = SOURCE_LINE_RE.exec(text);
   const statedSourceRaw = sourceLine ? sourceLine[1].trim() : '';
   const statedSource = statedSourceRaw.length > 0 ? statedSourceRaw : null;
 
