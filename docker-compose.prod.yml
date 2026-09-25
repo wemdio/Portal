@@ -693,6 +693,45 @@ services:
     networks:
       - portal-network
 
+  # Проверка карточки AMO при передаче проекта: читает ветку «Передача проектов»
+  # группы «Продажи Polza», отвечает реплаем только при проблемах с карточкой
+  # (или если в сообщении нет ссылки на AMO), раз в день в 10:00 МСК перепроверяет
+  # открытые проблемы. Спека: docs/superpowers/specs/2026-09-25-handoff-card-check-design.md.
+  # Перед выкладкой нужно руками: 1) HANDOFF_BOT_TOKEN в .env на сервере;
+  # 2) у бота в BotFather выключить приватность (/setprivacy → Disable) или
+  # сделать его админом группы — иначе он не видит чужие сообщения.
+  worker-handoff-check-bot:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-handoff-check-bot
+    command: ["node", "/app/workers/handoffCheckBot.js"]
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - HANDOFF_BOT_TOKEN=${HANDOFF_BOT_TOKEN:-}
+      - HANDOFF_CHAT_ID=${HANDOFF_CHAT_ID:-}
+      - HANDOFF_THREAD_ID=${HANDOFF_THREAD_ID:-}
+      - FIRST_SALES_PIPELINE_ID=${FIRST_SALES_PIPELINE_ID:-}
+      - AMO_BASE_URL=${AMO_BASE_URL:-}
+      - AMO_ACCESS_TOKEN=${AMO_ACCESS_TOKEN:-}
+      # TG-алерт при сбое (нет токена, конфликт getUpdates, не отправился ответ,
+      # ежедневная перепроверка упала). Идёт в канал health-check бота
+      # (см. app/src/lib/telegram/workerAlert.ts).
+      - TELEGRAM_HEALTH_BOT_TOKEN=${TELEGRAM_HEALTH_BOT_TOKEN}
+      - TELEGRAM_HEALTH_CHAT_ID=${TELEGRAM_HEALTH_CHAT_ID}
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+          pids: 256
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   worker-hypothesis-engine:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-hypothesis-engine
