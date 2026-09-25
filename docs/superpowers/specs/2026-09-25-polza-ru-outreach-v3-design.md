@@ -41,7 +41,7 @@
 |---|---|
 | `GENERIC_MAILBOX` | почта общая: `is_routing = true` или локальная часть из списка info/sales/office/hello/mail/zakaz/… |
 | `NEAR_THRESHOLD` | оценка `< write_threshold + 10` |
-| `WEAK_SIGNAL` | цепочка `icp_only`; или повод без даты; или повод старше 30 дней; или у повода только уровень B без цитаты и нет второго повода |
+| `WEAK_SIGNAL` | цепочка `icp_only`; или повод без даты; или повод старше 30 дней (выставка впереди — не слабый; `reactivation` не проверяется) |
 | `COMPANY_DOUBT` | B2B подтверждён только косвенно (нет `b2bQuote` ни с сайта, ни из вакансии); или размер неизвестен (нет выручки и штата); или бренд с сайта не похож на название из источника (нормализованные ключи не пересекаются) |
 
 Коды хранятся по одному на признак; подробность (какой именно подпризнак) — в `doubt_detail text`.
@@ -66,8 +66,10 @@
 ### 3.1 2ГИС (`gis`)
 Кандидаты из `gis_signal_company_signals` ⨝ `gis_signal_seen_companies` (домен, название), проверенные
 в окне свежести по `checked_at`. Сигналы:
-- `signal_sales_dept` или `signal_target_vacancy` → новый тип `sales_team` (уровень B, цитата = evidence);
-- `signal_multi_office` → `new_office` без даты (постоянный факт, слабый повод, цитата = evidence.multiOffice).
+- `signal_sales_dept` или `signal_target_vacancy` → новый тип `sales_team` (уровень C: хранится для таблицы,
+  в выборе цепочки не участвует — как `sales_hiring_broad`);
+- `signal_multi_office` → `new_office` без даты (постоянный факт, слабый повод; фраза письма «Увидел, что у
+  {бренд} несколько филиалов.»).
 Большинство компаний там локальный B2C — их отсечёт существующая проверка B2B по сайту.
 Функция-RPC `polza_ru_gis_candidates(p_since, p_limit)`.
 
@@ -79,7 +81,10 @@ title = адрес новой точки. RPC `polza_ru_ymaps_new_branches(p_sin
 Каталог стоит с 28.08.2026 (прокси) — свежих находок будет мало до починки.
 
 ### 3.3 Рост выручки (`revenue_growth`)
-Обогащение по ИНН через открытую бухотчётность ФНС (bo.nalog.ru): выручка за два последних года.
+Обогащение по ИНН через открытую бухотчётность ФНС (bo.nalog.gov.ru, проверено 25.09.2026 без ключа:
+`GET /advanced-search/organizations/search?query=<ИНН>&page=0` → `content[0].id`;
+`GET /nbo/organizations/<id>/bfo/` → отчёты по годам, `typeCorrections[0].correction.financialResult.current2110`
+и `previous2110` — выручка текущего и прошлого года в тыс. ₽): выручка за два последних года.
 Рост ≥ 20% → сигнал `revenue_growth` (уровень B, title «Выручка 2025 выросла на N% к 2024», date = конец
 отчётного года + 3 месяца, url карточки). Кандидаты — компании общей базы с ИНН в заданном размере
 (тот же RPC `polza_ru_directory_candidates`) плюс любые кандидаты с ИНН из других источников.
