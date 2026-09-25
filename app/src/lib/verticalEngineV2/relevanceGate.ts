@@ -10,6 +10,7 @@ import { VeLlmRateLimitError, type VeLlmRateLimit } from './llmRateLimit';
 import { readRelevanceCheckpoint, relevanceHash, VeRelevanceCheckpointError, type VeRelevanceCheckpoint, type VeRelevanceFailureCode } from './relevanceCheckpoint';
 import { VE_RELEVANCE_RULES_VERSION, VE_RELEVANCE_WEBSITE_VERSION, veRelevanceDecisionSchema, type VeRelevanceDecision } from './relevanceDecision';
 import { fetchVeRelevanceEvidence, VE_RELEVANCE_EVIDENCE_MAX_MS, type VeRelevanceEvidence } from './relevanceEvidence';
+import { proxyPoolHealth } from '@/lib/enrich/proxyPool';
 import { VeOperationTimeoutError, withVeDeadline } from './operationDeadline';
 import { normalizeVeCompanyInn, veCompanyIdentityKey } from './collectionIdentity';
 import { reviewVeRelevanceEvidence, VE_RELEVANCE_SCOPE_NOTE, VE_RELEVANCE_TARGET_RULES, type VeRelevanceReviewCompany, type VeRelevanceReviewResult } from './relevanceReview';
@@ -69,7 +70,9 @@ const WEBSITE_COMPANY_DEADLINE_LABEL = 'relevance website company';
 // форме волны: сравнивать барьер с пулом можно только внутри одной версии.
 // 2 — ярлык таймаута сужен до своей стартовой страницы, появились второй заход
 // через прокси и задержка event loop; slowButUsable — только при готовом тексте.
-const WEBSITE_TIMING_VERSION = 2;
+// 3 — повтор через прокси включён по умолчанию, туннель ограничен, выбывание
+// нод; появились proxyFailed, proxyUnavailable и proxyNodesOut.
+const WEBSITE_TIMING_VERSION = 3;
 // Границы гистограммы в миллисекундах; последняя корзина — всё, что больше.
 const WAVE_BUCKETS_MS = [1_000, 5_000, 15_000, 30_000, 60_000, 120_000] as const;
 /** Одна волна фазы сайтов. Ничего из этого не попадает в чекпойнт и в
@@ -95,11 +98,15 @@ export interface VeWebsiteWaveTiming {
   /** RU-прокси: GET через прокси, своя главная открылась только через прокси,
    * компания получила готовый текст с сайта, страницу которого принёс прокси
    * (главную или реквизиты), не хватило пропуска. Пользу прокси показывает
-   * proxyVerified: спасённая главная без реквизитов ничего не даёт. */
+   * proxyVerified: спасённая главная без реквизитов ничего не даёт.
+   * proxyFailed — заход через прокси кончился ошибкой без ответа сайта
+   * (туннель, нода), proxyUnavailable — все RU-ноды были выбывшими. */
   proxyAttempts: number;
   proxyRescued: number;
   proxyVerified: number;
   proxyDenied: number;
+  proxyFailed: number;
+  proxyUnavailable: number;
   /** Худшая задержка event loop за волну: таймауты под нагрузкой бывают от
    * самого процесса, а не от сайта. */
   loopDelayMaxMs: number;
@@ -109,7 +116,7 @@ export interface VeWebsiteWaveTiming {
 function newWaveTiming(slots: number): VeWebsiteWaveTiming {
   return { slots, companies: 0, cached: 0, wallMs: 0, sumMs: 0, maxMs: 0, minMs: 0,
     buckets: WAVE_BUCKETS_MS.map(() => 0).concat(0), saveMs: 0, pagesRead: 0,
-    proxyAttempts: 0, proxyRescued: 0, proxyVerified: 0, proxyDenied: 0, loopDelayMaxMs: 0,
+    proxyAttempts: 0, proxyRescued: 0, proxyVerified: 0, proxyDenied: 0, proxyFailed: 0, proxyUnavailable: 0, loopDelayMaxMs: 0,
     outcomes: { ok: 0, unavailable: 0, providerError: 0, deferred: 0, timeoutPage: 0, timeoutDeadline: 0, slowButUsable: 0 } };
 }
 function recordWaveCompany(wave: VeWebsiteWaveTiming, ms: number, evidence: VeRelevanceEvidence): void {
@@ -124,6 +131,8 @@ function recordWaveCompany(wave: VeWebsiteWaveTiming, ms: number, evidence: VeRe
   wave.proxyRescued += evidence.proxy?.rescued ?? 0;
   wave.proxyVerified += evidence.proxy?.verified ?? 0;
   wave.proxyDenied += evidence.proxy?.denied ?? 0;
+  wave.proxyFailed += evidence.proxy?.failed ?? 0;
+  wave.proxyUnavailable += evidence.proxy?.unavailable ?? 0;
   const timedOut = evidence.reason === 'website_evidence_timeout';
   if (evidence.search_deferred) wave.outcomes.deferred += 1;
   else if (evidence.provider_error) wave.outcomes.providerError += 1;
@@ -142,8 +151,9 @@ function recordWaveCompany(wave: VeWebsiteWaveTiming, ms: number, evidence: VeRe
 export function journalWaveTiming(wave: VeWebsiteWaveTiming): void {
   const scope = getProviderUsageScope();
   if (!scope) return;
+  // proxyNodesOut — номера выбывших RU-нод на момент записи, без адресов.
   void logInfo('ve2_website_wave', `VE2 website wave: ${wave.companies}/${wave.slots} companies in ${wave.wallMs} ms`,
-    { version: WEBSITE_TIMING_VERSION, ...scope, ...wave }, { requestId: scope.projectId });
+    { version: WEBSITE_TIMING_VERSION, ...scope, ...wave, proxyNodesOut: proxyPoolHealth().priorityOut }, { requestId: scope.projectId });
 }
 const searchAttemptsExhausted = (evidence?: { provider_error?: { kind: string }; provider_error_attempts?: number }): boolean =>
   evidence?.provider_error?.kind === 'transient' && (evidence.provider_error_attempts ?? 1) >= MAX_SEARCH_PROVIDER_ATTEMPTS;

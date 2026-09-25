@@ -91,7 +91,7 @@ import { VeLlmRateLimitError, veRateLimitDelay } from '../llmRateLimit';
 
 import { createHash, randomUUID } from 'node:crypto';
 import { ProviderUsageWriteError } from '@/lib/providerUsage';
-import { isVeProviderBillingError, isVeProviderConfigurationError } from '../collectionErrors';
+import { isVeProviderBillingError, isVeProviderConfigurationError, isVeTransientDirectoryError } from '../collectionErrors';
 import { validVeAdaptiveCollection, newVeAdaptiveCollection, finishVeAdaptiveBatch, chooseVeAdaptiveSource, veSourceStrategyKey, veReadyContactKeys,
   readVeBatchSpend, veAdaptiveCandidateLimit, veAdaptiveLowYield, veAdaptiveYieldWindows, veAdaptiveSourceDry, veDryLiveSources,
   veDrySourcesSummary, type VeAdaptiveCollection } from '../adaptiveCollection';
@@ -123,7 +123,7 @@ import { isVeRelevanceTriageEnabled } from '../relevanceTriageConfig';
 import { capVeContactsPerCompany, countVeTargetContacts, normalizeVeMaxEmailsPerCompany, stripVeCompanyCapMarker, veContactLimitKey, VE_COMPANY_CAP_FIELD } from '../companyContactCap';
 import { relevanceHash, VeRelevanceCheckpointError, VePreviewCheckpointConflict, type VeRelevanceCheckpoint } from '../relevanceCheckpoint';
 import {
-  buildVeRelevanceReviewBatch, mergeVeRelevanceRows, needsVeRelevanceReview, readVeRelevanceReserve, readVeRelevanceSourceRows, summarizeVeRelevanceReserve,
+  buildVeRelevanceReviewBatch, compactVeRelevanceReserve, mergeVeRelevanceRows, needsVeRelevanceReview, readVeRelevanceReserve, readVeRelevanceSourceRows, summarizeVeRelevanceReserve,
   veRelevanceCompanyKey, veRelevanceRowKey, veSavedReviewSignature, type VeRelevanceReserve, type VeRelevanceReserveSummary,
 } from '../relevanceReserve';
 import { cleanVeCompanyNames, type VeCompanyNameCheckpoint } from '../companyNameCleanup';
@@ -878,10 +878,11 @@ async function persistCollectInfo(
   patch: Record<string, unknown> = {},
 ): Promise<void> {
   ctx.signal?.throwIfAborted();
+  const stored = collectInfoForStorage(info);
   if (info.preview_pipeline) {
     const revision = info.preview_pipeline.revision;
     if (!Number.isSafeInteger(revision) || revision < 0) throw new Error('Invalid preview checkpoint revision');
-    const next = { ...info, preview_pipeline: { ...info.preview_pipeline, revision: revision + 1 } };
+    const next = { ...stored, preview_pipeline: { ...info.preview_pipeline, revision: revision + 1 } };
     const { data, error } = await ctx.supabase.from('ve_bases')
       .update({ ...patch, collect_info: next, updated_at: new Date().toISOString() })
       .eq('id', baseId).eq('status', 'collecting')
@@ -894,10 +895,15 @@ async function persistCollectInfo(
   }
   const { error } = await ctx.supabase
     .from('ve_bases')
-    .update({ ...patch, collect_info: info, updated_at: new Date().toISOString() })
+    .update({ ...patch, collect_info: stored, updated_at: new Date().toISOString() })
     .eq('id', baseId);
   if (error) throw new Error(`ve_bases collect_info update: ${error.message}`);
   ctx.onCheckpoint?.();
+}
+
+function collectInfoForStorage(info: VeCollectInfo): VeCollectInfo {
+  return info.relevance_reserve
+    ? { ...info, relevance_reserve: compactVeRelevanceReserve(info.relevance_reserve) } : info;
 }
 
 /* ─────────────────────────── Фаза PLAN ─────────────────────────── */
@@ -1820,12 +1826,18 @@ async function dispatchTask(
     // Падаем только когда фиксировать нечего: иначе таймаут шлюза на
     // очередной странице уносил и собранные строки, и задачу, и всю базу
     // (прод 21.09, база 3cd77243: 400 компаний и 10 590 просмотренных строк).
-    if (error && rows.length === 0) throw new Error(`companies_directory: ${error}`);
     // Закладка и строки фиксируются одной записью: смещение двигается ровно по
     // тем строкам, которые ушли в harvest, поэтому перешагнуть неразобранное
     // оно не может — ни при успехе лейна, ни при обрыве.
     writeDirectoryCursor(state, firstFilters, first.nextOffset);
     if (second) writeDirectoryCursor(state, secondFilters, second.nextOffset);
+    if (error && rows.length === 0) {
+      // Even an empty prefix can have skipped many already checked companies.
+      // Keep that progress and any old harvest before the worker retries with
+      // its bounded backoff; the failed page itself has not been advanced.
+      await save();
+      throw new Error(`companies_directory: ${error}`);
+    }
     if (existingContactsOnly) state.existing_contacts_only = true;
     else delete state.existing_contacts_only;
     // Лейны «есть почта / есть сайт» уже дают контакт; фильтр страхует строки,
@@ -3618,7 +3630,7 @@ async function applyVeContactCapToFinishedBase(
   // One atomic write, guarded on the status the decision was made from: a
   // parallel collection or launch must never be overwritten by this projection.
   const { data: written, error } = await ctx.supabase.from('ve_bases')
-    .update({ collect_info: saved, data: kept, columns, row_count: kept.length,
+    .update({ collect_info: collectInfoForStorage(saved), data: kept, columns, row_count: kept.length,
       sample_rows: readyRows.slice(0, SAMPLE_ROWS), contact_cap_applied: limit, updated_at: new Date().toISOString() })
     .eq('id', base.id).eq('status', 'analyzed').select('id').maybeSingle();
   if (error) throw new VeRelevanceCheckpointError(`Contact cap save: ${error.message}`);
@@ -4346,7 +4358,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     delete info.preview_pipeline;
     ctx.signal?.throwIfAborted();
     const { data: saved, error } = await ctx.supabase.from('ve_bases')
-      .update({ collect_info: info, updated_at: new Date().toISOString() })
+      .update({ collect_info: collectInfoForStorage(info), updated_at: new Date().toISOString() })
       .eq('id', baseId).eq('status', 'collecting')
       .eq('collect_info->preview_pipeline->>revision', String(revision)).select('id').maybeSingle();
     if (error) throw new VeRelevanceCheckpointError(`Preview compatibility checkpoint: ${error.message}`);
@@ -4562,13 +4574,24 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     const consumedKeys = await getExcludedKeys();
     const canAcquire = !info.preview_pipeline?.error && !info.adaptive_collection?.pending && target.ready_rows < target.ready_target
       && target.candidates_processed + (info.preview_pipeline?.batches.reduce((sum, batch) => sum + batch.rows.length, 0) ?? 0) < target.max_candidates;
-    // Retain buffered harvests. Only refill a directory when its previous
-    // candidates have all been consumed/reserved, never drop its unused tail.
+    // Only usable contacts or a still-permitted site lookup hold a page open.
+    // A completed lookup with no site is not an unconsumed candidate: otherwise
+    // its raw row pins the same catalogue page for every subsequent round.
     for (const state of tasks) {
+      const harvest = state.harvest ?? [];
+      const recovered = applyVeSourceContacts(harvest, info.source_contact_recovery);
+      const pendingDiscovery = new Set(!existingFirst && !state.task.widened && !info.source_contact_budget?.paused
+        ? pendingVeSourceContacts(harvest, info.source_contact_recovery) : []);
       if (canAcquire && (info.preview_pipeline?.batches.length ?? 0) < PREVIEW_IN_FLIGHT
         && isVeRenewableSourceTask(state)
-        && !(state.harvest ?? []).some((row) => (!existingFirst || hasExistingSourceContact(row))
+        && !recovered.some((row, index) => normalizeCompanyForDedup(row.company) !== ''
+          && (hasExistingSourceContact(row) || pendingDiscovery.has(harvest[index]))
           && !baseRowMatchesExclusion(consumedKeys, row) && !baseRowMatchesExclusion(reservedKeys, row))) {
+        // Retain unsuccessful/paused source inputs as well as their lookup
+        // receipts; advancing the page must not erase the saved reserve.
+        if (info.search_policy) info.search_policy.deferred_rows = dedupUnifiedRows([
+          ...info.search_policy.deferred_rows, ...taggedHarvest(state).filter((row) => !hasExistingSourceContact(row)),
+        ]);
         if (isVeLegacyMapsTask(state)) {
           // Старая задача карт: её строки уже разобраны, дальше читаем каталог.
           if (state.child_job_id) state.legacy_child_job_id = state.child_job_id;
@@ -4605,6 +4628,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
     } catch (e) {
       ctx.signal?.throwIfAborted();
       if (e instanceof VeRelevanceCheckpointError || (e instanceof Error && e.name === 'VeWorkerShutdownError')) throw e;
+      if (state.source === 'companies_directory' && isVeTransientDirectoryError(e)) throw e;
       state.status = 'failed';
       state.error = e instanceof Error ? e.message : String(e);
       stageLog(ctx, `[base_collect] dispatch ${state.source} упал: ${state.error}`);
@@ -4856,7 +4880,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       .update({
         status: 'failed',
         error: note.slice(0, 500),
-        collect_info: { ...info, stats },
+        collect_info: collectInfoForStorage({ ...info, stats }),
         updated_at: new Date().toISOString(),
       })
       .eq('id', baseId);
@@ -5080,7 +5104,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       .update({
         status: 'failed',
         error: note.slice(0, 500),
-        collect_info: { ...info, stats },
+        collect_info: collectInfoForStorage({ ...info, stats }),
         updated_at: new Date().toISOString(),
       })
       .eq('id', baseId);
@@ -5161,7 +5185,7 @@ async function runBaseCollectStageImpl(job: VeJob, ctx: VeStageContext): Promise
       data: storedRows,
       row_count: storedRows.length,
       status: 'analyzing',
-      collect_info: { ...info, stats: statsWithQuality },
+      collect_info: collectInfoForStorage({ ...info, stats: statsWithQuality }),
       updated_at: new Date().toISOString(),
     })
     .eq('id', baseId);
@@ -5213,7 +5237,7 @@ export async function runBaseCollectStage(job: VeJob, ctx: VeStageContext): Prom
     if (error instanceof VePreviewCheckpointConflict) throw error;
     // The generic worker persists Retry-After. A waiting job must not leave
     // the base's progress looking like a terminal preparation failure.
-    if (error instanceof VeLlmRateLimitError) throw error;
+    if (error instanceof VeLlmRateLimitError || isVeTransientDirectoryError(error)) throw error;
     if (error instanceof VeRelevanceRetryScheduled) {
       return { result: { base_id: error.baseId, waiting: true, relevance_retry: true },
         tokensUsed: error.usage.tokensUsed, costUsd: error.usage.costUsd };

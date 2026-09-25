@@ -117,17 +117,38 @@ describe('listLeads → Instantly POST /leads/list body shape', () => {
 
     await expect(createLeads(
       [{ email: 'person@example.test' }],
-      { campaign_id: 'campaign-1' },
+      { campaign_id: 'campaign-1', skip_if_in_workspace: false, skip_if_in_campaign: false, skip_if_in_list: false },
       { skipRateLimiter: true, onRequestAttempt },
     )).rejects.toThrow('provider timeout');
 
     expect(onRequestAttempt).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastFetchBody()).toMatchObject({
+      campaign_id: 'campaign-1', skip_if_in_workspace: false, skip_if_in_campaign: false, skip_if_in_list: false,
+    });
     // Не-emails запрос не резервирует email-read бюджет. Hourly-счётчик
     // (instantly_bump_api_usage) — отдельный fire-and-forget RPC, ему можно.
     const budgetRpcNames = mockEmailBudgetRpc.mock.calls.map((c) => c[0]);
     expect(budgetRpcNames).not.toContain('instantly_reserve_email_read');
     expect(budgetRpcNames).not.toContain('instantly_defer_email_reads');
+
+    // A durable async lease denial must settle before fetch, not race it.
+    fetchMock.mockClear();
+    const denied = jest.fn(async () => { throw new Error('lease expired'); });
+    await expect(createLeads([{ email: 'person@example.test' }], { campaign_id: 'campaign-1' }, {
+      skipRateLimiter: true, onRequestAttempt: denied,
+    })).rejects.toThrow('lease expired');
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // A resumed process checks elapsed time even before overdue timers run.
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(1000);
+    try {
+      await expect(createLeads([{ email: 'person@example.test' }], { campaign_id: 'campaign-1' }, {
+        skipRateLimiter: true, timeoutMs: 100,
+        onRequestAttempt: async () => { clock.mockReturnValue(2000); },
+      })).rejects.toMatchObject({ name: 'AbortError' });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); }
 
     // Read admission is a separate hard gate, including skipRateLimiter callers.
     fetchMock.mockClear();
@@ -199,6 +220,7 @@ describe('listLeads → Instantly POST /leads/list body shape', () => {
       limit: 50,
       starting_after: 'cursor-1',
       search: 'foo@bar.com',
+      contacts: ['foo@bar.com'],
       interest_status: 1,
     });
 
@@ -209,6 +231,7 @@ describe('listLeads → Instantly POST /leads/list body shape', () => {
       limit: 50,
       starting_after: 'cursor-1',
       search: 'foo@bar.com',
+      contacts: ['foo@bar.com'],
       interest_status: 1,
     });
     expect(body).not.toHaveProperty('lead_list_id');
@@ -232,5 +255,28 @@ describe('listLeads → Instantly POST /leads/list body shape', () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).toBe('https://api.instantly.ai/api/v2/leads/list');
     expect((init as { method?: string }).method).toBe('POST');
+  });
+});
+
+
+describe('workspace contact storage preflight', () => {
+  it.each([
+    [{ total_lead_limit: 1000, current_lead_count: 995 }, { limit: 1000, used: 995, remaining: 5 }],
+    [{ total_lead_limit: 1000, current_lead_count: 1002 }, { limit: 1000, used: 1002, remaining: 0 }],
+    [{ total_lead_limit: 1000 }, null],
+    [{ total_lead_limit: null, current_lead_count: 0 }, null],
+    [{ total_lead_limit: '1000', current_lead_count: 0 }, null],
+  ])('reads billing capacity without treating unknown values as zero: %j', async (outreach, expected) => {
+    const { getWorkspaceContactCapacity } = await import('@/lib/instantly/client');
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ subscriptions: { outreach } })));
+    expect(await getWorkspaceContactCapacity({ skipRateLimiter: true })).toEqual(expected);
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.instantly.ai/api/v2/workspace-billing/plan-details');
+    expect(fetchMock.mock.calls[0][1].method).toBe('GET');
+  });
+
+  it.each([403, 404, 429, 503])('uses the existing upload response when billing is unavailable (%s)', async (status) => {
+    const { getWorkspaceContactCapacity } = await import('@/lib/instantly/client');
+    fetchMock.mockResolvedValueOnce(new Response('Unavailable', { status }));
+    expect(await getWorkspaceContactCapacity({ skipRateLimiter: true })).toBeNull();
   });
 });

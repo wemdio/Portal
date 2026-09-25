@@ -62,7 +62,7 @@ export function ReplyDetailPanel({
 }: {
   projectId: string;
   item: ReplyListItem;
-  onHandled: () => void;
+  onHandled: (id: string, status: 'sent' | 'skipped') => void;
 }) {
   const [thread, setThread] = useState<ThreadMessage[]>([]);
   const [threadLoading, setThreadLoading] = useState(true);
@@ -186,7 +186,7 @@ export function ReplyDetailPanel({
     try {
       await skipReply(item.id, projectId);
       forgetLocal();
-      onHandled();
+      onHandled(item.id, 'skipped');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось пропустить письмо');
     } finally {
@@ -201,7 +201,13 @@ export function ReplyDetailPanel({
         <div className="text-sm font-semibold text-gray-900">{item.companyName || item.leadEmail}</div>
         <div className="text-xs text-gray-500">
           {item.leadEmail}
-          {item.campaignName ? ` · ${item.campaignName}` : ''}
+          {item.source === 'others'
+            ? item.eaccount
+              ? ` · пришло на ${item.eaccount}`
+              : ''
+            : item.campaignName
+              ? ` · ${item.campaignName}`
+              : ''}
         </div>
       </div>
 
@@ -339,13 +345,14 @@ export function ReplyDetailPanel({
           onSent={() => {
             setConfirmOpen(false);
             forgetLocal();
-            onHandled();
+            onHandled(item.id, 'sent');
           }}
           qualificationId={item.id}
           projectId={projectId}
           draftId={draft?.draftId ?? null}
           toEmail={recipient ?? item.leadEmail}
           newContact={recipient !== null}
+          separateLetter={Boolean(item.outOfCampaign) && recipient === null}
         />
       </div>
     </div>

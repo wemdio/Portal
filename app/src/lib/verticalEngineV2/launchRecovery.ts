@@ -12,6 +12,7 @@ import { loadVeContactDeliveryRows, readContactDeliveryPages } from './contactDe
 import { estimatedBundleRunDays } from './launchTemplate';
 import { buildSegmentationLaunchGroups, stableJson } from './segmentationAudit';
 import { validateStoredAuditSnapshot, type StoredAuditValidationInput } from './stages/segmentationAudit';
+import { claimProjectCampaignLinks, describePortalProjectTerm, loadPortalProjectTerm } from './portalDeliveryTerm';
 
 export class ContactDeliveryRecoveryError extends Error {
   constructor(message: string, readonly code: string, readonly status = 409) {
@@ -50,10 +51,25 @@ export async function prepareBoundContactDeliveryRecovery(input: {
   if (error || !project) blocked('Не удалось проверить привязку проекта для восстановления.');
   // Historical unbound launches keep their existing reconciliation path.
   if (!project.portal_project_id && !project.portal_period_id && project.target_contacts == null) return null;
-  if (!project.portal_project_id || !project.portal_period_id ||
+  if (!project.portal_project_id ||
       !Number.isSafeInteger(project.target_contacts) || project.target_contacts <= 0 ||
       project.launch_preset_id !== input.presetId || !project.launch_instantly_account_id) {
     blocked('Привязка плана ежедневной загрузки неполна или изменилась.');
+  }
+  if (!project.portal_period_id) {
+    // Проект без периодов: сроком служит карточка проекта. Проверяем её до
+    // любых обращений к Instantly.
+    let term: ReturnType<typeof describePortalProjectTerm>;
+    try {
+      const { project: portalProject, periods } = await loadPortalProjectTerm(input.portalDb, project.portal_project_id);
+      if (!portalProject) blocked('Проект Portal не найден.');
+      term = describePortalProjectTerm(portalProject, periods, { bound: true });
+    } catch (error) {
+      if (error instanceof ContactDeliveryRecoveryError) throw error;
+      throw new ContactDeliveryRecoveryError('Не удалось проверить проект Portal для восстановления.',
+        'CONTACT_DELIVERY_TERM_UNAVAILABLE', 500);
+    }
+    if (!term.ok) blocked(term.error, term.code);
   }
   const validation = validateStoredAuditSnapshot(input);
   if (validation.state !== 'current') {
@@ -178,16 +194,25 @@ export async function materializeRecoveredContactDelivery(input: {
   if (prepared.groups.some((group) => group.leadIndices.length && !usedSegments.has(group.segment))) {
     blocked('Не все сегменты базы сопоставлены с найденными кампаниями.');
   }
+  const periodId = prepared.project.portal_period_id;
   try {
-    const ownership = await reservePeriodCampaignLinks(input.instantlyDb, prepared.project.portal_project_id,
-      campaigns.map((campaign) => ({ periodId: prepared.project.portal_period_id,
-        campaignId: campaign.campaign_id, matchSource: 'manual', baselineContacts: 0,
-        matchConfidence: 1, matchReason: 'Vertical Engine v2 recovered contact-delivery plan' })));
-    if (ownership.status === 'conflict') blocked('Кампания уже принадлежит другому Portal-проекту.');
+    if (periodId) {
+      const ownership = await reservePeriodCampaignLinks(input.instantlyDb, prepared.project.portal_project_id,
+        campaigns.map((campaign) => ({ periodId,
+          campaignId: campaign.campaign_id, matchSource: 'manual', baselineContacts: 0,
+          matchConfidence: 1, matchReason: 'Vertical Engine v2 recovered contact-delivery plan' })));
+      if (ownership.status === 'conflict') blocked('Кампания уже принадлежит другому Portal-проекту.');
+    } else {
+      const conflicts = await claimProjectCampaignLinks(input.instantlyDb, prepared.project.portal_project_id,
+        campaigns.map((campaign) => campaign.campaign_id), 'Vertical Engine v2 recovered contact-delivery plan');
+      if (conflicts.length > 0) blocked('Кампания уже принадлежит другому Portal-проекту.');
+    }
   } catch (error) {
     if (error instanceof ContactDeliveryRecoveryError) throw error;
-    throw new ContactDeliveryRecoveryError('Не удалось закрепить кампании за периодом Portal-проекта.',
-      'CONTACT_DELIVERY_OWNERSHIP_FAILED', 500);
+    throw new ContactDeliveryRecoveryError(periodId
+      ? 'Не удалось закрепить кампании за периодом Portal-проекта.'
+      : 'Не удалось закрепить кампании за проектом Portal.',
+    'CONTACT_DELIVERY_OWNERSHIP_FAILED', 500);
   }
   return { campaigns, dripRows };
 }

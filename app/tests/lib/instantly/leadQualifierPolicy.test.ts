@@ -416,7 +416,8 @@ describe('machine acknowledgement policy', () => {
 
   it('accepts null but rejects absent or invalid machine verdicts before lead promotion', async () => {
     for (const machineReplyKind of [undefined, null, false, true, 'false', 'unknown']) {
-      mockAiResult({ is_lead: false, machine_reply_kind: machineReplyKind });
+      // Exercise schema validation with unresolved intent, not a final semantic rejection.
+      mockAiResult({ is_lead: false, needs_review: true, machine_reply_kind: machineReplyKind });
       const qualification = qualify('Можете связаться со мной завтра.');
       if (machineReplyKind === null) {
         await expect(qualification).resolves.toMatchObject({ isLead: true, machineReplyKind: null });

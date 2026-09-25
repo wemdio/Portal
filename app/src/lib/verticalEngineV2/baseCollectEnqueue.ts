@@ -28,6 +28,8 @@ import { collectionRoundLimit, createCollectionTarget, type VeCollectionMode } f
 import { canResumePartialPreview, grantVeResumeRoundBudget, openNextVeCollectionRound, previewRecoveryKind } from './collectionRecovery';
 import { normalizeVeMaxEmailsPerCompany } from './companyContactCap';
 import { resumeVeSavedEmailRecovery } from './savedEmailRecovery';
+import { isVeTransientDirectoryError } from './collectionErrors';
+import { compactVeRelevanceReserve } from './relevanceReserve';
 
 export interface VeBaseCollectInput {
   verticalId: string;
@@ -144,22 +146,6 @@ async function resumeFailedPreview(
     ...(previewRecoveryKind(saved) === 'validation' ? { validation_retry: true } : {}),
     ...(saved.status === 'analyzed' ? { validation_retry: true, relevance_review_requested: true } : {}),
   };
-  // Older workers timed out queued children from dispatch time. On an explicit
-  // continuation, poll the SAME child again instead of buying another scrape.
-  if (Array.isArray(info.tasks)) {
-    info.tasks = info.tasks.map((task: Record<string, unknown>) => {
-      if (task.source === 'yandex_maps' && task.status === 'failed') {
-        const recovered: Record<string, unknown> = { ...task, status: 'pending', child_job_id: null,
-          ...(task.child_job_id ? { legacy_child_job_id: task.child_job_id } : {}) };
-        delete recovered.error;
-        return recovered;
-      }
-      if (task.status !== 'failed' || !task.child_job_id || task.error !== 'timeout: дочерняя джоба зависла') return task;
-      const recovered: Record<string, unknown> = { ...task, status: 'dispatched' };
-      delete recovered.error;
-      return recovered;
-    });
-  }
   if (info.saved_email_recovery !== undefined) {
     info.saved_email_recovery = resumeVeSavedEmailRecovery(info.saved_email_recovery);
   }
@@ -177,6 +163,33 @@ async function resumeFailedPreview(
   // Остальные виды либо требуют `completed_round === round - 1`, либо ставят
   // флаги повтора — те редактируют уже собранное и номер двигать не должны.
   if (previewRecoveryKind(saved) === 'catalog') openNextVeCollectionRound(info);
+  // Reopen failed tasks after advancing a closed round: its normal renewal
+  // must not discard the saved prefix of a newly recovered directory task.
+  // Older workers timed out queued children from dispatch time. On an explicit
+  // continuation, poll the SAME child again instead of buying another scrape.
+  if (Array.isArray(info.tasks)) {
+    info.tasks = info.tasks.map((task: Record<string, unknown>) => {
+      if (task.source === 'companies_directory' && task.status === 'failed'
+        && isVeTransientDirectoryError(task.error)) {
+        // Drain any saved prefix before reading another page. Renewable done
+        // tasks reopen only after their harvest has been consumed.
+        const recovered: Record<string, unknown> = { ...task,
+          status: Array.isArray(task.harvest) && task.harvest.length ? 'done' : 'pending' };
+        delete recovered.error;
+        return recovered;
+      }
+      if (task.source === 'yandex_maps' && task.status === 'failed') {
+        const recovered: Record<string, unknown> = { ...task, status: 'pending', child_job_id: null,
+          ...(task.child_job_id ? { legacy_child_job_id: task.child_job_id } : {}) };
+        delete recovered.error;
+        return recovered;
+      }
+      if (task.status !== 'failed' || !task.child_job_id || task.error !== 'timeout: дочерняя джоба зависла') return task;
+      const recovered: Record<string, unknown> = { ...task, status: 'dispatched' };
+      delete recovered.error;
+      return recovered;
+    });
+  }
   // «Продолжить подготовку» этой базы — новый бюджет раундов.
   if (input.resumeBaseId === saved.id) grantVeResumeRoundBudget(info);
   if (info.preview_pipeline?.version === 1) {
@@ -184,6 +197,7 @@ async function resumeFailedPreview(
     delete info.preview_pipeline.error;
   }
   const claimedAt = new Date().toISOString();
+  if (info.relevance_reserve) info.relevance_reserve = compactVeRelevanceReserve(info.relevance_reserve);
   const { data: claimed, error: claimError } = await supabase.from('ve_bases')
     .update({ status: 'collecting', error: null, collect_info: info, updated_at: claimedAt })
     .eq('id', saved.id).eq('status', saved.status).select('id, status, hypothesis_id').maybeSingle();

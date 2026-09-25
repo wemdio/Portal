@@ -35,6 +35,29 @@ function toQualificationRow(email: Email & { lead: string }, campaignId: string)
   };
 }
 
+/**
+ * Письмо папки Others: к кампании не привязано, поэтому кампания — та, с
+ * которой работает ящик письма (её цепочку ИИ получит как контекст).
+ */
+export function othersLetterToRow(email: Email, campaignId: string): QualificationRow {
+  return {
+    id: email.id,
+    campaignId,
+    campaignName: null,
+    leadEmail: (email.from_address_email ?? '').trim().toLowerCase(),
+    companyName: null,
+    threadId: email.thread_id ?? null,
+    replySubject: email.subject ?? null,
+    replyBody: extractPreview(email.body),
+    lastOutboundPreview: null,
+    instantlyEmailId: email.id,
+    eaccount: (email.eaccount ?? '').trim().toLowerCase() || null,
+    replyTimestamp: email.timestamp_email ?? email.timestamp_created ?? null,
+    qualificationStatus: null,
+    outOfCampaign: !email.campaign_id,
+  };
+}
+
 /** Страниц на кампанию за один запрос списка — чтобы «Показать ещё» не выжирал лимит /emails. */
 const MAX_PAGES_PER_CAMPAIGN = 5;
 
@@ -91,23 +114,33 @@ export async function listLiveReplies(params: {
 
 /**
  * Одно письмо живого аккаунта по его id. Аккаунт письма заранее не известен,
- * поэтому пробуем аккаунты проекта по очереди; принимаем только письмо из
- * кампаний этого проекта.
+ * поэтому пробуем аккаунты проекта по очереди. Принимаем письмо из кампаний
+ * этого проекта или входящее на ящик проекта (папка Others).
  */
 export async function getLiveReply(params: {
   emailId: string;
   accountIds: string[];
   campaignIds: string[];
+  /** Ящики проекта на аккаунте (ящик → кампания); по ним узнаётся письмо Others. */
+  mailboxesFor?: (accountId: string) => Promise<Map<string, string> | undefined>;
 }): Promise<{ qualification: QualificationRow; accountId: string } | null> {
   const allowed = new Set(params.campaignIds);
   for (const accountId of params.accountIds) {
+    let email: Email;
     try {
-      const email = await getEmail(params.emailId, { accountId, timeoutMs: 20_000, consumer: 'personalization_feed' });
-      if (!email?.id || !email.lead || !email.campaign_id || !allowed.has(email.campaign_id)) continue;
-      return { qualification: toQualificationRow({ ...email, lead: email.lead }, email.campaign_id), accountId };
+      email = await getEmail(params.emailId, { accountId, timeoutMs: 20_000, consumer: 'personalization_feed' });
     } catch {
       // Письма нет на этом аккаунте — пробуем следующий.
+      continue;
     }
+    if (!email?.id) continue;
+    if (email.lead && email.campaign_id && allowed.has(email.campaign_id)) {
+      return { qualification: toQualificationRow({ ...email, lead: email.lead }, email.campaign_id), accountId };
+    }
+    if ((email.ue_type ?? 2) !== 2 || !params.mailboxesFor) continue;
+    const mailboxes = await params.mailboxesFor(accountId);
+    const campaignId = mailboxes?.get((email.eaccount ?? '').trim().toLowerCase());
+    if (campaignId) return { qualification: othersLetterToRow(email, campaignId), accountId };
   }
   return null;
 }

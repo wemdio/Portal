@@ -17,7 +17,8 @@ export async function activateApprovedLaunchCampaigns(input: {
     .eq('id', input.veProjectId).maybeSingle();
   if (error || !project) throw new Error('Не удалось проверить план загрузки перед активацией.');
   if (project.portal_project_id || project.portal_period_id || project.target_contacts != null) {
-    if (!project.portal_project_id || !project.portal_period_id ||
+    // A missing period is a valid binding to a Portal project without periods.
+    if (!project.portal_project_id ||
         !Number.isSafeInteger(project.target_contacts) || project.target_contacts <= 0) {
       throw new Error('Привязка плана ежедневной загрузки неполна.');
     }

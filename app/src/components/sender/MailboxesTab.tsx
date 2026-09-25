@@ -5,6 +5,7 @@ import { Loader2, RefreshCw, Search, Trash2, Upload, Users } from 'lucide-react'
 import {
   bulkMailboxes,
   deleteMailbox,
+  fetchEgressIps,
   fetchMailboxes,
   fetchMailboxProbe,
   fetchMailboxStats,
@@ -12,15 +13,19 @@ import {
   googleWorkspaceStatus,
   syncGoogleWorkspace,
   importMailboxes,
+  moveMailboxes,
   patchMailbox,
+  setEgressAcceptsNew,
   startMailboxProbe,
   type BulkMailboxAction,
+  type EgressIpDto,
   type ImportMailboxesResult,
   type MailboxDto,
   type MailboxStatsDto,
   type MailboxTagDto,
   type ProbeResultDto,
 } from './api';
+import { EgressMoveMenu, EgressPanel } from './EgressPanel';
 import { GOOGLE_STATE_LABELS, MAILBOX_STATUS_LABELS, providerLabel } from './labels';
 import { TagAssignMenu, TagChip, TagFilterMenu } from './MailboxTags';
 import { SenderModal } from './SenderModal';
@@ -71,6 +76,11 @@ export function MailboxesTab() {
   // Ключ строкой: Set в списке зависимостей useCallback сравнивается по ссылке,
   // и список перезагружался бы на каждый рендер.
   const tagFilterKey = [...tagFilter].sort().join(',');
+  const [egressIps, setEgressIps] = useState<EgressIpDto[]>([]);
+  const [unassigned, setUnassigned] = useState(0);
+  // Фильтр по адресу — клик по адресу в блоке «Адреса отправки».
+  const [egressFilter, setEgressFilter] = useState<string | null>(null);
+  const [egressBusy, setEgressBusy] = useState<string | null>(null);
 
   const load = useCallback(async (targetPage: number) => {
     try {
@@ -79,6 +89,7 @@ export function MailboxesTab() {
         search: appliedSearch || undefined,
         tagIds: tagFilterKey ? tagFilterKey.split(',') : undefined,
         noTag: noTagFilter || undefined,
+        egressIp: egressFilter ?? undefined,
       });
       setMailboxes(rows);
       setTotal(count);
@@ -91,7 +102,7 @@ export function MailboxesTab() {
     } finally {
       setLoading(false);
     }
-  }, [appliedSearch, tagFilterKey, noTagFilter]);
+  }, [appliedSearch, tagFilterKey, noTagFilter, egressFilter]);
 
   const loadTags = useCallback(async () => {
     try {
@@ -106,6 +117,23 @@ export function MailboxesTab() {
   useEffect(() => {
     void loadTags();
   }, [loadTags]);
+
+  const loadEgress = useCallback(async () => {
+    try {
+      const res = await fetchEgressIps();
+      setEgressIps(res.ips);
+      setUnassigned(res.unassigned);
+    } catch {
+      /* адреса не доехали — блок просто не покажется */
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadEgress();
+    // Пульс воркеров — раз в 30 с; чаще опрашивать незачем.
+    const timer = window.setInterval(() => void loadEgress(), 30_000);
+    return () => window.clearInterval(timer);
+  }, [loadEgress]);
 
   // Ушли с экрана недонабрав — отложенный запрос отменяем.
   useEffect(() => () => {
@@ -295,6 +323,44 @@ export function MailboxesTab() {
     resetToFirstPage();
   };
 
+  const filterByEgress = (ip: string | null) => {
+    setEgressFilter(ip);
+    resetToFirstPage();
+  };
+
+  const toggleAcceptsNew = async (row: EgressIpDto) => {
+    setEgressBusy(row.ip);
+    setError(null);
+    try {
+      await setEgressAcceptsNew(row.ip, !row.acceptsNew);
+      await loadEgress();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось переключить адрес');
+    } finally {
+      setEgressBusy(null);
+    }
+  };
+
+  /** «На адрес»: ящик закреплён за адресом, перенос — осознанное действие. */
+  const moveToEgress = async (ip: string) => {
+    const ids = [...selected];
+    if (!ids.length) return;
+    if (!window.confirm(
+      `Перенести выбранные ящики (${ids.length}) на адрес ${ip}? Следующий вход в почту у них будет уже с нового адреса.`,
+    )) return;
+    setBulkBusy(true);
+    setError(null);
+    try {
+      await moveMailboxes(ids, ip);
+      setSelected(new Set());
+      await Promise.all([load(page), loadEgress()]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось перенести ящики');
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   /** «Под тег» на выборку: у ящика может быть только один тег, поэтому замена. */
   const assignTag = async (tagId: string | null) => {
     const ids = [...selected];
@@ -423,6 +489,15 @@ export function MailboxesTab() {
         {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
       </div>
 
+      <EgressPanel
+        ips={egressIps}
+        unassigned={unassigned}
+        filter={egressFilter}
+        busyIp={egressBusy}
+        onFilter={filterByEgress}
+        onToggleAcceptsNew={(row) => void toggleAcceptsNew(row)}
+      />
+
       {/* Поиск и фильтр тегов — между подключением и списком: это про список,
           но нужны до того, как в нём начнёшь что-то искать глазами. */}
       <div className="flex flex-wrap items-center justify-center gap-2">
@@ -452,7 +527,12 @@ export function MailboxesTab() {
 
       <div className="rounded-xl border border-zinc-200 bg-white">
         <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-3">
-          <h2 className="text-base font-semibold text-zinc-900">Ящики ({total})</h2>
+          <h2 className="text-base font-semibold text-zinc-900">
+            Ящики ({total})
+            {egressFilter ? (
+              <span className="ml-2 font-mono text-xs font-normal text-zinc-500">адрес {egressFilter}</span>
+            ) : null}
+          </h2>
           <div className="flex items-center gap-1">
             <button
               type="button"
@@ -511,6 +591,7 @@ export function MailboxesTab() {
               Удалить
             </button>
             <TagAssignMenu tags={tags} disabled={bulkBusy} onPick={(tagId) => void assignTag(tagId)} />
+            <EgressMoveMenu ips={egressIps} disabled={bulkBusy} onPick={(ip) => void moveToEgress(ip)} />
             <button
               type="button"
               disabled={bulkBusy}
@@ -530,7 +611,7 @@ export function MailboxesTab() {
           </div>
         ) : mailboxes.length === 0 ? (
           <p className="px-5 py-10 text-center text-sm text-zinc-500">
-            {appliedSearch || tagFilterKey || noTagFilter
+            {appliedSearch || tagFilterKey || noTagFilter || egressFilter
               ? 'Под фильтр не попал ни один ящик.'
               : 'Ящиков пока нет — загрузите выгрузку провайдера.'}
           </p>
@@ -563,6 +644,7 @@ export function MailboxesTab() {
                   <th className="px-3 py-2 font-medium">Ящик</th>
                   <th className="px-3 py-2 font-medium">Провайдер</th>
                   <th className="px-3 py-2 font-medium">Тег</th>
+                  <th className="px-3 py-2 font-medium">Адрес</th>
                   <th className="px-3 py-2 font-medium">В рассылке</th>
                   <th className="px-3 py-2 font-medium">В Google</th>
                   <th className="px-3 py-2 font-medium">Статус</th>
@@ -642,6 +724,15 @@ export function MailboxesTab() {
                           <TagChip name={mailbox.tag.name} />
                         ) : (
                           <span className="text-xs text-zinc-400">—</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        {mailbox.egress_ip ? (
+                          <span className="font-mono text-xs text-zinc-600">{mailbox.egress_ip}</span>
+                        ) : (
+                          <span className="text-xs text-zinc-400" title="Адрес выдаётся автоматически в течение минуты">
+                            ждёт адреса
+                          </span>
                         )}
                       </td>
                       {/* Галочка прямо в строке: выбирать ящики по одному

@@ -71,7 +71,7 @@ export function useContactSupply(templateId: string | null, required: boolean, c
   const plan = data?.plan;
   const approved = !required || Boolean(plan?.current && ['approved', 'active'].includes(plan.status)
     && (plan.launched || (plan.preset_id === presetId && plan.portal_project_id === projectId
-      && plan.portal_period_id === periodId && plan.target_contacts === target)));
+      && (plan.portal_period_id ?? null) === (periodId ?? null) && plan.target_contacts === target)));
   return { required, data, error, busy, confirmed, setConfirmed, act, approved, canApprove: Boolean(context) };
 }
 
@@ -102,7 +102,7 @@ export function ContactSupplyPanel({ supply }: { supply: ContactSupplyController
           disabled={supply.busy || !supply.confirmed || !supply.canApprove}>
           {supply.busy ? 'Сохраняем…' : 'Зафиксировать согласование'}
         </button>
-        {!supply.canApprove ? <p className={HE.faint}>Сначала завершите аудит и укажите клиентский пресет, период и обязательство.</p> : null}
+        {!supply.canApprove ? <p className={HE.faint}>Сначала завершите аудит и укажите клиентский пресет, проект, период (если он есть) и цель.</p> : null}
       </div> : null}
     </> : null}
     {plan ? <div className="mt-3">
@@ -123,7 +123,9 @@ export function ContactSupplyPanel({ supply }: { supply: ContactSupplyController
         <div><dt className={HE.faint}>Ориентир этой гипотезы по текущему весу</dt><dd>{count(metrics.hypothesis_daily_target)} контактов в рабочий день</dd></div>
         <div><dt className={HE.faint}>Загружено в её кампании</dt><dd>{count(metrics.uploaded)} всего, {count(metrics.uploaded_today)} сегодня</dd></div>
         <div><dt className={HE.faint}>План ближайшего рабочего дня, весь проект</dt><dd>{count(metrics.project_daily_plan)} контактов</dd></div>
-        <div><dt className={HE.faint}>Факт первых контактов за период, весь проект</dt><dd>{count(metrics.project_first_contacted)}</dd></div>
+        <div><dt className={HE.faint}>{plan?.portal_period_id === null
+          ? 'Факт первых контактов по кампаниям этого плана'
+          : 'Факт первых контактов за период, весь проект'}</dt><dd>{count(metrics.project_first_contacted)}</dd></div>
       </dl>
       <p className={HE.muted}>{metrics.hypothesis_stock_workdays === null
         ? 'Срок запаса гипотезы появится после активации и распределения темпа.'

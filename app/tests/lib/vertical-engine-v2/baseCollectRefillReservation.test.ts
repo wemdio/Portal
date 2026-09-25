@@ -215,6 +215,7 @@ describe('VE2 refill contact reservations', () => {
     await run(db);
 
     expect(reservedEmails(db)).toEqual(new Set(['one@example.test']));
+    expect(mockAppendLeads).toHaveBeenCalledWith(expect.objectContaining({ skipIfInCampaign: false }));
   });
 
   it('does not reserve rows removed by the client tariff inside append', async () => {

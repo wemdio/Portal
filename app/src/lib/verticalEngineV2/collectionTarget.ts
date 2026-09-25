@@ -275,7 +275,9 @@ export function finishCollectionRound(
   // но раунд не дал ни одного кандидата — и карточка всё равно сообщала, что
   // продолжать нечем, при задаче done и exhausted=false. Причина обязана
   // совпадать с состоянием задач, иначе по ней нельзя решить, продолжать ли.
-  if (result.candidates === 0 && !result.validationRetry) {
+  // A recognized idle round has its own bounded retry below. A single empty
+  // page from a live source must not bypass that allowance.
+  if (result.candidates === 0 && !result.validationRetry && !result.idle) {
     return { ...next, status: 'limited', reason: 'Партия вышла пустой: источники плана ещё не отмечены исчерпанными, '
       + 'но за раунд не набралось ни одного кандидата. Это остановка по пустому раунду, а не доказательство, '
       + 'что подходящие компании кончились' };

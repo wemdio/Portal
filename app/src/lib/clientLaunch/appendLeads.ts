@@ -17,7 +17,8 @@
  */
 
 import { logAudit, logError } from '@/lib/loggerServer';
-import { createLeads, listLeads } from '@/lib/instantly/client';
+import { createLeads, listLeads, getWorkspaceContactCapacity } from '@/lib/instantly/client';
+import { isInstantlyContactCapacityError } from '@/lib/instantly/errors';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { resolveClientInstantlyRequestOptions } from '@/lib/instantly/clientAccountOptions';
 import { getBlockedEmailSet, filterBlockedLeads } from '@/lib/clientBlocklist/blockedContacts';
@@ -76,6 +77,10 @@ export interface AppendLeadsToClientCampaignInput {
   entitlementMode?: 'client_tariff' | 'managed_contract';
   /** Immutable workspace fence supplied by a trusted campaign owner. */
   expectedInstantlyAccountId?: string;
+  /** VE2 keeps capacity omissions in its durable ready reserve for explicit retry. */
+  pauseOnWorkspaceCapacity?: boolean;
+  /** Trusted VE2 lease fence; runs just before each HTTP attempt, after rate admission. */
+  beforeProviderRequest?: () => Promise<void>;
   /** Durable reporting provenance for this append operation. */
   ledgerSource?: {
     kind: string;
@@ -95,6 +100,9 @@ export interface AppendLeadsResult {
   /** Exact permanent skips (client policy, blocklist, or identified provider rejection), never retryable omissions. */
   skippedIndexes?: number[];
   identityComplete: boolean;
+  /** Exact provider refusals that are safe to retry; never transport uncertainty. */
+  deferredIndexes?: number[];
+  capacityBlocked?: boolean;
 }
 
 export class AppendLeadsPartialError extends ClientLaunchError {
@@ -302,6 +310,8 @@ export async function appendLeadsToClientCampaign(
   const acceptedIndexes: number[] = [];
   const attemptedIndexes = new Set<number>();
   const batchIds: string[] = [];
+  const deferredIndexes = new Set<number>();
+  let capacityBlocked = false;
 
   const currentResult = (): AppendLeadsResult => ({
     accepted,
@@ -310,10 +320,21 @@ export async function appendLeadsToClientCampaign(
     acceptedIndexes: identityComplete ? [...acceptedIndexes].sort((a, b) => a - b) : null,
     skippedIndexes: [...skippedIndexes].sort((a, b) => a - b),
     identityComplete,
+    ...(input.pauseOnWorkspaceCapacity ? {
+      deferredIndexes: [...deferredIndexes].sort((a, b) => a - b), capacityBlocked,
+    } : {}),
   });
 
-  for (let offset = 0; offset < leadsToSend.length; offset += PROVIDER_APPEND_BATCH_SIZE) {
-    const chunk = leadsToSend.slice(offset, offset + PROVIDER_APPEND_BATCH_SIZE);
+  const tariffSkippedCount = Math.max(0, allowedLeads.length - leadsToSend.length);
+  let workspaceRemaining: number | null = null;
+  if (input.pauseOnWorkspaceCapacity) {
+    const capacity = await getWorkspaceContactCapacity(instantlyRequestOptions);
+    workspaceRemaining = capacity?.remaining ?? null;
+  }
+
+  for (let offset = 0; offset < leadsToSend.length;) {
+    if (workspaceRemaining === 0) { capacityBlocked = true; break; }
+    const chunk = leadsToSend.slice(offset, offset + Math.min(PROVIDER_APPEND_BATCH_SIZE, workspaceRemaining ?? PROVIDER_APPEND_BATCH_SIZE));
     const ledgerContext = {
       clientUserId: userId,
       campaignId,
@@ -329,9 +350,7 @@ export async function appendLeadsToClientCampaign(
       ({ batchId } = await startAppendLedgerBatch(supabaseAdmin, {
         ...ledgerContext,
         blockedCount: offset === 0 ? blockedCount : 0,
-        tariffSkippedCount: offset === 0
-          ? Math.max(0, allowedLeads.length - leadsToSend.length)
-          : 0,
+        tariffSkippedCount: offset === 0 ? tariffSkippedCount : 0,
         startedAt: new Date().toISOString(),
       }));
       batchIds.push(batchId);
@@ -344,14 +363,23 @@ export async function appendLeadsToClientCampaign(
     }
 
     let chunkAccepted: number;
+    let chunkCapacityBlocked = false;
+    let knownPermanentRejections = 0;
     let createdLeads: Array<{ id: string; email: string; index: number }> = [];
     try {
       const leadResult = await createLeads(
         chunk,
-        { campaign_id: campaignId, skip_if_in_campaign: skipIfInCampaign },
+        {
+          campaign_id: campaignId, skip_if_in_campaign: skipIfInCampaign,
+          // Omitting a flag must not inherit a workspace/import setting that
+          // suppresses contacts merely because another client's campaign has them.
+          ...(!skipIfInCampaign ? { skip_if_in_workspace: false, skip_if_in_list: false } : {}),
+        },
         {
           ...instantlyRequestOptions,
-          onRequestAttempt: () => {
+          ...(input.beforeProviderRequest ? { timeoutMs: 90_000, timeoutIncludesBody: true, retryRateLimits: false } : {}),
+          onRequestAttempt: async () => {
+            await input.beforeProviderRequest?.();
             for (const index of sentInputIndexes.slice(offset, offset + chunk.length)) {
               attemptedIndexes.add(index);
             }
@@ -360,7 +388,25 @@ export async function appendLeadsToClientCampaign(
       );
       chunkAccepted = leadResult.leads_uploaded;
       createdLeads = leadResult.created_leads ?? [];
+      if (input.pauseOnWorkspaceCapacity) {
+        // Blocklisted/invalid contacts consume no storage. Continue through the
+        // untouched tail while slots remain, bounded by the original daily batch.
+        const remaining = leadResult.remaining_in_plan;
+        workspaceRemaining = typeof remaining === 'number' && Number.isSafeInteger(remaining) && remaining >= 0
+          ? remaining : workspaceRemaining === null ? null : Math.max(0, workspaceRemaining - chunkAccepted);
+        chunkCapacityBlocked = workspaceRemaining === 0;
+        capacityBlocked = chunkCapacityBlocked;
+        // Only explicit provider reasons prove permanent omissions. Do not use
+        // skipped_count: older API responses synthesize it from total - accepted.
+        knownPermanentRejections = [leadResult.in_blocklist, leadResult.duplicated_leads,
+          leadResult.invalid_email_count, leadResult.incomplete_count, leadResult.duplicate_email_count]
+          .reduce((sum, value) => sum + (Number.isSafeInteger(value) && value >= 0 ? value : 0), 0);
+      }
     } catch (err) {
+      if (input.pauseOnWorkspaceCapacity && isInstantlyContactCapacityError(err)) {
+        capacityBlocked = true;
+        for (const index of sentInputIndexes.slice(offset, offset + chunk.length)) deferredIndexes.add(index);
+      }
       try {
         await failAppendLedgerBatch(supabaseAdmin, {
           ...ledgerContext,
@@ -379,6 +425,10 @@ export async function appendLeadsToClientCampaign(
     }
 
     const chunkSkipped = Math.max(0, chunk.length - chunkAccepted);
+    // If every omitted contact has a permanent reason, the exact complement
+    // of created_leads is safe to skip. Mixed capacity/blocklist counts cannot
+    // identify which omission is which: keep that complement retryable.
+    const deferOmissions = chunkCapacityBlocked && knownPermanentRejections !== chunkSkipped;
     const identity = buildAcceptedIdentitySnapshot({
       requested: chunk,
       accepted: chunkAccepted,
@@ -388,7 +438,7 @@ export async function appendLeadsToClientCampaign(
     // result even if the terminal journal write below is temporarily unavailable,
     // so callers never mistake a delivered chunk for an untouched one.
     accepted += chunkAccepted;
-    externalSkipped += chunkSkipped;
+    externalSkipped += deferOmissions ? 0 : chunkSkipped;
     if (identity.identityComplete) {
       const acceptedChunkIndexes = new Set(identity.acceptedIdentities.map((entry) => entry.index));
       for (const acceptedIdentity of identity.acceptedIdentities) {
@@ -396,7 +446,9 @@ export async function appendLeadsToClientCampaign(
         if (inputIndex !== undefined) acceptedIndexes.push(inputIndex);
       }
       for (let index = 0; index < chunk.length; index += 1) {
-        if (!acceptedChunkIndexes.has(index)) skippedIndexes.add(sentInputIndexes[offset + index]);
+        if (!acceptedChunkIndexes.has(index)) {
+          (deferOmissions ? deferredIndexes : skippedIndexes).add(sentInputIndexes[offset + index]);
+        }
       }
     } else {
       identityComplete = false;
@@ -406,7 +458,7 @@ export async function appendLeadsToClientCampaign(
         ...ledgerContext,
         batchId,
         accepted: chunkAccepted,
-        skipped: chunkSkipped,
+        skipped: deferOmissions ? 0 : chunkSkipped,
         createdLeads,
         finishedAt: new Date().toISOString(),
       });
@@ -419,7 +471,8 @@ export async function appendLeadsToClientCampaign(
         currentResult(),
       );
     }
-
+    offset += chunk.length;
+    if (chunkCapacityBlocked) break;
   }
 
   // `skipped` remains backward compatible for callers: provider skips plus

@@ -447,16 +447,43 @@ export interface VePortalActivePeriodDto {
   contacts_done_count: number | null;
 }
 
+/**
+ * Проект без периодов: сроком служит карточка проекта. Обязательство и
+ * накопленный факт только показываются, в расчёт плана не входят.
+ */
+export interface VePortalProjectTermDto {
+  deadline: string | null;
+  starts_at?: string | null;
+  /** Свободный текст карточки: «4000», «8000-16000» или пусто. */
+  contacts_obligation?: string | null;
+  /** Накопленный projects.contacts_done. */
+  contacts_done_total?: number | null;
+  /** Почему проект сейчас нельзя выбрать; null — можно. */
+  issue?: string | null;
+}
+
 /** Явный выбор Portal-проекта; источник периода всегда Portal. */
 export interface VePortalProjectOptionDto {
   id: string;
   name: string;
   active_period: VePortalActivePeriodDto | null;
+  /** Есть, когда у проекта нет активного периода. */
+  project_term?: VePortalProjectTermDto | null;
+  /** У проекта есть периоды, но все закрыты. */
+  periods_closed?: boolean;
+}
+
+/** Неизменяемая привязка плана, когда её план сейчас не пересчитывается. */
+export interface VeDeliveryPlanBindingDto {
+  portal_project_id: string;
+  portal_period_id: string | null;
+  target_contacts: number;
 }
 
 export interface VeDeliveryPlanPreviewRequest {
   portal_project_id: string;
-  expected_portal_period_id: string;
+  /** null — проект без периодов. */
+  expected_portal_period_id: string | null;
   target_contacts: number;
   preset_id: string;
   segmentation_audit_id?: string;
@@ -466,7 +493,8 @@ export interface VeDeliveryPlanPreviewRequest {
 export interface VeDeliveryPlanPreviewDto {
   portal_project_id: string;
   portal_project_name?: string | null;
-  portal_period_id: string;
+  /** null — план по проекту без периодов. */
+  portal_period_id: string | null;
   portal_period_label?: string | null;
   deadline: string;
   contacts_done_count: number;
@@ -483,6 +511,8 @@ export interface VeDeliveryPlanPreviewDto {
   capacity_deficit: number;
   delivery_timezone?: string | null;
   delivery_schedule_days?: number[] | null;
+  /** Только без периода: карточка проекта для показа. */
+  project_term?: Omit<VePortalProjectTermDto, 'issue'> | null;
 }
 
 export interface VeDeliveryPlanPreviewResponse {

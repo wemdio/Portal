@@ -44,6 +44,7 @@ import { resolveLeadContactMetadata } from './leadContactMetadata';
 import { loadCachedLeadContacts } from './cachedLeadContacts';
 import { senderDisplayLeadName } from './leadReplyContacts';
 import { resolveEffectiveReplyOwner } from './replyOwnershipResolver';
+import { resolveSentHandoffClientEcho } from './clientEchoOwner';
 import { resolveInstantlyAccountId } from './accounts';
 import { randomUUID } from 'node:crypto';
 import { qualificationAutomationPolicy, replyAutomationExpired } from './qualificationAutomationPolicy';
@@ -1543,7 +1544,8 @@ export async function qualifyOneReply(
   // письмо продолжает старый диалог другого проекта. До критериев, ИИ и любых
   // пользовательских side effects восстанавливаем владельца по исходящему
   // родителю и eaccount, учитывая доказанный ответ через другой ящик.
-  const ownership = await resolveEffectiveReplyOwner({
+  const clientEchoOwnership = machineSnapshot ? await resolveSentHandoffClientEcho(db, reply) : null;
+  const ownership = clientEchoOwnership ?? await resolveEffectiveReplyOwner({
     db,
     reply,
     providerCampaignId,
@@ -1653,7 +1655,7 @@ export async function qualifyOneReply(
       `(campaign ${campaignId}): client-party ownership is not provable`,
     );
   }
-  if (clientParty.addresses.has(fromLower) || (fromDomain && clientParty.domains.has(fromDomain))) {
+  if (clientEchoOwnership || clientParty.addresses.has(fromLower) || (fromDomain && clientParty.domains.has(fromDomain))) {
     const replyText = getBodyText(reply.body);
     // Как и основной upsert ниже: ошибку НЕ глотаем. Молча потерянная строка =
     // нет дедупа → это же эхо переобрабатывается каждый тик, занимая слот из
@@ -2008,10 +2010,24 @@ export async function qualifyOneReply(
     `Classified ${leadEmail} in campaign ${campaignId}: ${status} (confidence: ${result.confidence.toFixed(2)})${inserted?.id ? '' : ' [dedup-skip]'}`,
   );
 
-  // Гостевая таблица лидов проекта (lead board): авто-строка при каждом новом
-  // лиде project-linked кампании. Неудача НЕ роняет квалификацию/алерт —
-  // логируем и едем дальше.
+  let specialistLeadSideEffectsAllowed = false;
+  let specialistThreadClaim: SpecialistAlertClaimDecision | null = null;
   if (status === 'lead' && inserted?.id && qualifiedProjectId) {
+    const threadClaim = await claimSpecialistThreadAlert(db, inserted.id, handoffEnabled());
+    specialistThreadClaim = threadClaim;
+    if (threadClaim.status === 'alert') {
+      specialistLeadSideEffectsAllowed = true;
+    } else if (threadClaim.status === 'duplicate') {
+      workerLog('info', `Lead specialist side effects ${inserted.id} suppressed: thread already belongs to qualification ${threadClaim.winnerQualificationId}`);
+    } else {
+      workerLog('warn', `${threadClaim.reason} — specialist lead side effects deferred`);
+    }
+  }
+
+  // One board row per elected project/thread, even for subsequent positive
+  // replies. A failed claim is recovered with delivery, not a duplicate row.
+  if (status === 'lead' && inserted?.id && qualifiedProjectId && specialistThreadClaim && specialistThreadClaim.status !== 'retry' &&
+    !(await qualificationAutomationBlocked(db, { qualificationId: inserted.id }))) {
     try {
       const boardProjectId = qualifiedProjectId;
       await getOrCreateBoard(db, boardProjectId);
@@ -2027,7 +2043,9 @@ export async function qualifyOneReply(
         fromName = senderDisplayLeadName(n);
       }
       await upsertBoardRow(db, {
-        qualificationId: inserted.id,
+        qualificationId: specialistThreadClaim.status === 'duplicate'
+          ? specialistThreadClaim.winnerQualificationId : inserted.id,
+        sourceQualificationId: inserted.id,
         projectId: boardProjectId,
         campaignId,
         campaignName,
@@ -2042,27 +2060,6 @@ export async function qualifyOneReply(
       });
     } catch (err) {
       workerLog('warn', `lead board row upsert failed for ${leadEmail} (campaign ${campaignId}): ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  let specialistLeadSideEffectsAllowed = false;
-  let specialistThreadClaim: SpecialistAlertClaimDecision | null = null;
-  if (status === 'lead' && inserted?.id && qualifiedProjectId) {
-    const threadClaim = await claimSpecialistThreadAlert(
-      db,
-      inserted.id,
-      handoffEnabled(),
-    );
-    specialistThreadClaim = threadClaim;
-    if (threadClaim.status === 'alert') {
-      specialistLeadSideEffectsAllowed = true;
-    } else if (threadClaim.status === 'duplicate') {
-      workerLog(
-        'info',
-        `Lead specialist side effects ${inserted.id} suppressed: thread already belongs to qualification ${threadClaim.winnerQualificationId}`,
-      );
-    } else {
-      workerLog('warn', `${threadClaim.reason} — specialist lead side effects deferred`);
     }
   }
 
@@ -2770,7 +2767,7 @@ export async function reprocessOwnershipReviewRows(
       };
       const storedSnapshot = await readSnapshot();
       let fullEmail: Email;
-      if (storedSnapshot && !shouldRefreshRecoverySource(raw)) fullEmail = storedSnapshot;
+      if (storedSnapshot && (classifyMachineReply(storedSnapshot) || !shouldRefreshRecoverySource(raw))) fullEmail = storedSnapshot;
       else if (raw.recovery_use_snapshot) {
         throw new Error('recovery source unavailable: provider 404 and no complete saved inbound');
       } else {
@@ -3961,12 +3958,42 @@ type RecoverableLeadQualification = {
   reply_subject: string | null;
   reply_body: string | null;
   reply_preview: string | null;
+  reply_recovery_snapshot?: unknown;
   last_outbound_preview: string | null;
   reply_timestamp: string | null;
   ai_reason: string | null;
   created_at: string;
   updated_at: string;
 };
+
+/** Restore a board write deferred by the thread claim, using saved sources
+ * only. This never requalifies a reply, reads Instantly or sends notifications. */
+async function recoverLeadBoardRow(
+  db: NonNullable<typeof supabaseAdmin>, lead: RecoverableLeadQualification,
+  threadClaim: SpecialistAlertClaimDecision,
+): Promise<void> {
+  if (!lead.qualified_project_id || threadClaim.status === 'retry') return;
+  try {
+    if (await qualificationAutomationBlocked(db, { qualificationId: lead.id })) return;
+    const body = qualificationReplySnapshot(lead)?.body ?? lead.reply_body ?? lead.reply_preview ?? '';
+    const metadata = resolveLeadContactMetadata({
+      leads: [], leadEmail: lead.lead_email, campaignId: lead.campaign_id, replyBody: body,
+    });
+    await getOrCreateBoard(db, lead.qualified_project_id);
+    await upsertBoardRow(db, {
+      qualificationId: threadClaim.status === 'duplicate' ? threadClaim.winnerQualificationId : lead.id,
+      sourceQualificationId: lead.id,
+      projectId: lead.qualified_project_id,
+      campaignId: lead.campaign_id, campaignName: lead.campaign_name,
+      leadEmail: lead.lead_email, leadName: senderDisplayLeadName(lead.lead_name) ?? metadata.leadName,
+      companyName: lead.company_name ?? metadata.companyName,
+      phone: metadata.phone, website: metadata.website,
+      requestText: leadBoardRequestText(body), stepNumber: null, replyTimestamp: lead.reply_timestamp,
+    });
+  } catch (error) {
+    workerLog('warn', `lead board delivery recovery failed for ${lead.id}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 
 type LeadDeliveryLogRow = {
   id: string;
@@ -4042,7 +4069,7 @@ export async function reconcileLeadNotificationDeliveries(
   while (true) {
     const { data: leadRows, error: leadRowsError } = await instantlyDb
       .from('instantly_lead_qualifications')
-      .select('id, campaign_id, qualified_project_id, qualified_project_owner_proven, thread_id, instantly_email_id, eaccount, lead_email, lead_name, company_name, campaign_name, reply_subject, reply_body, reply_preview, last_outbound_preview, reply_timestamp, ai_reason, created_at, updated_at')
+      .select('id, campaign_id, qualified_project_id, qualified_project_owner_proven, thread_id, instantly_email_id, eaccount, lead_email, lead_name, company_name, campaign_name, reply_subject, reply_body, reply_preview, reply_recovery_snapshot, last_outbound_preview, reply_timestamp, ai_reason, created_at, updated_at')
       .eq('status', 'lead')
       .is('queue_archived_at', null)
       // A cold retry preserves created_at but refreshes updated_at. Its first
@@ -4191,6 +4218,7 @@ export async function reconcileLeadNotificationDeliveries(
         lead.id,
         handoffEnabled(),
       );
+      await recoverLeadBoardRow(instantlyDb, lead, threadClaim);
       if (threadClaim.status === 'duplicate') {
         workerLog(
           'info',
@@ -4537,9 +4565,9 @@ export async function reconcileLeadHandoffJobs(options: {
  * and a responsible specialist, post the handoff card to Telegram with a
  * "Передать клиенту" button. Текст передачи — легенда проекта ДОСЛОВНО (без ИИ,
  * спецы полностью контролируют формулировку). The press (handled by
- * /api/telegram/handoff/webhook) is what actually sends it — only the responsible
- * specialist may press. Gated by LEAD_HANDOFF_ENABLED; never throws into the
- * qualification flow.
+ * /api/telegram/handoff/webhook) is what actually sends it. The responsible
+ * specialist or an opted-in project lead may press. Gated by
+ * LEAD_HANDOFF_ENABLED; never throws into the qualification flow.
  */
 export async function maybePostLeadHandoff(opts: {
   instantlyDb: NonNullable<typeof supabaseAdmin>;
@@ -4630,7 +4658,7 @@ export async function maybePostLeadHandoff(opts: {
 
     const { data: projectRow, error: projectsError } = await main
       .from('projects')
-      .select('handoff_email, handoff_legend, handoff_ai_adapt, handoff_auto_send, specialist_user_id')
+      .select('handoff_email, handoff_legend, handoff_ai_adapt, handoff_auto_send, specialist_user_id, tag_project_lead_in_telegram')
       .eq('id', projectId)
       .maybeSingle();
     if (projectsError) {
@@ -4640,7 +4668,7 @@ export async function maybePostLeadHandoff(opts: {
     const project = projectRow &&
       Boolean((projectRow.handoff_email as string | null)?.trim()) &&
       Boolean((projectRow.handoff_legend as string | null)?.trim())
-      ? projectRow as { handoff_email: string; handoff_legend: string; handoff_ai_adapt: boolean; handoff_auto_send: boolean; specialist_user_id: string | null }
+      ? projectRow as { handoff_email: string; handoff_legend: string; handoff_ai_adapt: boolean; handoff_auto_send: boolean; specialist_user_id: string | null; tag_project_lead_in_telegram: boolean }
       : undefined;
     if (!project) return { disposition: 'skipped', detail: 'handoff is not configured' };
 
@@ -4711,7 +4739,7 @@ export async function maybePostLeadHandoff(opts: {
       boardLink ? `📋 <a href="${escapeHtml(boardLink)}">Все лиды проекта</a>` : '',
       autoSend
         ? '⚡ Автопередача включена — отправляется автоматически, без кнопки-подтверждения.'
-        : 'Нажмите «Передать клиенту» — письмо уйдёт лиду, клиент в копии. Нажать может только ответственный.',
+        : `Нажмите «Передать клиенту» — письмо уйдёт лиду, клиент в копии. Нажать может ответственный${project.tag_project_lead_in_telegram ? ' или лид проекта' : ''}.`,
     ].filter(Boolean).join('\n');
 
     // Recovery must reply to the persisted alert, including after a restart.

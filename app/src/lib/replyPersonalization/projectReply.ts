@@ -7,6 +7,7 @@ import {
   listSyncedQualifications,
 } from './db';
 import { getLiveReply, listLiveReplies } from './liveReplyList';
+import { getProjectMailboxes, type ProjectMailboxes } from './projectMailboxes';
 import type { QualificationRow, ReplyCampaignOption } from './types';
 
 /** Сколько писем отдаём за раз; прокрутка до конца списка просит следующую сотню. */
@@ -104,8 +105,20 @@ export async function resolveProjectReply(
   }
 
   const campaignIds = await getProjectCampaignIds(projectId);
+  if (!campaignIds.length) return null;
   const accounts = await getCampaignAccountIds(campaignIds);
-  const liveAccounts = [...new Set([...accounts.values()])].filter((a) => a !== 'main');
-  if (!liveAccounts.length) return null;
-  return getLiveReply({ emailId: replyId, accountIds: liveAccounts, campaignIds });
+  // Живое письмо — письмо кампании другого аккаунта (их квалификатор не
+  // синкает) или письмо папки Others любого аккаунта проекта, включая основной.
+  // Основной — последним: письма его кампаний уже нашлись в таблице выше.
+  const accountIds = [...new Set(accounts.values())].sort((a, b) => Number(a === 'main') - Number(b === 'main'));
+  let mailboxes: Promise<ProjectMailboxes> | null = null;
+  return getLiveReply({
+    emailId: replyId,
+    accountIds,
+    campaignIds,
+    mailboxesFor: async (accountId) => {
+      mailboxes ??= getProjectMailboxes(campaignIds, accounts);
+      return (await mailboxes).byAccount.get(accountId);
+    },
+  });
 }

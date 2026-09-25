@@ -24,7 +24,7 @@ export function contactDeliveryDailyCapacity(
 export async function loadContactDeliverySettings(
   db: SupabaseClient,
   veProjectId: string,
-  input: { portalProjectId: string; portalPeriodId: string; targetContacts: number; presetId: string },
+  input: { portalProjectId: string; portalPeriodId: string | null; targetContacts: number; presetId: string },
   preset: Pick<ClientCampaignPreset, 'daily_max_leads' | 'daily_limit' | 'schedule_days' | 'schedule_timezone'>,
 ) {
   const { data: binding, error } = await db.from('ve_projects')
@@ -36,7 +36,7 @@ export async function loadContactDeliverySettings(
   }
   const bound = Boolean(binding.portal_project_id);
   if (bound && (binding.portal_project_id !== input.portalProjectId
-    || binding.portal_period_id !== input.portalPeriodId || binding.target_contacts !== input.targetContacts)) {
+    || (binding.portal_period_id ?? null) !== input.portalPeriodId || binding.target_contacts !== input.targetContacts)) {
     throw new Error('Проект, период или обязательство не совпадает с закреплённым планом');
   }
   const scheduleDays = normalizeContactDeliveryScheduleDays(bound ? binding.delivery_schedule_days : preset.schedule_days);

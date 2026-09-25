@@ -55,6 +55,9 @@ const MODEL_PRICES: Record<string, ModelPrices> = {
   'openai/gpt-5.5':                 { in: 5.0, out: 30.0 },
   'gemini-3.1-pro-preview':         { in: 1.8, out: 10.8 },
   'google/gemini-3.1-pro-preview':  { in: 1.8, out: 10.8 },
+  // Генерация гипотез после A/B 24.09.2026 (Requesty /v1/models).
+  'gemini-3.8-flash':               { in: 0.75, out: 3.75, cached: 0.075 },
+  'vertex/gemini-3.8-flash':        { in: 0.75, out: 3.75, cached: 0.075 },
   // Основная модель сбора. Ставка снята с продового журнала 20.09.2026
   // (26 619 оплаченных вызовов, регрессия по входным токенам, r=0.99):
   // $0.099 за миллион входных с наценкой Requesty. Без этой строки
@@ -105,11 +108,12 @@ function providerUsage(response: RequestyResponse, requestedModel: string) {
 
 /* ─────────────────────── Роли моделей ─────────────────────── */
 
-export type VeModelKind = 'research' | 'chain' | 'bulk' | 'collection' | 'gate' | 'relevanceReview';
+export type VeModelKind = 'research' | 'hypotheses' | 'chain' | 'bulk' | 'collection' | 'gate' | 'relevanceReview';
 
 export const VE_COLLECTION_MODEL = 'deepinfra/deepseek-v4-flash-0731';
 
-const VE_MODEL_DEFAULTS: Record<VeModelKind, string> = {
+// Генерация гипотез без своей настройки идёт на модели исследования.
+const VE_MODEL_DEFAULTS: Record<Exclude<VeModelKind, 'hypotheses'>, string> = {
   research: 'anthropic/claude-opus-5',
   chain: 'anthropic/claude-opus-5',
   bulk: 'anthropic/claude-sonnet-4-6',
@@ -125,6 +129,7 @@ const VE_MODEL_DEFAULTS: Record<VeModelKind, string> = {
 
 const VE_MODEL_ENV: Record<VeModelKind, string> = {
   research: 'VE_MODEL_RESEARCH',
+  hypotheses: 'VE_MODEL_HYPOTHESES',
   chain: 'VE_MODEL_CHAIN',
   bulk: 'VE_MODEL_BULK',
   collection: 'VE_MODEL_COLLECTION',
@@ -134,7 +139,9 @@ const VE_MODEL_ENV: Record<VeModelKind, string> = {
 
 /** Модель для роли движка; переопределяется соответствующей переменной VE_MODEL_*. */
 export function getVeModel(kind: VeModelKind): string {
-  return (process.env[VE_MODEL_ENV[kind]] ?? '').trim() || VE_MODEL_DEFAULTS[kind];
+  const configured = (process.env[VE_MODEL_ENV[kind]] ?? '').trim();
+  if (configured) return configured;
+  return kind === 'hypotheses' ? getVeModel('research') : VE_MODEL_DEFAULTS[kind];
 }
 
 /** This rollout keeps the evidence/admission contract. Reuse paid checkpoints

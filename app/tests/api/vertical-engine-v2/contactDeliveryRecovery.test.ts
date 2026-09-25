@@ -15,6 +15,8 @@ const mockActivateCampaign = jest.fn();
 const mockCreateLeads = jest.fn();
 const mockValidate = jest.fn();
 const mockReserveOwnership = jest.fn();
+const mockCheckOwnership = jest.fn();
+const mockClaimOwnership = jest.fn();
 
 jest.mock('@/lib/supabaseAdmin', () => ({ get supabaseAdmin() { return mockPortalDb; } }));
 jest.mock('@/lib/supabaseInstantly', () => ({ get supabaseInstantly() { return mockInstantlyDb; } }));
@@ -34,12 +36,15 @@ jest.mock('@/lib/instantly/client', () => ({
 }));
 jest.mock('@/lib/instantly/campaignProjectOwnership', () => ({
   reservePeriodCampaignLinks: (...args: unknown[]) => mockReserveOwnership(...args),
+  checkCampaignProjectOwnershipConflicts: (...args: unknown[]) => mockCheckOwnership(...args),
+  claimCampaignProjectOwnership: (...args: unknown[]) => mockClaimOwnership(...args),
 }));
 jest.mock('@/lib/verticalEngineV2/stages/segmentationAudit', () => ({
   validateStoredAuditSnapshot: (...args: unknown[]) => mockValidate(...args),
   prepareAuditSnapshot: jest.fn(() => ({ audience: { leads: [] } })),
 }));
 
+import { GET as getUpload, POST as retryUpload } from '@/app/api/tools/vertical-engine-v2/templates/[id]/upload/route';
 import { GET as getAudit, PATCH, POST as createAudit } from '@/app/api/tools/vertical-engine-v2/templates/[id]/segmentation-audit/route';
 import { GET as getBaseTemplate } from '@/app/api/tools/vertical-engine-v2/bases/[id]/template/route';
 import { activateApprovedLaunchCampaigns, activateDeliveredContactCampaigns } from '@/lib/verticalEngineV2/contactDeliveryActivation';
@@ -77,6 +82,7 @@ function seed(known = true) {
     ve_contact_delivery_rows: [{ id: 'existing-row', ve_project_id: 've-project-1',
       campaign_row_id: 'another-campaign-row', email_normalized: 'reserved@example.test', status: 'ready' }],
   }, rpcHandlers: {
+    ve_retry_contact_delivery_upload: () => ({ data: { ok: true } }),
     ve_resolve_template_launch: () => ({ data: { resolved: true, audit_row: audit } }),
     ve_resolve_template_contact_delivery: () => ({ data: { resolved: true, audit_row: audit } }),
   } });
@@ -106,6 +112,8 @@ beforeEach(() => {
   mockListLeads.mockResolvedValue({ items: [], next_starting_after: null });
   mockGetAnalytics.mockResolvedValue([{ campaign_id: 'campaign-1', emails_sent_count: 0, contacted_count: 0 }]);
   mockReserveOwnership.mockResolvedValue({ status: 'claimed', conflictingProjectIds: [] });
+  mockCheckOwnership.mockResolvedValue([]);
+  mockClaimOwnership.mockResolvedValue({ status: 'claimed', conflictingProjectIds: [] });
 });
 
 it('recovers the exact filtered reserve and period ownership without uploading contacts', async () => {
@@ -196,4 +204,78 @@ it('starts first accepted tranche behind a DB fence, never resumes a previously 
     've_reserve_contact_delivery_activation', 've_finalize_contact_delivery_activation',
   ]);
   expect(portal.rpcCalls.at(-1)?.params).toMatchObject({ p_succeeded: true });
+});
+
+describe('recovery of a plan bound to a Portal project without periods', () => {
+  async function withoutPeriod(periods: Array<Record<string, unknown>> = []) {
+    await mockPortalDb.from('ve_projects').update({ portal_period_id: null }).eq('id', 've-project-1');
+    await mockPortalDb.from('projects').insert({
+      id: 'portal-project-1', client: 'Staff Line', name: 'Аутрич', status: 'В работе',
+      deadline: '2099-09-30', contacts_obligation: '4000', contacts_done: '25905',
+    });
+    for (const period of periods) await mockPortalDb.from('project_periods').insert({ project_id: 'portal-project-1', ...period });
+  }
+
+  it('recovers the reserve and links the campaign to the project, not to a period', async () => {
+    await withoutPeriod();
+    expect((await recover()).status).toBe(200);
+    expect(mockReserveOwnership).not.toHaveBeenCalled();
+    expect(mockCheckOwnership).toHaveBeenCalledWith(mockInstantlyDb, 'portal-project-1', ['campaign-1']);
+    expect(mockClaimOwnership).toHaveBeenCalledWith(mockInstantlyDb, expect.objectContaining({
+      projectId: 'portal-project-1', campaignId: 'campaign-1', matchSource: 'manual', periodId: null, replaceAutomatic: false,
+    }));
+    expect(mockPortalDb.rpcCalls.at(-1)).toMatchObject({
+      fn: 've_resolve_template_contact_delivery',
+      params: { p_launch_info: { portal_project_id: 'portal-project-1', portal_period_id: null, target_contacts: 100 } },
+    });
+  });
+
+  it('stops before any provider check when the project got a period', async () => {
+    await withoutPeriod([{ id: 'new-period', status: 'active' }]);
+    const response = await recover();
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: expect.stringContaining('Проекту в Portal создан период'),
+    });
+    expect(mockGetCampaign).not.toHaveBeenCalled();
+    expect(mockClaimOwnership).not.toHaveBeenCalled();
+    expect(mockPortalDb.rpcCalls).toHaveLength(0);
+  });
+
+  it('keeps a legacy-link conflict fail-closed', async () => {
+    await withoutPeriod();
+    mockCheckOwnership.mockResolvedValue([{ campaignId: 'campaign-1', conflictingProjectIds: ['other-project'] }]);
+    const response = await recover();
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ error: 'Кампания уже принадлежит другому Portal-проекту.' });
+    expect(mockCheckOwnership).toHaveBeenCalledWith(mockInstantlyDb, 'portal-project-1', ['campaign-1']);
+    expect(mockClaimOwnership).not.toHaveBeenCalled();
+    expect(mockPortalDb.rpcCalls).toHaveLength(0);
+  });
+});
+
+
+it('shows the durable project upload pause and requests retry without contacting Instantly', async () => {
+  const runId = '50000000-0000-4000-8000-000000000001';
+  const blockedAt = '2026-09-24T07:00:00.123456+00:00';
+  await mockPortalDb.from('ve_contact_delivery_daily_runs').insert({ id: runId,
+    ve_project_id: 've-project-1', run_date: '2026-09-24', upload_blocked_at: blockedAt,
+    accepted_count: 12, uncertain_count: 2, skipped_count: 1, reserved_count: 20 });
+  const context = { params: Promise.resolve({ id: 'template-1' }) };
+  const status = await getUpload(new Request('http://x/upload') as NextRequest, context);
+  expect(status.status).toBe(200);
+  expect(await status.json()).toEqual({ blocked: {
+    run_id: runId, blocked_at: blockedAt, run_date: '2026-09-24', accepted: 12, pending: 5, uncertain: 2,
+  } });
+  const response = await retryUpload(new Request('http://x/upload', { method: 'POST', body: JSON.stringify({
+    action: 'retry', run_id: runId, blocked_at: blockedAt, project_id: 'foreign-project', actor_id: 'foreign-user',
+  }) }) as NextRequest, context);
+  expect(response.status).toBe(200);
+  expect(mockPortalDb.rpcCalls.at(-1)).toMatchObject({ fn: 've_retry_contact_delivery_upload', params: {
+    p_run_id: runId, p_blocked_at: blockedAt, p_ve_project_id: 've-project-1', p_actor_id: 'staff-1',
+  } });
+  expect(mockCreateLeads).not.toHaveBeenCalled();
+  expect(mockActivateCampaign).not.toHaveBeenCalled();
+  const invalid = await retryUpload(new Request('http://x/upload', { method: 'POST', body: '{}' }) as NextRequest, context);
+  expect(invalid.status).toBe(400);
 });

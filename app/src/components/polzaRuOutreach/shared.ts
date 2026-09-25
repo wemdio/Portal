@@ -1,7 +1,7 @@
 'use client';
 
 import { authFetch, authFetchJson } from '@/lib/authFetch';
-import { CHAIN_LABELS, type ChainType, type Letter, type RuOutreachConfig, type Signal } from '@/lib/polzaRuOutreach/types';
+import { CHAIN_LABELS, type ChainType, type Letter, type RuOutreachConfig, type Signal, type Stage } from '@/lib/polzaRuOutreach/types';
 
 export const API = '/api/tools/polza-ru-outreach';
 
@@ -144,3 +144,26 @@ export function fmtDateTime(value: string | null | undefined): string {
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? value : d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
+
+/** Ответ `/{jobId}/results`: строки страницы плюс счётчики для воронки и фильтров. */
+export interface ResultsResponse {
+  items: RuRow[];
+  count: number;
+  funnel: Record<Stage, number>;
+  reason_counts: Record<string, number>;
+  status_counts: Record<string, number>;
+}
+
+/** Быстрые фильтры над таблицей результатов. */
+export type ResultsFilter = 'ready' | 'doubtful' | 'manual_review' | 'rejected' | 'all';
+
+export const RESULT_FILTERS: Array<[ResultsFilter, string]> = [
+  ['ready', 'Готовые'],
+  ['doubtful', 'Очень спорные'],
+  ['manual_review', 'Ручная проверка'],
+  ['rejected', 'Отсеянные'],
+  ['all', 'Все'],
+];
+
+/** Сколько строк результатов на странице. */
+export const RESULTS_PAGE = 50;

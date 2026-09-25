@@ -160,7 +160,12 @@ describe('VE2 contact delivery scheduler', () => {
       return {};
     });
 
+    const reconcile = jest.fn(async ({ veProjectId }: { veProjectId: string }) => {
+      if (veProjectId === 've-1') throw new Error('reconciliation API unavailable');
+      return { accepted: 1, released: 1, errors: [] };
+    });
     const result = await runBoundContactDeliveries({
+      reconcile,
       portalDb: portal as never,
       instantlyDb: {} as never,
       now: new Date('2026-09-02T12:00:00.000Z'),
@@ -171,6 +176,8 @@ describe('VE2 contact delivery scheduler', () => {
 
     expect(runProject.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-1', 've-2']);
     expect(runSupply.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-1', 've-2']);
+    expect(reconcile.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-1', 've-2']);
+    expect(reconcile.mock.invocationCallOrder[1]).toBeLessThan(runProject.mock.invocationCallOrder[1]);
     expect(result).toEqual({
       skipped: false,
       eligibleProjects: 2,
@@ -365,6 +372,76 @@ describe('VE2 contact delivery scheduler', () => {
       await runProjectContactSupply(input);
       expect(portal.rpcCalls.filter((call) => call.fn === 've_enqueue_contact_supply_batch')).toHaveLength(expected === 'active' ? 1 : 0);
     }
+  });
+
+  it('includes a complete binding to a Portal project without periods and still skips incomplete ones', async () => {
+    const portal = createMockSupabase({
+      enforceQueryWindows: true,
+      tables: {
+        ve_projects: [
+          { id: 've-no-period', ...COMPLETE_BINDING, portal_period_id: null },
+          { id: 've-unbound', ...COMPLETE_BINDING, portal_project_id: null, portal_period_id: null },
+          { id: 've-partial', ...COMPLETE_BINDING, portal_period_id: null, delivery_timezone: null },
+        ],
+        ve_launch_queue_items: ['ve-no-period', 've-unbound', 've-partial'].map((projectId) => ({
+          id: `item-${projectId}`, project_id: projectId, status: 'active',
+        })),
+      },
+    });
+    const runProject = jest.fn(async (_input: { veProjectId: string }) => ({ status: 'completed' as const }));
+    const runSupply = jest.fn(async (_input: { veProjectId: string }) => ({}));
+    const result = await runBoundContactDeliveries({
+      portalDb: portal as never, instantlyDb: {} as never, runProject: runProject as never,
+      runSupply: runSupply as never, log: jest.fn(),
+    });
+    expect(runProject.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-no-period']);
+    expect(runSupply.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-no-period']);
+    expect(result).toMatchObject({ eligibleProjects: 1, attemptedProjects: 1, failedProjects: 0 });
+  });
+
+  it('supplies a plan without a period from the card deadline and the observed VE2 fact', async () => {
+    const tables = (projectOverrides: Record<string, unknown> = {}, periods: Array<Record<string, unknown>> = []) => ({
+      ve_contact_supply_plans: [{ id: 'plan', project_id: 've', hypothesis_id: 'hyp', template_id: 'original-template', item_id: 'item', status: 'active', source_state: {} }],
+      ve_projects: [{ id: 've', ...COMPLETE_BINDING, portal_period_id: null, launch_instantly_account_id: 'main' }],
+      // Staff Line: накопленный факт карточки больше обязательства и в план не входит.
+      projects: [{ id: COMPLETE_BINDING.portal_project_id, client: 'Staff Line', status: 'В работе', deadline: '2026-09-11',
+        contacts_obligation: '4000', contacts_done: '25905', ...projectOverrides }],
+      project_periods: periods,
+      ve_launch_queue_items: [{ id: 'item', project_id: 've', status: 'active', potential_pct: 70 }],
+      ve_launch_queue_campaigns: [{ id: 'campaign-row', item_id: 'item', campaign_id: 'original-campaign', segment: null }],
+      ve_contact_delivery_rows: [0, 1, 2].map((n) => ({ id: `row-${n}`, ve_project_id: 've', campaign_row_id: 'campaign-row', email_normalized: `existing${n}@example.test`, status: 'ready' })),
+    });
+    const handlers = {
+      ve_contact_supply_approval_current: () => ({ data: true }),
+      ve_enqueue_contact_supply_batch: () => ({ data: { created: true } }),
+    };
+    const instantly = createMockSupabase({
+      tables: {
+        client_campaign_presets: [{ id: 'preset-1', client_user_id: 'client', instantly_account_id: 'main' }],
+        instantly_campaign_catalog: [{ id: 'original-campaign', new_leads_contacted_count: 10 }],
+      },
+      rpcHandlers: { client_blocklist_snapshot: () => ({ data: { count: 0, emails: [] } }) },
+    });
+    const now = new Date('2026-09-07T06:00:00Z');
+
+    const portal = createMockSupabase({ enforceQueryWindows: true, tables: tables(), rpcHandlers: handlers });
+    await runProjectContactSupply({ portalDb: portal as never, instantlyDb: instantly as never, veProjectId: 've', now });
+    // 100 − 10 observed = 90 over 5 workdays → 18 a day; two-day buffer 36 minus 3 ready.
+    expect(portal.rpcCalls.find((call) => call.fn === 've_enqueue_contact_supply_batch')?.params.p_limit).toBe(33);
+    expect(portal.selects.filter((call) => call.table === 'project_periods').every((call) => !call.columns.includes('contacts_done'))).toBe(true);
+
+    const afterPeriod = createMockSupabase({ enforceQueryWindows: true, rpcHandlers: handlers,
+      tables: tables({}, [{ id: 'new-period', project_id: COMPLETE_BINDING.portal_project_id, status: 'active', deadline: '2026-10-31', contacts_done: '0' }]) });
+    await expect(runProjectContactSupply({ portalDb: afterPeriod as never, instantlyDb: instantly as never, veProjectId: 've', now }))
+      .rejects.toThrow('Проекту в Portal создан период');
+    expect(afterPeriod.rpcCalls.some((call) => call.fn === 've_enqueue_contact_supply_batch')).toBe(false);
+
+    // Дедлайн карточки считается по часовому поясу отправки: 21:30 UTC — уже следующий день по Москве.
+    const afterDeadline = createMockSupabase({ enforceQueryWindows: true, rpcHandlers: handlers, tables: tables({ deadline: '2026-09-10' }) });
+    await expect(runProjectContactSupply({
+      portalDb: afterDeadline as never, instantlyDb: instantly as never, veProjectId: 've', now: new Date('2026-09-10T21:30:00Z'),
+    })).rejects.toThrow('Дедлайн проекта (10.09.2026) уже прошёл');
+    expect(afterDeadline.rpcCalls.some((call) => call.fn === 've_enqueue_contact_supply_batch')).toBe(false);
   });
 
   it('does not read or mutate the Portal DB without the Instantly client', async () => {

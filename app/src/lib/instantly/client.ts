@@ -88,6 +88,7 @@ async function request<T>(
     // 'pending' survives into the catch only for transport/timeout failures;
     // every explicit outcome below overwrites it before throwing/returning.
     let attemptStatus: InstantlyUsageStatus | 'pending' = 'pending';
+    let transportStarted = false;
     if (isEmailList) {
       await reserveInstantlyEmailRead(resolveInstantlyAccountId(requestOptions?.accountId),
         requestOptions?.requestPriority ?? 'fresh', emailReadDeadline, requestOptions?.consumer ?? 'unspecified');
@@ -95,6 +96,7 @@ async function request<T>(
     const headers: HeadersInit = { Authorization: `Bearer ${apiKey}` };
     const controller = new AbortController();
     const remainingTimeoutMs = emailReadDeadline === undefined ? timeoutMs : Math.max(1, emailReadDeadline - Date.now());
+    const attemptDeadline = Date.now() + remainingTimeoutMs;
     const timeoutId = setTimeout(() => controller.abort(), remainingTimeoutMs);
     const timeoutIncludesBody = isEmailList || requestOptions?.timeoutIncludesBody === true;
     const init: RequestInit = { method: options.method ?? 'GET', headers, signal: controller.signal };
@@ -110,7 +112,11 @@ async function request<T>(
       // network error is ambiguous: the provider may already have applied the
       // request. The hook is intentionally write-ahead and may fire again on
       // a 429 retry; callers must make their record idempotent.
-      requestOptions?.onRequestAttempt?.();
+      await requestOptions?.onRequestAttempt?.();
+      // A suspended process may resume before its overdue timer callback runs.
+      if (Date.now() >= attemptDeadline) controller.abort();
+      controller.signal.throwIfAborted();
+      transportStarted = true;
       const res = await fetch(url.toString(), init);
       if (timeoutIncludesBody) controller.signal.throwIfAborted();
       // Existing callers keep their original headers-only timeout. Recovery
@@ -156,7 +162,7 @@ async function request<T>(
       attemptStatus = 'ok';
       return body;
     } catch (error) {
-      if (attemptStatus === 'pending') {
+      if (attemptStatus === 'pending' && transportStarted) {
         attemptStatus = error instanceof InstantlyApiError ? 'http_error' : 'network_error';
       }
       throw error;
@@ -436,6 +442,30 @@ function normalizeBulkLeadImportResult(
   };
 }
 
+/** Billing is a preflight hint; the import response remains authoritative under concurrent uploads. */
+export async function getWorkspaceContactCapacity(requestOptions?: InstantlyRequestOptions): Promise<{
+  limit: number; used: number; remaining: number;
+} | null> {
+  let raw: { subscriptions?: { outreach?: { total_lead_limit?: unknown; current_lead_count?: unknown } } };
+  try {
+    raw = await request('/workspace-billing/plan-details', {}, {
+      ...requestOptions, timeoutMs: 10_000, timeoutIncludesBody: true, retryRateLimits: false,
+    });
+  } catch (error) {
+    // Existing keys may not grant workspace_billing:read. Do not change their
+    // permissions or confuse an unavailable preflight with an exhausted plan.
+    // A read outage is also inconclusive; the upload response remains authoritative.
+    if (!(error instanceof InstantlyApiError) || [403, 404, 429].includes(error.status) || error.status >= 500) return null;
+    throw error;
+  }
+  const plan = raw?.subscriptions?.outreach;
+  const limit = plan?.total_lead_limit;
+  const used = plan?.current_lead_count;
+  if (typeof limit !== 'number' || typeof used !== 'number' || !Number.isSafeInteger(limit)
+    || !Number.isSafeInteger(used) || limit < 0 || used < 0) return null;
+  return { limit, used, remaining: Math.max(0, limit - used) };
+}
+
 export async function createLeads(
   leads: LeadCreatePayload[],
   options?: {
@@ -504,6 +534,8 @@ export async function createLeads(
 
 export async function listLeads(body: {
   campaign_id?: string;
+  /** Exact email filter used for durable upload reconciliation. */
+  contacts?: string[];
   lead_list_id?: string;
   search?: string;
   interest_status?: number;
@@ -722,6 +754,11 @@ export async function listEmails(
      */
     lead?: string;
     search?: string;
+    /**
+     * Our mailbox that sent/received the email. Instantly v2 accepts a
+     * comma-separated list of mailboxes (GET /api/v2/emails docs).
+     */
+    eaccount?: string;
     /**
      * Per Instantly v2 docs (GET /api/v2/emails), the filter on direction is
      * `email_type` (string enum), NOT `ue_type` (which is a RESPONSE field

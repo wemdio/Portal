@@ -1,49 +1,25 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Download, Loader2, RefreshCw, Square, Trash2 } from 'lucide-react';
-import {
-  CHAIN_LABELS,
-  REASON_LABELS,
-  SOURCE_LABELS,
-  type ChainType,
-  type RuOutreachConfig,
-  type SourceCode,
-  type Stage,
-} from '@/lib/polzaRuOutreach/types';
-import { LaunchForm } from './LaunchForm';
+import { Play } from 'lucide-react';
+import type { RuOutreachConfig } from '@/lib/polzaRuOutreach/types';
+import { JobDetail, type ExportKind } from './JobDetail';
+import { JobList } from './JobList';
+import { LaunchPanel } from './LaunchPanel';
 import { Libraries } from './Libraries';
-import { Reasons, ResultsTable } from './Results';
-import { RuStages } from './Stages';
-import { API, api, downloadFile, fmtDateTime, type RuJob, type RuRow } from './shared';
+import { WorkArea } from '@/components/ui/WorkArea';
+import { API, RESULTS_PAGE, api, downloadFile, type ResultsFilter, type ResultsResponse, type RuJob } from './shared';
 
 type Tab = 'launch' | 'libraries';
-type Filter = 'ready' | 'doubtful' | 'manual_review' | 'rejected' | 'all';
-
-const FILTERS: Array<[Filter, string]> = [
-  ['ready', 'Готовые'],
-  ['doubtful', 'Очень спорные'],
-  ['manual_review', 'Ручная проверка'],
-  ['rejected', 'Отсеянные'],
-  ['all', 'Все'],
-];
-const PAGE = 50;
-
-const JOB_STATUS: Record<RuJob['status'], string> = {
-  pending: 'в очереди',
-  running: 'идёт',
-  completed: 'готов',
-  failed: 'остановлен / ошибка',
-};
 
 type Sender = { id: string; sender_name: string; sender_title: string | null; is_default: boolean; status: string };
-type ResultsResponse = {
-  items: RuRow[];
-  count: number;
-  funnel: Record<Stage, number>;
-  reason_counts: Record<string, number>;
-  status_counts: Record<string, number>;
-};
+
+/** Открытая панель запуска: `initial` не пуст, когда жмут «Повторить». */
+interface PanelState {
+  initial: Partial<RuOutreachConfig> | null;
+  /** Растёт на каждое открытие — панель пересоздаётся с новыми значениями полей. */
+  seq: number;
+}
 
 export function PolzaRuOutreachView() {
   const [tab, setTab] = useState<Tab>('launch');
@@ -52,12 +28,13 @@ export function PolzaRuOutreachView() {
   const [senders, setSenders] = useState<Sender[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<Filter>('ready');
+  const [filter, setFilter] = useState<ResultsFilter>('ready');
   const [reason, setReason] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [results, setResults] = useState<ResultsResponse | null>(null);
   const [loadingResults, setLoadingResults] = useState(false);
   const [exporting, setExporting] = useState<string | null>(null);
+  const [panel, setPanel] = useState<PanelState | null>(null);
 
   const active = useMemo(() => jobs.find((j) => j.id === activeId) ?? null, [jobs, activeId]);
   const running = active?.status === 'running' || active?.status === 'pending';
@@ -83,7 +60,7 @@ export function PolzaRuOutreachView() {
     if (!activeId) return;
     setLoadingResults(true);
     try {
-      const params = new URLSearchParams({ limit: String(PAGE), offset: String((page - 1) * PAGE) });
+      const params = new URLSearchParams({ limit: String(RESULTS_PAGE), offset: String((page - 1) * RESULTS_PAGE) });
       if (reason) params.set('reason', reason);
       else if (filter !== 'all') params.set('status', filter);
       setResults(await api<ResultsResponse>(`${API}/${activeId}/results?${params.toString()}`));
@@ -114,6 +91,8 @@ export function PolzaRuOutreachView() {
     }, 5000);
     return () => window.clearInterval(id);
   }, [running, loadJobs, loadResults]);
+
+  const openPanel = (initial: Partial<RuOutreachConfig> | null) => setPanel((prev) => ({ initial, seq: (prev?.seq ?? 0) + 1 }));
 
   const start = async (config: Partial<RuOutreachConfig>) => {
     setBusy(true);
@@ -153,7 +132,7 @@ export function PolzaRuOutreachView() {
     }
   };
 
-  const exportFile = async (kind: 'ready' | 'journal' | 'doubtful') => {
+  const exportFile = async (kind: ExportKind) => {
     if (!activeId) return;
     setExporting(kind);
     try {
@@ -164,9 +143,6 @@ export function PolzaRuOutreachView() {
       setExporting(null);
     }
   };
-
-  const totalPages = Math.max(1, Math.ceil((results?.count ?? 0) / PAGE));
-  const detail = active?.progress_detail ?? null;
 
   return (
     <div className="space-y-5">
@@ -192,199 +168,70 @@ export function PolzaRuOutreachView() {
 
       {tab === 'libraries' ? (
         <Libraries onError={setError} onSendersChanged={() => void loadSenders()} />
+      ) : jobs.length === 0 ? (
+        <div className="rounded-xl border border-gray-200 bg-white p-8 text-center shadow-sm">
+          <div className="text-base font-semibold text-gray-900">Запусков ещё не было</div>
+          <p className="mx-auto mt-1 max-w-xl text-sm text-gray-500">
+            Система соберёт компании по свежим поводам, отберёт по скорингу, найдёт почту и напишет цепочку писем. Письма не отправляются — на
+            выходе таблица и Excel.
+          </p>
+          <button
+            type="button"
+            onClick={() => openPanel(null)}
+            className="mt-4 inline-flex items-center rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700"
+          >
+            <Play className="mr-2 h-4 w-4" /> Новый запуск
+          </button>
+        </div>
       ) : (
-        <>
-          <LaunchForm busy={busy} senders={senders} onStart={start} />
+        <WorkArea
+          aside={
+            <JobList
+              jobs={jobs}
+              activeId={activeId}
+              onSelect={(id) => {
+                setActiveId(id);
+                setPage(1);
+                setReason(null);
+              }}
+              onNew={() => openPanel(null)}
+              onRepeat={(job) => openPanel(job.config ?? null)}
+              onDelete={(id) => void remove(id)}
+              onRefresh={() => void loadJobs()}
+            />
+          }
+        >
+          {active ? (
+            <JobDetail
+              job={active}
+              results={results}
+              loading={loadingResults}
+              exporting={exporting}
+              filter={filter}
+              reason={reason}
+              page={page}
+              onFilter={setFilter}
+              onReason={setReason}
+              onPage={setPage}
+              onStop={() => void stop()}
+              onExport={(kind) => void exportFile(kind)}
+            />
+          ) : (
+            <div className="rounded-xl border border-gray-200 bg-white p-6 text-sm text-gray-500 shadow-sm">Выберите запуск слева.</div>
+          )}
+        </WorkArea>
+      )}
 
-          <div className="grid grid-cols-1 items-start gap-6 xl:grid-cols-[380px_minmax(0,1fr)]">
-            <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-              <div className="mb-2 flex items-center justify-between">
-                <div className="text-sm font-semibold text-gray-900">Запуски</div>
-                <button type="button" onClick={() => void loadJobs()} className="rounded-md p-1 text-gray-500 hover:bg-gray-100" aria-label="Обновить">
-                  <RefreshCw className="h-4 w-4" />
-                </button>
-              </div>
-              {jobs.length === 0 ? (
-                <div className="text-sm text-gray-500">Запусков ещё не было.</div>
-              ) : (
-                <div className="max-h-[70vh] divide-y divide-gray-100 overflow-y-auto">
-                  {jobs.map((j) => (
-                    <div
-                      key={j.id}
-                      onClick={() => {
-                        setActiveId(j.id);
-                        setPage(1);
-                        setReason(null);
-                      }}
-                      className={`flex cursor-pointer items-center justify-between gap-3 px-2 py-2 text-sm ${j.id === activeId ? 'bg-violet-50' : 'hover:bg-gray-50'}`}
-                    >
-                      <div className="min-w-0">
-                        <span className="font-medium text-gray-900">Запуск на {j.config?.limit ?? '—'}</span>
-                        <span className="ml-2 text-xs text-gray-500">{fmtDateTime(j.created_at)}</span>
-                        <span className="ml-2 text-xs text-gray-500">
-                          готово {j.total_parsed ?? 0} из {j.config?.limit ?? '—'} · просмотрено {j.total_found ?? 0}
-                        </span>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-2">
-                        <span className="text-xs text-gray-500">{JOB_STATUS[j.status]}</span>
-                        {j.status !== 'running' && j.status !== 'pending' && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void remove(j.id);
-                            }}
-                            className="rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-600"
-                            aria-label="Удалить запуск"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div className="min-w-0 space-y-4">
-              {!active ? (
-                <div className="rounded-xl border border-gray-200 bg-white p-6 text-sm text-gray-500">Выберите запуск слева или запустите новый.</div>
-              ) : (
-                <>
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="text-sm text-gray-700">
-                      <b>Запуск</b> · {JOB_STATUS[active.status]}
-                      {running && <> · {active.progress_percent ?? 0}% · в пуле {detail?.pool ?? '…'} компаний</>}
-                      {detail?.doubtful ? ` · очень спорных ${detail.doubtful}` : ''}
-                      {detail?.stop_reason === 'pool_exhausted' && ' · кандидаты закончились раньше лимита'}
-                      {detail?.stop_reason === 'scan_limit' && ' · достигнут потолок просмотра'}
-                      {active.status === 'failed' && active.error_message ? ` · ${active.error_message}` : ''}
-                    </div>
-                    <div className="flex gap-2">
-                      {running && (
-                        <button type="button" onClick={stop} className="inline-flex items-center rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50">
-                          <Square className="mr-1.5 h-4 w-4" /> Остановить
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        disabled={exporting !== null}
-                        onClick={() => void exportFile('ready')}
-                        className="inline-flex items-center rounded-lg bg-violet-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50"
-                      >
-                        {exporting === 'ready' ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Download className="mr-1.5 h-4 w-4" />}
-                        Excel: готовые
-                      </button>
-                      <button
-                        type="button"
-                        disabled={exporting !== null}
-                        onClick={() => void exportFile('doubtful')}
-                        className="inline-flex items-center rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                      >
-                        {exporting === 'doubtful' ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Download className="mr-1.5 h-4 w-4" />}
-                        Excel: очень спорные
-                      </button>
-                      <button
-                        type="button"
-                        disabled={exporting !== null}
-                        onClick={() => void exportFile('journal')}
-                        className="inline-flex items-center rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                      >
-                        {exporting === 'journal' ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Download className="mr-1.5 h-4 w-4" />}
-                        Excel: журнал
-                      </button>
-                    </div>
-                  </div>
-
-                  {detail?.source_errors && Object.keys(detail.source_errors).length > 0 && (
-                    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                      Источники с ошибкой (запуск шёл без них):{' '}
-                      {Object.entries(detail.source_errors).map(([code, msg]) => `${SOURCE_LABELS[code as SourceCode] ?? code}: ${msg}`).join(' · ')}
-                    </div>
-                  )}
-
-                  {detail?.chains && Object.keys(detail.chains).length > 0 && (
-                    <div className="flex flex-wrap gap-2 text-xs">
-                      <span className="text-gray-500">Цепочки после скоринга:</span>
-                      {Object.entries(detail.chains).map(([c, n]) => (
-                        <span key={c} className="rounded-full bg-violet-50 px-2 py-0.5 text-violet-700">
-                          {CHAIN_LABELS[c as ChainType] ?? c}: {n}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-
-                  {detail?.sdr && detail.sdr.any_sales_vacancy > 0 && (
-                    <p className="text-xs text-gray-500">
-                      Вакансии продаж: у {detail.sdr.any_sales_vacancy} компаний. В SDR-цепочку — {detail.sdr.strict_sdr}{' '}
-                      (роль SDR/BDR и холодный поиск новых B2B-клиентов), остальные {detail.sdr.broad_to_general_queue} идут
-                      по другим поводам.
-                    </p>
-                  )}
-
-                  <RuStages
-                    jobId={active.id}
-                    funnel={results?.funnel ?? null}
-                    run={{ running, failed: active.status === 'failed' }}
-                    error={active.error_message}
-                  />
-
-                  <Reasons
-                    reasons={results?.reason_counts ?? null}
-                    onReason={(code) => {
-                      setReason(code);
-                      setPage(1);
-                    }}
-                  />
-
-                  <div className="flex flex-wrap items-center gap-2">
-                    {FILTERS.map(([f, l]) => (
-                      <button
-                        key={f}
-                        type="button"
-                        onClick={() => {
-                          setFilter(f);
-                          setReason(null);
-                          setPage(1);
-                        }}
-                        className={`rounded-full px-3 py-1 text-sm ${!reason && filter === f ? 'bg-violet-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
-                      >
-                        {l}
-                        {f !== 'all' && results?.status_counts?.[f] != null ? ` · ${results.status_counts[f]}` : ''}
-                      </button>
-                    ))}
-                    {reason && (
-                      <span className="rounded-full bg-amber-100 px-3 py-1 text-sm text-amber-800">
-                        Причина: {REASON_LABELS[reason] ?? reason}
-                        <button type="button" className="ml-2 text-amber-900" onClick={() => setReason(null)}>
-                          ×
-                        </button>
-                      </span>
-                    )}
-                    {loadingResults && <Loader2 className="h-4 w-4 animate-spin text-gray-400" />}
-                  </div>
-
-                  <ResultsTable rows={results?.items ?? []} />
-
-                  {totalPages > 1 && (
-                    <div className="flex items-center justify-end gap-2 text-sm">
-                      <button type="button" disabled={page <= 1} onClick={() => setPage(page - 1)} className="rounded border px-2 py-1 disabled:opacity-40">
-                        ←
-                      </button>
-                      <span className="text-gray-600">
-                        {page} / {totalPages}
-                      </span>
-                      <button type="button" disabled={page >= totalPages} onClick={() => setPage(page + 1)} className="rounded border px-2 py-1 disabled:opacity-40">
-                        →
-                      </button>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
-        </>
+      {panel && (
+        <LaunchPanel
+          key={panel.seq}
+          open
+          busy={busy}
+          senders={senders}
+          initial={panel.initial}
+          onClose={() => setPanel(null)}
+          onStart={(config) => void start(config)}
+        />
       )}
     </div>
   );

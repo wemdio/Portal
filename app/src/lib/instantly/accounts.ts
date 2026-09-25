@@ -48,7 +48,7 @@ export interface InstantlyRequestOptions {
    * Internal write-ahead hook fired immediately before each provider fetch.
    * Callers use it to distinguish preflight failures from an ambiguous POST.
    */
-  onRequestAttempt?: () => void;
+  onRequestAttempt?: () => void | Promise<void>;
 }
 
 type RawAccount = {

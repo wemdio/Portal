@@ -6,7 +6,9 @@
  * verifies campaign ownership first, asks the DB for one frozen daily batch,
  * fences every provider attempt, and persists exact accepted/uncertain row ids.
  * `projects/project_periods.contacts_done` remains the fulfillment fact; an
- * accepted upload here is only a technical delivery event.
+ * accepted upload here is only a technical delivery event. A plan bound to a
+ * Portal project without periods uses the project card as its term and the
+ * first-contacted count of its own campaigns as the plan fact.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -17,6 +19,8 @@ import {
   type AppendLeadsResult,
 } from '@/lib/clientLaunch/appendLeads';
 import {
+  checkCampaignProjectOwnershipConflicts,
+  claimCampaignProjectOwnership,
   reservePeriodCampaignLinks,
   type CampaignProjectOwnershipResult,
   type PeriodCampaignReservation,
@@ -25,6 +29,13 @@ import type { LeadCreatePayload } from '@/lib/instantly/types';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { loadVeContactDeliveryCampaignInventory } from './contactDeliveryInventory';
 import { activateDeliveredContactCampaigns } from './contactDeliveryActivation';
+import {
+  claimProjectCampaignLinks,
+  describeOwnershipConflicts,
+  describePortalProjectTerm,
+  loadPortalProjectTerm,
+  localIsoDate,
+} from './portalDeliveryTerm';
 
 interface BoundVeProject {
   id: string;
@@ -53,6 +64,7 @@ interface DeliveryBatch {
 }
 
 type ReserveStatus =
+  | 'capacity_blocked'
   | 'reserved'
   | 'replayed'
   | 'not_scheduled'
@@ -83,9 +95,13 @@ export interface ContactDeliveryRunnerDeps {
   ) => Promise<CampaignProjectOwnershipResult>;
   appendLeads: typeof appendLeadsToClientCampaign;
   createAttemptId: () => string;
+  /** Plans without a period own campaigns through the legacy project link. */
+  checkCampaignProjectOwnershipConflicts?: typeof checkCampaignProjectOwnershipConflicts;
+  claimCampaignProjectOwnership?: typeof claimCampaignProjectOwnership;
 }
 
 export type ContactDeliveryDayStatus =
+  | 'capacity_blocked'
   | 'completed'
   | 'uncertain'
   | 'failed'
@@ -109,6 +125,8 @@ const DEFAULT_DEPS: ContactDeliveryRunnerDeps = {
   reservePeriodCampaignLinks,
   appendLeads: appendLeadsToClientCampaign,
   createAttemptId: randomUUID,
+  checkCampaignProjectOwnershipConflicts,
+  claimCampaignProjectOwnership,
 };
 
 function asObject(value: unknown): Record<string, unknown> | null {
@@ -149,6 +167,7 @@ function parseReservation(data: unknown): DeliveryReservation {
   const status = row?.status;
   if (
     status !== 'reserved' &&
+    status !== 'capacity_blocked' &&
     status !== 'replayed' &&
     status !== 'not_scheduled' &&
     status !== 'fulfilled' &&
@@ -193,14 +212,16 @@ function classifyAppendResult(
   const attempted = new Set(attemptedIndexes);
   const knownSkippedIndexes = normalizeIndexes(result.skippedIndexes ?? [], rowIds.length);
   const knownSkipped = new Set(knownSkippedIndexes);
+  const deferred = new Set(normalizeIndexes(result.deferredIndexes ?? [], rowIds.length));
+  if ([...deferred].some((index) => knownSkipped.has(index))) throw new Error('append deferred a permanently skipped contact');
   const skipped = knownSkippedIndexes.map((index) => rowIds[index]);
-  const released = rowIds.filter((_, index) => !attempted.has(index) && !knownSkipped.has(index));
+  const released = rowIds.filter((_, index) => deferred.has(index) || (!attempted.has(index) && !knownSkipped.has(index)));
 
   if (!result.identityComplete || result.acceptedIndexes === null) {
     return {
       accepted: [],
       skipped,
-      uncertain: attemptedIndexes.filter((index) => !knownSkipped.has(index)).map((index) => rowIds[index]),
+      uncertain: attemptedIndexes.filter((index) => !knownSkipped.has(index) && !deferred.has(index)).map((index) => rowIds[index]),
       released,
       error: ambiguous ? 'provider outcome is ambiguous' : 'provider identity is incomplete',
     };
@@ -210,13 +231,13 @@ function classifyAppendResult(
   if (acceptedIndexes.some((index) => !attempted.has(index))) {
     throw new Error('append accepted a contact whose provider request was not attempted');
   }
-  if (acceptedIndexes.some((index) => knownSkipped.has(index))) {
+  if (acceptedIndexes.some((index) => knownSkipped.has(index) || deferred.has(index))) {
     throw new Error('append classified the same contact as both accepted and skipped');
   }
   const acceptedSet = new Set(acceptedIndexes);
   const accepted = acceptedIndexes.map((index) => rowIds[index]);
   const remainder = attemptedIndexes
-    .filter((index) => !acceptedSet.has(index) && !knownSkipped.has(index))
+    .filter((index) => !acceptedSet.has(index) && !knownSkipped.has(index) && !deferred.has(index))
     .map((index) => rowIds[index]);
   return {
     accepted,
@@ -231,12 +252,14 @@ async function loadPreflight(
   portalDb: SupabaseClient,
   instantlyDb: SupabaseClient,
   veProjectId: string,
+  now: Date,
 ): Promise<{
   project: BoundVeProject;
-  period: ActivePeriod;
+  period: ActivePeriod | null;
   clientUserId: string;
   observedFirstContacted: number;
   instantlyAccountId: string;
+  activeCampaignIds: string[];
   links: PeriodCampaignReservation[];
 }> {
   const { data: projectData, error: projectError } = await portalDb
@@ -251,7 +274,6 @@ async function loadPreflight(
   if (
     !project ||
     !project.portal_project_id ||
-    !project.portal_period_id ||
     !project.launch_preset_id ||
     !nonEmptyString(project.launch_instantly_account_id) ||
     !Number.isSafeInteger(project.target_contacts) ||
@@ -260,17 +282,31 @@ async function loadPreflight(
     throw new Error('VE2 delivery plan is not explicitly bound');
   }
 
-  const { data: periodData, error: periodError } = await portalDb
-    .from('project_periods')
-    .select('id, project_id, status, contacts_done, deadline')
-    .eq('id', project.portal_period_id)
-    .eq('project_id', project.portal_project_id)
-    .eq('status', 'active')
-    .maybeSingle();
-  if (periodError) throw new Error(`delivery period read failed: ${periodError.message}`);
-  const period = periodData as ActivePeriod | null;
-  if (!period) throw new Error('bound Portal project period is not active');
+  let period: ActivePeriod | null = null;
+  if (project.portal_period_id) {
+    const { data: periodData, error: periodError } = await portalDb
+      .from('project_periods')
+      .select('id, project_id, status, contacts_done, deadline')
+      .eq('id', project.portal_period_id)
+      .eq('project_id', project.portal_project_id)
+      .eq('status', 'active')
+      .maybeSingle();
+    if (periodError) throw new Error(`delivery period read failed: ${periodError.message}`);
+    period = periodData as ActivePeriod | null;
+    if (!period) throw new Error('bound Portal project period is not active');
+  } else {
+    // Stop before ownership and reservation when the project card no longer
+    // authorizes delivery; the reason is the specialist-facing text.
+    const { project: portalProject, periods } = await loadPortalProjectTerm(portalDb, project.portal_project_id);
+    if (!portalProject) throw new Error('Проект Portal не найден. Загрузка новых контактов остановлена.');
+    const term = describePortalProjectTerm(portalProject, periods, {
+      bound: true,
+      today: localIsoDate(now, project.delivery_timezone?.trim() || 'Europe/Moscow'),
+    });
+    if (!term.ok) throw new Error(term.error);
+  }
 
+  const periodId = period?.id ?? null;
   const inventory = await loadVeContactDeliveryCampaignInventory(portalDb, instantlyDb, veProjectId);
   if (inventory.activeCampaignIds.length === 0) throw new Error('VE2 project has no active launch bundle');
 
@@ -297,8 +333,9 @@ async function loadPreflight(
     clientUserId,
     observedFirstContacted: inventory.observedFirstContacted,
     instantlyAccountId,
-    links: inventory.activeCampaignIds.map((campaignId) => ({
-      periodId: period.id,
+    activeCampaignIds: inventory.activeCampaignIds,
+    links: !periodId ? [] : inventory.activeCampaignIds.map((campaignId) => ({
+      periodId,
       campaignId,
       matchSource: 'manual',
       baselineContacts: 0,
@@ -317,7 +354,8 @@ async function finalizeAttempt(
     outcome: AttemptFinalizeInput;
   },
 ): Promise<void> {
-  const { error } = await portalDb.rpc('ve_finalize_contact_delivery_attempt', {
+  const { error } = await portalDb.rpc(input.outcome.error === 'INSTANTLY_CONTACT_CAPACITY'
+    ? 've_finalize_contact_delivery_capacity' : 've_finalize_contact_delivery_attempt', {
     p_run_id: input.runId,
     p_attempt_id: input.attemptId,
     p_campaign_id: input.campaignId,
@@ -338,19 +376,35 @@ export async function runContactDeliveryDay(input: {
   deps?: ContactDeliveryRunnerDeps;
 }): Promise<ContactDeliveryDayResult> {
   const deps = input.deps ?? DEFAULT_DEPS;
-  const preflight = await loadPreflight(input.portalDb, input.instantlyDb, input.veProjectId);
+  const preflight = await loadPreflight(input.portalDb, input.instantlyDb, input.veProjectId, input.now ?? new Date());
 
   // Cross-database ownership is established before the main DB can expose a
   // provider batch. A conflict therefore cannot consume or strand drip rows.
-  const ownership = await deps.reservePeriodCampaignLinks(
-    input.instantlyDb,
-    preflight.project.portal_project_id as string,
-    preflight.links,
-  );
-  if (ownership.status === 'conflict') {
-    throw new Error(
-      `delivery campaign ownership conflict: ${ownership.conflictingProjectIds.join(', ')}`,
+  if (preflight.period) {
+    const ownership = await deps.reservePeriodCampaignLinks(
+      input.instantlyDb,
+      preflight.project.portal_project_id as string,
+      preflight.links,
     );
+    if (ownership.status === 'conflict') {
+      throw new Error(
+        `delivery campaign ownership conflict: ${ownership.conflictingProjectIds.join(', ')}`,
+      );
+    }
+  } else {
+    const conflicts = await claimProjectCampaignLinks(
+      input.instantlyDb,
+      preflight.project.portal_project_id as string,
+      preflight.activeCampaignIds,
+      `Vertical Engine v2 delivery · ${input.veProjectId}`,
+      {
+        check: deps.checkCampaignProjectOwnershipConflicts,
+        claim: deps.claimCampaignProjectOwnership,
+      },
+    );
+    if (conflicts.length > 0) {
+      throw new Error(`delivery campaign ownership conflict: ${describeOwnershipConflicts(conflicts)}`);
+    }
   }
 
   const { data: reserveData, error: reserveError } = await input.portalDb.rpc(
@@ -386,11 +440,12 @@ export async function runContactDeliveryDay(input: {
   let skipped = 0;
   let uncertain = 0;
   const errors: string[] = [];
+  let capacityBlocked = false;
 
   for (const batch of reservation.batches) {
     const attemptId = deps.createAttemptId();
     const { data: markData, error: markError } = await input.portalDb.rpc(
-      've_mark_contact_delivery_attempt',
+      've_begin_recoverable_contact_delivery',
       {
         p_run_id: reservation.run_id,
         p_attempt_id: attemptId,
@@ -402,6 +457,7 @@ export async function runContactDeliveryDay(input: {
     if (!parseMarked(markData)) continue;
 
     let outcome: AttemptFinalizeInput;
+    let receivedResult = false;
     try {
       const appendResult = await deps.appendLeads({
         userId: preflight.clientUserId,
@@ -414,28 +470,39 @@ export async function runContactDeliveryDay(input: {
         skipIfInCampaign: false,
         entitlementMode: 'managed_contract',
         expectedInstantlyAccountId: preflight.instantlyAccountId,
+        pauseOnWorkspaceCapacity: true,
+        beforeProviderRequest: async () => {
+          const { data, error } = await input.portalDb.rpc('ve_renew_contact_delivery_request', {
+            p_run_id: reservation.run_id, p_attempt_id: attemptId,
+          });
+          if (error || data !== true) throw new Error(error?.message ?? 'Delivery attempt lease expired');
+        },
         ledgerSource: {
           kind: 've2_contact_delivery',
           runId: reservation.run_id,
           campaignName: batch.campaign_id,
         },
       });
+      receivedResult = true;
       outcome = classifyAppendResult(batch.row_ids, appendResult, false);
+      capacityBlocked = appendResult.capacityBlocked === true;
     } catch (error) {
       if (error instanceof AppendLeadsPartialError) {
         outcome = classifyAppendResult(batch.row_ids, error.partialResult, true);
+        capacityBlocked = error.partialResult.capacityBlocked === true;
         outcome.error = error.message.slice(0, 500);
       } else {
         outcome = {
           accepted: [],
           skipped: [],
-          uncertain: [],
-          released: [...batch.row_ids],
+          uncertain: receivedResult ? [...batch.row_ids] : [],
+          released: receivedResult ? [] : [...batch.row_ids],
           error: (error instanceof Error ? error.message : String(error)).slice(0, 500),
         };
       }
       errors.push(outcome.error ?? 'delivery append failed');
     }
+    if (capacityBlocked) outcome.error = 'INSTANTLY_CONTACT_CAPACITY';
 
     await finalizeAttempt(input.portalDb, {
       runId: reservation.run_id,
@@ -446,6 +513,9 @@ export async function runContactDeliveryDay(input: {
     accepted += outcome.accepted.length;
     skipped += outcome.skipped.length;
     uncertain += outcome.uncertain.length;
+    // Untouched sibling batches remain reserved. Explicit retry can resume
+    // them after a crash as well, without creating fake provider attempts.
+    if (capacityBlocked) break;
   }
 
   const activation = await activateDeliveredContactCampaigns({
@@ -453,7 +523,8 @@ export async function runContactDeliveryDay(input: {
   });
   errors.push(...activation.errors);
   return {
-    status: uncertain > 0 || activation.errors.length > 0 ? 'uncertain' : errors.length > 0 ? 'failed' : 'completed',
+    status: uncertain > 0 || activation.errors.length > 0 ? 'uncertain' : capacityBlocked ? 'capacity_blocked'
+      : errors.length > 0 ? 'failed' : 'completed',
     runId: reservation.run_id,
     runDate: reservation.run_date,
     accepted,

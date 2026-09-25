@@ -12,6 +12,8 @@ export interface MailboxDto {
   google_state: 'active' | 'suspended' | 'missing' | null;
   /** Админ Workspace, из чьего каталога пришёл ящик. */
   google_account: string | null;
+  /** Адрес отправки, за которым закреплён ящик; null — выдаётся автоматически. */
+  egress_ip: string | null;
   email: string;
   display_name: string | null;
   username: string;
@@ -195,6 +197,8 @@ export function fetchMailboxes(
     tagIds?: string[];
     /** Вдобавок к tagIds показывать ящики без тега. */
     noTag?: boolean;
+    /** Только ящики этого адреса отправки; 'none' — ящики без адреса. */
+    egressIp?: string;
   } = {},
 ) {
   const query = new URLSearchParams({ page: String(params.page ?? 1) });
@@ -202,6 +206,7 @@ export function fetchMailboxes(
   if (params.pageSize) query.set('pageSize', String(params.pageSize));
   if (params.tagIds?.length) query.set('tagIds', params.tagIds.join(','));
   if (params.noTag) query.set('noTag', '1');
+  if (params.egressIp) query.set('egressIp', params.egressIp);
   return authFetchJson<{ mailboxes: MailboxDto[]; total: number }>(
     `${BASE}/mailboxes?${query.toString()}`,
   );
@@ -288,6 +293,41 @@ export function bulkMailboxes(ids: string[], action: BulkMailboxAction, tagId?: 
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ids, action, ...(action === 'tag' ? { tagId: tagId ?? null } : {}) }),
+  });
+}
+
+/** Адрес отправки: с него выходит в интернет свой воркер. */
+export interface EgressIpDto {
+  ip: string;
+  host: string;
+  acceptsNew: boolean;
+  /** online — воркер на связи; silent — давно не выходил; error — выходит в интернет не с того адреса. */
+  state: 'online' | 'silent' | 'error';
+  lastSeenAt: string | null;
+  lastError: string | null;
+  mailboxes: number;
+  enabledMailboxes: number;
+  sentToday: number;
+}
+
+export function fetchEgressIps() {
+  return authFetchJson<{ ips: EgressIpDto[]; unassigned: number }>(`${BASE}/egress`);
+}
+
+export function setEgressAcceptsNew(ip: string, acceptsNew: boolean) {
+  return authFetchJson<{ ok: true }>(`${BASE}/egress`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ip, acceptsNew }),
+  });
+}
+
+/** Перенести выбранные ящики на другой адрес отправки. */
+export function moveMailboxes(ids: string[], egressIp: string) {
+  return authFetchJson<{ ok: true; affected: number }>(`${BASE}/mailboxes`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids, action: 'move', egressIp }),
   });
 }
 

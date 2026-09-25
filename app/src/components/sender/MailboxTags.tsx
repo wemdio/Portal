@@ -19,8 +19,8 @@ import { SenderModal } from './SenderModal';
  * метку было бы нечем.
  */
 
-/** Закрытие по клику мимо и по Esc — общее для обоих меню. */
-function useDismiss(open: boolean, close: () => void) {
+/** Закрытие по клику мимо и по Esc — общее для выпадающих меню вкладки. */
+export function useDismiss(open: boolean, close: () => void) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;

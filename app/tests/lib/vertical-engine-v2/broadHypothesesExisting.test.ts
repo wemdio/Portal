@@ -9,6 +9,9 @@
  * 12 вертикалей, базы у «Платных клиник», «Репродукции», «Диагностики» и
  * «Медицинских франшиз», широких нет.
  */
+import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import path from 'node:path';
 import { createMockSupabase, type MockSupabaseClient, type Row } from '@/../tests/helpers/mockSupabase';
 import type { VeJob } from '@/lib/verticalEngineV2/types';
 
@@ -28,7 +31,7 @@ import {
   type HypothesesPromptInput,
 } from '@/lib/verticalEngineV2/prompts/hypotheses';
 import { BROAD_HYPOTHESES_RULES_EN, buildHypothesesInstantMessagesEn } from '@/lib/verticalEngineV2/prompts/hypotheses.en';
-import { VeBroadHypothesesOnlySchema } from '@/lib/verticalEngineV2/schemas';
+import { VeBroadHypothesesOnlySchema, VeHypothesesBatchSchema } from '@/lib/verticalEngineV2/schemas';
 import { VE_BROAD_RESEARCH_BUSY_TEXT, selectNewBroadCandidates, veBroadTitleKey } from '@/lib/verticalEngineV2/broadHypotheses';
 import {
   VE_BROAD_ADD_LABEL,
@@ -101,14 +104,13 @@ const MODEL_ANSWER = {
     sector('Аптечные сети'), // название вертикали и гипотезы проекта
     sector('телемедицина '), // та же вертикаль в другом регистре
     sector('«Частная  медицина»'), // повтор внутри ответа
-    { title: 'Фармацевтика', description: 'Аптеки и дистрибьюторы.' }, // неполная — отбрасывается разбором
     sector('Ветеринария', 45),
     sector('Фитнес и велнес', 40),
   ],
 };
 
-function job(): VeJob {
-  return { id: 'job-broad', project_id: PROJECT, stage: 'broad_hypotheses', status: 'running', payload: {}, result: null,
+function job(id = 'job-broad'): VeJob {
+  return { id, project_id: PROJECT, stage: 'broad_hypotheses', status: 'running', payload: {}, result: null,
     attempts: 0, error: null, started_at: null, tokens_used: 0, cost_usd: 0, created_at: '', updated_at: '' };
 }
 
@@ -117,37 +119,37 @@ function snapshot(db: MockSupabaseClient) {
     .map((table) => [table, JSON.parse(JSON.stringify(db.getRows(table)))]));
 }
 
-/**
- * Перехват вставок в таблицу: hook видит строки вставки и может вернуть
- * ошибку базы (тогда ничего не пишется). Остальные запросы — как есть.
- */
-function withInsertHook(
-  db: MockSupabaseClient,
-  table: string,
-  hook: (rows: Row[]) => { code: string; message: string } | null,
-): MockSupabaseClient {
-  return new Proxy(db, {
-    get(target, prop, receiver) {
-      if (prop !== 'from') return Reflect.get(target, prop, receiver);
-      return (name: string) => {
-        const builder = target.from(name);
-        if (name !== table) return builder;
-        const insert = builder.insert.bind(builder);
-        builder.insert = (rows: Row | Row[]) => {
-          const error = hook(Array.isArray(rows) ? rows : [rows]);
-          if (!error) return insert(rows);
-          const failed = { data: null, error };
-          const chain = {
-            select: () => chain,
-            single: async () => failed,
-            then: (resolve: (v: typeof failed) => unknown, reject?: (e: unknown) => unknown) => Promise.resolve(failed).then(resolve, reject),
-          };
-          return chain as never;
-        };
-        return builder;
-      };
+// Unit adapter models only the RPC response/storage boundary. Transaction,
+// rollback and database guards are exercised against real SQL below.
+function broadDb(tables = seedTables(), options: { error?: string; loseReply?: boolean; afterCommit?: () => void } = {}) {
+  return createMockSupabase({ tables, rpcHandlers: {
+    ve_commit_broad_hypotheses: async (params, db) => {
+      if (options.error) return { data: null, error: { message: options.error } };
+      const added = [];
+      for (const c of params.p_candidates as Row[]) {
+        const verticalId = randomUUID();
+        const hypothesisId = randomUUID();
+        await db.from('ve_verticals').insert({ id: verticalId, project_id: PROJECT, name: c.title,
+          summary: c.description, synonyms: [c.title], potential_pct: Math.min(95, Number(c.potential_pct)),
+          rank: Math.max(db.getRows('ve_verticals').length, ...db.getRows('ve_verticals').map((v) => Number(v.rank ?? 0))) + 1 });
+        await db.from('ve_hypotheses').insert({ id: hypothesisId, project_id: PROJECT, vertical_id: verticalId,
+          tier: 1, title: c.title, description: c.description, fit_rationale: c.fit_rationale,
+          evidence: [], seasonality: null, potential_pct: c.potential_pct, status: 'proposed', broad: true });
+        added.push({ title: c.title, hypothesis_id: hypothesisId, vertical_id: verticalId });
+      }
+      const result = { broad_hypotheses_committed: true, added, duplicates: params.p_duplicates,
+        requested: params.p_requested, tokensUsed: params.p_tokens_used, costUsd: params.p_cost_usd };
+      await db.from('ve_jobs').update({ result }).eq('id', params.p_job_id);
+      options.afterCommit?.();
+      return options.loseReply ? { data: null, error: { message: 'response lost after commit' } } : { data: result };
     },
-  });
+  } });
+}
+
+async function nextJob(db: MockSupabaseClient): Promise<VeJob> {
+  const next = job(randomUUID());
+  await db.from('ve_jobs').insert(next as unknown as Row);
+  return next;
 }
 
 function llmReturns(data: unknown) {
@@ -164,17 +166,17 @@ afterAll(() => { delete process.env.VE_MODEL_RESEARCH; });
 
 describe('VE2 stage broad_hypotheses on an existing project', () => {
   it('adds only new broad hypotheses with their own verticals and leaves everything else untouched', async () => {
-    const db = createMockSupabase({ tables: seedTables() });
+    const db = broadDb();
     const before = snapshot(db);
     llmReturns(MODEL_ANSWER);
 
     const out = await runVeStage(job(), { supabase: db as never, market: 'ru' });
 
-    // Один вызов модели стадии hypotheses; модели показан основной список проекта.
+    // Модели research показан основной список проекта.
     expect(mockCallLLMWithSchema).toHaveBeenCalledTimes(1);
     const [messages, schema, opts] = mockCallLLMWithSchema.mock.calls[0];
     expect(schema).toBe(VeBroadHypothesesOnlySchema);
-    expect(opts).toMatchObject({ model: 'test/research-model' });
+    expect(opts).toMatchObject({ model: 'test/research-model', requireCompleteJson: true });
     const user = (messages as Array<{ content: string }>)[1].content;
     expect(user).toContain('- Платные клиники: Сети частных клиник; Стоматологические клиники');
     expect(user).toContain('- Аптечные сети: Аптечные сети');
@@ -213,69 +215,106 @@ describe('VE2 stage broad_hypotheses on an existing project', () => {
   });
 
   it('a repeat after completion does not duplicate the same sectors, and a full project does not call the model', async () => {
-    const db = createMockSupabase({ tables: seedTables() });
+    const db = broadDb();
     llmReturns(MODEL_ANSWER);
     await runVeStage(job(), { supabase: db as never, market: 'ru' });
     const afterFirst = snapshot(db);
 
     // Повторное нажатие: модель снова предлагает те же секторы.
-    const repeat = await runVeStage(job(), { supabase: db as never, market: 'ru' });
+    const secondJob = await nextJob(db);
+    const repeat = await runVeStage(secondJob, { supabase: db as never, market: 'ru' });
     expect(snapshot(db)).toEqual(afterFirst);
     expect(repeat.result).toMatchObject({ added: [], requested: 2 });
     const user = (mockCallLLMWithSchema.mock.calls[1][0] as Array<{ content: string }>)[1].content;
     expect(user).toContain('ШИРОКИЕ — УЖЕ ЕСТЬ В ПРОЕКТЕ:\n- Частная медицина\n- Ветеринария\n- Фитнес и велнес');
     expect(user).toContain('до 2 НОВЫХ широких гипотез');
-    expect(db.getRows('ve_jobs').find((j) => j.id === 'job-broad')?.progress)
+    expect(db.getRows('ve_jobs').find((j) => j.id === secondJob.id)?.progress)
       .toMatchObject({ done: 0, label: 'Новых секторов не нашлось: предложенные уже есть в проекте' });
 
     // Добор до предела: ещё два новых сектора — и больше модель не зовём.
     llmReturns({ broad_hypotheses: [sector('Стоматология'), sector('Косметология'), sector('Лишний сектор')] });
-    await runVeStage(job(), { supabase: db as never, market: 'ru' });
+    await runVeStage(await nextJob(db), { supabase: db as never, market: 'ru' });
     expect(db.getRows('ve_hypotheses').filter((h) => h.broad === true).map((h) => h.title))
       .toEqual(['Частная медицина', 'Ветеринария', 'Фитнес и велнес', 'Стоматология', 'Косметология']);
     const calls = mockCallLLMWithSchema.mock.calls.length;
-    const full = await runVeStage(job(), { supabase: db as never, market: 'ru' });
+    const full = await runVeStage(await nextJob(db), { supabase: db as never, market: 'ru' });
     expect(mockCallLLMWithSchema.mock.calls.length).toBe(calls);
     expect(full).toMatchObject({ result: { added: [], reason: 'limit' }, tokensUsed: 0, costUsd: 0 });
   });
 
-  it('removes its fresh verticals when the hypothesis insert fails and does not touch existing rows', async () => {
-    const db = createMockSupabase({
-      tables: seedTables(),
-      errorInserts: { ve_hypotheses: { code: '23514', message: 'new row violates check constraint' } },
-    });
+  it('fails on an RPC error without falling back to separate writes', async () => {
+    const db = broadDb(seedTables(), { error: 'transaction rolled back' });
     const before = snapshot(db);
     llmReturns(MODEL_ANSWER);
-    await expect(runVeStage(job(), { supabase: db as never, market: 'ru' })).rejects.toThrow('ve_hypotheses insert');
+    await expect(runVeStage(job(), { supabase: db as never })).rejects.toThrow('transaction rolled back');
     expect(snapshot(db)).toEqual(before);
+    expect(db.inserts).toEqual([]);
   });
 
-  it('leaves no part of the sectors behind when writing fails after the first one', async () => {
-    const db = createMockSupabase({ tables: seedTables() });
-    const before = snapshot(db);
+  it('recovers a lost commit response without another model call, rows or lost usage', async () => {
+    const db = broadDb(seedTables(), { loseReply: true });
     llmReturns(MODEL_ANSWER);
-    // Сбой базы на записи второго сектора: первый уже мог лечь.
-    let rows = 0;
-    const flaky = withInsertHook(db, 've_hypotheses', (payload) => {
-      rows += payload.length;
-      return rows > 1 ? { code: '57014', message: 'canceling statement due to statement timeout' } : null;
-    });
-    await expect(runVeStage(job(), { supabase: flaky as never, market: 'ru' })).rejects.toThrow('ve_hypotheses insert');
-    expect(snapshot(db)).toEqual(before);
+    await expect(runVeStage(job(), { supabase: db as never })).rejects.toThrow('response lost after commit');
+    const afterCommit = snapshot(db);
+    const recovered = await runVeStage(job(), { supabase: db as never });
+    expect(snapshot(db)).toEqual(afterCommit);
+    expect(mockCallLLMWithSchema).toHaveBeenCalledTimes(1);
+    expect(db.rpcCalls).toHaveLength(1);
+    expect(recovered).toMatchObject({ tokensUsed: 1200, costUsd: 0.02,
+      result: { added: expect.any(Array), requested: 5 } });
+    expect((recovered.result as { added: unknown[] }).added).toHaveLength(3);
+    const accounted = await runVeStage({ ...job(), tokens_used: 1200, cost_usd: 0.02 }, { supabase: db as never });
+    expect(accounted).toMatchObject({ tokensUsed: 0, costUsd: 0 });
   });
 
-  it('a cancel arriving while writing does not leave a part of the sectors', async () => {
-    const db = createMockSupabase({ tables: seedTables() });
-    const before = snapshot(db);
-    llmReturns(MODEL_ANSWER);
+  it('does not begin a cancelled commit and keeps an in-flight commit whole', async () => {
     const controller = new AbortController();
-    const cancelled = withInsertHook(db, 've_verticals', () => { controller.abort(); return null; });
-    await runVeStage(job(), { supabase: cancelled as never, market: 'ru', signal: controller.signal }).catch(() => undefined);
+    const db = broadDb(seedTables(), { afterCommit: () => controller.abort() });
+    const before = snapshot(db);
+    llmReturns(MODEL_ANSWER);
+    await runVeStage(job(), { supabase: db as never, signal: controller.signal });
     const newVerticals = db.getRows('ve_verticals').filter((v) => !before.ve_verticals.some((old: Row) => old.id === v.id));
     const newHypotheses = db.getRows('ve_hypotheses').filter((h) => !before.ve_hypotheses.some((old: Row) => old.id === h.id));
-    // Всё или ничего: каждая новая вертикаль — со своей широкой гипотезой.
-    expect([0, 3]).toContain(newHypotheses.length);
+    expect(newHypotheses).toHaveLength(3);
     expect(newVerticals.map((v) => v.id).sort()).toEqual(newHypotheses.map((h) => h.vertical_id).sort());
+    const cancelled = broadDb();
+    await expect(runVeStage(job(), { supabase: cancelled as never, signal: controller.signal })).rejects.toThrow();
+    expect(cancelled.rpcCalls).toHaveLength(0);
+  });
+
+  it('retries malformed model output, permits an explicit empty result, and keeps full research lenient', async () => {
+    const malformed = { broad_hypotheses: [{ title: 'Фармацевтика', description: 'Аптеки' }] };
+    for (const value of [{ unrelated: true }, { broad_hypotheses: null }, malformed,
+      { broad_hypotheses: [sector('   ')] }, { broad_hypotheses: [sector('!!!')] }]) {
+      expect(VeBroadHypothesesOnlySchema.safeParse(value).success).toBe(false);
+    }
+    expect(VeHypothesesBatchSchema.parse({ ...malformed, hypotheses: [{ ...sector('Медицина'), tier: 1 }] }).broad_hypotheses).toEqual([]);
+    const actual = jest.requireActual('@/lib/verticalEngineV2/llm') as typeof import('@/lib/verticalEngineV2/llm');
+    const oldFetch = global.fetch;
+    const oldKey = process.env.OPENROUTER_BRIEF_API_KEY;
+    process.env.OPENROUTER_BRIEF_API_KEY = 'local-test';
+    const responses = [malformed, { broad_hypotheses: [] }];
+    const fetchMock = jest.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(responses.shift()) } }],
+      usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    global.fetch = fetchMock as typeof fetch;
+    try {
+      const result = await actual.callLLMWithSchema([{ role: 'user', content: 'Sectors' }], VeBroadHypothesesOnlySchema, { model: 'test/broad-schema' });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(result.data.broad_hypotheses).toEqual([]);
+      expect(result.tokensUsed).toBe(40);
+    } finally {
+      global.fetch = oldFetch;
+      if (oldKey === undefined) delete process.env.OPENROUTER_BRIEF_API_KEY;
+      else process.env.OPENROUTER_BRIEF_API_KEY = oldKey;
+    }
+    const db = broadDb(seedTables(), { loseReply: true });
+    llmReturns({ broad_hypotheses: [] });
+    await expect(runVeStage(job(), { supabase: db as never })).rejects.toThrow('response lost');
+    const recovered = await runVeStage(job(), { supabase: db as never });
+    expect(recovered.result).toMatchObject({ broad_hypotheses_committed: true, added: [] });
+    expect(mockCallLLMWithSchema).toHaveBeenCalledTimes(1);
   });
 
   it('adds nothing while the project is being researched', async () => {
@@ -362,4 +401,87 @@ describe('VE2 «Добавить широкие гипотезы» button state'
     expect(veBroadHypothesesAction({ jobs: [], hypotheses: [broad(), broad(), broad(), broad(), broad('rejected')] }).disabled).toBe(false);
     expect(veBroadHypothesesAction({ jobs: [], hypotheses: [], researchRunning: true }).disabled).toBe(true);
   });
+});
+
+// Same opt-in runtime as the existing SQL smoke. Executes PostgreSQL itself.
+const pgliteModule = process.env.PGLITE_MODULE ?? (() => {
+  try { return require.resolve('@electric-sql/pglite'); } catch { return null; }
+})();
+(pgliteModule ? it : it.skip)('atomically appends sectors, rolls back failures and replays the original SQL receipt', () => {
+  const script = String.raw`
+    import { readFileSync } from 'node:fs';
+    import assert from 'node:assert/strict';
+    import { randomUUID } from 'node:crypto';
+    const { PGlite } = await import(process.env.PGLITE_MODULE);
+    const db = new PGlite();
+    const read = name => readFileSync(process.env.MIGRATIONS + '/' + name, 'utf8');
+    await db.exec('create role anon; create role authenticated; create role service_role;');
+    await db.exec('create table public.ve_projects(id uuid primary key, status text not null);');
+    const runtime = read('20260821_0001_vertical_engine_v2_runtime.sql');
+    await db.exec(runtime.slice(runtime.indexOf('create table if not exists public.ve_jobs'), runtime.indexOf('-- ─── ve_chains')));
+    await db.exec(read('20260828_0002_vertical_engine_v2_ru_seasonality.sql'));
+    await db.exec(read('20260923_0001_ve_hypotheses_broad.sql'));
+    await db.exec(read('20260923_0003_ve_jobs_broad_hypotheses_stage.sql'));
+    const migration = read('20260924_0012_ve_broad_hypotheses_atomic.sql');
+    await db.exec(migration);
+    await db.exec(migration);
+    const project = randomUUID(), existing = randomUUID(), job = randomUUID();
+    await db.query("insert into ve_projects values ($1, 'researched')", [project]);
+    await db.query("insert into ve_verticals(id,project_id,name,synonyms,rank) values ($1,$2,'Узкая','[\"Учёт\"]',7)", [existing,project]);
+    await db.query("insert into ve_jobs(id,project_id,stage,status) values ($1,$2,'broad_hypotheses','running')", [job,project]);
+    const candidate = (title, pct = 60) => ({title, description:'Описание', fit_rationale:'Причина', potential_pct:pct});
+    const invoke = async (items, id = job, pid = project, requested = 5) => (await db.query(
+      'select public.ve_commit_broad_hypotheses($1,$2,$3::jsonb,$4::jsonb,$5,$6,$7) as receipt',
+      [id,pid,JSON.stringify(items),'[]',requested,1200,0.02])).rows[0].receipt;
+    const snapshot = async () => Promise.all(['ve_verticals','ve_hypotheses','ve_jobs'].map(async table =>
+      (await db.query('select * from ' + table + ' order by id')).rows));
+    const before = await snapshot();
+    await db.exec("alter table ve_hypotheses add constraint injected_failure check (title <> 'Сбой');");
+    await assert.rejects(invoke([candidate('Медицина'),candidate('Сбой')]), /injected_failure/);
+    assert.deepEqual(await snapshot(), before);
+    await db.exec('alter table ve_hypotheses drop constraint injected_failure;');
+    await assert.rejects(invoke([candidate('Медицина'),candidate('Сбой',101)]), /Invalid broad/);
+    assert.deepEqual(await snapshot(), before);
+    await assert.rejects(invoke([candidate('Медицина')],job,randomUUID()), /does not belong/);
+    await db.query("update ve_jobs set status='cancelled' where id=$1",[job]);
+    await assert.rejects(invoke([candidate('Медицина')]), /not running/);
+    await db.query("update ve_jobs set status='running' where id=$1",[job]);
+    await db.query("update ve_projects set status='researching' where id=$1",[project]);
+    await assert.rejects(invoke([candidate('Медицина')]), /research is running/);
+    await db.query("update ve_projects set status='researched' where id=$1",[project]);
+    await db.exec('set role authenticated;');
+    await assert.rejects(invoke([candidate('Медицина')]), /permission denied/);
+    await db.exec('reset role; set role service_role;');
+    const receipt = await invoke([candidate(' «УЧЕТ» '),candidate('Медицина',100),candidate('медицина'),candidate('Ветеринария')]);
+    assert.equal(receipt.added.length,2);
+    assert.deepEqual(receipt.duplicates,['«УЧЕТ»','медицина']);
+    assert.equal(receipt.tokensUsed,1200);
+    assert.equal(receipt.costUsd,0.02);
+    await db.exec('reset role;');
+    const committed = await snapshot();
+    assert.deepEqual(await invoke([candidate('Другой сектор')]),receipt);
+    assert.deepEqual(await snapshot(),committed);
+    const verticals = (await db.query('select * from ve_verticals where id <> $1 order by rank',[existing])).rows;
+    assert.deepEqual(verticals.map(v => [v.rank,v.potential_pct]),[[8,95],[9,60]]);
+    assert.deepEqual((await db.query('select vertical_id from ve_hypotheses')).rows.map(h => h.vertical_id).sort(),receipt.added.map(h=>h.vertical_id).sort());
+    await db.query("update ve_jobs set status='done' where id=$1",[job]);
+    const next = randomUUID();
+    await db.query("insert into ve_jobs(id,project_id,stage,status) values ($1,$2,'broad_hypotheses','running')",[next,project]);
+    const capped = await invoke(['A','B','C','D','E'].map(t=>candidate(t)),next);
+    assert.equal(capped.added.length,3);
+    assert.equal((await db.query('select count(*)::int as n from ve_hypotheses where broad')).rows[0].n,5);
+    await db.query("update ve_jobs set status='done' where id=$1",[next]);
+    const empty = randomUUID();
+    await db.query("insert into ve_jobs(id,project_id,stage,status) values ($1,$2,'broad_hypotheses','running')",[empty,project]);
+    const emptyReceipt = await invoke([],empty);
+    assert.deepEqual(emptyReceipt.added,[]);
+    assert.deepEqual(await invoke([candidate('F')],empty),emptyReceipt);
+    await db.close();
+    console.log('PASS atomic broad hypotheses');
+  `;
+  const output = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    env: { ...process.env, PGLITE_MODULE: pgliteModule ?? '', MIGRATIONS: path.resolve(__dirname, '../../../../supabase/migrations') },
+    encoding: 'utf8', timeout: 15_000,
+  });
+  expect(output).toContain('PASS atomic broad hypotheses');
 });

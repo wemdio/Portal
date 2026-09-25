@@ -109,7 +109,13 @@ export type VeHypothesesBatchOutput = z.infer<typeof VeHypothesesBatchSchema>;
 
 /** Отдельная генерация широких для уже исследованного проекта: только блок широких. */
 export const VeBroadHypothesesOnlySchema = z.object({
-  broad_hypotheses: VeBroadHypothesesBlockSchema,
+  // Here this is the entire paid response: malformed output must enter the
+  // schema retry, not silently turn into a successful empty generation.
+  broad_hypotheses: z.array(VeBroadHypothesisCandidateSchema.extend({
+    title: z.string().trim().min(1).regex(/[\p{L}\p{N}]/u, 'Название сектора должно содержать буквы или цифры'),
+    description: z.string().trim().min(1),
+    fit_rationale: z.string().trim().min(1),
+  })),
 });
 export type VeBroadHypothesesOnlyOutput = z.infer<typeof VeBroadHypothesesOnlySchema>;
 
