@@ -114,18 +114,20 @@ async function evaluate(
   if (amoId == null) return { kind: 'no_link' };
   try {
     const card = await fetchCard(ctx.db, amoId);
+    ctx.alerts.clear('amo-unavailable');
     return { kind: 'checked', problems: checkCard(card, stated, PIPELINE_ID) };
   } catch (error) {
     // Любой сбой чтения — не «сделка не найдена»: строка ждёт перепроверки,
-    // в чат ничего не уходит.
-    ctx.log('warn', `AMO read failed for lead ${amoId}`, error);
+    // в чат ничего не уходит, а в health-чат — один алерт до первого успеха.
+    const reason = error instanceof Error ? error.message : String(error);
+    await ctx.alerts.raise('amo-unavailable', `не удалось прочитать сделку ${amoId} из AMO`, reason);
     return { kind: 'amo_unavailable' };
   }
 }
 
 // ── Telegram ────────────────────────────────────────────────────────────────
 
-function replyText(kind: ReplyKind, decision: Decision, amoUrl: string): string {
+function replyText(kind: ReplyKind, decision: Decision, amoUrl: string | null): string {
   const problems = chatVisibleProblems(decision.problems);
   if (kind === 'no_link') return noLinkReply();
   if (kind === 'resolved') return resolvedReply();
@@ -151,11 +153,13 @@ async function sendReply(ctx: Ctx, messageId: number, text: string): Promise<num
   }
 }
 
-function amoUrlFor(amoUrl: string | null, amoId: number | null): string {
+/** Ссылка на сделку для ответа; null — собрать не из чего (строку «Сделка:» опускаем). */
+function amoUrlFor(amoUrl: string | null, amoId: number | null): string | null {
   if (amoUrl) return amoUrl;
   const base = (process.env.AMO_BASE_URL ?? '').trim().replace(/\/+$/, '');
+  if (!base || amoId == null) return null;
   const origin = base.startsWith('http') ? base : `https://${base}`;
-  return `${origin}/leads/detail/${amoId ?? ''}`;
+  return `${origin}/leads/detail/${amoId}`;
 }
 
 function authorOf(message: TelegramMessage): string | null {
@@ -183,10 +187,28 @@ function claimedRow(prev: PrevState | null, decision: Decision, fields: HandoffC
     status: decision.status,
     problems: decision.problems,
     reply_message_id: replyMessageId,
-    warned_at: prev?.warned_at ?? (isWarning(decision.reply) ? nowIso : null),
-    reminded_at: decision.markReminded ? nowIso : (prev?.reminded_at ?? null),
+    ...warningClock(prev, decision, nowIso),
     resolved_at: decision.markResolved ? nowIso : (prev?.resolved_at ?? null),
     last_checked_at: nowIso,
+  };
+}
+
+/**
+ * Часы напоминания. Новое предупреждение, когда в чате нашего предупреждения
+ * нет (первая проверка или после «✅»), начинает заново: `warned_at` = сейчас,
+ * напоминание снова доступно.
+ */
+function warningClock(
+  prev: PrevState | null,
+  decision: Decision,
+  nowIso: string,
+): Pick<HandoffCheckUpsert, 'warned_at' | 'reminded_at'> {
+  if (isWarning(decision.reply) && prev?.reply_message_id == null) {
+    return { warned_at: nowIso, reminded_at: null };
+  }
+  return {
+    warned_at: prev?.warned_at ?? null,
+    reminded_at: decision.markReminded ? nowIso : (prev?.reminded_at ?? null),
   };
 }
 
@@ -202,15 +224,20 @@ function revertAfterFailedSend(prev: PrevState | null, decision: Decision): Part
       resolved_at: prev.resolved_at,
     };
   }
-  // Предупреждения в чате нет — ежедневный проход (или правка) отправит его заново.
-  return { reply_message_id: null, warned_at: prev?.warned_at ?? null };
+  // Новое предупреждение не ушло: в чате остаётся прежнее (если было), часы —
+  // прежние. Нет прежнего — ежедневный проход (или правка) отправит заново.
+  return {
+    reply_message_id: prev?.reply_message_id ?? null,
+    warned_at: prev?.warned_at ?? null,
+    reminded_at: prev?.reminded_at ?? null,
+  };
 }
 
 async function applyDecision(
   ctx: Ctx,
   prev: PrevState | null,
   decision: Decision,
-  target: { messageId: number; amoUrl: string },
+  target: { messageId: number; amoUrl: string | null },
   fields: HandoffCheckUpsert,
 ): Promise<void> {
   const nowIso = new Date().toISOString();

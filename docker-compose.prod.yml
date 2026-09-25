@@ -716,6 +716,8 @@ services:
       - FIRST_SALES_PIPELINE_ID=${FIRST_SALES_PIPELINE_ID:-}
       - AMO_BASE_URL=${AMO_BASE_URL:-}
       - AMO_ACCESS_TOKEN=${AMO_ACCESS_TOKEN:-}
+      # Запасное имя токена — как у синка (services/portal-external-sync/sources/amo.py).
+      - AMOCRM_TOKEN=${AMOCRM_TOKEN:-}
       # TG-алерт при сбое (нет токена, конфликт getUpdates, не отправился ответ,
       # ежедневная перепроверка упала). Идёт в канал health-check бота
       # (см. app/src/lib/telegram/workerAlert.ts).

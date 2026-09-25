@@ -31,8 +31,9 @@ function baseUrl(): string {
 }
 
 function token(): string {
-  const raw = (process.env.AMO_ACCESS_TOKEN ?? '').trim();
-  if (!raw) throw new AmoUnavailableError('AMO_ACCESS_TOKEN is not set');
+  // Как у синка (`services/portal-external-sync/sources/amo.py`): AMOCRM_TOKEN — запасное имя.
+  const raw = (process.env.AMO_ACCESS_TOKEN || process.env.AMOCRM_TOKEN || '').trim();
+  if (!raw) throw new AmoUnavailableError('AMO_ACCESS_TOKEN / AMOCRM_TOKEN is not set');
   return raw;
 }
 
