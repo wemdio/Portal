@@ -16,6 +16,7 @@
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { analyzeVacancy, findStrictOutboundDuty, isSdrRoleTitle, type VacancyAnalysis } from './analyze';
 import { collectCandidates, type Candidate } from './collect';
+import { computeDoubts } from './doubts';
 import { companyBrand, isSuppressed, loadPreviouslyExported, normalizeDomain, siteUrl, type ExportedIndex } from './company';
 import { findRuCompanyEmail } from './findEmail';
 import { buildChain, buildSegmentsHypothesis, openingSentence, type ChainInput } from './letters/chains';
@@ -25,7 +26,9 @@ import { runQa } from './qa';
 import { decide, routeCase, routeChain, scoreCompany, type Route, type Score } from './router';
 import { amoLookup, loadAmoIndex, type AmoIndex, type AmoRecord } from './sources/amo';
 import { loadSizeByInn } from './sources/directory';
+import { fetchRevenue, revenueGrowthSignal } from './sources/fnsRevenue';
 import { fetchEmployerSite, fetchVacancyCard } from './sources/hhCard';
+import { findNewsSignals } from './sources/news';
 import { analyzeSite, EMPTY_SITE, type SiteAnalysis } from './sources/siteSignals';
 import {
   sanitizeRuOutreachConfig,
@@ -54,7 +57,7 @@ function log(level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) {
 }
 
 export function maxCandidatesFor(target: number): number {
-  return Math.min(5000, Math.max(300, target * 40));
+  return Math.min(12_000, Math.max(300, target * 15));
 }
 
 export function nextWaveSize(target: number, totals: { scanned: number; ready: number }): number {
@@ -98,6 +101,9 @@ interface Qualified {
   caseHit: { record: CaseRecord; reason: string } | null;
   score: Score;
   marketQuote: string | null;
+  revenue: number | null;
+  employees: number | null;
+  b2bQuoted: boolean;
 }
 
 export async function runRuOutreachJob(jobId: string): Promise<void> {
@@ -149,12 +155,14 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
     const exported: ExportedIndex = config.include_previously_exported
       ? { domains: new Set(), inns: new Set() }
       : await loadPreviouslyExported(db, jobId);
-    const pool = await collectCandidates(db, config, amo, maxScan);
+    const { pool, sourceErrors } = await collectCandidates(db, config, amo, maxScan);
+    if (Object.keys(sourceErrors).length) log('warn', `job ${jobId}: source errors`, sourceErrors);
     log('info', `job ${jobId}: pool=${pool.length}, target=${target}, sources=${config.sources.join(',')}`);
 
     const funnel = Object.fromEntries(STAGES.map((s) => [s, 0])) as Record<Stage, number>;
     const reasons: Record<string, number> = {};
     const chains: Record<string, number> = {};
+    const doubtful = { count: 0 };
     // Отчёт о попадании в SDR (SDR_ENTERPRISE_PROOF_AND_OFFER_ROUTING §3):
     // уникальные компании, а не вакансии — видно, не «пылесосит» ли SDR поток.
     const sdr = { any_sales_vacancy: 0, strict_sdr: 0, broad_to_general_queue: 0 };
@@ -171,7 +179,7 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         progress_percent: Math.min(97, 3 + Math.round(94 * Math.max(totals.ready / target, Math.min(1, totals.scanned / maxScan)))),
         total_found: totals.scanned,
         total_parsed: totals.ready,
-        progress_detail: { wave: waveNo, target, pool: pool.length, scanned: totals.scanned, ready: totals.ready, funnel, reasons, chains, sdr, offer_version: libraries.offerVersion, ...extra },
+        progress_detail: { wave: waveNo, target, pool: pool.length, scanned: totals.scanned, ready: totals.ready, funnel, reasons, chains, sdr, offer_version: libraries.offerVersion, source_errors: sourceErrors, doubtful: doubtful.count, ...extra },
       });
     };
     const reach = (...stages: Stage[]) => {
@@ -315,10 +323,59 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
       }
       reach('enriched');
 
-      const reactivation = Boolean(amoRec && amoRec.status === 'lost' && amoRec.priorContact);
-      const route = routeChain({ signals, reactivation, taScore: site.taScore });
-      const marketQuote = vacancy?.marketQuote ?? site.customerQuote ?? null;
       const known = c.inn ? size.get(c.inn) : undefined;
+      let revenue = c.revenue ?? known?.revenue ?? null;
+      const employees = c.employees ?? known?.employees ?? null;
+
+      // Рост выручки по ФНС: и повод, и размер, если он ещё неизвестен.
+      if (c.inn && (config.sources.includes('revenue_growth') || revenue === null)) {
+        const inn = c.inn;
+        const fact = await fetchRevenue(db, inn).catch((err) => {
+          log('warn', `fns revenue failed for ${inn}`, err instanceof Error ? err.message : err);
+          return null;
+        });
+        if (fact?.revenue != null && revenue === null) revenue = fact.revenue;
+        const growth = fact && config.sources.includes('revenue_growth') ? revenueGrowthSignal(fact) : null;
+        if (growth) signals.push(growth);
+      }
+
+      if (config.sources.includes('news')) {
+        const news = await findNewsSignals(brand, config.freshness_days).catch((err): Signal[] => {
+          log('warn', `news failed for ${domain}`, err instanceof Error ? err.message : err);
+          return [];
+        });
+        signals.push(...news);
+      }
+
+      // Ползунки размера и похожести режут все источники; неизвестный размер не отсеиваем.
+      const reactivation = Boolean(amoRec && amoRec.status === 'lost' && amoRec.priorContact);
+      if (!reactivation) {
+        const tooSmall = (revenue !== null && revenue < config.min_revenue) || (employees !== null && employees < config.min_employees);
+        const tooBig = revenue !== null && revenue > config.max_revenue;
+        if (tooSmall || tooBig) {
+          await finish(id, {
+            stage: 'scored', status: 'rejected', reason: 'SIZE_OUT_OF_RANGE',
+            detail: `выручка ${revenue ?? '—'}, штат ${employees ?? '—'}`,
+          }, { signals });
+          return null;
+        }
+        if (site.taScore < config.min_ta_score) {
+          await finish(id, { stage: 'scored', status: 'rejected', reason: 'TA_TOO_LOW', detail: `ЦА ${site.taScore}/10 при пороге ${config.min_ta_score}` }, { signals, ta_score: site.taScore, ta_reason: site.taReason });
+          return null;
+        }
+      }
+
+      const route = routeChain({
+        signals,
+        reactivation,
+        taScore: site.taScore,
+        freshnessDays: config.freshness_days,
+        revenue,
+        employees,
+        hasAdPixel: site.hasAdPixel,
+        hasCaseFor: (chain) => Boolean(routeCase(libraries.cases, site.industryGroup, chain)),
+      });
+      const marketQuote = vacancy?.marketQuote ?? site.customerQuote ?? null;
       const base = {
         company_brand: brand,
         signals,
@@ -347,8 +404,8 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         freshnessDays: config.freshness_days,
         taScore: site.taScore,
         isB2b,
-        revenue: c.revenue ?? known?.revenue ?? null,
-        employees: c.employees ?? known?.employees ?? null,
+        revenue,
+        employees,
         hasAdPixel: site.hasAdPixel,
         siteReachable: true,
         // SDR-цепочке кейс по отрасли не нужен (Максим 23.09): письмо 2 —
@@ -369,6 +426,8 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         evidence_quote: p?.quote ?? null,
         evidence_level: p ? p.level : 'NONE',
         generation_mode: route.chain,
+        route_reason: route.reason,
+        route_runner_up: route.runnerUp,
         case_id: caseHit?.record.case_id ?? null,
         case_match_reason: caseHit?.reason ?? null,
         priority_score: score.total,
@@ -382,7 +441,10 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
       }
       await updateRow(id, { ...patch, pipeline_stage: 'scored' });
       reach('scored');
-      return { id, candidate: c, domain, website: site_url, brand, amo: amoRec, site, vacancy, signals, route, caseHit, score, marketQuote };
+      return {
+        id, candidate: c, domain, website: site_url, brand, amo: amoRec, site, vacancy, signals, route, caseHit, score, marketQuote,
+        revenue, employees, b2bQuoted: Boolean(site.b2bQuote || vacancy?.b2bQuote),
+      };
     };
 
     // ── Фаза 2: почта, письма, QA ──
@@ -475,13 +537,34 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         return;
       }
       reach('qa_checked');
+      const doubts = computeDoubts({
+        email: email.email,
+        emailType: email.emailType,
+        score: q.score.total,
+        writeThreshold: config.write_threshold,
+        chain: q.route.chain,
+        primary: q.route.primary,
+        b2bQuoted: q.b2bQuoted,
+        revenue: q.revenue,
+        employees: q.employees,
+        sourceName: q.candidate.companyName,
+        brand: q.brand,
+        sourceIsDomainOnly: q.candidate.companyName === q.domain,
+      });
+      const doubtPatch = { doubt_flags: doubts.flags, doubt_detail: doubts.detail.join('; ') || null };
+      // Очень спорная не идёт в Instantly и не занимает место в лимите — ищем дальше.
+      if (doubts.veryDoubtful) {
+        doubtful.count += 1;
+        await updateRow(q.id, { ...base, ...doubtPatch, row_status: 'doubtful', pipeline_stage: 'qa_checked', reason_code: null, reason_detail: null });
+        return;
+      }
       if (totals.ready >= target) {
-        await updateRow(q.id, { ...base, row_status: 'manual_review', pipeline_stage: 'qa_checked', reason_code: 'LIMIT_REACHED', reason_detail: 'лимит готовых компаний уже набран' });
+        await updateRow(q.id, { ...base, ...doubtPatch, row_status: 'manual_review', pipeline_stage: 'qa_checked', reason_code: 'LIMIT_REACHED', reason_detail: 'лимит готовых компаний уже набран' });
         return;
       }
       totals.ready += 1;
       reach('ready');
-      await updateRow(q.id, { ...base, row_status: 'ready', pipeline_stage: 'ready', reason_code: null, reason_detail: null });
+      await updateRow(q.id, { ...base, ...doubtPatch, row_status: 'ready', pipeline_stage: 'ready', reason_code: null, reason_detail: null });
     };
 
     const safe = async (id: string, fn: () => Promise<void>) => {
@@ -562,7 +645,7 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
       total_parsed: totals.ready,
       completed_at: new Date().toISOString(),
       error_message: null,
-      progress_detail: { wave: waveNo, target, pool: pool.length, scanned: totals.scanned, ready: totals.ready, stop_reason: stopReason, funnel, reasons, chains, offer_version: libraries.offerVersion },
+      progress_detail: { wave: waveNo, target, pool: pool.length, scanned: totals.scanned, ready: totals.ready, stop_reason: stopReason, funnel, reasons, chains, offer_version: libraries.offerVersion, source_errors: sourceErrors, doubtful: doubtful.count },
     });
   } catch (err) {
     if (err instanceof CancelledError) {
