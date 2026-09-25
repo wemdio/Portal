@@ -2464,7 +2464,9 @@ async def _ping_site(count: int = 5) -> str:
     )
 
 
-async def _ping_one_proxy(url: str, count: int) -> tuple[int, list[float]]:
+async def _ping_one_proxy(
+    url: str, count: int, test_urls: list[str] | None = None
+) -> tuple[int, list[float]]:
     """Ping one proxy `count` times, return (ok_count, latencies_ms)."""
     ok = 0
     latencies: list[float] = []
@@ -2474,7 +2476,7 @@ async def _ping_one_proxy(url: str, count: int) -> tuple[int, list[float]]:
                 # Same rule as check_proxy: any non-5xx, non-407 response means
                 # the ping traversed the proxy. Fall back across targets so one
                 # flaky target doesn't drag the success rate to 0.
-                for test_url in PROXY_TEST_URLS:
+                for test_url in test_urls or PROXY_TEST_URLS:
                     try:
                         r = await client.get(test_url)
                         if r.status_code < 500 and r.status_code != 407:
@@ -2493,7 +2495,13 @@ async def _ping_proxies(count: int = 3) -> str:
     if not ALL_PROXIES:
         return "🔗 <b>Прокси</b>: не настроены"
 
-    tasks = [_ping_one_proxy(url, count) for _, url in ALL_PROXIES]
+    # RU-ноды — по российским целям, как в check_all_proxies: зарубежные
+    # cloudflare/ipify им недоступны, и в отчёте они висели «не отвечает»
+    # при живых прокси (25.09.2026: через них ya.ru 302, Яндекс Карты 200).
+    tasks = [
+        _ping_one_proxy(url, count, RU_PROXY_TEST_URLS if group.startswith("RU") else None)
+        for group, url in ALL_PROXIES
+    ]
     outcomes = await asyncio.gather(*tasks, return_exceptions=True)
 
     rows: list[tuple[str, str, bool, int, int, float]] = []
