@@ -44,13 +44,14 @@ export interface Problem {
 const WON_STATUS_ID = 142;
 
 // Словарь синонимов «Откуда лид» → каноническое значение поля «Источник» AMO.
-// Порядок важен: «Аутрич» проверяется после email/telegram-аутрича, иначе более
-// общий синоним «outreach» перехватит их случаи.
+// Синонимы короче остальных («email», «почта») намеренно исключены — они
+// перехватывали бы «Email-рассылку» и другие каналы и давали ложные совпадения.
 const SOURCE_SYNONYMS: Array<{ canonical: string; synonyms: string[] }> = [
   { canonical: 'Сайт', synonyms: ['сайт', 'заявкассайта', 'форма'] },
   { canonical: 'Лидскан', synonyms: ['лидскан', 'leadscan'] },
-  { canonical: 'Партнер', synonyms: ['партнер', 'партнёр'] },
-  { canonical: 'Email Outreach', synonyms: ['emailoutreach', 'email', 'имейл', 'почта'] },
+  { canonical: 'Партнер', synonyms: ['партнер'] },
+  { canonical: 'Email Outreach', synonyms: ['emailoutreach', 'имейлаутрич', 'emailаутрич'] },
+  { canonical: 'Email-рассылка', synonyms: ['рассылк'] },
   { canonical: 'Telegram Outreach', synonyms: ['telegramoutreach', 'tgoutreach', 'тгаутрич'] },
   { canonical: 'Аутрич', synonyms: ['аутрич', 'outreach'] },
   { canonical: 'Сарафан', synonyms: ['сарафан', 'рекомендац'] },
@@ -68,15 +69,41 @@ function normalizeForMatch(value: string): string {
     .replace(/[^a-zа-я0-9]/g, '');
 }
 
-/** «Откуда лид» → каноническое значение «Источник», если синоним уверенно распознан; иначе null. */
+/**
+ * «Откуда лид» → каноническое значение «Источник», если синоним уверенно
+ * распознан; иначе null. Среди всех канонических значений, чей синоним
+ * встретился подстрокой в тексте, побеждает тот, у кого совпавший синоним
+ * длиннее — короткое совпадение реже случайно и увереннее указывает на канал.
+ * Ничья по длине между разными каноническими значениями — расхождение не
+ * проверяем (`null`), чтобы не спутать один канал с другим.
+ */
 export function canonicalSource(statedSource: string | null): string | null {
   if (!statedSource) return null;
   const normalized = normalizeForMatch(statedSource);
   if (!normalized) return null;
+
+  let best: { canonical: string; length: number } | null = null;
+  let tie = false;
+
   for (const { canonical, synonyms } of SOURCE_SYNONYMS) {
-    if (synonyms.some((synonym) => normalized.includes(synonym))) return canonical;
+    let longestMatch = 0;
+    for (const synonym of synonyms) {
+      const normalizedSynonym = normalizeForMatch(synonym);
+      if (normalizedSynonym && normalized.includes(normalizedSynonym)) {
+        longestMatch = Math.max(longestMatch, normalizedSynonym.length);
+      }
+    }
+    if (longestMatch === 0) continue;
+
+    if (!best || longestMatch > best.length) {
+      best = { canonical, length: longestMatch };
+      tie = false;
+    } else if (longestMatch === best.length && canonical !== best.canonical) {
+      tie = true;
+    }
   }
-  return null;
+
+  return best && !tie ? best.canonical : null;
 }
 
 function formatRub(amount: number): string {
@@ -125,7 +152,7 @@ export function checkCard(
     problems.push({ code: 'NO_SOURCE', text: 'не заполнен «Источник»' });
   } else {
     const canonical = canonicalSource(stated.source);
-    if (canonical && canonical !== card.source) {
+    if (canonical && normalizeForMatch(canonical) !== normalizeForMatch(card.source)) {
       problems.push({
         code: 'SOURCE_MISMATCH',
         text: `«Источник» в карточке — «${card.source}», а в сообщении «Откуда лид: ${stated.source}» (похоже на «${canonical}»)`,

@@ -8,6 +8,7 @@
  * `AMO_BASE_URL` может быть с протоколом или без, `AMO_ACCESS_TOKEN` — bearer.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { normalizeInn } from '@/lib/firstSales/money';
 import type { CardData } from './checkCard';
 
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -151,11 +152,8 @@ export async function fetchCard(db: SupabaseClient, amoId: number): Promise<Card
   const inn = customFieldValue(lead.custom_fields_values, 'ИНН');
   const source = customFieldValue(lead.custom_fields_values, 'Источник');
 
-  const normalizedInn = inn ? inn.replace(/\D/g, '') : null;
-  const innDuplicates =
-    normalizedInn && /^(\d{10}|\d{12})$/.test(normalizedInn)
-      ? await findInnDuplicates(db, pipelineId, amoId, normalizedInn)
-      : [];
+  const normalizedInn = normalizeInn(inn);
+  const innDuplicates = normalizedInn ? await findInnDuplicates(db, pipelineId, amoId, normalizedInn) : [];
 
   return {
     found: true,
