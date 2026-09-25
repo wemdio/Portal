@@ -64,7 +64,7 @@ export function openingSentence(input: ChainInput, brand: string): string | null
         const subject = s.title && wordCount(s.title) <= 15 ? s.title : null;
         return `Увидел, что ${b} выиграла тендер${subject ? ` «${subject}»` : ''}.`;
       }
-      // Цифры роста в письмо не несём: QA режет числа не из разрешённых источников.
+      // Цифры роста в письмо не несём сознательно: фраза-повод целиком попадает в разрешённые факты QA, и неподтверждённое число он бы не поймал.
       if (s.type === 'revenue_growth') return `Увидел по открытой отчётности, что ${b} заметно выросла за последний год.`;
       if (s.type === 'new_office' && s.source === 'gis') return `Увидел, что у ${b} несколько филиалов.`;
       if (s.type === 'new_office' && s.source === 'ymaps') return `Увидел, что у ${b} появилась новая точка: ${s.title}.`;

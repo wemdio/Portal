@@ -163,6 +163,27 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
     const reasons: Record<string, number> = {};
     const chains: Record<string, number> = {};
     const doubtful = { count: 0 };
+    // Предохранитель обогащения: 5 ошибок подряд — источник выключается до конца запуска.
+    const enrichFails: Record<'revenue_growth' | 'news', number> = { revenue_growth: 0, news: 0 };
+    const enrichOff = new Set<string>();
+    const enrich = async <T>(code: 'revenue_growth' | 'news', what: string, fn: () => Promise<T>): Promise<T | null> => {
+      if (enrichOff.has(code)) return null;
+      try {
+        const res = await fn();
+        enrichFails[code] = 0;
+        return res;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log('warn', `${what} failed`, msg);
+        enrichFails[code] += 1;
+        if (enrichFails[code] >= 5 && !enrichOff.has(code)) {
+          enrichOff.add(code);
+          sourceErrors[code] = `отключён на этот запуск после 5 ошибок подряд: ${msg.slice(0, 300)}`;
+          log('warn', `job ${jobId}: ${code} disabled for this run`);
+        }
+        return null;
+      }
+    };
     // Отчёт о попадании в SDR (SDR_ENTERPRISE_PROOF_AND_OFFER_ROUTING §3):
     // уникальные компании, а не вакансии — видно, не «пылесосит» ли SDR поток.
     const sdr = { any_sales_vacancy: 0, strict_sdr: 0, broad_to_general_queue: 0 };
@@ -326,42 +347,44 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
       const known = c.inn ? size.get(c.inn) : undefined;
       let revenue = c.revenue ?? known?.revenue ?? null;
       const employees = c.employees ?? known?.employees ?? null;
-
-      // Рост выручки по ФНС: и повод, и размер, если он ещё неизвестен.
-      if (c.inn && (config.sources.includes('revenue_growth') || revenue === null)) {
-        const inn = c.inn;
-        const fact = await fetchRevenue(db, inn).catch((err) => {
-          log('warn', `fns revenue failed for ${inn}`, err instanceof Error ? err.message : err);
-          return null;
-        });
-        if (fact?.revenue != null && revenue === null) revenue = fact.revenue;
-        const growth = fact && config.sources.includes('revenue_growth') ? revenueGrowthSignal(fact) : null;
-        if (growth) signals.push(growth);
-      }
-
-      if (config.sources.includes('news')) {
-        const news = await findNewsSignals(brand, config.freshness_days).catch((err): Signal[] => {
-          log('warn', `news failed for ${domain}`, err instanceof Error ? err.message : err);
-          return [];
-        });
-        signals.push(...news);
-      }
+      const reactivation = Boolean(amoRec && amoRec.status === 'lost' && amoRec.priorContact);
 
       // Ползунки размера и похожести режут все источники; неизвестный размер не отсеиваем.
-      const reactivation = Boolean(amoRec && amoRec.status === 'lost' && amoRec.priorContact);
-      if (!reactivation) {
+      // Дешёвые отсевы — до платных по времени ФНС и новостей. Реактивацию не режем и не обогащаем.
+      const sizeRejected = async (): Promise<boolean> => {
         const tooSmall = (revenue !== null && revenue < config.min_revenue) || (employees !== null && employees < config.min_employees);
         const tooBig = revenue !== null && revenue > config.max_revenue;
-        if (tooSmall || tooBig) {
-          await finish(id, {
-            stage: 'scored', status: 'rejected', reason: 'SIZE_OUT_OF_RANGE',
-            detail: `выручка ${revenue ?? '—'}, штат ${employees ?? '—'}`,
-          }, { signals });
+        if (!tooSmall && !tooBig) return false;
+        await finish(id, {
+          stage: 'scored', status: 'rejected', reason: 'SIZE_OUT_OF_RANGE',
+          detail: `выручка ${revenue ?? '—'}, штат ${employees ?? '—'}`,
+        }, { signals, company_brand: brand, ta_score: site.taScore, ta_reason: site.taReason });
+        return true;
+      };
+      if (!reactivation) {
+        if (site.taScore < config.min_ta_score) {
+          await finish(id, { stage: 'scored', status: 'rejected', reason: 'TA_TOO_LOW', detail: `ЦА ${site.taScore}/10 при пороге ${config.min_ta_score}` }, { signals, company_brand: brand, ta_score: site.taScore, ta_reason: site.taReason });
           return null;
         }
-        if (site.taScore < config.min_ta_score) {
-          await finish(id, { stage: 'scored', status: 'rejected', reason: 'TA_TOO_LOW', detail: `ЦА ${site.taScore}/10 при пороге ${config.min_ta_score}` }, { signals, ta_score: site.taScore, ta_reason: site.taReason });
-          return null;
+        if (await sizeRejected()) return null;
+
+        // Рост выручки по ФНС: повод и, если размер был неизвестен, выручка.
+        const inn = c.inn;
+        if (inn && config.sources.includes('revenue_growth')) {
+          const fact = await enrich('revenue_growth', `fns revenue ${inn}`, () => fetchRevenue(db, inn));
+          if (fact) {
+            if (fact.revenue != null && revenue === null) {
+              revenue = fact.revenue;
+              if (await sizeRejected()) return null;
+            }
+            const growth = revenueGrowthSignal(fact);
+            if (growth) signals.push(growth);
+          }
+        }
+
+        if (config.sources.includes('news')) {
+          const news = await enrich('news', `news ${domain}`, () => findNewsSignals(brand, config.freshness_days));
+          if (news) signals.push(...news);
         }
       }
 

@@ -13,7 +13,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Signal } from '../types';
 
 const BASE = 'https://bo.nalog.gov.ru';
-const TIMEOUT_MS = 15_000;
+const TIMEOUT_MS = 8_000;
 const PAUSE_MS = 1_000;
 const CACHE_DAYS = 30;
 export const MIN_REVENUE_GROWTH = 0.2;
