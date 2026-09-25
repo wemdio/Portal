@@ -3041,6 +3041,7 @@ export async function resolveColleagueWebhookReply(
   leadEmail: string,
   accountId: string,
   notBefore: number,
+  retry = false,
 ): Promise<{ reply: Email; ctx: ThreadContext } | 'expired' | 'lead_own' | 'not_indexed' | 'not_ours' | null> {
   const byId = await fetchWebhookReplyById(emailId, campaignId, accountId);
   if (!byId || byId === 'not_ours') return byId;
@@ -3050,7 +3051,10 @@ export async function resolveColleagueWebhookReply(
   if (replyAutomationExpired(notBefore, byId)) return 'expired';
   const sender = (byId.from_address_email ?? '').trim().toLowerCase();
   if (!sender || sender === leadEmail.trim().toLowerCase()) return 'lead_own';
-  const senderCtx = await fetchThreadContext(campaignId, sender, byId.thread_id ?? null, accountId);
+  const senderCtx = retry
+    ? await fetchThreadContext(campaignId, sender, byId.thread_id ?? null, accountId,
+      { requestPriority: 'recovery', timeoutMs: 20_000, timeoutIncludesBody: true, retryRateLimits: false })
+    : await fetchThreadContext(campaignId, sender, byId.thread_id ?? null, accountId);
   if (!senderCtx || senderCtx.replyEmail.id !== byId.id) return 'not_indexed';
   return {
     reply: { ...senderCtx.replyEmail, campaign_id: senderCtx.replyEmail.campaign_id ?? campaignId } as Email,
@@ -3116,6 +3120,7 @@ export async function drainWebhookQueue(): Promise<number> {
   const batchSize = envNumber('INSTANTLY_WEBHOOK_DRAIN_BATCH', 25);
   const minAgeMs = envNumber('INSTANTLY_WEBHOOK_DRAIN_MIN_AGE_MS', 3000);
   const olderThanIso = new Date(Date.now() - minAgeMs).toISOString();
+  const dueFilter = `retry_next_at.is.null,retry_next_at.lte.${new Date().toISOString()}`;
 
   // Build the complete campaign surface before claiming any event. A partial
   // legacy/period/client-access read cannot distinguish "not ours" from a DB
@@ -3136,6 +3141,7 @@ export async function drainWebhookQueue(): Promise<number> {
     .from('instantly_webhook_events')
     .select('id')
     .eq('processed', false)
+    .or(dueFilter)
     .ilike('event_type', '%repl%')
     .lt('created_at', olderThanIso)
     .order('created_at', { ascending: true })
@@ -3152,7 +3158,8 @@ export async function drainWebhookQueue(): Promise<number> {
     .update({ processed: true })
     .in('id', ids)
     .eq('processed', false)
-    .select('id, email_id, campaign_id, lead_email, thread_id, created_at');
+    .or(dueFilter)
+    .select('id, email_id, campaign_id, lead_email, thread_id, created_at, retry_attempts');
   if (!claimed || claimed.length === 0) return 0;
 
   const accountForCampaign = (campaignId: string): string | null => {
@@ -3172,6 +3179,7 @@ export async function drainWebhookQueue(): Promise<number> {
     lead_email: string | null;
     thread_id: string | null;
     created_at: string | null;
+    retry_attempts?: number | null;
   }>) {
     if (replyAutomationExpired(notBefore, row)) continue;
     const campaignId = row.campaign_id ?? '';
@@ -3197,7 +3205,11 @@ export async function drainWebhookQueue(): Promise<number> {
       if (fetched > 0) await new Promise((r) => setTimeout(r, interDelay));
       fetched++;
       // Один вызов Instantly: проверка готовности + источник настоящего id письма.
-      const found = await fetchThreadContext(campaignId, leadEmail, row.thread_id, accountId);
+      const retry = (row.retry_attempts ?? 0) > 0;
+      const found = retry
+        ? await fetchThreadContext(campaignId, leadEmail, row.thread_id, accountId,
+          { requestPriority: 'recovery', timeoutMs: 20_000, timeoutIncludesBody: true, retryRateLimits: false })
+        : await fetchThreadContext(campaignId, leadEmail, row.thread_id, accountId);
       // Вебхук — про конкретное письмо (row.email_id). Поиск треда идёт по
       // адресу лида, а поиск Instantly сопоставляет ОТПРАВИТЕЛЯ, поэтому ответ
       // коллеги со своего адреса (писали на info@, ответил zamkomdir@) этим
@@ -3220,7 +3232,7 @@ export async function drainWebhookQueue(): Promise<number> {
         } as Email;
       } else {
         const colleague = await resolveColleagueWebhookReply(
-          webhookEmailId, campaignId, leadEmail, accountId, notBefore,
+          webhookEmailId, campaignId, leadEmail, accountId, notBefore, retry,
         );
         if (typeof colleague === 'object' && colleague) {
           reply = colleague.reply;
@@ -3305,9 +3317,15 @@ export async function drainWebhookQueue(): Promise<number> {
 
         // If the provider has not exposed a real email id yet (or the retry
         // row write failed), give the durable webhook queue its claim back.
+        // Persist the deadline: a worker restart must not turn a missing
+        // provider index into another tight loop consuming fresh LIST quota.
+        const attempts = Math.max(0, row.retry_attempts ?? 0) + 1;
+        const providerDelay = readInstantlyEmailReadDeferral(err)?.retryAfterMs ?? 0;
+        const delayMs = Math.max(providerDelay, Math.min(30 * 60_000, 60_000 * 2 ** Math.min(attempts - 1, 5)));
         const { error: requeueError } = await db
           .from('instantly_webhook_events')
-          .update({ processed: false })
+          .update({ processed: false, retry_attempts: attempts,
+            retry_next_at: new Date(Date.now() + delayMs).toISOString() })
           .eq('id', row.id);
         if (!requeueError) {
           workerLog('warn', `drain: transient failure for ${retryKey} — event requeued`);
