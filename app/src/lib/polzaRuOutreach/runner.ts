@@ -568,8 +568,6 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         chain: q.route.chain,
         primary: q.route.primary,
         b2bQuoted: q.b2bQuoted,
-        revenue: q.revenue,
-        employees: q.employees,
         sourceName: q.candidate.companyName,
         brand: q.brand,
         sourceIsDomainOnly: q.candidate.companyName === q.domain,

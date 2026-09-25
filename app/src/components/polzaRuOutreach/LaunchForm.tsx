@@ -173,7 +173,7 @@ export function LaunchForm({ busy, senders, onStart }: Props) {
             <input className={input} type="number" min={0} value={minEmployees} onChange={(e) => setMinEmployees(Number(e.target.value))} />
           </div>
         </div>
-        <p className="mt-1 text-xs text-gray-500">Известный размер вне рамок — отсев. Неизвестный — компания проходит с пометкой «Сомнения в компании».</p>
+        <p className="mt-1 text-xs text-gray-500">Известный размер вне рамок — отсев. Неизвестный — компания проходит.</p>
       </div>
 
       <div className="mt-5 flex flex-wrap items-center justify-between gap-4">

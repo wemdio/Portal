@@ -26,8 +26,6 @@ export interface DoubtInput {
   primary: Signal | null;
   /** B2B подтверждён дословной цитатой с сайта или из вакансии. */
   b2bQuoted: boolean;
-  revenue: number | null;
-  employees: number | null;
   /** Название из источника и бренд со страницы. */
   sourceName: string;
   brand: string;
@@ -84,7 +82,6 @@ export function computeDoubts(i: DoubtInput): Doubts {
 
   const company: string[] = [];
   if (!i.b2bQuoted) company.push('B2B подтверждён косвенно');
-  if (i.revenue == null && i.employees == null) company.push('размер неизвестен');
   if (!i.sourceIsDomainOnly && !namesLookAlike(i.sourceName, i.brand)) {
     company.push(`название на сайте «${i.brand}» не похоже на «${i.sourceName}»`);
   }
