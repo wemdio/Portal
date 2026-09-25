@@ -487,6 +487,104 @@ function quotedOutbounds(reply: Email, mailbox?: string): QuotedOutbound[] {
   return result;
 }
 
+interface SubjectlessDirectQuote {
+  sender: string;
+  recipient: string;
+  at: number;
+  subject: string;
+  body: string;
+}
+
+/** A direct changed-address reply may omit Subject from its quoted headers.
+ * Keep this separate from quotedOutbounds(): it is only a bounded lookup hint
+ * until a real send matches its full body, addresses, subject and sent minute.
+ * Unsupported dates, forwards and contradictory headers stay on the old path.
+ */
+function subjectlessDirectQuote(reply: Email): SubjectlessDirectQuote | null {
+  const mailbox = normalizeMailbox(reply.eaccount);
+  const responder = normalizeMailbox(reply.from_address_email);
+  const replyAt = emailTs(reply);
+  if (!mailbox || !responder || responder === mailbox || !replyAt ||
+      !recipientMailboxIdentities(reply).has(mailbox) ||
+      !/^\s*(?:re|ответ)\s*:/i.test(reply.subject ?? '') ||
+      /(?:^|:)\s*(?:fw|fwd|пересылка)(?:\[\d+\])?\s*:/i.test(reply.subject ?? '')) return null;
+
+  const raw = getBodyText(reply.body).replace(/\r\n?/g, '\n');
+  if (/^[ \t]*>[ \t]*>/m.test(raw) || /forwarded message|пересылаемое сообщение/i.test(raw)) return null;
+  const text = raw.split('\n').map(line => line.replace(/^\s*(?:>\s*)+/, '')).join('\n');
+  const starts = [...text.matchAll(/^(?:From|От кого|От)(?:[ \t]*:[ \t]*|[ \t]+)(.+)$/gim)];
+  if (starts.length !== 1) return null;
+  const start = starts[0];
+  const senders = emailAddressTokens(start[1]);
+  if (senders.length !== 1 || senders[0] !== mailbox) return null;
+
+  const lines = text.slice(start.index! + start[0].length).split('\n');
+  let recipient = '';
+  let date = '';
+  let bodyAt = 0;
+  const seen = new Set<string>();
+  for (let i = 0; i < Math.min(16, lines.length); i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const header = /^(Sent|Date|Отправлено|Дата|To|Кому|Cc|Копия|Subject|Тема)(?:[ \t]*:[ \t]*|[ \t]+)(.*)$/i.exec(line);
+    if (!header) break;
+    // Even an empty explicit Subject must not be replaced by the reply subject.
+    if (/^(Subject|Тема|Cc|Копия)$/i.test(header[1])) return null;
+    const key = /^(To|Кому)$/i.test(header[1]) ? 'to' : 'date';
+    if (seen.has(key)) return null;
+    seen.add(key);
+    if (key === 'to') {
+      const addresses = emailAddressTokens(header[2]);
+      if (addresses.length !== 1) return null;
+      recipient = addresses[0];
+    } else {
+      date = header[2].trim();
+    }
+    bodyAt = i + 1;
+  }
+
+  // Only the observed timezone-bearing format, not locale-dependent Date.parse.
+  const dated = /^(?:[А-ЯЁа-яё]+,\s*)?(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\s+(\d{4}),?\s+(\d{2}):(\d{2})\s+([+-])(\d{2}):(\d{2})$/iu.exec(date);
+  if (!dated || !recipient || recipient === responder || recipient === mailbox) return null;
+  const month = [
+    'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+    'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
+  ].indexOf(dated[2].toLowerCase());
+  const day = Number(dated[1]);
+  const year = Number(dated[3]);
+  const hour = Number(dated[4]);
+  const minute = Number(dated[5]);
+  const zoneHour = Number(dated[7]);
+  const zoneMinute = Number(dated[8]);
+  const local = Date.UTC(year, month, day, hour, minute);
+  const localDate = new Date(local);
+  if (day < 1 || localDate.getUTCDate() !== day || localDate.getUTCMonth() !== month ||
+      localDate.getUTCFullYear() !== year || hour > 23 || minute > 59 || zoneHour > 14 || zoneMinute > 59) return null;
+  const at = local - (dated[6] === '+' ? 1 : -1) * (zoneHour * 60 + zoneMinute) * 60_000;
+  const subject = normalizedSubject(reply.subject ?? '');
+  const body = lines.slice(bodyAt).join('\n');
+  if (at >= replyAt || !subject || normalizeQuotedText(body).length < 160) return null;
+  return { sender: mailbox, recipient, at, subject, body };
+}
+
+function matchesSubjectlessDirectQuote(
+  email: Email,
+  reply: Email,
+  quote: SubjectlessDirectQuote | null = subjectlessDirectQuote(reply),
+): boolean {
+  if (!quote || !email.id || !email.campaign_id || ![1, 3].includes(email.ue_type ?? 0) ||
+      normalizeMailbox(email.eaccount) !== quote.sender || normalizeMailbox(email.from_address_email) !== quote.sender) return false;
+  const at = emailTs(email);
+  if (!at || at < quote.at || at >= quote.at + 60_000 || at >= emailTs(reply) ||
+      normalizedSubject(email.subject ?? '') !== quote.subject) return false;
+  const recipients = new Set([
+    ...emailAddressTokens(email.to_address_email_list), ...jsonAddressTokens(email.to_address_json),
+  ]);
+  const body = normalizeQuotedText(getBodyText(email.body));
+  return recipients.size === 1 && recipients.has(quote.recipient) && body.length >= 160 &&
+    normalizeQuotedText(quote.body).includes(body);
+}
+
 function normalizedSubject(value: string): string {
   return value.toLowerCase().replace(/^(?:(?:re|fw|fwd|ответ|пересылка)(?:\[\d+\])?\s*:\s*)+/i, '')
     .replace(/\s+/g, ' ').trim();
@@ -636,8 +734,12 @@ async function fetchWorkspaceEvidence(args: WorkspaceEvidenceArgs): Promise<Work
   // that proof before expanding lookup hints; the flag alone is insufficient.
   if (prefetched.trustedParentAlreadyProven) return { evidence: prefetched.evidence, complete: true };
   const primary = (args.reply.lead ?? args.leadEmail).trim().toLowerCase() || args.leadEmail;
-  const identities = [...new Set([primary, ...quotedOutbounds(args.reply)
-    .flatMap(quote => quote.recipients)])];
+  const subjectless = subjectlessDirectQuote(args.reply);
+  const identities = [...new Set([
+    primary,
+    ...quotedOutbounds(args.reply).flatMap(quote => quote.recipients),
+    ...(subjectless ? [subjectless.recipient] : []),
+  ])];
   // Never select a winner from a silently truncated candidate set.
   if (identities.length > 4) throw new Error('ownership evidence checkpoint blocked: too many quoted recipients');
   let evidence = new Map<string, CampaignEvidence>();
@@ -847,7 +949,8 @@ async function resumeWorkspaceEvidence(args: {
   const checkpoint = await loadOwnershipEvidenceCheckpoint(args.db, {
     // Prior negative searches excluded cross-mailbox original recipients/sends.
     // Keep durable pagination, but never reuse their incomplete proof.
-    evidenceVersion: 3,
+    // Only this new shape invalidates searches that omitted its original recipient.
+    evidenceVersion: subjectlessDirectQuote(args.reply) ? 4 : 3,
     accountId: args.accountId ?? 'main',
     // Changing a body, mailbox, identity, timestamp, thread or owner scope
     // invalidates both cursors. Never reuse another reply's classification.
@@ -982,6 +1085,7 @@ function verifiedConversationParents(emails: Email[], reply: Email): Email[] {
   ]);
   const quote = normalizeQuotedText(getBodyText(reply.body));
   const headers = quotedOutbounds(reply);
+  const subjectless = subjectlessDirectQuote(reply);
   return emails
     .filter((email, index, all) => {
       if (!email.id || !email.campaign_id?.trim() ||
@@ -1002,6 +1106,7 @@ function verifiedConversationParents(emails: Email[], reply: Email): Email[] {
       // Quoted recipients are hints until matched against a real provider send,
       // its full body, subject, sender and chronological position. The quoted
       // sender may be the receiving alias, but an arbitrary third address is not accepted.
+      if (matchesSubjectlessDirectQuote(email, reply, subjectless)) return true;
       const subject = normalizedSubject(email.subject ?? '');
       return body.length >= 160 && Boolean(subject) && headers.some(header =>
         (header.sender === sender || header.sender === mailbox) &&
@@ -1359,7 +1464,7 @@ export async function resolveEffectiveReplyOwner(args: {
   // but never use that shortcut to discard available sends/quotes or a failed
   // history fetch. Those need the bounded proof search over BOTH candidates.
   const providerConversationNeedsProof = Boolean(providerContext?.historyFetchFailed ||
-    quotedOutbounds(reply).length > 0 ||
+    quotedOutbounds(reply).length > 0 || subjectlessDirectQuote(reply) !== null ||
     [...(providerContext?.threadEmails ?? []), ...(providerContext?.lastOutbound ? [providerContext.lastOutbound] : [])]
       .some(email => email.campaign_id === providerCampaignId && (email.ue_type === 1 || email.ue_type === 3)));
   const providerOwnerDiffers = providerOwnerKeys.some(key =>
@@ -1500,7 +1605,7 @@ export async function resolveEffectiveReplyOwner(args: {
   if (providerIsCurrent && currentOwnerKeys.length === 1 &&
       !currentOwnerKeys[0].startsWith('unknown:') &&
       providerOwnerKeys.length === 1 && providerOwnerKeys[0] === currentOwnerKeys[0] &&
-      quotedOutbounds(reply).length === 0 &&
+      quotedOutbounds(reply).length === 0 && subjectlessDirectQuote(reply) === null &&
       !providerContext?.lastOutbound &&
       campaignParentMatches(workspaceEvidence.evidence, evidenceCampaignIds).length === 0) {
     return {
