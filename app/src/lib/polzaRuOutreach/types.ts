@@ -47,7 +47,10 @@ export const INDUSTRY_GROUP_LABELS: Record<IndustryGroup, string> = {
   digital_agency: 'digital / event / маркетинг / агентства',
 };
 
-export const SOURCE_CODES = ['hh', 'direct', 'crm', 'exhibitors', 'contracts', 'growth', 'site_news', 'directory'] as const;
+export const SOURCE_CODES = [
+  'hh', 'direct', 'crm', 'exhibitors', 'contracts', 'tenders', 'growth', 'site_news', 'directory',
+  'gis', 'ymaps', 'revenue_growth', 'news',
+] as const;
 export type SourceCode = (typeof SOURCE_CODES)[number];
 
 export const SOURCE_LABELS: Record<SourceCode, string> = {
@@ -56,9 +59,14 @@ export const SOURCE_LABELS: Record<SourceCode, string> = {
   crm: 'AMO: старые отказы',
   exhibitors: 'Выставки (загруженные каталоги)',
   contracts: 'Госконтракты (загруженные выгрузки ЕИС)',
+  tenders: 'Коммерческие тендеры (загруженные выгрузки)',
   growth: 'Гранты / акселераторы (загруженные списки)',
   site_news: 'Новости на сайтах компаний прошлых запусков',
   directory: 'Общая база компаний (по профилю)',
+  gis: '2ГИС: несколько филиалов, отдел продаж',
+  ymaps: 'Яндекс Карты: новые точки сетей',
+  revenue_growth: 'Рост выручки по отчётности ФНС',
+  news: 'Новости о компании (Google News)',
 };
 
 export interface RuOutreachConfig {
@@ -69,6 +77,8 @@ export interface RuOutreachConfig {
   limit: number;
   /** Порог скоринга 0–100: от него пишем, ниже — пропуск. Ручную проверку CEO убрал 23.09.2026. */
   write_threshold: number;
+  /** Похожесть на клиента Polza по сайту, 0–10: ниже — отсев (кроме «Возврата»). */
+  min_ta_score: number;
   /** Нижний порог суммы госконтракта, ₽. */
   min_contract_amount: number;
   /** Общая база: выручка, ₽, и штат. */
@@ -81,8 +91,11 @@ export interface RuOutreachConfig {
 
 export const DEFAULT_FRESHNESS_DAYS = 45;
 export const MAX_FRESHNESS_DAYS = 180;
-export const DEFAULT_LIMIT = 50;
-export const MAX_LIMIT = 500;
+/** Готовые компании уходят в Instantly; 500 — решение 25.09.2026. */
+export const DEFAULT_LIMIT = 500;
+export const MAX_LIMIT = 1000;
+export const DEFAULT_WRITE_THRESHOLD = 70;
+export const DEFAULT_MIN_TA_SCORE = 4;
 
 function clampInt(value: unknown, fallback: number, min: number, max: number): number {
   const n = Number(value);
@@ -95,7 +108,7 @@ export function sanitizeRuOutreachConfig(raw: Partial<RuOutreachConfig>): RuOutr
   const sources = Array.isArray(raw.sources)
     ? Array.from(new Set(raw.sources.filter((s): s is SourceCode => SOURCE_CODES.includes(s as SourceCode))))
     : [];
-  const write = clampInt(raw.write_threshold, 70, 0, 100);
+  const write = clampInt(raw.write_threshold, DEFAULT_WRITE_THRESHOLD, 0, 100);
   const minRevenue = clampInt(raw.min_revenue, 30_000_000, 0, 1_000_000_000_000);
   const senderId = typeof raw.sender_id === 'string' && /^[0-9a-f-]{36}$/i.test(raw.sender_id) ? raw.sender_id : null;
   return {
@@ -103,6 +116,7 @@ export function sanitizeRuOutreachConfig(raw: Partial<RuOutreachConfig>): RuOutr
     freshness_days: clampInt(raw.freshness_days, DEFAULT_FRESHNESS_DAYS, 1, MAX_FRESHNESS_DAYS),
     limit: clampInt(raw.limit, DEFAULT_LIMIT, 1, MAX_LIMIT),
     write_threshold: write,
+    min_ta_score: clampInt(raw.min_ta_score, DEFAULT_MIN_TA_SCORE, 0, 10),
     min_contract_amount: clampInt(raw.min_contract_amount, 1_000_000, 0, 10_000_000_000),
     min_revenue: minRevenue,
     max_revenue: Math.max(minRevenue, clampInt(raw.max_revenue, 3_000_000_000, 0, 1_000_000_000_000)),
@@ -112,7 +126,7 @@ export function sanitizeRuOutreachConfig(raw: Partial<RuOutreachConfig>): RuOutr
   };
 }
 
-export type RowStatus = 'processing' | 'ready' | 'rejected' | 'manual_review' | 'failed';
+export type RowStatus = 'processing' | 'ready' | 'rejected' | 'manual_review' | 'failed' | 'doubtful';
 
 /** Этапы конвейера (поле pipeline_stage). Порядок = порядок воронки. */
 export const STAGES = [
@@ -157,6 +171,8 @@ export const REASON_LABELS: Record<string, string> = {
   EXCLUDED_CATEGORY: 'Исключённая категория (кадровое агентство, конкурент, маркетплейс)',
   NO_CHAIN: 'Нет повода и низкий ЦА-балл',
   SCORE_TOO_LOW: 'Скоринг ниже порога',
+  TA_TOO_LOW: 'Мало похожа на клиента Polza (ниже ползунка)',
+  SIZE_OUT_OF_RANGE: 'Размер компании вне заданных рамок',
   EMAIL_NOT_FOUND: 'Не найдена корпоративная почта',
   SUPPRESSED_CONTACT: 'Почта в стоп-листе',
   SENDER_MISSING: 'Нет активной подписи отправителя',
@@ -166,6 +182,20 @@ export const REASON_LABELS: Record<string, string> = {
   PROCESSING_ERROR: 'Ошибка обработки',
   LIMIT_REACHED: 'Лимит готовых компаний уже набран',
 };
+
+/** Признаки сомнения готовой строки: один — «спорная», два и больше — «очень спорная». */
+export const DOUBT_CODES = ['GENERIC_MAILBOX', 'NEAR_THRESHOLD', 'WEAK_SIGNAL', 'COMPANY_DOUBT'] as const;
+export type DoubtCode = (typeof DOUBT_CODES)[number];
+
+export const DOUBT_LABELS: Record<DoubtCode, string> = {
+  GENERIC_MAILBOX: 'Общая почта',
+  NEAR_THRESHOLD: 'Оценка у порога',
+  WEAK_SIGNAL: 'Слабый повод',
+  COMPANY_DOUBT: 'Сомнения в компании',
+};
+
+/** С какого числа признаков строка уходит во вкладку «Очень спорные». */
+export const VERY_DOUBTFUL_FROM = 2;
 
 export type EvidenceLevel = 'A' | 'B' | 'C' | 'NONE';
 
@@ -189,7 +219,15 @@ export type SignalType =
   | 'dealer_search'
   | 'export_launch'
   | 'new_case'
-  | 'crm_lost';
+  | 'crm_lost'
+  /** 2ГИС: на сайте есть отдел продаж / целевая вакансия. В выборе цепочки не участвует. */
+  | 'sales_team'
+  /** Выручка по отчётности ФНС выросла на 20% и больше. */
+  | 'revenue_growth'
+  /** Выигранный коммерческий тендер (загруженная выгрузка). */
+  | 'tender_won'
+  /** Новость об инвестициях в компанию. */
+  | 'investment';
 
 /** Один найденный факт о компании с доказательством. */
 export interface Signal {

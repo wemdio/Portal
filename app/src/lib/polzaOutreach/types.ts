@@ -37,7 +37,7 @@ export const POLZA_OUTREACH_DEFAULT_POSTED_WITHIN_DAYS = 30;
 export const POLZA_OUTREACH_MIN_POSTED_WITHIN_DAYS = 1;
 export const POLZA_OUTREACH_MAX_POSTED_WITHIN_DAYS = 45;
 
-export const POLZA_OUTREACH_DEFAULT_LIMIT = 100;
+export const POLZA_OUTREACH_DEFAULT_LIMIT = 500;
 export const POLZA_OUTREACH_MIN_LIMIT = 1;
 // Потолок ГОТОВЫХ компаний за прогон: лимит считает выход конвейера, а не
 // размер выборки — кандидатов раннер добирает волнами, пока не наберёт

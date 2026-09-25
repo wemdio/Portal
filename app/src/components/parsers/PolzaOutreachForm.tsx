@@ -44,7 +44,7 @@ const RECENCY_OPTIONS = [
 export function PolzaOutreachForm({ onStart, busy }: Props) {
   const [countries, setCountries] = useState<string[]>([...POLZA_OUTREACH_DEFAULT_COUNTRIES]);
   const [days, setDays] = useState<number>(30);
-  const [limit, setLimit] = useState('100');
+  const [limit, setLimit] = useState('500');
   const [geoOpen, setGeoOpen] = useState(false);
   const [sources, setSources] = useState<Array<'hiring' | 'yc'>>(['hiring', 'yc']);
   const [ycFrom, setYcFrom] = useState('2023');
@@ -86,7 +86,7 @@ export function PolzaOutreachForm({ onStart, busy }: Props) {
     return {
       countries: countries.length ? countries : [...POLZA_OUTREACH_DEFAULT_COUNTRIES],
       posted_within_days: days,
-      limit: Number.isFinite(parsed) ? Math.max(1, Math.min(1000, Math.trunc(parsed))) : 100,
+      limit: Number.isFinite(parsed) ? Math.max(1, Math.min(1000, Math.trunc(parsed))) : 500,
       sources,
       yc_batch_from_year: Number(ycFrom) || 2023,
       min_employees: Number(minEmp) || 3,
