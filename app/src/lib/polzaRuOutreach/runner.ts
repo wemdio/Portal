@@ -668,7 +668,7 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
       total_parsed: totals.ready,
       completed_at: new Date().toISOString(),
       error_message: null,
-      progress_detail: { wave: waveNo, target, pool: pool.length, scanned: totals.scanned, ready: totals.ready, stop_reason: stopReason, funnel, reasons, chains, offer_version: libraries.offerVersion, source_errors: sourceErrors, doubtful: doubtful.count },
+      progress_detail: { wave: waveNo, target, pool: pool.length, scanned: totals.scanned, ready: totals.ready, stop_reason: stopReason, funnel, reasons, chains, sdr, offer_version: libraries.offerVersion, source_errors: sourceErrors, doubtful: doubtful.count },
     });
   } catch (err) {
     if (err instanceof CancelledError) {

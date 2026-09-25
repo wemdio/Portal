@@ -21,12 +21,14 @@ export async function loadYmapsNewBranches(db: SupabaseClient, freshnessDays: nu
   if (error) throw new Error(`Яндекс Карты: ${error.message}`);
   const out: YmapsCandidate[] = [];
   for (const r of (data ?? []) as Array<Record<string, unknown>>) {
+    const networkId = String(r.network_id ?? '');
+    if (!networkId) continue;
     const domain = normalizeDomain(String(r.website ?? ''));
     if (!domain) continue;
     const address = [r.city, r.address].filter((x) => typeof x === 'string' && x.trim()).join(', ');
     out.push({
-      networkId: String(r.network_id),
-      companyName: String(r.network_name ?? r.name ?? domain),
+      networkId,
+      companyName: String(r.network_name || r.name || domain),
       domain,
       signal: {
         type: 'new_office', source: 'ymaps', title: address || 'новая точка сети', date: r.first_seen_at ? String(r.first_seen_at) : null,

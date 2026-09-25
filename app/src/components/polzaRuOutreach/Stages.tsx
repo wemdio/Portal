@@ -43,14 +43,27 @@ function passedDetail(row: RuRow): string {
   ].filter(Boolean).join(' · ');
 }
 
-/** Все строки, отсеянные на данном этапе — постранично, по каждому ключу этапа отдельно. */
-async function loadDropped(jobId: string, keys: Stage[], isCancelled: () => boolean): Promise<RuRow[]> {
+/**
+ * Все строки, отсеянные на данном этапе — постранично, по каждому ключу этапа отдельно.
+ * Очень спорные (row_status 'doubtful', pipeline_stage 'qa_checked') не «не прошли» —
+ * они ждут ручной проверки, поэтому в обычных этапах их не показываем, а в шаге
+ * «Готово» показываем отдельно (запрос по статусу, не по этапу — у них другой pipeline_stage).
+ */
+async function loadDropped(jobId: string, keys: Stage[], includeDoubtful: boolean, isCancelled: () => boolean): Promise<RuRow[]> {
   const dropped: RuRow[] = [];
   for (const key of keys) {
     for (let offset = 0; offset < MODAL_MAX_ROWS_PER_STAGE; offset += MODAL_PAGE) {
       if (isCancelled()) return dropped;
       const page = await api<{ items: RuRow[]; count: number }>(`${API}/${jobId}/results?stage=${key}&limit=${MODAL_PAGE}&offset=${offset}`);
-      dropped.push(...page.items.filter((r) => r.row_status !== 'ready' && r.row_status !== 'processing'));
+      dropped.push(...page.items.filter((r) => r.row_status !== 'ready' && r.row_status !== 'processing' && r.row_status !== 'doubtful'));
+      if (offset + MODAL_PAGE >= page.count || page.items.length < MODAL_PAGE) break;
+    }
+  }
+  if (includeDoubtful) {
+    for (let offset = 0; offset < MODAL_MAX_ROWS_PER_STAGE; offset += MODAL_PAGE) {
+      if (isCancelled()) return dropped;
+      const page = await api<{ items: RuRow[]; count: number }>(`${API}/${jobId}/results?status=doubtful&limit=${MODAL_PAGE}&offset=${offset}`);
+      dropped.push(...page.items);
       if (offset + MODAL_PAGE >= page.count || page.items.length < MODAL_PAGE) break;
     }
   }
@@ -66,9 +79,10 @@ function StageModal({ jobId, viewIndex, passedCount, onClose }: { jobId: string;
   useEffect(() => {
     let cancelled = false;
     const lastIdx = Math.max(...view.keys.map((k) => STAGES.indexOf(k)));
+    const includeDoubtful = view.keys.includes('ready');
     async function load() {
       const [droppedRows, page] = await Promise.all([
-        loadDropped(jobId, view.keys, () => cancelled),
+        loadDropped(jobId, view.keys, includeDoubtful, () => cancelled),
         api<{ items: RuRow[] }>(`${API}/${jobId}/results?limit=${MODAL_PAGE}&offset=0`),
       ]);
       if (cancelled) return;

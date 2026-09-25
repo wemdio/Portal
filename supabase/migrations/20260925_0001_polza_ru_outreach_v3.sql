@@ -87,19 +87,19 @@ language sql
 stable
 set statement_timeout = '30s'
 as $$
-  select distinct on (f.network_id::text)
-         f.network_id::text, f.network_name::text, f.name::text, f.website::text,
-         f.address::text, f.city::text, f.first_seen_at, f.card_url::text
+  select distinct on (f.network_id)
+         f.network_id, f.network_name, f.name, f.website,
+         f.address, f.city, f.first_seen_at, f.card_url
   from public.yandex_maps_company_catalog f
-  where f.network_id is not null
+  where f.network_id <> ''
     and f.first_seen_at >= p_since
     and f.closed_suspected_at is null
-    and coalesce(f.website::text, '') <> ''
+    and coalesce(f.website, '') <> ''
     and exists (
       select 1 from public.yandex_maps_company_catalog o
-      where o.network_id = f.network_id and o.first_seen_at < p_since
+      where o.network_id = f.network_id and o.network_id <> '' and o.first_seen_at < p_since
     )
-  order by f.network_id::text, f.first_seen_at desc
+  order by f.network_id, f.first_seen_at desc
   limit least(greatest(p_limit, 1), 5000);
 $$;
 revoke all on function public.polza_ru_ymaps_new_branches(timestamptz, integer) from public;
