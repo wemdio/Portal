@@ -163,8 +163,11 @@ async function fetchLetters(
 
   const cursors = cursor ? decodeCursor(cursor) : null;
   const active = cursors ? lanes.filter((lane) => lane.key in cursors) : lanes;
-  // Одна пачка — одно чтение, которого ждёт человек; несколько — уже веер.
-  const requestPriority = active.length === 1 ? 'interactive' : 'fresh';
+  // Экран открыт — человек ждёт ответа, поэтому до трёх пачек читаем в
+  // интерактивной полосе: веер ограничен и не отнимает у сбора ответов больше
+  // пары чтений. Больше трёх — это уже широкий веер, он идёт общей полосой
+  // 'fresh', чтобы один экран не выедал интерактивную долю бюджета LIST.
+  const requestPriority = active.length <= 3 ? 'interactive' : 'fresh';
 
   const nextCursors: Record<string, string> = {};
   const letters: { email: Email; campaignId: string }[] = [];
