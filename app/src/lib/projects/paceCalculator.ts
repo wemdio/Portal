@@ -32,6 +32,7 @@ export interface PaceData {
   deadline: string | null;
   onTrack: boolean | null;
   requiredPace: number | null;
+  /** Usable snapshots after the latest reset/correction of the cumulative counter. */
   dataPoints: number;
   periodDays: number;
   /**
@@ -47,9 +48,11 @@ export interface PaceData {
  * `history` may arrive in any order (DB query is DESC, but tooltip code can
  * also pass arbitrary fixtures); we sort internally by recorded_at ASC.
  *
- * Velocity is computed across the full window: (last - first) / daysDiff.
- * Returns `avgPerDay = 0` and forecast = null if there's <2 points or if
- * delta and daysDiff don't yield a positive forward velocity.
+ * Velocity is (last - first) / daysDiff within the latest nondecreasing
+ * segment. A decrease starts a new baseline: old totals must not turn a
+ * counter reset/correction into negative production speed.
+ * With <2 usable points or no elapsed days, pace is unknown (avgPerDay = 0,
+ * forecast = null). Callers must not interpret that as confirmed zero pace.
  */
 export function computePace(
   history: readonly PaceHistoryPoint[],
@@ -59,7 +62,17 @@ export function computePace(
   /** Treated as "now" for forecast & on-track calculations. Defaults to Date.now(). */
   now: Date = new Date(),
 ): PaceData {
-  const sorted = [...history].sort((a, b) => a.recorded_at.localeCompare(b.recorded_at));
+  const ordered = [...history].sort((a, b) => a.recorded_at.localeCompare(b.recorded_at));
+  let segmentStart = 0;
+  for (let i = 1; i < ordered.length; i++) {
+    if (ordered[i].value < ordered[i - 1].value) segmentStart = i;
+  }
+  // A manual reset can precede the next daily snapshot. Until it is recorded,
+  // none of the old history establishes the pace of the current counter.
+  const lastSnapshot = ordered[ordered.length - 1];
+  const sorted = lastSnapshot && currentDone < lastSnapshot.value
+    ? []
+    : ordered.slice(segmentStart);
   const remaining = Math.max(0, obligation - currentDone);
   const base: PaceData = {
     avgPerDay: 0,
@@ -77,12 +90,10 @@ export function computePace(
 
   const first = sorted[0];
   const last = sorted[sorted.length - 1];
-  const daysDiff = Math.max(
-    1,
-    Math.round(
-      (new Date(last.recorded_at).getTime() - new Date(first.recorded_at).getTime()) / 86_400_000,
-    ),
+  const daysDiff = Math.round(
+    (new Date(last.recorded_at).getTime() - new Date(first.recorded_at).getTime()) / 86_400_000,
   );
+  if (daysDiff <= 0) return base;
   const delta = last.value - first.value;
   // Раньше тут было Math.round(delta / daysDiff) — для KPI/лидов это режет
   // до 0 любой темп < 0.5/день (типично для b2b: 3 лида за 14 дней = 0.21,
@@ -106,11 +117,13 @@ export function computePace(
   if (deadline) {
     const dlDate = new Date(deadline);
     if (!isNaN(dlDate.getTime())) {
-      const daysUntilDeadline = Math.max(0, Math.ceil((dlDate.getTime() - now.getTime()) / 86_400_000));
+      const daysUntilDeadline = Math.ceil((dlDate.getTime() - now.getTime()) / 86_400_000);
       base.requiredPace = daysUntilDeadline > 0 ? Math.ceil(remaining / daysUntilDeadline) : null;
       if (base.forecastDays !== null) {
-        base.onTrack = base.forecastDays <= daysUntilDeadline;
-        base.behindDays = base.forecastDays - daysUntilDeadline;
+        // Fulfilled obligations are not at risk. For unfinished ones, include
+        // days already overdue instead of treating the deadline as today.
+        base.onTrack = remaining === 0 || base.forecastDays <= daysUntilDeadline;
+        base.behindDays = remaining === 0 ? 0 : base.forecastDays - daysUntilDeadline;
       }
     }
   }
@@ -410,3 +423,64 @@ export function summarizeProjectRisk(
   return { axes, daysBehind };
 }
 
+/**
+ * Project filter: overdue obligations, forecast delay, or a stalled near-term
+ * target. Loading failures and insufficient post-reset history are unknown
+ * pace, not evidence of a stalled project. Hard overdue obligations remain
+ * visible even when history is unavailable.
+ */
+export function isProjectAtRisk(
+  input: Pick<ProjectPaceInput, 'contactsObligation' | 'contactsDone' | 'kpiPlan' | 'kpiFact' | 'deadline'>,
+  pace: ProjectPace | undefined,
+  isCompleted: boolean,
+  now: Date = new Date(),
+): boolean {
+  if (isCompleted) return false;
+
+  const contactsOblig = input.contactsObligation;
+  const contactsDone = input.contactsDone;
+  const kpiPlan = input.kpiPlan;
+  const kpiFact = input.kpiFact;
+
+  // У проекта вообще нет обязательств — никогда не проблемный.
+  if (contactsOblig === 0 && kpiPlan === 0) return false;
+
+  const deadlineStr = input.deadline?.trim();
+  let daysUntilDeadline: number | null = null;
+  if (deadlineStr) {
+    const dl = new Date(deadlineStr);
+    if (!isNaN(dl.getTime())) {
+      daysUntilDeadline = Math.ceil((dl.getTime() - now.getTime()) / 86_400_000);
+    }
+  }
+
+  // 1) HARD-FAILURE: дедлайн в прошлом больше чем на допуск, не доехали.
+  if (daysUntilDeadline !== null && daysUntilDeadline < -RISK_GRACE_DAYS) {
+    if (contactsOblig > 0 && contactsDone < contactsOblig) return true;
+    if (kpiPlan > 0 && kpiFact < kpiPlan) return true;
+  }
+
+  // 2) PACE-BASED (форкаст видим только если есть история).
+  const risk = summarizeProjectRisk(
+    pace,
+    false, // isCompleted уже отсеян выше
+  );
+  if (risk.axes.length > 0) return true;
+
+  // 3) ZERO-PACE: дедлайн ≤14 дней (включая просроченный), и отсутствие
+  //    роста подтверждено хотя бы двумя снимками после последнего сброса.
+  if (daysUntilDeadline !== null && daysUntilDeadline <= 14) {
+    const contactsRemaining = Math.max(0, contactsOblig - contactsDone);
+    const kpiRemaining = Math.max(0, kpiPlan - kpiFact);
+    const isStalled = (data: PaceData | null | undefined): boolean =>
+      !!data && data.dataPoints >= 2 && data.periodDays > 0 && data.avgPerDay <= 0;
+    if (contactsOblig > 0 && contactsRemaining > 0) {
+      if (isStalled(pace?.contacts)) return true;
+    }
+    if (kpiPlan > 0 && kpiRemaining > 0) {
+      if (isStalled(pace?.kpi)) return true;
+    }
+  }
+
+  return false;
+}

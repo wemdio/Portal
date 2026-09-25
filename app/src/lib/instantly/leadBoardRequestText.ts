@@ -1,6 +1,6 @@
 import { load } from 'cheerio';
 import { extractAuthoredReplyText, getBodyText } from './leadQualifier';
-import { LEAD_DATED_ATTRIBUTION, LEAD_QUOTE_BLOCKS, removeLeadReplyQuotes } from './leadReplyHtml';
+import { LEAD_DATED_ATTRIBUTION, LEAD_DATE_FIRST_ATTRIBUTION, LEAD_QUOTE_BLOCKS, removeLeadReplyQuotes } from './leadReplyHtml';
 import type { Email } from './types';
 
 const YOU_WROTE = /^Вы\s+писали\s+(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+[а-яё]{3,})(?:[^\n]{0,120})?:\s*$/iu;
@@ -28,7 +28,20 @@ export function leadBoardRequestText(body: Email['body']): string | null {
       // the terminal boundary: deleting just the label would expose old prose.
       $('.gmail_attr, .moz-cite-prefix, #divRplyFwdMsg, #stopSpelling, .OutlookMessageHeader')
         .before('\n> \n');
-      $('.gmail_signature').before('\n--\n');
+      const outsideSignatures = $('body').clone();
+      outsideSignatures.find('.gmail_signature').remove();
+      const onlySignatureHasText = !/\p{L}/u.test(outsideSignatures.text());
+      $('.gmail_signature').each((_, signature) => {
+        const node = $(signature);
+        // A sender may type the entire answer inside Gmail's signature editor.
+        // The CSS class alone must not erase a substantive request. Closed
+        // history has already been removed; still cut the contact table below.
+        const visible = getBodyText({ html: node.html() ?? '' });
+        const authoredInSignature = onlySignatureHasText && /^(?:добрый\s+(?:день|вечер)|здравствуйте|hello|hi)[!. ,]/iu.test(visible.trim()) &&
+          /(?:напишите|подскажите|пришлите|возможно\s+ли|интересует|please\s+send)/iu.test(visible);
+        if (!authoredInSignature) node.before('\n--\n');
+        else node.find('table').first().before('\n--\n');
+      });
       text = getBodyText({ html: $.html() });
     } catch {
       // Never fall back to dumping unparsed HTML/history into the board.
@@ -42,7 +55,7 @@ function cleanRequestText(text: string): string | null {
   // Another common dated attribution: "Name писал 2026-09-18 12:49:".
   // This display-only boundary must not change classifier behaviour.
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
-  const attribution = lines.findIndex((line) => LEAD_DATED_ATTRIBUTION.test(line.trim()) || YOU_WROTE.test(line.trim()) || SPACED_SIGNOFF.test(line.trim()));
+  const attribution = lines.findIndex((line) => LEAD_DATED_ATTRIBUTION.test(line.trim()) || LEAD_DATE_FIRST_ATTRIBUTION.test(line.trim()) || YOU_WROTE.test(line.trim()) || SPACED_SIGNOFF.test(line.trim()) || /^От кого:\s*.+@/iu.test(line.trim()));
   const current = attribution < 0 ? text : lines.slice(0, attribution).join('\n');
   // Empty means there is no separable current answer; do not resurrect history.
   const authored = extractAuthoredReplyText(current).split('\n')

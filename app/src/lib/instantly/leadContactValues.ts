@@ -6,7 +6,7 @@ const NON_COMPANY_DOMAINS = [
   'instagram.com', 'twitter.com', 'x.com', 'youtube.com', 'youtu.be', 't.me',
   'telegram.me', 'wa.me', 'whatsapp.com', 'vk.com', 'ok.ru', 'max.ru', 'aka.ms',
   'bit.ly', 'tinyurl.com', 'goo.gl', 'clck.ru', 'linktr.ee', '2gis.ru',
-  'safelinks.protection.outlook.com', 'jivo.chat', 'jivosite.com',
+  'safelinks.protection.outlook.com', 'jivo.chat', 'jivosite.com', 'workspace.vk.ru',
 ];
 
 /** Shared by uploaded fields and signatures; no network/DNS or paid lookup. */
@@ -68,13 +68,18 @@ export interface LeadPhoneCandidate { value: string; digits: string; start: numb
 /** Retain explicit extensions and separate multiple numbers on the same line. */
 export function leadPhoneCandidates(line: string): LeadPhoneCandidate[] {
   const result: LeadPhoneCandidate[] = [];
-  const candidate = /(?:\+?\d|\(\d{2,5}\))[\d \t\u00a0().-]{4,}\d\)?/g;
+  const candidate = /(?:(?:\+[ \t\u00a0]*)?\d|\(\d{2,5}\))[\d \t\u00a0().-]{4,}\d\)?/g;
   let consumed = 0;
   for (const match of line.matchAll(candidate)) {
     if (match.index < consumed) continue;
     let base = match[0].trim().replace(/[.]+$/, '');
     let extension: string | undefined;
     let end = match.index + match[0].length;
+    // Never extract a numeric substring of a registry id or a timestamp.
+    // The latter used to turn "2026-09-24 12:47" into a phone.
+    if (/[\p{L}\p{N}_/-]$/u.test(line.slice(0, match.index)) ||
+      /^[\p{L}\p{N}_/]/u.test(line.slice(end)) ||
+      /^(?:\d{4}[./-]\d{1,2}[./-]\d{1,2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4})(?:\s|$)/u.test(base)) continue;
     const suffix = /^(?:\s*[,;]?\s*\(?\s*(?:доб(?:авочный|\.)?|доп\.?|внутр\.?|ext(?:ension|\.)?|x)\s*[:.#]?\s*(\d{1,6})(?!\d)\)?)/iu.exec(line.slice(end));
     if (suffix) { extension = suffix[1]; end += suffix[0].length; }
     // Legacy Russian signatures: +7(391)206-18-17(102). Only interpret the
