@@ -13,6 +13,7 @@ import {
 } from '@/lib/firstSales/metrics';
 import { fetchTaskMeetings } from '@/lib/firstSales/meetings';
 import { fetchFirstSalesPayments, moneyByDeal } from '@/lib/firstSales/money';
+import { fetchStatusesAt } from '@/lib/firstSales/dealTransitions';
 
 // Роут авторизуется по заголовку и зависит от query — предрендер здесь дал бы
 // либо пустой ответ, либо чужой. Тот же паттерн, что у summary/route.ts.
@@ -48,18 +49,23 @@ export async function GET(req: NextRequest) {
   const matchesSlice = matchesDrill(slice.value, parsed.value.sources);
 
   try {
-    // Встречи и деньги окна нужны здесь не для расширения выборки, а только
-    // для ярлыков «В периоде» у сделок, которые в списке останутся. Сам
-    // список режется по дате создания (фильтр ниже), поэтому сделку, пришедшую
-    // раньше окна, тянуть незачем — `extraDealIds` сюда не передаём. В
-    // summary/route.ts расширение остаётся: цифры сводки считают встречи и
-    // деньги по старым сделкам и без них разошлись бы с бухгалтерией.
+    // Выборка расширяется так же, как в summary/route.ts: сделка, заведённая
+    // раньше окна, попадает в список, если в окне по ней была встреча,
+    // договор, продажа или оплата. Иначе сумма списка не сходилась бы с
+    // цифрами строки — март, оплаченный в сентябре, сидел в «Деньгах»
+    // сентября, но в сентябрьском списке его не было (решение 25.09.2026).
     const [payments, taskMeetings] = await Promise.all([
       fetchFirstSalesPayments(gate.supabaseAdmin, PIPELINE_ID, from, to),
       fetchTaskMeetings(gate.supabaseAdmin, PIPELINE_ID, from, to),
     ]);
+    const extraDealIds = [
+      ...new Set([
+        ...payments.map((p) => p.amo_deal_id).filter((id): id is number => id != null),
+        ...taskMeetings.keys(),
+      ]),
+    ];
 
-    const leads = await fetchFirstSalesLeads(gate.supabaseAdmin, PIPELINE_ID, from, to);
+    const leads = await fetchFirstSalesLeads(gate.supabaseAdmin, PIPELINE_ID, from, to, extraDealIds);
 
     // Встречи и деньги по сделкам — теми же правилами, что и цифры разбивки
     // (окно, порог достоверности встреч, дедуп «одна сделка — один день»,
@@ -67,7 +73,7 @@ export async function GET(req: NextRequest) {
     const meetings = meetingsByDeal(leads, from, to, taskMeetings);
     const money = moneyByDeal(payments, from, to);
 
-    const rows = leads
+    const selected = leads
       .filter(matchesSlice)
       .map((lead) => ({
         lead,
@@ -80,22 +86,38 @@ export async function GET(req: NextRequest) {
           money: money.get(lead.amo_id) ?? 0,
         },
       }))
-      // Список режется по ДАТЕ СОЗДАНИЯ сделки, и только по ней: выбран
-      // сентябрь — в списке сделки сентября, без исключений. Выборка выше
-      // шире (запрос ловит и активность по этапам), поэтому фильтр здесь
-      // обязателен.
+      // В списке — сделки, созданные в периоде, и сделки, заведённые раньше,
+      // если в периоде по ним что-то случилось (встреча, договор, продажа,
+      // деньги). Квал не проверяем: он засчитывается только сделке,
+      // созданной в окне (isQualifiedInWindow).
       //
-      // Осознанная цена решения (продуктовое решение от 08.09.2026): цифры
-      // «Договоры» и «Деньги» строки считаются по дате этапа и по дате
-      // прихода, а не по дате создания, поэтому договор или оплата июньской
-      // сделки в сентябрьском списке не покажутся — сумма ярлыков под
-      // строкой может не сойтись с самой строкой. Раньше было наоборот:
-      // список показывал такие сделки, и это читалось как сломанный фильтр
-      // периода. Оговорка про расхождение стоит под таблицей в
-      // `DealDrillDown`.
-      .filter(({ hits }) => hits.lead)
-      .sort((a, b) => (b.lead.created_at ?? '').localeCompare(a.lead.created_at ?? ''))
-      .slice(0, MAX_ROWS)
+      // История решения: 08.09.2026 список резали строго по дате создания —
+      // старая сделка в нём читалась как сломанный фильтр периода. Это
+      // давало обратную беду: «Деньги» строки не сходились со списком. С
+      // 25.09.2026 старые сделки возвращены, но помечены «заведена раньше» и
+      // несут этап на конец периода, так что сломанным фильтром больше не
+      // выглядят.
+      .filter(({ hits }) => hits.lead || hits.meetings > 0 || hits.contract || hits.sale || hits.money > 0);
+
+    // Старые сделки при обрезке не теряем: их мало, и именно они объясняют
+    // деньги строки. Новые — свежие сверху, как раньше.
+    const byCreatedDesc = (a: (typeof selected)[number], b: (typeof selected)[number]) =>
+      (b.lead.created_at ?? '').localeCompare(a.lead.created_at ?? '');
+    const earlier = selected.filter(({ hits }) => !hits.lead).sort(byCreatedDesc);
+    const inPeriod = selected.filter(({ hits }) => hits.lead).sort(byCreatedDesc);
+    const picked = [...inPeriod.slice(0, Math.max(0, MAX_ROWS - earlier.length)), ...earlier].slice(0, MAX_ROWS);
+    const truncated = picked.length < selected.length;
+
+    // Этап на конец периода — по истории переходов, а не текущий: выбран
+    // июль — значит, где сделка стояла 31 июля. Для периода, который ещё
+    // идёт, это совпадает с текущим этапом.
+    const statusAtEnd = await fetchStatusesAt(
+      gate.supabaseAdmin,
+      picked.map(({ lead }) => ({ amo_id: lead.amo_id, created_at: lead.created_at, status_id: lead.status_id })),
+      to,
+    );
+
+    const rows = picked
       .map(({ lead, hits }) => ({
         amo_id: lead.amo_id,
         name: lead.name,
@@ -108,10 +130,11 @@ export async function GET(req: NextRequest) {
         first_contract_at: lead.first_contract_at,
         won_at: lead.won_at,
         history_complete: lead.history_complete,
+        /** Этап AMO на конец выбранного периода. null — этап не определить. */
+        status_at_end: statusAtEnd.get(lead.amo_id) ?? null,
         // Что у сделки случилось внутри окна: квал, встреча по записи
-        // разговора, договор, деньги. Все сделки списка созданы в периоде,
-        // так что `lead` здесь всегда true — колонка отвечает на «до чего
-        // сделка дошла», а не «почему она в списке».
+        // разговора, договор, деньги. `lead: false` — сделка заведена раньше
+        // периода и попала в список по одному из остальных событий.
         in_period: {
           lead: hits.lead,
           qualified: hits.qualified,
@@ -124,7 +147,7 @@ export async function GET(req: NextRequest) {
       }));
 
     // Срез в 200 строк — не «столько и есть». Отдаём флаг, чтобы UI сказал правду.
-    return NextResponse.json({ rows, truncated: rows.length === MAX_ROWS });
+    return NextResponse.json({ rows, truncated });
   } catch (e) {
     return NextResponse.json(
       { error: e instanceof Error ? e.message : 'first_sales_leads_failed' },

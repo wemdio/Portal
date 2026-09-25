@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { chunkArray, IN_CHUNK_SIZE } from '@/lib/cisLeads/batchedQuery';
 
 /**
  * История переходов сделки по этапам AMO — «рельсы» в модалке сделки.
@@ -205,6 +206,77 @@ export function buildDealRail(
     createdPipeline: createdRow?.pipeline_name ?? pipelineName(currentPipeline),
     transitions,
   };
+}
+
+/**
+ * Этап, на котором сделка стояла в момент `at`: куда её привёл последний
+ * переход не позже `at`, а если переходов до `at` не было — этап при создании.
+ *
+ * Нужен списку сделок первички: сделка, заведённая раньше периода, попадает в
+ * него по событию периода (встреча, оплата), и её сегодняшний этап описывал бы
+ * не тот период, который выбран, а сегодняшний день.
+ */
+export function statusAt(rail: DealRail, at: Date): string | null {
+  const t = at.getTime();
+  let status = rail.createdStatus;
+  for (const transition of rail.transitions) {
+    if (new Date(transition.changedAt).getTime() > t) break;
+    status = transition.toStatus;
+  }
+  return status;
+}
+
+/**
+ * Этапы многих сделок на момент `at` — одной пачкой запросов, без имён авторов
+ * переходов (для этапа они не нужны). События берутся все, без отсечки по дате:
+ * этап при создании читается из первого перехода, даже если он был после `at`.
+ */
+export async function fetchStatusesAt(
+  db: SupabaseClient,
+  deals: Array<{ amo_id: number; created_at: string | null; status_id: number | null }>,
+  at: Date,
+): Promise<Map<number, string | null>> {
+  const result = new Map<number, string | null>();
+  if (deals.length === 0) return result;
+
+  const ids = deals.map((d) => d.amo_id);
+  const [statusesRes, eventChunks] = await Promise.all([
+    db.from('amo_statuses').select('pipeline_id, status_id, status_name, pipeline_name, sort'),
+    Promise.all(
+      chunkArray(ids, IN_CHUNK_SIZE).map(async (chunk) => {
+        const { data, error } = await db
+          .from('amo_events')
+          .select('amo_deal_id, changed_at, changed_by, from_value, to_value, payload')
+          .in('amo_deal_id', chunk)
+          .eq('event_type', 'lead_status_changed');
+        if (error) throw error;
+        return (data ?? []) as Array<EventRow & { amo_deal_id: number }>;
+      }),
+    ),
+  ]);
+  if (statusesRes.error) throw statusesRes.error;
+  const statuses = (statusesRes.data ?? []) as StatusRow[];
+
+  const eventsByDeal = new Map<number, EventRow[]>();
+  for (const event of eventChunks.flat()) {
+    const list = eventsByDeal.get(Number(event.amo_deal_id)) ?? [];
+    list.push(event);
+    eventsByDeal.set(Number(event.amo_deal_id), list);
+  }
+
+  const noNames = new Map<string, string>();
+  for (const deal of deals) {
+    // Воронка сделки здесь неизвестна; для сделки с переходами она читается из
+    // самих событий, а у сделки без переходов этап и есть текущий.
+    const rail = buildDealRail(
+      { created_at: deal.created_at, status_id: deal.status_id, pipeline_id: null },
+      eventsByDeal.get(deal.amo_id) ?? [],
+      statuses,
+      noNames,
+    );
+    result.set(deal.amo_id, statusAt(rail, at));
+  }
+  return result;
 }
 
 /** Тянет всё нужное для рельсов одной сделки. Общая для ручек первички и продлений. */
