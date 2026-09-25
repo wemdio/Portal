@@ -3454,7 +3454,8 @@ describe('pollAndQualifyReplies', () => {
         campaign_id: 'linked-campaign',
         lead_email: 'info@lead.example',
         thread_id: null,
-        created_at: '2026-08-21T00:00:00.000Z',
+        // Молодое событие: старше 15 минут drain его уже не переоткрывает.
+        created_at: new Date(Date.now() - 60_000).toISOString(),
         processed: false,
       });
     }
@@ -3488,6 +3489,7 @@ describe('pollAndQualifyReplies', () => {
       // поллинга) и отдали разбору её — без повторного поиска внутри.
       expect(fetchThreadContext).toHaveBeenCalledWith(
         'linked-campaign', 'zamkomdir@lead.example', 'provider-thread-1', expect.anything(),
+        { consumer: 'webhook_drain' },
       );
       expect(fetchThreadContext).toHaveBeenCalledTimes(2);
     });
@@ -3673,7 +3675,10 @@ describe('pollAndQualifyReplies', () => {
     });
   });
 
-  it('reopens an old webhook event when provider context is still unavailable', async () => {
+  // Прод 25.09: событие без переписки у Instantly переоткрывалось каждые 7 с
+  // до суток (~470 LIST + ~470 GET в час). Старше 15 минут — закрываем,
+  // ответ подберёт discovery.
+  it('acks an old webhook event when provider context is still unavailable', async () => {
     await mockInstantlyDb!.from('instantly_webhook_events').insert({
       id: 'old-empty-context-event',
       event_type: 'reply_received',
@@ -3691,7 +3696,7 @@ describe('pollAndQualifyReplies', () => {
     });
 
     expect(mockInstantlyDb!.getRows('instantly_webhook_events')).toEqual([
-      expect.objectContaining({ id: 'old-empty-context-event', processed: false }),
+      expect.objectContaining({ id: 'old-empty-context-event', processed: true }),
     ]);
     expect(mockInstantlyDb!.getRows('instantly_lead_qualifications')).toHaveLength(0);
 
@@ -3705,7 +3710,8 @@ describe('pollAndQualifyReplies', () => {
         tables: {
           project_instantly_campaigns: [{ campaign_id: 'linked-campaign', project_id: 'project-1' }],
           instantly_webhook_events: [{
-            id: 'known-event', email_id: legacy ? null : 'known-email', event_type: 'reply_received',
+            // Свой id на прогон: переоткрытое событие drain минуту не перечитывает.
+            id: `known-event-${status}`, email_id: legacy ? null : 'known-email', event_type: 'reply_received',
             campaign_id: 'linked-campaign', lead_email: 'lead@example.com',
             thread_id: 'thread-not-indexed', created_at: '2026-08-21T00:00:00.000Z', processed: false,
           }],

@@ -84,6 +84,23 @@ const LOCAL_RETRY_QUALIFY_ERROR_RE = /Instantly email read deferred|failed after
 const RETRIABLE_BILLING_QUALIFY_ERROR_RE =
   /\b(?:insufficient credits?|insufficient balance|balance is too low|payment required|out of credits?|spend(?:ing)? limit|billing limit)\b/i;
 const OWNERSHIP_DEFER_ERROR_PREFIX = 'Reply ownership deferred';
+// Событие вебхука, для которого Instantly так и не отдал письмо/переписку,
+// раньше переоткрывалось каждые 7 с до суточного отсечения: одно такое событие
+// (прод 25.09) стоило ~470 LIST + ~470 GET в час на main и съедало общий
+// бюджет LIST /emails. Через 15 минут от прихода вебхука бросаем его: ответ
+// всё равно подберёт discovery (pollLoop → discoverQualificationRepliesCycle
+// листает полученные письма воркспейса независимо от вебхуков), а до этого
+// читаем то же событие не чаще раза в минуту.
+const WEBHOOK_CONTEXT_GIVE_UP_MS = 15 * 60_000;
+const WEBHOOK_CONTEXT_RETRY_MS = 60_000;
+// В памяти процесса: drain крутится в одном воркере, а после рестарта
+// худший случай — одно лишнее чтение на событие. Миграция ради этого не нужна.
+const webhookEventRetryAt = new Map<string, number>();
+
+function webhookContextGiveUpDue(createdAt: string | null, now = Date.now()): boolean {
+  const created = createdAt ? Date.parse(createdAt) : NaN;
+  return Number.isFinite(created) && now - created >= WEBHOOK_CONTEXT_GIVE_UP_MS;
+}
 export const OWNERSHIP_REVIEW_REASON_PREFIX =
   'Не удалось однозначно определить проект-владельца ответа:';
 export const TRANSIENT_RETRY_REASON_PREFIX =
@@ -2774,7 +2791,7 @@ export async function reprocessOwnershipReviewRows(
         try {
           fullEmail = await instantly.getEmail(emailId, {
             accountId, requestPriority: 'recovery', retryRateLimits: false,
-            timeoutMs: 20_000, timeoutIncludesBody: true,
+            timeoutMs: 20_000, timeoutIncludesBody: true, consumer: 'ownership_recovery',
           });
         } catch (error) {
           if (!(error instanceof InstantlyApiError && error.status === 404)) throw error;
@@ -3049,7 +3066,9 @@ export async function resolveColleagueWebhookReply(
   if (replyAutomationExpired(notBefore, byId)) return 'expired';
   const sender = (byId.from_address_email ?? '').trim().toLowerCase();
   if (!sender || sender === leadEmail.trim().toLowerCase()) return 'lead_own';
-  const senderCtx = await fetchThreadContext(campaignId, sender, byId.thread_id ?? null, accountId);
+  const senderCtx = await fetchThreadContext(
+    campaignId, sender, byId.thread_id ?? null, accountId, { consumer: 'webhook_drain' },
+  );
   if (!senderCtx || senderCtx.replyEmail.id !== byId.id) return 'not_indexed';
   return {
     reply: { ...senderCtx.replyEmail, campaign_id: senderCtx.replyEmail.campaign_id ?? campaignId } as Email,
@@ -3080,6 +3099,7 @@ export async function fetchWebhookReplyById(
     // последовательную очередь вебхуков 90 с, а 429 уходит в общий transient-путь.
     email = await instantly.getEmail(id, {
       accountId, retryRateLimits: false, timeoutMs: 20_000, timeoutIncludesBody: true,
+      consumer: 'webhook_drain',
     });
   } catch (error) {
     if (error instanceof InstantlyApiError && error.status === 404) return null;
@@ -3131,6 +3151,14 @@ export async function drainWebhookQueue(): Promise<number> {
   //    — чтобы Instantly успел проиндексировать письмо в /emails), и атомарно их
   //    клеймим (processed=true): конкурентный поллинг очередь не читает, повторный
   //    drain их уже не возьмёт.
+  //    События, переоткрытые меньше минуты назад, пропускаем, не клеймя: иначе
+  //    одно застрявшее событие перечитывало бы Instantly каждый тик (7 с).
+  //    Выборку берём с запасом на отложенные — чтобы они, как самые старые,
+  //    не занимали весь батч и не задерживали свежие ответы.
+  const nowMs = Date.now();
+  for (const [eventId, retryAt] of webhookEventRetryAt) {
+    if (retryAt <= nowMs) webhookEventRetryAt.delete(eventId);
+  }
   const { data: candidates, error: selErr } = await db
     .from('instantly_webhook_events')
     .select('id')
@@ -3138,14 +3166,18 @@ export async function drainWebhookQueue(): Promise<number> {
     .ilike('event_type', '%repl%')
     .lt('created_at', olderThanIso)
     .order('created_at', { ascending: true })
-    .limit(batchSize);
+    .limit(batchSize + Math.min(webhookEventRetryAt.size, 200));
   if (selErr) {
     workerLog('warn', `drain: select failed: ${selErr.message}`);
     return 0;
   }
   if (!candidates || candidates.length === 0) return 0;
 
-  const ids = (candidates as Array<{ id: string }>).map((c) => c.id);
+  const ids = (candidates as Array<{ id: string }>)
+    .map((c) => c.id)
+    .filter((id) => !webhookEventRetryAt.has(id))
+    .slice(0, batchSize);
+  if (ids.length === 0) return 0;
   const { data: claimed } = await db
     .from('instantly_webhook_events')
     .update({ processed: true })
@@ -3180,6 +3212,10 @@ export async function drainWebhookQueue(): Promise<number> {
     if (!accountId) continue; // не Portal-linked/client кампания — поллинг её тоже не берёт
 
     let replyForError: Email | null = null;
+    // Идут ли сейчас чтения Instantly за письмом/перепиской. Сбой до них или
+    // после (дедуп в БД, разбор) — не про отсутствие письма у провайдера,
+    // сдача по возрасту его не касается.
+    let awaitingProviderContext = false;
     try {
       // Polling may already have persisted this exact inbound (including a
       // durable retry). ACK its webhook without spending another /emails read.
@@ -3195,8 +3231,11 @@ export async function drainWebhookQueue(): Promise<number> {
       }
       if (fetched > 0) await new Promise((r) => setTimeout(r, interDelay));
       fetched++;
+      awaitingProviderContext = true;
       // Один вызов Instantly: проверка готовности + источник настоящего id письма.
-      const found = await fetchThreadContext(campaignId, leadEmail, row.thread_id, accountId);
+      const found = await fetchThreadContext(
+        campaignId, leadEmail, row.thread_id, accountId, { consumer: 'webhook_drain' },
+      );
       // Вебхук — про конкретное письмо (row.email_id). Поиск треда идёт по
       // адресу лида, а поиск Instantly сопоставляет ОТПРАВИТЕЛЯ, поэтому ответ
       // коллеги со своего адреса (писали на info@, ответил zamkomdir@) этим
@@ -3244,15 +3283,29 @@ export async function drainWebhookQueue(): Promise<number> {
           // Старое письмо, доставленное заново: автоматике не положено, закрываем.
           continue;
         } else {
-          // Без id в вебхуке, письмо ещё не отдаётся по id, отвечал сам лид или
-          // переписка коллеги ещё не ищется — ждём индекса Instantly: общий
-          // transient-путь ниже переоткроет событие (до суточного отсечения).
+          // Без id в вебхуке, письмо ещё не отдаётся по id (404), отвечал сам
+          // лид или переписка коллеги ещё не ищется — ждём индекса Instantly:
+          // общий transient-путь ниже переоткроет событие не чаще раза в
+          // минуту. Но не дольше 15 минут от прихода вебхука: дальше событие
+          // закрываем (claim уже поставил processed=true, continue его
+          // оставляет), а ответ подберёт discovery — он листает полученные
+          // письма воркспейса сам, без вебхуков, и сходится с drain на
+          // instantly_email_id.
+          if (webhookContextGiveUpDue(row.created_at)) {
+            workerLog(
+              'warn',
+              `drain: webhook event ${row.id} has no provider context after ` +
+              `${WEBHOOK_CONTEXT_GIVE_UP_MS / 60_000} min — acked, left to discovery`,
+            );
+            continue;
+          }
           throw new Error(
             `${OWNERSHIP_DEFER_ERROR_PREFIX} for webhook event ${row.id}: ` +
             'provider thread context is not available yet',
           );
         }
       }
+      awaitingProviderContext = false;
       if (!reply.id) continue; // без id невозможен дедуп-конвердж — пропускаем
       if (replyAutomationExpired(notBefore, reply)) continue;
 
@@ -3302,6 +3355,18 @@ export async function drainWebhookQueue(): Promise<number> {
           workerLog('error', `drain: retry-row write failed for ${retryKey}: ${retryError.message}`);
         }
 
+        // Тот же предел в 15 минут для сбоев самих чтений Instantly (5xx/429/
+        // отказ бюджета на GET по id или поиске треда): письмо так и не
+        // получено, а discovery подберёт ответ сам. Событие остаётся acked.
+        if (!replyForError && awaitingProviderContext && webhookContextGiveUpDue(row.created_at)) {
+          workerLog(
+            'warn',
+            `drain: webhook event ${row.id} still failing provider reads after ` +
+            `${WEBHOOK_CONTEXT_GIVE_UP_MS / 60_000} min — acked, left to discovery`,
+          );
+          continue;
+        }
+
         // If the provider has not exposed a real email id yet (or the retry
         // row write failed), give the durable webhook queue its claim back.
         const { error: requeueError } = await db
@@ -3309,6 +3374,8 @@ export async function drainWebhookQueue(): Promise<number> {
           .update({ processed: false })
           .eq('id', row.id);
         if (!requeueError) {
+          // Переоткрытое событие следующий тик не берёт — только через минуту.
+          webhookEventRetryAt.set(row.id, Date.now() + WEBHOOK_CONTEXT_RETRY_MS);
           workerLog('warn', `drain: transient failure for ${retryKey} — event requeued`);
           continue;
         }
@@ -4683,7 +4750,7 @@ export async function maybePostLeadHandoff(opts: {
     let eaccount = (opts.reply as { eaccount?: string | null }).eaccount ?? null;
     if (!eaccount) {
       try {
-        const e = await instantly.getEmail(replyToUuid, { accountId: opts.accountId });
+        const e = await instantly.getEmail(replyToUuid, { accountId: opts.accountId, consumer: 'handoff' });
         eaccount = (e as { eaccount?: string | null })?.eaccount ?? null;
       } catch {
         /* fall through to skip */

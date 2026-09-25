@@ -61,8 +61,10 @@ export async function fetchThreadContext(
   leadEmail: string,
   threadId?: string | null,
   accountId?: string,
+  // consumer — по умолчанию 'qualification'; drain вебхуков передаёт свой
+  // ярлык, чтобы его чтения LIST /emails были видны в почасовых счётчиках.
   requestOptions?: Pick<InstantlyRequestOptions,
-    'requestPriority' | 'timeoutMs' | 'timeoutIncludesBody' | 'retryRateLimits'>,
+    'requestPriority' | 'timeoutMs' | 'timeoutIncludesBody' | 'retryRateLimits' | 'consumer'>,
 ): Promise<ThreadContext | null> {
   let allEmails: Email[] = [];
   let historyFetchFailed = false;
