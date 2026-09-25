@@ -13,6 +13,9 @@ export const VE_COMPANY_CAP_FIELD = '_ve_company_cap';
 export interface VeRelevanceReserve {
   version: 1;
   rows: Array<Record<string, unknown>>;
+  /** Repeated descriptions are stored once. Row flags/verdicts remain inline
+   * for SQL review eligibility; all worker reads restore the original text. */
+  descriptions?: string[];
   /** Preserved acquisition inputs, including multi-email cells BC may reduce. */
   source_rows?: Array<Record<string, unknown>>;
 }
@@ -61,7 +64,46 @@ export function readVeRelevanceReserve(value: unknown): Array<Record<string, unk
   if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
   const reserve = value as Partial<VeRelevanceReserve>;
   if (reserve.version !== 1 || !Array.isArray(reserve.rows)) return [];
-  return reserve.rows.filter((row): row is Record<string, unknown> => !!row && typeof row === 'object' && !Array.isArray(row));
+  return reserve.rows.filter((row): row is Record<string, unknown> => !!row && typeof row === 'object' && !Array.isArray(row))
+    .map((row) => {
+      if (!('_ve_description_ref' in row)) return row;
+      const ref = row._ve_description_ref;
+      if (typeof ref !== 'number' || !Number.isSafeInteger(ref) || ref < 0
+        || !Array.isArray(reserve.descriptions) || typeof reserve.descriptions[ref] !== 'string') {
+        throw new Error('Invalid relevance reserve description reference');
+      }
+      const restored: Record<string, unknown> = { ...row, description: reserve.descriptions[ref] };
+      delete restored._ve_description_ref;
+      return restored;
+    });
+}
+
+/** Lossless storage compaction, without removing any company, email or verdict.
+ * Historical constructors expanded one company's description to hundreds of
+ * addresses; StaffLine's reserve alone grew to 201 MB and blocked checkpoint
+ * writes at PostgreSQL's 256 MB jsonb limit. Keep small reserves unchanged. */
+export function compactVeRelevanceReserve(value: VeRelevanceReserve): VeRelevanceReserve {
+  const rows = readVeRelevanceReserve(value);
+  const counts = new Map<string, number>();
+  for (const row of rows) if (typeof row.description === 'string' && row.description.length >= 256) {
+    counts.set(row.description, (counts.get(row.description) ?? 0) + 1);
+  }
+  const descriptions: string[] = [];
+  let savings = 0;
+  for (const [description, count] of counts) if (count > 1) {
+    descriptions.push(description);
+    savings += (count - 1) * description.length - count * 32;
+  }
+  const { descriptions: _previous, ...plain } = value;
+  if (savings < 64 * 1024) return _previous ? { ...plain, rows } : value;
+  const refs = new Map(descriptions.map((description, index) => [description, index]));
+  return { ...plain, descriptions, rows: rows.map((row) => {
+    const ref = typeof row.description === 'string' ? refs.get(row.description) : undefined;
+    if (ref === undefined) return row;
+    const packed: Record<string, unknown> = { ...row, _ve_description_ref: ref };
+    delete packed.description;
+    return packed;
+  }) };
 }
 
 export function readVeRelevanceSourceRows(value: unknown): Array<Record<string, unknown>> {
