@@ -1,6 +1,7 @@
 /**
- * Шесть цепочек «Нашего автоаутрича» (RU_OUTREACH_HANDOFF §2, §3.2): пять по
- * четыре письма и SDR-цепочка «найм» — три письма по INSTRUCTION_02 (23.09).
+ * Цепочки «Нашего автоаутрича» (RU_OUTREACH_HANDOFF §2, §3.2): пять по
+ * четыре письма, SDR-цепочка «найм» — три письма по INSTRUCTION_02 (23.09) и
+ * «Автоматизированный аутрич» — три письма по INSTRUCTION_03 (сплит 50/50, 25.09).
  *
  *  1 — повод: вакансия / реклама / выставка / рост / профиль / прошлый разговор;
  *      на общий ящик — routing-вариант «кому переслать»;
@@ -27,6 +28,8 @@ export interface ChainInput {
   /** Дословная цитата о рынке/клиентах компании — без неё сегменты общие. */
   marketQuote: string | null;
   productSummary: string | null;
+  /** У «Автоматизации» — исходная цепочка: её подтверждённый повод идёт в письмо 2. */
+  baseChain?: ChainType;
 }
 
 function formatDate(iso: string | null | undefined): string | null {
@@ -85,6 +88,11 @@ export function openingSentence(input: ChainInput, brand: string): string | null
       return input.marketQuote && wordCount(input.marketQuote) >= 6 && wordCount(input.marketQuote) <= 20
         ? `На вашем сайте указано: «${input.marketQuote}».`
         : null;
+    case 'automation':
+      // Повод исходной цепочки; «уже общались» у автоматизации — в самом шаблоне письма 1.
+      return input.baseChain && input.baseChain !== 'automation' && input.baseChain !== 'reactivation'
+        ? openingSentence({ ...input, chain: input.baseChain }, brand)
+        : null;
   }
 }
 
@@ -102,8 +110,8 @@ interface ChainCopy {
   cta2: (b: string) => string;
 }
 
-/** Цепочки CEO по четыре письма; «найм» — отдельная SDR-цепочка (buildSdrChain). */
-const COPY: Record<Exclude<ChainType, 'hiring'>, ChainCopy> = {
+/** Цепочки CEO по четыре письма; «найм» и «автоматизация» — отдельные цепочки Максима. */
+const COPY: Record<Exclude<ChainType, 'hiring' | 'automation'>, ChainCopy> = {
   reactivation: {
     subjects: (b) => [`снова по поводу аутрича для ${b}`, `новая гипотеза для ${b}`],
     letter1:
@@ -260,8 +268,108 @@ function buildSdrChain(ctx: LetterContext, input: ChainInput): AssembledChain & 
   };
 }
 
+const AUTOMATION_MECHANISM =
+  'Как это устроено: на старте один раз согласовываем аудитории и предложения, дальше база пополняется по правилам, а кампании по сегментам запускаются без ручного запуска каждой гипотезы. Заинтересованные ответы передаём вашему менеджеру вместе с перепиской — обработка лидов остаётся на вашей стороне.';
+
+/**
+ * «Автоматизированный аутрич» — три письма по INSTRUCTION_03 (Максим, 22.09.2026):
+ * новый формат → возражение «объём = хуже персонализация» и механика →
+ * самоквалификация. «Мы с вами уже общались» — только при разговоре в AMO;
+ * цифры оффера — только из утверждённого claim `automation_value`.
+ */
+function buildAutomationChain(ctx: LetterContext, input: ChainInput): AssembledChain & { campaignHypothesis: string | null } {
+  const b = q(ctx.brand);
+  const s = ctx.sender;
+  const value = claim(ctx, 'automation_value');
+  const signalBlock = openingSentence(input, ctx.brand);
+
+  const letter1: Letter = ctx.isRouting
+    ? {
+        n: 1,
+        subject: `вопрос по лидогенерации в ${b}`,
+        body: signed(
+          paragraphs(
+            'Добрый день!',
+            `Подскажите, пожалуйста, кто в ${b} отвечает за лидогенерацию?`,
+            'Я занимаюсь развитием Polza Agency. Мы настраиваем автоматизированный email-outreach: согласовываем несколько узких B2B-сегментов и предложения, настраиваем пополнение базы и цепочки писем, а дальше кампании работают по заданным правилам.',
+            'Буду благодарен, если передадите письмо ответственному сотруднику или подскажете его контакт.',
+          ),
+          s,
+        ),
+      }
+    : input.priorContact
+      ? {
+          n: 1,
+          subject: `автоматизация лидогенерации в ${b}`,
+          body: signed(
+            paragraphs(
+              `Добрый день! Я коротко по поводу ${b}.`,
+              'Мы с вами уже общались по поводу email-аутрича. Сейчас у Polza есть формат, в котором мы один раз согласовываем аудитории и предложения, настраиваем сбор базы и цепочки, а дальше кампании запускаются по заданным правилам без постоянного ручного согласования каждого запуска.',
+              'Это позволяет параллельно вести несколько узких сегментов, а не одну широкую рассылку.',
+              value?.claim_text,
+              `Есть смысл посмотреть, как такой формат можно применить для ${b}?`,
+            ),
+            s,
+          ),
+        }
+      : {
+          n: 1,
+          subject: `вопрос по лидогенерации в ${b}`,
+          body: signed(
+            paragraphs(
+              `Добрый день! Я коротко по поводу ${b}.`,
+              'Я занимаюсь развитием Polza Agency. Мы настраиваем автоматизированный email-outreach: согласовываем несколько узких B2B-сегментов и предложения, настраиваем пополнение базы и цепочки писем, а дальше кампании работают по заданным правилам без ручного запуска каждой гипотезы.',
+              value?.claim_text,
+              `Подскажите, есть смысл обсудить применимость такого формата для ${b}?`,
+            ),
+            s,
+          ),
+        };
+
+  const letter2: Letter = {
+    n: 2,
+    subject: '',
+    body: signed(
+      paragraphs(
+        'Добрый день!',
+        `${intro(s)}. На днях писал про автоматизацию аутрича для ${b}.`,
+        signalBlock,
+        'Здесь объём растёт не за счёт одной большой одинаковой рассылки. База компаний собирается и пополняется по правилам, поэтому можно параллельно вести несколько узких сегментов — каждый со своим предложением и причиной обращения.',
+        `Например, отдельно можно работать с компаниями, которые нанимают продавцов, выходят в конкретный регион или развивают партнёрский канал. Это примеры сегментации, а не утверждения о текущих планах ${b}.`,
+        caseBlock(ctx) ?? AUTOMATION_MECHANISM,
+        `Предлагаю на 15 минут созвониться: посмотрим, какие сегменты можно выделить для ${b} и какой объём контактов там реально доступен. Когда будет удобно?`,
+      ),
+      s,
+    ),
+  };
+
+  const letter3: Letter = {
+    n: 3,
+    subject: '',
+    body: signed(
+      paragraphs(
+        'Добрый день!',
+        `${intro(s, true)}. Понимаю, что сейчас, возможно, не до этого, поэтому очень коротко.`,
+        'Формат подходит не всем. Он имеет смысл, если вы уже продаёте B2B и понимаете основные сегменты своей аудитории, хотите параллельно проверять больше гипотез и у вас есть кому обрабатывать заинтересованные ответы.',
+        'Если какого-то из этих условий нет, дополнительный объём контактов сам по себе не даст пользы.',
+        `Если условия совпадают с ситуацией в ${b}, давайте коротко созвонимся и посмотрим, где автоматизированный аутрич может сработать лучше всего.`,
+      ),
+      s,
+    ),
+  };
+
+  return {
+    letters: [letter1, letter2, letter3],
+    subjectB: `автоматизированный аутрич для ${b}`,
+    caseId: ctx.caseRecord?.case_id ?? null,
+    claimIds: usedClaimIds(value),
+    campaignHypothesis: null,
+  };
+}
+
 export function buildChain(ctx: LetterContext, input: ChainInput, hypothesis: SegmentsHypothesis | null): AssembledChain & { campaignHypothesis: string | null } {
   if (input.chain === 'hiring') return buildSdrChain(ctx, input);
+  if (input.chain === 'automation') return buildAutomationChain(ctx, input);
   const copy = COPY[input.chain];
   const b = q(ctx.brand);
   const s = ctx.sender;

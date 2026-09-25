@@ -23,7 +23,7 @@ import { buildChain, buildSegmentsHypothesis, openingSentence, type ChainInput }
 import type { LetterContext } from './letters/common';
 import { loadLibraries, type CaseRecord } from './libraries';
 import { runQa } from './qa';
-import { decide, routeCase, routeChain, scoreCompany, type Route, type Score } from './router';
+import { baseChain, decide, routeCase, routeChain, scoreCompany, splitAutomation, type Route, type Score } from './router';
 import { amoLookup, loadAmoIndex, type AmoIndex, type AmoRecord } from './sources/amo';
 import { loadSizeByInn } from './sources/directory';
 import { fetchRevenue, revenueGrowthSignal } from './sources/fnsRevenue';
@@ -388,7 +388,7 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         }
       }
 
-      const route = routeChain({
+      const picked = routeChain({
         signals,
         reactivation,
         taScore: site.taScore,
@@ -416,13 +416,16 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
           ...(site.hasAdPixel ? ['На сайте стоят рекламные счётчики'] : []),
         ],
       };
-      if (!route) {
+      if (!picked) {
         await finish(id, { stage: 'scored', status: 'rejected', reason: 'NO_CHAIN', detail: `ЦА ${site.taScore}/10` }, base);
         return null;
       }
+      // Сплит 50/50: половина подходящих компаний получает «Автоматизированный аутрич».
+      const route = splitAutomation(picked, domain, { signals, reactivation, isB2b, marketQuote });
       const caseHit = routeCase(libraries.cases, site.industryGroup, route.chain);
       const score = scoreCompany({
-        chain: route.chain,
+        // Скоринг — по исходной цепочке, чтобы сплит не менял, кто проходит порог.
+        chain: picked.chain,
         primary: route.primary,
         freshnessDays: config.freshness_days,
         taScore: site.taScore,
@@ -433,7 +436,7 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         siteReachable: true,
         // SDR-цепочке кейс по отрасли не нужен (Максим 23.09): письмо 2 —
         // механика, балл за доказательство не снимаем.
-        hasCase: route.chain === 'hiring' || Boolean(caseHit),
+        hasCase: picked.chain === 'hiring' || Boolean(routeCase(libraries.cases, site.industryGroup, picked.chain)),
         // Скоринг до поиска почты — оптимистичный: почту ищем только у прошедших.
         emailFound: true,
       });
@@ -476,7 +479,8 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         await updateRow(q.id, { row_status: 'manual_review', reason_code: 'LIMIT_REACHED', reason_detail: 'лимит готовых компаний уже набран' });
         return;
       }
-      const email = q.route.chain === 'reactivation' && q.amo?.contactEmail
+      const prior = baseChain(q.route) === 'reactivation';
+      const email = prior && q.amo?.contactEmail
         ? { email: q.amo.contactEmail, emailType: 'person' as const, isRouting: false, recipientRole: 'Контакт из AMO', sourceUrl: null }
         : await findRuCompanyEmail(q.website, q.domain);
       if (!email.email) {
@@ -490,7 +494,7 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
       await updateRow(q.id, {
         recipient_email: email.email,
         email_type: email.emailType,
-        email_verification: q.route.chain === 'reactivation' && q.amo?.contactEmail ? 'crm_contact' : 'found_on_site',
+        email_verification: prior && q.amo?.contactEmail ? 'crm_contact' : 'found_on_site',
         email_source_url: email.sourceUrl,
         recipient_role: email.recipientRole,
         is_routing: email.isRouting,
@@ -501,9 +505,10 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
       const chainInput: ChainInput = {
         chain: q.route.chain,
         signal: q.route.primary,
-        priorContact: q.route.chain === 'reactivation',
+        priorContact: prior,
         marketQuote: q.marketQuote,
         productSummary: q.site.productSummary,
+        baseChain: q.route.from,
       };
       const letterCtx: LetterContext = {
         brand: q.brand,
@@ -512,7 +517,7 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         caseRecord: q.caseHit?.record ?? null,
         claims: libraries.claims.filter((cl) => cl.chain_type === 'all' || cl.chain_type === q.route.chain),
       };
-      const hypothesis = !q.caseHit && q.marketQuote
+      const hypothesis = !q.caseHit && q.marketQuote && q.route.chain !== 'automation'
         ? await buildSegmentsHypothesis({ brand: q.brand, productSummary: q.site.productSummary, marketQuote: q.marketQuote }).catch(() => null)
         : null;
       const chain = buildChain(letterCtx, chainInput, hypothesis);
@@ -565,7 +570,7 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         emailType: email.emailType,
         score: q.score.total,
         writeThreshold: config.write_threshold,
-        chain: q.route.chain,
+        chain: baseChain(q.route),
         primary: q.route.primary,
         b2bQuoted: q.b2bQuoted,
         sourceName: q.candidate.companyName,

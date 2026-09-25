@@ -5,13 +5,15 @@
  * (RU_OUTREACH_HANDOFF CEO, 23.09.2026): reactivation → hiring → ad_budget →
  * event → growth_event → icp_only. Во всех цепочках четыре письма:
  * повод → боль и что делает Polza → доказательство → мягкое закрытие.
+ * Половина подходящих компаний (кроме SDR) вместо своей цепочки получает
+ * оффер «Автоматизированный аутрич» — сплит 50/50 по домену (25.09.2026).
  *
  * Дизайн: docs/superpowers/specs/2026-09-23-polza-ru-outreach-chain-router-design.md.
  */
 
 export const RU_OUTREACH_PARSER_TYPE = 'polza_ru_outreach' as const;
 
-export const CHAIN_TYPES = ['reactivation', 'hiring', 'ad_budget', 'event', 'growth_event', 'icp_only'] as const;
+export const CHAIN_TYPES = ['reactivation', 'hiring', 'ad_budget', 'event', 'growth_event', 'icp_only', 'automation'] as const;
 export type ChainType = (typeof CHAIN_TYPES)[number];
 
 export const CHAIN_LABELS: Record<ChainType, string> = {
@@ -21,17 +23,19 @@ export const CHAIN_LABELS: Record<ChainType, string> = {
   event: 'Выставка / событие',
   growth_event: 'Рост: продукт, регион, контракт, грант',
   icp_only: 'Только профиль (высокий ЦА-балл)',
+  automation: 'Автоматизированный аутрич (50/50)',
 };
 
 export const LETTER_COUNT = 4;
-export const TEMPLATE_VERSION = 'chains_v2@2026-09-23';
+export const TEMPLATE_VERSION = 'chains_v3@2026-09-25';
 
 /**
- * Писем в цепочке: SDR-цепочка («найм») — три письма по инструкции Максима
- * (INSTRUCTION_02 от 23.09.2026), остальные цепочки CEO — четыре.
+ * Писем в цепочке: SDR-цепочка («найм») и «Автоматизированный аутрич» — по три
+ * письма по инструкциям Максима (INSTRUCTION_02 / INSTRUCTION_03), остальные
+ * цепочки CEO — четыре.
  */
 export function letterCountFor(chain: ChainType): number {
-  return chain === 'hiring' ? 3 : LETTER_COUNT;
+  return chain === 'hiring' || chain === 'automation' ? 3 : LETTER_COUNT;
 }
 
 /** Отраслевые группы роутера кейсов (таблица CEO). */
