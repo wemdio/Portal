@@ -242,7 +242,7 @@ function LibrarySection({ table, rows, onChanged, onError }: { table: TableKey; 
 }
 
 function UploadsSection({ uploads, onChanged, onError }: { uploads: Rec[]; onChanged: () => void; onError: (m: string) => void }) {
-  const [kind, setKind] = useState<'exhibitors' | 'contracts' | 'growth'>('exhibitors');
+  const [kind, setKind] = useState<'exhibitors' | 'contracts' | 'growth' | 'tenders'>('exhibitors');
   const [title, setTitle] = useState('');
   const [eventStart, setEventStart] = useState('');
   const [eventEnd, setEventEnd] = useState('');
@@ -297,9 +297,10 @@ function UploadsSection({ uploads, onChanged, onError }: { uploads: Rec[]; onCha
         Нужна колонка с названием компании; сайт, ИНН, дата, предмет, сумма и заказчик распознаются по заголовкам.
       </p>
       <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
-        <select className={inputCls} value={kind} onChange={(e) => setKind(e.target.value as 'exhibitors' | 'contracts' | 'growth')}>
+        <select className={inputCls} value={kind} onChange={(e) => setKind(e.target.value as 'exhibitors' | 'contracts' | 'growth' | 'tenders')}>
           <option value="exhibitors">Каталог выставки</option>
           <option value="contracts">Выгрузка контрактов ЕИС</option>
+          <option value="tenders">Выгрузка коммерческих тендеров (B2B-Center, Росэлторг)</option>
           <option value="growth">Список грантов / акселератора</option>
         </select>
         <input className={inputCls} placeholder={kind === 'exhibitors' ? 'Название выставки' : kind === 'growth' ? 'Название программы (попадёт в письмо)' : 'Название выгрузки'} value={title} onChange={(e) => setTitle(e.target.value)} />
@@ -329,7 +330,7 @@ function UploadsSection({ uploads, onChanged, onError }: { uploads: Rec[]; onCha
         {uploads.map((u) => (
           <div key={u.id} className="flex items-center justify-between gap-3 py-2 text-sm">
             <div className="min-w-0 text-gray-800">
-              <span className="mr-2 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{u.kind === 'exhibitors' ? 'выставка' : u.kind === 'growth' ? 'гранты' : 'контракты'}</span>
+              <span className="mr-2 rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">{u.kind === 'exhibitors' ? 'выставка' : u.kind === 'growth' ? 'гранты' : u.kind === 'tenders' ? 'тендеры' : 'контракты'}</span>
               {String(u.title)}
               {u.event_start ? <span className="ml-2 text-xs text-gray-500">{fmtDate(String(u.event_start))}</span> : null}
               <span className="ml-2 text-xs text-gray-500">строк: {String(u.rows_total)}</span>

@@ -28,7 +28,7 @@ export async function POST(req: NextRequest) {
   if (!form) return jsonError('Ожидается multipart/form-data', 400);
   const file = form.get('file');
   const rawKind = String(form.get('kind') ?? '');
-  const kind = rawKind === 'contracts' || rawKind === 'exhibitors' || rawKind === 'growth' ? rawKind : null;
+  const kind = rawKind === 'contracts' || rawKind === 'exhibitors' || rawKind === 'growth' || rawKind === 'tenders' ? rawKind : null;
   const title = String(form.get('title') ?? '').trim();
   if (!(file instanceof File) || !kind) return jsonError('Нужны файл и вид загрузки', 400);
   if (file.size > MAX_FILE_BYTES) return jsonError('Файл больше 15 МБ', 400);
