@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import type { VeOutreachPreparation } from '@/lib/verticalEngineV2/outreachSetup';
 import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors';
 import type { VeBaseSummary, VeCollectInfo, VeJobSummary } from './api';
-import { collectCount, describeReadyComposition, getCollectionProgress, isPartialPreview } from './collectionProgress';
+import { collectCount, describeCompletedCollection, describeReadyComposition, getCollectionProgress, isPartialPreview } from './collectionProgress';
 import { HE, StatusDot } from './design';
 
 interface PreparationProgressProps {
@@ -74,12 +74,15 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
   });
   const target = base?.collect_info?.target_progress;
   const composition = describeReadyComposition(target);
-  const partialReady = preparation.status === 'ready' && (target?.ready_rows ?? 0) > 0 && target?.status !== 'error';
+  const partialReady = preparation.status === 'ready' && (target?.ready_rows ?? 0) > 0
+    && ['limited', 'exhausted'].includes(target?.status ?? '');
   if (base?.status === 'analyzed' && target && isPartialPreview(base) && !hasLiveJob
     && !['pending', 'error', 'generating'].includes(preparation.status)) return {
-    title: 'Сбор остановлен',
-    readiness: partialReady ? 'Проверенная база и письма готовы к согласованию. Контакты можно скачать и использовать для запуска, не дожидаясь цели сбора.' : undefined,
-    description: (target.status === 'exhausted' ? 'Компании из текущего плана источников обработаны; это не оценка всего рынка. '
+    title: partialReady ? 'База и письма готовы к согласованию'
+      : target.status === 'error' ? 'Ошибка добора' : target.ready_rows > 0 ? 'Подготовка не завершена' : 'Готовых контактов пока нет',
+    readiness: partialReady ? 'Контакты можно скачать. После согласования базы и писем можно перейти к запуску, не дожидаясь цели сбора.' : undefined,
+    description: (partialReady ? describeCompletedCollection(target) + ' '
+        : target.status === 'exhausted' ? 'Компании из текущего плана источников обработаны; это не оценка всего рынка. '
         : target.status === 'error' ? preparationError(target.reason ?? base.error ?? '') + ' '
           : target.reason?.startsWith('Нет подтверждённого продолжения источников')
             ? 'По текущему плану система не смогла продолжить добор. Это не означает, что подходящих компаний больше нет. '
@@ -88,7 +91,7 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
       + (target.ready_rows > 0 ? partialReady ? '' : 'Проверенная часть сохранена и доступна для скачивания. '
         : 'Кандидаты сохранены, но контактов, прошедших все проверки, пока нет. '),
     currentStep: partialReady ? STEPS.length : null,
-    tone: target.status === 'error' ? 'err' : 'muted', canContinue: true,
+    tone: partialReady ? 'ok' : target.status === 'error' ? 'err' : 'muted', canContinue: true,
     continueLabel: preparation.status === 'ready' && target.status !== 'error' ? 'Повторить добор' : undefined,
     continueHint: 'Повторная попытка продолжит работу с сохранёнными результатами. Если источники снова дадут только повторы, новых контактов не будет.',
   };

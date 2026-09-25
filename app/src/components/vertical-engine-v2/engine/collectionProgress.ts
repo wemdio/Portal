@@ -19,6 +19,14 @@ export function describeReadyComposition(target: NonNullable<VeCollectInfo['targ
   return companies === null ? null : `Компаний: ${companies.toLocaleString('ru-RU')}.`;
 }
 
+/** A normal terminal collection reason is secondary to the usable saved result. */
+export function describeCompletedCollection(target: NonNullable<VeCollectInfo['target_progress']>): string {
+  const reason = target.status === 'exhausted'
+    ? 'Компании из текущего плана источников обработаны; это не оценка всего рынка.'
+    : target.reason?.replace(/сбор остановлен/gi, 'Добор завершён').replace(/[.\s]+$/, '');
+  return 'Добор завершён ниже цели.' + (reason ? ` ${reason.replace(/[.\s]+$/, '')}.` : ' Найденные контакты сохранены.');
+}
+
 export function collectTaskDone(status: string | undefined): boolean {
   return typeof status === 'string' && ['done', 'completed', 'success', 'ok'].includes(status.toLowerCase());
 }

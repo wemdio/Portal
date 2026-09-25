@@ -41,7 +41,7 @@ import {
 import { HE, StatusDot, Spinner } from '../design';
 import { SeasonalityDetail } from '../SeasonalitySummary';
 import { StatusBox, TIER_META, formatDate } from '../ui';
-import { collectCount, collectTaskDone, collectTaskFailed, describeReadyComposition, getCollectionProgress, getCollectionQueue, isPartialPreview } from '../collectionProgress';
+import { collectCount, collectTaskDone, collectTaskFailed, describeCompletedCollection, describeReadyComposition, getCollectionProgress, getCollectionQueue, isPartialPreview } from '../collectionProgress';
 import type { PreparationPresentation } from '../PreparationProgress';
 
 /** Как часто дёргать reload детали во время автосборки (как POLL_INTERVAL_MS родителя). */
@@ -917,9 +917,9 @@ export function BaseRow({ base, job, hypothesisTitle, queued, preparationState, 
             Разбираем…
           </span>
         ) : base.status === 'analyzed' && partialPreview ? (
-          <span className="ve2-st ve2-tg-q">
-            <StatusDot tone="muted" />
-            Сбор остановлен — цель не достигнута
+          <span className={`ve2-st ${base.collect_info?.target_progress?.status === 'error' ? 've2-tg-err' : hasReadyContacts ? 've2-tg-ok' : 've2-tg-q'}`}>
+            <StatusDot tone={base.collect_info?.target_progress?.status === 'error' ? 'err' : hasReadyContacts ? 'ok' : 'muted'} />
+            {base.collect_info?.target_progress?.status === 'error' ? 'Ошибка добора' : hasReadyContacts ? 'Проверенная база готова' : 'Готовых контактов пока нет'}
           </span>
         ) : base.status === 'analyzed' ? (
           <span className="ve2-st ve2-tg-ok">
@@ -1271,6 +1271,8 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
               : relevanceInProgress ? 'Автоматически проверяем деятельность компаний: ищем сайты по ИНН и читаем подтверждённые страницы.'
               : target.status === 'collecting' ? `Проход ${target.round} из ${target.max_rounds}. Добираем контакты после проверок.`
               : target.status === 'target_reached' ? `Цель превью достигнута. В готовой базе ${(target.ready_contacts ?? target.ready_rows).toLocaleString('ru-RU')} контактов; отправка ещё не включена.`
+              : base.status === 'analyzed' && target.ready_rows > 0 && target.ready_rows < target.ready_target
+                && ['limited', 'exhausted'].includes(target.status) ? describeCompletedCollection(target)
               : target.status === 'exhausted' ? 'Источники текущего плана закончились. Это не оценка всего рынка.'
               : target.status === 'limited' ? target.reason || 'Сбор остановлен защитным лимитом. Это не означает, что контакты закончились.'
               : 'Подготовка превью остановлена. Непроверенные контакты не попадут в запуск.'}
