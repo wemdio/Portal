@@ -157,7 +157,10 @@ export default function KpiRow({
   // попавшая сюда, сломает сходимость с выпиской.
   const money = totals.money;
   const coverageKnown = totals.sales > 0;
-  const moneyPartial = money.received < money.bankTotal;
+  // Приходы по сделкам прошлых периодов (без когорты) — не «несвязанные»:
+  // они разобраны и отнесены, просто к другому периоду. Плитку жёлтой не
+  // делают.
+  const moneyPartial = money.received + money.earlierDeals < money.bankTotal;
   const moneySub = [
     `платежей: ${fmt(money.payments)}`,
     coverageKnown ? `ИНН у ${fmt(money.contractsWithInn)} из ${fmt(totals.sales)} продаж` : null,

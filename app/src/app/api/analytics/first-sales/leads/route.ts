@@ -32,7 +32,7 @@ export async function GET(req: NextRequest) {
   // `parsed.value === null`, а не `parsed.error` — то же сужение, что в
   // summary/route.ts (truthy-сужение объединения тут не работает на tsc 5.9.3).
   if (parsed.value === null) return NextResponse.json({ error: parsed.error }, { status: 400 });
-  const { from, to, cohort } = parsed.value;
+  const { from, to, cohort, cohortFrom, cohortTo } = parsed.value;
 
   // Срез, в который проваливается пользователь: либо источник, либо менеджер.
   //
@@ -78,6 +78,10 @@ export async function GET(req: NextRequest) {
       .filter(matchesSlice)
       .map((lead) => ({
         lead,
+        // Заведена ли в выбранном периоде — для режима «без когорты». При
+        // клике по столбцу графика окно from/to — один день, а период —
+        // весь выбранный (cohortFrom/cohortTo, см. params.ts).
+        createdInCohort: isLeadInWindow(lead, cohortFrom, cohortTo),
         hits: {
           lead: isLeadInWindow(lead, from, to),
           qualified: isQualifiedInWindow(lead, from, to),
@@ -100,16 +104,21 @@ export async function GET(req: NextRequest) {
       // выглядят.
       //
       // С 26.09.2026 это режим «по когорте». В режиме «без когорты» список —
-      // только сделки, заведённые в периоде (как до 25.09.2026): цифры строки
-      // в этом режиме посчитаны лишь по ним (`eventsCount` в metrics.ts), и
-      // старая сделка в списке объясняла бы то, чего в строке нет.
-      .filter(({ hits }) => (cohort
-        ? hits.lead || hits.meetings > 0 || hits.contract || hits.sale || hits.money > 0
-        : hits.lead));
+      // только сделки, заведённые в выбранном периоде (как до 25.09.2026):
+      // цифры строки в этом режиме посчитаны лишь по ним (`eventsCount` в
+      // metrics.ts), и старая сделка в списке объясняла бы то, чего в строке
+      // нет. Попадание в окно проверяется то же, что и по когорте, — важно
+      // при клике по столбцу: сделка 3 сентября, оплаченная 15-го, обязана
+      // быть в таблице столбца 15 сентября.
+      .filter(({ hits, createdInCohort }) => (
+        (cohort || createdInCohort)
+        && (hits.lead || hits.meetings > 0 || hits.contract || hits.sale || hits.money > 0)
+      ));
 
     // Старые сделки при обрезке не теряем: их мало, и именно они объясняют
-    // деньги строки. Новые — свежие сверху, как раньше. Без когорты старых
-    // в выборке нет, и `earlier` пуст.
+    // деньги строки. Новые — свежие сверху, как раньше. Без когорты здесь
+    // только сделки выбранного периода; `earlier` непуст лишь при клике по
+    // столбцу — сделки, заведённые раньше этого дня, но в периоде.
     const byCreatedDesc = (a: (typeof selected)[number], b: (typeof selected)[number]) =>
       (b.lead.created_at ?? '').localeCompare(a.lead.created_at ?? '');
     const earlier = selected.filter(({ hits }) => !hits.lead).sort(byCreatedDesc);
@@ -127,7 +136,7 @@ export async function GET(req: NextRequest) {
     );
 
     const rows = picked
-      .map(({ lead, hits }) => ({
+      .map(({ lead, hits, createdInCohort }) => ({
         amo_id: lead.amo_id,
         name: lead.name,
         // Ответственный отдаётся как есть, включая null: пустая клетка в
@@ -144,8 +153,13 @@ export async function GET(req: NextRequest) {
         // Что у сделки случилось внутри окна: квал, встреча по записи
         // разговора, договор, деньги. `lead: false` — сделка заведена раньше
         // периода и попала в список по одному из остальных событий.
+        //
+        // Без когорты `lead` — «заведена в выбранном периоде», а не в окне:
+        // при клике по столбцу окно — один день, и сделка начала месяца
+        // получила бы метку «заведена раньше», хотя режим как раз говорит,
+        // что заведённых раньше в списке нет.
         in_period: {
-          lead: hits.lead,
+          lead: cohort ? hits.lead : createdInCohort,
           qualified: hits.qualified,
           meetings: hits.meetings,
           sale: hits.sale,

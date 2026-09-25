@@ -367,10 +367,17 @@ export function computeFirstSalesSeries(
   taskMeetings: Map<number, string> = new Map(),
   // Режим счёта (см. `cohort` в params.ts). По умолчанию «по когорте» — так
   // дашборд считает с 25.09.2026 и так ждут все прежние вызовы.
-  options: { cohort?: boolean } = {},
+  // cohortFrom/cohortTo — период, по которому «без когорты» судит о дате
+  // создания; по умолчанию from/to. Шире окна он при клике по столбцу
+  // графика — см. `cohortFrom` в params.ts.
+  options: { cohort?: boolean; cohortFrom?: Date; cohortTo?: Date } = {},
 ): FirstSalesSeries {
   const allowed = sourceFilter && sourceFilter.length > 0 ? new Set(sourceFilter) : null;
   const cohort = options.cohort ?? true;
+  const cohortFrom = options.cohortFrom ?? from;
+  const cohortTo = options.cohortTo ?? to;
+  /** Заведена ли сделка в выбранном периоде — в смысле режима «без когорты». */
+  const createdInCohort = (lead: FirstSalesLeadRow): boolean => isLeadInWindow(lead, cohortFrom, cohortTo);
 
   /**
    * Засчитываются ли периоду события сделки — продажа, встреча, деньги.
@@ -382,7 +389,7 @@ export function computeFirstSalesSeries(
    *
    * Лиды и квал сюда не смотрят: они и так считаются по дате создания.
    */
-  const eventsCount = (lead: FirstSalesLeadRow): boolean => cohort || isLeadInWindow(lead, from, to);
+  const eventsCount = (lead: FirstSalesLeadRow): boolean => cohort || createdInCohort(lead);
 
   const keys = buildBuckets(from, to, groupBy);
   const series = new Map<string, SeriesBucket>(
@@ -435,7 +442,7 @@ export function computeFirstSalesSeries(
   const dealManagerMap = new Map<number, string | null>();
   /** Сделки, заведённые в периоде, — нужны проходу денег в режиме «без
    *  когорты»: у платежа есть только id сделки. */
-  const createdInWindow = new Set<number>();
+  const createdInCohortIds = new Set<number>();
 
   // Название источника берём у сделки с наибольшим created_at (при равенстве —
   // с наибольшим amo_id, чтобы результат не зависел от порядка строк выборки).
@@ -461,7 +468,7 @@ export function computeFirstSalesSeries(
     const resolved = resolveSource(lead.raw);
     dealSourceMap.set(lead.amo_id, resolved);
     dealManagerMap.set(lead.amo_id, lead.responsible_name);
-    if (isLeadInWindow(lead, from, to)) createdInWindow.add(lead.amo_id);
+    if (createdInCohort(lead)) createdInCohortIds.add(lead.amo_id);
 
     const createdAt = lead.created_at ? new Date(lead.created_at).getTime() : Number.NEGATIVE_INFINITY;
     const bestLabel = labelPick.get(resolved.key);
@@ -668,7 +675,7 @@ export function computeFirstSalesSeries(
     // ровно этой строке при любом фильтре. Сделка, которой нет в выборке
     // (дату создания не узнать), считается прошлой: записать её в период без
     // доказательства — выдумать данные.
-    if (!cohort && !createdInWindow.has(dealId)) {
+    if (!cohort && !createdInCohortIds.has(dealId)) {
       totals.money.earlierDeals += amount;
       totals.money.earlierDealsPayments += 1;
       continue;

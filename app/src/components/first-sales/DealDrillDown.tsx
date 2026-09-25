@@ -113,7 +113,10 @@ const drillSortColumns: SortColumns<DrillLeadRow> = {
  * правило линтера `react-hooks/set-state-in-effect`.
  */
 export function drillKey(filters: FiltersState): string {
-  return `${filters.from}|${filters.to}|${filters.sources.join(',')}|${filters.cohort ? 'cohort' : 'created'}`;
+  return [
+    filters.from, filters.to, filters.sources.join(','),
+    filters.cohort ? 'cohort' : 'created', filters.cohortFrom ?? '', filters.cohortTo ?? '',
+  ].join('|');
 }
 
 /** Стабильная строка среза — и для зависимостей эффекта, и для логов. */
@@ -146,6 +149,12 @@ export default function DealDrillDown({
         const qs = new URLSearchParams({ from: filters.from, to: filters.to, ...query });
         // Режим по умолчанию не передаём — ручка сама считает «по когорте».
         if (!filters.cohort) qs.set('cohort', '0');
+        // Таблица сужена кликом по столбцу — выбранный период целиком нужен
+        // режиму «без когорты» (см. `cohortFrom` в lib/firstSales/params.ts).
+        if (filters.cohortFrom && filters.cohortTo) {
+          qs.set('cohortFrom', filters.cohortFrom);
+          qs.set('cohortTo', filters.cohortTo);
+        }
 
         // Фильтр по источникам нужен только при провале в МЕНЕДЖЕРА: его
         // цифра в разбивке посчитана уже после фильтра, и список сделок
@@ -183,8 +192,8 @@ export default function DealDrillDown({
       active = false;
       controller.abort();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- from/to/sources/cohort уже свёрнуты в drillKey выше уровнем; key меняется вместе со строкой.
-  }, [key, filters.from, filters.to, filters.sources.join(','), filters.cohort]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- from/to/sources/cohort/cohortFrom/cohortTo уже свёрнуты в drillKey выше уровнем; key меняется вместе со строкой.
+  }, [key, filters.from, filters.to, filters.sources.join(','), filters.cohort, filters.cohortFrom, filters.cohortTo]);
 
   // `rows`/`sortedRows` объявлены до ранних return'ов ниже — хуки не могут
   // вызываться условно, а компонент размонтируется/монтируется заново при смене

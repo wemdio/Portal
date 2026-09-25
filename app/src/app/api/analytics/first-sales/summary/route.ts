@@ -31,13 +31,18 @@ export async function GET(req: NextRequest) {
   // ловушка с truthy-сужением, что задокументирована в firstSales/access.ts.
   // Сужаем по `parsed.value === null`, второй половине того же дискриминанта.
   if (parsed.value === null) return NextResponse.json({ error: parsed.error }, { status: 400 });
-  const { from, to, groupBy, sources, cohort } = parsed.value;
+  const { from, to, groupBy, sources, cohort, cohortFrom, cohortTo } = parsed.value;
 
   // Предыдущее окно считается отдельной выборкой: расширять текущее нельзя —
   // ряд по времени раздуется вдвое и график покажет лишнее. Режим счёта у
   // него тот же, что у текущего: дельта «когорта против не-когорты» сравнила
   // бы разные вопросы и показала рост там, где его нет.
   const prev = previousWindow(from, to);
+  // Период «заведена в периоде» для прошлого окна — сдвинутый так же. Когда
+  // он совпадает с окном (обычный запрос), это ровно `prev`. При клике по
+  // столбцу графика прошлые итоги экран не показывает, так что точность
+  // сдвига там ни на что не влияет.
+  const prevCohort = previousWindow(cohortFrom, cohortTo);
 
   // Платежи тянутся раньше сделок: их amo_deal_id идут в fetchFirstSalesLeads
   // как extraDealIds — сделка могла прийти в марте, а деньги по ней прийти в
@@ -81,11 +86,12 @@ export async function GET(req: NextRequest) {
 
     const result = computeFirstSalesSeries(
       current.leads, from, to, groupBy, sources,
-      current.payments, current.taskMeetings, { cohort },
+      current.payments, current.taskMeetings, { cohort, cohortFrom, cohortTo },
     );
     const prevResult = computeFirstSalesSeries(
       previous.leads, prev.from, prev.to, groupBy, sources,
-      previous.payments, previous.taskMeetings, { cohort },
+      previous.payments, previous.taskMeetings,
+      { cohort, cohortFrom: prevCohort.from, cohortTo: prevCohort.to },
     );
 
     const lastRun = lastRunRes.data;

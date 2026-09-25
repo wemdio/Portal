@@ -56,6 +56,12 @@ function summaryQuery(filters: FiltersState, period: { from: string; to: string 
   const qs = new URLSearchParams({ from: period.from, to: period.to, groupBy });
   for (const source of filters.sources) qs.append('source', source);
   if (!filters.cohort) qs.set('cohort', '0');
+  // Окно уже выбранного периода (клик по столбцу) — период для «без
+  // когорты» остаётся выбранным целиком, см. `cohortFrom` в params.ts.
+  if (period.from !== filters.from || period.to !== filters.to) {
+    qs.set('cohortFrom', filters.from);
+    qs.set('cohortTo', filters.to);
+  }
   return qs.toString();
 }
 
@@ -253,7 +259,11 @@ export default function FirstSalesView() {
 
   // Период для таблицы и её drill-down: сужённый, если корзина выбрана. Так
   // раскрытие строки со сделками само отфильтруется по тому же дню.
-  const tableFilters = selection ? { ...filters, from: selection.from, to: selection.to } : filters;
+  // Период целиком уходит в cohortFrom/cohortTo: без когорты «заведена в
+  // периоде» считается по нему, а не по выбранному дню.
+  const tableFilters: FiltersState = selection
+    ? { ...filters, from: selection.from, to: selection.to, cohortFrom: filters.from, cohortTo: filters.to }
+    : filters;
 
   const selectionLabel = selection
     ? selection.from === selection.to

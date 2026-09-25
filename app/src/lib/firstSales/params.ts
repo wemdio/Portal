@@ -24,7 +24,21 @@ export type FirstSalesParams = {
    * docs/superpowers/specs/2026-09-26-first-sales-cohort-toggle-design.md.
    */
   cohort: boolean;
+  /**
+   * Период, по которому режим «без когорты» решает, заведена ли сделка «в
+   * периоде». По умолчанию совпадает с from/to. Отдельно — ради клика по
+   * столбцу графика: таблицы тогда сужаются до одного дня, а «заведена в
+   * периоде» обязано по-прежнему значить выбранный период целиком. Иначе
+   * сделка, заведённая 3 сентября и оплаченная 15-го, пропадала бы из
+   * таблиц столбца 15 сентября, хотя в цифрах сентября она есть.
+   * Параметры запроса `cohortFrom`/`cohortTo` (YYYY-MM-DD), только парой.
+   */
+  cohortFrom: Date;
+  cohortTo: Date;
 };
+
+const MSK_DAY_START = (day: string) => new Date(new Date(`${day}T00:00:00.000Z`).getTime() - MSK_OFFSET_MS);
+const MSK_DAY_END = (day: string) => new Date(new Date(`${day}T23:59:59.999Z`).getTime() - MSK_OFFSET_MS);
 
 /** Границы приходят как YYYY-MM-DD и трактуются как МСК-сутки целиком:
  *  from — 00:00:00.000 МСК, to — 23:59:59.999 МСК того же дня. Иначе
@@ -72,6 +86,24 @@ export function parseFirstSalesParams(
     return { value: null, error: `Недопустимый cohort: ${cohortRaw} (ожидается 0 или 1)` };
   }
 
+  const cohortFromRaw = url.searchParams.get('cohortFrom');
+  const cohortToRaw = url.searchParams.get('cohortTo');
+  let cohortFrom = from;
+  let cohortTo = to;
+  if (cohortFromRaw !== null || cohortToRaw !== null) {
+    if (!cohortFromRaw || !cohortToRaw || !isDate(cohortFromRaw) || !isDate(cohortToRaw)) {
+      return { value: null, error: 'cohortFrom и cohortTo передаются парой в формате YYYY-MM-DD' };
+    }
+    cohortFrom = MSK_DAY_START(cohortFromRaw);
+    cohortTo = MSK_DAY_END(cohortToRaw);
+    if (cohortTo.getTime() < cohortFrom.getTime()) {
+      return { value: null, error: 'Конец периода когорты раньше начала' };
+    }
+    if ((cohortTo.getTime() - cohortFrom.getTime()) / (24 * 60 * 60 * 1000) > MAX_RANGE_DAYS) {
+      return { value: null, error: `Слишком длинный период когорты: максимум ${MAX_RANGE_DAYS} дней` };
+    }
+  }
+
   return {
     value: {
       from,
@@ -79,6 +111,8 @@ export function parseFirstSalesParams(
       groupBy: groupByRaw as GroupBy,
       sources: sourceRaw.length > 0 ? sourceRaw : null,
       cohort: cohortRaw === '1',
+      cohortFrom,
+      cohortTo,
     },
     error: null,
   };
