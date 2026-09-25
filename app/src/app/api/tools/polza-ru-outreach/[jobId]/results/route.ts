@@ -9,7 +9,8 @@ const LIST_COLUMNS =
   'id,chain_type,source_type,source_url,source_urls,company_name,company_brand,inn,normalized_domain,company_website,' +
   'prior_contact,prior_contact_date,amo_status,ta_score,ta_reason,priority_score,case_match_reason,campaign_hypothesis,email_verification,signal_type,signal_date,signal_title,evidence_quote,evidence_level,market_evidence_quote,' +
   'target_market,signals,fit_reasons,signal_score,generation_mode,recipient_email,email_type,recipient_role,is_routing,' +
-  'letters,subject_b,case_id,offer_version,template_version,qa_status,qa_flags,row_status,pipeline_stage,reason_code,reason_detail,created_at';
+  'letters,subject_b,case_id,offer_version,template_version,qa_status,qa_flags,row_status,pipeline_stage,reason_code,reason_detail,' +
+  'doubt_flags,doubt_detail,route_reason,route_runner_up,created_at';
 
 /**
  * Строки журнала запуска + воронка по этапам и причины отсева.
@@ -63,7 +64,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     if (row.reason_code) reasonCounts[row.reason_code] = (reasonCounts[row.reason_code] ?? 0) + 1;
     const idx = STAGES.indexOf((row.pipeline_stage ?? 'candidates_loaded') as Stage);
     // Отсеянная на этапе X строка дошла до этапа X-1; прошедшая этап — до X.
-    const reached = row.row_status === 'ready' ? STAGES.length - 1 : row.row_status === 'processing' ? idx : idx - 1;
+    const reached =
+      row.row_status === 'ready' ? STAGES.length - 1 : row.row_status === 'processing' || row.row_status === 'doubtful' ? idx : idx - 1;
     for (let i = 0; i <= Math.max(0, reached); i += 1) funnel[STAGES[i]] += 1;
   }
 

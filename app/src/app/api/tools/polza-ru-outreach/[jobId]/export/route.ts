@@ -2,16 +2,17 @@ import { NextResponse, type NextRequest } from 'next/server';
 import ExcelJS from 'exceljs';
 import { logError } from '@/lib/loggerServer';
 import { authed, jsonError } from '@/lib/polzaRuOutreach/routeAuth';
-import { REASON_LABELS, STAGE_LABELS, type Stage } from '@/lib/polzaRuOutreach/types';
+import { DOUBT_LABELS, REASON_LABELS, STAGE_LABELS, type DoubtCode, type Stage } from '@/lib/polzaRuOutreach/types';
 
 export const dynamic = 'force-dynamic';
 
 /**
  * Выгрузка запуска в Excel.
  *
- * ?kind=ready   — только готовые строки (email + QA passed), колонки из
- *                 RU_OUTREACH_HANDOFF §3.5: это файл «кому и что отправлять»;
- * ?kind=journal — все строки с этапом и причиной отсева: «почему выход такой».
+ * ?kind=ready    — только готовые строки (email + QA passed), колонки из
+ *                  RU_OUTREACH_HANDOFF §3.5: это файл «кому и что отправлять»;
+ * ?kind=journal  — все строки с этапом и причиной отсева: «почему выход такой».
+ * ?kind=doubtful — очень спорные: те же колонки, что у готовых; в Instantly не идут без решения человека.
  *
  * Названия колонок — поля из ТЗ латиницей: файл дальше грузят в рассылку,
  * где письма подставляются по имени колонки ({{email_1_body}}).
@@ -23,6 +24,8 @@ type Col = { header: string; value: (r: Row) => unknown; width?: number };
 const letter = (n: number, part: 'subject' | 'body') => (r: Row) => r.letters?.find((l) => l.n === n)?.[part] ?? '';
 const field = (key: string) => (r: Row) => r[key] ?? '';
 const list = (key: string) => (r: Row) => (Array.isArray(r[key]) ? (r[key] as unknown[]).join('; ') : '');
+const doubts = (r: Row) =>
+  Array.isArray(r.doubt_flags) ? (r.doubt_flags as string[]).map((f) => DOUBT_LABELS[f as DoubtCode] ?? f).join('; ') : '';
 
 /** Колонки готового файла — список полей из RU_OUTREACH_HANDOFF §3.5. */
 const READY_COLUMNS: Col[] = [
@@ -35,6 +38,9 @@ const READY_COLUMNS: Col[] = [
   { header: 'ta_score', value: field('ta_score') },
   { header: 'ta_reason', value: field('ta_reason'), width: 40 },
   { header: 'priority_score', value: field('priority_score') },
+  { header: 'doubts', value: doubts, width: 24 },
+  { header: 'doubt_detail', value: field('doubt_detail'), width: 40 },
+  { header: 'route_reason', value: field('route_reason'), width: 40 },
   { header: 'amo_status', value: field('amo_status') },
   { header: 'recipient_role', value: field('recipient_role') },
   { header: 'recipient_email', value: field('recipient_email'), width: 30 },
@@ -86,13 +92,18 @@ const JOURNAL_COLUMNS: Col[] = [
   { header: 'reason', value: (r) => (r.reason_code ? REASON_LABELS[String(r.reason_code)] ?? r.reason_code : '') , width: 36 },
   { header: 'reason_detail', value: field('reason_detail'), width: 40 },
   { header: 'qa_flags', value: list('qa_flags'), width: 36 },
+  { header: 'doubts', value: doubts, width: 24 },
+  { header: 'doubt_detail', value: field('doubt_detail'), width: 40 },
+  { header: 'route_reason', value: field('route_reason'), width: 40 },
+  { header: 'route_runner_up', value: field('route_runner_up') },
 ];
 
 export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: string }> }) {
   const auth = await authed(req);
   if ('error' in auth) return auth.error;
   const { jobId } = await ctx.params;
-  const kind = req.nextUrl.searchParams.get('kind') === 'journal' ? 'journal' : 'ready';
+  const rawKind = req.nextUrl.searchParams.get('kind');
+  const kind: 'ready' | 'journal' | 'doubtful' = rawKind === 'journal' ? 'journal' : rawKind === 'doubtful' ? 'doubtful' : 'ready';
 
   const { data: job, error: jobErr } = await auth.supabase.from('parser_jobs').select('config,created_at').eq('id', jobId).single();
   if (jobErr || !job) return jsonError('Запуск не найден', 404);
@@ -107,6 +118,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       .order('created_at', { ascending: true })
       .range(from, from + PAGE - 1);
     if (kind === 'ready') q = q.eq('row_status', 'ready').eq('qa_status', 'passed').not('recipient_email', 'is', null);
+    if (kind === 'doubtful') q = q.eq('row_status', 'doubtful');
     const { data, error } = await q;
     if (error) {
       await logError('polza_ru_outreach.export.failed', error, { jobId, kind }, { userId: auth.user.id });
@@ -116,7 +128,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     if (!data || data.length < PAGE) break;
   }
 
-  if (kind === 'ready') {
+  if (kind !== 'journal') {
     // Утверждённый текст кейса — дословно из библиотеки, как он стоит в письме.
     const caseIds = Array.from(new Set(rows.map((r) => r.case_id).filter((x): x is string => typeof x === 'string')));
     if (caseIds.length) {
@@ -125,9 +137,9 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       for (const r of rows) if (typeof r.case_id === 'string') r.case_text_approved = byId.get(r.case_id) ?? '';
     }
   }
-  const columns = kind === 'ready' ? READY_COLUMNS : JOURNAL_COLUMNS;
+  const columns = kind === 'journal' ? JOURNAL_COLUMNS : READY_COLUMNS;
   const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet(kind === 'ready' ? 'Готовые' : 'Журнал');
+  const ws = wb.addWorksheet(kind === 'ready' ? 'Готовые' : kind === 'doubtful' ? 'Очень спорные' : 'Журнал');
   ws.columns = columns.map((c) => ({ header: c.header, key: c.header, width: c.width ?? 18 }));
   for (const r of rows) {
     const values: Record<string, unknown> = {};
@@ -146,7 +158,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   return new NextResponse(buffer as ArrayBuffer, {
     headers: {
       'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'Content-Disposition': `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(`Наш автоаутрич — ${kind === 'ready' ? 'готовые' : 'журнал'} ${date}.xlsx`)}`,
+      'Content-Disposition': `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(`Наш автоаутрич — ${kind === 'ready' ? 'готовые' : kind === 'doubtful' ? 'очень спорные' : 'журнал'} ${date}.xlsx`)}`,
     },
   });
 }
