@@ -11,6 +11,7 @@ const STATUS_TONE: Record<RuRow['row_status'], string> = {
   rejected: 'bg-gray-100 text-gray-600',
   failed: 'bg-red-50 text-red-700',
   processing: 'bg-blue-50 text-blue-700',
+  doubtful: 'bg-orange-50 text-orange-700',
 };
 
 export function Funnel({

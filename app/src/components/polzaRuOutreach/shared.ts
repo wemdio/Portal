@@ -21,6 +21,8 @@ export interface RuJob {
     target?: number;
     stop_reason?: string;
     reasons?: Record<string, number>;
+    source_errors?: Record<string, string>;
+    doubtful?: number;
   } | null;
   total_found: number | null;
   total_parsed: number | null;
@@ -68,10 +70,14 @@ export interface RuRow {
   case_id: string | null;
   qa_status: string | null;
   qa_flags: string[];
-  row_status: 'processing' | 'ready' | 'rejected' | 'manual_review' | 'failed';
+  row_status: 'processing' | 'ready' | 'rejected' | 'manual_review' | 'failed' | 'doubtful';
   pipeline_stage: string | null;
   reason_code: string | null;
   reason_detail: string | null;
+  doubt_flags: string[];
+  doubt_detail: string | null;
+  route_reason: string | null;
+  route_runner_up: string | null;
 }
 
 export const api = authFetchJson;
@@ -100,6 +106,7 @@ export const STATUS_LABELS: Record<RuRow['row_status'], string> = {
   rejected: 'отсеяна',
   manual_review: 'ручная проверка',
   failed: 'ошибка',
+  doubtful: 'очень спорная',
 };
 
 export const SIGNAL_LABELS: Record<string, string> = {
@@ -117,6 +124,11 @@ export const SIGNAL_LABELS: Record<string, string> = {
   dealer_search: 'ищут дилеров',
   export_launch: 'экспорт',
   new_case: 'новый кейс',
+  sales_team: 'отдел продаж (2ГИС)',
+  revenue_growth: 'рост выручки (ФНС)',
+  tender_won: 'выигранный тендер',
+  investment: 'инвестиции',
+  sales_hiring_broad: 'вакансия продаж (не SDR)',
 };
 
 export const MODE_LABELS: Record<string, string> = CHAIN_LABELS;
