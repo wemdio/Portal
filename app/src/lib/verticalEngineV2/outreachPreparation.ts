@@ -213,8 +213,17 @@ export async function runVeOutreachPreparations(db: SupabaseClient, shouldStop: 
         // successful analysis. A failure of THIS analysis generation still
         // requires an explicit retry, so paid generation cannot loop forever.
         const analysis = await latestJob('base_analyze');
+        // The analyzed base can become visible before its job's terminal
+        // write completes. Wait for that job instead of reviving an old
+        // letter error during the short gap between the two writes.
+        if (analysis && ['pending', 'running'].includes(analysis.status)) {
+          await save('collecting');
+          continue;
+        }
         const superseded = analysis?.status === 'done'
-          && Date.parse(job.created_at) < Date.parse(analysis.finished_at);
+          // A template may be queued after the analysis write but before the
+          // analysis job finishes. Its failure still belongs to this analysis.
+          && Date.parse(job.created_at) < Date.parse(analysis.created_at);
         if (!superseded) throw new Error(job.error ?? 'Подготовка писем остановлена. Нажмите «Продолжить подготовку»');
       }
       await queue('template');
