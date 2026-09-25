@@ -993,7 +993,7 @@ export function BaseRow({ base, job, hypothesisTitle, queued, preparationState, 
       {previewOpen && hasRows ? (
         <div id={`ve-base-preview-${base.id}`} className="overflow-x-auto px-4 pb-4">
           <p className={`mb-2 ${HE.faint}`}>{isReadyPreview
-            ? partialPreview ? 'Промежуточный результат: только уже проверенные контакты. Подготовка превью ещё не завершена.'
+            ? partialPreview ? 'Показаны контакты, прошедшие проверки. Их можно скачать; число контактов ниже цели не делает их непригодными для рассылки. Готовность писем и согласование проверяются отдельно.'
               : 'Первые готовые контакты для согласования. Это не весь исходный список.'
             : 'Образец исходных кандидатов, включая не прошедших проверки. Не используйте его как готовую базу для рассылки.'}</p>
           <table className="min-w-full divide-y divide-gray-200 text-xs">
@@ -1248,7 +1248,7 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
     >
       {target ? (
         <div className="mb-2" role="status">
-          <p className="font-medium">{target.mode === 'preview' ? isPartialPreview(base) ? 'Проверено сейчас — превью не завершено' : 'Готово для превью' : 'Проверено и подготовлено'}: {target.ready_rows.toLocaleString('ru-RU')} / {target.ready_target.toLocaleString('ru-RU')} контактов</p>
+          <p className="font-medium">Засчитано в цель сбора: {target.ready_rows.toLocaleString('ru-RU')} / {target.ready_target.toLocaleString('ru-RU')} контактов</p>
           {composition ? <p className="mt-1 text-gray-700">{composition}</p> : null}
           {target.mode === 'preview' && base.status === 'collecting' ? (
             <p className="mt-1 text-gray-700">

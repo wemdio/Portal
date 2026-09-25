@@ -20,9 +20,12 @@ interface PreparationProgressProps {
 export interface PreparationPresentation {
   title: string;
   description: string;
+  readiness?: string;
   currentStep: number | null;
   tone: 'info' | 'muted' | 'err' | 'ok';
   canContinue?: boolean;
+  continueLabel?: string;
+  continueHint?: string;
 }
 
 const STEPS = ['Сбор и проверка базы', 'Разбор состава базы', 'Подготовка A/B-писем'];
@@ -71,19 +74,23 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
   });
   const target = base?.collect_info?.target_progress;
   const composition = describeReadyComposition(target);
-  if (base?.status === 'analyzed' && target && isPartialPreview(base) && !hasLiveJob && preparation.status !== 'pending') return {
+  const partialReady = preparation.status === 'ready' && (target?.ready_rows ?? 0) > 0 && target?.status !== 'error';
+  if (base?.status === 'analyzed' && target && isPartialPreview(base) && !hasLiveJob
+    && !['pending', 'error', 'generating'].includes(preparation.status)) return {
     title: `Сбор остановлен: ${target.ready_rows.toLocaleString('ru-RU')} из ${target.ready_target.toLocaleString('ru-RU')} контактов`,
-    description: `${preparation.status === 'ready' ? 'Письма подготовлены. ' : ''}Сейчас добор не идёт. `
-      + (target.status === 'exhausted' ? 'Компании из текущего плана источников обработаны; это не оценка всего рынка. '
+    readiness: partialReady ? 'Проверенная база и письма готовы к согласованию. Контакты можно скачать и использовать для запуска, не дожидаясь цели сбора.' : undefined,
+    description: (target.status === 'exhausted' ? 'Компании из текущего плана источников обработаны; это не оценка всего рынка. '
         : target.status === 'error' ? preparationError(target.reason ?? base.error ?? '') + ' '
           : target.reason?.startsWith('Нет подтверждённого продолжения источников')
             ? 'По текущему плану система не смогла продолжить добор. Это не означает, что подходящих компаний больше нет. '
             : (target.reason ? target.reason.replace(/[.\s]+$/, '') + '. ' : 'Цель превью пока не достигнута. '))
       + (composition ? composition + ' ' : '')
-      + (target.ready_rows > 0 ? 'Проверенная часть сохранена и доступна для скачивания. '
-        : 'Кандидаты сохранены, но контактов, прошедших все проверки, пока нет. ')
-      + 'Продолжение повторит только доступные незавершённые этапы.',
-    currentStep: null, tone: 'muted', canContinue: true,
+      + (target.ready_rows > 0 ? partialReady ? '' : 'Проверенная часть сохранена и доступна для скачивания. '
+        : 'Кандидаты сохранены, но контактов, прошедших все проверки, пока нет. '),
+    currentStep: partialReady ? STEPS.length : null,
+    tone: target.status === 'error' ? 'err' : 'muted', canContinue: true,
+    continueLabel: preparation.status === 'ready' && target.status !== 'error' ? 'Повторить добор' : undefined,
+    continueHint: 'Повторная попытка продолжит работу с сохранёнными результатами. Если источники снова дадут только повторы, новых контактов не будет.',
   };
   if (context === 'letters' && base?.status === 'failed' && !hasLiveJob) return {
     title: 'Письма ждут завершения подготовки базы',
@@ -238,6 +245,7 @@ export function PreparationProgress(props: PreparationProgressProps) {
         <StatusDot tone={state.tone} />
         <h3 className={HE.cardTitle}>{state.title}</h3>
       </div>
+      {state.readiness ? <p>{state.readiness}</p> : null}
       <p className={HE.muted}>{state.description}</p>
       {stepPercent !== null ? <div className="space-y-2">
         <p className={HE.muted}>Текущий этап обработки: {stepPercent}% · это не готовность всей базы</p>
@@ -257,22 +265,23 @@ export function PreparationProgress(props: PreparationProgressProps) {
       <ol className="ve2-preparation-steps" aria-label="Этапы подготовки">
         {STEPS.map((label, index) => (
           <li key={label} data-state={state.currentStep === index ? 'current' : state.currentStep !== null && state.currentStep > index ? 'done' : 'pending'} aria-current={state.currentStep === index ? 'step' : undefined}>
-            <span className="ve2-preparation-step-num" aria-hidden="true">{index + 1}</span>
-            <span>{label}</span>
+            <span className="ve2-preparation-step-num" aria-hidden="true">{state.currentStep !== null && state.currentStep > index ? '✓' : index + 1}</span>
+            <span>{state.currentStep !== null && state.currentStep > index ? <span className="sr-only">Завершено: </span> : null}{label}</span>
           </li>
         ))}
       </ol>
-      {!collecting && savedCandidates !== null && savedCandidates > 0 ? (
+      {!collecting && state.currentStep !== STEPS.length && savedCandidates !== null && savedCandidates > 0 ? (
         <p className={HE.muted}>
           Сохранённые результаты: {savedCandidates.toLocaleString('ru-RU')} кандидатов
-          {savedReady !== null ? `, ${savedReady.toLocaleString('ru-RU')} готовых контактов` : ''}.
+          {savedReady !== null ? `; в цель засчитано ${savedReady.toLocaleString('ru-RU')} контактов` : ''}.
         </p>
       ) : null}
-      {state.canContinue && props.onContinue ? (
-        <button type="button" className={HE.btnPrimary} disabled={props.continueDisabled} onClick={props.onContinue}>
-          Продолжить подготовку
+      {state.canContinue && props.onContinue ? <div className="space-y-2">
+        <button type="button" className={state.continueLabel ? HE.btnGhost : HE.btnPrimary} disabled={props.continueDisabled} onClick={props.onContinue}>
+          {state.continueLabel ?? 'Продолжить подготовку'}
         </button>
-      ) : null}
+        {state.continueHint ? <p className={HE.faint}>{state.continueHint}</p> : null}
+      </div> : null}
     </div>
   );
 }

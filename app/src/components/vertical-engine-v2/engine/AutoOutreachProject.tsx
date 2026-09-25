@@ -28,7 +28,7 @@ import { CampaignProgress } from './CampaignProgress';
 import { ManualBaseLibrary } from './ManualBaseLibrary';
 import { PreparationProgress, getPreparationPresentation, type PreparationPresentation } from './PreparationProgress';
 import { selectHypothesisLetters } from './letterSelection';
-import { isPartialPreview } from './collectionProgress';
+import { collectCount, isPartialPreview } from './collectionProgress';
 import { ContactLimitField } from './ContactLimitField';
 import {
   VE_BROAD_HYPOTHESES_EMPTY_NOTE,
@@ -106,17 +106,28 @@ export function AudienceSummary({
     ? `Новых контактов для резерва запуска: ${data.ready.toLocaleString('ru-RU')}. Исключения клиента и контакты, уже распределённые в кампании проекта, учтены.`
     : `До ${data.ready.toLocaleString('ru-RU')} контактов попадут в резерв запуска. Повторы с уже подготовленными кампаниями проекта исключены; точное число пересчитаем после выбора клиента и применения его списка исключений.`;
   const partial = isPartialPreview(base);
-  const collecting = base.status === 'collecting' && preparationState.tone !== 'err';
-  const waiting = collecting && preparationState.tone === 'muted';
+  const target = base.collect_info?.target_progress;
+  const counted = collectCount(target?.ready_rows);
+  const goal = collectCount(target?.ready_target ?? data.preview_target);
+  const companies = collectCount(target?.ready_companies ?? data.observed_yield?.ready_companies);
+  const perCompany = collectCount(target?.counted_per_company);
+  const readyForReview = base.status === 'analyzed' && preparationState.currentStep === 3;
   return (
     <div className="space-y-3">
       <div className="ve2-stats">
         <div className="ve2-stat">
           <p className="ve2-stat-v">
             {(partial ? data.checked_ready : data.ready).toLocaleString('ru-RU')}
-            {partial && data.preview_target !== null ? <span className="text-base font-normal text-[var(--ve2-muted)]"> / {data.preview_target.toLocaleString('ru-RU')}</span> : null}
           </p>
-          <p className="ve2-stat-k">{partial ? waiting ? 'Подготовка не завершена' : collecting ? 'Сбор продолжается' : 'Сбор остановлен' : 'Готово в базе'}</p>
+          <p className="ve2-stat-k">{partial ? 'Проверенных контактов' : 'Доступно для запуска'}</p>
+        </div>
+        <div className="ve2-stat">
+          <p className="ve2-stat-v">
+            {goal !== null
+              ? <>{counted === null ? '—' : counted.toLocaleString('ru-RU')}<span className="text-base font-normal text-[var(--ve2-mute)]"> / {goal.toLocaleString('ru-RU')}</span></>
+              : companies === null ? '—' : companies.toLocaleString('ru-RU')}
+          </p>
+          <p className="ve2-stat-k">{goal !== null ? 'Засчитано в цель сбора' : 'Проверенных компаний'}</p>
         </div>
         <div className="ve2-stat">
           <p className="ve2-stat-v">
@@ -124,37 +135,25 @@ export function AudienceSummary({
           </p>
           <p className="ve2-stat-k">Проверено кандидатов</p>
         </div>
-        <div className="ve2-stat">
-          <p className="ve2-stat-v">
-            {data.estimate ? `~${data.estimate.contacts.toLocaleString('ru-RU')}` : 'Не рассчитан'}
-          </p>
-          <p className="ve2-stat-k">
-            {data.estimate?.companies !== undefined
-              ? `Ещё соберётся контактов (≈${data.estimate.companies.toLocaleString('ru-RU')} компаний)`
-              : 'Можно собрать дополнительно'}
-          </p>
-        </div>
       </div>
-      {data.estimate ? (
-        <p className={HE.muted}>
-          ~{data.estimate.contacts.toLocaleString('ru-RU')} ещё соберётся контактов
-          {data.estimate.companies !== undefined ? ` (≈${data.estimate.companies.toLocaleString('ru-RU')} компаний)` : ''}, оценка
-          на {formatDate(data.estimate.as_of)}; это новые компании, а не дополнительные адреса уже найденных.
-        </p>
-      ) : null}
       <p className={HE.muted}>{partial
-        ? waiting ? 'Это промежуточный результат, а не готовое превью. Текущий этап подготовки указан выше.'
-          : collecting
-          ? 'Это промежуточный результат, а не готовое превью. Показаны контакты, уже прошедшие проверки; сбор ещё продолжается.'
-          : 'Это сохранённая проверенная часть. Полное превью ещё не готово. Причина остановки — в подробностях базы.'
+        ? readyForReview
+          ? 'Проверенные контакты можно скачать и согласовать для запуска. Добор до цели не обязателен. Откройте «Контакты базы и скачивание» ниже.'
+          : data.checked_ready > 0
+            ? 'Проверенные контакты можно посмотреть и скачать ниже. Готовность к согласованию зависит от завершения разбора базы и подготовки писем. Текущий этап указан выше.'
+            : 'Контактов, прошедших все проверки, пока нет. Состояние подготовки и причина остановки, если она произошла, указаны выше.'
         : preparedForLaunch}</p>
-      {!partial ? <p className={HE.faint}>
+      {partial && readyForReview ? <p className={HE.muted}>{preparedForLaunch}</p> : null}
+      {!partial || readyForReview ? <p className={HE.faint}>
         Контакты будут загружаться в Instantly дневными партиями. Темп и срок появятся на шаге «Запуск» после выбора
         проекта и настроек отправки; план считается по общему обязательству проекта сразу для всех гипотез.
       </p> : null}
       <details>
-        <summary className="ve2-link cursor-pointer">Как рассчитан объём</summary>
+        <summary className="ve2-link cursor-pointer">Расчёт объёма и прогноз</summary>
         <div className="mt-2 space-y-2">
+          {goal !== null && perCompany ? <p className={HE.muted}>
+            В цель сбора засчитывается не больше {perCompany} адресов одной компании. Остальные проверенные адреса также сохранены в базе.
+          </p> : null}
           {data.observed_yield ? (
             <p className={HE.muted}>
               Проверено кандидатов: {data.observed_yield.candidates.toLocaleString('ru-RU')}. Получено готовых
@@ -164,11 +163,14 @@ export function AudienceSummary({
           ) : null}
           {data.preview_target !== null && data.checked_ready > data.preview_target ? (
             <p className={HE.muted}>
-              Цель превью — {data.preview_target.toLocaleString('ru-RU')}. Последняя проверенная партия дала{' '}
-              {(data.checked_ready - data.preview_target).toLocaleString('ru-RU')} дополнительный контакт; он сохранён в
-              готовой базе. CSV-превью содержит первые {data.preview_target.toLocaleString('ru-RU')} контактов.
+              В базе сохранены все проверенные контакты. CSV-превью содержит первые {data.preview_target.toLocaleString('ru-RU')} контактов.
             </p>
           ) : null}
+          {data.estimate ? <p className={HE.muted}>
+            Предварительная оценка добора: ~{data.estimate.contacts.toLocaleString('ru-RU')} контактов
+            {data.estimate.companies !== undefined ? ` (≈${data.estimate.companies.toLocaleString('ru-RU')} компаний)` : ''}.
+            {' '}Это оценка новых компаний, а не дополнительных адресов уже найденных. Она не гарантирует, что текущие источники дадут новые контакты, и не означает, что добор идёт.
+          </p> : null}
           <p className={HE.muted}>
             {data.estimate
               ? `Оценка с низкой уверенностью от ${formatDate(data.estimate.as_of)}. `
@@ -771,7 +773,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                       <>
                         <AudienceSummary base={base} presetId={presetId} preparationState={preparationState} />
                         <details>
-                          <summary className="ve2-link cursor-pointer">Превью базы и подтверждения</summary>
+                          <summary className="ve2-link cursor-pointer">Контакты базы и скачивание</summary>
                           <div className="mt-3">
                             <BaseRow
                               base={base}

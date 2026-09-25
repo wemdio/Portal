@@ -180,7 +180,7 @@ describe('VE2 collection progress presentation', () => {
       const stopped = { ...preview, id: collecting.id, status: 'analyzed' as const,
         collect_info: { ...preview.collect_info, target_progress: { ...preview.collect_info!.target_progress!, ready_rows: readyRows } } };
       const presentation = getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: stopped, jobs: [] });
-      expect(presentation).toMatchObject({ tone: 'muted', currentStep: null, canContinue: true });
+      expect(presentation).toMatchObject({ tone: 'muted', currentStep: readyRows > 0 ? 3 : null, canContinue: true });
       expect(presentation.title).toContain(`${readyRows} из 500`);
     }
     collecting.collect_info.relevance_review_requested = false;
