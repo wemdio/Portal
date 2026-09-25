@@ -133,13 +133,12 @@ export async function fetchCard(db: SupabaseClient, amoId: number): Promise<Card
   if (response.status === 404 || response.status === 204) {
     return NOT_FOUND;
   }
-  if (response.status === 401 || response.status >= 500) {
-    throw new AmoUnavailableError(`AMO request failed: HTTP ${response.status}`);
-  }
   if (!response.ok) {
-    // Прочие 4xx (403, 400 — например невалидный id) — считаем «сделки нет»,
-    // а не сбоем: повтор с тем же ответом ничего не даст.
-    return NOT_FOUND;
+    // Любой другой не-2xx — сбой, не «сделки нет»: 429 — рейт-лимит AMO,
+    // 401/403 — токен/права, остальные 4xx и 5xx — тоже не повод молчать в
+    // чат «сделка не найдена». Повтор (ручной или ежедневный) может дать
+    // другой результат — в отличие от честного 404/204.
+    throw new AmoUnavailableError(`AMO request failed: HTTP ${response.status}`);
   }
 
   const lead = (await response.json().catch(() => null)) as AmoLeadResponse | null;
