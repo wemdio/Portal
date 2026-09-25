@@ -3233,11 +3233,16 @@ async function checkCollectedRelevance(args: {
       onCheckpoint: async (checkpoint, options) => {
         ctx.signal?.throwIfAborted();
         const result = { ...job.result, relevance_checkpoint: checkpoint };
+        const updatedAt = new Date().toISOString();
         // Keep the per-batch write small: collect_info includes source harvests.
         // A retry of this job resumes these verdicts; terminal base save below
         // carries them into a later manually enqueued recovery job as well.
         const { data: saved, error } = await ctx.supabase.from('ve_jobs')
-          .update({ result, updated_at: new Date().toISOString() })
+          .update({ result, updated_at: updatedAt,
+            // Public activity comes from a durable checkpoint, not the preparation
+            // heartbeat. The email-child marker can remain until this pass returns.
+            progress: { phase: 'relevance_review', label: 'Проверяем соответствие компаний гипотезе', updated_at: updatedAt },
+          })
           .eq('id', job.id).eq('status', 'running').select('id').maybeSingle();
         if (error || !saved) throw new VeRelevanceCheckpointError(
           error ? `Relevance checkpoint save: ${error.message}` : 'Relevance checkpoint lost job ownership',

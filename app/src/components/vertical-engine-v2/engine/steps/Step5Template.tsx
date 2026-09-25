@@ -829,6 +829,11 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
   // Проект без периодов: сроком служит карточка проекта.
   const term = !period ? preview?.project_term ?? launch.projectTerm : null;
   const termDeadline = preview?.deadline ?? term?.deadline ?? null;
+  const targetHint = launch.deliveryPlanLocked
+    ? 'Цель закреплена в созданном плане выполнения и недоступна для изменения здесь.'
+    : launch.submitting ? 'Сохраняем план выполнения…'
+      : !launch.selectedPortalProject ? 'Сначала выберите «Проект клиента». После этого можно указать цель контактов.'
+        : null;
 
   return (
     <section className="border-t border-gray-200 pt-3" aria-labelledby="ve2-delivery-plan-title">
@@ -864,7 +869,7 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
                 value={launch.portalProjectId}
                 onChange={(event) => launch.selectPortalProject(event.target.value)}
                 disabled={launch.deliveryPlanLocked || launch.submitting}
-                className="ve2-input h-10 w-full px-3 text-xs"
+                className="ve2-input h-10 w-full px-3 text-xs disabled:cursor-not-allowed disabled:opacity-60"
               >
                 <option value="">Выберите проект</option>
                 {launch.portalProjects.map((project) => (
@@ -887,11 +892,12 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
                 value={launch.targetContactsInput}
                 onChange={(event) => launch.changeTargetContacts(event.target.value)}
                 disabled={!launch.selectedPortalProject || launch.deliveryPlanLocked || launch.submitting}
-                placeholder="Точное число"
+                placeholder={launch.selectedPortalProject ? 'Точное число' : 'Сначала выберите проект'}
                 aria-invalid={targetInvalid}
-                aria-describedby={targetInvalid ? 've2-delivery-target-error' : undefined}
-                className="ve2-input h-10 w-full px-3 text-xs"
+                aria-describedby={[targetHint ? 've2-delivery-target-hint' : '', targetInvalid ? 've2-delivery-target-error' : ''].filter(Boolean).join(' ') || undefined}
+                className="ve2-input h-10 w-full px-3 text-xs disabled:cursor-not-allowed disabled:opacity-60"
               />
+              {targetHint ? <p id="ve2-delivery-target-hint" className={`mt-2 ${HE.faint}`}>{targetHint}</p> : null}
             </div>
           </div>
 
@@ -925,7 +931,7 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
               </>
             ) : null
           ) : (
-            <p className="mt-2 text-xs text-gray-500">Выберите проект явно, период подставится из Portal.</p>
+            <p className="mt-2 text-xs text-gray-500">Срок выполнения подставится из выбранного проекта Portal.</p>
           )}
 
           {targetInvalid ? (

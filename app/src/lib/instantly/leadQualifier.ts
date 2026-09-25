@@ -1539,6 +1539,51 @@ function isSharedContactRoutingReply(text: string): boolean {
   return SHARED_CONTACT_ROUTING_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
+// Permission to submit a generic proposal to an inbox is not a request to
+// evaluate it. Match the WHOLE authored answer, never just the KP keyword or
+// the destination address. Personal asks, questions, prices, quantities and
+// any additional buyer intent must still reach ordinary qualification.
+function isPassiveProposalEmailRouting(ctx: ThreadContext, replyText: string): boolean {
+  // Some mail-to-text converters preserve emphasis around the sign-off. Do
+  // this locally: changing the shared signature parser would affect unrelated
+  // qualification/contact extraction paths.
+  const unformatted = replyText.replace(/\r\n?/gu, '\n').replace(
+    /^([ \t]*)(\*{1,2}|_{1,2})([^\n]+)\2[ \t]*$/gmu,
+    '$1$3',
+  );
+  const authored = extractAuthoredReplyText(unformatted);
+  // "Можете отправить КП на …?" may be a polite buyer request. Also preserve
+  // an explicit "Да" accepting our offer instead of stripping it as framing.
+  if (authored.includes('?')) return false;
+  const statement = authored.replace(/\s+/gu, ' ').replace(
+    /^(?:(?:добр(?:ый|ое|ого)\s+(?:день|утро|вечер))|здравствуйте|коллеги)\s*[,!.:\-–—]*\s*/iu,
+    '',
+  ).trim();
+  const permissionOnly = new RegExp(
+    String.raw`^(?:вы\s+)?(?:можете|можно)\s+(?:отправить|направить|переслать)\s+(?:(?:ваше|сво[её])\s+)?(?:коммерческое\s+предложение|кп)\s+на\s+(?:(?:(?:этот|данный|указанный|следующий|общий)\s+)?(?:адрес|e-?mail)|(?:(?:эту|данную|указанную|следующую|общую)\s+)?(?:электронную\s+)?почту)?\s*[:—–-]?\s*<?(?:mailto:)?${CONTACT_EMAIL_SOURCE}>?[.!]*$`,
+    'iu',
+  ).test(statement);
+  if (!permissionOnly) return false;
+  // A person may add a buying question in a postscript after the sign-off.
+  // Exclude quoted history before checking that tail for competing intent.
+  const lines = unformatted.split('\n');
+  const signatureAt = lines.findIndex(line => SIGNATURE_BOUNDARY_PATTERN.test(line.trim()));
+  if (signatureAt >= 0) {
+    const tail = extractAuthoredReplyText(lines.slice(signatureAt + 1).join('\n'));
+    if (hasHumanReplyContinuation(tail) || hasExplicitBuyerInterest(tail)) return false;
+  }
+  // The same words can accept our explicit offer to send a proposal. A
+  // competing question in the latest outbound is enough to skip this narrow
+  // shortcut; do not search the whole quoted history for unrelated questions.
+  const outbound = ctx.lastOutbound
+    ? extractAuthoredReplyText(getBodyText(ctx.lastOutbound.body)) : '';
+  const proposalQuestion = new RegExp(
+    String.raw`(?:^|[.!?\n])[^.!?\n]{0,120}${LETTER_TOKEN_START_SOURCE}(?:кп|(?:коммерческ[а-яё]*\s+)?предложени[а-яё]*)${LETTER_TOKEN_END_SOURCE}[^.!?\n]{0,120}\?`,
+    'iu',
+  );
+  return !proposalQuestion.test(outbound);
+}
+
 function isSubstantiveOfferText(text: string): boolean {
   return (
     isProposalMessage(text) &&
@@ -2483,6 +2528,7 @@ function buildSystemPrompt(
 - non_lead_kind="service_followup" — служебное продолжение тикета/обслуживания, в котором поставщик ждёт нашу обратную связь или обсуждает выполнение своего запроса, без интереса приобрести наше предложение. Это может быть живой человек, а не автоответ. Одни лишь адрес support@, номер тикета или слова «обратная связь» НЕ доказывают эту категорию: сверяй роли отправителей, содержание и контекст.
 - Ответ поддержки «открыты к партнёрствам, заполните форму; рассмотрим заявку и свяжемся в случае взаимной заинтересованности» — только порядок подачи обращения, а не подтверждённый интерес к нашему предложению (non_lead_kind="service_followup"). Общая готовность рассматривать заявки не равна согласию на сотрудничество. Если вместе с формой есть конкретный интерес к нашему продукту или запрос цены/демонстрации, оцени его отдельно по контексту и критериям проекта.
 - non_lead_kind="contact_routing" — только передача контакта/перенаправление к коллеге или в отдел без собственного интереса: «можно связаться с Юлией, она отвечает за партнёрства»; «send the requested information to affiliates@..., this team cannot help». Это не собственное согласие на звонок и не запрос нашей цены, даже после подробного оффера.
+- Разрешение «Вы можете отправить ваше коммерческое предложение на почту contact@example.org», если это весь смысл ответа, — тоже contact_routing, is_lead=false, needs_review=false: указан канал приёма предложений, а не собственный интерес. Уже раскрытый оффер не превращает такое разрешение в покупательский запрос. Не применяй это исключение только по наличию другого email или слова «можете»: «Пришлите КП, рассмотрим», «Можете отправить мне расчёт?», согласие на наше предложение прислать КП, конкретные условия/объём, интерес к продукту или согласие на звонок — самостоятельные сигналы, оцени их отдельно. Положительный кастомный критерий, прямо допускающий передачу контакта, сохраняет приоритет.
 - Подтверждение СЕБЯ как адресата тоже может быть contact_routing: на вопрос «кто отвечает за документы / кому адресовать письмо?» ответили только «Рассказать можно мне», «Это ко мне», «Я отвечаю за это», «You can tell me». По дефолту это is_lead=false, needs_review=false: человек указал, КОМУ рассказывать, но не выразил интерес к решению. Наличие описания продукта, длина исходящего письма и его цитата не меняют этот смысл. Не путай с ответом на предложение провести демо/встречу или рассказать о решении: учитывай, на какой вопрос ответил человек. Если рядом есть «интересно ваше решение», запрос цены/КП, материалов после оффера или согласие на звонок — оцени этот отдельный интерес, non_lead_kind=null. Положительный кастомный критерий «ответственный ответил сам / назвал себя — лид» имеет приоритет; одного номера или email в подписи для такого совпадения недостаточно.
 - Если в том же основном ответе есть реальный покупательский интерес к НАШЕМУ предложению (вопрос о нашей цене, запрос нашего КП, согласие обсуждать наше решение), ставь non_lead_kind=null и оцени этот интерес. Описание своего бизнеса не отменяет покупательский запрос. «Пришлите ваше КП, передам руководству» после оффера или при отсутствующей истории — лид, но не после известного пустого opener; простое перенаправление к коллеге без такого запроса — нет.
 - Положительный кастомный критерий проекта может считать сознательную передачу контакта лидом. Но явный кастомный запрет «передача своего или чужого контакта без интереса — НЕ лид» распространяется и на «Напишите мне в Макс +номер» после оффера; сама смена канала не является отдельным интересом.
@@ -3401,6 +3447,12 @@ function applyQualificationGuards(
   );
   if (isProtectedSemanticIntent(criteriaAwareResult.nonLeadKind) && !criteriaAwareResult.customCriteriaMatched) {
     return semanticNonLead(criteriaAwareResult, criteriaAwareResult.nonLeadKind);
+  }
+  if (isPassiveProposalEmailRouting(ctx, replyText) && !criteriaAwareResult.customCriteriaMatched) {
+    return {
+      ...semanticNonLead(criteriaAwareResult, 'contact_routing'),
+      reason: 'Получатель только разрешил отправить общее КП на указанный адрес, не выразив собственного коммерческого интереса.',
+    };
   }
   if (
     (isPlainContactReplyToContactOnlyOpener(ctx, replyText) || isOnlyContactRedirect(replyText)) &&

@@ -17,6 +17,7 @@ import { VeLlmRateLimitError, veRateLimitDelay, type VeLlmRateLimit } from './ll
 import { isVeStageDbInterruption } from './stageDb';
 import type { VeJob } from './types';
 import { VeJobInactivityError } from './workerLiveness';
+import { readRelevanceCheckpoint } from './relevanceCheckpoint';
 
 /** Попытки для постоянных ошибок — как было до автоповтора. */
 export const PERMANENT_MAX_ATTEMPTS = 3;
@@ -41,7 +42,8 @@ export function isRetryableStageError(msg: string): boolean {
 /** Лимит попыток для конкретной ошибки стадии. */
 export function maxAttemptsFor(msg: string): number {
   // A journal failure may occur after a paid response. A fresh worker scope
-  // must not automatically repeat the stage and charge for that work again.
+  // must not automatically repeat an arbitrary stage and charge again.
+  // planVeJobFailure handles the checkpointed collection exception below.
   if (msg === 'Provider usage journal could not be saved.') return 1;
   if (isVeProviderBillingError(msg) || isVeProviderConfigurationError(msg)) return 1;
   return isRetryableStageError(msg) ? RETRYABLE_MAX_ATTEMPTS : PERMANENT_MAX_ATTEMPTS;
@@ -102,10 +104,17 @@ export interface VeJobFailurePlan {
 }
 
 /** How the worker records a failed stage run (attempts, next run, final failure). */
-export function planVeJobFailure(job: Pick<VeJob, 'id' | 'attempts' | 'payload'>, error: unknown, nowMs = Date.now()): VeJobFailurePlan {
+export function planVeJobFailure(job: Pick<VeJob, 'id' | 'attempts' | 'payload'> & Partial<Pick<VeJob, 'stage' | 'result'>>, error: unknown, nowMs = Date.now()): VeJobFailurePlan {
   const msg = error instanceof Error ? error.message : String(error);
-  const retryable = isRetryableStageError(msg);
-  const attemptCap = maxAttemptsFor(msg);
+  // Only collection has durable, validated per-company decisions and bounded
+  // recovery of an interrupted semantic review. Do not replay an arbitrary
+  // research stage after losing the metering write of a paid response.
+  const checkpoint = job.result?.relevance_checkpoint as { context_hash?: unknown } | null | undefined;
+  const resumeJournal = msg === 'Provider usage journal could not be saved.' && job.stage === 'base_collect'
+    && typeof checkpoint?.context_hash === 'string'
+    && Object.keys(readRelevanceCheckpoint(checkpoint, checkpoint.context_hash).verdicts).length > 0;
+  const retryable = resumeJournal || isRetryableStageError(msg);
+  const attemptCap = resumeJournal ? RETRYABLE_MAX_ATTEMPTS : maxAttemptsFor(msg);
   const rateLimit = error instanceof VeLlmRateLimitError ? error : undefined;
   const interrupted = isVeJobInterruption(error);
   const count = interrupted ? veJobInterruptions(job.payload) + 1 : 0;

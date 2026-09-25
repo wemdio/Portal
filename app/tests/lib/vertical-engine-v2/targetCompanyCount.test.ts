@@ -53,12 +53,11 @@ describe('VE2 goal counts companies, not address density', () => {
     expect(plain).not.toHaveProperty('counted_per_company');
   });
 
-  it('shows companies and the address total to the specialist in plain words', () => {
+  it('shows company composition and prepared status without a competing goal counter', () => {
     const target = withVeTargetComposition({ ...createCollectionTarget('preview'), ready_rows: 92, status: 'limited' as const,
       reason: 'Достигнут защитный предел кандидатов или раундов; цель ещё не набрана' },
     { counted: 92, companies: 39, perCompany: 3 }, 771);
-    expect(describeReadyComposition(target)).toBe(
-      'Компаний: 39. Всего адресов в базе: 771; в цель засчитывается не больше 3 адресов одной компании.');
+    expect(describeReadyComposition(target)).toBe('Компаний: 39.');
     expect(describeReadyComposition({ ...target, ready_contacts: undefined, counted_per_company: undefined })).toBe('Компаний: 39.');
     // Старая запись без состава ничего не придумывает.
     expect(describeReadyComposition({ ...createCollectionTarget('preview'), ready_rows: 500 })).toBeNull();
@@ -68,8 +67,8 @@ describe('VE2 goal counts companies, not address density', () => {
       hypothesis_id: 'h1', filename: 'b1', row_count: 771, analysis: null, columns: [], sample_rows: [],
       collect_info: { collection_mode: 'preview', target_progress: target } } as unknown as VeBaseSummary;
     const state = getPreparationPresentation({ preparation, base: summary, jobs: [] });
-    expect(state.title).toBe('Сбор остановлен: 92 из 500 контактов');
-    expect(state.description).toContain('Компаний: 39. Всего адресов в базе: 771');
+    expect(state.title).toBe('База и письма готовы к согласованию');
+    expect(state.description).toContain('Компаний: 39.');
     expect(state.canContinue).toBe(true);
   });
 });

@@ -193,7 +193,7 @@ export type VeJobSummary = Pick<
   /** Вход стадии: фильтрация джоб по вертикали (payload.vertical_id). */
   payload?: { vertical_id?: string; base_id?: string; review_relevance?: boolean } | null;
   /** Живой прогресс стадии (ve_jobs.progress): счётчик «— 14/33 · проверяем гипотезу». */
-  progress?: { done?: number; total?: number; label?: string } | null;
+  progress?: { done?: number; total?: number; label?: string; phase?: string; updated_at?: string } | null;
 };
 
 /* ── Цепочка писем: A/B-варианты ── */

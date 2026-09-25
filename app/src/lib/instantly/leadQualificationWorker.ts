@@ -1,6 +1,7 @@
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
 import { logInfo, logWarn } from '@/lib/loggerServer';
+import { INTERNAL_ROLES } from '@/lib/roles';
 import {
   qualifyReply,
   getBodyText,
@@ -3724,19 +3725,31 @@ async function notifySpecialistsAboutLead(
     // (инцидент PP Prod / Илиана, 2026-06-24): лид квалифицировался, но
     // notifySpecialistsAboutLead выходил с userIds.size === 0.
     if (unlinkedNames.size > 0) {
-      const { data: byName } = await supabaseMain
+      // A client account may have the same display name. Name-only routing
+      // must identify exactly one employee, never every matching profile.
+      const { data: byName, error: specialistProfileError } = await supabaseMain
         .from('profiles')
         .select('id, full_name')
+        .in('role', INTERNAL_ROLES)
         .in('full_name', [...unlinkedNames]);
-      const matched = (byName ?? []) as Array<{ id: string; full_name: string }>;
-      for (const p of matched) {
-        if (p.id) userIds.add(p.id);
-      }
-      if (matched.length < unlinkedNames.size) {
+      if (specialistProfileError) {
         workerLog(
           'warn',
-          `Specialist set as free text without a linked account (campaign ${campaignId}): [${[...unlinkedNames].join(', ')}] — matched ${matched.length}/${unlinkedNames.size} by name. Unmatched get no alert; link the specialist via the project dropdown.`,
+          `Specialist lookup failed for project ${projectId}: ${specialistProfileError.message}`,
         );
+      } else {
+        const matched = (byName ?? []) as Array<{ id: string; full_name: string }>;
+        for (const name of unlinkedNames) {
+          const exactSpecialists = matched.filter((profile) => profile.full_name === name);
+          if (exactSpecialists.length === 1 && exactSpecialists[0].id) {
+            userIds.add(exactSpecialists[0].id);
+          } else {
+            workerLog(
+              'warn',
+              `Specialist ${name} for project ${projectId} resolved to ${exactSpecialists.length} internal profiles — alert skipped; link the specialist via the project dropdown.`,
+            );
+          }
+        }
       }
     }
 
@@ -3748,6 +3761,7 @@ async function notifySpecialistsAboutLead(
         const { data: managerProfiles, error: managerProfileError } = await supabaseMain
           .from('profiles')
           .select('id, full_name')
+          .in('role', INTERNAL_ROLES)
           .ilike('full_name', managerName);
         if (managerProfileError) {
           workerLog('warn', `Lead (PM) lookup failed for project ${projectId}: ${managerProfileError.message}`);
