@@ -13,6 +13,11 @@
  *      карточке сделки, метрикой перестал быть 09.09.2026. Встречи — по ДАТЕ
  *      записи разговора (`meeting_deal_links` → `tg_video_transcripts`), а не
  *      по этапу AMO вовсе: этап «Встреча проведена» засорён, см. `meetings.ts`.
+ *
+ * Режимов два (переключатель на экране с 26.09.2026, см. `cohort` в params.ts):
+ * «по когорте» — продажи, встречи и деньги считаются по дате события, чья бы
+ * сделка ни была; «без когорты» — только по сделкам, заведённым в периоде.
+ * Расчёт один на оба режима: `computeFirstSalesSeries(..., { cohort })`.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { chunkArray, IN_CHUNK_SIZE } from '@/lib/cisLeads/batchedQuery';
@@ -360,8 +365,24 @@ export function computeFirstSalesSeries(
   // Встречи по закрытой задаче «Встреча» (fetchTaskMeetings): сделка → срок
   // задачи. Необязательно по той же причине, что и деньги.
   taskMeetings: Map<number, string> = new Map(),
+  // Режим счёта (см. `cohort` в params.ts). По умолчанию «по когорте» — так
+  // дашборд считает с 25.09.2026 и так ждут все прежние вызовы.
+  options: { cohort?: boolean } = {},
 ): FirstSalesSeries {
   const allowed = sourceFilter && sourceFilter.length > 0 ? new Set(sourceFilter) : null;
+  const cohort = options.cohort ?? true;
+
+  /**
+   * Засчитываются ли периоду события сделки — продажа, встреча, деньги.
+   *
+   * «По когорте» — всегда: август, оплаченный в сентябре, — продажа сентября.
+   * «Без когорты» — только если сделка заведена в периоде. Одна проверка на
+   * все три прохода ниже, а не вторая копия расчёта: иначе два режима рано
+   * или поздно разошлись бы не только тем, чем должны.
+   *
+   * Лиды и квал сюда не смотрят: они и так считаются по дате создания.
+   */
+  const eventsCount = (lead: FirstSalesLeadRow): boolean => cohort || isLeadInWindow(lead, from, to);
 
   const keys = buildBuckets(from, to, groupBy);
   const series = new Map<string, SeriesBucket>(
@@ -412,6 +433,9 @@ export function computeFirstSalesSeries(
   /** Сделка → ответственный: встречи считаются отдельным проходом, где самой
    *  сделки под рукой уже нет. */
   const dealManagerMap = new Map<number, string | null>();
+  /** Сделки, заведённые в периоде, — нужны проходу денег в режиме «без
+   *  когорты»: у платежа есть только id сделки. */
+  const createdInWindow = new Set<number>();
 
   // Название источника берём у сделки с наибольшим created_at (при равенстве —
   // с наибольшим amo_id, чтобы результат не зависел от порядка строк выборки).
@@ -437,6 +461,7 @@ export function computeFirstSalesSeries(
     const resolved = resolveSource(lead.raw);
     dealSourceMap.set(lead.amo_id, resolved);
     dealManagerMap.set(lead.amo_id, lead.responsible_name);
+    if (isLeadInWindow(lead, from, to)) createdInWindow.add(lead.amo_id);
 
     const createdAt = lead.created_at ? new Date(lead.created_at).getTime() : Number.NEGATIVE_INFINITY;
     const bestLabel = labelPick.get(resolved.key);
@@ -502,6 +527,12 @@ export function computeFirstSalesSeries(
     // метрикой быть перестал: за август 2026 он дал 9 при 13 оплаченных
     // сделках, потому что пять продаж его вообще не проходили. Этап остался
     // отметкой в карточке (см. isContractInWindow), но не цифрой на экране.
+    //
+    // Без когорты продажа засчитывается только сделке, заведённой в периоде
+    // (`eventsCount`), и цикл ниже — тоже: «оплат» под плиткой цикла обязано
+    // совпадать с «Продажами».
+    if (!eventsCount(lead)) continue;
+
     if (isSaleInWindow(lead, from, to)) {
       totals.sales += 1;
       breakdown.sales += 1;
@@ -548,7 +579,11 @@ export function computeFirstSalesSeries(
   //   - встреча, проведённая по закрытой задаче «Встреча», но не отмеченная
   //     этапом (карточка осталась на «Назначена встреча»), засчитывается по
   //     сроку задачи — см. meetingDateInWindow.
+  //
+  // Без когорты встреча по сделке, заведённой до периода, периоду не
+  // засчитывается (`eventsCount`).
   for (const lead of leads) {
+    if (!eventsCount(lead)) continue;
     const meetingAt = meetingDateInWindow(lead, from, to, taskMeetings);
     if (!meetingAt) continue;
 
@@ -625,6 +660,19 @@ export function computeFirstSalesSeries(
     const resolved = dealSourceMap.get(dealId);
     const key = resolved?.key ?? NO_SOURCE_KEY;
     if (allowed && !allowed.has(key)) continue;
+
+    // Без когорты приход по сделке, заведённой до периода, первичкой периода
+    // не считается — но и не пропадает: своя строка «по сделкам прошлых
+    // периодов», иначе экран перестал бы сходиться с выпиской. Проверка после
+    // фильтра источника, чтобы «по когорте» минус «без когорты» равнялось
+    // ровно этой строке при любом фильтре. Сделка, которой нет в выборке
+    // (дату создания не узнать), считается прошлой: записать её в период без
+    // доказательства — выдумать данные.
+    if (!cohort && !createdInWindow.has(dealId)) {
+      totals.money.earlierDeals += amount;
+      totals.money.earlierDealsPayments += 1;
+      continue;
+    }
 
     totals.money.received += amount;
     totals.money.payments += 1;

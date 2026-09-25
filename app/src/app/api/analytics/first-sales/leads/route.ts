@@ -32,7 +32,7 @@ export async function GET(req: NextRequest) {
   // `parsed.value === null`, а не `parsed.error` — то же сужение, что в
   // summary/route.ts (truthy-сужение объединения тут не работает на tsc 5.9.3).
   if (parsed.value === null) return NextResponse.json({ error: parsed.error }, { status: 400 });
-  const { from, to } = parsed.value;
+  const { from, to, cohort } = parsed.value;
 
   // Срез, в который проваливается пользователь: либо источник, либо менеджер.
   //
@@ -54,6 +54,7 @@ export async function GET(req: NextRequest) {
     // договор, продажа или оплата. Иначе сумма списка не сходилась бы с
     // цифрами строки — март, оплаченный в сентябре, сидел в «Деньгах»
     // сентября, но в сентябрьском списке его не было (решение 25.09.2026).
+    // Выборка одна на оба режима: без когорты старые сделки отсеиваются ниже.
     const [payments, taskMeetings] = await Promise.all([
       fetchFirstSalesPayments(gate.supabaseAdmin, PIPELINE_ID, from, to),
       fetchTaskMeetings(gate.supabaseAdmin, PIPELINE_ID, from, to),
@@ -97,10 +98,18 @@ export async function GET(req: NextRequest) {
       // 25.09.2026 старые сделки возвращены, но помечены «заведена раньше» и
       // несут этап на конец периода, так что сломанным фильтром больше не
       // выглядят.
-      .filter(({ hits }) => hits.lead || hits.meetings > 0 || hits.contract || hits.sale || hits.money > 0);
+      //
+      // С 26.09.2026 это режим «по когорте». В режиме «без когорты» список —
+      // только сделки, заведённые в периоде (как до 25.09.2026): цифры строки
+      // в этом режиме посчитаны лишь по ним (`eventsCount` в metrics.ts), и
+      // старая сделка в списке объясняла бы то, чего в строке нет.
+      .filter(({ hits }) => (cohort
+        ? hits.lead || hits.meetings > 0 || hits.contract || hits.sale || hits.money > 0
+        : hits.lead));
 
     // Старые сделки при обрезке не теряем: их мало, и именно они объясняют
-    // деньги строки. Новые — свежие сверху, как раньше.
+    // деньги строки. Новые — свежие сверху, как раньше. Без когорты старых
+    // в выборке нет, и `earlier` пуст.
     const byCreatedDesc = (a: (typeof selected)[number], b: (typeof selected)[number]) =>
       (b.lead.created_at ?? '').localeCompare(a.lead.created_at ?? '');
     const earlier = selected.filter(({ hits }) => !hits.lead).sort(byCreatedDesc);

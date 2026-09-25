@@ -11,6 +11,19 @@ export type FirstSalesParams = {
   to: Date;
   groupBy: GroupBy;
   sources: string[] | null;
+  /**
+   * Режим счёта, `cohort=0|1` в запросе, по умолчанию 1.
+   *
+   * true — «по когорте»: в период попадает всё, что в нём СЛУЧИЛОСЬ, в том
+   * числе по сделкам, заведённым раньше (августовская сделка, оплаченная в
+   * сентябре, — продажа и деньги сентября). Так дашборд считает с 25.09.2026.
+   *
+   * false — «без когорты»: продажи, встречи и деньги засчитываются только
+   * сделкам, ЗАВЕДЁННЫМ в периоде. Лиды и квал от режима не зависят — они и
+   * так считаются по дате создания. Просьба CEO от 26.09.2026, спека
+   * docs/superpowers/specs/2026-09-26-first-sales-cohort-toggle-design.md.
+   */
+  cohort: boolean;
 };
 
 /** Границы приходят как YYYY-MM-DD и трактуются как МСК-сутки целиком:
@@ -52,12 +65,20 @@ export function parseFirstSalesParams(
     return { value: null, error: `Слишком много источников в фильтре: максимум ${MAX_SOURCES}` };
   }
 
+  // Строго 0 или 1: опечатка вида `cohort=false` молча дала бы режим по
+  // умолчанию, и экран показал бы не те цифры, о которых просили.
+  const cohortRaw = url.searchParams.get('cohort') ?? '1';
+  if (cohortRaw !== '0' && cohortRaw !== '1') {
+    return { value: null, error: `Недопустимый cohort: ${cohortRaw} (ожидается 0 или 1)` };
+  }
+
   return {
     value: {
       from,
       to,
       groupBy: groupByRaw as GroupBy,
       sources: sourceRaw.length > 0 ? sourceRaw : null,
+      cohort: cohortRaw === '1',
     },
     error: null,
   };

@@ -30,6 +30,35 @@ function formatDay(key: string): string {
   return y && m && d ? `${d}.${m}.${y}` : key;
 }
 
+/** Параметр адреса страницы с режимом счёта: `?cohort=0` — «без когорты».
+ *  Режим по умолчанию в адрес не пишется, чтобы старые ссылки не менялись. */
+const COHORT_URL_PARAM = 'cohort';
+
+/**
+ * Режим счёта живёт в адресе страницы, а не только в состоянии: ссылку «без
+ * когорты» пересылают CEO, и открыться она обязана в том же режиме.
+ * `replaceState`, а не навигация роутера: страница не перерисовывается, и
+ * каждый клик по переключателю не плодит запись в истории «Назад».
+ */
+function readCohortFromUrl(): boolean {
+  return new URLSearchParams(window.location.search).get(COHORT_URL_PARAM) !== '0';
+}
+
+function writeCohortToUrl(cohort: boolean): void {
+  const url = new URL(window.location.href);
+  if (cohort) url.searchParams.delete(COHORT_URL_PARAM);
+  else url.searchParams.set(COHORT_URL_PARAM, '0');
+  if (url.href !== window.location.href) window.history.replaceState(window.history.state, '', url.href);
+}
+
+/** Строка запроса сводки — одна на весь период и на выбранную корзину. */
+function summaryQuery(filters: FiltersState, period: { from: string; to: string }, groupBy: string): string {
+  const qs = new URLSearchParams({ from: period.from, to: period.to, groupBy });
+  for (const source of filters.sources) qs.append('source', source);
+  if (!filters.cohort) qs.set('cohort', '0');
+  return qs.toString();
+}
+
 export default function FirstSalesView() {
   const [filters, setFilters] = useState<FiltersState>(() => getDefaultFilters());
   /**
@@ -72,12 +101,18 @@ export default function FirstSalesView() {
   // прошлое окно), а флаг `active` подстраховывает на случай, если промис уже
   // успел зарезолвиться до того, как abort долетел — тот же идиом, что в
   // analytics/mailbox-load/page.tsx.
+  // Режим счёта восстанавливается здесь же, из адреса страницы, — по той же
+  // причине, что и период: на сервере адреса браузера нет, а сводка до
+  // восстановления не запрашивается.
   useEffect(() => {
     const stored = readSharedPeriod();
-    if (stored) {
-      const { from, to } = clampSharedPeriod(stored);
-      setFilters((f) => (f.from === from && f.to === to ? f : { ...f, from, to }));
-    }
+    const cohort = readCohortFromUrl();
+    const period = stored ? clampSharedPeriod(stored) : null;
+    setFilters((f) => {
+      const from = period?.from ?? f.from;
+      const to = period?.to ?? f.to;
+      return f.from === from && f.to === to && f.cohort === cohort ? f : { ...f, from, to, cohort };
+    });
     setPeriodRestored(true);
   }, []);
 
@@ -88,16 +123,20 @@ export default function FirstSalesView() {
 
   useEffect(() => {
     if (!periodRestored) return;
+    writeCohortToUrl(filters.cohort);
+  }, [periodRestored, filters.cohort]);
+
+  useEffect(() => {
+    if (!periodRestored) return;
     const controller = new AbortController();
     let active = true;
 
     const run = async () => {
       setLoading(true);
       try {
-        const qs = new URLSearchParams({ from: filters.from, to: filters.to, groupBy: filters.groupBy });
-        for (const source of filters.sources) qs.append('source', source);
+        const qs = summaryQuery(filters, filters, filters.groupBy);
 
-        const res = await authFetch(`/api/analytics/first-sales/summary?${qs.toString()}`, {
+        const res = await authFetch(`/api/analytics/first-sales/summary?${qs}`, {
           signal: controller.signal,
         });
         if (!res.ok) {
@@ -178,10 +217,9 @@ export default function FirstSalesView() {
     const run = async () => {
       setBucketLoading(true);
       try {
-        const qs = new URLSearchParams({ from: selection.from, to: selection.to, groupBy: 'day' });
-        for (const source of filters.sources) qs.append('source', source);
+        const qs = summaryQuery(filters, selection, 'day');
 
-        const res = await authFetch(`/api/analytics/first-sales/summary?${qs.toString()}`, {
+        const res = await authFetch(`/api/analytics/first-sales/summary?${qs}`, {
           signal: controller.signal,
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -206,7 +244,7 @@ export default function FirstSalesView() {
       controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- источники сравниваем строкой: массив меняет тождество на каждом рендере
-  }, [selection, selectedBucket, sourceKey, reloadKey]);
+  }, [selection, selectedBucket, sourceKey, filters.cohort, reloadKey]);
 
   // Данные корзины показываем, только если они от ТЕКУЩЕЙ выбранной корзины.
   // Сравнение по ключу вместо сброса состояния эффектом: пока летит новый
@@ -270,6 +308,7 @@ export default function FirstSalesView() {
             previousFrom={data.previousFrom}
             previousTo={data.previousTo}
             syncedAt={data.syncedAt}
+            cohort={filters.cohort}
             onNoSourceClick={() => {
               setFilters((f) => ({ ...f, sources: ['none'] }));
               setSelectedBucket(null);
@@ -297,7 +336,11 @@ export default function FirstSalesView() {
                 endpoint="/api/analytics/first-sales/stage-funnel"
                 dealEndpoint="/api/analytics/first-sales/deal"
                 title="Воронка первички за период"
-                subtitle="На каком этапе была каждая сделка в последний день периода — среди заведённых или сдвинутых в нём. История переходов — в карточке сделки."
+                subtitle={
+                  filters.cohort
+                    ? 'На каком этапе была каждая сделка в последний день периода — среди заведённых или сдвинутых в нём. История переходов — в карточке сделки.'
+                    : 'На каком этапе была каждая сделка в последний день периода — только среди заведённых в нём (без когорты). История переходов — в карточке сделки.'
+                }
                 emptyText="За выбранный период в воронке новых лидов сделок не было — попробуйте расширить период."
                 ariaLabel="Воронка первички по этапам AMO"
                 outcomesLabel="Итог:"

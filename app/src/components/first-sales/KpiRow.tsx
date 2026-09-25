@@ -123,6 +123,7 @@ export default function KpiRow({
   previousFrom,
   previousTo,
   syncedAt,
+  cohort,
   onNoSourceClick,
 }: {
   totals: FirstSalesTotals;
@@ -132,6 +133,8 @@ export default function KpiRow({
   previousFrom: string;
   previousTo: string;
   syncedAt: string | null;
+  /** Режим счёта: false — «без когорты», только сделки, заведённые в периоде. */
+  cohort: boolean;
   /** Клик по плашке «Без источника» — поставить фильтр на неё. */
   onNoSourceClick: () => void;
 }) {
@@ -147,12 +150,20 @@ export default function KpiRow({
   // не связано ни с одной сделкой. Пока связано не всё, плитка жёлтая —
   // читать её как «столько мы заработали» нельзя, только как «столько
   // связали с первичкой».
+  //
+  // Строки подписи вместе с «Деньгами» складываются ровно во «всего по банку»:
+  // первичка + по сделкам прошлых периодов (только без когорты) + ждут
+  // разбора + спорные + в продления + не связано. Новая строка денег, не
+  // попавшая сюда, сломает сходимость с выпиской.
   const money = totals.money;
   const coverageKnown = totals.sales > 0;
   const moneyPartial = money.received < money.bankTotal;
   const moneySub = [
     `платежей: ${fmt(money.payments)}`,
     coverageKnown ? `ИНН у ${fmt(money.contractsWithInn)} из ${fmt(totals.sales)} продаж` : null,
+    // Без когорты приходы по сделкам, заведённым до периода, в «Деньги» не
+    // идут, но и не пропадают — иначе экран разошёлся бы с банком.
+    money.earlierDealsPayments > 0 ? `по сделкам прошлых периодов: ${fmtMoney(money.earlierDeals)}` : null,
     money.pendingPayments > 0 ? `ждут разбора: ${fmtMoney(money.pending)}` : null,
     money.ambiguousPayments > 0 ? `спорных: ${fmtMoney(money.ambiguous)}` : null,
     money.renewalsPayments > 0 ? `в продления: ${fmtMoney(money.renewals)}` : null,
@@ -235,7 +246,9 @@ export default function KpiRow({
         }
         hint={
           'Сколько проходит от создания сделки до оплаты. Считается по сделкам, '
-          + 'ОПЛАЧЕННЫМ в выбранном периоде, — сама сделка могла прийти раньше. '
+          + (cohort
+            ? 'ОПЛАЧЕННЫМ в выбранном периоде, — сама сделка могла прийти раньше. '
+            : 'заведённым И оплаченным в выбранном периоде (режим «без когорты»). ')
           + 'Крупно медиана: половина сделок закрылась быстрее, половина дольше. '
           + 'Среднее выше медианы — значит несколько долгих сделок тянут его вверх.'
         }

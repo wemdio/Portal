@@ -24,10 +24,10 @@ export async function GET(req: NextRequest) {
   // `parsed.value === null`, а не `parsed.error` — то же сужение, что в
   // соседних ручках аналитики.
   if (parsed.value === null) return NextResponse.json({ error: parsed.error }, { status: 400 });
-  const { from, to, sources } = parsed.value;
+  const { from, to, sources, cohort } = parsed.value;
 
   try {
-    const funnel = await fetchFirstSalesStageFunnel(gate.supabaseAdmin, PIPELINE_ID, { from, to }, sources);
+    const funnel = await fetchFirstSalesStageFunnel(gate.supabaseAdmin, PIPELINE_ID, { from, to }, sources, { cohort });
     return NextResponse.json(funnel);
   } catch (e) {
     return NextResponse.json(

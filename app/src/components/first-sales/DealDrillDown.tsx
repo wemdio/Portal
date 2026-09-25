@@ -98,7 +98,8 @@ const drillSortColumns: SortColumns<DrillLeadRow> = {
 
 /**
  * Ключ, по которому раскрытая строка теряет актуальность. Только from/to/
- * sources влияют на то, какие сделки попадут в drill-down — смена groupBy
+ * sources и режим счёта (cohort: без когорты старые сделки из списка уходят)
+ * влияют на то, какие сделки попадут в drill-down — смена groupBy
  * на сам список сделок не влияет (это только раскладка графика по корзинам),
  * поэтому в ключ не входит: иначе переключение «День/Неделя/Месяц» без
  * причины сворачивало бы открытую строку.
@@ -112,7 +113,7 @@ const drillSortColumns: SortColumns<DrillLeadRow> = {
  * правило линтера `react-hooks/set-state-in-effect`.
  */
 export function drillKey(filters: FiltersState): string {
-  return `${filters.from}|${filters.to}|${filters.sources.join(',')}`;
+  return `${filters.from}|${filters.to}|${filters.sources.join(',')}|${filters.cohort ? 'cohort' : 'created'}`;
 }
 
 /** Стабильная строка среза — и для зависимостей эффекта, и для логов. */
@@ -143,6 +144,8 @@ export default function DealDrillDown({
       setLoading(true);
       try {
         const qs = new URLSearchParams({ from: filters.from, to: filters.to, ...query });
+        // Режим по умолчанию не передаём — ручка сама считает «по когорте».
+        if (!filters.cohort) qs.set('cohort', '0');
 
         // Фильтр по источникам нужен только при провале в МЕНЕДЖЕРА: его
         // цифра в разбивке посчитана уже после фильтра, и список сделок
@@ -180,8 +183,8 @@ export default function DealDrillDown({
       active = false;
       controller.abort();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- from/to/sources уже свёрнуты в drillKey выше уровнем; key меняется вместе со строкой.
-  }, [key, filters.from, filters.to, filters.sources.join(',')]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- from/to/sources/cohort уже свёрнуты в drillKey выше уровнем; key меняется вместе со строкой.
+  }, [key, filters.from, filters.to, filters.sources.join(','), filters.cohort]);
 
   // `rows`/`sortedRows` объявлены до ранних return'ов ниже — хуки не могут
   // вызываться условно, а компонент размонтируется/монтируется заново при смене
@@ -353,12 +356,17 @@ export default function DealDrillDown({
             </tbody>
           </table>
         </div>
-        {/* Оговорка: в списке есть сделки старше периода, и без пояснения они
-            читались бы как сломанный фильтр дат. */}
+        {/* Оговорка: по когорте в списке есть сделки старше периода, и без
+            пояснения они читались бы как сломанный фильтр дат. Без когорты
+            их нет — и сноска говорит об этом, а не о том, чего не видно. */}
         <p className="mt-1.5 text-[11px] text-zinc-400">
-          Показаны сделки, созданные в выбранном периоде, и сделки, заведённые раньше, если в периоде
-          по ним была встреча, договор, продажа или оплата — они помечены «заведена раньше». Этап —
-          на последний день периода.
+          {filters.cohort
+            ? 'Показаны сделки, созданные в выбранном периоде, и сделки, заведённые раньше, если в периоде '
+              + 'по ним была встреча, договор, продажа или оплата — они помечены «заведена раньше». Этап — '
+              + 'на последний день периода.'
+            : 'Режим «без когорты»: показаны только сделки, созданные в выбранном периоде. Сделки, '
+              + 'заведённые раньше, здесь не видны, даже если в периоде по ним была встреча, продажа или '
+              + 'оплата. Этап — на последний день периода.'}
         </p>
         {data?.truncated && (
           <p className="mt-1.5 text-[11px] text-amber-700">

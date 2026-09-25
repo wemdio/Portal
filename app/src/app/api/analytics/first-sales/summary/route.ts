@@ -31,10 +31,12 @@ export async function GET(req: NextRequest) {
   // ловушка с truthy-сужением, что задокументирована в firstSales/access.ts.
   // Сужаем по `parsed.value === null`, второй половине того же дискриминанта.
   if (parsed.value === null) return NextResponse.json({ error: parsed.error }, { status: 400 });
-  const { from, to, groupBy, sources } = parsed.value;
+  const { from, to, groupBy, sources, cohort } = parsed.value;
 
   // Предыдущее окно считается отдельной выборкой: расширять текущее нельзя —
-  // ряд по времени раздуется вдвое и график покажет лишнее.
+  // ряд по времени раздуется вдвое и график покажет лишнее. Режим счёта у
+  // него тот же, что у текущего: дельта «когорта против не-когорты» сравнила
+  // бы разные вопросы и показала рост там, где его нет.
   const prev = previousWindow(from, to);
 
   // Платежи тянутся раньше сделок: их amo_deal_id идут в fetchFirstSalesLeads
@@ -79,11 +81,11 @@ export async function GET(req: NextRequest) {
 
     const result = computeFirstSalesSeries(
       current.leads, from, to, groupBy, sources,
-      current.payments, current.taskMeetings,
+      current.payments, current.taskMeetings, { cohort },
     );
     const prevResult = computeFirstSalesSeries(
       previous.leads, prev.from, prev.to, groupBy, sources,
-      previous.payments, previous.taskMeetings,
+      previous.payments, previous.taskMeetings, { cohort },
     );
 
     const lastRun = lastRunRes.data;

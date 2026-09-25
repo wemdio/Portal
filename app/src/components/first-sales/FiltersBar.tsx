@@ -11,6 +11,13 @@ export type FiltersState = {
   groupBy: GroupBy;
   /** Ключи источников (`enum_id` строкой либо `none`). Пусто — фильтра нет. */
   sources: string[];
+  /**
+   * true — «По когорте» (по умолчанию): в период попадает всё, что в нём
+   * случилось, в том числе по сделкам, заведённым раньше. false — «Без
+   * когорты»: только сделки, заведённые в периоде. См. `cohort` в
+   * lib/firstSales/params.ts. В запрос уходит `cohort=0` только для false.
+   */
+  cohort: boolean;
 };
 
 // Дашборд живёт в МСК (та же зона, что buckets.ts/params.ts на сервере), а
@@ -108,6 +115,7 @@ export function getDefaultFilters(): FiltersState {
     to: toDateInputValue(now),
     groupBy: 'day',
     sources: [],
+    cohort: true,
   };
 }
 
@@ -116,6 +124,23 @@ const GROUP_BY_OPTIONS: Array<{ id: GroupBy; label: string }> = [
   { id: 'week', label: 'Неделя' },
   { id: 'month', label: 'Месяц' },
 ];
+
+/** Названия режимов — те, которыми их называет CEO; не переименовывать без него. */
+const COHORT_OPTIONS: Array<{ id: boolean; label: string }> = [
+  { id: true, label: 'По когорте' },
+  { id: false, label: 'Без когорты' },
+];
+
+/** Подсказка к переключателю: пример на месяцах понятнее определения. */
+const COHORT_HINT =
+  'По когорте — в период попадает всё, что в нём случилось, в том числе по сделкам, '
+  + 'заведённым раньше. Сделку завели в августе, а оплатили в сентябре — это продажа и '
+  + 'деньги сентября, в таблице сделок она помечена «заведена раньше».\n\n'
+  + 'Без когорты — считаются только сделки, заведённые в выбранном периоде. Та же '
+  + 'августовская сделка в сентябре не засчитается: ни продажа, ни встреча, ни деньги. '
+  + 'Её деньги видны отдельной строкой «по сделкам прошлых периодов», чтобы сумма '
+  + 'сходилась с банком.\n\n'
+  + 'Лиды и квал в обоих режимах одинаковые — они и так считаются по дате создания сделки.';
 
 export default function FiltersBar({
   value,
@@ -313,6 +338,30 @@ export default function FiltersBar({
             Сбросить
           </button>
         )}
+
+        {/* Режим счёта — сегментом, как «День / Неделя / Месяц»: выбор из
+            двух взаимоисключающих, и оба варианта видны сразу. Подсказка —
+            на всей группе, чтобы её находили наведением на любую кнопку. */}
+        <div
+          role="group"
+          aria-label="Режим счёта"
+          title={COHORT_HINT}
+          className="ml-auto flex cursor-help items-center gap-1"
+        >
+          {COHORT_OPTIONS.map((c) => (
+            <button
+              key={c.label}
+              type="button"
+              aria-pressed={value.cohort === c.id}
+              onClick={() => onChange({ ...value, cohort: c.id })}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                value.cohort === c.id ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:bg-zinc-100'
+              }`}
+            >
+              {c.label}
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );
