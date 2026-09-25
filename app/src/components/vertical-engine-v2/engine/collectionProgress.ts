@@ -13,19 +13,10 @@ export function isPartialPreview(base: Pick<VeBaseSummary, 'status' | 'collect_i
     || (target != null && target.ready_rows < target.ready_target);
 }
 
-/**
- * Состав готовой части рядом с засчитанными в цель контактами: сколько в ней
- * компаний и, если в цель засчитаны не все адреса, сколько адресов всего.
- */
+/** Company composition; goal accounting belongs in expandable details. */
 export function describeReadyComposition(target: NonNullable<VeCollectInfo['target_progress']> | null | undefined): string | null {
   const companies = collectCount(target?.ready_companies);
-  if (!target || companies === null) return null;
-  const contacts = collectCount(target.ready_contacts);
-  const perCompany = collectCount(target.counted_per_company);
-  return `Компаний: ${companies.toLocaleString('ru-RU')}.`
-    + (contacts !== null && perCompany && contacts > target.ready_rows
-      ? ` Всего адресов в базе: ${contacts.toLocaleString('ru-RU')}; в цель засчитывается не больше ${perCompany} адресов одной компании.`
-      : '');
+  return companies === null ? null : `Компаний: ${companies.toLocaleString('ru-RU')}.`;
 }
 
 export function collectTaskDone(status: string | undefined): boolean {

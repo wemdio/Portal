@@ -1248,12 +1248,20 @@ function CollectionFunnel({ base, job, useDefaultLimit = false }: { base: VeBase
     >
       {target ? (
         <div className="mb-2" role="status">
-          <p className="font-medium">Засчитано в цель сбора: {target.ready_rows.toLocaleString('ru-RU')} / {target.ready_target.toLocaleString('ru-RU')} контактов</p>
+          <p className="font-medium">Проверенных контактов: {(target.ready_contacts ?? target.ready_rows).toLocaleString('ru-RU')}</p>
           {composition ? <p className="mt-1 text-gray-700">{composition}</p> : null}
+          <details className="mt-1">
+            <summary className="ve2-link cursor-pointer">Как учитывается цель сбора</summary>
+            <p className="mt-1">
+              В цель {target.ready_target.toLocaleString('ru-RU')} засчитано {target.ready_rows.toLocaleString('ru-RU')} контактов.
+              {target.counted_per_company ? ` При расчёте цели учитывается не больше ${target.counted_per_company} адресов одной компании.` : ''}
+              {' '}Остальные проверенные адреса также сохранены в базе.
+            </p>
+          </details>
           {target.mode === 'preview' && base.status === 'collecting' ? (
             <p className="mt-1 text-gray-700">
               {target.ready_rows > 0
-                ? `Готовую часть можно посмотреть и скачать. Продолжаем добор до ${target.ready_target.toLocaleString('ru-RU')} проверенных контактов.`
+                ? 'Готовую часть можно посмотреть и скачать. Продолжаем искать новые компании и проверять контакты.'
                 : `Собираем ${target.ready_target.toLocaleString('ru-RU')} готовых контактов: проверяем почты, соответствие гипотезе и названия компаний. Размер следующих партий подбираем по фактическому выходу.`}
             </p>
           ) : null}

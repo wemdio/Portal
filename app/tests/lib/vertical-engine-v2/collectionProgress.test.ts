@@ -181,7 +181,7 @@ describe('VE2 collection progress presentation', () => {
         collect_info: { ...preview.collect_info, target_progress: { ...preview.collect_info!.target_progress!, ready_rows: readyRows } } };
       const presentation = getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: stopped, jobs: [] });
       expect(presentation).toMatchObject({ tone: 'muted', currentStep: readyRows > 0 ? 3 : null, canContinue: true });
-      expect(presentation.title).toContain(`${readyRows} из 500`);
+      expect(presentation.title).toBe('Сбор остановлен');
     }
     collecting.collect_info.relevance_review_requested = false;
     collecting.collect_info.construct.progress = { status: 'processing', current_step_key: 'validate_emails', current_step_progress: 37 };

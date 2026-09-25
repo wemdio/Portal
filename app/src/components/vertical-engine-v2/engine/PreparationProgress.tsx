@@ -77,7 +77,7 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
   const partialReady = preparation.status === 'ready' && (target?.ready_rows ?? 0) > 0 && target?.status !== 'error';
   if (base?.status === 'analyzed' && target && isPartialPreview(base) && !hasLiveJob
     && !['pending', 'error', 'generating'].includes(preparation.status)) return {
-    title: `Сбор остановлен: ${target.ready_rows.toLocaleString('ru-RU')} из ${target.ready_target.toLocaleString('ru-RU')} контактов`,
+    title: 'Сбор остановлен',
     readiness: partialReady ? 'Проверенная база и письма готовы к согласованию. Контакты можно скачать и использовать для запуска, не дожидаясь цели сбора.' : undefined,
     description: (target.status === 'exhausted' ? 'Компании из текущего плана источников обработаны; это не оценка всего рынка. '
         : target.status === 'error' ? preparationError(target.reason ?? base.error ?? '') + ' '
@@ -230,9 +230,8 @@ export function PreparationProgress(props: PreparationProgressProps) {
   const progress = getCollectionProgress(props.base?.collect_info, job);
   const target = props.base?.collect_info?.target_progress;
   const savedCandidates = collectCount(target?.candidates_processed);
-  const savedReady = collectCount(target?.ready_rows);
+  const savedReady = collectCount(target?.ready_contacts) ?? collectCount(target?.ready_rows);
   const composition = describeReadyComposition(target);
-  const goal = collectCount(target?.ready_target ?? props.base?.collect_info?.ready_target);
   const collecting = props.base?.status === 'collecting' && state.tone !== 'err';
   const stepPercent = collecting && state.tone === 'info' ? progress.stepPercent : null;
   const started = Date.parse(props.base?.created_at ?? '');
@@ -252,7 +251,6 @@ export function PreparationProgress(props: PreparationProgressProps) {
         <progress className="w-full h-2" max={100} value={stepPercent} aria-label="Прогресс текущего этапа обработки" />
       </div> : null}
       {collecting ? <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
-        {goal !== null ? <span>Цель превью: {goal.toLocaleString('ru-RU')} готовых контактов</span> : null}
         {progress.candidates !== null ? <span>Кандидатов: {progress.candidates.toLocaleString('ru-RU')}</span> : null}
         {savedReady !== null ? <span>Прошли все проверки: {savedReady.toLocaleString('ru-RU')}</span> : null}
         {composition ? <span>{composition}</span> : null}
@@ -273,7 +271,7 @@ export function PreparationProgress(props: PreparationProgressProps) {
       {!collecting && state.currentStep !== STEPS.length && savedCandidates !== null && savedCandidates > 0 ? (
         <p className={HE.muted}>
           Сохранённые результаты: {savedCandidates.toLocaleString('ru-RU')} кандидатов
-          {savedReady !== null ? `; в цель засчитано ${savedReady.toLocaleString('ru-RU')} контактов` : ''}.
+          {savedReady !== null ? `; проверенных контактов: ${savedReady.toLocaleString('ru-RU')}` : ''}.
         </p>
       ) : null}
       {state.canContinue && props.onContinue ? <div className="space-y-2">

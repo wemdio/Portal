@@ -117,17 +117,15 @@ export function AudienceSummary({
       <div className="ve2-stats">
         <div className="ve2-stat">
           <p className="ve2-stat-v">
-            {(partial ? data.checked_ready : data.ready).toLocaleString('ru-RU')}
+            {data.checked_ready.toLocaleString('ru-RU')}
           </p>
-          <p className="ve2-stat-k">{partial ? 'Проверенных контактов' : 'Доступно для запуска'}</p>
+          <p className="ve2-stat-k">Проверенных контактов</p>
         </div>
         <div className="ve2-stat">
           <p className="ve2-stat-v">
-            {goal !== null
-              ? <>{counted === null ? '—' : counted.toLocaleString('ru-RU')}<span className="text-base font-normal text-[var(--ve2-mute)]"> / {goal.toLocaleString('ru-RU')}</span></>
-              : companies === null ? '—' : companies.toLocaleString('ru-RU')}
+            {companies === null ? '—' : companies.toLocaleString('ru-RU')}
           </p>
-          <p className="ve2-stat-k">{goal !== null ? 'Засчитано в цель сбора' : 'Проверенных компаний'}</p>
+          <p className="ve2-stat-k">Проверенных компаний</p>
         </div>
         <div className="ve2-stat">
           <p className="ve2-stat-v">
@@ -151,8 +149,11 @@ export function AudienceSummary({
       <details>
         <summary className="ve2-link cursor-pointer">Расчёт объёма и прогноз</summary>
         <div className="mt-2 space-y-2">
-          {goal !== null && perCompany ? <p className={HE.muted}>
-            В цель сбора засчитывается не больше {perCompany} адресов одной компании. Остальные проверенные адреса также сохранены в базе.
+          {goal !== null ? <p className={HE.muted}>
+            Цель сбора: {goal.toLocaleString('ru-RU')} контактов.
+            {counted !== null ? ` В неё засчитано ${counted.toLocaleString('ru-RU')}.` : ''}
+            {perCompany ? ` При расчёте цели учитывается не больше ${perCompany} адресов одной компании.` : ''}
+            {' '}Это правило управления добором. Все {data.checked_ready.toLocaleString('ru-RU')} проверенных контактов сохранены в базе.
           </p> : null}
           {data.observed_yield ? (
             <p className={HE.muted}>
