@@ -235,9 +235,9 @@ describe('VE2 calibrated relevance triage', () => {
     const calls = provider();
     const first = await findIrrelevantRows({ ...input, verticalSummary: summary, rows: [rows[2]] });
     expect(calls.rubric).toBe(1);
-    // The saved checklist predates the closed list of structural requirements.
+    // The saved checklist predates the specialist-provider boundary.
     const old = JSON.parse(JSON.stringify(first.checkpoint)) as VeRelevanceCheckpoint;
-    old.triage = { version: 1, rubric: { ...rubric, requirements: ['The company supplies federal retail chains.'] } };
+    old.triage = { version: 2, rubric: { ...rubric, requirements: ['The company supplies federal retail chains.'] } };
     const prompts: Array<[string, string]> = [];
     const rebuilt = provider();
     const answer = global.fetch as jest.Mock;
@@ -248,7 +248,7 @@ describe('VE2 calibrated relevance triage', () => {
     }) as unknown as typeof fetch;
     const second = await findIrrelevantRows({ ...input, verticalSummary: summary, rows: [{ ...rows[2], inn: '7700000301' }], checkpoint: old });
     expect(rebuilt.rubric).toBe(1);
-    expect(second.checkpoint.triage?.version).toBe(2);
+    expect(second.checkpoint.triage?.version).toBe(3);
     await findIrrelevantRows({ ...input, verticalSummary: summary, rows: [{ ...rows[2], inn: '7700000302' }], checkpoint: second.checkpoint });
     expect(rebuilt.rubric).toBe(1);
     expect(prompts).toHaveLength(1);
