@@ -3,12 +3,20 @@
 import { useEffect, useState } from 'react';
 import { Loader2, X } from 'lucide-react';
 import { OutreachStages } from '@/components/parsers/OutreachStages';
-import { CHAIN_LABELS, REASON_LABELS, STAGES, type ChainType, type Stage } from '@/lib/polzaRuOutreach/types';
+import { CHAIN_LABELS, REASON_LABELS, STAGES, type Stage } from '@/lib/polzaRuOutreach/types';
 import { API, api, STATUS_LABELS, type RuRow } from './shared';
 
 /**
  * Шаги «Нашего автоаутрича» — как у английского: где работа сейчас, сколько
  * прошло и отсеялось, и по клику — кто именно и почему.
+ *
+ * Большие запуски просматривают до 12 тыс. кандидатов — тянуть весь журнал
+ * ради одного этапа неверно и не помещается в разумный кап. Поэтому
+ * «не прошли здесь» запрашивается точечно, по каждому ключу этапа
+ * (`?stage=…`) — сервер уже фильтрует по `pipeline_stage`, и список
+ * получается полным, а не «первые 5000 строк job'а». «Прошли дальше»,
+ * наоборот, не обязан быть полным — это витрина примеров, а счётчик берётся
+ * из воронки, которая и так считает по всем строкам на сервере.
  */
 
 export const RU_STAGE_VIEW: Array<{ keys: Stage[]; label: string; hint: string }> = [
@@ -24,43 +32,58 @@ export const RU_STAGE_VIEW: Array<{ keys: Stage[]; label: string; hint: string }
 ];
 
 const MODAL_PAGE = 500;
-const MODAL_MAX_ROWS = 5000;
+const MODAL_MAX_ROWS_PER_STAGE = 5000;
 
 function passedDetail(row: RuRow): string {
   return [
     row.normalized_domain,
-    row.chain_type ? CHAIN_LABELS[row.chain_type as ChainType] : null,
+    row.chain_type ? CHAIN_LABELS[row.chain_type] : null,
     row.priority_score != null ? `оценка ${row.priority_score}` : null,
     row.recipient_email,
   ].filter(Boolean).join(' · ');
 }
 
-function StageModal({ jobId, viewIndex, onClose }: { jobId: string; viewIndex: number; onClose: () => void }) {
+/** Все строки, отсеянные на данном этапе — постранично, по каждому ключу этапа отдельно. */
+async function loadDropped(jobId: string, keys: Stage[], isCancelled: () => boolean): Promise<RuRow[]> {
+  const dropped: RuRow[] = [];
+  for (const key of keys) {
+    for (let offset = 0; offset < MODAL_MAX_ROWS_PER_STAGE; offset += MODAL_PAGE) {
+      if (isCancelled()) return dropped;
+      const page = await api<{ items: RuRow[]; count: number }>(`${API}/${jobId}/results?stage=${key}&limit=${MODAL_PAGE}&offset=${offset}`);
+      dropped.push(...page.items.filter((r) => r.row_status !== 'ready' && r.row_status !== 'processing'));
+      if (offset + MODAL_PAGE >= page.count || page.items.length < MODAL_PAGE) break;
+    }
+  }
+  return dropped;
+}
+
+function StageModal({ jobId, viewIndex, passedCount, onClose }: { jobId: string; viewIndex: number; passedCount: number; onClose: () => void }) {
   const view = RU_STAGE_VIEW[viewIndex];
-  const [rows, setRows] = useState<RuRow[] | null>(null);
+  const [dropped, setDropped] = useState<RuRow[] | null>(null);
+  const [passedExamples, setPassedExamples] = useState<RuRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    const lastIdx = Math.max(...view.keys.map((k) => STAGES.indexOf(k)));
     async function load() {
-      const all: RuRow[] = [];
-      for (let offset = 0; offset < MODAL_MAX_ROWS; offset += MODAL_PAGE) {
-        const page = await api<{ items: RuRow[]; count: number }>(`${API}/${jobId}/results?limit=${MODAL_PAGE}&offset=${offset}`);
-        all.push(...page.items);
-        if (all.length >= page.count || page.items.length < MODAL_PAGE) break;
-      }
-      if (!cancelled) setRows(all);
+      const [droppedRows, page] = await Promise.all([
+        loadDropped(jobId, view.keys, () => cancelled),
+        api<{ items: RuRow[] }>(`${API}/${jobId}/results?limit=${MODAL_PAGE}&offset=0`),
+      ]);
+      if (cancelled) return;
+      setDropped(droppedRows);
+      setPassedExamples(page.items.filter((r) => r.row_status === 'ready' || STAGES.indexOf(r.pipeline_stage as Stage) > lastIdx));
     }
     // Загрузка разбора этапа по клику — запрос во внешнюю систему.
     load().catch((e) => !cancelled && setError(e instanceof Error ? e.message : 'Ошибка загрузки'));
     return () => {
       cancelled = true;
     };
-  }, [jobId]);
+  }, [jobId, view.keys]);
 
-  const lastIdx = Math.max(...view.keys.map((k) => STAGES.indexOf(k)));
-  const dropped = (rows ?? []).filter((r) => view.keys.includes(r.pipeline_stage as Stage) && r.row_status !== 'ready' && r.row_status !== 'processing');
-  const passed = (rows ?? []).filter((r) => r.row_status === 'ready' || STAGES.indexOf(r.pipeline_stage as Stage) > lastIdx);
+  const examples = (passedExamples ?? []).slice(0, 300);
+  const rows = dropped && passedExamples ? { dropped, examples } : null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4" onClick={onClose}>
@@ -77,12 +100,12 @@ function StageModal({ jobId, viewIndex, onClose }: { jobId: string; viewIndex: n
           {rows && (
             <>
               <section>
-                <div className="mb-2 font-medium text-gray-900">Не прошли здесь · {dropped.length}</div>
-                {dropped.length === 0 ? (
+                <div className="mb-2 font-medium text-gray-900">Не прошли здесь · {rows.dropped.length}</div>
+                {rows.dropped.length === 0 ? (
                   <div className="text-gray-500">Никто.</div>
                 ) : (
                   <ul className="divide-y divide-gray-100">
-                    {dropped.slice(0, 300).map((r) => (
+                    {rows.dropped.slice(0, 300).map((r) => (
                       <li key={r.id} className="py-1.5">
                         <span className="text-gray-900">{r.company_brand ?? r.company_name}</span>
                         <span className="ml-2 text-gray-500">
@@ -94,18 +117,19 @@ function StageModal({ jobId, viewIndex, onClose }: { jobId: string; viewIndex: n
                     ))}
                   </ul>
                 )}
+                {rows.dropped.length > 300 && <div className="mt-1 text-xs text-gray-500">Показаны первые 300 — полный список в Excel-журнале.</div>}
               </section>
               <section>
-                <div className="mb-2 font-medium text-gray-900">Прошли дальше · {passed.length}</div>
+                <div className="mb-2 font-medium text-gray-900">Прошли дальше · {passedCount}</div>
                 <ul className="divide-y divide-gray-100">
-                  {passed.slice(0, 300).map((r) => (
+                  {rows.examples.map((r) => (
                     <li key={r.id} className="py-1.5">
                       <span className="text-gray-900">{r.company_brand ?? r.company_name}</span>
                       <span className="ml-2 text-gray-500">{passedDetail(r)}</span>
                     </li>
                   ))}
                 </ul>
-                {passed.length > 300 && <div className="mt-1 text-xs text-gray-500">Показаны первые 300 — полный список в Excel-журнале.</div>}
+                {rows.examples.length < passedCount && <div className="mt-1 text-xs text-gray-500">Показаны примеры — полный список в Excel-журнале.</div>}
               </section>
             </>
           )}
@@ -131,7 +155,9 @@ export function RuStages({
   return (
     <>
       <OutreachStages stages={stages} run={run} error={error} onOpenStage={jobId ? setOpen : undefined} />
-      {open !== null && jobId && <StageModal jobId={jobId} viewIndex={open} onClose={() => setOpen(null)} />}
+      {open !== null && jobId && (
+        <StageModal jobId={jobId} viewIndex={open} passedCount={stages[open].count} onClose={() => setOpen(null)} />
+      )}
     </>
   );
 }
