@@ -18,7 +18,7 @@ type Row = Record<string, unknown>;
 const mockLogs: string[] = [];
 const mockTransitions: Row[] = [];
 const mockUpdates: Array<{ table: string; values: Row }> = [];
-const mockState = { jobStatus: 'running' };
+const mockState = { jobStatus: 'running', transitionFailures: 0, completionFailures: 0, baseFailures: 0, stopped: false };
 const mockPool: { run?: (job: unknown) => Promise<void> } = {};
 const mockRunVeStage = jest.fn();
 
@@ -29,8 +29,17 @@ function mockDb() {
     let columns = '';
     let values: Row = {};
     const result = () => {
-      if (op !== 'select') { mockUpdates.push({ table, values }); return { data: { id: 'x' }, error: null }; }
-      if (table === 've_jobs' && columns === 'status') return { data: { status: mockState.jobStatus }, error: null };
+      if (op !== 'select') {
+        mockUpdates.push({ table, values });
+        if (table === 've_jobs' && values.status === 'done') {
+          mockState.jobStatus = 'done';
+          // Commit succeeded; its response was lost.
+          if (mockState.completionFailures-- > 0) return { data: null, error: { message: 'fetch failed' } };
+        }
+        if (table === 've_bases' && mockState.baseFailures-- > 0) return { data: null, error: { message: 'fetch failed' } };
+        return { data: { id: 'x' }, error: null };
+      }
+      if (table === 've_jobs' && columns.startsWith('status')) return { data: { status: mockState.jobStatus, started_at: null }, error: null };
       if (table === 've_jobs') return { data: [], error: null };
       if (table === 've_projects') return { data: { market: 'ru', tokens_used: 0, cost_usd: 0 }, error: null };
       return { data: null, error: null };
@@ -52,7 +61,7 @@ function mockDb() {
 jest.mock('../../../worker/_shared', () => ({
   createWorkerLogger: () => (level: string, msg: string) => { mockLogs.push(`${level} ${msg}`); },
   requireSupabaseAdmin: () => mockDb(),
-  setupGracefulShutdown: () => () => false,
+  setupGracefulShutdown: () => () => mockState.stopped,
   pollLoop: () => new Promise(() => {}),
   startWorkerHeartbeat: () => undefined,
 }));
@@ -71,7 +80,13 @@ jest.mock('@/lib/verticalEngineV2/jobQueue', () => ({
   },
 }));
 jest.mock('@/lib/verticalEngineV2/jobFailureTransition', () => ({
-  transitionVeJobFailure: async (_db: unknown, input: Row) => { mockTransitions.push(input); return { transitioned: true, error: null }; },
+  ...jest.requireActual('@/lib/verticalEngineV2/jobFailureTransition'),
+  transitionVeJobFailure: async (_db: unknown, input: Row) => {
+    mockTransitions.push(input);
+    if (mockState.transitionFailures-- > 0) return { transitioned: false, error: 'fetch failed' };
+    mockState.jobStatus = String(input.status);
+    return { transitioned: true, error: null };
+  },
 }));
 jest.mock('@/lib/verticalEngineV2/contactDeliveryScheduler', () => ({
   createGuardedContactDeliveryTick: () => async () => false,
@@ -120,6 +135,8 @@ beforeEach(() => {
   mockTransitions.length = 0;
   mockUpdates.length = 0;
   mockState.jobStatus = 'running';
+  mockState.transitionFailures = mockState.completionFailures = mockState.baseFailures = 0;
+  mockState.stopped = false;
   mockRunVeStage.mockReset();
   global.fetch = realFetch;
 });
@@ -131,6 +148,50 @@ async function runJob(claimed: ReturnType<typeof job>, advanceMs: number): Promi
 }
 
 describe('VE2 worker: hangs do not spend attempts', () => {
+  it('retains a failed invocation until DB finalization recovers, respects cancellation, and does not replay a completed stage', async () => {
+    for (const cancelled of [false, true]) {
+      mockState.jobStatus = 'running';
+      mockState.transitionFailures = 2;
+      mockTransitions.length = 0;
+      mockUpdates.length = 0;
+      mockRunVeStage.mockReset().mockRejectedValue(new Error('terminal failure'));
+      let finished = false;
+      const pending = mockPool.run!(job()).then(() => { finished = true; });
+      await jest.advanceTimersByTimeAsync(0);
+      expect(finished).toBe(false); // The queue lock remains held.
+      expect(mockTransitions).toHaveLength(1);
+      if (cancelled) mockState.jobStatus = 'cancelled';
+      await jest.advanceTimersByTimeAsync(60_000);
+      await pending;
+      expect(mockRunVeStage).toHaveBeenCalledTimes(1);
+      expect(mockState.jobStatus).toBe(cancelled ? 'cancelled' : 'failed');
+      expect(mockTransitions).toHaveLength(cancelled ? 1 : 3);
+      expect(mockTransitions.every((t) => t.attempts === 5)).toBe(true);
+      expect(mockUpdates.filter((u) => u.table === 've_bases')).toHaveLength(cancelled ? 0 : 1);
+    }
+    // Failure of the second write (base status), after the job failure committed.
+    mockState.jobStatus = 'running';
+    mockState.transitionFailures = 0;
+    mockState.baseFailures = 1;
+    mockRunVeStage.mockReset().mockRejectedValue(new Error('terminal failure'));
+    await runJob(job(), 60_000);
+    expect(mockRunVeStage).toHaveBeenCalledTimes(1);
+    expect(mockState.jobStatus).toBe('failed');
+
+    // Success was already paid and done committed: retry only its bookkeeping.
+    mockState.jobStatus = 'running';
+    mockState.completionFailures = 1;
+    mockTransitions.length = 0;
+    mockUpdates.length = 0;
+    mockRunVeStage.mockReset().mockResolvedValue({ result: { rows: 20 }, tokensUsed: 10, costUsd: 0.01 });
+    await runJob(job(), 60_000);
+    expect(mockRunVeStage).toHaveBeenCalledTimes(1);
+    expect(mockState.jobStatus).toBe('done');
+    expect(mockTransitions).toEqual([]);
+    expect(mockUpdates.filter((u) => u.table === 've_projects')).toHaveLength(1);
+    expect(mockUpdates.filter((u) => u.table === 've_jobs' && u.values.status === 'done')).toHaveLength(1);
+  });
+
   it('a stage whose database read stalls goes back to the queue with the same attempts', async () => {
     global.fetch = stalledBody() as unknown as typeof fetch;
     let readError = '';
