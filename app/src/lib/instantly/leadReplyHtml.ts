@@ -3,6 +3,7 @@ import type { AnyNode } from 'domhandler';
 
 export const LEAD_QUOTE_BLOCKS = 'blockquote, .gmail_quote, .yahoo_quoted, .protonmail_quote, .moz-forward-container, .ms-outlook-mobile-reference-message';
 export const LEAD_DATED_ATTRIBUTION = /^.{1,160}\s+(?:писал(?:а|\(а\))?|написал(?:а|\(а\))?|пишет|wrote)\s+(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4})\s+\d{1,2}:\d{2}(?::\d{2})?\s*:\s*$/iu;
+export const LEAD_DATE_FIRST_ATTRIBUTION = /^(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4})\s+\d{1,2}:\d{2},?\s+[^\n]{1,160}\s+(?:пишет|писал(?:а|\(а\))?|wrote):\s*$/iu;
 const YOU_WROTE = /^Вы\s+писали\s+(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+[а-яё]{3,})(?:[^\n]{0,120})?:\s*$/iu;
 
 function previousContent($: CheerioAPI, node: AnyNode): AnyNode | null {
@@ -22,7 +23,7 @@ export function removeLeadReplyQuotes($: CheerioAPI, recoverFooter = false): voi
       const header = $(previous);
       const label = header.text().trim();
       if (header.is('.gmail_attr, .moz-cite-prefix') ||
-        (!/[\r\n]/.test(label) && (/^On\s+.+\s+wrote:\s*$/iu.test(label) || LEAD_DATED_ATTRIBUTION.test(label) || YOU_WROTE.test(label)))) {
+        (!/[\r\n]/.test(label) && (/^On\s+.+\s+wrote:\s*$/iu.test(label) || LEAD_DATED_ATTRIBUTION.test(label) || LEAD_DATE_FIRST_ATTRIBUTION.test(label) || YOU_WROTE.test(label)))) {
         header.remove();
       } else if (recoverFooter && /^\d{1,2}[./-]\d{1,2}[./-]\d{4},?\s+\d{1,2}:\d{2}[^\n]{0,400}@[^\n]{0,160}:\s*$/u.test(label)) {
         // Yandex puts To + Subject + dated author OUTSIDE its closed quote.

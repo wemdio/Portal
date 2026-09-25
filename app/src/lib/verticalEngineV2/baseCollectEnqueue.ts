@@ -29,6 +29,7 @@ import { canResumePartialPreview, grantVeResumeRoundBudget, openNextVeCollection
 import { normalizeVeMaxEmailsPerCompany } from './companyContactCap';
 import { resumeVeSavedEmailRecovery } from './savedEmailRecovery';
 import { isVeTransientDirectoryError } from './collectionErrors';
+import { compactVeRelevanceReserve } from './relevanceReserve';
 
 export interface VeBaseCollectInput {
   verticalId: string;
@@ -196,6 +197,7 @@ async function resumeFailedPreview(
     delete info.preview_pipeline.error;
   }
   const claimedAt = new Date().toISOString();
+  if (info.relevance_reserve) info.relevance_reserve = compactVeRelevanceReserve(info.relevance_reserve);
   const { data: claimed, error: claimError } = await supabase.from('ve_bases')
     .update({ status: 'collecting', error: null, collect_info: info, updated_at: claimedAt })
     .eq('id', saved.id).eq('status', saved.status).select('id, status, hypothesis_id').maybeSingle();

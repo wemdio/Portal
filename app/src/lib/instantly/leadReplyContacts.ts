@@ -1,7 +1,7 @@
 import { load } from 'cheerio';
 import { isPersonName, isRoleTitle } from '../enrich/extractors/nameQuality';
 import { joinLeadPhones, leadPhoneCandidates, normalizeLeadWebsite } from './leadContactValues';
-import { removeLeadReplyQuotes } from './leadReplyHtml';
+import { LEAD_DATED_ATTRIBUTION, LEAD_DATE_FIRST_ATTRIBUTION, removeLeadReplyQuotes } from './leadReplyHtml';
 import type { Email } from './types';
 
 export interface LeadReplyContacts {
@@ -10,10 +10,12 @@ export interface LeadReplyContacts {
   signaturePhone: string | null;
   companyName: string | null;
   website: string | null;
+  /** Explicit replacement notice only; not an ordinary third-party mention. */
+  replacedLeadName?: string;
 }
 
 const YOU_WROTE = /^Вы\s+писали\s+(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+[а-яё]{3,})(?:[^\n]{0,120})?:\s*$/iu;
-const EXTRA_DISPLAY_GIVEN_NAMES = new Set(['аружан', 'варя', 'maxime', 'raheel']);
+const EXTRA_DISPLAY_GIVEN_NAMES = new Set(['аружан', 'варя', 'инга', 'maxime', 'raheel']);
 
 /** Sender display names are weaker than a signed name: keep plausible full
  * names (including uncommon ones), but never copy a mailbox/brand/role into
@@ -33,13 +35,13 @@ export function senderDisplayLeadName(raw: unknown): string | null {
     /\.(?:ru|com|net|org|by|kz|online|io)\b/iu.test(value) || isRoleTitle(value)) return null;
   const words = value.split(' ');
   if (words.some((word) => /^(?:info|support|contact|sales|admin|noreply|no-reply|service|team|company|agency|group|digital|solutions|generation|inbox|help|change|mister|bit|компания|организация|отдел|команда|служба|секретарь|агентство|группа|центр|магазин|решения|завод|стоматология|студия|эквайринг|фабрика|коммуникации)$/iu.test(word))) return null;
-  if (isPersonName(value)) return value;
+  if (isPersonName(value) || EXTRA_DISPLAY_GIVEN_NAMES.has(value.toLowerCase())) return value;
   if (words.length < 2 || words.length > 3) return null;
   const cyrillic = words.every((word) => /^[А-ЯЁ][а-яё’-]{1,50}$/u.test(word));
   const latin = words.every((word) => /^[A-Z][a-z’-]{1,50}$/.test(word));
   if (latin) {
     const hasKnownGiven = words.some((word) => EXTRA_DISPLAY_GIVEN_NAMES.has(word.toLowerCase()));
-    const hasSurname = words.some((word) => /(?:ov|ova|ev|eva|in|ina|enko|chuk|yuk|son|sen|ez|yan|ian|vich|shvili|dze)$/i.test(word));
+    const hasSurname = words.some((word) => /(?:ov|ova|ev|eva|in|ina|enko|chuk|yuk|son|sen|ez|yan|ian|vich|shvili|dze|ski|sky|ska)$/i.test(word));
     return hasKnownGiven || hasSurname ? value : null;
   }
   if (!cyrillic) return null;
@@ -56,6 +58,8 @@ const HISTORY_BOUNDARIES = [
   /^On\s+.+\s+wrote:\s*$/i,
   /^On\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s/i,
   YOU_WROTE,
+  LEAD_DATED_ATTRIBUTION,
+  LEAD_DATE_FIRST_ATTRIBUTION,
   /^(?:Van|Verzonden|Aan|Onderwerp|De|Envoyé|À|Objet|Von|Gesendet|An|Betreff):\s+.+$/iu,
   /^\d{1,2}[./-]\d{1,2}[./-]\d{2,4},?\s+\d{1,2}:\d{2}.*(?:@|mailto:)/iu,
   /^(?:От|От кого|From|Sent|Отправлено|Кому|To|Subject|Тема):\s+.+$/i,
@@ -67,8 +71,8 @@ const HISTORY_BOUNDARIES = [
 ];
 const SIGNOFF = /^(?:--|—|с\s+(?:уважением|наилучшими\s+пожеланиями)(?:\s*[,.!:].*)?|(?:best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:\s*[,.!:].*)?)$/iu;
 const SIGNOFF_PREFIX = /^(?:с\s+(?:уважением|наилучшими\s+пожеланиями)|best\s+regards|kind\s+regards|regards|yours\s+sincerely|yours\s+faithfully|sincerely)(?:[\s,.!:-]+|$)/iu;
-const PHONE_LABEL = /(?:телефон|тел\s*[.:]|моб(?:ильный)?\s*[.:]|phone|mobile|telephone|whats\s*app|tel:|позвон|звоните|набери|свяжитесь|для\s+связи|(?:мой|наш)\s+номер|контакт|\b(?:call|reach|contact)\b|\b[mtp]\s*:)/iu;
-const NON_PHONE_LABEL = /(?:инн|кпп|огрн(?:ип)?|окпо|бик|снилс|р[/.]?с|к[/.]?с|vat|tax\s*(?:id|number)?|order|заказ[а-яё]*|заявк[аи]|сч[её]т[а-яё]*)\s*[:№#.-]?\s*$/iu;
+const PHONE_LABEL = /(?:телефон|тел(?:\s*\/\s*факс)?\s*[.:]|моб(?:ильный)?\s*[.:]|phone|mobile|telephone|whats\s*app|tel:|позвон|звоните|набери|свяжитесь|для\s+связи|(?:мой|наш)\s+номер|контакт|(?:напишите|на\s+пишете|пишите)\s+в\s+(?:мах|макс|max|телеграм\S*)|\b(?:call|reach|contact)\b|\b[mtp]\s*:)/iu;
+const NON_PHONE_LABEL = /(?:^|\s)(?:инн|кпп|огрн(?:ип)?|окпо|бик|снилс|р[/.]?с|к[/.]?с|vat|tax\s*(?:id|number)?|order|заказ[а-яё]*|заявк[аи]|сч[её]т[а-яё]*)\s*[:№#.-]?\s*$/iu;
 const WEBSITE_LABEL = /(?:сайт|website|web\s*:|\bour\s+site\b)/iu;
 const URL_CANDIDATE = /https?:\/\/[^\s<>"'()[\]{}]+|(?<![\p{L}\p{N}@._-])(?:www\.)?(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?\.)+[\p{L}]{2,}(?:\/[^\s<>"'()[\]{}]*)?/giu;
 
@@ -82,7 +86,9 @@ function currentLines(text: string): string[] {
   // block. An unquoted From/To/forwarding header opens another author's
   // message; even its nested quotes do not make the footer ours again.
   const lastQuoted = lines.findLastIndex((line) => /^>/.test(line.trim()));
-  if (lastQuoted >= end && lines.slice(end, lastQuoted + 1).every((line) =>
+  const quoteStart = LEAD_DATE_FIRST_ATTRIBUTION.test(lines[end].trim()) ||
+    LEAD_DATED_ATTRIBUTION.test(lines[end].trim()) ? end + 1 : end;
+  if (lastQuoted >= quoteStart && lines.slice(quoteStart, lastQuoted + 1).every((line) =>
     !line.trim() || /^>/.test(line.trim()))) {
     const tail = lines.slice(lastQuoted + 1);
     const first = tail.find((line) => line.trim())?.trim() ?? '';
@@ -130,6 +136,11 @@ function htmlText(html: string): string {
       node = node.parent();
     }
     $(marker).remove();
+  });
+  // Source-code line wrapping inside inline tags is whitespace, not a new
+  // signature field (e.g. ООО "Лав\n Продукт"). Preserve real preformatted text.
+  $('body *').addBack().contents().each((_, node) => {
+    if (node.type === 'text' && !$(node).parents('pre').length) node.data = node.data.replace(/[\r\n]+\s*/g, ' ');
   });
   $('.gmail_signature').prepend('\n--\n');
   $('a[href]').each((_, anchor) => {
@@ -196,6 +207,10 @@ function explicitCompany(line: string): string | null {
   line = line.replace(SIGNOFF_PREFIX, '').trim();
   if (/(?:переписк|конфиденциал|подлежит|disclaimer|confidential)/iu.test(line)) return null;
   if (/(?:^|\s)(?:оказывает|предоставляет|предлагает|производит|занимается|работает|осуществляет|поставляет|является|provides|offers|specializes|manufactures|works|delivers)(?:\s|$)/iu.test(line)) return null;
+  // Inline HTML source wrapping must not split a legal name from its linked
+  // brand/website. Retain the complete quoted legal name, not the URL suffix.
+  const linkedLegal = /^((?:ООО|АО|ПАО|ЗАО|ОАО|ИП|ТОО)\s+[«"“][^»"”\n]{2,90}[»"”])(?:\s*[—–-]\s*[\p{L}\p{N} &'’-]{2,80})?\s+<?https?:\/\/[^\s<>]+>?\s*$/u.exec(line);
+  if (linkedLegal && websitesInLine(line).length) return linkedLegal[1];
   // Legal names in the sender's own job title are still company names. The
   // previous role pattern required a word *between* "директор" and "ООО" and
   // missed the common "Директор ООО «... »" signature.
@@ -210,6 +225,8 @@ function explicitCompany(line: string): string | null {
   const value = (label?.[1] ?? role?.[1] ?? (legal ? line : '')).replace(/\s+/g, ' ').trim()
     .replace(/^\*{1,2}(.+?)\*{1,2}$/, '$1');
   if (value.length < 2 || value.length > 120 || /[@/:!?\n]/.test(value)) return null;
+  if ((value.match(/"/g)?.length ?? 0) % 2 ||
+    (value.match(/[«“]/g)?.length ?? 0) !== (value.match(/[»”]/g)?.length ?? 0)) return null;
   if (!/[\p{L}]/u.test(value) || PHONE_LABEL.test(value) || websitesInLine(value).length) return null;
   if (/^(?:мы|нам|вам|we|please|our|you)\s/iu.test(value)) return null;
   return value || null;
@@ -220,6 +237,9 @@ function companyFromSignature(signature: string[], website: string | null): stri
     explicitCompany(signature.slice(Math.max(0, index - length + 1), index + 1).join(' ')))).find(Boolean);
   if (explicit) return explicit;
   for (const [index, line] of signature.entries()) {
+    if (/^[«“"][\p{L}\p{N} &'’.,-]{3,80}[»”"]$/u.test(line) && index > 0 &&
+      isRoleTitle(signature[index - 1]) && signature.slice(index + 1, index + 4)
+        .some((item) => phoneInLine(item, true) || websitesInLine(item).length)) return line;
     // A branded domain in an explicit team signature is not a personal name.
     // Use the validated website host, never an arbitrary label/email local part.
     if (website && /^(?:команда|team)\s+\S/iu.test(line) && websitesInLine(line).length) {
@@ -269,6 +289,7 @@ function signatureNameInLine(line: string): string | null {
   const value = line.replace(/\s+/g, ' ').trim()
     .replace(SIGNOFF_PREFIX, '')
     .replace(/^(?:фио|имя|name)\s*:\s*/iu, '')
+    .replace(/^(?:(?:генеральный|коммерческий|исполнительный)\s+)?(?:директор|управляющ(?:ий|ая))\s+/iu, '')
     .replace(/[.,;:!]+$/u, '').trim();
   const namedRole = /^(\p{Lu}[\p{L}’'-]+(?:\s+\p{Lu}[\p{L}’'-]+){1,2}),\s*(?:[Дд]иректор|[Рр]уководитель|[Мм]енеджер|[Сс]пециалист)(?:\s|$)/u.exec(value);
   if (namedRole && isPersonName(namedRole[1])) return namedRole[1];
@@ -320,6 +341,19 @@ function introducedLeadName(body: string[]): string | null {
 function replyLeadName(body: string[], signature: string[]): string | null {
   const contactCards = body.map((line) => /^(\p{Lu}[\p{L}’'-]+(?:\s+\p{Lu}[\p{L}’'-]+){1,2})\s+[^\s<>]+@[^\s<>]+(?:\s+\[[^\]]+\])?\s*$/u.exec(line)?.[1])
     .filter((value): value is string => Boolean(value && signatureNameInLine(value)));
+  for (const [index, line] of body.entries()) {
+    // A labelled contact card, not a greeting or an arbitrary name in prose.
+    if (signatureNameInLine(line) && isRoleTitle(body[index - 1] ?? '') &&
+      phoneInLine(body[index + 1] ?? '', false)) contactCards.push(signatureNameInLine(line)!);
+    for (const phone of leadPhoneCandidates(line)) {
+      const before = line.slice(0, phone.start).trim();
+      const after = line.slice(phone.end).trim();
+      const leading = before.replace(/\s+(?:тел(?:ефон)?\.?)\s*:?$/iu, '').trim();
+      const name = (!after && signatureNameInLine(leading)) ||
+        (signatureNameInLine(after) && (!before || PHONE_LABEL.test(before)) ? signatureNameInLine(after) : null);
+      if (name && phoneInLine(line, false)) contactCards.push(name);
+    }
+  }
   const uniqueCards = new Set(contactCards);
   const introduced = introducedLeadName(body) ?? (uniqueCards.size === 1 ? contactCards[0] : null);
   const signed = signatureLeadName(signature);
@@ -368,8 +402,11 @@ function extractFromText(text: string): LeadReplyContacts {
     const standalone = line.replace(URL_CANDIDATE, '').replace(/[\s<>()[\],;:.-]/g, '') === '';
     return WEBSITE_LABEL.test(line) || standalone ? sites : [];
   })[0] ?? null;
+  const leadName = replyLeadName(body, nameStart < 0 ? [] : lines.slice(nameStart));
+  const replacement = /(?:^|[.!?]\s*)([А-ЯЁ][а-яё’-]+(?:\s+[А-ЯЁ][а-яё’-]+){1,2})\s+больше\s+не\s+работает\s+в\s+нашей\s+компании\.\s*Вместо\s+(?:не[её]|него)\s+другой\s+сотрудник[^\n]*ниже\./u.exec(body.join('\n'));
   return {
-    leadName: replyLeadName(body, nameStart < 0 ? [] : lines.slice(nameStart)),
+    leadName,
+    ...(replacement && leadName ? { replacedLeadName: replacement[1] } : {}),
     bodyPhone: joinLeadPhones(body.map((line) => phoneInLine(line, false))),
     signaturePhone: joinLeadPhones(signature.map((line) => phoneInLine(line, true))),
     companyName: companyFromSignature(signature, signatureSite) ?? companyFromSelfIntroduction(body),
@@ -400,6 +437,7 @@ export function extractLeadReplyContacts(body: Email['body']): LeadReplyContacts
       signaturePhone: joinLeadPhones([primary.signaturePhone, fallback.signaturePhone]),
       companyName: primary.companyName ?? fallback.companyName,
       website: primary.website ?? fallback.website,
+      ...(primary.replacedLeadName || fallback.replacedLeadName ? { replacedLeadName: primary.replacedLeadName ?? fallback.replacedLeadName } : {}),
     };
   } catch {
     // Bad/deeply nested optional provider HTML must not fail qualification.

@@ -1,4 +1,5 @@
 import type { Email } from './types';
+import { isCompleteServiceReceipt } from './machineReplyTemplates';
 import type { InstantlyRequestOptions } from './accounts';
 import { resolveCampaignProjectOwner } from './campaignProjectOwnerResolver';
 import * as instantly from './client';
@@ -1207,6 +1208,7 @@ function serviceAcknowledgementSegments(authoredBody: string): string[] {
 function classifySystemEnvelope(sender: string, subject: string, text: string): MachineReplyKind | null {
   const body = text.replace(/\r\n?/g, '\n').trim();
   if (body.length > 80_000) return null;
+  if (isCompleteServiceReceipt(sender, body)) return 'service_acknowledgement';
   // WMD creates a new support ticket even when no person has replied to our
   // offer. Its later notifications may arrive at a different mailbox, so this
   // complete machine envelope must be recognized before project ownership.
@@ -2058,7 +2060,20 @@ function normalizeDiscussionReadiness(authoredReply: string): string {
  * with normal assessment. Signatures/quoted CTAs cannot manufacture intent. */
 function isGenericDiscussionReadiness(authoredReply: string): boolean {
   const statement = normalizeDiscussionReadiness(authoredReply);
-  return /^(?:(?:я|мы)\s+)?(?:готов(?:а|ы)?\s+(?:с\s+вами\s+)?(?:пообщаться|поговорить|обсудить)|давайте\s+(?:пообщаемся|поговорим|обсудим)|можем\s+(?:мы\s+)?(?:пообщаться|поговорить|обсудить))(?:\s+с\s+вами)?(?:\s+(?:(?:ваше|это|данное)\s+предложение|(?:этот|данный)\s+вопрос|(?:по\s+)?(?:вопросам?\s+)?(?:по\s+)?(?:вашему\s+)?письму(?:\s+ниже)?|поподробнее|подробнее|детали|тему))?(?:\s+в\s+(?:любое|удобное(?:\s+для\s+(?:вас|меня|нас))?)\s+время)?[.!?]?$/iu.test(statement);
+  // A messenger handle does not turn "happy to hear more" into a concrete
+  // commercial appointment. Strip only a complete channel-only final sentence;
+  // dates, product questions and other substantive additions stay with AI.
+  const channel = /[.!]\s*(?:для\s+удобства\s+)?(?:предлагаю\s+перейти|напишите(?:\s+мне)?|пишите(?:\s+мне)?)\s+в\s+(?:телеграм(?:м)?|telegram)\s*[:—–-]?\s*(?:@[a-z0-9_]{5,32}|https:\/\/t\.me\/[a-z0-9_]{5,32})[.!]?$/iu;
+  const readiness = statement.replace(channel, '').replace(/^буду\s+рад(?:а)?\s+/iu, 'готова ');
+  return /^(?:(?:я|мы)\s+)?(?:готов(?:а|ы)?\s+(?:с\s+вами\s+)?(?:пообщаться|поговорить|обсудить)|давайте\s+(?:пообщаемся|поговорим|обсудим)|можем\s+(?:мы\s+)?(?:пообщаться|поговорить|обсудить))(?:\s+с\s+вами)?(?:\s+(?:(?:ваше|это|данное)\s+предложение|(?:этот|данный)\s+вопрос|(?:по\s+)?(?:вопросам?\s+)?(?:по\s+)?(?:вашему\s+)?письму(?:\s+ниже)?|поподробнее|подробнее|детали|тему))?(?:\s+в\s+(?:любое|удобное(?:\s+для\s+(?:вас|меня|нас))?)\s+время)?[.!?]?$/iu.test(readiness);
+}
+
+/** A ticket's generic request for contact details is support routing, not an
+ * acceptance of our offer. A ticket marker alone says nothing about intent. */
+function isSupportContactRequest(replyText: string): boolean {
+  return /(?:^|\n)\s*T_I_C_K_E_T_I_D_\d+\s*(?:\n|$)/u.test(replyText) &&
+    /^(?:укажите|сообщите|оставьте)\s+(?:пожалуйста\s+)?(?:ваши\s+)?контакты\s+для\s+связи[.!]?$/iu
+      .test(normalizeDiscussionReadiness(extractAuthoredReplyText(replyText)));
 }
 
 /** Learning what the approach is about is not accepting a commercial call.
@@ -2308,6 +2323,10 @@ function normalizeDefaultLeadSignals(
   const authoredReply = extractAuthoredReplyText(replyText);
   if (!authoredReply) return result;
   if (isExplicitSellerOnlyReply(authoredReply)) return semanticNonLead(result, 'seller_pitch');
+  if (isSupportContactRequest(replyText)) {
+    return { ...semanticNonLead(result, 'service_followup'),
+      reason: 'Саппорт в служебном тикете запросил контакты для обработки обращения; интереса к нашему предложению в ответе нет.' };
+  }
 
   const outboundTexts = getPreReplyOutboundTexts(ctx);
   const substantiveOutboundTexts = outboundTexts.filter(isSubstantiveOfferText);
@@ -2497,6 +2516,8 @@ function buildSystemPrompt(
 - Явное отрицание («не интересно», «не актуально») и условный интерес третьих лиц («если коллегам будет интересно — они свяжутся») не являются положительным интересом самого получателя.
 
 ОБЩЕЕ ЛЮБОПЫТСТВО — НЕ ЛИД:
+- «Буду рада пообщаться подробнее, предлагаю перейти в Telegram» после одного поиска контакта без понятного оффера — только готовность выслушать. Никнейм мессенджера не является назначенной встречей или коммерческим запросом. После раскрытого оффера и при конкретной договорённости о звонке оценивай интерес по обычным правилам.
+- Служебное «Укажите контакты для связи» в тикете саппорта не означает принятие нашего оффера. Но сам адрес support или номер тикета не отменяют самостоятельный запрос цены, заказа или обсуждения нашей услуги.
 - Вопрос о том, правильно ли мы выбрали адресата/отрасль («вы про наш вид перевозок или перепутали профиль?»), перечисление собственного ассортимента и упрёк в нерелевантной рассылке не означают интереса к нашей услуге. После одного поиска ответственного без раскрытого оффера такой ответ — is_lead=false, proposal_seen=false. Не превращай упоминание специфики бизнеса в запрос цены или условий. Отдельный самостоятельный заказ/расчёт с конкретной задачей либо явный запрос нашей услуги оценивай отдельно; наличие вопросительного знака не является коммерческим сигналом.
 - БЕЗ подтверждённого оффера «готова пообщаться с вами по вопросам по письму ниже», «я занимаюсь привлечением новых клиентов, готова обсудить ваше предложение», «привлечением новых клиентов занимаюсь я, готова пообщаться в удобное для вас время», «давайте обсудим этот вопрос» означают готовность к первичному знакомству: is_lead=false, proposal_seen=false, needs_review=false. Имя в приветствии, порядок слов, самопредставление, слово «предложение», удобное время и телефон в подписи не доказывают понимания нашей услуги. Оценивай смысл, а не буквальное совпадение с примерами. После подтверждённого понятного оффера готовность обсудить его является положительным интересом. Положительный кастомный критерий, явно считающий самопредставление ответственного лидом, сохраняет приоритет.
 - Если в доступной переписке только поиск ответственного и общая тема («хочу обсудить выход на кафе / привлечение клиентов»), просьба «подскажите свой номер телефона, чтобы я могла связаться с вами и обсудить ваш запрос ниже» также означает первичное выяснение запроса: is_lead=false, proposal_seen=false, needs_review=false. Звонок как КАНАЛ разъяснения ещё не раскрытой услуги не становится покупательским интересом. Это правило приоритетнее общего правила о звонках; не придумывай, что адресат понял услугу из брифа, подписи или названия кампании. Самостоятельная потребность, заказ/расчёт своей задачи или демо оцениваются отдельно; общая просьба прислать КП после такого opener остаётся intro_request. Ответ «позвоните завтра после 11:00» ПОСЛЕ подробного предложения — лид; более позднее исходящее не оправдывает ранний ответ.

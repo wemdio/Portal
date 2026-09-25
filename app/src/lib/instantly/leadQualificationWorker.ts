@@ -44,6 +44,7 @@ import { resolveLeadContactMetadata } from './leadContactMetadata';
 import { loadCachedLeadContacts } from './cachedLeadContacts';
 import { senderDisplayLeadName } from './leadReplyContacts';
 import { resolveEffectiveReplyOwner } from './replyOwnershipResolver';
+import { resolveSentHandoffClientEcho } from './clientEchoOwner';
 import { resolveInstantlyAccountId } from './accounts';
 import { randomUUID } from 'node:crypto';
 import { qualificationAutomationPolicy, replyAutomationExpired } from './qualificationAutomationPolicy';
@@ -1543,7 +1544,8 @@ export async function qualifyOneReply(
   // письмо продолжает старый диалог другого проекта. До критериев, ИИ и любых
   // пользовательских side effects восстанавливаем владельца по исходящему
   // родителю и eaccount, учитывая доказанный ответ через другой ящик.
-  const ownership = await resolveEffectiveReplyOwner({
+  const clientEchoOwnership = machineSnapshot ? await resolveSentHandoffClientEcho(db, reply) : null;
+  const ownership = clientEchoOwnership ?? await resolveEffectiveReplyOwner({
     db,
     reply,
     providerCampaignId,
@@ -1653,7 +1655,7 @@ export async function qualifyOneReply(
       `(campaign ${campaignId}): client-party ownership is not provable`,
     );
   }
-  if (clientParty.addresses.has(fromLower) || (fromDomain && clientParty.domains.has(fromDomain))) {
+  if (clientEchoOwnership || clientParty.addresses.has(fromLower) || (fromDomain && clientParty.domains.has(fromDomain))) {
     const replyText = getBodyText(reply.body);
     // Как и основной upsert ниже: ошибку НЕ глотаем. Молча потерянная строка =
     // нет дедупа → это же эхо переобрабатывается каждый тик, занимая слот из
@@ -2765,7 +2767,7 @@ export async function reprocessOwnershipReviewRows(
       };
       const storedSnapshot = await readSnapshot();
       let fullEmail: Email;
-      if (storedSnapshot && !shouldRefreshRecoverySource(raw)) fullEmail = storedSnapshot;
+      if (storedSnapshot && (classifyMachineReply(storedSnapshot) || !shouldRefreshRecoverySource(raw))) fullEmail = storedSnapshot;
       else if (raw.recovery_use_snapshot) {
         throw new Error('recovery source unavailable: provider 404 and no complete saved inbound');
       } else {

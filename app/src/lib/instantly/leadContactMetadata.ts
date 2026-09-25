@@ -151,9 +151,18 @@ export function resolveLeadContactMetadata(input: {
   const firstName = firstField(sources, ['first_name', 'имя'], cleanValue);
   const lastName = firstField(sources, ['last_name', 'фамилия'], cleanValue);
   const emailDomain = normalizeEmail(input.leadEmail).match(/^[^@\s]+@([^@\s]+)$/)?.[1];
+  const uploadedName = senderDisplayLeadName([firstName, lastName].filter(Boolean).join(' '));
+  const replacedName = reply.replacedLeadName?.toLowerCase().split(/\s+/u);
+  const replacesUploaded = uploadedName && replacedName &&
+    uploadedName.toLowerCase().split(/\s+/u).every((word) => replacedName.includes(word));
+  const uploadedCompany = firstField(sources, COMPANY_KEYS, companyValue, 'company');
+  // A bare imported domain is a fallback label, not stronger than an explicit
+  // legal name in the current reply. Real uploaded company names keep priority.
+  const replyCompany = companyValue(reply.companyName);
   return {
-    leadName: senderDisplayLeadName([firstName, lastName].filter(Boolean).join(' ')) || reply.leadName,
-    companyName: firstField(sources, COMPANY_KEYS, companyValue, 'company') || companyValue(reply.companyName),
+    leadName: replacesUploaded ? reply.leadName : uploadedName || reply.leadName,
+    companyName: uploadedCompany && normalizeLeadWebsite(uploadedCompany) && replyCompany
+      ? replyCompany : uploadedCompany || replyCompany,
     // Uploaded phones keep their order, but must not hide additional numbers
     // from the same contact's reply/signature. History is excluded upstream.
     phone: joinLeadPhones([
