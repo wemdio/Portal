@@ -68,10 +68,11 @@ export function computeDoubts(i: DoubtInput): Doubts {
 
   if (i.chain !== 'reactivation') {
     const weak: string[] = [];
+    const t = i.primary?.date ? new Date(i.primary.date).getTime() : NaN;
     if (i.chain === 'icp_only') weak.push('повода нет, только профиль');
-    else if (!i.primary?.date) weak.push('повод без даты');
+    else if (!Number.isFinite(t)) weak.push('повод без даты');
     else {
-      const age = (Date.now() - new Date(i.primary.date).getTime()) / DAY;
+      const age = (Date.now() - t) / DAY;
       const futureEvent = i.chain === 'event' && age < 0;
       if (!futureEvent && age > WEAK_AGE_DAYS) weak.push(`повод ${Math.round(age)} дн. назад`);
     }
