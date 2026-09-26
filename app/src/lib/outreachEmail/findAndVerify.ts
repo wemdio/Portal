@@ -22,6 +22,9 @@
  *
  * Без SMTP-прокси обёртка проверяет только синтаксис и MX и считает рабочим
  * любой адрес на домене с почтовым сервером — это видно по smtpAvailable().
+ *
+ * Поиск одной компании целиком укладывается в общий потолок времени
+ * (OUTREACH_EMAIL_COMPANY_TIMEOUT_MS, по умолчанию 2 минуты) — см. COMPANY_TIMEOUT_MS.
  */
 
 import type { DomainInfo } from '@/lib/emailValidation/shared';
@@ -103,8 +106,29 @@ const VERIFY_TIMEOUT_MS = 90_000;
 // Кэш — экономия, а не источник правды: зависший PostgREST не держит строку.
 const DB_TIMEOUT_MS = 15_000;
 
+function envMs(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+// Потолок на компанию целиком: чтение кэша, обход сайта и проверка до трёх
+// адресов. Каждый шаг ограничен и сам (минута на сайт, 90 с на адрес), но
+// вместе это до шести минут на одну компанию, а параллельных слотов на почту
+// у раннера всего несколько: пара сайтов-ловушек или зависших прокси — и темп
+// запуска падает в ноль.
+// Тот же урок, что у обогащения сайтов (FETCH_EMAIL_ROW_HARD_TIMEOUT_MS в
+// websiteEnrichmentWorker.ts): отдельные потолки шагов не ограничивают строку.
+// Две минуты хватает нормальному сайту и проверке. Кончилось время — уже
+// выбранный адрес уходит как «не удалось проверить», а если до адреса не
+// дошли — почты нет.
+const COMPANY_TIMEOUT_MS = envMs('OUTREACH_EMAIL_COMPANY_TIMEOUT_MS', 120_000);
+
 /** И Error, и ошибка Supabase (PostgrestError — не Error) несут message. */
-function warn(message: string, err: unknown): void {
+function warn(message: string, err?: unknown): void {
+  if (err === undefined) {
+    console.warn(`[outreach-email][WARN] ${message}`);
+    return;
+  }
   const text = err && typeof err === 'object' && 'message' in err ? String((err as { message: unknown }).message) : String(err);
   console.warn(`[outreach-email][WARN] ${message}: ${text}`);
 }
@@ -168,14 +192,22 @@ function parseEmailList(value: string | null | undefined): string[] {
     .filter(Boolean);
 }
 
-/** Свежие адреса сайта из кэша; null — промах, сайт надо обойти. */
-async function readCachedEmails(key: string): Promise<string[] | null> {
+/**
+ * Свежие адреса сайта из кэша; null — промах, сайт надо обойти.
+ *
+ * Запись из кэша бывает беднее своего обхода: обогащение хранит только первые
+ * 10 адресов сайта (наши записи — до 30), и если строку первым записало оно,
+ * адрес дальше десятого (тот же sales@ после филиалов) аутрич не увидит, пока
+ * запись не протухнет (7 дней). Это осознанно: перепроверять каждую чужую
+ * запись обходом — значит не иметь общего кэша вовсе.
+ */
+async function readCachedEmails(key: string, budgetMs: number): Promise<string[] | null> {
   const db = supabaseAdmin;
-  if (!db) return null;
+  if (!db || budgetMs <= 0) return null;
   try {
     const { data, error } = await runWithTimeout(
       Promise.resolve(db.from(CACHE_TABLE).select('emails, last_error, expires_at').eq('url_normalized', key).maybeSingle()),
-      { timeoutMs: DB_TIMEOUT_MS, timeoutMessage: 'таймаут чтения кэша почт' },
+      { timeoutMs: Math.min(DB_TIMEOUT_MS, budgetMs), timeoutMessage: 'таймаут чтения кэша почт' },
     );
     if (error) {
       warn(`email cache read failed (${key})`, error);
@@ -194,7 +226,11 @@ async function readCachedEmails(key: string): Promise<string[] | null> {
   }
 }
 
-/** Запись — поля и сроки как у обогащения (setEmailCache). Сбой записи — пропуск. */
+/**
+ * Запись — поля и сроки как у обогащения (setEmailCache). Сбой записи — пропуск.
+ * Никогда не бросает, поэтому зовётся без ожидания: результат поиска от записи
+ * не зависит, а время на компанию общее и нужно проверке адресов.
+ */
 async function writeCachedEmails(key: string, payload: { emails: string[]; pagesScanned: number } | { error: string }): Promise<void> {
   const db = supabaseAdmin;
   if (!db) return;
@@ -224,34 +260,61 @@ async function writeCachedEmails(key: string, payload: { emails: string[]; pages
   }
 }
 
-/** Обход сайта с общим потолком времени; результат — в кэш. Сбой — пустой список. */
-async function scrapeSiteEmails(url: string, locale: 'ru' | 'en', maxPages: number): Promise<string[]> {
+/**
+ * Обход сайта: минута, но не дольше, чем осталось у компании; результат — в
+ * кэш. Сбой — пустой список. cutByDeadline — обход оборвал общий потолок
+ * компании, а не свой минутный.
+ */
+async function scrapeSiteEmails(
+  url: string,
+  locale: 'ru' | 'en',
+  maxPages: number,
+  budgetMs: number,
+): Promise<{ emails: string[]; cutByDeadline: boolean }> {
+  if (budgetMs <= 0) return { emails: [], cutByDeadline: true };
+  const timeoutMs = Math.min(SITE_TIMEOUT_MS, budgetMs);
   const abort = new AbortController();
+  let timedOut = false;
   try {
     const result = await runWithTimeout(
       scrapeEmails(url, { locale, maxPages, timeout: PAGE_TIMEOUT_MS, signal: abort.signal }),
       {
-        timeoutMs: SITE_TIMEOUT_MS,
-        timeoutMessage: `Превышено время ожидания сайта (${Math.round(SITE_TIMEOUT_MS / 1000)}с)`,
+        timeoutMs,
+        timeoutMessage: `Превышено время ожидания сайта (${Math.round(timeoutMs / 1000)}с)`,
         // Потолок обрывает и сам обход: иначе зависший сайт качался бы в фоне.
-        onTimeout: () => abort.abort(),
+        onTimeout: () => {
+          timedOut = true;
+          abort.abort();
+        },
       },
     );
     const emails = result.emails.slice(0, CACHE_MAX_EMAILS);
-    await writeCachedEmails(url, { emails, pagesScanned: result.pagesScanned });
-    return emails;
+    void writeCachedEmails(url, { emails, pagesScanned: result.pagesScanned });
+    return { emails, cutByDeadline: false };
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Ошибка извлечения email';
     // Таймаут и сеть не кэшируем — как обогащение: следующий запуск попробует снова.
-    if (shouldUseCachedError(message)) await writeCachedEmails(url, { error: message });
-    return [];
+    if (shouldUseCachedError(message)) void writeCachedEmails(url, { error: message });
+    return { emails: [], cutByDeadline: timedOut && timeoutMs < SITE_TIMEOUT_MS };
   }
 }
 
-async function verifyAddress(email: string, domainCache: EmailDomainCache): Promise<OutreachEmailVerification | 'invalid'> {
+/** Проверка адреса: 90 с, но не дольше, чем осталось у компании. */
+async function verifyAddress(
+  email: string,
+  domainCache: EmailDomainCache,
+  budgetMs: number,
+): Promise<OutreachEmailVerification | 'invalid'> {
+  // Адрес выбран, а время компании вышло: проверять не начинаем — «не удалось проверить».
+  if (budgetMs <= 0) return 'unverified';
   try {
+    // Отменить проверку нечем: у validateEmailForAutoPipeline нет сигнала
+    // отмены, поэтому по потолку мы только перестаём её ждать. Дотикает она в
+    // фоне сама — запросы к прокси внутри ограничены своими 25 с, — и её
+    // единственный след — MX и catch-all домена в domainCache запуска, это
+    // безвредно: компания к тому времени уже решена.
     const validation = await runWithTimeout(validateEmailForAutoPipeline(email, domainCache), {
-      timeoutMs: VERIFY_TIMEOUT_MS,
+      timeoutMs: Math.min(VERIFY_TIMEOUT_MS, budgetMs),
       timeoutMessage: 'email verification timeout',
     });
     return verdictForStatus(validation.status);
@@ -267,14 +330,27 @@ async function verifyAddress(email: string, domainCache: EmailDomainCache): Prom
  * исключается, и pick выбирает следующего — до maxCandidates проверок.
  * «Не удалось проверить» — окончательный ответ: следующий адрес того же домена
  * упрётся в те же прокси и MX, а правила выбора уже сказали, кто лучше.
+ *
+ * Всё вместе — не дольше COMPANY_TIMEOUT_MS: каждый шаг получает свой потолок,
+ * но не больше остатка общего времени. Время вышло на проверке — выбранный
+ * адрес уходит как «не удалось проверить»; до адреса не дошли — почты нет.
  */
 export async function findAndVerifyCompanyEmail<P extends { email: string }>(
   opts: FindAndVerifyOptions<P>,
 ): Promise<CompanyEmailSearch<P>> {
   const url = cacheKeyFor(opts.website, opts.domain);
   if (!url) return { result: null, verdict: 'none', triedInvalid: [], sourceUrl: null };
+  const deadline = Date.now() + COMPANY_TIMEOUT_MS;
+  const left = () => deadline - Date.now();
 
-  const emails = (await readCachedEmails(url)) ?? (await scrapeSiteEmails(url, opts.locale, opts.maxPages ?? DEFAULT_MAX_PAGES));
+  let emails = await readCachedEmails(url, left());
+  if (!emails) {
+    const scraped = await scrapeSiteEmails(url, opts.locale, opts.maxPages ?? DEFAULT_MAX_PAGES, left());
+    // Для раннера это просто «почты нет»; лог отличает «не успели» от сайта,
+    // где почты правда нет.
+    if (scraped.cutByDeadline) warn(`company email search hit the ${COMPANY_TIMEOUT_MS}ms cap before any address (${url})`);
+    emails = scraped.emails;
+  }
   const maxCandidates = Math.max(1, opts.maxCandidates ?? DEFAULT_MAX_CANDIDATES);
   const excluded = new Set<string>();
   const triedInvalid: string[] = [];
@@ -285,7 +361,7 @@ export async function findAndVerifyCompanyEmail<P extends { email: string }>(
     // Правила выбора обязаны пропускать исключённые адреса. Не пропустили —
     // считаем, что кандидаты кончились: иначе один адрес проверялся бы по кругу.
     if (excluded.has(key)) break;
-    const verification = await verifyAddress(picked.email, opts.domainCache);
+    const verification = await verifyAddress(picked.email, opts.domainCache, left());
     if (verification === 'invalid') {
       excluded.add(key);
       triedInvalid.push(picked.email);
