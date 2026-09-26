@@ -156,12 +156,8 @@ export function fmtDate(value: string | null | undefined): string {
   return Number.isNaN(d.getTime()) ? value : d.toLocaleDateString('ru-RU');
 }
 
-/** Доллары для строки расхода на ИИ: доли цента дешёвой модели не прячем в «$0.00». */
-export function fmtUsd(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return '$0';
-  if (value < 0.01) return '<$0.01';
-  return `$${Number.isInteger(value) ? value : value.toFixed(2)}`;
-}
+/** Доллары для строки расхода на ИИ — общие с английским экраном запуска. */
+export { fmtUsd } from '@/lib/outreachLlm/format';
 
 export function fmtDateTime(value: string | null | undefined): string {
   if (!value) return '—';

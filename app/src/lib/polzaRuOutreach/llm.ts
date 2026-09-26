@@ -6,9 +6,9 @@
  * (lib/outreachLlm): свой ключ POLZA_RU_OUTREACH_API_KEY, дешёвая модель
  * разбора, температура 0, повтор при сбое сети и битом JSON. Язык и лимит на ИИ
  * берутся из контекста запуска (runner.ts). Вне контекста (разовый вызов не из
- * раннера) — русский ключ без лимита. Английский аутрич берёт отсюда только
- * разбор ответа (asString и соседи), а ИИ зовёт своим ключом напрямую через
- * общий клиент (siteProfile.ts).
+ * раннера) — русский ключ без лимита. Разбор полей ответа (asString и соседи)
+ * общий с английским аутричем и живёт в lib/outreachLlm/json.ts; здесь он
+ * реэкспортирован для прежних импортов.
  *
  * Ошибки клиента типизированы, и от типа зависит судьба строки и запуска:
  * LlmCallError — сбой на этой строке («ИИ не ответил»); BudgetExceededError и
@@ -57,11 +57,6 @@ export async function callJson(
   return result;
 }
 
-/** Да/нет из JSON-ответа: булево или строка "true"/"false" (как принимает asBool). */
-export function isBoolLike(value: unknown): boolean {
-  return typeof value === 'boolean' || value === 'true' || value === 'false';
-}
-
 /** Сколько вызовов ИИ ответило в текущем запуске; вне запуска — 0. */
 export function llmAnswersInRun(): number {
   const ctx = currentOutreachContext();
@@ -77,14 +72,4 @@ export function isFatalLlmError(err: unknown): err is BudgetExceededError | LlmA
   return err instanceof BudgetExceededError || err instanceof LlmAuthError;
 }
 
-export function asString(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
-}
-
-export function asBool(value: unknown): boolean {
-  return value === true || value === 'true';
-}
-
-export function asStringArray(value: unknown, max = 20): string[] {
-  return Array.isArray(value) ? value.map(asString).filter(Boolean).slice(0, max) : [];
-}
+export { asBool, asString, asStringArray, isBoolLike } from '@/lib/outreachLlm/json';
