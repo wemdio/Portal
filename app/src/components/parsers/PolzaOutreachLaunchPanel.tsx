@@ -74,6 +74,7 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
   const [maxEmp, setMaxEmp] = useState(String(initial?.max_employees ?? 200));
   const [writeT, setWriteT] = useState(String(initial?.write_threshold ?? 75));
   const [budgetUsd, setBudgetUsd] = useState<number>(initial?.llm_budget_usd ?? POLZA_OUTREACH_DEFAULT_LLM_BUDGET_USD);
+  const [includeExported, setIncludeExported] = useState<boolean>(initial?.include_previously_exported ?? false);
   const [advanced, setAdvanced] = useState(false);
   const geoRef = useRef<HTMLDivElement>(null);
 
@@ -114,8 +115,9 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
       max_employees: Number(maxEmp) || 200,
       write_threshold: Number(writeT) || 75,
       llm_budget_usd: budgetUsd,
+      include_previously_exported: includeExported,
     };
-  }, [countries, days, limit, sources, ycFrom, minEmp, maxEmp, writeT, budgetUsd]);
+  }, [countries, days, limit, sources, ycFrom, minEmp, maxEmp, writeT, budgetUsd, includeExported]);
 
   // Пустое поле или 0 сервер молча поднял бы до минимума — лучше не пускать запуск.
   const budgetValid =
@@ -303,7 +305,7 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
           {advanced ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
           Тонкая настройка
         </button>
-        {!advanced && <p className="mt-1 text-xs text-gray-500">Батч YC, размер компании и порог Lead Score.</p>}
+        {!advanced && <p className="mt-1 text-xs text-gray-500">Батч YC, размер компании, порог Lead Score и компании прошлых запусков.</p>}
 
         {advanced && (
           <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -322,6 +324,13 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
                 <input value={maxEmp} onChange={(e) => setMaxEmp(e.target.value.replace(/\D/g, ''))} inputMode="numeric" className={inputCls} />
               </div>
             </div>
+            {/* По умолчанию компании, уже готовые в прошлых запусках, отсеиваются:
+                второй раз одной компании не пишем. Галочка — для осознанного
+                повтора (например, прошлую выгрузку так и не отправили). */}
+            <label className="flex items-center gap-2 text-sm text-gray-700 sm:col-span-2">
+              <input type="checkbox" checked={includeExported} onChange={(e) => setIncludeExported(e.target.checked)} />
+              Брать компании, которые уже выгружались раньше
+            </label>
           </div>
         )}
       </div>

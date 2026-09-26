@@ -67,6 +67,11 @@ export interface PolzaOutreachConfig {
    * штатно (stop_reason 'budget'), готовое остаётся.
    */
   llm_budget_usd: number;
+  /**
+   * Брать и компании, уже готовые в прошлых запусках (по умолчанию нет —
+   * второй раз одной компании не пишем; как у русского аутрича).
+   */
+  include_previously_exported: boolean;
 }
 
 /**
@@ -120,6 +125,7 @@ export function sanitizePolzaOutreachConfig(raw: Partial<PolzaOutreachConfig>): 
     max_employees: Math.max(minEmployees, clamp(raw.max_employees, 200, 1, 100_000)),
     write_threshold: write,
     llm_budget_usd: sanitizeLlmBudgetUsd(raw.llm_budget_usd),
+    include_previously_exported: raw.include_previously_exported === true,
   };
 }
 

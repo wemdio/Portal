@@ -77,6 +77,9 @@ const COLUMNS: { header: string; key: string; width: number }[] = [
 const READY_COLUMNS: { header: string; key: string; width: number }[] = [
   { header: 'company_name', key: 'company_name', width: 28 },
   { header: 'email', key: 'selected_company_email', width: 30 },
+  // Вердикт SMTP-проверки как есть (ok / catch_all): catch-all отказа не
+  // даст, но дойдёт ли письмо — неизвестно, это видно и при отправке.
+  { header: 'email_verification', key: 'email_verification', width: 16 },
   { header: 'domain', key: 'normalized_domain', width: 24 },
   { header: 'country', key: 'country', width: 14 },
   { header: 'employee_range', key: 'employee_range', width: 12 },
@@ -181,6 +184,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     .select('*')
     .eq('job_id', jobId)
     .order('created_at', { ascending: true })
+    .order('id', { ascending: true })
     .limit(5000);
   if (statusFilter) query = query.eq('status', statusFilter);
   const { data: rows, error } = await query;
@@ -211,8 +215,13 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       // Да/нет вместо true/false: файл читает продажник, а не разработчик.
       outbound_mandate: row.outbound_mandate === true ? 'да' : row.outbound_mandate === false ? 'нет' : '',
       email_type: typeof row.email_type === 'string' ? EMAIL_TYPE_RU[row.email_type] ?? row.email_type : '',
+      // Лист для отправки — машинные значения, как и его заголовки; журнал — по-русски.
       email_verification:
-        typeof row.email_verification === 'string' ? EMAIL_VERIFICATION_RU[row.email_verification] ?? row.email_verification : '',
+        typeof row.email_verification !== 'string'
+          ? ''
+          : forSending
+            ? row.email_verification
+            : EMAIL_VERIFICATION_RU[row.email_verification] ?? row.email_verification,
       status: typeof row.status === 'string' ? STATUS_RU[row.status] ?? row.status : '',
       exclusion_reason: reason(row.exclusion_reason),
       review_reason: reason(row.review_reason),

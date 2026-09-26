@@ -100,12 +100,19 @@ export async function loadPreviouslyExported(db: SupabaseClient, excludeJobId: s
   return { domains, inns };
 }
 
-/** Стоп-лист «Рассылки»: отписки, жалобы, жёсткие отказы, ручные. */
+/**
+ * Стоп-лист «Рассылки»: отписки, жалобы, жёсткие отказы, ручные.
+ *
+ * Сбой запроса — не «адреса в стоп-листе нет»: так отписавшийся молча прошёл
+ * бы дальше, до писем и выгрузки. Бросаем ошибку — раннер (RU и EN) помечает
+ * строку сбойной, запуск идёт дальше.
+ */
 export async function isSuppressed(db: SupabaseClient, email: string): Promise<boolean> {
-  const { data } = await db
+  const { data, error } = await db
     .from('sender_suppressions')
     .select('email')
     .eq('email', email.toLowerCase())
     .maybeSingle();
+  if (error) throw new Error(`Не удалось проверить стоп-лист рассылки: ${error.message}`);
   return Boolean(data);
 }

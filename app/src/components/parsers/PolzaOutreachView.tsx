@@ -6,6 +6,7 @@ import { supabase } from '@/lib/supabaseClient';
 import { authFetch } from '@/lib/authFetch';
 import type { PolzaOutreachCompanyRow, PolzaOutreachConfig, PolzaOutreachFunnel, PolzaOutreachParserJob } from '@/types';
 import type { OutreachLlmBudgetSnapshot } from '@/lib/outreachLlm/types';
+import { fetchAllResultPages } from '@/lib/polzaOutreach/resultsPaging';
 import { PolzaOutreachLaunchPanel } from '@/components/parsers/PolzaOutreachLaunchPanel';
 import { PolzaOutreachResults } from '@/components/parsers/PolzaOutreachResults';
 import { JobRail, type JobRailItem } from '@/components/ui/JobRail';
@@ -21,10 +22,11 @@ type ResultsResponse = {
   funnel?: PolzaOutreachFunnel | null;
   status_counts?: Record<string, number> | null;
   exclusion_counts?: Record<string, number> | null;
+  /** Причины ручной проверки (needs_review) — «почта не проверена — N» у цепочки этапов. */
+  review_counts?: Record<string, number> | null;
 };
 
 const RESULTS_LIMIT = 50;
-const EXPORT_LIMIT = 1000;
 
 /**
  * Файл для отправки: компания, куда писать и что писать.
@@ -211,6 +213,7 @@ export function PolzaOutreachView() {
   const [resultsCount, setResultsCount] = useState(0);
   const [funnel, setFunnel] = useState<PolzaOutreachFunnel | null>(null);
   const [exclusionCounts, setExclusionCounts] = useState<Record<string, number> | null>(null);
+  const [reviewCounts, setReviewCounts] = useState<Record<string, number> | null>(null);
   const [resultsPage, setResultsPage] = useState(1);
   // Режим отправки включён с самого начала: инструмент существует ради
   // готовых строк, а отсеянные компании нужны раз в десять запусков — когда
@@ -272,6 +275,7 @@ export function PolzaOutreachView() {
       setResults(data.items ?? []);
       setFunnel(data.funnel ?? null);
       setExclusionCounts(data.exclusion_counts ?? null);
+      setReviewCounts(data.review_counts ?? null);
     } finally {
       setResultsLoading(false);
     }
@@ -282,36 +286,36 @@ export function PolzaOutreachView() {
    *
    * Таблица листается по полусотне, а этап — это про весь прогон: показывать
    * его по строкам, случайно оказавшихся на текущей странице, значило бы
-   * отвечать не на тот вопрос. Потолок ручки — тысяча строк, лимит запуска —
-   * триста компаний, так что в один запрос прогон помещается целиком.
+   * отвечать не на тот вопрос. Ручка отдаёт не больше тысячи строк за раз, а
+   * запуск на 500 готовых просматривает до 4000 кандидатов, — поэтому читаем
+   * страницами до конца (lib/polzaOutreach/resultsPaging.ts). Одной страницы
+   * хватало, пока лимит запуска был триста компаний.
    */
   const loadAllRows = useCallback(async (): Promise<PolzaOutreachCompanyRow[]> => {
     if (!activeJobId) return [];
-    const data = await apiFetch<ResultsResponse>(
-      `/api/parsers/polza-outreach/${activeJobId}/results?limit=1000&offset=0`,
-      { method: 'GET' },
-    );
-    return data.items ?? [];
-  }, [activeJobId]);
-
-  const fetchAllResults = useCallback(async (jobId: string) => {
-    const all: PolzaOutreachCompanyRow[] = [];
-    let offset = 0;
-    let total = Infinity;
-    while (offset < total) {
+    return fetchAllResultPages<PolzaOutreachCompanyRow>(async (offset, limit) => {
       const data = await apiFetch<ResultsResponse>(
-        `/api/parsers/polza-outreach/${jobId}/results?limit=${EXPORT_LIMIT}&offset=${offset}${statusQuery}`,
+        `/api/parsers/polza-outreach/${activeJobId}/results?limit=${limit}&offset=${offset}`,
         { method: 'GET' },
       );
-      if (offset === 0) total = data.count ?? 0;
-      const chunk = data.items ?? [];
-      all.push(...chunk);
-      if (chunk.length === 0) break;
-      offset += chunk.length;
-      setExportProgress(`Загрузка: ${Math.min(offset, total)} / ${total}`);
-    }
-    return all;
-  }, [statusQuery]);
+      return { items: data.items ?? [], count: data.count ?? 0 };
+    });
+  }, [activeJobId]);
+
+  const fetchAllResults = useCallback(
+    async (jobId: string) =>
+      fetchAllResultPages<PolzaOutreachCompanyRow>(
+        async (offset, limit) => {
+          const data = await apiFetch<ResultsResponse>(
+            `/api/parsers/polza-outreach/${jobId}/results?limit=${limit}&offset=${offset}${statusQuery}`,
+            { method: 'GET' },
+          );
+          return { items: data.items ?? [], count: data.count ?? 0 };
+        },
+        (loaded, total) => setExportProgress(`Загрузка: ${loaded} / ${total}`),
+      ),
+    [statusQuery],
+  );
 
   useEffect(() => {
     void (async () => {
@@ -521,6 +525,7 @@ export function PolzaOutreachView() {
         setResultsCount(0);
         setFunnel(null);
         setExclusionCounts(null);
+        setReviewCounts(null);
       }
       await refreshJobs();
     } catch (e) {
@@ -598,6 +603,7 @@ export function PolzaOutreachView() {
           count={resultsCount}
           funnel={funnel}
           exclusionCounts={exclusionCounts}
+          reviewCounts={reviewCounts}
           loading={resultsLoading}
           jobStatus={activeJob?.status ?? null}
           jobError={activeJob?.error_message ?? null}

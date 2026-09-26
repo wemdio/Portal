@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { logError } from '@/lib/loggerServer';
 import { POLZA_FUNNEL_COLUMNS, polzaFunnel, type PolzaFunnelRow } from '@/lib/polzaOutreach/funnel';
+import { POLZA_RESULTS_MAX_PAGE } from '@/lib/polzaOutreach/resultsPaging';
 
 export const dynamic = 'force-dynamic';
 
@@ -34,15 +35,20 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   const { jobId } = await ctx.params;
 
   const sp = req.nextUrl.searchParams;
-  const limit = Math.min(1000, Math.max(1, Number(sp.get('limit') ?? '50')));
-  const offset = Math.max(0, Number(sp.get('offset') ?? '0'));
+  // Мусор в параметрах — значения по умолчанию, а не NaN в range().
+  const limit = Math.min(POLZA_RESULTS_MAX_PAGE, Math.max(1, Math.trunc(Number(sp.get('limit') ?? '50')) || 50));
+  const offset = Math.max(0, Math.trunc(Number(sp.get('offset') ?? '0')) || 0);
   const statusFilter = sp.get('status');
 
+  // Порядок стабильный: строки одной вставки делят created_at, и без id
+  // соседние страницы (окно этапа и выгрузка читают прогон целиком) могли бы
+  // повторять одни строки и терять другие.
   let resultsQuery = supabase
     .from('polza_outreach_companies')
     .select('*', { count: 'exact' })
     .eq('job_id', jobId)
     .order('created_at', { ascending: true })
+    .order('id', { ascending: true })
     .range(offset, offset + limit - 1);
   if (statusFilter) resultsQuery = resultsQuery.eq('status', statusFilter);
 
@@ -55,11 +61,13 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   // Воронка и сводка — по всем строкам джобы, независимо от пагинации.
   const statusCounts = {} as Record<string, number>;
   const exclusionCounts = {} as Record<string, number>;
+  // Почему строки ждут ручной проверки — экран показывает «почта не проверена — N».
+  const reviewCounts = {} as Record<string, number>;
 
-  // Одна выборка всех строк дешевле head-запроса на каждый этап. Страницами:
-  // запуск на 500 готовых просматривает до 4000 кандидатов, а PostgREST
-  // отдаёт за раз не больше 1000 строк — без страниц воронка молча
-  // обрезалась бы.
+  // Одна выборка всех строк дешевле head-запроса на каждый этап. Страницами
+  // по 1000, как соседние роуты: запуск на 500 готовых просматривает до 4000
+  // кандидатов, а выдачу PostgREST может ограничивать max-rows — без страниц
+  // воронка молча обрезалась бы.
   const allRows: SummaryRow[] = [];
   const PAGE = 1000;
   for (let from = 0; ; from += PAGE) {
@@ -67,6 +75,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       .from('polza_outreach_companies')
       .select(`${POLZA_FUNNEL_COLUMNS},exclusion_reason`)
       .eq('job_id', jobId)
+      .order('created_at', { ascending: true })
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
     if (allErr) {
@@ -84,6 +93,9 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     if (row.status === 'excluded' && row.exclusion_reason) {
       exclusionCounts[row.exclusion_reason] = (exclusionCounts[row.exclusion_reason] ?? 0) + 1;
     }
+    if (row.status === 'needs_review' && row.review_reason) {
+      reviewCounts[row.review_reason] = (reviewCounts[row.review_reason] ?? 0) + 1;
+    }
   }
 
   return NextResponse.json({
@@ -94,5 +106,6 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     funnel,
     status_counts: statusCounts,
     exclusion_counts: exclusionCounts,
+    review_counts: reviewCounts,
   });
 }

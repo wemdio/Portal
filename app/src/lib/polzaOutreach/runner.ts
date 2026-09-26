@@ -8,7 +8,8 @@
  *  S1 кандидаты: вакансии sales/GTM + стартапы YC, склейка по домену/названию;
  *  S2 домен, размер/отрасль/страна из PDL;
  *  S3 жёсткие отсевы, дубль домена в запуске и повторы между запусками —
- *     компания уже готова в другом запуске (previously_exported);
+ *     компания уже готова в другом запуске (previously_exported; галочка
+ *     include_previously_exported этот отсев выключает);
  *  S5 почта, тоже бесплатно: поиск на сайте, SMTP-проверка, стоп-лист
  *     «Рассылки». Нет рабочей почты — отсев до ИИ: разбор компании, которой
  *     некуда писать, — выброшенные деньги. Почта не проверена — на ручную
@@ -82,6 +83,11 @@ const ENRICH_CONCURRENCY = envInt('POLZA_OUTREACH_LLM_CONCURRENCY', 4, 1, 6);
 const EMAIL_CONCURRENCY = envInt('POLZA_OUTREACH_EMAIL_CONCURRENCY', 8, 1, 16);
 // Письма собираются без ИИ.
 const LETTERS_CONCURRENCY = 4;
+// Поиск домена (запросы по каталогу PDL и Clearbit) и профиль PDL идут в
+// пуле почты, а он шире прежнего пула разбора (8 против 4): без своего
+// ограничителя запросов к Clearbit и каталогу одновременно стало бы вдвое
+// больше. Четыре — как было, когда S2 шёл в пуле разбора.
+const DOMAIN_CONCURRENCY = 4;
 const DB_CHUNK = 100;
 const MIN_WAVE = 25;
 const MAX_WAVE = 250;
@@ -151,6 +157,26 @@ async function runPool<T>(items: T[], concurrency: number, worker: (item: T) => 
       }
     }),
   );
+}
+
+/**
+ * Не больше max задач одновременно внутри более широкого пула; остальные ждут
+ * в очереди. Освободившееся место сразу переходит следующему ждущему.
+ */
+function createLimiter(max: number): <T>(task: () => Promise<T>) => Promise<T> {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  return async <T>(task: () => Promise<T>): Promise<T> => {
+    if (active < max) active += 1;
+    else await new Promise<void>((resolve) => waiting.push(resolve));
+    try {
+      return await task();
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else active -= 1;
+    }
+  };
 }
 
 /** Кандидат после склейки источников: одна компания — одна карточка. */
@@ -505,7 +531,9 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
     const ycs = config.sources.includes('yc') ? await loadYcCompanies(db, config) : [];
     const pool = mergeCandidates(vacancies, ycs);
     const cases = await loadEnCases(db);
-    const exported = await loadPreviouslyExported(db, jobId);
+    // Повторы между запусками — домены компаний, готовых в других запусках.
+    // Галочка «Брать компании, которые уже выгружались раньше» их не отсеивает.
+    const exported = config.include_previously_exported ? new Set<string>() : await loadPreviouslyExported(db, jobId);
     log('info', `job ${jobId}: pool=${pool.length} (hiring=${vacancies.length}, yc=${ycs.length}), cases=${cases.length}, previously exported=${exported.size}, target=${target}`);
 
     const totals: Totals = { vacancies: 0, domainFound: 0, icpPassed: 0, emailFound: 0, writeNow: 0, ready: 0 };
@@ -516,6 +544,8 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
     const duplicates: Duplicate[] = [];
     // MX и catch-all доменов для SMTP-проверки почты — один кэш на запуск.
     const emailDomainCache: EmailDomainCache = new Map();
+    // Места для S2 (каталог PDL и Clearbit) внутри пула почты — DOMAIN_CONCURRENCY.
+    const domainSlot = createLimiter(DOMAIN_CONCURRENCY);
     let cursor = 0;
     let waveNo = 0;
     let processed = 0;
@@ -628,17 +658,21 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
 
     // ── S2, S3 и S5 для одной компании: всё бесплатное, до ИИ ──
     const prepare = async (id: string, c: Candidate, tally: Tally): Promise<Prepared | null> => {
-      // S2 домен
-      let domain: string | null = c.yc?.domain ?? null;
-      let website: string | null = c.yc?.website ?? null;
-      if (!domain && c.vacancy) {
-        const res = await resolveCompanyDomain(db, c.companyName, c.vacancy.jobCountryCode, c.vacancy.companySiteUrl);
-        domain = res.normalizedDomain;
-        website = res.companyWebsite;
-      }
-      if (!domain || !website) return excludeRow(id, ST.s2Domain, 'domain_not_resolved');
+      // S2 домен и профиль PDL — не больше DOMAIN_CONCURRENCY строк сразу.
+      const resolved = await domainSlot(async () => {
+        let foundDomain: string | null = c.yc?.domain ?? null;
+        let foundWebsite: string | null = c.yc?.website ?? null;
+        if (!foundDomain && c.vacancy) {
+          const res = await resolveCompanyDomain(db, c.companyName, c.vacancy.jobCountryCode, c.vacancy.companySiteUrl);
+          foundDomain = res.normalizedDomain;
+          foundWebsite = res.companyWebsite;
+        }
+        if (!foundDomain || !foundWebsite) return null;
+        return { domain: foundDomain, website: foundWebsite, pdl: await lookupPdlProfile(db, c.companyName, foundDomain) };
+      });
+      if (!resolved) return excludeRow(id, ST.s2Domain, 'domain_not_resolved');
+      const { domain, website, pdl } = resolved;
       count(tally, 'domainFound');
-      const pdl = await lookupPdlProfile(db, c.companyName, domain);
       const employees = c.yc?.teamSize ?? employeesFromBucket(pdl.size);
       const countryName = c.yc?.country ?? pdl.country ?? null;
       const countryCode = c.vacancy?.jobCountryCode || (countryName ? COUNTRY_CODE_BY_NAME[countryName.toLowerCase()] ?? null : null);
@@ -683,6 +717,10 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
       // этом запуске отсеется дублем этой строки.
       if (exported.has(domain)) return excludeRow(id, ST.s3Icp, 'previously_exported');
       count(tally, 'icpPassed');
+      // Стадию почты пишем сразу, до поиска: ICP и повторы строка прошла, и
+      // воронка по строкам должна это видеть — и пока идёт долгий поиск почты,
+      // и если строка на нём упадёт (сбойная остаётся на последней стадии).
+      await updateRow(id, { stage: ST.s5Email });
 
       // S5 почта — до ИИ: компания без рабочего адреса не стоит разбора.
       const found = await findCompanyEmail(website, domain, emailDomainCache);

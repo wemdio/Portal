@@ -13,6 +13,8 @@ type Props = {
   count: number;
   funnel: PolzaOutreachFunnel | null;
   exclusionCounts: Record<string, number> | null;
+  /** Причины ручной проверки по всему прогону (review_counts ручки результатов). */
+  reviewCounts?: Record<string, number> | null;
   loading: boolean;
   jobStatus: ParserJobStatus | null;
   /** Текст ошибки запуска — показываем у этапа, на котором встали. */
@@ -244,6 +246,7 @@ export function PolzaOutreachResults({
   count,
   funnel,
   exclusionCounts,
+  reviewCounts,
   loading,
   jobStatus,
   jobError,
@@ -268,6 +271,7 @@ export function PolzaOutreachResults({
   const running = jobStatus === 'running' || jobStatus === 'pending';
   const hasItems = items.length > 0;
   const readyCount = funnel ? Number(funnel.ready ?? 0) : null;
+  const unverifiedCount = Number(reviewCounts?.email_unverified ?? 0);
 
   return (
     <div className="space-y-4">
@@ -290,6 +294,16 @@ export function PolzaOutreachResults({
       {jobStatus && llmSpend ? (
         <div className="px-1 text-sm text-gray-500" title={`Вызовов ИИ: ${llmSpend.calls}`}>
           ИИ: потрачено {fmtUsd(llmSpend.spent_usd)} из {fmtUsd(llmSpend.limit_usd)}
+        </div>
+      ) : null}
+      {/* Строки с непроверенной почтой в цепочке — среди отсеянных на почте, а
+          они не отсев: адрес есть, решает человек. Поэтому число — отдельно. */}
+      {jobStatus && unverifiedCount > 0 ? (
+        <div
+          className="px-1 text-sm text-amber-700"
+          title="Адрес на сайте нашёлся, но SMTP-проверка не дала ответа: строки ждут ручной проверки, разбора ИИ и писем у них нет"
+        >
+          почта не проверена — {unverifiedCount}
         </div>
       ) : null}
       {/* Повторный запуск не пишет компаниям, уже готовым в этом: они отсеются

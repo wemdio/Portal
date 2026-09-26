@@ -296,6 +296,8 @@ export interface PolzaOutreachConfig {
   write_threshold?: number;
   /** Лимит на ИИ за запуск, $ (1–100); у запусков до 26.09.2026 его нет. */
   llm_budget_usd?: number;
+  /** Брать и компании, уже готовые в прошлых запусках (по умолчанию нет). */
+  include_previously_exported?: boolean;
 }
 
 export interface PolzaOutreachParserJob {
