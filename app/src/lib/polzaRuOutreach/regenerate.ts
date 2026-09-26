@@ -14,14 +14,24 @@
  * Одна пересборка на запуск за раз: отметка progress_detail.rebuilding,
  * которую ставят и снимают записью со сравнением. Под ней считаются готовые
  * (места в лимите) и пишется расход — две пересборки разных офферов не
- * делят одни места и не затирают расход друг друга. Роут пускает сюда только
- * законченный запуск: пока он идёт, воркер ведёт лимит готовых и расход в
- * памяти, и пересборка сбоку их бы разошла.
+ * делят одни места и не затирают расход друг друга. Только законченный
+ * запуск, которого воркер уже не держит: пока запуск идёт, воркер ведёт лимит
+ * готовых и расход в памяти, а остановленный он ещё доводит (аренда
+ * progress_detail.worker, lib/outreachLlm/workerLease.ts) — и его итоговая
+ * запись стёрла бы расход и счётчики пересборки. Бюджет — из снимка,
+ * прочитанного при постановке отметки.
  */
 
 import { randomUUID } from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { BudgetExceededError, JobBudget, LlmAuthError, type OutreachLlmBudgetSnapshot } from '@/lib/outreachLlm/context';
+import {
+  BudgetExceededError,
+  JobBudget,
+  LlmAuthError,
+  runWithOutreachContext,
+  type OutreachLlmBudgetSnapshot,
+} from '@/lib/outreachLlm/context';
+import { WORKER_LEASE_KEY, withoutWorkerLease, workerLeaseLive, workerLeaseOf } from '@/lib/outreachLlm/workerLease';
 import { dropLettersDoubts, lettersQaDoubtText, templateDoubtText, withLettersDoubt } from './doubts';
 import { journalCounts, type JournalCountRow, type JournalCounts } from './funnel';
 import { buildSegmentsHypothesis, type SegmentsHypothesis } from './letters/chains';
@@ -30,7 +40,8 @@ import {
   regenerateChainTemplate,
   ROUTE_WRITER_TIMEOUT_MS,
   templateBeingWritten,
-  templateExists,
+  templateStatus,
+  writerAttemptWorstUsd,
   type ChainTemplate,
 } from './letters/templateWriter';
 import type { Libraries, SenderProfile } from './libraries';
@@ -109,6 +120,16 @@ export type RegenerateOfferResult =
   | { kind: 'missing' }
   /** rebuild — идёт другая пересборка запуска; writing — пишется шаблон оффера (offer). */
   | { kind: 'busy'; reason: 'rebuild' | 'writing'; offer?: ChainType }
+  /**
+   * Запуск ещё у воркера: running — идёт (или ждёт воркера); stopping —
+   * остановлен, но воркер его ещё доводит и запишет итог.
+   */
+  | { kind: 'active'; state: 'running' | 'stopping' }
+  /**
+   * Лимит на ИИ запуска исчерпан или на попытку писателя его не хватает
+   * (needUsd — её оценка сверху): писателю не платим, шаблон не трогаем.
+   */
+  | { kind: 'budget'; spentUsd: number; limitUsd: number; needUsd?: number }
   /** Компаний, которые ждут эту цепочку, нет — переписывать незачем, писателю не платим. */
   | { kind: 'nothing' }
   /** Лимит готовых уже набран — пересобранные письма всё равно не стали бы готовыми. */
@@ -124,11 +145,12 @@ export interface RegenerateOfferInput {
   target: number;
   libraries: Libraries;
   sender: SenderProfile;
-  /** Бюджет запуска из progress_detail.llm — тот же объект, что в контексте ИИ. */
-  budget: JobBudget;
   /** Срок роута (Date.now()): писатель, гипотезы и пересборка укладываются в него. */
   deadlineAt: number;
 }
+
+/** Вход пересборки строк: бюджет — из снимка, прочитанного под отметкой. */
+type RebuildInput = RegenerateOfferInput & { budget: JobBudget };
 
 function log(level: 'info' | 'warn', msg: string): void {
   console[level](`[polza-ru-outreach][regenerate][${level.toUpperCase()}] ${msg}`);
@@ -197,6 +219,8 @@ function markerOf(detail: Record<string, unknown>): RebuildMarker | null {
 
 interface JobState {
   status: string;
+  /** Когда запуск закончили или остановили — аренда воркера держится и по ней (workerLeaseLive). */
+  completedAt: string | null;
   config: RuOutreachConfig;
   detail: Record<string, unknown>;
 }
@@ -205,24 +229,31 @@ type DetailChange = { detail: Record<string, unknown>; patch?: Record<string, un
 
 /**
  * Запись progress_detail со сравнением: пишем, только если отметка
- * пересборки в базе та же, что мы прочитали (или её так же нет). Законченный
- * запуск меняют только пересборки, и каждая ставит и снимает отметку, — её
- * хватает как версии. change вернул null — писать не надо (занято).
+ * пересборки и аренда воркера в базе те же, что мы прочитали (или их так же
+ * нет). Законченный запуск меняют только пересборки (каждая ставит и снимает
+ * отметку) и воркер, пока держит аренду (каждое продление меняет её срок), —
+ * этого хватает как версии. change вернул null — писать не надо (занято).
  */
 async function casProgressDetail(db: SupabaseClient, jobId: string, change: (job: JobState) => DetailChange): Promise<boolean> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const { data: job, error } = await db.from('parser_jobs').select('status,config,progress_detail').eq('id', jobId).maybeSingle();
+    const { data: job, error } = await db.from('parser_jobs').select('status,config,progress_detail,completed_at').eq('id', jobId).maybeSingle();
     if (error || !job) throw new Error(`Не удалось прочитать запуск: ${error?.message ?? 'не найден'}`);
     const detail = asObject(job.progress_detail);
     const seen = markerOf(detail);
+    const seenLease = workerLeaseOf(detail);
     const next = change({
       status: String(job.status ?? ''),
+      completedAt: typeof job.completed_at === 'string' ? job.completed_at : null,
       config: sanitizeRuOutreachConfig((job.config ?? {}) as Partial<RuOutreachConfig>),
       detail,
     });
     if (!next) return false;
     const base = db.from('parser_jobs').update({ ...(next.patch ?? {}), progress_detail: next.detail }).eq('id', jobId);
-    const guarded = seen ? base.eq('progress_detail->rebuilding->>token', seen.token) : base.is('progress_detail->rebuilding', null);
+    const marked = seen ? base.eq('progress_detail->rebuilding->>token', seen.token) : base.is('progress_detail->rebuilding', null);
+    // Битую отметку аренды (не наш формат) сравнить не с чем — без условия по ней.
+    const guarded = seenLease
+      ? marked.eq(`progress_detail->${WORKER_LEASE_KEY}->>until`, seenLease.until)
+      : detail[WORKER_LEASE_KEY] == null ? marked.is(`progress_detail->${WORKER_LEASE_KEY}`, null) : marked;
     const { data, error: saveErr } = await guarded.select('id');
     if (saveErr) throw new Error(`Не удалось сохранить прогресс запуска: ${saveErr.message}`);
     if (data?.length) return true;
@@ -230,30 +261,48 @@ async function casProgressDetail(db: SupabaseClient, jobId: string, change: (job
   throw new Error('Прогресс запуска меняют одновременно — попробуйте ещё раз');
 }
 
-/** Занять запуск: отметки нет или она просрочена (роут умер). Идёт или ждёт воркера — нельзя. */
-async function acquireRebuild(db: SupabaseClient, jobId: string, token: string): Promise<boolean> {
-  return casProgressDetail(db, jobId, (job) => {
-    if (job.status === 'pending' || job.status === 'running') return null;
+type RebuildLock = { ok: true; job: JobState } | { ok: false; reason: 'running' | 'stopping' | 'rebuild' };
+
+/**
+ * Занять запуск: отметки нет или она просрочена (роут умер). Идёт или ждёт
+ * воркера — нельзя; остановлен, но воркер ещё держит аренду (доводит строки и
+ * запишет итог) — тоже нельзя: его запись стёрла бы нашу. Истёкшую аренду
+ * умершего воркера снимаем — переживший её процесс пишет только при своей
+ * отметке и ничего не перетрёт. job — запуск, прочитанный при постановке
+ * отметки: из него бюджет пересборки.
+ */
+async function acquireRebuild(db: SupabaseClient, jobId: string, token: string): Promise<RebuildLock> {
+  const outcome: { job: JobState | null; reason: 'running' | 'stopping' | 'rebuild' } = { job: null, reason: 'rebuild' };
+  const taken = await casProgressDetail(db, jobId, (job) => {
+    outcome.job = null;
+    if (job.status === 'pending' || job.status === 'running') {
+      outcome.reason = 'running';
+      return null;
+    }
+    if (workerLeaseLive(job.detail, job.completedAt)) {
+      outcome.reason = 'stopping';
+      return null;
+    }
     const seen = markerOf(job.detail);
-    if (seen && Date.parse(seen.until) > Date.now()) return null;
-    return { detail: { ...job.detail, rebuilding: { token, until: new Date(Date.now() + REBUILD_LOCK_TTL_MS).toISOString() } } };
+    if (seen && Date.parse(seen.until) > Date.now()) {
+      outcome.reason = 'rebuild';
+      return null;
+    }
+    const detail = withoutWorkerLease(job.detail);
+    outcome.job = { ...job, detail };
+    return { detail: { ...detail, rebuilding: { token, until: new Date(Date.now() + REBUILD_LOCK_TTL_MS).toISOString() } } };
   });
+  return taken && outcome.job ? { ok: true, job: outcome.job } : { ok: false, reason: outcome.reason };
 }
 
 /**
- * Отпустить запуск и записать итог: расход на ИИ — прибавкой к снимку, счётчики
- * экрана — по журналу, stop_reason — «набран лимит», если пересборка его
- * добрала. Отметку снимаем, только если она ещё наша: просроченную и занятую
- * заново не трогаем, но расход дописываем и тогда — деньги потрачены.
+ * Отпустить запуск и записать расход на ИИ — прибавкой к снимку. Отметку
+ * снимаем, только если она ещё наша: просроченную и занятую заново не
+ * трогаем, но расход дописываем и тогда — деньги потрачены. Счётчики экрана
+ * здесь не пересчитываются: сбой чтения журнала не должен ни потерять расход,
+ * ни держать отметку до срока (refreshCounts — отдельно, после).
  */
-async function releaseRebuild(
-  db: SupabaseClient,
-  jobId: string,
-  token: string,
-  spent: Spend,
-  counts: JournalCounts | null,
-  target: number,
-): Promise<void> {
+async function releaseRebuild(db: SupabaseClient, jobId: string, token: string, spent: Spend): Promise<void> {
   await casProgressDetail(db, jobId, (job) => {
     const detail = { ...job.detail };
     if (markerOf(detail)?.token === token) delete detail.rebuilding;
@@ -267,7 +316,19 @@ async function releaseRebuild(
       }
       detail.llm = total.snapshot();
     }
-    if (!counts) return { detail };
+    return { detail };
+  });
+}
+
+/**
+ * Счётчики экрана — по журналу, stop_reason — «набран лимит», если пересборка
+ * его добрала. Отдельная запись после releaseRebuild: не прочитался журнал —
+ * расход уже сохранён, отметка снята.
+ */
+async function refreshCounts(db: SupabaseClient, jobId: string, target: number): Promise<void> {
+  const counts = await loadCounts(db, jobId);
+  await casProgressDetail(db, jobId, (job) => {
+    const detail = { ...job.detail };
     Object.assign(detail, {
       ready: counts.ready,
       doubtful: counts.doubtful,
@@ -420,7 +481,7 @@ interface RowsOutcome {
  * добирает следующая пачка. Лишних писем (и гипотез) для строк, которым места
  * всё равно не достанется, не собираем.
  */
-async function rebuildRows(input: RegenerateOfferInput, template: ChainTemplate, rows: WaitingRow[], readyAtStart: number): Promise<RowsOutcome> {
+async function rebuildRows(input: RebuildInput, template: ChainTemplate, rows: WaitingRow[], readyAtStart: number): Promise<RowsOutcome> {
   const { db, jobId, chain, libraries, sender, budget, deadlineAt } = input;
   const outcome: RowsOutcome = { promoted: 0, stillDoubtful: 0, limitReached: 0, unfinished: 0 };
   const letters = template.letters;
@@ -514,77 +575,97 @@ async function rebuildRows(input: RegenerateOfferInput, template: ChainTemplate,
 }
 
 /**
- * Переписать шаблон оффера и пересобрать письма ждавших его строк. Вызывать
- * внутри runWithOutreachContext с тем же бюджетом (input.budget): писатель и
- * гипотезы списывают деньги с лимита запуска. Расход сохраняется в запуск,
+ * Переписать шаблон оффера и пересобрать письма ждавших его строк. Бюджет —
+ * лимит и уже потраченное из progress_detail.llm, прочитанного при постановке
+ * отметки пересборки, — и вся работа идёт внутри своего контекста ИИ: писатель
+ * и гипотезы списывают деньги с лимита запуска. Расход сохраняется в запуск,
  * даже если пересборка оборвалась на середине — деньги уже потрачены.
  */
 export async function regenerateOfferChain(input: RegenerateOfferInput): Promise<RegenerateOfferResult> {
-  const { db, jobId, chain, libraries, sender, budget } = input;
+  const { db, jobId } = input;
   const token = randomUUID();
-  if (!(await acquireRebuild(db, jobId, token))) return { kind: 'busy', reason: 'rebuild' };
+  const lock = await acquireRebuild(db, jobId, token);
+  if (!lock.ok) return lock.reason === 'rebuild' ? { kind: 'busy', reason: 'rebuild' } : { kind: 'active', state: lock.reason };
+  const budget = JobBudget.fromSnapshot(
+    (lock.job.detail.llm ?? null) as Partial<OutreachLlmBudgetSnapshot> | null,
+    lock.job.config.llm_budget_usd,
+  );
   const before = spendOf(budget);
-  const spentBefore = budget.spentUsd;
-  let touchedRows = false;
+  const touched = { rows: false };
   let failure: unknown = null;
   let result: RegenerateOfferResult | null = null;
   try {
-    // Под отметкой: другой шаблон запуска ещё пишется (процесс жив) — ждём,
-    // иначе две записи делили бы лимит и расход.
-    const writing = await templateBeingWritten(db, jobId);
-    if (writing) {
-      result = { kind: 'busy', reason: 'writing', offer: writing };
-    } else if (!(await templateExists(db, jobId, chain))) {
-      result = { kind: 'missing' };
-    } else {
-      // Платить писателю — только если есть кого пересобирать и куда:
-      // строки ждут цепочку, а в лимите готовых есть места.
-      const rows = await loadWaitingRows(db, jobId, chain);
-      const ready = rows.length ? await countReady(db, jobId) : 0;
-      if (!rows.length) {
-        result = { kind: 'nothing' };
-      } else if (ready >= input.target) {
-        result = { kind: 'limit', ready };
-      } else {
-        const outcome = await regenerateChainTemplate(
-          { db, jobId, sender, claims: libraries.claims, writerTimeoutMs: ROUTE_WRITER_TIMEOUT_MS, deadlineAt: input.deadlineAt - REBUILD_RESERVE_MS },
-          chain,
-        );
-        if (outcome.kind === 'busy') {
-          result = { kind: 'busy', reason: 'writing', offer: chain };
-        } else if (outcome.kind === 'missing') {
-          result = { kind: 'missing' };
-        } else {
-          touchedRows = true;
-          const counts = await rebuildRows(input, outcome.template, rows, ready);
-          result = {
-            kind: 'done',
-            summary: {
-              status: outcome.template.status,
-              templateId: outcome.template.id,
-              rewritten: outcome.wrote,
-              waiting: rows.length,
-              ...counts,
-              costUsd: roundUsd(budget.spentUsd - spentBefore),
-              qaFlags: outcome.template.qaFlags,
-              error: outcome.template.error,
-            },
-          };
-        }
-      }
-    }
+    result = budget.exhausted()
+      ? { kind: 'budget', spentUsd: budget.spentUsd, limitUsd: budget.limitUsd }
+      : await runWithOutreachContext({ lang: 'ru', budget }, () => rebuildOffer({ ...input, budget }, touched));
   } catch (err) {
     failure = err;
   }
+  // Расход — первым, вместе со снятием отметки: он пишется, даже если пересчёт
+  // журнала потом не прочитается.
   try {
-    const counts = touchedRows ? await loadCounts(db, jobId) : null;
-    await releaseRebuild(db, jobId, token, spendSince(before, budget), counts, input.target);
+    await releaseRebuild(db, jobId, token, spendSince(before, budget));
   } catch (err) {
     // Сбой записи итога не должен спрятать исходную ошибку пересборки.
     if (failure) log('warn', `job ${jobId}: ${err instanceof Error ? err.message : String(err)}`);
     else failure = err;
   }
+  if (touched.rows) {
+    try {
+      await refreshCounts(db, jobId, input.target);
+    } catch (err) {
+      // Письма пересобраны и расход записан — устаревшие счётчики экрана не повод
+      // отвечать ошибкой: их пересчитает следующая пересборка.
+      log('warn', `job ${jobId}: counters were not recounted after the rebuild — ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   if (failure) throw failure;
   if (!result) throw new Error('Пересборка цепочки не вернула результата');
   return result;
+}
+
+/** Пересборка под отметкой, внутри контекста ИИ запуска. touched.rows — строки менялись, счётчики пересчитать. */
+async function rebuildOffer(input: RebuildInput, touched: { rows: boolean }): Promise<RegenerateOfferResult> {
+  const { db, jobId, chain, libraries, sender, budget } = input;
+  const spentBefore = budget.spentUsd;
+  // Под отметкой: другой шаблон запуска ещё пишется (процесс жив) — ждём,
+  // иначе две записи делили бы лимит и расход.
+  const writing = await templateBeingWritten(db, jobId);
+  if (writing) return { kind: 'busy', reason: 'writing', offer: writing };
+  const status = await templateStatus(db, jobId, chain);
+  if (status === null) return { kind: 'missing' };
+  // Платить писателю — только если есть кого пересобирать и куда:
+  // строки ждут цепочку, а в лимите готовых есть места.
+  const rows = await loadWaitingRows(db, jobId, chain);
+  if (!rows.length) return { kind: 'nothing' };
+  const ready = await countReady(db, jobId);
+  if (ready >= input.target) return { kind: 'limit', ready };
+  // Попытка писателя не помещается в лимит (оценкой сверху) — отказ до того,
+  // как шаблон занят: иначе отказ бюджета стёр бы его прошлый вариант и
+  // замечания проверки.
+  const needUsd = writerAttemptWorstUsd();
+  if (status !== 'ok' && budget.available() < needUsd) {
+    return { kind: 'budget', spentUsd: budget.spentUsd, limitUsd: budget.limitUsd, needUsd };
+  }
+  const outcome = await regenerateChainTemplate(
+    { db, jobId, sender, claims: libraries.claims, writerTimeoutMs: ROUTE_WRITER_TIMEOUT_MS, deadlineAt: input.deadlineAt - REBUILD_RESERVE_MS },
+    chain,
+  );
+  if (outcome.kind === 'busy') return { kind: 'busy', reason: 'writing', offer: chain };
+  if (outcome.kind === 'missing') return { kind: 'missing' };
+  touched.rows = true;
+  const counts = await rebuildRows(input, outcome.template, rows, ready);
+  return {
+    kind: 'done',
+    summary: {
+      status: outcome.template.status,
+      templateId: outcome.template.id,
+      rewritten: outcome.wrote,
+      waiting: rows.length,
+      ...counts,
+      costUsd: roundUsd(budget.spentUsd - spentBefore),
+      qaFlags: outcome.template.qaFlags,
+      error: outcome.template.error,
+    },
+  };
 }

@@ -797,11 +797,6 @@ export async function templateBeingWritten(db: SupabaseClient, jobId: string): P
   return busy ? (busy.offer_key as ChainType) : null;
 }
 
-/** Строка шаблона оффера есть в запуске (у оффера были компании, дошедшие до писем). */
-export async function templateExists(db: SupabaseClient, jobId: string, chain: ChainType): Promise<boolean> {
-  return (await readRow(db, jobId, chain)) !== null;
-}
-
 /**
  * Статус шаблона оффера в запуске (ok, failed, pending) или null — строки нет:
  * у оффера не было компаний, дошедших до писем.

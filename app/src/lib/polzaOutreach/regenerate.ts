@@ -12,12 +12,16 @@
  * на ИИ запуска (бюджет из progress_detail.llm); потраченное дописывается
  * обратно в progress_detail.llm, счётчики экрана пересчитываются по журналу.
  *
- * Роут пускает сюда только законченный запуск: пока он идёт, воркер ведёт
- * лимит готовых и расход в памяти, и пересборка сбоку их бы разошла. А внутри
- * одного запуска пересборка одна за раз (маркер REBUILD_LEASE_KEY): две
- * пересборки разных офферов считали бы свободные места в лимите готовых
- * каждая по себе. Писателю не платим, пока не ясно, что писать есть кому:
- * строки ждут шаблон и лимит готовых ещё не набран.
+ * Только законченный запуск, которого воркер уже не держит: пока запуск
+ * идёт, воркер ведёт лимит готовых и расход в памяти, и пересборка сбоку их бы
+ * разошла, а остановленный он ещё доводит (аренда progress_detail.worker,
+ * lib/outreachLlm/workerLease.ts) — и его итоговая запись стёрла бы расход и
+ * счётчики пересборки. А внутри одного запуска пересборка одна за раз (маркер
+ * REBUILD_LEASE_KEY): две пересборки разных офферов считали бы свободные места
+ * в лимите готовых каждая по себе. Бюджет — из progress_detail.llm,
+ * прочитанного под маркером. Писателю не платим, пока не ясно, что писать есть
+ * кому: строки ждут шаблон, лимит готовых ещё не набран, а попытка писателя
+ * помещается в лимит на ИИ.
  *
  * Остаточная гонка: расход дописывается чтением и записью progress_detail, не
  * атомарно. Под маркером пишет только эта пересборка, воркер к законченному
@@ -26,7 +30,8 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { JobBudget, type OutreachLlmBudgetSnapshot } from '@/lib/outreachLlm/context';
+import { JobBudget, runWithOutreachContext, type OutreachLlmBudgetSnapshot } from '@/lib/outreachLlm/context';
+import { withoutWorkerLease, workerLeaseLive, workerLeaseOf } from '@/lib/outreachLlm/workerLease';
 import { SEQUENCE_ID } from './buildLetters';
 import type { EnCase } from './caseRouter';
 import { POLZA_FUNNEL_COLUMNS, polzaFunnel, type PolzaFunnelRow } from './funnel';
@@ -41,6 +46,7 @@ import {
   ROUTE_WRITER_TIMEOUT_MS,
   ROUTE_WRITER_TOTAL_MS,
   templateFailureDetail,
+  writerAttemptWorstUsd,
   type ChainTemplate,
 } from './templateWriter';
 import {
@@ -93,6 +99,16 @@ export type RegenerateOfferResult =
   | { kind: 'missing' }
   /** rebuild — письма запуска уже пересобирает другой роут; template — шаблон запуска пишется. */
   | { kind: 'busy'; reason: 'rebuild' | 'template' }
+  /**
+   * Запуск ещё у воркера: running — идёт (или ждёт воркера); stopping —
+   * остановлен, но воркер его ещё доводит и запишет итог.
+   */
+  | { kind: 'active'; state: 'running' | 'stopping' }
+  /**
+   * Лимит на ИИ запуска исчерпан или на попытку писателя его не хватает
+   * (needUsd — её оценка сверху): писателю не платим, шаблон не трогаем.
+   */
+  | { kind: 'budget'; spentUsd: number; limitUsd: number; needUsd?: number }
   /** Цепочку этого оффера не ждёт ни одна строка — платить писателю не за что. */
   | { kind: 'nothing_waiting' }
   /** Лимит готовых запуска набран: все ждущие строки ушли бы в limit_reached. */
@@ -110,9 +126,10 @@ export interface RegenerateOfferInput {
   signature: string;
   /** Утверждённые кейсы (loadEnCases): кейс строки ищется по recommended_case. */
   cases: EnCase[];
-  /** Бюджет запуска из progress_detail.llm — тот же объект, что в контексте ИИ. */
-  budget: JobBudget;
 }
+
+/** Вход пересборки под маркером: бюджет — из снимка, прочитанного под ним. */
+type RebuildInput = RegenerateOfferInput & { budget: JobBudget };
 
 function log(level: 'info' | 'warn', msg: string): void {
   console[level](`[polza-outreach][regenerate][${level.toUpperCase()}] ${msg}`);
@@ -212,68 +229,106 @@ function companyInput(row: WaitingRow, cases: EnCase[]): CompanyLettersInput {
   };
 }
 
+interface JobUnderLease {
+  config: PolzaOutreachConfig;
+  detail: Record<string, unknown>;
+}
+
 /**
- * Расход на ИИ и счётчики экрана — в progress_detail. Расход — прибавкой к
- * свежему снимку, а не нашим снимком целиком: так запись не теряет расход,
- * дописанный в запуск после того, как роут прочитал бюджет.
+ * Запуск, прочитанный под маркером пересборки: статус, аренда воркера и
+ * расход на ИИ — одним чтением. Идёт или ждёт воркера — running; остановлен,
+ * но воркер ещё держит аренду (доводит строки и запишет итог) — stopping: его
+ * запись стёрла бы нашу. Истёкшую аренду умершего воркера снимаем сравнением
+ * с обменом — переживший её процесс пишет только при своей отметке и ничего не
+ * перетрёт; продлил её между чтением и записью — воркер жив, читаем заново.
  */
-async function refreshJob(db: SupabaseClient, jobId: string, spent: Spend, recount: boolean): Promise<void> {
+async function jobUnderLease(db: SupabaseClient, jobId: string): Promise<JobUnderLease | 'running' | 'stopping'> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { data: job, error } = await db.from('parser_jobs').select('status,config,progress_detail,completed_at').eq('id', jobId).maybeSingle();
+    if (error || !job) throw new Error(`Не удалось прочитать запуск: ${error?.message ?? 'не найден'}`);
+    if (job.status === 'pending' || job.status === 'running') return 'running';
+    const detail = asObject(job.progress_detail);
+    if (workerLeaseLive(detail, typeof job.completed_at === 'string' ? job.completed_at : null)) return 'stopping';
+    const config = sanitizePolzaOutreachConfig((job.config ?? {}) as Partial<PolzaOutreachConfig>);
+    const lease = workerLeaseOf(detail);
+    if (!lease) return { config, detail };
+    const released = withoutWorkerLease(detail);
+    const { data: saved, error: saveErr } = await db
+      .from('parser_jobs')
+      .update({ progress_detail: released })
+      .eq('id', jobId)
+      .eq('progress_detail->worker->>until', lease.until)
+      .select('id');
+    if (saveErr) throw new Error(`Не удалось снять аренду воркера: ${saveErr.message}`);
+    if (saved?.length) return { config, detail: released };
+  }
+  return 'stopping';
+}
+
+/**
+ * Расход на ИИ — в progress_detail, прибавкой к свежему снимку, а не нашим
+ * снимком целиком: так запись не теряет расход, дописанный в запуск после
+ * того, как роут прочитал бюджет. Отдельно от счётчиков (recountJob): не
+ * прочитался журнал — расход всё равно записан.
+ */
+async function saveSpend(db: SupabaseClient, jobId: string, spent: Spend): Promise<void> {
   const hasSpend = Boolean(spent.analysis.calls || spent.writer.calls || spent.analysis.usd || spent.writer.usd);
-  if (!hasSpend && !recount) return;
+  if (!hasSpend) return;
   const { data: job, error } = await db.from('parser_jobs').select('config,progress_detail').eq('id', jobId).maybeSingle();
   if (error || !job) throw new Error(`Не удалось прочитать запуск: ${error?.message ?? 'не найден'}`);
   const detail = asObject(job.progress_detail);
-  const patch: Record<string, unknown> = {};
   const config = sanitizePolzaOutreachConfig((job.config ?? {}) as Partial<PolzaOutreachConfig>);
-  if (hasSpend) {
-    const limit = config.llm_budget_usd;
-    const total = JobBudget.fromSnapshot((detail.llm ?? null) as Partial<OutreachLlmBudgetSnapshot> | null, limit);
-    for (const role of ['analysis', 'writer'] as const) {
-      total.byRole[role].usd += spent[role].usd;
-      total.byRole[role].calls += spent[role].calls;
-      total.spentUsd += spent[role].usd;
-      total.calls += spent[role].calls;
-    }
-    detail.llm = total.snapshot();
+  const total = JobBudget.fromSnapshot((detail.llm ?? null) as Partial<OutreachLlmBudgetSnapshot> | null, config.llm_budget_usd);
+  for (const role of ['analysis', 'writer'] as const) {
+    total.byRole[role].usd += spent[role].usd;
+    total.byRole[role].calls += spent[role].calls;
+    total.spentUsd += spent[role].usd;
+    total.calls += spent[role].calls;
   }
-  if (recount) {
-    // Счётчики — по журналу тем же правилом, что экран (funnel.ts).
-    const rows: PolzaFunnelRow[] = [];
-    for (let from = 0; ; from += PAGE) {
-      const { data, error: rowsErr } = await db
-        .from(ROWS)
-        .select(POLZA_FUNNEL_COLUMNS)
-        .eq('job_id', jobId)
-        .order('id', { ascending: true })
-        .range(from, from + PAGE - 1);
-      if (rowsErr) throw new Error(`Не удалось прочитать журнал запуска: ${rowsErr.message}`);
-      rows.push(...((data ?? []) as unknown as PolzaFunnelRow[]));
-      if (!data || data.length < PAGE) break;
-    }
-    const ready = rows.filter((r) => r.status === 'ready').length;
-    const awaiting = rows.filter((r) => r.status === 'needs_review' && (r.review_reason ?? '').startsWith('template_failed')).length;
-    Object.assign(detail, { ready, awaiting_templates: awaiting, funnel: polzaFunnel(rows) });
-    if (ready >= config.limit) {
-      // Пересборка добрала лимит готовых — запуск закончился тем, ради чего шёл
-      // (раньше — «ждут цепочку» или «кончились кандидаты»).
-      detail.stop_reason = 'target_reached';
-      delete detail.stop_reason_base;
-    } else if (detail.stop_reason === 'awaiting_templates' && ready + awaiting < config.limit) {
-      // Запуск встал, потому что заказанное набиралось вместе с ждущими
-      // цепочку. Их стало меньше (часть писем не прошла гарды) — эта причина
-      // больше не верна, и плашка «ждут цепочку» висела бы при нуле ждущих:
-      // возвращаем ту, что была бы без ждущих (раннер записал её в
-      // stop_reason_base), а если её нет — не утверждаем никакой.
-      const base = detail.stop_reason_base;
-      if (typeof base === 'string' && base) detail.stop_reason = base;
-      else delete detail.stop_reason;
-      delete detail.stop_reason_base;
-    }
-    patch.total_parsed = ready;
+  detail.llm = total.snapshot();
+  const { error: saveErr } = await db.from('parser_jobs').update({ progress_detail: detail }).eq('id', jobId);
+  if (saveErr) throw new Error(`Не удалось сохранить расход на ИИ запуска: ${saveErr.message}`);
+}
+
+/** Счётчики экрана — по журналу тем же правилом, что экран (funnel.ts). */
+async function recountJob(db: SupabaseClient, jobId: string): Promise<void> {
+  const rows: PolzaFunnelRow[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error: rowsErr } = await db
+      .from(ROWS)
+      .select(POLZA_FUNNEL_COLUMNS)
+      .eq('job_id', jobId)
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (rowsErr) throw new Error(`Не удалось прочитать журнал запуска: ${rowsErr.message}`);
+    rows.push(...((data ?? []) as unknown as PolzaFunnelRow[]));
+    if (!data || data.length < PAGE) break;
   }
-  patch.progress_detail = detail;
-  const { error: saveErr } = await db.from('parser_jobs').update(patch).eq('id', jobId);
-  if (saveErr) throw new Error(`Не удалось сохранить расход и счётчики запуска: ${saveErr.message}`);
+  const { data: job, error } = await db.from('parser_jobs').select('config,progress_detail').eq('id', jobId).maybeSingle();
+  if (error || !job) throw new Error(`Не удалось прочитать запуск: ${error?.message ?? 'не найден'}`);
+  const detail = asObject(job.progress_detail);
+  const config = sanitizePolzaOutreachConfig((job.config ?? {}) as Partial<PolzaOutreachConfig>);
+  const ready = rows.filter((r) => r.status === 'ready').length;
+  const awaiting = rows.filter((r) => r.status === 'needs_review' && (r.review_reason ?? '').startsWith('template_failed')).length;
+  Object.assign(detail, { ready, awaiting_templates: awaiting, funnel: polzaFunnel(rows) });
+  if (ready >= config.limit) {
+    // Пересборка добрала лимит готовых — запуск закончился тем, ради чего шёл
+    // (раньше — «ждут цепочку» или «кончились кандидаты»).
+    detail.stop_reason = 'target_reached';
+    delete detail.stop_reason_base;
+  } else if (detail.stop_reason === 'awaiting_templates' && ready + awaiting < config.limit) {
+    // Запуск встал, потому что заказанное набиралось вместе с ждущими
+    // цепочку. Их стало меньше (часть писем не прошла гарды) — эта причина
+    // больше не верна, и плашка «ждут цепочку» висела бы при нуле ждущих:
+    // возвращаем ту, что была бы без ждущих (раннер записал её в
+    // stop_reason_base), а если её нет — не утверждаем никакой.
+    const base = detail.stop_reason_base;
+    if (typeof base === 'string' && base) detail.stop_reason = base;
+    else delete detail.stop_reason;
+    delete detail.stop_reason_base;
+  }
+  const { error: saveErr } = await db.from('parser_jobs').update({ total_parsed: ready, progress_detail: detail }).eq('id', jobId);
+  if (saveErr) throw new Error(`Не удалось сохранить счётчики запуска: ${saveErr.message}`);
 }
 
 interface RowsOutcome {
@@ -334,76 +389,99 @@ async function rebuildRows(input: RegenerateOfferInput, template: ChainTemplate,
 }
 
 /**
- * Переписать шаблон оффера и пересобрать письма ждавших его строк. Вызывать
- * внутри runWithOutreachContext с тем же бюджетом (input.budget): писатель
+ * Переписать шаблон оффера и пересобрать письма ждавших его строк. Бюджет —
+ * лимит и уже потраченное из progress_detail.llm, прочитанного под маркером
+ * пересборки, — и вся работа идёт внутри своего контекста ИИ: писатель
  * списывает деньги с лимита запуска. Расход сохраняется в запуск, даже если
  * пересборка оборвалась на середине — деньги уже потрачены.
  */
 export async function regenerateOfferChain(input: RegenerateOfferInput): Promise<RegenerateOfferResult> {
-  const { db, jobId, offer, budget } = input;
+  const { db, jobId } = input;
   const lease = await claimRebuildLease(db, jobId);
   if (!lease) return { kind: 'busy', reason: 'rebuild' };
-  const before = spendOf(budget);
-  const spentBefore = budget.spentUsd;
   let result: RegenerateOfferResult | null = null;
-  let touchedRows = false;
+  const touched = { rows: false };
   let failure: unknown = null;
+  let budget: JobBudget | null = null;
+  let before: Spend | null = null;
   try {
-    const current = await findChainTemplate(db, jobId, offer);
-    if (!current) {
-      result = { kind: 'missing' };
-    } else if (await hasPendingTemplate(db, jobId)) {
-      result = { kind: 'busy', reason: 'template' };
+    const job = await jobUnderLease(db, jobId);
+    if (job === 'running' || job === 'stopping') {
+      result = { kind: 'active', state: job };
     } else {
-      // До оплаты писателя: есть ли кому писать и есть ли места в лимите готовых.
-      const rows = await loadWaitingRows(db, jobId, current.id);
-      const ready = await countReady(db, jobId);
-      if (!rows.length) {
-        result = { kind: 'nothing_waiting' };
-      } else if (ready >= input.target) {
-        result = { kind: 'limit_full', ready, target: input.target };
-      } else {
-        const outcome = await regenerateChainTemplate(
-          { db, jobId, writerTimeoutMs: ROUTE_WRITER_TIMEOUT_MS, writerTotalMs: ROUTE_WRITER_TOTAL_MS },
-          offer,
-        );
-        if (outcome.kind !== 'done') {
-          result = outcome.kind === 'busy' ? { kind: 'busy', reason: 'template' } : outcome;
-        } else {
-          // До пересборки: оборвётся на середине — часть строк уже поменялась, и
-          // счётчики всё равно надо пересчитать. Не прошедший шаблон меняет
-          // строкам только подробность причины — счётчики те же.
-          touchedRows = outcome.template.status === 'ok';
-          const counts = await rebuildRows(input, outcome.template, rows, ready);
-          result = {
-            kind: 'done',
-            summary: {
-              status: outcome.template.status,
-              templateId: outcome.template.id,
-              rewritten: outcome.wrote,
-              waiting: rows.length,
-              ...counts,
-              costUsd: roundUsd(budget.spentUsd - spentBefore),
-              qaFlags: outcome.template.qaFlags,
-              error: outcome.template.error,
-            },
-          };
-        }
-      }
+      const own = JobBudget.fromSnapshot((job.detail.llm ?? null) as Partial<OutreachLlmBudgetSnapshot> | null, job.config.llm_budget_usd);
+      budget = own;
+      before = spendOf(own);
+      result = own.exhausted()
+        ? { kind: 'budget', spentUsd: own.spentUsd, limitUsd: own.limitUsd }
+        : await runWithOutreachContext({ lang: 'en', budget: own }, () => rebuildOffer({ ...input, budget: own }, touched));
     }
   } catch (err) {
     failure = err;
   }
   try {
-    await refreshJob(db, jobId, spendSince(before, budget), touchedRows);
+    // Расход — первым и отдельно: он пишется, даже если пересчёт журнала потом
+    // не прочитается.
+    if (budget && before) await saveSpend(db, jobId, spendSince(before, budget));
   } catch (err) {
-    // Сбой записи счётчиков не должен спрятать исходную ошибку пересборки.
+    // Сбой записи расхода не должен спрятать исходную ошибку пересборки.
     if (failure) log('warn', `job ${jobId}: ${err instanceof Error ? err.message : String(err)}`);
     else failure = err;
+  }
+  try {
+    if (touched.rows) await recountJob(db, jobId);
+  } catch (err) {
+    // Письма пересобраны и расход записан — устаревшие счётчики экрана не повод
+    // отвечать ошибкой: их пересчитает следующая пересборка.
+    log('warn', `job ${jobId}: counters were not recounted after the rebuild — ${err instanceof Error ? err.message : String(err)}`);
   } finally {
     await releaseRebuildLease(db, lease);
   }
   if (failure) throw failure;
   if (!result) throw new Error('Пересборка цепочки не вернула результата');
   return result;
+}
+
+/** Пересборка под маркером, внутри контекста ИИ запуска. touched.rows — строки менялись, счётчики пересчитать. */
+async function rebuildOffer(input: RebuildInput, touched: { rows: boolean }): Promise<RegenerateOfferResult> {
+  const { db, jobId, offer, budget } = input;
+  const spentBefore = budget.spentUsd;
+  const current = await findChainTemplate(db, jobId, offer);
+  if (!current) return { kind: 'missing' };
+  if (await hasPendingTemplate(db, jobId)) return { kind: 'busy', reason: 'template' };
+  // До оплаты писателя: есть ли кому писать и есть ли места в лимите готовых.
+  const rows = await loadWaitingRows(db, jobId, current.id);
+  const ready = await countReady(db, jobId);
+  if (!rows.length) return { kind: 'nothing_waiting' };
+  if (ready >= input.target) return { kind: 'limit_full', ready, target: input.target };
+  // Попытка писателя не помещается в лимит (оценкой сверху) — отказ до того,
+  // как шаблон занят: иначе отказ бюджета стёр бы его прошлый вариант и
+  // замечания проверки.
+  const needUsd = writerAttemptWorstUsd();
+  if (current.status !== 'ok' && budget.available() < needUsd) {
+    return { kind: 'budget', spentUsd: budget.spentUsd, limitUsd: budget.limitUsd, needUsd };
+  }
+  const outcome = await regenerateChainTemplate(
+    { db, jobId, writerTimeoutMs: ROUTE_WRITER_TIMEOUT_MS, writerTotalMs: ROUTE_WRITER_TOTAL_MS },
+    offer,
+  );
+  if (outcome.kind !== 'done') return outcome.kind === 'busy' ? { kind: 'busy', reason: 'template' } : outcome;
+  // До пересборки: оборвётся на середине — часть строк уже поменялась, и
+  // счётчики всё равно надо пересчитать. Не прошедший шаблон меняет строкам
+  // только подробность причины — счётчики те же.
+  touched.rows = outcome.template.status === 'ok';
+  const counts = await rebuildRows(input, outcome.template, rows, ready);
+  return {
+    kind: 'done',
+    summary: {
+      status: outcome.template.status,
+      templateId: outcome.template.id,
+      rewritten: outcome.wrote,
+      waiting: rows.length,
+      ...counts,
+      costUsd: roundUsd(budget.spentUsd - spentBefore),
+      qaFlags: outcome.template.qaFlags,
+      error: outcome.template.error,
+    },
+  };
 }
