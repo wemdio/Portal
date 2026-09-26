@@ -53,7 +53,8 @@ function passedDetail(row: RuRow): string {
  * Все строки, не прошедшие данный этап — постранично, по каждому ключу этапа отдельно.
  * Очень спорные (row_status 'doubtful') задержаны на своём этапе, как отсеянные
  * (воронка в results/route.ts считает их так же), поэтому и показываются там же —
- * с пометкой, что писем у них нет и решает человек.
+ * с пометкой, что решает человек. Писем у них нет, кроме тех, чьи письма не
+ * прошли автопроверку.
  */
 async function loadDropped(jobId: string, keys: Stage[], isCancelled: () => boolean): Promise<RuRow[]> {
   const dropped: RuRow[] = [];
@@ -121,7 +122,7 @@ function StageModal({ jobId, viewIndex, passedCount, onClose }: { jobId: string;
                         <span className="text-gray-900">{r.company_brand ?? r.company_name}</span>
                         <span className="ml-2 text-gray-500">
                           {r.row_status === 'doubtful'
-                            ? `очень спорная, писем нет: ${r.doubt_detail ?? ''}`
+                            ? `очень спорная${r.letters?.length ? '' : ', писем нет'}: ${r.doubt_detail ?? ''}`
                             : `${r.reason_code ? REASON_LABELS[r.reason_code] ?? r.reason_code : STATUS_LABELS[r.row_status]}${r.reason_detail ? ` — ${r.reason_detail}` : ''}`}
                         </span>
                       </li>

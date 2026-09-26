@@ -120,6 +120,11 @@ export async function loadLibraries(db: SupabaseClient, senderId: string | null)
   };
 }
 
+/** Утверждённые формулировки для цепочки: её собственные и общие («all»). */
+export function claimsForChain(claims: OfferClaim[], chain: string): OfferClaim[] {
+  return claims.filter((c) => c.chain_type === 'all' || c.chain_type === chain);
+}
+
 /** Подпись целиком из профиля отправителя: имя, должность, телефон, сайт, Telegram. */
 export function formatSignature(sender: SenderProfile): string {
   return [sender.sender_name, sender.sender_title, sender.company_name, sender.phone, sender.website, sender.telegram]

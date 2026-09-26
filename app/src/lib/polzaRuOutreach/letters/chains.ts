@@ -14,6 +14,13 @@
  * Черновики текстов от 23.09.2026 — на согласовании у CEO. Факты о компании в
  * письмо попадают только из подтверждённого сигнала; боль сформулирована как
  * общее наблюдение о канале, а не диагноз получателя.
+ *
+ * С 26.09.2026 письма компаниям собираются из шаблона цепочки оффера, который
+ * один раз на запуск пишет Gemini 3.1 Pro (templateWriter.ts, спека
+ * 2026-09-26-outreach-to-sender-design.md §4). Цепочки отсюда — образец тона и
+ * структуры для писателя: он получает их собранными на плейсхолдерах. Под
+ * компанию по-прежнему считаются здесь фраза-повод (openingSentence) и
+ * гипотеза сегментов (buildSegmentsHypothesis).
  */
 
 import { wordCount } from '../evidence';
@@ -31,6 +38,12 @@ export interface ChainInput {
   productSummary: string | null;
   /** У «Автоматизации» — исходная цепочка: её подтверждённый повод идёт в письмо 2. */
   baseChain?: ChainType;
+  /**
+   * Готовая фраза-повод вместо собранной из сигнала. Так образец для писателя
+   * шаблонов (templateWriter.ts) получает на месте повода плейсхолдер {{повод}}:
+   * сигнал с таким текстом не собрать.
+   */
+  opening?: string;
 }
 
 function formatDate(iso: string | null | undefined): string | null {
@@ -90,8 +103,10 @@ export function openingSentence(input: ChainInput, brand: string): string | null
         ? `На вашем сайте указано: «${input.marketQuote}».`
         : null;
     case 'automation':
-      // Повод исходной цепочки; «уже общались» у автоматизации — в самом шаблоне письма 1.
-      return input.baseChain && input.baseChain !== 'automation' && input.baseChain !== 'reactivation'
+      // Повод исходной цепочки, в том числе «мы с вами уже общались» у
+      // возврата: шаблон оффера один на все его компании, и о разговоре в AMO
+      // письмо узнаёт только из повода.
+      return input.baseChain && input.baseChain !== 'automation'
         ? openingSentence({ ...input, chain: input.baseChain }, brand)
         : null;
   }
@@ -239,7 +254,7 @@ function buildSdrChain(ctx: LetterContext, input: ChainInput): AssembledChain & 
         body: signed(
           paragraphs(
             `Добрый день! Я очень коротко по поводу ${b}.`,
-            `Увидел, что вы ищете ${title}. Я не по поводу подбора кандидата.`,
+            input.opening ?? `Увидел, что вы ищете ${title}. Я не по поводу подбора кандидата.`,
             'Я занимаюсь развитием Polza Agency. Мы привлекаем B2B-клиентов через email-outreach: подбираем компании, находим ЛПР и пишем им от вашего лица. Первичный контакт и переписку до заинтересованного ответа берём на себя, после чего передаём ответ вашему менеджеру вместе с контекстом.',
             `Есть смысл коротко обсудить, как это можно проверить для ${b}?`,
           ),
@@ -300,7 +315,7 @@ function buildAutomationChain(ctx: LetterContext, input: ChainInput): AssembledC
   const b = q(ctx.brand);
   const s = ctx.sender;
   const value = claim(ctx, 'automation_value');
-  const signalBlock = openingSentence(input, ctx.brand);
+  const signalBlock = input.opening ?? openingSentence(input, ctx.brand);
 
   const letter1: Letter = ctx.isRouting
     ? {
@@ -391,7 +406,7 @@ export function buildChain(ctx: LetterContext, input: ChainInput, hypothesis: Se
   const copy = COPY[input.chain];
   const b = q(ctx.brand);
   const s = ctx.sender;
-  const opening = openingSentence(input, ctx.brand);
+  const opening = input.opening ?? openingSentence(input, ctx.brand);
   const [subjectA, subjectB] = copy.subjects(b, input.signal);
   const value = claim(ctx, 'letter2_value');
   const hypoText = !ctx.caseRecord && hypothesis && input.marketQuote ? hypothesisText(ctx.brand, hypothesis) : null;

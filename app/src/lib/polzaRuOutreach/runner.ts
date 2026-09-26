@@ -13,7 +13,11 @@
  *  4. сомнения — сразу после оценки, все признаки уже известны: очень спорная
  *     строка писем не получает;
  *  5. письма и QA — прошедшим, от самых сильных к слабым (pre-LPR rerank CEO),
- *     пока не набрано заказанное число готовых.
+ *     пока не набрано заказанное число готовых. Письма — из шаблона цепочки
+ *     оффера: его один раз на оффер запуска пишет Gemini 3.1 Pro
+ *     (letters/templateWriter.ts), под компанию подставляются проверенные
+ *     факты. Шаблон не прошёл проверку или письма компании не прошли
+ *     автопроверку — строка очень спорная (спека §4).
  *
  * Волна идёт тремя пулами по очереди: почта (свой параллелизм — обход сайта и
  * SMTP-проверка больше ждут, чем работают), разбор ИИ, письма.
@@ -49,15 +53,22 @@ import { pruneSiteAnalysisCache } from '@/lib/outreachLlm/siteAnalysisCache';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { analyzeVacancy, findStrictOutboundDuty, isSdrRoleTitle, type VacancyAnalysis } from './analyze';
 import { collectCandidates, type Candidate } from './collect';
-import { computeDoubts, unverifiedEmailDoubts } from './doubts';
+import {
+  computeDoubts,
+  lettersQaDoubtText,
+  templateDoubtText,
+  unverifiedEmailDoubts,
+  withLettersDoubt,
+  type Doubts,
+} from './doubts';
 import { companyBrand, isSuppressed, loadPreviouslyExported, normalizeDomain, siteUrl, type ExportedIndex } from './company';
 import { findRuCompanyEmail } from './findEmail';
-import { funnelFromRows } from './funnel';
-import { buildChain, buildSegmentsHypothesis, openingSentence, type ChainInput } from './letters/chains';
-import type { LetterContext } from './letters/common';
+import { journalCounts } from './funnel';
+import { buildSegmentsHypothesis, type SegmentsHypothesis } from './letters/chains';
+import { composeCompanyLetters } from './letters/renderTemplate';
+import { createChainTemplates, WORKER_WRITER_TIMEOUT_MS } from './letters/templateWriter';
 import { loadLibraries, type CaseRecord } from './libraries';
 import { isFatalLlmError, llmAnswersInRun } from './llm';
-import { runQa } from './qa';
 import { baseChain, decide, routeCase, routeChain, scoreCompany, splitAutomation, type Route, type Score } from './router';
 import { amoLookup, loadAmoIndex, type AmoIndex, type AmoRecord } from './sources/amo';
 import { loadSizeByInn } from './sources/directory';
@@ -70,7 +81,6 @@ import {
   sanitizeRuOutreachConfig,
   STAGES,
   TEMPLATE_VERSION,
-  letterCountFor,
   type RuOutreachConfig,
   type Signal,
   type Stage,
@@ -87,7 +97,9 @@ const ENRICH_CONCURRENCY = envInt('POLZA_RU_OUTREACH_CONCURRENCY', 4, 1, 6);
 // Шаг почты: обход сайта до минуты и SMTP-проверка через прокси — потоки
 // больше ждут, чем работают, и ИИ не тратят. Поэтому свой пул, шире разбора.
 const EMAIL_CONCURRENCY = envInt('POLZA_RU_OUTREACH_EMAIL_CONCURRENCY', 8, 1, 16);
-// Письма собираются без ИИ (кроме необязательной гипотезы сегментов).
+// Письма — подстановка в шаблон оффера (и необязательная гипотеза сегментов).
+// Шаблон пишется один раз на оффер: компании оффера, дошедшие до писем
+// одновременно, ждут одного писателя.
 const LETTERS_CONCURRENCY = 4;
 /** Карточек вакансий на компанию: у неё может быть и РОП, и SDR. */
 const MAX_VACANCY_CARDS = 2;
@@ -203,6 +215,8 @@ interface Qualified {
   caseHit: { record: CaseRecord; reason: string } | null;
   score: Score;
   marketQuote: string | null;
+  /** Признаки сомнения с оценки: шаг писем добавляет к ним свой, если письма не вышли. */
+  doubts: Doubts;
 }
 
 /** «Повтор компании в запуске» и строки, чей домен или ИНН он повторил. */
@@ -352,16 +366,7 @@ async function completeSpentRun(
     for (const r of data ?? []) gone.add(String(r.id));
   }
   const kept = rows.filter((r) => !gone.has(String(r.id)));
-  const reasons: Record<string, number> = {};
-  const chains: Record<string, number> = {};
-  let ready = 0;
-  let doubtful = 0;
-  for (const r of kept) {
-    if (r.reason_code) reasons[r.reason_code] = (reasons[r.reason_code] ?? 0) + 1;
-    if (r.chain_type) chains[r.chain_type] = (chains[r.chain_type] ?? 0) + 1;
-    if (r.row_status === 'ready') ready += 1;
-    if (r.row_status === 'doubtful') doubtful += 1;
-  }
+  const { funnel, reasons, chains, ready, doubtful } = journalCounts(kept);
   const stopReason = ready >= target ? 'target_reached' : 'budget';
   const spend = budget.snapshot();
   log('info', `job ${jobId}: LLM budget already spent ($${spend.spent_usd}/$${spend.limit_usd}) — restart keeps the journal: ${kept.length} rows, ${ready} ready (${stopReason})`);
@@ -377,7 +382,7 @@ async function completeSpentRun(
       ...(previousDetail ?? {}),
       scanned: kept.length,
       ready,
-      funnel: funnelFromRows(kept),
+      funnel,
       reasons,
       chains,
       doubtful,
@@ -450,12 +455,20 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
     // Лимит при этом ещё не исчерпан (иначе — completeSpentRun выше): разборы
     // сайтов в кэше, и заново платим в основном за вакансии.
     await db.from('polza_ru_outreach_companies').delete().eq('job_id', jobId);
+    // И без шаблонов цепочек прошлого прогона: failed-шаблон иначе сразу
+    // отправил бы компании оффера в спорные без новой попытки, а pending
+    // умершего прогона заставил бы ждать. Путь «лимит уже исчерпан» выше
+    // шаблоны не трогает — журнал и его письма остаются.
+    const { error: templatesErr } = await db.from('polza_chain_templates').delete().eq('job_id', jobId).eq('lang', 'ru');
+    if (templatesErr) throw new Error(`Не удалось убрать цепочки прошлого прогона: ${templatesErr.message}`);
     // Устаревшие разборы сайтов читатель не берёт — чистим, чтобы кэш не рос без конца.
     await pruneSiteAnalysisCache('ru');
 
     const libraries = await loadLibraries(db, config.sender_id);
     if (!libraries.sender) throw new Error('Нет активной подписи отправителя — добавьте её во вкладке «Библиотеки»');
     const sender = libraries.sender;
+    // Шаблоны цепочек запуска: пишутся лениво, один раз на оффер.
+    const templates = createChainTemplates({ db, jobId, sender, claims: libraries.claims, writerTimeoutMs: WORKER_WRITER_TIMEOUT_MS });
     const amo: AmoIndex = await loadAmoIndex(db);
     const exported: ExportedIndex = config.include_previously_exported
       ? { domains: new Set(), inns: new Set() }
@@ -1022,7 +1035,30 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
       }
       await updateRow(id, { ...patch, ...doubtPatch, pipeline_stage: 'scored' });
       reach(tally, 'scored');
-      return { id, tally, domain, brand, amo: amoRec, email, site, vacancy, signals, route, caseHit, score, marketQuote };
+      return { id, tally, domain, brand, amo: amoRec, email, site, vacancy, signals, route, caseHit, score, marketQuote, doubts };
+    };
+
+    // Гипотеза сегментов для письма 3 без кейса — дешёвой моделью. Она
+    // необязательна: без неё письмо 3 — механика. Поэтому и исчерпанный лимит
+    // на ИИ строку не останавливает — письма собираем без гипотезы, уже
+    // оплаченный разбор не пропадает. Неверный ключ — про весь запуск, его
+    // отдаём в safe().
+    const skipHypothesis = () => {
+      if (!hypothesisSkipLogged) {
+        hypothesisSkipLogged = true;
+        log('info', `job ${jobId}: LLM budget exhausted — letters go without the segments hypothesis`);
+      }
+      return null;
+    };
+    const segmentsHypothesis = async (req: { brand: string; productSummary: string | null; marketQuote: string }): Promise<SegmentsHypothesis | null> => {
+      if (budget.exhausted()) return skipHypothesis();
+      return buildSegmentsHypothesis(req).catch((err: unknown) => {
+        if (err instanceof LlmAuthError) throw err;
+        if (err instanceof BudgetExceededError) return skipHypothesis();
+        // Ключа в тексте нет: клиент аутричей вычищает его из ошибок.
+        log('warn', `segments hypothesis failed for ${req.brand}: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      });
     };
 
     // ── Шаг 3: письма и QA — только прошедшим порог и не очень спорным ──
@@ -1033,89 +1069,74 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
         await finish(q.id, { stage: 'sequence_assembled', status: 'manual_review', reason: 'LIMIT_REACHED', detail: 'лимит готовых компаний уже набран' });
         return;
       }
-      const prior = baseChain(q.route) === 'reactivation';
-      const chainInput: ChainInput = {
-        chain: q.route.chain,
-        signal: q.route.primary,
-        priorContact: prior,
-        marketQuote: q.marketQuote,
-        productSummary: q.site.productSummary,
-        baseChain: q.route.from,
-      };
-      const letterCtx: LetterContext = {
-        brand: q.brand,
-        sender,
-        isRouting: q.email.isRouting,
-        caseRecord: q.caseHit?.record ?? null,
-        claims: libraries.claims.filter((cl) => cl.chain_type === 'all' || cl.chain_type === q.route.chain),
-      };
-      // Гипотеза необязательна: без неё письмо 3 — кейс или механика. Поэтому и
-      // исчерпанный лимит на ИИ строку не останавливает — письма собираем без
-      // гипотезы, уже оплаченный разбор не пропадает. Неверный ключ — про весь
-      // запуск, его отдаём в safe().
-      const skipHypothesis = () => {
-        if (!hypothesisSkipLogged) {
-          hypothesisSkipLogged = true;
-          log('info', `job ${jobId}: LLM budget exhausted — letters go without the segments hypothesis`);
-        }
-        return null;
-      };
-      // Гипотеза нужна, только когда нет кейса и есть подтверждённый рынок.
-      const hypothesisMarket = !q.caseHit && q.route.chain !== 'automation' ? q.marketQuote : null;
-      const hypothesis = !hypothesisMarket
-        ? null
-        : budget.exhausted()
-          ? skipHypothesis()
-          : await buildSegmentsHypothesis({ brand: q.brand, productSummary: q.site.productSummary, marketQuote: hypothesisMarket }).catch((err: unknown) => {
-              if (err instanceof LlmAuthError) throw err;
-              if (err instanceof BudgetExceededError) return skipHypothesis();
-              // Ключа в тексте нет: клиент аутричей вычищает его из ошибок.
-              log('warn', `segments hypothesis failed for ${q.domain}: ${err instanceof Error ? err.message : String(err)}`);
-              return null;
-            });
-      const chain = buildChain(letterCtx, chainInput, hypothesis);
+      // Шаблон цепочки оффера: пишется, когда до писем дошла первая компания
+      // оффера; остальные ждут тот же промис. Лимит на ИИ до записи шаблона —
+      // BudgetExceededError: строка возвращается в необработанные (safe()).
+      const template = await templates.get(q.route.chain);
+      const scoringDetail = q.doubts.detail.join('; ') || null;
+      if (template.status !== 'ok' || !template.letters) {
+        // Шаблон оффера не прошёл проверку или не написан — письма собирать не
+        // из чего. Строка очень спорная и стоит на этапе писем (оценку прошла,
+        // писем нет); «Переписать цепочку» найдёт её по TEMPLATE_FAILED.
+        doubtful.count += 1;
+        await updateRow(q.id, {
+          ...withLettersDoubt(q.doubts.flags, scoringDetail, 'TEMPLATE_FAILED', templateDoubtText(template)),
+          chain_template_id: template.id,
+          row_status: 'doubtful',
+          pipeline_stage: 'sequence_assembled',
+          reason_code: null,
+          reason_detail: null,
+        });
+        return;
+      }
+      const composed = await composeCompanyLetters(
+        template.letters,
+        {
+          chain: q.route.chain,
+          brand: q.brand,
+          isRouting: q.email.isRouting,
+          primary: q.route.primary,
+          signals: q.signals,
+          priorContact: baseChain(q.route) === 'reactivation',
+          baseChain: q.route.from,
+          marketQuote: q.marketQuote,
+          productSummary: q.site.productSummary,
+          targetMarket: q.vacancy?.targetMarket ?? null,
+          caseRecord: q.caseHit?.record ?? null,
+          recipientEmail: q.email.email,
+          amoStatus: q.amo?.status ?? null,
+        },
+        { sender, claims: libraries.claims, hypothesis: segmentsHypothesis },
+      );
       reach(q.tally, 'sequence_assembled');
-
-      const opening = openingSentence(chainInput, q.brand);
-      const usedClaims = libraries.claims.filter((cl) => chain.claimIds.includes(cl.id));
-      const qa = runQa({
-        letters: chain.letters,
-        expectedLetters: letterCountFor(q.route.chain),
-        amoStatus: q.amo?.status ?? null,
-        sender,
-        priorContact: chainInput.priorContact,
-        caseText: q.caseHit?.record.case_text_short.trim() ?? null,
-        claimTexts: usedClaims.map((cl) => cl.claim_text),
-        allowedFacts: [
-          q.brand,
-          ...(opening ? [opening] : []),
-          ...q.signals.flatMap((s) => [s.title, s.quote ?? '']).filter(Boolean),
-          ...(q.marketQuote ? [q.marketQuote] : []),
-        ],
-        targetMarket: q.vacancy?.targetMarket ?? null,
-        marketQuote: q.marketQuote,
-        recipientEmail: q.email.email,
-      });
-      // Признаки сомнения записаны на шаге 2 и не меняются: письма их не трогают.
+      // Признаки сомнения с оценки письма не трогают — только добавляют свой,
+      // если письма не прошли проверку. Второй темы (subject_b) у шаблона нет.
       const base = {
-        letters: chain.letters,
-        subject_b: chain.subjectB,
-        case_id: chain.caseId,
-        campaign_hypothesis: chain.campaignHypothesis,
+        letters: composed.letters,
+        subject_b: null,
+        case_id: composed.caseId,
+        campaign_hypothesis: composed.hypothesisText,
         offer_version: libraries.offerVersion,
-        offer_claim_ids: chain.claimIds,
+        offer_claim_ids: composed.claimIds,
         sender_id: sender.id,
         template_version: TEMPLATE_VERSION,
-        qa_status: qa.status,
-        qa_flags: qa.flags,
+        chain_template_id: template.id,
+        qa_status: composed.qa.status,
+        qa_flags: composed.qa.flags,
       };
-      if (qa.status !== 'passed') {
-        const reason = qa.flags.some((f) => f.includes('placeholder'))
-          ? 'QA_PLACEHOLDER_LEFT'
-          : qa.flags.some((f) => /unsupported|false_prior|market_without/.test(f))
-            ? 'QA_FACT_UNSUPPORTED'
-            : 'QA_FAILED';
-        await finish(q.id, { stage: 'qa_checked', status: 'manual_review', reason, detail: qa.flags.join('; ') }, base);
+      if (composed.qa.status !== 'passed') {
+        // Письма собраны, но автопроверку не прошли — очень спорная: в рассылку
+        // не идёт, письма остаются в строке, решает человек. Стоит на проверке
+        // писем: воронка считает её до «Цепочки» включительно.
+        doubtful.count += 1;
+        await updateRow(q.id, {
+          ...base,
+          ...withLettersDoubt(q.doubts.flags, scoringDetail, 'LETTERS_QA_FAILED', lettersQaDoubtText(composed.qa.flags)),
+          row_status: 'doubtful',
+          pipeline_stage: 'qa_checked',
+          reason_code: null,
+          reason_detail: null,
+        });
         return;
       }
       reach(q.tally, 'qa_checked');
@@ -1270,9 +1291,11 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
       });
 
       // Шаг 3: письма — pre-LPR rerank, от самых сильных к слабым.
-      // Лимит здесь не проверяем: письма бесплатны, а необязательную
-      // гипотезу сегментов после лимита просто пропускаем — уже оплаченный
-      // разбор доводим до готовых.
+      // Лимит здесь не проверяем: по готовому шаблону оффера письма
+      // бесплатны, а необязательную гипотезу сегментов после лимита просто
+      // пропускаем — уже оплаченный разбор доводим до готовых. Шаблон, который
+      // ещё не написан, после лимита не написать: такие строки вернутся в
+      // необработанные (BudgetExceededError в safe()).
       qualified.sort((a, b) => b.score.total - a.score.total);
       phase = 'writing_letters';
       await publish(phase, { qualified: qualified.length });

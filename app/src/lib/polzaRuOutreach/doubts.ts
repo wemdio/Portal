@@ -10,6 +10,11 @@
  * Исключение — непроверенная почта (unverifiedEmailDoubts): она делает строку
  * очень спорной сразу на шаге почты, до разбора ИИ, — платить за разбор
  * компании, которой письмо может не дойти, незачем.
+ *
+ * Шаг писем добавляет свой признак поверх признаков оценки (withLettersDoubt):
+ * шаблон цепочки оффера не прошёл проверку или письма компании не прошли
+ * автопроверку. Такая строка очень спорная сразу, как бы мало ни было прочих
+ * признаков, — письма без проверки в рассылку не идут.
  */
 
 import { companyKey } from './company';
@@ -106,4 +111,56 @@ export function computeDoubts(i: DoubtInput): Doubts {
   }
 
   return { flags, detail, veryDoubtful: flags.length >= VERY_DOUBTFUL_FROM };
+}
+
+/* ── Признаки шага писем ── */
+
+type LettersDoubt = Extract<DoubtCode, 'TEMPLATE_FAILED' | 'LETTERS_QA_FAILED'>;
+
+// Пояснения шага писем начинаются так — и только они: куски computeDoubts
+// начинаются иначе («общая почта…», «оценка…», «повод…», «B2B…», «название…»).
+// По началу «Переписать цепочку» убирает прежнее пояснение из doubt_detail.
+const TEMPLATE_DETAIL_START = 'цепочка оффера ';
+const LETTERS_QA_DETAIL_START = 'письма не прошли автопроверку';
+// doubt_detail — куски через «; »: точка с запятой внутри пояснения разрезала бы его.
+const DETAIL_SEPARATOR = '; ';
+const MAX_LETTERS_DETAIL = 500;
+
+export interface DoubtPatch {
+  doubt_flags: string[];
+  doubt_detail: string | null;
+}
+
+/** Шаблон оффера не написан (ИИ не ответил) или не прошёл проверку — почему, коротко. */
+export function templateDoubtText(template: { qaFlags: readonly string[]; error: string | null }): string {
+  const text = template.error
+    ? `${TEMPLATE_DETAIL_START}не написана: ${template.error}`
+    : `${TEMPLATE_DETAIL_START}не прошла проверку: ${template.qaFlags.join(', ') || 'без замечаний'}`;
+  return text.slice(0, MAX_LETTERS_DETAIL);
+}
+
+/** Письма компании не прошли автопроверку (runQa) — её флаги. */
+export function lettersQaDoubtText(flags: readonly string[]): string {
+  return `${LETTERS_QA_DETAIL_START}: ${flags.join(', ')}`.slice(0, MAX_LETTERS_DETAIL);
+}
+
+/** Убрать признаки шага писем: письма строки собираются заново («Переписать цепочку»). */
+export function dropLettersDoubts(flags: readonly string[] | null, detail: string | null): DoubtPatch {
+  const doubt_flags = (flags ?? []).filter((f) => f !== 'TEMPLATE_FAILED' && f !== 'LETTERS_QA_FAILED');
+  const kept = (detail ?? '')
+    .split(DETAIL_SEPARATOR)
+    .filter((s) => s.trim() && !s.startsWith(TEMPLATE_DETAIL_START) && !s.startsWith(LETTERS_QA_DETAIL_START));
+  return { doubt_flags, doubt_detail: kept.join(DETAIL_SEPARATOR) || null };
+}
+
+/**
+ * Признак шага писем поверх признаков оценки: прежний признак шага писем
+ * заменяется, пояснение идёт последним куском doubt_detail.
+ */
+export function withLettersDoubt(flags: readonly string[] | null, detail: string | null, code: LettersDoubt, text: string): DoubtPatch {
+  const kept = dropLettersDoubts(flags, detail);
+  return {
+    doubt_flags: [...kept.doubt_flags, code],
+    doubt_detail: [kept.doubt_detail, text.replace(/;/g, ',')].filter(Boolean).join(DETAIL_SEPARATOR),
+  };
 }

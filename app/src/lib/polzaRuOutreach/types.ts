@@ -29,11 +29,76 @@ export const CHAIN_LABELS: Record<ChainType, string> = {
 };
 
 export const LETTER_COUNT = 4;
-export const TEMPLATE_VERSION = 'chains_v4@2026-09-26';
+/**
+ * Версия писем строки (template_version). С 26.09.2026 письма — шаблон цепочки
+ * оффера от писателя (letters/templateWriter.ts) с подставленными фактами
+ * компании; прежние детерминированные цепочки (chains_v4) — только его образец.
+ */
+export const TEMPLATE_VERSION = 'offer_templates_v1@2026-09-26';
 
 /** Писем в цепочке: во всех цепочках четыре, как у CEO (решение 26.09.2026). */
 export function letterCountFor(_chain: ChainType): number {
   return LETTER_COUNT;
+}
+
+/**
+ * Плейсхолдеры шаблона цепочки — только они меняются от компании к компании
+ * (спека 2026-09-26-outreach-to-sender-design.md §4): бренд, фраза-повод из
+ * проверенных фактов (openingSentence), текст утверждённого кейса, гипотеза
+ * сегментов и подпись отправителя.
+ */
+export const TEMPLATE_PLACEHOLDERS = {
+  brand: '{{бренд}}',
+  opening: '{{повод}}',
+  case: '{{кейс}}',
+  hypothesis: '{{гипотеза}}',
+  signature: '{{подпись}}',
+} as const;
+export type TemplatePlaceholder = (typeof TEMPLATE_PLACEHOLDERS)[keyof typeof TEMPLATE_PLACEHOLDERS];
+
+/** Конец каждого письма шаблона — как у signed(): подпись подставляется целиком. */
+export const TEMPLATE_SIGN_OFF = `С уважением,\n${TEMPLATE_PLACEHOLDERS.signature}`;
+
+/**
+ * Шаблон цепочки оффера в разобранном виде (в базе — polza_chain_templates.letters
+ * по контракту писателя). Письмо 1 — в двух вариантах: лично ЛПР и «перешлите
+ * ответственному» для общей почты; письмо 3 — с кейсом и без него (гипотеза
+ * сегментов и механика). У SDR-цепочки кейса нет — нет и варианта с кейсом.
+ */
+export interface ChainTemplateLetters {
+  subject: string;
+  bodyDirect: string;
+  bodyRouting: string;
+  letter2: string;
+  bodyWithCase: string | null;
+  bodyWithoutCase: string;
+  letter4: string;
+}
+
+/** Кейс по отрасли подбирается всем цепочкам, кроме SDR (router.routeCase). */
+export function chainUsesCase(chain: ChainType): boolean {
+  return chain !== 'hiring';
+}
+
+/**
+ * Гипотеза сегментов — только у цепочек CEO: в письме 3 SDR-цепочки —
+ * утверждённая фраза о ролях и процесс, у «Автоматизации» — механика формата.
+ * Там её не считаем и за неё не платим.
+ */
+export function chainUsesHypothesis(chain: ChainType): boolean {
+  return chain !== 'hiring' && chain !== 'automation';
+}
+
+/** Плейсхолдеры, которые может использовать шаблон оффера. */
+export function templatePlaceholdersFor(chain: ChainType): TemplatePlaceholder[] {
+  const p = TEMPLATE_PLACEHOLDERS;
+  return [
+    p.brand,
+    p.opening,
+    ...(chainUsesCase(chain) ? [p.case] : []),
+    ...(chainUsesHypothesis(chain) ? [p.hypothesis] : []),
+    p.signature,
+  ];
 }
 
 /** Отраслевые группы роутера кейсов (таблица CEO). */
@@ -210,8 +275,16 @@ export const REASON_LABELS: Record<string, string> = {
  * «очень спорная». EMAIL_UNVERIFIED («почта не проверена») ставится ещё на
  * шаге почты и сразу делает строку «очень спорной»: письмо на адрес, который
  * SMTP-проверка не подтвердила, может не дойти, и разбор ИИ ей не оплачиваем.
+ *
+ * TEMPLATE_FAILED и LETTERS_QA_FAILED ставит шаг писем: шаблон цепочки оффера
+ * не прошёл проверку (или не написан) либо письма компании не прошли
+ * автопроверку. Такая строка тоже очень спорная — в рассылку не идёт; по
+ * TEMPLATE_FAILED «Переписать цепочку» находит строки, которые надо
+ * пересобрать.
  */
-export const DOUBT_CODES = ['EMAIL_UNVERIFIED', 'GENERIC_MAILBOX', 'NEAR_THRESHOLD', 'WEAK_SIGNAL', 'COMPANY_DOUBT'] as const;
+export const DOUBT_CODES = [
+  'EMAIL_UNVERIFIED', 'GENERIC_MAILBOX', 'NEAR_THRESHOLD', 'WEAK_SIGNAL', 'COMPANY_DOUBT', 'TEMPLATE_FAILED', 'LETTERS_QA_FAILED',
+] as const;
 export type DoubtCode = (typeof DOUBT_CODES)[number];
 
 export const DOUBT_LABELS: Record<DoubtCode, string> = {
@@ -220,6 +293,8 @@ export const DOUBT_LABELS: Record<DoubtCode, string> = {
   NEAR_THRESHOLD: 'Оценка у порога',
   WEAK_SIGNAL: 'Слабый повод',
   COMPANY_DOUBT: 'Сомнения в компании',
+  TEMPLATE_FAILED: 'Цепочка оффера не прошла проверку',
+  LETTERS_QA_FAILED: 'Письма не прошли автопроверку',
 };
 
 /** С какого числа признаков строка уходит во вкладку «Очень спорные» (и писем не получает). */
