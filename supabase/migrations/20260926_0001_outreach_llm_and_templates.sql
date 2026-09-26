@@ -77,18 +77,34 @@ grant select, insert, update, delete on public.polza_chain_templates to authenti
 -- chain_template_id — по какому шаблону собраны письма строки.
 -- sender_campaign_id / sender_uploaded_at — строка уже залита в рассылку:
 -- повторное «Залить в Рассылку» доливает только строки без отметки.
+-- Внешние ключи с on delete set null: удалили рассылку — строки запуска снова
+-- можно залить; удалили шаблон (новый старт запуска удаляет его шаблоны) —
+-- ссылка обнуляется, а не висит на несуществующей записи. Таблица шаблонов
+-- создана выше, sender_campaigns — в 20260916_0001.
 alter table public.polza_ru_outreach_companies
-  add column if not exists chain_template_id uuid,
-  add column if not exists sender_campaign_id uuid,
+  add column if not exists chain_template_id uuid references public.polza_chain_templates(id) on delete set null,
+  add column if not exists sender_campaign_id uuid references public.sender_campaigns(id) on delete set null,
   add column if not exists sender_uploaded_at timestamptz;
 
 -- У английского ещё результат проверки почты: у русского колонка
 -- email_verification есть с 20260922_0008, английский почту не проверял.
 alter table public.polza_outreach_companies
-  add column if not exists chain_template_id uuid,
+  add column if not exists chain_template_id uuid references public.polza_chain_templates(id) on delete set null,
   add column if not exists email_verification text,
-  add column if not exists sender_campaign_id uuid,
+  add column if not exists sender_campaign_id uuid references public.sender_campaigns(id) on delete set null,
   add column if not exists sender_uploaded_at timestamptz;
+
+-- Удаление рассылки или шаблона обнуляет ссылки в строках — без индекса каждое
+-- такое удаление шло бы полным проходом по строкам всех запусков. Ссылка
+-- заполнена у малой доли строк (готовых), поэтому индексы частичные.
+create index if not exists idx_polza_ru_outreach_sender_campaign
+  on public.polza_ru_outreach_companies(sender_campaign_id) where sender_campaign_id is not null;
+create index if not exists idx_polza_ru_outreach_chain_template
+  on public.polza_ru_outreach_companies(chain_template_id) where chain_template_id is not null;
+create index if not exists idx_polza_outreach_sender_campaign
+  on public.polza_outreach_companies(sender_campaign_id) where sender_campaign_id is not null;
+create index if not exists idx_polza_outreach_chain_template
+  on public.polza_outreach_companies(chain_template_id) where chain_template_id is not null;
 
 -- ── Настройки английского аутрича ───────────────────────────────────────────
 -- Подпись одна на аутрич: у русского она в «Библиотеках» (polza_ru_senders),
@@ -101,8 +117,15 @@ create table if not exists public.polza_outreach_settings (
   updated_at timestamptz not null default now()
 );
 
+-- Настройки общие для всех операторов инструмента — как подписи русского
+-- (polza_ru_senders): роут настроек ходит клиентом пользователя. Удалять
+-- настройку с экрана нечем и незачем — delete не выдаём.
 alter table public.polza_outreach_settings enable row level security;
+drop policy if exists polza_outreach_settings_authenticated on public.polza_outreach_settings;
+create policy polza_outreach_settings_authenticated on public.polza_outreach_settings
+  for all to authenticated using (true) with check (true);
 grant all on public.polza_outreach_settings to service_role;
+grant select, insert, update on public.polza_outreach_settings to authenticated;
 
 insert into public.polza_outreach_settings (key, value)
 values ('signature', to_jsonb(E'Julia Mira\nAccount Manager\nPolza Agency'::text))

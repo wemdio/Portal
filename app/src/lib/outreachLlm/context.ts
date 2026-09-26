@@ -7,31 +7,38 @@
  * сигнатур, а общая переменная смешала бы расходы двух запусков.
  * AsyncLocalStorage держит контекст на всю асинхронную цепочку запуска,
  * включая Promise.all и пулы параллельной обработки строк.
+ *
+ * Модуль серверный (node:async_hooks). Клиентскому коду — формы данных из
+ * types.ts.
  */
 
+import 'server-only';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type {
+  LlmAuthReason,
+  OutreachLang,
+  OutreachLlmBudgetSnapshot,
+  OutreachLlmRole,
+  OutreachLlmRoleSpend,
+} from './types';
 
-export type OutreachLang = 'ru' | 'en';
-
-/** analysis — дешёвый разбор (сайт, вакансия, новости, сегменты); writer — цепочки писем. */
-export type OutreachLlmRole = 'analysis' | 'writer';
-
-export interface OutreachLlmRoleSpend {
-  usd: number;
-  calls: number;
-}
-
-/** Снимок для parser_jobs.progress_detail.llm: экран запуска пишет «ИИ: потрачено $X из $Y». */
-export interface OutreachLlmBudgetSnapshot {
-  spent_usd: number;
-  calls: number;
-  limit_usd: number;
-  by_role: Record<OutreachLlmRole, OutreachLlmRoleSpend>;
-}
+export type {
+  LlmAuthReason,
+  OutreachLang,
+  OutreachLlmBudgetSnapshot,
+  OutreachLlmRole,
+  OutreachLlmRoleSpend,
+} from './types';
 
 /** Хватает и для долей цента у дешёвой модели, и совпадает с numeric(10,4) в polza_chain_templates. */
 function roundUsd(value: number): number {
   return Math.round(value * 10_000) / 10_000;
+}
+
+/** Снимок приходит из jsonb: число строкой, NaN, минус — всё это не должно попасть в счётчик. */
+function finiteAtLeastZero(value: unknown): number | null {
+  const n = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : NaN;
+  return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
 /**
@@ -56,6 +63,28 @@ export class JobBudget {
       throw new RangeError(`Лимит на ИИ должен быть положительным числом, получено: ${String(limitUsd)}`);
     }
     this.limitUsd = limitUsd;
+  }
+
+  /**
+   * Бюджет запуска из его снимка (progress_detail.llm): «Переписать цепочку»
+   * тратит из того же лимита, что и сам запуск, начиная с уже потраченного.
+   * Нет снимка или лимит в нём битый — лимит по умолчанию; битые суммы и
+   * счётчики — ноль, а не NaN, иначе exhausted() перестал бы срабатывать.
+   */
+  static fromSnapshot(
+    snapshot: Partial<OutreachLlmBudgetSnapshot> | null | undefined,
+    defaultLimitUsd: number,
+  ): JobBudget {
+    const limit = finiteAtLeastZero(snapshot?.limit_usd);
+    const budget = new JobBudget(limit !== null && limit > 0 ? limit : defaultLimitUsd);
+    budget.spentUsd = finiteAtLeastZero(snapshot?.spent_usd) ?? 0;
+    budget.calls = Math.floor(finiteAtLeastZero(snapshot?.calls) ?? 0);
+    for (const role of ['analysis', 'writer'] as const) {
+      const spend: Partial<OutreachLlmRoleSpend> | undefined = snapshot?.by_role?.[role];
+      budget.byRole[role].usd = finiteAtLeastZero(spend?.usd) ?? 0;
+      budget.byRole[role].calls = Math.floor(finiteAtLeastZero(spend?.calls) ?? 0);
+    }
+    return budget;
   }
 
   add(role: OutreachLlmRole, usd: number): void {
@@ -91,9 +120,13 @@ export interface OutreachLlmContext {
 
 const storage = new AsyncLocalStorage<OutreachLlmContext>();
 
-/** Весь запуск — внутри: каждый ИИ-вызов в нём знает язык и списывает деньги со своего бюджета. */
+/**
+ * Весь запуск — внутри: каждый ИИ-вызов в нём знает язык и списывает деньги со
+ * своего бюджета. fn оборачиваем в async, чтобы и синхронная ошибка в ней
+ * вернулась отклонённым промисом, а не вылетела мимо await вызывающего.
+ */
 export function runWithOutreachContext<T>(ctx: OutreachLlmContext, fn: () => Promise<T>): Promise<T> {
-  return storage.run(ctx, fn);
+  return storage.run(ctx, async () => fn());
 }
 
 export function currentOutreachContext(): OutreachLlmContext | null {
@@ -112,13 +145,10 @@ export class BudgetExceededError extends Error {
   }
 }
 
-/** missing_key — ключ не задан; rejected_key — Requesty ответил 401/403; billing — на ключе кончились деньги. */
-export type LlmAuthReason = 'missing_key' | 'rejected_key' | 'billing';
-
 /**
- * Ключ ИИ не задан, отвергнут или пуст по деньгам. Повторять бессмысленно:
- * каждый следующий вызов упадёт так же. Поэтому запуск сразу failed с понятным
- * текстом, а не сотни строк «ИИ не ответил».
+ * Ключ ИИ не задан, отвергнут, пуст по деньгам, или модель из env Requesty не
+ * знает. Повторять бессмысленно: каждый следующий вызов упадёт так же. Поэтому
+ * запуск сразу failed с понятным текстом, а не сотни строк «ИИ не ответил».
  */
 export class LlmAuthError extends Error {
   constructor(
@@ -132,9 +162,9 @@ export class LlmAuthError extends Error {
 
 /**
  * Прочие сбои ИИ: сеть, таймаут, 429/5xx после повторов, битый или обрезанный
- * ответ после повтора. Касается одной строки — она уходит в отсев с причиной
- * «ИИ не ответил» (LLM_FAILED / llm_failed), а не маскируется под «сайт не
- * открылся». status — HTTP-код Requesty, если ответ был.
+ * ответ после повтора, отказ модерации. Касается одной строки — она уходит в
+ * отсев с причиной «ИИ не ответил» (LLM_FAILED / llm_failed), а не маскируется
+ * под «сайт не открылся». status — HTTP-код Requesty, если ответ был.
  */
 export class LlmCallError extends Error {
   constructor(

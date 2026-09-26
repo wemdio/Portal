@@ -10,25 +10,20 @@
  *
  * Язык и бюджет приходят из контекста запуска (context.ts). Каждый оплаченный
  * ответ сразу списывается с бюджета — даже если потом не разобрался: деньги
- * уже потрачены, и лимит обязан это видеть.
+ * уже потрачены, и лимит обязан это видеть. Оборванный нами запрос тоже
+ * списывается — оценкой сверху (см. abortedUsage).
  *
  * Транспорт — прямой fetch, как в lib/openrouter/client.ts: тот бросает
  * обычный Error и теряет usage, а здесь нужны стоимость каждого ответа и типы
  * ошибок (ключ / сбой / бюджет), от которых зависит судьба запуска.
  */
 
-import {
-  BudgetExceededError,
-  currentOutreachContext,
-  LlmAuthError,
-  LlmCallError,
-  type JobBudget,
-  type OutreachLang,
-  type OutreachLlmRole,
-} from './context';
+import 'server-only';
+import { BudgetExceededError, currentOutreachContext, LlmAuthError, LlmCallError, type JobBudget } from './context';
 import { bareModelName, estimateCostUsd } from './prices';
+import type { OutreachLang, OutreachLlmRole } from './types';
 
-export type { OutreachLang, OutreachLlmRole } from './context';
+export type { OutreachLang, OutreachLlmRole } from './types';
 
 const DEFAULT_ENDPOINT = 'https://router.requesty.ai/v1/chat/completions';
 
@@ -58,17 +53,36 @@ const DEFAULT_MAX_TOKENS: Record<OutreachLlmRole, number> = { analysis: 1500, wr
 // лимитом, но не выше этого.
 const MAX_TOKENS_CAP = 16_000;
 // Без таймаута зависший запрос держал бы строку, а с ней и запуск, бесконечно.
-// Писатель думает долго — ему больше.
-const REQUEST_TIMEOUT_MS: Record<OutreachLlmRole, number> = { analysis: 120_000, writer: 300_000 };
-// 429/5xx/сеть: ещё две попытки через 2 и 4 с. 408 и 425 — те же таймауты
-// апстрима, что и 5xx. Остальные 4xx постоянны: повтор заплатит за ту же ошибку.
+// Писатель думает долго — ему больше, но меньше 300 с: на 300 с запрос без
+// потока оборвёт сам fetch (headersTimeout undici), и мы не узнали бы, что это
+// таймаут, за который надо списать деньги.
+const REQUEST_TIMEOUT_MS: Record<OutreachLlmRole, number> = { analysis: 120_000, writer: 280_000 };
+// 429/5xx/сеть/таймаут: ещё две попытки через 2 и 4 с. 408 и 425 — те же
+// таймауты апстрима, что и 5xx. Остальные 4xx постоянны: повтор заплатит за ту
+// же ошибку.
 const TRANSPORT_RETRIES = 2;
 const RETRY_BASE_MS = 2_000;
 const RETRYABLE_STATUS = new Set([408, 425, 429]);
+// Повтор, на который после паузы остаётся меньше секунды общего срока, всё
+// равно не успеет.
+const MIN_ATTEMPT_MS = 1_000;
 // Как у движка вертикалей (collectionErrors.ts): кончились деньги — это не сбой
 // одной строки, а причина остановить запуск.
 const BILLING_TEXT =
   /not enough credits|insufficient[\s_-]+(?:funds|balance|credits)|payment[\s_-]+required|credit balance (?:is )?too low/i;
+// Модель из env Requesty не знает — упадёт каждый вызов, запуск валим сразу.
+// Между «model» и отказом — только одна фраза: точка внутри имени модели
+// («gemini-3.1») пропускается, конец предложения — нет, иначе «This model does
+// not support X. Parameter Y is not supported» валил бы запуск как чужая модель.
+const BAD_MODEL_TEXT =
+  /model[\s_-]*not[\s_-]*found|(?:unknown|invalid|unsupported|unrecognized)[\s_-]+model|not a valid model|no such model|model\b(?:[^.\n]|\.(?=\S)){0,80}?\b(?:not found|does(?:n't| not) exist|is not supported|is not available)/i;
+// 403 модерации или фильтра безопасности — отказ на конкретный текст (сайт с
+// «неудобным» содержимым), а не на ключ: это про одну строку. Но если в тексте
+// речь о ключе («API key policy…») — это ключ.
+const MODERATION_TEXT = /moderat|flagged|polic(?:y|ies)|safety/i;
+const KEY_TEXT = /api[\s_-]*key|unauthori[sz]ed|authenticat/i;
+// Таймауты самого undici: запрос уже ушёл, ответа не дождались.
+const UNDICI_TIMEOUT_CODES = new Set(['UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']);
 
 // json_object-режим у части поставщиков отвечает 400, если слово «json» не
 // встречается в сообщениях (движок вертикалей наступил на это) — добавляем сами.
@@ -95,8 +109,11 @@ export interface OutreachLlmUsage {
   /** Модель, которая ответила по данным Requesty; если он её не назвал — запрошенная. */
   model: string;
   costUsd: number;
-  /** reported — usage.cost от Requesty; estimated — наша оценка по prices.ts. */
-  costSource: 'reported' | 'estimated';
+  /**
+   * reported — usage.cost от Requesty; estimated — наша оценка по prices.ts;
+   * aborted — запрос оборван таймаутом или отменой: оценка сверху, ответа нет.
+   */
+  costSource: 'reported' | 'estimated' | 'aborted';
   promptTokens: number | null;
   completionTokens: number | null;
 }
@@ -115,6 +132,19 @@ export interface OutreachLlmCallOptions {
    * шаблон цепочки знает свою стоимость и модель (polza_chain_templates).
    */
   onUsage?: (usage: OutreachLlmUsage) => void;
+  /**
+   * Отмена снаружи (остановка запуска, закрытый запрос роута): обрывает
+   * запрос и паузу перед повтором, повторов после неё нет, вызов отклоняется
+   * с signal.reason.
+   */
+  signal?: AbortSignal;
+  /**
+   * Общий срок на весь вызов — все попытки и паузы между ними. Роуту
+   * «Переписать цепочку» нужен ответ за ~60 с, иначе его оборвёт платформа.
+   * Не уложились — LlmCallError. Без срока у каждого запроса свой таймаут по
+   * роли (120 / 280 с).
+   */
+  timeoutMs?: number;
 }
 
 /** Один вызов со строгим JSON-объектом в ответе. */
@@ -141,6 +171,10 @@ interface CallSpec {
   apiKey: string;
   model: string;
   json: boolean;
+  signal: AbortSignal | null;
+  /** Срок всего вызова (Date.now()), если задан opts.timeoutMs. */
+  deadline: number | null;
+  timeoutMs: number | null;
 }
 
 interface Answer {
@@ -184,13 +218,28 @@ async function callOutreach<T>(
   if (!/^[\x21-\x7E]+$/.test(apiKey)) {
     throw new LlmAuthError(`Неверный ключ ИИ для ${LANG_LABEL[lang]} автоаутрича: недопустимые символы в ${API_KEY_ENV[lang]}`);
   }
-  const call: CallSpec = { lang, role: opts.role, title: opts.title, apiKey, model: outreachModel(lang, opts.role), json };
+  const timeoutMs = typeof opts.timeoutMs === 'number' && Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0
+    ? opts.timeoutMs
+    : null;
+  const call: CallSpec = {
+    lang,
+    role: opts.role,
+    title: opts.title,
+    apiKey,
+    model: outreachModel(lang, opts.role),
+    json,
+    signal: opts.signal ?? null,
+    deadline: timeoutMs === null ? null : Date.now() + timeoutMs,
+    timeoutMs,
+  };
   const baseMessages = buildMessages(opts, call);
 
   const charge = (usage: OutreachLlmUsage): void => {
     budget?.add(usage.role, usage.costUsd);
     if (usage.costSource === 'estimated') {
       warnOnce(`cost:${usage.model}`, `${label(call)}: Requesty не вернул usage.cost (${usage.model}) — стоимость оценена по таблице цен`);
+    } else if (usage.costSource === 'aborted') {
+      log('warn', `${label(call)}: запрос оборван — в бюджет записана оценка сверху $${usage.costUsd.toFixed(4)}`);
     }
     if (bareModelName(usage.model) !== bareModelName(call.model)) {
       warnOnce(`model:${call.model}>${usage.model}`, `${label(call)}: запрошена модель ${call.model}, ответила ${usage.model}`);
@@ -210,6 +259,12 @@ async function callOutreach<T>(
   for (;;) {
     const messages = nudge ? [...baseMessages, { role: 'user' as const, content: JSON_RETRY_NUDGE[lang] }] : baseMessages;
     const answer = await requestWithRetries(call, messages, maxTokens, budget, charge);
+    // Обрезанный текст — недописанное письмо. Обрезанный JSON, если всё же
+    // разобрался, целый: скобки сошлись, значит объект закрыт — платить за
+    // повтор незачем.
+    const value = answer.truncated && !call.json ? null : accept(answer.content);
+    if (value !== null) return value;
+
     const canGrow = maxTokens < MAX_TOKENS_CAP;
     if (answer.truncated && call.role === 'writer' && canGrow && !grewForLength) {
       grewForLength = true;
@@ -217,11 +272,6 @@ async function callOutreach<T>(
       log('info', `${label(call)}: ответ обрезан по лимиту токенов — повтор с max_tokens=${maxTokens}`);
       continue;
     }
-    // Обрезанный текст — недописанное письмо. Обрезанный JSON, если всё же
-    // разобрался, целый: скобки сошлись, значит объект закрыт.
-    const value = answer.truncated && !call.json ? null : accept(answer.content);
-    if (value !== null) return value;
-
     const problem = answer.truncated
       ? `ответ обрезан на max_tokens=${maxTokens}`
       : call.json
@@ -278,27 +328,37 @@ async function requestWithRetries(
   for (let attempt = 0; attempt <= TRANSPORT_RETRIES; attempt += 1) {
     if (attempt > 0) {
       const pauseMs = RETRY_BASE_MS * 2 ** (attempt - 1);
+      // Повтор не успеет до общего срока — отдаём последнюю ошибку сразу, не
+      // проспав остаток срока.
+      if (call.deadline !== null && call.deadline - Date.now() - pauseMs < MIN_ATTEMPT_MS) break;
       log('warn', `${lastError?.message ?? label(call)} — повтор ${attempt}/${TRANSPORT_RETRIES} через ${pauseMs / 1000} с`);
-      await sleep(pauseMs);
+      await sleep(pauseMs, call.signal);
     }
+    call.signal?.throwIfAborted();
+    const remainingMs = call.deadline === null ? Infinity : call.deadline - Date.now();
+    if (remainingMs <= 0) break;
     // Перед каждым запросом, включая повторы: пока этот поток ждал, лимит мог
     // выбрать другой.
     ensureBudget(budget);
-    const outcome = await requestOnce(call, messages, maxTokens, charge);
+    const timeoutMs = Math.min(REQUEST_TIMEOUT_MS[call.role], remainingMs);
+    const outcome = await requestOnce(call, messages, maxTokens, timeoutMs, charge);
     if (outcome.ok) return outcome.answer;
     lastError = outcome.error;
   }
-  throw lastError ?? new LlmCallError(`${label(call)}: нет ответа после повторов`);
+  throw lastError ?? new LlmCallError(`${label(call)}: не уложились в ${seconds(call.timeoutMs ?? 0)} с`);
 }
 
-/** Retryable-сбой возвращается, постоянный (ключ, деньги, прочие 4xx) — бросается. */
+/** Retryable-сбой возвращается, постоянный (ключ, деньги, модель, прочие 4xx) — бросается. */
 async function requestOnce(
   call: CallSpec,
   messages: ChatMessage[],
   maxTokens: number,
+  timeoutMs: number,
   charge: (usage: OutreachLlmUsage) => void,
 ): Promise<Outcome> {
   const promptChars = messages.reduce((sum, m) => sum + m.content.length, 0);
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const signal = call.signal ? AbortSignal.any([call.signal, timeoutSignal]) : timeoutSignal;
   let res: Response;
   let text: string;
   try {
@@ -317,12 +377,18 @@ async function requestOnce(
         max_tokens: maxTokens,
         ...(call.json ? { response_format: { type: 'json_object' } } : {}),
       }),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS[call.role]),
+      signal,
     });
-    // Тело читаем под тем же таймаутом: оборванный ответ мог быть оплачен,
-    // но usage из него не достать — остаётся только повторить.
+    // Тело читаем под тем же сигналом: оборванный ответ мог быть оплачен, но
+    // usage из него уже не достать.
     text = await res.text();
   } catch (err) {
+    const cancelled = call.signal?.aborted === true;
+    if (cancelled || timeoutSignal.aborted || isTimeoutError(err)) {
+      charge(abortedUsage(call, promptChars, maxTokens));
+      if (cancelled) throw call.signal?.reason;
+      return { ok: false, error: new LlmCallError(`${label(call)}: нет ответа за ${seconds(timeoutMs)} с`) };
+    }
     return { ok: false, error: new LlmCallError(`${label(call)}: ${networkProblem(err, call)}`) };
   }
 
@@ -348,11 +414,22 @@ async function requestOnce(
 
 function failure(call: CallSpec, status: number, message: string): Outcome {
   const where = `Requesty ${status}${message ? `: ${message}` : ''}`;
+  const lang = LANG_LABEL[call.lang];
   if (status === 402 || BILLING_TEXT.test(message)) {
-    throw new LlmAuthError(`Закончились деньги на ключе ИИ для ${LANG_LABEL[call.lang]} автоаутрича (${where})`, 'billing');
+    throw new LlmAuthError(`Закончились деньги на ключе ИИ для ${lang} автоаутрича (${where})`, 'billing');
+  }
+  if ((status === 400 || status === 404) && BAD_MODEL_TEXT.test(message)) {
+    throw new LlmAuthError(
+      `Неверное имя модели ИИ (${call.model}) для ${lang} автоаутрича — проверьте ${MODEL_ENV[call.lang][call.role]} (${where})`,
+      'bad_model',
+    );
+  }
+  if (status === 403 && MODERATION_TEXT.test(message) && !KEY_TEXT.test(message)) {
+    // Тот же текст получит тот же отказ — без повтора, но и без остановки запуска.
+    throw new LlmCallError(`${label(call)}: запрос отклонён модерацией (${where})`, status);
   }
   if (status === 401 || status === 403) {
-    throw new LlmAuthError(`Неверный ключ ИИ для ${LANG_LABEL[call.lang]} автоаутрича (${where})`, 'rejected_key');
+    throw new LlmAuthError(`Неверный ключ ИИ для ${lang} автоаутрича (${where})`, 'rejected_key');
   }
   const error = new LlmCallError(`${label(call)}: ${where}`, status);
   if (RETRYABLE_STATUS.has(status) || status >= 500) return { ok: false, error };
@@ -405,6 +482,18 @@ function nonNegative(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
+/**
+ * Оценка по первой модели с известной ценой. Модель без цены — по тарифу
+ * писателя, самому дорогому: лимиту лучше сработать раньше, чем недосчитать.
+ */
+function estimateUsd(models: string[], tokensIn: number, tokensOut: number): number {
+  for (const model of models) {
+    const usd = estimateCostUsd(model, tokensIn, tokensOut);
+    if (usd !== null) return usd;
+  }
+  return estimateCostUsd(DEFAULT_MODELS.writer, tokensIn, tokensOut) ?? 0;
+}
+
 function usageOf(
   envelope: RequestyEnvelope,
   choice: RequestyChoice | null,
@@ -421,16 +510,30 @@ function usageOf(
   }
   // Без usage.cost — оценка по токенам, без токенов — по длине текста (~3
   // символа на токен). Сначала по модели, которая ответила: Requesty мог
-  // подменить модель, и цена запрошенной была бы неверной. Модель без цены —
-  // по тарифу писателя, самому дорогому: лимиту лучше сработать раньше, чем
-  // недосчитать.
+  // подменить модель, и цена запрошенной была бы неверной.
   const tokensIn = promptTokens ?? Math.ceil(promptChars / 3);
   const tokensOut = completionTokens ?? Math.ceil((choice ? contentOf(choice).length : 0) / 3);
-  const costUsd = estimateCostUsd(model, tokensIn, tokensOut)
-    ?? estimateCostUsd(call.model, tokensIn, tokensOut)
-    ?? estimateCostUsd(DEFAULT_MODELS.writer, tokensIn, tokensOut)
-    ?? 0;
+  const costUsd = estimateUsd([model, call.model], tokensIn, tokensOut);
   return { role: call.role, model, costUsd, costSource: 'estimated', promptTokens, completionTokens };
+}
+
+/**
+ * Запрос ушёл, а оборвали его мы (таймаут или отмена). Requesty при этом мог
+ * уже заплатить апстриму за генерацию — ответа с usage мы не увидим никогда.
+ * Списываем оценку сверху: весь промпт (~3 символа на токен) и max_tokens
+ * ответа, иначе серия таймаутов тратила бы деньги мимо лимита.
+ */
+function abortedUsage(call: CallSpec, promptChars: number, maxTokens: number): OutreachLlmUsage {
+  const costUsd = estimateUsd([call.model], Math.ceil(promptChars / 3), maxTokens);
+  return { role: call.role, model: call.model, costUsd, costSource: 'aborted', promptTokens: null, completionTokens: null };
+}
+
+function isTimeoutError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === 'TimeoutError') return true;
+  const cause = err.cause;
+  const code = cause && typeof cause === 'object' && 'code' in cause ? (cause as { code: unknown }).code : undefined;
+  return typeof code === 'string' && UNDICI_TIMEOUT_CODES.has(code);
 }
 
 function errorCodeOf(envelope: RequestyEnvelope): number | null {
@@ -455,9 +558,6 @@ function providerMessage(envelope: RequestyEnvelope | null, rawText: string, cal
 }
 
 function networkProblem(err: unknown, call: CallSpec): string {
-  if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
-    return `нет ответа за ${REQUEST_TIMEOUT_MS[call.role] / 1000} с`;
-  }
   const message = err instanceof Error ? err.message : String(err);
   const cause = err instanceof Error ? err.cause : undefined;
   const code = cause && typeof cause === 'object' && 'code' in cause ? String((cause as { code: unknown }).code) : '';
@@ -480,8 +580,25 @@ function label(call: CallSpec): string {
   return `${LANG_LABEL[call.lang]} ${call.role} «${call.title}»`;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function seconds(ms: number): string {
+  return ms >= 10_000 ? String(Math.round(ms / 1000)) : String(Math.round(ms / 100) / 10);
+}
+
+/** Пауза перед повтором; отмена снаружи прерывает и её, а не ждёт до конца. */
+function sleep(ms: number, signal: AbortSignal | null): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function log(level: 'info' | 'warn', message: string): void {
