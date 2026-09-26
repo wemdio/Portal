@@ -27,15 +27,11 @@ export const CHAIN_LABELS: Record<ChainType, string> = {
 };
 
 export const LETTER_COUNT = 4;
-export const TEMPLATE_VERSION = 'chains_v3@2026-09-25';
+export const TEMPLATE_VERSION = 'chains_v4@2026-09-26';
 
-/**
- * Писем в цепочке: SDR-цепочка («найм») и «Автоматизированный аутрич» — по три
- * письма по инструкциям Максима (INSTRUCTION_02 / INSTRUCTION_03), остальные
- * цепочки CEO — четыре.
- */
-export function letterCountFor(chain: ChainType): number {
-  return chain === 'hiring' || chain === 'automation' ? 3 : LETTER_COUNT;
+/** Писем в цепочке: во всех цепочках четыре, как у CEO (решение 26.09.2026). */
+export function letterCountFor(_chain: ChainType): number {
+  return LETTER_COUNT;
 }
 
 /** Отраслевые группы роутера кейсов (таблица CEO). */

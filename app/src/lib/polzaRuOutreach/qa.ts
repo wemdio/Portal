@@ -18,7 +18,7 @@ import { LETTER_COUNT } from './types';
 
 export interface QaInput {
   letters: Letter[];
-  /** Сколько писем должно быть в цепочке: SDR — три, остальные — четыре. */
+  /** Сколько писем должно быть в цепочке: во всех цепочках четыре. */
   expectedLetters?: number;
   /** Статус компании в AMO: открытая сделка и клиент блокируют выгрузку. */
   amoStatus: string | null;
