@@ -81,13 +81,19 @@ export function prepareSteps(steps: CampaignStepInput[]): PreparedStep[] {
 /**
  * Название, пул ящиков и шаги — без них кампании нет. Одна проверка на
  * создание и на правку: тексты ошибок оператор видит одинаковые.
+ *
+ * allowEmptyPool — исключение для черновика из автоаутрича (createCampaign):
+ * форма и правка по-прежнему требуют ящики.
  */
-export function validateCampaignDraft(input: { name: string; mailboxIds: string[]; steps: CampaignStepInput[] }) {
+export function validateCampaignDraft(
+  input: { name: string; mailboxIds: string[]; steps: CampaignStepInput[] },
+  opts: { allowEmptyPool?: boolean } = {},
+) {
   const name = (input.name ?? '').trim();
   if (!name) throw new SenderOpError('Укажите название кампании', 400);
 
   const mailboxIds = [...new Set((input.mailboxIds ?? []).filter((id) => typeof id === 'string' && id))];
-  if (!mailboxIds.length) throw new SenderOpError('Выберите хотя бы один ящик', 400);
+  if (!mailboxIds.length && !opts.allowEmptyPool) throw new SenderOpError('Выберите хотя бы один ящик', 400);
 
   return { name, mailboxIds, steps: prepareSteps(input.steps ?? []) };
 }
@@ -127,6 +133,14 @@ export interface CreateCampaignInput {
   sourceKind?: CampaignSourceKind;
   /** Запуск автоаутрича (parser_jobs.id), из которого зальются получатели. */
   sourceJobId?: string | null;
+  /**
+   * Черновик без ящиков — только у заливки из автоаутрича. Ящики рассылка
+   * берёт из папки, а там их могли ещё не выбрать (сиды папок приходят
+   * пустыми), и заливка из-за этого стоять не должна. Уехать такая рассылка
+   * всё равно не может: startCampaign без пула не запускает, а кнопка
+   * аутрича перед запуском подставляет ящики папки.
+   */
+  allowEmptyPool?: boolean;
   createdBy: string | null;
 }
 
@@ -136,7 +150,7 @@ export interface CreateCampaignInput {
  */
 export async function createCampaign(input: CreateCampaignInput): Promise<{ id: string }> {
   const db = requireDb();
-  const { name, mailboxIds, steps } = validateCampaignDraft(input);
+  const { name, mailboxIds, steps } = validateCampaignDraft(input, { allowEmptyPool: input.allowEmptyPool });
 
   const { data: campaign, error } = await db
     .from('sender_campaigns')
@@ -161,10 +175,12 @@ export async function createCampaign(input: CreateCampaignInput): Promise<{ id: 
   const campaignId = String(campaign.id);
 
   try {
-    const { error: poolError } = await db
-      .from('sender_campaign_mailboxes')
-      .insert(mailboxIds.map((mailboxId) => ({ campaign_id: campaignId, mailbox_id: mailboxId })));
-    if (poolError) throw new SenderOpError(poolError.message, 500);
+    if (mailboxIds.length) {
+      const { error: poolError } = await db
+        .from('sender_campaign_mailboxes')
+        .insert(mailboxIds.map((mailboxId) => ({ campaign_id: campaignId, mailbox_id: mailboxId })));
+      if (poolError) throw new SenderOpError(poolError.message, 500);
+    }
 
     await insertSteps(campaignId, steps);
   } catch (e) {
