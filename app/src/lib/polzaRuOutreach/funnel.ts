@@ -34,6 +34,8 @@ export function funnelFromRows(rows: Iterable<FunnelRow>): Record<Stage, number>
 export interface JournalCountRow extends FunnelRow {
   reason_code: string | null;
   chain_type: string | null;
+  /** Без поля ждущие цепочку не считаются (awaiting = 0). */
+  doubt_flags?: string[] | null;
 }
 
 export interface JournalCounts {
@@ -42,22 +44,28 @@ export interface JournalCounts {
   chains: Record<string, number>;
   ready: number;
   doubtful: number;
+  /** Ждут цепочку оффера: очень спорные с TEMPLATE_FAILED (progress_detail.awaiting_templates). */
+  awaiting: number;
 }
 
 /**
  * Счётчики progress_detail по журналу — те же, что раннер ведёт на ходу:
- * воронка, причины отсева, цепочки, готовые и очень спорные.
+ * воронка, причины отсева, цепочки, готовые, очень спорные и ждущие цепочку.
  */
 export function journalCounts(rows: readonly JournalCountRow[]): JournalCounts {
   const reasons: Record<string, number> = {};
   const chains: Record<string, number> = {};
   let ready = 0;
   let doubtful = 0;
+  let awaiting = 0;
   for (const r of rows) {
     if (r.reason_code) reasons[r.reason_code] = (reasons[r.reason_code] ?? 0) + 1;
     if (r.chain_type) chains[r.chain_type] = (chains[r.chain_type] ?? 0) + 1;
     if (r.row_status === 'ready') ready += 1;
-    if (r.row_status === 'doubtful') doubtful += 1;
+    if (r.row_status === 'doubtful') {
+      doubtful += 1;
+      if (r.doubt_flags?.includes('TEMPLATE_FAILED')) awaiting += 1;
+    }
   }
-  return { funnel: funnelFromRows(rows), reasons, chains, ready, doubtful };
+  return { funnel: funnelFromRows(rows), reasons, chains, ready, doubtful, awaiting };
 }

@@ -268,8 +268,28 @@ async function releaseRebuild(
       detail.llm = total.snapshot();
     }
     if (!counts) return { detail };
-    Object.assign(detail, { ready: counts.ready, doubtful: counts.doubtful, funnel: counts.funnel, reasons: counts.reasons, chains: counts.chains });
-    if (counts.ready >= target) detail.stop_reason = 'target_reached';
+    Object.assign(detail, {
+      ready: counts.ready,
+      doubtful: counts.doubtful,
+      awaiting_templates: counts.awaiting,
+      funnel: counts.funnel,
+      reasons: counts.reasons,
+      chains: counts.chains,
+    });
+    if (counts.ready >= target) {
+      detail.stop_reason = 'target_reached';
+      delete detail.stop_reason_base;
+    } else if (detail.stop_reason === 'awaiting_templates' && counts.ready + counts.awaiting < target) {
+      // Запуск встал, потому что заказанное набиралось вместе с ждущими
+      // цепочку. Их стало меньше (часть писем не прошла автопроверку) — эта
+      // причина больше не верна: возвращаем ту, что была бы без ждущих
+      // (раннер записал её в stop_reason_base), а если её нет — не
+      // утверждаем никакой.
+      const base = detail.stop_reason_base;
+      if (typeof base === 'string' && base) detail.stop_reason = base;
+      else delete detail.stop_reason;
+      delete detail.stop_reason_base;
+    }
     return { detail, patch: { total_parsed: counts.ready } };
   });
 }
@@ -308,7 +328,7 @@ async function loadCounts(db: SupabaseClient, jobId: string): Promise<JournalCou
   for (let from = 0; ; from += PAGE) {
     const { data, error } = await db
       .from(ROWS)
-      .select('row_status,pipeline_stage,reason_code,chain_type')
+      .select('row_status,pipeline_stage,reason_code,chain_type,doubt_flags')
       .eq('job_id', jobId)
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);

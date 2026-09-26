@@ -357,6 +357,7 @@ interface JournalRow {
   chain_type: string | null;
   normalized_domain: string | null;
   inn: string | null;
+  doubt_flags: string[] | null;
 }
 
 /**
@@ -387,7 +388,7 @@ async function completeSpentRun(
     // пропустить или повторить строки, и счётчики разошлись бы с журналом.
     const { data, error } = await db
       .from('polza_ru_outreach_companies')
-      .select('id,row_status,pipeline_stage,reason_code,chain_type,normalized_domain,inn')
+      .select('id,row_status,pipeline_stage,reason_code,chain_type,normalized_domain,inn,doubt_flags')
       .eq('job_id', jobId)
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
@@ -415,7 +416,7 @@ async function completeSpentRun(
     for (const r of data ?? []) gone.add(String(r.id));
   }
   const kept = rows.filter((r) => !gone.has(String(r.id)));
-  const { funnel, reasons, chains, ready, doubtful } = journalCounts(kept);
+  const { funnel, reasons, chains, ready, doubtful, awaiting } = journalCounts(kept);
   const stopReason = ready >= target ? 'target_reached' : 'budget';
   const spend = budget.snapshot();
   log('info', `job ${jobId}: no LLM budget left for new analysis ($${spend.spent_usd}/$${spend.limit_usd}) — restart keeps the journal: ${kept.length} rows, ${ready} ready (${stopReason})`);
@@ -435,6 +436,7 @@ async function completeSpentRun(
       reasons,
       chains,
       doubtful,
+      awaiting_templates: awaiting,
       llm: spend,
       stop_reason: stopReason,
     },
@@ -1579,11 +1581,15 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
 
     // awaiting_templates — заказанное набрано вместе с компаниями, которые
     // ждут «Переписать цепочку»: разбор новых компаний на этом остановлен.
+    // stop_reason_base — причина, какой она была бы без ждущих (null — волны
+    // шли бы дальше): если после «Переписать цепочку» ждущих не хватит до
+    // заказанного, экран покажет её (regenerate.ts).
+    const baseReason = budgetStop ? 'budget' : cursor >= pool.length ? 'pool_exhausted' : totals.scanned >= maxScan ? 'scan_limit' : null;
     const stopReason = totals.ready >= target
       ? 'target_reached'
       : totals.ready + awaiting.count >= target
         ? 'awaiting_templates'
-        : budgetStop ? 'budget' : cursor >= pool.length ? 'pool_exhausted' : 'scan_limit';
+        : baseReason ?? 'scan_limit';
     const spend = budget.snapshot();
     log('info', `job ${jobId} done: scanned=${totals.scanned} ready=${totals.ready}/${target} (${stopReason}), llm $${spend.spent_usd}/$${spend.limit_usd} in ${spend.calls} calls`, { reasons, chains });
     // Тоже только идущему: остановку между проверкой выше и этой записью не перетираем.
@@ -1595,7 +1601,7 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
       total_parsed: totals.ready,
       completed_at: new Date().toISOString(),
       error_message: null,
-      progress_detail: detail({ stop_reason: stopReason }),
+      progress_detail: detail({ stop_reason: stopReason, ...(stopReason === 'awaiting_templates' ? { stop_reason_base: baseReason } : {}) }),
     });
   } catch (err) {
     if (err instanceof CancelledError) {
