@@ -209,13 +209,16 @@ export function SenderBlock({ jobUrl, running, readyCount, onChanged }: Props) {
     );
   }
 
-  const { folder, campaigns, pending, uploaded, uploadedDeleted } = status;
+  const { folder, campaigns, pending, uploaded, uploadedDeleted, smtpUnavailable } = status;
   const targets = status.appendTargets ?? [];
   const blocked = [
     pending.suppressed ? `в стоп-листе — ${pending.suppressed}` : null,
     pending.invalid ? `некорректный адрес — ${pending.invalid}` : null,
   ].filter(Boolean);
   const hasUploads = uploaded > 0 || uploadedDeleted > 0 || campaigns.length > 0;
+  // Заливку предлагаем, только если она пройдёт: запуск закончился и почты
+  // прошли SMTP-проверку. Без неё сервер откажет всегда, конец запуска не поможет.
+  const offerUpload = !running && !smtpUnavailable;
   const senderLink = (label: string) => (
     <a
       href={SENDER_PAGE}
@@ -255,12 +258,20 @@ export function SenderBlock({ jobUrl, running, readyCount, onChanged }: Props) {
             Были в рассылке, которую потом удалили: {companies(uploadedDeleted)}. Повторно их не зальём, чтобы им не написали второй раз.
           </div>
         ) : null}
-        {!running && pending.uploadable > 0 ? (
+        {/* Без SMTP-проверки адрес «рабочий», если у домена есть почтовый
+            сервер: несуществующие ящики вернули бы отбойники по нашим ящикам. */}
+        {smtpUnavailable ? (
+          <div className="rounded-lg bg-amber-50 px-3 py-2 text-amber-800">
+            Залить в Рассылку нельзя: почты этого запуска проверены только по MX — SMTP-проверка была недоступна. Часть писем
+            вернулась бы, а ящики потеряли бы репутацию.
+          </div>
+        ) : null}
+        {offerUpload && pending.uploadable > 0 ? (
           <div>
             {hasUploads ? 'Новых готовых к заливке' : 'Готово к заливке'}: {companies(pending.uploadable)}.
           </div>
         ) : null}
-        {!running && blocked.length ? <div className="text-gray-500">Не зальются: {blocked.join(', ')}.</div> : null}
+        {offerUpload && blocked.length ? <div className="text-gray-500">Не зальются: {blocked.join(', ')}.</div> : null}
         {!running && pending.total === 0 && uploaded === 0 && uploadedDeleted === 0 ? (
           <div className="text-gray-500">Готовых компаний для заливки нет.</div>
         ) : null}
@@ -270,7 +281,7 @@ export function SenderBlock({ jobUrl, running, readyCount, onChanged }: Props) {
           </div>
         ) : null}
 
-        {running ? (
+        {smtpUnavailable ? null : running ? (
           <div className="flex flex-wrap items-center gap-3">
             <button
               type="button"

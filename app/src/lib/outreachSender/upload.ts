@@ -174,20 +174,39 @@ interface JobRow {
   id: string;
   createdAt: string;
   status: string;
+  /**
+   * У воркера не было SMTP-прокси (progress_detail.smtp_unavailable, раннеры
+   * RU и EN): почты проверены только синтаксисом и MX.
+   */
+  smtpUnavailable: boolean;
 }
+
+/**
+ * Почему запуск без SMTP-проверки не заливается. Без неё «рабочим» считается
+ * любой адрес на домене с почтовым сервером: несуществующие ящики вернули бы
+ * отбойники, а отбойники бьют по репутации наших ящиков.
+ */
+const SMTP_UNAVAILABLE_MESSAGE =
+  'Почты этого запуска проверены только по MX: SMTP-проверка была недоступна. Заливать их в рассылку нельзя — часть писем вернётся, а ящики потеряют репутацию.';
 
 async function loadJob(source: OutreachSource, jobId: string): Promise<JobRow> {
   // Кривой id дал бы 500 «invalid input syntax for type uuid» вместо понятного ответа.
   if (!UUID_RE.test(jobId)) throw new SenderOpError('Запуск не найден', 404);
   const { data, error } = await db()
     .from('parser_jobs')
-    .select('id, created_at, status')
+    .select('id, created_at, status, progress_detail')
     .eq('id', jobId)
     .eq('parser_type', source.parserType)
     .maybeSingle();
   if (error) throw new SenderOpError(error.message, 500);
   if (!data) throw new SenderOpError('Запуск не найден', 404);
-  return { id: String(data.id), createdAt: String(data.created_at), status: String(data.status) };
+  const detail = data.progress_detail as { smtp_unavailable?: unknown } | null;
+  return {
+    id: String(data.id),
+    createdAt: String(data.created_at),
+    status: String(data.status),
+    smtpUnavailable: detail?.smtp_unavailable === true,
+  };
 }
 
 interface FolderRow {
@@ -544,6 +563,11 @@ function nothingLandedMessage(result: ImportRecipientsResult): string {
  * готовая может уйти в «сверх лимита» или в спорные, а письма пересобираются.
  * Залитое до этого уехало бы в рассылку в промежуточном виде.
  *
+ * И только если почты запуска прошли SMTP-проверку. Без SMTP-прокси раннер
+ * проверяет адрес лишь синтаксисом и MX и помечает запуск
+ * (progress_detail.smtp_unavailable) — такие адреса в рассылку не идут. Отказ
+ * — сразу, даже пока запуск идёт: конец запуска этого уже не исправит.
+ *
  * Новая рассылка берёт из папки расписание, паузы, задержки писем и ящики.
  * Рабочих ящиков в папке может ещё не быть — черновик создаётся всё равно
  * (заливка не стоит) и с пустым пулом, а понятная ошибка «Выберите ящики в
@@ -557,6 +581,7 @@ function nothingLandedMessage(result: ImportRecipientsResult): string {
 export async function uploadJobToSender(input: UploadJobInput): Promise<UploadJobResult> {
   const source = SOURCES[input.lang];
   const job = await loadJob(source, input.jobId);
+  if (job.smtpUnavailable) throw new SenderOpError(SMTP_UNAVAILABLE_MESSAGE, 409);
   if (!FINISHED_JOB_STATUSES.includes(job.status)) {
     throw new SenderOpError('Заливать можно после окончания запуска', 409);
   }
@@ -754,6 +779,12 @@ export interface JobSenderStatus {
    * заливки экран держит выключенной, сервер отвечает 409.
    */
   jobStatus: string;
+  /**
+   * Почты запуска проверены только синтаксисом и MX — SMTP-проверка была
+   * недоступна. Такой запуск не заливается (сервер отвечает 409), и экран не
+   * предлагает кнопку заливки, а говорит почему.
+   */
+  smtpUnavailable: boolean;
   folder: {
     id: string;
     name: string;
@@ -765,7 +796,8 @@ export interface JobSenderStatus {
   /** Рассылки, созданные запуском или получившие его строки; новые сверху. */
   campaigns: JobSenderCampaign[];
   /**
-   * Готовые строки, ещё не залитые. uploadable — зальются нажатием;
+   * Готовые строки, ещё не залитые. uploadable — зальются нажатием (если
+   * запуск вообще можно заливать: см. smtpUnavailable и jobStatus);
    * suppressed — адрес в стоп-листе; invalid — адрес некорректный. Письма
    * здесь не читаются (это мегабайты на каждый показ экрана): строку без темы
    * или без первого письма заливка отсеет сама и скажет об этом.
@@ -890,6 +922,7 @@ export async function getJobSenderStatus(input: { lang: OutreachLang; jobId: str
 
   return {
     jobStatus: job.status,
+    smtpUnavailable: job.smtpUnavailable,
     folder: { id: folder.id, name: folder.name, mailboxes: mailboxes.ids.length, workingMailboxes: mailboxes.working },
     campaigns,
     pending: {
