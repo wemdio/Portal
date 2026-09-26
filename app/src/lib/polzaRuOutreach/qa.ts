@@ -140,10 +140,39 @@ export interface TemplateQaInput {
    * компании — не выдуманное число.
    */
   senderTexts: string[];
+  /**
+   * Примеры из промпта — бренд-пример и примеры {{повод}}: в шаблоне это была
+   * бы чужая компания в письме всем компаниям оффера.
+   */
+  exampleTexts?: string[];
 }
 
 const ANY_PLACEHOLDER = /\{\{[^{}]*\}\}/g;
 const QUOTED_BRAND = `«${TEMPLATE_PLACEHOLDERS.brand}»`;
+/**
+ * «2–3» в шаблоне — только перед словом «сегмент» («2–3 сегмента», «2–3
+ * узких сегмента»), как в образце CEO. У готовых писем «2–3» просто в списке
+ * разрешённых слов, а в шаблоне писатель мог бы написать «2–3 недели» или
+ * «2–3 клиента» — и это ушло бы всем компаниям оффера.
+ */
+const SEGMENTS_RANGE = /2\s*[–-]\s*3(?:\s+[^\s\d]+)?\s+сегмент/gi;
+const TEMPLATE_ALLOWED_WORDS = ['15 минут', 'B2B', 'b2b'];
+/**
+ * Выдумки без цифр: числа словами и обещания сроков и результатов. Шаблон
+ * идёт всем компаниям оффера, подтвердить такое в нём нечем. Готовые письма
+ * (runQa) этого не проверяют: там это законно приходит из кейса.
+ */
+const FABRICATION = /(?<![а-яё])в\s+(?:\S+\s+)?раз[аы]?(?![а-яё])|вдвое|втрое|вчетверо|десятк|сотн|сотен|тысяч|процент|недел|месяц|месяч|квартал/gi;
+/**
+ * Намёк на прошлый контакт — не только «уже общались»: «ранее обсуждали»,
+ * «с вами переписывались», «наш разговор», «нашей встречи».
+ */
+const PRIOR_CONTACT =
+  /(?<![а-яё])(?:уже|ранее|раньше|с\s+вами)\s+(?:[а-яё]+\s+)?(?:общались|обсуждали|переписывались|созванивались|говорили)|(?<![а-яё])наш(?:ему|его|ей|ем|им|у|а|и)?\s+(?:прошл[а-яё]*\s+|недавн[а-яё]*\s+|последн[а-яё]*\s+)?(?:разговор|созвон|встреч|переписк)/i;
+/** «Гарантий» и «гарантия» — тоже нет: промпт запрещает корень целиком, даже с отрицанием. */
+const TEMPLATE_FORBIDDEN_EXTRA: Array<[RegExp, string]> = [[/гарант/i, 'forbidden:guarantee']];
+/** Абзацы шаблона — через пустую строку, как у renderTemplate. */
+const PARAGRAPH_BREAK = /\n[ \t]*\n/;
 
 function countOf(text: string, piece: string): number {
   return text.split(piece).length - 1;
@@ -156,12 +185,35 @@ function unsupportedNumbers(text: string, allowed: string[]): string[] {
 }
 
 /**
- * Необязательный плейсхолдер (повод, гипотеза) стоит отдельной строкой: пустое
- * значение renderTemplate удаляет вместе со строкой, а в строке с другим
- * текстом осталась бы фраза без смысла («Например: »).
+ * Необязательный плейсхолдер (повод, гипотеза) — отдельным абзацем: пустое
+ * значение renderTemplate удаляет вместе с абзацем, а в абзаце с другим
+ * текстом осталась бы фраза без смысла («Например: »). Гипотеза к тому же сама
+ * из нескольких абзацев и внутри чужого абзаца слиплась бы с ним.
  */
-function standsAlone(text: string, placeholder: string): boolean {
-  return text.split('\n').every((line) => !line.includes(placeholder) || line.trim() === placeholder);
+function ownParagraph(text: string, placeholder: string): boolean {
+  return text.split(PARAGRAPH_BREAK).every((p) => !p.includes(placeholder) || p.trim() === placeholder);
+}
+
+/**
+ * Проверки текста, который пишет сам писатель: плейсхолдеры, утверждённые
+ * формулировки и представление отправителя из него вычитаются — их цифры и
+ * слова законны.
+ */
+function textChecks(tag: string, text: string, chain: ChainType, writerFree: string[], examples: string[], flags: string[]): void {
+  const own = stripAll(text.replace(ANY_PLACEHOLDER, ' '), writerFree);
+  for (const [re, flag] of [...FORBIDDEN, ...TEMPLATE_FORBIDDEN_EXTRA]) {
+    if (re.test(own) && !flags.includes(`${tag}:${flag}`)) flags.push(`${tag}:${flag}`);
+  }
+  const digits = unsupportedNumbers(own.replace(SEGMENTS_RANGE, ' '), TEMPLATE_ALLOWED_WORDS);
+  if (digits.length) flags.push(`${tag}:unsupported_number(${digits.join(' ')})`);
+  const made = Array.from(new Set((own.match(FABRICATION) ?? []).map((m) => m.toLowerCase()))).slice(0, 3);
+  if (made.length) flags.push(`${tag}:fabrication(${made.join(', ')})`);
+  // Прошлый контакт — только «Возврату»: у остальных офферов разговор в AMO,
+  // если он был, приносит {{повод}}, а текст шаблона идёт всем компаниям.
+  if (chain !== 'reactivation' && PRIOR_CONTACT.test(own)) flags.push(`${tag}:false_prior_contact`);
+  const lower = text.toLowerCase();
+  const leaked = examples.find((e) => e.trim() && lower.includes(e.trim().toLowerCase()));
+  if (leaked) flags.push(`${tag}:example_leak(${leaked.slice(0, 40)})`);
 }
 
 /**
@@ -174,7 +226,8 @@ export function runTemplateQa(input: TemplateQaInput): QaResult {
   const P = TEMPLATE_PLACEHOLDERS;
   const flags: string[] = [];
   const allowed = new Set<string>(templatePlaceholdersFor(chain));
-  const allowedNumbers = [...input.claimTexts, ...input.senderTexts, ...TEMPLATE_NUMBERS];
+  const writerFree = [...input.claimTexts, ...input.senderTexts];
+  const examples = input.exampleTexts ?? [];
 
   // Тема: из плейсхолдеров — только бренд, и в ёлочках: бренд капсом
   // («СИБУР») иначе провалил бы subject_caps у писем каждой такой компании.
@@ -186,9 +239,7 @@ export function runTemplateQa(input: TemplateQaInput): QaResult {
     if (CANDIDATE_LIKE_SUBJECT.test(rest)) flags.push('subject_candidate_like');
     if (/[A-ZА-ЯЁ]{6,}/.test(rest.replace(/«[^»]*»/g, ''))) flags.push('subject_caps');
     if (/!/.test(subject)) flags.push('subject_exclamation');
-    for (const [re, flag] of FORBIDDEN) if (re.test(rest)) flags.push(`subject:${flag}`);
-    const digits = unsupportedNumbers(rest, allowedNumbers);
-    if (digits.length) flags.push(`subject:unsupported_number(${digits.join(' ')})`);
+    textChecks('subject', rest, chain, writerFree, examples, flags);
   }
 
   const bodies: Array<[string, string]> = [
@@ -222,36 +273,36 @@ export function runTemplateQa(input: TemplateQaInput): QaResult {
       if (countOf(text, ph) > 1) flags.push(`${tag}:placeholder_repeated(${ph})`);
     }
     for (const ph of [P.opening, P.hypothesis]) {
-      if (text.includes(ph) && !standsAlone(text, ph)) flags.push(`${tag}:placeholder_not_alone(${ph})`);
+      if (text.includes(ph) && !ownParagraph(text, ph)) flags.push(`${tag}:placeholder_not_alone(${ph})`);
     }
 
     const questions = countOf(text, '?');
     if (questions === 0) flags.push(`${tag}:no_cta`);
     if (questions > 1) flags.push(`${tag}:more_than_one_cta`);
     if ((text.replace(/^Добрый день!/, '').match(/!/g) ?? []).length) flags.push(`${tag}:exclamation`);
-    for (const [re, flag] of FORBIDDEN) if (re.test(plain)) flags.push(`${tag}:${flag}`);
     if (/\*\*|__|^#{1,6}\s/m.test(text)) flags.push(`${tag}:markdown`);
-    // «Уже общались» — только «Возврату»: у остальных офферов разговор в AMO,
-    // если он был, приносит {{повод}}, а текст шаблона идёт всем компаниям.
-    if (/уже общались/i.test(text) && chain !== 'reactivation') flags.push(`${tag}:false_prior_contact`);
-    const digits = unsupportedNumbers(plain, allowedNumbers);
-    if (digits.length) flags.push(`${tag}:unsupported_number(${digits.join(' ')})`);
+    textChecks(tag, text, chain, writerFree, examples, flags);
   }
 
-  // Обязательные плейсхолдеры и их места: повод — в письме 1 (оба варианта),
-  // кейс — только в письме 3 с кейсом, гипотеза — только в письме 3 без кейса.
+  // Обязательные плейсхолдеры и их места: повод — в письме 1 (оба варианта)
+  // и только там (в других письмах он повторял бы письмо 1), кейс — только в
+  // письме 3 с кейсом, гипотеза — только в письме 3 без кейса.
   if (!t.bodyDirect.includes(P.opening)) flags.push(`L1:placeholder_missing(${P.opening})`);
   if (!t.bodyRouting.includes(P.opening)) flags.push(`L1r:placeholder_missing(${P.opening})`);
   if (chainUsesCase(chain) && !(t.bodyWithCase ?? '').includes(P.case)) flags.push(`L3c:placeholder_missing(${P.case})`);
   if (chainUsesHypothesis(chain) && !t.bodyWithoutCase.includes(P.hypothesis)) flags.push(`L3:placeholder_missing(${P.hypothesis})`);
   for (const [tag, raw] of bodies) {
+    if (tag !== 'L1' && tag !== 'L1r' && raw.includes(P.opening)) flags.push(`${tag}:placeholder_misplaced(${P.opening})`);
     if (tag !== 'L3c' && allowed.has(P.case) && raw.includes(P.case)) flags.push(`${tag}:placeholder_misplaced(${P.case})`);
     if (tag !== 'L3' && allowed.has(P.hypothesis) && raw.includes(P.hypothesis)) flags.push(`${tag}:placeholder_misplaced(${P.hypothesis})`);
   }
 
-  // Письмо 4 — самое короткое, как требует runQa у готовых писем.
+  // Письмо 4 — самое короткое. Сравниваем с письмом 2 и письмом 3 без кейса:
+  // в варианте с кейсом {{кейс}} — одно слово шаблона, а в письме это 20–40
+  // слов кейса, и письмо 4 CEO «длиннее» его только на бумаге. Готовые письма
+  // runQa сверяет честно, после подстановки.
   const last = words.get('L4');
-  if (last !== undefined && ['L2', 'L3c', 'L3'].some((tag) => (words.get(tag) ?? Infinity) <= last)) flags.push('L4:not_shortest');
+  if (last !== undefined && ['L2', 'L3'].some((tag) => (words.get(tag) ?? Infinity) <= last)) flags.push('L4:not_shortest');
 
   return { status: flags.length ? 'failed' : 'passed', flags };
 }
@@ -268,31 +319,32 @@ const TEMPLATE_PLACES: Record<string, string> = {
 
 const TEMPLATE_FLAG_TEXT: Record<string, string> = {
   empty: 'текст пустой',
-  field_missing: 'в ответе нет поля',
   letters_missing: 'в ответе нет массива letters с письмами 1–4',
   greeting_missing: 'должно начинаться строкой «Добрый день!»',
   signature_mismatch: 'должно заканчиваться ровно «С уважением,» и с новой строки {{подпись}}',
   placeholder_not_allowed: 'плейсхолдер здесь не разрешён',
   placeholder_broken: 'сломанный плейсхолдер: одиночные фигурные скобки',
   placeholder_repeated: 'плейсхолдер стоит дважды',
-  placeholder_not_alone: 'плейсхолдер должен стоять отдельной строкой, без другого текста',
+  placeholder_not_alone: 'плейсхолдер должен быть отдельным абзацем, без другого текста',
   placeholder_missing: 'нет обязательного плейсхолдера',
   placeholder_misplaced: 'плейсхолдер не на своём месте',
   no_cta: 'нет вопроса — нужен ровно один «?»',
   more_than_one_cta: 'больше одного «?» — нужен ровно один',
   exclamation: 'восклицательный знак (можно только в «Добрый день!»)',
-  'forbidden:urgency': 'давление срочностью',
+  'forbidden:urgency': 'давление срочностью (корень «срочн» нельзя даже с отрицанием)',
   'forbidden:unique': 'слово «уникальный»',
-  'forbidden:guarantee': 'обещание гарантий',
+  'forbidden:guarantee': 'гарантии (корень «гарант» нельзя даже с отрицанием)',
   'forbidden:scarcity': 'давление дефицитом',
   'forbidden:superlative': 'превосходная степень о себе',
   'forbidden:emoji': 'эмодзи',
   internal_text: 'служебный текст (json, null, TODO)',
   internal_words: 'служебные слова (score, pipeline, ICP, LLM, evidence, скоринг)',
   markdown: 'разметка markdown',
-  false_prior_contact: '«уже общались» можно только в оффере «Возврат»',
-  unsupported_number: 'цифры не из утверждённых формулировок',
-  not_shortest: 'письмо 4 должно быть самым коротким из писем 2–4',
+  false_prior_contact: 'намёк на прошлый контакт («уже общались», «ранее обсуждали», «наш разговор») — только в оффере «Возврат»',
+  unsupported_number: 'цифры не из утверждённых формулировок («2–3» — только перед словом «сегмент»)',
+  fabrication: 'число словами или обещание срока или результата — подтвердить нечем',
+  example_leak: 'в текст попал пример из задания — в шаблоне не может быть конкретной компании',
+  not_shortest: 'письмо 4 должно быть короче письма 2 и письма 3 без кейса',
   subject_missing: 'нет темы',
   subject_placeholder: 'из плейсхолдеров в теме можно только «{{бренд}}»',
   subject_brand_unquoted: 'бренд в теме — только в ёлочках: «{{бренд}}»',
@@ -302,8 +354,9 @@ const TEMPLATE_FLAG_TEXT: Record<string, string> = {
 };
 
 /**
- * Флаг проверки шаблона — по-русски, для повторного запроса писателю: «Письмо
- * 2: цифры не из утверждённых формулировок — 30%». Незнакомый флаг — как есть.
+ * Флаг проверки шаблона — по-русски: для повторного запроса писателю и для
+ * пояснения в строке журнала («Письмо 2: цифры не из утверждённых формулировок
+ * — 30%»). Незнакомый флаг — как есть.
  */
 export function describeTemplateFlag(flag: string): string {
   const colon = flag.indexOf(':');

@@ -78,9 +78,11 @@ const REQUEST_TIMEOUT_MS: Record<OutreachLlmRole, number> = { analysis: 120_000,
 const TRANSPORT_RETRIES = 2;
 const RETRY_BASE_MS = 2_000;
 const RETRYABLE_STATUS = new Set([408, 425, 429]);
-// Повтор, на который после паузы остаётся меньше секунды общего срока, всё
-// равно не успеет.
-const MIN_ATTEMPT_MS = 1_000;
+// Повтор, на который после паузы остаётся меньше этого от общего срока, всё
+// равно не успеет. Писатель (Gemini с рассуждениями) раньше чем за минуту
+// цепочку не пишет: повтор с меньшим запасом оборвётся по сроку и будет
+// списан оценкой сверху за max_tokens — деньги без ответа.
+const MIN_ATTEMPT_MS: Record<OutreachLlmRole, number> = { analysis: 1_000, writer: 60_000 };
 // Как у движка вертикалей (collectionErrors.ts): кончились деньги — это не сбой
 // одной строки, а причина остановить запуск.
 const BILLING_TEXT =
@@ -354,7 +356,7 @@ async function requestWithRetries(
       const pauseMs = RETRY_BASE_MS * 2 ** (attempt - 1);
       // Повтор не успеет до общего срока — отдаём последнюю ошибку сразу, не
       // проспав остаток срока.
-      if (call.deadline !== null && call.deadline - Date.now() - pauseMs < MIN_ATTEMPT_MS) break;
+      if (call.deadline !== null && call.deadline - Date.now() - pauseMs < MIN_ATTEMPT_MS[call.role]) break;
       log('warn', `${lastError?.message ?? label(call)} — повтор ${attempt}/${TRANSPORT_RETRIES} через ${pauseMs / 1000} с`);
       await sleep(pauseMs, call.signal);
     }

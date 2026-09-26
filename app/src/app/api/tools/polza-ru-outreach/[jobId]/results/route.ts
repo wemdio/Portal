@@ -16,6 +16,10 @@ const LIST_COLUMNS =
  * Строки журнала запуска + воронка по этапам и причины отсева.
  * Воронка считается по всем строкам — правило в lib/polzaRuOutreach/funnel.ts
  * (им же раннер пересчитывает счётчики по журналу).
+ *
+ * Порядок страниц — created_at, при равенстве id: раннер вставляет строки
+ * пачками по 100 с одним created_at, и без второго ключа соседние страницы
+ * могли бы повторить или пропустить строки.
  */
 export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: string }> }) {
   const auth = await authed(req);
@@ -33,6 +37,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     .select(LIST_COLUMNS, { count: 'exact' })
     .eq('job_id', jobId)
     .order('created_at', { ascending: true })
+    .order('id', { ascending: true })
     .range(offset, offset + limit - 1);
   if (status) query = query.eq('row_status', status);
   if (stage) query = query.eq('pipeline_stage', stage);
@@ -50,6 +55,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       .from('polza_ru_outreach_companies')
       .select('row_status,pipeline_stage,reason_code')
       .eq('job_id', jobId)
+      .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
     if (allErr) return jsonError(allErr.message, 500);
     all.push(...((chunk ?? []) as typeof all));

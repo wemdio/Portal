@@ -22,9 +22,11 @@ import {
 } from '@/lib/polzaRuOutreach/types';
 
 export const dynamic = 'force-dynamic';
-// Два вызова писателя по минуте (попытка и повтор с замечаниями) и пересборка
-// писем застрявших строк — укладываемся с запасом в таймаут прокси (300 с).
-export const maxDuration = 180;
+// Писатель — до 100 с на вызов, с повтором около 200 с, и пересборка писем:
+// ниже таймаута прокси (300 с, deploy/nginx). Сама работа укладывается в
+// ROUTE_BUDGET_MS — с запасом до maxDuration.
+export const maxDuration = 280;
+const ROUTE_BUDGET_MS = 270_000;
 
 /**
  * «Переписать цепочку» оффера: новая попытка писателя для шаблона, не
@@ -34,8 +36,11 @@ export const maxDuration = 180;
  * Только для законченного запуска: пока он идёт, воркер сам ведёт лимит
  * готовых и расход на ИИ в памяти — пересборка сбоку набрала бы готовых
  * сверх лимита, а её расход перетёрла бы следующая публикация прогресса.
+ * И одна пересборка на запуск за раз (отметка в progress_detail). Писателю не
+ * платим, если ждущих строк нет или лимит готовых уже набран.
  */
 export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: string; offerKey: string }> }) {
+  const startedAt = Date.now();
   const auth = await authed(req);
   if ('error' in auth) return auth.error;
   const { jobId, offerKey } = await ctx.params;
@@ -80,10 +85,23 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
 
   try {
     const result = await runWithOutreachContext({ lang: 'ru', budget }, () =>
-      regenerateOfferChain({ db: auth.supabase, jobId, chain, target: config.limit, libraries, sender, budget }),
+      regenerateOfferChain({
+        db: auth.supabase, jobId, chain, target: config.limit, libraries, sender, budget, deadlineAt: startedAt + ROUTE_BUDGET_MS,
+      }),
     );
     if (result.kind === 'missing') return jsonError(`В запуске нет цепочки оффера «${CHAIN_LABELS[chain]}»`, 404);
-    if (result.kind === 'busy') return jsonError('Эту цепочку уже переписывают — обновите экран через минуту', 409);
+    if (result.kind === 'busy') {
+      return jsonError(
+        result.reason === 'writing' && result.offer
+          ? `Сейчас пишется цепочка оффера «${CHAIN_LABELS[result.offer]}» — обновите экран через минуту`
+          : 'Цепочки этого запуска уже переписывают — обновите экран через минуту',
+        409,
+      );
+    }
+    if (result.kind === 'nothing') return jsonError('Компаний, которые ждут эту цепочку, нет — переписывать незачем', 409);
+    if (result.kind === 'limit') {
+      return jsonError(`Лимит готовых компаний запуска уже набран (${result.ready} из ${config.limit}) — пересобранные письма не стали бы готовыми`, 409);
+    }
     await logAudit(
       'polza_ru_outreach.template.regenerated',
       'Наш автоаутрич: цепочка оффера переписана',

@@ -40,6 +40,8 @@ export async function callJson(
   title: string,
   maxTokens = 1200,
   isComplete?: (raw: Record<string, unknown>) => boolean,
+  /** Общий срок вызова: роуту «Переписать цепочку» надо уложиться в свой таймаут. */
+  timeoutMs?: number,
 ): Promise<Record<string, unknown>> {
   const ctx = currentOutreachContext();
   const result = await callOutreachJson({
@@ -49,6 +51,7 @@ export async function callJson(
     title,
     maxTokens,
     lang: ctx?.lang ?? 'ru',
+    timeoutMs,
   });
   if (isComplete && !isComplete(result)) {
     throw new LlmCallError(`RU analysis «${title}»: в ответе нет обязательных полей`);

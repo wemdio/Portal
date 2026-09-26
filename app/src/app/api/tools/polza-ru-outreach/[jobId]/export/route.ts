@@ -13,7 +13,11 @@ export const dynamic = 'force-dynamic';
  *                  RU_OUTREACH_HANDOFF §3.5: это файл «кому и что отправлять»;
  * ?kind=journal  — все строки с этапом и причиной отсева: «почему выход такой».
  * ?kind=doubtful — очень спорные: те же колонки, что у готовых; в Instantly не идут без решения человека.
- *                  Писем у них нет (с 26.09.2026 очень спорным их не пишем) — почему спорная, видно в doubts.
+ *                  Почему спорная — в doubts/doubt_detail. Писем у большинства нет (очень спорным их не
+ *                  пишем, а без прошедшего проверку шаблона оффера — не из чего); есть только у тех, чьи
+ *                  письма собраны, но не прошли автопроверку (LETTERS_QA_FAILED), — человеку на правку.
+ *
+ * Страницы — по created_at, при равенстве по id: строки одной пачки вставки делят created_at.
  *
  * Названия колонок — поля из ТЗ латиницей: файл дальше грузят в рассылку,
  * где письма подставляются по имени колонки ({{email_1_body}}).
@@ -121,6 +125,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       .select('*')
       .eq('job_id', jobId)
       .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
     if (kind === 'ready') q = q.eq('row_status', 'ready').eq('qa_status', 'passed').not('recipient_email', 'is', null);
     if (kind === 'doubtful') q = q.eq('row_status', 'doubtful');

@@ -78,7 +78,11 @@ export interface ExportedIndex {
   inns: Set<string>;
 }
 
-/** Компании, уже попадавшие в готовую выгрузку любого оффера. */
+/**
+ * Компании, уже попадавшие в готовую выгрузку любого оффера. Страницы — в
+ * порядке id: без порядка Postgres отдаёт строки как придётся, и соседние
+ * страницы могли бы пропустить или повторить строки.
+ */
 export async function loadPreviouslyExported(db: SupabaseClient, excludeJobId: string): Promise<ExportedIndex> {
   const domains = new Set<string>();
   const inns = new Set<string>();
@@ -89,6 +93,7 @@ export async function loadPreviouslyExported(db: SupabaseClient, excludeJobId: s
       .select('normalized_domain,inn')
       .eq('row_status', 'ready')
       .neq('job_id', excludeJobId)
+      .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw new Error(`previously exported lookup failed: ${error.message}`);
     for (const row of data ?? []) {

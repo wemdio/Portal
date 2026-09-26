@@ -18,6 +18,7 @@
  */
 
 import { companyKey } from './company';
+import { describeTemplateFlag } from './qa';
 import { VERY_DOUBTFUL_FROM, type ChainType, type DoubtCode, type Signal } from './types';
 
 const DAY = 86_400_000;
@@ -131,11 +132,15 @@ export interface DoubtPatch {
   doubt_detail: string | null;
 }
 
-/** Шаблон оффера не написан (ИИ не ответил) или не прошёл проверку — почему, коротко. */
+/**
+ * Шаблон оффера не написан (ИИ не ответил) или не прошёл проверку — почему.
+ * Замечания — словами (describeTemplateFlag), а не кодами: пояснение читает
+ * человек в журнале и в выгрузке.
+ */
 export function templateDoubtText(template: { qaFlags: readonly string[]; error: string | null }): string {
   const text = template.error
     ? `${TEMPLATE_DETAIL_START}не написана: ${template.error}`
-    : `${TEMPLATE_DETAIL_START}не прошла проверку: ${template.qaFlags.join(', ') || 'без замечаний'}`;
+    : `${TEMPLATE_DETAIL_START}не прошла проверку: ${template.qaFlags.map(describeTemplateFlag).join(', ') || 'без замечаний'}`;
   return text.slice(0, MAX_LETTERS_DETAIL);
 }
 

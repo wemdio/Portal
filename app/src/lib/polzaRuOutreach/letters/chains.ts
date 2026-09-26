@@ -39,11 +39,19 @@ export interface ChainInput {
   /** У «Автоматизации» — исходная цепочка: её подтверждённый повод идёт в письмо 2. */
   baseChain?: ChainType;
   /**
-   * Готовая фраза-повод вместо собранной из сигнала. Так образец для писателя
-   * шаблонов (templateWriter.ts) получает на месте повода плейсхолдер {{повод}}:
-   * сигнал с таким текстом не собрать.
+   * Режим образца для писателя шаблонов (templateWriter.ts): готовая
+   * фраза-повод вместо собранной из сигнала — туда встаёт плейсхолдер
+   * {{повод}}, сигнал с таким текстом не собрать. В этом режиме цепочка
+   * собирается по контракту шаблона: повод — в письме 1 обоих вариантов и
+   * только там (у SDR и «Автоматизации» его прежнее место — в других абзацах).
    */
   opening?: string;
+  /**
+   * Режим образца: абзац гипотезы сегментов ({{гипотеза}}) в письме 3 без
+   * кейса — перед механикой, как в контракте шаблона. Без него письмо 3 —
+   * гипотеза или механика, как раньше.
+   */
+  hypothesis?: string;
 }
 
 function formatDate(iso: string | null | undefined): string | null {
@@ -242,7 +250,10 @@ function buildSdrChain(ctx: LetterContext, input: ChainInput): AssembledChain & 
           paragraphs(
             'Добрый день!',
             `Подскажите, пожалуйста, кто в ${b} отвечает за продажи и привлечение новых клиентов?`,
-            `Увидел вакансию ${title} и хочу обсудить внешний email-outreach как дополнительный канал первичного контакта с B2B-компаниями.`,
+            // В образце вакансию называет {{повод}} — отдельным абзацем, как в шаблоне.
+            ...(input.opening !== undefined
+              ? [input.opening, 'Хочу обсудить внешний email-outreach как дополнительный канал первичного контакта с B2B-компаниями.']
+              : [`Увидел вакансию ${title} и хочу обсудить внешний email-outreach как дополнительный канал первичного контакта с B2B-компаниями.`]),
             'Буду благодарен, если передадите письмо ответственному сотруднику или подскажете его контакт.',
           ),
           s,
@@ -315,7 +326,10 @@ function buildAutomationChain(ctx: LetterContext, input: ChainInput): AssembledC
   const b = q(ctx.brand);
   const s = ctx.sender;
   const value = claim(ctx, 'automation_value');
-  const signalBlock = input.opening ?? openingSentence(input, ctx.brand);
+  // Повод исходной цепочки — в письме 2. В образце для писателя шаблонов
+  // (input.opening) он в письме 1 обоих вариантов, как требует контракт шаблона.
+  const signalBlock = input.opening !== undefined ? null : openingSentence(input, ctx.brand);
+  const sampleOpening = input.opening ?? null;
 
   const letter1: Letter = ctx.isRouting
     ? {
@@ -325,6 +339,7 @@ function buildAutomationChain(ctx: LetterContext, input: ChainInput): AssembledC
           paragraphs(
             'Добрый день!',
             `Подскажите, пожалуйста, кто в ${b} отвечает за лидогенерацию?`,
+            sampleOpening,
             'Я занимаюсь развитием Polza Agency. Мы настраиваем автоматизированный email-outreach: согласовываем несколько узких B2B-сегментов и предложения, настраиваем пополнение базы и цепочки писем, а дальше кампании работают по заданным правилам.',
             'Буду благодарен, если передадите письмо ответственному сотруднику или подскажете его контакт.',
           ),
@@ -352,6 +367,7 @@ function buildAutomationChain(ctx: LetterContext, input: ChainInput): AssembledC
           body: signed(
             paragraphs(
               `Добрый день! Я коротко по поводу ${b}.`,
+              sampleOpening,
               'Я занимаюсь развитием Polza Agency. Мы настраиваем автоматизированный email-outreach: согласовываем несколько узких B2B-сегментов и предложения, настраиваем пополнение базы и цепочки писем, а дальше кампании работают по заданным правилам без ручного запуска каждой гипотезы.',
               value?.claim_text,
               `Подскажите, есть смысл обсудить применимость такого формата для ${b}?`,
@@ -456,7 +472,9 @@ export function buildChain(ctx: LetterContext, input: ChainInput, hypothesis: Se
       paragraphs(
         'Добрый день!',
         `${intro(s, true)}. Покажу на примере, как это выглядит.`,
-        caseBlock(ctx) ?? hypoText ?? MECHANISM,
+        // Образец шаблона: гипотеза отдельным абзацем перед механикой — пустая
+        // гипотеза удаляется, механика остаётся.
+        caseBlock(ctx) ?? (input.hypothesis !== undefined ? paragraphs(input.hypothesis, MECHANISM) : hypoText ?? MECHANISM),
         `Могу прислать короткий план первого теста для ${b}?`,
       ),
       s,
@@ -480,12 +498,19 @@ const SEGMENTS_SYSTEM = `Ты помогаешь агентству B2B-аутр
 }
 Правила: сегменты ДОЛЖНЫ соответствовать подтверждённому рынку из цитаты; без цифр, названий конкретных компаний, превосходных степеней и обещаний.`;
 
-/** Гипотеза сегментов письма 3 — только при подтверждённой цитате рынка. */
-export async function buildSegmentsHypothesis(input: {
-  brand: string;
-  productSummary: string | null;
-  marketQuote: string;
-}): Promise<SegmentsHypothesis | null> {
+/**
+ * Гипотеза сегментов письма 3 — только при подтверждённой цитате рынка.
+ * timeoutMs — общий срок вызова (роут «Переписать цепочку» ограничен своим
+ * таймаутом); без него — таймаут клиента по роли.
+ */
+export async function buildSegmentsHypothesis(
+  input: {
+    brand: string;
+    productSummary: string | null;
+    marketQuote: string;
+  },
+  options: { timeoutMs?: number } = {},
+): Promise<SegmentsHypothesis | null> {
   // Без массива segments ответ — сбой модели: LlmCallError (раннер пишет письма
   // без гипотезы), и серию «ИИ молчит» такой ответ не обнуляет.
   const raw = await callJson(
@@ -494,6 +519,7 @@ export async function buildSegmentsHypothesis(input: {
     'segments',
     400,
     (r) => Array.isArray(r.segments),
+    options.timeoutMs,
   );
   const clean = (items: string[], maxWords: number) =>
     items

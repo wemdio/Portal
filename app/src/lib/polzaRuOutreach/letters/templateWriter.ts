@@ -22,7 +22,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { callOutreachJson, type OutreachLlmUsage } from '@/lib/outreachLlm/client';
 import { BudgetExceededError, LlmAuthError, LlmCallError } from '@/lib/outreachLlm/context';
 import { claimsForChain, formatSignature, type CaseRecord, type OfferClaim, type SenderProfile } from '../libraries';
-import { describeTemplateFlag, runTemplateQa } from '../qa';
+import { describeTemplateFlag, runTemplateQa, type TemplateQaInput } from '../qa';
 import {
   CHAIN_LABELS,
   TEMPLATE_PLACEHOLDERS,
@@ -45,6 +45,12 @@ const ROW_COLUMNS = 'id,offer_key,status,letters,qa_flags,model,cost_usd,attempt
 /** Первая попытка и одна повторная — с замечаниями автопроверки. */
 const MAX_WRITER_ATTEMPTS = 2;
 /**
+ * Меньше этого до срока (роут «Переписать цепочку») повторную попытку не
+ * начинаем: Gemini не успеет, а оборванный запрос всё равно оплачен (как
+ * MIN_ATTEMPT_MS писателя в outreachLlm/client.ts).
+ */
+const WRITER_MIN_ATTEMPT_MS = 60_000;
+/**
  * Лимит токенов ответа писателя. Gemini считает в нём и скрытые рассуждения:
  * шесть писем шаблона с рассуждениями в 8000 по умолчанию могут не влезть, а
  * обрезанный ответ оплачен и выброшен. Платим только за написанное, поэтому
@@ -57,8 +63,12 @@ const WRITER_MAX_TOKENS = 12_000;
  * оффера до 15 минут.
  */
 export const WORKER_WRITER_TIMEOUT_MS = 300_000;
-/** В роуте «Переписать цепочку» — меньше: пользователь ждёт ответа на экране. */
-export const ROUTE_WRITER_TIMEOUT_MS = 60_000;
+/**
+ * В роуте «Переписать цепочку» — меньше: пользователь ждёт ответа на экране,
+ * а у прокси 300 с на запрос. Два вызова (попытка и повтор) — около 200 с,
+ * остальное — на пересборку писем.
+ */
+export const ROUTE_WRITER_TIMEOUT_MS = 100_000;
 /**
  * Строка pending дольше этого — занявший процесс умер (перезапуск воркера или
  * Next посреди записи): её можно занять заново. Больше двух вызовов писателя
@@ -89,7 +99,15 @@ export interface TemplateWriterDeps {
   jobId: string;
   sender: SenderProfile;
   claims: OfferClaim[];
+  /** Срок одного вызова писателя (со всеми повторами транспорта). */
   writerTimeoutMs: number;
+  /**
+   * Общий срок записи шаблона (Date.now()), обе попытки: роуту надо уложиться
+   * в свой таймаут. Повтор, которому не хватит минуты, не начинается.
+   */
+  deadlineAt?: number;
+  /** Остановка запуска: обрывает вызов писателя, строка шаблона освобождается. */
+  signal?: AbortSignal;
 }
 
 interface TemplateRow {
@@ -204,6 +222,21 @@ const OFFER_BRIEFS: Record<ChainType, OfferBrief> = {
 };
 
 const EXAMPLE_BRAND = 'Альфа';
+/**
+ * Приметные куски примеров {{повод}} — в шаблон они попасть не должны: это
+ * чужая компания в письме всем компаниям оффера (runTemplateQa, example_leak).
+ * Общие слова примеров («поиск и привлечение новых B2B-клиентов») сюда не
+ * входят — их шаблон может сказать и сам.
+ */
+const EXAMPLE_FRAGMENTS = [
+  EXAMPLE_BRAND,
+  'оборудование для складов',
+  'Металлообработка',
+  'филиал в Казани',
+  'Менеджер по активным продажам',
+  'складского оборудования',
+  'пищевых производств',
+];
 
 /** Как выглядит {{повод}} у этого оффера — из того же openingSentence, что подставит его компаниям. */
 function openingExamples(chain: ChainType): string[] {
@@ -227,13 +260,14 @@ function openingExamples(chain: ChainType): string[] {
 }
 
 /**
- * Образец — нынешняя цепочка оффера, собранная на плейсхолдерах: бренд
- * {{бренд}}, повод {{повод}}, кейс {{кейс}}, подпись {{подпись}}. Отправитель
- * настоящий: так он представляется в письмах 2–3, а это одинаково для всех
- * компаний запуска. Гипотезу образец не показывает (hypothesisText — готовый
- * текст, не плейсхолдер), её место описано словами.
+ * Образец — нынешняя цепочка оффера, собранная на плейсхолдерах в режиме
+ * образца (chains.ts: повод — в письме 1 обоих вариантов, гипотеза — абзацем
+ * перед механикой), то есть сам по себе правильный шаблон: runTemplateQa его
+ * пропускает, и писатель не учится на образце тому, за что его потом
+ * завернёт проверка. Отправитель настоящий: так он представляется в письмах
+ * 2–3, а это одинаково для всех компаний запуска.
  */
-function sampleChain(chain: ChainType, sender: SenderProfile, claims: OfferClaim[]): string {
+export function sampleTemplate(chain: ChainType, sender: SenderProfile, claims: OfferClaim[]): ChainTemplateLetters {
   const sampleCase: CaseRecord = { case_id: 'sample', public_name: '', industry_groups: [], allowed_chains: [], case_text_short: P.case };
   const input: ChainInput = {
     chain,
@@ -243,6 +277,7 @@ function sampleChain(chain: ChainType, sender: SenderProfile, claims: OfferClaim
     productSummary: null,
     baseChain: chain === 'automation' ? 'growth_event' : undefined,
     opening: P.opening,
+    hypothesis: chainUsesHypothesis(chain) ? P.hypothesis : undefined,
   };
   const ctx = (isRouting: boolean, caseRecord: CaseRecord | null): LetterContext => ({
     brand: P.brand, sender, isRouting, caseRecord, claims: claimsForChain(claims, chain),
@@ -252,26 +287,36 @@ function sampleChain(chain: ChainType, sender: SenderProfile, claims: OfferClaim
   const noCase = buildChain(ctx(false, null), input, null).letters;
   const signature = formatSignature(sender);
   const text = (body: string) => body.split(signature).join(P.signature);
+  return {
+    subject: direct[0].subject,
+    bodyDirect: text(direct[0].body),
+    bodyRouting: text(routing[0].body),
+    letter2: text(direct[1].body),
+    bodyWithCase: chainUsesCase(chain) ? text(direct[2].body) : null,
+    bodyWithoutCase: text(noCase[2].body),
+    letter4: text(direct[3].body),
+  };
+}
+
+function sampleText(sample: ChainTemplateLetters): string {
   return [
-    `ТЕМА ПИСЬМА 1: ${direct[0].subject}`,
+    `ТЕМА ПИСЬМА 1: ${sample.subject}`,
     '',
     'ПИСЬМО 1 — ЛИЧНО (почта ЛПР):',
-    text(direct[0].body),
+    sample.bodyDirect,
     '',
     'ПИСЬМО 1 — «ПЕРЕШЛИТЕ ОТВЕТСТВЕННОМУ» (общая почта):',
-    text(routing[0].body),
+    sample.bodyRouting,
     '',
     'ПИСЬМО 2:',
-    text(direct[1].body),
+    sample.letter2,
     '',
-    ...(chainUsesCase(chain) ? ['ПИСЬМО 3 — С КЕЙСОМ:', text(direct[2].body), ''] : []),
-    chainUsesHypothesis(chain)
-      ? 'ПИСЬМО 3 — БЕЗ КЕЙСА (в образце — механика; в шаблоне перед ней отдельной строкой поставь {{гипотеза}}):'
-      : 'ПИСЬМО 3 — БЕЗ КЕЙСА:',
-    text(noCase[2].body),
+    ...(sample.bodyWithCase !== null ? ['ПИСЬМО 3 — С КЕЙСОМ:', sample.bodyWithCase, ''] : []),
+    'ПИСЬМО 3 — БЕЗ КЕЙСА:',
+    sample.bodyWithoutCase,
     '',
     'ПИСЬМО 4:',
-    text(direct[3].body),
+    sample.letter4,
   ].join('\n');
 }
 
@@ -281,9 +326,9 @@ const WRITER_SYSTEM = [
   '',
   'ПЛЕЙСХОЛДЕРЫ — ровно в таком написании, других {{…}} не бывает:',
   '{{бренд}} — название компании-получателя. Пиши его в кавычках-ёлочках: «{{бренд}}».',
-  '{{повод}} — готовая фраза-повод из проверенных фактов о компании: одно-два законченных предложения с точкой. Бывает пустой, тогда её строка удаляется. Ставь её отдельной строкой без другого текста, письмо должно читаться и без неё; её смысл своими словами не повторяй.',
+  '{{повод}} — готовая фраза-повод из проверенных фактов о компании: одно-два законченных предложения с точкой. Только в письме 1. Бывает пустой, тогда её абзац удаляется. Ставь её отдельным абзацем (пустая строка до и после, без другого текста), письмо должно читаться и без неё; её смысл своими словами не повторяй.',
   '{{кейс}} — утверждённый текст кейса клиента Polza со строчной буквы, вставляется дословно. Пиши: «Для примера: {{кейс}}».',
-  '{{гипотеза}} — два-четыре предложения гипотезы первых сегментов для компании. Бывает пустой — ставь отдельной строкой без другого текста.',
+  '{{гипотеза}} — два-четыре предложения гипотезы первых сегментов для компании. Бывает пустой — ставь отдельным абзацем без другого текста.',
   '{{подпись}} — подпись отправителя в несколько строк.',
   '',
   'ПРАВИЛА:',
@@ -291,11 +336,12 @@ const WRITER_SYSTEM = [
   '2. Абзацы разделяй пустой строкой.',
   '3. В каждом письме ровно один вопросительный знак — один призыв к действию.',
   '4. У письма 1 есть тема: коротко, со строчной буквы, без «!» и «?», без слов «резюме», «кандидат», «отклик». Письма 2–4 — ответы в той же ветке, без темы.',
-  '5. Никаких цифр, кроме «15 минут», «2–3» и цифр внутри утверждённых формулировок — их вставляй только дословно. Не выдумывай результаты, проценты, сроки, объёмы, число клиентов.',
+  '5. Цифры — только «15 минут», «2–3» перед словом «сегмент» («2–3 сегмента», «2–3 узких сегмента») и цифры внутри утверждённых формулировок (их вставляй только дословно). Числа словами тоже нельзя: «десятки», «сотни», «тысячи», «вдвое», «втрое», «в N раз». Не обещай сроков и результатов: никаких «неделя», «месяц», «квартал», «процент». Не выдумывай результаты, объёмы, число клиентов.',
   '6. О компании-получателе — ничего сверх {{повод}}: не додумывай её рынок, клиентов, планы и проблемы. Боль — общее наблюдение о канале, а не диагноз получателю.',
-  '7. «Мы с вами уже общались» и похожее — только в оффере «Возврат».',
-  '8. Нельзя: давить срочностью или дефицитом («последний шанс», «осталось N мест»), обещать гарантии, писать «уникальный», «мы лучшие», «революционный», эмодзи, восклицательные знаки (кроме «Добрый день!»), разметку markdown и служебные слова (score, pipeline, ICP, LLM, evidence, JSON, null, TODO, скоринг).',
+  '7. Никаких намёков на прошлый контакт — «мы с вами уже общались», «ранее обсуждали», «переписывались», «созванивались», «наш разговор», «наша встреча» — кроме оффера «Возврат». Если разговор был, о нём скажет {{повод}}.',
+  '8. Нельзя слов с корнями «срочн» и «гарант» — даже с отрицанием («не срочно», «без гарантий» тоже нельзя). Нельзя давить дефицитом («последний шанс», «осталось N мест»), писать «уникальный», «мы лучшие», «революционный», эмодзи, восклицательные знаки (кроме «Добрый день!»), разметку markdown и служебные слова (score, pipeline, ICP, LLM, evidence, JSON, null, TODO, скоринг).',
   '9. Тон — как в образце: коротко, по-деловому, от первого лица отправителя, без канцелярита. Письмо 4 — самое короткое.',
+  `10. Примеры из задания (компания «${EXAMPLE_BRAND}» и её поводы) — только чтобы понять, что подставит код; в шаблон их не переносить.`,
   '',
   'Ответ — строгий JSON-объект по формату из сообщения, без markdown и пояснений.',
 ].join('\n');
@@ -322,9 +368,9 @@ function writerUserPrompt(chain: ChainType, sender: SenderProfile, claims: Offer
   const brief = OFFER_BRIEFS[chain];
   const chainClaims = claimsForChain(claims, chain);
   const places = [
-    `${P.opening} — в письме 1, в обоих вариантах (в образце он может стоять в другом письме — перенеси)`,
+    `${P.opening} — в письме 1, в обоих вариантах, и больше нигде`,
     ...(chainUsesCase(chain) ? [`${P.case} — только в письме 3 «с кейсом»`] : []),
-    ...(chainUsesHypothesis(chain) ? [`${P.hypothesis} — только в письме 3 «без кейса»`] : []),
+    ...(chainUsesHypothesis(chain) ? [`${P.hypothesis} — только в письме 3 «без кейса», отдельным абзацем`] : []),
     `${P.signature} — в конце каждого письма`,
   ];
   const lines = [
@@ -338,15 +384,15 @@ function writerUserPrompt(chain: ChainType, sender: SenderProfile, claims: Offer
     ...(!chainUsesCase(chain) ? [`${P.case} этому офферу не подбирается: плейсхолдера нет, и письма 3 «с кейсом» тоже.`] : []),
     ...(!chainUsesHypothesis(chain) ? [`${P.hypothesis} в этом оффере не используется.`] : []),
     `ОБЯЗАТЕЛЬНО: ${places.join('; ')}.`,
-    `${P.opening} у этого оффера выглядит так (пример для компании «${EXAMPLE_BRAND}»):`,
+    `${P.opening} у этого оффера выглядит так (пример для компании «${EXAMPLE_BRAND}» — в шаблон не переносить):`,
     ...openingExamples(chain).map((example) => `— ${example}`),
     '',
     `ОТПРАВИТЕЛЬ: ${intro(sender)} — так он представляется в письмах 2–3, как в образце; другого имени не пиши.`,
     'УТВЕРЖДЁННЫЕ ФОРМУЛИРОВКИ (вставлять только дословно; цифры — только из них):',
-    ...(chainClaims.length ? chainClaims.map((c) => `— ${c.claim_text.trim()}`) : ['— нет: пиши без цифр.']),
+    ...(chainClaims.length ? chainClaims.map((c) => `— ${c.claim_text}`) : ['— нет: пиши без цифр.']),
     '',
     'ОБРАЗЕЦ — нынешняя цепочка этого оффера, тексты согласованы с CEO. Держись их смысла, порядка и тона; формулировки можно улучшать:',
-    sampleChain(chain, sender, claims),
+    sampleText(sampleTemplate(chain, sender, claims)),
     '',
     'ФОРМАТ ОТВЕТА — JSON:',
     contractText(chain),
@@ -518,9 +564,22 @@ async function finishRow(db: SupabaseClient, claimed: TemplateRow, patch: Record
  * непредвиденные ошибки освобождают строку (failed с текстом) и летят дальше:
  * они про весь запуск, а не про оффер.
  */
+/**
+ * Вход проверки шаблона оффера, кроме самих писем: утверждённые формулировки,
+ * представление отправителя, примеры из промпта. Один для ответа писателя и
+ * для образца (sampleTemplate) — образец обязан проходить ту же проверку.
+ */
+export function templateQaInput(chain: ChainType, sender: SenderProfile, claims: OfferClaim[]): Omit<TemplateQaInput, 'letters'> {
+  return {
+    chain,
+    claimTexts: claimsForChain(claims, chain).map((c) => c.claim_text),
+    senderTexts: senderTexts(sender),
+    exampleTexts: [...EXAMPLE_FRAGMENTS, ...openingExamples(chain)],
+  };
+}
+
 async function writeTemplate(deps: TemplateWriterDeps, chain: ChainType, claimed: TemplateRow): Promise<ChainTemplate> {
-  const claims = claimsForChain(deps.claims, chain);
-  const qaInput = { chain, claimTexts: claims.map((c) => c.claim_text), senderTexts: senderTexts(deps.sender) };
+  const qaInput = templateQaInput(chain, deps.sender, deps.claims);
   const firstAttempt = Number(claimed.attempt ?? 1) || 1;
   let cost = 0;
   let model = claimed.model;
@@ -536,6 +595,13 @@ async function writeTemplate(deps: TemplateWriterDeps, chain: ChainType, claimed
   };
   try {
     for (let attempt = 1; attempt <= MAX_WRITER_ATTEMPTS; attempt += 1) {
+      const left = deps.deadlineAt === undefined ? Infinity : deps.deadlineAt - Date.now();
+      if (attempt > 1 && left < WRITER_MIN_ATTEMPT_MS) {
+        // Повтор не успеет до срока роута: шаблон failed с замечаниями первой
+        // попытки, «Переписать цепочку» можно нажать ещё раз.
+        log('warn', `job ${deps.jobId}: chain ${chain} retry skipped — ${Math.round(left / 1000)} s left before the deadline`);
+        break;
+      }
       calls += 1;
       const raw = await callOutreachJson({
         role: 'writer',
@@ -545,7 +611,8 @@ async function writeTemplate(deps: TemplateWriterDeps, chain: ChainType, claimed
         maxTokens: WRITER_MAX_TOKENS,
         lang: LANG,
         onUsage,
-        timeoutMs: deps.writerTimeoutMs,
+        timeoutMs: Math.min(deps.writerTimeoutMs, Math.max(1, left)),
+        signal: deps.signal,
       });
       letters = parseTemplateLetters(raw, chain);
       flags = letters ? runTemplateQa({ ...qaInput, letters }).flags : ['letters_missing'];
@@ -554,7 +621,11 @@ async function writeTemplate(deps: TemplateWriterDeps, chain: ChainType, claimed
       retry = { flags, previous: raw };
     }
   } catch (err) {
-    if (err instanceof LlmCallError) {
+    if (deps.signal?.aborted) {
+      // Запуск остановили посреди записи: строку освобождаем, остановку — дальше.
+      fatal = err;
+      error = 'запуск остановлен, цепочка не дописана';
+    } else if (err instanceof LlmCallError) {
       // Клиент уже повторил сеть, 5xx и битый JSON — третий раз писать не просим.
       error = `ИИ не ответил: ${err.message}`;
     } else {
@@ -598,6 +669,8 @@ async function writeTemplate(deps: TemplateWriterDeps, chain: ChainType, claimed
 async function obtainTemplate(deps: TemplateWriterDeps, chain: ChainType): Promise<ChainTemplate> {
   const deadline = Date.now() + PENDING_STALE_MS + 2 * POLL_MS;
   for (;;) {
+    // Запуск остановили, пока ждали чужую запись, — не ждём дальше.
+    deps.signal?.throwIfAborted();
     const claimed = await claimNew(deps.db, deps.jobId, chain);
     if (claimed) return writeTemplate(deps, chain, claimed);
     const row = await readRow(deps.db, deps.jobId, chain);
@@ -637,6 +710,23 @@ export function createChainTemplates(deps: TemplateWriterDeps): ChainTemplates {
       return promise;
     },
   };
+}
+
+/**
+ * Какой шаблон запуска сейчас пишется (pending, процесс жив) — или null.
+ * «Переписать цепочку» ждёт, пока допишется любой шаблон запуска: иначе две
+ * пересборки одного запуска делили бы лимит готовых и расход на ИИ.
+ */
+export async function templateBeingWritten(db: SupabaseClient, jobId: string): Promise<ChainType | null> {
+  const { data, error } = await db.from(TABLE).select(ROW_COLUMNS).eq('job_id', jobId).eq('lang', LANG).eq('status', 'pending');
+  if (error) throw new Error(`Не удалось прочитать цепочки запуска: ${error.message}`);
+  const busy = ((data ?? []) as TemplateRow[]).find((row) => !isStale(row));
+  return busy ? (busy.offer_key as ChainType) : null;
+}
+
+/** Строка шаблона оффера есть в запуске (у оффера были компании, дошедшие до писем). */
+export async function templateExists(db: SupabaseClient, jobId: string, chain: ChainType): Promise<boolean> {
+  return (await readRow(db, jobId, chain)) !== null;
 }
 
 export type RegenerateTemplateResult =
