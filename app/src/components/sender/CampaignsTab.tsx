@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2, Pause, Play, Plus, Settings, Square, Trash2, Users } from 'lucide-react';
 import {
   deleteCampaign,
@@ -30,6 +30,14 @@ const ACTION_FAILED: Record<CampaignAction, string> = {
   finish: 'Не удалось завершить',
   delete: 'Не удалось удалить',
 };
+
+/** Сколько держится подсветка кампании, открытой по ссылке. */
+const HIGHLIGHT_MS = 4000;
+
+/** id строки кампании в разметке — к нему прокручивает ссылка ?campaign=<id>. */
+function campaignRowId(campaignId: string): string {
+  return `sender-campaign-${campaignId}`;
+}
 
 function campaignsLabel(count: number): string {
   const mod10 = count % 10;
@@ -105,11 +113,14 @@ function FolderSummary({ folder }: { folder: SenderFolderDto }) {
 
 function CampaignRow({
   campaign,
+  highlighted,
   onEdit,
   onRecipients,
   onAction,
 }: {
   campaign: CampaignDto;
+  /** Кампания открыта по ссылке — подсвечена, пока на неё смотрят. */
+  highlighted: boolean;
   onEdit: () => void;
   onRecipients: () => void;
   onAction: (action: CampaignAction) => void;
@@ -121,7 +132,12 @@ function CampaignRow({
   const poolFromFolder = Boolean(campaign.folder_id) && campaign.mailboxes.length === 0 && campaign.status === 'draft';
 
   return (
-    <div className="flex flex-wrap items-center gap-4 px-5 py-4">
+    <div
+      id={campaignRowId(campaign.id)}
+      className={`flex flex-wrap items-center gap-4 px-5 py-4 transition-colors duration-700 ${
+        highlighted ? 'bg-blue-50 ring-2 ring-inset ring-blue-200' : ''
+      }`}
+    >
       <div className="min-w-48 flex-1">
         <div className="flex items-center gap-2">
           {/* Название — вход в настройки: отдельная кнопка «Изменить» в
@@ -226,8 +242,12 @@ function CampaignRow({
  * «Залить в Рассылку» заводит свою кампанию в папке своего аутрича, и одним
  * списком они смешались бы с кампаниями, созданными вручную («Остальные»). У
  * папки — «Настройки»: ящики и расписание, которые получит её новая кампания.
+ *
+ * focusCampaignId — кампания из ссылки (?campaign=<id>, кнопка «Открыть в
+ * Рассылке» на экране запуска аутрича): после первой загрузки список
+ * прокручивается к ней, и она ненадолго подсвечивается.
  */
-export function CampaignsTab() {
+export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: string | null } = {}) {
   const [campaigns, setCampaigns] = useState<CampaignDto[]>([]);
   // В список влезли не все кампании: сервер отдаёт последние.
   const [truncated, setTruncated] = useState(false);
@@ -243,14 +263,34 @@ export function CampaignsTab() {
   const [recipientsOf, setRecipientsOf] = useState<CampaignDto | null>(null);
   // Папка, чьи настройки открыты.
   const [folderSettings, setFolderSettings] = useState<SenderFolderDto | null>(null);
+  // Кампания из ссылки ищется один раз — после первой загрузки: обновление
+  // списка после «Запустить» не должно снова дёргать экран к ней.
+  const pendingFocus = useRef(focusCampaignId);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  // Кампании из ссылки нет в списке — сказать, а не молча показать список.
+  const [linkMissing, setLinkMissing] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     // Папки и кампании грузятся независимо: не загрузились папки — кампании
     // всё равно видны, просто одним списком.
     const [campaignsRes, foldersRes] = await Promise.allSettled([fetchCampaigns(), fetchFolders()]);
     if (campaignsRes.status === 'fulfilled') {
-      setCampaigns(campaignsRes.value.campaigns);
-      setTruncated(Boolean(campaignsRes.value.truncated));
+      const { campaigns: list, truncated: cut } = campaignsRes.value;
+      setCampaigns(list);
+      setTruncated(Boolean(cut));
+      const target = pendingFocus.current;
+      if (target) {
+        pendingFocus.current = null;
+        if (list.some((campaign) => campaign.id === target)) {
+          setHighlightId(target);
+        } else {
+          setLinkMissing(
+            cut
+              ? 'Кампании из ссылки нет среди последних в списке — более старые сюда не помещаются.'
+              : 'Кампания из ссылки не найдена — возможно, её удалили.',
+          );
+        }
+      }
     } else {
       setError(campaignsRes.reason instanceof Error ? campaignsRes.reason.message : 'Не удалось загрузить кампании');
     }
@@ -266,6 +306,15 @@ export function CampaignsTab() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Строка уже на экране (подсветка ставится вместе со списком) — прокручиваем
+  // к ней и через несколько секунд гасим подсветку.
+  useEffect(() => {
+    if (!highlightId) return;
+    document.getElementById(campaignRowId(highlightId))?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const timer = window.setTimeout(() => setHighlightId(null), HIGHLIGHT_MS);
+    return () => window.clearTimeout(timer);
+  }, [highlightId]);
 
   const act = async (campaign: CampaignDto, action: CampaignAction) => {
     if (action === 'finish' && !window.confirm(`Завершить кампанию «${campaign.name}»? Запланированные письма отменятся.`)) {
@@ -300,6 +349,7 @@ export function CampaignsTab() {
     <div className="space-y-4">
       {notice ? <p className="text-sm text-emerald-600">{notice}</p> : null}
       {error ? <p className="text-sm text-red-600">{error}</p> : null}
+      {linkMissing ? <p className="text-sm text-amber-600">{linkMissing}</p> : null}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         {folders.length ? (
@@ -366,6 +416,7 @@ export function CampaignsTab() {
                     <CampaignRow
                       key={campaign.id}
                       campaign={campaign}
+                      highlighted={campaign.id === highlightId}
                       onEdit={() => setEditing(campaign)}
                       onRecipients={() => setRecipientsOf(campaign)}
                       onAction={(action) => void act(campaign, action)}
