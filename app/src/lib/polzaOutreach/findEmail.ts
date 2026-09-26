@@ -64,6 +64,7 @@ const ROLE_PRIORITY = [
   'enquiries',
   'inquiries',
   'enquiry',
+  'inquiry',
   'contact',
   'contactus',
   'hello',
@@ -77,8 +78,13 @@ const ROLE_PRIORITY = [
   'ask',
 ] as const;
 
-/** Обезличенные «общие» ящики — в отчёте отличаются от отдела продаж. */
+/**
+ * Обезличенные «общие» ящики — в отчёте отличаются от отдела продаж, и письмо 1
+ * им идёт в варианте «кто у вас за это отвечает?» (renderTemplate): читает его
+ * не ЛПР. enquiries@ и inquiries@ — тот же общий ящик для входящих вопросов.
+ */
 const GENERIC_LOCALS = new Set([
+  'enquiries', 'inquiries', 'enquiry', 'inquiry',
   'contact', 'contactus', 'hello', 'hallo', 'hi', 'hey', 'team', 'office', 'info', 'welcome', 'ask',
 ]);
 

@@ -224,8 +224,9 @@ async function refreshJob(db: SupabaseClient, jobId: string, spent: Spend, recou
   if (error || !job) throw new Error(`Не удалось прочитать запуск: ${error?.message ?? 'не найден'}`);
   const detail = asObject(job.progress_detail);
   const patch: Record<string, unknown> = {};
+  const config = sanitizePolzaOutreachConfig((job.config ?? {}) as Partial<PolzaOutreachConfig>);
   if (hasSpend) {
-    const limit = sanitizePolzaOutreachConfig((job.config ?? {}) as Partial<PolzaOutreachConfig>).llm_budget_usd;
+    const limit = config.llm_budget_usd;
     const total = JobBudget.fromSnapshot((detail.llm ?? null) as Partial<OutreachLlmBudgetSnapshot> | null, limit);
     for (const role of ['analysis', 'writer'] as const) {
       total.byRole[role].usd += spent[role].usd;
@@ -250,7 +251,11 @@ async function refreshJob(db: SupabaseClient, jobId: string, spent: Spend, recou
       if (!data || data.length < PAGE) break;
     }
     const ready = rows.filter((r) => r.status === 'ready').length;
-    Object.assign(detail, { ready, funnel: polzaFunnel(rows) });
+    const awaiting = rows.filter((r) => r.status === 'needs_review' && (r.review_reason ?? '').startsWith('template_failed')).length;
+    Object.assign(detail, { ready, awaiting_templates: awaiting, funnel: polzaFunnel(rows) });
+    // Пересборка добрала лимит готовых — запуск закончился тем, ради чего шёл
+    // (раньше — «ждут цепочку» или «кончились кандидаты»).
+    if (ready >= config.limit) detail.stop_reason = 'target_reached';
     patch.total_parsed = ready;
   }
   patch.progress_detail = detail;

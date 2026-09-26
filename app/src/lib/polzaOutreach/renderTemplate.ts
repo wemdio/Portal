@@ -146,7 +146,14 @@ export function composeCompanyLetters(template: PolzaChainTemplateLetters, input
     signature,
     isRouting,
   });
-  // Цифры в письмах — только из названия, поводов и утверждённого кейса.
-  const allowedFacts = [company, ...triggers.map((t) => t.title), ...(caseHit ? [caseHit.snippet, caseHit.segment] : [])];
+  // Проверенные факты: цифры в письмах — только из них, а запретные и служебные
+  // слова гард ищет в тексте без них (имя «Leading Edge» — не наша реклама).
+  // Сегменты — из разбора сайта, цифр в них не бывает (siteProfile).
+  const allowedFacts = [
+    company,
+    ...triggers.map((t) => t.title),
+    ...(caseHit ? [caseHit.snippet, caseHit.segment] : []),
+    ...input.segments.map(tidy),
+  ];
   return { letters, guard: guardLetters(letters, allowedFacts, signature), isRouting };
 }

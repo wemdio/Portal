@@ -28,6 +28,7 @@ import {
   caseSentence,
   describeTemplateFlag,
   guardTemplate,
+  normalizeSampleRange,
   segmentsBlock,
   triggerPhrase,
   triggerShort,
@@ -82,6 +83,9 @@ const MIN_RETRY_MS = 60_000;
 export const PENDING_STALE_MS = 15 * 60_000;
 const POLL_MS = 5_000;
 
+/** Начало error у шаблона, который не написан, потому что модель не ответила (а не лимит, ключ или остановка). */
+const AI_FAILED_PREFIX = 'ИИ не ответил: ';
+
 export interface ChainTemplate {
   id: string;
   offer: PolzaOfferKey;
@@ -89,8 +93,14 @@ export interface ChainTemplate {
   /** Письма шаблона; у failed — последний вариант писателя (на экран), если он был. */
   letters: PolzaChainTemplateLetters | null;
   qaFlags: string[];
-  /** Почему шаблона нет совсем: ИИ не ответил, лимит на ИИ, ключ. */
+  /** Почему шаблона нет совсем: ИИ не ответил, лимит на ИИ, ключ, остановка запуска. */
   error: string | null;
+  /**
+   * Шаблона нет, потому что модель не ответила (сеть, 5xx, битый JSON после
+   * повторов), — не приговор офферу: раннер один раз пробует его заново в
+   * следующей волне. Провал проверки — ответ писателя, его не повторяем.
+   */
+  aiFailed: boolean;
   model: string | null;
   /** Все попытки шаблона, включая прошлые «Переписать цепочку». */
   costUsd: number;
@@ -106,6 +116,12 @@ export interface TemplateWriterDeps {
   writerTimeoutMs: number;
   /** Срок обеих попыток вместе; нет — у каждой попытки свой writerTimeoutMs. */
   writerTotalMs?: number;
+  /**
+   * Остановка запуска: обрывает вызов писателя (Gemini думает минутами, и без
+   * сигнала «Остановить» ждало бы его и заплатило), строка шаблона
+   * освобождается как failed — «Переписать цепочку» не ждёт 15 минут.
+   */
+  signal?: AbortSignal;
 }
 
 interface TemplateRow {
@@ -205,17 +221,51 @@ const OFFER_BRIEFS: Record<PolzaOfferKey, OfferBrief> = {
 
 const EXAMPLE_COMPANY = 'Acme';
 
-/** Как выглядит {{trigger}} у оффера — из того же triggerPhrase, что подставит его компаниям. */
+/**
+ * Как выглядит {{trigger}} у оффера — из того же triggerPhrase, что подставит
+ * его компаниям. Должности примеров — нарочно приметные (не «head of sales»,
+ * которую шаблон мог бы назвать и сам): проверка ищет их в шаблоне как
+ * перенесённый пример.
+ */
 const EXAMPLE_TRIGGERS: Record<PolzaOfferKey, Trigger[]> = {
   hiring: [
     { type: 'hiring', title: 'Sales Development Representative', url: null, date: null, quote: null },
-    { type: 'hiring', title: 'Head of Sales', url: null, date: null, quote: null },
+    { type: 'hiring', title: 'Founding Account Executive', url: null, date: null, quote: null },
   ],
   yc: [{ type: 'yc', title: 'W24', url: null, date: null, quote: null }],
   launch: [{ type: 'launch', title: 'Acme launched its self-serve workspace', url: null, date: null, quote: null }],
   tech_stack: [{ type: 'tech_stack', title: 'HubSpot, Apollo', url: null, date: null, quote: null }],
   none: [],
 };
+
+/**
+ * Приметные куски примеров задания — в шаблоне их быть не должно: это чужая
+ * компания и чужой повод в письме всем компаниям оффера (guardTemplate,
+ * example_leak). Хвосты фраз-поводов тоже здесь: шаблон, повторивший
+ * {{trigger}} своими словами, сказал бы о повторе дважды или приписал его
+ * компании, у которой повод другой.
+ */
+const EXAMPLE_FRAGMENTS = [
+  EXAMPLE_COMPANY,
+  'Sales Development Representative',
+  'Founding Account Executive',
+  'W24',
+  'HubSpot',
+  'Apollo',
+  'self-serve workspace',
+  'is becoming a priority',
+  'proving repeatable GTM fast',
+  'was part of YC',
+  'Saw the recent launch',
+  'the right first B2B accounts',
+  'already uses outbound/CRM tools',
+  'not sending but account selection',
+];
+
+/** Примеры задания для проверки шаблона (guardTemplate): один список для ответа писателя и для образца. */
+export function templateQaExamples(): readonly string[] {
+  return EXAMPLE_FRAGMENTS;
+}
 
 // Образец собирается на фиктивной компании, затем повод, кейс, сегменты и
 // подпись заменяются плейсхолдерами: так писатель видит, где что стоит.
@@ -283,10 +333,10 @@ const WRITER_SYSTEM = [
   '',
   'PLACEHOLDERS — spelled exactly like this, no other {{…}} exist:',
   '{{company}} — the recipient company name (e.g. "Acme"). Use it inside sentences.',
-  '{{trigger}} — a ready sentence about the verified reason we are writing, ending with a period (e.g. "Saw that Acme is hiring for Head of Sales, looks like outbound/GTM is becoming a priority."). Put it on its own line with no other text. It can be empty and then its line is removed, so the email must read fine without it. Do not repeat its meaning in your own words.',
+  '{{trigger}} — a ready sentence about the verified reason we are writing, ending with a period (e.g. "Saw that Acme is hiring for Founding Account Executive, looks like outbound/GTM is becoming a priority."). Put it in a paragraph of its own. It can be empty and then its paragraph is removed, so the email must read fine without it. Do not repeat its meaning in your own words.',
   '{{trigger_short}} — a short phrase for the same reason to use inside a sentence (e.g. "hiring for GTM roles": "when a team is {{trigger_short}}, …").',
-  '{{case}} — one complete sentence about an approved Polza client case, inserted verbatim (e.g. "For a similar B2B software company, we helped … get … replies."). Own line, no other text.',
-  '{{segments}} — a short block with the first 2–3 segments we would test for the company, with its own lead-in line ("For Acme, I would probably start with:" and a numbered list). Own line, no other text. It can be empty and then its line is removed.',
+  '{{case}} — one complete sentence about an approved Polza client case, inserted verbatim (e.g. "For a similar B2B software company, we helped … get … replies."). A paragraph of its own.',
+  '{{segments}} — a short block with the first 2–3 segments we would test for the company, with its own lead-in line ("For Acme, I would probably start with:" and a numbered list). A paragraph of its own, no lead-in of yours before it. It can be empty and then its paragraph is removed.',
   '{{signature}} — the sender signature block (several lines).',
   '',
   'RULES:',
@@ -294,11 +344,13 @@ const WRITER_SYSTEM = [
   '2. Separate paragraphs with a blank line.',
   '3. Exactly one question mark in every email — one call to action.',
   '4. Email 1 has a subject line: short, lowercase, no "!", may contain {{company}}, no other placeholder. Emails 2–4 are replies in the same thread and have no subject.',
-  '5. The only number allowed is "20–30", and only in the phrase about the free sample of 20–30 accounts; the numbers of a case come only inside {{case}}. Never invent results or promises: no percentages, no multipliers ("twice", "2x", "double"), no time frames ("in two weeks", "within a month"), no "dozens/hundreds/thousands" of anything.',
+  '5. The only number allowed is "20–30", and only in the phrase about the free sample of 20–30 accounts; the numbers of a case come only inside {{case}}. Never invent results or promises: no percentages; no multipliers or amounts, in digits or in words ("twice", "double", "2x", "tenfold", "in half", "dozens", "hundreds", "thousands", "three meetings", "ten leads"); no time-frame promises ("in two weeks", "within a month", "in the next few weeks", "by next quarter"). Proposing a call "next week" or "this week" is fine.',
   '6. Nothing about the recipient beyond the placeholders: do not guess their market, customers, plans or problems. The pain is a general observation about outbound, not a diagnosis of the recipient.',
   '7. We have never talked to the recipient: no "as we discussed", "following up on our call", "we spoke". Emails 2–4 follow up on my own previous email.',
   '8. Never: urgency or scarcity pressure, guarantees, hype words ("leading", "world-class", "revolutionary", "best-in-class", "full-service"), exclamation marks, emoji, markdown (**bold**, # headings), internal words (score, scoring, ICP, LLM, JSON, null, evidence, validation). Plain dash lists like in the sample are fine.',
   '9. Tone — like the sample: short, plain, peer-to-peer, first person of the sender, natural American business English, no filler and no corporate jargon. Keep every email under about 90 words; email 4 is the shortest.',
+  '10. {{trigger}}, {{case}} and {{segments}} are paragraphs of their own: a blank line before and after, no other text, and no lead-in line ending with ":" right before them — when a value is empty, its paragraph is removed and nothing must dangle.',
+  `11. The examples in this task (the company "${EXAMPLE_COMPANY}", its job titles and trigger phrases) only show what the code will insert — never copy them or their wording into the template.`,
   '',
   'Answer with a strict JSON object in the format from the message, with no markdown and no comments.',
 ].join('\n');
@@ -332,13 +384,16 @@ function writerUserPrompt(offer: PolzaOfferKey, retry: RetryNote | null): string
     'EMAIL GOALS:',
     ...brief.goals.map((goal, i) => `${i + 1} — ${goal}`),
     'body_direct — email 1 for a sales or personal inbox: the reader may be the right person, so the one question is about their interest (whether new pipeline is a priority, whether it is worth a look), or a soft fork: relevant for you, or who owns this on your team.',
-    'body_routing — email 1 for a shared inbox (info@, hello@, contact@): the reader is not the decision-maker. Ask who is the right person to talk to about new B2B pipeline and outbound, or ask to forward the email to them; explain in one line what we do.',
+    'body_routing — email 1 for a shared inbox (info@, hello@, contact@): the reader is not the decision-maker. Ask who is the right person to talk to about new B2B pipeline and outbound, or ask them to forward this email to that person; explain in one line what we do.',
     '',
     `PLACEHOLDERS OF THIS OFFER: ${polzaTemplatePlaceholdersFor(offer).join(', ')}.`,
     ...(hasTrigger ? [] : [`This offer has no ${P.trigger}: do not use it.`]),
     `REQUIRED: ${places.join('; ')}.`,
     ...(examples.length
-      ? [`${P.trigger} for this offer looks like this (example for "${EXAMPLE_COMPANY}"):`, ...examples.map((example) => `— ${example}`)]
+      ? [
+          `${P.trigger} for this offer looks like this (example for "${EXAMPLE_COMPANY}" — code inserts it, never copy it into the template):`,
+          ...examples.map((example) => `— ${example}`),
+        ]
       : []),
     `${P.triggerShort} for this offer: "${triggerShort(EXAMPLE_TRIGGERS[offer][0] ?? null)}".`,
     '',
@@ -365,7 +420,8 @@ function writerUserPrompt(offer: PolzaOfferKey, retry: RetryNote | null): string
 
 // Строка-прощание перед подписью: у цепочки CEO его нет — подпись сама
 // закрывает письмо, а «Best,» над ней выглядел бы оборванным.
-const SIGN_OFF_LINE = /^(?:best|best regards|kind regards|warm regards|regards|thanks|thank you|many thanks|cheers|all the best|sincerely)[,.]?$/i;
+const SIGN_OFF_LINE =
+  /^(?:best|best regards|best wishes|kind regards|warm regards|warmest regards|warmly|regards|thanks|thank you|thanks again|thanks in advance|many thanks|cheers|all the best|talk soon|speak soon|looking forward|sincerely|yours(?: truly| sincerely)?)[,.!]?$/i;
 
 /** Тело письма: переводы строк, хвостовые пробелы и концовка с подписью — в одном виде. */
 function normalizeBody(value: unknown): string {
@@ -373,7 +429,8 @@ function normalizeBody(value: unknown): string {
   let text = value.replace(/\r\n?/g, '\n');
   // Модель иногда экранирует перевод строки дважды — в тексте остаётся «\n».
   if (!text.includes('\n') && text.includes('\\n')) text = text.replace(/\\n/g, '\n');
-  text = text.replace(/[ \t]+\n/g, '\n').trim();
+  // «20-30», «20 to 30» → «20–30»: проверка шаблона и гард писем видят одну запись.
+  text = normalizeSampleRange(text.replace(/[ \t]+\n/g, '\n').trim());
   const end = /\n\s*\{\{signature\}\}$/.exec(text);
   if (!end) return text;
   // Подпись — последним абзацем: одна пустая строка перед ней, без «Best,».
@@ -421,9 +478,14 @@ export function templateLettersToJson(t: PolzaChainTemplateLetters): Array<Recor
 
 /* ─────────────────────────── Строка в базе ─────────────────────────── */
 
-function isStale(row: TemplateRow, staleMs = PENDING_STALE_MS): boolean {
+function isStale(row: Pick<TemplateRow, 'updated_at'>, staleMs = PENDING_STALE_MS): boolean {
   const t = Date.parse(row.updated_at);
   return !Number.isFinite(t) || Date.now() - t > staleMs;
+}
+
+/** Строка failed, потому что модель не ответила (а не проверка, лимит, ключ или остановка). */
+function aiFailedRow(row: TemplateRow): boolean {
+  return row.status === 'failed' && (row.error ?? '').startsWith(AI_FAILED_PREFIX);
 }
 
 function templateFromRow(row: TemplateRow, offer: PolzaOfferKey): ChainTemplate {
@@ -436,6 +498,7 @@ function templateFromRow(row: TemplateRow, offer: PolzaOfferKey): ChainTemplate 
     letters,
     qaFlags: row.qa_flags ?? [],
     error: row.error ?? (row.status === 'ok' && !letters ? 'письма шаблона в базе не разбираются' : null),
+    aiFailed: aiFailedRow(row),
     model: row.model,
     costUsd: Number(row.cost_usd ?? 0) || 0,
     attempt: Number(row.attempt ?? 0) || 0,
@@ -514,9 +577,9 @@ async function finishRow(db: SupabaseClient, claimed: TemplateRow, patch: Record
 
 /**
  * Писатель пишет шаблон в занятую строку: попытка, проверка, при провале —
- * повтор с замечаниями. Итог — в строку. Лимит на ИИ, ключ и прочие
- * непредвиденные ошибки освобождают строку (failed с текстом) и летят дальше:
- * они про весь запуск, а не про оффер.
+ * повтор с замечаниями. Итог — в строку. Лимит на ИИ, ключ, остановка запуска
+ * и прочие непредвиденные ошибки освобождают строку (failed с текстом) и летят
+ * дальше: они про весь запуск, а не про оффер.
  */
 async function writeTemplate(deps: TemplateWriterDeps, offer: PolzaOfferKey, claimed: TemplateRow): Promise<ChainTemplate> {
   const firstAttempt = Number(claimed.attempt ?? 1) || 1;
@@ -552,17 +615,24 @@ async function writeTemplate(deps: TemplateWriterDeps, offer: PolzaOfferKey, cla
         lang: LANG,
         onUsage,
         timeoutMs: Math.min(deps.writerTimeoutMs, left),
+        signal: deps.signal,
       });
       letters = parseTemplateLetters(raw);
-      flags = letters ? guardTemplate(letters, offer).flags : ['letters_missing'];
+      flags = letters ? guardTemplate(letters, offer, EXAMPLE_FRAGMENTS).flags : ['letters_missing'];
       if (!flags.length) break;
       log('warn', `job ${deps.jobId}: offer ${offer} attempt ${attempt} failed QA: ${flags.join(', ')}`);
       retry = { flags, previous: raw };
     }
   } catch (err) {
-    if (err instanceof LlmCallError) {
+    if (deps.signal?.aborted) {
+      // Запуск остановили посреди записи: строку освобождаем как failed — не
+      // pending, иначе «Переписать цепочку» ждала бы её 15 минут, — а
+      // остановку отдаём дальше. Оборванный запрос клиент уже списал с лимита.
+      fatal = err;
+      error = 'запуск остановлен, цепочка не дописана';
+    } else if (err instanceof LlmCallError) {
       // Клиент уже повторил сеть, 5xx и битый JSON — третий раз писать не просим.
-      error = `ИИ не ответил: ${err.message}`;
+      error = `${AI_FAILED_PREFIX}${err.message}`;
     } else {
       fatal = err;
       error = err instanceof BudgetExceededError
@@ -578,6 +648,7 @@ async function writeTemplate(deps: TemplateWriterDeps, offer: PolzaOfferKey, cla
     letters,
     qaFlags: flags,
     error,
+    aiFailed: !fatal && Boolean(error?.startsWith(AI_FAILED_PREFIX)),
     model,
     costUsd: roundUsd((Number(claimed.cost_usd ?? 0) || 0) + cost),
     attempt: firstAttempt + Math.max(0, calls - 1),
@@ -600,14 +671,29 @@ async function writeTemplate(deps: TemplateWriterDeps, offer: PolzaOfferKey, cla
 /**
  * Шаблон оффера для воркера: своя строка или готовая чужая. Чужую pending
  * (её пишет другой процесс) ждём, пока допишет; умер — занимаем заново.
+ * reclaimAiFailed — шаблон, не написанный из-за молчания модели, занять и
+ * написать ещё раз (раннер просит об этом один раз на оффер, в следующей волне).
  */
-async function obtainTemplate(deps: TemplateWriterDeps, offer: PolzaOfferKey): Promise<ChainTemplate> {
+async function obtainTemplate(deps: TemplateWriterDeps, offer: PolzaOfferKey, reclaimAiFailed = false): Promise<ChainTemplate> {
   const deadline = Date.now() + PENDING_STALE_MS + 2 * POLL_MS;
+  let reclaim = reclaimAiFailed;
   for (;;) {
+    // Запуск остановили, пока ждали чужую запись, — не ждём дальше.
+    deps.signal?.throwIfAborted();
     const claimed = await claimNew(deps.db, deps.jobId, offer);
     if (claimed) return writeTemplate(deps, offer, claimed);
     const row = await readRow(deps.db, deps.jobId, offer);
-    if (row && row.status !== 'pending') return templateFromRow(row, offer);
+    if (row && row.status !== 'pending') {
+      if (reclaim && aiFailedRow(row)) {
+        // Одна попытка занять: не вышло — строку уже пишет кто-то другой,
+        // ждём его результата, как у любой чужой pending.
+        reclaim = false;
+        const taken = await claimExisting(deps.db, row);
+        if (taken) return writeTemplate(deps, offer, taken);
+        continue;
+      }
+      return templateFromRow(row, offer);
+    }
     if (row && isStale(row)) {
       const taken = await claimExisting(deps.db, row);
       if (taken) return writeTemplate(deps, offer, taken);
@@ -621,6 +707,15 @@ async function obtainTemplate(deps: TemplateWriterDeps, offer: PolzaOfferKey): P
 
 export interface ChainTemplates {
   get(offer: PolzaOfferKey): Promise<ChainTemplate>;
+  /**
+   * Шаблоны, не написанные из-за молчания модели (сеть, 5xx, битый ответ), —
+   * забыть, чтобы следующая компания оффера один раз попробовала заново:
+   * сбой Requesty на минуту не должен оставить оффер без писем до конца
+   * запуска. Раннер зовёт это между волнами; провал проверки не забываем —
+   * писатель ответил, и тот же запрос дал бы то же. Каждый оффер — не больше
+   * одного такого повтора за запуск. Возвращает офферы, которые попробуют снова.
+   */
+  retryAiFailures(): PolzaOfferKey[];
 }
 
 /**
@@ -629,18 +724,39 @@ export interface ChainTemplates {
  */
 export function createChainTemplates(deps: TemplateWriterDeps): ChainTemplates {
   const byOffer = new Map<PolzaOfferKey, Promise<ChainTemplate>>();
+  const settled = new Map<PolzaOfferKey, ChainTemplate>();
+  const retried = new Set<PolzaOfferKey>();
+  const reclaim = new Set<PolzaOfferKey>();
   return {
     get(offer) {
       const known = byOffer.get(offer);
       if (known) return known;
-      const promise = obtainTemplate(deps, offer);
+      const promise = obtainTemplate(deps, offer, reclaim.delete(offer));
       byOffer.set(offer, promise);
-      // Сбой базы — не ответ писателя: следующая компания оффера попробует
-      // снова. Лимит на ИИ и ключ — про весь запуск, их запоминаем.
-      promise.catch((err: unknown) => {
-        if (!(err instanceof BudgetExceededError) && !(err instanceof LlmAuthError)) byOffer.delete(offer);
-      });
+      promise.then(
+        (template) => {
+          settled.set(offer, template);
+        },
+        // Сбой базы или остановка — не ответ писателя: следующая компания
+        // оффера попробует снова. Лимит на ИИ и ключ — про весь запуск, их
+        // запоминаем.
+        (err: unknown) => {
+          if (!(err instanceof BudgetExceededError) && !(err instanceof LlmAuthError)) byOffer.delete(offer);
+        },
+      );
       return promise;
+    },
+    retryAiFailures() {
+      const offers: PolzaOfferKey[] = [];
+      for (const [offer, template] of settled) {
+        if (template.status !== 'failed' || !template.aiFailed || retried.has(offer)) continue;
+        retried.add(offer);
+        reclaim.add(offer);
+        byOffer.delete(offer);
+        settled.delete(offer);
+        offers.push(offer);
+      }
+      return offers;
     },
   };
 }
@@ -737,11 +853,11 @@ export async function releaseRebuildLease(db: SupabaseClient, lease: RebuildLeas
 export async function hasPendingTemplate(db: SupabaseClient, jobId: string): Promise<boolean> {
   const { data, error } = await db
     .from(TABLE)
-    .select(ROW_COLUMNS)
+    .select('id,updated_at')
     .eq('job_id', jobId)
     .eq('lang', LANG)
     .eq('status', 'pending')
     .neq('offer_key', REBUILD_LEASE_KEY);
   if (error) throw new Error(`Не удалось прочитать цепочки запуска: ${error.message}`);
-  return ((data ?? []) as TemplateRow[]).some((row) => !isStale(row));
+  return ((data ?? []) as Array<Pick<TemplateRow, 'updated_at'>>).some((row) => !isStale(row));
 }

@@ -153,7 +153,19 @@ export function buildLetters(input: BuildLettersInput): PolzaOutreachLetter[] {
 
 const INTERNAL_RE = /\b(score|scoring|pipeline_stage|validation|pre-scoring|rerank|icp|llm|json|undefined|null|evidence|trigger_\w+)\b/i;
 const HYPE_RE = /\b(leading|full-service|world-class|revolutionary|guarantee[sd]?|best-in-class)\b/i;
-const TEMPLATE_NUMBERS = ['20–30', '20-30', 'B2B', '1. ', '2. ', '3. '];
+const TEMPLATE_NUMBERS = ['B2B', '1. ', '2. ', '3. '];
+/**
+ * Размер бесплатной выборки — «20–30» с любым тире и пробелами, «20 to 30».
+ * Писатель пишет его по-разному; normalizeSampleRange приводит шаблон к
+ * «20–30», а гард писем принимает любую запись — проверки шаблона и писем
+ * компании не расходятся.
+ */
+const SAMPLE_RANGE_ANY = /\b20\s*(?:[–—-]|to)\s*30\b/gi;
+
+/** «20-30», «20 — 30», «20 to 30» → «20–30»: одна запись для проверки шаблона и писем. */
+export function normalizeSampleRange(text: string): string {
+  return text.replace(SAMPLE_RANGE_ANY, '20–30');
+}
 
 /** Текст без разрешённых кусков — длинные первыми, чтобы кусок внутри длинного не разрезал его. */
 function stripAll(text: string, pieces: string[]): string {
@@ -170,6 +182,9 @@ function stripAll(text: string, pieces: string[]): string {
  *
  * Подпись — текст оператора, а не письма: цифры телефона или «?» в ней письмо
  * неправильным не делают, поэтому правила текста проверяют то, что над ней.
+ * Так же и проверенные факты (название, должность, кейс, сегменты): «Leading
+ * Edge Robotics» — имя компании, а не наша реклама, поэтому запретные и
+ * служебные слова ищем в тексте без них.
  */
 export function guardLetters(
   letters: PolzaOutreachLetter[],
@@ -193,9 +208,12 @@ export function guardLetters(
     if (/\{\{|\}\}/.test(`${letter.subject}\n${letter.body}`)) violations.push(`${label}: остались переменные`);
     const questions = (text.match(/\?/g) ?? []).length;
     if (questions !== 1) violations.push(`${label}: вопросов ${questions}, нужен ровно один`);
-    if (INTERNAL_RE.test(text)) violations.push(`${label}: служебное слово в тексте`);
-    if (HYPE_RE.test(`${letter.subject}\n${text}`)) violations.push(`${label}: запрещённое слово`);
-    if (/\d/.test(stripAll(`${letter.subject}\n${text}`, pieces))) violations.push(`${label}: число не из кейса и не из повода`);
+    const ownWords = stripAll(`${letter.subject}\n${text}`, allowedFacts);
+    if (INTERNAL_RE.test(stripAll(text, allowedFacts))) violations.push(`${label}: служебное слово в тексте`);
+    if (HYPE_RE.test(ownWords)) violations.push(`${label}: запрещённое слово`);
+    if (/\d/.test(stripAll(`${letter.subject}\n${text}`.replace(SAMPLE_RANGE_ANY, ' '), pieces))) {
+      violations.push(`${label}: число не из кейса и не из повода`);
+    }
   });
 
   return { ok: violations.length === 0, violations };
@@ -214,18 +232,34 @@ const URGENCY_RE = /\b(act now|limited time|last chance|hurry|don['’]t miss|on
 const EMOJI_RE = /\p{Extended_Pictographic}/u;
 const MARKDOWN_RE = /\*\*|__|^#{1,6}\s/m;
 // Письмо 1 для общего ящика читает не ЛПР: оно обязано спросить, кто
-// отвечает, или попросить переслать — иначе это то же прямое письмо.
-const ROUTING_RE = /\b(right person|right contact|who (?:owns|handles|leads|runs|looks after|is responsible|would be)|point me|forward)\b/i;
+// отвечает, или попросить переслать письмо. Голое «forward» не в счёт — «move
+// forward», «look forward» так же пропустили бы прямое письмо.
+const ROUTING_RE =
+  /\b(?:right person|right people|right contact|who (?:owns|handles|leads|runs|looks after|is responsible|would be the right)|point me to|forward (?:this|it|my (?:note|email|message))|pass (?:this|it) (?:on|along))\b/i;
 const SUBJECT_MAX = 80;
 // Шаблон идёт всем компаниям оффера, фактов о результатах у него нет: цифра в
 // шаблоне — только размер бесплатной выборки, и только во фразе о выборке
-// аккаунтов. «20–30» в другом месте читается уже как обещание.
-const SAMPLE_SIZE_RE = /\b20\s?[–—-]\s?30(?=\s+(?:[a-z-]+\s+){0,2}(?:accounts|companies)\b)/gi;
-const TEMPLATE_PIECES = ['B2B', '1. ', '2. ', '3. '];
-// Обещания без цифр — те же выдуманные результаты: множители, доли, сроки,
-// «сотни компаний».
-const PROMISE_RE =
-  /\b(?:twice|double[ds]?|doubling|triple[ds]?|tripling|dozens|hundreds|thousands|millions|percent|weeks?|months?)\b|\d+\s?%|\b\d+\s?x\b|\bx\s?\d+\b/i;
+// аккаунтов («20–30 accounts», «20–30 B2B accounts»). «20–30» в другом месте
+// читается уже как обещание. Шаблон к этой минуте прошёл normalizeSampleRange.
+const SAMPLE_SIZE_RE = /\b20–30(?=\s+(?:[a-z0-9-]+\s+){0,2}(?:accounts|companies)\b)/gi;
+// Обещания без цифр — те же выдуманные результаты: множители, доли, «сотни
+// компаний», число встреч и сроки результата. Сроки — только как обещание
+// («in two weeks», «within a month», «by next quarter»): «next week» для
+// созвона и «double-check» обещаниями не считаются.
+const NUMBER_WORD = '(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)';
+const PROMISE_RE = new RegExp(
+  [
+    `\\b(?:in|within|over|after|under)\\s+(?:the\\s+)?(?:next\\s+|first\\s+)?(?:(?:a\\s+)?(?:couple\\s+of|few)|${NUMBER_WORD}|a|an|\\d+)\\s+(?:days?|weeks?|months?|quarters?|years?)\\b`,
+    '\\bby\\s+(?:the\\s+)?(?:next|end\\s+of\\s+(?:the\\s+|this\\s+|next\\s+)?)\\s*(?:week|month|quarter|year)\\b',
+    '\\b(?:twice|double[ds]?(?!-)|doubling|triple[ds]?|tripling|tenfold|(?:two|three|four|five|ten|\\d+)-?fold|dozens?|hundreds|thousands|millions|percent|per\\s+cent)\\b',
+    '\\b(?:in|by)\\s+half\\b|\\bhalf\\s+the\\s+(?:time|cost|price|effort|work)\\b',
+    `\\b(?:${NUMBER_WORD}|a\\s+dozen)\\s+(?:new\\s+|more\\s+|extra\\s+|qualified\\s+)?(?:meetings?|deals?|leads?|replies|responses|clients?|customers?|opportunities|sqls?|mqls?)\\b`,
+    '\\d+\\s?%',
+    '\\b\\d+\\s?x\\b',
+    '\\bx\\s?\\d+\\b',
+  ].join('|'),
+  'i',
+);
 // С получателем мы не общались: письма 2–4 — продолжение нашего же письма, а
 // «как мы обсуждали» в шаблоне уйдёт всем компаниям оффера.
 const PRIOR_CONTACT_RE =
@@ -236,36 +270,69 @@ function countOf(text: string, piece: string): number {
 }
 
 /**
- * Плейсхолдер-предложение (повод, кейс, сегменты) стоит отдельной строкой:
- * пустое значение renderTemplate удаляет вместе со строкой, а в строке с
- * другим текстом осталась бы фраза без смысла.
+ * Плейсхолдер-предложение (повод, кейс, сегменты) — отдельным абзацем: пустое
+ * значение renderTemplate удаляет его строку, а текст того же абзаца остался
+ * бы с дырой.
  */
-function standsAlone(text: string, placeholder: string): boolean {
-  return text.split('\n').every((line) => !line.includes(placeholder) || line.trim() === placeholder);
+function ownParagraph(text: string, placeholder: string): boolean {
+  const lines = text.split('\n');
+  return lines.every((line, i) => {
+    if (!line.includes(placeholder)) return true;
+    if (line.trim() !== placeholder) return false;
+    return !(lines[i - 1] ?? '').trim() && !(lines[i + 1] ?? '').trim();
+  });
+}
+
+/**
+ * Вводная строка перед плейсхолдером («Here is what I would test:»): у пустого
+ * значения она повисла бы без продолжения. У {{segments}} вводная своя,
+ * внутри значения.
+ */
+function hasLeadIn(text: string, placeholder: string): boolean {
+  const lines = text.split('\n');
+  const at = lines.findIndex((line) => line.trim() === placeholder);
+  let prev = at - 1;
+  while (prev >= 0 && !lines[prev].trim()) prev -= 1;
+  return prev >= 0 && /:\s*$/.test(lines[prev]);
 }
 
 function unsupportedNumbers(text: string): string[] {
-  const rest = stripAll(text.replace(SAMPLE_SIZE_RE, ' '), TEMPLATE_PIECES);
+  const rest = stripAll(text.replace(SAMPLE_SIZE_RE, ' '), TEMPLATE_NUMBERS);
   return Array.from(new Set(rest.match(/\S*\d\S*/g) ?? [])).slice(0, 3);
 }
 
 function firstMatch(re: RegExp, text: string): string | null {
   const m = re.exec(text);
-  return m ? m[0].toLowerCase() : null;
+  return m ? m[0].toLowerCase().replace(/\s+/g, ' ') : null;
+}
+
+function escapeRe(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Первый пример из задания, попавший в текст: слово — целиком, фраза — где угодно, без учёта регистра. */
+function exampleLeak(text: string, examples: readonly string[]): string | null {
+  for (const example of examples) {
+    const re = /\s/.test(example.trim()) ? new RegExp(escapeRe(example.trim()), 'i') : new RegExp(`\\b${escapeRe(example.trim())}\\b`, 'i');
+    if (example.trim() && re.test(text)) return example.trim();
+  }
+  return null;
 }
 
 /**
  * Правила guardLetters для шаблона цепочки оффера — один раз на оффер: шаблон
  * идёт всем компаниям оффера, и ошибка в нём повторилась бы в каждом письме.
  * Плюс правила самого шаблона: только плейсхолдеры оффера и на своих местах,
- * повод/кейс/сегменты — отдельной строкой, подпись — последней строкой, у
- * общего ящика — вопрос «кто у вас за это отвечает». Готовые письма компании
- * после подстановки проверяет guardLetters.
+ * повод/кейс/сегменты — отдельным абзацем без вводной строки, подпись —
+ * последней строкой, у общего ящика — вопрос «кто у вас за это отвечает»,
+ * ничего из примеров задания (examples: компания Acme, должности и фразы
+ * примеров повода — templateWriter.templateQaExamples). Готовые письма
+ * компании после подстановки проверяет guardLetters.
  *
  * Флаги — с местом: L1 — письмо 1 лично, L1r — для общего ящика, L2, L3c —
  * письмо 3 с кейсом, L3 — без кейса, L4, subject — тема письма 1.
  */
-export function guardTemplate(t: PolzaChainTemplateLetters, offer: PolzaOfferKey): PolzaTemplateQaResult {
+export function guardTemplate(t: PolzaChainTemplateLetters, offer: PolzaOfferKey, examples: readonly string[] = []): PolzaTemplateQaResult {
   const P = POLZA_TEMPLATE_PLACEHOLDERS;
   const flags: string[] = [];
   const allowed = new Set<string>(polzaTemplatePlaceholdersFor(offer));
@@ -283,6 +350,8 @@ export function guardTemplate(t: PolzaChainTemplateLetters, offer: PolzaOfferKey
     const promise = firstMatch(PROMISE_RE, rest);
     if (promise) flags.push(`subject:promise_words(${promise})`);
     if (PRIOR_CONTACT_RE.test(rest)) flags.push('subject:prior_contact');
+    const leak = exampleLeak(rest, examples);
+    if (leak) flags.push(`subject:example_leak(${leak})`);
     const digits = unsupportedNumbers(rest);
     if (digits.length) flags.push(`subject:unsupported_number(${digits.join(' ')})`);
   }
@@ -316,8 +385,10 @@ export function guardTemplate(t: PolzaChainTemplateLetters, offer: PolzaOfferKey
     }
     if (/[{}]/.test(plain)) flags.push(`${tag}:placeholder_broken`);
     for (const ph of [P.trigger, P.case, P.segments]) {
+      if (!text.includes(ph)) continue;
       if (countOf(text, ph) > 1) flags.push(`${tag}:placeholder_repeated(${ph})`);
-      if (text.includes(ph) && !standsAlone(text, ph)) flags.push(`${tag}:placeholder_not_alone(${ph})`);
+      if (!ownParagraph(text, ph)) flags.push(`${tag}:placeholder_not_alone(${ph})`);
+      else if (hasLeadIn(text, ph)) flags.push(`${tag}:placeholder_lead_in(${ph})`);
     }
 
     const questions = countOf(plain, '?');
@@ -331,6 +402,8 @@ export function guardTemplate(t: PolzaChainTemplateLetters, offer: PolzaOfferKey
     const promise = firstMatch(PROMISE_RE, plain);
     if (promise) flags.push(`${tag}:promise_words(${promise})`);
     if (PRIOR_CONTACT_RE.test(plain)) flags.push(`${tag}:prior_contact`);
+    const leak = exampleLeak(plain, examples);
+    if (leak) flags.push(`${tag}:example_leak(${leak})`);
     const digits = unsupportedNumbers(plain);
     if (digits.length) flags.push(`${tag}:unsupported_number(${digits.join(' ')})`);
   }
@@ -386,7 +459,8 @@ const TEMPLATE_FLAG_TEXT: Record<FlagLang, Record<string, string>> = {
     placeholder_not_allowed: 'this placeholder is not allowed here',
     placeholder_broken: 'broken placeholder: stray curly braces',
     placeholder_repeated: 'the placeholder appears twice',
-    placeholder_not_alone: 'the placeholder must stand on its own line with no other text',
+    placeholder_not_alone: 'the placeholder must be its own paragraph: a blank line before and after, no other text',
+    placeholder_lead_in: 'no lead-in line ending with ":" right before the placeholder — it would dangle when the value is empty',
     placeholder_missing: 'a required placeholder is missing',
     placeholder_misplaced: 'the placeholder is in the wrong email',
     no_cta: 'no question — exactly one "?" is required',
@@ -396,10 +470,11 @@ const TEMPLATE_FLAG_TEXT: Record<FlagLang, Record<string, string>> = {
     internal_word: 'internal words (score, ICP, LLM, JSON, null, evidence, validation)',
     emoji: 'emoji',
     markdown: 'markdown formatting',
-    promise_words: 'multipliers, percentages, time frames or "hundreds/thousands" read as promises we cannot back',
+    promise_words: 'a promise we cannot back: multipliers or amounts (twice, 2x, tenfold, in half, hundreds, three meetings), percentages or time frames (in two weeks, within a month, by next quarter)',
     prior_contact: 'implies an earlier conversation — we have never talked to the recipient',
+    example_leak: 'copied from the examples of this task (the company Acme, sample job titles or trigger phrases) — the template goes to every company',
     unsupported_number: 'numbers — the only allowed one is "20–30" in the phrase about the free sample of accounts',
-    not_routing: 'the shared-inbox variant must ask who the right person is or ask to forward the email',
+    not_routing: 'the shared-inbox variant must ask who the right person is or ask to forward this email',
     subject_missing: 'no subject',
     subject_placeholder: 'only {{company}} is allowed in the subject',
     subject_exclamation: 'exclamation mark',
@@ -413,7 +488,8 @@ const TEMPLATE_FLAG_TEXT: Record<FlagLang, Record<string, string>> = {
     placeholder_not_allowed: 'чужой плейсхолдер',
     placeholder_broken: 'сломанный плейсхолдер',
     placeholder_repeated: 'плейсхолдер стоит дважды',
-    placeholder_not_alone: 'плейсхолдер не отдельной строкой',
+    placeholder_not_alone: 'плейсхолдер не отдельным абзацем',
+    placeholder_lead_in: 'вводная строка перед плейсхолдером',
     placeholder_missing: 'нет обязательного плейсхолдера',
     placeholder_misplaced: 'плейсхолдер не в том письме',
     no_cta: 'нет вопроса',
@@ -425,6 +501,7 @@ const TEMPLATE_FLAG_TEXT: Record<FlagLang, Record<string, string>> = {
     markdown: 'разметка markdown',
     promise_words: 'обещания результата или сроков',
     prior_contact: 'намёк на прошлый разговор',
+    example_leak: 'перенесён пример из задания',
     unsupported_number: 'цифры не из фразы о выборке 20–30 аккаунтов',
     not_routing: 'вариант для общего ящика не спрашивает, кто отвечает',
     subject_missing: 'нет темы',
