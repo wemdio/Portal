@@ -3,6 +3,7 @@ import 'server-only';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { authForMailbox } from './mailboxAuth';
 import { sendSenderMail, type SendErrorCode } from './smtp';
+import { advanceRecipient } from './stepAdvance';
 import type { MailboxRow, MessageRow, RecipientRow, StepRow } from './types';
 
 /**
@@ -54,7 +55,7 @@ function retryPlan(code: SendErrorCode | undefined, attempts: number): 'retry' |
   }
 }
 
-async function afterSend(message: MessageRow, mailbox: MailboxRow, sentAt: string): Promise<void> {
+async function afterSend(message: MessageRow, mailbox: MailboxRow, sentAt: string, log: Log): Promise<void> {
   if (!supabaseAdmin) return;
   const db = supabaseAdmin;
 
@@ -74,23 +75,16 @@ async function afterSend(message: MessageRow, mailbox: MailboxRow, sentAt: strin
     .maybeSingle();
   const nextStep = nextStepRow as StepRow | null;
 
-  const patch: Record<string, unknown> = {
-    last_step_sent: message.step_no,
-    updated_at: sentAt,
-  };
-  // Message-ID первого письма — корень переписки: follow-up уходят ответом
-  // в него, поэтому у получателя это одна ветка, а не отдельные письма.
-  if (message.step_no === 1) patch.thread_message_id = message.message_id;
-
-  if (nextStep) {
-    const next = new Date(new Date(sentAt).getTime() + nextStep.delay_hours * 60 * 60 * 1000);
-    patch.next_step_at = next.toISOString();
-  } else {
-    patch.status = 'finished';
-    patch.next_step_at = null;
+  // Шаг, корень переписки и срок следующего шага — общим правилом с
+  // планировщиком (stepAdvance.ts).
+  try {
+    await advanceRecipient(db, { recipientId: recipient.id, stepNo: message.step_no, messageId: message.message_id, sentAt }, nextStep);
+  } catch (e) {
+    // Письмо ушло, а шаг получателя не записан. Второй раз письмо шага не
+    // поставят (уникальность шага), а получателя сдвинет планировщик, когда
+    // встретит это письмо отправленным (planner.settleTakenStep).
+    log('error', `Письмо ${message.id} ушло, но шаг получателя ${message.to_email} не записан`, e instanceof Error ? e.message : e);
   }
-
-  await db.from('sender_recipients').update(patch).eq('id', recipient.id);
   await db.from('sender_mailboxes').update({ last_send_at: sentAt }).eq('id', mailbox.id);
 }
 
@@ -195,7 +189,7 @@ export async function processSenderBatch(opts: { egressIp: string; batchSize?: n
           .eq('id', message.id);
         continue;
       }
-      await afterSend(message, mailbox, sentAt);
+      await afterSend(message, mailbox, sentAt, log);
       sentCount += 1;
       continue;
     }

@@ -401,11 +401,11 @@ const PAGE = 1000;
 
 /**
  * Активные получатели кампании, у которых письмо текущего шага
- * (last_step_sent + 1) уже есть. Отправленные письма не читаются: после
- * отправки шаг получателя сдвигается (sendWorker.afterSend), а их в большой
- * кампании десятки тысяч.
+ * (last_step_sent + 1) уже есть, — с прочитанным last_step_sent. Отправленные
+ * письма не читаются: после отправки шаг получателя сдвигается
+ * (sendWorker.afterSend), а их в большой кампании десятки тысяч.
  */
-async function recipientsWithTakenStep(campaignId: string): Promise<string[]> {
+async function recipientsWithTakenStep(campaignId: string): Promise<Array<{ id: string; lastStepSent: number }>> {
   const db = requireDb();
   const stepsOf = new Map<string, Set<number>>();
   for (let from = 0; ; from += PAGE) {
@@ -424,7 +424,7 @@ async function recipientsWithTakenStep(campaignId: string): Promise<string[]> {
     if (!data || data.length < PAGE) break;
   }
 
-  const taken: string[] = [];
+  const taken: Array<{ id: string; lastStepSent: number }> = [];
   for (const part of chunkForInFilter([...stepsOf.keys()])) {
     const { data, error } = await db
       .from('sender_recipients')
@@ -433,7 +433,8 @@ async function recipientsWithTakenStep(campaignId: string): Promise<string[]> {
       .eq('status', 'active');
     if (error) throw new SenderOpError(error.message, 500);
     for (const row of data ?? []) {
-      if (stepsOf.get(String(row.id))?.has(Number(row.last_step_sent) + 1)) taken.push(String(row.id));
+      const lastStepSent = Number(row.last_step_sent);
+      if (stepsOf.get(String(row.id))?.has(lastStepSent + 1)) taken.push({ id: String(row.id), lastStepSent });
     }
   }
   return taken;
@@ -526,14 +527,25 @@ export async function startCampaign(campaignId: string): Promise<void> {
   // на каждом проходе планировщика и стоял бы в голове его выборки. Снимаем
   // после общей постановки — одним запросом по всем её не выразить; кампания
   // до смены статуса не идёт, и планировщик их в этом промежутке не видит.
-  const taken = await recipientsWithTakenStep(campaignId);
-  for (const part of chunkForInFilter(taken)) {
-    const { error: holdError } = await db
-      .from('sender_recipients')
-      .update({ next_step_at: null, updated_at: nowIso })
-      .in('id', part)
-      .eq('status', 'active');
-    if (holdError) throw new SenderOpError(holdError.message, 500);
+  // Снимаем только тех, кто всё ещё на прочитанном шаге: письмо «в отправке»
+  // могло тем временем уйти, и отправка уже назначила следующий шаг
+  // (sendWorker.afterSend) — затереть его next_step_at значило оборвать цепочку.
+  const byStep = new Map<number, string[]>();
+  for (const { id, lastStepSent } of await recipientsWithTakenStep(campaignId)) {
+    const ids = byStep.get(lastStepSent);
+    if (ids) ids.push(id);
+    else byStep.set(lastStepSent, [id]);
+  }
+  for (const [lastStepSent, ids] of byStep) {
+    for (const part of chunkForInFilter(ids)) {
+      const { error: holdError } = await db
+        .from('sender_recipients')
+        .update({ next_step_at: null, updated_at: nowIso })
+        .in('id', part)
+        .eq('status', 'active')
+        .eq('last_step_sent', lastStepSent);
+      if (holdError) throw new SenderOpError(holdError.message, 500);
+    }
   }
 
   // Смена статуса — одним условным обновлением: из двух одновременных
