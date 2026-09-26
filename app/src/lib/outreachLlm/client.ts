@@ -5,7 +5,7 @@
  * У каждого аутрича свой ключ Requesty (POLZA_RU_OUTREACH_API_KEY /
  * POLZA_EN_OUTREACH_API_KEY): расход виден в кабинете отдельно, а сбой или
  * лимит одного ключа не задевает другой аутрич и остальные фичи портала.
- * Модель — по роли: дешёвая для разбора (analysis), Gemini 3.1 Pro для
+ * Модель — по роли: gpt-4o-mini для разбора (analysis), Gemini 3.1 Pro для
  * цепочек писем (writer); обе переопределяются env.
  *
  * Язык и бюджет приходят из контекста запуска (context.ts). Каждый оплаченный
@@ -29,8 +29,13 @@ const DEFAULT_ENDPOINT = 'https://router.requesty.ai/v1/chat/completions';
 
 // Id — как в каталоге Requesty, с префиксом поставщика: без него Requesty
 // может молча ответить другой моделью (см. replyPersonalization/geminiClient.ts).
+// Разбор — gpt-4o-mini: не рассуждает, отвечает быстро и по деньгам не дороже.
+// DeepSeek V4 Flash (им собирает движок вертикалей) — reasoning-модель: скрытые
+// рассуждения съедают max_tokens, и в этом репозитории она уже возвращала
+// пустой ответ (шапка lib/constants.ts). Поставить её через env можно —
+// клиент тогда поднимает ей лимит токенов (см. REASONING_MODEL).
 const DEFAULT_MODELS: Record<OutreachLlmRole, string> = {
-  analysis: 'deepinfra/deepseek-v4-flash-0731',
+  analysis: 'openai/gpt-4o-mini',
   writer: 'google/gemini-3.1-pro-preview',
 };
 
@@ -49,6 +54,16 @@ const LANG_LABEL: Record<OutreachLang, string> = { ru: 'RU', en: 'EN' };
 // Разбор извлекает факты — выдумка не нужна; письмам нужна живость.
 const TEMPERATURE: Record<OutreachLlmRole, number> = { analysis: 0, writer: 0.4 };
 const DEFAULT_MAX_TOKENS: Record<OutreachLlmRole, number> = { analysis: 1500, writer: 8000 };
+// Меньше этого разбору не даём, даже если вызывающий попросил: с запасом по
+// токенам модель отвечает целиком с первого раза, а платим только за то, что
+// она реально написала, — повтор обрезанного ответа обошёлся бы дороже.
+const MIN_ANALYSIS_MAX_TOKENS = 1500;
+// Reasoning-модель на разборе (DeepSeek через env): её скрытые рассуждения
+// считаются в max_tokens — с обычным лимитом до ответа она не доходит и
+// возвращает пустой content. Даём запас и не меньше двух минут на ответ.
+const REASONING_MODEL = /deepseek/i;
+const REASONING_MIN_MAX_TOKENS = 5000;
+const REASONING_MIN_TIMEOUT_MS = 120_000;
 // Gemini тратит токены на размышление: обрезанный ответ повторяем с удвоенным
 // лимитом, но не выше этого.
 const MAX_TOKENS_CAP = 16_000;
@@ -252,7 +267,7 @@ async function callOutreach<T>(
     }
   };
 
-  let maxTokens = initialMaxTokens(opts);
+  let maxTokens = initialMaxTokens(opts, call.model);
   let grewForLength = false;
   let retriedBadAnswer = false;
   let nudge = false;
@@ -292,11 +307,20 @@ async function callOutreach<T>(
   }
 }
 
-function initialMaxTokens(opts: OutreachLlmCallOptions): number {
+function initialMaxTokens(opts: OutreachLlmCallOptions, model: string): number {
   const requested = opts.maxTokens;
-  return typeof requested === 'number' && Number.isFinite(requested) && requested >= 1
-    ? Math.min(Math.floor(requested), MAX_TOKENS_CAP)
+  const wanted = typeof requested === 'number' && Number.isFinite(requested) && requested >= 1
+    ? Math.floor(requested)
     : DEFAULT_MAX_TOKENS[opts.role];
+  if (opts.role !== 'analysis') return Math.min(wanted, MAX_TOKENS_CAP);
+  const floor = REASONING_MODEL.test(model) ? REASONING_MIN_MAX_TOKENS : MIN_ANALYSIS_MAX_TOKENS;
+  return Math.min(Math.max(wanted, floor), MAX_TOKENS_CAP);
+}
+
+/** Таймаут одного запроса по роли; reasoning-модели на разборе — не меньше двух минут. */
+function requestTimeoutMs(call: CallSpec): number {
+  const base = REQUEST_TIMEOUT_MS[call.role];
+  return call.role === 'analysis' && REASONING_MODEL.test(call.model) ? Math.max(base, REASONING_MIN_TIMEOUT_MS) : base;
 }
 
 function buildMessages(opts: OutreachLlmCallOptions, call: CallSpec): ChatMessage[] {
@@ -340,7 +364,7 @@ async function requestWithRetries(
     // Перед каждым запросом, включая повторы: пока этот поток ждал, лимит мог
     // выбрать другой.
     ensureBudget(budget);
-    const timeoutMs = Math.min(REQUEST_TIMEOUT_MS[call.role], remainingMs);
+    const timeoutMs = Math.min(requestTimeoutMs(call), remainingMs);
     const outcome = await requestOnce(call, messages, maxTokens, timeoutMs, charge);
     if (outcome.ok) return outcome.answer;
     lastError = outcome.error;

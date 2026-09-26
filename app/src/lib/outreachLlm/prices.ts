@@ -15,12 +15,12 @@ interface ModelPrice {
 }
 
 const PRICES_PER_MILLION: Record<string, ModelPrice> = {
-  // Разбор сайта, вакансии, новостей, сегментов (роль analysis).
-  'deepinfra/deepseek-v4-flash-0731': { input: 0.094, output: 0.38 },
+  // Разбор сайта, вакансии, новостей, сегментов (роль analysis) по умолчанию.
+  'openai/gpt-4o-mini': { input: 0.15, output: 0.6 },
   // Цепочки писем (роль writer).
   'google/gemini-3.1-pro-preview': { input: 1.8, output: 10.8 },
-  // Прежняя модель аутричей — на случай, если её вернут через env.
-  'openai/gpt-4o-mini': { input: 0.15, output: 0.6 },
+  // Разбор через env (POLZA_*_ANALYSIS_MODEL) — reasoning-модель, см. client.ts.
+  'deepinfra/deepseek-v4-flash-0731': { input: 0.094, output: 0.38 },
 };
 
 /**

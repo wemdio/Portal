@@ -11,7 +11,7 @@
 | Вопрос | Решение |
 |---|---|
 | Кто пишет письма | **Как движок вертикалей**: Gemini 3.1 Pro (`google/gemini-3.1-pro-preview`) пишет **цепочку один раз на каждый оффер запуска**; под компанию подставляются проверенные факты. |
-| Модель разбора (сайт, вакансия, новости, сегменты) | Дешёвая, как сбор у движка вертикалей: `deepinfra/deepseek-v4-flash-0731` (переопределяется env). |
+| Модель разбора (сайт, вакансия, новости, сегменты) | Дешёвая без рассуждений: `openai/gpt-4o-mini` (переопределяется env). DeepSeek V4 Flash (сбор у движка вертикалей) — только осознанно через env: reasoning-модель, скрытые рассуждения съедают `max_tokens` и дают пустой ответ; клиент ей поднимает лимит до 5000 токенов и таймаут не меньше 120 с (правка 26.09.2026 после ревью). |
 | Ключи | Отдельные ключи Requesty: `POLZA_RU_OUTREACH_API_KEY`, `POLZA_EN_OUTREACH_API_KEY`. |
 | Бюджет | Лимит расхода на ИИ за запуск, по умолчанию **$10**, поле в форме. Цель — **$3–5 за запуск на 500**. |
 | Порядок | Дорогое в конце: бесплатные отсевы → почта → дешёвый разбор → оценка → письма только итоговым. |
@@ -27,8 +27,11 @@
 - `callOutreachJson({ lang, role: 'analysis'|'writer', system, user, title, maxTokens }, budget)`:
   ключ — `POLZA_RU_OUTREACH_API_KEY` / `POLZA_EN_OUTREACH_API_KEY`; модель — `role==='writer'` →
   `POLZA_{RU|EN}_WRITER_MODEL` ‖ `google/gemini-3.1-pro-preview`; `analysis` →
-  `POLZA_{RU|EN}_ANALYSIS_MODEL` ‖ `deepinfra/deepseek-v4-flash-0731`. Транспорт — Requesty, как
-  `lib/openrouter/client.ts` (endpoint `OPENROUTER_ENDPOINT` ‖ router.requesty.ai).
+  `POLZA_{RU|EN}_ANALYSIS_MODEL` ‖ `openai/gpt-4o-mini`. У разбора `max_tokens` не меньше 1500; если в env
+  поставлена reasoning-модель (в id есть `deepseek`) — не меньше 5000 и таймаут не меньше 120 с, иначе
+  рассуждения съедают лимит и ответ приходит пустым (так уже было в репозитории — шапка
+  `lib/constants.ts`). Транспорт — Requesty, как `lib/openrouter/client.ts` (endpoint
+  `OPENROUTER_ENDPOINT` ‖ router.requesty.ai).
 - Стоимость вызова: `usage.cost` из ответа Requesty; нет — оценка по таблице цен (для трёх моделей) из
   `usage.prompt/completion_tokens`. `finish_reason: 'length'` у писателя — один повтор с большим
   `max_tokens` (Gemini тратит токены на размышление).

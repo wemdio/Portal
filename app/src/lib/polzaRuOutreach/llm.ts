@@ -14,17 +14,33 @@
  */
 
 import { callOutreachJson } from '@/lib/outreachLlm/client';
-import { BudgetExceededError, currentOutreachContext, LlmAuthError } from '@/lib/outreachLlm/context';
+import { BudgetExceededError, currentOutreachContext, LlmAuthError, type OutreachLlmContext } from '@/lib/outreachLlm/context';
+
+/**
+ * Удачные ответы ИИ по запускам; ключ — объект контекста запуска, он один на
+ * весь прогон. Раннеру — для предохранителя «ИИ молчит»: серию отсевов «ИИ не
+ * ответил» обнуляет любой удачный ответ, а ответ из кэша разбора — нет.
+ */
+const answersByRun = new WeakMap<OutreachLlmContext, number>();
 
 export async function callJson(system: string, user: string, title: string, maxTokens = 1200): Promise<Record<string, unknown>> {
-  return callOutreachJson({
+  const ctx = currentOutreachContext();
+  const result = await callOutreachJson({
     role: 'analysis',
     system,
     user,
     title,
     maxTokens,
-    lang: currentOutreachContext()?.lang ?? 'ru',
+    lang: ctx?.lang ?? 'ru',
   });
+  if (ctx) answersByRun.set(ctx, (answersByRun.get(ctx) ?? 0) + 1);
+  return result;
+}
+
+/** Сколько вызовов ИИ ответило в текущем запуске; вне запуска — 0. */
+export function llmAnswersInRun(): number {
+  const ctx = currentOutreachContext();
+  return ctx ? answersByRun.get(ctx) ?? 0 : 0;
 }
 
 /**

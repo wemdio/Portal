@@ -16,6 +16,7 @@
  * обходит сайт и не платит ИИ за ту же компанию.
  */
 
+import { createHash } from 'crypto';
 import { fetchSitePageHtml } from '@/lib/enrich/emailScraper';
 import { detectSignals } from '@/lib/enrich/signalDetector';
 import { outreachModel } from '@/lib/outreachLlm/client';
@@ -172,11 +173,30 @@ dealer_search — ищут дилеров/дистрибьюторов; export_l
 Жёсткие правила: цитаты и бренд копируются символ в символ со страницы; «мы растём» — не факт; не угадывай.`;
 
 /**
- * Версия промпта и разбора ответа — часть ключа кэша. Правка SYSTEM или кода
- * разбора ниже (что и как попадает в SiteAnalysis) — поднять версию, иначе
- * 30 дней будут отдаваться разборы по старым правилам.
+ * Версия кода разбора ответа (что и как попадает в SiteAnalysis). Правка
+ * промпта меняет ключ кэша сама (хэш ниже), а правку разбора код не видит —
+ * её отмечаем, подняв это значение.
  */
-export const SITE_PROMPT_VERSION = 'ru-site@2026-09-26';
+const SITE_PARSER_VERSION = 'p1';
+
+/**
+ * Версия для ключа кэша: версия разбора + короткий хэш текста SYSTEM. Поправили
+ * промпт — старые разборы просто не находятся, и 30 дней не отдаются разборы
+ * по прежним правилам, даже если версию поднять забыли.
+ */
+export const SITE_PROMPT_VERSION = `ru-site:${SITE_PARSER_VERSION}:${createHash('sha256').update(SYSTEM).digest('hex').slice(0, 12)}`;
+
+/**
+ * Ответ без главных полей (балл ЦА числом, B2B да/нет) — не разбор, а сбой
+ * модели: строка пойдёт дальше с нулями, но такой ответ не кэшируем, иначе
+ * компания 30 дней отсеивалась бы по пустому разбору.
+ */
+function hasCoreFields(raw: Record<string, unknown>): boolean {
+  const ta = raw.ta_score;
+  const taValid = (typeof ta === 'number' && Number.isFinite(ta)) || (typeof ta === 'string' && ta.trim() !== '' && Number.isFinite(Number(ta)));
+  const b2b = raw.is_b2b;
+  return taValid && (typeof b2b === 'boolean' || b2b === 'true' || b2b === 'false');
+}
 
 /** Разбор из кэша — только целый и открывшийся: битая запись — промах, а не падение строки. */
 function siteFromCache(raw: unknown): SiteAnalysis | null {
@@ -245,8 +265,10 @@ export async function analyzeSite(website: string, domain: string | null = norma
     hasAdPixel,
     facts,
   };
-  // В кэш — только разобранный ИИ сайт. Неоткрывшийся не запоминаем: завтра
-  // он может открыться. Свежесть событий раннер сверяет по датам при чтении.
-  if (cacheKey) await writeSiteAnalysisCache(cacheKey, analysis);
+  // В кэш — только разобранный ИИ сайт с целым ответом. Неоткрывшийся не
+  // запоминаем: завтра он может открыться. Свежесть событий раннер сверяет по
+  // датам при чтении.
+  if (cacheKey && hasCoreFields(raw)) await writeSiteAnalysisCache(cacheKey, analysis);
+  else if (cacheKey) console.warn(`[polza-ru-outreach][WARN] site analysis for ${cacheKey.domain} lacks ta_score/is_b2b — not cached`);
   return analysis;
 }

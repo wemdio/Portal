@@ -15,8 +15,9 @@
  * ИИ — общий клиент аутричей: свой ключ, дешёвая модель разбора и лимит
  * расхода на запуск (docs/superpowers/specs/2026-09-26-outreach-to-sender-design.md §1).
  * Лимит исчерпан — новые строки не начинаются, запуск завершается штатно
- * (stop_reason 'budget'), готовое остаётся. Ключ не работает — запуск сразу
- * failed с понятным текстом, а не сотни строк «ИИ не ответил».
+ * (stop_reason 'budget'), готовое остаётся. Ключ не работает или модель молчит
+ * 10 компаний подряд — запуск сразу failed с понятным текстом, а не сотни
+ * строк «ИИ не ответил».
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -32,7 +33,7 @@ import { findRuCompanyEmail } from './findEmail';
 import { buildChain, buildSegmentsHypothesis, openingSentence, type ChainInput } from './letters/chains';
 import type { LetterContext } from './letters/common';
 import { loadLibraries, type CaseRecord } from './libraries';
-import { isFatalLlmError } from './llm';
+import { isFatalLlmError, llmAnswersInRun } from './llm';
 import { runQa } from './qa';
 import { baseChain, decide, routeCase, routeChain, scoreCompany, splitAutomation, type Route, type Score } from './router';
 import { amoLookup, loadAmoIndex, type AmoIndex, type AmoRecord } from './sources/amo';
@@ -60,6 +61,10 @@ const DB_CHUNK = 100;
 const DAY = 86_400_000;
 
 class CancelledError extends Error {}
+/** ИИ не отвечает серией — запуск падает целиком, как при неверном ключе. */
+class LlmSilentError extends Error {}
+/** Сколько компаний подряд с «ИИ не ответил» — уже не случайность, а лежащая модель. */
+const LLM_FAIL_STREAK = 10;
 
 function log(level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) {
   const line = `[polza-ru-outreach][${level.toUpperCase()}] ${msg}`;
@@ -106,6 +111,9 @@ interface Tally {
   stages: Stage[];
   sdr: 'strict' | 'broad' | null;
   chain: string | null;
+  /** Домен и ИНН, которые строка заняла в дедупе запуска. */
+  domain: string | null;
+  inn: string | null;
 }
 
 /** Всё, что известно о компании после фазы 1. */
@@ -161,6 +169,13 @@ async function budgetLimitFor(db: SupabaseClient, jobId: string): Promise<number
 async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Promise<void> {
   const setProgress = async (patch: Record<string, unknown>) => {
     const { error } = await db.from('parser_jobs').update(patch).eq('id', jobId);
+    if (error) log('warn', `progress update failed for ${jobId}`, error);
+  };
+  // Прогресс и итог пишем только идущему запуску. Упал или остановлен — потоки
+  // пула ещё добегают свои строки, и их публикации перетёрли бы «failed» и
+  // «Остановлено пользователем».
+  const setRunningProgress = async (patch: Record<string, unknown>) => {
+    const { error } = await db.from('parser_jobs').update(patch).eq('id', jobId).eq('status', 'running');
     if (error) log('warn', `progress update failed for ${jobId}`, error);
   };
   const ensureNotCancelled = async () => {
@@ -260,8 +275,29 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
       if (budget.exhausted()) budgetStop = true;
       return budgetStop;
     };
-    // Ключ ИИ отвергнут: запуск уже падает — остальным потокам новых строк не брать.
+    // Ключ ИИ отвергнут или ИИ молчит: запуск уже падает — остальным потокам
+    // новых строк не брать.
     let halted = false;
+    // Предохранитель «ИИ молчит»: LLM_FAIL_STREAK компаний подряд отсеяны с
+    // «ИИ не ответил», и между ними ни одного удачного ответа — значит, лежат
+    // модель или Requesty, и так же упадёт каждая следующая строка. Считаем
+    // только отсевы по ИИ; любой удачный ответ (в том числе на другой строке)
+    // серию обнуляет.
+    let llmFailStreak = 0;
+    let llmAnswersSeen = 0;
+    const noteLlmFailed = () => {
+      const answers = llmAnswersInRun();
+      if (answers !== llmAnswersSeen) {
+        llmAnswersSeen = answers;
+        llmFailStreak = 0;
+      }
+      llmFailStreak += 1;
+      if (llmFailStreak >= LLM_FAIL_STREAK) {
+        throw new LlmSilentError(`ИИ не отвечает: ${LLM_FAIL_STREAK} компаний подряд без ответа модели — проверьте Requesty/модель`);
+      }
+    };
+    // Гипотеза сегментов после лимита на ИИ пропускается; в лог — один раз за запуск.
+    let hypothesisSkipLogged = false;
 
     // llm — снимок расходов: экран пишет «ИИ: потрачено $X из $Y».
     const detail = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -270,7 +306,7 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
     });
     currentDetail = () => detail();
     const publish = async (stage: string, extra: Record<string, unknown> = {}) => {
-      await setProgress({
+      await setRunningProgress({
         progress_stage: stage,
         progress_percent: Math.min(97, 3 + Math.round(94 * Math.max(totals.ready / target, Math.min(1, totals.scanned / maxScan)))),
         total_found: totals.scanned,
@@ -278,7 +314,7 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         progress_detail: detail(extra),
       });
     };
-    const newTally = (): Tally => ({ stages: [], sdr: null, chain: null });
+    const newTally = (): Tally => ({ stages: [], sdr: null, chain: null, domain: null, inn: null });
     const reach = (tally: Tally, ...stages: Stage[]) => {
       for (const s of stages) {
         funnel[s] += 1;
@@ -298,9 +334,15 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         if (left > 0) chains[tally.chain] = left;
         else delete chains[tally.chain];
       }
+      // Домен и ИНН строки освобождаем: иначе такая же компания дальше в
+      // запуске отсеялась бы «повтором» строки, которой в журнале уже нет.
+      if (tally.domain) seenDomains.delete(tally.domain);
+      if (tally.inn) seenInns.delete(tally.inn);
       tally.stages = [];
       tally.sdr = null;
       tally.chain = null;
+      tally.domain = null;
+      tally.inn = null;
     };
     const finish = async (id: string, r: Rejection, patch: Record<string, unknown> = {}) => {
       reasons[r.reason] = (reasons[r.reason] ?? 0) + 1;
@@ -342,6 +384,7 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
             // как на экране). Лимит, ключ и прочее — выше, в safe().
             if (!(err instanceof LlmCallError)) throw err;
             await finish(id, { stage: 'amo_checked', status: 'rejected', reason: 'LLM_FAILED', detail: `разбор вакансии: ${err.message}`.slice(0, 500) });
+            noteLlmFailed();
             return null;
           }
           if (analysis.excludedCategory === 'recruitment_agency' || analysis.excludedCategory === 'leadgen_competitor') {
@@ -417,7 +460,11 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         return null;
       }
       seenDomains.add(domain);
-      if (c.inn) seenInns.add(c.inn);
+      tally.domain = domain;
+      if (c.inn) {
+        seenInns.add(c.inn);
+        tally.inn = c.inn;
+      }
       if (exported.domains.has(domain) || (c.inn && exported.inns.has(c.inn))) {
         await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'PREVIOUSLY_EXPORTED' });
         return null;
@@ -435,6 +482,7 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         if (!(err instanceof LlmCallError)) throw err;
         log('warn', `site analysis LLM failed for ${domain}`, err.message);
         await finish(id, { stage: 'enriched', status: 'rejected', reason: 'LLM_FAILED', detail: `разбор сайта: ${err.message}`.slice(0, 500) }, { signals });
+        noteLlmFailed();
         return null;
       }
       if (!site.reachable) {
@@ -638,14 +686,30 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         caseRecord: q.caseHit?.record ?? null,
         claims: libraries.claims.filter((cl) => cl.chain_type === 'all' || cl.chain_type === q.route.chain),
       };
-      // Гипотеза необязательна: без неё письмо 3 — кейс или механика. Но лимит
-      // на ИИ и неверный ключ — не про эту строку, их отдаём в safe().
-      const hypothesis = !q.caseHit && q.marketQuote && q.route.chain !== 'automation'
-        ? await buildSegmentsHypothesis({ brand: q.brand, productSummary: q.site.productSummary, marketQuote: q.marketQuote }).catch((err: unknown) => {
-            if (isFatalLlmError(err)) throw err;
-            return null;
-          })
-        : null;
+      // Гипотеза необязательна: без неё письмо 3 — кейс или механика. Поэтому и
+      // исчерпанный лимит на ИИ строку не останавливает — письма собираем без
+      // гипотезы, уже оплаченный разбор не пропадает. Неверный ключ — про весь
+      // запуск, его отдаём в safe().
+      const skipHypothesis = () => {
+        if (!hypothesisSkipLogged) {
+          hypothesisSkipLogged = true;
+          log('info', `job ${jobId}: LLM budget exhausted — letters go without the segments hypothesis`);
+        }
+        return null;
+      };
+      // Гипотеза нужна, только когда нет кейса и есть подтверждённый рынок.
+      const hypothesisMarket = !q.caseHit && q.route.chain !== 'automation' ? q.marketQuote : null;
+      const hypothesis = !hypothesisMarket
+        ? null
+        : budget.exhausted()
+          ? skipHypothesis()
+          : await buildSegmentsHypothesis({ brand: q.brand, productSummary: q.site.productSummary, marketQuote: hypothesisMarket }).catch((err: unknown) => {
+              if (err instanceof LlmAuthError) throw err;
+              if (err instanceof BudgetExceededError) return skipHypothesis();
+              // Ключа в тексте нет: клиент аутричей вычищает его из ошибок.
+              log('warn', `segments hypothesis failed for ${q.domain}: ${err instanceof Error ? err.message : String(err)}`);
+              return null;
+            });
       const chain = buildChain(letterCtx, chainInput, hypothesis);
       reach(q.tally, 'sequence_assembled');
 
@@ -724,8 +788,9 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         await fn();
       } catch (err) {
         if (err instanceof CancelledError) throw err;
-        if (err instanceof LlmAuthError) {
-          // Ключ не работает — так же упадёт каждая строка. Валим запуск целиком.
+        if (err instanceof LlmAuthError || err instanceof LlmSilentError) {
+          // Ключ не работает или ИИ молчит серией — так же упадёт каждая
+          // строка. Валим запуск целиком.
           halted = true;
           throw err;
         }
@@ -741,7 +806,8 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         await updateRow(id, { row_status: 'failed', reason_code: 'PROCESSING_ERROR', reason_detail: err instanceof Error ? err.message.slice(0, 500) : String(err) });
       } finally {
         processed += 1;
-        if (processed % 5 === 0) await publish('processing');
+        // Запуск уже падает — прогресс не публикуем, итог запишет обработчик сбоя.
+        if (!halted && processed % 5 === 0) await publish('processing');
       }
     };
 
@@ -798,9 +864,9 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
       });
 
       // Pre-LPR rerank: почту ищем от самых сильных к слабым.
-      // Лимит здесь не проверяем: ИИ во второй фазе нужен только гипотезе
-      // сегментов, а почта и письма бесплатны — уже оплаченный разбор доводим
-      // до готовых. Строку, которой нужна гипотеза, лимит вернёт в необработанные.
+      // Лимит здесь не проверяем: почта и письма бесплатны, а необязательную
+      // гипотезу сегментов после лимита просто пропускаем — уже оплаченный
+      // разбор доводим до готовых.
       qualified.sort((a, b) => b.score.total - a.score.total);
       await publish('finding_emails', { qualified: qualified.length });
       await runPool(qualified, EMAIL_CONCURRENCY, async (q) => {
@@ -832,7 +898,8 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
       : budgetStop ? 'budget' : cursor >= pool.length ? 'pool_exhausted' : 'scan_limit';
     const spend = budget.snapshot();
     log('info', `job ${jobId} done: scanned=${totals.scanned} ready=${totals.ready}/${target} (${stopReason}), llm $${spend.spent_usd}/$${spend.limit_usd} in ${spend.calls} calls`, { reasons, chains });
-    await setProgress({
+    // Тоже только идущему: остановку между проверкой выше и этой записью не перетираем.
+    await setRunningProgress({
       status: 'completed',
       progress_stage: 'completed',
       progress_percent: 100,

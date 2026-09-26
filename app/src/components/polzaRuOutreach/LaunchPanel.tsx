@@ -204,7 +204,7 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart }: 
               type="number"
               min={MIN_LLM_BUDGET_USD}
               max={MAX_LLM_BUDGET_USD}
-              step={1}
+              step={0.5}
               value={Number.isFinite(budgetUsd) ? budgetUsd : ''}
               onChange={(e) => setBudgetUsd(e.target.value === '' ? NaN : Number(e.target.value))}
             />
