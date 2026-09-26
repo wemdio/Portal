@@ -21,7 +21,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { callOutreachJson, type OutreachLlmUsage } from '@/lib/outreachLlm/client';
+import { callOutreachJson, outreachWorstCaseUsd, type OutreachLlmUsage } from '@/lib/outreachLlm/client';
 import { BudgetExceededError, LlmAuthError, LlmCallError } from '@/lib/outreachLlm/context';
 import {
   buildLetters,
@@ -57,6 +57,21 @@ const MAX_WRITER_ATTEMPTS = 2;
  * запас сверху ничего не стоит; обрезанный всё же — клиент повторит с 16000.
  */
 const WRITER_MAX_TOKENS = 12_000;
+/**
+ * Длина промпта писателя для оценки сверху, пока сам промпт не собран (запас
+ * лимита под шаблоны считается на старте запуска). Первая попытка — system и
+ * задание с образцом цепочки, 8–9 тысяч символов; берём с запасом.
+ */
+const WRITER_PROMPT_CHARS_ESTIMATE = 12_000;
+
+/**
+ * Оценка сверху одной попытки писателя: промпт и WRITER_MAX_TOKENS ответа по
+ * цене модели писателя (Gemini 3.1 Pro — около $0.14). Столько клиент
+ * бронирует в лимите на ИИ под каждый вызов писателя.
+ */
+export function writerAttemptWorstUsd(): number {
+  return outreachWorstCaseUsd(LANG, 'writer', WRITER_PROMPT_CHARS_ESTIMATE, WRITER_MAX_TOKENS);
+}
 /**
  * Срок одного вызова писателя в воркере — со всеми повторами транспорта.
  * Gemini отвечает за 20–90 с; без срока зависший Requesty держал бы компании
@@ -716,6 +731,13 @@ export interface ChainTemplates {
    * одного такого повтора за запуск. Возвращает офферы, которые попробуют снова.
    */
   retryAiFailures(): PolzaOfferKey[];
+  /**
+   * Все начатые записи шаблонов закончились — строки шаблонов дописаны (или
+   * отпущены после остановки). false — не дождались за timeoutMs. Раннер ждёт
+   * их перед итоговой записью: «Переписать цепочку» сразу после неё видит
+   * шаблоны законченными, а не «пишется».
+   */
+  settled(timeoutMs: number): Promise<boolean>;
 }
 
 /**
@@ -757,6 +779,16 @@ export function createChainTemplates(deps: TemplateWriterDeps): ChainTemplates {
         offers.push(offer);
       }
       return offers;
+    },
+    settled(timeoutMs) {
+      return new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+        timer.unref?.();
+        void Promise.allSettled([...byOffer.values()]).then(() => {
+          clearTimeout(timer);
+          resolve(true);
+        });
+      });
     },
   };
 }

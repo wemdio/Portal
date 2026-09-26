@@ -19,7 +19,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { callOutreachJson, type OutreachLlmUsage } from '@/lib/outreachLlm/client';
+import { callOutreachJson, outreachWorstCaseUsd, type OutreachLlmUsage } from '@/lib/outreachLlm/client';
 import { BudgetExceededError, LlmAuthError, LlmCallError } from '@/lib/outreachLlm/context';
 import { claimsForChain, formatSignature, type CaseRecord, type OfferClaim, type SenderProfile } from '../libraries';
 import { describeTemplateFlag, runTemplateQa, type TemplateQaInput } from '../qa';
@@ -57,6 +57,22 @@ const WRITER_MIN_ATTEMPT_MS = 60_000;
  * запас сверху ничего не стоит; обрезанный всё же — клиент повторит с 16000.
  */
 const WRITER_MAX_TOKENS = 12_000;
+/**
+ * Длина промпта писателя для оценки сверху, пока сам промпт не собран (запас
+ * лимита под шаблоны считается на старте запуска). Первая попытка — system и
+ * задание с образцом цепочки, 6–8 тысяч символов; берём с запасом на длинные
+ * утверждённые формулировки.
+ */
+const WRITER_PROMPT_CHARS_ESTIMATE = 12_000;
+
+/**
+ * Оценка сверху одной попытки писателя: промпт и WRITER_MAX_TOKENS ответа по
+ * цене модели писателя (Gemini 3.1 Pro — около $0.14). Столько клиент
+ * бронирует в лимите на ИИ под каждый вызов писателя.
+ */
+export function writerAttemptWorstUsd(): number {
+  return outreachWorstCaseUsd(LANG, 'writer', WRITER_PROMPT_CHARS_ESTIMATE, WRITER_MAX_TOKENS);
+}
 /**
  * Срок одного вызова писателя в воркере — со всеми повторами транспорта.
  * Gemini отвечает за 20–60 с; без срока зависший Requesty держал бы компании
@@ -704,6 +720,13 @@ export interface ChainTemplates {
    * по оферу снова зовёт писателя. Возвращает офферы, которым дан повтор.
    */
   retryFailed(): ChainType[];
+  /**
+   * Все начатые записи шаблонов закончились — строки шаблонов дописаны (или
+   * отпущены после остановки). false — не дождались за timeoutMs. Раннер ждёт
+   * их перед итоговой записью: «Переписать цепочку» сразу после неё видит
+   * шаблоны законченными, а не «пишется».
+   */
+  settled(timeoutMs: number): Promise<boolean>;
 }
 
 /**
@@ -749,6 +772,16 @@ export function createChainTemplates(deps: TemplateWriterDeps): ChainTemplates {
       }
       return chains;
     },
+    settled(timeoutMs) {
+      return new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+        timer.unref?.();
+        void Promise.allSettled([...byChain.values()]).then(() => {
+          clearTimeout(timer);
+          resolve(true);
+        });
+      });
+    },
   };
 }
 
@@ -767,6 +800,14 @@ export async function templateBeingWritten(db: SupabaseClient, jobId: string): P
 /** Строка шаблона оффера есть в запуске (у оффера были компании, дошедшие до писем). */
 export async function templateExists(db: SupabaseClient, jobId: string, chain: ChainType): Promise<boolean> {
   return (await readRow(db, jobId, chain)) !== null;
+}
+
+/**
+ * Статус шаблона оффера в запуске (ok, failed, pending) или null — строки нет:
+ * у оффера не было компаний, дошедших до писем.
+ */
+export async function templateStatus(db: SupabaseClient, jobId: string, chain: ChainType): Promise<string | null> {
+  return (await readRow(db, jobId, chain))?.status ?? null;
 }
 
 export type RegenerateTemplateResult =

@@ -53,6 +53,7 @@ import {
   type OutreachLlmBudgetSnapshot,
 } from '@/lib/outreachLlm/context';
 import { pruneSiteAnalysisCache } from '@/lib/outreachLlm/siteAnalysisCache';
+import { JobOwner, WORKER_LEASE_KEY, WORKER_LEASE_TOKEN_PATH, withoutWorkerLease } from '@/lib/outreachLlm/workerLease';
 import { isSuppressed } from '@/lib/polzaRuOutreach/company';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { analyzeVacancy } from './analyzeVacancy';
@@ -67,8 +68,17 @@ import { lookupPdlProfile, normalizeDomain, PDL_COUNTRY_BY_CODE, resolveCompanyD
 import { selectVacancies } from './selectVacancies';
 import { loadSignature } from './settings';
 import { buildSiteProfile, type SiteProfile } from './siteProfile';
-import { createChainTemplates, templateFailureDetail, WORKER_WRITER_TIMEOUT_MS, type ChainTemplate } from './templateWriter';
 import {
+  createChainTemplates,
+  REBUILD_LEASE_KEY,
+  templateFailureDetail,
+  WORKER_WRITER_TIMEOUT_MS,
+  writerAttemptWorstUsd,
+  type ChainTemplate,
+  type ChainTemplates,
+} from './templateWriter';
+import {
+  POLZA_OFFER_KEYS,
   POLZA_OFFER_LABELS,
   POLZA_OUTREACH_STAGES as ST,
   polzaReviewReason,
@@ -145,20 +155,42 @@ const WRITER_FAILED_ATTEMPTS = 2;
  * Запас лимита на ИИ под писателя цепочек: шаблоны пишутся в конце волны, и
  * разбор не должен съесть лимит до цента — иначе компании, оплаченные
  * разбором, остались бы без писем. Новый разбор не начинаем, когда до лимита
- * меньше запаса. $1 — три-пять шаблонов Gemini 3.1 Pro; у маленького лимита —
- * пятая часть, иначе при лимите в $1 разбор не начался бы вовсе.
+ * (за вычетом броней идущих запросов) меньше запаса.
+ *
+ * Лимит строгий: каждый вызов писателя бронирует свою оценку сверху
+ * (writerAttemptWorstUsd — около $0.14: 12 000 токенов ответа Gemini 3.1 Pro
+ * по $10.8 за миллион и промпт, с наценкой Requesty), а шаблоны офферов волны
+ * пишутся разом. Поэтому запас — не меньше первых попыток всех пяти офферов
+ * (около $0.72) с четвертью сверху на строки, чей разбор начался до
+ * стоп-линии. Базовый запас — $1, у маленького лимита — пятая часть; итог —
+ * не больше половины лимита, иначе при лимите в $1 разбор не начался бы вовсе.
  */
 const WRITER_RESERVE_USD = 1;
 const WRITER_RESERVE_SHARE = 0.2;
+const WRITER_RESERVE_MARGIN = 1.25;
+const WRITER_RESERVE_MAX_SHARE = 0.5;
 
 function writerReserveUsd(budget: JobBudget): number {
-  return Math.min(WRITER_RESERVE_USD, budget.limitUsd * WRITER_RESERVE_SHARE);
+  const firstAttempts = POLZA_OFFER_KEYS.length * writerAttemptWorstUsd() * WRITER_RESERVE_MARGIN;
+  const base = Math.min(WRITER_RESERVE_USD, budget.limitUsd * WRITER_RESERVE_SHARE);
+  return Math.min(budget.limitUsd * WRITER_RESERVE_MAX_SHARE, Math.max(base, firstAttempts));
 }
 
-/** На разбор ещё можно тратить: лимит не исчерпан и запас под писателя цел. */
+/** На разбор ещё можно тратить: лимит не исчерпан и запас под писателя цел (с бронями идущих запросов). */
 function analysisBudgetLeft(budget: JobBudget): boolean {
-  return !budget.exhausted() && budget.limitUsd - budget.spentUsd >= writerReserveUsd(budget);
+  return !budget.exhausted() && budget.available() >= writerReserveUsd(budget);
 }
+
+/**
+ * Сколько ждать идущие вызовы ИИ, прежде чем записать итог расхода. После
+ * остановки или сбоя они оборваны и списываются сразу — ждём с запасом. У
+ * законченного запуска могут дописываться шаблоны, начатые заранее (их
+ * компании ушли в limit_reached): писатель — до двух попыток по пять минут.
+ */
+const ABORTED_SETTLE_MS = 30_000;
+const COMPLETED_SETTLE_MS = 2 * WORKER_WRITER_TIMEOUT_MS + 30_000;
+/** Строки шаблонов после ответа или обрыва писателя дописываются за миллисекунды — ждём с запасом. */
+const TEMPLATE_ROWS_SETTLE_MS = 10_000;
 
 /**
  * Строка, которую лимит на ИИ вернул в необработанные: статус «найдена» и ни
@@ -355,7 +387,13 @@ interface Duplicate {
 /**
  * Весь запуск идёт внутри контекста ИИ (lib/outreachLlm/context.ts): каждый
  * вызов разбора знает язык и списывает деньги с лимита именно этого запуска —
- * воркер одновременно ведёт и русский аутрич.
+ * воркер одновременно ведёт и русский аутрич. Сигнал контекста — остановка
+ * всего запуска: он обрывает каждый идущий вызов ИИ, не только писателя, и
+ * итог расхода пишется сразу, а не когда они сами закончатся.
+ *
+ * Запуск воркер держит арендой (lib/outreachLlm/workerLease.ts): пока он
+ * доводит остановленный запуск, «Переписать цепочку» ждёт, и итог воркера не
+ * стирает её расход.
  */
 export async function runPolzaOutreachJob(jobId: string): Promise<void> {
   const db = supabaseAdmin;
@@ -363,9 +401,28 @@ export async function runPolzaOutreachJob(jobId: string): Promise<void> {
     log('error', 'supabaseAdmin not configured');
     return;
   }
+  const runAbort = new AbortController();
+  const owner = new JobOwner({
+    db,
+    jobId,
+    log,
+    // Запуск забрали (аренда истекла, отметку снял роут) — прогон больше не
+    // наш: обрываем его, записывать итог он не будет.
+    onLost: () => {
+      if (!runAbort.signal.aborted) runAbort.abort(new PolzaOutreachCancelledError());
+    },
+  });
+  // Остановку или сбой воркер заметил — до итоговой записи держит аренду свежей.
+  runAbort.signal.addEventListener('abort', () => owner.windDown(), { once: true });
   let start: JobStart;
   try {
     start = await loadJobStart(db, jobId);
+    // Только идущий запуск: остановленный между захватом и стартом (его уже
+    // может переписывать «Переписать цепочку») заново не начинается.
+    if (!(await owner.claim(start.previousDetail))) {
+      log('info', `job ${jobId}: not running anymore — the run is not started`);
+      return;
+    }
   } catch (err) {
     // Лимит и прошлый расход не прочитались — не запускаем: с лимитом по
     // умолчанию и нулём потраченного перезапуск мог бы потратить лимит ещё раз.
@@ -374,11 +431,14 @@ export async function runPolzaOutreachJob(jobId: string): Promise<void> {
     const { error } = await db
       .from('parser_jobs')
       .update({ status: 'failed', progress_stage: 'failed', completed_at: new Date().toISOString(), error_message: message })
-      .eq('id', jobId);
+      .eq('id', jobId)
+      .eq('status', 'running');
     if (error) log('warn', `job ${jobId}: failed status update failed`, error);
     return;
   }
-  await runWithOutreachContext({ lang: 'en', budget: start.budget }, () => runJob(db, jobId, start.budget, start.previousDetail));
+  await runWithOutreachContext({ lang: 'en', budget: start.budget, signal: runAbort.signal }, () =>
+    runJob(db, jobId, start.budget, start.previousDetail, runAbort, owner),
+  );
 }
 
 interface JobStart {
@@ -396,8 +456,9 @@ const START_READ_RETRY_MS = 2_000;
  * возвращается в очередь и идёт заново, а снимок остаётся от прерванного
  * прогона: деньги уже потрачены, и без него каждый перезапуск получал бы
  * лимит целиком ещё раз. Читаем до runJob — первая же публикация прогресса
- * снимок перезапишет. Снимок обновляется раз в несколько строк: вызовы,
- * оплаченные перед самым падением, в него могут не попасть.
+ * снимок перезапишет. Снимок сохраняется продлением аренды раз в 30 с и сразу
+ * после каждого вызова писателя: при падении теряются только вызовы разбора
+ * последних секунд.
  *
  * Не прочиталось (сбой PostgREST или сети) — одна повторная попытка, потом
  * ошибка: молча начать с лимитом по умолчанию и нулём потраченного нельзя.
@@ -452,7 +513,7 @@ async function completeSpentRun(
   target: number,
   budget: JobBudget,
   previousDetail: Record<string, unknown> | null,
-  setRunningProgress: (patch: Record<string, unknown>) => Promise<void>,
+  finishRun: (patch: Record<string, unknown>) => Promise<void>,
 ): Promise<void> {
   const { error: dropErr } = await db.from('polza_outreach_companies').delete().eq('job_id', jobId).in('status', UNFINISHED_STATUSES);
   if (dropErr) throw new Error(`Не удалось убрать необработанные строки журнала: ${dropErr.message}`);
@@ -495,7 +556,7 @@ async function completeSpentRun(
   const spend = budget.snapshot();
   log('info', `job ${jobId}: LLM budget already spent ($${spend.spent_usd}/$${spend.limit_usd}) — restart keeps the journal: ${kept.length} rows, ${ready} ready (${stopReason})`);
   const progressDetail: Record<string, unknown> = {
-    ...(previousDetail ?? {}),
+    ...withoutWorkerLease(previousDetail ?? {}),
     scanned: kept.length,
     ready,
     awaiting_templates: awaiting,
@@ -505,7 +566,7 @@ async function completeSpentRun(
   };
   // Причина «без ждущих» относилась к прошлому прогону — теперь причина своя.
   delete progressDetail.stop_reason_base;
-  await setRunningProgress({
+  await finishRun({
     status: 'completed',
     progress_stage: 'completed',
     progress_percent: 100,
@@ -517,21 +578,62 @@ async function completeSpentRun(
   });
 }
 
-async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, previousDetail: Record<string, unknown> | null): Promise<void> {
-  const setProgress = async (patch: Record<string, unknown>) => {
-    const { error } = await db.from('parser_jobs').update(patch).eq('id', jobId);
-    if (error) log('warn', `progress update failed for ${jobId}`, error);
-  };
+async function runJob(
+  db: SupabaseClient,
+  jobId: string,
+  budget: JobBudget,
+  previousDetail: Record<string, unknown> | null,
+  // Остановка обрывает все вызовы ИИ запуска (сигнал контекста): писатель ждёт
+  // Gemini до пяти минут, и без сигнала «Остановить» ждало бы, пока он допишет
+  // (и заплатило бы за это).
+  runAbort: AbortController,
+  owner: JobOwner,
+): Promise<void> {
   // Прогресс и итог пишем только идущему запуску. Упал или остановлен — потоки
   // пула ещё добегают свои строки, и их публикации перетёрли бы «failed» и
-  // «Stopped by user».
+  // «Stopped by user». И только при своей аренде: запуск, который подхватил
+  // другой прогон, этот не перетирает.
   const setRunningProgress = async (patch: Record<string, unknown>) => {
-    const { error } = await db.from('parser_jobs').update(patch).eq('id', jobId).eq('status', 'running');
+    const { error } = await db
+      .from('parser_jobs')
+      .update(patch)
+      .eq('id', jobId)
+      .eq('status', 'running')
+      .eq(WORKER_LEASE_TOKEN_PATH, owner.token);
     if (error) log('warn', `progress update failed for ${jobId}`, error);
   };
-  // Остановка обрывает и писателя цепочек: он ждёт Gemini до пяти минут, и без
-  // сигнала «Остановить» ждало бы, пока он допишет (и заплатило бы за это).
-  const runAbort = new AbortController();
+  /**
+   * Итог законченного запуска — последняя запись, она же отпускает аренду.
+   * Остановили в последний момент — статус остановки не трогаем и причину
+   * окончания не утверждаем, но прогресс и расход всё равно пишем.
+   */
+  const finishRun = async (patch: Record<string, unknown>) => {
+    await owner.close();
+    if ((await owner.write(patch, { requireRunning: true })) !== 'skipped') return;
+    const progressDetail = { ...(patch.progress_detail as Record<string, unknown>) };
+    delete progressDetail.stop_reason;
+    delete progressDetail.stop_reason_base;
+    await owner.write({ progress_detail: progressDetail });
+  };
+  // Шаблоны цепочек запуска — когда созданы: итог ждёт и их строк.
+  let templatesRef: ChainTemplates | null = null;
+  /**
+   * Дождаться идущих вызовов ИИ: итог расхода пишется после них. false — не
+   * дождались, и их брони (оценку сверху) итог считает потраченными. Потом —
+   * строки шаблонов, которые писатели дописывают или отпускают после обрыва:
+   * «Переписать цепочку» сразу после итога не должна видеть шаблон «пишется».
+   */
+  const settleCalls = async (timeoutMs: number): Promise<boolean> => {
+    const deadline = Date.now() + timeoutMs;
+    let settled = budget.idle();
+    if (!settled) {
+      log('info', `job ${jobId}: waiting for LLM calls in flight before writing the final spend`);
+      settled = await budget.whenIdle(timeoutMs);
+      if (!settled) log('warn', `job ${jobId}: LLM calls still in flight after ${Math.round(timeoutMs / 1000)} s — their upper estimate is counted as spent`);
+    }
+    if (templatesRef) await templatesRef.settled(Math.min(TEMPLATE_ROWS_SETTLE_MS, Math.max(0, deadline - Date.now())));
+    return settled;
+  };
   const ensureNotCancelled = async () => {
     const { data } = await db.from('parser_jobs').select('status').eq('id', jobId).single();
     if (!data || data.status !== 'running') {
@@ -555,6 +657,20 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
   // Прогресс «как сейчас» — для сбоя и остановки: к нему дописывается итог
   // расходов на ИИ. Появляется, когда запуск дошёл до обработки строк.
   let currentDetail: (() => Record<string, unknown>) | null = null;
+  // До того — прошлый прогон и расход (его пишут продление аренды и итог).
+  const baseDetail = (): Record<string, unknown> => ({
+    ...withoutWorkerLease(previousDetail ?? {}),
+    llm: budget.snapshot(),
+    [WORKER_LEASE_KEY]: owner.lease(),
+  });
+  // Раз в 30 с воркер сохраняет изменившийся progress_detail — расход на ИИ
+  // (при падении теряются только последние секунды). Вызов писателя — дорогой:
+  // его расход сохраняем сразу, иначе перезапуск воркера заплатил бы за шаблон
+  // ещё раз мимо лимита.
+  owner.start(() => (currentDetail ? currentDetail() : baseDetail()));
+  budget.onCharge((role) => {
+    if (role === 'writer') owner.save();
+  });
 
   try {
     const { data: job, error: jobErr } = await db.from('parser_jobs').select('config,status').eq('id', jobId).single();
@@ -569,7 +685,7 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
     // под писателя — то же самое: новый прогон стёр бы оплаченный журнал, а
     // разбор всё равно не начался бы.
     if (!analysisBudgetLeft(budget)) {
-      await completeSpentRun(db, jobId, target, budget, previousDetail, setRunningProgress);
+      await completeSpentRun(db, jobId, target, budget, previousDetail, finishRun);
       return;
     }
     // Роут не создаёт запуск без ключа, но окружение воркера — отдельное. Без
@@ -583,8 +699,9 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
     const smtpOn = smtpAvailable();
     if (!smtpOn) log('warn', `job ${jobId}: SMTP_PROXY_URLS not set — emails are checked by syntax and MX only`);
 
-    await setProgress({
-      status: 'running',
+    // Только идущему: статус остановки не перетираем (запуск, остановленный
+    // после захвата, заново не начинается — ensureNotCancelled ниже).
+    await setRunningProgress({
       started_at: new Date().toISOString(),
       error_message: null,
       progress_stage: 'selecting_vacancies',
@@ -606,16 +723,24 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
         }, () => undefined);
     }, CANCEL_WATCH_MS);
     cancelWatch.unref?.();
+    // Остановленный между захватом и стартом запуск журнал прошлого прогона не стирает.
+    await ensureNotCancelled();
     // Повторный прогон (recover после падения воркера) — с чистого листа.
     // Лимит при этом ещё не исчерпан (иначе — completeSpentRun выше): профили
     // сайтов в кэше, и заново платим в основном за вакансии.
     await db.from('polza_outreach_companies').delete().eq('job_id', jobId);
-    // И без шаблонов цепочек прошлого прогона: failed-шаблон иначе сразу
-    // отправил бы компании оффера на ручную проверку без новой попытки, а
-    // pending умершего прогона заставил бы ждать. Путь «лимит уже исчерпан»
-    // выше шаблоны не трогает — журнал и его письма остаются.
-    const { error: templatesErr } = await db.from('polza_chain_templates').delete().eq('job_id', jobId).eq('lang', 'en');
+    // Из шаблонов цепочек прошлого прогона — только не готовые: failed-шаблон
+    // иначе сразу отправил бы компании оффера на ручную проверку без новой
+    // попытки, а pending умершего прогона заставил бы ждать. Готовые (ok)
+    // оплачены и годятся этому же запуску — новый прогон возьмёт их, а не
+    // заплатит писателю второй раз. Путь «лимит уже исчерпан» выше шаблоны не
+    // трогает — журнал и его письма остаются.
+    const { error: templatesErr } = await db.from('polza_chain_templates').delete().eq('job_id', jobId).eq('lang', 'en').neq('status', 'ok');
     if (templatesErr) throw new Error(`Не удалось убрать цепочки прошлого прогона: ${templatesErr.message}`);
+    // Маркер пересборки прошлого прогона (отпущенный — со статусом ok) — тоже:
+    // новый прогон начинается без него.
+    const { error: leaseErr } = await db.from('polza_chain_templates').delete().eq('job_id', jobId).eq('lang', 'en').eq('offer_key', REBUILD_LEASE_KEY);
+    if (leaseErr) throw new Error(`Не удалось убрать маркер пересборки прошлого прогона: ${leaseErr.message}`);
     // Устаревшие профили сайтов читатель не берёт — чистим, чтобы кэш не рос без конца.
     await pruneSiteAnalysisCache('en');
     // Подпись писем — из настроек (одна на все запуски), читается один раз:
@@ -624,6 +749,7 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
     // Шаблоны цепочек запуска: пишутся лениво, один раз на оффер; остановка
     // запуска обрывает писателя.
     const templates = createChainTemplates({ db, jobId, writerTimeoutMs: WORKER_WRITER_TIMEOUT_MS, signal: runAbort.signal });
+    templatesRef = templates;
 
     // ── S1: пул кандидатов ──
     const vacancies = config.sources.includes('hiring')
@@ -749,6 +875,8 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
       llm: budget.snapshot(),
       ...(smtpOn ? {} : { smtp_unavailable: true }),
       ...extra,
+      // Аренда запуска воркером: её несёт каждая запись progress_detail.
+      [WORKER_LEASE_KEY]: owner.lease(),
     });
     currentDetail = () => detail();
     const publish = async (stage: string, extra: Record<string, unknown> = {}) => {
@@ -1341,10 +1469,13 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
       : totals.ready + awaitingTemplate >= target
         ? 'awaiting_templates'
         : baseReason ?? 'pool_exhausted';
-    const spend = budget.snapshot();
+    // Шаблон, начатый заранее для компаний, которые ушли в limit_reached, ещё
+    // пишется — его расход часть итога: дожидаемся (запуск пока идёт).
+    const settled = await settleCalls(COMPLETED_SETTLE_MS);
+    const spend = budget.snapshot({ includeReserved: !settled });
     log('info', `job ${jobId} done: ${JSON.stringify(funnelOf())} (${stopReason}), llm $${spend.spent_usd}/$${spend.limit_usd} in ${spend.calls} calls`);
     // Тоже только идущему: остановку между проверкой выше и этой записью не перетираем.
-    await setRunningProgress({
+    await finishRun({
       status: 'completed',
       progress_stage: 'completed',
       progress_percent: 100,
@@ -1352,33 +1483,39 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
       total_parsed: totals.ready,
       completed_at: new Date().toISOString(),
       error_message: null,
-      progress_detail: detail({ stop_reason: stopReason, ...(stopReason === 'awaiting_templates' ? { stop_reason_base: baseReason } : {}) }),
+      progress_detail: {
+        ...detail({ stop_reason: stopReason, ...(stopReason === 'awaiting_templates' ? { stop_reason_base: baseReason } : {}) }),
+        llm: spend,
+      },
     });
   } catch (err) {
+    // Остановка или сбой: идущие вызовы ИИ запуска обрываем — другие офферы
+    // писали бы шаблоны (может, и повтор) и тратили деньги, которые итог уже
+    // не увидит. Оборванные списываются оценкой сверху; итог расхода — после
+    // них, последней записью, она же отпускает аренду.
+    if (!runAbort.signal.aborted) runAbort.abort(new PolzaOutreachCancelledError());
+    const settled = await settleCalls(ABORTED_SETTLE_MS);
+    const finalDetail = { ...(currentDetail ? currentDetail() : baseDetail()), llm: budget.snapshot({ includeReserved: !settled }) };
+    await owner.close();
     if (err instanceof PolzaOutreachCancelledError) {
       log('info', `job ${jobId} cancelled`);
       // Статус поставил тот, кто остановил; дописываем только итог — сколько
-      // успели потратить на ИИ и докуда дошли. Только у остановленного
-      // (failed): после перезапуска воркера запуск мог подхватить новый
-      // прогон, его прогресс не трогаем.
-      if (currentDetail) {
-        const { error } = await db.from('parser_jobs').update({ progress_detail: currentDetail() }).eq('id', jobId).eq('status', 'failed');
-        if (error) log('warn', `final progress update failed for ${jobId}`, error);
-      }
+      // успели потратить на ИИ и докуда дошли. Только при своей аренде: после
+      // перезапуска воркера запуск мог подхватить новый прогон, его прогресс
+      // не трогаем.
+      await owner.write({ progress_detail: finalDetail });
       return;
     }
     log('error', `job ${jobId} failed`, err);
-    await db
-      .from('parser_jobs')
-      .update({
-        status: 'failed',
-        progress_stage: 'failed',
-        completed_at: new Date().toISOString(),
-        error_message: err instanceof Error ? err.message : 'Unknown error',
-        ...(currentDetail ? { progress_detail: currentDetail() } : {}),
-      })
-      .eq('id', jobId);
+    await owner.write({
+      status: 'failed',
+      progress_stage: 'failed',
+      completed_at: new Date().toISOString(),
+      error_message: err instanceof Error ? err.message : 'Unknown error',
+      progress_detail: finalDetail,
+    });
   } finally {
     if (cancelWatch) clearInterval(cancelWatch);
+    await owner.close();
   }
 }
