@@ -1714,11 +1714,29 @@ const CONSTRUCT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 /** Пауза между тиками ожидания BC-джобы (run_after). */
 const CONSTRUCT_REQUEUE_MS = 60_000;
 
+/**
+ * Срок на один сайт для шага find_emails (только market='us', см. step_config
+ * ниже). Своего потолка у шага нет — в отличие от enrich, который жёстко
+ * режет сайт на 60 с. Худший случай на одну строку: 5 страниц по 2 попытки
+ * × 15 с + 400 мс backoff, плюс прокси-ретрай 8 с на главную ≈ 170 с, и всё
+ * это время строка держит 1 из 15 слотов пула. На базе в 1000 строк такой
+ * хвост упирается в CONSTRUCT_TIMEOUT_MS и теряется ВСЯ база, поэтому ждать
+ * молчащий сайт дольше 30 с смысла нет: адреса, найденные до срока, шаг
+ * сохраняет (abort прерывает обход страниц, а не результат).
+ */
+const CONSTRUCT_FIND_EMAILS_SITE_DEADLINE_MS = 30_000;
+
 /** Заголовок сетки конструктора (lowercase) → унифицированная колонка / description. */
 const CONSTRUCT_HEADER_MAP: Record<string, keyof HeUnifiedRow | 'description'> = {
   company: 'company',
   'компания': 'company',
   site: 'website',
+  // Конструктор при locale='en' канонизирует заголовок сетки 'Site' в 'Website'
+  // (EN_HEADER_ALIASES, baseConstructorWorker.normalizeEnHeaders) и сохраняет
+  // переписанный заголовок в base_constructor_jobs.data. Без этого ключа
+  // обратный разбор колонку не находил и домен терялся у КАЖДОЙ английской
+  // базы. Остальные десять колонок EN-сетки конструктор не переименовывает.
+  website: 'website',
   'сайт': 'website',
   email: 'email',
   phone: 'phone',
@@ -2137,6 +2155,22 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       }
       const locale = market === 'us' ? 'en' : 'ru';
       const steps = constructStepsFor(merged);
+      // Два ограничителя расхода шага find_emails — только для ENG-пути.
+      // RU-ветка staff-инструмента остаётся байт-в-байт прежней: правка
+      // дефолтов общего конструктора для RU-баз — отдельное решение.
+      //
+      // reuse_website_description: описание берём из главной страницы, которую
+      // поиск почт уже скачал. Шаг пишет его в колонку Description, а
+      // enrich_descriptions строки с непустым описанием пропускает — второй
+      // закачки тех же сайтов (ещё по одному фетчу на строку, 5 потоков, до
+      // 60 с на сайт) не будет. Текст тот же: reusableMainPageDescription
+      // применяет тот же порог 220 символов, что и fetchAndExtract, и при
+      // коротком тексте возвращает пусто — такую строку enrich по-прежнему
+      // обойдёт сам, со своим фоллбеком на страницу «о компании».
+      const findEmailsConfig =
+        market === 'us'
+          ? { reuse_website_description: true, site_timeout_ms: CONSTRUCT_FIND_EMAILS_SITE_DEADLINE_MS }
+          : null;
       const bcJobId = await insertChildJob(ctx, 'base_constructor_jobs', {
         user_id: project.created_by,
         workload_origin: 'automation',
@@ -2145,7 +2179,10 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         locale,
         selected_steps: steps,
         // Кап «до 5 почт на компанию» — ключ max, как читает STEP_RUNNERS воркера.
-        step_config: { cap_emails_per_company: { max: 5 } },
+        step_config: {
+          cap_emails_per_company: { max: 5 },
+          ...(findEmailsConfig ? { find_emails: findEmailsConfig } : {}),
+        },
         data: buildConstructGrid(merged, market),
         initial_row_count: merged.length,
         total_steps: steps.length,

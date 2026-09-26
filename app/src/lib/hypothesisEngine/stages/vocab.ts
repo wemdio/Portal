@@ -14,6 +14,7 @@ import { projectMarket } from '../market';
 import { HeVocabSchema } from '../schemas';
 import { buildVocabMessages } from '../prompts/vocab';
 import { buildVocabMessagesEn } from '../prompts/vocab.en';
+import { companyPartOfSummaryEn } from '../relevanceGate';
 import type { HeHypothesis, HeJob, HeVertical } from '../types';
 import { selectPromptHypotheses } from './chain';
 import { resolveSearch } from './io';
@@ -65,11 +66,21 @@ export async function runVocabStage(job: HeJob, ctx: HeStageContext): Promise<He
   // Рынок: ctx.market (воркер), фолбэк — колонка he_projects.market.
   const market = ctx.market ?? projectMarket(await readProject(ctx.supabase, job.project_id));
 
+  // Цель отбора, а не текст для клиента: из матрицы вокабуляра термины
+  // (company_types) и запросы (search_queries) уезжают прямо в сбор базы, и
+  // мотив покупки внутри summary превращается в термины вида «companies that
+  // need outbound» — таких компаний источники не знают, а запрос к каталогу по
+  // ним пустой. Поэтому на EN режем мотив тем же правилом, что гейт и проба
+  // среза (companyPartOfSummaryEn). Контекст «почему покупают» матрица не
+  // теряет: боли и мотивы приходят списком гипотез ниже, а он для сегментов и
+  // объявлен ПЕРВИЧНЫМ источником. RU-ветка (legacy /tools/hypothesis-engine)
+  // получает summary как раньше, байт-в-байт.
+  const summary = vertical.summary ?? '';
   const model = getHeModel('bulk');
   const llm = await callLLMWithSchema(
     (market === 'us' ? buildVocabMessagesEn : buildVocabMessages)({
       verticalName: vertical.name,
-      verticalSummary: vertical.summary ?? '',
+      verticalSummary: market === 'us' ? companyPartOfSummaryEn(summary) : summary,
       synonyms: Array.isArray(vertical.synonyms) ? vertical.synonyms : [],
       hypotheses,
     }),

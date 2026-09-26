@@ -20,18 +20,26 @@
  *   - кап daily_leads_cap конфига — на ПРОЕКТ в сутки (UTC): уже долитое
  *     сегодня другими refill'ами вычитается;
  *   - blocklist владельца пресета и чанкование — внутри
- *     appendLeadsToClientCampaign (тот же путь, что у RU auto-pipeline);
+ *     appendLeadsToClientCampaign (тот же путь, что у RU auto-pipeline), но с
+ *     entitlementMode='managed_contract': объём режет серверный daily_leads_cap,
+ *     а не self-serve тариф клиента (см. комментарий у вызова);
  *   - терминальный статус базы — 'analyzed' (не 'analyzing': анализа не
  *     будет), итог — в collect_info.refill_result и he_auto_pipeline_runs;
+ *     ИСКЛЮЧЕНИЕ: долив упал, не отдав провайдеру ни одной строки — база
+ *     уходит в 'failed', иначе её компании выжигаются навсегда (см.
+ *     refillLeadsReachedProvider и loadOtherBaseExclusionKeys). Возврат даётся
+ *     только разовому отказу: со второго подряд (REFILL_RELEASE_FAIL_STREAK_LIMIT,
+ *     refillFailStreak) база снова 'analyzed' — иначе ночной крон собирал бы
+ *     один и тот же срез каждую ночь;
  *   - пустой harvest — ШТАТНЫЙ исход добора («новых компаний нет»): база
  *     НЕ failed, прогон 'no_new', джоба завершается успешно;
- *   - ошибка долива (Instantly/пресет/тарифный гейт) — НЕ валит джобу:
+ *   - ошибка долива (Instantly/пресет/лимиты воркспейса) — НЕ валит джобу:
  *     собранная база сохраняется, прогон 'failed' с текстом ошибки, а
  *     завтрашний тик крона поставит новую refill-сборку. Повторный прогон
  *     ЭТОЙ базы невозможен — стадия работает только из статуса 'collecting'.
  */
 
-import { appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
+import { AppendLeadsPartialError, appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
 import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { mapBaseRowsToLeads, parseLaunchInfo } from '../launchHandoff';
@@ -45,6 +53,22 @@ import {
 
 /** Дефолт дневного капа лидов на проект — зеркало DEFAULT миграции 20260804_0005. */
 export const HE_AUTO_DEFAULT_DAILY_LEADS_CAP = 50;
+
+/**
+ * Сколько подряд упавших доливов вертикали ещё возвращают её компании в пул.
+ *
+ * Возврат компаний (база 'failed' → HARVEST снова видит их как новые) нужен
+ * ровно для разового отказа: собрали, письмо не ушло не по вине компаний,
+ * незачем выжигать срез. Но крон ставит refill вертикали КАЖДУЮ НОЧЬ, и при
+ * устойчивой причине (пропавший пресет, снятая кампания, исчерпанный лимит
+ * воркспейса, сменившийся Instantly-аккаунт) возврат
+ * превращается в цикл: те же компании собираются заново, падают на том же
+ * месте и снова возвращаются — каждую ночь за деньги сбора. Поэтому возврат
+ * даётся только первому отказу; со второго подряд срез остаётся исключённым,
+ * и цикл по одному и тому же набору прекращается. Причина решения — в
+ * refill_result (companies_released/fail_streak).
+ */
+const REFILL_RELEASE_FAIL_STREAK_LIMIT = 1;
 
 /** Статистика воронки долива (he_auto_pipeline_runs.stats + refill_result). */
 export interface HeRefillStats {
@@ -70,6 +94,27 @@ export interface HeRefillResult {
   campaign_id?: string;
   stats?: HeRefillStats;
   error?: string;
+  /**
+   * Только для status='failed': успел ли долив отдать хотя бы одну строку
+   * провайдеру. От этого зависит терминальный статус базы (см.
+   * runHeRefillAppend), поэтому признак сохраняется в collect_info — иначе
+   * решение «выжигать компании или нет» нельзя перепроверить по факту.
+   */
+  delivery_attempted?: boolean;
+  /**
+   * Только для status='failed': вернулись ли компании базы в пул сборки
+   * (status='failed' у базы) или остались исключёнными ('analyzed'). false при
+   * доставленных строках и при серии отказов
+   * (REFILL_RELEASE_FAIL_STREAK_LIMIT) — по этому полю видно, почему срез
+   * больше не поднимается ночными прогонами.
+   */
+  companies_released?: boolean;
+  /**
+   * Сколько refill-прогонов вертикали упало подряд ДО этого (0 — первый отказ).
+   * Считается до предела, нужного решению (REFILL_RELEASE_FAIL_STREAK_LIMIT + 1),
+   * а не по всей истории — см. refillFailStreak.
+   */
+  fail_streak?: number;
   completed_at: string;
 }
 
@@ -166,7 +211,12 @@ async function writeRefillRun(
   }
 }
 
-/** Терминальный апдейт refill-базы: строки как в обычном пути, но статус 'analyzed' + refill_result. */
+/**
+ * Терминальный апдейт refill-базы: строки как в обычном пути, статус —
+ * 'analyzed' при доливе и 'failed' у недоставленного разового отказа, компании
+ * которого возвращаются в пул (см. runHeRefillAppend).
+ * Строки сохраняются в любом случае: отчёт и разбор причины идут по ним.
+ */
 async function persistRefillBase(
   ctx: HeStageContext,
   baseId: string,
@@ -176,6 +226,9 @@ async function persistRefillBase(
     info: HeCollectInfo;
     stats: HeCollectInfo['stats'];
     refillResult: HeRefillResult;
+    status: 'analyzed' | 'failed';
+    /** Текст в he_bases.error (кабинет сворачивает его в машинный код). */
+    error?: string;
   },
 ): Promise<void> {
   const { error } = await ctx.supabase
@@ -185,12 +238,109 @@ async function persistRefillBase(
       sample_rows: args.rows.slice(0, SAMPLE_ROWS),
       data: args.rows,
       row_count: args.rows.length,
-      status: 'analyzed',
+      status: args.status,
+      ...(args.error === undefined ? {} : { error: args.error }),
       collect_info: { ...args.info, stats: args.stats, refill_result: args.refillResult },
       updated_at: new Date().toISOString(),
     })
     .eq('id', baseId);
   if (error) throw new Error(`he_bases refill update: ${error.message}`);
+}
+
+/**
+ * Дошла ли до провайдера хотя бы одна строка упавшего долива.
+ *
+ * Зачем: loadOtherBaseExclusionKeys (stages/baseCollect.ts) исключает из
+ * будущих сборок проекта компании всех баз, КРОМЕ 'failed'. Пока упавший
+ * долив сохранялся в 'analyzed', его компании выжигались навсегда: сбор
+ * оплачен, письма не ушли, второй раз эти компании не соберутся. Отдавать их
+ * обратно в сборку можно только когда Instantly точно ничего не получил —
+ * повторное письмо уже написанному лиду хуже потерянного лида.
+ *
+ * AppendLeadsPartialError несёт снимок результата; attemptedIndexes
+ * заполняется в onRequestAttempt ПЕРЕД HTTP-запросом, поэтому непустой
+ * список означает «запрос мог долететь, даже если ответ потерян». Остальные
+ * отказы долива (нет кампании или пресета, сменившийся воркспейс, исчерпанный
+ * лимит контактов, blocklist) бросаются до первого запроса в Instantly.
+ *
+ * Отсюда инвариант: доставленная база НИКОГДА не уходит в 'failed' решением
+ * этой стадии, поэтому в released-базе не может быть компании, которой уже
+ * писали (её собственный сбор исключал все не-'failed' базы проекта, а
+ * доставленные базы остаются 'analyzed'). Единственный путь, где база с
+ * доставкой всё же может стать 'failed', — ремонт воркера после ФИНАЛЬНОГО
+ * фейла base_collect (repairBaseAfterCollectFinalFail, CAS по 'collecting'):
+ * он сработает, если упадёт сама запись базы уже ПОСЛЕ долива. Второе письмо
+ * при этом всё равно не уйдёт: долив идёт со skipIfInCampaign=true (Instantly
+ * отсеет лида, который уже в кампании), а start-guard стадии
+ * (`status !== 'collecting'` → throw) не даёт повторно собрать базу с
+ * терминальным статусом.
+ */
+function refillLeadsReachedProvider(e: unknown): boolean {
+  if (!(e instanceof AppendLeadsPartialError)) return false;
+  const partial = e.partialResult;
+  return partial.accepted > 0 || partial.attemptedIndexes.length > 0;
+}
+
+/**
+ * Сколько refill-прогонов этой вертикали упало ПОДРЯД перед текущим.
+ *
+ * Журнал he_auto_pipeline_runs: строку 'collecting' пишет крон при постановке,
+ * финал — эта стадия по base_id. Поэтому считаем только завершённые прогоны
+ * ДРУГИХ баз (своя строка сейчас ещё 'collecting'); любой успех
+ * ('appended'/'no_new') серию обрывает. Строки без base_id — отказы САМОЙ
+ * постановки крона (сбора не было), они про срез ничего не говорят и в серию
+ * не идут.
+ *
+ * Никогда не бросает: вызывается из catch-ветки долива, где падать нельзя
+ * (см. шапку файла). Непрочитанная история = 0, то есть отказ считается
+ * разовым и компании возвращаются в пул — из двух исходов это обратимый:
+ * вернуть срез можно ещё раз, а выжженный назад не достать.
+ *
+ * Возвращаемое число ограничено окном чтения (LIMIT + 1): решение бинарное
+ * («серия достигла лимита или нет»), полная длина истории для него не нужна.
+ */
+async function refillFailStreak(
+  ctx: HeStageContext,
+  verticalId: string,
+  currentBaseId: string,
+): Promise<number> {
+  try {
+    const { data, error } = await ctx.supabase
+      .from('he_auto_pipeline_runs')
+      .select('status')
+      .eq('vertical_id', verticalId)
+      // Отбор делает запрос, а не JS: раньше пропускаемые строки (своя
+      // 'collecting', зависшие 'collecting' прошлых постановок, отказы крона
+      // без base_id) занимали место в окне и серия читалась короче, чем есть.
+      // base_id IS NULL отсекает и сам neq (SQL: NULL <> id → NULL), условие
+      // оставлено явным — оно про смысл строки, а не про трёхзначную логику.
+      .not('base_id', 'is', null)
+      .neq('base_id', currentBaseId)
+      .neq('status', 'collecting')
+      // Порядок — по завершению: у всех незавершённых строк статус
+      // 'collecting', он уже отсечён, а completed_at ставят и стадия, и крон.
+      // nullsFirst=false — чтобы гипотетическая строка без даты не съела окно.
+      .order('completed_at', { ascending: false, nullsFirst: false })
+      // Ровно столько, сколько нужно решению: LIMIT подряд упавших прогонов
+      // уже запрещают возврат, +1 строка отличает «серия ровно на лимите» от
+      // «длиннее» в журнале.
+      .limit(REFILL_RELEASE_FAIL_STREAK_LIMIT + 1);
+    if (error) throw new Error(error.message);
+    let streak = 0;
+    for (const row of (data ?? []) as Array<{ status?: unknown }>) {
+      // Любой успех ('appended'/'no_new') серию обрывает.
+      if (row.status !== 'failed') break;
+      streak += 1;
+    }
+    return streak;
+  } catch (e) {
+    stageLog(
+      ctx,
+      `[base_collect] refill: he_auto_pipeline_runs серия отказов не прочитана: ` +
+        `${e instanceof Error ? e.message : String(e)} — считаем отказ разовым`,
+    );
+    return 0;
+  }
 }
 
 interface RefillTemplatePick {
@@ -347,6 +497,8 @@ export async function runHeRefillAppend(args: {
   });
 
   const config = await loadRefillConfig(ctx, job.project_id);
+  /** Отдали ли строки провайдеру — решает судьбу компаний при отказе. */
+  let providerTouched = false;
   const runStats: HeRefillStats = {
     collected: finalRows.length,
     with_email: 0,
@@ -433,9 +585,31 @@ export async function runHeRefillAppend(args: {
         leads: toSend,
         contextLabel: `HE auto-refill · ${base.id}`,
         skipIfInCampaign: true,
+        // Ночной долив — доверенный серверный оркестратор, а не браузер
+        // клиента: объём уже срезан серверным `daily_leads_cap` (шаг 5 выше),
+        // поэтому self-serve тарифный гейт к нему не применяется. Без этой
+        // строки ENG-клиент получал 403 «Подписка не активна» ПОСЛЕ оплаченного
+        // сбора (у него тариф неактивен или отсутствует), тогда как ручной
+        // запуск ENG-кампании гейта не имеет вовсе. Ветка ENG-only по
+        // построению: payload.refill ставит только крон autoPipeline, который
+        // берёт лишь конфиги проектов he_projects.market='us'.
+        //
+        // Флаг снимает гейт ЦЕЛИКОМ (appendLeads.ts:245) — вместе с «подписка
+        // не активна» отключаются удержание на прогреве почт, «оформлена, но
+        // не оплачена» и тарифный лимит контактов. Для ENG это осознанно:
+        // ящики, прогрев и расписание ведёт студия по договору, а не тариф
+        // клиента; объём режет daily_leads_cap. НЕ затрагиваются (они вне
+        // гейта): blocklist владельца, доменная политика, отказ Instantly по
+        // лимитам воркспейса и журнал отправок. Вторая возможная опция —
+        // `agency_managed` у ENG-пресета при провижининге, см. TODO(tariffs)
+        // в autoPipeline.ts.
+        entitlementMode: 'managed_contract',
       });
       runStats.appended = appended.accepted;
       runStats.skipped_instantly = appended.skipped;
+      // Провайдер уже видел строки. Если дальше упадёт запись базы, компании
+      // обратно в сборку отдавать нельзя (см. refillLeadsReachedProvider).
+      providerTouched = appended.accepted > 0 || appended.attemptedIndexes.length > 0;
     }
     const outcome: HeRefillResult['status'] = valid === 0 ? 'no_new' : 'appended';
 
@@ -445,7 +619,9 @@ export async function runHeRefillAppend(args: {
       stats: runStats,
       completed_at: new Date().toISOString(),
     };
-    await persistRefillBase(ctx, base.id, { columns: finalColumns, rows: finalRows, info, stats, refillResult });
+    await persistRefillBase(ctx, base.id, {
+      columns: finalColumns, rows: finalRows, info, stats, refillResult, status: 'analyzed',
+    });
     await writeRefillRun(ctx, {
       configId: config?.id ?? null,
       projectId: job.project_id,
@@ -460,16 +636,42 @@ export async function runHeRefillAppend(args: {
     );
     return done(refillResult);
   } catch (e) {
-    // Ошибка долива НЕ валит джобу (см. шапку): база сохраняется в 'analyzed'
-    // с refill_result.error, прогон журналируется 'failed'.
+    // Ошибка долива НЕ валит джобу (см. шапку): база сохраняется с
+    // refill_result.error, прогон журналируется 'failed'.
     const message = (e instanceof Error ? e.message : String(e)).slice(0, 500);
+    // Провайдер ничего не получил → база терминально 'failed', и её компании
+    // остаются доступны следующей сборке проекта. Успел получить (или мы не
+    // знаем наверняка) → прежнее 'analyzed': компании считаются отработанными,
+    // второе письмо тому же лиду дороже потерянного лида.
+    const delivered = providerTouched || refillLeadsReachedProvider(e);
+    // Второй отказ подряд компании уже не возвращает: иначе ночной крон
+    // собирал бы тот же срез снова и снова (см. REFILL_RELEASE_FAIL_STREAK_LIMIT).
+    const failStreak = delivered ? 0 : await refillFailStreak(ctx, base.vertical_id, base.id);
+    const released = !delivered && failStreak < REFILL_RELEASE_FAIL_STREAK_LIMIT;
     const refillResult: HeRefillResult = {
       status: 'failed',
       stats: runStats,
       error: message,
+      delivery_attempted: delivered,
+      companies_released: released,
+      // Серию читаем только когда от неё зависит решение: у доставленного
+      // отказа компании не возвращаются независимо от истории, и записанный
+      // здесь ноль был бы неизмеренным.
+      ...(delivered ? {} : { fail_streak: failStreak }),
       completed_at: new Date().toISOString(),
     };
-    await persistRefillBase(ctx, base.id, { columns: finalColumns, rows: finalRows, info, stats, refillResult });
+    await persistRefillBase(ctx, base.id, {
+      columns: finalColumns,
+      rows: finalRows,
+      info,
+      stats,
+      refillResult,
+      status: released ? 'failed' : 'analyzed',
+      // Причина видна в карточке базы, а не только в журнале прогонов.
+      // Пишем её только вместе со статусом 'failed': у 'analyzed'-базы
+      // непустой error означал бы для UI сломанную базу.
+      ...(released ? { error: message } : {}),
+    });
     await writeRefillRun(ctx, {
       configId: config?.id ?? null,
       projectId: job.project_id,
@@ -477,7 +679,16 @@ export async function runHeRefillAppend(args: {
       baseId: base.id,
       result: refillResult,
     });
-    stageLog(ctx, `[base_collect] refill failed: ${message}`);
+    stageLog(
+      ctx,
+      `[base_collect] refill failed: ${message}` +
+        (delivered
+          ? ' — строки уже у провайдера, база остаётся analyzed'
+          : released
+            ? ' — провайдер строк не получил, база failed (компании не выжигаем)'
+            : ` — отказ ${failStreak + 1}-й подряд, компании остаются исключёнными ` +
+              '(база analyzed): иначе ночной прогон собрал бы тот же срез заново'),
+    );
     return done(refillResult);
   }
 }

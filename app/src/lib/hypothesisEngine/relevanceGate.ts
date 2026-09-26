@@ -30,6 +30,126 @@ export interface HeRelevanceGateResult {
   costUsd: number;
 }
 
+/**
+ * Оборот мотива покупки внутри EN-summary.
+ *
+ * EN-промпт кластеризации обещает ДВЕ вещи: summary — ровно два предложения, и
+ * второе начинается точными словами «They buy because …» (prompts/clustering.en.ts,
+ * самопроверки 4 и 5). Обещание промпта — не инвариант, и резать по одной фразе
+ * мало:
+ *  - модель пишет тот же мотив иначе: «These companies buy because …»,
+ *    «They purchase the service because …»;
+ *  - вертикали, склеенные ДО правки промпта (формат «1–2 предложения: кто это и
+ *    почему покупает»), зачина не несут вовсе и держат мотив внутри ОДНОГО
+ *    предложения — граница там проходит посередине, а не по точке;
+ *  - порядок предложений модель иногда переставляет.
+ *
+ * Поэтому ищем не метку, а сам оборот: анафора (they/these/those/such/their) +
+ * глагол покупки рядом + причинный союз. Описание компании так не звучит:
+ * первое предложение пишется без антецедента и начинается конкретной группой
+ * («Mid-market staffing agencies …»; «Companies that buy media …» под шаблон не
+ * попадает — между подлежащим и глаголом стоит «that»), поэтому описание
+ * шаблон не режет. Союз «to» в список НЕ взят намеренно: «such platforms
+ * subscribe to industry feeds» — это описание, а не мотив.
+ */
+const EN_BUYING_MOTIVE =
+  /\b(?:why\s+(?:they|these\s+companies)\s+buy\s*:|(?:and\s+)?(?:they|these|those|such|their)(?:\s+[a-z][a-z-]*){0,3}?\s+(?:buys?|purchases?|invests?|spends?|pays?|procures?|subscribes?|adopts?|outsources?)\b[^.!?]{0,80}?\s(?:because|in\s+order\s+to|so\s+that)\b)/i;
+
+/**
+ * Признак того, что предложение говорит о покупке, а не о компании. Нужен на
+ * шаге 3 (см. companyPartOfSummaryEn), когда оборот выше не нашёлся, а
+ * структура промпта соблюдена: «They buy to fill a thin pipeline.», «The
+ * purchase is driven by a missing BD function.».
+ */
+const EN_PURCHASE_TALK =
+  /\b(?:buy|buys|buying|bought|purchase|purchases|purchasing|invest|invests|investing|spend|spends|spending|pay|pays|paying|because)\b/i;
+
+/**
+ * Начала предложений. Без словаря сокращений: лишнее деление на «Inc.» делает
+ * правило только осторожнее — шаг 3 работает ровно на двух предложениях, то
+ * есть на обещанной промптом форме, а на тексте, разбитом лишний раз, молчит.
+ */
+function sentenceStartsEn(text: string): number[] {
+  const starts = [0];
+  const re = /[.!?…]["')\]]*\s+/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const next = m.index + m[0].length;
+    if (next < text.length) starts.push(next);
+  }
+  return starts;
+}
+
+/** Хвост вида «, and» / «;» / «—», остающийся после реза посередине предложения. */
+function trimConnectorTailEn(text: string): string {
+  return text.replace(/(?:[\s,;:—–]|\band\b|\bbut\b|\bwhile\b)+$/i, '').trim();
+}
+
+/**
+ * Цель отбора — описание КОМПАНИИ, а не причины, по которой мы хотели бы ей
+ * продать. he_verticals.summary служит обеим задачам: человеку в кабинете он
+ * объясняет «почему они покупают», а сюда приезжает как «кого мы ищем». Гейт
+ * видит только company/website/category/vacancy_title — по этим полям мотив
+ * покупки не проверяется никак, и модель вычёркивала подходящие компании за то,
+ * что в полях не видно причины покупки. Цена ошибки высокая: помеченные строки
+ * вырезаются из запуска (launchTemplate) и из добора (baseCollectRefill), без
+ * состояния «на пересмотр» — клиент теряет компанию молча.
+ *
+ * Поэтому мотив отрезаем — по двум признакам, и оба взяты из обещаний
+ * EN-промпта, а не из догадки о том, как модель напишет:
+ *   1) оборот мотива (EN_BUYING_MOTIVE) — режем по нему где угодно, в том числе
+ *      посередине предложения: у вертикалей, склеенных до правки промпта, мотив
+ *      и описание живут в одном предложении;
+ *   2) если оборот стоит первым — значит модель переставила предложения, и
+ *      описание идёт после него: отдаём хвост, а не пустую строку;
+ *   3) если оборота нет вовсе — опираемся на вторую гарантию промпта: ровно два
+ *      предложения, мотив — во втором. Второе предложение отбрасываем только
+ *      когда оно действительно про покупку (EN_PURCHASE_TALK).
+ * Ни один шаг не может вернуть пустое: цель с мотивом хуже, чем цель без
+ * мотива, но цель из одного имени вертикали хуже обеих — у пробы среза дефолт
+ * стоит на «не принадлежит», и без описания она забракует любой срез.
+ *
+ * ЧЕСТНАЯ ГРАНИЦА: надёжного разделителя внутри свободного текста не бывает —
+ * промпт не компилятор. Развязка по-настоящему делается ПОЛЕМ: clustering
+ * возвращает «кто это» и «почему покупают» отдельно, цель отбора берёт первое,
+ * письма — оба. Это миграция he_verticals + схема ответа кластеризации + правка
+ * клиентской проекции, то есть отдельная волна; здесь сделано максимум, что
+ * можно сделать на существующем поле.
+ *
+ * Только EN: RU-ветка обслуживает legacy-инструмент /tools/hypothesis-engine и
+ * должна остаться байт-в-байт прежней.
+ *
+ * Экспортируется, потому что ту же цель получают ещё два консьюмера того же
+ * summary — проба среза (sliceProbe.ts) и матрица вокабуляра (stages/vocab.ts,
+ * откуда термины и запросы уезжают прямо в сбор). Резать надо тем же правилом:
+ * у пробы дефолт стоит на «не принадлежит», и мотив внутри цели топит её ещё
+ * вернее, чем гейт.
+ */
+export function companyPartOfSummaryEn(summary: string): string {
+  const text = summary.trim();
+  if (!text) return '';
+
+  const starts = sentenceStartsEn(text);
+  const motive = text.search(EN_BUYING_MOTIVE);
+
+  // 1) Оборот найден — он и есть граница описания компании.
+  if (motive > 0) {
+    const head = trimConnectorTailEn(text.slice(0, motive));
+    if (head) return head;
+  }
+  // 2) Оборот стоит первым — описание идёт следующими предложениями.
+  if (motive === 0 && starts.length > 1) {
+    const tail = text.slice(starts[1]).trim();
+    if (tail) return tail;
+  }
+  // 3) Оборота нет — работаем по форме, которую обещает промпт.
+  if (motive < 0 && starts.length === 2 && EN_PURCHASE_TALK.test(text.slice(starts[1]))) {
+    const head = trimConnectorTailEn(text.slice(0, starts[1]));
+    if (head) return head;
+  }
+  return text;
+}
+
 function buildRelevanceMessages(
   verticalName: string,
   verticalSummary: string,
@@ -38,15 +158,16 @@ function buildRelevanceMessages(
 ): LLMMessage[] {
   const rowsJson = JSON.stringify(batch);
   if (language === 'en') {
+    const target = companyPartOfSummaryEn(verticalSummary);
     return [
       {
         role: 'system',
         content:
-          'You filter a collected lead base for one market vertical. A row is relevant only if the company itself plausibly belongs to the vertical (not merely mentions it in a vacancy or sells to it). Answer strictly in JSON.',
+          'You filter a collected lead base for one market vertical. A row is relevant only if the company itself plausibly belongs to the vertical (not merely mentions it in a vacancy or sells to it). Judge only what the company IS — its line of business and its company type. A reason to buy anything, processes, software, budget, hiring and headcount are context, never requirements. Answer strictly in JSON.',
       },
       {
         role: 'user',
-        content: `Vertical: «${verticalName}»${verticalSummary ? ` — ${verticalSummary}` : ''}\n\nRows (i + fields):\n${rowsJson}\n\nReturn JSON {"irrelevant": [<i>, ...]} with the indices of rows whose company clearly does NOT belong to this vertical. When in doubt — keep the row (do not list it).`,
+        content: `Vertical: «${verticalName}»${target ? ` — ${target}` : ''}\n\nRows (i + fields):\n${rowsJson}\n\nReturn JSON {"irrelevant": [<i>, ...]} with the indices of rows whose company clearly does NOT belong to this vertical. When in doubt — keep the row (do not list it).`,
       },
     ];
   }

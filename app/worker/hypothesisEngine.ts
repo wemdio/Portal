@@ -22,11 +22,18 @@
  * завершиться — done/дочейн не выполняются, attempts не растут (failJob).
  */
 
-import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop, startWorkerHeartbeat } from './_shared';
+import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop, sleep, startWorkerHeartbeat } from './_shared';
 import { runHeStage } from '@/lib/hypothesisEngine/stages';
 import { setHeActiveJobSignal } from '@/lib/hypothesisEngine/llm';
 import { normalizeHeMarket } from '@/lib/hypothesisEngine/market';
-import { enqueueAutopilotFollowups } from '@/lib/hypothesisEngine/autopilotNext';
+import {
+  HE_ANALYZING_BASE_FIELDS,
+  enqueueAutopilotFollowups,
+  isAnalyzingBaseLive,
+  liveHeJobBaseIds,
+  repairOrphanAnalyzingBase,
+} from '@/lib/hypothesisEngine/autopilotNext';
+import type { HeAnalyzingBase } from '@/lib/hypothesisEngine/autopilotNext';
 import type { HeJob, HeStage } from '@/lib/hypothesisEngine/types';
 
 const WORKER_ID = `hypothesis-engine-${process.pid}`;
@@ -133,15 +140,27 @@ async function accumulateProjectUsage(projectId: string, tokensUsed: number, cos
 }
 
 /**
+ * Сколько раз пробуем поставить следующую research-стадию: вставка в he_jobs
+ * денег не стоит, повтор дешевле обрыва цепочки проекта.
+ */
+const CHAIN_ENQUEUE_ATTEMPTS = 3;
+const CHAIN_ENQUEUE_RETRY_MS = 1000;
+
+/**
  * Дочейнить следующую research-стадию. Идемпотентно: если такая стадия уже
  * стоит в pending/running по этому проекту (повторный прогон, гонка с API) —
  * дубликат не ставим.
+ *
+ * Ошибку ЧТЕНИЯ дедупа бросаем, а не игнорируем: пустой `existing` после сбоя
+ * чтения означает не «стадии нет», а «неизвестно», и insert на этом месте
+ * ставил ВТОРУЮ копию следующей стадии — второй платный прогон того же
+ * research. Повтор (chainNextResearchStage) перечитает дедуп заново.
  */
 async function enqueueNextResearchStage(job: HeJob) {
   const nextStage = NEXT_RESEARCH_STAGE[job.stage];
   if (!nextStage) return;
 
-  const { data: existing } = await db
+  const { data: existing, error: existingErr } = await db
     .from('he_jobs')
     .select('id')
     .eq('project_id', job.project_id)
@@ -149,13 +168,85 @@ async function enqueueNextResearchStage(job: HeJob) {
     .in('status', ['pending', 'running'])
     .limit(1)
     .maybeSingle();
+  if (existingErr) throw new Error(`he_jobs ${nextStage} dedup read: ${existingErr.message}`);
   if (existing) return;
 
   const { error } = await db
     .from('he_jobs')
     .insert({ project_id: job.project_id, stage: nextStage });
-  if (error) throw new Error(`enqueue ${nextStage}: ${error.message}`);
+  if (error) throw new Error(`he_jobs ${nextStage} enqueue: ${error.message}`);
   log('info', `Job ${job.id} (${job.stage}) → enqueued ${nextStage} for project ${job.project_id}`);
+}
+
+/**
+ * Дочейн следующей стадии, который НЕ роняет уже завершённую джобу.
+ *
+ * Раньше сбой постановки летел из handleJob наверх, pollOnce звал failJob, и
+ * тот возвращал в pending УЖЕ done-джобу с attempts+1: оплаченная
+ * research-стадия исполнялась заново на самой дорогой модели. Поэтому:
+ *  - сначала CHAIN_ENQUEUE_ATTEMPTS дешёвых попыток — типичная причина
+ *    (транзиентный отказ PostgREST) лечится повтором, а дедуп-чтение внутри
+ *    не даёт повтору поставить дубликат;
+ *  - джоба остаётся done: платную работу не повторяем, причину пишем в её
+ *    `error` (в мастере специалиста колонка ошибки видна и у done-строки);
+ *  - проект уходит в 'failed' с причиной — вести цепочку дальше некому, а
+ *    молчаливый успех оставил бы проект в 'researching' навсегда. Это тот же
+ *    терминальный статус, что failJob ставит при финальном фейле
+ *    research-стадии, только без трёх платных повторов по дороге к нему;
+ *    перезапуск research (staff-роут projects/[id]/research и клиентская
+ *    кнопка client/eng/projects/[id]/research) с него работает — обе идут через
+ *    enqueueHeResearchJob, а тот сам возвращает проект в 'researching'.
+ *    Апдейт идёт с CAS по 'researching': отменённый проект cancel-роут уже
+ *    перевёл в 'draft', и затирать его отмену этим фейлом нельзя.
+ *
+ * Окно ремонта сознательно оставлено коротким (~3 с суммой пауз): воркер
+ * односоточный, пока он спит — не обрабатываются джобы других проектов, а
+ * дольше ждать тут и нечем помочь. Полная недоступность БД роняет и записи
+ * причины (тогда проект остаётся в 'researching' до внешнего реконсилятора),
+ * а сбой, при котором insert в he_jobs не проходит, а update he_projects
+ * проходит, — не транзиент, и повторы его не вылечат. Долговечное решение —
+ * реконсилятор незавершённых проектов (отдельная волна).
+ *
+ * Наружу не бросает НИЧЕГО (включая сбой самой записи причины) — иначе вернётся
+ * ровно тот повтор платной стадии, от которого функция и защищает.
+ */
+async function chainNextResearchStage(job: HeJob) {
+  let lastErr: unknown = null;
+  for (let attempt = 1; attempt <= CHAIN_ENQUEUE_ATTEMPTS; attempt += 1) {
+    try {
+      await enqueueNextResearchStage(job);
+      return;
+    } catch (e) {
+      lastErr = e;
+      const msg = e instanceof Error ? e.message : String(e);
+      log('error', `Job ${job.id} (${job.stage}) chain enqueue failed (attempt ${attempt}/${CHAIN_ENQUEUE_ATTEMPTS}): ${msg}`);
+      if (attempt < CHAIN_ENQUEUE_ATTEMPTS) await sleep(CHAIN_ENQUEUE_RETRY_MS * attempt);
+    }
+  }
+
+  const reason = `chain stopped: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`;
+  try {
+    await db
+      .from('he_jobs')
+      .update({ error: reason.slice(0, 500), updated_at: new Date().toISOString() })
+      .eq('id', job.id);
+    await db
+      .from('he_projects')
+      .update({
+        status: 'failed',
+        error: `${job.stage}: ${reason}`.slice(0, 500),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', job.project_id)
+      // CAS: валим только идущее исследование. Отменённый проект cancel-роут
+      // уже перевёл в 'draft' — затирать отмену фейлом дочейна нельзя.
+      // (Перезапуск, успевший вернуть проект в 'researching', этим фильтром не
+      // отличить — такую гонку закроет только реконсилятор.)
+      .eq('status', 'researching');
+    log('error', `Job ${job.id} (${job.stage}) → research chain stopped, project ${job.project_id} marked failed`);
+  } catch (e) {
+    log('error', `Job ${job.id} (${job.stage}) → research chain stopped, но записать причину не удалось: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 async function handleJob(job: HeJob) {
@@ -250,16 +341,139 @@ async function handleJob(job: HeJob) {
     .eq('id', job.id);
 
   await accumulateProjectUsage(job.project_id, tokensUsed, costUsd);
-  await enqueueNextResearchStage(job);
+  // Дочейн следующей research-стадии сам обрабатывает свой сбой: наверх ничего
+  // не бросает, иначе failJob вернул бы уже done-джобу в pending и оплаченная
+  // стадия исполнилась бы заново.
+  await chainNextResearchStage(job);
   // Автопилот ENG-кабинета (только при he_projects.autopilot=true): дочейн
   // chain → base_collect → (base_analyze уже авто) → template. Сбой постановки
   // followup не должен ронять уже завершённую джобу — логируем и идём дальше.
   try {
-    await enqueueAutopilotFollowups(db, job);
+    // Итог дочейна логируем: 'reanalyzed' (вместо новой сборки вылечена
+    // осиротевшая база) иначе не виден в логах вообще.
+    const followups = await enqueueAutopilotFollowups(db, job);
+    const summary = Object.entries(followups)
+      .map(([stage, outcome]) => `${stage}=${outcome}`)
+      .join(' ');
+    if (summary) log('info', `Job ${job.id} (${job.stage}) autopilot followups: ${summary}`);
   } catch (e) {
     log('error', `Job ${job.id} (${job.stage}) autopilot followups failed: ${e instanceof Error ? e.message : String(e)}`);
   }
   log('info', `Job ${job.id} (${job.stage}) → done (+${tokensUsed} tok, $${costUsd.toFixed(6)})`);
+}
+
+/**
+ * Ремонт базы после ФИНАЛЬНОГО фейла base_collect. Два нетерминальных статуса,
+ * в которых стадия может оставить базу, лечатся по-разному:
+ *
+ *  - 'collecting' — до harvest: собранного нет, база уходит в 'failed' с
+ *    причиной. Иначе она навсегда остаётся «живой» для collect-роута и держит
+ *    partial unique index he_bases_one_collecting_per_vertical.
+ *  - 'analyzing' — harvest УЖЕ прошёл: строки собраны, конструктор оплачен,
+ *    умерла только вставка base_analyze (stages/baseCollect.ts делает её
+ *    отдельным запросом после перевода базы в 'analyzing'), а ретраи сборки
+ *    после этого умирают в start-guard («сборка уже завершена»). Здесь база
+ *    ГОДНА к анализу, и правильный ремонт — поставить пропавшую джобу
+ *    анализа, а не выбросить оплаченные строки в 'failed' ради выхода из
+ *    подвисшего состояния. Вставка в he_jobs бесплатна, анализ подхватит
+ *    автопилот дальше (base_analyze done → template). Сам ремонт и предикат
+ *    живости — общие с автопилотом и клиентским роутом «Start outreach»
+ *    (lib/hypothesisEngine/autopilotNext: isAnalyzingBaseLive,
+ *    repairOrphanAnalyzingBase), чтобы три контура не расходились в том, что
+ *    считать живой базой и что делать с осиротевшей.
+ *
+ * 'failed' остаётся фолбэком ровно там, где анализ невозможен: живого анализа
+ * нет и анализировать нечего (нет строк/колонок), в этом конвейере анализа не
+ * бывает вовсе (refill) или сама постановка не удалась. Иначе база без живой
+ * джобы висела бы в 'analyzing' навсегда, а автопилот вертикали считал бы её
+ * подготовленной и больше ничего не ставил.
+ */
+async function repairBaseAfterCollectFinalFail(job: HeJob, baseId: string, msg: string) {
+  /** Терминальная запись с CAS: статус пишем только из 'collecting'. */
+  const markCollectingFailed = async (error: string) => {
+    await db
+      .from('he_bases')
+      .update({
+        status: 'failed',
+        error: error.slice(0, 500),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', baseId)
+      .eq('status', 'collecting');
+  };
+
+  const { data: baseRow, error: baseErr } = await db
+    .from('he_bases')
+    .select(HE_ANALYZING_BASE_FIELDS)
+    .eq('id', baseId)
+    .maybeSingle();
+  // Сбой чтения — прежнее поведение: валим только 'collecting'. Про
+  // 'analyzing' без чтения судить нельзя (можно убить живой анализ).
+  if (baseErr || !baseRow) {
+    await markCollectingFailed(msg);
+    return;
+  }
+  const base = baseRow as unknown as HeAnalyzingBase;
+  if (base.status === 'collecting') {
+    await markCollectingFailed(msg);
+    return;
+  }
+  // Терминальный статус (стадия сама свалила базу с ПРИЧИНОЙ — «ноль строк»,
+  // отказ пробы среза; так выглядели базы Franchise Brands 12.08) — не трогаем:
+  // текст start-guard перетёр бы осмысленную причину.
+  if (base.status !== 'analyzing') return;
+
+  // Живость — ОБЩИМ предикатом автопилота и кабинета, но с graceMs=0: смерть
+  // тут наблюдаемая, а не выведенная из снапшота (упала та самая base_collect,
+  // которая и должна была поставить анализ), и окно ожидания только помешало бы
+  // лечить — секунду назад harvest как раз и выставил 'analyzing'.
+  let liveBaseIds: Set<string>;
+  try {
+    liveBaseIds = await liveHeJobBaseIds(db, job.project_id);
+  } catch (e) {
+    // «Неизвестно» ≠ «мертва»: без списка активных джоб базу не трогаем.
+    log(
+      'error',
+      `Job ${job.id} (base_collect) base ${baseId}: активные джобы не прочитаны (${e instanceof Error ? e.message : String(e)}) — базу не трогаем`,
+    );
+    return;
+  }
+  if (isAnalyzingBaseLive(base, liveBaseIds, 0)) {
+    log('info', `Job ${job.id} (base_collect) base ${baseId}: analyzing с живой джобой по базе — не трогаем`);
+    return;
+  }
+
+  try {
+    const verdict = await repairOrphanAnalyzingBase(db, {
+      projectId: job.project_id,
+      base,
+      reason: msg,
+      // Refill-конвейер анализа не делает вовсе — там только 'failed'.
+      refill: job.payload?.refill === true,
+    });
+    if (verdict === 'reanalyzed') {
+      const rowCount = typeof base.row_count === 'number' ? base.row_count : 0;
+      log(
+        'info',
+        `Job ${job.id} (base_collect) base ${baseId}: осиротевший analyzing вылечен постановкой base_analyze (${rowCount} собранных строк сохранены)`,
+      );
+    } else {
+      // 'failed' — либо анализировать нечего (нет строк/колонок, refill), либо
+      // не удалась сама постановка анализа; точная причина уже в he_bases.error.
+      log(
+        'error',
+        `Job ${job.id} (base_collect) base ${baseId}: осиротевший analyzing не удалось довести до анализа → failed`,
+      );
+    }
+  } catch (e) {
+    // Ремонт не записался — база остаётся в 'analyzing' до следующего прохода
+    // (автопилот вертикали или повторный «Start outreach» кабинета её долечат).
+    // Бросать наверх нельзя: failJob вызван из catch pollOnce.
+    log(
+      'error',
+      `Job ${job.id} (base_collect) base ${baseId}: ремонт осиротевшего analyzing не удался: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
 }
 
 async function failJob(job: HeJob, err: unknown) {
@@ -303,26 +517,14 @@ async function failJob(job: HeJob, err: unknown) {
       .eq('id', job.project_id);
   }
 
-  // Финальный фейл base_collect: без этого he_bases навсегда остаётся в
-  // 'collecting', и collect-роут продолжает отдавать базу как живую. payload
+  // Финальный фейл base_collect: без ремонта he_bases навсегда остаётся в
+  // нетерминальном статусе — 'collecting' (collect-роут продолжает отдавать
+  // базу как живую) или 'analyzing' (автопилот считает её подготовленной).
+  // Что именно делать с базой — в repairBaseAfterCollectFinalFail. payload
   // может не содержать base_id — тогда просто не трогаем базу.
-  // Только status='collecting': стадия сама валит базу с ПРИЧИНОЙ («ноль
-  // строк», отказ пробы среза), а ретраи после этого умирают в start-guard —
-  // без фильтра его текст «сборка уже завершена» перетирал осмысленную причину
-  // (так выглядели базы Franchise Brands 12.08).
   if (finalFail && job.stage === 'base_collect') {
     const baseId = typeof job.payload?.base_id === 'string' ? job.payload.base_id : null;
-    if (baseId) {
-      await db
-        .from('he_bases')
-        .update({
-          status: 'failed',
-          error: msg.slice(0, 500),
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', baseId)
-        .eq('status', 'collecting');
-    }
+    if (baseId) await repairBaseAfterCollectFinalFail(job, baseId, msg);
   }
 }
 

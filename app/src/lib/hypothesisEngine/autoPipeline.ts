@@ -22,6 +22,21 @@
  * stages/baseCollectRefill.ts). Дедуп компаний при повторных сборах —
  * встроенный в HARVEST (исключение компаний других баз проекта), поэтому
  * refill поднимает только новые.
+ *
+ * TODO(tariffs): долив этой ветки — ЕДИНСТВЕННЫЙ ENG-путь, который упирается в
+ * self-serve тарифный гейт. `stages/baseCollectRefill.ts` зовёт общий
+ * `appendLeadsToClientCampaign` без `entitlementMode`, то есть по правилам
+ * RU-кабинета, а ручной запуск ENG-кампании гейта не имеет вовсе (там свой
+ * `TODO(tariffs)` в `api/client/eng/templates/[id]/launch/route.ts`, и ядро
+ * `runHeTemplateLaunch` грузит лидов в рассыльщик напрямую, минуя эту функцию).
+ * У ENG-клиента строка тарифа либо неактивна (`api/signup/route.ts` ставит
+ * `is_active=false`), либо отсутствует — оба случая дают 403 «Подписка не
+ * активна» уже ПОСЛЕ оплаченного сбора. Асимметрию закрывать ТОЛЬКО на стороне
+ * вызывающего (общий биллинг-код делят RU-кабинет и VE2 — ветки по рынку внутри
+ * него быть не должно): либо `entitlementMode: 'managed_contract'` в вызове
+ * refill'а, либо `agency_managed` у ENG-пресета при провижининге. Объём долива
+ * при этом режет не тариф, а дневной кап проекта
+ * `he_auto_pipeline_configs.daily_leads_cap`.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';

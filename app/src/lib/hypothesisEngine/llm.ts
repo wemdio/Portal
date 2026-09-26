@@ -10,8 +10,10 @@
  *    (цепочки писем парсятся маркерами ---LETTER N---, а не схемой).
  *
  * Цены (USD/M токенов) — по прайсу Requesty на момент написания; при смене
- * моделей обновить MODEL_PRICES. Фолбэк-оценка — по самой дорогой (opus),
- * чтобы не занижать фактическую стоимость прогона.
+ * моделей обновить MODEL_PRICES. Фолбэка «считать по самой дорогой» больше нет:
+ * он завышал самый массовый вызов движка в ~33 раза. Модель без ставки прогон
+ * не останавливает: расход берётся из usage.cost роутера, а сам пробел в
+ * таблице виден в логе (см. costOfCall).
  */
 
 import { z } from 'zod';
@@ -20,7 +22,7 @@ const API_URL = 'https://router.requesty.ai/v1/chat/completions';
 
 interface RequestyResponse {
   choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
-  usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
+  usage?: { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number; cost?: number };
 }
 
 type ModelPrices = { in: number; out: number };
@@ -42,12 +44,43 @@ const MODEL_PRICES: Record<string, ModelPrices> = {
   'openai/gpt-5.5':                 { in: 4.5, out: 27.0 },
   'gemini-3.1-pro-preview':         { in: 1.8, out: 10.8 },
   'google/gemini-3.1-pro-preview':  { in: 1.8, out: 10.8 },
+  // Дефолт роли gate (HE_MODEL_DEFAULTS.gate) — самый массовый вызов движка:
+  // relevanceGate (до 60 батчей на базу), segmentClassify, sliceProbe, caseBank.
+  // Без этой строки он считался по фолбэку opus ($5/$25), то есть в ~33× дороже
+  // факта по входным токенам. Прайс Requesty /v1/models, 2026-09-08.
+  'gpt-4o-mini':                    { in: 0.15, out: 0.60 },
+  'openai/gpt-4o-mini':             { in: 0.15, out: 0.60 },
   // На случай downgrade через env
   'claude-haiku-4-5':               { in: 1.0, out: 5.0 },
   'anthropic/claude-haiku-4-5':     { in: 1.0, out: 5.0 },
 };
 
-const FALLBACK_PRICES: ModelPrices = MODEL_PRICES['anthropic/claude-opus-4-8'];
+function lookupPrices(model: string): ModelPrices | undefined {
+  // Датированный алиас («…-2024-07-18»), например в env, считаем по базовой
+  // ставке — иначе он молча уходил бы в «модель без ставки».
+  return MODEL_PRICES[model] ?? MODEL_PRICES[model.replace(/-\d{4}-\d{2}-\d{2}$/, '')];
+}
+
+/** Уже залогированные пробелы (модель + повод): до 60 вызовов гейта на базу, без дедупа лог зашумится. */
+const unpricedLogged = new Set<string>();
+
+/**
+ * Один раз на модель и повод сказать в лог, что ставки нет.
+ *
+ * Пропуск в MODEL_PRICES — ошибка конфигурации (опечатка в env, переименование
+ * модели у провайдера, новая роль без ставки), и заметить её больше негде:
+ * cost_usd у he_jobs/he_projects — numeric not null, который воркер только
+ * прибавляет (`Number(job.cost_usd ?? 0) + …`), «неизвестно» в нём не
+ * выражается, а llm_model пишется лишь у части артефактов (chain/template/
+ * dossier), у джобы gate/bulk — нет. Поэтому лог — единственный канал, и
+ * молчать в нём нельзя: иначе отчёт о себестоимости занижается тихо.
+ */
+function noteUnpriced(model: string, reason: string, detail: string): void {
+  const key = `${model}|${reason}`;
+  if (unpricedLogged.has(key)) return;
+  unpricedLogged.add(key);
+  console.error(`[he-llm] нет ставки в MODEL_PRICES для модели '${model}': ${detail}`);
+}
 
 function getApiKey(): string {
   const key = process.env.OPENROUTER_HYPOTHESIS_ENGINE_API_KEY || process.env.OPENROUTER_BRIEF_API_KEY;
@@ -57,9 +90,33 @@ function getApiKey(): string {
   return key;
 }
 
-function estimateCost(model: string, promptTokens: number, completionTokens: number): number {
-  const p = MODEL_PRICES[model] ?? FALLBACK_PRICES;
-  return (promptTokens / 1_000_000) * p.in + (completionTokens / 1_000_000) * p.out;
+/**
+ * Стоимость вызова. Порядок: ставка из MODEL_PRICES (штатный путь, цифры не
+ * меняются) → фактический `usage.cost` роутера → 0 с записью в лог.
+ *
+ * Ставки может не быть у модели из env или из явного opts.model, и бросать
+ * здесь нельзя: к моменту подсчёта вызов уже оплачен, стадия упала бы ПОСЛЕ
+ * успешного ответа модели — пробел в бухгалтерии не повод останавливать
+ * работающий платный прогон. Requesty отдаёт свою цену вызова в usage.cost
+ * (в VE2 это и есть источник аудита расхода) — это точнее любой таблицы, и
+ * ставку «самой дорогой» модели не выдумываем ни при каких условиях. Если и
+ * usage.cost нет — вклад нулевой (сумму складывают в stages/shared.ts и
+ * прибавляют к numeric-колонке, NaN сломал бы её), но не молча: см. noteUnpriced.
+ */
+function costOfCall(
+  model: string,
+  promptTokens: number,
+  completionTokens: number,
+  reportedCostUsd?: number,
+): number {
+  const p = lookupPrices(model);
+  if (p) return (promptTokens / 1_000_000) * p.in + (completionTokens / 1_000_000) * p.out;
+  if (reportedCostUsd !== undefined) {
+    noteUnpriced(model, 'router', `расход взят из usage.cost роутера ($${reportedCostUsd}) — допишите ставку в hypothesisEngine/llm.ts`);
+    return reportedCostUsd;
+  }
+  noteUnpriced(model, 'missing', 'и роутер не вернул usage.cost — расход этого вызова НЕ попал в cost_usd, допишите ставку в hypothesisEngine/llm.ts');
+  return 0;
 }
 
 /* ─────────────────────── Роли моделей ─────────────────────── */
@@ -83,9 +140,25 @@ const HE_MODEL_ENV: Record<HeModelKind, string> = {
   gate: 'HE_MODEL_GATE',
 };
 
-/** Модель для роли движка; переопределяется env HE_MODEL_RESEARCH/CHAIN/BULK/GATE. */
+/**
+ * Модель для роли движка; переопределяется env HE_MODEL_RESEARCH/CHAIN/BULK/GATE.
+ * Про отсутствие ставки говорим здесь же — при чтении конфигурации, с именем
+ * env: так опечатка видна на первой стадии, а не только по факту вызовов.
+ * Модель при этом возвращаем как есть: файл обслуживает и штатный RU-инструмент
+ * специалистов, и ENG-ресёрч, и остановить их из-за пробела в прайсе нельзя.
+ */
 export function getHeModel(kind: HeModelKind): string {
-  return (process.env[HE_MODEL_ENV[kind]] ?? '').trim() || HE_MODEL_DEFAULTS[kind];
+  const configured = (process.env[HE_MODEL_ENV[kind]] ?? '').trim();
+  const model = configured || HE_MODEL_DEFAULTS[kind];
+  if (!lookupPrices(model)) {
+    noteUnpriced(
+      model,
+      'config',
+      `роль '${kind}' (${configured ? HE_MODEL_ENV[kind] : `HE_MODEL_DEFAULTS.${kind}`}) — ` +
+        `расход ляжет на usage.cost роутера, а без него в ноль — допишите ставку в hypothesisEngine/llm.ts`,
+    );
+  }
+  return model;
 }
 
 /* ─────────────────────── Базовые типы/вызов ─────────────────────── */
@@ -180,14 +253,22 @@ async function rawCall(
   return { text, response };
 }
 
-function usageOf(response: RequestyResponse): { promptTokens: number; completionTokens: number; tokensUsed: number } {
+function usageOf(response: RequestyResponse): {
+  promptTokens: number;
+  completionTokens: number;
+  tokensUsed: number;
+  /** Цена вызова от роутера, если он её вернул: нужна моделям без своей ставки. */
+  reportedCostUsd?: number;
+} {
   const usage = response.usage || {};
   const promptTokens = usage.prompt_tokens ?? 0;
   const completionTokens = usage.completion_tokens ?? 0;
+  const cost = usage.cost;
   return {
     promptTokens,
     completionTokens,
     tokensUsed: usage.total_tokens ?? promptTokens + completionTokens,
+    ...(typeof cost === 'number' && Number.isFinite(cost) && cost >= 0 ? { reportedCostUsd: cost } : {}),
   };
 }
 
@@ -256,7 +337,7 @@ export async function callLLMWithSchema<T>(
     }
 
     const { text, response } = await rawCall(currentMessages, opts.model, maxTokens, true);
-    const { promptTokens, completionTokens, tokensUsed } = usageOf(response);
+    const { promptTokens, completionTokens, tokensUsed, reportedCostUsd } = usageOf(response);
 
     // strip markdown fences if модель их всё-таки добавила
     const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
@@ -289,7 +370,7 @@ export async function callLLMWithSchema<T>(
       tokensUsed,
       promptTokens,
       completionTokens,
-      costUsd: estimateCost(opts.model, promptTokens, completionTokens),
+      costUsd: costOfCall(opts.model, promptTokens, completionTokens, reportedCostUsd),
       rawResponse: response,
     };
   }
@@ -312,13 +393,13 @@ export async function callLLMText(
 ): Promise<LLMTextResult> {
   const maxTokens = opts.maxTokens ?? 8192;
   const { text, response } = await rawCall(messages, opts.model, maxTokens, false);
-  const { promptTokens, completionTokens, tokensUsed } = usageOf(response);
+  const { promptTokens, completionTokens, tokensUsed, reportedCostUsd } = usageOf(response);
   return {
     text: text.trim(),
     tokensUsed,
     promptTokens,
     completionTokens,
-    costUsd: estimateCost(opts.model, promptTokens, completionTokens),
+    costUsd: costOfCall(opts.model, promptTokens, completionTokens, reportedCostUsd),
     rawResponse: response,
     finishReason: response.choices?.[0]?.finish_reason,
   };

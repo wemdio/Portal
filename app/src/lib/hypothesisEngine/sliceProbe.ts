@@ -21,6 +21,7 @@
 
 import { z } from 'zod';
 import { callLLMWithSchema, getHeModel, type LLMMessage } from './llm';
+import { companyPartOfSummaryEn } from './relevanceGate';
 
 /**
  * Число из env с ЧЕСТНЫМ нулём: `Number(x) || d` роняет 0 в дефолт, потому что
@@ -57,6 +58,11 @@ export function sliceProbeSample(): number { return envNum('HE_SLICE_PROBE_SAMPL
  *
  * Пока вопрос пробы не переделан, действовать на её числах нельзя. Провенанс
  * при этом ценен и продолжает писаться в collect_info.slice_probe.
+ *
+ * Числа в таблице сняты на цели, в которую уезжал summary целиком, вместе с
+ * мотивом покупки; теперь цель — только «кто это за компании»
+ * (companyPartOfSummaryEn в buildProbeMessages). Перед тем как включать пороги,
+ * их надо перемерить.
  * Включается осознанно: HE_SLICE_PROBE_REPAIR_BELOW / _REJECT_BELOW.
  */
 /* Функции, а не константы: значение, прочитанное при импорте, нельзя было бы
@@ -85,6 +91,14 @@ function buildProbeMessages(
   verticalSummary: string,
   batch: Array<{ i: number; company: string; website: string; category: string }>,
 ): LLMMessage[] {
+  // Цель пробы — «кто это за компании», поэтому мотив покупки из summary
+  // отрезаем тем же правилом, что и гейт (companyPartOfSummaryEn). Здесь это
+  // важнее: дефолт пробы — «не принадлежит», а причины покупки по
+  // company/website/category не видно никогда, так что строка с мотивом в цели
+  // молча уходит в промах и занижает hitRate — то самое число, на которое потом
+  // смотрят при калибровке порогов выше. Проба зовётся только для рынка us
+  // (guard в stages/baseCollect.ts), поэтому EN-правило тут безусловное.
+  const target = companyPartOfSummaryEn(verticalSummary);
   return [
     {
       role: 'system',
@@ -92,11 +106,13 @@ function buildProbeMessages(
         'You audit whether a sampled slice of a company catalog actually consists of companies of a given sales vertical. ' +
         'A row counts ONLY if the company itself is a member of the vertical — not merely operating in a related industry, ' +
         'not a supplier to it, not a consultancy or media covering it. ' +
+        'Judge only what the company IS — its line of business and its company type. A reason to buy anything, processes, ' +
+        'software, budget, hiring and headcount are context, never requirements. ' +
         'Default to NOT belonging: when you are unsure, leave the row out. Answer strictly in JSON.',
     },
     {
       role: 'user',
-      content: `Vertical: «${verticalName}»${verticalSummary ? ` — ${verticalSummary}` : ''}
+      content: `Vertical: «${verticalName}»${target ? ` — ${target}` : ''}
 
 Sampled rows (i + fields):
 ${JSON.stringify(batch)}

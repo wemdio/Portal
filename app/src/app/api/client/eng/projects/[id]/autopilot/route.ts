@@ -2,12 +2,20 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { logAudit } from '@/lib/loggerServer';
+import { logAudit, logError } from '@/lib/loggerServer';
 import { isValidUuid } from '@/lib/apiValidation';
 import { withToolTrace } from '@/lib/toolTrace';
 import { loadClientHeProject, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
 import { enqueueHeBaseCollect } from '@/lib/hypothesisEngine/baseCollectEnqueue';
-import { AUTOPILOT_BASE_LIMIT } from '@/lib/hypothesisEngine/autopilotNext';
+import {
+  AUTOPILOT_BASE_LIMIT,
+  HE_ANALYZING_BASE_FIELDS,
+  ORPHAN_ANALYZING_REASON,
+  isAnalyzingBaseLive,
+  liveBaseIdsFromJobs,
+  repairOrphanAnalyzingBase,
+} from '@/lib/hypothesisEngine/autopilotNext';
+import type { HeAnalyzingBase } from '@/lib/hypothesisEngine/autopilotNext';
 import { defaultChainLanguageForMarket, projectMarket } from '@/lib/hypothesisEngine/market';
 import { engServerError } from '../../../_shared';
 
@@ -21,10 +29,16 @@ const OUTREACH_START_FAILED = 'Failed to start the outreach';
 // КЛИЕНТ-ВЫБРАННОЙ вертикали (есть хотя бы одна accepted-гипотеза; остальные
 // вертикали пропускаются):
 //   нет ready-цепочки и нет активной chain-джобы → chain (язык по market);
-//   цепочка ready и нет основной auto-базы (collecting/analyzing/analyzed;
-//   refill-базы «auto-refill: …» не в счёт) → base_collect
+//   цепочка ready и нет основной auto-базы (collecting, ЖИВАЯ analyzing,
+//   analyzed; refill-базы «auto-refill: …» не в счёт) → base_collect
 //     (лимит AUTOPILOT_BASE_LIMIT, accepted-гипотезы; дедупы внутри
-//     enqueueHeBaseCollect);
+//     enqueueHeBaseCollect). Осиротевшая 'analyzing'-база (строки собраны и
+//     оплачены, умерла только постановка анализа) новой сборки НЕ вызывает —
+//     ей доставляется пропавший base_analyze тем же общим ремонтом, которым
+//     лечат воркер и автопилот (lib/hypothesisEngine/autopilotNext), и ровно
+//     при том же условии «вертикали нужна база»: у вертикали с готовой
+//     (analyzed) или уже собирающейся базой осиротевшую НЕ трогаем — её анализ
+//     стоил бы вызовов модели и дал бы вторую базу там, где клиент ждёт одну;
 //   база analyzed и нет шаблона/активной template-джобы → template.
 // Дальше конвейер ведёт воркер (enqueueAutopilotFollowups) — повторный вызов
 // этого роута ничего не дублирует, а подхватывает рассинхрон (ручные отмены,
@@ -36,7 +50,10 @@ const OUTREACH_START_FAILED = 'Failed to start the outreach';
 // язык chain всё равно вычисляется из market.
 //
 // verticals_skipped в ответе — вертикали, по которым в этом вызове ничего не
-// потребовалось ставить (всё уже в работе или готово).
+// потребовалось ставить (всё уже в работе или готово). Вылеченная осиротевшая
+// база пропуском НЕ считается: ей поставлен base_analyze, и в ответе это
+// отдельный счётчик analyses_requeued — иначе вызов выглядел бы как «ничего не
+// сделали», хотя стадия конвейера была доставлена.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.autopilot.post' }, async () => {
     const result = await requireClientAuth(req);
@@ -81,7 +98,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       supabaseAdmin.from('he_hypotheses').select('id, vertical_id, status').eq('project_id', id),
       supabaseAdmin
         .from('he_bases')
-        .select('id, vertical_id, source, status, filename')
+        // HE_ANALYZING_BASE_FIELDS — поля общего предиката/ремонта осиротевшей
+        // 'analyzing'-базы; `data` (строки базы) сюда не попадает.
+        .select(`${HE_ANALYZING_BASE_FIELDS}, vertical_id, source`)
         .eq('project_id', id)
         .order('created_at', { ascending: false }),
       supabaseAdmin.from('he_templates').select('id, vertical_id, base_id').in('vertical_id', verticalIds),
@@ -105,6 +124,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const bases = basesRes.data ?? [];
     const templates = templatesRes.data ?? [];
     const activeJobs = jobsRes.data ?? [];
+    // base_id активных джоб — из уже прочитанного снапшота, тем же хелпером,
+    // которым их читают воркер и автопилот (лишнего запроса не нужно).
+    const liveBaseIds = liveBaseIdsFromJobs(activeJobs);
 
     // Флаг — ДО постановки джоб: воркер подхватывает followups только при
     // autopilot=true, а клеймить свежие джобы он начнёт позже этой транзакции.
@@ -124,6 +146,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     let chainsEnqueued = 0;
     let collectsEnqueued = 0;
     let templatesEnqueued = 0;
+    let analysesRequeued = 0;
     let verticalsSkipped = 0;
 
     for (const vertical of verticals) {
@@ -165,18 +188,71 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       } else if (readyChain) {
         // Auto-базы вертикали БЕЗ refill-баз auto-pipeline («auto-refill: …»):
         // refill — дочерний долив кампании, он ни основной базой не считается,
-        // ни шаблон по себе не требует. Живая (collecting/analyzing) или готовая
-        // (analyzed). Свежее — первой (выборка created_at desc).
+        // ни шаблон по себе не требует. Живая (collecting или ЖИВАЯ analyzing —
+        // см. ниже) или готовая (analyzed). Свежее — первой (created_at desc).
         const autoBases = bases.filter(
           (b) =>
             b.vertical_id === verticalId &&
             b.source === 'auto' &&
             !String((b as { filename?: string }).filename ?? '').startsWith('auto-refill'),
         );
-        const liveBase = autoBases.some((b) => b.status === 'collecting' || b.status === 'analyzing');
+        const collectingBase = autoBases.some((b) => b.status === 'collecting');
+        const analyzingBases = autoBases.filter((b) => b.status === 'analyzing');
         const analyzedBase = autoBases.find((b) => b.status === 'analyzed');
 
-        if (!liveBase && !analyzedBase) {
+        // Живая 'analyzing'-база или осиротевшая — ОБЩИМ предикатом воркера и
+        // автопилота (isAnalyzingBaseLive): до этой правки роут считал живой
+        // ЛЮБУЮ 'analyzing'-базу, и кабинет расходился с воркером в том, что
+        // считать «база уже в работе» — мёртвая база молча блокировала запуск
+        // вертикали навсегда. Осиротевшую при этом НЕ пересобираем: строки
+        // собраны и оплачены, ей доставляется пропавший base_analyze тем же
+        // repairOrphanAnalyzingBase. Пока анализ поставлен — база для этого
+        // роута снова «живая», второй платной сборки не будет.
+        // Живых считаем ДО ремонта осиротевших: под идущим анализом ремонт не
+        // нужен, а порядок баз в выборке (created_at desc) этого не гарантирует.
+        let analyzingLive = analyzingBases.some((b) => isAnalyzingBaseLive(b as HeAnalyzingBase, liveBaseIds));
+        const orphanAnalyzing = analyzingBases.filter(
+          (b) => !isAnalyzingBaseLive(b as HeAnalyzingBase, liveBaseIds),
+        );
+
+        for (const base of orphanAnalyzing) {
+          // Ремонт — только если вертикали эта база ЕЩЁ НУЖНА, и предикат тут
+          // ровно тот же, по которому ниже идёт платная сборка: нет ни
+          // собирающейся, ни живого анализа, ни готовой (analyzed) базы.
+          // Вертикаль с готовой базой уже закончена: конвейер идёт по ней
+          // (ниже — шаблон, дальше запуск клиентом; launch бывает только у
+          // шаблона, а шаблон — только у 'analyzed'-базы, см. роут
+          // bases/[id]/template), и анализ осиротевшей дал бы вторую базу там,
+          // где клиент ждёт одну, за новые вызовы модели. По той же причине
+          // выходим после первой вылеченной: вертикали нужна ОДНА база.
+          if (collectingBase || analyzingLive || analyzedBase) break;
+          try {
+            const verdict = await repairOrphanAnalyzingBase(supabaseAdmin, {
+              projectId: id,
+              base: base as HeAnalyzingBase,
+              reason: ORPHAN_ANALYZING_REASON,
+            });
+            if (verdict === 'reanalyzed') {
+              analysesRequeued += 1;
+              analyzingLive = true;
+              // Вертикаль НЕ «пропущена»: ей доставлен пропавший анализ — то
+              // единственное, что здесь и требовалось поставить.
+              enqueued = true;
+            }
+          } catch (e) {
+            // «Починить не удалось» ≠ «анализировать нечего»: сборку по этой
+            // вертикали не запускаем, причина уходит в application_logs, а
+            // запуск остаётся успешным — остальные вертикали не страдают.
+            analyzingLive = true;
+            void logError('client.eng.autopilot.orphan_repair_failed', e, {
+              userId: result.auth.userId,
+              projectId: id,
+              verticalId,
+            });
+          }
+        }
+
+        if (!collectingBase && !analyzingLive && !analyzedBase) {
           const collect = await enqueueHeBaseCollect(supabaseAdmin, {
             verticalId,
             projectId: id,
@@ -233,6 +309,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       chainsEnqueued,
       collectsEnqueued,
       templatesEnqueued,
+      analysesRequeued,
       verticalsSkipped,
     });
 
@@ -241,6 +318,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       chains_enqueued: chainsEnqueued,
       collects_enqueued: collectsEnqueued,
       templates_enqueued: templatesEnqueued,
+      analyses_requeued: analysesRequeued,
       verticals_skipped: verticalsSkipped,
     });
   });

@@ -19,6 +19,12 @@
  * Гонку двух параллельных запусков (оба прошли проверки до insert) закрывает
  * partial unique index he_bases_one_collecting_per_vertical: проигравший
  * insert получает 23505 и тоже отвечает 'existing' с чужой collecting-базой.
+ *
+ * Сбой вставки джобы ПОСЛЕ вставки базы компенсируется (см. хвост функции):
+ * база уводится в 'failed', иначе осиротевшая 'collecting'-строка навсегда
+ * держит дедуп и уникальный индекс вертикали. Компенсация срабатывает только
+ * когда удалось УБЕДИТЬСЯ, что джобы нет: сбой самой проверки — отдельный
+ * исход, статус базы в нём не пишется («неизвестно» ≠ «джобы нет»).
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -160,6 +166,60 @@ export async function enqueueHeBaseCollect(
       payload: { base_id: base.id, ...jobPayload },
     });
   if (jobErr) {
+    // Компенсация fail-closed. Новая база без джобы воркера — осиротевшая
+    // 'collecting'-строка, и вылечить её нечем: failJob воркера валит базу
+    // только по своей джобе, а джобы нет. При этом она навсегда занимает и
+    // дедуп 1 выше, и partial unique index he_bases_one_collecting_per_vertical
+    // — ручная кнопка, автопилот и ночной refill вертикали после этого вечно
+    // отвечают «уже собирается». Решение скопировано из V2
+    // (verticalEngineV2/baseCollectEnqueue: перечитать, иначе база в failed).
+    //
+    // Сначала перечитываем активные base_collect-джобы: ответ мог не доехать
+    // при состоявшейся вставке, и тогда сборка на самом деле идёт.
+    const { data: rescueJobs, error: rescueErr } = await supabase
+      .from('he_jobs')
+      .select('id, payload')
+      .eq('project_id', projectId)
+      .eq('stage', 'base_collect')
+      .in('status', ['pending', 'running']);
+    if (rescueErr) {
+      // Сбой САМОГО спасательного чтения — отдельный исход, а не «джобы нет».
+      // Легла вставка или нет — неизвестно, и писать по «неизвестно»
+      // терминальный статус нельзя: если легла, воркер придёт на живую сборку,
+      // а стадия умрёт в своём start-guard («сборка уже завершена») из-за
+      // чужой ошибки — оплаченный прогон превратится в базу без строк. Поэтому
+      // статус базы не трогаем и называем состояние в ответе. Цена: если
+      // вставка всё же не легла, 'collecting'-строка останется висеть и будет
+      // держать дедуп вертикали (лечит ремонт сирот — roadmap
+      // P-C-enqueue-orphan-repair, отдельная волна).
+      return {
+        ok: false,
+        message:
+          `${jobErr.message}; he_jobs rescue read: ${rescueErr.message} ` +
+          `(he_bases ${base.id} left as-is: enqueue outcome unknown)`,
+      };
+    }
+    const alive = (rescueJobs ?? []).some(
+      (j) => (j.payload as { base_id?: unknown } | null)?.base_id === base.id,
+    );
+    if (alive) return { ok: true, created: true, base: base as Record<string, unknown> };
+    // CAS по 'collecting': если базу уже увели (cancel, параллельный ремонт) —
+    // её статус не перетираем.
+    const { error: cleanupErr } = await supabase
+      .from('he_bases')
+      .update({
+        status: 'failed',
+        error: `he_jobs base_collect enqueue: ${jobErr.message}`.slice(0, 500),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', base.id)
+      .eq('status', 'collecting');
+    if (cleanupErr) {
+      return {
+        ok: false,
+        message: `${jobErr.message}; he_bases orphan cleanup: ${cleanupErr.message}`,
+      };
+    }
     return { ok: false, message: jobErr.message };
   }
 
