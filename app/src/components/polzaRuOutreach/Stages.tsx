@@ -21,17 +21,19 @@ import { API, api, STATUS_LABELS, type RuRow } from './shared';
 
 /**
  * Шаги на экране — в порядке работы раннера (STAGES): почта до разбора ИИ,
- * сомнения до писем. Счётчик шага — воронка по его последнему ключу.
+ * сомнения до писем. Счётчик шага — воронка по его последнему ключу. Очень
+ * спорная строка задержана на своём шаге, как отсеянная: непроверенная почта —
+ * на «Почте» (без разбора ИИ), два признака сомнения — на «Оценке».
  */
 export const RU_STAGE_VIEW: Array<{ keys: Stage[]; label: string; hint: string }> = [
   { keys: ['candidates_loaded'], label: 'Кандидаты', hint: 'Компании из выбранных источников: одна компания — одна карточка со всеми поводами' },
   { keys: ['amo_checked'], label: 'Проверка AMO', hint: 'Открытые сделки, клиенты и свежие отказы не пишем' },
   { keys: ['company_resolved'], label: 'Компания и сайт', hint: 'Нашли официальный сайт компании' },
   { keys: ['deduplicated'], label: 'Без повторов', hint: 'Нет повторов в запуске и в прошлых выгрузках' },
-  { keys: ['recipient_resolved'], label: 'Почта', hint: 'Рабочая почта на сайте, не в стоп-листе — ищем до разбора ИИ; не удалось проверить — очень спорная' },
+  { keys: ['recipient_resolved'], label: 'Почта', hint: 'Рабочая почта на сайте, не в стоп-листе — до разбора ИИ; не удалось проверить — очень спорная, без разбора' },
   { keys: ['enriched'], label: 'Разбор ИИ', hint: 'Вакансии hh вживую и разбор сайта: B2B, исключения, события' },
-  { keys: ['scored'], label: 'Оценка', hint: 'Похожесть, размер, новости и отчётность ФНС, выбор оффера и оценка 0–100 не ниже порога' },
-  { keys: ['sequence_assembled', 'qa_checked'], label: 'Письма и проверка', hint: 'Письма — от сильных к слабым до заказанного числа, кроме очень спорных; прошли автопроверку' },
+  { keys: ['scored'], label: 'Оценка', hint: 'Похожесть, размер, новости и ФНС, оффер и оценка 0–100 не ниже порога; очень спорные — без писем' },
+  { keys: ['sequence_assembled', 'qa_checked'], label: 'Письма и проверка', hint: 'Письма — от сильных к слабым до заказанного числа; прошли автопроверку' },
   { keys: ['ready'], label: 'Готово', hint: 'Идут в Excel для Instantly' },
 ];
 
@@ -48,26 +50,18 @@ function passedDetail(row: RuRow): string {
 }
 
 /**
- * Все строки, отсеянные на данном этапе — постранично, по каждому ключу этапа отдельно.
- * Очень спорные (row_status 'doubtful', pipeline_stage 'scored') оценку прошли, но
- * писем не получают и ждут ручной проверки: в воронке они доходят до «Оценки», поэтому
- * среди не прошедших их показываем в шаге писем — отдельным запросом по статусу.
+ * Все строки, не прошедшие данный этап — постранично, по каждому ключу этапа отдельно.
+ * Очень спорные (row_status 'doubtful') задержаны на своём этапе, как отсеянные
+ * (воронка в results/route.ts считает их так же), поэтому и показываются там же —
+ * с пометкой, что писем у них нет и решает человек.
  */
-async function loadDropped(jobId: string, keys: Stage[], includeDoubtful: boolean, isCancelled: () => boolean): Promise<RuRow[]> {
+async function loadDropped(jobId: string, keys: Stage[], isCancelled: () => boolean): Promise<RuRow[]> {
   const dropped: RuRow[] = [];
   for (const key of keys) {
     for (let offset = 0; offset < MODAL_MAX_ROWS_PER_STAGE; offset += MODAL_PAGE) {
       if (isCancelled()) return dropped;
       const page = await api<{ items: RuRow[]; count: number }>(`${API}/${jobId}/results?stage=${key}&limit=${MODAL_PAGE}&offset=${offset}`);
-      dropped.push(...page.items.filter((r) => r.row_status !== 'ready' && r.row_status !== 'processing' && r.row_status !== 'doubtful'));
-      if (offset + MODAL_PAGE >= page.count || page.items.length < MODAL_PAGE) break;
-    }
-  }
-  if (includeDoubtful) {
-    for (let offset = 0; offset < MODAL_MAX_ROWS_PER_STAGE; offset += MODAL_PAGE) {
-      if (isCancelled()) return dropped;
-      const page = await api<{ items: RuRow[]; count: number }>(`${API}/${jobId}/results?status=doubtful&limit=${MODAL_PAGE}&offset=${offset}`);
-      dropped.push(...page.items);
+      dropped.push(...page.items.filter((r) => r.row_status !== 'ready' && r.row_status !== 'processing'));
       if (offset + MODAL_PAGE >= page.count || page.items.length < MODAL_PAGE) break;
     }
   }
@@ -83,11 +77,9 @@ function StageModal({ jobId, viewIndex, passedCount, onClose }: { jobId: string;
   useEffect(() => {
     let cancelled = false;
     const lastIdx = Math.max(...view.keys.map((k) => STAGES.indexOf(k)));
-    // Очень спорные останавливаются перед письмами (см. loadDropped).
-    const includeDoubtful = view.keys.includes('sequence_assembled');
     async function load() {
       const [droppedRows, page] = await Promise.all([
-        loadDropped(jobId, view.keys, includeDoubtful, () => cancelled),
+        loadDropped(jobId, view.keys, () => cancelled),
         api<{ items: RuRow[] }>(`${API}/${jobId}/results?limit=${MODAL_PAGE}&offset=0`),
       ]);
       if (cancelled) return;

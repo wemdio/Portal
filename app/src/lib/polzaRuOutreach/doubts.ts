@@ -1,12 +1,15 @@
 /**
- * Признаки сомнения строки, прошедшей порог (дизайн v3 §2, решение 25.09.2026;
- * с 26.09.2026 — до писем, спека 2026-09-26-outreach-to-sender-design.md §2).
+ * Признаки сомнения строки (дизайн v3 §2, решение 25.09.2026; с 26.09.2026 —
+ * до писем, спека 2026-09-26-outreach-to-sender-design.md §2).
  *
  * Готовые компании уходят в Instantly, где место под контакты ограничено, —
  * поэтому сомнительное помечаем, а очень сомнительное (VERY_DOUBTFUL_FROM
- * признаков и больше или непроверенная почта) убираем из выгрузки в отдельную
- * вкладку. Считаем сразу после оценки: все признаки к этому времени известны,
- * и очень спорной строке письма не пишем вовсе.
+ * признаков и больше) убираем из выгрузки в отдельную вкладку и писем ему не
+ * пишем. Признаки считаются сразу после оценки: к этому времени известны все.
+ *
+ * Исключение — непроверенная почта (unverifiedEmailDoubts): она делает строку
+ * очень спорной сразу на шаге почты, до разбора ИИ, — платить за разбор
+ * компании, которой письмо может не дойти, незачем.
  */
 
 import { companyKey } from './company';
@@ -23,11 +26,6 @@ const GENERIC_LOCAL =
 export interface DoubtInput {
   email: string;
   emailType: 'department' | 'generic' | 'person' | null;
-  /**
-   * SMTP-проверка адреса не дала ответа (прокси, greylisting, таймаут): адрес
-   * с сайта, но дойдёт ли письмо — неизвестно.
-   */
-  emailUnverified: boolean;
   score: number;
   writeThreshold: number;
   chain: ChainType;
@@ -57,15 +55,18 @@ function namesLookAlike(a: string, b: string): boolean {
   return false;
 }
 
+/**
+ * Почта с сайта, которую SMTP-проверка не подтвердила (прокси, greylisting,
+ * таймаут): дойдёт ли письмо — неизвестно. Строка сразу очень спорная — без
+ * разбора ИИ, оценки и писем; прочие признаки без разбора не посчитать.
+ */
+export function unverifiedEmailDoubts(email: string): Doubts {
+  return { flags: ['EMAIL_UNVERIFIED'], detail: [`почта ${email} не проверена: SMTP-проверка не дала ответа`], veryDoubtful: true };
+}
+
 export function computeDoubts(i: DoubtInput): Doubts {
   const flags: DoubtCode[] = [];
   const detail: string[] = [];
-
-  // Первым — решающий признак: в пояснении строки он виден сразу.
-  if (i.emailUnverified) {
-    flags.push('EMAIL_UNVERIFIED');
-    detail.push(`почта ${i.email} не проверена: SMTP-проверка не дала ответа`);
-  }
 
   const local = i.email.split('@')[0] ?? '';
   if (i.emailType === 'generic' || GENERIC_LOCAL.test(local)) {
@@ -104,7 +105,5 @@ export function computeDoubts(i: DoubtInput): Doubts {
     detail.push(...company);
   }
 
-  // Непроверенная почта — очень спорная сама по себе: остальные признаки
-  // говорят о качестве повода, а этот — о том, дойдёт ли письмо вообще.
-  return { flags, detail, veryDoubtful: flags.includes('EMAIL_UNVERIFIED') || flags.length >= VERY_DOUBTFUL_FROM };
+  return { flags, detail, veryDoubtful: flags.length >= VERY_DOUBTFUL_FROM };
 }

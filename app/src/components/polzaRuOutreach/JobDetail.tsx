@@ -56,6 +56,12 @@ export function JobDetail({ job, results, loading, exporting, filter, reason, pa
                 Остановлен: достигнут лимит на ИИ. Готовые компании сохранены — чтобы добрать остальные, повторите запуск с большим лимитом.
               </div>
             )}
+            {/* Без SMTP-прокси адрес считается рабочим, если у домена есть почтовый сервер: письмо может не дойти. */}
+            {detail?.smtp_unavailable && (
+              <div className="mt-2 rounded-lg bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
+                SMTP-проверка почт недоступна — почты проверены только по MX
+              </div>
+            )}
             {job.status === 'failed' && job.error_message ? (
               <div className="mt-2 rounded-lg bg-red-50 px-3 py-1.5 text-sm text-red-700">{job.error_message}</div>
             ) : null}

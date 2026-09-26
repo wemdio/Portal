@@ -6,11 +6,12 @@
  *     домену, повторы в запуске, «уже выгружалась»;
  *  2. почта, тоже бесплатно: поиск на сайте, SMTP-проверка, стоп-лист. Нет
  *     рабочей почты — отсев до ИИ: разбор компании, которой некуда писать, —
- *     выброшенные деньги;
+ *     выброшенные деньги. Почта не проверена — строка сразу очень спорная,
+ *     тоже без ИИ;
  *  3. дешёвый ИИ: вакансии hh и разбор сайта (кэш 30 дней); затем ползунки,
  *     ФНС и новости, оффер, оценка, порог;
  *  4. сомнения — сразу после оценки, все признаки уже известны: очень спорная
- *     строка (в том числе с непроверенной почтой) писем не получает;
+ *     строка писем не получает;
  *  5. письма и QA — прошедшим, от самых сильных к слабым (pre-LPR rerank CEO),
  *     пока не набрано заказанное число готовых.
  *
@@ -24,11 +25,17 @@
  * расхода на запуск (спека §1). Лимит исчерпан — новые строки не начинаются,
  * запуск завершается штатно (stop_reason 'budget'), готовое остаётся. Ключ не
  * работает или модель молчит 10 компаний подряд — запуск сразу failed с
- * понятным текстом, а не сотни строк «ИИ не ответил».
+ * понятным текстом, а не сотни строк «ИИ не ответил». Так же и с проверкой
+ * почт: 15 адресов подряд «не удалось проверить» — лежат SMTP-прокси.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { EmailDomainCache, OutreachEmailVerification } from '@/lib/outreachEmail/findAndVerify';
+import {
+  smtpAvailable,
+  type EmailDomainCache,
+  type OutreachEmailVerdict,
+  type OutreachEmailVerification,
+} from '@/lib/outreachEmail/findAndVerify';
 import { outreachApiKey } from '@/lib/outreachLlm/client';
 import {
   BudgetExceededError,
@@ -42,7 +49,7 @@ import { pruneSiteAnalysisCache } from '@/lib/outreachLlm/siteAnalysisCache';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { analyzeVacancy, findStrictOutboundDuty, isSdrRoleTitle, type VacancyAnalysis } from './analyze';
 import { collectCandidates, type Candidate } from './collect';
-import { computeDoubts } from './doubts';
+import { computeDoubts, unverifiedEmailDoubts } from './doubts';
 import { companyBrand, isSuppressed, loadPreviouslyExported, normalizeDomain, siteUrl, type ExportedIndex } from './company';
 import { findRuCompanyEmail } from './findEmail';
 import { buildChain, buildSegmentsHypothesis, openingSentence, type ChainInput } from './letters/chains';
@@ -94,6 +101,13 @@ class CancelledError extends Error {}
 class LlmSilentError extends Error {}
 /** Сколько компаний подряд с «ИИ не ответил» — уже не случайность, а лежащая модель. */
 const LLM_FAIL_STREAK = 10;
+/** SMTP-проверка не отвечает серией — запуск падает целиком: дальше все строки ушли бы в очень спорные. */
+class SmtpSilentError extends Error {}
+/**
+ * Сколько адресов подряд «не удалось проверить» — уже не greylisting одного
+ * сервера, а лежащие SMTP-прокси.
+ */
+const SMTP_UNVERIFIED_STREAK = 15;
 
 function log(level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) {
   const line = `[polza-ru-outreach][${level.toUpperCase()}] ${msg}`;
@@ -275,6 +289,11 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
     if (!outreachApiKey('ru')) {
       throw new LlmAuthError('Не задан ключ ИИ для RU автоаутрича (POLZA_RU_OUTREACH_API_KEY) в окружении воркера', 'missing_key');
     }
+    // Без SMTP-прокси проверка почт — только синтаксис и MX: адрес «рабочий»,
+    // если у домена есть почтовый сервер. Запуск идёт, но экран об этом
+    // предупреждает (progress_detail.smtp_unavailable).
+    const smtpOn = smtpAvailable();
+    if (!smtpOn) log('warn', `job ${jobId}: SMTP_PROXY_URLS not set — emails are checked by syntax and MX only`);
 
     await setProgress({
       status: 'running',
@@ -376,13 +395,34 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         throw new LlmSilentError(`ИИ не отвечает: ${LLM_FAIL_STREAK} компаний подряд без ответа модели — проверьте Requesty/модель`);
       }
     };
+    // Предохранитель «проверка почт молчит»: SMTP_UNVERIFIED_STREAK адресов
+    // подряд «не удалось проверить» — лежат SMTP-прокси, и каждая следующая
+    // компания уйдёт в очень спорные. Любой определённый ответ проверки
+    // (рабочий, catch-all, нерабочий) серию обнуляет; «адресов на сайте нет» и
+    // контакт из AMO её не трогают. Без SMTP-прокси проверки SMTP нет — нет и
+    // предохранителя.
+    let smtpUnverifiedStreak = 0;
+    /** true — серия дошла до порога: строку дописываем и валим запуск. */
+    const noteEmailVerdict = (verdict: OutreachEmailVerdict): boolean => {
+      if (!smtpOn || verdict === 'none') return false;
+      if (verdict !== 'unverified') {
+        smtpUnverifiedStreak = 0;
+        return false;
+      }
+      smtpUnverifiedStreak += 1;
+      return smtpUnverifiedStreak >= SMTP_UNVERIFIED_STREAK;
+    };
+    const smtpSilentError = () =>
+      new SmtpSilentError(`Проверка почт не отвечает: ${SMTP_UNVERIFIED_STREAK} адресов подряд не удалось проверить — проверьте SMTP-прокси`);
     // Гипотеза сегментов после лимита на ИИ пропускается; в лог — один раз за запуск.
     let hypothesisSkipLogged = false;
 
     // llm — снимок расходов: экран пишет «ИИ: потрачено $X из $Y».
+    // smtp_unavailable — плашка «SMTP-проверка почт недоступна».
     const detail = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
       wave: waveNo, target, pool: pool.length, scanned: totals.scanned, ready: totals.ready, funnel, reasons, chains, sdr,
-      offer_version: libraries.offerVersion, source_errors: sourceErrors, doubtful: doubtful.count, llm: budget.snapshot(), ...extra,
+      offer_version: libraries.offerVersion, source_errors: sourceErrors, doubtful: doubtful.count, llm: budget.snapshot(),
+      ...(smtpOn ? {} : { smtp_unavailable: true }), ...extra,
     });
     currentDetail = () => detail();
     const publish = async (stage: string, extra: Record<string, unknown> = {}) => {
@@ -516,10 +556,13 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
       // берём контакт из AMO без поиска и проверки — с ним уже был разговор.
       const reactivation = Boolean(amoRec && amoRec.status === 'lost' && amoRec.priorContact);
       let email: RowEmail;
+      // Серия «не удалось проверить» дошла до порога — строку дописываем, запуск валим.
+      let smtpSilent = false;
       if (reactivation && amoRec?.contactEmail) {
         email = { email: amoRec.contactEmail, emailType: 'person', isRouting: false, recipientRole: 'Контакт из AMO', sourceUrl: null, verification: 'crm_contact' };
       } else {
         const found = await findRuCompanyEmail(site_url, domain, emailDomainCache);
+        smtpSilent = noteEmailVerdict(found.verdict);
         if (!found.email || !found.verification) {
           // Адреса на сайте есть, но все не прошли проверку, — своя причина:
           // «почты нет» и «почта мёртвая» — разные выводы об источнике.
@@ -532,8 +575,6 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
           });
           return null;
         }
-        // «Не удалось проверить» дальше идёт: разбор и оценка нужны, чтобы
-        // человек решил по очень спорной строке, — но писем она не получит.
         email = {
           email: found.email,
           emailType: found.emailType,
@@ -545,20 +586,40 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
       }
       if (await isSuppressed(db, email.email)) {
         await finish(id, { stage: 'recipient_resolved', status: 'rejected', reason: 'SUPPRESSED_CONTACT', detail: email.email });
+        if (smtpSilent) throw smtpSilentError();
         return null;
       }
       // Почту и вердикт проверки пишем сразу: строка, отсеянная дальше разбором
       // или оценкой, показывает в журнале, какой адрес у неё был и чем
       // кончилась проверка.
-      await updateRow(id, {
+      const emailPatch = {
         recipient_email: email.email,
         email_type: email.emailType,
         email_verification: email.verification,
         email_source_url: email.sourceUrl,
         recipient_role: email.recipientRole,
         is_routing: email.isRouting,
-        pipeline_stage: 'recipient_resolved',
-      });
+      };
+      if (email.verification === 'unverified') {
+        // Почта не проверена — строка сразу очень спорная и дальше не идёт:
+        // разбор ИИ, ФНС и новости ей не оплачиваем, письма не пишем. Решает
+        // человек по выгрузке «очень спорные». Как отсев, она задержана на шаге
+        // почты: в воронке «Почту» не проходит (results/route.ts).
+        const doubts = unverifiedEmailDoubts(email.email);
+        doubtful.count += 1;
+        await updateRow(id, {
+          ...emailPatch,
+          doubt_flags: doubts.flags,
+          doubt_detail: doubts.detail.join('; '),
+          row_status: 'doubtful',
+          pipeline_stage: 'recipient_resolved',
+          reason_code: null,
+          reason_detail: null,
+        });
+        if (smtpSilent) throw smtpSilentError();
+        return null;
+      }
+      await updateRow(id, { ...emailPatch, pipeline_stage: 'recipient_resolved' });
       reach(tally, 'recipient_resolved');
       return { id, tally, candidate: c, domain, website: site_url, amo: amoRec, reactivation, email, cards };
     };
@@ -794,13 +855,11 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
       }
 
       // Сомнения — до писем: все признаки уже известны. Очень спорная строка
-      // (в том числе с почтой, которую SMTP-проверка не подтвердила) писем не
-      // получает, в Instantly не идёт и места в лимите готовых не занимает —
-      // ищем дальше. Почему она спорная — в doubt_detail и в выгрузке.
+      // писем не получает, в Instantly не идёт и места в лимите готовых не
+      // занимает — ищем дальше. Почему она спорная — в doubt_detail и в выгрузке.
       const doubts = computeDoubts({
         email: email.email,
         emailType: email.emailType,
-        emailUnverified: email.verification === 'unverified',
         score: score.total,
         writeThreshold: config.write_threshold,
         chain: baseChain(route),
@@ -811,13 +870,14 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         sourceIsDomainOnly: onlyDomainName,
       });
       const doubtPatch = { doubt_flags: doubts.flags, doubt_detail: doubts.detail.join('; ') || null };
-      reach(tally, 'scored');
       if (doubts.veryDoubtful) {
+        // Как отсев, очень спорная задержана на оценке: в воронке «Оценку» не проходит.
         doubtful.count += 1;
         await updateRow(id, { ...patch, ...doubtPatch, row_status: 'doubtful', pipeline_stage: 'scored', reason_code: null, reason_detail: null });
         return null;
       }
       await updateRow(id, { ...patch, ...doubtPatch, pipeline_stage: 'scored' });
+      reach(tally, 'scored');
       return { id, tally, domain, brand, amo: amoRec, email, site, vacancy, signals, route, caseHit, score, marketQuote };
     };
 
@@ -927,9 +987,9 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         await fn();
       } catch (err) {
         if (err instanceof CancelledError) throw err;
-        if (err instanceof LlmAuthError || err instanceof LlmSilentError) {
-          // Ключ не работает или ИИ молчит серией — так же упадёт каждая
-          // строка. Валим запуск целиком.
+        if (err instanceof LlmAuthError || err instanceof LlmSilentError || err instanceof SmtpSilentError) {
+          // Ключ не работает, ИИ или проверка почт молчат серией — так же
+          // упадёт каждая строка. Валим запуск целиком.
           halted = true;
           throw err;
         }

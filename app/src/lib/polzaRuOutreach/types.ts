@@ -219,9 +219,9 @@ export const REASON_LABELS: Record<string, string> = {
 
 /**
  * Признаки сомнения строки, прошедшей порог: один — «спорная», два и больше —
- * «очень спорная». EMAIL_UNVERIFIED («почта не проверена») — сразу «очень
- * спорная», сколько бы ни было прочих: письмо на адрес, который SMTP-проверка
- * не подтвердила, может не дойти, а выгрузка уходит в Instantly.
+ * «очень спорная». EMAIL_UNVERIFIED («почта не проверена») ставится ещё на
+ * шаге почты и сразу делает строку «очень спорной»: письмо на адрес, который
+ * SMTP-проверка не подтвердила, может не дойти, и разбор ИИ ей не оплачиваем.
  */
 export const DOUBT_CODES = ['EMAIL_UNVERIFIED', 'GENERIC_MAILBOX', 'NEAR_THRESHOLD', 'WEAK_SIGNAL', 'COMPANY_DOUBT'] as const;
 export type DoubtCode = (typeof DOUBT_CODES)[number];

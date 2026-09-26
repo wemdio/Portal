@@ -38,6 +38,8 @@ export interface RuJob {
     doubtful?: number;
     /** Нет у запусков до 26.09.2026 — тогда строку расхода не показываем. */
     llm?: RuJobLlmSpend;
+    /** У воркера нет SMTP-прокси: почты проверены только по синтаксису и MX. */
+    smtp_unavailable?: boolean;
   } | null;
   total_found: number | null;
   total_parsed: number | null;
