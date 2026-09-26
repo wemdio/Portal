@@ -1,6 +1,7 @@
 import 'server-only';
 
 import type { OutreachLang } from '@/lib/outreachLlm/types';
+import { workerLeaseLive } from '@/lib/outreachLlm/workerLease';
 import { RU_OUTREACH_PARSER_TYPE } from '@/lib/polzaRuOutreach/types';
 import {
   createCampaign,
@@ -179,6 +180,11 @@ interface JobRow {
    * RU и EN): почты проверены только синтаксисом и MX.
    */
   smtpUnavailable: boolean;
+  /**
+   * Остановленный запуск воркер ещё доводит (аренда progress_detail.worker,
+   * lib/outreachLlm/workerLease.ts): идущие строки могут стать готовыми.
+   */
+  workerActive: boolean;
 }
 
 /**
@@ -194,7 +200,7 @@ async function loadJob(source: OutreachSource, jobId: string): Promise<JobRow> {
   if (!UUID_RE.test(jobId)) throw new SenderOpError('Запуск не найден', 404);
   const { data, error } = await db()
     .from('parser_jobs')
-    .select('id, created_at, status, progress_detail')
+    .select('id, created_at, status, progress_detail, completed_at')
     .eq('id', jobId)
     .eq('parser_type', source.parserType)
     .maybeSingle();
@@ -206,6 +212,7 @@ async function loadJob(source: OutreachSource, jobId: string): Promise<JobRow> {
     createdAt: String(data.created_at),
     status: String(data.status),
     smtpUnavailable: detail?.smtp_unavailable === true,
+    workerActive: workerLeaseLive(data.progress_detail, (data.completed_at as string | null) ?? null),
   };
 }
 
@@ -585,6 +592,9 @@ export async function uploadJobToSender(input: UploadJobInput): Promise<UploadJo
   if (!FINISHED_JOB_STATUSES.includes(job.status)) {
     throw new SenderOpError('Заливать можно после окончания запуска', 409);
   }
+  // Сразу после «Стоп» воркер ещё доводит идущие строки — залитое сейчас
+  // разошлось бы с тем, что запуск покажет через минуту.
+  if (job.workerActive) throw new SenderOpError('Запуск ещё останавливается — попробуйте через минуту', 409);
   const folder = await loadFolder(source);
   const target = input.mode === 'append' ? await appendTarget(folder, input.campaignId) : null;
 
