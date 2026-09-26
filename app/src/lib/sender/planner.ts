@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { chunkForInFilter } from './inFilter';
 import { applyVars, buildMessageId, followUpSubject, recipientVars } from './template';
 import { nextGapMs, nextWindowSlot, type SendWindow } from './sendWindow';
 import type { CampaignRow, MailboxRow, RecipientRow, StepRow } from './types';
@@ -22,12 +23,12 @@ type Log = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => v
 
 const RECIPIENTS_PER_CAMPAIGN = 500;
 /**
- * Адресов и id за один запрос. in-фильтр уезжает в адрес запроса, а шлюз
- * перед PostgREST режет адреса длиннее ~9–13 КБ (414): стоп-лист на все 500
- * получателей прохода (~16 КБ) и пул папки на 200+ ящиков (~8 КБ id) в один
- * запрос не влезают.
+ * Ящиков пула за один запрос. in-фильтр уезжает в адрес запроса, а шлюз перед
+ * PostgREST режет адреса длиннее ~9–13 КБ (414): пул папки на 200+ ящиков
+ * (~8 КБ id) в один запрос не влезает. Адреса почты разной длины — их пачки
+ * набираются по весу (inFilter.ts): стоп-лист на все 500 получателей прохода
+ * одним запросом — это ~16 КБ.
  */
-const EMAIL_CHUNK = 100;
 const MAILBOX_CHUNK = 50;
 
 interface MailboxSlot {
@@ -46,13 +47,18 @@ function windowOf(campaign: CampaignRow): SendWindow {
   };
 }
 
-/** Остаток дневного лимита ящика: отправленное сегодня плюс уже запланированное. */
-async function remainingQuota(mailbox: MailboxRow): Promise<number> {
+/**
+ * Остаток дневного лимита ящика: отправленное сегодня плюс уже запланированное.
+ * Не прочитали — ноль на этот проход: раньше ошибка запроса считалась «ничего
+ * не отправлено», и ящику давали весь дневной лимит сверх уже ушедшего.
+ * Перелимит бьёт по репутации ящика, пропуск одного тика — нет.
+ */
+async function remainingQuota(mailbox: MailboxRow, log: Log): Promise<number> {
   if (!supabaseAdmin) return 0;
   const dayStart = new Date();
   dayStart.setUTCHours(0, 0, 0, 0);
 
-  const [{ count: sent }, { count: pending }] = await Promise.all([
+  const [sent, pending] = await Promise.all([
     supabaseAdmin
       .from('sender_messages')
       .select('id', { count: 'exact', head: true })
@@ -65,8 +71,13 @@ async function remainingQuota(mailbox: MailboxRow): Promise<number> {
       .eq('mailbox_id', mailbox.id)
       .in('status', ['scheduled', 'sending']),
   ]);
+  const error = sent.error ?? pending.error;
+  if (error) {
+    log('error', `Ящик ${mailbox.email}: лимит не прочитан — в этот проход с него не пишем`, error.message);
+    return 0;
+  }
 
-  return Math.max(0, mailbox.daily_campaign_limit - (sent ?? 0) - (pending ?? 0));
+  return Math.max(0, mailbox.daily_campaign_limit - (sent.count ?? 0) - (pending.count ?? 0));
 }
 
 /**
@@ -78,11 +89,8 @@ async function remainingQuota(mailbox: MailboxRow): Promise<number> {
 async function loadSuppressed(emails: string[]): Promise<Set<string>> {
   const suppressed = new Set<string>();
   if (!supabaseAdmin || !emails.length) return suppressed;
-  for (let i = 0; i < emails.length; i += EMAIL_CHUNK) {
-    const { data, error } = await supabaseAdmin
-      .from('sender_suppressions')
-      .select('email')
-      .in('email', emails.slice(i, i + EMAIL_CHUNK));
+  for (const part of chunkForInFilter(emails)) {
+    const { data, error } = await supabaseAdmin.from('sender_suppressions').select('email').in('email', part);
     if (error) throw new Error(`стоп-лист не прочитан: ${error.message}`);
     for (const row of data ?? []) suppressed.add(String(row.email).toLowerCase());
   }
@@ -101,12 +109,11 @@ async function loadCrossCampaignBusy(emails: string[], campaignId: string): Prom
   const busy = new Set<string>();
   if (!supabaseAdmin || !emails.length) return busy;
   const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-  const CHUNK = 50; // in-фильтр уезжает в адрес запроса — держим его коротким
-  for (let i = 0; i < emails.length; i += CHUNK) {
+  for (const part of chunkForInFilter(emails)) {
     const { data, error } = await supabaseAdmin
       .from('sender_recipients')
       .select('email')
-      .in('email', emails.slice(i, i + CHUNK))
+      .in('email', part)
       .neq('campaign_id', campaignId)
       .eq('status', 'active')
       .not('mailbox_id', 'is', null)
@@ -210,7 +217,7 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
     // ящиков ставит первое письмо в один момент (всплеск в начале окна, потом
     // простой). Случайный сдвиг до 45 минут размазывает старт по окну.
     const startOffsetMs = Math.floor(Math.random() * 45 * 60 * 1000);
-    slots.push({ mailbox, remaining: await remainingQuota(mailbox), cursor: new Date(now.getTime() + startOffsetMs) });
+    slots.push({ mailbox, remaining: await remainingQuota(mailbox, log), cursor: new Date(now.getTime() + startOffsetMs) });
   }
 
   // Статус получателя меняем только у всё ещё активного (.eq('status',
@@ -326,15 +333,26 @@ export async function planSenderMessages(opts?: { log?: Log }): Promise<number> 
   if (!supabaseAdmin) return 0;
   const log: Log = opts?.log ?? (() => {});
 
-  const { data } = await supabaseAdmin
+  const { data, error } = await supabaseAdmin
     .from('sender_campaigns')
     .select('*')
     .eq('status', 'running')
     .order('created_at');
+  if (error) {
+    log('error', `Список идущих кампаний не прочитан: ${error.message}`);
+    return 0;
+  }
 
   let planned = 0;
   for (const campaign of (data ?? []) as CampaignRow[]) {
-    planned += await planCampaign(campaign, log);
+    // Каждая кампания — отдельно: исключение в одной (битые данные, сбой
+    // запроса) раньше обрывало весь проход, и остальные кампании стояли,
+    // пока её не починят.
+    try {
+      planned += await planCampaign(campaign, log);
+    } catch (e) {
+      log('error', `Кампания ${campaign.name} (${campaign.id}): проход планировщика упал — остальные идут дальше`, e);
+    }
   }
   if (planned) log('info', `Запланировано писем: ${planned}`);
   return planned;

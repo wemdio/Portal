@@ -123,14 +123,20 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     }
 
     // Ни одной годной строки — importRecipients базу не трогал (при замене
-    // тоже), остаётся объяснить почему.
+    // тоже), остаётся объяснить почему. Причин две, и в файле бывают обе
+    // сразу: «у всех пустое письмо» при части кривых адресов отправляло бы
+    // оператора чинить письмо, хотя половину строк надо чинить в адресах.
     if (!result.accepted) {
-      return jsonError(
-        result.skippedEmptyLetter
-          ? 'У всех адресов файла первое письмо выходит пустым — проверьте переменные в его теме и тексте'
-          : 'В файле не нашлось ни одного корректного адреса',
-        400,
-      );
+      const { skippedInvalid: badAddress, skippedEmptyLetter: emptyLetter } = result;
+      let message = 'В файле не нашлось ни одного корректного адреса';
+      if (emptyLetter && badAddress) {
+        message =
+          `Ни одна строка не подошла: у ${badAddress} некорректный адрес, у ${emptyLetter} первое письмо выходит пустым — ` +
+          'проверьте колонку адреса и переменные в теме и тексте письма';
+      } else if (emptyLetter) {
+        message = 'У всех адресов файла первое письмо выходит пустым — проверьте переменные в его теме и тексте';
+      }
+      return jsonError(message, 400);
     }
 
     return NextResponse.json({

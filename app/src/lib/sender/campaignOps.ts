@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { chunkForInFilter } from './inFilter';
 import {
   normalizeRecipientEmail,
   normalizeRecipients,
@@ -59,13 +60,10 @@ const MAX_STEPS = 5;
 /** Строк базы за одну вставку: строки едут в теле запроса, не в адресе. */
 const INSERT_CHUNK = 500;
 /**
- * Адресов за один запрос к стоп-листу. in-фильтр уезжает в адрес запроса, а
- * шлюз перед PostgREST режет адреса длиннее ~9–13 КБ (414): пачка в 500
- * адресов — это ~16 КБ, запрос падал, и стоп-лист молча считался пустым.
- * 100 адресов — ~4 КБ даже с длинными адресами.
+ * Ящиков пула за один запрос: in-фильтр уезжает в адрес запроса, а шлюз
+ * режет длинные адреса (414). id одной длины — 50 штук это ~2 КБ. Адреса
+ * почты разной длины, их пачки набираются по весу (inFilter.ts).
  */
-const SUPPRESSION_CHUNK = 100;
-/** Ящиков пула за один запрос — по той же причине: id длинные. */
 const MAILBOX_CHUNK = 50;
 
 function requireDb() {
@@ -231,16 +229,14 @@ export interface ImportRecipientsResult {
 
 /**
  * Адреса из списка, стоящие в стоп-листе. Не прочитали — ошибка, а не пустой
- * список: иначе при сбое базы адреса из стоп-листа молча уехали бы в кампанию.
+ * список: иначе при сбое базы (в том числе 414 на длинном адресе запроса)
+ * адреса из стоп-листа молча уехали бы в кампанию.
  */
 async function loadSuppressedEmails(emails: string[]): Promise<Set<string>> {
   const db = requireDb();
   const suppressed = new Set<string>();
-  for (let i = 0; i < emails.length; i += SUPPRESSION_CHUNK) {
-    const { data, error } = await db
-      .from('sender_suppressions')
-      .select('email')
-      .in('email', emails.slice(i, i + SUPPRESSION_CHUNK));
+  for (const part of chunkForInFilter(emails)) {
+    const { data, error } = await db.from('sender_suppressions').select('email').in('email', part);
     if (error) throw new SenderOpError(`Не удалось сверить базу со стоп-листом: ${error.message}`, 500);
     for (const row of data ?? []) suppressed.add(String(row.email));
   }
@@ -401,9 +397,11 @@ async function poolHasWorkingMailbox(mailboxIds: string[]): Promise<boolean> {
  * становилась «идущей» и молча не отправляла ничего — планировщик пропускал
  * её на каждом проходе, а оператор ждал писем.
  *
- * Идущую не запускаем повторно: очередь ей заново выставила бы тех, чьё
- * письмо уже стоит в очереди, — планировщик упирался бы в уникальность
- * (recipient_id, step_no) на каждом проходе. Дата первого запуска при
+ * Запускается только черновик или кампания на паузе. Идущую повторно не
+ * запускаем: очередь ей заново выставила бы тех, чьё письмо уже стоит в
+ * очереди, — планировщик упирался бы в уникальность (recipient_id, step_no)
+ * на каждом проходе. Завершённую — тоже: её письма сняты, и «запуск» молча
+ * вернул бы в работу базу, которую оператор закрыл. Дата первого запуска при
  * продолжении после паузы не сдвигается.
  */
 export async function startCampaign(campaignId: string): Promise<void> {
@@ -418,12 +416,16 @@ export async function startCampaign(campaignId: string): Promise<void> {
   if (campaignError) throw new SenderOpError(campaignError.message, 500);
   if (!campaign) throw new SenderOpError('Кампания не найдена', 404);
   if (campaign.status === 'running') throw new SenderOpError('Кампания уже идёт', 409);
+  if (!EDITABLE_CAMPAIGN_STATUSES.includes(String(campaign.status))) {
+    throw new SenderOpError('Кампания завершена — запустить её снова нельзя', 409);
+  }
 
-  const { count } = await db
+  const { count, error: countError } = await db
     .from('sender_recipients')
     .select('id', { count: 'exact', head: true })
     .eq('campaign_id', campaignId)
     .eq('status', 'active');
+  if (countError) throw new SenderOpError(countError.message, 500);
   if (!count) throw new SenderOpError('В кампании нет получателей', 422);
 
   const { data: pool, error: poolError } = await db
@@ -451,22 +453,32 @@ export async function startCampaign(campaignId: string): Promise<void> {
   // есть уникальность (recipient_id, step_no). Без уборки повторный запуск
   // упирался бы в неё и молча не отправлял ничего тем, кто стоял в очереди
   // на момент паузы. Отменённое письмо никуда не уходило — удаляем.
-  await db
+  // Обе записи проверяются до смены статуса: упали — кампания остаётся как
+  // была, и повторное «Запустить» просто пройдёт их заново.
+  const { error: cleanupError } = await db
     .from('sender_messages')
     .delete()
     .eq('campaign_id', campaignId)
     .eq('status', 'canceled');
+  if (cleanupError) throw new SenderOpError(cleanupError.message, 500);
 
-  await db
+  const { error: requeueError } = await db
     .from('sender_recipients')
     .update({ next_step_at: nowIso, updated_at: nowIso })
     .eq('campaign_id', campaignId)
     .eq('status', 'active')
     .is('next_step_at', null);
+  if (requeueError) throw new SenderOpError(requeueError.message, 500);
 
-  const { error } = await db
+  // Смена статуса — одним условным обновлением: из двух одновременных
+  // «Запустить» (или «Запустить» и «Завершить») проходит одно, второе видит,
+  // что кампания уже не черновик и не на паузе.
+  const { data: switched, error } = await db
     .from('sender_campaigns')
     .update({ status: 'running', updated_at: nowIso, started_at: campaign.started_at ?? nowIso })
-    .eq('id', campaignId);
+    .eq('id', campaignId)
+    .in('status', EDITABLE_CAMPAIGN_STATUSES)
+    .select('id');
   if (error) throw new SenderOpError(error.message, 500);
+  if (!switched?.length) throw new SenderOpError('Кампанию уже запустили или завершили — обновите экран', 409);
 }
