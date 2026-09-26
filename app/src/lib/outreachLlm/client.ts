@@ -8,10 +8,13 @@
  * Модель — по роли: gpt-4o-mini для разбора (analysis), Gemini 3.1 Pro для
  * цепочек писем (writer); обе переопределяются env.
  *
- * Язык и бюджет приходят из контекста запуска (context.ts). Каждый оплаченный
- * ответ сразу списывается с бюджета — даже если потом не разобрался: деньги
- * уже потрачены, и лимит обязан это видеть. Оборванный нами запрос тоже
- * списывается — оценкой сверху (см. abortedUsage).
+ * Язык и бюджет приходят из контекста запуска (context.ts), и вне контекста
+ * клиент не платит вовсе: вызов без лимита — ошибка. Перед каждым запросом
+ * бюджет бронирует его оценку сверху (JobBudget.reserve) — лимит строгий и при
+ * параллельных вызовах. Каждый оплаченный ответ сразу списывается с бюджета —
+ * даже если потом не разобрался: деньги уже потрачены, и лимит обязан это
+ * видеть. Запрос, оборванный нами или сетью после отправки, тоже списывается —
+ * оценкой сверху (см. unansweredUsage).
  *
  * Транспорт — прямой fetch, как в lib/openrouter/client.ts: тот бросает
  * обычный Error и теряет usage, а здесь нужны стоимость каждого ответа и типы
@@ -19,7 +22,7 @@
  */
 
 import 'server-only';
-import { BudgetExceededError, currentOutreachContext, LlmAuthError, LlmCallError, type JobBudget } from './context';
+import { currentOutreachContext, LlmAuthError, LlmCallError, type BudgetHold, type JobBudget } from './context';
 import { bareModelName, estimateCostUsd } from './prices';
 import type { OutreachLang, OutreachLlmRole } from './types';
 
@@ -100,6 +103,17 @@ const MODERATION_TEXT = /moderat|flagged|polic(?:y|ies)|safety/i;
 const KEY_TEXT = /api[\s_-]*key|unauthori[sz]ed|authenticat/i;
 // Таймауты самого undici: запрос уже ушёл, ответа не дождались.
 const UNDICI_TIMEOUT_CODES = new Set(['UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']);
+// Сеть упала до соединения: имя не разрешилось, в соединении отказали, до хоста
+// не дойти, TLS не договорился. Запрос не ушёл — Requesty за него не платил.
+// Любой другой обрыв (сброс сокета, «terminated» при чтении ответа) — после
+// отправки: ответ мог быть сгенерирован и оплачен.
+const PRE_SEND_CODES = new Set([
+  'ENOTFOUND', 'EAI_AGAIN', 'EAI_FAIL', 'EAI_NONAME', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN',
+  'EHOSTDOWN', 'EADDRNOTAVAIL', 'UND_ERR_CONNECT_TIMEOUT',
+]);
+const PRE_SEND_TLS_CODE = /^(?:ERR_TLS_|ERR_SSL_|CERT_|UNABLE_TO_(?:GET|VERIFY)_|DEPTH_ZERO_SELF_SIGNED|SELF_SIGNED_CERT)/;
+// fetch отверг сам запрос (битый адрес или заголовок) — он не ушёл.
+const PRE_SEND_TEXT = /failed to parse url|invalid url|invalid header|header value/i;
 
 // json_object-режим у части поставщиков отвечает 400, если слово «json» не
 // встречается в сообщениях (движок вертикалей наступил на это) — добавляем сами.
@@ -121,6 +135,16 @@ export function outreachModel(lang: OutreachLang, role: OutreachLlmRole): string
   return (process.env[MODEL_ENV[lang][role]] ?? '').trim() || DEFAULT_MODELS[role];
 }
 
+/**
+ * Оценка сверху одного запроса к модели роли: весь промпт (~3 символа на
+ * токен) и max_tokens ответа по цене из prices.ts с наценкой Requesty. Столько
+ * клиент бронирует в лимите перед запросом и столько списывает за запрос без
+ * ответа. Раннеры по ней считают запас лимита под писателя цепочек.
+ */
+export function outreachWorstCaseUsd(lang: OutreachLang, role: OutreachLlmRole, promptChars: number, maxTokens: number): number {
+  return estimateUsd([outreachModel(lang, role)], Math.ceil(Math.max(0, promptChars) / 3), Math.max(0, maxTokens));
+}
+
 export interface OutreachLlmUsage {
   role: OutreachLlmRole;
   /** Модель, которая ответила по данным Requesty; если он её не назвал — запрошенная. */
@@ -128,7 +152,8 @@ export interface OutreachLlmUsage {
   costUsd: number;
   /**
    * reported — usage.cost от Requesty; estimated — наша оценка по prices.ts;
-   * aborted — запрос оборван таймаутом или отменой: оценка сверху, ответа нет.
+   * aborted — ответа нет, а запрос мог быть оплачен (оборван таймаутом,
+   * отменой или сетью после отправки): оценка сверху.
    */
   costSource: 'reported' | 'estimated' | 'aborted';
   promptTokens: number | null;
@@ -142,7 +167,11 @@ export interface OutreachLlmCallOptions {
   /** Короткая метка вызова для заголовка X-Title и логов: «site», «vacancy», «chain-hiring». */
   title: string;
   maxTokens?: number;
-  /** Явный язык важнее контекста; вне runWithOutreachContext обязателен, и бюджета тогда нет. */
+  /**
+   * Язык берётся из контекста запуска; явный — проверка: вызов английского
+   * разбора внутри русского запуска (и наоборот) списал бы деньги чужого ключа
+   * с чужого лимита, поэтому он отклоняется.
+   */
   lang?: OutreachLang;
   /**
    * Каждый оплаченный ответ, в том числе отвергнутый потом как битый: так
@@ -152,7 +181,8 @@ export interface OutreachLlmCallOptions {
   /**
    * Отмена снаружи (остановка запуска, закрытый запрос роута): обрывает
    * запрос и паузу перед повтором, повторов после неё нет, вызов отклоняется
-   * с signal.reason.
+   * с signal.reason. Сигнал контекста запуска (остановка всего запуска)
+   * действует и без него.
    */
   signal?: AbortSignal;
   /**
@@ -220,12 +250,17 @@ async function callOutreach<T>(
   accept: (content: string) => T | null,
 ): Promise<T> {
   const ctx = currentOutreachContext();
-  const lang = opts.lang ?? ctx?.lang;
-  if (!lang) {
-    // Ошибка программиста, а не ИИ: пусть падает громко, а не прячется в «ИИ не ответил».
-    throw new Error(`Outreach LLM «${opts.title}»: язык не задан — вызов вне runWithOutreachContext без opts.lang`);
+  // Ошибки программиста, а не ИИ: пусть падают громко, а не прячутся в «ИИ не
+  // ответил». Вызов без контекста запуска потратил бы деньги мимо лимита —
+  // такой не уходит вовсе, с какими бы параметрами его ни позвали.
+  if (!ctx) {
+    throw new Error(`Outreach LLM «${opts.title}»: вызов вне runWithOutreachContext — без лимита на ИИ не платим`);
   }
-  const budget = ctx?.budget ?? null;
+  if (opts.lang && opts.lang !== ctx.lang) {
+    throw new Error(`Outreach LLM «${opts.title}»: язык вызова (${opts.lang}) не совпадает с запуском (${ctx.lang})`);
+  }
+  const lang = ctx.lang;
+  const budget = ctx.budget;
   const apiKey = outreachApiKey(lang);
   if (!apiKey) {
     throw new LlmAuthError(`Не задан ключ ИИ для ${LANG_LABEL[lang]} автоаутрича (${API_KEY_ENV[lang]})`, 'missing_key');
@@ -245,14 +280,15 @@ async function callOutreach<T>(
     apiKey,
     model: outreachModel(lang, opts.role),
     json,
-    signal: opts.signal ?? null,
+    signal: anySignal(opts.signal, ctx.signal),
     deadline: timeoutMs === null ? null : Date.now() + timeoutMs,
     timeoutMs,
   };
   const baseMessages = buildMessages(opts, call);
 
-  const charge = (usage: OutreachLlmUsage): void => {
-    budget?.add(usage.role, usage.costUsd);
+  // Списание с бюджета делает бронь запроса (requestWithRetries); здесь —
+  // предупреждения и учёт вызывающего.
+  const report = (usage: OutreachLlmUsage): void => {
     if (usage.costSource === 'estimated') {
       warnOnce(`cost:${usage.model}`, `${label(call)}: Requesty не вернул usage.cost (${usage.model}) — стоимость оценена по таблице цен`);
     } else if (usage.costSource === 'aborted') {
@@ -275,7 +311,7 @@ async function callOutreach<T>(
   let nudge = false;
   for (;;) {
     const messages = nudge ? [...baseMessages, { role: 'user' as const, content: JSON_RETRY_NUDGE[lang] }] : baseMessages;
-    const answer = await requestWithRetries(call, messages, maxTokens, budget, charge);
+    const answer = await requestWithRetries(call, messages, maxTokens, budget, report);
     // Обрезанный текст — недописанное письмо. Обрезанный JSON, если всё же
     // разобрался, целый: скобки сошлись, значит объект закрыт — платить за
     // повтор незачем.
@@ -336,20 +372,20 @@ function buildMessages(opts: OutreachLlmCallOptions, call: CallSpec): ChatMessag
   return messages;
 }
 
-function ensureBudget(budget: JobBudget | null): void {
-  if (!budget || !budget.exhausted()) return;
-  throw new BudgetExceededError(
-    `Достигнут лимит на ИИ: потрачено $${budget.spentUsd.toFixed(2)} из $${budget.limitUsd.toFixed(2)}`,
-  );
+/** Сигнал вызова и сигнал запуска вместе: любой из них обрывает запрос. */
+function anySignal(a: AbortSignal | undefined, b: AbortSignal | undefined): AbortSignal | null {
+  if (a && b && a !== b) return AbortSignal.any([a, b]);
+  return a ?? b ?? null;
 }
 
 async function requestWithRetries(
   call: CallSpec,
   messages: ChatMessage[],
   maxTokens: number,
-  budget: JobBudget | null,
-  charge: (usage: OutreachLlmUsage) => void,
+  budget: JobBudget,
+  report: (usage: OutreachLlmUsage) => void,
 ): Promise<Answer> {
+  const promptChars = messages.reduce((sum, m) => sum + m.content.length, 0);
   let lastError: LlmCallError | null = null;
   for (let attempt = 0; attempt <= TRANSPORT_RETRIES; attempt += 1) {
     if (attempt > 0) {
@@ -363,29 +399,44 @@ async function requestWithRetries(
     call.signal?.throwIfAborted();
     const remainingMs = call.deadline === null ? Infinity : call.deadline - Date.now();
     if (remainingMs <= 0) break;
-    // Перед каждым запросом, включая повторы: пока этот поток ждал, лимит мог
-    // выбрать другой.
-    ensureBudget(budget);
+    // Бронь — перед каждым запросом, включая повторы: оценка сверху этого
+    // запроса вместе с потраченным и бронями соседних потоков должна
+    // поместиться в лимит, иначе BudgetExceededError и запрос не уходит.
+    const hold = budget.reserve(call.role, worstCaseUsd(call, promptChars, maxTokens));
     const timeoutMs = Math.min(requestTimeoutMs(call), remainingMs);
-    const outcome = await requestOnce(call, messages, maxTokens, timeoutMs, charge);
+    let outcome: Outcome;
+    try {
+      outcome = await requestOnce(call, messages, promptChars, maxTokens, timeoutMs, hold, report);
+    } finally {
+      // Запрос без оплаты (не ушёл, ошибка без usage) — бронь просто снимается.
+      hold.release();
+    }
     if (outcome.ok) return outcome.answer;
     lastError = outcome.error;
   }
   throw lastError ?? new LlmCallError(`${label(call)}: не уложились в ${seconds(call.timeoutMs ?? 0)} с`);
 }
 
-/** Retryable-сбой возвращается, постоянный (ключ, деньги, модель, прочие 4xx) — бросается. */
+/**
+ * Retryable-сбой возвращается, постоянный (ключ, деньги, модель, прочие 4xx) —
+ * бросается. Оплаченный запрос закрывает бронь своей стоимостью (hold.settle).
+ */
 async function requestOnce(
   call: CallSpec,
   messages: ChatMessage[],
+  promptChars: number,
   maxTokens: number,
   timeoutMs: number,
-  charge: (usage: OutreachLlmUsage) => void,
+  hold: BudgetHold,
+  report: (usage: OutreachLlmUsage) => void,
 ): Promise<Outcome> {
-  const promptChars = messages.reduce((sum, m) => sum + m.content.length, 0);
+  const charge = (usage: OutreachLlmUsage): void => {
+    hold.settle(usage.costUsd);
+    report(usage);
+  };
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const signal = call.signal ? AbortSignal.any([call.signal, timeoutSignal]) : timeoutSignal;
-  let res: Response;
+  let res: Response | null = null;
   let text: string;
   try {
     res = await fetch(endpoint(), {
@@ -411,11 +462,19 @@ async function requestOnce(
   } catch (err) {
     const cancelled = call.signal?.aborted === true;
     if (cancelled || timeoutSignal.aborted || isTimeoutError(err)) {
-      charge(abortedUsage(call, promptChars, maxTokens));
+      charge(unansweredUsage(call, promptChars, maxTokens));
       if (cancelled) throw call.signal?.reason;
       return { ok: false, error: new LlmCallError(`${label(call)}: нет ответа за ${seconds(timeoutMs)} с`) };
     }
-    return { ok: false, error: new LlmCallError(`${label(call)}: ${networkProblem(err, call)}`) };
+    // Обрыв сети. До соединения (DNS, отказ в соединении, TLS) запрос не ушёл
+    // и ничего не стоил. После — сброс сокета, «terminated» при чтении ответа
+    // (заголовки 200 уже пришли) — Requesty мог уже заплатить за ответ, которого
+    // мы не увидим: списываем оценку сверху, как оборванный запрос. Иначе два
+    // повтора после таких обрывов тратили бы деньги мимо лимита.
+    const maybePaid = res !== null || !isPreSendError(err);
+    if (maybePaid) charge(unansweredUsage(call, promptChars, maxTokens));
+    const note = maybePaid ? ' — запрос мог быть оплачен, в лимит записана оценка сверху' : '';
+    return { ok: false, error: new LlmCallError(`${label(call)}: ${networkProblem(err, call)}${note}`) };
   }
 
   const envelope = parseEnvelope(text);
@@ -423,6 +482,10 @@ async function requestOnce(
   if (envelope && (envelope.usage || choice)) {
     // Ошибки Requesty обычно бесплатны, но если он что-то посчитал — учитываем.
     charge(usageOf(envelope, choice, call, promptChars));
+  } else if (res.ok && !envelope) {
+    // 200, а тело не читается: ответ был сгенерирован и, скорее всего,
+    // оплачен, но usage из него не достать — оценка сверху.
+    charge(unansweredUsage(call, promptChars, maxTokens));
   }
 
   if (res.ok) {
@@ -544,13 +607,22 @@ function usageOf(
 }
 
 /**
- * Запрос ушёл, а оборвали его мы (таймаут или отмена). Requesty при этом мог
- * уже заплатить апстриму за генерацию — ответа с usage мы не увидим никогда.
- * Списываем оценку сверху: весь промпт (~3 символа на токен) и max_tokens
- * ответа, иначе серия таймаутов тратила бы деньги мимо лимита.
+ * Оценка сверху одного запроса: весь промпт (~3 символа на токен) и
+ * max_tokens ответа по цене запрошенной модели. Её бронирует бюджет перед
+ * запросом (reserve) — и её же списываем за запрос без ответа.
  */
-function abortedUsage(call: CallSpec, promptChars: number, maxTokens: number): OutreachLlmUsage {
-  const costUsd = estimateUsd([call.model], Math.ceil(promptChars / 3), maxTokens);
+function worstCaseUsd(call: CallSpec, promptChars: number, maxTokens: number): number {
+  return estimateUsd([call.model], Math.ceil(promptChars / 3), maxTokens);
+}
+
+/**
+ * Запрос ушёл, а ответа нет: оборвали его мы (таймаут или отмена), сеть после
+ * отправки, или 200 пришёл нечитаемым. Requesty при этом мог уже заплатить
+ * апстриму за генерацию — ответа с usage мы не увидим никогда. Списываем
+ * оценку сверху, иначе серия таких обрывов тратила бы деньги мимо лимита.
+ */
+function unansweredUsage(call: CallSpec, promptChars: number, maxTokens: number): OutreachLlmUsage {
+  const costUsd = worstCaseUsd(call, promptChars, maxTokens);
   return { role: call.role, model: call.model, costUsd, costSource: 'aborted', promptTokens: null, completionTokens: null };
 }
 
@@ -560,6 +632,21 @@ function isTimeoutError(err: unknown): boolean {
   const cause = err.cause;
   const code = cause && typeof cause === 'object' && 'code' in cause ? (cause as { code: unknown }).code : undefined;
   return typeof code === 'string' && UNDICI_TIMEOUT_CODES.has(code);
+}
+
+/** Коды ошибок по цепочке cause (и внутри AggregateError — несколько адресов хоста). */
+function errorCodes(err: unknown, depth = 0): string[] {
+  if (!err || typeof err !== 'object' || depth > 5) return [];
+  const own = 'code' in err && typeof (err as { code: unknown }).code === 'string' ? [(err as { code: string }).code] : [];
+  const nested = err instanceof AggregateError ? err.errors.flatMap((e: unknown) => errorCodes(e, depth + 1)) : [];
+  const cause = err instanceof Error ? errorCodes(err.cause, depth + 1) : [];
+  return [...own, ...nested, ...cause];
+}
+
+/** Сбой сети до соединения или отказ fetch собрать запрос: запрос не ушёл и не оплачен. */
+function isPreSendError(err: unknown): boolean {
+  if (errorCodes(err).some((code) => PRE_SEND_CODES.has(code) || PRE_SEND_TLS_CODE.test(code))) return true;
+  return err instanceof TypeError && !err.cause && PRE_SEND_TEXT.test(err.message);
 }
 
 function errorCodeOf(envelope: RequestyEnvelope): number | null {

@@ -5,10 +5,10 @@
  * Транспорт, ключ, модель, повторы и учёт денег — общий клиент аутричей
  * (lib/outreachLlm): свой ключ POLZA_RU_OUTREACH_API_KEY, дешёвая модель
  * разбора, температура 0, повтор при сбое сети и битом JSON. Язык и лимит на ИИ
- * берутся из контекста запуска (runner.ts). Вне контекста (разовый вызов не из
- * раннера) — русский ключ без лимита. Разбор полей ответа (asString и соседи)
- * общий с английским аутричем и живёт в lib/outreachLlm/json.ts; здесь он
- * реэкспортирован для прежних импортов.
+ * берутся из контекста запуска (раннер и «Переписать цепочку»). Вне контекста
+ * вызов не уходит вовсе — без лимита не платим. Разбор полей ответа (asString
+ * и соседи) общий с английским аутричем и живёт в lib/outreachLlm/json.ts;
+ * здесь он реэкспортирован для прежних импортов.
  *
  * Ошибки клиента типизированы, и от типа зависит судьба строки и запуска:
  * LlmCallError — сбой на этой строке («ИИ не ответил»); BudgetExceededError и
@@ -44,13 +44,14 @@ export async function callJson(
   timeoutMs?: number,
 ): Promise<Record<string, unknown>> {
   const ctx = currentOutreachContext();
+  // Язык и лимит — только из контекста запуска: без него клиент вызов отклонит.
   const result = await callOutreachJson({
     role: 'analysis',
     system,
     user,
     title,
     maxTokens,
-    lang: ctx?.lang ?? 'ru',
+    lang: 'ru',
     timeoutMs,
   });
   if (isComplete && !isComplete(result)) {

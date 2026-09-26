@@ -14,6 +14,7 @@
 
 import 'server-only';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { fmtUsd } from './format';
 import type {
   LlmAuthReason,
   OutreachLang,
@@ -41,11 +42,29 @@ function finiteAtLeastZero(value: unknown): number | null {
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
+/** Сравнение денег с запасом на погрешность сложения дробей. */
+const USD_EPSILON = 1e-9;
+
 /**
- * Счётчик расхода на ИИ за запуск. Клиент проверяет exhausted() перед каждым
- * запросом и списывает каждый оплаченный ответ. Запросы, которые параллельные
- * потоки уже отправили, всё равно будут оплачены — перерасход не больше одного
- * вызова на поток обработки.
+ * Бронь под один запрос к ИИ (reserve): оценка сверху держится, пока ответа
+ * нет. Закрывается один раз — settle или release; повторный вызов ничего не
+ * меняет.
+ */
+export interface BudgetHold {
+  /** Запрос оплачен (ответ пришёл или оборван): бронь снимается, списывается стоимость. */
+  settle(usd: number): void;
+  /** Запрос ничего не стоил (не ушёл, ошибка без оплаты): бронь просто снимается. */
+  release(): void;
+}
+
+/**
+ * Счётчик расхода на ИИ за запуск. Лимит строгий: перед каждым запросом клиент
+ * бронирует его оценку сверху (весь промпт и max_tokens ответа по цене модели,
+ * reserve), и запрос не уходит, если потраченное, брони идущих запросов и эта
+ * оценка вместе больше лимита. Ответ снимает бронь и списывает свою стоимость.
+ * Так параллельные потоки — семь писателей цепочек разом — не проскакивают
+ * проверку все сразу, пока ни один ещё не оплачен. Перелёт возможен, только
+ * если Requesty насчитал больше нашей оценки сверху.
  */
 export class JobBudget {
   readonly limitUsd: number;
@@ -55,6 +74,12 @@ export class JobBudget {
     analysis: { usd: 0, calls: 0 },
     writer: { usd: 0, calls: 0 },
   };
+  /** Брони запросов, которые ушли, а ответа ещё нет. */
+  reservedUsd = 0;
+  private readonly reservedByRole: Record<OutreachLlmRole, number> = { analysis: 0, writer: 0 };
+  private inFlight = 0;
+  private readonly idleWaiters = new Set<() => void>();
+  private readonly chargeListeners = new Set<(role: OutreachLlmRole, usd: number) => void>();
 
   constructor(limitUsd: number) {
     // С NaN вместо лимита бюджет стал бы бесконечным (spentUsd >= NaN всегда
@@ -94,20 +119,115 @@ export class JobBudget {
     this.calls += 1;
     this.byRole[role].usd += amount;
     this.byRole[role].calls += 1;
+    for (const listener of this.chargeListeners) {
+      try {
+        listener(role, amount);
+      } catch {
+        // Учёт слушателя (сохранение расхода) не должен ронять оплаченный вызов.
+      }
+    }
   }
 
   exhausted(): boolean {
     return this.spentUsd >= this.limitUsd;
   }
 
-  snapshot(): OutreachLlmBudgetSnapshot {
+  /** Сколько ещё можно потратить: лимит минус потраченное и брони идущих запросов. */
+  available(): number {
+    return this.limitUsd - this.spentUsd - this.reservedUsd;
+  }
+
+  /**
+   * Забронировать оценку сверху под запрос. Не помещается в лимит вместе с
+   * потраченным и бронями идущих запросов — BudgetExceededError, запрос не
+   * уходит.
+   */
+  reserve(role: OutreachLlmRole, usd: number): BudgetHold {
+    const amount = Number.isFinite(usd) && usd > 0 ? usd : 0;
+    if (this.exhausted()) {
+      throw new BudgetExceededError(`Достигнут лимит на ИИ: потрачено ${fmtUsd(this.spentUsd)} из ${fmtUsd(this.limitUsd)}`);
+    }
+    if (this.spentUsd + this.reservedUsd + amount > this.limitUsd + USD_EPSILON) {
+      const inFlight = this.reservedUsd > 0 ? `, ещё до ${fmtUsd(this.reservedUsd)} — в идущих запросах` : '';
+      throw new BudgetExceededError(
+        `Не хватает лимита на ИИ: потрачено ${fmtUsd(this.spentUsd)} из ${fmtUsd(this.limitUsd)}${inFlight}, а запрос может стоить до ${fmtUsd(amount)}`,
+      );
+    }
+    this.reservedUsd += amount;
+    this.reservedByRole[role] += amount;
+    this.inFlight += 1;
+    let open = true;
+    const close = () => {
+      if (!open) return;
+      open = false;
+      this.inFlight -= 1;
+      if (this.inFlight === 0) {
+        // Без погрешности дробей: ноль броней — ровно ноль.
+        this.reservedUsd = 0;
+        this.reservedByRole.analysis = 0;
+        this.reservedByRole.writer = 0;
+        for (const wake of this.idleWaiters) wake();
+        this.idleWaiters.clear();
+      } else {
+        this.reservedUsd = Math.max(0, this.reservedUsd - amount);
+        this.reservedByRole[role] = Math.max(0, this.reservedByRole[role] - amount);
+      }
+    };
     return {
-      spent_usd: roundUsd(this.spentUsd),
+      settle: (cost: number) => {
+        close();
+        this.add(role, cost);
+      },
+      release: close,
+    };
+  }
+
+  /** Идущих запросов нет. */
+  idle(): boolean {
+    return this.inFlight === 0;
+  }
+
+  /**
+   * Дождаться, пока все идущие запросы получат ответ или оборвутся: итог расхода
+   * пишется после них. false — не дождались за timeoutMs.
+   */
+  whenIdle(timeoutMs: number): Promise<boolean> {
+    if (this.inFlight === 0) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const wake = () => {
+        clearTimeout(timer);
+        resolve(true);
+      };
+      const timer = setTimeout(() => {
+        this.idleWaiters.delete(wake);
+        resolve(false);
+      }, timeoutMs);
+      this.idleWaiters.add(wake);
+    });
+  }
+
+  /** Слушатель каждого списания (роль и сумма) — например, сохранить расход в запуск. Возвращает отписку. */
+  onCharge(listener: (role: OutreachLlmRole, usd: number) => void): () => void {
+    this.chargeListeners.add(listener);
+    return () => {
+      this.chargeListeners.delete(listener);
+    };
+  }
+
+  /**
+   * includeReserved — брони идущих запросов считать потраченными: итог
+   * запуска, если ответа на них так и не дождались. Деньги за такой запрос,
+   * скорее всего, уже списаны, и лимит должен это видеть.
+   */
+  snapshot(options: { includeReserved?: boolean } = {}): OutreachLlmBudgetSnapshot {
+    const extra = options.includeReserved ? this.reservedByRole : { analysis: 0, writer: 0 };
+    return {
+      spent_usd: roundUsd(this.spentUsd + extra.analysis + extra.writer),
       calls: this.calls,
       limit_usd: this.limitUsd,
       by_role: {
-        analysis: { usd: roundUsd(this.byRole.analysis.usd), calls: this.byRole.analysis.calls },
-        writer: { usd: roundUsd(this.byRole.writer.usd), calls: this.byRole.writer.calls },
+        analysis: { usd: roundUsd(this.byRole.analysis.usd + extra.analysis), calls: this.byRole.analysis.calls },
+        writer: { usd: roundUsd(this.byRole.writer.usd + extra.writer), calls: this.byRole.writer.calls },
       },
     };
   }
@@ -116,14 +236,21 @@ export class JobBudget {
 export interface OutreachLlmContext {
   lang: OutreachLang;
   budget: JobBudget;
+  /**
+   * Остановка всего запуска: обрывает каждый идущий запрос к ИИ в контексте,
+   * не только писателя. Оборванный запрос списывается оценкой сверху.
+   */
+  signal?: AbortSignal;
 }
 
 const storage = new AsyncLocalStorage<OutreachLlmContext>();
 
 /**
  * Весь запуск — внутри: каждый ИИ-вызов в нём знает язык и списывает деньги со
- * своего бюджета. fn оборачиваем в async, чтобы и синхронная ошибка в ней
- * вернулась отклонённым промисом, а не вылетела мимо await вызывающего.
+ * своего бюджета. Вне контекста клиент ИИ не платит вовсе (client.ts): вызов
+ * без лимита — ошибка программиста. fn оборачиваем в async, чтобы и
+ * синхронная ошибка в ней вернулась отклонённым промисом, а не вылетела мимо
+ * await вызывающего.
  */
 export function runWithOutreachContext<T>(ctx: OutreachLlmContext, fn: () => Promise<T>): Promise<T> {
   return storage.run(ctx, async () => fn());
@@ -134,9 +261,9 @@ export function currentOutreachContext(): OutreachLlmContext | null {
 }
 
 /**
- * Лимит на ИИ исчерпан. Раннер ловит её и завершает запуск штатно
- * (stop_reason = 'budget'): всё готовое остаётся, строка возвращается в
- * необработанные, а не в отсев.
+ * Лимит на ИИ исчерпан или следующий запрос в него не помещается (оценкой
+ * сверху). Раннер ловит её и завершает запуск штатно (stop_reason = 'budget'):
+ * всё готовое остаётся, строка возвращается в необработанные, а не в отсев.
  */
 export class BudgetExceededError extends Error {
   constructor(message = 'Достигнут лимит на ИИ для запуска') {
