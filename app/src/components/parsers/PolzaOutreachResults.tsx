@@ -8,6 +8,7 @@ import { polzaReviewLabel } from '@/lib/polzaOutreach/types';
 import { POLZA_STAGE_KEYS, POLZA_STAGE_LABELS, PolzaOutreachStages } from '@/components/parsers/PolzaOutreachStages';
 import { PolzaOutreachStageModal } from '@/components/parsers/PolzaOutreachStageModal';
 import { ChainTemplates } from '@/components/outreach/ChainTemplates';
+import { SenderBlock } from '@/components/outreach/SenderBlock';
 import { ChevronDown, ChevronRight, Download, ExternalLink, FileText, Filter, Loader2, Mail, Square, Trash2 } from 'lucide-react';
 
 type Props = {
@@ -23,8 +24,13 @@ type Props = {
   jobError?: string | null;
   /** Расход на ИИ за запуск (progress_detail.llm); у запусков до 26.09.2026 его нет. */
   llmSpend?: OutreachLlmBudgetSnapshot | null;
-  /** Почему запуск закончился (progress_detail.stop_reason); budget — кончился лимит на ИИ. */
+  /**
+   * Почему запуск закончился (progress_detail.stop_reason): budget — кончился лимит
+   * на ИИ; awaiting_templates — набрано вместе с компаниями, которые ждут цепочку оффера.
+   */
   stopReason?: string | null;
+  /** Сколько компаний ждут «Переписать цепочку» (progress_detail.awaiting_templates). */
+  awaitingTemplates?: number | null;
   /** У воркера нет SMTP-прокси (progress_detail.smtp_unavailable): почты проверены только по MX. */
   smtpUnavailable?: boolean;
   /** Запуск на экране — для блока «Цепочки запуска». */
@@ -255,6 +261,7 @@ export function PolzaOutreachResults({
   jobError,
   llmSpend,
   stopReason,
+  awaitingTemplates,
   smtpUnavailable,
   jobId,
   onRefresh,
@@ -318,6 +325,13 @@ export function PolzaOutreachResults({
           Остановлен: достигнут лимит на ИИ. Готовые компании сохранены — чтобы добрать остальные, повторите запуск с большим лимитом.
         </div>
       ) : null}
+      {/* Разбор новых компаний остановлен: до заказанного числа добирают те, что ждут цепочку оффера. */}
+      {jobStatus && stopReason === 'awaiting_templates' ? (
+        <div className="rounded-lg bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
+          Набрано вместе с компаниями, которые ждут цепочку{awaitingTemplates ? ` (${awaitingTemplates})` : ''} — перепишите цепочку в блоке
+          «Цепочки запуска»
+        </div>
+      ) : null}
       {/* Без SMTP-прокси адрес считается рабочим, если у домена есть почтовый сервер: письмо может не дойти. */}
       {jobStatus && smtpUnavailable ? (
         <div className="rounded-lg bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
@@ -326,7 +340,16 @@ export function PolzaOutreachResults({
       ) : null}
 
       {jobStatus && jobId ? (
-        <ChainTemplates key={jobId} jobUrl={`/api/parsers/polza-outreach/${jobId}`} running={running} lang="en" onChanged={onRefresh} />
+        <>
+          <ChainTemplates key={jobId} jobUrl={`/api/parsers/polza-outreach/${jobId}`} running={running} lang="en" onChanged={onRefresh} />
+          <SenderBlock
+            key={`sender-${jobId}`}
+            jobUrl={`/api/parsers/polza-outreach/${jobId}`}
+            running={running}
+            readyCount={readyCount}
+            onChanged={onRefresh}
+          />
+        </>
       ) : null}
 
       {openStage !== null && loadAllRows ? (

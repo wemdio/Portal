@@ -3,6 +3,7 @@
 import { Download, Loader2, Square } from 'lucide-react';
 import { CHAIN_LABELS, REASON_LABELS, SOURCE_LABELS, type ChainType, type SourceCode } from '@/lib/polzaRuOutreach/types';
 import { ChainTemplates } from '@/components/outreach/ChainTemplates';
+import { SenderBlock } from '@/components/outreach/SenderBlock';
 import { JOB_STATUS } from './JobList';
 import { Reasons, ResultsTable } from './Results';
 import { RuStages } from './Stages';
@@ -57,6 +58,13 @@ export function JobDetail({ job, results, loading, exporting, filter, reason, pa
             {detail?.stop_reason === 'budget' && (
               <div className="mt-2 rounded-lg bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
                 Остановлен: достигнут лимит на ИИ. Готовые компании сохранены — чтобы добрать остальные, повторите запуск с большим лимитом.
+              </div>
+            )}
+            {/* Разбор новых компаний остановлен: до заказанного числа добирают те, что ждут цепочку оффера. */}
+            {detail?.stop_reason === 'awaiting_templates' && (
+              <div className="mt-2 rounded-lg bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
+                Набрано вместе с компаниями, которые ждут цепочку{detail.awaiting_templates ? ` (${detail.awaiting_templates})` : ''} — перепишите цепочку в
+                блоке «Цепочки запуска»
               </div>
             )}
             {/* Без SMTP-прокси адрес считается рабочим, если у домена есть почтовый сервер: письмо может не дойти. */}
@@ -144,6 +152,8 @@ export function JobDetail({ job, results, loading, exporting, filter, reason, pa
       <RuStages jobId={job.id} funnel={results?.funnel ?? null} run={{ running, failed: job.status === 'failed' }} error={job.error_message} />
 
       <ChainTemplates key={job.id} jobUrl={`${API}/${job.id}`} running={running} lang="ru" onChanged={onRefresh} />
+
+      <SenderBlock key={`sender-${job.id}`} jobUrl={`${API}/${job.id}`} running={running} readyCount={detail?.ready ?? null} onChanged={onRefresh} />
 
       <Reasons
         reasons={results?.reason_counts ?? null}

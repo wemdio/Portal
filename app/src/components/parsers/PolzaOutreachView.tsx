@@ -117,6 +117,7 @@ function runSummary(job: PolzaOutreachParserJob | null): {
   llm: OutreachLlmBudgetSnapshot | null;
   stopReason: string | null;
   smtpUnavailable: boolean;
+  awaitingTemplates: number | null;
 } {
   const detail = job?.progress_detail as Record<string, unknown> | null | undefined;
   const llm = detail?.llm as Partial<OutreachLlmBudgetSnapshot> | null | undefined;
@@ -125,6 +126,8 @@ function runSummary(job: PolzaOutreachParserJob | null): {
     llm: valid ? (llm as OutreachLlmBudgetSnapshot) : null,
     stopReason: typeof detail?.stop_reason === 'string' ? detail.stop_reason : null,
     smtpUnavailable: detail?.smtp_unavailable === true,
+    // Сколько компаний ждут «Переписать цепочку» — ключ общий с русским аутричем.
+    awaitingTemplates: typeof detail?.awaiting_templates === 'number' ? detail.awaiting_templates : null,
   };
 }
 
@@ -610,6 +613,7 @@ export function PolzaOutreachView() {
           llmSpend={activeSummary.llm}
           stopReason={activeSummary.stopReason}
           smtpUnavailable={activeSummary.smtpUnavailable}
+          awaitingTemplates={activeSummary.awaitingTemplates}
           jobId={activeJob?.id ?? null}
           onRefresh={() => void manualRefresh().catch((e) => setError(e instanceof Error ? e.message : 'Ошибка загрузки'))}
           loadAllRows={activeJobId ? loadAllRows : undefined}

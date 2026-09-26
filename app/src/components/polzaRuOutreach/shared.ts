@@ -31,8 +31,13 @@ export interface RuJob {
     scanned?: number;
     ready?: number;
     target?: number;
-    /** target_reached | pool_exhausted | scan_limit | budget (кончился лимит на ИИ). */
+    /**
+     * target_reached | pool_exhausted | scan_limit | budget (кончился лимит на ИИ) |
+     * awaiting_templates (заказанное набрано вместе с компаниями, которые ждут цепочку оффера).
+     */
     stop_reason?: string;
+    /** Сколько компаний ждут «Переписать цепочку» (очень спорные: цепочка оффера не готова). */
+    awaiting_templates?: number;
     reasons?: Record<string, number>;
     source_errors?: Record<string, string>;
     doubtful?: number;
