@@ -19,16 +19,20 @@ import { API, api, STATUS_LABELS, type RuRow } from './shared';
  * из воронки, которая и так считает по всем строкам на сервере.
  */
 
+/**
+ * Шаги на экране — в порядке работы раннера (STAGES): почта до разбора ИИ,
+ * сомнения до писем. Счётчик шага — воронка по его последнему ключу.
+ */
 export const RU_STAGE_VIEW: Array<{ keys: Stage[]; label: string; hint: string }> = [
   { keys: ['candidates_loaded'], label: 'Кандидаты', hint: 'Компании из выбранных источников: одна компания — одна карточка со всеми поводами' },
-  { keys: ['amo_checked'], label: 'Проверка AMO', hint: 'Открытые сделки, клиенты и свежие отказы не пишем; вакансии hh проверены вживую' },
+  { keys: ['amo_checked'], label: 'Проверка AMO', hint: 'Открытые сделки, клиенты и свежие отказы не пишем' },
   { keys: ['company_resolved'], label: 'Компания и сайт', hint: 'Нашли официальный сайт компании' },
   { keys: ['deduplicated'], label: 'Без повторов', hint: 'Нет повторов в запуске и в прошлых выгрузках' },
-  { keys: ['enriched'], label: 'Сайт и поводы', hint: 'Разбор сайта: B2B, исключения, события; новости и отчётность ФНС' },
-  { keys: ['scored'], label: 'Оценка', hint: 'Похожесть, размер, выбор оффера и оценка 0–100 не ниже порога' },
-  { keys: ['recipient_resolved'], label: 'Почта', hint: 'Корпоративная почта на сайте, не в стоп-листе' },
-  { keys: ['sequence_assembled', 'qa_checked'], label: 'Письма и проверка', hint: 'Цепочка собрана и прошла автоматическую проверку' },
-  { keys: ['ready'], label: 'Готово', hint: 'Идут в Excel для Instantly; очень спорные — в отдельной вкладке' },
+  { keys: ['recipient_resolved'], label: 'Почта', hint: 'Рабочая почта на сайте, не в стоп-листе — ищем до разбора ИИ; не удалось проверить — очень спорная' },
+  { keys: ['enriched'], label: 'Разбор ИИ', hint: 'Вакансии hh вживую и разбор сайта: B2B, исключения, события' },
+  { keys: ['scored'], label: 'Оценка', hint: 'Похожесть, размер, новости и отчётность ФНС, выбор оффера и оценка 0–100 не ниже порога' },
+  { keys: ['sequence_assembled', 'qa_checked'], label: 'Письма и проверка', hint: 'Письма — от сильных к слабым до заказанного числа, кроме очень спорных; прошли автопроверку' },
+  { keys: ['ready'], label: 'Готово', hint: 'Идут в Excel для Instantly' },
 ];
 
 const MODAL_PAGE = 500;
@@ -45,9 +49,9 @@ function passedDetail(row: RuRow): string {
 
 /**
  * Все строки, отсеянные на данном этапе — постранично, по каждому ключу этапа отдельно.
- * Очень спорные (row_status 'doubtful', pipeline_stage 'qa_checked') не «не прошли» —
- * они ждут ручной проверки, поэтому в обычных этапах их не показываем, а в шаге
- * «Готово» показываем отдельно (запрос по статусу, не по этапу — у них другой pipeline_stage).
+ * Очень спорные (row_status 'doubtful', pipeline_stage 'scored') оценку прошли, но
+ * писем не получают и ждут ручной проверки: в воронке они доходят до «Оценки», поэтому
+ * среди не прошедших их показываем в шаге писем — отдельным запросом по статусу.
  */
 async function loadDropped(jobId: string, keys: Stage[], includeDoubtful: boolean, isCancelled: () => boolean): Promise<RuRow[]> {
   const dropped: RuRow[] = [];
@@ -79,7 +83,8 @@ function StageModal({ jobId, viewIndex, passedCount, onClose }: { jobId: string;
   useEffect(() => {
     let cancelled = false;
     const lastIdx = Math.max(...view.keys.map((k) => STAGES.indexOf(k)));
-    const includeDoubtful = view.keys.includes('ready');
+    // Очень спорные останавливаются перед письмами (см. loadDropped).
+    const includeDoubtful = view.keys.includes('sequence_assembled');
     async function load() {
       const [droppedRows, page] = await Promise.all([
         loadDropped(jobId, view.keys, includeDoubtful, () => cancelled),
@@ -124,7 +129,7 @@ function StageModal({ jobId, viewIndex, passedCount, onClose }: { jobId: string;
                         <span className="text-gray-900">{r.company_brand ?? r.company_name}</span>
                         <span className="ml-2 text-gray-500">
                           {r.row_status === 'doubtful'
-                            ? `очень спорная: ${r.doubt_detail ?? ''}`
+                            ? `очень спорная, писем нет: ${r.doubt_detail ?? ''}`
                             : `${r.reason_code ? REASON_LABELS[r.reason_code] ?? r.reason_code : STATUS_LABELS[r.row_status]}${r.reason_detail ? ` — ${r.reason_detail}` : ''}`}
                         </span>
                       </li>

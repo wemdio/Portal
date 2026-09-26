@@ -1,29 +1,43 @@
 /**
  * Раннер «Нашего автоаутрича» (parser_type='polza_ru_outreach').
  *
- * Поток (RU_OUTREACH_HANDOFF §6): компания из источников → AMO и стоп-лист →
- * сайт и сигналы → тип цепочки → кейс → скоринг → почта → 4 письма → QA → выгрузка.
+ * Поток — дорогое в конце (docs/superpowers/specs/2026-09-26-outreach-to-sender-design.md §2 RU):
+ *  1. бесплатно: AMO по ИНН → домен (в т.ч. сайт работодателя hh) → AMO по
+ *     домену, повторы в запуске, «уже выгружалась»;
+ *  2. почта, тоже бесплатно: поиск на сайте, SMTP-проверка, стоп-лист. Нет
+ *     рабочей почты — отсев до ИИ: разбор компании, которой некуда писать, —
+ *     выброшенные деньги;
+ *  3. дешёвый ИИ: вакансии hh и разбор сайта (кэш 30 дней); затем ползунки,
+ *     ФНС и новости, оффер, оценка, порог;
+ *  4. сомнения — сразу после оценки, все признаки уже известны: очень спорная
+ *     строка (в том числе с непроверенной почтой) писем не получает;
+ *  5. письма и QA — прошедшим, от самых сильных к слабым (pre-LPR rerank CEO),
+ *     пока не набрано заказанное число готовых.
  *
- * Волна идёт в две фазы — это и есть pre-LPR rerank CEO:
- *  1. все кандидаты волны проходят проверки, разбор сайта и скоринг;
- *  2. почту ищем только у прошедших порог, начиная с самых сильных, и
- *     останавливаемся, как только набрано заказанное число готовых компаний.
+ * Волна идёт тремя пулами по очереди: почта (свой параллелизм — обход сайта и
+ * SMTP-проверка больше ждут, чем работают), разбор ИИ, письма.
  *
  * Отсеянная строка остаётся в журнале с этапом, кодом и пояснением — по ним
  * считается воронка. Ошибка одной строки не валит запуск.
  *
  * ИИ — общий клиент аутричей: свой ключ, дешёвая модель разбора и лимит
- * расхода на запуск (docs/superpowers/specs/2026-09-26-outreach-to-sender-design.md §1).
- * Лимит исчерпан — новые строки не начинаются, запуск завершается штатно
- * (stop_reason 'budget'), готовое остаётся. Ключ не работает или модель молчит
- * 10 компаний подряд — запуск сразу failed с понятным текстом, а не сотни
- * строк «ИИ не ответил».
+ * расхода на запуск (спека §1). Лимит исчерпан — новые строки не начинаются,
+ * запуск завершается штатно (stop_reason 'budget'), готовое остаётся. Ключ не
+ * работает или модель молчит 10 компаний подряд — запуск сразу failed с
+ * понятным текстом, а не сотни строк «ИИ не ответил».
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { EmailDomainCache } from '@/lib/outreachEmail/findAndVerify';
+import type { EmailDomainCache, OutreachEmailVerification } from '@/lib/outreachEmail/findAndVerify';
 import { outreachApiKey } from '@/lib/outreachLlm/client';
-import { BudgetExceededError, JobBudget, LlmAuthError, LlmCallError, runWithOutreachContext } from '@/lib/outreachLlm/context';
+import {
+  BudgetExceededError,
+  JobBudget,
+  LlmAuthError,
+  LlmCallError,
+  runWithOutreachContext,
+  type OutreachLlmBudgetSnapshot,
+} from '@/lib/outreachLlm/context';
 import { pruneSiteAnalysisCache } from '@/lib/outreachLlm/siteAnalysisCache';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { analyzeVacancy, findStrictOutboundDuty, isSdrRoleTitle, type VacancyAnalysis } from './analyze';
@@ -40,7 +54,8 @@ import { baseChain, decide, routeCase, routeChain, scoreCompany, splitAutomation
 import { amoLookup, loadAmoIndex, type AmoIndex, type AmoRecord } from './sources/amo';
 import { loadSizeByInn } from './sources/directory';
 import { fetchRevenue, revenueGrowthSignal } from './sources/fnsRevenue';
-import { fetchEmployerSite, fetchVacancyCard } from './sources/hhCard';
+import { fetchEmployerSite, fetchVacancyCard, type HhVacancyCard } from './sources/hhCard';
+import type { HhVacancyRef } from './sources/hhPool';
 import { findNewsSignals } from './sources/news';
 import { analyzeSite, type SiteAnalysis } from './sources/siteSignals';
 import {
@@ -53,8 +68,21 @@ import {
   type Stage,
 } from './types';
 
-const ENRICH_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.POLZA_RU_OUTREACH_CONCURRENCY ?? '4')));
-const EMAIL_CONCURRENCY = 4;
+/** Целое из env в рамках. Пусто или мусор — значение по умолчанию: NaN в пуле дал бы ноль потоков. */
+function envInt(name: string, fallback: number, min: number, max: number): number {
+  const raw = (process.env[name] ?? '').trim();
+  const n = Number(raw);
+  return raw && Number.isFinite(n) ? Math.max(min, Math.min(max, Math.trunc(n))) : fallback;
+}
+
+const ENRICH_CONCURRENCY = envInt('POLZA_RU_OUTREACH_CONCURRENCY', 4, 1, 6);
+// Шаг почты: обход сайта до минуты и SMTP-проверка через прокси — потоки
+// больше ждут, чем работают, и ИИ не тратят. Поэтому свой пул, шире разбора.
+const EMAIL_CONCURRENCY = envInt('POLZA_RU_OUTREACH_EMAIL_CONCURRENCY', 8, 1, 16);
+// Письма собираются без ИИ (кроме необязательной гипотезы сегментов).
+const LETTERS_CONCURRENCY = 4;
+/** Карточек вакансий на компанию: у неё может быть и РОП, и SDR. */
+const MAX_VACANCY_CARDS = 2;
 const MIN_WAVE = 20;
 const MAX_WAVE = 200;
 const BLIND_YIELD_GUESS = 0.08;
@@ -109,6 +137,8 @@ interface Rejection {
  * пула, и на экране она не должна числиться ни в воронке, ни в цепочках.
  */
 interface Tally {
+  /** Строка журнала: по ней дедуп знает, кто занял домен и ИНН. */
+  id: string;
   stages: Stage[];
   sdr: 'strict' | 'broad' | null;
   chain: string | null;
@@ -117,15 +147,40 @@ interface Tally {
   inn: string | null;
 }
 
-/** Всё, что известно о компании после фазы 1. */
-interface Qualified {
+/** Почта строки: адрес с сайта с вердиктом проверки или контакт из AMO («Возврат»). */
+interface RowEmail {
+  email: string;
+  emailType: 'department' | 'generic' | 'person' | null;
+  isRouting: boolean;
+  recipientRole: string | null;
+  sourceUrl: string | null;
+  /** ok / catch_all / unverified — вердикт SMTP-проверки; crm_contact — адрес из AMO, его не проверяем. */
+  verification: OutreachEmailVerification | 'crm_contact';
+}
+
+/** Итог бесплатного шага: компания с доменом и рабочей почтой — вход разбора ИИ. */
+interface Prepared {
   id: string;
   tally: Tally;
   candidate: Candidate;
   domain: string;
   website: string;
+  amo: AmoRecord | null;
+  /** Давний отказ в AMO с записанным разговором — цепочка «Возврат». */
+  reactivation: boolean;
+  email: RowEmail;
+  /** Карточки вакансий, уже скачанные ради сайта работодателя: разбор не качает их второй раз. */
+  cards: Map<string, HhVacancyCard | null>;
+}
+
+/** Всё, что известно о компании после разбора и оценки, — вход писем. */
+interface Qualified {
+  id: string;
+  tally: Tally;
+  domain: string;
   brand: string;
   amo: AmoRecord | null;
+  email: RowEmail;
   site: SiteAnalysis;
   vacancy: VacancyAnalysis | null;
   signals: Signal[];
@@ -133,10 +188,16 @@ interface Qualified {
   caseHit: { record: CaseRecord; reason: string } | null;
   score: Score;
   marketQuote: string | null;
-  revenue: number | null;
-  employees: number | null;
-  b2bQuoted: boolean;
 }
+
+/** «Повтор компании в запуске» и строки, чей домен или ИНН он повторил. */
+interface Duplicate {
+  id: string;
+  tally: Tally;
+  owners: string[];
+}
+
+type SizeIndex = Map<string, { revenue: number | null; employees: number | null }>;
 
 /**
  * Весь запуск идёт внутри контекста ИИ (lib/outreachLlm/context.ts): каждый
@@ -149,21 +210,30 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
     log('error', 'supabaseAdmin not configured');
     return;
   }
-  const budget = new JobBudget(await budgetLimitFor(db, jobId));
+  const budget = await budgetFor(db, jobId);
   await runWithOutreachContext({ lang: 'ru', budget }, () => runJob(db, jobId, budget));
 }
 
 /**
- * Лимит нужен до входа в контекст, поэтому здесь конфиг читается отдельно от
- * runJob. Не прочитался — лимит по умолчанию: runJob прочитает конфиг сам и
- * упадёт с понятной ошибкой, как раньше.
+ * Бюджет нужен до входа в контекст, поэтому конфиг здесь читается отдельно от
+ * runJob. Лимит — из конфига, потраченное — из снимка progress_detail.llm. У
+ * нового запуска снимка нет, счёт с нуля. После падения воркера запуск
+ * возвращается в очередь (recoverRunningParserJobs) и идёт заново, а снимок
+ * остаётся от прерванного прогона: деньги уже потрачены, и без него каждый
+ * перезапуск получал бы лимит целиком ещё раз. Читаем до runJob — первая же
+ * публикация прогресса снимок перезапишет. Снимок обновляется раз в несколько
+ * строк: вызовы, оплаченные перед самым падением, в него могут не попасть.
+ * Не прочитался — лимит по умолчанию: runJob прочитает конфиг сам и упадёт с
+ * понятной ошибкой, как раньше.
  */
-async function budgetLimitFor(db: SupabaseClient, jobId: string): Promise<number> {
+async function budgetFor(db: SupabaseClient, jobId: string): Promise<JobBudget> {
   try {
-    const { data } = await db.from('parser_jobs').select('config').eq('id', jobId).maybeSingle();
-    return sanitizeRuOutreachConfig((data?.config ?? {}) as Partial<RuOutreachConfig>).llm_budget_usd;
+    const { data } = await db.from('parser_jobs').select('config, progress_detail').eq('id', jobId).maybeSingle();
+    const limit = sanitizeRuOutreachConfig((data?.config ?? {}) as Partial<RuOutreachConfig>).llm_budget_usd;
+    const detail = (data?.progress_detail ?? null) as { llm?: Partial<OutreachLlmBudgetSnapshot> } | null;
+    return JobBudget.fromSnapshot(detail?.llm, limit);
   } catch {
-    return sanitizeRuOutreachConfig({}).llm_budget_usd;
+    return new JobBudget(sanitizeRuOutreachConfig({}).llm_budget_usd);
   }
 }
 
@@ -262,15 +332,22 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
     };
     // Отчёт о попадании в SDR (SDR_ENTERPRISE_PROOF_AND_OFFER_ROUTING §3):
     // уникальные компании, а не вакансии — видно, не «пылесосит» ли SDR поток.
+    // Вакансии разбираются после почты, поэтому считаются компании с рабочей почтой.
     const sdr = { any_sales_vacancy: 0, strict_sdr: 0, broad_to_general_queue: 0 };
     const totals = { scanned: 0, ready: 0 };
-    const seenDomains = new Set<string>();
-    const seenInns = new Set<string>();
+    // Дедуп запуска: какая строка заняла домен и какая — ИНН. Строка,
+    // возвращённая в необработанные, их освобождает; повтор помнит, чей домен
+    // или ИНН он повторил (уборка после стопа по лимиту).
+    const domainOwner = new Map<string, string>();
+    const innOwner = new Map<string, string>();
+    const duplicates: Duplicate[] = [];
     // MX и catch-all доменов для SMTP-проверки почты — один кэш на запуск.
     const emailDomainCache: EmailDomainCache = new Map();
     let cursor = 0;
     let waveNo = 0;
     let processed = 0;
+    // Шаг волны, который сейчас идёт, — для progress_stage.
+    let phase = 'finding_emails';
     // Лимит на ИИ исчерпан: новые строки и волны не начинаем, запуск
     // завершится штатно. Строки, которые лимит остановил, уберём из журнала.
     let budgetStop = false;
@@ -284,8 +361,8 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
     // Предохранитель «ИИ молчит»: LLM_FAIL_STREAK компаний подряд отсеяны с
     // «ИИ не ответил», и между ними ни одного удачного ответа — значит, лежат
     // модель или Requesty, и так же упадёт каждая следующая строка. Считаем
-    // только отсевы по ИИ; любой удачный ответ (в том числе на другой строке)
-    // серию обнуляет.
+    // только отсевы по ИИ; любой удачный (целый) ответ — в том числе на другой
+    // строке — серию обнуляет, ответ без обязательных полей — нет (llm.ts).
     let llmFailStreak = 0;
     let llmAnswersSeen = 0;
     const noteLlmFailed = () => {
@@ -317,7 +394,7 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         progress_detail: detail(extra),
       });
     };
-    const newTally = (): Tally => ({ stages: [], sdr: null, chain: null, domain: null, inn: null });
+    const newTally = (id: string): Tally => ({ id, stages: [], sdr: null, chain: null, domain: null, inn: null });
     const reach = (tally: Tally, ...stages: Stage[]) => {
       for (const s of stages) {
         funnel[s] += 1;
@@ -339,8 +416,8 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
       }
       // Домен и ИНН строки освобождаем: иначе такая же компания дальше в
       // запуске отсеялась бы «повтором» строки, которой в журнале уже нет.
-      if (tally.domain) seenDomains.delete(tally.domain);
-      if (tally.inn) seenInns.delete(tally.inn);
+      if (tally.domain && domainOwner.get(tally.domain) === tally.id) domainOwner.delete(tally.domain);
+      if (tally.inn && innOwner.get(tally.inn) === tally.id) innOwner.delete(tally.inn);
       tally.stages = [];
       tally.sdr = null;
       tally.chain = null;
@@ -352,41 +429,162 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
       await updateRow(id, { ...patch, row_status: r.status, pipeline_stage: r.stage, reason_code: r.reason, reason_detail: r.detail ?? null });
     };
 
-    // ── Фаза 1: проверки, сайт, сигналы, цепочка, скоринг ──
-    const qualify = async (
-      id: string,
-      c: Candidate,
-      size: Map<string, { revenue: number | null; employees: number | null }>,
-      tally: Tally,
-    ): Promise<Qualified | null> => {
+    /**
+     * Живая карточка вакансии, если она годится поводом: открыта, с текстом и
+     * свежая. Скачанные карточки строки запоминаем: карточку, взятую ради
+     * сайта работодателя, разбор вакансий второй раз не качает.
+     */
+    const liveCard = async (ref: HhVacancyRef, cards: Map<string, HhVacancyCard | null>): Promise<HhVacancyCard | null> => {
+      if (cards.has(ref.vacancy_id)) return cards.get(ref.vacancy_id) ?? null;
+      const res = await fetchVacancyCard(ref.vacancy_id);
+      let card: HhVacancyCard | null = null;
+      if (res.ok && !res.card.archived && res.card.descriptionText.length >= 200) {
+        const published = res.card.publishedAt ? new Date(res.card.publishedAt).getTime() : NaN;
+        if (!(Number.isFinite(published) && published < Date.now() - config.freshness_days * DAY)) card = res.card;
+      }
+      cards.set(ref.vacancy_id, card);
+      return card;
+    };
+    /** Id работодателя из живой карточки вакансии — у кандидата hh его может не быть. */
+    const employerIdFromCards = async (c: Candidate, cards: Map<string, HhVacancyCard | null>): Promise<string | null> => {
+      for (const ref of c.vacancies.slice(0, MAX_VACANCY_CARDS)) {
+        const card = await liveCard(ref, cards);
+        if (card?.employerId) return card.employerId;
+      }
+      return null;
+    };
+
+    // ── Шаг 1 (бесплатно): AMO, домен, повторы, почта, стоп-лист ──
+    const prepare = async (id: string, c: Candidate, tally: Tally): Promise<Prepared | null> => {
       reach(tally, 'candidates_loaded');
       const amoByInn = c.inn ? amoLookup(amo, null, c.inn) : null;
       if (amoByInn && (amoByInn.status === 'open_deal' || amoByInn.status === 'client')) {
         await finish(id, { stage: 'amo_checked', status: 'rejected', reason: amoByInn.status === 'client' ? 'AMO_CLIENT' : 'AMO_OPEN_DEAL', detail: amoByInn.statusName }, { amo_status: amoByInn.status });
         return null;
       }
+      reach(tally, 'amo_checked');
+
+      // Домен. Сайта нет в источнике — берём сайт работодателя hh: id
+      // работодателя из источника или из живой карточки вакансии (hh API, без ИИ).
+      const cards = new Map<string, HhVacancyCard | null>();
+      let website = c.website;
+      let domain = normalizeDomain(website);
+      if (!domain) {
+        const employerId = c.hhEmployerId ?? (await employerIdFromCards(c, cards));
+        if (employerId) {
+          website = await fetchEmployerSite(employerId);
+          domain = normalizeDomain(website);
+        }
+      }
+      if (!domain) {
+        await finish(id, { stage: 'company_resolved', status: 'rejected', reason: 'DOMAIN_NOT_FOUND' });
+        return null;
+      }
+      const site_url = website && /^https?:\/\//i.test(website) ? website : siteUrl(domain);
+      await updateRow(id, { normalized_domain: domain, company_website: site_url, pipeline_stage: 'company_resolved' });
+
+      // AMO по домену: клиент, открытая сделка, свежий отказ — не пишем.
+      const amoRec = amoLookup(amo, domain, c.inn) ?? c.amo;
+      if (amoRec && amoRec.status !== 'lost' && amoRec.status !== 'none') {
+        const reason = amoRec.status === 'client' ? 'AMO_CLIENT' : amoRec.status === 'open_deal' ? 'AMO_OPEN_DEAL' : 'CRM_RECENT_CONTACT';
+        await finish(id, { stage: 'amo_checked', status: 'rejected', reason, detail: amoRec.statusName }, { amo_status: amoRec.status });
+        return null;
+      }
+      reach(tally, 'company_resolved');
+
+      // Проверка и захват домена/ИНН — без await между ними: параллельные
+      // потоки не займут одну компанию дважды.
+      const owners = [domainOwner.get(domain), c.inn ? innOwner.get(c.inn) : undefined].filter((o): o is string => Boolean(o));
+      if (owners.length) {
+        duplicates.push({ id, tally, owners: Array.from(new Set(owners)) });
+        await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'DUPLICATE_COMPANY' });
+        return null;
+      }
+      domainOwner.set(domain, id);
+      tally.domain = domain;
+      if (c.inn) {
+        innOwner.set(c.inn, id);
+        tally.inn = c.inn;
+      }
+      if (exported.domains.has(domain) || (c.inn && exported.inns.has(c.inn))) {
+        await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'PREVIOUSLY_EXPORTED' });
+        return null;
+      }
+      reach(tally, 'deduplicated');
+
+      // Почта — до ИИ: компания без рабочего адреса не стоит разбора. Возврату
+      // берём контакт из AMO без поиска и проверки — с ним уже был разговор.
+      const reactivation = Boolean(amoRec && amoRec.status === 'lost' && amoRec.priorContact);
+      let email: RowEmail;
+      if (reactivation && amoRec?.contactEmail) {
+        email = { email: amoRec.contactEmail, emailType: 'person', isRouting: false, recipientRole: 'Контакт из AMO', sourceUrl: null, verification: 'crm_contact' };
+      } else {
+        const found = await findRuCompanyEmail(site_url, domain, emailDomainCache);
+        if (!found.email || !found.verification) {
+          // Адреса на сайте есть, но все не прошли проверку, — своя причина:
+          // «почты нет» и «почта мёртвая» — разные выводы об источнике.
+          const invalid = found.verdict === 'invalid';
+          await finish(id, {
+            stage: 'recipient_resolved',
+            status: 'rejected',
+            reason: invalid ? 'EMAIL_INVALID' : 'EMAIL_NOT_FOUND',
+            detail: invalid ? `не прошли проверку: ${found.triedInvalid.join(', ')}`.slice(0, 500) : undefined,
+          });
+          return null;
+        }
+        // «Не удалось проверить» дальше идёт: разбор и оценка нужны, чтобы
+        // человек решил по очень спорной строке, — но писем она не получит.
+        email = {
+          email: found.email,
+          emailType: found.emailType,
+          isRouting: found.isRouting,
+          recipientRole: found.recipientRole,
+          sourceUrl: found.sourceUrl,
+          verification: found.verification,
+        };
+      }
+      if (await isSuppressed(db, email.email)) {
+        await finish(id, { stage: 'recipient_resolved', status: 'rejected', reason: 'SUPPRESSED_CONTACT', detail: email.email });
+        return null;
+      }
+      // Почту и вердикт проверки пишем сразу: строка, отсеянная дальше разбором
+      // или оценкой, показывает в журнале, какой адрес у неё был и чем
+      // кончилась проверка.
+      await updateRow(id, {
+        recipient_email: email.email,
+        email_type: email.emailType,
+        email_verification: email.verification,
+        email_source_url: email.sourceUrl,
+        recipient_role: email.recipientRole,
+        is_routing: email.isRouting,
+        pipeline_stage: 'recipient_resolved',
+      });
+      reach(tally, 'recipient_resolved');
+      return { id, tally, candidate: c, domain, website: site_url, amo: amoRec, reactivation, email, cards };
+    };
+
+    // ── Шаг 2 (дешёвый ИИ): вакансии, сайт, ползунки, ФНС, новости, оффер, оценка, сомнения ──
+    const analyze = async (p: Prepared, size: SizeIndex): Promise<Qualified | null> => {
+      const { id, tally, candidate: c, domain, website: site_url, amo: amoRec, reactivation, email } = p;
 
       // Вакансии hh: живая карточка и цитата функции продаж.
       let vacancy: VacancyAnalysis | null = null;
       const signals: Signal[] = [...c.signals];
-      let employerIdFromCard: string | null = null;
       if (c.vacancies.length) {
         // Смотрим до двух свежих карточек: у компании может быть и РОП, и SDR —
         // строгий SDR-сигнал ищем среди всех, одна компания = одна цепочка.
         let broad: Signal | null = null;
-        for (const ref of c.vacancies.slice(0, 2)) {
-          const res = await fetchVacancyCard(ref.vacancy_id);
-          if (!res.ok || res.card.archived || res.card.descriptionText.length < 200) continue;
-          const published = res.card.publishedAt ? new Date(res.card.publishedAt).getTime() : NaN;
-          if (Number.isFinite(published) && published < Date.now() - config.freshness_days * DAY) continue;
+        for (const ref of c.vacancies.slice(0, MAX_VACANCY_CARDS)) {
+          const card = await liveCard(ref, p.cards);
+          if (!card) continue;
           let analysis: VacancyAnalysis;
           try {
-            analysis = await analyzeVacancy({ title: res.card.title, description: res.card.descriptionText, companyName: c.companyName });
+            analysis = await analyzeVacancy({ title: card.title, description: card.descriptionText, companyName: c.companyName });
           } catch (err) {
-            // ИИ не ответил — отсев с честной причиной (этап проверки вакансий,
-            // как на экране). Лимит, ключ и прочее — выше, в safe().
+            // ИИ не ответил (или ответил без главных полей) — отсев с честной
+            // причиной. Лимит, ключ и прочее — выше, в safe().
             if (!(err instanceof LlmCallError)) throw err;
-            await finish(id, { stage: 'amo_checked', status: 'rejected', reason: 'LLM_FAILED', detail: `разбор вакансии: ${err.message}`.slice(0, 500) });
+            await finish(id, { stage: 'enriched', status: 'rejected', reason: 'LLM_FAILED', detail: `разбор вакансии: ${err.message}`.slice(0, 500) });
             noteLlmFailed();
             return null;
           }
@@ -395,17 +593,16 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
             return null;
           }
           vacancy ??= analysis;
-          if (res.card.employerId && !c.hhEmployerId) employerIdFromCard ??= res.card.employerId;
 
           // Строгий SDR (Максим 23.09, SDR_ENTERPRISE_PROOF_AND_OFFER_ROUTING §3):
           // роль первичного outbound И цитата холодного поиска новых B2B-клиентов.
-          const duty = analysis.sdrQuote ?? findStrictOutboundDuty(`${res.card.title}\n${res.card.descriptionText}`);
-          const sdrTitle = isSdrRoleTitle(res.card.title);
+          const duty = analysis.sdrQuote ?? findStrictOutboundDuty(`${card.title}\n${card.descriptionText}`);
+          const sdrTitle = isSdrRoleTitle(card.title);
           const inboundOnly = analysis.excludedCategory === 'inbound_retail_only' || analysis.excludedCategory === 'b2c_only';
           if (sdrTitle && duty && analysis.isB2b && !inboundOnly) {
             vacancy = analysis;
             signals.push({
-              type: 'sales_hiring', source: 'hh', title: res.card.title, date: res.card.publishedAt, url: res.card.url, quote: duty, level: 'A',
+              type: 'sales_hiring', source: 'hh', title: card.title, date: card.publishedAt, url: card.url, quote: duty, level: 'A',
               meta: { vacancy_count: c.vacancyCount, role_match_rule: 'sdr_title+b2b_outbound_duty', override_reason: 'strict_sdr_signal' },
             });
             broad = null;
@@ -414,7 +611,7 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
           // Обычная вакансия продаж — не повод для SDR-цепочки: компания идёт
           // по остальным поводам. Причину храним для отчёта «сколько ушло в общую очередь».
           broad ??= {
-            type: 'sales_hiring_broad', source: 'hh', title: res.card.title, date: res.card.publishedAt, url: res.card.url, quote: duty ?? null, level: 'C',
+            type: 'sales_hiring_broad', source: 'hh', title: card.title, date: card.publishedAt, url: card.url, quote: duty ?? null, level: 'C',
             meta: {
               sdr_override: false,
               non_sdr_reason: !sdrTitle ? 'title_not_sdr' : !duty ? 'no_b2b_outbound_duty' : inboundOnly ? 'inbound_or_b2c' : 'not_b2b',
@@ -432,47 +629,6 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
           tally.sdr = 'broad';
         }
       }
-      reach(tally, 'amo_checked');
-
-      // Домен.
-      let website = c.website;
-      let domain = normalizeDomain(website);
-      const employerId = c.hhEmployerId ?? employerIdFromCard;
-      if (!domain && employerId) {
-        website = await fetchEmployerSite(employerId);
-        domain = normalizeDomain(website);
-      }
-      if (!domain) {
-        await finish(id, { stage: 'company_resolved', status: 'rejected', reason: 'DOMAIN_NOT_FOUND' }, { signals });
-        return null;
-      }
-      const site_url = website && /^https?:\/\//i.test(website) ? website : siteUrl(domain);
-      await updateRow(id, { normalized_domain: domain, company_website: site_url, pipeline_stage: 'company_resolved' });
-
-      // AMO по домену: клиент, открытая сделка, свежий отказ — не пишем.
-      const amoRec = amoLookup(amo, domain, c.inn) ?? c.amo;
-      if (amoRec && amoRec.status !== 'lost' && amoRec.status !== 'none') {
-        const reason = amoRec.status === 'client' ? 'AMO_CLIENT' : amoRec.status === 'open_deal' ? 'AMO_OPEN_DEAL' : 'CRM_RECENT_CONTACT';
-        await finish(id, { stage: 'amo_checked', status: 'rejected', reason, detail: amoRec.statusName }, { amo_status: amoRec.status });
-        return null;
-      }
-      reach(tally, 'company_resolved');
-
-      if (seenDomains.has(domain) || (c.inn && seenInns.has(c.inn))) {
-        await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'DUPLICATE_COMPANY' });
-        return null;
-      }
-      seenDomains.add(domain);
-      tally.domain = domain;
-      if (c.inn) {
-        seenInns.add(c.inn);
-        tally.inn = c.inn;
-      }
-      if (exported.domains.has(domain) || (c.inn && exported.inns.has(c.inn))) {
-        await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'PREVIOUSLY_EXPORTED' });
-        return null;
-      }
-      reach(tally, 'deduplicated');
 
       // Сайт: один обход, один разбор — или готовый разбор из кэша за 30 дней.
       // Не открылся — SITE_UNREACHABLE. ИИ не ответил — LLM_FAILED: сайт мог
@@ -518,7 +674,6 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
       const known = c.inn ? size.get(c.inn) : undefined;
       let revenue = c.revenue ?? known?.revenue ?? null;
       const employees = c.employees ?? known?.employees ?? null;
-      const reactivation = Boolean(amoRec && amoRec.status === 'lost' && amoRec.priorContact);
 
       // Ползунки размера и похожести режут все источники; неизвестный размер не отсеиваем.
       // Дешёвые отсевы — до платных по времени ФНС и новостей. Реактивацию не режем и не обогащаем.
@@ -608,21 +763,21 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         // SDR-цепочке кейс по отрасли не нужен (Максим 23.09): письмо 2 —
         // механика, балл за доказательство не снимаем.
         hasCase: picked.chain === 'hiring' || Boolean(routeCase(libraries.cases, site.industryGroup, picked.chain)),
-        // Скоринг до поиска почты — оптимистичный: почту ищем только у прошедших.
+        // Почта уже найдена и прошла проверку (или это контакт из AMO) — шаг 1.
         emailFound: true,
       });
       chains[route.chain] = (chains[route.chain] ?? 0) + 1;
       tally.chain = route.chain;
-      const p = route.primary;
+      const primary = route.primary;
       const patch = {
         ...base,
         chain_type: route.chain,
-        signal_type: p?.type ?? null,
-        signal_date: p?.date ?? null,
-        signal_title: p?.title ?? null,
-        source_url: p?.url ?? c.sourceUrls[0] ?? null,
-        evidence_quote: p?.quote ?? null,
-        evidence_level: p ? p.level : 'NONE',
+        signal_type: primary?.type ?? null,
+        signal_date: primary?.date ?? null,
+        signal_title: primary?.title ?? null,
+        source_url: primary?.url ?? c.sourceUrls[0] ?? null,
+        evidence_quote: primary?.quote ?? null,
+        evidence_level: primary ? primary.level : 'NONE',
         generation_mode: route.chain,
         route_reason: route.reason,
         route_runner_up: route.runnerUp,
@@ -637,54 +792,42 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         await finish(id, { stage: 'scored', status: 'rejected', reason: 'SCORE_TOO_LOW', detail: `${score.total}/100` }, patch);
         return null;
       }
-      await updateRow(id, { ...patch, pipeline_stage: 'scored' });
+
+      // Сомнения — до писем: все признаки уже известны. Очень спорная строка
+      // (в том числе с почтой, которую SMTP-проверка не подтвердила) писем не
+      // получает, в Instantly не идёт и места в лимите готовых не занимает —
+      // ищем дальше. Почему она спорная — в doubt_detail и в выгрузке.
+      const doubts = computeDoubts({
+        email: email.email,
+        emailType: email.emailType,
+        emailUnverified: email.verification === 'unverified',
+        score: score.total,
+        writeThreshold: config.write_threshold,
+        chain: baseChain(route),
+        primary: route.primary,
+        b2bQuoted: Boolean(site.b2bQuote || vacancy?.b2bQuote),
+        sourceName: c.companyName,
+        brand,
+        sourceIsDomainOnly: onlyDomainName,
+      });
+      const doubtPatch = { doubt_flags: doubts.flags, doubt_detail: doubts.detail.join('; ') || null };
       reach(tally, 'scored');
-      return {
-        id, tally, candidate: c, domain, website: site_url, brand, amo: amoRec, site, vacancy, signals, route, caseHit, score, marketQuote,
-        revenue, employees, b2bQuoted: Boolean(site.b2bQuote || vacancy?.b2bQuote),
-      };
+      if (doubts.veryDoubtful) {
+        doubtful.count += 1;
+        await updateRow(id, { ...patch, ...doubtPatch, row_status: 'doubtful', pipeline_stage: 'scored', reason_code: null, reason_detail: null });
+        return null;
+      }
+      await updateRow(id, { ...patch, ...doubtPatch, pipeline_stage: 'scored' });
+      return { id, tally, domain, brand, amo: amoRec, email, site, vacancy, signals, route, caseHit, score, marketQuote };
     };
 
-    // ── Фаза 2: почта, письма, QA ──
+    // ── Шаг 3: письма и QA — только прошедшим порог и не очень спорным ──
     const finalize = async (q: Qualified) => {
       if (totals.ready >= target) {
-        await updateRow(q.id, { row_status: 'manual_review', reason_code: 'LIMIT_REACHED', reason_detail: 'лимит готовых компаний уже набран' });
+        await finish(q.id, { stage: 'scored', status: 'manual_review', reason: 'LIMIT_REACHED', detail: 'лимит готовых компаний уже набран' });
         return;
       }
       const prior = baseChain(q.route) === 'reactivation';
-      // Контакт из AMO не ищем и не проверяем — email_verification у него crm_contact.
-      const email = prior && q.amo?.contactEmail
-        ? { email: q.amo.contactEmail, emailType: 'person' as const, isRouting: false, recipientRole: 'Контакт из AMO', sourceUrl: null, verification: 'crm_contact' as const, triedInvalid: [] as string[] }
-        : await findRuCompanyEmail(q.website, q.domain, emailDomainCache);
-      if (!email.email) {
-        // Адреса, не прошедшие SMTP-проверку, пока тоже «почта не найдена»:
-        // своя причина появится, когда поиск почты переедет до разбора ИИ.
-        // Какие адреса отбракованы — в пояснении.
-        await finish(q.id, {
-          stage: 'recipient_resolved',
-          status: 'rejected',
-          reason: 'EMAIL_NOT_FOUND',
-          detail: email.triedInvalid.length ? `не прошли проверку: ${email.triedInvalid.join(', ')}` : undefined,
-        });
-        return;
-      }
-      if (await isSuppressed(db, email.email)) {
-        await finish(q.id, { stage: 'recipient_resolved', status: 'rejected', reason: 'SUPPRESSED_CONTACT', detail: email.email });
-        return;
-      }
-      await updateRow(q.id, {
-        recipient_email: email.email,
-        email_type: email.emailType,
-        // Адрес с сайта — вердикт проверки: ok / catch_all / unverified.
-        // «Не удалось проверить» пока идёт в письма как раньше.
-        email_verification: email.verification,
-        email_source_url: email.sourceUrl,
-        recipient_role: email.recipientRole,
-        is_routing: email.isRouting,
-        pipeline_stage: 'recipient_resolved',
-      });
-      reach(q.tally, 'recipient_resolved');
-
       const chainInput: ChainInput = {
         chain: q.route.chain,
         signal: q.route.primary,
@@ -696,7 +839,7 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
       const letterCtx: LetterContext = {
         brand: q.brand,
         sender,
-        isRouting: email.isRouting,
+        isRouting: q.email.isRouting,
         caseRecord: q.caseHit?.record ?? null,
         claims: libraries.claims.filter((cl) => cl.chain_type === 'all' || cl.chain_type === q.route.chain),
       };
@@ -745,8 +888,9 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         ],
         targetMarket: q.vacancy?.targetMarket ?? null,
         marketQuote: q.marketQuote,
-        recipientEmail: email.email,
+        recipientEmail: q.email.email,
       });
+      // Признаки сомнения записаны на шаге 2 и не меняются: письма их не трогают.
       const base = {
         letters: chain.letters,
         subject_b: chain.subjectB,
@@ -769,32 +913,13 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         return;
       }
       reach(q.tally, 'qa_checked');
-      const doubts = computeDoubts({
-        email: email.email,
-        emailType: email.emailType,
-        score: q.score.total,
-        writeThreshold: config.write_threshold,
-        chain: baseChain(q.route),
-        primary: q.route.primary,
-        b2bQuoted: q.b2bQuoted,
-        sourceName: q.candidate.companyName,
-        brand: q.brand,
-        sourceIsDomainOnly: q.candidate.companyName === q.domain,
-      });
-      const doubtPatch = { doubt_flags: doubts.flags, doubt_detail: doubts.detail.join('; ') || null };
-      // Очень спорная не идёт в Instantly и не занимает место в лимите — ищем дальше.
-      if (doubts.veryDoubtful) {
-        doubtful.count += 1;
-        await updateRow(q.id, { ...base, ...doubtPatch, row_status: 'doubtful', pipeline_stage: 'qa_checked', reason_code: null, reason_detail: null });
-        return;
-      }
       if (totals.ready >= target) {
-        await updateRow(q.id, { ...base, ...doubtPatch, row_status: 'manual_review', pipeline_stage: 'qa_checked', reason_code: 'LIMIT_REACHED', reason_detail: 'лимит готовых компаний уже набран' });
+        await finish(q.id, { stage: 'qa_checked', status: 'manual_review', reason: 'LIMIT_REACHED', detail: 'лимит готовых компаний уже набран' }, base);
         return;
       }
       totals.ready += 1;
       reach(q.tally, 'ready');
-      await updateRow(q.id, { ...base, ...doubtPatch, row_status: 'ready', pipeline_stage: 'ready', reason_code: null, reason_detail: null });
+      await updateRow(q.id, { ...base, row_status: 'ready', pipeline_stage: 'ready', reason_code: null, reason_detail: null });
     };
 
     const safe = async (id: string, tally: Tally, fn: () => Promise<void>) => {
@@ -819,14 +944,51 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         reasons.PROCESSING_ERROR = (reasons.PROCESSING_ERROR ?? 0) + 1;
         await updateRow(id, { row_status: 'failed', reason_code: 'PROCESSING_ERROR', reason_detail: err instanceof Error ? err.message.slice(0, 500) : String(err) });
       } finally {
+        // Шаг строки, а не строка: строка, дошедшая до писем, считается трижды —
+        // счётчик нужен только для частоты публикаций.
         processed += 1;
         // Запуск уже падает — прогресс не публикуем, итог запишет обработчик сбоя.
-        if (!halted && processed % 5 === 0) await publish('processing');
+        if (!halted && processed % 5 === 0) await publish(phase);
+      }
+    };
+
+    /**
+     * Стоп по лимиту убрал из журнала необработанные строки. «Повтор компании
+     * в запуске», чья строка-оригинал среди них, остался бы повтором записи,
+     * которой в журнале нет, — а повторный запуск возьмёт компанию заново.
+     * Такие повторы убираем вместе с ней; повтор, у которого жив хоть один
+     * оригинал (по домену или ИНН), остаётся.
+     */
+    const dropOrphanDuplicates = async (droppedIds: ReadonlySet<string>) => {
+      const orphans = duplicates.filter((d) => d.owners.every((o) => droppedIds.has(o)));
+      for (let i = 0; i < orphans.length; i += DB_CHUNK) {
+        const chunk = orphans.slice(i, i + DB_CHUNK);
+        const { data, error } = await db
+          .from('polza_ru_outreach_companies')
+          .delete()
+          .eq('job_id', jobId)
+          .eq('reason_code', 'DUPLICATE_COMPANY')
+          .in('id', chunk.map((d) => d.id))
+          .select('id');
+        if (error) {
+          log('warn', `job ${jobId}: orphan duplicates cleanup failed`, error);
+          continue;
+        }
+        const gone = new Set((data ?? []).map((r) => String(r.id)));
+        for (const d of chunk) {
+          if (!gone.has(d.id)) continue;
+          untally(d.tally);
+          const left = (reasons.DUPLICATE_COMPANY ?? 0) - 1;
+          if (left > 0) reasons.DUPLICATE_COMPANY = left;
+          else delete reasons.DUPLICATE_COMPANY;
+          totals.scanned = Math.max(0, totals.scanned - 1);
+        }
       }
     };
 
     while (totals.ready < target && totals.scanned < maxScan && cursor < pool.length) {
-      // Лимит на ИИ исчерпан — новую волну не начинаем: каждой её строке нужен разбор.
+      // Лимит на ИИ исчерпан — новую волну не начинаем: её строкам нужен разбор.
+      // Внутри волны шаг почты ИИ не тратит, поэтому лимит в нём не кончается.
       if (stopForBudget()) break;
       await ensureNotCancelled();
       waveNo += 1;
@@ -860,30 +1022,53 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         for (const r of data ?? []) ids.push(String(r.id));
       }
       totals.scanned += wave.length;
-      const size = await loadSizeByInn(db, wave.map((c) => c.inn).filter((x): x is string => Boolean(x)));
-      await publish('enriching', { wave_size: wave.length });
+      const size: SizeIndex = await loadSizeByInn(db, wave.map((c) => c.inn).filter((x): x is string => Boolean(x)));
+      phase = 'finding_emails';
+      await publish(phase, { wave_size: wave.length });
       log('info', `wave ${waveNo}: ${wave.length} candidates (ready ${totals.ready}/${target})`);
 
-      const qualified: Qualified[] = [];
-      await runPool(wave.map((c, i) => ({ c, id: ids[i] })).filter((x) => x.id), ENRICH_CONCURRENCY, async ({ c, id }) => {
-        // Лимит на ИИ исчерпан — строку не начинаем: она останется необработанной
-        // и в конце уйдёт из журнала, как будто её не брали из пула.
-        if (halted || stopForBudget()) return;
+      // Шаг 1: бесплатные проверки и почта — у всей волны.
+      const prepared: Prepared[] = [];
+      await runPool(wave.map((c, i) => ({ c, id: ids[i] })).filter((x) => x.id), EMAIL_CONCURRENCY, async ({ c, id }) => {
+        if (halted) return;
         await ensureNotCancelled();
-        const tally = newTally();
+        const tally = newTally(id);
         await safe(id, tally, async () => {
-          const q = await qualify(id, c, size, tally);
+          const p = await prepare(id, c, tally);
+          if (p) prepared.push(p);
+        });
+      });
+
+      // Шаг 2: разбор ИИ — только у компаний с рабочей почтой.
+      const qualified: Qualified[] = [];
+      phase = 'enriching';
+      await publish(phase, { with_email: prepared.length });
+      await runPool(prepared, ENRICH_CONCURRENCY, async (p) => {
+        if (halted) return;
+        if (stopForBudget()) {
+          // Лимит на ИИ исчерпан — разбор не начинаем. Почту строка прошла, но
+          // этот шаг бесплатный, а без разбора она ни отсеяна, ни готова:
+          // возвращаем в необработанные, как строку, которую лимит прервал
+          // (в конце уйдёт из журнала, повторный запуск возьмёт её заново) —
+          // вклад в воронку вычитаем, домен и ИНН освобождаем.
+          untally(p.tally);
+          return;
+        }
+        await ensureNotCancelled();
+        await safe(p.id, p.tally, async () => {
+          const q = await analyze(p, size);
           if (q) qualified.push(q);
         });
       });
 
-      // Pre-LPR rerank: почту ищем от самых сильных к слабым.
-      // Лимит здесь не проверяем: почта и письма бесплатны, а необязательную
+      // Шаг 3: письма — pre-LPR rerank, от самых сильных к слабым.
+      // Лимит здесь не проверяем: письма бесплатны, а необязательную
       // гипотезу сегментов после лимита просто пропускаем — уже оплаченный
       // разбор доводим до готовых.
       qualified.sort((a, b) => b.score.total - a.score.total);
-      await publish('finding_emails', { qualified: qualified.length });
-      await runPool(qualified, EMAIL_CONCURRENCY, async (q) => {
+      phase = 'writing_letters';
+      await publish(phase, { qualified: qualified.length });
+      await runPool(qualified, LETTERS_CONCURRENCY, async (q) => {
         if (halted) return;
         await ensureNotCancelled();
         await safe(q.id, q.tally, () => finalize(q));
@@ -894,9 +1079,10 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
     await ensureNotCancelled();
     if (budgetStop) {
       // Строки, до которых из-за лимита не дошли или которые он прервал, — не
-      // отсев и не ошибка. Убираем их из журнала: воронка и «просмотрено»
-      // считают только то, что действительно разобрали. Повторный запуск
-      // возьмёт эти компании заново.
+      // отсев и не ошибка. Среди них и прошедшие почту, но не успевшие к
+      // разбору ИИ: почта бесплатна и готовой строку не делает. Убираем их из
+      // журнала: воронка и «просмотрено» считают только то, что действительно
+      // разобрали. Повторный запуск возьмёт эти компании заново.
       const { data: dropped, error: dropErr } = await db
         .from('polza_ru_outreach_companies')
         .delete()
@@ -904,7 +1090,11 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         .eq('row_status', 'processing')
         .select('id');
       if (dropErr) log('warn', `job ${jobId}: unprocessed rows cleanup failed`, dropErr);
-      else totals.scanned = Math.max(0, totals.scanned - (dropped?.length ?? 0));
+      else {
+        const droppedIds = new Set((dropped ?? []).map((r) => String(r.id)));
+        totals.scanned = Math.max(0, totals.scanned - droppedIds.size);
+        await dropOrphanDuplicates(droppedIds);
+      }
     }
 
     const stopReason = totals.ready >= target

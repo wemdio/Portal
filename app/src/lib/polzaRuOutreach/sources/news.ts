@@ -88,7 +88,9 @@ export async function findNewsSignals(brand: string, freshnessDays: number): Pro
   if (!items.length) return [];
 
   const user = [`КОМПАНИЯ: ${brand}`, '', ...items.map((it, i) => `${i + 1}. ${it.title}`)].join('\n');
-  const raw = await callJson(SYSTEM, user, 'news', 400);
+  // Без массива items ответ — сбой модели, а не «новостей о компании нет»:
+  // считается сбоем источника (предохранитель новостей) и серию «ИИ молчит» не обнуляет.
+  const raw = await callJson(SYSTEM, user, 'news', 400, (r) => Array.isArray(r.items));
   const verdicts = Array.isArray(raw.items) ? (raw.items as Array<Record<string, unknown>>) : [];
   const out: Signal[] = [];
   for (const v of verdicts) {

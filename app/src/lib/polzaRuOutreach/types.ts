@@ -155,15 +155,20 @@ export function sanitizeRuOutreachConfig(raw: Partial<RuOutreachConfig>): RuOutr
 
 export type RowStatus = 'processing' | 'ready' | 'rejected' | 'manual_review' | 'failed' | 'doubtful';
 
-/** Этапы конвейера (поле pipeline_stage). Порядок = порядок воронки. */
+/**
+ * Этапы конвейера (поле pipeline_stage). Порядок = порядок воронки и порядок
+ * шагов раннера: воронку (results/route.ts) считают по индексу этапа строки.
+ * С 26.09.2026 почта — до разбора ИИ (дорогое в конце): компанию без рабочей
+ * почты не разбираем и за неё не платим.
+ */
 export const STAGES = [
   'candidates_loaded',
   'amo_checked',
   'company_resolved',
   'deduplicated',
+  'recipient_resolved',
   'enriched',
   'scored',
-  'recipient_resolved',
   'sequence_assembled',
   'qa_checked',
   'ready',
@@ -175,9 +180,9 @@ export const STAGE_LABELS: Record<Stage, string> = {
   amo_checked: 'Проверка AMO',
   company_resolved: 'Компания и домен',
   deduplicated: 'Без повторов',
-  enriched: 'Сайт и сигналы',
-  scored: 'Прошли скоринг',
   recipient_resolved: 'Найдена почта',
+  enriched: 'Вакансии, сайт и сигналы',
+  scored: 'Прошли скоринг',
   sequence_assembled: 'Цепочка собрана',
   qa_checked: 'Прошли QA',
   ready: 'Готово',
@@ -202,6 +207,7 @@ export const REASON_LABELS: Record<string, string> = {
   TA_TOO_LOW: 'Мало похожа на клиента Polza (ниже ползунка)',
   SIZE_OUT_OF_RANGE: 'Размер компании вне заданных рамок',
   EMAIL_NOT_FOUND: 'Не найдена корпоративная почта',
+  EMAIL_INVALID: 'Почта на сайте не прошла проверку',
   SUPPRESSED_CONTACT: 'Почта в стоп-листе',
   SENDER_MISSING: 'Нет активной подписи отправителя',
   QA_FACT_UNSUPPORTED: 'QA: неподтверждённый факт',
@@ -211,18 +217,24 @@ export const REASON_LABELS: Record<string, string> = {
   LIMIT_REACHED: 'Лимит готовых компаний уже набран',
 };
 
-/** Признаки сомнения готовой строки: один — «спорная», два и больше — «очень спорная». */
-export const DOUBT_CODES = ['GENERIC_MAILBOX', 'NEAR_THRESHOLD', 'WEAK_SIGNAL', 'COMPANY_DOUBT'] as const;
+/**
+ * Признаки сомнения строки, прошедшей порог: один — «спорная», два и больше —
+ * «очень спорная». EMAIL_UNVERIFIED («почта не проверена») — сразу «очень
+ * спорная», сколько бы ни было прочих: письмо на адрес, который SMTP-проверка
+ * не подтвердила, может не дойти, а выгрузка уходит в Instantly.
+ */
+export const DOUBT_CODES = ['EMAIL_UNVERIFIED', 'GENERIC_MAILBOX', 'NEAR_THRESHOLD', 'WEAK_SIGNAL', 'COMPANY_DOUBT'] as const;
 export type DoubtCode = (typeof DOUBT_CODES)[number];
 
 export const DOUBT_LABELS: Record<DoubtCode, string> = {
+  EMAIL_UNVERIFIED: 'Почта не проверена',
   GENERIC_MAILBOX: 'Общая почта',
   NEAR_THRESHOLD: 'Оценка у порога',
   WEAK_SIGNAL: 'Слабый повод',
   COMPANY_DOUBT: 'Сомнения в компании',
 };
 
-/** С какого числа признаков строка уходит во вкладку «Очень спорные». */
+/** С какого числа признаков строка уходит во вкладку «Очень спорные» (и писем не получает). */
 export const VERY_DOUBTFUL_FROM = 2;
 
 export type EvidenceLevel = 'A' | 'B' | 'C' | 'NONE';

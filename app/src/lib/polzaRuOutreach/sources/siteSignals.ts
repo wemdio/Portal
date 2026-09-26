@@ -23,7 +23,7 @@ import { outreachModel } from '@/lib/outreachLlm/client';
 import { readSiteAnalysisCache, writeSiteAnalysisCache, type SiteAnalysisCacheKey } from '@/lib/outreachLlm/siteAnalysisCache';
 import { normalizeDomain } from '../company';
 import { acceptQuote, htmlToText } from '../evidence';
-import { asBool, asString, callJson } from '../llm';
+import { asBool, asString, callJson, isBoolLike } from '../llm';
 import { INDUSTRY_GROUPS, type IndustryGroup, type Signal, type SignalType } from '../types';
 
 const PAGE_TIMEOUT_MS = 12_000;
@@ -188,14 +188,15 @@ export const SITE_PROMPT_VERSION = `ru-site:${SITE_PARSER_VERSION}:${createHash(
 
 /**
  * Ответ без главных полей (балл ЦА числом, B2B да/нет) — не разбор, а сбой
- * модели: строка пойдёт дальше с нулями, но такой ответ не кэшируем, иначе
- * компания 30 дней отсеивалась бы по пустому разбору.
+ * модели. callJson бросает на нём LlmCallError: строка уходит в «ИИ не
+ * ответил» и в серию предохранителя, а не отсеивается молча по нулевому баллу
+ * как «мало похожа на клиента»; в кэш такой ответ не попадает, иначе компания
+ * 30 дней отсеивалась бы по пустому разбору.
  */
 function hasCoreFields(raw: Record<string, unknown>): boolean {
   const ta = raw.ta_score;
   const taValid = (typeof ta === 'number' && Number.isFinite(ta)) || (typeof ta === 'string' && ta.trim() !== '' && Number.isFinite(Number(ta)));
-  const b2b = raw.is_b2b;
-  return taValid && (typeof b2b === 'boolean' || b2b === 'true' || b2b === 'false');
+  return taValid && isBoolLike(raw.is_b2b);
 }
 
 /** Разбор из кэша — только целый и открывшийся: битая запись — промах, а не падение строки. */
@@ -208,8 +209,9 @@ function siteFromCache(raw: unknown): SiteAnalysis | null {
 
 /**
  * Разбор сайта компании. Сайт не открылся — EMPTY_SITE (reachable: false).
- * ИИ не ответил — ошибка клиента аутричей летит наверх как есть: раннер
- * отличает «сайт не открылся» от «ИИ не ответил» и от исчерпанного лимита.
+ * ИИ не ответил или ответил без главных полей — LlmCallError летит наверх как
+ * есть: раннер отличает «сайт не открылся» от «ИИ не ответил» и от
+ * исчерпанного лимита.
  */
 export async function analyzeSite(website: string, domain: string | null = normalizeDomain(website)): Promise<SiteAnalysis> {
   const cacheKey: SiteAnalysisCacheKey | null = domain
@@ -225,7 +227,7 @@ export async function analyzeSite(website: string, domain: string | null = norma
   const hasAdPixel = homeHtml ? detectSignals(homeHtml).some((s) => s.category === 'ad_pixel') : false;
 
   const user = pages.map((p) => `=== СТРАНИЦА ${p.url} ===\n${p.text.slice(0, PAGE_TEXT_CHARS)}`).join('\n\n');
-  const raw = await callJson(SYSTEM, user, 'site', 1600);
+  const raw = await callJson(SYSTEM, user, 'site', 1600, hasCoreFields);
 
   const allText = pages.map((p) => p.text).join('\n');
   const pageByUrl = new Map(pages.map((p) => [p.url.replace(/\/+$/, ''), p]));
@@ -265,10 +267,9 @@ export async function analyzeSite(website: string, domain: string | null = norma
     hasAdPixel,
     facts,
   };
-  // В кэш — только разобранный ИИ сайт с целым ответом. Неоткрывшийся не
-  // запоминаем: завтра он может открыться. Свежесть событий раннер сверяет по
-  // датам при чтении.
-  if (cacheKey && hasCoreFields(raw)) await writeSiteAnalysisCache(cacheKey, analysis);
-  else if (cacheKey) console.warn(`[polza-ru-outreach][WARN] site analysis for ${cacheKey.domain} lacks ta_score/is_b2b — not cached`);
+  // В кэш — только разобранный ИИ сайт; ответ без главных полей сюда не
+  // доходит (callJson бросил). Неоткрывшийся не запоминаем: завтра он может
+  // открыться. Свежесть событий раннер сверяет по датам при чтении.
+  if (cacheKey) await writeSiteAnalysisCache(cacheKey, analysis);
   return analysis;
 }

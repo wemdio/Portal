@@ -172,7 +172,7 @@ export function PolzaRuOutreachView() {
         <div className="rounded-xl border border-gray-200 bg-white p-8 text-center shadow-sm">
           <div className="text-base font-semibold text-gray-900">Запусков ещё не было</div>
           <p className="mx-auto mt-1 max-w-xl text-sm text-gray-500">
-            Система соберёт компании по свежим поводам, отберёт по скорингу, найдёт почту и напишет цепочку писем. Письма не отправляются — на
+            Система соберёт компании по свежим поводам, найдёт и проверит почту, отберёт по скорингу и напишет цепочку писем. Письма не отправляются — на
             выходе таблица и Excel.
           </p>
           <button

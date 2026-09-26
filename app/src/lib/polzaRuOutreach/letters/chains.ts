@@ -471,11 +471,14 @@ export async function buildSegmentsHypothesis(input: {
   productSummary: string | null;
   marketQuote: string;
 }): Promise<SegmentsHypothesis | null> {
+  // Без массива segments ответ — сбой модели: LlmCallError (раннер пишет письма
+  // без гипотезы), и серию «ИИ молчит» такой ответ не обнуляет.
   const raw = await callJson(
     SEGMENTS_SYSTEM,
     [`КОМПАНИЯ: ${input.brand}`, `ЧТО ПРОДАЁТ: ${input.productSummary ?? 'не указано'}`, `ПОДТВЕРЖДЁННЫЙ РЫНОК (цитата): «${input.marketQuote}»`].join('\n'),
     'segments',
     400,
+    (r) => Array.isArray(r.segments),
   );
   const clean = (items: string[], maxWords: number) =>
     items

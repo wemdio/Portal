@@ -64,6 +64,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     if (row.reason_code) reasonCounts[row.reason_code] = (reasonCounts[row.reason_code] ?? 0) + 1;
     const idx = STAGES.indexOf((row.pipeline_stage ?? 'candidates_loaded') as Stage);
     // Отсеянная на этапе X строка дошла до этапа X-1; прошедшая этап — до X.
+    // Очень спорная прошла свой этап (оценку, pipeline_stage 'scored') — писем ей
+    // не пишут, поэтому дальше она не считается.
     const reached =
       row.row_status === 'ready' ? STAGES.length - 1 : row.row_status === 'processing' || row.row_status === 'doubtful' ? idx : idx - 1;
     for (let i = 0; i <= Math.max(0, reached); i += 1) funnel[STAGES[i]] += 1;

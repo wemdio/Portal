@@ -15,7 +15,7 @@
  */
 
 import { acceptQuote } from './evidence';
-import { asBool, asString, callJson } from './llm';
+import { asBool, asString, callJson, isBoolLike } from './llm';
 
 const MAX_DESCRIPTION_CHARS = 7000;
 
@@ -47,6 +47,17 @@ const SYSTEM = `Ты разбираешь вакансию российской 
 - «Активные продажи», «развитие региона», «построение отдела продаж» — НЕ холодный поиск новых B2B-клиентов.
 - Не угадывай: пустая строка лучше догадки.`;
 
+/**
+ * Главное поле разбора вакансии — is_b2b: у цитат и категории есть законное
+ * «пусто» (""), а продаёт ли компания организациям, модель обязана решить в
+ * любом ответе. Без него ответ — сбой модели (пустой объект, чужая схема):
+ * callJson бросает LlmCallError, а не выдаёт «не B2B, без SDR» по умолчанию.
+ */
+function hasCoreFields(raw: Record<string, unknown>): boolean {
+  return isBoolLike(raw.is_b2b);
+}
+
+/** Ответ без is_b2b — LlmCallError («ИИ не ответил»), см. hasCoreFields. */
 export async function analyzeVacancy(input: {
   title: string;
   description: string;
@@ -60,7 +71,7 @@ export async function analyzeVacancy(input: {
     'ТЕКСТ ВАКАНСИИ:',
     input.description.slice(0, MAX_DESCRIPTION_CHARS),
   ].join('\n');
-  const raw = await callJson(SYSTEM, user, 'vacancy');
+  const raw = await callJson(SYSTEM, user, 'vacancy', undefined, hasCoreFields);
 
   const marketQuote = acceptQuote(source, asString(raw.market_quote));
   const excluded = asString(raw.excluded_category);

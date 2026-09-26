@@ -16,16 +16,31 @@
  */
 
 import { callOutreachJson } from '@/lib/outreachLlm/client';
-import { BudgetExceededError, currentOutreachContext, LlmAuthError, type OutreachLlmContext } from '@/lib/outreachLlm/context';
+import { BudgetExceededError, currentOutreachContext, LlmAuthError, LlmCallError, type OutreachLlmContext } from '@/lib/outreachLlm/context';
 
 /**
  * Удачные ответы ИИ по запускам; ключ — объект контекста запуска, он один на
  * весь прогон. Раннеру — для предохранителя «ИИ молчит»: серию отсевов «ИИ не
  * ответил» обнуляет любой удачный ответ, а ответ из кэша разбора — нет.
+ * Удачный — целый: ответ без обязательных полей не считается.
  */
 const answersByRun = new WeakMap<OutreachLlmContext, number>();
 
-export async function callJson(system: string, user: string, title: string, maxTokens = 1200): Promise<Record<string, unknown>> {
+/**
+ * isComplete — есть ли в ответе поля, без которых разбор не разбор (у сайта —
+ * балл ЦА числом и B2B да/нет). Нет их — это сбой модели, а не ответ «ничего не
+ * найдено»: бросаем LlmCallError, строка уходит в «ИИ не ответил» и в серию
+ * предохранителя, а не идёт дальше с нулями по умолчанию. Такой ответ оплачен
+ * (клиент уже списал его с лимита), но серию «ИИ молчит» не обнуляет — иначе
+ * модель, которая отвечает пустым объектом, предохранитель не заметил бы.
+ */
+export async function callJson(
+  system: string,
+  user: string,
+  title: string,
+  maxTokens = 1200,
+  isComplete?: (raw: Record<string, unknown>) => boolean,
+): Promise<Record<string, unknown>> {
   const ctx = currentOutreachContext();
   const result = await callOutreachJson({
     role: 'analysis',
@@ -35,8 +50,16 @@ export async function callJson(system: string, user: string, title: string, maxT
     maxTokens,
     lang: ctx?.lang ?? 'ru',
   });
+  if (isComplete && !isComplete(result)) {
+    throw new LlmCallError(`RU analysis «${title}»: в ответе нет обязательных полей`);
+  }
   if (ctx) answersByRun.set(ctx, (answersByRun.get(ctx) ?? 0) + 1);
   return result;
+}
+
+/** Да/нет из JSON-ответа: булево или строка "true"/"false" (как принимает asBool). */
+export function isBoolLike(value: unknown): boolean {
+  return typeof value === 'boolean' || value === 'true' || value === 'false';
 }
 
 /** Сколько вызовов ИИ ответило в текущем запуске; вне запуска — 0. */
