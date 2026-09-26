@@ -11,6 +11,7 @@ import {
   type CampaignStepInput,
   type ImportRecipientsResult,
 } from '@/lib/sender/campaignOps';
+import { fillPoolFromFolder } from '@/lib/sender/folders';
 import { normalizeRecipientEmail, type RecipientInput } from '@/lib/sender/recipientImport';
 import type { CampaignSourceKind } from '@/lib/sender/types';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -536,45 +537,15 @@ export async function uploadJobToSender(input: UploadJobInput): Promise<UploadJo
 // ── Запуск ──────────────────────────────────────────────────────────────────
 
 /**
- * Рассылка без ящиков берёт ящики папки в момент запуска: папка — это «какие
- * ящики у автоаутрича», и выбрать их после заливки естественнее, чем чинить
- * пул каждой рассылки. Непустой пул не трогаем — его могли поправить руками
- * в «Рассылке». Пока в папке нет ни одного рабочего ящика, пул не заполняем
- * вовсе: иначе он стал бы непустым из непроверенных ящиков, и выбор рабочих
- * в папке эту рассылку уже не спас бы.
- */
-async function ensurePool(source: OutreachSource, campaignId: string): Promise<number> {
-  const { count, error } = await db()
-    .from('sender_campaign_mailboxes')
-    .select('mailbox_id', { count: 'exact', head: true })
-    .eq('campaign_id', campaignId);
-  if (error) throw new SenderOpError(error.message, 500);
-  if (count) return 0;
-
-  const folder = await loadFolder(source);
-  const { ids, working } = await folderMailboxes(folder);
-  if (!ids.length) throw new SenderOpError(`Выберите ящики в настройках папки “${folder.name}”`, 422);
-  if (!working) {
-    throw new SenderOpError(
-      `В папке “${folder.name}” нет проверенных ящиков: письма уходят только с ящиков, которые прошли проверку входа и отмечены галочкой — выберите такие в настройках папки`,
-      422,
-    );
-  }
-  const { error: poolError } = await db()
-    .from('sender_campaign_mailboxes')
-    .upsert(
-      ids.map((mailboxId) => ({ campaign_id: campaignId, mailbox_id: mailboxId })),
-      { onConflict: 'campaign_id,mailbox_id', ignoreDuplicates: true },
-    );
-  if (poolError) throw new SenderOpError(poolError.message, 500);
-  return ids.length;
-}
-
-/**
  * «Запустить рассылку» с экрана запуска: только рассылку, созданную этим
  * запуском. Рассылку, в которую запуск лишь долил компании, запускают там,
  * где её создали, — иначе кнопка одного запуска запускала бы чужую базу.
  * Проверки самого запуска (получатели, ящики, шаги) — campaignOps.startCampaign.
+ *
+ * Рассылка без ящиков перед запуском берёт ящики своей папки —
+ * sender/folders.fillPoolFromFolder, то же правило, что у кнопки «Запустить»
+ * в «Рассылке»: заполняется только пустой пул и только если в папке есть
+ * рабочий ящик, иначе — «Выберите ящики в настройках папки …».
  */
 export async function startJobCampaign(input: {
   lang: OutreachLang;
@@ -604,7 +575,7 @@ export async function startJobCampaign(input: {
   }
 
   const campaignId = String(campaign.id);
-  const mailboxesAdded = await ensurePool(source, campaignId);
+  const mailboxesAdded = await fillPoolFromFolder(campaignId);
   await startCampaign(campaignId);
   return { campaignId, mailboxesAdded };
 }

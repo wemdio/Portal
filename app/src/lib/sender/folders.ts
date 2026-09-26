@@ -377,7 +377,8 @@ export async function updateFolder(
  * Непустой пул не трогаем — его могли поправить руками. Пока в папке нет ни
  * одного рабочего ящика, пул не заполняем вовсе: иначе он стал бы непустым из
  * непроверенных ящиков, и выбор рабочих в папке эту рассылку уже не спас бы.
- * Те же правила — у запуска с экрана аутрича (lib/outreachSender/upload.ts).
+ * Функция одна на обе кнопки: запуск с экрана аутрича
+ * (lib/outreachSender/upload.ts) зовёт её же.
  */
 export async function fillPoolFromFolder(campaignId: string): Promise<number> {
   // Кривой id — не наша забота: «Кампания не найдена» скажет startCampaign.
