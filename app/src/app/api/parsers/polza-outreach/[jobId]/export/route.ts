@@ -126,6 +126,7 @@ const REASON_RU: Record<string, string> = {
   size_11_50: 'размер 11–50',
   size_out_of_range: 'размер вне 3–200',
   site_unreachable: 'сайт не открылся',
+  llm_failed: 'ИИ не ответил (сбой модели или ключа)',
   not_b2b: 'не B2B',
   no_trigger: 'нет повода написать',
   low_score: 'Lead Score ниже порога',

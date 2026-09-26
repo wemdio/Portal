@@ -5,6 +5,7 @@ import { Play, X } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch } from '@/lib/authFetch';
 import type { PolzaOutreachCompanyRow, PolzaOutreachConfig, PolzaOutreachFunnel, PolzaOutreachParserJob } from '@/types';
+import type { OutreachLlmBudgetSnapshot } from '@/lib/outreachLlm/types';
 import { PolzaOutreachLaunchPanel } from '@/components/parsers/PolzaOutreachLaunchPanel';
 import { PolzaOutreachResults } from '@/components/parsers/PolzaOutreachResults';
 import { JobRail, type JobRailItem } from '@/components/ui/JobRail';
@@ -104,6 +105,21 @@ function fmtJobDate(value: string): string {
     : d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
+/**
+ * Расход на ИИ и причина остановки из progress_detail запуска. Поле — jsonb
+ * без схемы (у старых запусков его нет вовсе), поэтому форму проверяем здесь,
+ * а не верим типу.
+ */
+function runSummary(job: PolzaOutreachParserJob | null): { llm: OutreachLlmBudgetSnapshot | null; stopReason: string | null } {
+  const detail = job?.progress_detail as Record<string, unknown> | null | undefined;
+  const llm = detail?.llm as Partial<OutreachLlmBudgetSnapshot> | null | undefined;
+  const valid = typeof llm?.spent_usd === 'number' && typeof llm?.limit_usd === 'number' && typeof llm?.calls === 'number';
+  return {
+    llm: valid ? (llm as OutreachLlmBudgetSnapshot) : null,
+    stopReason: typeof detail?.stop_reason === 'string' ? detail.stop_reason : null,
+  };
+}
+
 function csvCell(value: unknown) {
   const text = String(value ?? '').replaceAll('\r', ' ').replaceAll('\n', ' ').replaceAll('\t', ' ');
   return `"${text.replaceAll('"', '""')}"`;
@@ -201,6 +217,7 @@ export function PolzaOutreachView() {
   const [deleteCandidate, setDeleteCandidate] = useState<string | null>(null);
 
   const activeJob = useMemo(() => jobs.find((job) => job.id === activeJobId) ?? null, [activeJobId, jobs]);
+  const activeSummary = useMemo(() => runSummary(activeJob), [activeJob]);
 
   const railItems = useMemo<JobRailItem[]>(
     () =>
@@ -577,6 +594,8 @@ export function PolzaOutreachView() {
           loading={resultsLoading}
           jobStatus={activeJob?.status ?? null}
           jobError={activeJob?.error_message ?? null}
+          llmSpend={activeSummary.llm}
+          stopReason={activeSummary.stopReason}
           loadAllRows={activeJobId ? loadAllRows : undefined}
           currentPage={resultsPage}
           totalPages={totalPages}

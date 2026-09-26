@@ -7,20 +7,21 @@
  * поле очищается, confidence понижается до low. У модели нет возможности
  * выдумать доказательство.
  *
- * Модель — дешёвая (уровень bulk), температура 0, одна вакансия на вызов,
- * один ретрай. Ключ OPENROUTER_PERSONALIZATION_API_KEY (общий с другими фичами).
+ * Одна вакансия на вызов. Транспорт, ключ, модель, повторы и учёт денег —
+ * общий клиент аутричей (lib/outreachLlm): свой ключ POLZA_EN_OUTREACH_API_KEY
+ * (раньше ключ был общий с другими фичами портала), дешёвая модель разбора,
+ * температура 0, повтор при сбое сети и битом JSON, списание с лимита запуска.
+ * Язык задан явно: и вне контекста запуска вызов не уйдёт на русский ключ.
+ *
+ * Ошибки клиента летят наверх как есть: раннер отличает «ИИ не ответил»
+ * (LlmCallError — отсев строки) от исчерпанного лимита и неверного ключа
+ * (про весь запуск).
  */
 
-import { callOpenRouterChat } from '@/lib/openrouter/client';
+import { callOutreachJson } from '@/lib/outreachLlm/client';
 import type { PolzaOutreachGeoConfidence, PolzaVacancyAnalysis } from './types';
 
-const OPENROUTER_PERSONALIZATION_API_KEY =
-  process.env.OPENROUTER_PERSONALIZATION_API_KEY || process.env.OPENROUTER_BRIEF_API_KEY || '';
-
-export const POLZA_OUTREACH_MODEL = process.env.POLZA_OUTREACH_MODEL || 'openai/gpt-4o-mini';
-
 const MAX_DESCRIPTION_CHARS = 6000;
-const MAX_RETRIES = 2;
 
 // Признаки outbound-мандата (спека §4.3) — независимый от модели пруф:
 // если цитата LLM не подтвердилась, mandate можно оставить только если
@@ -97,16 +98,8 @@ function asConfidence(value: unknown): PolzaOutreachGeoConfidence {
   return value === 'high' || value === 'medium' ? value : 'low';
 }
 
-function parseAnalysis(content: string): PolzaVacancyAnalysis | null {
-  const text = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-  const jsonSlice = text.startsWith('{') ? text : (text.match(/\{[\s\S]*\}/)?.[0] ?? '');
-  if (!jsonSlice) return null;
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(jsonSlice) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
+/** Ответ модели уже разобран клиентом аутричей в объект — здесь только приводим поля к типам. */
+function analysisFrom(parsed: Record<string, unknown>): PolzaVacancyAnalysis {
   return {
     outbound_mandate: asBool(parsed.outbound_mandate),
     outbound_evidence: asString(parsed.outbound_evidence).slice(0, 200),
@@ -176,34 +169,13 @@ export async function analyzeVacancy(input: {
   companyName: string;
   countryCode: string;
 }): Promise<PolzaVacancyAnalysis> {
-  if (!OPENROUTER_PERSONALIZATION_API_KEY) {
-    throw new Error('OPENROUTER_PERSONALIZATION_API_KEY is not configured');
-  }
-
-  const messages = [
-    { role: 'system' as const, content: SYSTEM_PROMPT },
-    { role: 'user' as const, content: buildUserPrompt(input) },
-  ];
-  const jobText = `${input.jobTitle}\n${input.vacancyDescription}`;
-
-  let lastError: Error | null = null;
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt += 1) {
-    try {
-      const content = await callOpenRouterChat({
-        apiKey: OPENROUTER_PERSONALIZATION_API_KEY,
-        model: POLZA_OUTREACH_MODEL,
-        messages,
-        temperature: 0,
-        maxTokens: 900,
-        responseFormat: { type: 'json_object' },
-        title: 'Portal - Polza Outreach S4',
-      });
-      const parsed = parseAnalysis(content);
-      if (parsed) return applyEvidenceRules(parsed, jobText);
-      lastError = new Error('LLM returned unparseable JSON');
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-    }
-  }
-  throw lastError ?? new Error('analyzeVacancy failed');
+  const raw = await callOutreachJson({
+    role: 'analysis',
+    lang: 'en',
+    system: SYSTEM_PROMPT,
+    user: buildUserPrompt(input),
+    title: 'vacancy',
+    maxTokens: 900,
+  });
+  return applyEvidenceRules(analysisFrom(raw), `${input.jobTitle}\n${input.vacancyDescription}`);
 }

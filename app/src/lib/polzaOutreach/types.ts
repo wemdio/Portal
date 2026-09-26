@@ -56,6 +56,32 @@ export interface PolzaOutreachConfig {
   max_employees: number;
   /** Lead Score: ≥write — write now, ниже — skip (ручной проверки нет). */
   write_threshold: number;
+  /**
+   * Лимит расхода на ИИ за запуск, $. Дошли до него — запуск завершается
+   * штатно (stop_reason 'budget'), готовое остаётся.
+   */
+  llm_budget_usd: number;
+}
+
+/**
+ * Лимит на ИИ по умолчанию и его рамки. Константы здесь, а не в
+ * lib/outreachLlm: форма запуска — клиентский компонент, а клиент аутричей
+ * серверный (ключи из env, node:async_hooks).
+ */
+export const POLZA_OUTREACH_DEFAULT_LLM_BUDGET_USD = 10;
+export const POLZA_OUTREACH_MIN_LLM_BUDGET_USD = 1;
+export const POLZA_OUTREACH_MAX_LLM_BUDGET_USD = 100;
+
+/**
+ * Деньги — с точностью до цента: $2.5 — осмысленный лимит, в отличие от 2,5
+ * компании. Пустое значение — «не задано» (запуск до появления поля), а не 0:
+ * Number(null) дал бы 0 и молча срезал лимит до минимума.
+ */
+function clampUsd(value: unknown, fallback: number, min: number, max: number): number {
+  if (value === null || value === undefined || value === '') return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(n * 100) / 100));
 }
 
 /** Санитизация конфига задачи: один и тот же код в API-роуте и в раннере. */
@@ -97,6 +123,12 @@ export function sanitizePolzaOutreachConfig(raw: Partial<PolzaOutreachConfig>): 
     min_employees: minEmployees,
     max_employees: Math.max(minEmployees, clamp(raw.max_employees, 200, 1, 100_000)),
     write_threshold: write,
+    llm_budget_usd: clampUsd(
+      raw.llm_budget_usd,
+      POLZA_OUTREACH_DEFAULT_LLM_BUDGET_USD,
+      POLZA_OUTREACH_MIN_LLM_BUDGET_USD,
+      POLZA_OUTREACH_MAX_LLM_BUDGET_USD,
+    ),
   };
 }
 

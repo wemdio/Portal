@@ -3,7 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown, ChevronRight, Loader2, Play } from 'lucide-react';
 import type { PolzaOutreachConfig } from '@/types';
-import { POLZA_OUTREACH_DEFAULT_COUNTRIES } from '@/lib/polzaOutreach/types';
+import {
+  POLZA_OUTREACH_DEFAULT_COUNTRIES,
+  POLZA_OUTREACH_DEFAULT_LLM_BUDGET_USD,
+  POLZA_OUTREACH_MAX_LLM_BUDGET_USD,
+  POLZA_OUTREACH_MIN_LLM_BUDGET_USD,
+} from '@/lib/polzaOutreach/types';
 import { SidePanel } from '@/components/ui/SidePanel';
 
 type Props = {
@@ -55,8 +60,8 @@ const sectionCls = 'mb-3 text-xs font-semibold uppercase tracking-wide text-gray
  *
  * Раньше висела раскрытым блоком над списком запусков и занимала первый экран
  * целиком, хотя её трогают раз в запуск. Часто меняемое — гео, сколько
- * компаний, свежесть и источники — осталось наверху; батч YC, размер компании
- * и порог Lead Score убраны в «Тонкую настройку».
+ * компаний, свежесть, лимит на ИИ и источники — осталось наверху; батч YC,
+ * размер компании и порог Lead Score убраны в «Тонкую настройку».
  */
 export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Props) {
   const [countries, setCountries] = useState<string[]>(initial?.countries ?? [...POLZA_OUTREACH_DEFAULT_COUNTRIES]);
@@ -68,6 +73,7 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
   const [minEmp, setMinEmp] = useState(String(initial?.min_employees ?? 3));
   const [maxEmp, setMaxEmp] = useState(String(initial?.max_employees ?? 200));
   const [writeT, setWriteT] = useState(String(initial?.write_threshold ?? 75));
+  const [budgetUsd, setBudgetUsd] = useState<number>(initial?.llm_budget_usd ?? POLZA_OUTREACH_DEFAULT_LLM_BUDGET_USD);
   const [advanced, setAdvanced] = useState(false);
   const geoRef = useRef<HTMLDivElement>(null);
 
@@ -107,10 +113,15 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
       min_employees: Number(minEmp) || 3,
       max_employees: Number(maxEmp) || 200,
       write_threshold: Number(writeT) || 75,
+      llm_budget_usd: budgetUsd,
     };
-  }, [countries, days, limit, sources, ycFrom, minEmp, maxEmp, writeT]);
+  }, [countries, days, limit, sources, ycFrom, minEmp, maxEmp, writeT, budgetUsd]);
 
-  const canStart = countries.length > 0 && sources.length > 0;
+  // Пустое поле или 0 сервер молча поднял бы до минимума — лучше не пускать запуск.
+  const budgetValid =
+    Number.isFinite(budgetUsd) && budgetUsd >= POLZA_OUTREACH_MIN_LLM_BUDGET_USD && budgetUsd <= POLZA_OUTREACH_MAX_LLM_BUDGET_USD;
+  const hasScope = countries.length > 0 && sources.length > 0;
+  const canStart = hasScope && budgetValid;
   const submit = () => {
     if (busy || !canStart) return;
     void onStart(config);
@@ -126,7 +137,11 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
       footer={
         <div className="flex items-center justify-between gap-3">
           <span className="text-xs text-gray-500">
-            {!canStart ? 'Нужны хотя бы одна страна и один источник' : `${countries.length} стран · ${sources.length} источника`}
+            {!hasScope
+              ? 'Нужны хотя бы одна страна и один источник'
+              : !budgetValid
+                ? `Лимит на ИИ — от $${POLZA_OUTREACH_MIN_LLM_BUDGET_USD} до $${POLZA_OUTREACH_MAX_LLM_BUDGET_USD}`
+                : `${countries.length} стран · ${sources.length} источника`}
           </span>
           <span className="flex gap-2">
             <button type="button" onClick={onClose} className="rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100">
@@ -242,6 +257,25 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
               ))}
             </div>
           </div>
+
+          <label className="block">
+            <span className={labelCls}>Лимит на ИИ, $</span>
+            <input
+              type="number"
+              min={POLZA_OUTREACH_MIN_LLM_BUDGET_USD}
+              max={POLZA_OUTREACH_MAX_LLM_BUDGET_USD}
+              step={0.5}
+              value={Number.isFinite(budgetUsd) ? budgetUsd : ''}
+              onChange={(e) => setBudgetUsd(e.target.value === '' ? NaN : Number(e.target.value))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') submit();
+              }}
+              className={inputCls}
+            />
+            <span className="mt-1 block text-xs text-gray-500">
+              Разбор сайтов и вакансий. Дойдёт до лимита — запуск остановится, готовое сохранится.
+            </span>
+          </label>
         </div>
 
         <div className="mt-4">

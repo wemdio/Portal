@@ -294,6 +294,8 @@ export interface PolzaOutreachConfig {
   min_employees?: number;
   max_employees?: number;
   write_threshold?: number;
+  /** Лимит на ИИ за запуск, $ (1–100); у запусков до 26.09.2026 его нет. */
+  llm_budget_usd?: number;
 }
 
 export interface PolzaOutreachParserJob {

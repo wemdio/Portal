@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { logAudit, logError } from '@/lib/loggerServer';
+import { outreachApiKey } from '@/lib/outreachLlm/client';
 import { sanitizePolzaOutreachConfig, type PolzaOutreachConfig } from '@/lib/polzaOutreach/types';
 
 export const dynamic = 'force-dynamic';
@@ -57,6 +58,10 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({ jobs: data ?? [] });
 }
 
+/**
+ * Запуск аутрича. Лимит на ИИ (llm_budget_usd) проходит ту же санитизацию,
+ * что и остальной конфиг.
+ */
 export async function POST(req: NextRequest) {
   const auth = await getSupabase(req);
   if ('error' in auth) return auth.error;
@@ -64,6 +69,14 @@ export async function POST(req: NextRequest) {
   const { supabase, user } = auth;
   const requestId = req.headers.get('x-request-id') ?? crypto.randomUUID();
   const logMeta = { userId: user.id, requestId, route: req.nextUrl.pathname };
+
+  // Без своего ключа запуск упал бы в воркере на первой же компании — говорим
+  // сразу, запуск не создаём.
+  if (!outreachApiKey('en')) {
+    return jsonError('Не задан ключ ИИ для английского автоаутрича (POLZA_EN_OUTREACH_API_KEY в .env сервера)', 400, {
+      request_id: requestId,
+    });
+  }
 
   let raw: Partial<PolzaOutreachConfig>;
   try {

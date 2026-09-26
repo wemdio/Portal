@@ -2,6 +2,7 @@
 
 import { Fragment, useState } from 'react';
 import type { PolzaOutreachCompanyRow, PolzaOutreachFunnel, ParserJobStatus } from '@/types';
+import type { OutreachLlmBudgetSnapshot } from '@/lib/outreachLlm/types';
 import { POLZA_STAGE_LABELS, PolzaOutreachStages } from '@/components/parsers/PolzaOutreachStages';
 import { PolzaOutreachStageModal } from '@/components/parsers/PolzaOutreachStageModal';
 import { ChevronDown, ChevronRight, Download, ExternalLink, FileText, Filter, Loader2, Mail, Square, Trash2 } from 'lucide-react';
@@ -15,6 +16,10 @@ type Props = {
   jobStatus: ParserJobStatus | null;
   /** Текст ошибки запуска — показываем у этапа, на котором встали. */
   jobError?: string | null;
+  /** Расход на ИИ за запуск (progress_detail.llm); у запусков до 26.09.2026 его нет. */
+  llmSpend?: OutreachLlmBudgetSnapshot | null;
+  /** Почему запуск закончился (progress_detail.stop_reason); budget — кончился лимит на ИИ. */
+  stopReason?: string | null;
   /** Строки всего прогона — для разбора этапа. */
   loadAllRows?: () => Promise<PolzaOutreachCompanyRow[]>;
   currentPage: number;
@@ -52,6 +57,7 @@ const EXCLUSION_LABELS: Record<string, string> = {
   duplicate_domain: 'дубль домена',
   no_outbound_mandate: 'нет outbound-мандата',
   site_unreachable: 'сайт не открылся',
+  llm_failed: 'ИИ не ответил (сбой модели или ключа)',
   not_b2b: 'не B2B',
   no_trigger: 'нет повода написать',
   low_score: 'Lead Score ниже порога',
@@ -75,6 +81,13 @@ const REVIEW_LABELS: Record<string, string> = {
 
 function reviewLabel(reason: string): string {
   return REVIEW_LABELS[reason] ?? reason;
+}
+
+/** Доллары для строки расхода на ИИ: доли цента дешёвой модели не прячем в «$0.00». */
+function fmtUsd(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '$0';
+  if (value < 0.01) return '<$0.01';
+  return `$${Number.isInteger(value) ? value : value.toFixed(2)}`;
 }
 
 const CONFIDENCE_STYLES: Record<string, string> = {
@@ -234,6 +247,8 @@ export function PolzaOutreachResults({
   loading,
   jobStatus,
   jobError,
+  llmSpend,
+  stopReason,
   loadAllRows,
   currentPage,
   totalPages,
@@ -269,6 +284,17 @@ export function PolzaOutreachResults({
           error={jobError}
           onOpenStage={loadAllRows ? setOpenStage : undefined}
         />
+      ) : null}
+
+      {jobStatus && llmSpend ? (
+        <div className="px-1 text-sm text-gray-500" title={`Вызовов ИИ: ${llmSpend.calls}`}>
+          ИИ: потрачено {fmtUsd(llmSpend.spent_usd)} из {fmtUsd(llmSpend.limit_usd)}
+        </div>
+      ) : null}
+      {jobStatus && stopReason === 'budget' ? (
+        <div className="rounded-lg bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
+          Остановлен: достигнут лимит на ИИ. Готовые компании сохранены — чтобы добрать остальные, повторите запуск с большим лимитом.
+        </div>
       ) : null}
 
       {openStage !== null && loadAllRows ? (
