@@ -11,8 +11,18 @@
  *
  * Отсеянная строка остаётся в журнале с этапом, кодом и пояснением — по ним
  * считается воронка. Ошибка одной строки не валит запуск.
+ *
+ * ИИ — общий клиент аутричей: свой ключ, дешёвая модель разбора и лимит
+ * расхода на запуск (docs/superpowers/specs/2026-09-26-outreach-to-sender-design.md §1).
+ * Лимит исчерпан — новые строки не начинаются, запуск завершается штатно
+ * (stop_reason 'budget'), готовое остаётся. Ключ не работает — запуск сразу
+ * failed с понятным текстом, а не сотни строк «ИИ не ответил».
  */
 
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { outreachApiKey } from '@/lib/outreachLlm/client';
+import { BudgetExceededError, JobBudget, LlmAuthError, LlmCallError, runWithOutreachContext } from '@/lib/outreachLlm/context';
+import { pruneSiteAnalysisCache } from '@/lib/outreachLlm/siteAnalysisCache';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { analyzeVacancy, findStrictOutboundDuty, isSdrRoleTitle, type VacancyAnalysis } from './analyze';
 import { collectCandidates, type Candidate } from './collect';
@@ -22,6 +32,7 @@ import { findRuCompanyEmail } from './findEmail';
 import { buildChain, buildSegmentsHypothesis, openingSentence, type ChainInput } from './letters/chains';
 import type { LetterContext } from './letters/common';
 import { loadLibraries, type CaseRecord } from './libraries';
+import { isFatalLlmError } from './llm';
 import { runQa } from './qa';
 import { baseChain, decide, routeCase, routeChain, scoreCompany, splitAutomation, type Route, type Score } from './router';
 import { amoLookup, loadAmoIndex, type AmoIndex, type AmoRecord } from './sources/amo';
@@ -29,7 +40,7 @@ import { loadSizeByInn } from './sources/directory';
 import { fetchRevenue, revenueGrowthSignal } from './sources/fnsRevenue';
 import { fetchEmployerSite, fetchVacancyCard } from './sources/hhCard';
 import { findNewsSignals } from './sources/news';
-import { analyzeSite, EMPTY_SITE, type SiteAnalysis } from './sources/siteSignals';
+import { analyzeSite, type SiteAnalysis } from './sources/siteSignals';
 import {
   sanitizeRuOutreachConfig,
   STAGES,
@@ -86,9 +97,21 @@ interface Rejection {
   detail?: string;
 }
 
+/**
+ * Вклад строки в счётчики запуска: этапы воронки, отчёт SDR, цепочка. Строку,
+ * которую остановил лимит на ИИ, вычитаем обратно — её как будто не брали из
+ * пула, и на экране она не должна числиться ни в воронке, ни в цепочках.
+ */
+interface Tally {
+  stages: Stage[];
+  sdr: 'strict' | 'broad' | null;
+  chain: string | null;
+}
+
 /** Всё, что известно о компании после фазы 1. */
 interface Qualified {
   id: string;
+  tally: Tally;
   candidate: Candidate;
   domain: string;
   website: string;
@@ -106,13 +129,36 @@ interface Qualified {
   b2bQuoted: boolean;
 }
 
+/**
+ * Весь запуск идёт внутри контекста ИИ (lib/outreachLlm/context.ts): каждый
+ * вызов разбора знает язык и списывает деньги с лимита именно этого запуска —
+ * воркер одновременно ведёт и английский аутрич.
+ */
 export async function runRuOutreachJob(jobId: string): Promise<void> {
   const db = supabaseAdmin;
   if (!db) {
     log('error', 'supabaseAdmin not configured');
     return;
   }
+  const budget = new JobBudget(await budgetLimitFor(db, jobId));
+  await runWithOutreachContext({ lang: 'ru', budget }, () => runJob(db, jobId, budget));
+}
 
+/**
+ * Лимит нужен до входа в контекст, поэтому здесь конфиг читается отдельно от
+ * runJob. Не прочитался — лимит по умолчанию: runJob прочитает конфиг сам и
+ * упадёт с понятной ошибкой, как раньше.
+ */
+async function budgetLimitFor(db: SupabaseClient, jobId: string): Promise<number> {
+  try {
+    const { data } = await db.from('parser_jobs').select('config').eq('id', jobId).maybeSingle();
+    return sanitizeRuOutreachConfig((data?.config ?? {}) as Partial<RuOutreachConfig>).llm_budget_usd;
+  } catch {
+    return sanitizeRuOutreachConfig({}).llm_budget_usd;
+  }
+}
+
+async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Promise<void> {
   const setProgress = async (patch: Record<string, unknown>) => {
     const { error } = await db.from('parser_jobs').update(patch).eq('id', jobId);
     if (error) log('warn', `progress update failed for ${jobId}`, error);
@@ -128,6 +174,9 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
       .eq('id', id);
     if (error) log('warn', `row update failed (${id})`, error);
   };
+  // Прогресс «как сейчас» — для сбоя и остановки: к нему дописывается итог
+  // расходов на ИИ. Появляется, когда запуск дошёл до обработки строк.
+  let currentDetail: (() => Record<string, unknown>) | null = null;
 
   try {
     const { data: job, error: jobErr } = await db.from('parser_jobs').select('config').eq('id', jobId).single();
@@ -135,6 +184,11 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
     const config: RuOutreachConfig = sanitizeRuOutreachConfig((job.config ?? {}) as Partial<RuOutreachConfig>);
     const target = config.limit;
     const maxScan = maxCandidatesFor(target);
+    // Роут не создаёт запуск без ключа, но окружение воркера — отдельное. Без
+    // ключа ни одна компания не пройдёт разбор: падаем до сбора источников.
+    if (!outreachApiKey('ru')) {
+      throw new LlmAuthError('Не задан ключ ИИ для RU автоаутрича (POLZA_RU_OUTREACH_API_KEY) в окружении воркера', 'missing_key');
+    }
 
     await setProgress({
       status: 'running',
@@ -147,6 +201,8 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
     });
     // Повтор после падения воркера — с чистого журнала, иначе дубли в воронке.
     await db.from('polza_ru_outreach_companies').delete().eq('job_id', jobId);
+    // Устаревшие разборы сайтов читатель не берёт — чистим, чтобы кэш не рос без конца.
+    await pruneSiteAnalysisCache('ru');
 
     const libraries = await loadLibraries(db, config.sender_id);
     if (!libraries.sender) throw new Error('Нет активной подписи отправителя — добавьте её во вкладке «Библиотеки»');
@@ -173,6 +229,10 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         enrichFails[code] = 0;
         return res;
       } catch (err) {
+        // Лимит на ИИ и неверный ключ — не сбой источника: предохранитель их не
+        // считает и не глотает, иначе строка молча ушла бы дальше без новостей,
+        // а запуск продолжил бы тратить или падать построчно.
+        if (isFatalLlmError(err)) throw err;
         const msg = err instanceof Error ? err.message : String(err);
         log('warn', `${what} failed`, msg);
         enrichFails[code] += 1;
@@ -193,18 +253,54 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
     let cursor = 0;
     let waveNo = 0;
     let processed = 0;
+    // Лимит на ИИ исчерпан: новые строки и волны не начинаем, запуск
+    // завершится штатно. Строки, которые лимит остановил, уберём из журнала.
+    let budgetStop = false;
+    const stopForBudget = (): boolean => {
+      if (budget.exhausted()) budgetStop = true;
+      return budgetStop;
+    };
+    // Ключ ИИ отвергнут: запуск уже падает — остальным потокам новых строк не брать.
+    let halted = false;
 
+    // llm — снимок расходов: экран пишет «ИИ: потрачено $X из $Y».
+    const detail = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+      wave: waveNo, target, pool: pool.length, scanned: totals.scanned, ready: totals.ready, funnel, reasons, chains, sdr,
+      offer_version: libraries.offerVersion, source_errors: sourceErrors, doubtful: doubtful.count, llm: budget.snapshot(), ...extra,
+    });
+    currentDetail = () => detail();
     const publish = async (stage: string, extra: Record<string, unknown> = {}) => {
       await setProgress({
         progress_stage: stage,
         progress_percent: Math.min(97, 3 + Math.round(94 * Math.max(totals.ready / target, Math.min(1, totals.scanned / maxScan)))),
         total_found: totals.scanned,
         total_parsed: totals.ready,
-        progress_detail: { wave: waveNo, target, pool: pool.length, scanned: totals.scanned, ready: totals.ready, funnel, reasons, chains, sdr, offer_version: libraries.offerVersion, source_errors: sourceErrors, doubtful: doubtful.count, ...extra },
+        progress_detail: detail(extra),
       });
     };
-    const reach = (...stages: Stage[]) => {
-      for (const s of stages) funnel[s] += 1;
+    const newTally = (): Tally => ({ stages: [], sdr: null, chain: null });
+    const reach = (tally: Tally, ...stages: Stage[]) => {
+      for (const s of stages) {
+        funnel[s] += 1;
+        tally.stages.push(s);
+      }
+    };
+    /** Строка возвращается в необработанные: её вклад в счётчики вычитаем. */
+    const untally = (tally: Tally) => {
+      for (const s of tally.stages) funnel[s] -= 1;
+      if (tally.sdr) {
+        sdr.any_sales_vacancy -= 1;
+        if (tally.sdr === 'strict') sdr.strict_sdr -= 1;
+        else sdr.broad_to_general_queue -= 1;
+      }
+      if (tally.chain) {
+        const left = (chains[tally.chain] ?? 0) - 1;
+        if (left > 0) chains[tally.chain] = left;
+        else delete chains[tally.chain];
+      }
+      tally.stages = [];
+      tally.sdr = null;
+      tally.chain = null;
     };
     const finish = async (id: string, r: Rejection, patch: Record<string, unknown> = {}) => {
       reasons[r.reason] = (reasons[r.reason] ?? 0) + 1;
@@ -212,8 +308,13 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
     };
 
     // ── Фаза 1: проверки, сайт, сигналы, цепочка, скоринг ──
-    const qualify = async (id: string, c: Candidate, size: Map<string, { revenue: number | null; employees: number | null }>): Promise<Qualified | null> => {
-      reach('candidates_loaded');
+    const qualify = async (
+      id: string,
+      c: Candidate,
+      size: Map<string, { revenue: number | null; employees: number | null }>,
+      tally: Tally,
+    ): Promise<Qualified | null> => {
+      reach(tally, 'candidates_loaded');
       const amoByInn = c.inn ? amoLookup(amo, null, c.inn) : null;
       if (amoByInn && (amoByInn.status === 'open_deal' || amoByInn.status === 'client')) {
         await finish(id, { stage: 'amo_checked', status: 'rejected', reason: amoByInn.status === 'client' ? 'AMO_CLIENT' : 'AMO_OPEN_DEAL', detail: amoByInn.statusName }, { amo_status: amoByInn.status });
@@ -233,7 +334,16 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
           if (!res.ok || res.card.archived || res.card.descriptionText.length < 200) continue;
           const published = res.card.publishedAt ? new Date(res.card.publishedAt).getTime() : NaN;
           if (Number.isFinite(published) && published < Date.now() - config.freshness_days * DAY) continue;
-          const analysis = await analyzeVacancy({ title: res.card.title, description: res.card.descriptionText, companyName: c.companyName });
+          let analysis: VacancyAnalysis;
+          try {
+            analysis = await analyzeVacancy({ title: res.card.title, description: res.card.descriptionText, companyName: c.companyName });
+          } catch (err) {
+            // ИИ не ответил — отсев с честной причиной (этап проверки вакансий,
+            // как на экране). Лимит, ключ и прочее — выше, в safe().
+            if (!(err instanceof LlmCallError)) throw err;
+            await finish(id, { stage: 'amo_checked', status: 'rejected', reason: 'LLM_FAILED', detail: `разбор вакансии: ${err.message}`.slice(0, 500) });
+            return null;
+          }
           if (analysis.excludedCategory === 'recruitment_agency' || analysis.excludedCategory === 'leadgen_competitor') {
             await finish(id, { stage: 'enriched', status: 'rejected', reason: 'EXCLUDED_CATEGORY', detail: analysis.excludedCategory });
             return null;
@@ -269,12 +379,14 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         if (signals.some((s) => s.type === 'sales_hiring')) {
           sdr.any_sales_vacancy += 1;
           sdr.strict_sdr += 1;
+          tally.sdr = 'strict';
         } else if (broad) {
           sdr.any_sales_vacancy += 1;
           sdr.broad_to_general_queue += 1;
+          tally.sdr = 'broad';
         }
       }
-      reach('amo_checked');
+      reach(tally, 'amo_checked');
 
       // Домен.
       let website = c.website;
@@ -298,7 +410,7 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         await finish(id, { stage: 'amo_checked', status: 'rejected', reason, detail: amoRec.statusName }, { amo_status: amoRec.status });
         return null;
       }
-      reach('company_resolved');
+      reach(tally, 'company_resolved');
 
       if (seenDomains.has(domain) || (c.inn && seenInns.has(c.inn))) {
         await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'DUPLICATE_COMPANY' });
@@ -310,13 +422,21 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         await finish(id, { stage: 'deduplicated', status: 'rejected', reason: 'PREVIOUSLY_EXPORTED' });
         return null;
       }
-      reach('deduplicated');
+      reach(tally, 'deduplicated');
 
-      // Сайт: один обход, один разбор.
-      const site = await analyzeSite(site_url).catch((err) => {
-        log('warn', `site analysis failed for ${domain}`, err instanceof Error ? err.message : err);
-        return EMPTY_SITE;
-      });
+      // Сайт: один обход, один разбор — или готовый разбор из кэша за 30 дней.
+      // Не открылся — SITE_UNREACHABLE. ИИ не ответил — LLM_FAILED: сайт мог
+      // быть в порядке, и прятать сбой ИИ под «сайт не открылся» нельзя.
+      // Лимит, ключ и ошибки кода — выше, в safe().
+      let site: SiteAnalysis;
+      try {
+        site = await analyzeSite(site_url, domain);
+      } catch (err) {
+        if (!(err instanceof LlmCallError)) throw err;
+        log('warn', `site analysis LLM failed for ${domain}`, err.message);
+        await finish(id, { stage: 'enriched', status: 'rejected', reason: 'LLM_FAILED', detail: `разбор сайта: ${err.message}`.slice(0, 500) }, { signals });
+        return null;
+      }
       if (!site.reachable) {
         await finish(id, { stage: 'enriched', status: 'rejected', reason: 'SITE_UNREACHABLE', detail: site_url }, { signals });
         return null;
@@ -342,7 +462,7 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         await finish(id, { stage: 'enriched', status: 'rejected', reason: 'COMPANY_AMBIGUOUS' }, { signals });
         return null;
       }
-      reach('enriched');
+      reach(tally, 'enriched');
 
       const known = c.inn ? size.get(c.inn) : undefined;
       let revenue = c.revenue ?? known?.revenue ?? null;
@@ -441,6 +561,7 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         emailFound: true,
       });
       chains[route.chain] = (chains[route.chain] ?? 0) + 1;
+      tally.chain = route.chain;
       const p = route.primary;
       const patch = {
         ...base,
@@ -466,9 +587,9 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         return null;
       }
       await updateRow(id, { ...patch, pipeline_stage: 'scored' });
-      reach('scored');
+      reach(tally, 'scored');
       return {
-        id, candidate: c, domain, website: site_url, brand, amo: amoRec, site, vacancy, signals, route, caseHit, score, marketQuote,
+        id, tally, candidate: c, domain, website: site_url, brand, amo: amoRec, site, vacancy, signals, route, caseHit, score, marketQuote,
         revenue, employees, b2bQuoted: Boolean(site.b2bQuote || vacancy?.b2bQuote),
       };
     };
@@ -500,7 +621,7 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         is_routing: email.isRouting,
         pipeline_stage: 'recipient_resolved',
       });
-      reach('recipient_resolved');
+      reach(q.tally, 'recipient_resolved');
 
       const chainInput: ChainInput = {
         chain: q.route.chain,
@@ -517,11 +638,16 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         caseRecord: q.caseHit?.record ?? null,
         claims: libraries.claims.filter((cl) => cl.chain_type === 'all' || cl.chain_type === q.route.chain),
       };
+      // Гипотеза необязательна: без неё письмо 3 — кейс или механика. Но лимит
+      // на ИИ и неверный ключ — не про эту строку, их отдаём в safe().
       const hypothesis = !q.caseHit && q.marketQuote && q.route.chain !== 'automation'
-        ? await buildSegmentsHypothesis({ brand: q.brand, productSummary: q.site.productSummary, marketQuote: q.marketQuote }).catch(() => null)
+        ? await buildSegmentsHypothesis({ brand: q.brand, productSummary: q.site.productSummary, marketQuote: q.marketQuote }).catch((err: unknown) => {
+            if (isFatalLlmError(err)) throw err;
+            return null;
+          })
         : null;
       const chain = buildChain(letterCtx, chainInput, hypothesis);
-      reach('sequence_assembled');
+      reach(q.tally, 'sequence_assembled');
 
       const opening = openingSentence(chainInput, q.brand);
       const usedClaims = libraries.claims.filter((cl) => chain.claimIds.includes(cl.id));
@@ -564,7 +690,7 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         await finish(q.id, { stage: 'qa_checked', status: 'manual_review', reason, detail: qa.flags.join('; ') }, base);
         return;
       }
-      reach('qa_checked');
+      reach(q.tally, 'qa_checked');
       const doubts = computeDoubts({
         email: email.email,
         emailType: email.emailType,
@@ -589,15 +715,28 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
         return;
       }
       totals.ready += 1;
-      reach('ready');
+      reach(q.tally, 'ready');
       await updateRow(q.id, { ...base, ...doubtPatch, row_status: 'ready', pipeline_stage: 'ready', reason_code: null, reason_detail: null });
     };
 
-    const safe = async (id: string, fn: () => Promise<void>) => {
+    const safe = async (id: string, tally: Tally, fn: () => Promise<void>) => {
       try {
         await fn();
       } catch (err) {
         if (err instanceof CancelledError) throw err;
+        if (err instanceof LlmAuthError) {
+          // Ключ не работает — так же упадёт каждая строка. Валим запуск целиком.
+          halted = true;
+          throw err;
+        }
+        if (err instanceof BudgetExceededError) {
+          // Лимит на ИИ: строка не отсеяна и не сломана — она не обработана.
+          // Вклад в счётчики вычитаем, саму строку в конце уберём из журнала
+          // вместе с остальными необработанными.
+          budgetStop = true;
+          untally(tally);
+          return;
+        }
         reasons.PROCESSING_ERROR = (reasons.PROCESSING_ERROR ?? 0) + 1;
         await updateRow(id, { row_status: 'failed', reason_code: 'PROCESSING_ERROR', reason_detail: err instanceof Error ? err.message.slice(0, 500) : String(err) });
       } finally {
@@ -607,6 +746,8 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
     };
 
     while (totals.ready < target && totals.scanned < maxScan && cursor < pool.length) {
+      // Лимит на ИИ исчерпан — новую волну не начинаем: каждой её строке нужен разбор.
+      if (stopForBudget()) break;
       await ensureNotCancelled();
       waveNo += 1;
       const want = Math.min(nextWaveSize(target, totals), maxScan - totals.scanned);
@@ -645,24 +786,52 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
 
       const qualified: Qualified[] = [];
       await runPool(wave.map((c, i) => ({ c, id: ids[i] })).filter((x) => x.id), ENRICH_CONCURRENCY, async ({ c, id }) => {
+        // Лимит на ИИ исчерпан — строку не начинаем: она останется необработанной
+        // и в конце уйдёт из журнала, как будто её не брали из пула.
+        if (halted || stopForBudget()) return;
         await ensureNotCancelled();
-        await safe(id, async () => {
-          const q = await qualify(id, c, size);
+        const tally = newTally();
+        await safe(id, tally, async () => {
+          const q = await qualify(id, c, size, tally);
           if (q) qualified.push(q);
         });
       });
 
       // Pre-LPR rerank: почту ищем от самых сильных к слабым.
+      // Лимит здесь не проверяем: ИИ во второй фазе нужен только гипотезе
+      // сегментов, а почта и письма бесплатны — уже оплаченный разбор доводим
+      // до готовых. Строку, которой нужна гипотеза, лимит вернёт в необработанные.
       qualified.sort((a, b) => b.score.total - a.score.total);
       await publish('finding_emails', { qualified: qualified.length });
       await runPool(qualified, EMAIL_CONCURRENCY, async (q) => {
+        if (halted) return;
         await ensureNotCancelled();
-        await safe(q.id, () => finalize(q));
+        await safe(q.id, q.tally, () => finalize(q));
       });
     }
 
-    const stopReason = totals.ready >= target ? 'target_reached' : cursor >= pool.length ? 'pool_exhausted' : 'scan_limit';
-    log('info', `job ${jobId} done: scanned=${totals.scanned} ready=${totals.ready}/${target} (${stopReason})`, { reasons, chains });
+    // Пока добегала последняя волна, запуск могли остановить — не перетираем «Остановлено».
+    await ensureNotCancelled();
+    if (budgetStop) {
+      // Строки, до которых из-за лимита не дошли или которые он прервал, — не
+      // отсев и не ошибка. Убираем их из журнала: воронка и «просмотрено»
+      // считают только то, что действительно разобрали. Повторный запуск
+      // возьмёт эти компании заново.
+      const { data: dropped, error: dropErr } = await db
+        .from('polza_ru_outreach_companies')
+        .delete()
+        .eq('job_id', jobId)
+        .eq('row_status', 'processing')
+        .select('id');
+      if (dropErr) log('warn', `job ${jobId}: unprocessed rows cleanup failed`, dropErr);
+      else totals.scanned = Math.max(0, totals.scanned - (dropped?.length ?? 0));
+    }
+
+    const stopReason = totals.ready >= target
+      ? 'target_reached'
+      : budgetStop ? 'budget' : cursor >= pool.length ? 'pool_exhausted' : 'scan_limit';
+    const spend = budget.snapshot();
+    log('info', `job ${jobId} done: scanned=${totals.scanned} ready=${totals.ready}/${target} (${stopReason}), llm $${spend.spent_usd}/$${spend.limit_usd} in ${spend.calls} calls`, { reasons, chains });
     await setProgress({
       status: 'completed',
       progress_stage: 'completed',
@@ -671,17 +840,31 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
       total_parsed: totals.ready,
       completed_at: new Date().toISOString(),
       error_message: null,
-      progress_detail: { wave: waveNo, target, pool: pool.length, scanned: totals.scanned, ready: totals.ready, stop_reason: stopReason, funnel, reasons, chains, sdr, offer_version: libraries.offerVersion, source_errors: sourceErrors, doubtful: doubtful.count },
+      progress_detail: detail({ stop_reason: stopReason }),
     });
   } catch (err) {
     if (err instanceof CancelledError) {
       log('info', `job ${jobId} cancelled`);
+      // Статус поставил тот, кто остановил; дописываем только итог — сколько
+      // успели потратить на ИИ и докуда дошли. Только у остановленного
+      // (failed): после перезапуска воркера запуск мог подхватить новый
+      // прогон, его прогресс не трогаем.
+      if (currentDetail) {
+        const { error } = await db.from('parser_jobs').update({ progress_detail: currentDetail() }).eq('id', jobId).eq('status', 'failed');
+        if (error) log('warn', `final progress update failed for ${jobId}`, error);
+      }
       return;
     }
     log('error', `job ${jobId} failed`, err);
     await db
       .from('parser_jobs')
-      .update({ status: 'failed', progress_stage: 'failed', completed_at: new Date().toISOString(), error_message: err instanceof Error ? err.message : 'Unknown error' })
+      .update({
+        status: 'failed',
+        progress_stage: 'failed',
+        completed_at: new Date().toISOString(),
+        error_message: err instanceof Error ? err.message : 'Unknown error',
+        ...(currentDetail ? { progress_detail: currentDetail() } : {}),
+      })
       .eq('id', jobId);
   }
 }

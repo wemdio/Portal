@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { logAudit, logError } from '@/lib/loggerServer';
+import { outreachApiKey } from '@/lib/outreachLlm/client';
 import { authed, jsonError } from '@/lib/polzaRuOutreach/routeAuth';
 import { RU_OUTREACH_PARSER_TYPE, sanitizeRuOutreachConfig, type RuOutreachConfig } from '@/lib/polzaRuOutreach/types';
 
@@ -22,10 +23,18 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({ jobs: data ?? [] });
 }
 
-/** Запуск оффера: профиль фиксируется здесь и дальше не меняется. */
+/**
+ * Запуск оффера: профиль фиксируется здесь и дальше не меняется. Лимит на ИИ
+ * (llm_budget_usd) проходит ту же санитизацию, что и остальной конфиг.
+ */
 export async function POST(req: NextRequest) {
   const auth = await authed(req);
   if ('error' in auth) return auth.error;
+  // Без своего ключа запуск упал бы в воркере на первой же компании — говорим
+  // сразу, запуск не создаём.
+  if (!outreachApiKey('ru')) {
+    return jsonError('Не задан ключ ИИ для русского автоаутрича (POLZA_RU_OUTREACH_API_KEY в .env сервера)', 400);
+  }
   let raw: Partial<RuOutreachConfig>;
   try {
     raw = (await req.json()) as Partial<RuOutreachConfig>;

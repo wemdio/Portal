@@ -5,7 +5,7 @@ import { CHAIN_LABELS, REASON_LABELS, SOURCE_LABELS, type ChainType, type Source
 import { JOB_STATUS } from './JobList';
 import { Reasons, ResultsTable } from './Results';
 import { RuStages } from './Stages';
-import { RESULTS_PAGE, RESULT_FILTERS, fmtDateTime, type ResultsFilter, type ResultsResponse, type RuJob } from './shared';
+import { RESULTS_PAGE, RESULT_FILTERS, fmtDateTime, fmtUsd, type ResultsFilter, type ResultsResponse, type RuJob } from './shared';
 
 export type ExportKind = 'ready' | 'doubtful' | 'journal';
 
@@ -29,6 +29,7 @@ export function JobDetail({ job, results, loading, exporting, filter, reason, pa
   const detail = job.progress_detail ?? null;
   const totalPages = Math.max(1, Math.ceil((results?.count ?? 0) / RESULTS_PAGE));
   const target = job.config?.limit ?? null;
+  const llm = detail?.llm ?? null;
 
   return (
     <div className="space-y-4">
@@ -45,6 +46,16 @@ export function JobDetail({ job, results, loading, exporting, filter, reason, pa
               {detail?.stop_reason === 'pool_exhausted' && ' · кандидаты закончились раньше лимита'}
               {detail?.stop_reason === 'scan_limit' && ' · достигнут потолок просмотра'}
             </div>
+            {llm && (
+              <div className="mt-0.5 text-sm text-gray-500" title={`Вызовов ИИ: ${llm.calls}`}>
+                ИИ: потрачено {fmtUsd(llm.spent_usd)} из {fmtUsd(llm.limit_usd)}
+              </div>
+            )}
+            {detail?.stop_reason === 'budget' && (
+              <div className="mt-2 rounded-lg bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
+                Остановлен: достигнут лимит на ИИ. Готовые компании сохранены — чтобы добрать остальные, повторите запуск с большим лимитом.
+              </div>
+            )}
             {job.status === 'failed' && job.error_message ? (
               <div className="mt-2 rounded-lg bg-red-50 px-3 py-1.5 text-sm text-red-700">{job.error_message}</div>
             ) : null}

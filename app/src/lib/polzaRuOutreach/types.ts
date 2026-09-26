@@ -87,7 +87,21 @@ export interface RuOutreachConfig {
   min_employees: number;
   include_previously_exported: boolean;
   sender_id: string | null;
+  /**
+   * Лимит расхода на ИИ за запуск, $. Дошли до него — запуск завершается
+   * штатно (stop_reason 'budget'), готовое остаётся.
+   */
+  llm_budget_usd: number;
 }
+
+/**
+ * Лимит на ИИ по умолчанию и его рамки. Константы здесь, а не в
+ * lib/outreachLlm: форма запуска — клиентский компонент, а тот модуль тянет
+ * node:async_hooks, которого в браузере нет.
+ */
+export const DEFAULT_LLM_BUDGET_USD = 10;
+export const MIN_LLM_BUDGET_USD = 1;
+export const MAX_LLM_BUDGET_USD = 100;
 
 export const DEFAULT_FRESHNESS_DAYS = 45;
 export const MAX_FRESHNESS_DAYS = 180;
@@ -101,6 +115,18 @@ function clampInt(value: unknown, fallback: number, min: number, max: number): n
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(min, Math.min(max, Math.trunc(n)));
+}
+
+/**
+ * Деньги — с точностью до цента: $2.5 — осмысленный лимит, в отличие от 2,5
+ * компании. Пустое значение — «не задано» (запуск до появления поля), а не 0:
+ * Number(null) дал бы 0 и молча срезал лимит до минимума.
+ */
+function clampUsd(value: unknown, fallback: number, min: number, max: number): number {
+  if (value === null || value === undefined || value === '') return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(n * 100) / 100));
 }
 
 /** Санитизация конфига: один код в API-роуте и в раннере. */
@@ -123,6 +149,7 @@ export function sanitizeRuOutreachConfig(raw: Partial<RuOutreachConfig>): RuOutr
     min_employees: clampInt(raw.min_employees, 10, 0, 100_000),
     include_previously_exported: raw.include_previously_exported === true,
     sender_id: senderId,
+    llm_budget_usd: clampUsd(raw.llm_budget_usd, DEFAULT_LLM_BUDGET_USD, MIN_LLM_BUDGET_USD, MAX_LLM_BUDGET_USD),
   };
 }
 
@@ -167,6 +194,7 @@ export const REASON_LABELS: Record<string, string> = {
   PREVIOUSLY_EXPORTED: 'Уже выгружалась раньше',
   DOMAIN_NOT_FOUND: 'Не найден сайт компании',
   SITE_UNREACHABLE: 'Сайт компании не открылся',
+  LLM_FAILED: 'ИИ не ответил (сбой модели или ключа)',
   NOT_B2B: 'Не B2B',
   EXCLUDED_CATEGORY: 'Исключённая категория (кадровое агентство, конкурент, маркетплейс)',
   NO_CHAIN: 'Нет повода и низкий ЦА-балл',

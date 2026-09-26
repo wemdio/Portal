@@ -5,6 +5,18 @@ import { CHAIN_LABELS, type ChainType, type Letter, type RuOutreachConfig, type 
 
 export const API = '/api/tools/polza-ru-outreach';
 
+/**
+ * Расход на ИИ за запуск (progress_detail.llm). Та же форма, что снимок
+ * бюджета в lib/outreachLlm/context.ts, но объявлена здесь: тот модуль тянет
+ * node:async_hooks, а это клиентский код.
+ */
+export interface RuJobLlmSpend {
+  spent_usd: number;
+  calls: number;
+  limit_usd: number;
+  by_role?: Record<'analysis' | 'writer', { usd: number; calls: number }>;
+}
+
 export interface RuJob {
   id: string;
   status: 'pending' | 'running' | 'completed' | 'failed';
@@ -19,10 +31,13 @@ export interface RuJob {
     scanned?: number;
     ready?: number;
     target?: number;
+    /** target_reached | pool_exhausted | scan_limit | budget (кончился лимит на ИИ). */
     stop_reason?: string;
     reasons?: Record<string, number>;
     source_errors?: Record<string, string>;
     doubtful?: number;
+    /** Нет у запусков до 26.09.2026 — тогда строку расхода не показываем. */
+    llm?: RuJobLlmSpend;
   } | null;
   total_found: number | null;
   total_parsed: number | null;
@@ -137,6 +152,13 @@ export function fmtDate(value: string | null | undefined): string {
   if (!value) return '—';
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? value : d.toLocaleDateString('ru-RU');
+}
+
+/** Доллары для строки расхода на ИИ: доли цента дешёвой модели не прячем в «$0.00». */
+export function fmtUsd(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '$0';
+  if (value < 0.01) return '<$0.01';
+  return `$${Number.isInteger(value) ? value : value.toFixed(2)}`;
 }
 
 export function fmtDateTime(value: string | null | undefined): string {

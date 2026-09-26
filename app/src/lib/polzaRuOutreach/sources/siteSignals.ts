@@ -11,10 +11,16 @@
  *  - отраслевую группу для роутера кейсов.
  * Отдельно, без LLM: счётчик Яндекс.Директа / рекламные пиксели на главной —
  * только баллы скоринга, в письмо не попадают.
+ *
+ * Готовый разбор живёт 30 дней в общем кэше аутричей: повторный запуск не
+ * обходит сайт и не платит ИИ за ту же компанию.
  */
 
 import { fetchSitePageHtml } from '@/lib/enrich/emailScraper';
 import { detectSignals } from '@/lib/enrich/signalDetector';
+import { outreachModel } from '@/lib/outreachLlm/client';
+import { readSiteAnalysisCache, writeSiteAnalysisCache, type SiteAnalysisCacheKey } from '@/lib/outreachLlm/siteAnalysisCache';
+import { normalizeDomain } from '../company';
 import { acceptQuote, htmlToText } from '../evidence';
 import { asBool, asString, callJson } from '../llm';
 import { INDUSTRY_GROUPS, type IndustryGroup, type Signal, type SignalType } from '../types';
@@ -165,7 +171,35 @@ new_production — запуск производства/мощности; partn
 dealer_search — ищут дилеров/дистрибьюторов; export_launch — начало экспорта; new_case — новый проект с конкретным клиентом.
 Жёсткие правила: цитаты и бренд копируются символ в символ со страницы; «мы растём» — не факт; не угадывай.`;
 
-export async function analyzeSite(website: string): Promise<SiteAnalysis> {
+/**
+ * Версия промпта и разбора ответа — часть ключа кэша. Правка SYSTEM или кода
+ * разбора ниже (что и как попадает в SiteAnalysis) — поднять версию, иначе
+ * 30 дней будут отдаваться разборы по старым правилам.
+ */
+export const SITE_PROMPT_VERSION = 'ru-site@2026-09-26';
+
+/** Разбор из кэша — только целый и открывшийся: битая запись — промах, а не падение строки. */
+function siteFromCache(raw: unknown): SiteAnalysis | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const cached = raw as Partial<SiteAnalysis>;
+  if (cached.reachable !== true || !Array.isArray(cached.facts) || typeof cached.taScore !== 'number') return null;
+  return { ...EMPTY_SITE, ...cached, reachable: true };
+}
+
+/**
+ * Разбор сайта компании. Сайт не открылся — EMPTY_SITE (reachable: false).
+ * ИИ не ответил — ошибка клиента аутричей летит наверх как есть: раннер
+ * отличает «сайт не открылся» от «ИИ не ответил» и от исчерпанного лимита.
+ */
+export async function analyzeSite(website: string, domain: string | null = normalizeDomain(website)): Promise<SiteAnalysis> {
+  const cacheKey: SiteAnalysisCacheKey | null = domain
+    ? { lang: 'ru', domain, promptVersion: SITE_PROMPT_VERSION, model: outreachModel('ru', 'analysis') }
+    : null;
+  if (cacheKey) {
+    const cached = siteFromCache(await readSiteAnalysisCache(cacheKey));
+    if (cached) return cached;
+  }
+
   const { pages, homeHtml } = await crawlSite(website);
   if (!pages.length) return EMPTY_SITE;
   const hasAdPixel = homeHtml ? detectSignals(homeHtml).some((s) => s.category === 'ad_pixel') : false;
@@ -197,7 +231,7 @@ export async function analyzeSite(website: string): Promise<SiteAnalysis> {
   const group = asString(raw.industry_group) as IndustryGroup;
   const b2bQuote = acceptQuote(allText, asString(raw.b2b_quote));
   const ta = Number(raw.ta_score);
-  return {
+  const analysis: SiteAnalysis = {
     reachable: true,
     brand,
     isB2b: asBool(raw.is_b2b) && Boolean(b2bQuote),
@@ -211,4 +245,8 @@ export async function analyzeSite(website: string): Promise<SiteAnalysis> {
     hasAdPixel,
     facts,
   };
+  // В кэш — только разобранный ИИ сайт. Неоткрывшийся не запоминаем: завтра
+  // он может открыться. Свежесть событий раннер сверяет по датам при чтении.
+  if (cacheKey) await writeSiteAnalysisCache(cacheKey, analysis);
+  return analysis;
 }

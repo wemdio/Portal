@@ -7,10 +7,13 @@ import {
   CHAIN_TYPES,
   DEFAULT_FRESHNESS_DAYS,
   DEFAULT_LIMIT,
+  DEFAULT_LLM_BUDGET_USD,
   DEFAULT_MIN_TA_SCORE,
   DEFAULT_WRITE_THRESHOLD,
   MAX_FRESHNESS_DAYS,
   MAX_LIMIT,
+  MAX_LLM_BUDGET_USD,
+  MIN_LLM_BUDGET_USD,
   SOURCE_CODES,
   SOURCE_LABELS,
   type RuOutreachConfig,
@@ -92,10 +95,13 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart }: 
   const [minEmployees, setMinEmployees] = useState(initial?.min_employees ?? 10);
   const [includeExported, setIncludeExported] = useState(initial?.include_previously_exported ?? false);
   const [senderId, setSenderId] = useState(initial?.sender_id ?? '');
+  const [budgetUsd, setBudgetUsd] = useState(initial?.llm_budget_usd ?? DEFAULT_LLM_BUDGET_USD);
   const [advanced, setAdvanced] = useState(false);
 
   const activeSenders = senders.filter((s) => s.status === 'active');
   const toggle = (s: SourceCode) => setSources((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
+  // Пустое поле или 0 сервер молча поднял бы до минимума — лучше не пускать запуск.
+  const budgetValid = Number.isFinite(budgetUsd) && budgetUsd >= MIN_LLM_BUDGET_USD && budgetUsd <= MAX_LLM_BUDGET_USD;
 
   const submit = () => {
     onStart({
@@ -110,6 +116,7 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart }: 
       min_employees: minEmployees,
       include_previously_exported: includeExported,
       sender_id: senderId || null,
+      llm_budget_usd: budgetUsd,
     });
     onClose();
   };
@@ -122,14 +129,20 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart }: 
       onClose={onClose}
       footer={
         <div className="flex items-center justify-between gap-3">
-          <span className="text-xs text-gray-500">{sources.length === 0 ? 'Выберите хотя бы один источник' : `Источников: ${sources.length}`}</span>
+          <span className="text-xs text-gray-500">
+            {sources.length === 0
+              ? 'Выберите хотя бы один источник'
+              : !budgetValid
+                ? `Лимит на ИИ — от $${MIN_LLM_BUDGET_USD} до $${MAX_LLM_BUDGET_USD}`
+                : `Источников: ${sources.length}`}
+          </span>
           <span className="flex gap-2">
             <button type="button" onClick={onClose} className="rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100">
               Отмена
             </button>
             <button
               type="button"
-              disabled={busy || sources.length === 0}
+              disabled={busy || sources.length === 0 || !budgetValid}
               onClick={submit}
               className="inline-flex items-center rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50"
             >
@@ -183,6 +196,21 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart }: 
                 </option>
               ))}
             </select>
+          </div>
+          <div>
+            <label className={label}>Лимит на ИИ, $</label>
+            <input
+              className={input}
+              type="number"
+              min={MIN_LLM_BUDGET_USD}
+              max={MAX_LLM_BUDGET_USD}
+              step={1}
+              value={Number.isFinite(budgetUsd) ? budgetUsd : ''}
+              onChange={(e) => setBudgetUsd(e.target.value === '' ? NaN : Number(e.target.value))}
+            />
+            <p className="mt-1 text-xs text-gray-500">
+              Разбор сайтов, вакансий и новостей. Дойдёт до лимита — запуск остановится, готовое сохранится.
+            </p>
           </div>
         </div>
 
