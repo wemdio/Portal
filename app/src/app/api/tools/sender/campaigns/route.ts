@@ -6,6 +6,21 @@ import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
 
+/**
+ * Сколько последних кампаний отдаёт список. Вкладка раскладывает их по папкам,
+ * и при 50 последних частые заливки одного автоаутрича вытесняли с экрана
+ * рассылки другого. Постраничности нет: кампаний — сотни, не тысячи.
+ */
+const LIST_LIMIT = 200;
+/**
+ * Кампаний, чья статистика считается одновременно. У каждой — семь запросов
+ * счётчиков, и 200 кампаний разом — это 1400 запросов в пул PostgREST на
+ * 30 соединений.
+ */
+const STATS_CHUNK = 20;
+/** Кампаний на один запрос пулов: id уезжают в адрес запроса. */
+const POOL_CHUNK = 50;
+
 interface CreateBody {
   name?: string;
   mailboxIds?: string[];
@@ -71,12 +86,18 @@ async function mailboxesByCampaign(campaignIds: string[]) {
   const out = new Map<string, { id: string; email: string }[]>();
   if (!supabaseAdmin || !campaignIds.length) return out;
 
-  const { data } = await supabaseAdmin
-    .from('sender_campaign_mailboxes')
-    .select('campaign_id, sender_mailboxes(id, email)')
-    .in('campaign_id', campaignIds);
+  // Пачками: 200 id в одном in-фильтре — это ~7 КБ адреса, у самого края
+  // того, что пропускает шлюз перед PostgREST.
+  const rows: { campaign_id: string; sender_mailboxes: unknown }[] = [];
+  for (let i = 0; i < campaignIds.length; i += POOL_CHUNK) {
+    const { data } = await supabaseAdmin
+      .from('sender_campaign_mailboxes')
+      .select('campaign_id, sender_mailboxes(id, email)')
+      .in('campaign_id', campaignIds.slice(i, i + POOL_CHUNK));
+    rows.push(...((data ?? []) as { campaign_id: string; sender_mailboxes: unknown }[]));
+  }
 
-  for (const row of (data ?? []) as { campaign_id: string; sender_mailboxes: unknown }[]) {
+  for (const row of rows) {
     // Вложенная запись приезжает объектом или массивом в зависимости от того,
     // как PostgREST разобрал связь, — приводим к одному виду.
     const raw = row.sender_mailboxes;
@@ -91,31 +112,42 @@ async function mailboxesByCampaign(campaignIds: string[]) {
   return out;
 }
 
-/** GET — список кампаний с короткой статистикой. */
+/**
+ * GET — последние кампании с короткой статистикой. Вместе с настройками
+ * приезжают папка (folder_id) и источник (source_kind, source_job_id):
+ * вкладка группирует по ним кампании. truncated — в список влезли не все.
+ */
 export async function GET(req: NextRequest) {
   return withToolTrace({ request: req, operation: 'tools.sender.campaigns.list' }, async () => {
     const auth = await authenticateRequest(req.headers.get('authorization'));
     if ('error' in auth) return auth.error;
     if (!supabaseAdmin) return jsonError('Сервис не настроен', 503);
 
+    // Одна строка сверх лимита — признак, что старые кампании не влезли.
     const { data, error } = await supabaseAdmin
       .from('sender_campaigns')
       .select('*')
       .order('created_at', { ascending: false })
-      .limit(50);
+      .limit(LIST_LIMIT + 1);
 
     if (error) return jsonError(error.message, 500);
 
-    const pool = await mailboxesByCampaign((data ?? []).map((c) => String(c.id)));
-    const campaigns = await Promise.all(
-      (data ?? []).map(async (campaign) => ({
-        ...campaign,
-        mailboxes: pool.get(String(campaign.id)) ?? [],
-        stats: await campaignStats(String(campaign.id)),
-      })),
-    );
+    const rows = (data ?? []).slice(0, LIST_LIMIT);
+    const pool = await mailboxesByCampaign(rows.map((c) => String(c.id)));
+    const campaigns: Record<string, unknown>[] = [];
+    for (let i = 0; i < rows.length; i += STATS_CHUNK) {
+      campaigns.push(
+        ...(await Promise.all(
+          rows.slice(i, i + STATS_CHUNK).map(async (campaign) => ({
+            ...campaign,
+            mailboxes: pool.get(String(campaign.id)) ?? [],
+            stats: await campaignStats(String(campaign.id)),
+          })),
+        )),
+      );
+    }
 
-    return NextResponse.json({ campaigns });
+    return NextResponse.json({ campaigns, truncated: (data ?? []).length > LIST_LIMIT });
   });
 }
 

@@ -8,6 +8,7 @@ import {
   validateCampaignDraft,
   type CampaignStepInput,
 } from '@/lib/sender/campaignOps';
+import { fillPoolFromFolder } from '@/lib/sender/folders';
 import { describeSavedRecipients, mergeVariableStats } from '@/lib/sender/recipientImport';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
@@ -219,7 +220,8 @@ async function updateSettings(id: string, body: PatchBody) {
 /**
  * PATCH — запустить, поставить на паузу или закрыть кампанию; без action —
  * правка настроек. Запуск — campaignOps.startCampaign: тем же путём рассылку
- * запускает кнопка на экране автоаутрича.
+ * запускает кнопка на экране автоаутрича. Рассылка папки без ящиков перед
+ * запуском берёт ящики папки (folders.fillPoolFromFolder) — как и там.
  */
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'tools.sender.campaigns.patch' }, async () => {
@@ -234,8 +236,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     try {
       if (!body.action) return await updateSettings(id, body);
       if (body.action === 'start') {
+        // Сколько ящиков взято из папки — экран скажет, откуда они взялись.
+        const mailboxesAdded = await fillPoolFromFolder(id);
         await startCampaign(id);
-        return NextResponse.json({ ok: true, status: 'running' });
+        return NextResponse.json({ ok: true, status: 'running', mailboxesAdded });
       }
     } catch (e) {
       if (e instanceof SenderOpError) return jsonError(e.message, e.status);

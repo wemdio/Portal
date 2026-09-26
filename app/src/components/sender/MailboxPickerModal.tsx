@@ -11,6 +11,17 @@ import { SenderModal } from './SenderModal';
 export interface PickedMailbox {
   id: string;
   email: string;
+  /**
+   * Состояние на момент выбора — настройки папки по нему сразу говорят,
+   * сколько выбранных ящиков может слать. У ящиков, пришедших из кампании
+   * списком адресов, его нет.
+   */
+  status?: MailboxDto['status'];
+  enabled?: boolean;
+}
+
+function toPicked(mailbox: MailboxDto): PickedMailbox {
+  return { id: mailbox.id, email: mailbox.email, status: mailbox.status, enabled: mailbox.enabled };
 }
 
 const PAGE_SIZE = 200;
@@ -23,6 +34,8 @@ interface Props {
   initial: PickedMailbox[];
   onSave: (picked: PickedMailbox[]) => void;
   onClose: () => void;
+  /** Подпись под заголовком: у кампании и у папки ящики значат разное. */
+  subtitle?: string;
 }
 
 /**
@@ -34,7 +47,12 @@ interface Props {
  * всё равно берёт только проверенные, и такой ящик просто подключится к
  * кампании сам, когда пройдёт проверку.
  */
-export function MailboxPickerModal({ initial, onSave, onClose }: Props) {
+export function MailboxPickerModal({
+  initial,
+  onSave,
+  onClose,
+  subtitle = 'Письма кампании уходят по очереди со всех выбранных ящиков',
+}: Props) {
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
   const [rows, setRows] = useState<MailboxDto[]>([]);
@@ -103,7 +121,7 @@ export function MailboxPickerModal({ initial, onSave, onClose }: Props) {
     setPicked((prev) =>
       prev.some((m) => m.id === mailbox.id)
         ? prev.filter((m) => m.id !== mailbox.id)
-        : [...prev, { id: mailbox.id, email: mailbox.email }],
+        : [...prev, toPicked(mailbox)],
     );
   };
 
@@ -124,7 +142,7 @@ export function MailboxPickerModal({ initial, onSave, onClose }: Props) {
       const collected: PickedMailbox[] = [];
       for (let page = 1; page <= MAX_TAG_PAGES; page += 1) {
         const res = await fetchMailboxes({ tagIds: [tag.id], page, pageSize: PAGE_SIZE });
-        collected.push(...res.mailboxes.map((m) => ({ id: m.id, email: m.email })));
+        collected.push(...res.mailboxes.map(toPicked));
         if (collected.length >= res.total || res.mailboxes.length < PAGE_SIZE) break;
       }
       if (!collected.length) return;
@@ -153,14 +171,14 @@ export function MailboxPickerModal({ initial, onSave, onClose }: Props) {
         return prev.filter((m) => !shown.has(m.id));
       }
       const known = new Set(prev.map((m) => m.id));
-      return [...prev, ...rows.filter((r) => !known.has(r.id)).map((r) => ({ id: r.id, email: r.email }))];
+      return [...prev, ...rows.filter((r) => !known.has(r.id)).map(toPicked)];
     });
   };
 
   return (
     <SenderModal
       title="Ящики для отправки"
-      subtitle="Письма кампании уходят по очереди со всех выбранных ящиков"
+      subtitle={subtitle}
       onClose={onClose}
       footer={
         <>

@@ -329,6 +329,11 @@ interface ScheduleProps {
   onGapSeconds: (value: number) => void;
   onGapJitterSeconds: (value: number) => void;
   disabled?: boolean;
+  /**
+   * Своё поле пояса вместо списка TIMEZONES — у настроек папки, где пояс
+   * можно вписать руками. Подпись «Пояс» и место в строке остаются общими.
+   */
+  timezoneControl?: ReactNode;
 }
 
 /**
@@ -351,6 +356,7 @@ export function ScheduleStep({
   onGapSeconds,
   onGapJitterSeconds,
   disabled = false,
+  timezoneControl,
 }: ScheduleProps) {
   const toggleWeekday = (id: number) => {
     onWeekdays(
@@ -394,17 +400,19 @@ export function ScheduleStep({
             выбора всё навсегда остаётся московским — для ENG-рынка это мимо
             рабочих часов получателя. */}
         <span className="ml-2 text-xs uppercase tracking-wide text-zinc-500">Пояс</span>
-        <select
-          value={timezone}
-          disabled={disabled}
-          onChange={(e) => onTimezone(e.target.value)}
-          className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-sm font-medium text-zinc-900 focus:outline-none"
-        >
-          {/* Текущий пояс кампании может быть не в списке — показываем и его. */}
-          {[...new Set([timezone, ...TIMEZONES])].map((tz) => (
-            <option key={tz} value={tz}>{timezoneLabel(tz)}</option>
-          ))}
-        </select>
+        {timezoneControl ?? (
+          <select
+            value={timezone}
+            disabled={disabled}
+            onChange={(e) => onTimezone(e.target.value)}
+            className="rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-sm font-medium text-zinc-900 focus:outline-none"
+          >
+            {/* Текущий пояс кампании может быть не в списке — показываем и его. */}
+            {[...new Set([timezone, ...TIMEZONES])].map((tz) => (
+              <option key={tz} value={tz}>{timezoneLabel(tz)}</option>
+            ))}
+          </select>
+        )}
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
