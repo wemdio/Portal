@@ -17,6 +17,15 @@ export const FIND_EMAILS_CHECKPOINT_ATTEMPTED_COL = '__portal_find_emails_attemp
 export const WEBSITE_EMAIL_PREFERENCE_COL = '__portal_website_email_preference_v1';
 
 /**
+ * Addresses of the row that came ONLY from «Найденный Email» (JSON array,
+ * lowercase). Written by the eager merge when a job explicitly asks
+ * validate_emails to check one source ('original' | 'found'): after the merge
+ * and split there is a single email column, and without this column the
+ * validator cannot tell scraped addresses from the user's own.
+ */
+export const FOUND_EMAIL_ORIGIN_COL = '__portal_found_email_origin_v1';
+
+/**
  * Private per-row state for the long-running `validate_emails` step.
  *
  * Public "... Статус" columns only contain the best aggregate verdict for a
@@ -144,6 +153,7 @@ export function stripBaseConstructorCheckpointMetadata(data: string[][]): string
     ENRICH_CHECKPOINT_ATTEMPTED_COL,
     FIND_EMAILS_CHECKPOINT_ATTEMPTED_COL,
     WEBSITE_EMAIL_PREFERENCE_COL,
+    FOUND_EMAIL_ORIGIN_COL,
     EMAIL_VALIDATION_CHECKPOINT_STATE_COL,
   ]));
 }

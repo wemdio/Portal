@@ -38,10 +38,12 @@ import {
   stripBaseConstructorCheckpointMetadata,
   stripEnrichCheckpointMetadata,
   stripFindEmailsCheckpointMetadata,
+  FOUND_EMAIL_ORIGIN_COL,
   type EmailValidationCheckpointEntry,
   type EmailValidationCheckpointState,
 } from './baseConstructorCheckpoint';
 import { compactWebsiteEmailPreferences, selectValidatedWebsiteEmails } from './websiteEmailPreference';
+import { compactFoundEmailOrigins, parseFoundEmailOrigin } from './foundEmailOrigin';
 import {
   CLEANUP_JSON_SYSTEM_PROMPT,
   CLEANUP_BATCH,
@@ -754,7 +756,7 @@ export async function stepSplitEmails(
   }
 
   await onProgress(100);
-  return compactWebsiteEmailPreferences([header, ...result]);
+  return compactFoundEmailOrigins(compactWebsiteEmailPreferences([header, ...result]));
 }
 
 /* ═══════════════════════════════════════════
@@ -1888,15 +1890,28 @@ export async function stepValidateEmails(
 
   const target: ValidateEmailsTarget = options?.validateTarget ?? 'original';
 
+  // Eager merge уже слил «Найденный Email» в исходную колонку и оставил
+  // FOUND_EMAIL_ORIGIN_COL (только при явном 'original' | 'found', см.
+  // foundEmailOrigin.ts): валидируем одну колонку, но только адреса
+  // запрошенного источника. Адреса другого источника — доверенные: их не
+  // проверяем и не удаляем.
+  const originIdx = header.indexOf(FOUND_EMAIL_ORIGIN_COL);
+  const perSource = originIdx >= 0 && foundEmailIdx < 0 && originalEmailIdx >= 0
+    && (target === 'original' || target === 'found');
+
   // Резолвим какие индексы реально валидируем. Если запрошен 'both' но одна
   // из колонок отсутствует — берём только что есть; если обе отсутствуют —
   // ранний return (нечего валидировать).
   const indicesToValidate: number[] = [];
-  if ((target === 'original' || target === 'both') && originalEmailIdx >= 0) {
+  if (perSource) {
     indicesToValidate.push(originalEmailIdx);
-  }
-  if ((target === 'found' || target === 'both') && foundEmailIdx >= 0) {
-    indicesToValidate.push(foundEmailIdx);
+  } else {
+    if ((target === 'original' || target === 'both') && originalEmailIdx >= 0) {
+      indicesToValidate.push(originalEmailIdx);
+    }
+    if ((target === 'found' || target === 'both') && foundEmailIdx >= 0) {
+      indicesToValidate.push(foundEmailIdx);
+    }
   }
   if (indicesToValidate.length === 0) {
     await onProgress(100);
@@ -1961,6 +1976,16 @@ export async function stepValidateEmails(
       : {},
   );
 
+  // perSource: адреса строки, которые НЕ проверяем (другой источник).
+  // Битая ячейка происхождения → доверенных нет, проверяем всё (безопасно).
+  const trustedByRow: string[][] = newBody.map((row) => {
+    if (!perSource) return [];
+    const origin = parseFoundEmailOrigin(row[originIdx]);
+    if (!origin) return [];
+    return extractEmails(row[originalEmailIdx] || '')
+      .filter((e) => (target === 'found' ? !origin.has(e) : origin.has(e)));
+  });
+
   type ProbeResult = {
     result: EmailValidationCheckpointEntry['result'];
     is_free: boolean;
@@ -2017,8 +2042,9 @@ export async function stepValidateEmails(
   const cells: CellToValidate[] = [];
   const uniqueEmails = new Set<string>();
   for (let r = 0; r < newBody.length; r += 1) {
+    const trusted = new Set(trustedByRow[r]);
     for (const m of meta) {
-      const emails = extractEmails(newBody[r][m.srcIdx] || '');
+      const emails = extractEmails(newBody[r][m.srcIdx] || '').filter((e) => !trusted.has(e));
       if (emails.length === 0) continue;
       const prevStatus = (newBody[r][m.statusIdx] || '').trim();
       const allEmailsDurablyAccountedFor = emails.every((email) => {
@@ -2314,6 +2340,7 @@ export async function stepValidateEmails(
   const filtered = newBody.filter((row, r) => {
     let anyValid = false;
     let anyUnverifiable = false;
+    const trusted = trustedByRow[r];
     for (const m of meta) {
       const status = (row[m.statusIdx] || '').trim();
       if (status === '') continue; // пустой email в этой колонке — не учитываем
@@ -2337,13 +2364,26 @@ export async function stepValidateEmails(
             || (!keepUnverifiable && UNVERIFIABLE_STATUSES.has(st));
           return !bad;
         });
-        if (survivors.length === 0) row[m.srcIdx] = '';
+        if (trusted.length > 0) {
+          // perSource: доверенные адреса остаются в ячейке как были.
+          if (survivors.length < cell.emails.length) row[m.srcIdx] = [...trusted, ...survivors].join(', ');
+          if (survivors.length === 0) {
+            // Статус относился к удалённым адресам, оставшиеся не проверялись.
+            row[m.statusIdx] = '';
+            row[m.providerIdx] = '';
+          }
+        } else if (survivors.length === 0) row[m.srcIdx] = '';
         else if (survivors.length < cell.emails.length) row[m.srcIdx] = survivors.join(', ');
       } else if (!isValid && !isUnverifiable) {
         // Подтверждённо плохой (invalid/disposable) — или unknown/error при
         // keepUnverifiable=false — чистим src-ячейку чтобы потомки (export,
-        // merge) не видели заведомо плохой email.
-        row[m.srcIdx] = '';
+        // merge) не видели заведомо плохой email. Доверенные (perSource)
+        // адреса не трогаем.
+        row[m.srcIdx] = trusted.join(', ');
+        if (trusted.length > 0) {
+          row[m.statusIdx] = '';
+          row[m.providerIdx] = '';
+        }
       }
     }
     // Строка не имела email ни в одной валидируемой колонке (status='' везде).
@@ -2352,6 +2392,8 @@ export async function stepValidateEmails(
     // Legacy-режим (dropRowsWithoutEmail=false) — сохраняем строку. Раньше
     // legacy-поведение было хардкодом и давало 74% мусорных строк на выходе
     // (см. job polza@polza.ru 8b188038-…: 1795 пустых строк из 2418).
+    // Доверенный (непроверяемый) адрес — рабочий по выбору пользователя.
+    if (trusted.length > 0) return true;
     const hadAnyEmail = meta.some((m) => (row[m.statusIdx] || '').trim() !== '');
     if (!hadAnyEmail) return !dropRowsWithoutEmail;
     return anyValid || anyUnverifiable;
@@ -2373,6 +2415,12 @@ export interface StepCapEmailsPerCompanyOptions {
    * step_config.cap_emails_per_company.max — см. STEP_RUNNERS в worker'е.
    */
   max?: number;
+  /**
+   * Пустой статус = «подтверждён» (ранг ok). Только для validate «Только
+   * найденные»: исходные адреса там намеренно не проверялись, пользователь
+   * им доверяет. По умолчанию пустой статус — ниже всех.
+   */
+  trustEmptyStatus?: boolean;
 }
 
 /**
@@ -2427,11 +2475,12 @@ export async function stepCapEmailsPerCompany(
   }
   const keep = new Set<number>();
   for (const idxs of groups.values()) {
-    const ranked = [...idxs].sort((a, b) => {
-      const ra = statusIdx >= 0 ? statusRank((body[a][statusIdx] || '').trim()) : -1;
-      const rb = statusIdx >= 0 ? statusRank((body[b][statusIdx] || '').trim()) : -1;
-      return rb - ra || a - b;
-    });
+    const rankOf = (i: number) => {
+      if (statusIdx < 0) return -1;
+      const status = (body[i][statusIdx] || '').trim();
+      return status === '' && options?.trustEmptyStatus ? statusRank('ok') : statusRank(status);
+    };
+    const ranked = [...idxs].sort((a, b) => rankOf(b) - rankOf(a) || a - b);
     for (const i of ranked.slice(0, max)) keep.add(i);
   }
   const out = body.filter((_, i) => keep.has(i));
