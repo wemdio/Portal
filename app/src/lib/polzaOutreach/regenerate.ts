@@ -253,9 +253,22 @@ async function refreshJob(db: SupabaseClient, jobId: string, spent: Spend, recou
     const ready = rows.filter((r) => r.status === 'ready').length;
     const awaiting = rows.filter((r) => r.status === 'needs_review' && (r.review_reason ?? '').startsWith('template_failed')).length;
     Object.assign(detail, { ready, awaiting_templates: awaiting, funnel: polzaFunnel(rows) });
-    // Пересборка добрала лимит готовых — запуск закончился тем, ради чего шёл
-    // (раньше — «ждут цепочку» или «кончились кандидаты»).
-    if (ready >= config.limit) detail.stop_reason = 'target_reached';
+    if (ready >= config.limit) {
+      // Пересборка добрала лимит готовых — запуск закончился тем, ради чего шёл
+      // (раньше — «ждут цепочку» или «кончились кандидаты»).
+      detail.stop_reason = 'target_reached';
+      delete detail.stop_reason_base;
+    } else if (detail.stop_reason === 'awaiting_templates' && ready + awaiting < config.limit) {
+      // Запуск встал, потому что заказанное набиралось вместе с ждущими
+      // цепочку. Их стало меньше (часть писем не прошла гарды) — эта причина
+      // больше не верна, и плашка «ждут цепочку» висела бы при нуле ждущих:
+      // возвращаем ту, что была бы без ждущих (раннер записал её в
+      // stop_reason_base), а если её нет — не утверждаем никакой.
+      const base = detail.stop_reason_base;
+      if (typeof base === 'string' && base) detail.stop_reason = base;
+      else delete detail.stop_reason;
+      delete detail.stop_reason_base;
+    }
     patch.total_parsed = ready;
   }
   patch.progress_detail = detail;

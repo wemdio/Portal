@@ -488,9 +488,23 @@ async function completeSpentRun(
   }
   const kept = rows.filter((r) => !gone.has(String(r.id)));
   const ready = kept.filter((r) => r.status === 'ready').length;
+  // Ждущие цепочку — тоже по журналу, а не из снимка прогона: снимок мог
+  // устареть (прервался посреди писем или после «Переписать цепочку»).
+  const awaiting = kept.filter((r) => r.status === 'needs_review' && (r.review_reason ?? '').startsWith('template_failed')).length;
   const stopReason = ready >= target ? 'target_reached' : 'budget';
   const spend = budget.snapshot();
   log('info', `job ${jobId}: LLM budget already spent ($${spend.spent_usd}/$${spend.limit_usd}) — restart keeps the journal: ${kept.length} rows, ${ready} ready (${stopReason})`);
+  const progressDetail: Record<string, unknown> = {
+    ...(previousDetail ?? {}),
+    scanned: kept.length,
+    ready,
+    awaiting_templates: awaiting,
+    funnel: polzaFunnel(kept),
+    llm: spend,
+    stop_reason: stopReason,
+  };
+  // Причина «без ждущих» относилась к прошлому прогону — теперь причина своя.
+  delete progressDetail.stop_reason_base;
   await setRunningProgress({
     status: 'completed',
     progress_stage: 'completed',
@@ -499,14 +513,7 @@ async function completeSpentRun(
     total_parsed: ready,
     completed_at: new Date().toISOString(),
     error_message: null,
-    progress_detail: {
-      ...(previousDetail ?? {}),
-      scanned: kept.length,
-      ready,
-      funnel: polzaFunnel(kept),
-      llm: spend,
-      stop_reason: stopReason,
-    },
+    progress_detail: progressDetail,
   });
 }
 
@@ -1322,13 +1329,18 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
     // awaiting_templates — готовых меньше заказанного, но вместе с ждущими
     // цепочку лимит набран: докупать разбор незачем, их доведёт «Переписать
     // цепочку» (тот же ключ у русского аутрича — экран пишет один текст).
+    // stop_reason_base — причина, какой она была бы без ждущих (null — волны
+    // шли бы дальше): если после «Переписать цепочку» ждущих не хватит до
+    // заказанного (часть писем не пройдёт гарды), экран покажет её
+    // (regenerate.ts), а не устаревшее «ждут цепочку».
+    const baseReason = budgetStop
+      ? 'budget'
+      : cursor >= pool.length ? 'pool_exhausted' : totals.vacancies >= maxCandidates ? 'scan_limit' : null;
     const stopReason = totals.ready >= target
       ? 'target_reached'
-      : budgetStop
-        ? 'budget'
-        : totals.ready + awaitingTemplate >= target
-          ? 'awaiting_templates'
-          : totals.vacancies >= maxCandidates ? 'scan_limit' : 'pool_exhausted';
+      : totals.ready + awaitingTemplate >= target
+        ? 'awaiting_templates'
+        : baseReason ?? 'pool_exhausted';
     const spend = budget.snapshot();
     log('info', `job ${jobId} done: ${JSON.stringify(funnelOf())} (${stopReason}), llm $${spend.spent_usd}/$${spend.limit_usd} in ${spend.calls} calls`);
     // Тоже только идущему: остановку между проверкой выше и этой записью не перетираем.
@@ -1340,7 +1352,7 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
       total_parsed: totals.ready,
       completed_at: new Date().toISOString(),
       error_message: null,
-      progress_detail: detail({ stop_reason: stopReason }),
+      progress_detail: detail({ stop_reason: stopReason, ...(stopReason === 'awaiting_templates' ? { stop_reason_base: baseReason } : {}) }),
     });
   } catch (err) {
     if (err instanceof PolzaOutreachCancelledError) {
