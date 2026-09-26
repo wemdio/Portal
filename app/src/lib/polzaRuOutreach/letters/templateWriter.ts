@@ -665,8 +665,10 @@ async function writeTemplate(deps: TemplateWriterDeps, chain: ChainType, claimed
 /**
  * Шаблон оффера для воркера: своя строка или готовая чужая. Чужую pending
  * (её пишет другой процесс) ждём, пока допишет; умер — занимаем заново.
+ * retryFailed — повтор после «ИИ не ответил»: failed-строку занимаем заново
+ * (со сравнением, как «Переписать цепочку»), а не отдаём как есть.
  */
-async function obtainTemplate(deps: TemplateWriterDeps, chain: ChainType): Promise<ChainTemplate> {
+async function obtainTemplate(deps: TemplateWriterDeps, chain: ChainType, retryFailed = false): Promise<ChainTemplate> {
   const deadline = Date.now() + PENDING_STALE_MS + 2 * POLL_MS;
   for (;;) {
     // Запуск остановили, пока ждали чужую запись, — не ждём дальше.
@@ -674,6 +676,13 @@ async function obtainTemplate(deps: TemplateWriterDeps, chain: ChainType): Promi
     const claimed = await claimNew(deps.db, deps.jobId, chain);
     if (claimed) return writeTemplate(deps, chain, claimed);
     const row = await readRow(deps.db, deps.jobId, chain);
+    if (row && row.status === 'failed' && retryFailed) {
+      const taken = await claimExisting(deps.db, row);
+      if (taken) return writeTemplate(deps, chain, taken);
+      // Занял кто-то другой — дождёмся его итога на следующем круге.
+      await sleep(POLL_MS);
+      continue;
+    }
     if (row && row.status !== 'pending') return templateFromRow(row, chain);
     if (row && isStale(row)) {
       const taken = await claimExisting(deps.db, row);
@@ -688,26 +697,57 @@ async function obtainTemplate(deps: TemplateWriterDeps, chain: ChainType): Promi
 
 export interface ChainTemplates {
   get(chain: ChainType): Promise<ChainTemplate>;
+  /**
+   * Офферы, чей шаблон не написан из-за молчания модели (ошибка, а не
+   * замечания проверки), — забыть и занять заново. Один раз на оффер за
+   * запуск: раннер зовёт это на шаге писем следующей волны, и следующий get()
+   * по оферу снова зовёт писателя. Возвращает офферы, которым дан повтор.
+   */
+  retryFailed(): ChainType[];
 }
 
 /**
  * Шаблоны запуска в воркере: один промис на оффер — компании оффера, дошедшие
- * до писем одновременно, ждут одного писателя.
+ * до писем одновременно, ждут одного писателя. Провал по замечаниям проверки
+ * запоминается до конца запуска (писатель ответил — повтор уже был внутри
+ * записи). Провал из-за молчания модели запоминается только до следующей волны:
+ * Requesty или Gemini могли лечь на минуту.
  */
 export function createChainTemplates(deps: TemplateWriterDeps): ChainTemplates {
   const byChain = new Map<ChainType, Promise<ChainTemplate>>();
+  const settled = new Map<ChainType, ChainTemplate>();
+  const retried = new Set<ChainType>();
+  const retrying = new Set<ChainType>();
   return {
     get(chain) {
       const known = byChain.get(chain);
       if (known) return known;
-      const promise = obtainTemplate(deps, chain);
+      const promise = obtainTemplate(deps, chain, retrying.has(chain));
       byChain.set(chain, promise);
-      // Сбой базы — не ответ писателя: следующая компания оффера попробует
-      // снова. Лимит на ИИ и ключ — про весь запуск, их запоминаем.
-      promise.catch((err: unknown) => {
-        if (!(err instanceof BudgetExceededError) && !(err instanceof LlmAuthError)) byChain.delete(chain);
-      });
+      promise.then(
+        (template) => {
+          settled.set(chain, template);
+          retrying.delete(chain);
+        },
+        (err: unknown) => {
+          // Сбой базы — не ответ писателя: следующая компания оффера попробует
+          // снова. Лимит на ИИ и ключ — про весь запуск, их запоминаем.
+          if (!(err instanceof BudgetExceededError) && !(err instanceof LlmAuthError)) byChain.delete(chain);
+        },
+      );
       return promise;
+    },
+    retryFailed() {
+      const chains: ChainType[] = [];
+      for (const [chain, template] of settled) {
+        if (template.status !== 'failed' || !template.error || retried.has(chain)) continue;
+        retried.add(chain);
+        retrying.add(chain);
+        settled.delete(chain);
+        byChain.delete(chain);
+        chains.push(chain);
+      }
+      return chains;
     },
   };
 }

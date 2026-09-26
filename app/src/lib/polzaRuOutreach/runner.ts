@@ -17,7 +17,11 @@
  *     оффера: его один раз на оффер запуска пишет Gemini 3.1 Pro
  *     (letters/templateWriter.ts), под компанию подставляются проверенные
  *     факты. Шаблон не прошёл проверку или письма компании не прошли
- *     автопроверку — строка очень спорная (спека §4).
+ *     автопроверку — строка очень спорная (спека §4). Строки, ждущие шаблон
+ *     оффера, идут в счёт заказанного числа — их поднимет «Переписать
+ *     цепочку», и разбор сверх этого не покупаем. Шаблон, который модель не
+ *     написала (ошибка, а не замечания проверки), пишется ещё раз на следующей
+ *     волне или в конце запуска; снова нет и ни одного написанного — стоп.
  *
  * Волна идёт тремя пулами по очереди: почта (свой параллелизм — обход сайта и
  * SMTP-проверка больше ждут, чем работают), разбор ИИ, письма.
@@ -607,23 +611,42 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
       if (!analysisBudgetLeft()) budgetStop = true;
       return budgetStop;
     };
-    // Предохранитель «писатель молчит»: WRITER_FAIL_OFFERS офферов подряд без
-    // шаблона из-за «ИИ не ответил» и ни одного написанного — лежит Gemini
-    // (или Requesty), и каждая следующая компания ушла бы в спорные без писем.
+    // Предохранитель «писатель молчит»: ни одного написанного шаблона, а
+    // модель не ответила на WRITER_FAIL_OFFERS офферах — или на одном, но и в
+    // повторе на следующей волне. Значит, лежит Gemini (или Requesty), и каждая
+    // следующая компания ушла бы в спорные без писем. Провал по замечаниям
+    // проверки не в счёт: писатель отвечает. Считаем попытки записи (attempt
+    // шаблона), а не строки: строк у одной попытки много.
     let writerWorks = false;
-    const writerFailures = new Map<ChainType, string>();
+    const writerFailures = new Map<ChainType, { error: string; attempts: Set<number> }>();
     const noteTemplate = (template: ChainTemplate) => {
       if (template.status === 'ok') {
         writerWorks = true;
         return;
       }
       if (!template.error || writerWorks) return;
-      writerFailures.set(template.chain, template.error);
-      if (writerFailures.size >= WRITER_FAIL_OFFERS) {
-        const list = [...writerFailures].map(([chain, error]) => `«${CHAIN_LABELS[chain]}» — ${error}`).join('; ');
+      const seen = writerFailures.get(template.chain) ?? { error: template.error, attempts: new Set<number>() };
+      seen.error = template.error;
+      seen.attempts.add(template.attempt);
+      writerFailures.set(template.chain, seen);
+      const failedTwice = [...writerFailures.values()].some((f) => f.attempts.size >= 2);
+      if (writerFailures.size >= WRITER_FAIL_OFFERS || failedTwice) {
+        const list = [...writerFailures].map(([chain, f]) => `«${CHAIN_LABELS[chain]}» — ${f.error}`).join('; ');
         throw new LlmSilentError(`Gemini не пишет цепочки: ${list}`.slice(0, 1000));
       }
     };
+    // Строки, которые ждут шаблон оффера, не прошедший проверку или не
+    // написанный (очень спорные с TEMPLATE_FAILED). «Переписать цепочку» может
+    // сделать их готовыми, поэтому они идут в счёт заказанного числа: иначе
+    // запуск докупал бы разбор новых компаний сверх того, что потом можно
+    // выложить.
+    const awaiting = { count: 0 };
+    // Из них — те, чей шаблон не написан из-за молчания модели: на шаге писем
+    // следующей волны (или в конце запуска) шаблон пишется ещё раз, и эти
+    // строки собираются заново.
+    const parked = new Map<ChainType, Qualified[]>();
+    const parkedIds = new Set<string>();
+    const retriedChains = new Set<ChainType>();
     // Ключ ИИ отвергнут или ИИ молчит: запуск уже падает — остальным потокам
     // новых строк не брать.
     let halted = false;
@@ -669,9 +692,11 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
 
     // llm — снимок расходов: экран пишет «ИИ: потрачено $X из $Y».
     // smtp_unavailable — плашка «SMTP-проверка почт недоступна».
+    // awaiting_templates — сколько компаний ждут «Переписать цепочку».
     const detail = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
       wave: waveNo, target, pool: pool.length, scanned: totals.scanned, ready: totals.ready, funnel, reasons, chains, sdr,
       offer_version: libraries.offerVersion, source_errors: sourceErrors, doubtful: doubtful.count, llm: budget.snapshot(),
+      awaiting_templates: awaiting.count,
       ...(smtpOn ? {} : { smtp_unavailable: true }), ...extra,
     });
     currentDetail = () => detail();
@@ -1200,16 +1225,38 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
       for (const wake of waiting) wake();
     };
 
+    /** Признаки сомнения с оценки — без признака шага писем (строка собирается заново). */
+    const scoringDoubts = (q: Qualified) => ({ doubt_flags: q.doubts.flags, doubt_detail: q.doubts.detail.join('; ') || null });
+
     // ── Шаг 3: письма и QA — только прошедшим порог и не очень спорным ──
     const finalize = async (q: Qualified) => {
+      // Строка ждала шаблон, который модель не написала, и собирается заново:
+      // из ждущих и очень спорных она выходит (вернётся, если шаблон опять не
+      // выйдет).
+      const retry = parkedIds.delete(q.id);
+      if (retry) {
+        awaiting.count -= 1;
+        doubtful.count -= 1;
+      }
       // Лимит готовых набран — строка оценку прошла, а до писем не дошла: стоит
       // на этапе писем, воронка (funnel.ts) считает её до «Оценки» включительно.
       if (!(await takeLettersSlot())) {
-        await finish(q.id, { stage: 'sequence_assembled', status: 'manual_review', reason: 'LIMIT_REACHED', detail: 'лимит готовых компаний уже набран' });
+        await finish(q.id, { stage: 'sequence_assembled', status: 'manual_review', reason: 'LIMIT_REACHED', detail: 'лимит готовых компаний уже набран' }, scoringDoubts(q));
         return;
       }
       try {
         await buildLetters(q);
+      } catch (err) {
+        // Повтор записи шаблона упёрся в лимит на ИИ: в базе строка не
+        // менялась и по-прежнему ждёт шаблон — оставляем её так, а не в
+        // необработанные (её разбор оплачен, «Переписать цепочку» её поднимет).
+        if (retry && err instanceof BudgetExceededError) {
+          budgetStop = true;
+          awaiting.count += 1;
+          doubtful.count += 1;
+          return;
+        }
+        throw err;
       } finally {
         releaseLettersSlot();
       }
@@ -1225,8 +1272,15 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
       if (template.status !== 'ok' || !template.letters) {
         // Шаблон оффера не прошёл проверку или не написан — письма собирать не
         // из чего. Строка очень спорная и стоит на этапе писем (оценку прошла,
-        // писем нет); «Переписать цепочку» найдёт её по TEMPLATE_FAILED.
+        // писем нет); «Переписать цепочку» найдёт её по TEMPLATE_FAILED. Она
+        // идёт в счёт заказанного числа (awaiting). Модель не ответила и
+        // повтора ещё не было — строка соберётся заново на следующей волне.
         doubtful.count += 1;
+        awaiting.count += 1;
+        if (template.error && !retriedChains.has(q.route.chain)) {
+          parkedIds.add(q.id);
+          parked.set(q.route.chain, [...(parked.get(q.route.chain) ?? []), q]);
+        }
         await updateRow(q.id, {
           ...withLettersDoubt(q.doubts.flags, scoringDetail, 'TEMPLATE_FAILED', templateDoubtText(template)),
           chain_template_id: template.id,
@@ -1295,12 +1349,14 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
       // бывает — страховка. Строка стоит на «Готово», воронка считает её до
       // проверки писем включительно.
       if (totals.ready >= target) {
-        await finish(q.id, { stage: 'ready', status: 'manual_review', reason: 'LIMIT_REACHED', detail: 'лимит готовых компаний уже набран' }, base);
+        await finish(q.id, { stage: 'ready', status: 'manual_review', reason: 'LIMIT_REACHED', detail: 'лимит готовых компаний уже набран' }, { ...base, ...scoringDoubts(q) });
         return;
       }
       totals.ready += 1;
       reach(q.tally, 'ready');
-      await updateRow(q.id, { ...base, row_status: 'ready', pipeline_stage: 'ready', reason_code: null, reason_detail: null });
+      // Признаки сомнения — с оценки: у строки, ждавшей шаблон, в базе ещё стоит
+      // TEMPLATE_FAILED.
+      await updateRow(q.id, { ...base, ...scoringDoubts(q), row_status: 'ready', pipeline_stage: 'ready', reason_code: null, reason_detail: null });
     };
 
     const safe = async (id: string, tally: Tally, fn: () => Promise<void>) => {
@@ -1367,13 +1423,57 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
       }
     };
 
-    while (totals.ready < target && totals.scanned < maxScan && cursor < pool.length) {
+    /**
+     * Шаг писем: pre-LPR rerank, от самых сильных к слабым. Лимит на ИИ здесь
+     * не проверяем: по готовому шаблону оффера письма бесплатны, а
+     * необязательную гипотезу сегментов после лимита просто пропускаем — уже
+     * оплаченный разбор доводим до готовых. Шаблон, который ещё не написан,
+     * после лимита не написать: такие строки вернутся в необработанные
+     * (BudgetExceededError в safe()). Сюда же — строки, чей шаблон модель не
+     * написала на прошлой волне: шаблон пишется ещё раз, один на оффер.
+     */
+    const lettersStep = async (fresh: Qualified[]) => {
+      const again = templates.retryFailed();
+      const retryRows: Qualified[] = [];
+      for (const chain of again) {
+        retriedChains.add(chain);
+        retryRows.push(...(parked.get(chain) ?? []));
+        parked.delete(chain);
+      }
+      if (again.length) {
+        log('info', `job ${jobId}: writing chain templates again after the model did not answer: ${again.join(', ')} (${retryRows.length} rows waiting)`);
+      }
+      // При равной оценке — сначала ждавшие с прошлой волны: они раньше в пуле
+      // и уже разобраны (сортировка устойчивая).
+      const rows = [...retryRows, ...fresh].sort((a, b) => b.score.total - a.score.total);
+      phase = 'writing_letters';
+      await publish(phase, { qualified: fresh.length });
+      // Шаблоны офферов — заранее и все сразу: иначе четыре потока писем ждали
+      // бы писателя по очереди, оффер за оффером. Только офферы строк, которым
+      // хватит мест в лимите готовых, — за лишний оффер не платим. Ошибку
+      // записи увидит строка оффера в finalize.
+      if (!halted) {
+        const room = Math.max(0, target - totals.ready);
+        for (const chain of new Set(rows.slice(0, room).map((q) => q.route.chain))) {
+          templates.get(chain).catch(() => undefined);
+        }
+      }
+      await runPool(rows, LETTERS_CONCURRENCY, async (q) => {
+        if (halted) return;
+        await ensureNotCancelled();
+        await safe(q.id, q.tally, () => finalize(q));
+      });
+    };
+
+    // Строки, ждущие шаблон оффера, — в счёт заказанного: их поднимет
+    // «Переписать цепочку», и разбор сверх этого — выброшенные деньги.
+    while (totals.ready + awaiting.count < target && totals.scanned < maxScan && cursor < pool.length) {
       // Лимит на ИИ исчерпан — новую волну не начинаем: её строкам нужен разбор.
       // Внутри волны шаг почты ИИ не тратит, поэтому лимит в нём не кончается.
       if (stopForBudget()) break;
       await ensureNotCancelled();
       waveNo += 1;
-      const want = Math.min(nextWaveSize(target, totals), maxScan - totals.scanned);
+      const want = Math.min(nextWaveSize(target, { scanned: totals.scanned, ready: totals.ready + awaiting.count }), maxScan - totals.scanned);
       const wave = pool.slice(cursor, cursor + want);
       cursor += wave.length;
 
@@ -1443,30 +1543,16 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
         });
       });
 
-      // Шаг 3: письма — pre-LPR rerank, от самых сильных к слабым.
-      // Лимит здесь не проверяем: по готовому шаблону оффера письма
-      // бесплатны, а необязательную гипотезу сегментов после лимита просто
-      // пропускаем — уже оплаченный разбор доводим до готовых. Шаблон, который
-      // ещё не написан, после лимита не написать: такие строки вернутся в
-      // необработанные (BudgetExceededError в safe()).
-      qualified.sort((a, b) => b.score.total - a.score.total);
-      phase = 'writing_letters';
-      await publish(phase, { qualified: qualified.length });
-      // Шаблоны офферов волны — заранее и все сразу: иначе четыре потока писем
-      // ждали бы писателя по очереди, оффер за оффером. Только офферы строк,
-      // которым хватит мест в лимите готовых, — за лишний оффер не платим.
-      // Ошибку записи увидит строка оффера в finalize.
-      if (!halted) {
-        const room = Math.max(0, target - totals.ready);
-        for (const chain of new Set(qualified.slice(0, room).map((q) => q.route.chain))) {
-          templates.get(chain).catch(() => undefined);
-        }
-      }
-      await runPool(qualified, LETTERS_CONCURRENCY, async (q) => {
-        if (halted) return;
-        await ensureNotCancelled();
-        await safe(q.id, q.tally, () => finalize(q));
-      });
+      // Шаг 3: письма.
+      await lettersStep(qualified);
+    }
+
+    // Волн больше не будет, а строки ждут шаблон, который модель не написала:
+    // повтор записи им положен — сейчас, один раз. Лимит исчерпан — писать не
+    // на что, строки ждут «Переписать цепочку».
+    if (!halted && parked.size && !budget.exhausted()) {
+      await ensureNotCancelled();
+      await lettersStep([]);
     }
 
     // Пока добегала последняя волна, запуск могли остановить — не перетираем «Остановлено».
@@ -1491,9 +1577,13 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
       }
     }
 
+    // awaiting_templates — заказанное набрано вместе с компаниями, которые
+    // ждут «Переписать цепочку»: разбор новых компаний на этом остановлен.
     const stopReason = totals.ready >= target
       ? 'target_reached'
-      : budgetStop ? 'budget' : cursor >= pool.length ? 'pool_exhausted' : 'scan_limit';
+      : totals.ready + awaiting.count >= target
+        ? 'awaiting_templates'
+        : budgetStop ? 'budget' : cursor >= pool.length ? 'pool_exhausted' : 'scan_limit';
     const spend = budget.snapshot();
     log('info', `job ${jobId} done: scanned=${totals.scanned} ready=${totals.ready}/${target} (${stopReason}), llm $${spend.spent_usd}/$${spend.limit_usd} in ${spend.calls} calls`, { reasons, chains });
     // Тоже только идущему: остановку между проверкой выше и этой записью не перетираем.
