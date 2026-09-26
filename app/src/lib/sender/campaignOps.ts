@@ -390,6 +390,56 @@ async function poolHasWorkingMailbox(mailboxIds: string[]): Promise<boolean> {
 }
 
 /**
+ * Статусы письма, при которых шаг получателя уже занят: письмо ждёт отправки
+ * (scheduled, sending), упало (failed) или с неизвестным исходом (unknown).
+ * Второй раз такой шаг не ставится — уникальность (recipient_id, step_no).
+ * Отменённые (canceled) к этому моменту startCampaign уже удалил.
+ */
+const STEP_TAKEN_STATUSES = ['scheduled', 'sending', 'failed', 'unknown'];
+/** Страница чтения очереди: больше PostgREST за раз не отдаёт. */
+const PAGE = 1000;
+
+/**
+ * Активные получатели кампании, у которых письмо текущего шага
+ * (last_step_sent + 1) уже есть. Отправленные письма не читаются: после
+ * отправки шаг получателя сдвигается (sendWorker.afterSend), а их в большой
+ * кампании десятки тысяч.
+ */
+async function recipientsWithTakenStep(campaignId: string): Promise<string[]> {
+  const db = requireDb();
+  const stepsOf = new Map<string, Set<number>>();
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await db
+      .from('sender_messages')
+      .select('id, recipient_id, step_no')
+      .eq('campaign_id', campaignId)
+      .in('status', STEP_TAKEN_STATUSES)
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new SenderOpError(error.message, 500);
+    for (const row of data ?? []) {
+      const recipientId = String(row.recipient_id);
+      stepsOf.set(recipientId, (stepsOf.get(recipientId) ?? new Set<number>()).add(Number(row.step_no)));
+    }
+    if (!data || data.length < PAGE) break;
+  }
+
+  const taken: string[] = [];
+  for (const part of chunkForInFilter([...stepsOf.keys()])) {
+    const { data, error } = await db
+      .from('sender_recipients')
+      .select('id, last_step_sent')
+      .in('id', part)
+      .eq('status', 'active');
+    if (error) throw new SenderOpError(error.message, 500);
+    for (const row of data ?? []) {
+      if (stepsOf.get(String(row.id))?.has(Number(row.last_step_sent) + 1)) taken.push(String(row.id));
+    }
+  }
+  return taken;
+}
+
+/**
  * Запустить кампанию. Получатели, которым ещё ничего не отправляли, встают в
  * очередь немедленно: дальше их разложит по окну отправки планировщик.
  *
@@ -469,6 +519,22 @@ export async function startCampaign(campaignId: string): Promise<void> {
     .eq('status', 'active')
     .is('next_step_at', null);
   if (requeueError) throw new SenderOpError(requeueError.message, 500);
+
+  // Кроме тех, чьё письмо текущего шага уже есть: пауза застаёт письма в
+  // отправке (claim переводит их в unknown), бывают упавшие. Такому шагу
+  // второй раз не бывать, а в очереди получатель упирался бы в уникальность
+  // на каждом проходе планировщика и стоял бы в голове его выборки. Снимаем
+  // после общей постановки — одним запросом по всем её не выразить; кампания
+  // до смены статуса не идёт, и планировщик их в этом промежутке не видит.
+  const taken = await recipientsWithTakenStep(campaignId);
+  for (const part of chunkForInFilter(taken)) {
+    const { error: holdError } = await db
+      .from('sender_recipients')
+      .update({ next_step_at: null, updated_at: nowIso })
+      .in('id', part)
+      .eq('status', 'active');
+    if (holdError) throw new SenderOpError(holdError.message, 500);
+  }
 
   // Смена статуса — одним условным обновлением: из двух одновременных
   // «Запустить» (или «Запустить» и «Завершить») проходит одно, второе видит,

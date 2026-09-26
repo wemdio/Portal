@@ -16,12 +16,16 @@ import type { CampaignRow, MailboxRow, RecipientRow, StepRow } from './types';
  *     иначе очередь за один проход выберет недельный объём;
  *   • письма ставятся с паузой друг от друга и только внутрь окна отправки;
  *   • адрес из стоп-листа не получает письмо, а лид закрывается;
- *   • письмо, пустое после подстановки переменных, не ставится в очередь.
+ *   • письмо, пустое после подстановки переменных, не ставится в очередь;
+ *   • шаг ставится один раз: если его письмо уже есть, получатель снимается
+ *     с планирования, а не стоит в голове очереди (settleTakenStep).
  */
 
 type Log = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => void;
 
 const RECIPIENTS_PER_CAMPAIGN = 500;
+/** SQLSTATE нарушения уникальности — PostgREST отдаёт его в error.code. */
+const UNIQUE_VIOLATION = '23505';
 /**
  * Ящиков пула за один запрос. in-фильтр уезжает в адрес запроса, а шлюз перед
  * PostgREST режет адреса длиннее ~9–13 КБ (414): пул папки на 200+ ящиков
@@ -146,6 +150,61 @@ async function loadWorkingMailboxes(mailboxIds: string[]): Promise<MailboxRow[]>
   return mailboxes;
 }
 
+/**
+ * Письмо текущего шага у получателя уже есть — вставка упёрлась в уникальность
+ * (recipient_id, step_no). Так бывает после паузы: продолжение ставит в
+ * очередь всех активных без next_step_at, а письмо шага могло упасть (failed),
+ * остаться с неизвестным исходом (unknown — в том числе снятое с паузы прямо
+ * в отправке) или ещё ждать отправки. Второй раз шаг не ставится никогда, но
+ * и оставить получателя как есть нельзя: next_step_at в прошлом держал бы его
+ * в голове выборки (order by next_step_at, limit) и на каждом проходе он
+ * упирался бы в ту же уникальность, а за ним ждали бы все остальные.
+ *
+ *   • Отменённое письмо никуда не уходило — удаляем, шаг встанет следующим
+ *     проходом (как при продолжении после паузы, campaignOps.startCampaign).
+ *   • Остальное — снимаем получателя с планирования (next_step_at = null):
+ *     ждущее письмо уйдёт само, и следующий шаг назначит отправка
+ *     (sendWorker.afterSend); упавшее и неизвестное остаются оператору — как
+ *     и без паузы, повтор шага мог бы стать дублем.
+ *
+ * Снимаем только если получатель всё ещё на этом шаге (last_step_sent): между
+ * чтением и этой записью отправка могла закончить шаг и назначить следующий.
+ *
+ * retry — шаг встанет следующим проходом; held — получатель снят с
+ * планирования. Сбой запроса — исключение: получатель остаётся как был, и
+ * следующий проход попробует снова.
+ */
+async function settleTakenStep(recipient: RecipientRow, stepNo: number): Promise<'retry' | 'held'> {
+  if (!supabaseAdmin) throw new Error('нет подключения к базе');
+  const db = supabaseAdmin;
+  const { data: existing, error } = await db
+    .from('sender_messages')
+    .select('id, status')
+    .eq('recipient_id', recipient.id)
+    .eq('step_no', stepNo)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  // Письма уже нет — его успели удалить (продолжение после паузы убирает отменённые).
+  if (!existing) return 'retry';
+  if (existing.status === 'canceled') {
+    const { error: deleteError } = await db
+      .from('sender_messages')
+      .delete()
+      .eq('id', existing.id)
+      .eq('status', 'canceled');
+    if (deleteError) throw new Error(deleteError.message);
+    return 'retry';
+  }
+  const { error: holdError } = await db
+    .from('sender_recipients')
+    .update({ next_step_at: null, updated_at: new Date().toISOString() })
+    .eq('id', recipient.id)
+    .eq('status', 'active')
+    .eq('last_step_sent', recipient.last_step_sent);
+  if (holdError) throw new Error(holdError.message);
+  return 'held';
+}
+
 function pickSlot(slots: MailboxSlot[], recipient: RecipientRow): MailboxSlot | null {
   // Уже закреплённый ящик: если он ещё в пуле и лимит не выбран — только он,
   // иначе лид ждёт следующего окна. Менять отправителя посреди цепочки нельзя:
@@ -225,6 +284,9 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
   // отметить его «ответил», «отбой» или «отписался», и без условия планировщик
   // затёр бы ответ своим «пройден» или «стоп-лист».
   let planned = 0;
+  // Сняты с планирования: письмо их текущего шага уже есть (settleTakenStep).
+  // В лог — одной строкой за проход, а не строкой на каждого.
+  const held: string[] = [];
   for (const recipient of recipients) {
     if (suppressed.has(recipient.email)) {
       await db
@@ -305,8 +367,15 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
     });
 
     if (error) {
-      // Уникальный индекс (recipient_id, step_no) — письмо уже запланировано
-      // другим проходом. Это не ошибка, просто пропускаем.
+      if (error.code === UNIQUE_VIOLATION) {
+        // Письмо этого шага уже есть — второй раз шаг не ставим (settleTakenStep).
+        try {
+          if ((await settleTakenStep(recipient, stepNo)) === 'held') held.push(recipient.email);
+        } catch (e) {
+          log('warn', `Кампания ${campaign.name}: письмо шага ${stepNo} для ${recipient.email} уже есть, но разобрать его не вышло — повтор на следующем проходе`, e);
+        }
+        continue;
+      }
       log('warn', `Не удалось запланировать письмо для ${recipient.email}: ${error.message}`);
       continue;
     }
@@ -325,6 +394,13 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
     planned += 1;
   }
 
+  if (held.length) {
+    const sample = held.slice(0, 5).join(', ') + (held.length > 5 ? ', …' : '');
+    log(
+      'warn',
+      `Кампания ${campaign.name}: у ${held.length} получателей письмо текущего шага уже есть (ждёт отправки, упало или с неизвестным исходом) — сняты с планирования, второй раз шаг не ставится: ${sample}`,
+    );
+  }
   return planned;
 }
 
