@@ -1,24 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/sender/apiHelpers';
+import {
+  EDITABLE_CAMPAIGN_STATUSES,
+  replaceSteps,
+  SenderOpError,
+  startCampaign,
+  validateCampaignDraft,
+  type CampaignStepInput,
+} from '@/lib/sender/campaignOps';
 import { describeSavedRecipients, mergeVariableStats } from '@/lib/sender/recipientImport';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
 
-interface StepInput {
-  /** Задержка от предыдущего шага в часах; у первого письма игнорируется. */
-  delayHours?: number;
-  subject?: string;
-  body?: string;
-}
-
 interface PatchBody {
   action?: 'start' | 'pause' | 'finish';
   /** Правка настроек: приезжает вместо action. */
   name?: string;
   mailboxIds?: string[];
-  steps?: StepInput[];
+  steps?: CampaignStepInput[];
   timezone?: string;
   sendHourFrom?: number;
   sendHourTo?: number;
@@ -27,7 +28,6 @@ interface PatchBody {
   gapJitterSeconds?: number;
 }
 
-const MAX_STEPS = 5;
 /**
  * Сколько получателей читаем ради примеров значений в подсказках формы.
  * Сами ключи и счётчики «заполнено у N» считаются по всей базе
@@ -36,9 +36,6 @@ const MAX_STEPS = 5;
  * сохранить.
  */
 const VARS_SAMPLE = 1000;
-
-/** Редактировать можно то, что ещё не едет: черновик и остановленную кампанию. */
-const EDITABLE_STATUSES = ['draft', 'paused'];
 
 /** GET — кампания целиком: шаги, ящики, база получателей и её переменные. */
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -138,7 +135,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
         exact,
         columns,
       },
-      editable: EDITABLE_STATUSES.includes(String(campaign.status)),
+      editable: EDITABLE_CAMPAIGN_STATUSES.includes(String(campaign.status)),
     });
   });
 }
@@ -157,19 +154,17 @@ async function updateSettings(id: string, body: PatchBody) {
   const { data: campaign } = await supabaseAdmin
     .from('sender_campaigns').select('id, status').eq('id', id).maybeSingle();
   if (!campaign) return jsonError('Кампания не найдена', 404);
-  if (!EDITABLE_STATUSES.includes(String(campaign.status))) {
+  if (!EDITABLE_CAMPAIGN_STATUSES.includes(String(campaign.status))) {
     return jsonError('Идущую и завершённую кампанию править нельзя — сначала поставьте на паузу', 409);
   }
 
-  const name = (body.name ?? '').trim();
-  if (!name) return jsonError('Укажите название кампании', 400);
-
-  const mailboxIds = [...new Set((body.mailboxIds ?? []).filter((v) => typeof v === 'string' && v))];
-  if (!mailboxIds.length) return jsonError('Выберите хотя бы один ящик', 400);
-
-  const steps = (body.steps ?? []).slice(0, MAX_STEPS).filter((step) => (step.body ?? '').trim());
-  if (!steps.length) return jsonError('Добавьте хотя бы одно письмо', 400);
-  if (!(steps[0].subject ?? '').trim()) return jsonError('У первого письма должна быть тема', 400);
+  // Та же проверка, что при создании (campaignOps): ошибка — SenderOpError,
+  // её в ответ превращает PATCH.
+  const { name, mailboxIds, steps } = validateCampaignDraft({
+    name: body.name ?? '',
+    mailboxIds: body.mailboxIds ?? [],
+    steps: body.steps ?? [],
+  });
 
   const nowIso = new Date().toISOString();
   const { error } = await supabaseAdmin
@@ -195,17 +190,7 @@ async function updateSettings(id: string, body: PatchBody) {
     .insert(mailboxIds.map((mailboxId) => ({ campaign_id: id, mailbox_id: mailboxId })));
   if (poolError) return jsonError(poolError.message, 500);
 
-  await supabaseAdmin.from('sender_campaign_steps').delete().eq('campaign_id', id);
-  const { error: stepsError } = await supabaseAdmin.from('sender_campaign_steps').insert(
-    steps.map((step, index) => ({
-      campaign_id: id,
-      step_no: index + 1,
-      delay_hours: index === 0 ? 0 : Math.max(1, Math.round(step.delayHours ?? 72)),
-      subject: (step.subject ?? '').trim(),
-      body: (step.body ?? '').trim(),
-    })),
-  );
-  if (stepsError) return jsonError(stepsError.message, 500);
+  await replaceSteps(id, steps);
 
   // Лид закреплён за ящиком на всю переписку. Если ящик убрали из пула, те,
   // кому ещё не писали, зависли бы навсегда: планировщик ждёт именно «свой»
@@ -233,9 +218,8 @@ async function updateSettings(id: string, body: PatchBody) {
 
 /**
  * PATCH — запустить, поставить на паузу или закрыть кампанию; без action —
- * правка настроек.
- * При запуске получатели, которым ещё ничего не отправляли, становятся в
- * очередь немедленно: дальше их разложит по окну отправки планировщик.
+ * правка настроек. Запуск — campaignOps.startCampaign: тем же путём рассылку
+ * запускает кнопка на экране автоаутрича.
  */
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'tools.sender.campaigns.patch' }, async () => {
@@ -246,58 +230,32 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     const { id } = await params;
     const body = (await req.json().catch(() => null)) as PatchBody | null;
     if (!body) return jsonError('Невалидный JSON', 400);
-    if (!body.action) return updateSettings(id, body);
 
-    const nowIso = new Date().toISOString();
-
-    if (body.action === 'start') {
-      const { count } = await supabaseAdmin
-        .from('sender_recipients')
-        .select('id', { count: 'exact', head: true })
-        .eq('campaign_id', id)
-        .eq('status', 'active');
-      if (!count) return jsonError('В кампании нет получателей', 422);
-
-      const { count: mailboxCount } = await supabaseAdmin
-        .from('sender_campaign_mailboxes')
-        .select('mailbox_id', { count: 'exact', head: true })
-        .eq('campaign_id', id);
-      if (!mailboxCount) return jsonError('В кампании нет ящиков', 422);
-
-      // Пауза отменяет запланированные письма, но строки остаются, а у очереди
-      // есть уникальность (recipient_id, step_no). Без уборки повторный запуск
-      // упирался бы в неё и молча не отправлял ничего тем, кто стоял в очереди
-      // на момент паузы. Отменённое письмо никуда не уходило — удаляем.
-      await supabaseAdmin
-        .from('sender_messages')
-        .delete()
-        .eq('campaign_id', id)
-        .eq('status', 'canceled');
-
-      await supabaseAdmin
-        .from('sender_recipients')
-        .update({ next_step_at: nowIso, updated_at: nowIso })
-        .eq('campaign_id', id)
-        .eq('status', 'active')
-        .is('next_step_at', null);
+    try {
+      if (!body.action) return await updateSettings(id, body);
+      if (body.action === 'start') {
+        await startCampaign(id);
+        return NextResponse.json({ ok: true, status: 'running' });
+      }
+    } catch (e) {
+      if (e instanceof SenderOpError) return jsonError(e.message, e.status);
+      throw e;
     }
 
-    const status = body.action === 'start' ? 'running' : body.action === 'pause' ? 'paused' : 'done';
-    const patch: Record<string, unknown> = { status, updated_at: nowIso };
-    if (body.action === 'start') patch.started_at = nowIso;
-
-    const { error } = await supabaseAdmin.from('sender_campaigns').update(patch).eq('id', id);
+    const status = body.action === 'pause' ? 'paused' : 'done';
+    const { error } = await supabaseAdmin
+      .from('sender_campaigns')
+      .update({ status, updated_at: new Date().toISOString() })
+      .eq('id', id);
     if (error) return jsonError(error.message, 500);
 
     // Пауза и закрытие снимают уже запланированные, но ещё не отправленные
     // письма: иначе кампания продолжила бы «доезжать» после остановки.
-    if (body.action !== 'start') {
-      await supabaseAdmin
-        .from('sender_messages')
-        .update({ status: 'canceled' })
-        .eq('campaign_id', id)
-        .eq('status', 'scheduled');
-    }
+    await supabaseAdmin
+      .from('sender_messages')
+      .update({ status: 'canceled' })
+      .eq('campaign_id', id)
+      .eq('status', 'scheduled');
 
     return NextResponse.json({ ok: true, status });
   });

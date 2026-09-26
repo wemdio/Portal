@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/sender/apiHelpers';
+import { importRecipients, SenderOpError, type ImportRecipientsResult } from '@/lib/sender/campaignOps';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { FileParseError, parseMailboxFile } from '@/lib/sender/fileParse';
-import { parseRecipientRows } from '@/lib/sender/recipientImport';
+import { recipientRowsFromFile, type RecipientInput } from '@/lib/sender/recipientImport';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
-const INSERT_CHUNK = 500;
 const PAGE_SIZE = 30;
 
 const STATUS_LABELS: Record<string, string> = {
@@ -76,14 +76,9 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 }
 
 /**
- * POST — загрузка базы получателей файлом (CSV/XLSX).
- * Адреса из стоп-листа в кампанию не попадают, повторная загрузка того же
- * файла не создаёт дублей: адрес уникален в пределах кампании.
- *
- * Поле mode=replace заменяет базу, а не дополняет: из кампании уходят только
- * те, кому ещё ничего не планировали и не отправляли. Переписки замена не
- * трогает — иначе «перезалить базу» означало бы потерять историю по тем, кто
- * уже получил письмо и, может быть, ответил.
+ * POST — загрузка базы получателей файлом (CSV/XLSX). Правила заливки — стоп-
+ * лист, дубли, пустое первое письмо, замена базы (поле mode=replace) — в
+ * campaignOps.importRecipients: той же функцией базу заливает автоаутрич.
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'tools.sender.recipients.import' }, async () => {
@@ -92,15 +87,6 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     if (!supabaseAdmin) return jsonError('Сервис не настроен', 503);
 
     const { id: campaignId } = await params;
-    const { data: campaign } = await supabaseAdmin
-      .from('sender_campaigns')
-      .select('id, status')
-      .eq('id', campaignId)
-      .maybeSingle();
-    if (!campaign) return jsonError('Кампания не найдена', 404);
-    // База, долитая в уже идущую кампанию, должна поехать сразу: у черновика
-    // очередь выставляется в момент запуска.
-    const nextStepAt = campaign.status === 'running' ? new Date().toISOString() : null;
 
     let form: FormData;
     try {
@@ -114,78 +100,48 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     if (file.size > MAX_FILE_BYTES) return jsonError('Файл больше 20 МБ', 400);
 
     const replace = String(form.get('mode') ?? '') === 'replace';
-    if (replace && !['draft', 'paused'].includes(String(campaign.status))) {
-      return jsonError('Заменить базу можно у черновика или остановленной кампании', 409);
-    }
 
-    // Чистим до разбора файла, но после проверок статуса: если файл окажется
-    // битым, старую базу уже не вернуть, поэтому разбираем его первым делом.
-    let parsed;
+    // Файл разбирается целиком до любых записей: битый файл при замене базы
+    // не должен успеть стереть старую.
+    let rows: RecipientInput[];
     let fileRows: number;
     try {
       const parsedFile = parseMailboxFile(file.name, Buffer.from(await file.arrayBuffer()));
       fileRows = parsedFile.totalRows;
-      parsed = parseRecipientRows(parsedFile.rows);
+      rows = recipientRowsFromFile(parsedFile.rows);
     } catch (e) {
       if (e instanceof FileParseError) return jsonError(e.message, 400);
       return jsonError(`Не удалось прочитать файл: ${e instanceof Error ? e.message : String(e)}`, 400);
     }
 
-    if (!parsed.recipients.length) {
-      return jsonError('В файле не нашлось ни одного корректного адреса', 400);
+    let result: ImportRecipientsResult;
+    try {
+      result = await importRecipients(campaignId, rows, { mode: replace ? 'replace' : 'append' });
+    } catch (e) {
+      if (e instanceof SenderOpError) return jsonError(e.message, e.status);
+      throw e;
     }
 
-    if (replace) {
-      // mailbox_id проставляется ровно в тот момент, когда планировщик завёл
-      // письмо, поэтому «пустой ящик и нулевой шаг» — это и есть «мы к нему
-      // ещё не прикасались».
-      const { error: wipeError } = await supabaseAdmin
-        .from('sender_recipients')
-        .delete()
-        .eq('campaign_id', campaignId)
-        .eq('last_step_sent', 0)
-        .is('mailbox_id', null);
-      if (wipeError) return jsonError(wipeError.message, 500);
-    }
-
-    const emails = parsed.recipients.map((r) => r.email);
-    const suppressed = new Set<string>();
-    for (let i = 0; i < emails.length; i += INSERT_CHUNK) {
-      const { data } = await supabaseAdmin
-        .from('sender_suppressions')
-        .select('email')
-        .in('email', emails.slice(i, i + INSERT_CHUNK));
-      for (const row of data ?? []) suppressed.add(String(row.email));
-    }
-
-    const rows = parsed.recipients
-      .filter((recipient) => !suppressed.has(recipient.email))
-      .map((recipient) => ({
-        campaign_id: campaignId,
-        email: recipient.email,
-        name: recipient.name,
-        vars: recipient.vars,
-        status: 'active',
-        next_step_at: nextStepAt,
-      }));
-
-    let imported = 0;
-    for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
-      const chunk = rows.slice(i, i + INSERT_CHUNK);
-      const { data, error } = await supabaseAdmin
-        .from('sender_recipients')
-        .upsert(chunk, { onConflict: 'campaign_id,email', ignoreDuplicates: true })
-        .select('id');
-      if (error) return jsonError(error.message, 500);
-      imported += data?.length ?? 0;
+    // Ни одной годной строки — importRecipients базу не трогал (при замене
+    // тоже), остаётся объяснить почему.
+    if (!result.accepted) {
+      return jsonError(
+        result.skippedEmptyLetter
+          ? 'У всех адресов файла первое письмо выходит пустым — проверьте переменные в его тексте'
+          : 'В файле не нашлось ни одного корректного адреса',
+        400,
+      );
     }
 
     return NextResponse.json({
-      imported,
+      imported: result.inserted,
       replaced: replace,
-      skippedInvalid: parsed.invalid,
-      skippedDuplicates: parsed.duplicates,
-      skippedSuppressed: suppressed.size,
+      // Вместе с пустым первым письмом: такой строке письмо не уйдёт, как и
+      // строке с плохим адресом. Отдельно — skippedEmptyLetter.
+      skippedInvalid: result.skippedInvalid,
+      skippedEmptyLetter: result.skippedEmptyLetter,
+      skippedDuplicates: result.skippedDuplicates,
+      skippedSuppressed: result.skippedSuppressed,
       // Обрез лимита виден человеку, а не молчит: «в файле 50 000, загружено 20 000».
       fileRows,
       truncated: fileRows > 20_000 ? 20_000 : null,

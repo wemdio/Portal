@@ -61,21 +61,62 @@ function findEmailHeader(headers: string[]): string | null {
   return findHeader(headers, EMAIL_HEADERS) ?? headers.find((h) => normalize(h).includes('mail')) ?? null;
 }
 
-export function parseRecipientRows(rows: FileRow[]): RecipientImportResult {
+/**
+ * Строка базы до проверки — так её отдаёт файл (recipientRowsFromFile) или
+ * заливка из автоаутрича. Ключи vars — как в источнике: к именам переменных
+ * письма их приводит normalizeRecipients.
+ */
+export interface RecipientInput {
+  email: string;
+  name?: string | null;
+  vars: Record<string, string>;
+}
+
+/** Адрес в том виде, в каком он хранится в базе; null — адрес некорректный. */
+export function normalizeRecipientEmail(raw: string | null | undefined): string | null {
+  const email = String(raw ?? '').trim().toLowerCase();
+  return EMAIL_RE.test(email) ? email : null;
+}
+
+/**
+ * Строки файла → строки базы: колонки адреса и имени находятся по названию,
+ * остальные колонки уезжают в переменные. Адреса здесь ещё не проверяются.
+ */
+export function recipientRowsFromFile(rows: FileRow[]): RecipientInput[] {
   const headers = Object.keys(rows[0] ?? {});
   const emailHeader = findEmailHeader(headers);
   const nameHeader = findHeader(headers, NAME_HEADERS);
 
+  return rows.map((row) => {
+    const vars: Record<string, string> = {};
+    for (const [header, value] of Object.entries(row)) {
+      if (header !== emailHeader) vars[header] = value;
+    }
+    return {
+      // Нет колонки адреса — все строки файла окажутся некорректными.
+      email: emailHeader ? (row[emailHeader] ?? '') : '',
+      name: nameHeader ? (row[nameHeader] ?? null) : null,
+      vars,
+    };
+  });
+}
+
+/**
+ * Проверка строк базы — одно правило для файла и для заливки из аутрича:
+ * адрес без пробелов и строчными, некорректный отбрасывается, повтор адреса
+ * внутри одной заливки тоже (остаётся первое вхождение). Ключи переменных
+ * приводятся через varKey, пустые значения не храним — при подстановке
+ * отсутствующая переменная и так даёт пусто.
+ */
+export function normalizeRecipients(rows: RecipientInput[]): RecipientImportResult {
   const recipients: ParsedRecipient[] = [];
   const seen = new Set<string>();
   let invalid = 0;
   let duplicates = 0;
 
-  if (!emailHeader) return { recipients, invalid: rows.length, duplicates };
-
   for (const row of rows) {
-    const email = (row[emailHeader] ?? '').trim().toLowerCase();
-    if (!EMAIL_RE.test(email)) {
+    const email = normalizeRecipientEmail(row.email);
+    if (!email) {
       invalid += 1;
       continue;
     }
@@ -86,20 +127,19 @@ export function parseRecipientRows(rows: FileRow[]): RecipientImportResult {
     seen.add(email);
 
     const vars: Record<string, string> = {};
-    for (const [header, value] of Object.entries(row)) {
-      if (header === emailHeader) continue;
+    for (const [header, value] of Object.entries(row.vars ?? {})) {
       const key = varKey(header);
       if (key && value) vars[key] = value;
     }
 
-    recipients.push({
-      email,
-      name: nameHeader ? (row[nameHeader] ?? '').trim() || null : null,
-      vars,
-    });
+    recipients.push({ email, name: String(row.name ?? '').trim() || null, vars });
   }
 
   return { recipients, invalid, duplicates };
+}
+
+export function parseRecipientRows(rows: FileRow[]): RecipientImportResult {
+  return normalizeRecipients(recipientRowsFromFile(rows));
 }
 
 /**

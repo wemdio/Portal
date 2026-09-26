@@ -1,21 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/sender/apiHelpers';
+import { createCampaign, SenderOpError, type CampaignStepInput } from '@/lib/sender/campaignOps';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
 
-interface StepInput {
-  /** Задержка от предыдущего шага в часах; у первого письма игнорируется. */
-  delayHours?: number;
-  subject?: string;
-  body?: string;
-}
-
 interface CreateBody {
   name?: string;
   mailboxIds?: string[];
-  steps?: StepInput[];
+  steps?: CampaignStepInput[];
   timezone?: string;
   sendHourFrom?: number;
   sendHourTo?: number;
@@ -23,8 +17,6 @@ interface CreateBody {
   gapSeconds?: number;
   gapJitterSeconds?: number;
 }
-
-const MAX_STEPS = 5;
 
 async function campaignStats(campaignId: string) {
   if (!supabaseAdmin) return null;
@@ -127,7 +119,11 @@ export async function GET(req: NextRequest) {
   });
 }
 
-/** POST — создать кампанию: пул ящиков, шаги цепочки, расписание. */
+/**
+ * POST — создать кампанию: пул ящиков, шаги цепочки, расписание. Проверки и
+ * запись — в lib/sender/campaignOps: тем же путём кампании заводит заливка
+ * из автоаутрича.
+ */
 export async function POST(req: NextRequest) {
   return withToolTrace({ request: req, operation: 'tools.sender.campaigns.create' }, async () => {
     const auth = await authenticateRequest(req.headers.get('authorization'));
@@ -137,51 +133,23 @@ export async function POST(req: NextRequest) {
     const body = (await req.json().catch(() => null)) as CreateBody | null;
     if (!body) return jsonError('Невалидный JSON', 400);
 
-    const name = (body.name ?? '').trim();
-    if (!name) return jsonError('Укажите название кампании', 400);
-
-    const mailboxIds = [...new Set((body.mailboxIds ?? []).filter((id) => typeof id === 'string' && id))];
-    if (!mailboxIds.length) return jsonError('Выберите хотя бы один ящик', 400);
-
-    const steps = (body.steps ?? []).slice(0, MAX_STEPS).filter((step) => (step.body ?? '').trim());
-    if (!steps.length) return jsonError('Добавьте хотя бы одно письмо', 400);
-    if (!(steps[0].subject ?? '').trim()) return jsonError('У первого письма должна быть тема', 400);
-
-    const { data: campaign, error } = await supabaseAdmin
-      .from('sender_campaigns')
-      .insert({
-        name,
-        status: 'draft',
-        timezone: body.timezone?.trim() || 'Europe/Moscow',
-        send_hour_from: body.sendHourFrom ?? 9,
-        send_hour_to: body.sendHourTo ?? 18,
-        send_weekdays: body.sendWeekdays?.length ? body.sendWeekdays : [1, 2, 3, 4, 5],
-        gap_seconds: body.gapSeconds ?? 180,
-        gap_jitter_seconds: body.gapJitterSeconds ?? 120,
-        created_by: auth.user.id,
-      })
-      .select('id')
-      .single();
-
-    if (error || !campaign) return jsonError(error?.message ?? 'Не удалось создать кампанию', 500);
-    const campaignId = String(campaign.id);
-
-    const { error: poolError } = await supabaseAdmin
-      .from('sender_campaign_mailboxes')
-      .insert(mailboxIds.map((mailboxId) => ({ campaign_id: campaignId, mailbox_id: mailboxId })));
-    if (poolError) return jsonError(poolError.message, 500);
-
-    const { error: stepsError } = await supabaseAdmin.from('sender_campaign_steps').insert(
-      steps.map((step, index) => ({
-        campaign_id: campaignId,
-        step_no: index + 1,
-        delay_hours: index === 0 ? 0 : Math.max(1, Math.round(step.delayHours ?? 72)),
-        subject: (step.subject ?? '').trim(),
-        body: (step.body ?? '').trim(),
-      })),
-    );
-    if (stepsError) return jsonError(stepsError.message, 500);
-
-    return NextResponse.json({ id: campaignId });
+    try {
+      const { id } = await createCampaign({
+        name: body.name ?? '',
+        mailboxIds: body.mailboxIds ?? [],
+        steps: body.steps ?? [],
+        timezone: body.timezone,
+        sendHourFrom: body.sendHourFrom,
+        sendHourTo: body.sendHourTo,
+        sendWeekdays: body.sendWeekdays,
+        gapSeconds: body.gapSeconds,
+        gapJitterSeconds: body.gapJitterSeconds,
+        createdBy: auth.user.id,
+      });
+      return NextResponse.json({ id });
+    } catch (e) {
+      if (e instanceof SenderOpError) return jsonError(e.message, e.status);
+      throw e;
+    }
   });
 }

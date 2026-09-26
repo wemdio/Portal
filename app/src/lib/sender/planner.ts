@@ -14,7 +14,8 @@ import type { CampaignRow, MailboxRow, RecipientRow, StepRow } from './types';
  *   • дневной лимит ящика считается вместе с уже запланированными письмами,
  *     иначе очередь за один проход выберет недельный объём;
  *   • письма ставятся с паузой друг от друга и только внутрь окна отправки;
- *   • адрес из стоп-листа не получает письмо, а лид закрывается.
+ *   • адрес из стоп-листа не получает письмо, а лид закрывается;
+ *   • письмо, пустое после подстановки переменных, не ставится в очередь.
  */
 
 type Log = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => void;
@@ -184,6 +185,26 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
       continue;
     }
 
+    const vars = recipientVars(recipient);
+    const body = applyVars(step.body, vars);
+    if (!body.trim()) {
+      // Пустое письмо не отправляем. Так бывает, когда шаг ссылается на
+      // переменную, которой у получателя нет: у рассылки из автоаутрича тело
+      // шага — целиком {{email_N}}, и пропущенное письмо цепочки превратилось
+      // бы в письмо без единого слова с нашего ящика. На первом шаге лид не
+      // получил ничего — останавливаем и пишем причину в лог; на следующих
+      // цепочка для него просто кончилась раньше.
+      const firstTouch = stepNo === 1;
+      if (firstTouch) {
+        log('warn', `Кампания ${campaign.name}: первое письмо для ${recipient.email} пустое — получатель остановлен`);
+      }
+      await db
+        .from('sender_recipients')
+        .update({ status: firstTouch ? 'stopped' : 'finished', next_step_at: null, updated_at: new Date().toISOString() })
+        .eq('id', recipient.id);
+      continue;
+    }
+
     // Первое касание не дублируем между кампаниями: пока адрес едет в другой
     // активной кампании, этот старт откладываем на сутки (задача 5.5).
     if (stepNo === 1 && !recipient.mailbox_id && busy.has(recipient.email)) {
@@ -197,7 +218,6 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
     const slot = pickSlot(slots, recipient);
     if (!slot) continue; // лимиты выбраны — лид подождёт следующего прохода
 
-    const vars = recipientVars(recipient);
     const firstStep = steps[0];
     const subject = stepNo === 1
       ? applyVars(step.subject, vars)
@@ -213,7 +233,7 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
       step_no: stepNo,
       to_email: recipient.email,
       subject,
-      body: applyVars(step.body, vars),
+      body,
       message_id: messageId,
       in_reply_to: stepNo === 1 ? null : recipient.thread_message_id,
       status: 'scheduled',
