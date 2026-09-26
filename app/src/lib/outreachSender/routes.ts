@@ -44,8 +44,12 @@ async function run(req: NextRequest, lang: OutreachLang, jobId: string, op: stri
       return await handler(auth.user.id);
     } catch (e) {
       // SenderOpError — ошибка для человека: текст как есть, со своим статусом.
-      if (e instanceof SenderOpError) return jsonError(e.message, e.status);
+      // Статус 500+ — это сбой базы или настройки, а не ошибка оператора: его
+      // пишем в журнал так же, как неожиданное исключение, иначе такие сбои
+      // было бы видно только по жалобе.
+      if (e instanceof SenderOpError && e.status < 500) return jsonError(e.message, e.status);
       await logError(`${LOG[lang]}.${op}.failed`, e, { jobId }, { userId: auth.user.id });
+      if (e instanceof SenderOpError) return jsonError(e.message, e.status);
       return jsonError(e instanceof Error ? e.message : 'Не удалось выполнить действие', 500);
     }
   });

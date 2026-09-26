@@ -12,6 +12,7 @@ import {
   type ImportRecipientsResult,
 } from '@/lib/sender/campaignOps';
 import { fillPoolFromFolder } from '@/lib/sender/folders';
+import { chunkForInFilter } from '@/lib/sender/inFilter';
 import { normalizeRecipientEmail, type RecipientInput } from '@/lib/sender/recipientImport';
 import type { CampaignSourceKind } from '@/lib/sender/types';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -52,8 +53,12 @@ interface OutreachSource {
   sourceKind: CampaignSourceKind;
   /** Колонка с адресом компании. */
   emailColumn: string;
-  /** Условия «строка готова» помимо адреса. */
-  readyFilters: Array<[column: string, value: string]>;
+  /** Условия «строка готова» помимо адреса: колонка = значение. */
+  readyEq: Array<[column: string, value: string]>;
+  /** Колонка — одно из значений. */
+  readyIn: Array<[column: string, values: string[]]>;
+  /** Колонки, которые обязаны быть заполнены. */
+  readyNotNull: string[];
   /** Колонки строки, нужные для получателя. */
   columns: string;
   toRow: (raw: Record<string, unknown>) => OutreachRow;
@@ -63,6 +68,16 @@ function text(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+/*
+ * В рассылку идут только строки нового конвейера (с 26.09.2026): письма
+ * собраны по шаблону цепочки оффера (chain_template_id заполнен), а почта
+ * прошла портальную проверку. У запусков до 26.09 почту никто не проверял, а
+ * их готовые строки могли уже уйти в работу выгрузкой в Excel — «залить» такой
+ * старый запуск значило бы написать компаниям второй раз и с непроверенных
+ * адресов. unverified — «не удалось проверить» — у обоих аутричей уходит в
+ * спорные и сюда не попадает и так; crm_contact у русского — адрес контакта
+ * из AMO: его не проверяют, это наш собственный контакт.
+ */
 const SOURCES: Record<OutreachLang, OutreachSource> = {
   ru: {
     label: 'RU',
@@ -73,10 +88,12 @@ const SOURCES: Record<OutreachLang, OutreachSource> = {
     emailColumn: 'recipient_email',
     // Готовая — прошла все этапы и автопроверку писем. «Спорные» (doubtful) и
     // ручная проверка остаются за человеком и в рассылку не идут.
-    readyFilters: [
+    readyEq: [
       ['row_status', 'ready'],
       ['qa_status', 'passed'],
     ],
+    readyIn: [['email_verification', ['ok', 'catch_all', 'crm_contact']]],
+    readyNotNull: ['chain_template_id'],
     columns: 'id, recipient_email, company_brand, company_name, normalized_domain, letters',
     toRow: (raw) => ({
       id: String(raw.id),
@@ -96,7 +113,9 @@ const SOURCES: Record<OutreachLang, OutreachSource> = {
     emailColumn: 'selected_company_email',
     // needs_review (почта не проверена, письма не прошли гарды, сверх лимита)
     // — к человеку, в рассылку не идёт.
-    readyFilters: [['status', 'ready']],
+    readyEq: [['status', 'ready']],
+    readyIn: [['email_verification', ['ok', 'catch_all']]],
+    readyNotNull: ['chain_template_id'],
     columns: 'id, selected_company_email, company_name, normalized_domain, letters',
     toRow: (raw) => ({
       id: String(raw.id),
@@ -114,10 +133,14 @@ const LETTERS = 4;
 const DEFAULT_DELAY_HOURS = 24;
 /** Страница чтения строк: больше PostgREST за раз не отдаёт. */
 const PAGE = 1000;
-/** id и адреса в in-фильтре уезжают в адрес запроса — держим пачки короткими. */
-const IN_CHUNK = 100;
-/** Ящиков за один запрос — как MAILBOX_CHUNK в campaignOps. */
+/**
+ * Ящиков за один запрос — как MAILBOX_CHUNK в campaignOps. id и адреса почты
+ * в остальных in-фильтрах режутся по весу (sender/inFilter.ts): они уезжают в
+ * адрес запроса, а шлюз режет длинные адреса (414).
+ */
 const MAILBOX_CHUNK = 50;
+/** Запуск закончился — строки больше не меняются, заливать можно. */
+const FINISHED_JOB_STATUSES = ['completed', 'failed'];
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -137,6 +160,7 @@ function chunks<T>(list: T[], size: number): T[][] {
 interface JobRow {
   id: string;
   createdAt: string;
+  status: string;
 }
 
 async function loadJob(source: OutreachSource, jobId: string): Promise<JobRow> {
@@ -144,13 +168,13 @@ async function loadJob(source: OutreachSource, jobId: string): Promise<JobRow> {
   if (!UUID_RE.test(jobId)) throw new SenderOpError('Запуск не найден', 404);
   const { data, error } = await db()
     .from('parser_jobs')
-    .select('id, created_at')
+    .select('id, created_at, status')
     .eq('id', jobId)
     .eq('parser_type', source.parserType)
     .maybeSingle();
   if (error) throw new SenderOpError(error.message, 500);
   if (!data) throw new SenderOpError('Запуск не найден', 404);
-  return { id: String(data.id), createdAt: String(data.created_at) };
+  return { id: String(data.id), createdAt: String(data.created_at), status: String(data.status) };
 }
 
 interface FolderRow {
@@ -199,18 +223,36 @@ async function folderMailboxes(folder: FolderRow): Promise<{ ids: string[]; work
   return { ids, working: ids.filter((id) => canSend.get(id)).length };
 }
 
+/** Методы фильтра PostgREST, нужные условию «строка готова»; все возвращают сам запрос. */
+interface ReadyFilterable {
+  eq(column: string, value: unknown): ReadyFilterable;
+  in(column: string, values: unknown[]): ReadyFilterable;
+  not(column: string, operator: string, value: unknown): ReadyFilterable;
+}
+
 /**
- * Готовые строки запуска — отбор для заливки и для экрана один. Строка без
- * адреса готовой не бывает, но проверка здесь дешевле, чем разбор потом.
+ * Условие «строка готова к заливке» — одно на чтение и на отметку строк:
+ * отметка повторяет его, чтобы не застолбить строку, которая между чтением и
+ * отметкой перестала быть готовой (переписанная цепочка, ручная правка).
+ * Строка без адреса готовой не бывает, но проверка здесь дешевле разбора.
  */
+function applyReady<Q>(query: Q, source: OutreachSource): Q {
+  let filtered = (query as unknown as ReadyFilterable).not(source.emailColumn, 'is', null);
+  for (const [column, value] of source.readyEq) filtered = filtered.eq(column, value);
+  for (const [column, values] of source.readyIn) filtered = filtered.in(column, values);
+  for (const column of source.readyNotNull) filtered = filtered.not(column, 'is', null);
+  return filtered as unknown as Q;
+}
+
+/** Готовые строки запуска — отбор для заливки и для экрана один. */
 function readyQuery(source: OutreachSource, jobId: string, columns: string, count?: 'exact') {
-  let query = db()
-    .from(source.table)
-    .select(columns, count ? { count, head: true } : undefined)
-    .eq('job_id', jobId)
-    .not(source.emailColumn, 'is', null);
-  for (const [column, value] of source.readyFilters) query = query.eq(column, value);
-  return query;
+  return applyReady(
+    db()
+      .from(source.table)
+      .select(columns, count ? { count, head: true } : undefined)
+      .eq('job_id', jobId),
+    source,
+  );
 }
 
 /**
@@ -330,14 +372,16 @@ async function claimRows(
   claimed: string[],
 ): Promise<void> {
   const uploadedAt = new Date().toISOString();
-  for (const part of chunks(ids, IN_CHUNK)) {
-    const { data, error } = await db()
-      .from(source.table)
-      .update({ sender_campaign_id: campaignId, sender_uploaded_at: uploadedAt })
-      .eq('job_id', jobId)
-      .in('id', part)
-      .is('sender_campaign_id', null)
-      .select('id');
+  for (const part of chunkForInFilter(ids)) {
+    const { data, error } = await applyReady(
+      db()
+        .from(source.table)
+        .update({ sender_campaign_id: campaignId, sender_uploaded_at: uploadedAt })
+        .eq('job_id', jobId)
+        .in('id', part)
+        .is('sender_campaign_id', null),
+      source,
+    ).select('id');
     if (error) throw new SenderOpError(error.message, 500);
     // Пополняем список вызывающего сразу: если следующая пачка упадёт, он
     // знает, что снимать.
@@ -345,16 +389,47 @@ async function claimRows(
   }
 }
 
-/** Снять отметку со строк, которые в рассылку не попали (только нашу). */
-async function releaseRows(source: OutreachSource, ids: string[], campaignId: string): Promise<void> {
-  for (const part of chunks(ids, IN_CHUNK)) {
-    const { error } = await db()
+/**
+ * Снять отметку заливки — вместе с датой, иначе у незалитой строки осталась
+ * бы «дата заливки». campaignId — снимаем только отметку этой рассылки; null —
+ * рассылку уже удалили, внешний ключ обнулил ссылку, осталась дата.
+ */
+async function releaseRows(source: OutreachSource, ids: string[], campaignId: string | null): Promise<void> {
+  for (const part of chunkForInFilter(ids)) {
+    const query = db()
       .from(source.table)
       .update({ sender_campaign_id: null, sender_uploaded_at: null })
-      .in('id', part)
-      .eq('sender_campaign_id', campaignId);
+      .in('id', part);
+    const { error } = await (campaignId ? query.eq('sender_campaign_id', campaignId) : query.is('sender_campaign_id', null));
     if (error) throw new SenderOpError(error.message, 500);
   }
+}
+
+/**
+ * Строки, чей адрес уже стоит в рассылке. Нужны уборке после сбоя доливки:
+ * часть получателей могла лечь до сбоя, и снять с их строк отметку значило бы
+ * залить эти компании второй раз, например в новую рассылку.
+ */
+async function rowsAlreadyInCampaign(
+  campaignId: string,
+  rows: Array<{ id: string; recipient: RecipientInput }>,
+): Promise<Set<string>> {
+  const byEmail = new Map<string, string[]>();
+  for (const row of rows) {
+    const email = normalizeRecipientEmail(row.recipient.email);
+    if (email) byEmail.set(email, [...(byEmail.get(email) ?? []), row.id]);
+  }
+  const inCampaign = new Set<string>();
+  for (const part of chunkForInFilter([...byEmail.keys()])) {
+    const { data, error } = await db()
+      .from('sender_recipients')
+      .select('email')
+      .eq('campaign_id', campaignId)
+      .in('email', part);
+    if (error) throw new SenderOpError(error.message, 500);
+    for (const row of data ?? []) for (const id of byEmail.get(String(row.email)) ?? []) inCampaign.add(id);
+  }
+  return inCampaign;
 }
 
 // ── Заливка ─────────────────────────────────────────────────────────────────
@@ -429,10 +504,14 @@ function nothingLandedMessage(result: ImportRecipientsResult): string {
  * «Залить в Рассылку»: готовые строки запуска, ещё не залитые, — в новую
  * рассылку папки (mode 'new') или в существующую (mode 'append').
  *
+ * Только после окончания запуска: пока он идёт, воркер ещё меняет строки —
+ * готовая может уйти в «сверх лимита» или в спорные, а письма пересобираются.
+ * Залитое до этого уехало бы в рассылку в промежуточном виде.
+ *
  * Новая рассылка берёт из папки расписание, паузы, задержки писем и ящики.
- * Ящиков в папке может ещё не быть — черновик создаётся всё равно (заливка не
- * стоит), а понятная ошибка «Выберите ящики в настройках папки» приходит на
- * запуске (startJobCampaign).
+ * Рабочих ящиков в папке может ещё не быть — черновик создаётся всё равно
+ * (заливка не стоит) и с пустым пулом, а понятная ошибка «Выберите ящики в
+ * настройках папки» приходит на запуске (startJobCampaign).
  *
  * Строки помечаются рассылкой (sender_campaign_id, sender_uploaded_at), если
  * адрес теперь в ней: добавлен сейчас, уже стоял или повторяет такой адрес.
@@ -442,6 +521,9 @@ function nothingLandedMessage(result: ImportRecipientsResult): string {
 export async function uploadJobToSender(input: UploadJobInput): Promise<UploadJobResult> {
   const source = SOURCES[input.lang];
   const job = await loadJob(source, input.jobId);
+  if (!FINISHED_JOB_STATUSES.includes(job.status)) {
+    throw new SenderOpError('Заливать можно после окончания запуска', 409);
+  }
   const folder = await loadFolder(source);
   const target = input.mode === 'append' ? await appendTarget(folder, input.campaignId) : null;
 
@@ -460,11 +542,17 @@ export async function uploadJobToSender(input: UploadJobInput): Promise<UploadJo
     campaignId = target.id;
     campaignName = target.name;
   } else {
+    // Пул — только если в папке есть рабочий ящик. Иначе рассылка остаётся с
+    // пустым пулом и возьмёт ящики папки при запуске (fillPoolFromFolder):
+    // скопируй мы сейчас одни непроверенные ящики, пул стал бы непустым, и
+    // выбор рабочих ящиков в папке эту рассылку уже не спас бы.
     const mailboxes = await folderMailboxes(folder);
+    // Имя с числом кандидатов — временное: после заливки в нём будет число
+    // реально добавленных получателей.
     campaignName = campaignNameFor(source, job.createdAt, candidates.length);
     ({ id: campaignId } = await createCampaign({
       name: campaignName,
-      mailboxIds: mailboxes.ids,
+      mailboxIds: mailboxes.working ? mailboxes.ids : [],
       allowEmptyPool: true,
       steps: chainSteps(folder),
       timezone: folder.timezone,
@@ -503,6 +591,20 @@ export async function uploadJobToSender(input: UploadJobInput): Promise<UploadJo
     );
     if (!landed.size) throw new SenderOpError(nothingLandedMessage(imported), 422);
 
+    // «RU · 26.09 · N компаний» — N по факту: стоп-лист, дубли и строки без
+    // письма в рассылку не легли. Имя — для людей, сбой переименования
+    // заливку не отменяет.
+    if (!target) {
+      const finalName = campaignNameFor(source, job.createdAt, imported.inserted);
+      if (finalName !== campaignName) {
+        const { error: renameError } = await db()
+          .from('sender_campaigns')
+          .update({ name: finalName, updated_at: new Date().toISOString() })
+          .eq('id', campaignId);
+        if (!renameError) campaignName = finalName;
+      }
+    }
+
     return {
       campaignId,
       campaignName,
@@ -519,14 +621,25 @@ export async function uploadJobToSender(input: UploadJobInput): Promise<UploadJo
     };
   } catch (e) {
     // Уборка без общей транзакции, по возможности; ошибка уходит та, что была.
-    // Новую рассылку удаляем целиком: пул, шаги и получатели уходят каскадом,
-    // отметки строк обнуляет внешний ключ (on delete set null). В чужой
-    // рассылке снимаем только свои отметки; получатели, которых заливка
-    // успела добавить до сбоя, пометятся при следующей доливке как «уже в
-    // рассылке».
     try {
-      if (target) await releaseRows(source, claimed, campaignId);
-      else await db().from('sender_campaigns').delete().eq('id', campaignId);
+      if (target) {
+        // В существующей рассылке снимаем отметку только со строк, чей адрес
+        // в неё так и не лёг: получатели, добавленные до сбоя, остаются, и их
+        // строки должны остаться залитыми — иначе следующая заливка отправила
+        // бы эти компании во вторую рассылку. Не удалось проверить — отметки
+        // не трогаем вовсе: лучше строка, которую надо долить руками, чем
+        // вторая цепочка той же компании.
+        const claimedIds = new Set(claimed);
+        const kept = await rowsAlreadyInCampaign(campaignId, candidates.filter((c) => claimedIds.has(c.id)));
+        await releaseRows(source, claimed.filter((id) => !kept.has(id)), campaignId);
+      } else {
+        // Новую рассылку удаляем целиком: пул, шаги и получатели уходят
+        // каскадом, ссылку в строках обнуляет внешний ключ. Дату заливки
+        // снимаем сами — и только если рассылка действительно удалена: иначе
+        // её получатели остались бы без отметки в строках и залились бы снова.
+        const { error: deleteError } = await db().from('sender_campaigns').delete().eq('id', campaignId);
+        if (!deleteError) await releaseRows(source, claimed, null);
+      }
     } catch {
       /* уборка по возможности */
     }
@@ -599,6 +712,12 @@ export interface JobSenderCampaign {
 }
 
 export interface JobSenderStatus {
+  /**
+   * Статус запуска (parser_jobs.status). Заливать можно только законченный —
+   * completed или failed (в том числе остановленный); пока он идёт, кнопку
+   * заливки экран держит выключенной, сервер отвечает 409.
+   */
+  jobStatus: string;
   folder: {
     id: string;
     name: string;
@@ -641,7 +760,7 @@ async function campaignCounts(campaignId: string) {
 
 async function suppressedAmong(emails: string[]): Promise<Set<string>> {
   const suppressed = new Set<string>();
-  for (const part of chunks(emails, IN_CHUNK)) {
+  for (const part of chunkForInFilter(emails)) {
     const { data, error } = await db().from('sender_suppressions').select('email').in('email', part);
     if (error) throw new SenderOpError(error.message, 500);
     for (const row of data ?? []) suppressed.add(String(row.email));
@@ -723,6 +842,7 @@ export async function getJobSenderStatus(input: { lang: OutreachLang; jobId: str
   );
 
   return {
+    jobStatus: job.status,
     folder: { id: folder.id, name: folder.name, mailboxes: mailboxes.ids.length, workingMailboxes: mailboxes.working },
     campaigns,
     pending: {
