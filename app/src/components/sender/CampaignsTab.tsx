@@ -7,6 +7,7 @@ import {
   fetchCampaigns,
   fetchFolders,
   patchCampaign,
+  type CampaignDeleteOutreachDto,
   type CampaignDto,
   type SenderFolderDto,
 } from './api';
@@ -33,6 +34,29 @@ const ACTION_FAILED: Record<CampaignAction, string> = {
 
 /** Сколько держится подсветка кампании, открытой по ссылке. */
 const HIGHLIGHT_MS = 4000;
+
+/**
+ * Вопрос перед удалением. У кампании автоаутрича удаление решает и судьбу её
+ * компаний (api/tools/sender/campaigns/[id], DELETE): письма уходили — они
+ * больше не зальются, не уходили — их можно залить заново. Это надо знать до
+ * того, как нажать «ОК».
+ */
+function deleteConfirmText(campaign: CampaignDto): string {
+  const question = `Удалить кампанию «${campaign.name}» вместе с базой получателей и историей писем?`;
+  if (!campaign.source_kind || campaign.source_kind === 'manual') return question;
+  return (
+    `${question}\n\nКомпании в ней — из автоаутрича. Если письма из кампании уже уходили, эти компании больше `
+    + 'не зальются в Рассылку — чтобы им не написали второй раз. Если писем ещё не было, их можно будет залить заново.'
+  );
+}
+
+/** Что стало с компаниями удалённой кампании автоаутрича; null — сказать нечего. */
+function deletedOutreachNotice(campaign: CampaignDto, outreach: CampaignDeleteOutreachDto): string | null {
+  if (!outreach.rows) return null;
+  return outreach.lettersSent
+    ? `Кампания «${campaign.name}» удалена. Письма из неё уже уходили, поэтому её компании (${outreach.rows}) больше не зальются в Рассылку.`
+    : `Кампания «${campaign.name}» удалена. Писем из неё не было — её компании (${outreach.released}) можно залить заново с экрана запуска автоаутрича.`;
+}
 
 /** id строки кампании в разметке — к нему прокручивает ссылка ?campaign=<id>. */
 function campaignRowId(campaignId: string): string {
@@ -320,15 +344,14 @@ export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: str
     if (action === 'finish' && !window.confirm(`Завершить кампанию «${campaign.name}»? Запланированные письма отменятся.`)) {
       return;
     }
-    if (
-      action === 'delete'
-      && !window.confirm(`Удалить кампанию «${campaign.name}» вместе с базой получателей и историей писем?`)
-    ) {
+    if (action === 'delete' && !window.confirm(deleteConfirmText(campaign))) {
       return;
     }
     try {
       if (action === 'delete') {
-        await deleteCampaign(campaign.id);
+        const res = await deleteCampaign(campaign.id);
+        const outreachNotice = res.outreach ? deletedOutreachNotice(campaign, res.outreach) : null;
+        if (outreachNotice) setNotice(outreachNotice);
       } else {
         const res = await patchCampaign(campaign.id, action);
         // Кампания без ящиков взяла их из папки — об этом стоит сказать:

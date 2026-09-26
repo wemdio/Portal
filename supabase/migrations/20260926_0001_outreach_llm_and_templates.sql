@@ -76,11 +76,13 @@ grant select, insert, update, delete on public.polza_chain_templates to authenti
 -- ── Строки аутричей: шаблон цепочки и заливка в «Рассылку» ─────────────────
 -- chain_template_id — по какому шаблону собраны письма строки.
 -- sender_campaign_id / sender_uploaded_at — строка уже залита в рассылку:
--- повторное «Залить в Рассылку» доливает только строки без отметки.
--- Внешние ключи с on delete set null: удалили рассылку — строки запуска снова
--- можно залить; удалили шаблон (новый старт запуска удаляет его шаблоны) —
--- ссылка обнуляется, а не висит на несуществующей записи. Таблица шаблонов
--- создана выше, sender_campaigns — в 20260916_0001.
+-- повторное «Залить в Рассылку» доливает только строки без обеих отметок.
+-- Внешние ключи с on delete set null: удалили рассылку — обнуляется только
+-- ссылка, дата заливки остаётся, и компания второй раз не зальётся (дату
+-- снимает лишь удаление рассылки, из которой не ушло ни одного письма, —
+-- app/src/lib/outreachSender/deletion.ts); удалили шаблон (новый старт запуска
+-- удаляет его шаблоны) — ссылка обнуляется, а не висит на несуществующей
+-- записи. Таблица шаблонов создана выше, sender_campaigns — в 20260916_0001.
 alter table public.polza_ru_outreach_companies
   add column if not exists chain_template_id uuid references public.polza_chain_templates(id) on delete set null,
   add column if not exists sender_campaign_id uuid references public.sender_campaigns(id) on delete set null,

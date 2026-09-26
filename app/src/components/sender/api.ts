@@ -509,8 +509,20 @@ export function patchCampaign(id: string, action: 'start' | 'pause' | 'finish') 
   });
 }
 
+/**
+ * Что удаление кампании автоаутрича сделало с отметками заливки в строках
+ * запуска (у ручной кампании поля нет). lettersSent — письма уходили, отметки
+ * остались, и эти компании больше не зальются; иначе released строк можно
+ * залить заново.
+ */
+export interface CampaignDeleteOutreachDto {
+  rows: number;
+  lettersSent: boolean;
+  released: number;
+}
+
 export function deleteCampaign(id: string) {
-  return authFetchJson<{ ok: true }>(`${BASE}/campaigns/${id}`, { method: 'DELETE' });
+  return authFetchJson<{ ok: true; outreach?: CampaignDeleteOutreachDto }>(`${BASE}/campaigns/${id}`, { method: 'DELETE' });
 }
 
 /** Что нашлось в базе получателей — ответ /recipients/preview. */

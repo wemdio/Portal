@@ -209,13 +209,13 @@ export function SenderBlock({ jobUrl, running, readyCount, onChanged }: Props) {
     );
   }
 
-  const { folder, campaigns, pending, uploaded } = status;
+  const { folder, campaigns, pending, uploaded, uploadedDeleted } = status;
   const targets = status.appendTargets ?? [];
   const blocked = [
     pending.suppressed ? `в стоп-листе — ${pending.suppressed}` : null,
     pending.invalid ? `некорректный адрес — ${pending.invalid}` : null,
   ].filter(Boolean);
-  const hasUploads = uploaded > 0 || campaigns.length > 0;
+  const hasUploads = uploaded > 0 || uploadedDeleted > 0 || campaigns.length > 0;
   const senderLink = (label: string) => (
     <a
       href={SENDER_PAGE}
@@ -248,14 +248,27 @@ export function SenderBlock({ jobUrl, running, readyCount, onChanged }: Props) {
 
       <div className="mt-3 space-y-2 text-sm text-gray-700">
         {uploaded > 0 ? <div>Уже в Рассылке: {companies(uploaded)} из этого запуска.</div> : null}
+        {/* Рассылку удалили, а письма из неё уходили: отметки остались, чтобы
+            компаниям не написали второй раз (api/tools/sender/campaigns/[id]). */}
+        {uploadedDeleted > 0 ? (
+          <div className="text-gray-500">
+            Были в рассылке, которую потом удалили: {companies(uploadedDeleted)}. Повторно их не зальём, чтобы им не написали второй раз.
+          </div>
+        ) : null}
         {!running && pending.uploadable > 0 ? (
           <div>
             {hasUploads ? 'Новых готовых к заливке' : 'Готово к заливке'}: {companies(pending.uploadable)}.
           </div>
         ) : null}
         {!running && blocked.length ? <div className="text-gray-500">Не зальются: {blocked.join(', ')}.</div> : null}
-        {!running && pending.total === 0 && uploaded === 0 ? <div className="text-gray-500">Готовых компаний для заливки нет.</div> : null}
-        {!running && pending.total === 0 && uploaded > 0 ? <div className="text-gray-500">Все готовые компании запуска уже в Рассылке.</div> : null}
+        {!running && pending.total === 0 && uploaded === 0 && uploadedDeleted === 0 ? (
+          <div className="text-gray-500">Готовых компаний для заливки нет.</div>
+        ) : null}
+        {!running && pending.total === 0 && (uploaded > 0 || uploadedDeleted > 0) ? (
+          <div className="text-gray-500">
+            {uploadedDeleted > 0 ? 'Все готовые компании запуска уже заливались в Рассылку.' : 'Все готовые компании запуска уже в Рассылке.'}
+          </div>
+        ) : null}
 
         {running ? (
           <div className="flex flex-wrap items-center gap-3">

@@ -31,9 +31,22 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
  * Цепочка у каждой компании своя, поэтому письма едут в переменных получателя
  * (subject_1, email_1..email_4), а шаги рассылки — просто {{email_N}}: одна
  * рассылка везёт письма всех компаний запуска.
+ *
+ * Компания получает цепочку один раз. Залитая строка помечается датой заливки
+ * (sender_uploaded_at) и ссылкой на рассылку (sender_campaign_id), и второй раз
+ * её не зальют, пока стоит хоть одна из отметок. Удаление рассылки обнуляет
+ * только ссылку (внешний ключ) — дата остаётся, и компании из удалённой
+ * рассылки заново не льются. Снимают дату лишь уборка после сбоя заливки и
+ * удаление рассылки, из которой не ушло ни одного письма (deletion.ts).
  */
 
 export type { OutreachLang };
+
+/** Таблица строк запуска у каждого аутрича — одна на заливку и на удаление (deletion.ts). */
+export const OUTREACH_ROW_TABLE: Record<OutreachLang, string> = {
+  ru: 'polza_ru_outreach_companies',
+  en: 'polza_outreach_companies',
+};
 
 interface OutreachRow {
   id: string;
@@ -82,7 +95,7 @@ const SOURCES: Record<OutreachLang, OutreachSource> = {
   ru: {
     label: 'RU',
     parserType: RU_OUTREACH_PARSER_TYPE,
-    table: 'polza_ru_outreach_companies',
+    table: OUTREACH_ROW_TABLE.ru,
     folderKey: 'auto_ru',
     sourceKind: 'polza_ru',
     emailColumn: 'recipient_email',
@@ -107,7 +120,7 @@ const SOURCES: Record<OutreachLang, OutreachSource> = {
   en: {
     label: 'EN',
     parserType: 'polza_outreach',
-    table: 'polza_outreach_companies',
+    table: OUTREACH_ROW_TABLE.en,
     folderKey: 'auto_en',
     sourceKind: 'polza_en',
     emailColumn: 'selected_company_email',
@@ -223,10 +236,11 @@ async function folderMailboxes(folder: FolderRow): Promise<{ ids: string[]; work
   return { ids, working: ids.filter((id) => canSend.get(id)).length };
 }
 
-/** Методы фильтра PostgREST, нужные условию «строка готова»; все возвращают сам запрос. */
+/** Методы фильтра PostgREST, нужные условиям строк; все возвращают сам запрос. */
 interface ReadyFilterable {
   eq(column: string, value: unknown): ReadyFilterable;
   in(column: string, values: unknown[]): ReadyFilterable;
+  is(column: string, value: null): ReadyFilterable;
   not(column: string, operator: string, value: unknown): ReadyFilterable;
 }
 
@@ -242,6 +256,21 @@ function applyReady<Q>(query: Q, source: OutreachSource): Q {
   for (const [column, values] of source.readyIn) filtered = filtered.in(column, values);
   for (const column of source.readyNotNull) filtered = filtered.not(column, 'is', null);
   return filtered as unknown as Q;
+}
+
+/**
+ * Строка ещё не заливалась: нет ни даты заливки, ни ссылки на рассылку. Одно
+ * условие на чтение и на отметку строк.
+ *
+ * Пустой ссылки мало: её обнуляет удаление рассылки, а компании из удалённой
+ * рассылки уже могли получить письма — их держит дата. Пустой даты тоже мало:
+ * удаление рассылки без писем снимает дату ещё до самого удаления, и если
+ * удалить не вышло, строку держит ссылка на живую рассылку.
+ */
+function notUploaded<Q>(query: Q): Q {
+  return (query as unknown as ReadyFilterable)
+    .is('sender_uploaded_at', null)
+    .is('sender_campaign_id', null) as unknown as Q;
 }
 
 /** Готовые строки запуска — отбор для заливки и для экрана один. */
@@ -265,8 +294,7 @@ async function loadPendingRows(source: OutreachSource, jobId: string): Promise<O
   const rows: OutreachRow[] = [];
   const seen = new Set<string>();
   for (let from = 0; ; from += PAGE) {
-    const { data, error } = await readyQuery(source, jobId, source.columns)
-      .is('sender_campaign_id', null)
+    const { data, error } = await notUploaded(readyQuery(source, jobId, source.columns))
       .order('created_at', { ascending: true })
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
@@ -285,10 +313,15 @@ async function loadPendingRows(source: OutreachSource, jobId: string): Promise<O
   return rows;
 }
 
+/** Готовых строк, которые уже заливались, — все, кроме notUploaded. */
 async function countUploaded(source: OutreachSource, jobId: string): Promise<number> {
-  const { count, error } = await readyQuery(source, jobId, 'id', 'exact').not('sender_campaign_id', 'is', null);
+  const [dated, linkedOnly] = await Promise.all([
+    readyQuery(source, jobId, 'id', 'exact').not('sender_uploaded_at', 'is', null),
+    readyQuery(source, jobId, 'id', 'exact').is('sender_uploaded_at', null).not('sender_campaign_id', 'is', null),
+  ]);
+  const error = dated.error ?? linkedOnly.error;
   if (error) throw new SenderOpError(error.message, 500);
-  return count ?? 0;
+  return (dated.count ?? 0) + (linkedOnly.count ?? 0);
 }
 
 // ── Строка аутрича → получатель рассылки ────────────────────────────────────
@@ -374,12 +407,13 @@ async function claimRows(
   const uploadedAt = new Date().toISOString();
   for (const part of chunkForInFilter(ids)) {
     const { data, error } = await applyReady(
-      db()
-        .from(source.table)
-        .update({ sender_campaign_id: campaignId, sender_uploaded_at: uploadedAt })
-        .eq('job_id', jobId)
-        .in('id', part)
-        .is('sender_campaign_id', null),
+      notUploaded(
+        db()
+          .from(source.table)
+          .update({ sender_campaign_id: campaignId, sender_uploaded_at: uploadedAt })
+          .eq('job_id', jobId)
+          .in('id', part),
+      ),
       source,
     ).select('id');
     if (error) throw new SenderOpError(error.message, 500);
@@ -390,9 +424,11 @@ async function claimRows(
 }
 
 /**
- * Снять отметку заливки — вместе с датой, иначе у незалитой строки осталась
- * бы «дата заливки». campaignId — снимаем только отметку этой рассылки; null —
- * рассылку уже удалили, внешний ключ обнулил ссылку, осталась дата.
+ * Снять отметку заливки — и ссылку, и дату: строка с любой из них считается
+ * залитой (notUploaded). Только для строк, чьи получатели в рассылку так и не
+ * легли, — уборка после сбоя заливки. campaignId — снимаем только отметку этой
+ * рассылки; null — рассылку, созданную этой же заливкой, уже удалили: внешний
+ * ключ обнулил ссылку, осталась дата.
  */
 async function releaseRows(source: OutreachSource, ids: string[], campaignId: string | null): Promise<void> {
   for (const part of chunkForInFilter(ids)) {
@@ -735,8 +771,15 @@ export interface JobSenderStatus {
    * или без первого письма заливка отсеет сама и скажет об этом.
    */
   pending: { total: number; uploadable: number; suppressed: number; invalid: number };
-  /** Готовых строк, уже залитых в рассылки. */
+  /** Готовых строк в рассылках, которые есть сейчас. */
   uploaded: number;
+  /**
+   * Готовых строк, залитых в рассылку, которую потом удалили, — с отметкой
+   * без ссылки. Удаление снимает отметки, только если из рассылки не ушло ни
+   * одного письма, поэтому эти компании письма уже получали: второй раз они
+   * не льются.
+   */
+  uploadedDeleted: number;
   /** Рассылки папки, в которые можно долить: черновик или пауза, новые сверху. */
   appendTargets: Array<{ id: string; name: string; status: string }>;
 }
@@ -773,11 +816,14 @@ export async function getJobSenderStatus(input: { lang: OutreachLang; jobId: str
   const job = await loadJob(source, input.jobId);
   const folder = await loadFolder(source);
 
-  // Лёгкий проход по готовым строкам: адрес и отметка, без писем.
+  // Лёгкий проход по готовым строкам: адрес и отметки, без писем. Разбор —
+  // тот же, что у notUploaded: ссылка — строка в живой рассылке; дата без
+  // ссылки — рассылку удалили; ни того ни другого — ждёт заливки.
   const perCampaign = new Map<string, number>();
+  let uploadedDeleted = 0;
   const pendingEmails: Array<string | null> = [];
   for (let from = 0; ; from += PAGE) {
-    const { data, error } = await readyQuery(source, job.id, `id, ${source.emailColumn}, sender_campaign_id`)
+    const { data, error } = await readyQuery(source, job.id, `id, ${source.emailColumn}, sender_campaign_id, sender_uploaded_at`)
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw new SenderOpError(error.message, 500);
@@ -785,6 +831,7 @@ export async function getJobSenderStatus(input: { lang: OutreachLang; jobId: str
     for (const row of page) {
       const campaignId = row.sender_campaign_id ? String(row.sender_campaign_id) : null;
       if (campaignId) perCampaign.set(campaignId, (perCampaign.get(campaignId) ?? 0) + 1);
+      else if (row.sender_uploaded_at) uploadedDeleted += 1;
       else pendingEmails.push(normalizeRecipientEmail(String(row[source.emailColumn] ?? '')));
     }
     if (page.length < PAGE) break;
@@ -852,6 +899,7 @@ export async function getJobSenderStatus(input: { lang: OutreachLang; jobId: str
       invalid: pendingEmails.length - valid.length,
     },
     uploaded: [...perCampaign.values()].reduce((sum, n) => sum + n, 0),
+    uploadedDeleted,
     appendTargets: ((targets.data ?? []) as Record<string, unknown>[]).map((row) => ({
       id: String(row.id),
       name: String(row.name),

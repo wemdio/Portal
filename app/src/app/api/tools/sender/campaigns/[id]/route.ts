@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { releaseOutreachRowsBeforeCampaignDelete, type OutreachCampaignDeleteResult } from '@/lib/outreachSender/deletion';
 import { authenticateRequest, jsonError } from '@/lib/sender/apiHelpers';
 import {
   EDITABLE_CAMPAIGN_STATUSES,
@@ -269,6 +270,12 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
  * DELETE — убрать кампанию. Идущую удалить нельзя: письма физически уходят,
  * и исчезновение кампании вместе с очередью скрыло бы факт отправки. Пауза
  * или завершение — сначала, удаление — потом.
+ *
+ * Кампания из автоаутрича: до удаления решаем, что станет с отметками
+ * заливки в строках запуска (outreachSender/deletion.ts). Письма уходили —
+ * отметки остаются, и эти компании второй раз не зальются; не уходили —
+ * отметки снимаются, и заливку можно повторить. В ответе — что вышло
+ * (outreach), экран скажет это оператору.
  */
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'tools.sender.campaigns.delete' }, async () => {
@@ -279,7 +286,7 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
     const { id } = await params;
     const { data: campaign } = await supabaseAdmin
       .from('sender_campaigns')
-      .select('id, status')
+      .select('id, status, source_kind')
       .eq('id', id)
       .maybeSingle();
     if (!campaign) return jsonError('Кампания не найдена', 404);
@@ -287,8 +294,18 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
       return jsonError('Идущую кампанию удалить нельзя — сначала поставьте на паузу или завершите', 409);
     }
 
+    let outreach: OutreachCampaignDeleteResult | null = null;
+    if (campaign.source_kind && campaign.source_kind !== 'manual') {
+      try {
+        outreach = await releaseOutreachRowsBeforeCampaignDelete(id);
+      } catch (e) {
+        if (e instanceof SenderOpError) return jsonError(e.message, e.status);
+        throw e;
+      }
+    }
+
     const { error } = await supabaseAdmin.from('sender_campaigns').delete().eq('id', id);
     if (error) return jsonError(error.message, 500);
-    return NextResponse.json({ ok: true });
+    return NextResponse.json(outreach ? { ok: true, outreach } : { ok: true });
   });
 }
