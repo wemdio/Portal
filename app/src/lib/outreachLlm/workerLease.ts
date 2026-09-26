@@ -29,6 +29,9 @@
  * Колонок аренды у parser_jobs в этой ветке нет (единый жизненный цикл задач
  * живёт в ветке dmitriy_kuladmed), поэтому отметка — в progress_detail, как и
  * отметка пересборки русского аутрича (progress_detail.rebuilding).
+ *
+ * Здесь же — проверка остановки (JobStatusReader): остановкой считается только
+ * прочитанный статус, а не сбой чтения.
  */
 
 import { randomUUID } from 'crypto';
@@ -56,6 +59,22 @@ const HEARTBEAT_MS = 30_000;
 const SAVE_GAP_MS = 5_000;
 const FINAL_WRITE_ATTEMPTS = 3;
 const FINAL_WRITE_PAUSE_MS = 1_000;
+
+/**
+ * Сколько статус запуска может не читаться подряд — ни проверкой перед
+ * строкой, ни опросом раз в 15 с, — прежде чем воркер прервёт запуск.
+ * Одиночный сбой PostgREST (5xx, таймаут) остановкой не считается, но и долго
+ * работать, не видя «Остановить», нельзя: ИИ тратился бы вслепую.
+ */
+export const STATUS_UNREADABLE_MS = 3 * 60_000;
+export const STATUS_UNREADABLE_TEXT =
+  `База не отвечает больше ${STATUS_UNREADABLE_MS / 60_000} минут — запуск прерван, чтобы не тратить ИИ, не видя команды «Остановить»`;
+/**
+ * Итог запуска, который воркер оборвал, хотя «Остановить» никто не нажимал:
+ * без него запуск навсегда остался бы «идущим» без воркера (JobOwner.writeCancelled).
+ */
+export const ABANDONED_RUN_TEXT =
+  'Запуск прервался без команды «Остановить» — готовые компании сохранены, остальные не обработаны';
 
 export interface WorkerLease {
   token: string;
@@ -90,6 +109,49 @@ export function withoutWorkerLease(detail: Record<string, unknown>): Record<stri
   const rest = { ...detail };
   delete rest[WORKER_LEASE_KEY];
   return rest;
+}
+
+/** Статус запуска: status null — запуска больше нет (удалён); ok false — не прочитался. */
+export type JobStatusRead = { ok: true; status: string | null } | { ok: false; error: string };
+
+/**
+ * Статус запуска для проверки остановки — перед каждой строкой и опросом раз
+ * в 15 с. Остановка — только прочитанный статус «не идёт» (или запуска больше
+ * нет). Сбой чтения — не остановка: раньше одна ошибка PostgREST обрывала
+ * здоровый запуск, статус при этом никто не менял, и запуск навсегда
+ * оставался «идущим» без воркера (очередь берёт только pending). Не читается
+ * дольше STATUS_UNREADABLE_MS подряд — unreadableTooLong(): раннер прерывает
+ * запуск с понятной причиной.
+ */
+export class JobStatusReader {
+  /** С какой минуты подряд не удаётся ни одно чтение; null — последнее удалось. */
+  private unreadableSince: number | null = null;
+
+  constructor(
+    private readonly db: SupabaseClient,
+    private readonly jobId: string,
+  ) {}
+
+  async read(): Promise<JobStatusRead> {
+    let problem: string;
+    try {
+      const { data, error } = await this.db.from('parser_jobs').select('status').eq('id', this.jobId).maybeSingle();
+      if (!error) {
+        this.unreadableSince = null;
+        return { ok: true, status: data ? String(data.status) : null };
+      }
+      problem = error.message;
+    } catch (err) {
+      problem = err instanceof Error ? err.message : String(err);
+    }
+    this.unreadableSince ??= Date.now();
+    return { ok: false, error: problem };
+  }
+
+  /** Все чтения статуса не удаются подряд дольше STATUS_UNREADABLE_MS. */
+  unreadableTooLong(now = Date.now()): boolean {
+    return this.unreadableSince !== null && now - this.unreadableSince >= STATUS_UNREADABLE_MS;
+  }
 }
 
 type Log = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => void;
@@ -303,5 +365,32 @@ export class JobOwner {
       return saved?.length ? 'written' : 'skipped';
     }
     return 'error';
+  }
+
+  /**
+   * Итог оборванного прогона. Статус обычно уже поставил тот, кто остановил,
+   * — дописываем только прогресс и расход. Но если запуск всё ещё «идёт» под
+   * нашей отметкой, его никто не останавливал, а воркер уходит: без failed он
+   * навсегда остался бы «идущим» (очередь берёт только pending, «Переписать
+   * цепочку» и заливка идущий не трогают). Проверка и запись — одним условным
+   * обновлением: остановку, пришедшую в тот же миг, не перетираем.
+   */
+  async writeCancelled(progressDetail: Record<string, unknown>): Promise<OwnerWrite> {
+    const failed = await this.write(
+      {
+        status: 'failed',
+        progress_stage: 'failed',
+        completed_at: new Date().toISOString(),
+        error_message: ABANDONED_RUN_TEXT,
+        progress_detail: progressDetail,
+      },
+      { requireRunning: true },
+    );
+    if (failed === 'written') {
+      this.opts.log('warn', `job ${this.opts.jobId}: the run was cut short although nobody stopped it — marked failed`);
+      return failed;
+    }
+    if (failed === 'error') return failed;
+    return this.write({ progress_detail: progressDetail });
   }
 }

@@ -56,7 +56,14 @@ import {
   type OutreachLlmBudgetSnapshot,
 } from '@/lib/outreachLlm/context';
 import { pruneSiteAnalysisCache } from '@/lib/outreachLlm/siteAnalysisCache';
-import { JobOwner, WORKER_LEASE_KEY, WORKER_LEASE_TOKEN_PATH, withoutWorkerLease } from '@/lib/outreachLlm/workerLease';
+import {
+  JobOwner,
+  JobStatusReader,
+  STATUS_UNREADABLE_TEXT,
+  WORKER_LEASE_KEY,
+  WORKER_LEASE_TOKEN_PATH,
+  withoutWorkerLease,
+} from '@/lib/outreachLlm/workerLease';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { analyzeVacancy, findStrictOutboundDuty, isSdrRoleTitle, type VacancyAnalysis } from './analyze';
 import { collectCandidates, type Candidate } from './collect';
@@ -377,8 +384,9 @@ const START_READ_RETRY_MS = 2_000;
  * остаётся от прерванного прогона: деньги уже потрачены, и без него каждый
  * перезапуск получал бы лимит целиком ещё раз. Читаем до runJob — первая же
  * публикация прогресса снимок перезапишет. Снимок сохраняется продлением
- * аренды раз в 30 с и сразу после каждого вызова писателя: при падении
- * теряются только вызовы разбора последних секунд.
+ * аренды раз в 30 с и сразу после каждого вызова писателя, вместе с бронями
+ * идущих запросов (они считаются потраченными): при падении теряются только
+ * запросы, начатые в последние секунды.
  *
  * Не прочиталось (сбой PostgREST или сети) — одна повторная попытка, потом
  * ошибка: молча начать с лимитом по умолчанию и нулём потраченного нельзя.
@@ -559,9 +567,21 @@ async function runJob(
     if (templatesRef) await templatesRef.settled(Math.min(TEMPLATE_ROWS_SETTLE_MS, Math.max(0, deadline - Date.now())));
     return settled;
   };
+  // Остановка — только прочитанный статус «не идёт» (или запуска нет). Сбой
+  // чтения — не остановка: раньше он бросал здоровый запуск «идущим» без
+  // воркера навсегда. Статус не читается больше 3 минут подряд — запуск падает
+  // с понятной причиной (JobStatusReader).
+  const statusReader = new JobStatusReader(db, jobId);
   const ensureNotCancelled = async () => {
-    const { data } = await db.from('parser_jobs').select('status').eq('id', jobId).single();
-    if (!data || data.status !== 'running') {
+    // Запуск уже оборван (остановка или сбой) — новую строку не начинаем.
+    if (runAbort.signal.aborted) throw new CancelledError();
+    const read = await statusReader.read();
+    if (!read.ok) {
+      if (statusReader.unreadableTooLong()) throw new Error(STATUS_UNREADABLE_TEXT);
+      log('warn', `job ${jobId}: status check failed, the run goes on — ${read.error}`);
+      return;
+    }
+    if (read.status !== 'running') {
       const cancelled = new CancelledError();
       if (!runAbort.signal.aborted) runAbort.abort(cancelled);
       throw cancelled;
@@ -579,15 +599,19 @@ async function runJob(
   // расходов на ИИ. Появляется, когда запуск дошёл до обработки строк.
   let currentDetail: (() => Record<string, unknown>) | null = null;
   // До того — прошлый прогон и расход (его пишут продление аренды и итог).
+  // Расход, пока запуск идёт, — с бронями идущих запросов (оценкой сверху):
+  // упадёт воркер (SIGKILL, OOM) посреди семи писателей — перезапуск начнёт со
+  // снимка, где эти, может быть, уже оплаченные запросы учтены, и лимит
+  // останется строгим. Итог запуска пишет факт (после ответа или обрыва).
   const baseDetail = (): Record<string, unknown> => ({
     ...withoutWorkerLease(previousDetail ?? {}),
-    llm: budget.snapshot(),
+    llm: budget.snapshot({ includeReserved: true }),
     [WORKER_LEASE_KEY]: owner.lease(),
   });
   // Раз в 30 с воркер сохраняет изменившийся progress_detail — расход на ИИ
-  // (при падении теряются только последние секунды). Вызов писателя — дорогой:
-  // его расход сохраняем сразу, иначе перезапуск воркера заплатил бы за шаблон
-  // ещё раз мимо лимита.
+  // (при падении теряются только запросы последних секунд). Вызов писателя —
+  // дорогой: его расход сохраняем сразу, иначе перезапуск воркера заплатил бы
+  // за шаблон ещё раз мимо лимита.
   owner.start(() => (currentDetail ? currentDetail() : baseDetail()));
   budget.onCharge((role) => {
     if (role === 'writer') owner.save();
@@ -633,16 +657,12 @@ async function runJob(
     });
     // Потоки писем могут минутами ждать писателя и на статус не смотреть —
     // остановку ловим отдельно, чтобы она обрывала и запись шаблона. Только
-    // явную: сбой запроса статуса — не повод обрывать оплаченную запись.
+    // явную: сбой запроса статуса — не повод обрывать оплаченную запись (но
+    // идёт в счёт «статус не читается» у проверки перед строкой).
     cancelWatch = setInterval(() => {
-      void db
-        .from('parser_jobs')
-        .select('status')
-        .eq('id', jobId)
-        .maybeSingle()
-        .then(({ data, error }) => {
-          if (!error && data && data.status !== 'running' && !runAbort.signal.aborted) runAbort.abort(new CancelledError());
-        }, () => undefined);
+      void statusReader.read().then((read) => {
+        if (read.ok && read.status !== 'running' && !runAbort.signal.aborted) runAbort.abort(new CancelledError());
+      });
     }, CANCEL_WATCH_MS);
     cancelWatch.unref?.();
     // Остановленный между захватом и стартом запуск журнал прошлого прогона не стирает.
@@ -820,7 +840,9 @@ async function runJob(
     // worker — аренда запуска воркером: её несёт каждая запись progress_detail.
     const detail = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
       wave: waveNo, target, pool: pool.length, scanned: totals.scanned, ready: totals.ready, funnel, reasons, chains, sdr,
-      offer_version: libraries.offerVersion, source_errors: sourceErrors, doubtful: doubtful.count, llm: budget.snapshot(),
+      offer_version: libraries.offerVersion, source_errors: sourceErrors, doubtful: doubtful.count,
+      // С бронями идущих запросов — как baseDetail; итог запуска пишет факт.
+      llm: budget.snapshot({ includeReserved: true }),
       awaiting_templates: awaiting.count,
       ...(smtpOn ? {} : { smtp_unavailable: true }), ...extra,
       [WORKER_LEASE_KEY]: owner.lease(),
@@ -1301,11 +1323,21 @@ async function runJob(
       return { id, tally, domain, brand, amo: amoRec, email, site, vacancy, signals, route, caseHit, score, marketQuote, doubts };
     };
 
+    /**
+     * Запуск остановлен или падает — строку дальше не доводим: её письма и
+     * «готово» легли бы после итоговой записи, и счётчики запуска разошлись бы
+     * с журналом. Проверка — после каждого ожидания шага писем (шаблон,
+     * гипотеза).
+     */
+    const lettersStillWanted = () => {
+      if (runAbort.signal.aborted) throw new CancelledError();
+    };
     // Гипотеза сегментов для письма 3 без кейса — дешёвой моделью. Она
     // необязательна: без неё письмо 3 — механика. Поэтому и исчерпанный лимит
     // на ИИ строку не останавливает — письма собираем без гипотезы, уже
     // оплаченный разбор не пропадает. Неверный ключ — про весь запуск, его
-    // отдаём в safe().
+    // отдаём в safe(). Остановка запуска — тоже: оборванная гипотеза не
+    // превращается в «письма без гипотезы», строка не доводится до готовой.
     const skipHypothesis = () => {
       if (!hypothesisSkipLogged) {
         hypothesisSkipLogged = true;
@@ -1314,9 +1346,11 @@ async function runJob(
       return null;
     };
     const segmentsHypothesis = async (req: { brand: string; productSummary: string | null; marketQuote: string }): Promise<SegmentsHypothesis | null> => {
+      lettersStillWanted();
       if (budget.exhausted()) return skipHypothesis();
       return buildSegmentsHypothesis(req).catch((err: unknown) => {
-        if (err instanceof LlmAuthError) throw err;
+        if (err instanceof LlmAuthError || err instanceof CancelledError) throw err;
+        lettersStillWanted();
         if (err instanceof BudgetExceededError) return skipHypothesis();
         // Ключа в тексте нет: клиент аутричей вычищает его из ошибок.
         log('warn', `segments hypothesis failed for ${req.brand}: ${err instanceof Error ? err.message : String(err)}`);
@@ -1394,6 +1428,7 @@ async function runJob(
       // оффера; остальные ждут тот же промис. Лимит на ИИ до записи шаблона —
       // BudgetExceededError: строка возвращается в необработанные (safe()).
       const template = await templates.get(q.route.chain);
+      lettersStillWanted();
       const scoringDetail = q.doubts.detail.join('; ') || null;
       if (template.status !== 'ok' || !template.letters) {
         // Шаблон оффера не прошёл проверку или не написан — письма собирать не
@@ -1439,6 +1474,7 @@ async function runJob(
         },
         { sender, claims: libraries.claims, hypothesis: segmentsHypothesis },
       );
+      lettersStillWanted();
       reach(q.tally, 'sequence_assembled');
       // Признаки сомнения с оценки письма не трогают — только добавляют свой,
       // если письма не прошли проверку. Второй темы (subject_b) у шаблона нет.
@@ -1747,8 +1783,9 @@ async function runJob(
       // Статус поставил тот, кто остановил; дописываем только итог — сколько
       // успели потратить на ИИ и докуда дошли. Только при своей аренде: после
       // перезапуска воркера запуск мог подхватить новый прогон, его прогресс
-      // не трогаем.
-      await owner.write({ progress_detail: finalDetail });
+      // не трогаем. Запуск всё ещё «идёт» под нашей арендой — его никто не
+      // останавливал: failed с понятной причиной, а не «идущий» без воркера.
+      await owner.writeCancelled(finalDetail);
       return;
     }
     log('error', `job ${jobId} failed`, err);

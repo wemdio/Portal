@@ -53,7 +53,14 @@ import {
   type OutreachLlmBudgetSnapshot,
 } from '@/lib/outreachLlm/context';
 import { pruneSiteAnalysisCache } from '@/lib/outreachLlm/siteAnalysisCache';
-import { JobOwner, WORKER_LEASE_KEY, WORKER_LEASE_TOKEN_PATH, withoutWorkerLease } from '@/lib/outreachLlm/workerLease';
+import {
+  JobOwner,
+  JobStatusReader,
+  STATUS_UNREADABLE_TEXT,
+  WORKER_LEASE_KEY,
+  WORKER_LEASE_TOKEN_PATH,
+  withoutWorkerLease,
+} from '@/lib/outreachLlm/workerLease';
 import { isSuppressed } from '@/lib/polzaRuOutreach/company';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { analyzeVacancy } from './analyzeVacancy';
@@ -457,8 +464,9 @@ const START_READ_RETRY_MS = 2_000;
  * прогона: деньги уже потрачены, и без него каждый перезапуск получал бы
  * лимит целиком ещё раз. Читаем до runJob — первая же публикация прогресса
  * снимок перезапишет. Снимок сохраняется продлением аренды раз в 30 с и сразу
- * после каждого вызова писателя: при падении теряются только вызовы разбора
- * последних секунд.
+ * после каждого вызова писателя, вместе с бронями идущих запросов (они
+ * считаются потраченными): при падении теряются только запросы, начатые в
+ * последние секунды.
  *
  * Не прочиталось (сбой PostgREST или сети) — одна повторная попытка, потом
  * ошибка: молча начать с лимитом по умолчанию и нулём потраченного нельзя.
@@ -634,9 +642,21 @@ async function runJob(
     if (templatesRef) await templatesRef.settled(Math.min(TEMPLATE_ROWS_SETTLE_MS, Math.max(0, deadline - Date.now())));
     return settled;
   };
+  // Остановка — только прочитанный статус «не идёт» (или запуска нет). Сбой
+  // чтения — не остановка: раньше он бросал здоровый запуск «идущим» без
+  // воркера навсегда. Статус не читается больше 3 минут подряд — запуск падает
+  // с понятной причиной (JobStatusReader).
+  const statusReader = new JobStatusReader(db, jobId);
   const ensureNotCancelled = async () => {
-    const { data } = await db.from('parser_jobs').select('status').eq('id', jobId).single();
-    if (!data || data.status !== 'running') {
+    // Запуск уже оборван (остановка или сбой) — новую строку не начинаем.
+    if (runAbort.signal.aborted) throw new PolzaOutreachCancelledError();
+    const read = await statusReader.read();
+    if (!read.ok) {
+      if (statusReader.unreadableTooLong()) throw new Error(STATUS_UNREADABLE_TEXT);
+      log('warn', `job ${jobId}: status check failed, the run goes on — ${read.error}`);
+      return;
+    }
+    if (read.status !== 'running') {
       const cancelled = new PolzaOutreachCancelledError();
       if (!runAbort.signal.aborted) runAbort.abort(cancelled);
       throw cancelled;
@@ -658,15 +678,19 @@ async function runJob(
   // расходов на ИИ. Появляется, когда запуск дошёл до обработки строк.
   let currentDetail: (() => Record<string, unknown>) | null = null;
   // До того — прошлый прогон и расход (его пишут продление аренды и итог).
+  // Расход, пока запуск идёт, — с бронями идущих запросов (оценкой сверху):
+  // упадёт воркер (SIGKILL, OOM) посреди пяти писателей — перезапуск начнёт со
+  // снимка, где эти, может быть, уже оплаченные запросы учтены, и лимит
+  // останется строгим. Итог запуска пишет факт (после ответа или обрыва).
   const baseDetail = (): Record<string, unknown> => ({
     ...withoutWorkerLease(previousDetail ?? {}),
-    llm: budget.snapshot(),
+    llm: budget.snapshot({ includeReserved: true }),
     [WORKER_LEASE_KEY]: owner.lease(),
   });
   // Раз в 30 с воркер сохраняет изменившийся progress_detail — расход на ИИ
-  // (при падении теряются только последние секунды). Вызов писателя — дорогой:
-  // его расход сохраняем сразу, иначе перезапуск воркера заплатил бы за шаблон
-  // ещё раз мимо лимита.
+  // (при падении теряются только запросы последних секунд). Вызов писателя —
+  // дорогой: его расход сохраняем сразу, иначе перезапуск воркера заплатил бы
+  // за шаблон ещё раз мимо лимита.
   owner.start(() => (currentDetail ? currentDetail() : baseDetail()));
   budget.onCharge((role) => {
     if (role === 'writer') owner.save();
@@ -711,16 +735,12 @@ async function runJob(
     });
     // Потоки писем могут минутами ждать писателя и на статус не смотреть —
     // остановку ловим отдельно, чтобы она обрывала и запись шаблона. Только
-    // явную: сбой запроса статуса — не повод обрывать оплаченную запись.
+    // явную: сбой запроса статуса — не повод обрывать оплаченную запись (но
+    // идёт в счёт «статус не читается» у проверки перед строкой).
     cancelWatch = setInterval(() => {
-      void db
-        .from('parser_jobs')
-        .select('status')
-        .eq('id', jobId)
-        .maybeSingle()
-        .then(({ data, error }) => {
-          if (!error && data && data.status !== 'running' && !runAbort.signal.aborted) runAbort.abort(new PolzaOutreachCancelledError());
-        }, () => undefined);
+      void statusReader.read().then((read) => {
+        if (read.ok && read.status !== 'running' && !runAbort.signal.aborted) runAbort.abort(new PolzaOutreachCancelledError());
+      });
     }, CANCEL_WATCH_MS);
     cancelWatch.unref?.();
     // Остановленный между захватом и стартом запуск журнал прошлого прогона не стирает.
@@ -872,7 +892,8 @@ async function runJob(
       // Сколько компаний ждут цепочку оффера («Переписать цепочку»).
       awaiting_templates: awaitingTemplate,
       funnel: funnelOf(),
-      llm: budget.snapshot(),
+      // С бронями идущих запросов — как baseDetail; итог запуска пишет факт.
+      llm: budget.snapshot({ includeReserved: true }),
       ...(smtpOn ? {} : { smtp_unavailable: true }),
       ...extra,
       // Аренда запуска воркером: её несёт каждая запись progress_detail.
@@ -1502,8 +1523,9 @@ async function runJob(
       // Статус поставил тот, кто остановил; дописываем только итог — сколько
       // успели потратить на ИИ и докуда дошли. Только при своей аренде: после
       // перезапуска воркера запуск мог подхватить новый прогон, его прогресс
-      // не трогаем.
-      await owner.write({ progress_detail: finalDetail });
+      // не трогаем. Запуск всё ещё «идёт» под нашей арендой — его никто не
+      // останавливал: failed с понятной причиной, а не «идущий» без воркера.
+      await owner.writeCancelled(finalDetail);
       return;
     }
     log('error', `job ${jobId} failed`, err);
