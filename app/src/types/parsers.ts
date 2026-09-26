@@ -348,6 +348,8 @@ export interface PolzaOutreachCompanyRow {
   email_verification?: string | null;
   sequence_id?: string | null;
   letters?: PolzaOutreachLetter[] | null;
+  /** Шаблон цепочки оффера, по которому собраны письма (с 26.09.2026). */
+  chain_template_id?: string | null;
   status: string;
   stage?: string | null;
   exclusion_reason?: string | null;

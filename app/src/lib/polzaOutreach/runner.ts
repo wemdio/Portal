@@ -16,7 +16,12 @@
  *     проверку (email_unverified), тоже без ИИ;
  *  S4 дешёвый ИИ: сайт (кэш 30 дней) и вакансия → поводы, Lead Score, статус;
  *  S6 четыре письма и гарды — прошедшим порог, от самых сильных к слабым,
- *     пока не набрано заказанное число готовых.
+ *     пока не набрано заказанное число готовых. Письма — из шаблона цепочки
+ *     оффера (тип главного повода): его один раз на оффер запуска пишет
+ *     Gemini 3.1 Pro (templateWriter.ts), под компанию подставляются
+ *     проверенные факты и подпись из настроек. Шаблон не прошёл проверку или
+ *     письма компании не прошли гарды — строка на ручную проверку
+ *     (template_failed / letters_qa_failed), в рассылку она не идёт (спека §4).
  * Номера стадий исторические (их хранит поле stage): почта (s5_email) с
  * 26.09.2026 идёт раньше разбора (s4_analyzed). Воронку по строкам считает
  * lib/polzaOutreach/funnel.ts.
@@ -51,18 +56,23 @@ import { pruneSiteAnalysisCache } from '@/lib/outreachLlm/siteAnalysisCache';
 import { isSuppressed } from '@/lib/polzaRuOutreach/company';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { analyzeVacancy } from './analyzeVacancy';
-import { buildLetters, displayName, guardLetters, SEQUENCE_ID, triggerPhrase } from './buildLetters';
+import { displayName, SEQUENCE_ID, triggerPhrase } from './buildLetters';
 import { loadEnCases, routeEnCase, type EnCase } from './caseRouter';
-import { findCompanyEmail } from './findEmail';
+import { findCompanyEmail, type PolzaEmailType } from './findEmail';
 import { POLZA_FUNNEL_COLUMNS, polzaFunnel, type PolzaFunnelRow } from './funnel';
 import { icpFilter } from './icpFilter';
 import { employeesFromBucket, leadStatus, primaryTrigger, scoreLead, type LeadScore, type Trigger } from './leadScore';
+import { composeCompanyLetters, offerKeyOf } from './renderTemplate';
 import { lookupPdlProfile, normalizeDomain, PDL_COUNTRY_BY_CODE, resolveCompanyDomain } from './resolveDomain';
 import { selectVacancies } from './selectVacancies';
+import { loadSignature } from './settings';
 import { buildSiteProfile, type SiteProfile } from './siteProfile';
+import { createChainTemplates, templateFailureDetail, WORKER_WRITER_TIMEOUT_MS, type ChainTemplate } from './templateWriter';
 import {
   POLZA_OUTREACH_STAGES as ST,
+  polzaReviewReason,
   sanitizePolzaOutreachConfig,
+  type PolzaOfferKey,
   type PolzaOutreachConfig,
   type PolzaOutreachVacancyCandidate,
   type PolzaVacancyAnalysis,
@@ -81,7 +91,8 @@ const ENRICH_CONCURRENCY = envInt('POLZA_OUTREACH_LLM_CONCURRENCY', 4, 1, 6);
 // больше ждут, чем работают, и ИИ не тратят. Почту теперь ищут у всех
 // прошедших S3, а не только у write now, поэтому свой пул, шире разбора.
 const EMAIL_CONCURRENCY = envInt('POLZA_OUTREACH_EMAIL_CONCURRENCY', 8, 1, 16);
-// Письма собираются без ИИ.
+// Письма — подстановка в шаблон оффера. Шаблон пишется один раз на оффер:
+// компании оффера, дошедшие до писем одновременно, ждут одного писателя.
 const LETTERS_CONCURRENCY = 4;
 // Поиск домена (запросы по каталогу PDL и Clearbit) и профиль PDL идут в
 // пуле почты, а он шире прежнего пула разбора (8 против 4): без своего
@@ -107,13 +118,41 @@ class SmtpSilentError extends Error {}
  * сервера, а лежащие SMTP-прокси.
  */
 const SMTP_UNVERIFIED_STREAK = 15;
+/**
+ * Писатель цепочек не отвечает — запуск падает целиком: шаблон один на оффер,
+ * и без писателя все компании запуска ушли бы на ручную проверку, а разбор
+ * следующих волн был бы оплачен впустую.
+ */
+class WriterSilentError extends Error {}
+/** Сколько офферов подряд без шаблона из-за сбоя ИИ (не проверки) — уже не случайность, если ни один не написан. */
+const WRITER_FAILED_OFFERS = 2;
+/**
+ * Запас лимита на ИИ под писателя цепочек: шаблоны пишутся в конце волны, и
+ * разбор не должен съесть лимит до цента — иначе компании, оплаченные
+ * разбором, остались бы без писем. Новый разбор не начинаем, когда до лимита
+ * меньше запаса. $1 — три-пять шаблонов Gemini 3.1 Pro; у маленького лимита —
+ * пятая часть, иначе при лимите в $1 разбор не начался бы вовсе.
+ */
+const WRITER_RESERVE_USD = 1;
+const WRITER_RESERVE_SHARE = 0.2;
+
+function writerReserveUsd(budget: JobBudget): number {
+  return Math.min(WRITER_RESERVE_USD, budget.limitUsd * WRITER_RESERVE_SHARE);
+}
+
+/** На разбор ещё можно тратить: лимит не исчерпан и запас под писателя цел. */
+function analysisBudgetLeft(budget: JobBudget): boolean {
+  return !budget.exhausted() && budget.limitUsd - budget.spentUsd >= writerReserveUsd(budget);
+}
 
 /**
  * Строка, которую лимит на ИИ вернул в необработанные: статус «найдена» и ни
- * одного поля шагов S2 и S5. В конце запуска такие строки уходят из журнала;
- * но воронку экран считает по полям строки (домен, почта), и строка, которую
- * не удалось удалить, иначе числилась бы в ней, хотя из счётчиков запуска её
- * уже вычли.
+ * одного поля шагов S2 и S5, и без оценки S4. В конце запуска такие строки
+ * уходят из журнала; но воронку экран считает по полям строки (домен, почта,
+ * write now), и строка, которую не удалось удалить, иначе числилась бы в ней,
+ * хотя из счётчиков запуска её уже вычли. Оценка есть у строки, которую лимит
+ * остановил на письмах: шаблон оффера ещё не написан, а платить писателю уже
+ * нечем.
  */
 const UNPROCESSED_PATCH: Record<string, unknown> = {
   status: 'discovered',
@@ -127,6 +166,7 @@ const UNPROCESSED_PATCH: Record<string, unknown> = {
   email_type: null,
   email_source_url: null,
   email_verification: null,
+  lead_status: null,
 };
 
 function log(level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) {
@@ -274,6 +314,8 @@ interface Prepared {
   website: string;
   employees: number | null;
   countryCode: string | null;
+  /** Общий ящик (info@, hello@) получает письмо 1 «кто у вас за это отвечает?». */
+  emailType: PolzaEmailType | null;
 }
 
 /** Всё, что известно о компании после разбора и оценки, — вход писем. */
@@ -285,6 +327,7 @@ interface Qualified {
   triggers: Trigger[];
   score: LeadScore;
   caseHit: EnCase | null;
+  emailType: PolzaEmailType | null;
 }
 
 /** «Дубль домена» и строка, чей домен он повторил, — для уборки после стопа по лимиту. */
@@ -492,8 +535,10 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
     const maxCandidates = maxCandidatesFor(target);
     const thresholds = { write: config.write_threshold };
     // Перезапуск после исчерпанного лимита: журнал оплачен и остаётся, новых
-    // строк не будет — ни ключ, ни источники не нужны.
-    if (budget.exhausted()) {
+    // строк не будет — ни ключ, ни источники не нужны. Остаток меньше запаса
+    // под писателя — то же самое: новый прогон стёр бы оплаченный журнал, а
+    // разбор всё равно не начался бы.
+    if (!analysisBudgetLeft(budget)) {
       await completeSpentRun(db, jobId, target, budget, previousDetail, setRunningProgress);
       return;
     }
@@ -521,8 +566,19 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
     // Лимит при этом ещё не исчерпан (иначе — completeSpentRun выше): профили
     // сайтов в кэше, и заново платим в основном за вакансии.
     await db.from('polza_outreach_companies').delete().eq('job_id', jobId);
+    // И без шаблонов цепочек прошлого прогона: failed-шаблон иначе сразу
+    // отправил бы компании оффера на ручную проверку без новой попытки, а
+    // pending умершего прогона заставил бы ждать. Путь «лимит уже исчерпан»
+    // выше шаблоны не трогает — журнал и его письма остаются.
+    const { error: templatesErr } = await db.from('polza_chain_templates').delete().eq('job_id', jobId).eq('lang', 'en');
+    if (templatesErr) throw new Error(`Не удалось убрать цепочки прошлого прогона: ${templatesErr.message}`);
     // Устаревшие профили сайтов читатель не берёт — чистим, чтобы кэш не рос без конца.
     await pruneSiteAnalysisCache('en');
+    // Подпись писем — из настроек (одна на все запуски), читается один раз:
+    // все письма запуска подписаны одинаково, даже если её поменяют посреди.
+    const signature = await loadSignature(db);
+    // Шаблоны цепочек запуска: пишутся лениво, один раз на оффер.
+    const templates = createChainTemplates({ db, jobId, writerTimeoutMs: WORKER_WRITER_TIMEOUT_MS });
 
     // ── S1: пул кандидатов ──
     const vacancies = config.sources.includes('hiring')
@@ -551,11 +607,12 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
     let processed = 0;
     // Шаг волны, который сейчас идёт, — для progress_stage.
     let phase = 'finding_emails';
-    // Лимит на ИИ исчерпан: новые строки и волны не начинаем, запуск
-    // завершится штатно. Строки, которые лимит остановил, уберём из журнала.
+    // Лимит на ИИ исчерпан или от него остался только запас под писателя:
+    // новые строки и волны не начинаем, запуск завершится штатно. Строки,
+    // которые лимит остановил, уберём из журнала.
     let budgetStop = false;
     const stopForBudget = (): boolean => {
-      if (budget.exhausted()) budgetStop = true;
+      if (!analysisBudgetLeft(budget)) budgetStop = true;
       return budgetStop;
     };
     // Ключ ИИ отвергнут, ИИ или проверка почт молчат: запуск уже падает —
@@ -595,6 +652,19 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
     };
     const smtpSilentError = () =>
       new SmtpSilentError(`Проверка почт не отвечает: ${SMTP_UNVERIFIED_STREAK} адресов подряд не удалось проверить — проверьте SMTP-прокси`);
+    // Предохранитель «писатель молчит»: WRITER_FAILED_OFFERS офферов остались
+    // без шаблона из-за сбоя ИИ (не проверки), и ни один шаблон не написан —
+    // лежат Gemini или Requesty, так же кончится каждый следующий оффер.
+    // Шаблон, не прошедший проверку, — ответ писателя, он серию не копит.
+    const templateOutcomes = new Map<PolzaOfferKey, { ok: boolean; error: string | null }>();
+    const noteTemplate = (t: ChainTemplate) => {
+      templateOutcomes.set(t.offer, { ok: t.status === 'ok', error: t.status === 'ok' ? null : t.error });
+      const outcomes = [...templateOutcomes.values()];
+      const failed = outcomes.filter((o) => o.error);
+      if (!outcomes.some((o) => o.ok) && failed.length >= WRITER_FAILED_OFFERS) {
+        throw new WriterSilentError(`Gemini не пишет цепочки: ${failed[0].error}`);
+      }
+    };
 
     // Ключи воронки — в порядке шагов раннера; geo_confirmed исторически значит «write now».
     const funnelOf = () => ({
@@ -759,7 +829,7 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
       }
       await updateRow(id, { ...emailPatch, stage: ST.s5Email });
       count(tally, 'emailFound');
-      return { id, tally, c, domain, website, employees, countryCode };
+      return { id, tally, c, domain, website, employees, countryCode, emailType: found.emailType };
     };
 
     // ── S4 для одной компании: дешёвый ИИ, поводы, Lead Score ──
@@ -801,6 +871,10 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
       const triggers: Trigger[] = [];
       let analysisPatch: Record<string, unknown> = {};
       if (c.vacancy) {
+        // Пока шёл разбор сайта, от лимита мог остаться только запас под
+        // писателя цепочек — вакансию не разбираем, строка вернётся в
+        // необработанные (safely()). Разбор сайта не пропал: он в кэше.
+        if (!analysisBudgetLeft(budget)) throw new BudgetExceededError('На разбор остался только запас под писателя цепочек');
         let analysis: PolzaVacancyAnalysis;
         try {
           analysis = await analyzeVacancy({
@@ -881,37 +955,90 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
       if (status === 'skip') return excludeRow(id, ST.s4Analyzed, 'low_score', patch);
       count(tally, 'writeNow');
       await updateRow(id, { ...patch, status: 'qualified', stage: ST.s4Analyzed });
-      return { id, tally, c, site, triggers, score, caseHit: routed?.record ?? null };
+      return { id, tally, c, site, triggers, score, caseHit: routed?.record ?? null, emailType: p.emailType };
     };
 
-    // ── S6 для одной компании: письма и гарды ──
-    const finalize = async (q: Qualified) => {
-      if (totals.ready >= target) {
-        await updateRow(q.id, { status: 'needs_review', review_reason: 'limit_reached' });
-        return;
+    // Места в лимите готовых для писем, которые сейчас собираются. Между
+    // проверкой лимита и готовой строкой теперь ожидание шаблона (писатель —
+    // до минуты): без мест все потоки пула прошли бы проверку разом, и за
+    // шаблон оффера, чьи компании всё равно уйдут в limit_reached, мы бы
+    // заплатили. Строка без места ждёт: место освободится, если письма
+    // соседа не выйдут, — в limit_reached она уходит, только когда лимит
+    // действительно набран.
+    let lettersInFlight = 0;
+    let slotWaiters: Array<() => void> = [];
+    const takeLettersSlot = async (): Promise<boolean> => {
+      for (;;) {
+        if (totals.ready >= target) return false;
+        if (totals.ready + lettersInFlight < target) {
+          lettersInFlight += 1;
+          return true;
+        }
+        await new Promise<void>((resolve) => slotWaiters.push(resolve));
       }
-      const company = displayName(q.c.companyName);
-      const primary = primaryTrigger(q.triggers);
-      const letters = buildLetters({ company, trigger: primary, caseHit: q.caseHit, segments: q.site.segments });
-      const allowedFacts = [company, ...q.triggers.map((t) => t.title), ...(q.caseHit ? [q.caseHit.snippet, q.caseHit.segment] : [])];
-      const guard = guardLetters(letters, allowedFacts);
-      if (!guard.ok) {
+    };
+    const releaseLettersSlot = () => {
+      lettersInFlight -= 1;
+      const waiting = slotWaiters;
+      slotWaiters = [];
+      for (const wake of waiting) wake();
+    };
+
+    // ── S6 для одной компании: письма из шаблона оффера и гарды ──
+    const buildCompanyLetters = async (q: Qualified) => {
+      // Шаблон цепочки оффера: пишется, когда до писем дошла первая компания
+      // оффера; остальные ждут тот же промис. Лимит на ИИ до записи шаблона —
+      // BudgetExceededError: строка возвращается в необработанные (safely()).
+      const template = await templates.get(offerKeyOf(primaryTrigger(q.triggers)));
+      noteTemplate(template);
+      if (template.status !== 'ok' || !template.letters) {
+        // Шаблон оффера не прошёл проверку или не написан — писем собирать не
+        // из чего. На ручную проверку: в рассылку строка не идёт, а
+        // «Переписать цепочку» найдёт её по template_failed и id шаблона.
         await updateRow(q.id, {
           status: 'needs_review',
           stage: ST.s6Letters,
           sequence_id: SEQUENCE_ID,
-          letters,
-          review_reason: `letter_guard_failed: ${guard.violations[0] ?? 'unknown'}`,
+          chain_template_id: template.id,
+          review_reason: polzaReviewReason('template_failed', templateFailureDetail(template)),
         });
-        log('warn', `S6 guard failed for ${company}`, guard.violations);
+        return;
+      }
+      const composed = composeCompanyLetters(
+        template.letters,
+        { companyName: q.c.companyName, triggers: q.triggers, caseHit: q.caseHit, segments: q.site.segments, emailType: q.emailType },
+        signature,
+      );
+      const base = { stage: ST.s6Letters, sequence_id: SEQUENCE_ID, chain_template_id: template.id, letters: composed.letters };
+      if (!composed.guard.ok) {
+        // Письма собраны, но гарды не прошли — на ручную проверку, письма в
+        // строке, решает человек. Какое правило нарушено — в причине строки.
+        await updateRow(q.id, {
+          ...base,
+          status: 'needs_review',
+          review_reason: polzaReviewReason('letters_qa_failed', composed.guard.violations.join('; ')),
+        });
+        log('warn', `S6 guard failed for ${displayName(q.c.companyName)}`, composed.guard.violations);
         return;
       }
       if (totals.ready >= target) {
-        await updateRow(q.id, { status: 'needs_review', review_reason: 'limit_reached', letters, sequence_id: SEQUENCE_ID });
+        await updateRow(q.id, { ...base, status: 'needs_review', review_reason: 'limit_reached' });
         return;
       }
       totals.ready += 1;
-      await updateRow(q.id, { status: 'ready', stage: ST.s6Letters, sequence_id: SEQUENCE_ID, letters });
+      await updateRow(q.id, { ...base, status: 'ready' });
+    };
+
+    const finalize = async (q: Qualified) => {
+      if (!(await takeLettersSlot())) {
+        await updateRow(q.id, { status: 'needs_review', review_reason: 'limit_reached' });
+        return;
+      }
+      try {
+        await buildCompanyLetters(q);
+      } finally {
+        releaseLettersSlot();
+      }
     };
 
     const safely = async (id: string, tally: Tally, fn: () => Promise<void>) => {
@@ -919,9 +1046,9 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
         await fn();
       } catch (err) {
         if (err instanceof PolzaOutreachCancelledError) throw err;
-        if (err instanceof LlmAuthError || err instanceof LlmSilentError || err instanceof SmtpSilentError) {
-          // Ключ не работает, ИИ или проверка почт молчат серией — так же
-          // упадёт каждая строка. Валим запуск целиком.
+        if (err instanceof LlmAuthError || err instanceof LlmSilentError || err instanceof SmtpSilentError || err instanceof WriterSilentError) {
+          // Ключ не работает, ИИ, писатель цепочек или проверка почт молчат
+          // серией — так же упадёт каждая строка. Валим запуск целиком.
           halted = true;
           throw err;
         }
@@ -1043,10 +1170,27 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, prev
       });
 
       // Шаг 3: письма — от самых сильных к слабым. Лимит на ИИ здесь не
-      // проверяем: письма бесплатны — уже оплаченный разбор доводим до готовых.
+      // проверяем: по готовому шаблону оффера письма бесплатны — уже
+      // оплаченный разбор доводим до готовых (на писателя оставлен запас,
+      // writerReserveUsd). Шаблон, который ещё не написан, после лимита не
+      // написать: такие строки вернутся в необработанные (BudgetExceededError
+      // в safely()).
       qualified.sort((a, b) => b.score.total - a.score.total);
       phase = 'building_letters';
       await publish(phase, { write_now: qualified.length });
+      // Шаблоны офферов волны — сразу и параллельно: иначе оффер, чья первая
+      // компания стоит в очереди писем последней, ждал бы, пока допишутся
+      // шаблоны офферов перед ним. Только офферы строк, которым хватит места
+      // в лимите готовых: за шаблон оффера, все компании которого уйдут в
+      // limit_reached, платить незачем (понадобится — строка напишет его
+      // сама). Ошибку получит строка, которая ждёт тот же промис, — здесь её
+      // только гасим.
+      if (!halted) {
+        const fits = qualified.slice(0, Math.max(0, target - totals.ready));
+        for (const offer of new Set(fits.map((q) => offerKeyOf(primaryTrigger(q.triggers))))) {
+          void templates.get(offer).catch(() => undefined);
+        }
+      }
       await runPool(qualified, LETTERS_CONCURRENCY, async (q) => {
         if (halted) return;
         await ensureNotCancelled();

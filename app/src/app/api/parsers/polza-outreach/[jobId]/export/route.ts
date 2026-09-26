@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import ExcelJS from 'exceljs';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { logError } from '@/lib/loggerServer';
+import { polzaReviewLabel } from '@/lib/polzaOutreach/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -152,7 +153,6 @@ const REASON_RU: Record<string, string> = {
   email_unverified: 'почта не проверена: SMTP-проверка не дала ответа',
   generic_company: 'слишком общее описание компании',
   low_geo_confidence: 'гео продаж подтверждено слабо',
-  letters_guard_failed: 'письма не прошли проверку правил',
 };
 
 function jsonError(message: string, status: number) {
@@ -224,7 +224,9 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
             : EMAIL_VERIFICATION_RU[row.email_verification] ?? row.email_verification,
       status: typeof row.status === 'string' ? STATUS_RU[row.status] ?? row.status : '',
       exclusion_reason: reason(row.exclusion_reason),
-      review_reason: reason(row.review_reason),
+      // Причины ручной проверки — одни подписи с экраном (lib/polzaOutreach/types.ts),
+      // вместе с подробностью: почему цепочка не готова, какое правило писем нарушено.
+      review_reason: typeof row.review_reason === 'string' ? polzaReviewLabel(row.review_reason) : '',
       source_list: Array.isArray(row.source_list) ? (row.source_list as string[]).join(' + ') : '',
       segments: Array.isArray(row.segments) ? (row.segments as string[]).join('; ') : '',
       trigger_list: Array.isArray(row.trigger_list)

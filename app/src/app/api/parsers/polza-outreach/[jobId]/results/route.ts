@@ -4,6 +4,7 @@ import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteC
 import { logError } from '@/lib/loggerServer';
 import { POLZA_FUNNEL_COLUMNS, polzaFunnel, type PolzaFunnelRow } from '@/lib/polzaOutreach/funnel';
 import { POLZA_RESULTS_MAX_PAGE } from '@/lib/polzaOutreach/resultsPaging';
+import { polzaReviewCode } from '@/lib/polzaOutreach/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -94,7 +95,11 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       exclusionCounts[row.exclusion_reason] = (exclusionCounts[row.exclusion_reason] ?? 0) + 1;
     }
     if (row.status === 'needs_review' && row.review_reason) {
-      reviewCounts[row.review_reason] = (reviewCounts[row.review_reason] ?? 0) + 1;
+      // По коду причины: у цепочки, которая не готова, и у писем, не
+      // прошедших гарды, после кода — почему, и без этого каждая строка
+      // считалась бы отдельно.
+      const code = polzaReviewCode(row.review_reason);
+      reviewCounts[code] = (reviewCounts[code] ?? 0) + 1;
     }
   }
 

@@ -4,6 +4,7 @@ import { Fragment, useState } from 'react';
 import type { PolzaOutreachCompanyRow, PolzaOutreachFunnel, ParserJobStatus } from '@/types';
 import { fmtUsd } from '@/lib/outreachLlm/format';
 import type { OutreachLlmBudgetSnapshot } from '@/lib/outreachLlm/types';
+import { polzaReviewLabel } from '@/lib/polzaOutreach/types';
 import { POLZA_STAGE_KEYS, POLZA_STAGE_LABELS, PolzaOutreachStages } from '@/components/parsers/PolzaOutreachStages';
 import { PolzaOutreachStageModal } from '@/components/parsers/PolzaOutreachStageModal';
 import { ChevronDown, ChevronRight, Download, ExternalLink, FileText, Filter, Loader2, Mail, Square, Trash2 } from 'lucide-react';
@@ -76,20 +77,12 @@ const EXCLUSION_LABELS: Record<string, string> = {
  * Причины, по которым строка ушла на ручную проверку.
  *
  * Показывались машинным кодом («no_corporate_email»): оператору он ничего не
- * объясняет, а гадать по подчёркиваниям — не его работа.
+ * объясняет, а гадать по подчёркиваниям — не его работа. Подписи общие с
+ * выгрузкой в Excel (lib/polzaOutreach/types.ts): у цепочки оффера, которая
+ * не готова, и у писем, не прошедших гарды, к подписи добавляется почему.
  */
-const REVIEW_LABELS: Record<string, string> = {
-  email_unverified: 'почта не проверена: SMTP-проверка не дала ответа',
-  no_corporate_email: 'не нашли корпоративную почту',
-  generic_company: 'слишком общее описание компании',
-  low_geo_confidence: 'гео продаж подтверждено слабо',
-  letters_guard_failed: 'письма не прошли проверку правил',
-  manual_check: 'Lead Score в зоне ручной проверки',
-  limit_reached: 'лимит готовых уже набран',
-};
-
 function reviewLabel(reason: string): string {
-  return REVIEW_LABELS[reason] ?? reason;
+  return polzaReviewLabel(reason);
 }
 
 const CONFIDENCE_STYLES: Record<string, string> = {
@@ -152,7 +145,12 @@ function LettersBlock({ row }: { row: PolzaOutreachCompanyRow }) {
             <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[11px] font-semibold text-violet-800">
               Письмо {letter.n}
             </span>
-            <span className="text-sm font-medium text-gray-800">{letter.subject}</span>
+            {/* С 26.09.2026 тема только у письма 1: остальные уходят ответом в ту же ветку. */}
+            {letter.subject ? (
+              <span className="text-sm font-medium text-gray-800">{letter.subject}</span>
+            ) : (
+              <span className="text-xs text-gray-400">ответ в той же ветке</span>
+            )}
           </div>
           <pre className="whitespace-pre-wrap break-words font-sans text-sm text-gray-700">{letter.body}</pre>
         </div>

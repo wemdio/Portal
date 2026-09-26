@@ -13,7 +13,9 @@
  *   S5 findEmail        — корпоративная почта с SMTP-проверкой и стоп-лист «Рассылки»,
  *                         у всех прошедших S3 и ДО разбора ИИ: за компанию без почты не платим
  *   S4 score            — сайт + вакансия (дешёвый ИИ) → поводы, fit, Lead Score v1, статус
- *   S6 buildLetters     — 4 письма CEO + детерминированные гарды
+ *   S6 письма           — шаблон цепочки оффера (Gemini 3.1 Pro, один раз на тип главного
+ *                         повода запуска; templateWriter.ts) + подстановка проверенных фактов
+ *                         (renderTemplate.ts) + детерминированные гарды (buildLetters.ts)
  * Номера стадий исторические: их хранит поле stage, и S5 с 26.09.2026 идёт до S4.
  *
  * Статусы строки: discovered → normalized → excluded | needs_review | qualified → ready.
@@ -185,7 +187,7 @@ export interface PolzaVacancyAnalysis {
   is_lead_gen_agency: boolean;
 }
 
-/** Письмо цепочки (letters jsonb). */
+/** Письмо цепочки (letters jsonb). Тема — только у письма 1: письма 2–4 идут ответом в той же ветке. */
 export interface PolzaOutreachLetter {
   n: number;
   subject: string;
@@ -196,4 +198,146 @@ export interface PolzaOutreachLetter {
 export interface PolzaLetterGuardResult {
   ok: boolean;
   violations: string[];
+}
+
+/* ─────────────── Цепочки писем: шаблон на оффер (спека §4) ─────────────── */
+
+/**
+ * Оффер цепочки — тип главного повода компании (leadScore.primaryTrigger).
+ * Цепочку пишет Gemini 3.1 Pro один раз на оффер запуска, под компанию
+ * подставляются проверенные факты. none — повода нет: сейчас такие компании
+ * отсеиваются до писем (no_trigger), ключ есть, чтобы строка без повода не
+ * осталась без цепочки, если отсев когда-нибудь смягчат.
+ */
+export const POLZA_OFFER_KEYS = ['hiring', 'yc', 'launch', 'tech_stack', 'none'] as const;
+export type PolzaOfferKey = (typeof POLZA_OFFER_KEYS)[number];
+
+export const POLZA_OFFER_LABELS: Record<PolzaOfferKey, string> = {
+  hiring: 'Найм в sales/GTM',
+  yc: 'Стартап YC',
+  launch: 'Запуск продукта',
+  tech_stack: 'Стек продаж',
+  none: 'Без повода',
+};
+
+export function isPolzaOfferKey(value: string): value is PolzaOfferKey {
+  return (POLZA_OFFER_KEYS as readonly string[]).includes(value);
+}
+
+/**
+ * Плейсхолдеры шаблона — только они меняются от компании к компании:
+ * название, фраза-повод (triggerPhrase, из проверенного повода), короткий
+ * повод для середины фразы (triggerShort), предложение об утверждённом кейсе,
+ * блок первых сегментов (из разбора сайта) и подпись из настроек.
+ */
+export const POLZA_TEMPLATE_PLACEHOLDERS = {
+  company: '{{company}}',
+  trigger: '{{trigger}}',
+  triggerShort: '{{trigger_short}}',
+  case: '{{case}}',
+  segments: '{{segments}}',
+  signature: '{{signature}}',
+} as const;
+export type PolzaTemplatePlaceholder = (typeof POLZA_TEMPLATE_PLACEHOLDERS)[keyof typeof POLZA_TEMPLATE_PLACEHOLDERS];
+
+/** Плейсхолдеры, которые может использовать шаблон оффера: без повода нет и фразы-повода. */
+export function polzaTemplatePlaceholdersFor(offer: PolzaOfferKey): PolzaTemplatePlaceholder[] {
+  const p = POLZA_TEMPLATE_PLACEHOLDERS;
+  return [p.company, ...(offer === 'none' ? [] : [p.trigger]), p.triggerShort, p.case, p.segments, p.signature];
+}
+
+/**
+ * Шаблон цепочки оффера в разобранном виде (в базе — polza_chain_templates.letters
+ * по контракту писателя). Письмо 1 — в двух вариантах: лично (sales@, личный
+ * адрес) и «кто у вас за это отвечает?» для общего ящика (info@, hello@);
+ * письмо 3 — с кейсом и без. Кейс подбирается по отрасли любому офферу.
+ */
+export interface PolzaChainTemplateLetters {
+  subject: string;
+  bodyDirect: string;
+  bodyRouting: string;
+  letter2: string;
+  bodyWithCase: string;
+  bodyWithoutCase: string;
+  letter4: string;
+}
+
+/* ─────────────────────── Подпись писем ─────────────────────── */
+
+/**
+ * Подпись по умолчанию — она же сид polza_outreach_settings.signature
+ * (20260926_0001): до 26.09.2026 была константой в коде. Нужна, если
+ * настройки нет или она пустая.
+ */
+export const POLZA_OUTREACH_DEFAULT_SIGNATURE = 'Julia Mira\nAccount Manager\nPolza Agency';
+export const POLZA_OUTREACH_SIGNATURE_MAX_LENGTH = 500;
+
+/**
+ * Подпись из формы — в том виде, в каком она встанет в письма: переводы строк
+ * одного вида, без хвостовых пробелов и лишних пустых строк. Гард писем сверяет
+ * конец письма с подписью посимвольно — поэтому в базе лежит уже чистая.
+ * Фигурные скобки запрещены: «{{…}}» в письме гард считает забытым
+ * плейсхолдером, и все письма запуска ушли бы на ручную проверку.
+ */
+export function sanitizePolzaSignature(raw: unknown): { ok: true; value: string } | { ok: false; error: string } {
+  if (typeof raw !== 'string') return { ok: false, error: 'Подпись должна быть текстом' };
+  const value = raw
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/\s+$/, ''))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (!value) return { ok: false, error: 'Подпись не может быть пустой' };
+  if (value.length > POLZA_OUTREACH_SIGNATURE_MAX_LENGTH) {
+    return { ok: false, error: `Подпись длиннее ${POLZA_OUTREACH_SIGNATURE_MAX_LENGTH} символов` };
+  }
+  if (/[{}]/.test(value)) return { ok: false, error: 'В подписи не должно быть фигурных скобок' };
+  return { ok: true, value };
+}
+
+/* ─────────────────────── Причины ручной проверки ─────────────────────── */
+
+/**
+ * review_reason строки — код причины или «код: подробность» (у цепочки оффера,
+ * которая не готова, и у писем, не прошедших гарды, — почему; у сбойной строки
+ * там просто текст ошибки). Коды пишет раннер, подписи — одни на экран и
+ * Excel. До 26.09.2026 раннер писал «letter_guard_failed: …», а подпись искала
+ * «letters_guard_failed» — и экран показывал машинный код; старые строки
+ * читаются той же подписью, что и новые.
+ */
+export const POLZA_REVIEW_LABELS: Record<string, string> = {
+  email_unverified: 'почта не проверена: SMTP-проверка не дала ответа',
+  template_failed: 'цепочка оффера не готова',
+  letters_qa_failed: 'письма не прошли автопроверку',
+  limit_reached: 'лимит готовых уже набран',
+  letter_guard_failed: 'письма не прошли автопроверку',
+  letters_guard_failed: 'письма не прошли автопроверку',
+  no_corporate_email: 'не нашли корпоративную почту',
+  generic_company: 'слишком общее описание компании',
+  low_geo_confidence: 'гео продаж подтверждено слабо',
+  manual_check: 'Lead Score в зоне ручной проверки',
+};
+
+const REVIEW_REASON_MAX = 500;
+
+/** review_reason для строки: код и, если есть, подробность. */
+export function polzaReviewReason(code: string, detail?: string | null): string {
+  const text = detail?.replace(/\s+/g, ' ').trim();
+  return (text ? `${code}: ${text}` : code).slice(0, REVIEW_REASON_MAX);
+}
+
+/** Код причины из review_reason; незнакомый текст (ошибка сбойной строки) — как есть. */
+export function polzaReviewCode(reason: string): string {
+  const m = /^([a-z_]+): /.exec(reason);
+  return m && POLZA_REVIEW_LABELS[m[1]] ? m[1] : reason;
+}
+
+/** Подпись причины для экрана и Excel: «письма не прошли автопроверку — letter 2: …». */
+export function polzaReviewLabel(reason: string): string {
+  const code = polzaReviewCode(reason);
+  const label = POLZA_REVIEW_LABELS[code];
+  if (!label) return reason;
+  const detail = reason.slice(code.length).replace(/^:\s*/, '').trim();
+  return detail ? `${label} — ${detail}` : label;
 }
