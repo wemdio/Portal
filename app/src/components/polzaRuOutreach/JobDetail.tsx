@@ -129,10 +129,11 @@ export function JobDetail({ job, results, loading, exporting, filter, reason, pa
           </div>
         )}
 
+        {/* Вакансии разбираются после поиска почты — поэтому считаются только компании с рабочей почтой. */}
         {detail?.sdr && detail.sdr.any_sales_vacancy > 0 && (
           <p className="mt-2 text-xs text-gray-500">
-            Вакансии продаж: у {detail.sdr.any_sales_vacancy} компаний. В SDR-цепочку — {detail.sdr.strict_sdr} (роль SDR/BDR и холодный поиск
-            новых B2B-клиентов), остальные {detail.sdr.broad_to_general_queue} идут по другим поводам.
+            Вакансии продаж (среди компаний с рабочей почтой): у {detail.sdr.any_sales_vacancy} компаний. В SDR-цепочку — {detail.sdr.strict_sdr} (роль
+            SDR/BDR и холодный поиск новых B2B-клиентов), остальные {detail.sdr.broad_to_general_queue} идут по другим поводам.
           </p>
         )}
       </div>

@@ -15,7 +15,7 @@
  */
 
 import { acceptQuote } from './evidence';
-import { asBool, asString, callJson, isBoolLike } from './llm';
+import { asBool, asString, callJson } from './llm';
 
 const MAX_DESCRIPTION_CHARS = 7000;
 
@@ -35,7 +35,7 @@ const SYSTEM = `Ты разбираешь вакансию российской 
   "sdr_quote": string,          // ДОСЛОВНАЯ цитата (до 30 слов): обязанность ХОЛОДНОГО поиска НОВЫХ клиентов-организаций / лидогенерации или outbound по НОВЫМ B2B-клиентам / назначения встреч и демо с НОВЫМИ B2B-клиентами; "" если такой обязанности нет. НЕ подходят: «активные продажи», развитие рынков и партнёров, построение отдела, работа с текущей базой, входящие заявки
   "market": string,             // кому или на какой рынок продаёт компания, 2–8 слов; "" если прямо не написано
   "market_quote": string,       // ДОСЛОВНАЯ цитата, подтверждающая market; ""
-  "is_b2b": boolean,            // компания продаёт организациям
+  "is_b2b": boolean,            // компания продаёт организациям; всегда true или false
   "b2b_quote": string,          // ДОСЛОВНАЯ цитата про клиентов-организаций; ""
   "excluded_category": string,  // "recruitment_agency" (вакансия размещена кадровым агентством за клиента) | "leadgen_competitor" (работодатель сам агентство лидогенерации/аутрича/колл-центр продаж на аутсорсе) | "b2c_only" (продажи только частным лицам) | "inbound_retail_only" (только входящие заявки, торговый зал, розница, работа с текущей базой) | ""
   "product_summary": string,    // что продаёт компания, 3–10 слов; ""
@@ -47,17 +47,19 @@ const SYSTEM = `Ты разбираешь вакансию российской 
 - «Активные продажи», «развитие региона», «построение отдела продаж» — НЕ холодный поиск новых B2B-клиентов.
 - Не угадывай: пустая строка лучше догадки.`;
 
+const VACANCY_KEYS = ['sdr_quote', 'market', 'market_quote', 'is_b2b', 'b2b_quote', 'excluded_category', 'product_summary'];
+
 /**
- * Главное поле разбора вакансии — is_b2b: у цитат и категории есть законное
- * «пусто» (""), а продаёт ли компания организациям, модель обязана решить в
- * любом ответе. Без него ответ — сбой модели (пустой объект, чужая схема):
- * callJson бросает LlmCallError, а не выдаёт «не B2B, без SDR» по умолчанию.
+ * Ответ по схеме — объект хотя бы с одним полем из неё. У каждого поля есть
+ * законное «пусто»: цитата "" — цитаты нет, is_b2b "" или null — не B2B (asBool).
+ * Сбой модели — только объект мимо схемы (пустой, чужие ключи): тогда callJson
+ * бросает LlmCallError, а не выдаёт «не B2B, без SDR» по умолчанию.
  */
 function hasCoreFields(raw: Record<string, unknown>): boolean {
-  return isBoolLike(raw.is_b2b);
+  return VACANCY_KEYS.some((key) => key in raw);
 }
 
-/** Ответ без is_b2b — LlmCallError («ИИ не ответил»), см. hasCoreFields. */
+/** Ответ мимо схемы — LlmCallError («ИИ не ответил»), см. hasCoreFields. */
 export async function analyzeVacancy(input: {
   title: string;
   description: string;

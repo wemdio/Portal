@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { logError } from '@/lib/loggerServer';
+import { funnelFromRows } from '@/lib/polzaRuOutreach/funnel';
 import { authed, jsonError } from '@/lib/polzaRuOutreach/routeAuth';
-import { STAGES, type Stage } from '@/lib/polzaRuOutreach/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -14,8 +14,8 @@ const LIST_COLUMNS =
 
 /**
  * Строки журнала запуска + воронка по этапам и причины отсева.
- * Воронка считается по всем строкам: «дошла до этапа» = этап строки не раньше
- * данного (у готовой строки — все этапы).
+ * Воронка считается по всем строкам — правило в lib/polzaRuOutreach/funnel.ts
+ * (им же раннер пересчитывает счётчики по журналу).
  */
 export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: string }> }) {
   const auth = await authed(req);
@@ -56,18 +56,12 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     if (!chunk || chunk.length < PAGE) break;
   }
 
-  const funnel = Object.fromEntries(STAGES.map((s) => [s, 0])) as Record<Stage, number>;
+  const funnel = funnelFromRows(all);
   const statusCounts: Record<string, number> = {};
   const reasonCounts: Record<string, number> = {};
   for (const row of all) {
     statusCounts[row.row_status] = (statusCounts[row.row_status] ?? 0) + 1;
     if (row.reason_code) reasonCounts[row.reason_code] = (reasonCounts[row.reason_code] ?? 0) + 1;
-    const idx = STAGES.indexOf((row.pipeline_stage ?? 'candidates_loaded') as Stage);
-    // Отсеянная на этапе X строка дошла до этапа X-1; прошедшая этап — до X.
-    // Очень спорная задержана на своём этапе, как отсеянная: почта не проверена —
-    // на «Почте», два признака сомнения — на «Оценке». Дальше писем ей не пишут.
-    const reached = row.row_status === 'ready' ? STAGES.length - 1 : row.row_status === 'processing' ? idx : idx - 1;
-    for (let i = 0; i <= Math.max(0, reached); i += 1) funnel[STAGES[i]] += 1;
   }
 
   return NextResponse.json({ items: data ?? [], count: count ?? 0, limit, offset, funnel, status_counts: statusCounts, reason_counts: reasonCounts });

@@ -52,6 +52,7 @@ import { collectCandidates, type Candidate } from './collect';
 import { computeDoubts, unverifiedEmailDoubts } from './doubts';
 import { companyBrand, isSuppressed, loadPreviouslyExported, normalizeDomain, siteUrl, type ExportedIndex } from './company';
 import { findRuCompanyEmail } from './findEmail';
+import { funnelFromRows } from './funnel';
 import { buildChain, buildSegmentsHypothesis, openingSentence, type ChainInput } from './letters/chains';
 import type { LetterContext } from './letters/common';
 import { loadLibraries, type CaseRecord } from './libraries';
@@ -224,9 +225,31 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
     log('error', 'supabaseAdmin not configured');
     return;
   }
-  const budget = await budgetFor(db, jobId);
-  await runWithOutreachContext({ lang: 'ru', budget }, () => runJob(db, jobId, budget));
+  let start: JobStart;
+  try {
+    start = await loadJobStart(db, jobId);
+  } catch (err) {
+    // Лимит и прошлый расход не прочитались — не запускаем: с лимитом по
+    // умолчанию и нулём потраченного перезапуск мог бы потратить лимит ещё раз.
+    const message = err instanceof Error ? err.message : String(err);
+    log('error', `job ${jobId}: ${message}`);
+    const { error } = await db
+      .from('parser_jobs')
+      .update({ status: 'failed', progress_stage: 'failed', completed_at: new Date().toISOString(), error_message: message })
+      .eq('id', jobId);
+    if (error) log('warn', `job ${jobId}: failed status update failed`, error);
+    return;
+  }
+  await runWithOutreachContext({ lang: 'ru', budget: start.budget }, () => runJob(db, jobId, start.budget, start.previousDetail));
 }
+
+interface JobStart {
+  budget: JobBudget;
+  /** progress_detail прошлого прогона (перезапуск воркера) или null у нового запуска. */
+  previousDetail: Record<string, unknown> | null;
+}
+
+const START_READ_RETRY_MS = 2_000;
 
 /**
  * Бюджет нужен до входа в контекст, поэтому конфиг здесь читается отдельно от
@@ -237,21 +260,134 @@ export async function runRuOutreachJob(jobId: string): Promise<void> {
  * перезапуск получал бы лимит целиком ещё раз. Читаем до runJob — первая же
  * публикация прогресса снимок перезапишет. Снимок обновляется раз в несколько
  * строк: вызовы, оплаченные перед самым падением, в него могут не попасть.
- * Не прочитался — лимит по умолчанию: runJob прочитает конфиг сам и упадёт с
- * понятной ошибкой, как раньше.
+ *
+ * Не прочиталось (сбой PostgREST или сети) — одна повторная попытка, потом
+ * ошибка: молча начать с лимитом по умолчанию и нулём потраченного нельзя.
  */
-async function budgetFor(db: SupabaseClient, jobId: string): Promise<JobBudget> {
-  try {
-    const { data } = await db.from('parser_jobs').select('config, progress_detail').eq('id', jobId).maybeSingle();
-    const limit = sanitizeRuOutreachConfig((data?.config ?? {}) as Partial<RuOutreachConfig>).llm_budget_usd;
-    const detail = (data?.progress_detail ?? null) as { llm?: Partial<OutreachLlmBudgetSnapshot> } | null;
-    return JobBudget.fromSnapshot(detail?.llm, limit);
-  } catch {
-    return new JobBudget(sanitizeRuOutreachConfig({}).llm_budget_usd);
+async function loadJobStart(db: SupabaseClient, jobId: string): Promise<JobStart> {
+  let problem = '';
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, START_READ_RETRY_MS));
+    try {
+      const { data, error } = await db.from('parser_jobs').select('config, progress_detail').eq('id', jobId).maybeSingle();
+      if (error) {
+        problem = error.message;
+        continue;
+      }
+      if (!data) {
+        problem = 'запуск не найден';
+        continue;
+      }
+      const limit = sanitizeRuOutreachConfig((data.config ?? {}) as Partial<RuOutreachConfig>).llm_budget_usd;
+      const raw: unknown = data.progress_detail;
+      const previousDetail = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+      const snapshot = (previousDetail?.llm ?? null) as Partial<OutreachLlmBudgetSnapshot> | null;
+      return { budget: JobBudget.fromSnapshot(snapshot, limit), previousDetail };
+    } catch (err) {
+      problem = err instanceof Error ? err.message : String(err);
+    }
   }
+  throw new Error(`Не удалось прочитать запуск и расход на ИИ из базы: ${problem}`);
 }
 
-async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Promise<void> {
+interface JournalRow {
+  id: string;
+  row_status: string;
+  pipeline_stage: string | null;
+  reason_code: string | null;
+  chain_type: string | null;
+  normalized_domain: string | null;
+  inn: string | null;
+}
+
+/**
+ * Перезапуск воркера, когда лимит на ИИ уже исчерпан (по снимку
+ * progress_detail.llm): разбирать больше не на что, а журнал прошлого прогона —
+ * готовые, отсеянные, очень спорные — оплачен. Поэтому журнал не стираем:
+ * убираем только необработанные строки (и повторы, чей оригинал среди них —
+ * как при обычном стопе по лимиту), счётчики пересчитываем по журналу тем же
+ * правилом, что экран (funnel.ts), и завершаем запуск остановленным лимитом.
+ * Отчёт SDR, пул и ошибки источников по журналу не пересчитать — они
+ * остаются из снимка.
+ */
+async function completeSpentRun(
+  db: SupabaseClient,
+  jobId: string,
+  target: number,
+  budget: JobBudget,
+  previousDetail: Record<string, unknown> | null,
+  setRunningProgress: (patch: Record<string, unknown>) => Promise<void>,
+): Promise<void> {
+  const { error: dropErr } = await db.from('polza_ru_outreach_companies').delete().eq('job_id', jobId).eq('row_status', 'processing');
+  if (dropErr) throw new Error(`Не удалось убрать необработанные строки журнала: ${dropErr.message}`);
+  const rows: JournalRow[] = [];
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await db
+      .from('polza_ru_outreach_companies')
+      .select('id,row_status,pipeline_stage,reason_code,chain_type,normalized_domain,inn')
+      .eq('job_id', jobId)
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(`Не удалось прочитать журнал запуска: ${error.message}`);
+    rows.push(...((data ?? []) as JournalRow[]));
+    if (!data || data.length < PAGE) break;
+  }
+  // Повтор без оригинала: ни одна строка, кроме повторов, не держит его домен или ИНН.
+  const held = rows.filter((r) => r.reason_code !== 'DUPLICATE_COMPANY');
+  const domains = new Set(held.map((r) => r.normalized_domain).filter(Boolean));
+  const inns = new Set(held.map((r) => r.inn).filter(Boolean));
+  const orphans = rows
+    .filter((r) => r.reason_code === 'DUPLICATE_COMPANY' && !(r.normalized_domain && domains.has(r.normalized_domain)) && !(r.inn && inns.has(r.inn)))
+    .map((r) => r.id);
+  const gone = new Set<string>();
+  for (let i = 0; i < orphans.length; i += DB_CHUNK) {
+    const { data, error } = await db
+      .from('polza_ru_outreach_companies')
+      .delete()
+      .eq('job_id', jobId)
+      .eq('reason_code', 'DUPLICATE_COMPANY')
+      .in('id', orphans.slice(i, i + DB_CHUNK))
+      .select('id');
+    if (error) log('warn', `job ${jobId}: orphan duplicates cleanup failed`, error);
+    for (const r of data ?? []) gone.add(String(r.id));
+  }
+  const kept = rows.filter((r) => !gone.has(String(r.id)));
+  const reasons: Record<string, number> = {};
+  const chains: Record<string, number> = {};
+  let ready = 0;
+  let doubtful = 0;
+  for (const r of kept) {
+    if (r.reason_code) reasons[r.reason_code] = (reasons[r.reason_code] ?? 0) + 1;
+    if (r.chain_type) chains[r.chain_type] = (chains[r.chain_type] ?? 0) + 1;
+    if (r.row_status === 'ready') ready += 1;
+    if (r.row_status === 'doubtful') doubtful += 1;
+  }
+  const stopReason = ready >= target ? 'target_reached' : 'budget';
+  const spend = budget.snapshot();
+  log('info', `job ${jobId}: LLM budget already spent ($${spend.spent_usd}/$${spend.limit_usd}) — restart keeps the journal: ${kept.length} rows, ${ready} ready (${stopReason})`);
+  await setRunningProgress({
+    status: 'completed',
+    progress_stage: 'completed',
+    progress_percent: 100,
+    total_found: kept.length,
+    total_parsed: ready,
+    completed_at: new Date().toISOString(),
+    error_message: null,
+    progress_detail: {
+      ...(previousDetail ?? {}),
+      scanned: kept.length,
+      ready,
+      funnel: funnelFromRows(kept),
+      reasons,
+      chains,
+      doubtful,
+      llm: spend,
+      stop_reason: stopReason,
+    },
+  });
+}
+
+async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, previousDetail: Record<string, unknown> | null): Promise<void> {
   const setProgress = async (patch: Record<string, unknown>) => {
     const { error } = await db.from('parser_jobs').update(patch).eq('id', jobId);
     if (error) log('warn', `progress update failed for ${jobId}`, error);
@@ -284,6 +420,12 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
     const config: RuOutreachConfig = sanitizeRuOutreachConfig((job.config ?? {}) as Partial<RuOutreachConfig>);
     const target = config.limit;
     const maxScan = maxCandidatesFor(target);
+    // Перезапуск после исчерпанного лимита: журнал оплачен и остаётся, новых
+    // строк не будет — ни ключ, ни источники не нужны.
+    if (budget.exhausted()) {
+      await completeSpentRun(db, jobId, target, budget, previousDetail, setRunningProgress);
+      return;
+    }
     // Роут не создаёт запуск без ключа, но окружение воркера — отдельное. Без
     // ключа ни одна компания не пройдёт разбор: падаем до сбора источников.
     if (!outreachApiKey('ru')) {
@@ -305,6 +447,8 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
       total_parsed: 0,
     });
     // Повтор после падения воркера — с чистого журнала, иначе дубли в воронке.
+    // Лимит при этом ещё не исчерпан (иначе — completeSpentRun выше): разборы
+    // сайтов в кэше, и заново платим в основном за вакансии.
     await db.from('polza_ru_outreach_companies').delete().eq('job_id', jobId);
     // Устаревшие разборы сайтов читатель не берёт — чистим, чтобы кэш не рос без конца.
     await pruneSiteAnalysisCache('ru');
@@ -883,8 +1027,10 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
 
     // ── Шаг 3: письма и QA — только прошедшим порог и не очень спорным ──
     const finalize = async (q: Qualified) => {
+      // Лимит готовых набран — строка оценку прошла, а до писем не дошла: стоит
+      // на этапе писем, воронка (funnel.ts) считает её до «Оценки» включительно.
       if (totals.ready >= target) {
-        await finish(q.id, { stage: 'scored', status: 'manual_review', reason: 'LIMIT_REACHED', detail: 'лимит готовых компаний уже набран' });
+        await finish(q.id, { stage: 'sequence_assembled', status: 'manual_review', reason: 'LIMIT_REACHED', detail: 'лимит готовых компаний уже набран' });
         return;
       }
       const prior = baseChain(q.route) === 'reactivation';
@@ -973,8 +1119,10 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         return;
       }
       reach(q.tally, 'qa_checked');
+      // Письма готовы и проверены, но лимит набрали параллельные потоки: строка
+      // стоит на «Готово», воронка считает её до проверки писем включительно.
       if (totals.ready >= target) {
-        await finish(q.id, { stage: 'qa_checked', status: 'manual_review', reason: 'LIMIT_REACHED', detail: 'лимит готовых компаний уже набран' }, base);
+        await finish(q.id, { stage: 'ready', status: 'manual_review', reason: 'LIMIT_REACHED', detail: 'лимит готовых компаний уже набран' }, base);
         return;
       }
       totals.ready += 1;

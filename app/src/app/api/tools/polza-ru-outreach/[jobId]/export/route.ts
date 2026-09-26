@@ -87,6 +87,10 @@ const JOURNAL_COLUMNS: Col[] = [
   { header: 'signal_score', value: field('signal_score') },
   { header: 'generation_mode', value: field('generation_mode') },
   { header: 'recipient_email', value: field('recipient_email'), width: 30 },
+  // Тип адреса и вердикт SMTP-проверки: по ним видно, почему строка «очень спорная»
+  // (почта не проверена) или отсеяна на шаге почты.
+  { header: 'email_type', value: field('email_type') },
+  { header: 'email_verification', value: field('email_verification') },
   { header: 'pipeline_stage', value: (r) => STAGE_LABELS[r.pipeline_stage as Stage] ?? r.pipeline_stage ?? '' },
   { header: 'row_status', value: field('row_status') },
   { header: 'reason_code', value: field('reason_code') },
