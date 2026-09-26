@@ -4715,17 +4715,20 @@ export async function maybePostLeadHandoff(opts: {
     // The first board write may have failed while qualification/notification
     // succeeded. Keep this in the durable handoff job: never offer a manual
     // decision whose saved candidate is missing. No external reads are needed.
-    const metadata = resolveLeadContactMetadata({
-      leads: [], leadEmail: opts.leadEmail, campaignId, replyBody: opts.reply.body,
-    });
-    await upsertBoardRow(instantlyDb, {
-      qualificationId, projectId, campaignId, campaignName: opts.campaignName,
-      leadEmail: opts.leadEmail, leadName: opts.leadName ?? metadata.leadName,
-      companyName: metadata.companyName, phone: metadata.phone, website: metadata.website,
-      requestText: leadBoardRequestText(opts.reply.body), stepNumber: null,
-      replyTimestamp: opts.reply.timestamp_email ?? null,
-      requiresSpecialistReview: !project.handoff_auto_send,
-    });
+    // Automatic delivery retains its existing independence from board writes.
+    if (!project.handoff_auto_send) {
+      const metadata = resolveLeadContactMetadata({
+        leads: [], leadEmail: opts.leadEmail, campaignId, replyBody: opts.reply.body,
+      });
+      await upsertBoardRow(instantlyDb, {
+        qualificationId, projectId, campaignId, campaignName: opts.campaignName,
+        leadEmail: opts.leadEmail, leadName: opts.leadName ?? metadata.leadName,
+        companyName: metadata.companyName, phone: metadata.phone, website: metadata.website,
+        requestText: leadBoardRequestText(opts.reply.body), stepNumber: null,
+        replyTimestamp: opts.reply.timestamp_email ?? null,
+        requiresSpecialistReview: true,
+      });
+    }
 
     // 2. Reply target + sending mailbox.
     const replyToUuid = opts.reply.id;

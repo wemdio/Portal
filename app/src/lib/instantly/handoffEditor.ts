@@ -88,7 +88,9 @@ export async function handleHandoffEditor(update: HandoffEditUpdate, token: stri
   if (action?.action === 's') {
     await answerCallback(token, cq!.id, 'Отправляю подтверждённый ответ…');
     const result = await sendHandoffNow(db, row, { sentByTelegramId: from, editToken: row.edit_token! });
-    await postHandoffEditor(token, chat, result.ok ? '✅ Исправленный ответ отправлен лиду, клиент добавлен в копию.'
+    await postHandoffEditor(token, chat, result.ok ? (result.publicationPending
+      ? 'Письмо отправлено, клиент в копии. Не удалось подтвердить сохранение передачи в БД: запись может отсутствовать в таблице. Сообщите администратору; повторно отправлять письмо не нужно.'
+      : '✅ Исправленный ответ отправлен лиду, клиент добавлен в копию.')
       : 'Отправку не удалось подтвердить. Повторно не отправляем: сначала нужно проверить результат передачи.',
     { threadId: context?.message_thread_id });
     return true;

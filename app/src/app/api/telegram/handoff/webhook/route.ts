@@ -117,9 +117,11 @@ export async function POST(req: NextRequest) {
       token,
       chatId,
       messageId,
-      `✅ <b>Передано клиенту</b> — ${pending.client_email}\n(лиду ушёл ответ, клиент в копии${result.replyAllCc.length ? ` + участники переписки: ${result.replyAllCc.join(', ')}` : ''}${result.via === 'test' ? '; отдельным письмом — Others-адресат вне кампании, треда в Unibox не будет' : ''})`,
+      `✅ <b>Передано клиенту</b> — ${pending.client_email}\n(лиду ушёл ответ, клиент в копии${result.replyAllCc.length ? ` + участники переписки: ${result.replyAllCc.join(', ')}` : ''}${result.via === 'test' ? '; отдельным письмом — Others-адресат вне кампании, треда в Unibox не будет' : ''})` +
+        (result.publicationPending ? '\n⚠️ Не удалось подтвердить сохранение передачи в БД. Запись может отсутствовать в таблице. Сообщите администратору; повторно отправлять письмо не нужно.' : ''),
     );
   }
-  await answerCallback(token, cq.id, 'Передано клиенту ✅');
+  await answerCallback(token, cq.id, result.publicationPending
+    ? 'Письмо отправлено, сохранение в таблице не подтверждено. Сообщите администратору.' : 'Передано клиенту ✅', Boolean(result.publicationPending));
   return OK();
 }
