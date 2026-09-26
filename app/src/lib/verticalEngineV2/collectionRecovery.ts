@@ -1,4 +1,4 @@
-import { isVeProviderBillingError, isVeTransientDirectoryError } from './collectionErrors';
+import { isVeProviderBillingError, isVeTransientDirectoryError, isVeResumableDirectoryError } from './collectionErrors';
 import {
   collectionRoundLimit, veCollectionMaxRounds, VE_COLLECTION_ROUND_BUDGET, VE_COLLECTION_ROUND_CEILING,
   type VeCollectionTargetProgress,
@@ -132,7 +132,7 @@ export function previewRecoveryKind(base: Record<string, unknown>): 'validation'
     task?.source === 'yandex_maps' && (task.status === 'failed' || task.status === 'pending')
     && task.task?.maps_query?.queries?.length)) return 'catalog';
   if (progress.status === 'error' && Array.isArray(info.tasks) && info.tasks.some((task) =>
-    task?.source === 'companies_directory' && task.status === 'failed' && isVeTransientDirectoryError(task.error))
+    task?.source === 'companies_directory' && task.status === 'failed' && isVeResumableDirectoryError(task.error))
     && typeof progress.round === 'number' && Number.isSafeInteger(progress.round) && progress.round > 0
     && ((checkpoint?.completed_round ?? 0) === progress.round - 1 || checkpoint?.completed_round === progress.round)) return 'catalog';
   return null;
