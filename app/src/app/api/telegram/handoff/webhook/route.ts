@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { verifyHandoffCallback } from '@/lib/instantly/handoffCallback';
+import { verifyHandoffCallback, verifyHandoffRejection } from '@/lib/instantly/handoffCallback';
 import { handoffBotToken, answerCallback, editHandoffMessage } from '@/lib/instantly/handoffTelegram';
 import { sendHandoffNow, type PendingHandoffRow } from '@/lib/instantly/handoffSender';
 import { handleHandoffEditor, type HandoffEditUpdate } from '@/lib/instantly/handoffEditor';
 import { canActOnManualHandoff } from '@/lib/instantly/handoffAuthorization';
+import { rejectManualHandoff } from '@/lib/instantly/handoffRejection';
 
 export const dynamic = 'force-dynamic';
 
@@ -54,11 +55,12 @@ export async function POST(req: NextRequest) {
   const messageId = cq.message?.message_id;
 
   const verify = verifyHandoffCallback(cq.data ?? '', token);
-  if (!verify.ok) {
+  const rejectionId = verifyHandoffRejection(cq.data ?? '', token);
+  if (!verify.ok && !rejectionId) {
     await answerCallback(token, cq.id, 'Некорректная кнопка');
     return OK();
   }
-  const qualificationId = verify.qualificationId;
+  const qualificationId = rejectionId ?? (verify.ok ? verify.qualificationId : '');
 
   if (!supabaseInstantly) {
     await answerCallback(token, cq.id, 'Сервис недоступен');
@@ -76,8 +78,19 @@ export async function POST(req: NextRequest) {
     await answerCallback(token, cq.id, 'Передача не найдена');
     return OK();
   }
+  if (rejectionId) {
+    const result = supabaseAdmin
+      ? await rejectManualHandoff(supabaseAdmin, instDb, pending as PendingHandoffRow, { telegramId: fromId, chatId })
+      : { ok: false as const, error: 'Сервис недоступен' };
+    if (result.ok && chatId != null && messageId != null) {
+      await editHandoffMessage(token, chatId, messageId,
+        '🚫 <b>Не лид</b> — отмечено специалистом.\nЗапись скрыта из клиентской таблицы. Письмо не отправлено. Решение и исходная переписка сохранены для разбора.');
+    }
+    await answerCallback(token, cq.id, result.ok ? 'Сохранено: не лид' : result.error, !result.ok);
+    return OK();
+  }
   if (pending.status !== 'pending') {
-    await answerCallback(token, cq.id, pending.status === 'sent' ? 'Уже передано' : 'Недоступно');
+    await answerCallback(token, cq.id, pending.status === 'sent' ? 'Уже передано' : pending.status === 'rejected' ? 'Отмечено «Не лид»' : 'Недоступно');
     return OK();
   }
 

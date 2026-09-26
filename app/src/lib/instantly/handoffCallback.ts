@@ -36,6 +36,17 @@ export function signHandoffCallback(qualificationId: string, secret: string): st
   return `${body}.${sig}`;
 }
 
+/** Separate signed action: a rejection must never verify as a send. */
+export function signHandoffRejection(qualificationId: string, secret: string): string {
+  const body = `n.${qualificationId}`;
+  return `${body}.${createHmac('sha256', secret).update(body).digest('base64url').slice(0, SIG_LEN)}`;
+}
+
+export function verifyHandoffRejection(data: string, secret: string): string | null {
+  const match = /^n\.([0-9a-f-]{36})\.([A-Za-z0-9_-]{24})$/.exec(data);
+  return match && secret && safeEqual(data, signHandoffRejection(match[1], secret)) ? match[1] : null;
+}
+
 export type HandoffVerifyResult =
   | { ok: true; qualificationId: string }
   | { ok: false; error: string };

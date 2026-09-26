@@ -26,6 +26,7 @@ import {
   getOrCreateBoard,
   getBoardLinkForProject,
   upsertBoardRow,
+  requiresSpecialistReview,
 } from './leadBoardWriter';
 import {
   handoffBotToken,
@@ -2048,6 +2049,7 @@ export async function qualifyOneReply(
           ? specialistThreadClaim.winnerQualificationId : inserted.id,
         sourceQualificationId: inserted.id,
         projectId: boardProjectId,
+        requiresSpecialistReview: await requiresSpecialistReview(supabaseMain, boardProjectId, handoffEnabled()),
         campaignId,
         campaignName,
         leadEmail,
@@ -4016,6 +4018,7 @@ async function recoverLeadBoardRow(
       qualificationId: threadClaim.status === 'duplicate' ? threadClaim.winnerQualificationId : lead.id,
       sourceQualificationId: lead.id,
       projectId: lead.qualified_project_id,
+      requiresSpecialistReview: await requiresSpecialistReview(supabaseMain, lead.qualified_project_id, handoffEnabled()),
       campaignId: lead.campaign_id, campaignName: lead.campaign_name,
       leadEmail: lead.lead_email, leadName: senderDisplayLeadName(lead.lead_name) ?? metadata.leadName,
       companyName: lead.company_name ?? metadata.companyName,
@@ -4647,13 +4650,13 @@ export async function maybePostLeadHandoff(opts: {
     if (existingError) return { disposition: 'retry', detail: `pending lookup failed: ${existingError.message}` };
     if (existing) {
       const materialized = existing as unknown as PendingHandoffRow & {
-        status: 'pending' | 'sent' | 'failed';
+        status: 'pending' | 'sent' | 'failed' | 'rejected';
         auto_send?: boolean;
         error_message?: string | null;
       };
       const automatic = materialized.auto_send === true ||
         materialized.error_message?.startsWith(HANDOFF_AUTO_SEND_MARKER) === true;
-      if (!automatic || materialized.status === 'sent') {
+      if (!automatic || materialized.status === 'sent' || materialized.status === 'rejected') {
         return { disposition: 'completed', detail: 'handoff already materialized' };
       }
       const resent = await sendHandoffNow(instantlyDb, materialized);
@@ -4708,6 +4711,21 @@ export async function maybePostLeadHandoff(opts: {
       workerLog('warn', `Handoff: campaign ${campaignId} project has no specialist_user_id — skip (only the responsible specialist may send)`);
       return { disposition: 'skipped', detail: 'project has no responsible specialist' };
     }
+
+    // The first board write may have failed while qualification/notification
+    // succeeded. Keep this in the durable handoff job: never offer a manual
+    // decision whose saved candidate is missing. No external reads are needed.
+    const metadata = resolveLeadContactMetadata({
+      leads: [], leadEmail: opts.leadEmail, campaignId, replyBody: opts.reply.body,
+    });
+    await upsertBoardRow(instantlyDb, {
+      qualificationId, projectId, campaignId, campaignName: opts.campaignName,
+      leadEmail: opts.leadEmail, leadName: opts.leadName ?? metadata.leadName,
+      companyName: metadata.companyName, phone: metadata.phone, website: metadata.website,
+      requestText: leadBoardRequestText(opts.reply.body), stepNumber: null,
+      replyTimestamp: opts.reply.timestamp_email ?? null,
+      requiresSpecialistReview: !project.handoff_auto_send,
+    });
 
     // 2. Reply target + sending mailbox.
     const replyToUuid = opts.reply.id;
@@ -4771,7 +4789,7 @@ export async function maybePostLeadHandoff(opts: {
       boardLink ? `📋 <a href="${escapeHtml(boardLink)}">Все лиды проекта</a>` : '',
       autoSend
         ? '⚡ Автопередача включена — отправляется автоматически, без кнопки-подтверждения.'
-        : `Нажмите «Передать клиенту» — письмо уйдёт лиду, клиент в копии. Нажать может ответственный${project.tag_project_lead_in_telegram ? ' или лид проекта' : ''}.`,
+        : `До подтверждения запись не видна в таблице клиента. «Передать клиенту» — отправить письмо и добавить лид в таблицу. «Не лид» — отклонить без отправки и сохранить обратную связь. Нажать может ответственный${project.tag_project_lead_in_telegram ? ' или лид проекта' : ''}.`,
     ].filter(Boolean).join('\n');
 
     // Recovery must reply to the persisted alert, including after a restart.

@@ -59,7 +59,7 @@ export async function POST(
   const existing = new Set<string>();
   for (let i = 0; i < emails.length; i += 50) {
     const { data, error } = await db
-      .from('project_lead_board_rows')
+      .from('project_client_lead_board_rows')
       .select('lead_email')
       .eq('project_id', projectId)
       .in('lead_email', emails.slice(i, i + 50));
@@ -82,7 +82,7 @@ export async function POST(
   let imported = 0;
   for (let i = 0; i < toInsert.length; i += 50) {
     const chunk = toInsert.slice(i, i + 50);
-    const { error } = await db.from('project_lead_board_rows').insert(chunk);
+    const { error } = await db.from('project_client_lead_board_rows').insert(chunk);
     if (error) return jsonError(error.message, 500);
     imported += chunk.length;
   }
