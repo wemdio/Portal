@@ -44,8 +44,11 @@ export interface AutoPipelineEmailValidation {
  * Возвращает true если в окружении настроен SMTP-прокси и можно делать
  * полноценную SMTP-валидацию. В локальной разработке (без прокси) пропускаем
  * SMTP-шаг и валидируем только до MX.
+ *
+ * Экспортирована для автоаутричей (lib/outreachEmail/findAndVerify.ts): их
+ * плашка «SMTP-проверка недоступна» обязана судить по тому же условию.
  */
-function smtpProxyAvailable(): boolean {
+export function smtpProxyAvailable(): boolean {
   const v = process.env.SMTP_PROXY_URLS;
   return typeof v === 'string' && v.trim().length > 0;
 }

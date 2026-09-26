@@ -21,6 +21,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import type { EmailDomainCache } from '@/lib/outreachEmail/findAndVerify';
 import { outreachApiKey } from '@/lib/outreachLlm/client';
 import { BudgetExceededError, JobBudget, LlmAuthError, LlmCallError, runWithOutreachContext } from '@/lib/outreachLlm/context';
 import { pruneSiteAnalysisCache } from '@/lib/outreachLlm/siteAnalysisCache';
@@ -265,6 +266,8 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
     const totals = { scanned: 0, ready: 0 };
     const seenDomains = new Set<string>();
     const seenInns = new Set<string>();
+    // MX и catch-all доменов для SMTP-проверки почты — один кэш на запуск.
+    const emailDomainCache: EmailDomainCache = new Map();
     let cursor = 0;
     let waveNo = 0;
     let processed = 0;
@@ -649,11 +652,20 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         return;
       }
       const prior = baseChain(q.route) === 'reactivation';
+      // Контакт из AMO не ищем и не проверяем — email_verification у него crm_contact.
       const email = prior && q.amo?.contactEmail
-        ? { email: q.amo.contactEmail, emailType: 'person' as const, isRouting: false, recipientRole: 'Контакт из AMO', sourceUrl: null }
-        : await findRuCompanyEmail(q.website, q.domain);
+        ? { email: q.amo.contactEmail, emailType: 'person' as const, isRouting: false, recipientRole: 'Контакт из AMO', sourceUrl: null, verification: 'crm_contact' as const, triedInvalid: [] as string[] }
+        : await findRuCompanyEmail(q.website, q.domain, emailDomainCache);
       if (!email.email) {
-        await finish(q.id, { stage: 'recipient_resolved', status: 'rejected', reason: 'EMAIL_NOT_FOUND' });
+        // Адреса, не прошедшие SMTP-проверку, пока тоже «почта не найдена»:
+        // своя причина появится, когда поиск почты переедет до разбора ИИ.
+        // Какие адреса отбракованы — в пояснении.
+        await finish(q.id, {
+          stage: 'recipient_resolved',
+          status: 'rejected',
+          reason: 'EMAIL_NOT_FOUND',
+          detail: email.triedInvalid.length ? `не прошли проверку: ${email.triedInvalid.join(', ')}` : undefined,
+        });
         return;
       }
       if (await isSuppressed(db, email.email)) {
@@ -663,7 +675,9 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
       await updateRow(q.id, {
         recipient_email: email.email,
         email_type: email.emailType,
-        email_verification: prior && q.amo?.contactEmail ? 'crm_contact' : 'found_on_site',
+        // Адрес с сайта — вердикт проверки: ok / catch_all / unverified.
+        // «Не удалось проверить» пока идёт в письма как раньше.
+        email_verification: email.verification,
         email_source_url: email.sourceUrl,
         recipient_role: email.recipientRole,
         is_routing: email.isRouting,

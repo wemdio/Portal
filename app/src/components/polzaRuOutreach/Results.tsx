@@ -14,6 +14,16 @@ const STATUS_TONE: Record<RuRow['row_status'], string> = {
   doubtful: 'bg-orange-50 text-orange-700',
 };
 
+// email_verification строки: откуда адрес и чем кончилась SMTP-проверка.
+// found_on_site — строки запусков, когда почту ещё не проверяли.
+const EMAIL_VERIFICATION_LABELS: Record<string, string> = {
+  crm_contact: 'контакт из AMO',
+  found_on_site: 'найдена на сайте',
+  ok: 'найдена на сайте, проверена',
+  catch_all: 'найдена на сайте, сервер принимает любые адреса',
+  unverified: 'найдена на сайте, проверить не удалось',
+};
+
 export function Reasons({ reasons, onReason }: { reasons: Record<string, number> | null; onReason: (code: string) => void }) {
   const sortedReasons = Object.entries(reasons ?? {}).sort((a, b) => b[1] - a[1]);
   return (
@@ -136,7 +146,7 @@ function Details({ row }: { row: RuRow }) {
           Почта: {row.recipient_email ?? '—'} {row.recipient_role ? `(${row.recipient_role})` : ''}
           {row.is_routing ? ' · письмо 1 в варианте «кому переслать»' : ''}
           {row.case_id ? ` · кейс ${row.case_id}${row.case_match_reason ? ` (${row.case_match_reason})` : ''}` : ' · без кейса'}
-          {row.email_verification ? ` · почта: ${row.email_verification === 'crm_contact' ? 'контакт из AMO' : 'найдена на сайте'}` : ''}
+          {row.email_verification ? ` · почта: ${EMAIL_VERIFICATION_LABELS[row.email_verification] ?? row.email_verification}` : ''}
         </div>
         {row.qa_flags?.length > 0 && <div className="text-xs text-red-700">QA: {row.qa_flags.join(', ')}</div>}
       </div>

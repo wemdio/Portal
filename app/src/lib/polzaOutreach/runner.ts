@@ -22,6 +22,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import type { EmailDomainCache } from '@/lib/outreachEmail/findAndVerify';
 import { outreachApiKey } from '@/lib/outreachLlm/client';
 import { BudgetExceededError, JobBudget, LlmAuthError, LlmCallError, runWithOutreachContext } from '@/lib/outreachLlm/context';
 import { pruneSiteAnalysisCache } from '@/lib/outreachLlm/siteAnalysisCache';
@@ -255,6 +256,8 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
 
     const totals: Totals = { vacancies: 0, domainFound: 0, icpPassed: 0, writeNow: 0, emailFound: 0, ready: 0 };
     const seenDomains = new Set<string>();
+    // MX и catch-all доменов для SMTP-проверки почты — один кэш на запуск.
+    const emailDomainCache: EmailDomainCache = new Map();
     let cursor = 0;
     let waveNo = 0;
     // Лимит на ИИ исчерпан: новые строки и волны не начинаем, запуск
@@ -495,8 +498,11 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         await updateRow(q.id, { status: 'needs_review', review_reason: 'limit_reached' });
         return;
       }
-      const email = await findCompanyEmail(q.website, q.domain);
+      // Адреса, не прошедшие SMTP-проверку, пока тоже «нет корпоративной почты»:
+      // своя причина появится, когда поиск почты переедет до разбора ИИ.
+      const email = await findCompanyEmail(q.website, q.domain, emailDomainCache);
       if (!email.email) {
+        if (email.triedInvalid.length) log('info', `S5 ${q.domain}: ${email.triedInvalid.length} email(s) failed verification`);
         const score = scoreLead({ ...q.scoreInput, hasEmail: false });
         await updateRow(q.id, {
           status: 'excluded',
@@ -514,6 +520,9 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         selected_company_email: email.email,
         email_type: email.emailType,
         email_source_url: email.emailSourceUrl,
+        // Вердикт проверки: ok / catch_all / unverified. «Не удалось проверить»
+        // пока идёт в письма как раньше.
+        email_verification: email.verification,
         stage: ST.s5Email,
       });
 
