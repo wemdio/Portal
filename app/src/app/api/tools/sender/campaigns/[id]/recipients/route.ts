@@ -127,7 +127,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     if (!result.accepted) {
       return jsonError(
         result.skippedEmptyLetter
-          ? 'У всех адресов файла первое письмо выходит пустым — проверьте переменные в его тексте'
+          ? 'У всех адресов файла первое письмо выходит пустым — проверьте переменные в его теме и тексте'
           : 'В файле не нашлось ни одного корректного адреса',
         400,
       );
@@ -136,8 +136,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     return NextResponse.json({
       imported: result.inserted,
       replaced: replace,
-      // Вместе с пустым первым письмом: такой строке письмо не уйдёт, как и
-      // строке с плохим адресом. Отдельно — skippedEmptyLetter.
+      // Раздельно: «плохой адрес» — только про адрес. Строка с пустым первым
+      // письмом (пустая переменная в теме или тексте) чинится в файле или в
+      // письме, и под «плохим адресом» оператор искал бы её не там.
       skippedInvalid: result.skippedInvalid,
       skippedEmptyLetter: result.skippedEmptyLetter,
       skippedDuplicates: result.skippedDuplicates,

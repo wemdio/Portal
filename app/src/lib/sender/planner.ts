@@ -21,6 +21,14 @@ import type { CampaignRow, MailboxRow, RecipientRow, StepRow } from './types';
 type Log = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => void;
 
 const RECIPIENTS_PER_CAMPAIGN = 500;
+/**
+ * Адресов и id за один запрос. in-фильтр уезжает в адрес запроса, а шлюз
+ * перед PostgREST режет адреса длиннее ~9–13 КБ (414): стоп-лист на все 500
+ * получателей прохода (~16 КБ) и пул папки на 200+ ящиков (~8 КБ id) в один
+ * запрос не влезают.
+ */
+const EMAIL_CHUNK = 100;
+const MAILBOX_CHUNK = 50;
 
 interface MailboxSlot {
   mailbox: MailboxRow;
@@ -61,14 +69,23 @@ async function remainingQuota(mailbox: MailboxRow): Promise<number> {
   return Math.max(0, mailbox.daily_campaign_limit - (sent ?? 0) - (pending ?? 0));
 }
 
+/**
+ * Адреса прохода, стоящие в стоп-листе. Не прочитали — исключение, а не
+ * пустой список: раньше сбой запроса (в том числе 414 на длинном адресе)
+ * молча давал «стоп-лист пуст», и письмо уходило тому, кто просил не писать.
+ * Вызывающий пропускает проход кампании.
+ */
 async function loadSuppressed(emails: string[]): Promise<Set<string>> {
   const suppressed = new Set<string>();
   if (!supabaseAdmin || !emails.length) return suppressed;
-  const { data } = await supabaseAdmin
-    .from('sender_suppressions')
-    .select('email')
-    .in('email', emails);
-  for (const row of data ?? []) suppressed.add(String(row.email).toLowerCase());
+  for (let i = 0; i < emails.length; i += EMAIL_CHUNK) {
+    const { data, error } = await supabaseAdmin
+      .from('sender_suppressions')
+      .select('email')
+      .in('email', emails.slice(i, i + EMAIL_CHUNK));
+    if (error) throw new Error(`стоп-лист не прочитан: ${error.message}`);
+    for (const row of data ?? []) suppressed.add(String(row.email).toLowerCase());
+  }
   return suppressed;
 }
 
@@ -77,7 +94,8 @@ async function loadSuppressed(emails: string[]): Promise<Set<string>> {
  * есть только внутри кампании, и один лид в двух запущенных получал бы два
  * первых письма с двух разных ящиков одновременно. Занят = чужая активная
  * цепочка, которая трогала лида за последний месяц; закончится — этот адрес
- * поедет со следующего прохода.
+ * поедет со следующего прохода. Не прочитали — исключение, как у стоп-листа:
+ * иначе сбой запроса выдавал бы второе первое письмо.
  */
 async function loadCrossCampaignBusy(emails: string[], campaignId: string): Promise<Set<string>> {
   const busy = new Set<string>();
@@ -85,7 +103,7 @@ async function loadCrossCampaignBusy(emails: string[], campaignId: string): Prom
   const monthAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
   const CHUNK = 50; // in-фильтр уезжает в адрес запроса — держим его коротким
   for (let i = 0; i < emails.length; i += CHUNK) {
-    const { data } = await supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from('sender_recipients')
       .select('email')
       .in('email', emails.slice(i, i + CHUNK))
@@ -93,9 +111,32 @@ async function loadCrossCampaignBusy(emails: string[], campaignId: string): Prom
       .eq('status', 'active')
       .not('mailbox_id', 'is', null)
       .gt('updated_at', monthAgo);
+    if (error) throw new Error(`занятость адресов в других кампаниях не прочитана: ${error.message}`);
     for (const row of data ?? []) busy.add(String(row.email).toLowerCase());
   }
   return busy;
+}
+
+/**
+ * Ящики пула, с которых можно слать: проверены и с галочкой. Пачками — пул
+ * папки бывает на 200+ ящиков. Не прочитали — исключение: пустой ответ
+ * значил бы «ящиков нет» и молчаливый пропуск без причины в логе.
+ */
+async function loadWorkingMailboxes(mailboxIds: string[]): Promise<MailboxRow[]> {
+  const mailboxes: MailboxRow[] = [];
+  if (!supabaseAdmin) return mailboxes;
+  for (let i = 0; i < mailboxIds.length; i += MAILBOX_CHUNK) {
+    const { data, error } = await supabaseAdmin
+      .from('sender_mailboxes')
+      .select('*')
+      .in('id', mailboxIds.slice(i, i + MAILBOX_CHUNK))
+      .eq('status', 'verified')
+      // Снятая галочка — это «не шлём с него», даже если ящик в пуле кампании.
+      .eq('enabled', true);
+    if (error) throw new Error(`ящики пула не прочитаны: ${error.message}`);
+    mailboxes.push(...((data ?? []) as MailboxRow[]));
+  }
+  return mailboxes;
 }
 
 function pickSlot(slots: MailboxSlot[], recipient: RecipientRow): MailboxSlot | null {
@@ -127,14 +168,13 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
     return 0;
   }
 
-  const { data: mailboxRows } = await db
-    .from('sender_mailboxes')
-    .select('*')
-    .in('id', mailboxIds)
-    .eq('status', 'verified')
-    // Снятая галочка — это «не шлём с него», даже если ящик в пуле кампании.
-    .eq('enabled', true);
-  const mailboxes = (mailboxRows ?? []) as MailboxRow[];
+  let mailboxes: MailboxRow[];
+  try {
+    mailboxes = await loadWorkingMailboxes(mailboxIds);
+  } catch (e) {
+    log('error', `Кампания ${campaign.name}: не удалось прочитать ящики пула — проход пропущен`, e);
+    return 0;
+  }
   if (!mailboxes.length) {
     log('warn', `Кампания ${campaign.name}: нет подтверждённых ящиков — пропуск`);
     return 0;
@@ -152,8 +192,17 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
   const recipients = (recipientRows ?? []) as RecipientRow[];
   if (!recipients.length) return 0;
 
-  const suppressed = await loadSuppressed(recipients.map((r) => r.email));
-  const busy = await loadCrossCampaignBusy(recipients.map((r) => r.email), campaign.id);
+  // Без стоп-листа и занятости адресов не пишем никому: проход кампании
+  // пропускается целиком и повторится на следующем тике.
+  let suppressed: Set<string>;
+  let busy: Set<string>;
+  try {
+    suppressed = await loadSuppressed(recipients.map((r) => r.email));
+    busy = await loadCrossCampaignBusy(recipients.map((r) => r.email), campaign.id);
+  } catch (e) {
+    log('error', `Кампания ${campaign.name}: стоп-лист или занятость адресов не проверены — проход пропущен`, e);
+    return 0;
+  }
   const now = new Date();
   const slots: MailboxSlot[] = [];
   for (const mailbox of mailboxes) {
@@ -164,13 +213,18 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
     slots.push({ mailbox, remaining: await remainingQuota(mailbox), cursor: new Date(now.getTime() + startOffsetMs) });
   }
 
+  // Статус получателя меняем только у всё ещё активного (.eq('status',
+  // 'active')): между чтением базы и этой записью обработчик ответов мог
+  // отметить его «ответил», «отбой» или «отписался», и без условия планировщик
+  // затёр бы ответ своим «пройден» или «стоп-лист».
   let planned = 0;
   for (const recipient of recipients) {
     if (suppressed.has(recipient.email)) {
       await db
         .from('sender_recipients')
         .update({ status: 'stopped', next_step_at: null, updated_at: new Date().toISOString() })
-        .eq('id', recipient.id);
+        .eq('id', recipient.id)
+        .eq('status', 'active');
       continue;
     }
 
@@ -181,7 +235,8 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
       await db
         .from('sender_recipients')
         .update({ status: 'finished', next_step_at: null, updated_at: new Date().toISOString() })
-        .eq('id', recipient.id);
+        .eq('id', recipient.id)
+        .eq('status', 'active');
       continue;
     }
 
@@ -191,17 +246,18 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
       // Пустое письмо не отправляем. Так бывает, когда шаг ссылается на
       // переменную, которой у получателя нет: у рассылки из автоаутрича тело
       // шага — целиком {{email_N}}, и пропущенное письмо цепочки превратилось
-      // бы в письмо без единого слова с нашего ящика. На первом шаге лид не
-      // получил ничего — останавливаем и пишем причину в лог; на следующих
-      // цепочка для него просто кончилась раньше.
-      const firstTouch = stepNo === 1;
-      if (firstTouch) {
-        log('warn', `Кампания ${campaign.name}: первое письмо для ${recipient.email} пустое — получатель остановлен`);
+      // бы в письмо без единого слова с нашего ящика. Цепочка для лида
+      // кончается — «пройден», и на первом шаге тоже: «стоп-лист» на экране
+      // базы означал бы, что лид просил не писать, а это не так. Что первое
+      // письмо не ушло вовсе, видно в логе.
+      if (stepNo === 1) {
+        log('warn', `Кампания ${campaign.name}: первое письмо для ${recipient.email} пустое — получатель закрыт без отправки`);
       }
       await db
         .from('sender_recipients')
-        .update({ status: firstTouch ? 'stopped' : 'finished', next_step_at: null, updated_at: new Date().toISOString() })
-        .eq('id', recipient.id);
+        .update({ status: 'finished', next_step_at: null, updated_at: new Date().toISOString() })
+        .eq('id', recipient.id)
+        .eq('status', 'active');
       continue;
     }
 
@@ -211,7 +267,8 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
       await db
         .from('sender_recipients')
         .update({ next_step_at: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString(), updated_at: now.toISOString() })
-        .eq('id', recipient.id);
+        .eq('id', recipient.id)
+        .eq('status', 'active');
       continue;
     }
 

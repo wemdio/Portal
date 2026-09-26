@@ -134,7 +134,10 @@ export interface ImportRecipientsResult {
   imported: number;
   /** База была заменена, а не дополнена. */
   replaced?: boolean;
+  /** Некорректный адрес. */
   skippedInvalid: number;
+  /** Первое письмо у строки выходит пустым (пустая переменная в теме или тексте). */
+  skippedEmptyLetter?: number;
   skippedDuplicates: number;
   skippedSuppressed: number;
   /** Сколько строк с данными было в файле до обреза лимитом. */

@@ -260,19 +260,19 @@ function letterAt(letters: unknown, n: number): { subject: string; body: string 
 }
 
 /**
- * Получатель из готовой строки; null — строку заливать нельзя.
- *
- * Тема первого письма обязательна: шаг 1 рассылки — тема {{subject_1}}, и без
- * неё ушло бы письмо без темы, а follow-up'ы получили бы тему «Re: ». Такую
- * строку отсеиваем ещё до заливки: она не столбится за рассылкой, а оператор
- * видит точную причину.
- * Недостающее письмо цепочки — пустая строка: такой шаг планировщик не
+ * Получатель из готовой строки. Строку без темы или без текста первого
+ * письма не пропустит importRecipients: шаг 1 рассылки — тема {{subject_1}} и
+ * тело {{email_1}}, и пустое после подстановки первое письмо в рассылку не
+ * льётся (skippedEmptyLetter) — правило одно с формой «Рассылки».
+ * Недостающее письмо 2–4 — пустая строка: такой шаг планировщик не
  * отправляет, и цепочка для компании просто кончается раньше.
  */
-function recipientOf(row: OutreachRow): RecipientInput | null {
-  const first = letterAt(row.letters, 1);
-  if (!first?.subject) return null;
-  const vars: Record<string, string> = { subject_1: first.subject, company: row.company, domain: row.domain };
+function recipientOf(row: OutreachRow): RecipientInput {
+  const vars: Record<string, string> = {
+    subject_1: letterAt(row.letters, 1)?.subject ?? '',
+    company: row.company,
+    domain: row.domain,
+  };
   for (let n = 1; n <= LETTERS; n += 1) vars[`email_${n}`] = letterAt(row.letters, n)?.body ?? '';
   return { email: row.email, name: row.company || null, vars };
 }
@@ -383,8 +383,10 @@ export interface UploadJobResult {
   skippedExisting: number;
   /** У двух компаний одна почта: письмо получит первая, обе строки помечены. */
   skippedDuplicates: number;
-  /** Некорректный адрес, пустое первое письмо или нет его темы — строка не помечена. */
+  /** Некорректный адрес — строка не помечена. */
   skippedInvalid: number;
+  /** Первое письмо без темы или без текста — строка не помечена. */
+  skippedEmptyLetter: number;
   /** Готовых строк запуска, залитых раньше: второй раз они не льются. */
   alreadyUploaded: number;
 }
@@ -417,7 +419,8 @@ async function appendTarget(folder: FolderRow, campaignId: string | null | undef
 function nothingLandedMessage(result: ImportRecipientsResult): string {
   const parts: string[] = [];
   if (result.skippedSuppressed) parts.push(`в стоп-листе — ${result.skippedSuppressed}`);
-  if (result.skippedInvalid) parts.push(`некорректный адрес или пустое первое письмо — ${result.skippedInvalid}`);
+  if (result.skippedInvalid) parts.push(`некорректный адрес — ${result.skippedInvalid}`);
+  if (result.skippedEmptyLetter) parts.push(`первое письмо без темы или текста — ${result.skippedEmptyLetter}`);
   return `Ни одна компания не попала в рассылку${parts.length ? `: ${parts.join(', ')}` : ''}`;
 }
 
@@ -432,8 +435,8 @@ function nothingLandedMessage(result: ImportRecipientsResult): string {
  *
  * Строки помечаются рассылкой (sender_campaign_id, sender_uploaded_at), если
  * адрес теперь в ней: добавлен сейчас, уже стоял или повторяет такой адрес.
- * Стоп-лист и некорректные строки не помечаются — повторное нажатие их снова
- * попробует, а доливает только новые готовые строки.
+ * Стоп-лист, некорректный адрес и пустое первое письмо не помечаются —
+ * повторное нажатие их снова попробует, а доливает только новые готовые строки.
  */
 export async function uploadJobToSender(input: UploadJobInput): Promise<UploadJobResult> {
   const source = SOURCES[input.lang];
@@ -442,22 +445,13 @@ export async function uploadJobToSender(input: UploadJobInput): Promise<UploadJo
   const target = input.mode === 'append' ? await appendTarget(folder, input.campaignId) : null;
 
   const [pending, alreadyUploaded] = await Promise.all([loadPendingRows(source, job.id), countUploaded(source, job.id)]);
-  const candidates: Array<{ id: string; recipient: RecipientInput }> = [];
-  for (const row of pending) {
-    const recipient = recipientOf(row);
-    if (recipient) candidates.push({ id: row.id, recipient });
-  }
-  const noSubject = pending.length - candidates.length;
-
   if (!pending.length) {
     throw new SenderOpError(
       alreadyUploaded ? 'Все готовые компании запуска уже залиты в «Рассылку»' : 'В запуске пока нет готовых компаний',
       409,
     );
   }
-  if (!candidates.length) {
-    throw new SenderOpError(`Залить нечего: у готовых компаний (${noSubject}) нет темы первого письма`, 422);
-  }
+  const candidates = pending.map((row) => ({ id: row.id, recipient: recipientOf(row) }));
 
   let campaignId: string;
   let campaignName: string;
@@ -518,7 +512,8 @@ export async function uploadJobToSender(input: UploadJobInput): Promise<UploadJo
       skippedSuppressed: imported.skippedSuppressed,
       skippedExisting: imported.skippedExisting,
       skippedDuplicates: imported.skippedDuplicates,
-      skippedInvalid: imported.skippedInvalid + noSubject,
+      skippedInvalid: imported.skippedInvalid,
+      skippedEmptyLetter: imported.skippedEmptyLetter,
       alreadyUploaded,
     };
   } catch (e) {

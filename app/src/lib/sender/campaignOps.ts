@@ -1,7 +1,12 @@
 import 'server-only';
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { normalizeRecipientEmail, normalizeRecipients, type RecipientInput } from './recipientImport';
+import {
+  normalizeRecipientEmail,
+  normalizeRecipients,
+  type ParsedRecipient,
+  type RecipientInput,
+} from './recipientImport';
 import { applyVars, recipientVars } from './template';
 import type { CampaignSourceKind } from './types';
 
@@ -51,9 +56,16 @@ export interface PreparedStep {
 export const EDITABLE_CAMPAIGN_STATUSES = ['draft', 'paused'];
 
 const MAX_STEPS = 5;
-/** Строк базы за один запрос: in-фильтр стоп-листа уезжает в адрес запроса. */
+/** Строк базы за одну вставку: строки едут в теле запроса, не в адресе. */
 const INSERT_CHUNK = 500;
-/** Ящиков пула за один запрос — по той же причине, что и выше. */
+/**
+ * Адресов за один запрос к стоп-листу. in-фильтр уезжает в адрес запроса, а
+ * шлюз перед PostgREST режет адреса длиннее ~9–13 КБ (414): пачка в 500
+ * адресов — это ~16 КБ, запрос падал, и стоп-лист молча считался пустым.
+ * 100 адресов — ~4 КБ даже с длинными адресами.
+ */
+const SUPPRESSION_CHUNK = 100;
+/** Ящиков пула за один запрос — по той же причине: id длинные. */
 const MAILBOX_CHUNK = 50;
 
 function requireDb() {
@@ -199,9 +211,9 @@ export interface ImportRecipientsResult {
   inserted: number;
   /** Годных строк: адрес корректный, не повтор, первое письмо не пустое (до стоп-листа). */
   accepted: number;
-  /** Адрес некорректный или первое письмо у строки выходит пустым. */
+  /** Адрес некорректный. */
   skippedInvalid: number;
-  /** Из skippedInvalid — строки с пустым первым письмом. */
+  /** Первое письмо у строки выходит пустым: пустое тело или пустая тема. */
   skippedEmptyLetter: number;
   /** Повтор адреса внутри этой же заливки (остаётся первое вхождение). */
   skippedDuplicates: number;
@@ -218,16 +230,35 @@ export interface ImportRecipientsResult {
 }
 
 /**
+ * Адреса из списка, стоящие в стоп-листе. Не прочитали — ошибка, а не пустой
+ * список: иначе при сбое базы адреса из стоп-листа молча уехали бы в кампанию.
+ */
+async function loadSuppressedEmails(emails: string[]): Promise<Set<string>> {
+  const db = requireDb();
+  const suppressed = new Set<string>();
+  for (let i = 0; i < emails.length; i += SUPPRESSION_CHUNK) {
+    const { data, error } = await db
+      .from('sender_suppressions')
+      .select('email')
+      .in('email', emails.slice(i, i + SUPPRESSION_CHUNK));
+    if (error) throw new SenderOpError(`Не удалось сверить базу со стоп-листом: ${error.message}`, 500);
+    for (const row of data ?? []) suppressed.add(String(row.email));
+  }
+  return suppressed;
+}
+
+/**
  * Залить базу получателей в кампанию.
  *
  * Адреса из стоп-листа в кампанию не попадают, повторная заливка тех же
  * адресов не создаёт дублей: адрес уникален в пределах кампании.
  *
- * Строка, у которой первое письмо после подстановки выходит пустым, не
- * заливается. У рассылки из автоаутрича тело шага — целиком {{email_1}}, и
- * пустая переменная означала бы письмо без единого слова с нашего ящика.
- * Шаг сверяется с тем, что сохранено в кампании сейчас, поэтому шаги
- * сохраняют до заливки базы (так делают и форма, и заливка из аутрича).
+ * Строка, у которой первое письмо после подстановки выходит пустым — тело
+ * или тема, — не заливается. У рассылки из автоаутрича тело шага — целиком
+ * {{email_1}}, тема — {{subject_1}}, и пустая переменная означала бы письмо
+ * без единого слова или без темы с нашего ящика. Шаг сверяется с тем, что
+ * сохранено в кампании сейчас, поэтому шаги сохраняют до заливки базы (так
+ * делают и форма, и заливка из аутрича).
  *
  * mode 'replace' заменяет базу, а не дополняет: из кампании уходят только те,
  * кому ещё ничего не планировали и не отправляли. Переписки замена не трогает
@@ -257,34 +288,44 @@ export async function importRecipients(
   // очередь выставляется в момент запуска.
   const nextStepAt = campaign.status === 'running' ? new Date().toISOString() : null;
 
-  const parsed = normalizeRecipients(rows);
-
-  // Первое письмо рендерим так же, как планировщик. Шага нет — сверять не с
-  // чем, а запуск такую кампанию и так не пропустит.
+  // Первое письмо рендерим так же, как планировщик: тело и тему. Шага нет —
+  // сверять не с чем, а запуск такую кампанию и так не пропустит.
   const { data: firstStep, error: stepError } = await db
     .from('sender_campaign_steps')
-    .select('body')
+    .select('subject, body')
     .eq('campaign_id', campaignId)
     .eq('step_no', 1)
     .maybeSingle();
   if (stepError) throw new SenderOpError(stepError.message, 500);
-  const firstBody = firstStep ? String(firstStep.body ?? '') : null;
-  const recipients = firstBody === null
-    ? parsed.recipients
-    : parsed.recipients.filter((recipient) => applyVars(firstBody, recipientVars(recipient)).trim());
-  const skippedEmptyLetter = parsed.recipients.length - recipients.length;
+  const firstLetterFilled = firstStep
+    ? (recipient: ParsedRecipient) => {
+        const vars = recipientVars(recipient);
+        return Boolean(
+          applyVars(String(firstStep.body ?? ''), vars).trim() && applyVars(String(firstStep.subject ?? ''), vars).trim(),
+        );
+      }
+    : undefined;
+
+  // Пустое письмо отсеивается до поиска повторов (keep): иначе такая строка,
+  // стоящая первой, вытесняла бы как «повтор» годную строку с тем же адресом.
+  const parsed = normalizeRecipients(rows, { keep: firstLetterFilled });
+  const recipients = parsed.recipients;
 
   const result: ImportRecipientsResult = {
     inserted: 0,
     accepted: recipients.length,
-    skippedInvalid: parsed.invalid + skippedEmptyLetter,
-    skippedEmptyLetter,
+    skippedInvalid: parsed.invalid,
+    skippedEmptyLetter: parsed.rejected,
     skippedDuplicates: parsed.duplicates,
     skippedSuppressed: 0,
     skippedExisting: 0,
     inCampaignRows: [],
   };
   if (!recipients.length) return result;
+
+  // Стоп-лист — до любых записей: не прочитался он — замена базы не должна
+  // успеть стереть старую.
+  const suppressed = await loadSuppressedEmails(recipients.map((recipient) => recipient.email));
 
   if (replace) {
     // mailbox_id проставляется ровно в тот момент, когда планировщик завёл
@@ -297,16 +338,6 @@ export async function importRecipients(
       .eq('last_step_sent', 0)
       .is('mailbox_id', null);
     if (wipeError) throw new SenderOpError(wipeError.message, 500);
-  }
-
-  const emails = recipients.map((recipient) => recipient.email);
-  const suppressed = new Set<string>();
-  for (let i = 0; i < emails.length; i += INSERT_CHUNK) {
-    const { data } = await db
-      .from('sender_suppressions')
-      .select('email')
-      .in('email', emails.slice(i, i + INSERT_CHUNK));
-    for (const row of data ?? []) suppressed.add(String(row.email));
   }
 
   const toInsert = recipients
@@ -369,10 +400,24 @@ async function poolHasWorkingMailbox(mailboxIds: string[]): Promise<boolean> {
  * Кампанию без писем или без единого рабочего ящика не запускаем: раньше она
  * становилась «идущей» и молча не отправляла ничего — планировщик пропускал
  * её на каждом проходе, а оператор ждал писем.
+ *
+ * Идущую не запускаем повторно: очередь ей заново выставила бы тех, чьё
+ * письмо уже стоит в очереди, — планировщик упирался бы в уникальность
+ * (recipient_id, step_no) на каждом проходе. Дата первого запуска при
+ * продолжении после паузы не сдвигается.
  */
 export async function startCampaign(campaignId: string): Promise<void> {
   const db = requireDb();
   const nowIso = new Date().toISOString();
+
+  const { data: campaign, error: campaignError } = await db
+    .from('sender_campaigns')
+    .select('id, status, started_at')
+    .eq('id', campaignId)
+    .maybeSingle();
+  if (campaignError) throw new SenderOpError(campaignError.message, 500);
+  if (!campaign) throw new SenderOpError('Кампания не найдена', 404);
+  if (campaign.status === 'running') throw new SenderOpError('Кампания уже идёт', 409);
 
   const { count } = await db
     .from('sender_recipients')
@@ -421,7 +466,7 @@ export async function startCampaign(campaignId: string): Promise<void> {
 
   const { error } = await db
     .from('sender_campaigns')
-    .update({ status: 'running', updated_at: nowIso, started_at: nowIso })
+    .update({ status: 'running', updated_at: nowIso, started_at: campaign.started_at ?? nowIso })
     .eq('id', campaignId);
   if (error) throw new SenderOpError(error.message, 500);
 }

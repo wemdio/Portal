@@ -18,6 +18,8 @@ export interface RecipientImportResult {
   recipients: ParsedRecipient[];
   invalid: number;
   duplicates: number;
+  /** Отброшено проверкой keep (normalizeRecipients); без неё 0. */
+  rejected: number;
 }
 
 /** Переменная, доступная в письме после загрузки базы, — для подсказок в форме. */
@@ -107,12 +109,20 @@ export function recipientRowsFromFile(rows: FileRow[]): RecipientInput[] {
  * внутри одной заливки тоже (остаётся первое вхождение). Ключи переменных
  * приводятся через varKey, пустые значения не храним — при подстановке
  * отсутствующая переменная и так даёт пусто.
+ *
+ * keep — дополнительная проверка строки (заливка в кампанию: не пустое ли
+ * первое письмо). Она идёт до поиска повторов: отброшенная строка не должна
+ * занимать адрес и вытеснять как «повтор» следующую годную с тем же адресом.
  */
-export function normalizeRecipients(rows: RecipientInput[]): RecipientImportResult {
+export function normalizeRecipients(
+  rows: RecipientInput[],
+  opts: { keep?: (recipient: ParsedRecipient) => boolean } = {},
+): RecipientImportResult {
   const recipients: ParsedRecipient[] = [];
   const seen = new Set<string>();
   let invalid = 0;
   let duplicates = 0;
+  let rejected = 0;
 
   for (const row of rows) {
     const email = normalizeRecipientEmail(row.email);
@@ -120,22 +130,27 @@ export function normalizeRecipients(rows: RecipientInput[]): RecipientImportResu
       invalid += 1;
       continue;
     }
-    if (seen.has(email)) {
-      duplicates += 1;
-      continue;
-    }
-    seen.add(email);
 
     const vars: Record<string, string> = {};
     for (const [header, value] of Object.entries(row.vars ?? {})) {
       const key = varKey(header);
       if (key && value) vars[key] = value;
     }
+    const recipient: ParsedRecipient = { email, name: String(row.name ?? '').trim() || null, vars };
 
-    recipients.push({ email, name: String(row.name ?? '').trim() || null, vars });
+    if (opts.keep && !opts.keep(recipient)) {
+      rejected += 1;
+      continue;
+    }
+    if (seen.has(email)) {
+      duplicates += 1;
+      continue;
+    }
+    seen.add(email);
+    recipients.push(recipient);
   }
 
-  return { recipients, invalid, duplicates };
+  return { recipients, invalid, duplicates, rejected };
 }
 
 export function parseRecipientRows(rows: FileRow[]): RecipientImportResult {
