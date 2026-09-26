@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { logError } from '@/lib/loggerServer';
 import { PENDING_STALE_MS } from '@/lib/polzaRuOutreach/letters/templateWriter';
+import { describeTemplateFlag } from '@/lib/polzaRuOutreach/qa';
 import { authed, jsonError } from '@/lib/polzaRuOutreach/routeAuth';
 import { CHAIN_LABELS, type ChainType } from '@/lib/polzaRuOutreach/types';
 
@@ -10,7 +11,8 @@ const PAGE = 1000;
 
 /**
  * Шаблоны цепочек запуска — для блока «Цепочки запуска» на экране: оффер,
- * статус, стоимость, письма шаблона с плейсхолдерами. waiting — сколько
+ * статус, стоимость, письма шаблона с плейсхолдерами и замечания проверки
+ * словами (components/outreach/ChainTemplates.tsx). waiting — сколько
  * компаний оффера ждут цепочку (очень спорные с TEMPLATE_FAILED): их
  * пересоберёт «Переписать цепочку». stale — pending, чей процесс умер: её
  * можно переписать заново.
@@ -50,13 +52,19 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   }
 
   const now = Date.now();
-  const templates = (data ?? []).map((t) => ({
-    ...t,
-    offer_label: CHAIN_LABELS[t.offer_key as ChainType] ?? t.offer_key,
-    // numeric из PostgREST может прийти строкой.
-    cost_usd: Number(t.cost_usd ?? 0) || 0,
-    waiting: waiting[t.offer_key] ?? 0,
-    stale: t.status === 'pending' && now - Date.parse(String(t.updated_at)) > PENDING_STALE_MS,
-  }));
+  const templates = (data ?? []).map((t) => {
+    const flags: string[] = Array.isArray(t.qa_flags) ? t.qa_flags : [];
+    return {
+      ...t,
+      offer_label: CHAIN_LABELS[t.offer_key as ChainType] ?? t.offer_key,
+      // Замечания проверки словами — экран показывает их оператору, а
+      // describeTemplateFlag живёт в серверном qa.ts (как у английского аутрича).
+      qa_flags_text: flags.map((flag) => describeTemplateFlag(flag)),
+      // numeric из PostgREST может прийти строкой.
+      cost_usd: Number(t.cost_usd ?? 0) || 0,
+      waiting: waiting[t.offer_key] ?? 0,
+      stale: t.status === 'pending' && now - Date.parse(String(t.updated_at)) > PENDING_STALE_MS,
+    };
+  });
   return NextResponse.json({ templates });
 }

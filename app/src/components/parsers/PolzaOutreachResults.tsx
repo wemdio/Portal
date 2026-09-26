@@ -7,6 +7,7 @@ import type { OutreachLlmBudgetSnapshot } from '@/lib/outreachLlm/types';
 import { polzaReviewLabel } from '@/lib/polzaOutreach/types';
 import { POLZA_STAGE_KEYS, POLZA_STAGE_LABELS, PolzaOutreachStages } from '@/components/parsers/PolzaOutreachStages';
 import { PolzaOutreachStageModal } from '@/components/parsers/PolzaOutreachStageModal';
+import { ChainTemplates } from '@/components/outreach/ChainTemplates';
 import { ChevronDown, ChevronRight, Download, ExternalLink, FileText, Filter, Loader2, Mail, Square, Trash2 } from 'lucide-react';
 
 type Props = {
@@ -26,6 +27,10 @@ type Props = {
   stopReason?: string | null;
   /** У воркера нет SMTP-прокси (progress_detail.smtp_unavailable): почты проверены только по MX. */
   smtpUnavailable?: boolean;
+  /** Запуск на экране — для блока «Цепочки запуска». */
+  jobId?: string | null;
+  /** Перечитать запуск и таблицу: «Переписать цепочку» меняет готовых и расход на ИИ. */
+  onRefresh?: () => void;
   /** Строки всего прогона — для разбора этапа. */
   loadAllRows?: () => Promise<PolzaOutreachCompanyRow[]>;
   currentPage: number;
@@ -251,6 +256,8 @@ export function PolzaOutreachResults({
   llmSpend,
   stopReason,
   smtpUnavailable,
+  jobId,
+  onRefresh,
   loadAllRows,
   currentPage,
   totalPages,
@@ -316,6 +323,10 @@ export function PolzaOutreachResults({
         <div className="rounded-lg bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
           SMTP-проверка почт недоступна — почты проверены только по MX
         </div>
+      ) : null}
+
+      {jobStatus && jobId ? (
+        <ChainTemplates key={jobId} jobUrl={`/api/parsers/polza-outreach/${jobId}`} running={running} lang="en" onChanged={onRefresh} />
       ) : null}
 
       {openStage !== null && loadAllRows ? (

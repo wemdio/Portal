@@ -610,6 +610,8 @@ export function PolzaOutreachView() {
           llmSpend={activeSummary.llm}
           stopReason={activeSummary.stopReason}
           smtpUnavailable={activeSummary.smtpUnavailable}
+          jobId={activeJob?.id ?? null}
+          onRefresh={() => void manualRefresh().catch((e) => setError(e instanceof Error ? e.message : 'Ошибка загрузки'))}
           loadAllRows={activeJobId ? loadAllRows : undefined}
           currentPage={resultsPage}
           totalPages={totalPages}

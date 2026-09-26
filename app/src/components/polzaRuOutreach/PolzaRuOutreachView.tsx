@@ -92,6 +92,12 @@ export function PolzaRuOutreachView() {
     return () => window.clearInterval(id);
   }, [running, loadJobs, loadResults]);
 
+  // После «Переписать цепочку»: готовых, спорных и расход на ИИ стало иначе.
+  const refresh = useCallback(() => {
+    loadJobs().catch((e) => setError(e instanceof Error ? e.message : 'Ошибка загрузки'));
+    void loadResults();
+  }, [loadJobs, loadResults]);
+
   const openPanel = (initial: Partial<RuOutreachConfig> | null) => setPanel((prev) => ({ initial, seq: (prev?.seq ?? 0) + 1 }));
 
   const start = async (config: Partial<RuOutreachConfig>) => {
@@ -215,6 +221,7 @@ export function PolzaRuOutreachView() {
               onPage={setPage}
               onStop={() => void stop()}
               onExport={(kind) => void exportFile(kind)}
+              onRefresh={refresh}
             />
           ) : (
             <div className="rounded-xl border border-gray-200 bg-white p-6 text-sm text-gray-500 shadow-sm">Выберите запуск слева.</div>

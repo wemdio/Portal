@@ -2,10 +2,11 @@
 
 import { Download, Loader2, Square } from 'lucide-react';
 import { CHAIN_LABELS, REASON_LABELS, SOURCE_LABELS, type ChainType, type SourceCode } from '@/lib/polzaRuOutreach/types';
+import { ChainTemplates } from '@/components/outreach/ChainTemplates';
 import { JOB_STATUS } from './JobList';
 import { Reasons, ResultsTable } from './Results';
 import { RuStages } from './Stages';
-import { RESULTS_PAGE, RESULT_FILTERS, fmtDateTime, fmtUsd, type ResultsFilter, type ResultsResponse, type RuJob } from './shared';
+import { API, RESULTS_PAGE, RESULT_FILTERS, fmtDateTime, fmtUsd, type ResultsFilter, type ResultsResponse, type RuJob } from './shared';
 
 export type ExportKind = 'ready' | 'doubtful' | 'journal';
 
@@ -22,9 +23,11 @@ interface Props {
   onPage: (p: number) => void;
   onStop: () => void;
   onExport: (kind: ExportKind) => void;
+  /** Перечитать запуск и таблицу: «Переписать цепочку» меняет готовых и расход на ИИ. */
+  onRefresh: () => void;
 }
 
-export function JobDetail({ job, results, loading, exporting, filter, reason, page, onFilter, onReason, onPage, onStop, onExport }: Props) {
+export function JobDetail({ job, results, loading, exporting, filter, reason, page, onFilter, onReason, onPage, onStop, onExport, onRefresh }: Props) {
   const running = job.status === 'running' || job.status === 'pending';
   const detail = job.progress_detail ?? null;
   const totalPages = Math.max(1, Math.ceil((results?.count ?? 0) / RESULTS_PAGE));
@@ -139,6 +142,8 @@ export function JobDetail({ job, results, loading, exporting, filter, reason, pa
       </div>
 
       <RuStages jobId={job.id} funnel={results?.funnel ?? null} run={{ running, failed: job.status === 'failed' }} error={job.error_message} />
+
+      <ChainTemplates key={job.id} jobUrl={`${API}/${job.id}`} running={running} lang="ru" onChanged={onRefresh} />
 
       <Reasons
         reasons={results?.reason_counts ?? null}
