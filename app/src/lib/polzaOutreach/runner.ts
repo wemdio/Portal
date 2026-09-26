@@ -4,33 +4,56 @@
  * Флоу CEO (en-outreach-flow-improvements, 23.09.2026):
  *   компания → fit → поводы → данные → Lead Score → кейс → угол → цепочка.
  *
- * S1 кандидаты: вакансии sales/GTM + стартапы YC, склейка по домену/названию;
- * S2 домен, размер/отрасль/страна из PDL; S3 жёсткие отсевы; S4 сайт, разбор
- * вакансии, поводы, Lead Score и статус; S5 почта — только у write now,
- * от сильных к слабым; S6 четыре письма и гарды.
+ * Порядок — дорогое в конце (docs/superpowers/specs/2026-09-26-outreach-to-sender-design.md §2 EN):
+ *  S1 кандидаты: вакансии sales/GTM + стартапы YC, склейка по домену/названию;
+ *  S2 домен, размер/отрасль/страна из PDL;
+ *  S3 жёсткие отсевы, дубль домена в запуске и повторы между запусками —
+ *     компания уже готова в другом запуске (previously_exported);
+ *  S5 почта, тоже бесплатно: поиск на сайте, SMTP-проверка, стоп-лист
+ *     «Рассылки». Нет рабочей почты — отсев до ИИ: разбор компании, которой
+ *     некуда писать, — выброшенные деньги. Почта не проверена — на ручную
+ *     проверку (email_unverified), тоже без ИИ;
+ *  S4 дешёвый ИИ: сайт (кэш 30 дней) и вакансия → поводы, Lead Score, статус;
+ *  S6 четыре письма и гарды — прошедшим порог, от самых сильных к слабым,
+ *     пока не набрано заказанное число готовых.
+ * Номера стадий исторические (их хранит поле stage): почта (s5_email) с
+ * 26.09.2026 идёт раньше разбора (s4_analyzed). Воронку по строкам считает
+ * lib/polzaOutreach/funnel.ts.
+ *
+ * Волна идёт тремя пулами по очереди: почта (свой параллелизм — обход сайта и
+ * SMTP-проверка больше ждут, чем работают), разбор ИИ, письма.
  *
  * Лимит считает ГОТОВЫЕ компании; кандидатов раннер берёт волнами, пока не
  * наберёт или пока не кончится пул. Отсеянные строки остаются с причиной —
  * по ним считается воронка. Ошибка одной компании не валит запуск.
  *
  * ИИ — общий клиент аутричей: свой ключ, дешёвая модель разбора и лимит
- * расхода на запуск (docs/superpowers/specs/2026-09-26-outreach-to-sender-design.md §1).
- * Лимит исчерпан — новые строки не начинаются, запуск завершается штатно
- * (stop_reason 'budget'), готовое остаётся. Ключ не работает или модель молчит
- * 10 компаний подряд — запуск сразу failed с понятным текстом, а не сотни
- * строк «ИИ не ответил».
+ * расхода на запуск (спека §1). Лимит исчерпан — новые строки не начинаются,
+ * запуск завершается штатно (stop_reason 'budget'), готовое остаётся. Ключ не
+ * работает или модель молчит 10 компаний подряд — запуск сразу failed с
+ * понятным текстом, а не сотни строк «ИИ не ответил». Так же и с проверкой
+ * почт: 15 адресов подряд «не удалось проверить» — лежат SMTP-прокси.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import type { EmailDomainCache } from '@/lib/outreachEmail/findAndVerify';
+import { smtpAvailable, type EmailDomainCache, type OutreachEmailVerdict } from '@/lib/outreachEmail/findAndVerify';
 import { outreachApiKey } from '@/lib/outreachLlm/client';
-import { BudgetExceededError, JobBudget, LlmAuthError, LlmCallError, runWithOutreachContext } from '@/lib/outreachLlm/context';
+import {
+  BudgetExceededError,
+  JobBudget,
+  LlmAuthError,
+  LlmCallError,
+  runWithOutreachContext,
+  type OutreachLlmBudgetSnapshot,
+} from '@/lib/outreachLlm/context';
 import { pruneSiteAnalysisCache } from '@/lib/outreachLlm/siteAnalysisCache';
+import { isSuppressed } from '@/lib/polzaRuOutreach/company';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { analyzeVacancy } from './analyzeVacancy';
 import { buildLetters, displayName, guardLetters, SEQUENCE_ID, triggerPhrase } from './buildLetters';
 import { loadEnCases, routeEnCase, type EnCase } from './caseRouter';
 import { findCompanyEmail } from './findEmail';
+import { POLZA_FUNNEL_COLUMNS, polzaFunnel, type PolzaFunnelRow } from './funnel';
 import { icpFilter } from './icpFilter';
 import { employeesFromBucket, leadStatus, primaryTrigger, scoreLead, type LeadScore, type Trigger } from './leadScore';
 import { lookupPdlProfile, normalizeDomain, PDL_COUNTRY_BY_CODE, resolveCompanyDomain } from './resolveDomain';
@@ -45,8 +68,20 @@ import {
 } from './types';
 import { loadYcCompanies, type YcCompany } from './ycCandidates';
 
-const ENRICH_CONCURRENCY = Math.max(1, Math.min(6, Number(process.env.POLZA_OUTREACH_LLM_CONCURRENCY ?? '4')));
-const EMAIL_CONCURRENCY = Math.max(1, Math.min(5, Number(process.env.POLZA_OUTREACH_EMAIL_CONCURRENCY ?? '5')));
+/** Целое из env в рамках. Пусто или мусор — значение по умолчанию: NaN в пуле дал бы ноль потоков. */
+function envInt(name: string, fallback: number, min: number, max: number): number {
+  const raw = (process.env[name] ?? '').trim();
+  const n = Number(raw);
+  return raw && Number.isFinite(n) ? Math.max(min, Math.min(max, Math.trunc(n))) : fallback;
+}
+
+const ENRICH_CONCURRENCY = envInt('POLZA_OUTREACH_LLM_CONCURRENCY', 4, 1, 6);
+// Шаг почты: обход сайта до минуты и SMTP-проверка через прокси — потоки
+// больше ждут, чем работают, и ИИ не тратят. Почту теперь ищут у всех
+// прошедших S3, а не только у write now, поэтому свой пул, шире разбора.
+const EMAIL_CONCURRENCY = envInt('POLZA_OUTREACH_EMAIL_CONCURRENCY', 8, 1, 16);
+// Письма собираются без ИИ.
+const LETTERS_CONCURRENCY = 4;
 const DB_CHUNK = 100;
 const MIN_WAVE = 25;
 const MAX_WAVE = 250;
@@ -59,6 +94,34 @@ class PolzaOutreachCancelledError extends Error {}
 class LlmSilentError extends Error {}
 /** Сколько компаний подряд с «ИИ не ответил» — уже не случайность, а лежащая модель. */
 const LLM_FAIL_STREAK = 10;
+/** SMTP-проверка не отвечает серией — запуск падает целиком: дальше все строки ушли бы на ручную проверку. */
+class SmtpSilentError extends Error {}
+/**
+ * Сколько адресов подряд «не удалось проверить» — уже не greylisting одного
+ * сервера, а лежащие SMTP-прокси.
+ */
+const SMTP_UNVERIFIED_STREAK = 15;
+
+/**
+ * Строка, которую лимит на ИИ вернул в необработанные: статус «найдена» и ни
+ * одного поля шагов S2 и S5. В конце запуска такие строки уходят из журнала;
+ * но воронку экран считает по полям строки (домен, почта), и строка, которую
+ * не удалось удалить, иначе числилась бы в ней, хотя из счётчиков запуска её
+ * уже вычли.
+ */
+const UNPROCESSED_PATCH: Record<string, unknown> = {
+  status: 'discovered',
+  stage: ST.s1Selected,
+  normalized_domain: null,
+  company_website: null,
+  employee_range: null,
+  industry: null,
+  country: null,
+  selected_company_email: null,
+  email_type: null,
+  email_source_url: null,
+  email_verification: null,
+};
 
 function log(level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) {
   const line = `[polza-outreach][${level.toUpperCase()}] ${msg}`;
@@ -124,17 +187,44 @@ function mergeCandidates(vacancies: PolzaOutreachVacancyCandidate[], ycs: YcComp
   return [...both, ...hiringOnly, ...ycOnly];
 }
 
+/**
+ * Домены компаний, готовых в других запусках английского аутрича: второй раз
+ * одной компании не пишем (спека §2 EN — как «уже выгружалась» у русского).
+ * Готовые — status 'ready': их выгружают в рассылку. Удалённый запуск уносит
+ * свои строки (on delete cascade), и его компании снова доступны.
+ */
+async function loadPreviouslyExported(db: SupabaseClient, excludeJobId: string): Promise<Set<string>> {
+  const domains = new Set<string>();
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    // Порядок по id — иначе страницы range() не стабильны и строка могла бы выпасть.
+    const { data, error } = await db
+      .from('polza_outreach_companies')
+      .select('id, normalized_domain')
+      .eq('status', 'ready')
+      .neq('job_id', excludeJobId)
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(`previously exported lookup failed: ${error.message}`);
+    for (const row of data ?? []) {
+      if (row.normalized_domain) domains.add(String(row.normalized_domain));
+    }
+    if (!data || data.length < PAGE) break;
+  }
+  return domains;
+}
+
 interface Totals {
   vacancies: number;
   domainFound: number;
   icpPassed: number;
-  writeNow: number;
   emailFound: number;
+  writeNow: number;
   ready: number;
 }
 
 /** Счётчики воронки, которые строка двигает по пути к готовой. */
-type TalliedTotal = 'domainFound' | 'icpPassed' | 'writeNow' | 'emailFound';
+type TalliedTotal = 'domainFound' | 'icpPassed' | 'emailFound' | 'writeNow';
 
 /**
  * Вклад строки в счётчики запуска и в дедуп доменов. Строку, которую
@@ -142,23 +232,40 @@ type TalliedTotal = 'domainFound' | 'icpPassed' | 'writeNow' | 'emailFound';
  * экране она не должна числиться ни в воронке, ни занимать домен.
  */
 interface Tally {
+  /** Строка журнала: по ней дедуп знает, кто занял домен. */
+  id: string;
   totals: TalliedTotal[];
-  /** Домен, который строка заняла в дедупе запуска (seenDomains). */
+  /** Домен, который строка заняла в дедупе запуска. */
   domain: string | null;
 }
 
-interface Qualified {
+/** Итог бесплатного шага: компания с доменом и рабочей почтой — вход разбора ИИ. */
+interface Prepared {
   id: string;
   tally: Tally;
   c: Candidate;
   domain: string;
   website: string;
+  employees: number | null;
+  countryCode: string | null;
+}
+
+/** Всё, что известно о компании после разбора и оценки, — вход писем. */
+interface Qualified {
+  id: string;
+  tally: Tally;
+  c: Candidate;
   site: SiteProfile;
   triggers: Trigger[];
   score: LeadScore;
-  scoreInput: Parameters<typeof scoreLead>[0];
   caseHit: EnCase | null;
-  caseReason: string | null;
+}
+
+/** «Дубль домена» и строка, чей домен он повторил, — для уборки после стопа по лимиту. */
+interface Duplicate {
+  id: string;
+  tally: Tally;
+  owner: string;
 }
 
 /**
@@ -172,25 +279,154 @@ export async function runPolzaOutreachJob(jobId: string): Promise<void> {
     log('error', 'supabaseAdmin not configured');
     return;
   }
-  const budget = new JobBudget(await budgetLimitFor(db, jobId));
-  await runWithOutreachContext({ lang: 'en', budget }, () => runJob(db, jobId, budget));
+  let start: JobStart;
+  try {
+    start = await loadJobStart(db, jobId);
+  } catch (err) {
+    // Лимит и прошлый расход не прочитались — не запускаем: с лимитом по
+    // умолчанию и нулём потраченного перезапуск мог бы потратить лимит ещё раз.
+    const message = err instanceof Error ? err.message : String(err);
+    log('error', `job ${jobId}: ${message}`);
+    const { error } = await db
+      .from('parser_jobs')
+      .update({ status: 'failed', progress_stage: 'failed', completed_at: new Date().toISOString(), error_message: message })
+      .eq('id', jobId);
+    if (error) log('warn', `job ${jobId}: failed status update failed`, error);
+    return;
+  }
+  await runWithOutreachContext({ lang: 'en', budget: start.budget }, () => runJob(db, jobId, start.budget, start.previousDetail));
+}
+
+interface JobStart {
+  budget: JobBudget;
+  /** progress_detail прошлого прогона (перезапуск воркера) или null у нового запуска. */
+  previousDetail: Record<string, unknown> | null;
+}
+
+const START_READ_RETRY_MS = 2_000;
+
+/**
+ * Бюджет нужен до входа в контекст, поэтому конфиг здесь читается отдельно от
+ * runJob. Лимит — из конфига, потраченное — из снимка progress_detail.llm. У
+ * нового запуска снимка нет, счёт с нуля. После падения воркера запуск
+ * возвращается в очередь и идёт заново, а снимок остаётся от прерванного
+ * прогона: деньги уже потрачены, и без него каждый перезапуск получал бы
+ * лимит целиком ещё раз. Читаем до runJob — первая же публикация прогресса
+ * снимок перезапишет. Снимок обновляется раз в несколько строк: вызовы,
+ * оплаченные перед самым падением, в него могут не попасть.
+ *
+ * Не прочиталось (сбой PostgREST или сети) — одна повторная попытка, потом
+ * ошибка: молча начать с лимитом по умолчанию и нулём потраченного нельзя.
+ */
+async function loadJobStart(db: SupabaseClient, jobId: string): Promise<JobStart> {
+  let problem = '';
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, START_READ_RETRY_MS));
+    try {
+      const { data, error } = await db.from('parser_jobs').select('config, progress_detail').eq('id', jobId).maybeSingle();
+      if (error) {
+        problem = error.message;
+        continue;
+      }
+      if (!data) {
+        problem = 'запуск не найден';
+        continue;
+      }
+      const limit = sanitizePolzaOutreachConfig((data.config ?? {}) as Partial<PolzaOutreachConfig>).llm_budget_usd;
+      const raw: unknown = data.progress_detail;
+      const previousDetail = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : null;
+      const snapshot = (previousDetail?.llm ?? null) as Partial<OutreachLlmBudgetSnapshot> | null;
+      return { budget: JobBudget.fromSnapshot(snapshot, limit), previousDetail };
+    } catch (err) {
+      problem = err instanceof Error ? err.message : String(err);
+    }
+  }
+  throw new Error(`Не удалось прочитать запуск и расход на ИИ из базы: ${problem}`);
 }
 
 /**
- * Лимит нужен до входа в контекст, поэтому здесь конфиг читается отдельно от
- * runJob. Не прочитался — лимит по умолчанию: runJob прочитает конфиг сам и
- * упадёт с понятной ошибкой, как раньше.
+ * Незаконченные строки журнала: не начатые, прерванные на S2–S5 и дождавшиеся
+ * разбора, но не писем (qualified). Строка без писем — не готовая и не
+ * отсеянная, и к моменту перезапуска её разбор уже не продолжить.
  */
-async function budgetLimitFor(db: SupabaseClient, jobId: string): Promise<number> {
-  try {
-    const { data } = await db.from('parser_jobs').select('config').eq('id', jobId).maybeSingle();
-    return sanitizePolzaOutreachConfig((data?.config ?? {}) as Partial<PolzaOutreachConfig>).llm_budget_usd;
-  } catch {
-    return sanitizePolzaOutreachConfig({}).llm_budget_usd;
+const UNFINISHED_STATUSES = ['discovered', 'normalized', 'qualified'];
+
+type JournalRow = PolzaFunnelRow & { id: string; exclusion_reason: string | null };
+
+/**
+ * Перезапуск воркера, когда лимит на ИИ уже исчерпан (по снимку
+ * progress_detail.llm): разбирать больше не на что, а журнал прошлого прогона —
+ * готовые, отсеянные, на ручной проверке — оплачен. Поэтому журнал не стираем:
+ * убираем только незаконченные строки (и дубли, чей оригинал среди них, — как
+ * при обычном стопе по лимиту), счётчики пересчитываем по журналу тем же
+ * правилом, что экран (funnel.ts), и завершаем запуск остановленным лимитом.
+ * Номер волны и размер пула по журналу не пересчитать — они остаются из снимка.
+ */
+async function completeSpentRun(
+  db: SupabaseClient,
+  jobId: string,
+  target: number,
+  budget: JobBudget,
+  previousDetail: Record<string, unknown> | null,
+  setRunningProgress: (patch: Record<string, unknown>) => Promise<void>,
+): Promise<void> {
+  const { error: dropErr } = await db.from('polza_outreach_companies').delete().eq('job_id', jobId).in('status', UNFINISHED_STATUSES);
+  if (dropErr) throw new Error(`Не удалось убрать необработанные строки журнала: ${dropErr.message}`);
+  const rows: JournalRow[] = [];
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await db
+      .from('polza_outreach_companies')
+      .select(`id,exclusion_reason,${POLZA_FUNNEL_COLUMNS}`)
+      .eq('job_id', jobId)
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(`Не удалось прочитать журнал запуска: ${error.message}`);
+    rows.push(...((data ?? []) as unknown as JournalRow[]));
+    if (!data || data.length < PAGE) break;
   }
+  // Дубль без оригинала: ни одна строка, кроме дублей, не держит его домен.
+  const held = new Set(rows.filter((r) => r.exclusion_reason !== 'duplicate_domain').map((r) => r.normalized_domain).filter(Boolean));
+  const orphans = rows
+    .filter((r) => r.exclusion_reason === 'duplicate_domain' && !(r.normalized_domain && held.has(r.normalized_domain)))
+    .map((r) => r.id);
+  const gone = new Set<string>();
+  for (let i = 0; i < orphans.length; i += DB_CHUNK) {
+    const { data, error } = await db
+      .from('polza_outreach_companies')
+      .delete()
+      .eq('job_id', jobId)
+      .eq('exclusion_reason', 'duplicate_domain')
+      .in('id', orphans.slice(i, i + DB_CHUNK))
+      .select('id');
+    if (error) log('warn', `job ${jobId}: orphan duplicates cleanup failed`, error);
+    for (const r of data ?? []) gone.add(String(r.id));
+  }
+  const kept = rows.filter((r) => !gone.has(String(r.id)));
+  const ready = kept.filter((r) => r.status === 'ready').length;
+  const stopReason = ready >= target ? 'target_reached' : 'budget';
+  const spend = budget.snapshot();
+  log('info', `job ${jobId}: LLM budget already spent ($${spend.spent_usd}/$${spend.limit_usd}) — restart keeps the journal: ${kept.length} rows, ${ready} ready (${stopReason})`);
+  await setRunningProgress({
+    status: 'completed',
+    progress_stage: 'completed',
+    progress_percent: 100,
+    total_found: kept.length,
+    total_parsed: ready,
+    completed_at: new Date().toISOString(),
+    error_message: null,
+    progress_detail: {
+      ...(previousDetail ?? {}),
+      scanned: kept.length,
+      ready,
+      funnel: polzaFunnel(kept),
+      llm: spend,
+      stop_reason: stopReason,
+    },
+  });
 }
 
-async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Promise<void> {
+async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget, previousDetail: Record<string, unknown> | null): Promise<void> {
   const setProgress = async (patch: Record<string, unknown>) => {
     const { error } = await db.from('parser_jobs').update(patch).eq('id', jobId);
     if (error) log('warn', `progress update failed for ${jobId}`, error);
@@ -213,6 +449,10 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
       .eq('id', id);
     if (error) log('warn', `row update failed (${id})`, error);
   };
+  const excludeRow = async (id: string, stage: string, reason: string, patch: Record<string, unknown> = {}): Promise<null> => {
+    await updateRow(id, { ...patch, status: 'excluded', stage, exclusion_reason: reason, lead_status: 'skip' });
+    return null;
+  };
   // Прогресс «как сейчас» — для сбоя и остановки: к нему дописывается итог
   // расходов на ИИ. Появляется, когда запуск дошёл до обработки строк.
   let currentDetail: (() => Record<string, unknown>) | null = null;
@@ -225,11 +465,22 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
     const target = config.limit;
     const maxCandidates = maxCandidatesFor(target);
     const thresholds = { write: config.write_threshold };
+    // Перезапуск после исчерпанного лимита: журнал оплачен и остаётся, новых
+    // строк не будет — ни ключ, ни источники не нужны.
+    if (budget.exhausted()) {
+      await completeSpentRun(db, jobId, target, budget, previousDetail, setRunningProgress);
+      return;
+    }
     // Роут не создаёт запуск без ключа, но окружение воркера — отдельное. Без
     // ключа ни одна компания не пройдёт разбор: падаем до выборки кандидатов.
     if (!outreachApiKey('en')) {
       throw new LlmAuthError('Не задан ключ ИИ для EN автоаутрича (POLZA_EN_OUTREACH_API_KEY) в окружении воркера', 'missing_key');
     }
+    // Без SMTP-прокси проверка почт — только синтаксис и MX: адрес «рабочий»,
+    // если у домена есть почтовый сервер. Запуск идёт, но экран об этом
+    // предупреждает (progress_detail.smtp_unavailable).
+    const smtpOn = smtpAvailable();
+    if (!smtpOn) log('warn', `job ${jobId}: SMTP_PROXY_URLS not set — emails are checked by syntax and MX only`);
 
     await setProgress({
       status: 'running',
@@ -241,6 +492,8 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
       total_parsed: 0,
     });
     // Повторный прогон (recover после падения воркера) — с чистого листа.
+    // Лимит при этом ещё не исчерпан (иначе — completeSpentRun выше): профили
+    // сайтов в кэше, и заново платим в основном за вакансии.
     await db.from('polza_outreach_companies').delete().eq('job_id', jobId);
     // Устаревшие профили сайтов читатель не берёт — чистим, чтобы кэш не рос без конца.
     await pruneSiteAnalysisCache('en');
@@ -252,14 +505,22 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
     const ycs = config.sources.includes('yc') ? await loadYcCompanies(db, config) : [];
     const pool = mergeCandidates(vacancies, ycs);
     const cases = await loadEnCases(db);
-    log('info', `job ${jobId}: pool=${pool.length} (hiring=${vacancies.length}, yc=${ycs.length}), cases=${cases.length}, target=${target}`);
+    const exported = await loadPreviouslyExported(db, jobId);
+    log('info', `job ${jobId}: pool=${pool.length} (hiring=${vacancies.length}, yc=${ycs.length}), cases=${cases.length}, previously exported=${exported.size}, target=${target}`);
 
-    const totals: Totals = { vacancies: 0, domainFound: 0, icpPassed: 0, writeNow: 0, emailFound: 0, ready: 0 };
-    const seenDomains = new Set<string>();
+    const totals: Totals = { vacancies: 0, domainFound: 0, icpPassed: 0, emailFound: 0, writeNow: 0, ready: 0 };
+    // Дедуп запуска: какая строка заняла домен. Строка, возвращённая в
+    // необработанные, его освобождает; дубль помнит, чей домен он повторил
+    // (уборка после стопа по лимиту).
+    const domainOwner = new Map<string, string>();
+    const duplicates: Duplicate[] = [];
     // MX и catch-all доменов для SMTP-проверки почты — один кэш на запуск.
     const emailDomainCache: EmailDomainCache = new Map();
     let cursor = 0;
     let waveNo = 0;
+    let processed = 0;
+    // Шаг волны, который сейчас идёт, — для progress_stage.
+    let phase = 'finding_emails';
     // Лимит на ИИ исчерпан: новые строки и волны не начинаем, запуск
     // завершится штатно. Строки, которые лимит остановил, уберём из журнала.
     let budgetStop = false;
@@ -267,14 +528,15 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
       if (budget.exhausted()) budgetStop = true;
       return budgetStop;
     };
-    // Ключ ИИ отвергнут или ИИ молчит: запуск уже падает — остальным потокам
-    // новых строк не брать и прогресс не публиковать.
+    // Ключ ИИ отвергнут, ИИ или проверка почт молчат: запуск уже падает —
+    // остальным потокам новых строк не брать и прогресс не публиковать.
     let halted = false;
     // Предохранитель «ИИ молчит»: LLM_FAIL_STREAK компаний подряд отсеяны с
-    // «ИИ не ответил», и между ними ни одного ответа модели — значит, лежат
-    // модель или Requesty, и так же упадёт каждая следующая строка. Считаем
-    // только отсевы по ИИ; любой ответ модели (в том числе на другой строке)
-    // серию обнуляет, а профиль из кэша — нет: он ничего не говорит о модели.
+    // «ИИ не ответил», и между ними ни одного целого ответа модели — значит,
+    // лежат модель или Requesty, и так же упадёт каждая следующая строка.
+    // Считаем только отсевы по ИИ; любой целый ответ (в том числе на другой
+    // строке) серию обнуляет, а ответ без главных полей и профиль из кэша —
+    // нет: они ничего не говорят о том, что модель работает.
     let llmFailStreak = 0;
     const noteLlmAnswered = () => {
       llmFailStreak = 0;
@@ -285,18 +547,46 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         throw new LlmSilentError(`ИИ не отвечает: ${LLM_FAIL_STREAK} компаний подряд без ответа модели — проверьте Requesty/модель`);
       }
     };
+    // Предохранитель «проверка почт молчит»: SMTP_UNVERIFIED_STREAK адресов
+    // подряд «не удалось проверить» — лежат SMTP-прокси, и каждая следующая
+    // компания уйдёт на ручную проверку. Любой определённый ответ проверки
+    // (рабочий, catch-all, нерабочий) серию обнуляет; «адресов на сайте нет»
+    // её не трогает. Без SMTP-прокси проверки SMTP нет — нет и предохранителя.
+    let smtpUnverifiedStreak = 0;
+    /** true — серия дошла до порога: строку дописываем и валим запуск. */
+    const noteEmailVerdict = (verdict: OutreachEmailVerdict): boolean => {
+      if (!smtpOn || verdict === 'none') return false;
+      if (verdict !== 'unverified') {
+        smtpUnverifiedStreak = 0;
+        return false;
+      }
+      smtpUnverifiedStreak += 1;
+      return smtpUnverifiedStreak >= SMTP_UNVERIFIED_STREAK;
+    };
+    const smtpSilentError = () =>
+      new SmtpSilentError(`Проверка почт не отвечает: ${SMTP_UNVERIFIED_STREAK} адресов подряд не удалось проверить — проверьте SMTP-прокси`);
 
+    // Ключи воронки — в порядке шагов раннера; geo_confirmed исторически значит «write now».
     const funnelOf = () => ({
       vacancies: totals.vacancies,
       domain_found: totals.domainFound,
       icp_passed: totals.icpPassed,
-      geo_confirmed: totals.writeNow,
       email_found: totals.emailFound,
+      geo_confirmed: totals.writeNow,
       ready: totals.ready,
     });
     // llm — снимок расходов: экран пишет «ИИ: потрачено $X из $Y».
+    // smtp_unavailable — плашка «SMTP-проверка почт недоступна».
     const detail = (extra: Record<string, unknown> = {}): Record<string, unknown> => ({
-      wave: waveNo, target, pool: pool.length, scanned: totals.vacancies, ready: totals.ready, funnel: funnelOf(), llm: budget.snapshot(), ...extra,
+      wave: waveNo,
+      target,
+      pool: pool.length,
+      scanned: totals.vacancies,
+      ready: totals.ready,
+      funnel: funnelOf(),
+      llm: budget.snapshot(),
+      ...(smtpOn ? {} : { smtp_unavailable: true }),
+      ...extra,
     });
     currentDetail = () => detail();
     const publish = async (stage: string, extra: Record<string, unknown> = {}) => {
@@ -311,38 +601,33 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         progress_detail: detail(extra),
       });
     };
-    const newTally = (): Tally => ({ totals: [], domain: null });
+    const newTally = (id: string): Tally => ({ id, totals: [], domain: null });
     const count = (tally: Tally, key: TalliedTotal) => {
       totals[key] += 1;
       tally.totals.push(key);
     };
-    /** Строка возвращается в необработанные: её вклад в счётчики и домен в дедупе вычитаем. */
+    /** Строка возвращается в необработанные: её вклад в счётчики вычитаем, домен освобождаем. */
     const untally = (tally: Tally) => {
       for (const key of tally.totals) totals[key] -= 1;
-      // Домен освобождаем: иначе такая же компания дальше в запуске отсеялась
-      // бы «дублем» строки, которой в журнале уже нет.
-      if (tally.domain) seenDomains.delete(tally.domain);
+      // Иначе такая же компания дальше в запуске отсеялась бы «дублем»
+      // строки, которой в журнале уже нет.
+      if (tally.domain && domainOwner.get(tally.domain) === tally.id) domainOwner.delete(tally.domain);
       tally.totals = [];
       tally.domain = null;
     };
+    /**
+     * Строку остановил лимит на ИИ: она не отсеяна и не сломана — она не
+     * обработана. Вклад в счётчики вычитаем, а в журнале стираем найденное
+     * (UNPROCESSED_PATCH) — в конце запуска строка уйдёт из журнала вместе с
+     * остальными необработанными.
+     */
+    const returnToPool = async (id: string, tally: Tally) => {
+      untally(tally);
+      await updateRow(id, UNPROCESSED_PATCH);
+    };
 
-    // ── S2–S4 для одной компании ──
-    const qualify = async (id: string, c: Candidate, tally: Tally): Promise<Qualified | null> => {
-      const exclude = async (stage: string, reason: string, patch: Record<string, unknown> = {}) => {
-        await updateRow(id, { ...patch, status: 'excluded', stage, exclusion_reason: reason, lead_status: 'skip' });
-        return null;
-      };
-      // ИИ не ответил на этой строке — отсев с честной причиной llm_failed, а
-      // не «сайт не открылся». Подробность — в лог: колонки пояснения у
-      // английского журнала нет, а review_reason на экране читается как
-      // «на ручную проверку». Лимит, ключ и ошибки кода — выше, в safely().
-      const llmFailed = async (what: string, err: LlmCallError, patch: Record<string, unknown> = {}) => {
-        log('warn', `${what} LLM failed for ${c.companyName}: ${err.message}`);
-        await exclude(ST.s4Analyzed, 'llm_failed', patch);
-        noteLlmFailed();
-        return null;
-      };
-
+    // ── S2, S3 и S5 для одной компании: всё бесплатное, до ИИ ──
+    const prepare = async (id: string, c: Candidate, tally: Tally): Promise<Prepared | null> => {
       // S2 домен
       let domain: string | null = c.yc?.domain ?? null;
       let website: string | null = c.yc?.website ?? null;
@@ -351,22 +636,25 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         domain = res.normalizedDomain;
         website = res.companyWebsite;
       }
-      if (!domain || !website) return exclude(ST.s2Domain, 'domain_not_resolved');
+      if (!domain || !website) return excludeRow(id, ST.s2Domain, 'domain_not_resolved');
       count(tally, 'domainFound');
       const pdl = await lookupPdlProfile(db, c.companyName, domain);
       const employees = c.yc?.teamSize ?? employeesFromBucket(pdl.size);
       const countryName = c.yc?.country ?? pdl.country ?? null;
       const countryCode = c.vacancy?.jobCountryCode || (countryName ? COUNTRY_CODE_BY_NAME[countryName.toLowerCase()] ?? null : null);
-      const base = {
+      await updateRow(id, {
         normalized_domain: domain,
         company_website: website,
         employee_range: c.yc?.teamSize != null ? String(c.yc.teamSize) : pdl.size,
         industry: pdl.industry ?? c.yc?.industry ?? null,
         country: countryName,
-      };
-      await updateRow(id, { ...base, status: 'normalized', stage: ST.s2Domain });
+        status: 'normalized',
+        stage: ST.s2Domain,
+      });
 
-      // S3 жёсткие отсевы
+      // S3 жёсткие отсевы и дубль домена в запуске. Проверка и захват домена —
+      // синхронно внутри icpFilter, без await между ними: параллельные потоки
+      // не займут один домен дважды. Владельца запоминаем для уборки дублей.
       const icp = icpFilter(
         {
           companyName: c.companyName,
@@ -377,16 +665,82 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
           minEmployees: config.min_employees,
           maxEmployees: config.max_employees,
         },
-        seenDomains,
+        {
+          has: (d) => domainOwner.has(d),
+          add: (d) => {
+            domainOwner.set(d, id);
+            tally.domain = d;
+          },
+        },
       );
-      if (icp.exclude) return exclude(ST.s3Icp, icp.reason ?? 'icp');
-      // Прошедший фильтр домен icpFilter занял в дедупе запуска.
-      tally.domain = domain;
+      if (icp.exclude) {
+        const owner = icp.reason === 'duplicate_domain' ? domainOwner.get(domain) : undefined;
+        if (owner) duplicates.push({ id, tally, owner });
+        return excludeRow(id, ST.s3Icp, icp.reason ?? 'icp');
+      }
+      // Повторы между запусками: компания уже готова в другом запуске — второй
+      // раз ей не пишем. Домен строка уже заняла: такая же компания дальше в
+      // этом запуске отсеется дублем этой строки.
+      if (exported.has(domain)) return excludeRow(id, ST.s3Icp, 'previously_exported');
       count(tally, 'icpPassed');
 
-      // S4 сайт, вакансия, поводы, скоринг. Сайт — один обход и один разбор
-      // или готовый профиль из кэша за 30 дней. Не открылся — site_unreachable;
-      // ИИ не ответил — llm_failed: сайт мог быть в порядке.
+      // S5 почта — до ИИ: компания без рабочего адреса не стоит разбора.
+      const found = await findCompanyEmail(website, domain, emailDomainCache);
+      // Серия «не удалось проверить» дошла до порога — строку дописываем, запуск валим.
+      const smtpSilent = noteEmailVerdict(found.verdict);
+      if (!found.email || !found.verification) {
+        // Адреса на сайте есть, но все не прошли проверку, — своя причина:
+        // «почты нет» и «почта мёртвая» — разные выводы об источнике. Колонки
+        // пояснения у английского журнала нет — какие адреса, пишем в лог.
+        const invalid = found.verdict === 'invalid';
+        if (invalid) log('info', `S5 ${domain}: all candidates failed verification: ${found.triedInvalid.join(', ')}`);
+        return excludeRow(id, ST.s5Email, invalid ? 'email_invalid' : 'no_corporate_email');
+      }
+      if (await isSuppressed(db, found.email)) {
+        log('info', `S5 ${domain}: ${found.email} is on the sender stop-list`);
+        await excludeRow(id, ST.s5Email, 'suppressed_contact');
+        if (smtpSilent) throw smtpSilentError();
+        return null;
+      }
+      // Почту и вердикт проверки пишем сразу: строка, отсеянная дальше
+      // разбором или оценкой, показывает в журнале, какой адрес у неё был и
+      // чем кончилась проверка.
+      const emailPatch = {
+        selected_company_email: found.email,
+        email_type: found.emailType,
+        email_source_url: found.emailSourceUrl,
+        email_verification: found.verification,
+      };
+      if (found.verification === 'unverified') {
+        // Почта не проверена — на ручную проверку, и дальше строка не идёт:
+        // разбор ИИ ей не оплачиваем, письма не пишем, решает человек. «Почту»
+        // в воронке она не проходит (lib/polzaOutreach/funnel.ts).
+        await updateRow(id, { ...emailPatch, status: 'needs_review', stage: ST.s5Email, review_reason: 'email_unverified' });
+        if (smtpSilent) throw smtpSilentError();
+        return null;
+      }
+      await updateRow(id, { ...emailPatch, stage: ST.s5Email });
+      count(tally, 'emailFound');
+      return { id, tally, c, domain, website, employees, countryCode };
+    };
+
+    // ── S4 для одной компании: дешёвый ИИ, поводы, Lead Score ──
+    const analyze = async (p: Prepared): Promise<Qualified | null> => {
+      const { id, tally, c, domain, website, employees, countryCode } = p;
+      // ИИ не ответил на этой строке — отсев с честной причиной llm_failed, а
+      // не «сайт не открылся». Подробность — в лог: колонки пояснения у
+      // английского журнала нет, а review_reason на экране читается как
+      // «на ручную проверку». Лимит, ключ и ошибки кода — выше, в safely().
+      const llmFailed = async (what: string, err: LlmCallError, patch: Record<string, unknown> = {}) => {
+        log('warn', `${what} LLM failed for ${c.companyName}: ${err.message}`);
+        await excludeRow(id, ST.s4Analyzed, 'llm_failed', patch);
+        noteLlmFailed();
+        return null;
+      };
+
+      // Сайт — один обход и один разбор или готовый профиль из кэша за 30
+      // дней. Не открылся — site_unreachable; ИИ не ответил — llm_failed:
+      // сайт мог быть в порядке.
       let site: SiteProfile;
       try {
         site = await buildSiteProfile(website, c.yc?.description ?? c.vacancy?.companyDescription ?? null, {
@@ -397,13 +751,13 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         if (!(err instanceof LlmCallError)) throw err;
         return llmFailed('site profile', err);
       }
-      if (!site.reachable) return exclude(ST.s4Analyzed, 'site_unreachable');
+      if (!site.reachable) return excludeRow(id, ST.s4Analyzed, 'site_unreachable');
       if (site.exclusion) {
         const map: Record<string, string> = {
           staffing: 'staffing_agency', job_board: 'staffing_agency', lead_gen_agency: 'competitor',
           marketing_agency: 'generic_marketing', b2c: 'b2c_or_education', local_service: 'b2c_or_education', course: 'b2c_or_education',
         };
-        return exclude(ST.s4Analyzed, map[site.exclusion] ?? 'b2c_or_education', { company_context: site.companyContext });
+        return excludeRow(id, ST.s4Analyzed, map[site.exclusion] ?? 'b2c_or_education', { company_context: site.companyContext });
       }
 
       const triggers: Trigger[] = [];
@@ -431,7 +785,7 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
           target_sales_geo_evidence: analysis.target_sales_geo_evidence || null,
           target_sales_geo_confidence: analysis.target_sales_geo_confidence,
         };
-        if (analysis.is_lead_gen_agency) return exclude(ST.s4Analyzed, 'competitor', analysisPatch);
+        if (analysis.is_lead_gen_agency) return excludeRow(id, ST.s4Analyzed, 'competitor', analysisPatch);
         if (analysis.outbound_mandate) {
           triggers.push({ type: 'hiring', title: c.vacancy.jobTitle, url: c.vacancy.jobSourceUrl, date: c.vacancy.jobPublishedAt, quote: analysis.outbound_evidence || null });
         }
@@ -452,10 +806,10 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         outreach_angle: site.outreachAngle,
         segments: site.segments,
       };
-      if (!isB2b) return exclude(ST.s4Analyzed, 'not_b2b', common);
-      if (!triggers.length) return exclude(ST.s4Analyzed, 'no_trigger', common);
+      if (!isB2b) return excludeRow(id, ST.s4Analyzed, 'not_b2b', common);
+      if (!triggers.length) return excludeRow(id, ST.s4Analyzed, 'no_trigger', common);
 
-      const scoreInput = {
+      const score = scoreLead({
         isB2b,
         businessModel: site.businessModel,
         icpClear: Boolean(site.icpQuote),
@@ -465,10 +819,10 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         countryCode,
         triggers,
         hasSite: true,
-        hasEmail: true, // до поиска почты — оптимистично: ищем её только у прошедших
+        // Почта уже найдена и прошла проверку — шаг S5 теперь до разбора.
+        hasEmail: true,
         hasDescription: site.hasDescription,
-      };
-      const score = scoreLead(scoreInput);
+      });
       const status = leadStatus(score.total, thresholds);
       const primary = primaryTrigger(triggers);
       const routed = routeEnCase(cases, site.industryGroup);
@@ -486,46 +840,18 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         case_snippet: routed?.record.snippet ?? null,
         cta_type: 'route',
       };
-      if (status === 'skip') return exclude(ST.s4Analyzed, 'low_score', patch);
+      if (status === 'skip') return excludeRow(id, ST.s4Analyzed, 'low_score', patch);
       count(tally, 'writeNow');
       await updateRow(id, { ...patch, status: 'qualified', stage: ST.s4Analyzed });
-      return { id, tally, c, domain, website, site, triggers, score, scoreInput, caseHit: routed?.record ?? null, caseReason: routed?.reason ?? null };
+      return { id, tally, c, site, triggers, score, caseHit: routed?.record ?? null };
     };
 
-    // ── S5–S6 для одной компании ──
+    // ── S6 для одной компании: письма и гарды ──
     const finalize = async (q: Qualified) => {
       if (totals.ready >= target) {
         await updateRow(q.id, { status: 'needs_review', review_reason: 'limit_reached' });
         return;
       }
-      // Адреса, не прошедшие SMTP-проверку, пока тоже «нет корпоративной почты»:
-      // своя причина появится, когда поиск почты переедет до разбора ИИ.
-      const email = await findCompanyEmail(q.website, q.domain, emailDomainCache);
-      if (!email.email) {
-        if (email.triedInvalid.length) log('info', `S5 ${q.domain}: ${email.triedInvalid.length} email(s) failed verification`);
-        const score = scoreLead({ ...q.scoreInput, hasEmail: false });
-        await updateRow(q.id, {
-          status: 'excluded',
-          stage: ST.s5Email,
-          exclusion_reason: 'no_corporate_email',
-          lead_score: score.total,
-          score_breakdown: score.breakdown,
-          data_quality_score: score.dataQuality,
-          lead_status: 'skip',
-        });
-        return;
-      }
-      count(q.tally, 'emailFound');
-      await updateRow(q.id, {
-        selected_company_email: email.email,
-        email_type: email.emailType,
-        email_source_url: email.emailSourceUrl,
-        // Вердикт проверки: ok / catch_all / unverified. «Не удалось проверить»
-        // пока идёт в письма как раньше.
-        email_verification: email.verification,
-        stage: ST.s5Email,
-      });
-
       const company = displayName(q.c.companyName);
       const primary = primaryTrigger(q.triggers);
       const letters = buildLetters({ company, trigger: primary, caseHit: q.caseHit, segments: q.site.segments });
@@ -550,32 +876,67 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
       await updateRow(q.id, { status: 'ready', stage: ST.s6Letters, sequence_id: SEQUENCE_ID, letters });
     };
 
-    const safely = async (id: string, stage: string, tally: Tally, fn: () => Promise<void>) => {
+    const safely = async (id: string, tally: Tally, fn: () => Promise<void>) => {
       try {
         await fn();
       } catch (err) {
         if (err instanceof PolzaOutreachCancelledError) throw err;
-        if (err instanceof LlmAuthError || err instanceof LlmSilentError) {
-          // Ключ не работает или ИИ молчит серией — так же упадёт каждая
-          // строка. Валим запуск целиком.
+        if (err instanceof LlmAuthError || err instanceof LlmSilentError || err instanceof SmtpSilentError) {
+          // Ключ не работает, ИИ или проверка почт молчат серией — так же
+          // упадёт каждая строка. Валим запуск целиком.
           halted = true;
           throw err;
         }
         if (err instanceof BudgetExceededError) {
           // Лимит на ИИ: строка не отсеяна и не сломана — она не обработана.
-          // Вклад в счётчики и дедуп вычитаем, строку помечаем необработанной —
-          // в конце её уберём из журнала вместе с остальными такими.
           budgetStop = true;
-          untally(tally);
-          await updateRow(id, { status: 'discovered', stage: ST.s1Selected });
+          await returnToPool(id, tally);
           return;
         }
-        await updateRow(id, { status: 'failed', stage, review_reason: err instanceof Error ? err.message.slice(0, 500) : 'failed' });
+        // Стадию не трогаем: строка остаётся на последней пройденной, и
+        // воронка считает её дошедшей докуда дошла.
+        await updateRow(id, { status: 'failed', review_reason: err instanceof Error ? err.message.slice(0, 500) : 'failed' });
+      } finally {
+        // Шаг строки, а не строка: строка, дошедшая до писем, считается трижды —
+        // счётчик нужен только для частоты публикаций.
+        processed += 1;
+        if (processed % 10 === 0) await publish(phase);
+      }
+    };
+
+    /**
+     * Стоп по лимиту убрал из журнала необработанные строки. «Дубль домена»,
+     * чья строка-оригинал среди них, остался бы дублем записи, которой в
+     * журнале нет, — а повторный запуск возьмёт компанию заново. Такие дубли
+     * убираем вместе с ней.
+     */
+    const dropOrphanDuplicates = async (droppedIds: ReadonlySet<string>) => {
+      const orphans = duplicates.filter((d) => droppedIds.has(d.owner));
+      for (let i = 0; i < orphans.length; i += DB_CHUNK) {
+        const chunk = orphans.slice(i, i + DB_CHUNK);
+        const { data, error } = await db
+          .from('polza_outreach_companies')
+          .delete()
+          .eq('job_id', jobId)
+          .eq('exclusion_reason', 'duplicate_domain')
+          .in('id', chunk.map((d) => d.id))
+          .select('id');
+        if (error) {
+          log('warn', `job ${jobId}: orphan duplicates cleanup failed`, error);
+          continue;
+        }
+        const gone = new Set((data ?? []).map((r) => String(r.id)));
+        for (const d of chunk) {
+          if (!gone.has(d.id)) continue;
+          untally(d.tally);
+          totals.vacancies = Math.max(0, totals.vacancies - 1);
+        }
       }
     };
 
     while (totals.ready < target && cursor < pool.length && totals.vacancies < maxCandidates) {
-      // Лимит на ИИ исчерпан — новую волну не начинаем: каждой её строке нужен разбор.
+      // Лимит на ИИ исчерпан — новую волну не начинаем: её строкам нужен разбор.
+      // Внутри волны шаг почты ИИ не тратит, поэтому лимит в нём не кончается.
       if (stopForBudget()) break;
       await ensureNotCancelled();
       waveNo += 1;
@@ -606,47 +967,65 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         for (const r of data ?? []) ids.push(String(r.id));
       }
       totals.vacancies += wave.length;
-      await publish('analyzing_vacancies', { wave_size: wave.length });
+      phase = 'finding_emails';
+      await publish(phase, { wave_size: wave.length });
       log('info', `wave ${waveNo}: ${wave.length} candidates (ready ${totals.ready}/${target})`);
 
-      const qualified: Qualified[] = [];
-      let done = 0;
-      await runPool(wave.map((c, i) => ({ c, id: ids[i] })).filter((x) => x.id), ENRICH_CONCURRENCY, async ({ c, id }) => {
-        // Лимит на ИИ исчерпан — строку не начинаем: она останется необработанной
-        // и в конце уйдёт из журнала, как будто её не брали из пула.
-        if (halted || stopForBudget()) return;
-        await ensureNotCancelled();
-        const tally = newTally();
-        await safely(id, ST.s4Analyzed, tally, async () => {
-          const q = await qualify(id, c, tally);
-          if (q) qualified.push(q);
-        });
-        done += 1;
-        if (done % 10 === 0) await publish('analyzing_vacancies');
-      });
-
-      // Почта — только у write now, от самых сильных к слабым.
-      // Лимит здесь не проверяем: почта и письма бесплатны — уже оплаченный
-      // разбор доводим до готовых.
-      qualified.sort((a, b) => b.score.total - a.score.total);
-      await publish('finding_emails', { write_now: qualified.length });
-      await runPool(qualified, EMAIL_CONCURRENCY, async (q) => {
+      // Шаг 1 (бесплатно): домен, отсевы, повторы, почта, стоп-лист — у всей волны.
+      const prepared: Prepared[] = [];
+      await runPool(wave.map((c, i) => ({ c, id: ids[i] })).filter((x) => x.id), EMAIL_CONCURRENCY, async ({ c, id }) => {
         if (halted) return;
         await ensureNotCancelled();
-        await safely(q.id, ST.s5Email, q.tally, () => finalize(q));
+        const tally = newTally(id);
+        await safely(id, tally, async () => {
+          const p = await prepare(id, c, tally);
+          if (p) prepared.push(p);
+        });
       });
-      await publish('building_letters');
+
+      // Шаг 2 (дешёвый ИИ): разбор — только у компаний с рабочей почтой.
+      const qualified: Qualified[] = [];
+      phase = 'analyzing_vacancies';
+      await publish(phase, { with_email: prepared.length });
+      await runPool(prepared, ENRICH_CONCURRENCY, async (p) => {
+        if (halted) return;
+        if (stopForBudget()) {
+          // Лимит на ИИ исчерпан — разбор не начинаем. Почту строка прошла, но
+          // этот шаг бесплатный, а без разбора она ни отсеяна, ни готова:
+          // возвращаем в необработанные, как строку, которую лимит прервал
+          // (в конце уйдёт из журнала, повторный запуск возьмёт её заново).
+          await returnToPool(p.id, p.tally);
+          return;
+        }
+        await ensureNotCancelled();
+        await safely(p.id, p.tally, async () => {
+          const q = await analyze(p);
+          if (q) qualified.push(q);
+        });
+      });
+
+      // Шаг 3: письма — от самых сильных к слабым. Лимит на ИИ здесь не
+      // проверяем: письма бесплатны — уже оплаченный разбор доводим до готовых.
+      qualified.sort((a, b) => b.score.total - a.score.total);
+      phase = 'building_letters';
+      await publish(phase, { write_now: qualified.length });
+      await runPool(qualified, LETTERS_CONCURRENCY, async (q) => {
+        if (halted) return;
+        await ensureNotCancelled();
+        await safely(q.id, q.tally, () => finalize(q));
+      });
     }
 
     // Пока добегала последняя волна, запуск могли остановить — не перетираем «Stopped by user».
     await ensureNotCancelled();
     if (budgetStop) {
       // Строки, до которых из-за лимита не дошли или которые он прервал, — не
-      // отсев и не ошибка. Убираем их из журнала: воронка на экране (её
-      // считает роут результатов по строкам) и «просмотрено» — только то, что
-      // действительно разобрали. Повторный запуск возьмёт эти компании заново,
-      // а уже оплаченные профили сайтов — из кэша. normalized — прерванная
-      // строка, которую не удалось пометить необработанной.
+      // отсев и не ошибка. Среди них и прошедшие почту, но не успевшие к
+      // разбору ИИ: почта бесплатна и готовой строку не делает. Убираем их из
+      // журнала: воронка на экране (её считают по строкам) и «просмотрено» —
+      // только то, что действительно разобрали. Повторный запуск возьмёт эти
+      // компании заново, а уже оплаченные профили сайтов — из кэша.
+      // normalized — прерванная строка, которую не удалось пометить необработанной.
       const { data: dropped, error: dropErr } = await db
         .from('polza_outreach_companies')
         .delete()
@@ -654,7 +1033,11 @@ async function runJob(db: SupabaseClient, jobId: string, budget: JobBudget): Pro
         .in('status', ['discovered', 'normalized'])
         .select('id');
       if (dropErr) log('warn', `job ${jobId}: unprocessed rows cleanup failed`, dropErr);
-      else totals.vacancies = Math.max(0, totals.vacancies - (dropped?.length ?? 0));
+      else {
+        const droppedIds = new Set((dropped ?? []).map((r) => String(r.id)));
+        totals.vacancies = Math.max(0, totals.vacancies - droppedIds.size);
+        await dropOrphanDuplicates(droppedIds);
+      }
     }
 
     const stopReason = totals.ready >= target

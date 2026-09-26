@@ -342,6 +342,8 @@ export interface PolzaOutreachCompanyRow {
   selected_company_email?: string | null;
   email_type?: string | null;
   email_source_url?: string | null;
+  /** Вердикт SMTP-проверки адреса: ok / catch_all / unverified; у строк до 26.09.2026 — null. */
+  email_verification?: string | null;
   sequence_id?: string | null;
   letters?: PolzaOutreachLetter[] | null;
   status: string;
@@ -369,6 +371,10 @@ export interface PolzaOutreachCompanyRow {
   created_at: string;
 }
 
+/**
+ * Воронка английского аутрича; правила и порядок этапов — lib/polzaOutreach/funnel.ts
+ * (с 26.09.2026 почта идёт до Lead Score). geo_confirmed — исторический ключ «write now».
+ */
 export interface PolzaOutreachFunnel {
   vacancies: number;
   domain_found: number;

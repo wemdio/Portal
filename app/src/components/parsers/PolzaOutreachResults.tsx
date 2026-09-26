@@ -2,8 +2,9 @@
 
 import { Fragment, useState } from 'react';
 import type { PolzaOutreachCompanyRow, PolzaOutreachFunnel, ParserJobStatus } from '@/types';
+import { fmtUsd } from '@/lib/outreachLlm/format';
 import type { OutreachLlmBudgetSnapshot } from '@/lib/outreachLlm/types';
-import { POLZA_STAGE_LABELS, PolzaOutreachStages } from '@/components/parsers/PolzaOutreachStages';
+import { POLZA_STAGE_KEYS, POLZA_STAGE_LABELS, PolzaOutreachStages } from '@/components/parsers/PolzaOutreachStages';
 import { PolzaOutreachStageModal } from '@/components/parsers/PolzaOutreachStageModal';
 import { ChevronDown, ChevronRight, Download, ExternalLink, FileText, Filter, Loader2, Mail, Square, Trash2 } from 'lucide-react';
 
@@ -20,6 +21,8 @@ type Props = {
   llmSpend?: OutreachLlmBudgetSnapshot | null;
   /** Почему запуск закончился (progress_detail.stop_reason); budget — кончился лимит на ИИ. */
   stopReason?: string | null;
+  /** У воркера нет SMTP-прокси (progress_detail.smtp_unavailable): почты проверены только по MX. */
+  smtpUnavailable?: boolean;
   /** Строки всего прогона — для разбора этапа. */
   loadAllRows?: () => Promise<PolzaOutreachCompanyRow[]>;
   currentPage: number;
@@ -55,6 +58,7 @@ const EXCLUSION_LABELS: Record<string, string> = {
   size_11_50: 'размер 11–50',
   size_out_of_range: 'размер вне 3–200',
   duplicate_domain: 'дубль домена',
+  previously_exported: 'уже готова в прошлом запуске',
   no_outbound_mandate: 'нет outbound-мандата',
   site_unreachable: 'сайт не открылся',
   llm_failed: 'ИИ не ответил (сбой модели или ключа)',
@@ -62,6 +66,8 @@ const EXCLUSION_LABELS: Record<string, string> = {
   no_trigger: 'нет повода написать',
   low_score: 'Lead Score ниже порога',
   no_corporate_email: 'не нашли корпоративную почту',
+  email_invalid: 'почта на сайте не прошла проверку',
+  suppressed_contact: 'почта в стоп-листе Рассылки',
 };
 
 /**
@@ -71,6 +77,7 @@ const EXCLUSION_LABELS: Record<string, string> = {
  * объясняет, а гадать по подчёркиваниям — не его работа.
  */
 const REVIEW_LABELS: Record<string, string> = {
+  email_unverified: 'почта не проверена: SMTP-проверка не дала ответа',
   no_corporate_email: 'не нашли корпоративную почту',
   generic_company: 'слишком общее описание компании',
   low_geo_confidence: 'гео продаж подтверждено слабо',
@@ -81,13 +88,6 @@ const REVIEW_LABELS: Record<string, string> = {
 
 function reviewLabel(reason: string): string {
   return REVIEW_LABELS[reason] ?? reason;
-}
-
-/** Доллары для строки расхода на ИИ: доли цента дешёвой модели не прячем в «$0.00». */
-function fmtUsd(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return '$0';
-  if (value < 0.01) return '<$0.01';
-  return `$${Number.isInteger(value) ? value : value.toFixed(2)}`;
 }
 
 const CONFIDENCE_STYLES: Record<string, string> = {
@@ -249,6 +249,7 @@ export function PolzaOutreachResults({
   jobError,
   llmSpend,
   stopReason,
+  smtpUnavailable,
   loadAllRows,
   currentPage,
   totalPages,
@@ -291,15 +292,23 @@ export function PolzaOutreachResults({
           ИИ: потрачено {fmtUsd(llmSpend.spent_usd)} из {fmtUsd(llmSpend.limit_usd)}
         </div>
       ) : null}
+      {/* Повторный запуск не пишет компаниям, уже готовым в этом: они отсеются
+          как повторы между запусками, и он доберёт новые. */}
       {jobStatus && stopReason === 'budget' ? (
         <div className="rounded-lg bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
           Остановлен: достигнут лимит на ИИ. Готовые компании сохранены — чтобы добрать остальные, повторите запуск с большим лимитом.
         </div>
       ) : null}
+      {/* Без SMTP-прокси адрес считается рабочим, если у домена есть почтовый сервер: письмо может не дойти. */}
+      {jobStatus && smtpUnavailable ? (
+        <div className="rounded-lg bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
+          SMTP-проверка почт недоступна — почты проверены только по MX
+        </div>
+      ) : null}
 
       {openStage !== null && loadAllRows ? (
         <PolzaOutreachStageModal
-          stageIndex={openStage}
+          stageKey={POLZA_STAGE_KEYS[openStage] ?? 'vacancies'}
           stageLabel={POLZA_STAGE_LABELS[openStage] ?? 'Этап'}
           loadRows={loadAllRows}
           reviewLabel={reviewLabel}

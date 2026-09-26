@@ -52,6 +52,7 @@ const COLUMNS: { header: string; key: string; width: number }[] = [
   { header: 'Цитата про мандат', key: 'outbound_evidence', width: 48 },
   { header: 'Почта', key: 'selected_company_email', width: 28 },
   { header: 'Тип почты', key: 'email_type', width: 18 },
+  { header: 'Проверка почты', key: 'email_verification', width: 22 },
   { header: 'Статус', key: 'status', width: 18 },
   { header: 'Причина исключения', key: 'exclusion_reason', width: 22 },
   { header: 'На ручную проверку', key: 'review_reason', width: 22 },
@@ -117,6 +118,13 @@ const EMAIL_TYPE_RU: Record<string, string> = {
   person_company: 'личный ящик',
 };
 
+// Вердикт SMTP-проверки адреса (с 26.09.2026); у строк раньше — пусто.
+const EMAIL_VERIFICATION_RU: Record<string, string> = {
+  ok: 'проверена',
+  catch_all: 'сервер принимает любые адреса',
+  unverified: 'проверить не удалось',
+};
+
 const REASON_RU: Record<string, string> = {
   domain_not_resolved: 'домен не найден',
   competitor: 'конкурент (лидген)',
@@ -133,8 +141,12 @@ const REASON_RU: Record<string, string> = {
   manual_check: 'Lead Score в зоне ручной проверки',
   limit_reached: 'лимит готовых уже набран',
   duplicate_domain: 'дубль домена',
+  previously_exported: 'уже готова в прошлом запуске',
   no_outbound_mandate: 'нет outbound-мандата',
   no_corporate_email: 'не нашли корпоративную почту',
+  email_invalid: 'почта на сайте не прошла проверку',
+  suppressed_contact: 'почта в стоп-листе Рассылки',
+  email_unverified: 'почта не проверена: SMTP-проверка не дала ответа',
   generic_company: 'слишком общее описание компании',
   low_geo_confidence: 'гео продаж подтверждено слабо',
   letters_guard_failed: 'письма не прошли проверку правил',
@@ -199,6 +211,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       // Да/нет вместо true/false: файл читает продажник, а не разработчик.
       outbound_mandate: row.outbound_mandate === true ? 'да' : row.outbound_mandate === false ? 'нет' : '',
       email_type: typeof row.email_type === 'string' ? EMAIL_TYPE_RU[row.email_type] ?? row.email_type : '',
+      email_verification:
+        typeof row.email_verification === 'string' ? EMAIL_VERIFICATION_RU[row.email_verification] ?? row.email_verification : '',
       status: typeof row.status === 'string' ? STATUS_RU[row.status] ?? row.status : '',
       exclusion_reason: reason(row.exclusion_reason),
       review_reason: reason(row.review_reason),

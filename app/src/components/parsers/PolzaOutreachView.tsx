@@ -67,6 +67,7 @@ const EXPORT_HEADER = [
   'outbound_evidence',
   'email',
   'email_type',
+  'email_verification',
   'status',
   'stage',
   'exclusion_reason',
@@ -106,17 +107,22 @@ function fmtJobDate(value: string): string {
 }
 
 /**
- * Расход на ИИ и причина остановки из progress_detail запуска. Поле — jsonb
- * без схемы (у старых запусков его нет вовсе), поэтому форму проверяем здесь,
- * а не верим типу.
+ * Расход на ИИ, причина остановки и доступность SMTP-проверки из
+ * progress_detail запуска. Поле — jsonb без схемы (у старых запусков его нет
+ * вовсе), поэтому форму проверяем здесь, а не верим типу.
  */
-function runSummary(job: PolzaOutreachParserJob | null): { llm: OutreachLlmBudgetSnapshot | null; stopReason: string | null } {
+function runSummary(job: PolzaOutreachParserJob | null): {
+  llm: OutreachLlmBudgetSnapshot | null;
+  stopReason: string | null;
+  smtpUnavailable: boolean;
+} {
   const detail = job?.progress_detail as Record<string, unknown> | null | undefined;
   const llm = detail?.llm as Partial<OutreachLlmBudgetSnapshot> | null | undefined;
   const valid = typeof llm?.spent_usd === 'number' && typeof llm?.limit_usd === 'number' && typeof llm?.calls === 'number';
   return {
     llm: valid ? (llm as OutreachLlmBudgetSnapshot) : null,
     stopReason: typeof detail?.stop_reason === 'string' ? detail.stop_reason : null,
+    smtpUnavailable: detail?.smtp_unavailable === true,
   };
 }
 
@@ -177,6 +183,7 @@ function exportRow(row: PolzaOutreachCompanyRow) {
     row.outbound_evidence ?? '',
     row.selected_company_email ?? '',
     row.email_type ?? '',
+    row.email_verification ?? '',
     row.status,
     row.stage ?? '',
     row.exclusion_reason ?? '',
@@ -558,8 +565,8 @@ export function PolzaOutreachView() {
         <div className="rounded-xl border border-gray-200 bg-white p-8 text-center shadow-sm">
           <div className="text-base font-semibold text-gray-900">Запусков ещё не было</div>
           <p className="mx-auto mt-1 max-w-xl text-sm text-gray-500">
-            Соберём B2B-компании с поводом написать — найм в sales/GTM или свежий батч YC, — отберём по Lead Score, найдём почту и напишем
-            цепочку из четырёх писем на английском. Без отправки: на выходе таблица и выгрузка.
+            Соберём B2B-компании с поводом написать — найм в sales/GTM или свежий батч YC, — найдём и проверим почту, отберём по Lead Score и
+            напишем цепочку из четырёх писем на английском. Без отправки: на выходе таблица и выгрузка.
           </p>
           <button
             type="button"
@@ -596,6 +603,7 @@ export function PolzaOutreachView() {
           jobError={activeJob?.error_message ?? null}
           llmSpend={activeSummary.llm}
           stopReason={activeSummary.stopReason}
+          smtpUnavailable={activeSummary.smtpUnavailable}
           loadAllRows={activeJobId ? loadAllRows : undefined}
           currentPage={resultsPage}
           totalPages={totalPages}

@@ -18,14 +18,18 @@
  *
  * Готовый профиль живёт 30 дней в общем кэше аутричей: повторный запуск не
  * обходит сайт и не платит ИИ за ту же компанию.
+ *
+ * Ответ без главных полей (hasCoreFields) — сбой модели: LlmCallError, а не
+ * профиль с пустыми полями по умолчанию.
  */
 
 import { createHash } from 'node:crypto';
 import { detectSignals } from '@/lib/enrich/signalDetector';
 import { callOutreachJson, outreachModel } from '@/lib/outreachLlm/client';
+import { LlmCallError } from '@/lib/outreachLlm/context';
+import { asBool, asString, asStringArray, isBoolLike } from '@/lib/outreachLlm/json';
 import { readSiteAnalysisCache, writeSiteAnalysisCache, type SiteAnalysisCacheKey } from '@/lib/outreachLlm/siteAnalysisCache';
 import { acceptQuote } from '@/lib/polzaRuOutreach/evidence';
-import { asBool, asString, asStringArray } from '@/lib/polzaRuOutreach/llm';
 import { crawlSite, parseRuDate } from '@/lib/polzaRuOutreach/sources/siteSignals';
 import { INDUSTRY_GROUPS, type IndustryGroup } from '@/lib/polzaRuOutreach/types';
 import { normalizeDomain } from './resolveDomain';
@@ -107,24 +111,23 @@ export const SITE_PROMPT_VERSION = `en-site:${SITE_PARSER_VERSION}:${createHash(
 
 const BUSINESS_MODELS: readonly string[] = ['saas', 'service', 'platform', 'other'];
 
-function isBoolAnswer(value: unknown): boolean {
-  return typeof value === 'boolean' || value === 'true' || value === 'false';
+/** Модель бизнеса из ответа; регистр не важен: «SaaS» — это saas, а не сбой модели. */
+function businessModelOf(raw: Record<string, unknown>): string {
+  return asString(raw.business_model).toLowerCase();
 }
 
 /**
- * Ответ без главных полей (B2B да/нет, дорогая сделка да/нет, модель бизнеса
- * из списка, что делает компания) — не разбор, а сбой модели или пустой ответ:
- * строка пойдёт дальше как есть, но такой ответ не кэшируем, иначе компания
- * 30 дней отсеивалась бы как «не B2B» по пустому разбору. Повторный разбор
- * дешёвой моделью стоит доли цента.
+ * Главные поля разбора: B2B да/нет, дорогая сделка да/нет, модель бизнеса из
+ * списка — на них стоит блок Company fit в Lead Score. У цитат, контекста и
+ * сегментов есть законное «пусто», а эти три модель обязана решить в любом
+ * ответе. Без них ответ — сбой модели (пустой объект, чужая схема), а не
+ * «не B2B»: buildSiteProfile бросает LlmCallError, строка уходит в «ИИ не
+ * ответил» и в серию предохранителя, а не отсеивается молча по пустому
+ * разбору; в кэш такой ответ не попадает, иначе компания 30 дней
+ * отсеивалась бы по нему.
  */
 function hasCoreFields(raw: Record<string, unknown>): boolean {
-  return (
-    isBoolAnswer(raw.is_b2b) &&
-    isBoolAnswer(raw.high_value) &&
-    BUSINESS_MODELS.includes(asString(raw.business_model)) &&
-    asString(raw.company_context) !== ''
-  );
+  return isBoolLike(raw.is_b2b) && isBoolLike(raw.high_value) && BUSINESS_MODELS.includes(businessModelOf(raw));
 }
 
 /**
@@ -158,8 +161,9 @@ export interface SiteProfileOptions {
   /** Нормализованный домен — ключ кэша профиля; по умолчанию берётся из адреса сайта. */
   domain?: string;
   /**
-   * ИИ ответил (профиль не из кэша): раннер по этому обнуляет серию «ИИ не
-   * ответил» — предохранитель «ИИ молчит» считает только ответы модели.
+   * ИИ ответил целым ответом (профиль не из кэша): раннер по этому обнуляет
+   * серию «ИИ не ответил» — предохранитель «ИИ молчит» считает только ответы
+   * модели, и ответ без главных полей ответом не считается.
    */
   onLlmAnswer?: () => void;
 }
@@ -176,9 +180,9 @@ function detectTechStack(html: string): string[] {
 
 /**
  * Профиль компании по сайту. Сайт не открылся — EMPTY_PROFILE (reachable:
- * false). ИИ не ответил — ошибка клиента аутричей летит наверх как есть:
- * раннер отличает «сайт не открылся» от «ИИ не ответил» и от исчерпанного
- * лимита.
+ * false). ИИ не ответил или ответил без главных полей — LlmCallError летит
+ * наверх как есть: раннер отличает «сайт не открылся» от «ИИ не ответил» и от
+ * исчерпанного лимита.
  */
 export async function buildSiteProfile(
   website: string,
@@ -202,12 +206,18 @@ export async function buildSiteProfile(
     ...pages.map((p) => `=== PAGE ${p.url} ===\n${p.text.slice(0, PAGE_TEXT_CHARS)}`),
   ].join('\n\n');
   const raw = await callOutreachJson({ role: 'analysis', lang: 'en', system: SYSTEM, user, title: 'site', maxTokens: 1400 });
+  if (!hasCoreFields(raw)) {
+    // Ответ оплачен (клиент уже списал его с лимита), но серию «ИИ молчит» не
+    // обнуляет: иначе модель, которая отвечает пустым объектом, предохранитель
+    // не заметил бы.
+    throw new LlmCallError('EN analysis «site»: в ответе нет обязательных полей (is_b2b, high_value, business_model)');
+  }
   options.onLlmAnswer?.();
 
   const allText = pages.map((p) => p.text).join('\n');
   const pageByUrl = new Map(pages.map((p) => [p.url.replace(/\/+$/, ''), p]));
   const b2bQuote = acceptQuote(allText, asString(raw.b2b_quote));
-  const model = asString(raw.business_model);
+  const model = businessModelOf(raw);
   const exclusion = asString(raw.exclusion) as SiteExclusion;
   const group = asString(raw.industry_group) as IndustryGroup;
 
@@ -245,14 +255,10 @@ export async function buildSiteProfile(
     techStack: homeHtml ? detectTechStack(homeHtml) : [],
     hasDescription: pagesDescribe || Boolean(fallbackDescription),
   };
-  // В кэш — только разобранный ИИ сайт с целым ответом. Неоткрывшийся не
-  // запоминаем: завтра он может открыться. Свежесть запуска продукта раннер
-  // сверяет по дате при чтении.
-  if (cacheKey && hasCoreFields(raw)) {
-    await writeSiteAnalysisCache(cacheKey, { ...profile, hasDescription: pagesDescribe });
-  } else if (cacheKey) {
-    console.warn(`[polza-outreach][WARN] site profile for ${cacheKey.domain} lacks is_b2b/high_value/business_model/company_context — not cached`);
-  }
+  // В кэш — только разобранный ИИ сайт; ответ без главных полей сюда не
+  // доходит (бросили выше). Неоткрывшийся не запоминаем: завтра он может
+  // открыться. Свежесть запуска продукта раннер сверяет по дате при чтении.
+  if (cacheKey) await writeSiteAnalysisCache(cacheKey, { ...profile, hasDescription: pagesDescribe });
   return profile;
 }
 

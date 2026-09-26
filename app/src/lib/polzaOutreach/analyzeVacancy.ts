@@ -15,10 +15,12 @@
  *
  * Ошибки клиента летят наверх как есть: раннер отличает «ИИ не ответил»
  * (LlmCallError — отсев строки) от исчерпанного лимита и неверного ключа
- * (про весь запуск).
+ * (про весь запуск). Ответ мимо схемы (hasCoreFields) — тоже LlmCallError.
  */
 
 import { callOutreachJson } from '@/lib/outreachLlm/client';
+import { LlmCallError } from '@/lib/outreachLlm/context';
+import { asBool, asString } from '@/lib/outreachLlm/json';
 import type { PolzaOutreachGeoConfidence, PolzaVacancyAnalysis } from './types';
 
 const MAX_DESCRIPTION_CHARS = 6000;
@@ -86,12 +88,28 @@ function buildUserPrompt(input: {
   ].join('\n');
 }
 
-function asBool(value: unknown): boolean {
-  return value === true || value === 'true';
-}
+const VACANCY_KEYS = [
+  'outbound_mandate',
+  'outbound_evidence',
+  'service_line',
+  'service_line_confident',
+  'target_sales_geo',
+  'target_sales_geo_evidence',
+  'target_sales_geo_confidence',
+  'is_lead_gen_agency',
+];
 
-function asString(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
+/**
+ * Ответ по схеме — объект хотя бы с одним полем из неё. У каждого поля есть
+ * законное «пусто»: цитата "" — цитаты нет, outbound_mandate "" или null —
+ * мандата нет (asBool). Сбой модели — только объект мимо схемы (пустой, чужие
+ * ключи): тогда analyzeVacancy бросает LlmCallError («ИИ не ответил»), а не
+ * выдаёт «мандата нет, не агентство» по умолчанию — иначе строка молча теряла
+ * бы повод «найм», а пустой ответ обнулял бы серию предохранителя «ИИ молчит»
+ * в раннере. Правило то же, что у русского разбора вакансии.
+ */
+function hasCoreFields(raw: Record<string, unknown>): boolean {
+  return VACANCY_KEYS.some((key) => key in raw);
 }
 
 function asConfidence(value: unknown): PolzaOutreachGeoConfidence {
@@ -177,5 +195,9 @@ export async function analyzeVacancy(input: {
     title: 'vacancy',
     maxTokens: 900,
   });
+  if (!hasCoreFields(raw)) {
+    // Ответ оплачен (клиент уже списал его с лимита), но ответом не считается.
+    throw new LlmCallError('EN analysis «vacancy»: ответ мимо схемы — нет ни одного поля разбора');
+  }
   return applyEvidenceRules(analysisFrom(raw), `${input.jobTitle}\n${input.vacancyDescription}`);
 }
