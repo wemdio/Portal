@@ -29,7 +29,7 @@ import { ManualBaseLibrary } from './ManualBaseLibrary';
 import { PreparationProgress, getPreparationPresentation, type PreparationPresentation } from './PreparationProgress';
 import { selectHypothesisLetters } from './letterSelection';
 import { collectCount, isPartialPreview } from './collectionProgress';
-import { ContactLimitField } from './ContactLimitField';
+import { ContactLimitField, parseContactLimitDraft } from './ContactLimitField';
 import {
   VE_BROAD_HYPOTHESES_EMPTY_NOTE,
   VE_BROAD_HYPOTHESES_NOTE,
@@ -198,6 +198,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   const [step, setStep] = useState(1);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [contactLimitDraft, setContactLimitDraft] = useState<string | null>(null);
   const [researchBusy, setResearchBusy] = useState(false);
   const [broadRequesting, setBroadRequesting] = useState(false);
   const [activeHypothesis, setActiveHypothesis] = useState('');
@@ -283,6 +284,10 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
     };
   }, [refresh, working]);
   const locked = !!run && ['queued', 'running', 'waiting'].includes(run.status);
+  const contactLimit = snapshot?.setup.max_emails_per_company ?? null;
+  const contactLimitText = contactLimitDraft ?? (contactLimit === null ? '' : String(contactLimit));
+  const parsedContactLimit = parseContactLimitDraft(contactLimitText);
+  const contactLimitUnsaved = !parsedContactLimit.valid || parsedContactLimit.value !== contactLimit;
   const selectedIds = snapshot?.setup.selected_hypothesis_ids ?? [];
   const resultTemplates = (detail?.templates ?? []).filter((t) => {
     const base = detail?.bases.find((b) => b.id === t.base_id);
@@ -313,6 +318,10 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   };
   const change = async (payload: Record<string, unknown>) => {
     if (!snapshot || busy || locked) return;
+    if (payload.action === 'prepare' && contactLimitUnsaved) {
+      setError('Сначала примените лимит адресов на шаге «Гипотезы».');
+      return;
+    }
     setBusy(true);
     setError('');
     try {
@@ -331,7 +340,10 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
         await refresh();
       }
       // Finished bases are re-partitioned by the worker right after the save.
-      if (payload.action === 'contact_limit') await refresh();
+      if (payload.action === 'contact_limit') {
+        setContactLimitDraft(null);
+        await refresh();
+      }
     } catch {
       setError('Не удалось сохранить решение. Проверьте соединение');
     } finally {
@@ -415,18 +427,21 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   if (!detail) return <StatusBox tone={error ? 'error' : 'info'}>{error || 'Загружаем проект…'}</StatusBox>;
   const hasJobs = detail.jobs.some((j) => ['pending', 'running'].includes(j.status));
   const researchRunning = researchBusy || detail.project.status === 'researching';
-  const allPrepared =
-    selectedIds.length > 0 &&
-    selectedIds.every((id) => snapshot?.preparations.some((p) => p.hypothesis_id === id && p.status === 'ready'));
-  const allApproved =
-    allPrepared &&
-    selectedIds.every((id) => {
-      const p = snapshot?.preparations.find((p) => p.hypothesis_id === id);
-      if (!p?.base_id) return false;
-      const review = snapshot?.reviews[p.base_id],
-        approval = snapshot?.setup.approved_bases[p.base_id];
-      return !!review && approval?.revision === review.revision && approval.template_id === review.template_id;
-    });
+  const launchBlockers = selectedIds.flatMap((id) => {
+    const p = snapshot?.preparations.find((row) => row.hypothesis_id === id);
+    let reason: string;
+    if (!p) reason = 'Подготовка ещё не начата';
+    else if (p.status === 'error') reason = 'Подготовка завершилась с ошибкой';
+    else if (p.status !== 'ready' || !p.base_id) reason = 'Подготовка ещё не завершена';
+    else {
+      const review = snapshot?.reviews[p.base_id], approval = snapshot?.setup.approved_bases[p.base_id];
+      if (review && approval?.revision === review.revision && approval.template_id === review.template_id) return [];
+      reason = !review ? 'Версия базы ещё не готова к одобрению'
+        : approval ? 'После изменений нужно одобрить базу заново' : 'База ещё не одобрена';
+    }
+    return [{ id, title: titles[id] ?? 'Гипотеза', reason }];
+  });
+  const allApproved = selectedIds.length > 0 && launchBlockers.length === 0;
   const picker =
     selectedHypotheses.length > 1 ? (
       <label className="block ve2-label mb-5">
@@ -693,11 +708,18 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                     <option value="pl">Polski</option>
                   </select>
                 </label>
+                <ContactLimitField
+                  value={contactLimit}
+                  draft={contactLimitText}
+                  disabled={busy || locked || !snapshot}
+                  onDraftChange={setContactLimitDraft}
+                  onSave={(next) => void change({ action: 'contact_limit', max_emails_per_company: next })}
+                />
                 <div className="ve2-hypothesis-submit">
                   <span className={HE.muted} aria-live="polite">Выбрано: {selectedIds.length}</span>
                   <button
                     type="button"
-                    disabled={busy || locked || !selectedIds.length}
+                    disabled={busy || locked || !selectedIds.length || contactLimitUnsaved}
                     className={HE.btnPrimary}
                     onClick={() => void change({ action: 'prepare' })}
                   >
@@ -751,12 +773,16 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           {step === 3 ? (
             <section className="space-y-6">
               <h2 className="ve2-h2">Базы и доступный объём</h2>
-              <ContactLimitField
-                key={snapshot?.setup.max_emails_per_company ?? 'none'}
-                value={snapshot?.setup.max_emails_per_company ?? null}
-                disabled={busy || locked || !snapshot}
-                onSave={(next) => void change({ action: 'contact_limit', max_emails_per_company: next })}
-              />
+              <div className="space-y-2">
+                <p className={HE.muted}>
+                  Сохранённый лимит адресов на компанию: {contactLimit ?? 'без ограничения'}.
+                  {' '}Запущенные базы сохраняют свои настройки.
+                </p>
+                {contactLimitUnsaved ? <p className={HE.muted}>Изменение лимита ещё не применено.</p> : null}
+                <button type="button" className={HE.btnQuiet} onClick={() => jump(1)}>
+                  Изменить на шаге «Гипотезы»
+                </button>
+              </div>
               {selectedHypotheses.map((h) => {
                 const p = snapshot?.preparations.find((p) => p.hypothesis_id === h.id),
                   base = detail.bases.find((b) => b.id === p?.base_id);
@@ -829,7 +855,25 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
               <p className={HE.muted}>
                 Контакты разных гипотез могут пересекаться. Перед отправкой система исключит повторы.
               </p>
-              <button type="button" className={HE.btnPrimary} disabled={!allApproved} onClick={() => jump(4)}>
+              {!allApproved ? (
+                <div id="ve2-launch-blockers" className="space-y-2">
+                  <p>Для запуска должны быть готовы и одобрены все выбранные базы.</p>
+                  <ul className="space-y-1">
+                    {launchBlockers.map((item) => (
+                      <li key={item.id} className={HE.muted}>{item.title}: {item.reason}.</li>
+                    ))}
+                  </ul>
+                  <p className={HE.muted}>
+                    Чтобы запустить одну базу, оставьте только её на шаге «Гипотезы», затем одобрите заново.
+                    Остальные собранные базы сохранятся.
+                  </p>
+                  <button type="button" className={HE.btnQuiet} onClick={() => jump(1)}>
+                    Изменить выбор гипотез
+                  </button>
+                </div>
+              ) : null}
+              <button type="button" className={HE.btnPrimary} disabled={!allApproved}
+                aria-describedby={!allApproved ? 've2-launch-blockers' : undefined} onClick={() => jump(4)}>
                 К запуску
               </button>
             </section>
