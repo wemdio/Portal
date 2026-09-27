@@ -32,7 +32,6 @@ export class VeOutreachLaunchError extends Error {
   constructor(message: string, readonly status = 409) { super(message); }
 }
 function fail(message: string): never { throw new VeOutreachLaunchError(message); }
-const sorted = (values: string[]) => [...values].sort();
 function canonicalRequest(input: VeOutreachLaunchRequest): VeOutreachLaunchRequest {
   return { ...input, items: [...input.items].sort((a, b) => a.hypothesis_id.localeCompare(b.hypothesis_id)) };
 }
@@ -42,6 +41,7 @@ function activationKey(runId: string, templateId: string, planVersion: unknown):
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 function uniqueItems(request: VeOutreachLaunchRequest) {
+  if (!request.items.length || request.items.length > 50) fail('Выберите от 1 до 50 баз для запуска.');
   for (const key of ['hypothesis_id', 'base_id', 'template_id'] as const) {
     if (new Set(request.items.map((item) => item[key])).size !== request.items.length) fail('Каждая гипотеза должна иметь одну выбранную базу и одну версию писем.');
   }
@@ -51,8 +51,9 @@ async function readSetup(db: SupabaseClient, projectId: string, request: VeOutre
   const { data, error } = await db.from('ve_outreach_setups').select('*').eq('project_id', projectId).maybeSingle();
   if (error) throw new VeOutreachLaunchError('Настройка запуска недоступна. Проверьте выпуск миграции автоаутрича.', 503);
   if (!data || Number(data.revision) !== request.setup_revision) fail('Выбранные гипотезы или согласования изменились. Обновите обзор запуска.');
-  if (JSON.stringify(sorted(data.selected_hypothesis_ids ?? [])) !== JSON.stringify(sorted(request.items.map((item) => item.hypothesis_id)))) {
-    fail('Состав запуска не совпадает с сохранённым выбором гипотез.');
+  const preparedIds = new Set<string>(data.selected_hypothesis_ids ?? []);
+  if (request.items.some((item) => !preparedIds.has(item.hypothesis_id))) {
+    fail('Одна из баз запуска больше не входит в выбранные гипотезы. Обновите обзор запуска.');
   }
   for (const item of request.items) {
     const approval = data.approved_bases?.[item.base_id];

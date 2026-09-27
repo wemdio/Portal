@@ -30,6 +30,7 @@ import { PreparationProgress, getPreparationPresentation, type PreparationPresen
 import { selectHypothesisLetters } from './letterSelection';
 import { collectCount, isPartialPreview } from './collectionProgress';
 import { ContactLimitField, parseContactLimitDraft } from './ContactLimitField';
+import { getVeLaunchSelectionState } from './launchSelection';
 import {
   VE_BROAD_HYPOTHESES_EMPTY_NOTE,
   VE_BROAD_HYPOTHESES_NOTE,
@@ -199,6 +200,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [contactLimitDraft, setContactLimitDraft] = useState<string | null>(null);
+  const [launchHypothesisIds, setLaunchHypothesisIds] = useState<string[]>([]);
   const [researchBusy, setResearchBusy] = useState(false);
   const [broadRequesting, setBroadRequesting] = useState(false);
   const [activeHypothesis, setActiveHypothesis] = useState('');
@@ -334,6 +336,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
         return;
       }
       setSnapshot(result.data);
+      if (payload.action === 'select') setLaunchHypothesisIds([]);
       if (payload.action === 'select' && payload.next_run === true) setStep(1);
       if (payload.action === 'prepare') {
         setStep((current) => current === 3 ? 3 : 2);
@@ -424,24 +427,27 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
       setError('Не удалось остановить подготовку. Проверьте соединение');
     }
   };
+  const configureLaunch = (ids: string[]) => {
+    if (busy || locked) return;
+    if (contactLimitUnsaved) {
+      setError('Сначала примените лимит адресов на шаге «Гипотезы».');
+      return;
+    }
+    if (!ids.length || ids.some((id) => !getVeLaunchSelectionState(snapshot, detail?.templates ?? [], id).ready)) {
+      setError('Выберите готовые и одобренные базы для запуска.');
+      return;
+    }
+    if (!guardLeave()) return;
+    setLaunchHypothesisIds(ids);
+    setStep(4);
+    topRef.current?.scrollIntoView({ block: 'start' });
+  };
   if (!detail) return <StatusBox tone={error ? 'error' : 'info'}>{error || 'Загружаем проект…'}</StatusBox>;
   const hasJobs = detail.jobs.some((j) => ['pending', 'running'].includes(j.status));
   const researchRunning = researchBusy || detail.project.status === 'researching';
-  const launchBlockers = selectedIds.flatMap((id) => {
-    const p = snapshot?.preparations.find((row) => row.hypothesis_id === id);
-    let reason: string;
-    if (!p) reason = 'Подготовка ещё не начата';
-    else if (p.status === 'error') reason = 'Подготовка завершилась с ошибкой';
-    else if (p.status !== 'ready' || !p.base_id) reason = 'Подготовка ещё не завершена';
-    else {
-      const review = snapshot?.reviews[p.base_id], approval = snapshot?.setup.approved_bases[p.base_id];
-      if (review && approval?.revision === review.revision && approval.template_id === review.template_id) return [];
-      reason = !review ? 'Версия базы ещё не готова к одобрению'
-        : approval ? 'После изменений нужно одобрить базу заново' : 'База ещё не одобрена';
-    }
-    return [{ id, title: titles[id] ?? 'Гипотеза', reason }];
-  });
-  const allApproved = selectedIds.length > 0 && launchBlockers.length === 0;
+  const launchStates = Object.fromEntries(selectedIds.map((id) => [id, getVeLaunchSelectionState(snapshot, detail.templates, id)]));
+  const readyForLaunchCount = Object.values(launchStates).filter((state) => state.ready).length;
+  const chosenLaunchReady = launchHypothesisIds.length > 0 && launchHypothesisIds.every((id) => launchStates[id]?.ready);
   const picker =
     selectedHypotheses.length > 1 ? (
       <label className="block ve2-label mb-5">
@@ -783,6 +789,47 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                   Изменить на шаге «Гипотезы»
                 </button>
               </div>
+              <div className="space-y-3">
+                <h3 className="ve2-h3">Готовы к запуску: {readyForLaunchCount} из {selectedIds.length}</h3>
+                <p className={HE.muted}>
+                  Запустите одну базу или отметьте несколько. На следующем шаге выберите клиента и настройки отправки.
+                  Подготовка и одобрения остальных гипотез сохранятся.
+                </p>
+                <div className="divide-y divide-[var(--ve2-line)]">
+                  {selectedHypotheses.map((h) => {
+                    const state = launchStates[h.id];
+                    const selected = launchHypothesisIds.includes(h.id);
+                    const p = snapshot?.preparations.find((row) => row.hypothesis_id === h.id);
+                    const base = detail.bases.find((row) => row.id === p?.base_id);
+                    return (
+                      <div key={h.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
+                        <label className="flex min-w-0 flex-1 items-start gap-3">
+                          <input type="checkbox" className="ve2-cbx mt-1"
+                            aria-label={`Включить «${h.title}» в запуск`}
+                            checked={selected} disabled={busy || locked || (!state.ready && !selected)}
+                            onChange={(event) => setLaunchHypothesisIds((current) => event.target.checked
+                              ? [...current, h.id] : current.filter((id) => id !== h.id))} />
+                          <span className="min-w-0">
+                            <span className="block font-medium">{h.title}</span>
+                            <span className={`block ${HE.muted}`}>{state.label}
+                              {base ? ` · контактов: ${base.row_count.toLocaleString('ru-RU')}` : ''}</span>
+                          </span>
+                        </label>
+                        <button type="button" className={HE.btnGhost}
+                          aria-label={`Запустить отдельно: ${h.title}`}
+                          disabled={!state.ready || busy || locked || contactLimitUnsaved}
+                          onClick={() => configureLaunch([h.id])}>Запустить отдельно</button>
+                      </div>
+                    );
+                  })}
+                </div>
+                {locked ? <p className={HE.muted}>Предыдущий запуск ещё обрабатывается. Его статус доступен в «Результатах».</p> : null}
+                <button type="button" className={HE.btnPrimary}
+                  disabled={!chosenLaunchReady || busy || locked || contactLimitUnsaved}
+                  onClick={() => configureLaunch(launchHypothesisIds)}>
+                  К запуску выбранных ({launchHypothesisIds.length})
+                </button>
+              </div>
               {selectedHypotheses.map((h) => {
                 const p = snapshot?.preparations.find((p) => p.hypothesis_id === h.id),
                   base = detail.bases.find((b) => b.id === p?.base_id);
@@ -795,7 +842,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                   <article key={h.id} className="border-t border-[var(--ve2-line)] pt-5 space-y-4">
                     <h3 className="ve2-h3">{h.title}</h3>
                     {p?.status !== 'ready' || (base && isPartialPreview(base)) ? <PreparationProgress preparation={p} base={base} jobs={detail.jobs}
-                      onContinue={() => void change({ action: 'prepare', hypothesis_id: h.id })} continueDisabled={busy || locked} /> : null}
+                      onContinue={launchStates[h.id]?.launched ? undefined : () => void change({ action: 'prepare', hypothesis_id: h.id })}
+                      continueDisabled={busy || locked} /> : null}
                     {base ? (
                       <>
                         <AudienceSummary base={base} presetId={presetId} preparationState={preparationState} />
@@ -823,6 +871,12 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                             </div>
                           </details>
                         ) : null}
+                        {launchStates[h.id]?.launched ? (
+                          <div className="space-y-2">
+                            <p className={HE.muted}>База уже передана в запуск.</p>
+                            <button type="button" className={HE.btnGhost} onClick={() => jump(5)}>Посмотреть результаты</button>
+                          </div>
+                        ) : <>
                         <label className={`flex items-start gap-3${!review ? ' cursor-not-allowed ' + HE.muted : ''}`}>
                           <input
                             type="checkbox"
@@ -847,6 +901,10 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                             {preparationState.title}. Для одобрения должны быть готовы база и итоговые письма.
                           </p>
                         ) : null}
+                        <button type="button" className={HE.btnGhost}
+                          disabled={!launchStates[h.id]?.ready || busy || locked || contactLimitUnsaved}
+                          onClick={() => configureLaunch([h.id])}>К запуску этой базы</button>
+                        </>}
                       </>
                     ) : null}
                   </article>
@@ -855,39 +913,31 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
               <p className={HE.muted}>
                 Контакты разных гипотез могут пересекаться. Перед отправкой система исключит повторы.
               </p>
-              {!allApproved ? (
-                <div id="ve2-launch-blockers" className="space-y-2">
-                  <p>Для запуска должны быть готовы и одобрены все выбранные базы.</p>
-                  <ul className="space-y-1">
-                    {launchBlockers.map((item) => (
-                      <li key={item.id} className={HE.muted}>{item.title}: {item.reason}.</li>
-                    ))}
-                  </ul>
-                  <p className={HE.muted}>
-                    Чтобы запустить одну базу, оставьте только её на шаге «Гипотезы», затем одобрите заново.
-                    Остальные собранные базы сохранятся.
-                  </p>
-                  <button type="button" className={HE.btnQuiet} onClick={() => jump(1)}>
-                    Изменить выбор гипотез
-                  </button>
-                </div>
-              ) : null}
-              <button type="button" className={HE.btnPrimary} disabled={!allApproved}
-                aria-describedby={!allApproved ? 've2-launch-blockers' : undefined} onClick={() => jump(4)}>
-                К запуску
+              <button type="button" className={HE.btnPrimary}
+                disabled={!chosenLaunchReady || busy || locked || contactLimitUnsaved}
+                onClick={() => configureLaunch(launchHypothesisIds)}>
+                К запуску выбранных ({launchHypothesisIds.length})
               </button>
             </section>
           ) : null}
-          {step === 4 && snapshot ? (
+          {step === 4 && snapshot ? contactLimitUnsaved ? (
+            <section className="space-y-3">
+              <StatusBox tone="info">Перед запуском примените изменённый лимит адресов на шаге «Гипотезы».</StatusBox>
+              <button type="button" className={HE.btnGhost} onClick={() => jump(1)}>К настройке лимита</button>
+            </section>
+          ) : (
             <OutreachLaunchPanel
-              key={selectedIds[0] ?? 'empty'}
+              key={launchHypothesisIds.join(',') || 'empty'}
               projectId={projectId}
               snapshot={snapshot}
               templates={detail.templates}
               titles={titles}
+              hypothesisIds={launchHypothesisIds}
+              onBack={() => jump(3)}
               onPresetChange={setPresetId}
               onStarted={(value) => {
                 setRun(value);
+                setLaunchHypothesisIds([]);
                 setStep(5);
                 void refresh();
               }}
@@ -902,19 +952,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                   type="button"
                   className={HE.btnGhost}
                   disabled={busy}
-                  onClick={() =>
-                    void change({
-                      action: 'select',
-                      language: snapshot?.setup.language ?? 'ru',
-                      hypothesis_ids: selectedIds.filter(
-                        (id) =>
-                          !resultTemplates.some((t) =>
-                            detail.bases.some((b) => b.id === t.base_id && b.hypothesis_id === id),
-                          ),
-                      ),
-                      next_run: true,
-                    })
-                  }
+                  onClick={() => jump(3)}
                 >
                   Подготовить следующий запуск
                 </button>

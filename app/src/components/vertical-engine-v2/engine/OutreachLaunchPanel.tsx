@@ -7,6 +7,7 @@ import { VE_API, veEnginePost, type VeDeliveryPlanPreviewDto } from './api';
 import { HE } from './design';
 import { StatusBox } from './ui';
 import { CreateClientPresetInline, DeliveryPlanBlock, useTemplateLaunch } from './steps/Step5Template';
+import { getVeLaunchSelectionState } from './launchSelection';
 
 type PreflightItem = VeOutreachLaunchRequest['items'][number] & {
   status: 'ready' | 'working' | 'blocked';
@@ -24,6 +25,8 @@ export function OutreachLaunchPanel({
   snapshot,
   templates,
   titles,
+  hypothesisIds,
+  onBack,
   onStarted,
   onPresetChange,
 }: {
@@ -31,11 +34,13 @@ export function OutreachLaunchPanel({
   snapshot: VeOutreachSetupResponse;
   templates: VeTemplate[];
   titles: Record<string, string>;
+  hypothesisIds: string[];
+  onBack: () => void;
   onStarted: (run: VeOutreachRun) => void;
   onPresetChange: (presetId: string) => void;
 }) {
   const firstPreparation = snapshot.preparations.find(
-    (p) => p.hypothesis_id === snapshot.setup.selected_hypothesis_ids[0],
+    (p) => p.hypothesis_id === hypothesisIds[0],
   );
   const first = templates.find((t) => t.id === firstPreparation?.template_id) ?? null;
   const [preflightState, setPreflightState] = useState<{ key: string; result: Preflight } | null>(null);
@@ -65,10 +70,11 @@ export function OutreachLaunchPanel({
     // null — проект Portal без периодов; undefined — проект сейчас выбрать нельзя.
     if (!launch.presetId || !launch.portalProjectId || launch.expectedPortalPeriodId === undefined || !launch.targetContacts)
       return null;
-    const ids = snapshot.setup.selected_hypothesis_ids;
+    const ids = hypothesisIds;
     if (!ids.length) return null;
     const items: VeOutreachLaunchRequest['items'] = [];
     for (const id of ids) {
+      if (!getVeLaunchSelectionState(snapshot, templates, id).ready) return null;
       const p = snapshot.preparations.find((row) => row.hypothesis_id === id);
       if (!p?.base_id || !p.template_id || p.status !== 'ready') return null;
       const review = snapshot.reviews[p.base_id],
@@ -89,7 +95,7 @@ export function OutreachLaunchPanel({
       target_contacts: launch.targetContacts,
       items,
     };
-  }, [snapshot, launch.presetId, launch.portalProjectId, launch.expectedPortalPeriodId, launch.targetContacts]);
+  }, [snapshot, hypothesisIds, templates, launch.presetId, launch.portalProjectId, launch.expectedPortalPeriodId, launch.targetContacts]);
   const requestKey = request ? JSON.stringify(request) : '';
   const preflight = preflightState?.key === requestKey ? preflightState.result : null;
   const confirmationKey = preflight?.ready
@@ -173,9 +179,26 @@ export function OutreachLaunchPanel({
     }
   };
   const preset = launch.presets?.find((p) => p.id === launch.presetId);
-  if (!first) return <StatusBox tone="info">Дождитесь подготовки писем и одобрите базы на предыдущем шаге.</StatusBox>;
+  const selectionBlocked = !hypothesisIds.length || hypothesisIds.some((id) => !getVeLaunchSelectionState(snapshot, templates, id).ready);
+  if (!first || selectionBlocked) return (
+    <section className="space-y-3">
+      <StatusBox tone="info">Выберите готовые и одобренные базы на шаге «Базы и объём».</StatusBox>
+      {hypothesisIds.map((id) => <p key={id} className={HE.muted}>
+        {titles[id] ?? 'Гипотеза'}: {getVeLaunchSelectionState(snapshot, templates, id).label}.
+      </p>)}
+      <button type="button" className={HE.btnGhost} onClick={onBack}>К выбору баз</button>
+    </section>
+  );
   return (
     <section className="space-y-5">
+      <div className="space-y-2">
+        <h2 className="ve2-h2">Базы этого запуска: {hypothesisIds.length}</h2>
+        <ul className="space-y-1">
+          {hypothesisIds.map((id) => <li key={id}>{titles[id] ?? 'Гипотеза'}</li>)}
+        </ul>
+        <p className={HE.muted}>Остальные базы проекта в этот запуск не входят.</p>
+        <button type="button" className={HE.btnQuiet} disabled={busy} onClick={onBack}>Изменить состав запуска</button>
+      </div>
       <h2 className="ve2-h2">Клиент и отправители</h2>
       {launch.loadError ? <StatusBox tone="error">{launch.loadError}</StatusBox> : null}
       <label className="block ve2-label">
@@ -209,7 +232,7 @@ export function OutreachLaunchPanel({
       <div className="border-t border-[var(--ve2-line)] pt-5 space-y-3">
         <h2 className="ve2-h2">Обзор запуска</h2>
         {!request ? (
-          <p className={HE.muted}>Одобрите все выбранные базы, выберите клиента, проект и цель за период.</p>
+          <p className={HE.muted}>Выберите клиента, проект и цель контактов за период.</p>
         ) : !preflight && !error ? (
           <p role="status">Проверяем аудиторию и настройки отправки…</p>
         ) : null}
