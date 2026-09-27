@@ -4,7 +4,7 @@
  * the button and answering its press both go through this bot's token.
  */
 
-import { signHandoffEdit, verifyHandoffCallback } from './handoffCallback';
+import { signHandoffEdit, signHandoffRejection, verifyHandoffCallback } from './handoffCallback';
 import { sendOrderedHandoff } from './leadTelegramOrder';
 const TG_TIMEOUT_MS = 15_000;
 
@@ -75,6 +75,7 @@ export async function postHandoffMessage(opts: {
     if (verified.ok) body.reply_markup = { inline_keyboard: [
       [{ text: '➡️ Передать клиенту', callback_data: opts.callbackData }],
       [{ text: '✏️ Изменить ответ', callback_data: signHandoffEdit('e', verified.qualificationId, opts.token) }],
+      [{ text: 'Не лид', callback_data: signHandoffRejection(verified.qualificationId, opts.token) }],
     ] };
   }
   if (opts.threadId) body.message_thread_id = opts.threadId;

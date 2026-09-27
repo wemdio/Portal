@@ -74,6 +74,8 @@ function renderPanel(expectedPortalPeriodId: string | null | undefined) {
       snapshot={snapshot}
       templates={[template]}
       titles={{ 'hypothesis-1': 'Кадровые агентства' }}
+      hypothesisIds={['hypothesis-1']}
+      onBack={jest.fn()}
       onStarted={onStarted}
       onPresetChange={jest.fn()}
     />,
@@ -140,7 +142,7 @@ describe('VE2 auto-outreach launch panel', () => {
 
   it('builds no request while the project cannot be chosen', async () => {
     renderPanel(undefined);
-    expect(await screen.findByText('Одобрите все выбранные базы, выберите клиента, проект и цель за период.')).toBeInTheDocument();
+    expect(await screen.findByText('Выберите клиента, проект и цель контактов за период.')).toBeInTheDocument();
     expect(mockVeEnginePost).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'Запустить аутрич' })).toBeDisabled();
   });

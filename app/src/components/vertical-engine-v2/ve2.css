@@ -521,9 +521,8 @@ html[data-portal-theme="dark"] .ve2 {
 }
 .ve2-hypothesis-actions {
   display: flex;
-  flex-wrap: wrap;
-  align-items: end;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: stretch;
   gap: 20px;
   padding: 20px 24px;
   border: 1px solid var(--ve2-line);
@@ -540,6 +539,10 @@ html[data-portal-theme="dark"] .ve2 {
   flex-wrap: wrap;
   align-items: center;
   gap: 12px;
+  justify-content: space-between;
+}
+.ve2-contact-limit {
+  max-width: 70ch;
 }
 @media (max-width: 640px) {
   .ve2-vertical-group {

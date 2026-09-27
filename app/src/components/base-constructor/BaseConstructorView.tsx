@@ -372,10 +372,11 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   // Email-pipeline target options. Дефолты выставлены так, чтобы при наличии
   // в файле существующей email-колонки поведение было «безопасным»:
   //   - find_emails не перетирает исходные email, пишет в отдельную колонку;
-  //   - validate валидирует исходные (т.к. они «свои», легко проверить).
+  //   - validate проверяет обе колонки: исходные и найденные. 'original' /
+  //     'found' проверяют один источник, другой считается доверенным.
   // Юзер может переключить через UI в секции «Настройки».
   const [findEmailsTarget, setFindEmailsTarget] = useState<'same' | 'separate'>('separate');
-  const [validateTarget, setValidateTarget] = useState<'original' | 'found' | 'both'>('original');
+  const [validateTarget, setValidateTarget] = useState<'original' | 'found' | 'both'>('both');
   // «Почт на компанию» (шаг cap_emails_per_company). Строка — чтобы поле
   // можно было очистить при вводе; на сабмите нормализуется в 1..20.
   const [emailsPerCompany, setEmailsPerCompany] = useState(String(EMAILS_PER_COMPANY_DEFAULT));
@@ -852,8 +853,12 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
       if (selectedSteps.includes('find_emails')) {
         stepConfig.find_emails_target = findEmailsTarget;
       }
-      if (selectedSteps.includes('validate_emails')) {
+      // validate_target — только когда выбор был на экране: явный 'original' /
+      // 'found' включает в worker'е учёт происхождения адресов. Без выбора
+      // worker проверяет всю email-колонку, как раньше.
+      if (selectedSteps.includes('validate_emails') && showValidateTargetOption) {
         stepConfig.validate_target = validateTarget;
+        stepConfig.validate_target_explicit = true;
       }
       Object.assign(stepConfig, buildEmailsPerCompanyStepConfig(selectedSteps, emailsPerCompany));
 
@@ -1016,8 +1021,8 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
     }
   }, [showFindEmailsTargetOption, findEmailsTarget]);
   useEffect(() => {
-    if (!showValidateTargetOption && validateTarget !== 'original') {
-      setValidateTarget('original');
+    if (!showValidateTargetOption && validateTarget !== 'both') {
+      setValidateTarget('both');
     }
   }, [showValidateTargetOption, validateTarget]);
 
