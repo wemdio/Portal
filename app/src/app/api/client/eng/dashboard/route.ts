@@ -81,6 +81,33 @@ function withSafeCampaignName(template: Record<string, unknown>): Record<string,
   };
 }
 
+/**
+ * Компаний в базе — ЕДИНСТВЕННОЕ честное число компаний, доступное дашборду:
+ * `collect_info.stats.companies_total` (уникальные ключи «компания|домен»,
+ * пишет стадия при финализации базы — stages/baseCollect.ts, capImportedRows).
+ *
+ * `row_count` компаниями НЕ является: ENG-сборка разносит один адрес на строку
+ * (шаг `split_emails` у market='us'), поэтому у компании с пятью адресами строк
+ * пять, и строк до капа адресов на компанию (по умолчанию 5) раз больше, чем
+ * компаний. Ровно это число дашборд и печатал как «N companies».
+ *
+ * Читаем из СЫРОЙ строки выборки, а не из спроецированной: клиентская проекция
+ * collect_info этот ключ не пропускает (COLLECT_STATS_FIELDS в
+ * clientEngProjection — файл чужой полосы), а наружу уезжает один скаляр.
+ *
+ * Ключа нет у сборок до 26.09.2026 → компаний мы не знаем, и тогда здесь 0:
+ * карточка прячет подпись сама (`s.companies > 0`, EngDashboard.tsx), а делить
+ * `row_count` на кап — выдуманное число, оно хуже отсутствия числа. Правдивую
+ * цифру строк такая вертикаль отдаёт в `stats.rows`.
+ */
+function companiesTotalOf(base: Record<string, unknown>): number {
+  const info = base.collect_info;
+  if (!info || typeof info !== 'object' || Array.isArray(info)) return 0;
+  const stats = (info as Record<string, unknown>).stats;
+  if (!stats || typeof stats !== 'object' || Array.isArray(stats)) return 0;
+  return num((stats as Record<string, unknown>).companies_total);
+}
+
 export async function GET(req: NextRequest) {
   const result = await requireClientAuth(req);
   if ('error' in result) return result.error;
@@ -110,7 +137,7 @@ export async function GET(req: NextRequest) {
   const emptyAggregate = {
     projects: projectRows.map((p) => ({ id: p.id, name: p.name, status: p.status })),
     verticals: [] as unknown[],
-    today: { appended: 0, valid: 0, collected: 0 },
+    today: { appended: 0, valid: 0, collected: 0, collected_companies: 0 },
     autoRefill: { enabled: false, next_run_at: nextDailyRunIso(now), daily_cap: 0 },
     events: [] as unknown[],
     activeJobs: [] as unknown[],
@@ -183,6 +210,14 @@ export async function GET(req: NextRequest) {
     }
     return row;
   });
+  // Счётчик компаний строится по СЫРЫМ строкам баз (см. companiesTotalOf):
+  // спроецированный `collect_info` ключа `companies_total` уже не несёт.
+  const companiesByBaseId = new Map(
+    (basesRes.data ?? []).map((b) => [
+      str((b as Record<string, unknown>).id),
+      companiesTotalOf(b as Record<string, unknown>),
+    ]),
+  );
   const activeJobRows = activeJobsRes.data ?? [];
   const finishedJobRows = finishedJobsRes.data ?? [];
   const configRows = configsRes.data ?? [];
@@ -221,18 +256,67 @@ export async function GET(req: NextRequest) {
   // today-суммы: прогоны, созданные в текущих UTC-сутках (крон ставит их в
   // 03:20, долив завершается тем же днём; stats {} у ещё идущих — нули).
   const todayRuns = runRows.filter((r) => ts(r.created_at) >= todayStartTs);
-  const today = { appended: 0, valid: 0, collected: 0 };
+  /**
+   * Счётчики дня — ТРИ РАЗНЫЕ ЕДИНИЦЫ, и каждая названа своей:
+   *  - `collected` — СТРОКИ сборки: `stats.collected` долива это
+   *    `finalRows.length` (stages/baseCollectRefill.ts, runStats). У market='us'
+   *    конструктор разносит один адрес на строку (шаг `split_emails`), поэтому
+   *    у компании с пятью адресами строк пять — компаниями это число не
+   *    является, и карточка «Collected today» печатает его как строки.
+   *  - `collected_companies` — КОМПАНИИ, и только записанным числом:
+   *    `collect_info.stats.companies_total` баз сегодняшних доливов
+   *    (companiesTotalOf). Воронка самого прогона компаний не знает вовсе:
+   *    `stats.company_target`/`company_limit` — ПЛАН сборки, а не факт, и
+   *    печатать их как собранные компании нельзя.
+   *  - `valid` / `appended` — АДРЕСА: строк с допущенным вердиктом валидации и
+   *    лидов, принятых Instantly (подписи карточек — про почты и лиды).
+   */
+  const today = { appended: 0, valid: 0, collected: 0, collected_companies: 0 };
   const appendedTodayByVertical = new Map<string, number>();
+  // Компании дня собираем отдельным накопителем, чтобы ни одна единица не
+  // попала в чужую сумму. `companiesKnown` — правило «частичную сумму не
+  // печатаем», см. ниже.
+  let collectedCompanies = 0;
+  let companiesKnown = true;
+  const companiesCountedBases = new Set<string>();
   for (const r of todayRuns) {
     const stats =
       r.stats && typeof r.stats === 'object' ? (r.stats as Record<string, unknown>) : {};
     const appended = num(stats.appended);
+    const collected = num(stats.collected);
     today.appended += appended;
     today.valid += num(stats.valid);
-    today.collected += num(stats.collected);
+    today.collected += collected;
     const vid = str(r.vertical_id);
     if (vid) appendedTodayByVertical.set(vid, (appendedTodayByVertical.get(vid) ?? 0) + appended);
+    // Компании — по БАЗЕ прогона (один прогон = одна база: крон пишет строку
+    // 'collecting' с base_id, финал долива обновляет её же по base_id —
+    // autoPipeline.insertRun / baseCollectRefill.writeRefillRun).
+    //
+    // Прогон без собранных строк — это отказ постановки (base_id NULL, stats
+    // нет) или пустой harvest: компаний он не добавляет и незнанием не
+    // считается. Повторный прогон по той же базе компании не удваивает:
+    // companies_total — свойство базы, а не прогона.
+    if (collected === 0) continue;
+    const bid = str(r.base_id);
+    if (!bid || companiesCountedBases.has(bid)) {
+      if (!bid) companiesKnown = false;
+      continue;
+    }
+    companiesCountedBases.add(bid);
+    const companies = companiesByBaseId.get(bid) ?? 0;
+    if (companies === 0) {
+      companiesKnown = false;
+      continue;
+    }
+    collectedCompanies += companies;
   }
+  // Частичную сумму компаний НЕ печатаем: у базы старше 26.09.2026 ключа
+  // companies_total нет, и сумма по остальным прогонам читалась бы как «сегодня
+  // собрали меньше компаний», то есть была бы выдуманным числом. 0 — та же
+  // договорённость, что у `stats.companies` вертикали: «не знаем», и тогда
+  // единственное правдивое число дня — строки в `collected`.
+  today.collected_companies = companiesKnown ? collectedCompanies : 0;
 
   const verticals = verticalRows
     .slice()
@@ -278,7 +362,15 @@ export async function GET(req: NextRequest) {
         stageDetail: derived.stageDetail,
         dots: derived.dots,
         stats: {
-          companies: num(derived.mainBase?.row_count),
+          // КОМПАНИИ и СТРОКИ — разные числа, и раньше в обоих полях лежало
+          // одно: `row_count`. Теперь `companies` — только счётчик стадии
+          // (companiesTotalOf; 0 = не знаем, карточка подпись прячет), а
+          // `rows` — то самое число строк, которое печатает шаг 4 мастера
+          // («N rows») и подпись этапа 'analyzed' (engDashboard.ts).
+          companies: companiesByBaseId.get(str(derived.mainBase?.id)) ?? 0,
+          rows: num(derived.mainBase?.row_count),
+          // Адреса, не компании: emails_found — найдено конструктором,
+          // valid_count — из них с вердиктом 'ok' (collect_info.construct).
           emails_found: num(construct?.emails_found),
           valid_count: num(construct?.valid_count),
           appended_today: appendedTodayByVertical.get(vid) ?? 0,

@@ -11,14 +11,29 @@
  *     последний по дате запуска шаблон вертикали с launch_info; маппинг
  *     колонок → переменные — operator_mapping того же шаблона (как при
  *     первичном запуске, mapBaseRowsToLeads из launchHandoff);
- *   - лиды: только строки с email И вердиктом валидации 'ok' (колонка
- *     «Email Статус» сетки конструктора; catch_all/invalid/disposable
- *     исключаем — TODO: catch_all может дать часть рабочих адресов, пока
- *     сознательно не шлём). Если валидации не было (конструктор пропущен
- *     или не дошёл до validate_emails) — статус неизвестен, берём все
- *     строки с email: ровно так ведёт себя первичный запуск;
+ *   - лиды: только строки с email И ДОПУЩЕННЫМ вердиктом валидации. Список
+ *     допущенных вердиктов и их ранжирование здесь НЕ дублируются — вердикт
+ *     считает heLaunchEmailVerdict (launchHandoff.ts), тот же, что у ручного
+ *     запуска: два контура обязаны допускать ровно одно и то же, иначе
+ *     ночной долив разойдётся с проверенным руками запуском;
+ *   - вердикт ОБЯЗАТЕЛЕН (fail-closed). Строка без вердикта («Email Статус»
+ *     пуст или колонки нет вовсе: конструктор упал после split_emails, не
+ *     дойдя до validate_emails, и его частичная сетка импортирована) в
+ *     кампанию НЕ идёт. Раньше такая строка проходила как проверенная, и
+ *     непроверенные адреса уезжали в живую рассылку без человека рядом —
+ *     баунсы бьют по доменам ящиков клиента, обратной связи по ним у движка
+ *     нет. Сколько строк так снято — stats.unverified, отдельно от
+ *     отклонённых;
  *   - кап daily_leads_cap конфига — на ПРОЕКТ в сутки (UTC): уже долитое
  *     сегодня другими refill'ами вычитается;
+ *   - кап считает СТРОКИ (после split_emails строка = один адрес = один лид), а
+ *     сборка считает КОМПАНИИ, и одна компания даёт до max_emails_per_company
+ *     строк. Разные единицы у бюджета и у сборки — это оплаченный краул сайта и
+ *     SMTP-проба на каждый адрес, который кап потом выбросит, причём компания
+ *     остаётся выжженной (база уходит в 'analyzed' и её компании исключены из
+ *     будущих сборок проекта). Поэтому размер сборки обязан считаться ИЗ капа:
+ *     heRefillCompanyTarget / resolveHeRefillCollectCompanies ниже, разошедшиеся
+ *     единицы видны в stats.company_target против stats.company_limit;
  *   - blocklist владельца пресета и чанкование — внутри
  *     appendLeadsToClientCampaign (тот же путь, что у RU auto-pipeline), но с
  *     entitlementMode='managed_contract': объём режет серверный daily_leads_cap,
@@ -33,6 +48,12 @@
  *     один и тот же срез каждую ночь;
  *   - пустой harvest — ШТАТНЫЙ исход добора («новых компаний нет»): база
  *     НЕ failed, прогон 'no_new', джоба завершается успешно;
+ *   - строки собрались, но НИ У ОДНОЙ нет вердикта валидации — это не пустой
+ *     рынок, а недоработавшая валидация: прогон 'failed' с причиной, а не
+ *     'no_new'. Иначе оплаченный срез выжигался бы под отчётом «новых
+ *     компаний нет», и ночь за ночью было бы не видно, что долив уже неделю
+ *     не отправляет ничего. Компании при этом возвращаются в пул по общему
+ *     правилу отказа (ниже) — завтрашняя сборка проверит их заново;
  *   - ошибка долива (Instantly/пресет/лимиты воркспейса) — НЕ валит джобу:
  *     собранная база сохраняется, прогон 'failed' с текстом ошибки, а
  *     завтрашний тик крона поставит новую refill-сборку. Повторный прогон
@@ -42,7 +63,11 @@
 import { AppendLeadsPartialError, appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
 import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
-import { mapBaseRowsToLeads, parseLaunchInfo } from '../launchHandoff';
+import {
+  HE_MAX_EMAILS_PER_COMPANY_DEFAULT,
+  normalizeHeMaxEmailsPerCompany,
+} from '../baseCollectEnqueue';
+import { heLaunchEmailVerdict, mapBaseRowsToLeads, parseLaunchInfo } from '../launchHandoff';
 import type { HeJob, HeOperatorMapping } from '../types';
 import { stageLog, type HeStageContext, type HeStageResult, type HeUsage } from './shared';
 import {
@@ -53,6 +78,73 @@ import {
 
 /** Дефолт дневного капа лидов на проект — зеркало DEFAULT миграции 20260804_0005. */
 export const HE_AUTO_DEFAULT_DAILY_LEADS_CAP = 50;
+
+/**
+ * Сколько ДОПУЩЕННЫХ адресов ждём с одной собранной компании.
+ *
+ * Единственная оценка в расчёте размера сборки (heRefillCompanyTarget) и
+ * единственное место, где её править. Меряется по факту любого прогона долива:
+ * stats.valid / stats.companies_total сборки.
+ *
+ * Почему не max_emails_per_company: потолок «до N адресов на компанию»
+ * достижим только у компании с живым сайтом и несколькими рабочими адресами, а
+ * в среднем по срезу часть компаний не даёт ни одного допущенного адреса (сайта
+ * нет; на страницах адресов нет; единственный найденный — catch_all, который
+ * слать нельзя). Ночной долив не запускался в production ни разу, поэтому любое
+ * значение здесь — оценка, и выбрана она в сторону НЕДОбора: недобор до капа
+ * виден в той же воронке (capped=0 при daily_remaining>0) и лечится этой
+ * константой, а лишние компании — это уже оплаченные краул и SMTP-пробы плюс
+ * выжженные из будущих сборок компании, назад их не вернуть.
+ */
+export const HE_REFILL_ACCEPTED_PER_COMPANY = 2;
+
+/**
+ * Минимум компаний в refill-сборке — зеркало MIN_ROWS_LIMIT стадии
+ * (stages/baseCollect.ts): totalRowsCap всё равно поднимает любой меньший limit
+ * до 100, и просить меньше значило бы писать в collect_info число, которого
+ * стадия не придерживается.
+ */
+const HE_REFILL_MIN_COMPANIES = 100;
+
+/**
+ * Сколько КОМПАНИЙ собирать под дневной кап лидов, который считает СТРОКИ.
+ *
+ * Перевод единиц — через HE_REFILL_ACCEPTED_PER_COMPANY, но не больше
+ * contactCap: при «до 1 адреса на компанию» компания даёт максимум один лид, и
+ * компаний нужно столько же, сколько лидов.
+ *
+ * Потолка здесь НЕТ — его ставит вызывающий своим лимитом
+ * (resolveHeRefillCollectCompanies берёт min): расчёт может только УМЕНЬШИТЬ
+ * сборку против уже запланированной, но никогда не увеличить. Рост сборки —
+ * это новые деньги и решение владельца, а не функции.
+ */
+export function heRefillCompanyTarget(input: { dailyLeadsCap: number; contactCap: number }): number {
+  const perCompany = Math.max(1, Math.min(input.contactCap, HE_REFILL_ACCEPTED_PER_COMPANY));
+  const cap = Number.isFinite(input.dailyLeadsCap) ? Math.max(0, input.dailyLeadsCap) : 0;
+  return Math.max(HE_REFILL_MIN_COMPANIES, Math.ceil(cap / perCompany));
+}
+
+/**
+ * Лимит компаний для refill-сборки: min(уже запланированный лимит, расчёт из
+ * дневного капа проекта). Вызывать ДО сбора — за краул и SMTP-пробы платит
+ * сборка, а не эта ветка (см. шапку файла).
+ *
+ * Best-effort как и сам loadRefillConfig: кап не прочитался или конфига нет —
+ * берётся дефолт движка, тот же, по которому долив ниже будет резать объём,
+ * поэтому расчёт и кап остаются в одних единицах даже на транзиентной ошибке
+ * чтения. Ошибка в меньшую сторону: недобор — не потраченные деньги.
+ */
+export async function resolveHeRefillCollectCompanies(
+  ctx: HeStageContext,
+  input: { projectId: string; payloadLimit: number; contactCap: number },
+): Promise<number> {
+  const config = await loadRefillConfig(ctx, input.projectId);
+  const dailyLeadsCap = config?.dailyLeadsCap ?? HE_AUTO_DEFAULT_DAILY_LEADS_CAP;
+  return Math.min(
+    input.payloadLimit,
+    heRefillCompanyTarget({ dailyLeadsCap, contactCap: input.contactCap }),
+  );
+}
 
 /**
  * Сколько подряд упавших доливов вертикали ещё возвращают её компании в пул.
@@ -76,8 +168,14 @@ export interface HeRefillStats {
   collected: number;
   /** Строк с непустым email. */
   with_email: number;
-  /** Строк с email и вердиктом 'ok' (либо без валидации — см. шапку). */
+  /** Строк с email и допущенным вердиктом валидации — кандидаты в лиды. */
   valid: number;
+  /**
+   * Строк с email, снятых из-за ОТСУТСТВИЯ вердикта. Отдельным счётчиком от
+   * отклонённых (with_email - valid - unverified): «адрес не проверен» лечится
+   * пересборкой базы, «адрес отклонён» — ничем, и в отчёте это разные строки.
+   */
+  unverified: number;
   /** Принято Instantly. */
   appended: number;
   /** Отрезано blocklist'ом владельца пресета. */
@@ -86,6 +184,29 @@ export interface HeRefillStats {
   skipped_instantly: number;
   /** Не влезло в дневной кап daily_leads_cap (уйдёт в отчёт, не в кампанию). */
   capped: number;
+  /**
+   * Почему строки не ушли, когда capped > 0. Одно значение, но пишется явно:
+   * «отрезано» без причины читается как брак адресов, а это бюджет проекта.
+   */
+  capped_reason?: 'daily_leads_cap';
+  /** Дневной кап лидов проекта (СТРОК), действовавший в прогоне. */
+  daily_cap: number;
+  /**
+   * Сколько от капа осталось к моменту долива (кап минус долитое сегодня).
+   * Нет ключа — долив упал до расчёта бюджета: остаток не измерен, а нулём его
+   * писать нельзя, это прочиталось бы как «бюджет исчерпан».
+   */
+  daily_remaining?: number;
+  /**
+   * Компаний, под которые кап просит собирать (heRefillCompanyTarget), и лимит
+   * компаний, с которым сборка реально шла (collect_info.limit; null — лимита в
+   * снапшоте нет). company_limit > company_target — постановка сборки ещё
+   * считает объём в строках: разница компаний уже оплачена краулом и пробами, а
+   * кап её строки выбросит. Оба числа в воронке затем, чтобы первый ночной счёт
+   * объяснялся из журнала, а не из догадок.
+   */
+  company_target: number;
+  company_limit: number | null;
 }
 
 /** Итог refill-ветки: он же collect_info.refill_result и (по полям) runs-запись. */
@@ -409,28 +530,38 @@ export function pickRefillTemplate(
 }
 
 /**
- * Строки-кандидаты в лиды: непустой email И (вердикт валидации 'ok' ЛИБО
- * валидации не было — статус null). catch_all/invalid/disposable/unknown
- * отсекаем. Возвращает счётчики воронки для журнала.
+ * Строки-кандидаты в лиды: непустой email И вердикт валидации 'accepted'.
+ *
+ * Вердикт считает heLaunchEmailVerdict (launchHandoff.ts) — тот же список
+ * допущенных статусов, что у ручного запуска шаблона, и тот же разбор
+ * регистра/пробелов. Здесь он НЕ переписан осознанно: два пути допуска
+ * адресов, которые можно поправить по отдельности, рано или поздно разойдутся,
+ * а расхождение видно только по баунсам, то есть уже по репутации доменов.
+ * Почему catch_all не допущен — в докблоке HE_LAUNCH_ACCEPTED_EMAIL_STATUSES.
+ *
+ * 'missing' (вердикта нет вовсе) отклоняется, как и 'rejected', но считается
+ * отдельно: ночной долив идёт без человека рядом, и «валидация не доработала»
+ * обязано быть видно в воронке, а не выглядеть как «адреса плохие».
  */
 export function selectRefillLeadRows(
   rows: HeUnifiedRow[],
   emailStatuses: Array<string | null> | null,
-): { leadRows: HeUnifiedRow[]; withEmail: number; valid: number } {
+): { leadRows: HeUnifiedRow[]; withEmail: number; valid: number; unverified: number } {
   const leadRows: HeUnifiedRow[] = [];
   let withEmail = 0;
+  let unverified = 0;
   for (let i = 0; i < rows.length; i += 1) {
     const row = rows[i];
     if (row.email.trim() === '') continue;
     // Строки вне вертикали (релевант-гейт base_collect) в долив не идут.
     if ((row as { _low_relevance?: boolean })._low_relevance === true) continue;
     withEmail += 1;
-    const status = emailStatuses?.[i] ?? null;
-    // TODO(catch_all): catch_all-домены частично рабочие — пока не шлём (риск баунсов).
-    if (status !== null && status !== 'ok') continue;
+    const verdict = heLaunchEmailVerdict(emailStatuses?.[i] ?? null);
+    if (verdict === 'missing') unverified += 1;
+    if (verdict !== 'accepted') continue;
     leadRows.push(row);
   }
-  return { leadRows, withEmail, valid: leadRows.length };
+  return { leadRows, withEmail, valid: leadRows.length, unverified };
 }
 
 /**
@@ -484,7 +615,11 @@ export async function runHeRefillAppend(args: {
   stats: HeCollectInfo['stats'];
   finalRows: HeUnifiedRow[];
   finalColumns: string[];
-  /** Вердикты валидации по строкам (null — валидации не было), по индексам finalRows. */
+  /**
+   * Вердикты валидации по индексам finalRows. null вместо массива (валидации
+   * не было вовсе) или null в элементе (у строки вердикта нет) — такая строка
+   * в долив НЕ идёт и попадает в stats.unverified, см. selectRefillLeadRows.
+   */
   emailStatuses: Array<string | null> | null;
   usage: HeUsage;
 }): Promise<HeStageResult> {
@@ -497,16 +632,46 @@ export async function runHeRefillAppend(args: {
   });
 
   const config = await loadRefillConfig(ctx, job.project_id);
+  const dailyLeadsCap = config?.dailyLeadsCap ?? HE_AUTO_DEFAULT_DAILY_LEADS_CAP;
+  // Кап адресов на компанию ЭТОЙ сборки: он же уехал конструктору в
+  // step_config.cap_emails_per_company (collect_info.construct.contact_cap есть
+  // всегда, в том числе там, где миграция 20260926_0001 не применена). Читаем
+  // снапшот, а не колонку проекта: лимит мог измениться после постановки, а
+  // оплачены пробы по тому, с которым сборка шла.
+  const contactCap =
+    normalizeHeMaxEmailsPerCompany(info.construct?.contact_cap) ?? HE_MAX_EMAILS_PER_COMPANY_DEFAULT;
+  const companyTarget = heRefillCompanyTarget({ dailyLeadsCap, contactCap });
+  const companyLimit =
+    typeof info.limit === 'number' && Number.isFinite(info.limit) ? info.limit : null;
+  // Сборка оплачена ДО этой ветки. Если её объём считали не из капа, лишние
+  // краулы и SMTP-пробы уже потрачены: кап выбросит их строки, а компании
+  // останутся выжженными (база уйдёт в 'analyzed'). Называем это вслух в
+  // журнале сборки — иначе первый ночной счёт объяснять будет нечем. Строка
+  // исчезнет сама, когда постановка начнёт считать объём в компаниях
+  // (resolveHeRefillCollectCompanies).
+  if (companyLimit !== null && companyLimit > companyTarget) {
+    stageLog(
+      ctx,
+      `[base_collect] refill: сборка шла на ${companyLimit} компаний при капе ${dailyLeadsCap} ` +
+        `лидов (хватило бы ${companyTarget}) — до ` +
+        `${(companyLimit - companyTarget) * (contactCap + 1)} адресов проверено впустую; ` +
+        'объём сборки должен считаться из капа (resolveHeRefillCollectCompanies)',
+    );
+  }
   /** Отдали ли строки провайдеру — решает судьбу компаний при отказе. */
   let providerTouched = false;
   const runStats: HeRefillStats = {
     collected: finalRows.length,
     with_email: 0,
     valid: 0,
+    unverified: 0,
     appended: 0,
     skipped_blocklist: 0,
     skipped_instantly: 0,
     capped: 0,
+    daily_cap: dailyLeadsCap,
+    company_target: companyTarget,
+    company_limit: companyLimit,
   };
 
   try {
@@ -540,10 +705,31 @@ export async function runHeRefillAppend(args: {
       throw new Error(`пресет ${pick.presetId} не найден — владелец кампании неизвестен`);
     }
 
-    // 3. Лиды: email + вердикт 'ok', маппинг колонок → переменные шаблона.
-    const { leadRows, withEmail, valid } = selectRefillLeadRows(finalRows, emailStatuses);
+    // 3. Лиды: email + допущенный вердикт валидации, маппинг колонок →
+    //    переменные шаблона.
+    const { leadRows, withEmail, valid, unverified } = selectRefillLeadRows(finalRows, emailStatuses);
     runStats.with_email = withEmail;
     runStats.valid = valid;
+    runStats.unverified = unverified;
+    // Ни одного проверенного адреса, а непроверенные есть — валидация не
+    // доработала. Уходим в общий отказ долива (catch ниже): прогон 'failed' с
+    // причиной, компании возвращаются в пул по тому же правилу, что и у
+    // недоставленного отказа, и завтрашняя сборка проверит их заново. Тихий
+    // 'no_new' здесь означал бы «новых компаний нет» — отчёт, по которому
+    // неделю неотправки не отличить от исчерпанного рынка.
+    //
+    // Статус фазы конструктора в тексте не для красоты: he_bases.error кабинет
+    // сворачивает в машинный код причины (clientErrors.classifyHeClientError),
+    // и по этой формулировке ENG-клиент получает «валидация почт не
+    // доработала» вместо обобщённого технического сбоя. Переформулировать —
+    // только сверившись с тем классификатором.
+    if (valid === 0 && unverified > 0) {
+      throw new Error(
+        `валидация почт не дала вердиктов: ${unverified} стр. с адресом не проверено ` +
+          `(конструктор завершился со статусом ${info.construct?.status ?? 'неизвестным'}) — ` +
+          'долив остановлен',
+      );
+    }
     const { leads } = mapBaseRowsToLeads({
       rows: leadRows,
       columns: finalColumns,
@@ -557,7 +743,6 @@ export async function runHeRefillAppend(args: {
     runStats.skipped_blocklist = blockedCount;
 
     // 5. Дневной кап проекта: минус уже долитое сегодня (UTC) всеми refill'ами конфига.
-    const cap = config?.dailyLeadsCap ?? HE_AUTO_DEFAULT_DAILY_LEADS_CAP;
     let spent = 0;
     if (config) {
       const { data: spentRows, error: spentErr } = await ctx.supabase
@@ -572,12 +757,19 @@ export async function runHeRefillAppend(args: {
         if (typeof appended === 'number' && Number.isFinite(appended)) spent += appended;
       }
     }
-    const remaining = Math.max(0, cap - spent);
+    const remaining = Math.max(0, dailyLeadsCap - spent);
     const toSend = kept.slice(0, remaining);
     runStats.capped = kept.length - toSend.length;
+    runStats.daily_remaining = remaining;
+    // Причина отреза — рядом с числом: воронка обязана отличать «бюджет
+    // проекта на сутки» от брака адресов (unverified/отклонённые выше).
+    if (runStats.capped > 0) runStats.capped_reason = 'daily_leads_cap';
 
-    // 6. Долив. valid===0 (нечего слать после фильтров) — 'no_new'; валидные
-    //    были, но всё съели blocklist/кап — 'appended' с appended=0 (воронка в stats).
+    // 6. Долив. valid===0 — 'no_new': сюда доходит только случай «вердикты
+    //    есть, но ни один адрес не допущен» (или адресов не нашли вовсе), то
+    //    есть добор действительно нечего отправлять; непроверенные адреса
+    //    отсеялись отказом на шаге 3. Валидные были, но всё съели
+    //    blocklist/кап — 'appended' с appended=0 (воронка в stats).
     if (toSend.length > 0) {
       const appended = await appendLeadsToClientCampaign({
         userId: ownerUserId,
@@ -632,7 +824,11 @@ export async function runHeRefillAppend(args: {
     stageLog(
       ctx,
       `[base_collect] refill ${outcome}: кампания ${pick.campaignId}, лидов ${runStats.appended} ` +
-        `(valid ${runStats.valid}, blocklist ${runStats.skipped_blocklist}, кап-отрез ${runStats.capped})`,
+        `(valid ${runStats.valid}, без вердикта ${runStats.unverified}, ` +
+        `blocklist ${runStats.skipped_blocklist}, кап-отрез ${runStats.capped} ` +
+        // Остаток капа при нулевом отрезе — признак НЕДОбора: компаний собрали
+        // меньше, чем нужно капу (см. HE_REFILL_ACCEPTED_PER_COMPANY).
+        `при остатке ${runStats.daily_remaining ?? 0} из ${runStats.daily_cap})`,
     );
     return done(refillResult);
   } catch (e) {

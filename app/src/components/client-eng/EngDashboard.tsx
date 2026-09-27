@@ -236,6 +236,18 @@ function buildPipelineRows(
   const withEta = (text: string): string =>
     pct !== null && !text.includes('/') ? `${text} · ~${pct}% done` : text;
 
+  // «Сколько собрано»: компании, если стадия их посчитала, иначе строки — и
+  // тогда под своим именем. `stats.companies` (companies_total) у баз старше
+  // 26.09.2026 нет, роут отдаёт 0; строки известны всегда, но строка ≠ компания
+  // (ENG разносит один адрес на строку), поэтому делить их на кап и называть
+  // компаниями нельзя — печатаем «rows». Обе цифры пусты → подписи нет.
+  const collected = (prefix: string): string =>
+    s.companies > 0
+      ? `${prefix}${fmt(s.companies)} companies`
+      : s.rows > 0
+        ? `${prefix}${fmt(s.rows)} rows`
+        : '';
+
   const rows: PipeRow[] = [
     {
       key: 'research',
@@ -261,8 +273,8 @@ function buildPipelineRows(
       evidence:
         vertical.stage === 'collecting'
           ? withEta(vertical.stageDetail)
-          : stateOf(2) === 'done' && s.companies > 0
-            ? `${fmt(s.companies)} companies`
+          : stateOf(2) === 'done'
+            ? collected('')
             : '',
     },
     {
@@ -283,8 +295,8 @@ function buildPipelineRows(
       evidence:
         vertical.stage === 'analyzing'
           ? withEta(vertical.stageDetail)
-          : stateOf(4) === 'done' && s.companies > 0
-            ? `analyzed ${fmt(s.companies)} companies`
+          : stateOf(4) === 'done'
+            ? collected('analyzed ')
             : '',
     },
     {
@@ -685,7 +697,11 @@ export function EngDashboard() {
                 [
                   // Счётчики — тихие mono-числа + label, без hero-метрик;
                   // цвет только paper, статусной окраски у агрегатов дня нет.
-                  { label: 'Collected today', value: today.collected, hint: 'new companies harvested' },
+                  // `today.collected` — сумма `stats.collected` ночных доливов, а это
+                  // `finalRows.length`, то есть СТРОКИ (у market='us' одна строка =
+                  // один адрес). Компаний долив не считает, поэтому подпись про
+                  // строки: раньше здесь стояло «new companies harvested».
+                  { label: 'Collected today', value: today.collected, hint: 'address rows collected' },
                   { label: 'Valid today', value: today.valid, hint: 'emails passed validation' },
                   { label: 'Appended today', value: today.appended, hint: 'leads added to campaigns' },
                 ] as const

@@ -46,17 +46,33 @@ import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
  *     джоба падает. Упавшие задачи фиксируются в collect_info, но не валят
  *     джобу, если хотя бы одна задача дала строки.
  *  5. CONSTRUCT — обогащение собранных строк конструктором баз
- *     (base_constructor_jobs: dedup_email → find_emails → validate_emails →
- *     cap_emails_per_company → enrich_descriptions; locale джобы по рынку).
- *     Пропускается, когда email уже есть у >50% строк (RU-источники богатые)
- *     или фаза завершалась ранее (construct.status='done' в collect_info).
+ *     (base_constructor_jobs; locale И СПИСОК ШАГОВ — по рынку проекта, см.
+ *     constructStepsFor: RU — dedup_email → find_emails → validate_emails →
+ *     cap_emails_per_company → enrich_descriptions, как было; ENG (market='us')
+ *     — find_emails → enrich_descriptions → split_emails → dedup_email →
+ *     validate_emails → cap_emails_per_company, то есть ОДИН АДРЕС НА СТРОКУ
+ *     со своим вердиктом и работающий кап «до N адресов на компанию»).
+ *     Шаг find_emails попадает в список только для бедных баз (email есть у
+ *     ≤50% строк); сама фаза пропускается лишь когда завершалась ранее
+ *     (construct.status='done' в collect_info) или строк нет вовсе.
  *     DISPATCH-CONSTRUCT создаёт BC-джобу (bc_job_id — в collect_info.construct)
  *     и уходит в self-requeue с паузой 60с; WAIT-CONSTRUCT опрашивает её до
  *     терминального статуса (таймаут 6ч → база failed); IMPORT мапит сетку
  *     обратно в унифицированные колонки по имени заголовка (email — первый
- *     адрес merged-ячейки) и добавляет колонку description В КОНЕЦ заголовков.
+ *     адрес ячейки: в ENG-сетке он там один, в RU-сетке ячейка может быть
+ *     склеенной) и добавляет колонку description В КОНЕЦ заголовков.
+ *     ENG-джоба БЕЗ шага split_emails не импортируется вовсе (её вердикты
+ *     валидации не поадресные) — база один раз пересобирается по текущему
+ *     контракту.
  *     failed/cancelled BC-джоба базу НЕ валит: импортируется частичный data,
- *     если он есть, иначе переход к analyzing без обогащения. Далее —
+ *     если он есть, иначе переход к analyzing без обогащения.
+ *     На импортированную сетку заново накладываются ОБА числа клиента
+ *     (capImportedRows): «до N адресов на компанию» и лимит сборки как кап
+ *     КОМПАНИЙ. Кап конструктора живёт в чужом процессе и у оборвавшейся
+ *     джобы мог не выполниться, поэтому limit — это и до, и после
+ *     конструктора «сколько компаний», а не «сколько строк»: строк у базы
+ *     после разноса адресов больше, и что именно срезано, видно в
+ *     stats.dropped_over_contact_cap / dropped_over_company_cap. Далее —
  *     he_bases → status='analyzing' и ставится стадия base_analyze.
  *
  * Refill-режим (ENG auto-pipeline, payload.refill=true; постановка — крон
@@ -66,7 +82,11 @@ import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
  * запущенную кампанию Instantly, база уходит в терминальный 'analyzed',
  * итог пишется в collect_info.refill_result и he_auto_pipeline_runs.
  * Пустой harvest — штатный 'no_new' (база НЕ failed). Вся механика —
- * stages/baseCollectRefill.ts.
+ * stages/baseCollectRefill.ts. Объём такой сборки считается ИЗ дневного капа
+ * лидов проекта (resolveHeRefillCollectCompanies, ниже «РАЗМЕР REFILL-СБОРКИ»),
+ * а не флэтовым числом: иначе краул сайта и SMTP-проба оплачивались бы по
+ * компаниям, чьи адреса кап того же вечера выбросит, а сами компании оставались
+ * бы выжженными для будущих сборок проекта.
  *
  * Продолжение сбора больших сегментов (>50k — больше одного капа limit):
  * повторная сборка той же вертикали исключает компании других he_bases
@@ -91,6 +111,15 @@ import { applyFundedFilters } from '@/lib/funded/queryFilters';
 import { buildRolesRegex } from '@/lib/parsers/atsFilters';
 import { domainToSiteUrl, resolveCompanyDomainViaPdl } from '@/lib/parsers/companyDomainResolver';
 import { extractEmail } from '@/lib/tools/dfybUtils';
+import { normalizeLeadWebsite } from '@/lib/instantly/leadContactValues';
+import {
+  HE_MAX_EMAILS_PER_COMPANY_DEFAULT,
+  normalizeHeMaxEmailsPerCompany,
+} from '../baseCollectEnqueue';
+// Только константа потолка запуска: модуль чистый (типы + маппинг лидов), в
+// стадию он не тащит ни БД, ни рассыльщика. Нужна, чтобы назвать вслух базу, у
+// которой адресов больше потолка запуска, — см. предупреждение в финале стадии.
+import { HE_LAUNCH_MAX_LEADS } from '../launchHandoff';
 import { callLLMWithSchema, getHeModel } from '../llm';
 import { projectMarket, type HeMarket } from '../market';
 import { findIrrelevantRows } from '../relevanceGate';
@@ -111,6 +140,7 @@ import { HeCatalogRepairSchema, HeSourcePlanSchema } from '../schemas';
 import type { HeBase, HeJob, HeProject, HeVertical } from '../types';
 import {
   completeHeRefillNoNew,
+  resolveHeRefillCollectCompanies,
   runHeRefillAppend,
   type HeRefillResult,
 } from './baseCollectRefill';
@@ -358,10 +388,11 @@ export function normalizeWebsiteForDedup(website: string): string {
  * плана упорядочены по приоритету) плюс схлопывание пары «та же компания,
  * сайт пуст хотя бы у одной строки»: «ООО "ТЕРАБАЙТ"» с сайтом и «ТЕРАБАЙТ»
  * без сайта — одна компания, выживает более богатая строка (с website/email,
- * иначе первая). Асимметрия с кросс-базовым исключением осознанная: там
- * матч ТОЛЬКО по компании (website может отсутствовать у целого источника),
- * а здесь пары с РАЗНЫМИ непустыми сайтами живут обе — у дочек/филиалов
- * бывают разные домены. Строки с пустым нормализованным ключом компании
+ * иначе первая). Пары с РАЗНЫМИ непустыми сайтами живут обе — у дочек/филиалов
+ * бывают разные домены; с 26.09.2026 то же уточнение доменом делает и
+ * кросс-базовое исключение при market='us' (matchesExclusion), а для RU там
+ * по-прежнему матч по компании с уточнением ИНН: у RU-источников одна фирма
+ * приходит с разными сайтами. Строки с пустым нормализованным ключом компании
  * («ООО», «—», «») — мусор: все они схлопнулись бы в один ключ «|»,
  * выбрасываются как и строки с пустым сырым company.
  */
@@ -509,6 +540,20 @@ export interface HeConstructInfo {
   emails_found?: number;
   /** Почт с вердиктом ok после валидации (колонка «Email Статус» сетки). */
   valid_count?: number;
+  /**
+   * Кап «адресов на компанию», переданный этой BC-джобе
+   * (step_config.cap_emails_per_company.max). Дубль колонки
+   * he_bases.contact_cap_applied: колонка — для дешёвой выборки баз,
+   * чей кап устарел, а здесь значение есть ВСЕГДА, в том числе на
+   * инсталляции, где миграция 20260926_0001 ещё не применена.
+   */
+  contact_cap?: number;
+  /**
+   * Эта джоба — повтор ради обязательного split_emails; здесь id той
+   * legacy-джобы, чей результат импортировать было нельзя. Признак
+   * одноразовости: второй такой повтор оплачивать не будем.
+   */
+  resplit_of?: string;
   /** Пометка для UI (частичный импорт / без обогащения / таймаут). */
   note?: string;
 }
@@ -584,6 +629,25 @@ export interface HeCollectInfo {
     excluded_existing_bases: number;
     /** Реестр: строк пропущено ещё на выборке (уже собраны в других базах проекта). */
     excluded_during_fetch: number;
+    /**
+     * Компаний в готовой базе (уникальных ключей «компания|домен»). Отличается
+     * от row_count базы: после split_emails у компании столько строк, сколько
+     * адресов оставил кап. Ключа нет у сборок до 26.09.2026.
+     */
+    companies_total?: number;
+    /**
+     * Адресов с вердиктом 'ok', не помеченных вне вертикали, — оценка СВЕРХУ
+     * того, сколько лидов возьмёт запуск (ниже ещё чёрный список клиента и
+     * дедуп адресов). Сравнивается с потолком запуска HE_LAUNCH_MAX_LEADS:
+     * больше потолка — часть адресов запуск оставит дома (сначала по одному
+     * сильнейшему адресу на компанию), но базу примет. Ключа нет у сборок до
+     * 26.09.2026.
+     */
+    ok_contacts?: number;
+    /** Адресов отброшено пост-импортным капом сверх «N адресов на компанию». */
+    dropped_over_contact_cap?: number;
+    /** Строк отброшено у компаний сверх лимита сборки (инвариант «≤ N компаний»). */
+    dropped_over_company_cap?: number;
     finished_at: string;
   };
 }
@@ -593,6 +657,14 @@ type HeAutoBase = HeBase & {
   source?: string;
   collect_info?: HeCollectInfo | null;
   error?: string | null;
+  /**
+   * Кап «адресов на компанию» этой базы (штамп с проекта на постановке,
+   * baseCollectEnqueue) и кап, реально применённый конструктором. Обе колонки
+   * моложе HeBase и отсутствуют, пока не применена миграция
+   * 20260926_0001_he_emails_per_company.sql.
+   */
+  max_emails_per_company?: number | null;
+  contact_cap_applied?: number | null;
 };
 
 /** Таблица дочерней джобы по источнику (у реестра и ENG-источников pdl/funded/eng_hiring дочерней джобы нет). */
@@ -1033,8 +1105,9 @@ async function fetchDirectoryRows(
     }
     offset += res.rows.length;
     for (const r of res.rows) {
-      // Дубль другой базы: по имени (с ИНН-уточнением) или точно по ИНН.
-      if (matchesExclusion(excludedKeys, cell(r.name), r.inn)) {
+      // Дубль другой базы: по имени (с уточнением ИНН/доменом), точно по ИНН
+      // или точно по собственному домену.
+      if (matchesExclusion(excludedKeys, cell(r.name), r.inn, r.website)) {
         excludedDuringFetch += 1;
         continue;
       }
@@ -1605,31 +1678,78 @@ function normalizeInnForDedup(value: unknown): string {
 }
 
 /**
- * Ключи исключения по другим базам проекта. Два канала матча:
+ * Ключи исключения по другим базам проекта. Каналы матча:
  *  - ИНН: то же юрлицо под другим написанием имени («ООО Ромашка» vs
  *    «РОМАШКА ООО») ловится по множеству всех ИНН;
+ *  - домен (ТОЛЬКО market='us', см. useWebsite): для ENG-источников
+ *    (pdl/funded/eng_hiring/google maps) сайт — это и есть удостоверение
+ *    компании, ИНН у них не бывает никогда. «Acme Technologies» и «Acme» на
+ *    одном домене — одна компания, хотя ключи имён у них разные;
  *  - имя: если под этим именем в других базах есть ИНН и у входящей строки
  *    тоже — сравниваем юрлица точно (одноимённые компании разных регионов
- *    с разными ИНН больше НЕ вымываются); если ИНН пуст хотя бы с одной
- *    стороны — консервативный матч по имени, как раньше.
+ *    с разными ИНН больше НЕ вымываются); при market='us' то же уточнение
+ *    делает домен (две разные фирмы «Acme» с разными сайтами больше не
+ *    вымывают друг друга); если уточнять нечем — консервативный матч по
+ *    имени, как раньше.
+ *
+ * Почему домен НЕ включён для RU: у RU-источников одна фирма легко приходит
+ * с разными сайтами (реестр — корпоративный домен, карты — лендинг), а под
+ * одним корпоративным сайтом живут несколько юрлиц холдинга. Там точное
+ * удостоверение — ИНН, и он есть. Включение домена для RU меняло бы поведение
+ * ежедневного staff-инструмента в обе стороны сразу: это отдельное решение,
+ * а не побочный эффект правки ENG.
  */
 export interface HeBaseExclusionKeys {
   /** нормализованное имя → ИНН'ы, встреченные под ним в других базах. */
   nameInns: Map<string, Set<string>>;
   /** Все ИНН других баз (матч «то же юрлицо, другое написание»). */
   inns: Set<string>;
+  /** нормализованное имя → домены, встреченные под ним (только useWebsite). */
+  nameSites: Map<string, Set<string>>;
+  /** Все домены других баз (матч «та же компания, другое имя»; только useWebsite). */
+  sites: Set<string>;
+  /** market='us': домен участвует в ключе. Для RU оба множества выше пусты. */
+  useWebsite: boolean;
 }
 
-/** Строка исключена: совпал непустой ИНН или имя (с ИНН-уточнением, см. выше). */
-function matchesExclusion(keys: HeBaseExclusionKeys, company: string, inn: unknown): boolean {
+/**
+ * Домен как удостоверение компании: только собственный сайт. Соцсети,
+ * сокращатели и бесплатные почтовые домены в колонке «сайт» (обычное дело у
+ * google maps) принадлежат многим компаниям сразу — по ним исключение
+ * вымывало бы всех, кроме первой. Отсев берём готовый,
+ * normalizeLeadWebsite (instantly/leadContactValues) уже содержит этот список
+ * и поддерживается: он возвращает null для не-компанейского хоста.
+ */
+function companySiteKey(website: unknown): string {
+  const raw = cell(website);
+  if (!raw || !normalizeLeadWebsite(raw)) return '';
+  return normalizeWebsiteForDedup(raw);
+}
+
+/** Строка исключена: совпал непустой ИНН, домен или имя (с уточнением, см. выше). */
+function matchesExclusion(
+  keys: HeBaseExclusionKeys,
+  company: string,
+  inn: unknown,
+  website?: unknown,
+): boolean {
   const innKey = normalizeInnForDedup(inn);
   if (innKey && keys.inns.has(innKey)) return true;
+  const siteKey = keys.useWebsite ? companySiteKey(website) : '';
+  if (siteKey && keys.sites.has(siteKey)) return true;
   const nameKey = normalizeCompanyForDedup(company);
   if (!nameKey) return false;
   const knownInns = keys.nameInns.get(nameKey);
   if (knownInns === undefined) return false;
   // Точное сравнение юрлиц только когда ИНН есть с обеих сторон.
   if (innKey && knownInns.size > 0) return knownInns.has(innKey);
+  if (siteKey) {
+    // То же уточнение доменом: одноимённые компании с РАЗНЫМИ собственными
+    // сайтами — разные компании. Когда домена нет хотя бы с одной стороны,
+    // остаёмся на консервативном матче по имени.
+    const knownSites = keys.nameSites.get(nameKey);
+    if (knownSites && knownSites.size > 0) return knownSites.has(siteKey);
+  }
   return true;
 }
 
@@ -1637,7 +1757,8 @@ function matchesExclusion(keys: HeBaseExclusionKeys, company: string, inn: unkno
  * Ключи компаний из ДРУГИХ he_bases того же проекта (любой
  * source, любой статус кроме failed; текущая база исключена). Без этого одна
  * и та же компания копилась в нескольких базах проекта через повторные
- * сборки. Компания — из колонки 'company', ИНН — из 'inn'. data jsonb чужой базы и так читается целиком (одно поле
+ * сборки. Компания — из колонки 'company', ИНН — из 'inn', сайт — из
+ * 'website' (только market='us', см. HeBaseExclusionKeys). data jsonb чужой базы и так читается целиком (одно поле
  * строки), поэтому slice до MAX_ROWS_LIMIT — лишь JS-предохранитель; он
  * обязан быть не меньше максимального размера базы: кап 10k при лимите
  * сборки до 50k отрезал хвост чужой базы из исключений, и вторая сборка
@@ -1647,6 +1768,7 @@ async function loadOtherBaseExclusionKeys(
   ctx: HeStageContext,
   projectId: string,
   baseId: string,
+  market: HeMarket,
 ): Promise<HeBaseExclusionKeys> {
   const { data, error } = await ctx.supabase
     .from('he_bases')
@@ -1656,13 +1778,21 @@ async function loadOtherBaseExclusionKeys(
     .neq('id', baseId);
   if (error) throw new Error(`he_bases exclusion read: ${error.message}`);
 
-  const keys: HeBaseExclusionKeys = { nameInns: new Map<string, Set<string>>(), inns: new Set<string>() };
+  const keys: HeBaseExclusionKeys = {
+    nameInns: new Map<string, Set<string>>(),
+    inns: new Set<string>(),
+    nameSites: new Map<string, Set<string>>(),
+    sites: new Set<string>(),
+    useWebsite: market === 'us',
+  };
   for (const row of (data ?? []) as Array<{ data?: unknown }>) {
     const rows = Array.isArray(row.data) ? row.data.slice(0, MAX_ROWS_LIMIT) : [];
     for (const item of rows) {
       const rec = item as Record<string, unknown> | null;
       const innKey = normalizeInnForDedup(rec?.inn);
       if (innKey) keys.inns.add(innKey);
+      const siteKey = keys.useWebsite ? companySiteKey(rec?.website) : '';
+      if (siteKey) keys.sites.add(siteKey);
       const company = rec?.company;
       if (typeof company !== 'string') continue;
       const nameKey = normalizeCompanyForDedup(company);
@@ -1673,6 +1803,14 @@ async function loadOtherBaseExclusionKeys(
         keys.nameInns.set(nameKey, bucket);
       }
       if (innKey) bucket.add(innKey);
+      if (siteKey) {
+        let sites = keys.nameSites.get(nameKey);
+        if (!sites) {
+          sites = new Set<string>();
+          keys.nameSites.set(nameKey, sites);
+        }
+        sites.add(siteKey);
+      }
     }
   }
   return keys;
@@ -1681,30 +1819,83 @@ async function loadOtherBaseExclusionKeys(
 /* ─────────────────────────── Фаза CONSTRUCT ─────────────────────────── */
 
 /**
- * Шаги конструктора для авто-базы HE: дедуп почт → (поиск на сайтах, если
- * база бедная) → ВАЛИДАЦИЯ → кап на компанию → описания. AI-шагов
- * (ta_scoring/personalization) нет — генерация и скоринг остаются в Движке.
+ * Шаги конструктора для авто-базы HE. Список ВЫБИРАЕТСЯ ПО РЫНКУ ПРОЕКТА —
+ * это главное, что нужно знать про эту функцию.
  *
- * validate_emails — ВСЕГДА: раньше конструктор запускался только при бедных
- * почтах, и базы реестра/карт (email уже есть, но это протухшие info@ из
- * ЕГРЮЛ-источников) уходили в рассылку без валидации — баунсы ложились на
- * домен клиента. find_emails — только когда email есть у ≤50% строк
- * (ENG-базы pdl/funded/eng_hiring, бедные hh-сборки).
+ * RU (staff-инструмент /tools/hypothesis-engine, работает ежедневно) — список
+ * прежний, байт-в-байт: дедуп почт → (поиск на сайтах, если база бедная) →
+ * ВАЛИДАЦИЯ → кап на компанию → описания.
+ *
+ * ENG (market='us', клиентский кабинет /client/eng) — (поиск на сайтах, если
+ * база бедная) → описания → РАЗНОС АДРЕСОВ ПО СТРОКАМ → дедуп почт →
+ * ВАЛИДАЦИЯ → кап на компанию.
+ *
+ * Почему ENG-порядок именно такой — по колонкам, которые трогает каждый шаг:
+ *
+ *  1. find_emails пишет найденные адреса в ОТДЕЛЬНУЮ колонку («Found Email»:
+ *     target='separate' — дефолт STEP_RUNNERS воркера). Перед каждым
+ *     следующим шагом воркер сливает её в исходную Email через запятую
+ *     (mergeFoundEmailColumn, merge_mode по умолчанию 'all'). Значит любой шаг
+ *     ПОСЛЕ поиска видит мульти-адресную ячейку — и split_emails обязан стоять
+ *     после поиска: иначе найденные адреса склеятся только на финальном
+ *     мёрдже, разносить их будет уже некому.
+ *  2. enrich_descriptions зависит только от компании/сайта и ходит на сайт ПО
+ *     СТРОКЕ (кеша по хосту у шага нет). Держим его ДО split_emails: после
+ *     разноса одна компания занимает до N строк, и тот же сайт качался бы N
+ *     раз — прямой путь в 6-часовой таймаут конструктора. Тот же порядок и по
+ *     той же причине выбран в V2.
+ *  3. split_emails — одна строка на один адрес. Ради него список и переставлен:
+ *     без разноса validate_emails писал ОДИН вердикт на всю склеенную ячейку
+ *     (живой и мёртвый адрес получали общий статус), cap_emails_per_company
+ *     считал СТРОКИ и потому не делал ничего, а на запуске анкоренный
+ *     email-регекс (clientLaunch/mapRowsToLeads) ячейку с запятой не принимал —
+ *     и компания молча выпадала целиком.
+ *  4. dedup_email — ПОСЛЕ разноса. До него он дедупит по ПЕРВОМУ адресу ячейки
+ *     (deduplicateByEmail → extractEmail), то есть решает судьбу всей строки по
+ *     одному из нескольких адресов. Вдобавок до 26.09.2026 он стоял ПЕРЕД
+ *     поиском и найденных адресов не видел вовсе.
+ *  5. validate_emails — теперь в ячейке один адрес, поэтому вердикт в колонке
+ *     «Email Статус» принадлежит именно ему.
+ *  6. cap_emails_per_company — последним: он оставляет N лучших СТРОК компании,
+ *     ранжируя их по вердикту, значит ему нужны и строки (split), и статусы
+ *     (validate).
+ *
+ * validate_emails — ВСЕГДА и в обоих рынках: раньше конструктор запускался
+ * только при бедных почтах, и базы реестра/карт (email уже есть, но это
+ * протухшие info@ из ЕГРЮЛ-источников) уходили в рассылку без валидации —
+ * баунсы ложились на домен клиента. find_emails — только когда email есть у
+ * ≤50% строк (ENG-базы pdl/funded/eng_hiring, бедные hh-сборки).
+ *
+ * AI-шагов (ta_scoring/personalization) нет ни в одном из списков — генерация и
+ * скоринг остаются в Движке.
  */
-const CONSTRUCT_STEPS_TAIL = ['validate_emails', 'cap_emails_per_company', 'enrich_descriptions'];
+const CONSTRUCT_STEPS_TAIL_RU = ['validate_emails', 'cap_emails_per_company', 'enrich_descriptions'];
+
+/** ENG-хвост после поиска почт и описаний: разнос адресов обязателен (см. выше). */
+const CONSTRUCT_STEPS_AFTER_SPLIT_US = [
+  'split_emails',
+  'dedup_email',
+  'validate_emails',
+  'cap_emails_per_company',
+];
 
 /** Свыше этого размера enrich_descriptions (per-site фетчи) не укладывается в
  *  6-часовой таймаут конструктора — для больших баз шаг пропускаем. */
 const CONSTRUCT_ENRICH_MAX_ROWS = 5000;
 
-function constructStepsFor(merged: HeUnifiedRow[]): string[] {
+function constructStepsFor(merged: HeUnifiedRow[], market: HeMarket): string[] {
   const withEmail = merged.filter((r) => r.email.trim() !== '').length;
   const poor = withEmail * 2 <= merged.length;
-  const tail =
-    merged.length > CONSTRUCT_ENRICH_MAX_ROWS
-      ? CONSTRUCT_STEPS_TAIL.filter((s) => s !== 'enrich_descriptions')
-      : CONSTRUCT_STEPS_TAIL;
-  return ['dedup_email', ...(poor ? ['find_emails'] : []), ...tail];
+  const find = poor ? ['find_emails'] : [];
+  if (market !== 'us') {
+    const tail =
+      merged.length > CONSTRUCT_ENRICH_MAX_ROWS
+        ? CONSTRUCT_STEPS_TAIL_RU.filter((s) => s !== 'enrich_descriptions')
+        : CONSTRUCT_STEPS_TAIL_RU;
+    return ['dedup_email', ...find, ...tail];
+  }
+  const enrich = merged.length > CONSTRUCT_ENRICH_MAX_ROWS ? [] : ['enrich_descriptions'];
+  return [...find, ...enrich, ...CONSTRUCT_STEPS_AFTER_SPLIT_US];
 }
 /** Канонические заголовки сетки конструктора (порядок — как HE_AUTO_COLLECT_COLUMNS). */
 const CONSTRUCT_HEADERS_RU = ['Компания', 'Сайт', 'Email', 'Телефон', 'Вакансия', 'Адрес', 'Категория', 'Сотрудники', 'Выручка', 'ИНН', 'Источник'];
@@ -1723,8 +1914,41 @@ const CONSTRUCT_REQUEUE_MS = 60_000;
  * хвост упирается в CONSTRUCT_TIMEOUT_MS и теряется ВСЯ база, поэтому ждать
  * молчащий сайт дольше 30 с смысла нет: адреса, найденные до срока, шаг
  * сохраняет (abort прерывает обход страниц, а не результат).
+ *
+ * С 26.09.2026 этот срок ещё важнее: обход больше не обрывается на первом
+ * найденном адресе (stop_at_first=false, см. step_config), то есть страницы
+ * из CONSTRUCT_FIND_EMAILS_MAX_PAGES теперь перебираются не в худшем случае,
+ * а на КАЖДОМ живом сайте. Срок — единственное, что держит эту цену.
  */
 const CONSTRUCT_FIND_EMAILS_SITE_DEADLINE_MS = 30_000;
+
+/**
+ * Страниц на сайт при глубоком обходе (market='us'). Дефолт шага — 5, берём 4:
+ * столько же, сколько V2 оставил после замеров, и заведомо не больше, чем
+ * обходилось до включения глубокого поиска. Контакты лежат на главной и на
+ * «contact/about», хвост страниц даёт адреса всё реже, а платим за него
+ * временем каждого сайта.
+ */
+const CONSTRUCT_FIND_EMAILS_MAX_PAGES = 4;
+
+/**
+ * Потолок адресов с одного сайта — предохранитель от «сайта-простыни»
+ * (десятки адресов в футере или на team-странице), если кап на компанию
+ * когда-нибудь выставят большим.
+ */
+const CONSTRUCT_FIND_EMAILS_PER_SITE_MAX = 10;
+
+/**
+ * Сколько адресов забирать с одного сайта: кап компании плюс один. Каждый
+ * найденный адрес дальше оплачивается SMTP-пробой в validate_emails, а лишние
+ * всё равно отрежет cap_emails_per_company — но уже ПОСЛЕ проверки (у V2 на
+ * «все адреса с 12 страниц» доходило до 167 проверенных адресов одной
+ * компании). Небольшой запас сверх капа нужен ровно затем, чтобы кап мог
+ * предпочесть подтверждённый адрес catch-all'у.
+ */
+function constructFindEmailsPerSite(contactCap: number): number {
+  return Math.min(CONSTRUCT_FIND_EMAILS_PER_SITE_MAX, contactCap + 1);
+}
 
 /** Заголовок сетки конструктора (lowercase) → унифицированная колонка / description. */
 const CONSTRUCT_HEADER_MAP: Record<string, keyof HeUnifiedRow | 'description'> = {
@@ -1783,19 +2007,106 @@ function buildConstructGrid(rows: HeUnifiedRow[], market: HeMarket): string[][] 
 async function readConstructJobStatus(
   ctx: HeStageContext,
   bcJobId: string,
-): Promise<{ status: string; error_message: string | null } | null> {
+): Promise<{ status: string; error_message: string | null; selected_steps: string[] | null } | null> {
   const { data, error } = await ctx.supabase
     .from('base_constructor_jobs')
-    .select('status, error_message, workload_origin')
+    .select('status, error_message, workload_origin, selected_steps')
     .eq('id', bcJobId)
     .maybeSingle();
   if (error) throw new Error(`base_constructor_jobs read: ${error.message}`);
   if (!data) return null;
   if (data.workload_origin !== 'automation') await markAutomatedConstructor(ctx.supabase, bcJobId);
-  const row = data as { status?: unknown; error_message?: unknown };
+  const row = data as { status?: unknown; error_message?: unknown; selected_steps?: unknown };
   return {
     status: String(row.status ?? ''),
     error_message: typeof row.error_message === 'string' ? row.error_message : null,
+    // Список шагов нужен импорту: результат джобы БЕЗ split_emails нельзя
+    // принимать за базу с поадресными вердиктами (см. фазу CONSTRUCT).
+    // null — колонку не отдали: тогда доверяем джобе, как и раньше.
+    selected_steps: Array.isArray(row.selected_steps)
+      ? row.selected_steps.map((s) => String(s))
+      : null,
+  };
+}
+
+/**
+ * Создать джобу конструктора под собранные строки. Один вход для обоих
+ * случаев: первичный DISPATCH-CONSTRUCT и повтор legacy-джобы, поставленной до
+ * того, как split_emails стал обязательным для ENG (см. WAIT-CONSTRUCT). Общий
+ * код нужен именно затем, чтобы повтор шёл по ТЕКУЩЕМУ контракту, а не по
+ * копии старого.
+ */
+async function dispatchConstructJob(input: {
+  ctx: HeStageContext;
+  ownerId: string | null | undefined;
+  baseLabel: string;
+  rows: HeUnifiedRow[];
+  market: HeMarket;
+  /** Кап «адресов на компанию» этой базы (см. resolveContactCap у стадии). */
+  contactCap: number;
+}): Promise<{ bcJobId: string; locale: 'ru' | 'en'; steps: string[]; construct: HeConstructInfo }> {
+  const { ctx, ownerId, baseLabel, rows, market, contactCap } = input;
+  if (!ownerId) {
+    throw new Error('he_projects.created_by пуст — джобе конструктора некому принадлежать');
+  }
+  const locale = market === 'us' ? 'en' : 'ru';
+  const steps = constructStepsFor(rows, market);
+  // Настройки шага find_emails — только для ENG-пути. RU-ветка
+  // staff-инструмента остаётся байт-в-байт прежней: правка дефолтов общего
+  // конструктора для RU-баз — отдельное решение.
+  //
+  // reuse_website_description: описание берём из главной страницы, которую
+  // поиск почт уже скачал. Шаг пишет его в колонку Description, а
+  // enrich_descriptions строки с непустым описанием пропускает — второй
+  // закачки тех же сайтов (ещё по одному фетчу на строку, 5 потоков, до
+  // 60 с на сайт) не будет. Текст тот же: reusableMainPageDescription
+  // применяет тот же порог 220 символов, что и fetchAndExtract, и при
+  // коротком тексте возвращает пусто — такую строку enrich по-прежнему
+  // обойдёт сам, со своим фоллбеком на страницу «о компании».
+  //
+  // stop_at_first=false — глубокий обход: по умолчанию шаг обрывается на
+  // ПЕРВОМ пригодном адресе, поэтому второго адреса компании просто не
+  // существовало и выбирать капу было не из чего. Цена ограничена тремя
+  // рамками: страницы (max_pages), адреса с сайта (max_per_site) и срок на
+  // сайт (site_timeout_ms). merge_mode НЕ задаём: дефолтный 'all' и есть то
+  // самое склеивание исходного адреса с найденными, которое потом разносит
+  // split_emails.
+  const findEmailsConfig =
+    market === 'us'
+      ? {
+          reuse_website_description: true,
+          site_timeout_ms: CONSTRUCT_FIND_EMAILS_SITE_DEADLINE_MS,
+          stop_at_first: false,
+          max_per_site: constructFindEmailsPerSite(contactCap),
+          max_pages: CONSTRUCT_FIND_EMAILS_MAX_PAGES,
+        }
+      : null;
+  const bcJobId = await insertChildJob(ctx, 'base_constructor_jobs', {
+    user_id: ownerId,
+    workload_origin: 'automation',
+    file_name: `HE · ${baseLabel}`,
+    status: 'pending',
+    locale,
+    selected_steps: steps,
+    // Кап «до N почт на компанию» — ключ max, как читает STEP_RUNNERS воркера.
+    step_config: {
+      cap_emails_per_company: { max: contactCap },
+      ...(findEmailsConfig ? { find_emails: findEmailsConfig } : {}),
+    },
+    data: buildConstructGrid(rows, market),
+    initial_row_count: rows.length,
+    total_steps: steps.length,
+  });
+  return {
+    bcJobId,
+    locale,
+    steps,
+    construct: {
+      bc_job_id: bcJobId,
+      status: 'dispatched',
+      dispatched_at: new Date().toISOString(),
+      contact_cap: contactCap,
+    },
   };
 }
 
@@ -1883,14 +2194,165 @@ async function importConstructRows(ctx: HeStageContext, bcJobId: string): Promis
   return { rows, emailStatuses, emailsFound, validCount, hasDescription: idxByKey.has('description') };
 }
 
+/* ────────── Пост-импортный кап: «N компаний × до K адресов» ────────── */
+
+/**
+ * Ранг вердикта валидации при выборе, какие адреса компании оставить: копия
+ * таблицы шага cap_emails_per_company (lib/tools/processingSteps.ts,
+ * STATUS_RANK) — ok > catch_all > unknown > error > invalid > disposable,
+ * незнакомый вердикт ниже всех. Дубль намеренный: тянуть в воркер весь модуль
+ * шагов конструктора ради шести чисел дороже, чем держать копию рядом с местом
+ * применения. При правке рангов правятся ОБА места, иначе кап конструктора и
+ * кап здесь оставят разные адреса одной компании.
+ */
+const IMPORT_STATUS_RANK: Record<string, number> = {
+  ok: 5,
+  catch_all: 4,
+  unknown: 3,
+  error: 2,
+  invalid: 1,
+  disposable: 0,
+};
+
+/** Строка без адреса не уедет никуда — она проигрывает любому адресу. */
+function importedRowRank(email: string, status: string | null): number {
+  if (email.trim() === '') return -2;
+  return IMPORT_STATUS_RANK[(status ?? '').trim().toLowerCase()] ?? -1;
+}
+
+export interface HeImportCapResult<T> {
+  rows: T[];
+  /** Вердикты, параллельные rows (исходный порядок строк сохранён). */
+  emailStatuses: Array<string | null>;
+  /** Компаний в базе после капа — уникальных ключей «компания|домен». */
+  companies: number;
+  /** Адресов с вердиктом 'ok' среди ОСТАВЛЕННЫХ строк. */
+  validCount: number;
+  /** Адресов отброшено сверх капа «адресов на компанию». */
+  droppedOverContactCap: number;
+  /** Строк отброшено у компаний сверх лимита сборки. */
+  droppedOverCompanyCap: number;
+}
+
+/**
+ * Наложить на импортированную сетку конструктора ОБА числа, которые обещаны
+ * клиенту: «не больше companyCap компаний» (лимит сборки) и «не больше
+ * contactCap адресов у одной компании».
+ *
+ * Зачем повторно, если кап есть у конструктора (шаг cap_emails_per_company):
+ * шаг живёт в ЧУЖОМ процессе, и его может не оказаться в результате.
+ *  - Джоба упала или отменена на неизвестном шаге, а частичную сетку импорт
+ *    принимает (и правильно: платить второй раз не за что). Если она
+ *    оборвалась после split_emails, но до cap_emails_per_company, база до
+ *    26.09.2026 уезжала со ВСЕМИ найденными адресами: глубокий обход берёт с
+ *    сайта до constructFindEmailsPerSite адресов, то есть до десяти строк на
+ *    компанию вместо выбранных клиентом.
+ *  - Список шагов джобы мог быть собран старым кодом (см. проверку
+ *    split_emails в фазе CONSTRUCT).
+ * Кап после импорта делает число клиента правдой независимо от того, чем
+ * кончилась джоба, — и ровно поэтому штамп contact_cap_applied теперь ставится
+ * у любого импорта, а не только у дошедшей до конца джобы.
+ *
+ * Ключ компании — тот же, что у дедупа HARVEST (нормализованные компания и
+ * домен), поэтому группы соответствуют merged-строкам один-к-одному: строки,
+ * на которые split_emails разнёс адреса одной merged-строки, держат её company
+ * и website. Отсюда два следствия. У ДОШЕДШЕЙ до конца ENG-джобы кап
+ * идемпотентен — конструктор уже оставил ≤ contactCap строк на компанию.
+ * RU-сборку staff-инструмента он не меняет вовсе: без split_emails у каждой
+ * компании ровно одна строка (дедуп HARVEST схлопнул повторы), а companyCap
+ * равен лимиту сборки, которого merged-строки уже не превышают.
+ *
+ * Компании сверх companyCap — инвариант, а не рабочая ветка: сетка приходит из
+ * merged, где строк уже не больше лимита. Считаем и записываем в воронку на
+ * случай, если конструктор когда-нибудь вернёт строки компаний, которых мы ему
+ * не отдавали: молча потерять оплаченные компании нельзя.
+ *
+ * Пустой базы кап не делает никогда: у каждой компании остаётся минимум одна
+ * строка, а companyCap ≥ 1 оставляет минимум одну компанию.
+ */
+export function capImportedRows<T extends HeUnifiedRow>(input: {
+  rows: T[];
+  emailStatuses: Array<string | null>;
+  contactCap: number;
+  companyCap: number;
+}): HeImportCapResult<T> {
+  const { rows, emailStatuses } = input;
+  // Кап 0 обнулил бы оплаченную сборку: мусор в настройке не должен
+  // превращаться в «ни одного адреса» (та же граница, что у
+  // normalizeHeMaxEmailsPerCompany).
+  const contactCap = Math.max(1, input.contactCap);
+  const companyCap = Math.max(1, input.companyCap);
+
+  const groups = new Map<string, number[]>();
+  rows.forEach((row, i) => {
+    const key = `${normalizeCompanyForDedup(row.company)}|${normalizeWebsiteForDedup(row.website)}`;
+    const idxs = groups.get(key);
+    if (idxs) idxs.push(i);
+    else groups.set(key, [i]);
+  });
+
+  const keep = new Set<number>();
+  let companies = 0;
+  let droppedOverContactCap = 0;
+  let droppedOverCompanyCap = 0;
+  for (const idxs of groups.values()) {
+    // Порядок групп — первое появление компании в сетке, то есть порядок
+    // приоритета задач плана (round-robin мёрджа): при переполнении уходят
+    // последние компании, а не случайные.
+    if (companies >= companyCap) {
+      droppedOverCompanyCap += idxs.length;
+      continue;
+    }
+    companies += 1;
+    if (idxs.length <= contactCap) {
+      for (const i of idxs) keep.add(i);
+      continue;
+    }
+    // Оставляем лучшие адреса компании по вердикту, при равенстве — порядок
+    // сетки. Выходной порядок строк остаётся исходным (фильтр по keep ниже).
+    const ranked = [...idxs].sort((a, b) => {
+      const rb = importedRowRank(rows[b].email, emailStatuses[b] ?? null);
+      const ra = importedRowRank(rows[a].email, emailStatuses[a] ?? null);
+      return rb - ra || a - b;
+    });
+    for (const i of ranked.slice(0, contactCap)) keep.add(i);
+    droppedOverContactCap += idxs.length - contactCap;
+  }
+
+  const keptRows: T[] = [];
+  const keptStatuses: Array<string | null> = [];
+  // Валидных считаем по ОСТАВЛЕННЫМ строкам: кабинет показывает это число
+  // рядом с row_count («N of M rows with a verified email»), и счёт по сетке
+  // ДО капа дал бы «валидных больше, чем строк в базе».
+  let validCount = 0;
+  rows.forEach((row, i) => {
+    if (!keep.has(i)) return;
+    const status = emailStatuses[i] ?? null;
+    if (status === 'ok') validCount += 1;
+    keptRows.push(row);
+    keptStatuses.push(status);
+  });
+
+  return {
+    rows: keptRows,
+    emailStatuses: keptStatuses,
+    companies,
+    validCount,
+    droppedOverContactCap,
+    droppedOverCompanyCap,
+  };
+}
+
 /* ─────────────────────────── Стадия ─────────────────────────── */
 
 export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
   const usage = newUsage();
   const baseId = payloadString(job, 'base_id');
   // Лимит сборки из payload (route кладёт туда выбор пользователя): один на
-  // всё — пагинация реестра, чтение дочерних джоб, итоговый кап базы.
-  const limit = totalRowsCap(job);
+  // всё — пагинация реестра, чтение дочерних джоб, итоговый кап базы. У
+  // refill-сборки ниже уменьшается под дневной кап лидов проекта («РАЗМЕР
+  // REFILL-СБОРКИ»), поэтому let, а не const.
+  let limit = totalRowsCap(job);
   // Refill-режим ENG auto-pipeline: финал — долив в запущенную кампанию
   // (stages/baseCollectRefill.ts), а не analyzing + base_analyze.
   const isRefill = job.payload?.refill === true;
@@ -1925,8 +2387,63 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // ctx.market прокидывает воркер, фолбэк — колонка he_projects.market.
   const market = ctx.market ?? projectMarket(project);
 
+  // Кап «адресов на компанию» для этой базы: штамп с проекта, поставленный при
+  // постановке сборки (baseCollectEnqueue), иначе дефолт движка — прежняя
+  // пятёрка. Проект читаем НЕ здесь: значение должно быть стабильным на всю
+  // сборку, а перечитывание давало бы разный кап на разных тиках одной джобы.
+  const ownContactCap = normalizeHeMaxEmailsPerCompany(base.max_emails_per_company);
+  const contactCap = ownContactCap ?? HE_MAX_EMAILS_PER_COMPANY_DEFAULT;
+  // Непустое значение на строке доказывает, что миграция
+  // 20260926_0001_he_emails_per_company.sql применена, — значит и колонку
+  // contact_cap_applied писать безопасно. Без этой проверки финальный апдейт
+  // оплаченной сборки мог бы упасть на неизвестной колонке.
+  const contactCapColumnsPresent = ownContactCap !== null;
+
   const info: HeCollectInfo =
     base.collect_info && typeof base.collect_info === 'object' ? base.collect_info : {};
+
+  // ─── РАЗМЕР REFILL-СБОРКИ ───
+  // Ночной долив просит КОМПАНИИ, а его дневной бюджет daily_leads_cap считает
+  // СТРОКИ-лиды, и одна компания после разноса адресов даёт их до contactCap.
+  // Пока объём сборки был флэтовым (HE_AUTO_REFILL_ROWS_LIMIT), лишние компании
+  // проходили оплаченный краул сайта и SMTP-пробу на каждый адрес, который кап
+  // того же вечера выбросит, и при этом оставались выжженными: база уходит в
+  // 'analyzed', её компании исключены из будущих сборок проекта
+  // (loadOtherBaseExclusionKeys), вернуть их нельзя. Перевод «лиды → компании» и
+  // запас на компании без допущенного адреса здесь НЕ дублируются — их считает
+  // resolveHeRefillCollectCompanies (stages/baseCollectRefill.ts), рядом с самим
+  // доливом, иначе два числа со временем разъехались бы. Расчёт умеет только
+  // УМЕНЬШИТЬ сборку (внутри min с payloadLimit): рост объёма — новые деньги и
+  // решение владельца, а не функции.
+  //
+  // Считается ДО DISPATCH: платит сборка, а не долив. Итог штампуется в
+  // collect_info.limit и на следующих тиках берётся оттуда — лимит обязан быть
+  // один на всю сборку (как contactCap выше), и долив читает это же поле как
+  // stats.company_limit, «с каким лимитом сборка реально шла». Ни одно правило
+  // допуска (вердикт валидации, чёрный список, возврат компаний при отказе, кап
+  // компаний) этим не затрагивается: меняется только СКОЛЬКО компаний собирать.
+  if (isRefill) {
+    const plannedLimit =
+      typeof info.limit === 'number' && Number.isFinite(info.limit)
+        ? Math.min(limit, info.limit)
+        : limit;
+    limit = await resolveHeRefillCollectCompanies(ctx, {
+      projectId: job.project_id,
+      payloadLimit: plannedLimit,
+      contactCap,
+    });
+    if (limit < plannedLimit) {
+      stageLog(
+        ctx,
+        `[base_collect] refill: лимит сборки ${plannedLimit} → ${limit} компаний под дневной кап ` +
+          `лидов проекта (до ${contactCap} адресов на компанию)`,
+      );
+    }
+    if (info.limit !== limit) {
+      info.limit = limit;
+      await persistCollectInfo(ctx, baseId, info);
+    }
+  }
 
   // ─── PLAN ───
   if (!info.plan) {
@@ -1981,7 +2498,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   let excludedKeysCache: HeBaseExclusionKeys | null = null;
   const getExcludedKeys = async (): Promise<HeBaseExclusionKeys> => {
     if (!excludedKeysCache) {
-      excludedKeysCache = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId);
+      excludedKeysCache = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId, market);
     }
     return excludedKeysCache;
   };
@@ -2057,13 +2574,13 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // реестра это страховка (основное исключение прошло на выборке), для
   // hh/карт — единственная точка исключения.
   const existingKeys = await getExcludedKeys();
-  const kept = interleaved.filter((r) => !matchesExclusion(existingKeys, r.company, r.inn));
+  const kept = interleaved.filter((r) => !matchesExclusion(existingKeys, r.company, r.inn, r.website));
   const excludedExisting = interleaved.length - kept.length;
   if (excludedExisting > 0) {
     stageLog(ctx, `[base_collect] исключено ${excludedExisting} строк — компании уже есть в других базах проекта`);
   }
   // Кап — после дедупа и исключения, как раньше после дедупа (limit уже
-  // посчитан выше — тот же totalRowsCap(job)).
+  // посчитан выше: totalRowsCap(job), у refill — уменьшенный под дневной кап).
   const merged = kept.slice(0, limit);
 
   const stats = {
@@ -2145,51 +2662,38 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // пометке строк (_email_status) при финальной записи: null, когда
   // конструктор не запускался / вернул пусто.
   let finalEmailStatuses: Array<string | null> | null = null;
+  // Кап, реально применённый к этой базе (колонка he_bases.contact_cap_applied).
+  // null — конструктор не запускался или не отдал данных: капа на базе нет, и
+  // ужесточать нечего.
+  let contactCapApplied: number | null = null;
+  // Что срезал пост-импортный кап (capImportedRows) — в воронку stats, рядом с
+  // соседними исключениями: оплаченные строки не исчезают молча.
+  let droppedOverContactCap = 0;
+  let droppedOverCompanyCap = 0;
+  // Компаний в готовой базе. Без конструктора это сами merged-строки: их ключи
+  // «компания|домен» уникальны после дедупа HARVEST, то есть строка = компания.
+  let companiesTotal = merged.length;
   const construct = info.construct;
   if ((!construct || construct.status === 'dispatched') && needsConstruct(merged)) {
     if (!construct?.bc_job_id) {
       // DISPATCH-CONSTRUCT: джоба конструктора (воркер baseConstructor клеймит
       // pending), её id — в collect_info.construct; дальше WAIT с паузой 60с.
-      if (!project.created_by) {
-        throw new Error('he_projects.created_by пуст — джобе конструктора некому принадлежать');
-      }
-      const locale = market === 'us' ? 'en' : 'ru';
-      const steps = constructStepsFor(merged);
-      // Два ограничителя расхода шага find_emails — только для ENG-пути.
-      // RU-ветка staff-инструмента остаётся байт-в-байт прежней: правка
-      // дефолтов общего конструктора для RU-баз — отдельное решение.
-      //
-      // reuse_website_description: описание берём из главной страницы, которую
-      // поиск почт уже скачал. Шаг пишет его в колонку Description, а
-      // enrich_descriptions строки с непустым описанием пропускает — второй
-      // закачки тех же сайтов (ещё по одному фетчу на строку, 5 потоков, до
-      // 60 с на сайт) не будет. Текст тот же: reusableMainPageDescription
-      // применяет тот же порог 220 символов, что и fetchAndExtract, и при
-      // коротком тексте возвращает пусто — такую строку enrich по-прежнему
-      // обойдёт сам, со своим фоллбеком на страницу «о компании».
-      const findEmailsConfig =
-        market === 'us'
-          ? { reuse_website_description: true, site_timeout_ms: CONSTRUCT_FIND_EMAILS_SITE_DEADLINE_MS }
-          : null;
-      const bcJobId = await insertChildJob(ctx, 'base_constructor_jobs', {
-        user_id: project.created_by,
-        workload_origin: 'automation',
-        file_name: `HE · ${base.filename ?? baseId}`,
-        status: 'pending',
-        locale,
-        selected_steps: steps,
-        // Кап «до 5 почт на компанию» — ключ max, как читает STEP_RUNNERS воркера.
-        step_config: {
-          cap_emails_per_company: { max: 5 },
-          ...(findEmailsConfig ? { find_emails: findEmailsConfig } : {}),
-        },
-        data: buildConstructGrid(merged, market),
-        initial_row_count: merged.length,
-        total_steps: steps.length,
+      const dispatched = await dispatchConstructJob({
+        ctx,
+        ownerId: project.created_by,
+        baseLabel: base.filename ?? baseId,
+        rows: merged,
+        market,
+        contactCap,
       });
-      info.construct = { bc_job_id: bcJobId, status: 'dispatched', dispatched_at: new Date().toISOString() };
+      info.construct = dispatched.construct;
       await persistCollectInfo(ctx, baseId, info);
-      stageLog(ctx, `[base_collect] construct: создана base_constructor_jobs ${bcJobId} (${merged.length} строк, locale ${locale})`);
+      stageLog(
+        ctx,
+        `[base_collect] construct: создана base_constructor_jobs ${dispatched.bcJobId} ` +
+          `(${merged.length} строк, locale ${dispatched.locale}, шаги ${dispatched.steps.join(' → ')}, ` +
+          `кап ${contactCap} адресов на компанию)`,
+      );
       await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
       return {
         result: { waiting: true, base_id: baseId, construct: 'dispatched' },
@@ -2202,6 +2706,72 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     const bc = await readConstructJobStatus(ctx, construct.bc_job_id);
     const bcStatus = bc?.status ?? 'failed';
     if (bcStatus === 'completed' || bcStatus === 'failed' || bcStatus === 'cancelled') {
+      // ENG: джоба могла быть поставлена ДО того, как split_emails стал
+      // обязательным (26.09.2026). Её сетку импортировать нельзя: адреса
+      // компании склеены в одной ячейке, вердикт валидации там ОДИН — лучший
+      // из адресов, — и импорт прикрепил бы его к ПЕРВОМУ адресу ячейки.
+      // Строка уехала бы в рассылку с чужим «ok». Молча принять такой
+      // результат — ровно тот отказ, который этот блок и закрывает: вместо
+      // импорта один раз пересобираем базу по текущему контракту.
+      // Повтор одноразовый: у новой джобы split_emails в selected_steps есть
+      // по построению (constructStepsFor), поэтому сюда она вернуться не
+      // может, а если всё же вернулась — платить второй раз не будем и
+      // скажем причину вслух.
+      if (market === 'us' && bc?.selected_steps && !bc.selected_steps.includes('split_emails')) {
+        if (construct.resplit_of) {
+          // Статус фазы конструктора в тексте не для красоты — ровно как у
+          // того же отказа в доливе (baseCollectRefill.ts:595): `he_bases.error`
+          // кабинет сворачивает в машинный код причины
+          // (clientErrors.classifyHeClientError), и именно по формулировке
+          // «конструктор завершился со статусом …» ENG-клиент получает
+          // `enrichment` — «поиск и проверка адресов для этой базы не
+          // доработали», — а не обобщённый технический сбой (`unknown`), как
+          // было до 27.09.2026. Русский текст остаётся staff'у (he_jobs.error,
+          // логи воркера, мастер специалиста), клиент видит только код.
+          // Переформулировать — только сверившись с тем классификатором.
+          const note =
+            `Конструктор дважды вернул результат без разноса адресов по строкам ` +
+            `(джобы ${construct.resplit_of}, ${construct.bc_job_id}; ` +
+            `конструктор завершился со статусом ${bcStatus}) — импорт отклонён: ` +
+            `вердикты валидации в такой сетке не принадлежат адресам построчно`;
+          info.construct = { ...construct, note };
+          await ctx.supabase
+            .from('he_bases')
+            .update({
+              status: 'failed',
+              error: note.slice(0, 500),
+              collect_info: { ...info, stats },
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', baseId);
+          throw new Error(note);
+        }
+        const replacement = await dispatchConstructJob({
+          ctx,
+          ownerId: project.created_by,
+          baseLabel: base.filename ?? baseId,
+          rows: merged,
+          market,
+          contactCap,
+        });
+        info.construct = {
+          ...replacement.construct,
+          resplit_of: construct.bc_job_id,
+          note: `джоба ${construct.bc_job_id} без split_emails — база пересобирается по текущему контракту`,
+        };
+        await persistCollectInfo(ctx, baseId, info);
+        stageLog(
+          ctx,
+          `[base_collect] construct: legacy job ${construct.bc_job_id} без split_emails → ` +
+            `повтор ${replacement.bcJobId}`,
+        );
+        await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+        return {
+          result: { waiting: true, base_id: baseId, construct: 're_dispatched' },
+          tokensUsed: usage.tokensUsed,
+          costUsd: usage.costUsd,
+        };
+      }
       // IMPORT: failed/cancelled базу НЕ валит — импортируем частичный data,
       // если он есть, иначе идём в analyzing без обогащения.
       const imported = await importConstructRows(ctx, construct.bc_job_id);
@@ -2210,16 +2780,47 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
           ? null
           : `конструктор завершился со статусом ${bcStatus}${bc?.error_message ? `: ${bc.error_message}` : ''}`;
       if (imported) {
-        finalRows = imported.rows;
-        finalEmailStatuses = imported.emailStatuses;
+        // Оба числа клиента накладываются ЗДЕСЬ, на готовую сетку: «до N
+        // адресов на компанию» и лимит сборки как кап КОМПАНИЙ. Иначе число
+        // клиента зависело бы от того, дошла ли джоба до шага
+        // cap_emails_per_company (см. capImportedRows).
+        const capped = capImportedRows({
+          rows: imported.rows,
+          emailStatuses: imported.emailStatuses,
+          contactCap,
+          companyCap: limit,
+        });
+        finalRows = capped.rows;
+        finalEmailStatuses = capped.emailStatuses;
+        droppedOverContactCap = capped.droppedOverContactCap;
+        droppedOverCompanyCap = capped.droppedOverCompanyCap;
+        companiesTotal = capped.companies;
         if (imported.hasDescription) finalColumns = [...HE_AUTO_COLLECT_COLUMNS, 'description'];
+        // Кап засчитан применённым у ЛЮБОГО импорта: его накладывает
+        // capImportedRows в этом же процессе, а не только шаг конструктора.
+        // Раньше у частичного результата (failed/cancelled оборвался на
+        // неизвестном шаге) штамп оставался null — честно, но база при этом и
+        // правда уезжала без капа; теперь кап есть у обеих ветвей.
+        contactCapApplied = contactCap;
         info.construct = {
           ...construct,
           status: bcStatus === 'completed' ? 'done' : bcStatus,
           emails_found: imported.emailsFound,
-          valid_count: imported.validCount,
+          // Валидных — по оставленным строкам (см. capImportedRows): кабинет
+          // печатает это число рядом с row_count базы.
+          valid_count: capped.validCount,
           ...(failNote ? { note: `${failNote} — импортирован частичный результат` } : {}),
         };
+        if (droppedOverContactCap > 0 || droppedOverCompanyCap > 0) {
+          stageLog(
+            ctx,
+            `[base_collect] кап после импорта: ${companiesTotal} компаний, ${finalRows.length} строк; ` +
+              `отброшено ${droppedOverContactCap} адресов сверх ${contactCap} на компанию` +
+              (droppedOverCompanyCap > 0
+                ? `, ${droppedOverCompanyCap} строк компаний сверх лимита ${limit}`
+                : ''),
+          );
+        }
       } else {
         info.construct = {
           ...construct,
@@ -2307,7 +2908,44 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   } catch (e) {
     stageLog(ctx, `[base_collect] релевант-гейт пропущен: ${e instanceof Error ? e.message : String(e)}`);
   }
-  const statsWithQuality = { ...stats, low_relevance: lowRelevanceCount };
+  // Адресов, которые запуск реально возьмёт: вердикт 'ok' И строка не помечена
+  // вне вертикали — те же два фильтра, что у launchTemplate. Это ОЦЕНКА СВЕРХУ:
+  // запуск ещё выбросит строки без разбираемого адреса, повторные адреса (после
+  // split_emails + dedup_email их быть не должно) и контакты из чёрного списка
+  // клиента. Число нужно и воронке, и сравнению с потолком запуска ниже.
+  const okContacts = storedRows.reduce(
+    (n, r) => n + (r._email_status === 'ok' && r._low_relevance !== true ? 1 : 0),
+    0,
+  );
+  const statsWithQuality = {
+    ...stats,
+    low_relevance: lowRelevanceCount,
+    companies_total: companiesTotal,
+    ok_contacts: okContacts,
+    dropped_over_contact_cap: droppedOverContactCap,
+    dropped_over_company_cap: droppedOverCompanyCap,
+  };
+  // Потолок мастера считает АДРЕСА (HE_LAUNCH_MAX_LEADS лидов), а число клиента
+  // — КОМПАНИИ, и после разноса адресов по строкам одна компания даёт до
+  // contactCap адресов: 2000 компаний × 5 адресов — до 10 000 лидов при потолке
+  // 2000. ОТКАЗА (413) у market='us' на это больше НЕТ: потолок выбирает —
+  // сначала по одному сильнейшему адресу каждой компании, потом вторые
+  // (selectLeadsWithinLaunchCap в launchHandoff.ts), — поэтому оплаченные
+  // компании уезжают все, а сверхпотолочные адреса остаются дома. В журнал
+  // соотношение всё равно пишется: staff должен видеть, что часть адресов
+  // собранной базы запуск не возьмёт. RU-инструмент не предупреждаем: там строка
+  // = компания, потолок по-прежнему отвечает 413, у staff-UI на этот случай свой
+  // пречек, а базы на 50 000 строк штатны — предупреждение было бы шумом на
+  // каждой сборке.
+  if (market === 'us' && okContacts > HE_LAUNCH_MAX_LEADS) {
+    stageLog(
+      ctx,
+      `[base_collect] адресов с вердиктом ok ${okContacts} при потолке запуска ` +
+        `${HE_LAUNCH_MAX_LEADS}: запуск не откажет — возьмёт по сильнейшему адресу каждой ` +
+        `компании, пока не наберёт потолок, остальные адреса не уедут. ` +
+        `Компаний ${companiesTotal}, кап ${contactCap} адресов на компанию`,
+    );
+  }
 
   // ─── REFILL (ENG auto-pipeline) ───
   // Вместо финала «analyzing + base_analyze»: долив валидных строк лидами в
@@ -2336,6 +2974,12 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       row_count: storedRows.length,
       status: 'analyzing',
       collect_info: { ...info, stats: statsWithQuality },
+      // Применённый кап — только когда колонка точно существует (см.
+      // contactCapColumnsPresent). Значение есть и в collect_info.construct,
+      // поэтому на инсталляции без миграции ничего не теряется.
+      ...(contactCapColumnsPresent && contactCapApplied !== null
+        ? { contact_cap_applied: contactCapApplied }
+        : {}),
       updated_at: new Date().toISOString(),
     })
     .eq('id', baseId);

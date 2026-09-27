@@ -3,7 +3,12 @@
 /**
  * Шаг 1 «Brief» клиентского ENG-кабинета: карточки site_profile (что движок
  * понял с сайта), редактируемые offer/style/signature overrides (уточняют
- * генерацию писем) и «Re-run research» с дедупом на бэкенде.
+ * генерацию писем), настройка проекта «до N адресов одной компании» и
+ * «Re-run research» с дедупом на бэкенде.
+ *
+ * Настройка живёт здесь, а не на шаге сборки баз: это ДЕФОЛТ ПРОЕКТА для всех
+ * будущих сборок (на поставленной базе лимит уже проштампован), то есть тот же
+ * уровень, что и остальные настройки проекта на этом шаге.
  */
 
 import { useMemo, useState } from 'react';
@@ -27,6 +32,33 @@ const PROFILE_FIELDS: Array<{ key: string; label: string }> = [
   { key: 'current_clients', label: 'Current clients' },
   { key: 'cases', label: 'Cases' },
 ];
+
+/**
+ * Варианты «сколько адресов одной компании брать в работу». Список короткий
+ * намеренно: роут принимает 1..100, но клиенту нужен выбор, а не поле ввода с
+ * границами, которые он должен угадывать.
+ */
+const CONTACT_CAP_OPTIONS = [1, 2, 3, 5, 10];
+
+/**
+ * Что действует, пока клиент ничего не выбрал. Зеркалит
+ * HE_MAX_EMAILS_PER_COMPANY_DEFAULT движка; импортировать константу нельзя —
+ * модуль постановки сборки уехал бы в клиентский бандл вместе с именами таблиц
+ * и логикой дедупа. Авторитет всё равно на сервере: пустая колонка = дефолт
+ * движка, а сохранённый выбор уезжает числом.
+ */
+const CONTACT_CAP_DEFAULT = 5;
+
+/**
+ * Действующее значение из строки проекта. Тип `EngProject` (api-client) поле
+ * пока не объявляет — читаем через unknown, а не расширяем чужой DTO.
+ * Границы не проверяем: их держит check-ограничение колонки, здесь достаточно
+ * «целое положительное», иначе показываем дефолт.
+ */
+function contactCapOf(project: unknown): number {
+  const raw = (project as { max_emails_per_company?: unknown } | null)?.max_emails_per_company;
+  return typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0 ? raw : CONTACT_CAP_DEFAULT;
+}
 
 function isResearchActive(jobs: HeJobSummary[]): boolean {
   return jobs.some(
@@ -56,6 +88,11 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
   const [savedAt, setSavedAt] = useState(0);
   const [researchBusy, setResearchBusy] = useState(false);
   const [error, setError] = useState('');
+  // Селект настройки: начальное значение берём из проекта сразу (в отличие от
+  // overrides, пустое поле здесь означало бы «одна компания = один адрес»).
+  const [cap, setCap] = useState(() => contactCapOf(project));
+  const [capSaving, setCapSaving] = useState(false);
+  const [capSavedAt, setCapSavedAt] = useState(0);
 
   // Перечитываем overrides из деталки (первый рендер и после поллов) —
   // React-паттерн «правка state при смене пропа во время рендера», как в
@@ -67,9 +104,17 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
     setStyle(typeof brief.style_override === 'string' ? brief.style_override : '');
     setSignature(typeof brief.signature_override === 'string' ? brief.signature_override : '');
     setBusiness(typeof brief.business_override === 'string' ? brief.business_override : '');
+    setCap(contactCapOf(project));
   }
 
   const researchActive = useMemo(() => isResearchActive(jobs), [jobs]);
+
+  // Значение, выставленное вне этого селекта (поддержка попросила 7), обязано
+  // остаться видимым: иначе экран показывал бы не то, что действует.
+  const capOptions = useMemo(
+    () => (CONTACT_CAP_OPTIONS.includes(cap) ? CONTACT_CAP_OPTIONS : [...CONTACT_CAP_OPTIONS, cap].sort((a, b) => a - b)),
+    [cap],
+  );
 
   const onSave = async () => {
     if (saving) return;
@@ -88,6 +133,32 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
       setError(e instanceof Error ? e.message : 'Failed to save');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const onSaveCap = async () => {
+    if (capSaving) return;
+    setCapSaving(true);
+    setError('');
+    try {
+      // Тело PATCH в api-client объявлено только полями брифа — расширяем тип
+      // на месте вызова, чтобы не править общий модуль чужой полосы (см.
+      // handoff в отчёте). На провод уезжает { max_emails_per_company: <число> }.
+      const body: Parameters<typeof patchEngProject>[1] & { max_emails_per_company: number } = {
+        max_emails_per_company: cap,
+      };
+      const saved = await patchEngProject(project.id, body);
+      // Показываем то, что БД действительно сохранила (ответ идёт через ту же
+      // клиентскую проекцию, что и деталка): `updated_at` у he_projects по этой
+      // записи не меняется, поэтому блок перечитывания деталки выше не
+      // сработает и синхронизировать селект больше нечему.
+      setCap(contactCapOf(saved?.project));
+      setCapSavedAt(Date.now());
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally {
+      setCapSaving(false);
     }
   };
 
@@ -232,6 +303,44 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
               </span>
             )}
           </div>
+        </div>
+      </EngCard>
+
+      <EngCard>
+        <EngEyebrow>Contacts per company</EngEyebrow>
+        <p className="mb-3 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+          The most people we may write to at one company. Applies to lists collected from now on —
+          a list you have already collected keeps the number it was collected with.
+        </p>
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="text-[10px]" style={{ color: 'var(--cp-text-l)' }}>
+            Email addresses per company
+            <select
+              value={cap}
+              onChange={(e) => setCap(Number(e.target.value))}
+              className="ds-input mt-1 w-full text-xs"
+            >
+              {capOptions.map((n) => (
+                <option key={n} value={n}>
+                  {n === 1 ? 'Up to 1 address' : `Up to ${n} addresses`}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            onClick={() => void onSaveCap()}
+            disabled={capSaving}
+            className="ds-btn-primary inline-flex items-center gap-1.5 text-xs"
+          >
+            {capSaving ? <EngSpinner className="h-3 w-3" /> : <Save className="h-3 w-3" />}
+            Save
+          </button>
+          {capSavedAt > 0 && !capSaving && (
+            <span className="text-[11px]" style={{ color: 'var(--cp-green)' }}>
+              Saved
+            </span>
+          )}
         </div>
       </EngCard>
 

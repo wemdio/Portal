@@ -281,9 +281,67 @@ interface EngPresetsResponse {
   error?: string;
 }
 
+/* ── Окно отправки (sending window) ── */
+
+/**
+ * Окно отправки кампании: пояс, часы и дни недели. Клиент выбирает его при
+ * запуске и может поменять после (роуты `/eng/templates/[id]/launch` и
+ * `/eng/templates/[id]/schedule`).
+ *
+ * `days` — нумерация рассыльщика (0=Sunday … 6=Saturday), как её отдаёт и
+ * принимает API; порядок показа задаёт список `weekdays` ответа.
+ */
+export interface EngSendingWindow {
+  timezone: string;
+  /** 'HH:MM', 24 часа. */
+  from: string;
+  /** 'HH:MM', 24 часа. */
+  to: string;
+  days: number[];
+}
+
+/** Пункт выпадашки поясов: подпись человеческая, value — то, что шлём обратно. */
+export interface EngSendingWindowTimezoneOption {
+  value: string;
+  label: string;
+}
+
+export interface EngSendingWindowWeekdayOption {
+  value: number;
+  label: string;
+}
+
+/**
+ * GET /eng/templates/[id]/schedule. Списки приходят С СЕРВЕРА, а не лежат в
+ * бандле: принимаемый рассыльщиком набор поясов — серверный контракт, и вторая
+ * его копия на фронте разъехалась бы с первой (клиент выбрал бы пояс, на который
+ * запуск отвечает отказом). Пустой ответ (демо-фикстура) — поле отсутствует.
+ */
+export interface EngSendingWindowResponse {
+  /** Сохранённый выбор клиента; null — ещё не выбирал. */
+  schedule?: EngSendingWindow | null;
+  default?: EngSendingWindow;
+  timezones?: EngSendingWindowTimezoneOption[];
+  weekdays?: EngSendingWindowWeekdayOption[];
+  launched?: boolean;
+  error?: string;
+}
+
+export interface EngSendingWindowUpdateResponse {
+  ok?: boolean;
+  schedule?: EngSendingWindow;
+  /** Сколько кампаний запуска приняли новое окно (id кампаний кабинету не отдаются). */
+  campaigns_updated?: number;
+  campaigns_total?: number;
+  warnings?: string[];
+  error?: string;
+}
+
 export interface EngLaunchResponse {
   ok?: boolean;
   launch?: EngTemplateLaunchInfo;
+  /** Окно отправки, с которым уехали созданные кампании. */
+  schedule?: EngSendingWindow;
   warnings?: string[];
   error?: string;
 }
@@ -438,11 +496,27 @@ export async function fetchEngLaunchPresets(templateId: string): Promise<HeLaunc
 
 export async function launchEngTemplate(
   templateId: string,
-  body: { preset_id: string; force?: boolean },
+  body: { preset_id: string; force?: boolean; schedule?: EngSendingWindow },
 ): Promise<EngLaunchResponse> {
   return engApiFetch<EngLaunchResponse>(`/eng/templates/${templateId}/launch`, {
     method: 'POST',
     body: JSON.stringify(body),
+  });
+}
+
+/** Что предложить клиенту в окне отправки (работает и до запуска шаблона). */
+export async function fetchEngSendingWindow(templateId: string): Promise<EngSendingWindowResponse> {
+  return engApiFetch<EngSendingWindowResponse>(`/eng/templates/${templateId}/schedule`);
+}
+
+/** Поменять окно отправки у уже созданных кампаний запуска. */
+export async function updateEngSendingWindow(
+  templateId: string,
+  schedule: EngSendingWindow,
+): Promise<EngSendingWindowUpdateResponse> {
+  return engApiFetch<EngSendingWindowUpdateResponse>(`/eng/templates/${templateId}/schedule`, {
+    method: 'PATCH',
+    body: JSON.stringify({ schedule }),
   });
 }
 
@@ -468,9 +542,28 @@ export interface EngDashboardVertical {
   stageDetail: string;
   /** Пять точек прогресса: research → letters → base → template → launched. */
   dots: boolean[];
+  /**
+   * Числа карточки. Этот DTO написан руками и компилятором с роутом НЕ сверяется
+   * (`/eng/dashboard` отдаёт `NextResponse.json`), поэтому имена полей здесь —
+   * копия имён роута: `companies`, `rows`.
+   */
   stats: {
+    /**
+     * КОМПАНИИ в базе (`collect_info.stats.companies_total`, пишет стадия при
+     * финализации). 0 = не знаем: у баз, собранных до 26.09.2026, ключа нет.
+     * Компаниями считать `rows` нельзя — см. ниже.
+     */
     companies: number;
+    /**
+     * СТРОКИ базы (`he_bases.row_count`). Строка ≠ компания: ENG-сборка
+     * разносит один адрес на строку (шаг `split_emails` у market='us'), у
+     * компании с пятью адресами строк пять. Годится как честная замена
+     * `companies`, когда тех нет, но только под своим именем («rows»).
+     */
+    rows: number;
+    /** Адреса, найденные конструктором (не компании). */
     emails_found: number;
+    /** Из них с допущенным вердиктом валидации (тоже адреса). */
     valid_count: number;
     appended_today: number;
     leads_launched: number;

@@ -72,6 +72,13 @@ export interface ClientEngProjectDetail {
 
 // `error` здесь НЕТ (как и в BASE_FIELDS): причина уезжает машинным кодом
 // `error_code`, см. toClientEngStageErrorCode.
+//
+// `max_emails_per_company` — настройка САМОГО клиента («до N адресов одной
+// компании», миграция 20260926_0001), а не наша кухня: без неё кабинет не может
+// показать действующее значение, и выбор становится невидимым. Отдаём число, а
+// не то, как оно применяется: лимит, реально применённый к конкретной базе
+// (`he_bases.contact_cap_applied`), в BASE_FIELDS не входит — это отчёт
+// конструктора, и объясняется он только устройством шага.
 const PROJECT_FIELDS = [
   'id',
   'name',
@@ -79,6 +86,7 @@ const PROJECT_FIELDS = [
   'status',
   'market',
   'autopilot',
+  'max_emails_per_company',
   'created_at',
   'updated_at',
 ] as const;
@@ -254,7 +262,31 @@ const BASE_ANALYSIS_FIELDS = ['notable_segments', 'recommended_angles'] as const
 
 const CYRILLIC_RE = /[\u0400-\u04FF]/;
 
-const COLLECT_STATS_FIELDS = ['tasks_total', 'tasks_done', 'tasks_failed', 'rows_total'] as const;
+/**
+ * Счётчики сборки: прогресс-карта + `low_relevance`.
+ *
+ * `low_relevance` — СКОЛЬКО строк квалити-гейт стадии пометил как вне
+ * вертикали (`statsWithQuality` в stages/baseCollect). Запуск такие строки не
+ * отправляет (`runHeTemplateLaunch` фильтрует `_low_relevance`), поэтому без
+ * этого числа карточка базы обещает клиенту объём, которого не будет.
+ *
+ * Это ЧИСЛО, а не пометки строк: сами `_low_relevance` по-прежнему заперты
+ * default-deny по префиксу (BASE_ROW_KEPT_MARKER) — там наша оценка КОНКРЕТНОЙ
+ * строки клиента, здесь только её количество. Тот же уровень раскрытия, что
+ * уже даёт кабинету проба среза (`slice_probe.hit_rate` и off-target примеры,
+ * EngStepBases → AutopilotDecisions).
+ *
+ * `excluded_existing_bases` / `excluded_during_fetch` НЕ отдаём: эти строки
+ * отсеяны как уже собранные в других базах проекта, то есть на объём запуска
+ * этой базы не влияют, а объясняются только устройством межбазового дедупа.
+ */
+const COLLECT_STATS_FIELDS = [
+  'tasks_total',
+  'tasks_done',
+  'tasks_failed',
+  'rows_total',
+  'low_relevance',
+] as const;
 
 // `note` СКВОЗЬ НЕ ПРОХОДИТ (как и tasks[].source) — переводится подписью,
 // см. CONSTRUCT_NOTE_LABELS.
@@ -721,6 +753,19 @@ export const HE_HYPOTHESIS_CLIENT_COLUMNS =
  */
 export const HE_PROJECT_CLIENT_COLUMNS =
   'id, name, website_url, status, market, autopilot, error, created_at, updated_at';
+
+/*
+ * `max_emails_per_company` в этот литерал НЕ добавлен, хотя в PROJECT_FIELDS он
+ * есть, и это ровно тот безопасный случай расхождения, который описан выше
+ * («список уже проектора»): действующее значение настройки показывает шаг
+ * мастера по ДЕТАЛКЕ проекта (`loadHeProjectDetail` читает строку целиком), а
+ * список проектов и ответ на создание его не рисуют.
+ *
+ * Причина не косметическая: колонка появилась миграцией 20260926_0001, и на
+ * установке без неё PostgREST отвечает 42703 на ВЕСЬ `select` — список
+ * проектов кабинета лёг бы целиком. Постановка сборки по той же причине читает
+ * колонку отдельным запросом и молча переходит на дефолт (`baseCollectEnqueue`).
+ */
 
 /**
  * Строка `he_projects`. Экспортирована: создание проекта и правка брифа

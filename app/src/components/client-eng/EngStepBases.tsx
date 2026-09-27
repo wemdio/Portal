@@ -7,6 +7,9 @@
  * сборки (фазы задач + счётчики конструктора: найдено/валидных почт из
  * collect_info.construct), статусы баз (анализ: сегменты/углы) и кампании
  * после запуска (имя, контакты, дата — без ссылок наружу: кабинет white-label).
+ *
+ * У готовой базы рядом со «строками» стоит объём, который реально уедет в
+ * рассылку (SendVolume): строк в базе и контактов в кампании — разные числа.
  */
 
 import { useMemo } from 'react';
@@ -75,6 +78,100 @@ function CollectProgress({ base }: { base: EngBaseSummary }) {
   );
 }
 
+/* ── Сколько из готовой базы реально уедет в рассылку ── */
+
+/**
+ * Честный объём ДО запуска. Строк в базе и контактов в кампании — разные
+ * числа: запуск (`runHeTemplateLaunch`) отправляет только строки с вердиктом
+ * валидации 'ok', строки вне вертикали выбрасывает, а повторный адрес грузит
+ * один раз (`mapBaseRowsToLeads`, дедуп по email). База на 2000 строк уезжает
+ * сотнями, и до этой правки клиент узнавал об этом только после запуска.
+ *
+ * ПОЧЕМУ НЕТ ОДНОГО ЧИСЛА «ready to send». Точный ответ считается только по
+ * самим строкам: нужно пересечение «вердикт ok» × «не помечена вне вертикали»
+ * минус дубли адресов. Строки живут в `he_bases.data` (до 50k строк, десятки
+ * МБ), а деталку проекта кабинет поллит каждые 4 секунды — по ней этот jsonb
+ * намеренно не тянут (projectDetail.ts: HE_BASE_LIST_COLUMNS без `data`).
+ * Из двух счётчиков в `collect_info` точное число не выводится: пересечение
+ * «ok» и «вне вертикали» неизвестно, и любая арифметика над ними дала бы
+ * ВЫДУМАННУЮ цифру — она хуже отсутствия цифры. Поэтому показываем ровно то,
+ * что записано, каждое число своим именем, а «сколько уедет» называем только
+ * фактом после запуска (`launch_info.leads_count`, TemplateLaunchStatus).
+ * Точный предварительный счётчик возможен, но его должна ПИСАТЬ стадия при
+ * финализации базы: считать «адреса с вердиктом 'ok', не помеченные вне
+ * вертикали, после капа на компанию» надо там, где известна сетка, и класть
+ * готовое число в collect_info.stats — кабинет не должен это выводить сам.
+ *
+ * ДВЕ ветки из трёх говорят не «сколько уедет», а «не уедет ничего»: база без
+ * вердиктов и база, где ни один вердикт не 'ok'. Обе запуск ENG-клиента
+ * отклоняет до создания кампании (runHeTemplateLaunch: baseNotVerified /
+ * noValidEmails), поэтому здесь про это сказано прямо — клиент не должен
+ * узнавать об отказе на шаге 5, пройдя часы сборки.
+ */
+function SendVolume({ base }: { base: EngBaseSummary }) {
+  // Только авто-база: у загруженного файла движок строки не размечает, и
+  // запуск их не фильтрует (`isAutoBase` в runHeTemplateLaunch).
+  if (base.source !== 'auto' || base.row_count <= 0) return null;
+
+  const construct = base.collect_info?.construct;
+  // valid_count пишется только вместе с импортом результата конструктора;
+  // у фазы в состоянии 'dispatched' его ещё нет.
+  const verified =
+    construct && construct.status !== 'dispatched' && typeof construct.valid_count === 'number'
+      ? construct.valid_count
+      : null;
+  // `stats.low_relevance` отдаёт проекция (COLLECT_STATS_FIELDS), но в DTO
+  // кабинета `stats` описан под прогресс-карту сборки и этого поля не знает.
+  // Читаем узким кастом здесь, а не расширяем тип в api-client.ts — файл
+  // чужой полосы.
+  const flagged = (base.collect_info?.stats as { low_relevance?: number } | undefined)?.low_relevance ?? 0;
+
+  // Вердиктов нет ВООБЩЕ — и это не «узнаем на запуске», а отказ запуска.
+  // `valid_count` пишется ровно тем же импортом результата конструктора, что и
+  // пометки `_email_status` на строках (stages/baseCollect.ts: finalEmailStatuses
+  // ← capImportedRows, оба в одной ветке), поэтому его отсутствие означает «ни
+  // на одной строке вердикта нет». У market='us' вердикт обязателен
+  // (runHeTemplateLaunch, шаг 5: verdict 'missing' → строка снята), так что
+  // лидов не останется и запуск вернёт 400 baseNotVerified. Пересобрать базу
+  // из кабинета клиент не может (шаг 4 — витрина, UI-вызова
+  // POST /verticals/[id]/collect нет, а «Start outreach» новой сборки при
+  // готовой базе не ставит), поэтому действие — то же, что у пустого пресета на
+  // шаге 5: попросить менеджера. Легаси-база сюда НЕ попадает: импорт до
+  // 26.09.2026 тоже писал valid_count, её отклонит другой предохранитель
+  // (baseCollectedBeforeSplit) — врать про причину нечем.
+  if (verified === null) {
+    return (
+      <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
+        Email verification did not finish on this base, so none of its rows has a verified email — and an
+        unverified address is never mailed. This base cannot be launched: step 5 «Review &amp; Launch» will
+        refuse it. Ask your manager to collect this audience again; a new collection runs verification to the
+        end.
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="mt-2 flex flex-col gap-1 text-[11px]"
+      // Ноль проверенных — не «меньше», а «нечего»: тот же сигнал, что у ветки
+      // без вердиктов.
+      style={{ color: verified === 0 ? 'var(--cp-amber)' : 'var(--cp-text-m)' }}
+    >
+      <div className="ds-mono">
+        {verified.toLocaleString('en-US')} of {base.row_count.toLocaleString('en-US')} rows with a verified email
+        {flagged > 0 ? ` · ${flagged.toLocaleString('en-US')} flagged as outside this vertical` : ''}
+      </div>
+      <div style={{ color: 'var(--cp-text-l)' }}>
+        {verified === 0
+          ? // Вердикты есть, но ни один не 'ok' — запуск вернёт 400 noValidEmails
+            // (все строки снимет гейт как rejected), лидов не останется.
+            'Not one address here passed verification, and only a verified email is mailed — so this base cannot be launched. Ask your manager to collect this audience again.'
+          : 'Only rows with a verified email are mailed; flagged rows are skipped and a repeated address is mailed once — so a launch sends fewer contacts than the base has rows. The exact number is confirmed at launch.'}
+      </div>
+    </div>
+  );
+}
+
 /* ── Решения автопилота по плану источников ── */
 
 const pct = (v: number | undefined) => `${Math.round((v ?? 0) * 100)}%`;
@@ -135,8 +232,18 @@ function TemplateLaunchStatus({ template }: { template: HeTemplate }) {
   if (!launch) {
     return (
       <div className="mt-2 rounded-md p-3 text-[11px]" style={{ border: '1px solid var(--cp-divider)', color: 'var(--cp-text-m)' }}>
+        {/* Запуску нужен пресет отправки (`client_campaign_presets`): без него
+            POST /eng/templates/[id]/launch отвечает «Sending preset not found»,
+            а селектор шага 5 просто пуст. Сам клиент пресет НЕ создаёт — его
+            заводит администратор студии (api/admin/clients/[id]/preset), и
+            самообслуживания здесь не будет: в пресете живут ящики рассылки.
+            Поэтому про условие сказано заранее, на шаге 4: до шага 5 клиент
+            проходит часы сборки и не должен узнавать о блокировке последним.
+            Про окно отправки здесь намеренно молчим — его клиент выбирает при
+            запуске (роут `templates/[id]/schedule`), пресет задаёт лишь
+            дефолт. */}
         {template.status === 'ready'
-          ? 'Template is ready — launch it from step 5 «Review & Launch».'
+          ? 'Template is ready — launch it from step 5 «Review & Launch». Sending needs a preset set up for your account — the mailboxes your campaigns send from; step 5 shows whether yours is ready.'
           : 'Template is being built…'}
       </div>
     );
@@ -236,6 +343,8 @@ export function EngStepBases({ detail }: { detail: EngDetail; onChanged: () => v
                       {b.row_count.toLocaleString('en-US')} rows
                     </span>
                   </div>
+
+                  <SendVolume base={b} />
 
                   <AutopilotDecisions base={b} />
 

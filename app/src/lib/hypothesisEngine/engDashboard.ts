@@ -75,7 +75,21 @@ export interface EngDashStageInfo {
   stage: EngDashStage;
   stageDetail: string;
   dots: EngDashDots;
-  /** База-«паспорт» вертикали (из которой считаются companies/emails/valid). */
+  /**
+   * База-«паспорт» вертикали: из неё берутся `row_count` и счётчики
+   * конструктора (emails_found/valid_count).
+   *
+   * ВНИМАНИЕ: `row_count` — это СТРОКИ базы, а не компании. ENG-сборка
+   * разносит один адрес на строку (шаг `split_emails` в `constructStepsFor`
+   * для market='us'), поэтому у компании с пятью адресами строк пять, и
+   * `row_count` до капа адресов на компанию (по умолчанию 5) раз больше
+   * числа компаний. Компаний в этом модуле НЕТ: `he_bases.row_count` их не
+   * знает, поэтому любая подпись здесь называет строки строками. Само число
+   * компаний живёт в `collect_info.stats.companies_total` (пишет
+   * `capImportedRows` в `stages/baseCollect.ts`), и роут дашборда берёт
+   * `companies` оттуда, а `rows` — из этого `row_count`; у баз, собранных до
+   * появления ключа, компаний нет вовсе — там 0 со смыслом «не знаем».
+   */
   mainBase: Record<string, unknown> | null;
   launch: HeTemplateLaunchInfo | null;
 }
@@ -212,7 +226,10 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
   if (analyzedBase) {
     return {
       stage: 'analyzed',
-      stageDetail: `base analyzed: ${asNum(analyzedBase.row_count)} companies`,
+      // «rows», а не «companies»: см. mainBase в EngDashStageInfo. Слово взято
+      // у шага 4 мастера (EngStepBases: «{row_count} rows»), чтобы у одного и
+      // того же числа в кабинете было одно имя.
+      stageDetail: `base analyzed: ${asNum(analyzedBase.row_count)} rows`,
       dots: [true, true, true, false, false],
       mainBase,
       launch: null,
@@ -341,7 +358,9 @@ export function buildEngDashboardEvents(input: {
         const rows = b ? asNum(b.row_count) : 0;
         events.push({
           type: 'base_analyzed',
-          text: withVertical(`base analyzed: ${rows} companies`, vname),
+          // Та же подпись, что у stageDetail этапа 'analyzed': строки, не
+          // компании (см. mainBase в EngDashStageInfo).
+          text: withVertical(`base analyzed: ${rows} rows`, vname),
           at,
         });
         break;
@@ -383,7 +402,12 @@ export function buildEngDashboardEvents(input: {
         at,
       });
     } else if (status === 'no_new') {
-      events.push({ type: 'refill_empty', text: withVertical('refill: no new companies', vname), at });
+      // 'no_new' ставится по ДВУМ причинам (stages/baseCollectRefill.ts):
+      // пустой harvest (новых компаний действительно нет) и valid === 0
+      // (компании нашлись, но ни одного адреса с вердиктом 'ok'). Про
+      // компании мы знаем только в первом случае, поэтому подпись говорит
+      // ровно то, что верно для обоих: отправлять нечего.
+      events.push({ type: 'refill_empty', text: withVertical('refill: nothing new to send', vname), at });
     } else if (status === 'failed') {
       events.push({ type: 'failed', text: withVertical('refill failed', vname), at });
     }

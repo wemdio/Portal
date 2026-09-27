@@ -15,9 +15,18 @@
  *     в Instantly и запускает вручную.
  *
  * Отличия от клиентского runLaunch осознанные:
- *   - нет тарифных гейтов/чёрного списка клиента/журнала client_campaign_launches
- *     (запуск делает сотрудник из внутреннего инструмента, billing клиента не
- *     должен меняться);
+ *   - нет тарифных гейтов и журнала client_campaign_launches (запуск делает
+ *     сотрудник из внутреннего инструмента, billing клиента не должен
+ *     меняться). ЧЁРНЫЙ СПИСОК клиента — не отличие: он применяется в обоих
+ *     контурах, fail-closed, до первого вызова рассыльщика
+ *     (launchTemplate.ts, шаг 5a). Блок ставит сам клиент по негативным
+ *     ответам, и «письмо от сотрудника» для получателя ничем не отличается от
+ *     письма из кабинета;
+ *   - ТРЕБОВАНИЕ вердикта валидации (строка без вердикта не отправляется) и
+ *     отказ от запуска легаси-базы — только у market='us'. В RU-инструменте
+ *     эти строки уезжают как до 26.09.2026, но теперь названы в
+ *     предупреждениях запуска: частично собранная база там штатный случай, и
+ *     запрещать её сотруднику никто не просил (launchTemplate.ts, шаги 4c и 5);
  *   - пресет читается по id без client_user_id-скоупа (service-level read через
  *     тот же supabaseInstantly, что и clientLaunch);
  *   - ошибки НЕ проходят scrubBrand — текст идёт во внутренний UI, где точная
@@ -29,10 +38,35 @@ import {
   CLIENT_LAUNCH_MAX_VARIANTS_PER_STEP,
   type ClientLaunchSequenceStep,
 } from '@/lib/clientLaunch/types';
+import { extractEmails } from '@/lib/tools/dfybUtils';
+// Только ТИП рынка: модуль обязан остаться чистым (его тянет и 'use client'
+// шаг 5 staff-инструмента), а market.ts своих зависимостей не имеет вовсе.
+import type { HeMarket } from './market';
 import type { HeChainLetter, HeOperatorMapping } from './types';
 
 /** Максимум лидов за один запуск из мастера (v1-ограничение роута, 413 сверх). */
 export const HE_LAUNCH_MAX_LEADS = 2000;
+
+/**
+ * ОТКАЗЫВАЕТ ли запуск базе, в которой адресов больше HE_LAUNCH_MAX_LEADS.
+ *
+ * С 26.09.2026 ответ зависит от рынка ПРОЕКТА, а не от контура запуска:
+ *   - market='us' — потолок ВЫБИРАЕТ адреса (selectLeadsWithinLaunchCap ниже),
+ *     и такая база запускается: сначала по одному сильнейшему адресу каждой
+ *     компании, потом вторые. Отказа нет;
+ *   - market='ru' — запуск отвечает 413, как и раньше: там строка = компания
+ *     (шага split_emails в RU-списке нет), и резать оплаченный срез никто не
+ *     просил.
+ *
+ * Функция существует, чтобы это правило было ОДНО. По нему разветвляется и сам
+ * запуск (launchTemplate.ts, шаг 5b), и пречек staff-шага 5, который гасит
+ * кнопку «Отправить в запуск» по row_count базы (Step5Template.tsx): пречек,
+ * выведенный отдельно, уже разошёлся с запуском и запрещает сотруднику запуск
+ * us-базы, которой запуск ничего не отказывает.
+ */
+export function heLaunchRefusesOverCap(market: HeMarket): boolean {
+  return market !== 'us';
+}
 
 /**
  * Кампания одного сегмента в записи о запуске. При материализации сегментных
@@ -222,6 +256,84 @@ export function segmentVariantsWarning(sequence: HeLaunchSequence): string | nul
   );
 }
 
+/**
+ * Вердикты валидации почты, с которыми строка базы допускается в запуск.
+ *
+ * Словарь вердиктов задаёт шаг конструктора validate_emails: он пишет в сетку
+ * колонку «Email Статус» (`processingSteps.ts`, ранг качества там же —
+ * ok > catch_all > unknown > error > invalid > disposable), а импорт сборки
+ * кладёт её значение на строку базы как `_email_status`
+ * (`stages/baseCollect.ts`). Пустая ячейка означает «вердикта нет»: шаг не
+ * дошёл до адреса или не запускался вовсе.
+ *
+ * Пропускаем ТОЛЬКО 'ok'. Почему не catch_all: такой домен подтверждает на
+ * SMTP любой ящик, поэтому несуществующий адрес не отваливается на
+ * рукопожатии, а превращается в поздний hard bounce или в попадание в
+ * спам-ловушку — то есть бьёт уже по репутации домена отправителя. Обратной
+ * связи по баунсам у движка нет ни в одном из контуров, чинить репутацию
+ * будет нечем. Внутренний V2 катает catch_all осознанно (свои домены, ручной
+ * присмотр специалиста) — для клиентских доменов это не аргумент.
+ */
+export const HE_LAUNCH_ACCEPTED_EMAIL_STATUSES: readonly string[] = ['ok'];
+
+/**
+ * Что вердикт строки говорит о её адресе: допускаем / отклоняем / вердикта
+ * нет вовсе. 'missing' отделён от 'rejected' осознанно: это разные причины и
+ * разные тексты для того, кто нажал запуск (см. launchTemplate.ts, шаг 5).
+ *
+ * Как поступать с 'missing', решает ВЫЗЫВАЮЩИЙ, и решение разное по рынку:
+ * у us-проекта строка без вердикта не отправляется (письма уедут с домённых
+ * ящиков ENG-клиента), а в RU-инструменте она отправляется как и до
+ * 26.09.2026 — частично собранная база там штатный рабочий случай, — но
+ * попадает в предупреждение запуска. Эта функция сама ничего не запрещает.
+ */
+export type HeLaunchEmailVerdict = 'accepted' | 'rejected' | 'missing';
+
+/** Вердикт по значению `_email_status` строки базы (регистр и пробелы неважны). */
+export function heLaunchEmailVerdict(rawStatus: unknown): HeLaunchEmailVerdict {
+  if (typeof rawStatus !== 'string') return 'missing';
+  const status = rawStatus.trim().toLowerCase();
+  if (!status) return 'missing';
+  return HE_LAUNCH_ACCEPTED_EMAIL_STATUSES.includes(status) ? 'accepted' : 'rejected';
+}
+
+/**
+ * Кап «адресов на компанию», записанный стадией сборки в
+ * `he_bases.collect_info.construct.contact_cap` при ПОСТАНОВКЕ джобы
+ * конструктора (`stages/baseCollect.ts`, dispatchConstructJob). null — ключа
+ * нет.
+ *
+ * Зачем это запуску: ключ появился 26.09.2026 вместе с обязательным для
+ * market='us' шагом split_emails, и другого кода, который бы его писал, нет.
+ * Поэтому у us-базы его ОТСУТСТВИЕ — маркер «сетку собирал прежний контракт,
+ * без разноса адресов по строкам», а значит вердикт в «Email Статус»
+ * принадлежит ЛУЧШЕМУ адресу склеенной ячейки, тогда как импорт положил на
+ * строку ПЕРВЫЙ (`importConstructRows`: `extractEmail`). Строка может читаться
+ * как «a@acme.com / ok», хотя валидацию прошёл b@acme.com. Как это используется
+ * — launchTemplate.ts, шаг 4c.
+ *
+ * Границы маркера, честно:
+ *   - он доказывает только «джобу ставил новый код». Что split_emails ДОШЁЛ до
+ *     конца, доказывает не он, а порядок шагов: split стоит перед
+ *     validate_emails, поэтому оборвавшаяся раньше джоба вообще не оставляет
+ *     вердиктов — такую базу отсекает гейт вердиктов, а не этот маркер. Если
+ *     порядок в CONSTRUCT_STEPS_AFTER_SPLIT_US когда-нибудь переставят,
+ *     проверять придётся selected_steps самой джобы;
+ *   - для market='ru' он не значит НИЧЕГО: в RU-списке шагов split_emails нет
+ *     ни до, ни после 26.09.2026, поэтому RU-вердикт — по-прежнему лучший из
+ *     ячейки. Это состояние HEAD, отдельное продуктовое решение, и по
+ *     маркеру его не отличить;
+ *   - колонка `he_bases.contact_cap_applied` для той же цели НЕ годится: её не
+ *     пишут на инсталляции без миграции 20260926_0001 и у частичного импорта.
+ */
+export function heConstructContactCap(collectInfo: unknown): number | null {
+  if (!collectInfo || typeof collectInfo !== 'object') return null;
+  const construct = (collectInfo as { construct?: unknown }).construct;
+  if (!construct || typeof construct !== 'object') return null;
+  const cap = (construct as { contact_cap?: unknown }).contact_cap;
+  return typeof cap === 'number' && Number.isFinite(cap) ? cap : null;
+}
+
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const EMAIL_COLUMN_NAME_RE = /e-?mail|почта|емейл/i;
 
@@ -253,6 +365,20 @@ export interface MapBaseRowsInput {
   rows: Array<Record<string, unknown>>;
   columns: string[];
   operatorMapping?: HeOperatorMapping[];
+  /**
+   * Колонка адреса, уже найденная вызывающим. Передаётся, чтобы ОДНА детекция
+   * обслуживала и гейт вердиктов, и маппинг: гейту колонка нужна ДО фильтра
+   * строк, маппингу — после, а детекция по содержимому (findEmailColumn: доля
+   * похожих значений среди первых непустых) зависит от НАБОРА строк. Посчитанная
+   * дважды, она могла назвать разные колонки — вплоть до «колонки нет» на
+   * остатке, у которого гейт снял как раз строки с адресами. Тогда база
+   * отвечала бы «не найдена колонка с email» вместо честной причины отсева.
+   *
+   * null — «искали и не нашли», это тоже ответ (детекцию не повторяем).
+   * Ключа нет вовсе — ищем сами по переданным rows (прежнее поведение; так
+   * зовёт ночной долив).
+   */
+  emailColumn?: string | null;
 }
 
 export interface MapBaseRowsResult {
@@ -262,11 +388,37 @@ export interface MapBaseRowsResult {
   /** Индекс исходной строки базы для каждого лида (параллельно leads) — нужен
    *  сплиту по сегментам при запуске. */
   leadRowIndices: number[];
+  /**
+   * Строки, чья ячейка email держит ДВА и больше адреса («a@x.com, b@y.com»).
+   * Контракт he_bases — один адрес на строку, и EMAIL_RE привязан к началу и
+   * концу значения, поэтому такая ячейка не даёт лида: компания выпадает из
+   * запуска целиком.
+   *
+   * Почему не берём первый адрес: вердикт валидации на строке ОДИН на всю
+   * ячейку, и validate_emails пишет в него ЛУЧШИЙ из адресов ячейки. То есть
+   * 'ok' у «a@x.com, b@y.com» может относиться к b, а a быть невалидным —
+   * взять первый значило бы отправить письмо на адрес без вердикта под
+   * вердиктом соседа. Поэтому строку не отправляем, но и не теряем молча:
+   * счётчик уходит наверх, и запуск о нём предупреждает.
+   *
+   * Живые источники таких ячеек: базы, собранные до разделения адресов по
+   * строкам, и ручные CSV специалиста.
+   */
+  multiAddressRows: number;
+  /**
+   * Строки, где ячейка email непустая, но адреса в ней нет (или он утонул в
+   * мусоре: «нет почты», «mail: a@x.com»). Тоже не молча: счётчик наверх.
+   * Пустая ячейка сюда НЕ попадает — у автосборки это штатная строка компании,
+   * которой почту не нашли.
+   */
+  malformedEmailRows: number;
 }
 
 /**
  * Строки he_bases.data → лиды Instantly, по мотивам mapCsvRowsToLeads:
- *   - email обязателен, lowercase, дедуп;
+ *   - email обязателен, lowercase, дедуп; ячейка обязана содержать РОВНО один
+ *     адрес (контракт he_bases). Ячейка с двумя адресами или с мусором лида не
+ *     даёт — но и не исчезает молча: см. multiAddressRows/malformedEmailRows;
  *   - operator_mapping применяется для именования переменных: matched оператор
  *     «var → колонка» кладёт значение ячейки в custom_variables под именем
  *     оператора (так {{var}} в письме подставится на стороне Instantly).
@@ -280,8 +432,17 @@ export interface MapBaseRowsResult {
 export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
   const { rows, columns, operatorMapping } = input;
 
-  const emailColumn = findEmailColumn(columns, rows);
-  if (!emailColumn) return { leads: [], emailColumn: null, leadRowIndices: [] };
+  const emailColumn =
+    input.emailColumn !== undefined ? input.emailColumn : findEmailColumn(columns, rows);
+  if (!emailColumn) {
+    return {
+      leads: [],
+      emailColumn: null,
+      leadRowIndices: [],
+      multiAddressRows: 0,
+      malformedEmailRows: 0,
+    };
+  }
 
   // Колонки, которые занял хотя бы один оператор: их значение эмитится под
   // именем КАЖДОГО такого оператора, а не под именем колонки.
@@ -306,10 +467,20 @@ export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
   const leads: LeadCreatePayload[] = [];
   const leadRowIndices: number[] = [];
   const seenEmails = new Set<string>();
+  let multiAddressRows = 0;
+  let malformedEmailRows = 0;
 
   rows.forEach((row, rowIndex) => {
-    const email = String(row[emailColumn] ?? '').trim().toLowerCase();
-    if (!email || !EMAIL_RE.test(email)) return;
+    const cell = String(row[emailColumn] ?? '').trim();
+    if (!cell) return;
+    const email = cell.toLowerCase();
+    if (!EMAIL_RE.test(email)) {
+      // Ячейка есть, но это не один адрес. Считаем причину и идём дальше:
+      // решение «не отправлять» прежнее, новое — что об этом сообщают.
+      if (extractEmails(cell).length > 1) multiAddressRows += 1;
+      else malformedEmailRows += 1;
+      return;
+    }
     if (seenEmails.has(email)) return;
     seenEmails.add(email);
 
@@ -341,5 +512,247 @@ export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
     leadRowIndices.push(rowIndex);
   });
 
-  return { leads, emailColumn, leadRowIndices };
+  return { leads, emailColumn, leadRowIndices, multiAddressRows, malformedEmailRows };
+}
+
+/* ── Потолок запуска: адреса против компаний ── */
+
+/**
+ * Колонки, по которым строки одной компании узнают друг друга.
+ *
+ * Пара «компания + сайт», а не одна компания: «однофамильцев» (одно имя у
+ * разных фирм) различают сайты — тот же ключ, что у шага конструктора
+ * cap_emails_per_company (`lib/tools/processingSteps.ts`, makeCompanyKeyFn) и у
+ * капа после импорта (`stages/baseCollect.ts`, capImportedRows).
+ *
+ * ПОРЯДОК ВЫБОРА (два яруса, не «первая подходящая по имени»). Ключ компании —
+ * то, на чём стоит вся арифметика потолка: перепутанная колонка не ломает
+ * запуск, а ТИХО превращает «по одному адресу каждой компании» в «первые N
+ * адресов подряд». Поэтому:
+ *   1. КАНОН — точное совпадение (trim + lowercase) с именем, которое эта
+ *      сборка реально производит. Контракт he_bases.columns авто-базы —
+ *      HE_AUTO_COLLECT_COLUMNS (`stages/baseCollect.ts`), то есть ровно
+ *      'company' и 'website'; заголовки сетки конструктора
+ *      (CONSTRUCT_HEADERS_RU/EN и EN-алиас 'Website') перечислены для CSV,
+ *      выгруженного из конструктора и загруженного специалистом обратно.
+ *      Ярус перебирает СПИСОК, а не сетку, поэтому порядок колонок базы на
+ *      ответ не влияет и две подходящие колонки не спорят между собой.
+ *   2. ИМЯ — прежний поиск по регулярке, для сеток, которых этот пайплайн не
+ *      производит (ручной CSV: колонки называются как угодно). Ярус
+ *      сохраняет прежнее поведение (первая подходящая в порядке сетки), но
+ *      честно сообщает наверх, что выбор сделан догадкой и сколько колонок
+ *      подошло: догадываться лучше, чем не найти ничего, а НЕ ЗНАТЬ, что
+ *      догадались, нельзя.
+ * Ни одна колонка не подошла — source 'none' и column null: строки теряют
+ * ключ, и каждый адрес становится «своей компанией» (см. вызывающего). Это
+ * тоже уходит в журнал, а не остаётся молчаливой деградацией.
+ */
+const COMPANY_COLUMN_NAME_RE = /company|компания|название|наименование|организация/i;
+const WEBSITE_COLUMN_NAME_RE = /website|site|сайт|домен|domain/i;
+/** Канонические имена колонки компании, в порядке предпочтения. */
+const COMPANY_CANONICAL_COLUMNS: readonly string[] = ['company', 'компания'];
+/** Канонические имена колонки сайта, в порядке предпочтения. */
+const WEBSITE_CANONICAL_COLUMNS: readonly string[] = ['website', 'сайт', 'site'];
+
+/** Чем выбрана колонка ключа: контрактом сборки, догадкой по имени или ничем. */
+export type HeLaunchCompanyColumnSource = 'canonical' | 'named' | 'none';
+
+/** Как именно нашлись колонки ключа — уходит в журнал запуска, а не теряется. */
+export interface HeLaunchCompanyColumnResolution {
+  company: HeLaunchCompanyColumnSource;
+  website: HeLaunchCompanyColumnSource;
+  /** Колонок, подошедших ПО ИМЕНИ (ярус 2); >1 — сетка неоднозначна. */
+  companyNameMatches: number;
+  websiteNameMatches: number;
+}
+
+export interface HeLaunchCompanyColumns {
+  company: string | null;
+  website: string | null;
+  /** Чем выбрана каждая из них (для журнала; на сам ключ не влияет). */
+  resolution: HeLaunchCompanyColumnResolution;
+}
+
+function pickCompanyKeyColumn(
+  columns: string[],
+  canonical: readonly string[],
+  nameRe: RegExp,
+): { column: string | null; source: HeLaunchCompanyColumnSource; nameMatches: number } {
+  for (const want of canonical) {
+    const hit = columns.find((c) => c.trim().toLowerCase() === want);
+    if (hit) return { column: hit, source: 'canonical', nameMatches: 0 };
+  }
+  const named = columns.filter((c) => nameRe.test(c));
+  if (named.length > 0) return { column: named[0], source: 'named', nameMatches: named.length };
+  return { column: null, source: 'none', nameMatches: 0 };
+}
+
+/**
+ * Найти колонки компании и сайта (обеих может не быть). Одна и та же колонка на
+ * оба поля («Company website» подходит и туда, и туда) НЕ разводится: ключ от
+ * этого не меняется — значение просто повторяется в обоих его полях, а
+ * группировка строк остаётся той же.
+ */
+export function findCompanyKeyColumns(columns: string[]): HeLaunchCompanyColumns {
+  const company = pickCompanyKeyColumn(columns, COMPANY_CANONICAL_COLUMNS, COMPANY_COLUMN_NAME_RE);
+  const website = pickCompanyKeyColumn(columns, WEBSITE_CANONICAL_COLUMNS, WEBSITE_COLUMN_NAME_RE);
+  return {
+    company: company.column,
+    website: website.column,
+    resolution: {
+      company: company.source,
+      website: website.source,
+      companyNameMatches: company.nameMatches,
+      websiteNameMatches: website.nameMatches,
+    },
+  };
+}
+
+/**
+ * Ключ «одна компания» для строки базы. Пустая строка — компанию по строке не
+ * опознать (обеих колонок нет или обе пусты); вызывающий обязан в этом случае
+ * считать строку отдельной компанией, а не склеивать все такие строки в одну.
+ *
+ * Нормализация НАМЕРЕННО лёгкая (trim + lowercase), без юрформ и хостов
+ * (normalizeCompanyForDedup/normalizeWebsiteForDedup стадии сборки): строки, на
+ * которые split_emails разнёс адреса ОДНОЙ компании, унаследовали её ячейки
+ * компании и сайта дословно, поэтому байтового равенства достаточно. Тяжёлая
+ * нормализация нужна дедупу РАЗНЫХ источников, а здесь она добавила бы риск
+ * склеить две настоящие компании — в этой задаче ошибка в сторону «склеили»
+ * хуже: она отняла бы у компании место в запуске.
+ */
+export function heLaunchCompanyKey(
+  row: Record<string, unknown>,
+  cols: HeLaunchCompanyColumns,
+): string {
+  const company = cols.company ? String(row[cols.company] ?? '').trim().toLowerCase() : '';
+  const website = cols.website ? String(row[cols.website] ?? '').trim().toLowerCase() : '';
+  if (!company && !website) return '';
+  // JSON.stringify даёт ключ без коллизий склейки (["ab","c"] ≠ ["a","bc"]).
+  return JSON.stringify([company, website]);
+}
+
+/**
+ * Сила вердикта строки при выборе, какой адрес компании сильнее. Порядок тот
+ * же, что у heLaunchEmailVerdict: допущенный адрес сильнее непроверенного,
+ * непроверенный — сильнее отклонённого.
+ *
+ * Отклонённые и (у market='us') непроверенные строки до потолка не доходят —
+ * их снял гейт запуска. Ранг всё равно задан для всех трёх: в RU-контуре
+ * непроверенные строки законно уезжают, и там «сначала проверенный адрес
+ * компании» — единственный осмысленный порядок.
+ */
+const HE_LAUNCH_VERDICT_STRENGTH: Record<HeLaunchEmailVerdict, number> = {
+  accepted: 2,
+  missing: 1,
+  rejected: 0,
+};
+
+export interface HeLaunchCapInput {
+  /** Строки базы, из которых собраны лиды (уже после гейта вердиктов). */
+  rows: Array<Record<string, unknown>>;
+  columns: string[];
+  /** Индекс строки для каждого лида — mapBaseRowsToLeads.leadRowIndices. */
+  leadRowIndices: readonly number[];
+  /** Потолок АДРЕСОВ; по умолчанию HE_LAUNCH_MAX_LEADS. */
+  limit?: number;
+}
+
+export interface HeLaunchCapSelection {
+  /** Позиции лидов, которые уезжают, в ИСХОДНОМ порядке базы. */
+  keptLeadPositions: number[];
+  /** Компаний, у которых уехал хотя бы один адрес. */
+  companiesSent: number;
+  /** Адресов уезжает (= keptLeadPositions.length). */
+  addressesSent: number;
+  /** Адресов снял потолок. */
+  addressesHeldBack: number;
+  /** Компаний, которым не досталось ни одного адреса. */
+  companiesHeldBack: number;
+  /**
+   * Чем выбраны колонки ключа компании. Не влияет ни на одно число выше — это
+   * ДИАГНОСТИКА для журнала запуска: 'named' означает «колонку угадали по
+   * имени», 'none' по обоим полям — «ключа нет вовсе», и тогда правило «по
+   * одному адресу на компанию» вырождается в «первые N адресов подряд».
+   */
+  companyKeyResolution: HeLaunchCompanyColumnResolution;
+  /**
+   * Адресов, у которых компанию по строке опознать не удалось (обе ячейки
+   * ключа пусты или колонок нет): каждый такой адрес считается ОТДЕЛЬНОЙ
+   * компанией, поэтому число companiesSent на столько же завышено против
+   * настоящих компаний. Столбик для журнала: 0 — потолок отработал ровно так,
+   * как обещает предупреждение клиенту.
+   */
+  addressesWithoutCompanyKey: number;
+}
+
+/**
+ * Какие адреса взять в запуск, когда их больше потолка.
+ *
+ * ПРАВИЛО: потолок сначала берёт по ОДНОМУ — сильнейшему — адресу каждой
+ * компании, и только потом вторые адреса тех, кто уже попал, потом третьи и так
+ * далее (раунды по «глубине»). Причина продуктовая: клиент заказывал КОМПАНИИ, а
+ * потолок считает АДРЕСА, и после разноса адресов по строкам одна компания
+ * занимает до capа строк. Запуск на 2000 компаний по одному адресу — это 2000
+ * шансов на ответ; запуск на 400 компаний по пять адресов — 400 шансов и пять
+ * писем в одну приёмную. Внутри компании порядок — сила вердикта
+ * (HE_LAUNCH_VERDICT_STRENGTH), при равенстве — порядок строк базы, то есть
+ * приоритет задач плана сборки; порядок компаний — первое появление в базе (то
+ * же свойство, на которое опирается capImportedRows).
+ *
+ * Потолок НЕ поднимается и не отказывает: он выбирает. Ни одна снятая строка
+ * при этом не помечается отправленной — функция чистая и ничего не пишет.
+ */
+export function selectLeadsWithinLaunchCap(input: HeLaunchCapInput): HeLaunchCapSelection {
+  const { rows, leadRowIndices } = input;
+  const limit = Math.max(1, input.limit ?? HE_LAUNCH_MAX_LEADS);
+  const cols = findCompanyKeyColumns(input.columns);
+
+  const groups = new Map<string, number[]>();
+  let addressesWithoutCompanyKey = 0;
+  leadRowIndices.forEach((rowIndex, leadPos) => {
+    // Компанию по строке не опознать — считаем её отдельной компанией
+    // (деградация к поштучному поведению, как в makeCompanyKeyFn), иначе все
+    // безымянные строки схлопнулись бы в одну «компанию» и потолок оставил бы
+    // от них один адрес. Считаем такие строки: молчаливой эта деградация быть
+    // не должна — на ней правило «по одному адресу на компанию» перестаёт
+    // что-либо значить.
+    const rowKey = heLaunchCompanyKey(rows[rowIndex] ?? {}, cols);
+    if (!rowKey) addressesWithoutCompanyKey += 1;
+    const key = rowKey || `row:${leadPos}`;
+    const list = groups.get(key);
+    if (list) list.push(leadPos);
+    else groups.set(key, [leadPos]);
+  });
+
+  const strengthOf = (leadPos: number): number =>
+    HE_LAUNCH_VERDICT_STRENGTH[heLaunchEmailVerdict(rows[leadRowIndices[leadPos]]?._email_status)];
+  const ranked = [...groups.values()].map((positions) =>
+    [...positions].sort((a, b) => strengthOf(b) - strengthOf(a) || a - b),
+  );
+
+  const kept = new Set<number>();
+  const deepest = ranked.reduce((max, group) => Math.max(max, group.length), 0);
+  for (let depth = 0; depth < deepest && kept.size < limit; depth += 1) {
+    for (const group of ranked) {
+      if (kept.size >= limit) break;
+      const leadPos = group[depth];
+      if (leadPos !== undefined) kept.add(leadPos);
+    }
+  }
+
+  let companiesSent = 0;
+  for (const group of ranked) {
+    if (group.some((leadPos) => kept.has(leadPos))) companiesSent += 1;
+  }
+
+  return {
+    keptLeadPositions: [...kept].sort((a, b) => a - b),
+    companiesSent,
+    addressesSent: kept.size,
+    addressesHeldBack: leadRowIndices.length - kept.size,
+    companiesHeldBack: ranked.length - companiesSent,
+    companyKeyResolution: cols.resolution,
+    addressesWithoutCompanyKey,
+  };
 }

@@ -25,9 +25,53 @@
  * держит дедуп и уникальный индекс вертикали. Компенсация срабатывает только
  * когда удалось УБЕДИТЬСЯ, что джобы нет: сбой самой проверки — отдельный
  * исход, статус базы в нём не пишется («неизвестно» ≠ «джобы нет»).
+ *
+ * Здесь же резолвится лимит «адресов на компанию»: значение проекта
+ * снимается ОДИН раз, на постановке, и дальше живёт на строке базы (см.
+ * normalizeHeMaxEmailsPerCompany).
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+
+/*
+ * ───────────── «До N адресов одной компании» (he_*) ─────────────
+ *
+ * Лимит применяет шаг конструктора cap_emails_per_company: он оставляет не
+ * больше N СТРОК на компанию, ранжируя их по вердикту валидации. До 26.09.2026
+ * стадия base_collect передавала ему константу 5, и при этом в ENG-сетке не
+ * было шага split_emails — все адреса компании жили в одной ячейке, строка на
+ * компанию была одна, и лимит не делал ничего. С разносом адресов по строкам
+ * он начинает работать, поэтому значение стало данными: колонка проекта
+ * (дефолт для новых сборок) → колонка базы (действует на эту сборку) → дефолт
+ * движка. Миграция — supabase/migrations/20260926_0001_he_emails_per_company.sql.
+ *
+ * Константы живут в этом модуле, а не в стадии: он лёгкий (единственный импорт
+ * — тип SupabaseClient), поэтому его безопасно тянуть и из роутов Next, и из
+ * воркера. Обратный импорт — роут за собой утащил бы весь граф стадии.
+ */
+
+/** Границы значения; обязаны совпадать с check-ограничениями миграции. */
+export const HE_MAX_EMAILS_PER_COMPANY_MIN = 1;
+export const HE_MAX_EMAILS_PER_COMPANY_MAX = 100;
+/**
+ * Значение, захардкоженное в step_config до 26.09.2026. Остаётся дефолтом:
+ * проект без настройки собирается ровно как раньше.
+ */
+export const HE_MAX_EMAILS_PER_COMPANY_DEFAULT = 5;
+
+/**
+ * null = «значения нет» (нужен дефолт движка). Всё, что не целое в границах, —
+ * тоже «нет»: угадывать чужой лимит нельзя, а мусор в колонке не должен
+ * превращаться в кап 0 и обнулять базу.
+ */
+export function normalizeHeMaxEmailsPerCompany(value: unknown): number | null {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value >= HE_MAX_EMAILS_PER_COMPANY_MIN
+    && value <= HE_MAX_EMAILS_PER_COMPANY_MAX
+    ? value
+    : null;
+}
 
 export interface HeBaseCollectInput {
   verticalId: string;
@@ -119,6 +163,32 @@ export async function enqueueHeBaseCollect(
       ? { limit, hypothesis_ids: hypothesisIds }
       : { limit };
 
+  // Лимит «адресов на компанию» снимается с проекта ЗДЕСЬ и штампуется на
+  // строку базы: правка проектной настройки после постановки не должна менять
+  // уже идущую (и тем более уже собранную) базу под ней — стадия читает
+  // значение своей базы, а не проекта.
+  //
+  // Сбой чтения (включая инсталляцию, где миграция ещё не применена, — код
+  // 42703) трактуется как «значения нет»: стадия подставит
+  // HE_MAX_EMAILS_PER_COMPANY_DEFAULT, то есть сегодняшнее поведение. Валить
+  // постановку сборки из-за необязательной настройки нельзя, а угадывать лимит
+  // — тем более. Колонка уходит в insert только когда значение ЕСТЬ: непустое
+  // значение доказывает, что колонка в базе есть, и insert не упадёт на
+  // неизвестном поле.
+  let contactCap: number | null = null;
+  try {
+    const { data: projectRow, error: projectErr } = await supabase
+      .from('he_projects')
+      .select('max_emails_per_company')
+      .eq('id', projectId)
+      .maybeSingle();
+    if (!projectErr) {
+      contactCap = normalizeHeMaxEmailsPerCompany(
+        (projectRow as { max_emails_per_company?: unknown } | null)?.max_emails_per_company,
+      );
+    }
+  } catch { /* значения нет → дефолт движка */ }
+
   const { data: base, error: baseInsertErr } = await supabase
     .from('he_bases')
     .insert({
@@ -130,6 +200,7 @@ export async function enqueueHeBaseCollect(
       row_count: 0,
       columns: [],
       data: [],
+      ...(contactCap !== null ? { max_emails_per_company: contactCap } : {}),
       // Лимит и выбранные гипотезы — сразу в collect_info: прогресс-карта
       // показывает лимит, пока стадия ещё не перезаписала collect_info
       // планом (поля живут дальше — стадия мержит collect_info, а не
