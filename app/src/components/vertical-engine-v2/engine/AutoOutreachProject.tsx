@@ -64,7 +64,7 @@ export function AudienceSummary({
   base: VeBaseSummary;
   presetId: string;
   preparationState: PreparationPresentation;
-  onCount?: (count: number) => void;
+  onCount?: (baseId: string, count: number | null) => void;
 }) {
   const baseId = base.id;
   const [data, setData] = useState<VeBaseAudienceSummary | null>(null);
@@ -80,13 +80,17 @@ export function AudienceSummary({
         if (!response.ok) {
           setError(response.data.error ?? 'Не удалось пересчитать запас');
           setData(null);
+          onCount?.(baseId, null);
           return;
         }
         setData(response.data);
         setError('');
-        onCount?.(response.data.ready);
+        onCount?.(baseId, response.data.checked_ready);
       } catch {
-        if (!cancelled) setError('Не удалось обновить объём. Проверьте соединение');
+        if (!cancelled) {
+          setError('Не удалось обновить объём. Проверьте соединение');
+          onCount?.(baseId, null);
+        }
       }
     };
     void load();
@@ -201,6 +205,10 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   const [busy, setBusy] = useState(false);
   const [contactLimitDraft, setContactLimitDraft] = useState<string | null>(null);
   const [launchHypothesisIds, setLaunchHypothesisIds] = useState<string[]>([]);
+  const [checkedContactCounts, setCheckedContactCounts] = useState<Record<string, number | null>>({});
+  const updateCheckedContactCount = useCallback((baseId: string, count: number | null) => {
+    setCheckedContactCounts((current) => current[baseId] === count ? current : { ...current, [baseId]: count });
+  }, []);
   const [researchBusy, setResearchBusy] = useState(false);
   const [broadRequesting, setBroadRequesting] = useState(false);
   const [activeHypothesis, setActiveHypothesis] = useState('');
@@ -812,7 +820,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                           <span className="min-w-0">
                             <span className="block font-medium">{h.title}</span>
                             <span className={`block ${HE.muted}`}>{state.label}
-                              {base ? ` · контактов: ${base.row_count.toLocaleString('ru-RU')}` : ''}</span>
+                              {base && checkedContactCounts[base.id] != null
+                                ? ` · проверенных контактов: ${checkedContactCounts[base.id]!.toLocaleString('ru-RU')}` : ''}</span>
                           </span>
                         </label>
                         <button type="button" className={HE.btnGhost}
@@ -846,7 +855,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                       continueDisabled={busy || locked} /> : null}
                     {base ? (
                       <>
-                        <AudienceSummary base={base} presetId={presetId} preparationState={preparationState} />
+                        <AudienceSummary base={base} presetId={presetId} preparationState={preparationState}
+                          onCount={updateCheckedContactCount} />
                         <details>
                           <summary className="ve2-link cursor-pointer">Контакты базы и скачивание</summary>
                           <div className="mt-3">

@@ -226,9 +226,11 @@ export function OutreachLaunchPanel({
         </p>
       ) : null}
       {launch.canCreateClient && !launch.boundPresetId ? (
-        <CreateClientPresetInline launch={launch} templateId={first.id} />
+        <fieldset disabled={busy}>
+          <CreateClientPresetInline launch={launch} templateId={first.id} />
+        </fieldset>
       ) : null}
-      <DeliveryPlanBlock launch={launch} />
+      <DeliveryPlanBlock launch={launch} disabled={busy} />
       <div className="border-t border-[var(--ve2-line)] pt-5 space-y-3">
         <h2 className="ve2-h2">Обзор запуска</h2>
         {!request ? (
