@@ -2,10 +2,13 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { logError } from '@/lib/loggerServer';
+import { POLZA_FUNNEL_COLUMNS, polzaFunnel, type PolzaFunnelRow } from '@/lib/polzaOutreach/funnel';
+import { POLZA_RESULTS_MAX_PAGE } from '@/lib/polzaOutreach/resultsPaging';
+import { polzaReviewCode } from '@/lib/polzaOutreach/types';
 
 export const dynamic = 'force-dynamic';
 
-const STAGE_ICP_PASSED = ['s4_analyzed', 's5_email', 's6_letters'];
+type SummaryRow = PolzaFunnelRow & { exclusion_reason: string | null };
 
 function jsonError(message: string, status: number, extra?: Record<string, unknown>) {
   return NextResponse.json({ error: message, ...(extra ?? {}) }, { status });
@@ -33,15 +36,20 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   const { jobId } = await ctx.params;
 
   const sp = req.nextUrl.searchParams;
-  const limit = Math.min(1000, Math.max(1, Number(sp.get('limit') ?? '50')));
-  const offset = Math.max(0, Number(sp.get('offset') ?? '0'));
+  // Мусор в параметрах — значения по умолчанию, а не NaN в range().
+  const limit = Math.min(POLZA_RESULTS_MAX_PAGE, Math.max(1, Math.trunc(Number(sp.get('limit') ?? '50')) || 50));
+  const offset = Math.max(0, Math.trunc(Number(sp.get('offset') ?? '0')) || 0);
   const statusFilter = sp.get('status');
 
+  // Порядок стабильный: строки одной вставки делят created_at, и без id
+  // соседние страницы (окно этапа и выгрузка читают прогон целиком) могли бы
+  // повторять одни строки и терять другие.
   let resultsQuery = supabase
     .from('polza_outreach_companies')
     .select('*', { count: 'exact' })
     .eq('job_id', jobId)
     .order('created_at', { ascending: true })
+    .order('id', { ascending: true })
     .range(offset, offset + limit - 1);
   if (statusFilter) resultsQuery = resultsQuery.eq('status', statusFilter);
 
@@ -54,33 +62,44 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   // Воронка и сводка — по всем строкам джобы, независимо от пагинации.
   const statusCounts = {} as Record<string, number>;
   const exclusionCounts = {} as Record<string, number>;
+  // Почему строки ждут ручной проверки — экран показывает «почта не проверена — N».
+  const reviewCounts = {} as Record<string, number>;
 
-  // Одна выборка всех строк дешевле восьми head-запросов: строк ≤ 300 на джобу.
-  const { data: allRows, error: allErr } = await supabase
-    .from('polza_outreach_companies')
-    .select('status,stage,exclusion_reason,normalized_domain,selected_company_email,lead_status')
-    .eq('job_id', jobId);
-  if (allErr) {
-    await logError('parser.polza_outreach.summary.fetch.failed', allErr, { jobId }, logMeta);
-    return jsonError(allErr.message, 500, { request_id: requestId });
+  // Одна выборка всех строк дешевле head-запроса на каждый этап. Страницами
+  // по 1000, как соседние роуты: запуск на 500 готовых просматривает до 4000
+  // кандидатов, а выдачу PostgREST может ограничивать max-rows — без страниц
+  // воронка молча обрезалась бы.
+  const allRows: SummaryRow[] = [];
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    const { data: chunk, error: allErr } = await supabase
+      .from('polza_outreach_companies')
+      .select(`${POLZA_FUNNEL_COLUMNS},exclusion_reason`)
+      .eq('job_id', jobId)
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (allErr) {
+      await logError('parser.polza_outreach.summary.fetch.failed', allErr, { jobId }, logMeta);
+      return jsonError(allErr.message, 500, { request_id: requestId });
+    }
+    allRows.push(...((chunk ?? []) as unknown as SummaryRow[]));
+    if (!chunk || chunk.length < PAGE) break;
   }
 
-  const funnel = {
-    vacancies: allRows?.length ?? 0,
-    domain_found: allRows?.filter((r) => r.normalized_domain).length ?? 0,
-    icp_passed: allRows?.filter((r) => STAGE_ICP_PASSED.includes(String(r.stage))).length ?? 0,
-    // v2: поле воронки geo_confirmed = «Lead Score: write now» (до поиска почты).
-    geo_confirmed:
-      allRows?.filter(
-        (r) => r.lead_status === 'write_now' || r.stage === 's5_email' || r.stage === 's6_letters',
-      ).length ?? 0,
-    email_found: allRows?.filter((r) => r.selected_company_email).length ?? 0,
-    ready: allRows?.filter((r) => r.status === 'ready').length ?? 0,
-  };
-  for (const row of allRows ?? []) {
+  // Правила этапов общие с окном разбора этапа на экране (lib/polzaOutreach/funnel.ts).
+  const funnel = polzaFunnel(allRows);
+  for (const row of allRows) {
     statusCounts[row.status] = (statusCounts[row.status] ?? 0) + 1;
     if (row.status === 'excluded' && row.exclusion_reason) {
       exclusionCounts[row.exclusion_reason] = (exclusionCounts[row.exclusion_reason] ?? 0) + 1;
+    }
+    if (row.status === 'needs_review' && row.review_reason) {
+      // По коду причины: у цепочки, которая не готова, и у писем, не
+      // прошедших гарды, после кода — почему, и без этого каждая строка
+      // считалась бы отдельно.
+      const code = polzaReviewCode(row.review_reason);
+      reviewCounts[code] = (reviewCounts[code] ?? 0) + 1;
     }
   }
 
@@ -92,5 +111,6 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     funnel,
     status_counts: statusCounts,
     exclusion_counts: exclusionCounts,
+    review_counts: reviewCounts,
   });
 }

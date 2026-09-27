@@ -5,6 +5,8 @@ export type CampaignStatus = 'draft' | 'running' | 'paused' | 'done';
 export type RecipientStatus = 'active' | 'replied' | 'bounced' | 'unsubscribed' | 'finished' | 'stopped';
 export type MessageStatus = 'scheduled' | 'sending' | 'sent' | 'failed' | 'canceled' | 'unknown';
 export type ReplyKind = 'human' | 'auto_reply' | 'bounce' | 'warmup' | 'unknown';
+/** Кто создал рассылку: человек в форме или заливка автоаутрича RU / EN. */
+export type CampaignSourceKind = 'manual' | 'polza_ru' | 'polza_en';
 
 /** password — пароль приложения из выгрузки; google_sa — ключ служебного аккаунта. */
 export type MailboxAuthType = 'password' | 'google_sa';
@@ -53,6 +55,11 @@ export interface CampaignRow {
   gap_seconds: number;
   gap_jitter_seconds: number;
   started_at: string | null;
+  /** Папка на экране рассылок (sender_folders); null — ручная кампания вне папок. */
+  folder_id: string | null;
+  source_kind: CampaignSourceKind;
+  /** Запуск автоаутрича (parser_jobs.id), из которого залиты получатели. */
+  source_job_id: string | null;
 }
 
 export interface StepRow {

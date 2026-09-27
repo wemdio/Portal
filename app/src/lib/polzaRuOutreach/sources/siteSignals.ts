@@ -11,12 +11,19 @@
  *  - отраслевую группу для роутера кейсов.
  * Отдельно, без LLM: счётчик Яндекс.Директа / рекламные пиксели на главной —
  * только баллы скоринга, в письмо не попадают.
+ *
+ * Готовый разбор живёт 30 дней в общем кэше аутричей: повторный запуск не
+ * обходит сайт и не платит ИИ за ту же компанию.
  */
 
+import { createHash } from 'crypto';
 import { fetchSitePageHtml } from '@/lib/enrich/emailScraper';
 import { detectSignals } from '@/lib/enrich/signalDetector';
+import { outreachModel } from '@/lib/outreachLlm/client';
+import { readSiteAnalysisCache, writeSiteAnalysisCache, type SiteAnalysisCacheKey } from '@/lib/outreachLlm/siteAnalysisCache';
+import { normalizeDomain } from '../company';
 import { acceptQuote, htmlToText } from '../evidence';
-import { asBool, asString, callJson } from '../llm';
+import { asBool, asString, callJson, isBoolLike } from '../llm';
 import { INDUSTRY_GROUPS, type IndustryGroup, type Signal, type SignalType } from '../types';
 
 const PAGE_TIMEOUT_MS = 12_000;
@@ -165,13 +172,62 @@ new_production — запуск производства/мощности; partn
 dealer_search — ищут дилеров/дистрибьюторов; export_launch — начало экспорта; new_case — новый проект с конкретным клиентом.
 Жёсткие правила: цитаты и бренд копируются символ в символ со страницы; «мы растём» — не факт; не угадывай.`;
 
-export async function analyzeSite(website: string): Promise<SiteAnalysis> {
+/**
+ * Версия кода разбора ответа (что и как попадает в SiteAnalysis). Правка
+ * промпта меняет ключ кэша сама (хэш ниже), а правку разбора код не видит —
+ * её отмечаем, подняв это значение.
+ */
+const SITE_PARSER_VERSION = 'p1';
+
+/**
+ * Версия для ключа кэша: версия разбора + короткий хэш текста SYSTEM. Поправили
+ * промпт — старые разборы просто не находятся, и 30 дней не отдаются разборы
+ * по прежним правилам, даже если версию поднять забыли.
+ */
+export const SITE_PROMPT_VERSION = `ru-site:${SITE_PARSER_VERSION}:${createHash('sha256').update(SYSTEM).digest('hex').slice(0, 12)}`;
+
+/**
+ * Ответ без главных полей (балл ЦА числом, B2B да/нет) — не разбор, а сбой
+ * модели. callJson бросает на нём LlmCallError: строка уходит в «ИИ не
+ * ответил» и в серию предохранителя, а не отсеивается молча по нулевому баллу
+ * как «мало похожа на клиента»; в кэш такой ответ не попадает, иначе компания
+ * 30 дней отсеивалась бы по пустому разбору.
+ */
+function hasCoreFields(raw: Record<string, unknown>): boolean {
+  const ta = raw.ta_score;
+  const taValid = (typeof ta === 'number' && Number.isFinite(ta)) || (typeof ta === 'string' && ta.trim() !== '' && Number.isFinite(Number(ta)));
+  return taValid && isBoolLike(raw.is_b2b);
+}
+
+/** Разбор из кэша — только целый и открывшийся: битая запись — промах, а не падение строки. */
+function siteFromCache(raw: unknown): SiteAnalysis | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const cached = raw as Partial<SiteAnalysis>;
+  if (cached.reachable !== true || !Array.isArray(cached.facts) || typeof cached.taScore !== 'number') return null;
+  return { ...EMPTY_SITE, ...cached, reachable: true };
+}
+
+/**
+ * Разбор сайта компании. Сайт не открылся — EMPTY_SITE (reachable: false).
+ * ИИ не ответил или ответил без главных полей — LlmCallError летит наверх как
+ * есть: раннер отличает «сайт не открылся» от «ИИ не ответил» и от
+ * исчерпанного лимита.
+ */
+export async function analyzeSite(website: string, domain: string | null = normalizeDomain(website)): Promise<SiteAnalysis> {
+  const cacheKey: SiteAnalysisCacheKey | null = domain
+    ? { lang: 'ru', domain, promptVersion: SITE_PROMPT_VERSION, model: outreachModel('ru', 'analysis') }
+    : null;
+  if (cacheKey) {
+    const cached = siteFromCache(await readSiteAnalysisCache(cacheKey));
+    if (cached) return cached;
+  }
+
   const { pages, homeHtml } = await crawlSite(website);
   if (!pages.length) return EMPTY_SITE;
   const hasAdPixel = homeHtml ? detectSignals(homeHtml).some((s) => s.category === 'ad_pixel') : false;
 
   const user = pages.map((p) => `=== СТРАНИЦА ${p.url} ===\n${p.text.slice(0, PAGE_TEXT_CHARS)}`).join('\n\n');
-  const raw = await callJson(SYSTEM, user, 'site', 1600);
+  const raw = await callJson(SYSTEM, user, 'site', 1600, hasCoreFields);
 
   const allText = pages.map((p) => p.text).join('\n');
   const pageByUrl = new Map(pages.map((p) => [p.url.replace(/\/+$/, ''), p]));
@@ -197,7 +253,7 @@ export async function analyzeSite(website: string): Promise<SiteAnalysis> {
   const group = asString(raw.industry_group) as IndustryGroup;
   const b2bQuote = acceptQuote(allText, asString(raw.b2b_quote));
   const ta = Number(raw.ta_score);
-  return {
+  const analysis: SiteAnalysis = {
     reachable: true,
     brand,
     isB2b: asBool(raw.is_b2b) && Boolean(b2bQuote),
@@ -211,4 +267,9 @@ export async function analyzeSite(website: string): Promise<SiteAnalysis> {
     hasAdPixel,
     facts,
   };
+  // В кэш — только разобранный ИИ сайт; ответ без главных полей сюда не
+  // доходит (callJson бросил). Неоткрывшийся не запоминаем: завтра он может
+  // открыться. Свежесть событий раннер сверяет по датам при чтении.
+  if (cacheKey) await writeSiteAnalysisCache(cacheKey, analysis);
+  return analysis;
 }

@@ -62,7 +62,19 @@ function Section({ section }: { section: DigestSection }) {
             // оставался почти нечитаемым.
             <li key={index} className="flex gap-2 text-sm leading-relaxed text-gray-900">
               <span className="mt-0.5 shrink-0 text-xs tabular-nums text-gray-400">{index + 1}</span>
-              <span>{renderInline(item)}</span>
+              <div className="min-w-0">
+                <span>{renderInline(item.text)}</span>
+                {item.children.length ? (
+                  <ul className="mt-1 space-y-1">
+                    {item.children.map((child, childIndex) => (
+                      <li key={childIndex} className="flex gap-2">
+                        <span className="shrink-0 text-gray-400">•</span>
+                        <span>{renderInline(child)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
             </li>
           ))}
         </ol>

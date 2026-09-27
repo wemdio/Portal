@@ -17,10 +17,9 @@ const fmtDate = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString(
 const fmtMoney = (n: number) => `${Math.round(n).toLocaleString('ru-RU')} ₽`;
 
 /**
- * До чего сделка дошла внутри выбранного периода. В этом списке все сделки
- * созданы в периоде (ручка режет по дате создания), поэтому колонка отвечает
- * не на «почему она здесь», а на «что по ней успело случиться»: квал,
- * встреча, договор, деньги.
+ * Что со сделкой случилось внутри выбранного периода: квал, встреча, договор,
+ * продажа, деньги. `lead: false` — сделка заведена раньше периода и попала в
+ * список по одному из остальных событий (помечается «заведена раньше»).
  *
  * Тип общий с воронкой (прежний `FunnelDealsList`, удалён 11.09.2026), и там `lead` ещё несёт смысл —
  * поэтому поле остаётся, просто ярлык из этого списка убран (см.
@@ -40,9 +39,8 @@ export type InPeriod = {
 
 function periodBadges(p: InPeriod): string[] {
   const out: string[] = [];
-  // Ярлык «лид» намеренно не рисуем: список режется по дате создания, он стоял
-  // бы у каждой строки и не отличал бы ничего. В воронке (прежний `FunnelDealsList`, удалён 11.09.2026)
-  // отбор другой, там свой набор ярлыков и «лид» осмыслен.
+  // Ярлык «лид» намеренно не рисуем: он стоял бы почти у каждой строки.
+  // Сделки, заведённые раньше периода, отмечены отдельно — рядом с названием.
   if (p.qualified) out.push('квал');
   if (p.meetings > 0) out.push(p.meetings > 1 ? `встречи · ${p.meetings}` : 'встреча');
   if (p.contract) out.push('договор');
@@ -61,6 +59,8 @@ export type DrillLeadRow = {
   first_contract_at: string | null;
   won_at: string | null;
   history_complete: boolean;
+  /** Этап AMO на конец выбранного периода (по истории переходов). */
+  status_at_end: string | null;
   /** Что именно этой сделки попало в период — см. `InPeriod`. */
   in_period: InPeriod;
   amo_url: string | null;
@@ -90,6 +90,7 @@ const drillSortColumns: SortColumns<DrillLeadRow> = {
   // не «менеджер по имени пусто», а отсутствие данных.
   responsible_name: { type: 'string', getValue: (r) => r.responsible_name },
   created_at: { type: 'date', getValue: (r) => r.created_at },
+  status_at_end: { type: 'string', getValue: (r) => r.status_at_end },
   first_meeting_at: { type: 'date', getValue: (r) => r.first_meeting_at },
   first_contract_at: { type: 'date', getValue: (r) => r.first_contract_at },
   won_at: { type: 'date', getValue: (r) => r.won_at },
@@ -97,7 +98,8 @@ const drillSortColumns: SortColumns<DrillLeadRow> = {
 
 /**
  * Ключ, по которому раскрытая строка теряет актуальность. Только from/to/
- * sources влияют на то, какие сделки попадут в drill-down — смена groupBy
+ * sources и режим счёта (cohort: без когорты старые сделки из списка уходят)
+ * влияют на то, какие сделки попадут в drill-down — смена groupBy
  * на сам список сделок не влияет (это только раскладка графика по корзинам),
  * поэтому в ключ не входит: иначе переключение «День/Неделя/Месяц» без
  * причины сворачивало бы открытую строку.
@@ -111,7 +113,10 @@ const drillSortColumns: SortColumns<DrillLeadRow> = {
  * правило линтера `react-hooks/set-state-in-effect`.
  */
 export function drillKey(filters: FiltersState): string {
-  return `${filters.from}|${filters.to}|${filters.sources.join(',')}`;
+  return [
+    filters.from, filters.to, filters.sources.join(','),
+    filters.cohort ? 'cohort' : 'created', filters.cohortFrom ?? '', filters.cohortTo ?? '',
+  ].join('|');
 }
 
 /** Стабильная строка среза — и для зависимостей эффекта, и для логов. */
@@ -142,6 +147,14 @@ export default function DealDrillDown({
       setLoading(true);
       try {
         const qs = new URLSearchParams({ from: filters.from, to: filters.to, ...query });
+        // Режим по умолчанию не передаём — ручка сама считает «по когорте».
+        if (!filters.cohort) qs.set('cohort', '0');
+        // Таблица сужена кликом по столбцу — выбранный период целиком нужен
+        // режиму «без когорты» (см. `cohortFrom` в lib/firstSales/params.ts).
+        if (filters.cohortFrom && filters.cohortTo) {
+          qs.set('cohortFrom', filters.cohortFrom);
+          qs.set('cohortTo', filters.cohortTo);
+        }
 
         // Фильтр по источникам нужен только при провале в МЕНЕДЖЕРА: его
         // цифра в разбивке посчитана уже после фильтра, и список сделок
@@ -179,8 +192,8 @@ export default function DealDrillDown({
       active = false;
       controller.abort();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- from/to/sources уже свёрнуты в drillKey выше уровнем; key меняется вместе со строкой.
-  }, [key, filters.from, filters.to, filters.sources.join(',')]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- from/to/sources/cohort/cohortFrom/cohortTo уже свёрнуты в drillKey выше уровнем; key меняется вместе со строкой.
+  }, [key, filters.from, filters.to, filters.sources.join(','), filters.cohort, filters.cohortFrom, filters.cohortTo]);
 
   // `rows`/`sortedRows` объявлены до ранних return'ов ниже — хуки не могут
   // вызываться условно, а компонент размонтируется/монтируется заново при смене
@@ -226,7 +239,7 @@ export default function DealDrillDown({
             Второй `.glass-frame` дал бы размытие внутри размытия — именно
             вложенность роняет плавность прокрутки. Плотная подложка строк. */}
         <div className="overflow-x-auto rounded-lg border border-zinc-200 bg-[var(--glass-rows)]">
-          <table className="w-full min-w-[760px] text-[11px]">
+          <table className="w-full min-w-[880px] text-[11px]">
             <thead>
               <tr className="border-b border-zinc-100 text-left text-[10px] uppercase tracking-wider text-zinc-400">
                 <SortableTh label="Сделка" sortKey="name" sort={sort} onSort={toggleSort} className="px-2.5 py-1.5" />
@@ -240,6 +253,17 @@ export default function DealDrillDown({
                 <SortableTh
                   label="Создана"
                   sortKey="created_at"
+                  sort={sort}
+                  onSort={toggleSort}
+                  className="px-2.5 py-1.5"
+                />
+                <SortableTh
+                  label={
+                    <span title="Этап сделки в AMO на последний день выбранного периода — по истории переходов, а не текущий. Для периода, который ещё идёт, совпадает с текущим этапом.">
+                      Этап на конец периода
+                    </span>
+                  }
+                  sortKey="status_at_end"
                   sort={sort}
                   onSort={toggleSort}
                   className="px-2.5 py-1.5"
@@ -272,7 +296,7 @@ export default function DealDrillDown({
                 {/* Не сортируется: это не величина, а перечисление причин, по
                     которым сделка попала в период. */}
                 <th className="px-2.5 py-1.5 font-medium">
-                  <span title="До чего сделка дошла внутри выбранного периода: квал, встреча по записи разговора, договор, деньги. Все сделки списка созданы в этом периоде; пустая клетка значит «дальше лида пока не ушла».">
+                  <span title="Что со сделкой случилось внутри выбранного периода: квал, встреча по записи разговора, договор, продажа, деньги. Пустая клетка у сделки этого периода значит «дальше лида пока не ушла».">
                     В периоде
                   </span>
                 </th>
@@ -295,6 +319,14 @@ export default function DealDrillDown({
                       ) : (
                         <span className="text-zinc-700">{lead.name || `Сделка #${lead.amo_id}`}</span>
                       )}
+                      {!lead.in_period.lead && (
+                        <span
+                          title={`Сделка заведена ${fmtDate(lead.created_at)} — раньше выбранного периода. В списке она потому, что в периоде по ней была встреча, договор, продажа или оплата.`}
+                          className="cursor-help rounded-full border border-zinc-200 bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600"
+                        >
+                          заведена раньше
+                        </span>
+                      )}
                       {!lead.history_complete && (
                         <span
                           title="Сделка создана раньше глубины синка событий AMO — даты встречи/договора могли произойти до горизонта, который мы видим, и посчитаны быть не могут."
@@ -312,6 +344,7 @@ export default function DealDrillDown({
                     {lead.responsible_name || <span className="text-zinc-400">не закреплён</span>}
                   </td>
                   <td className="px-2.5 py-1.5 tabular-nums text-zinc-600">{fmtDate(lead.created_at)}</td>
+                  <td className="px-2.5 py-1.5 text-zinc-600">{lead.status_at_end ?? '—'}</td>
                   <td className="px-2.5 py-1.5 tabular-nums text-zinc-600">{fmtDate(lead.first_meeting_at)}</td>
                   <td className="px-2.5 py-1.5 tabular-nums text-zinc-600">{fmtDate(lead.first_contract_at)}</td>
                   <td className="px-2.5 py-1.5 tabular-nums text-zinc-600">{fmtDate(lead.won_at)}</td>
@@ -332,12 +365,17 @@ export default function DealDrillDown({
             </tbody>
           </table>
         </div>
-        {/* Оговорка обязательна: список и строка над ним считаются по разным
-            датам, и молчаливое расхождение читалось бы как ошибка расчёта. */}
+        {/* Оговорка: по когорте в списке есть сделки старше периода, и без
+            пояснения они читались бы как сломанный фильтр дат. Без когорты
+            их нет — и сноска говорит об этом, а не о том, чего не видно. */}
         <p className="mt-1.5 text-[11px] text-zinc-400">
-          Показаны сделки, созданные в выбранном периоде. Продажи и оплаты считаются по своим
-          датам, поэтому продажа или платёж по сделке, пришедшей раньше периода, попадёт в цифры
-          строки, но в этом списке не появится.
+          {filters.cohort
+            ? 'Показаны сделки, созданные в выбранном периоде, и сделки, заведённые раньше, если в периоде '
+              + 'по ним была встреча, договор, продажа или оплата — они помечены «заведена раньше». Этап — '
+              + 'на последний день периода.'
+            : 'Режим «без когорты»: показаны только сделки, созданные в выбранном периоде. Сделки, '
+              + 'заведённые раньше, здесь не видны, даже если в периоде по ним была встреча, продажа или '
+              + 'оплата. Этап — на последний день периода.'}
         </p>
         {data?.truncated && (
           <p className="mt-1.5 text-[11px] text-amber-700">

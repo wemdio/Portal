@@ -125,8 +125,10 @@ export default function RenewalsFunnel({
   listSubtitle = RENEWALS_DEFAULTS.listSubtitle,
   listOutcomesLabel = RENEWALS_DEFAULTS.listOutcomesLabel,
 }: {
-  /** Период и — у первички — фильтр каналов. Остальные поля фильтров экрана воронке не нужны. */
-  filters: { from: string; to: string; sources?: string[] };
+  /** Период и — у первички — фильтр каналов и режим счёта (`cohort: false` —
+   *  только сделки, заведённые в периоде). Остальные поля фильтров экрана
+   *  воронке не нужны; продления режима не знают и его не передают. */
+  filters: { from: string; to: string; sources?: string[]; cohort?: boolean };
   endpoint?: string;
   dealEndpoint?: string;
   title?: string;
@@ -138,6 +140,7 @@ export default function RenewalsFunnel({
   listOutcomesLabel?: string;
 }) {
   const sourcesKey = (filters.sources ?? []).join(SOURCES_SEPARATOR);
+  const withoutCohort = filters.cohort === false;
   const rootRef = useRef<HTMLDivElement>(null);
   const theme = useChartTheme(rootRef);
   const reducedMotion = usePrefersReducedMotion();
@@ -155,6 +158,7 @@ export default function RenewalsFunnel({
       try {
         const qs = new URLSearchParams({ from: filters.from, to: filters.to });
         for (const source of sourcesKey ? sourcesKey.split(SOURCES_SEPARATOR) : []) qs.append('source', source);
+        if (withoutCohort) qs.set('cohort', '0');
         const res = await authFetch(`${endpoint}?${qs.toString()}`, {
           signal: controller.signal,
         });
@@ -178,7 +182,7 @@ export default function RenewalsFunnel({
       active = false;
       controller.abort();
     };
-  }, [endpoint, filters.from, filters.to, sourcesKey]);
+  }, [endpoint, filters.from, filters.to, sourcesKey, withoutCohort]);
 
   const option = useMemo(
     () => (theme && data && data.totalDeals > 0 ? buildOption(data, theme, !reducedMotion) : null),

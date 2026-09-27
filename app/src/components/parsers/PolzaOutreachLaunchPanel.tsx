@@ -3,7 +3,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown, ChevronRight, Loader2, Play } from 'lucide-react';
 import type { PolzaOutreachConfig } from '@/types';
-import { POLZA_OUTREACH_DEFAULT_COUNTRIES } from '@/lib/polzaOutreach/types';
+import { authFetchJson } from '@/lib/authFetch';
+import {
+  POLZA_OUTREACH_DEFAULT_COUNTRIES,
+  POLZA_OUTREACH_DEFAULT_LLM_BUDGET_USD,
+  POLZA_OUTREACH_MAX_LLM_BUDGET_USD,
+  POLZA_OUTREACH_MIN_LLM_BUDGET_USD,
+  POLZA_OUTREACH_SIGNATURE_MAX_LENGTH,
+  sanitizePolzaSignature,
+} from '@/lib/polzaOutreach/types';
 import { SidePanel } from '@/components/ui/SidePanel';
 
 type Props = {
@@ -45,6 +53,10 @@ const RECENCY_OPTIONS = [
   { days: 45, label: '45 дней' },
 ];
 
+/** Подпись писем — настройка инструмента, а не запуска (api/parsers/polza-outreach/settings). */
+const SETTINGS_URL = '/api/parsers/polza-outreach/settings';
+type SettingsResponse = { signature: string; updated_at: string | null };
+
 const inputCls =
   'w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-violet-400 focus:outline-none focus:ring-1 focus:ring-violet-400';
 const labelCls = 'mb-1 block text-sm font-medium text-gray-700';
@@ -55,21 +67,76 @@ const sectionCls = 'mb-3 text-xs font-semibold uppercase tracking-wide text-gray
  *
  * Раньше висела раскрытым блоком над списком запусков и занимала первый экран
  * целиком, хотя её трогают раз в запуск. Часто меняемое — гео, сколько
- * компаний, свежесть и источники — осталось наверху; батч YC, размер компании
- * и порог Lead Score убраны в «Тонкую настройку».
+ * компаний, свежесть, лимит на ИИ и источники — осталось наверху; батч YC,
+ * размер компании и порог Lead Score убраны в «Тонкую настройку».
  */
 export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Props) {
   const [countries, setCountries] = useState<string[]>(initial?.countries ?? [...POLZA_OUTREACH_DEFAULT_COUNTRIES]);
   const [days, setDays] = useState<number>(initial?.posted_within_days ?? 30);
-  const [limit, setLimit] = useState(String(initial?.limit ?? 100));
+  const [limit, setLimit] = useState(String(initial?.limit ?? 500));
   const [geoOpen, setGeoOpen] = useState(false);
   const [sources, setSources] = useState<Array<'hiring' | 'yc'>>(initial?.sources ?? ['hiring', 'yc']);
   const [ycFrom, setYcFrom] = useState(String(initial?.yc_batch_from_year ?? 2023));
   const [minEmp, setMinEmp] = useState(String(initial?.min_employees ?? 3));
   const [maxEmp, setMaxEmp] = useState(String(initial?.max_employees ?? 200));
   const [writeT, setWriteT] = useState(String(initial?.write_threshold ?? 75));
+  const [budgetUsd, setBudgetUsd] = useState<number>(initial?.llm_budget_usd ?? POLZA_OUTREACH_DEFAULT_LLM_BUDGET_USD);
+  const [includeExported, setIncludeExported] = useState<boolean>(initial?.include_previously_exported ?? false);
   const [advanced, setAdvanced] = useState(false);
   const geoRef = useRef<HTMLDivElement>(null);
+  // Подпись писем: одна на все запуски, живёт в настройках инструмента.
+  // savedSignature === null — ещё не загрузилась (или не загрузилась совсем).
+  const [signature, setSignature] = useState('');
+  const [savedSignature, setSavedSignature] = useState<string | null>(null);
+  const [signatureStatus, setSignatureStatus] = useState<'loading' | 'idle' | 'saving' | 'saved' | 'error'>('loading');
+  const [signatureError, setSignatureError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    authFetchJson<SettingsResponse>(SETTINGS_URL)
+      .then((data) => {
+        if (!alive) return;
+        setSignature(data.signature);
+        setSavedSignature(data.signature);
+        setSignatureStatus('idle');
+      })
+      .catch((e: unknown) => {
+        if (!alive) return;
+        setSignatureError(`Подпись не загрузилась: ${e instanceof Error ? e.message : 'ошибка сети'}. Письма подпишутся сохранённой подписью.`);
+        setSignatureStatus('error');
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const cleanSignature = sanitizePolzaSignature(signature);
+  const signatureDirty = savedSignature !== null && (cleanSignature.ok ? cleanSignature.value : signature) !== savedSignature;
+
+  const saveSignature = async (): Promise<boolean> => {
+    const clean = sanitizePolzaSignature(signature);
+    if (!clean.ok) {
+      setSignatureError(clean.error);
+      setSignatureStatus('error');
+      return false;
+    }
+    setSignatureStatus('saving');
+    setSignatureError(null);
+    try {
+      const data = await authFetchJson<SettingsResponse>(SETTINGS_URL, {
+        method: 'PUT',
+        body: JSON.stringify({ signature: clean.value }),
+      });
+      setSignature(data.signature);
+      setSavedSignature(data.signature);
+      setSignatureStatus('saved');
+      return true;
+    } catch (e) {
+      setSignatureError(e instanceof Error ? e.message : 'Не удалось сохранить подпись');
+      setSignatureStatus('error');
+      return false;
+    }
+  };
 
   const toggleSource = (s: 'hiring' | 'yc') => setSources((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
 
@@ -101,18 +168,27 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
     return {
       countries: countries.length ? countries : [...POLZA_OUTREACH_DEFAULT_COUNTRIES],
       posted_within_days: days,
-      limit: Number.isFinite(parsed) ? Math.max(1, Math.min(1000, Math.trunc(parsed))) : 100,
+      limit: Number.isFinite(parsed) ? Math.max(1, Math.min(1000, Math.trunc(parsed))) : 500,
       sources,
       yc_batch_from_year: Number(ycFrom) || 2023,
       min_employees: Number(minEmp) || 3,
       max_employees: Number(maxEmp) || 200,
       write_threshold: Number(writeT) || 75,
+      llm_budget_usd: budgetUsd,
+      include_previously_exported: includeExported,
     };
-  }, [countries, days, limit, sources, ycFrom, minEmp, maxEmp, writeT]);
+  }, [countries, days, limit, sources, ycFrom, minEmp, maxEmp, writeT, budgetUsd, includeExported]);
 
-  const canStart = countries.length > 0 && sources.length > 0;
-  const submit = () => {
+  // Пустое поле или 0 сервер молча поднял бы до минимума — лучше не пускать запуск.
+  const budgetValid =
+    Number.isFinite(budgetUsd) && budgetUsd >= POLZA_OUTREACH_MIN_LLM_BUDGET_USD && budgetUsd <= POLZA_OUTREACH_MAX_LLM_BUDGET_USD;
+  const hasScope = countries.length > 0 && sources.length > 0;
+  const canStart = hasScope && budgetValid && signatureStatus !== 'saving';
+  const submit = async () => {
     if (busy || !canStart) return;
+    // Несохранённая подпись уходит в настройки до запуска: иначе воркер
+    // подписал бы письма прежней, хотя в поле уже новая.
+    if (signatureDirty && !(await saveSignature())) return;
     void onStart(config);
     onClose();
   };
@@ -126,7 +202,11 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
       footer={
         <div className="flex items-center justify-between gap-3">
           <span className="text-xs text-gray-500">
-            {!canStart ? 'Нужны хотя бы одна страна и один источник' : `${countries.length} стран · ${sources.length} источника`}
+            {!hasScope
+              ? 'Нужны хотя бы одна страна и один источник'
+              : !budgetValid
+                ? `Лимит на ИИ — от $${POLZA_OUTREACH_MIN_LLM_BUDGET_USD} до $${POLZA_OUTREACH_MAX_LLM_BUDGET_USD}`
+                : `${countries.length} стран · ${sources.length} источника`}
           </span>
           <span className="flex gap-2">
             <button type="button" onClick={onClose} className="rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100">
@@ -134,7 +214,7 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
             </button>
             <button
               type="button"
-              onClick={submit}
+              onClick={() => void submit()}
               disabled={busy || !canStart}
               className="inline-flex items-center rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50"
             >
@@ -146,9 +226,11 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
       }
     >
       <p className="text-sm text-gray-600">
-        B2B-компании с поводом написать: найм в sales/GTM или стартап YC. Сайт, размер и отрасль → Lead Score (fit, размер, повод, полнота
-        данных) → почта только у «write now» → кейс по отрасли → цепочка из 4 писем. Сколько закажете готовых — столько и соберём, пока
-        хватает кандидатов.
+        B2B-компании с поводом написать: найм в sales/GTM или стартап YC. Домен, размер и отрасль → отсев агентств, B2C и компаний, уже
+        готовых в прошлых запусках → почта с сайта и её проверка — до разбора ИИ, за компании без почты не платим → разбор сайта и вакансии
+        → Lead Score (fit, размер, повод, полнота данных) → кейс по отрасли → цепочка из 4 писем: ИИ пишет её один раз на каждый тип повода,
+        под компанию подставляются проверенные факты. Почта, которую не удалось проверить, и письма, не прошедшие автопроверку, — на
+        ручную проверку. Сколько закажете готовых — столько и соберём, пока хватает кандидатов.
       </p>
 
       <div className="mt-5">
@@ -217,10 +299,10 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
               value={limit}
               onChange={(e) => setLimit(e.target.value.replace(/\D/g, ''))}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') submit();
+                if (e.key === 'Enter') void submit();
               }}
               inputMode="numeric"
-              placeholder="100"
+              placeholder="500"
               className={inputCls}
             />
           </label>
@@ -242,6 +324,25 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
               ))}
             </div>
           </div>
+
+          <label className="block">
+            <span className={labelCls}>Лимит на ИИ, $</span>
+            <input
+              type="number"
+              min={POLZA_OUTREACH_MIN_LLM_BUDGET_USD}
+              max={POLZA_OUTREACH_MAX_LLM_BUDGET_USD}
+              step={0.5}
+              value={Number.isFinite(budgetUsd) ? budgetUsd : ''}
+              onChange={(e) => setBudgetUsd(e.target.value === '' ? NaN : Number(e.target.value))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void submit();
+              }}
+              className={inputCls}
+            />
+            <span className="mt-1 block text-xs text-gray-500">
+              Разбор сайтов и вакансий и цепочки писем. Дойдёт до лимита — запуск остановится, готовое сохранится.
+            </span>
+          </label>
         </div>
 
         <div className="mt-4">
@@ -260,6 +361,46 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
       </div>
 
       <div className="mt-6 border-t border-gray-200 pt-4">
+        <div className={sectionCls}>Письма</div>
+        <label className="block">
+          <span className={labelCls}>Подпись</span>
+          <textarea
+            value={signature}
+            onChange={(e) => {
+              setSignature(e.target.value);
+              if (signatureStatus === 'saved' || (signatureStatus === 'error' && savedSignature !== null)) {
+                setSignatureStatus('idle');
+                setSignatureError(null);
+              }
+            }}
+            rows={3}
+            maxLength={POLZA_OUTREACH_SIGNATURE_MAX_LENGTH}
+            disabled={savedSignature === null}
+            placeholder={signatureStatus === 'loading' ? 'Загружаю подпись…' : undefined}
+            className={`${inputCls} disabled:bg-gray-50 disabled:text-gray-500`}
+          />
+        </label>
+        <div className="mt-1 flex items-start justify-between gap-3">
+          <span className="text-xs text-gray-500">
+            Одна на все запуски: стоит в конце каждого письма, строка в строку. Изменённая сохранится при запуске.
+          </span>
+          {signatureDirty ? (
+            <button
+              type="button"
+              onClick={() => void saveSignature()}
+              disabled={signatureStatus === 'saving'}
+              className="shrink-0 rounded-lg border border-violet-200 px-2.5 py-1 text-xs font-medium text-violet-700 hover:bg-violet-50 disabled:opacity-50"
+            >
+              {signatureStatus === 'saving' ? 'Сохраняю…' : 'Сохранить'}
+            </button>
+          ) : signatureStatus === 'saved' ? (
+            <span className="shrink-0 text-xs text-emerald-700">Сохранено</span>
+          ) : null}
+        </div>
+        {signatureError ? <p className="mt-1 text-xs text-red-600">{signatureError}</p> : null}
+      </div>
+
+      <div className="mt-6 border-t border-gray-200 pt-4">
         <button
           type="button"
           onClick={() => setAdvanced((v) => !v)}
@@ -268,7 +409,7 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
           {advanced ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
           Тонкая настройка
         </button>
-        {!advanced && <p className="mt-1 text-xs text-gray-500">Батч YC, размер компании и порог Lead Score.</p>}
+        {!advanced && <p className="mt-1 text-xs text-gray-500">Батч YC, размер компании, порог Lead Score и компании прошлых запусков.</p>}
 
         {advanced && (
           <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -287,6 +428,13 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
                 <input value={maxEmp} onChange={(e) => setMaxEmp(e.target.value.replace(/\D/g, ''))} inputMode="numeric" className={inputCls} />
               </div>
             </div>
+            {/* По умолчанию компании, уже готовые в прошлых запусках, отсеиваются:
+                второй раз одной компании не пишем. Галочка — для осознанного
+                повтора (например, прошлую выгрузку так и не отправили). */}
+            <label className="flex items-center gap-2 text-sm text-gray-700 sm:col-span-2">
+              <input type="checkbox" checked={includeExported} onChange={(e) => setIncludeExported(e.target.checked)} />
+              Брать компании, которые уже выгружались раньше
+            </label>
           </div>
         )}
       </div>

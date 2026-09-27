@@ -1,10 +1,15 @@
 'use client';
 
 import { Download, Loader2, Square } from 'lucide-react';
-import { CHAIN_LABELS, REASON_LABELS, type ChainType } from '@/lib/polzaRuOutreach/types';
+import { CHAIN_LABELS, REASON_LABELS, SOURCE_LABELS, type ChainType, type SourceCode } from '@/lib/polzaRuOutreach/types';
+import { ChainTemplates } from '@/components/outreach/ChainTemplates';
+import { SenderBlock } from '@/components/outreach/SenderBlock';
 import { JOB_STATUS } from './JobList';
-import { Funnel, ResultsTable } from './Results';
-import { RESULTS_PAGE, RESULT_FILTERS, fmtDateTime, type ResultsFilter, type ResultsResponse, type RuJob } from './shared';
+import { Reasons, ResultsTable } from './Results';
+import { RuStages } from './Stages';
+import { API, RESULTS_PAGE, RESULT_FILTERS, fmtDateTime, fmtUsd, type ResultsFilter, type ResultsResponse, type RuJob } from './shared';
+
+export type ExportKind = 'ready' | 'doubtful' | 'journal';
 
 interface Props {
   job: RuJob;
@@ -18,14 +23,17 @@ interface Props {
   onReason: (code: string | null) => void;
   onPage: (p: number) => void;
   onStop: () => void;
-  onExport: (kind: 'ready' | 'journal') => void;
+  onExport: (kind: ExportKind) => void;
+  /** Перечитать запуск и таблицу: «Переписать цепочку» меняет готовых и расход на ИИ. */
+  onRefresh: () => void;
 }
 
-export function JobDetail({ job, results, loading, exporting, filter, reason, page, onFilter, onReason, onPage, onStop, onExport }: Props) {
+export function JobDetail({ job, results, loading, exporting, filter, reason, page, onFilter, onReason, onPage, onStop, onExport, onRefresh }: Props) {
   const running = job.status === 'running' || job.status === 'pending';
   const detail = job.progress_detail ?? null;
   const totalPages = Math.max(1, Math.ceil((results?.count ?? 0) / RESULTS_PAGE));
   const target = job.config?.limit ?? null;
+  const llm = detail?.llm ?? null;
 
   return (
     <div className="space-y-4">
@@ -38,9 +46,33 @@ export function JobDetail({ job, results, loading, exporting, filter, reason, pa
             <div className="mt-0.5 text-sm text-gray-500">
               {fmtDateTime(job.created_at)} · {JOB_STATUS[job.status]}
               {running && <> · {job.progress_percent ?? 0}% · в пуле {detail?.pool ?? '…'} компаний</>}
+              {detail?.doubtful ? ` · очень спорных ${detail.doubtful}` : ''}
               {detail?.stop_reason === 'pool_exhausted' && ' · кандидаты закончились раньше лимита'}
               {detail?.stop_reason === 'scan_limit' && ' · достигнут потолок просмотра'}
             </div>
+            {llm && (
+              <div className="mt-0.5 text-sm text-gray-500" title={`Вызовов ИИ: ${llm.calls}`}>
+                ИИ: потрачено {fmtUsd(llm.spent_usd)} из {fmtUsd(llm.limit_usd)}
+              </div>
+            )}
+            {detail?.stop_reason === 'budget' && (
+              <div className="mt-2 rounded-lg bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
+                Остановлен: достигнут лимит на ИИ. Готовые компании сохранены — чтобы добрать остальные, повторите запуск с большим лимитом.
+              </div>
+            )}
+            {/* Разбор новых компаний остановлен: до заказанного числа добирают те, что ждут цепочку оффера. */}
+            {detail?.stop_reason === 'awaiting_templates' && (
+              <div className="mt-2 rounded-lg bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
+                Набрано вместе с компаниями, которые ждут цепочку{detail.awaiting_templates ? ` (${detail.awaiting_templates})` : ''} — перепишите цепочку в
+                блоке «Цепочки запуска»
+              </div>
+            )}
+            {/* Без SMTP-прокси адрес считается рабочим, если у домена есть почтовый сервер: письмо может не дойти. */}
+            {detail?.smtp_unavailable && (
+              <div className="mt-2 rounded-lg bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
+                SMTP-проверка почт недоступна — почты проверены только по MX
+              </div>
+            )}
             {job.status === 'failed' && job.error_message ? (
               <div className="mt-2 rounded-lg bg-red-50 px-3 py-1.5 text-sm text-red-700">{job.error_message}</div>
             ) : null}
@@ -64,6 +96,15 @@ export function JobDetail({ job, results, loading, exporting, filter, reason, pa
             <button
               type="button"
               disabled={exporting !== null}
+              onClick={() => onExport('doubtful')}
+              className="inline-flex items-center rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              {exporting === 'doubtful' ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Download className="mr-1.5 h-4 w-4" />}
+              Excel: очень спорные
+            </button>
+            <button
+              type="button"
+              disabled={exporting !== null}
               onClick={() => onExport('journal')}
               className="inline-flex items-center rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
             >
@@ -79,6 +120,15 @@ export function JobDetail({ job, results, loading, exporting, filter, reason, pa
           </div>
         )}
 
+        {detail?.source_errors && Object.keys(detail.source_errors).length > 0 && (
+          <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            Источники с ошибкой (запуск шёл без них):{' '}
+            {Object.entries(detail.source_errors)
+              .map(([code, msg]) => `${SOURCE_LABELS[code as SourceCode] ?? code}: ${msg}`)
+              .join(' · ')}
+          </div>
+        )}
+
         {detail?.chains && Object.keys(detail.chains).length > 0 && (
           <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
             <span className="text-gray-500">Цепочки после скоринга:</span>
@@ -90,16 +140,22 @@ export function JobDetail({ job, results, loading, exporting, filter, reason, pa
           </div>
         )}
 
+        {/* Вакансии разбираются после поиска почты — поэтому считаются только компании с рабочей почтой. */}
         {detail?.sdr && detail.sdr.any_sales_vacancy > 0 && (
           <p className="mt-2 text-xs text-gray-500">
-            Вакансии продаж: у {detail.sdr.any_sales_vacancy} компаний. В SDR-цепочку — {detail.sdr.strict_sdr} (роль SDR/BDR и холодный поиск
-            новых B2B-клиентов), остальные {detail.sdr.broad_to_general_queue} идут по другим поводам.
+            Вакансии продаж (среди компаний с рабочей почтой): у {detail.sdr.any_sales_vacancy} компаний. В SDR-цепочку — {detail.sdr.strict_sdr} (роль
+            SDR/BDR и холодный поиск новых B2B-клиентов), остальные {detail.sdr.broad_to_general_queue} идут по другим поводам.
           </p>
         )}
       </div>
 
-      <Funnel
-        funnel={results?.funnel ?? null}
+      <RuStages jobId={job.id} funnel={results?.funnel ?? null} run={{ running, failed: job.status === 'failed' }} error={job.error_message} />
+
+      <ChainTemplates key={job.id} jobUrl={`${API}/${job.id}`} running={running} lang="ru" onChanged={onRefresh} />
+
+      <SenderBlock key={`sender-${job.id}`} jobUrl={`${API}/${job.id}`} running={running} readyCount={detail?.ready ?? null} onChanged={onRefresh} />
+
+      <Reasons
         reasons={results?.reason_counts ?? null}
         onReason={(code) => {
           onReason(code);

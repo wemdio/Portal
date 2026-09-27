@@ -52,7 +52,17 @@ export interface IcpFilterResult {
   reason: IcpExclusionReason | null;
 }
 
-export function icpFilter(input: IcpFilterInput, seenDomains: Set<string>): IcpFilterResult {
+/**
+ * Домены, уже занятые в запуске: прошедшая фильтр строка свой домен занимает.
+ * Set подходит как есть; раннер передаёт обёртку, которая запоминает ещё и
+ * строку-владельца, — чтобы после стопа по лимиту убрать дубли удалённых строк.
+ */
+export interface SeenDomains {
+  has(domain: string): boolean;
+  add(domain: string): unknown;
+}
+
+export function icpFilter(input: IcpFilterInput, seenDomains: SeenDomains): IcpFilterResult {
   const name = input.companyName ?? '';
   const description = `${input.companyDescription ?? ''}\n${input.vacancyDescription ?? ''}`;
 

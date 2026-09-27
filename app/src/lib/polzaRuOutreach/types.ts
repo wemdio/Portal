@@ -5,13 +5,17 @@
  * (RU_OUTREACH_HANDOFF CEO, 23.09.2026): reactivation → hiring → ad_budget →
  * event → growth_event → icp_only. Во всех цепочках четыре письма:
  * повод → боль и что делает Polza → доказательство → мягкое закрытие.
+ * Половина подходящих компаний (кроме SDR) вместо своей цепочки получает
+ * оффер «Автоматизированный аутрич» — сплит 50/50 по домену (25.09.2026).
  *
  * Дизайн: docs/superpowers/specs/2026-09-23-polza-ru-outreach-chain-router-design.md.
  */
 
+import { sanitizeLlmBudgetUsd } from '@/lib/outreachLlm/types';
+
 export const RU_OUTREACH_PARSER_TYPE = 'polza_ru_outreach' as const;
 
-export const CHAIN_TYPES = ['reactivation', 'hiring', 'ad_budget', 'event', 'growth_event', 'icp_only'] as const;
+export const CHAIN_TYPES = ['reactivation', 'hiring', 'ad_budget', 'event', 'growth_event', 'icp_only', 'automation'] as const;
 export type ChainType = (typeof CHAIN_TYPES)[number];
 
 export const CHAIN_LABELS: Record<ChainType, string> = {
@@ -21,17 +25,80 @@ export const CHAIN_LABELS: Record<ChainType, string> = {
   event: 'Выставка / событие',
   growth_event: 'Рост: продукт, регион, контракт, грант',
   icp_only: 'Только профиль (высокий ЦА-балл)',
+  automation: 'Автоматизированный аутрич (50/50)',
 };
 
 export const LETTER_COUNT = 4;
-export const TEMPLATE_VERSION = 'chains_v2@2026-09-23';
+/**
+ * Версия писем строки (template_version). С 26.09.2026 письма — шаблон цепочки
+ * оффера от писателя (letters/templateWriter.ts) с подставленными фактами
+ * компании; прежние детерминированные цепочки (chains_v4) — только его образец.
+ */
+export const TEMPLATE_VERSION = 'offer_templates_v1@2026-09-26';
+
+/** Писем в цепочке: во всех цепочках четыре, как у CEO (решение 26.09.2026). */
+export function letterCountFor(_chain: ChainType): number {
+  return LETTER_COUNT;
+}
 
 /**
- * Писем в цепочке: SDR-цепочка («найм») — три письма по инструкции Максима
- * (INSTRUCTION_02 от 23.09.2026), остальные цепочки CEO — четыре.
+ * Плейсхолдеры шаблона цепочки — только они меняются от компании к компании
+ * (спека 2026-09-26-outreach-to-sender-design.md §4): бренд, фраза-повод из
+ * проверенных фактов (openingSentence), текст утверждённого кейса, гипотеза
+ * сегментов и подпись отправителя.
  */
-export function letterCountFor(chain: ChainType): number {
-  return chain === 'hiring' ? 3 : LETTER_COUNT;
+export const TEMPLATE_PLACEHOLDERS = {
+  brand: '{{бренд}}',
+  opening: '{{повод}}',
+  case: '{{кейс}}',
+  hypothesis: '{{гипотеза}}',
+  signature: '{{подпись}}',
+} as const;
+export type TemplatePlaceholder = (typeof TEMPLATE_PLACEHOLDERS)[keyof typeof TEMPLATE_PLACEHOLDERS];
+
+/** Конец каждого письма шаблона — как у signed(): подпись подставляется целиком. */
+export const TEMPLATE_SIGN_OFF = `С уважением,\n${TEMPLATE_PLACEHOLDERS.signature}`;
+
+/**
+ * Шаблон цепочки оффера в разобранном виде (в базе — polza_chain_templates.letters
+ * по контракту писателя). Письмо 1 — в двух вариантах: лично ЛПР и «перешлите
+ * ответственному» для общей почты; письмо 3 — с кейсом и без него (гипотеза
+ * сегментов и механика). У SDR-цепочки кейса нет — нет и варианта с кейсом.
+ */
+export interface ChainTemplateLetters {
+  subject: string;
+  bodyDirect: string;
+  bodyRouting: string;
+  letter2: string;
+  bodyWithCase: string | null;
+  bodyWithoutCase: string;
+  letter4: string;
+}
+
+/** Кейс по отрасли подбирается всем цепочкам, кроме SDR (router.routeCase). */
+export function chainUsesCase(chain: ChainType): boolean {
+  return chain !== 'hiring';
+}
+
+/**
+ * Гипотеза сегментов — только у цепочек CEO: в письме 3 SDR-цепочки —
+ * утверждённая фраза о ролях и процесс, у «Автоматизации» — механика формата.
+ * Там её не считаем и за неё не платим.
+ */
+export function chainUsesHypothesis(chain: ChainType): boolean {
+  return chain !== 'hiring' && chain !== 'automation';
+}
+
+/** Плейсхолдеры, которые может использовать шаблон оффера. */
+export function templatePlaceholdersFor(chain: ChainType): TemplatePlaceholder[] {
+  const p = TEMPLATE_PLACEHOLDERS;
+  return [
+    p.brand,
+    p.opening,
+    ...(chainUsesCase(chain) ? [p.case] : []),
+    ...(chainUsesHypothesis(chain) ? [p.hypothesis] : []),
+    p.signature,
+  ];
 }
 
 /** Отраслевые группы роутера кейсов (таблица CEO). */
@@ -47,7 +114,10 @@ export const INDUSTRY_GROUP_LABELS: Record<IndustryGroup, string> = {
   digital_agency: 'digital / event / маркетинг / агентства',
 };
 
-export const SOURCE_CODES = ['hh', 'direct', 'crm', 'exhibitors', 'contracts', 'growth', 'site_news', 'directory'] as const;
+export const SOURCE_CODES = [
+  'hh', 'direct', 'crm', 'exhibitors', 'contracts', 'tenders', 'growth', 'site_news', 'directory',
+  'gis', 'ymaps', 'revenue_growth', 'news',
+] as const;
 export type SourceCode = (typeof SOURCE_CODES)[number];
 
 export const SOURCE_LABELS: Record<SourceCode, string> = {
@@ -56,9 +126,14 @@ export const SOURCE_LABELS: Record<SourceCode, string> = {
   crm: 'AMO: старые отказы',
   exhibitors: 'Выставки (загруженные каталоги)',
   contracts: 'Госконтракты (загруженные выгрузки ЕИС)',
+  tenders: 'Коммерческие тендеры (загруженные выгрузки)',
   growth: 'Гранты / акселераторы (загруженные списки)',
   site_news: 'Новости на сайтах компаний прошлых запусков',
   directory: 'Общая база компаний (по профилю)',
+  gis: '2ГИС: несколько филиалов, отдел продаж',
+  ymaps: 'Яндекс Карты: новые точки сетей',
+  revenue_growth: 'Рост выручки по отчётности ФНС',
+  news: 'Новости о компании (Google News)',
 };
 
 export interface RuOutreachConfig {
@@ -69,6 +144,8 @@ export interface RuOutreachConfig {
   limit: number;
   /** Порог скоринга 0–100: от него пишем, ниже — пропуск. Ручную проверку CEO убрал 23.09.2026. */
   write_threshold: number;
+  /** Похожесть на клиента Polza по сайту, 0–10: ниже — отсев (кроме «Возврата»). */
+  min_ta_score: number;
   /** Нижний порог суммы госконтракта, ₽. */
   min_contract_amount: number;
   /** Общая база: выручка, ₽, и штат. */
@@ -77,12 +154,27 @@ export interface RuOutreachConfig {
   min_employees: number;
   include_previously_exported: boolean;
   sender_id: string | null;
+  /**
+   * Лимит расхода на ИИ за запуск, $. Дошли до него — запуск завершается
+   * штатно (stop_reason 'budget'), готовое остаётся.
+   */
+  llm_budget_usd: number;
 }
+
+/**
+ * Лимит на ИИ по умолчанию и его рамки — общие с английским аутричем, живут в
+ * lib/outreachLlm/types.ts (модуль без Node-зависимостей: форма запуска —
+ * клиентский компонент). Здесь — прежние имена для формы и роута.
+ */
+export { DEFAULT_LLM_BUDGET_USD, MAX_LLM_BUDGET_USD, MIN_LLM_BUDGET_USD } from '@/lib/outreachLlm/types';
 
 export const DEFAULT_FRESHNESS_DAYS = 45;
 export const MAX_FRESHNESS_DAYS = 180;
-export const DEFAULT_LIMIT = 50;
-export const MAX_LIMIT = 500;
+/** Готовые компании уходят в Instantly; 500 — решение 25.09.2026. */
+export const DEFAULT_LIMIT = 500;
+export const MAX_LIMIT = 1000;
+export const DEFAULT_WRITE_THRESHOLD = 70;
+export const DEFAULT_MIN_TA_SCORE = 4;
 
 function clampInt(value: unknown, fallback: number, min: number, max: number): number {
   const n = Number(value);
@@ -95,7 +187,7 @@ export function sanitizeRuOutreachConfig(raw: Partial<RuOutreachConfig>): RuOutr
   const sources = Array.isArray(raw.sources)
     ? Array.from(new Set(raw.sources.filter((s): s is SourceCode => SOURCE_CODES.includes(s as SourceCode))))
     : [];
-  const write = clampInt(raw.write_threshold, 70, 0, 100);
+  const write = clampInt(raw.write_threshold, DEFAULT_WRITE_THRESHOLD, 0, 100);
   const minRevenue = clampInt(raw.min_revenue, 30_000_000, 0, 1_000_000_000_000);
   const senderId = typeof raw.sender_id === 'string' && /^[0-9a-f-]{36}$/i.test(raw.sender_id) ? raw.sender_id : null;
   return {
@@ -103,26 +195,33 @@ export function sanitizeRuOutreachConfig(raw: Partial<RuOutreachConfig>): RuOutr
     freshness_days: clampInt(raw.freshness_days, DEFAULT_FRESHNESS_DAYS, 1, MAX_FRESHNESS_DAYS),
     limit: clampInt(raw.limit, DEFAULT_LIMIT, 1, MAX_LIMIT),
     write_threshold: write,
+    min_ta_score: clampInt(raw.min_ta_score, DEFAULT_MIN_TA_SCORE, 0, 10),
     min_contract_amount: clampInt(raw.min_contract_amount, 1_000_000, 0, 10_000_000_000),
     min_revenue: minRevenue,
     max_revenue: Math.max(minRevenue, clampInt(raw.max_revenue, 3_000_000_000, 0, 1_000_000_000_000)),
     min_employees: clampInt(raw.min_employees, 10, 0, 100_000),
     include_previously_exported: raw.include_previously_exported === true,
     sender_id: senderId,
+    llm_budget_usd: sanitizeLlmBudgetUsd(raw.llm_budget_usd),
   };
 }
 
-export type RowStatus = 'processing' | 'ready' | 'rejected' | 'manual_review' | 'failed';
+export type RowStatus = 'processing' | 'ready' | 'rejected' | 'manual_review' | 'failed' | 'doubtful';
 
-/** Этапы конвейера (поле pipeline_stage). Порядок = порядок воронки. */
+/**
+ * Этапы конвейера (поле pipeline_stage). Порядок = порядок воронки и порядок
+ * шагов раннера: воронку (results/route.ts) считают по индексу этапа строки.
+ * С 26.09.2026 почта — до разбора ИИ (дорогое в конце): компанию без рабочей
+ * почты не разбираем и за неё не платим.
+ */
 export const STAGES = [
   'candidates_loaded',
   'amo_checked',
   'company_resolved',
   'deduplicated',
+  'recipient_resolved',
   'enriched',
   'scored',
-  'recipient_resolved',
   'sequence_assembled',
   'qa_checked',
   'ready',
@@ -134,9 +233,9 @@ export const STAGE_LABELS: Record<Stage, string> = {
   amo_checked: 'Проверка AMO',
   company_resolved: 'Компания и домен',
   deduplicated: 'Без повторов',
-  enriched: 'Сайт и сигналы',
-  scored: 'Прошли скоринг',
   recipient_resolved: 'Найдена почта',
+  enriched: 'Вакансии, сайт и сигналы',
+  scored: 'Прошли скоринг',
   sequence_assembled: 'Цепочка собрана',
   qa_checked: 'Прошли QA',
   ready: 'Готово',
@@ -153,11 +252,15 @@ export const REASON_LABELS: Record<string, string> = {
   PREVIOUSLY_EXPORTED: 'Уже выгружалась раньше',
   DOMAIN_NOT_FOUND: 'Не найден сайт компании',
   SITE_UNREACHABLE: 'Сайт компании не открылся',
+  LLM_FAILED: 'ИИ не ответил (сбой модели или ключа)',
   NOT_B2B: 'Не B2B',
   EXCLUDED_CATEGORY: 'Исключённая категория (кадровое агентство, конкурент, маркетплейс)',
   NO_CHAIN: 'Нет повода и низкий ЦА-балл',
   SCORE_TOO_LOW: 'Скоринг ниже порога',
+  TA_TOO_LOW: 'Мало похожа на клиента Polza (ниже ползунка)',
+  SIZE_OUT_OF_RANGE: 'Размер компании вне заданных рамок',
   EMAIL_NOT_FOUND: 'Не найдена корпоративная почта',
+  EMAIL_INVALID: 'Почта на сайте не прошла проверку',
   SUPPRESSED_CONTACT: 'Почта в стоп-листе',
   SENDER_MISSING: 'Нет активной подписи отправителя',
   QA_FACT_UNSUPPORTED: 'QA: неподтверждённый факт',
@@ -166,6 +269,36 @@ export const REASON_LABELS: Record<string, string> = {
   PROCESSING_ERROR: 'Ошибка обработки',
   LIMIT_REACHED: 'Лимит готовых компаний уже набран',
 };
+
+/**
+ * Признаки сомнения строки, прошедшей порог: один — «спорная», два и больше —
+ * «очень спорная». EMAIL_UNVERIFIED («почта не проверена») ставится ещё на
+ * шаге почты и сразу делает строку «очень спорной»: письмо на адрес, который
+ * SMTP-проверка не подтвердила, может не дойти, и разбор ИИ ей не оплачиваем.
+ *
+ * TEMPLATE_FAILED и LETTERS_QA_FAILED ставит шаг писем: шаблон цепочки оффера
+ * не прошёл проверку (или не написан) либо письма компании не прошли
+ * автопроверку. Такая строка тоже очень спорная — в рассылку не идёт; по
+ * TEMPLATE_FAILED «Переписать цепочку» находит строки, которые надо
+ * пересобрать.
+ */
+export const DOUBT_CODES = [
+  'EMAIL_UNVERIFIED', 'GENERIC_MAILBOX', 'NEAR_THRESHOLD', 'WEAK_SIGNAL', 'COMPANY_DOUBT', 'TEMPLATE_FAILED', 'LETTERS_QA_FAILED',
+] as const;
+export type DoubtCode = (typeof DOUBT_CODES)[number];
+
+export const DOUBT_LABELS: Record<DoubtCode, string> = {
+  EMAIL_UNVERIFIED: 'Почта не проверена',
+  GENERIC_MAILBOX: 'Общая почта',
+  NEAR_THRESHOLD: 'Оценка у порога',
+  WEAK_SIGNAL: 'Слабый повод',
+  COMPANY_DOUBT: 'Сомнения в компании',
+  TEMPLATE_FAILED: 'Цепочка оффера не прошла проверку',
+  LETTERS_QA_FAILED: 'Письма не прошли автопроверку',
+};
+
+/** С какого числа признаков строка уходит во вкладку «Очень спорные» (и писем не получает). */
+export const VERY_DOUBTFUL_FROM = 2;
 
 export type EvidenceLevel = 'A' | 'B' | 'C' | 'NONE';
 
@@ -189,7 +322,15 @@ export type SignalType =
   | 'dealer_search'
   | 'export_launch'
   | 'new_case'
-  | 'crm_lost';
+  | 'crm_lost'
+  /** 2ГИС: на сайте есть отдел продаж / целевая вакансия. В выборе цепочки не участвует. */
+  | 'sales_team'
+  /** Выручка по отчётности ФНС выросла на 20% и больше. */
+  | 'revenue_growth'
+  /** Выигранный коммерческий тендер (загруженная выгрузка). */
+  | 'tender_won'
+  /** Новость об инвестициях в компанию. */
+  | 'investment';
 
 /** Один найденный факт о компании с доказательством. */
 export interface Signal {

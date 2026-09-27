@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { MailboxesTab } from './MailboxesTab';
 import { CampaignsTab } from './CampaignsTab';
 import { StoplistTab } from './StoplistTab';
@@ -19,8 +20,29 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]['id'];
 
+/**
+ * Вкладка из адреса: ?tab=campaigns. Ссылка на кампанию (?campaign=<id>)
+ * без вкладки тоже ведёт в «Кампании» — иначе она открывала бы «Ящики».
+ */
+function initialTab(tab: string | null, campaignId: string | null): TabId {
+  const known = TABS.find((item) => item.id === tab);
+  if (known) return known.id;
+  return campaignId ? 'campaigns' : 'mailboxes';
+}
+
+/**
+ * Страница «Рассылка». Адрес /tools/sender?tab=campaigns&campaign=<id> сразу
+ * открывает кампании и подсвечивает нужную: так ведёт кнопка «Открыть в
+ * Рассылке» с экрана запуска автоаутрича — иначе рассылку запуска
+ * приходилось бы искать глазами в списке. Адрес читается один раз, при
+ * открытии страницы.
+ */
 export function SenderView() {
-  const [tab, setTab] = useState<TabId>('mailboxes');
+  const searchParams = useSearchParams();
+  const [tab, setTab] = useState<TabId>(() => initialTab(searchParams.get('tab'), searchParams.get('campaign')));
+  // Кампания из ссылки. Сбрасывается при смене вкладки: вернувшись в
+  // «Кампании», человек ждёт обычный список, а не повторную подсветку.
+  const [focusCampaignId, setFocusCampaignId] = useState<string | null>(() => searchParams.get('campaign'));
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-8">
@@ -36,7 +58,10 @@ export function SenderView() {
           <button
             key={item.id}
             type="button"
-            onClick={() => setTab(item.id)}
+            onClick={() => {
+              setTab(item.id);
+              setFocusCampaignId(null);
+            }}
             className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
               tab === item.id
                 ? 'border-blue-600 text-blue-600'
@@ -49,7 +74,7 @@ export function SenderView() {
       </div>
 
       {tab === 'mailboxes' ? <MailboxesTab /> : null}
-      {tab === 'campaigns' ? <CampaignsTab /> : null}
+      {tab === 'campaigns' ? <CampaignsTab focusCampaignId={focusCampaignId} /> : null}
       {tab === 'threads' ? <ThreadsTab /> : null}
       {tab === 'stoplist' ? <StoplistTab /> : null}
     </div>

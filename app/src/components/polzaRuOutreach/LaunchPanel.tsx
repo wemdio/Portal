@@ -7,7 +7,13 @@ import {
   CHAIN_TYPES,
   DEFAULT_FRESHNESS_DAYS,
   DEFAULT_LIMIT,
+  DEFAULT_LLM_BUDGET_USD,
+  DEFAULT_MIN_TA_SCORE,
+  DEFAULT_WRITE_THRESHOLD,
+  MAX_FRESHNESS_DAYS,
   MAX_LIMIT,
+  MAX_LLM_BUDGET_USD,
+  MIN_LLM_BUDGET_USD,
   SOURCE_CODES,
   SOURCE_LABELS,
   type RuOutreachConfig,
@@ -34,21 +40,68 @@ const DEFAULT_SOURCES: SourceCode[] = ['hh', 'direct', 'crm', 'site_news'];
 
 const MILLION = 1_000_000;
 
+function Slider({
+  title,
+  hint,
+  value,
+  min,
+  max,
+  step = 1,
+  suffix = '',
+  onChange,
+}: {
+  title: string;
+  hint: string;
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  suffix?: string;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div>
+      <div className="mb-1 flex items-baseline justify-between">
+        <span className="text-sm font-medium text-gray-700">{title}</span>
+        <span className="text-sm font-semibold tabular-nums text-violet-700">
+          {value}
+          {suffix}
+        </span>
+      </div>
+      <input
+        type="range"
+        className="w-full accent-violet-600"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+      />
+      <p className="mt-1 text-xs text-gray-500">{hint}</p>
+    </div>
+  );
+}
+
 export function LaunchPanel({ open, busy, senders, initial, onClose, onStart }: Props) {
   const [sources, setSources] = useState<SourceCode[]>(initial?.sources ?? DEFAULT_SOURCES);
-  const [freshness, setFreshness] = useState(initial?.freshness_days ?? DEFAULT_FRESHNESS_DAYS);
+  // Ползунок свежести начинается с 7 дней — старый запуск с меньшим окном подтягиваем к нему.
+  const [freshness, setFreshness] = useState(Math.min(MAX_FRESHNESS_DAYS, Math.max(7, initial?.freshness_days ?? DEFAULT_FRESHNESS_DAYS)));
   const [limit, setLimit] = useState(initial?.limit ?? DEFAULT_LIMIT);
-  const [write, setWrite] = useState(initial?.write_threshold ?? 70);
+  const [write, setWrite] = useState(initial?.write_threshold ?? DEFAULT_WRITE_THRESHOLD);
+  const [minTa, setMinTa] = useState(initial?.min_ta_score ?? DEFAULT_MIN_TA_SCORE);
   const [minContract, setMinContract] = useState(initial?.min_contract_amount ?? MILLION);
   const [minRevenueM, setMinRevenueM] = useState((initial?.min_revenue ?? 30 * MILLION) / MILLION);
   const [maxRevenueM, setMaxRevenueM] = useState((initial?.max_revenue ?? 3000 * MILLION) / MILLION);
   const [minEmployees, setMinEmployees] = useState(initial?.min_employees ?? 10);
   const [includeExported, setIncludeExported] = useState(initial?.include_previously_exported ?? false);
   const [senderId, setSenderId] = useState(initial?.sender_id ?? '');
+  const [budgetUsd, setBudgetUsd] = useState(initial?.llm_budget_usd ?? DEFAULT_LLM_BUDGET_USD);
   const [advanced, setAdvanced] = useState(false);
 
   const activeSenders = senders.filter((s) => s.status === 'active');
   const toggle = (s: SourceCode) => setSources((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
+  // Пустое поле или 0 сервер молча поднял бы до минимума — лучше не пускать запуск.
+  const budgetValid = Number.isFinite(budgetUsd) && budgetUsd >= MIN_LLM_BUDGET_USD && budgetUsd <= MAX_LLM_BUDGET_USD;
 
   const submit = () => {
     onStart({
@@ -56,12 +109,14 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart }: 
       freshness_days: freshness,
       limit,
       write_threshold: write,
+      min_ta_score: minTa,
       min_contract_amount: minContract,
       min_revenue: minRevenueM * MILLION,
       max_revenue: maxRevenueM * MILLION,
       min_employees: minEmployees,
       include_previously_exported: includeExported,
       sender_id: senderId || null,
+      llm_budget_usd: budgetUsd,
     });
     onClose();
   };
@@ -74,14 +129,20 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart }: 
       onClose={onClose}
       footer={
         <div className="flex items-center justify-between gap-3">
-          <span className="text-xs text-gray-500">{sources.length === 0 ? 'Выберите хотя бы один источник' : `Источников: ${sources.length}`}</span>
+          <span className="text-xs text-gray-500">
+            {sources.length === 0
+              ? 'Выберите хотя бы один источник'
+              : !budgetValid
+                ? `Лимит на ИИ — от $${MIN_LLM_BUDGET_USD} до $${MAX_LLM_BUDGET_USD}`
+                : `Источников: ${sources.length}`}
+          </span>
           <span className="flex gap-2">
             <button type="button" onClick={onClose} className="rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100">
               Отмена
             </button>
             <button
               type="button"
-              disabled={busy || sources.length === 0}
+              disabled={busy || sources.length === 0 || !budgetValid}
               onClick={submit}
               className="inline-flex items-center rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50"
             >
@@ -93,8 +154,11 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart }: 
       }
     >
       <p className="text-sm text-gray-600">
-        Система сама выбирает цепочку по главному поводу компании: {CHAIN_TYPES.map((c) => CHAIN_LABELS[c]).join(' → ')}. Открытые сделки и
-        клиенты из AMO пропускаются. Почта ищется только у компаний, набравших порог скоринга. Во всех цепочках 4 письма.
+        Система сравнивает все поводы компании и выбирает лучший оффер: {CHAIN_TYPES.filter((c) => c !== 'automation').map((c) => CHAIN_LABELS[c]).join(', ')}. «Возврат» —
+        всегда первый, если с компанией уже говорили. Половина компаний, которым подходит автоматизация (B2B, несколько сегментов или
+        разговор в AMO), получает оффер «{CHAIN_LABELS.automation}» вместо своего — кроме найма SDR. Открытые сделки и клиенты из AMO
+        пропускаются. Почту ищем и проверяем до разбора ИИ — за компании без почты и с непроверенной почтой не платим. Спорные компании помечаются, очень
+        спорные (в том числе с почтой, которую не удалось проверить) уходят в отдельную вкладку без писем и в Instantly не попадают.
       </p>
 
       <div className="mt-5">
@@ -110,17 +174,15 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart }: 
         </div>
         <p className="mt-2 text-xs text-gray-500">
           Выставки, госконтракты и гранты берутся из файлов вкладки «Библиотеки». Общая база даёт компании без повода — они попадут в цепочку
-          «Только профиль», только если сайт получит ЦА-балл от 7.
+          «Только профиль», только если сайт получит ЦА-балл от 7. Тендеры — из файлов «Библиотек». Новости и рост выручки проверяются у
+          каждой компании и удлиняют запуск.
         </p>
 
-        <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div>
             <label className={label}>Сколько готовых компаний</label>
             <input className={input} type="number" min={1} max={MAX_LIMIT} value={limit} onChange={(e) => setLimit(Number(e.target.value))} />
-          </div>
-          <div>
-            <label className={label}>Свежесть повода, дней</label>
-            <input className={input} type="number" min={1} max={180} value={freshness} onChange={(e) => setFreshness(Number(e.target.value))} />
+            <p className="mt-1 text-xs text-gray-500">Готовые уходят в Instantly. На 500 запуск идёт несколько часов и заметно дороже по ИИ.</p>
           </div>
           <div>
             <label className={label}>Подпись</label>
@@ -135,6 +197,53 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart }: 
               ))}
             </select>
           </div>
+          <div>
+            <label className={label}>Лимит на ИИ, $</label>
+            <input
+              className={input}
+              type="number"
+              min={MIN_LLM_BUDGET_USD}
+              max={MAX_LLM_BUDGET_USD}
+              step={0.5}
+              value={Number.isFinite(budgetUsd) ? budgetUsd : ''}
+              onChange={(e) => setBudgetUsd(e.target.value === '' ? NaN : Number(e.target.value))}
+            />
+            <p className="mt-1 text-xs text-gray-500">
+              Разбор сайтов, вакансий и новостей. Дойдёт до лимита — запуск остановится, готовое сохранится.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-5 space-y-5">
+          <Slider title="Пишем от оценки" hint="Оценка компании 0–100. Ниже — отсев." value={write} min={0} max={100} onChange={setWrite} />
+          <Slider
+            title="Похожесть на клиента от"
+            hint="Балл 0–10 по сайту. Ниже — отсев из любого источника; «Только профиль» — не ниже 7."
+            value={minTa}
+            min={0}
+            max={10}
+            onChange={setMinTa}
+          />
+          <Slider title="Свежесть повода" hint="Повод старше — не повод." value={freshness} min={7} max={MAX_FRESHNESS_DAYS} suffix=" дн." onChange={setFreshness} />
+        </div>
+
+        <div className="mt-5">
+          <span className={label}>Размер компаний (для всех источников)</span>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div>
+              <div className="mb-1 text-xs text-gray-500">Выручка от, млн ₽</div>
+              <input className={input} type="number" min={0} value={minRevenueM} onChange={(e) => setMinRevenueM(Number(e.target.value))} />
+            </div>
+            <div>
+              <div className="mb-1 text-xs text-gray-500">Выручка до, млн ₽</div>
+              <input className={input} type="number" min={0} value={maxRevenueM} onChange={(e) => setMaxRevenueM(Number(e.target.value))} />
+            </div>
+            <div>
+              <div className="mb-1 text-xs text-gray-500">Сотрудников от</div>
+              <input className={input} type="number" min={0} value={minEmployees} onChange={(e) => setMinEmployees(Number(e.target.value))} />
+            </div>
+          </div>
+          <p className="mt-1 text-xs text-gray-500">Известный размер вне рамок — отсев. Неизвестный — компания проходит.</p>
         </div>
       </div>
 
@@ -143,41 +252,14 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart }: 
           {advanced ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
           Тонкая настройка
         </button>
-        {!advanced && <p className="mt-1 text-xs text-gray-500">Порог скоринга, сумма госконтракта, размер компаний и повторные выгрузки.</p>}
+        {!advanced && <p className="mt-1 text-xs text-gray-500">Сумма госконтракта и повторные выгрузки.</p>}
 
         {advanced && (
           <div className="mt-4 space-y-5">
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div>
-                <label className={label}>Пишем от скоринга (0–100)</label>
-                <input className={input} type="number" min={0} max={100} value={write} onChange={(e) => setWrite(Number(e.target.value))} />
-                <p className="mt-1 text-xs text-gray-500">Ниже порога — пропуск, ручной проверки нет.</p>
-              </div>
-              <div>
-                <label className={label}>Мин. сумма госконтракта, ₽</label>
-                <input className={input} type="number" min={0} step={100000} value={minContract} onChange={(e) => setMinContract(Number(e.target.value))} />
-              </div>
+            <div className="sm:max-w-xs">
+              <label className={label}>Мин. сумма госконтракта, ₽</label>
+              <input className={input} type="number" min={0} step={100000} value={minContract} onChange={(e) => setMinContract(Number(e.target.value))} />
             </div>
-
-            {sources.includes('directory') && (
-              <div>
-                <span className={label}>Общая база: размер компаний</span>
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-                  <div>
-                    <div className="mb-1 text-xs text-gray-500">Выручка от, млн ₽</div>
-                    <input className={input} type="number" min={0} value={minRevenueM} onChange={(e) => setMinRevenueM(Number(e.target.value))} />
-                  </div>
-                  <div>
-                    <div className="mb-1 text-xs text-gray-500">Выручка до, млн ₽</div>
-                    <input className={input} type="number" min={0} value={maxRevenueM} onChange={(e) => setMaxRevenueM(Number(e.target.value))} />
-                  </div>
-                  <div>
-                    <div className="mb-1 text-xs text-gray-500">Сотрудников от</div>
-                    <input className={input} type="number" min={0} value={minEmployees} onChange={(e) => setMinEmployees(Number(e.target.value))} />
-                  </div>
-                </div>
-              </div>
-            )}
 
             <label className="flex items-center gap-2 text-sm text-gray-700">
               <input type="checkbox" checked={includeExported} onChange={(e) => setIncludeExported(e.target.checked)} />

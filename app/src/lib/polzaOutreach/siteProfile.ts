@@ -11,15 +11,32 @@
  * письмо идут только как гипотеза («I would probably start with…»).
  * Стек продаж (HubSpot, Salesforce, Apollo, Clay, Instantly, Outreach,
  * Lemlist) определяется по коду главной страницы, без LLM.
+ *
+ * ИИ — общий клиент аутричей с английским ключом (POLZA_EN_OUTREACH_API_KEY)
+ * и дешёвой моделью разбора; раньше здесь звался русский callJson с русским
+ * ключом. Обход сайта (crawlSite) общий с русским — это не ИИ.
+ *
+ * Готовый профиль живёт 30 дней в общем кэше аутричей: повторный запуск не
+ * обходит сайт и не платит ИИ за ту же компанию.
+ *
+ * Ответ без главных полей (hasCoreFields) — сбой модели: LlmCallError, а не
+ * профиль с пустыми полями по умолчанию.
  */
 
+import { createHash } from 'node:crypto';
 import { detectSignals } from '@/lib/enrich/signalDetector';
+import { callOutreachJson, outreachModel } from '@/lib/outreachLlm/client';
+import { LlmCallError } from '@/lib/outreachLlm/context';
+import { asBool, asString, asStringArray, isBoolLike } from '@/lib/outreachLlm/json';
+import { readSiteAnalysisCache, writeSiteAnalysisCache, type SiteAnalysisCacheKey } from '@/lib/outreachLlm/siteAnalysisCache';
 import { acceptQuote } from '@/lib/polzaRuOutreach/evidence';
-import { asBool, asString, asStringArray, callJson } from '@/lib/polzaRuOutreach/llm';
 import { crawlSite, parseRuDate } from '@/lib/polzaRuOutreach/sources/siteSignals';
 import { INDUSTRY_GROUPS, type IndustryGroup } from '@/lib/polzaRuOutreach/types';
+import { normalizeDomain } from './resolveDomain';
 
 const PAGE_TEXT_CHARS = 3500;
+// Страницы длиннее — уже описание компании (блок «данные» в Lead Score).
+const DESCRIPTIVE_PAGE_CHARS = 300;
 
 const OUTBOUND_TOOLS_RE = /\b(apollo\.io|clay\.com|instantly\.ai|outreach\.io|lemlist|salesloft|smartlead)\b/i;
 
@@ -78,6 +95,82 @@ const SYSTEM = `You analyze a company's website for Polza Agency, a B2B outbound
 }
 Rules: quotes are copied character-for-character from the page text; never invent; prefer "" over a guess.`;
 
+/**
+ * Версия кода разбора ответа (что и как попадает в SiteProfile: сверка цитат,
+ * чистка сегментов, даты). Правка промпта меняет ключ кэша сама (хэш ниже), а
+ * правку разбора код не видит — её отмечаем, подняв это значение.
+ */
+const SITE_PARSER_VERSION = 'p1';
+
+/**
+ * Версия для ключа кэша: версия разбора + короткий хэш текста SYSTEM. Поправили
+ * промпт — старые профили просто не находятся, и 30 дней не отдаются разборы
+ * по прежним правилам, даже если версию поднять забыли.
+ */
+export const SITE_PROMPT_VERSION = `en-site:${SITE_PARSER_VERSION}:${createHash('sha256').update(SYSTEM).digest('hex').slice(0, 12)}`;
+
+const BUSINESS_MODELS: readonly string[] = ['saas', 'service', 'platform', 'other'];
+
+/** Модель бизнеса из ответа; регистр не важен: «SaaS» — это saas, а не сбой модели. */
+function businessModelOf(raw: Record<string, unknown>): string {
+  return asString(raw.business_model).toLowerCase();
+}
+
+/**
+ * Главные поля разбора: B2B да/нет и дорогая сделка да/нет — на них стоит
+ * блок Company fit в Lead Score. У цитат, контекста и сегментов есть законное
+ * «пусто», а эти два да/нет модель обязана решить в любом ответе. Без них
+ * ответ — сбой модели (пустой объект, чужая схема), а не «не B2B»:
+ * buildSiteProfile бросает LlmCallError, строка уходит в «ИИ не ответил» и в
+ * серию предохранителя, а не отсеивается молча по пустому разбору; в кэш
+ * такой ответ не попадает, иначе компания 30 дней отсеивалась бы по нему.
+ *
+ * Модель бизнеса в это правило не входит: любое значение вне списка (в том
+ * числе пустое) — «other». Это законная оценка, а не повод терять строку:
+ * «marketplace» вместо «platform» — модель ответила, просто своими словами.
+ */
+function hasCoreFields(raw: Record<string, unknown>): boolean {
+  return isBoolLike(raw.is_b2b) && isBoolLike(raw.high_value);
+}
+
+/**
+ * Профиль из кэша — только целый и открывшийся: битая запись — промах, а не
+ * падение строки. Описание из каталога (YC, вакансия) приходит с кандидатом,
+ * а не с сайта, поэтому в кэше «есть описание» — только по страницам, а
+ * каталожное добавляем заново.
+ */
+function profileFromCache(raw: unknown, fallbackDescription: string | null): SiteProfile | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const cached = raw as Partial<SiteProfile>;
+  if (
+    cached.reachable !== true ||
+    typeof cached.isB2b !== 'boolean' ||
+    typeof cached.highValue !== 'boolean' ||
+    !BUSINESS_MODELS.includes(String(cached.businessModel)) ||
+    !Array.isArray(cached.segments) ||
+    !Array.isArray(cached.techStack)
+  ) {
+    return null;
+  }
+  return {
+    ...EMPTY_PROFILE,
+    ...cached,
+    reachable: true,
+    hasDescription: cached.hasDescription === true || Boolean(fallbackDescription),
+  };
+}
+
+export interface SiteProfileOptions {
+  /** Нормализованный домен — ключ кэша профиля; по умолчанию берётся из адреса сайта. */
+  domain?: string;
+  /**
+   * ИИ ответил целым ответом (профиль не из кэша): раннер по этому обнуляет
+   * серию «ИИ не ответил» — предохранитель «ИИ молчит» считает только ответы
+   * модели, и ответ без главных полей ответом не считается.
+   */
+  onLlmAnswer?: () => void;
+}
+
 function detectTechStack(html: string): string[] {
   const stack = new Set<string>();
   for (const s of detectSignals(html)) {
@@ -88,7 +181,26 @@ function detectTechStack(html: string): string[] {
   return Array.from(stack);
 }
 
-export async function buildSiteProfile(website: string, fallbackDescription: string | null): Promise<SiteProfile> {
+/**
+ * Профиль компании по сайту. Сайт не открылся — EMPTY_PROFILE (reachable:
+ * false). ИИ не ответил или ответил без главных полей — LlmCallError летит
+ * наверх как есть: раннер отличает «сайт не открылся» от «ИИ не ответил» и от
+ * исчерпанного лимита.
+ */
+export async function buildSiteProfile(
+  website: string,
+  fallbackDescription: string | null,
+  options: SiteProfileOptions = {},
+): Promise<SiteProfile> {
+  const domain = options.domain || normalizeDomain(website);
+  const cacheKey: SiteAnalysisCacheKey | null = domain.includes('.')
+    ? { lang: 'en', domain, promptVersion: SITE_PROMPT_VERSION, model: outreachModel('en', 'analysis') }
+    : null;
+  if (cacheKey) {
+    const cached = profileFromCache(await readSiteAnalysisCache(cacheKey), fallbackDescription);
+    if (cached) return cached;
+  }
+
   const { pages, homeHtml } = await crawlSite(website);
   if (!pages.length) return EMPTY_PROFILE;
 
@@ -96,12 +208,19 @@ export async function buildSiteProfile(website: string, fallbackDescription: str
     ...(fallbackDescription ? [`=== DIRECTORY DESCRIPTION (not a page) ===\n${fallbackDescription}`] : []),
     ...pages.map((p) => `=== PAGE ${p.url} ===\n${p.text.slice(0, PAGE_TEXT_CHARS)}`),
   ].join('\n\n');
-  const raw = await callJson(SYSTEM, user, 'en-site', 1400);
+  const raw = await callOutreachJson({ role: 'analysis', lang: 'en', system: SYSTEM, user, title: 'site', maxTokens: 1400 });
+  if (!hasCoreFields(raw)) {
+    // Ответ оплачен (клиент уже списал его с лимита), но серию «ИИ молчит» не
+    // обнуляет: иначе модель, которая отвечает пустым объектом, предохранитель
+    // не заметил бы.
+    throw new LlmCallError('EN analysis «site»: в ответе нет обязательных полей (is_b2b, high_value)');
+  }
+  options.onLlmAnswer?.();
 
   const allText = pages.map((p) => p.text).join('\n');
   const pageByUrl = new Map(pages.map((p) => [p.url.replace(/\/+$/, ''), p]));
   const b2bQuote = acceptQuote(allText, asString(raw.b2b_quote));
-  const model = asString(raw.business_model);
+  const model = businessModelOf(raw);
   const exclusion = asString(raw.exclusion) as SiteExclusion;
   const group = asString(raw.industry_group) as IndustryGroup;
 
@@ -119,7 +238,8 @@ export async function buildSiteProfile(website: string, fallbackDescription: str
     return t && t.split(' ').length <= maxWords ? t : null;
   };
 
-  return {
+  const pagesDescribe = pages.some((p) => p.text.length > DESCRIPTIVE_PAGE_CHARS);
+  const profile: SiteProfile = {
     reachable: true,
     isB2b: asBool(raw.is_b2b) && Boolean(b2bQuote),
     b2bQuote,
@@ -136,8 +256,13 @@ export async function buildSiteProfile(website: string, fallbackDescription: str
     industryGroup: INDUSTRY_GROUPS.includes(group) ? group : null,
     launch,
     techStack: homeHtml ? detectTechStack(homeHtml) : [],
-    hasDescription: pages.some((p) => p.text.length > 300) || Boolean(fallbackDescription),
+    hasDescription: pagesDescribe || Boolean(fallbackDescription),
   };
+  // В кэш — только разобранный ИИ сайт; ответ без главных полей сюда не
+  // доходит (бросили выше). Неоткрывшийся не запоминаем: завтра он может
+  // открыться. Свежесть запуска продукта раннер сверяет по дате при чтении.
+  if (cacheKey) await writeSiteAnalysisCache(cacheKey, { ...profile, hasDescription: pagesDescribe });
+  return profile;
 }
 
 const EN_MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];

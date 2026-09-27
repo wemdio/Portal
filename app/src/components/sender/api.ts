@@ -74,6 +74,58 @@ export interface CampaignDto {
   send_weekdays: number[];
   created_at: string;
   stats: CampaignStatsDto | null;
+  /** Папка на вкладке кампаний; null — кампания вне папок («Остальные»). */
+  folder_id: string | null;
+  /** Кто создал: форма «Рассылки» или заливка автоаутрича RU / EN. */
+  source_kind: 'manual' | 'polza_ru' | 'polza_en';
+  /** Запуск автоаутрича, из которого залиты получатели. */
+  source_job_id: string | null;
+}
+
+/** Ящик папки: адрес и можно ли с него слать прямо сейчас. */
+export interface FolderMailboxDto {
+  id: string;
+  email: string;
+  status: MailboxDto['status'];
+  enabled: boolean;
+}
+
+/**
+ * Папка рассылок: настройки, которые новая рассылка автоаутрича копирует
+ * себе в момент заливки. Уже созданные рассылки правка папки не меняет.
+ */
+export interface SenderFolderDto {
+  id: string;
+  /** auto_ru / auto_en — папки автоаутричей. */
+  key: string;
+  name: string;
+  timezone: string;
+  send_hour_from: number;
+  send_hour_to: number;
+  send_weekdays: number[];
+  gap_seconds: number;
+  gap_jitter_seconds: number;
+  /** Задержки писем 2, 3, 4 от предыдущего письма, в часах. */
+  step_delays_hours: number[];
+  updated_at: string;
+  /** Существующие ящики папки в порядке выбора. */
+  mailboxes: FolderMailboxDto[];
+  mailboxCount: number;
+  /** Проверены и с галочкой «берём в рассылку». */
+  workingMailboxCount: number;
+  campaignCount: number;
+}
+
+export interface FolderSettingsInput {
+  timezone: string;
+  sendHourFrom: number;
+  sendHourTo: number;
+  sendWeekdays: number[];
+  gapSeconds: number;
+  gapJitterSeconds: number;
+  /** Задержки писем 2, 3, 4 в часах. */
+  stepDelaysHours: number[];
+  mailboxIds: string[];
 }
 
 export interface CampaignStatsDto {
@@ -134,7 +186,10 @@ export interface ImportRecipientsResult {
   imported: number;
   /** База была заменена, а не дополнена. */
   replaced?: boolean;
+  /** Некорректный адрес. */
   skippedInvalid: number;
+  /** Первое письмо у строки выходит пустым (пустая переменная в теме или тексте). */
+  skippedEmptyLetter?: number;
   skippedDuplicates: number;
   skippedSuppressed: number;
   /** Сколько строк с данными было в файле до обреза лимитом. */
@@ -331,8 +386,22 @@ export function moveMailboxes(ids: string[], egressIp: string) {
   });
 }
 
+/** truncated — в список влезли не все кампании: показаны последние. */
 export function fetchCampaigns() {
-  return authFetchJson<{ campaigns: CampaignDto[] }>(`${BASE}/campaigns`);
+  return authFetchJson<{ campaigns: CampaignDto[]; truncated?: boolean }>(`${BASE}/campaigns`);
+}
+
+export function fetchFolders() {
+  return authFetchJson<{ folders: SenderFolderDto[] }>(`${BASE}/folders`);
+}
+
+/** Сохранить настройки папки; droppedMailboxes — выбранные ящики, которых уже нет. */
+export function updateFolder(id: string, body: FolderSettingsInput) {
+  return authFetchJson<{ folder: SenderFolderDto; droppedMailboxes: number }>(`${BASE}/folders/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
 }
 
 export function createCampaign(body: {
@@ -431,16 +500,29 @@ export function updateCampaign(
   });
 }
 
+/** mailboxesAdded — у запуска: сколько ящиков кампания без пула взяла из своей папки. */
 export function patchCampaign(id: string, action: 'start' | 'pause' | 'finish') {
-  return authFetchJson<{ ok: true; status: string }>(`${BASE}/campaigns/${id}`, {
+  return authFetchJson<{ ok: true; status: string; mailboxesAdded?: number }>(`${BASE}/campaigns/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action }),
   });
 }
 
+/**
+ * Что удаление кампании автоаутрича сделало с отметками заливки в строках
+ * запуска (у ручной кампании поля нет). lettersSent — письма уходили, отметки
+ * остались, и эти компании больше не зальются; иначе released строк можно
+ * залить заново.
+ */
+export interface CampaignDeleteOutreachDto {
+  rows: number;
+  lettersSent: boolean;
+  released: number;
+}
+
 export function deleteCampaign(id: string) {
-  return authFetchJson<{ ok: true }>(`${BASE}/campaigns/${id}`, { method: 'DELETE' });
+  return authFetchJson<{ ok: true; outreach?: CampaignDeleteOutreachDto }>(`${BASE}/campaigns/${id}`, { method: 'DELETE' });
 }
 
 /** Что нашлось в базе получателей — ответ /recipients/preview. */

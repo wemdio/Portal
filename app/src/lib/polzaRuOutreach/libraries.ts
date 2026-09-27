@@ -120,6 +120,20 @@ export async function loadLibraries(db: SupabaseClient, senderId: string | null)
   };
 }
 
+/**
+ * Утверждённые формулировки для цепочки: её собственные и общие («all»).
+ * Пробелы и переводы строк внутри — в один пробел: писатель копирует
+ * формулировку из промпта, проверка ищет её в шаблоне и в письмах дословно, и
+ * лишний перенос строки из «Библиотек» иначе делал бы её «чужой» — с
+ * неподтверждёнными цифрами.
+ */
+export function claimsForChain(claims: OfferClaim[], chain: string): OfferClaim[] {
+  return claims
+    .filter((c) => c.chain_type === 'all' || c.chain_type === chain)
+    .map((c) => ({ ...c, claim_text: c.claim_text.replace(/\s+/g, ' ').trim() }))
+    .filter((c) => c.claim_text);
+}
+
 /** Подпись целиком из профиля отправителя: имя, должность, телефон, сайт, Telegram. */
 export function formatSignature(sender: SenderProfile): string {
   return [sender.sender_name, sender.sender_title, sender.company_name, sender.phone, sender.website, sender.telegram]

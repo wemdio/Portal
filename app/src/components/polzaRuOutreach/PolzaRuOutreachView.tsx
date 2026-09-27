@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Play } from 'lucide-react';
 import type { RuOutreachConfig } from '@/lib/polzaRuOutreach/types';
-import { JobDetail } from './JobDetail';
+import { JobDetail, type ExportKind } from './JobDetail';
 import { JobList } from './JobList';
 import { LaunchPanel } from './LaunchPanel';
 import { Libraries } from './Libraries';
@@ -92,6 +92,12 @@ export function PolzaRuOutreachView() {
     return () => window.clearInterval(id);
   }, [running, loadJobs, loadResults]);
 
+  // После «Переписать цепочку»: готовых, спорных и расход на ИИ стало иначе.
+  const refresh = useCallback(() => {
+    loadJobs().catch((e) => setError(e instanceof Error ? e.message : 'Ошибка загрузки'));
+    void loadResults();
+  }, [loadJobs, loadResults]);
+
   const openPanel = (initial: Partial<RuOutreachConfig> | null) => setPanel((prev) => ({ initial, seq: (prev?.seq ?? 0) + 1 }));
 
   const start = async (config: Partial<RuOutreachConfig>) => {
@@ -132,7 +138,7 @@ export function PolzaRuOutreachView() {
     }
   };
 
-  const exportFile = async (kind: 'ready' | 'journal') => {
+  const exportFile = async (kind: ExportKind) => {
     if (!activeId) return;
     setExporting(kind);
     try {
@@ -172,7 +178,7 @@ export function PolzaRuOutreachView() {
         <div className="rounded-xl border border-gray-200 bg-white p-8 text-center shadow-sm">
           <div className="text-base font-semibold text-gray-900">Запусков ещё не было</div>
           <p className="mx-auto mt-1 max-w-xl text-sm text-gray-500">
-            Система соберёт компании по свежим поводам, отберёт по скорингу, найдёт почту и напишет цепочку писем. Письма не отправляются — на
+            Система соберёт компании по свежим поводам, найдёт и проверит почту, отберёт по скорингу и напишет цепочку писем. Письма не отправляются — на
             выходе таблица и Excel.
           </p>
           <button
@@ -215,6 +221,7 @@ export function PolzaRuOutreachView() {
               onPage={setPage}
               onStop={() => void stop()}
               onExport={(kind) => void exportFile(kind)}
+              onRefresh={refresh}
             />
           ) : (
             <div className="rounded-xl border border-gray-200 bg-white p-6 text-sm text-gray-500 shadow-sm">Выберите запуск слева.</div>

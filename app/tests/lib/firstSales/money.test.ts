@@ -138,6 +138,8 @@ describe('emptyMoneyTotals', () => {
       renewalsPayments: 0,
       unlinked: 0,
       unlinkedPayments: 0,
+      earlierDeals: 0,
+      earlierDealsPayments: 0,
       bankTotal: 0,
       bankPayments: 0,
     });
