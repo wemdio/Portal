@@ -204,6 +204,7 @@ interface Builder {
 
   order: (...args: unknown[]) => Builder;
   limit: (...args: unknown[]) => Builder;
+  abortSignal: (signal: AbortSignal) => Builder;
   range: (...args: unknown[]) => Promise<{ data: Row[]; error: { message: string } | null; count: number }>;
 
   single: () => Promise<{ data: Row | null; error: { message: string; code?: string } | null }>;
@@ -564,6 +565,8 @@ export function createMockSupabase(seed: MockSupabaseSeed = {}): MockSupabaseCli
         return builder;
       },
 
+      // No transport in this synchronous store; still respect an already cancelled query.
+      abortSignal: (signal) => { signal.throwIfAborted(); return builder; },
       eq: (column, value) => { filters.push({ column, op: 'eq', value }); return builder; },
       neq: (column, value) => { filters.push({ column, op: 'neq', value }); return builder; },
       in: (column, values) => { filters.push({ column, op: 'in', value: values }); return builder; },

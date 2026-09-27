@@ -16,6 +16,13 @@ import {
 } from '@/lib/tools/baseConstructorEta';
 import { getMappingContentWarnings } from '@/lib/tools/columnMappingWarnings';
 import {
+  EMAILS_PER_COMPANY_DEFAULT,
+  EMAILS_PER_COMPANY_MAX,
+  EMAILS_PER_COMPANY_MIN,
+  buildEmailsPerCompanyStepConfig,
+  normalizeEmailsPerCompany,
+} from '@/lib/tools/baseConstructorEmailsPerCompany';
+import {
   Eraser, CopyMinus, MailMinus, MailX, Sparkles, MailSearch, MailCheck,
   Globe, FileText, Target, PenLine, Upload, Play, X, Check,
   Download, ArrowRight, Loader2, ChevronDown, ChevronUp, RotateCcw,
@@ -46,7 +53,7 @@ function isActiveJobStatus(status: string): boolean {
 
 type StepKey =
   | 'remove_empty' | 'dedup_full' | 'dedup_email' | 'clean_names'
-  | 'find_emails' | 'split_emails' | 'remove_support_emails' | 'validate_emails' | 'check_sites'
+  | 'find_emails' | 'split_emails' | 'remove_support_emails' | 'validate_emails' | 'cap_emails_per_company' | 'check_sites'
   | 'enrich_descriptions' | 'ta_scoring' | 'personalization';
 
 type CostTier = 'free' | 'cheap' | 'api' | 'ai';
@@ -116,11 +123,12 @@ const STEPS: StepDef[] = [
   { key: 'remove_empty', label: 'Удалить пустые', description: 'Удаляет пустые строки и столбцы', icon: Eraser, category: 'clean', cost: 'free', priority: 10 },
   { key: 'dedup_full', label: 'Убрать дубликаты', description: 'Удаляет полностью идентичные строки', icon: CopyMinus, category: 'clean', cost: 'free', priority: 20 },
   { key: 'check_sites', label: 'Проверить сайты', description: 'Удаляет строки с мертвыми сайтами', icon: Globe, category: 'enrich', cost: 'cheap', priority: 30, requiresColumns: [['сайт', 'site', 'website', 'url', 'домен', 'domain']] },
-  { key: 'find_emails', label: 'Найти Email', description: 'Ищет все email по сайту компании', icon: MailSearch, category: 'enrich', cost: 'cheap', priority: 40, requiresColumns: [['сайт', 'site', 'website', 'url', 'домен', 'domain']], producesColumns: ['email'], recommendedAfter: ['check_sites'] },
+  { key: 'find_emails', label: 'Найти Email', description: 'Ищет email на сайте компании до первой страницы с почтой. Больше адресов — шаг «Почт на компанию»', icon: MailSearch, category: 'enrich', cost: 'cheap', priority: 40, requiresColumns: [['сайт', 'site', 'website', 'url', 'домен', 'domain']], producesColumns: ['email'], recommendedAfter: ['check_sites'] },
   { key: 'split_emails', label: 'Разделить почты', description: 'Каждый email — отдельная строка', icon: Split, category: 'clean', cost: 'free', priority: 45, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['find_emails'] },
   { key: 'remove_support_emails', label: 'Убрать почты поддержки', description: 'Удаляет почты поддержки (support@, help@, zakaz@…); info@/sales@ оставляет', icon: MailX, category: 'clean', cost: 'free', priority: 47, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['split_emails'] },
   { key: 'dedup_email', label: 'Дедуп по Email', description: 'Одна строка на уникальный email', icon: MailMinus, category: 'clean', cost: 'free', priority: 50, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['split_emails'], autoAdds: ['split_emails'] },
   { key: 'validate_emails', label: 'Валидация Email', description: 'SMTP-проверка, удаляет невалидные и одноразовые', icon: MailCheck, category: 'enrich', cost: 'api', priority: 55, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['split_emails', 'dedup_email'], autoAdds: ['split_emails'] },
+  { key: 'cap_emails_per_company', label: 'Почт на компанию', description: 'Оставляет до N почт на компанию, сначала подтверждённые. При N больше 1 «Найти Email» проходит несколько страниц сайта — дольше', icon: MailMinus, category: 'clean', cost: 'free', priority: 57, requiresColumns: [['email', 'e-mail', 'почта', 'mail']], recommendedAfter: ['split_emails', 'remove_support_emails', 'dedup_email', 'validate_emails'], autoAdds: ['split_emails'] },
   { key: 'clean_names', label: 'Очистить названия', description: 'AI убирает мусор из названий (ООО, LLC...)', icon: Sparkles, category: 'clean', cost: 'ai', priority: 60, requiresColumns: [['компания', 'company', 'name', 'название']] },
   { key: 'enrich_descriptions', label: 'Обогатить описаниями', description: 'Парсит описание компании с сайта', icon: FileText, category: 'enrich', cost: 'cheap', priority: 65, requiresColumns: [['сайт', 'site', 'website', 'url', 'домен', 'domain']], recommendedAfter: ['check_sites'] },
   { key: 'ta_scoring', label: 'Оценка ЦА', description: 'AI оценивает релевантность по брифу, оставляет 7–10', icon: Target, needsConfig: 'brief', category: 'ai', cost: 'ai', priority: 80, recommendedAfter: ['enrich_descriptions'], autoAdds: ['enrich_descriptions'] },
@@ -174,7 +182,7 @@ const COLUMN_ROLES: ColumnRole[] = [
     label: 'Email',
     canonical: 'email',
     aliases: ['email', 'e-mail', 'почта', 'mail', 'электронная почта', 'емейл', 'имейл'],
-    neededBy: ['split_emails', 'dedup_email', 'validate_emails'],
+    neededBy: ['split_emails', 'dedup_email', 'validate_emails', 'cap_emails_per_company'],
   },
 ];
 
@@ -368,6 +376,9 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
   // Юзер может переключить через UI в секции «Настройки».
   const [findEmailsTarget, setFindEmailsTarget] = useState<'same' | 'separate'>('separate');
   const [validateTarget, setValidateTarget] = useState<'original' | 'found' | 'both'>('original');
+  // «Почт на компанию» (шаг cap_emails_per_company). Строка — чтобы поле
+  // можно было очистить при вводе; на сабмите нормализуется в 1..20.
+  const [emailsPerCompany, setEmailsPerCompany] = useState(String(EMAILS_PER_COMPANY_DEFAULT));
   const [showPreview, setShowPreview] = useState(true);
   const briefFileRef = useRef<HTMLInputElement | null>(null);
 
@@ -844,6 +855,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
       if (selectedSteps.includes('validate_emails')) {
         stepConfig.validate_target = validateTarget;
       }
+      Object.assign(stepConfig, buildEmailsPerCompanyStepConfig(selectedSteps, emailsPerCompany));
 
       const res = await authFetch('/api/tools/base-constructor', {
         method: 'POST',
@@ -976,6 +988,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
 
   const needsBrief = selectedSteps.includes('ta_scoring');
   const needsPrompt = selectedSteps.includes('personalization');
+  const showEmailsPerCompanyOption = selectedSteps.includes('cap_emails_per_company');
   const neededRoles = fileData ? getNeededRoles(selectedSteps) : [];
   const unmappedRoles = neededRoles.filter((r) => !columnMapping[r.key]);
   // Есть ли в файле колонка с email — определяется по column_mapping
@@ -1550,18 +1563,58 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
             )}
 
             {/* Settings: brief, prompt, email pipeline target options */}
-            {fileData && (needsBrief || needsPrompt || showFindEmailsTargetOption || showValidateTargetOption) && (
+            {fileData && (needsBrief || needsPrompt || showFindEmailsTargetOption || showValidateTargetOption || showEmailsPerCompanyOption) && (
               <div className={clientMode ? 'neu-card overflow-hidden' : 'bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden'}>
                 <div className={clientMode ? 'px-6 py-4 border-b border-[var(--cp-divider)]' : 'px-6 py-4 border-b border-gray-100 bg-gray-50/50'}>
                   <h2 className={clientMode ? 'text-base font-semibold m-0 text-[var(--cp-paper)]' : 'text-base font-bold text-gray-900'}>{neededRoles.length > 0 ? '4' : '3'}. Настройки</h2>
                 </div>
                 <div className="px-6 py-5 space-y-4">
-                  {(showFindEmailsTargetOption || showValidateTargetOption) && (
+                  {(showFindEmailsTargetOption || showValidateTargetOption || showEmailsPerCompanyOption) && (
                     <div className="space-y-3 pb-1">
                       <h3 className={`text-sm font-semibold flex items-center gap-2 ${clientMode ? 'text-[var(--cp-paper)]' : 'text-gray-700'}`}>
                         <MailSearch className={`w-4 h-4 ${clientMode ? 'text-[var(--cp-paper-faint)]' : 'text-gray-500'}`} />
                         Email пайплайн
                       </h3>
+
+                      {showEmailsPerCompanyOption && (
+                        <fieldset className={clientMode ? 'border border-[var(--cp-divider)] rounded-md p-4 space-y-2' : 'border border-gray-200 rounded-xl p-4 space-y-2'}>
+                          <legend className={clientMode ? 'ds-eyebrow px-1' : 'text-xs font-semibold text-gray-700 px-1'}>
+                            Почт на компанию
+                          </legend>
+                          <p className="text-[11px] text-gray-500 mb-2">
+                            Сколько адресов оставить у одной компании. Сначала остаются подтверждённые валидацией, затем catch-all.
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              inputMode="numeric"
+                              min={EMAILS_PER_COMPANY_MIN}
+                              max={EMAILS_PER_COMPANY_MAX}
+                              step={1}
+                              aria-label="Почт на компанию"
+                              value={emailsPerCompany}
+                              onChange={(e) => setEmailsPerCompany(e.target.value)}
+                              onBlur={() => setEmailsPerCompany(String(normalizeEmailsPerCompany(emailsPerCompany)))}
+                              className={clientMode
+                                ? 'ds-input w-20'
+                                : 'w-20 px-3 py-2 text-sm border border-gray-200 rounded-xl bg-gray-50 outline-none transition hover:bg-gray-100 focus:border-gray-400 focus:bg-white'}
+                            />
+                            <span className={clientMode ? 'text-[11px] text-[var(--cp-paper-faint)]' : 'text-[11px] text-gray-500'}>
+                              {`${EMAILS_PER_COMPANY_MIN}–${EMAILS_PER_COMPANY_MAX}`}
+                            </span>
+                          </div>
+                          {selectedSteps.includes('find_emails') && normalizeEmailsPerCompany(emailsPerCompany) > 1 && (
+                            <p className={clientMode ? 'text-[11px] text-[var(--cp-paper-faint)]' : 'text-[11px] text-gray-500'}>
+                              Поиск почт пройдёт по нескольким страницам сайта, а не остановится на главной: адресов больше, поиск примерно на треть дольше.
+                            </p>
+                          )}
+                          {!selectedSteps.includes('validate_emails') && (
+                            <p className={clientMode ? 'text-[11px] text-[var(--cp-paper-faint)]' : 'text-[11px] text-gray-500'}>
+                              Без шага «Валидация Email» остаются первые адреса по порядку.
+                            </p>
+                          )}
+                        </fieldset>
+                      )}
 
                       {showFindEmailsTargetOption && (
                         <fieldset className={clientMode ? 'border border-[var(--cp-divider)] rounded-md p-4 space-y-2' : 'border border-gray-200 rounded-xl p-4 space-y-2'}>

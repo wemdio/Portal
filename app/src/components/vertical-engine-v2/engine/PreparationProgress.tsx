@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import type { VeOutreachPreparation } from '@/lib/verticalEngineV2/outreachSetup';
 import { getVeCollectionFailure } from '@/lib/verticalEngineV2/collectionErrors';
 import type { VeBaseSummary, VeCollectInfo, VeJobSummary } from './api';
-import { collectCount, describeReadyComposition, getCollectionProgress, isPartialPreview } from './collectionProgress';
+import { collectCount, describeCompletedCollection, describeReadyComposition, getCollectionProgress, isPartialPreview } from './collectionProgress';
 import { HE, StatusDot } from './design';
 
 interface PreparationProgressProps {
@@ -20,9 +20,12 @@ interface PreparationProgressProps {
 export interface PreparationPresentation {
   title: string;
   description: string;
+  readiness?: string;
   currentStep: number | null;
   tone: 'info' | 'muted' | 'err' | 'ok';
   canContinue?: boolean;
+  continueLabel?: string;
+  continueHint?: string;
 }
 
 const STEPS = ['Сбор и проверка базы', 'Разбор состава базы', 'Подготовка A/B-писем'];
@@ -49,7 +52,7 @@ const COLLECT_PHASES: Record<ReturnType<typeof getCollectionProgress>['phase'], 
   processing: ['Обогащаем и проверяем контакты', 'Ищем недостающие данные, проверяем email и исключаем дубли. В итоговую базу попадут только контакты, прошедшие все проверки.'],
   finishing: ['Проверяем соответствие гипотезе', 'Система автоматически проверяет, чем занимаются компании и соответствуют ли они выбранной гипотезе. Неподтверждённые контакты не входят в готовую базу.'],
   cleaning_names: ['Подготавливаем названия компаний для писем', 'Контакты уже отобраны. Приводим названия компаний к виду, который можно использовать в обращении, затем разберём состав базы.'],
-  reviewing_relevance: ['Проверяем соответствие компаний гипотезе', 'Система автоматически проверяет сведения о сохранённых компаниях и подтверждения на их сайтах. Контакты без подтверждения не попадут в готовую базу.'],
+  reviewing_relevance: ['Проверяем соответствие компаний гипотезе', 'Проверяем сведения о компаниях и подтверждения на их сайтах. Число готовых контактов обновится после завершения проверок. Контакты без подтверждения не попадут в готовую базу.'],
   reviewing_emails: ['Проверяем сохранённые email', 'Продолжаем проверку уже найденных адресов. После неё система завершит отбор компаний под гипотезу и разберёт состав базы.'],
   construct_failed: ['Обработка контактов остановлена', 'Обработчик сообщил об остановке. Причина появится после обновления состояния подготовки.'],
 };
@@ -71,19 +74,26 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
   });
   const target = base?.collect_info?.target_progress;
   const composition = describeReadyComposition(target);
-  if (base?.status === 'analyzed' && target && isPartialPreview(base) && !hasLiveJob && preparation.status !== 'pending') return {
-    title: `Сбор остановлен: ${target.ready_rows.toLocaleString('ru-RU')} из ${target.ready_target.toLocaleString('ru-RU')} контактов`,
-    description: `${preparation.status === 'ready' ? 'Письма подготовлены. ' : ''}Сейчас добор не идёт. `
-      + (target.status === 'exhausted' ? 'Компании из текущего плана источников обработаны; это не оценка всего рынка. '
+  const partialReady = preparation.status === 'ready' && (target?.ready_rows ?? 0) > 0
+    && ['limited', 'exhausted'].includes(target?.status ?? '');
+  if (base?.status === 'analyzed' && target && isPartialPreview(base) && !hasLiveJob
+    && !['pending', 'error', 'generating'].includes(preparation.status)) return {
+    title: partialReady ? 'База и письма готовы к согласованию'
+      : target.status === 'error' ? 'Ошибка добора' : target.ready_rows > 0 ? 'Подготовка не завершена' : 'Готовых контактов пока нет',
+    readiness: partialReady ? 'Контакты можно скачать. После согласования базы и писем можно перейти к запуску, не дожидаясь цели сбора.' : undefined,
+    description: (partialReady ? describeCompletedCollection(target) + ' '
+        : target.status === 'exhausted' ? 'Компании из текущего плана источников обработаны; это не оценка всего рынка. '
         : target.status === 'error' ? preparationError(target.reason ?? base.error ?? '') + ' '
           : target.reason?.startsWith('Нет подтверждённого продолжения источников')
             ? 'По текущему плану система не смогла продолжить добор. Это не означает, что подходящих компаний больше нет. '
             : (target.reason ? target.reason.replace(/[.\s]+$/, '') + '. ' : 'Цель превью пока не достигнута. '))
       + (composition ? composition + ' ' : '')
-      + (target.ready_rows > 0 ? 'Проверенная часть сохранена и доступна для скачивания. '
-        : 'Кандидаты сохранены, но контактов, прошедших все проверки, пока нет. ')
-      + 'Продолжение повторит только доступные незавершённые этапы.',
-    currentStep: null, tone: 'muted', canContinue: true,
+      + (target.ready_rows > 0 ? partialReady ? '' : 'Проверенная часть сохранена и доступна для скачивания. '
+        : 'Кандидаты сохранены, но контактов, прошедших все проверки, пока нет. '),
+    currentStep: partialReady ? STEPS.length : null,
+    tone: partialReady ? 'ok' : target.status === 'error' ? 'err' : 'muted', canContinue: true,
+    continueLabel: preparation.status === 'ready' && target.status !== 'error' ? 'Повторить добор' : undefined,
+    continueHint: 'Повторная попытка продолжит работу с сохранёнными результатами. Если источники снова дадут только повторы, новых контактов не будет.',
   };
   if (context === 'letters' && base?.status === 'failed' && !hasLiveJob) return {
     title: 'Письма ждут завершения подготовки базы',
@@ -204,7 +214,7 @@ export function getPreparationPresentation({ preparation, base, jobs, context = 
       currentStep: 0, tone: 'info',
     };
   }
-  const [title, description] = info?.validation_retry && !info.company_name_recovery && !info.saved_email_review_pending
+  const [title, description] = info?.validation_retry && phase !== 'reviewing_relevance' && !info.company_name_recovery && !info.saved_email_review_pending
     ? ['Продолжаем проверку сохранённых контактов', 'Система продолжает автоматическую проверку уже найденных контактов: соответствие компаний гипотезе и пригодность email для рассылки. После проверки начнётся разбор базы.']
     : COLLECT_PHASES[phase];
   return { title, description, currentStep: 0, tone: phase === 'construct_failed' ? 'err' : phase === 'construct_queued' ? 'muted' : 'info' };
@@ -223,13 +233,12 @@ export function PreparationProgress(props: PreparationProgressProps) {
   const progress = getCollectionProgress(props.base?.collect_info, job);
   const target = props.base?.collect_info?.target_progress;
   const savedCandidates = collectCount(target?.candidates_processed);
-  const savedReady = collectCount(target?.ready_rows);
+  const savedReady = collectCount(target?.ready_contacts) ?? collectCount(target?.ready_rows);
   const composition = describeReadyComposition(target);
-  const goal = collectCount(target?.ready_target ?? props.base?.collect_info?.ready_target);
   const collecting = props.base?.status === 'collecting' && state.tone !== 'err';
   const stepPercent = collecting && state.tone === 'info' ? progress.stepPercent : null;
-  const started = Date.parse(props.base?.created_at ?? '');
-  const updated = Date.parse(props.base?.updated_at ?? '');
+  const started = Date.parse(job?.status === 'running' ? job.started_at ?? '' : '');
+  const updated = progress.relevanceUpdatedAt ?? Date.parse(props.base?.updated_at ?? '');
   const minutes = now !== null && Number.isFinite(started) && now >= started ? Math.floor((now - started) / 60_000) : null;
   const elapsed = minutes === null ? null : minutes < 1 ? 'меньше минуты' : minutes < 60 ? `${minutes} мин` : `${Math.floor(minutes / 60)} ч ${minutes % 60} мин`;
   return (
@@ -238,41 +247,42 @@ export function PreparationProgress(props: PreparationProgressProps) {
         <StatusDot tone={state.tone} />
         <h3 className={HE.cardTitle}>{state.title}</h3>
       </div>
+      {state.readiness ? <p>{state.readiness}</p> : null}
       <p className={HE.muted}>{state.description}</p>
       {stepPercent !== null ? <div className="space-y-2">
         <p className={HE.muted}>Текущий этап обработки: {stepPercent}% · это не готовность всей базы</p>
         <progress className="w-full h-2" max={100} value={stepPercent} aria-label="Прогресс текущего этапа обработки" />
       </div> : null}
       {collecting ? <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
-        {goal !== null ? <span>Цель превью: {goal.toLocaleString('ru-RU')} готовых контактов</span> : null}
         {progress.candidates !== null ? <span>Кандидатов: {progress.candidates.toLocaleString('ru-RU')}</span> : null}
         {savedReady !== null ? <span>Прошли все проверки: {savedReady.toLocaleString('ru-RU')}</span> : null}
         {composition ? <span>{composition}</span> : null}
       </div> : null}
       {collecting && (elapsed || Number.isFinite(updated)) ? <p className={HE.muted}>
-        {elapsed ? `С момента создания базы: ${elapsed}. ` : ''}
-        {Number.isFinite(updated) ? `Статус обновлён ${new Date(updated).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })} МСК. ` : ''}
+        {elapsed ? `Текущая попытка: ${elapsed}. ` : ''}
+        {Number.isFinite(updated) ? `${progress.relevanceUpdatedAt !== null ? 'Последнее сохранение проверки:' : 'Статус обновлён'} ${new Date(updated).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', ...(progress.relevanceUpdatedAt !== null ? { second: '2-digit' } : {}) })} МСК. ` : ''}
         Время завершения пока неизвестно.
       </p> : null}
       <ol className="ve2-preparation-steps" aria-label="Этапы подготовки">
         {STEPS.map((label, index) => (
           <li key={label} data-state={state.currentStep === index ? 'current' : state.currentStep !== null && state.currentStep > index ? 'done' : 'pending'} aria-current={state.currentStep === index ? 'step' : undefined}>
-            <span className="ve2-preparation-step-num" aria-hidden="true">{index + 1}</span>
-            <span>{label}</span>
+            <span className="ve2-preparation-step-num" aria-hidden="true">{state.currentStep !== null && state.currentStep > index ? '✓' : index + 1}</span>
+            <span>{state.currentStep !== null && state.currentStep > index ? <span className="sr-only">Завершено: </span> : null}{label}</span>
           </li>
         ))}
       </ol>
-      {!collecting && savedCandidates !== null && savedCandidates > 0 ? (
+      {!collecting && state.currentStep !== STEPS.length && savedCandidates !== null && savedCandidates > 0 ? (
         <p className={HE.muted}>
           Сохранённые результаты: {savedCandidates.toLocaleString('ru-RU')} кандидатов
-          {savedReady !== null ? `, ${savedReady.toLocaleString('ru-RU')} готовых контактов` : ''}.
+          {savedReady !== null ? `; проверенных контактов: ${savedReady.toLocaleString('ru-RU')}` : ''}.
         </p>
       ) : null}
-      {state.canContinue && props.onContinue ? (
-        <button type="button" className={HE.btnPrimary} disabled={props.continueDisabled} onClick={props.onContinue}>
-          Продолжить подготовку
+      {state.canContinue && props.onContinue ? <div className="space-y-2">
+        <button type="button" className={state.continueLabel ? HE.btnGhost : HE.btnPrimary} disabled={props.continueDisabled} onClick={props.onContinue}>
+          {state.continueLabel ?? 'Продолжить подготовку'}
         </button>
-      ) : null}
+        {state.continueHint ? <p className={HE.faint}>{state.continueHint}</p> : null}
+      </div> : null}
     </div>
   );
 }

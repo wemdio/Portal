@@ -687,6 +687,7 @@ describe('pollAndQualifyReplies', () => {
       id: 'project-lead-1',
       full_name: 'Anna Lead',
       email: 'anna@example.com',
+      role: 'lead',
     });
     await mockMainDb!.from('telegram_links').insert({
       user_id: 'project-lead-1',

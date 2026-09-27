@@ -1,6 +1,7 @@
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
 import { logInfo, logWarn } from '@/lib/loggerServer';
+import { INTERNAL_ROLES } from '@/lib/roles';
 import {
   qualifyReply,
   getBodyText,
@@ -3057,6 +3058,7 @@ export async function resolveColleagueWebhookReply(
   leadEmail: string,
   accountId: string,
   notBefore: number,
+  retry = false,
 ): Promise<{ reply: Email; ctx: ThreadContext } | 'expired' | 'lead_own' | 'not_indexed' | 'not_ours' | null> {
   const byId = await fetchWebhookReplyById(emailId, campaignId, accountId);
   if (!byId || byId === 'not_ours') return byId;
@@ -3066,9 +3068,10 @@ export async function resolveColleagueWebhookReply(
   if (replyAutomationExpired(notBefore, byId)) return 'expired';
   const sender = (byId.from_address_email ?? '').trim().toLowerCase();
   if (!sender || sender === leadEmail.trim().toLowerCase()) return 'lead_own';
-  const senderCtx = await fetchThreadContext(
-    campaignId, sender, byId.thread_id ?? null, accountId, { consumer: 'webhook_drain' },
-  );
+  const senderCtx = retry
+    ? await fetchThreadContext(campaignId, sender, byId.thread_id ?? null, accountId,
+      { requestPriority: 'recovery', timeoutMs: 20_000, timeoutIncludesBody: true, retryRateLimits: false, consumer: 'webhook_drain' })
+    : await fetchThreadContext(campaignId, sender, byId.thread_id ?? null, accountId, { consumer: 'webhook_drain' });
   if (!senderCtx || senderCtx.replyEmail.id !== byId.id) return 'not_indexed';
   return {
     reply: { ...senderCtx.replyEmail, campaign_id: senderCtx.replyEmail.campaign_id ?? campaignId } as Email,
@@ -3135,6 +3138,7 @@ export async function drainWebhookQueue(): Promise<number> {
   const batchSize = envNumber('INSTANTLY_WEBHOOK_DRAIN_BATCH', 25);
   const minAgeMs = envNumber('INSTANTLY_WEBHOOK_DRAIN_MIN_AGE_MS', 3000);
   const olderThanIso = new Date(Date.now() - minAgeMs).toISOString();
+  const dueFilter = `retry_next_at.is.null,retry_next_at.lte.${new Date().toISOString()}`;
 
   // Build the complete campaign surface before claiming any event. A partial
   // legacy/period/client-access read cannot distinguish "not ours" from a DB
@@ -3163,6 +3167,7 @@ export async function drainWebhookQueue(): Promise<number> {
     .from('instantly_webhook_events')
     .select('id')
     .eq('processed', false)
+    .or(dueFilter)
     .ilike('event_type', '%repl%')
     .lt('created_at', olderThanIso)
     .order('created_at', { ascending: true })
@@ -3183,7 +3188,8 @@ export async function drainWebhookQueue(): Promise<number> {
     .update({ processed: true })
     .in('id', ids)
     .eq('processed', false)
-    .select('id, email_id, campaign_id, lead_email, thread_id, created_at');
+    .or(dueFilter)
+    .select('id, email_id, campaign_id, lead_email, thread_id, created_at, retry_attempts');
   if (!claimed || claimed.length === 0) return 0;
 
   const accountForCampaign = (campaignId: string): string | null => {
@@ -3203,6 +3209,7 @@ export async function drainWebhookQueue(): Promise<number> {
     lead_email: string | null;
     thread_id: string | null;
     created_at: string | null;
+    retry_attempts?: number | null;
   }>) {
     if (replyAutomationExpired(notBefore, row)) continue;
     const campaignId = row.campaign_id ?? '';
@@ -3233,9 +3240,11 @@ export async function drainWebhookQueue(): Promise<number> {
       fetched++;
       awaitingProviderContext = true;
       // Один вызов Instantly: проверка готовности + источник настоящего id письма.
-      const found = await fetchThreadContext(
-        campaignId, leadEmail, row.thread_id, accountId, { consumer: 'webhook_drain' },
-      );
+      const retry = (row.retry_attempts ?? 0) > 0;
+      const found = retry
+        ? await fetchThreadContext(campaignId, leadEmail, row.thread_id, accountId,
+          { requestPriority: 'recovery', timeoutMs: 20_000, timeoutIncludesBody: true, retryRateLimits: false, consumer: 'webhook_drain' })
+        : await fetchThreadContext(campaignId, leadEmail, row.thread_id, accountId, { consumer: 'webhook_drain' });
       // Вебхук — про конкретное письмо (row.email_id). Поиск треда идёт по
       // адресу лида, а поиск Instantly сопоставляет ОТПРАВИТЕЛЯ, поэтому ответ
       // коллеги со своего адреса (писали на info@, ответил zamkomdir@) этим
@@ -3258,7 +3267,7 @@ export async function drainWebhookQueue(): Promise<number> {
         } as Email;
       } else {
         const colleague = await resolveColleagueWebhookReply(
-          webhookEmailId, campaignId, leadEmail, accountId, notBefore,
+          webhookEmailId, campaignId, leadEmail, accountId, notBefore, retry,
         );
         if (typeof colleague === 'object' && colleague) {
           reply = colleague.reply;
@@ -3369,9 +3378,15 @@ export async function drainWebhookQueue(): Promise<number> {
 
         // If the provider has not exposed a real email id yet (or the retry
         // row write failed), give the durable webhook queue its claim back.
+        // Persist the deadline: a worker restart must not turn a missing
+        // provider index into another tight loop consuming fresh LIST quota.
+        const attempts = Math.max(0, row.retry_attempts ?? 0) + 1;
+        const providerDelay = readInstantlyEmailReadDeferral(err)?.retryAfterMs ?? 0;
+        const delayMs = Math.max(providerDelay, Math.min(30 * 60_000, 60_000 * 2 ** Math.min(attempts - 1, 5)));
         const { error: requeueError } = await db
           .from('instantly_webhook_events')
-          .update({ processed: false })
+          .update({ processed: false, retry_attempts: attempts,
+            retry_next_at: new Date(Date.now() + delayMs).toISOString() })
           .eq('id', row.id);
         if (!requeueError) {
           // Переоткрытое событие следующий тик не берёт — только через минуту.
@@ -3791,19 +3806,31 @@ async function notifySpecialistsAboutLead(
     // (инцидент PP Prod / Илиана, 2026-06-24): лид квалифицировался, но
     // notifySpecialistsAboutLead выходил с userIds.size === 0.
     if (unlinkedNames.size > 0) {
-      const { data: byName } = await supabaseMain
+      // A client account may have the same display name. Name-only routing
+      // must identify exactly one employee, never every matching profile.
+      const { data: byName, error: specialistProfileError } = await supabaseMain
         .from('profiles')
         .select('id, full_name')
+        .in('role', INTERNAL_ROLES)
         .in('full_name', [...unlinkedNames]);
-      const matched = (byName ?? []) as Array<{ id: string; full_name: string }>;
-      for (const p of matched) {
-        if (p.id) userIds.add(p.id);
-      }
-      if (matched.length < unlinkedNames.size) {
+      if (specialistProfileError) {
         workerLog(
           'warn',
-          `Specialist set as free text without a linked account (campaign ${campaignId}): [${[...unlinkedNames].join(', ')}] — matched ${matched.length}/${unlinkedNames.size} by name. Unmatched get no alert; link the specialist via the project dropdown.`,
+          `Specialist lookup failed for project ${projectId}: ${specialistProfileError.message}`,
         );
+      } else {
+        const matched = (byName ?? []) as Array<{ id: string; full_name: string }>;
+        for (const name of unlinkedNames) {
+          const exactSpecialists = matched.filter((profile) => profile.full_name === name);
+          if (exactSpecialists.length === 1 && exactSpecialists[0].id) {
+            userIds.add(exactSpecialists[0].id);
+          } else {
+            workerLog(
+              'warn',
+              `Specialist ${name} for project ${projectId} resolved to ${exactSpecialists.length} internal profiles — alert skipped; link the specialist via the project dropdown.`,
+            );
+          }
+        }
       }
     }
 
@@ -3815,6 +3842,7 @@ async function notifySpecialistsAboutLead(
         const { data: managerProfiles, error: managerProfileError } = await supabaseMain
           .from('profiles')
           .select('id, full_name')
+          .in('role', INTERNAL_ROLES)
           .ilike('full_name', managerName);
         if (managerProfileError) {
           workerLog('warn', `Lead (PM) lookup failed for project ${projectId}: ${managerProfileError.message}`);

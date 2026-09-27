@@ -17,6 +17,12 @@ import {
 } from '@/lib/verticalEngineV2/jobRetry';
 import { VeLlmRateLimitError } from '@/lib/verticalEngineV2/llmRateLimit';
 import { VeJobInactivityError } from '@/lib/verticalEngineV2/workerLiveness';
+import type { SupabaseClient } from '@supabase/supabase-js';
+import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
+import { readRelevanceCheckpoint } from '@/lib/verticalEngineV2/relevanceCheckpoint';
+import { retryVeJobFinalization, transitionVeJobFailure } from '@/lib/verticalEngineV2/jobFailureTransition';
+import { createVeJobPool, canRunVeJob } from '@/lib/verticalEngineV2/jobQueue';
+import type { VeJob } from '@/lib/verticalEngineV2/types';
 
 const NOW = Date.parse('2026-09-23T09:26:23.776Z');
 // The payload of job 896efda6 (base 0482f88b) on production.
@@ -39,6 +45,77 @@ async function stalledReadMessage(): Promise<string> {
 }
 
 describe('VE2 job interruptions do not spend attempts', () => {
+  it('resumes metering failures only for collection with a valid saved checkpoint, and bounds repeated failures', () => {
+    const checkpoint = readRelevanceCheckpoint(null, 'a'.repeat(64));
+    checkpoint.verdicts['b'.repeat(64)] = { version: 2, status: 'needs_review', reason: 'Saved check', evidence: [], context_hash: checkpoint.context_hash };
+    const collect = { ...job(0), stage: 'base_collect' as const, result: { relevance_checkpoint: checkpoint } };
+    const error = new Error('Provider usage journal could not be saved.');
+    expect(planVeJobFailure(collect, error, NOW)).toMatchObject({ status: 'pending', attempts: 1, retryable: true,
+      runAfter: new Date(NOW + 30_000).toISOString() });
+    expect(planVeJobFailure({ ...collect, attempts: 4 }, error, NOW)).toMatchObject({ status: 'failed', attempts: 5 });
+    for (const unsafe of [
+      { ...collect, stage: 'site_profile' as const }, { ...collect, result: null },
+      { ...collect, result: { relevance_checkpoint: { ...checkpoint, verdicts: {} } } },
+      { ...collect, result: { relevance_checkpoint: { ...checkpoint, version: 99 } } },
+    ]) expect(planVeJobFailure(unsafe, error, NOW)).toMatchObject({ status: 'failed', attempts: 1 });
+  });
+
+  it('retries an acknowledged failure transition idempotently and fences off cancellation and a newer claim', async () => {
+    const input = { jobId: 'j', startedAt: new Date(NOW).toISOString(), status: 'pending' as const,
+      attempts: 1, error: 'fetch failed', finishedAt: null, runAfter: new Date(NOW + 30_000).toISOString(), updatedAt: new Date(NOW).toISOString() };
+    for (const startedAt of [input.startedAt, null]) {
+      const db = createMockSupabase({ tables: { ve_jobs: [{ id: 'j', status: 'running', started_at: startedAt,
+        attempts: 0, result: { checkpoint: 'preserved' } }] } });
+      for (let i = 0; i < 2; i++) {
+        await expect(transitionVeJobFailure(db as unknown as SupabaseClient, { ...input, startedAt }))
+          .resolves.toEqual({ transitioned: true, error: null });
+      }
+      expect(db.getRows('ve_jobs')[0]).toMatchObject({ status: 'pending', attempts: 1, result: { checkpoint: 'preserved' } });
+    }
+    for (const row of [
+      { id: 'j', status: 'cancelled', started_at: input.startedAt, attempts: 0 },
+      { id: 'j', status: 'running', started_at: new Date(NOW + 60_000).toISOString(), attempts: 1 },
+      { id: 'j', status: 'done', started_at: input.startedAt, attempts: 0 },
+    ]) {
+      const db = createMockSupabase({ tables: { ve_jobs: [row] } });
+      await expect(transitionVeJobFailure(db as unknown as SupabaseClient, input)).resolves.toEqual({ transitioned: false, error: null });
+      expect(db.getRows('ve_jobs')).toEqual([row]);
+    }
+  });
+
+  it('keeps the queue scope locked during save retries and stops retrying on shutdown without replaying work', async () => {
+    jest.useFakeTimers();
+    try {
+      const jobs = ['a', 'b'].map((id) => ({ id, project_id: 'p', stage: 'base_collect', payload: { base_id: 'same' } }) as unknown as VeJob);
+      const writes = jest.fn().mockRejectedValueOnce(new Error('offline')).mockRejectedValueOnce(new Error('offline')).mockResolvedValue(undefined);
+      const started: string[] = [];
+      const pool = createVeJobPool({ concurrency: 2, idleMs: 10, shouldStop: () => false,
+        claim: async (active) => jobs[0] && canRunVeJob(jobs[0], active) ? jobs.shift()! : null,
+        run: async (current) => { started.push(current.id); await retryVeJobFinalization({ save: writes, shouldStop: () => false, onError: jest.fn() }); },
+        onError: jest.fn(),
+      });
+      await pool.pollOnce();
+      await jest.advanceTimersByTimeAsync(0);
+      const waiting = pool.pollOnce();
+      await jest.advanceTimersByTimeAsync(10);
+      await waiting;
+      expect(started).toEqual(['a']);
+      await jest.advanceTimersByTimeAsync(15_000);
+      await pool.pollOnce();
+      await pool.drain();
+      expect(started).toEqual(['a', 'b']);
+      expect(writes).toHaveBeenCalledTimes(4);
+      let stopped = false;
+      const failing = jest.fn().mockRejectedValue(new Error('offline'));
+      const pending = retryVeJobFinalization({ save: failing, shouldStop: () => stopped, onError: jest.fn() });
+      await jest.advanceTimersByTimeAsync(0);
+      stopped = true;
+      await jest.advanceTimersByTimeAsync(30_000);
+      await pending;
+      expect(failing).toHaveBeenCalledTimes(1);
+    } finally { jest.useRealTimers(); }
+  });
+
   it('a stalled stage database read returns the job to the queue with the same attempts', async () => {
     const plan = planVeJobFailure(job(4), new Error(await stalledReadMessage()), NOW);
     expect(plan).toMatchObject({ status: 'pending', attempts: 4, interruption: { count: 1, free: true } });

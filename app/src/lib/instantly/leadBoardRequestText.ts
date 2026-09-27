@@ -1,6 +1,7 @@
 import { load } from 'cheerio';
 import { extractAuthoredReplyText, getBodyText } from './leadQualifier';
-import { LEAD_DATED_ATTRIBUTION, LEAD_DATE_FIRST_ATTRIBUTION, LEAD_QUOTE_BLOCKS, removeLeadReplyQuotes } from './leadReplyHtml';
+import { LEAD_DATED_ATTRIBUTION, LEAD_DATE_FIRST_ATTRIBUTION, LEAD_MONTH_FIRST_ATTRIBUTION, LEAD_QUOTE_BLOCKS, removeLeadReplyQuotes } from './leadReplyHtml';
+import { stripLeadReplyContactSignature } from './leadReplyContacts';
 import type { Email } from './types';
 
 const YOU_WROTE = /^Вы\s+писали\s+(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{1,2}\s+[а-яё]{3,})(?:[^\n]{0,120})?:\s*$/iu;
@@ -42,6 +43,12 @@ export function leadBoardRequestText(body: Email['body']): string | null {
         if (!authoredInSignature) node.before('\n--\n');
         else node.find('table').first().before('\n--\n');
       });
+      // Block boundaries must survive conversion: a linked name in one div
+      // must not concatenate with the business descriptor in the next one.
+      $('br').replaceWith('\n');
+      $('p, div, li, tr, td, th, section, article, header, footer').each((_, element) => {
+        $(element).prepend('\n').append('\n');
+      });
       text = getBodyText({ html: $.html() });
     } catch {
       // Never fall back to dumping unparsed HTML/history into the board.
@@ -55,10 +62,10 @@ function cleanRequestText(text: string): string | null {
   // Another common dated attribution: "Name писал 2026-09-18 12:49:".
   // This display-only boundary must not change classifier behaviour.
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
-  const attribution = lines.findIndex((line) => LEAD_DATED_ATTRIBUTION.test(line.trim()) || LEAD_DATE_FIRST_ATTRIBUTION.test(line.trim()) || YOU_WROTE.test(line.trim()) || SPACED_SIGNOFF.test(line.trim()) || /^От кого:\s*.+@/iu.test(line.trim()));
+  const attribution = lines.findIndex((line) => LEAD_DATED_ATTRIBUTION.test(line.trim()) || LEAD_DATE_FIRST_ATTRIBUTION.test(line.trim()) || LEAD_MONTH_FIRST_ATTRIBUTION.test(line.trim()) || YOU_WROTE.test(line.trim()) || SPACED_SIGNOFF.test(line.trim()) || /^От кого:\s*.+@/iu.test(line.trim()));
   const current = attribution < 0 ? text : lines.slice(0, attribution).join('\n');
   // Empty means there is no separable current answer; do not resurrect history.
-  const authored = extractAuthoredReplyText(current).split('\n')
+  const authored = stripLeadReplyContactSignature(extractAuthoredReplyText(current)).split('\n')
     .filter((line) => !/^\s*\[?cid:[^\s\]]+\]?\s*$/iu.test(line));
   // A divider before history/signature is not part of the customer's request.
   // Preserve separators inside substantive text, only trim the empty tail.

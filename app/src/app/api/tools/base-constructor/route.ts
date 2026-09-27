@@ -5,6 +5,7 @@ import { blockDemo } from '@/lib/auth/blockDemo';
 import { withToolTrace } from '@/lib/toolTrace';
 import { AVAILABLE_STEPS, type StepKey } from '@/lib/tools/processingSteps';
 import { applyClientGuard } from '@/lib/tools/baseConstructorClientGuard';
+import { sanitizeEmailsPerCompanyStepConfig } from '@/lib/tools/baseConstructorEmailsPerCompany';
 import { countActiveManualConstructorJobs } from '@/lib/tools/baseConstructorQueue';
 import { MAX_MANUAL_CONSTRUCTOR_JOBS } from '@/lib/tools/baseConstructorCapacity';
 import {
@@ -164,7 +165,10 @@ export async function POST(req: NextRequest) {
           file_name: file_name || null,
           data,
           selected_steps: finalSteps,
-          step_config: step_config || {},
+          step_config: sanitizeEmailsPerCompanyStepConfig(
+            (step_config || {}) as Record<string, unknown>,
+            finalSteps,
+          ),
           initial_row_count: data.length - 1,
           total_steps: finalSteps.length,
         })

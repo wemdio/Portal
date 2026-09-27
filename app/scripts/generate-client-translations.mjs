@@ -44,6 +44,13 @@ const MANUAL_OVERRIDES = {
     // чтобы регенерация каталога не оставила их без перевода.
     'писем': 'letters',
     ', открыли': ', opened',
+    // Конструктор баз: шаг «Почт на компанию» (2026-09-26).
+    'Ищет email на сайте компании до первой страницы с почтой. Больше адресов — шаг «Почт на компанию»': 'Searches the company website for emails until the first page that has one. For more addresses, use the “Emails per company” step',
+    'Почт на компанию': 'Emails per company',
+    'Оставляет до N почт на компанию, сначала подтверждённые. При N больше 1 «Найти Email» проходит несколько страниц сайта — дольше': 'Keeps up to N emails per company, verified ones first. With N above 1, “Find Email” crawls several pages of the website, which takes longer',
+    'Сколько адресов оставить у одной компании. Сначала остаются подтверждённые валидацией, затем catch-all.': 'How many addresses to keep per company. Addresses verified by validation are kept first, then catch-all.',
+    'Поиск почт пройдёт по нескольким страницам сайта, а не остановится на главной: адресов больше, поиск примерно на треть дольше.': 'Email search will crawl several pages of the website instead of stopping at the home page: more addresses, about a third slower.',
+    'Без шага «Валидация Email» остаются первые адреса по порядку.': 'Without the “Email Validation” step, the first addresses in order are kept.',
     'Запустите первую — мы покажем здесь её метрики (отправки, ответы, лиды) в реальном времени.': 'Launch the first one - we will show here its metrics (sends, replies, leads) in real time.',
     'Показываем последнее письмо — остальная переписка догрузится через несколько секунд.': 'Showing the latest email — the rest of the conversation will load in a few seconds.',
     'Обновляем переписку — новые письма появятся через несколько секунд.': 'Updating the conversation — new emails will appear in a few seconds.',
@@ -167,6 +174,13 @@ const MANUAL_OVERRIDES = {
     'Отправки, ответы и лиды смотрите в разделе': 'Consulta los envíos, respuestas y leads en',
     'писем': 'cartas',
     ', открыли': ', abiertas',
+    // Конструктор баз: шаг «Почт на компанию» (2026-09-26).
+    'Ищет email на сайте компании до первой страницы с почтой. Больше адресов — шаг «Почт на компанию»': 'Busca correos en el sitio web de la empresa hasta la primera página que tenga uno. Para más direcciones, usa el paso «Correos por empresa»',
+    'Почт на компанию': 'Correos por empresa',
+    'Оставляет до N почт на компанию, сначала подтверждённые. При N больше 1 «Найти Email» проходит несколько страниц сайта — дольше': 'Conserva hasta N correos por empresa, primero los verificados. Con N mayor que 1, «Buscar correo electrónico» recorre varias páginas del sitio web, lo que tarda más',
+    'Сколько адресов оставить у одной компании. Сначала остаются подтверждённые валидацией, затем catch-all.': 'Cuántas direcciones conservar por empresa. Primero se conservan las verificadas por la validación y después las catch-all.',
+    'Поиск почт пройдёт по нескольким страницам сайта, а не остановится на главной: адресов больше, поиск примерно на треть дольше.': 'La búsqueda de correos recorrerá varias páginas del sitio web en lugar de detenerse en la página de inicio: más direcciones, aproximadamente un tercio más lenta.',
+    'Без шага «Валидация Email» остаются первые адреса по порядку.': 'Sin el paso «Validación de correo electrónico», se conservan las primeras direcciones por orden.',
     'Запустите первую — мы покажем здесь её метрики (отправки, ответы, лиды) в реальном времени.': 'Lanza el primero - mostraremos aquí sus métricas (envíos, respuestas, leads) en tiempo real.',
     'Показываем последнее письмо — остальная переписка догрузится через несколько секунд.': 'Mostramos el último correo: el resto de la conversación se cargará en unos segundos.',
     'Обновляем переписку — новые письма появятся через несколько секунд.': 'Actualizando la conversación: los correos nuevos aparecerán en unos segundos.',
