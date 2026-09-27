@@ -819,7 +819,7 @@ function formatEmailCount(count: number | null): string {
   return formatRussianCount(count, ['почта', 'почты', 'почт']);
 }
 
-export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
+export function DeliveryPlanBlock({ launch, disabled = false }: { launch: TemplateLaunchState; disabled?: boolean }) {
   const preview = launch.deliveryPreview;
   const period = launch.activePortalPeriod;
   const targetInvalid = launch.targetContactsInput.trim() !== '' && launch.targetContacts === null;
@@ -831,7 +831,7 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
   const termDeadline = preview?.deadline ?? term?.deadline ?? null;
   const targetHint = launch.deliveryPlanLocked
     ? 'Цель закреплена в созданном плане выполнения и недоступна для изменения здесь.'
-    : launch.submitting ? 'Сохраняем план выполнения…'
+    : launch.submitting || disabled ? 'Сохраняем план выполнения…'
       : !launch.selectedPortalProject ? 'Сначала выберите «Проект клиента». После этого можно указать цель контактов.'
         : null;
 
@@ -868,7 +868,7 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
                 id="ve2-portal-project"
                 value={launch.portalProjectId}
                 onChange={(event) => launch.selectPortalProject(event.target.value)}
-                disabled={launch.deliveryPlanLocked || launch.submitting}
+                disabled={disabled || launch.deliveryPlanLocked || launch.submitting}
                 className="ve2-input h-10 w-full px-3 text-xs disabled:cursor-not-allowed disabled:opacity-60"
               >
                 <option value="">Выберите проект</option>
@@ -891,7 +891,7 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
                 step={1}
                 value={launch.targetContactsInput}
                 onChange={(event) => launch.changeTargetContacts(event.target.value)}
-                disabled={!launch.selectedPortalProject || launch.deliveryPlanLocked || launch.submitting}
+                disabled={disabled || !launch.selectedPortalProject || launch.deliveryPlanLocked || launch.submitting}
                 placeholder={launch.selectedPortalProject ? 'Точное число' : 'Сначала выберите проект'}
                 aria-invalid={targetInvalid}
                 aria-describedby={[targetHint ? 've2-delivery-target-hint' : '', targetInvalid ? 've2-delivery-target-error' : ''].filter(Boolean).join(' ') || undefined}

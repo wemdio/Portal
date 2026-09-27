@@ -38,6 +38,18 @@ export function isVeTransientDirectoryError(error: unknown): boolean {
     && /\b(?:408|429|5\d\d)\b|timeout|tim(?:ed|ing)\s+out|econnreset|econnrefused|etimedout|enotfound|network|fetch failed|socket hang up/i.test(message);
 }
 
+/** Explicit continuation can retry a restored gateway without buying a new base.
+ * An HTML nginx 404 is NOT transient: automatic retries must still reject it.
+ * Structured 404s (missing RPC/table), authentication and bad filters stay errors.
+ */
+export function isVeResumableDirectoryError(error: unknown): boolean {
+  if (isVeTransientDirectoryError(error)) return true;
+  const message = errorMessage(error);
+  return /\bcompanies_directory:/i.test(message)
+    && /<html\b/i.test(message) && /\b404 Not Found\b/i.test(message)
+    && /\bnginx(?:\/|<)/i.test(message);
+}
+
 export interface VeCollectionFailure {
   kind: 'billing' | 'configuration' | 'provider' | 'incomplete_checks' | 'name_cleanup' | 'source' | 'unknown';
   message: string;
