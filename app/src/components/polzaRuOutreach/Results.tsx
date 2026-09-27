@@ -2,7 +2,7 @@
 
 import { Fragment, useState } from 'react';
 import { ChevronDown, ChevronRight, ExternalLink } from 'lucide-react';
-import { REASON_LABELS, STAGES, STAGE_LABELS, type Stage } from '@/lib/polzaRuOutreach/types';
+import { DOUBT_LABELS, REASON_LABELS, type DoubtCode } from '@/lib/polzaRuOutreach/types';
 import { MODE_LABELS, SIGNAL_LABELS, STATUS_LABELS, fmtDate, type RuRow } from './shared';
 
 const STATUS_TONE: Record<RuRow['row_status'], string> = {
@@ -11,62 +11,41 @@ const STATUS_TONE: Record<RuRow['row_status'], string> = {
   rejected: 'bg-gray-100 text-gray-600',
   failed: 'bg-red-50 text-red-700',
   processing: 'bg-blue-50 text-blue-700',
+  doubtful: 'bg-orange-50 text-orange-700',
 };
 
-export function Funnel({
-  funnel,
-  reasons,
-  onReason,
-}: {
-  funnel: Record<Stage, number> | null;
-  reasons: Record<string, number> | null;
-  onReason: (code: string) => void;
-}) {
-  if (!funnel) return null;
-  const top = funnel.candidates_loaded || 0;
+// email_verification строки: откуда адрес и чем кончилась SMTP-проверка.
+// found_on_site — строки запусков, когда почту ещё не проверяли.
+const EMAIL_VERIFICATION_LABELS: Record<string, string> = {
+  crm_contact: 'контакт из AMO',
+  found_on_site: 'найдена на сайте',
+  ok: 'найдена на сайте, проверена',
+  catch_all: 'найдена на сайте, сервер принимает любые адреса',
+  unverified: 'найдена на сайте, проверить не удалось',
+};
+
+export function Reasons({ reasons, onReason }: { reasons: Record<string, number> | null; onReason: (code: string) => void }) {
   const sortedReasons = Object.entries(reasons ?? {}).sort((a, b) => b[1] - a[1]);
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-      <div className="rounded-xl border border-gray-200 bg-white p-4">
-        <div className="mb-3 text-sm font-semibold text-gray-900">Воронка</div>
-        <div className="space-y-1.5">
-          {STAGES.map((s) => {
-            const n = funnel[s] ?? 0;
-            const pct = top ? Math.round((n / top) * 100) : 0;
-            return (
-              <div key={s} className="flex items-center gap-3 text-sm">
-                <div className="w-40 shrink-0 text-gray-600">{STAGE_LABELS[s]}</div>
-                <div className="h-2 flex-1 rounded bg-gray-100">
-                  <div className="h-2 rounded bg-violet-500" style={{ width: `${pct}%` }} />
-                </div>
-                <div className="w-20 shrink-0 text-right tabular-nums text-gray-900">
-                  {n} <span className="text-xs text-gray-400">{pct}%</span>
-                </div>
-              </div>
-            );
-          })}
+    <div className="rounded-xl border border-gray-200 bg-white p-4">
+      <div className="mb-3 text-sm font-semibold text-gray-900">Почему отсеялись</div>
+      {sortedReasons.length === 0 ? (
+        <div className="text-sm text-gray-500">Пока нет отсеянных строк.</div>
+      ) : (
+        <div className="space-y-1">
+          {sortedReasons.map(([code, n]) => (
+            <button
+              key={code}
+              type="button"
+              onClick={() => onReason(code)}
+              className="flex w-full items-center justify-between rounded-md px-2 py-1 text-left text-sm hover:bg-gray-50"
+            >
+              <span className="text-gray-700">{REASON_LABELS[code] ?? code}</span>
+              <span className="tabular-nums text-gray-900">{n}</span>
+            </button>
+          ))}
         </div>
-      </div>
-      <div className="rounded-xl border border-gray-200 bg-white p-4">
-        <div className="mb-3 text-sm font-semibold text-gray-900">Почему отсеялись</div>
-        {sortedReasons.length === 0 ? (
-          <div className="text-sm text-gray-500">Пока нет отсеянных строк.</div>
-        ) : (
-          <div className="space-y-1">
-            {sortedReasons.map(([code, n]) => (
-              <button
-                key={code}
-                type="button"
-                onClick={() => onReason(code)}
-                className="flex w-full items-center justify-between rounded-md px-2 py-1 text-left text-sm hover:bg-gray-50"
-              >
-                <span className="text-gray-700">{REASON_LABELS[code] ?? code}</span>
-                <span className="tabular-nums text-gray-900">{n}</span>
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
+      )}
     </div>
   );
 }
@@ -110,6 +89,17 @@ function Details({ row }: { row: RuRow }) {
             Скоринг: <b>{row.priority_score ?? '—'}</b>/100 · ЦА-балл: <b>{row.ta_score ?? '—'}</b>/10
             {row.ta_reason ? <span className="text-gray-500"> — {row.ta_reason}</span> : null}
             {row.amo_status && row.amo_status !== 'none' ? <span className="text-gray-500"> · AMO: {row.amo_status}</span> : null}
+          </div>
+        )}
+        {row.route_reason && (
+          <div className="text-gray-800">
+            Почему этот оффер: <span className="text-gray-600">{row.route_reason}</span>
+            {row.route_runner_up ? <span className="text-gray-500"> · второй вариант: {row.route_runner_up}</span> : null}
+          </div>
+        )}
+        {row.doubt_detail && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-900">
+            <b>Сомнения:</b> {row.doubt_detail}
           </div>
         )}
         {row.evidence_quote && (
@@ -156,7 +146,7 @@ function Details({ row }: { row: RuRow }) {
           Почта: {row.recipient_email ?? '—'} {row.recipient_role ? `(${row.recipient_role})` : ''}
           {row.is_routing ? ' · письмо 1 в варианте «кому переслать»' : ''}
           {row.case_id ? ` · кейс ${row.case_id}${row.case_match_reason ? ` (${row.case_match_reason})` : ''}` : ' · без кейса'}
-          {row.email_verification ? ` · почта: ${row.email_verification === 'crm_contact' ? 'контакт из AMO' : 'найдена на сайте'}` : ''}
+          {row.email_verification ? ` · почта: ${EMAIL_VERIFICATION_LABELS[row.email_verification] ?? row.email_verification}` : ''}
         </div>
         {row.qa_flags?.length > 0 && <div className="text-xs text-red-700">QA: {row.qa_flags.join(', ')}</div>}
       </div>
@@ -211,6 +201,15 @@ export function ResultsTable({ rows }: { rows: RuRow[] }) {
                     {row.reason_code && row.row_status !== 'ready' ? (
                       <div className="mt-1 max-w-[16rem] text-xs text-gray-500">{REASON_LABELS[row.reason_code] ?? row.reason_code}</div>
                     ) : null}
+                    {row.doubt_flags?.length > 0 && (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {row.doubt_flags.map((f) => (
+                          <span key={f} className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[11px] text-amber-800">
+                            {DOUBT_LABELS[f as DoubtCode] ?? f}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </td>
                 </tr>
                 {isOpen && (

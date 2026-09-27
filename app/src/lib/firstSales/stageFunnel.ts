@@ -21,10 +21,15 @@ import type {
  * когорту (лиды, квалы) с датами событий (встречи, продажи) и не показывала,
  * где именно застревают сделки.
  *
- * Какие сделки на воронке: заведённые в периоде ИЛИ сдвинутые в нём хотя бы раз
- * — в любой воронке, но в конце периода стоявшие в первичке. Сделка, которую
- * к концу периода уже перенесли в продления, сюда не попадает; сделка, которую
- * перенесли позже, — попадает на своём этапе первички.
+ * Какие сделки на воронке, зависит от режима (переключатель «По когорте / Без
+ * когорты», 26.09.2026):
+ *   - по когорте (по умолчанию) — заведённые в периоде ИЛИ сдвинутые в нём хотя
+ *     бы раз: августовская сделка, которую двигали в сентябре, — на воронке
+ *     сентября;
+ *   - без когорты — только заведённые в периоде.
+ * В обоих режимах — в любой воронке, но в конце периода стоявшие в первичке.
+ * Сделка, которую к концу периода уже перенесли в продления, сюда не попадает;
+ * сделка, которую перенесли позже, — попадает на своём этапе первички.
  *
  * «Успешно реализовано» и «Закрыто и не реализовано» — исходы, а не ступени:
  * показываются отдельной строкой под воронкой, как «вне пути» у продлений.
@@ -84,7 +89,9 @@ export async function fetchFirstSalesStageFunnel(
   pipelineId: number,
   window: { from: Date; to: Date },
   sourceFilter: string[] | null = null,
+  options: { cohort?: boolean } = {},
 ): Promise<RenewalsFunnel> {
+  const cohort = options.cohort ?? true;
   const fromIso = window.from.toISOString();
   const toIso = window.to.toISOString();
   const toMs = window.to.getTime();
@@ -96,11 +103,16 @@ export async function fetchFirstSalesStageFunnel(
       db.from('amo_leads').select('amo_id')
         .gte('created_at', fromIso).lte('created_at', toIso)
         .order('amo_id').range(a, b)),
-    fetchAllPages<{ amo_deal_id: number }>((a, b) =>
-      db.from('amo_events').select('amo_deal_id')
-        .eq('event_type', 'lead_status_changed')
-        .gte('changed_at', fromIso).lte('changed_at', toIso)
-        .order('id').range(a, b)),
+    // Сдвинутые в периоде нужны только режиму «по когорте»: без когорты
+    // воронка — ровно заведённые в периоде, и лишний проход по событиям окна
+    // ничего бы не добавил.
+    cohort
+      ? fetchAllPages<{ amo_deal_id: number }>((a, b) =>
+        db.from('amo_events').select('amo_deal_id')
+          .eq('event_type', 'lead_status_changed')
+          .gte('changed_at', fromIso).lte('changed_at', toIso)
+          .order('id').range(a, b))
+      : Promise.resolve([] as Array<{ amo_deal_id: number }>),
   ]);
   if (statusRes.error) throw new Error(`amo_statuses: ${statusRes.error.message}`);
 

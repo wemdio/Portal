@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Loader2, X } from 'lucide-react';
 import type { PolzaOutreachCompanyRow } from '@/types';
+import { passedFunnelStep, type PolzaFunnelKey } from '@/lib/polzaOutreach/funnel';
 
 /**
  * Что происходило на конкретном этапе конвейера.
@@ -18,8 +19,11 @@ import type { PolzaOutreachCompanyRow } from '@/types';
  */
 
 export interface StageModalProps {
-  /** Номер этапа с нуля: 0 — вакансии, 5 — цепочка писем. */
-  stageIndex: number;
+  /**
+   * Ключ этапа, а не номер: номера поехали, когда почту перенесли до разбора
+   * ИИ (26.09.2026), и правило по номеру молча показывало бы чужой этап.
+   */
+  stageKey: PolzaFunnelKey;
   stageLabel: string;
   loadRows: () => Promise<PolzaOutreachCompanyRow[]>;
   reviewLabel: (reason: string) => string;
@@ -37,82 +41,76 @@ interface StageEntry {
   reason: string | null;
 }
 
+/** Вердикт SMTP-проверки адреса — рядом с почтой на этапе почты. */
+const EMAIL_VERIFICATION_LABELS: Record<string, string> = {
+  ok: 'проверена',
+  catch_all: 'сервер принимает любые адреса',
+  unverified: 'проверить не удалось',
+};
+
 /**
  * Разбор строки на конкретном этапе.
  *
- * Каждый этап смотрит на свои поля — поэтому это не общий рендер таблицы, а
- * шесть маленьких правил. Зато в окне видно именно то, что этап делает, а не
- * двадцать колонок, из которых нужны две.
+ * «Прошла» — по тем же правилам, что счётчик этапа в цепочке
+ * (lib/polzaOutreach/funnel.ts): число в заголовке окна и число в цепочке
+ * совпадают. Что этап узнал о строке, у каждого этапа своё — поэтому это не
+ * общий рендер таблицы, а шесть маленьких правил. Зато в окне видно именно
+ * то, что этап делает, а не двадцать колонок, из которых нужны две.
  */
 function describe(
   row: PolzaOutreachCompanyRow,
-  stageIndex: number,
+  stageKey: PolzaFunnelKey,
   reviewLabel: (reason: string) => string,
   exclusionLabel: (reason: string) => string,
 ): StageEntry {
-  const excluded = row.status === 'excluded' && row.exclusion_reason
-    ? exclusionLabel(row.exclusion_reason)
-    : null;
+  const passed = passedFunnelStep(row, stageKey);
+  // Не прошла — почему: отсев, ручная проверка, ошибка или ещё не дошла.
+  // Отсеянная раньше показывает причину своего этапа: дальше она не ходила.
+  const notPassed = (fallback: string): string => {
+    if (row.status === 'excluded' && row.exclusion_reason) return exclusionLabel(row.exclusion_reason);
+    if (row.review_reason) return reviewLabel(row.review_reason);
+    if (row.status === 'failed') return 'ошибка обработки';
+    if (row.status === 'discovered' || row.status === 'normalized' || row.status === 'qualified') return 'ещё в работе';
+    return fallback;
+  };
 
-  switch (stageIndex) {
-    case 0:
-      return {
-        row,
-        passed: true,
-        detail: [row.source_list?.length ? row.source_list.join(' + ') : row.source_type, row.job_title, row.job_country_code?.toUpperCase()].filter(Boolean).join(' · ') || '—',
-        reason: null,
-      };
-    case 1: {
-      const domain = row.normalized_domain ?? '';
-      return {
-        row,
-        passed: Boolean(domain),
-        detail: domain || '—',
-        reason: domain ? null : (excluded ?? 'домен не найден'),
-      };
+  let detail: string;
+  let fallback: string;
+  switch (stageKey) {
+    case 'vacancies':
+      detail = [row.source_list?.length ? row.source_list.join(' + ') : row.source_type, row.job_title, row.job_country_code?.toUpperCase()].filter(Boolean).join(' · ');
+      fallback = 'не прошла';
+      break;
+    case 'domain_found':
+      detail = row.normalized_domain ?? '';
+      fallback = 'домен не найден';
+      break;
+    case 'icp_passed':
+      detail = [row.employee_range ? `${row.employee_range} чел.` : null, row.industry, row.country].filter(Boolean).join(' · ');
+      fallback = 'не прошла фильтр';
+      break;
+    case 'email_found': {
+      const verification = row.email_verification ? EMAIL_VERIFICATION_LABELS[row.email_verification] ?? row.email_verification : null;
+      detail = [row.selected_company_email, verification].filter(Boolean).join(' · ');
+      fallback = 'почта не найдена';
+      break;
     }
-    case 2: {
-      const passed = row.status !== 'excluded';
-      return {
-        row,
-        passed,
-        detail: [row.employee_range ? `${row.employee_range} чел.` : null, row.industry, row.country].filter(Boolean).join(' · ') || '—',
-        reason: passed ? null : excluded,
-      };
-    }
-    case 3: {
-      const passed = row.lead_status === 'write_now' || row.stage === 's5_email' || row.stage === 's6_letters';
-      const score = row.lead_score != null ? `${row.lead_score}/100` : null;
-      return {
-        row,
-        passed,
-        detail: [score, row.primary_trigger].filter(Boolean).join(' · ') || '—',
-        reason: passed ? null : (excluded ?? (row.review_reason ? reviewLabel(row.review_reason) : 'Lead Score ниже порога')),
-      };
-    }
-    case 4: {
-      const email = row.selected_company_email ?? '';
-      return {
-        row,
-        passed: Boolean(email),
-        detail: email || '—',
-        reason: email ? null : (row.review_reason ? reviewLabel(row.review_reason) : (excluded ?? 'почта не найдена')),
-      };
-    }
-    default: {
+    case 'geo_confirmed':
+      detail = [row.lead_score != null ? `${row.lead_score}/100` : null, row.primary_trigger].filter(Boolean).join(' · ');
+      fallback = 'Lead Score ниже порога';
+      break;
+    case 'ready': {
       const letters = row.letters?.length ?? 0;
-      return {
-        row,
-        passed: letters > 0,
-        detail: letters > 0 ? `писем: ${letters}` : '—',
-        reason: letters > 0 ? null : (row.review_reason ? reviewLabel(row.review_reason) : (excluded ?? 'письма не собраны')),
-      };
+      detail = letters > 0 ? `писем: ${letters}` : '';
+      fallback = 'письма не собраны';
+      break;
     }
   }
+  return { row, passed, detail: detail || '—', reason: passed ? null : notPassed(fallback) };
 }
 
 export function PolzaOutreachStageModal({
-  stageIndex,
+  stageKey,
   stageLabel,
   loadRows,
   reviewLabel,
@@ -140,7 +138,7 @@ export function PolzaOutreachStageModal({
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
-  const entries = (rows ?? []).map((row) => describe(row, stageIndex, reviewLabel, exclusionLabel));
+  const entries = (rows ?? []).map((row) => describe(row, stageKey, reviewLabel, exclusionLabel));
   const passedCount = entries.filter((entry) => entry.passed).length;
   const failedCount = entries.length - passedCount;
   const shown = onlyFailed ? entries.filter((entry) => !entry.passed) : entries;
@@ -232,7 +230,7 @@ export function PolzaOutreachStageModal({
                       <span className="break-words">{entry.detail}</span>
                       {/* Цитата-доказательство нужна именно на этапе гео: без
                           неё «гео подтверждено» — просто слово. */}
-                      {stageIndex === 3 && entry.row.target_sales_geo_evidence ? (
+                      {stageKey === 'geo_confirmed' && entry.row.target_sales_geo_evidence ? (
                         <p className="mt-1 text-[11px] italic leading-relaxed text-gray-500">
                           «{entry.row.target_sales_geo_evidence}»
                         </p>

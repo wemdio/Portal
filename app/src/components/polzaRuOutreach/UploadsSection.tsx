@@ -9,12 +9,13 @@ import type { Rec } from './libraryFilters';
 const inputCls =
   'w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-violet-400 focus:outline-none focus:ring-1 focus:ring-violet-400';
 
-type Kind = 'exhibitors' | 'contracts' | 'growth';
+type Kind = 'exhibitors' | 'contracts' | 'growth' | 'tenders';
 
 const KIND_LABELS: Record<Kind, string> = {
   exhibitors: 'выставка',
   contracts: 'контракты',
   growth: 'гранты',
+  tenders: 'тендеры',
 };
 
 export function UploadsSection({ uploads, onChanged, onError }: { uploads: Rec[]; onChanged: () => void; onError: (m: string) => void }) {
@@ -77,6 +78,7 @@ export function UploadsSection({ uploads, onChanged, onError }: { uploads: Rec[]
         <select className={inputCls} value={kind} onChange={(e) => setKind(e.target.value as Kind)}>
           <option value="exhibitors">Каталог выставки</option>
           <option value="contracts">Выгрузка контрактов ЕИС</option>
+          <option value="tenders">Выгрузка коммерческих тендеров (B2B-Center, Росэлторг)</option>
           <option value="growth">Список грантов / акселератора</option>
         </select>
         <input

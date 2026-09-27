@@ -7,20 +7,23 @@
  * поле очищается, confidence понижается до low. У модели нет возможности
  * выдумать доказательство.
  *
- * Модель — дешёвая (уровень bulk), температура 0, одна вакансия на вызов,
- * один ретрай. Ключ OPENROUTER_PERSONALIZATION_API_KEY (общий с другими фичами).
+ * Одна вакансия на вызов. Транспорт, ключ, модель, повторы и учёт денег —
+ * общий клиент аутричей (lib/outreachLlm): свой ключ POLZA_EN_OUTREACH_API_KEY
+ * (раньше ключ был общий с другими фичами портала), дешёвая модель разбора,
+ * температура 0, повтор при сбое сети и битом JSON, списание с лимита запуска.
+ * Язык задан явно: и вне контекста запуска вызов не уйдёт на русский ключ.
+ *
+ * Ошибки клиента летят наверх как есть: раннер отличает «ИИ не ответил»
+ * (LlmCallError — отсев строки) от исчерпанного лимита и неверного ключа
+ * (про весь запуск). Ответ мимо схемы (hasCoreFields) — тоже LlmCallError.
  */
 
-import { callOpenRouterChat } from '@/lib/openrouter/client';
+import { callOutreachJson } from '@/lib/outreachLlm/client';
+import { LlmCallError } from '@/lib/outreachLlm/context';
+import { asBool, asString } from '@/lib/outreachLlm/json';
 import type { PolzaOutreachGeoConfidence, PolzaVacancyAnalysis } from './types';
 
-const OPENROUTER_PERSONALIZATION_API_KEY =
-  process.env.OPENROUTER_PERSONALIZATION_API_KEY || process.env.OPENROUTER_BRIEF_API_KEY || '';
-
-export const POLZA_OUTREACH_MODEL = process.env.POLZA_OUTREACH_MODEL || 'openai/gpt-4o-mini';
-
 const MAX_DESCRIPTION_CHARS = 6000;
-const MAX_RETRIES = 2;
 
 // Признаки outbound-мандата (спека §4.3) — независимый от модели пруф:
 // если цитата LLM не подтвердилась, mandate можно оставить только если
@@ -85,28 +88,36 @@ function buildUserPrompt(input: {
   ].join('\n');
 }
 
-function asBool(value: unknown): boolean {
-  return value === true || value === 'true';
-}
+const VACANCY_KEYS = [
+  'outbound_mandate',
+  'outbound_evidence',
+  'service_line',
+  'service_line_confident',
+  'target_sales_geo',
+  'target_sales_geo_evidence',
+  'target_sales_geo_confidence',
+  'is_lead_gen_agency',
+];
 
-function asString(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
+/**
+ * Ответ по схеме — объект хотя бы с одним полем из неё. У каждого поля есть
+ * законное «пусто»: цитата "" — цитаты нет, outbound_mandate "" или null —
+ * мандата нет (asBool). Сбой модели — только объект мимо схемы (пустой, чужие
+ * ключи): тогда analyzeVacancy бросает LlmCallError («ИИ не ответил»), а не
+ * выдаёт «мандата нет, не агентство» по умолчанию — иначе строка молча теряла
+ * бы повод «найм», а пустой ответ обнулял бы серию предохранителя «ИИ молчит»
+ * в раннере. Правило то же, что у русского разбора вакансии.
+ */
+function hasCoreFields(raw: Record<string, unknown>): boolean {
+  return VACANCY_KEYS.some((key) => key in raw);
 }
 
 function asConfidence(value: unknown): PolzaOutreachGeoConfidence {
   return value === 'high' || value === 'medium' ? value : 'low';
 }
 
-function parseAnalysis(content: string): PolzaVacancyAnalysis | null {
-  const text = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-  const jsonSlice = text.startsWith('{') ? text : (text.match(/\{[\s\S]*\}/)?.[0] ?? '');
-  if (!jsonSlice) return null;
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(jsonSlice) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
+/** Ответ модели уже разобран клиентом аутричей в объект — здесь только приводим поля к типам. */
+function analysisFrom(parsed: Record<string, unknown>): PolzaVacancyAnalysis {
   return {
     outbound_mandate: asBool(parsed.outbound_mandate),
     outbound_evidence: asString(parsed.outbound_evidence).slice(0, 200),
@@ -176,34 +187,17 @@ export async function analyzeVacancy(input: {
   companyName: string;
   countryCode: string;
 }): Promise<PolzaVacancyAnalysis> {
-  if (!OPENROUTER_PERSONALIZATION_API_KEY) {
-    throw new Error('OPENROUTER_PERSONALIZATION_API_KEY is not configured');
+  const raw = await callOutreachJson({
+    role: 'analysis',
+    lang: 'en',
+    system: SYSTEM_PROMPT,
+    user: buildUserPrompt(input),
+    title: 'vacancy',
+    maxTokens: 900,
+  });
+  if (!hasCoreFields(raw)) {
+    // Ответ оплачен (клиент уже списал его с лимита), но ответом не считается.
+    throw new LlmCallError('EN analysis «vacancy»: ответ мимо схемы — нет ни одного поля разбора');
   }
-
-  const messages = [
-    { role: 'system' as const, content: SYSTEM_PROMPT },
-    { role: 'user' as const, content: buildUserPrompt(input) },
-  ];
-  const jobText = `${input.jobTitle}\n${input.vacancyDescription}`;
-
-  let lastError: Error | null = null;
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt += 1) {
-    try {
-      const content = await callOpenRouterChat({
-        apiKey: OPENROUTER_PERSONALIZATION_API_KEY,
-        model: POLZA_OUTREACH_MODEL,
-        messages,
-        temperature: 0,
-        maxTokens: 900,
-        responseFormat: { type: 'json_object' },
-        title: 'Portal - Polza Outreach S4',
-      });
-      const parsed = parseAnalysis(content);
-      if (parsed) return applyEvidenceRules(parsed, jobText);
-      lastError = new Error('LLM returned unparseable JSON');
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-    }
-  }
-  throw lastError ?? new Error('analyzeVacancy failed');
+  return applyEvidenceRules(analysisFrom(raw), `${input.jobTitle}\n${input.vacancyDescription}`);
 }

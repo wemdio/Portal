@@ -294,6 +294,10 @@ export interface PolzaOutreachConfig {
   min_employees?: number;
   max_employees?: number;
   write_threshold?: number;
+  /** Лимит на ИИ за запуск, $ (1–100); у запусков до 26.09.2026 его нет. */
+  llm_budget_usd?: number;
+  /** Брать и компании, уже готовые в прошлых запусках (по умолчанию нет). */
+  include_previously_exported?: boolean;
 }
 
 export interface PolzaOutreachParserJob {
@@ -340,8 +344,12 @@ export interface PolzaOutreachCompanyRow {
   selected_company_email?: string | null;
   email_type?: string | null;
   email_source_url?: string | null;
+  /** Вердикт SMTP-проверки адреса: ok / catch_all / unverified; у строк до 26.09.2026 — null. */
+  email_verification?: string | null;
   sequence_id?: string | null;
   letters?: PolzaOutreachLetter[] | null;
+  /** Шаблон цепочки оффера, по которому собраны письма (с 26.09.2026). */
+  chain_template_id?: string | null;
   status: string;
   stage?: string | null;
   exclusion_reason?: string | null;
@@ -367,6 +375,10 @@ export interface PolzaOutreachCompanyRow {
   created_at: string;
 }
 
+/**
+ * Воронка английского аутрича; правила и порядок этапов — lib/polzaOutreach/funnel.ts
+ * (с 26.09.2026 почта идёт до Lead Score). geo_confirmed — исторический ключ «write now».
+ */
 export interface PolzaOutreachFunnel {
   vacancies: number;
   domain_found: number;

@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import ExcelJS from 'exceljs';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { logError } from '@/lib/loggerServer';
+import { polzaReviewLabel } from '@/lib/polzaOutreach/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -52,6 +53,7 @@ const COLUMNS: { header: string; key: string; width: number }[] = [
   { header: 'Цитата про мандат', key: 'outbound_evidence', width: 48 },
   { header: 'Почта', key: 'selected_company_email', width: 28 },
   { header: 'Тип почты', key: 'email_type', width: 18 },
+  { header: 'Проверка почты', key: 'email_verification', width: 22 },
   { header: 'Статус', key: 'status', width: 18 },
   { header: 'Причина исключения', key: 'exclusion_reason', width: 22 },
   { header: 'На ручную проверку', key: 'review_reason', width: 22 },
@@ -76,6 +78,9 @@ const COLUMNS: { header: string; key: string; width: number }[] = [
 const READY_COLUMNS: { header: string; key: string; width: number }[] = [
   { header: 'company_name', key: 'company_name', width: 28 },
   { header: 'email', key: 'selected_company_email', width: 30 },
+  // Вердикт SMTP-проверки как есть (ok / catch_all): catch-all отказа не
+  // даст, но дойдёт ли письмо — неизвестно, это видно и при отправке.
+  { header: 'email_verification', key: 'email_verification', width: 16 },
   { header: 'domain', key: 'normalized_domain', width: 24 },
   { header: 'country', key: 'country', width: 14 },
   { header: 'employee_range', key: 'employee_range', width: 12 },
@@ -117,6 +122,13 @@ const EMAIL_TYPE_RU: Record<string, string> = {
   person_company: 'личный ящик',
 };
 
+// Вердикт SMTP-проверки адреса (с 26.09.2026); у строк раньше — пусто.
+const EMAIL_VERIFICATION_RU: Record<string, string> = {
+  ok: 'проверена',
+  catch_all: 'сервер принимает любые адреса',
+  unverified: 'проверить не удалось',
+};
+
 const REASON_RU: Record<string, string> = {
   domain_not_resolved: 'домен не найден',
   competitor: 'конкурент (лидген)',
@@ -126,17 +138,21 @@ const REASON_RU: Record<string, string> = {
   size_11_50: 'размер 11–50',
   size_out_of_range: 'размер вне 3–200',
   site_unreachable: 'сайт не открылся',
+  llm_failed: 'ИИ не ответил (сбой модели или ключа)',
   not_b2b: 'не B2B',
   no_trigger: 'нет повода написать',
   low_score: 'Lead Score ниже порога',
   manual_check: 'Lead Score в зоне ручной проверки',
   limit_reached: 'лимит готовых уже набран',
   duplicate_domain: 'дубль домена',
+  previously_exported: 'уже готова в прошлом запуске',
   no_outbound_mandate: 'нет outbound-мандата',
   no_corporate_email: 'не нашли корпоративную почту',
+  email_invalid: 'почта на сайте не прошла проверку',
+  suppressed_contact: 'почта в стоп-листе Рассылки',
+  email_unverified: 'почта не проверена: SMTP-проверка не дала ответа',
   generic_company: 'слишком общее описание компании',
   low_geo_confidence: 'гео продаж подтверждено слабо',
-  letters_guard_failed: 'письма не прошли проверку правил',
 };
 
 function jsonError(message: string, status: number) {
@@ -168,6 +184,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     .select('*')
     .eq('job_id', jobId)
     .order('created_at', { ascending: true })
+    .order('id', { ascending: true })
     .limit(5000);
   if (statusFilter) query = query.eq('status', statusFilter);
   const { data: rows, error } = await query;
@@ -198,9 +215,18 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
       // Да/нет вместо true/false: файл читает продажник, а не разработчик.
       outbound_mandate: row.outbound_mandate === true ? 'да' : row.outbound_mandate === false ? 'нет' : '',
       email_type: typeof row.email_type === 'string' ? EMAIL_TYPE_RU[row.email_type] ?? row.email_type : '',
+      // Лист для отправки — машинные значения, как и его заголовки; журнал — по-русски.
+      email_verification:
+        typeof row.email_verification !== 'string'
+          ? ''
+          : forSending
+            ? row.email_verification
+            : EMAIL_VERIFICATION_RU[row.email_verification] ?? row.email_verification,
       status: typeof row.status === 'string' ? STATUS_RU[row.status] ?? row.status : '',
       exclusion_reason: reason(row.exclusion_reason),
-      review_reason: reason(row.review_reason),
+      // Причины ручной проверки — одни подписи с экраном (lib/polzaOutreach/types.ts),
+      // вместе с подробностью: почему цепочка не готова, какое правило писем нарушено.
+      review_reason: typeof row.review_reason === 'string' ? polzaReviewLabel(row.review_reason) : '',
       source_list: Array.isArray(row.source_list) ? (row.source_list as string[]).join(' + ') : '',
       segments: Array.isArray(row.segments) ? (row.segments as string[]).join('; ') : '',
       trigger_list: Array.isArray(row.trigger_list)

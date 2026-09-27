@@ -3227,6 +3227,19 @@ html[data-portal-theme='dark'] .portal-shell .bg-purple-50\/80,
 html[data-portal-theme='dark'] .portal-shell .hover\:bg-purple-50:hover {
   background-color: rgba(167, 139, 250, 0.07) !important;
 }
+/* Альфа-варианты bg-violet-50 — информационные карточки (Lead Score в
+ * английском автоаутриче — bg-violet-50/50, подсветка в DatabaseSpreadsheet —
+ * bg-violet-50/40). Без override Tailwind кладёт светлую заливку на тёмный
+ * фон, а текст внутри уже светлый: блок читался как белое пятно (25.09.2026).
+ * Тон как у bg-violet-50, чуть тише. */
+html[data-portal-theme='dark'] .portal-shell .bg-violet-50\/30,
+html[data-portal-theme='dark'] .portal-shell .bg-violet-50\/40,
+html[data-portal-theme='dark'] .portal-shell .bg-violet-50\/50,
+html[data-portal-theme='dark'] .portal-shell .bg-violet-50\/60,
+html[data-portal-theme='dark'] .portal-shell .bg-violet-50\/70,
+html[data-portal-theme='dark'] .portal-shell .bg-violet-50\/80 {
+  background-color: rgba(167, 139, 250, 0.12) !important;
+}
 html[data-portal-theme='dark'] .portal-shell .bg-violet-500,
 html[data-portal-theme='dark'] .portal-shell .bg-violet-600,
 html[data-portal-theme='dark'] .portal-shell .bg-violet-700,
@@ -3248,6 +3261,11 @@ html[data-portal-theme='dark'] .portal-shell .border-violet-300,
 html[data-portal-theme='dark'] .portal-shell .border-purple-200,
 html[data-portal-theme='dark'] .portal-shell .border-purple-300 {
   border-color: rgba(167, 139, 250, 0.35) !important;
+}
+/* border-violet-100 — рамки тех же светлых карточек: на тёмном фоне светлая
+ * рамка режет глаз, поэтому тише, чем у 200/300. */
+html[data-portal-theme='dark'] .portal-shell .border-violet-100 {
+  border-color: rgba(167, 139, 250, 0.22) !important;
 }
 html[data-portal-theme='dark'] .portal-shell .hover\:bg-violet-700:hover,
 html[data-portal-theme='dark'] .portal-shell .hover\:bg-violet-600:hover,

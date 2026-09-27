@@ -196,9 +196,14 @@ export function CampaignFormModal({ campaign, onClose, onCreated }: Props) {
     const truncation = res.truncated != null && res.fileRows != null
       ? ` В файле было ${res.fileRows} строк — загружены первые ${res.truncated}, остальное не попало в кампанию.`
       : '';
+    // Пустое первое письмо — отдельной строкой, а не «плохим адресом»: чинят
+    // его в переменных письма или в колонках файла, а не в адресах.
+    const emptyLetter = res.skippedEmptyLetter
+      ? `${res.skippedEmptyLetter} с пустым первым письмом (пустая переменная в теме или тексте), `
+      : '';
     return (
       `${res.replaced ? 'База заменена' : 'Получателей добавлено'}: ${res.imported}. `
-      + `Пропущено: ${res.skippedInvalid} с плохим адресом, ${res.skippedDuplicates} дублей, `
+      + `Пропущено: ${res.skippedInvalid} с плохим адресом, ${emptyLetter}${res.skippedDuplicates} дублей, `
       + `${res.skippedSuppressed} из стоп-листа.${truncation}`
     );
   };

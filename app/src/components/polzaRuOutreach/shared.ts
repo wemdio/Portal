@@ -5,6 +5,18 @@ import { CHAIN_LABELS, type ChainType, type Letter, type RuOutreachConfig, type 
 
 export const API = '/api/tools/polza-ru-outreach';
 
+/**
+ * Расход на ИИ за запуск (progress_detail.llm). Та же форма, что снимок
+ * бюджета в lib/outreachLlm/context.ts, но объявлена здесь: тот модуль тянет
+ * node:async_hooks, а это клиентский код.
+ */
+export interface RuJobLlmSpend {
+  spent_usd: number;
+  calls: number;
+  limit_usd: number;
+  by_role?: Record<'analysis' | 'writer', { usd: number; calls: number }>;
+}
+
 export interface RuJob {
   id: string;
   status: 'pending' | 'running' | 'completed' | 'failed';
@@ -19,8 +31,20 @@ export interface RuJob {
     scanned?: number;
     ready?: number;
     target?: number;
+    /**
+     * target_reached | pool_exhausted | scan_limit | budget (кончился лимит на ИИ) |
+     * awaiting_templates (заказанное набрано вместе с компаниями, которые ждут цепочку оффера).
+     */
     stop_reason?: string;
+    /** Сколько компаний ждут «Переписать цепочку» (очень спорные: цепочка оффера не готова). */
+    awaiting_templates?: number;
     reasons?: Record<string, number>;
+    source_errors?: Record<string, string>;
+    doubtful?: number;
+    /** Нет у запусков до 26.09.2026 — тогда строку расхода не показываем. */
+    llm?: RuJobLlmSpend;
+    /** У воркера нет SMTP-прокси: почты проверены только по синтаксису и MX. */
+    smtp_unavailable?: boolean;
   } | null;
   total_found: number | null;
   total_parsed: number | null;
@@ -68,10 +92,14 @@ export interface RuRow {
   case_id: string | null;
   qa_status: string | null;
   qa_flags: string[];
-  row_status: 'processing' | 'ready' | 'rejected' | 'manual_review' | 'failed';
+  row_status: 'processing' | 'ready' | 'rejected' | 'manual_review' | 'failed' | 'doubtful';
   pipeline_stage: string | null;
   reason_code: string | null;
   reason_detail: string | null;
+  doubt_flags: string[];
+  doubt_detail: string | null;
+  route_reason: string | null;
+  route_runner_up: string | null;
 }
 
 export const api = authFetchJson;
@@ -100,6 +128,7 @@ export const STATUS_LABELS: Record<RuRow['row_status'], string> = {
   rejected: 'отсеяна',
   manual_review: 'ручная проверка',
   failed: 'ошибка',
+  doubtful: 'очень спорная',
 };
 
 export const SIGNAL_LABELS: Record<string, string> = {
@@ -117,6 +146,11 @@ export const SIGNAL_LABELS: Record<string, string> = {
   dealer_search: 'ищут дилеров',
   export_launch: 'экспорт',
   new_case: 'новый кейс',
+  sales_team: 'отдел продаж (2ГИС)',
+  revenue_growth: 'рост выручки (ФНС)',
+  tender_won: 'выигранный тендер',
+  investment: 'инвестиции',
+  sales_hiring_broad: 'вакансия продаж (не SDR)',
 };
 
 export const MODE_LABELS: Record<string, string> = CHAIN_LABELS;
@@ -126,6 +160,9 @@ export function fmtDate(value: string | null | undefined): string {
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? value : d.toLocaleDateString('ru-RU');
 }
+
+/** Доллары для строки расхода на ИИ — общие с английским экраном запуска. */
+export { fmtUsd } from '@/lib/outreachLlm/format';
 
 export function fmtDateTime(value: string | null | undefined): string {
   if (!value) return '—';
@@ -143,10 +180,11 @@ export interface ResultsResponse {
 }
 
 /** Быстрые фильтры над таблицей результатов. */
-export type ResultsFilter = 'ready' | 'manual_review' | 'rejected' | 'all';
+export type ResultsFilter = 'ready' | 'doubtful' | 'manual_review' | 'rejected' | 'all';
 
 export const RESULT_FILTERS: Array<[ResultsFilter, string]> = [
   ['ready', 'Готовые'],
+  ['doubtful', 'Очень спорные'],
   ['manual_review', 'Ручная проверка'],
   ['rejected', 'Отсеянные'],
   ['all', 'Все'],

@@ -1,64 +1,79 @@
 /**
- * Один вызов LLM со строгим JSON-ответом. Модель только извлекает и
+ * Один вызов ИИ со строгим JSON-ответом. Модель только извлекает и
  * классифицирует; каждая цитата потом сверяется с источником кодом (evidence.ts).
  *
- * Дешёвая модель, температура 0, один ретрай при битом JSON. Ключ общий с
- * английским автоаутричем.
+ * Транспорт, ключ, модель, повторы и учёт денег — общий клиент аутричей
+ * (lib/outreachLlm): свой ключ POLZA_RU_OUTREACH_API_KEY, дешёвая модель
+ * разбора, температура 0, повтор при сбое сети и битом JSON. Язык и лимит на ИИ
+ * берутся из контекста запуска (раннер и «Переписать цепочку»). Вне контекста
+ * вызов не уходит вовсе — без лимита не платим. Разбор полей ответа (asString
+ * и соседи) общий с английским аутричем и живёт в lib/outreachLlm/json.ts;
+ * здесь он реэкспортирован для прежних импортов.
+ *
+ * Ошибки клиента типизированы, и от типа зависит судьба строки и запуска:
+ * LlmCallError — сбой на этой строке («ИИ не ответил»); BudgetExceededError и
+ * LlmAuthError — про весь запуск (isFatalLlmError).
  */
 
-import { callOpenRouterChat } from '@/lib/openrouter/client';
+import { callOutreachJson } from '@/lib/outreachLlm/client';
+import { BudgetExceededError, currentOutreachContext, LlmAuthError, LlmCallError, type OutreachLlmContext } from '@/lib/outreachLlm/context';
 
-const API_KEY = process.env.OPENROUTER_PERSONALIZATION_API_KEY || process.env.OPENROUTER_BRIEF_API_KEY || '';
-export const RU_OUTREACH_MODEL = process.env.POLZA_RU_OUTREACH_MODEL || process.env.POLZA_OUTREACH_MODEL || 'openai/gpt-4o-mini';
-const MAX_ATTEMPTS = 2;
+/**
+ * Удачные ответы ИИ по запускам; ключ — объект контекста запуска, он один на
+ * весь прогон. Раннеру — для предохранителя «ИИ молчит»: серию отсевов «ИИ не
+ * ответил» обнуляет любой удачный ответ, а ответ из кэша разбора — нет.
+ * Удачный — целый: ответ без обязательных полей не считается.
+ */
+const answersByRun = new WeakMap<OutreachLlmContext, number>();
 
-function parseJsonObject(content: string): Record<string, unknown> | null {
-  const text = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-  const slice = text.startsWith('{') ? text : (text.match(/\{[\s\S]*\}/)?.[0] ?? '');
-  if (!slice) return null;
-  try {
-    const parsed = JSON.parse(slice) as unknown;
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
-  } catch {
-    return null;
+/**
+ * isComplete — есть ли в ответе поля, без которых разбор не разбор (у сайта —
+ * балл ЦА числом и B2B да/нет). Нет их — это сбой модели, а не ответ «ничего не
+ * найдено»: бросаем LlmCallError, строка уходит в «ИИ не ответил» и в серию
+ * предохранителя, а не идёт дальше с нулями по умолчанию. Такой ответ оплачен
+ * (клиент уже списал его с лимита), но серию «ИИ молчит» не обнуляет — иначе
+ * модель, которая отвечает пустым объектом, предохранитель не заметил бы.
+ */
+export async function callJson(
+  system: string,
+  user: string,
+  title: string,
+  maxTokens = 1200,
+  isComplete?: (raw: Record<string, unknown>) => boolean,
+  /** Общий срок вызова: роуту «Переписать цепочку» надо уложиться в свой таймаут. */
+  timeoutMs?: number,
+): Promise<Record<string, unknown>> {
+  const ctx = currentOutreachContext();
+  // Язык и лимит — только из контекста запуска: без него клиент вызов отклонит.
+  const result = await callOutreachJson({
+    role: 'analysis',
+    system,
+    user,
+    title,
+    maxTokens,
+    lang: 'ru',
+    timeoutMs,
+  });
+  if (isComplete && !isComplete(result)) {
+    throw new LlmCallError(`RU analysis «${title}»: в ответе нет обязательных полей`);
   }
+  if (ctx) answersByRun.set(ctx, (answersByRun.get(ctx) ?? 0) + 1);
+  return result;
 }
 
-export async function callJson(system: string, user: string, title: string, maxTokens = 1200): Promise<Record<string, unknown>> {
-  if (!API_KEY) throw new Error('OPENROUTER_PERSONALIZATION_API_KEY is not configured');
-  let lastError: Error | null = null;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    try {
-      const content = await callOpenRouterChat({
-        apiKey: API_KEY,
-        model: RU_OUTREACH_MODEL,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user },
-        ],
-        temperature: 0,
-        maxTokens,
-        responseFormat: { type: 'json_object' },
-        title: `Portal - Polza RU Outreach ${title}`,
-      });
-      const parsed = parseJsonObject(content);
-      if (parsed) return parsed;
-      lastError = new Error('LLM returned unparseable JSON');
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-    }
-  }
-  throw lastError ?? new Error('LLM call failed');
+/** Сколько вызовов ИИ ответило в текущем запуске; вне запуска — 0. */
+export function llmAnswersInRun(): number {
+  const ctx = currentOutreachContext();
+  return ctx ? answersByRun.get(ctx) ?? 0 : 0;
 }
 
-export function asString(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
+/**
+ * Лимит на ИИ исчерпан или ключ не работает. Такую ошибку нельзя глотать ни в
+ * необязательном шаге (новости, гипотеза), ни в предохранителе источника:
+ * она не про одну строку, а про весь запуск.
+ */
+export function isFatalLlmError(err: unknown): err is BudgetExceededError | LlmAuthError {
+  return err instanceof BudgetExceededError || err instanceof LlmAuthError;
 }
 
-export function asBool(value: unknown): boolean {
-  return value === true || value === 'true';
-}
-
-export function asStringArray(value: unknown, max = 20): string[] {
-  return Array.isArray(value) ? value.map(asString).filter(Boolean).slice(0, max) : [];
-}
+export { asBool, asString, asStringArray, isBoolLike } from '@/lib/outreachLlm/json';

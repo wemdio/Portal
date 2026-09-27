@@ -5,6 +5,8 @@ import { Play, X } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch } from '@/lib/authFetch';
 import type { PolzaOutreachCompanyRow, PolzaOutreachConfig, PolzaOutreachFunnel, PolzaOutreachParserJob } from '@/types';
+import type { OutreachLlmBudgetSnapshot } from '@/lib/outreachLlm/types';
+import { fetchAllResultPages } from '@/lib/polzaOutreach/resultsPaging';
 import { PolzaOutreachLaunchPanel } from '@/components/parsers/PolzaOutreachLaunchPanel';
 import { PolzaOutreachResults } from '@/components/parsers/PolzaOutreachResults';
 import { JobRail, type JobRailItem } from '@/components/ui/JobRail';
@@ -20,10 +22,11 @@ type ResultsResponse = {
   funnel?: PolzaOutreachFunnel | null;
   status_counts?: Record<string, number> | null;
   exclusion_counts?: Record<string, number> | null;
+  /** Причины ручной проверки (needs_review) — «почта не проверена — N» у цепочки этапов. */
+  review_counts?: Record<string, number> | null;
 };
 
 const RESULTS_LIMIT = 50;
-const EXPORT_LIMIT = 1000;
 
 /**
  * Файл для отправки: компания, куда писать и что писать.
@@ -66,6 +69,7 @@ const EXPORT_HEADER = [
   'outbound_evidence',
   'email',
   'email_type',
+  'email_verification',
   'status',
   'stage',
   'exclusion_reason',
@@ -102,6 +106,29 @@ function fmtJobDate(value: string): string {
   return Number.isNaN(d.getTime())
     ? value
     : d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+/**
+ * Расход на ИИ, причина остановки и доступность SMTP-проверки из
+ * progress_detail запуска. Поле — jsonb без схемы (у старых запусков его нет
+ * вовсе), поэтому форму проверяем здесь, а не верим типу.
+ */
+function runSummary(job: PolzaOutreachParserJob | null): {
+  llm: OutreachLlmBudgetSnapshot | null;
+  stopReason: string | null;
+  smtpUnavailable: boolean;
+  awaitingTemplates: number | null;
+} {
+  const detail = job?.progress_detail as Record<string, unknown> | null | undefined;
+  const llm = detail?.llm as Partial<OutreachLlmBudgetSnapshot> | null | undefined;
+  const valid = typeof llm?.spent_usd === 'number' && typeof llm?.limit_usd === 'number' && typeof llm?.calls === 'number';
+  return {
+    llm: valid ? (llm as OutreachLlmBudgetSnapshot) : null,
+    stopReason: typeof detail?.stop_reason === 'string' ? detail.stop_reason : null,
+    smtpUnavailable: detail?.smtp_unavailable === true,
+    // Сколько компаний ждут «Переписать цепочку» — ключ общий с русским аутричем.
+    awaitingTemplates: typeof detail?.awaiting_templates === 'number' ? detail.awaiting_templates : null,
+  };
 }
 
 function csvCell(value: unknown) {
@@ -161,6 +188,7 @@ function exportRow(row: PolzaOutreachCompanyRow) {
     row.outbound_evidence ?? '',
     row.selected_company_email ?? '',
     row.email_type ?? '',
+    row.email_verification ?? '',
     row.status,
     row.stage ?? '',
     row.exclusion_reason ?? '',
@@ -188,6 +216,7 @@ export function PolzaOutreachView() {
   const [resultsCount, setResultsCount] = useState(0);
   const [funnel, setFunnel] = useState<PolzaOutreachFunnel | null>(null);
   const [exclusionCounts, setExclusionCounts] = useState<Record<string, number> | null>(null);
+  const [reviewCounts, setReviewCounts] = useState<Record<string, number> | null>(null);
   const [resultsPage, setResultsPage] = useState(1);
   // Режим отправки включён с самого начала: инструмент существует ради
   // готовых строк, а отсеянные компании нужны раз в десять запусков — когда
@@ -201,6 +230,7 @@ export function PolzaOutreachView() {
   const [deleteCandidate, setDeleteCandidate] = useState<string | null>(null);
 
   const activeJob = useMemo(() => jobs.find((job) => job.id === activeJobId) ?? null, [activeJobId, jobs]);
+  const activeSummary = useMemo(() => runSummary(activeJob), [activeJob]);
 
   const railItems = useMemo<JobRailItem[]>(
     () =>
@@ -248,6 +278,7 @@ export function PolzaOutreachView() {
       setResults(data.items ?? []);
       setFunnel(data.funnel ?? null);
       setExclusionCounts(data.exclusion_counts ?? null);
+      setReviewCounts(data.review_counts ?? null);
     } finally {
       setResultsLoading(false);
     }
@@ -258,36 +289,36 @@ export function PolzaOutreachView() {
    *
    * Таблица листается по полусотне, а этап — это про весь прогон: показывать
    * его по строкам, случайно оказавшихся на текущей странице, значило бы
-   * отвечать не на тот вопрос. Потолок ручки — тысяча строк, лимит запуска —
-   * триста компаний, так что в один запрос прогон помещается целиком.
+   * отвечать не на тот вопрос. Ручка отдаёт не больше тысячи строк за раз, а
+   * запуск на 500 готовых просматривает до 4000 кандидатов, — поэтому читаем
+   * страницами до конца (lib/polzaOutreach/resultsPaging.ts). Одной страницы
+   * хватало, пока лимит запуска был триста компаний.
    */
   const loadAllRows = useCallback(async (): Promise<PolzaOutreachCompanyRow[]> => {
     if (!activeJobId) return [];
-    const data = await apiFetch<ResultsResponse>(
-      `/api/parsers/polza-outreach/${activeJobId}/results?limit=1000&offset=0`,
-      { method: 'GET' },
-    );
-    return data.items ?? [];
-  }, [activeJobId]);
-
-  const fetchAllResults = useCallback(async (jobId: string) => {
-    const all: PolzaOutreachCompanyRow[] = [];
-    let offset = 0;
-    let total = Infinity;
-    while (offset < total) {
+    return fetchAllResultPages<PolzaOutreachCompanyRow>(async (offset, limit) => {
       const data = await apiFetch<ResultsResponse>(
-        `/api/parsers/polza-outreach/${jobId}/results?limit=${EXPORT_LIMIT}&offset=${offset}${statusQuery}`,
+        `/api/parsers/polza-outreach/${activeJobId}/results?limit=${limit}&offset=${offset}`,
         { method: 'GET' },
       );
-      if (offset === 0) total = data.count ?? 0;
-      const chunk = data.items ?? [];
-      all.push(...chunk);
-      if (chunk.length === 0) break;
-      offset += chunk.length;
-      setExportProgress(`Загрузка: ${Math.min(offset, total)} / ${total}`);
-    }
-    return all;
-  }, [statusQuery]);
+      return { items: data.items ?? [], count: data.count ?? 0 };
+    });
+  }, [activeJobId]);
+
+  const fetchAllResults = useCallback(
+    async (jobId: string) =>
+      fetchAllResultPages<PolzaOutreachCompanyRow>(
+        async (offset, limit) => {
+          const data = await apiFetch<ResultsResponse>(
+            `/api/parsers/polza-outreach/${jobId}/results?limit=${limit}&offset=${offset}${statusQuery}`,
+            { method: 'GET' },
+          );
+          return { items: data.items ?? [], count: data.count ?? 0 };
+        },
+        (loaded, total) => setExportProgress(`Загрузка: ${loaded} / ${total}`),
+      ),
+    [statusQuery],
+  );
 
   useEffect(() => {
     void (async () => {
@@ -497,6 +528,7 @@ export function PolzaOutreachView() {
         setResultsCount(0);
         setFunnel(null);
         setExclusionCounts(null);
+        setReviewCounts(null);
       }
       await refreshJobs();
     } catch (e) {
@@ -541,8 +573,8 @@ export function PolzaOutreachView() {
         <div className="rounded-xl border border-gray-200 bg-white p-8 text-center shadow-sm">
           <div className="text-base font-semibold text-gray-900">Запусков ещё не было</div>
           <p className="mx-auto mt-1 max-w-xl text-sm text-gray-500">
-            Соберём B2B-компании с поводом написать — найм в sales/GTM или свежий батч YC, — отберём по Lead Score, найдём почту и напишем
-            цепочку из четырёх писем на английском. Без отправки: на выходе таблица и выгрузка.
+            Соберём B2B-компании с поводом написать — найм в sales/GTM или свежий батч YC, — найдём и проверим почту, отберём по Lead Score и
+            напишем цепочку из четырёх писем на английском. Без отправки: на выходе таблица и выгрузка.
           </p>
           <button
             type="button"
@@ -574,9 +606,16 @@ export function PolzaOutreachView() {
           count={resultsCount}
           funnel={funnel}
           exclusionCounts={exclusionCounts}
+          reviewCounts={reviewCounts}
           loading={resultsLoading}
           jobStatus={activeJob?.status ?? null}
           jobError={activeJob?.error_message ?? null}
+          llmSpend={activeSummary.llm}
+          stopReason={activeSummary.stopReason}
+          smtpUnavailable={activeSummary.smtpUnavailable}
+          awaitingTemplates={activeSummary.awaitingTemplates}
+          jobId={activeJob?.id ?? null}
+          onRefresh={() => void manualRefresh().catch((e) => setError(e instanceof Error ? e.message : 'Ошибка загрузки'))}
           loadAllRows={activeJobId ? loadAllRows : undefined}
           currentPage={resultsPage}
           totalPages={totalPages}

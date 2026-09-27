@@ -2,6 +2,7 @@ import { runPolzaOutreachJob } from '@/lib/polzaOutreach/runner';
 import { runRuOutreachJob } from '@/lib/polzaRuOutreach/runner';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
 import { claimParserJob, recoverRunningParserJobs } from './parserJobs';
+import { installUndiciAssertGuard } from './_undiciAssertGuard';
 
 /**
  * Воркер автоаутричей Polza: английский (polza_outreach) и «Наш автоаутрич»
@@ -57,6 +58,11 @@ async function pollOnce(): Promise<boolean> {
 
 async function main(): Promise<void> {
   log('info', `Starting Polza outreach worker (pid=${process.pid})`);
+  // Клиент ИИ обрывает запросы по таймауту и по остановке запуска, а поиск
+  // почты — страницы сайтов. На таком обрыве undici может бросить ассерт мимо
+  // промиса fetch (см. _undiciAssertGuard.ts) — без перехвата он валил бы весь
+  // воркер, а перезапуск заново платил бы за разбор обоих идущих запусков.
+  installUndiciAssertGuard(log);
   requireSupabaseAdmin(log);
   const shouldStop = setupGracefulShutdown(log);
 

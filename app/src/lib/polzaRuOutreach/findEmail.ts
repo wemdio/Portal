@@ -8,16 +8,36 @@
  *
  * Запрещены: бесплатные домены, HR/резюме/поддержка/бухгалтерия/служебные и
  * любые адреса НЕ на домене компании.
+ *
+ * Поиск и проверка — общие у аутричей (lib/outreachEmail/findAndVerify.ts):
+ * обход сайта через портальный кэш и SMTP-проверка выбранного адреса. Здесь
+ * только правила выбора: нерабочий адрес исключается, и pickRuEmail выбирает
+ * следующий по тем же приоритетам.
  */
 
-import { scrapeEmails } from '@/lib/enrich/emailScraper';
+import {
+  findAndVerifyCompanyEmail,
+  type EmailDomainCache,
+  type OutreachEmailVerdict,
+  type OutreachEmailVerification,
+} from '@/lib/outreachEmail/findAndVerify';
 
-export interface RuEmailResult {
+/** Адрес по правилам выбора — без поиска и проверки. */
+export interface RuEmailPick {
   email: string | null;
   emailType: 'department' | 'generic' | 'person' | null;
   isRouting: boolean;
   recipientRole: string | null;
+}
+
+export interface RuEmailResult extends RuEmailPick {
   sourceUrl: string | null;
+  /** Вердикт проверки — в email_verification строки; null — адреса нет. */
+  verification: OutreachEmailVerification | null;
+  /** ok / catch_all / unverified — адрес есть; invalid — кандидаты не прошли проверку; none — адресов нет. */
+  verdict: OutreachEmailVerdict;
+  /** Адреса, отбракованные проверкой, — пояснение в журнале. */
+  triedInvalid: string[];
 }
 
 const DEPARTMENT_LOCALS: Array<[string, string]> = [
@@ -54,8 +74,6 @@ const FREE_MAIL_DOMAINS = new Set([
 ]);
 
 const MAX_PAGES = 8;
-const PAGE_TIMEOUT_MS = 15_000;
-const COMPANY_TOTAL_TIMEOUT_MS = 60_000;
 
 function isAllowed(email: string, companyDomain: string): boolean {
   const [local, domain] = email.toLowerCase().split('@');
@@ -66,9 +84,13 @@ function isAllowed(email: string, companyDomain: string): boolean {
   return domain === companyDomain || domain.endsWith(`.${companyDomain}`);
 }
 
-/** Выбор адреса — чистая функция: один и тот же набор всегда даёт один результат. */
-export function pickRuEmail(emails: string[], companyDomain: string): Omit<RuEmailResult, 'sourceUrl'> {
-  const allowed = Array.from(new Set(emails.map((e) => e.toLowerCase()))).filter((e) => isAllowed(e, companyDomain));
+/**
+ * Выбор адреса — чистая функция: один и тот же набор всегда даёт один результат.
+ * excluded — адреса в нижнем регистре, которые проверка признала нерабочими:
+ * их нет среди кандидатов, и выбор идёт по тем же приоритетам среди остальных.
+ */
+export function pickRuEmail(emails: string[], companyDomain: string, excluded: ReadonlySet<string> = new Set()): RuEmailPick {
+  const allowed = Array.from(new Set(emails.map((e) => e.toLowerCase()))).filter((e) => !excluded.has(e) && isAllowed(e, companyDomain));
   const localOf = (e: string) => e.split('@')[0];
 
   for (const [local, role] of DEPARTMENT_LOCALS) {
@@ -91,25 +113,28 @@ export function pickRuEmail(emails: string[], companyDomain: string): Omit<RuEma
   return { email: null, emailType: null, isRouting: false, recipientRole: null };
 }
 
-async function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const guard = new Promise<T>((resolve) => {
-    timer = setTimeout(() => resolve(fallback), ms);
+/** domainCache — один на запуск (MX и catch-all доменов для SMTP-проверки). */
+export async function findRuCompanyEmail(website: string, companyDomain: string, domainCache: EmailDomainCache): Promise<RuEmailResult> {
+  const search = await findAndVerifyCompanyEmail({
+    website,
+    domain: companyDomain,
+    locale: 'ru',
+    maxPages: MAX_PAGES,
+    domainCache,
+    pick: (emails, excluded) => {
+      const picked = pickRuEmail(emails, companyDomain, excluded);
+      return picked.email ? { ...picked, email: picked.email } : null;
+    },
   });
-  try {
-    return await Promise.race([promise, guard]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
-
-export async function findRuCompanyEmail(website: string, companyDomain: string): Promise<RuEmailResult> {
-  const result = await withTimeout(
-    scrapeEmails(website, { locale: 'ru', maxPages: MAX_PAGES, timeout: PAGE_TIMEOUT_MS }),
-    COMPANY_TOTAL_TIMEOUT_MS,
-    null,
-  );
-  if (!result) return { email: null, emailType: null, isRouting: false, recipientRole: null, sourceUrl: null };
-  const picked = pickRuEmail(result.emails, companyDomain);
-  return { ...picked, sourceUrl: picked.email ? (result.checkedUrls[0] ?? website) : null };
+  const found = search.result;
+  return {
+    email: found?.email ?? null,
+    emailType: found?.emailType ?? null,
+    isRouting: found?.isRouting ?? false,
+    recipientRole: found?.recipientRole ?? null,
+    sourceUrl: search.sourceUrl,
+    verification: found?.verification ?? null,
+    verdict: search.verdict,
+    triedInvalid: search.triedInvalid,
+  };
 }

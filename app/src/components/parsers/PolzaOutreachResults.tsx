@@ -2,8 +2,13 @@
 
 import { Fragment, useState } from 'react';
 import type { PolzaOutreachCompanyRow, PolzaOutreachFunnel, ParserJobStatus } from '@/types';
-import { POLZA_STAGE_LABELS, PolzaOutreachStages } from '@/components/parsers/PolzaOutreachStages';
+import { fmtUsd } from '@/lib/outreachLlm/format';
+import type { OutreachLlmBudgetSnapshot } from '@/lib/outreachLlm/types';
+import { polzaReviewLabel } from '@/lib/polzaOutreach/types';
+import { POLZA_STAGE_KEYS, POLZA_STAGE_LABELS, PolzaOutreachStages } from '@/components/parsers/PolzaOutreachStages';
 import { PolzaOutreachStageModal } from '@/components/parsers/PolzaOutreachStageModal';
+import { ChainTemplates } from '@/components/outreach/ChainTemplates';
+import { SenderBlock } from '@/components/outreach/SenderBlock';
 import { ChevronDown, ChevronRight, Download, ExternalLink, FileText, Filter, Loader2, Mail, Square, Trash2 } from 'lucide-react';
 
 type Props = {
@@ -11,10 +16,27 @@ type Props = {
   count: number;
   funnel: PolzaOutreachFunnel | null;
   exclusionCounts: Record<string, number> | null;
+  /** Причины ручной проверки по всему прогону (review_counts ручки результатов). */
+  reviewCounts?: Record<string, number> | null;
   loading: boolean;
   jobStatus: ParserJobStatus | null;
   /** Текст ошибки запуска — показываем у этапа, на котором встали. */
   jobError?: string | null;
+  /** Расход на ИИ за запуск (progress_detail.llm); у запусков до 26.09.2026 его нет. */
+  llmSpend?: OutreachLlmBudgetSnapshot | null;
+  /**
+   * Почему запуск закончился (progress_detail.stop_reason): budget — кончился лимит
+   * на ИИ; awaiting_templates — набрано вместе с компаниями, которые ждут цепочку оффера.
+   */
+  stopReason?: string | null;
+  /** Сколько компаний ждут «Переписать цепочку» (progress_detail.awaiting_templates). */
+  awaitingTemplates?: number | null;
+  /** У воркера нет SMTP-прокси (progress_detail.smtp_unavailable): почты проверены только по MX. */
+  smtpUnavailable?: boolean;
+  /** Запуск на экране — для блока «Цепочки запуска». */
+  jobId?: string | null;
+  /** Перечитать запуск и таблицу: «Переписать цепочку» меняет готовых и расход на ИИ. */
+  onRefresh?: () => void;
   /** Строки всего прогона — для разбора этапа. */
   loadAllRows?: () => Promise<PolzaOutreachCompanyRow[]>;
   currentPage: number;
@@ -50,31 +72,28 @@ const EXCLUSION_LABELS: Record<string, string> = {
   size_11_50: 'размер 11–50',
   size_out_of_range: 'размер вне 3–200',
   duplicate_domain: 'дубль домена',
+  previously_exported: 'уже готова в прошлом запуске',
   no_outbound_mandate: 'нет outbound-мандата',
   site_unreachable: 'сайт не открылся',
+  llm_failed: 'ИИ не ответил (сбой модели или ключа)',
   not_b2b: 'не B2B',
   no_trigger: 'нет повода написать',
   low_score: 'Lead Score ниже порога',
   no_corporate_email: 'не нашли корпоративную почту',
+  email_invalid: 'почта на сайте не прошла проверку',
+  suppressed_contact: 'почта в стоп-листе Рассылки',
 };
 
 /**
  * Причины, по которым строка ушла на ручную проверку.
  *
  * Показывались машинным кодом («no_corporate_email»): оператору он ничего не
- * объясняет, а гадать по подчёркиваниям — не его работа.
+ * объясняет, а гадать по подчёркиваниям — не его работа. Подписи общие с
+ * выгрузкой в Excel (lib/polzaOutreach/types.ts): у цепочки оффера, которая
+ * не готова, и у писем, не прошедших гарды, к подписи добавляется почему.
  */
-const REVIEW_LABELS: Record<string, string> = {
-  no_corporate_email: 'не нашли корпоративную почту',
-  generic_company: 'слишком общее описание компании',
-  low_geo_confidence: 'гео продаж подтверждено слабо',
-  letters_guard_failed: 'письма не прошли проверку правил',
-  manual_check: 'Lead Score в зоне ручной проверки',
-  limit_reached: 'лимит готовых уже набран',
-};
-
 function reviewLabel(reason: string): string {
-  return REVIEW_LABELS[reason] ?? reason;
+  return polzaReviewLabel(reason);
 }
 
 const CONFIDENCE_STYLES: Record<string, string> = {
@@ -137,7 +156,12 @@ function LettersBlock({ row }: { row: PolzaOutreachCompanyRow }) {
             <span className="rounded bg-violet-100 px-1.5 py-0.5 text-[11px] font-semibold text-violet-800">
               Письмо {letter.n}
             </span>
-            <span className="text-sm font-medium text-gray-800">{letter.subject}</span>
+            {/* С 26.09.2026 тема только у письма 1: остальные уходят ответом в ту же ветку. */}
+            {letter.subject ? (
+              <span className="text-sm font-medium text-gray-800">{letter.subject}</span>
+            ) : (
+              <span className="text-xs text-gray-400">ответ в той же ветке</span>
+            )}
           </div>
           <pre className="whitespace-pre-wrap break-words font-sans text-sm text-gray-700">{letter.body}</pre>
         </div>
@@ -231,9 +255,16 @@ export function PolzaOutreachResults({
   count,
   funnel,
   exclusionCounts,
+  reviewCounts,
   loading,
   jobStatus,
   jobError,
+  llmSpend,
+  stopReason,
+  awaitingTemplates,
+  smtpUnavailable,
+  jobId,
+  onRefresh,
   loadAllRows,
   currentPage,
   totalPages,
@@ -252,6 +283,7 @@ export function PolzaOutreachResults({
   const running = jobStatus === 'running' || jobStatus === 'pending';
   const hasItems = items.length > 0;
   const readyCount = funnel ? Number(funnel.ready ?? 0) : null;
+  const unverifiedCount = Number(reviewCounts?.email_unverified ?? 0);
 
   return (
     <div className="space-y-4">
@@ -271,9 +303,58 @@ export function PolzaOutreachResults({
         />
       ) : null}
 
+      {jobStatus && llmSpend ? (
+        <div className="px-1 text-sm text-gray-500" title={`Вызовов ИИ: ${llmSpend.calls}`}>
+          ИИ: потрачено {fmtUsd(llmSpend.spent_usd)} из {fmtUsd(llmSpend.limit_usd)}
+        </div>
+      ) : null}
+      {/* Строки с непроверенной почтой в цепочке — среди отсеянных на почте, а
+          они не отсев: адрес есть, решает человек. Поэтому число — отдельно. */}
+      {jobStatus && unverifiedCount > 0 ? (
+        <div
+          className="px-1 text-sm text-amber-700"
+          title="Адрес на сайте нашёлся, но SMTP-проверка не дала ответа: строки ждут ручной проверки, разбора ИИ и писем у них нет"
+        >
+          почта не проверена — {unverifiedCount}
+        </div>
+      ) : null}
+      {/* Повторный запуск не пишет компаниям, уже готовым в этом: они отсеются
+          как повторы между запусками, и он доберёт новые. */}
+      {jobStatus && stopReason === 'budget' ? (
+        <div className="rounded-lg bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
+          Остановлен: достигнут лимит на ИИ. Готовые компании сохранены — чтобы добрать остальные, повторите запуск с большим лимитом.
+        </div>
+      ) : null}
+      {/* Разбор новых компаний остановлен: до заказанного числа добирают те, что ждут цепочку оффера. */}
+      {jobStatus && stopReason === 'awaiting_templates' ? (
+        <div className="rounded-lg bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
+          Набрано вместе с компаниями, которые ждут цепочку{awaitingTemplates ? ` (${awaitingTemplates})` : ''} — перепишите цепочку в блоке
+          «Цепочки запуска»
+        </div>
+      ) : null}
+      {/* Без SMTP-прокси адрес считается рабочим, если у домена есть почтовый сервер: письмо может не дойти. */}
+      {jobStatus && smtpUnavailable ? (
+        <div className="rounded-lg bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
+          SMTP-проверка почт недоступна — почты проверены только по MX
+        </div>
+      ) : null}
+
+      {jobStatus && jobId ? (
+        <>
+          <ChainTemplates key={jobId} jobUrl={`/api/parsers/polza-outreach/${jobId}`} running={running} lang="en" onChanged={onRefresh} />
+          <SenderBlock
+            key={`sender-${jobId}`}
+            jobUrl={`/api/parsers/polza-outreach/${jobId}`}
+            running={running}
+            readyCount={readyCount}
+            onChanged={onRefresh}
+          />
+        </>
+      ) : null}
+
       {openStage !== null && loadAllRows ? (
         <PolzaOutreachStageModal
-          stageIndex={openStage}
+          stageKey={POLZA_STAGE_KEYS[openStage] ?? 'vacancies'}
           stageLabel={POLZA_STAGE_LABELS[openStage] ?? 'Этап'}
           loadRows={loadAllRows}
           reviewLabel={reviewLabel}

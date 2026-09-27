@@ -159,8 +159,37 @@ services:
       - NODE_ENV=production
       - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
-      # S4 (LLM-разбор вакансий) ходит в OpenRouter через этот ключ
-      - OPENROUTER_PERSONALIZATION_API_KEY=${OPENROUTER_PERSONALIZATION_API_KEY}
+      # 26.09.2026 (Task 8, docs/superpowers/plans/2026-09-26-outreach-to-sender.md):
+      # RU (runRuOutreachJob) и EN (runPolzaOutreachJob) автоаутричи — оба обслуживает
+      # этот воркер (WORKER_KIND=polzaoutreach) — переехали на общий ИИ-клиент
+      # lib/outreachLlm/client.ts со своим ключом Requesty на каждый язык вместо
+      # общего OPENROUTER_PERSONALIZATION_API_KEY (его по-прежнему используют другие
+      # фичи портала, не этот воркер, — lib/tools/processingSteps.ts, dfybWorker.ts).
+      # Модели необязательные: пустая строка не ломает outreachModel() — код
+      # подставляет дефолт (gpt-4o-mini / gemini-3.1-pro-preview).
+      # Роуты создания запуска (app/src/app/api/parsers/polza-outreach/route.ts,
+      # .../tools/polza-ru-outreach/route.ts) тоже проверяют эти ключи — сервис
+      # portal получает их через свой env_file: .env, отдельно прописывать не нужно.
+      # Правка требует пересоздания обоих контейнеров (CLAUDE.md, «после правки
+      # compose обязателен --force-recreate»):
+      #   docker compose -p portal -f docker-compose.prod.yml up -d --force-recreate --no-deps worker-polza-outreach portal
+      - POLZA_RU_OUTREACH_API_KEY=${POLZA_RU_OUTREACH_API_KEY:-}
+      - POLZA_EN_OUTREACH_API_KEY=${POLZA_EN_OUTREACH_API_KEY:-}
+      - POLZA_RU_ANALYSIS_MODEL=${POLZA_RU_ANALYSIS_MODEL:-}
+      - POLZA_RU_WRITER_MODEL=${POLZA_RU_WRITER_MODEL:-}
+      - POLZA_EN_ANALYSIS_MODEL=${POLZA_EN_ANALYSIS_MODEL:-}
+      - POLZA_EN_WRITER_MODEL=${POLZA_EN_WRITER_MODEL:-}
+      # Поиск и SMTP-проверка почты для автоаутричей (lib/outreachEmail/findAndVerify.ts
+      # -> lib/emailValidation/validator.ts) — тот же SMTP-прокси, что у
+      # worker-emailvalidation ниже; имена переменных скопированы оттуда один в один.
+      - SMTP_PROXY_URL=${SMTP_PROXY_URL}
+      - SMTP_PROXY_URLS=${SMTP_PROXY_URLS}
+      - SMTP_PROXY_API_KEY=${SMTP_PROXY_API_KEY}
+      # Необязательный тюнинг шага почты — пусто/не задано = дефолт из кода
+      # (envMs/envInt в findAndVerify.ts, polzaRuOutreach/runner.ts, polzaOutreach/runner.ts).
+      - OUTREACH_EMAIL_COMPANY_TIMEOUT_MS=${OUTREACH_EMAIL_COMPANY_TIMEOUT_MS:-}
+      - POLZA_RU_OUTREACH_EMAIL_CONCURRENCY=${POLZA_RU_OUTREACH_EMAIL_CONCURRENCY:-}
+      - POLZA_OUTREACH_EMAIL_CONCURRENCY=${POLZA_OUTREACH_EMAIL_CONCURRENCY:-}
       - WORKER_POLL_INTERVAL_MS=${WORKER_POLL_INTERVAL_MS:-5000}
       - WORKER_KIND=polzaoutreach
     stop_grace_period: 3h
@@ -680,6 +709,47 @@ services:
       - LEADS_REPORT_PIPELINE_NAME=${LEADS_REPORT_PIPELINE_NAME:-Воронка - новые лиды}
       # TG-алерт при сбое leadsReportSummaryCron. Идёт в канал health-check
       # бота (см. app/src/lib/telegram/workerAlert.ts).
+      - TELEGRAM_HEALTH_BOT_TOKEN=${TELEGRAM_HEALTH_BOT_TOKEN}
+      - TELEGRAM_HEALTH_CHAT_ID=${TELEGRAM_HEALTH_CHAT_ID}
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+          pids: 256
+    restart: unless-stopped
+    networks:
+      - portal-network
+
+  # Проверка карточки AMO при передаче проекта: читает ветку «Передача проектов»
+  # группы «Продажи Polza», отвечает реплаем только при проблемах с карточкой
+  # (или если в сообщении нет ссылки на AMO), раз в день в 10:00 МСК перепроверяет
+  # открытые проблемы. Спека: docs/superpowers/specs/2026-09-25-handoff-card-check-design.md.
+  # Перед выкладкой нужно руками: 1) HANDOFF_BOT_TOKEN в .env на сервере;
+  # 2) у бота в BotFather выключить приватность (/setprivacy → Disable) или
+  # сделать его админом группы — иначе он не видит чужие сообщения.
+  worker-handoff-check-bot:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-handoff-check-bot
+    command: ["node", "/app/workers/handoffCheckBot.js"]
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - HANDOFF_BOT_TOKEN=${HANDOFF_BOT_TOKEN:-}
+      - HANDOFF_CHAT_ID=${HANDOFF_CHAT_ID:-}
+      - HANDOFF_THREAD_ID=${HANDOFF_THREAD_ID:-}
+      - FIRST_SALES_PIPELINE_ID=${FIRST_SALES_PIPELINE_ID:-}
+      - AMO_BASE_URL=${AMO_BASE_URL:-}
+      - AMO_ACCESS_TOKEN=${AMO_ACCESS_TOKEN:-}
+      # Запасное имя токена — как у синка (services/portal-external-sync/sources/amo.py).
+      - AMOCRM_TOKEN=${AMOCRM_TOKEN:-}
+      # TG-алерт при сбое (нет токена, конфликт getUpdates, не отправился ответ,
+      # ежедневная перепроверка упала). Идёт в канал health-check бота
+      # (см. app/src/lib/telegram/workerAlert.ts).
       - TELEGRAM_HEALTH_BOT_TOKEN=${TELEGRAM_HEALTH_BOT_TOKEN}
       - TELEGRAM_HEALTH_CHAT_ID=${TELEGRAM_HEALTH_CHAT_ID}
     stop_grace_period: 30s

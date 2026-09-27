@@ -1,21 +1,30 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/sender/apiHelpers';
+import { createCampaign, SenderOpError, type CampaignStepInput } from '@/lib/sender/campaignOps';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
 
-interface StepInput {
-  /** Задержка от предыдущего шага в часах; у первого письма игнорируется. */
-  delayHours?: number;
-  subject?: string;
-  body?: string;
-}
+/**
+ * Сколько последних кампаний отдаёт список. Вкладка раскладывает их по папкам,
+ * и при 50 последних частые заливки одного автоаутрича вытесняли с экрана
+ * рассылки другого. Постраничности нет: кампаний — сотни, не тысячи.
+ */
+const LIST_LIMIT = 200;
+/**
+ * Кампаний, чья статистика считается одновременно. У каждой — семь запросов
+ * счётчиков, и 200 кампаний разом — это 1400 запросов в пул PostgREST на
+ * 30 соединений.
+ */
+const STATS_CHUNK = 20;
+/** Кампаний на один запрос пулов: id уезжают в адрес запроса. */
+const POOL_CHUNK = 50;
 
 interface CreateBody {
   name?: string;
   mailboxIds?: string[];
-  steps?: StepInput[];
+  steps?: CampaignStepInput[];
   timezone?: string;
   sendHourFrom?: number;
   sendHourTo?: number;
@@ -23,8 +32,6 @@ interface CreateBody {
   gapSeconds?: number;
   gapJitterSeconds?: number;
 }
-
-const MAX_STEPS = 5;
 
 async function campaignStats(campaignId: string) {
   if (!supabaseAdmin) return null;
@@ -79,12 +86,18 @@ async function mailboxesByCampaign(campaignIds: string[]) {
   const out = new Map<string, { id: string; email: string }[]>();
   if (!supabaseAdmin || !campaignIds.length) return out;
 
-  const { data } = await supabaseAdmin
-    .from('sender_campaign_mailboxes')
-    .select('campaign_id, sender_mailboxes(id, email)')
-    .in('campaign_id', campaignIds);
+  // Пачками: 200 id в одном in-фильтре — это ~7 КБ адреса, у самого края
+  // того, что пропускает шлюз перед PostgREST.
+  const rows: { campaign_id: string; sender_mailboxes: unknown }[] = [];
+  for (let i = 0; i < campaignIds.length; i += POOL_CHUNK) {
+    const { data } = await supabaseAdmin
+      .from('sender_campaign_mailboxes')
+      .select('campaign_id, sender_mailboxes(id, email)')
+      .in('campaign_id', campaignIds.slice(i, i + POOL_CHUNK));
+    rows.push(...((data ?? []) as { campaign_id: string; sender_mailboxes: unknown }[]));
+  }
 
-  for (const row of (data ?? []) as { campaign_id: string; sender_mailboxes: unknown }[]) {
+  for (const row of rows) {
     // Вложенная запись приезжает объектом или массивом в зависимости от того,
     // как PostgREST разобрал связь, — приводим к одному виду.
     const raw = row.sender_mailboxes;
@@ -99,35 +112,50 @@ async function mailboxesByCampaign(campaignIds: string[]) {
   return out;
 }
 
-/** GET — список кампаний с короткой статистикой. */
+/**
+ * GET — последние кампании с короткой статистикой. Вместе с настройками
+ * приезжают папка (folder_id) и источник (source_kind, source_job_id):
+ * вкладка группирует по ним кампании. truncated — в список влезли не все.
+ */
 export async function GET(req: NextRequest) {
   return withToolTrace({ request: req, operation: 'tools.sender.campaigns.list' }, async () => {
     const auth = await authenticateRequest(req.headers.get('authorization'));
     if ('error' in auth) return auth.error;
     if (!supabaseAdmin) return jsonError('Сервис не настроен', 503);
 
+    // Одна строка сверх лимита — признак, что старые кампании не влезли.
     const { data, error } = await supabaseAdmin
       .from('sender_campaigns')
       .select('*')
       .order('created_at', { ascending: false })
-      .limit(50);
+      .limit(LIST_LIMIT + 1);
 
     if (error) return jsonError(error.message, 500);
 
-    const pool = await mailboxesByCampaign((data ?? []).map((c) => String(c.id)));
-    const campaigns = await Promise.all(
-      (data ?? []).map(async (campaign) => ({
-        ...campaign,
-        mailboxes: pool.get(String(campaign.id)) ?? [],
-        stats: await campaignStats(String(campaign.id)),
-      })),
-    );
+    const rows = (data ?? []).slice(0, LIST_LIMIT);
+    const pool = await mailboxesByCampaign(rows.map((c) => String(c.id)));
+    const campaigns: Record<string, unknown>[] = [];
+    for (let i = 0; i < rows.length; i += STATS_CHUNK) {
+      campaigns.push(
+        ...(await Promise.all(
+          rows.slice(i, i + STATS_CHUNK).map(async (campaign) => ({
+            ...campaign,
+            mailboxes: pool.get(String(campaign.id)) ?? [],
+            stats: await campaignStats(String(campaign.id)),
+          })),
+        )),
+      );
+    }
 
-    return NextResponse.json({ campaigns });
+    return NextResponse.json({ campaigns, truncated: (data ?? []).length > LIST_LIMIT });
   });
 }
 
-/** POST — создать кампанию: пул ящиков, шаги цепочки, расписание. */
+/**
+ * POST — создать кампанию: пул ящиков, шаги цепочки, расписание. Проверки и
+ * запись — в lib/sender/campaignOps: тем же путём кампании заводит заливка
+ * из автоаутрича.
+ */
 export async function POST(req: NextRequest) {
   return withToolTrace({ request: req, operation: 'tools.sender.campaigns.create' }, async () => {
     const auth = await authenticateRequest(req.headers.get('authorization'));
@@ -137,51 +165,23 @@ export async function POST(req: NextRequest) {
     const body = (await req.json().catch(() => null)) as CreateBody | null;
     if (!body) return jsonError('Невалидный JSON', 400);
 
-    const name = (body.name ?? '').trim();
-    if (!name) return jsonError('Укажите название кампании', 400);
-
-    const mailboxIds = [...new Set((body.mailboxIds ?? []).filter((id) => typeof id === 'string' && id))];
-    if (!mailboxIds.length) return jsonError('Выберите хотя бы один ящик', 400);
-
-    const steps = (body.steps ?? []).slice(0, MAX_STEPS).filter((step) => (step.body ?? '').trim());
-    if (!steps.length) return jsonError('Добавьте хотя бы одно письмо', 400);
-    if (!(steps[0].subject ?? '').trim()) return jsonError('У первого письма должна быть тема', 400);
-
-    const { data: campaign, error } = await supabaseAdmin
-      .from('sender_campaigns')
-      .insert({
-        name,
-        status: 'draft',
-        timezone: body.timezone?.trim() || 'Europe/Moscow',
-        send_hour_from: body.sendHourFrom ?? 9,
-        send_hour_to: body.sendHourTo ?? 18,
-        send_weekdays: body.sendWeekdays?.length ? body.sendWeekdays : [1, 2, 3, 4, 5],
-        gap_seconds: body.gapSeconds ?? 180,
-        gap_jitter_seconds: body.gapJitterSeconds ?? 120,
-        created_by: auth.user.id,
-      })
-      .select('id')
-      .single();
-
-    if (error || !campaign) return jsonError(error?.message ?? 'Не удалось создать кампанию', 500);
-    const campaignId = String(campaign.id);
-
-    const { error: poolError } = await supabaseAdmin
-      .from('sender_campaign_mailboxes')
-      .insert(mailboxIds.map((mailboxId) => ({ campaign_id: campaignId, mailbox_id: mailboxId })));
-    if (poolError) return jsonError(poolError.message, 500);
-
-    const { error: stepsError } = await supabaseAdmin.from('sender_campaign_steps').insert(
-      steps.map((step, index) => ({
-        campaign_id: campaignId,
-        step_no: index + 1,
-        delay_hours: index === 0 ? 0 : Math.max(1, Math.round(step.delayHours ?? 72)),
-        subject: (step.subject ?? '').trim(),
-        body: (step.body ?? '').trim(),
-      })),
-    );
-    if (stepsError) return jsonError(stepsError.message, 500);
-
-    return NextResponse.json({ id: campaignId });
+    try {
+      const { id } = await createCampaign({
+        name: body.name ?? '',
+        mailboxIds: body.mailboxIds ?? [],
+        steps: body.steps ?? [],
+        timezone: body.timezone,
+        sendHourFrom: body.sendHourFrom,
+        sendHourTo: body.sendHourTo,
+        sendWeekdays: body.sendWeekdays,
+        gapSeconds: body.gapSeconds,
+        gapJitterSeconds: body.gapJitterSeconds,
+        createdBy: auth.user.id,
+      });
+      return NextResponse.json({ id });
+    } catch (e) {
+      if (e instanceof SenderOpError) return jsonError(e.message, e.status);
+      throw e;
+    }
   });
 }
