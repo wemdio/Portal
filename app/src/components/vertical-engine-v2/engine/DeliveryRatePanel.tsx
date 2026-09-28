@@ -94,8 +94,8 @@ export function DeliveryRatePanel({ projectId, presetId, templateIds, disabled =
     {snapshot ? <div className="space-y-1">
       <p><strong>До {valid ? cap : snapshot.max_new_contacts} новых контактов в день</strong></p>
       <p className={HE.muted}>Доступно почт: {snapshot.usable_mailboxes} из {snapshot.mailbox_count}. В расчёте — до {snapshot.sequence_steps} писем на контакт, включая продолжения.</p>
-      {snapshot.busy_mailboxes > 0 ? <p className={HE.muted}>В других активных кампаниях занято почт: {snapshot.busy_mailboxes}; они не добавляют мощность этому плану.</p> : null}
-      {snapshot.max_new_contacts === 0 ? <p className={HE.muted}>Свободной мощности для новых контактов сейчас нет. Проверьте занятость и доступность выбранных почт в Instantly, затем обновите расчёт.</p> : null}
+      {snapshot.busy_mailboxes > 0 ? <p className={HE.muted}>Почт, используемых также в других активных кампаниях: {snapshot.busy_mailboxes}. Это допустимо: Instantly делит общий дневной лимит каждой почты между кампаниями. Фактический темп здесь может быть ниже расчётного.</p> : null}
+      {snapshot.max_new_contacts === 0 ? <p className={HE.muted}>Сейчас лимиты и состояние почт не позволяют добавлять новые контакты. Проверьте их в Instantly, затем обновите расчёт.</p> : null}
       {snapshot.unavailable_mailboxes > 0 ? <p className={HE.muted}>Недоступно или не настроено почт: {snapshot.unavailable_mailboxes}.</p> : null}
       {snapshot.slow_ramp_mailboxes > 0 ? <p className={HE.muted}>У {snapshot.slow_ramp_mailboxes} почт включён постепенный разгон. Instantly не сообщает текущую ступень: учитываем по 2 письма в день, пока разгон включён.</p> : null}
       <p className={HE.muted}>Это верхняя граница, а не обещание отправки. Лимиты самих почт не повышаются. Расчёт обновляется перед очередной загрузкой.</p>

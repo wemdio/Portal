@@ -48,10 +48,13 @@ describe('buildContactDeliveryPlan', () => {
       otherCampaigns: [{ id: 'external', status: CampaignStatus.Active, email_list: ['busy@example.test'] }] as Campaign[],
       sequenceSteps: 3, policy: { mode: 'auto' as const, manual_limit: null }, windowMinutes: 300, gapMinutes: 1,
     };
-    expect(calculateDeliveryRate(input)).toMatchObject({ mailbox_count: 6, usable_mailboxes: 3,
-      busy_mailboxes: 1, unavailable_mailboxes: 2, slow_ramp_mailboxes: 1, email_capacity: 82, max_new_contacts: 27, effective_capacity: 27 });
+    expect(calculateDeliveryRate(input)).toMatchObject({ mailbox_count: 6, usable_mailboxes: 4,
+      busy_mailboxes: 1, unavailable_mailboxes: 2, slow_ramp_mailboxes: 1, email_capacity: 132, max_new_contacts: 44, effective_capacity: 44 });
     expect(calculateDeliveryRate({...input, policy: {mode: 'manual', manual_limit: 10}}).effective_capacity).toBe(10);
-    expect(calculateDeliveryRate({...input, policy: {mode: 'manual', manual_limit: 1000}}).effective_capacity).toBe(27);
+    expect(calculateDeliveryRate({...input, policy: {mode: 'manual', manual_limit: 1000}}).effective_capacity).toBe(44);
+    // Sharing a mailbox is allowed. The provider enforces its global account
+    // limit; foreign campaign count must not multiply or zero that capacity.
+    expect(calculateDeliveryRate({...input, otherCampaigns: [...input.otherCampaigns, ...input.otherCampaigns]}).email_capacity).toBe(132);
     expect(() => calculateDeliveryRate({...input, policy: {mode: 'manual', manual_limit: 0}})).toThrow();
     expect(() => calculateDeliveryRate({...input, otherCampaigns: [{id: 'unknown', status: CampaignStatus.Active} as Campaign]})).toThrow();
     expect(() => calculateDeliveryRate({...input, otherCampaigns: [{id: 'unknown', email_list: ['a@example.test']} as Campaign]})).toThrow('статус');

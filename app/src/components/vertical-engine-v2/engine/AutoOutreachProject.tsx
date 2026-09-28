@@ -43,7 +43,7 @@ import {
 const LABELS = ['Гипотезы', 'Письма', 'Базы и объём', 'Запуск', 'Результаты'];
 const RUN_LABELS = {
   queued: 'Запуск в очереди',
-  running: 'Создаём и запускаем кампании',
+  running: 'Подготавливаем кампании без отправки',
   waiting: 'Ожидает отправителей или даты начала',
   active: 'Запуск разрешён',
   blocked: 'Запуск требует внимания',
@@ -956,7 +956,8 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
           ) : null}
           {step === 5 ? (
             <section className="space-y-5">
-              <h2 className="ve2-h2">{run ? RUN_LABELS[run.status] : 'Результаты'}</h2>
+              <h2 className="ve2-h2">{run?.status === 'waiting' && run.items.some(item => item.code === 'VE_LAUNCH_REVIEW_REQUIRED')
+                ? 'Кампании ожидают проверки специалиста' : run ? RUN_LABELS[run.status] : 'Результаты'}</h2>
               {run?.error ? <StatusBox tone="error">{run.error}</StatusBox> : null}
               {run?.request.preset_id && run.items.length ? <DeliveryRatePanel projectId={projectId}
                 presetId={run.request.preset_id} templateIds={run.items.map(item => item.template_id)}

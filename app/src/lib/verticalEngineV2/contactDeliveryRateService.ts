@@ -124,7 +124,7 @@ export async function saveDeliveryRate(portalDb:SupabaseClient, instantlyDb:Supa
   projectId:string; presetId:string; templateIds:string[]; policy:DeliveryRatePolicy; revision:number; actorId:string;
 }) {
   const preview = await previewDeliveryRate(portalDb,instantlyDb,input);
-  if (preview.snapshot.effective_capacity <= 0) throw new DeliveryRateError('Нет доступной мощности: проверьте почты, занятые кампании и длину цепочки.');
+  if (preview.snapshot.effective_capacity <= 0) throw new DeliveryRateError('Нет доступной мощности: проверьте состояние почт, их лимиты и длину цепочки.');
   distributeDeliveryRate(preview.snapshot.effective_capacity, preview.own.map(c => c.id));
   return rateRpc(portalDb,'ve_save_contact_delivery_rate',{
     p_project_id:input.projectId,p_preset_id:input.presetId,p_template_ids:preview.templateIds,
@@ -141,7 +141,7 @@ export async function refreshDeliveryRate(portalDb:SupabaseClient, instantlyDb:S
   if(claimed!==true) throw new DeliveryRateError('Темп обновляется другим процессом. Следующий проход повторит проверку.');
   try {
     const current=await previewDeliveryRate(portalDb,instantlyDb,{projectId,presetId:rate.preset_id,templateIds:rate.template_ids,policy:rate});
-    if(current.snapshot.effective_capacity<=0) throw new DeliveryRateError('Нет свободной мощности отправителей для новых контактов.');
+    if(current.snapshot.effective_capacity<=0) throw new DeliveryRateError('Лимиты и состояние отправителей пока не позволяют добавлять новые контакты.');
     const ids=current.own.map(c=>c.id);
     const newLimits=distributeDeliveryRate(current.snapshot.effective_capacity,ids);
     const emailLimits=distributeDeliveryRate(current.snapshot.email_capacity,ids);

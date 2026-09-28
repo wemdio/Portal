@@ -68,7 +68,7 @@ describe('VE2 contact delivery scheduler', () => {
       const preview = () => previewDeliveryRate(portal as never, presets as never, {
         projectId: 've', presetId: 'preset-1', templateIds: ['template'], policy: {mode: 'auto', manual_limit: null},
       });
-      expect((await preview()).snapshot).toMatchObject({effective_capacity: 0, busy_mailboxes: 1});
+      expect((await preview()).snapshot).toMatchObject({effective_capacity: 30, busy_mailboxes: 1});
       expect(accounts).toHaveBeenCalledWith({limit: 100, tag_ids: 'tag-1', starting_after: 'second'}, expect.objectContaining({accountId: 'main'}));
       accounts.mockImplementation(async (params) => params?.tag_ids
         ? {items: [{email: 'unrelated@example.test'}]} as never

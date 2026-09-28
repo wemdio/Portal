@@ -5,6 +5,7 @@ export class DeliveryRateError extends Error {}
 
 export type DeliveryRatePolicy = { mode: 'auto' | 'manual'; manual_limit: number | null };
 export type DeliveryRateSnapshot = {
+  /** busy_mailboxes is informational: these mailboxes are shared, not unavailable. */
   mailbox_count: number; usable_mailboxes: number; busy_mailboxes: number; unavailable_mailboxes: number;
   slow_ramp_mailboxes: number; email_capacity: number; sequence_steps: number; max_new_contacts: number;
   effective_capacity: number; checked_at: string;
@@ -20,7 +21,7 @@ export function isSendingCampaign(campaign: Campaign): boolean {
   return campaign.status === CampaignStatus.Active || campaign.status === CampaignStatus.RunningSubsequences;
 }
 
-/** Sustainable first-contact rate: reserve one slot for every step, including follow-ups. */
+/** Upper bound from mailbox limits, allowing every sequence step. Instantly shares each account's limit across campaigns. */
 export function calculateDeliveryRate(input: {
   mailboxIds: string[]; accounts: Account[]; otherCampaigns: Campaign[];
   /** Complete union of accounts selected by tags in other sending campaigns. */
@@ -42,7 +43,7 @@ export function calculateDeliveryRate(input: {
   }
   let emailCapacity = 0, usable = 0, occupied = 0, unavailable = 0, ramp = 0;
   for (const email of mailboxes) {
-    if (busy.has(email)) { occupied++; continue; }
+    if (busy.has(email)) occupied++;
     const account = byEmail.get(email);
     if (!account || account.status !== AccountStatus.Active || account.setup_pending ||
       !Number.isSafeInteger(account.daily_limit) || account.daily_limit! <= 0) { unavailable++; continue; }
@@ -68,6 +69,6 @@ export function calculateDeliveryRate(input: {
 /** Keep the summed campaign limits within the shared mailbox budget. Zero is not sent to Instantly. */
 export function distributeDeliveryRate(total: number, ids: string[]): Record<string, number> {
   const sorted = [...new Set(ids)].sort();
-  if (!Number.isSafeInteger(total) || total < sorted.length) throw new DeliveryRateError('Доступный лимит меньше числа кампаний. Увеличьте лимит или освободите отправителей.');
+  if (!Number.isSafeInteger(total) || total < sorted.length) throw new DeliveryRateError('Доступный лимит меньше числа кампаний. Проверьте дневной лимит и доступность отправителей.');
   return Object.fromEntries(sorted.map((id, index) => [id, Math.floor(total / sorted.length) + (index < total % sorted.length ? 1 : 0)]));
 }

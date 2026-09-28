@@ -266,8 +266,8 @@ export function OutreachLaunchPanel({
         ))}
         {preflight?.ready ? (
           <p className={HE.muted}>
-            Будем пополнять эти кампании в рабочие дни. Если отправители заняты или ещё не наступила дата начала,
-            гипотеза останется в очереди.
+            Подготовим кампании в Instantly без отправки. После проверки подтвердите активацию в «Очереди запусков».
+            Затем контакты будут загружаться в рабочие дни по плану.
           </p>
         ) : null}
         {error ? <StatusBox tone="error">{error}</StatusBox> : null}
@@ -284,7 +284,7 @@ export function OutreachLaunchPanel({
             checked={!!confirmationKey && confirmedKey === confirmationKey}
             onChange={(event) => setConfirmedKey(event.target.checked ? confirmationKey : null)}
           />
-          <span>Базы, письма и сегменты согласованы с заказчиком. Разрешаю создание кампаний и отправку.</span>
+          <span>Базы, письма и сегменты согласованы с заказчиком. Подтверждаю подготовку кампаний без отправки.</span>
         </label>
         <button
           type="button"
@@ -294,7 +294,7 @@ export function OutreachLaunchPanel({
           }
           onClick={() => void start()}
         >
-          {busy ? 'Сохраняем запуск…' : 'Запустить аутрич'}
+          {busy ? 'Сохраняем запрос…' : 'Подготовить кампании в Instantly'}
         </button>
       </div>
     </section>
