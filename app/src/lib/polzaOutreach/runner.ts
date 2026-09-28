@@ -64,7 +64,7 @@ import {
 import { isSuppressed } from '@/lib/polzaRuOutreach/company';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { analyzeVacancy } from './analyzeVacancy';
-import { displayName, SEQUENCE_ID, triggerPhrase } from './buildLetters';
+import { displayName, letterCompanyName, SEQUENCE_ID, triggerPhrase } from './buildLetters';
 import { loadEnCases, routeEnCase, type EnCase } from './caseRouter';
 import { findCompanyEmail, type PolzaEmailType } from './findEmail';
 import { POLZA_FUNNEL_COLUMNS, polzaFunnel, type PolzaFunnelRow } from './funnel';
@@ -1120,6 +1120,9 @@ async function runJob(
       if (site.techStack.length) triggers.push({ type: 'tech_stack', title: site.techStack.join(', '), url: website, date: null, quote: null });
 
       const isB2b = site.isB2b || c.yc?.industry === 'b2b';
+      // Название для писем: с сайта, иначе из YC (у пары «вакансия + YC» строка
+      // зовётся по вакансии — слагом ATS, а у YC имя человеческое).
+      const brandName = site.brandName ?? c.yc?.name ?? null;
       const common = {
         ...analysisPatch,
         source_list: [c.vacancy ? 'hiring' : null, c.yc ? 'yc' : null].filter(Boolean),
@@ -1128,6 +1131,8 @@ async function runJob(
         likely_gtm_problem: site.likelyGtmProblem,
         outreach_angle: site.outreachAngle,
         segments: site.segments,
+        brand_name: brandName,
+        about_line: site.aboutLine,
       };
       if (!isB2b) return excludeRow(id, ST.s4Analyzed, 'not_b2b', common);
       if (!triggers.length) return excludeRow(id, ST.s4Analyzed, 'no_trigger', common);
@@ -1148,12 +1153,12 @@ async function runJob(
       });
       const status = leadStatus(score.total, thresholds);
       const primary = primaryTrigger(triggers);
-      const routed = routeEnCase(cases, site.industryGroup);
+      const routed = routeEnCase(cases, site.industryGroup, domain);
       const patch = {
         ...common,
         primary_trigger: primary?.type ?? null,
         trigger_evidence_url: primary?.url ?? null,
-        trigger_phrase: triggerPhrase(displayName(c.companyName), primary),
+        trigger_phrase: triggerPhrase(displayName(letterCompanyName(c.companyName, brandName)), primary),
         lead_score: score.total,
         score_breakdown: score.breakdown,
         data_quality_score: score.dataQuality,
@@ -1221,7 +1226,15 @@ async function runJob(
       noteTemplate(template);
       const composed = composeCompanyLetters(
         template.letters,
-        { companyName: q.c.companyName, triggers: q.triggers, caseHit: q.caseHit, segments: q.site.segments, emailType: q.emailType },
+        {
+          companyName: q.c.companyName,
+          brandName: q.site.brandName ?? q.c.yc?.name ?? null,
+          aboutLine: q.site.aboutLine,
+          triggers: q.triggers,
+          caseHit: q.caseHit,
+          segments: q.site.segments,
+          emailType: q.emailType,
+        },
         signature,
       );
       const base = { stage: ST.s6Letters, sequence_id: SEQUENCE_ID, chain_template_id: template.id, letters: composed.letters };

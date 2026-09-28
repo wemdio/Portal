@@ -35,6 +35,8 @@ export interface TemplateValues {
   brand: string;
   /** Фраза-повод (openingSentence); нет — строка с {{повод}} удаляется. */
   opening: string | null;
+  /** Строка о компании из разбора сайта; нет — строка с {{о компании}} удаляется. */
+  about: string | null;
   /** Текст утверждённого кейса; есть и шаблон с кейсом — письмо 3 с кейсом. */
   caseText: string | null;
   /** Гипотеза сегментов текстом (hypothesisText); нет — строка удаляется. */
@@ -80,6 +82,7 @@ export function renderTemplate(template: ChainTemplateLetters, v: TemplateValues
   const values: Record<string, string | null> = {
     [P.brand]: v.brand,
     [P.opening]: v.opening,
+    [P.about]: v.about,
     [P.case]: v.caseText,
     [P.hypothesis]: v.hypothesis,
     [P.signature]: v.signature,
@@ -112,6 +115,8 @@ export interface CompanyLettersInput {
   baseChain?: ChainType;
   marketQuote: string | null;
   productSummary: string | null;
+  /** Строка о компании из разбора сайта — {{о компании}}. */
+  aboutLine?: string | null;
   targetMarket: string | null;
   caseRecord: CaseRecord | null;
   recipientEmail: string;
@@ -158,6 +163,7 @@ export async function composeCompanyLetters(
     baseChain: input.baseChain,
   };
   const opening = openingSentence(chainInput, input.brand);
+  const about = input.aboutLine?.replace(/\s+/g, ' ').trim() || null;
   const caseText = input.caseRecord?.case_text_short.trim() || null;
   const withCase = Boolean(caseText) && template.bodyWithCase !== null;
   // Гипотезу считаем, только когда она попадёт в письмо: вариант без кейса с
@@ -172,6 +178,7 @@ export async function composeCompanyLetters(
   const letters = renderTemplate(template, {
     brand: input.brand,
     opening,
+    about,
     caseText: withCase ? caseText : null,
     hypothesis: hypoText,
     signature: formatSignature(deps.sender),
@@ -192,6 +199,7 @@ export async function composeCompanyLetters(
       // Отправитель представляется в письмах 2–3 текстом шаблона.
       deps.sender.company_name,
       ...(opening ? [opening] : []),
+      ...(about ? [about] : []),
       ...input.signals.flatMap((s) => [s.title, s.quote ?? '']).filter(Boolean),
       ...(marketQuote ? [marketQuote] : []),
     ],

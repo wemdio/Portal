@@ -269,10 +269,10 @@ export function runTemplateQa(input: TemplateQaInput): QaResult {
       if (!allowed.has(found) || found === P.signature) flags.push(`${tag}:placeholder_not_allowed(${found})`);
     }
     if (/[{}]/.test(plain)) flags.push(`${tag}:placeholder_broken`);
-    for (const ph of [P.opening, P.case, P.hypothesis]) {
+    for (const ph of [P.opening, P.about, P.case, P.hypothesis]) {
       if (countOf(text, ph) > 1) flags.push(`${tag}:placeholder_repeated(${ph})`);
     }
-    for (const ph of [P.opening, P.hypothesis]) {
+    for (const ph of [P.opening, P.about, P.hypothesis]) {
       if (text.includes(ph) && !ownParagraph(text, ph)) flags.push(`${tag}:placeholder_not_alone(${ph})`);
     }
 
@@ -284,15 +284,19 @@ export function runTemplateQa(input: TemplateQaInput): QaResult {
     textChecks(tag, text, chain, writerFree, examples, flags);
   }
 
-  // Обязательные плейсхолдеры и их места: повод — в письме 1 (оба варианта)
-  // и только там (в других письмах он повторял бы письмо 1), кейс — только в
-  // письме 3 с кейсом, гипотеза — только в письме 3 без кейса.
+  // Обязательные плейсхолдеры и их места: повод и строка о компании — в
+  // письме 1 (оба варианта) и только там (в других письмах они повторяли бы
+  // письмо 1), кейс — только в письме 3 с кейсом, гипотеза — только в письме 3
+  // без кейса.
   if (!t.bodyDirect.includes(P.opening)) flags.push(`L1:placeholder_missing(${P.opening})`);
   if (!t.bodyRouting.includes(P.opening)) flags.push(`L1r:placeholder_missing(${P.opening})`);
+  if (!t.bodyDirect.includes(P.about)) flags.push(`L1:placeholder_missing(${P.about})`);
+  if (!t.bodyRouting.includes(P.about)) flags.push(`L1r:placeholder_missing(${P.about})`);
   if (chainUsesCase(chain) && !(t.bodyWithCase ?? '').includes(P.case)) flags.push(`L3c:placeholder_missing(${P.case})`);
   if (chainUsesHypothesis(chain) && !t.bodyWithoutCase.includes(P.hypothesis)) flags.push(`L3:placeholder_missing(${P.hypothesis})`);
   for (const [tag, raw] of bodies) {
     if (tag !== 'L1' && tag !== 'L1r' && raw.includes(P.opening)) flags.push(`${tag}:placeholder_misplaced(${P.opening})`);
+    if (tag !== 'L1' && tag !== 'L1r' && raw.includes(P.about)) flags.push(`${tag}:placeholder_misplaced(${P.about})`);
     if (tag !== 'L3c' && allowed.has(P.case) && raw.includes(P.case)) flags.push(`${tag}:placeholder_misplaced(${P.case})`);
     if (tag !== 'L3' && allowed.has(P.hypothesis) && raw.includes(P.hypothesis)) flags.push(`${tag}:placeholder_misplaced(${P.hypothesis})`);
   }

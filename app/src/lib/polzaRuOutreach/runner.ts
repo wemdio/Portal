@@ -1230,6 +1230,7 @@ async function runJob(
       const marketQuote = vacancy?.marketQuote ?? site.customerQuote ?? null;
       const base = {
         company_brand: brand,
+        about_line: site.aboutLine,
         signals,
         amo_status: amoRec?.status ?? 'none',
         prior_contact: reactivation,
@@ -1467,6 +1468,7 @@ async function runJob(
           baseChain: q.route.from,
           marketQuote: q.marketQuote,
           productSummary: q.site.productSummary,
+          aboutLine: q.site.aboutLine,
           targetMarket: q.vacancy?.targetMarket ?? null,
           caseRecord: q.caseHit?.record ?? null,
           recipientEmail: q.email.email,
