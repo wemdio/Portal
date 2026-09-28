@@ -144,10 +144,10 @@ blocks:
             - cd $APP_PATH
             - 'export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"'
             # Один кэш на обе медленные проверки: и eslint (.next/cache/eslint),
-            # и incremental-состояние tsc (.next/cache/tsc) лежат в .next/cache
-            # и вместе весят ~3,5 МБ. Замеры на этом проекте:
-            #   eslint      без кэша 1 мин 53 с → с кэшем 4 с
-            #   typecheck   без кэша 5 мин 45 с → с кэшем 23 с
+            # и incremental-состояние TypeScript 7 (.next/cache/tsc7) лежат в
+            # .next/cache и вместе весят несколько мегабайт. Замеры на проекте:
+            #   eslint          без кэша 1 мин 53 с → с кэшем 4 с
+            #   typecheck:fast  без кэша ~1 мин → с кэшем ~10 с (28.09.2026, 2 ядра)
             #
             # Ключ включает SHA коммита, потому что Semaphore НЕ перезаписывает
             # существующие ключи. Прежний постоянный ключ <префикс>-<ветка>
@@ -162,15 +162,20 @@ blocks:
             # новые mtime всем файлам, и стратегия по умолчанию сделала бы кэш
             # бесполезным.
             - npm run lint
-            # Проверка типов идёт кусками (tsconfig.typecheck.*.json), а не одним
-            # проходом. Причина — память: после мержей test 17–21.09 сплошной
-            # tsc --noEmit брал 4,09 ГБ при потолке 4096 МБ и падал с exit 134.
-            # Замер 21.09 по кускам: core 3,29 ГБ, api 3,31 ГБ, pages 1,42 ГБ,
-            # tests 1,90 ГБ — каждый процесс получает свою кучу, и худший кусок
-            # оставляет ~750 МБ запаса. Куски вместе покрывают весь проект;
-            # tests/lib/nextBuildTypecheckConfig.test.ts следит, чтобы ни один
-            # не выпал из команды.
-            - npm run typecheck:strict
+            # Проверка типов в ветках — TypeScript 7 (пакет typescript-7, нативный,
+            # на Go), с 28.09.2026: те же куски, что у typecheck:strict, но в
+            # несколько раз быстрее (TypeScript 5 здесь занимал от 20 с до 3 мин
+            # с кэшем и ~6 мин без него). Прод-сборка в Dockerfile по-прежнему
+            # проверяет typecheck:strict на TypeScript 5 — вторая линия, если 7
+            # в чём-то окажется мягче.
+            #
+            # Куски (tsconfig.typecheck.*.json + маршруты Next), а не один
+            # проход, — из-за памяти: у TypeScript 7 весь проект разом берёт
+            # 3,7–4,9 ГБ при 4 ГБ машины. По кускам с --checkers 1 пик 2,9 ГБ
+            # (маршруты) — ниже, чем у TypeScript 5 сейчас (3,9 ГБ). Куски вместе
+            # покрывают весь проект; tests/lib/nextBuildTypecheckConfig.test.ts
+            # следит, чтобы ни один не выпал ни из одной из двух команд.
+            - npm run typecheck:fast
             - 'cache store checks-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_GIT_SHA .next/cache'
             # npm audit переехал в ночной прогон (.semaphore/nightly-audit.yml):
             # на каждом пуше он ходил в интернет и изредка подвисал/флапал.

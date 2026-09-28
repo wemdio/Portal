@@ -982,7 +982,19 @@ export default function TasksPage() {
       const isBoardTask = view === 'board' && selectedBoardId && selectedBoardColumns.length > 0;
       const explicitDeadlineIso = newDeadline ? new Date(newDeadline).toISOString() : null;
       const fallbackDeadlineIso = getDeadlineDefaultIso();
-      const payload: Record<string, string | null> = {
+      // Точные поля, а не Record<string, …>: по записи «любые ключи» TypeScript 7
+      // (проверка типов в CI веток) не может вывести тип строки для insert.
+      const payload: {
+        title: string;
+        specialist: string;
+        project_id: string | null;
+        status: string;
+        description: string | null;
+        image_url: string | null;
+        deadline: string | null;
+        board_id?: string;
+        column_id?: string;
+      } = {
         title: newTitle.trim(),
         specialist: specialistValue,
         project_id: isBoardTask ? null : (newProjectId || null),
