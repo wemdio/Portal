@@ -21,7 +21,7 @@ import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient, type ActiveClient } from './gramClient';
 import type { LoopControl } from './watchdog';
 import { orderByStaleness } from './accountRotation';
-import { openaiGenerate, detectTrigger } from './openaiChat';
+import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, ensureHandoffPhrase } from './openaiChat';
 import { loadBlockedUserIds } from './blockedUsers';
 import {
   handleProxyError,
@@ -1049,11 +1049,28 @@ export async function handleChat(
     return { replied: false, triggerType: null };
   }
 
+  // Явный интерес ловим отдельной проверкой: фразу передачи модель ответа
+  // то забывает, то перефразирует, и «Да, пришлите условия» оставался без
+  // менеджера. Проверка упала — решает ответ модели, как раньше.
+  const phrase = handoffPhrase(oai);
+  let interested: boolean | null = null;
+  if (phrase) {
+    const check = await detectInterest(chatMessages);
+    interested = check.interested;
+    if (interested) {
+      log('info', `${displayName}: в ответе явный интерес — отвечу и передам контакт менеджеру`);
+    } else if (interested === null) {
+      log('warning', `${displayName}: проверка интереса не удалась (${check.error}) — передача только по фразе в ответе модели`);
+    }
+  }
+
   let replyText: string | null = null;
   let usedFallback = false;
   const openaiStart = Date.now();
   try {
-    replyText = await openaiGenerate(oai, chatMessages);
+    replyText = await openaiGenerate(oai, chatMessages, {
+      extraInstruction: interested && phrase ? handoffInstruction(phrase) : null,
+    });
     const openaiSec = ((Date.now() - openaiStart) / 1000).toFixed(1);
     if (replyText) {
       log('info', `${displayName}: GPT сгенерировал ответ за ${openaiSec}с (${replyText.length} символов)`);
@@ -1085,6 +1102,9 @@ export async function handleChat(
   if (isRepeatOfOurs(replyText, chatMessages)) {
     log('warning', `${displayName}: ответ дословно повторяет то, что мы уже писали ("${replyText}") — НЕ отправляю`);
     return { replied: false, triggerType: null };
+  }
+  if (interested && phrase) {
+    replyText = ensureHandoffPhrase(replyText, phrase);
   }
 
   const readReplyDelay = randomRange(tg.read_reply_delay_range) * 1000;
