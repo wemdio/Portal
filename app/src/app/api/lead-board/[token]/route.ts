@@ -36,7 +36,7 @@ export async function GET(
   const db = supabaseInstantly!;
 
   const { data: rows, error: rowsErr } = await db
-    .from('project_lead_board_rows')
+    .from('project_client_lead_board_rows')
     .select(
       'id, lead_email, lead_name, company_name, phone, website, request_text, campaign_name, step_number, reply_timestamp, quality, comment, taken, custom',
     )
@@ -131,7 +131,7 @@ export async function PATCH(
 
   // Строка нужна и для 404, и для merge кастомных полей.
   const { data: row, error: rowErr } = await db
-    .from('project_lead_board_rows')
+    .from('project_client_lead_board_rows')
     .select('id, custom')
     .eq('id', rowId)
     .eq('project_id', projectId) // чужой ряд этим токеном не правится
@@ -210,7 +210,7 @@ export async function PATCH(
   patch.updated_at = new Date().toISOString();
 
   const { data, error } = await db
-    .from('project_lead_board_rows')
+    .from('project_client_lead_board_rows')
     .update(patch)
     .eq('id', rowId)
     .eq('project_id', projectId)
@@ -233,7 +233,7 @@ export async function POST(
   const db = supabaseInstantly!;
 
   const { data, error } = await db
-    .from('project_lead_board_rows')
+    .from('project_client_lead_board_rows')
     .insert({ project_id: projectId })
     .select('id')
     .maybeSingle();
@@ -265,7 +265,7 @@ export async function DELETE(
   if (!rowId) return jsonError('rowId is required', 400);
 
   const { data, error } = await db
-    .from('project_lead_board_rows')
+    .from('project_client_lead_board_rows')
     .delete()
     .eq('id', rowId)
     .eq('project_id', projectId) // чужой ряд этим токеном не удаляется

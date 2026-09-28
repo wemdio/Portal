@@ -3206,6 +3206,102 @@ async def run_dataset_sync_report() -> None:
     await send_telegram("\n".join(lines), force=icon != "🟢")
 
 
+# ── Ежедневный контроль ответов клиентского кабинета (21:00 МСК) ──────────────
+# У /emails/test нет записи в Unibox: успешный HTTP сам по себе не доказывает,
+# кому адресовано письмо. Сравниваем два НЕЗАВИСИМЫХ поля аудита: фактический To
+# запроса к Instantly и From входящего письма. Старые аудиты без этих полей
+# показываем отдельно как непроверяемые, а не объявляем успешными.
+async def run_client_reply_report() -> None:
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    try:
+        conn = await asyncpg.connect(DATABASE_URL, **_CONNECT_KWARGS)
+        try:
+            counts = await conn.fetchrow("""
+                SELECT
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.sent')::int AS sent,
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.sent'
+                    AND context->>'via' = 'test')::int AS fallback,
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.failed')::int AS failed,
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.recipient_blocked')::int AS blocked,
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.sent'
+                    AND context->>'via' = 'test'
+                    AND (nullif(context->>'to_email', '') IS NULL
+                      OR nullif(context->>'sender_email', '') IS NULL))::int AS unverified,
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.sent'
+                    AND context->>'via' = 'test'
+                    AND nullif(context->>'to_email', '') IS NOT NULL
+                    AND nullif(context->>'sender_email', '') IS NOT NULL
+                    AND lower(context->>'to_email') <> lower(context->>'sender_email'))::int AS wrong_recipient,
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.sent'
+                    AND context->>'via' = 'test'
+                    AND nullif(context->>'provider_lead_email', '') IS NOT NULL
+                    AND nullif(context->>'sender_email', '') IS NOT NULL
+                    AND lower(context->>'provider_lead_email') <> lower(context->>'sender_email')
+                    AND lower(context->>'to_email') = lower(context->>'sender_email'))::int AS protected
+                FROM public.application_logs
+                WHERE created_at >= $1
+                  AND event LIKE 'client.campaign.replies.reply.%'
+            """, since)
+            incidents = await conn.fetch("""
+                SELECT created_at, event, message, context->>'emailId' AS email_id,
+                       context->>'sender_email' AS sender_email,
+                       context->>'to_email' AS to_email
+                FROM public.application_logs
+                WHERE created_at >= $1
+                  AND (
+                    event IN ('client.campaign.replies.reply.failed',
+                              'client.campaign.replies.reply.recipient_blocked')
+                    OR (event = 'client.campaign.replies.reply.sent'
+                      AND context->>'via' = 'test'
+                      AND (nullif(context->>'to_email', '') IS NULL
+                        OR nullif(context->>'sender_email', '') IS NULL
+                        OR lower(context->>'to_email') <> lower(context->>'sender_email')))
+                  )
+                ORDER BY created_at DESC LIMIT 5
+            """, since)
+        finally:
+            await conn.close()
+    except Exception as error:
+        await send_telegram(
+            f"🔴 <b>Ответы клиентам: отчёт недоступен</b> — {_now_msk()}\n"
+            f"Не удалось проверить журнал отправок: {html.escape(_normalize_network_error(error))}",
+            force=True,
+        )
+        return
+
+    blocked = counts["blocked"]
+    wrong = counts["wrong_recipient"]
+    unverified = counts["unverified"]
+    failed = counts["failed"]
+    icon = "🔴" if blocked or wrong else "🟠" if failed or unverified else "🟢"
+    lines = [
+        f"{icon} <b>Ответы клиентам за 24 часа</b> — {_now_msk()}",
+        f"По журналу принято Instantly: {counts['sent']} · отдельным письмом: {counts['fallback']}",
+        f"Отказов при отправке: {failed} · блокировок адресата: {blocked}",
+        f"Адресат не совпал с автором: {wrong} · адресат не записан в старом аудите: {unverified}",
+        f"Ответы с другим адресом автора, адресат проверен: {counts['protected']}",
+    ]
+    if incidents:
+        lines.append("Последние случаи для проверки:")
+        for row in incidents:
+            event = row["event"].rsplit(".", 1)[-1]
+            email_id = html.escape((row["email_id"] or "без id")[:36])
+            time_msk = row["created_at"].astimezone(timezone(timedelta(hours=3))).strftime("%H:%M")
+            detail = ""
+            if event == "sent":
+                if row["sender_email"] and row["to_email"]:
+                    detail = (
+                        f" · {html.escape(row['sender_email'][:120])} → "
+                        f"{html.escape(row['to_email'][:120])}"
+                    )
+                else:
+                    detail = " · адресат/автор не записан в старом аудите"
+            elif row["message"]:
+                detail = f" · {html.escape(row['message'][:100])}"
+            lines.append(f"• {time_msk} {html.escape(event)} · <code>{email_id}</code>{detail}")
+    await send_telegram("\n".join(lines), force=icon != "🟢")
+
+
 async def main():
     _require("DATABASE_URL or SUPABASE_DB_URL", DATABASE_URL)
     _require("TELEGRAM_HEALTH_CHAT_ID", TELEGRAM_CHAT_ID)
@@ -3284,6 +3380,16 @@ async def main():
         run_dataset_sync_report, "cron",
         hour=5, minute=30, timezone="UTC",
         id="dataset_sync_report",
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+
+    # Ответы клиентам: 21:00 МСК == 18:00 UTC. Отдельный отчёт health-бота;
+    # ошибки и недоказанный адресат видны даже когда API вернул 200.
+    scheduler.add_job(
+        run_client_reply_report, "cron",
+        hour=18, minute=0, timezone="UTC",
+        id="client_reply_report",
         max_instances=1,
         misfire_grace_time=3600,
     )

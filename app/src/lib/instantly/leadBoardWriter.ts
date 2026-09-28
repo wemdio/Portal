@@ -1,4 +1,5 @@
 import type { supabaseInstantly } from '@/lib/supabaseInstantly';
+import type { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { createBoardToken, boardTokenSecret, boardUrl } from '@/lib/leadBoard/boardToken';
 import { resolveCampaignProjectOwner } from './campaignProjectOwnerResolver';
 import { joinLeadPhones } from './leadContactValues';
@@ -16,6 +17,21 @@ export type { CampaignProjectOwnerResolution } from './campaignProjectOwnerResol
  */
 
 type InstantlyDb = NonNullable<typeof supabaseInstantly>;
+
+/** Read before the initial row write, even if the handoff card is still queued.
+ * A failed config read must not publish an unreviewed candidate to the client. */
+export async function requiresSpecialistReview(
+  main: typeof supabaseAdmin, projectId: string, handoffEnabled: boolean,
+): Promise<boolean> {
+  if (!handoffEnabled) return false;
+  if (!main) throw new Error('lead board review: main database unavailable');
+  const { data, error } = await main.from('projects')
+    .select('handoff_email, handoff_legend, handoff_auto_send, specialist_user_id')
+    .eq('id', projectId).maybeSingle();
+  if (error || !data) throw new Error('lead board review: project config unavailable');
+  return Boolean(data.specialist_user_id && data.handoff_email?.trim() &&
+    data.handoff_legend?.trim() && data.handoff_auto_send !== true);
+}
 
 export interface BoardColumnConfigEntry {
   key: string;
@@ -161,6 +177,7 @@ export interface BoardRowInput {
   requestText: string | null;
   stepNumber: number | null;
   replyTimestamp: string | null;
+  requiresSpecialistReview?: boolean;
 }
 
 /**
@@ -184,6 +201,9 @@ export async function upsertBoardRow(db: InstantlyDb, input: BoardRowInput): Pro
       request_text: input.requestText,
       step_number: input.stepNumber,
       reply_timestamp: input.replyTimestamp,
+      // Omit for automatic/unconfigured projects during rolling upgrades.
+      // Manual candidates fail closed if the publication migration is absent.
+      ...(input.requiresSpecialistReview ? { specialist_review_required: true } : {}),
     };
   const { error } = await db.from('project_lead_board_rows').upsert(
     { ...payload, auto_reply_ids: [sourceId] },

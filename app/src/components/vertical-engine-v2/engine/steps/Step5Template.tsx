@@ -819,8 +819,19 @@ function formatEmailCount(count: number | null): string {
   return formatRussianCount(count, ['почта', 'почты', 'почт']);
 }
 
-export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
-  const preview = launch.deliveryPreview;
+export function DeliveryPlanBlock({ launch, disabled = false, preparedPreview }: {
+  launch: TemplateLaunchState;
+  disabled?: boolean;
+  /** Outreach preflight supplies the preview for the current request; null means it is not ready yet. */
+  preparedPreview?: VeDeliveryPlanPreviewDto | null;
+}) {
+  const externalPreview = preparedPreview !== undefined;
+  const preparedPreviewMatches = !!preparedPreview && isValidDeliveryPreview(preparedPreview) &&
+    preparedPreview.portal_project_id === launch.portalProjectId &&
+    (preparedPreview.portal_period_id ?? null) === launch.expectedPortalPeriodId &&
+    preparedPreview.target_contacts === launch.targetContacts;
+  const preview = externalPreview ? (preparedPreviewMatches ? preparedPreview : null) : launch.deliveryPreview;
+  const previewReady = externalPreview ? preparedPreviewMatches : launch.deliveryPlanReady;
   const period = launch.activePortalPeriod;
   const targetInvalid = launch.targetContactsInput.trim() !== '' && launch.targetContacts === null;
   const periodLabel = preview?.portal_period_label?.trim() || period?.label?.trim() || 'Активный период';
@@ -831,7 +842,7 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
   const termDeadline = preview?.deadline ?? term?.deadline ?? null;
   const targetHint = launch.deliveryPlanLocked
     ? 'Цель закреплена в созданном плане выполнения и недоступна для изменения здесь.'
-    : launch.submitting ? 'Сохраняем план выполнения…'
+    : launch.submitting || disabled ? 'Сохраняем план выполнения…'
       : !launch.selectedPortalProject ? 'Сначала выберите «Проект клиента». После этого можно указать цель контактов.'
         : null;
 
@@ -868,7 +879,7 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
                 id="ve2-portal-project"
                 value={launch.portalProjectId}
                 onChange={(event) => launch.selectPortalProject(event.target.value)}
-                disabled={launch.deliveryPlanLocked || launch.submitting}
+                disabled={disabled || launch.deliveryPlanLocked || launch.submitting}
                 className="ve2-input h-10 w-full px-3 text-xs disabled:cursor-not-allowed disabled:opacity-60"
               >
                 <option value="">Выберите проект</option>
@@ -891,7 +902,7 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
                 step={1}
                 value={launch.targetContactsInput}
                 onChange={(event) => launch.changeTargetContacts(event.target.value)}
-                disabled={!launch.selectedPortalProject || launch.deliveryPlanLocked || launch.submitting}
+                disabled={disabled || !launch.selectedPortalProject || launch.deliveryPlanLocked || launch.submitting}
                 placeholder={launch.selectedPortalProject ? 'Точное число' : 'Сначала выберите проект'}
                 aria-invalid={targetInvalid}
                 aria-describedby={[targetHint ? 've2-delivery-target-hint' : '', targetInvalid ? 've2-delivery-target-error' : ''].filter(Boolean).join(' ') || undefined}
@@ -950,18 +961,18 @@ export function DeliveryPlanBlock({ launch }: { launch: TemplateLaunchState }) {
         </>
       )}
 
-      {launch.deliveryPreviewState === 'loading' ? (
+      {!externalPreview && launch.deliveryPreviewState === 'loading' ? (
         <p className="mt-2 text-xs text-gray-500" role="status">
           Считаем темп по рабочим дням…
         </p>
       ) : null}
-      {launch.portalProjects !== null && launch.deliveryPreviewState === 'error' && launch.deliveryPreviewError ? (
+      {!externalPreview && launch.portalProjects !== null && launch.deliveryPreviewState === 'error' && launch.deliveryPreviewError ? (
         <p className="mt-2 text-xs text-red-600" role="alert">
           {launch.deliveryPreviewError}
         </p>
       ) : null}
 
-      {preview && launch.deliveryPlanReady ? (
+      {preview && previewReady ? (
         <div className="mt-3" aria-live="polite">
           <dl className="grid grid-cols-2 border-y border-gray-200 text-xs sm:grid-cols-5">
             {[

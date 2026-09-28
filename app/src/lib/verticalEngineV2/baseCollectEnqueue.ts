@@ -28,7 +28,7 @@ import { collectionRoundLimit, createCollectionTarget, type VeCollectionMode } f
 import { canResumePartialPreview, grantVeResumeRoundBudget, openNextVeCollectionRound, previewRecoveryKind } from './collectionRecovery';
 import { normalizeVeMaxEmailsPerCompany } from './companyContactCap';
 import { resumeVeSavedEmailRecovery } from './savedEmailRecovery';
-import { isVeTransientDirectoryError } from './collectionErrors';
+import { isVeResumableDirectoryError } from './collectionErrors';
 import { compactVeRelevanceReserve } from './relevanceReserve';
 
 export interface VeBaseCollectInput {
@@ -170,7 +170,7 @@ async function resumeFailedPreview(
   if (Array.isArray(info.tasks)) {
     info.tasks = info.tasks.map((task: Record<string, unknown>) => {
       if (task.source === 'companies_directory' && task.status === 'failed'
-        && isVeTransientDirectoryError(task.error)) {
+        && isVeResumableDirectoryError(task.error)) {
         // Drain any saved prefix before reading another page. Renewable done
         // tasks reopen only after their harvest has been consumed.
         const recovered: Record<string, unknown> = { ...task,
