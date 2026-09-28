@@ -10,7 +10,7 @@ import { useUser } from '@/lib/UserProvider';
 import { logAudit, logError } from '@/lib/loggerClient';
 import { useIsTma } from '@/lib/useIsTma';
 import { normalizePublicAvatarUrl } from '@/lib/publicAvatarUrl';
-import { Check, CheckCircle2, ChevronDown, ChevronUp, FileUp, Loader2, MoreVertical, Plus, Power, Unlock } from 'lucide-react';
+import { Check, CheckCircle2, ChevronDown, ChevronUp, Eye, EyeOff, FileUp, Loader2, MoreVertical, Plus, Power, Unlock } from 'lucide-react';
 import { parseInnColumn } from '@/lib/companiesSearch/innCsv';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, ALL_NAV_TAB_IDS, NAV_TABS_CONFIG } from '@/lib/toolsRegistry';
 import { CampaignStatusLabels } from '@/lib/instantly/types';
@@ -936,6 +936,7 @@ export default function UsersPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [creating, setCreating] = useState(false);
   const [newUser, setNewUser] = useState({ email: '', password: '', role: 'technician' as UserRole, full_name: '' });
+  const [revealNewUserPassword, setRevealNewUserPassword] = useState(false);
   
   const [saving, setSaving] = useState(false);
   
@@ -1794,6 +1795,7 @@ export default function UsersPage() {
         <button
           onClick={() => {
             setSearchQuery(''); // Clear search when opening modal
+            setRevealNewUserPassword(false);
             setShowCreateModal(true);
           }}
           className={`inline-flex h-8 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 px-5 text-sm font-semibold text-white shadow-sm shadow-blue-600/25 transition-all hover:-translate-y-0.5 hover:from-blue-500 hover:to-indigo-500 hover:shadow-md hover:shadow-blue-600/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2 active:translate-y-0 ${isTma ? 'w-full sm:w-auto' : ''}`}
@@ -1912,14 +1914,26 @@ export default function UsersPage() {
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   Пароль <span className="text-red-500">*</span>
                 </label>
-                <input
-                  type="password"
-                  value={newUser.password}
-                  onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="Минимум 8 символов"
-                  required
-                />
+                <div className="relative">
+                  <input
+                    type={revealNewUserPassword ? 'text' : 'password'}
+                    value={newUser.password}
+                    onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
+                    className="w-full py-2 pl-3 pr-10 border border-gray-300 rounded-lg focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="Минимум 8 символов"
+                    autoComplete="new-password"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setRevealNewUserPassword((v) => !v)}
+                    className="absolute inset-y-0 right-0 flex w-10 items-center justify-center rounded-r-lg text-gray-400 hover:text-gray-700"
+                    aria-label={revealNewUserPassword ? 'Скрыть пароль' : 'Показать пароль'}
+                    title={revealNewUserPassword ? 'Скрыть пароль' : 'Показать пароль'}
+                  >
+                    {revealNewUserPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">

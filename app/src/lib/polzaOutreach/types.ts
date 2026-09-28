@@ -30,7 +30,7 @@ export type PolzaOutreachGeoConfidence = 'high' | 'medium' | 'low';
 /** Гео-выборка MVP (спека §4/шаг 2 плана). `remote` и NULL не берём — гео недоказуемо. */
 export const POLZA_OUTREACH_GEO_CODES = [
   'us', 'gb', 'ca', 'de', 'nl', 'sg', 'au', 'fr', 'se', 'ie', 'es', 'ch',
-  'be', 'dk', 'no', 'fi', 'at', 'it', 'pl', 'pt', 'cz',
+  'be', 'dk', 'no', 'fi', 'at', 'it', 'pl', 'pt', 'cz', 'il', 'ae',
 ] as const;
 
 /** Страны MVP-фильтра CEO: +5 баллов в Lead Score. */
