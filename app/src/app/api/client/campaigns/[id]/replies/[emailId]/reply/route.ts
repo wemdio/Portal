@@ -108,9 +108,15 @@ export async function POST(
       eaccount = findEaccountForReply({ originalEmail: original, threadEmails: thread.items ?? [] });
     }
     if (!eaccount) {
+      await logError('client.campaign.replies.reply.failed', new Error('Sending mailbox could not be resolved'), {
+        campaignId, emailId, userId,
+      });
       return jsonError('Не удалось определить аккаунт отправки. Попробуйте позже.', 400);
     }
     if (!replyRecipientEmail || !isValidEmail(replyRecipientEmail) || replyRecipientEmail === eaccount.trim().toLowerCase()) {
+      await logError('client.campaign.replies.reply.recipient_blocked', new Error('Inbound sender address is unavailable or invalid'), {
+        campaignId, emailId, userId, reason: 'unresolved_sender',
+      });
       return jsonError('Не удалось определить адрес отправителя письма. Ответ не отправлен.', 400);
     }
 
@@ -158,17 +164,30 @@ export async function POST(
     // ящика» бессмысленно — отправляющие ящики наши, доступа к ним у него нет.
     // Плата: письмо не заводит сущность в Unibox провайдера, поэтому в треде не
     // появится (кабинет предупреждает об этом заранее) — но до адресата доходит.
-    const sendAsNewLetter = async (): Promise<void> => {
+    let fallbackRecipientEmail: string | null = null;
+    const sendAsNewLetter = async (recipient: string): Promise<void> => {
+      // Independent last gate for the explicit /emails/test destination. If a
+      // future caller passes Instantly's `lead` again, block it before the POST.
+      const actual = recipient.trim().toLowerCase();
+      const expected = senderEmail?.trim().toLowerCase() ?? null;
+      if (!expected || !isValidEmail(actual) || actual !== expected) {
+        await logError('client.campaign.replies.reply.recipient_blocked', new Error('Fallback destination differs from inbound sender'), {
+          campaignId, emailId, userId, reason: 'recipient_mismatch',
+          expected_email: expected, attempted_email: actual,
+        });
+        throw new Error('Адрес получателя не совпадает с автором письма. Ответ не отправлен.');
+      }
       await sendTestEmail(
         {
           eaccount,
           // Дедуп на случай, если лид уже оказался в cc.
-          to_address_email_list: mergeCcLists([replyRecipientEmail], mergedCc).join(', '),
+          to_address_email_list: mergeCcLists([actual], mergedCc).join(', '),
           subject: replySubject,
           body: { html: replyHtml },
         },
         instantlyRequestOptions,
       );
+      fallbackRecipientEmail = actual;
     };
 
     let via: 'reply' | 'test' = 'reply';
@@ -176,7 +195,7 @@ export async function POST(
       // По сироте reply отвергается гарантированно — не тратим на него запрос:
       // минутная квота воркспейса общая с воркерами, и заведомо провальный вызов
       // может стоить 429 на следующем.
-      await sendAsNewLetter();
+      await sendAsNewLetter(replyRecipientEmail);
       via = 'test';
     } else {
       try {
@@ -200,7 +219,7 @@ export async function POST(
         // Страховка: письмо числится в кампании, а провайдер считает иначе. С bcc
         // ошибку не глушим — на обходном пути копия была бы молча потеряна.
         if (!isNotPartOfCampaignError(err) || validation.bcc) throw err;
-        await sendAsNewLetter();
+        await sendAsNewLetter(replyRecipientEmail);
         via = 'test';
       }
     }
@@ -216,10 +235,15 @@ export async function POST(
       await logError('client.campaign.replies.reply.record_failed', err, { campaignId, emailId, userId });
     }
 
-    void logAudit('client.campaign.replies.reply.sent', 'Client replied via Instantly', {
+    await logAudit('client.campaign.replies.reply.sent', 'Client replied via Instantly', {
       campaignId,
       emailId,
       via,
+      // Only /emails/test has an explicit To. Keep the actual POST destination
+      // separate from the expected sender so health-check can compare them.
+      to_email: fallbackRecipientEmail,
+      sender_email: original.from_address_email?.trim().toLowerCase() ?? null,
+      provider_lead_email: original.lead?.trim().toLowerCase() ?? null,
       cc_count: mergedCc.length,
       bcc_count: validation.bcc ? validation.bcc.split(',').length : 0,
       userId,
