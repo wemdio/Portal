@@ -25,6 +25,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
+const startedAt = Date.now();
 const APP_DIR = process.cwd();
 const JEST_BIN = path.join(APP_DIR, 'node_modules', 'jest', 'bin', 'jest.js');
 const dryRun = process.argv.includes('--dry-run');
@@ -50,6 +51,17 @@ function git(args) {
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
+/**
+ * Дотянуть историю из origin. Только коммиты, без деревьев и файлов
+ * (--filter=tree:0): для общей точки с test нужен граф коммитов, а не
+ * содержимое. С файлами этот шаг в CI занимал ~20 с, без них — ~2 с.
+ * Сервер или git без фильтров — обычная закачка.
+ */
+function fetchHistory(args) {
+  if (git(['fetch', '--quiet', '--no-tags', '--filter=tree:0', ...args]) !== null) return;
+  git(['fetch', '--quiet', '--no-tags', ...args]);
+}
+
 function jest(args, { capture = false } = {}) {
   return spawnSync(
     process.execPath,
@@ -69,7 +81,7 @@ function listTests(args) {
 }
 
 function finish(args, summary) {
-  console.log(`[tests] ${summary}`);
+  console.log(`[tests] ${summary} (выбор занял ${((Date.now() - startedAt) / 1000).toFixed(1)} с)`);
   if (dryRun) process.exit(0);
   const result = jest(['--watchAll=false', ...jestArgs, ...args]);
   process.exit(result.status ?? 1);
@@ -88,11 +100,11 @@ if (!base) {
   // В CI клон неглубокий и только своей ветки: test дотягиваем отдельно.
   // Локально ничего не качаем — берём тот origin/test, что уже есть.
   if (process.env.SEMAPHORE === 'true') {
-    git(['fetch', '--quiet', '--no-tags', ...(shallow ? ['--depth=300'] : []), 'origin', '+refs/heads/test:refs/remotes/origin/test']);
+    fetchHistory([...(shallow ? ['--depth=300'] : []), 'origin', '+refs/heads/test:refs/remotes/origin/test']);
   }
   base = git(['merge-base', 'origin/test', 'HEAD']);
   if (!base && shallow) {
-    git(['fetch', '--quiet', '--no-tags', '--deepen=300', 'origin']);
+    fetchHistory(['--deepen=300', 'origin']);
     base = git(['merge-base', 'origin/test', 'HEAD']);
   }
 }
