@@ -10,6 +10,8 @@ import {
   type StartJobRow,
 } from '@/lib/tgOutreach/watchdog';
 import { startTrace } from '@/lib/tracer';
+import { verifyBaseUsernames } from '@/lib/tgOutreach/firstTouch/verifyUsernames';
+import { shouldReportTmeDown } from '@/lib/tgOutreach/usernameExists';
 
 const WORKER_ID = `tg-outreach-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
@@ -666,6 +668,8 @@ export async function resumeWarmupRuns() {
 }
 
 const RESUME_CHECK_INTERVAL_MS = 5 * 60_000;
+/** Раз в минуту по 40 ников: свежая база в 250 ников проверена за 6–7 минут. */
+const USERNAME_CHECK_INTERVAL_MS = 60_000;
 
 async function main() {
   log('info', 'TG Outreach worker starting...');
@@ -793,6 +797,34 @@ async function main() {
       log('error', `Periodic warmup resume check failed: ${err instanceof Error ? err.message : String(err)}`),
     );
   }, RESUME_CHECK_INTERVAL_MS);
+
+  /**
+   * Ники в базах — по t.me, заранее, а не когда на них споткнётся аккаунт.
+   *
+   * Мёртвый ник, дошедший до аккаунта, выглядит для портала как заморозка
+   * аккаунта: 24–28.09.2026 четыре таких ника в хвосте базы ATOL-1 отправили
+   * на паузу все 50 аккаунтов кампании. Отдельно от кругов кампаний: проверка
+   * не трогает Telegram-сессии и не должна ждать, пока круг дойдёт до базы.
+   */
+  let usernameCheckBusy = false;
+  const usernameCheckTimer = setInterval(() => {
+    if (shouldStop() || usernameCheckBusy) return;
+    usernameCheckBusy = true;
+    verifyBaseUsernames({
+      db,
+      log: (level, msg) => log(level === 'warning' ? 'warn' : level, msg),
+    })
+      .then((res) => {
+        if (!res.working && shouldReportTmeDown('base-verifier')) {
+          log('warn', 'Проверка ников по t.me на паузе: сервер не достучался до t.me или страница поменяла вид. Базы не трогаю.');
+        }
+      })
+      .catch((err) => log('error', `Проверка ников по t.me упала: ${err instanceof Error ? err.message : String(err)}`))
+      .finally(() => {
+        usernameCheckBusy = false;
+      });
+  }, USERNAME_CHECK_INTERVAL_MS);
+  if (typeof usernameCheckTimer.unref === 'function') usernameCheckTimer.unref();
 
   await pollLoop({
     log,

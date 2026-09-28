@@ -26,6 +26,7 @@ function isRetryable(status: number): boolean {
 export async function openaiGenerate(
   settings: OpenAISettings,
   chatHistory: DialogMessage[],
+  opts?: { extraInstruction?: string | null },
 ): Promise<string | null> {
   const apiKey = process.env.OPENROUTER_TG_OUTREACH_API_KEY;
   if (!apiKey) {
@@ -44,6 +45,12 @@ export async function openaiGenerate(
 
   for (const msg of chatHistory) {
     messages.push({ role: msg.role, content: msg.content });
+  }
+
+  // Указание на этот конкретный ответ — после истории, чтобы модель не
+  // растворила его в длинном промпте кампании.
+  if (opts?.extraInstruction) {
+    messages.push({ role: 'system', content: opts.extraInstruction });
   }
 
   // Всегда используем Requesty policy — fallback chain рулит моделями.
@@ -107,6 +114,126 @@ export async function openaiGenerate(
   }
 
   throw lastError ?? new Error('OpenRouter: all retry attempts exhausted');
+}
+
+/**
+ * Явный интерес собеседника — отдельной проверкой, до генерации ответа.
+ *
+ * Зачем: лид уходит менеджеру только по фразе передачи в НАШЕМ ответе, а
+ * модель ответа её то забывает, то перефразирует («Могу передать ваш
+ * контакт…»). На 28.09.2026 в базе было ~80 диалогов с «Да, пришлите
+ * условия», «Давайте», «Можем завтра созвониться» — и ни одной передачи.
+ * Узкий вопрос «есть интерес или нет» дешёвая модель решает надёжнее, чем
+ * длинный промпт кампании между делом.
+ *
+ * interested: true — интерес есть, false — нет, null — проверка не удалась
+ * (тогда всё решает ответ модели, как раньше; причина — в error).
+ */
+const INTEREST_MODEL = 'openai/gpt-4o-mini';
+const INTEREST_TIMEOUT_MS = 30_000;
+const INTEREST_HISTORY_MESSAGES = 10;
+
+const INTEREST_PROMPT = `Ты проверяешь переписку в Telegram. «Мы» написали человеку холодное предложение (партнёрство, услуга, сервис). Реши, проявил ли «Собеседник» в своих ПОСЛЕДНИХ сообщениях явный интерес к нашему предложению.
+
+Явный интерес (ответ ДА):
+- просит прислать условия, подробности, презентацию, КП, прайс, ссылку ("да, пришлите", "присылайте", "скиньте", "расскажите подробнее");
+- соглашается на наше предложение прислать условия, обсудить, подключиться, поговорить с менеджером ("давайте", "да, давай", "интересно") — если наш предыдущий вопрос был именно таким предложением;
+- спрашивает, как начать, зарегистрироваться, подключиться, сколько стоит или сколько платят — в контексте участия;
+- предлагает созвониться, встретиться, оставляет телефон или удобное время;
+- прямо говорит, что готов попробовать или участвовать.
+
+НЕТ интереса (ответ НЕТ):
+- отказ, "не интересно", "не актуально", "не пишите", "подумаю", "буду иметь в виду", "посмотрю", "если что обращусь";
+- короткое "да"/"нет"/"бывает" в ответ на наш уточняющий вопрос о работе собеседника (например "бывают ли у вас такие клиенты?") — это ответ на вопрос, а не согласие;
+- вопросы "кто вы", "откуда мой контакт", "что это", недоумение;
+- встречное предложение своих услуг, реклама, автоответчик, спам, ошибся номером, болтовня не по теме;
+- интерес вместе с просьбой больше не писать — это НЕТ.
+
+Ответь одним словом: ДА или НЕТ.`;
+
+export async function detectInterest(
+  chatHistory: DialogMessage[],
+): Promise<{ interested: boolean | null; error?: string }> {
+  const apiKey = process.env.OPENROUTER_TG_OUTREACH_API_KEY;
+  if (!apiKey) return { interested: null, error: 'OPENROUTER_TG_OUTREACH_API_KEY не задан' };
+
+  const transcript = chatHistory
+    .slice(-INTEREST_HISTORY_MESSAGES)
+    .map(m => `${m.role === 'assistant' ? 'Мы' : 'Собеседник'}: ${m.content}`)
+    .join('\n\n');
+
+  // Вторая попытка — на случайный сбой провайдера: пропущенная проверка
+  // означает пропущенного лида. Причину последнего сбоя отдаём наверх, в
+  // лог кампании: молча отвалившаяся проверка выглядела бы как «интереса нет».
+  let error = 'модель не ответила ни ДА, ни НЕТ';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await new Promise(r => setTimeout(r, 2_000));
+    try {
+      const res = await fetch('https://router.requesty.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: INTEREST_MODEL,
+          messages: [
+            { role: 'system', content: INTEREST_PROMPT },
+            { role: 'user', content: transcript },
+          ],
+          // Меньше 16 провайдер не принимает: отвечает ошибкой, а не словом.
+          max_tokens: 16,
+          temperature: 0,
+        }),
+        signal: AbortSignal.timeout(INTEREST_TIMEOUT_MS),
+      });
+      if (!res.ok) {
+        error = `ошибка ${res.status}: ${(await res.text()).slice(0, 200)}`;
+        continue;
+      }
+      const data = (await res.json()) as OpenRouterResponse;
+      const answer = data.choices?.[0]?.message?.content?.trim().toLowerCase() ?? '';
+      if (answer.startsWith('да') || answer.startsWith('yes')) return { interested: true };
+      if (answer.startsWith('нет') || answer.startsWith('no')) return { interested: false };
+      error = `непонятный ответ модели: «${answer.slice(0, 50)}»`;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+  return { interested: null, error };
+}
+
+/** Фраза передачи менеджеру — первая строка положительных триггеров кампании. */
+export function handoffPhrase(settings: OpenAISettings): string | null {
+  const first = (settings.trigger_phrases_positive ?? '')
+    .split('\n')
+    .map(p => p.trim())
+    .find(Boolean);
+  return first ?? null;
+}
+
+/**
+ * Указание модели ответа, когда проверка увидела явный интерес: ответить на
+ * просьбу и закончить фразой передачи.
+ */
+export function handoffInstruction(phrase: string): string {
+  return `Собеседник проявил явный интерес. Коротко ответь на его просьбу или вопрос (если просил условия — кратко изложи их) и закончи сообщение точной фразой «${phrase}». Фразу не меняй и не перефразируй, после неё ничего не пиши и вопросов не задавай.`;
+}
+
+/**
+ * Модель могла не послушаться — фразу дописываем сами: без неё лид не уйдёт
+ * менеджеру, а человек не узнает, что с ним свяжутся.
+ */
+export function ensureHandoffPhrase(reply: string, phrase: string): string {
+  if (reply.toLowerCase().includes(phrase.toLowerCase())) return reply;
+  let trimmed = reply.trim();
+  // «…Вам интересно узнать подробнее? Передаю ваш контакт менеджеру» —
+  // вопрос, на который уже никто не ответит. Отрезаем его, если до него
+  // есть что оставить.
+  const withoutQuestion = trimmed.match(/^([\s\S]*[.!…])\s+[^.!?…]*\?$/);
+  if (withoutQuestion) trimmed = withoutQuestion[1].trim();
+  const sep = /[.!?…)]$/.test(trimmed) ? ' ' : '. ';
+  return `${trimmed}${sep}${phrase}`;
 }
 
 export function detectTrigger(

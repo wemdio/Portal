@@ -21,7 +21,7 @@ import { isRepeatOfOurs, shouldStaySilent } from './replyGuards';
 import { buildClients, describeProxyForLog, disconnectAll, getUpdatedSessionString, probeProxyTcp, reconnectClient, type ActiveClient } from './gramClient';
 import type { LoopControl } from './watchdog';
 import { orderByStaleness } from './accountRotation';
-import { openaiGenerate, detectTrigger } from './openaiChat';
+import { openaiGenerate, detectTrigger, detectInterest, handoffPhrase, handoffInstruction, ensureHandoffPhrase } from './openaiChat';
 import { loadBlockedUserIds } from './blockedUsers';
 import {
   handleProxyError,
@@ -29,6 +29,7 @@ import {
   recordProxySuccess,
 } from './proxyHealth';
 import { sendFirstTouchBatch } from './firstTouch/send';
+import { checkUsernamesOnTme } from './usernameExists';
 import { parkAccountAfterLimit } from './accountCooldown';
 import { pickForwardIds } from './forwardSelection';
 import { sendFreezeAppeal } from './freezeAppeal';
@@ -1048,11 +1049,28 @@ export async function handleChat(
     return { replied: false, triggerType: null };
   }
 
+  // Явный интерес ловим отдельной проверкой: фразу передачи модель ответа
+  // то забывает, то перефразирует, и «Да, пришлите условия» оставался без
+  // менеджера. Проверка упала — решает ответ модели, как раньше.
+  const phrase = handoffPhrase(oai);
+  let interested: boolean | null = null;
+  if (phrase) {
+    const check = await detectInterest(chatMessages);
+    interested = check.interested;
+    if (interested) {
+      log('info', `${displayName}: в ответе явный интерес — отвечу и передам контакт менеджеру`);
+    } else if (interested === null) {
+      log('warning', `${displayName}: проверка интереса не удалась (${check.error}) — передача только по фразе в ответе модели`);
+    }
+  }
+
   let replyText: string | null = null;
   let usedFallback = false;
   const openaiStart = Date.now();
   try {
-    replyText = await openaiGenerate(oai, chatMessages);
+    replyText = await openaiGenerate(oai, chatMessages, {
+      extraInstruction: interested && phrase ? handoffInstruction(phrase) : null,
+    });
     const openaiSec = ((Date.now() - openaiStart) / 1000).toFixed(1);
     if (replyText) {
       log('info', `${displayName}: GPT сгенерировал ответ за ${openaiSec}с (${replyText.length} символов)`);
@@ -1084,6 +1102,9 @@ export async function handleChat(
   if (isRepeatOfOurs(replyText, chatMessages)) {
     log('warning', `${displayName}: ответ дословно повторяет то, что мы уже писали ("${replyText}") — НЕ отправляю`);
     return { replied: false, triggerType: null };
+  }
+  if (interested && phrase) {
+    replyText = ensureHandoffPhrase(replyText, phrase);
   }
 
   const readReplyDelay = randomRange(tg.read_reply_delay_range) * 1000;
@@ -2722,6 +2743,7 @@ export async function runCampaignLoop(
             gapMs: randomRange(tg.read_reply_delay_range) * 1000,
             claimed: claimedContacts,
             claimLock: withClaimLock,
+            checkUsernames: checkUsernamesOnTme,
           });
           if (ft.sent || ft.skipped || ft.postponed) {
             log(
@@ -2737,10 +2759,22 @@ export async function runCampaignLoop(
             const blanks = readBlankRounds(account) + 1;
             await writeBlankRounds(account, blanks);
             if (blanks >= RESOLVE_BLOCKED_LIMIT) {
+              /**
+               * Раньше здесь стояло «при том что другие аккаунты кампании с той
+               * же очереди рассылают» — без всякой проверки. 24–28.09.2026 в
+               * ATOL-1 не рассылал никто: в очереди остались четыре мёртвых
+               * ника, и эта фраза стояла в карточках всех пятидесяти аккаунтов.
+               * Теперь довод называем тот, что есть: t.me подтвердил живые ники
+               * или проверить их не удалось.
+               */
+              const evidence = ft.blindOnExisting > 0
+                ? `${blanks} круга подряд не нашёл ни одного ника из порции, хотя эти люди есть в Telegram ` +
+                  '(ники проверены по t.me).'
+                : `${blanks} круга подряд ни один ник из порции не нашёлся; проверить ники по t.me не ` +
+                  'удалось, так что вывод косвенный — это могут быть и несуществующие ники в базе.';
               const detail =
-                `ВРЕМЕННОЕ ограничение — аккаунт не резолвит юзернеймы: ${blanks} круга подряд ` +
-                'ни один ник из порции не нашёлся, при том что другие аккаунты кампании с той же ' +
-                'очереди рассылают. Так выглядит заморозка Telegram: @SpamBot про неё не отвечает, ' +
+                `ВРЕМЕННОЕ ограничение — аккаунт не резолвит юзернеймы: ${evidence} ` +
+                'Так выглядит заморозка Telegram: @SpamBot про неё не отвечает, ' +
                 'кода ошибки нет. Проверьте аккаунт в официальном приложении — при заморозке там ' +
                 'висит баннер с кнопкой обжалования.';
               const parked = await parkAccountAfterLimit({

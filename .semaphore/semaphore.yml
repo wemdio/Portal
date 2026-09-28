@@ -68,7 +68,13 @@ blocks:
       # последнего push). Без этого Semaphore по умолчанию берёт merge-base
       # с main → на давно разошедшейся ветке правки в app/ накопились и
       # change_in всегда true.
-      when: "branch != 'main' AND branch != 'test' AND change_in(['/app/', '/.semaphore/semaphore.yml', '/.semaphore/select-deploy-targets.sh', '/.semaphore/test-select-deploy-targets.sh', '/drain-worker.sh'], {default_branch: 'main', branch_range: '$SEMAPHORE_GIT_COMMIT_RANGE'})"
+      #
+      # Ветки test и main блок не гоняют: это вливания уже проверенных веток,
+      # и повторный прогон — лишние минуты на каждое слияние (попытка гонять
+      # полный набор на test отменена 28.09.2026 по той же причине).
+      # Миграции, Dockerfile, compose и health-check в списке потому, что их
+      # читают тесты напрямую, мимо импортов.
+      when: "branch != 'main' AND branch != 'test' AND change_in(['/app/', '/.semaphore/semaphore.yml', '/.semaphore/select-deploy-targets.sh', '/.semaphore/test-select-deploy-targets.sh', '/drain-worker.sh', '/supabase/migrations/', '/Dockerfile', '/Dockerfile.worker', '/docker-compose.prod.yml', '/services/health-check/'], {default_branch: 'main', branch_range: '$SEMAPHORE_GIT_COMMIT_RANGE'})"
     task:
       secrets:
         - name: portal_secrets
@@ -134,20 +140,20 @@ blocks:
       # на машины дороже, чем прогнать подряд.
       #
       # Порядок шагов — от самого дешёвого к самому дорогому: линт и типы
-      # отваливаются за секунды и не дают платить за тесты и сборку, когда
-      # правка не компилируется (fail_fast на ветках выключает и остальное).
+      # отваливаются за секунды и не дают платить за тесты, когда правка не
+      # компилируется (fail_fast на ветках выключает и остальное).
       jobs:
-        - name: 'Checks and build'
+        - name: 'Checks and tests'
           commands:
             - source /tmp/env_vars
             - '(cd "$APP_PATH/.." && bash .semaphore/test-select-deploy-targets.sh)'
             - cd $APP_PATH
             - 'export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=4096"'
             # Один кэш на обе медленные проверки: и eslint (.next/cache/eslint),
-            # и incremental-состояние tsc (.next/cache/tsc) лежат в .next/cache
-            # и вместе весят ~3,5 МБ. Замеры на этом проекте:
-            #   eslint      без кэша 1 мин 53 с → с кэшем 4 с
-            #   typecheck   без кэша 5 мин 45 с → с кэшем 23 с
+            # и incremental-состояние TypeScript 7 (.next/cache/tsc7) лежат в
+            # .next/cache и вместе весят несколько мегабайт. Замеры на проекте:
+            #   eslint          без кэша 1 мин 53 с → с кэшем 4 с
+            #   typecheck:fast  без кэша ~1 мин → с кэшем ~10 с (28.09.2026, 2 ядра)
             #
             # Ключ включает SHA коммита, потому что Semaphore НЕ перезаписывает
             # существующие ключи. Прежний постоянный ключ <префикс>-<ветка>
@@ -162,15 +168,20 @@ blocks:
             # новые mtime всем файлам, и стратегия по умолчанию сделала бы кэш
             # бесполезным.
             - npm run lint
-            # Проверка типов идёт кусками (tsconfig.typecheck.*.json), а не одним
-            # проходом. Причина — память: после мержей test 17–21.09 сплошной
-            # tsc --noEmit брал 4,09 ГБ при потолке 4096 МБ и падал с exit 134.
-            # Замер 21.09 по кускам: core 3,29 ГБ, api 3,31 ГБ, pages 1,42 ГБ,
-            # tests 1,90 ГБ — каждый процесс получает свою кучу, и худший кусок
-            # оставляет ~750 МБ запаса. Куски вместе покрывают весь проект;
-            # tests/lib/nextBuildTypecheckConfig.test.ts следит, чтобы ни один
-            # не выпал из команды.
-            - npm run typecheck:strict
+            # Проверка типов в ветках — TypeScript 7 (пакет typescript-7, нативный,
+            # на Go), с 28.09.2026: те же куски, что у typecheck:strict, но в
+            # несколько раз быстрее (TypeScript 5 здесь занимал от 20 с до 3 мин
+            # с кэшем и ~6 мин без него). Прод-сборка в Dockerfile по-прежнему
+            # проверяет typecheck:strict на TypeScript 5 — вторая линия, если 7
+            # в чём-то окажется мягче.
+            #
+            # Куски (tsconfig.typecheck.*.json + маршруты Next), а не один
+            # проход, — из-за памяти: у TypeScript 7 весь проект разом берёт
+            # 3,7–4,9 ГБ при 4 ГБ машины. По кускам с --checkers 1 пик 2,9 ГБ
+            # (маршруты) — ниже, чем у TypeScript 5 сейчас (3,9 ГБ). Куски вместе
+            # покрывают весь проект; tests/lib/nextBuildTypecheckConfig.test.ts
+            # следит, чтобы ни один не выпал ни из одной из двух команд.
+            - npm run typecheck:fast
             - 'cache store checks-$SEMAPHORE_GIT_BRANCH-$SEMAPHORE_GIT_SHA .next/cache'
             # npm audit переехал в ночной прогон (.semaphore/nightly-audit.yml):
             # на каждом пуше он ходил в интернет и изредка подвисал/флапал.
@@ -184,22 +195,21 @@ blocks:
             # по хэшу содержимого файла, поэтому кэш соседней ветки не «чужой» —
             # он промахнётся ровно на тех файлах, которые с тех пор поменялись.
             # Ротация по дню — потому что ключи не перезаписываются.
-            - 'cache restore jest-v2-$(date +%Y%m%d),jest-v2-'
-            - 'npm test -- --watchAll=false --maxWorkers=2 --workerIdleMemoryLimit=1200MB --cacheDirectory=.jest-cache'
-            - 'cache store jest-v2-$(date +%Y%m%d) .jest-cache'
-            # Ежедневная ротация ключа — та же причина, что у кэша проверок
-            # выше: постоянный ключ nextjs-<ветка> означал, что .next/cache
-            # клал только первый прогон ветки, а дальше store молча ничего не
-            # делал и сборка переставала быть инкрементальной.
             #
-            # Здесь, в отличие от кэша проверок, ключ по дню, а не по коммиту:
-            # webpack-кэш Next весит сотни мегабайт, и запись на каждый пуш
-            # вытеснила бы из квоты всё остальное.
-            - 'cache restore nextjs-v2-$SEMAPHORE_GIT_BRANCH-$(date +%Y%m%d),nextjs-v2-$SEMAPHORE_GIT_BRANCH-,nextjs-v2-'
-            # Проверку типов Next пропускает: она упирается в физические 4 ГБ
-            # runner-а. Типы проверяет production Docker-сборка на main.
-            - 'NEXT_BUILD_SKIP_TYPECHECK=1 npm run build'
-            - 'cache store nextjs-v2-$SEMAPHORE_GIT_BRANCH-$(date +%Y%m%d) .next/cache'
+            # Какие тесты гонять, решает branch-tests.mjs (с 28.09.2026):
+            # связанные с изменениями ветки относительно test плюс все, что
+            # читают файлы сами (~50 из ~300 файлов вместо всех — ~20 с вместо
+            # минуты). Весь набор, если менялись зависимости, настройки или CI.
+            # Решение и список пишутся в лог.
+            #
+            # Сборки Next в CI веток нет с 28.09.2026: минута на каждом пуше
+            # ради редкого — того, чего не видят линт и типы (серверный код в
+            # клиентском, настройки маршрутов, ошибки пререндера). Такую
+            # ошибку ловит Docker-сборка на main, до выкладки: прод она не
+            # ломает, но выкладку задержит до исправления.
+            - 'cache restore jest-v2-$(date +%Y%m%d),jest-v2-'
+            - 'node scripts/ci/branch-tests.mjs --maxWorkers=2 --workerIdleMemoryLimit=1200MB --cacheDirectory=.jest-cache'
+            - 'cache store jest-v2-$(date +%Y%m%d) .jest-cache'
   - name: Build portal
     dependencies: []
     run:
