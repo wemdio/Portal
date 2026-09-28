@@ -37,7 +37,10 @@ export function resolveMaxChars(configured?: number | null): number {
   return Math.min(Math.floor(n), TELEGRAM_MAX_MESSAGE_CHARS);
 }
 
-export type ValidationFailure = 'empty' | 'too_long';
+export type ValidationFailure = 'empty' | 'too_long' | 'caption_too_long';
+
+/** Предел Telegram на подпись под файлом (без Premium): текст с файлом длиннее — не уйдёт. */
+export const TELEGRAM_MAX_CAPTION_CHARS = 1024;
 
 export type ValidationResult =
   | { ok: true }
@@ -58,13 +61,14 @@ export type ValidationResult =
  *
  * Мусор в файле ловят оставшиеся проверки: пустая ячейка и порог длины.
  */
-export function validateFirstTouch(message: string, maxChars?: number | null): ValidationResult {
+export function validateFirstTouch(message: string, maxChars?: number | null, opts: { withAttachment?: boolean } = {}): ValidationResult {
   if (typeof message !== 'string') return { ok: false, reason: 'empty' };
 
   const limit = resolveMaxChars(maxChars);
   const text = message.replace(/ /g, ' ').trim();
   if (!text) return { ok: false, reason: 'empty' };
   if (text.length > limit) return { ok: false, reason: 'too_long' };
+  if (opts.withAttachment && text.length > TELEGRAM_MAX_CAPTION_CHARS) return { ok: false, reason: 'caption_too_long' };
 
   return { ok: true };
 }
@@ -76,5 +80,7 @@ export function describeFailure(reason: ValidationFailure, maxChars?: number | n
       return 'пустой текст сообщения';
     case 'too_long':
       return `текст длиннее ${resolveMaxChars(maxChars)} знаков`;
+    case 'caption_too_long':
+      return `текст с файлом длиннее ${TELEGRAM_MAX_CAPTION_CHARS} знаков — Telegram не пропустит такую подпись`;
   }
 }

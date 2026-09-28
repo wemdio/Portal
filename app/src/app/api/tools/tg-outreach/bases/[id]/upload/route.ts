@@ -56,6 +56,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
           base_id: id,
           username: c.username,
           message: c.message,
+          attachment_name: c.attachmentName,
           raw: c.raw,
         })),
         { onConflict: 'base_id,username', ignoreDuplicates: true },

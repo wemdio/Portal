@@ -18,6 +18,9 @@ import {
 import { classifyRestriction, describeRestriction } from '../restriction';
 import { withTimeout } from '../withTimeout';
 import { expandSpintax } from './spintax';
+import { formatFirstTouch } from './formatText';
+import { ATTACHMENTS_BUCKET, resolveContactAttachment, type BaseAttachment } from './attachments';
+import { CustomFile } from 'telegram/client/uploads';
 
 /**
  * Сроки на вызовы Telegram в первом касании — та же причина, что в боевом
@@ -414,6 +417,20 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
   /** Окно выборки: с запасом, чтобы добор не ходил в базу на каждый контакт. */
   const WINDOW = quota * 6;
 
+  // Файлы к первому сообщению у баз аккаунта; содержимое качаем из хранилища
+  // один раз на порцию — картинка у базы обычно одна на всех.
+  const baseAttachments = await fdb.loadBaseAttachments(db, baseIds);
+  const fileCache = new Map<string, Buffer>();
+  const fileBuffer = async (a: BaseAttachment): Promise<Buffer> => {
+    const cached = fileCache.get(a.storage_path);
+    if (cached) return cached;
+    const { data, error } = await db.storage.from(ATTACHMENTS_BUCKET).download(a.storage_path);
+    if (error || !data) throw new Error(error?.message ?? 'пустой ответ хранилища');
+    const buf = Buffer.from(await data.arrayBuffer());
+    fileCache.set(a.storage_path, buf);
+    return buf;
+  };
+
   const claimed = args.claimed ?? new Set<string>();
   const withClaimLock = args.claimLock ?? (<T,>(fn: () => Promise<T>) => fn());
   // RPC USERNAME_NOT_OCCUPIED неоднозначен: так Telegram отвечает и за мёртвый
@@ -468,8 +485,20 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
        * Разворот на каждый контакт, а не на порцию: смысл в том, чтобы соседние
        * получатели видели разные формулировки.
        */
-      const messageText = expandSpintax(contact.message);
-      const check = validateFirstTouch(messageText, maxChars);
+      // Разметку (**жирный**, <u>подчёркнутый</u>, ссылки) разбираем сами: длину
+      // проверяем по тому, что увидит человек, а не по тексту с маркерами.
+      const formatted = formatFirstTouch(expandSpintax(contact.message));
+      const messageText = formatted.text;
+      const attachmentPick = resolveContactAttachment(contact.attachment_name, baseAttachments.filter((a) => a.base_id === contact.base_id));
+      if (attachmentPick.kind === 'missing') {
+        const why = `в таблице указан файл «${attachmentPick.name}», а к базе он не загружен`;
+        const outcome = await fdb.recordContactFailure(db, contact.id, attempts, why);
+        log('warning', `Первое касание: @${contact.username} отложен — ${why}${attemptNote(outcome)}`);
+        result.postponed++;
+        continue;
+      }
+      const attachment = attachmentPick.kind === 'file' ? attachmentPick.attachment : null;
+      const check = validateFirstTouch(messageText, maxChars, { withAttachment: Boolean(attachment) });
       if (!check.ok) {
         const why = describeFailure(check.reason, maxChars);
         const outcome = await fdb.recordContactFailure(db, contact.id, attempts, why);
@@ -580,9 +609,32 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
         continue;
       }
 
+      let fileData: Buffer | null = null;
+      if (attachment) {
+        try {
+          fileData = await fileBuffer(attachment);
+        } catch (err) {
+          // Хранилище не отдало файл — вина наша, а не контакта: попытку не
+          // списываем, контакт остаётся в очереди до следующего круга.
+          log('error', `Первое касание: @${contact.username} не отправлен — не смог взять файл «${attachment.file_name}» из хранилища: ${err instanceof Error ? err.message : String(err)}`);
+          result.postponed++;
+          continue;
+        }
+      }
+
       try {
         await withTimeout(
-          client.sendMessage(`@${contact.username}`, { message: messageText }),
+          attachment && fileData
+            // Файл и текст — одним сообщением: текст подписью под картинкой
+            // или документом. Два сообщения подряд от незнакомца больше похожи
+            // на спам.
+            ? client.sendFile(`@${contact.username}`, {
+                file: new CustomFile(attachment.file_name, fileData.length, '', fileData),
+                caption: messageText,
+                formattingEntities: formatted.entities,
+                forceDocument: attachment.kind === 'document',
+              })
+            : client.sendMessage(`@${contact.username}`, { message: messageText, formattingEntities: formatted.entities }),
           sendTimeoutMs,
           'отправка первого сообщения',
         );
@@ -674,7 +726,15 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
         tg_username: contact.username,
         // В историю — отправленный вариант, а не шаблон: дальше по нему
         // отвечает модель, и она должна видеть то же, что и собеседник.
-        messages: [{ role: 'assistant', content: messageText, timestamp: nowIso }],
+        // Про файл — пометкой: модель должна знать, что человек видел картинку
+        // или документ, если он о них спросит.
+        messages: [{
+          role: 'assistant',
+          content: attachment ? `${messageText}
+
+[к сообщению приложен файл: ${attachment.file_name}]` : messageText,
+          timestamp: nowIso,
+        }],
         status: 'none',
         can_send: true,
         last_message_at: nowIso,
@@ -685,7 +745,7 @@ export async function sendFirstTouchBatch(args: SendBatchArgs): Promise<SendBatc
       );
       await fdb.markContactSent(db, contact.id, account.id, tgUserId);
 
-      log('info', `Первое касание: отправлено @${contact.username}`);
+      log('info', `Первое касание: отправлено @${contact.username}${attachment ? ` (с файлом «${attachment.file_name}»)` : ''}`);
       result.sent++;
     }
 
