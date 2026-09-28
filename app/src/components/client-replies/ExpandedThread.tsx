@@ -38,7 +38,7 @@ import type { ClientReplyThread, ThreadMessage, Recipient } from '@/lib/clientCa
  */
 
 type ActionMode = 'reply' | 'forward' | null;
-type ReplySendResult = { ok: true; via: 'reply' | 'test'; to_email: string };
+type ReplySendResult = { ok: true; via?: 'reply' | 'test'; to_email?: string };
 
 function formatReplyDate(iso: string | null): string {
   if (!iso) return '';
@@ -732,14 +732,16 @@ export function ExpandedThread({
           replyAsNewEmail={replyAsNewEmail}
           onCancel={() => setActionMode(null)}
           onSent={(result) => {
+            // Older reply endpoints return only { ok: true }.
+            const via = result.via ?? 'reply';
             setActionMode(null);
             setSendNotice({
               emailId,
-              text: result.via === 'test'
-                ? `Сервис принял ответ для ${result.to_email} как отдельное письмо. В истории переписки он не появится — не отправляйте его повторно из-за отсутствия в треде.`
+              text: via === 'test'
+                ? `Сервис принял ответ${result.to_email ? ` для ${result.to_email}` : ''} как отдельное письмо. В истории переписки он не появится — не отправляйте его повторно из-за отсутствия в треде.`
                 : 'Ответ отправлен.',
             });
-            if (result.via === 'reply') void loadThread();
+            if (via === 'reply') void loadThread();
             onAfterAction?.();
             onReplied?.();
           }}
