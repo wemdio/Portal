@@ -15,7 +15,7 @@
  * подстановки (guardTemplate), но подставленные факты — нет.
  */
 
-import { caseSentence, displayName, guardLetters, segmentsBlock, triggerPhrase, triggerShort } from './buildLetters';
+import { caseSentence, displayName, guardLetters, letterCompanyName, segmentsBlock, shortJobTitle, triggerPhrase, triggerShort } from './buildLetters';
 import type { EnCase } from './caseRouter';
 import { primaryTrigger, type Trigger } from './leadScore';
 import {
@@ -39,6 +39,8 @@ export interface TemplateValues {
   /** Фраза-повод (triggerPhrase); нет — строка с {{trigger}} удаляется. */
   trigger: string | null;
   triggerShort: string;
+  /** Строка о компании (siteProfile.aboutLine); нет — строка с {{about}} удаляется. */
+  about: string | null;
   /** Предложение о кейсе (caseSentence); есть — письмо 3 с кейсом. */
   caseText: string | null;
   /** Блок сегментов (segmentsBlock); нет — строка удаляется. */
@@ -86,6 +88,7 @@ export function renderTemplate(template: PolzaChainTemplateLetters, v: TemplateV
     [P.company]: v.company,
     [P.trigger]: v.trigger,
     [P.triggerShort]: v.triggerShort,
+    [P.about]: v.about,
     [P.case]: v.caseText,
     [P.segments]: v.segments,
     [P.signature]: v.signature,
@@ -106,6 +109,10 @@ export function renderTemplate(template: PolzaChainTemplateLetters, v: TemplateV
 export interface CompanyLettersInput {
   /** Название как в источнике — в письма идёт без юрформы (displayName). */
   companyName: string;
+  /** Название с сайта: заменяет слаг из адреса вакансии (letterCompanyName). */
+  brandName?: string | null;
+  /** Строка о компании из разбора сайта — {{about}}. */
+  aboutLine?: string | null;
   /** Все подтверждённые поводы строки — главный среди них выбирает primaryTrigger. */
   triggers: Trigger[];
   /** Кейс по отрасли (routeEnCase); нет — письмо 3 без кейса. */
@@ -132,7 +139,8 @@ export function composeCompanyLetters(template: PolzaChainTemplateLetters, input
   // посимвольно, а двойной пробел или перевод строки внутри названия,
   // должности или кейса (так бывает в источниках) разошёлся бы с письмом.
   const tidy = (text: string) => text.replace(/\s+/g, ' ').trim();
-  const company = tidy(displayName(input.companyName));
+  const company = tidy(displayName(letterCompanyName(input.companyName, input.brandName)));
+  const about = input.aboutLine ? tidy(input.aboutLine) : null;
   const triggers = input.triggers.map((t) => ({ ...t, title: tidy(t.title) }));
   const caseHit = input.caseHit ? { ...input.caseHit, snippet: tidy(input.caseHit.snippet), segment: tidy(input.caseHit.segment) } : null;
   const primary = primaryTrigger(triggers);
@@ -141,6 +149,7 @@ export function composeCompanyLetters(template: PolzaChainTemplateLetters, input
     company,
     trigger: triggerPhrase(company, primary),
     triggerShort: triggerShort(primary),
+    about,
     caseText: caseHit ? caseSentence(caseHit) : null,
     segments: segmentsBlock(company, input.segments),
     signature,
@@ -148,10 +157,14 @@ export function composeCompanyLetters(template: PolzaChainTemplateLetters, input
   });
   // Проверенные факты: цифры в письмах — только из них, а запретные и служебные
   // слова гард ищет в тексте без них (имя «Leading Edge» — не наша реклама).
-  // Сегменты — из разбора сайта, цифр в них не бывает (siteProfile).
+  // Сегменты и строка о компании — из разбора сайта, цифр в них не бывает
+  // (siteProfile); в строке о компании законны слова вроде «LLM» и «evidence».
   const allowedFacts = [
     company,
+    ...(about ? [about] : []),
     ...triggers.map((t) => t.title),
+    // В фразу-повод идёт короткое название вакансии — его цифры тоже из факта.
+    ...triggers.map((t) => (t.type === 'hiring' ? shortJobTitle(t.title) : null)).filter((s): s is string => Boolean(s)),
     ...(caseHit ? [caseHit.snippet, caseHit.segment] : []),
     ...input.segments.map(tidy),
   ];

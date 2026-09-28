@@ -31,6 +31,7 @@ import {
   normalizeSampleRange,
   segmentsBlock,
   triggerPhrase,
+  triggerPhraseVariants,
   triggerShort,
 } from './buildLetters';
 import type { EnCase } from './caseRouter';
@@ -175,19 +176,21 @@ interface OfferBrief {
 
 const POLZA_WHAT =
   'Polza builds the account list, enriches the right contacts, writes and launches the outbound sequence on their behalf and tracks replies, handing interested ones to their team';
+const LETTER2 =
+  'a follow-up that adds something new instead of repeating email 1: outbound rarely stalls because of the tool, it stalls because the same generic email goes to a broad list and nobody has a reason to reply; what we would do for {{company}} instead — a few narrow segments and a separate reason to write to each company, replies handed over with the thread; the one question: whether a short sketch of that would help';
 const LETTER3 =
-  'proof: the "with case" variant opens with {{case}}, the "without case" variant with {{segments}} (the first segments we would test for them; it may follow {{case}} in the "with case" variant too); then offer a small free sample of 20–30 target accounts so they can judge the quality before any call; the one question: whether to send the sample';
+  'proof: the "with case" variant opens with {{case}}, the "without case" variant with {{segments}} (the first segments we would test for them; it may follow {{case}} in the "with case" variant too); then offer a free sample of 20–30 target accounts so they can judge the quality before any call; the one question: whether to send the sample';
 const LETTER4 =
   'close the loop politely: the last email, no pressure; if new pipeline is relevant, the account sample for {{company}} is still on the table; if not, a short "not now" is enough and we will not follow up; the one question: should I close the loop';
 
-/** Суть оффера и цель каждого письма — пересказ цепочки CEO (buildLetters) под тип повода. */
+/** Суть оффера и цель каждого письма — пересказ образца (buildLetters) под тип повода. */
 const OFFER_BRIEFS: Record<PolzaOfferKey, OfferBrief> = {
   hiring: {
     title: 'Hiring for sales/GTM',
     essence: `The company is hiring for a sales/GTM role (SDR, BDR, AE, Head of Sales). We do not write about the hire itself or about recruiting. ${POLZA_WHAT}, so new pipeline can start moving in parallel with the hire and a new rep does not spend the ramp-up on manual research.`,
     goals: [
-      '{{trigger}} — the hiring signal; usually at this stage the hard part is not sending more emails but finding the right accounts and the right angle and getting first qualified replies fast; what Polza does in one line',
-      "why it is slow: when a team is {{trigger_short}}, the bottleneck is usually not the email tool but which companies to target, which contacts to use, what angle to test first and how to avoid a generic cold email; Polza takes that off the new hire's plate",
+      "{{trigger}} (the hiring fact), then {{about}} (what they sell and to whom); then why it matters: when a team is {{trigger_short}}, the early effort goes into research — which accounts, which contacts, what to say — and that is the part Polza takes off the new hire's plate; one question",
+      LETTER2,
       LETTER3,
       LETTER4,
     ],
@@ -196,8 +199,8 @@ const OFFER_BRIEFS: Record<PolzaOfferKey, OfferBrief> = {
     title: 'Y Combinator startup',
     essence: `The company went through Y Combinator. At this stage the job is proving repeatable GTM fast: finding the first right-fit B2B accounts and getting qualified replies. ${POLZA_WHAT}, so the founders are not stuck doing manual prospecting.`,
     goals: [
-      '{{trigger}} — the YC signal; at this stage the hard part is not sending more emails but finding the first right-fit accounts and a message that gets qualified replies; what Polza does in one line',
-      'why it is slow: when a team is {{trigger_short}}, founders usually prospect by hand — list building, contacts, angles, follow-ups — and it eats the time the product needs; Polza runs that end-to-end',
+      '{{trigger}} (the YC fact), then {{about}}; then why it matters: when a team is {{trigger_short}}, founders usually prospect by hand — list, contacts, angles, follow-ups — and it eats the time the product needs; Polza runs that part; one question',
+      LETTER2,
       LETTER3,
       LETTER4,
     ],
@@ -206,8 +209,8 @@ const OFFER_BRIEFS: Record<PolzaOfferKey, OfferBrief> = {
     title: 'Recent product launch',
     essence: `The company recently launched a product or a major feature. The next step is finding the first right B2B accounts for it and getting early qualified conversations while the launch is fresh. ${POLZA_WHAT}.`,
     goals: [
-      '{{trigger}} — the launch signal; after a launch the hard part is finding the right first accounts for it, not sending more emails; what Polza does in one line',
-      'why it is slow: when a team is {{trigger_short}}, inbound is small at the start and the list of right-fit accounts has to be built from scratch — which companies, which contacts, what angle; Polza runs that end-to-end',
+      '{{trigger}} (the launch fact), then {{about}}; then why it matters: after a launch inbound is small at the start and the list of right-fit accounts has to be built from scratch; Polza runs that part; one question',
+      LETTER2,
       LETTER3,
       LETTER4,
     ],
@@ -216,8 +219,8 @@ const OFFER_BRIEFS: Record<PolzaOfferKey, OfferBrief> = {
     title: 'Already runs outbound/CRM tools',
     essence: `The company already uses outbound/CRM tools, so the bottleneck is probably not sending but account selection and the angle. ${POLZA_WHAT}: the right accounts, contacts and a tested angle go into the tools they already have.`,
     goals: [
-      '{{trigger}} — they already run outbound tools; the bottleneck is usually account selection and the angle, not sending; what Polza does in one line',
-      'why tools alone do not fix it: when a team is {{trigger_short}}, the slow part is which companies to target, which contacts to use, what angle to test first and how to avoid a generic cold email; Polza handles that end-to-end',
+      '{{trigger}} (the tools they run), then {{about}}; then why tools alone do not fix it: the slow part is which companies to target, which contacts to use and what to say; Polza handles that and feeds it into the tools they already have; one question',
+      LETTER2,
       LETTER3,
       LETTER4,
     ],
@@ -226,8 +229,8 @@ const OFFER_BRIEFS: Record<PolzaOfferKey, OfferBrief> = {
     title: 'No specific trigger',
     essence: `There is no specific signal: the company looks like a Polza client — it sells B2B to a clear audience. Offer outbound as a channel for new B2B pipeline: ${POLZA_WHAT}.`,
     goals: [
-      'what Polza does and why outbound works for B2B teams, as a general observation (this offer has no {{trigger}})',
-      'why outbound is slow to set up in-house: when a team is {{trigger_short}}, the slow part is which companies to target, which contacts to use, what angle to test first and how to avoid a generic cold email; Polza handles that end-to-end',
+      '{{about}} (what they sell and to whom; this offer has no {{trigger}}); then what Polza does and why outbound works for B2B teams like this, as a general observation; one question',
+      LETTER2,
       LETTER3,
       LETTER4,
     ],
@@ -268,13 +271,15 @@ const EXAMPLE_FRAGMENTS = [
   'HubSpot',
   'Apollo',
   'self-serve workspace',
-  'is becoming a priority',
-  'proving repeatable GTM fast',
-  'was part of YC',
-  'Saw the recent launch',
-  'the right first B2B accounts',
-  'already uses outbound/CRM tools',
-  'not sending but account selection',
+  'opening at',
+  'Came across the',
+  'went through YC',
+  'is a YC',
+  'launch news',
+  'just launched something new',
+  // Пример {{about}} из промпта писателя.
+  'warehouse robots',
+  'third-party logistics',
 ];
 
 /** Примеры задания для проверки шаблона (guardTemplate): один список для ответа писателя и для образца. */
@@ -286,6 +291,7 @@ export function templateQaExamples(): readonly string[] {
 // подпись заменяются плейсхолдерами: так писатель видит, где что стоит.
 const SAMPLE_CASE: EnCase = { caseId: 'sample', segment: 'B2B software', snippet: 'a sample client get their first replies', url: null, groups: [] };
 const SAMPLE_SEGMENTS = ['sample segment one', 'sample segment two', 'sample segment three'];
+const SAMPLE_ABOUT = 'You sell a sample product to sample customers.';
 
 /**
  * Образец — нынешняя цепочка CEO (buildLetters) для оффера, собранная на
@@ -297,11 +303,12 @@ const SAMPLE_SEGMENTS = ['sample segment one', 'sample segment two', 'sample seg
  */
 export function sampleTemplateLetters(offer: PolzaOfferKey): PolzaChainTemplateLetters {
   const trigger = EXAMPLE_TRIGGERS[offer][0] ?? null;
-  const withCase = buildLetters({ company: EXAMPLE_COMPANY, trigger, caseHit: SAMPLE_CASE, segments: SAMPLE_SEGMENTS });
-  const noCase = buildLetters({ company: EXAMPLE_COMPANY, trigger, caseHit: null, segments: SAMPLE_SEGMENTS });
+  const withCase = buildLetters({ company: EXAMPLE_COMPANY, trigger, about: SAMPLE_ABOUT, caseHit: SAMPLE_CASE, segments: SAMPLE_SEGMENTS });
+  const noCase = buildLetters({ company: EXAMPLE_COMPANY, trigger, about: SAMPLE_ABOUT, caseHit: null, segments: SAMPLE_SEGMENTS });
   // Сначала целые фразы (в них есть название компании), потом само название.
   const swaps: Array<[string | null, string]> = [
     [triggerPhrase(EXAMPLE_COMPANY, trigger), P.trigger],
+    [SAMPLE_ABOUT, P.about],
     [caseSentence(SAMPLE_CASE), P.case],
     [segmentsBlock(EXAMPLE_COMPANY, SAMPLE_SEGMENTS), P.segments],
     [POLZA_OUTREACH_DEFAULT_SIGNATURE, P.signature],
@@ -325,7 +332,7 @@ function sampleChain(offer: PolzaOfferKey): string {
   return [
     `SUBJECT OF EMAIL 1: ${t.subject}`,
     '',
-    'EMAIL 1 (today one version for every inbox; it asks who owns outbound, so it is the shared-inbox variant — write body_direct from the goals):',
+    'EMAIL 1 (one version for every inbox; it asks who the right person is, so it is the shared-inbox variant — write body_direct from the goals):',
     t.bodyRouting,
     '',
     'EMAIL 2:',
@@ -348,7 +355,8 @@ const WRITER_SYSTEM = [
   '',
   'PLACEHOLDERS — spelled exactly like this, no other {{…}} exist:',
   '{{company}} — the recipient company name (e.g. "Acme"). Use it inside sentences.',
-  '{{trigger}} — a ready sentence about the verified reason we are writing, ending with a period (e.g. "Saw that Acme is hiring for Founding Account Executive, looks like outbound/GTM is becoming a priority."). Put it in a paragraph of its own. It can be empty and then its paragraph is removed, so the email must read fine without it. Do not repeat its meaning in your own words.',
+  '{{trigger}} — a ready short sentence with the verified fact we are writing about, ending with a period (e.g. "Noticed the Founding Account Executive opening at Acme."). Put it in a paragraph of its own. It can be empty and then its paragraph is removed, so the email must read fine without it. Do not repeat its meaning in your own words.',
+  '{{about}} — one ready sentence, different for every company, about what the recipient sells and to whom (e.g. "You sell warehouse robots to third-party logistics companies."). It is what makes email 1 personal. A paragraph of its own right after {{trigger}}. It can be empty and then its paragraph is removed, so the email must read fine without it. Do not repeat or paraphrase it.',
   '{{trigger_short}} — a short phrase for the same reason to use inside a sentence (e.g. "hiring for GTM roles": "when a team is {{trigger_short}}, …").',
   '{{case}} — one complete sentence about an approved Polza client case, inserted verbatim (e.g. "For a similar B2B software company, we helped … get … replies."). A paragraph of its own.',
   '{{segments}} — a short block with the first 2–3 segments we would test for the company, with its own lead-in line ("For Acme, I would probably start with:" and a numbered list). A paragraph of its own, no lead-in of yours before it. It can be empty and then its paragraph is removed.',
@@ -363,9 +371,9 @@ const WRITER_SYSTEM = [
   '6. Nothing about the recipient beyond the placeholders: do not guess their market, customers, plans or problems. The pain is a general observation about outbound, not a diagnosis of the recipient.',
   '7. We have never talked to the recipient: no "as we discussed", "following up on our call", "we spoke". Emails 2–4 follow up on my own previous email.',
   '8. Never: urgency or scarcity pressure, guarantees, hype words ("leading", "world-class", "revolutionary", "best-in-class", "full-service"), exclamation marks, emoji, markdown (**bold**, # headings), internal words (score, scoring, ICP, LLM, JSON, null, evidence, validation). Plain dash lists like in the sample are fine.',
-  '9. Tone — like the sample: short, plain, peer-to-peer, first person of the sender, natural American business English, no filler and no corporate jargon. Keep every email under about 90 words; email 4 is the shortest.',
-  '10. {{trigger}}, {{case}} and {{segments}} are paragraphs of their own: a blank line before and after, no other text, and no lead-in line ending with ":" right before them — when a value is empty, its paragraph is removed and nothing must dangle.',
-  `11. The examples in this task (the company "${EXAMPLE_COMPANY}", its job titles and trigger phrases) only show what the code will insert — never copy them or their wording into the template.`,
+  '9. Tone: it must read like one person wrote it to one company, not like a mass email. Short, plain, peer-to-peer, first person of the sender, natural American business English; vary sentence length; say concrete things. No stock phrases: "I hope this finds you well", "just checking in", "quick follow-up", "touch base", "circle back", "reach out", "I wanted to", "leverage", "streamline", "take X to the next level". Each follow-up adds something new instead of repeating the previous email. Keep every email under about 90 words; email 4 is the shortest.',
+  '10. {{trigger}}, {{about}}, {{case}} and {{segments}} are paragraphs of their own: a blank line before and after, no other text, and no lead-in line ending with ":" right before them — when a value is empty, its paragraph is removed and nothing must dangle.',
+  `11. The examples in this task (the company "${EXAMPLE_COMPANY}", its job titles, trigger phrases and the {{about}} example) only show what the code will insert — never copy them or their wording into the template.`,
   '',
   'Answer with a strict JSON object in the format from the message, with no markdown and no comments.',
 ].join('\n');
@@ -388,11 +396,13 @@ function writerUserPrompt(offer: PolzaOfferKey, retry: RetryNote | null): string
   const hasTrigger = offer !== 'none';
   const places = [
     ...(hasTrigger ? [`${P.trigger} — in email 1, both variants`] : []),
+    `${P.about} — in email 1, both variants${hasTrigger ? `, right after ${P.trigger}` : ''}, and nowhere else`,
     `${P.case} — only in email 3 "with case"`,
     `${P.segments} — in email 3 "without case" (it may also follow ${P.case} in "with case")`,
     `${P.signature} — the last line of every email`,
   ];
-  const examples = EXAMPLE_TRIGGERS[offer].map((t) => triggerPhrase(EXAMPLE_COMPANY, t)).filter((s): s is string => Boolean(s));
+  // Все формулировки повода: компаниям достаётся одна из них, шаблон должен читаться с любой.
+  const examples = EXAMPLE_TRIGGERS[offer].flatMap((t) => triggerPhraseVariants(EXAMPLE_COMPANY, t));
   const lines = [
     `OFFER: ${brief.title}`,
     `ESSENCE: ${brief.essence}`,
@@ -412,7 +422,7 @@ function writerUserPrompt(offer: PolzaOfferKey, retry: RetryNote | null): string
       : []),
     `${P.triggerShort} for this offer: "${triggerShort(EXAMPLE_TRIGGERS[offer][0] ?? null)}".`,
     '',
-    'SAMPLE — the current sequence approved by the CEO. Keep its meaning, order and tone; you may improve the wording:',
+    'SAMPLE — shows the meaning and the order of the four emails. Do not copy its sentences: write the emails in your own words so they sound like a real person, following the goals and rules above:',
     sampleChain(offer),
     '',
     'ANSWER FORMAT — JSON:',

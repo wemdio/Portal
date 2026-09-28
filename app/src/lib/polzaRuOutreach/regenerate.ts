@@ -51,7 +51,7 @@ import { TEMPLATE_VERSION, sanitizeRuOutreachConfig, type ChainType, type RuOutr
 const ROWS = 'polza_ru_outreach_companies';
 const PAGE = 1000;
 const WAITING_COLUMNS =
-  'id,chain_type,company_name,company_brand,is_routing,signals,signal_type,signal_title,signal_date,evidence_quote,source_url,' +
+  'id,chain_type,company_name,company_brand,about_line,is_routing,signals,signal_type,signal_title,signal_date,evidence_quote,source_url,' +
   'prior_contact,market_evidence_quote,target_market,fit_reasons,case_id,recipient_email,amo_status,priority_score,doubt_flags,doubt_detail';
 const PRODUCT_PREFIX = 'Продукт: ';
 /** Письма строк собираются по четыре сразу: гипотеза — сетевой вызов. */
@@ -75,6 +75,7 @@ interface WaitingRow {
   chain_type: string;
   company_name: string;
   company_brand: string | null;
+  about_line: string | null;
   is_routing: boolean | null;
   signals: unknown;
   signal_type: string | null;
@@ -460,6 +461,7 @@ function companyInput(row: WaitingRow, chain: ChainType, libraries: Libraries): 
     baseChain: chain === 'automation' ? (prior ? 'reactivation' : (primary && chainOfSignal(primary.type)) || 'icp_only') : undefined,
     marketQuote: row.market_evidence_quote,
     productSummary: product ? product.slice(PRODUCT_PREFIX.length) : null,
+    aboutLine: row.about_line,
     targetMarket: row.target_market,
     caseRecord: row.case_id ? libraries.cases.find((c) => c.case_id === row.case_id) ?? null : null,
     recipientEmail: row.recipient_email ?? '',

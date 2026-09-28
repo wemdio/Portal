@@ -46,11 +46,13 @@ export const SEQUENCE_ID = 'en_offer_templates_v1';
 export interface BuildLettersInput {
   company: string;
   trigger: Trigger | null;
+  /** Строка о компании из разбора сайта (siteProfile.aboutLine) — значение {{about}}. */
+  about?: string | null;
   caseHit: EnCase | null;
   segments: string[];
 }
 
-const LEGAL_SUFFIX_RE = /[,\s]+(inc\.?|llc|l\.l\.c\.|ltd\.?|limited|gmbh|corp\.?|corporation|co\.|b\.v\.|bv|s\.a\.|ag|plc|pte\.?\s*ltd\.?)$/i;
+const LEGAL_SUFFIX_RE = /[,\s]+(inc\.?|llc|l\.l\.c\.|ltd\.?|limited|gmbh\s*&\s*co\.?\s*kg|gmbh|kg|ug|corp\.?|corporation|co\.|b\.v\.|bv|n\.v\.|nv|s\.a\.|s\.a\.s\.|sas|s\.r\.l\.|srl|ag|plc|oy|pty\.?\s*ltd\.?|pte\.?\s*ltd\.?)$/i;
 
 /** Имя для писем: без юрформы, без изменения бренда. */
 export function displayName(name: string): string {
@@ -59,19 +61,78 @@ export function displayName(name: string): string {
   return out || name.trim();
 }
 
-/** Фраза-повод письма 1 (таблица «Trigger phrase examples» CEO) — значение {{trigger}}. */
-export function triggerPhrase(company: string, t: Trigger | null): string | null {
-  if (!t) return null;
+/**
+ * Имя компании для писем. Источник вакансий часто даёт имя из адреса вакансии
+ * («ambiencehealthcare», «moss»), и письмо с ним выглядит собранным роботом.
+ * Название с сайта (siteProfile.brandName) берём, когда исходное — такой
+ * слаг (нет заглавных букв) или то же имя, только иначе написанное
+ * («constellationspace» → «Constellation Space»). Разные имена («Alphabet» и
+ * «Google») не подменяем: название с сайта может оказаться именем продукта.
+ */
+export function letterCompanyName(sourceName: string, brandName: string | null | undefined): string {
+  const source = sourceName.trim();
+  const brand = brandName?.trim();
+  if (!brand) return source;
+  const key = (s: string) => displayName(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!/[A-Z]/.test(source) || key(source) === key(brand)) return brand;
+  return source;
+}
+
+/**
+ * Название вакансии для письма: без скобок («(m/w/d)», «(Remote)»), локации и
+ * отдела после « - », « | », « / », запятой. Длиннее шести слов — null: такое
+ * название в письме выглядит вставленным роботом («Senior Vertriebsingenieur /
+ * Business Development (m/w/d) Schlüsselfertiger Gewerbebau …»), и фраза-повод
+ * обходится без него.
+ */
+export function shortJobTitle(title: string): string | null {
+  const cut = title
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')
+    .split(/\s+[-–—|/]\s+|,\s+/)[0]
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cut || cut.length > 60 || cut.split(' ').length > 6) return null;
+  return cut;
+}
+
+/**
+ * Варианты фразы-повода письма 1 — значение {{trigger}}. Раньше фраза была
+ * одна на всех («…looks like outbound/GTM is becoming a priority.»), и сотня
+ * писем оффера начиналась одинаково. Теперь это короткий факт без вывода —
+ * вывод делает текст шаблона, — в нескольких формулировках.
+ */
+export function triggerPhraseVariants(company: string, t: Trigger | null): string[] {
+  if (!t) return [];
   switch (t.type) {
-    case 'hiring':
-      return `Saw that ${company} is hiring for ${t.title}, looks like outbound/GTM is becoming a priority.`;
+    case 'hiring': {
+      const title = shortJobTitle(t.title);
+      if (!title) return [`Saw that ${company} is hiring for sales.`, `Noticed ${company} is growing its sales team.`];
+      return [
+        `Saw that ${company} is hiring for ${title}.`,
+        `Noticed the ${title} opening at ${company}.`,
+        `Came across the ${title} role at ${company}.`,
+      ];
+    }
     case 'yc':
-      return `Saw ${company} was part of YC ${t.title}, usually this stage is about proving repeatable GTM fast.`;
+      return [`Saw that ${company} went through YC ${t.title}.`, `Noticed ${company} is a YC ${t.title} company.`];
     case 'launch':
-      return `Saw the recent launch at ${company}, looks like the next step is finding the right first B2B accounts.`;
+      return [`Saw the recent launch news on the ${company} site.`, `Noticed ${company} has just launched something new.`];
     case 'tech_stack':
-      return 'Looks like your team already uses outbound/CRM tools, so the bottleneck is probably not sending but account selection.';
+      return [`Looks like ${company} already runs ${t.title}.`, `Noticed ${t.title} on the ${company} site.`];
   }
+}
+
+/** Устойчивый выбор варианта по компании: у одной компании фраза всегда одна и та же. */
+function pickVariant<T>(key: string, variants: T[]): T | null {
+  if (!variants.length) return null;
+  let h = 0;
+  for (const ch of key.toLowerCase()) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return variants[h % variants.length];
+}
+
+/** Фраза-повод письма 1 — значение {{trigger}}. */
+export function triggerPhrase(company: string, t: Trigger | null): string | null {
+  return pickVariant(company, triggerPhraseVariants(company, t));
 }
 
 /** Повод для середины фразы («when a team is …») — значение {{trigger_short}}. */
@@ -90,9 +151,14 @@ export function triggerShort(t: Trigger | null): string {
   }
 }
 
-/** Предложение об утверждённом кейсе — значение {{case}}. */
+/**
+ * Предложение об утверждённом кейсе — значение {{case}}. Было «For a similar
+ * {segment} company, we helped {snippet}» — а snippet сам начинается с того же
+ * описания клиента, и выходило «for a similar custom software development
+ * company, we helped a custom software development team».
+ */
 export function caseSentence(c: EnCase): string {
-  return `For a similar ${c.segment} company, we helped ${c.snippet}.`;
+  return `One example: we helped ${c.snippet}.`;
 }
 
 /**
@@ -110,42 +176,48 @@ function signed(...paragraphs: Array<string | null | undefined | false>): string
   return `Hi there,\n\n${body}\n\n${POLZA_OUTREACH_DEFAULT_SIGNATURE}`;
 }
 
-/** Цепочка CEO — образец писателя шаблонов (templateWriter.ts собирает её на плейсхолдерах). */
+/**
+ * Цепочка — образец писателя шаблонов (templateWriter.ts собирает её на
+ * плейсхолдерах). 28.09.2026 переписана: прежний текст CEO шёл почти дословно
+ * во все письма («топорно и одинаково» — отзыв продаж). Смысл и порядок те же:
+ * повод и строка о компании → почему буксует и что делаем → пример и
+ * бесплатная выборка → закрыть переписку. Письма 2–4 — ответы в той же ветке:
+ * своей темы у них нет.
+ */
 export function buildLetters(input: BuildLettersInput): PolzaOutreachLetter[] {
   const { company } = input;
   const phrase = triggerPhrase(company, input.trigger);
 
   const letter1 = signed(
     phrase,
-    'Usually at this stage the hard part is not sending more emails, but finding the right accounts, the right angle, and getting first qualified replies fast.',
-    'We help B2B teams build the list, enrich contacts, write the sequence, and launch outbound without hiring an SDR just to do manual research.',
-    'Who would be the right person to speak with about new B2B pipeline?',
+    input.about,
+    `When a team is ${triggerShort(input.trigger)}, most of the early effort goes into research: which accounts to go after, who to contact there and what to say to them. That is the part we take on — the account list, contacts, the sequence and the launch — and the interested replies go straight to your team.`,
+    'Who would be the right person to talk to about this?',
   );
 
   const letter2 = signed(
-    `The reason I reached out: when a team is ${triggerShort(input.trigger)}, the slow part is usually not the email tool.`,
-    'It is:\n- which companies to target;\n- which contacts to use;\n- what angle to test first;\n- how to avoid a generic cold email.',
-    'We handle that end-to-end: account research, contact enrichment, sequence writing, launch setup and reply tracking.',
-    'Worth asking who owns this on your side?',
+    'Following up on my note. Outbound rarely stalls because of the sending tool. It stalls because the same generic email goes to a broad list, and nobody has a real reason to reply.',
+    `What we would do for ${company} instead: a few narrow segments, a separate reason to write to each company, and every reply handed to you with the full thread.`,
+    'Would it help if I sketched what that could look like for you?',
   );
 
   const letter3 = signed(
     input.caseHit ? caseSentence(input.caseHit) : null,
     segmentsBlock(company, input.segments),
-    'I can send a small sample of 20–30 accounts so you can judge the quality before any call.',
-    'Should I send it here?',
+    `I can put together a free sample of 20–30 target accounts for ${company}, so you can judge the quality before we even talk.`,
+    'Want me to send it over?',
   );
 
   const letter4 = signed(
-    'Should I close the loop here?',
-    `If outbound/new pipeline is relevant, I can send a small account sample for ${company}.\nIf not, just reply “not now” and I will not follow up.`,
+    `Last note from me. If new pipeline is on the agenda at ${company}, the account sample is still on the table. If not, a short “not now” is enough and I will leave it there.`,
+    'Should I close the loop?',
   );
 
   return [
-    { n: 1, subject: `who owns outbound at ${company}?`, body: letter1 },
-    { n: 2, subject: 'quick follow-up', body: letter2 },
-    { n: 3, subject: `example for ${company}`, body: letter3 },
-    { n: 4, subject: 'should I close this?', body: letter4 },
+    { n: 1, subject: `pipeline at ${company}`, body: letter1 },
+    { n: 2, subject: '', body: letter2 },
+    { n: 3, subject: '', body: letter3 },
+    { n: 4, subject: '', body: letter4 },
   ];
 }
 
@@ -384,7 +456,7 @@ export function guardTemplate(t: PolzaChainTemplateLetters, offer: PolzaOfferKey
       if (!allowed.has(found) || found === P.signature) flags.push(`${tag}:placeholder_not_allowed(${found})`);
     }
     if (/[{}]/.test(plain)) flags.push(`${tag}:placeholder_broken`);
-    for (const ph of [P.trigger, P.case, P.segments]) {
+    for (const ph of [P.trigger, P.about, P.case, P.segments]) {
       if (!text.includes(ph)) continue;
       if (countOf(text, ph) > 1) flags.push(`${tag}:placeholder_repeated(${ph})`);
       if (!ownParagraph(text, ph)) flags.push(`${tag}:placeholder_not_alone(${ph})`);
@@ -408,16 +480,20 @@ export function guardTemplate(t: PolzaChainTemplateLetters, offer: PolzaOfferKey
     if (digits.length) flags.push(`${tag}:unsupported_number(${digits.join(' ')})`);
   }
 
-  // Обязательные плейсхолдеры и их места: повод — в письме 1 (оба варианта),
-  // кейс — только в письме 3 с кейсом, сегменты — только в письме 3.
+  // Обязательные плейсхолдеры и их места: повод и строка о компании — в
+  // письме 1 (оба варианта), кейс — только в письме 3 с кейсом, сегменты —
+  // только в письме 3.
   if (allowed.has(P.trigger)) {
     if (!t.bodyDirect.includes(P.trigger)) flags.push(`L1:placeholder_missing(${P.trigger})`);
     if (!t.bodyRouting.includes(P.trigger)) flags.push(`L1r:placeholder_missing(${P.trigger})`);
   }
+  if (!t.bodyDirect.includes(P.about)) flags.push(`L1:placeholder_missing(${P.about})`);
+  if (!t.bodyRouting.includes(P.about)) flags.push(`L1r:placeholder_missing(${P.about})`);
   if (!t.bodyWithCase.includes(P.case)) flags.push(`L3c:placeholder_missing(${P.case})`);
   if (!t.bodyWithoutCase.includes(P.segments)) flags.push(`L3:placeholder_missing(${P.segments})`);
   for (const [tag, raw] of bodies) {
     if (allowed.has(P.trigger) && !tag.startsWith('L1') && raw.includes(P.trigger)) flags.push(`${tag}:placeholder_misplaced(${P.trigger})`);
+    if (!tag.startsWith('L1') && raw.includes(P.about)) flags.push(`${tag}:placeholder_misplaced(${P.about})`);
     if (tag !== 'L3c' && raw.includes(P.case)) flags.push(`${tag}:placeholder_misplaced(${P.case})`);
     if (!tag.startsWith('L3') && raw.includes(P.segments)) flags.push(`${tag}:placeholder_misplaced(${P.segments})`);
   }

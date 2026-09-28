@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2, RefreshCw, Search, Trash2, Upload, Users } from 'lucide-react';
 import {
   bulkMailboxes,
@@ -27,7 +27,7 @@ import {
 } from './api';
 import { EgressMoveMenu, EgressPanel } from './EgressPanel';
 import { GOOGLE_STATE_LABELS, MAILBOX_STATUS_LABELS, providerLabel } from './labels';
-import { TagAssignMenu, TagChip, TagFilterMenu } from './MailboxTags';
+import { TagAssignMenu, TagChip, TagFilterMenu, tagTones } from './MailboxTags';
 import { SenderModal } from './SenderModal';
 
 const PAGE_SIZE = 30;
@@ -70,6 +70,7 @@ export function MailboxesTab() {
   const [appliedSearch, setAppliedSearch] = useState('');
   const searchTimer = useRef<number | null>(null);
   const [tags, setTags] = useState<MailboxTagDto[]>([]);
+  const toneByTag = useMemo(() => tagTones(tags), [tags]);
   const [untagged, setUntagged] = useState(0);
   const [tagFilter, setTagFilter] = useState<ReadonlySet<string>>(EMPTY_SELECTION);
   const [noTagFilter, setNoTagFilter] = useState(false);
@@ -721,7 +722,7 @@ export function MailboxesTab() {
                       </td>
                       <td className="px-3 py-2.5">
                         {mailbox.tag ? (
-                          <TagChip name={mailbox.tag.name} />
+                          <TagChip name={mailbox.tag.name} tone={toneByTag.get(mailbox.tag.id)} />
                         ) : (
                           <span className="text-xs text-zinc-400">—</span>
                         )}

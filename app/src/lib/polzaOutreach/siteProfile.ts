@@ -50,6 +50,10 @@ export interface SiteProfile {
   icpQuote: string | null;
   highValue: boolean;
   exclusion: SiteExclusion | null;
+  /** Название, как компания пишет себя на сайте (сверено со страницами); в письма — вместо имени из адреса вакансии. */
+  brandName: string | null;
+  /** Строка письма 1 о компании — что продаёт и кому ({{about}}); прошла проверку aboutLineOf. */
+  aboutLine: string | null;
   companyContext: string | null;
   likelyGtmProblem: string | null;
   outreachAngle: string | null;
@@ -68,6 +72,8 @@ export const EMPTY_PROFILE: SiteProfile = {
   icpQuote: null,
   highValue: false,
   exclusion: null,
+  brandName: null,
+  aboutLine: null,
   companyContext: null,
   likelyGtmProblem: null,
   outreachAngle: null,
@@ -86,6 +92,8 @@ const SYSTEM = `You analyze a company's website for Polza Agency, a B2B outbound
   "icp_quote": string,            // VERBATIM quote naming who the customers are (industries, roles, company types); "" if not stated
   "high_value": boolean,          // high-value B2B deal (enterprise/mid-market software, industrial equipment, professional services with large contracts)
   "exclusion": string,            // "staffing" | "job_board" | "lead_gen_agency" | "marketing_agency" | "b2c" | "local_service" | "course" | "" — only if clearly true
+  "brand_name": string,           // the company name exactly as the site writes it, without Inc./LLC/GmbH; ""
+  "about_line": string,           // ONE sentence for a cold email, addressed to the company ("you"), 10–25 words: what they sell and to whom, taken only from the pages; plain spoken English, no praise, no numbers, no guesses about their problems or plans; "" if the pages do not say it clearly
   "company_context": string,      // what the company does, 5–15 words, plain English, no hype
   "likely_gtm_problem": string,   // a plausible go-to-market challenge for a company like this, 8–20 words, phrased as a hypothesis
   "outreach_angle": string,       // the angle to open with, 5–15 words
@@ -171,6 +179,34 @@ export interface SiteProfileOptions {
   onLlmAnswer?: () => void;
 }
 
+/** Название с сайта — только если оно правда есть на страницах и похоже на название, а не на фразу. */
+function brandNameOf(value: unknown, allText: string): string | null {
+  const name = asString(value).replace(/\s+/g, ' ').replace(/^["'«]|["'»]$/g, '').trim();
+  if (!name || name.length > 60 || name.split(' ').length > 6) return null;
+  return allText.toLowerCase().includes(name.toLowerCase()) ? name : null;
+}
+
+// Строка о компании уходит в письмо без правки человеком: реклама, обещания и
+// голос «мы» в ней — брак, лучше письмо без неё.
+const ABOUT_BANNED_RE = /\b(leading|world-class|revolutionary|best-in-class|cutting-edge|innovative|amazing|impressive|guarantee[sd]?)\b/i;
+// «We», «our» — голос самой компании, скопированный с сайта. Регистр важен: «US hospitals» — не «us».
+const ABOUT_OWN_VOICE_RE = /\b(?:[Ww]e|[Oo]ur|us)\b/;
+
+/**
+ * Строка {{about}}: одно законченное предложение 6–30 слов, без цифр (цифры в
+ * письме — только из кейса и повода), вопросов, восклицаний, кавычек и
+ * скобок. Не прошла — null: абзац с {{about}} из письма удаляется.
+ */
+export function aboutLineOf(value: unknown): string | null {
+  let line = asString(value).replace(/\s+/g, ' ').trim();
+  if (!line) return null;
+  if (!/[.]$/.test(line)) line = `${line}.`;
+  const words = line.split(' ').length;
+  if (words < 6 || words > 30) return null;
+  if (/\d|[?!{}"«»;]/.test(line) || /\.\s+\S/.test(line.slice(0, -1)) || ABOUT_BANNED_RE.test(line) || ABOUT_OWN_VOICE_RE.test(line)) return null;
+  return line.charAt(0).toUpperCase() + line.slice(1);
+}
+
 function detectTechStack(html: string): string[] {
   const stack = new Set<string>();
   for (const s of detectSignals(html)) {
@@ -247,6 +283,8 @@ export async function buildSiteProfile(
     icpQuote: acceptQuote(allText, asString(raw.icp_quote)),
     highValue: asBool(raw.high_value),
     exclusion: ['staffing', 'job_board', 'lead_gen_agency', 'marketing_agency', 'b2c', 'local_service', 'course'].includes(exclusion) ? exclusion : null,
+    brandName: brandNameOf(raw.brand_name, allText),
+    aboutLine: aboutLineOf(raw.about_line),
     companyContext: clean(raw.company_context, 18),
     likelyGtmProblem: clean(raw.likely_gtm_problem, 24),
     outreachAngle: clean(raw.outreach_angle, 18),
