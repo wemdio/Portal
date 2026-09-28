@@ -5,6 +5,7 @@ import type { VeOutreachSetupResponse } from '@/lib/verticalEngineV2/outreachSet
 import type { VeOutreachLaunchRequest, VeOutreachRun } from '@/lib/verticalEngineV2/outreachLaunch';
 import { VE_API, veEnginePost, type VeDeliveryPlanPreviewDto } from './api';
 import { HE } from './design';
+import { SearchableSelect } from './SearchableSelect';
 import { StatusBox } from './ui';
 import { CreateClientPresetInline, DeliveryPlanBlock, useTemplateLaunch } from './steps/Step5Template';
 import { getVeLaunchSelectionState } from './launchSelection';
@@ -203,23 +204,15 @@ export function OutreachLaunchPanel({
       </div>
       <h2 className="ve2-h2">Клиент и отправители</h2>
       {launch.loadError ? <StatusBox tone="error">{launch.loadError}</StatusBox> : null}
-      <label className="block ve2-label">
-        Клиент
-        <select
-          aria-label="Клиент"
-          className={`${HE.input} mt-2 w-full`}
-          value={launch.presetId}
-          disabled={!!launch.boundPresetId || busy}
-          onChange={(event) => launch.setPresetId(event.target.value)}
-        >
-          <option value="">Выберите клиента</option>
-          {launch.presets?.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
-          ))}
-        </select>
-      </label>
+      <SearchableSelect
+        id="ve2-outreach-client"
+        label="Клиент"
+        value={launch.presetId}
+        options={launch.presets ?? []}
+        disabled={!!launch.boundPresetId || busy}
+        onChange={launch.setPresetId}
+        placeholder="Выберите клиента"
+      />
       {preset ? (
         <p className={HE.muted}>
           {preset.instantly_account_label} ·{' '}

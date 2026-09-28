@@ -645,6 +645,26 @@ html[data-portal-theme="dark"] .ve2 {
   color: var(--ve2-faint);
   border-color: var(--ve2-line);
 }
+.ve2-select { position: relative; min-width: 0; }
+.ve2-select-input { padding-right: 36px; }
+.ve2-select-chevron {
+  position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+  width: 16px; height: 16px; pointer-events: none; color: var(--ve2-faint);
+}
+.ve2-select-menu {
+  position: absolute; top: 100%; left: 0; right: 0; z-index: 30; margin-top: 4px;
+  background: var(--ve2-surface); color: var(--ve2-fg);
+  border: 1px solid var(--ve2-input-line); border-radius: 6px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+}
+.ve2-select-options { max-height: 240px; overflow-y: auto; overscroll-behavior: contain; padding: 4px; }
+.ve2-select-option {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  min-height: 40px; padding: 8px; border-radius: 3px;
+  cursor: pointer; font-size: 13px; overflow-wrap: anywhere;
+}
+.ve2-select-option:hover, .ve2-select-option[data-active="true"] { background: var(--ve2-elev); }
+.ve2-select-option[aria-selected="true"] { font-weight: 600; }
 .ve2-cbx {
   accent-color: var(--ve2-accent);
   flex: none;

@@ -19,6 +19,7 @@ import {
   type VeProjectsResponse,
 } from './api';
 import { HE, Spinner, StatusDot } from './design';
+import { matchesVeSearch } from './SearchableSelect';
 import { LaunchPortfolioView } from './LaunchPortfolioView';
 import { ProjectDetail } from './ProjectDetail';
 import { ProjectStatusBadge, StatusBox, formatDate, prettyHost, prettyProjectName } from './ui';
@@ -56,6 +57,9 @@ export function VeEngineWorkspace({
 } = {}) {
   const [projects, setProjects] = useState<VeProject[]>([]);
   const [listLoading, setListLoading] = useState(true);
+  const [projectQuery, setProjectQuery] = useState('');
+  const visibleProjects = projects.filter((project) =>
+    matchesVeSearch(`${prettyProjectName(project.name, project.website_url)} ${prettyHost(project.website_url)}`, projectQuery));
   const [errorMsg, setErrorMsg] = useState('');
 
   const [websiteUrl, setWebsiteUrl] = useState('');
@@ -195,6 +199,29 @@ export function VeEngineWorkspace({
                 ) : null}
               </div>
 
+              {!listLoading && projects.length > 0 ? (
+                <div className="mb-4">
+                  <label htmlFor="ve2-project-search" className="ve2-label mb-2 block">Найти проект</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      id="ve2-project-search"
+                      type="search"
+                      autoComplete="off"
+                      placeholder="Название или сайт"
+                      className={HE.input}
+                      value={projectQuery}
+                      onChange={(event) => setProjectQuery(event.target.value)}
+                    />
+                    {projectQuery ? (
+                      <button type="button" className="ve2-b-quiet shrink-0" onClick={() => setProjectQuery('')}>
+                        Сбросить
+                      </button>
+                    ) : null}
+                  </div>
+                  {projectQuery.trim() ? <p role="status" className={`mt-2 ${HE.faint}`}>Найдено: {visibleProjects.length} из {projects.length}</p> : null}
+                </div>
+              ) : null}
+
               {listLoading ? (
                 <div className="ve2-rows">
                   {[1, 2, 3].map((i) => (
@@ -208,9 +235,14 @@ export function VeEngineWorkspace({
                     Добавьте сайт клиента в форме нового проекта. Первый этап начнётся внутри проекта.
                   </p>
                 </div>
+              ) : visibleProjects.length === 0 ? (
+                <div className={`${HE.emptyState} py-10`}>
+                  <p className={HE.cardTitle}>Проект не найден</p>
+                  <p className={`mt-2 ${HE.muted}`}>Измените название или сбросьте поиск.</p>
+                </div>
               ) : (
                 <ul className="ve2-rows">
-                  {projects.map((p) => (
+                  {visibleProjects.map((p) => (
                     <li key={p.id}>
                       <button
                         type="button"

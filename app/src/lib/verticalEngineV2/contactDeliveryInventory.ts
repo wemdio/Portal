@@ -4,6 +4,13 @@ import { CampaignStatus } from '@/lib/instantly/types';
 const PAGE_SIZE = 500;
 const ID_BATCH_SIZE = 100;
 
+export class ContactDeliveryAnalyticsUnavailableError extends Error {
+  constructor() {
+    super('delivery catalog requires an exact non-negative first-contacted count');
+    this.name = 'ContactDeliveryAnalyticsUnavailableError';
+  }
+}
+
 type Page<T> = {
   data: T[] | null;
   count?: number | null;
@@ -144,7 +151,7 @@ export async function loadVeContactDeliveryCampaignInventory(
         campaign.analytics_synced_at === null && initialEmptyCampaignIds.has(campaign.id);
       const contacts = awaitingFirstAnalytics ? 0 : exactContactCount(campaign.new_leads_contacted_count);
       if (contacts === null) {
-        throw new Error('delivery catalog requires an exact non-negative first-contacted count');
+        throw new ContactDeliveryAnalyticsUnavailableError();
       }
       if (!ids.includes(campaign.id) || observedIds.has(campaign.id)) {
         throw new Error('delivery catalog has invalid or duplicate campaign identities');
