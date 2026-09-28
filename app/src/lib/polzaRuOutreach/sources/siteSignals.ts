@@ -49,6 +49,8 @@ export interface SiteAnalysis {
   isB2b: boolean;
   b2bQuote: string | null;
   productSummary: string | null;
+  /** Строка письма 1 о компании — что продаёт и кому ({{о компании}}); прошла проверку aboutLineOf. */
+  aboutLine: string | null;
   customerQuote: string | null;
   excludedCategory: string | null;
   taScore: number;
@@ -64,6 +66,7 @@ export const EMPTY_SITE: SiteAnalysis = {
   isB2b: false,
   b2bQuote: null,
   productSummary: null,
+  aboutLine: null,
   customerQuote: null,
   excludedCategory: null,
   taScore: 0,
@@ -146,10 +149,11 @@ const POLZA_ICP_BRIEF = `Клиент Polza Agency — российская ко
 
 const SYSTEM = `Ты разбираешь страницы сайта российской компании для B2B-аутрича Polza Agency. Верни СТРОГИЙ JSON:
 {
-  "brand": string,              // название компании ДОСЛОВНО как на сайте (без ООО/АО); "" если не видно
+  "brand": string,              // короткое название, которым компания сама называет себя в тексте сайта, ДОСЛОВНО (без ООО/АО и без полного юридического наименования); "" если не видно
   "is_b2b": boolean,            // продаёт организациям
   "b2b_quote": string,          // ДОСЛОВНАЯ цитата, подтверждающая продажи организациям; ""
   "product_summary": string,    // что продаёт компания, 3–10 слов, по-русски; ""
+  "about_line": string,         // ОДНО предложение для холодного письма, обращение на «вы», 8–25 слов: что компания продаёт и кому — только по страницам сайта; простым разговорным языком, без оценок и похвалы, без цифр, без догадок о проблемах и планах; "" если со страниц это неясно
   "customer_quote": string,     // ДОСЛОВНАЯ цитата: кому продаёт (отрасли, тип клиентов); "" если прямо не написано
   "excluded_category": string,  // "recruitment_agency" | "leadgen_agency" | "b2c_only" | "marketplace" | "" — только если явно
   "ta_score": number,           // 0–10: насколько компания похожа на клиента Polza (портрет ниже). Будь строг: большинство 3–6; мало данных — не выше 5
@@ -197,6 +201,26 @@ function hasCoreFields(raw: Record<string, unknown>): boolean {
   const ta = raw.ta_score;
   const taValid = (typeof ta === 'number' && Number.isFinite(ta)) || (typeof ta === 'string' && ta.trim() !== '' && Number.isFinite(Number(ta)));
   return taValid && isBoolLike(raw.is_b2b);
+}
+
+// Строка о компании уходит в письмо без правки человеком: реклама, давление и
+// голос самой компании («мы», «наш» — скопировано с сайта) в ней — брак.
+const ABOUT_BANNED_RE = /уникальн|лучш|лидер|срочн|гарант|революц|инновац|идеальн|(?<![а-яё])(?:мы|нас|нам|наш[а-яё]*)(?![а-яё])/i;
+
+/**
+ * Строка {{о компании}}: одно законченное предложение 6–30 слов, без цифр
+ * (цифры в письме — только из кейса, повода и утверждённых формулировок),
+ * вопросов, восклицаний, кавычек и скобок. Не прошла — null: абзац из письма
+ * удаляется.
+ */
+export function aboutLineOf(value: unknown): string | null {
+  let line = asString(value).replace(/\s+/g, ' ').trim();
+  if (!line) return null;
+  if (!/[.]$/.test(line)) line = `${line}.`;
+  const words = line.split(' ').length;
+  if (words < 6 || words > 30) return null;
+  if (/\d|[?!{}"«»;]/.test(line) || /\.\s+\S/.test(line.slice(0, -1)) || ABOUT_BANNED_RE.test(line)) return null;
+  return line.charAt(0).toUpperCase() + line.slice(1);
 }
 
 /** Разбор из кэша — только целый и открывшийся: битая запись — промах, а не падение строки. */
@@ -259,6 +283,7 @@ export async function analyzeSite(website: string, domain: string | null = norma
     isB2b: asBool(raw.is_b2b) && Boolean(b2bQuote),
     b2bQuote,
     productSummary: asString(raw.product_summary).slice(0, 120) || null,
+    aboutLine: aboutLineOf(raw.about_line),
     customerQuote: acceptQuote(allText, asString(raw.customer_quote)),
     excludedCategory: ['recruitment_agency', 'leadgen_agency', 'b2c_only', 'marketplace'].includes(excluded) ? excluded : null,
     taScore: Number.isFinite(ta) ? Math.max(0, Math.min(10, Math.round(ta))) : 0,

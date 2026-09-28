@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Check, Loader2, Search, Tag } from 'lucide-react';
 import { fetchMailboxTags, fetchMailboxes, type MailboxDto, type MailboxTagDto } from './api';
 import { MAILBOX_STATUS_LABELS, providerLabel } from './labels';
-import { TagChip } from './MailboxTags';
+import { TagChip, tagTones } from './MailboxTags';
 import { SenderModal } from './SenderModal';
 
 /** Ящик в выборке: адрес храним рядом с id, чтобы показать его без повторного запроса. */
@@ -61,6 +61,7 @@ export function MailboxPickerModal({
   const [error, setError] = useState<string | null>(null);
   const [picked, setPicked] = useState<PickedMailbox[]>(initial);
   const [tags, setTags] = useState<MailboxTagDto[]>([]);
+  const toneByTag = useMemo(() => tagTones(tags), [tags]);
   // Какой тег сейчас докладываем: ящики тега доезжают запросом, и на пуле в
   // несколько сотен это не мгновенно.
   const [tagBusy, setTagBusy] = useState<string | null>(null);
@@ -295,7 +296,7 @@ export function MailboxPickerModal({
                   className="h-4 w-4 cursor-pointer rounded border-zinc-300"
                 />
                 <span className="min-w-0 flex-1 truncate text-sm text-zinc-900">{mailbox.email}</span>
-                {mailbox.tag ? <TagChip name={mailbox.tag.name} /> : null}
+                {mailbox.tag ? <TagChip name={mailbox.tag.name} tone={toneByTag.get(mailbox.tag.id)} /> : null}
                 {/* Снятая галочка на вкладке «Ящики» сильнее выбора в кампании:
                     планировщик такой ящик пропустит, и об этом надо сказать
                     здесь, а не оставлять человека гадать, почему письма стоят. */}

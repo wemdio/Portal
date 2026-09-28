@@ -40,14 +40,27 @@ export function useDismiss(open: boolean, close: () => void) {
   return ref;
 }
 
-/** Чип тега в строке таблицы. Цвета нет намеренно: рядом уже два цветных статуса. */
-export function TagChip({ name }: { name: string }) {
+/**
+ * Чип тега: цветные текст и обводка без заливки — заливкой уже говорят
+ * статусы рядом, и цветной блок спорил бы с ними. Цвета — `.mailbox-tag-chip`
+ * в globals.css, по одному набору на светлую и тёмную тему. Без `tone`
+ * (теги ещё не доехали) чип нейтральный.
+ */
+export function TagChip({ name, tone }: { name: string; tone?: number }) {
   return (
-    <span className="inline-flex max-w-40 items-center gap-1 rounded-md bg-zinc-100 px-2 py-0.5 text-xs text-zinc-700">
-      <Tag className="h-3 w-3 shrink-0 text-zinc-400" />
+    <span
+      data-tone={tone}
+      className="mailbox-tag-chip inline-flex max-w-40 items-center gap-1 rounded-md border px-2 py-0.5 text-xs font-medium"
+    >
+      <Tag className="h-3 w-3 shrink-0" />
       <span className="truncate">{name}</span>
     </span>
   );
+}
+
+/** Тег → номер цвета: у строки ящика есть только id и имя тега. */
+export function tagTones(tags: MailboxTagDto[]): Map<string, number> {
+  return new Map(tags.map((tag) => [tag.id, tag.tone]));
 }
 
 /** Окно с одним полем: создание тега и переименование — одна и та же форма. */
@@ -246,7 +259,9 @@ export function TagFilterMenu({
                       >
                         {checked ? <Check className="h-3 w-3" /> : null}
                       </span>
-                      <span className="flex-1 truncate">{tag.name}</span>
+                      <span className="min-w-0 flex-1">
+                        <TagChip name={tag.name} tone={tag.tone} />
+                      </span>
                       <span className="text-xs text-zinc-400">{tag.mailboxes}</span>
                     </button>
                     <button
@@ -364,8 +379,9 @@ export function TagAssignMenu({
                 }}
                 className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-100"
               >
-                <Tag className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
-                <span className="flex-1 truncate">{tag.name}</span>
+                <span className="min-w-0 flex-1">
+                  <TagChip name={tag.name} tone={tag.tone} />
+                </span>
                 <span className="text-xs text-zinc-400">{tag.mailboxes}</span>
               </button>
             ))}

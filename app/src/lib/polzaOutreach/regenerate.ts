@@ -59,7 +59,7 @@ import {
 
 const ROWS = 'polza_outreach_companies';
 const PAGE = 1000;
-const WAITING_COLUMNS = 'id,company_name,trigger_list,recommended_case,segments,email_type,lead_score';
+const WAITING_COLUMNS = 'id,company_name,brand_name,about_line,trigger_list,recommended_case,segments,email_type,lead_score';
 /** review_reason строк, ждущих шаблон: код и подробность («template_failed: …»). */
 const TEMPLATE_FAILED_LIKE = 'template_failed%';
 /** Письма собираются без ИИ — параллельно пишем только строки в базу. */
@@ -68,6 +68,8 @@ const REBUILD_CONCURRENCY = 4;
 interface WaitingRow {
   id: string;
   company_name: string;
+  brand_name: string | null;
+  about_line: string | null;
   trigger_list: unknown;
   recommended_case: string | null;
   segments: unknown;
@@ -221,6 +223,8 @@ function companyInput(row: WaitingRow, cases: EnCase[]): CompanyLettersInput {
   const segments = Array.isArray(row.segments) ? row.segments.filter((s): s is string => typeof s === 'string') : [];
   return {
     companyName: row.company_name,
+    brandName: row.brand_name,
+    aboutLine: row.about_line,
     triggers,
     // Кейс — только утверждённый сейчас: отозванный после запуска в письмо не идёт.
     caseHit: row.recommended_case ? cases.find((c) => c.caseId === row.recommended_case) ?? null : null,

@@ -60,6 +60,8 @@ export interface MailboxTagRef {
 /** Тег в окошке фильтра — со счётчиком ящиков. */
 export interface MailboxTagDto extends MailboxTagRef {
   mailboxes: number;
+  /** Номер цвета чипа, 0..TAG_TONES-1 — назначает сервер, см. assignTagTones. */
+  tone: number;
 }
 
 export interface CampaignDto {
@@ -272,7 +274,7 @@ export function fetchMailboxTags() {
 }
 
 export function createMailboxTag(name: string) {
-  return authFetchJson<MailboxTagDto>(`${BASE}/tags`, {
+  return authFetchJson<MailboxTagRef>(`${BASE}/tags`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),

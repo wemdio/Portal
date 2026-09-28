@@ -1810,6 +1810,54 @@ html[data-portal-theme='dark'] .portal-shell {
   --chart-series-muted: #5f606a;
 }
 
+/* ─── Чипы тегов ящиков «Рассылки» ─────────────────────────────────────────
+   Цветные текст и обводка, фон прозрачный: заливкой в той же строке говорят
+   статусы. Номер цвета назначает сервер (`assignTagTones`, lib/sender/tags.ts)
+   — число слотов там же, `TAG_TONES`, и должно совпадать с числом правил ниже.
+
+   Светлая тема — оттенки уровня 700 (от 4.5:1 к белому), тёмная — 300 (от 8:1
+   к тёмной поверхности): цвет текста читается как текст, а не как подсветка.
+   Порядок подобран так, чтобы первые теги были дальше всего друг от друга по
+   тону. Без `data-tone` чип нейтральный — так он выглядит, пока теги грузятся. */
+.portal-shell {
+  --tag-tone-0: #1d4ed8;
+  --tag-tone-1: #b45309;
+  --tag-tone-2: #047857;
+  --tag-tone-3: #be123c;
+  --tag-tone-4: #6d28d9;
+  --tag-tone-5: #0e7490;
+  --tag-tone-6: #4d7c0f;
+  --tag-tone-7: #a21caf;
+  --tag-tone-none: #52525b;
+}
+
+html[data-portal-theme='dark'] .portal-shell {
+  --tag-tone-0: #93c5fd;
+  --tag-tone-1: #fcd34d;
+  --tag-tone-2: #6ee7b7;
+  --tag-tone-3: #fda4af;
+  --tag-tone-4: #c4b5fd;
+  --tag-tone-5: #67e8f9;
+  --tag-tone-6: #bef264;
+  --tag-tone-7: #f0abfc;
+  --tag-tone-none: #a1a1aa;
+}
+
+.mailbox-tag-chip {
+  --tag-tone: var(--tag-tone-none);
+  color: var(--tag-tone);
+  background-color: transparent;
+  border-color: color-mix(in srgb, var(--tag-tone) 55%, transparent);
+}
+.mailbox-tag-chip[data-tone='0'] { --tag-tone: var(--tag-tone-0); }
+.mailbox-tag-chip[data-tone='1'] { --tag-tone: var(--tag-tone-1); }
+.mailbox-tag-chip[data-tone='2'] { --tag-tone: var(--tag-tone-2); }
+.mailbox-tag-chip[data-tone='3'] { --tag-tone: var(--tag-tone-3); }
+.mailbox-tag-chip[data-tone='4'] { --tag-tone: var(--tag-tone-4); }
+.mailbox-tag-chip[data-tone='5'] { --tag-tone: var(--tag-tone-5); }
+.mailbox-tag-chip[data-tone='6'] { --tag-tone: var(--tag-tone-6); }
+.mailbox-tag-chip[data-tone='7'] { --tag-tone: var(--tag-tone-7); }
+
 @media (max-width: 639px) {
   .client-portal .neu-card,
   .client-portal .neu-sm,

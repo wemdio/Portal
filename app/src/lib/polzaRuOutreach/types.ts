@@ -44,12 +44,15 @@ export function letterCountFor(_chain: ChainType): number {
 /**
  * Плейсхолдеры шаблона цепочки — только они меняются от компании к компании
  * (спека 2026-09-26-outreach-to-sender-design.md §4): бренд, фраза-повод из
- * проверенных фактов (openingSentence), текст утверждённого кейса, гипотеза
- * сегментов и подпись отправителя.
+ * проверенных фактов (openingSentence), строка о компании (что продаёт и
+ * кому — из разбора сайта, 28.09.2026: без неё письма всем компаниям оффера
+ * были одним текстом), текст утверждённого кейса, гипотеза сегментов и
+ * подпись отправителя.
  */
 export const TEMPLATE_PLACEHOLDERS = {
   brand: '{{бренд}}',
   opening: '{{повод}}',
+  about: '{{о компании}}',
   case: '{{кейс}}',
   hypothesis: '{{гипотеза}}',
   signature: '{{подпись}}',
@@ -95,6 +98,7 @@ export function templatePlaceholdersFor(chain: ChainType): TemplatePlaceholder[]
   return [
     p.brand,
     p.opening,
+    p.about,
     ...(chainUsesCase(chain) ? [p.case] : []),
     ...(chainUsesHypothesis(chain) ? [p.hypothesis] : []),
     p.signature,

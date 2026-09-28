@@ -227,12 +227,15 @@ export function isPolzaOfferKey(value: string): value is PolzaOfferKey {
 /**
  * Плейсхолдеры шаблона — только они меняются от компании к компании:
  * название, фраза-повод (triggerPhrase, из проверенного повода), короткий
- * повод для середины фразы (triggerShort), предложение об утверждённом кейсе,
- * блок первых сегментов (из разбора сайта) и подпись из настроек.
+ * повод для середины фразы (triggerShort), строка о компании (что продаёт и
+ * кому — из разбора сайта, 28.09.2026: без неё письма всем компаниям оффера
+ * были одним текстом), предложение об утверждённом кейсе, блок первых
+ * сегментов (из разбора сайта) и подпись из настроек.
  */
 export const POLZA_TEMPLATE_PLACEHOLDERS = {
   company: '{{company}}',
   trigger: '{{trigger}}',
+  about: '{{about}}',
   triggerShort: '{{trigger_short}}',
   case: '{{case}}',
   segments: '{{segments}}',
@@ -243,7 +246,7 @@ export type PolzaTemplatePlaceholder = (typeof POLZA_TEMPLATE_PLACEHOLDERS)[keyo
 /** Плейсхолдеры, которые может использовать шаблон оффера: без повода нет и фразы-повода. */
 export function polzaTemplatePlaceholdersFor(offer: PolzaOfferKey): PolzaTemplatePlaceholder[] {
   const p = POLZA_TEMPLATE_PLACEHOLDERS;
-  return [p.company, ...(offer === 'none' ? [] : [p.trigger]), p.triggerShort, p.case, p.segments, p.signature];
+  return [p.company, ...(offer === 'none' ? [] : [p.trigger]), p.about, p.triggerShort, p.case, p.segments, p.signature];
 }
 
 /**
