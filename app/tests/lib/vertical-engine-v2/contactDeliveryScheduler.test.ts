@@ -1,5 +1,6 @@
 /** @jest-environment node */
 
+import { ContactDeliveryAnalyticsUnavailableError } from '@/lib/verticalEngineV2/contactDeliveryInventory';
 import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
 import {
   createGuardedContactDeliveryTick,
@@ -144,7 +145,7 @@ describe('VE2 contact delivery scheduler', () => {
       enforceQueryWindows: true,
     });
     const runProject = jest.fn(async ({ veProjectId }: { veProjectId: string }) => {
-      if (veProjectId === 've-1') throw new Error('provider timeout');
+      if (veProjectId === 've-1') throw new ContactDeliveryAnalyticsUnavailableError();
       return {
         status: 'completed' as const,
         runId: 'run-2',
@@ -164,8 +165,10 @@ describe('VE2 contact delivery scheduler', () => {
       if (veProjectId === 've-1') throw new Error('reconciliation API unavailable');
       return { accepted: 1, released: 1, errors: [] };
     });
+    const recoverActivation = jest.fn(async () => ({ activated: 1, errors: [] }));
     const result = await runBoundContactDeliveries({
       reconcile,
+      recoverActivation,
       portalDb: portal as never,
       instantlyDb: {} as never,
       now: new Date('2026-09-02T12:00:00.000Z'),
@@ -174,6 +177,8 @@ describe('VE2 contact delivery scheduler', () => {
       log,
     });
 
+    expect(recoverActivation).toHaveBeenCalledTimes(1);
+    expect(recoverActivation).toHaveBeenCalledWith({ portalDb: portal, veProjectId: 've-1' });
     expect(runProject.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-1', 've-2']);
     expect(runSupply.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-1', 've-2']);
     expect(reconcile.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-1', 've-2']);

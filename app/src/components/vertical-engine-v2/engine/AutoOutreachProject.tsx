@@ -44,7 +44,7 @@ const RUN_LABELS = {
   queued: 'Запуск в очереди',
   running: 'Создаём и запускаем кампании',
   waiting: 'Ожидает отправителей или даты начала',
-  active: 'Кампании запущены',
+  active: 'Запуск разрешён',
   blocked: 'Запуск требует внимания',
   cancelled: 'Запуск остановлен',
 };
@@ -978,7 +978,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                         creating: 'Создаём кампании',
                         activating: 'Включаем отправку',
                         waiting: 'Ожидает отправителей или даты',
-                        active: 'Отправка включена',
+                        active: 'Загрузка контактов и отправка разрешены по расписанию',
                         blocked: 'Требует внимания',
                       }[item.status]}
                   </p>

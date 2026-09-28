@@ -171,8 +171,7 @@ describe('Vertical Engine v2 Step 5 client onboarding', () => {
     });
 
     const presetSelect = await screen.findByLabelText('Настройки отправки');
-    expect(presetSelect).toHaveValue('preset-1');
-    expect((screen.getByRole('option', { name: 'VBI Новый клиент' }) as HTMLOptionElement).selected).toBe(true);
+    expect(presetSelect).toHaveValue('VBI Новый клиент');
     expect(screen.getByText('Основной Instantly')).toBeInTheDocument();
     expect(screen.getByText('VBI')).toBeInTheDocument();
     expect(screen.queryByText(/sender-(one|two)@secret\.test/)).not.toBeInTheDocument();
@@ -284,7 +283,8 @@ describe('Vertical Engine v2 Step 5 launch plan for Portal projects without peri
   it('lets the specialist choose a project without periods and plans to its card deadline', async () => {
     launchSettings();
     const { user, projectSelect } = await openLaunchForm();
-    await user.selectOptions(projectSelect, STAFF_LINE_ID);
+    await user.type(projectSelect, 'staffline');
+    await user.click(screen.getByRole('option', { name: 'Staff Line' }));
     expect(screen.queryByText(/Новый запуск заблокирован/)).not.toBeInTheDocument();
     expect(screen.getByText(/Без периода/)).toHaveTextContent(
       /^Без периода · дедлайн 30\.09\.2026 · обязательство в карточке «4000» · всего контактов по проекту 25\s905 \(в расчёт не входит\)$/,
@@ -323,7 +323,8 @@ describe('Vertical Engine v2 Step 5 launch plan for Portal projects without peri
   ])('explains why project %s cannot be launched', async (projectId, reason) => {
     launchSettings();
     const { user, projectSelect } = await openLaunchForm();
-    await user.selectOptions(projectSelect, projectId);
+    await user.click(projectSelect);
+    await user.click(screen.getByRole('option', { name: projects.find((project) => project.id === projectId)!.name }));
     expect(screen.getByText(`${reason} Новый запуск заблокирован.`)).toBeInTheDocument();
     // A project with closed periods is not «без периода»; only its reason is shown.
     expect(Boolean(screen.queryByText(/Без периода/))).toBe(projectId === ENAGENCY_ID);
@@ -339,7 +340,7 @@ describe('Vertical Engine v2 Step 5 launch plan for Portal projects without peri
       delivery_plan_issue: issue,
     });
     const { projectSelect } = await openLaunchForm();
-    await waitFor(() => expect(projectSelect).toHaveValue(STAFF_LINE_ID));
+    await waitFor(() => expect(projectSelect).toHaveValue('Staff Line'));
     expect(projectSelect).toBeDisabled();
     expect(screen.getByLabelText('Цель контактов до дедлайна')).toHaveValue(4000);
     expect(screen.getByText(`${issue} Новый запуск заблокирован.`)).toBeInTheDocument();
@@ -363,7 +364,7 @@ describe('Vertical Engine v2 Step 5 launch plan for Portal projects without peri
       delivery_plan_issue: issue,
     });
     const { projectSelect } = await openLaunchForm();
-    await waitFor(() => expect(projectSelect).toHaveValue(PERIOD_PROJECT_ID));
+    await waitFor(() => expect(projectSelect).toHaveValue('Клиент Портала'));
     expect(projectSelect).toBeDisabled();
     expect(screen.getByText(`${issue} Новый запуск заблокирован.`)).toBeInTheDocument();
     await new Promise((resolve) => setTimeout(resolve, 400));
@@ -373,7 +374,8 @@ describe('Vertical Engine v2 Step 5 launch plan for Portal projects without peri
   it('keeps the active-period flow unchanged', async () => {
     launchSettings();
     const { user, projectSelect } = await openLaunchForm();
-    await user.selectOptions(projectSelect, PERIOD_PROJECT_ID);
+    await user.type(projectSelect, 'клиент портала');
+    await user.keyboard('{ArrowDown}{Enter}');
     expect(screen.queryByText(/Без периода/)).not.toBeInTheDocument();
     expect(screen.queryByText(EXTEND_BY_DEADLINE)).not.toBeInTheDocument();
     await user.type(screen.getByLabelText('Цель контактов за период'), '23');
