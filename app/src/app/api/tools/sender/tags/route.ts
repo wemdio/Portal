@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/sender/apiHelpers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { isDuplicateName, normalizeTagName } from '@/lib/sender/tags';
+import { assignTagTones, isDuplicateName, normalizeTagName } from '@/lib/sender/tags';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -26,7 +26,11 @@ export async function GET(req: NextRequest) {
 
     if (error) return jsonError(error.message, 500);
 
-    const tags = (data ?? []).map((row) => {
+    const rows = data ?? [];
+    const tones = assignTagTones(
+      rows.map((row) => ({ id: String(row.id), created_at: row.created_at ? String(row.created_at) : null })),
+    );
+    const tags = rows.map((row) => {
       const raw = (row as { sender_mailboxes?: unknown }).sender_mailboxes;
       const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
       const first = list[0] as { count?: number } | undefined;
@@ -34,6 +38,7 @@ export async function GET(req: NextRequest) {
         id: String(row.id),
         name: String(row.name),
         mailboxes: Number(first?.count ?? 0),
+        tone: tones.get(String(row.id)) ?? 0,
       };
     });
 
