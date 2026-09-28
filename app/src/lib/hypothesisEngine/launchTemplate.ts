@@ -269,7 +269,16 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
     alreadyLaunched: 'Template has already been sent to launch. Re-launch requires force: true.',
     baseNotFound: 'Base not found',
     presetLoadFailed: 'Failed to load the preset',
-    presetNotFound: 'Preset not found',
+    // «Preset not found» не говорило клиенту НИ ЧТО случилось, ни что делать:
+    // пресет он выбирает списком, который загрузился при открытии шага 5, и
+    // пропасть тот может, пока экран открыт. Текст ОДИН на оба случая («такого
+    // id нет» и «id не твой») — расщепление выдало бы существование чужого id
+    // и было бы регрессом к волне 0. Действие — то, которое в кабинете ЕСТЬ:
+    // перечитать список, а если он пуст, попросить менеджера — той же фразой,
+    // что печатает пустой список на шаге 5 (EngStepReview.tsx).
+    presetNotFound:
+      'This sending preset is no longer available. Refresh the page and pick a sending preset again — '
+      + 'if none is offered, ask your manager to set one up.',
     noLetters: 'The template has no letters to launch',
     noEmailColumn: 'No email column found in the collected base',
     noValidEmails: 'The base contains no valid email addresses',

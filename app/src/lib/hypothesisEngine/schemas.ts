@@ -127,21 +127,31 @@ export type HeClusteringDecision = HeClusteringOutput['verticals'][number];
 
 /* ─────────────────────── vocab ─────────────────────── */
 
+/**
+ * Порог у двух полей, без которых вокабуляр бесполезен, — не косметика:
+ * пустой список уезжал к потребителям молча. `company_types` читает план
+ * сбора (stages/baseCollect.ts — термины источника), `job_titles` — досье
+ * (stages/dossier.ts — должности ЛПР для hh-счётчиков); оба просто логировали
+ * «продолжаем без …» и шли дальше на пустом списке. Пустая строка внутри
+ * элемента — тот же пустой список, поэтому `term`/`title` тоже с порогом.
+ * `search_queries` остаётся `.default([])`: его пустота допустима, план сбора
+ * умеет работать без готовых запросов.
+ */
 export const HeVocabSchema = z.object({
   company_types: z
     .array(
       z.object({
-        term: z.string(),
+        term: z.string().trim().min(1),
         kind: z.enum(['canonical', 'synonym', 'geo_variant', 'adjacent', 'slang']).default('synonym'),
         geo: z.string().optional(),
         notes: z.string().optional(),
       }),
     )
-    .default([]),
+    .min(1),
   job_titles: z
     .array(
       z.object({
-        title: z.string(),
+        title: z.string().trim().min(1),
         /**
          * Сторона аудитории (обязательна):
          * buyer — ЛПР компаний вертикали (кому агентство продаёт);
@@ -154,7 +164,7 @@ export const HeVocabSchema = z.object({
         alt_names: z.array(z.string()).optional(),
       }),
     )
-    .default([]),
+    .min(1),
   search_queries: z
     .array(
       z.object({

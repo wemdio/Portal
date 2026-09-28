@@ -20,6 +20,16 @@
  *
  * Локализация: при he_projects.market='us' оба LLM-вызова идут EN-промптами
  * (prompts/siteProfile.en), иначе — RU (обратная совместимость).
+ *
+ * Сроки чтения сайта (волна 3): каждое чтение ограничено сроком (io.ts), и
+ * истёкший срок — НЕ «страницы нет». Три исхода стадии различимы:
+ *  - главная не ответила в срок → наружу летит HeOperationTimeoutError (типом
+ *    его читает политика повторов воркера), в логе — отдельная строка;
+ *  - докачка не ответила в срок → остальные пути этого origin не перебираем
+ *    (каждый стоил бы ещё один полный срок) и пишем это в лог; профиль строится
+ *    по тому, что успели прочитать;
+ *  - сайт ответил, но текста мало → как и раньше brief.site_thin (UI просит
+ *    ручное описание бизнеса). Таймаут в site_thin НЕ превращается.
  */
 
 import { z } from 'zod';
@@ -34,7 +44,8 @@ import {
   buildSiteProfileMessagesEn,
 } from '../prompts/siteProfile.en';
 import type { HeJob } from '../types';
-import { resolveFetchText, type HeFetchTextFn } from './io';
+import { heStageSignal, resolveFetchText, type HeFetchTextFn } from './io';
+import { heIoFailureReason, isHeOperationTimeout } from '../operationDeadline';
 import {
   addUsage,
   newUsage,
@@ -111,22 +122,36 @@ const JS_STUB_MARK = 'требует JavaScript';
  * Бюджеты РАЗДЕЛЬНЫЕ: контентные пути (12 шт) не съедают попытки кейс-путей —
  * иначе кейс-страницы недостижимы вообще (8 попыток < 12 контентных путей).
  * Каждая страница best-effort: 404/ошибка парсера — норма.
+ *
+ * Истёкший срок — не «нет страницы»: origin не отвечает, и остальные пути
+ * (их до 14) стоили бы по полному сроку каждый. Такой перебор и есть та самая
+ * зависшая стадия, поэтому на первом таймауте докачку прекращаем и сообщаем об
+ * этом наверх (timedOut), чтобы исход попал в лог отдельной строкой.
+ * Отмена задачи не «пропущенная страница», а конец работы — её пробрасываем.
  */
 async function fetchExtraPages(
   fetchText: HeFetchTextFn,
   websiteUrl: string,
-): Promise<{ content: Array<{ url: string; text: string }>; cases: Array<{ url: string; text: string }> }> {
+  jobSignal?: AbortSignal,
+): Promise<{
+  content: Array<{ url: string; text: string }>;
+  cases: Array<{ url: string; text: string }>;
+  timedOut: boolean;
+}> {
   let origin: string;
   try {
     origin = new URL(websiteUrl).origin;
   } catch {
-    return { content: [], cases: [] };
+    return { content: [], cases: [], timedOut: false };
   }
+  let timedOut = false;
   const fetchPath = async (path: string): Promise<{ url: string; text: string } | null> => {
     try {
       const text = await fetchText(origin + path);
       if (text && text.trim().length >= MIN_PAGE_CHARS) return { url: origin + path, text };
-    } catch {
+    } catch (e) {
+      if (jobSignal?.aborted) throw e;
+      if (isHeOperationTimeout(e)) timedOut = true;
       /* страницы может не существовать — это ожидаемо */
     }
     return null;
@@ -135,7 +160,7 @@ async function fetchExtraPages(
   const content: Array<{ url: string; text: string }> = [];
   let contentAttempts = 0;
   for (const path of CONTENT_PAGE_PATHS) {
-    if (content.length >= MAX_CONTENT_PAGES || contentAttempts >= MAX_CONTENT_ATTEMPTS) break;
+    if (content.length >= MAX_CONTENT_PAGES || contentAttempts >= MAX_CONTENT_ATTEMPTS || timedOut) break;
     contentAttempts++;
     const page = await fetchPath(path);
     if (page) content.push(page);
@@ -144,12 +169,12 @@ async function fetchExtraPages(
   const cases: Array<{ url: string; text: string }> = [];
   let caseAttempts = 0;
   for (const path of CASE_PAGE_PATHS) {
-    if (cases.length >= MAX_EXTRA_PAGES || caseAttempts >= MAX_PAGE_ATTEMPTS) break;
+    if (cases.length >= MAX_EXTRA_PAGES || caseAttempts >= MAX_PAGE_ATTEMPTS || timedOut) break;
     caseAttempts++;
     const page = await fetchPath(path);
     if (page) cases.push(page);
   }
-  return { content, cases };
+  return { content, cases, timedOut };
 }
 
 /** Корпус профиля: главная + контентные страницы с маркерами URL, с капом. */
@@ -169,6 +194,7 @@ function buildProfileCorpus(siteText: string, extraPages: Array<{ url: string; t
 async function fetchCasePages(
   fetchText: HeFetchTextFn,
   websiteUrl: string,
+  jobSignal?: AbortSignal,
 ): Promise<Array<{ url: string; text: string }>> {
   let origin: string;
   try {
@@ -178,15 +204,19 @@ async function fetchCasePages(
   }
   const pages: Array<{ url: string; text: string }> = [];
   let attempts = 0;
+  let timedOut = false;
   for (const path of CASE_PAGE_PATHS) {
-    if (pages.length >= MAX_EXTRA_PAGES || attempts >= MAX_PAGE_ATTEMPTS) break;
+    if (pages.length >= MAX_EXTRA_PAGES || attempts >= MAX_PAGE_ATTEMPTS || timedOut) break;
     attempts++;
     try {
       const text = await fetchText(origin + path);
       if (text && text.trim().length >= MIN_PAGE_CHARS) {
         pages.push({ url: origin + path, text });
       }
-    } catch {
+    } catch (e) {
+      if (jobSignal?.aborted) throw e;
+      // Тот же разбор, что в fetchExtraPages: молчащий origin не перебираем.
+      if (isHeOperationTimeout(e)) timedOut = true;
       /* страницы может не существовать — это ожидаемо */
     }
   }
@@ -209,7 +239,7 @@ async function refreshSiteCases(
 ): Promise<{ extracted: number; tokensUsed: number; costUsd: number }> {
   // Страницы уже скачанных кейс-путей переиспользуем (стадия качала их для
   // корпуса профиля); не переданы — старый слепой перебор.
-  const extraPages = prefetchedPages ?? (await fetchCasePages(fetchText, websiteUrl));
+  const extraPages = prefetchedPages ?? (await fetchCasePages(fetchText, websiteUrl, heStageSignal(ctx)));
   stageLog(ctx, `[site_profile] кейс-страницы: ${extraPages.length}`);
 
   const casesInput = { websiteUrl, siteText, extraPages };
@@ -282,12 +312,34 @@ export async function runSiteProfileStage(job: HeJob, ctx: HeStageContext): Prom
   const market = projectMarket(project);
 
   const fetchText = resolveFetchText(ctx);
+  const jobSignal = heStageSignal(ctx);
   stageLog(ctx, `[site_profile] фетч ${project.website_url}`);
-  const siteText = await fetchText(project.website_url);
+  let siteText: string;
+  try {
+    siteText = await fetchText(project.website_url);
+  } catch (e) {
+    // Срок истёк ≠ «сайт ничего не отдал»: первый исход транзиентный (хост
+    // принял соединение и молчит), второй — свойство сайта. Отмечаем это в
+    // логе; наружу летит тот же типизированный класс, по которому политика
+    // повторов воркера отличает транзиент от мёртвого сайта.
+    if (isHeOperationTimeout(e)) {
+      stageLog(
+        ctx,
+        `[site_profile] сайт не ответил в срок: ${heIoFailureReason(e)} — это таймаут, а не пустой сайт`,
+      );
+    }
+    throw e;
+  }
   // Докачка контентных/кейс-страниц: профиль по одной главной (≤3000 символов)
   // — уровень «прочитал билборд» и даёт усреднённые гипотезы. Кейс-страницы
   // из этой же пачки уходят в refreshSiteCases (без повторных фетчей).
-  const extraPages = await fetchExtraPages(fetchText, project.website_url);
+  const extraPages = await fetchExtraPages(fetchText, project.website_url, jobSignal);
+  if (extraPages.timedOut) {
+    stageLog(
+      ctx,
+      '[site_profile] докачка остановлена: сайт не ответил в срок (остальные пути этого origin не пробовали)',
+    );
+  }
   const corpusPages = [...extraPages.content, ...extraPages.cases];
   stageLog(
     ctx,
@@ -348,7 +400,10 @@ export async function runSiteProfileStage(job: HeJob, ctx: HeStageContext): Prom
     usage.costUsd += casesResult.costUsd;
     stageLog(ctx, `[site_profile] кейсов извлечено: ${casesResult.extracted}`);
   } catch (e) {
-    stageLog(ctx, `[site_profile] кейсы не извлечены: ${e instanceof Error ? e.message : String(e)}`);
+    // Отмена задачи — не «кейсы не дались»: дальше по стадии идти незачем,
+    // а воркер по 'cancelled' попытку не тратит.
+    if (jobSignal?.aborted) throw e;
+    stageLog(ctx, `[site_profile] кейсы не извлечены: ${heIoFailureReason(e)}`);
   }
 
   return { result: llm.data, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };

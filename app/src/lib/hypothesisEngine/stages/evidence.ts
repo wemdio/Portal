@@ -8,7 +8,21 @@
  * Устойчивость: сбой поиска → тонкие доказательства, стадия завершается;
  * сбой фетча источника → источник пропускается; сбой LLM по одному
  * кандидату → кандидат отбрасывается с reason='stage_error', остальные
- * продолжаются.
+ * продолжаются. Отмена задачи под эти правила НЕ попадает: поиск и чтение
+ * ограничены сроком (io.ts) и слушают сигнал джобы, а отменённая стадия
+ * прерывается — отменённая гипотеза не должна уехать в статистику как
+ * отброшенная (dropped), это разные исходы.
+ *
+ * Под эти правила НЕ попадает и отказ ДОСТУПА к провайдеру (поиск: деньги,
+ * ключ; модель: деньги, ключ, лимит частоты): он перманентен для прогона, то
+ * есть повторится на каждом следующем кандидате, и стадия прерывается ДО
+ * перезаписи he_hypotheses. Туда же — ПОЛНЫЙ отказ поиска (ни одного
+ * обслуженного запроса за двух кандидатов подряд): «тонкие доказательства» это
+ * про один кандидат, а не про прогон, у которого источников нет вовсе.
+ *
+ * Сама перезапись стала условной: снос прошлых 'proposed' гипотез проекта
+ * делается только если этот прогон принял хотя бы одну — иначе ночь заменяла
+ * хороший набор пустым.
  *
  * Кодовая верификация (verifyEvidence.ts): каждый evidence-пункт проверяется
  * против реально скачанных источников (URL ∈ fetched, цитата — подстрока
@@ -28,8 +42,20 @@ import { verifyEvidenceItems } from '../verifyEvidence';
 import { buildEvidenceMessages } from '../prompts/evidence';
 import { buildEvidenceMessagesEn } from '../prompts/evidence.en';
 import type { HeEvidenceItem, HeHypothesisTier, HeJob } from '../types';
+// Политика «какой отказ провайдера модели останавливает прогон» — одна на две
+// стадии с поэлементным платным вызовом; её дом brandCloud.ts (там же docblock).
+import { heLlmRefusalLabel, heRunStoppingLlmFailure } from './brandCloud';
 import { loadMarkupHistory, loadPortfolioProfile } from './hypotheses';
-import { resolveFetchText, resolveSearch } from './io';
+import { heStageSignal, resolveFetchText, resolveSearch } from './io';
+import {
+  heSearchFailureStatus,
+  heSearchOutageFailure,
+  heSearchStageFailure,
+  newHeSearchTally,
+  noteHeSearchAnswered,
+  noteHeSearchFailure,
+} from './searchIo';
+import { heIoFailureReason } from '../operationDeadline';
 import {
   addUsage,
   latestDoneJobResult,
@@ -89,6 +115,7 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
   const profile = readSiteProfile<HeSiteProfileOutput>(project);
   const search = resolveSearch(ctx);
   const fetchText = resolveFetchText(ctx);
+  const jobSignal = heStageSignal(ctx);
   // Рынок: ctx.market (воркер), фолбэк — колонка he_projects.market.
   const market = ctx.market ?? projectMarket(project);
 
@@ -119,6 +146,10 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
   // как есть (блок «Right now» кабинета ENG), поэтому зависит от рынка, а не
   // переводится насовсем: тот же V1 обслуживает русский внутренний инструмент.
   const progressLabel = market === 'us' ? 'checking a hypothesis' : 'проверяем гипотезу';
+  // Счётчик один на всю стадию: «тонкие доказательства» из-за пустой выдачи по
+  // одному кандидату — норма, а вот НУЛЬ обслуженных запросов за всю стадию
+  // означает, что кластеризация ранжировала бы гипотезы по пустоте.
+  const tally = newHeSearchTally();
 
   for (let i = 0; i < candidates.length; i += 1) {
     const candidate = candidates[i];
@@ -133,14 +164,37 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
     const searchResults: Array<{ title: string; link: string; snippet?: string }> = [];
     for (const q of queries) {
       try {
-        for (const item of await search(q)) {
+        const items = await search(q);
+        noteHeSearchAnswered(tally);
+        for (const item of items) {
           if (seenLinks.has(item.link) || searchResults.length >= MAX_SEARCH_ITEMS) continue;
           seenLinks.add(item.link);
           searchResults.push(item);
         }
       } catch (e) {
-        stageLog(ctx, `[evidence] поиск «${q}» упал: ${e instanceof Error ? e.message : String(e)}`);
+        if (jobSignal?.aborted) throw e;
+        noteHeSearchFailure(tally, e);
+        stageLog(ctx, `[evidence] поиск «${q}» упал: ${heIoFailureReason(e)}`);
       }
+    }
+    // Ниже на КАЖДОГО кандидата идёт платный вызов ресёрч-модели, и его вход —
+    // ровно то, что нашёл поиск. Останавливаемся до вызова и ДО перезаписи
+    // he_hypotheses (прошлые предложенные гипотезы проекта должны уцелеть) в
+    // двух случаях: отказ по деньгам/ключу сам не пройдёт, а поиск, не
+    // обслуживший НИ ОДНОГО запроса за два кандидата подряд, лёг целиком —
+    // остальным кандидатам достанется тот же пустой массив источников
+    // (heSearchOutageFailure). Одна пустая выдача, один упавший кандидат и
+    // одиночный блип сюда не попадают: первая считается обслуженной, вторые два
+    // не переживают следующего кандидата.
+    const outage = heSearchOutageFailure(tally, i + 1);
+    if (outage) {
+      stageLog(
+        ctx,
+        `[evidence] поиск отказал (обслужено запросов: ${tally.answered}) — `
+          + `стадия остановлена на «${candidate.title}» (${i}/${candidates.length}), `
+          + `до платного вызова модели: ${heIoFailureReason(outage)}${heSearchFailureStatus(outage)}`,
+      );
+      throw outage;
     }
 
     // 2) Фетч топ-1–2 источников; сбойные пропускаем.
@@ -148,8 +202,11 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
     for (const item of searchResults.slice(0, MAX_SOURCES_TO_FETCH)) {
       try {
         sources.push({ url: item.link, text: truncate(await fetchText(item.link), SOURCE_EXCERPT) });
-      } catch {
-        stageLog(ctx, `[evidence] фетч ${item.link} пропущен`);
+      } catch (e) {
+        if (jobSignal?.aborted) throw e;
+        // Причину печатаем: истёкший срок и «источник не отдался» — разные
+        // исходы, а раньше в логе не было ни того, ни другого.
+        stageLog(ctx, `[evidence] фетч ${item.link} пропущен: ${heIoFailureReason(e)}`);
       }
     }
 
@@ -226,22 +283,63 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
         potential_pct: finalPct,
       });
     } catch (e) {
+      // Отмена задачи — не «кандидат отброшен»: прерываем стадию, иначе цифра
+      // dropped соврёт, а перебор продолжит тратить деньги после отмены.
+      if (jobSignal?.aborted) throw e;
+      // Отказ ДОСТУПА к модели (деньги, ключ, лимит частоты) — тоже не «кандидат
+      // отброшен»: остальные кандидаты получат тот же ответ, dropped соврёт на
+      // все оставшиеся, а перезапись he_hypotheses ниже заменила бы хороший
+      // набор гипотез проекта пустым. Проглоченный здесь, этот класс не доходил
+      // до джобы — а park по 429 и терминальный отказ по 402/401 живут именно
+      // там. Бросаем исходную ошибку: воркеру нужен её тип целым.
+      const refusal = heRunStoppingLlmFailure(e);
+      if (refusal) {
+        stageLog(
+          ctx,
+          `[evidence] провайдер модели отказал (${heLlmRefusalLabel(refusal)}) — стадия остановлена `
+            + `на «${candidate.title}» (${i}/${candidates.length}), до записи в he_hypotheses: `
+            + `${heIoFailureReason(e)}`,
+        );
+        throw e;
+      }
       dropped += 1;
-      stageLog(ctx, `[evidence] stage_error по «${candidate.title}»: ${e instanceof Error ? e.message : String(e)}`);
+      stageLog(ctx, `[evidence] stage_error по «${candidate.title}»: ${heIoFailureReason(e)}`);
     }
+  }
+
+  // Отказ поиска на ВСЕХ запросах (или перманентный отказ где угодно):
+  // доказательств не искали, а не «не нашли». Падаем до удаления прошлых
+  // предложенных гипотез — иначе проект остался бы и без старых, и без новых.
+  const searchFailure = heSearchStageFailure(tally);
+  if (searchFailure) {
+    stageLog(
+      ctx,
+      `[evidence] поиск не обслужил ни одного запроса по ${candidates.length} кандидатам `
+        + `(обслужено: ${tally.answered}) — стадия остановлена до записи: `
+        + `${heIoFailureReason(searchFailure)}${heSearchFailureStatus(searchFailure)}`,
+    );
+    throw searchFailure;
   }
 
   // 4) Идемпотентная перезапись: сносим прошлые предложенные (ещё не
   //    кластеризованные) гипотезы проекта, вставляем свежие.
-  const { error: delError } = await ctx.supabase
-    .from('he_hypotheses')
-    .delete()
-    .eq('project_id', job.project_id)
-    .is('vertical_id', null)
-    .eq('status', 'proposed');
-  if (delError) throw new Error(`he_hypotheses cleanup: ${delError.message}`);
-
+  //
+  //    Снос — ТОЛЬКО если этому прогону есть чем заменить. Пустой accepted — это
+  //    либо «модель забраковала всех кандидатов», либо «прогон не смог их
+  //    проверить», и различить их здесь нечем; а снос в обоих случаях оставлял
+  //    проект БЕЗ гипотез: хороший набор прошлой ночи молча заменялся ничем, и
+  //    кабинет показывал завершившееся исследование с пустым списком.
+  //    Идемпотентность от этого не страдает: дубли создаёт только вставка, а
+  //    она в этой ветке не выполняется.
   if (accepted.length) {
+    const { error: delError } = await ctx.supabase
+      .from('he_hypotheses')
+      .delete()
+      .eq('project_id', job.project_id)
+      .is('vertical_id', null)
+      .eq('status', 'proposed');
+    if (delError) throw new Error(`he_hypotheses cleanup: ${delError.message}`);
+
     const rows = accepted.map((a) => ({
       project_id: job.project_id,
       tier: a.tier,
@@ -254,6 +352,15 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
     }));
     const { error: insError } = await ctx.supabase.from('he_hypotheses').insert(rows);
     if (insError) throw new Error(`he_hypotheses insert: ${insError.message}`);
+  } else {
+    // Молчать нельзя: снаружи (и в кабинете) прогон выглядит завершившимся, а
+    // гипотезы в нём — прошлой ночи. Флаг дублируется в result, чтобы это
+    // читалось из he_jobs.result, а не только из лога прогона.
+    stageLog(
+      ctx,
+      `[evidence] принятых гипотез нет (кандидатов ${candidates.length}, отброшено ${dropped}) — `
+        + 'прошлые предложенные гипотезы проекта ОСТАВЛЕНЫ как есть',
+    );
   }
 
   const result = {
@@ -262,6 +369,7 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
     merged,
     dropped,
     evidence_dropped: evidenceDropped,
+    ...(accepted.length ? {} : { prior_proposed_kept: true }),
   };
   stageLog(ctx, `[evidence] итог: ${JSON.stringify(result)}`);
   return { result, tokensUsed: usage.tokensUsed, costUsd: usage.costUsd };

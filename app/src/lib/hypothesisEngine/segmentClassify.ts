@@ -8,10 +8,23 @@
  * Контракт: частичные сбои переживаем (батч → лог, остальные продолжаются);
  * системный сбой (упали ВСЕ батчи) → null: вызывающий идёт по старому пути
  * (одна кампания, сегментные варианты выкинуты с предупреждением).
+ *
+ * Полнота ответа обязательна (`requireCompleteJson`): для классификатора
+ * отремонтированный обрубок — это короткий список, который выглядит уверенным.
+ * Такой батч повторяется, а если и повтор обрезан — честно падает в лог, и
+ * его строки уезжают в дефолтный текст письма, а не в чужой сегмент.
  */
 
 import { z } from 'zod';
-import { callLLMWithSchema, getHeModel, type LLMMessage } from './llm';
+import {
+  callLLMWithSchema,
+  getHeModel,
+  HeLlmHttpError,
+  HeLlmTimeoutError,
+  HeLlmTransportError,
+  LLMValidationError,
+  type LLMMessage,
+} from './llm';
 
 /** Строк в одном LLM-вызове (компактные ячейки, ~2-4k токенов на батч). */
 const BATCH_SIZE = 40;
@@ -36,7 +49,24 @@ export interface SegmentClassifyInput {
   segments: string[];
   /** Язык промпта: по тексту условий (кириллица → ru). */
   language: 'ru' | 'en';
+  /** Куда писать о сбоях батчей; по умолчанию — console.warn процесса. */
   log?: (msg: string) => void;
+}
+
+/**
+ * Класс сбоя батча — по ТИПУ ошибки, а не по её тексту (см. llm.ts). В логе это
+ * разные новости: `rate_limit` и `transient` значат «повторите запуск», а
+ * `billing`/`configuration` — «повтор не поможет, нужен человек». Без класса в
+ * строке лога оба выглядели одинаково — «батч упал».
+ */
+function failureLabel(error: unknown): string {
+  if (error instanceof HeLlmHttpError) return `${error.kind}, HTTP ${error.status}`;
+  if (error instanceof HeLlmTransportError) return error.kind;
+  if (error instanceof HeLlmTimeoutError) return 'timeout';
+  // Сюда попадает и неполный (обрезанный) ответ: полнота для классификатора
+  // обязательна, и её отсутствие — не «сеть», а ответ модели.
+  if (error instanceof LLMValidationError) return 'invalid_answer';
+  return 'unknown';
 }
 
 function truncateCell(value: unknown): string {
@@ -85,7 +115,12 @@ function buildClassifyMessages(
 export async function classifyBaseRowsIntoSegments(
   input: SegmentClassifyInput,
 ): Promise<Map<number, string> | null> {
-  const { rows, segments, language, log } = input;
+  const { rows, segments, language } = input;
+  // Путь запуска (launchTemplate) лог не передаёт, а молчащий сбой
+  // классификатора — это тихая потеря сегментных вариантов: строки уезжают в
+  // дефолтный текст, и узнать об этом негде. Поэтому по умолчанию — в лог
+  // процесса (воркер/роут), а не в никуда.
+  const log = input.log ?? ((msg: string) => console.warn(msg));
   const cleaned = [...new Set(segments.map((s) => s.trim()).filter(Boolean))];
   if (rows.length === 0 || cleaned.length === 0) return new Map();
 
@@ -116,20 +151,34 @@ export async function classifyBaseRowsIntoSegments(
             buildClassifyMessages(cleaned, batch.items, language),
             AssignmentsSchema,
             // Роль gate: присвоение сегмента — классификация, мини-модель.
-            { model: getHeModel('gate'), maxTokens: 4096 },
+            // requireCompleteJson: неполный список сегментов молча раскидал бы
+            // хвост батча по дефолтному тексту (см. шапку файла).
+            { model: getHeModel('gate'), maxTokens: 4096, requireCompleteJson: true },
           );
           const validRows = new Set(batch.items.map((it) => it.index));
+          const answered = new Set<number>();
           for (const a of llm.data.assignments) {
             if (!validRows.has(a.row)) continue;
+            answered.add(a.row);
             const key = a.segment?.trim().toLowerCase();
             if (!key) continue;
             const condition = canonical.get(key);
             if (condition) result.set(a.row, condition);
           }
+          // Ответ уложился в лимит, но строки в нём не все: формально это не
+          // сбой (непокрытые уедут в дефолтный текст), и потому единственный
+          // способ узнать о потере — сказать о ней.
+          if (answered.size < batch.items.length) {
+            log(
+              `[segmentClassify] батч ${batch.start}–${batch.start + batch.items.length - 1}: ` +
+                `модель разметила ${answered.size} из ${batch.items.length} строк — остальные уйдут в дефолтный текст`,
+            );
+          }
         } catch (e) {
           failedBatches += 1;
-          log?.(
-            `[segmentClassify] батч ${batch.start}–${batch.start + batch.items.length - 1} упал: ${e instanceof Error ? e.message : String(e)}`,
+          log(
+            `[segmentClassify] батч ${batch.start}–${batch.start + batch.items.length - 1} упал ` +
+              `[${failureLabel(e)}]: ${e instanceof Error ? e.message : String(e)}`,
           );
         }
       }),

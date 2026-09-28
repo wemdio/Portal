@@ -14,9 +14,25 @@
  * он завышал самый массовый вызов движка в ~33 раза. Модель без ставки прогон
  * не останавливает: расход берётся из usage.cost роутера, а сам пробел в
  * таблице виден в логе (см. costOfCall).
+ *
+ * Транспорт (раздел «Транспорт» ниже): у каждой ПОПЫТКИ есть свой срок и
+ * ограниченные повторы. Классы сбоя — типизированные (HeLlmHttpError.kind,
+ * HeLlmTransportError, HeLlmTimeoutError), и решение о повторе принимается по
+ * типу, а не по тексту сообщения: в этом движке «aborted» означает отмену
+ * пользователем, и regexp принял бы отмену за транзиентный сбой.
+ *
+ * Признак жизни (волна 3, полоса F1): каждая попытка запроса отмечается через
+ * канал активной джобы (setHeActiveJob → onActivity) — ТОТ ЖЕ вход сторожа
+ * простоя воркера, что и у операций стадий (ctx.onActivity, stages/io.ts).
+ * Без этого самое длинное ЗАКОННОЕ молчание движка — генерация ответа модели —
+ * выглядело для сторожа зависанием, прерывание считалось бесплатным, и самый
+ * дорогой вызов проекта оплачивался заново. Второго механизма живости не
+ * заводим: канал один, сток один (watchdog.touch()).
  */
 
 import { z } from 'zod';
+
+import { isHeProviderBillingError, isHeProviderConfigurationError } from './clientErrors';
 
 const API_URL = 'https://router.requesty.ai/v1/chat/completions';
 
@@ -196,17 +212,103 @@ export class LLMValidationError extends Error {
 }
 
 /**
- * AbortSignal активной джобы воркера. Воркер single-flight (handleJob
- * выполняет строго одну джобу за раз), поэтому сигнал — модульный:
- * worker/hypothesisEngine.ts ставит его перед runHeStage и снимает после.
- * Отмена задачи (he_jobs.status='cancelled') через сигнал обрывает текущий
- * HTTP-запрос к LLM сразу, а не по окончании стадии — деньги не догорают.
- * Вне воркера (API-роуты) сигнала нет — поведение прежнее.
+ * Пути схемы, по которым ответ не прошёл валидацию («company_types»,
+ * «job_titles.0.title»). Стадии нужен честный повод отказа, а не текст zod'а:
+ * пустой массив на верхнем уровне и опечатка внутри элемента — разные новости
+ * для специалиста. Пустой результат = причина не в схеме (усечение, синтаксис,
+ * транспорт). Единственный читатель сегодня — stages/vocab.ts.
  */
-let activeJobSignal: AbortSignal | null = null;
+export function llmValidationIssuePaths(error: unknown): string[] {
+  const zodError = error instanceof LLMValidationError ? error.zodError : error;
+  if (!(zodError instanceof z.ZodError)) return [];
+  return zodError.issues.map((issue) => issue.path.join('.'));
+}
 
-export function setHeActiveJobSignal(signal: AbortSignal | null): void {
-  activeJobSignal = signal;
+/**
+ * Общие опции вызова модели.
+ *
+ * Своего `signal` и своего `timeoutMs` здесь СОЗНАТЕЛЬНО нет (были заведены как
+ * точка расширения и остались без единого писателя из ~30 вызовов движка):
+ *  - отмена приходит одним каналом активной джобы (setHeActiveJob ниже) —
+ *    второй источник сигнала означал бы, что отмену можно не заметить;
+ *  - срок считается от maxTokens и обязан быть МЕНЬШЕ окна сторожа простоя
+ *    (см. llmAttemptTimeoutMs). Опция «свой срок» позволяла вызывающему
+ *    перевернуть этот порядок и вернуть ровно тот баг, который волна лечит.
+ */
+export interface HeLlmCallOptions {
+  model: string;
+  maxTokens?: number;
+}
+
+export interface HeLlmSchemaCallOptions extends HeLlmCallOptions {
+  /**
+   * Требовать ПОЛНЫЙ ответ: усечённый по max_tokens не ремонтировать, а
+   * повторять и в итоге отказывать честно. Включают классификаторы, где
+   * короткий список выглядит как уверенный ответ (segmentClassify).
+   * Гейт релевантности НЕ включает: он fail-open по замыслу, и строгое
+   * правило превратило бы частичный ответ в потерю целого батча.
+   */
+  requireCompleteJson?: boolean;
+}
+
+export interface HeLlmTextCallOptions extends HeLlmCallOptions {
+  fallbackModel?: string;
+  minChars?: number;
+  log?: (msg: string) => void;
+}
+
+/**
+ * Канал активной джобы воркера: отмена, признак жизни и лог прогона. Воркер
+ * single-flight (handleJob выполняет строго одну джобу за раз), поэтому канал —
+ * модульный: worker/hypothesisEngine.ts ставит его перед runHeStage и снимает
+ * после. Вне воркера (API-роуты, CLI) канала нет — поведение прежнее.
+ */
+export interface HeActiveJobChannel {
+  /**
+   * Отмена задачи (he_jobs.status='cancelled') обрывает текущий HTTP-запрос к
+   * модели сразу, а не по окончании стадии — деньги не догорают.
+   */
+  signal: AbortSignal | null;
+  /**
+   * Признак жизни для сторожа простоя воркера — ТОТ ЖЕ сток, что у
+   * ctx.onActivity стадий (watchdog.touch()). Транспорт отмечает каждую попытку
+   * запроса, включая повторы: генерация ответа — самое длинное законное
+   * молчание движка, и без этой отметки сторож считал её зависанием.
+   */
+  onActivity?: () => void;
+  /**
+   * Лог прогона: у строк транспорта та же личность, что у остальных строк
+   * воркера (id воркера, джобы, проекта, стадия). Без канала — console.warn
+   * процесса, как было.
+   */
+  log?: (msg: string) => void;
+}
+
+let activeJob: HeActiveJobChannel | null = null;
+
+export function setHeActiveJob(channel: HeActiveJobChannel | null): void {
+  activeJob = channel;
+}
+
+/**
+ * Сигнал того же канала для стадий (stages/io.ts): отмена доходит не только до
+ * LLM-запроса, но и до чтения сайта и поиска. Отдельного параметра контракта
+ * для этого не вводим — воркер односоточный, источник сигнала один.
+ */
+export function getHeActiveJobSignal(): AbortSignal | null {
+  return activeJob?.signal ?? null;
+}
+
+/** Попытка запроса началась/ответила — продлить окно сторожа простоя. */
+function noteLlmActivity(): void {
+  activeJob?.onActivity?.();
+}
+
+/** Строка транспорта в лог прогона (или в лог процесса, если канала нет). */
+function llmLog(msg: string): void {
+  const sink = activeJob?.log;
+  if (sink) sink(msg);
+  else console.warn(msg);
 }
 
 /**
@@ -227,30 +329,446 @@ function withJsonModeHint(messages: LLMMessage[]): LLMMessage[] {
   ];
 }
 
+/* ─────────────────────── Транспорт: срок, классы сбоя, повторы ─────────────────────── */
+
+/**
+ * Свой срок вызова истёк. Отдельный тип, а не «просто AbortError»: отмена
+ * пользователем и наш срок приходят одним механизмом (AbortSignal), но
+ * означают разное — отмену повторять нельзя, срок повторить можно.
+ *
+ * Слова «timed out» в тексте — опора клиентской классификации
+ * (clientErrors.ts → код 'timeout'), менять формулировку вместе с ней.
+ */
+export class HeLlmTimeoutError extends Error {
+  constructor(public readonly label: string, public readonly timeoutMs: number) {
+    super(`${label} timed out after ${timeoutMs}ms`);
+    this.name = 'HeLlmTimeoutError';
+  }
+}
+
+/**
+ * Класс отказа транспорта. Читается ТИПОМ (instanceof + поле kind), никогда
+ * регэкспом по тексту: см. шапку файла про «aborted».
+ *  - transient — повтор имеет смысл (5xx, 408/425, обрыв сети, битый конверт);
+ *  - rate_limit — провайдер попросил подождать (429 + Retry-After);
+ *  - billing / configuration — нужен человек, повтор только сожжёт время;
+ *  - permanent — прочие 4xx: тот же запрос ответит тем же.
+ */
+export type HeLlmFailureKind = 'transient' | 'rate_limit' | 'billing' | 'configuration' | 'permanent';
+
+export class HeLlmHttpError extends Error {
+  /** Дискриминант класса: instanceof ложен, если в процессе две копии модуля. */
+  readonly heLlmFailure = true as const;
+
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly kind: HeLlmFailureKind,
+    /** Пауза, о которой попросил провайдер заголовком Retry-After, если попросил. */
+    public readonly retryAfterMs?: number,
+  ) {
+    super(message);
+    this.name = 'HeLlmHttpError';
+  }
+}
+
+/** Сеть не дошла или ответ не разобрался: запрос как будто не состоялся. */
+export class HeLlmTransportError extends Error {
+  /** Дискриминант класса: instanceof ложен, если в процессе две копии модуля. */
+  readonly heLlmFailure = true as const;
+
+  public readonly kind: HeLlmFailureKind = 'transient';
+  constructor(message: string) {
+    super(message);
+    this.name = 'HeLlmTransportError';
+  }
+}
+
+/** Что именно ответил провайдер — для политики повторов ДЖОБЫ (worker failJob). */
+export interface HeLlmFailureFacts {
+  kind: HeLlmFailureKind;
+  /** HTTP-статус ответа; у обрыва сети статуса нет. */
+  status?: number;
+  /** Пауза, о которой провайдер попросил заголовком Retry-After. */
+  retryAfterMs?: number;
+}
+
+const HE_LLM_FAILURE_KINDS = new Set<string>([
+  'transient',
+  'rate_limit',
+  'billing',
+  'configuration',
+  'permanent',
+]);
+
+/**
+ * Факты отказа транспорта, если он есть в цепочке причин ошибки, — иначе null.
+ * Читает ТИП (дискриминант класса), а не текст сообщения: решение джобы
+ * «припарковать до времени провайдера» / «отказать терминально» обязано
+ * опираться на протокол, а не на формулировку. Цепочку `cause` проходим на
+ * случай стадии, которая перебросила ошибку своим текстом.
+ */
+export function heLlmFailureOf(error: unknown): HeLlmFailureFacts | null {
+  for (let e: unknown = error, depth = 0; e && depth < 4; depth += 1) {
+    const candidate = e as { heLlmFailure?: unknown; kind?: unknown; status?: unknown; retryAfterMs?: unknown; cause?: unknown };
+    if (candidate.heLlmFailure === true && typeof candidate.kind === 'string' && HE_LLM_FAILURE_KINDS.has(candidate.kind)) {
+      return {
+        kind: candidate.kind as HeLlmFailureKind,
+        ...(typeof candidate.status === 'number' ? { status: candidate.status } : {}),
+        ...(typeof candidate.retryAfterMs === 'number' && Number.isFinite(candidate.retryAfterMs)
+          ? { retryAfterMs: candidate.retryAfterMs }
+          : {}),
+      };
+    }
+    e = candidate.cause;
+  }
+  return null;
+}
+
+/** Статусы, которые чинит повтор. 429 — отдельный класс, у него своя пауза. */
+const RETRYABLE_STATUSES = new Set<number>([408, 425, 500, 502, 503, 504, 529]);
+/** Повторов после первой попытки (итого до 4 запросов на один вызов). */
+const MAX_HTTP_RETRIES = 3;
+/** База экспоненциального бэкоффа: 2с → 4с → 8с. */
+const RETRY_BASE_MS = 2000;
+/**
+ * Максимум ОДНОГО ожидания перед повтором (порог на само число, не на сумму):
+ * попросил провайдер дольше — отдаём слот воркеру с внятной причиной вместо
+ * получаса сна в fetch. Повторов до MAX_HTTP_RETRIES, поэтому суммарно вызов
+ * может проспать до 3 × этого числа — бюджет попытки (llmAttemptTimeoutMs,
+ * минимум 300 000 мс) это покрывает с запасом.
+ */
+const MAX_RETRY_WAIT_MS = 30_000;
+
+const LLM_DEADLINE_BASE_MS = 180_000;
+const LLM_DEADLINE_PER_TOKEN_MS = 30;
+const LLM_DEADLINE_MIN_MS = 300_000;
+/**
+ * Потолок срока ОДНОЙ попытки. Он обязан быть НЕ МЕНЬШЕ того, что просит сама
+ * формула на самом дорогом вызове движка, иначе константа противоречит расчёту
+ * и молча его обрезает.
+ *
+ * Было 900 000 мс при расчёте 180 000 + 30 × 32 768 = 1 163 040 мс для стадии
+ * hypotheses (единственный вызов с maxTokens 32768): та получала 77% своего
+ * бюджета, и ЗАКОННО долгая генерация обрывалась посередине ответа — платный
+ * вызов выбрасывался, а за ним шли вторая попытка схемы и до трёх прогонов
+ * стадии. 1 200 000 мс покрывают формулу при максимальном maxTokens движка с
+ * запасом и остаются внутри границ HE_LLM_TIMEOUT_MS.
+ *
+ * Цена решения — в воркере: окно сторожа выводится из этого числа
+ * (1,5 × → 1 800 000 мс), поэтому НАСТОЯЩЕЕ зависание стадии ловится за 30 мин
+ * вместо 22,5, плюс 2 мин на аварийный выход. Порядок бюджетов при этом цел:
+ * срок попытки < окно сторожа при любом maxTokens.
+ */
+const LLM_DEADLINE_MAX_MS = 1_200_000;
+/** Границы явного HE_LLM_TIMEOUT_MS: ниже 30 с срок рубил бы штатный ответ. */
+const LLM_DEADLINE_ENV_MIN_MS = 30_000;
+const LLM_DEADLINE_ENV_MAX_MS = 1_800_000;
+/** Попыток схемы на один вызов (первая + повтор с фидбэком). */
+const SCHEMA_ATTEMPTS = 2;
+
+/** Про отклонённый HE_LLM_TIMEOUT_MS достаточно одной строки на процесс. */
+let rejectedAttemptMsLogged = false;
+
+/**
+ * Явный срок из окружения, если он задан и в границах.
+ *
+ * Отклонённое значение больше НЕ молчит. Раньше опечатка («30» вместо «30000»,
+ * «5m», значение вне границ) просто игнорировалась, а стартовая строка воркера
+ * печатала действующий срок и выведенное из него окно сторожа так, будто
+ * переменную приняли: оператор был уверен, что бюджеты изменил, и продолжал
+ * искать причину в другом месте. Теперь отказ виден там же, где виден срок.
+ */
+function configuredAttemptMs(): number | null {
+  const raw = (process.env.HE_LLM_TIMEOUT_MS ?? '').trim();
+  if (!raw) return null;
+  const configured = Number(raw);
+  if (
+    Number.isFinite(configured) &&
+    configured >= LLM_DEADLINE_ENV_MIN_MS &&
+    configured <= LLM_DEADLINE_ENV_MAX_MS
+  ) {
+    return configured;
+  }
+  if (!rejectedAttemptMsLogged) {
+    rejectedAttemptMsLogged = true;
+    llmLog(
+      `[he-llm] HE_LLM_TIMEOUT_MS='${raw}' ОТКЛОНЁН (допустимо ` +
+        `${LLM_DEADLINE_ENV_MIN_MS}…${LLM_DEADLINE_ENV_MAX_MS} мс) — действует расчёт срока по maxTokens`,
+    );
+  }
+  return null;
+}
+
+/**
+ * Срок на ОДНУ попытку запроса: база + запас на maxTokens, не меньше 300 с и не
+ * больше 1 200 с; явный HE_LLM_TIMEOUT_MS перебивает расчёт.
+ *
+ * Считать от maxTokens обязательно: стадия hypotheses просит у opus 32768
+ * токенов (stages/hypotheses.ts:230), цепочки писем — 16384, и фиксированные
+ * 300 с обрезали бы ШТАТНЫЙ ответ RU-инструмента специалистов, то есть лечение
+ * зависания обернулось бы поломкой рабочего прогона. Нижняя граница выбрана
+ * равной сроку, который на тех же моделях уже работает в соседнем движке.
+ *
+ * ПОПЫТКА, а не весь вызов: один срок на оба прохода схемы означал, что
+ * медленный первый проход оставлял повтору огрызок бюджета и тот обрывался
+ * посередине генерации — платный вызов, выброшенный из-за чужой медлительности.
+ * Вызов при этом остаётся ограниченным: попыток ровно SCHEMA_ATTEMPTS, у каждой
+ * свой срок, то есть весь вызов ≤ SCHEMA_ATTEMPTS × срок попытки.
+ */
+function llmAttemptTimeoutMs(maxTokens: number): number {
+  const configured = configuredAttemptMs();
+  if (configured !== null) return configured;
+  const budget = LLM_DEADLINE_BASE_MS + maxTokens * LLM_DEADLINE_PER_TOKEN_MS;
+  return Math.min(LLM_DEADLINE_MAX_MS, Math.max(LLM_DEADLINE_MIN_MS, budget));
+}
+
+/**
+ * Самое долгое ЗАКОННОЕ молчание одного запроса к модели — потолок
+ * llmAttemptTimeoutMs при любом maxTokens, включая перекрышку из окружения.
+ *
+ * Читатель — сторож простоя стадии в воркере: окно «стадия зависла» обязано
+ * быть заметно БОЛЬШЕ этого числа, иначе здоровая генерация объявляется
+ * зависанием, прерывание считается бесплатным и самый дорогой вызов проекта
+ * оплачивается заново (ровно этот баг волна и лечит). Поэтому порядок бюджетов
+ * задаётся здесь, а не двумя константами в двух файлах: HE_LLM_TIMEOUT_MS
+ * перевернуть его не может — окно следует за сроком, а не наоборот.
+ */
+export function heLlmMaxAttemptMs(): number {
+  return configuredAttemptMs() ?? LLM_DEADLINE_MAX_MS;
+}
+
+/**
+ * Срок ОДНОЙ попытки запроса — включая её внутренние транспортные повторы. Копия
+ * withVeDeadline соседнего движка (не импорт: архитектурный тест
+ * tests/architecture/verticalEngineV2Isolation.test.ts запрещает движку V1
+ * импортировать модули V2).
+ *
+ * Зачем: до этого срока молчащий сокет держал стадию БЕСКОНЕЧНО. Воркер
+ * движка single-flight, heartbeat тикает независимым setInterval
+ * (worker/_shared.ts), а resetStuckJobs отрабатывает только на старте
+ * процесса — то есть один зависший запрос к роутеру останавливал ВСЕ задачи
+ * движка до ручного рестарта, и healthcheck при этом оставался зелёным.
+ *
+ * Отклоняем промис сами, даже если fetch проигнорирует сигнал; поздний
+ * результат отбрасывается.
+ *
+ * Рядом живёт operationDeadline.ts — тот же механизм для ОДНОЙ транспортной
+ * операции стадии (чтение сайта, поиск). Двойник умышленный: там срок бросает
+ * `HeOperationTimeoutError`, который стадии читают как «хост молчит, идём
+ * дальше», и вызов модели под тем же классом стадия приняла бы за мёртвую
+ * страницу. Здесь свой класс — `HeLlmTimeoutError`.
+ */
+async function withLlmDeadline<T>(
+  label: string,
+  timeoutMs: number,
+  parent: AbortSignal | null | undefined,
+  work: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  parent?.throwIfAborted();
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new RangeError('LLM call timeout must be finite and positive');
+  }
+  const controller = new AbortController();
+  const { signal } = controller;
+  const onParentAbort = () => controller.abort(parent?.reason);
+  parent?.addEventListener('abort', onParentAbort, { once: true });
+  let onAbort!: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  const timer = setTimeout(() => controller.abort(new HeLlmTimeoutError(label, timeoutMs)), timeoutMs);
+  try {
+    const operation = Promise.resolve().then(async () => {
+      signal.throwIfAborted();
+      const result = await work(signal);
+      signal.throwIfAborted();
+      return result;
+    });
+    return await Promise.race([operation, aborted]);
+  } finally {
+    clearTimeout(timer);
+    parent?.removeEventListener('abort', onParentAbort);
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
+/** Retry-After: секунды или дата. Отрицательные и абсурдные значения — мимо. */
+function retryAfterMs(value: string | null | undefined, now = Date.now()): number | undefined {
+  if (!value?.trim()) return undefined;
+  const text = value.trim();
+  const until = /^\d+(?:\.\d+)?$/.test(text) ? now + Math.ceil(Number(text) * 1000) : Date.parse(text);
+  return Number.isFinite(until) && until <= 8.64e15 && until >= now ? until - now : undefined;
+}
+
+/** Пауза, прерываемая отменой задачи и своим сроком. */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/**
+ * Статусы, у которых тело ответа ВПРАВЕ уточнить класс: провайдер отвечает
+ * «insufficient credits» и под 400, и под 429, а «invalid key» — под 401/403.
+ * Всё остальное классифицируется одним статусом.
+ */
+const BODY_CLASSIFIED_STATUSES = new Set<number>([400, 401, 402, 403, 409, 422, 429]);
+
+/**
+ * Класс отказа по ответу роутера. Первичный признак — СТАТУС, структурный факт
+ * протокола.
+ *
+ * Транзиентные статусы решаются ПЕРВЫМИ и телу не отдаются: 5xx/408/425 — это
+ * «сервер не справился», и если в его теле случайно окажется «invalid key»
+ * (эхо чужого апстрима, отладочный дамп, HTML-заглушка балансировщика), повтор
+ * терять нельзя, а клиенту нельзя показывать ошибку конфигурации там, где
+ * ничего не сломано. Тело смотрим только у статусов, которые ДЕЙСТВИТЕЛЬНО
+ * несут биллинг и авторизацию, и только чтобы расширить два неповторяемых
+ * класса. Предикаты берём из clientErrors.ts — они там и выделены отдельно под
+ * политику ретраев.
+ */
+function httpFailureKind(status: number, body: string): HeLlmFailureKind {
+  if (RETRYABLE_STATUSES.has(status) || status >= 500) return 'transient';
+  if (BODY_CLASSIFIED_STATUSES.has(status)) {
+    const text = `Requesty ${status}: ${body}`;
+    if (isHeProviderBillingError(text)) return 'billing';
+    if (isHeProviderConfigurationError(text)) return 'configuration';
+  }
+  if (status === 429) return 'rate_limit';
+  return 'permanent';
+}
+
+/**
+ * Сколько ждать перед повтором — или null, если повторять нельзя.
+ * 429: ждём ровно столько, сколько попросил провайдер, но не дольше
+ * MAX_RETRY_WAIT_MS; больше — честный отказ, решение за джобой.
+ */
+function retryWaitMs(failure: HeLlmHttpError | HeLlmTransportError, attempt: number): number | null {
+  if (failure.kind !== 'transient' && failure.kind !== 'rate_limit') return null;
+  if (attempt >= MAX_HTTP_RETRIES) return null;
+  const asked = failure instanceof HeLlmHttpError ? failure.retryAfterMs : undefined;
+  const wait = Math.max(RETRY_BASE_MS * 2 ** attempt, asked ?? 0);
+  return wait > MAX_RETRY_WAIT_MS ? null : wait;
+}
+
+/** Отмена задачи и свой срок — не сбои провайдера: пробрасываем как есть. */
+function throwIfInterrupted(signal: AbortSignal, err: unknown): void {
+  if (signal.aborted) throw signal.reason ?? err;
+  if (err instanceof Error && err.name === 'AbortError') throw err;
+}
+
 async function rawCall(
   messages: LLMMessage[],
   model: string,
   maxTokens: number,
   jsonMode: boolean,
+  signal: AbortSignal,
 ): Promise<{ text: string; response: RequestyResponse }> {
-  const res = await fetch(API_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getApiKey()}` },
-    body: JSON.stringify({
-      model,
-      messages: jsonMode ? withJsonModeHint(messages) : messages,
-      max_tokens: maxTokens,
-      ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
-    }),
-    ...(activeJobSignal ? { signal: activeJobSignal } : {}),
+  // Ключ читаем ДО цикла: пробел в конфигурации повтором не лечится, а сообщение
+  // с именем env-переменной клиентский маппинг узнаёт как 'configuration'.
+  const apiKey = getApiKey();
+  const body = JSON.stringify({
+    model,
+    messages: jsonMode ? withJsonModeHint(messages) : messages,
+    max_tokens: maxTokens,
+    ...(jsonMode ? { response_format: { type: 'json_object' } } : {}),
   });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Requesty ${res.status}: ${text.slice(0, 300)}`);
+
+  for (let attempt = 0; ; attempt++) {
+    signal.throwIfAborted();
+    let failure: HeLlmHttpError | HeLlmTransportError;
+    try {
+      // Признак жизни ДО запроса и сразу ПОСЛЕ ответа: между ними идёт самое
+      // длинное законное молчание движка — генерация ответа моделью. Отметка на
+      // каждой попытке, включая транспортные повторы, — именно этим сторож
+      // простоя отличает работающий платный вызов от зависшей стадии.
+      noteLlmActivity();
+      const res = await fetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body,
+        signal,
+      });
+      noteLlmActivity();
+      if (res.ok) {
+        // Конверт проверяем, и у каждого его изъяна СВОЙ класс. Раньше оба
+        // уезжали безымянным `new Error(...)` в catch ниже, тот красил всё в
+        // transient, и структурно не тот ответ повторялся тремя новыми ПЛАТНЫМИ
+        // запросами. Решение о повторе снова принимает класс, а не catch-all.
+        let parsed: unknown;
+        try {
+          parsed = await res.json();
+        } catch (e) {
+          // Тело 200 не доехало целиком (обрыв в середине ответа): ответа как
+          // будто не было — повтор уместен, класс transient. Текст без второго
+          // префикса: свой типизированный класс catch ниже не перекрашивает.
+          throw new HeLlmTransportError(
+            `Requesty transport: тело ответа 200 не разобралось (${e instanceof Error ? e.message : String(e)})`,
+          );
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          // Тело разобралось, но это НЕ конверт чата (массив, строка, null):
+          // тот же запрос ответит тем же, а каждый повтор — новый платный
+          // вызов, поэтому класс permanent. Возможную оплату называем в тексте:
+          // usage из такого ответа не прочитать, и в cost_usd этот вызов не
+          // попадёт вообще никак.
+          throw new HeLlmHttpError(
+            `Requesty ${res.status}: ответ не похож на JSON-конверт чата (вызов мог быть оплачен)`,
+            res.status,
+            'permanent',
+          );
+        }
+        const response = parsed as RequestyResponse;
+        return { text: response.choices?.[0]?.message?.content ?? '', response };
+      }
+      const text = await res.text();
+      noteLlmActivity();
+      const kind = httpFailureKind(res.status, text);
+      failure = new HeLlmHttpError(
+        `Requesty ${res.status}: ${text.slice(0, 300)}`,
+        res.status,
+        kind,
+        // Retry-After провайдер присылает и с 503 (окно перегрузки), не только
+        // с 429; для неповторяемых классов заголовок смысла не имеет.
+        kind === 'rate_limit' || kind === 'transient'
+          ? retryAfterMs(res.headers.get('retry-after'))
+          : undefined,
+      );
+    } catch (err) {
+      throwIfInterrupted(signal, err);
+      // Уже классифицированный отказ (конверт 200 выше) сохраняем как есть:
+      // иначе класс снова назначал бы catch-all, и «тот же запрос ответит тем
+      // же» опять повторялось бы трижды за деньги.
+      failure =
+        err instanceof HeLlmHttpError || err instanceof HeLlmTransportError
+          ? err
+          : new HeLlmTransportError(
+              `Requesty transport: ${err instanceof Error ? err.message : String(err)}`,
+            );
+    }
+
+    const waitMs = retryWaitMs(failure, attempt);
+    if (waitMs === null) throw failure;
+    // Строка получает личность прогона (id воркера, джобы, проекта, стадия) из
+    // канала активной джобы: в общем логе контейнера иначе не видно, чей это
+    // повтор. Вне воркера — прежний console.warn процесса.
+    llmLog(
+      `[he-llm] ${model}: ${failure.kind} (${failure.message.slice(0, 160)}) — ` +
+        `повтор ${attempt + 1}/${MAX_HTTP_RETRIES} через ${waitMs} мс`,
+    );
+    await sleep(waitMs, signal);
   }
-  const response = (await res.json()) as RequestyResponse;
-  const text = response.choices?.[0]?.message?.content ?? '';
-  return { text, response };
 }
 
 function usageOf(response: RequestyResponse): {
@@ -313,31 +831,99 @@ export function tryRepairTruncatedJson(text: string): unknown | null {
  * Один LLM-вызов с response_format=json_object + Zod-валидация ответа.
  * При невалидном JSON — 1 retry с system-фидбэком об ошибке. Если и второй
  * раз невалидно — бросает LLMValidationError (воркер помечает job failed).
+ *
+ * У КАЖДОЙ попытки схемы свой полный срок (llmAttemptTimeoutMs), внутри него —
+ * транспортные повторы этой попытки. Весь вызов ограничен структурно: попыток
+ * ровно SCHEMA_ATTEMPTS, то есть ≤ SCHEMA_ATTEMPTS × срок попытки.
  */
 export async function callLLMWithSchema<T>(
   messages: LLMMessage[],
   schema: z.ZodType<T>,
-  opts: { model: string; maxTokens?: number },
+  opts: HeLlmSchemaCallOptions,
 ): Promise<LLMResult<T>> {
   const maxTokens = opts.maxTokens ?? 4096;
+  return callLLMWithSchemaAttempts(messages, schema, opts, maxTokens, getHeActiveJobSignal());
+}
 
-  const attempts: Array<{ text: string; error?: string }> = [];
+async function callLLMWithSchemaAttempts<T>(
+  messages: LLMMessage[],
+  schema: z.ZodType<T>,
+  opts: HeLlmSchemaCallOptions,
+  maxTokens: number,
+  parent: AbortSignal | null,
+): Promise<LLMResult<T>> {
+  const attempts: Array<{
+    text: string;
+    error?: string;
+    /** truncated — ответ обрезан по max_tokens; фидбэк повтора у него свой. */
+    kind: 'truncated' | 'json_syntax' | 'schema';
+    zodError?: z.ZodError;
+  }> = [];
+  const attemptTimeoutMs = llmAttemptTimeoutMs(maxTokens);
+  /**
+   * Расход ОТБРОШЕННЫХ попыток. Провайдер выставил счёт за каждый ответ, в том
+   * числе за тот, который не прошёл схему или приехал обрезанным, — а учёт
+   * читал usage только удачной попытки, и вторая оплата была невидима в
+   * cost_usd. Копим и добавляем к итогу: переплата обязана быть видна там же,
+   * где считается стоимость прогона.
+   */
+  const discarded = { tokensUsed: 0, promptTokens: 0, completionTokens: 0, costUsd: 0 };
 
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < SCHEMA_ATTEMPTS; attempt++) {
+    parent?.throwIfAborted();
     const currentMessages: LLMMessage[] = [...messages];
-    if (attempt > 0 && attempts[0]) {
-      currentMessages.push(
-        { role: 'assistant', content: attempts[0].text.slice(0, 2000) },
-        { role: 'user', content:
-          `Твой предыдущий ответ не прошёл валидацию JSON-схемы. Ошибка:\n` +
-          `${attempts[0].error}\n\n` +
-          `Верни валидный JSON строго по схеме. Никаких markdown-фенсов, никакого текста до/после.`,
-        },
-      );
+    const previous = attempt > 0 ? attempts[0] : undefined;
+    if (previous) {
+      // Обрубок в истории учит модель вернуть ровно тот же обрубок (а срез до
+      // 2000 символов делает обрубком даже целый ответ), поэтому при усечении
+      // предыдущий ответ не переигрываем вовсе и просим полный результат.
+      if (previous.kind !== 'truncated') {
+        currentMessages.push({ role: 'assistant', content: previous.text.slice(0, 2000) });
+      }
+      currentMessages.push({
+        role: 'user',
+        content: previous.kind === 'truncated'
+          ? 'Твой предыдущий ответ не поместился в лимит и был обрезан. Верни ПОЛНЫЙ результат по исходному ' +
+            'запросу: все элементы списка, строго валидный JSON по схеме, без markdown-фенсов и текста до/после. ' +
+            'Сокращай значения полей, а не список.'
+          : `Твой предыдущий ответ не прошёл валидацию JSON-схемы. Ошибка:\n` +
+            `${previous.error}\n\n` +
+            `Верни валидный JSON строго по схеме. Никаких markdown-фенсов, никакого текста до/после.`,
+      });
     }
 
-    const { text, response } = await rawCall(currentMessages, opts.model, maxTokens, true);
+    // Свой полный срок на КАЖДУЮ попытку: медленный первый проход больше не
+    // оставляет повтору огрызок бюджета (иначе повтор режется посередине
+    // генерации — платный ответ выброшен из-за чужой медлительности).
+    const { text, response } = await withLlmDeadline(
+      `LLM request ${attempt + 1}/${SCHEMA_ATTEMPTS}`,
+      attemptTimeoutMs,
+      parent,
+      (signal) => rawCall(currentMessages, opts.model, maxTokens, true, signal),
+    );
     const { promptTokens, completionTokens, tokensUsed, reportedCostUsd } = usageOf(response);
+    const costUsd = costOfCall(opts.model, promptTokens, completionTokens, reportedCostUsd);
+    /** Отброшенная попытка тоже оплачена: копим её расход (см. discarded). */
+    const keepDiscardedUsage = () => {
+      discarded.tokensUsed += tokensUsed;
+      discarded.promptTokens += promptTokens;
+      discarded.completionTokens += completionTokens;
+      discarded.costUsd += costUsd;
+      llmLog(
+        `[he-llm] ${opts.model}: попытка ${attempt + 1}/${SCHEMA_ATTEMPTS} отброшена, ` +
+          `её расход учтён (+${tokensUsed} tok, $${costUsd.toFixed(6)})`,
+      );
+    };
+
+    // Усечённый ответ там, где важна полнота списка: ремонт ниже сделал бы из
+    // 12 строк из 40 «уверенный» короткий ответ, и потребитель не узнал бы,
+    // что список не полон. Повторяем, а не спасаем кусок.
+    const finishReason = response.choices?.[0]?.finish_reason;
+    if (opts.requireCompleteJson && finishReason === 'length') {
+      attempts.push({ text, kind: 'truncated', error: 'ответ обрезан по max_tokens (finish_reason=length)' });
+      keepDiscardedUsage();
+      continue;
+    }
 
     // strip markdown fences if модель их всё-таки добавила
     const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
@@ -349,9 +935,15 @@ export async function callLLMWithSchema<T>(
       // Ремонт усечённого JSON: модель упёрлась в max_tokens посередине
       // массива объектов. Обрезаем до последней целой структуры и закрываем
       // скобки — спасаем то, что успело сгенерироваться, вместо жёсткого фейла.
-      parsed = tryRepairTruncatedJson(cleaned);
+      // При requireCompleteJson ремонт запрещён: см. комментарий выше.
+      parsed = opts.requireCompleteJson ? null : tryRepairTruncatedJson(cleaned);
       if (parsed === null) {
-        attempts.push({ text, error: `JSON.parse failed: ${e instanceof Error ? e.message : String(e)}` });
+        attempts.push({
+          text,
+          kind: opts.requireCompleteJson ? 'truncated' : 'json_syntax',
+          error: `JSON.parse failed: ${e instanceof Error ? e.message : String(e)}`,
+        });
+        keepDiscardedUsage();
         continue;
       }
     }
@@ -360,25 +952,37 @@ export async function callLLMWithSchema<T>(
     if (!validated.success) {
       attempts.push({
         text,
+        kind: 'schema',
+        zodError: validated.error,
         error: JSON.stringify(validated.error.format()).slice(0, 800),
       });
+      keepDiscardedUsage();
       continue;
     }
 
     return {
       data: validated.data,
-      tokensUsed,
-      promptTokens,
-      completionTokens,
-      costUsd: costOfCall(opts.model, promptTokens, completionTokens, reportedCostUsd),
+      tokensUsed: tokensUsed + discarded.tokensUsed,
+      promptTokens: promptTokens + discarded.promptTokens,
+      completionTokens: completionTokens + discarded.completionTokens,
+      costUsd: costUsd + discarded.costUsd,
       rawResponse: response,
     };
   }
 
   const last = attempts[attempts.length - 1]!;
   throw new LLMValidationError(
-    `LLM вернул невалидный JSON дважды: ${last.error}`,
+    (last.kind === 'truncated'
+      ? `LLM дважды вернул неполный ответ: ${last.error}`
+      : `LLM вернул невалидный JSON дважды: ${last.error}`) +
+      // Оплаченное и выброшенное — в тексте отказа: стадия этот расход уже не
+      // вернёт (usage приезжает только с результатом), но невидимым он быть
+      // не должен.
+      ` [оплачено и отброшено: ${discarded.tokensUsed} tok, $${discarded.costUsd.toFixed(6)}]`,
     last.text,
+    // Причина уровня схемы нужна стадии: по путям она отличает «список пуст»
+    // от «элемент кривой» (llmValidationIssuePaths).
+    last.zodError,
   );
 }
 
@@ -389,10 +993,17 @@ export async function callLLMWithSchema<T>(
  */
 export async function callLLMText(
   messages: LLMMessage[],
-  opts: { model: string; maxTokens?: number },
+  opts: HeLlmCallOptions,
 ): Promise<LLMTextResult> {
   const maxTokens = opts.maxTokens ?? 8192;
-  const { text, response } = await rawCall(messages, opts.model, maxTokens, false);
+  // Попытка одна (повтора схемы у свободного текста нет), поэтому срок попытки
+  // ограничивает и весь вызов.
+  const { text, response } = await withLlmDeadline(
+    'LLM request',
+    llmAttemptTimeoutMs(maxTokens),
+    getHeActiveJobSignal(),
+    (signal) => rawCall(messages, opts.model, maxTokens, false, signal),
+  );
   const { promptTokens, completionTokens, tokensUsed, reportedCostUsd } = usageOf(response);
   return {
     text: text.trim(),
@@ -414,7 +1025,7 @@ export async function callLLMText(
  */
 export async function callLLMTextWithFallback(
   messages: LLMMessage[],
-  opts: { model: string; maxTokens?: number; fallbackModel?: string; minChars?: number; log?: (msg: string) => void },
+  opts: HeLlmTextCallOptions,
 ): Promise<LLMTextResult> {
   const minChars = opts.minChars ?? 20;
   const fallbackModel = (opts.fallbackModel ?? process.env.HE_MODEL_CHAIN_FALLBACK ?? '').trim();

@@ -4,6 +4,10 @@
  * страницы конкурентов скачиваются (excerpt), сбои отдельных сайтов
  * пропускаются, не валят стадию. Результат пишется в job.result —
  * его читают стадии brand_cloud и hypotheses.
+ *
+ * Отмена задачи сбоем сайта НЕ считается: поиск и чтение ограничены сроком
+ * (io.ts) и слушают сигнал джобы, а цикл на отмене прерывается — иначе после
+ * нажатия «отменить» стадия дочитывала бы всех оставшихся конкурентов.
  */
 
 import { callLLMWithSchema, getHeModel } from '../llm';
@@ -12,7 +16,15 @@ import { projectMarket } from '../market';
 import { buildCompetitorsMessages } from '../prompts/competitors';
 import { buildCompetitorsMessagesEn } from '../prompts/competitors.en';
 import type { HeJob } from '../types';
-import { resolveFetchText, resolveSearch } from './io';
+import { heStageSignal, resolveFetchText, resolveSearch } from './io';
+import {
+  heSearchFailureStatus,
+  heSearchStageFailure,
+  newHeSearchTally,
+  noteHeSearchAnswered,
+  noteHeSearchFailure,
+} from './searchIo';
+import { heIoFailureReason } from '../operationDeadline';
 import {
   addUsage,
   newUsage,
@@ -63,6 +75,7 @@ export async function runCompetitorsStage(job: HeJob, ctx: HeStageContext): Prom
   const profile = readSiteProfile<HeSiteProfileOutput>(project);
   const search = resolveSearch(ctx);
   const fetchText = resolveFetchText(ctx);
+  const jobSignal = heStageSignal(ctx);
   // Рынок: ctx.market (воркер), фолбэк — колонка he_projects.market.
   const market = ctx.market ?? projectMarket(project);
 
@@ -82,14 +95,39 @@ export async function runCompetitorsStage(job: HeJob, ctx: HeStageContext): Prom
         ];
 
   const searchResults: Array<{ query: string; items: Array<{ title: string; link: string; snippet?: string }> }> = [];
+  const tally = newHeSearchTally();
   for (const q of queries) {
     let items: Array<{ title: string; link: string; snippet?: string }> = [];
     try {
       items = await search(q);
+      // Обслуженный запрос — даже с пустой выдачей: по одному-двум пустым
+      // запросам конкурентов отбирать можно, по нулю обслуженных — нет.
+      noteHeSearchAnswered(tally);
     } catch (e) {
-      stageLog(ctx, `[competitors] поиск «${q}» упал: ${e instanceof Error ? e.message : String(e)}`);
+      if (jobSignal?.aborted) throw e;
+      noteHeSearchFailure(tally, e);
+      stageLog(ctx, `[competitors] поиск «${q}» упал: ${heIoFailureReason(e)}`);
     }
     searchResults.push({ query: q, items });
+  }
+  // Ни один запрос не обслужен — списка конкурентов взять НЕОТКУДА. Раньше
+  // стадия шла дальше: модель придумывала конкурентов из приоров, стадия
+  // завершалась успехом, а платить за неё приходилось как за исследование.
+  //
+  // Перманентный отказ (деньги, ключ) останавливает стадию и тогда, когда часть
+  // запросов обслужена: дальше по конвейеру идут brand_cloud и evidence с
+  // десятками поисков, и ни один из них уже не получит выдачи — исследование
+  // доехало бы до конца на приорах модели. Одна честно пустая выдача среди
+  // обслуженных стадию не трогает (см. HeSearchTally).
+  const searchFailure = heSearchStageFailure(tally);
+  if (searchFailure) {
+    stageLog(
+      ctx,
+      `[competitors] поиск отказал (обслужено ${tally.answered} из ${queries.length} запросов) — `
+        + `стадия остановлена до вызова модели: `
+        + `${heIoFailureReason(searchFailure)}${heSearchFailureStatus(searchFailure)}`,
+    );
+    throw searchFailure;
   }
   stageLog(ctx, `[competitors] выдача собрана, отбор LLM…`);
 
@@ -117,7 +155,8 @@ export async function runCompetitorsStage(job: HeJob, ctx: HeStageContext): Prom
     try {
       entry.site_excerpt = truncate(await fetchText(c.url), HOMEPAGE_EXCERPT);
     } catch (e) {
-      stageLog(ctx, `[competitors] фетч ${c.url} пропущен: ${e instanceof Error ? e.message : String(e)}`);
+      if (jobSignal?.aborted) throw e;
+      stageLog(ctx, `[competitors] фетч ${c.url} пропущен: ${heIoFailureReason(e)}`);
     }
     competitors.push(entry);
   }

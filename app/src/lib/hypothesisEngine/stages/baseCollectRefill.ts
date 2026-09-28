@@ -48,7 +48,9 @@
  *     будет), итог — в collect_info.refill_result и he_auto_pipeline_runs;
  *     ИСКЛЮЧЕНИЕ: долив упал, не отдав провайдеру ни одной строки — база
  *     уходит в 'failed', иначе её компании выжигаются навсегда (см.
- *     refillLeadsReachedProvider и loadOtherBaseExclusionKeys). Возврат даётся
+ *     refillLeadsReachedProvider и loadOtherBaseExclusionKeys); явный отказ
+ *     Instantly по частоте запросов (429) при нулевом приёме считается именно
+ *     таким случаем — провайдер отклонил запрос целиком. Возврат даётся
  *     только разовому отказу: со второго подряд (REFILL_RELEASE_FAIL_STREAK_LIMIT,
  *     refillFailStreak) база снова 'analyzed' — иначе ночной крон собирал бы
  *     один и тот же срез каждую ночь;
@@ -67,7 +69,7 @@
  */
 
 import { AppendLeadsPartialError, appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
-import { isInstantlyContactCapacityError } from '@/lib/instantly/errors';
+import { InstantlyApiError, isInstantlyContactCapacityError } from '@/lib/instantly/errors';
 import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import {
@@ -503,6 +505,13 @@ async function persistRefillBase(
  * отказы долива (нет кампании или пресета, сменившийся воркспейс, исчерпанный
  * лимит контактов, blocklist) бросаются до первого запроса в Instantly.
  *
+ * Исключение — явный отказ провайдера по частоте запросов (429): он не
+ * «возможно, долетел», а «отклонён целиком», и при нулевом accepted строки
+ * гарантированно не приняты (см. refillRateLimitRefusal). Считать такую ночь
+ * доставленной значило бы терять оплаченный срез из-за минутной паузы
+ * провайдера. Ответ с частичным приёмом (accepted > 0) по-прежнему доставка:
+ * он решается ВЫШЕ проверки 429, даже если следующий чанк получил отказ.
+ *
  * Отсюда инвариант: доставленная база НИКОГДА не уходит в 'failed' решением
  * этой стадии, поэтому в released-базе не может быть компании, которой уже
  * писали (её собственный сбор исключал все не-'failed' базы проекта, а
@@ -518,7 +527,40 @@ async function persistRefillBase(
 function refillLeadsReachedProvider(e: unknown): boolean {
   if (!(e instanceof AppendLeadsPartialError)) return false;
   const partial = e.partialResult;
-  return partial.accepted > 0 || partial.attemptedIndexes.length > 0;
+  if (partial.accepted > 0) return true;
+  // Провайдер ОТВЕТИЛ «слишком часто» — это доказательство НЕприёма: запрос
+  // отклонён целиком, лидов он не создал. Неопределённость (сорванный сокет,
+  // истёкший срок, потерянный ответ) сюда не попадает — только явный HTTP-код.
+  if (refillRateLimitRefusal(e)) return false;
+  return partial.attemptedIndexes.length > 0;
+}
+
+/**
+ * Явный отказ Instantly по частоте запросов (HTTP 429).
+ *
+ * Зачем отдельно: хук beforeProviderRequest (признак жизни для сторожа простоя)
+ * в appendLeads.ts связан ОДНОЙ строкой с двумя другими опциями — таймаут 90 с
+ * с чтением тела и `retryRateLimits: false`. То есть, взяв видимость для
+ * сторожа, ночной долив потерял пересиживание 429 внутри клиента Instantly
+ * (4+8+16 с), и 429 на ПЕРВОМ чанке стал прилетать сюда как отказ. А
+ * attemptedIndexes заполняются в onRequestAttempt ДО HTTP-запроса — значит без
+ * этого предиката разовый 429 читался бы как «провайдер строки получил»: база
+ * сохранялась 'analyzed' с нулём доставленных лидов, а её компании исключались
+ * из ВСЕХ будущих сборок проекта (loadOtherBaseExclusionKeys). Оплаченный краул
+ * и SMTP-пробы сгорали из-за паузы провайдера на минуту.
+ *
+ * Разбор по тексту здесь — не выбор, а следствие: AppendLeadsPartialError
+ * переносит наружу только `message` исходной ошибки (ни `cause`, ни статуса), а
+ * appendLeads.ts делит файл с ОПЛАЧИВАЕМЫМ RU-кабинетом и обязан остаться
+ * байт-в-байт. Поэтому класс читается напрямую, когда ошибка дошла не
+ * завёрнутой, и по стабильному префиксу сообщения клиента Instantly
+ * (`Instantly API <код>: …`, lib/instantly/client.ts) — когда завёрнутой.
+ * Чистое решение — развязать три опции в appendLeads и дать ошибке `cause`;
+ * это правка общего с платящим контуром файла и требует решения владельца.
+ */
+function refillRateLimitRefusal(e: unknown): boolean {
+  if (e instanceof InstantlyApiError) return e.status === 429;
+  return e instanceof Error && /^Instantly API 429\b/.test(e.message);
 }
 
 /**
@@ -938,6 +980,29 @@ export async function runHeRefillAppend(args: {
         // рядом, и разница «некуда грузить» против «адреса плохие» решает,
         // пересобирать базу или ждать места.
         pauseOnWorkspaceCapacity: true,
+        // Признак жизни на КАЖДОЙ попытке отправки чанка (хук зовётся после
+        // допуска лимитера, прямо перед HTTP). Без него ночной долив был
+        // невидим для сторожа простоя стадии: blocklist, кап и загрузка идут
+        // через supabaseInstantly и HTTP Instantly, то есть ни ctx.supabase, ни
+        // ctx.log, ни ctx.onActivity не дёргаются, и медленная ночь провайдера
+        // обрывалась аварийным выходом процесса ПОСРЕДИ загрузки: лиды уже
+        // приняты, refill_result нет, строки журнала прогона нет, а повтор
+        // грузит их заново — от дублей остаётся только skipIfInCampaign.
+        //
+        // Побочный эффект хука осознан (appendLeads.ts:380): вместе с ним
+        // включаются timeoutMs=90_000 и timeoutIncludesBody=true — это нам и
+        // нужно, иначе зависшее ЧТЕНИЕ ТЕЛА ответа не ограничено ничем, — и
+        // выключается retryRateLimits, то есть 429 больше не пересиживается
+        // внутри клиента (4+8+16 с). Обмен сознательный: отказ по 429 долив
+        // ловит сам, пишет прогон 'failed' с причиной, ВОЗВРАЩАЕТ компании в пул
+        // (429 доказывает, что строки не приняты — refillRateLimitRefusal) и его
+        // повторит крон следующей ночью, тогда как аварийный выход посреди
+        // загрузки не оставлял ни причины, ни журнала и приводил к повторной
+        // отправке. Развязать три опции в appendLeads.ts было бы чище, но этот
+        // файл общий с оплачиваемым RU-кабинетом — решение владельца.
+        beforeProviderRequest: async () => {
+          ctx.onActivity?.();
+        },
       });
       runStats.appended = appended.accepted;
       runStats.skipped_instantly = appended.skipped;
@@ -1082,6 +1147,7 @@ export async function runHeRefillAppend(args: {
           ? ' — строки уже у провайдера, база остаётся analyzed'
           : released
             ? ' — провайдер строк не получил, база failed (компании не выжигаем)'
+              + (refillRateLimitRefusal(e) ? ': отказ по частоте запросов, приёма не было' : '')
             : ` — отказ ${failStreak + 1}-й подряд, компании остаются исключёнными ` +
               '(база analyzed): иначе ночной прогон собрал бы тот же срез заново'),
     );
