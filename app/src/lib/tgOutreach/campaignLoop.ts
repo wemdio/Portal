@@ -29,6 +29,7 @@ import {
   recordProxySuccess,
 } from './proxyHealth';
 import { sendFirstTouchBatch } from './firstTouch/send';
+import { checkUsernamesOnTme } from './usernameExists';
 import { parkAccountAfterLimit } from './accountCooldown';
 import { pickForwardIds } from './forwardSelection';
 import { sendFreezeAppeal } from './freezeAppeal';
@@ -2722,6 +2723,7 @@ export async function runCampaignLoop(
             gapMs: randomRange(tg.read_reply_delay_range) * 1000,
             claimed: claimedContacts,
             claimLock: withClaimLock,
+            checkUsernames: checkUsernamesOnTme,
           });
           if (ft.sent || ft.skipped || ft.postponed) {
             log(
@@ -2737,10 +2739,22 @@ export async function runCampaignLoop(
             const blanks = readBlankRounds(account) + 1;
             await writeBlankRounds(account, blanks);
             if (blanks >= RESOLVE_BLOCKED_LIMIT) {
+              /**
+               * Раньше здесь стояло «при том что другие аккаунты кампании с той
+               * же очереди рассылают» — без всякой проверки. 24–28.09.2026 в
+               * ATOL-1 не рассылал никто: в очереди остались четыре мёртвых
+               * ника, и эта фраза стояла в карточках всех пятидесяти аккаунтов.
+               * Теперь довод называем тот, что есть: t.me подтвердил живые ники
+               * или проверить их не удалось.
+               */
+              const evidence = ft.blindOnExisting > 0
+                ? `${blanks} круга подряд не нашёл ни одного ника из порции, хотя эти люди есть в Telegram ` +
+                  '(ники проверены по t.me).'
+                : `${blanks} круга подряд ни один ник из порции не нашёлся; проверить ники по t.me не ` +
+                  'удалось, так что вывод косвенный — это могут быть и несуществующие ники в базе.';
               const detail =
-                `ВРЕМЕННОЕ ограничение — аккаунт не резолвит юзернеймы: ${blanks} круга подряд ` +
-                'ни один ник из порции не нашёлся, при том что другие аккаунты кампании с той же ' +
-                'очереди рассылают. Так выглядит заморозка Telegram: @SpamBot про неё не отвечает, ' +
+                `ВРЕМЕННОЕ ограничение — аккаунт не резолвит юзернеймы: ${evidence} ` +
+                'Так выглядит заморозка Telegram: @SpamBot про неё не отвечает, ' +
                 'кода ошибки нет. Проверьте аккаунт в официальном приложении — при заморозке там ' +
                 'висит баннер с кнопкой обжалования.';
               const parked = await parkAccountAfterLimit({
