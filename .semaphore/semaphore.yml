@@ -69,12 +69,12 @@ blocks:
       # с main → на давно разошедшейся ветке правки в app/ накопились и
       # change_in всегда true.
       #
-      # Ветка test с 28.09.2026 тоже гоняет блок — полный набор тестов и
-      # сборку Next (см. app/scripts/ci/branch-tests.mjs): остальные ветки
-      # гоняют только связанные тесты и без сборки, test — страховка после
-      # слияния. Миграции, Dockerfile, compose и health-check в списке потому,
-      # что их читают тесты напрямую, мимо импортов.
-      when: "branch != 'main' AND change_in(['/app/', '/.semaphore/semaphore.yml', '/.semaphore/select-deploy-targets.sh', '/.semaphore/test-select-deploy-targets.sh', '/drain-worker.sh', '/supabase/migrations/', '/Dockerfile', '/Dockerfile.worker', '/docker-compose.prod.yml', '/services/health-check/'], {default_branch: 'main', branch_range: '$SEMAPHORE_GIT_COMMIT_RANGE'})"
+      # Ветки test и main блок не гоняют: это вливания уже проверенных веток,
+      # и повторный прогон — лишние минуты на каждое слияние (попытка гонять
+      # полный набор на test отменена 28.09.2026 по той же причине).
+      # Миграции, Dockerfile, compose и health-check в списке потому, что их
+      # читают тесты напрямую, мимо импортов.
+      when: "branch != 'main' AND branch != 'test' AND change_in(['/app/', '/.semaphore/semaphore.yml', '/.semaphore/select-deploy-targets.sh', '/.semaphore/test-select-deploy-targets.sh', '/drain-worker.sh', '/supabase/migrations/', '/Dockerfile', '/Dockerfile.worker', '/docker-compose.prod.yml', '/services/health-check/'], {default_branch: 'main', branch_range: '$SEMAPHORE_GIT_COMMIT_RANGE'})"
     task:
       secrets:
         - name: portal_secrets
@@ -140,10 +140,10 @@ blocks:
       # на машины дороже, чем прогнать подряд.
       #
       # Порядок шагов — от самого дешёвого к самому дорогому: линт и типы
-      # отваливаются за секунды и не дают платить за тесты и сборку, когда
-      # правка не компилируется (fail_fast на ветках выключает и остальное).
+      # отваливаются за секунды и не дают платить за тесты, когда правка не
+      # компилируется (fail_fast на ветках выключает и остальное).
       jobs:
-        - name: 'Checks and build'
+        - name: 'Checks and tests'
           commands:
             - source /tmp/env_vars
             - '(cd "$APP_PATH/.." && bash .semaphore/test-select-deploy-targets.sh)'
@@ -196,31 +196,20 @@ blocks:
             # он промахнётся ровно на тех файлах, которые с тех пор поменялись.
             # Ротация по дню — потому что ключи не перезаписываются.
             #
-            # Какие тесты гонять, решает branch-tests.mjs (с 28.09.2026): на
-            # ветке test — весь набор; на остальных — связанные с изменениями
-            # ветки относительно test плюс все, что читают файлы сами (~50 из
-            # ~300 файлов вместо всех — ~20 с вместо минуты). Весь набор и на
-            # ветке, если менялись зависимости, настройки или CI. Решение и
-            # список пишутся в лог.
+            # Какие тесты гонять, решает branch-tests.mjs (с 28.09.2026):
+            # связанные с изменениями ветки относительно test плюс все, что
+            # читают файлы сами (~50 из ~300 файлов вместо всех — ~20 с вместо
+            # минуты). Весь набор, если менялись зависимости, настройки или CI.
+            # Решение и список пишутся в лог.
+            #
+            # Сборки Next в CI веток нет с 28.09.2026: минута на каждом пуше
+            # ради редкого — того, чего не видят линт и типы (серверный код в
+            # клиентском, настройки маршрутов, ошибки пререндера). Такую
+            # ошибку ловит Docker-сборка на main, до выкладки: прод она не
+            # ломает, но выкладку задержит до исправления.
             - 'cache restore jest-v2-$(date +%Y%m%d),jest-v2-'
             - 'node scripts/ci/branch-tests.mjs --maxWorkers=2 --workerIdleMemoryLimit=1200MB --cacheDirectory=.jest-cache'
             - 'cache store jest-v2-$(date +%Y%m%d) .jest-cache'
-            # Сборка Next — только на ветке test, после слияния (с 28.09.2026):
-            # на каждом пуше ветки она занимала минуту, а ловит редкое — то,
-            # чего не видят линт и типы (серверный код в клиентском, настройки
-            # маршрутов, ошибки пререндера). На прод такая ошибка всё равно не
-            # попадёт: её не пропустит Docker-сборка на main.
-            #
-            # Проверку типов Next пропускает: она упирается в физические 4 ГБ
-            # runner-а, а типы уже проверил typecheck:fast выше в этой же
-            # джобе. На ветке test одного NEXT_BUILD_SKIP_TYPECHECK мало —
-            # next.config.ts пускает пропуск на test только вместе с
-            # NEXT_BUILD_PRECHECKED_TYPECHECK.
-            #
-            # Кэш сборки по дню, а не по коммиту: webpack-кэш Next весит сотни
-            # мегабайт, и запись на каждый пуш вытеснила бы из квоты всё
-            # остальное.
-            - 'if [ "$SEMAPHORE_GIT_BRANCH" = "test" ]; then cache restore nextjs-v2-test-$(date +%Y%m%d),nextjs-v2-test-,nextjs-v2-; NEXT_BUILD_PRECHECKED_TYPECHECK=1 NEXT_BUILD_SKIP_TYPECHECK=1 npm run build && cache store nextjs-v2-test-$(date +%Y%m%d) .next/cache; else echo "[ci] сборка Next — только на ветке test"; fi'
   - name: Build portal
     dependencies: []
     run:
