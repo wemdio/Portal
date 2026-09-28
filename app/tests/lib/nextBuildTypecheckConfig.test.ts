@@ -182,7 +182,11 @@ describe('Next build typecheck contract', () => {
       '.next/cache/tsc7',
     );
 
-    expect(testBlock).toContain("branch != 'main' AND branch != 'test'");
+    // Ветка test обязана гонять блок: остальные ветки гоняют только связанные
+    // тесты и без сборки Next, и полный набор со сборкой — на test, после
+    // слияния. Выпади test из условия — полного прогона не было бы нигде.
+    expect(testBlock).toContain("when: \"branch != 'main' AND change_in(");
+    expect(testBlock).not.toContain("branch != 'test'");
     expect(typecheckJob).toContain('- npm run typecheck:fast');
     expect(typecheckJob).not.toContain('- npx next typegen');
     expect(packageJson.scripts?.['pretypecheck:strict']).toContain(
@@ -197,15 +201,20 @@ describe('Next build typecheck contract', () => {
     expect(typecheckJob).toMatch(/cache restore \S+/);
     expect(typecheckJob).toMatch(/cache store [^\n]*\.next\/cache/);
     expect(typecheckJob).not.toContain('.tsbuildinfo.ci');
-    // Тесты обязаны остаться в обязательном блоке ветки и гоняться целиком:
+    // Тесты обязаны остаться в обязательном блоке ветки; какие именно гонять
+    // (весь набор на test, связанные — на остальных), решает один скрипт.
     // --shard без пересчёта долей однажды уже мог бы тихо недосчитать часть
     // набора, оставив прогон зелёным. Сейчас долей нет — и появиться они
     // должны осознанно, вместе с правкой этого теста.
-    expect(testsJob).toContain('npm test -- --watchAll=false');
+    expect(testsJob).toContain('- \'node scripts/ci/branch-tests.mjs ');
+    expect(fs.existsSync(path.resolve(process.cwd(), 'scripts', 'ci', 'branch-tests.mjs'))).toBe(true);
     expect(testsJob).not.toContain('--shard=');
     // Порядок внутри джобы: сначала дешёвые проверки, потом дорогая сборка.
     // Иначе за сборку платится даже там, где правка не проходит типы.
     expect(typecheckJob.indexOf('npm run typecheck:fast')).toBeLessThan(
+      typecheckJob.indexOf('scripts/ci/branch-tests.mjs'),
+    );
+    expect(typecheckJob.indexOf('scripts/ci/branch-tests.mjs')).toBeLessThan(
       typecheckJob.indexOf('npm run build'),
     );
   });
@@ -232,15 +241,28 @@ describe('Next build typecheck contract', () => {
     expect(validatorConfig.exclude).toEqual(['node_modules']);
   });
 
-  it('sets the branch-CI skip flag only inside the branch Next build job', () => {
+  it('builds Next in CI only on the test branch, prechecked by the fast typecheck of the same job', () => {
     const workflow = fs.readFileSync(
       path.resolve(process.cwd(), '..', '.semaphore', 'semaphore.yml'),
       'utf8',
     );
     const testBlock = namedSection(workflow, 'Run tests', 2);
     const nextBuildJob = namedSection(testBlock, 'Checks and build', 8);
+    const buildLine = nextBuildJob.split(/\r?\n/).find((line) => line.includes('npm run build')) ?? '';
 
-    expect(nextBuildJob).toContain("- 'NEXT_BUILD_SKIP_TYPECHECK=1 npm run build'");
+    // Сборка Next с 28.09.2026 — только на ветке test (страховка после
+    // слияния), не на каждом пуше ветки.
+    expect(buildLine).toContain('if [ "$SEMAPHORE_GIT_BRANCH" = "test" ]; then');
+    // Пропуск встроенной проверки типов Next на test разрешён только вместе с
+    // флагом «проверено заранее» — и заранее её обязан сделать typecheck:fast
+    // в этой же джобе, до сборки.
+    expect(buildLine).toContain('NEXT_BUILD_PRECHECKED_TYPECHECK=1 NEXT_BUILD_SKIP_TYPECHECK=1 npm run build');
+    expect(nextBuildJob.indexOf('- npm run typecheck:fast')).toBeGreaterThan(-1);
+    expect(nextBuildJob.indexOf('- npm run typecheck:fast')).toBeLessThan(nextBuildJob.indexOf(buildLine));
+    // Упавшая сборка обязана ронять строку: через «;» результатом строки стал
+    // бы код следующей команды (записи кэша), и красная сборка прошла бы
+    // зелёной.
+    expect(buildLine).toMatch(/npm run build && /);
     expect(workflow.match(/NEXT_BUILD_SKIP_TYPECHECK=1 npm run build/g)).toHaveLength(1);
   });
 
