@@ -93,6 +93,7 @@ describe('VE2 contact delivery scheduler', () => {
       update.mockRejectedValueOnce(new Error('lost response'));
       const runProject = jest.fn(), runSupply = jest.fn();
       const result = await runBoundContactDeliveries({portalDb: portal as never, instantlyDb: presets as never,
+        recoverActivation: async () => ({activated: 0, errors: []}),
         reconcile: async () => ({accepted: 0, released: 0, errors: []}), runProject, runSupply,
         log: jest.fn()});
       expect(result.failedProjects).toBe(1);
@@ -255,16 +256,16 @@ describe('VE2 contact delivery scheduler', () => {
       log,
     });
 
-    expect(recoverActivation).toHaveBeenCalledTimes(1);
+    expect(recoverActivation).toHaveBeenCalledTimes(3);
     expect(recoverActivation).toHaveBeenCalledWith({ portalDb: portal, veProjectId: 've-1' });
-    expect(runProject.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-1', 've-2']);
-    expect(runSupply.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-1', 've-2']);
-    expect(reconcile.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-1', 've-2']);
+    expect(runProject.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-1', 've-2', 've-queued']);
+    expect(runSupply.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-1', 've-2', 've-queued']);
+    expect(reconcile.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-1', 've-2', 've-queued']);
     expect(reconcile.mock.invocationCallOrder[1]).toBeLessThan(runProject.mock.invocationCallOrder[1]);
     expect(result).toEqual({
       skipped: false,
-      eligibleProjects: 2,
-      attemptedProjects: 2,
+      eligibleProjects: 3,
+      attemptedProjects: 3,
       failedProjects: 1,
     });
     expect(log).toHaveBeenCalledWith(
@@ -277,6 +278,7 @@ describe('VE2 contact delivery scheduler', () => {
       const supply = jest.fn(async () => { if (phase === 'supply') stopping = true; return {}; });
       const delivery = jest.fn(async () => { stopping = true; return { status: 'completed' }; });
       const stopped = await runBoundContactDeliveries({ portalDb: portal as never, instantlyDb: {} as never,
+        recoverActivation: async () => ({activated: 0, errors: []}),
         shouldStop: () => stopping, runSupply: supply as never, runProject: delivery as never, log });
       expect(supply).toHaveBeenCalledTimes(1);
       expect(delivery).toHaveBeenCalledTimes(phase === 'delivery' ? 1 : 0);
@@ -307,7 +309,7 @@ describe('VE2 contact delivery scheduler', () => {
         ve_projects: [{ id: 've', ...COMPLETE_BINDING, launch_instantly_account_id: 'main' }],
         project_periods: [{ id: COMPLETE_BINDING.portal_period_id, project_id: COMPLETE_BINDING.portal_project_id, status: 'active', contacts_done: '0', deadline: '2026-09-11' }],
         ve_launch_queue_items: [{ id: 'item', project_id: 've', status: 'active', potential_pct: 70 }],
-        ve_launch_queue_campaigns: [{ id: 'campaign-row', item_id: 'item', campaign_id: 'original-campaign', segment: null }],
+        ve_launch_queue_campaigns: [{ id: 'campaign-row', item_id: 'item', campaign_id: 'original-campaign', segment: null, remote_status: 1, status_observed_at: '2026-09-07T06:00:00Z' }],
         ve_templates: [template],
         ve_contact_delivery_rows: [0, 1, 2].map((n) => ({ id: `row-${n}`, ve_project_id: 've', campaign_row_id: 'campaign-row', email_normalized: `existing${n}@example.test`, status: 'ready' })),
       },
@@ -358,6 +360,15 @@ describe('VE2 contact delivery scheduler', () => {
     expect(portal.rpcCalls.some((call) => call.fn === 've_enqueue_contact_supply_batch')).toBe(false);
     approved = true;
     await portal.from('ve_contact_supply_plans').update({ status: 'active' }).eq('id', 'plan');
+    for (const status of [0, 2]) {
+      await portal.from('ve_launch_queue_campaigns').update({remote_status: status}).eq('id','campaign-row');
+      await runProjectContactSupply(input);
+      expect(portal.rpcCalls.some(call => call.fn === 've_enqueue_contact_supply_batch')).toBe(false);
+    }
+    await portal.from('ve_launch_queue_campaigns').update({remote_status:1,status_observed_at:'2026-09-07T05:54:00Z'}).eq('id','campaign-row');
+    await runProjectContactSupply(input);
+    expect(portal.rpcCalls.some(call => call.fn === 've_enqueue_contact_supply_batch')).toBe(false);
+    await portal.from('ve_launch_queue_campaigns').update({status_observed_at:input.now.toISOString()}).eq('id','campaign-row');
     await runProjectContactSupply(input);
     expect(portal.rpcCalls.find((call) => call.fn === 've_enqueue_contact_supply_batch')?.params.p_limit).toBe(37);
     await runProjectContactSupply(input);
@@ -434,7 +445,7 @@ describe('VE2 contact delivery scheduler', () => {
           ve_projects: [{ id: 've', ...COMPLETE_BINDING, launch_instantly_account_id: 'main' }],
           project_periods: [{ id: COMPLETE_BINDING.portal_period_id, project_id: COMPLETE_BINDING.portal_project_id, status: 'active', contacts_done: '0', deadline: '2026-09-11' }],
           ve_launch_queue_items: [{ id: 'item', project_id: 've', status: 'active', potential_pct: 70 }],
-          ve_launch_queue_campaigns: [{ id: 'campaign-row', item_id: 'item', campaign_id: 'original-campaign', segment: null }],
+          ve_launch_queue_campaigns: [{ id: 'campaign-row', item_id: 'item', campaign_id: 'original-campaign', segment: null, remote_status: 1, status_observed_at: '2026-09-07T06:00:00Z' }],
         },
         rpcHandlers: {
           ve_contact_supply_approval_current: () => ({ data: true }),
@@ -475,7 +486,7 @@ describe('VE2 contact delivery scheduler', () => {
     const runSupply = jest.fn(async (_input: { veProjectId: string }) => ({}));
     const result = await runBoundContactDeliveries({
       portalDb: portal as never, instantlyDb: {} as never, runProject: runProject as never,
-      runSupply: runSupply as never, log: jest.fn(),
+      runSupply: runSupply as never, recoverActivation: async () => ({activated: 0, errors: []}), log: jest.fn(),
     });
     expect(runProject.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-no-period']);
     expect(runSupply.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-no-period']);
@@ -491,7 +502,7 @@ describe('VE2 contact delivery scheduler', () => {
         contacts_obligation: '4000', contacts_done: '25905', ...projectOverrides }],
       project_periods: periods,
       ve_launch_queue_items: [{ id: 'item', project_id: 've', status: 'active', potential_pct: 70 }],
-      ve_launch_queue_campaigns: [{ id: 'campaign-row', item_id: 'item', campaign_id: 'original-campaign', segment: null }],
+      ve_launch_queue_campaigns: [{ id: 'campaign-row', item_id: 'item', campaign_id: 'original-campaign', segment: null, remote_status: 1, status_observed_at: '2026-09-07T06:00:00Z' }],
       ve_contact_delivery_rows: [0, 1, 2].map((n) => ({ id: `row-${n}`, ve_project_id: 've', campaign_row_id: 'campaign-row', email_normalized: `existing${n}@example.test`, status: 'ready' })),
     });
     const handlers = {

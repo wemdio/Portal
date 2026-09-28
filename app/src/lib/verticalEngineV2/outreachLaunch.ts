@@ -9,6 +9,7 @@ import { prepareAuditSnapshot, validateStoredAuditSnapshot } from './stages/segm
 import { requeueVeJob, type VeStageContext, type VeStageResult } from './stages/shared';
 import type { VeBase, VeJob, VeSegmentationAudit, VeTemplate } from './types';
 import { readDeliveryRate } from './contactDeliveryRateService';
+import { activateDeliveredContactCampaigns } from './contactDeliveryActivation';
 
 const itemSchema = z.object({
   hypothesis_id: z.string().uuid(), base_id: z.string().uuid(), template_id: z.string().uuid(),
@@ -225,15 +226,15 @@ export async function runVeOutreachStartStage(job: VeJob, ctx: VeStageContext, i
     const planVersion = Number(queue.plan_version);
     if (!Number.isSafeInteger(planVersion) || planVersion < 1) fail('Версия очереди запуска недоступна.');
     item.item_id = queue.id; item.campaigns = launch.campaigns ?? [{ campaign_id: launch.campaign_id, campaign_url: launch.campaign_url }];
-    if (queue.status === 'active') item.status = 'active';
-    else {
-      if (['uncertain', 'activating'].includes(queue.status)) fail('Состояние активации не подтверждено. Нужна сверка, повторная отправка не запускается.');
-      if (queue.status !== 'queued') fail('Кампании выведены из очереди или остановлены. Автоматическое возобновление отключено.');
-      // Creating campaigns is not a specialist's review of the actual provider
-      // result. Only the separate queue activation action may grant that approval.
-      item.status = 'waiting'; item.code = 'VE_LAUNCH_REVIEW_REQUIRED';
-      item.error = 'Кампании подготовлены без отправки. Проверьте их в Instantly, затем подтвердите активацию в «Очереди запусков».';
+    if (!['prepared', 'queued', 'active', 'uncertain'].includes(queue.status)) fail('Подготовка отменена или изменена. Проверьте сохранённые кампании.');
+    const observed = await activateDeliveredContactCampaigns({portalDb: db, veProjectId: job.project_id, itemId: queue.id});
+    if (observed.errors.length) {
+      item.status = 'waiting'; item.code = 'VE_CAMPAIGN_SYNC_PENDING';
+      item.error = 'Кампании сохранены. Ожидаем подтверждения их состояния из Instantly; повторно создавать их не нужно.';
+    } else {
+      item.status = 'active'; item.code = 'VE_CAMPAIGNS_PREPARED';
     }
+
   } catch (error_) {
     ctx.signal?.throwIfAborted();
     item.status = 'blocked'; item.error = error_ instanceof VeOutreachLaunchError ? error_.message : 'Запуск остановлен из-за технической ошибки. Сохранённые кампании не создаются повторно.';

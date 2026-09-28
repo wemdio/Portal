@@ -9,6 +9,8 @@ jest.mock('@/lib/verticalEngineV2/stages/segmentationAudit', () => ({
 jest.mock('@/lib/verticalEngineV2/launchActivation', () => ({
   activateVeLaunchPortfolioItem: jest.fn(async () => ({status: 200})),
 }));
+jest.mock('@/lib/verticalEngineV2/contactDeliveryActivation', () => ({activateDeliveredContactCampaigns: jest.fn()}));
+import { activateDeliveredContactCampaigns } from '@/lib/verticalEngineV2/contactDeliveryActivation';
 import { activateVeLaunchPortfolioItem } from '@/lib/verticalEngineV2/launchActivation';
 
 import { outreachLaunchRequestSchema, runVeOutreachStartStage, prepareVeOutreachLaunch } from '@/lib/verticalEngineV2/outreachLaunch';
@@ -47,7 +49,7 @@ describe('auto-outreach launch for a Portal project without periods', () => {
     expect(outreachLaunchRequestSchema.safeParse(missing).success).toBe(false);
   });
 
-  it('keeps prepared campaigns without period waiting for a separate specialist activation', async () => {
+  it('finishes preparation after status sync without a Portal activation or duplicate creation', async () => {
     const portal = createMockSupabase({
       tables: {
         ve_jobs: [{id: 'job-1', project_id: VE_PROJECT_ID, stage: 'outreach_start', status: 'running'}],
@@ -91,17 +93,18 @@ describe('auto-outreach launch for a Portal project without periods', () => {
       createMockSupabase() as never,
     );
 
+    jest.mocked(activateDeliveredContactCampaigns).mockResolvedValue({activated: 0, errors: ['API unavailable']});
     expect(await runStage()).toEqual({result: {outreach_run_id: 'run-1', status: 'waiting'}});
     expect(portal.getRows('ve_outreach_runs')[0]).toMatchObject({status: 'waiting', items: [expect.objectContaining({
-      status: 'waiting', code: 'VE_LAUNCH_REVIEW_REQUIRED', item_id: 'item-1',
+      status: 'waiting', code: 'VE_CAMPAIGN_SYNC_PENDING', item_id: 'item-1',
     })]});
     expect(portal.getRows('ve_jobs')[0].status).toBe('pending');
     // A later worker pass still cannot fabricate the operator's review.
     await portal.from('ve_jobs').update({status: 'running'}).eq('id', 'job-1');
     expect(await runStage()).toEqual({result: {outreach_run_id: 'run-1', status: 'waiting'}});
     expect(activateVeLaunchPortfolioItem).not.toHaveBeenCalled();
-    // Only observe approval made through the separate existing queue action.
-    await portal.from('ve_launch_queue_items').update({status: 'active'}).eq('id', 'item-1');
+    // Provider state becomes available; no separate queue action or activation.
+    jest.mocked(activateDeliveredContactCampaigns).mockResolvedValue({activated: 0, errors: []});
     await portal.from('ve_jobs').update({status: 'running'}).eq('id', 'job-1');
     expect(await runStage()).toEqual({ result: { outreach_run_id: 'run-1', status: 'active' } });
     expect(portal.getRows('ve_outreach_runs')[0]).toMatchObject({

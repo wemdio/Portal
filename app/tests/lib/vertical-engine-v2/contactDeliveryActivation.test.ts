@@ -11,6 +11,8 @@ jest.mock('@/lib/instantly/client', () => ({
 
 import { activateApprovedLaunchCampaigns } from '@/lib/verticalEngineV2/contactDeliveryActivation';
 
+import { activateVeLaunchPortfolioItem } from '@/lib/verticalEngineV2/launchActivation';
+
 const STAFF_LINE_ID = '837cbcb1-9afb-49c9-965c-d83d1e7d8e9c';
 
 function approve(project: Record<string, unknown>) {
@@ -25,9 +27,11 @@ function approve(project: Record<string, unknown>) {
 beforeEach(() => mockActivateCampaign.mockReset());
 
 describe('approved launch activation', () => {
-  it('defers a plan bound to a Portal project without periods to the daily runner', async () => {
+  it('never starts sending from a bound plan or a stale Portal activation request', async () => {
     await expect(approve({ portal_project_id: STAFF_LINE_ID, portal_period_id: null, target_contacts: 4000 }))
       .resolves.toEqual({ deferred: true });
+    const staleRequest = await activateVeLaunchPortfolioItem({ portalDb: {} as never, itemId: 'old-item', actorId: 'user', body: {confirm_campaign_review:true} });
+    expect(staleRequest).toMatchObject({status:409,body:{code:'VE_START_IN_INSTANTLY'}});
     expect(mockActivateCampaign).not.toHaveBeenCalled();
   });
 

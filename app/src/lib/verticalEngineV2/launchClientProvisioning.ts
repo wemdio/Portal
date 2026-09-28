@@ -32,7 +32,7 @@ export const VE_LAUNCH_CLIENT_PRESET_DEFAULTS = {
   daily_limit: 50,
   daily_max_leads: 50,
   email_gap_minutes: 10,
-  open_tracking: true,
+  open_tracking: false,
   link_tracking: true,
   stop_on_reply: true,
   text_only: false,

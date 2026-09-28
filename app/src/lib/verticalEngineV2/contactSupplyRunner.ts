@@ -200,12 +200,24 @@ export async function runProjectContactSupply(input: {
   if (!approved.length) return result;
   const context = await loadSupplyContext(portalDb, instantlyDb, veProjectId, now);
   if (!context.eligibleToday) return result;
-  const broadHypotheses = await readBroadHypothesisIds(portalDb, approved.map((plan) => plan.hypothesis_id));
+  const liveCampaigns = await readContactDeliveryPages<{item_id: string; remote_status: number; status_observed_at: string}>(
+    'sending supply campaigns', (from, to) => portalDb.from('ve_launch_queue_campaigns')
+      .select('item_id, remote_status, status_observed_at', {count: 'exact'})
+      .in('item_id', approved.map(plan => plan.item_id).filter(Boolean))
+      .in('remote_status', [1, 3, 4]).order('id', {ascending: true}).range(from, to));
+  const sendingItems = new Set(liveCampaigns.filter(campaign => {
+    const age = now.getTime() - Date.parse(campaign.status_observed_at);
+    return age >= -60_000 && age <= 5 * 60_000;
+  }).map(campaign => campaign.item_id));
+  const sendingPlans = approved.filter(plan => plan.item_id && sendingItems.has(plan.item_id));
+  if (!sendingPlans.length) return result;
+
+  const broadHypotheses = await readBroadHypothesisIds(portalDb, sendingPlans.map((plan) => plan.hypothesis_id));
   const batches = await readContactDeliveryPages<SupplyBatch>('contact supply batches', (from, to) => portalDb
     .from('ve_contact_supply_batches').select('id, plan_id, base_id, template_id, audit_id, status, appended_count, error', { count: 'exact' })
-    .in('plan_id', approved.map((plan) => plan.id)).order('created_at', { ascending: false }).order('id', { ascending: true }).range(from, to));
+    .in('plan_id', sendingPlans.map((plan) => plan.id)).order('created_at', { ascending: false }).order('id', { ascending: true }).range(from, to));
   let pendingWork = false;
-  for (const plan of approved) {
+  for (const plan of sendingPlans) {
     if (!context.campaigns.some((campaign) => campaign.item_id === plan.item_id)) continue;
     const batch = batches.find((entry) => entry.plan_id === plan.id);
     if (!batch) continue;
@@ -322,7 +334,7 @@ export async function runProjectContactSupply(input: {
   // another bounded source batch; next sweep sees freshly appended inventory.
   if (pendingWork) return result;
   for (const request of context.requests) {
-    const plan = approved.find((entry) => entry.item_id === request.itemId);
+    const plan = sendingPlans.find((entry) => entry.item_id === request.itemId);
     if (!plan) continue;
     const enqueued = await rpc(portalDb, 've_enqueue_contact_supply_batch', {
       p_plan_id: plan.id, p_limit: request.readyTarget, p_now: now.toISOString(),
