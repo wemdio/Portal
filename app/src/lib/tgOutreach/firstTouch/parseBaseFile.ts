@@ -11,11 +11,17 @@
  */
 import { countSpintaxVariants } from './spintax';
 import { normalizeUsername } from './normalizeUsername';
+import { isAttachmentHeader, normalizeAttachmentName } from './attachments';
 
 export interface ParsedContact {
   username: string;
   message: string;
-  /** Колонки помимо первых двух: ключ — заголовок или «Колонка N». */
+  /**
+   * Имя файла к первому сообщению из колонки «картинка»/«файл» (ищется по
+   * заголовку); null — колонки нет или ячейка пустая.
+   */
+  attachmentName: string | null;
+  /** Колонки помимо первых двух (и колонки файла): ключ — заголовок или «Колонка N». */
   raw: Record<string, string>;
 }
 
@@ -35,6 +41,8 @@ export interface ParseStats {
    * самая богатая формулировка.
    */
   spintaxVariants: number;
+  /** Контактов с файлом в колонке «картинка»/«файл». */
+  withAttachment: number;
 }
 
 export interface ParseResult {
@@ -70,7 +78,7 @@ function looksLikeHeader(row: unknown[]): boolean {
 }
 
 export function parseBaseRows(rows: unknown[][]): ParseResult {
-  const stats: ParseStats = { total: 0, accepted: 0, noUsername: 0, noMessage: 0, duplicates: 0, spintaxVariants: 1 };
+  const stats: ParseStats = { total: 0, accepted: 0, noUsername: 0, noMessage: 0, duplicates: 0, spintaxVariants: 1, withAttachment: 0 };
   const contacts: ParsedContact[] = [];
   const seen = new Set<string>();
 
@@ -79,6 +87,8 @@ export function parseBaseRows(rows: unknown[][]): ParseResult {
   const hasHeader = looksLikeHeader(rows[0]);
   const headers = hasHeader ? rows[0].map((_, i) => cell(rows[0], i)) : null;
   const dataRows = hasHeader ? rows.slice(1) : rows;
+  // Колонка файла — только по заголовку и не среди первых двух.
+  const attachmentCol = headers ? headers.findIndex((h, i) => i >= 2 && isAttachmentHeader(h)) : -1;
 
   for (const row of dataRows) {
     // Строки нулевой длины — хвост массива без данных вообще, в статистику
@@ -107,12 +117,16 @@ export function parseBaseRows(rows: unknown[][]): ParseResult {
 
     const raw: Record<string, string> = {};
     for (let i = 2; i < row.length; i++) {
+      if (i === attachmentCol) continue;
       const value = cell(row, i);
       if (!value) continue;
       raw[headers?.[i] || `Колонка ${i + 1}`] = value;
     }
 
-    contacts.push({ username, message, raw });
+    const attachmentName = attachmentCol >= 0 ? normalizeAttachmentName(cell(row, attachmentCol)) || null : null;
+    if (attachmentName) stats.withAttachment++;
+
+    contacts.push({ username, message, attachmentName, raw });
     stats.accepted++;
     stats.spintaxVariants = Math.max(stats.spintaxVariants, countSpintaxVariants(message));
   }

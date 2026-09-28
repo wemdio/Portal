@@ -5,6 +5,7 @@ import { authFetch, getAccessToken } from '@/lib/authFetch';
 import { AccountAvatar } from '@/components/tg-outreach/AccountAvatar';
 import { defaultAppealText } from '@/lib/tgOutreach/freezeAppeal';
 import { BaseContactsModal } from '@/components/tg-outreach/BaseContactsModal';
+import { BaseAttachmentsPanel } from '@/components/tg-outreach/BaseAttachmentsPanel';
 import { pickIdentity } from '@/lib/tgOutreach/profile/autofill';
 import { BulkProfileModal } from '@/components/tg-outreach/BulkProfileModal';
 import { MoveAccountsModal } from '@/components/tg-outreach/MoveAccountsModal';
@@ -4866,6 +4867,8 @@ function CampaignBasesTab({
   const [queuePending, setQueuePending] = useState<number | null>(null);
   /** База, у которой сейчас правят список рассыльщиков. */
   const [editingSendersFor, setEditingSendersFor] = useState<string | null>(null);
+  /** База, у которой открыт блок файлов к первому сообщению. */
+  const [attachmentsFor, setAttachmentsFor] = useState<string | null>(null);
   /** Открытая база в окне просмотра контактов. */
   const [viewingBase, setViewingBase] = useState<{ id: string; name: string } | null>(null);
   const [sendersDraft, setSendersDraft] = useState<Set<string>>(new Set());
@@ -5158,7 +5161,7 @@ function CampaignBasesTab({
       });
       const d = (await res.json().catch(() => null)) as {
         error?: string;
-        stats?: { total: number; accepted: number; noUsername: number; noMessage: number; duplicates: number; spintaxVariants?: number };
+        stats?: { total: number; accepted: number; noUsername: number; noMessage: number; duplicates: number; spintaxVariants?: number; withAttachment?: number };
       } | null;
       if (!res.ok) {
         setError(d?.error ?? `Ошибка загрузки (${res.status})`);
@@ -5172,7 +5175,8 @@ function CampaignBasesTab({
             ? s.spintaxVariants > 1
               ? ` Вариантов текста: ${s.spintaxVariants}.`
               : ' Вариантов текста: 1 — все получат дословно одинаковое сообщение. Добавьте синонимы в фигурных скобках.'
-            : ''),
+            : '')
+          + (s.withAttachment ? ` С файлом в таблице: ${s.withAttachment} — проверьте, что файлы загружены (кнопка «файлы» у базы).` : ''),
         );
       }
       void load();
@@ -5283,6 +5287,18 @@ function CampaignBasesTab({
                     ? `рассылают: ${b.sending_account_ids?.length} из ${accounts.length}`
                     : 'рассылают: все аккаунты'}
                 </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAttachmentsFor(attachmentsFor === b.id ? null : b.id);
+                    setEditingSendersFor(null);
+                    setEditingChatsFor(null);
+                  }}
+                  title="Картинки и документы, которые уходят вместе с первым сообщением"
+                  className="mt-0.5 block text-[10px] text-gray-400 underline decoration-dotted underline-offset-2 transition hover:text-indigo-600 cursor-pointer"
+                >
+                  файлы к сообщению
+                </button>
               </div>
               <span className="text-xs text-gray-600">{b.counts.total}</span>
               <span className="text-xs text-gray-600">{b.counts.pending}</span>
@@ -5319,6 +5335,7 @@ function CampaignBasesTab({
                 </button>
               </div>
             </div>
+            {attachmentsFor === b.id && <BaseAttachmentsPanel baseId={b.id} baseName={b.name} />}
             {editingSendersFor === b.id && (
               <div className="space-y-2 border-t border-gray-100 bg-gray-50 px-4 py-3">
                 <div className="text-[11px] font-medium text-gray-700">
