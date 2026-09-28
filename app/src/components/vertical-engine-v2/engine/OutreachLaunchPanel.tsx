@@ -1,6 +1,6 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { VeTemplate } from '@/lib/verticalEngineV2/types';
+import type { VeSegmentationAuditSummary, VeTemplate } from '@/lib/verticalEngineV2/types';
 import type { VeOutreachSetupResponse } from '@/lib/verticalEngineV2/outreachSetup';
 import type { VeOutreachLaunchRequest, VeOutreachRun } from '@/lib/verticalEngineV2/outreachLaunch';
 import { VE_API, veEnginePost, type VeDeliveryPlanPreviewDto } from './api';
@@ -12,7 +12,7 @@ import { getVeLaunchSelectionState } from './launchSelection';
 type PreflightItem = VeOutreachLaunchRequest['items'][number] & {
   status: 'ready' | 'working' | 'blocked';
   error?: string;
-  summary?: { segments?: Array<{ count: number; name?: string }>; defaultGroup?: { count: number } };
+  summary?: VeSegmentationAuditSummary;
   preview?: VeDeliveryPlanPreviewDto & { prospective_ready: number };
 };
 interface Preflight {
@@ -53,7 +53,9 @@ export function OutreachLaunchPanel({
   const onAuditRejected = useCallback(() => setPreflightState(null), []);
   const launch = useTemplateLaunch(
     first,
-    preflightState?.result.items[0]?.segmentation_audit_id ?? null,
+    // prepare-launch owns both the audit and delivery preview. A second preview
+    // request can race the unfinished audit and leave a stale error in the form.
+    null,
     onAuditRejected,
   );
   const openForm = launch.openForm;
@@ -230,7 +232,7 @@ export function OutreachLaunchPanel({
           <CreateClientPresetInline launch={launch} templateId={first.id} />
         </fieldset>
       ) : null}
-      <DeliveryPlanBlock launch={launch} disabled={busy} />
+      <DeliveryPlanBlock launch={launch} disabled={busy} preparedPreview={preflight?.items[0]?.preview ?? null} />
       <div className="border-t border-[var(--ve2-line)] pt-5 space-y-3">
         <h2 className="ve2-h2">Обзор запуска</h2>
         {!request ? (
@@ -250,9 +252,10 @@ export function OutreachLaunchPanel({
             </p>
             {item.status === 'ready' ? (
               <p className={HE.muted}>
-                Кампаний:{' '}
-                {(item.summary?.segments?.filter((s) => s.count > 0).length ?? 0) +
-                  (item.summary?.defaultGroup?.count ? 1 : 0)}{' '}
+                Будет создано кампаний:{' '}
+                {item.summary
+                  ? item.summary.segments.filter((s) => s.count > 0).length + (item.summary.default.count > 0 ? 1 : 0)
+                  : '—'}{' '}
                 · новых готовых контактов: {item.preview?.prospective_ready ?? '—'}
               </p>
             ) : null}
