@@ -29,3 +29,8 @@ export function reminderReply(problems: Problem[], amoUrl: string | null): strin
 export function resolvedReply(): string {
   return '✅ Карточка дозаполнена';
 }
+
+/** Сообщение переотправили, и новая версия прошла проверку. */
+export function supersededReply(): string {
+  return '✅ Исправлено в новом сообщении';
+}

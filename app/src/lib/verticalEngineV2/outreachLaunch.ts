@@ -9,6 +9,7 @@ import { runVeTemplateLaunch } from './launchTemplate';
 import { prepareAuditSnapshot, validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import { requeueVeJob, type VeStageContext, type VeStageResult } from './stages/shared';
 import type { VeBase, VeJob, VeSegmentationAudit, VeTemplate } from './types';
+import { readDeliveryRate } from './contactDeliveryRateService';
 
 const itemSchema = z.object({
   hypothesis_id: z.string().uuid(), base_id: z.string().uuid(), template_id: z.string().uuid(),
@@ -16,6 +17,7 @@ const itemSchema = z.object({
 }).strict();
 export const outreachLaunchRequestSchema = z.object({
   setup_revision: z.number().int().positive(), preset_id: z.string().min(1).max(200),
+  delivery_rate_revision: z.number().int().positive().optional(),
   // null — проект Portal без периодов; поле обязательно, чтобы режим был выбран явно.
   portal_project_id: z.string().uuid(), expected_portal_period_id: z.string().uuid().nullable(),
   target_contacts: z.number().int().positive().max(1_000_000), items: z.array(itemSchema).min(1).max(50),
@@ -46,8 +48,15 @@ function uniqueItems(request: VeOutreachLaunchRequest) {
     if (new Set(request.items.map((item) => item[key])).size !== request.items.length) fail('Каждая гипотеза должна иметь одну выбранную базу и одну версию писем.');
   }
 }
-async function readSetup(db: SupabaseClient, projectId: string, request: VeOutreachLaunchRequest) {
+async function readSetup(db: SupabaseClient, projectId: string, request: VeOutreachLaunchRequest, checkRate = true) {
   uniqueItems(request);
+  if (checkRate && request.delivery_rate_revision != null) {
+    const rate = await readDeliveryRate(db, projectId);
+    if (!rate || rate.revision !== request.delivery_rate_revision || rate.preset_id !== request.preset_id
+      || !['ready', 'pending'].includes(rate.status) || request.items.some(item => !rate.template_ids.includes(item.template_id))) {
+      fail('Темп отправки изменился. Обновите расчёт и подтвердите запуск заново.');
+    }
+  }
   const { data, error } = await db.from('ve_outreach_setups').select('*').eq('project_id', projectId).maybeSingle();
   if (error) throw new VeOutreachLaunchError('Настройка запуска недоступна. Проверьте выпуск миграции автоаутрича.', 503);
   if (!data || Number(data.revision) !== request.setup_revision) fail('Выбранные гипотезы или согласования изменились. Обновите обзор запуска.');
@@ -188,7 +197,9 @@ export async function runVeOutreachStartStage(job: VeJob, ctx: VeStageContext, i
   try {
     item.last_attempt_at = new Date().toISOString();
     ctx.signal?.throwIfAborted();
-    await readSetup(db, job.project_id, request);
+    // An explicit later rate change must not invalidate an already accepted launch.
+    // Delivery checks the current policy before uploading; content approvals remain mandatory.
+    await readSetup(db, job.project_id, request, false);
     const { template, base } = await readItem(db, job.project_id, item);
     const audit = await readAudit(db, item);
     if (validateStoredAuditSnapshot({ audit, template, base }).state !== 'current') fail('Одобренные письма или аудитория изменились. Требуется новый обзор запуска.');

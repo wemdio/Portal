@@ -24,6 +24,7 @@ import { DossierSegmentCard, DossierSignalsCard, DossierDatasetCard } from './st
 import { BaseRow, BaseAnalysisCards } from './steps/Step4Base';
 import { FinalLettersEditor } from './FinalLettersEditor';
 import { OutreachLaunchPanel } from './OutreachLaunchPanel';
+import { DeliveryRatePanel } from './DeliveryRatePanel';
 import { CampaignProgress } from './CampaignProgress';
 import { ManualBaseLibrary } from './ManualBaseLibrary';
 import { PreparationProgress, getPreparationPresentation, type PreparationPresentation } from './PreparationProgress';
@@ -44,7 +45,7 @@ const RUN_LABELS = {
   queued: 'Запуск в очереди',
   running: 'Создаём и запускаем кампании',
   waiting: 'Ожидает отправителей или даты начала',
-  active: 'Кампании запущены',
+  active: 'Запуск разрешён',
   blocked: 'Запуск требует внимания',
   cancelled: 'Запуск остановлен',
 };
@@ -957,6 +958,9 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
             <section className="space-y-5">
               <h2 className="ve2-h2">{run ? RUN_LABELS[run.status] : 'Результаты'}</h2>
               {run?.error ? <StatusBox tone="error">{run.error}</StatusBox> : null}
+              {run?.request.preset_id && run.items.length ? <DeliveryRatePanel projectId={projectId}
+                presetId={run.request.preset_id} templateIds={run.items.map(item => item.template_id)}
+                disabled={busy || ['queued', 'running'].includes(run.status)} /> : null}
               {!locked && resultTemplates.length ? (
                 <button
                   type="button"
@@ -978,7 +982,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                         creating: 'Создаём кампании',
                         activating: 'Включаем отправку',
                         waiting: 'Ожидает отправителей или даты',
-                        active: 'Отправка включена',
+                        active: 'Загрузка контактов и отправка разрешены по расписанию',
                         blocked: 'Требует внимания',
                       }[item.status]}
                   </p>

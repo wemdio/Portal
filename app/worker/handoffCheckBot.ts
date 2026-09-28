@@ -28,19 +28,29 @@ import { sendWorkerAlert } from '@/lib/telegram/workerAlert';
 import { parseHandoff } from '@/lib/handoffCheck/parseHandoff';
 import { checkCard } from '@/lib/handoffCheck/checkCard';
 import { fetchCard } from '@/lib/handoffCheck/amoApi';
-import { noLinkReply, problemsReply, reminderReply, resolvedReply } from '@/lib/handoffCheck/formatReply';
+import {
+  noLinkReply,
+  problemsReply,
+  reminderReply,
+  resolvedReply,
+  supersededReply,
+} from '@/lib/handoffCheck/formatReply';
 import {
   earliestCheckAt,
   getCheck,
   listOpen,
+  listOpenOlderForDeal,
+  newestLaterForDeal,
   upsertCheck,
   type HandoffCheckRow,
+  type HandoffCheckStatus,
   type HandoffCheckUpsert,
 } from '@/lib/handoffCheck/store';
 import {
   REPLY_PENDING,
   chatVisibleProblems,
   decide,
+  decideSuperseded,
   isDailyPassDue,
   isExpired,
   moscowDateKey,
@@ -257,6 +267,39 @@ async function applyDecision(
   }
 }
 
+// ── Сообщение переотправили ─────────────────────────────────────────────────
+
+/**
+ * Закрывает проверку старого сообщения, которое заменено более новым по той
+ * же сделке: сообщение не правят, а удаляют и отправляют заново — и без этого
+ * предупреждение к старой версии висело бы над исправленной, а через 3 дня
+ * пришло бы напоминание о том, что давно исправлено (28.09.2026).
+ */
+async function supersede(ctx: Ctx, row: HandoffCheckRow, newerStatus: HandoffCheckStatus): Promise<void> {
+  const { sayFixed } = decideSuperseded(row, newerStatus);
+  // Сначала запись: строка уходит из открытых, и ни ежедневный проход, ни
+  // правка старого сообщения её больше не тронут — даже если ответ не уйдёт.
+  await upsertCheck(ctx.db, {
+    chat_id: row.chat_id,
+    message_id: row.message_id,
+    status: 'superseded',
+    reply_message_id: null,
+    last_checked_at: new Date().toISOString(),
+  });
+  ctx.log('info', `message ${row.message_id}: superseded${sayFixed ? ', fixed reply' : ''}`);
+  if (!sayFixed) return;
+  // Отвечаем под своим предупреждением, а не под старым сообщением: его,
+  // переотправляя, обычно удаляют.
+  const warningId = row.reply_message_id;
+  const target = warningId != null && warningId !== REPLY_PENDING ? warningId : row.message_id;
+  await sendReply(ctx, target, supersededReply());
+}
+
+async function supersedeOlder(ctx: Ctx, amoId: number, messageId: number, status: HandoffCheckStatus): Promise<void> {
+  const older = await listOpenOlderForDeal(ctx.db, CHAT_ID, amoId, messageId);
+  for (const row of older) await supersede(ctx, row, status);
+}
+
 // ── Новые и исправленные сообщения ──────────────────────────────────────────
 
 function isWatchedMessage(message: TelegramMessage): boolean {
@@ -281,6 +324,8 @@ export async function handleUpdate(ctx: Ctx, update: TelegramUpdate): Promise<vo
   // Уже проверявшиеся сообщения продолжаем вести, даже если отправлены
   // чуть раньше первой записи в таблице.
   if (!prev && isBeforeLaunch(ctx, message)) return;
+  // Сделку ведёт более новое сообщение — правка старого ничего не меняет.
+  if (prev?.status === 'superseded') return;
 
   const outcome = await evaluate(ctx, parsed.amoId, { amount: parsed.statedAmount, source: parsed.statedSource });
   const decision = decide(prev, outcome, 'message', new Date());
@@ -301,12 +346,22 @@ export async function handleUpdate(ctx: Ctx, update: TelegramUpdate): Promise<vo
       status: decision.status,
     },
   );
+  if (parsed.amoId != null) await supersedeOlder(ctx, parsed.amoId, message.message_id, decision.status);
 }
 
 // ── Ежедневная перепроверка ─────────────────────────────────────────────────
 
 async function recheckRow(ctx: Ctx, row: HandoffCheckRow, now: Date): Promise<void> {
   const key = { chat_id: row.chat_id, message_id: row.message_id };
+  // Замену ловит и ежедневный проход: новое сообщение могло прийти, пока
+  // бот лежал, или до выкладки этого правила.
+  if (row.amo_id != null) {
+    const newer = await newestLaterForDeal(ctx.db, row.chat_id, row.amo_id, row.message_id);
+    if (newer) {
+      await supersede(ctx, row, newer.status);
+      return;
+    }
+  }
   if (isExpired(row, now)) {
     await upsertCheck(ctx.db, { ...key, status: 'expired', last_checked_at: now.toISOString() });
     return;

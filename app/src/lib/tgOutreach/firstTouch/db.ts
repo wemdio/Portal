@@ -4,6 +4,7 @@
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { PendingContact } from './selectContacts';
+import type { BaseAttachment } from './attachments';
 
 /** База рассылки с фильтром «кто её шлёт». */
 export interface CampaignBase {
@@ -108,7 +109,7 @@ export async function loadPendingByBase(
       // вечно пишет 1, статус `failed` не наступает, контакт остаётся
       // pending навсегда. Прод 18.08.2026: 114 контактов застряли на
       // attempts=1, один username собрал 168 попыток за месяц.
-      .select('id, base_id, username, message, attempts')
+      .select('id, base_id, username, message, attempts, attachment_name')
       .eq('base_id', baseId)
       .eq('status', 'pending')
       .order('created_at', { ascending: true })
@@ -116,6 +117,17 @@ export async function loadPendingByBase(
     out.push({ baseId, contacts: (data ?? []) as PendingContact[] });
   }
   return out;
+}
+
+/** Файлы к первому сообщению у баз порции — один запрос на порцию, а не на контакт. */
+export async function loadBaseAttachments(db: SupabaseClient, baseIds: string[]): Promise<BaseAttachment[]> {
+  if (!baseIds.length) return [];
+  const { data, error } = await db
+    .from('tg_outreach_base_attachments')
+    .select('id, base_id, file_name, storage_path, mime_type, size_bytes, kind, is_default')
+    .in('base_id', baseIds);
+  if (error) throw new Error(`Не удалось прочитать файлы баз: ${error.message}`);
+  return (data ?? []) as BaseAttachment[];
 }
 
 /** Сколько первых сообщений аккаунт отправил с начала суток. */

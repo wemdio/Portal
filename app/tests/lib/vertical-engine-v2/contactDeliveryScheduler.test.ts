@@ -1,5 +1,6 @@
 /** @jest-environment node */
 
+import { ContactDeliveryAnalyticsUnavailableError } from '@/lib/verticalEngineV2/contactDeliveryInventory';
 import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
 import {
   createGuardedContactDeliveryTick,
@@ -10,6 +11,11 @@ import { allocateContactSupplyTargets } from '@/lib/verticalEngineV2/contactSupp
 import { prepareAuditSnapshot, runSegmentationAuditStage, toStoredAuditSummary } from '@/lib/verticalEngineV2/stages/segmentationAudit';
 import { buildSegmentationAudit } from '@/lib/verticalEngineV2/segmentationAudit';
 import { createVeJobShutdown, createVeJobWatchdog, VeWorkerShutdownError } from '@/lib/verticalEngineV2/workerLiveness';
+import * as instantlyClient from '@/lib/instantly/client';
+import { refreshDeliveryRate } from '@/lib/verticalEngineV2/contactDeliveryRateService';
+jest.mock('@/lib/instantly/client', () => ({ ...jest.requireActual('@/lib/instantly/client'),
+  listAccounts: jest.fn(), listCampaigns: jest.fn(), getCampaign: jest.fn(), updateCampaign: jest.fn(),
+}));
 
 const COMPLETE_BINDING = {
   portal_project_id: '20000000-0000-0000-0000-000000000001',
@@ -24,6 +30,49 @@ const COMPLETE_BINDING = {
 };
 
 describe('VE2 contact delivery scheduler', () => {
+  it('changes only owned campaign limits, verifies the result and defers delivery after partial provider failure', async () => {
+    const accounts = jest.spyOn(instantlyClient, 'listAccounts').mockResolvedValue({items: [
+      {email: 'sender@example.test', status: 1, daily_limit: 90},
+    ]} as never);
+    const campaigns = jest.spyOn(instantlyClient, 'listCampaigns').mockResolvedValue({items: []});
+    let live = {id: 'own-campaign', status: 2, email_list: ['sender@example.test'], daily_limit: 50, daily_max_leads: 50,
+      sequences: [{steps: [{}, {}, {}]}]};
+    const get = jest.spyOn(instantlyClient, 'getCampaign').mockImplementation(async () => live as never);
+    const update = jest.spyOn(instantlyClient, 'updateCampaign').mockImplementation(async (_id, patch) => {
+      live = {...live, ...patch} as typeof live;
+      return live as never;
+    });
+    const portal = createMockSupabase({enforceQueryWindows: true, tables: {
+      ve_projects: [{id: 've', ...COMPLETE_BINDING, launch_instantly_account_id: 'main'}],
+      ve_contact_delivery_rates: [{project_id: 've', preset_id: 'preset-1', revision: 1, template_ids: ['template'], mode: 'manual', manual_limit: 20}],
+      ve_templates: [{id: 'template', base_id: 'base', status: 'ready', letters: [{},{},{}]}],
+      ve_bases: [{id: 'base', project_id: 've'}],
+      ve_launch_queue_items: [{id: 'item', template_id: 'template', project_id: 've', status: 'active', instantly_account_id: 'main', mailbox_ids: ['sender@example.test']}],
+      ve_launch_queue_campaigns: [{id: 'child', item_id: 'item', campaign_id: 'own-campaign'}],
+    }, rpcHandlers: {ve_claim_contact_delivery_rate: () => ({data: true}), ve_finish_contact_delivery_rate: () => ({data: true})}});
+    const presets = createMockSupabase({tables: {client_campaign_presets: [{id: 'preset-1', instantly_account_id: 'main',
+      email_account_ids: ['sender@example.test'], schedule_from: '09:00', schedule_to: '18:00', email_gap_minutes: 1}]}});
+    try {
+      await refreshDeliveryRate(portal as never, presets as never, 've');
+      expect(update).toHaveBeenCalledWith('own-campaign', {daily_limit: 90, daily_max_leads: 20}, expect.objectContaining({accountId: 'main'}));
+      expect(portal.rpcCalls.at(-1)).toMatchObject({fn: 've_finish_contact_delivery_rate', params: {p_error: null, p_snapshot: {effective_capacity: 20}}});
+      update.mockClear();
+      await refreshDeliveryRate(portal as never, presets as never, 've');
+      expect(update).not.toHaveBeenCalled(); // same limit needs no provider write
+      live = {...live, daily_limit: 50};
+      update.mockRejectedValueOnce(new Error('lost response'));
+      const runProject = jest.fn(), runSupply = jest.fn();
+      const result = await runBoundContactDeliveries({portalDb: portal as never, instantlyDb: presets as never,
+        reconcile: async () => ({accepted: 0, released: 0, errors: []}), runProject, runSupply,
+        log: jest.fn()});
+      expect(result.failedProjects).toBe(1);
+      expect(runProject).not.toHaveBeenCalled(); expect(runSupply).not.toHaveBeenCalled();
+      expect(portal.rpcCalls.at(-1)).toMatchObject({fn: 've_finish_contact_delivery_rate', params: {p_snapshot: null, p_error: expect.any(String)}});
+      expect(portal.rpcCalls.every(call => ['ve_claim_contact_delivery_rate','ve_finish_contact_delivery_rate'].includes(call.fn))).toBe(true);
+      campaigns.mockResolvedValueOnce({items: [], next_starting_after: 'loop'}).mockResolvedValueOnce({items: [], next_starting_after: 'loop'});
+      await expect(refreshDeliveryRate(portal as never, presets as never, 've')).rejects.toThrow('повторил страницу');
+    } finally { accounts.mockRestore(); campaigns.mockRestore(); get.mockRestore(); update.mockRestore(); }
+  });
   it('aborts idle research, never revives it on late progress, and escalates only unresponsive work', () => {
     jest.useFakeTimers();
     try {
@@ -144,7 +193,7 @@ describe('VE2 contact delivery scheduler', () => {
       enforceQueryWindows: true,
     });
     const runProject = jest.fn(async ({ veProjectId }: { veProjectId: string }) => {
-      if (veProjectId === 've-1') throw new Error('provider timeout');
+      if (veProjectId === 've-1') throw new ContactDeliveryAnalyticsUnavailableError();
       return {
         status: 'completed' as const,
         runId: 'run-2',
@@ -164,8 +213,10 @@ describe('VE2 contact delivery scheduler', () => {
       if (veProjectId === 've-1') throw new Error('reconciliation API unavailable');
       return { accepted: 1, released: 1, errors: [] };
     });
+    const recoverActivation = jest.fn(async () => ({ activated: 1, errors: [] }));
     const result = await runBoundContactDeliveries({
       reconcile,
+      recoverActivation,
       portalDb: portal as never,
       instantlyDb: {} as never,
       now: new Date('2026-09-02T12:00:00.000Z'),
@@ -174,6 +225,8 @@ describe('VE2 contact delivery scheduler', () => {
       log,
     });
 
+    expect(recoverActivation).toHaveBeenCalledTimes(1);
+    expect(recoverActivation).toHaveBeenCalledWith({ portalDb: portal, veProjectId: 've-1' });
     expect(runProject.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-1', 've-2']);
     expect(runSupply.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-1', 've-2']);
     expect(reconcile.mock.calls.map(([input]) => input.veProjectId)).toEqual(['ve-1', 've-2']);

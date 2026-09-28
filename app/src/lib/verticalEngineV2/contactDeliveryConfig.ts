@@ -1,5 +1,6 @@
 import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { readDeliveryRate } from './contactDeliveryRateService';
 
 export function normalizeContactDeliveryScheduleDays(value: unknown): number[] | null {
   if (!Array.isArray(value)) return null;
@@ -40,7 +41,12 @@ export async function loadContactDeliverySettings(
     throw new Error('Проект, период или обязательство не совпадает с закреплённым планом');
   }
   const scheduleDays = normalizeContactDeliveryScheduleDays(bound ? binding.delivery_schedule_days : preset.schedule_days);
-  const dailyCapacity = bound ? binding.sender_daily_capacity : contactDeliveryDailyCapacity(preset);
+  const rate = await readDeliveryRate(db, veProjectId);
+  if (rate && rate.preset_id !== input.presetId) throw new Error('Сохраните темп для выбранного профиля отправки.');
+  if (rate && !bound && (rate.status !== 'ready' || !rate.checked_at || Date.now() - Date.parse(rate.checked_at) > 10 * 60_000)) {
+    throw new Error('Расчёт темпа устарел. Обновите его перед запуском.');
+  }
+  const dailyCapacity = bound ? binding.sender_daily_capacity : rate?.effective_capacity ?? contactDeliveryDailyCapacity(preset);
   const timezone = (bound ? binding.delivery_timezone : preset.schedule_timezone)?.trim();
   if (!scheduleDays || !Number.isSafeInteger(dailyCapacity) || dailyCapacity <= 0 || !timezone) {
     throw new Error('Для плана нужны будние дни, часовой пояс и положительный дневной лимит');

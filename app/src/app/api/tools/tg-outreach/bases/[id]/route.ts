@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { sanitizeSendingAccountIds } from '@/lib/tgOutreach/bases';
 import { withToolTrace } from '@/lib/toolTrace';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { ATTACHMENTS_BUCKET } from '@/lib/tgOutreach/firstTouch/attachments';
 
 export const dynamic = 'force-dynamic';
 
@@ -148,9 +150,22 @@ export async function DELETE(req: NextRequest, ctx: Ctx) {
       if ('error' in auth) return auth.error;
       const { id } = await ctx.params;
 
-      // Контакты и привязки к кампаниям уходят каскадом (on delete cascade).
+      // Файлы к первому сообщению — из хранилища до удаления базы: строки о
+      // них уйдут каскадом, и найти файлы потом будет не по чему.
+      const { data: files } = await auth.supabase
+        .from('tg_outreach_base_attachments')
+        .select('storage_path')
+        .eq('base_id', id);
+
+      // Контакты, файлы и привязки к кампаниям уходят каскадом (on delete cascade).
       const { error } = await auth.supabase.from('tg_outreach_bases').delete().eq('id', id);
       if (error) return jsonError(error.message, 500);
+
+      const paths = (files ?? []).map((f) => f.storage_path as string);
+      if (paths.length && supabaseAdmin) {
+        const { error: rmError } = await supabaseAdmin.storage.from(ATTACHMENTS_BUCKET).remove(paths);
+        if (rmError) console.warn(`[tg-outreach] base ${id}: files not removed from storage: ${rmError.message}`);
+      }
 
       return NextResponse.json({ ok: true });
     },

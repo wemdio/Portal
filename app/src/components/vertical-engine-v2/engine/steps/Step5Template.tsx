@@ -32,6 +32,7 @@ import {
   type VePortalProjectOptionDto,
 } from '../api';
 import { HE, StatusDot } from '../design';
+import { SearchableSelect } from '../SearchableSelect';
 import { ContactSupplyPanel, useContactSupply, type ContactSupplyController } from '../ContactSupplyPanel';
 import type { LaunchPortfolioResponse } from '../LaunchPortfolioView';
 import { SeasonalityStatus } from '../SeasonalitySummary';
@@ -872,23 +873,14 @@ export function DeliveryPlanBlock({ launch, disabled = false, preparedPreview }:
         <>
           <div className="mt-2 grid gap-3 sm:grid-cols-2">
             <div>
-              <label htmlFor="ve2-portal-project" className="ve2-label">
-                Проект клиента
-              </label>
-              <select
+              <SearchableSelect
                 id="ve2-portal-project"
+                label="Проект клиента"
                 value={launch.portalProjectId}
-                onChange={(event) => launch.selectPortalProject(event.target.value)}
+                options={launch.portalProjects}
+                onChange={launch.selectPortalProject}
                 disabled={disabled || launch.deliveryPlanLocked || launch.submitting}
-                className="ve2-input h-10 w-full px-3 text-xs disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                <option value="">Выберите проект</option>
-                {launch.portalProjects.map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.name}
-                  </option>
-                ))}
-              </select>
+              />
             </div>
             <div>
               <label htmlFor="ve2-delivery-target" className="ve2-label">
@@ -1649,27 +1641,16 @@ function LaunchSection({
           {launch.presets && launch.presets.length > 0 ? (
             <div className="space-y-3">
               <div className="min-w-0 sm:max-w-sm">
-                <label htmlFor="ve2-launch-preset" className="ve2-label">
-                  Настройки отправки
-                </label>
-                <select
+                <SearchableSelect
                   id="ve2-launch-preset"
+                  label="Настройки отправки"
                   value={launch.presetId}
-                  onChange={(event) => launch.setPresetId(event.target.value)}
-                  disabled={Boolean(launch.boundPresetId)}
-                  className="ve2-input h-10 w-full px-3 text-xs"
-                  aria-describedby={selectedPreset ? 've2-launch-preset-summary' : undefined}
-                >
-                  {!launch.boundPresetId ? <option value="">Выберите клиента</option> : null}
-                  {launch.boundPresetId && !selectedPreset ? (
-                    <option value="">Настройки отправки недоступны</option>
-                  ) : null}
-                  {launch.presets.map((preset) => (
-                    <option key={preset.id} value={preset.id}>
-                      {preset.name}
-                    </option>
-                  ))}
-                </select>
+                  options={launch.presets}
+                  onChange={launch.setPresetId}
+                  disabled={Boolean(launch.boundPresetId) || launch.submitting}
+                  placeholder={launch.boundPresetId && !selectedPreset ? 'Настройки отправки недоступны' : 'Выберите клиента'}
+                  describedBy={selectedPreset ? 've2-launch-preset-summary' : undefined}
+                />
                 {launch.boundPresetId && selectedPreset ? (
                   <p className="mt-1 text-[11px] text-gray-500">Настройки отправки закреплены за проектом</p>
                 ) : null}

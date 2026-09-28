@@ -361,6 +361,8 @@ export interface AutoReportFunnel {
   openPctOfContacted: string;
   replies: number;
   replyPctOfOpened: string;
+  /** Ответы ÷ охваченные — конверсия ответов в отчёте с 28.09.2026 (открытий в нём нет). */
+  replyPctOfContacted: string;
 }
 
 export interface AutoReportSummary {
@@ -566,19 +568,21 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
   let tableText = `Отчёт по email-кампании\n`;
   tableText += `Период: ${period}\n\n`;
   tableText += `Статистика по кампаниям:\n`;
-  tableText += `Название кампании\tКонтактов\tОхвачено\tОтправлено писем\tУник. открытий\t% открываемости\tОтветов\t% ответов\tЛидов\tОстаток базы\n`;
+  // Открытий в отчёте нет с 28.09.2026: статистика открытий у Instantly
+  // сломана, трекинг открытий в кампаниях больше не включаем — цифры были бы
+  // ложными. Сами поля (opened/openedUnique) из данных не убраны: на них
+  // держатся отчёты, сохранённые в истории.
+  tableText += `Название кампании\tКонтактов\tОхвачено\tОтправлено писем\tОтветов\t% ответов\tЛидов\tОстаток базы\n`;
 
   Object.values(campaignData).forEach((c) => {
     const contacts = num(c.contacts);
     const contacted = num(c.contacted) || contacts;
     const sent = num(c.totalEmailsSent);
-    const openedUnique = num(c.openedUnique);
     const replies = num(c.replies);
     const leads = num(c.leads);
-    const openRate = contacted > 0 ? (openedUnique / contacted * 100).toFixed(1) : '0.0';
     const replyRate = contacts > 0 ? (replies / contacts * 100).toFixed(1) : '0.0';
     const remainingBase = Math.max(0, leads - contacts);
-    tableText += `${c.name}\t${contacts}\t${contacted}\t${sent}\t${openedUnique}\t${openRate}%\t${replies}\t${replyRate}%\t${leads}\t${remainingBase}\n`;
+    tableText += `${c.name}\t${contacts}\t${contacted}\t${sent}\t${replies}\t${replyRate}%\t${leads}\t${remainingBase}\n`;
   });
 
   const totalOpenPct =
@@ -596,6 +600,11 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
     totalStats.openedUnique > 0
       ? (totalStats.replies / totalStats.openedUnique * 100).toFixed(1)
       : '0.0';
+  // Ответы — от охваченных: этап «открыли» ушёл из воронки вместе с открытиями.
+  const replyPctOfContacted =
+    totalStats.contacted > 0
+      ? (totalStats.replies / totalStats.contacted * 100).toFixed(1)
+      : '0.0';
 
   tableText += `\nОбщая статистика:\n`;
   tableText += `Показатель\tЗначение\tКонверсия из предыдущего этапа\n`;
@@ -603,8 +612,7 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
   tableText += `Охвачено лидов (вкл. повторные касания)\t${totalStats.contacted}\t\n`;
   tableText += `Остаток базы (ещё не в работе)\t${totalStats.remaining}\t\n`;
   tableText += `Общее количество отправленных писем\t${totalStats.sent}\t\n`;
-  tableText += `Общее количество уникальных открытий\t${totalStats.openedUnique}\t${funnelOpenPct}% от охваченных\n`;
-  tableText += `Общее количество ответов\t${totalStats.replies}\t${funnelReplyPct}% от открывших\n`;
+  tableText += `Общее количество ответов\t${totalStats.replies}\t${replyPctOfContacted}% от охваченных\n`;
   tableText += `Лиды (заполняется вручную)\t\t\n`;
   tableText += `Общее количество бракованных\t${totalStats.bounced}\t\n`;
 
@@ -612,12 +620,10 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
   tableText += `${STEP_TRANSITION_NOTE}\n\n`;
   Object.values(campaignData).forEach((c) => {
     tableText += `${c.name}\n`;
-    tableText += `STEP\tSENT\tOPENED\tREPLIED\tCLICKED\tOPPORTUNITIES\tДОШЛО ДО СЛЕД. ШАГА\n`;
+    tableText += `STEP\tSENT\tREPLIED\tCLICKED\tOPPORTUNITIES\tДОШЛО ДО СЛЕД. ШАГА\n`;
     if (Object.keys(c.steps).length === 0) {
-      const openRate =
-        c.totalEmailsSent > 0 ? (num(c.opened) / num(c.totalEmailsSent) * 100).toFixed(1) : '0.0';
       const replyRate = num(c.contacts) > 0 ? (num(c.replies) / num(c.contacts) * 100).toFixed(1) : '0.0';
-      tableText += `Общая статистика\t${num(c.totalEmailsSent)}\t${num(c.opened)}|${openRate}%\t${num(c.replies)}|${replyRate}%\t0\t0\t\n\n`;
+      tableText += `Общая статистика\t${num(c.totalEmailsSent)}\t${num(c.replies)}|${replyRate}%\t0\t0\t\n\n`;
       return;
     }
     const sortedStepNumbers = Object.keys(c.steps)
@@ -625,19 +631,16 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
       .sort((a, b) => a - b);
     sortedStepNumbers.forEach((stepNumber, stepIdx) => {
       const step = c.steps[stepNumber];
-      const stepOpenRate =
-        step.totalSent > 0 ? (step.totalOpened / step.totalSent * 100).toFixed(1) : '0.0';
       const stepReplyRate =
         step.totalSent > 0 ? (step.totalReplied / step.totalSent * 100).toFixed(1) : '0.0';
       const transition = stepTransition(c.steps, sortedStepNumbers, stepIdx);
       const transitionText = transition ? `${transition.nextSent}|${transition.pct}%` : '—';
-      tableText += `${step.stepName}\t${step.totalSent}\t${step.totalOpened}|${stepOpenRate}%\t${step.totalReplied}|${stepReplyRate}%\t${step.totalClicked}\t${step.totalOpportunities}\t${transitionText}\n`;
+      tableText += `${step.stepName}\t${step.totalSent}\t${step.totalReplied}|${stepReplyRate}%\t${step.totalClicked}\t${step.totalOpportunities}\t${transitionText}\n`;
       const sortedVariants = Object.keys(step.variants).sort();
       sortedVariants.forEach((letter) => {
         const v = step.variants[letter];
-        const vOpen = v.sent > 0 ? (v.opened / v.sent * 100).toFixed(0) : '0';
         const vReply = v.sent > 0 ? (v.replied / v.sent * 100).toFixed(0) : '0';
-        tableText += `${letter}\t${v.sent}\t${v.opened}|${vOpen}%\t${v.replied}|${vReply}%\t${v.clicked}\t${v.opportunities}\t\n`;
+        tableText += `${letter}\t${v.sent}\t${v.replied}|${vReply}%\t${v.clicked}\t${v.opportunities}\t\n`;
       });
       tableText += `\n`;
     });
@@ -652,8 +655,6 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
     'Контактов',
     'Охвачено',
     'Отправлено писем',
-    'Уник. открытий',
-    '% открываемости',
     'Ответов',
     '% ответов',
     'Браков',
@@ -662,10 +663,8 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
     const contacts = num(c.contacts);
     const contacted = num(c.contacted) || contacts;
     const sent = num(c.totalEmailsSent);
-    const openedUnique = num(c.openedUnique);
     const replies = num(c.replies);
     const bounced = num(c.bounced);
-    const openRate = contacted > 0 ? (openedUnique / contacted * 100).toFixed(1) : '0.0';
     const replyRate = contacts > 0 ? (replies / contacts * 100).toFixed(1) : '0.0';
     rows.push([
       currentDate,
@@ -673,8 +672,6 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
       contacts,
       contacted,
       sent,
-      openedUnique,
-      `${openRate}%`,
       replies,
       `${replyRate}%`,
       bounced,
@@ -686,8 +683,6 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
     totalStats.contacts,
     totalStats.contacted,
     totalStats.sent,
-    totalStats.openedUnique,
-    `${funnelOpenPct}%`,
     totalStats.replies,
     `${totalReplyPct}%`,
     totalStats.bounced,
@@ -717,6 +712,7 @@ function buildReportFromNormalized(normalized: NormalizedItem[]): {
         openPctOfContacted: funnelOpenPct,
         replies: totalStats.replies,
         replyPctOfOpened: funnelReplyPct,
+        replyPctOfContacted,
       },
     },
     campaignData,

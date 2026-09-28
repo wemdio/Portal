@@ -5,9 +5,11 @@ import type { VeOutreachSetupResponse } from '@/lib/verticalEngineV2/outreachSet
 import type { VeOutreachLaunchRequest, VeOutreachRun } from '@/lib/verticalEngineV2/outreachLaunch';
 import { VE_API, veEnginePost, type VeDeliveryPlanPreviewDto } from './api';
 import { HE } from './design';
+import { SearchableSelect } from './SearchableSelect';
 import { StatusBox } from './ui';
 import { CreateClientPresetInline, DeliveryPlanBlock, useTemplateLaunch } from './steps/Step5Template';
 import { getVeLaunchSelectionState } from './launchSelection';
+import { DeliveryRatePanel } from './DeliveryRatePanel';
 
 type PreflightItem = VeOutreachLaunchRequest['items'][number] & {
   status: 'ready' | 'working' | 'blocked';
@@ -68,9 +70,15 @@ export function OutreachLaunchPanel({
   useEffect(() => {
     onPresetChange(launch.presetId);
   }, [launch.presetId, onPresetChange]);
+  const rateTemplates = snapshot.preparations.filter(p => hypothesisIds.includes(p.hypothesis_id) && p.template_id)
+    .map(p => p.template_id!).sort();
+  const rateKey = `${launch.presetId}/${rateTemplates.join(',')}`;
+  const [rateReady, setRateReady] = useState<{key: string; revision: number} | null>(null);
+  const onRateReady = useCallback((revision: number | null) => setRateReady(revision == null ? null : {key: rateKey, revision}), [rateKey]);
+  const rateRevision = rateReady?.key === rateKey ? rateReady.revision : null;
   const request = useMemo<VeOutreachLaunchRequest | null>(() => {
     // null — проект Portal без периодов; undefined — проект сейчас выбрать нельзя.
-    if (!launch.presetId || !launch.portalProjectId || launch.expectedPortalPeriodId === undefined || !launch.targetContacts)
+    if (!launch.presetId || !launch.portalProjectId || launch.expectedPortalPeriodId === undefined || !launch.targetContacts || !rateRevision)
       return null;
     const ids = hypothesisIds;
     if (!ids.length) return null;
@@ -92,12 +100,13 @@ export function OutreachLaunchPanel({
     return {
       setup_revision: snapshot.setup.revision,
       preset_id: launch.presetId,
+      delivery_rate_revision: rateRevision,
       portal_project_id: launch.portalProjectId,
       expected_portal_period_id: launch.expectedPortalPeriodId,
       target_contacts: launch.targetContacts,
       items,
     };
-  }, [snapshot, hypothesisIds, templates, launch.presetId, launch.portalProjectId, launch.expectedPortalPeriodId, launch.targetContacts]);
+  }, [snapshot, hypothesisIds, templates, launch.presetId, launch.portalProjectId, launch.expectedPortalPeriodId, launch.targetContacts, rateRevision]);
   const requestKey = request ? JSON.stringify(request) : '';
   const preflight = preflightState?.key === requestKey ? preflightState.result : null;
   const confirmationKey = preflight?.ready
@@ -203,23 +212,15 @@ export function OutreachLaunchPanel({
       </div>
       <h2 className="ve2-h2">Клиент и отправители</h2>
       {launch.loadError ? <StatusBox tone="error">{launch.loadError}</StatusBox> : null}
-      <label className="block ve2-label">
-        Клиент
-        <select
-          aria-label="Клиент"
-          className={`${HE.input} mt-2 w-full`}
-          value={launch.presetId}
-          disabled={!!launch.boundPresetId || busy}
-          onChange={(event) => launch.setPresetId(event.target.value)}
-        >
-          <option value="">Выберите клиента</option>
-          {launch.presets?.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
-          ))}
-        </select>
-      </label>
+      <SearchableSelect
+        id="ve2-outreach-client"
+        label="Клиент"
+        value={launch.presetId}
+        options={launch.presets ?? []}
+        disabled={!!launch.boundPresetId || busy}
+        onChange={launch.setPresetId}
+        placeholder="Выберите клиента"
+      />
       {preset ? (
         <p className={HE.muted}>
           {preset.instantly_account_label} ·{' '}
@@ -233,10 +234,12 @@ export function OutreachLaunchPanel({
         </fieldset>
       ) : null}
       <DeliveryPlanBlock launch={launch} disabled={busy} preparedPreview={preflight?.items[0]?.preview ?? null} />
+      {launch.presetId && rateTemplates.length ? <DeliveryRatePanel key={rateKey} projectId={projectId}
+        presetId={launch.presetId} templateIds={rateTemplates} disabled={busy} onReady={onRateReady} /> : null}
       <div className="border-t border-[var(--ve2-line)] pt-5 space-y-3">
         <h2 className="ve2-h2">Обзор запуска</h2>
         {!request ? (
-          <p className={HE.muted}>Выберите клиента, проект и цель контактов за период.</p>
+          <p className={HE.muted}>Выберите клиента, проект и цель контактов, затем примените темп.</p>
         ) : !preflight && !error ? (
           <p role="status">Проверяем аудиторию и настройки отправки…</p>
         ) : null}
