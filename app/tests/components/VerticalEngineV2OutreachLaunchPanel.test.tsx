@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { VeTemplate } from '@/lib/verticalEngineV2/types';
+import type { VeSegmentationAuditSummary, VeTemplate } from '@/lib/verticalEngineV2/types';
 import type { VeOutreachSetupResponse } from '@/lib/verticalEngineV2/outreachSetup';
 import { ContactUploadNotice } from '@/components/vertical-engine-v2/engine/ContactUploadNotice';
 import { OutreachLaunchPanel } from '@/components/vertical-engine-v2/engine/OutreachLaunchPanel';
@@ -53,6 +53,13 @@ const snapshot: VeOutreachSetupResponse = {
 
 const PREPARE_URL = `/api/tools/vertical-engine-v2/projects/${PROJECT_ID}/outreach/prepare-launch`;
 const START_URL = `/api/tools/vertical-engine-v2/projects/${PROJECT_ID}/outreach/start`;
+const summary: VeSegmentationAuditSummary = {
+  version: 1, status: 'not_required', base_rows_total: 774, total_base_rows: 774,
+  launchable_rows_total: 774, launchable_rows: 774, covered_rows_total: 774, default_rows_total: 774,
+  unclassified_rows_total: 0, unclassified_count: 0, failed_batches: 0, total_batches: 0,
+  excluded: { low_relevance: 0, relevance_unchecked: 0, invalid_verification: 0, invalid_email_status: 0, invalid_email: 0, duplicate_email: 0 },
+  segments: [], default: { count: 774, share_pct: 100, examples: [] },
+};
 
 function renderPanel(expectedPortalPeriodId: string | null | undefined) {
   Object.assign(mockLaunch, {
@@ -102,7 +109,7 @@ describe('VE2 auto-outreach launch panel', () => {
             ready: true,
             items: [{
               hypothesis_id: 'hypothesis-1', base_id: 'base-1', template_id: 'template-1', preview_revision: 'rev-1',
-              segmentation_audit_id: 'audit-1', status: 'ready',
+              segmentation_audit_id: 'audit-1', status: 'ready', summary, preview: { prospective_ready: 774 },
             }],
           },
         };
@@ -124,6 +131,7 @@ describe('VE2 auto-outreach launch panel', () => {
 
     const approval = await screen.findByRole('checkbox');
     await waitFor(() => expect(approval).toBeEnabled());
+    expect(screen.getByText('Будет создано кампаний: 1 · новых готовых контактов: 774')).toBeInTheDocument();
     await userEvent.click(approval);
     await userEvent.click(screen.getByRole('button', { name: 'Запустить аутрич' }));
     await waitFor(() => expect(onStarted).toHaveBeenCalledWith({ id: 'run-1' }));

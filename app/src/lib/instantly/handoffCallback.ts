@@ -47,6 +47,17 @@ export function verifyHandoffRejection(data: string, secret: string): string | n
   return match && secret && safeEqual(data, signHandoffRejection(match[1], secret)) ? match[1] : null;
 }
 
+/** The first lead alert can be rejected before a handoff draft even exists. */
+export function signLeadAlertRejection(qualificationId: string, secret: string): string {
+  const body = `r.${qualificationId}`;
+  return `${body}.${createHmac('sha256', secret).update(body).digest('base64url').slice(0, SIG_LEN)}`;
+}
+
+export function verifyLeadAlertRejection(data: string, secret: string): string | null {
+  const match = /^r\.([0-9a-f-]{36})\.([A-Za-z0-9_-]{24})$/.exec(data);
+  return match && secret && safeEqual(data, signLeadAlertRejection(match[1], secret)) ? match[1] : null;
+}
+
 export type HandoffVerifyResult =
   | { ok: true; qualificationId: string }
   | { ok: false; error: string };
