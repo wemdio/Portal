@@ -7,10 +7,6 @@ const mockCreateCampaign = jest.fn();
 const mockUpdateCampaign = jest.fn();
 const mockValidateStoredAuditSnapshot = jest.fn();
 
-jest.mock('@/lib/clientLaunch/buildCampaignPayload', () => ({
-  buildCampaignPayloadFromPreset: jest.fn((input) => ({name: input.sequence.name, ...input.behaviorOverride, sequences: [{steps: []}]})),
-}));
-
 jest.mock('@/lib/clientLaunch/campaignSequences', () => ({
   hasUsableCampaignSequences: jest.fn(() => true),
 }));
@@ -90,7 +86,7 @@ function instantlyDb(options: { conflict?: boolean; links?: boolean; claim?: 'co
       client_campaign_presets: [{
         id: 'preset-1', client_user_id: 'client-1', instantly_account_id: 'workspace-a',
         email_account_ids: ['sender@example.test'], daily_limit: 30,
-        open_tracking: true, stop_on_reply: true, schedule_days: [1, 2, 3, 4, 5], schedule_timezone: 'Europe/Moscow',
+        open_tracking: true, link_tracking: true, stop_on_reply: true, schedule_days: [1, 2, 3, 4, 5], schedule_timezone: 'Europe/Moscow',
       }],
       project_instantly_campaigns: options.links === false ? [] : [{ project_id: STAFF_LINE_ID, campaign_id: 'legacy-campaign' }],
     },
@@ -163,11 +159,9 @@ describe('VE2 launch for a Portal project without periods', () => {
     await namedPortal.from('ve_hypotheses').insert({id:'energy-hypothesis',project_id:VE_PROJECT_ID,title:'Энергетические компании'});
     const { outcome, portal, instantly } = await launch(namedPortal);
     expect(outcome.status).toBe(200);
-    const {buildCampaignPayloadFromPreset: builderMock} = jest.requireMock('@/lib/clientLaunch/buildCampaignPayload');
-    const {buildCampaignPayloadFromPreset: realBuilder} = jest.requireActual<typeof import('@/lib/clientLaunch/buildCampaignPayload')>('@/lib/clientLaunch/buildCampaignPayload');
-    expect(realBuilder(builderMock.mock.calls[0][0])).toMatchObject({open_tracking:false,stop_on_reply:true});
     expect(mockCreateCampaign).toHaveBeenCalledWith(expect.objectContaining({
-      name: 'Staff Line · Энергетические компании · 2026-09-23', open_tracking: false, stop_on_reply: true,
+      name: 'Staff Line · Энергетические компании · 2026-09-23',
+      daily_limit: 1000, open_tracking: false, link_tracking: false, stop_on_reply: true,
     }), expect.anything());
 
     expect(portal.rpcCalls.find((call) => call.fn === 've_bind_contact_delivery_plan')?.params).toMatchObject({

@@ -5,7 +5,7 @@ import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import type { Account, Campaign, PaginatedResponse } from '@/lib/instantly/types';
 import { normalizeLaunchMailboxIds, launchMailboxScopesEqual } from './launchPortfolio';
 import { readContactDeliveryPages } from './contactDeliveryInventory';
-import { DeliveryRateError, calculateDeliveryRate, distributeDeliveryRate, isSendingCampaign, type DeliveryRatePolicy, type DeliveryRateRow } from './contactDeliveryRate';
+import { VE_CAMPAIGN_SENDING_SETTINGS, DeliveryRateError, calculateDeliveryRate, distributeDeliveryRate, isSendingCampaign, type DeliveryRatePolicy, type DeliveryRateRow } from './contactDeliveryRate';
 
 const READ_OPTIONS = { timeoutMs: 10_000, timeoutIncludesBody: true, retryRateLimits: false };
 async function allPages<T>(read: (cursor?: string) => Promise<PaginatedResponse<T>>): Promise<T[]> {
@@ -144,7 +144,6 @@ export async function refreshDeliveryRate(portalDb:SupabaseClient, instantlyDb:S
     if(current.snapshot.effective_capacity<=0) throw new DeliveryRateError('Лимиты и состояние отправителей пока не позволяют добавлять новые контакты.');
     const ids=current.own.map(c=>c.id);
     const newLimits=distributeDeliveryRate(current.snapshot.effective_capacity,ids);
-    const emailLimits=distributeDeliveryRate(current.snapshot.email_capacity,ids);
     const options={...READ_OPTIONS,accountId:current.accountId};
     const renew = async () => {
       const owned=await rateRpc(portalDb,'ve_claim_contact_delivery_rate',{p_project_id:projectId,p_revision:rate.revision,p_token:token});
@@ -152,13 +151,15 @@ export async function refreshDeliveryRate(portalDb:SupabaseClient, instantlyDb:S
     };
     await renew();
     for(const campaign of current.own) {
-      const desired={daily_limit:emailLimits[campaign.id],daily_max_leads:newLimits[campaign.id]};
-      if(campaign.daily_limit===desired.daily_limit && campaign.daily_max_leads===desired.daily_max_leads) continue;
+      const desired={...VE_CAMPAIGN_SENDING_SETTINGS,daily_max_leads:newLimits[campaign.id]};
+      if(campaign.daily_limit===desired.daily_limit && campaign.daily_max_leads===desired.daily_max_leads &&
+        campaign.open_tracking===false && campaign.link_tracking===false) continue;
       await renew();
       await updateCampaign(campaign.id,desired,options);
       const verified=await getCampaign(campaign.id,options);
       if(verified.id!==campaign.id || verified.email_tag_list?.length || !launchMailboxScopesEqual(verified.email_list,campaign.email_list) ||
-        verified.daily_limit!==desired.daily_limit || verified.daily_max_leads!==desired.daily_max_leads) throw new DeliveryRateError('Instantly не подтвердил новый лимит кампании. Загрузка отложена.');
+        verified.daily_limit!==desired.daily_limit || verified.daily_max_leads!==desired.daily_max_leads ||
+        verified.open_tracking!==false || verified.link_tracking!==false) throw new DeliveryRateError('Instantly не подтвердил лимиты и отключение отслеживания. Загрузка отложена.');
     }
     await renew();
     const finished = await rateRpc(portalDb,'ve_finish_contact_delivery_rate',{p_project_id:projectId,p_revision:rate.revision,p_token:token,p_snapshot:current.snapshot,p_error:null});

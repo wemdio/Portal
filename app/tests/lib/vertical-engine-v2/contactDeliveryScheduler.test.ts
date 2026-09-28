@@ -30,12 +30,12 @@ const COMPLETE_BINDING = {
 };
 
 describe('VE2 contact delivery scheduler', () => {
-  it('changes only owned campaign limits, verifies the result and defers delivery after partial provider failure', async () => {
+  it('changes only owned campaign sending settings, verifies the result and defers delivery after partial provider failure', async () => {
     const accounts = jest.spyOn(instantlyClient, 'listAccounts').mockResolvedValue({items: [
       {email: 'sender@example.test', status: 1, daily_limit: 90},
     ]} as never);
     const campaigns = jest.spyOn(instantlyClient, 'listCampaigns').mockResolvedValue({items: []});
-    let live = {id: 'own-campaign', status: 2, email_list: ['sender@example.test'], daily_limit: 50, daily_max_leads: 50,
+    let live = {id: 'own-campaign', status: 2, email_list: ['sender@example.test'], daily_limit: 50, daily_max_leads: 50, open_tracking: true, link_tracking: true,
       sequences: [{steps: [{}, {}, {}]}]};
     const get = jest.spyOn(instantlyClient, 'getCampaign').mockImplementation(async () => live as never);
     const update = jest.spyOn(instantlyClient, 'updateCampaign').mockImplementation(async (_id, patch) => {
@@ -54,7 +54,7 @@ describe('VE2 contact delivery scheduler', () => {
       email_account_ids: ['sender@example.test'], schedule_from: '09:00', schedule_to: '18:00', email_gap_minutes: 1}]}});
     try {
       await refreshDeliveryRate(portal as never, presets as never, 've');
-      expect(update).toHaveBeenCalledWith('own-campaign', {daily_limit: 90, daily_max_leads: 20}, expect.objectContaining({accountId: 'main'}));
+      expect(update).toHaveBeenCalledWith('own-campaign', {daily_limit: 1000, daily_max_leads: 20, open_tracking: false, link_tracking: false}, expect.objectContaining({accountId: 'main'}));
       expect(portal.rpcCalls.at(-1)).toMatchObject({fn: 've_finish_contact_delivery_rate', params: {p_error: null, p_snapshot: {effective_capacity: 20}}});
       update.mockClear();
       await refreshDeliveryRate(portal as never, presets as never, 've');

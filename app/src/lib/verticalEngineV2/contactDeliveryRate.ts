@@ -1,6 +1,14 @@
 import type { Account, Campaign } from '@/lib/instantly/types';
 import { AccountStatus, CampaignStatus } from '@/lib/instantly/types';
 
+/** Campaign ceiling is independent of the new-contact quota. Instantly still
+ * enforces each mailbox's shared daily limit across all of its campaigns. */
+export const VE_CAMPAIGN_SENDING_SETTINGS = {
+  daily_limit: 1000,
+  open_tracking: false,
+  link_tracking: false,
+} as const;
+
 export class DeliveryRateError extends Error {}
 
 export type DeliveryRatePolicy = { mode: 'auto' | 'manual'; manual_limit: number | null };
@@ -66,7 +74,7 @@ export function calculateDeliveryRate(input: {
     checked_at: (input.now ?? new Date()).toISOString() };
 }
 
-/** Keep the summed campaign limits within the shared mailbox budget. Zero is not sent to Instantly. */
+/** Keep summed new-contact limits within the project delivery budget. Zero is not sent to Instantly. */
 export function distributeDeliveryRate(total: number, ids: string[]): Record<string, number> {
   const sorted = [...new Set(ids)].sort();
   if (!Number.isSafeInteger(total) || total < sorted.length) throw new DeliveryRateError('Доступный лимит меньше числа кампаний. Проверьте дневной лимит и доступность отправителей.');

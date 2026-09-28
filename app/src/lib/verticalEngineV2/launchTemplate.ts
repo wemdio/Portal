@@ -51,6 +51,7 @@ import {
 } from './ruSeasonality';
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import { loadContactDeliverySettings } from './contactDeliveryConfig';
+import { VE_CAMPAIGN_SENDING_SETTINGS } from './contactDeliveryRate';
 import { loadVeContactDeliveryRows } from './contactDeliveryInventory';
 import {
   claimProjectCampaignLinks,
@@ -891,8 +892,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
     let groupMutationAttempted = false;
     try {
       const payload = buildCampaignPayloadFromPreset({
-        preset,
-        behaviorOverride: { open_tracking: false, stop_on_reply: preset.stop_on_reply },
+        preset: { ...preset, ...VE_CAMPAIGN_SENDING_SETTINGS },
         sequence: { name: campaignName, steps: sequence.steps },
       });
       await heartbeatTemplateLaunch({ portalDb, auditId: audit.id, reservationId });
