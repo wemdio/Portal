@@ -6,7 +6,8 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Problem } from './checkCard';
 
-export type HandoffCheckStatus = 'ok' | 'problems' | 'no_link' | 'resolved' | 'expired';
+/** `superseded` — по той же сделке пришло более новое сообщение о передаче. */
+export type HandoffCheckStatus = 'ok' | 'problems' | 'no_link' | 'resolved' | 'expired' | 'superseded';
 
 export interface HandoffCheckRow {
   id: string;
@@ -91,6 +92,48 @@ export async function listOpen(db: SupabaseClient): Promise<HandoffCheckRow[]> {
     .order('first_checked_at', { ascending: true });
   if (error) throw error;
   return (data ?? []) as HandoffCheckRow[];
+}
+
+/**
+ * Открытые проверки той же сделки в сообщениях СТАРШЕ данного — их заменяет
+ * новое сообщение о передаче. id сообщений в чате растут, поэтому «старше» —
+ * это меньший `message_id`.
+ */
+export async function listOpenOlderForDeal(
+  db: SupabaseClient,
+  chatId: number,
+  amoId: number,
+  messageId: number,
+): Promise<HandoffCheckRow[]> {
+  const { data, error } = await db
+    .from(TABLE)
+    .select('*')
+    .eq('chat_id', chatId)
+    .eq('amo_id', amoId)
+    .lt('message_id', messageId)
+    .in('status', ['problems', 'no_link']);
+  if (error) throw error;
+  return (data ?? []) as HandoffCheckRow[];
+}
+
+/** Самое новое сообщение о передаче той же сделки после данного; null — такого нет. */
+export async function newestLaterForDeal(
+  db: SupabaseClient,
+  chatId: number,
+  amoId: number,
+  messageId: number,
+): Promise<HandoffCheckRow | null> {
+  const { data, error } = await db
+    .from(TABLE)
+    .select('*')
+    .eq('chat_id', chatId)
+    .eq('amo_id', amoId)
+    .gt('message_id', messageId)
+    .order('message_id', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as HandoffCheckRow | null) ?? null;
 }
 
 /** Самая ранняя проверка в таблице — момент первого запуска бота; null — таблица пуста. */

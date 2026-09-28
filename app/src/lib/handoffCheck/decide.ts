@@ -168,6 +168,30 @@ export function decide(
   return decideProblems(prev, told, visible, trigger, now);
 }
 
+/**
+ * Статусы, при которых сообщение о передаче прошло проверку и сказать про
+ * него в чате нечего.
+ */
+export function isCleanStatus(status: HandoffCheckStatus): boolean {
+  return status === 'ok' || status === 'resolved';
+}
+
+/**
+ * Старое сообщение о передаче заменено более новым по той же сделке (его
+ * переотправили вместо правки). Старое больше не проверяется и не напоминает
+ * — сделку ведёт новое.
+ *
+ * «✅» пишем, только если в чате висит наше предупреждение к старому И новое
+ * сообщение чистое. Если у нового свои проблемы, о них уже сказано под ним —
+ * второй голос под старым был бы шумом.
+ */
+export function decideSuperseded(
+  prev: Pick<HandoffCheckRow, 'reply_message_id'>,
+  newerStatus: HandoffCheckStatus,
+): { sayFixed: boolean } {
+  return { sayFixed: prev.reply_message_id != null && isCleanStatus(newerStatus) };
+}
+
 /** Дата по Москве `YYYY-MM-DD` — ключ ежедневного прохода. */
 export function moscowDateKey(now: Date): string {
   return new Date(now.getTime() + MSK_OFFSET_MS).toISOString().slice(0, 10);
