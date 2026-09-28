@@ -6,6 +6,7 @@ import {
 import { runProjectContactSupply } from './contactSupplyRunner';
 import { reconcileContactDeliveries } from './contactDeliveryReconciliation';
 import { activateDeliveredContactCampaigns } from './contactDeliveryActivation';
+import { refreshDeliveryRate } from './contactDeliveryRateService';
 import { ContactDeliveryAnalyticsUnavailableError } from './contactDeliveryInventory';
 
 export type ContactDeliverySchedulerLog = (
@@ -53,6 +54,7 @@ export async function runBoundContactDeliveries(input: {
   runSupply?: typeof runProjectContactSupply;
   reconcile?: typeof reconcileContactDeliveries;
   recoverActivation?: typeof activateDeliveredContactCampaigns;
+  refreshRate?: typeof refreshDeliveryRate;
   /** Finish an already attempted delivery, then leave remaining work for restart. */
   shouldStop?: () => boolean;
   log: ContactDeliverySchedulerLog;
@@ -125,6 +127,14 @@ export async function runBoundContactDeliveries(input: {
       if (recovery.accepted || recovery.released) input.log('info', `VE2 contact reconciliation project ${project.id}`, recovery);
     } catch (error) {
       input.log('error', `VE2 contact reconciliation project ${project.id} failed`, error);
+    }
+    if (input.shouldStop?.()) break;
+    try {
+      await (input.refreshRate ?? refreshDeliveryRate)(input.portalDb, input.instantlyDb, project.id);
+    } catch (error) {
+      failedProjects += 1;
+      input.log('error', `VE2 rate refresh project ${project.id} failed; new delivery deferred`, error);
+      continue;
     }
     if (input.shouldStop?.()) break;
     try {

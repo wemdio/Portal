@@ -7,7 +7,7 @@ jest.mock('@/lib/verticalEngineV2/stages/segmentationAudit', () => ({
   prepareAuditSnapshot: jest.fn(),
 }));
 
-import { outreachLaunchRequestSchema, runVeOutreachStartStage } from '@/lib/verticalEngineV2/outreachLaunch';
+import { outreachLaunchRequestSchema, runVeOutreachStartStage, prepareVeOutreachLaunch } from '@/lib/verticalEngineV2/outreachLaunch';
 
 const STAFF_LINE_ID = '837cbcb1-9afb-49c9-965c-d83d1e7d8e9c';
 const VE_PROJECT_ID = '10000000-0000-4000-8000-000000000001';
@@ -29,6 +29,13 @@ const request = {
 };
 
 describe('auto-outreach launch for a Portal project without periods', () => {
+  it('rejects a stale rate approval before any launch/audience work', async () => {
+    const db = createMockSupabase({tables: {ve_contact_delivery_rates: [{project_id: VE_PROJECT_ID, preset_id: 'preset-1',
+      revision: 2, status: 'ready', template_ids: [TEMPLATE_ID]}]}});
+    await expect(prepareVeOutreachLaunch(db as never, {} as never, {projectId: VE_PROJECT_ID, userId: 'staff-1',
+      request: {...request, delivery_rate_revision: 1}})).rejects.toThrow('Темп отправки изменился');
+    expect(db.rpcCalls).toEqual([]);
+  });
   it('requires the period field but accepts an explicit null', () => {
     expect(outreachLaunchRequestSchema.safeParse(request).success).toBe(true);
     expect(outreachLaunchRequestSchema.safeParse({ ...request, expected_portal_period_id: '30000000-0000-4000-8000-000000000001' }).success).toBe(true);
@@ -41,12 +48,13 @@ describe('auto-outreach launch for a Portal project without periods', () => {
       tables: {
         ve_outreach_runs: [{
           id: 'run-1', project_id: VE_PROJECT_ID, requested_by: 'staff-1', status: 'running',
-          request, items: [{ ...request.items[0], status: 'queued' }], error: null,
+          request: {...request, delivery_rate_revision: 1}, items: [{ ...request.items[0], status: 'queued' }], error: null,
         }],
         ve_outreach_setups: [{
           project_id: VE_PROJECT_ID, revision: 3, selected_hypothesis_ids: [HYPOTHESIS_ID],
           approved_bases: { [BASE_ID]: { template_id: TEMPLATE_ID, revision: 'reviewed' } },
         }],
+        ve_contact_delivery_rates: [{project_id: VE_PROJECT_ID, preset_id: 'preset-1', revision: 2, status: 'pending', template_ids: [TEMPLATE_ID]}],
         ve_templates: [{
           id: TEMPLATE_ID, base_id: BASE_ID, status: 'ready', supply_batch_id: null,
           letters: [{ subject: 'Тема', body: 'Письмо', selected_variant: 'A' }],

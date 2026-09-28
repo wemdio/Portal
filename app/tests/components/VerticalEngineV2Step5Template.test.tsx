@@ -2,6 +2,7 @@ import { act, render, renderHook, screen, waitFor } from '@testing-library/react
 import userEvent from '@testing-library/user-event';
 import type { VeTemplate } from '@/lib/verticalEngineV2/types';
 import { Step5Template, useTemplateLaunch } from '@/components/vertical-engine-v2/engine/steps/Step5Template';
+import { DeliveryRatePanel } from '@/components/vertical-engine-v2/engine/DeliveryRatePanel';
 
 const mockVeEngineCall = jest.fn();
 const mockVeEnginePost = jest.fn();
@@ -74,6 +75,30 @@ const template: VeTemplate = {
 };
 
 describe('Vertical Engine v2 Step 5 client onboarding', () => {
+  it('requires saving edited tempo and preserves pending state without starting or reuploading a launch', async () => {
+    const snapshot = {max_new_contacts: 100, effective_capacity: 100, usable_mailboxes: 10, mailbox_count: 10,
+      sequence_steps: 3, busy_mailboxes: 0, unavailable_mailboxes: 0, slow_ramp_mailboxes: 0, checked_at: new Date().toISOString()};
+    mockAuthFetch.mockResolvedValue({ok: true, json: async () => ({rate: null, revision: 0, snapshot, bound: true})});
+    mockVeEnginePost.mockResolvedValue({ok: true, data: {rate: {revision: 1, mode: 'manual', manual_limit: 20,
+      template_ids: ['template-1'], status: 'pending', snapshot: {...snapshot, effective_capacity: 20}}}});
+    const ready = jest.fn();
+    const user = userEvent.setup();
+    render(<DeliveryRatePanel projectId="ve" presetId="preset" templateIds={['template-1']} onReady={ready} />);
+    await screen.findByText('До 100 новых контактов в день');
+    await user.click(screen.getByLabelText('Ограничить вручную'));
+    await user.type(screen.getByLabelText('Не больше новых контактов в день'), '20');
+    expect(ready).toHaveBeenLastCalledWith(null);
+    await user.click(screen.getByRole('button', {name: 'Применить темп'}));
+    await waitFor(() => expect(ready).toHaveBeenLastCalledWith(1));
+    expect(mockVeEnginePost).toHaveBeenCalledTimes(1);
+    expect(mockVeEnginePost).toHaveBeenCalledWith('/api/tools/vertical-engine-v2/projects/ve/delivery-rate', {
+      preset_id: 'preset', template_ids: ['template-1'], mode: 'manual', manual_limit: 20, expected_revision: 0,
+    });
+    expect(screen.getByText(/Система применит его перед следующей загрузкой/)).toBeInTheDocument();
+    await user.clear(screen.getByLabelText('Не больше новых контактов в день'));
+    expect(ready).toHaveBeenLastCalledWith(null);
+    expect(screen.getByRole('button', {name: 'Применить темп'})).toBeDisabled();
+  });
   beforeEach(() => {
     jest.clearAllMocks();
     mockAuthFetch.mockResolvedValue({ ok: true });

@@ -64,6 +64,7 @@ try {
     '20260924_0011_ve_project_deadline_card_formats.sql',
     '20260924_0013_ve_instantly_upload_capacity.sql',
     '20260924_0014_ve_contact_delivery_reconciliation.sql',
+    '20260928_0004_ve_contact_delivery_rate.sql',
   ]) {
     await db.exec(migration(name));
   }
@@ -268,6 +269,46 @@ try {
     const totals = await one('select accepted_count,uncertain_count,skipped_count,reserved_count from public.ve_contact_delivery_daily_runs where id=$1', [day.run_id]);
     check(totals.accepted_count === 18 && totals.uncertain_count === 1 && totals.skipped_count === 1 && totals.reserved_count === 20,
       'capacity: accepted and uncertain counts survive retry without duplicates', JSON.stringify(totals));
+    await inRollback(async () => {
+      const snapshot = { effective_capacity: 5, max_new_contacts: 30, checked_at: new Date().toISOString() };
+      await rows("update public.projects set deadline=(current_date+30)::text where id=$1", [STAFF]);
+      const rateSave = 'select public.ve_save_contact_delivery_rate($1,$2,$3::uuid[],$4,$5,$6,$7::jsonb,$8) as r';
+      const rateArgs = [VE, PRESET, [TPL], 'manual', 5, 0, JSON.stringify(snapshot), USER];
+      const before = await rows('select * from public.ve_contact_delivery_rows where ve_project_id=$1 order by id', [VE]);
+      await expectError('rate: no direct binding capacity edits', 'update public.ve_projects set sender_daily_capacity=5 where id=$1', [VE], /подтверждённый расчёт/);
+      await expectError('rate: zero capacity rejected', rateSave, [...rateArgs.slice(0,6), JSON.stringify({...snapshot,effective_capacity:0}), USER], /подтверждённый расчёт/);
+      const saved = (await one(rateSave, rateArgs)).r;
+      check(saved.revision === 1 && saved.status === 'pending', 'rate: bound change saved pending without changing the daily quota');
+      await expectError('rate: stale tab cannot overwrite a policy', rateSave, rateArgs, /другой вкладке/);
+      await expectError('rate: pending provider verification blocks a new reserve', reserveSql, [VE,dbNow], /не подтверждён/);
+      const token = 'f1f1f1f1-f1f1-41f1-81f1-f1f1f1f1f1f1';
+      const otherToken = 'f2f2f2f2-f2f2-42f2-82f2-f2f2f2f2f2f2';
+      const claim = 'select public.ve_claim_contact_delivery_rate($1,1,$2) as ok';
+      check((await one(claim, [VE,token])).ok, 'rate: worker owns update');
+      check(!(await one(claim, [VE,otherToken])).ok, 'rate: second worker cannot claim a live lease');
+      await expectError('rate: policy cannot change during provider work', rateSave, [...rateArgs.slice(0,5),1,...rateArgs.slice(6)], /Воркер применяет/);
+      const finish = 'select public.ve_finish_contact_delivery_rate($1,1,$2,$3::jsonb,$4) as ok';
+      await expectError('rate: other worker cannot finish', finish, [VE,otherToken,JSON.stringify(snapshot),null], /lease changed/);
+      check(!(await one(finish,[VE,token,null,'provider failed'])).ok, 'rate: failed provider check blocks delivery');
+      await expectError('rate: failure does not reuse old ready flag', reserveSql, [VE,dbNow], /не подтверждён/);
+      await one(claim,[VE,token]);
+      check((await one(finish,[VE,token,JSON.stringify(snapshot),null])).ok, 'rate: retry can verify and commit the limit');
+      check((await one('select sender_daily_capacity as n from public.ve_projects where id=$1',[VE])).n === 5, 'rate: confirmed capacity replaces only the rate binding');
+      const unchanged = await rows('select * from public.ve_contact_delivery_rows where ve_project_id=$1 order by id', [VE]);
+      check(JSON.stringify(before) === JSON.stringify(unchanged), 'rate: accepted, skipped, uncertain and ready rows are unchanged');
+      const replay = (await one(reserveSql,[VE,dbNow])).r;
+      check(replay.run_id === day.run_id && replay.batches.length === 0, 'rate: changing the limit does not restart a completed daily upload');
+      const tomorrow = (await one("select (date_trunc('week', now()) + interval '7 days 9 hours')::text as t")).t;
+      const freshDay = (await one(reserveSql,[VE,tomorrow])).r;
+      check(freshDay.effective_count === 5 && !freshDay.batches.flatMap(b=>b.row_ids).some(id=>ids.includes(id)), 'rate: next day uses new limit without selecting completed identities', JSON.stringify(freshDay));
+      await rows("update public.ve_contact_delivery_rates set checked_at=now()-interval '11 minutes' where project_id=$1",[VE]);
+      await expectError('rate: stale provider check blocks delivery',reserveSql,[VE,tomorrow],/не подтверждён/);
+      await db.exec('set role service_role');
+      await expectError('rate: service role cannot directly alter policy', 'update public.ve_contact_delivery_rates set revision=99 where project_id=$1', [VE], /permission denied/);
+      await db.exec('reset role; set role authenticated');
+      await expectError('rate: browser role cannot call save RPC', rateSave, rateArgs, /permission denied/);
+      await db.exec('reset role');
+    });
     const nextMonday = (await one("select (date_trunc('week', now()) + interval '7 days 9 hours')::text as t")).t;
     const nextDaily = (await one(reserveSql, [VE, nextMonday])).r;
     check(nextDaily.status === 'reserved' && nextDaily.committed_count === 19 && nextDaily.ready_remaining === 10
