@@ -10,7 +10,9 @@ type SnapshotWriteResult = { error: { message?: string } | null };
 type SnapshotDatabase = {
   from: (table: string) => {
     upsert: (
-      rows: ReadonlyArray<Record<string, unknown>>,
+      // Изменяемый массив, как у upsert Supabase: TypeScript 7 (проверка типов
+      // в CI веток) не считает клиент Supabase подходящим под readonly-массив.
+      rows: Record<string, unknown>[],
       options: { onConflict: string; ignoreDuplicates: boolean },
     ) => PromiseLike<SnapshotWriteResult>;
   };

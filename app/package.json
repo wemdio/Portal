@@ -12,7 +12,8 @@
     "dev:ui": "node scripts/dev-ui.mjs",
     "dev:workers": "concurrently \"npm run build:workers:watch\" \"node --watch --env-file ../.env dist/workers/hh.js\" \"node --watch --env-file ../.env dist/workers/engHiring.js\" \"node --watch --env-file ../.env dist/workers/search.js\" \"node --watch --env-file ../.env dist/workers/enrich.js\" \"node --watch --env-file ../.env dist/workers/yandexmaps.js\" \"node --watch --env-file ../.env dist/workers/emailvalidation.js\" \"node --watch --env-file ../.env dist/workers/tgOutreach.js\" \"node --watch --env-file ../.env dist/workers/salesCopilot.js\" \"node --watch --env-file ../.env dist/workers/salesChatLogger.js\" \"node --watch --env-file ../.env dist/workers/byoSend.js\" \"node --watch --env-file ../.env dist/workers/byoReplies.js\"",
     "pretypecheck:strict": "node -e \"require('node:fs').mkdirSync('.next/cache/tsc', { recursive: true })\"",
-    "typecheck:strict": "next typegen && tsc -p tsconfig.next-route-validator.json --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/routes.tsbuildinfo && tsc -p tsconfig.typecheck.core.json --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/core.tsbuildinfo && tsc -p tsconfig.typecheck.api.json --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/api.tsbuildinfo && tsc -p tsconfig.typecheck.pages.json --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/pages.tsbuildinfo && tsc -p tsconfig.typecheck.tests.json --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/tests.tsbuildinfo",
+    "typecheck:strict": "next typegen && node node_modules/typescript/bin/tsc -p tsconfig.next-route-validator.json --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/routes.tsbuildinfo && node node_modules/typescript/bin/tsc -p tsconfig.typecheck.core.json --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/core.tsbuildinfo && node node_modules/typescript/bin/tsc -p tsconfig.typecheck.api.json --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/api.tsbuildinfo && node node_modules/typescript/bin/tsc -p tsconfig.typecheck.pages.json --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/pages.tsbuildinfo && node node_modules/typescript/bin/tsc -p tsconfig.typecheck.tests.json --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/tests.tsbuildinfo",
+    "typecheck:fast": "next typegen && node node_modules/typescript-7/bin/tsc -p tsconfig.next-route-validator.json --noEmit --checkers 1 --incremental --tsBuildInfoFile .next/cache/tsc7/routes.tsbuildinfo && node node_modules/typescript-7/bin/tsc -p tsconfig.typecheck.core.json --noEmit --checkers 1 --incremental --tsBuildInfoFile .next/cache/tsc7/core.tsbuildinfo && node node_modules/typescript-7/bin/tsc -p tsconfig.typecheck.api.json --noEmit --checkers 1 --incremental --tsBuildInfoFile .next/cache/tsc7/api.tsbuildinfo && node node_modules/typescript-7/bin/tsc -p tsconfig.typecheck.pages.json --noEmit --checkers 1 --incremental --tsBuildInfoFile .next/cache/tsc7/pages.tsbuildinfo && node node_modules/typescript-7/bin/tsc -p tsconfig.typecheck.tests.json --noEmit --checkers 1 --incremental --tsBuildInfoFile .next/cache/tsc7/tests.tsbuildinfo",
     "build": "next build",
     "build:sbis-importer": "esbuild ./scripts/apply-sbis-directory-plan.ts --bundle --platform=node --target=node22 --format=cjs --outfile=./dist/scripts/apply-sbis-directory-plan.cjs --tsconfig=tsconfig.json --external:pg --log-level=info",
     "build:polza-registry-planner": "esbuild ./scripts/plan-polza-registry-v2.ts --bundle --platform=node --target=node22 --format=cjs --outfile=./dist/scripts/plan-polza-registry-v2.cjs --tsconfig=tsconfig.json --external:pg --log-level=info",
@@ -136,7 +137,8 @@
     "jsdom": "^28.1.0",
     "patch-package": "^8.0.1",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "typescript-7": "npm:typescript@7.0.2"
   },
   "optionalDependencies": {
     "lightningcss-linux-x64-gnu": "^1.31.1"

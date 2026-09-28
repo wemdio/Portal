@@ -106,7 +106,51 @@ describe('Next build typecheck contract', () => {
     return lines.slice(start, next < 0 ? undefined : start + 1 + next).join('\n');
   }
 
-  it('keeps the shared strict typecheck command in the required test job', () => {
+  /**
+   * Проверка типов идёт двумя командами: typecheck:strict (TypeScript 5,
+   * прод-сборка в Dockerfile) и typecheck:fast (TypeScript 7, CI веток, с
+   * 28.09.2026). Обе проверяют проект кусками, а не одним проходом: целиком он
+   * не влезает в 4 ГБ машины сборки ни у 5-го, ни у 7-го. Поэтому сторожим не
+   * одну команду, а инвариант для каждой — маршруты Next и КАЖДЫЙ
+   * tsconfig.typecheck.*.json обязаны прогоняться. Так из команды не выпадет
+   * кусок (часть проекта перестала бы проверяться молча) и не появится
+   * файл-сирота, который завели, но запускать забыли.
+   *
+   * tsc вызывается только по явному пути: оба пакета объявляют команду `tsc`,
+   * и какой из них окажется в node_modules/.bin, зависит от способа установки
+   * (чистая — TypeScript 5, доустановка поверх — TypeScript 7). Голый `tsc`
+   * молча подменил бы версию.
+   */
+  function expectChunkedTypecheck(script: string, tsc: string, flags: string, buildInfoDir: string) {
+    const typegenIndex = script.indexOf('next typegen');
+    const routeValidatorIndex = script.indexOf(
+      `${tsc} -p tsconfig.next-route-validator.json --noEmit ${flags}--incremental --tsBuildInfoFile ${buildInfoDir}/routes.tsbuildinfo`,
+    );
+    const chunkConfigs = fs
+      .readdirSync(process.cwd())
+      .filter((name) => /^tsconfig\.typecheck\..+\.json$/.test(name))
+      .sort();
+    const chunkIndexes = chunkConfigs.map((name) =>
+      script.indexOf(`${tsc} -p ${name} --noEmit ${flags}--incremental --tsBuildInfoFile ${buildInfoDir}/`),
+    );
+    const tscIndex = chunkIndexes.length ? Math.min(...chunkIndexes) : -1;
+
+    expect(typegenIndex).toBeGreaterThan(-1);
+    expect(routeValidatorIndex).toBeGreaterThan(typegenIndex);
+    expect(chunkConfigs.length).toBeGreaterThan(0);
+    expect(chunkIndexes).not.toContain(-1);
+    expect(tscIndex).toBeGreaterThan(routeValidatorIndex);
+    const allTscCalls = script.split('tsc -p ').length - 1;
+    expect(allTscCalls).toBe(chunkConfigs.length + 1);
+    expect(script.split(`${tsc} -p `).length - 1).toBe(allTscCalls);
+    // Куски пишут разные файлы incremental-состояния: общий файл на две разные
+    // программы означал бы, что каждый прогон обесценивает кэш соседнего.
+    const buildInfoFiles = [...script.matchAll(/--tsBuildInfoFile (\S+)/g)].map((m) => m[1]);
+    expect(new Set(buildInfoFiles).size).toBe(buildInfoFiles.length);
+    expect(buildInfoFiles.every((file) => file.startsWith(`${buildInfoDir}/`))).toBe(true);
+  }
+
+  it('keeps both chunked typecheck commands complete and the fast one in the required test job', () => {
     const workflow = fs.readFileSync(
       path.resolve(process.cwd(), '..', '.semaphore', 'semaphore.yml'),
       'utf8',
@@ -120,62 +164,57 @@ describe('Next build typecheck contract', () => {
     // типами, и тесты, и сборка проверяются в одной секции.
     const typecheckJob = namedSection(testBlock, 'Checks and build', 8);
     const testsJob = typecheckJob;
-    const strictTypecheck = packageJson.scripts?.['typecheck:strict'] ?? '';
-    const typegenIndex = strictTypecheck.indexOf('next typegen');
-    const routeValidatorIndex = strictTypecheck.indexOf(
-      'tsc -p tsconfig.next-route-validator.json --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/routes.tsbuildinfo',
-    );
-    /**
-     * Проект проверяется кусками, а не одним проходом: сплошной tsc не влезает
-     * в 4 ГБ машины сборки. Поэтому сторожим не одну команду, а инвариант —
-     * КАЖДЫЙ tsconfig.typecheck.*.json обязан прогоняться. Так из команды не
-     * выпадет кусок (часть проекта перестала бы проверяться молча) и не
-     * появится файл-сирота, который завели, но запускать забыли.
-     */
-    const chunkConfigs = fs
-      .readdirSync(process.cwd())
-      .filter((name) => /^tsconfig\.typecheck\..+\.json$/.test(name))
-      .sort();
-    const chunkIndexes = chunkConfigs.map((name) =>
-      strictTypecheck.indexOf(
-        `tsc -p ${name} --noEmit --incremental --tsBuildInfoFile .next/cache/tsc/`,
-      ),
-    );
-    const tscIndex = chunkIndexes.length ? Math.min(...chunkIndexes) : -1;
 
-    expect(testBlock).toContain("branch != 'main' AND branch != 'test'");
-    expect(typecheckJob).toContain('- npm run typecheck:strict');
+    expectChunkedTypecheck(
+      packageJson.scripts?.['typecheck:strict'] ?? '',
+      'node node_modules/typescript/bin/tsc',
+      '',
+      '.next/cache/tsc',
+    );
+    // --checkers 1 — потолок памяти, а не вкус: с двумя проверяющими потоками
+    // кусок маршрутов у TypeScript 7 берёт 3,7 ГБ, с одним — 2,9 ГБ при 4 ГБ
+    // машины (замер 28.09.2026). Состояние TypeScript 7 лежит отдельно от
+    // состояния 5-го: форматы у них разные.
+    expectChunkedTypecheck(
+      packageJson.scripts?.['typecheck:fast'] ?? '',
+      'node node_modules/typescript-7/bin/tsc',
+      '--checkers 1 ',
+      '.next/cache/tsc7',
+    );
+
+    // Ветка test обязана гонять блок: остальные ветки гоняют только связанные
+    // тесты и без сборки Next, и полный набор со сборкой — на test, после
+    // слияния. Выпади test из условия — полного прогона не было бы нигде.
+    expect(testBlock).toContain("when: \"branch != 'main' AND change_in(");
+    expect(testBlock).not.toContain("branch != 'test'");
+    expect(typecheckJob).toContain('- npm run typecheck:fast');
     expect(typecheckJob).not.toContain('- npx next typegen');
-    expect(typegenIndex).toBeGreaterThan(-1);
-    expect(routeValidatorIndex).toBeGreaterThan(typegenIndex);
-    expect(chunkConfigs.length).toBeGreaterThan(0);
-    expect(chunkIndexes).not.toContain(-1);
-    expect(tscIndex).toBeGreaterThan(routeValidatorIndex);
-    // Куски пишут разные файлы incremental-состояния: общий файл на две разные
-    // программы означал бы, что каждый прогон обесценивает кэш соседнего.
-    const buildInfoFiles = [...strictTypecheck.matchAll(/--tsBuildInfoFile (\S+)/g)].map((m) => m[1]);
-    expect(new Set(buildInfoFiles).size).toBe(buildInfoFiles.length);
     expect(packageJson.scripts?.['pretypecheck:strict']).toContain(
       "mkdirSync('.next/cache/tsc', { recursive: true })",
     );
-    // Проверяем инвариант, а не буквальный ключ: incremental-состояние tsc
-    // (.next/cache/tsc) обязано и подниматься из кэша, и складываться обратно.
-    // Без этого typecheck:strict считает проект с нуля — замер на проекте:
-    // 23 секунды со свежим кэшем против 5 минут 45 секунд без него.
+    // Проверяем инвариант, а не буквальный ключ: incremental-состояние
+    // (.next/cache) обязано и подниматься из кэша, и складываться обратно.
+    // Без этого проверка типов считает проект с нуля — у TypeScript 7 это
+    // ~1 минута против ~10 секунд с кэшем.
     // Раньше здесь были прибиты точные строки ключей, и любая правка схемы
     // кэширования валила тест, ничего содержательного при этом не поймав.
     expect(typecheckJob).toMatch(/cache restore \S+/);
     expect(typecheckJob).toMatch(/cache store [^\n]*\.next\/cache/);
     expect(typecheckJob).not.toContain('.tsbuildinfo.ci');
-    // Тесты обязаны остаться в обязательном блоке ветки и гоняться целиком:
+    // Тесты обязаны остаться в обязательном блоке ветки; какие именно гонять
+    // (весь набор на test, связанные — на остальных), решает один скрипт.
     // --shard без пересчёта долей однажды уже мог бы тихо недосчитать часть
     // набора, оставив прогон зелёным. Сейчас долей нет — и появиться они
     // должны осознанно, вместе с правкой этого теста.
-    expect(testsJob).toContain('npm test -- --watchAll=false');
+    expect(testsJob).toContain('- \'node scripts/ci/branch-tests.mjs ');
+    expect(fs.existsSync(path.resolve(process.cwd(), 'scripts', 'ci', 'branch-tests.mjs'))).toBe(true);
     expect(testsJob).not.toContain('--shard=');
     // Порядок внутри джобы: сначала дешёвые проверки, потом дорогая сборка.
     // Иначе за сборку платится даже там, где правка не проходит типы.
-    expect(typecheckJob.indexOf('npm run typecheck:strict')).toBeLessThan(
+    expect(typecheckJob.indexOf('npm run typecheck:fast')).toBeLessThan(
+      typecheckJob.indexOf('scripts/ci/branch-tests.mjs'),
+    );
+    expect(typecheckJob.indexOf('scripts/ci/branch-tests.mjs')).toBeLessThan(
       typecheckJob.indexOf('npm run build'),
     );
   });
@@ -202,15 +241,28 @@ describe('Next build typecheck contract', () => {
     expect(validatorConfig.exclude).toEqual(['node_modules']);
   });
 
-  it('sets the branch-CI skip flag only inside the branch Next build job', () => {
+  it('builds Next in CI only on the test branch, prechecked by the fast typecheck of the same job', () => {
     const workflow = fs.readFileSync(
       path.resolve(process.cwd(), '..', '.semaphore', 'semaphore.yml'),
       'utf8',
     );
     const testBlock = namedSection(workflow, 'Run tests', 2);
     const nextBuildJob = namedSection(testBlock, 'Checks and build', 8);
+    const buildLine = nextBuildJob.split(/\r?\n/).find((line) => line.includes('npm run build')) ?? '';
 
-    expect(nextBuildJob).toContain("- 'NEXT_BUILD_SKIP_TYPECHECK=1 npm run build'");
+    // Сборка Next с 28.09.2026 — только на ветке test (страховка после
+    // слияния), не на каждом пуше ветки.
+    expect(buildLine).toContain('if [ "$SEMAPHORE_GIT_BRANCH" = "test" ]; then');
+    // Пропуск встроенной проверки типов Next на test разрешён только вместе с
+    // флагом «проверено заранее» — и заранее её обязан сделать typecheck:fast
+    // в этой же джобе, до сборки.
+    expect(buildLine).toContain('NEXT_BUILD_PRECHECKED_TYPECHECK=1 NEXT_BUILD_SKIP_TYPECHECK=1 npm run build');
+    expect(nextBuildJob.indexOf('- npm run typecheck:fast')).toBeGreaterThan(-1);
+    expect(nextBuildJob.indexOf('- npm run typecheck:fast')).toBeLessThan(nextBuildJob.indexOf(buildLine));
+    // Упавшая сборка обязана ронять строку: через «;» результатом строки стал
+    // бы код следующей команды (записи кэша), и красная сборка прошла бы
+    // зелёной.
+    expect(buildLine).toMatch(/npm run build && /);
     expect(workflow.match(/NEXT_BUILD_SKIP_TYPECHECK=1 npm run build/g)).toHaveLength(1);
   });
 
