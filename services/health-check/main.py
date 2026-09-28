@@ -127,6 +127,33 @@ HEALTH_ALERT_REPEAT_CYCLES = max(0, int(os.environ.get("HEALTH_ALERT_REPEAT_CYCL
 # Per-check consecutive-failure counters; reset to 0 on first success.
 _FAIL_COUNT: dict[str, int] = {}
 
+# Проверка прокси идёт внутри 15-минутного цикла, но не чаще
+# PROXY_CHECK_INTERVAL_SEC — её реальный шаг кратен циклу.
+_PROXY_CYCLE_SEC = -(-PROXY_CHECK_INTERVAL_SEC // max(1, HEALTH_INTERVAL_SEC)) * HEALTH_INTERVAL_SEC
+
+
+def _failure_streak_note(count: int, cycle_sec: int) -> str:
+    """« (×62 подряд, ≈15 ч)» — сколько проверок провалено подряд и сколько это времени.
+
+    Голое «×62» читалось как число отправленных сообщений. На деле алерт уходит
+    на 2-й провал и дальше раз в HEALTH_ALERT_REPEAT_CYCLES, а 62 — это длина
+    сбоя в циклах. Время здесь понятнее, чем циклы.
+    """
+    minutes = count * cycle_sec / 60
+    span = f"≈{round(minutes)} мин" if minutes < 90 else f"≈{round(minutes / 60)} ч"
+    return f" (×{count} подряд, {span})"
+
+
+def _attach_streak(problem_text: str, note: str) -> str:
+    """Счётчик сбоя — в первую строку алерта, а не в конец.
+
+    Раньше он дописывался в конец многострочного текста и прилипал к последней
+    строке. У прокси последней строкой стоит тег, и 28.09.2026 пришло
+    «@Jacob_brown (×62)» — выглядело как «тегнули 62 раза».
+    """
+    first, sep, rest = problem_text.partition("\n")
+    return first + note + sep + rest
+
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 S3_BUCKET = os.environ.get("S3_BUCKET", "")
 
@@ -1845,9 +1872,11 @@ async def _run_health_check_inner():
     def _check(key: str, failed: bool, problem_text: str, recovery_text: str) -> None:
         emit_alert, emit_recovery = _track(key, failed)
         count = _FAIL_COUNT.get(key, 0)
-        suffix = f" (×{count})" if failed and count > HEALTH_ALERT_MIN_CONSECUTIVE else ""
         if emit_alert:
-            problems.append(problem_text + suffix)
+            if failed and count > HEALTH_ALERT_MIN_CONSECUTIVE:
+                cycle = _PROXY_CYCLE_SEC if key == "proxies" else HEALTH_INTERVAL_SEC
+                problem_text = _attach_streak(problem_text, _failure_streak_note(count, cycle))
+            problems.append(problem_text)
         if emit_recovery:
             recoveries.append(recovery_text)
 
