@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { CampaignStatus } from '@/lib/instantly/types';
 
 const PAGE_SIZE = 500;
 const ID_BATCH_SIZE = 100;
@@ -47,7 +48,9 @@ function exactContactCount(value: unknown): number | null {
  * All campaign history matters when distinguishing delivered-but-not-contacted
  * supply from the Portal period's fulfillment fact. A released bundle must not
  * disappear from that calculation. Missing catalog rows conservatively count
- * as zero; present but malformed facts fail closed instead of inflating room.
+ * as zero. An explicit initial null is allowed only for an empty campaign that
+ * has not been activated and was observed as draft/paused. Previously delivered
+ * campaigns and malformed or incomplete synced facts still fail closed.
  */
 export async function loadVeContactDeliveryCampaignInventory(
   portalDb: SupabaseClient,
@@ -77,14 +80,18 @@ export async function loadVeContactDeliveryCampaignInventory(
   const allIds = new Set<string>();
   const activeIds = new Set<string>();
   const activeCampaignRowIds = new Set<string>();
+  const initialEmptyCampaignIds = new Set<string>();
   const childIds = new Set<string>();
   for (let offset = 0; offset < itemIds.length; offset += ID_BATCH_SIZE) {
     const ids = itemIds.slice(offset, offset + ID_BATCH_SIZE);
-    const campaigns = await readContactDeliveryPages<{ id: string; item_id: string; campaign_id: string }>(
+    const campaigns = await readContactDeliveryPages<{
+      id: string; item_id: string; campaign_id: string; leads_count: unknown;
+      activated_at: unknown; remote_status: unknown; status_observed_at: unknown;
+    }>(
       'delivery campaign inventory',
       (from, to) => portalDb
         .from('ve_launch_queue_campaigns')
-        .select('id, item_id, campaign_id', { count: 'exact' })
+        .select('id, item_id, campaign_id, leads_count, activated_at, remote_status, status_observed_at', { count: 'exact' })
         .in('item_id', ids)
         .order('id', { ascending: true })
         .range(from, to),
@@ -98,6 +105,11 @@ export async function loadVeContactDeliveryCampaignInventory(
       }
       childIds.add(campaign.id);
       allIds.add(campaign.campaign_id);
+      if (campaign.leads_count === 0 && campaign.activated_at === null &&
+        (campaign.remote_status === CampaignStatus.Draft || campaign.remote_status === CampaignStatus.Paused) &&
+        typeof campaign.status_observed_at === 'string' && Number.isFinite(Date.parse(campaign.status_observed_at))) {
+        initialEmptyCampaignIds.add(campaign.campaign_id);
+      }
       if (activeItems.has(campaign.item_id)) {
         activeCampaignRowIds.add(campaign.id);
         activeIds.add(campaign.campaign_id);
@@ -114,17 +126,23 @@ export async function loadVeContactDeliveryCampaignInventory(
   const observedIds = new Set<string>();
   for (let offset = 0; offset < allCampaignIds.length; offset += ID_BATCH_SIZE) {
     const ids = allCampaignIds.slice(offset, offset + ID_BATCH_SIZE);
-    const catalog = await readContactDeliveryPages<{ id: string; new_leads_contacted_count: unknown }>(
+    const catalog = await readContactDeliveryPages<{
+      id: string; new_leads_contacted_count: unknown; analytics_synced_at: unknown;
+    }>(
       'delivery campaign first-contacted inventory',
       (from, to) => instantlyDb
         .from('instantly_campaign_catalog')
-        .select('id, new_leads_contacted_count', { count: 'exact' })
+        .select('id, new_leads_contacted_count, analytics_synced_at', { count: 'exact' })
         .in('id', ids)
         .order('id', { ascending: true })
         .range(from, to),
     );
     for (const campaign of catalog) {
-      const contacts = exactContactCount(campaign.new_leads_contacted_count);
+      // The catalog sync creates a row before the separate analytics sync.
+      // Do not make an unknown count in an already delivered campaign look empty.
+      const awaitingFirstAnalytics = campaign.new_leads_contacted_count === null &&
+        campaign.analytics_synced_at === null && initialEmptyCampaignIds.has(campaign.id);
+      const contacts = awaitingFirstAnalytics ? 0 : exactContactCount(campaign.new_leads_contacted_count);
       if (contacts === null) {
         throw new Error('delivery catalog requires an exact non-negative first-contacted count');
       }

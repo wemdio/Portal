@@ -61,7 +61,8 @@ function portalDb(options: { replayAfterFirst?: boolean; awaitingDelivery?: bool
       }],
       ve_launch_queue_campaigns: [
         { id: 'child-1', item_id: ITEM_ID, campaign_id: 'campaign-a' },
-        { id: 'child-2', item_id: ITEM_ID, campaign_id: 'campaign-b' },
+        { id: 'child-2', item_id: ITEM_ID, campaign_id: 'campaign-b', leads_count: 0,
+          activated_at: null, remote_status: 0, status_observed_at: '2026-09-07T06:00:00.000Z' },
         { id: 'child-3', item_id: 'released-item', campaign_id: 'campaign-old' },
       ],
     },
@@ -104,6 +105,8 @@ function instantlyDb(workspace = 'workspace-1') {
       client_campaign_presets: [{ id: 'preset-1', client_user_id: 'client-user-1', instantly_account_id: workspace }],
       instantly_campaign_catalog: [
         { id: 'campaign-a', new_leads_contacted_count: 3 },
+        // New campaigns appear in the catalog before their first analytics sync.
+        { id: 'campaign-b', new_leads_contacted_count: null, analytics_synced_at: null },
         { id: 'campaign-old', new_leads_contacted_count: '7' },
       ],
     },
