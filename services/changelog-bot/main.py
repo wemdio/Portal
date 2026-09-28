@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import re
 import sys
@@ -43,6 +44,7 @@ import httpx
 from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from ve2_digest import DailyDigest
 
 # ── Env config ───────────────────────────────────────────────────────────────
 
@@ -56,6 +58,7 @@ THREAD_ID = os.environ.get("CHANGELOG_THREAD_ID", "")
 RUN_NOW = os.environ.get("CHANGELOG_RUN_NOW", "") == "1"
 DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("SUPABASE_DB_URL", "")
 WEBHOOK_PORT = int(os.environ.get("CHANGELOG_WEBHOOK_PORT", "8095"))
+VE2_DIGEST_ENABLED = os.environ.get("VE2_DIGEST_ENABLED", "1") == "1"
 
 MSK = timezone(timedelta(hours=3))
 
@@ -81,6 +84,9 @@ async def get_pool() -> asyncpg.Pool | None:
             DATABASE_URL, min_size=1, max_size=3, statement_cache_size=0
         )
     return _pool
+
+
+ve2_digest = DailyDigest(get_pool, TELEGRAM_BOT_TOKEN, CHAT_ID, THREAD_ID, VE2_DIGEST_ENABLED)
 
 
 # ── Ожидание базы при старте ────────────────────────────────────────────────
@@ -897,7 +903,7 @@ async def run_digest(
 # ── Health check server ───────────────────────────────────────────────────────
 
 async def handle_health(_request: web.Request) -> web.Response:
-    return web.json_response({"status": "ok", "service": "changelog-bot"})
+    return web.json_response({"status": "ok", "service": "changelog-bot", "ve2_digest": ve2_digest.health})
 
 
 # ── Catchup on startup ────────────────────────────────────────────────────────
@@ -924,6 +930,7 @@ async def _run_catchup() -> None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Portal changelog bot")
+    parser.add_argument("--ve2-preview", action="store_true", help="Read-only VE2 report preview and private diagnostics. Never sends or writes history.")
     parser.add_argument(
         "--once",
         action="store_true",
@@ -972,29 +979,52 @@ async def main() -> None:
     await site.start()
     print(f"[changelog] Health server on 0.0.0.0:{WEBHOOK_PORT}/health", flush=True)
 
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(ve2_digest.tick, CronTrigger(hour=8, minute=0, timezone="UTC"),
+                      id="ve2_daily_digest", max_instances=1, coalesce=True, misfire_grace_time=3600)
+    # Retry known failures / catch up after an outage. tick is date-idempotent,
+    # cannot send before 11 MSK and never retries an unknown Telegram result.
+    scheduler.add_job(ve2_digest.tick, "interval", minutes=5,
+                      id="ve2_digest_recovery", max_instances=1, coalesce=True)
+    scheduler.start()
+    print(f"[ve2-digest] Scheduled: daily at 11:00 MSK (08:00 UTC), enabled={VE2_DIGEST_ENABLED}", flush=True)
+    await ve2_digest.tick()
+
     if RUN_NOW:
         print("[changelog] CHANGELOG_RUN_NOW=1 — running digest immediately", flush=True)
         await run_digest()
     else:
         await _run_catchup()
 
-    scheduler = AsyncIOScheduler()
+    # Preserve the changelog's existing catchup-before-cron ordering, so its
+    # startup catchup cannot overlap with the 09:00 job. VE2 is independent.
     scheduler.add_job(
         run_digest,
         CronTrigger(hour=6, minute=0, timezone="UTC"),
         id="daily_digest",
         max_instances=1,
     )
-    scheduler.start()
     print(f"[changelog] Scheduled: daily at 09:00 MSK (06:00 UTC). Repo: {GITHUB_REPO}, model: {AI_MODEL}", flush=True)
 
     while True:
         await asyncio.sleep(3600)
 
 
+async def preview_ve2() -> None:
+    _require("DATABASE_URL", DATABASE_URL)
+    pool = await get_pool()
+    try:
+        async with pool.acquire() as conn:
+            print(json.dumps(await ve2_digest.preview(conn), ensure_ascii=False, indent=2))
+    finally:
+        await pool.close()
+
+
 if __name__ == "__main__":
     args = _parse_args()
-    if args.once:
+    if args.ve2_preview:
+        asyncio.run(preview_ve2())
+    elif args.once:
         asyncio.run(run_once(days=args.days, model=args.model))
     else:
         asyncio.run(main())
