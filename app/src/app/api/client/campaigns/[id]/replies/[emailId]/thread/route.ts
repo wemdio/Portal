@@ -51,8 +51,9 @@ export async function GET(
     // поэтому право проверяем по ящику-получателю — см. strayAccess. Адрес лида
     // берём из нашей записи: у сироты поле lead пустое, а без него ниже не
     // собрать ни остальную переписку, ни «ответить всем».
+    const replyAsNewEmail = original.campaign_id !== campaignId;
     let strayLeadEmail: string | null = null;
-    if (original.campaign_id !== campaignId) {
+    if (replyAsNewEmail) {
       const stray = await resolveStrayAccess({
         emailId,
         campaignId,
@@ -168,15 +169,21 @@ export async function GET(
       Array.isArray(original.from_address_json) && typeof original.from_address_json[0]?.name === 'string'
         ? original.from_address_json[0].name.trim() || null
         : null;
-    const replyToEmail = original.from_address_email ?? leadEmail ?? null;
+    const replyToEmail = isInboundEmail(original)
+      ? (original.from_address_email ?? strayLeadEmail)
+      : leadEmail;
     const reply_to = replyToEmail ? { email: replyToEmail, name: fromName } : null;
-    const reply_all_cc = computeReplyAllRecipients(original, { eaccount, leadEmail });
+    const reply_all_cc = computeReplyAllRecipients(original, {
+      eaccount,
+      leadEmail: original.from_address_email ?? strayLeadEmail ?? leadEmail,
+    });
 
     const payload: ClientReplyThread = {
       thread_id: threadId,
       messages,
       reply_to,
       reply_all_cc,
+      reply_as_new_email: replyAsNewEmail,
       ...(historyRetryAfterMs != null ? { history_deferred: { retry_after_ms: historyRetryAfterMs } } : {}),
     };
     return NextResponse.json(payload);

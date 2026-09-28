@@ -38,6 +38,7 @@ import type { ClientReplyThread, ThreadMessage, Recipient } from '@/lib/clientCa
  */
 
 type ActionMode = 'reply' | 'forward' | null;
+type ReplySendResult = { ok: true; via: 'reply' | 'test'; to_email: string };
 
 function formatReplyDate(iso: string | null): string {
   if (!iso) return '';
@@ -221,11 +222,12 @@ interface ReplyFormProps {
   emailId: string;
   replyTo?: Recipient | null;
   replyAllCc?: Recipient[];
+  replyAsNewEmail?: boolean;
   onCancel: () => void;
-  onSent: () => void;
+  onSent: (result: ReplySendResult) => void;
 }
 
-function ReplyForm({ campaignId, emailId, replyTo, replyAllCc, onCancel, onSent }: ReplyFormProps) {
+function ReplyForm({ campaignId, emailId, replyTo, replyAllCc, replyAsNewEmail, onCancel, onSent }: ReplyFormProps) {
   const [bodyText, setBodyText] = useState('');
   const [cc, setCc] = useState('');
   const [bcc, setBcc] = useState('');
@@ -239,7 +241,7 @@ function ReplyForm({ campaignId, emailId, replyTo, replyAllCc, onCancel, onSent 
     setError('');
     setAuthExpired(false);
     try {
-      await clientApiFetch(`/campaigns/${campaignId}/replies/${emailId}/reply`, {
+      const result = await clientApiFetch<ReplySendResult>(`/campaigns/${campaignId}/replies/${emailId}/reply`, {
         method: 'POST',
         body: JSON.stringify({
           body_text: bodyText,
@@ -247,7 +249,7 @@ function ReplyForm({ campaignId, emailId, replyTo, replyAllCc, onCancel, onSent 
           bcc: bcc || undefined,
         }),
       });
-      onSent();
+      onSent(result);
     } catch (err) {
       if (isAuthExpiredError(err)) setAuthExpired(true);
       setError(err instanceof Error ? err.message : 'Не удалось отправить');
@@ -287,6 +289,11 @@ function ReplyForm({ campaignId, emailId, replyTo, replyAllCc, onCancel, onSent 
       ) : (
         <p className="text-[10px] leading-snug" style={{ color: 'var(--cp-paper-faint)' }}>
           Участники переписки останутся в копии автоматически («ответить всем») — никого не потеряем.
+        </p>
+      )}
+      {replyAsNewEmail && (
+        <p className="text-[10px] leading-snug" style={{ color: 'var(--cp-paper-mute)' }}>
+          Ответ уйдёт отдельным письмом и не появится в истории этой переписки.
         </p>
       )}
       <input
@@ -523,6 +530,8 @@ export function ExpandedThread({
   const [thread, setThread] = useState<ThreadMessage[] | null>(null);
   const [replyTo, setReplyTo] = useState<Recipient | null>(null);
   const [replyAllCc, setReplyAllCc] = useState<Recipient[]>([]);
+  const [replyAsNewEmail, setReplyAsNewEmail] = useState(false);
+  const [sendNotice, setSendNotice] = useState<{ emailId: string; text: string } | null>(null);
   const [threadLoading, setThreadLoading] = useState(false);
   const [threadError, setThreadError] = useState('');
   const [threadAuthExpired, setThreadAuthExpired] = useState(false);
@@ -576,6 +585,7 @@ export function ExpandedThread({
         setThread(data.messages);
         setReplyTo(data.reply_to ?? null);
         setReplyAllCc(data.reply_all_cc ?? []);
+        setReplyAsNewEmail(data.reply_as_new_email ?? false);
       }
       if (deferred) {
         if (historyAttemptsRef.current < HISTORY_MAX_RETRIES) {
@@ -707,6 +717,11 @@ export function ExpandedThread({
           </button>
         </div>
       )}
+      {sendNotice?.emailId === emailId && (
+        <p role="status" className="text-[11px] leading-snug" style={{ color: 'var(--cp-paper)' }}>
+          {sendNotice.text}
+        </p>
+      )}
 
       {actionMode === 'reply' && (
         <ReplyForm
@@ -714,10 +729,17 @@ export function ExpandedThread({
           emailId={emailId}
           replyTo={replyTo}
           replyAllCc={replyAllCc}
+          replyAsNewEmail={replyAsNewEmail}
           onCancel={() => setActionMode(null)}
-          onSent={() => {
+          onSent={(result) => {
             setActionMode(null);
-            void loadThread();
+            setSendNotice({
+              emailId,
+              text: result.via === 'test'
+                ? `Сервис принял ответ для ${result.to_email} как отдельное письмо. В истории переписки он не появится — не отправляйте его повторно из-за отсутствия в треде.`
+                : 'Ответ отправлен.',
+            });
+            if (result.via === 'reply') void loadThread();
             onAfterAction?.();
             onReplied?.();
           }}

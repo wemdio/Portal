@@ -76,6 +76,8 @@ export interface ClientReplyThread {
    * Lets the composer SHOW exactly who stays in copy before sending.
    */
   reply_all_cc?: Recipient[];
+  /** Provider cannot attach this inbound email to the client's campaign. */
+  reply_as_new_email?: boolean;
   /**
    * История переписки не загружена: общий бюджет чтения LIST /emails занят
    * (его делят кабинет и воркер квалификации ответов). В `messages` тогда
