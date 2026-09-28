@@ -7,6 +7,8 @@ import { OutreachLaunchPanel } from '@/components/vertical-engine-v2/engine/Outr
 
 const mockVeEnginePost = jest.fn();
 const mockVeEngineCall = jest.fn();
+const mockAuthFetch = jest.fn();
+jest.mock('@/lib/authFetch', () => ({authFetch: (...args: unknown[]) => mockAuthFetch(...args)}));
 // Поля useTemplateLaunch, которые читает панель автоаутрича.
 const mockLaunch: Record<string, unknown> = {};
 
@@ -100,6 +102,9 @@ describe('VE2 auto-outreach launch panel', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockAuthFetch.mockResolvedValue({ok: true, json: async () => ({rate: {revision: 1, template_ids: ['template-1'], mode: 'auto', status: 'ready',
+      snapshot: {checked_at: new Date().toISOString()}}, revision: 1,
+      snapshot: {max_new_contacts: 100, usable_mailboxes: 10, mailbox_count: 10, sequence_steps: 3}, bound: false})});
     for (const key of Object.keys(mockLaunch)) delete mockLaunch[key];
     mockVeEnginePost.mockImplementation(async (url: string) => {
       if (url === PREPARE_URL) {
@@ -120,7 +125,7 @@ describe('VE2 auto-outreach launch panel', () => {
 
   it('launches a Portal project without periods with an explicit null period', async () => {
     const { onStarted } = renderPanel(null);
-    const expected = {
+      const expected = {
       preset_id: 'preset-1',
       portal_project_id: STAFF_LINE_ID,
       expected_portal_period_id: null,
@@ -138,6 +143,7 @@ describe('VE2 auto-outreach launch panel', () => {
     const startBody = mockVeEnginePost.mock.calls.find(([url]) => url === START_URL)?.[1];
     expect(startBody).toMatchObject({ ...expected, confirmed_customer_approval: true, items: [expect.objectContaining({ segmentation_audit_id: 'audit-1' })] });
     expect(startBody).toHaveProperty('expected_portal_period_id', null);
+    expect(startBody).toHaveProperty('delivery_rate_revision', 1);
   });
 
   it('keeps the active period of a project that has one', async () => {
@@ -150,7 +156,7 @@ describe('VE2 auto-outreach launch panel', () => {
 
   it('builds no request while the project cannot be chosen', async () => {
     renderPanel(undefined);
-    expect(await screen.findByText('Выберите клиента, проект и цель контактов за период.')).toBeInTheDocument();
+    expect(await screen.findByText('Выберите клиента, проект и цель контактов, затем примените темп.')).toBeInTheDocument();
     expect(mockVeEnginePost).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'Запустить аутрич' })).toBeDisabled();
   });
