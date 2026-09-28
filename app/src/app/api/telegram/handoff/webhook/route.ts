@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { verifyHandoffCallback, verifyHandoffRejection } from '@/lib/instantly/handoffCallback';
+import { verifyHandoffCallback, verifyHandoffRejection, verifyLeadAlertRejection } from '@/lib/instantly/handoffCallback';
 import { handoffBotToken, answerCallback, editHandoffMessage } from '@/lib/instantly/handoffTelegram';
 import { sendHandoffNow, type PendingHandoffRow } from '@/lib/instantly/handoffSender';
 import { handleHandoffEditor, type HandoffEditUpdate } from '@/lib/instantly/handoffEditor';
 import { canActOnManualHandoff } from '@/lib/instantly/handoffAuthorization';
-import { rejectManualHandoff } from '@/lib/instantly/handoffRejection';
+import { rejectManualHandoff, rejectLeadFromAlert } from '@/lib/instantly/handoffRejection';
 
 export const dynamic = 'force-dynamic';
 
@@ -53,6 +53,23 @@ export async function POST(req: NextRequest) {
   const fromId = cq.from?.id;
   const chatId = cq.message?.chat?.id;
   const messageId = cq.message?.message_id;
+
+  const alertRejectionId = verifyLeadAlertRejection(cq.data ?? '', token);
+  if (alertRejectionId) {
+    const result = supabaseAdmin && supabaseInstantly
+      ? await rejectLeadFromAlert(supabaseAdmin, supabaseInstantly, alertRejectionId,
+        { telegramId: fromId, chatId, messageId })
+      : { ok: false as const, error: 'Сервис недоступен' };
+    if (result.ok && chatId != null && messageId != null) {
+      const text = '🚫 <b>Не лид</b> — отмечено специалистом.\nЗапись не показывается в клиентской таблице. Письмо не отправлено. Решение и исходная переписка сохранены для разбора.';
+      await editHandoffMessage(token, chatId, messageId, text);
+      if (result.handoffMessage && result.handoffMessage.messageId !== messageId) {
+        await editHandoffMessage(token, result.handoffMessage.chatId, result.handoffMessage.messageId, text);
+      }
+    }
+    await answerCallback(token, cq.id, result.ok ? 'Сохранено: не лид' : result.error, !result.ok);
+    return OK();
+  }
 
   const verify = verifyHandoffCallback(cq.data ?? '', token);
   const rejectionId = verifyHandoffRejection(cq.data ?? '', token);

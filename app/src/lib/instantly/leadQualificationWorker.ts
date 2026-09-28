@@ -3698,7 +3698,7 @@ async function notifySpecialistsAboutLead(
     boardLink = await getBoardLinkForProject(instantlyDb, projectId);
     const projectLookup = await supabaseMain
       .from('projects')
-      .select('specialist_user_id, specialist, manager, client, handoff_email, handoff_legend, tag_project_lead_in_telegram')
+      .select('specialist_user_id, specialist, manager, client, handoff_email, handoff_legend, handoff_auto_send, tag_project_lead_in_telegram')
       .eq('id', projectId)
       .maybeSingle();
     let project = projectLookup.data;
@@ -3706,7 +3706,7 @@ async function notifySpecialistsAboutLead(
     if (isMissingProjectLeadTelegramColumn(projectError)) {
       const legacyLookup = await supabaseMain
         .from('projects')
-        .select('specialist_user_id, specialist, manager, client, handoff_email, handoff_legend')
+        .select('specialist_user_id, specialist, manager, client, handoff_email, handoff_legend, handoff_auto_send')
         .eq('id', projectId)
         .maybeSingle();
       project = legacyLookup.data
@@ -3919,6 +3919,7 @@ async function notifySpecialistsAboutLead(
 
     const tgResult = await sendTelegramLeadAlertForSpecialists({
       expectHandoff: handoffEnabled() && Boolean(project?.specialist_user_id && project?.handoff_email?.trim() && project?.handoff_legend?.trim()),
+      allowRejection: project?.handoff_auto_send === false && userIdList.length === 1,
       userIds: userIdList,
       projectLeadUserIds: [...projectLeadUserIds],
       qualificationId,
@@ -4380,6 +4381,7 @@ async function maybeReconcileLeadNotificationDeliveries(): Promise<number> {
 
 async function sendTelegramLeadAlertForSpecialists(data: {
   expectHandoff?: boolean;
+  allowRejection?: boolean;
   userIds: string[];
   projectLeadUserIds: string[];
   qualificationId: string;
@@ -4445,6 +4447,7 @@ async function sendTelegramLeadAlertForSpecialists(data: {
 
     const result = await sendLeadTelegramAlert({
       expectHandoff: data.expectHandoff,
+      allowRejection: data.allowRejection,
       qualificationId: data.qualificationId,
       campaignId: data.campaignId,
       leadEmail: data.leadEmail,
@@ -4849,6 +4852,16 @@ export async function maybePostLeadHandoff(opts: {
       insErr = legacyInsert.error;
     }
     if (insErr || !pendingRow) {
+      // The specialist may reject the first alert while this draft is being
+      // prepared/posted. The unique qualification row lets that decision win
+      // without ever creating a sendable handoff, including in a stale worker.
+      const rejected = await instantlyDb.from('instantly_pending_handoffs')
+        .select('status').eq('qualification_id', qualificationId).maybeSingle();
+      if (!rejected.error && rejected.data?.status === 'rejected') {
+        await editHandoffMessage(token, chatId, messageId,
+          '🚫 <b>Не лид</b> — отмечено специалистом. Передача отменена, письмо не отправлено.');
+        return { disposition: 'completed', detail: 'lead rejected during handoff preparation' };
+      }
       workerLog('error', `Handoff: pending insert failed (qual ${qualificationId}): ${insErr?.message ?? 'no row returned'}`);
       return { disposition: 'retry', detail: `pending insert failed: ${insErr?.message ?? 'no row returned'}` };
     }

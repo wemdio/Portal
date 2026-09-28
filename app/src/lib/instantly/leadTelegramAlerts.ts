@@ -1,4 +1,5 @@
 import { sendOrderedLead } from './leadTelegramOrder';
+import { signLeadAlertRejection } from './handoffCallback';
 const TG_FETCH_TIMEOUT_MS = 15_000;
 
 export interface LeadTelegramSpecialistMention {
@@ -10,6 +11,8 @@ export interface LeadTelegramSpecialistMention {
 
 export interface LeadTelegramAlertData {
   expectHandoff?: boolean;
+  /** Explicitly disabled for automatic projects and unknown configuration. */
+  allowRejection?: boolean;
   qualificationId: string;
   campaignId: string;
   leadEmail: string;
@@ -287,6 +290,9 @@ export async function sendLeadTelegramAlert(
   if (threadId) body.message_thread_id = threadId;
 
   return sendOrderedLead(chatId, data.qualificationId, async (late) => {
+  if (data.allowRejection === true) body.reply_markup = { inline_keyboard: [[{
+    text: 'Не лид', callback_data: signLeadAlertRejection(data.qualificationId, token),
+  }]] };
   if (late && data.expectHandoff) {
     // Keep the payload within Telegram's limit; the full lead text is preserved
     // in the guest table. The status is outside the quoted email.
