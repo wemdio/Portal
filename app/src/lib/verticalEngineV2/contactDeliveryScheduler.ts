@@ -5,6 +5,9 @@ import {
 } from '@/lib/verticalEngineV2/contactDeliveryRunner';
 import { runProjectContactSupply } from './contactSupplyRunner';
 import { reconcileContactDeliveries } from './contactDeliveryReconciliation';
+import { activateDeliveredContactCampaigns } from './contactDeliveryActivation';
+import { refreshDeliveryRate } from './contactDeliveryRateService';
+import { ContactDeliveryAnalyticsUnavailableError } from './contactDeliveryInventory';
 
 export type ContactDeliverySchedulerLog = (
   level: 'info' | 'warn' | 'error',
@@ -50,6 +53,8 @@ export async function runBoundContactDeliveries(input: {
   runProject?: RunContactDeliveryProject;
   runSupply?: typeof runProjectContactSupply;
   reconcile?: typeof reconcileContactDeliveries;
+  recoverActivation?: typeof activateDeliveredContactCampaigns;
+  refreshRate?: typeof refreshDeliveryRate;
   /** Finish an already attempted delivery, then leave remaining work for restart. */
   shouldStop?: () => boolean;
   log: ContactDeliverySchedulerLog;
@@ -125,6 +130,14 @@ export async function runBoundContactDeliveries(input: {
     }
     if (input.shouldStop?.()) break;
     try {
+      await (input.refreshRate ?? refreshDeliveryRate)(input.portalDb, input.instantlyDb, project.id);
+    } catch (error) {
+      failedProjects += 1;
+      input.log('error', `VE2 rate refresh project ${project.id} failed; new delivery deferred`, error);
+      continue;
+    }
+    if (input.shouldStop?.()) break;
+    try {
       await (input.runSupply ?? runProjectContactSupply)({
         portalDb: input.portalDb, instantlyDb: input.instantlyDb, veProjectId: project.id, now: input.now,
       });
@@ -152,6 +165,21 @@ export async function runBoundContactDeliveries(input: {
     } catch (error) {
       failedProjects += 1;
       input.log('error', `VE2 contact delivery project ${project.id} failed`, error);
+      if (error instanceof ContactDeliveryAnalyticsUnavailableError && !input.shouldStop?.()) {
+        // Upload may have been committed just before a worker restart. Missing
+        // analytics still blocks new rows, but must not strand that accepted
+        // tranche. The existing activation fence checks live identity, approval,
+        // schedule, accepted rows and unresolved attempts; no upload is retried.
+        try {
+          const recovery = await (input.recoverActivation ?? activateDeliveredContactCampaigns)({
+            portalDb: input.portalDb, veProjectId: project.id,
+          });
+          if (recovery.errors.length) input.log('warn', `VE2 delivery activation recovery project ${project.id} incomplete`, recovery.errors);
+          if (recovery.activated) input.log('info', `VE2 delivery activation recovery project ${project.id}`, recovery);
+        } catch (recoveryError) {
+          input.log('error', `VE2 delivery activation recovery project ${project.id} failed`, recoveryError);
+        }
+      }
     }
   }
 

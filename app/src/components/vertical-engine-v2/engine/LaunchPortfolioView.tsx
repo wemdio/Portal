@@ -89,7 +89,7 @@ const GROUPS: ReadonlyArray<{
   key: QueueGroup;
   title: string;
 }> = [
-  { key: 'active', title: 'Активная отправка' },
+  { key: 'active', title: 'Запуски в работе' },
   { key: 'attention', title: 'Требует сверки' },
   { key: 'launch_now', title: 'Запускать сейчас' },
   { key: 'prepare_now', title: 'Подготовить заранее' },
@@ -139,7 +139,7 @@ function itemGroup(item: LaunchPortfolioItemDto): QueueGroup {
 function StatusLabel({ item }: { item: LaunchPortfolioItemDto }) {
   const state = seasonalStateOf(item);
   const lifecycle = item.status === 'active'
-    ? { label: 'Активная отправка', dotClass: 've2-d-g' }
+    ? { label: 'Запуск разрешён', dotClass: 've2-d-g' }
     : item.status === 'activating'
       ? { label: 'Активация выполняется', dotClass: 've2-d-w' }
         : item.status === 'uncertain'
@@ -364,7 +364,7 @@ export function LaunchPortfolioView({
         className="ve2-panel px-5 py-4"
       >
         <p className="ve2-h3">
-          Активные группы отправки · {capacity.active_bundles}
+          Группы запуска в работе · {capacity.active_bundles}
         </p>
         <p className={`mt-1 ${HE.muted}`}>
           Лимит {capacity.max_active_bundles} считается отдельно для пересекающихся mailbox-пулов

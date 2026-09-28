@@ -2,6 +2,7 @@ import { act, render, renderHook, screen, waitFor } from '@testing-library/react
 import userEvent from '@testing-library/user-event';
 import type { VeTemplate } from '@/lib/verticalEngineV2/types';
 import { Step5Template, useTemplateLaunch } from '@/components/vertical-engine-v2/engine/steps/Step5Template';
+import { DeliveryRatePanel } from '@/components/vertical-engine-v2/engine/DeliveryRatePanel';
 
 const mockVeEngineCall = jest.fn();
 const mockVeEnginePost = jest.fn();
@@ -74,6 +75,30 @@ const template: VeTemplate = {
 };
 
 describe('Vertical Engine v2 Step 5 client onboarding', () => {
+  it('requires saving edited tempo and preserves pending state without starting or reuploading a launch', async () => {
+    const snapshot = {max_new_contacts: 100, effective_capacity: 100, usable_mailboxes: 10, mailbox_count: 10,
+      sequence_steps: 3, busy_mailboxes: 0, unavailable_mailboxes: 0, slow_ramp_mailboxes: 0, checked_at: new Date().toISOString()};
+    mockAuthFetch.mockResolvedValue({ok: true, json: async () => ({rate: null, revision: 0, snapshot, bound: true})});
+    mockVeEnginePost.mockResolvedValue({ok: true, data: {rate: {revision: 1, mode: 'manual', manual_limit: 20,
+      template_ids: ['template-1'], status: 'pending', snapshot: {...snapshot, effective_capacity: 20}}}});
+    const ready = jest.fn();
+    const user = userEvent.setup();
+    render(<DeliveryRatePanel projectId="ve" presetId="preset" templateIds={['template-1']} onReady={ready} />);
+    await screen.findByText('До 100 новых контактов в день');
+    await user.click(screen.getByLabelText('Ограничить вручную'));
+    await user.type(screen.getByLabelText('Не больше новых контактов в день'), '20');
+    expect(ready).toHaveBeenLastCalledWith(null);
+    await user.click(screen.getByRole('button', {name: 'Применить темп'}));
+    await waitFor(() => expect(ready).toHaveBeenLastCalledWith(1));
+    expect(mockVeEnginePost).toHaveBeenCalledTimes(1);
+    expect(mockVeEnginePost).toHaveBeenCalledWith('/api/tools/vertical-engine-v2/projects/ve/delivery-rate', {
+      preset_id: 'preset', template_ids: ['template-1'], mode: 'manual', manual_limit: 20, expected_revision: 0,
+    });
+    expect(screen.getByText(/Система применит его перед следующей загрузкой/)).toBeInTheDocument();
+    await user.clear(screen.getByLabelText('Не больше новых контактов в день'));
+    expect(ready).toHaveBeenLastCalledWith(null);
+    expect(screen.getByRole('button', {name: 'Применить темп'})).toBeDisabled();
+  });
   beforeEach(() => {
     jest.clearAllMocks();
     mockAuthFetch.mockResolvedValue({ ok: true });
@@ -171,8 +196,7 @@ describe('Vertical Engine v2 Step 5 client onboarding', () => {
     });
 
     const presetSelect = await screen.findByLabelText('Настройки отправки');
-    expect(presetSelect).toHaveValue('preset-1');
-    expect((screen.getByRole('option', { name: 'VBI Новый клиент' }) as HTMLOptionElement).selected).toBe(true);
+    expect(presetSelect).toHaveValue('VBI Новый клиент');
     expect(screen.getByText('Основной Instantly')).toBeInTheDocument();
     expect(screen.getByText('VBI')).toBeInTheDocument();
     expect(screen.queryByText(/sender-(one|two)@secret\.test/)).not.toBeInTheDocument();
@@ -284,7 +308,8 @@ describe('Vertical Engine v2 Step 5 launch plan for Portal projects without peri
   it('lets the specialist choose a project without periods and plans to its card deadline', async () => {
     launchSettings();
     const { user, projectSelect } = await openLaunchForm();
-    await user.selectOptions(projectSelect, STAFF_LINE_ID);
+    await user.type(projectSelect, 'staffline');
+    await user.click(screen.getByRole('option', { name: 'Staff Line' }));
     expect(screen.queryByText(/Новый запуск заблокирован/)).not.toBeInTheDocument();
     expect(screen.getByText(/Без периода/)).toHaveTextContent(
       /^Без периода · дедлайн 30\.09\.2026 · обязательство в карточке «4000» · всего контактов по проекту 25\s905 \(в расчёт не входит\)$/,
@@ -323,7 +348,8 @@ describe('Vertical Engine v2 Step 5 launch plan for Portal projects without peri
   ])('explains why project %s cannot be launched', async (projectId, reason) => {
     launchSettings();
     const { user, projectSelect } = await openLaunchForm();
-    await user.selectOptions(projectSelect, projectId);
+    await user.click(projectSelect);
+    await user.click(screen.getByRole('option', { name: projects.find((project) => project.id === projectId)!.name }));
     expect(screen.getByText(`${reason} Новый запуск заблокирован.`)).toBeInTheDocument();
     // A project with closed periods is not «без периода»; only its reason is shown.
     expect(Boolean(screen.queryByText(/Без периода/))).toBe(projectId === ENAGENCY_ID);
@@ -339,7 +365,7 @@ describe('Vertical Engine v2 Step 5 launch plan for Portal projects without peri
       delivery_plan_issue: issue,
     });
     const { projectSelect } = await openLaunchForm();
-    await waitFor(() => expect(projectSelect).toHaveValue(STAFF_LINE_ID));
+    await waitFor(() => expect(projectSelect).toHaveValue('Staff Line'));
     expect(projectSelect).toBeDisabled();
     expect(screen.getByLabelText('Цель контактов до дедлайна')).toHaveValue(4000);
     expect(screen.getByText(`${issue} Новый запуск заблокирован.`)).toBeInTheDocument();
@@ -363,7 +389,7 @@ describe('Vertical Engine v2 Step 5 launch plan for Portal projects without peri
       delivery_plan_issue: issue,
     });
     const { projectSelect } = await openLaunchForm();
-    await waitFor(() => expect(projectSelect).toHaveValue(PERIOD_PROJECT_ID));
+    await waitFor(() => expect(projectSelect).toHaveValue('Клиент Портала'));
     expect(projectSelect).toBeDisabled();
     expect(screen.getByText(`${issue} Новый запуск заблокирован.`)).toBeInTheDocument();
     await new Promise((resolve) => setTimeout(resolve, 400));
@@ -373,7 +399,8 @@ describe('Vertical Engine v2 Step 5 launch plan for Portal projects without peri
   it('keeps the active-period flow unchanged', async () => {
     launchSettings();
     const { user, projectSelect } = await openLaunchForm();
-    await user.selectOptions(projectSelect, PERIOD_PROJECT_ID);
+    await user.type(projectSelect, 'клиент портала');
+    await user.keyboard('{ArrowDown}{Enter}');
     expect(screen.queryByText(/Без периода/)).not.toBeInTheDocument();
     expect(screen.queryByText(EXTEND_BY_DEADLINE)).not.toBeInTheDocument();
     await user.type(screen.getByLabelText('Цель контактов за период'), '23');
