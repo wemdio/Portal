@@ -968,7 +968,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                   disabled={busy}
                   onClick={() => jump(3)}
                 >
-                  Подготовить следующий запуск
+                  Выбрать другую базу для запуска
                 </button>
               ) : null}
               {run?.items.map((item) => (

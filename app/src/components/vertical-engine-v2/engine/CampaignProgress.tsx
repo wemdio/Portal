@@ -31,6 +31,7 @@ export function CampaignProgress({ template, title, required }: CampaignProgress
   const info = parseLaunchInfo((template as VeTemplate & { launch_info?: unknown }).launch_info);
   const plan = required ? supply.data?.plan : null;
   const metrics = required ? supply.data?.metrics : null;
+  const stock = metrics ?? (required ? supply.data?.stock : null);
   const campaigns = info?.campaigns?.length ? info.campaigns : info ? [{
     campaign_id: info.campaign_id,
     campaign_name: info.campaign_name,
@@ -57,36 +58,36 @@ export function CampaignProgress({ template, title, required }: CampaignProgress
         <StatusBox tone="info">Автоматический поиск для этих кампаний ещё не согласован.</StatusBox>
       ) : null}
 
-      {metrics ? (
+      {stock ? (
         <>
           <div className="ve2-stats">
             <div className="ve2-stat">
-              <p className="ve2-stat-v">{count(metrics.ready)}</p>
+              <p className="ve2-stat-v">{count(stock.ready)}</p>
               <p className="ve2-stat-k">Готовый запас</p>
             </div>
             <div className="ve2-stat">
-              <p className="ve2-stat-v">{count(metrics.uploaded_today)}</p>
+              <p className="ve2-stat-v">{count(stock.uploaded_today)}</p>
               <p className="ve2-stat-k">Добавлено сегодня в Instantly</p>
             </div>
             <div className="ve2-stat">
-              <p className="ve2-stat-v">{count(metrics.uploaded)}</p>
+              <p className="ve2-stat-v">{count(stock.uploaded)}</p>
               <p className="ve2-stat-k">Всего добавлено в кампании</p>
             </div>
           </div>
-          {metrics.hypothesis_stock_workdays !== null ? (
+          {metrics && metrics.hypothesis_stock_workdays !== null ? (
             <p className={HE.muted}>
               Готового запаса хватит примерно на {count(metrics.hypothesis_stock_workdays)} рабочих дней
               при темпе {count(metrics.hypothesis_daily_target)} контактов в день.
             </p>
           ) : null}
-          {metrics.uncertain > 0 ? (
+          {stock.uncertain > 0 ? (
             <StatusBox tone="info">
-              Для {count(metrics.uncertain)} контактов результат загрузки ещё не подтверждён.
+              Для {count(stock.uncertain)} контактов результат загрузки ещё не подтверждён.
               Повторная загрузка заблокирована до автоматической сверки с Instantly.
             </StatusBox>
           ) : null}
           <p className={HE.faint}>
-            Дата учёта: {metrics.business_date}, {metrics.timezone}.
+            Дата учёта: {stock.business_date}, {stock.timezone}.
             {' '}Загрузка в кампанию не означает первое отправленное письмо.
           </p>
         </>
@@ -95,7 +96,7 @@ export function CampaignProgress({ template, title, required }: CampaignProgress
       ) : null}
 
       {required && supply.data?.metrics_error ? (
-        <StatusBox tone="error">{supply.data.metrics_error}</StatusBox>
+        <StatusBox tone={supply.data.analytics_pending ? 'info' : 'error'}>{supply.data.metrics_error}</StatusBox>
       ) : null}
       {required && supply.error ? <StatusBox tone="error">{supply.error}</StatusBox> : null}
 

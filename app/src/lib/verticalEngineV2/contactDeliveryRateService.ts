@@ -7,7 +7,7 @@ import { normalizeLaunchMailboxIds, launchMailboxScopesEqual } from './launchPor
 import { readContactDeliveryPages } from './contactDeliveryInventory';
 import { DeliveryRateError, calculateDeliveryRate, distributeDeliveryRate, isSendingCampaign, type DeliveryRatePolicy, type DeliveryRateRow } from './contactDeliveryRate';
 
-const READ_OPTIONS = { timeoutMs: 10_000, retryRateLimits: false };
+const READ_OPTIONS = { timeoutMs: 10_000, timeoutIncludesBody: true, retryRateLimits: false };
 async function allPages<T>(read: (cursor?: string) => Promise<PaginatedResponse<T>>): Promise<T[]> {
   const rows: T[] = [], seen = new Set<string>();
   let cursor: string | undefined;
@@ -79,6 +79,29 @@ export async function previewDeliveryRate(portalDb: SupabaseClient, instantlyDb:
     if (full.id !== campaign.id) throw new DeliveryRateError('Instantly вернул другую кампанию.');
     external.push(full);
   }
+  // Instantly commonly selects senders through tags and returns email_list: [].
+  // Resolve the union once, with pagination, rather than rejecting unrelated
+  // campaigns or treating their empty explicit list as unoccupied mailboxes.
+  const tagIds = [...new Set(external.filter(isSendingCampaign).flatMap(campaign => {
+    if (campaign.email_tag_list != null && (!Array.isArray(campaign.email_tag_list) ||
+      campaign.email_tag_list.some(tag => typeof tag !== 'string' || !tag.trim() || tag.includes(',')))) {
+      throw new DeliveryRateError('Не удалось прочитать теги отправителей другой кампании.');
+    }
+    return campaign.email_tag_list ?? [];
+  }))].sort();
+  const tagMailboxes = new Set<string>();
+  for (let offset = 0; offset < tagIds.length; offset += 50) {
+    const tagAccounts = await allPages<Account>(cursor => listAccounts({
+      limit: 100, starting_after: cursor, tag_ids: tagIds.slice(offset, offset + 50).join(','),
+    }, options));
+    const seen = new Set<string>();
+    for (const account of tagAccounts) {
+      const email = typeof account?.email === 'string' ? account.email.trim().toLowerCase() : '';
+      if (!email || seen.has(email)) throw new DeliveryRateError('Не удалось полностью проверить почты по тегам. Обновите расчёт.');
+      seen.add(email);
+      tagMailboxes.add(email);
+    }
+  }
   const minutes = (time: unknown) => typeof time === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(time)
     ? Number(time.slice(0,2))*60+Number(time.slice(3)) : Number.NaN;
   let windowMinutes = minutes(preset.schedule_to) - minutes(preset.schedule_from);
@@ -87,7 +110,7 @@ export async function previewDeliveryRate(portalDb: SupabaseClient, instantlyDb:
     if (!c.sequences?.length || c.sequences.some(s=>!Array.isArray(s.steps) || !s.steps.length)) throw new DeliveryRateError('Не удалось прочитать цепочку действующей кампании.');
     return Math.max(...c.sequences.map(s=>s.steps.length));
   }));
-  const snapshot = calculateDeliveryRate({mailboxIds:mailboxes,accounts,otherCampaigns:external,sequenceSteps:steps,
+  const snapshot = calculateDeliveryRate({mailboxIds:mailboxes,accounts,otherCampaigns:external,otherCampaignTagMailboxIds:[...tagMailboxes],sequenceSteps:steps,
     policy:input.policy,windowMinutes,gapMinutes:preset.email_gap_minutes});
   return { snapshot, own, accountId, bound: Boolean(project.portal_project_id), templateIds };
 }

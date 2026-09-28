@@ -23,6 +23,8 @@ export function isSendingCampaign(campaign: Campaign): boolean {
 /** Sustainable first-contact rate: reserve one slot for every step, including follow-ups. */
 export function calculateDeliveryRate(input: {
   mailboxIds: string[]; accounts: Account[]; otherCampaigns: Campaign[];
+  /** Complete union of accounts selected by tags in other sending campaigns. */
+  otherCampaignTagMailboxIds?: string[];
   sequenceSteps: number; policy: DeliveryRatePolicy; windowMinutes: number; gapMinutes: number; now?: Date;
 }): DeliveryRateSnapshot {
   if (!Number.isSafeInteger(input.sequenceSteps) || input.sequenceSteps < 1 || input.sequenceSteps > 100) throw new DeliveryRateError('Не удалось определить длину цепочки писем.');
@@ -33,9 +35,9 @@ export function calculateDeliveryRate(input: {
   if (!mailboxes.length) throw new DeliveryRateError('В профиле не выбраны отправители.');
   const byEmail = new Map(input.accounts.map(account => [emailKey(account.email), account]));
   if (byEmail.size !== input.accounts.length) throw new DeliveryRateError('Instantly вернул повторяющиеся почты. Повторите расчёт.');
-  const busy = new Set<string>();
+  const busy = new Set((input.otherCampaignTagMailboxIds ?? []).map(emailKey));
   for (const campaign of input.otherCampaigns.filter(isSendingCampaign)) {
-    if (!Array.isArray(campaign.email_list) || campaign.email_tag_list?.length) throw new DeliveryRateError('Не удалось точно определить отправителей другой активной кампании.');
+    if (!Array.isArray(campaign.email_list) || (campaign.email_tag_list?.length && !input.otherCampaignTagMailboxIds)) throw new DeliveryRateError('Не удалось точно определить отправителей другой активной кампании.');
     campaign.email_list.forEach(email => busy.add(emailKey(email)));
   }
   let emailCapacity = 0, usable = 0, occupied = 0, unavailable = 0, ramp = 0;

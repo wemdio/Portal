@@ -12,7 +12,7 @@ import { prepareAuditSnapshot, runSegmentationAuditStage, toStoredAuditSummary }
 import { buildSegmentationAudit } from '@/lib/verticalEngineV2/segmentationAudit';
 import { createVeJobShutdown, createVeJobWatchdog, VeWorkerShutdownError } from '@/lib/verticalEngineV2/workerLiveness';
 import * as instantlyClient from '@/lib/instantly/client';
-import { refreshDeliveryRate } from '@/lib/verticalEngineV2/contactDeliveryRateService';
+import { previewDeliveryRate, refreshDeliveryRate } from '@/lib/verticalEngineV2/contactDeliveryRateService';
 jest.mock('@/lib/instantly/client', () => ({ ...jest.requireActual('@/lib/instantly/client'),
   listAccounts: jest.fn(), listCampaigns: jest.fn(), getCampaign: jest.fn(), updateCampaign: jest.fn(),
 }));
@@ -59,6 +59,36 @@ describe('VE2 contact delivery scheduler', () => {
       update.mockClear();
       await refreshDeliveryRate(portal as never, presets as never, 've');
       expect(update).not.toHaveBeenCalled(); // same limit needs no provider write
+      campaigns.mockResolvedValue({items: [{id: 'tagged', status: 1, email_list: [], email_tag_list: ['tag-1']},
+        {id: 'paused-tagged', status: 2, email_list: [], email_tag_list: ['ignored-tag']}] as never});
+      accounts.mockImplementation(async (params) => params?.tag_ids
+        ? params.starting_after ? {items: [{email: 'sender@example.test'}]} as never
+          : {items: [{email: 'unrelated@example.test'}], next_starting_after: 'second'} as never
+        : {items: [{email: 'sender@example.test', status: 1, daily_limit: 90}]} as never);
+      const preview = () => previewDeliveryRate(portal as never, presets as never, {
+        projectId: 've', presetId: 'preset-1', templateIds: ['template'], policy: {mode: 'auto', manual_limit: null},
+      });
+      expect((await preview()).snapshot).toMatchObject({effective_capacity: 0, busy_mailboxes: 1});
+      expect(accounts).toHaveBeenCalledWith({limit: 100, tag_ids: 'tag-1', starting_after: 'second'}, expect.objectContaining({accountId: 'main'}));
+      accounts.mockImplementation(async (params) => params?.tag_ids
+        ? {items: [{email: 'unrelated@example.test'}]} as never
+        : {items: [{email: 'sender@example.test', status: 1, daily_limit: 90}]} as never);
+      expect((await preview()).snapshot).toMatchObject({effective_capacity: 30, busy_mailboxes: 0});
+      await refreshDeliveryRate(portal as never, presets as never, 've');
+      expect(update).not.toHaveBeenCalled(); // tags in unrelated campaigns do not block our unchanged limits
+      accounts.mockImplementation(async (params) => params?.tag_ids
+        ? {items: [{email: 'unrelated@example.test'}], next_starting_after: 'loop'} as never
+        : {items: [{email: 'sender@example.test', status: 1, daily_limit: 90}]} as never);
+      await expect(refreshDeliveryRate(portal as never, presets as never, 've')).rejects.toThrow('повторил страницу');
+      expect(update).not.toHaveBeenCalled();
+      accounts.mockImplementation(async (params) => {
+        if (params?.tag_ids) throw new Error('tag lookup unavailable');
+        return {items: [{email: 'sender@example.test', status: 1, daily_limit: 90}]} as never;
+      });
+      await expect(refreshDeliveryRate(portal as never, presets as never, 've')).rejects.toThrow('tag lookup unavailable');
+      expect(update).not.toHaveBeenCalled();
+      accounts.mockResolvedValue({items: [{email: 'sender@example.test', status: 1, daily_limit: 90}]} as never);
+      campaigns.mockResolvedValue({items: []});
       live = {...live, daily_limit: 50};
       update.mockRejectedValueOnce(new Error('lost response'));
       const runProject = jest.fn(), runSupply = jest.fn();
