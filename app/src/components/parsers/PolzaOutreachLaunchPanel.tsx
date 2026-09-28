@@ -22,10 +22,12 @@ type Props = {
   onStart: (config: PolzaOutreachConfig) => Promise<void>;
 };
 
+// По алфавиту: в сетке из 21+ стран нужную иначе ищут глазами. Названия —
+// по-русски, иначе латинские «USA»/«UK» выпадают из алфавитного порядка.
 const GEO_OPTIONS: { code: string; label: string }[] = [
-  { code: 'us', label: 'USA' },
+  { code: 'us', label: 'США' },
   { code: 'ca', label: 'Канада' },
-  { code: 'gb', label: 'UK' },
+  { code: 'gb', label: 'Великобритания' },
   { code: 'de', label: 'Германия' },
   { code: 'nl', label: 'Нидерланды' },
   { code: 'sg', label: 'Сингапур' },
@@ -44,7 +46,9 @@ const GEO_OPTIONS: { code: string; label: string }[] = [
   { code: 'pl', label: 'Польша' },
   { code: 'pt', label: 'Португалия' },
   { code: 'cz', label: 'Чехия' },
-];
+  { code: 'il', label: 'Израиль' },
+  { code: 'ae', label: 'ОАЭ' },
+].sort((a, b) => a.label.localeCompare(b.label, 'ru'));
 
 const RECENCY_OPTIONS = [
   { days: 7, label: '7 дней' },
