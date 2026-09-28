@@ -79,7 +79,41 @@ export interface HeTemplateLaunchCampaign {
   campaign_url: string;
   /** Условие сегмента (when дословно); null — основная кампания. */
   segment: string | null;
+  /** ПРИНЯТЫХ рассыльщиком адресов (leads_uploaded его ответа). */
   leads_count: number;
+  /**
+   * Сколько адресов ушло в запросе (`leads_requested`) и сколько рассыльщик
+   * признал полученными (`total_sent` его ответа).
+   *
+   * Зачем рядом с leads_count: принятых он и так хранит, а ЗАПРОШЕННЫХ до
+   * 28.09.2026 не хранил никто — молчаливая частичная загрузка была
+   * неотличима от «столько адресов в базе и было». Остаток
+   * `leads_requested - leads_count` — ПОВТОРЯЕМЫЙ: ни одна строка базы при
+   * запуске не помечается отправленной (запуск в he_bases не пишет вовсе).
+   *
+   * Ключей нет у записей до 28.09.2026 и у кампании, чью загрузку прервала
+   * ошибка: тогда принято неизвестно сколько, и такой сегмент попадает в
+   * `pending` вместо того, чтобы врать числом.
+   */
+  leads_requested?: number;
+  leads_attempted?: number;
+}
+
+/**
+ * Сегмент запуска, который НЕ ПОЕХАЛ: кампании нет вовсе либо она создана, но
+ * лиды в неё не загрузились.
+ *
+ * Зачем в записи о запуске: по этому списку ПОВТОР понимает, что запуск не
+ * закончен, и достраивает именно недостающее, вместо того чтобы создать
+ * каждому сегменту вторую одноимённую кампанию (launchTemplate.ts, шаг 6).
+ * Пустой массив не пишется — ключа нет, и запись без него означает «запуск
+ * закончен» (так же читаются все записи до 28.09.2026).
+ */
+export interface HeTemplateLaunchPending {
+  /** Условие сегмента (when дословно); null — основная кампания. */
+  segment: string | null;
+  /** Где остановились: кампании нет / есть, но лиды не загружены. */
+  stage: 'campaign' | 'leads';
 }
 
 /**
@@ -98,12 +132,22 @@ export interface HeTemplateLaunchInfo {
   created_at: string;
   /** Все кампании запуска (основная + сегментные). Поля нет у запусков до сплита. */
   campaigns?: HeTemplateLaunchCampaign[];
+  /** Суммы по кампаниям: запрошено и признано полученным (см. кампанию выше). */
+  leads_requested?: number;
+  leads_attempted?: number;
+  /** Сегменты, которые не поехали; ключа нет — запуск закончен. */
+  pending?: HeTemplateLaunchPending[];
 }
 
 /** Пункт селектора пресетов (GET launch): id + человекочитаемое имя клиента. */
 export interface HeLaunchPresetOption {
   id: string;
   name: string;
+}
+
+/** Неотрицательное целое из jsonb; всё остальное — «ключа нет» (undefined). */
+function optionalCount(raw: unknown): number | undefined {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? raw : undefined;
 }
 
 /** Аккуратно прочитать launch_info из jsonb (могло прийти что угодно). */
@@ -114,15 +158,34 @@ export function parseLaunchInfo(raw: unknown): HeTemplateLaunchInfo | null {
   const campaigns = Array.isArray(r.campaigns)
     ? (r.campaigns as Array<Record<string, unknown>>)
         .filter((c) => c && typeof c.campaign_id === 'string' && c.campaign_id.length > 0)
-        .map((c) => ({
-          campaign_id: c.campaign_id as string,
-          campaign_name: typeof c.campaign_name === 'string' ? c.campaign_name : '',
-          campaign_url: typeof c.campaign_url === 'string' ? c.campaign_url : '',
-          segment: typeof c.segment === 'string' ? c.segment : null,
-          leads_count:
-            typeof c.leads_count === 'number' && Number.isFinite(c.leads_count) ? c.leads_count : 0,
+        .map((c) => {
+          const requested = optionalCount(c.leads_requested);
+          const attempted = optionalCount(c.leads_attempted);
+          return {
+            campaign_id: c.campaign_id as string,
+            campaign_name: typeof c.campaign_name === 'string' ? c.campaign_name : '',
+            campaign_url: typeof c.campaign_url === 'string' ? c.campaign_url : '',
+            segment: typeof c.segment === 'string' ? c.segment : null,
+            leads_count:
+              typeof c.leads_count === 'number' && Number.isFinite(c.leads_count) ? c.leads_count : 0,
+            ...(requested !== undefined ? { leads_requested: requested } : {}),
+            ...(attempted !== undefined ? { leads_attempted: attempted } : {}),
+          };
+        })
+    : undefined;
+  // Незнакомая стадия — «кампании нет»: считать её самым безопасным исходом
+  // нельзя наоборот (повтор пропустил бы сегмент как уже созданный), а лишний
+  // повтор создания сегменту без кампании ничего не портит.
+  const pending = Array.isArray(r.pending)
+    ? (r.pending as Array<Record<string, unknown>>)
+        .filter((p) => p && typeof p === 'object')
+        .map((p) => ({
+          segment: typeof p.segment === 'string' ? p.segment : null,
+          stage: p.stage === 'leads' ? ('leads' as const) : ('campaign' as const),
         }))
     : undefined;
+  const requestedTotal = optionalCount(r.leads_requested);
+  const attemptedTotal = optionalCount(r.leads_attempted);
   return {
     campaign_id: r.campaign_id,
     campaign_name: typeof r.campaign_name === 'string' ? r.campaign_name : '',
@@ -131,7 +194,32 @@ export function parseLaunchInfo(raw: unknown): HeTemplateLaunchInfo | null {
     preset_id: typeof r.preset_id === 'string' ? r.preset_id : '',
     created_at: typeof r.created_at === 'string' ? r.created_at : '',
     ...(campaigns && campaigns.length > 0 ? { campaigns } : {}),
+    ...(requestedTotal !== undefined ? { leads_requested: requestedTotal } : {}),
+    ...(attemptedTotal !== undefined ? { leads_attempted: attemptedTotal } : {}),
+    ...(pending && pending.length > 0 ? { pending } : {}),
   };
+}
+
+/**
+ * ЗАПУСК НЕ ЗАКОНЧЕН: в записи остались сегменты без кампании или без лидов.
+ *
+ * По этому признаку повтор запуска РАЗВЕТВЛЯЕТСЯ (launchTemplate.ts, шаги 1 и
+ * 6): незакончённый запуск достраивается (созданные кампании переиспользуются),
+ * закончённый ведёт себя как до 28.09.2026 — force создаёт новые кампании.
+ * Записи до 28.09.2026 ключа `pending` не имеют вовсе, поэтому для них ответ
+ * всегда false: историю RU-инструмента признак не переписывает.
+ *
+ * Тот же предикат — у ЭКРАНА, а не его копия: шаг «Review & Launch» кабинета
+ * (components/client-eng/EngStepReview.tsx) решает им, предлагать ли «Launch all
+ * (paused)» шаблону с записью, и подписывает бейдж. Поэтому `launch_info.pending`
+ * проходит проекцию кабинета (clientEngProjection.ts, LAUNCH_PENDING_FIELDS):
+ * без ключа экран видел бы законченным ЛЮБОЙ запуск и достройка осталась бы
+ * недостижимой. Второго определения «запуск не закончен» быть не должно —
+ * разойдясь, они дают либо спрятанную кнопку, либо второй запуск по уехавшей
+ * аудитории.
+ */
+export function heLaunchIsIncomplete(info: HeTemplateLaunchInfo | null | undefined): boolean {
+  return (info?.pending?.length ?? 0) > 0;
 }
 
 /** Ссылка на кампанию в Instantly (та же база URL, что и в остальном портале). */
@@ -361,10 +449,103 @@ export function findEmailColumn(
   return null;
 }
 
+/* ── Стандартные поля лида рассыльщика ── */
+
+/** Канонические имена колонки телефона, в порядке предпочтения. */
+const PHONE_CANONICAL_COLUMNS: readonly string[] = ['phone', 'телефон'];
+const PHONE_COLUMN_NAME_RE = /phone|телефон/i;
+
+/** Колонки базы, из которых берутся СТАНДАРТНЫЕ поля лида. */
+interface HeLeadStandardColumns {
+  company: string | null;
+  website: string | null;
+  phone: string | null;
+}
+
+/**
+ * Откуда брать значения стандартных полей лида (company_name/website/phone).
+ *
+ * Компанию и сайт ищет тот же двухъярусный резолвер, что и ключ компании у
+ * потолка запуска (findCompanyKeyColumns): контракт авто-сборки
+ * (HE_AUTO_COLLECT_COLUMNS) сначала, догадка по имени — потом, для ручного CSV
+ * специалиста. Двух ответов на вопрос «где в этой базе компания» быть не должно.
+ */
+function findLeadStandardColumns(columns: string[]): HeLeadStandardColumns {
+  const key = findCompanyKeyColumns(columns);
+  return {
+    company: key.company,
+    website: key.website,
+    phone: pickCompanyKeyColumn(columns, PHONE_CANONICAL_COLUMNS, PHONE_COLUMN_NAME_RE).column,
+  };
+}
+
+/**
+ * Имя переменной в том виде, в котором её видит рассыльщик: регистр и
+ * разделители он не различает, поэтому {{companyName}} и {{company_name}} —
+ * одна и та же переменная, и его СТАНДАРТНОЕ поле company_name спорит с
+ * одноимённой custom-переменной письма.
+ */
+function providerVariableKey(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * ВСЕ написания, которыми письма зовут ОДНО И ТО ЖЕ стандартное поле лида.
+ *
+ * Зачем список, а не имя самого поля: правило коллизии ниже сравнивало только
+ * ключ поля рассыльщика ('companyname'), а компанию письма движка зовут ДВУМЯ
+ * именами — {{company}} и {{companyName}}. Это не догадка: обе формы стоят в
+ * словаре синонимов стадии шаблона (`stages/template.ts`, OPERATOR_ALIASES:
+ * companyname/company, website/site, phone), обе отдельно ищет подпись превью
+ * (`renderPreview.ts`, previewRowLabel: 'companyname' | 'company'), и в
+ * personalization_plan.operator_mapping штатно лежит то написание, которое
+ * оказалось в тексте. После providerVariableKey ключи 'company' и 'companyname'
+ * РАЗНЫЕ, поэтому {{company}} с другим значением коллизией не считался: поле
+ * company_name уезжало рядом с ним, а чья переменная победит в письме, решает
+ * рассыльщик — ровно тот риск, ради которого правило и написано.
+ *
+ * Регистр и разделители внутри формы не важны (их складывает
+ * providerVariableKey: company_name = companyName = 'companyname'), поэтому в
+ * списке только РАЗНЫЕ ключи. Догадок не добавлять: каждая лишняя форма — это
+ * стандартное поле, которое перестаёт доезжать до рассыльщика.
+ */
+const STANDARD_FIELD_VARIABLE_FORMS = {
+  /** company_name = companyName; отдельная форма — короткое {{company}}. */
+  company: ['company_name', 'company'],
+  website: ['website', 'site'],
+  phone: ['phone'],
+} as const;
+
 export interface MapBaseRowsInput {
   rows: Array<Record<string, unknown>>;
   columns: string[];
   operatorMapping?: HeOperatorMapping[];
+  /**
+   * Заполнять ли СТАНДАРТНЫЕ поля лида рассыльщика (company_name, website,
+   * phone) из колонок базы — ПОМИМО custom-переменных, а не вместо них: письма
+   * ссылаются на переменные по имени оператора, и убрать их значило бы сломать
+   * подстановку.
+   *
+   * Зачем: до 28.09.2026 запуск складывал все колонки только в
+   * custom_variables, поэтому собственные поля лида у рассыльщика оставались
+   * пустыми — его родные функции (карточка лида, список кампании, его
+   * собственные переменные) компании и сайта не видели.
+   *
+   * Значение поля ставится ТОЛЬКО когда оно не может переписать письмо: если у
+   * строки есть custom-переменная ЛЮБОГО из написаний этого поля (в понимании
+   * рассыльщика — providerVariableKey; список форм —
+   * STANDARD_FIELD_VARIABLE_FORMS, в нём и короткое {{company}}) с ДРУГИМ
+   * значением, поле остаётся пустым, а отказ
+   * считается (standardFieldsHeldBack). Причина: чья переменная победит при
+   * коллизии, решает рассыльщик, а превью письма (renderPreview) обещает
+   * значение ИМЕННО custom-переменной — реальность обязана ему соответствовать.
+   * Совпадающее значение коллизией не является: что бы он ни выбрал, в письме
+   * один и тот же текст.
+   *
+   * Без ключа — прежнее поведение (только custom-переменные): так зовёт ночной
+   * долив, у которого свой durable-журнал отчётности читает company_name лида.
+   */
+  standardFields?: boolean;
   /**
    * Колонка адреса, уже найденная вызывающим. Передаётся, чтобы ОДНА детекция
    * обслуживала и гейт вердиктов, и маппинг: гейту колонка нужна ДО фильтра
@@ -412,6 +593,12 @@ export interface MapBaseRowsResult {
    * которой почту не нашли.
    */
   malformedEmailRows: number;
+  /**
+   * Сколько стандартных полей (по всем лидам) оставлено пустыми из-за
+   * одноимённой переменной письма с другим значением — см. standardFields.
+   * 0 при standardFields: коллизий в этой базе нет. Без standardFields всегда 0.
+   */
+  standardFieldsHeldBack: number;
 }
 
 /**
@@ -441,8 +628,10 @@ export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
       leadRowIndices: [],
       multiAddressRows: 0,
       malformedEmailRows: 0,
+      standardFieldsHeldBack: 0,
     };
   }
+  const standardColumns = input.standardFields ? findLeadStandardColumns(columns) : null;
 
   // Колонки, которые занял хотя бы один оператор: их значение эмитится под
   // именем КАЖДОГО такого оператора, а не под именем колонки.
@@ -469,6 +658,7 @@ export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
   const seenEmails = new Set<string>();
   let multiAddressRows = 0;
   let malformedEmailRows = 0;
+  let standardFieldsHeldBack = 0;
 
   rows.forEach((row, rowIndex) => {
     const cell = String(row[emailColumn] ?? '').trim();
@@ -508,11 +698,51 @@ export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
     if (Object.keys(customVars).length > 0) {
       lead.custom_variables = customVars;
     }
+
+    // Стандартные поля лида — ПОСЛЕ custom-переменных: правило коллизии
+    // сравнивает значение колонки с переменной ЭТОЙ строки (см. standardFields).
+    if (standardColumns) {
+      const varsByProviderKey = new Map<string, string>();
+      for (const [name, value] of Object.entries(customVars)) {
+        const key = providerVariableKey(name);
+        if (!varsByProviderKey.has(key)) varsByProviderKey.set(key, value);
+      }
+      // Коллизией считается ЛЮБОЕ из написаний поля (STANDARD_FIELD_VARIABLE_FORMS):
+      // письмо зовёт компанию и {{companyName}}, и {{company}}. Счётчик считает
+      // ПОЛЕ, а не формы: «сколько полей осталось пустыми» — его прежний смысл.
+      const takeStandard = (column: string | null, forms: readonly string[]): string | null => {
+        if (!column) return null;
+        const value = String(row[column] ?? '').trim();
+        if (!value) return null;
+        for (const form of forms) {
+          const collided = varsByProviderKey.get(providerVariableKey(form));
+          if (collided !== undefined && collided !== value) {
+            standardFieldsHeldBack += 1;
+            return null;
+          }
+        }
+        return value;
+      };
+      const companyName = takeStandard(standardColumns.company, STANDARD_FIELD_VARIABLE_FORMS.company);
+      if (companyName) lead.company_name = companyName;
+      const website = takeStandard(standardColumns.website, STANDARD_FIELD_VARIABLE_FORMS.website);
+      if (website) lead.website = website;
+      const phone = takeStandard(standardColumns.phone, STANDARD_FIELD_VARIABLE_FORMS.phone);
+      if (phone) lead.phone = phone;
+    }
+
     leads.push(lead);
     leadRowIndices.push(rowIndex);
   });
 
-  return { leads, emailColumn, leadRowIndices, multiAddressRows, malformedEmailRows };
+  return {
+    leads,
+    emailColumn,
+    leadRowIndices,
+    multiAddressRows,
+    malformedEmailRows,
+    standardFieldsHeldBack,
+  };
 }
 
 /* ── Потолок запуска: адреса против компаний ── */

@@ -49,6 +49,8 @@ export type HeClientErrorCode =
   | 'awaiting_payment'
   /** Исчерпан лимит контактов тарифа. */
   | 'contacts_exhausted'
+  /** У рассыльщика нет места под новые контакты — ёмкость, а не тариф клиента. */
+  | 'sending_capacity'
   /** Узнанный сбой инфраструктуры (БД/сеть) — клиенту деталей не даём. */
   | 'internal'
   /** Ничего не опознали. */
@@ -132,6 +134,19 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
     whatIsSaved: 'Contacts already uploaded keep running in your campaigns.',
     whatToDo: 'Upgrade the plan or wait for the next billing period to add more contacts.',
   },
+  /**
+   * НЕ путать с contacts_exhausted: тот про тариф клиента («поднимите план»), а
+   * этот — про ёмкость НАШЕГО рассыльщика, за которую клиент не отвечает и
+   * доплачивать ему нечего. Поэтому в тексте нет ни слова «plan», ни шага от
+   * клиента: ночь отложена, а не потеряна (ночной долив ставится заново каждые
+   * сутки, крон heAutoPipelineCron).
+   */
+  sending_capacity: {
+    title: 'Adding new contacts is on hold — our sending platform has no room for them right now.',
+    whatIsSaved:
+      'Nothing was lost: everything collected so far is saved, and the campaigns already running keep sending.',
+    whatToDo: 'No action is needed from you — the daily refill resumes by itself once room frees up.',
+  },
   internal: {
     title: 'The step stopped because of a technical problem on our side.',
     whatIsSaved: 'Everything collected so far is saved.',
@@ -206,6 +221,14 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
   if (/прогрев почт|warm-?up/i.test(message)) return 'subscription_warmup';
   if (/оплата ещё не поступила|оплата еще не поступила/i.test(message)) return 'awaiting_payment';
   if (/Подписка не активна|subscription is not active/i.test(message)) return 'subscription_inactive';
+  // ВЫШЕ contacts_exhausted намеренно: это два разных факта, и подстроки у них
+  // почти одинаковые. «Лимит контактов исчерпан» — тариф клиента; «лимит
+  // контактов воркспейса исчерпан» — нет места у нашего рассыльщика. Второе
+  // пишут два близнеца-текста: REFILL_CAPACITY_NOTE (отказ на доливе,
+  // stages/baseCollectRefill.ts) и CAPACITY_REFUSAL_ERROR (отказ предполёта до
+  // сборки, autoPipeline.ts). Якорь — общая подстрока обоих; менять её можно
+  // только вместе с ними, оба места на это ссылаются.
+  if (/лимит контактов воркспейса/i.test(message)) return 'sending_capacity';
   if (/Лимит контактов исчерпан/i.test(message)) return 'contacts_exhausted';
 
   if (/не покрывается каталогом/i.test(message)) return 'audience_mismatch';

@@ -31,9 +31,15 @@
  *     строк. Разные единицы у бюджета и у сборки — это оплаченный краул сайта и
  *     SMTP-проба на каждый адрес, который кап потом выбросит, причём компания
  *     остаётся выжженной (база уходит в 'analyzed' и её компании исключены из
- *     будущих сборок проекта). Поэтому размер сборки обязан считаться ИЗ капа:
+ *     будущих сборок проекта). Поэтому размер сборки обязан считаться ИЗ ОСТАТКА
+ *     капа на сегодня (кап минус долитое другими вертикалями этой же ночи):
  *     heRefillCompanyTarget / resolveHeRefillCollectCompanies ниже, разошедшиеся
  *     единицы видны в stats.company_target против stats.company_limit;
+ *   - у рассыльщика кончилось место под контакты — это ПАУЗА, а не брак данных:
+ *     долив идёт с pauseOnWorkspaceCapacity, грузит столько, сколько влезает,
+ *     остаток считается stats.deferred (отдельно от окончательных отказов
+ *     skipped_instantly и от нашего кап-отреза capped), а полный отказ получает
+ *     машинный error_kind='instantly_capacity' рядом с текстом;
  *   - blocklist владельца пресета и чанкование — внутри
  *     appendLeadsToClientCampaign (тот же путь, что у RU auto-pipeline), но с
  *     entitlementMode='managed_contract': объём режет серверный daily_leads_cap,
@@ -61,6 +67,7 @@
  */
 
 import { AppendLeadsPartialError, appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
+import { isInstantlyContactCapacityError } from '@/lib/instantly/errors';
 import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import {
@@ -99,10 +106,28 @@ export const HE_AUTO_DEFAULT_DAILY_LEADS_CAP = 50;
 export const HE_REFILL_ACCEPTED_PER_COMPANY = 2;
 
 /**
- * Минимум компаний в refill-сборке — зеркало MIN_ROWS_LIMIT стадии
- * (stages/baseCollect.ts): totalRowsCap всё равно поднимает любой меньший limit
- * до 100, и просить меньше значило бы писать в collect_info число, которого
- * стадия не придерживается.
+ * Минимум компаний в refill-сборке.
+ *
+ * НЕ зеркало MIN_ROWS_LIMIT стадии, как утверждала прежняя редакция этого
+ * докблока: стадия меньший limit НЕ поднимает. totalRowsCap (кламп [100,50000])
+ * считается ДО присваивания — `let limit = totalRowsCap(job)` и затем
+ * `limit = await resolveHeRefillCollectCompanies(...)` (stages/baseCollect.ts,
+ * блок «РАЗМЕР REFILL-СБОРКИ»), так что вернуть 25 можно и сборка пойдёт на 25.
+ *
+ * Пол — осознанная политика, а не техническое ограничение. Держится он на том,
+ * что у refill-джобы есть ФИКСИРОВАННАЯ цена, не зависящая от лимита: план
+ * сорсинга с пробой среза (LLM, buildPlan/sliceProbe в stages/baseCollect.ts)
+ * считается до харвеста и при любом limit. Попросить ноль компаний значило бы
+ * заплатить фикс и не получить ни строки, поэтому ночь с уже потраченным
+ * бюджетом собирает минимум — он пойдёт в бюджет следующих суток.
+ *
+ * Цена политики названа вслух: при дефолтном daily_leads_cap=50 пол БОЛЬШЕ
+ * расчёта из капа (ceil(50/2)=25), поэтому объём сборки определяет именно он, и
+ * перебор «собрали 100 компаний под 50 лидов» снимается только снижением этого
+ * числа — решение владельца (см. решения владельца волны 1). Правильное место
+ * для «бюджет потрачен — не начинать вовсе» — тик крона (autoPipeline.ts): он
+ * ставит все вертикали ночи в 03:20, когда ещё ничего не долито, поэтому знать
+ * остаток ему пока нечем.
  */
 const HE_REFILL_MIN_COMPANIES = 100;
 
@@ -133,6 +158,16 @@ export function heRefillCompanyTarget(input: { dailyLeadsCap: number; contactCap
  * берётся дефолт движка, тот же, по которому долив ниже будет резать объём,
  * поэтому расчёт и кап остаются в одних единицах даже на транзиентной ошибке
  * чтения. Ошибка в меньшую сторону: недобор — не потраченные деньги.
+ *
+ * Считаем от ОСТАТКА бюджета на сегодня, а не от всего капа: кап — на ПРОЕКТ в
+ * сутки, а крон ставит за тик до verticals_per_run вертикалей одного проекта.
+ * Пока каждая вертикаль мерила себя полным капом, ночь из трёх вертикалей
+ * собирала объём под три капа, а долить могла один: вторая и третья платили за
+ * краул и SMTP-пробы строк, которые кап того же вечера выбрасывал, и оставляли
+ * свои компании выжженными. Вычитаемое — ровно то же число, которым долив ниже
+ * (шаг 5) режет объём: один и тот же refillAppendedToday, иначе размер сборки и
+ * кап разъехались бы. Пол HE_REFILL_MIN_COMPANIES остаётся: потраченная ночь
+ * собирает минимум стадии, а не ноль (см. докблок пола).
  */
 export async function resolveHeRefillCollectCompanies(
   ctx: HeStageContext,
@@ -140,9 +175,26 @@ export async function resolveHeRefillCollectCompanies(
 ): Promise<number> {
   const config = await loadRefillConfig(ctx, input.projectId);
   const dailyLeadsCap = config?.dailyLeadsCap ?? HE_AUTO_DEFAULT_DAILY_LEADS_CAP;
+  // Остаток читаем best-effort: это ПРЕДПОЛЁТ, он обязан ошибаться в сторону
+  // прежнего поведения. Непрочитанная история → spent=0 → размер как до этой
+  // правки (полный кап), а не «бюджет исчерпан» — иначе транзиентная ошибка
+  // чтения журнала молча уводила бы каждую ночь на пол.
+  let appendedToday = 0;
+  if (config) {
+    try {
+      appendedToday = await refillAppendedToday(ctx, config.id);
+    } catch (e) {
+      stageLog(
+        ctx,
+        `[base_collect] refill: остаток дневного капа не прочитан ` +
+          `(${e instanceof Error ? e.message : String(e)}) — размер сборки по полному капу`,
+      );
+    }
+  }
+  const remainingLeadsCap = Math.max(0, dailyLeadsCap - appendedToday);
   return Math.min(
     input.payloadLimit,
-    heRefillCompanyTarget({ dailyLeadsCap, contactCap: input.contactCap }),
+    heRefillCompanyTarget({ dailyLeadsCap: remainingLeadsCap, contactCap: input.contactCap }),
   );
 }
 
@@ -185,6 +237,29 @@ export interface HeRefillStats {
   /** Не влезло в дневной кап daily_leads_cap (уйдёт в отчёт, не в кампанию). */
   capped: number;
   /**
+   * Строк, которые провайдер НЕ взял из-за нехватки места в воркспейсе, — не
+   * брак адресов и не наш бюджет. Отдельно от skipped_instantly (там
+   * ОКОНЧАТЕЛЬНЫЕ отказы: дубли кампании, невалидный адрес) и от capped (там
+   * дневной бюджет проекта): «не взяли, потому что некуда» лечится местом у
+   * провайдера, а не пересборкой и не тарифом. Считается как остаток пачки,
+   * отданной провайдеру, за вычетом принятого и окончательно отсеянного:
+   * result.deferredIndexes покрывает только явный отказ на чанке, а хвост,
+   * который пауза не начала отправлять, в него не попадает.
+   */
+  deferred?: number;
+  /** Причина deferred, когда он есть. Одно значение, но пишется явно. */
+  deferred_reason?: 'instantly_capacity';
+  /**
+   * Машинная причина ОТКАЗА прогона (status='failed') — та же, что в
+   * refill_result.error_kind. Дублируется сюда осознанно: журнал прогонов
+   * (he_auto_pipeline_runs) и карточка базы (he_bases.collect_info) — разные
+   * таблицы с разными читателями, а writeRefillRun переносит в прогон только
+   * stats/error. Без этого поля воронка ночей не отличает «у рассыльщика нет
+   * места» от «данные плохие», то есть не отвечает, сколько ночей потеряно
+   * из-за ёмкости.
+   */
+  error_kind?: 'instantly_capacity';
+  /**
    * Почему строки не ушли, когда capped > 0. Одно значение, но пишется явно:
    * «отрезано» без причины читается как брак адресов, а это бюджет проекта.
    */
@@ -215,6 +290,22 @@ export interface HeRefillResult {
   campaign_id?: string;
   stats?: HeRefillStats;
   error?: string;
+  /**
+   * Машинный вид причины отказа рядом с её текстом (только status='failed').
+   *
+   * Зачем отдельным полем: по тексту провайдера нельзя отличить «у рассыльщика
+   * не осталось места под контакты» от «данные плохие», а решения разные —
+   * первое лечится местом в воркспейсе и повторяется само на следующую ночь,
+   * второе требует пересборки базы. Классификация делается ЕДИНСТВЕННЫМ
+   * предикатом contact-capacity (isInstantlyContactCapacityError /
+   * AppendLeadsResult.capacityBlocked из clientLaunch/appendLeads), своего
+   * разбора текстов здесь нет.
+   *
+   * Значение техническое и в кабинет НЕ уезжает: клиентскую формулировку
+   * собирает clientErrors.classifyHeClientError по he_bases.error (кабинет
+   * white-label, имя рассыльщика в его payload не попадает).
+   */
+  error_kind?: 'instantly_capacity';
   /**
    * Только для status='failed': успел ли долив отдать хотя бы одну строку
    * провайдеру. От этого зависит терминальный статус базы (см.
@@ -247,6 +338,34 @@ interface RefillConfigRow {
 /** Начало текущих UTC-суток — дневной бюджет daily_leads_cap считается по ним. */
 function utcDayStart(now = new Date()): string {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
+}
+
+/**
+ * Сколько лидов конфиг уже долил за текущие UTC-сутки (все вертикали проекта).
+ *
+ * Одно определение «потрачено» на два потребителя: предполётный размер сборки
+ * (resolveHeRefillCollectCompanies) и сам отрез по капу (шаг 5 долива). Если бы
+ * их считали два разных запроса, сборка и кап со временем разъехались бы, а
+ * разница — это оплаченные краул и SMTP-пробы.
+ *
+ * БРОСАЕТ при ошибке чтения: у шага 5 это fail-closed (долив уходит в отказ, а
+ * не отправляет объём поверх бюджета). Предполёт ловит ошибку сам и продолжает
+ * с нулём — у него обратное правило, см. resolveHeRefillCollectCompanies.
+ */
+async function refillAppendedToday(ctx: HeStageContext, configId: string): Promise<number> {
+  const { data, error } = await ctx.supabase
+    .from('he_auto_pipeline_runs')
+    .select('stats')
+    .eq('config_id', configId)
+    .eq('status', 'appended')
+    .gte('completed_at', utcDayStart());
+  if (error) throw new Error(`he_auto_pipeline_runs daily spent: ${error.message}`);
+  let spent = 0;
+  for (const row of data ?? []) {
+    const appended = (row as { stats?: { appended?: unknown } }).stats?.appended;
+    if (typeof appended === 'number' && Number.isFinite(appended)) spent += appended;
+  }
+  return spent;
 }
 
 /**
@@ -400,6 +519,31 @@ function refillLeadsReachedProvider(e: unknown): boolean {
   if (!(e instanceof AppendLeadsPartialError)) return false;
   const partial = e.partialResult;
   return partial.accepted > 0 || partial.attemptedIndexes.length > 0;
+}
+
+/**
+ * Текст отказа «у рассыльщика не осталось места под контакты».
+ *
+ * Пишется в he_bases.error и refill_result.error рядом с машинным
+ * error_kind='instantly_capacity'. Формулировка стабильная НАМЕРЕННО: по ней
+ * клиентский классификатор (clientErrors.classifyHeClientError) отличает
+ * «некуда грузить» от «данные плохие». Менять — только вместе с его правилом.
+ */
+const REFILL_CAPACITY_NOTE = 'Instantly: лимит контактов воркспейса исчерпан';
+
+/**
+ * Отказ долива про ёмкость воркспейса?
+ *
+ * Своего разбора текстов нет: capacityBlocked ставит внутри
+ * appendLeadsToClientCampaign тот самый предикат isInstantlyContactCapacityError
+ * (он же проверяется здесь напрямую — отказ мог прилететь и не завёрнутым), а
+ * третья ветка узнаёт наш собственный отказ «провайдер не принял ни строки»,
+ * который эта стадия бросает сама (см. долив ниже).
+ */
+function refillCapacityRefusal(e: unknown): boolean {
+  if (isInstantlyContactCapacityError(e)) return true;
+  if (e instanceof AppendLeadsPartialError && e.partialResult.capacityBlocked === true) return true;
+  return e instanceof Error && e.message.includes(REFILL_CAPACITY_NOTE);
 }
 
 /**
@@ -742,21 +886,11 @@ export async function runHeRefillAppend(args: {
     const { kept, blockedCount } = filterBlockedLeads(leads, blockedSet);
     runStats.skipped_blocklist = blockedCount;
 
-    // 5. Дневной кап проекта: минус уже долитое сегодня (UTC) всеми refill'ами конфига.
-    let spent = 0;
-    if (config) {
-      const { data: spentRows, error: spentErr } = await ctx.supabase
-        .from('he_auto_pipeline_runs')
-        .select('stats')
-        .eq('config_id', config.id)
-        .eq('status', 'appended')
-        .gte('completed_at', utcDayStart());
-      if (spentErr) throw new Error(`he_auto_pipeline_runs daily spent: ${spentErr.message}`);
-      for (const row of spentRows ?? []) {
-        const appended = (row as { stats?: { appended?: unknown } }).stats?.appended;
-        if (typeof appended === 'number' && Number.isFinite(appended)) spent += appended;
-      }
-    }
+    // 5. Дневной кап проекта: минус уже долитое сегодня (UTC) всеми refill'ами
+    //    конфига. То же число вычитает предполётный размер сборки — общий
+    //    refillAppendedToday; здесь ошибка чтения уводит долив в отказ (не
+    //    отправляем поверх бюджета), там — продолжает с нулём.
+    const spent = config ? await refillAppendedToday(ctx, config.id) : 0;
     const remaining = Math.max(0, dailyLeadsCap - spent);
     const toSend = kept.slice(0, remaining);
     runStats.capped = kept.length - toSend.length;
@@ -793,15 +927,54 @@ export async function runHeRefillAppend(args: {
         // клиента; объём режет daily_leads_cap. НЕ затрагиваются (они вне
         // гейта): blocklist владельца, доменная политика, отказ Instantly по
         // лимитам воркспейса и журнал отправок. Вторая возможная опция —
-        // `agency_managed` у ENG-пресета при провижининге, см. TODO(tariffs)
-        // в autoPipeline.ts.
+        // `agency_managed` у ENG-пресета при провижининге, см. шапку
+        // autoPipeline.ts.
         entitlementMode: 'managed_contract',
+        // Кончилось место в воркспейсе — ПАУЗА, а не 402 поверх оплаченного
+        // сбора: appendLeadsToClientCampaign грузит столько, сколько влезает,
+        // и возвращает capacityBlocked вместо броска (и помечает не уехавшие
+        // строки deferred, а не окончательно отсеянными). Ночной долив —
+        // единственный ENG-путь, который упирается в ёмкость без человека
+        // рядом, и разница «некуда грузить» против «адреса плохие» решает,
+        // пересобирать базу или ждать места.
+        pauseOnWorkspaceCapacity: true,
       });
       runStats.appended = appended.accepted;
       runStats.skipped_instantly = appended.skipped;
       // Провайдер уже видел строки. Если дальше упадёт запись базы, компании
       // обратно в сборку отдавать нельзя (см. refillLeadsReachedProvider).
       providerTouched = appended.accepted > 0 || appended.attemptedIndexes.length > 0;
+      if (appended.capacityBlocked === true) {
+        // Остаток пачки: принято + окончательно отсеяно ≤ отдано, разница —
+        // строки, которым не хватило места (явный отказ на чанке + хвост,
+        // который пауза не начала отправлять).
+        const deferred = Math.max(0, toSend.length - appended.accepted - appended.skipped);
+        if (deferred > 0) {
+          runStats.deferred = deferred;
+          runStats.deferred_reason = 'instantly_capacity';
+        }
+        if (!providerTouched) {
+          // Провайдер не получил НИ ОДНОЙ строки — это отказ, а не долив:
+          // уходим в общий catch, чтобы база стала 'failed' и её компании
+          // вернулись в пул (по тому же правилу серии отказов). Иначе ночь
+          // записалась бы как 'appended' с нулём, а оплаченные компании
+          // остались бы выжженными — при том что доливать было НЕКУДА и
+          // завтрашняя ночь отправила бы их же, если место освободится.
+          throw new Error(
+            `${REFILL_CAPACITY_NOTE} — провайдер не принял ни одной строки из ${toSend.length}`,
+          );
+        }
+        // Часть строк уехала: база остаётся 'analyzed' (компании отработаны),
+        // остаток виден в stats.deferred. Durable-пауза с явным возобновлением
+        // остатка — отдельный пункт (волна 6b): сегодня остаток теряется, и
+        // молчать об этом нельзя.
+        stageLog(
+          ctx,
+          `[base_collect] refill: место в воркспейсе кончилось на доливе — ` +
+            `принято ${appended.accepted}, не уехало ${deferred} стр. ` +
+            '(повтор возможен только новой сборкой: durable-паузы остатка ещё нет)',
+        );
+      }
     }
     const outcome: HeRefillResult['status'] = valid === 0 ? 'no_new' : 'appended';
 
@@ -834,7 +1007,33 @@ export async function runHeRefillAppend(args: {
   } catch (e) {
     // Ошибка долива НЕ валит джобу (см. шапку): база сохраняется с
     // refill_result.error, прогон журналируется 'failed'.
-    const message = (e instanceof Error ? e.message : String(e)).slice(0, 500);
+    //
+    // Причина классифицируется рядом с текстом: отказ по ёмкости воркспейса —
+    // не брак данных, он повторяется сам, когда место освободится. Маркер
+    // REFILL_CAPACITY_NOTE дописывается в начало текста, чтобы причина читалась
+    // и в he_bases.error (кабинет сворачивает его в машинный код), а не только
+    // в машинном error_kind.
+    const capacityRefusal = refillCapacityRefusal(e);
+    if (capacityRefusal) {
+      runStats.error_kind = 'instantly_capacity';
+      // Строки, которые провайдер ОТКАЗАЛСЯ взять по ёмкости, он перечисляет
+      // сам (deferredIndexes непустой только при pauseOnWorkspaceCapacity).
+      // Хвост, до которого отправка не дошла, в это число не входит — считать
+      // его тут нечем, а завышать воронку нельзя.
+      const deferred = e instanceof AppendLeadsPartialError
+        ? (e.partialResult.deferredIndexes?.length ?? 0)
+        : 0;
+      if (deferred > 0) {
+        runStats.deferred = deferred;
+        runStats.deferred_reason = 'instantly_capacity';
+      }
+    }
+    const rawMessage = e instanceof Error ? e.message : String(e);
+    const message = (
+      capacityRefusal && !rawMessage.includes(REFILL_CAPACITY_NOTE)
+        ? `${REFILL_CAPACITY_NOTE} — ${rawMessage}`
+        : rawMessage
+    ).slice(0, 500);
     // Провайдер ничего не получил → база терминально 'failed', и её компании
     // остаются доступны следующей сборке проекта. Успел получить (или мы не
     // знаем наверняка) → прежнее 'analyzed': компании считаются отработанными,
@@ -848,6 +1047,7 @@ export async function runHeRefillAppend(args: {
       status: 'failed',
       stats: runStats,
       error: message,
+      ...(capacityRefusal ? { error_kind: 'instantly_capacity' as const } : {}),
       delivery_attempted: delivered,
       companies_released: released,
       // Серию читаем только когда от неё зависит решение: у доставленного

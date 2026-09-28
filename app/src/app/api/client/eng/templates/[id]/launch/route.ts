@@ -35,10 +35,47 @@ const LAUNCH_FAILED = 'Failed to launch the campaign';
 
 /**
  * Отказ отдельной сегментной кампании. Ядро склеивает его из текста ошибки API
- * рассыльщика (launchTemplate.ts:383,429) — бренд, коды и тело ответа. Клиенту
- * важен сам факт: часть аудитории не поехала; причину добавляет классификатор.
+ * рассыльщика (launchTemplate.ts, шаг 6) — бренд, коды и тело ответа. Клиенту
+ * важен сам факт: часть аудитории не поехала; причину добавляет классификатор,
+ * а КАКАЯ именно часть — segmentFailedWarning ниже.
  */
-const WARNING_SEGMENT_FAILED = 'One segment campaign was not created.';
+const WARNING_SEGMENT_FAILED = 'One segment of your audience did not launch.';
+
+/** Не поехала ОСНОВНАЯ кампания запуска (сегмент null у ядра). */
+const WARNING_MAIN_CAMPAIGN_FAILED =
+  'The main campaign of this launch did not go out, so the part of your audience that has no segment of ' +
+  'its own was not launched.';
+
+/**
+ * Какая именно часть аудитории не поехала. Условие сегмента — текст ИЗ ШАБЛОНА
+ * КЛИЕНТА (его же гипотеза), поэтому показать его можно; но правило файла —
+ * default-deny, и сырьё здесь тоже проверяется: внутренний след (кириллица
+ * staff-фразы, имя подрядчика, наша таблица, ссылка) → безымянная формулировка.
+ * Длина режется: «часть аудитории» в предупреждении — подпись, а не абзац.
+ *
+ * Зачем вообще имя: кампании запуска клиент различает только по сегменту, и
+ * «один сегмент не поехал» у шаблона с тремя сегментами не даёт ему ни проверить
+ * результат, ни назвать менеджеру, чего не хватает.
+ */
+function segmentFailedWarning(segment: string | null): string {
+  if (segment === null) return WARNING_MAIN_CAMPAIGN_FAILED;
+  const named = segment.replace(/\s+/g, ' ').trim().slice(0, 120);
+  if (!named || INTERNAL_TRACE_RE.test(named)) return WARNING_SEGMENT_FAILED;
+  return `One segment of your audience did not launch: “${named}”.`;
+}
+
+/**
+ * Имена сегментов, не поехавших в этом запуске, в порядке ядра
+ * (`segment_failures` его ответа). Сам список наружу не уходит — в его `error`
+ * лежит сырьё рассыльщика; наружу идут только тексты, собранные здесь.
+ */
+function readSegmentFailures(raw: unknown): Array<string | null> {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((item) => {
+    const segment = (item as { segment?: unknown } | null)?.segment;
+    return typeof segment === 'string' ? segment : null;
+  });
+}
 
 /**
  * Общий ответ на предупреждение, в котором остался внутренний след. Сюда
@@ -106,9 +143,10 @@ const INTERNAL_TRACE_RE = /[Ѐ-ӿ]|\b(?:Requesty|Serper|OpenRouter|instantly)\b|
  * уходит: тексты собраны только из констант этого файла и клиентского
  * классификатора (clientErrors.ts, тот тоже отвечает только константами).
  */
-function toClientLaunchWarnings(raw: unknown): string[] {
+function toClientLaunchWarnings(raw: unknown, segmentFailures: Array<string | null>): string[] {
   if (!Array.isArray(raw)) return [];
   const out: string[] = [];
+  let failureIndex = 0;
   for (const item of raw) {
     if (typeof item !== 'string') continue;
     const text = item.trim();
@@ -117,7 +155,16 @@ function toClientLaunchWarnings(raw: unknown): string[] {
       // Классифицируем ИСХОДНУЮ строку: правила опираются на имена подрядчиков
       // и коды их ответов — очищенный текст их бы не содержал.
       const failure = getHeClientFailure(text.slice(SEGMENT_FAILED_PREFIX.length));
-      out.push(`${WARNING_SEGMENT_FAILED} ${failure.title}`);
+      // Ядро складывает эти строки и segment_failures в ОДНОМ порядке, поэтому
+      // i-й строке соответствует i-й сегмент. Списка нет (ответ без него) —
+      // остаётся прежняя безымянная формулировка, а не догадка по тексту:
+      // разобрать склейку «сегмент: ошибка» обратно нельзя, в условии сегмента
+      // бывает ': '.
+      const named = failureIndex < segmentFailures.length ? segmentFailures[failureIndex] : undefined;
+      failureIndex += 1;
+      out.push(
+        `${named === undefined ? WARNING_SEGMENT_FAILED : segmentFailedWarning(named)} ${failure.title}`,
+      );
       continue;
     }
     out.push(INTERNAL_TRACE_RE.test(text) ? WARNING_NEEDS_ATTENTION : text);
@@ -244,6 +291,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // уже запущено): они по-английски и предназначены клиенту. White-label:
     // в тексте всё же может проскочить бренд рассыльщика — скрабим.
     const responseBody = { ...outcome.body };
+    // Машинный список отказов сегментов — вход для предупреждений ниже, и
+    // наружу он НЕ уходит: в его `error` лежит текст ответа рассыльщика.
+    const segmentFailures = readSegmentFailures(responseBody.segment_failures);
+    delete responseBody.segment_failures;
     if (typeof responseBody.error === 'string') {
       responseBody.error = scrubBrand(responseBody.error);
     }
@@ -260,9 +311,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     // (launchTemplate.ts), то есть между созданием и правкой окна ни одно письмо
     // по чужим часам уйти не может.
     //
-    // Только на свежем запуске (200). 409 «уже запущено» не создаёт кампаний, и
+    // Только на успешном запуске (200). 409 «уже запущено» не создаёт кампаний, и
     // переставлять окно у чужого прошлого запуска этот ответ не должен — для
     // этого есть PATCH .../schedule.
+    //
+    // ДОСТРОЙКА незакончённого запуска отвечает тем же 200, и окно уезжает во
+    // ВСЕ кампании записи — не только в созданные этим заходом. Так и надо:
+    // окно одно на шаблон, PATCH идемпотентен (в нём только campaign_schedule),
+    // а кампании стоят на паузе; пропустить перенесённые значило бы оставить
+    // половину запуска на часах, которые клиент уже переставил.
     const scheduleWarnings: string[] = [];
     if (outcome.status === 200) {
       const launched = parseLaunchInfo(outcome.body.launch);
@@ -398,7 +455,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       responseBody.launch = toClientEngLaunchInfo(responseBody.launch);
     }
     if ('warnings' in responseBody) {
-      responseBody.warnings = toClientLaunchWarnings(responseBody.warnings);
+      responseBody.warnings = toClientLaunchWarnings(responseBody.warnings, segmentFailures);
     }
     // Свои предупреждения дописываем ПОСЛЕ проекции: это готовые английские
     // константы этого файла, прогонять их через фильтр чужого сырья незачем.

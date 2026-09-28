@@ -26,6 +26,22 @@ const RelevanceSchema = z.object({
 export interface HeRelevanceGateResult {
   /** Глобальные индексы нерелевантных строк (во входном массиве rows). */
   flagged: Set<number>;
+  /**
+   * Сколько строк реально ушло модели (первые MAX_ROWS_TO_CHECK). Нужно
+   * вызывающему, чтобы записать цену гейта в воронку своими числами: остальные
+   * строки не судились и помеченными не считаются.
+   */
+  checkedRows: number;
+  /**
+   * Сколько строк ПОЛУЧИЛО вердикт модели. Меньше checkedRows на строки
+   * батчей, которые упали или вернули мусор: этот модуль их глотает (never-throw,
+   * см. шапку), поэтому по одному пустому `flagged` не отличить «модель никого
+   * не вычеркнула» от «модель не ответила ни разу». Вызывающему это различие
+   * обязательно: во втором случае гейт НЕ отработал, и верить его результату —
+   * значит навсегда пропустить проверку строк (запись гейта сохраняется, и
+   * следующий тик второй раз не судит).
+   */
+  judgedRows: number;
   tokensUsed: number;
   costUsd: number;
 }
@@ -196,9 +212,16 @@ export async function findIrrelevantRows(input: {
   log?: (msg: string) => void;
 }): Promise<HeRelevanceGateResult> {
   const { rows, verticalName, verticalSummary = '', language, log } = input;
-  const result: HeRelevanceGateResult = { flagged: new Set<number>(), tokensUsed: 0, costUsd: 0 };
+  const result: HeRelevanceGateResult = {
+    flagged: new Set<number>(),
+    checkedRows: 0,
+    judgedRows: 0,
+    tokensUsed: 0,
+    costUsd: 0,
+  };
   const checked = rows.slice(0, MAX_ROWS_TO_CHECK);
   if (checked.length === 0 || !verticalName.trim()) return result;
+  result.checkedRows = checked.length;
 
   for (let start = 0; start < checked.length; start += BATCH_SIZE) {
     const batch = checked.slice(start, start + BATCH_SIZE).map((r, i) => ({
@@ -226,6 +249,7 @@ export async function findIrrelevantRows(input: {
         log?.(`[relevanceGate] батч ${start}–${start + batch.length - 1}: ответ без irrelevant — пропуск`);
         continue;
       }
+      result.judgedRows += batch.length;
       result.tokensUsed += llm.tokensUsed;
       result.costUsd += llm.costUsd;
       for (const idx of irrelevant) {
@@ -238,4 +262,76 @@ export async function findIrrelevantRows(input: {
     }
   }
   return result;
+}
+
+/* ───────── Дешёвый негативный префильтр (до модели и до конструктора) ───────── */
+
+/**
+ * Маркеры «эта компания заведомо не из вертикали»: подстроки, которые ищем в
+ * названии компании, её рубрике и названии вакансии. Совпадение снимает строку
+ * с обхода сайтов и валидации ещё до модели — одним проходом по строкам, без
+ * единого сетевого вызова.
+ *
+ * Набор ПУСТОЙ по умолчанию и по замыслу. Негативных маркеров у движка сегодня
+ * не несёт ни одна сущность: `he_verticals` держит name/summary/synonyms — всё
+ * это ПОЛОЖИТЕЛЬНОЕ описание «кого ищем», а `he_projects.brief` — снапшот
+ * стадии site_profile про САМОГО клиента (product_summary, usp, price_tier,
+ * target_audience, current_clients, cases, geo, business_model). Вывести «кого
+ * НЕ брать» из этих свободных текстов можно только моделью, то есть не дешёво;
+ * а угадать маркеры регэкспом — значит придумать продуктовое правило за
+ * владельца: «marketing agency», «staffing», «academy», «marketplace» у одного
+ * клиента шум, а у другого сама вертикаль.
+ *
+ * Поэтому здесь механизм, а не эвристика: пока маркеров нет, префильтр ничего
+ * не делает (ни одной помеченной строки, ни одного сэкономленного вызова).
+ * Единственная точка включения — heOffTargetMarkersFor ниже.
+ */
+export interface HeOffTargetMarkers {
+  /** Подстроки для поиска (регистр не важен). */
+  contains: string[];
+}
+
+/**
+ * Откуда префильтр берёт маркеры. Сегодня — ниоткуда (см. HeOffTargetMarkers),
+ * и функция честно возвращает пустой набор.
+ *
+ * Она существует как единственная точка включения и как список кандидатов в
+ * источник, которые в брифе УЖЕ лежат и уже оплачены ресёрчем:
+ *  - `brief.site_profile.current_clients` — действующие клиенты (холодное
+ *    письмо действующему клиенту — не тот разговор);
+ *  - `brief.competitors[].name` — конкуренты клиента.
+ * Включение любого из них — решение владельца, а не функции: совпадение по
+ * подстроке названия бьёт и по «однофамильцам» («Apple» поймает «Applegate
+ * Farms»), а помеченную строку клиент теряет из запуска молча. Пока решения
+ * нет, маркеров нет.
+ */
+export function heOffTargetMarkersFor(_input: {
+  vertical: { name: string; summary?: string | null; synonyms?: string[] | null };
+  brief?: Record<string, unknown> | null;
+}): HeOffTargetMarkers {
+  return { contains: [] };
+}
+
+/**
+ * Индексы строк, снятых префильтром. Пустых маркеров достаточно, чтобы выйти
+ * не прикоснувшись к строкам, — у сборки без настроенных маркеров цена нулевая.
+ *
+ * Маркеры короче трёх символов игнорируются: подстрока в один-два знака
+ * совпадёт почти с любым названием и вычеркнула бы базу целиком. Это
+ * предохранитель от опечатки в настройке, а не продуктовое правило.
+ */
+export function findOffTargetRows(
+  rows: Array<Record<string, unknown>>,
+  markers: HeOffTargetMarkers,
+): Set<number> {
+  const out = new Set<number>();
+  const needles = markers.contains
+    .map((m) => m.trim().toLowerCase())
+    .filter((m) => m.length >= 3);
+  if (needles.length === 0) return out;
+  rows.forEach((row, i) => {
+    const haystack = `${String(row.company ?? '')} ${String(row.category ?? '')} ${String(row.vacancy_title ?? '')}`.toLowerCase();
+    if (needles.some((n) => haystack.includes(n))) out.add(i);
+  });
+  return out;
 }

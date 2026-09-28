@@ -399,8 +399,8 @@ const TEMPLATE_FIELDS = [
 
 // campaign_id обязателен: parseLaunchInfo (launchHandoff.ts:79) возвращает
 // null для записи без него, а шаг «Review & Launch» считает запускаемыми
-// шаблоны `status==='ready' && !parseLaunchInfo(launch_info)`
-// (EngStepReview.tsx:351) — без campaign_id уже запущенный шаблон снова
+// шаблоны `status==='ready'` без записи о запуске ЛИБО с НЕЗАКОНЧЕННОЙ записью
+// (EngStepReview.tsx) — без campaign_id уже запущенный шаблон снова
 // попадёт в очередь, это второй запуск по той же аудитории. Проверено по коду.
 //
 // campaign_url, наоборот, не отдаём: это
@@ -411,6 +411,24 @@ const TEMPLATE_FIELDS = [
 const LAUNCH_INFO_FIELDS = ['campaign_id', 'campaign_name', 'leads_count', 'created_at'] as const;
 
 const LAUNCH_CAMPAIGN_FIELDS = ['campaign_id', 'campaign_name', 'segment', 'leads_count'] as const;
+
+/**
+ * Сегменты НЕЗАКОНЧЕННОГО запуска (`launch_info.pending`): части аудитории, у
+ * которых кампании нет вовсе либо она создана, но адреса в неё не загрузились
+ * (launchHandoff.ts, HeTemplateLaunchPending).
+ *
+ * Зачем кабинету: по этому ключу шаг «Review & Launch» узнаёт, что запуск можно
+ * ДОСТРОИТЬ (heLaunchIsIncomplete — один предикат на сервер и на экран), и
+ * снова показывает «Launch all (paused)». Без проекции признак оставался на
+ * сервере, и кабинет видел частичный запуск как законченный: кнопка пропадала,
+ * хотя API повтор уже разрешал, — вся механика достройки была недостижима.
+ *
+ * `segment` наружу уже уходит в LAUNCH_CAMPAIGN_FIELDS (это условие из шаблона
+ * САМОГО клиента), `stage` — два нейтральных слова ('campaign' | 'leads') без
+ * следа рассыльщика и наших таблиц. Остальное записи (счётчики попыток,
+ * preset_id) по-прежнему не отдаётся.
+ */
+const LAUNCH_PENDING_FIELDS = ['segment', 'stage'] as const;
 
 /**
  * Исторические дефолты именования кампании (`buildLaunchCampaignName`,
@@ -681,6 +699,12 @@ export function toClientEngLaunchInfo(raw: unknown): Row | null {
       }
       return campaign;
     });
+  }
+  // Незакончённый запуск обязан быть ВИДЕН кабинету — иначе достроить его
+  // нечем (см. LAUNCH_PENDING_FIELDS). Ключа не было — не появляется: запись без
+  // `pending` (все запуски до 28.09.2026) читается как законченная.
+  if (Array.isArray(info.pending)) {
+    out.pending = pickList(info.pending, (p) => pick(p, LAUNCH_PENDING_FIELDS));
   }
   return out;
 }

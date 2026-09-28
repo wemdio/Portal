@@ -122,7 +122,7 @@ import {
 import { HE_LAUNCH_MAX_LEADS } from '../launchHandoff';
 import { callLLMWithSchema, getHeModel } from '../llm';
 import { projectMarket, type HeMarket } from '../market';
-import { findIrrelevantRows } from '../relevanceGate';
+import { findIrrelevantRows, findOffTargetRows, heOffTargetMarkersFor } from '../relevanceGate';
 import {
   probeSliceRelevance,
   sliceProbeRejectBelow,
@@ -558,6 +558,46 @@ export interface HeConstructInfo {
   note?: string;
 }
 
+/**
+ * Итог релевант-гейта, отработавшего ДО конструктора (только market='us').
+ * Ключа нет — гейт в этой сборке перед конструктором не запускался:
+ * RU-инструмент судит строки ПОСЛЕ импорта, как и раньше, и ENG-база, чья фаза
+ * CONSTRUCT началась до 28.09.2026, — тоже.
+ */
+export interface HeRelevanceGateInfo {
+  /**
+   * Гейт ОТРАБОТАЛ: строки действительно судились (моделью или префильтром).
+   * false — запись есть, а суда не было (провайдер не ответил ни на один батч,
+   * у вертикали пустое имя, гейт бросил). Такой записи не верим: следующий тик
+   * судит заново, а дошедшая до импорта база судится после импорта прежним
+   * путём. Без этого флага «модель никого не вычеркнула» и «модель не ответила»
+   * выглядели в jsonb одинаково (flagged_keys=[]), и один отказ провайдера
+   * навсегда снимал проверку с базы.
+   */
+  ran: boolean;
+  /** Почему гейт не отработал (только при ran=false; текст для staff). */
+  error?: string;
+  /** Строк отдано модели (внутренний кап гейта MAX_ROWS_TO_CHECK). */
+  checked: number;
+  /** Строк ПОЛУЧИЛО вердикт модели (батчи без ответа не считаются). */
+  judged: number;
+  /** Строк снял дешёвый префильтр ДО модели (findOffTargetRows). */
+  off_target: number;
+  /**
+   * Ключи «компания|домен» строк вне вертикали — тот же ключ, что у дедупа
+   * HARVEST. Ключи, а не индексы: merged пересчитывается на каждом тике
+   * (межбазовое исключение могло вырасти), и индекс уехал бы на чужую строку.
+   */
+  flagged_keys: string[];
+  tokens_used: number;
+  cost_usd: number;
+  /**
+   * Когда гейт отработал (ISO); у записи с ran=false — когда он пытался.
+   * Запись с ran=true = второй раз не платим.
+   */
+  judged_at: string;
+}
+
 /** Провенанс починки плана: почему её запускали и чем кончилось. */
 export interface HePlanRepair {
   reason: 'no_catalog_source';
@@ -620,6 +660,12 @@ export interface HeCollectInfo {
   tasks?: HeCollectTaskState[];
   /** Фаза CONSTRUCT: состояние передачи базы конструктору (появляется после HARVEST). */
   construct?: HeConstructInfo;
+  /**
+   * Релевант-гейт, отработавший ДО конструктора (market='us'). Запись —
+   * доказательство оплаты: пока она есть, гейт на этой базе не повторяется, а
+   * её flagged_keys переживают все тики ожидания конструктора.
+   */
+  relevance_gate?: HeRelevanceGateInfo;
   stats?: {
     tasks_total: number;
     tasks_done: number;
@@ -1883,18 +1929,53 @@ const CONSTRUCT_STEPS_AFTER_SPLIT_US = [
  *  6-часовой таймаут конструктора — для больших баз шаг пропускаем. */
 const CONSTRUCT_ENRICH_MAX_ROWS = 5000;
 
-function constructStepsFor(merged: HeUnifiedRow[], market: HeMarket): string[] {
-  const withEmail = merged.filter((r) => r.email.trim() !== '').length;
-  const poor = withEmail * 2 <= merged.length;
+/** Бедная база: адрес есть у ≤50% строк — тогда конструктор идёт искать почты. */
+function emailPoorRows(rows: HeUnifiedRow[]): boolean {
+  return rows.filter((r) => r.email.trim() !== '').length * 2 <= rows.length;
+}
+
+/**
+ * Шаги BC-джобы под сетку `rows`.
+ *
+ * `harvest` — ВЕСЬ собранный merged, из которого сетка вырезана релевант-гейтом
+ * (market='us'); по умолчанию это сама сетка, и тогда решения ровно те, что до
+ * гейта: у RU-инструмента и у ENG-сборки, где гейт никого не снял, оба массива —
+ * один и тот же объект.
+ *
+ * Почему тесты берут РАЗНЫЕ наборы:
+ *  - «бедная база» (find_emails) — по ОБОИМ: шаг включён, если адресов мало хоть
+ *    в одном. Гейт судит РЕЛЕВАНТНОСТЬ, а не наличие адреса, и снимает он именно
+ *    шумные строки карт/вакансий/каталога — те, у кого адреса чаще и нет. На
+ *    сетке остаток выглядит БОГАЧЕ целого, и одна прогонка мини-модели молча
+ *    выключала бы поиск почт всей базе: строки без адреса (их могут быть сотни)
+ *    уезжали бы в валидацию пустыми, то есть компании терялись бы совсем.
+ *    Обратная ошибка так же реальна: снял гейт как раз строки С адресами —
+ *    беднее оказывается сетка, и мерить только по merged значило бы выключить
+ *    поиск там, где он нужен. Поэтому «или», а не выбор одного из двух: включить
+ *    шаг лишний раз стоит одного обхода сайта в рамках max_pages/max_per_site/
+ *    site_timeout_ms и может только ДОБАВИТЬ адрес, а не включить — стоит
+ *    компаний. Монотонность здесь и есть гарантия: пометки гейта не могут отнять
+ *    у базы шаг, который она получила бы без него.
+ *  - enrich_descriptions — по САМОЙ сетке: порог CONSTRUCT_ENRICH_MAX_ROWS это
+ *    срок на per-site фетч КАЖДОЙ строки джобы в шестичасовом окне, а строки, не
+ *    попавшие в сетку, конструктор не качает вовсе. Мерить их значило бы терять
+ *    описания у джобы, которой времени хватало.
+ */
+function constructStepsFor(
+  rows: HeUnifiedRow[],
+  market: HeMarket,
+  harvest: HeUnifiedRow[] = rows,
+): string[] {
+  const poor = emailPoorRows(rows) || emailPoorRows(harvest);
   const find = poor ? ['find_emails'] : [];
   if (market !== 'us') {
     const tail =
-      merged.length > CONSTRUCT_ENRICH_MAX_ROWS
+      rows.length > CONSTRUCT_ENRICH_MAX_ROWS
         ? CONSTRUCT_STEPS_TAIL_RU.filter((s) => s !== 'enrich_descriptions')
         : CONSTRUCT_STEPS_TAIL_RU;
     return ['dedup_email', ...find, ...tail];
   }
-  const enrich = merged.length > CONSTRUCT_ENRICH_MAX_ROWS ? [] : ['enrich_descriptions'];
+  const enrich = rows.length > CONSTRUCT_ENRICH_MAX_ROWS ? [] : ['enrich_descriptions'];
   return [...find, ...enrich, ...CONSTRUCT_STEPS_AFTER_SPLIT_US];
 }
 /** Канонические заголовки сетки конструктора (порядок — как HE_AUTO_COLLECT_COLUMNS). */
@@ -1984,6 +2065,21 @@ const CONSTRUCT_HEADER_MAP: Record<string, keyof HeUnifiedRow | 'description'> =
 };
 
 /**
+ * Ключ компании «нормализованная компания|домен» — ровно тот, по которому
+ * схлопывает строки дедуп HARVEST (dedupUnifiedRows), поэтому у merged-строк он
+ * уникален, а строки, на которые split_emails разнёс адреса одной компании,
+ * держат ключ своей merged-строки.
+ *
+ * Функция, а не два инлайна: по этому ключу релевант-гейт (см. фазу CONSTRUCT)
+ * возвращает в базу строки, которых конструктор не видел, и любое расхождение
+ * между «как считали при отборе» и «как считаем при возврате» пометило бы чужую
+ * строку.
+ */
+function heCompanyRowKey(row: Pick<HeUnifiedRow, 'company' | 'website'>): string {
+  return `${normalizeCompanyForDedup(row.company)}|${normalizeWebsiteForDedup(row.website)}`;
+}
+
+/**
  * Конструктор нужен всегда (см. constructStepsFor): валидация почт обязательна
  * для любых источников; поиск почт — только для бедных баз.
  */
@@ -2041,16 +2137,23 @@ async function dispatchConstructJob(input: {
   ownerId: string | null | undefined;
   baseLabel: string;
   rows: HeUnifiedRow[];
+  /**
+   * Весь harvest сборки, если сетка `rows` — его подмножество (релевант-гейт
+   * до конструктора, market='us'). Нужен ровно одному решению — «бедная база»
+   * в constructStepsFor; всё остальное (сетка, initial_row_count, порог
+   * enrich) считается по САМОЙ сетке. Не передан — сетка и есть harvest.
+   */
+  harvest?: HeUnifiedRow[];
   market: HeMarket;
   /** Кап «адресов на компанию» этой базы (см. resolveContactCap у стадии). */
   contactCap: number;
 }): Promise<{ bcJobId: string; locale: 'ru' | 'en'; steps: string[]; construct: HeConstructInfo }> {
-  const { ctx, ownerId, baseLabel, rows, market, contactCap } = input;
+  const { ctx, ownerId, baseLabel, rows, harvest, market, contactCap } = input;
   if (!ownerId) {
     throw new Error('he_projects.created_by пуст — джобе конструктора некому принадлежать');
   }
   const locale = market === 'us' ? 'en' : 'ru';
-  const steps = constructStepsFor(rows, market);
+  const steps = constructStepsFor(rows, market, harvest ?? rows);
   // Настройки шага find_emails — только для ENG-пути. RU-ветка
   // staff-инструмента остаётся байт-в-байт прежней: правка дефолтов общего
   // конструктора для RU-баз — отдельное решение.
@@ -2285,7 +2388,7 @@ export function capImportedRows<T extends HeUnifiedRow>(input: {
 
   const groups = new Map<string, number[]>();
   rows.forEach((row, i) => {
-    const key = `${normalizeCompanyForDedup(row.company)}|${normalizeWebsiteForDedup(row.website)}`;
+    const key = heCompanyRowKey(row);
     const idxs = groups.get(key);
     if (idxs) idxs.push(i);
     else groups.set(key, [i]);
@@ -2340,6 +2443,105 @@ export function capImportedRows<T extends HeUnifiedRow>(input: {
     validCount,
     droppedOverContactCap,
     droppedOverCompanyCap,
+  };
+}
+
+/**
+ * Релевант-гейт ENG-сборки, отработавший ДО конструктора: дешёвый префильтр без
+ * модели, затем мини-модель по merged-строкам, и обе пометки — в один набор
+ * ключей компаний для collect_info.
+ *
+ * Почему до конструктора. Гейту нужны только company/website/category/
+ * vacancy_title — все четыре поля есть сразу после HARVEST, а конструктор не
+ * добавляет ни одного из них. Пока гейт стоял ПОСЛЕ импорта, каждая
+ * вычеркнутая строка успевала пройти весь конструктор — при том, что и запуск
+ * (launchTemplate), и ночной долив (baseCollectRefill) всё равно выбрасывают её
+ * по _low_relevance.
+ *
+ * Что именно на ней тратилось — БЕЗ преувеличений: платных провайдеров шаги
+ * конструктора не зовут (поиск почт — свой краул, валидация — node dns/net),
+ * поэтому за строку доллары не списываются. Тратятся обход её сайта (до 4
+ * страниц и до 30 с в одном из 15 слотов пула), прокси-трафик, часы воркера и
+ * доля шестичасового окна ожидания джобы: чем больше таких строк в сетке, тем
+ * ближе база к таймауту, в котором теряется ВСЯ база.
+ *
+ * Сама модель гейта тоже дешевеет: после split_emails у компании столько строк,
+ * сколько адресов нашлось, и гейт судил одну компанию по несколько раз, упираясь
+ * при этом во внутренний кап MAX_ROWS_TO_CHECK — то есть у большой базы часть
+ * компаний не судилась вовсе. По merged-строкам одна компания = одна строка: тот
+ * же кап покрывает больше компаний за меньшее число батчей.
+ *
+ * Never-throw: любой сбой = «никто не помечен», и сборка идёт дальше целиком.
+ * Fail-open здесь обязателен — разовый отказ провайдера не должен превращаться
+ * в пустой запуск (поэтому пометки «не проверено» в фильтрах запуска и добора
+ * нет и не будет).
+ *
+ * Но fail-open ≠ «считать, что судили». Отказ возвращается с ran=false, и это
+ * ОТДЕЛЬНЫЙ исход от «судили, никого не вычеркнули»: по ran=false вызывающий
+ * судит заново на следующем тике, а дошедшую до импорта базу проверяет прежним
+ * путём после импорта. Судить по одному пустому flagged_keys нельзя — у обоих
+ * исходов он пустой.
+ */
+async function judgeRowsBeforeConstruct(input: {
+  ctx: HeStageContext;
+  rows: HeUnifiedRow[];
+  vertical: HeVertical;
+  brief?: Record<string, unknown> | null;
+}): Promise<HeRelevanceGateInfo> {
+  const { ctx, rows, vertical, brief } = input;
+  const judgedAt = new Date().toISOString();
+  // Префильтр — до модели: его строки модели не отдаём, это единственная
+  // экономия, которую он приносит (и она нулевая, пока маркеров нет, см.
+  // heOffTargetMarkersFor).
+  const offTarget = findOffTargetRows(rows, heOffTargetMarkersFor({ vertical, brief }));
+  const judged = offTarget.size > 0 ? rows.filter((_, i) => !offTarget.has(i)) : rows;
+  const flaggedKeys = new Set<string>();
+  for (const i of offTarget) flaggedKeys.add(heCompanyRowKey(rows[i]));
+  let checked = 0;
+  let judgedRows = 0;
+  let tokensUsed = 0;
+  let costUsd = 0;
+  let error: string | null = null;
+  try {
+    const gate = await findIrrelevantRows({
+      rows: judged,
+      verticalName: vertical.name,
+      verticalSummary: vertical.summary ?? '',
+      language: 'en',
+      log: (m) => stageLog(ctx, m),
+    });
+    checked = gate.checkedRows;
+    judgedRows = gate.judgedRows;
+    tokensUsed = gate.tokensUsed;
+    costUsd = gate.costUsd;
+    // Индексы гейта — во входном массиве judged, поэтому ключ берём из него же.
+    for (const i of gate.flagged) flaggedKeys.add(heCompanyRowKey(judged[i]));
+    // Ни одного вердикта на непустом входе: модуль глотает падение батча сам
+    // (never-throw), поэтому «все батчи упали» приходит сюда молча — как пустой
+    // flagged при checkedRows>0. Это НЕ суд.
+    if (judgedRows === 0 && judged.length > 0) {
+      error =
+        checked === 0
+          ? `гейту нечего было судить: у вертикали «${vertical.name}» пустое имя`
+          : `модель не дала ни одного вердикта по ${checked} строкам`;
+    }
+  } catch (e) {
+    error = e instanceof Error ? e.message : String(e);
+  }
+  if (error) stageLog(ctx, `[base_collect] релевант-гейт не отработал: ${error}`);
+  return {
+    // Суд состоялся, если вердикт получила хоть одна строка ЛИБО судить моделью
+    // было нечего, потому что префильтр снял всё сам (детерминированный проход,
+    // модель ему не нужна).
+    ran: error === null,
+    ...(error ? { error: error.slice(0, 300) } : {}),
+    checked,
+    judged: judgedRows,
+    off_target: offTarget.size,
+    flagged_keys: [...flaggedKeys],
+    tokens_used: tokensUsed,
+    cost_usd: costUsd,
+    judged_at: judgedAt,
   };
 }
 
@@ -2674,7 +2876,111 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // «компания|домен» уникальны после дедупа HARVEST, то есть строка = компания.
   let companiesTotal = merged.length;
   const construct = info.construct;
-  if ((!construct || construct.status === 'dispatched') && needsConstruct(merged)) {
+
+  // ─── РЕЛЕВАНТ-ГЕЙТ ДО КОНСТРУКТОРА (только market='us') ───
+  // Судим строки ДО конструктора и отдаём ему только те, которым письмо вообще
+  // может уйти (см. judgeRowsBeforeConstruct). Вычеркнутые из
+  // базы НЕ исчезают: они дописываются после импорта — клиент и воронка должны
+  // видеть, что именно исключено.
+  //
+  // Запись collect_info.relevance_gate с ran=true = доказательство оплаты: гейт
+  // считается ровно один раз на сборку, а его ключи переживают все тики ожидания
+  // конструктора (фаза CONSTRUCT растянута на несколько заходов джобы).
+  //
+  // Запись с ran=false — не доказательство, а протокол отказа: судить второй раз
+  // тут не «платить дважды», а платить впервые. Такой тик бывает (гейт записан,
+  // а диспатч упал на insert'е — воркер повторяет джобу с тем же harvest), и без
+  // проверки ran неудачный гейт снимал бы проверку с базы навсегда: ниже, на
+  // импорте, ветка `if (gateRan)` тоже не стала бы судить.
+  //
+  // RU-инструмент /tools/hypothesis-engine не затронут: у него гейт по-прежнему
+  // стоит после импорта и судит те же строки, что судил.
+  let relevanceGate: HeRelevanceGateInfo | null = info.relevance_gate ?? null;
+  if (market === 'us' && relevanceGate?.ran !== true && !construct?.bc_job_id && needsConstruct(merged)) {
+    relevanceGate = await judgeRowsBeforeConstruct({
+      ctx,
+      rows: merged,
+      vertical,
+      brief: project.brief,
+    });
+    info.relevance_gate = relevanceGate;
+    // Пишем ДО диспатча: если диспатч упадёт и воркер повторит джобу, гейт не
+    // будет оплачен второй раз.
+    await persistCollectInfo(ctx, baseId, info);
+    usage.tokensUsed += relevanceGate.tokens_used;
+    usage.costUsd += relevanceGate.cost_usd;
+    stageLog(
+      ctx,
+      relevanceGate.ran
+        ? `[base_collect] релевант-гейт до конструктора: судили ${relevanceGate.judged} из ${merged.length} строк, ` +
+            `вне вертикали ${relevanceGate.flagged_keys.length}` +
+            (relevanceGate.off_target > 0 ? ` (из них ${relevanceGate.off_target} — префильтром, без модели)` : '')
+        : `[base_collect] релевант-гейт до конструктора НЕ отработал (${relevanceGate.error ?? 'без причины'}): ` +
+            `${merged.length} строк уходят конструктору целиком, проверка — после импорта`,
+    );
+  }
+  /** Гейт действительно судил строки (а не записал отказ) — см. HeRelevanceGateInfo.ran. */
+  const gateRan = relevanceGate?.ran === true;
+  const gateFlaggedKeys = new Set(relevanceGate?.flagged_keys ?? []);
+  // Строки вне вертикали конструктору не отдаём — это и есть экономия.
+  const gateHeldRows =
+    gateFlaggedKeys.size > 0 ? merged.filter((r) => gateFlaggedKeys.has(heCompanyRowKey(r))) : [];
+  const constructRows =
+    gateFlaggedKeys.size > 0 ? merged.filter((r) => !gateFlaggedKeys.has(heCompanyRowKey(r))) : merged;
+  /**
+   * Гейт не оставил конструктору НИ ОДНОЙ строки: вертикаль, в которой не прошло
+   * ничего. Конструктор не запускается — работы для него нет, и это правильно:
+   * платить за поиск адресов компаниям, которым никто не напишет, гейт и
+   * поставлен предотвращать.
+   *
+   * Но исход обязан быть СКАЗАН. Без этого база молча доезжала до 'analyzing' и
+   * дальше до анализа — «сбор завершён, N компаний», — при том что в ней нет ни
+   * одного найденного адреса и ни одного вердикта валидации. Клиент видел
+   * готовую базу, из которой запуск не возьмёт ничего, и отличить её от сбоя
+   * обогащения было нечем. Поэтому финальная запись ниже уводит такую базу в
+   * терминальный 'failed' с причиной (формулировка классифицируется кабинетом
+   * как audience_mismatch — «срез не про эту вертикаль, это осознанная
+   * остановка»), а строки и воронка пишутся в неё ровно так же, как у любой
+   * другой сборки: пометки _low_relevance на всех строках, low_relevance = все,
+   * ok_contacts = 0.
+   *
+   * Условие `!construct?.bc_job_id`: джобу конструктора мы не бросаем. Если она
+   * уже в работе, а гейт (посчитанный на прошлом тике, когда merged был шире)
+   * покрыл весь нынешний merged, доводим фазу штатно — импортируем и помечаем.
+   *
+   * НОЧНОЙ ДОЛИВ идёт своим терминалом (runHeRefillAppend ниже), и это не
+   * недоделка, а цена вопроса: 'failed'-база ВЫПАДАЕТ из кросс-базового
+   * исключения (loadOtherBaseExclusionKeys фильтрует по `status != failed`), то
+   * есть её компании снова считаются несобранными. Ручную сборку это устраивает
+   * — повтор инициирует человек, которому кабинет прямо сказал взять другую
+   * вертикаль. Ночному крону — нет: он обходит все вертикали с запущенной
+   * кампанией КАЖДУЮ ночь и пересобирал бы ровно те же компании, каждый раз
+   * заново платя за гейт. Терминал долива оставляет базу в 'analyzed', её
+   * компании — исключёнными, и следующая ночь честно упирается в «новых компаний
+   * нет». Причина при этом записана машинно (stats.all_off_target ниже).
+   */
+  const allOffTarget =
+    gateHeldRows.length > 0 && constructRows.length === 0 && !construct?.bc_job_id;
+  if (allOffTarget) {
+    stageLog(
+      ctx,
+      `[base_collect] релевант-гейт вне вертикали ВСЕ ${merged.length} строк: конструктор не запускаем, ` +
+        (isRefill
+          ? 'обогащать нечего — долив закончится нулём, компании остаются исключёнными'
+          : 'база уходит в failed с причиной — обогащать нечего'),
+    );
+  }
+
+  // «Есть что отдавать конструктору» спрашиваем ТОЛЬКО у первого входа в фазу:
+  // это про сетку, которую мы сейчас соберём. Уже поставленную джобу этот вопрос
+  // не касается — её надо довести до импорта в любом случае. Раньше оба входа
+  // висели на одном needsConstruct, и достаточно было, чтобы merged к очередному
+  // тику сжался до одних помеченных строк (кросс-базовое исключение выросло:
+  // соседняя сборка проекта забрала те же компании), — фаза переставала
+  // опрашивать ЖИВУЮ джобу, и оплаченный результат конструктора терялся молча.
+  // У RU-инструмента и у ENG-сборки без пометок условие прежнее: constructRows
+  // это merged, а merged здесь непуст по построению (пустой ушёл выше).
+  if ((!construct && needsConstruct(constructRows)) || construct?.status === 'dispatched') {
     if (!construct?.bc_job_id) {
       // DISPATCH-CONSTRUCT: джоба конструктора (воркер baseConstructor клеймит
       // pending), её id — в collect_info.construct; дальше WAIT с паузой 60с.
@@ -2682,7 +2988,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         ctx,
         ownerId: project.created_by,
         baseLabel: base.filename ?? baseId,
-        rows: merged,
+        rows: constructRows,
+        // Весь harvest — только для теста «бедная база» (см. constructStepsFor).
+        harvest: merged,
         market,
         contactCap,
       });
@@ -2691,8 +2999,10 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       stageLog(
         ctx,
         `[base_collect] construct: создана base_constructor_jobs ${dispatched.bcJobId} ` +
-          `(${merged.length} строк, locale ${dispatched.locale}, шаги ${dispatched.steps.join(' → ')}, ` +
-          `кап ${contactCap} адресов на компанию)`,
+          `(${constructRows.length} строк, locale ${dispatched.locale}, шаги ${dispatched.steps.join(' → ')}, ` +
+          `кап ${contactCap} адресов на компанию` +
+          (gateHeldRows.length > 0 ? `; ${gateHeldRows.length} строк вне вертикали не оплачиваем` : '') +
+          `)`,
       );
       await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
       return {
@@ -2750,7 +3060,8 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
           ctx,
           ownerId: project.created_by,
           baseLabel: base.filename ?? baseId,
-          rows: merged,
+          rows: constructRows,
+          harvest: merged,
           market,
           contactCap,
         });
@@ -2796,6 +3107,23 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         droppedOverCompanyCap = capped.droppedOverCompanyCap;
         companiesTotal = capped.companies;
         if (imported.hasDescription) finalColumns = [...HE_AUTO_COLLECT_COLUMNS, 'description'];
+        // Строки, вычеркнутые гейтом ДО конструктора, он не видел, а
+        // finalRows = capped.rows заменяет массив ЦЕЛИКОМ — без дописывания
+        // исключённые компании исчезли бы из базы молча, и ни клиент, ни
+        // воронка не узнали бы, что именно отсеяно. Вердикта валидации у них
+        // нет (мы за него не платили): в finalEmailStatuses кладём им null,
+        // иначе вердикты всех строк сдвинулись бы на одну.
+        if (gateHeldRows.length > 0) {
+          finalRows = [
+            ...finalRows,
+            ...gateHeldRows.map((r) => (imported.hasDescription ? { ...r, description: '' } : r)),
+          ];
+          finalEmailStatuses = [...capped.emailStatuses, ...gateHeldRows.map(() => null)];
+          // Компании базы — оплаченные плюс отложенные: обе группы пришли из
+          // merged, где строк уже не больше лимита сборки, поэтому инвариант
+          // «не больше limit компаний» держится и после дописывания.
+          companiesTotal += gateHeldRows.length;
+        }
         // Кап засчитан применённым у ЛЮБОГО импорта: его накладывает
         // capImportedRows в этом же процессе, а не только шаг конструктора.
         // Раньше у частичного результата (failed/cancelled оборвался на
@@ -2869,10 +3197,20 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // ─── QUALITY GATE (до refill/финала: пометки нужны обоим путям) ───
   // 1) вердикты валидации почт → _email_status на строках (запуск пропускает
   //    не-'ok' — баунсы не ложатся на домен клиента);
-  // 2) релевант-гейт LLM → _low_relevance на строках вне вертикали (шум
+  // 2) релевант-гейт → _low_relevance на строках вне вертикали (шум
   //    hh/карт/реестра): запуск фильтрует их в launchTemplate, refill — в
   //    selectRefillLeadRows. Пометки живут только в jsonb-строках: в columns
   //    не попадают, сетки UI и маппинг операторов их не видят.
+  //    У ENG-сборки сам гейт отработал РАНЬШЕ, до конструктора, и здесь
+  //    остаётся только разложить его пометки по строкам (вычеркнутые строки
+  //    дописаны в конец finalRows после импорта).
+  //
+  // Два шага ниже НЕЗАВИСИМЫ, и это важно: пометки уже посчитанного гейта
+  // раскладываются всегда (строки вырезаны из сетки по этим самым ключам —
+  // не разложить их значило бы отдать в запуск то, за что мы не платили), а
+  // суд ПОСЛЕ импорта идёт ровно тогда, когда суда до конструктора не было
+  // (gateRan=false): RU-инструмент, ENG-база с фазой CONSTRUCT от прошлой
+  // сборки и ENG-база, у которой гейт до конструктора отказал.
   type StoredRow = HeUnifiedRow & { _email_status?: string; _low_relevance?: boolean };
   let storedRows: StoredRow[] = finalRows;
   if (finalEmailStatuses) {
@@ -2881,33 +3219,56 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       return st ? { ...r, _email_status: st } : r;
     });
   }
-  let lowRelevanceCount = 0;
-  try {
-    const { data: vrow } = await ctx.supabase
-      .from('he_verticals')
-      .select('name, summary')
-      .eq('id', base.vertical_id)
-      .maybeSingle();
-    const verticalName = (vrow as { name?: string } | null)?.name ?? '';
-    const gate = await findIrrelevantRows({
-      rows: storedRows,
-      verticalName,
-      verticalSummary: (vrow as { summary?: string | null } | null)?.summary ?? '',
-      language: market === 'us' ? 'en' : 'ru',
-      log: (m) => stageLog(ctx, m),
-    });
-    usage.tokensUsed += gate.tokensUsed;
-    usage.costUsd += gate.costUsd;
-    if (gate.flagged.size > 0) {
-      lowRelevanceCount = gate.flagged.size;
-      storedRows = storedRows.map((r, i) =>
-        gate.flagged.has(i) ? { ...r, _low_relevance: true } : r,
-      );
-      stageLog(ctx, `[base_collect] релевант-гейт: помечено ${lowRelevanceCount} строк вне вертикали`);
-    }
-  } catch (e) {
-    stageLog(ctx, `[base_collect] релевант-гейт пропущен: ${e instanceof Error ? e.message : String(e)}`);
+  // ENG: гейт отработал ДО конструктора, и платить второй раз не за что.
+  // Помечаем по ключам компаний: вычеркнутые строки дописаны в конец
+  // finalRows, а среди оплаченных таких ключей быть не может — конструктор
+  // получил только невычеркнутые строки, и split_emails ключ компании не
+  // меняет.
+  if (gateFlaggedKeys.size > 0) {
+    storedRows = storedRows.map((r) =>
+      gateFlaggedKeys.has(heCompanyRowKey(r)) ? { ...r, _low_relevance: true } : r,
+    );
+    stageLog(
+      ctx,
+      `[base_collect] релевант-гейт (до конструктора): помечено ${gateFlaggedKeys.size} компаний вне вертикали`,
+    );
   }
+  if (!gateRan) {
+    // Прежний путь — судим строки ПОСЛЕ импорта. Здесь три случая: RU-сборка
+    // легаси-инструмента (её поведение обязано остаться прежним), ENG-база,
+    // чья фаза CONSTRUCT началась ДО переноса гейта (записи relevance_gate у
+    // неё нет), и ENG-база, у которой гейт до конструктора НЕ отработал
+    // (ran=false) — её строки иначе не проверил бы никто.
+    try {
+      const { data: vrow } = await ctx.supabase
+        .from('he_verticals')
+        .select('name, summary')
+        .eq('id', base.vertical_id)
+        .maybeSingle();
+      const verticalName = (vrow as { name?: string } | null)?.name ?? '';
+      const gate = await findIrrelevantRows({
+        rows: storedRows,
+        verticalName,
+        verticalSummary: (vrow as { summary?: string | null } | null)?.summary ?? '',
+        language: market === 'us' ? 'en' : 'ru',
+        log: (m) => stageLog(ctx, m),
+      });
+      usage.tokensUsed += gate.tokensUsed;
+      usage.costUsd += gate.costUsd;
+      if (gate.flagged.size > 0) {
+        storedRows = storedRows.map((r, i) =>
+          gate.flagged.has(i) ? { ...r, _low_relevance: true } : r,
+        );
+        stageLog(ctx, `[base_collect] релевант-гейт: помечено ${gate.flagged.size} строк вне вертикали`);
+      }
+    } catch (e) {
+      stageLog(ctx, `[base_collect] релевант-гейт пропущен: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  // Считаем по САМИМ строкам, а не по размеру набора ключей: у одной компании
+  // после split_emails несколько строк, и оба шага выше могли пометить одну и
+  // ту же (у базы с отказавшим гейтом до конструктора — реально могут).
+  const lowRelevanceCount = storedRows.reduce((n, r) => n + (r._low_relevance === true ? 1 : 0), 0);
   // Адресов, которые запуск реально возьмёт: вердикт 'ok' И строка не помечена
   // вне вертикали — те же два фильтра, что у launchTemplate. Это ОЦЕНКА СВЕРХУ:
   // запуск ещё выбросит строки без разбираемого адреса, повторные адреса (после
@@ -2924,6 +3285,12 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     ok_contacts: okContacts,
     dropped_over_contact_cap: droppedOverContactCap,
     dropped_over_company_cap: droppedOverCompanyCap,
+    // Причина «нулевой» базы машинно, а не только в тексте he_bases.error: у
+    // базы, где гейт снял ВСЁ, low_relevance == rows_total и ok_contacts == 0
+    // выглядят так же, как у базы, которой конструктор не нашёл ни одного
+    // адреса. Пишем только когда это правда — иначе ключ был бы шумом на
+    // каждой сборке.
+    ...(allOffTarget ? { all_off_target: true } : {}),
   };
   // Потолок мастера считает АДРЕСА (HE_LAUNCH_MAX_LEADS лидов), а число клиента
   // — КОМПАНИИ, и после разноса адресов по строкам одна компания даёт до
@@ -2965,6 +3332,25 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     });
   }
 
+  // Вертикаль, в которой не прошла ни одна строка (см. allOffTarget выше):
+  // терминальный 'failed' с причиной вместо 'analyzing' + анализ. Строки и
+  // воронка пишутся тем же апдейтом — исключённые компании клиент видит, и
+  // видит, что их ровно столько же, сколько собрано. До этой точки доходит
+  // только НЕ-refill: ночной долив вернулся выше своим терминалом.
+  //
+  // Формулировка не косметика: кабинет сворачивает he_bases.error в машинный
+  // код причины (clientErrors.classifyHeClientError), и по обороту «не
+  // покрывается каталогом» ENG-клиент получает audience_mismatch — «срез не про
+  // эту вертикаль, это осознанная остановка; возьмите другую вертикаль», — тот
+  // же код и тот же текст, что у отказа пробы среза, который останавливает
+  // сборку по той же причине, только раньше. Русский текст остаётся staff'у,
+  // клиент видит только код. Переформулировать — сверившись с классификатором.
+  const offTargetNote = allOffTarget
+    ? `Вертикаль «${vertical.name}» не покрывается каталогом: релевант-гейт снял все ` +
+      `${storedRows.length} собранных компаний как не принадлежащие вертикали. ` +
+      'Поиск и проверка адресов не запускались — рассылка по такому срезу навредила бы ' +
+      'рабочим вертикалям.'
+    : null;
   const { error: updError } = await ctx.supabase
     .from('he_bases')
     .update({
@@ -2972,7 +3358,8 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       sample_rows: storedRows.slice(0, SAMPLE_ROWS),
       data: storedRows,
       row_count: storedRows.length,
-      status: 'analyzing',
+      status: offTargetNote ? 'failed' : 'analyzing',
+      ...(offTargetNote ? { error: offTargetNote.slice(0, 500) } : {}),
       collect_info: { ...info, stats: statsWithQuality },
       // Применённый кап — только когда колонка точно существует (см.
       // contactCapColumnsPresent). Значение есть и в collect_info.construct,
@@ -2984,6 +3371,16 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     })
     .eq('id', baseId);
   if (updError) throw new Error(`he_bases harvest update: ${updError.message}`);
+  if (offTargetNote) {
+    // Анализ не ставим — анализировать нечего, а поставленный base_analyze увёл
+    // бы базу обратно в живой статус. Бросаем той же причиной, как отказ пробы
+    // среза: воркер повторит джобу, повтор попадёт в ЭТУ ЖЕ ветку (harvest и
+    // запись гейта лежат в collect_info, гейт второй раз не платится) и
+    // перезапишет тот же текст, а базу в терминальном статусе
+    // repairBaseAfterCollectFinalFail не трогает — причина доживает до кабинета.
+    stageLog(ctx, `[base_collect] ${offTargetNote}`);
+    throw new Error(offTargetNote);
+  }
 
   const { error: jobError } = await ctx.supabase.from('he_jobs').insert({
     project_id: job.project_id,

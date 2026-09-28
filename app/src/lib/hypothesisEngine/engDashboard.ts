@@ -273,6 +273,15 @@ export interface EngDashEvent {
     | 'template_ready'
     | 'launched'
     | 'refill_appended'
+    /**
+     * Ночь БЕЗ отправки и БЕЗ сбоя. Две причины, одна строка ленты:
+     * отправлять нечего ('no_new') и у рассыльщика нет места, ночь отложена
+     * (stats.error_kind='instantly_capacity'). Тип переиспользован осознанно:
+     * в кабинете он рисуется серым, а 'failed' — красным сбоем (EVENT_ICON,
+     * components/client-eng/EngDashboard.tsx), и отложенная ночь — именно
+     * серая. Разница причин — в тексте, а не в типе: заводить ключ, которого
+     * нет в клиентском union, значит рисовать событие значком по умолчанию.
+     */
     | 'refill_empty'
     | 'failed';
   text: string;
@@ -396,9 +405,17 @@ export function buildEngDashboardEvents(input: {
     const stats =
       run.stats && typeof run.stats === 'object' ? (run.stats as Record<string, unknown>) : {};
     if (status === 'appended') {
+      // Часть строк рассыльщик не взял по ёмкости (stats.deferred +
+      // deferred_reason, пишет stages/baseCollectRefill.ts). Ночь состоялась,
+      // но не целиком: без остатка «+N leads» читается как «уехало всё».
+      const deferred = asNum(stats.deferred);
+      const heldBack =
+        deferred > 0 && asStr(stats.deferred_reason) === 'instantly_capacity'
+          ? `, ${deferred} on hold (no room)`
+          : '';
       events.push({
         type: 'refill_appended',
-        text: withVertical(`refill: +${asNum(stats.appended)} leads`, vname),
+        text: withVertical(`refill: +${asNum(stats.appended)} leads${heldBack}`, vname),
         at,
       });
     } else if (status === 'no_new') {
@@ -409,7 +426,21 @@ export function buildEngDashboardEvents(input: {
       // ровно то, что верно для обоих: отправлять нечего.
       events.push({ type: 'refill_empty', text: withVertical('refill: nothing new to send', vname), at });
     } else if (status === 'failed') {
-      events.push({ type: 'failed', text: withVertical('refill failed', vname), at });
+      // Нет места у рассыльщика — не сбой: ночь ОТЛОЖЕНА, собранное цело,
+      // следующий прогон встанет сам. Читаем машинную причину, а не текст:
+      // stats.error_kind='instantly_capacity' пишут оба отказа по ёмкости —
+      // предполёт тика до сборки (autoPipeline.ts, строка журнала без base_id)
+      // и пауза долива (stages/baseCollectRefill.ts, runStats), — поэтому у
+      // ленты одно условие на оба.
+      events.push(
+        asStr(stats.error_kind) === 'instantly_capacity'
+          ? {
+              type: 'refill_empty',
+              text: withVertical('refill on hold: no room for new contacts', vname),
+              at,
+            }
+          : { type: 'failed', text: withVertical('refill failed', vname), at },
+      );
     }
   }
 

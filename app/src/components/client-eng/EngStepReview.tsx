@@ -7,8 +7,16 @@
  * (GET /eng/bases/[id]/rows, первые 100 строк, компактные колонки) и статус
  * шаблона. Вверху — общий селектор пресета, ОКНО ОТПРАВКИ (пояс/часы/дни,
  * уезжает вместе с запуском) и «Launch all (paused)»: последовательный запуск
- * всех ready-шаблонов без launch_info с прогрессом i/N; ошибка одного шаблона
- * показывается и не останавливает остальные.
+ * всех ready-шаблонов, которым есть что запускать, с прогрессом i/N; ошибка
+ * одного шаблона показывается и не останавливает остальные.
+ *
+ * «Есть что запускать» — это шаблон без записи о запуске ИЛИ шаблон, чей запуск
+ * НЕ ЗАКОНЧЕН (launch_info.pending: часть аудитории осталась без кампании или
+ * без адресов). Второй случай — ДОСТРОЙКА: то же нажатие достраивает недоехавшее
+ * и не создаёт вторых кампаний по уже уехавшей аудитории (правило и его цена —
+ * `lib/hypothesisEngine/launchTemplate.ts`, шаг 6; предикат один на сервер и на
+ * экран — heLaunchIsIncomplete). Отдельной кнопки «дозапустить» нет намеренно:
+ * второй способ запустить шаблон — это второй способ ошибиться.
  *
  * У запущенного шаблона окно отправки можно поменять — PATCH
  * /eng/templates/[id]/schedule переставляет его во всех кампаниях этого запуска.
@@ -19,7 +27,7 @@ import Link from 'next/link';
 import type { Route } from 'next';
 import { Clock, Eye, Rocket } from 'lucide-react';
 import type { HeTemplate, HeVertical } from '@/lib/hypothesisEngine/types';
-import { parseLaunchInfo } from '@/lib/hypothesisEngine/launchHandoff';
+import { heLaunchIsIncomplete, parseLaunchInfo } from '@/lib/hypothesisEngine/launchHandoff';
 import {
   fetchEngBaseRows,
   fetchEngLaunchPresets,
@@ -459,6 +467,9 @@ function VerticalReviewCard({
   onChanged: () => void;
 }) {
   const launch = template ? parseLaunchInfo((template as { launch_info?: unknown }).launch_info) : null;
+  // Частичный запуск нельзя подписывать «launched»: часть аудитории не уехала, и
+  // клиенту надо нажать запуск ещё раз (панель выше снова его предлагает).
+  const launchUnfinished = launch !== null && heLaunchIsIncomplete(launch);
   return (
     <EngCard>
       <div className="flex flex-wrap items-center gap-2">
@@ -466,7 +477,12 @@ function VerticalReviewCard({
           {vertical.name}
         </h4>
         {template && <EngBadge label={`template: ${template.status}`} tone={template.status === 'ready' ? 'green' : 'amber'} />}
-        {launch && <EngBadge label="launched (paused)" tone="green" />}
+        {launch && (
+          <EngBadge
+            label={launchUnfinished ? 'launch unfinished' : 'launched (paused)'}
+            tone={launchUnfinished ? 'amber' : 'green'}
+          />
+        )}
         {!template && templateBusy && (
           <span className="inline-flex items-center gap-1.5 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
             <EngSpinner className="h-3 w-3" /> building template…
@@ -542,6 +558,12 @@ function LaunchAllPanel({
   // Пресеты — per-client (GET launch их не привязывает к шаблону), грузим по
   // первому ready-шаблону. Зависим от стабильного id, а не от массива.
   const firstTemplateId = launchable[0]?.id;
+  // Сколько из них — ДОСТРОЙКА незакончённого запуска: «Launch» для них значит
+  // «закончить», а не «начать заново», и сказать это надо до нажатия.
+  const unfinished = launchable.filter((t) => {
+    const launch = parseLaunchInfo((t as { launch_info?: unknown }).launch_info);
+    return launch !== null && heLaunchIsIncomplete(launch);
+  }).length;
   // Окно отправки — тоже одно на пачку: «Launch all» запускает все готовые
   // шаблоны одним пресетом, и часы отправки у них общие. Поменять окно
   // отдельной кампании можно после запуска, в её карточке.
@@ -641,6 +663,18 @@ function LaunchAllPanel({
           </>
         )}
       </div>
+      {/* Достройка: клиент обязан знать, что повтор ЗАКАНЧИВАЕТ прошлый запуск,
+          а не начинает второй по той же аудитории. Отдельной кнопки для этого
+          нет — это тот же «Launch all (paused)». */}
+      {unfinished > 0 && (
+        <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
+          {unfinished === 1
+            ? '1 of them has an unfinished launch: part of its audience never went out.'
+            : `${unfinished} of them have an unfinished launch: part of their audience never went out.`}{' '}
+          Launching again finishes it — the campaigns that already have contacts are kept exactly as
+          they are, and nobody is contacted twice.
+        </div>
+      )}
       {/* Окно отправки выбирается ДО запуска и уезжает вместе с ним. Списки
           пришли с сервера — значит редактор рисуем; не пришли (или блип сети) —
           говорим, что уедет дефолт, и запуск не блокируем. */}
@@ -706,10 +740,18 @@ export function EngStepReview({ detail, onChanged }: { detail: EngDetail; onChan
     }))
     .filter((c) => c.chain || c.base || c.template);
 
-  // К запуску готовы ready-шаблоны без launch_info (уже запущенные — только бейдж).
-  const launchable = templates.filter(
-    (t) => t.status === 'ready' && !parseLaunchInfo((t as { launch_info?: unknown }).launch_info),
-  );
+  // К запуску готовы ready-шаблоны без записи о запуске И те, чей запуск НЕ
+  // ЗАКОНЧЕН: в записи остались части аудитории без кампании или без адресов
+  // (launch_info.pending). Повтор их ДОСТРАИВАЕТ, а не дублирует — кампанию,
+  // которая уже приняла адреса, ядро не трогает вовсе (launchTemplate.ts, шаг
+  // 6), и force для этого не нужен. Без второй ветки частичный запуск прятал
+  // кнопку ровно тогда, когда она нужна: запись у него есть, а половина
+  // аудитории не уехала.
+  const launchable = templates.filter((t) => {
+    if (t.status !== 'ready') return false;
+    const launch = parseLaunchInfo((t as { launch_info?: unknown }).launch_info);
+    return !launch || heLaunchIsIncomplete(launch);
+  });
 
   if (cards.length === 0) {
     return (
