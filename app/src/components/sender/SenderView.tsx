@@ -5,6 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import { MailboxesTab } from './MailboxesTab';
 import { CampaignsTab } from './CampaignsTab';
 import { EgressTab } from './EgressTab';
+import { StatsTab } from './StatsTab';
 import { StoplistTab } from './StoplistTab';
 import { ThreadsTab } from './ThreadsTab';
 
@@ -16,6 +17,7 @@ const TABS = [
   { id: 'mailboxes', label: 'Ящики' },
   { id: 'campaigns', label: 'Кампании' },
   { id: 'threads', label: 'Письма' },
+  { id: 'stats', label: 'Статистика' },
   { id: 'stoplist', label: 'Стоп-лист' },
   { id: 'egress', label: 'Адреса отправки' },
 ] as const;
@@ -89,6 +91,7 @@ export function SenderView() {
       {tab === 'mailboxes' ? <MailboxesTab initialEgressIp={egressIp} /> : null}
       {tab === 'campaigns' ? <CampaignsTab focusCampaignId={focusCampaignId} /> : null}
       {tab === 'threads' ? <ThreadsTab initialThreadId={initialThreadId} /> : null}
+      {tab === 'stats' ? <StatsTab /> : null}
       {tab === 'stoplist' ? <StoplistTab /> : null}
       {tab === 'egress' ? (
         <EgressTab
