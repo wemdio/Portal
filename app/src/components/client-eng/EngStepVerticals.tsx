@@ -8,9 +8,9 @@
  */
 
 import { useMemo, useState } from 'react';
-import { Check, Rocket, X } from 'lucide-react';
+import { Check, RotateCcw, Rocket, X } from 'lucide-react';
 import type { HeHypothesis, HeProjectStatus, HeVertical } from '@/lib/hypothesisEngine/types';
-import { patchEngHypothesis, startEngAutopilot } from './api-client';
+import { patchEngHypothesis, resumeEngVerticalRefill, startEngAutopilot } from './api-client';
 import { EngBadge, EngCard, EngSpinner, hypothesisStatusTone } from './ui';
 import type { EngDetail } from './EngProjectWizard';
 
@@ -81,6 +81,47 @@ function HypothesisCard({
 }
 
 /**
+ * Пометка «вертикаль снята с ежедневного добора»: ночной проход увидел N подряд
+ * прогонов, не добавивших ни одного контакта (lib/hypothesisEngine/autoPipeline.ts).
+ *
+ * ФОРМА ДАННЫХ РАЗБИРАЕТСЯ ЦЕЛИКОМ, а не по счастливому случаю. Пометку ставит
+ * одна запись сразу двумя полями, но экран обязан пережить любую строку,
+ * которая до него доедет (старая запись, правка руками, будущий писатель):
+ *   * штампа нет / он пустой → пометки НЕТ, карточка молчит. Штамп —
+ *     единственный признак: именно по нему правило решает, выдавать ли слот;
+ *   * штамп есть, число ночей меньше единицы (нет ключа, null, ноль, дробь
+ *     вроде 0.5 — всё это после округления вниз даёт 0) → фраза БЕЗ числа:
+ *     «0 daily refills in a row» было бы ложью о причине. Дробь БОЛЬШЕ
+ *     единицы округляется вниз и печатается (1.7 → «1 daily refill»): такое
+ *     число занижает серию, но не выдумывает её;
+ *   * штамп есть, но не парсится как дата → фраза без даты, пометка остаётся.
+ * Ни в одной ветке текст не обещает того, чего не знает.
+ *
+ * Про окно рассинхрона честно: правило выключается флагом окружения ВОРКЕРА, и
+ * пометки, оставшиеся от включённого периода, снимает первый же ночной проход
+ * — разом по всему проекту, до цикла по вертикалям, потому что до вертикали
+ * за пределами ночного бюджета цикл может и не дойти.
+ * До него (максимум одна ночь) карточка может показывать паузу, которой уже
+ * нет. Проверять флаг здесь нельзя: у кабинета и у воркера разные процессы и
+ * разное окружение, и прочитанный здесь флаг отвечал бы за чужую машину.
+ */
+function refillPauseNote(vertical: HeVertical): { headline: string; since: string } | null {
+  const since = typeof vertical.refill_dry_since === 'string' ? vertical.refill_dry_since.trim() : '';
+  if (!since) return null;
+  const raw = vertical.refill_dry_nights;
+  const nights = typeof raw === 'number' && Number.isFinite(raw) ? Math.floor(raw) : 0;
+  const headline =
+    nights >= 1
+      ? `Auto-refill is paused for this vertical — ${nights} daily refill${nights === 1 ? '' : 's'} in a row brought no new contacts.`
+      : 'Auto-refill is paused for this vertical — its recent daily refills brought no new contacts.';
+  const parsed = Date.parse(since);
+  const stamp = Number.isNaN(parsed)
+    ? ''
+    : new Date(parsed).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  return { headline, since: stamp };
+}
+
+/**
  * Почему кнопки «Start outreach» нет — по КАЖДОМУ статусу проекта.
  *
  * Без этой подсказки шаг 2 — тупик: кнопка просто исчезает, и клиент видит
@@ -139,6 +180,10 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
    * ложным успехом.
    */
   const [autopilotHeld, setAutopilotHeld] = useState(false);
+  /** Вертикаль, по которой сейчас идёт возврат в ежедневный добор. */
+  const [refillBusyId, setRefillBusyId] = useState<string | null>(null);
+  /** Вертикали, возвращённые в добор этим экраном (подтверждение под карточкой). */
+  const [refillResumedIds, setRefillResumedIds] = useState<string[]>([]);
 
   // Автопилот уже гонит конвейер, пока жива хотя бы одна его джоба.
   const AUTOPILOT_STAGES = useMemo(() => new Set(['chain', 'base_collect', 'base_analyze', 'template']), []);
@@ -190,6 +235,21 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
       setError(e instanceof Error ? e.message : 'Failed to start the autopilot');
     } finally {
       setAutopilotBusy(false);
+    }
+  };
+
+  const onResumeRefill = async (verticalId: string) => {
+    if (refillBusyId) return;
+    setRefillBusyId(verticalId);
+    setError('');
+    try {
+      await resumeEngVerticalRefill(verticalId);
+      setRefillResumedIds((prev) => (prev.includes(verticalId) ? prev : [...prev, verticalId]));
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to resume the auto-refill');
+    } finally {
+      setRefillBusyId(null);
     }
   };
 
@@ -276,6 +336,8 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
       {verticals.map((v) => {
         const own = hypotheses.filter((h) => h.vertical_id === v.id);
         const accepted = own.filter((h) => h.status === 'accepted').length;
+        const pause = refillPauseNote(v);
+        const resumed = refillResumedIds.includes(v.id);
         return (
           <EngCard key={v.id}>
             <div className="flex items-center gap-2">
@@ -295,6 +357,48 @@ export function EngStepVerticals({ detail, onChanged }: { detail: EngDetail; onC
             {v.summary && (
               <p className="mt-1.5 text-xs whitespace-pre-wrap" style={{ color: 'var(--cp-text-m)' }}>
                 {v.summary}
+              </p>
+            )}
+            {/* Намеренная остановка обязана выглядеть решением, а не поломкой:
+                причина, дата и кнопка, которая её отменяет, — в одном месте.
+                Цвет нейтральный, а не красный: ничего не сломалось и ничего не
+                потеряно. */}
+            {pause && (
+              <div
+                className="mt-2 rounded-md p-3 flex flex-col gap-2"
+                style={{ border: '1px solid var(--cp-divider)' }}
+              >
+                <p className="text-xs m-0" style={{ color: 'var(--cp-text-m)' }}>
+                  {pause.headline}
+                  {pause.since ? ` Paused on ${pause.since}.` : ''} Only the daily collection for this
+                  vertical stopped — the campaign and everything already in it are untouched.
+                </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void onResumeRefill(v.id)}
+                    disabled={refillBusyId === v.id}
+                    className="ds-btn-secondary inline-flex items-center gap-1 text-[11px]"
+                    title="Put this vertical back into the daily refill"
+                  >
+                    {refillBusyId === v.id ? (
+                      <EngSpinner className="h-3 w-3" />
+                    ) : (
+                      <RotateCcw className="h-3 w-3" />
+                    )}
+                    Resume auto-refill
+                  </button>
+                  <span className="text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+                    It becomes eligible for the daily refill again.
+                  </span>
+                </div>
+              </div>
+            )}
+            {/* Подтверждение держится до перезагрузки деталки: пометка уже снята,
+                и без этой строки нажатие выглядело бы как «ничего не произошло». */}
+            {!pause && resumed && (
+              <p className="mt-2 text-xs" style={{ color: 'var(--cp-green)' }}>
+                Auto-refill resumed — this vertical is eligible for the daily refill again.
               </p>
             )}
             <div className="mt-3 flex flex-col gap-2">

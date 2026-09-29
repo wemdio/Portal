@@ -35,6 +35,22 @@
  * а не долив. Такая вертикаль пишется в лог как capacity_blocked (уровень warn) и
  * в he_auto_pipeline_runs строкой без base_id.
  *
+ * Раньше предполёта ёмкости работает ПРАВИЛО СУХОЙ ВЕРТИКАЛИ
+ * (lib/hypothesisEngine/autoPipeline.ts, блок «СУХАЯ ВЕРТИКАЛЬ»): N подряд
+ * завершённых прогонов со статусом 'no_new' — и вертикаль ночной слот больше не
+ * получает (строка лога `dry`, уровень info: это намеренная экономия, а не
+ * сбой), пока клиент не вернёт её кнопкой в кабинете. Правило выключено по
+ * умолчанию, включается env-флагом HE_VERTICAL_DRY_STOP=1 и только вместе с
+ * применённой миграцией supabase/migrations/20260930_0003_he_vertical_dry.sql.
+ * Порог N — he_auto_pipeline_configs.dry_nights_limit (дефолт 7).
+ *
+ * С ВЫКЛЮЧЕННЫМ флагом проход всё равно СЧИТАЕТ серию и печатает её в строке
+ * каждой вертикали (`dry nights N`). Это сделано затем, чтобы порог можно было
+ * выбрать по факту: ночной добор ENG в production не запускался ни разу, и
+ * другой истории для калибровки не существует. Слот при этом не отнимается ни у
+ * кого, а пометки, оставшиеся от включённого периода, снимаются — иначе кабинет
+ * показывал бы паузу, которой больше нет.
+ *
  * Перед постановкой доливов крон делает ПРОХОД АВТОПОДЪЁМА баз, легших на
  * временном отказе провайдера (lib/hypothesisEngine/baseAutoResume →
  * RPC he_auto_resume_transient_bases). Проход выключен по умолчанию, включается
@@ -72,7 +88,7 @@
  * или обход конфига), либо сам проход автоподъёма не отработал, либо проход
  * реконсилера упал (целиком или по отдельному проекту), чтобы cron-алерты это
  * видели. capacity_blocked код НЕ меняет: место у рассыльщика — штатный
- * отказ, а не сбой тика. Отказ автоподъёма (потолок, остывание, занятая
+ * отказ, а не сбой тика. `dry` — тем более: это решение, а не отказ. Отказ автоподъёма (потолок, остывание, занятая
  * вертикаль) — тоже штатный: код не меняет. Пропуск проекта реконсилером
  * (нечего ставить, ждём человека) — тоже.
  */
@@ -147,10 +163,15 @@ async function main(): Promise<number> {
     const target = d.verticalId ? ` vertical ${d.verticalId}` : '';
     const base = d.baseId ? ` base ${d.baseId}` : '';
     const msg = d.message ? ` — ${d.message}` : '';
+    // Серия пустых ночей печатается у ЛЮБОГО исхода, где её удалось прочитать:
+    // с выключенным правилом это единственный материал для выбора порога, а с
+    // включённым — объяснение строки `dry`.
+    const dry = d.dryNights === undefined ? '' : `, dry nights ${d.dryNights}`;
     // capacity_blocked — штатный отказ, а не сбой: 'warn', чтобы строка была
-    // видна в ночном логе, но не читалась алертами как падение тика.
+    // видна в ночном логе, но не читалась алертами как падение тика. `dry` —
+    // не отказ вовсе, а намеренный пропуск: 'info'.
     const level = d.status === 'failed' ? 'error' : d.status === 'capacity_blocked' ? 'warn' : 'info';
-    log(level, `config ${d.configId}${target}${base}: ${d.status}${msg}`);
+    log(level, `config ${d.configId}${target}${base}: ${d.status}${dry}${msg}`);
   }
 
   // ─── Реконсилер автопилота: доставить стадии, которые никто не поставил ───
@@ -210,7 +231,7 @@ async function main(): Promise<number> {
     'info',
     `Done: ${summary.configs} configs, ${summary.enqueued} enqueued, ${summary.existing} existing, ` +
       `${summary.noCampaign} no_campaign, ${summary.capacityBlocked} capacity_blocked, ` +
-      `${summary.failed} failed in ${elapsedSec}s`,
+      `${summary.dry} dry, ${summary.failed} failed in ${elapsedSec}s`,
   );
   return summary.failed > 0 || resumeFailed || reconcileFailed ? 1 : 0;
 }

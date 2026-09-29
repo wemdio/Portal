@@ -507,6 +507,20 @@ export async function collectEngBase(
   });
 }
 
+/* ── Возврат вертикали в ночной добор (POST /eng/verticals/[id]/refill) ── */
+
+/**
+ * Отменяет решение правила сухой вертикали: ночной проход снял её с добора
+ * после N подряд ночей без единого добавленного контакта. Ответ пустой (только
+ * `ok`) намеренно: состояние экран перечитывает деталкой проекта, а второго
+ * источника у пометки быть не должно.
+ */
+export async function resumeEngVerticalRefill(verticalId: string): Promise<{ ok?: boolean; error?: string }> {
+  return engApiFetch<{ ok?: boolean; error?: string }>(`/eng/verticals/${verticalId}/refill`, {
+    method: 'POST',
+  });
+}
+
 export async function patchEngChain(
   chainId: string,
   letters: HeChainLetterDto[],

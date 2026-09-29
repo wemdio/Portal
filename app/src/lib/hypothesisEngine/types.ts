@@ -116,6 +116,14 @@ export interface HeVertical {
   actual_sent?: number | null;
   /** Штамп последнего замера фактических метрик. */
   actual_measured_at?: string | null;
+  /**
+   * Ночной добор снят с вертикали правилом сухой вертикали: N подряд ночей не
+   * добавили ни одного контакта (lib/hypothesisEngine/autoPipeline.ts).
+   * null/нет ключа — пометки нет. Снимается клиентом из кабинета.
+   */
+  refill_dry_since?: string | null;
+  /** Длина серии пустых ночей на момент решения — число из фразы кабинета. */
+  refill_dry_nights?: number | null;
   created_at: string;
   updated_at: string;
 }

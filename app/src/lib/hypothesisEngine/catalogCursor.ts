@@ -102,6 +102,12 @@ export interface HeCatalogCursorRow {
   planKey: string | null;
   /** Закладки срезов: ключ heCatalogSliceKey → закладка. */
   bookmarks: Record<string, HeCatalogBookmark>;
+  /**
+   * Когда платное расширение плана последний раз кончилось ничем (null — не
+   * было). Хранится у ПЛАНА, а не у базы: базы ночные, и отметка в
+   * collect_info одной базы не мешала бы следующей ночи купить тот же отказ.
+   */
+  widenFailedAt: string | null;
 }
 
 const CURSOR_TABLE = 'he_catalog_cursors';
@@ -130,14 +136,27 @@ function stableHash(value: unknown): string {
 }
 
 /**
- * Ключ закладки задачи: источник + хеш ЕГО фильтров. Не-каталожный источник
- * (реестр, hh, карты) закладки не имеет — null.
+ * Ключ закладки задачи: источник + хеш ЕГО фильтров (+ уровень ослабления).
+ * Не-каталожный источник (реестр, hh, карты) закладки не имеет — null.
  *
  * Хеш считается по тому под-объекту, который реально управляет выдачей, а не по
  * задаче целиком: `rationale` — проза модели, она меняется от прогона к прогону
  * и обнуляла бы закладку при том же самом срезе.
+ *
+ * `widen` — УРОВЕНЬ ОСЛАБЛЕНИЯ ПОРОГА, с которым читается тот же объект
+ * фильтров (baseCollect, market='us'): 0 — как спланировано, 1 — «порог или
+ * пустое поле», 2 — порога нет вовсе. Ключ обязан их РАЗЛИЧАТЬ, и это не
+ * украшение. Ослабленный срез — НАДМНОЖЕСТВО исходного: если пустить его под
+ * тем же ключом, закладка узкого среза уедет по строкам, которых узкий срез
+ * никогда не видел, и после выключения расширения они будут потеряны
+ * навсегда. С отдельным ключом у каждого уровня своя закладка, и выключение
+ * флага возвращает ровно прежнее чтение.
+ *
+ * Уровень 0 печатается БЕЗ суффикса — иначе ключи всех уже записанных закладок
+ * сменились бы, и первая же ночь после выката перечитала бы каждый срез с
+ * начала.
  */
-export function heCatalogSliceKey(task: HeCollectTask): string | null {
+export function heCatalogSliceKey(task: HeCollectTask, widen = 0): string | null {
   if (!isHeCatalogSource(task.source)) return null;
   const filters =
     task.source === 'pdl'
@@ -149,7 +168,7 @@ export function heCatalogSliceKey(task: HeCollectTask): string | null {
   // HeCollectTaskSchema требует его по источнику), но закладку без фильтров
   // заводить нельзя: она склеила бы разные срезы в один ключ.
   if (!filters) return null;
-  return `${task.source}:${stableHash(filters)}`;
+  return `${task.source}:${stableHash(filters)}${widen > 0 ? `:w${widen}` : ''}`;
 }
 
 /**
@@ -193,20 +212,59 @@ export async function loadHeCatalogCursor(
 ): Promise<HeCatalogCursorRow | null> {
   const { data, error } = await db
     .from(CURSOR_TABLE)
-    .select('plan, plan_key, bookmarks')
+    .select('plan, plan_key, bookmarks, widen_failed_at')
     .eq('vertical_id', verticalId)
     .maybeSingle();
   if (error) {
     log?.(`[base_collect] закладки каталога недоступны (${error.message.slice(0, 120)}) — читаем каталог как раньше`);
     return null;
   }
-  if (!data) return { plan: null, planKey: null, bookmarks: {} };
-  const row = data as { plan?: unknown; plan_key?: unknown; bookmarks?: unknown };
+  if (!data) return { plan: null, planKey: null, bookmarks: {}, widenFailedAt: null };
+  const row = data as {
+    plan?: unknown;
+    plan_key?: unknown;
+    bookmarks?: unknown;
+    widen_failed_at?: unknown;
+  };
   return {
     plan: isSourcePlan(row.plan) ? row.plan : null,
     planKey: typeof row.plan_key === 'string' && row.plan_key ? row.plan_key : null,
     bookmarks: readBookmarks(row.bookmarks),
+    widenFailedAt: typeof row.widen_failed_at === 'string' ? row.widen_failed_at : null,
   };
+}
+
+/**
+ * Окно остывания после безрезультатной ПЛАТНОЙ покупки среза.
+ *
+ * Неделя, потому что причина отказа обычно не в дне: узкая вертикаль, у
+ * которой модель раз за разом возвращает уже прочитанный срез, вернёт его и
+ * завтра. Без окна это был бы один bulk-вызов на вертикаль КАЖДУЮ ночь за ноль
+ * строк — отметка в collect_info от этого не спасает, она живёт в базе, а база
+ * у каждой ночи новая.
+ */
+export const HE_WIDEN_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Остывание ещё идёт: покупать расширение рано. */
+export function heWidenOnCooldown(row: HeCatalogCursorRow | null, nowMs: number): boolean {
+  if (!row?.widenFailedAt) return false;
+  const at = Date.parse(row.widenFailedAt);
+  return Number.isFinite(at) && nowMs - at < HE_WIDEN_COOLDOWN_MS;
+}
+
+/**
+ * Запомнить безрезультатную покупку рядом с планом. Никогда не бросает: отказ
+ * записи значит лишь, что следующая ночь попробует ещё раз.
+ */
+export async function rememberHeCatalogWidenFailure(
+  db: SupabaseClient,
+  verticalId: string,
+): Promise<void> {
+  const { error } = await db
+    .from(CURSOR_TABLE)
+    .update({ widen_failed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+    .eq('vertical_id', verticalId);
+  if (error) return;
 }
 
 /**

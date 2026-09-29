@@ -82,6 +82,10 @@ create table if not exists public.he_catalog_cursors (
   plan            jsonb,
   plan_key        text,
   plan_at         timestamptz,
+  -- Когда ПЛАТНОЕ расширение плана последний раз ничего не дало. Живёт рядом с
+  -- планом, а не в базе: базы у каждой ночи свои, и запись «не получилось» в
+  -- collect_info одной базы не мешает следующей ночи купить тот же отказ снова.
+  widen_failed_at timestamptz,
   -- Закладки срезов: {"<source>:<filters_hash>": {id, inserted_at?, at}}.
   bookmarks       jsonb not null default '{}'::jsonb,
   created_at      timestamptz not null default now(),
@@ -92,6 +96,8 @@ comment on table public.he_catalog_cursors is
   'ENG: план источников вертикали + закладки её срезов каталога (pdl/funded/eng_hiring). Одна строка на вертикаль; пишет только собирающаяся база.';
 comment on column public.he_catalog_cursors.bookmarks is
   'Карта «источник:хеш фильтров» → закладка {id, inserted_at?, at}. Отмечает конец префикса строк, с которыми у проекта покончено, а НЕ конец прочитанного.';
+comment on column public.he_catalog_cursors.widen_failed_at is
+  'Время последнего БЕЗРЕЗУЛЬТАТНОГО платного расширения плана. Пока оно моложе окна остывания, расширение не покупается снова.';
 comment on column public.he_catalog_cursors.plan_key is
   'Хеш входа планировщика (имя/описание вертикали, синонимы, отобранные гипотезы, типы компаний, рынок). Совпал — план берётся отсюда вместо платного вызова модели.';
 

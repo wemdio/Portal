@@ -128,7 +128,24 @@ const HYPOTHESIS_FIELDS = [
   'status',
 ] as const;
 
-const VERTICAL_FIELDS = ['id', 'project_id', 'name', 'summary', 'potential_pct', 'rank'] as const;
+// `refill_dry_*` — решение НОЧНОГО добора по этой вертикали: слот ей больше не
+// выдаётся, потому что N подряд ночей не добавили ни одного контакта
+// (lib/hypothesisEngine/autoPipeline.ts). Отдаём оба поля, и оба читаются
+// экраном: штамп решает, рисовать ли пометку вообще, число — единственное, чем
+// пометка себя объясняет. Без них намеренная остановка выглядит в кабинете как
+// поломка, а кнопки «вернуть» не к чему привязать.
+// `refill_resumed_at` здесь НЕТ: это техническая граница окна серии для самого
+// правила, экран её не показывает и показывать не должен.
+const VERTICAL_FIELDS = [
+  'id',
+  'project_id',
+  'name',
+  'summary',
+  'potential_pct',
+  'rank',
+  'refill_dry_since',
+  'refill_dry_nights',
+] as const;
 
 const CHAIN_FIELDS = ['id', 'vertical_id', 'language', 'letters', 'status', 'created_at', 'updated_at'] as const;
 

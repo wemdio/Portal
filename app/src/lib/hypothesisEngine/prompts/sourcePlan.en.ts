@@ -56,6 +56,82 @@ RULES:
 - rationale — one concrete line: WHAT we collect and WHY.
 - Answer in English, ONLY JSON, no markdown fences.`;
 
+const SYSTEM_CATALOG_WIDEN_EN = `You are a head of lead research at Polza agency planning lead sources for B2B outreach on the US/EU market.
+
+A vertical already has a collection plan with company-catalog slices, and every one of them has now been read to the very end: the sources hold no rows left under those filters, and the base is still short of its target. Your job is to name ONE MORE slice over pdl (People Data Labs company catalog, ~19.5M companies) that reaches companies the listed slices could not reach.
+
+THE SLICE MUST BE NEW, NOT A REWORDING:
+- a different industry label that the same vertical also lives under (a dental lab is "medical devices" as well as "hospital & health care");
+- a company-name substring, when the vertical is a business MODEL rather than an industry and its companies carry the word in their names ("franchise", "staffing", "logistics");
+- an adjacent country from the same market, when the listed slices were pinned to one country and the vertical is not;
+- a broader industry label, when every listed slice used a narrow one.
+
+RULES:
+- Never repeat a filter set from the list below, and never return a strict subset of one: those rows are already collected.
+- Never invent industry labels you are unsure about: a broad label that mostly misses the vertical is worse than a narrow name match, because the relevance gate will discard the bulk of it anyway.
+- sizes — headcount buckets ("1-10", "11-50", "51-200", "201-500", "501-1000", "1001-5000", "5001-10000", "10001+"); add only when the hypotheses are explicit about company size. This slice exists because the earlier ones ran out, so a threshold nobody asked for is the last thing it needs.
+- countries — lowercased English country names ("united states", "united kingdom"); omit when the whole market is targeted.
+- rationale — one concrete line: WHAT we collect and WHY it is not what the listed slices already collected.
+- Answer in English, ONLY JSON, no markdown fences.`;
+
+/** Срез, прочитанный до конца и не закрывший цель, — обратная связь планировщику. */
+export interface HeTriedSlice {
+  /** Источник среза (pdl/funded/eng_hiring) — модель должна видеть, что уже отработано. */
+  source: string;
+  /** Фильтры ровно в том виде, в каком срез читали. */
+  filters: unknown;
+  /** Сколько компаний срез дал этой сборке. */
+  rows: number;
+}
+
+/**
+ * Промпт расширения плана: у вертикали ВСЕ каталожные срезы дочитаны до конца,
+ * а цель не набрана → ещё один pdl-срез, который их не повторяет.
+ *
+ * ПОЧЕМУ ОТДЕЛЬНЫЙ SYSTEM, А НЕ ПОЛЕ В ПОЧИНКЕ. `SYSTEM_CATALOG_REPAIR_EN`
+ * начинается с утверждения «в плане НЕ БЫЛО каталожной задачи»; здесь она была,
+ * и не одна. Дописать обратную связь в пользовательскую часть того промпта
+ * значило бы подать модели ложную посылку и тут же её опровергнуть. Поэтому у
+ * расширения свой system, а починка «нет каталога» остаётся БАЙТ В БАЙТ прежней
+ * — её план хранится и переиспользуется (`HE_SOURCE_PLAN_REVISION`), и правка
+ * её промпта обнулила бы каждый сохранённый план.
+ *
+ * СХЕМА ТА ЖЕ — `HeCatalogRepairSchema`: source ставит код (всегда pdl), модель
+ * отвечает только за фильтры. Полный план здесь не нужен и вреден: он мог бы
+ * вернуть ещё один срез вместо прежних, а расширение обязано ДОБАВЛЯТЬ.
+ *
+ * Список `tried` — единственная разница с починкой по содержанию: без него
+ * модель по тому же входу вернула бы ровно тот срез, который уже дочитан.
+ */
+export function buildCatalogWidenMessagesEn(
+  input: SourcePlanPromptInput,
+  tried: HeTriedSlice[],
+): LLMMessage[] {
+  const user = `VERTICAL: ${input.verticalName}
+${input.verticalSummary ?? ''}
+Vertical synonyms: ${input.synonyms?.length ? input.synonyms.join(', ') : '—'}
+
+VERTICAL HYPOTHESES (non-rejected):
+${input.hypotheses.map((h) => `- ${h.tier != null ? `[tier ${h.tier}] ` : ''}${h.title}${h.description ? `: ${h.description}` : ''}`).join('\n')}
+
+COMPANY TYPES FROM VOCABULARY: ${input.companyTypes?.length ? input.companyTypes.join(', ') : '—'}
+
+SLICES ALREADY READ TO THE END (every row under these filters is collected — do not repeat them):
+${tried.map((t) => `- ${t.source}: ${JSON.stringify(t.filters)} → ${t.rows} companies`).join('\n')}
+
+Return ONLY JSON, strictly in this shape:
+{
+  "rationale": string,
+  "pdl_filters": { "industries"?: string[], "sizes"?: string[], "countries"?: string[], "name"?: string }
+}
+At least one filter is required.`;
+
+  return [
+    { role: 'system', content: SYSTEM_CATALOG_WIDEN_EN },
+    { role: 'user', content: user },
+  ];
+}
+
 /**
  * Промпт починки плана: вертикаль без каталожной задачи → ровно один
  * pdl-срез. Источник задаётся кодом (всегда pdl), модель отвечает только за

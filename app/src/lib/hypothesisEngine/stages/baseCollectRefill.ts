@@ -344,12 +344,53 @@ export interface HeRefillResult {
    * а не по всей истории — см. refillFailStreak.
    */
   fail_streak?: number;
+  /**
+   * ДОЧИТАЛИ ЛИ каталог этой ночью — см. refillScanComplete. Единственный
+   * читатель — правило сухой вертикали (lib/hypothesisEngine/autoPipeline.ts):
+   * без этого признака ночь, вставшая по потолку страниц или на оборванном
+   * чтении, была бы неотличима от исчерпанного среза, и вертикаль снимали бы с
+   * добора за наш собственный предохранитель.
+   *
+   * Поле НЕ часть воронки (HeRefillStats) — это свойство ЧТЕНИЯ, а не долива, —
+   * но в строку прогона уезжает внутрь того же jsonb `stats`: у правила есть
+   * только строка he_auto_pipeline_runs, а тащить ради одного флага тяжёлый
+   * collect_info каждой ночи (в нём лежат планы и харвесты задач) нельзя.
+   * Перенос делает writeRefillRun, см. его докблок.
+   */
+  scan_complete?: boolean;
   completed_at: string;
 }
 
 interface RefillConfigRow {
   id: string;
   dailyLeadsCap: number;
+}
+
+/**
+ * Дочитан ли каталог этой ночью до конца.
+ *
+ * `true` — все задачи сборки закончили чтение сами: ни одна не встала по
+ * потолку страниц (`hit_ceiling`), ни одна не оборвалась на середине
+ * (`partial`), ни одна не упала. Только в этом случае «новых компаний нет»
+ * говорит об ИСТОЧНИКЕ. Разбор состояний задачи — хендофф лейна расширения
+ * плана: «встал по потолку» и «чтение оборвалось» не означают «сухо» никогда,
+ * потому что повтор такой ночи продолжает с закладки и приносит строки.
+ *
+ * `false` — читать осталось (потолок, обрыв, упавшая задача) ИЛИ задач не было
+ * вовсе: у ночи без единой задачи нулевой результат говорит о плане, а не о
+ * рынке. Оба случая одинаково не годятся как показание о сухости.
+ *
+ * Поле `exhausted` здесь НЕ участвует: оно про ОДИН срез («за закладкой под
+ * эти фильтры пусто»), а правило судит ночь целиком, где срезов до четырёх и
+ * перемешивает их interleaveTaskHarvests. Сухость источника и сухость среза —
+ * разные факты, и путать их нельзя.
+ */
+function refillScanComplete(info: HeCollectInfo): boolean {
+  const tasks = Array.isArray(info.tasks) ? info.tasks : [];
+  if (tasks.length === 0) return false;
+  return tasks.every(
+    (t) => t.status === 'done' && t.hit_ceiling !== true && t.partial !== true && !t.error,
+  );
 }
 
 /** Начало текущих UTC-суток — дневной бюджет daily_leads_cap считается по ним. */
@@ -448,7 +489,17 @@ async function writeRefillRun(
 ): Promise<void> {
   const patch = {
     status: write.result.status,
-    stats: (write.result.stats ?? {}) as Record<string, unknown>,
+    // `scan_complete` подмешивается в тот же jsonb, что и воронка: у правила
+    // сухой вертикали есть только строка прогона, а различать «источник пуст»
+    // и «мы не дочитали» оно обязано (см. HeRefillResult.scan_complete).
+    // Ключ пишется ТОЛЬКО когда он известен: его отсутствие — это «не знаем»,
+    // и правило трактует такую ночь как непригодную для приговора.
+    stats: {
+      ...((write.result.stats ?? {}) as Record<string, unknown>),
+      ...(write.result.scan_complete === undefined
+        ? {}
+        : { scan_complete: write.result.scan_complete }),
+    },
     error: write.result.error ?? null,
     completed_at: write.result.completed_at,
   };
@@ -813,7 +864,14 @@ export async function completeHeRefillNoNew(args: {
   stats: HeCollectInfo['stats'];
 }): Promise<HeRefillResult> {
   const { ctx, job, baseId, verticalId, info, stats } = args;
-  const refillResult: HeRefillResult = { status: 'no_new', completed_at: new Date().toISOString() };
+  const refillResult: HeRefillResult = {
+    status: 'no_new',
+    // Пустой harvest — ещё не показание о сухости: та же пустота бывает у ночи,
+    // вставшей по потолку страниц. Признак пишется ЗДЕСЬ, потому что дальше
+    // (в строке прогона) задач уже не видно.
+    scan_complete: refillScanComplete(info),
+    completed_at: new Date().toISOString(),
+  };
 
   const { error } = await ctx.supabase
     .from('he_bases')
@@ -1097,6 +1155,11 @@ export async function runHeRefillAppend(args: {
       status: outcome,
       campaign_id: pick.campaignId,
       stats: runStats,
+      // Тот же признак, что и у пустого harvest'а: 'no_new' здесь означает
+      // «строки собрались, но допущенных адресов нет», и судить по такой ночи
+      // о сухости можно только когда каталог дочитан. Пишется и при
+      // 'appended' — форма строки прогона не должна зависеть от исхода.
+      scan_complete: refillScanComplete(info),
       completed_at: new Date().toISOString(),
     };
     await persistRefillBase(ctx, base.id, {

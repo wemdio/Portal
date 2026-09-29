@@ -149,7 +149,9 @@ import {
   heCatalogPlanKey,
   heCatalogSliceKey,
   isHeCatalogSource,
+  heWidenOnCooldown,
   loadHeCatalogCursor,
+  rememberHeCatalogWidenFailure,
   sameBookmark,
   saveHeCatalogCursor,
   usableBookmark,
@@ -177,7 +179,12 @@ import {
   type HeSourcePlan,
   type SourcePlanPromptInput,
 } from '../prompts/sourcePlan';
-import { buildCatalogRepairMessagesEn, buildSourcePlanMessagesEn } from '../prompts/sourcePlan.en';
+import {
+  buildCatalogRepairMessagesEn,
+  buildCatalogWidenMessagesEn,
+  buildSourcePlanMessagesEn,
+  type HeTriedSlice,
+} from '../prompts/sourcePlan.en';
 import {
   HE_FUNDED_SCOPE_FILTER_KEYS,
   HE_FUNDED_SIZE_FILTER_KEYS,
@@ -510,6 +517,81 @@ export function interleaveTaskHarvests(lists: HeUnifiedRow[][]): HeUnifiedRow[] 
   }
 }
 
+/**
+ * Вес контактности строки. Числа — не шкала качества, а порядок: перестановка
+ * зависит только от знака разности, поэтому любая пара с `почта > сайт > 0`
+ * даёт ровно тот же результат. Взяты те же 30/35, что у V2
+ * (`verticalEngineV2/candidatePriority.ts`, слагаемые сайта и почты), чтобы под
+ * одно и то же решение не завелось два разных числа. Почта дороже сайта
+ * намеренно: по готовому адресу контакт получается без обхода сайта.
+ */
+const CONTACTABLE_WEIGHT_SITE = 30;
+const CONTACTABLE_WEIGHT_EMAIL = 35;
+
+/**
+ * Харвест ОДНОЙ задачи: строки, по которым уже есть чем связаться (сайт или
+ * почта), — вперёд; внутри равного веса порядок источника сохраняется
+ * (ничьи разбиваются исходным индексом, то есть сортировка стабильна
+ * независимо от движка).
+ *
+ * ЗАЧЕМ. `kept.slice(0, limit)` у V1 ОКОНЧАТЕЛЕН: строка, не попавшая под кап,
+ * в эту базу не попадёт уже никогда, а слот под капом оплачен. Строка без
+ * сайта и без почты этот слот тратит впустую: `find_emails` и
+ * `enrich_descriptions` требуют колонку сайта, `validate_emails` — адрес, то
+ * есть конструктору по ней нечего обходить и нечего проверять, и контакта из
+ * неё не выйдет. При прочих равных слот отдаём строке, по которой есть чем
+ * работать. Отличие от V2 принципиальное: там тот же вес задаёт лишь ПОРЯДОК
+ * РАБОТЫ внутри источника для следующей партии (задача переоткрывается), здесь
+ * он решает, кто попадёт в базу ВООБЩЕ.
+ *
+ * ПОЧЕМУ ТОЛЬКО ВНУТРИ ЗАДАЧИ — и почему объединённый список сортировать
+ * нельзя ни при каких условиях. `interleaveTaskHarvests` заведён ровно против
+ * того, чтобы один источник съел кап целиком, а по контактности источники
+ * заведомо неравны: у `pdl`/`funded` сайт лежит в самой строке, у
+ * `eng_hiring` его дособирает резолвер с потолком
+ * ENG_HIRING_SITE_RESOLVE_MAX строк на задачу. Общая сортировка вынесла бы
+ * `eng_hiring` в хвост целиком — то есть выбросила бы сигнал НАМЕРЕНИЯ
+ * (компания нанимает прямо сейчас) и `vacancy_title`, единственный крючок
+ * персонализации, который у ENG-строки вообще бывает.
+ *
+ * ПОСЛЕ ДОСБОРА САЙТОВ, А НЕ ДО. Вес считается на готовом харвесте задачи, то
+ * есть уже после `resolveEngHiringSites` (он работает внутри
+ * `fetchEngHiringRows`): строка, которой сайт дособрали, идёт вперёд наравне с
+ * теми, у кого он был изначально. Перенесёте сортировку в ЦИКЛ СТРАНИЦ фетча —
+ * сломаете сразу две вещи: вес будет считаться до досбора, а закладка каталога
+ * уедет не туда, потому что префикс `catalogPrefix` идёт строго по порядку
+ * СКАНИРОВАНИЯ и на переставленных строках закроет не то, что разобрано.
+ */
+function contactableFirst(rows: HeUnifiedRow[]): HeUnifiedRow[] {
+  return rows
+    .map((row, index) => ({ row, index, score: contactableScore(row) }))
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .map((entry) => entry.row);
+}
+
+/** Есть ли по строке чем работать: обходимый сайт или готовый адрес. */
+function hasContactHandle(row: HeUnifiedRow): boolean {
+  return contactableScore(row) > 0;
+}
+
+/**
+ * «Сайт есть» — ровно то же, что понимают под сайтом дедуп и кросс-базовое
+ * исключение: хост с TLD (`normalizeWebsiteForDedup`). Строка со значением
+ * «нет сайта» или `localhost` для конструктора не сайт — `find_emails` по ней
+ * не обойдёт ничего, и считать её контактной значило бы соврать самому себе.
+ * «Почта есть» — тот же тест, что у `emailPoorRows`: пусто/непусто, без
+ * разбора формата; формат судит `validate_emails`, и до него мы здесь не
+ * достаём. В V2 сайт проверяется строже (`veOfficialWebsiteCandidates`
+ * отсеивает ещё и соцсети) — здесь такого понятия у V1 нет ни в одном месте
+ * стадии, и заводить его ради сортировки значило бы менять не порядок, а смысл.
+ */
+function contactableScore(row: HeUnifiedRow): number {
+  return (
+    (normalizeWebsiteForDedup(cell(row.website)) !== '' ? CONTACTABLE_WEIGHT_SITE : 0) +
+    (cell(row.email) !== '' ? CONTACTABLE_WEIGHT_EMAIL : 0)
+  );
+}
+
 /* ─────────────────────── Билдеры запросов к коллекторам ─────────────────────── */
 
 /** directory_filters плана → фильтры реестра (только заданные поля). */
@@ -708,6 +790,35 @@ export interface HePlanRepair {
 }
 
 /**
+ * ПЛАТНОЕ расширение плана: все каталожные срезы дочитаны до конца, цель не
+ * набрана — и мы один раз заплатили за ещё один срез (buildCatalogWidenMessagesEn).
+ *
+ * У записи ОДИН читатель, и без него её бы здесь не было: она же — признак
+ * «в этой сборке уже платили». Каталожная задача, добавленная расширением,
+ * сама становится каталожной задачей плана, и без признака следующий тик
+ * увидел бы ту же картину (все срезы исчерпаны, цель не набрана) и заплатил
+ * второй раз.
+ *
+ * ОТДЕЛЬНОЕ ПОЛЕ, А НЕ `plan_repair`, — и это не вкусовщина. Кабинет печатает
+ * решение автопилота по ОДНОМУ полю `plan_repair.outcome`
+ * (client-eng/EngStepBases.tsx): при 'repaired' он говорит «The plan had no
+ * company catalog — the autopilot added one». Для расширения это неправда —
+ * каталог в плане был, и не один, — а переписать текст кабинета отсюда
+ * нельзя. Поэтому у расширения своё поле, и в белый список клиентской
+ * проекции оно не входит: клиенту тут показывать нечего, читатель — staff.
+ */
+export interface HePlanWidening {
+  /** added — срез добавлен в план; failed — модель не ответила или вернула уже читанный срез. */
+  outcome: 'added' | 'failed';
+  /** Срез, которым расширили план (outcome='added'). */
+  pdl_filters?: HeCollectTask['pdl_filters'];
+  /** Почему расширение не состоялось (outcome='failed'; текст для staff). */
+  error?: string;
+  /** Когда платили (ISO). */
+  at: string;
+}
+
+/**
  * Итог пробы каталожного среза (ensureSliceMatchesVertical). outcome='rejected'
  * означает, что база НЕ строилась осознанно: срез не про эту вертикаль, а
  * автопилоту честнее пропустить вертикаль, чем разослать по мусору.
@@ -757,6 +868,12 @@ export interface HeCollectInfo {
    * he_catalog_cursors (срез уже судила та сборка, что за пробу заплатила).
    */
   slice_probe?: HeSliceProbe;
+  /**
+   * Платное расширение плана, когда все каталожные срезы дочитаны до конца, а
+   * цель не набрана (market='us', HE_COLLECT_WIDEN=replan). Ключа нет —
+   * в ЭТОЙ сборке за расширение не платили; ключ есть — второй раз не платим.
+   */
+  plan_widening?: HePlanWidening;
   /** Гипотезы, по которым реально строился план (accepted-дефолт или выбор специалиста). */
   hypotheses?: Array<{ id: string; title: string; status: string | null }>;
   tasks?: HeCollectTaskState[];
@@ -1312,6 +1429,129 @@ function heWithoutUnfoundedSizeFilters(
   });
 }
 
+/* ───────────── Расширение среза, когда план кончился раньше цели ───────────── */
+
+/**
+ * ЧТО ЭТО. Каталожная задача дочитала свой срез до конца (`exhausted`), а
+ * строк набрала меньше, чем просили. Вместо того чтобы отдать тонкую базу,
+ * перечитываем ТОТ ЖЕ срез с ослабленным порогом размера: сначала «порог или
+ * пустое поле», потом без порога вовсе.
+ *
+ * ЧЕГО ЗДЕСЬ НЕТ И ПОЧЕМУ. «Движок останавливается» — это про V2, а не про
+ * ENG: у V1 один линейный проход и ни одного статуса вроде
+ * `exhausted`/`limited` у БАЗЫ, останавливаться нечему. Единственное, что у
+ * ENG действительно случалось, — ночь, читавшая срез с первой строки; это
+ * закрыла закладка каталога (catalogCursor.ts). Поэтому лестница ниже — про
+ * ЦЕЛЬ, а не про застревание.
+ *
+ * ЛЕСТНИЦА — РОВНО ТРИ СТУПЕНИ, И КАЖДАЯ СЛЕДУЮЩАЯ НАДМНОЖЕСТВО ПРЕДЫДУЩЕЙ.
+ *  0. Срез как спланирован: `sizes` у pdl / `min_funding_usd` у funded стоят.
+ *  1. ПОРОГ ИЛИ ПУСТОЕ ПОЛЕ. Порог остаётся утверждением о компаниях, чей
+ *     размер каталогу ИЗВЕСТЕН; строка с пустым полем — не «компания ниже
+ *     порога», а «размер неизвестен», и выбрасывать её значит фильтровать по
+ *     полноте данных поставщика, а не по цели. Ровно это правило у V2
+ *     (`veDirectorySizeKeep`): в реестре штат не заполнен у 42% строк.
+ *  2. ПОРОГА НЕТ ВОВСЕ. Здесь мы уже отказываемся от утверждения гипотезы о
+ *     размере — поэтому это последняя ступень, а не первая.
+ *
+ * ЧТО ОСТАНАВЛИВАЕТ ПОСЛЕДОВАТЕЛЬНОСТЬ (полный список, а не те случаи, что
+ * пишет код ступени):
+ *  - у задачи нет порога вовсе (`heWidenThreshold` → null): лестница ПУСТА,
+ *    и это самый частый случай — у `eng_hiring` порога размера нет ни одного,
+ *    у pdl без `sizes` и у funded без `min_funding_usd` тоже. Такой задаче
+ *    бесплатные ступени не помогут ничем, и честнее сказать это вслух, чем
+ *    изображать лестницу;
+ *  - набран `limit` — расширять больше нечего;
+ *  - ступень вышла НЕ исчерпанной (набрала свой остаток или встала по
+ *    потолку страниц): в срезе ещё есть строки, и следующая ночь продолжит
+ *    его с закладки — ослаблять порог раньше времени значило бы смешать в
+ *    базу компании, до которых очередь ещё не дошла;
+ *  - чтение оборвалось (`error`): «строк нет» у оборванного чтения означает
+ *    «не дочитали», а не «кончились»;
+ *  - ступень 2 пройдена — дальше ослаблять нечего.
+ *
+ * ЦЕНА. Расширение НЕ увеличивает счёт сборки: гейт релевантности и
+ * конструктор платят за `merged`, а `merged = kept.slice(0, limit)` —
+ * тот же кап, что и у полной базы. Расширение приближает счёт к счёту
+ * ПОЛНОЙ базы, то есть к потолку, который существовал и до него; сверх
+ * потолка оно не платит ничего. Платит оно чтениями каталога, и их ограничивает
+ * тот же ENG_CATALOG_MAX_PAGES на КАЖДУЮ ступень.
+ *
+ * ПО УМОЛЧАНИЮ ВЫКЛЮЧЕНО, и это не осторожность ради осторожности. Ослабление
+ * ОБОСНОВАННОГО порога («small businesses» в гипотезе) — продуктовое решение:
+ * счёт от него не растёт, а точность падает, и платит за неё отклик, который у
+ * ENG не измерен ни разу (`he_auto_pipeline_configs` пуст, ночной добор в
+ * проде не запускался). Поэтому флаг, и поэтому же выключенный код НЕ МОЛЧИТ:
+ * место, где лестница сработала бы, пишется в лог стадии вместе с недобором —
+ * это и есть замер, которого не хватает, чтобы флаг включить осознанно.
+ */
+
+/** Потолок задач плана — тот же, что в HeSourcePlanSchema (`.max(4)`). */
+const HE_PLAN_MAX_TASKS = 4;
+
+/** Режим расширения: off — как раньше; free — две бесплатные ступени; replan — плюс один платный срез. */
+type HeWidenMode = 'off' | 'free' | 'replan';
+/** Ступень лестницы: 0 — как спланировано, 1 — «порог или пусто», 2 — без порога. */
+type HeWidenLevel = 0 | 1 | 2;
+const HE_WIDEN_MAX_LEVEL: HeWidenLevel = 2;
+
+/**
+ * Значение `HE_COLLECT_WIDEN`. Нераспознанное значение — это `off`, но СО
+ * СТРОКОЙ В ЛОГЕ: беззвучное выключение механизма опечаткой в переменной
+ * окружения уже стоило движку одного мёртвого пути (пороги пробы среза
+ * `sliceProbe.ts`), и повторять его здесь нельзя.
+ */
+function heWidenMode(ctx: HeStageContext): HeWidenMode {
+  const raw = (process.env.HE_COLLECT_WIDEN || '').trim().toLowerCase();
+  if (!raw || raw === 'off' || raw === '0' || raw === 'false') return 'off';
+  if (raw === 'free' || raw === 'replan') return raw;
+  stageLog(
+    ctx,
+    `[base_collect] HE_COLLECT_WIDEN='${raw.slice(0, 32)}' не распознано — расширение среза выключено ` +
+      '(допустимы off / free / replan)',
+  );
+  return 'off';
+}
+
+/**
+ * Порог размера, который у задачи вообще можно ослабить, — иначе null и
+ * лестницы у задачи нет. У `eng_hiring` порога размера нет по устройству:
+ * `posted_within_days` — окно свежести, и ослабление окна превратило бы
+ * «мы видим, что вы нанимаете» в неправду (вакансия давно закрыта).
+ *
+ * ВТОРОЕ УСЛОВИЕ, и без него лестница ломает то, что защищает правило порогов:
+ * ослаблять порог можно, только если срез СУЖАЕТ что-то ещё. Тот же тест уже
+ * стоит выше, в heTaskWithoutUnfoundedSize: он ОТКАЗЫВАЕТСЯ снимать порог без
+ * основания, когда после снятия не остаётся ни индустрии, ни имени, и пишет в
+ * лог «срез стал бы всем каталогом». Лестница без этой проверки отменяла бы
+ * тот отказ обходным путём — на втором шаге она посылает порог пустым, и
+ * получается ровно тот нефильтрованный каталог. Обратите внимание, что
+ * `countries` в набор сужающих ключей НЕ входит намеренно: страна — это
+ * рынок, а не срез рынка.
+ */
+function heWidenThreshold(task: HeCollectTask): 'sizes' | 'min_funding_usd' | null {
+  if (task.source === 'pdl') {
+    if (!task.pdl_filters?.sizes?.length) return null;
+    const rest = { ...task.pdl_filters, sizes: undefined };
+    return HE_PDL_SCOPE_FILTER_KEYS.some((k) => heFilterFilled(rest[k])) ? 'sizes' : null;
+  }
+  if (task.source === 'funded') {
+    const min = task.funded_filters?.min_funding_usd;
+    if (!(typeof min === 'number' && Number.isFinite(min) && min > 0)) return null;
+    const rest = { ...task.funded_filters, min_funding_usd: undefined };
+    return HE_FUNDED_SCOPE_FILTER_KEYS.some((k) => heFilterFilled(rest[k]))
+      ? 'min_funding_usd'
+      : null;
+  }
+  return null;
+}
+
+/** Размер строки каталога проходит ослабленный порог: он в наборе ЛИБО не заполнен. */
+function heSizeOrEmpty(sizes: ReadonlySet<string>, value: unknown): boolean {
+  const size = cell(value).toLowerCase();
+  return size === '' || sizes.has(size);
+}
+
 /**
  * ПЛАТНАЯ часть планирования: вызов модели + починка «нет каталога» + проба
  * среза. Вход уже прочитан (collectPlanInput), поэтому эта функция ничего из БД
@@ -1410,7 +1650,10 @@ async function ensureCatalogSource(
   // Потолок плана — 4 задачи (HeSourcePlanSchema). Если модель уже выбрала
   // четыре, каталожный срез вытесняет последнюю: без каталога база всё равно
   // не наберёт объём, а порядок задач у планировщика — от важного к частному.
-  const tasks = plan.tasks.length >= 4 ? plan.tasks.slice(0, 3) : plan.tasks.slice();
+  const tasks =
+    plan.tasks.length >= HE_PLAN_MAX_TASKS
+      ? plan.tasks.slice(0, HE_PLAN_MAX_TASKS - 1)
+      : plan.tasks.slice();
   tasks.push(task);
   stageLog(
     ctx,
@@ -1613,6 +1856,108 @@ async function ensureSliceMatchesVertical(
       replaced_tasks: catalogIdx.length,
     },
   };
+}
+
+/**
+ * ПЛАТНАЯ ступень лестницы: все каталожные срезы дочитаны до конца, цель не
+ * набрана — покупаем ЕЩЁ ОДИН pdl-срез, назвав модели те, что уже отработаны.
+ *
+ * ПОЧЕМУ НЕ «один вызов промпта починки». `buildCatalogRepairMessagesEn` чинит
+ * план, в котором каталожной задачи НЕ БЫЛО вовсе, и не знает ни одного
+ * прочитанного среза; полный планировщик V1 поля обратной связи не имеет вовсе.
+ * По тому же входу оба вернули бы ровно тот срез, который только что дочитан, —
+ * то есть купленный вызов не дал бы ни одной новой компании. Поэтому у
+ * расширения свой EN-промпт со списком отработанного
+ * (`buildCatalogWidenMessagesEn`), а RU-промпт плана не тронут ни одним байтом.
+ *
+ * Функция НЕ трогает `info.tasks`: добавленную задачу в список кладёт
+ * вызывающий — у него на руках та же ссылка, и два писателя одного массива
+ * разошлись бы на первой же правке.
+ *
+ * Провал (модель молчит либо вернула уже прочитанный срез) сборку не роняет:
+ * план уходит как есть, факт оплаты ложится в `plan_widening`, и второй раз за
+ * ту же сборку мы не платим.
+ */
+/**
+ * Покупка расширения кончилась ничем. Отдельная функция, а не выражение на
+ * месте: к моменту проверки компилятор уже сузил `info.plan_widening` по
+ * условию входа в ветку (`!info.plan_widening`) и не знает, что
+ * widenPlanWithPaidSlice поле проставила.
+ */
+function heWidenFailed(info: HeCollectInfo): boolean {
+  return info.plan_widening?.outcome === 'failed';
+}
+
+async function widenPlanWithPaidSlice(
+  ctx: HeStageContext,
+  args: {
+    info: HeCollectInfo;
+    input: HePlanInput;
+    catalogStates: HeCollectTaskState[];
+    harvested: number;
+    limit: number;
+    usage: HeUsage;
+  },
+): Promise<HeCollectTaskState | null> {
+  const { info, input, catalogStates, harvested, limit, usage } = args;
+  const plan = info.plan;
+  if (!plan) return null;
+  const at = new Date().toISOString();
+  const tried: HeTriedSlice[] = catalogStates.map((state) => ({
+    source: state.source,
+    filters:
+      state.task.source === 'pdl'
+        ? state.task.pdl_filters
+        : state.task.source === 'funded'
+          ? state.task.funded_filters
+          : state.task.eng_hiring_query,
+    rows: state.rows,
+  }));
+
+  let widened;
+  try {
+    widened = await callLLMWithSchema(
+      buildCatalogWidenMessagesEn(input.promptInput, tried),
+      HeCatalogRepairSchema,
+      { model: getHeModel('bulk') },
+    );
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    info.plan_widening = { outcome: 'failed', error: message.slice(0, 300), at };
+    stageLog(ctx, `[base_collect] расширение плана не удалось: ${message}`);
+    return null;
+  }
+  addUsage(usage, widened);
+
+  // Срез придумывает модель — значит и порог без основания она ставит так же
+  // охотно, как в починке «нет каталога». Снимаем ДО проверки на повтор:
+  // сравнивать надо ровно тот срез, который пойдёт в сбор.
+  const [task] = heWithoutUnfoundedSizeFilters(
+    ctx,
+    [{ source: 'pdl', rationale: widened.data.rationale, pdl_filters: widened.data.pdl_filters }],
+    input.promptInput,
+  );
+  const key = heCatalogSliceKey(task);
+  const known = new Set(
+    plan.tasks.map((t) => heCatalogSliceKey(t)).filter((k): k is string => k !== null),
+  );
+  if (!key || known.has(key)) {
+    info.plan_widening = { outcome: 'failed', error: 'модель вернула уже прочитанный срез', at };
+    stageLog(
+      ctx,
+      '[base_collect] расширение плана: вернулся срез, который уже дочитан, — план не тронут',
+    );
+    return null;
+  }
+
+  plan.tasks.push(task);
+  info.plan_widening = { outcome: 'added', pdl_filters: task.pdl_filters, at };
+  stageLog(
+    ctx,
+    `[base_collect] все каталожные срезы дочитаны, взято ${harvested} строк из ${limit} — ` +
+      `план расширен pdl-срезом: ${JSON.stringify(task.pdl_filters)}`,
+  );
+  return { source: task.source, status: 'pending', child_job_id: null, rows: 0, task };
 }
 
 /* ─────────────────────────── Фаза DISPATCH ─────────────────────────── */
@@ -1921,9 +2266,25 @@ async function fetchPdlRows(
   limit: number,
   excludedKeys: HeBaseExclusionKeys | null,
   slot: HeCatalogSlot | null,
+  widen: HeWidenLevel = 0,
+  seen?: ReadonlySet<string>,
 ): Promise<HeCatalogFetch> {
   const rows: Record<string, unknown>[] = [];
   const prefix = catalogPrefix(slot);
+  /**
+   * Ступень 1 у pdl судится В JS, а не в запросе, и это вынужденно: размер
+   * отбирает RPC (`p.size = any(p_sizes)`), а NULL он выбрасывает на стороне
+   * БД — выразить «или пусто» через неё нельзя вовсе. Значит на ступенях 1 и 2
+   * `p_sizes` уходит пустым, и СЕРВЕРНОЕ чтение у них одинаковое: разница
+   * только в предикате ниже. Цена одна и та же, выдача у ступени 1 уже —
+   * так и задумано, лестница отдаёт точность по одной ступени за раз.
+   * Починить это «по-честному» можно только правкой общей RPC
+   * (`coalesce(p.size,'') = any(p_sizes)`), но она снимает третью колонку
+   * индекса (country, industry, size) у КАЖДОГО её читателя — вкладки каталога
+   * и экспортов, — ради пути, который по умолчанию выключен.
+   */
+  const sizeKeep =
+    widen === 1 && filters?.sizes?.length ? new Set(lowerList(filters.sizes)) : null;
   let excludedDuringFetch = 0;
   let lastId = usableBookmark('pdl', slot?.from ?? undefined)?.id ?? '';
   let page = 0;
@@ -1933,7 +2294,8 @@ async function fetchPdlRows(
   for (; page < ENG_CATALOG_MAX_PAGES && rows.length < limit; page += 1) {
     const params = {
       p_industries: filters?.industries?.length ? lowerList(filters.industries) : null,
-      p_sizes: filters?.sizes?.length ? lowerList(filters.sizes) : null,
+      // Ослабленная ступень фильтр размера серверу не отдаёт — см. sizeKeep выше.
+      p_sizes: widen === 0 && filters?.sizes?.length ? lowerList(filters.sizes) : null,
       p_countries: filters?.countries?.length ? lowerList(filters.countries) : null,
       p_name: filters?.name ? filters.name.replace(/[%_]/g, '') : null,
       p_after_id: lastId || null,
@@ -1984,6 +2346,33 @@ async function fetchPdlRows(
         prefix.closed(catalogBookmark('pdl', r));
         continue;
       }
+      /**
+       * ДВЕ ПРИЧИНЫ ПРОПУСТИТЬ СТРОКУ НА ОСЛАБЛЕННОЙ СТУПЕНИ, и обе ЗАКРЫВАЮТ
+       * префикс. Это единственное место лестницы, где закладка двигается по
+       * строке, которую мы не взяли, поэтому разбор полный.
+       *
+       * 1. Строку уже взяла НИЖНЯЯ ступень этой же задачи (`seen`). Закрыть её
+       *    можно потому, что она защищена закладкой НИЖНЕЙ ступени: та
+       *    остановилась на первой же взятой строке и с места не сдвинулась.
+       *    Умрёт база — нижняя ступень прочитает эту строку заново, ничего не
+       *    потеряно. (Останавливать здесь нельзя: ослабленная ступень читает
+       *    НАДМНОЖЕСТВО, её первая же строка почти всегда `seen`, и закладка
+       *    была бы приколота к началу среза навсегда — каждую ночь те же 60
+       *    страниц, а хвост среза недостижим.)
+       * 2. Размер вне ослабленного набора (ступень 1). Здесь закладка
+       *    действительно перешагивает строку, отвергнутую ПО СОДЕРЖИМОМУ, и
+       *    разрешено это ровно одному источнику. `pdl_companies` — замороженный
+       *    слепок: одноразовый ingest, обновление = DELETE + полная перезагрузка
+       *    (app/scripts/pdl/README.md), строки на месте не переписываются. А сам
+       *    набор размеров входит в ключ закладки (хеш `pdl_filters`), поэтому
+       *    вердикт по строке для ЭТОГО среза неизменен. У живых фидов
+       *    (funded, eng_hiring) такого права нет и не будет: там ступень 1
+       *    фильтрует ЗАПРОСОМ, и отвергнутая строка до этого цикла не доходит.
+       */
+      if (seen?.has(cell(r.id)) || (sizeKeep && !heSizeOrEmpty(sizeKeep, r.size))) {
+        prefix.closed(catalogBookmark('pdl', r));
+        continue;
+      }
       prefix.stop();
       rows.push(r);
     }
@@ -2022,7 +2411,26 @@ async function fetchFundedRows(
   limit: number,
   excludedKeys: HeBaseExclusionKeys | null,
   slot: HeCatalogSlot | null,
+  widen: HeWidenLevel = 0,
+  seen?: ReadonlySet<string>,
 ): Promise<HeCatalogFetch> {
+  /**
+   * У funded ступень 1 судится В ЗАПРОСЕ, в отличие от pdl: `funded_companies`
+   * читается плоским PostgREST'ом, и «сумма не меньше порога ЛИБО суммы нет
+   * вовсе» выражается тем же `or`, каким `applyFundedFilters` выражает сам
+   * порог. Это не стилистика: живой фид дозаполняет строки (SEC Form D +
+   * обогащение из pdl), а серверный фильтр — единственный способ не дать
+   * закладке перешагнуть строку, чья сумма завтра появится.
+   */
+  const minFunding = widen === 1 ? filters?.min_funding_usd : undefined;
+  // Граница уезжает в запрос ЛИТЕРАЛОМ, поэтому она обязана быть целым числом,
+  // которое `${}` не напечатает в экспоненциальной форме (`1e+21` развалил бы
+  // условие). Не влезло — границы нет, и ступень 1 совпадает со ступенью 2:
+  // это ослабление, а не ужесточение, лишнего в базу не попадёт.
+  const fundingFloor =
+    typeof minFunding === 'number' && minFunding > 0 && Number.isSafeInteger(Math.round(minFunding))
+      ? Math.round(minFunding)
+      : null;
   const rows: Record<string, unknown>[] = [];
   const prefix = catalogPrefix(slot);
   let excludedDuringFetch = 0;
@@ -2047,9 +2455,18 @@ async function fetchFundedRows(
     query = applyFundedFilters(query, {
       industry: filters?.industries?.length ? lowerList(filters.industries) : undefined,
       country: filters?.countries?.length ? lowerList(filters.countries) : undefined,
-      minFunding: filters?.min_funding_usd ?? null,
+      // Ослабленные ступени порог суммы через applyFundedFilters НЕ ставят:
+      // ступень 1 ставит его сама (ниже, вместе с «суммы нет»), ступень 2 не
+      // ставит вовсе.
+      minFunding: widen === 0 ? filters?.min_funding_usd ?? null : null,
       fundedSince: filters?.funded_since ?? null,
     });
+    if (fundingFloor !== null) {
+      query = query.or(
+        `last_funding_usd.gte.${fundingFloor},total_funding_usd.gte.${fundingFloor},` +
+          'and(last_funding_usd.is.null,total_funding_usd.is.null)',
+      );
+    }
     const { data, error } = await query;
     if (error) {
       // Разобранное не выбрасываем: решение «падать или взять префикс»
@@ -2075,6 +2492,15 @@ async function fetchFundedRows(
       }
       // См. тот же приём у pdl: безымянная строка — закрытая, а не тормоз.
       if (!normalizeCompanyForDedup(cell(r.name))) {
+        prefix.closed(catalogBookmark('funded', r));
+        continue;
+      }
+      // Строку, уже взятую НИЖНЕЙ ступенью этой задачи, префикс закрывает: её
+      // держит закладка той ступени (она остановилась на первой же взятой
+      // строке). Разбор — у pdl, там же и причина, по которой останавливаться
+      // здесь нельзя. Отвергнутых ПО СОДЕРЖИМОМУ строк у funded в этом цикле
+      // не бывает вовсе: ослабленный порог суммы ставит запрос.
+      if (seen?.has(cell(r.id))) {
         prefix.closed(catalogBookmark('funded', r));
         continue;
       }
@@ -2410,9 +2836,23 @@ interface HeCatalogRun {
   reusablePlan(planKey: string): HeSourcePlan | null;
   /** Запомнить новый план и выбросить закладки чужих срезов. */
   rememberPlan(plan: HeSourcePlan, planKey: string): Promise<void>;
-  slotFor(task: HeCollectTask): HeCatalogSlot | null;
+  /**
+   * Слот закладки среза задачи на ступени ослабления `widen` (0 — как
+   * спланировано). У каждой ступени ключ свой: ослабленный срез —
+   * надмножество исходного, и общий ключ увёл бы закладку узкого среза по
+   * строкам, которых он никогда не видел (см. heCatalogSliceKey).
+   */
+  slotFor(task: HeCollectTask, widen?: HeWidenLevel): HeCatalogSlot | null;
   move(key: string, bookmark: HeCatalogBookmark | null): void;
   flush(): Promise<void>;
+  /**
+   * Платное расширение плана недавно кончилось ничем — покупать рано.
+   * Вопрос задаётся ПЛАНУ, а не базе: базы у каждой ночи свои, и отметка в
+   * collect_info одной базы следующую ночь ни от чего не удерживает.
+   */
+  widenOnCooldown(): boolean;
+  /** Запомнить безрезультатную покупку рядом с планом. */
+  rememberWidenFailure(): Promise<void>;
 }
 
 function createHeCatalogRun(
@@ -2422,6 +2862,12 @@ function createHeCatalogRun(
   const bookmarks: Record<string, HeCatalogBookmark> = { ...(args.stored?.bookmarks ?? {}) };
   let dirty = false;
   return {
+    widenOnCooldown() {
+      return heWidenOnCooldown(args.stored, Date.now());
+    },
+    async rememberWidenFailure() {
+      await rememberHeCatalogWidenFailure(ctx.supabase, args.verticalId);
+    },
     reusablePlan(planKey) {
       const stored = args.stored;
       if (!stored?.plan || stored.planKey !== planKey) return null;
@@ -2431,8 +2877,15 @@ function createHeCatalogRun(
     },
     async rememberPlan(plan, planKey) {
       if (!args.stored) return;
+      // Ключи ВСЕХ ступеней каждого среза, а не только нулевой: закладки
+      // ослабленных ступеней принадлежат тем же задачам плана, и запись,
+      // оставляющая только нулевые ключи, выбрасывала бы их прогресс каждый
+      // раз, когда план перезаписывается. Ступени перечисляются здесь (а не
+      // там, где ослабление включается), потому что набор ключей обязан
+      // совпадать при ЛЮБОМ значении флага — иначе выключение флага стирало
+      // бы закладки, которые включение снова заведёт.
       const sliceKeys = plan.tasks
-        .map((task) => heCatalogSliceKey(task))
+        .flatMap((task) => [0, 1, 2].map((widen) => heCatalogSliceKey(task, widen)))
         .filter((key): key is string => key !== null);
       const ok = await saveHeCatalogCursor(
         ctx.supabase,
@@ -2456,9 +2909,9 @@ function createHeCatalogRun(
         }
       }
     },
-    slotFor(task) {
+    slotFor(task, widen = 0) {
       if (!isHeCatalogSource(task.source)) return null;
-      const key = heCatalogSliceKey(task);
+      const key = heCatalogSliceKey(task, widen);
       if (!key) return null;
       return { key, from: usableBookmark(task.source, bookmarks[key]) };
     },
@@ -2488,6 +2941,7 @@ async function dispatchTask(
   limit: number,
   getExcludedKeys: () => Promise<HeBaseExclusionKeys>,
   catalog: HeCatalogRun | null,
+  widenMode: HeWidenMode = 'off',
 ): Promise<void> {
   const { task } = state;
 
@@ -2534,55 +2988,116 @@ async function dispatchTask(
     // (market='us'): у RU-плана ENG-задач не бывает, и лишнее чтение data всех
     // баз проекта там ничем не оправдано.
     const excluded = slot ? await getExcludedKeys() : null;
-    const fetched =
-      task.source === 'pdl'
-        ? await fetchPdlRows(ctx, task.pdl_filters, limit, excluded, slot)
-        : task.source === 'funded'
-          ? await fetchFundedRows(ctx, task.funded_filters, limit, excluded, slot)
-          : await fetchEngHiringRows(ctx, task.eng_hiring_query, limit, excluded, slot);
-    const moved = slot && !sameBookmark(fetched.next, slot.from) ? fetched.next : null;
+
+    /**
+     * ЛЕСТНИЦА ОСЛАБЛЕНИЯ ПОРОГА (см. блок «Расширение среза…»). Гейт рынка
+     * здесь один и тот же: `catalog !== null` — это ровно market='us'
+     * (getCatalog отдаёт null на любом другом рынке), поэтому ни одно значение
+     * HE_COLLECT_WIDEN не может расширить срез staff-сборки.
+     */
+    const threshold = catalog ? heWidenThreshold(task) : null;
+    const maxLevel: HeWidenLevel = catalog && threshold && widenMode !== 'off' ? HE_WIDEN_MAX_LEVEL : 0;
+
+    const rows: Record<string, unknown>[] = [];
+    /** id строк, уже взятых этой задачей: ослабленная ступень читает НАДМНОЖЕСТВО. */
+    const seen = new Set<string>();
+    let excludedDuringFetch = 0;
+    let continued = false;
+    let movedAny = false;
+    let level: HeWidenLevel = 0;
+    let fetched: HeCatalogFetch | null = null;
+    for (let step: HeWidenLevel = 0; step <= maxLevel; step = (step + 1) as HeWidenLevel) {
+      const stepSlot = step === 0 ? slot : catalog?.slotFor(task, step) ?? null;
+      // Остаток до limit, а не limit: ослабленная ступень ДОБИРАЕТ, а не
+      // собирает заново, иначе задача вернула бы больше строк, чем у неё просили.
+      const remaining = limit - rows.length;
+      if (remaining <= 0) break;
+      fetched =
+        task.source === 'pdl'
+          ? await fetchPdlRows(ctx, task.pdl_filters, remaining, excluded, stepSlot, step, seen)
+          : task.source === 'funded'
+            ? await fetchFundedRows(ctx, task.funded_filters, remaining, excluded, stepSlot, step, seen)
+            : await fetchEngHiringRows(ctx, task.eng_hiring_query, remaining, excluded, stepSlot);
+      level = step;
+      excludedDuringFetch += fetched.excludedDuringFetch;
+      if (stepSlot?.from) continued = true;
+      const moved = stepSlot && !sameBookmark(fetched.next, stepSlot.from) ? fetched.next : null;
+      if (stepSlot && moved) {
+        catalog?.move(stepSlot.key, moved);
+        movedAny = true;
+      }
+      for (const row of fetched.rows) {
+        rows.push(row);
+        const id = cell(row.id);
+        if (id) seen.add(id);
+      }
+      // Следующая ступень — только когда ЭТА кончилась целиком. Обрыв чтения и
+      // стоп по потолку страниц оставляют выдачу на месте: ослаблять порог на
+      // них значило бы подмешать в базу компании, до которых очередь ещё не
+      // дошла, и при этом объявить срез исчерпанным.
+      if (!fetched.exhausted || fetched.error || fetched.hitCeiling || rows.length >= limit) break;
+      if (step < maxLevel) {
+        stageLog(
+          ctx,
+          `[base_collect] ${task.source}: срез дочитан на ${rows.length} строках из ${limit} — ступень ` +
+            `${step + 1}: ${step === 0 ? `${threshold} или пустое поле` : `${threshold} снят`}`,
+        );
+      }
+    }
+    // Замер для выключённого флага. Строка пишется РОВНО там, где лестница
+    // сработала бы, и это единственное место, где недобор ENG-среза вообще
+    // виден: истории английских сборок нет, и включать расширение вслепую
+    // нечем. Ставится и при maxLevel=0 — «ослаблять нечего» тоже ответ.
+    if (catalog && fetched && fetched.exhausted && !fetched.error && !fetched.hitCeiling && rows.length < limit) {
+      const why =
+        !threshold
+          ? 'ослаблять нечего: порога размера в срезе нет'
+          : widenMode === 'off'
+            ? `порог ${threshold} можно ослабить, но расширение выключено (HE_COLLECT_WIDEN)`
+            : `не помогла и ступень ${level} (${threshold} снят)`;
+      stageLog(ctx, `[base_collect] ${task.source}: срез дочитан на ${rows.length} строках из ${limit} — ${why}`);
+    }
     // Обрыв выдачи НЕ выбрасывает разобранное: падаем только когда фиксировать
     // нечего вовсе — ни одной строки и ни одного сдвига закладки.
-    if (fetched.error && fetched.rows.length === 0 && !moved) {
+    if (fetched?.error && rows.length === 0 && !movedAny) {
       throw new Error(`${task.source}: ${fetched.error}`);
     }
-    if (slot && moved) catalog?.move(slot.key, moved);
-    state.harvest = fetched.rows.map(
+    state.harvest = rows.map(
       task.source === 'pdl' ? mapPdlRow : task.source === 'funded' ? mapFundedRow : mapEngHiringRow,
     );
     state.status = 'done';
     state.rows = state.harvest.length;
     state.child_job_id = null;
-    if (fetched.excludedDuringFetch > 0) {
-      state.excluded_during_fetch = fetched.excludedDuringFetch;
+    if (excludedDuringFetch > 0) {
+      state.excluded_during_fetch = excludedDuringFetch;
       stageLog(
         ctx,
-        `[base_collect] ${task.source}: ${fetched.excludedDuringFetch} строк пропущено на выборке — ` +
+        `[base_collect] ${task.source}: ${excludedDuringFetch} строк пропущено на выборке — ` +
           'компании уже есть в других базах проекта',
       );
     }
     // Чтение стартовало с сохранённой закладки: срез уже листали прошлые
     // сборки проекта. Без этого факта «выдача кончилась» неотличимо от «в
     // срезе не было ни строки с самого начала» (см. поле `continued`).
-    if (slot?.from) state.continued = true;
-    if (fetched.error) {
+    if (continued) state.continued = true;
+    if (fetched?.error) {
       // Партия частичная: источник жив, чтение оборвалось на странице. Ни
       // исчерпания, ни потолка не заявляем — продолжение пойдёт с закладки.
       state.partial = true;
       state.note = `частичная партия: выдача каталога оборвалась (${fetched.error})`;
       stageLog(
         ctx,
-        `[base_collect] ${task.source}: партия собрана частично, взято ${fetched.rows.length} строк, ` +
+        `[base_collect] ${task.source}: партия собрана частично, взято ${rows.length} строк, ` +
           `выдача оборвалась: ${fetched.error}`,
       );
-    } else if (fetched.hitCeiling) {
+    } else if (fetched?.hitCeiling) {
       // Стоп по потолку страниц — предохранитель, а НЕ исчерпание среза:
       // exhausted не ставим, иначе разбор нулевой сборки сказал бы клиенту
       // «новых компаний не осталось» на срабатывании предохранителя.
       const scanned = task.source === 'eng_hiring' ? ENG_HIRING_MAX_PAGES : ENG_CATALOG_MAX_PAGES;
       state.hit_ceiling = true;
       state.note = `остановлено на потолке сканирования каталога: ${scanned}k строк`;
-    } else if (slot && fetched.exhausted) {
+    } else if (slot && fetched?.exhausted) {
       // Выдача каталога кончилась на короткой странице: за закладкой под эти
       // фильтры строк больше нет. Пометка для staff + сигнал разбору нулевой
       // сборки (segmentExhausted). Ставим только при slot — вне market='us'
@@ -2599,9 +3114,15 @@ async function dispatchTask(
       // дочитан ПОСЛЕ прошлых сборок, без закладки — с первой строки. В
       // причину базы уезжает та, что случилась (breakdown ниже собирается из
       // пометок задач), иначе staff читал бы про закладку, которой не было.
-      state.note = slot.from
-        ? 'каталог дочитан до конца: за закладкой строк под фильтры среза больше нет'
-        : 'каталог дочитан до конца с первой строки: строк под фильтры среза больше нет';
+      //
+      // Ослабленная ступень (`level > 0`) названа в пометке отдельно: срез,
+      // дочитанный уже БЕЗ порога, и срез, дочитанный с порогом, — разные
+      // факты, и по второму есть что ослабить, а по первому нечего.
+      const widened = level > 0 ? `; срез ослаблен до ступени ${level}` : '';
+      state.note =
+        (slot.from
+          ? 'каталог дочитан до конца: за закладкой строк под фильтры среза больше нет'
+          : 'каталог дочитан до конца с первой строки: строк под фильтры среза больше нет') + widened;
     }
     return;
   }
@@ -3851,15 +4372,43 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   };
 
   // ─── PLAN ───
+  /**
+   * Вход планировщика этого тика. Нужен ДВУМ местам: самой фазе PLAN и платному
+   * расширению плана после DISPATCH. Читается бесплатно (гипотезы + вокабуляр),
+   * поэтому ленивый геттер ниже, а не обязательное чтение на каждом тике.
+   */
+  let planInput: HePlanInput | null = null;
+  /**
+   * Тот же вход для тика, который фазу PLAN НЕ проходил (план уже сохранён, а
+   * задачи ещё pending: джоба умерла между записью плана и диспатчем — это одна
+   * запись, поэтому состояние достижимо). Ошибку здесь НЕ бросаем: в фазе PLAN
+   * она честный фейл сборки, а расширение плана — улучшение, и его отказ обязан
+   * оставить сборку такой, какой она была бы без него.
+   */
+  const getPlanInput = async (): Promise<HePlanInput | null> => {
+    if (planInput) return planInput;
+    try {
+      planInput = await collectPlanInput(job, ctx, vertical, market);
+    } catch (e) {
+      stageLog(
+        ctx,
+        `[base_collect] вход планировщика перечитать не удалось: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return null;
+    }
+    return planInput;
+  };
   if (!info.plan) {
     // Вход планировщика читается бесплатно (гипотезы + вокабуляр) — по его хешу
-    // и решается, нужен ли платный вызов модели вообще.
-    const planInput = await collectPlanInput(job, ctx, vertical, market);
+    // и решается, нужен ли платный вызов модели вообще. Бросает здесь, как и
+    // раньше: пустое пересечение с выбором специалиста — честный фейл.
+    const planned = await collectPlanInput(job, ctx, vertical, market);
+    planInput = planned;
     const catalog = await getCatalog();
-    const reusedPlan = catalog?.reusablePlan(planInput.planKey) ?? null;
+    const reusedPlan = catalog?.reusablePlan(planned.planKey) ?? null;
     // Провенанс плана считаем всегда по ТЕКУЩЕМУ чтению гипотез, а не копией из
     // стора: иначе переиспользование показывало бы вчерашнюю разметку.
-    info.hypotheses = planInput.usedHypotheses;
+    info.hypotheses = planned.usedHypotheses;
     let planRepair: HePlanRepair | undefined;
     let sliceProbe: HeSliceProbe | undefined;
     if (reusedPlan) {
@@ -3873,7 +4422,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
           `${reusedPlan.tasks.map((t) => t.source).join(', ')}) — планировщик и проба среза не оплачиваются`,
       );
     } else {
-      const built = await buildPlan(ctx, vertical, planInput, usage, market);
+      const built = await buildPlan(ctx, vertical, planned, usage, market);
       info.plan = built.plan;
       planRepair = built.planRepair;
       sliceProbe = built.sliceProbe;
@@ -3918,7 +4467,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     // Новый план — в стор вертикали: следующая ночь возьмёт его вместо платного
     // вызова, и её закладки совпадут по ключу фильтров с этими срезами. Отказ
     // записи ничего не ломает — будет оплачен ещё один план.
-    if (!reusedPlan) await catalog?.rememberPlan(info.plan, planInput.planKey);
+    if (!reusedPlan) await catalog?.rememberPlan(info.plan, planned.planKey);
     stageLog(ctx, `[base_collect] план: ${info.tasks.length} задач (${info.tasks.map((t) => t.source).join(', ')})`);
   }
   const tasks = info.tasks ?? [];
@@ -3990,10 +4539,16 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   const dispatchCatalog = tasks.some((t) => t.status === 'pending' && isHeCatalogSource(t.source))
     ? await getCatalog()
     : null;
-  for (const state of tasks) {
-    if (state.status !== 'pending') continue;
+  // Режим расширения среза читается один раз на ТИК, а не на каждую каталожную
+  // задачу: иначе строка про нераспознанное значение переменной окружения
+  // печаталась бы по разу на задачу. Вне market='us' расширения нет вовсе — и
+  // решает это РЫНОК, а не наличие закладок: тик, диспатчащий только карты,
+  // каталожного прогона не заводит, но платное расширение плана на нём ещё
+  // может понадобиться.
+  const widenMode: HeWidenMode = market === 'us' ? heWidenMode(ctx) : 'off';
+  const runDispatch = async (state: HeCollectTaskState, catalog: HeCatalogRun | null): Promise<void> => {
     try {
-      await dispatchTask(ctx, state, project, limit, getExcludedKeys, dispatchCatalog);
+      await dispatchTask(ctx, state, project, limit, getExcludedKeys, catalog, widenMode);
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +
@@ -4009,7 +4564,96 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     // записи: потерянный сдвиг стоит одного лишнего скана следующей ночью,
     // потерянный префикс при уехавшем сдвиге стоил бы компаний, которых больше
     // никто не прочитает. Запись закладки не бросает by design.
-    if (dispatchCatalog) await dispatchCatalog.flush();
+    if (catalog) await catalog.flush();
+  };
+  for (const state of tasks) {
+    if (state.status !== 'pending') continue;
+    await runDispatch(state, dispatchCatalog);
+  }
+
+  /**
+   * ПЛАТНОЕ РАСШИРЕНИЕ ПЛАНА — последняя ступень лестницы и единственная, за
+   * которую платят. Условия все до одного обязательны:
+   *  - market='us' и HE_COLLECT_WIDEN=replan (по умолчанию расширения нет);
+   *  - в этой сборке за расширение ещё не платили (`plan_widening` — тот самый
+   *    признак: добавленный срез сам становится каталожной задачей, и без
+   *    признака следующий тик увидел бы ту же картину и заплатил снова);
+   *  - у плана есть куда добавить задачу (потолок 4, HeSourcePlanSchema);
+   *  - каталожные задачи ЕСТЬ и ВСЕ дочитаны до конца (`exhausted`). Задача,
+   *    вставшая по потолку сканирования или оборванная, — НЕ дочитана: там
+   *    поможет повторный запуск, а не новый срез, и платить за срез значило бы
+   *    покупать обход собственного предохранителя;
+   *  - даже ВЕРХНЯЯ оценка собранного (сумма строк задач, до дедупа и
+   *    межбазового исключения) не дотягивает до limit. Оценка сверху нарочно:
+   *    расширяемся, только когда недобор доказан при самом благоприятном счёте.
+   *
+   * Цену ограничивает не только «раз на сборку»: добавленный срез живёт в
+   * сохранённом плане, а план не может быть длиннее четырёх задач — значит за
+   * всю жизнь плана таких покупок не больше, чем (4 − задач в плане).
+   */
+  const catalogStates = tasks.filter((t) => isHeCatalogSource(t.source));
+  const harvestedUpperBound = tasks.reduce((sum, t) => sum + (t.status === 'done' ? t.rows : 0), 0);
+  if (
+    widenMode === 'replan' &&
+    !info.plan_widening &&
+    info.plan &&
+    info.plan.tasks.length < HE_PLAN_MAX_TASKS &&
+    catalogStates.length > 0 &&
+    // Ни одной незавершённой задачи: пока дочерний парсер карт жив, сколько
+    // собрано — неизвестно, и «недобор» был бы догадкой, за которую платят.
+    tasks.every((t) => t.status === 'done' || t.status === 'failed') &&
+    catalogStates.every((t) => t.status === 'done' && t.exhausted === true) &&
+    harvestedUpperBound < limit
+  ) {
+    // Прогон закладок нужен и здесь — тик мог не диспатчить ни одной каталожной
+    // задачи (ждал карты). Чтение мемоизировано, лишнего запроса нет.
+    const replanCatalog = await getCatalog();
+    // Остывание: прошлая покупка уже ничего не дала. Проверяем ПЕРЕД тем, как
+    // читать вход планировщика, — это единственное место, где отказ прошлой
+    // ночи вообще виден, потому что info у сегодняшней базы пустой.
+    const onCooldown = replanCatalog?.widenOnCooldown() === true;
+    if (onCooldown) {
+      stageLog(
+        ctx,
+        '[base_collect] расширение плана пропущено: прошлая платная попытка ничего не дала, окно остывания ещё идёт',
+      );
+    }
+    const input = replanCatalog && !onCooldown ? await getPlanInput() : null;
+    if (input && replanCatalog) {
+      const added = await widenPlanWithPaidSlice(ctx, {
+        info,
+        input,
+        catalogStates,
+        harvested: harvestedUpperBound,
+        limit,
+        usage,
+      });
+      // Покупка кончилась ничем — отмечаем это У ПЛАНА, иначе завтрашняя база
+      // с пустым collect_info купит ровно тот же отказ ещё раз, и так каждую
+      // ночь: один bulk-вызов за ноль строк. `outcome: 'failed'` ставит сама
+      // widenPlanWithPaidSlice во всех своих безрезультатных ветках.
+      if (!added && heWidenFailed(info)) {
+        await replanCatalog.rememberWidenFailure();
+      }
+      // Запись оплаты — КЛИЕНТОМ БЕЗ СИГНАЛА ДЖОБЫ (paidCheckpointDb) и ДО
+      // диспатча нового среза: прогон уже мог быть прерван, а без этой записи
+      // следующий тик купил бы срез второй раз.
+      //
+      // Купленная задача уезжает в ТУ ЖЕ запись, а не после диспатча, и это не
+      // порядок ради порядка. Фазу PLAN тик с уже сохранённым планом больше не
+      // проходит, а `info.tasks` собирается ТОЛЬКО там (из `info.plan.tasks`) —
+      // значит запись, где срез есть в плане, но не в списке задач, оставила бы
+      // оплаченный срез без единого исполнителя: заплатили и не собрали. Здесь
+      // прерванный прогон находит задачу в 'pending' и диспатчит её сам.
+      if (added) tasks.push(added);
+      await persistCollectInfo(ctx, baseId, info, { paidCheckpoint: true });
+      if (added) {
+        await runDispatch(added, replanCatalog);
+        // План со свежим срезом — в стор вертикали: иначе за него платила бы
+        // КАЖДАЯ следующая ночь той же вертикали.
+        await replanCatalog.rememberPlan(info.plan, input.planKey);
+      }
+    }
   }
 
   // ─── WAIT ───
@@ -4055,9 +4699,18 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // целиком. Строки без компании и строки-мусор, чья компания схлопывается в
   // пустой ключ («ООО», «—», «»), выбрасываем до мёрджа — все они делили бы
   // один пустой ключ «|» (дедуп ниже их тоже отбрасывает, это первая линия).
+  //
+  // Внутри КАЖДОЙ задачи (только market='us') строки с сайтом/почтой поднимаем
+  // наверх — contactableFirst. Между задачами порядок не трогаем ни здесь, ни
+  // где-либо ещё: очерёдность источников — дело round-robin'а, и общая
+  // сортировка сломала бы ровно то, против чего он заведён. RU-путь получает
+  // тот же массив, что и до правки.
   const interleaved = dedupUnifiedRows(
     interleaveTaskHarvests(
-      done.map((t) => (t.harvest ?? []).filter((r) => normalizeCompanyForDedup(r.company) !== '')),
+      done.map((t) => {
+        const rows = (t.harvest ?? []).filter((r) => normalizeCompanyForDedup(r.company) !== '');
+        return market === 'us' ? contactableFirst(rows) : rows;
+      }),
     ),
   );
 
@@ -4073,6 +4726,21 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // Кап — после дедупа и исключения, как раньше после дедупа (limit уже
   // посчитан выше: totalRowsCap(job), у refill — уменьшенный под дневной кап).
   const merged = kept.slice(0, limit);
+
+  // ЕДИНСТВЕННЫЙ замер эффекта contactableFirst: сколько строк со связью
+  // получила база и сколько их было во всём харвесте. Пишем только когда кап
+  // реально срезал (иначе порядок ни на что не влияет — множество то же) и
+  // только при market='us': истории ENG-сборок нет вовсе, и без этой строки
+  // проверить выигрыш после выкатки будет не по чему.
+  if (market === 'us' && kept.length > merged.length) {
+    const withHandle = merged.filter(hasContactHandle).length;
+    stageLog(
+      ctx,
+      `[base_collect] кап ${limit}: из ${kept.length} строк взято ${merged.length}, ` +
+        `со связью (сайт/почта) ${withHandle} — всего таких в харвесте ` +
+        `${kept.filter(hasContactHandle).length}`,
+    );
+  }
 
   const stats = {
     tasks_total: tasks.length,
