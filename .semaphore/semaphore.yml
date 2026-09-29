@@ -171,9 +171,9 @@ blocks:
             # Проверка типов в ветках — TypeScript 7 (пакет typescript-7, нативный,
             # на Go), с 28.09.2026: те же куски, что у typecheck:strict, но в
             # несколько раз быстрее (TypeScript 5 здесь занимал от 20 с до 3 мин
-            # с кэшем и ~6 мин без него). Прод-сборка в Dockerfile по-прежнему
-            # проверяет typecheck:strict на TypeScript 5 — вторая линия, если 7
-            # в чём-то окажется мягче.
+            # с кэшем и ~6 мин без него). С 29.09.2026 на TypeScript 7 и
+            # прод-сборка в Dockerfile; typecheck:strict (TypeScript 5) остался
+            # запасным — откат одной строкой в Dockerfile.
             #
             # Куски (tsconfig.typecheck.*.json + маршруты Next), а не один
             # проход, — из-за памяти: у TypeScript 7 весь проект разом берёт

@@ -54,10 +54,16 @@ ENV NEXT_PUBLIC_SIGNUP_HOSTS=$NEXT_PUBLIC_SIGNUP_HOSTS
 # Increase Node heap for Next.js build (avoids OOM in Docker)
 ENV NODE_OPTIONS="--max-old-space-size=4096"
 
-# Проверка типов идёт до сборки и кусками (tsconfig.typecheck.*.json).
-# Сплошной проход здесь падал: 21.09 замер дал heap 4029 из 4096 МБ, exit 134.
-# По кускам худший берёт 3,3 ГБ, и запас остаётся.
-RUN npm run typecheck:strict
+# Проверка типов идёт до сборки и кусками (tsconfig.typecheck.*.json) — с
+# 29.09.2026 на TypeScript 7 (typecheck:fast), как и в CI веток: TypeScript 5
+# (typecheck:strict) занимал здесь 3,5–4 минуты каждой выкладки, 7-й — около
+# минуты. Проверен на Alpine (musl): бинарник статический, при ошибке типов
+# возвращает 1 и роняет сборку. Откат — заменить строку ниже на
+# `RUN npm run typecheck:strict`.
+#
+# Кусками — из-за памяти: целиком проект не влезает в 4 ГБ машины сборки ни у
+# 5-го, ни у 7-го TypeScript; по кускам с --checkers 1 пик 2,9 ГБ.
+RUN npm run typecheck:fast
 # Оба флага ниже обязательны: next.config.ts разрешает пропуск встроенного
 # тайпчекера Next только когда рядом стоит флаг «типы уже проверены».
 # И он здесь законен именно потому, что строка выше их проверила.
