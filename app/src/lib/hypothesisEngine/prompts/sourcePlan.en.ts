@@ -35,7 +35,8 @@ RULES:
 - Each task's rationale — one concrete line: WHAT we collect and WHY (for which hypothesis/segment).
 - Never invent industry labels you are unsure about: use well-known LinkedIn industry names; fewer precise labels beat many approximate ones.
 - countries for pdl/funded — lowercased English country names; countries for eng_hiring — ATS codes from the list above; omit when the whole market is targeted.
-- funded_since — YYYY-MM-DD (e.g. "2026-01-01"); posted_within_days — whole days (7/30/90).
+- sizes (pdl) and min_funding_usd (funded) are THRESHOLDS, not defaults: add them only when the hypotheses are explicit about company size or about a funding amount. A threshold nobody asked for cuts the slice to a fraction of the market and the base comes out small with nothing to explain why; companies that turn out not to fit are caught by the relevance check before anything is sent.
+- funded_since — YYYY-MM-DD (e.g. "2026-01-01"); posted_within_days — whole days (7/30/90). Both are RECENCY windows, not size thresholds: set them when the hypothesis is about recency, and leave them out otherwise.
 - roles and maps queries — non-empty strings up to 300 characters.
 - Answer strictly in English, ONLY JSON, no markdown fences.`;
 

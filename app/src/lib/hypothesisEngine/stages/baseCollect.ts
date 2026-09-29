@@ -16,7 +16,13 @@ import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
  *     пустое пересечение с неотклонёнными — фейл джобы. План и статусы задач
  *     пишутся в collect_info.
  *     При market='us' промпт — EN (prompts/sourcePlan.en.ts) с ENG-источниками
- *     (pdl / funded / eng_hiring / google_maps); схема плана общая.
+ *     (pdl / funded / eng_hiring / google_maps); схема плана общая. И там же
+ *     вызова может не быть вовсе: если вход планировщика (имя и описание
+ *     вертикали, отобранные гипотезы, вокабуляр, рынок) совпал с сохранённым в
+ *     he_catalog_cursors, план берётся оттуда — вместе с пробой среза это весь
+ *     платёж фазы. Иначе каждая ночь добора платила бы за план заново, и её
+ *     закладки каталога не совпадали бы с прошлыми ни разу (ключ закладки —
+ *     хеш фильтров, а фильтры приходят из плана).
  *  2. DISPATCH — каждая pending-задача уходит в свой коллектор:
  *     companies_directory — синхронно через searchRows с пагинацией страницами
  *     по 1000 (строки сразу в задаче, дочерней джобы нет; кап — limit из
@@ -24,9 +30,12 @@ import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
  *     пропускаются ещё на выборке — см. блок про продолжение ниже);
  *     pdl / funded / eng_hiring (market='us') — тоже синхронно: прямое чтение
  *     справочных таблиц pdl_companies / funded_companies / eng_hiring_cache
- *     через ctx.supabase (keyset-пагинация по id у pdl/funded, офсетная у
- *     eng_hiring; дочерних джоб нет — исключение чужих баз для них, как для
- *     hh/карт, только на мёрдже);
+ *     через ctx.supabase, дочерних джоб нет. Пагинация keyset: у pdl по id
+ *     (одноразовый bulk-дамп), у funded и eng_hiring по ВРЕМЕНИ ВСТАВКИ —
+ *     живой фид, а их id с порядком вставки не связан, и закладка по id
+ *     отправила бы за курсор ровно свежие строки. Компании других баз проекта
+ *     исключаются ещё НА ВЫБОРКЕ (как у реестра), место разбора среза живёт в
+ *     he_catalog_cursors — см. блок «ЧТЕНИЕ КАТАЛОГА С ЗАКЛАДКОЙ»;
  *     hh_live / yandex_maps / google_maps — insert дочерней джобы
  *     (parser_jobs / yandex_maps_jobs / google_maps_jobs), её id — в
  *     child_job_id. У google_maps language/region — по рынку проекта
@@ -107,6 +116,11 @@ import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
  * с «сегмент исчерпан: новых компаний нет» вместо общего нулевого фейла.
  * Стоп по потолку 200 страниц — НЕ исчерпание: задача получает note про
  * предел сканирования, и «сегмент исчерпан» на такой задаче не срабатывает.
+ * ТО ЖЕ САМОЕ у ENG-каталогов (market='us'), и для ночного добора это не
+ * оптимизация, а условие работы: каждая ночь заводит новую базу с пустым
+ * collect_info, поэтому без закладки вне базы она читала бы срез с первой
+ * строки и получала ноль новых компаний. Закладка и переиспользуемый план
+ * живут в he_catalog_cursors — см. блок «ЧТЕНИЕ КАТАЛОГА С ЗАКЛАДКОЙ».
  * У hh/карт
  * исключение остаётся только на мёрдже: продолжение для них требует
  * вариации поисковых запросов — future work.
@@ -128,6 +142,22 @@ import {
   HE_MAX_EMAILS_PER_COMPANY_DEFAULT,
   normalizeHeMaxEmailsPerCompany,
 } from '../baseCollectEnqueue';
+// Закладка каталога и переиспользуемый план (только market='us'): стор ВНЕ
+// he_bases, потому что каждый ночной добор создаёт новую базу с пустым
+// collect_info — см. шапку catalogCursor.ts.
+import {
+  heCatalogPlanKey,
+  heCatalogSliceKey,
+  isHeCatalogSource,
+  loadHeCatalogCursor,
+  sameBookmark,
+  saveHeCatalogCursor,
+  usableBookmark,
+  type HeCatalogBookmark,
+  type HeCatalogCursorRow,
+  type HeCatalogSlot,
+  type HeCatalogSource,
+} from '../catalogCursor';
 // Только константа потолка запуска: модуль чистый (типы + маппинг лидов), в
 // стадию он не тащит ни БД, ни рассыльщика. Нужна, чтобы назвать вслух базу, у
 // которой адресов больше потолка запуска, — см. предупреждение в финале стадии.
@@ -148,7 +178,14 @@ import {
   type SourcePlanPromptInput,
 } from '../prompts/sourcePlan';
 import { buildCatalogRepairMessagesEn, buildSourcePlanMessagesEn } from '../prompts/sourcePlan.en';
-import { HeCatalogRepairSchema, HeSourcePlanSchema } from '../schemas';
+import {
+  HE_FUNDED_SCOPE_FILTER_KEYS,
+  HE_FUNDED_SIZE_FILTER_KEYS,
+  HE_PDL_SCOPE_FILTER_KEYS,
+  HE_PDL_SIZE_FILTER_KEYS,
+  HeCatalogRepairSchema,
+  HeSourcePlanSchema,
+} from '../schemas';
 // Клиент для записи ЧЕКПОЙНТА ОПЛАТЫ — без сигнала джобы (см. paidCheckpointDb
 // ниже). Ни одно чтение стадии через него не идёт.
 import { heCheckpointSupabase } from '../stageDb';
@@ -525,15 +562,55 @@ export interface HeCollectTaskState {
   /** Когда задача ушла в дочерний парсер (ISO) — таймаут ожидания в WAIT. */
   dispatched_at?: string;
   error?: string;
-  /** Реестр: строк пропущено на выборке как уже собранные в других базах проекта. */
+  /**
+   * Реестр и ENG-каталоги: строк пропущено на выборке как уже собранные в других
+   * базах проекта. Пропущенные НЕ тратят limit — в этом и смысл исключения на
+   * выборке (продолжение больших срезов).
+   */
   excluded_during_fetch?: number;
-  /** Реестр: выдача под фильтры кончилась раньше limit — сегмент собран целиком. */
+  /**
+   * Выдача источника под фильтры среза КОНЧИЛАСЬ раньше limit — продолжать
+   * этим срезом нечем. Ставят обе ветки: реестр (читает с offset 0, значит
+   * «кончилась вся выдача») и ENG-каталоги (читают с закладки, значит
+   * «кончилась выдача ЗА закладкой»). Разница существенна, и её несёт
+   * соседнее поле `continued`: без него «кончилась за закладкой» и «в срезе
+   * не было ни строки с самого начала» неразличимы.
+   *
+   * Флаг живёт в collect_info ОДНОЙ базы и вычисляется заново каждую сборку —
+   * он не может закрыть источник навсегда: ночной ingest вставит строки с
+   * большим created_at, они окажутся ВПЕРЕДИ закладки, и следующая сборка их
+   * прочитает.
+   */
   exhausted?: boolean;
   /**
-   * Реестр: стоп по потолку MAX_DIRECTORY_PAGES (200k просканированных строк)
-   * раньше limit — НЕ исчерпание: выдача ещё есть, повторная сборка продолжит.
+   * ENG-каталоги: чтение СТАРТОВАЛО с сохранённой закладки (`slot.from`), то
+   * есть этот срез уже листали прошлые сборки проекта.
+   *
+   * Читатель один — разбор нулевой сборки (`segmentExhausted`), и только в
+   * паре с `exhausted`. Зачем пара: «страница пришла короткой» без закладки
+   * означает «в срезе вообще пусто» (обычная первая пустая сборка), а с
+   * закладкой — «всё, что в срезе было, проект уже разобрал». Кабинет по
+   * второму случаю печатает «новых компаний не осталось»; по первому это
+   * было бы неправдой.
+   */
+  continued?: boolean;
+  /**
+   * Стоп по потолку страниц раньше limit — НЕ исчерпание: выдача ещё есть,
+   * повторная сборка продолжит. Потолок у реестра MAX_DIRECTORY_PAGES (200k
+   * просмотренных строк), у ENG-каталогов ENG_CATALOG_MAX_PAGES /
+   * ENG_HIRING_MAX_PAGES (60k / 20k).
    */
   hit_ceiling?: boolean;
+  /**
+   * ENG-каталоги: партия ЧАСТИЧНАЯ — чтение оборвалось на странице, разобранный
+   * префикс строк сохранён (см. блок «ЧТЕНИЕ КАТАЛОГА С ЗАКЛАДКОЙ»).
+   *
+   * Флаг существует ради ОДНОГО читателя — разбора нулевой сборки
+   * (`segmentExhausted`): у оборванного чтения «строк нет» не означает «новых
+   * компаний не осталось», а именно это предложение кабинет показал бы клиенту.
+   * Отличить одно от другого по `rows === 0` нельзя, поэтому признак хранится.
+   */
+  partial?: boolean;
   /** Пометка задачи для UI (например, «реестр исчерпан»). */
   note?: string;
 }
@@ -667,14 +744,17 @@ export interface HeCollectInfo {
   plan?: HeSourcePlan;
   /**
    * Починка плана без каталожного источника (ensureCatalogSource, market='us').
-   * Ключа нет — план пришёл от планировщика как есть. outcome='failed' объясняет
-   * тонкую базу: каталога не было и добавить его не вышло.
+   * Ключа нет — план пришёл от планировщика как есть ЛИБО взят из
+   * he_catalog_cursors (тогда провенанс планирования лежит у той базы, которая
+   * за него заплатила). outcome='failed' объясняет тонкую базу: каталога не
+   * было и добавить его не вышло.
    */
   plan_repair?: HePlanRepair;
   /**
    * Проба каталожного среза на принадлежность вертикали
-   * (ensureSliceMatchesVertical, market='us'). Ключа нет — пробы не было
-   * (RU-план, план без каталога или проба не состоялась).
+   * (ensureSliceMatchesVertical, market='us'). Ключа нет — пробы в ЭТОЙ сборке
+   * не было: RU-план, план без каталога, проба не состоялась или план взят из
+   * he_catalog_cursors (срез уже судила та сборка, что за пробу заплатила).
    */
   slice_probe?: HeSliceProbe;
   /** Гипотезы, по которым реально строился план (accepted-дефолт или выбор специалиста). */
@@ -945,18 +1025,30 @@ function dropCollectWorkState(info: HeCollectInfo): HeCollectInfo {
 
 /* ─────────────────────────── Фаза PLAN ─────────────────────────── */
 
-async function buildPlan(
+/**
+ * ВХОД планировщика: всё, что читается из БД БЕСПЛАТНО, отдельно от платного
+ * вызова модели.
+ *
+ * Разделение нужно переиспользованию плана: решение «брать сохранённый план или
+ * платить за новый» принимается по хешу этого входа, то есть до вызова модели.
+ * Порядок чтений и их ошибки не изменились — это те же самые первые строки
+ * прежнего buildPlan, включая честный фейл на пустом пересечении с выбором
+ * специалиста.
+ */
+interface HePlanInput {
+  promptInput: SourcePlanPromptInput;
+  /** Провенанс плана: по каким гипотезам он строится (для collect_info и UI). */
+  usedHypotheses: Array<{ id: string; title: string; status: string | null }>;
+  /** Хеш входа: пока совпадает, сохранённый план годен (catalogCursor). */
+  planKey: string;
+}
+
+async function collectPlanInput(
   job: HeJob,
   ctx: HeStageContext,
   vertical: HeVertical,
-  usage: HeUsage,
   market: HeMarket,
-): Promise<{
-  plan: HeSourcePlan;
-  planRepair?: HePlanRepair;
-  sliceProbe?: HeSliceProbe;
-  usedHypotheses: Array<{ id: string; title: string; status: string | null }>;
-}> {
+): Promise<HePlanInput> {
   // Гипотезы вертикали для плана. Семантика разметки: если специалист что-то
   // ПРИНЯЛ (accepted) — план строим только по принятым; предложенные (proposed)
   // идут в работу, только когда принятых нет (как в пересчёте % вертикали).
@@ -1019,13 +1111,224 @@ async function buildPlan(
       .filter(Boolean);
   }
 
-  const promptInput = {
+  // Гипотезы СУЖАЕМ до полей, которые промпт печатает (tier/title/description).
+  // Тип объявлен явно, чтобы лишнее поле нельзя было добавить молча: из этого
+  // объекта считается planKey, и `id`/`status` в хеше обнуляли бы
+  // переиспользование плана на правке, которой модель не видит, — специалист
+  // принял все предложенные гипотезы, текст промпта тот же, а ночь платит за
+  // новый план и новую пробу среза (см. heCatalogPlanKey в catalogCursor.ts).
+  const promptInput: SourcePlanPromptInput = {
     verticalName: vertical.name,
     verticalSummary: vertical.summary,
     synonyms: Array.isArray(vertical.synonyms) ? vertical.synonyms : [],
-    hypotheses,
+    hypotheses: hypotheses.map((h) => ({ title: h.title, description: h.description, tier: h.tier })),
     companyTypes,
   };
+
+  return {
+    promptInput,
+    // Провенанс плана: по каким гипотезам реально строили (для collect_info и UI —
+    // иначе на вопрос «точно всё верно?» ответа нет ни в БД, ни на экране).
+    usedHypotheses: hypotheses.map((h) => ({ id: h.id, title: h.title, status: h.status })),
+    planKey: heCatalogPlanKey(market, promptInput),
+  };
+}
+
+/* ───────────── Придуманный порог размера (market='us') ───────────── */
+
+/**
+ * Планировщик любит дописать в срез порог, которого гипотезы не просили:
+ * `sizes: ['51-200','201-500']` у pdl или `min_funding_usd: 5000000` у funded.
+ * Замер V2 22.09.2026: на реестровом аналоге порог срезал 72% рынка (ОКВЭД 10.1,
+ * 3389 компаний без порогов против 954 с ними), при том что о размере в тексте
+ * гипотезы не было ни слова.
+ *
+ * ПОСЛЕДСТВИЕ В ENG ДРУГОЕ, и это главное. В V2 такая база встаёт с пометкой
+ * «исчерпан» — то есть о проблеме хотя бы видно. Здесь видно НЕ будет: разбор
+ * нулевой сборки (segmentExhausted) требует нулевой выдачи, а выдача есть.
+ * База просто молча малая, и ни одна пометка, ни один текст кабинета об этом не
+ * скажет.
+ *
+ * ПРАВИЛО: порог, у которого нет основания ВО ВХОДЕ ПЛАНИРОВЩИКА, снимается.
+ * Основание ищем ровно в том тексте, который видела модель
+ * (SourcePlanPromptInput: вертикаль, её описание, синонимы, гипотезы, типы
+ * компаний из вокабуляра) — если размер не назван нигде там, назвать его могла
+ * только сама модель.
+ *
+ * Оснований ДВА, потому что это два разных утверждения:
+ *  - размер (`sizes`) — назван штат, класс размера или счётные единицы, ЛИБО
+ *    названа величина денег («компании с $50M ARR» — тоже про размер);
+ *  - величина денег (`min_funding_usd`) — названа именно СУММА, стадия раунда
+ *    или оборот. Слов «funded»/«raised»/«recently funded» БЕЗ величины не
+ *    хватает: они обосновывают выбор источника funded и окно `funded_since`, но
+ *    не нижнюю границу в долларах. Ровно эта граница и оказывается придуманной.
+ *
+ * ГРАНИЦЫ. Только market='us' (RU-план задач pdl/funded не содержит вовсе).
+ * Порог НЕ снимается, если после снятия в фильтрах не осталось ни индустрии, ни
+ * имени: схемы требуют минимум один фильтр, и снятие единственного дало бы `{}`,
+ * то есть нефильтрованный срез каталога (~19.5M строк) на весь лимит сборки.
+ * Окна свежести (`funded_since`, `posted_within_days`) не трогаются: это не
+ * пороги размера.
+ *
+ * Читатель решения — лог стадии (его читает специалист). Своего поля в
+ * collect_info у правила нет нарочно: клиентская проекция такие поля не
+ * пропускает (белый список), а данные, которых никто не читает, движок уже
+ * заводил.
+ */
+
+/** Ноун, к которому может прилипнуть прилагательное размера. */
+const HE_SIZED_NOUN_EN =
+  'business(?:es)?|compan(?:y|ies)|firms?|brands?|chains?|agenc(?:y|ies)|operators?|manufacturers?|' +
+  'clinics?|practices?|teams?|organi[sz]ations?|employers?|retailers?|providers?|players?|shops?|' +
+  'studios?|vendors?|enterprises?|groups?|start-?ups?|networks?|clients?|accounts?';
+
+/** Размер компании назван прямым текстом. */
+const HE_SIZE_BASIS_EN: RegExp[] = [
+  // Штат и его синонимы.
+  /\b(?:headcount|employees?|fte|ftes|workforce|payroll|staff|seats?)\b/i,
+  /\bteam\s+(?:size|of\s+\d)/i,
+  // Класс размера как термин.
+  /\b(?:smb|smbs|sme|smes|mid-?market|enterprise|enterprises|start-?ups?|scale-?ups?|unicorns?|growth-?stage|early-?stage|late-?stage|fortune\s*\d+)\b/i,
+  // Прилагательное размера РЯДОМ с компанией. Отдельно от списка выше нарочно:
+  // «large volume of tickets» о размере компании не говорит, «large
+  // manufacturers» говорит.
+  new RegExp(
+    '\\b(?:small|smaller|medium|mid-?sized?|midsized?|large|larger|big|bigger|micro|tiny|boutique|' +
+      'size?able|multi-?(?:unit|location|site))\\s+(?:[a-z-]+\\s+){0,2}(?:' +
+      HE_SIZED_NOUN_EN +
+      ')\\b',
+    'i',
+  ),
+  // Открытая граница и счётные единицы: «200+ locations», «over 50 agents».
+  /\d\s*\+/,
+  /\b(?:over|under|above|below|at\s+least|more\s+than|fewer\s+than|less\s+than|up\s+to|between|from)\s+\$?\d/i,
+  /\d[\d,\s]*(?:\s*(?:to|[–—-])\s*\d[\d,]*)?\s*(?:employees|people|staff|seats|locations|stores|branches|offices|beds|chairs|trucks|vehicles|agents|clinics|sites|units|outlets|reps|recruiters|technicians)\b/i,
+];
+
+/** Величина денег названа: сумма, стадия раунда, оборот. */
+const HE_AMOUNT_BASIS_EN: RegExp[] = [
+  /\$\s*\d/,
+  /\b\d+(?:[.,]\d+)?\s*(?:k|m|mm|bn|b)\b/i,
+  /\b(?:millions?|billions?|arr|mrr|revenue|turnover|valuation|unicorns?)\b/i,
+  /\bseries\s+[a-h]\b/i,
+  /\b(?:pre-?seed|seed|well[-\s]funded|heavily[-\s]funded|mega-?rounds?|large\s+rounds?)\b/i,
+];
+
+interface HeSizeBasis {
+  /** Размер компании назван (штат, класс, счётные единицы или деньги). */
+  size: boolean;
+  /** Названа величина денег — только она обосновывает нижнюю границу суммы. */
+  amount: boolean;
+}
+
+/** Ровно тот текст, который видел планировщик, — ничего сверх него. */
+function heSizeBasisEn(input: SourcePlanPromptInput): HeSizeBasis {
+  const text = [
+    input.verticalName,
+    input.verticalSummary ?? '',
+    ...(input.synonyms ?? []),
+    ...input.hypotheses.map((h) => `${h.title} ${h.description ?? ''}`),
+    ...(input.companyTypes ?? []),
+  ].join('\n');
+  const amount = HE_AMOUNT_BASIS_EN.some((re) => re.test(text));
+  return { size: amount || HE_SIZE_BASIS_EN.some((re) => re.test(text)), amount };
+}
+
+/** Фильтр заполнен: непустой массив, непустая строка или число. */
+function heFilterFilled(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'string') return value.trim() !== '';
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+/**
+ * Задача без придуманного порога. `dropped` — что снято, `kept` — что оставлено
+ * только потому, что без него срез потерял бы «про кого»; вызывающий кладёт оба
+ * в лог стадии.
+ */
+function heTaskWithoutUnfoundedSize(
+  task: HeCollectTask,
+  basis: HeSizeBasis,
+): { task: HeCollectTask; dropped: string[]; kept: string[] } {
+  const none = { task, dropped: [], kept: [] };
+  if (task.source === 'pdl') {
+    const filters = task.pdl_filters;
+    if (basis.size || !filters || !HE_PDL_SIZE_FILTER_KEYS.some((k) => heFilterFilled(filters[k]))) return none;
+    const rest = { ...filters };
+    for (const key of HE_PDL_SIZE_FILTER_KEYS) delete rest[key];
+    if (!HE_PDL_SCOPE_FILTER_KEYS.some((k) => heFilterFilled(rest[k]))) {
+      return { task, dropped: [], kept: [...HE_PDL_SIZE_FILTER_KEYS] };
+    }
+    return { task: { ...task, pdl_filters: rest }, dropped: [...HE_PDL_SIZE_FILTER_KEYS], kept: [] };
+  }
+  if (task.source === 'funded') {
+    const filters = task.funded_filters;
+    if (basis.amount || !filters || !HE_FUNDED_SIZE_FILTER_KEYS.some((k) => heFilterFilled(filters[k]))) return none;
+    const rest = { ...filters };
+    for (const key of HE_FUNDED_SIZE_FILTER_KEYS) delete rest[key];
+    if (!HE_FUNDED_SCOPE_FILTER_KEYS.some((k) => heFilterFilled(rest[k]))) {
+      return { task, dropped: [], kept: [...HE_FUNDED_SIZE_FILTER_KEYS] };
+    }
+    return { task: { ...task, funded_filters: rest }, dropped: [...HE_FUNDED_SIZE_FILTER_KEYS], kept: [] };
+  }
+  return none;
+}
+
+/**
+ * Снять придуманные пороги с набора задач. Вызывается на ВСЕХ трёх местах, где
+ * ENG-план рождается: свежий план планировщика, добавленный каталожный срез
+ * (ensureCatalogSource) и перепланированный срез (ensureSliceMatchesVertical).
+ * Иначе правило обходилось бы ровно тем вызовом, который и придумывает фильтры
+ * с нуля.
+ */
+function heWithoutUnfoundedSizeFilters(
+  ctx: HeStageContext,
+  tasks: HeCollectTask[],
+  promptInput: SourcePlanPromptInput,
+): HeCollectTask[] {
+  const basis = heSizeBasisEn(promptInput);
+  return tasks.map((task) => {
+    const res = heTaskWithoutUnfoundedSize(task, basis);
+    // Тексты разные по источнику нарочно: у pdl порог — это штат, у funded —
+    // сумма, и «размер не назван» про сумму было бы неправдой о том, что мы
+    // проверяли. Скоуп у funded тоже один (индустрия), ключа `name` там нет.
+    const missing = task.source === 'funded' ? 'сумму раунда или оборот' : 'размер компании';
+    const scope = task.source === 'funded' ? 'индустрии' : 'ни индустрии, ни имени';
+    if (res.dropped.length > 0) {
+      stageLog(
+        ctx,
+        `[base_collect] ${task.source}: порог без основания снят (${res.dropped.join(', ')}) — ` +
+          `ни гипотезы, ни описание вертикали, ни вокабуляр не называют ${missing}`,
+      );
+    }
+    if (res.kept.length > 0) {
+      stageLog(
+        ctx,
+        `[base_collect] ${task.source}: порог ${res.kept.join(', ')} оставлен, хотя основания нет — ` +
+          `без него в фильтрах не осталось бы ${scope}, то есть срез стал бы всем каталогом`,
+      );
+    }
+    return res.task;
+  });
+}
+
+/**
+ * ПЛАТНАЯ часть планирования: вызов модели + починка «нет каталога» + проба
+ * среза. Вход уже прочитан (collectPlanInput), поэтому эта функция ничего из БД
+ * не читает и вызывается ТОЛЬКО когда сохранённый план взять нельзя.
+ */
+async function buildPlan(
+  ctx: HeStageContext,
+  vertical: HeVertical,
+  input: HePlanInput,
+  usage: HeUsage,
+  market: HeMarket,
+): Promise<{
+  plan: HeSourcePlan;
+  planRepair?: HePlanRepair;
+  sliceProbe?: HeSliceProbe;
+}> {
+  const { promptInput } = input;
 
   const llm = await callLLMWithSchema(
     // Рынок 'us' — EN-промпт с ENG-источниками (pdl/funded/eng_hiring/google_maps).
@@ -1035,7 +1338,14 @@ async function buildPlan(
   );
   addUsage(usage, llm);
 
-  const withCatalog = await ensureCatalogSource(ctx, llm.data, promptInput, usage, market);
+  // Придуманные пороги размера снимаем ДО починки и ДО пробы среза: и та, и
+  // другая должны смотреть ровно тот срез, который пойдёт в сбор.
+  const planned: HeSourcePlan =
+    market === 'us'
+      ? { ...llm.data, tasks: heWithoutUnfoundedSizeFilters(ctx, llm.data.tasks, promptInput) }
+      : llm.data;
+
+  const withCatalog = await ensureCatalogSource(ctx, planned, promptInput, usage, market);
   // Проба идёт ПОСЛЕ починки «каталога нет вовсе»: чинить нечего, пока задачи
   // не существует, а добавленный срез проверяется на общих основаниях.
   const { plan, sliceProbe } = await ensureSliceMatchesVertical(
@@ -1046,14 +1356,7 @@ async function buildPlan(
     usage,
     market,
   );
-  return {
-    plan,
-    planRepair: withCatalog.planRepair,
-    sliceProbe,
-    // Провенанс плана: по каким гипотезам реально строили (для collect_info и UI —
-    // иначе на вопрос «точно все верно?» ответа нет ни в БД, ни на экране).
-    usedHypotheses: hypotheses.map((h) => ({ id: h.id, title: h.title, status: h.status })),
-  };
+  return { plan, planRepair: withCatalog.planRepair, sliceProbe };
 }
 
 /**
@@ -1096,11 +1399,14 @@ async function ensureCatalogSource(
   }
   addUsage(usage, repair);
 
-  const task: HeCollectTask = {
-    source: 'pdl',
-    rationale: repair.data.rationale,
-    pdl_filters: repair.data.pdl_filters,
-  };
+  // Починка отвечает ТОЛЬКО за фильтры, то есть придумывает их с нуля, — и тот
+  // же порог без основания она ставит так же охотно. Провенанс и лог ниже
+  // печатают фильтры ПОСЛЕ снятия: иначе staff читал бы срез, которого не было.
+  const [task] = heWithoutUnfoundedSizeFilters(
+    ctx,
+    [{ source: 'pdl', rationale: repair.data.rationale, pdl_filters: repair.data.pdl_filters }],
+    promptInput,
+  );
   // Потолок плана — 4 задачи (HeSourcePlanSchema). Если модель уже выбрала
   // четыре, каталожный срез вытесняет последнюю: без каталога база всё равно
   // не наберёт объём, а порядок задач у планировщика — от важного к частному.
@@ -1108,11 +1414,11 @@ async function ensureCatalogSource(
   tasks.push(task);
   stageLog(
     ctx,
-    `[base_collect] в плане не было каталога — добавлен pdl-срез: ${JSON.stringify(repair.data.pdl_filters)}`,
+    `[base_collect] в плане не было каталога — добавлен pdl-срез: ${JSON.stringify(task.pdl_filters)}`,
   );
   return {
     plan: { tasks },
-    planRepair: { reason: 'no_catalog_source', outcome: 'repaired', pdl_filters: repair.data.pdl_filters },
+    planRepair: { reason: 'no_catalog_source', outcome: 'repaired', pdl_filters: task.pdl_filters },
   };
 }
 
@@ -1128,17 +1434,24 @@ function findCatalogTasks(plan: HeSourcePlan): number[] {
     .filter((i) => i >= 0);
 }
 
-/** Выборка из среза одной задачи: те же коллекторы, только с крошечным лимитом. */
+/**
+ * Выборка из среза одной задачи: те же коллекторы, только с крошечным лимитом.
+ *
+ * БЕЗ закладки и БЕЗ исключения чужих баз, и это не экономия: проба отвечает на
+ * вопрос «этот СРЕЗ про эту вертикаль?», то есть обязана смотреть срез как он
+ * есть. Продолжение с закладки дало бы выборку из середины, а вычет уже
+ * собранных компаний — из остатка; и то и другое меняет измеряемую величину.
+ */
 async function sampleCatalogSlice(
   ctx: HeStageContext,
   task: HeCollectTask,
   limit: number,
 ): Promise<Array<Record<string, unknown>>> {
   if (task.source === 'funded') {
-    const rows = await fetchFundedRows(ctx, task.funded_filters, limit);
+    const { rows } = await fetchFundedRows(ctx, task.funded_filters, limit, null, null);
     return rows.map((r) => mapFundedRow(r) as unknown as Record<string, unknown>);
   }
-  const rows = await fetchPdlRows(ctx, task.pdl_filters, limit);
+  const { rows } = await fetchPdlRows(ctx, task.pdl_filters, limit, null, null);
   return rows.map((r) => mapPdlRow(r) as unknown as Record<string, unknown>);
 }
 
@@ -1250,11 +1563,13 @@ async function ensureSliceMatchesVertical(
   }
   addUsage(usage, repair);
 
-  const retried: HeCollectTask = {
-    source: 'pdl',
-    rationale: repair.data.rationale,
-    pdl_filters: repair.data.pdl_filters,
-  };
+  // Тот же ремонтный вызов — тот же придуманный порог; снимаем ДО второй пробы,
+  // иначе проба мерила бы один срез, а сбор шёл по другому.
+  const [retried] = heWithoutUnfoundedSizeFilters(
+    ctx,
+    [{ source: 'pdl', rationale: repair.data.rationale, pdl_filters: repair.data.pdl_filters }],
+    promptInput,
+  );
   const second = await probe([retried]);
   if (second.sampled > 0 && sliceProbeRejectBelow() > 0 && second.hitRate < sliceProbeRejectBelow()) {
     stageLog(
@@ -1269,7 +1584,7 @@ async function ensureSliceMatchesVertical(
         sampled: second.sampled,
         off_target_examples: second.offTargetExamples,
         first_hit_rate: first.hitRate,
-        pdl_filters: repair.data.pdl_filters,
+        pdl_filters: retried.pdl_filters,
       },
     };
   }
@@ -1285,7 +1600,7 @@ async function ensureSliceMatchesVertical(
     .filter((t, i) => i === firstCatalogAt || !catalogIdx.includes(i));
   stageLog(
     ctx,
-    `[base_collect] каталожная часть плана (${catalogIdx.length} задач) заменена одним срезом (${pct(first)} → ${pct(second)}): ${JSON.stringify(repair.data.pdl_filters)}`,
+    `[base_collect] каталожная часть плана (${catalogIdx.length} задач) заменена одним срезом (${pct(first)} → ${pct(second)}): ${JSON.stringify(retried.pdl_filters)}`,
   );
   return {
     plan: { tasks },
@@ -1294,7 +1609,7 @@ async function ensureSliceMatchesVertical(
       hit_rate: second.hitRate,
       sampled: second.sampled,
       first_hit_rate: first.hitRate,
-      pdl_filters: repair.data.pdl_filters,
+      pdl_filters: retried.pdl_filters,
       replaced_tasks: catalogIdx.length,
     },
   };
@@ -1386,6 +1701,15 @@ async function fetchDirectoryRows(
 
 /** Страница keyset-пагинации справочников pdl/funded (id — text PK). */
 const ENG_CATALOG_PAGE_SIZE = 1000;
+/**
+ * Потолок страниц pdl/funded за задачу (60 × 1000 = 60k просмотренных строк) —
+ * тот же предохранитель, что MAX_DIRECTORY_PAGES у реестра, и по той же
+ * причине: с исключением уже собранных компаний НА ВЫБОРКЕ страница может не
+ * дать ни одной новой строки, и цикл «пока не наберу limit» перестал быть
+ * ограниченным сверху. До исключения-на-выборке потолок недостижим в принципе:
+ * без пропусков limit набирается за ceil(limit / 1000) ≤ 50 страниц.
+ */
+const ENG_CATALOG_MAX_PAGES = 60;
 /** Страница офсетной пагинации eng_hiring_cache. */
 const ENG_HIRING_PAGE_SIZE = 1000;
 /**
@@ -1409,8 +1733,9 @@ function lowerList(values: string[]): string[] {
  * на широких фильтрах уходит pkey-scan'ом в 58s+ → 504 у Kong → задача
  * падала maintenance-страницей. Фильтры — серверные: industry/size/country
  * точным совпадением (значения в таблице в нижнем регистре), name — подстрокой
- * (ilike, как в /api/company-base). Исключения чужих баз на выборке нет
- * (как у hh/карт) — только на мёрдже.
+ * (ilike, как в /api/company-base). Компании других баз проекта исключаются
+ * ещё НА ВЫБОРКЕ (как у реестра) — см. общий блок про закладку ниже; на мёрдже
+ * исключение остаётся страховкой.
  */
 
 /**
@@ -1454,14 +1779,158 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const HARVEST_WRITE_ATTEMPTS = 3;
 const HARVEST_WRITE_RETRY_BASE_MS = 1000;
 
+/**
+ * ЧТЕНИЕ КАТАЛОГА С ЗАКЛАДКОЙ — общая механика трёх ENG-источников.
+ *
+ * Включается ровно для market='us' (`slot !== null`): у RU-плана каталог — это
+ * реестр со своей закладкой, и ни один байт его пути отсюда не меняется.
+ *
+ * ЧТО ИМЕННО ДЕЛАЕТ ЗАКЛАДКА. Каждая ночь добора заводит НОВУЮ he_bases с
+ * пустым collect_info, поэтому раньше каждая ночь читала срез с первой строки,
+ * набирала те же компании и выбрасывала их на мёрдже. Теперь компании других
+ * баз проекта отсеиваются ЕЩЁ НА ВЫБОРКЕ (и не тратят limit, как у реестра), а
+ * место, до которого срез разобран, переживает базу — стор `he_catalog_cursors`
+ * (см. шапку lib/hypothesisEngine/catalogCursor.ts).
+ *
+ * КУДА ИМЕННО ДВИГАЕТСЯ ЗАКЛАДКА — самое важное правило этого файла.
+ * Она отмечает конец ПРЕФИКСА РАЗОБРАННЫХ И ЗАКРЫТЫХ строк: подряд идущих
+ * строк, с которыми у проекта покончено, — тех, что уже лежат в другой базе
+ * этого проекта, и тех, у кого пустое имя компании (такая строка всё равно
+ * не переживёт дедуп на HARVEST). НЕсовпадение роли у eng_hiring в этот
+ * список НЕ входит: строки того источника переписываются ингестом на месте,
+ * и вчерашний «не тот» заголовок завтра может стать тем самым.
+ * «Закрыто навсегда» про пустое имя честно: имя строки не меняется от того,
+ * какой у нас срез, а условия среза входят в ключ закладки (хеш фильтров) —
+ * поменяются они, сменится ключ, и закладка будет своя.
+ * На ПЕРВОЙ ЖЕ строке, которую сборка забрала себе, префикс закрывается, и
+ * дальше закладка не идёт, сколько бы строк ни было прочитано после неё.
+ *
+ * Почему не «по всем прочитанным строкам», как просится. Каждая задача плана
+ * читает до `limit` строк, а мёрдж оставляет `limit` строк НА ВСЕ задачи
+ * (interleaveTaskHarvests + slice) — то есть из прочитанного в базу уезжает
+ * примерно 1/N. Закладка «по прочитанному» перешагивала бы остальные 1−1/N
+ * НАВСЕГДА: срез объявлялся бы исчерпанным, когда до клиента доехала треть
+ * его компаний, и обещание кабинета «в этих источниках больше нет новых
+ * компаний» стало бы ложью. Закладка по закрытому префиксу такого не делает:
+ * недоставленные строки читаются ещё раз следующей ночью, а как только они
+ * доезжают до базы — становятся исключением и префикс проходит их сам.
+ *
+ * Отсюда же и сходимость: перечитанный кусок — это ровно недоставленный хвост
+ * прошлой ночи (единицы страниц), а не срез с начала. Хвост может и не
+ * рассосаться — компания попала в мёрдж, но в базу не доехала (её выбросил
+ * конструктор, или базу увели в 'failed'), — и тогда закладка стоит на месте.
+ * Это НЕ потеря: срез читается как до этой правки, от той же строки, а сверху
+ * лежит потолок страниц, который такой скан ограничивает и помечает задачу
+ * `hit_ceiling`, чтобы разбор нулевой сборки не назвал предохранитель
+ * исчерпанием.
+ *
+ * ОБРЫВ ВЫДАЧИ НЕ ВЫБРАСЫВАЕТ РАЗОБРАННОЕ. Отказ страницы раньше уносил всю
+ * задачу вместе с уже разобранными страницами (прод 21.09 у реестра V2: 400
+ * компаний и 10 590 просмотренных строк). Здесь чтение возвращает префикс
+ * вместе с его закладкой, а падает задача только когда фиксировать нечего —
+ * ни одной строки и ни одного сдвига.
+ */
+
+/** Итог чтения каталога: разобранный префикс строк и куда встала закладка. */
+interface HeCatalogFetch {
+  rows: Record<string, unknown>[];
+  /** Строк пропущено на выборке — компании уже есть в других базах проекта. */
+  excludedDuringFetch: number;
+  /**
+   * Выдача КОНЧИЛАСЬ: цикл вышел на КОРОТКОЙ странице, то есть источник отдал
+   * всё, что у него есть за закладкой под фильтры этого среза.
+   *
+   * Считается по причине выхода, а НЕ по «строк меньше limit»: выходов у
+   * цикла пять, и недобор дают четыре из них — короткая страница (это и есть
+   * исчерпание), потолок страниц (`hitCeiling`), обрыв страницы (`error`) и
+   * невозможность построить курсор с хвоста полной страницы (строка без id /
+   * без времени вставки). Три последних оставляют выдачу на месте, и назвать
+   * их исчерпанием значит соврать. Пятый выход — набран limit — недобора не
+   * даёт и исчерпанием тоже не является: хвост короткой страницы мог остаться
+   * неразобранным.
+   */
+  exhausted: boolean;
+  /**
+   * Стоп по потолку страниц раньше limit: выдача ещё есть, это предохранитель,
+   * а НЕ исчерпание среза (иначе разбор нулевой сборки сказал бы клиенту
+   * «новых компаний не осталось» на простом срабатывании предохранителя).
+   */
+  hitCeiling: boolean;
+  /**
+   * Закладка после захода. Та же, что пришла, если закрытого префикса не
+   * случилось; null — market не 'us' либо закладки не было и не появилось.
+   */
+  next: HeCatalogBookmark | null;
+  /** Чтение оборвалось; rows — разобранный до обрыва префикс. */
+  error?: string;
+}
+
+/**
+ * Значение фильтра PostgREST в кавычках: id каталогов (`yc:xyz`,
+ * `sec_formd:0001`) и метки времени содержат символы, которые внутри `or=(...)`
+ * разбираются как синтаксис. Без кавычек запятая в id развалила бы условие
+ * keyset'а на два — и страница вернулась бы не та.
+ */
+function pgFilterValue(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+/** Keyset по времени вставки: `(created_at, id) > (закладка)`. */
+function insertionKeyset(from: HeCatalogBookmark): string {
+  const at = pgFilterValue(from.inserted_at ?? '');
+  return `created_at.gt.${at},and(created_at.eq.${at},id.gt.${pgFilterValue(from.id)})`;
+}
+
+/**
+ * Закладка на строку каталога. null — закладку на этой строке не поставить
+ * (нет id или времени вставки); такая строка ПРЕФИКС ЗАКРЫВАЕТ: перешагнуть
+ * то, чего нельзя записать, значит потерять это навсегда.
+ */
+function catalogBookmark(source: HeCatalogSource, row: Record<string, unknown>): HeCatalogBookmark | null {
+  const id = cell(row.id);
+  if (!id) return null;
+  if (source === 'pdl') return { id };
+  const insertedAt = cell(row.created_at);
+  return insertedAt ? { id, inserted_at: insertedAt } : null;
+}
+
+/** Накопитель закладки: растёт, пока идут закрытые строки (см. блок выше). */
+function catalogPrefix(slot: HeCatalogSlot | null) {
+  let next = slot?.from ?? null;
+  let open = slot !== null;
+  return {
+    /** Строка разобрана и закрыта навсегда — префикс двигается на неё. */
+    closed(bookmark: HeCatalogBookmark | null): void {
+      if (!open) return;
+      if (bookmark) next = bookmark;
+      else open = false;
+    },
+    /** Строка взята в сборку (или ждёт своей ночи) — префикс кончился. */
+    stop(): void {
+      open = false;
+    },
+    value(): HeCatalogBookmark | null {
+      return next;
+    },
+  };
+}
+
 async function fetchPdlRows(
   ctx: HeStageContext,
   filters: HeCollectTask['pdl_filters'],
   limit: number,
-): Promise<Record<string, unknown>[]> {
+  excludedKeys: HeBaseExclusionKeys | null,
+  slot: HeCatalogSlot | null,
+): Promise<HeCatalogFetch> {
   const rows: Record<string, unknown>[] = [];
-  let lastId = '';
-  for (;;) {
+  const prefix = catalogPrefix(slot);
+  let excludedDuringFetch = 0;
+  let lastId = usableBookmark('pdl', slot?.from ?? undefined)?.id ?? '';
+  let page = 0;
+  // Выход на короткой странице — единственная причина, по которой «строк
+  // больше нет» правда. Пишется ровно там, где цикл по ней и выходит.
+  let reachedEnd = false;
+  for (; page < ENG_CATALOG_MAX_PAGES && rows.length < limit; page += 1) {
     const params = {
       p_industries: filters?.industries?.length ? lowerList(filters.industries) : null,
       p_sizes: filters?.sizes?.length ? lowerList(filters.sizes) : null,
@@ -1486,39 +1955,95 @@ async function fetchPdlRows(
         await sleep(pause);
       }
     }
-    if (error) throw new Error(cleanPdlReadError(error.message));
-    const page = (data ?? []) as Record<string, unknown>[];
-    for (const r of page) {
-      if (rows.length < limit) rows.push(r);
+    if (error) {
+      return {
+        rows,
+        excludedDuringFetch,
+        exhausted: false,
+        hitCeiling: false,
+        next: prefix.value(),
+        error: cleanPdlReadError(error.message),
+      };
     }
-    if (rows.length >= limit || page.length < ENG_CATALOG_PAGE_SIZE) return rows;
-    lastId = cell(page[page.length - 1]?.id);
+    const pageRows = (data ?? []) as Record<string, unknown>[];
+    let scanned = 0;
+    for (const r of pageRows) {
+      // Остаток до limit кончился — дальше НЕ разбираем: закладка не имеет
+      // права перешагнуть строку, которую мы не смотрели.
+      if (rows.length >= limit) break;
+      scanned += 1;
+      if (excludedKeys && matchesExclusion(excludedKeys, cell(r.name), undefined, r.website)) {
+        excludedDuringFetch += 1;
+        prefix.closed(catalogBookmark('pdl', r));
+        continue;
+      }
+      // Без имени строка всё равно умрёт на HARVEST (дедуп по нормализованному
+      // имени), но по пути съела бы слот limit и НАВСЕГДА приколола бы закладку
+      // к себе: stop() ниже не двигает её, а строка никуда не девается.
+      if (!normalizeCompanyForDedup(cell(r.name))) {
+        prefix.closed(catalogBookmark('pdl', r));
+        continue;
+      }
+      prefix.stop();
+      rows.push(r);
+    }
+    // Порядок проверок — часть смысла `exhausted`: набранный limit важнее
+    // короткой страницы, потому что её хвост мы в этом случае не разбирали.
+    if (rows.length >= limit) break;
+    if (pageRows.length < ENG_CATALOG_PAGE_SIZE) {
+      reachedEnd = true;
+      break;
+    }
+    lastId = cell(pageRows[scanned - 1]?.id);
     // Строка без id — курсора нет, дальше не листнуть (защита от зацикливания).
-    if (!lastId) return rows;
+    // Выдача при этом осталась: исчерпанием такой выход НЕ считается.
+    if (!lastId) break;
   }
+  const hitCeiling = rows.length < limit && page >= ENG_CATALOG_MAX_PAGES;
+  return { rows, excludedDuringFetch, exhausted: reachedEnd, hitCeiling, next: prefix.value() };
 }
 
 /**
- * funded_companies (стартапы и раунды) keyset-пагинацией по id до limit строк.
+ * funded_companies (стартапы и раунды) до limit строк.
  * Фильтры — applyFundedFilters из /api/funded: единая семантика с вкладкой
  * Crunchbase (min funding: last ИЛИ total; funded_since: last_funding_date >=).
+ *
+ * ПОРЯДОК ВЫДАЧИ ЗАВИСИТ ОТ ТОГО, ЕСТЬ ЛИ КУДА ПИСАТЬ ЗАКЛАДКУ. Без неё
+ * (RU-план) — прежний keyset по `id`. С ней — keyset по ВРЕМЕНИ ВСТАВКИ
+ * (`created_at`, `id` разрывает ничьи): `funded_companies.id` собран как
+ * `<source>:<natural_key>` и с порядком вставки не связан вовсе, поэтому
+ * закладка по id отправляла бы за курсор ровно свежие раунды — то, ради чего
+ * ночной добор и нужен. По времени вставки свежая строка всегда ВПЕРЕДИ
+ * закладки, и пропустить её нельзя.
  */
 async function fetchFundedRows(
   ctx: HeStageContext,
   filters: HeCollectTask['funded_filters'],
   limit: number,
-): Promise<Record<string, unknown>[]> {
+  excludedKeys: HeBaseExclusionKeys | null,
+  slot: HeCatalogSlot | null,
+): Promise<HeCatalogFetch> {
   const rows: Record<string, unknown>[] = [];
+  const prefix = catalogPrefix(slot);
+  let excludedDuringFetch = 0;
   let lastId = '';
-  for (;;) {
+  let from = slot ? usableBookmark('funded', slot.from ?? undefined) : null;
+  let page = 0;
+  let reachedEnd = false;
+  for (; page < ENG_CATALOG_MAX_PAGES && rows.length < limit; page += 1) {
     let query = ctx.supabase
       .from('funded_companies')
+      // `created_at` — ключ закладки (см. шапку); остальное как было.
       .select(
-        'id, name, website, industry, country, region, locality, total_funding_usd, last_funding_usd, last_funding_type, last_funding_date, batch, source',
+        'id, created_at, name, website, industry, country, region, locality, total_funding_usd, last_funding_usd, last_funding_type, last_funding_date, batch, source',
       )
-      .gt('id', lastId)
-      .order('id')
       .limit(ENG_CATALOG_PAGE_SIZE);
+    if (slot) {
+      if (from) query = query.or(insertionKeyset(from));
+      query = query.order('created_at').order('id');
+    } else {
+      query = query.gt('id', lastId).order('id');
+    }
     query = applyFundedFilters(query, {
       industry: filters?.industries?.length ? lowerList(filters.industries) : undefined,
       country: filters?.countries?.length ? lowerList(filters.countries) : undefined,
@@ -1526,15 +2051,50 @@ async function fetchFundedRows(
       fundedSince: filters?.funded_since ?? null,
     });
     const { data, error } = await query;
-    if (error) throw new Error(`funded_companies read: ${error.message}`);
-    const page = (data ?? []) as Record<string, unknown>[];
-    for (const r of page) {
-      if (rows.length < limit) rows.push(r);
+    if (error) {
+      // Разобранное не выбрасываем: решение «падать или взять префикс»
+      // принимает dispatchTask — одно место на все три каталога.
+      return {
+        rows,
+        excludedDuringFetch,
+        exhausted: false,
+        hitCeiling: false,
+        next: prefix.value(),
+        error: `funded_companies read: ${error.message}`,
+      };
     }
-    if (rows.length >= limit || page.length < ENG_CATALOG_PAGE_SIZE) return rows;
-    lastId = cell(page[page.length - 1]?.id);
-    if (!lastId) return rows;
+    const pageRows = (data ?? []) as Record<string, unknown>[];
+    let scanned = 0;
+    for (const r of pageRows) {
+      if (rows.length >= limit) break;
+      scanned += 1;
+      if (excludedKeys && matchesExclusion(excludedKeys, cell(r.name), undefined, r.website)) {
+        excludedDuringFetch += 1;
+        prefix.closed(catalogBookmark('funded', r));
+        continue;
+      }
+      // См. тот же приём у pdl: безымянная строка — закрытая, а не тормоз.
+      if (!normalizeCompanyForDedup(cell(r.name))) {
+        prefix.closed(catalogBookmark('funded', r));
+        continue;
+      }
+      prefix.stop();
+      rows.push(r);
+    }
+    if (rows.length >= limit) break;
+    if (pageRows.length < ENG_CATALOG_PAGE_SIZE) {
+      reachedEnd = true;
+      break;
+    }
+    const tail = pageRows[scanned - 1];
+    lastId = cell(tail?.id);
+    from = tail ? catalogBookmark('funded', tail) : null;
+    // Курсор с хвоста полной страницы не собрался — выдача осталась, это не
+    // исчерпание.
+    if (slot ? !from : !lastId) break;
   }
+  const hitCeiling = rows.length < limit && page >= ENG_CATALOG_MAX_PAGES;
+  return { rows, excludedDuringFetch, exhausted: reachedEnd, hitCeiling, next: prefix.value() };
 }
 
 /** Время published_at как timestamp; мусор/пусто → 0 (в сортировке уходит в хвост). */
@@ -1646,62 +2206,279 @@ async function fillMissingCompanySites(
  * роли (buildRolesIlikeFilter — надмножество), точность роли добирает regex по
  * vacancy_title в JS (buildRolesRegex из ATS-фильтров, как в engHiring).
  * Дедуп по компании внутри задачи: выживает самая свежая вакансия.
- * Пагинация офсетная (order по published_at с keyset несовместим), с потолком
- * ENG_HIRING_MAX_PAGES.
+ *
+ * ДВА РЕЖИМА ЧТЕНИЯ.
+ *  - Без закладки (RU-план) — прежний: офсетная пагинация по `published_at
+ *    desc` с потолком ENG_HIRING_MAX_PAGES, дедуп после сбора всех страниц.
+ *  - С закладкой (market='us') — keyset по ВРЕМЕНИ ВСТАВКИ (`created_at`, `id`
+ *    разрывает ничьи). Офсет здесь не просто неудобен: `published_at` не
+ *    уникален, ingest пишет в кэш каждую ночь, и страницы офсета между заходами
+ *    разъезжаются — одна и та же вакансия попадает в две страницы, другая не
+ *    попадает ни в одну. Ключ обязан быть не только стабильным, но и монотонным
+ *    по вставке: keyset по uuid отправил бы за закладку примерно половину
+ *    свежих вакансий, а keyset по `published_at desc` — все до единой.
+ *    Дедуп в этом режиме потоковый (иначе закладка не знала бы, где
+ *    остановиться), но победитель тот же: самая свежая вакансия компании из
+ *    прочитанного.
+ *    Плюс отсев протухших строк кэша: берём только `source='jobhive'` —
+ *    ежесуточно пересобираемый фид на 47 ATS-платформ (docs/english-outreach-
+ *    data-sources.md, ingest — worker/jobhiveIngestCron в host crontab).
+ *    Поштучный ATS-ингест (greenhouse/lever/…) по расписанию НЕ идёт вовсе: его
+ *    страницы обновляет только запуск ENG-парсера специалистом
+ *    (parsers/engHiringRunner.ts, ensureCache), поэтому его строки в кэше живут
+ *    с последнего такого запуска, и «нанимают прямо сейчас» по ним — неправда.
+ *    Правка ровно в одну строку и снимается ровно так же.
  */
 async function fetchEngHiringRows(
   ctx: HeStageContext,
   query: HeCollectTask['eng_hiring_query'],
   limit: number,
-): Promise<Record<string, unknown>[]> {
+  excludedKeys: HeBaseExclusionKeys | null,
+  slot: HeCatalogSlot | null,
+): Promise<HeCatalogFetch> {
   const roles = query?.roles ?? [];
   const rolesRegex = buildRolesRegex(roles.join(', '));
   const rolesFilter = buildRolesIlikeFilter(roles);
   const days = query?.posted_within_days ?? 0;
   const cutoff = days > 0 ? new Date(Date.now() - days * 86_400_000).toISOString() : null;
   const countries = query?.countries?.length ? lowerList(query.countries) : null;
-
-  const matched: Record<string, unknown>[] = [];
-  let offset = 0;
-  for (let page = 0; page < ENG_HIRING_MAX_PAGES && matched.length < limit; page += 1) {
+  const baseQuery = () => {
     let q = ctx.supabase
       .from('eng_hiring_cache')
-      .select('company_name, company_site_url, vacancy_title, location, country, country_code, source, published_at');
+      // `id, created_at` — ключ закладки (см. шапку); остальное как было.
+      .select(
+        'id, created_at, company_name, company_site_url, vacancy_title, location, country, country_code, source, published_at',
+      );
+    if (slot) q = q.eq('source', 'jobhive');
     if (countries) q = q.in('country_code', countries);
     if (cutoff) q = q.gte('published_at', cutoff);
     if (rolesFilter) q = q.or(rolesFilter);
-    const { data, error } = await q
-      .order('published_at', { ascending: false })
-      .range(offset, offset + ENG_HIRING_PAGE_SIZE - 1);
-    if (error) throw new Error(`eng_hiring_cache read: ${error.message}`);
-    const rows = (data ?? []) as Record<string, unknown>[];
-    for (const r of rows) {
-      if (rolesRegex.test(cell(r.vacancy_title))) matched.push(r);
+    return q;
+  };
+
+  if (!slot) {
+    const matched: Record<string, unknown>[] = [];
+    let offset = 0;
+    for (let page = 0; page < ENG_HIRING_MAX_PAGES && matched.length < limit; page += 1) {
+      const { data, error } = await baseQuery()
+        .order('published_at', { ascending: false })
+        .range(offset, offset + ENG_HIRING_PAGE_SIZE - 1);
+      if (error) throw new Error(`eng_hiring_cache read: ${error.message}`);
+      const pageRows = (data ?? []) as Record<string, unknown>[];
+      for (const r of pageRows) {
+        if (rolesRegex.test(cell(r.vacancy_title))) matched.push(r);
+      }
+      if (pageRows.length < ENG_HIRING_PAGE_SIZE) break;
+      offset += pageRows.length;
     }
-    if (rows.length < ENG_HIRING_PAGE_SIZE) break;
-    offset += rows.length;
+
+    // Дедуп по компании внутри задачи: сортировка по свежести (в JS — порядок
+    // выборки не контракт), первое вхождение компании побеждает.
+    matched.sort((a, b) => publishedTime(b.published_at) - publishedTime(a.published_at));
+    const seen = new Set<string>();
+    const out: Record<string, unknown>[] = [];
+    for (const r of matched) {
+      const key = normalizeCompanyForDedup(cell(r.company_name));
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      if (out.length < limit) out.push(r);
+    }
+    await resolveEngHiringSites(ctx, out);
+    // Режим без закладки менять нельзя, и признак исчерпания здесь не нужен:
+    // читателя у него ровно один (разбор нулевой сборки), а тот берёт признак
+    // только в паре с `continued`, которого без закладки не бывает. Отдавать
+    // флаг, который в этой ветке никто не прочтёт, значит заводить второе
+    // описание одного факта.
+    return { rows: out, excludedDuringFetch: 0, exhausted: false, hitCeiling: false, next: null };
   }
 
-  // Дедуп по компании внутри задачи: сортировка по свежести (в JS — порядок
-  // выборки не контракт), первое вхождение компании побеждает.
-  matched.sort((a, b) => publishedTime(b.published_at) - publishedTime(a.published_at));
-  const seen = new Set<string>();
-  const out: Record<string, unknown>[] = [];
-  for (const r of matched) {
-    const key = normalizeCompanyForDedup(cell(r.company_name));
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    if (out.length < limit) out.push(r);
+  const prefix = catalogPrefix(slot);
+  let excludedDuringFetch = 0;
+  let from = usableBookmark('eng_hiring', slot.from ?? undefined);
+  // Компания → лучшая (самая свежая) её вакансия из прочитанного. Порядок
+  // вставки Map — порядок ПЕРВОЙ ВСТРЕЧИ компании; в мёрдж уходит другой
+  // порядок — по свежести вакансии (сортировка `out` ниже), тот же, что в
+  // режиме без закладки. Снимете сортировку — изменится, кто переживёт
+  // kept.slice(0, limit), и крючок персонализации станет старее.
+  const byCompany = new Map<string, Record<string, unknown>>();
+  let page = 0;
+  let readError: string | undefined;
+  let reachedEnd = false;
+  for (; page < ENG_HIRING_MAX_PAGES && byCompany.size < limit; page += 1) {
+    let q = baseQuery();
+    if (from) q = q.or(insertionKeyset(from));
+    const { data, error } = await q.order('created_at').order('id').limit(ENG_HIRING_PAGE_SIZE);
+    if (error) {
+      readError = `eng_hiring_cache read: ${error.message}`;
+      break;
+    }
+    const pageRows = (data ?? []) as Record<string, unknown>[];
+    let scanned = 0;
+    for (const r of pageRows) {
+      if (byCompany.size >= limit) break;
+      scanned += 1;
+      /**
+       * Роль не совпала — закладку через эту строку НЕ переносим.
+       *
+       * Соблазнительно считать её закрытой навсегда (regex строится из roles,
+       * а roles входят в ключ закладки), но строки jobhive МУТАБЕЛЬНЫ:
+       * ингест делает upsert по (source, source_job_id), а source_job_id —
+       * это `jh:<компания>:<страна>`, то есть фид схлопнут в ОДНУ строку на
+       * компанию, и вакансия в ней переписывается, пока created_at остаётся
+       * от первой вставки. Компания, у которой сегодня «Account Executive»,
+       * через месяц держит в той же строке «Head of Sales» — и если бы
+       * закладка её перешагнула, она навсегда осталась бы позади неё.
+       * Поэтому здесь stop(): двигаться закладке разрешено только по тому,
+       * с чем у проекта покончено НЕЗАВИСИМО от содержимого строки.
+       */
+      if (!rolesRegex.test(cell(r.vacancy_title))) {
+        prefix.stop();
+        continue;
+      }
+      const key = normalizeCompanyForDedup(cell(r.company_name));
+      if (!key) {
+        prefix.closed(catalogBookmark('eng_hiring', r));
+        continue;
+      }
+      if (excludedKeys && matchesExclusion(excludedKeys, cell(r.company_name), undefined, r.company_site_url)) {
+        excludedDuringFetch += 1;
+        prefix.closed(catalogBookmark('eng_hiring', r));
+        continue;
+      }
+      prefix.stop();
+      const known = byCompany.get(key);
+      // Свежая вакансия той же компании вытесняет прежнюю: крючок
+      // персонализации должен быть самым новым из прочитанного.
+      if (!known || publishedTime(r.published_at) > publishedTime(known.published_at)) {
+        byCompany.set(key, r);
+      }
+    }
+    if (byCompany.size >= limit) break;
+    if (pageRows.length < ENG_HIRING_PAGE_SIZE) {
+      reachedEnd = true;
+      break;
+    }
+    const tail = pageRows[scanned - 1];
+    from = tail ? catalogBookmark('eng_hiring', tail) : null;
+    // Курсор с хвоста полной страницы не собрался — выдача осталась.
+    if (!from) break;
   }
-
+  const out = [...byCompany.values()].sort(
+    (a, b) => publishedTime(b.published_at) - publishedTime(a.published_at),
+  );
   // Досбор сайтов — ПОСЛЕ дедупа: резолвим только те строки, что реально уйдут
   // в базу, а не каждую просканированную вакансию.
+  await resolveEngHiringSites(ctx, out);
+  const hitCeiling = !readError && out.length < limit && page >= ENG_HIRING_MAX_PAGES;
+  return {
+    rows: out,
+    excludedDuringFetch,
+    exhausted: reachedEnd,
+    hitCeiling,
+    next: prefix.value(),
+    ...(readError ? { error: readError } : {}),
+  };
+}
+
+/** Досбор сайтов у строк без него + строка лога (общая для обоих режимов). */
+async function resolveEngHiringSites(ctx: HeStageContext, out: Record<string, unknown>[]): Promise<void> {
   const missing = out.filter((r) => !cell(r.company_site_url)).length;
-  if (missing > 0) {
-    const filled = await fillMissingCompanySites(ctx, out);
-    stageLog(ctx, `[base_collect] eng_hiring: сайт дособран у ${filled} из ${missing} строк без него`);
-  }
-  return out;
+  if (missing === 0) return;
+  const filled = await fillMissingCompanySites(ctx, out);
+  stageLog(ctx, `[base_collect] eng_hiring: сайт дособран у ${filled} из ${missing} строк без него`);
+}
+
+/**
+ * Закладки каталога ОДНОГО ПРОГОНА стадии: карта в памяти + запись в стор.
+ *
+ * Зачем прослойка, а не прямые вызовы стора: сдвиг закладки обязан ложиться в
+ * БД ПОСЛЕ префикса строк (persistCollectInfo), а не вместе с ним. Потерянный
+ * сдвиг стоит одного лишнего скана на следующую ночь; потерянный префикс при
+ * уехавшем сдвиге стоил бы компаний, которых больше никто не прочитает.
+ *
+ * `stored === null` означает «стор недоступен» (миграция 20260930_0002 не
+ * применена либо чтение отказало). Слот при этом ВСЁ РАВНО выдаётся — просто с
+ * `from: null`: режим чтения каталога выбирается по рынку, а не по доступности
+ * стора, поэтому при market='us' срез читается тем же keyset'ом по времени
+ * вставки, только с первой строки и без записи закладок. Исключение уже
+ * собранных компаний на выборке тоже работает без стора — ему стор не нужен.
+ * Цена отсутствия миграции — не «как раньше», а проход без индексов под этот
+ * keyset, поэтому миграцию применяют ДО деплоя кода.
+ */
+interface HeCatalogRun {
+  /** Сохранённый план, если его вход совпал с текущим (иначе null — платим). */
+  reusablePlan(planKey: string): HeSourcePlan | null;
+  /** Запомнить новый план и выбросить закладки чужих срезов. */
+  rememberPlan(plan: HeSourcePlan, planKey: string): Promise<void>;
+  slotFor(task: HeCollectTask): HeCatalogSlot | null;
+  move(key: string, bookmark: HeCatalogBookmark | null): void;
+  flush(): Promise<void>;
+}
+
+function createHeCatalogRun(
+  ctx: HeStageContext,
+  args: { verticalId: string; market: HeMarket; stored: HeCatalogCursorRow | null },
+): HeCatalogRun {
+  const bookmarks: Record<string, HeCatalogBookmark> = { ...(args.stored?.bookmarks ?? {}) };
+  let dirty = false;
+  return {
+    reusablePlan(planKey) {
+      const stored = args.stored;
+      if (!stored?.plan || stored.planKey !== planKey) return null;
+      // План без задач переиспользовать нельзя: сборка ушла бы в «план пуст»
+      // вместо того, чтобы попробовать спланировать заново.
+      return stored.plan.tasks.length > 0 ? stored.plan : null;
+    },
+    async rememberPlan(plan, planKey) {
+      if (!args.stored) return;
+      const sliceKeys = plan.tasks
+        .map((task) => heCatalogSliceKey(task))
+        .filter((key): key is string => key !== null);
+      const ok = await saveHeCatalogCursor(
+        ctx.supabase,
+        {
+          verticalId: args.verticalId,
+          market: args.market,
+          bookmarks,
+          plan: { plan, planKey, sliceKeys },
+        },
+        (m) => stageLog(ctx, m),
+      );
+      // Запись выбросила закладки чужих срезов — выбрасываем их и из карты
+      // прогона. Иначе ближайший flush (он пишет карту целиком) вернул бы их
+      // обратно той же строкой, и обещанное «закладки чужих срезов выброшены
+      // той же записью» не выполнялось бы ни разу. На отказе записи карту не
+      // трогаем: в сторе остался прежний план, и его закладки ещё его.
+      if (ok) {
+        const wanted = new Set(sliceKeys);
+        for (const key of Object.keys(bookmarks)) {
+          if (!wanted.has(key)) delete bookmarks[key];
+        }
+      }
+    },
+    slotFor(task) {
+      if (!isHeCatalogSource(task.source)) return null;
+      const key = heCatalogSliceKey(task);
+      if (!key) return null;
+      return { key, from: usableBookmark(task.source, bookmarks[key]) };
+    },
+    move(key, bookmark) {
+      if (!bookmark || sameBookmark(bookmark, bookmarks[key] ?? null)) return;
+      // Штамп времени ставится здесь, на приёме сдвига: у чтения каталога он
+      // выписывался бы на каждую просмотренную строку (до 60 тысяч за задачу).
+      bookmarks[key] = { ...bookmark, at: new Date().toISOString() };
+      dirty = true;
+    },
+    async flush() {
+      if (!dirty || !args.stored) return;
+      const ok = await saveHeCatalogCursor(
+        ctx.supabase,
+        { verticalId: args.verticalId, market: args.market, bookmarks },
+        (m) => stageLog(ctx, m),
+      );
+      if (ok) dirty = false;
+    },
+  };
 }
 
 async function dispatchTask(
@@ -1710,6 +2487,7 @@ async function dispatchTask(
   project: HeProject,
   limit: number,
   getExcludedKeys: () => Promise<HeBaseExclusionKeys>,
+  catalog: HeCatalogRun | null,
 ): Promise<void> {
   const { task } = state;
 
@@ -1747,21 +2525,84 @@ async function dispatchTask(
   }
 
   // ENG-источники (market='us') — тоже синхронно, без дочерних джоб: справочные
-  // таблицы читаются напрямую, строки сразу ложатся в задачу (как реестр, но
-  // без исключения чужих баз на выборке — оно на мёрдже, как у hh/карт).
+  // таблицы читаются напрямую, строки сразу ложатся в задачу. Компании других
+  // баз проекта исключаются ЕЩЁ НА ВЫБОРКЕ (как у реестра), а место, до которого
+  // срез разобран, переживает базу — см. блок «ЧТЕНИЕ КАТАЛОГА С ЗАКЛАДКОЙ».
   if (task.source === 'pdl' || task.source === 'funded' || task.source === 'eng_hiring') {
-    const rows =
+    const slot = catalog?.slotFor(task) ?? null;
+    // Ключи чужих баз читаем только когда исключение на выборке включено
+    // (market='us'): у RU-плана ENG-задач не бывает, и лишнее чтение data всех
+    // баз проекта там ничем не оправдано.
+    const excluded = slot ? await getExcludedKeys() : null;
+    const fetched =
       task.source === 'pdl'
-        ? await fetchPdlRows(ctx, task.pdl_filters, limit)
+        ? await fetchPdlRows(ctx, task.pdl_filters, limit, excluded, slot)
         : task.source === 'funded'
-          ? await fetchFundedRows(ctx, task.funded_filters, limit)
-          : await fetchEngHiringRows(ctx, task.eng_hiring_query, limit);
-    state.harvest = rows.map(
+          ? await fetchFundedRows(ctx, task.funded_filters, limit, excluded, slot)
+          : await fetchEngHiringRows(ctx, task.eng_hiring_query, limit, excluded, slot);
+    const moved = slot && !sameBookmark(fetched.next, slot.from) ? fetched.next : null;
+    // Обрыв выдачи НЕ выбрасывает разобранное: падаем только когда фиксировать
+    // нечего вовсе — ни одной строки и ни одного сдвига закладки.
+    if (fetched.error && fetched.rows.length === 0 && !moved) {
+      throw new Error(`${task.source}: ${fetched.error}`);
+    }
+    if (slot && moved) catalog?.move(slot.key, moved);
+    state.harvest = fetched.rows.map(
       task.source === 'pdl' ? mapPdlRow : task.source === 'funded' ? mapFundedRow : mapEngHiringRow,
     );
     state.status = 'done';
     state.rows = state.harvest.length;
     state.child_job_id = null;
+    if (fetched.excludedDuringFetch > 0) {
+      state.excluded_during_fetch = fetched.excludedDuringFetch;
+      stageLog(
+        ctx,
+        `[base_collect] ${task.source}: ${fetched.excludedDuringFetch} строк пропущено на выборке — ` +
+          'компании уже есть в других базах проекта',
+      );
+    }
+    // Чтение стартовало с сохранённой закладки: срез уже листали прошлые
+    // сборки проекта. Без этого факта «выдача кончилась» неотличимо от «в
+    // срезе не было ни строки с самого начала» (см. поле `continued`).
+    if (slot?.from) state.continued = true;
+    if (fetched.error) {
+      // Партия частичная: источник жив, чтение оборвалось на странице. Ни
+      // исчерпания, ни потолка не заявляем — продолжение пойдёт с закладки.
+      state.partial = true;
+      state.note = `частичная партия: выдача каталога оборвалась (${fetched.error})`;
+      stageLog(
+        ctx,
+        `[base_collect] ${task.source}: партия собрана частично, взято ${fetched.rows.length} строк, ` +
+          `выдача оборвалась: ${fetched.error}`,
+      );
+    } else if (fetched.hitCeiling) {
+      // Стоп по потолку страниц — предохранитель, а НЕ исчерпание среза:
+      // exhausted не ставим, иначе разбор нулевой сборки сказал бы клиенту
+      // «новых компаний не осталось» на срабатывании предохранителя.
+      const scanned = task.source === 'eng_hiring' ? ENG_HIRING_MAX_PAGES : ENG_CATALOG_MAX_PAGES;
+      state.hit_ceiling = true;
+      state.note = `остановлено на потолке сканирования каталога: ${scanned}k строк`;
+    } else if (slot && fetched.exhausted) {
+      // Выдача каталога кончилась на короткой странице: за закладкой под эти
+      // фильтры строк больше нет. Пометка для staff + сигнал разбору нулевой
+      // сборки (segmentExhausted). Ставим только при slot — вне market='us'
+      // закладки нет, признак читать некому, а RU-путь обязан остаться
+      // прежним байт-в-байт.
+      //
+      // Флаг НЕ закрывает источник: он лежит в collect_info этой базы, его
+      // не читает ни планировщик ночного добора, ни enqueue — следующая
+      // сборка снова прочитает каталог с той же закладки и подберёт всё, что
+      // ingest вставил за ночь (у свежей строки created_at больше закладки,
+      // то есть она ВПЕРЕДИ курсора).
+      state.exhausted = true;
+      // Две разные правды, и ровно их различает `continued`: с закладкой срез
+      // дочитан ПОСЛЕ прошлых сборок, без закладки — с первой строки. В
+      // причину базы уезжает та, что случилась (breakdown ниже собирается из
+      // пометок задач), иначе staff читал бы про закладку, которой не было.
+      state.note = slot.from
+        ? 'каталог дочитан до конца: за закладкой строк под фильтры среза больше нет'
+        : 'каталог дочитан до конца с первой строки: строк под фильтры среза больше нет';
+    }
     return;
   }
 
@@ -2989,13 +3830,56 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     }
   }
 
+  /**
+   * Закладки каталога вертикали — ЛЕНИВО, ровно как ключи чужих баз.
+   *
+   * Тик чистого ожидания конструктора до DISPATCH не доходит и к стору не
+   * обращается; за всю ENG-сборку чтение одно — тик, который строит план и/или
+   * диспатчит каталожные задачи. `market !== 'us'` не читает стор никогда: у
+   * RU-плана каталог — это реестр со своей закладкой в задаче.
+   */
+  let catalogRun: HeCatalogRun | null = null;
+  let catalogLoaded = false;
+  const getCatalog = async (): Promise<HeCatalogRun | null> => {
+    if (market !== 'us') return null;
+    if (!catalogLoaded) {
+      catalogLoaded = true;
+      const stored = await loadHeCatalogCursor(ctx.supabase, base.vertical_id, (m) => stageLog(ctx, m));
+      catalogRun = createHeCatalogRun(ctx, { verticalId: base.vertical_id, market, stored });
+    }
+    return catalogRun;
+  };
+
   // ─── PLAN ───
   if (!info.plan) {
-    const { plan, planRepair, sliceProbe, usedHypotheses } = await buildPlan(job, ctx, vertical, usage, market);
-    info.plan = plan;
+    // Вход планировщика читается бесплатно (гипотезы + вокабуляр) — по его хешу
+    // и решается, нужен ли платный вызов модели вообще.
+    const planInput = await collectPlanInput(job, ctx, vertical, market);
+    const catalog = await getCatalog();
+    const reusedPlan = catalog?.reusablePlan(planInput.planKey) ?? null;
+    // Провенанс плана считаем всегда по ТЕКУЩЕМУ чтению гипотез, а не копией из
+    // стора: иначе переиспользование показывало бы вчерашнюю разметку.
+    info.hypotheses = planInput.usedHypotheses;
+    let planRepair: HePlanRepair | undefined;
+    let sliceProbe: HeSliceProbe | undefined;
+    if (reusedPlan) {
+      // Тот же вход планировщика, что и у сохранённого плана: срезы те же, и
+      // закладки в сторе указывают ровно в них. Экономия — вызов планировщика
+      // и проба среза, то есть весь платёж фазы PLAN.
+      info.plan = reusedPlan;
+      stageLog(
+        ctx,
+        `[base_collect] план источников взят из закладки вертикали (${reusedPlan.tasks.length} задач: ` +
+          `${reusedPlan.tasks.map((t) => t.source).join(', ')}) — планировщик и проба среза не оплачиваются`,
+      );
+    } else {
+      const built = await buildPlan(ctx, vertical, planInput, usage, market);
+      info.plan = built.plan;
+      planRepair = built.planRepair;
+      sliceProbe = built.sliceProbe;
+    }
     if (planRepair) info.plan_repair = planRepair;
     if (sliceProbe) info.slice_probe = sliceProbe;
-    info.hypotheses = usedHypotheses;
 
     // Отказ пробы: срез не про эту вертикаль и перепланирование не помогло.
     // Сохраняем провенанс и валим сбор ДО дозвона до коллекторов — час
@@ -3031,6 +3915,10 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       task,
     }));
     await persistCollectInfo(ctx, baseId, info);
+    // Новый план — в стор вертикали: следующая ночь возьмёт его вместо платного
+    // вызова, и её закладки совпадут по ключу фильтров с этими срезами. Отказ
+    // записи ничего не ломает — будет оплачен ещё один план.
+    if (!reusedPlan) await catalog?.rememberPlan(info.plan, planInput.planKey);
     stageLog(ctx, `[base_collect] план: ${info.tasks.length} задач (${info.tasks.map((t) => t.source).join(', ')})`);
   }
   const tasks = info.tasks ?? [];
@@ -3098,10 +3986,14 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   };
 
   // ─── DISPATCH ───
+  // Закладки нужны только тику, который реально диспатчит каталожную задачу.
+  const dispatchCatalog = tasks.some((t) => t.status === 'pending' && isHeCatalogSource(t.source))
+    ? await getCatalog()
+    : null;
   for (const state of tasks) {
     if (state.status !== 'pending') continue;
     try {
-      await dispatchTask(ctx, state, project, limit, getExcludedKeys);
+      await dispatchTask(ctx, state, project, limit, getExcludedKeys, dispatchCatalog);
       stageLog(
         ctx,
         `[base_collect] dispatch ${state.source}: ${state.status}` +
@@ -3113,6 +4005,11 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       stageLog(ctx, `[base_collect] dispatch ${state.source} упал: ${state.error}`);
     }
     await persistCollectInfo(ctx, baseId, info);
+    // Сдвиг закладки — строго ПОСЛЕ префикса строк, и только после его успешной
+    // записи: потерянный сдвиг стоит одного лишнего скана следующей ночью,
+    // потерянный префикс при уехавшем сдвиге стоил бы компаний, которых больше
+    // никто не прочитает. Запись закладки не бросает by design.
+    if (dispatchCatalog) await dispatchCatalog.flush();
   }
 
   // ─── WAIT ───
@@ -3213,16 +4110,45 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     // Сегмент исчерпан: все задачи исчерпаны/пусты (стоп по потолку
     // сканирования — НЕ исчерпание, hit_ceiling сбрасывает признак), база
     // пуста, нет упавших задач (упавшая задача важнее: показываем её разбор,
-    // а не «исчерпан») и реестр подтвердил продолжение — строки реально
-    // пропускались на выборке как уже собранные в других базах. Повторная
-    // сборка бессмысленна — честный фейл вместо общего «не дала строк».
-    // Пустая выдача при ПЕРВОЙ сборке (пропусков на выборке не было) —
-    // обычный нулевой сбор, не исчерпание.
+    // а не «исчерпан») и есть доказательство, что этот срез проект УЖЕ
+    // отработал (sliceAlreadyHarvested ниже). Повторная сборка бессмысленна —
+    // честный фейл вместо общего «не дала строк». Пустая выдача при ПЕРВОЙ
+    // сборке, за которой ничего не стоит, — обычный нулевой сбор, не
+    // исчерпание.
+    // Оборванное чтение каталога (`partial`) исчерпанием не считается ни при
+    // каких условиях: «строк нет» у него значит «не дочитали», а кабинет по
+    // этой причине печатает клиенту «в источниках больше нет новых компаний».
+    //
+    // ЧТО ИМЕННО ДОКАЗЫВАЕТ, ЧТО СРЕЗ УЖЕ ОТРАБОТАН. Доказательства два, и
+    // нужно ровно одно:
+    //  1. строки пропускались на выборке как уже собранные — так видит срез
+    //     реестр и так же ENG без стора закладок: оба читают с первой строки,
+    //     и повторный проход обязан их встретить;
+    //  2. ENG со стором: чтение стартовало с закладки (`continued`) и дошло до
+    //     КОНЦА выдачи (`exhausted`). У такой ночи пропускать уже нечего —
+    //     закладка стоит за всем разобранным, — и раньше ровно она получала
+    //     ложную причину: «источники не дали строк, запустите сборку ещё раз».
+    //     Запускать было бессмысленно: срез дочитан.
+    // Доказательство 2 требует ТРЕТЬЕГО условия — у проекта есть компании в
+    // других базах. Закладка сама по себе этого не доказывает: она проходит и
+    // по строкам, отвергнутым условиями среза (у eng_hiring — не совпавшая
+    // роль), поэтому у проекта, которому не собрали ни одной компании, она
+    // тоже может уехать. Без этой проверки кабинет сказал бы такому проекту
+    // «Companies collected earlier stay in the bases you already have» — а
+    // собранного раньше у него нет. `existingKeys` — те самые компании чужих
+    // баз, уже прочитанные выше для мёрджа, лишнего чтения здесь нет.
+    //
+    // Доказательство 1 оставлено дословно: снять его значит повесить
+    // «Сегмент исчерпан» на обычную ПЕРВУЮ пустую сборку RU-инструмента, где
+    // реестр честно ставит exhausted на пустой выдаче.
+    const sliceAlreadyHarvested =
+      tasks.some((t) => (t.excluded_during_fetch ?? 0) > 0) ||
+      (existingKeys.nameInns.size > 0 && tasks.some((t) => t.exhausted === true && t.continued === true));
     const segmentExhausted =
       (base.row_count ?? 0) === 0 &&
       failed.length === 0 &&
-      tasks.every((t) => t.exhausted || (t.rows === 0 && !t.hit_ceiling)) &&
-      tasks.some((t) => (t.excluded_during_fetch ?? 0) > 0);
+      tasks.every((t) => !t.partial && (t.exhausted || (t.rows === 0 && !t.hit_ceiling))) &&
+      sliceAlreadyHarvested;
     // Упавших задач нет — показываем пометки задач (например, потолок
     // сканирования), а не бессмысленное «план пуст».
     const breakdown =

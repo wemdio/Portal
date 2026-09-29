@@ -304,7 +304,8 @@ export const HeMapsQuerySchema = z.object({
  * Фильтры каталога PDL (pdl_companies, компании EU/US): industries — метки
  * LinkedIn-индустрий в нижнем регистре, sizes — бакеты штата («51-200»),
  * countries — английские названия стран в нижнем регистре, name — подстрока
- * имени. Пустой {} — нефильтрованный срез 13M-строкового справочника: запрещаем.
+ * имени. Пустой {} — нефильтрованный срез справочника на ~19.5M строк (та же
+ * цифра, что в EN-промпте и в docs/portal-product-overview.md): запрещаем.
  */
 export const HePdlFiltersSchema = z
   .object({
@@ -328,6 +329,27 @@ export const HeFundedFiltersSchema = z
     funded_since: HeDateSchema.optional(),
   })
   .refine((f) => Object.values(f).some((v) => v !== undefined), 'укажи хотя бы один фильтр');
+
+/**
+ * Ключи ENG-фильтров, которые задают ПОРОГ РАЗМЕРА, и ключи, которые задают,
+ * ПРО КОГО срез. Списки лежат рядом со схемами нарочно: правило «порог без
+ * основания снимается» (baseCollect, market='us') читает их отсюда, и новый
+ * ключ фильтра нельзя добавить в схему, не решив, к какой он группе.
+ *
+ * Снятие порога разрешено ТОЛЬКО когда в фильтрах остаётся хотя бы один ключ из
+ * «про кого». Одного .refine() выше для этой проверки мало: он требует любой
+ * непустой ключ, и `{ countries: ['united states'] }` его проходит — а это весь
+ * каталог США; снятие ЕДИНСТВЕННОГО фильтра дало бы `{}` и нефильтрованный срез
+ * на ~19.5M строк, то есть весь лимит сборки, забитый случайными компаниями.
+ *
+ * `funded_since` (и `posted_within_days` у eng_hiring) в списках НЕТ намеренно:
+ * это окна свежести, а не пороги размера.
+ */
+export const HE_PDL_SIZE_FILTER_KEYS = ['sizes'] as const;
+export const HE_PDL_SCOPE_FILTER_KEYS = ['industries', 'name'] as const;
+export const HE_FUNDED_SIZE_FILTER_KEYS = ['min_funding_usd'] as const;
+/** У funded ключа `name` нет вовсе — единственное «про кого» это industries. */
+export const HE_FUNDED_SCOPE_FILTER_KEYS = ['industries'] as const;
 
 /**
  * Запрос к eng_hiring_cache (компании, нанимающие ENG-роли): roles — EN
