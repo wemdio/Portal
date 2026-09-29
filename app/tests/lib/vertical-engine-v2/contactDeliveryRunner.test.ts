@@ -4,7 +4,10 @@ import { createMockSupabase } from '@/../tests/helpers/mockSupabase';
 import { AppendLeadsPartialError } from '@/lib/clientLaunch/appendLeads';
 import { runContactDeliveryDay } from '@/lib/verticalEngineV2/contactDeliveryRunner';
 import { loadVeContactDeliveryCampaignInventory } from '@/lib/verticalEngineV2/contactDeliveryInventory';
+import { getCampaign, getCampaignAnalyticsOverview } from '@/lib/instantly/client';
 import { activateDeliveredContactCampaigns } from '@/lib/verticalEngineV2/contactDeliveryActivation';
+
+jest.mock('@/lib/instantly/client', () => ({ getCampaign: jest.fn(), getCampaignAnalyticsOverview: jest.fn() }));
 
 jest.mock('@/lib/verticalEngineV2/contactDeliveryActivation', () => ({
   activateDeliveredContactCampaigns: jest.fn(),
@@ -12,6 +15,8 @@ jest.mock('@/lib/verticalEngineV2/contactDeliveryActivation', () => ({
 const activateDelivered = jest.mocked(activateDeliveredContactCampaigns);
 
 beforeEach(() => {
+  jest.mocked(getCampaign).mockReset().mockRejectedValue(new Error('provider unavailable'));
+  jest.mocked(getCampaignAnalyticsOverview).mockReset().mockRejectedValue(new Error('provider unavailable'));
   activateDelivered.mockReset().mockResolvedValue({ activated: 0, errors: [] });
 });
 
@@ -342,7 +347,7 @@ describe('VE2 contact delivery runner for a Portal project without periods', () 
   }
 
   it('links active campaigns to the project (legacy link) and reserves with the observed VE2 fact', async () => {
-    const portal = await portalWithoutPeriod();
+    const portal = await portalWithoutPeriod({ deadline: '2026-09-22' });
     const instantly = instantlyDb();
     const deps = ownershipDeps();
     const writesBefore = portal.mutations.length;
@@ -407,20 +412,6 @@ describe('VE2 contact delivery runner for a Portal project without periods', () 
       project: { status: 'Завершен' },
       periods: [],
       error: 'Проект в Portal не в работе (статус «Завершен»). Верните рабочий статус в карточке проекта. Загрузка продолжится сама, если к этому времени кампании плана ещё не завершились; иначе понадобится новый запуск.',
-    },
-    {
-      name: 'a passed card deadline',
-      project: { deadline: '2026-09-22' },
-      periods: [],
-      error: 'Дедлайн проекта (22.09.2026) уже прошёл. Обновите поле «Дедлайн» в карточке проекта. Загрузка продолжится сама, если к этому времени кампании плана ещё не завершились; иначе понадобится новый запуск.',
-    },
-    {
-      // 21:30 UTC — уже 00:30 следующего дня по Москве, часовому поясу отправки.
-      name: 'a card deadline that ended at midnight in the delivery timezone',
-      project: { deadline: '2026-09-22' },
-      periods: [],
-      now: '2026-09-22T21:30:00.000Z',
-      error: 'Дедлайн проекта (22.09.2026) уже прошёл. Обновите поле «Дедлайн» в карточке проекта. Загрузка продолжится сама, если к этому времени кампании плана ещё не завершились; иначе понадобится новый запуск.',
     },
     {
       name: 'a card deadline that is not a date',
@@ -551,5 +542,47 @@ describe('VE2 ambiguous upload reconciliation', () => {
     await expect(reconcileContactDeliveries({ portalDb: unavailable as never, veProjectId: VE_PROJECT_ID,
       deps: { getCampaign: jest.fn().mockResolvedValue({ id: claim.campaign_id, email_list: claim.mailbox_ids }), listLeads: jest.fn().mockResolvedValue({ items: [lead] }) },
     })).rejects.toThrow('DB reply lost');
+  });
+});
+
+describe('missing Instantly analytics', () => {
+  it('uses an explicit scoped overview, including zero, and rejects unknown facts and identities', async () => {
+    const portal = createMockSupabase({ tables: {
+      ve_launch_queue_items: [{ id: ITEM_ID, project_id: VE_PROJECT_ID, status: 'active', instantly_account_id: 'workspace-1' }],
+      ve_launch_queue_campaigns: [{ id: 'row', item_id: ITEM_ID, campaign_id: 'campaign-a', leads_count: 50 }],
+    } });
+    const instantly = createMockSupabase({ tables: {
+      instantly_campaign_catalog: [{ id: 'campaign-a', new_leads_contacted_count: null, analytics_synced_at: null }],
+    } });
+    const get = jest.mocked(getCampaign);
+    const overview = jest.mocked(getCampaignAnalyticsOverview);
+    get.mockResolvedValue({ id: 'campaign-a' } as never);
+    const inventory = () => loadVeContactDeliveryCampaignInventory(portal as never, instantly as never, VE_PROJECT_ID);
+    for (const count of [0, 12]) {
+      overview.mockResolvedValue({ new_leads_contacted_count: count, emails_sent_count: 12 });
+      await expect(inventory()).resolves.toMatchObject({ observedFirstContacted: count });
+    }
+    expect(get).toHaveBeenCalledWith('campaign-a', { accountId: 'workspace-1' });
+    expect(overview).toHaveBeenCalledWith({ campaign_id: 'campaign-a' }, { accountId: 'workspace-1' });
+    // A missing catalog row is unknown too, never an implicit zero.
+    await instantly.from('instantly_campaign_catalog').delete().eq('id', 'campaign-a');
+    await expect(inventory()).resolves.toMatchObject({ observedFirstContacted: 12 });
+    for (const result of [{}, { new_leads_contacted_count: null, emails_sent_count: 0 },
+      { new_leads_contacted_count: '0', emails_sent_count: 0 },
+      { new_leads_contacted_count: -1, emails_sent_count: 0 },
+      { new_leads_contacted_count: 1, emails_sent_count: 0 }]) {
+      overview.mockResolvedValue(result);
+      await expect(inventory()).rejects.toThrow('exact non-negative first-contacted');
+    }
+    overview.mockResolvedValue({ new_leads_contacted_count: 0, emails_sent_count: 0 });
+    get.mockResolvedValueOnce({ id: 'another-campaign' } as never);
+    const before = overview.mock.calls.length;
+    await expect(inventory()).rejects.toThrow('exact non-negative first-contacted');
+    expect(overview).toHaveBeenCalledTimes(before);
+    overview.mockRejectedValueOnce(new Error('timeout'));
+    await expect(inventory()).rejects.toThrow('exact non-negative first-contacted');
+    expect(portal.rpcCalls).toHaveLength(0);
+    expect(portal.mutations).toHaveLength(0);
+    expect(instantly.mutations).toHaveLength(1); // only this test's explicit catalog deletion
   });
 });

@@ -535,10 +535,33 @@ try {
 
   // The new manual-start migration is applied after historical migration checks.
   await db.exec(migration('20260928_0005_ve_manual_instantly_start.sql'));
+  await db.exec(migration('20260929_0060_ve_continue_after_deadline.sql'));
+  await db.exec(migration('20260929_0060_ve_continue_after_deadline.sql')); // idempotent
   await begin();
   await inRollback(async () => {
+    const ids = await one(`select gen_random_uuid() pp,gen_random_uuid() ve,gen_random_uuid() vert,
+      gen_random_uuid() base,gen_random_uuid() tpl,gen_random_uuid() audit,gen_random_uuid() reservation`);
+    await rows(`insert into public.projects(id,client,status,deadline) values($1,'Overdue','В работе','2000-01-01')`,[ids.pp]);
+    await insertVeProject(ids.ve,'Overdue approved launch');
+    await rows(`insert into public.ve_verticals(id,project_id,name,potential_pct) values($1,$2,'HR',50)`,[ids.vert,ids.ve]);
+    await rows(`insert into public.ve_bases(id,project_id,vertical_id,columns,data,source,status)
+      values($1,$2,$3,'["email"]','[]','auto','analyzed')`,[ids.base,ids.ve,ids.vert]);
+    await rows(`insert into public.ve_templates(id,base_id,vertical_id,letters,status)
+      values($1,$2,$3,'[{"subject":"s","body":"b"}]','ready')`,[ids.tpl,ids.base,ids.vert]);
+    await rows(`insert into public.ve_segmentation_audits(id,project_id,template_id,base_id,requested_by,status,input_hash,summary,launch_status,launch_reservation_id)
+      values($1,$2,$3,$4,$5,'ready',repeat('a',64),'{}','running',$6)`,[ids.audit,ids.ve,ids.tpl,ids.base,USER,ids.reservation]);
+    const bound = (await one(bindSql,[ids.ve,ids.pp,null,4000,USER,now])).r;
+    check(bound.bound && bound.delivery_plan.target_contacts===4000,'overdue: explicit new launch can bind its target after the planning date');
+    const info = {...launchInfo,portal_project_id:ids.pp,campaign_id:'overdue-camp',
+      campaigns:[{...launchInfo.campaigns[0],campaign_id:'overdue-camp'}]};
+    const finalized = (await one(finalizeSql,[ids.audit,ids.tpl,ids.reservation,JSON.stringify(info),now,
+      JSON.stringify(drip.map(row=>({...row,campaign_id:'overdue-camp'})))])).r;
+    check(finalized.finalized && finalized.delivery_rows_count===30 && finalized.queue_item.status==='queued' && finalized.queue_item.ever_active_at===null,
+      'overdue: preparation saves the reserve and leaves Start to the specialist',JSON.stringify(finalized));
+  });
+  await inRollback(async () => {
     const itemId = periodFinal.queue_item.id;
-    await rows(`update public.project_periods set status='active',deadline='2099-12-31' where id=$1`, [PERIOD]);
+    await rows(`update public.project_periods set status='active',deadline='2000-01-01' where id=$1`, [PERIOD]);
     await rows(`update public.ve_templates set launch_info=launch_info || jsonb_build_object('segmentation_audit_id',$2::text) where id=$1`, [VTPL,VAUD]);
     await rows(`update public.ve_launch_queue_items set status='prepared',ever_active_at=null where id=$1`, [itemId]);
     await rows(`update public.ve_launch_queue_campaigns set remote_status=null,status_observed_at=null,activated_at=null,leads_count=0 where item_id=$1`, [itemId]);
@@ -584,6 +607,8 @@ try {
     await observe(1);
     check(await allowed(), 'manual: Start in provider allows daily delivery');
     const resumed = (await reserveManual()).r;
+    check(resumed.deadline === '2000-01-01' && resumed.effective_count <= resumed.sender_daily_capacity,
+      'overdue: period keeps its original date and selected capacity', JSON.stringify(resumed));
     check(resumed.status === 'reserved' && resumed.run_id !== empty.run_id && resumed.batches[0]?.row_ids.length > 0,
       'manual: provider Start retries empty reservation on the same day',JSON.stringify(resumed));
     // mark() uses the DB clock; all observations here are from the same transaction.
@@ -609,6 +634,43 @@ try {
     check(oldDaily.reserved === false && oldPortal.reserved === false,'manual: old worker and old Portal cannot reserve Start');
     await rows(`update public.ve_launch_queue_items set status='released' where id=$1`,[itemId]);
     await expectError('manual: released launch cannot be re-enrolled',observeSql,[itemId,observations(1),dbNow],/released/);
+  });
+  await commit();
+
+  await begin();
+  await inRollback(async () => {
+    const liveNow = (await one('select now()::text as t')).t;
+    const t = new Date(liveNow); t.setUTCHours(6,0,0,0);
+    while ([0,6].includes(t.getUTCDay())) t.setUTCDate(t.getUTCDate()+1);
+    const workNow = t.toISOString();
+    await rows(`update public.projects set status='В работе',deadline='2000-01-01' where id=$1`, [STAFF]);
+    await rows(`update public.ve_launch_queue_items set status='active' where id=$1`, [ITEM]);
+    await rows(`update public.ve_launch_queue_campaigns set remote_status=1,status_observed_at=$2::timestamptz where item_id=$1`, [ITEM, workNow]);
+    await rows(`update public.ve_contact_delivery_rows set status='ready',run_id=null,reserved_at=null where item_id=$1`, [ITEM]);
+    await rows(`delete from public.ve_contact_delivery_daily_runs where ve_project_id=$1`, [VE]);
+    check((await one('select (public.ve_require_contact_supply_active($1,$2::timestamptz)).status as s',[PLAN,workNow])).s === 'active',
+      'overdue: collection remains authorized for a project without periods');
+    const reserved = (await one(reserveSql,[VE,workNow])).r;
+    check(reserved.status === 'reserved' && reserved.effective_count === 20 && reserved.deadline === '2000-01-01',
+      'overdue: no-period upload uses the selected capacity without rewriting deadline', JSON.stringify(reserved));
+    check((await one(reserveSql,[VE,workNow])).r.run_id === reserved.run_id,'overdue: daily replay cannot allocate a second batch');
+    const retained = (await one(releaseItem,[ITEM,workNow])).status;
+    check(retained === 'active','overdue: unfinished supply is not released just because the date passed');
+    await rows(`update public.ve_contact_delivery_daily_runs set upload_blocked_at=$2 where id=$1`,[reserved.run_id,workNow]);
+    const retryArgs = [VE,reserved.run_id,workNow,USER,workNow];
+    const retrySql = 'select public.ve_retry_contact_delivery_upload($1,$2,$3::timestamptz,$4,$5::timestamptz) as r';
+    check((await one(retrySql,retryArgs)).r.ok,'overdue: capacity retry remains possible after the planning date');
+    check((await one(retrySql,retryArgs)).r.replayed,'overdue: repeated retry is idempotent');
+    const tomorrow = new Date(t); tomorrow.setUTCDate(tomorrow.getUTCDate()+1);
+    await inRollback(async () => {
+      const fulfilled = (await one('select public.ve_reserve_contact_delivery_day($1,$2::timestamptz,4000) as r',[VE,tomorrow.toISOString()])).r;
+      check(fulfilled.status==='fulfilled' && fulfilled.effective_count===0,'overdue: reaching the target stops new uploads',JSON.stringify(fulfilled));
+    });
+    await rows(`update public.ve_contact_supply_plans set status='paused' where id=$1`,[PLAN]);
+    await expectError('overdue: specialist pause still prevents new collection',
+      'select public.ve_require_contact_supply_active($1,$2::timestamptz)',[PLAN,workNow],/not active/);
+    await rows(`update public.projects set status='Завершен' where id=$1`,[STAFF]);
+    await expectError('overdue: finished project still blocks delivery',reserveSql,[VE,tomorrow.toISOString()],/not launchable/);
   });
   await commit();
 
