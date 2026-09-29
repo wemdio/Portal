@@ -37,6 +37,8 @@ export type HeClientErrorCode =
   | 'segment_exhausted'
   /** Источник не отдал строк (ошибка чтения каталога или пустая выдача). */
   | 'source'
+  /** Сайт самого клиента не открылся — исследованию нечего было читать. */
+  | 'website_unreachable'
   /** Конструктор баз не обогатил строки почтами. */
   | 'enrichment'
   /** Шаг не уложился в отведённое время. */
@@ -103,6 +105,20 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
     title: 'The company sources did not return any rows for this vertical.',
     whatIsSaved: 'Everything collected so far is saved.',
     whatToDo: 'Start the collection again; if it keeps coming back empty, contact your manager.',
+  },
+  /**
+   * Единственный код, где виноват не наш контур: сайт, который клиент указал
+   * сам, не открылся (домена нет в DNS либо ни один адрес не отдал HTML —
+   * lib/hypothesisEngine/stages/io.ts, HeSiteUnreachableError). Поэтому здесь,
+   * в отличие от соседей, есть шаг, который клиент реально может сделать: адрес
+   * он задаёт при создании проекта, а описание бизнеса — на шаге «Brief», и
+   * ровно оно снимает отказ на следующем прогоне research.
+   */
+  website_unreachable: {
+    title: 'We could not open the website you gave us, so the research had nothing to read.',
+    whatIsSaved: 'The project and everything you entered are saved.',
+    whatToDo:
+      'Open the address in a browser to check it: if it does not open, start a new project with the correct one. If it opens but stays closed to us, describe your business in a few sentences in the Brief step and re-run the research.',
   },
   enrichment: {
     title: 'Finding and validating emails did not finish for this base.',
@@ -230,6 +246,16 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
   // только вместе с ними, оба места на это ссылаются.
   if (/лимит контактов воркспейса/i.test(message)) return 'sending_capacity';
   if (/Лимит контактов исчерпан/i.test(message)) return 'contacts_exhausted';
+
+  // Сайт клиента не открылся (стадия site_profile, HeSiteUnreachableError из
+  // stages/io.ts). Якорь — начало сообщения КЛАССА вместе с родом в скобках, но
+  // не начало строки: воркер пишет причину с префиксом стадии
+  // (`site_profile: …` — `writeJobFailure` в worker/hypothesisEngine.ts; имя
+  // функции, а не номер строки: номера здесь уже разъезжались). Правило стоит ВЫШЕ
+  // общих: в хвост сообщения подставлена причина чужого модуля, и «…: Не удалось
+  // загрузить сайт: … timed out» съехало бы в 'timeout', то есть в «попробуйте
+  // ещё раз» — совет, который мёртвому домену не помогает никогда.
+  if (/Сайт клиента недоступен \((?:dns|no_html)\)/i.test(message)) return 'website_unreachable';
 
   if (/не покрывается каталогом/i.test(message)) return 'audience_mismatch';
   if (/Сегмент исчерпан|не осталось новых/i.test(message)) return 'segment_exhausted';

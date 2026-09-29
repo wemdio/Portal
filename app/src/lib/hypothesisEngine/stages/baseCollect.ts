@@ -149,6 +149,9 @@ import {
 } from '../prompts/sourcePlan';
 import { buildCatalogRepairMessagesEn, buildSourcePlanMessagesEn } from '../prompts/sourcePlan.en';
 import { HeCatalogRepairSchema, HeSourcePlanSchema } from '../schemas';
+// Клиент для записи ЧЕКПОЙНТА ОПЛАТЫ — без сигнала джобы (см. paidCheckpointDb
+// ниже). Ни одно чтение стадии через него не идёт.
+import { heCheckpointSupabase } from '../stageDb';
 import type { HeBase, HeJob, HeProject, HeVertical } from '../types';
 import {
   completeHeRefillNoNew,
@@ -599,6 +602,13 @@ export interface HeRelevanceGateInfo {
    * Ключи «компания|домен» строк вне вертикали — тот же ключ, что у дедупа
    * HARVEST. Ключи, а не индексы: merged пересчитывается на каждом тике
    * (межбазовое исключение могло вырасти), и индекс уехал бы на чужую строку.
+   *
+   * Живут ровно до терминальной записи базы: там пометки уже разложены по
+   * строкам (`_low_relevance`), и набор ключей снимается — см.
+   * `dropCollectWorkState`. У завершённой базы здесь ПУСТОЙ массив, а сколько
+   * компаний вычеркнуто, говорит `stats.low_relevance` — он считается по самим
+   * строкам базы и живёт в терминальной записи, поэтому отдельного числа
+   * рядом с ключами не держим (такое число никто не читал).
    */
   flagged_keys: string[];
   tokens_used: number;
@@ -739,16 +749,198 @@ function isChildFailed(source: HeCollectSource, status: string): boolean {
     : status === 'failed';
 }
 
+/**
+ * Клиент для ЗАПИСИ ЧЕКПОЙНТА ОПЛАТЫ — не для работы стадии.
+ *
+ * Клиент стадий (`ctx.supabase`) привязан к сигналу джобы: после abort'а сторожа
+ * его запросы отвергаются, и это правильно для РАБОТЫ — прерванный прогон должен
+ * кончаться. Но у нескольких записей движка другая природа: они не делают работу,
+ * а ЗАПОМИНАЮТ, что работа уже оплачена. Их отказ не экономит ничего — он
+ * превращает оплаченную работу в неоплаченную, и повтор джобы покупает её второй
+ * раз. Поэтому они идут клиентом БЕЗ сигнала джобы (stageDb.heCheckpointSupabase,
+ * срок на заголовки и на паузу в теле у него тот же, так что повиснуть он тоже не
+ * может), и у них есть окно сторожа STAGE_ABORT_GRACE_MS на то, чтобы долететь.
+ *
+ * КРИТЕРИЙ, а не список: запись — ДЕНЬГИ, если она фиксирует то, что ПЛАТНЫЙ
+ * ИСПОЛНИТЕЛЬ уже сделал и чего повтор не отменит (модель уже отсудила батч,
+ * Instantly уже принял лидов). Запись — РАБОТА, если она фиксирует прогресс,
+ * который повтор воспроизведёт, ничего не купив заново. Работа остаётся на
+ * клиенте стадий сознательно: именно её запросы обязаны кончаться по abort'у.
+ *
+ * Сегодня критерию отвечают ЧЕТЫРЕ записи — две в этом файле и две в
+ * refill-ветке (stages/baseCollectRefill.ts), которая поэтому и импортирует эту
+ * функцию:
+ *  1. МЕМО РЕЛЕВАНТ-ГЕЙТА (`collect_info.relevance_gate`, ran=true). Гейт судит
+ *     строки моделью батчами по 50 (relevanceGate.findIrrelevantRows), и каждый
+ *     батч — отдельный платёж. Модуль never-throw ПО БАТЧАМ: если сторож прервал
+ *     прогон на пятом батче, четыре уже оплачены, judged > 0 и гейт возвращает
+ *     ran=true. Без этой записи повтор не находит `relevance_gate` и судит всё
+ *     заново — с нуля, по всем строкам.
+ *  2. ФИНАЛЬНАЯ ЗАПИСЬ БАЗЫ (harvestRow). К ней уже оплачены план, коллекторы,
+ *     конструктор и гейт; сама запись идемпотентна и адресована по id. Её потеря
+ *     дороже всего у RU-инструмента: там гейт судит ПОСЛЕ импорта и в
+ *     collect_info не memoized, поэтому каждый повтор — ещё один оплаченный суд.
+ *  3. ТЕРМИНАЛЬНАЯ ЗАПИСЬ REFILL-БАЗЫ (persistRefillBase, оба вызова: успешный
+ *     долив и отказ). К ней лиды УЖЕ ПРИНЯТЫ Instantly в живую кампанию — самый
+ *     дорогой вид оплаченного, потому что отменить приём нельзя. Эта же запись
+ *     несёт решение «вернуть компании в пул или оставить исключёнными»
+ *     (companies_released), и её потеря роняет базу в чужие руки: строка
+ *     остаётся 'collecting', финальный фейл джобы уводит её в 'failed'
+ *     (repairBaseAfterCollectFinalFail), а 'failed'-база ВЫПАДАЕТ из
+ *     кросс-базового исключения — то есть уже написанные компании объявляются
+ *     несобранными и ночь за ночью пересобираются за деньги.
+ *  4. СТРОКА ПРОГОНА ДОЛИВА (`he_auto_pipeline_runs`, writeRefillRun). В её
+ *     `stats.appended` лежит число уже принятых лидов, и именно оно вычитается
+ *     из дневного капа проекта (refillAppendedToday). Потерянная строка — это не
+ *     потерянный отчёт, а исчезнувший расход: следующая ночь считает бюджет
+ *     нетронутым и отправляет поверх капа.
+ *
+ * ЧТЕНИЯ через этот клиент не идут ни одного: ради того, чтобы чтения стадии
+ * кончались, привязка к сигналу и вводилась. Поэтому решения, которым нужно
+ * чтение, обязаны иметь безопасный исход при отказе чтения — так устроена серия
+ * отказов долива (refillFailStreak: непрочитанная история = 0 = компании
+ * возвращаются, обратимый исход).
+ *
+ * Отметки живости сторожу эти записи не дают: сток активности навешен
+ * прокси-обёрткой на КЛИЕНТ СТАДИЙ (worker/hypothesisEngine.ts:
+ * withStageActivity), а здесь клиент другой. Простоя из этого не выходит: перед
+ * мемо гейта сторожа кормили вызовы модели через канал активной джобы, перед
+ * финальной записью — импорт конструктора, перед записями долива — хук
+ * beforeProviderRequest на каждом чанке отправки, а сами записи занимают
+ * миллисекунды. Сколько времени у них есть после abort'а и у каких двух из
+ * четырёх худший случай ДЛИННЕЕ окна — в докблоке heCheckpointSupabase.
+ *
+ * Клиента может не быть, и условие у этого РОВНО ОДНО: url или сервисный ключ не
+ * в окружении. Про вызывающего ни эта функция, ни heCheckpointSupabase не знают
+ * ничего — «тест или скрипт со своим двойником `ctx.supabase`» отсюда НЕ
+ * определяется. В чекауте без `.env` вернётся null и мы останемся на клиенте
+ * стадий (поведение до этой правки, гарантии «долетит после аборта» нет), а в
+ * чекауте с `.env` тот же тест получит настоящий клиент и запись уедет мимо его
+ * двойника — разбор и что с этим делать тесту см. у heCheckpointSupabase.
+ */
+export function paidCheckpointDb(ctx: HeStageContext): HeStageContext['supabase'] {
+  return heCheckpointSupabase() ?? ctx.supabase;
+}
+
 async function persistCollectInfo(
   ctx: HeStageContext,
   baseId: string,
   info: HeCollectInfo,
+  options?: {
+    /**
+     * Запись фиксирует УЖЕ СДЕЛАННУЮ ОПЛАТУ (см. paidCheckpointDb): идёт клиентом
+     * без сигнала джобы и только пока база всё ещё 'collecting'. Барьер по статусу
+     * здесь не осторожность, а следствие: повтор входит в стадию через start-guard,
+     * который требует ровно 'collecting', — у отменённой или уже завершённой базы
+     * мемо не нужен никому, а записанный поверх отмены вернул бы в строку снятый
+     * уборкой харвест.
+     */
+    paidCheckpoint?: true;
+  },
 ): Promise<void> {
-  const { error } = await ctx.supabase
-    .from('he_bases')
-    .update({ collect_info: info, updated_at: new Date().toISOString() })
-    .eq('id', baseId);
+  /**
+   * Барьер по 'collecting' стоит на ОБЕИХ ветвях, и по одной причине: запись
+   * прогресса базе, которая уже не собирается, не нужна никогда. Отмена в
+   * кабинете переводит базу в 'failed' и обрезает харвест, а сигнал доходит до
+   * стадии только на следующем тике наблюдателя (CANCEL_WATCH_MS), поэтому без
+   * барьера стадия успевала вернуть обрезанный харвест обратно — до 10 МБ
+   * jsonb на отменённой базе. Ноль затронутых строк здесь не ошибка.
+   */
+  const update = { collect_info: info, updated_at: new Date().toISOString() };
+  const { error } = options?.paidCheckpoint
+    ? await paidCheckpointDb(ctx)
+        .from('he_bases')
+        .update(update)
+        .eq('id', baseId)
+        .eq('status', 'collecting')
+    : await ctx.supabase
+        .from('he_bases')
+        .update(update)
+        .eq('id', baseId)
+        .eq('status', 'collecting');
   if (error) throw new Error(`he_bases collect_info update: ${error.message}`);
+}
+
+/**
+ * Снять с `collect_info` РАБОЧЕЕ СОСТОЯНИЕ стадии — то, что нужно только
+ * незавершённой сборке. Зовётся на каждой терминальной записи базы ЭТОГО ФАЙЛА
+ * (семь ветвей ниже: отказ пробы среза, ноль строк, двойной отказ разноса
+ * адресов, таймаут конструктора, финал harvest и оба терминала долива).
+ *
+ * «Этого файла» — не оговорка: терминально писать базу умеют ещё два места, и
+ * ни одно из них сюда не заходит.
+ *  - Отмена клиентом (api/client/eng/projects/[id]/cancel) переводит базу в
+ *    'failed' одним апдейтом статуса, `collect_info` не трогая. Её харвест
+ *    снимает отдельная ограниченная уборка в том же роуте
+ *    (dropCancelledBaseHarvest) — по барьеру «status='failed' +
+ *    error='Cancelled by user'», по две базы за вызов.
+ *  - Финальный фейл джобы (worker/hypothesisEngine.ts,
+ *    repairBaseAfterCollectFinalFail → markNonTerminalFailed) тоже пишет только
+ *    статус и причину. Базу, до чьей терминальной записи стадия не дожила,
+ *    харвест поэтому переживает — навсегда, уборки на этот случай НЕТ. Это не
+ *    регрессия (до волны 4b харвест переживал ЛЮБОЙ исход) и не переплата
+ *    (статус терминальный, start-guard требует 'collecting'), но и не
+ *    «сняли везде»: такая база остаётся жирной в поллинге деталки.
+ *
+ * Зачем. `tasks[].harvest` — предмерж-харвест задачи, до `limit` строк на
+ * задачу при 1–4 задачах в плане. Замер на форме, которую пишет этот файл
+ * (11 колонок `HE_AUTO_COLLECT_COLUMNS`, у отсутствующих значений — пустая
+ * строка): 264 байта на строку pdl, 430 на строку реестра. То есть
+ * `collect_info` завершённой базы весит до 10,3 МБ у кабинета (лимит 10 000,
+ * 4 задачи) и до 82 МБ у RU-инструмента (лимит 50 000) — при 3,3 КБ полезного
+ * остатка. Эту колонку читают деталка проекта (поллинг 4 с) и ENG-дашборд по
+ * ВСЕМ базам проекта, а наружу из неё не уходит ни байта: `stripTaskHarvest`
+ * (projectDetail) и клиентская проекция режут харвест на выходе — но уже ПОСЛЕ
+ * того, как БД его переслала.
+ *
+ * `relevance_gate.flagged_keys` — второй по весу ключ (кап гейта
+ * HE_RELEVANCE_MAX_ROWS = 3000 ключей ≈ 154 КБ, то есть 98% остатка у
+ * ENG-базы). К терминальной записи он уже разложен в пометки `_low_relevance`
+ * на самих строках, и число помеченных строк лежит в `stats.low_relevance`.
+ *
+ * Почему это НЕ повторная оплата ничего. После терминальной записи статус базы
+ * — 'analyzing', 'analyzed' или 'failed', а start-guard стадии требует ровно
+ * 'collecting', поэтому ни один тик к этим ключам больше не обращается
+ * (единственные читатели — мёрдж HARVEST и раскладка пометок гейта, оба до
+ * терминальной записи).
+ *
+ * Автоподъём базы (`he_auto_resume_transient_bases`, миграция 20260929_0001)
+ * снятых ключей тоже не ждёт, но НЕ потому, что он до таких баз не доходит:
+ * доходит. Он берёт базы с `row_count = 0`, чей последний фейл транзиентен по
+ * `he_transient_collect_error`, и ветка «ноль строк» ниже как раз такую и
+ * пишет — в её текст подставлен разбор упавших задач, а там живёт ровно
+ * «Serper 429» и родня, то есть предикат СРАБАТЫВАЕТ. Не переплачивает поднятая
+ * база по другой причине: её `info.tasks` переживают подъём целиком, DISPATCH
+ * берёт только `status === 'pending'`, а у поднятой базы задачи уже 'done' или
+ * 'failed' — заново не покупается ни одна. Мёрдж такой базы дал ноль и без
+ * харвеста даст тот же ноль (строки, которых хватило бы на базу, увели бы её в
+ * ветку HARVEST, где `row_count > 0` и кандидатом она не станет).
+ *
+ * Доказательство оплаты гейта — `ran = true`, а не набор ключей: именно `ran`
+ * проверяет условие повторного суда.
+ *
+ * ВЫЧИТАНИЕ, А НЕ БЕЛЫЙ СПИСОК — сознательно. Белый список полей (как в v2)
+ * молча гасит элемент карточки, забытый в перечислении: серверный
+ * `HeCollectInfo` не знает про `hypothesis_ids`, который пишет постановка
+ * сборки (`baseCollectEnqueue`) и читает staff-UI («под эту гипотезу база уже
+ * собрана», Step2Verticals). Здесь ключи не перечисляются вовсе: `info` —
+ * это сам jsonb из строки базы, и всё, кроме двух названных ключей, проходит
+ * спредом как есть.
+ */
+function dropCollectWorkState(info: HeCollectInfo): HeCollectInfo {
+  const out: HeCollectInfo = { ...info };
+  if (Array.isArray(info.tasks)) {
+    out.tasks = info.tasks.map((task) => {
+      if (!task || typeof task !== 'object' || !('harvest' in task)) return task;
+      const { harvest: _harvest, ...rest } = task;
+      return rest;
+    });
+  }
+  const gate = info.relevance_gate;
+  if (gate && Array.isArray(gate.flagged_keys) && gate.flagged_keys.length > 0) {
+    out.relevance_gate = { ...gate, flagged_keys: [] };
+  }
+  return out;
 }
 
 /* ─────────────────────────── Фаза PLAN ─────────────────────────── */
@@ -1829,6 +2021,32 @@ function matchesExclusion(
  * обязан быть не меньше максимального размера базы: кап 10k при лимите
  * сборки до 50k отрезал хвост чужой базы из исключений, и вторая сборка
  * собирала компании 10001–50000 первой заново как «новые».
+ *
+ * ЦЕНА И ПОЧЕМУ ОНА ТАКАЯ. Исключению нужны три поля строки (company, inn,
+ * website), а читается строка целиком — вместе с описанием компании и
+ * вердиктами валидации. Спроецировать внутрь jsonb-МАССИВА PostgREST не умеет:
+ * путь вида `collect_info->target_checkpoint` работает для объекта, для
+ * `$[*].company` нужна SQL-функция или computed column, то есть миграция. Она
+ * тут сознательно НЕ заведена: пока миграция не применена, коду пришлось бы
+ * держать фолбэк на это же чтение, и выигрыш был бы нулевым.
+ *
+ * СКОЛЬКО РАЗ ЗА СБОРКУ это читается — считаем честно, потому что мемоизация
+ * (getExcludedKeys) живёт внутри ОДНОГО прогона стадии, а сборка растянута на
+ * несколько прогонов. У ENG-сборки прогонов, доходящих до HARVEST, ДВА, то есть
+ * чтений тоже два: тик диспатча-и-харвеста (ENG-источники синхронные, поэтому
+ * фаза HARVEST случается в том же прогоне) и тик импорта после конструктора. Тик
+ * чистого ожидания конструктора не добавляет ничего — он выходит из стадии
+ * раньше (см. «ТИК ЧИСТОГО ОЖИДАНИЯ КОНСТРУКТОРА») и сюда не доходит. У
+ * RU-сборки с дочерними парсерами добавляется по одному чтению на каждый тик,
+ * который ДИСПАТЧИТ реестр: такой тик уходит в self-requeue, не дойдя до
+ * HARVEST, и его мемо умирает вместе с прогоном (тики чистого ожидания дочерних
+ * джоб чтения не делают — pending-задач у них нет).
+ *
+ * `row_count = 0` в фильтр НЕ добавлен намеренно: у загруженной специалистом
+ * базы (`source='upload'`) счётчик мог не заполниться, и такая база молча
+ * выпала бы из исключения — проект начал бы собирать компании, которые у
+ * клиента уже есть. Экономия была бы нулевой (у базы без строк `data` пуст),
+ * а цена ошибки — оплаченный повторный сбор.
  */
 async function loadOtherBaseExclusionKeys(
   ctx: HeStageContext,
@@ -2005,6 +2223,30 @@ const CONSTRUCT_HEADERS_EN = ['Company', 'Site', 'Email', 'Phone', 'Vacancy', 'A
 const CONSTRUCT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 /** Пауза между тиками ожидания BC-джобы (run_after). */
 const CONSTRUCT_REQUEUE_MS = 60_000;
+
+/**
+ * Джоба конструктора закончила работу: дальше импорт, а не ожидание.
+ *
+ * Это type guard, а не `boolean`: фаза CONSTRUCT кладёт `bcStatus` прямо в
+ * `construct.status` (union из четырёх значений), и без сужения компилятор
+ * перестал бы ловить чужой статус, приехавший из base_constructor_jobs.
+ */
+function isConstructJobSettled(status: string): status is 'completed' | 'failed' | 'cancelled' {
+  return status === 'completed' || status === 'failed' || status === 'cancelled';
+}
+
+/**
+ * Шестичасовое окно ожидания конструктора истекло. У записи без
+ * `dispatched_at` (collect_info до появления штампа) окна нет — поведение как
+ * раньше. Один предикат на оба места, где окно проверяется: ранний выход тика
+ * ожидания и терминал таймаута в фазе CONSTRUCT.
+ */
+function constructWaitExpired(construct: HeConstructInfo): boolean {
+  return (
+    !!construct.dispatched_at &&
+    Date.now() - new Date(construct.dispatched_at).getTime() > CONSTRUCT_TIMEOUT_MS
+  );
+}
 
 /**
  * Срок на один сайт для шага find_emails (только market='us', см. step_config
@@ -2775,7 +3017,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         .update({
           status: 'failed',
           error: note.slice(0, 500),
-          collect_info: info,
+          collect_info: dropCollectWorkState(info),
           updated_at: new Date().toISOString(),
         })
         .eq('id', baseId);
@@ -2793,10 +3035,60 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   }
   const tasks = info.tasks ?? [];
 
+  /**
+   * ТИК ЧИСТОГО ОЖИДАНИЯ КОНСТРУКТОРА — выходим до всего остального.
+   *
+   * Фаза CONSTRUCT растянута на десятки заходов джобы (пауза 60 с, окно до 6 ч),
+   * и джоба перезапускает стадию С НАЧАЛА. Пока BC-джоба ещё работает, такой тик
+   * НЕ МОЖЕТ ничего решить: задачи все settled (фаза CONSTRUCT начинается только
+   * после `waiting.length === 0`, а статус задачи назад никто не пишет), поэтому
+   * DISPATCH и WAIT — пустые проходы, и весь тик сводится к «опросить BC-джобу и
+   * уснуть». До этой правки он попутно:
+   *  - перечитывал `data` ВСЕХ прочих баз проекта (loadOtherBaseExclusionKeys) —
+   *    у зрелого проекта это десятки МБ на тик, а результат тика выбрасывался;
+   *  - заново мёржил и дедуплицировал до 4 × limit строк харвеста;
+   *  - ПЕРЕПИСЫВАЛ `he_bases.collect_info` целиком тем же значением
+   *    (persistCollectInfo ниже безусловен) — до 82 МБ jsonb каждые 60 с.
+   *
+   * Что осталось прежним: сам опрос BC-джобы, пауза 60 с и self-requeue. Окно
+   * таймаута и терминальный статус спрашиваем ТЕМИ ЖЕ предикатами, что и фаза
+   * CONSTRUCT ниже, — и любой их исход, кроме «джоба ещё идёт», проваливается в
+   * обычный путь, где живут импорт, повтор без split_emails и терминал таймаута
+   * (ему нужна воронка `stats`, то есть полный мёрдж).
+   *
+   * Побочно закрыт отказ: у тика ожидания мёрдж мог сжаться до нуля (соседняя
+   * сборка проекта забрала те же компании), и ветка «ноль строк» валила базу в
+   * 'failed' ПОВЕРХ живой, уже оплаченной джобы конструктора — результат
+   * терялся молча.
+   */
+  const awaitedConstruct = info.construct;
+  if (
+    awaitedConstruct?.status === 'dispatched' &&
+    awaitedConstruct.bc_job_id &&
+    !constructWaitExpired(awaitedConstruct)
+  ) {
+    // Цена: на тике, который ДОЙДЁТ до импорта, статус BC-джобы читается дважды
+    // (здесь и в фазе CONSTRUCT) — один запрос по первичному ключу за одну
+    // сборку. Протаскивать значение через две фазы дороже, чем этот запрос.
+    const awaited = await readConstructJobStatus(ctx, awaitedConstruct.bc_job_id);
+    if (awaited && !isConstructJobSettled(awaited.status)) {
+      await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
+      return {
+        result: { waiting: true, base_id: baseId, construct: awaited.status },
+        tokensUsed: usage.tokensUsed,
+        costUsd: usage.costUsd,
+      };
+    }
+  }
+
   // Ключи компаний других баз проекта: нужны реестру ещё на DISPATCH
   // (исключение на выборке — продолжение больших сегментов) и повторно на
-  // HARVEST (страховка для строк hh/карт). Лениво + мемоизация: на тиках
-  // чистого ожидания дочерних парсеров лишнего чтения he_bases нет.
+  // HARVEST (страховка для строк hh/карт). Лениво + мемоизация: внутри ОДНОГО
+  // прогона чтение одно, на тиках чистого ожидания дочерних парсеров его нет
+  // вовсе, а тик ожидания конструктора до этого места уже не доходит (ранний
+  // выход выше). Мемо умирает вместе с прогоном, поэтому за всю ENG-сборку
+  // чтений два — прогон диспатча-и-харвеста и прогон импорта (полный расчёт,
+  // включая RU-тики с дочерними парсерами, — в доке loadOtherBaseExclusionKeys).
   let excludedKeysCache: HeBaseExclusionKeys | null = null;
   const getExcludedKeys = async (): Promise<HeBaseExclusionKeys> => {
     if (!excludedKeysCache) {
@@ -2906,7 +3198,10 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         job,
         baseId,
         verticalId: base.vertical_id,
-        info,
+        // Терминал долива — тоже терминальная запись базы: рабочее состояние
+        // стадии снимаем ЗДЕСЬ, до передачи, чтобы не заводить второе место,
+        // которое обязано об этом помнить (dropCollectWorkState).
+        info: dropCollectWorkState(info),
         stats,
       });
       return {
@@ -2945,7 +3240,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       .update({
         status: 'failed',
         error: note.slice(0, 500),
-        collect_info: { ...info, stats },
+        collect_info: { ...dropCollectWorkState(info), stats },
         updated_at: new Date().toISOString(),
       })
       .eq('id', baseId);
@@ -3004,9 +3299,14 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       brief: project.brief,
     });
     info.relevance_gate = relevanceGate;
-    // Пишем ДО диспатча: если диспатч упадёт и воркер повторит джобу, гейт не
-    // будет оплачен второй раз.
-    await persistCollectInfo(ctx, baseId, info);
+    // Пишем ДО диспатча и КЛИЕНТОМ БЕЗ СИГНАЛА ДЖОБЫ (paidCheckpoint): это запись
+    // чекпойнта оплаты, и она обязана долетать даже тогда, когда прогон уже
+    // прерван. Иначе гарантия «второй раз не платим» держалась бы только на
+    // спокойном прогоне: у гейта каждый батч из 50 строк — отдельный платёж, он
+    // never-throw по батчам (judged > 0 и ran=true даже после аборта на середине),
+    // а привязанная к сигналу запись после аборта отвергается — и повтор судит
+    // ВСЁ заново. Подробнее про обе такие записи — paidCheckpointDb.
+    await persistCollectInfo(ctx, baseId, info, { paidCheckpoint: true });
     usage.tokensUsed += relevanceGate.tokens_used;
     usage.costUsd += relevanceGate.cost_usd;
     stageLog(
@@ -3095,7 +3395,13 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         contactCap,
       });
       info.construct = dispatched.construct;
-      await persistCollectInfo(ctx, baseId, info);
+      // ДЕНЬГИ, а не работа: строка base_constructor_jobs уже поставлена, и её
+      // заберёт воркер конструктора — краул find_emails и SMTP-пробы
+      // validate_emails оплачиваются по ней. Потеряв эту запись, повтор стадии
+      // поставит ВТОРУЮ такую строку на те же компании, а результат первой не
+      // импортирует никто. Барьер по 'collecting' внутри как раз нужен: базе,
+      // которую успели отменить, bc_job_id возвращать не надо.
+      await persistCollectInfo(ctx, baseId, info, { paidCheckpoint: true });
       stageLog(
         ctx,
         `[base_collect] construct: создана base_constructor_jobs ${dispatched.bcJobId} ` +
@@ -3115,7 +3421,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     // WAIT-CONSTRUCT: опрос BC-джобы до терминального статуса.
     const bc = await readConstructJobStatus(ctx, construct.bc_job_id);
     const bcStatus = bc?.status ?? 'failed';
-    if (bcStatus === 'completed' || bcStatus === 'failed' || bcStatus === 'cancelled') {
+    if (isConstructJobSettled(bcStatus)) {
       // ENG: джоба могла быть поставлена ДО того, как split_emails стал
       // обязательным (26.09.2026). Её сетку импортировать нельзя: адреса
       // компании склеены в одной ячейке, вердикт валидации там ОДИН — лучший
@@ -3150,7 +3456,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
             .update({
               status: 'failed',
               error: note.slice(0, 500),
-              collect_info: { ...info, stats },
+              collect_info: { ...dropCollectWorkState(info), stats },
               updated_at: new Date().toISOString(),
             })
             .eq('id', baseId);
@@ -3268,10 +3574,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       );
     } else {
       // Таймаут ожидания конструктора — вечно не ждём: база failed с разбором.
-      if (
-        construct.dispatched_at &&
-        Date.now() - new Date(construct.dispatched_at).getTime() > CONSTRUCT_TIMEOUT_MS
-      ) {
+      if (constructWaitExpired(construct)) {
         const note = `Конструктор баз не завершился за 6ч (job ${construct.bc_job_id}, статус: ${bc?.status ?? 'не найдена'})`;
         info.construct = { ...construct, note };
         await ctx.supabase
@@ -3279,7 +3582,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
           .update({
             status: 'failed',
             error: note.slice(0, 500),
-            collect_info: { ...info, stats },
+            collect_info: { ...dropCollectWorkState(info), stats },
             updated_at: new Date().toISOString(),
           })
           .eq('id', baseId);
@@ -3423,7 +3726,9 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       ctx,
       job,
       base: { id: baseId, project_id: job.project_id, vertical_id: base.vertical_id },
-      info,
+      // Как и у ветки no_new выше: долив пишет базу терминально, рабочее
+      // состояние стадии до его записи не доезжает.
+      info: dropCollectWorkState(info),
       stats: statsWithQuality,
       finalRows: storedRows,
       finalColumns,
@@ -3458,7 +3763,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     row_count: storedRows.length,
     status: offTargetNote ? 'failed' : 'analyzing',
     ...(offTargetNote ? { error: offTargetNote.slice(0, 500) } : {}),
-    collect_info: { ...info, stats: statsWithQuality },
+    collect_info: { ...dropCollectWorkState(info), stats: statsWithQuality },
     // Применённый кап — только когда колонка точно существует (см.
     // contactCapColumnsPresent). Значение есть и в collect_info.construct,
     // поэтому на инсталляции без миграции ничего не теряется.
@@ -3481,10 +3786,18 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
    *
    * Постоянный отказ (невалидный JSON, права, ограничение) не повторяем: он не
    * изменится, и прежний путь — фейл джобы с причиной — остаётся его путём.
+   *
+   * И по той же причине запись идёт КЛИЕНТОМ БЕЗ СИГНАЛА ДЖОБЫ (paidCheckpointDb):
+   * повторы внутри запроса не помогут, если сам запрос отвергнут за то, что джобу
+   * уже прервали. Статус базы эта запись МЕНЯЕТ, поэтому барьера `'collecting'` у
+   * неё нет — он превратил бы отказ в тихий ноль строк, а ниже по коду стоит
+   * постановка анализа. Гонка «отмена пользователем прилетела ровно между
+   * start-guard'ом и этой записью → база оживает в 'analyzing'» этим не создаётся:
+   * так же было и до волны 4b, когда стадия работала общим клиентом без сигнала.
    */
   let updErrorMsg: string | null = null;
   for (let attempt = 1; attempt <= HARVEST_WRITE_ATTEMPTS; attempt += 1) {
-    const { error } = await ctx.supabase.from('he_bases').update(harvestRow).eq('id', baseId);
+    const { error } = await paidCheckpointDb(ctx).from('he_bases').update(harvestRow).eq('id', baseId);
     if (!error) {
       updErrorMsg = null;
       break;
@@ -3502,10 +3815,13 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   if (offTargetNote) {
     // Анализ не ставим — анализировать нечего, а поставленный base_analyze увёл
     // бы базу обратно в живой статус. Бросаем той же причиной, как отказ пробы
-    // среза: воркер повторит джобу, повтор попадёт в ЭТУ ЖЕ ветку (harvest и
-    // запись гейта лежат в collect_info, гейт второй раз не платится) и
-    // перезапишет тот же текст, а базу в терминальном статусе
-    // repairBaseAfterCollectFinalFail не трогает — причина доживает до кабинета.
+    // среза, и повтор джобы НИЧЕГО не переплачивает: база уже в терминальном
+    // 'failed', а start-guard стадии требует ровно 'collecting' — повтор
+    // останавливается на нём и в эту ветку не возвращается (в he_jobs.error
+    // последней попытки поэтому стоит «сборка уже завершена», а не этот текст).
+    // Причину читает кабинет из he_bases.error, и она доживает: базу в
+    // терминальном статусе repairBaseAfterCollectFinalFail не трогает
+    // (HE_BASE_TERMINAL_STATUSES → return).
     stageLog(ctx, `[base_collect] ${offTargetNote}`);
     throw new Error(offTargetNote);
   }

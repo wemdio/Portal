@@ -197,8 +197,12 @@ export async function GET(req: NextRequest) {
 
   const verticalRows = verticalsRes.data ?? [];
   const verticalIds = verticalRows.map((v) => v.id as string);
-  // collect_info: harvest (до 50k строк на задачу) режет stripTaskHarvest, всё
-  // остальное — клиентская проекция (план сорсинга с pdl_filters, id джоб
+  // collect_info: harvest (до limit строк на задачу, задач в плане 1–4) режет
+  // stripTaskHarvest. Снять его с ЭТОГО маршрута нельзя, хотя терминальная
+  // запись стадии харвест больше не сохраняет (dropCollectWorkState в
+  // stages/baseCollect): дашборд рисует прогресс ИДУЩЕЙ сборки, а у неё харвест
+  // в collect_info лежит по построению — это чекпойнт мёрджа между тиками.
+  // Всё остальное — клиентская проекция (план сорсинга с pdl_filters, id джоб
   // конструктора и состояние долива дашборду не нужны и клиенту не полагаются).
   // toClientEngBase здесь НЕ годится: дашборду нужны project_id/updated_at,
   // которых нет в белом списке мастера.

@@ -66,6 +66,16 @@
  *     собранная база сохраняется, прогон 'failed' с текстом ошибки, а
  *     завтрашний тик крона поставит новую refill-сборку. Повторный прогон
  *     ЭТОЙ базы невозможен — стадия работает только из статуса 'collecting'.
+ *
+ * Отмена и abort сторожа (волна 4b). Все ЧТЕНИЯ ветки идут клиентом стадий и
+ * после аборта отвергаются — это правильно, работа прерванного прогона обязана
+ * кончаться, и каждое такое чтение имеет безопасный исход (loadRefillConfig →
+ * дефолтный кап, refillFailStreak → ноль, то есть компании возвращаются:
+ * обратимый исход). Но ДВЕ ЗАПИСИ ветки терминальны и фиксируют УЖЕ ПРИНЯТЫХ
+ * Instantly лидов — persistRefillBase (оба вызова) и writeRefillRun; они идут
+ * клиентом БЕЗ сигнала (paidCheckpointDb из stages/baseCollect.ts), иначе abort
+ * посреди долива оставлял бы лидов в живой кампании, а базу — в 'collecting', без
+ * воронки, без расхода в дневном капе и без решения о судьбе компаний.
  */
 
 import { AppendLeadsPartialError, appendLeadsToClientCampaign } from '@/lib/clientLaunch/appendLeads';
@@ -80,6 +90,11 @@ import { heLaunchEmailVerdict, mapBaseRowsToLeads, parseLaunchInfo } from '../la
 import type { HeJob, HeOperatorMapping } from '../types';
 import { stageLog, type HeStageContext, type HeStageResult, type HeUsage } from './shared';
 import {
+  // Клиент БЕЗ сигнала джобы — только под записи, ФИКСИРУЮЩИЕ УЖЕ СДЕЛАННУЮ
+  // ОПЛАТУ. Критерий «деньги, а не работа» и полный список таких записей — в
+  // докблоке самой функции (stages/baseCollect.ts). Здесь их две: терминальная
+  // запись базы и строка прогона (см. persistRefillBase / writeRefillRun).
+  paidCheckpointDb,
   SAMPLE_ROWS,
   type HeCollectInfo,
   type HeUnifiedRow,
@@ -404,6 +419,22 @@ async function loadRefillConfig(ctx: HeStageContext, projectId: string): Promise
  * постановке — обновляем её по base_id; не нашли (refill поставлен вручную) —
  * вставляем финальную строку целиком. Best-effort: журнал — аудит, падение
  * записи не должно валить стадию после уже случившегося долива.
+ *
+ * Запись — ДЕНЬГИ, а не аудит, и поэтому идёт клиентом БЕЗ сигнала джобы
+ * (paidCheckpointDb): в `stats.appended` лежит число лидов, которых Instantly УЖЕ
+ * принял, и ровно это число вычитает из дневного капа проекта
+ * refillAppendedToday. Потерянная строка — не «нет отчёта», а исчезнувший расход:
+ * следующая ночь видит бюджет нетронутым и отправляет поверх капа.
+ *
+ * ЧТЕНИЯ здесь нет СОЗНАТЕЛЬНО. Раньше строку сначала искали `select('id')`, и
+ * это чтение — клиентом стадий, потому что через клиент чекпойнта чтения не идут
+ * — после аборта отвергалось, уводя весь вызов в catch: строка не появлялась
+ * именно в том прогоне, ради которого запись и освобождали от сигнала. Поэтому
+ * апдейт сам адресуется по (base_id, status='collecting') и возвращает
+ * затронутые id, а вставка нужна только когда не затронуто ничего. Дублей это не
+ * добавляет: барьер `status='collecting'` тот же, что стоял в поиске, — повтор
+ * стадии поверх уже завершённой строки не попадает в апдейт и, как и раньше,
+ * вставляет отдельную строку прогона.
  */
 async function writeRefillRun(
   ctx: HeStageContext,
@@ -421,22 +452,17 @@ async function writeRefillRun(
     error: write.result.error ?? null,
     completed_at: write.result.completed_at,
   };
+  const db = paidCheckpointDb(ctx);
   try {
-    const { data: existing, error: findErr } = await ctx.supabase
+    const { data: updated, error: updErr } = await db
       .from('he_auto_pipeline_runs')
-      .select('id')
+      .update(patch)
       .eq('base_id', write.baseId)
       .eq('status', 'collecting')
-      .maybeSingle();
-    if (findErr) throw new Error(findErr.message);
-    if (existing) {
-      const { error } = await ctx.supabase
-        .from('he_auto_pipeline_runs')
-        .update(patch)
-        .eq('id', (existing as { id: string }).id);
-      if (error) throw new Error(error.message);
-    } else {
-      const { error } = await ctx.supabase.from('he_auto_pipeline_runs').insert({
+      .select('id');
+    if (updErr) throw new Error(updErr.message);
+    if (!updated || updated.length === 0) {
+      const { error } = await db.from('he_auto_pipeline_runs').insert({
         config_id: write.configId,
         project_id: write.projectId,
         vertical_id: write.verticalId,
@@ -458,6 +484,19 @@ async function writeRefillRun(
  * 'analyzed' при доливе и 'failed' у недоставленного разового отказа, компании
  * которого возвращаются в пул (см. runHeRefillAppend).
  * Строки сохраняются в любом случае: отчёт и разбор причины идут по ним.
+ *
+ * Идёт клиентом БЕЗ сигнала джобы (paidCheckpointDb) — это запись ДЕНЕГ, и самых
+ * дорогих в движке: к обоим её вызовам Instantly мог УЖЕ принять лидов в живую
+ * кампанию, а приём не отменяется. Она же несёт решение о судьбе компаний
+ * (`companies_released`). Пока запись была привязана к сигналу, abort (отмена
+ * клиентом или сторож простоя) отвергал её ОБА раза — сначала в успешной ветке,
+ * потом в catch'е, — и стадия падала наружу, оставив базу в 'collecting': лиды в
+ * кампании есть, базы, воронки и решения нет. Дальше финальный фейл джобы уводил
+ * такую базу в 'failed' (repairBaseAfterCollectFinalFail), а 'failed'-база
+ * выпадает из кросс-базового исключения (loadOtherBaseExclusionKeys) — то есть
+ * УЖЕ НАПИСАННЫЕ компании объявлялись несобранными, и ночной крон пересобирал их
+ * за деньги (второе письмо спасал только skipIfInCampaign, оплаченный краул и
+ * SMTP-пробы — нет).
  */
 async function persistRefillBase(
   ctx: HeStageContext,
@@ -473,7 +512,7 @@ async function persistRefillBase(
     error?: string;
   },
 ): Promise<void> {
-  const { error } = await ctx.supabase
+  const { error } = await paidCheckpointDb(ctx)
     .from('he_bases')
     .update({
       columns: args.columns,
@@ -753,6 +792,17 @@ export function selectRefillLeadRows(
 /**
  * Пустой harvest refill-сборки — штатный «no_new»: база в терминальный
  * 'analyzed' (НЕ failed), прогон 'no_new', джоба завершится успешно.
+ *
+ * Эта запись базы — РАБОТА, а не деньги, и поэтому остаётся на КЛИЕНТЕ СТАДИЙ (в
+ * отличие от persistRefillBase ниже). Провайдер здесь не видел ни строки:
+ * доливать было нечего, ни один лид не принят, отменять нечего. Её отказ по
+ * abort'у стоит повтора сборки — а повтор ночного добора по пустому сегменту
+ * штатно упирается в то же «новых компаний нет» и ничего у провайдера не
+ * покупает. Расширять освобождение от сигнала на неё значило бы платить
+ * размытием границы за то, чего abort не ломает; критерий — у paidCheckpointDb.
+ * Строка прогона ниже под освобождение попадает (writeRefillRun), но до неё
+ * отвергнутая запись базы всё равно не доходит — и это правильный порядок:
+ * прогон 'no_new' без терминальной базы был бы отчётом о том, чего не случилось.
  */
 export async function completeHeRefillNoNew(args: {
   ctx: HeStageContext;

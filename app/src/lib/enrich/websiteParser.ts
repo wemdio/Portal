@@ -1091,6 +1091,42 @@ export function reusableMainPageDescription(html: string): string {
   return text.length >= MIN_MAIN_TEXT_TO_SKIP_ABOUT ? text.slice(0, MAX_TEXT_LENGTH) : '';
 }
 
+/**
+ * Ни один адрес origin'а не отдал HTML: ни главная (со своим ретраем), ни www,
+ * ни http-вариант, ни кандидаты «о компании».
+ *
+ * Класс, а не текст, потому что вызывающему нужно отличать два РАЗНЫХ факта:
+ * «хост молчит вообще» (перебирать остальные пути того же origin'а бессмысленно
+ * — каждый пойдёт тем же полным кругом) и «страница отдалась, но пустая или на
+ * JS» (это свойство одной страницы, соседние могут ответить).
+ *
+ * Адрес класс НЕ несёт: единственный консьюмер (`hypothesisEngine/stages/io`)
+ * подставляет в текст свой нормализованный url, а поле, которое никто не
+ * читает, следующий читатель принял бы за живое.
+ *
+ * Правка аддитивная: сообщение байт в байт то же, что бросал прежний
+ * `new Error`, поэтому консьюмеры (`api/enrich/*`, `lib/tools/dfyb*`,
+ * `processingSteps`, `websiteEnrichmentWorker`, io-слои движков) печатают и
+ * пишут в БД ровно тот же текст, что и до неё.
+ */
+export class WebsiteNoHtmlError extends Error {
+  /** Дискриминант: instanceof ложен, если в процессе окажется две копии модуля. */
+  readonly websiteNoHtml = true as const;
+
+  constructor() {
+    super('Не удалось получить HTML с сайта');
+    this.name = 'WebsiteNoHtmlError';
+  }
+}
+
+/** Типизированная проверка «origin не отдал HTML», без разбора текста ошибки. */
+export function isWebsiteNoHtmlError(e: unknown): e is WebsiteNoHtmlError {
+  if (e instanceof WebsiteNoHtmlError) return true;
+  return (
+    typeof e === 'object' && e !== null && (e as { websiteNoHtml?: unknown }).websiteNoHtml === true
+  );
+}
+
 export async function fetchAndExtract(
   rawUrl: string,
   options?: { timeout?: number; signal?: AbortSignal },
@@ -1190,7 +1226,7 @@ export async function fetchAndExtract(
   } else if (hadAnyHtml) {
     combined = 'Страница доступна, но требует JavaScript или блокирует парсер.';
   } else {
-    throw new Error('Не удалось получить HTML с сайта');
+    throw new WebsiteNoHtmlError();
   }
 
   // Final sanitization pass on the combined text

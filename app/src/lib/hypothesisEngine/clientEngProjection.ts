@@ -94,6 +94,12 @@ const PROJECT_FIELDS = [
 // brief — снапшот стадии site_profile плюс ручные overrides. Отдаём только то,
 // что рисует шаг «Brief»: `website_url`/`captured_at`/`site_text_chars` дублируют
 // строку проекта либо служат разбору стадии.
+//
+// `site_unreachable` в этом списке НЕТ и быть не должно: в строке под этим ключом
+// лежит служебная пометка стадии с РУССКОЙ причиной (stages/siteProfile.ts,
+// unreachableMark). Кабинет получает вместо неё ВЫЧИСЛЕННЫЙ БУЛЕВ признак того же
+// имени — см. toClientEngProjectRow, где он ставится ПОСЛЕ pick и поэтому
+// перекрыл бы сырую пометку, даже если ключ когда-нибудь окажется в этом списке.
 const BRIEF_FIELDS = [
   'site_profile',
   'site_thin',
@@ -144,16 +150,22 @@ const BASE_FIELDS = [
  * Причина падения для кабинета — КОД, а не текст.
  *
  * `he_projects.error` / `he_bases.error` пишут воркер и стадии V1: русская
- * проза с подставленным внутренним сырьём. Живые примеры писателей:
- *  - `worker/hypothesisEngine.ts:300` — `${job.stage}: ${msg}`, то есть имя
- *    стадии плюс ЛЮБОЙ `err.message` (тело ответа LLM-подрядчика, текст
- *    PostgREST с именами таблиц `he_*`);
- *  - `worker/hypothesisEngine.ts:320` — тот же `msg` в базу;
- *  - `stages/baseCollect.ts:1940` — «Вертикаль «X» не покрывается каталогом…»;
- *  - `stages/baseCollect.ts:2110` — «Авто-сборка не дала строк: pdl_companies
- *    read: …» (имена каталогов студии и текст Postgres внутри);
- *  - `stages/baseCollect.ts:2215` — «Конструктор баз не завершился за 6ч
- *    (job <uuid>…)» — с uuid внутренней джобы.
+ * проза с подставленным внутренним сырьём. Живые примеры писателей — по ИМЕНАМ,
+ * а не по номерам строк: номера в этом списке уже успели разъехаться с кодом
+ * дважды, а имена ищутся grep'ом и не врут:
+ *  - `worker/hypothesisEngine.ts`, `writeJobFailure` — `${job.stage}: ${msg}` в
+ *    `he_projects.error`, то есть имя стадии плюс ЛЮБОЙ `err.message` (тело
+ *    ответа LLM-подрядчика, текст PostgREST с именами таблиц `he_*`); в
+ *    `he_jobs.error` тот же `msg` уходит без префикса;
+ *  - `worker/hypothesisEngine.ts`, `chainNextResearchStage` — та же склейка в
+ *    проект, когда падает постановка следующей стадии;
+ *  - `stages/baseCollect.ts`, отказ пробы среза и терминал релевант-гейта —
+ *    «Вертикаль «X» не покрывается каталогом…»;
+ *  - `stages/baseCollect.ts`, разбор нулевой сборки — «Авто-сборка не дала
+ *    строк: pdl_companies read: …» (имена каталогов студии и текст Postgres
+ *    внутри);
+ *  - `stages/baseCollect.ts`, таймаут фазы CONSTRUCT — «Конструктор баз не
+ *    завершился за 6ч (job <uuid>…)» — с uuid внутренней джобы.
  *
  * До этой правки строка стояла в белых списках и уезжала в тело ответа
  * дословно. Экран её не печатал (компоненты звали классификатор сами), но
@@ -801,7 +813,26 @@ export function toClientEngProjectRow(project: Row): Row {
   if ('error' in project) out.error_code = toClientEngStageErrorCode(project.error);
   if ('brief' in project) {
     const brief = asRow(project.brief);
-    out.brief = brief ? pick(brief, BRIEF_FIELDS) : project.brief;
+    if (brief) {
+      const clientBrief = pick(brief, BRIEF_FIELDS);
+      /*
+       * «Сайт не открылся» и «сайт отдал мало текста» — РАЗНЫЕ факты, а флаг
+       * `site_thin` один: стадия ставит его и на мёртвом домене (там читать было
+       * нечего вообще), поэтому по нему одному мастер рассказывал клиенту про
+       * «мало текста» ровно в том случае, когда текста не было ни строки, — и не
+       * говорил, что описание бизнеса тут не «рекомендуем», а единственный способ
+       * доделать research.
+       *
+       * Отдаём БУЛЕВ признак, выведенный из наличия служебной пометки стадии, и
+       * никогда — саму пометку: в ней русская причина (kind/detail/at), а кабинет
+       * английский. Пометка пишется и как `null` (сайт ожил), поэтому смотрим,
+       * что это объект, а не просто наличие ключа.
+       */
+      clientBrief.site_unreachable = asRow(brief.site_unreachable) !== null;
+      out.brief = clientBrief;
+    } else {
+      out.brief = project.brief;
+    }
   }
   return out;
 }

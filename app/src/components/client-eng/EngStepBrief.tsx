@@ -66,6 +66,27 @@ function isResearchActive(jobs: HeJobSummary[]): boolean {
   );
 }
 
+/**
+ * Подсказка у поля «Business description» — по тому, ЧТО именно вышло с сайтом.
+ *
+ * Два факта, не один. `site_unreachable` — сайт не открылся (домена нет в DNS
+ * либо ни один адрес не отдал HTML): читать было нечего вообще, и описание
+ * бизнеса здесь не «рекомендуем», а единственный способ доделать research —
+ * стадия без него отказывает, и тот же экран показывает карточку отказа.
+ * `site_thin` — сайт открылся, но текста мало (или это JS-заглушка); стадия
+ * доработала, описание улучшает результат. Стадия ставит `site_thin` и в первом
+ * случае тоже, поэтому порядок проверок именно такой, иначе мёртвый домен
+ * рассказывал бы клиенту про «мало текста».
+ *
+ * Оба поля приходят БУЛЕВЫМИ из проекции кабинета (clientEngProjection):
+ * служебная пометка стадии с русской причиной в кабинет не уезжает.
+ */
+function businessDescriptionHint(brief: Record<string, unknown>): string {
+  if (brief.site_unreachable === true) return ' — required: we could not open your site';
+  if (brief.site_thin === true) return ' — recommended: your site gave us very little to read';
+  return '';
+}
+
 /** Значение поля site_profile → строка (массивы — списком через точку с запятой). */
 function profileValue(value: unknown): string {
   if (Array.isArray(value)) {
@@ -79,6 +100,7 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
   const { project, jobs = [] } = detail;
   const brief = (project.brief ?? {}) as Record<string, unknown>;
   const siteProfile = (brief.site_profile ?? null) as Record<string, unknown> | null;
+  const businessHint = businessDescriptionHint(brief);
 
   const [offer, setOffer] = useState('');
   const [style, setStyle] = useState('');
@@ -238,16 +260,16 @@ export function EngStepBrief({ detail, onChanged }: { detail: EngDetail; onChang
         </p>
         <div className="flex flex-col gap-3">
           <label className="flex flex-col gap-1">
-            <span className="text-[11px] font-semibold" style={{ color: brief.site_thin === true ? 'var(--cp-amber)' : 'var(--cp-text-m)' }}>
+            <span className="text-[11px] font-semibold" style={{ color: businessHint ? 'var(--cp-amber)' : 'var(--cp-text-m)' }}>
               Business description (manual, max 3000 chars)
-              {brief.site_thin === true ? ' — recommended: your site gave us very little to read' : ''}
+              {businessHint}
             </span>
             <textarea
               value={business}
               onChange={(e) => setBusiness(e.target.value)}
               rows={4}
               maxLength={3000}
-              placeholder="What you sell, to whom, and why clients pick you. Used above the site profile when the site is thin or JS-heavy."
+              placeholder="What you sell, to whom, and why clients pick you. Used above the site profile when the site is thin, JS-heavy, or could not be opened at all."
               className="ds-input w-full resize-y"
             />
           </label>

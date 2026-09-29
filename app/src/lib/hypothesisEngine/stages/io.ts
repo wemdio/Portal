@@ -11,13 +11,17 @@
  * было, а воркер односоточный: один молчащий хост держал исследование всех
  * проектов. Завершение каждой операции отмечается через ctx.onActivity — это
  * вход сторожа простоя (он обязан отличать работающую стадию от зависшей).
+ *
+ * Недоступный сайт (волна 4b): провал ЧТЕНИЯ отличается от истёкшего срока и от
+ * отмены типом — HeSiteUnreachableError. Это факт о сайте клиента, и стадия
+ * решает по нему не так, как по транзиенту: см. класс ниже.
  */
 
 import { assertPublicWebsite } from '@/lib/clientDemo/personalize';
 import { DEFAULT_MAX_ABOUT_CANDIDATES } from '@/lib/enrich/aboutCandidates';
-import { fetchAndExtract, normalizeUrl } from '@/lib/enrich/websiteParser';
+import { fetchAndExtract, isWebsiteNoHtmlError, normalizeUrl } from '@/lib/enrich/websiteParser';
 import { getHeActiveJobSignal } from '../llm';
-import { withHeDeadline } from '../operationDeadline';
+import { isHeOperationTimeout, withHeDeadline } from '../operationDeadline';
 import { defaultSearch, HE_SEARCH_TIMEOUT_MS } from './searchIo';
 import type { HeStageContext } from './shared';
 
@@ -108,16 +112,116 @@ const WEBSITE_TIMEOUT_MS = websiteTimeoutMs();
 const SEARCH_TIMEOUT_MS = HE_SEARCH_TIMEOUT_MS;
 
 /**
+ * Сайт клиента недоступен — это ФАКТ О САЙТЕ, а не сбой движка. Два рода:
+ *  - `dns` — гейт не пустил к первому запросу: домен не резолвится, адрес
+ *    невалидный либо приватный (`assertPublicWebsite`);
+ *  - `no_html` — хост принял соединение, но ни один адрес origin'а не отдал
+ *    HTML (`WebsiteNoHtmlError` из websiteParser).
+ *
+ * Зачем свой класс поверх чужих ошибок. Стадии нужно три разных решения на три
+ * исхода одного вызова: истёк срок (транзиент, повторяем), отменили (конец
+ * работы), сайт недоступен (перебирать остальные пути этого origin'а не за чем,
+ * а исход записываем честно). Первые два уже типизированы; третий до этой
+ * правки различался только по русскому тексту чужого модуля — то есть не
+ * различался никак.
+ *
+ * Текст РУССКИЙ: его читают `he_jobs.error`/`he_projects.error` и ежедневный
+ * staff-инструмент /tools/hypothesis-engine. В английский кабинет ни один байт
+ * этой строки не уезжает — роут сворачивает её в код причины
+ * (`clientEngProjection.toClientEngStageErrorCode` → `clientErrors`, код
+ * `website_unreachable`), и экран печатает английскую константу справочника.
+ *
+ * АСИММЕТРИЯ, которую надо знать читателю логов: слова «Сайт клиента» в тексте
+ * верны не всегда, а класс всё равно один. Ошибку бросает `defaultFetchText` для
+ * ЛЮБОГО адреса, который ей дали, а дают ей и чужие: главная и кейс-страница
+ * бренда (stages/brandCloud.ts), источник поисковой выдачи
+ * (stages/evidence.ts), главная конкурента (stages/competitors.ts). То есть в
+ * журнале стадии может стоять «Сайт клиента недоступен» про домен конкурента.
+ *
+ * Почему текст всё равно НЕ меняется. Первые слова вместе с родом в скобках —
+ * якорь классификатора кабинета (clientErrors.ts), и разойтись эти два места не
+ * имеют права; а разделить текст на «свой» и «чужой» значило бы либо два
+ * сообщения под один якорь, либо перенос якоря вместе с правилом.
+ * Цена асимметрии при этом ограничена ОДНИМ местом: наружу — в
+ * `he_projects.error`/`he_jobs.error` и дальше в код `website_unreachable` —
+ * ошибка уходит только из стадии site_profile, и только про
+ * `project.website_url`, то есть там формулировка честна буквально. Три стадии с
+ * чужими адресами ловят её в своём catch и печатают ОДНОЙ СТРОКОЙ ЛОГА рядом с
+ * самим адресом (`heIoFailureReason`, «фетч <url> пропущен: …»), а прогон
+ * продолжают: ни в статус, ни в кабинет эта строка не попадает. Поэтому читать
+ * такую строку нужно по URL в ней, а не по первым словам.
+ */
+export type HeSiteUnreachableKind = 'dns' | 'no_html';
+
+export class HeSiteUnreachableError extends Error {
+  /** Дискриминант: instanceof ложен, если в процессе окажется две копии модуля. */
+  readonly heSiteUnreachable = true as const;
+
+  constructor(
+    readonly kind: HeSiteUnreachableKind,
+    readonly url: string,
+    readonly detail: string,
+    cause?: unknown,
+  ) {
+    // Первые слова вместе с родом в скобках — якорь классификатора кабинета
+    // (сверка ВХОЖДЕНИЕМ, а не началом строки: воркер дописывает перед причиной
+    // имя стадии). Менять только вместе с правилом в clientErrors.ts.
+    super(`Сайт клиента недоступен (${kind}): ${detail}`, { cause });
+    this.name = 'HeSiteUnreachableError';
+  }
+}
+
+/** Типизированная проверка «сайт недоступен», без разбора текста ошибки. */
+export function isHeSiteUnreachable(e: unknown): e is HeSiteUnreachableError {
+  if (e instanceof HeSiteUnreachableError) return true;
+  return (
+    typeof e === 'object' &&
+    e !== null &&
+    (e as { heSiteUnreachable?: unknown }).heSiteUnreachable === true
+  );
+}
+
+/**
+ * Провал транспортной операции → «сайт недоступен», но ТОЛЬКО когда это правда.
+ * Истёкший срок и отмена задачи остаются собой: первый транзиентен (воркер
+ * повторит стадию), вторая — остановка по просьбе человека, и записать любую из
+ * них мёртвым доменом значило бы соврать про сайт клиента.
+ */
+function asSiteUnreachable(
+  e: unknown,
+  kind: HeSiteUnreachableKind,
+  url: string,
+  signal: AbortSignal,
+): unknown {
+  if (signal.aborted || isHeOperationTimeout(e)) return e;
+  return new HeSiteUnreachableError(kind, url, e instanceof Error ? e.message : String(e), e);
+}
+
+/**
  * Дефолтный фетч: нормализация URL → SSRF-гейт (DNS/приватные адреса режем
  * до первого запроса) → fetchAndExtract (главная + «о компании», ≤3000 символов).
+ * Оба шага дают собственный род недоступности — см. HeSiteUnreachableError.
  */
 export async function defaultFetchText(url: string, parent?: AbortSignal): Promise<string> {
   const normalized = normalizeUrl(url);
   return withHeDeadline('website extraction', WEBSITE_TIMEOUT_MS, parent, async (signal) => {
-    await withHeDeadline('website DNS', DNS_TIMEOUT_MS, signal, () => assertPublicWebsite(normalized));
+    try {
+      await withHeDeadline('website DNS', DNS_TIMEOUT_MS, signal, () =>
+        assertPublicWebsite(normalized),
+      );
+    } catch (e) {
+      throw asSiteUnreachable(e, 'dns', normalized, signal);
+    }
     // DNS-резолв не прерывается: его поздний результат не должен начать HTTP.
     signal.throwIfAborted();
-    const text = await fetchAndExtract(normalized, { signal });
+    let text: string;
+    try {
+      text = await fetchAndExtract(normalized, { signal });
+    } catch (e) {
+      // Пустая/JS-страница сюда НЕ попадает: у неё есть HTML, и fetchAndExtract
+      // возвращает про это текст, а не бросает.
+      throw isWebsiteNoHtmlError(e) ? asSiteUnreachable(e, 'no_html', normalized, signal) : e;
+    }
     signal.throwIfAborted();
     return text;
   });

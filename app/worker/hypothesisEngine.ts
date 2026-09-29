@@ -28,7 +28,23 @@
  * (канал активной джобы, lib/hypothesisEngine/llm.ts) — и прерывает молчащую
  * стадию,
  * а если та игнорирует abort, процесс выходит и его перезапускает docker.
- * Прерывание (сторож, рестарт воркера, обрыв чтения проекта) попытку НЕ
+ *
+ * Запросы стадий к БД идут ОТДЕЛЬНЫМ клиентом (stageDb ниже): у каждого есть
+ * срок на заголовки и на ПАУЗУ между кусками тела, и его обрывает сигнал джобы.
+ * Исключение одного рода и оно не здесь: записи, ФИКСИРУЮЩИЕ УЖЕ СДЕЛАННУЮ
+ * ОПЛАТУ, идут третьим клиентом без сигнала (stageDb.heCheckpointSupabase,
+ * см. paidCheckpointDb в stages/baseCollect.ts) — оба срока у них те же, а
+ * сигнала нет, чтобы их отказ не превращал оплаченную работу в неоплаченную.
+ * Сегодня таких записей ЧЕТЫРЕ, и числа здесь нет намеренно: список ведёт один
+ * докблок paidCheckpointDb, а копия числа в шапке воркера уже разъезжалась с
+ * ним (две записи стало четыре, когда освобождение дошло до ветки долива).
+ * Поэтому вставшее тело жирной строки he_bases.data кончается само за
+ * HE_STAGE_DB_TIMEOUT_MS, а abort сторожа доходит до транспорта — аварийный выход
+ * процесса перестаёт быть единственным способом раскрутить такое чтение. Общий
+ * `db` остаётся у бухгалтерии воркера: она обязана работать ПОСЛЕ аборта джобы.
+ *
+ * Прерывание (сторож, рестарт воркера, обрыв чтения проекта, вставшее тело
+ * ответа БД) попытку НЕ
  * тратит, но не бесконечно: HE_JOB_FREE_INTERRUPTIONS подряд, дальше обычная
  * попытка и финальный фейл — иначе застрявшая стадия пряталась бы за
  * бесплатными повторами навсегда. Классы прерываний ТИПИЗИРОВАНЫ
@@ -44,8 +60,12 @@
  */
 
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop, sleep, startWorkerHeartbeat } from './_shared';
+import { supabaseAdminFetchWithRetry } from '@/lib/supabaseAdmin';
 import { runHeStage } from '@/lib/hypothesisEngine/stages';
-import { heLlmFailureOf, heLlmMaxAttemptMs, setHeActiveJob } from '@/lib/hypothesisEngine/llm';
+import { getHeActiveJobSignal, heLlmFailureOf, heLlmMaxAttemptMs, setHeActiveJob } from '@/lib/hypothesisEngine/llm';
+// Клиент БД СТАДИЙ: срок на заголовки И на паузу между кусками тела, обрыв по
+// сигналу джобы. Отдельный от `db` сознательно — см. комментарий у stageDb ниже.
+import { createHeStageSupabase, isHeStageDbInterruption, HE_STAGE_DB_TIMEOUT_MS } from '@/lib/hypothesisEngine/stageDb';
 // Единственный примитив репозитория «сделай значение пригодным для jsonb/text»
 // (его же используют supabaseInstantly, парсеры и соседний движок). Это не
 // импорт через границу движков — модуль общий и лежит ниже обоих; своя копия
@@ -246,6 +266,42 @@ const FAIL_WRITE_RETRY_BASE_MS = 1000;
 
 const log = createWorkerLogger(WORKER_ID);
 const db = requireSupabaseAdmin(log);
+/**
+ * Клиент БД, через который ходят СТАДИИ (ctx.supabase в handleJob).
+ *
+ * Отличие от `db` одно, и оно про окончание запроса: у общего админского клиента
+ * срок стоит только на ЗАГОЛОВКИ ответа (таймер снимается, как только ответ
+ * начался), а чтение ТЕЛА не ограничено ничем и не слушает никакого сигнала.
+ * Жирная строка `he_bases.data`, чьё тело встало на середине, держала стадию
+ * навсегда: сторож простоя давал abort, до транспорта тот не доходил, и через
+ * STAGE_ABORT_GRACE_MS процесс выходил — вместе со всеми остальными проектами
+ * (воркер односоточный).
+ *
+ * Почему НЕ сигнал на общем клиенте: `db` обслуживает claimJob,
+ * cancel-наблюдателя, failJob, recordStageSpend и сборщик брошенных строк, и всё
+ * это обязано работать ПОСЛЕ аборта джобы — иначе записать причину отказа нечем.
+ *
+ * Сигнал джобы берётся МОДУЛЬНЫМ геттером канала активной джобы (тем же, что
+ * читает LLM-слой и stages/io.ts), а не полем контракта стадии: механизм один, и
+ * стадии для этого править не надо.
+ *
+ * Транспорт под низом — админский fetch со своими повторами по обрыву связи.
+ * Пауза между кусками тела — ограничение, которого не было вовсе. У фазы
+ * ЗАГОЛОВКОВ то же ЧИСЛО, что у общего клиента (SUPABASE_FETCH_TIMEOUT_MS,
+ * дефолт 120 000 мс), но ДРУГАЯ область: общий взводит его на каждую внутреннюю
+ * попытку, здесь таймер один на весь цикл повторов — границы попыток из
+ * переданного fetchImpl не видны. Весь вызов поэтому ограничен 120 000 мс вместо
+ * ≈362 000, и это как раз то, что держит порядок «срок запроса к БД < окно
+ * простоя стадии»; цена — последней попытке после отказов соединения достаётся
+ * остаток бюджета, а не полный (разбор с числами — у HE_STAGE_DB_TIMEOUT_MS в
+ * lib/hypothesisEngine/stageDb.ts).
+ */
+const stageDb = createHeStageSupabase({
+  url: process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  jobSignal: getHeActiveJobSignal,
+  fetchImpl: supabaseAdminFetchWithRetry,
+});
 const shouldStop = setupGracefulShutdown(log);
 
 /**
@@ -1121,10 +1177,12 @@ async function handleJob(job: HeJob) {
     const market = normalizeHeMarket((proj as { market?: string } | null)?.market);
 
     stageResult = await runHeStage(job, {
-      // Каждый запрос стадии к БД — признак жизни для сторожа: иначе
-      // прогрессирующая, но молчаливая стадия (base_analyze не логирует
-      // вовсе) выглядела бы зависшей.
-      supabase: withStageActivity(db, () => watchdog.touch()),
+      // Клиент СТАДИЙ (stageDb): у каждого запроса срок на заголовки и на паузу
+      // между кусками тела, и его обрывает сигнал джобы. Поверх — отметка
+      // активности: каждый запрос стадии к БД признак жизни для сторожа, иначе
+      // прогрессирующая, но молчаливая стадия (base_analyze не логирует вовсе)
+      // выглядела бы зависшей.
+      supabase: withStageActivity(stageDb, () => watchdog.touch()),
       market,
       // Отмена задачи — тем же сигналом, что уехал в канал LLM-слоя. Поле
       // контракта заполняем явно (io.ts: ctx.signal ?? getHeActiveJobSignal()):
@@ -1150,6 +1208,24 @@ async function handleJob(job: HeJob) {
     // попадает: её reason — DOMException, и её обрабатывает failJob по статусу.
     const reason: unknown = abort.signal.reason;
     if (isHeJobInterruption(reason)) throw reason;
+    /**
+     * ТЕЛО ответа БД встало на середине — прерывание (kind='db'), не сбой
+     * стадии: работа не выполнялась и не отказала, её оборвал срок клиента
+     * стадий. Политика при этом НЕ новая, а сохранённая: до этой правки такое
+     * чтение не кончалось ничем, кроме сторожа простоя, а сторож считает
+     * прерывание бесплатным. Потолок платных прогонов тот же и общий
+     * (HE_JOB_FREE_INTERRUPTIONS подряд, дальше обычные попытки) — второго
+     * счётчика здесь не появляется.
+     *
+     * Фаза ЗАГОЛОВКОВ и обрыв связи сюда не попадают сознательно
+     * (isHeStageDbInterruption истинен только для вставшего тела): они
+     * ограничены тем же сроком и без этой правки и уже сегодня тратят попытку —
+     * бесплатные повторы поднимали бы потолок платных прогонов стадии с 3 до 8
+     * там, где сегодня 3.
+     */
+    if (isHeStageDbInterruption(e)) {
+      throw new HeJobInterruptionError(e instanceof Error ? e.message : String(e), 'db');
+    }
     throw e;
   } finally {
     clearInterval(cancelWatcher);
@@ -1821,7 +1897,12 @@ async function main() {
       + `(≥ ${LLM_SILENCE_SAFETY_FACTOR}× LLM attempt ${heLlmMaxAttemptMs()}ms, floor ${STAGE_IDLE_FLOOR_MS}ms), `
       + `abort grace ${STAGE_ABORT_GRACE_MS}ms, free interruptions ${HE_JOB_FREE_INTERRUPTIONS}, `
       + `rate-limit pause ≤ ${RATE_LIMIT_PAUSE_MAX_MS}ms (попытка тратится), `
-      + `post-stage deadline ${POST_STAGE_DEADLINE_MS}ms`,
+      + `post-stage deadline ${POST_STAGE_DEADLINE_MS}ms, `
+      // Срок клиента стадий печатаем рядом с окном сторожа: порядок «срок
+      // запроса к БД < окно простоя» — то условие, при котором вставшее тело
+      // кончается САМО, а не аварийным выходом процесса. Это срок на заголовки и
+      // на ПАУЗУ между кусками тела, не на всё чтение.
+      + `stage DB per-request ${HE_STAGE_DB_TIMEOUT_MS}ms (headers / body-chunk pause)`,
   );
 
   await resetStuckJobs();
