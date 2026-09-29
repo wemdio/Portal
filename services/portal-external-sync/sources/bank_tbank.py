@@ -38,6 +38,7 @@ import httpx
 
 from .base import SyncSource
 from ._bank_common import classify_revenue, coerce_amount, parse_date, to_row
+from .bank_tochka import tochka_ssl_context
 
 #: Переменные окружения с токенами Т-Банка — по одному токену на бизнес.
 #: Третий бизнес добавляется дописыванием сюда ещё одного имени: всё
@@ -111,6 +112,27 @@ def redact_tokens(text: str, env: Mapping[str, str] | None = None) -> str:
 def _fail_details(e: BaseException) -> str:
     """Текст исключения + трейсбек, с затёртыми значениями токенов."""
     return redact_tokens(f"{e}\n{traceback.format_exc()}")
+
+
+def _fail_summary(e: BaseException) -> str:
+    """Одна строка о сбое — для итоговой ошибки прогона, без трейсбека.
+
+    Уходит в external_sync_runs.error и в алерт, поэтому короткая и тоже
+    с затёртыми токенами.
+    """
+    return redact_tokens(f"{type(e).__name__}: {e}")[:300]
+
+
+class TBankSyncIncomplete(RuntimeError):
+    """Часть токенов, счетов или периодов не отсинкалась.
+
+    Всё, что удалось получить, к этому моменту уже залито: исключение
+    поднимается в самом конце прогона, чтобы main.py записал его как error
+    и прислал алерт. До 29.09.2026 сбои только печатались в лог, а прогон
+    считался успешным: с 23.09 банк отказывал на первом же запросе, синк
+    неделю писал «success, 0 записей», и первичка за сентябрь недосчитала
+    ~620 тыс. — нашли по расхождению с фактом продаж, а не по алерту.
+    """
 
 
 def currency_from_numeric_code(code: object) -> str | None:
@@ -367,6 +389,10 @@ class BankTBankSync(SyncSource):
 
         total = 0
         skip_counts: dict[str, int] = {}
+        # Сбои всех уровней (токен, счёт, период). Изоляция по-прежнему
+        # доводит прогон до конца, но непустой список в конце — ошибка
+        # прогона, а не «успех с нулём» (см. TBankSyncIncomplete).
+        self._failures: list[str] = []
 
         for label, token in tokens:
             # Изоляция токена: сбой одного бизнеса не должен уносить синк
@@ -378,6 +404,7 @@ class BankTBankSync(SyncSource):
                     f"[bank_tbank] token FAIL {label}: {_fail_details(e)}",
                     flush=True,
                 )
+                self._failures.append(f"{label}: {_fail_summary(e)}")
 
         if skip_counts:
             # Сводка пропусков — общая за прогон, по всем токенам и счетам.
@@ -388,6 +415,11 @@ class BankTBankSync(SyncSource):
             print(
                 f"[bank_tbank] skipped {total_skipped} record(s): {breakdown}",
                 flush=True,
+            )
+
+        if self._failures:
+            raise TBankSyncIncomplete(
+                f"залито {total}, но не отсинкались: " + "; ".join(self._failures)
             )
 
         return total
@@ -403,7 +435,16 @@ class BankTBankSync(SyncSource):
         headers = {"Authorization": f"Bearer {token}"}
         total = 0
 
-        async with httpx.AsyncClient(timeout=120, headers=headers) as client:
+        # 22–23.09.2026 Т-Банк, как Точка месяцем раньше, перешёл на УЦ
+        # Минцифры: на стандартном certifi рукопожатие падало с «self-signed
+        # certificate in certificate chain». Цепочка *.tbank.ru → Russian
+        # Trusted Sub CA → Russian Trusted Root CA, отпечаток корня сверен
+        # вживую 29.09 — тот же файл, что у Точки. Контекст общий: проверка
+        # сертификата включена, стандартные корни сохранены, корень
+        # добавлен с проверкой отпечатка (см. bank_tochka.tochka_ssl_context).
+        async with httpx.AsyncClient(
+            timeout=120, headers=headers, verify=tochka_ssl_context()
+        ) as client:
             try:
                 resp = await client.get(ACCOUNTS_URL)
                 resp.raise_for_status()
@@ -416,6 +457,7 @@ class BankTBankSync(SyncSource):
                     f"{_fail_details(e)}",
                     flush=True,
                 )
+                self._failures.append(f"{label} список счетов: {_fail_summary(e)}")
                 return 0
 
             accounts = parse_accounts(payload, label)
@@ -445,6 +487,9 @@ class BankTBankSync(SyncSource):
                         f"[bank_tbank] account FAIL {label} acc={account.number}: "
                         f"{_fail_details(e)}",
                         flush=True,
+                    )
+                    self._failures.append(
+                        f"{label} acc={account.number}: {_fail_summary(e)}"
                     )
 
         return total
@@ -480,6 +525,10 @@ class BankTBankSync(SyncSource):
                         f"HTTP {resp.status_code} — период пропущен",
                         flush=True,
                     )
+                    self._failures.append(
+                        f"{label} acc={account.number} {frm}..{till}: "
+                        f"HTTP {resp.status_code}"
+                    )
                     continue
                 data = resp.json()
 
@@ -506,6 +555,9 @@ class BankTBankSync(SyncSource):
                     f"[bank_tbank] period FAIL {label} acc={account.number} "
                     f"{frm}..{till}: {_fail_details(e)}",
                     flush=True,
+                )
+                self._failures.append(
+                    f"{label} acc={account.number} {frm}..{till}: {_fail_summary(e)}"
                 )
 
         return total

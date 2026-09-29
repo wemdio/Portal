@@ -294,11 +294,41 @@ blocks:
               # SENDER_SSH_USER — default USER, SENDER_SSH_PASSWORD — default
               # SERVER_PASSWORD, SENDER_REMOTE_DIR — default /opt/portal-sender);
               # SENDER_SSH_HOST_2..9 — остальные, со своими SENDER_SSH_USER_N,
-              # SENDER_SSH_PASSWORD_N, SENDER_REMOTE_DIR_N. Хосты обновляются по
-              # очереди, у каждого свой бюджет; сбой одного не трогает остальные.
+              # SENDER_SSH_PASSWORD_N, SENDER_REMOTE_DIR_N. Хосты обновляются в
+              # фоне — параллельно друг другу и portal host (последовательно это
+              # было ~2 мин на хост: старый воркер дорассылает до 2 мин). У каждого
+              # свой бюджет; сбой одного не трогает остальные. Лог хоста пишется в
+              # файл и печатается целиком в wait_sender_hosts, до алерта и
+              # last_deploy_sha; при раннем выходе скрипта — из trap EXIT.
               # На хосте один раз создать .env по deploy/sender/.env.example.
               SENDER_DEPLOY_SKIPPED=""
               SENDER_TARGETS=""
+              SENDER_PIDS=""
+              SENDER_LOG_DIR=$(mktemp -d)
+              wait_sender_hosts() {
+                local entry pid n host reason
+                for entry in $SENDER_PIDS; do
+                  pid="${entry%%:*}"
+                  n="${entry#*:}"
+                  wait "$pid" || true
+                  host=$(cat "$SENDER_LOG_DIR/host_${n}.name" 2>/dev/null || echo "sender #${n}")
+                  echo "=== Sender host ${host}: лог выкладки ==="
+                  cat "$SENDER_LOG_DIR/host_${n}.log" 2>/dev/null || true
+                  if [ -f "$SENDER_LOG_DIR/host_${n}.done" ]; then
+                    reason=$(cat "$SENDER_LOG_DIR/host_${n}.skip" 2>/dev/null || true)
+                  else
+                    reason="фоновая выкладка оборвалась, результат не подтверждён; требуется проверка состояния"
+                  fi
+                  if [ -n "$reason" ]; then
+                    echo "[scheduled] !!! SENDER NOT DEPLOYED on ${host}: ${reason}. Портал и остальные sender-хосты выкладываются штатно." >&2
+                    SENDER_DEPLOY_SKIPPED="${SENDER_DEPLOY_SKIPPED:+${SENDER_DEPLOY_SKIPPED}; }${host}: ${reason}"
+                  fi
+                done
+                SENDER_PIDS=""
+              }
+              # Ранний выход (сбой portal host) не должен обрывать фоновые хосты
+              # посреди docker compose up: дожидаемся их и печатаем логи.
+              trap 'rc=$?; wait_sender_hosts; exit $rc' EXIT
               [ -z "${SENDER_SSH_HOST:-}" ] || SENDER_TARGETS="1"
               for sender_n in 2 3 4 5 6 7 8 9; do
                 eval "sender_candidate=\${SENDER_SSH_HOST_${sender_n}:-}"
@@ -357,55 +387,58 @@ blocks:
                     eval "SENDER_PASS=\${SENDER_SSH_PASSWORD_${sender_n}:-}"
                     eval "SENDER_PATH=\${SENDER_REMOTE_DIR_${sender_n}:-/opt/portal-sender}"
                   fi
-                  # Bound each host's phase, including hung SSH/pull. Pull and up
-                  # use separate sessions: a timed-out download can never later
-                  # continue into a container restart on its own.
-                  SENDER_DEADLINE=$((SECONDS + 300))
-                  HOST_SKIPPED=""
-                  if ! run_ssh_sender "sender preflight" "true" 25 2; then
-                    HOST_SKIPPED="хост не ответил на проверку SSH"
-                  else
-                    echo "[scheduled] Sender workers: deploying to ${SENDER_USER}@${SENDER_HOST}:${SENDER_PATH}"
-                    if ! run_ssh_sender "mkdir sender dir" \
-                      "sudo -n mkdir -p ${SENDER_PATH} && sudo -n chown -R ${SENDER_USER}:${SENDER_USER} ${SENDER_PATH}"; then
-                      HOST_SKIPPED="не удалось создать ${SENDER_PATH}"
-                    elif ! run_scp_sender "copy sender worker files" \
-                      deploy/sender/worker.base.yml deploy/sender/render-compose.sh "${SENDER_USER}@${SENDER_HOST}:${SENDER_PATH}/"; then
-                      HOST_SKIPPED="не удалось скопировать описание воркера"
-                    elif ! run_ssh_sender "render sender compose" "set -e
-                    cd ${SENDER_PATH}
-                    if [ ! -f .env ]; then echo \"[sender] FATAL: нет .env в ${SENDER_PATH} — создай по deploy/sender/.env.example\"; exit 1; fi
-                    sh render-compose.sh .env > docker-compose.yml.new
-                    mv docker-compose.yml.new docker-compose.yml
-                    " 60 1; then
-                      # Прежний docker-compose.yml на месте, контейнеры не
-                      # трогали; причина — в логе шага (SENDER_EGRESS_IPS в .env
-                      # или адрес не поднят на интерфейсе сервера).
-                      HOST_SKIPPED="compose не собран (SENDER_EGRESS_IPS в .env или адреса на интерфейсах); воркеры не трогали"
-                    elif ! run_ssh_sender "sender image pull" "set -e
-                    cd ${SENDER_PATH}
-                    printf '%s\n' \"${DOCKER_PASSWORD}\" | sudo -n timeout --kill-after=5s 30s docker login -u \"${DOCKER_USERNAME}\" --password-stdin
-                    sudo -n timeout --kill-after=10s 180s docker compose -f docker-compose.yml -p portal-sender --env-file .env pull
-                    " 240 1; then
-                      HOST_SKIPPED="скачивание образа не завершилось; запуск контейнеров не запрашивался"
-                    elif [ "$((SENDER_DEADLINE - SECONDS))" -lt 210 ]; then
-                      # Compose grants old workers 2m to drain. Do not start a
-                      # restart if the host budget cannot cover that grace period.
-                      HOST_SKIPPED="образ скачан, но бюджета недостаточно для безопасного перезапуска; контейнеры не трогали"
-                    elif ! run_ssh_sender "sender compose up" "set -e
-                    cd ${SENDER_PATH}
-                    sudo -n timeout --kill-after=10s 180s docker compose -f docker-compose.yml -p portal-sender --env-file .env up -d --pull never --remove-orphans
-                    sudo -n docker ps --filter label=com.docker.compose.project=portal-sender --format '{{.Names}} {{.Status}}'
-                    " 210 1; then
-                      # An ambiguous up must not be blindly replayed: it may have
-                      # already recreated containers before the SSH reply failed.
-                      HOST_SKIPPED="результат обновления контейнеров не подтверждён; требуется проверка состояния"
+                  echo "$SENDER_HOST" > "$SENDER_LOG_DIR/host_${sender_n}.name"
+                  echo "[scheduled] Sender workers: ${SENDER_HOST} — выкладка в фоне, лог после portal host"
+                  (
+                    # Bound each host's phase, including hung SSH/pull. Pull and up
+                    # use separate sessions: a timed-out download can never later
+                    # continue into a container restart on its own.
+                    SENDER_DEADLINE=$((SECONDS + 300))
+                    HOST_SKIPPED=""
+                    if ! run_ssh_sender "sender preflight" "true" 25 2; then
+                      HOST_SKIPPED="хост не ответил на проверку SSH"
+                    else
+                      echo "[scheduled] Sender workers: deploying to ${SENDER_USER}@${SENDER_HOST}:${SENDER_PATH}"
+                      if ! run_ssh_sender "mkdir sender dir" \
+                        "sudo -n mkdir -p ${SENDER_PATH} && sudo -n chown -R ${SENDER_USER}:${SENDER_USER} ${SENDER_PATH}"; then
+                        HOST_SKIPPED="не удалось создать ${SENDER_PATH}"
+                      elif ! run_scp_sender "copy sender worker files" \
+                        deploy/sender/worker.base.yml deploy/sender/render-compose.sh "${SENDER_USER}@${SENDER_HOST}:${SENDER_PATH}/"; then
+                        HOST_SKIPPED="не удалось скопировать описание воркера"
+                      elif ! run_ssh_sender "render sender compose" "set -e
+                      cd ${SENDER_PATH}
+                      if [ ! -f .env ]; then echo \"[sender] FATAL: нет .env в ${SENDER_PATH} — создай по deploy/sender/.env.example\"; exit 1; fi
+                      sh render-compose.sh .env > docker-compose.yml.new
+                      mv docker-compose.yml.new docker-compose.yml
+                      " 60 1; then
+                        # Прежний docker-compose.yml на месте, контейнеры не
+                        # трогали; причина — в логе шага (SENDER_EGRESS_IPS в .env
+                        # или адрес не поднят на интерфейсе сервера).
+                        HOST_SKIPPED="compose не собран (SENDER_EGRESS_IPS в .env или адреса на интерфейсах); воркеры не трогали"
+                      elif ! run_ssh_sender "sender image pull" "set -e
+                      cd ${SENDER_PATH}
+                      printf '%s\n' \"${DOCKER_PASSWORD}\" | sudo -n timeout --kill-after=5s 30s docker login -u \"${DOCKER_USERNAME}\" --password-stdin
+                      sudo -n timeout --kill-after=10s 180s docker compose -f docker-compose.yml -p portal-sender --env-file .env pull
+                      " 240 1; then
+                        HOST_SKIPPED="скачивание образа не завершилось; запуск контейнеров не запрашивался"
+                      elif [ "$((SENDER_DEADLINE - SECONDS))" -lt 210 ]; then
+                        # Compose grants old workers 2m to drain. Do not start a
+                        # restart if the host budget cannot cover that grace period.
+                        HOST_SKIPPED="образ скачан, но бюджета недостаточно для безопасного перезапуска; контейнеры не трогали"
+                      elif ! run_ssh_sender "sender compose up" "set -e
+                      cd ${SENDER_PATH}
+                      sudo -n timeout --kill-after=10s 180s docker compose -f docker-compose.yml -p portal-sender --env-file .env up -d --pull never --remove-orphans
+                      sudo -n docker ps --filter label=com.docker.compose.project=portal-sender --format '{{.Names}} {{.Status}}'
+                      " 210 1; then
+                        # An ambiguous up must not be blindly replayed: it may have
+                        # already recreated containers before the SSH reply failed.
+                        HOST_SKIPPED="результат обновления контейнеров не подтверждён; требуется проверка состояния"
+                      fi
                     fi
-                  fi
-                  if [ -n "$HOST_SKIPPED" ]; then
-                    echo "[scheduled] !!! SENDER NOT DEPLOYED on ${SENDER_HOST}: ${HOST_SKIPPED}. Портал и остальные sender-хосты выкладываются штатно." >&2
-                    SENDER_DEPLOY_SKIPPED="${SENDER_DEPLOY_SKIPPED:+${SENDER_DEPLOY_SKIPPED}; }${SENDER_HOST}: ${HOST_SKIPPED}"
-                  fi
+                    printf '%s' "$HOST_SKIPPED" > "$SENDER_LOG_DIR/host_${sender_n}.skip"
+                    : > "$SENDER_LOG_DIR/host_${sender_n}.done"
+                  ) > "$SENDER_LOG_DIR/host_${sender_n}.log" 2>&1 < /dev/null &
+                  SENDER_PIDS="${SENDER_PIDS} $!:${sender_n}"
                 done
               else
                 echo "[scheduled] Sender hosts: пропущены (изменений нет или SENDER_SSH_HOST не задан)"
@@ -731,6 +764,7 @@ blocks:
                 echo "[scheduled] Dataset sync: изменений в app/scripts/instantly-dataset нет — /opt/instantly-dataset-sync не трогаем"
               fi
 
+              wait_sender_hosts
               if [ -n "$SENDER_DEPLOY_SKIPPED" ]; then
                 run_ssh "sender: health alert" "cd /home/Portal/prod 2>/dev/null || exit 0
                 bot_token=\$(grep -E '^TELEGRAM_HEALTH_BOT_TOKEN=' .env 2>/dev/null | tail -n1 | cut -d= -f2-)
