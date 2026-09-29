@@ -65,6 +65,7 @@ const leads: LeadCreatePayload[] = [
 function portalDb() {
   return createMockSupabase({
     tables: {
+      projects: [{id: PORTAL_PROJECT_ID, client: 'Test client'}],
       ve_projects: [{ id: PROJECT_ID }],
       ve_templates: [
         {

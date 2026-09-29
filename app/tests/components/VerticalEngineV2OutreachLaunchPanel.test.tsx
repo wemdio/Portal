@@ -138,7 +138,7 @@ describe('VE2 auto-outreach launch panel', () => {
     await waitFor(() => expect(approval).toBeEnabled());
     expect(screen.getByText('Будет создано кампаний: 1 · новых готовых контактов: 774')).toBeInTheDocument();
     await userEvent.click(approval);
-    await userEvent.click(screen.getByRole('button', { name: 'Запустить аутрич' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Подготовить кампании в Instantly' }));
     await waitFor(() => expect(onStarted).toHaveBeenCalledWith({ id: 'run-1' }));
     const startBody = mockVeEnginePost.mock.calls.find(([url]) => url === START_URL)?.[1];
     expect(startBody).toMatchObject({ ...expected, confirmed_customer_approval: true, items: [expect.objectContaining({ segmentation_audit_id: 'audit-1' })] });
@@ -158,7 +158,7 @@ describe('VE2 auto-outreach launch panel', () => {
     renderPanel(undefined);
     expect(await screen.findByText('Выберите клиента, проект и цель контактов, затем примените темп.')).toBeInTheDocument();
     expect(mockVeEnginePost).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'Запустить аутрич' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Подготовить кампании в Instantly' })).toBeDisabled();
   });
 });
 

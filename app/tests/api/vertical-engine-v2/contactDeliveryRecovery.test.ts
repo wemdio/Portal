@@ -167,7 +167,7 @@ it.each(['stale audit', 'nonempty remote campaign', 'previously contacted campai
   expect(mockCreateLeads).not.toHaveBeenCalled();
 });
 
-it('approves bound empty campaigns without calling provider activation and keeps legacy activation', async () => {
+it('never grants provider activation, including the old unbound path', async () => {
   expect(await activateApprovedLaunchCampaigns({ portalDb: mockPortalDb as never,
     veProjectId: 've-project-1', accountId: 'workspace-a', campaignIds: ['campaign-1'],
   })).toEqual({ deferred: true });
@@ -175,35 +175,29 @@ it('approves bound empty campaigns without calling provider activation and keeps
   const legacy = createMockSupabase({ tables: { ve_projects: [{ id: 'legacy' }] } });
   expect(await activateApprovedLaunchCampaigns({ portalDb: legacy as never,
     veProjectId: 'legacy', accountId: 'workspace-a', campaignIds: ['campaign-1'],
-  })).toEqual({ deferred: false });
-  expect(mockActivateCampaign).toHaveBeenCalledTimes(1);
+  })).toEqual({ deferred: true });
+  expect(mockActivateCampaign).not.toHaveBeenCalled();
 });
 
-it('starts first accepted tranche behind a DB fence, never resumes a previously started paused child', async () => {
-  const portal = createMockSupabase({ tables: {
-    ve_launch_queue_items: [{ id: 'item-1', project_id: 've-project-1', status: 'active',
-      instantly_account_id: 'workspace-a', mailbox_ids: ['sender@example.test'] }],
-    ve_launch_queue_campaigns: [
-      { id: 'child-1', item_id: 'item-1', campaign_id: 'campaign-1', leads_count: 1, activated_at: null },
-      { id: 'child-2', item_id: 'item-1', campaign_id: 'manual-pause', leads_count: 1, activated_at: '2026-09-01' },
-      { id: 'child-3', item_id: 'item-1', campaign_id: 'empty', leads_count: 0, activated_at: null },
-      { id: 'child-4', item_id: 'item-1', campaign_id: 'draft', leads_count: 1, activated_at: null },
-    ],
-  }, rpcHandlers: {
-    ve_reserve_contact_delivery_activation: () => ({ data: { reserved: true } }),
-    ve_finalize_contact_delivery_activation: () => ({ data: { finalized: true } }),
-  } });
-  mockGetCampaign.mockImplementation(async (id: string) => ({ id,
-    status: mockActivateCampaign.mock.calls.some(([activatedId]) => activatedId === id) ? 1 : id === 'draft' ? 0 : 2,
-    email_list: ['sender@example.test'] }));
-  await activateDeliveredContactCampaigns({ portalDb: portal as never, veProjectId: 've-project-1' });
-  expect(mockActivateCampaign).toHaveBeenCalledTimes(2);
-  expect(mockActivateCampaign).toHaveBeenCalledWith('campaign-1', expect.objectContaining({ accountId: 'workspace-a' }));
-  expect(portal.rpcCalls.map((call) => call.fn)).toEqual([
-    've_reserve_contact_delivery_activation', 've_finalize_contact_delivery_activation',
-    've_reserve_contact_delivery_activation', 've_finalize_contact_delivery_activation',
-  ]);
-  expect(portal.rpcCalls.at(-1)?.params).toMatchObject({ p_succeeded: true });
+it('only observes draft, manual Start and Pause and never activates through the provider', async () => {
+  const portal = createMockSupabase({tables: {
+    ve_launch_queue_items: [{id: 'item-1', project_id: 've-project-1', status: 'queued',
+      instantly_account_id: 'workspace-a', mailbox_ids: ['sender@example.test']}],
+    ve_launch_queue_campaigns: [{id: 'child-1', item_id: 'item-1', campaign_id: 'campaign-1'}],
+  }, rpcHandlers: {ve_observe_manual_campaigns: () => ({data: {observed: true}})}});
+  for (const status of [0, 1, 2, 3]) {
+    mockGetCampaign.mockResolvedValue({id: 'campaign-1', status, email_list: ['sender@example.test']});
+    expect(await activateDeliveredContactCampaigns({portalDb: portal as never, veProjectId: 've-project-1'}))
+      .toEqual({activated: 0, errors: []});
+    expect(portal.rpcCalls.at(-1)).toMatchObject({fn: 've_observe_manual_campaigns', params: {
+      p_campaigns: [expect.objectContaining({campaign_id: 'campaign-1', status})],
+    }});
+  }
+  expect(mockActivateCampaign).not.toHaveBeenCalled();
+  const writes = portal.rpcCalls.length;
+  mockGetCampaign.mockRejectedValueOnce(new Error('API unavailable'));
+  expect((await activateDeliveredContactCampaigns({portalDb: portal as never, veProjectId: 've-project-1'})).errors).toHaveLength(1);
+  expect(portal.rpcCalls).toHaveLength(writes);
 });
 
 describe('recovery of a plan bound to a Portal project without periods', () => {
@@ -264,7 +258,7 @@ it('shows the durable project upload pause and requests retry without contacting
   const context = { params: Promise.resolve({ id: 'template-1' }) };
   const status = await getUpload(new Request('http://x/upload') as NextRequest, context);
   expect(status.status).toBe(200);
-  expect(await status.json()).toEqual({ blocked: {
+  expect(await status.json()).toMatchObject({ blocked: {
     run_id: runId, blocked_at: blockedAt, run_date: '2026-09-24', accepted: 12, pending: 5, uncertain: 2,
   } });
   const response = await retryUpload(new Request('http://x/upload', { method: 'POST', body: JSON.stringify({

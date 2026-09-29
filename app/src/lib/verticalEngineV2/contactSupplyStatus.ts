@@ -4,6 +4,12 @@ import { readContactDeliveryPages } from './contactDeliveryInventory';
 import { getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
 import { allocateContactSupplyTargets } from './contactSupplyPlanner';
 import { buildVeBaseAudienceSummary, type VeAudienceBase, type VeBaseAudienceSummary } from './baseAudienceSummary';
+import { localIsoDate } from './portalDeliveryTerm';
+
+type SupplyStock = {
+  ready: number; uploaded: number; uploaded_today: number; uncertain: number;
+  business_date: string; timezone: string;
+};
 
 export interface VeContactSupplyStatus {
   required: boolean;
@@ -39,6 +45,9 @@ export interface VeContactSupplyStatus {
   };
   estimate: null | { contacts: number; as_of: string; scope: string; confidence: 'low' };
   metrics_error?: string;
+  /** Confirmed ledger facts remain visible when the forecast is unavailable. */
+  stock?: SupplyStock;
+  analytics_pending?: boolean;
   /** Available before approval; facts and forecast never require creating a plan. */
   audience?: VeBaseAudienceSummary;
 }
@@ -69,12 +78,50 @@ export async function loadVeContactSupplyStatus(db: SupabaseClient, instantlyDb:
     launched: Boolean(plan.item_id), preset_id: binding.preset_id, portal_project_id: binding.portal_project_id,
     portal_period_id: binding.portal_period_id ?? null, target_contacts: binding.target_contacts, error: plan.last_error,
   };
+  // A later batch with unknown coverage invalidates the first preview's estimate,
+  // including while analytics/forecast are unavailable.
+  const estimate = plan.source_state?.previous_base_id
+    ? plan.estimate?.remaining_ready_estimate : base.collect_info?.estimate?.remaining_ready_estimate;
+  result.estimate = estimate && Number.isSafeInteger(estimate.contacts) && estimate.contacts >= 0 &&
+    typeof estimate.as_of === 'string' && typeof estimate.scope === 'string'
+    ? { contacts: estimate.contacts, as_of: estimate.as_of, scope: estimate.scope, confidence: 'low' }
+    : null;
+  const rows = plan.item_id ? await readContactDeliveryPages<{status: string; finalized_at: string | null; email_normalized: string}>(
+    'supply display inventory', (from, to) => db.from('ve_contact_delivery_rows')
+      .select('status, finalized_at, email_normalized', { count: 'exact' }).eq('item_id', plan.item_id)
+      .order('id').range(from, to),
+  ) : [];
+  const { data: preset, error: presetError } = await instantlyDb.from('client_campaign_presets')
+    .select('client_user_id, schedule_timezone').eq('id', binding.preset_id).maybeSingle();
+  if (presetError || !preset?.client_user_id) throw new Error('Не удалось проверить запас клиента');
+  const blocked = await getBlockedEmailSet(instantlyDb, preset.client_user_id);
+  const stockAt = (timezone: string, businessDate: string): SupplyStock => ({
+    ready: rows.filter(row => row.status === 'ready' && !blocked.has(row.email_normalized)).length,
+    uploaded: rows.filter(row => row.status === 'accepted').length,
+    uploaded_today: rows.filter(row => row.status === 'accepted' && row.finalized_at &&
+      Number.isFinite(Date.parse(row.finalized_at)) && localIsoDate(new Date(row.finalized_at), timezone) === businessDate).length,
+    uncertain: rows.filter(row => row.status === 'uncertain' || row.status === 'attempting').length,
+    business_date: businessDate, timezone,
+  });
+  if (plan.item_id) {
+    const { data: project, error: projectError } = await db.from('ve_projects')
+      .select('portal_project_id, delivery_timezone').eq('id', plan.project_id).maybeSingle();
+    if (projectError || !project) throw new Error('Не удалось прочитать часовой пояс запуска');
+    const timezone = project.portal_project_id ? project.delivery_timezone : preset.schedule_timezone;
+    if (typeof timezone !== 'string' || !timezone.trim()) throw new Error('Не указан часовой пояс запуска');
+    result.stock = stockAt(timezone, localIsoDate(new Date(), timezone));
+  }
   const preview = await buildVeContactDeliveryPreview(db, instantlyDb, {
     templateId, presetId: binding.preset_id, portalProjectId: binding.portal_project_id,
     expectedPortalPeriodId: binding.portal_period_id ?? null, targetContacts: binding.target_contacts,
     segmentationAuditId: plan.preview_audit_id,
   });
   if (preview.status !== 200) {
+    if (preview.body.code === 'DELIVERY_ANALYTICS_PENDING') {
+      result.analytics_pending = true;
+      result.metrics_error = String(preview.body.error);
+      return result;
+    }
     // Точная причина (закрытый период, новый период у проекта без периодов,
     // дедлайн карточки) важнее общего совета.
     result.metrics_error = typeof preview.body.error === 'string' && preview.status < 500
@@ -83,15 +130,6 @@ export async function loadVeContactSupplyStatus(db: SupabaseClient, instantlyDb:
     return result;
   }
   const p = preview.body.preview as Record<string, number | string>;
-  const rows = plan.item_id ? await readContactDeliveryPages<{status: string; finalized_at: string | null; email_normalized: string}>(
-    'supply display inventory', (from, to) => db.from('ve_contact_delivery_rows')
-      .select('status, finalized_at, email_normalized', { count: 'exact' }).eq('item_id', plan.item_id)
-      .order('id').range(from, to),
-  ) : [];
-  const { data: preset, error: presetError } = await instantlyDb.from('client_campaign_presets')
-    .select('client_user_id').eq('id', binding.preset_id).maybeSingle();
-  if (presetError || !preset?.client_user_id) throw new Error('Не удалось проверить запас клиента');
-  const blocked = await getBlockedEmailSet(instantlyDb, preset.client_user_id);
   const items = await readContactDeliveryPages<{id: string; potential_pct: number}>(
     'supply display weights', (from, to) => db.from('ve_launch_queue_items')
       .select('id, potential_pct', { count: 'exact' }).eq('project_id', plan.project_id).eq('status', 'active')
@@ -106,21 +144,14 @@ export async function loadVeContactSupplyStatus(db: SupabaseClient, instantlyDb:
     .eq('run_date', p.business_date).maybeSingle();
   if (dayError) throw new Error('Не удалось сверить сегодняшний план');
   const timezone = String(p.delivery_timezone);
-  const dateFormatter = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' });
-  const localDate = (value: string | null): string | null => {
-    if (!value || !Number.isFinite(Date.parse(value))) return null;
-    const parts = new Map(dateFormatter.formatToParts(new Date(value)).map((part) => [part.type, part.value]));
-    return `${parts.get('year')}-${parts.get('month')}-${parts.get('day')}`;
-  };
+  const stock = stockAt(timezone, String(p.business_date));
   const requiredDaily = Math.min(Number(p.required_daily), Number(p.sender_capacity));
   const dailyTarget = allocateContactSupplyTargets(requiredDaily, items.map((item) => ({ id: item.id, weight: item.potential_pct })))
     .find((item) => item.itemId === plan.item_id)?.contacts ?? 0;
   const ready = plan.item_id ? rows.filter((row) => row.status === 'ready' && !blocked.has(row.email_normalized)).length : Number(p.prospective_ready);
   result.metrics = {
+    ...stock,
     ready,
-    uploaded: rows.filter((row) => row.status === 'accepted').length,
-    uploaded_today: rows.filter((row) => row.status === 'accepted' && localDate(row.finalized_at) === p.business_date).length,
-    uncertain: rows.filter((row) => row.status === 'uncertain' || row.status === 'attempting').length,
     project_first_contacted: Number(p.contacts_done_count), project_daily_plan: dayRun?.effective_count ?? Number(p.effective_daily),
     project_required_daily: requiredDaily, project_ready: Number(p.ready_remaining),
     project_stock_workdays: requiredDaily > 0 ? Math.floor(Number(p.ready_remaining) / requiredDaily) : null,
@@ -129,15 +160,8 @@ export async function loadVeContactSupplyStatus(db: SupabaseClient, instantlyDb:
     hypothesis_estimated_workdays: null,
     business_date: String(p.business_date), timezone,
   };
-  // Only the collector can prove the source scope. An absent estimate stays unknown.
-  // A subsequent batch with unknown coverage invalidates the old first-preview
-  // estimate; do not silently keep showing the original market remainder.
-  const estimate = plan.source_state?.previous_base_id
-    ? plan.estimate?.remaining_ready_estimate : base.collect_info?.estimate?.remaining_ready_estimate;
-  if (estimate && Number.isSafeInteger(estimate.contacts) && estimate.contacts >= 0
-    && typeof estimate.as_of === 'string' && typeof estimate.scope === 'string') {
-    result.estimate = { contacts: estimate.contacts, as_of: estimate.as_of, scope: estimate.scope, confidence: 'low' };
-    result.metrics.hypothesis_estimated_workdays = dailyTarget > 0 ? Math.floor((ready + estimate.contacts) / dailyTarget) : null;
+  if (result.estimate) {
+    result.metrics.hypothesis_estimated_workdays = dailyTarget > 0 ? Math.floor((ready + result.estimate.contacts) / dailyTarget) : null;
   }
   return result;
 }

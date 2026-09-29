@@ -6,7 +6,7 @@ import {
 import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
 import { buildContactDeliveryPlan } from './contactDeliveryPlanner';
 import { loadContactDeliverySettings } from './contactDeliveryConfig';
-import { loadVeContactDeliveryCampaignInventory, loadVeContactDeliveryRows } from './contactDeliveryInventory';
+import { ContactDeliveryAnalyticsUnavailableError, loadVeContactDeliveryCampaignInventory, loadVeContactDeliveryRows } from './contactDeliveryInventory';
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import type { VeBase, VeSegmentationAudit, VeTemplate } from './types';
 import {
@@ -338,7 +338,10 @@ export async function buildVeContactDeliveryPreview(
     planContactsDone = contactsDone ?? inventory.observedFirstContacted;
     const committed = rows.filter((row) => ['accepted', 'attempting', 'uncertain'].includes(row.status)).length;
     outstandingCount = Math.max(0, committed - Math.min(inventory.observedFirstContacted, planContactsDone));
-  } catch {
+  } catch (error) {
+    if (error instanceof ContactDeliveryAnalyticsUnavailableError) {
+      return outcome(503, 'DELIVERY_ANALYTICS_PENDING', 'Статистика первых отправок Instantly ещё не получена. План дозагрузки будет пересчитан после синхронизации.');
+    }
     return outcome(500, 'DELIVERY_INVENTORY_UNAVAILABLE', 'Не удалось полностью сверить запас и уже загруженные контакты');
   }
 

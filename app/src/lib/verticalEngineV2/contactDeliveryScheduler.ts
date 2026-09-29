@@ -7,7 +7,6 @@ import { runProjectContactSupply } from './contactSupplyRunner';
 import { reconcileContactDeliveries } from './contactDeliveryReconciliation';
 import { activateDeliveredContactCampaigns } from './contactDeliveryActivation';
 import { refreshDeliveryRate } from './contactDeliveryRateService';
-import { ContactDeliveryAnalyticsUnavailableError } from './contactDeliveryInventory';
 
 export type ContactDeliverySchedulerLog = (
   level: 'info' | 'warn' | 'error',
@@ -70,13 +69,12 @@ export async function runBoundContactDeliveries(input: {
     };
   }
 
-  // A prepared bundle can wait in the seasonality portfolio for weeks. Do
-  // not treat that intentional queueing as a delivery failure on every tick;
-  // only projects with an actually active bundle are due for provider work.
+  // Prepared campaigns need their first upload before the specialist presses
+  // Start in Instantly. Include paused/queued records so manual resumes are seen.
   const { data: activeItemData, error: activeItemError } = await input.portalDb
     .from('ve_launch_queue_items')
     .select('project_id')
-    .eq('status', 'active');
+    .in('status', ['prepared', 'queued', 'active', 'uncertain']);
   if (activeItemError) {
     throw new Error(`VE2 active delivery queue scan failed: ${activeItemError.message}`);
   }
@@ -119,6 +117,16 @@ export async function runBoundContactDeliveries(input: {
 
   for (const project of projects) {
     if (input.shouldStop?.()) break;
+    try {
+      const observed = await (input.recoverActivation ?? activateDeliveredContactCampaigns)({
+        portalDb: input.portalDb, veProjectId: project.id,
+      });
+      if (observed.errors.length) throw new Error(observed.errors.join('; '));
+    } catch (error) {
+      failedProjects += 1;
+      input.log('error', `VE2 campaign state project ${project.id} unavailable; delivery deferred`, error);
+      continue;
+    }
     try {
       const recovery = await (input.reconcile ?? reconcileContactDeliveries)({
         portalDb: input.portalDb, veProjectId: project.id, shouldStop: input.shouldStop,
@@ -165,21 +173,6 @@ export async function runBoundContactDeliveries(input: {
     } catch (error) {
       failedProjects += 1;
       input.log('error', `VE2 contact delivery project ${project.id} failed`, error);
-      if (error instanceof ContactDeliveryAnalyticsUnavailableError && !input.shouldStop?.()) {
-        // Upload may have been committed just before a worker restart. Missing
-        // analytics still blocks new rows, but must not strand that accepted
-        // tranche. The existing activation fence checks live identity, approval,
-        // schedule, accepted rows and unresolved attempts; no upload is retried.
-        try {
-          const recovery = await (input.recoverActivation ?? activateDeliveredContactCampaigns)({
-            portalDb: input.portalDb, veProjectId: project.id,
-          });
-          if (recovery.errors.length) input.log('warn', `VE2 delivery activation recovery project ${project.id} incomplete`, recovery.errors);
-          if (recovery.activated) input.log('info', `VE2 delivery activation recovery project ${project.id}`, recovery);
-        } catch (recoveryError) {
-          input.log('error', `VE2 delivery activation recovery project ${project.id} failed`, recoveryError);
-        }
-      }
     }
   }
 
