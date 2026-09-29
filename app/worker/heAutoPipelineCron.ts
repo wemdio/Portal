@@ -30,10 +30,33 @@
  *   docker exec portal-worker-hypothesis-engine node /app/workers/heAutoPipelineCron.js
  * (локально: cd app && node --env-file=../.env dist/workers/heAutoPipelineCron.js)
  *
+ * Раньше всех отказов тик смотрит ДНЕВНОЙ БЮДЖЕТ ПРОЕКТА: сколько лидов на
+ * сегодняшние UTC-сутки ещё не занято бронями ночного добора (миграция
+ * supabase/migrations/20260930_0004_he_refill_reservations.sql). Выбран —
+ * сборку не получает ни одна вертикаль проекта (строка лога `budget_exhausted`,
+ * уровень info: это намеренная экономия, а не сбой, и exit code она не меняет).
+ * На обычном ночном прогоне в 03:20 броней ещё нет и проверка молчит; она
+ * защищает ВТОРОЙ за сутки запуск крона от оплаты сборки, которую бюджет всё
+ * равно не даст отправить.
+ *
  * Перед постановкой тик спрашивает у рассыльщика остаток ёмкости воркспейса
  * (один запрос на воркспейс за ночь) и при нуле НЕ ставит сборку: платит сборка,
  * а не долив. Такая вертикаль пишется в лог как capacity_blocked (уровень warn) и
  * в he_auto_pipeline_runs строкой без base_id.
+ *
+ * ДОКАЗАННЫЙ НОЛЬ ЁМКОСТИ ВДОБАВОК ОСТАНАВЛИВАЕТ ПРОЕКТ НАДОЛГО
+ * (he_auto_pipeline_configs.refill_paused_at, миграция
+ * supabase/migrations/20260930_0005_he_capacity_pause.sql): следующие ночи
+ * пишут `paused` (уровень info — это решение, а не отказ) и не делают по
+ * проекту ни одного запроса. Второй и главный писатель паузы — САМ ДОЛИВ:
+ * отказ провайдера по ёмкости работает и тогда, когда у ключа нет права читать
+ * биллинг и предполёт отвечает «не знаю». Снять паузу может ТОЛЬКО человек:
+ * POST /api/tools/hypothesis-engine/projects/[id]/refill-pause, кнопка
+ * «Возобновить ночной добор» в карточке проекта staff-инструмента. Автоснятия
+ * по таймеру нет намеренно — оно вернуло бы добор в тот же полный воркспейс.
+ * Счётчик ёмкости общий на весь instantly-аккаунт, поэтому ENG-проект может
+ * встать из-за лидов других (в том числе RU) клиентов; это написано в тексте
+ * причины, который видит сотрудник. `paused` exit code НЕ меняет.
  *
  * Раньше предполёта ёмкости работает ПРАВИЛО СУХОЙ ВЕРТИКАЛИ
  * (lib/hypothesisEngine/autoPipeline.ts, блок «СУХАЯ ВЕРТИКАЛЬ»): N подряд
@@ -88,7 +111,8 @@
  * или обход конфига), либо сам проход автоподъёма не отработал, либо проход
  * реконсилера упал (целиком или по отдельному проекту), чтобы cron-алерты это
  * видели. capacity_blocked код НЕ меняет: место у рассыльщика — штатный
- * отказ, а не сбой тика. `dry` — тем более: это решение, а не отказ. Отказ автоподъёма (потолок, остывание, занятая
+ * отказ, а не сбой тика. `dry` и `paused` — тем более: это решения, а не
+ * отказы. Отказ автоподъёма (потолок, остывание, занятая
  * вертикаль) — тоже штатный: код не меняет. Пропуск проекта реконсилером
  * (нечего ставить, ждём человека) — тоже.
  */
@@ -159,6 +183,9 @@ async function main(): Promise<number> {
     return 1;
   }
 
+  // Кого именно усыпила пауза — в итоговой строке: счётчик без имён
+  // заставляет искать проект по всему логу.
+  const pausedConfigIds: string[] = [];
   for (const d of summary.details) {
     const target = d.verticalId ? ` vertical ${d.verticalId}` : '';
     const base = d.baseId ? ` base ${d.baseId}` : '';
@@ -170,7 +197,19 @@ async function main(): Promise<number> {
     // capacity_blocked — штатный отказ, а не сбой: 'warn', чтобы строка была
     // видна в ночном логе, но не читалась алертами как падение тика. `dry` —
     // не отказ вовсе, а намеренный пропуск: 'info'.
-    const level = d.status === 'failed' ? 'error' : d.status === 'capacity_blocked' ? 'warn' : 'info';
+    // 'paused' поднят до 'warn' по той же причине, что и capacity_blocked:
+    // у durable-паузы НЕТ автоснятия, и единственный способ о ней узнать —
+    // эта строка или открытая карточка проекта. На info она тонет среди
+    // десятков других info-строк, и проект может месяцами не получать
+    // контактов, пока сотрудник не откроет именно его. Exit code по-прежнему
+    // не меняется: пауза — решение, а не сбой тика.
+    const level =
+      d.status === 'failed'
+        ? 'error'
+        : d.status === 'capacity_blocked' || d.status === 'paused'
+          ? 'warn'
+          : 'info';
+    if (d.status === 'paused') pausedConfigIds.push(d.configId);
     log(level, `config ${d.configId}${target}${base}: ${d.status}${dry}${msg}`);
   }
 
@@ -231,7 +270,10 @@ async function main(): Promise<number> {
     'info',
     `Done: ${summary.configs} configs, ${summary.enqueued} enqueued, ${summary.existing} existing, ` +
       `${summary.noCampaign} no_campaign, ${summary.capacityBlocked} capacity_blocked, ` +
-      `${summary.dry} dry, ${summary.failed} failed in ${elapsedSec}s`,
+      `${summary.budgetExhausted} budget_exhausted, ${summary.paused} paused` +
+      (pausedConfigIds.length > 0 ? ` (${pausedConfigIds.join(', ')})` : '') +
+      `, ${summary.dry} dry, ` +
+      `${summary.failed} failed in ${elapsedSec}s`,
   );
   return summary.failed > 0 || resumeFailed || reconcileFailed ? 1 : 0;
 }

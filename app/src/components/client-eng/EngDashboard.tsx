@@ -36,7 +36,10 @@ import {
   type EngDashboardResponse,
   type EngDashStage,
 } from './api-client';
-import { engAutopilotHoldText } from './engText';
+import { engAutopilotHoldText, engRefillHoldText } from './engText';
+// Только тип — см. пояснение в engText.ts: набор состояний один на оба конца
+// провода, а сам модуль проекции в клиентский бандл не уезжает.
+import type { HeClientRefillState } from '@/lib/hypothesisEngine/clientEngProjection';
 import { EngCard, EngSpinner } from './ui';
 
 const POLL_INTERVAL_MS = 15000;
@@ -164,8 +167,12 @@ interface PipeRow {
   key: string;
   label: string;
   state: 'done' | 'current' | 'future';
-  /** Маркер текущей строки: amber — работа идёт, green — живой цикл (refill). */
-  marker?: 'amber' | 'green';
+  /**
+   * Маркер текущей строки: amber — работа идёт (точка пульсирует), held —
+   * остановлено и само не возобновится (точка янтарная, неподвижная),
+   * green — остальные состояния живой вертикали (точка зелёная, неподвижная).
+   */
+  marker?: 'amber' | 'green' | 'held';
   /** Короткое доказательство цифрами; только то, что есть в агрегате. */
   evidence?: React.ReactNode;
 }
@@ -194,8 +201,31 @@ function currentIndexFor(vertical: EngDashboardVertical): number {
   }
 }
 
+/**
+ * Что кабинет говорит про ночной добор одной строкой — по ВСЕМ трём
+ * состояниям проекта, без четвёртого «наверное».
+ *
+ * `paused` НЕ схлопывается в `not configured`: добор настроен и нужен, просто
+ * сегодня его некуда грузить, и обещать «next run 03:20 UTC» проекту, который
+ * ночь пропустит, нельзя (эта фраза и была ложью до правки). Срок здесь не
+ * называется намеренно: возвращает проект в добор сотрудник, руками, и когда
+ * освободится место — кабинет не знает.
+ */
+const REFILL_NEXT_LINE: Record<HeClientRefillState, string> = {
+  running: 'next: daily refill 03:20 UTC',
+  paused: 'next: daily refill on hold — no room for new contacts',
+  off: 'next: daily refill — not configured',
+};
+
+/** То же тремя словами — в строку «Daily refill» карты пайплайна. */
+const REFILL_PIPE_EVIDENCE: Record<HeClientRefillState, string> = {
+  running: 'next 03:20 UTC',
+  paused: 'on hold — no room for new contacts',
+  off: 'not configured',
+};
+
 /** Строка «next: …» — следующий шаг конвейера из текущей стадии. */
-function nextLineFor(stage: EngDashStage, refillEnabled: boolean): string {
+function nextLineFor(stage: EngDashStage, refill: HeClientRefillState): string {
   switch (stage) {
     case 'research':
       return 'next: verticals review';
@@ -212,14 +242,14 @@ function nextLineFor(stage: EngDashStage, refillEnabled: boolean): string {
     case 'template':
       return 'next: launch from Review & Launch';
     case 'launched':
-      return refillEnabled ? 'next: daily refill 03:20 UTC' : 'next: daily refill — not configured';
+      return REFILL_NEXT_LINE[refill];
   }
 }
 
 function buildPipelineRows(
   vertical: EngDashboardVertical,
   job: EngDashboardActiveJob | undefined,
-  refillEnabled: boolean,
+  refill: HeClientRefillState,
 ): PipeRow[] {
   const s = vertical.stats;
   const fmt = (n: number) => n.toLocaleString('en-US');
@@ -337,11 +367,15 @@ function buildPipelineRows(
       key: 'refill',
       label: 'Daily refill',
       state: 'current',
-      marker: refillRunning ? 'amber' : 'green',
+      // Маркер — тоже утверждение, и под паузой оба прежних врали: зелёная
+      // точка значит «живой цикл», пульсирующая янтарная — «прямо сейчас
+      // работает». Остановленный добор не то и не другое, поэтому у него своя
+      // точка: янтарная, но неподвижная.
+      marker: refillRunning ? 'amber' : refill === 'paused' ? 'held' : 'green',
       evidence: refillRunning
         ? withEta('collecting refill…')
         : `${s.appended_today > 0 ? `+${fmt(s.appended_today)} today · ` : ''}${
-            refillEnabled ? 'next 03:20 UTC' : 'not configured'
+            REFILL_PIPE_EVIDENCE[refill]
           }`,
     });
   }
@@ -365,7 +399,9 @@ function PipelineRows({ rows }: { rows: PipeRow[] }) {
                   style={{
                     background: row.marker === 'green' ? 'var(--cp-green)' : 'var(--cp-amber)',
                     animation:
-                      row.marker === 'green' ? undefined : 'eng-dash-pulse 1.6s ease-in-out infinite',
+                      row.marker === 'green' || row.marker === 'held'
+                        ? undefined
+                        : 'eng-dash-pulse 1.6s ease-in-out infinite',
                   }}
                 />
               ) : (
@@ -519,19 +555,20 @@ function VerticalCard({
   showProject,
   projectName,
   activeJob,
-  refillEnabled,
+  refill,
 }: {
   vertical: EngDashboardVertical;
   index: number;
   showProject: boolean;
   projectName: string;
   activeJob: EngDashboardActiveJob | undefined;
-  refillEnabled: boolean;
+  /** Состояние ночного добора ПРОЕКТА этой вертикали, а не аккаунта. */
+  refill: HeClientRefillState;
 }) {
   const step = wizardStepFor(vertical.stage);
   const launched = vertical.stage === 'launched';
   const status = STAGE_STATUS[vertical.stage];
-  const rows = buildPipelineRows(vertical, activeJob, refillEnabled);
+  const rows = buildPipelineRows(vertical, activeJob, refill);
 
   return (
     <div
@@ -580,7 +617,7 @@ function VerticalCard({
 
       <div className="pt-2.5" style={{ borderTop: '1px solid var(--cp-divider)' }}>
         <span className="ds-mono text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
-          {nextLineFor(vertical.stage, refillEnabled)}
+          {nextLineFor(vertical.stage, refill)}
         </span>
       </div>
 
@@ -640,8 +677,25 @@ export function EngDashboard() {
   const activeJobs = data?.activeJobs ?? [];
   const today = data?.today ?? { appended: 0, valid: 0, collected: 0 };
   const autoRefill = data?.autoRefill;
-  const refillEnabled = autoRefill?.enabled === true;
   const projectNames = new Map(projects.map((p) => [p.id, p.name]));
+  /**
+   * Состояние ночного добора — ПО ПРОЕКТАМ, и весь набор целиком.
+   *
+   * Карточка «Auto-refill» одна на аккаунт, а пауза ставится проекту, поэтому
+   * состояний аккаунта ЧЕТЫРЕ, а не три, и каждое печатается своей фразой:
+   * ни одного настроенного проекта, все идут, все стоят и — смешанный случай
+   * — часть идёт, часть стоит. Последний и есть тот, из-за которого одного
+   * булева флага мало: обратный отсчёт для идущих правдив, но умолчать про
+   * стоящие рядом с ним было бы тем же обещанием добора, которого не будет.
+   *
+   * Поля может не быть (ответ старше этой волны) — читаем как `off`: до
+   * механизма паузы кабинет ровно так и считал проект без конфига.
+   */
+  const refillByProject = new Map<string, HeClientRefillState>(
+    projects.map((p) => [p.id, p.refill ?? 'off']),
+  );
+  const refillHeldProjects = projects.filter((p) => p.refill === 'paused');
+  const refillRunningCount = projects.filter((p) => p.refill === 'running').length;
   // Проекты, которые автопилот не продвинул на последней сверке. Роут отдаёт
   // сюда только код причины и только по проектам без активных джоб, поэтому
   // здесь остаётся отобрать непустые — и сразу с СУЖЕННЫМ кодом, чтобы экран
@@ -734,11 +788,30 @@ export function EngDashboard() {
                 style={{ animation: 'eng-dash-in 0.5s ease-out 210ms both' }}
               >
                 <span className="ds-eyebrow">Auto-refill</span>
-                {autoRefill?.enabled ? (
+                {/* Обратный отсчёт показываем ровно тогда, когда в ближайшую
+                    ночь реально пойдёт хотя бы один проект; если при этом
+                    другие стоят, подпись их называет. Ни одного идущего —
+                    отсчёта нет вовсе: тикать до ночи, которая проекту ничего
+                    не поставит, и есть то самое обещание. */}
+                {autoRefill && refillRunningCount > 0 ? (
                   <>
                     <RefillCountdown nextRunAt={autoRefill.next_run_at} />
                     <span className="text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
                       next run 03:20 UTC · daily cap {autoRefill.daily_cap.toLocaleString('en-US')}
+                      {refillHeldProjects.length > 0
+                        ? ` · ${refillHeldProjects.length} project${
+                            refillHeldProjects.length === 1 ? '' : 's'
+                          } on hold`
+                        : ''}
+                    </span>
+                  </>
+                ) : refillHeldProjects.length > 0 ? (
+                  <>
+                    <span className="ds-mono text-base font-medium" style={{ color: 'var(--cp-amber)' }}>
+                      on hold
+                    </span>
+                    <span className="text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
+                      no room for new contacts
                     </span>
                   </>
                 ) : (
@@ -776,6 +849,27 @@ export function EngDashboard() {
                 >
                   <span className="font-semibold">{p.name}</span> — {engAutopilotHoldText(p.hold.code)}
                 </Link>
+              ))}
+            </EngCard>
+          )}
+
+          {/* Проект, которому остановили ночной добор из-за нехватки места под
+              новые контакты. Отдельный блок, а не строка в карточке: карточка
+              отвечает «когда следующая ночь», а здесь нужно сказать, что
+              произошло и кто это разберёт, — в 10 пикселей подписи это не
+              влезает, а недосказанность здесь и была ложью.
+              Ссылки нет намеренно, в отличие от блока автопилота: в мастере
+              проекта клиенту с этим делать нечего — паузу снимает сотрудник,
+              и кнопки для клиента у неё нет и не должно быть (мутирующая
+              клиентская ручка означала бы право клиента запускать платную
+              работу провайдера). */}
+          {refillHeldProjects.length > 0 && (
+            <EngCard className="flex flex-col gap-2">
+              <span className="ds-eyebrow">Auto-refill</span>
+              {refillHeldProjects.map((p) => (
+                <p key={p.id} className="text-xs m-0" style={{ color: 'var(--cp-amber)' }}>
+                  <span className="font-semibold">{p.name}</span> — {engRefillHoldText()}
+                </p>
               ))}
             </EngCard>
           )}
@@ -818,7 +912,7 @@ export function EngDashboard() {
                           showProject={projects.length > 1}
                           projectName={projectNames.get(v.project_id) ?? ''}
                           activeJob={v.id ? jobByVertical.get(v.id) : undefined}
-                          refillEnabled={refillEnabled}
+                          refill={refillByProject.get(v.project_id) ?? 'off'}
                         />
                       ))}
                     </div>

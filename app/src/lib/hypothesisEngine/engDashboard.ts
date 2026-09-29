@@ -426,12 +426,25 @@ export function buildEngDashboardEvents(input: {
       // ровно то, что верно для обоих: отправлять нечего.
       events.push({ type: 'refill_empty', text: withVertical('refill: nothing new to send', vname), at });
     } else if (status === 'failed') {
-      // Нет места у рассыльщика — не сбой: ночь ОТЛОЖЕНА, собранное цело,
-      // следующий прогон встанет сам. Читаем машинную причину, а не текст:
+      // Нет места у рассыльщика — не сбой, а отложенная ночь. САМ ПРОГОН
+      // БОЛЬШЕ НЕ ВСТАЁТ: с миграции 20260930_0005 доказанное переполнение
+      // ставит durable-паузу ПРОЕКТА (he_auto_pipeline_configs.refill_paused_at),
+      // и ночной тик не купит сборку, пока сотрудник не возобновит добор
+      // кнопкой staff-инструмента; автоснятия по таймеру нет. Подпись ниже
+      // («on hold») от этого верна и для паузы, но обещать возобновление здесь
+      // нельзя. Собранное при этом цело не всегда: если часть строк уехала,
+      // остаток (stats.deferred) не досылается. Читаем машинную причину, а не текст:
       // stats.error_kind='instantly_capacity' пишут оба отказа по ёмкости —
       // предполёт тика до сборки (autoPipeline.ts, строка журнала без base_id)
       // и пауза долива (stages/baseCollectRefill.ts, runStats), — поэтому у
       // ленты одно условие на оба.
+      // Исчерпанный дневной бюджет — НЕ поломка, а решение: волна 6b сделала
+      // такую ночь 'failed', чтобы компании вернулись в пул (иначе они
+      // выжигались бы за ноль отправок), и без этой ветки клиент читал бы
+      // «refill failed» про штатный конец дневного капа. Исход уже лежит в том
+      // же stats, который ветка читает.
+      const budgetOutcome = asStr(stats.budget_outcome);
+      const budgetStopped = budgetOutcome === 'cap_exhausted' || budgetOutcome === 'already_reserved';
       events.push(
         asStr(stats.error_kind) === 'instantly_capacity'
           ? {
@@ -439,7 +452,13 @@ export function buildEngDashboardEvents(input: {
               text: withVertical('refill on hold: no room for new contacts', vname),
               at,
             }
-          : { type: 'failed', text: withVertical('refill failed', vname), at },
+          : budgetStopped
+            ? {
+                type: 'refill_empty',
+                text: withVertical("refill: today's contact limit is already used", vname),
+                at,
+              }
+            : { type: 'failed', text: withVertical('refill failed', vname), at },
       );
     }
   }

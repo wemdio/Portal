@@ -516,6 +516,18 @@ const STANDARD_FIELD_VARIABLE_FORMS = {
   phone: ['phone'],
 } as const;
 
+/**
+ * Имя переменной лида, в которой едет «строка базы, из которой он вырос».
+ *
+ * Значение НЕ наше изобретение: построчный журнал доставки
+ * (lib/clientReports/ledger.ts, buildContactLedgerEvents) кладёт
+ * `custom_variables.source_row_id` в колонку
+ * `client_campaign_contact_ledger.source_row_id`. Совпадение имён —
+ * единственный механизм связи, поэтому имя здесь константой, а не литералом в
+ * вызове: разойдётся — колонка молча снова станет пустой.
+ */
+export const HE_SOURCE_ROW_ID_VARIABLE = 'source_row_id';
+
 export interface MapBaseRowsInput {
   rows: Array<Record<string, unknown>>;
   columns: string[];
@@ -560,6 +572,25 @@ export interface MapBaseRowsInput {
    * зовёт ночной долив).
    */
   emailColumn?: string | null;
+  /**
+   * Чем пометить лида, чтобы по строке ДОСТАВКИ можно было найти строку базы,
+   * из которой он вырос. Аргумент — индекс строки в ПЕРЕДАННОМ массиве `rows`
+   * (не в he_bases.data: вызывающий обычно даёт отфильтрованный срез и сам
+   * знает, какому индексу базы он соответствует).
+   *
+   * Куда попадает значение: в custom_variables под именем
+   * HE_SOURCE_ROW_ID_VARIABLE. Это НЕ произвольное имя — построчный журнал
+   * доставки (lib/clientReports/ledger.ts, buildContactLedgerEvents) читает
+   * ровно эту переменную в колонку `client_campaign_contact_ledger.source_row_id`.
+   * То есть пометка не заводит второго журнала: она заполняет колонку, которая
+   * у ENG до сих пор стояла пустой, и связывает уже существующую строку
+   * доставки с конкретной строкой he_bases.
+   *
+   * Ключа нет — прежнее поведение (переменная не эмитится вовсе): так зовут
+   * ручной запуск шаблона (RU staff и ENG). Существующая одноимённая
+   * переменная строки НЕ перезаписывается: письмо старше нашей трассировки.
+   */
+  sourceRowId?: (rowIndex: number) => string | null;
 }
 
 export interface MapBaseRowsResult {
@@ -614,7 +645,9 @@ export interface MapBaseRowsResult {
  *     переменная осталась бы в письме литералом {{var}}, а превью
  *     (renderPreview) обещает именно подстановку — реальность обязана ей
  *     соответствовать). Unmatched-оператор с fallback → fallback у всех лидов;
- *   - остальные колонки проходят в custom_variables под своими именами.
+ *   - остальные колонки проходят в custom_variables под своими именами;
+ *   - по желанию вызывающего (sourceRowId) к лиду добавляется пометка
+ *     «из какой строки базы он вырос» — см. HE_SOURCE_ROW_ID_VARIABLE.
  */
 export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
   const { rows, columns, operatorMapping } = input;
@@ -693,6 +726,13 @@ export function mapBaseRowsToLeads(input: MapBaseRowsInput): MapBaseRowsResult {
     }
     for (const [op, fallback] of unmatchedFallbacks) {
       if (customVars[op] === undefined) customVars[op] = fallback;
+    }
+    // Пометка «из какой строки базы» — ПОСЛЕ колонок и операторов и только на
+    // свободное имя: переменная письма с тем же именем важнее нашей
+    // трассировки (её обещает превью, а трассировку не обещает никто).
+    if (input.sourceRowId && customVars[HE_SOURCE_ROW_ID_VARIABLE] === undefined) {
+      const sourceRowId = input.sourceRowId(rowIndex);
+      if (sourceRowId) customVars[HE_SOURCE_ROW_ID_VARIABLE] = sourceRowId;
     }
 
     if (Object.keys(customVars).length > 0) {

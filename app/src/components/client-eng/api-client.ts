@@ -27,6 +27,7 @@ import type {
 import type {
   ClientEngAutopilotHold,
   HeClientAutopilotHoldCode,
+  HeClientRefillState,
   HeClientStageErrorCode,
 } from '@/lib/hypothesisEngine/clientEngProjection';
 
@@ -656,10 +657,26 @@ export interface EngDashboardResponse {
      * отдаёт `null` — дашборд выдуманного состояния не показывает).
      */
     autopilot_hold?: ClientEngAutopilotHold | null;
+    /**
+     * Состояние ночного добора ЭТОГО проекта — `off` / `running` / `paused`
+     * (см. `HeClientRefillState`). Поля может не быть только у ответа старше
+     * этой волны; тогда экран читает его как `off`.
+     */
+    refill?: HeClientRefillState;
   }>;
   verticals?: EngDashboardVertical[];
   today?: { appended: number; valid: number; collected: number };
-  autoRefill?: { enabled: boolean; next_run_at: string; daily_cap: number };
+  /**
+   * Про АККАУНТ целиком, а не про проект: момент следующей ночи и суммарный
+   * дневной кап ТОЛЬКО тех проектов, которые в неё пойдут (проект на паузе в
+   * сумму не входит — его кап сегодня не потратится).
+   *
+   * Булева `enabled` здесь больше НЕТ: «включён ли добор» перестало быть
+   * ответом на вопрос экрана, потому что у включённого добора появилось два
+   * разных состояния. Сколько проектов идёт и сколько стоит, экран считает по
+   * `projects[].refill` — один источник правды, а не два.
+   */
+  autoRefill?: { next_run_at: string; daily_cap: number };
   events?: EngDashboardEvent[];
   activeJobs?: EngDashboardActiveJob[];
   error?: string;

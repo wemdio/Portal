@@ -53,6 +53,8 @@ export type HeClientErrorCode =
   | 'contacts_exhausted'
   /** У рассыльщика нет места под новые контакты — ёмкость, а не тариф клиента. */
   | 'sending_capacity'
+  /** Дневной кап добора на сегодня израсходован — ночь отложена, а не потеряна. */
+  | 'refill_budget_spent'
   /** Узнанный сбой инфраструктуры (БД/сеть) — клиенту деталей не даём. */
   | 'internal'
   /** Ничего не опознали. */
@@ -163,6 +165,21 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
       'Nothing was lost: everything collected so far is saved, and the campaigns already running keep sending.',
     whatToDo: 'No action is needed from you — the daily refill resumes by itself once room frees up.',
   },
+  /**
+   * Дневной кап добора на сегодня уже израсходован — ночь отложена, а не
+   * потеряна. Отдельный код, потому что волна 6b сознательно сделала такую
+   * ночь 'failed': иначе её компании выжигались бы (исключались из всех
+   * будущих сборок) за ноль отправок. Общий `internal` говорил бы «техническая
+   * проблема, попробуйте ещё раз» про штатный конец дневного лимита, а
+   * «попробуйте» здесь вдобавок неисполнимо — кнопки ночного добора у клиента
+   * нет, следующую ночь ставит крон.
+   */
+  refill_budget_spent: {
+    title: "Adding new contacts paused for today — this project's daily contact limit is already used.",
+    whatIsSaved:
+      'Nothing was lost: the companies collected for this run go back to the pool, and the campaigns already running keep sending.',
+    whatToDo: 'No action is needed from you — the daily refill picks this vertical up again tomorrow.',
+  },
   internal: {
     title: 'The step stopped because of a technical problem on our side.',
     whatIsSaved: 'Everything collected so far is saved.',
@@ -244,6 +261,11 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
   // stages/baseCollectRefill.ts) и CAPACITY_REFUSAL_ERROR (отказ предполёта до
   // сборки, autoPipeline.ts). Якорь — общая подстрока обоих; менять её можно
   // только вместе с ними, оба места на это ссылаются.
+  // Дневной кап добора исчерпан (stages/baseCollectRefill.ts, обе формулировки
+  // шага 5б несут общую подстроку «дневной бюджет добора»). Правило стоит ВЫШЕ
+  // общих: текст русский и без якоря уехал бы в 'internal' с неправдой
+  // «техническая проблема, попробуйте ещё раз».
+  if (/дневной бюджет добора/i.test(message)) return 'refill_budget_spent';
   if (/лимит контактов воркспейса/i.test(message)) return 'sending_capacity';
   if (/Лимит контактов исчерпан/i.test(message)) return 'contacts_exhausted';
 

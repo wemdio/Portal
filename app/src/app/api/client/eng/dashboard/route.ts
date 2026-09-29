@@ -9,7 +9,9 @@ import {
   toClientEngCampaignName,
   toClientEngCollectInfo,
   toClientEngJobProgressLabel,
+  toClientEngRefillState,
   type ClientEngAutopilotHold,
+  type HeClientRefillState,
 } from '@/lib/hypothesisEngine/clientEngProjection';
 import { requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
 import { reconcileProjectVerticals } from '@/lib/hypothesisEngine/actualsReconcile';
@@ -140,7 +142,7 @@ export async function GET(req: NextRequest) {
     projects: projectRows.map((p) => ({ id: p.id, name: p.name, status: p.status })),
     verticals: [] as unknown[],
     today: { appended: 0, valid: 0, collected: 0, collected_companies: 0 },
-    autoRefill: { enabled: false, next_run_at: nextDailyRunIso(now), daily_cap: 0 },
+    autoRefill: { next_run_at: nextDailyRunIso(now), daily_cap: 0 },
     events: [] as unknown[],
     activeJobs: [] as unknown[],
   };
@@ -473,11 +475,82 @@ export async function GET(req: NextRequest) {
       };
     });
 
+  /**
+   * ПАУЗА НОЧНОГО ДОБОРА — ОТДЕЛЬНЫМ ЗАПРОСОМ И BEST-EFFORT, тем же приёмом и
+   * по той же причине, что `autopilot_error` выше: `refill_paused_at`
+   * появляется миграцией 20260930_0005, а на установке без неё PostgREST
+   * отвечает 42703 на ВЕСЬ `select` — дописать колонку к выборке конфигов
+   * значило бы положить весь Command Center до применения миграции.
+   *
+   * ДЕФОЛТ ЗДЕСЬ — «паузы нет», и в отличие от автопилотного блока это не
+   * выдуманное состояние, а прочитанный факт: без колонки механизма паузы нет
+   * ни у кабинета, ни у ночного тика (`loadConfigs` читает её так же
+   * опционально и при 42703 повторяет запрос без неё), то есть ночь сборку
+   * поставит и «next run» — правда.
+   * Худший случай — колонка ЕСТЬ, а этот один запрос сорвался: тогда кабинет
+   * покажет «next run» проекту, который ночь пропустит, ровно до следующего
+   * полла (15 с). Обратное поведение — печатать паузу, которой мы не прочитали,
+   * — врало бы столько же, но в сторону «у вас всё встало», и самопроизвольно
+   * не чинилось бы.
+   *
+   * Запрос идёт ТОЛЬКО когда у клиента есть хотя бы один включённый конфиг: в
+   * production `he_auto_pipeline_configs` пуста, и лишнего похода в БД на
+   * 15-секундном полле у подавляющего большинства кабинетов не будет вовсе.
+   * Колонки перечислены поимённо — `refill_pause_reason` кабинету не
+   * полагается (русский текст для сотрудника с именем рассыльщика), и его
+   * здесь нет даже в выборке. Капа у запроса нет и не нужно: `project_id` у
+   * таблицы уникален (20260804_0005), а сам список проектов уже ограничен
+   * сотней строк выше — больше сотни строк отсюда не приедет.
+   */
   const enabledConfigs = configRows.filter((c) => c.enabled === true);
+  const refillPausedAtByProjectId = new Map<string, string>();
+  if (enabledConfigs.length > 0) {
+    const pauseRes = await supabaseAdmin
+      .from('he_auto_pipeline_configs')
+      .select('project_id, refill_paused_at')
+      .in('project_id', projectIds);
+    if (!pauseRes.error) {
+      for (const raw of pauseRes.data ?? []) {
+        const row = raw as Record<string, unknown>;
+        const pid = str(row.project_id);
+        const pausedAt = str(row.refill_paused_at);
+        if (pid && pausedAt) refillPausedAtByProjectId.set(pid, pausedAt);
+      }
+    }
+  }
+  const refillStateByProjectId = new Map<string, HeClientRefillState>(
+    configRows.map((c) => {
+      const pid = str((c as Record<string, unknown>).project_id);
+      // Строка конфига как есть плюс та единственная колонка, которую
+      // пришлось читать отдельно, — решение о состоянии принимает проекция.
+      return [
+        pid,
+        toClientEngRefillState({
+          ...(c as Record<string, unknown>),
+          refill_paused_at: refillPausedAtByProjectId.get(pid) ?? null,
+        }),
+      ];
+    }),
+  );
+  /**
+   * Агрегат добора по ВСЕМ проектам клиента: счётчики состояний кабинет
+   * считает сам по `projects[].refill` — второго источника той же правды
+   * здесь нет намеренно.
+   *
+   * `daily_cap` СУММИРУЕТСЯ ТОЛЬКО ПО ИДУЩИМ проектам. Кап — обещание про
+   * ближайшую ночь («daily cap N» рядом с обратным отсчётом), а проект на
+   * паузе в эту ночь не возьмёт ни одного лида: включать его кап в сумму
+   * значило бы назвать число, которого сегодня не будет.
+   */
   const autoRefill = {
-    enabled: enabledConfigs.length > 0,
     next_run_at: nextDailyRunIso(now),
-    daily_cap: enabledConfigs.reduce((acc, c) => acc + num(c.daily_leads_cap), 0),
+    daily_cap: enabledConfigs.reduce(
+      (acc, c) =>
+        refillStateByProjectId.get(str((c as Record<string, unknown>).project_id)) === 'running'
+          ? acc + num(c.daily_leads_cap)
+          : acc,
+      0,
+    ),
   };
 
   const events = buildEngDashboardEvents({
@@ -527,6 +600,11 @@ export async function GET(req: NextRequest) {
       name: p.name,
       status: p.status,
       autopilot_hold: autopilotHoldByProjectId.get(p.id as string) ?? null,
+      // Состояние ночного добора ПРОЕКТА, а не аккаунта: карточки вертикалей
+      // печатают «next: daily refill …» по своему проекту (у вертикали есть
+      // project_id), и у клиента с двумя проектами — один на паузе, второй
+      // идёт — обе фразы теперь верны каждая про своё.
+      refill: refillStateByProjectId.get(p.id as string) ?? 'off',
     })),
     verticals,
     today,

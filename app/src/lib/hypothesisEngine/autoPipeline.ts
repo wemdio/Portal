@@ -5,9 +5,20 @@
  *
  * Вызывается one-shot кроном app/worker/heAutoPipelineCron.ts. Один тик:
  *   1. enabled-конфиги he_auto_pipeline_configs, проект market='us';
+ *   1-. ПАУЗА ПО ЁМКОСТИ: he_auto_pipeline_configs.refill_paused_at (миграция
+ *      20260930_0005). Стоит — проект пропускается ЦЕЛИКОМ, до любых чтений и
+ *      любых запросов к рассыльщику. Снимает её только человек кнопкой в
+ *      staff-инструменте; подробности — в блоке «ПАУЗА ПО ЁМКОСТИ» ниже;
  *   2. вертикали проекта по created_at (стабильный порядок добора);
  *   3. вертикаль eligible, когда у неё есть шаблон с launch_info.campaign_id
  *      (последний по дате запуска) — есть куда доливать;
+ *   2-. ДНЕВНОЙ БЮДЖЕТ ПРОЕКТА: сколько лидов на сегодняшние UTC-сутки ещё не
+ *      занято бронями (he_refill_daily_budgets/he_refill_daily_reservations,
+ *      миграция 20260930_0004 — тот же учёт, которым долив режет отправку).
+ *      Ноль — сборку не получает НИ ОДНА вертикаль проекта: кап общий, а платит
+ *      сборка. На ночном тике в 03:20 броней ещё нет, и проверка ничего не
+ *      меняет; она про ВТОРОЙ за сутки прогон крона. Не прочиталось (нет
+ *      миграции, нет прав, сбой) — работаем как раньше, обязательный fail-open;
  *   3-. СУХАЯ ВЕРТИКАЛЬ: серия ночей без единого добавленного контакта читается
  *      ИЗ ЖУРНАЛА he_auto_pipeline_runs ДО постановки сборки (см. блок «СУХАЯ
  *      ВЕРТИКАЛЬ» ниже). Дошла до he_auto_pipeline_configs.dry_nights_limit —
@@ -22,7 +33,9 @@
  *      упрётся в «нет места», и оплаченные компании при этом выжигаются из
  *      будущих сборок проекта. Ёмкость не определилась — работаем как раньше
  *      (обязательный fail-open: слепой предполёт, угадавший ноль, остановил бы
- *      продукт на ровном месте);
+ *      продукт на ровном месте). Точный ноль вдобавок ЗАПИСЫВАЕТ durable-паузу
+ *      проекта (шаг 1- выше) — иначе завтрашняя ночь спрашивала бы то же самое
+ *      заново;
  *   4. постановка refill-сборки через общий enqueueHeBaseCollect (его же
  *      дедуп: уже собирающаяся auto-база / активная base_collect-джоба →
  *      'existing' и слот verticals_per_run НЕ расходуется): he_bases
@@ -37,6 +50,25 @@
  * stages/baseCollectRefill.ts). Дедуп компаний при повторных сборах —
  * встроенный в HARVEST (исключение компаний других баз проекта), поэтому
  * refill поднимает только новые.
+ *
+ * ЧТО ЗАПИСЫВАЕТ БРОНЬ И КОГДА ЗАКРЫВАЕТСЯ (хендофф лейну ёмкости). Бронь
+ * берёт САМ ДОЛИВ, а не этот тик: `stages/baseCollectRefill.ts`, шаг 5, один
+ * вызов `he_reserve_refill_daily_budget(project, base, requested)` ДО первого
+ * запроса к рассыльщику. Она пишет строку (проект, база, UTC-день,
+ * reserved_count) и, если это первая бронь дня, замораживает кап дня из
+ * `he_auto_pipeline_configs.daily_leads_cap`. Закрывается она в ТОМ ЖЕ прогоне,
+ * после терминальной записи базы, фактическим расходом: принято при успехе,
+ * max(принято, отдано в транспорт) при отказе, ноль при отказе до первого
+ * запроса. Незакрытая бронь занимает весь свой объём до конца UTC-суток — для
+ * всех, кроме СВОЕЙ ЖЕ базы: её новый прогон может забрать бронь, открытую
+ * дольше двух часов (окно перехвата, миграция 20260930_0004), потому что
+ * держатель за такой срок не может быть жив. Для ЭТОГО тика разницы нет:
+ * остаток проекта он считает по всем броням, и зависшая продолжает занимать
+ * объём, пока её не заберёт её же база или не кончатся сутки.
+ * Отсюда правило для любой ПАУЗЫ: пауза, поставленная ПОСЛЕ брони, но ДО
+ * отправки, не освобождает бюджет сама — освобождает только закрытие брони
+ * нулём, и делать это имеет право только путь, который точно знает, что
+ * провайдер строк не получил.
  *
  * Тарифная асимметрия ЗАКРЫТА на стороне вызывающего: `stages/baseCollectRefill.ts`
  * зовёт `appendLeadsToClientCampaign` с `entitlementMode: 'managed_contract'`
@@ -144,11 +176,233 @@ export function heVerticalDryStopEnabled(env: NodeJS.ProcessEnv = process.env): 
   return raw === '1' || raw === 'true' || raw === 'on' || raw === 'yes';
 }
 
+/* ─── ПАУЗА ПО ЁМКОСТИ ────────────────────────────────────────────────────
+ *
+ * ПРАВИЛО. У воркспейса рассыльщика кончилось место под контакты — ночной
+ * добор ПРОЕКТА останавливается до явного возобновления СОТРУДНИКОМ.
+ *
+ * ПОЧЕМУ ПРОЕКТА, А НЕ ВЕРТИКАЛИ. Место меряется воркспейсом, а все вертикали
+ * проекта живут в воркспейсе одного и того же клиента (пресет один на
+ * client_user_id). Пауза по вертикали означала бы N одинаковых решений и N
+ * одинаковых запросов к рассыльщику ради одного и того же ответа.
+ *
+ * СЧЁТЧИК ЁМКОСТИ ОБЩИЙ НА ВЕСЬ INSTANTLY-АККАУНТ. total_lead_limit и
+ * current_lead_count из /workspace-billing/plan-details считаются по ВОРКСПЕЙСУ,
+ * а не по кампании и не по клиенту: лиды RU-клиентов, сидящих в том же
+ * аккаунте, входят в тот же знаменатель. ENG-проект поэтому может встать
+ * из-за нагрузки, которую он не создавал, — и текст причины обязан называть
+ * это прямо, иначе сотрудник будет искать поломку в ENG.
+ *
+ * КТО ЗАПИСЫВАЕТ ПАУЗУ — ДВА ПУТИ, И ОБА НУЖНЫ:
+ *   * ПРЕДПОЛЁТ (ниже в этом файле): остаток ровно 0. Работает только пока
+ *     ключ имеет право читать биллинг воркспейса;
+ *   * ОТКАЗ САМОГО ДОЛИВА (stages/baseCollectRefill.ts): провайдер отказался
+ *     принять строки по ёмкости. Работает ВСЕГДА, в том числе когда у ключа
+ *     нет scope на биллинг и предполёт молчит, — это и есть требуемая
+ *     деградация «ответ импорта авторитетен».
+ * Без второго пути механизм имел бы дыру ровно по правам ключа: именно там,
+ * где предполёт слеп, ночь за ночью покупалась бы сборка, которую некуда
+ * отправить.
+ *
+ * ЧТО НЕ ЯВЛЯЕТСЯ ОСНОВАНИЕМ ДЛЯ ПАУЗЫ — по всему набору исходов предполёта:
+ *   * null от getWorkspaceContactCapacity (403 без scope, 404, 429, 5xx,
+ *     таймаут, нечитаемый ответ) — «не знаем». Паузу НЕ ставим;
+ *   * ненайденный пресет, отсутствующая instantly-БД, сбой резолва аккаунта —
+ *     то же «не знаем»;
+ *   * положительный остаток любой величины — места мало, но оно есть; сколько
+ *     влезет, столько долив и отправит (pauseOnWorkspaceCapacity в
+ *     appendLeadsToClientCampaign грузит по месту, а не всё или ничего);
+ *   * 402/тариф, 429 по частоте запросов, ошибка конструктора — это не
+ *     ёмкость, у них свои ветки.
+ * Пауза ставится ТОЛЬКО по доказанному нулю. Цена ошибки в эту сторону —
+ * проект спит, пока человек не вернёт его; цена ошибки в другую — ночь платной
+ * сборки, которую некуда отправить.
+ *
+ * ПОЧЕМУ БЕЗ ФЛАГА ОКРУЖЕНИЯ (в отличие от правила сухой вертикали). У сухой
+ * вертикали есть ПОРОГ, выбранный без единого замера, — там флаг защищает от
+ * неверного числа. Здесь порога нет: условие бинарное и приходит от самого
+ * рассыльщика. Флаг, выключенный по умолчанию, означал бы механизм, которого
+ * в дефолтной конфигурации нет, — а в докблоке он при этом описан.
+ *
+ * ПОЧЕМУ ВОЗОБНОВЛЕНИЕ — У СОТРУДНИКА, А НЕ У КЛИЕНТА. Возобновление запускает
+ * платную работу у провайдера; мутирующая ручка в кабинете отдала бы клиенту
+ * право начинать её. Кнопка живёт в staff-инструменте
+ * (POST /api/tools/hypothesis-engine/projects/[id]/refill-pause) — там же, где
+ * сотрудник и увидел бы переполненный воркспейс.
+ *
+ * АВТОСНЯТИЯ ПО ТАЙМЕРУ НЕТ. Пауза, снявшаяся сама, вернёт проект в тот же
+ * воркспейс: если место не освободили — та же платная сборка заново, и никто
+ * не узнал. Это и есть разница между «паузой» и «пропуском одной ночи».
+ *
+ * НОЧЬ ПОД ПАУЗОЙ НЕ СЧИТАЕТСЯ НИГДЕ. Строки he_auto_pipeline_runs пропуск не
+ * пишет (в status нет значения «решили не собирать», а 'failed' выдал бы
+ * намеренную экономию за сбой), поэтому ни серия сухих ночей
+ * (readDryNightStreak), ни серия отказов вертикали (refillFailStreak в
+ * stages/baseCollectRefill.ts) на паузе не растут: обе читают только
+ * ЗАВЕРШЁННЫЕ прогоны. Это осознанно — пауза наша, а не рынка, и наказывать за
+ * неё вертикаль нечем.
+ */
+
+/**
+ * Первая половина текста причины — то, что сотрудник обязан прочитать раньше
+ * всего: счётчик общий на весь воркспейс. Вторая половина (кто записал) —
+ * в buildHeCapacityPauseReason.
+ */
+export const HE_CAPACITY_PAUSE_WORKSPACE_NOTE =
+  'Instantly: в воркспейсе кончилось место под контакты. Счётчик общий на весь ' +
+  'instantly-аккаунт — в него входят лиды других клиентов, в том числе RU, ' +
+  'поэтому ENG-проект мог встать из-за чужой нагрузки.';
+
+/**
+ * Текст причины паузы для сотрудника. `source` — кто именно её записал: без
+ * него «предполёт увидел ноль» и «провайдер отказал на доливе» выглядят
+ * одинаково, а это разные проверки (вторая работает и без права читать
+ * биллинг) и разная цена уже потраченного.
+ *
+ * Текст СТАФФНЫЙ и по-русски: колонка refill_pause_reason не проецируется в
+ * ENG-кабинет ни одним маршрутом (client/eng/dashboard выбирает из конфига
+ * только project_id, enabled, daily_leads_cap, verticals_per_run, last_run_at).
+ */
+export function buildHeCapacityPauseReason(source: string): string {
+  return `${HE_CAPACITY_PAUSE_WORKSPACE_NOTE} Ночной добор остановлен до явного возобновления сотрудником. Записал: ${source}.`;
+}
+
+/** Состояние паузы проекта — ВЕСЬ набор, который умеет вернуть чтение. */
+export type HeRefillPauseState =
+  /** Колонок паузы нет (миграция 20260930_0005 не прокатана). */
+  | { kind: 'unsupported' }
+  /** Конфига добора у проекта нет вовсе — останавливать нечего. */
+  | { kind: 'no_config' }
+  | { kind: 'active'; pausedAt: string; reason: string | null; resumedAt: string | null }
+  | { kind: 'running'; resumedAt: string | null };
+
+/** Исход попытки возобновления — тот же полный набор плюс сам успех. */
+export type HeRefillResumeOutcome = 'resumed' | 'not_paused' | 'no_config' | 'unsupported';
+
+/**
+ * Записать паузу по ёмкости. Возвращает true, только если паузу поставил
+ * ИМЕННО ЭТОТ вызов.
+ *
+ * Идемпотентна по построению: условие `refill_paused_at is null` не даёт
+ * второй записи переписать штамп и причину первой. Это важно не ради красоты —
+ * штамп первой паузы отвечает на вопрос «сколько ночей проект стоит», а
+ * причина первой называет того, кто заметил переполнение раньше всех.
+ *
+ * НИКОГДА НЕ БРОСАЕТ. Не записалось (нет колонок, нет конфига, сбой БД) —
+ * паузы нет, и вызывающий ведёт себя как до этой правки: пропускает ночь и
+ * пробует снова завтра. Из двух исходов этот обратимый; брошенная отсюда
+ * ошибка уронила бы либо обход конфига в кроне, либо терминальную запись
+ * долива.
+ *
+ * Конфига у проекта может не быть вовсе (таблица пуста, refill поставлен
+ * руками) — тогда строк ноль и пауза не ставится. Это верно: без конфига
+ * ночного тика у проекта и нет, останавливать нечего.
+ */
+export async function pauseHeAutoPipelineRefill(
+  supabase: SupabaseClient,
+  projectId: string,
+  reason: string,
+  opts: { now?: Date } = {},
+): Promise<boolean> {
+  const now = (opts.now ?? new Date()).toISOString();
+  try {
+    const { data, error } = await supabase
+      .from('he_auto_pipeline_configs')
+      .update({ refill_paused_at: now, refill_pause_reason: reason, updated_at: now })
+      .eq('project_id', projectId)
+      .is('refill_paused_at', null)
+      .select('id');
+    if (error) return false;
+    return (data ?? []).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Прочитать состояние паузы проекта. Для staff-роута: он обязан различать
+ * «паузы нет», «конфига нет» и «колонок нет» — иначе кнопка молчала бы
+ * одинаково во всех трёх случаях, и сотрудник не понял бы, чинить ему
+ * окружение или разбирать воркспейс.
+ *
+ * БРОСАЕТ только на настоящем сбое БД: staff-роут отвечает на него 500, и это
+ * правильно — читающая ручка, которая врёт «не на паузе» при сбое чтения,
+ * хуже пятисотки.
+ */
+export async function readHeRefillPause(
+  supabase: SupabaseClient,
+  projectId: string,
+): Promise<HeRefillPauseState> {
+  const { data, error } = await supabase
+    .from('he_auto_pipeline_configs')
+    .select('refill_paused_at, refill_pause_reason, refill_resumed_at')
+    .eq('project_id', projectId)
+    .maybeSingle();
+  if (error) {
+    if (isMissingColumnError(error)) return { kind: 'unsupported' };
+    throw new Error(`he_auto_pipeline_configs pause read: ${error.message}`);
+  }
+  if (!data) return { kind: 'no_config' };
+  const row = data as Record<string, unknown>;
+  const pausedAt = asStringOrNull(row.refill_paused_at);
+  const resumedAt = asStringOrNull(row.refill_resumed_at);
+  if (!pausedAt) return { kind: 'running', resumedAt };
+  return { kind: 'active', pausedAt, reason: asStringOrNull(row.refill_pause_reason), resumedAt };
+}
+
+/**
+ * Вернуть проект в ночной добор — ЕДИНСТВЕННЫЙ способ снять паузу по ёмкости.
+ *
+ * `refill_resumed_at` ставится тем же апдейтом: без него «возобновили вчера» и
+ * «никогда не паузили» выглядят в таблице одинаково, а первая ночь после
+ * возобновления — единственная, по которой видно, что кнопка вообще работает.
+ * На решения тика этот штамп не влияет (в отличие от одноимённого у вертикали,
+ * где он режет окно серии): паузу снимает сам факт refill_paused_at = null, а
+ * истории, которая вернула бы её следующей ночью, у паузы нет.
+ *
+ * Условие `refill_paused_at is not null` отделяет настоящее возобновление от
+ * повторного нажатия: во втором случае вернётся 'not_paused', и роут не
+ * сделает вид, что что-то изменил.
+ *
+ * Права и рынок здесь НЕ проверяются: это делает вызывающий staff-роут
+ * (requireInternalToolAuth).
+ */
+export async function resumeHeRefillPause(
+  supabase: SupabaseClient,
+  projectId: string,
+  opts: { now?: Date } = {},
+): Promise<HeRefillResumeOutcome> {
+  const now = (opts.now ?? new Date()).toISOString();
+  const { data, error } = await supabase
+    .from('he_auto_pipeline_configs')
+    .update({
+      refill_paused_at: null,
+      refill_pause_reason: null,
+      refill_resumed_at: now,
+      updated_at: now,
+    })
+    .eq('project_id', projectId)
+    .not('refill_paused_at', 'is', null)
+    .select('id');
+  if (error) {
+    if (isMissingColumnError(error)) return 'unsupported';
+    throw new Error(`he_auto_pipeline_configs resume: ${error.message}`);
+  }
+  if ((data ?? []).length > 0) return 'resumed';
+  // Ноль строк — либо паузы не было, либо конфига нет вовсе. Различает их
+  // отдельное чтение: сотруднику это разные ответы («уже работает» против
+  // «ночной добор этому проекту не настроен»).
+  const state = await readHeRefillPause(supabase, projectId);
+  return state.kind === 'no_config' ? 'no_config' : state.kind === 'unsupported' ? 'unsupported' : 'not_paused';
+}
+
 export type HeAutoPipelineDetailStatus =
   | 'enqueued'
   | 'existing'
   | 'no_campaign'
   | 'capacity_blocked'
+  | 'budget_exhausted'
+  | 'paused'
   | 'dry'
   | 'failed';
 
@@ -199,6 +453,29 @@ export interface HeAutoPipelineTickSummary {
    */
   capacityBlocked: number;
   /**
+   * ПРОЕКТОВ, у которых дневной бюджет лидов на сегодняшние UTC-сутки уже
+   * занят бронями: сборка не ставится ни одной их вертикали. Считается
+   * ПРОЕКТАМИ, а не вертикалями, потому что кап общий на проект.
+   *
+   * НЕ failed и не capacityBlocked: это намеренная экономия (платит сборка, а
+   * бюджет всё равно не даст отправить). На обычном ночном тике счётчик
+   * нулевой — в 03:20 броней ещё нет; он бьёт по ВТОРОМУ за сутки прогону
+   * крона, ради которого и написан.
+   */
+  budgetExhausted: number;
+  /**
+   * ПРОЕКТОВ, чей ночной добор стоит на durable-паузе по ёмкости воркспейса
+   * (he_auto_pipeline_configs.refill_paused_at). Считается ПРОЕКТАМИ: пауза
+   * общая на проект, потому что воркспейс у его вертикалей один.
+   *
+   * НЕ failed и не capacityBlocked. capacityBlocked — это СЕГОДНЯШНЕЕ
+   * наблюдение предполёта (запрос к рассыльщику был, ответ ноль); paused —
+   * решение, принятое РАНЬШЕ, из-за которого сегодня не было даже запроса.
+   * Слить их в один счётчик значило бы потерять ровно то различие, ради
+   * которого пауза и заведена.
+   */
+  paused: number;
+  /**
    * Вертикалей, которым слот не выдан правилом сухой вертикали. НЕ failed и не
    * capacityBlocked: это намеренная экономия, а не отказ. Считается только при
    * включённом HE_VERTICAL_DRY_STOP — с выключенным флагом правило ничего не
@@ -215,6 +492,15 @@ interface ConfigRow {
   verticals_per_run: number | null;
   /** null — колонки ещё нет (миграция не прокатана) либо значение нечитаемо. */
   dry_nights_limit: number | null;
+  /**
+   * NOT NULL ⇒ проект на паузе по ёмкости и сборку сегодня не получает.
+   * null — паузы нет ЛИБО колонки ещё нет: оба случая ведут к прежней работе
+   * (см. CONFIG_OPTIONAL_COLUMNS), и это единственный безопасный fail-open —
+   * пауза, померещившаяся из-за непрокатанной миграции, усыпила бы продукт.
+   */
+  refill_paused_at: string | null;
+  /** Причина паузы для ночного лога; null — пауза без текста либо её нет. */
+  refill_pause_reason: string | null;
 }
 
 interface VerticalRow {
@@ -236,8 +522,19 @@ interface VerticalRow {
  */
 const VERTICAL_DRY_COLUMNS = 'refill_dry_since, refill_dry_nights, refill_resumed_at';
 
-/** Колонки конфига со стороны правила сухости (та же причина, см. loadConfigs). */
-const CONFIG_DRY_COLUMNS = 'dry_nights_limit';
+/**
+ * Колонки конфига, которых может не быть на окружении (та же причина, см.
+ * loadConfigs): порог сухости (20260930_0003) и пауза по ёмкости
+ * (20260930_0005).
+ *
+ * Группа ОДНА на обе миграции осознанно. Читать их двумя независимыми
+ * запросами значило бы удвоить чтение конфигов ради окна в несколько минут
+ * между двумя накатами, а исход у обеих недостающих колонок один и тот же —
+ * прежнее поведение: без dry_nights_limit порог берётся из кода, без
+ * refill_paused_at паузы просто нет. Обе стороны безопасны: непрочитанная
+ * пауза = проект собирается, как собирался до неё.
+ */
+const CONFIG_OPTIONAL_COLUMNS = 'dry_nights_limit, refill_paused_at, refill_pause_reason';
 
 /**
  * Ошибка PostgREST «колонки нет» (Postgres 42703). Ровно она отделяет
@@ -508,6 +805,69 @@ export async function resumeHeVerticalNightlyRefill(
   if (error) throw new Error(`he_verticals refill resume: ${error.message}`);
 }
 
+/**
+ * Сколько лидов дневной бюджет проекта ещё разрешает отправить СЕГОДНЯ (UTC).
+ *
+ * Источник — брони (`he_refill_daily_budgets` + `he_refill_daily_reservations`,
+ * миграция 20260930_0004), то есть ровно тот же учёт, которым долив режет
+ * отправку (reserveRefillDailyBudget в stages/baseCollectRefill.ts): открытая
+ * бронь занимает весь свой объём, завершённая — фактический расход. Второго
+ * определения «потрачено» тут не заводится.
+ *
+ * ВОЗРАСТ БРОНИ ЗДЕСЬ НЕ УЧИТЫВАЕТСЯ, и это совпадает с доливом: перехватить
+ * зависшую бронь имеет право только СВОЯ ЖЕ база (окно в два часа), а для
+ * суммы проекта такая бронь занята до конца суток. Иначе тик покупал бы сборку
+ * под объём, который долив всё равно не выдаст.
+ *
+ * Зачем тику знать остаток. Платит СБОРКА (план источников, гейт, краул сайтов,
+ * SMTP-проба каждого адреса), а бюджет режет уже ОТПРАВКУ: поставить сборку
+ * проекту, чей день выбран, значит заплатить за компании, строки которых
+ * бюджет выбросит, и выжечь эти компании из будущих сборок. На обычном ночном
+ * тике этого не бывает — в 03:20 броней нет, — но второй за сутки прогон крона
+ * (ручной перезапуск, повтор после сбоя) без этой проверки покупает ночь
+ * заново.
+ *
+ * `null` — «не знаем, считаем что бюджет цел», и это ЕДИНСТВЕННОЕ значение для
+ * всех неопределённостей: миграции нет, прав нет, сбой чтения, а также штатное
+ * «сегодня ещё не бронировали» (строки капа за этот день нет). Все они обязаны
+ * вести к прежнему поведению: предполёт, угадавший ноль, останавливает продукт.
+ */
+async function readRefillDayRemaining(
+  supabase: SupabaseClient,
+  projectId: string,
+  now: Date,
+): Promise<number | null> {
+  const day = now.toISOString().slice(0, 10);
+  try {
+    const budget = await supabase
+      .from('he_refill_daily_budgets')
+      .select('daily_cap')
+      .eq('project_id', projectId)
+      .eq('budget_date', day)
+      .maybeSingle();
+    if (budget.error) throw new Error(budget.error.message);
+    const cap = asNumberOrNull((budget.data as { daily_cap?: unknown } | null)?.daily_cap);
+    // Кап дня не заморожен — значит сегодня не было ни одной брони, тратить
+    // нечего. Это не «не знаем», но исход тот же: бюджет цел.
+    if (cap === null) return null;
+    const reservations = await supabase
+      .from('he_refill_daily_reservations')
+      .select('reserved_count, consumed_count, finalized_at')
+      .eq('project_id', projectId)
+      .eq('budget_date', day);
+    if (reservations.error) throw new Error(reservations.error.message);
+    let spent = 0;
+    for (const row of (reservations.data ?? []) as Array<Record<string, unknown>>) {
+      const open = asStringOrNull(row.finalized_at) === null;
+      const amount = asNumberOrNull(open ? row.reserved_count : row.consumed_count);
+      if (amount !== null) spent += amount;
+    }
+    return Math.max(0, cap - spent);
+  } catch {
+    return null;
+  }
+}
+
 /** Запись журнала прогонов; ошибка вставки — фейл обхода конфига. */
 async function insertRun(
   supabase: SupabaseClient,
@@ -518,17 +878,22 @@ async function insertRun(
 }
 
 /**
- * Enabled-конфиги добора. `dry_nights_limit` читается ОПЦИОНАЛЬНО по той же
- * причине, что и колонки пометки у вертикалей (см. loadVerticals): воркер
- * может уехать раньше миграции 20260930_0003, а 42703 здесь уронил бы весь
- * ночной тик. Колонки нет — порог берётся из кода.
+ * Enabled-конфиги добора. CONFIG_OPTIONAL_COLUMNS читаются ОПЦИОНАЛЬНО по той
+ * же причине, что и колонки пометки у вертикалей (см. loadVerticals): воркер
+ * может уехать раньше миграций 20260930_0003/0005, а 42703 здесь уронил бы
+ * весь ночной тик. Колонок нет — порог берётся из кода, а паузы по ёмкости
+ * просто не существует.
+ *
+ * `enabled=false` конфиги сюда не попадают вовсе — и паузу им поэтому не
+ * ставят и не снимают. Это верно: выключенный добор и без паузы ничего не
+ * собирает, а снятие паузы не должно включать добор тому, кто выключил его сам.
  */
 async function loadConfigs(supabase: SupabaseClient): Promise<ConfigRow[]> {
   const base = 'id, project_id, verticals_per_run';
   let rows: Array<Record<string, unknown>>;
   const first = await supabase
     .from('he_auto_pipeline_configs')
-    .select(`${base}, ${CONFIG_DRY_COLUMNS}`)
+    .select(`${base}, ${CONFIG_OPTIONAL_COLUMNS}`)
     .eq('enabled', true);
   if (first.error && !isMissingColumnError(first.error)) {
     throw new Error(`he_auto_pipeline_configs read: ${first.error.message}`);
@@ -545,6 +910,8 @@ async function loadConfigs(supabase: SupabaseClient): Promise<ConfigRow[]> {
     project_id: asString(row.project_id),
     verticals_per_run: asNumberOrNull(row.verticals_per_run),
     dry_nights_limit: asNumberOrNull(row.dry_nights_limit),
+    refill_paused_at: asStringOrNull(row.refill_paused_at),
+    refill_pause_reason: asStringOrNull(row.refill_pause_reason),
   }));
 }
 
@@ -558,6 +925,67 @@ async function runForConfig(
   const detail = (d: Omit<HeAutoPipelineTickDetail, 'configId' | 'projectId'>) => {
     summary.details.push({ configId: config.id, projectId: config.project_id, ...d });
   };
+
+  /**
+   * «Тик этот конфиг обошёл». Одно определение на оба выхода из функции —
+   * обычный и ранний (пауза по ёмкости): под паузой добор не идёт, но обход
+   * СОСТОЯЛСЯ, и last_run_at, застывший на дате паузы, читался бы как
+   * сломавшийся крон.
+   */
+  const touchLastRun = async () => {
+    const { error } = await supabase
+      .from('he_auto_pipeline_configs')
+      .update({ last_run_at: now.toISOString(), updated_at: now.toISOString() })
+      .eq('id', config.id);
+    if (error) throw new Error(`he_auto_pipeline_configs last_run_at: ${error.message}`);
+  };
+
+  const dryStopEnabled = heVerticalDryStopEnabled();
+
+  /**
+   * Правило сухой вертикали выключено — снимаем пометки СО ВСЕГО ПРОЕКТА, и
+   * делаем это РАНЬШЕ проверки паузы.
+   *
+   * Порядок важен: под паузой по ёмкости мы из функции выходим, и снятие,
+   * стоящее после неё, не выполнилось бы НИ РАЗУ, пока проект стоит. Кабинет
+   * продолжал бы писать «ночной добор по вертикали остановлен» про правило,
+   * которое выключено. Статья расхода — один UPDATE, который в норме не
+   * трогает ни строки (фильтр по непустой пометке).
+   *
+   * Внутри цикла вертикалей этого делать нельзя по отдельной причине: до
+   * вертикали можно не дойти (бюджет ночи, пропавшая кампания), и она хранила
+   * бы пометку вечно.
+   */
+  if (!dryStopEnabled) {
+    await supabase
+      .from('he_verticals')
+      .update({ refill_dry_since: null, refill_dry_nights: null })
+      .eq('project_id', config.project_id)
+      .not('refill_dry_since', 'is', null);
+  }
+
+  // ─── ПАУЗА ПО ЁМКОСТИ (раньше всех решений: до чтения вертикалей и
+  //     шаблонов, до бюджета, до рассыльщика, до денег) ───
+  // Решение принято в прошлую ночь и записано в конфиге; перепроверять его
+  // сегодняшним запросом к рассыльщику нельзя — ровно этот «автоматический
+  // пересмотр» и превратил бы паузу обратно в пропуск одной ночи. Снимает её
+  // только сотрудник (resumeHeRefillPause, staff-роут refill-pause).
+  // Своей строки he_auto_pipeline_runs пропуск НЕ пишет — та же причина, что у
+  // budget_exhausted и dry: в status нет значения «решили не собирать», а
+  // 'failed' выдал бы намеренную остановку за сбой. И ровно поэтому ночь под
+  // паузой не растит ни серию сухих ночей, ни серию отказов вертикали.
+  if (config.refill_paused_at) {
+    summary.paused += 1;
+    detail({
+      status: 'paused',
+      message: `nightly refill paused since ${config.refill_paused_at}`
+        + (config.refill_pause_reason ? ` — ${config.refill_pause_reason}` : ''),
+    });
+    // Что именно произошло, объясняют строка ночного лога и сама пометка со
+    // штампом; last_run_at при этом двигается как у любого обойдённого конфига.
+    await touchLastRun();
+    return;
+  }
 
   // Сортировка в JS (created_at asc): стабильный порядок добора вертикалей.
   const verticals = (await loadVerticals(supabase, config.project_id))
@@ -577,29 +1005,30 @@ async function runForConfig(
 
   const perRun = Math.max(1, config.verticals_per_run ?? HE_AUTO_DEFAULT_VERTICALS_PER_RUN);
   const dryLimit = Math.max(1, config.dry_nights_limit ?? HE_AUTO_DEFAULT_DRY_NIGHTS_LIMIT);
-  const dryStopEnabled = heVerticalDryStopEnabled();
   const dateTag = now.toISOString().slice(0, 10);
   let enqueued = 0;
 
-  /**
-   * Правило выключено — снимаем пометки СО ВСЕГО ПРОЕКТА и ДО цикла.
-   *
-   * Внутри цикла этого делать нельзя: до вертикали можно не дойти. Выше стоят
-   * `if (enqueued >= perRun) break` (бюджет ночи) и `continue` по пропавшей
-   * кампании, поэтому вертикаль за пределами бюджета сохраняла бы пометку
-   * вечно — и кабинет вечно писал бы «ночной добор на паузе» про вертикаль,
-   * которую никто не останавливал. Один запрос на проект, только по строкам
-   * с пометкой; результат не проверяем — не снялось, снимет следующая ночь.
-   */
-  if (!dryStopEnabled) {
-    await supabase
-      .from('he_verticals')
-      .update({ refill_dry_since: null, refill_dry_nights: null })
-      .eq('project_id', config.project_id)
-      .not('refill_dry_since', 'is', null);
+  // Снятие пометок выключенного правила сухой вертикали стоит ВЫШЕ, до
+  // проверки паузы: иначе под паузой оно не выполнялось бы ни разу (см. там же
+  // разбор обоих ограничений на его место).
+
+  // ─── ДНЕВНОЙ БЮДЖЕТ ПРОЕКТА (до сухой вертикали, до ёмкости, до денег) ───
+  // Кап общий на проект, поэтому и решение общее: выбран — ни одной вертикали
+  // сборку не ставим. Проверка идёт ПЕРВОЙ из трёх, потому что она про
+  // проект целиком, а две следующие — про вертикаль. Своей строки журнала
+  // прогонов пропуск НЕ пишет: в he_auto_pipeline_runs.status нет значения для
+  // «решили не собирать», а 'failed' выдал бы намеренную экономию за сбой (та
+  // же причина, что у правила сухой вертикали).
+  const dayRemaining = verticals.length === 0
+    ? null
+    : await readRefillDayRemaining(supabase, config.project_id, now);
+  const budgetExhausted = dayRemaining === 0;
+  if (budgetExhausted) {
+    summary.budgetExhausted += 1;
+    detail({ status: 'budget_exhausted', message: `daily lead budget for ${dateTag} is fully reserved` });
   }
 
-  for (const vertical of verticals) {
+  for (const vertical of budgetExhausted ? [] : verticals) {
     if (enqueued >= perRun) break;
     const target = campaignByVertical.get(vertical.id);
     if (!target) {
@@ -662,6 +1091,22 @@ async function runForConfig(
     if (remainingCapacity === 0) {
       summary.capacityBlocked += 1;
       detail({ verticalId: vertical.id, status: 'capacity_blocked', ...dryNightsDetail });
+      // Ноль ДОКАЗАН (число пришло от самого рассыльщика, а не угадано) —
+      // записываем durable-паузу проекта, иначе завтрашняя ночь спросит то же
+      // самое заново и так каждую ночь, пока место не освободится. null
+      // («не знаем») сюда не доходит по условию выше — это ключевое: пауза
+      // ставится только по доказанному нулю.
+      //
+      // Best-effort: не записалось (нет колонок, нет конфига, сбой) — ведём
+      // себя как до этой правки, то есть пропускаем ночь и пробуем завтра.
+      // Пишем ДО insertRun: строка журнала — объяснение, а деньги экономит
+      // пауза, и терять её из-за сбоя вставки журнала незачем.
+      await pauseHeAutoPipelineRefill(
+        supabase,
+        config.project_id,
+        buildHeCapacityPauseReason('ночной предполёт ёмкости (остаток 0)'),
+        { now },
+      );
       await insertRun(supabase, {
         config_id: config.id,
         project_id: config.project_id,
@@ -742,11 +1187,7 @@ async function runForConfig(
   }
 
   // Тик по конфигу отработал (даже без новых постановок) — фиксируем.
-  const { error: updErr } = await supabase
-    .from('he_auto_pipeline_configs')
-    .update({ last_run_at: now.toISOString(), updated_at: now.toISOString() })
-    .eq('id', config.id);
-  if (updErr) throw new Error(`he_auto_pipeline_configs last_run_at: ${updErr.message}`);
+  await touchLastRun();
 }
 
 /**
@@ -765,6 +1206,8 @@ export async function runHeAutoPipelineTick(
     existing: 0,
     noCampaign: 0,
     capacityBlocked: 0,
+    budgetExhausted: 0,
+    paused: 0,
     dry: 0,
     failed: 0,
     details: [],
