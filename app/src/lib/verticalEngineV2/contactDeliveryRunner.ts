@@ -418,9 +418,7 @@ export async function runContactDeliveryDay(input: {
   if (reserveError) throw new Error(`delivery day reservation failed: ${reserveError.message}`);
   const reservation = parseReservation(reserveData);
   if (reservation.status !== 'reserved') {
-    // A process may have stopped after persisting an accepted batch but before
-    // activation. The separate activation fence reconciles it without uploading
-    // the batch again or blindly repeating an ambiguous activation request.
+    // Refresh the provider state without starting or resuming sending.
     const activation = await activateDeliveredContactCampaigns({
       portalDb: input.portalDb, veProjectId: input.veProjectId,
     });

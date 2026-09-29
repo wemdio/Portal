@@ -51,6 +51,7 @@ import {
 } from './ruSeasonality';
 import { validateStoredAuditSnapshot } from './stages/segmentationAudit';
 import { loadContactDeliverySettings } from './contactDeliveryConfig';
+import { VE_CAMPAIGN_SENDING_SETTINGS } from './contactDeliveryRate';
 import { loadVeContactDeliveryRows } from './contactDeliveryInventory';
 import {
   claimProjectCampaignLinks,
@@ -632,6 +633,20 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   }
   const segmentsMaterialized = groups.some((group) => group.segment !== null);
 
+  // Human-readable identity follows the exact Portal project selected by staff.
+  // Ownership itself is claimed atomically by ID below, never inferred from this name.
+  const {data: namedProject, error: nameError} = await portalDb.from('projects')
+    .select('client, name').eq('id', portalProjectId).maybeSingle();
+  const campaignClientName = String(namedProject?.client || namedProject?.name || '').trim();
+  if (nameError || !campaignClientName) return {status: 409, body: {error: 'В выбранном проекте Portal не задано название клиента.'}};
+  let campaignAudienceName = base.filename ?? 'База';
+  if (base.hypothesis_id) {
+    const {data: hypothesis, error: hypothesisError} = await portalDb.from('ve_hypotheses')
+      .select('title').eq('id', base.hypothesis_id).eq('project_id', base.project_id).maybeSingle();
+    if (hypothesisError || !hypothesis?.title) return {status: 409, body: {error: 'Не удалось прочитать название выбранной гипотезы.'}};
+    campaignAudienceName = hypothesis.title;
+  }
+
   // A project without periods is its own term. Check it and the manual fact
   // before the first write here or in Instantly.
   let projectTermDeadline: string | null = null;
@@ -844,7 +859,7 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
 
   // 8. Instantly: по paused-кампании на группу, без немедленной загрузки базы.
   //    Проверенные контакты сохраняются в Portal как durable drip reserve и
-  //    будут передаваться точными дневными порциями после активации очереди.
+  //    будут передаваться дневными порциями. Start нажимает специалист в Instantly.
   //    Текст
   //    ошибки идёт без scrubBrand — staff-UI нужна точная формулировка API;
   //    клиентский роут скрабит бренд на своей стороне. Основная кампания
@@ -873,11 +888,11 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
       });
       return { status: 400, body: { error: t.noLetters } };
     }
-    const campaignName = buildLaunchCampaignName(base.filename, new Date(), group.segment);
+    const campaignName = buildLaunchCampaignName({clientName: campaignClientName, audienceName: campaignAudienceName, segment: group.segment});
     let groupMutationAttempted = false;
     try {
       const payload = buildCampaignPayloadFromPreset({
-        preset,
+        preset: { ...preset, ...VE_CAMPAIGN_SENDING_SETTINGS },
         sequence: { name: campaignName, steps: sequence.steps },
       });
       await heartbeatTemplateLaunch({ portalDb, auditId: audit.id, reservationId });

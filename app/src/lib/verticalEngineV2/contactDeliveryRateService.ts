@@ -5,9 +5,9 @@ import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import type { Account, Campaign, PaginatedResponse } from '@/lib/instantly/types';
 import { normalizeLaunchMailboxIds, launchMailboxScopesEqual } from './launchPortfolio';
 import { readContactDeliveryPages } from './contactDeliveryInventory';
-import { DeliveryRateError, calculateDeliveryRate, distributeDeliveryRate, isSendingCampaign, type DeliveryRatePolicy, type DeliveryRateRow } from './contactDeliveryRate';
+import { VE_CAMPAIGN_SENDING_SETTINGS, DeliveryRateError, calculateDeliveryRate, distributeDeliveryRate, isSendingCampaign, type DeliveryRatePolicy, type DeliveryRateRow } from './contactDeliveryRate';
 
-const READ_OPTIONS = { timeoutMs: 10_000, retryRateLimits: false };
+const READ_OPTIONS = { timeoutMs: 10_000, timeoutIncludesBody: true, retryRateLimits: false };
 async function allPages<T>(read: (cursor?: string) => Promise<PaginatedResponse<T>>): Promise<T[]> {
   const rows: T[] = [], seen = new Set<string>();
   let cursor: string | undefined;
@@ -79,6 +79,29 @@ export async function previewDeliveryRate(portalDb: SupabaseClient, instantlyDb:
     if (full.id !== campaign.id) throw new DeliveryRateError('Instantly вернул другую кампанию.');
     external.push(full);
   }
+  // Instantly commonly selects senders through tags and returns email_list: [].
+  // Resolve the union once, with pagination, rather than rejecting unrelated
+  // campaigns or treating their empty explicit list as unoccupied mailboxes.
+  const tagIds = [...new Set(external.filter(isSendingCampaign).flatMap(campaign => {
+    if (campaign.email_tag_list != null && (!Array.isArray(campaign.email_tag_list) ||
+      campaign.email_tag_list.some(tag => typeof tag !== 'string' || !tag.trim() || tag.includes(',')))) {
+      throw new DeliveryRateError('Не удалось прочитать теги отправителей другой кампании.');
+    }
+    return campaign.email_tag_list ?? [];
+  }))].sort();
+  const tagMailboxes = new Set<string>();
+  for (let offset = 0; offset < tagIds.length; offset += 50) {
+    const tagAccounts = await allPages<Account>(cursor => listAccounts({
+      limit: 100, starting_after: cursor, tag_ids: tagIds.slice(offset, offset + 50).join(','),
+    }, options));
+    const seen = new Set<string>();
+    for (const account of tagAccounts) {
+      const email = typeof account?.email === 'string' ? account.email.trim().toLowerCase() : '';
+      if (!email || seen.has(email)) throw new DeliveryRateError('Не удалось полностью проверить почты по тегам. Обновите расчёт.');
+      seen.add(email);
+      tagMailboxes.add(email);
+    }
+  }
   const minutes = (time: unknown) => typeof time === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(time)
     ? Number(time.slice(0,2))*60+Number(time.slice(3)) : Number.NaN;
   let windowMinutes = minutes(preset.schedule_to) - minutes(preset.schedule_from);
@@ -87,7 +110,7 @@ export async function previewDeliveryRate(portalDb: SupabaseClient, instantlyDb:
     if (!c.sequences?.length || c.sequences.some(s=>!Array.isArray(s.steps) || !s.steps.length)) throw new DeliveryRateError('Не удалось прочитать цепочку действующей кампании.');
     return Math.max(...c.sequences.map(s=>s.steps.length));
   }));
-  const snapshot = calculateDeliveryRate({mailboxIds:mailboxes,accounts,otherCampaigns:external,sequenceSteps:steps,
+  const snapshot = calculateDeliveryRate({mailboxIds:mailboxes,accounts,otherCampaigns:external,otherCampaignTagMailboxIds:[...tagMailboxes],sequenceSteps:steps,
     policy:input.policy,windowMinutes,gapMinutes:preset.email_gap_minutes});
   return { snapshot, own, accountId, bound: Boolean(project.portal_project_id), templateIds };
 }
@@ -101,7 +124,7 @@ export async function saveDeliveryRate(portalDb:SupabaseClient, instantlyDb:Supa
   projectId:string; presetId:string; templateIds:string[]; policy:DeliveryRatePolicy; revision:number; actorId:string;
 }) {
   const preview = await previewDeliveryRate(portalDb,instantlyDb,input);
-  if (preview.snapshot.effective_capacity <= 0) throw new DeliveryRateError('Нет доступной мощности: проверьте почты, занятые кампании и длину цепочки.');
+  if (preview.snapshot.effective_capacity <= 0) throw new DeliveryRateError('Нет доступной мощности: проверьте состояние почт, их лимиты и длину цепочки.');
   distributeDeliveryRate(preview.snapshot.effective_capacity, preview.own.map(c => c.id));
   return rateRpc(portalDb,'ve_save_contact_delivery_rate',{
     p_project_id:input.projectId,p_preset_id:input.presetId,p_template_ids:preview.templateIds,
@@ -118,10 +141,9 @@ export async function refreshDeliveryRate(portalDb:SupabaseClient, instantlyDb:S
   if(claimed!==true) throw new DeliveryRateError('Темп обновляется другим процессом. Следующий проход повторит проверку.');
   try {
     const current=await previewDeliveryRate(portalDb,instantlyDb,{projectId,presetId:rate.preset_id,templateIds:rate.template_ids,policy:rate});
-    if(current.snapshot.effective_capacity<=0) throw new DeliveryRateError('Нет свободной мощности отправителей для новых контактов.');
+    if(current.snapshot.effective_capacity<=0) throw new DeliveryRateError('Лимиты и состояние отправителей пока не позволяют добавлять новые контакты.');
     const ids=current.own.map(c=>c.id);
     const newLimits=distributeDeliveryRate(current.snapshot.effective_capacity,ids);
-    const emailLimits=distributeDeliveryRate(current.snapshot.email_capacity,ids);
     const options={...READ_OPTIONS,accountId:current.accountId};
     const renew = async () => {
       const owned=await rateRpc(portalDb,'ve_claim_contact_delivery_rate',{p_project_id:projectId,p_revision:rate.revision,p_token:token});
@@ -129,13 +151,15 @@ export async function refreshDeliveryRate(portalDb:SupabaseClient, instantlyDb:S
     };
     await renew();
     for(const campaign of current.own) {
-      const desired={daily_limit:emailLimits[campaign.id],daily_max_leads:newLimits[campaign.id]};
-      if(campaign.daily_limit===desired.daily_limit && campaign.daily_max_leads===desired.daily_max_leads) continue;
+      const desired={...VE_CAMPAIGN_SENDING_SETTINGS,daily_max_leads:newLimits[campaign.id]};
+      if(campaign.daily_limit===desired.daily_limit && campaign.daily_max_leads===desired.daily_max_leads &&
+        campaign.open_tracking===false && campaign.link_tracking===false) continue;
       await renew();
       await updateCampaign(campaign.id,desired,options);
       const verified=await getCampaign(campaign.id,options);
       if(verified.id!==campaign.id || verified.email_tag_list?.length || !launchMailboxScopesEqual(verified.email_list,campaign.email_list) ||
-        verified.daily_limit!==desired.daily_limit || verified.daily_max_leads!==desired.daily_max_leads) throw new DeliveryRateError('Instantly не подтвердил новый лимит кампании. Загрузка отложена.');
+        verified.daily_limit!==desired.daily_limit || verified.daily_max_leads!==desired.daily_max_leads ||
+        verified.open_tracking!==false || verified.link_tracking!==false) throw new DeliveryRateError('Instantly не подтвердил лимиты и отключение отслеживания. Загрузка отложена.');
     }
     await renew();
     const finished = await rateRpc(portalDb,'ve_finish_contact_delivery_rate',{p_project_id:projectId,p_revision:rate.revision,p_token:token,p_snapshot:current.snapshot,p_error:null});

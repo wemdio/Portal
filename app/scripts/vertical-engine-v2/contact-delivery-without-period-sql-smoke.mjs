@@ -533,6 +533,85 @@ try {
     [periodFinal.queue_item.id, '1b1b1b1b-1b1b-4b1b-8b1b-1b1b1b1b1b1b', now])).a?.reason === 'delivery_not_active', 'closed period still blocks activation');
   await commit();
 
+  // The new manual-start migration is applied after historical migration checks.
+  await db.exec(migration('20260928_0005_ve_manual_instantly_start.sql'));
+  await begin();
+  await inRollback(async () => {
+    const itemId = periodFinal.queue_item.id;
+    await rows(`update public.project_periods set status='active',deadline='2099-12-31' where id=$1`, [PERIOD]);
+    await rows(`update public.ve_templates set launch_info=launch_info || jsonb_build_object('segmentation_audit_id',$2::text) where id=$1`, [VTPL,VAUD]);
+    await rows(`update public.ve_launch_queue_items set status='prepared',ever_active_at=null where id=$1`, [itemId]);
+    await rows(`update public.ve_launch_queue_campaigns set remote_status=null,status_observed_at=null,activated_at=null,leads_count=0 where item_id=$1`, [itemId]);
+    await rows(`update public.ve_contact_delivery_rows set status='ready',run_id=null,reserved_at=null where item_id=$1`, [itemId]);
+    await rows(`delete from public.ve_contact_delivery_daily_runs where ve_project_id=$1`, [VEP]);
+    // Reserve on a business day even when this smoke is run on a weekend.
+    // mark() independently uses the real DB clock, as in the historical checks.
+    const actualNow = (await one('select now()::text as t')).t;
+    const businessNow = new Date(actualNow);
+    businessNow.setUTCHours(6,0,0,0);
+    while ([0,6].includes(businessNow.getUTCDay())) businessNow.setUTCDate(businessNow.getUTCDate()+1);
+    const dbNow = businessNow.toISOString();
+    const prepareMarkClock = async runId => {
+      await rows('update public.ve_contact_delivery_daily_runs set run_date=timezone(timezone,now())::date where id=$1',[runId]);
+      await rows('update public.ve_launch_queue_campaigns set status_observed_at=now() where item_id=$1',[itemId]);
+    };
+    const observeSql = 'select public.ve_observe_manual_campaigns($1,$2::jsonb,$3::timestamptz) as r';
+    const observations = status => JSON.stringify([{campaign_id:'pcamp',status,status_observed_at:dbNow}]);
+    const observe = status => one(observeSql,[itemId,observations(status),dbNow]);
+    check((await observe(0)).r.observed, 'manual: prepared draft enrolled without activation');
+    const campaignId = (await one('select id from public.ve_launch_queue_campaigns where item_id=$1',[itemId])).id;
+    const allowed = async () => (await one('select public.ve_manual_campaign_delivery_allowed($1,$2::timestamptz) as ok',[campaignId,dbNow])).ok;
+    check(await allowed(), 'manual: empty draft can receive a review tranche');
+    await expectError('manual: incomplete campaign identity rejected',observeSql,[itemId,'[]',dbNow],/observations required/);
+    await expectError('manual: foreign campaign rejected',observeSql,[itemId,JSON.stringify([{campaign_id:'foreign',status:1,status_observed_at:dbNow}]),dbNow],/identity/);
+    await expectError('manual: invalid status rejected',observeSql,[itemId,observations(999),dbNow],/invalid/);
+    const reserveManual = () => one('select public.ve_reserve_contact_delivery_day($1,$2::timestamptz,0) as r',[VEP,dbNow]);
+    const markManual = `select public.ve_mark_contact_delivery_attempt($1,$2,'pcamp',$3::uuid[]) as r`;
+    await inRollback(async () => {
+      const first = (await reserveManual()).r;
+      const attempt='17171717-1717-4717-8717-171717171717';
+      check(first.status === 'reserved','manual: empty draft reserves a real review batch');
+      await prepareMarkClock(first.run_id);
+      check((await one(markManual,[first.run_id,attempt,first.batches[0].row_ids])).r.marked,'manual: draft review upload passes the final fence');
+      await one(`select public.ve_finalize_contact_delivery_attempt($1,$2,'pcamp',$3::uuid[],'{}','{}','{}',null)`,[first.run_id,attempt,first.batches[0].row_ids]);
+      await rows('update public.ve_launch_queue_campaigns set status_observed_at=$2::timestamptz where item_id=$1',[itemId,dbNow]);
+      check(!(await allowed()), 'manual: no second tranche while draft waits for Start');
+    });
+    await observe(1);
+    await observe(2);
+    const empty = (await reserveManual()).r;
+    check(empty.status === 'no_ready_rows', 'manual: waiting for Start reserves no contacts',JSON.stringify(empty));
+    await observe(1);
+    check(await allowed(), 'manual: Start in provider allows daily delivery');
+    const resumed = (await reserveManual()).r;
+    check(resumed.status === 'reserved' && resumed.run_id !== empty.run_id && resumed.batches[0]?.row_ids.length > 0,
+      'manual: provider Start retries empty reservation on the same day',JSON.stringify(resumed));
+    // mark() uses the DB clock; all observations here are from the same transaction.
+    const attemptId='18181818-1818-4818-8818-181818181818';
+    await observe(2);
+    check(!(await allowed()), 'manual: Pause after Start blocks new uploads');
+    await prepareMarkClock(resumed.run_id);
+    await expectError('manual: Pause between reserve and upload blocks attempt',markManual,[resumed.run_id,attemptId,resumed.batches[0].row_ids],/requested project campaign/);
+    await rows('update public.ve_launch_queue_campaigns set status_observed_at=$2::timestamptz where item_id=$1',[itemId,dbNow]);
+    await observe(1);
+    await prepareMarkClock(resumed.run_id);
+    check((await one(markManual,[resumed.run_id,attemptId,resumed.batches[0].row_ids])).r.marked,
+      'manual: provider resume allows the exact reserved batch');
+    check(!(await one(markManual,[resumed.run_id,attemptId,resumed.batches[0].row_ids])).r.marked,
+      'manual: replay cannot repeat the upload');
+    await rows('update public.ve_launch_queue_campaigns set status_observed_at=$2::timestamptz where item_id=$1',[itemId,dbNow]);
+    await observe(3);
+    check(await allowed(), 'manual: completed campaign accepts next tranche without Portal activation');
+    await rows(`update public.ve_launch_queue_campaigns set status_observed_at=$2::timestamptz-interval '6 minutes' where id=$1`,[campaignId,dbNow]);
+    check(!(await allowed()), 'manual: stale provider observation blocks upload');
+    const oldDaily = (await one(`select public.ve_reserve_contact_delivery_activation($1,'pcamp',$2,2,$3::timestamptz,$3::timestamptz) as r`,[itemId,attemptId,dbNow])).r;
+    const oldPortal = (await one(`select public.ve_reserve_launch_activation($1,1,$2,$2,$3,$4::timestamptz) as r`,[itemId,attemptId,USER,dbNow])).r;
+    check(oldDaily.reserved === false && oldPortal.reserved === false,'manual: old worker and old Portal cannot reserve Start');
+    await rows(`update public.ve_launch_queue_items set status='released' where id=$1`,[itemId]);
+    await expectError('manual: released launch cannot be re-enrolled',observeSql,[itemId,observations(1),dbNow],/released/);
+  });
+  await commit();
+
   // ── Помощники не доступны ролям API ──
   await db.exec('set role service_role');
   await expectError('service_role cannot call the term helper', 'select * from public.ve_contact_delivery_term($1,null,null)', [STAFF], /permission denied/i);

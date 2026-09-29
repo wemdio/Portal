@@ -11,6 +11,7 @@ import type { CustomTag } from '@/lib/instantly/types';
 import { SCHEDULE_DEFAULTS } from '@/lib/clientLaunch/scheduleMapping';
 import { normalizeLaunchMailboxIds } from './launchPortfolio';
 import type { VeInstantlyTagMapping } from './launchPresets';
+import { VE_CAMPAIGN_SENDING_SETTINGS } from './contactDeliveryRate';
 
 const ACCOUNT_PAGE_SIZE = 100;
 const MAX_ACCOUNT_PAGES = 1_000;
@@ -29,11 +30,9 @@ const MAX_MAPPING_PAGES = 50;
 export const VE_LAUNCH_CLIENT_MAX_MAILBOXES = 200;
 
 export const VE_LAUNCH_CLIENT_PRESET_DEFAULTS = {
-  daily_limit: 50,
+  ...VE_CAMPAIGN_SENDING_SETTINGS,
   daily_max_leads: 50,
   email_gap_minutes: 10,
-  open_tracking: true,
-  link_tracking: true,
   stop_on_reply: true,
   text_only: false,
   schedule_from: SCHEDULE_DEFAULTS.from,
