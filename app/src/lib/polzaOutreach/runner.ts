@@ -65,7 +65,7 @@ import {
 import { isSuppressed } from '@/lib/polzaRuOutreach/company';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { analyzeVacancy } from './analyzeVacancy';
-import { displayName, letterCompanyName, SEQUENCE_ID, triggerPhrase } from './buildLetters';
+import { displayName, letterCompanyName, SEQUENCE_ID, shortJobTitle, triggerPhrase } from './buildLetters';
 import { loadEnCases, routeEnCase, type EnCase } from './caseRouter';
 import { findCompanyEmail, toCompanyEmails, type PolzaEmailType, type PolzaFoundEmail } from './findEmail';
 import { POLZA_FUNNEL_COLUMNS, polzaFunnel, type PolzaFunnelRow } from './funnel';
@@ -75,7 +75,7 @@ import { composeCompanyLetters, offerKeyOf } from './renderTemplate';
 import { lookupPdlProfile, normalizeDomain, PDL_COUNTRY_BY_CODE, resolveCompanyDomain } from './resolveDomain';
 import { selectVacancies } from './selectVacancies';
 import { loadSignature } from './settings';
-import { buildSiteProfile, type SiteProfile } from './siteProfile';
+import { buildSiteProfile, type SiteOccasion, type SiteProfile } from './siteProfile';
 import {
   createChainTemplates,
   REBUILD_LEASE_KEY,
@@ -280,6 +280,19 @@ interface Candidate {
   companyName: string;
   vacancy: PolzaOutreachVacancyCandidate | null;
   yc: YcCompany | null;
+}
+
+/**
+ * Повод компании, известный до разбора сайта, — под него разбор пишет боль
+ * письма 1 ({{pain}}). Порядок как у primaryTrigger: найм, затем YC. Найм ещё
+ * не подтверждён (мандат на outbound проверяет разбор вакансии после сайта),
+ * но вакансия есть — боль про неё не выдумана. Название длиннее шести слов —
+ * просто «sales», как во фразе-поводе.
+ */
+function siteOccasionOf(c: Candidate): SiteOccasion | null {
+  if (c.vacancy) return { type: 'hiring', title: shortJobTitle(c.vacancy.jobTitle) ?? 'sales' };
+  if (c.yc?.batch) return { type: 'yc', batch: c.yc.batch };
+  return null;
 }
 
 function nameKey(name: string): string {
@@ -1077,6 +1090,7 @@ async function runJob(
       try {
         site = await buildSiteProfile(website, c.yc?.description ?? c.vacancy?.companyDescription ?? null, {
           domain,
+          occasion: siteOccasionOf(c),
           onLlmAnswer: noteLlmAnswered,
         });
       } catch (err) {
@@ -1145,7 +1159,7 @@ async function runJob(
         outreach_angle: site.outreachAngle,
         segments: site.segments,
         brand_name: brandName,
-        about_line: site.aboutLine,
+        pain_line: site.painLine,
       };
       if (!isB2b) return excludeRow(id, ST.s4Analyzed, 'not_b2b', common);
       if (!triggers.length) return excludeRow(id, ST.s4Analyzed, 'no_trigger', common);
@@ -1242,7 +1256,7 @@ async function runJob(
         {
           companyName: q.c.companyName,
           brandName: q.site.brandName ?? q.c.yc?.name ?? null,
-          aboutLine: q.site.aboutLine,
+          painLine: q.site.painLine,
           triggers: q.triggers,
           caseHit: q.caseHit,
           segments: q.site.segments,

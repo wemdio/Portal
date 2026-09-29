@@ -62,7 +62,7 @@ import {
 const ROWS = 'polza_outreach_companies';
 const PAGE = 1000;
 const WAITING_COLUMNS =
-  'id,company_name,brand_name,about_line,trigger_list,recommended_case,segments,email_type,lead_score,' +
+  'id,company_name,brand_name,pain_line,trigger_list,recommended_case,segments,email_type,lead_score,' +
   'selected_company_email,email_verification,emails';
 /** review_reason строк, ждущих шаблон: код и подробность («template_failed: …»). */
 const TEMPLATE_FAILED_LIKE = 'template_failed%';
@@ -73,7 +73,8 @@ interface WaitingRow {
   id: string;
   company_name: string;
   brand_name: string | null;
-  about_line: string | null;
+  /** Боль компании из разбора сайта — {{pain}}; у строк до 29.09.2026 пусто. */
+  pain_line: string | null;
   trigger_list: unknown;
   recommended_case: string | null;
   segments: unknown;
@@ -232,7 +233,7 @@ function companyInput(row: WaitingRow, cases: EnCase[]): CompanyLettersInput {
   return {
     companyName: row.company_name,
     brandName: row.brand_name,
-    aboutLine: row.about_line,
+    painLine: row.pain_line,
     triggers,
     // Кейс — только утверждённый сейчас: отозванный после запуска в письмо не идёт.
     caseHit: row.recommended_case ? cases.find((c) => c.caseId === row.recommended_case) ?? null : null,
