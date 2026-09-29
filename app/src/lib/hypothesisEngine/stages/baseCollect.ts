@@ -299,6 +299,33 @@ function firstCell(value: unknown): string {
   return Array.isArray(value) ? cell(value[0]) : '';
 }
 
+/**
+ * Потолок свободного описания в ячейке строки. Совпадает с EN_TEXT_FIELD_CHARS
+ * релевант-гейта по смыслу, но НЕ импортируется оттуда: это два разных решения
+ * — что хранить в базе клиента и что показывать модели, — и связывать их одной
+ * константой значило бы, что правка порога промпта молча переписывает базы.
+ */
+const BLURB_MAX_CHARS = 200;
+
+/**
+ * Длинный свободный текст в короткую ячейку: пробелы схлопнуты, длина не больше
+ * BLURB_MAX_CHARS включая многоточие, рез по границе слова.
+ *
+ * Ячейка попадает и в сетку конструктора, и в выгрузку клиента, поэтому рез по
+ * слову, а не по символу: обрубок посреди слова клиент видит как порчу данных.
+ * Граница слова ищется только во второй половине бюджета — у текста без
+ * пробелов (склеенный слоган, одно длинное слово) рез по первому попавшемуся
+ * пробелу оставил бы от описания несколько букв.
+ */
+function blurbCell(value: unknown): string {
+  const text = cell(value).replace(/\s+/g, ' ');
+  if (text.length <= BLURB_MAX_CHARS) return text;
+  const cut = text.slice(0, BLURB_MAX_CHARS - 1);
+  const space = cut.lastIndexOf(' ');
+  const head = space >= BLURB_MAX_CHARS / 2 ? cut.slice(0, space) : cut;
+  return `${head.replace(/[\s,;:.!?—–-]+$/, '')}…`;
+}
+
 function unifiedRow(partial: Partial<HeUnifiedRow>): HeUnifiedRow {
   const row = {} as HeUnifiedRow;
   for (const col of HE_AUTO_COLLECT_COLUMNS) row[col] = partial[col] ?? '';
@@ -387,13 +414,39 @@ export function mapFundedRow(row: Record<string, unknown>): HeUnifiedRow {
   });
 }
 
-/** Вакансия eng_hiring_cache → работодатель + название вакансии как крючок персонализации. */
+/**
+ * Вакансия eng_hiring_cache → работодатель + название вакансии как крючок
+ * персонализации.
+ *
+ * `category` у этого источника — ЕДИНСТВЕННОЕ поле, по которому видно, чем
+ * компания занимается, и отраслевого ярлыка у кэша вакансий нет вовсе: до этой
+ * правки ячейка уезжала в релевант-гейт пустой, и гейт судил работодателя по
+ * названию компании, домену и названию вакансии. Кладём в неё описание компании
+ * из кэша, обрезанное blurbCell.
+ *
+ * ПОЧЕМУ В `category`, а не в свою колонку: HE_AUTO_COLLECT_COLUMNS — контракт
+ * `he_bases.columns` (сетка кабинета, выгрузка, обратный разбор после
+ * конструктора), и новая колонка там означала бы правку всех четырёх мест ради
+ * поля, которое сегодня пустое (см. ниже). Цена выбора честная: у строк этого
+ * источника под заголовком `category` лежит не рубрика, а фраза о компании —
+ * заголовок для клиента при этом не переименовывается.
+ *
+ * ЧЕГО ЭТА ПРАВКА НЕ ДАЁТ СЕГОДНЯ: у строк `source='jobhive'` — а на market='us'
+ * читаются ТОЛЬКО они (фильтр в fetchEngHiringRows) — `company_description`
+ * всегда NULL. Ночной ингест пишет в неё null (lib/parsers/jobhiveIngest.ts), а
+ * detail-обогащение, которое её заполняет, для jobhive запроса не строит вовсе
+ * (buildAtsDetailRequest возвращает null). Поэтому на главном пути ENG правка
+ * пока меняет ровно ноль строк и оживает в тот день, когда колонку заполнит
+ * ингест; разовый бэкфилл этого не сделает — ночной upsert идёт полной строкой
+ * по (source, source_job_id) и вернёт null на место.
+ */
 export function mapEngHiringRow(row: Record<string, unknown>): HeUnifiedRow {
   return unifiedRow({
     company: cell(row.company_name),
     website: cell(row.company_site_url),
     vacancy_title: cell(row.vacancy_title),
     address: cell(row.location) || cell(row.country),
+    category: blurbCell(row.company_description),
     source_detail: `eng_hiring:${cell(row.source) || 'unknown'}`,
   });
 }
@@ -2674,9 +2727,22 @@ async function fetchEngHiringRows(
   const baseQuery = () => {
     let q = ctx.supabase
       .from('eng_hiring_cache')
-      // `id, created_at` — ключ закладки (см. шапку); остальное как было.
+      // `id, created_at` — ключ закладки (см. шапку). `company_description` —
+      // единственная колонка кэша, говорящая, ЧЕМ компания занимается; она
+      // уезжает в `category` строки (mapEngHiringRow) и дальше в релевант-гейт.
+      //
+      // ЧТО ЭТО СТОИТ ПО ПРОВОДУ. Страничное чтение просматривает до
+      // ENG_HIRING_MAX_PAGES × ENG_HIRING_PAGE_SIZE = 20 000 строк на задачу, а
+      // оставляет из них limit — то есть колонка приезжает и у тех строк,
+      // которые тут же отбрасывает regex роли и дедуп по компании. Пока она
+      // NULL (весь jobhive, см. mapEngHiringRow), это ≈28 байт на строку,
+      // ≈0,5 МБ на задачу. Если её когда-нибудь заполнят текстом до 2000
+      // символов, та же страница потянет до 40 МБ, и читать описание придётся
+      // ВТОРЫМ запросом по id уже отобранных строк — там, где сейчас стоит
+      // resolveEngHiringSites. Обрезка на нашей стороне трафик не уменьшает:
+      // она ограничивает то, что попадёт в строку базы и в промпт.
       .select(
-        'id, created_at, company_name, company_site_url, vacancy_title, location, country, country_code, source, published_at',
+        'id, created_at, company_name, company_site_url, company_description, vacancy_title, location, country, country_code, source, published_at',
       );
     if (slot) q = q.eq('source', 'jobhive');
     if (countries) q = q.in('country_code', countries);
@@ -4078,9 +4144,16 @@ export function capImportedRows<T extends HeUnifiedRow>(input: {
  * модели, затем мини-модель по merged-строкам, и обе пометки — в один набор
  * ключей компаний для collect_info.
  *
- * Почему до конструктора. Гейту нужны только company/website/category/
- * vacancy_title — все четыре поля есть сразу после HARVEST, а конструктор не
- * добавляет ни одного из них. Пока гейт стоял ПОСЛЕ импорта, каждая
+ * Почему до конструктора. Гейту хватает company/website/category/
+ * vacancy_title — все четыре поля есть сразу после HARVEST, и ни одно из них
+ * конструктор не добавляет и не уточняет. Пятое поле, `description`, гейт
+ * читает (relevanceGate.HeGateRow), и вот его добавляет ИМЕННО конструктор,
+ * шагом enrich_descriptions, — значит на этом пути его нет ни у одной строки,
+ * и здесь гейт судит по четырём полям. Возвращать его за конструктор ради
+ * пятого поля нельзя: обход сайта, который это поле создаёт, и есть та трата,
+ * ради отказа от которой гейт сюда переехал (её цена — абзацем ниже). Описание
+ * достаётся гейту только на прежнем пути, после импорта, — в тех трёх случаях,
+ * что перечислены в шапке relevanceGate. Пока гейт стоял ПОСЛЕ импорта, каждая
  * вычеркнутая строка успевала пройти весь конструктор — при том, что и запуск
  * (launchTemplate), и ночной долив (baseCollectRefill) всё равно выбрасывают её
  * по _low_relevance.

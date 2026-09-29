@@ -1,25 +1,228 @@
 /**
- * Релевант-гейт строк автосборки «Движка вертикалей». Источники тащат шум:
- * hh full-text вернёт любую компанию, чья вакансия упомянула слово; карты —
- * рубричный шум; реестр — самодекларированные ОКВЭД. До запуска строки
- * проверяются дешёвой LLM-проверкой (bulk-модель, батчи по 50): «компания ∈
- * вертикаль?». Помеченные нерелевантными строки остаются в базе для
- * прозрачности, но не уходят в запуск (фильтр в launchTemplate).
+ * Релевант-гейт строк автосборки «Движка вертикалей». Источники тащат шум. На
+ * RU-сборке: hh full-text вернёт любую компанию, чья вакансия упомянула слово;
+ * карты — рубричный шум; реестр — самодекларированные ОКВЭД. На market='us':
+ * каталоги (pdl, funded) дают грубый industry-ярлык, eng_hiring — работодателя,
+ * у которого совпало название вакансии, и отраслевого ярлыка у него нет вовсе
+ * (в `category` его строк уезжает обрезанное описание компании из кэша, когда
+ * оно там есть, — см. mapEngHiringRow). Строки проверяются дешёвой
+ * LLM-проверкой (мини-модель роли 'gate'): «компания ∈ вертикаль?».
+ *
+ * Где стоит гейт: на ENG-сборке — ДО конструктора, по merged-строкам (одна
+ * компания = одна строка), см. judgeRowsBeforeConstruct в stages/baseCollect.ts.
+ * Прежний путь «после импорта» остался ровно на четыре случая: RU-сборка
+ * legacy-инструмента; ENG-база с пустым merged (судить нечего ни там, ни тут);
+ * ENG-база, чья фаза CONSTRUCT началась до переноса гейта; ENG-база, у которой
+ * гейт до конструктора вернул ran=false.
+ *
+ * ЧЕГО ЗДЕСЬ НЕТ — состояния «на пересмотр». Помеченная строка остаётся в базе
+ * для прозрачности, но выбрасывается ДВАЖДЫ и молча: из запуска
+ * (launchTemplate.ts, фильтр `_low_relevance`) и из ночного долива
+ * (stages/baseCollectRefill.ts). Никто её потом не пересматривает, поэтому
+ * лишняя пометка = потерянная компания, а недостающая = мусор, который получит
+ * письмо с домена клиента. Обе ошибки стоят денег, и ужесточать/смягчать
+ * формулировки промпта ниже можно только с осознанной ценой.
  *
  * Never-throw: сбой батча → его строки без пометок, остальные продолжаются;
  * сборка базы гейтом не валится никогда.
+ *
+ * ЧТО ДЕЛАЕТ СБОЙ — весь перечень, потому что все исходы здесь платные, а
+ * направление ошибки у этого гейта одно: он падает ОТКРЫТО (нет вердикта →
+ * строка остаётся в базе и уходит в запуск). Поэтому «проглотить» можно только
+ * то, что действительно стоит проглотить:
+ *  - прерывание задачи (отмена клиентом, сторож простоя, рестарт воркера) —
+ *    проход ОСТАНАВЛИВАЕТСЯ: следующий батч упрётся в тот же сигнал;
+ *  - биллинг / авторизация / permanent — проход ОСТАНАВЛИВАЕТСЯ и пишется в
+ *    лог: такой отказ принадлежит ключу и форме запроса, а не батчу, и каждый
+ *    оставшийся батч получил бы ровно его же;
+ *  - таймаут, 5xx, обрыв сети, 429 — ОДИН повтор того же сегмента, общий
+ *    бюджет повторов на проход (MAX_TRANSPORT_RETRIES);
+ *  - тот же 429/5xx, но провайдер попросил Retry-After дольше
+ *    MAX_RETRY_WAIT_MS — проход ОСТАНАВЛИВАЕТСЯ вместо ожидания: окно у
+ *    провайдера общее для всех сегментов, ждать его по разу на каждый значило
+ *    бы простоять окно джобы целиком;
+ *  - невалидный ответ (не прошёл схему дважды, приехал усечённым или
+ *    собрался только ремонтом усечённого JSON) — сегмент ДРОБИТСЯ
+ *    50 → 10 → 1 в пределах бюджета MAX_SPLIT_CALLS;
+ *  - всё прочее — сегмент пропускается, как и раньше.
+ * Пометки «не проверено» у пропущенных строк НЕТ и не будет: один отказ
+ * провайдера не имеет права превратиться в пустой запуск. Разрыв покрытия
+ * виден вызывающему одним способом — judgedRows < checkedRows.
  */
 
 import { z } from 'zod';
-import { callLLMWithSchema, getHeModel, type LLMMessage } from './llm';
+import {
+  callLLMWithSchema,
+  getHeActiveJobSignal,
+  getHeModel,
+  heLlmFailureOf,
+  HeLlmTimeoutError,
+  LLMValidationError,
+  type LLMMessage,
+} from './llm';
 
-/** Строк в одном вызове (≈2-3k токенов); выше — растёт цена и риск усечения. */
+/**
+ * ПОТОЛОК строк в одном вызове. Второй потолок того же вызова — суммарный
+ * размер строк (MAX_BATCH_CHARS ниже), и на EN-пути батч кончается по тому из
+ * них, который упёрся раньше: по числу строк у коротких строк (≈2-3k токенов
+ * на вызов) и по символам у строк с описанием.
+ */
 const BATCH_SIZE = 50;
+
+/**
+ * Длина СВОБОДНЫХ текстовых полей строки на EN-пути: рубрика каталога и
+ * описание. Оба поля свободный текст, и оба режутся одним числом, чтобы
+ * фраза про «cut to N characters» в системном сообщении оставалась правдой
+ * (она печатает ровно эту константу).
+ *
+ * 200 — это примерно 30 слов: заголовок главной страницы с подзаголовком, то
+ * есть ровно то, из чего видно ВИД ДЕЯТЕЛЬНОСТИ. Больше брать нельзя не из
+ * скромности, а по арифметике ниже: описание приезжает из конструктора куском
+ * до 2000 символов (stepEnrich режет текст сайта именно так), и полные 2000 на
+ * строку превратили бы вызов из 50 строк в ≈25 тысяч входных токенов — в
+ * одиннадцать раз дороже нынешнего.
+ */
+const EN_TEXT_FIELD_CHARS = 200;
+
+/**
+ * Потолок суммарного размера строк одного вызова, в символах JSON. Работает
+ * только на EN-пути (см. charBudget в findIrrelevantRows).
+ *
+ * Зачем второй потолок рядом с BATCH_SIZE: гейт платит за ВХОДНЫЕ токены, а
+ * ширина строки выросла — у EN-строки два поля по EN_TEXT_FIELD_CHARS вместо
+ * одного по 80. Арифметика на строку (ключи JSON + значения в потолках):
+ *  - было: 70 + 120 + 80 + 80 + 80 = ≈430 символов, 50 строк ≈ 21 400;
+ *  - стало: 86 + 120 + 80 + 200 + 80 + 200 = ≈766 символов.
+ * Число выбрано по первой строке: 22 000 — это РОВНО тот размер, до которого
+ * гейт доходит СЕГОДНЯ (≈21 400 символов на батч из 50 строк, у которых все
+ * поля в потолках), плюс запас около 3% на экранирование кавычек и длинные
+ * индексы. То есть после расширения строки ни один вызов не станет ЗАМЕТНО
+ * крупнее того, что гейт уже отправляет, — но и меньше он не станет. Замерено:
+ *  - строки в потолках всех полей — батч сам сжимается до 28 строк
+ *    (21 449 символов), и бюджет здесь единственное, что его держит;
+ *  - строки после конструктора (описание есть у каждой) — 18 051 символ на
+ *    50 строк, бюджет не срабатывает ни разу;
+ *  - строки до конструктора (описания нет ни у одной) — ≈6 тыс. символов на
+ *    50 строк, то есть путь живой ENG-сборки этой правки не замечает вовсе.
+ *
+ * Цена прохода от сжатия батча не растёт: суммарный объём строк базы один и тот
+ * же, меняется только число вызовов, а накладные вызова (системное сообщение
+ * плюс цель отбора, ≈250 токенов) на этом фоне малы — 108 вызовов вместо 60 в
+ * самом крайнем случае добавят к базе ≈12 тыс. токенов.
+ */
+const MAX_BATCH_CHARS = 22_000;
 /** Сколько первых строк базы проверяем (запуск капнут 2000 — покрытие полное). */
 const MAX_ROWS_TO_CHECK = Number(process.env.HE_RELEVANCE_MAX_ROWS) || 3000;
 
+/**
+ * Лестница дробления сегмента после НЕВАЛИДНОГО ответа: 50 → 10 → 1.
+ *
+ * Дробление здесь — не украшение, а единственный способ не потерять вердикт:
+ * ответа нет у ВСЕГО батча, а испорчен, как правило, кусок. На десятке та же
+ * модель отвечает целиком, и 49 строк получают свой вердикт вместо того, чтобы
+ * уйти в запуск непроверенными. Шаг размером с сегмент не берём (иначе
+ * рекурсия не сходится): следующий шаг всегда строго меньше длины сегмента,
+ * а последний — единица, которую дробить уже не на что.
+ *
+ * Размера 20 в лестнице нет намеренно: двадцатка соседнего движка обслуживает
+ * ДРУГОЙ промпт — с выдержками сайта и цитатами, где на компанию приходится в
+ * разы больше текста. Здесь на компанию приходится пять полей, из которых
+ * свободных два и оба обрезаны до EN_TEXT_FIELD_CHARS, а размер самого вызова
+ * держит MAX_BATCH_CHARS — то есть сегмент из десяти строк заведомо меньше
+ * трети бюджета одного вызова.
+ */
+const SPLIT_LADDER = [10, 1] as const;
+
+/**
+ * Потолок ДОПОЛНИТЕЛЬНЫХ вызовов, которые дробление тратит за ОДИН ПРОХОД.
+ *
+ * Именно за проход, а не за базу: у базы проходов бывает два. Проход, не
+ * давший НИ ОДНОГО вердикта, вызывающий записывает как ran=false
+ * (judgeRowsBeforeConstruct), и тогда базу судят второй раз — после импорта,
+ * со свежим бюджетом. То есть худший случай базы — удвоение всех чисел ниже.
+ * Так было и до дробления (два прохода по 120 вызовов), новое здесь только
+ * множитель.
+ *
+ * Без потолка дробление умножает цену: один батч из 50 в худшем случае это
+ * 1 + 5 + 50 обращений к модели, а на полной базе (60 батчей) — 3360 вместо
+ * 60. Потолок держит худший случай в полутора счетах прохода. Замер на базе в
+ * 3000 строк (кап MAX_ROWS_TO_CHECK), строки БЕЗ описания — это весь путь до
+ * конструктора, то есть главный путь ENG-сборки, и поля там заполнены как в
+ * ENG-каталоге:
+ *  - штатный проход — 60 вызовов, ≈137 тыс. входных токенов, ≈$0,02;
+ *  - худший случай БЕЗ дробления (каждый батч отвечает лишь со второй попытки
+ *    схемы) — 120 вызовов, ≈273 тыс. токенов, ≈$0,04;
+ *  - худший случай С дроблением (мусор в каждом ответе, бюджет выбран весь) —
+ *    520 вызовов, ≈415 тыс. токенов, ≈$0,06.
+ * То есть дробление в пределе добавляет к самому плохому проходу около $0,02
+ * на базу — против $1,3 за готовую базу. Бюджет кончился — дробления больше
+ * нет, и строки уходят без вердикта ровно так же, как уходили до этой правки.
+ *
+ * ВТОРАЯ ФОРМА СТРОКИ — база, прошедшая конструктор (прежний путь гейта после
+ * импорта): у каждой строки есть описание, обрезанное до EN_TEXT_FIELD_CHARS.
+ * Замерено на 300 строках с описанием в 2000 символов на входе: строка весит
+ * ≈361 символ против ≈145, промпт прохода тяжелее ровно в 2,5 раза, а ЧИСЛО
+ * вызовов то же — 18 тыс. символов на батч из 50 строк до бюджета
+ * MAX_BATCH_CHARS не дотягивают, и батч остаётся полным. Отсюда на той же базе
+ * в 3000 строк:
+ *  - штатный проход — те же 60 вызовов, ≈345 тыс. токенов, ≈$0,05;
+ *  - худший случай С дроблением — те же 520 вызовов, ≈1,04 млн токенов, ≈$0,15.
+ * Потолок дробления при этом НЕ пересчитан намеренно: он считает вызовы, а не
+ * токены, и его смысл — «не оплатить один и тот же батч 56 раз». Дороже стал
+ * каждый вызов, а не число вызовов, и +$0,09 на базу в САМОМ плохом проходе
+ * против $1,3 за готовую базу того не стоят.
+ */
+const MAX_SPLIT_CALLS = 200;
+
+/**
+ * Повторов транспорта на весь проход; на один сегмент — не больше одного.
+ *
+ * Считается по самому дорогому виду сбоя: у таймаута срок попытки не меньше
+ * 300 с (llmAttemptTimeoutMs), поэтому шесть повторов — это до получаса сверху
+ * на больной провайдер. Больше давать нельзя: у джобы сборки есть своё окно, и
+ * гейт не имеет права съесть его целиком ради проверки, которая fail-open.
+ */
+const MAX_TRANSPORT_RETRIES = 6;
+/** Пауза перед повтором сегмента, когда провайдер своей не назвал. */
+const RETRY_WAIT_MS = 2000;
+/**
+ * Потолок паузы, о которой попросил провайдер (тот же, что у транспорта в
+ * llm.ts). Попросил дольше — ждать нечего: окно у провайдера общее для всех
+ * батчей прохода, значит это остановка, а не повтор.
+ */
+const MAX_RETRY_WAIT_MS = 30_000;
+
 const RelevanceSchema = z.object({
-  /** Индексы нерелевантных строк (0-based, из входного батча). */
+  /**
+   * Индексы нерелевантных строк (0-based, из входного батча).
+   *
+   * БЕЗ `.default([])`, и это не вкусовщина. Дефолт превращал ответ, в котором
+   * поля нет ВОВСЕ, в «нерелевантных нет»: усечённая болтовня модели
+   * (`{"analysis": "rows 0-12 are dental practices…` без хвоста) чинится
+   * ремонтом усечённого JSON, проходит схему пустым списком — и 50 строк
+   * считаются осуждёнными и чистыми, хотя модель не сказала о них ничего.
+   * Счёт за такой ответ выставлен. Стоявшая здесь до этого проверка
+   * `Array.isArray` не ловила этот случай никогда и поэтому убрана: массив
+   * был на месте — его подставлял дефолт. Без дефолта отсутствие поля —
+   * ошибка схемы, то есть повод повторить и раздробить, а не повод молча
+   * пропустить полбазы.
+   */
+  irrelevant: z.array(z.number().int()),
+});
+
+/**
+ * У RU-ветки схема ОСТАЁТСЯ с дефолтом, и это не забывчивость.
+ *
+ * Строгость выше имеет смысл только вместе с указанием «ключ возвращай
+ * всегда», а его мы дописали ТОЛЬКО в английское сообщение: русский промпт
+ * обслуживает ежедневный инструмент специалистов, и его байты не трогаем.
+ * Строгая схема при неизменном промпте — это не защита, а лишний повтор:
+ * на чистом батче модель законно отвечает `{}`, и RU-проход платил бы за
+ * вторую попытку, а при повторе того же ответа дробил бы батч впустую.
+ * Транспорт просит `json_object`, а не json_schema, так что обязательность
+ * ключа провайдер за нас не проверит.
+ */
+const RelevanceSchemaRu = z.object({
   irrelevant: z.array(z.number().int()).default([]),
 });
 
@@ -27,9 +230,15 @@ export interface HeRelevanceGateResult {
   /** Глобальные индексы нерелевантных строк (во входном массиве rows). */
   flagged: Set<number>;
   /**
-   * Сколько строк реально ушло модели (первые MAX_ROWS_TO_CHECK). Нужно
-   * вызывающему, чтобы записать цену гейта в воронку своими числами: остальные
-   * строки не судились и помеченными не считаются.
+   * Сколько строк гейт ВЗЯЛ В ПРОХОД — первые MAX_ROWS_TO_CHECK. Нужно
+   * вызывающему, чтобы записать цену гейта в воронку своими числами: строки
+   * за капом не судились и помеченными не считаются.
+   *
+   * Это число НЕ уменьшается, когда проход остановлен посередине: оно
+   * описывает охват, а сколько строк дошло до модели, говорит judgedRows.
+   * Уменьшать его нельзя — вызывающий по `checked === 0` отличает «у вертикали
+   * пустое имя» от «модель не ответила», и обнулённый охват превратил бы
+   * остановку по биллингу в ложный диагноз про имя вертикали.
    */
   checkedRows: number;
   /**
@@ -105,8 +314,10 @@ function trimConnectorTailEn(text: string): string {
  * Цель отбора — описание КОМПАНИИ, а не причины, по которой мы хотели бы ей
  * продать. he_verticals.summary служит обеим задачам: человеку в кабинете он
  * объясняет «почему они покупают», а сюда приезжает как «кого мы ищем». Гейт
- * видит только company/website/category/vacancy_title — по этим полям мотив
- * покупки не проверяется никак, и модель вычёркивала подходящие компании за то,
+ * видит company/website/category/vacancy_title и, у строк, прошедших
+ * конструктор, обрезанное описание — мотив покупки не проверяется ни по одному
+ * из них (200 символов главной страницы говорят, ЧЕМ компания занимается, а не
+ * зачем она что-то покупает), и модель вычёркивала подходящие компании за то,
  * что в полях не видно причины покупки. Цена ошибки высокая: помеченные строки
  * вырезаются из запуска (launchTemplate) и из добора (baseCollectRefill), без
  * состояния «на пересмотр» — клиент теряет компанию молча.
@@ -166,24 +377,99 @@ export function companyPartOfSummaryEn(summary: string): string {
   return text;
 }
 
+/** Одна строка в том виде, в каком её видит модель. */
+interface HeGateRow {
+  i: number;
+  company: string;
+  website: string;
+  category: string;
+  vacancy_title: string;
+  /**
+   * Обрезанное описание компании — ТОЛЬКО EN-путь и только когда оно непустое.
+   *
+   * Необязательное поле, а не пустая строка, потому что пусто оно у КАЖДОЙ
+   * строки главного пути: описание добавляет шаг enrich_descriptions
+   * конструктора, а гейт ENG-сборки стоит до конструктора. `"description":""` в
+   * каждой из 3000 строк — это ≈50 тысяч символов на базу за ноль сведений, и
+   * платим мы за входные токены.
+   *
+   * Откуда берётся, обе формы: у строки после конструктора — первые
+   * EN_TEXT_FIELD_CHARS символов текста главной страницы (stepEnrich); у строки
+   * eng_hiring — описание компании из кэша вакансий, положенное в `category`
+   * (mapEngHiringRow), а не сюда.
+   */
+  description?: string;
+}
+
+/**
+ * Свободный текст в поле строки: пробелы схлопнуты в один, длина не больше
+ * `max` ВКЛЮЧАЯ многоточие.
+ *
+ * Многоточие не украшение: обрезка приходится на середину фразы, и системное
+ * сообщение отдельно говорит модели, что недосказанное в описании — не довод
+ * против строки. Видимый признак обрезки делает эту фразу проверяемой.
+ *
+ * Пробелы схлопываем, потому что текст сайта приезжает с переводами строк, а
+ * JSON.stringify печатает каждый как `\n` — два символа за ноль сведений, и это
+ * же искажало бы бюджет батча.
+ */
+function textField(value: unknown, max: number): string {
+  const text = String(value ?? '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 1).trimEnd()}…`;
+}
+
 function buildRelevanceMessages(
   verticalName: string,
   verticalSummary: string,
-  batch: Array<{ i: number; company: string; website: string; category: string; vacancy_title: string }>,
+  batch: HeGateRow[],
   language: 'ru' | 'en',
 ): LLMMessage[] {
   const rowsJson = JSON.stringify(batch);
   if (language === 'en') {
     const target = companyPartOfSummaryEn(verticalSummary);
+    // ЗАКРЫТЫЙ перечень того, что строка обязана доказать, — ровно два пункта, и
+    // оба видны в полях батча: вид деятельности и тип компании. Всё
+    // остальное, что вертикаль может упоминать (кто подписывает, зачем покупают,
+    // боли, процессы, ПО, бюджет, регуляторика, каналы продаж, найм, штат),
+    // названо контекстом ИМЕННО потому, что по этим полям это не проверяется
+    // никак: требовать такое — значит вычёркивать
+    // компанию за то, чего модель физически не видит, а вычеркнутую компанию
+    // никто не пересматривает (см. шапку файла).
+    //
+    // Перечень мягче прежней формулировки на четыре пункта и на «пустое поле — не
+    // довод против строки»: поводов вычеркнуть стало меньше. Поводов ОСТАВИТЬ не
+    // добавлено ни одного — положительное требование («вид деятельности + тип
+    // компании») осталось тем же, и компанию не того вида по-прежнему режет оно.
+    //
+    // ПЯТОЕ ПОЛЕ (description) добавляет СВИДЕТЕЛЬСТВО, а не требование, и это
+    // различие здесь единственное, что имеет значение. Направление правки
+    // поэтому одностороннее: у строки, чьё описание совпало с вертикалью,
+    // поводов остаться стало больше; у строки с явно чужим видом деятельности
+    // модель теперь видит его прямо, а не угадывает по названию. Чего в
+    // формулировке нет и быть не должно — «описание обязано подтвердить
+    // принадлежность»: описание это 200 символов главной страницы, и у половины
+    // компаний там слоган. Такое требование превратило бы отсутствие фразы в
+    // приговор, а приговор здесь окончательный.
     return [
       {
         role: 'system',
         content:
-          'You filter a collected lead base for one market vertical. A row is relevant only if the company itself plausibly belongs to the vertical (not merely mentions it in a vacancy or sells to it). Judge only what the company IS — its line of business and its company type. A reason to buy anything, processes, software, budget, hiring and headcount are context, never requirements. Answer strictly in JSON.',
+          'You filter a collected lead base for one market vertical. A row is relevant only if the company itself plausibly belongs to the vertical (not merely mentions it in a vacancy or sells to it). Per row you see up to five fields — company name, website URL, an industry label, a job title and a short description — and any of them can be empty or missing altogether. ' +
+          `The description is a raw excerpt — a catalog blurb or the top of the company's own home page — cut to ${EN_TEXT_FIELD_CHARS} characters and often ending in an ellipsis: take what it says as evidence of what the company does, but never as a full account of the company, so what it does not mention is not evidence against the row. If it reads as a placeholder, a parked or for-sale domain, a cookie or consent notice, a login wall or an error page rather than a description of a business, ignore the field entirely. The industry label may itself be a short company blurb rather than a category name. ` +
+          'Judge the two things those fields can show: the company\'s line of business and its type. Everything else the vertical description may mention — who signs the deal, a reason to buy anything, pains, processes, software, budget, regulation, sales channels, hiring and headcount — is context you cannot check here and never a requirement, and a field left empty is not evidence against a row. Answer strictly in JSON.',
       },
       {
         role: 'user',
-        content: `Vertical: «${verticalName}»${target ? ` — ${target}` : ''}\n\nRows (i + fields):\n${rowsJson}\n\nReturn JSON {"irrelevant": [<i>, ...]} with the indices of rows whose company clearly does NOT belong to this vertical. When in doubt — keep the row (do not list it).`,
+        // Последняя фраза — про ФОРМАТ, не про отбор: ни одного нового повода
+        // вычеркнуть или оставить строку она не вносит. Она закрывает дыру,
+        // которую открыло снятие `.default([])` у схемы: ответ «ничего не
+        // нашёл», написанный как `{}`, теперь законно не проходит схему, и без
+        // этой строчки самый обычный чистый батч оплачивал бы вторую попытку и
+        // дробление на ровном месте.
+        content: `Vertical: «${verticalName}»${target ? ` — ${target}` : ''}\n\nRows (i + fields):\n${rowsJson}\n\nReturn JSON {"irrelevant": [<i>, ...]} with the indices of rows whose company clearly does NOT belong to this vertical. When in doubt — keep the row (do not list it). Always include the "irrelevant" key: when every row belongs, return {"irrelevant": []}.`,
       },
     ];
   }
@@ -201,8 +487,101 @@ function buildRelevanceMessages(
 }
 
 /**
+ * Ответ приехал НЕПОЛНЫМ? Два признака, и оба читаются из сырого конверта той
+ * попытки, чей результат мы держим в руках.
+ *
+ * 1) finish_reason='length' — провайдер сам сказал, что обрезал ответ.
+ * 2) Текст ответа не разбирается JSON.parse'ом. Значит значение, которое нам
+ *    вернули, собрал ремонт усечённого JSON (tryRepairTruncatedJson): он
+ *    отрезает хвост до последней ЦЕЛОЙ структуры, поэтому список индексов
+ *    приезжает синтаксически безупречным и семантически ПОЛОВИННЫМ. Схема
+ *    такой список принимает — она проверяет форму, а не полноту.
+ *
+ * Почему проверяем здесь, а не включаем requireCompleteJson: тот флаг просто
+ * повторил бы тот же батч из 50 строк и в итоге отказал бы всему батчу. Гейту
+ * нужно обратное — забраковать ЭТОТ ответ и переспросить мельче, где ответ
+ * поместится целиком (см. SPLIT_LADDER). Требование полноты у гейта поэтому
+ * живёт здесь, а fail-open поведение llm.ts остаётся нетронутым.
+ *
+ * Не видно конверта (мок, чужая форма ответа) — не выдумываем усечение:
+ * доказательства обрезки нет, ответ принимается, как и раньше.
+ */
+function truncatedAnswer(rawResponse: unknown): string | null {
+  const choice = (
+    rawResponse as { choices?: Array<{ message?: { content?: string }; finish_reason?: string }> } | null | undefined
+  )?.choices?.[0];
+  if (choice?.finish_reason === 'length') return 'провайдер обрезал ответ (finish_reason=length)';
+  const text = String(choice?.message?.content ?? '')
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```\s*$/i, '')
+    .trim();
+  if (!text) return null;
+  try {
+    JSON.parse(text);
+  } catch {
+    return 'ответ собрался только ремонтом усечённого JSON — список неполон';
+  }
+  return null;
+}
+
+/**
+ * Оплаченное и выброшенное внутри llm.ts, когда тот в итоге отказал.
+ *
+ * Канал единственный и он текстовый: usage приезжает только вместе с
+ * результатом, а LLMValidationError несёт свою сумму строкой в сообщении
+ * (см. callLLMWithSchemaAttempts — там она и печатается). Разбираем её ТОЛЬКО
+ * ради бухгалтерии: ни одно решение о повторе, дроблении или остановке на
+ * текст сообщения здесь не опирается — у движка это правило записано в шапке
+ * llm.ts, и нарушать его нельзя. Не нашли — прибавляем ноль, то есть ведём
+ * себя как HEAD, а не выдумываем расход.
+ */
+function discardedSpendOf(error: unknown): { tokensUsed: number; costUsd: number } {
+  const match = /\[оплачено и отброшено: (\d+) tok, \$([\d.]+)\]/.exec(
+    error instanceof Error ? error.message : '',
+  );
+  if (!match) return { tokensUsed: 0, costUsd: 0 };
+  const tokensUsed = Number(match[1]);
+  const costUsd = Number(match[2]);
+  return {
+    tokensUsed: Number.isFinite(tokensUsed) ? tokensUsed : 0,
+    costUsd: Number.isFinite(costUsd) ? costUsd : 0,
+  };
+}
+
+/**
+ * Прерывание задачи, а не сбой провайдера: отмена клиентом (abort без причины,
+ * DOMException 'AbortError'), сторож простоя и рестарт воркера
+ * (HeJobInterruptionError с полем-дискриминантом). Читаем поле, а не текст.
+ */
+function isJobInterruption(error: unknown): boolean {
+  const candidate = error as { name?: unknown; heJobInterruption?: unknown } | null | undefined;
+  return candidate?.name === 'AbortError' || candidate?.heJobInterruption === true;
+}
+
+/**
+ * Пауза, которую снимает отмена задачи. Именно снимает, а не роняет: модуль
+ * никогда не бросает, а отмену увидит ближайший вызов модели и остановит
+ * проход штатно.
+ */
+function waitBeforeRetry(ms: number): Promise<void> {
+  const signal = getHeActiveJobSignal();
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
+/**
  * Найти нерелевантные строки среди первых MAX_ROWS_TO_CHECK. Каждая строка —
- * компактный набор полей (company/website/category/vacancy_title достаточно).
+ * компактный набор полей: company/website/category/vacancy_title, а на EN-пути
+ * ещё и `description`, если строка его несёт (см. HeGateRow и gateRowOf).
  */
 export async function findIrrelevantRows(input: {
   rows: Array<Record<string, unknown>>;
@@ -223,43 +602,219 @@ export async function findIrrelevantRows(input: {
   if (checked.length === 0 || !verticalName.trim()) return result;
   result.checkedRows = checked.length;
 
-  for (let start = 0; start < checked.length; start += BATCH_SIZE) {
-    const batch = checked.slice(start, start + BATCH_SIZE).map((r, i) => ({
-      i: start + i,
-      company: String(r.company ?? '').slice(0, 120),
-      website: String(r.website ?? '').slice(0, 80),
-      category: String(r.category ?? '').slice(0, 80),
-      vacancy_title: String(r.vacancy_title ?? '').slice(0, 80),
-    }));
-    try {
-      const llm = await callLLMWithSchema(
-        buildRelevanceMessages(verticalName, verticalSummary, batch, language),
-        RelevanceSchema,
-        // Роль gate: мини-модель — бинарная классификация строк не требует
-        // reasoning; на нём только тратились выходные токены и ловились
-        // усечения max_tokens (finish_reason='length').
-        { model: getHeModel('gate'), maxTokens: 2048 },
-      );
-      // Защита от мусорного ответа (моки/обрезка): без массива irrelevant
-      // батч пропускаем, расход не считаем.
-      const irrelevant = Array.isArray((llm.data as { irrelevant?: unknown[] } | undefined)?.irrelevant)
-        ? (llm.data as { irrelevant: unknown[] }).irrelevant
-        : null;
-      if (!irrelevant) {
-        log?.(`[relevanceGate] батч ${start}–${start + batch.length - 1}: ответ без irrelevant — пропуск`);
-        continue;
+  /**
+   * Бюджеты прохода. Живут в памяти ОДНОГО прохода: это обычные локальные
+   * переменные, поэтому рестарт воркера обнуляет их и вдобавок теряет уже
+   * оплаченные вердикты — памятку `relevance_gate` пишет только возврат
+   * findIrrelevantRows. При HE_JOB_FREE_INTERRUPTIONS = 5 это до пяти
+   * бесплатных повторов прохода подряд, каждый со своим полным бюджетом.
+   */
+  let splitCallsLeft = MAX_SPLIT_CALLS;
+  let transportRetriesLeft = MAX_TRANSPORT_RETRIES;
+  /** Причина остановки всего прохода; пока null — идём дальше по батчам. */
+  let stopped: string | null = null;
+
+  const range = (segment: HeGateRow[]): string =>
+    segment.length === 1 ? `строка ${segment[0].i}` : `строки ${segment[0].i}–${segment[segment.length - 1].i}`;
+
+  /**
+   * Строка базы → строка для модели.
+   *
+   * RU-ветка остаётся байт-в-байт прежней — те же четыре поля и те же срезы
+   * 120/80/80/80, без `description`. Это не осторожность ради осторожности:
+   * ветка обслуживает legacy-инструмент /tools/hypothesis-engine, которым
+   * ежедневно пользуются сотрудники, и у его баз описание после конструктора
+   * тоже есть — то есть расширение сработало бы и там, изменив и отбор, и цену
+   * инструмента, о котором в этой задаче никто не просил.
+   */
+  const gateRowOf = (row: Record<string, unknown>, i: number): HeGateRow => {
+    if (language !== 'en') {
+      return {
+        i,
+        company: String(row.company ?? '').slice(0, 120),
+        website: String(row.website ?? '').slice(0, 80),
+        category: String(row.category ?? '').slice(0, 80),
+        vacancy_title: String(row.vacancy_title ?? '').slice(0, 80),
+      };
+    }
+    const out: HeGateRow = {
+      i,
+      company: String(row.company ?? '').slice(0, 120),
+      website: String(row.website ?? '').slice(0, 80),
+      category: textField(row.category, EN_TEXT_FIELD_CHARS),
+      vacancy_title: String(row.vacancy_title ?? '').slice(0, 80),
+    };
+    const description = textField(row.description, EN_TEXT_FIELD_CHARS);
+    if (description) out.description = description;
+    return out;
+  };
+
+  /**
+   * Бюджет символов на вызов — только EN. На RU-ветке бюджета нет вовсе, а не
+   * «большой»: у её строк потолки прежние, и любое число здесь могло бы в
+   * пограничном случае (все поля в потолках плюс экранирование кавычек)
+   * отрезать 50-й строке место в батче и тем изменить группировку.
+   */
+  const charBudget = language === 'en' ? MAX_BATCH_CHARS : Number.POSITIVE_INFINITY;
+
+  /**
+   * Один вызов модели по сегменту. Возвращает исход, а не бросает: never-throw
+   * — контракт модуля, и решение «дробить / повторить / остановиться» должно
+   * приниматься здесь, где видно класс сбоя, а не у вызывающего по тексту.
+   *
+   * `loud` — писать ли в лог подробности сбоя. Подробности пишет только
+   * ИСХОДНЫЙ батч: у разбитого батча до 55 частей, и строка на каждую дала бы
+   * до 700 строк лога на одну базу в худшем случае — журнал джобы этого не
+   * заслуживает. Итог дробления одной строкой печатает judgeWithSplit; повторы
+   * транспорта и остановка прохода печатаются всегда, их число ограничено
+   * бюджетом.
+   */
+  async function judgeSegment(segment: HeGateRow[], loud: boolean): Promise<'judged' | 'invalid' | 'skipped'> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const llm = await callLLMWithSchema(
+          buildRelevanceMessages(verticalName, verticalSummary, segment, language),
+          language === 'en' ? RelevanceSchema : RelevanceSchemaRu,
+          // Роль gate: мини-модель — бинарная классификация строк не требует
+          // reasoning; на нём только тратились выходные токены и ловились
+          // усечения max_tokens (finish_reason='length').
+          { model: getHeModel('gate'), maxTokens: 2048 },
+        );
+        // Расход прибавляем ДО решения о годности ответа. Провайдер выставил
+        // счёт за ответ, даже если мы его сейчас забракуем, и HEAD этот случай
+        // терял: ответ без массива пропускался вместе со своей ценой.
+        result.tokensUsed += llm.tokensUsed;
+        result.costUsd += llm.costUsd;
+        const cut = truncatedAnswer(llm.rawResponse);
+        if (cut) {
+          if (loud) log?.(`[relevanceGate] ${range(segment)}: ${cut} — вердикт не берём`);
+          return 'invalid';
+        }
+        // Индексы сегмента — глобальные (их проставил маппер батча), поэтому
+        // чужой индекс не должен пометить чужую строку: сверяем по своему
+        // набору, а не по границам батча, — после дробления границы уже не
+        // выводятся из start.
+        const own = new Set(segment.map((r) => r.i));
+        for (const idx of llm.data.irrelevant) if (own.has(idx)) result.flagged.add(idx);
+        result.judgedRows += segment.length;
+        return 'judged';
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        // 1) Задачу прервали (отмена клиентом, сторож простоя, рестарт). Идти
+        //    дальше некуда: следующий сегмент упрётся в тот же сигнал.
+        if (isJobInterruption(e)) {
+          stopped = `задача прервана: ${message.slice(0, 160)}`;
+          return 'skipped';
+        }
+        // 2) Невалидный ответ: llm.ts уже потратил обе попытки схемы и отказал.
+        //    Его оплаченный и выброшенный расход прибавляем — он существует.
+        if (e instanceof LLMValidationError) {
+          const spent = discardedSpendOf(e);
+          result.tokensUsed += spent.tokensUsed;
+          result.costUsd += spent.costUsd;
+          if (loud) log?.(`[relevanceGate] ${range(segment)}: ответ не прошёл схему дважды — ${message.slice(0, 200)}`);
+          return 'invalid';
+        }
+        const failure = heLlmFailureOf(e);
+        // 3) Деньги, ключ и форма запроса — не свойство батча. Тот же отказ
+        //    ждёт каждый следующий сегмент, поэтому проход останавливаем:
+        //    дробить такой отказ значило бы оплатить его ещё 55 раз.
+        if (failure && (failure.kind === 'billing' || failure.kind === 'configuration' || failure.kind === 'permanent')) {
+          stopped = `${failure.kind}: ${message.slice(0, 200)}`;
+          return 'skipped';
+        }
+        // 4) Таймаут, 5xx/обрыв сети и 429 — один повтор того же сегмента в
+        //    пределах бюджета прохода. У 429 ждём столько, сколько попросил
+        //    провайдер; попросил дольше потолка — это не повтор, а остановка:
+        //    окно у провайдера одно на все сегменты.
+        const timedOut = e instanceof HeLlmTimeoutError;
+        const retriable = timedOut || failure?.kind === 'transient' || failure?.kind === 'rate_limit';
+        if (retriable) {
+          const wait = Math.max(failure?.retryAfterMs ?? 0, RETRY_WAIT_MS);
+          if (wait > MAX_RETRY_WAIT_MS) {
+            stopped = `провайдер просит ждать ${Math.round(wait / 1000)} с — окно общее для всех сегментов`;
+            return 'skipped';
+          }
+          if (attempt === 0 && transportRetriesLeft > 0) {
+            transportRetriesLeft -= 1;
+            log?.(
+              `[relevanceGate] ${range(segment)}: ${timedOut ? 'таймаут' : failure?.kind} — ` +
+                `повтор через ${wait} мс (бюджет повторов: ${transportRetriesLeft})`,
+            );
+            await waitBeforeRetry(wait);
+            continue;
+          }
+        }
+        if (loud) log?.(`[relevanceGate] ${range(segment)} пропущен: ${message.slice(0, 200)}`);
+        return 'skipped';
       }
-      result.judgedRows += batch.length;
-      result.tokensUsed += llm.tokensUsed;
-      result.costUsd += llm.costUsd;
-      for (const idx of irrelevant) {
-        if (typeof idx === 'number' && idx >= start && idx < start + batch.length) result.flagged.add(idx);
+    }
+  }
+
+  /**
+   * Сегмент и, если ответ оказался невалидным, его части. Шаг лестницы всегда
+   * строго меньше длины сегмента, последний шаг — единица: рекурсия конечна и
+   * без счётчика глубины. Бюджет тратит только ДОБАВОЧНЫЙ вызов — исходные
+   * батчи по 50 в него не входят.
+   */
+  async function judgeWithSplit(segment: HeGateRow[], top: boolean): Promise<void> {
+    if ((await judgeSegment(segment, top)) !== 'invalid' || stopped) return;
+    // Единицу дробить не на что: строка остаётся без вердикта и уходит в базу
+    // непроверенной. Отдельной строки лога на неё нет — её считает сводка ниже.
+    const size = SPLIT_LADDER.find((step) => step < segment.length);
+    if (size === undefined) return;
+    const judgedBefore = result.judgedRows;
+    for (let offset = 0; offset < segment.length && !stopped; offset += size) {
+      if (splitCallsLeft <= 0) {
+        log?.(
+          `[relevanceGate] бюджет дробления исчерпан (${MAX_SPLIT_CALLS} добавочных вызовов): ` +
+            `${range(segment.slice(offset))} остаются без вердикта`,
+        );
+        return;
       }
-    } catch (e) {
+      splitCallsLeft -= 1;
+      await judgeWithSplit(segment.slice(offset, offset + size), false);
+    }
+    // Итог дробления — одной строкой на исходный батч: сколько строк вердикт
+    // всё-таки получили, а сколько уходит непроверенными.
+    if (top) {
+      const rescued = result.judgedRows - judgedBefore;
       log?.(
-        `[relevanceGate] батч ${start}–${start + batch.length - 1} пропущен: ${e instanceof Error ? e.message : String(e)}`,
+        `[relevanceGate] ${range(segment)}: ответ забракован, дробили по ${size} — ` +
+          `вердикт получили ${rescued} строк из ${segment.length}`,
       );
     }
+  }
+
+  // Батч набирается ПО ДВУМ бюджетам: не больше BATCH_SIZE строк и не больше
+  // charBudget символов. Размер строки мерим её же JSON'ом — тем самым, который
+  // уедет в промпт, — чтобы новое поле попадало в бюджет само, без второго
+  // места, где перечислены поля и их длины.
+  for (let start = 0; start < checked.length && !stopped; ) {
+    const batch: HeGateRow[] = [];
+    let chars = 0;
+    while (batch.length < BATCH_SIZE && start + batch.length < checked.length) {
+      const row = gateRowOf(checked[start + batch.length], start + batch.length);
+      const size = JSON.stringify(row).length + 1;
+      // Первая строка входит в батч ВСЕГДА, даже если одна не помещается в
+      // бюджет: батча из нуля строк быть не может — внешний цикл сдвигается на
+      // batch.length и на пустом батче завис бы навсегда.
+      if (batch.length > 0 && chars + size > charBudget) break;
+      batch.push(row);
+      chars += size;
+    }
+    start += batch.length;
+    await judgeWithSplit(batch, true);
+  }
+  // Остановка — событие прохода, а не батча, и записана она должна быть один
+  // раз и целиком: причина плюс честное покрытие. Отдельной пометки строкам
+  // при этом НЕ ставим (см. шапку) — вызывающий отличает «судили всех» от
+  // «судили половину» по паре judged/checked.
+  if (stopped) {
+    log?.(
+      `[relevanceGate] проход остановлен: ${stopped}. Вердикт получили ${result.judgedRows} строк из ` +
+        `${result.checkedRows}; остальные идут в базу непроверенными.`,
+    );
   }
   return result;
 }

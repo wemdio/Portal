@@ -5,6 +5,38 @@
  * синхронными с RU-оригиналом. Рыночные отличия: экономика фита в USD,
  * географический перенос «works in the US → expand to EU/LatAm», чек-лист
  * макросекторов US-рынка.
+ *
+ * ОДНО расхождение с RU-оригиналом сделано намеренно, синхронизировать его НЕ
+ * надо: формат description. Сначала КТО ЭТО (вид деятельности, тип компании,
+ * продукты, явные условия среза), боль — отдельным предложением после.
+ *
+ * Причина — путь этого поля. Нераспределённая гипотеза становится
+ * вертикалью-одиночкой с summary = h.description (stages/clustering.ts), а
+ * EN-summary уезжает целью отбора в relevanceGate.ts. Помеченную строку там не
+ * «отправляют на пересмотр» — состояния «на пересмотр» у V1 нет: её вырезают из
+ * запуска (launchTemplate.ts, у баз source='auto', то есть у всех собранных
+ * движком) и из ночного добора (baseCollectRefill.ts). Описание, начатое с боли,
+ * превращается в цель, которая просит найти боль в company/website/category/
+ * vacancy_title, где боли нет, — и компания молча теряется.
+ *
+ * Ниже по течению эту ошибку не исправляет никто. companyPartOfSummaryEn режет
+ * мотив по обороту покупки, который обещает промпт кластеризации зачином «They
+ * buy because …»; сырое описание гипотезы этот оборот несёт лишь случайно, и
+ * тогда остаётся шаг 3 резалки — он срабатывает только когда описание ровно из
+ * двух предложений, а второе само похоже на разговор о покупке
+ * (EN_PURCHASE_TALK). Проба среза (sliceProbe.ts) не решает
+ * ничего по построению: оба её порога по умолчанию 0, она только меряет и пишет
+ * провенанс. Значит порядок предложений задаётся здесь или нигде.
+ *
+ * Два отличия от формулировки V2, оба обязательны для ENG:
+ *  - размер запрещён не как таковой, а как требование доказать его на сайте.
+ *    Слова «large», «mid-market», «200–500 employees» обязаны остаться
+ *    употребимыми: по тексту гипотезы heSizeBasisEn (stages/baseCollect.ts)
+ *    признаёт фильтр `sizes` обоснованным, и без них каждый headcount-бакет
+ *    плана снимается как придуманный порог;
+ *  - найм не запрещён: у ENG есть источник eng_hiring, а vacancy_title входит в
+ *    поля, которые видит гейт, — то есть найм это одно из немногих условий
+ *    среза, проверяемых по самой строке.
  */
 
 import type { LLMMessage } from '../llm';
@@ -41,7 +73,7 @@ COVERAGE COMPLETENESS (mandatory self-check before answering):
 HARD REQUIREMENTS:
 - 25–40 hypotheses total; tier 2 ≥ 8; tier 3 ≥ 8. Fewer than 25 — you didn't push hard enough.
 - Each hypothesis is a SPECIFIC segment (company type + role/scenario), not "every company in IT".
-- description: 1–3 sentences — who they are and which of the client's pains the product solves for them.
+- description: 1–3 sentences. FIRST who they are: the line of business, the company type (manufacturer, chain operator, distributor, agency…), products or sub-sectors, and explicit selection conditions when they matter (for example "chains of 5+ locations", "companies hiring account executives"). THEN, in a separate sentence, which of the client's pains the product solves. The order is not cosmetic: companies are later selected by this text, and a description that opens with the pain becomes a target asking the relevance check to find that pain in a company name, a website address and an industry label, where it is not. Do NOT write work processes, internal software, regulation, warehouses or sales channels as company attributes via "with …" (bad: "plants with ERP, raw-material warehouses and supplies to retail chains"): such words exclude fitting companies whose websites do not say so — they belong in the pain sentence or in the rationale. Company size is the opposite case: name it plainly when the segment really is about size ("large", "mid-market", "enterprise", "SMB", "200–500 employees"), because the company catalog filters by headcount bucket and a segment that never names its size loses that filter; what is forbidden is requiring the size to be provable on the company's own site (bad: "companies whose website states 200+ employees"). Hiring is legitimate as well — there is a hiring-signal source, and the vacancy title travels with the row.
 - fit_rationale: MANDATORY, 2–3 lines — the "WHY THIS IS A MARKET FOR THE CLIENT" chain: who the segment's buyer is (decision-maker, by role) → their goal → their pain that the client's product removes → the client's concrete offer to them → why the economics work (typical deal/LTV of the segment's client pays back the channel cost). This is NOT a segment description (that's description): description says "who they are", fit_rationale proves why our client specifically can sell to them. All five links are mandatory: decision-maker, their goal, their pain, the offer, and the economics. Tautologies are forbidden: "the segment is big", "they need sales", "they have budget" — these are fillers, not justification.
 - rationale: why this segment should buy — pain/trigger/budget/signal.
 - potential_pct: expert estimate of segment potential 0–100 BEFORE verification (the sum across all ≠ 100; these are independent estimates).
@@ -102,7 +134,7 @@ FORMAT — JSON ONLY:
     {
       "tier": 1|2|3,
       "title": string,          // short segment name, 2-6 words
-      "description": string,    // who they are and which pain the client's product solves — up to 300 chars
+      "description": string,    // who they are FIRST (line of business, type, products, explicit conditions like "chains of 5+ locations" or "hiring account executives"), then in a separate sentence the pain the client's product solves; processes, internal software, regulation and sales channels are not company attributes; size may be named ("large", "mid-market", "200–500 employees") but never as something the site must prove — up to 300 chars
       "fit_rationale": string,  // MANDATORY: the chain decision-maker → their goal → their pain the client's product removes → the client's concrete offer → why the economics work (or an honest "questionable"). Not a segment description, no tautologies — up to 350 chars
       "rationale": string,      // why they should buy: pain/trigger/budget; + "RISK: …" (economics / incompatible sales motion / similarity to specialist-rejected topics) — up to 200 chars
       "potential_pct": number,  // 0-100, before verification
@@ -113,7 +145,7 @@ FORMAT — JSON ONLY:
 
 LENGTH DISCIPLINE (critical): the per-field limits above are hard — write tightly and to the point, no filler or retelling. If you see you won't fit the limit — shorten the wording instead of cutting it off mid-word. The answer must be one fully closed valid JSON: 25 whole candidates are better than 40 with a truncated JSON.
 
-Check yourself before answering: 25–40 candidates? tier 2 ≥ 8? tier 3 ≥ 8? Macro-sector checklist walked — every relevant sector covered by at least one hypothesis? No macro-sector holds more than ~25% of candidates? Does each candidate's tier reflect obviousness of the connection, not potential_pct? Do candidates with an incompatible sales motion carry "RISK: …" in the rationale? Does every candidate's fit_rationale contain all four chain links (decision-maker → goal → pain → offer) plus the fifth link — why the economics work — and not repeat the description? Do segments with unrecoverable economics have their pct cut and a "RISK: economics …" note? Does every tier-3 without a portfolio match have another evidentiary path to effectiveness? Are all titles unique? Not a single URL in the answer?`;
+Check yourself before answering: 25–40 candidates? tier 2 ≥ 8? tier 3 ≥ 8? Macro-sector checklist walked — every relevant sector covered by at least one hypothesis? No macro-sector holds more than ~25% of candidates? Does each candidate's tier reflect obviousness of the connection, not potential_pct? Do candidates with an incompatible sales motion carry "RISK: …" in the rationale? Does every candidate's fit_rationale contain all four chain links (decision-maker → goal → pain → offer) plus the fifth link — why the economics work — and not repeat the description? Do segments with unrecoverable economics have their pct cut and a "RISK: economics …" note? Does every tier-3 without a portfolio match have another evidentiary path to effectiveness? Does every description open with WHO THEY ARE and keep the pain in a separate sentence after it? Are all titles unique? Not a single URL in the answer?`;
 
   return [
     { role: 'system', content: SYSTEM },
