@@ -674,8 +674,202 @@ try {
   });
   await commit();
 
+  // Intraday refill executes on the same PostgreSQL ledger as initial uploads.
+  await db.exec(migration('20260929_0061_ve_intraday_contact_refill.sql'));
+  await db.exec(migration('20260929_0061_ve_intraday_contact_refill.sql'));
+  await begin();
+  const clock = (await one('select now()::text as t')).t;
+  const workday = new Date(clock); workday.setUTCHours(6,0,0,0);
+  while ([0,6].includes(workday.getUTCDay())) workday.setUTCDate(workday.getUTCDate()+1);
+  const refillNow = workday.toISOString();
+  const sourceRows = new Map();
+  const setupRefill = async (project=VE, item=ITEM) => {
+    await rows(`update public.projects set status='В работе',deadline='2000-01-01' where id=$1`,[STAFF]);
+    await rows(`update public.project_periods set status='active',deadline='2000-01-01',contacts_done='0' where id=$1`,[PERIOD]);
+    await rows(`update public.ve_launch_queue_items set status='active',ever_active_at=$2 where id=$1`,[item,refillNow]);
+    await rows(`update public.ve_launch_queue_campaigns set remote_status=1,activated_at=$2,status_observed_at=$2 where item_id=$1`,[item,refillNow]);
+    await rows(`update public.ve_contact_delivery_rows set status='ready',run_id=null,attempt_id=null,reserved_at=null,attempted_at=null,finalized_at=null where item_id=$1`,[item]);
+    await rows(`delete from public.ve_contact_delivery_daily_runs where ve_project_id=$1`,[project]);
+    const saved=await rows('select * from public.ve_contact_delivery_rows where item_id=$1 order by drip_order,id',[item]);
+    saved.forEach(row=>sourceRows.set(row.id,row));
+    await rows('delete from public.ve_contact_delivery_rows where item_id=$1',[item]);
+    return saved.map(row=>row.id);
+  };
+  const ready = async ids => {
+    for (const id of ids) await rows(`insert into public.ve_contact_delivery_rows
+      select * from jsonb_populate_record(null::public.ve_contact_delivery_rows,$1::jsonb) on conflict(id) do nothing`,[JSON.stringify(sourceRows.get(id))]);
+    // Match the counters maintained by ve_append_contact_supply_batch.
+    await rows(`update public.ve_launch_queue_campaigns c set
+      ready_leads_count=(select count(*) from public.ve_contact_delivery_rows r where r.campaign_row_id=c.id),
+      ready_remaining_count=(select count(*) from public.ve_contact_delivery_rows r where r.campaign_row_id=c.id and r.status='ready'),
+      leads_count=(select count(*) from public.ve_contact_delivery_rows r where r.campaign_row_id=c.id and r.status='accepted')
+      where c.id in(select campaign_row_id from public.ve_contact_delivery_rows where id=any($1::uuid[]))`,[ids]);
+    await rows(`update public.ve_launch_queue_items qi set
+      ready_leads_count=(select count(*) from public.ve_contact_delivery_rows r where r.item_id=qi.id),
+      ready_remaining_count=(select count(*) from public.ve_contact_delivery_rows r where r.item_id=qi.id and r.status='ready')
+      where qi.id in(select item_id from public.ve_contact_delivery_rows where id=any($1::uuid[]))`,[ids]);
+  };
+  const reserve = async (project=VE, observed=0) => (await one('select public.ve_reserve_contact_delivery_day($1,$2::timestamptz,$3) as r',[project,refillNow,observed])).r;
+  const batchIds = run => run.batches.flatMap(batch=>batch.row_ids);
+  const mark = async (run,batch) => {
+    // Exercise the real pre-send clock, including when the script runs at a weekend.
+    await rows('update public.ve_contact_delivery_daily_runs set run_date=timezone(timezone,now())::date where id=$1',[run.run_id]);
+    await rows('update public.ve_launch_queue_campaigns set status_observed_at=now() where campaign_id=$1',[batch.campaign_id]);
+    const attempt = (await one('select gen_random_uuid() as id')).id;
+    const result = (await one('select public.ve_begin_recoverable_contact_delivery($1,$2,$3,$4::uuid[]) as r',[run.run_id,attempt,batch.campaign_id,batch.row_ids])).r;
+    check(result.marked,'refill: exact tranche can acquire the provider fence');
+    await rows('update public.ve_contact_delivery_daily_runs set run_date=timezone(timezone,$2::timestamptz)::date where id=$1',[run.run_id,refillNow]);
+    await rows('update public.ve_launch_queue_campaigns set status_observed_at=$2::timestamptz where campaign_id=$1',[batch.campaign_id,refillNow]);
+    return attempt;
+  };
+  const finish = async (run,batch,attempt,accepted=batch.row_ids,skipped=[],uncertain=[],released=[]) => one(
+    'select public.ve_finalize_contact_delivery_attempt($1,$2,$3,$4::uuid[],$5::uuid[],$6::uuid[],$7::uuid[],null) as r',
+    [run.run_id,attempt,batch.campaign_id,accepted,skipped,uncertain,released]);
+
+  await inRollback(async () => {
+    const ids=await setupRefill();
+    await ready(ids.slice(0,5));
+    const first=await reserve();
+    check(batchIds(first).length===5 && first.effective_count===5,'refill: initial stock can be below the day quota');
+    const firstAttempt=await mark(first,first.batches[0]);
+    await finish(first,first.batches[0],firstAttempt);
+    check((await reserve()).batches.length===0,'refill: no extra provider work before more stock arrives');
+
+    await inRollback(async () => {
+      await ready(ids.slice(5));
+      await rows('update public.ve_launch_queue_campaigns set remote_status=2 where item_id=$1',[ITEM]);
+      check((await reserve()).batches.length===0,'refill: provider Pause prevents a new tranche');
+      await rows("update public.ve_launch_queue_campaigns set remote_status=1,status_observed_at=$2::timestamptz-interval '6 minutes' where item_id=$1",[ITEM,refillNow]);
+      check((await reserve()).batches.length===0,'refill: stale provider state prevents a new tranche');
+    });
+    await inRollback(async () => {
+      await ready(ids.slice(5));
+      check((await reserve(VE,4000)).batches.length===0,'refill: a newly reached goal prevents additional uploads');
+      await rows("update public.projects set status='Завершен' where id=$1",[STAFF]);
+      await expectError('refill: a closed project blocks later tranches','select public.ve_reserve_contact_delivery_day($1,$2::timestamptz,0)',[VE,refillNow],/not launchable/);
+    });
+    await inRollback(async () => {
+      await ready(ids.slice(5));
+      await rows("update public.ve_contact_supply_plans set approval_snapshot='{}' where id=$1",[PLAN]);
+      await expectError('refill: changed approval cannot add another tranche','select public.ve_reserve_contact_delivery_day($1,$2::timestamptz,0)',[VE,refillNow],/approval is stale/);
+    });
+    await inRollback(async () => {
+      await ready(ids.slice(5));
+      await rows('update public.ve_contact_delivery_daily_runs set upload_blocked_at=$2 where id=$1',[first.run_id,refillNow]);
+      check((await reserve()).status==='capacity_blocked','refill: workspace capacity pause survives new stock');
+    });
+    for (const limit of [7,40]) await inRollback(async () => {
+      await ready(ids.slice(5));
+      const snapshot=JSON.stringify({effective_capacity:limit,max_new_contacts:40,checked_at:clock});
+      await one("select public.ve_save_contact_delivery_rate($1,$2,$3::uuid[],'manual',$4,0,$5::jsonb,$6)",[VE,PRESET,[TPL],limit,snapshot,USER]);
+      const token=(await one('select gen_random_uuid() as id')).id;
+      await one('select public.ve_claim_contact_delivery_rate($1,1,$2)',[VE,token]);
+      await one('select public.ve_finish_contact_delivery_rate($1,1,$2,$3::jsonb,null)',[VE,token,snapshot]);
+      const changed=await reserve();
+      check(batchIds(changed).length===(limit===7?2:15),'refill: rate changes respect both current capacity and the original daily quota');
+    });
+    await inRollback(async () => {
+      const extra=await one('select gen_random_uuid() item,gen_random_uuid() campaign,gen_random_uuid() reservation');
+      await rows(`insert into public.ve_launch_queue_items select (jsonb_populate_record(null::public.ve_launch_queue_items,
+        to_jsonb(q)||jsonb_build_object('id',$2::uuid,'prepare_reservation_id',$3::uuid,'ready_leads_count',0,'ready_remaining_count',0))).*
+        from public.ve_launch_queue_items q where q.id=$1`,[ITEM,extra.item,extra.reservation]);
+      await rows(`insert into public.ve_launch_queue_campaigns select (jsonb_populate_record(null::public.ve_launch_queue_campaigns,
+        to_jsonb(c)||jsonb_build_object('id',$2::uuid,'item_id',$3::uuid,'campaign_id','camp-2','leads_count',0,
+          'ready_leads_count',0,'ready_remaining_count',0,'remote_status',2))).*
+        from public.ve_launch_queue_campaigns c where c.item_id=$1`,[ITEM,extra.campaign,extra.item]);
+      const more=[];
+      for (let n=0;n<20;n++) {
+        const id=(await one('select gen_random_uuid() id')).id;
+        sourceRows.set(id,{...sourceRows.get(ids[0]),id,item_id:extra.item,campaign_row_id:extra.campaign,
+          source_row_index:n,drip_order:n,email_normalized:`other${n}@example.test`,lead_payload:{email:`other${n}@example.test`}});
+        more.push(id);
+      }
+      await ready([...ids.slice(5,10),...more]);
+      const liveOnly=await reserve();
+      check(batchIds(liveOnly).length===5 && liveOnly.batches.every(batch=>batch.campaign_id==='camp-1'),
+        'refill: one paused hypothesis does not block another active hypothesis');
+      for (const batch of liveOnly.batches) await finish(liveOnly,batch,await mark(liveOnly,batch));
+      await rows('update public.ve_launch_queue_campaigns set remote_status=1,status_observed_at=$2::timestamptz where id=$1',[extra.campaign,refillNow]);
+      const other=await reserve();
+      check(batchIds(other).length===10 && other.effective_count===20 && other.batches.every(batch=>batch.campaign_id==='camp-2'),
+        'refill: a second launch receives the project remainder, not its own full daily quota');
+      for (const batch of other.batches) await finish(other,batch,await mark(other,batch));
+      check((await reserve()).batches.length===0,'refill: the common daily limit holds across both launches');
+    });
+
+    await ready(ids.slice(5,10));
+    const second=await reserve();
+    check(second.run_id===first.run_id && second.effective_count===10 && batchIds(second).length===5,
+      'refill: late stock extends the same day with only fresh rows');
+    const replay=await reserve();
+    check(JSON.stringify(batchIds(replay))===JSON.stringify(batchIds(second)),
+      'refill: lost reservation reply/second worker returns the same pending tranche');
+    const secondAttempt=await mark(second,second.batches[0]);
+    check((await reserve()).batches.length===0,'refill: an in-flight provider request cannot get another tranche');
+    await finish(second,second.batches[0],secondAttempt);
+    await ready(ids.slice(10));
+    const third=await reserve();
+    check(third.run_id===first.run_id && third.effective_count===20 && batchIds(third).length===10,
+      'refill: third tranche fills only the remainder of the common limit');
+    await finish(third,third.batches[0],await mark(third,third.batches[0]));
+    check((await reserve()).batches.length===0,'refill: repeated ticks cannot exceed a filled daily limit');
+    const all=[...batchIds(first),...batchIds(second),...batchIds(third)];
+    check(new Set(all).size===20 && (await one('select accepted_count from public.ve_contact_delivery_daily_runs where id=$1',[first.run_id])).accepted_count===20,
+      'refill: counters accumulate exactly once across three uploads');
+    check((await finish(first,first.batches[0],firstAttempt)).r.replayed,'refill: replaying an older finalization remains idempotent');
+    const tomorrow=new Date(workday); tomorrow.setUTCDate(tomorrow.getUTCDate()+1);
+    while ([0,6].includes(tomorrow.getUTCDay())) tomorrow.setUTCDate(tomorrow.getUTCDate()+1);
+    await rows('update public.ve_launch_queue_campaigns set status_observed_at=$2::timestamptz where item_id=$1',[ITEM,tomorrow.toISOString()]);
+    const nextDay=(await one('select public.ve_reserve_contact_delivery_day($1,$2::timestamptz,0) as r',[VE,tomorrow.toISOString()])).r;
+    check(nextDay.run_id!==first.run_id && batchIds(nextDay).length===10 && !batchIds(nextDay).some(id=>all.includes(id)),
+      'refill: the next business day has a new quota and excludes all previous identities');
+  });
+
+  await inRollback(async () => {
+    const ids=await setupRefill();
+    await ready(ids.slice(0,5));
+    const first=await reserve();
+    const batch=first.batches[0], sent=batch.row_ids;
+    await finish(first,batch,await mark(first,batch),sent.slice(0,2),[sent[2]],[sent[3]],[sent[4]]);
+    await ready(ids.slice(5));
+    const next=await reserve();
+    check(next.effective_count===20 && batchIds(next).length===15 && !batchIds(next).some(id=>sent.includes(id)),
+      'refill: accepted, skipped, uncertain and released identities retain their quota and are never new work');
+    await finish(next,next.batches[0],await mark(next,next.batches[0]));
+    check((await reserve()).batches.length===0,'refill: uncertainty cannot manufacture additional daily allowance');
+  });
+
+  await inRollback(async () => {
+    const ids=await setupRefill(VEP,periodFinal.queue_item.id);
+    await ready(ids);
+    await rows("update public.project_periods set contacts_done='3' where id=$1",[PERIOD]);
+    const previous=await reserve(VEP);
+    const priorBatch=previous.batches[0];
+    await finish(previous,priorBatch,await mark(previous,priorBatch),[],[],priorBatch.row_ids);
+    await rows('update public.ve_contact_delivery_daily_runs set run_date=run_date-1 where id=$1',[previous.run_id]);
+    const waiting=await reserve(VEP);
+    check(waiting.status==='awaiting_delivery','refill: unsent backlog still protects the target');
+    // Different sync clocks: the period fact includes other campaigns. Never use
+    // the whole observed VE fact to erase this period's remaining unsent reserve.
+    await rows("update public.project_periods set contacts_done='10' where id=$1",[PERIOD]);
+    check((await reserve(VEP,3)).batches.length===0,'refill: independent period/VE facts cannot invent target headroom');
+    // Seed the exact state after verified recovery releases nine old-day rows.
+    // The remaining eleven unknown uploads still consume headroom.
+    await rows(`update public.ve_contact_delivery_rows set status='ready',run_id=null,attempt_id=null,
+      reserved_at=null,attempted_at=null,finalized_at=null where id=any($1::uuid[])`,[priorBatch.row_ids.slice(0,9)]);
+    const resumed=await reserve(VEP,3);
+    check(resumed.run_id===waiting.run_id && batchIds(resumed).length===5,
+      'refill: a cleared awaiting-delivery condition is reconsidered in the same day');
+    await finish(resumed,resumed.batches[0],await mark(resumed,resumed.batches[0]));
+    await rows("update public.project_periods set status='closed' where id=$1",[PERIOD]);
+    await expectError('refill: closed period blocks later work','select public.ve_reserve_contact_delivery_day($1,$2::timestamptz,3)',[VEP,refillNow],/not active/);
+  });
+  await commit();
+
   // ── Помощники не доступны ролям API ──
   await db.exec('set role service_role');
+  await expectError('service_role cannot bypass the reservation wrapper for refill',
+    'select public.ve_top_up_contact_delivery_day($1,$2::timestamptz,0)',[VE,refillNow],/permission denied/i);
   await expectError('service_role cannot call the term helper', 'select * from public.ve_contact_delivery_term($1,null,null)', [STAFF], /permission denied/i);
   await db.exec('reset role');
 } catch (error) {
