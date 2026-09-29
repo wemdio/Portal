@@ -548,7 +548,7 @@ describe('попадание сделки в период', () => {
     expect(isLeadInWindow(lead({ created_at: '2024-06-26T09:00:00.000Z' }), from, to)).toBe(false);
   });
 
-  it('квал — по дате квала внутри окна', () => {
+  it('квал — лид пришёл в окне и дошёл до этапа в том же окне', () => {
     expect(
       isQualifiedInWindow(lead({ first_qualified_at: '2026-07-20T09:00:00.000Z' }), from, to),
     ).toBe(true);
@@ -557,14 +557,13 @@ describe('попадание сделки в период', () => {
     expect(
       isQualifiedInWindow(lead({ first_qualified_at: '2026-08-02T09:00:00.000Z' }), from, to),
     ).toBe(false);
-    // Лид пришёл раньше окна, квал — в окне: событие периода. Старые лиды
-    // отсекает режим «без когорты», а не этот предикат (с 29.09.2026).
+    // Квал есть, но лид пришёл раньше окна — в этот период он не считается.
     expect(
       isQualifiedInWindow(
         lead({ created_at: '2026-06-01T09:00:00.000Z', first_qualified_at: '2026-07-05T09:00:00.000Z' }),
         from, to,
       ),
-    ).toBe(true);
+    ).toBe(false);
     // Неполная история — этап мог случиться до горизонта событий.
     expect(
       isQualifiedInWindow(

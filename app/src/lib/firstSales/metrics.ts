@@ -15,8 +15,8 @@
  *      по этапу AMO вовсе: этап «Встреча проведена» засорён, см. `meetings.ts`.
  *
  * Режимов два (переключатель на экране с 26.09.2026, см. `cohort` в params.ts):
- * «по когорте» — квалы, продажи, встречи и деньги считаются по дате события,
- * чья бы сделка ни была; «без когорты» — только по сделкам, заведённым в периоде.
+ * «по когорте» — продажи, встречи и деньги считаются по дате события, чья бы
+ * сделка ни была; «без когорты» — только по сделкам, заведённым в периоде.
  * Расчёт один на оба режима: `computeFirstSalesSeries(..., { cohort })`.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -223,15 +223,13 @@ export function isLeadInWindow(lead: FirstSalesLeadRow, from: Date, to: Date): b
 }
 
 /**
- * Квал периода — лид, квалифицированный в периоде, по дате самого квала.
+ * Квал периода — лид, заведённый в периоде И квалифицированный в нём же.
  *
- * До 11.09.2026 квал клали на дату создания лида: лид августа, дошедший до
- * квала в сентябре, засчитывался августу, и цифра прошлого месяца росла задним
- * числом. С 11.09 по 29.09.2026 требовалось ещё, чтобы лид был заведён в том же
- * периоде, а точка на графике стояла в день прихода лида — график читали как
- * «в этот день квалифицировали» и ошибались. С 29.09.2026 квал — событие, как
- * встреча и продажа: день квала, а старые лиды отсекает режим «без когорты»
- * (`eventsCount` в computeFirstSalesSeries), а не этот предикат.
+ * До 11.09.2026 хватало первого условия: лид августа, дошедший до квала в
+ * сентябре, засчитывался августу, и цифра прошлого месяца росла задним числом
+ * (за август 80 квалов, из них 5 квалифицированы уже в сентябре). Продажи
+ * смотрят на период как на срез: сделки и их этапы на его конец. Этап после
+ * конца периода к нему не относится.
  *
  * Закрытая в минус сделка квалом не считается вовсе, когда бы её ни закрыли:
  * так квалы считает отчёт продаж, и дашборд с ним сверяют. Цена решения —
@@ -241,7 +239,8 @@ const LOST_STATUS_ID = 143;
 
 export function isQualifiedInWindow(lead: FirstSalesLeadRow, from: Date, to: Date): boolean {
   return (
-    inWindow(lead.first_qualified_at, from, to)
+    isLeadInWindow(lead, from, to)
+    && inWindow(lead.first_qualified_at, from, to)
     && lead.history_complete
     && lead.status_id !== LOST_STATUS_ID
   );
@@ -381,14 +380,14 @@ export function computeFirstSalesSeries(
   const createdInCohort = (lead: FirstSalesLeadRow): boolean => isLeadInWindow(lead, cohortFrom, cohortTo);
 
   /**
-   * Засчитываются ли периоду события сделки — квал, продажа, встреча, деньги.
+   * Засчитываются ли периоду события сделки — продажа, встреча, деньги.
    *
    * «По когорте» — всегда: август, оплаченный в сентябре, — продажа сентября.
    * «Без когорты» — только если сделка заведена в периоде. Одна проверка на
    * все три прохода ниже, а не вторая копия расчёта: иначе два режима рано
    * или поздно разошлись бы не только тем, чем должны.
    *
-   * Лиды сюда не смотрят: они и так считаются по дате создания.
+   * Лиды и квал сюда не смотрят: они и так считаются по дате создания.
    */
   const eventsCount = (lead: FirstSalesLeadRow): boolean => cohort || createdInCohort(lead);
 
@@ -498,6 +497,24 @@ export function computeFirstSalesSeries(
       bump(bucketKey(new Date(lead.created_at as string), groupBy), 'leads');
       if (isLeadMagnet(lead.name)) totals.leadMagnets += 1;
       if (resolved.key === NO_SOURCE_KEY) totals.noSourceLeads += 1;
+
+      // «Дошёл до квала» кладётся в корзину по дате СОЗДАНИЯ, а не по дате
+      // достижения этапа; first_qualified_at проверяется только на то, что
+      // квал случился внутри того же периода (с 11.09.2026, см.
+      // isQualifiedInWindow). Это когортная семантика — «из пришедших в этот день/
+      // неделю/месяц скольких сумели квалифицировать», та же логика, что и у
+      // «леды». Отличается от meetings/sales ниже, которые по спеке
+      // кладутся по дате самого этапа («сколько встреч случилось в этот
+      // день», независимо от того, когда лид пришёл). Оба взгляда осмыслены,
+      // но соседствуют в одном SeriesBucket — при чтении графика это стоит
+      // держать в голове: столбец qualified отвечает на другой вопрос, чем
+      // столбцы meetings/sales в той же строке.
+      if (isQualifiedInWindow(lead, from, to)) {
+        totals.qualified += 1;
+        breakdown.qualified += 1;
+        manager.qualified += 1;
+        bump(bucketKey(new Date(lead.created_at as string), groupBy), 'qualified');
+      }
     }
 
     // Договор — по дате достижения этапа. Сделка с неполной историей
@@ -522,16 +539,6 @@ export function computeFirstSalesSeries(
     // (`eventsCount`), и цикл ниже — тоже: «оплат» под плиткой цикла обязано
     // совпадать с «Продажами».
     if (!eventsCount(lead)) continue;
-
-    // Квал — событие, как встреча и продажа: в корзину дня самого квала
-    // (с 29.09.2026, см. isQualifiedInWindow). График читают как «что
-    // случилось в этот день», и все линии обязаны отвечать на этот вопрос.
-    if (isQualifiedInWindow(lead, from, to)) {
-      totals.qualified += 1;
-      breakdown.qualified += 1;
-      manager.qualified += 1;
-      bump(bucketKey(new Date(lead.first_qualified_at as string), groupBy), 'qualified');
-    }
 
     if (isSaleInWindow(lead, from, to)) {
       totals.sales += 1;
@@ -739,16 +746,15 @@ export async function fetchFirstSalesLeads(
   const fromIso = from.toISOString();
   const toIso = to.toISOString();
 
-  // Берём сделки с ЛЮБОЙ активностью в окне: созданы, квалифицированы, дошли
-  // до встречи, до договора или оплачены. Иначе встреча июльской сделки,
-  // пришедшей в июне, в июльское окно не попадёт.
+  // Берём сделки с ЛЮБОЙ активностью в окне: созданы, дошли до встречи,
+  // до договора или оплачены. Иначе встреча июльской сделки, пришедшей в июне,
+  // в июльское окно не попадёт.
   const { data, error } = await db
     .from('amo_lead_stage_dates_v')
     .select(STAGE_DATE_COLUMNS)
     .eq('pipeline_id', pipelineId)
     .or(
       `and(created_at.gte.${fromIso},created_at.lte.${toIso}),` +
-        `and(first_qualified_at.gte.${fromIso},first_qualified_at.lte.${toIso}),` +
         `and(first_meeting_at.gte.${fromIso},first_meeting_at.lte.${toIso}),` +
         `and(first_contract_at.gte.${fromIso},first_contract_at.lte.${toIso}),` +
         `and(won_at.gte.${fromIso},won_at.lte.${toIso})`,
