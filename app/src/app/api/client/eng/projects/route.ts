@@ -138,12 +138,16 @@ export async function POST(req: NextRequest) {
     }
 
     // Для свежего проекта активных research-джоб нет — конфликт невозможен,
-    // но постановку делаем тем же helper'ом, что и «Re-run research».
+    // но постановку делаем тем же helper'ом, что и «Re-run research». Unique
+    // index he_jobs_one_active_site_profile этого не меняет: id проекта только
+    // что выдан gen_random_uuid(), сослаться на него никакая джоба не может.
     const enqueue = await enqueueHeResearchJob(supabaseAdmin, project.id as string);
     if (!enqueue.ok) {
+      // `message` есть только у reason:'db'; у 'conflict' его нет, и
+      // `new Error(undefined)` записал бы в журнал пустую причину.
       return engServerError(
         'client.eng.projects.research_enqueue_failed',
-        new Error(enqueue.message),
+        new Error(enqueue.message ?? `research enqueue refused: ${enqueue.reason}`),
         RESEARCH_START_FAILED,
         { userId, projectId: project.id },
       );

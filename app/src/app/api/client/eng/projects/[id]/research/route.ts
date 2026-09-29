@@ -14,6 +14,9 @@ export const dynamic = 'force-dynamic';
 
 // POST — перезапустить research-пайплайн СВОЕГО проекта (кнопка «Re-run
 // research» шага Brief). Дедуп тот же, что у staff: активная research-стадия → 409.
+// С этой же 409 приходит и проигравший гонки двойной клик: unique index
+// he_jobs_one_active_site_profile отдаёт хелперу 23505, хелпер — 'conflict'.
+// Текст один на оба случая и оба верны: research у проекта действительно идёт.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'client.eng.research.post' }, async () => {
     const result = await requireClientAuth(req);
@@ -32,6 +35,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const enqueue = await enqueueHeResearchJob(supabaseAdmin, id);
     if (!enqueue.ok) {
       if (enqueue.reason === 'conflict') {
+        // Про чужую джобу не говорим ничего, кроме факта «идёт»: id победителя
+        // (в гонке он может быть и не этого пользователя — staff со своей
+        // стороны) наружу не уезжает.
         return jsonError('Research is already running for this project', 409);
       }
       return engServerError(

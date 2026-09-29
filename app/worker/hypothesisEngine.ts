@@ -53,6 +53,12 @@ import { heLlmFailureOf, heLlmMaxAttemptMs, setHeActiveJob } from '@/lib/hypothe
 // мест. Границу сторожит tests/architecture/verticalEngineV2Isolation.test.ts:
 // запрещён только verticalEngineV2.
 import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
+// «Блип БД или приговор» — нейтральный предикат (lib/db/transientError.ts, без
+// импортов), общий с конструктором баз и ENG-роутами. Читается ТОЛЬКО там, где
+// решается судьба ЗАПРОСА (повторить ту же запись) и судьба джобы, стадия
+// которой ещё НЕ НАЧАЛАСЬ. Повтор оплаченной стадии по этому предикату не
+// назначается нигде.
+import { isTransientDbError } from '@/lib/db/transientError';
 import { normalizeHeMarket } from '@/lib/hypothesisEngine/market';
 import {
   HE_ANALYZING_BASE_FIELDS,
@@ -222,6 +228,21 @@ const POST_STAGE_DEADLINE_MS = 2 * 60_000;
  */
 const DONE_WRITE_ATTEMPTS = 4;
 const DONE_WRITE_RETRY_BASE_MS = 1000;
+
+/**
+ * Повторы ЧТЕНИЯ застрявших 'running' на старте (resetStuckJobs) и повторы
+ * ЗАПИСИ отказа (writeJobFailure) при блипе БД. Паузы 1с → 2с; оба участка
+ * идут до первой стадии либо внутри POST_STAGE_DEADLINE_MS, так что суммарное
+ * ожидание (≤3 с) в срок укладывается с запасом.
+ *
+ * Повторяется ЗАПРОС, а не стадия: запись отказа адресована по id и
+ * идемпотентна, чтение застрявших строк бесплатно. Ни один из этих повторов не
+ * меняет числа платных прогонов стадии.
+ */
+const STUCK_READ_ATTEMPTS = 3;
+const STUCK_READ_RETRY_BASE_MS = 1000;
+const FAIL_WRITE_ATTEMPTS = 3;
+const FAIL_WRITE_RETRY_BASE_MS = 1000;
 
 const log = createWorkerLogger(WORKER_ID);
 const db = requireSupabaseAdmin(log);
@@ -742,6 +763,18 @@ const NEXT_RESEARCH_STAGE: Partial<Record<HeStage, HeStage>> = {
   evidence: 'clustering',
 };
 
+/**
+ * ТЕРМИНАЛЬНЫЕ статусы he_bases (ограничение he_bases_status_check знает пять:
+ * uploaded, collecting, analyzing, analyzed, failed). Ремонт базы после
+ * финального фейла сборки решает по ЭТОМУ набору, а не по перечислению
+ * нетерминальных: раньше он был написан как «если collecting — свалить, если не
+ * analyzing — уйти», и любой ТРЕТИЙ нетерминальный статус (сегодня это
+ * 'uploaded', завтра — новый) молча оставался висеть навсегда. Инверсия — единственная
+ * форма, которая не ломается от добавления статуса: терминальный набор закрыт,
+ * нетерминальный открыт.
+ */
+const HE_BASE_TERMINAL_STATUSES = new Set(['analyzed', 'failed']);
+
 /** Стадии research-пайплайна — при финальном фейле помечают проект failed. */
 const RESEARCH_STAGES = new Set<HeStage>([
   'site_profile',
@@ -766,15 +799,32 @@ const RESEARCH_STAGES = new Set<HeStage>([
  * завершённым прогоном, а base_collect делает это каждым тиком self-requeue.
  */
 async function resetStuckJobs() {
-  const { data, error } = await db
-    .from('he_jobs')
-    .select('*')
-    .eq('status', 'running');
-  if (error) {
-    log('error', `Stuck running jobs could not be read: ${error.message}`);
-    return;
+  // Это ЕДИНСТВЕННЫЙ сборщик чужих застрявших 'running' (свои брошенные строки
+  // закрывает collectStrandedJobs), и работает он один раз — на старте. Блип БД
+  // ровно в эту секунду означал, что все застрявшие строки останутся 'running'
+  // до СЛЕДУЮЩЕГО рестарта, а их проекты — стоять: воркер single-flight и
+  // pending-джобу такого проекта он клеймит, а вот его 'running'-строку уже
+  // никто не подберёт. Поэтому блип повторяем (чтение бесплатно), а постоянный
+  // отказ — нет: повторы его не вылечат.
+  let rows: HeJob[] = [];
+  for (let attempt = 1; attempt <= STUCK_READ_ATTEMPTS; attempt += 1) {
+    const { data, error } = await db
+      .from('he_jobs')
+      .select('*')
+      .eq('status', 'running');
+    if (!error) {
+      rows = (data ?? []) as HeJob[];
+      break;
+    }
+    const retry = attempt < STUCK_READ_ATTEMPTS && isTransientDbError(error);
+    log(
+      'error',
+      `Stuck running jobs could not be read (attempt ${attempt}/${STUCK_READ_ATTEMPTS})`
+        + `${retry ? ', повторяем — блип БД' : ''}: ${error.message}`,
+    );
+    if (!retry) return;
+    await sleep(STUCK_READ_RETRY_BASE_MS * attempt);
   }
-  const rows = (data ?? []) as HeJob[];
   if (!rows.length) return;
   log('info', `Resetting ${rows.length} stuck running jobs to pending`);
   for (const row of rows) {
@@ -1055,7 +1105,19 @@ async function handleJob(job: HeJob) {
     // прогон us-проекта уходил на русских промптах — клиент получал письма не
     // на своём языке. Отсутствие строки (проект удалён) ошибкой не является:
     // это дальше честно скажет readProject стадии.
-    if (projErr) throw new HeJobInterruptionError(`he_projects market read: ${projErr.message}`, 'db');
+    //
+    // Бесплатное прерывание — только БЛИПУ (isTransientDbError): ни одного
+    // платного вызова тут ещё не было, поэтому повтор ничего не стоит, а пауза
+    // run_after (30/60/120 с) даёт БД вернуться. Постоянный отказ (нет колонки,
+    // отказ прав, кеш схемы после неприменённой миграции) прерыванием НЕ
+    // считаем: он не вылечится ни за пять бесплатных повторов, ни за восемь
+    // минут ожидания, и честнее дать ему сразу тратить попытки и дойти до
+    // 'failed' с причиной, чем прятать конфигурационную поломку за словом
+    // «прерывание».
+    if (projErr) {
+      const text = `he_projects market read: ${projErr.message}`;
+      throw isTransientDbError(projErr) ? new HeJobInterruptionError(text, 'db') : new Error(text);
+    }
     const market = normalizeHeMarket((proj as { market?: string } | null)?.market);
 
     stageResult = await runHeStage(job, {
@@ -1318,16 +1380,31 @@ async function finalizeJob(
 }
 
 /**
- * Ремонт базы после ФИНАЛЬНОГО фейла base_collect. Два нетерминальных статуса,
- * в которых стадия может оставить базу, лечатся по-разному:
+ * Ремонт базы после ФИНАЛЬНОГО фейла base_collect. Решение принимается по
+ * ТЕРМИНАЛЬНОСТИ статуса (HE_BASE_TERMINAL_STATUSES), а не по списку знакомых
+ * нетерминальных: 'analyzing' лечится, любой другой НЕтерминальный — валится,
+ * терминальный — не трогается. Так путь не обходит статус, о котором не знал
+ * автор правки (новый статус завтра).
  *
- *  - 'collecting' — до harvest: собранного нет, база уходит в 'failed' с
- *    причиной. Иначе она навсегда остаётся «живой» для collect-роута и держит
- *    partial unique index he_bases_one_collecting_per_vertical.
+ * Разбору статуса предшествует тест ИСТОЧНИКА (`source='auto'`, тот же, с
+ * которого начинается сама стадия): базу специалиста — CSV в 'uploaded' — этот
+ * ремонт не валит и не анализирует. Единственная запись, которая идёт ДО чтения
+ * источника, — фолбэк на нечитаемой строке, и его CAS по 'collecting' в
+ * staff-базу попасть не может: 'collecting' выставляет только авто-сборка, роут
+ * загрузки CSV создаёт базу в 'uploaded'.
+ *
+ *  - НЕтерминальный, кроме 'analyzing' (штатно — 'collecting') — до harvest:
+ *    собранного нет, база уходит в 'failed' с причиной. Иначе она навсегда
+ *    остаётся «живой» для collect-роута и держит partial unique index
+ *    he_bases_one_collecting_per_vertical.
  *  - 'analyzing' — harvest УЖЕ прошёл: строки собраны, конструктор оплачен,
  *    умерла только вставка base_analyze (stages/baseCollect.ts делает её
- *    отдельным запросом после перевода базы в 'analyzing'), а ретраи сборки
- *    после этого умирают в start-guard («сборка уже завершена»). Здесь база
+ *    отдельным запросом после перевода базы в 'analyzing'). Обычно пару
+ *    закрывает сама стадия на ПЕРВОМ же повторе (её start-guard узнаёт
+ *    'analyzing' с непустыми row_count/columns и бесплатно доставляет анализ),
+ *    так что сюда доезжают только те базы, чья сборка не дожила до повтора
+ *    вовсе — отменена, исчерпала попытки на другом отказе, умерла с подом.
+ *    Здесь база
  *    ГОДНА к анализу, и правильный ремонт — поставить пропавшую джобу
  *    анализа, а не выбросить оплаченные строки в 'failed' ради выхода из
  *    подвисшего состояния. Вставка в he_jobs бесплатна, анализ подхватит
@@ -1349,8 +1426,13 @@ async function repairBaseAfterCollectFinalFail(
   baseId: string,
   msg: string,
 ) {
-  /** Терминальная запись с CAS: статус пишем только из 'collecting'. */
-  const markCollectingFailed = async (error: string) => {
+  /**
+   * Терминальная запись с CAS по НАБЛЮДЁННОМУ статусу: пишем 'failed' только
+   * поверх того самого нетерминального статуса, который мы прочитали. Раньше в
+   * CAS было зашито 'collecting' — единственный статус, который путь умел
+   * лечить.
+   */
+  const markNonTerminalFailed = async (fromStatus: string, error: string) => {
     await client
       .from('he_bases')
       .update({
@@ -1359,29 +1441,65 @@ async function repairBaseAfterCollectFinalFail(
         updated_at: new Date().toISOString(),
       })
       .eq('id', baseId)
-      .eq('status', 'collecting');
+      .eq('status', fromStatus);
   };
 
   const { data: baseRow, error: baseErr } = await client
     .from('he_bases')
-    .select(HE_ANALYZING_BASE_FIELDS)
+    // `source` — сверх общего списка полей: этот контур единственный, кто читает
+    // базу по base_id из payload джобы, не отобрав её заранее по source='auto'
+    // (автопилот и клиентский роут запуска фильтруют источник в своих выборках).
+    .select(`${HE_ANALYZING_BASE_FIELDS}, source`)
     .eq('id', baseId)
     .maybeSingle();
   // Сбой чтения — прежнее поведение: валим только 'collecting'. Про
   // 'analyzing' без чтения судить нельзя (можно убить живой анализ).
   if (baseErr || !baseRow) {
-    await markCollectingFailed(msg);
+    await markNonTerminalFailed('collecting', msg);
     return;
   }
   const base = baseRow as unknown as HeAnalyzingBase;
-  if (base.status === 'collecting') {
-    await markCollectingFailed(msg);
+  const baseStatus = typeof base.status === 'string' && base.status ? base.status : null;
+  // Статус не прочитался значением — тот же случай «неизвестно», что выше.
+  if (!baseStatus) {
+    await markNonTerminalFailed('collecting', msg);
+    return;
+  }
+  /**
+   * НЕ АВТО-БАЗА — не наша, ремонт её не касается ни в какую сторону.
+   *
+   * Тот же тест источника, которым начинается сама стадия (stages/baseCollect:
+   * `base.source !== 'auto'` → отказ), и стоит он ДО разбора статуса: решение по
+   * терминальности статуса для чужой базы бессмысленно в обе стороны. Без него
+   * ветка «любой нетерминальный статус → failed» пишет 'failed' поверх
+   * 'uploaded' — то есть поверх ЖИВОЙ базы, которую специалист только что залил
+   * CSV в /tools/hypothesis-engine и которая ждёт своего base_analyze, — а по
+   * 'analyzing' чужой базы ремонт поставил бы ВТОРОЙ платный base_analyze.
+   * Сегодня путь сюда недостижим (джобу base_collect ставят только вместе с
+   * авто-базой, и start-guard стадии другой source не пускает), поэтому проверка
+   * — не лечение живого дефекта, а сохранение инварианта: первая же будущая
+   * «пересборка адресов для загруженной базы» иначе стоила бы staff-базы.
+   */
+  const baseSource = typeof base.source === 'string' && base.source ? base.source : null;
+  if (baseSource !== 'auto') {
+    log(
+      'info',
+      `Job ${job.id} (base_collect) base ${baseId}: source='${baseSource ?? 'upload'}' — не авто-база, ремонт её не трогает`,
+    );
     return;
   }
   // Терминальный статус (стадия сама свалила базу с ПРИЧИНОЙ — «ноль строк»,
   // отказ пробы среза; так выглядели базы Franchise Brands 12.08) — не трогаем:
   // текст start-guard перетёр бы осмысленную причину.
-  if (base.status !== 'analyzing') return;
+  if (HE_BASE_TERMINAL_STATUSES.has(baseStatus)) return;
+  // Любой нетерминальный статус, КРОМЕ 'analyzing', собранного не имеет: сборка
+  // умерла до harvest, спасать нечего — база уходит в 'failed' с причиной.
+  // 'collecting' (штатный статус авто-сборки) и любой третий нетерминальный
+  // статус идут одним путём, а не так, что первый лечится, а остальные висят.
+  if (baseStatus !== 'analyzing') {
+    await markNonTerminalFailed(baseStatus, msg);
+    return;
+  }
 
   // Живость — ОБЩИМ предикатом автопилота и кабинета, но с graceMs=0: смерть
   // тут наблюдаемая, а не выведенная из снапшота (упала та самая base_collect,
@@ -1455,14 +1573,19 @@ function rateLimitPauseMs(retryAfterMs: number | undefined): number {
  */
 async function failJob(job: HeJob, err: unknown): Promise<boolean> {
   let written = false;
-  const finished = await withPostStageDeadline(job, 'fail write', async (client) => {
-    written = await writeJobFailure(client, job, err);
+  const finished = await withPostStageDeadline(job, 'fail write', async (client, signal) => {
+    written = await writeJobFailure(client, job, err, signal);
   });
   return finished && written;
 }
 
 /** Возвращает, ДОЕХАЛА ли запись отказа до строки (читатель — collectStrandedJobs). */
-async function writeJobFailure(client: HeWorkerDb, job: HeJob, err: unknown): Promise<boolean> {
+async function writeJobFailure(
+  client: HeWorkerDb,
+  job: HeJob,
+  err: unknown,
+  signal?: AbortSignal,
+): Promise<boolean> {
   const msg = err instanceof Error ? err.message : String(err);
   /**
    * То же сообщение, но пригодное для Postgres: в msg приезжает тело ответа
@@ -1600,19 +1723,44 @@ async function writeJobFailure(client: HeWorkerDb, job: HeJob, err: unknown): Pr
   // ни в text, ни в jsonb, а в msg приезжает тело ответа провайдера и текст
   // модели. Отвергнутая запись отказа оставляла бы джобу 'running' — то есть
   // прятала бы саму причину отказа.
-  const { error: failErr } = await client
-    .from('he_jobs')
-    .update({
-      status: finalFail ? 'failed' : 'pending',
-      attempts: nextAttempts,
-      error: safeMsg.slice(0, 500),
-      finished_at: finalFail ? new Date().toISOString() : null,
-      ...retryState,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', job.id);
+  const failRow = {
+    status: finalFail ? 'failed' : 'pending',
+    attempts: nextAttempts,
+    error: safeMsg.slice(0, 500),
+    finished_at: finalFail ? new Date().toISOString() : null,
+    ...retryState,
+    updated_at: new Date().toISOString(),
+  };
+  /**
+   * Запись отказа при блипе БД ПОВТОРЯЕМ. Это ровно тот случай, когда
+   * транзиентный отказ БД стоил ЦЕЛОЙ ДЖОБЫ: апдейт отвергался, строка
+   * оставалась 'running', и подобрать её было некому до следующего рестарта
+   * процесса (collectStrandedJobs ведёт только СВОЙ список брошенных строк, а
+   * туда попадает не всякий отказ) — вместе с ней стоял весь проект, потому что
+   * воркер single-flight. Повторяется ЗАПРОС: он адресован по id и идемпотентен
+   * (одни и те же attempts, run_after считается до цикла), поэтому лишних
+   * прогонов стадии не появляется ни одного.
+   */
+  let failErrMsg: string | null = null;
+  for (let attempt = 1; attempt <= FAIL_WRITE_ATTEMPTS; attempt += 1) {
+    const { error } = await client.from('he_jobs').update(failRow).eq('id', job.id);
+    if (!error) {
+      failErrMsg = null;
+      break;
+    }
+    failErrMsg = error.message;
+    // Срок участка истёк (запросы оборваны) или отказ не блип — повторять нечем.
+    if (attempt >= FAIL_WRITE_ATTEMPTS || signal?.aborted || !isTransientDbError(error)) break;
+    log(
+      'error',
+      `Job ${job.id} (${job.stage}) fail update rejected (attempt ${attempt}/${FAIL_WRITE_ATTEMPTS}), `
+        + `повторяем — блип БД: ${error.message}`,
+    );
+    await sleep(FAIL_WRITE_RETRY_BASE_MS * attempt);
+  }
   // Сбой записи отказа виден в логе: без него джоба осталась бы 'running' до
   // рестарта, и причина (та, что в msg) не попала бы никуда вообще.
+  const failErr = failErrMsg ? { message: failErrMsg } : null;
   if (failErr) {
     log('error', `Job ${job.id} (${job.stage}) fail update rejected: ${failErr.message} (причина отказа: ${msg})`);
   }

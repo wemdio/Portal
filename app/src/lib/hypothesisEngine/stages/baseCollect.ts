@@ -74,6 +74,13 @@ import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
  *     после разноса адресов больше, и что именно срезано, видно в
  *     stats.dropped_over_contact_cap / dropped_over_company_cap. Далее —
  *     he_bases → status='analyzing' и ставится стадия base_analyze.
+ *     Пара «статус + джоба анализа» — два запроса в две таблицы, транзакции у
+ *     PostgREST нет, поэтому пару закрывает ПОВТОР этой же джобы: база в
+ *     'analyzing' с непустыми row_count/columns ловится в start-guard и
+ *     доводится до base_analyze бесплатно (ensureBaseAnalyzeJob, дедуп по
+ *     активной джобе анализа этой базы). Сама запись базы при блипе БД
+ *     повторяется на месте (HARVEST_WRITE_ATTEMPTS) — повторять стадию, за
+ *     которую уже заплачено, из-за 503 шлюза нельзя.
  *
  * Refill-режим (ENG auto-pipeline, payload.refill=true; постановка — крон
  * app/worker/heAutoPipelineCron.ts через enqueueHeBaseCollect): PLAN →
@@ -106,6 +113,11 @@ import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
  */
 
 import type { CompaniesSearchFilters } from '@/app/api/client/companies-search/route';
+// «Блип БД или приговор» — нейтральный предикат (lib/db/transientError.ts, без
+// импортов), общий с конструктором баз и воркером движка. Нужен ровно в одном
+// месте стадии: у финальной записи базы, повтор которой бесплатен, а повтор
+// стадии — нет.
+import { isTransientDbError } from '@/lib/db/transientError';
 import { searchRows } from '@/lib/companiesSearch/rpcSearch';
 import { applyFundedFilters } from '@/lib/funded/queryFilters';
 import { buildRolesRegex } from '@/lib/parsers/atsFilters';
@@ -1241,6 +1253,14 @@ function cleanPdlReadError(message: string): string {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Повторы ФИНАЛЬНОЙ записи базы при блипе БД (паузы 1с → 2с, всего ≤3 с). Это
+ * повтор ЗАПРОСА, адресованного по id и идемпотентного, а не стадии: к этому
+ * месту уже оплачены план, коллекторы, конструктор и релевант-гейт.
+ */
+const HARVEST_WRITE_ATTEMPTS = 3;
+const HARVEST_WRITE_RETRY_BASE_MS = 1000;
 
 async function fetchPdlRows(
   ctx: HeStageContext,
@@ -2545,6 +2565,47 @@ async function judgeRowsBeforeConstruct(input: {
   };
 }
 
+/**
+ * Поставить стадию анализа базы, если её ещё нет.
+ *
+ * Дедуп той же формы, что у остальных постановок движка (ручной роут
+ * bases/[id]/template, дочейн автопилота, ремонт осиротевшей базы в
+ * autopilotNext): активная джоба этой стадии по этой базе уже есть → второй не
+ * ставим. Без него каждый повторный вход в финал сборки — а их стало больше,
+ * см. ниже про незакрытую пару, — ставил ВТОРОЙ base_analyze, то есть платил за
+ * анализ одной и той же базы дважды.
+ *
+ * Ошибку ЧТЕНИЯ дедупа бросаем, а не глотаем: пустой список после сбоя чтения
+ * означает не «джобы нет», а «неизвестно», и вставка на этом месте — платный
+ * анализ «на догадке».
+ */
+async function ensureBaseAnalyzeJob(
+  ctx: HeStageContext,
+  job: HeJob,
+  baseId: string,
+): Promise<'enqueued' | 'existing'> {
+  const { data: active, error: activeErr } = await ctx.supabase
+    .from('he_jobs')
+    .select('id, payload')
+    .eq('project_id', job.project_id)
+    .eq('stage', 'base_analyze')
+    .in('status', ['pending', 'running']);
+  if (activeErr) throw new Error(`he_jobs base_analyze dedup read: ${activeErr.message}`);
+  const queued = (active ?? []).some(
+    (j) => (j.payload as { base_id?: unknown } | null)?.base_id === baseId,
+  );
+  if (queued) return 'existing';
+
+  const { error: jobError } = await ctx.supabase.from('he_jobs').insert({
+    project_id: job.project_id,
+    stage: 'base_analyze',
+    status: 'pending',
+    payload: { base_id: baseId },
+  });
+  if (jobError) throw new Error(`he_jobs base_analyze enqueue: ${jobError.message}`);
+  return 'enqueued';
+}
+
 /* ─────────────────────────── Стадия ─────────────────────────── */
 
 export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
@@ -2571,6 +2632,45 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     throw new Error(`he_bases ${baseId}: source='${base.source ?? 'upload'}' — base_collect работает только с source='auto'`);
   }
   if (base.status !== 'collecting') {
+    /**
+     * НЕЗАКРЫТАЯ ПАРА «база в analyzing + поставленный base_analyze».
+     *
+     * Финал сборки пишет её двумя запросами (harvest-апдейт со статусом
+     * 'analyzing', затем вставка base_analyze), и в щель между ними попадали
+     * смерть пода и блип БД. Атомарной пару сделать нечем: это две таблицы, а
+     * PostgREST транзакции не даёт; поменять порядок — тоже нельзя, стадия
+     * base_analyze своего гейта готовности не имеет и на базе без строк
+     * оплатила бы вызов модели по нулю строк, выставив ей 'analyzed'.
+     *
+     * Поэтому пара закрывается ИДЕМПОТЕНТНО, повтором этой же джобы: строки
+     * собраны (row_count/columns непусты — тот же признак годности к анализу, по
+     * которому судит ремонт в autopilotNext), harvest оплачен, и единственное,
+     * чего не хватает, — бесплатная вставка he_jobs. Раньше повтор умирал здесь
+     * с «сборка уже завершена», джоба сгорала тремя попытками, и база
+     * оставалась осиротевшей до ремонта из финального фейла (worker/
+     * hypothesisEngine: repairBaseAfterCollectFinalFail) или до следующего
+     * прохода автопилота. Теперь тот же ремонт — на первом же повторе, бесплатно
+     * и без единого платного вызова: ни PLAN, ни CONSTRUCT, ни релевант-гейт
+     * второй раз не исполняются, потому что до них дело не доходит.
+     *
+     * Refill сюда не относится: у долива нет фазы анализа вовсе, его терминалы
+     * пишет baseCollectRefill.
+     */
+    const analyzingRows = typeof base.row_count === 'number' ? base.row_count : 0;
+    const analyzingColumns = Array.isArray(base.columns) ? base.columns.length : 0;
+    if (!isRefill && base.status === 'analyzing' && analyzingRows > 0 && analyzingColumns > 0) {
+      const outcome = await ensureBaseAnalyzeJob(ctx, job, baseId);
+      stageLog(
+        ctx,
+        `[base_collect] база уже в analyzing со ${analyzingRows} собранными строками: ` +
+          `сборка закончена, ${outcome === 'enqueued' ? 'доставлен пропавший' : 'анализ уже поставлен'} base_analyze`,
+      );
+      return {
+        result: { base_id: baseId, rows: analyzingRows, analysis_enqueue: outcome },
+        tokensUsed: usage.tokensUsed,
+        costUsd: usage.costUsd,
+      };
+    }
     throw new Error(`he_bases ${baseId}: status='${base.status}' — сборка уже завершена или не начиналась`);
   }
 
@@ -3351,26 +3451,54 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       'Поиск и проверка адресов не запускались — рассылка по такому срезу навредила бы ' +
       'рабочим вертикалям.'
     : null;
-  const { error: updError } = await ctx.supabase
-    .from('he_bases')
-    .update({
-      columns: finalColumns,
-      sample_rows: storedRows.slice(0, SAMPLE_ROWS),
-      data: storedRows,
-      row_count: storedRows.length,
-      status: offTargetNote ? 'failed' : 'analyzing',
-      ...(offTargetNote ? { error: offTargetNote.slice(0, 500) } : {}),
-      collect_info: { ...info, stats: statsWithQuality },
-      // Применённый кап — только когда колонка точно существует (см.
-      // contactCapColumnsPresent). Значение есть и в collect_info.construct,
-      // поэтому на инсталляции без миграции ничего не теряется.
-      ...(contactCapColumnsPresent && contactCapApplied !== null
-        ? { contact_cap_applied: contactCapApplied }
-        : {}),
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', baseId);
-  if (updError) throw new Error(`he_bases harvest update: ${updError.message}`);
+  const harvestRow = {
+    columns: finalColumns,
+    sample_rows: storedRows.slice(0, SAMPLE_ROWS),
+    data: storedRows,
+    row_count: storedRows.length,
+    status: offTargetNote ? 'failed' : 'analyzing',
+    ...(offTargetNote ? { error: offTargetNote.slice(0, 500) } : {}),
+    collect_info: { ...info, stats: statsWithQuality },
+    // Применённый кап — только когда колонка точно существует (см.
+    // contactCapColumnsPresent). Значение есть и в collect_info.construct,
+    // поэтому на инсталляции без миграции ничего не теряется.
+    ...(contactCapColumnsPresent && contactCapApplied !== null
+      ? { contact_cap_applied: contactCapApplied }
+      : {}),
+    updated_at: new Date().toISOString(),
+  };
+  /**
+   * Финальную запись при БЛИПЕ БД повторяем — повторяется ЗАПРОС, не стадия.
+   *
+   * Это самая дорогая точка невозврата в движке: до неё уже оплачены план,
+   * коллекторы, конструктор и релевант-гейт, а сама запись адресована по id и
+   * идемпотентна (одни и те же строки, статус и collect_info). Отказ здесь
+   * уходил в фейл джобы, воркер поднимал стадию заново, и повтор доходил до
+   * этого места СНОВА через суд релевант-гейта ПОСЛЕ импорта (единственная
+   * платная работа, которая на повторе не memoized, — путь RU-инструмента,
+   * gateRan=false): три попытки = до трёх оплаченных судов там, где не сохранился
+   * один апдейт. 502/503 шлюза лечится тремя секундами ожидания, а не деньгами.
+   *
+   * Постоянный отказ (невалидный JSON, права, ограничение) не повторяем: он не
+   * изменится, и прежний путь — фейл джобы с причиной — остаётся его путём.
+   */
+  let updErrorMsg: string | null = null;
+  for (let attempt = 1; attempt <= HARVEST_WRITE_ATTEMPTS; attempt += 1) {
+    const { error } = await ctx.supabase.from('he_bases').update(harvestRow).eq('id', baseId);
+    if (!error) {
+      updErrorMsg = null;
+      break;
+    }
+    updErrorMsg = error.message;
+    if (attempt >= HARVEST_WRITE_ATTEMPTS || !isTransientDbError(error)) break;
+    stageLog(
+      ctx,
+      `[base_collect] финальная запись базы отвергнута (попытка ${attempt}/${HARVEST_WRITE_ATTEMPTS}), ` +
+        `повторяем — блип БД: ${error.message}`,
+    );
+    await sleep(HARVEST_WRITE_RETRY_BASE_MS * attempt);
+  }
+  if (updErrorMsg) throw new Error(`he_bases harvest update: ${updErrorMsg}`);
   if (offTargetNote) {
     // Анализ не ставим — анализировать нечего, а поставленный base_analyze увёл
     // бы базу обратно в живой статус. Бросаем той же причиной, как отказ пробы
@@ -3382,18 +3510,16 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     throw new Error(offTargetNote);
   }
 
-  const { error: jobError } = await ctx.supabase.from('he_jobs').insert({
-    project_id: job.project_id,
-    stage: 'base_analyze',
-    status: 'pending',
-    payload: { base_id: baseId },
-  });
-  if (jobError) throw new Error(`he_jobs base_analyze enqueue: ${jobError.message}`);
+  // Постановка анализа — через дедуп (ensureBaseAnalyzeJob): повторный вход в
+  // финал возможен (незакрытая пара выше, повтор после блипа записи), и без
+  // проверки существования он платил бы за анализ этой базы второй раз.
+  const analysisEnqueue = await ensureBaseAnalyzeJob(ctx, job, baseId);
 
   return {
     result: {
       base_id: baseId,
       rows: storedRows.length,
+      analysis_enqueue: analysisEnqueue,
       low_relevance: lowRelevanceCount,
       tasks_done: done.length,
       tasks_failed: failed.length,

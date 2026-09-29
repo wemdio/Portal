@@ -6,6 +6,14 @@
  * клиентский ENG-контур ставит research так же (и сразу при создании проекта).
  * Одновременно может идти только один research-прогон: при активной
  * research-стадии — conflict.
+ *
+ * Дедуп двухслойный. Чтение ниже отсекает обычный повтор, а гонку двух
+ * одновременных запросов (двойной клик, два таба) держит partial unique index
+ * `he_jobs_one_active_site_profile`
+ * (supabase/migrations/20260929_0002_he_site_profile_active_unique.sql):
+ * проигравшая вставка получает 23505 и становится тем же conflict'ом, то есть
+ * 409, а не 500 с текстом Postgres. Индекс покрывает ТОЛЬКО стадию
+ * site_profile — почему именно её и чем опасен широкий, написано в миграции.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -49,6 +57,17 @@ export async function enqueueHeResearchJob(
     .insert({ project_id: projectId, stage: 'site_profile', status: 'pending', payload: {} })
     .select()
     .single();
+  // 23505 = unique_violation на he_jobs_one_active_site_profile: параллельный
+  // запуск исследования успел раньше. Вставки не произошло, писать и откатывать
+  // нечего — отвечаем тем же conflict'ом, что и дедуп-чтение выше, и НЕ трогаем
+  // he_projects.status ниже: этот перевод принадлежит победителю. Гонка: на
+  // момент нашего ответа он мог ещё не дописать 'researching', поэтому клиент,
+  // прочитавший карточку сразу после 409, может увидеть прежний статус —
+  // состояние выравнивается за один polling-тик, а вторая запись отсюда
+  // затёрла бы чужой прогон.
+  // Других уникальных ограничений у he_jobs нет (кроме PK по id с
+  // gen_random_uuid()), поэтому код однозначен.
+  if (jobErr?.code === '23505') return { ok: false, reason: 'conflict' };
   if (jobErr || !job) {
     return { ok: false, reason: 'db', message: jobErr?.message ?? 'enqueue failed' };
   }

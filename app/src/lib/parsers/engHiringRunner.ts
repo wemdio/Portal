@@ -147,7 +147,7 @@ async function retryJobState<T>(
     }
     const retryable = status === 408 || status === 429 || (status >= 500 && status <= 599)
       || /^(PGRST00[0-3]|08\w{3}|53300|57P0[1-3])$/.test(failure.code ?? '')
-      || isTransientDbError(`${failure.code ?? ''} ${failure.message}`);
+      || isRetryableDbFailure(`${failure.code ?? ''} ${failure.message}`);
     if (!retryable || attempt >= JOB_STATE_ATTEMPTS) {
       throw new EngHiringJobStateError(`${label} failed: ${failure.code ? `${failure.code}: ` : ''}${failure.message}`);
     }
@@ -413,7 +413,16 @@ type UpsertOutcome = { error: { message: string } | null };
 
 // Abort / timeout / dropped-connection errors are worth retrying; data and
 // constraint errors are not (a retry just fails identically and wastes time).
-export function isTransientDbError(message: string): boolean {
+//
+// LOCAL to this runner, and deliberately NOT exported. It is not the same
+// question as lib/db/transientError.isTransientDbError, which answers "is this a
+// DB blip" for the hypothesis engine and excludes 'abort' and 'timeout' on
+// purpose: there those mean a user cancel and a watchdog interruption, and
+// calling them a blip resurrects a cancelled job on free retries. Here the only
+// retried writes are idempotent ON CONFLICT upserts and job-state reads, so an
+// aborted request is worth repeating. Keep the two apart by name as well as by
+// module, so no auto-import can slip this one into a job-fate decision.
+function isRetryableDbFailure(message: string): boolean {
   return /\babort|timed?\s*out|timeout|fetch failed|socket|econnreset|epipe|enetunreach|network|terminat/i.test(message ?? '');
 }
 
@@ -438,7 +447,7 @@ export async function upsertInChunksWithRetry(
       const { error } = await upsert(chunk);
       if (!error) { ok = true; break; }
       lastMessage = error.message;
-      if (attempt < opts.retries && isTransientDbError(error.message)) {
+      if (attempt < opts.retries && isRetryableDbFailure(error.message)) {
         await wait(opts.delayMs * attempt);
         continue;
       }
