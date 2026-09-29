@@ -2,6 +2,7 @@
 
 import { Fragment, useState } from 'react';
 import type { PolzaOutreachCompanyRow, PolzaOutreachFunnel, ParserJobStatus } from '@/types';
+import { companyEmailStatusLabel, extraCompanyEmails } from '@/lib/outreachEmail/companyEmails';
 import { fmtUsd } from '@/lib/outreachLlm/format';
 import type { OutreachLlmBudgetSnapshot } from '@/lib/outreachLlm/types';
 import { polzaReviewLabel } from '@/lib/polzaOutreach/types';
@@ -164,8 +165,43 @@ function LettersBlock({ row }: { row: PolzaOutreachCompanyRow }) {
             )}
           </div>
           <pre className="whitespace-pre-wrap break-words font-sans text-sm text-gray-700">{letter.body}</pre>
+          {/* Среди адресов компании есть и личный, и общий ящик — второй вариант письма 1. */}
+          {letter.alt_body ? (
+            <div className="mt-3 border-t border-gray-200 pt-3">
+              <div className="mb-1 text-xs font-medium text-gray-500">
+                {letter.alt_routing ? 'Вариант для общего ящика' : 'Вариант для личного адреса'}
+              </div>
+              <pre className="whitespace-pre-wrap break-words font-sans text-sm text-gray-700">{letter.alt_body}</pre>
+            </div>
+          ) : null}
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * Почта компании: главный адрес и остальные (до трёх адресов со статусом OK,
+ * с 29.09.2026) — каждый со своим статусом проверки.
+ */
+function EmailsCell({ row }: { row: PolzaOutreachCompanyRow }) {
+  if (!row.selected_company_email) return <span className="text-gray-400">—</span>;
+  const items = [
+    { email: row.selected_company_email, verification: row.email_verification ?? null },
+    ...extraCompanyEmails(row.emails, row.selected_company_email),
+  ];
+  return (
+    <div className="flex max-w-[220px] flex-col gap-0.5">
+      {items.map((item) => {
+        const status = companyEmailStatusLabel(item.verification);
+        return (
+          <span key={item.email} className="inline-flex items-center gap-1 truncate text-gray-700" title={status ? `${item.email} — ${status}` : item.email}>
+            <Mail className="h-3 w-3 shrink-0 text-gray-400" />
+            <span className="truncate">{item.email}</span>
+            {status && items.length > 1 ? <span className="shrink-0 text-[11px] text-gray-400">{status}</span> : null}
+          </span>
+        );
+      })}
     </div>
   );
 }
@@ -537,14 +573,7 @@ export function PolzaOutreachResults({
                           <ConfidenceBadge value={row.target_sales_geo_confidence} />
                         </td>
                         <td className="px-3 py-3">
-                          {row.selected_company_email ? (
-                            <span className="inline-flex max-w-[180px] items-center gap-1 truncate text-gray-700" title={row.selected_company_email}>
-                              <Mail className="h-3 w-3 shrink-0 text-gray-400" />
-                              {row.selected_company_email}
-                            </span>
-                          ) : (
-                            <span className="text-gray-400">—</span>
-                          )}
+                          <EmailsCell row={row} />
                         </td>
                         <td className="px-3 py-3">
                           {row.letters?.length ? (

@@ -187,11 +187,20 @@ export interface PolzaVacancyAnalysis {
   is_lead_gen_agency: boolean;
 }
 
-/** Письмо цепочки (letters jsonb). Тема — только у письма 1: письма 2–4 идут ответом в той же ветке. */
+/**
+ * Письмо цепочки (letters jsonb). Тема — только у письма 1: письма 2–4 идут
+ * ответом в той же ветке. У письма 1 бывает второй вариант (alt_body,
+ * lib/outreachEmail/companyEmails.ts): среди адресов компании есть и личный,
+ * и общий ящик.
+ */
 export interface PolzaOutreachLetter {
   n: number;
   subject: string;
   body: string;
+  /** Письмо 1 для адресов другого вида, чем главный. */
+  alt_body?: string;
+  /** Вид этого варианта: true — «кто у вас за это отвечает?». */
+  alt_routing?: boolean;
 }
 
 /** Гарды S6: результат проверки готовой цепочки. */

@@ -2,6 +2,7 @@
 
 import { Fragment, useState } from 'react';
 import { ChevronDown, ChevronRight, ExternalLink } from 'lucide-react';
+import { companyEmailStatusLabel, extraCompanyEmails } from '@/lib/outreachEmail/companyEmails';
 import { DOUBT_LABELS, REASON_LABELS, type DoubtCode } from '@/lib/polzaRuOutreach/types';
 import { MODE_LABELS, SIGNAL_LABELS, STATUS_LABELS, fmtDate, type RuRow } from './shared';
 
@@ -68,10 +69,24 @@ function Letters({ row }: { row: RuRow }) {
             )}
           </div>
           <pre className="whitespace-pre-wrap font-sans text-sm text-gray-800">{l.body}</pre>
+          {/* Среди адресов компании есть и адрес отдела, и общий ящик — второй вариант письма 1. */}
+          {l.alt_body ? (
+            <div className="mt-2 border-t border-gray-100 pt-2">
+              <div className="mb-1 text-xs font-medium text-gray-500">
+                {l.alt_routing ? 'Вариант «кому переслать» — для общего ящика' : 'Вариант лично — для адреса отдела'}
+              </div>
+              <pre className="whitespace-pre-wrap font-sans text-sm text-gray-800">{l.alt_body}</pre>
+            </div>
+          ) : null}
         </div>
       ))}
     </div>
   );
+}
+
+/** Остальные адреса компании (до двух, с 29.09.2026) — каждый со статусом проверки. */
+function extraEmails(row: RuRow) {
+  return extraCompanyEmails(row.emails, row.recipient_email);
 }
 
 function Details({ row }: { row: RuRow }) {
@@ -148,6 +163,15 @@ function Details({ row }: { row: RuRow }) {
           {row.case_id ? ` · кейс ${row.case_id}${row.case_match_reason ? ` (${row.case_match_reason})` : ''}` : ' · без кейса'}
           {row.email_verification ? ` · почта: ${EMAIL_VERIFICATION_LABELS[row.email_verification] ?? row.email_verification}` : ''}
         </div>
+        {extraEmails(row).length > 0 && (
+          <div className="text-xs text-gray-500">
+            Ещё адреса компании:{' '}
+            {extraEmails(row)
+              .map((item) => `${item.email} (${[item.is_routing ? 'кому переслать' : 'лично', companyEmailStatusLabel(item.verification)].filter(Boolean).join(', ')})`)
+              .join('; ')}
+            . Каждый получит цепочку со своего адреса, первые письма — с разницей в сутки.
+          </div>
+        )}
         {row.qa_flags?.length > 0 && <div className="text-xs text-red-700">QA: {row.qa_flags.join(', ')}</div>}
       </div>
       <Letters row={row} />
@@ -193,7 +217,14 @@ export function ResultsTable({ rows }: { rows: RuRow[] }) {
                     </div>
                   </td>
                   <td className="px-3 py-2 text-xs text-gray-600">{row.chain_type ? MODE_LABELS[row.chain_type] ?? row.chain_type : '—'}</td>
-                  <td className="px-3 py-2 text-xs text-gray-700">{row.recipient_email ?? '—'}</td>
+                  <td className="px-3 py-2 text-xs text-gray-700">
+                    <div>{row.recipient_email ?? '—'}</div>
+                    {extraEmails(row).map((item) => (
+                      <div key={item.email} className="text-gray-500" title={companyEmailStatusLabel(item.verification)}>
+                        {item.email}
+                      </div>
+                    ))}
+                  </td>
                   <td className="px-3 py-2">
                     <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_TONE[row.row_status]}`}>
                       {STATUS_LABELS[row.row_status]}

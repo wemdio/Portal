@@ -40,6 +40,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { altVariantFor, type CompanyEmail } from '@/lib/outreachEmail/companyEmails';
 import {
   smtpAvailable,
   type EmailDomainCache,
@@ -266,6 +267,11 @@ interface RowEmail {
   sourceUrl: string | null;
   /** ok / catch_all / unverified — вердикт SMTP-проверки; crm_contact — адрес из AMO, его не проверяем. */
   verification: OutreachEmailVerification | 'crm_contact';
+  /**
+   * Все адреса компании в работе (1–3, колонка emails), главный — первым:
+   * по ним решается второй вариант письма 1.
+   */
+  emails: CompanyEmail[];
 }
 
 /** Итог бесплатного шага: компания с доменом и рабочей почтой — вход разбора ИИ. */
@@ -992,11 +998,11 @@ async function runJob(
       // Почта — до ИИ: компания без рабочего адреса не стоит разбора. Возврату
       // берём контакт из AMO без поиска и проверки — с ним уже был разговор.
       const reactivation = Boolean(amoRec && amoRec.status === 'lost' && amoRec.priorContact);
-      let email: RowEmail;
+      let foundEmails: Array<Omit<RowEmail, 'emails'>>;
       // Серия «не удалось проверить» дошла до порога — строку дописываем, запуск валим.
       let smtpSilent = false;
       if (reactivation && amoRec?.contactEmail) {
-        email = { email: amoRec.contactEmail, emailType: 'person', isRouting: false, recipientRole: 'Контакт из AMO', sourceUrl: null, verification: 'crm_contact' };
+        foundEmails = [{ email: amoRec.contactEmail, emailType: 'person', isRouting: false, recipientRole: 'Контакт из AMO', sourceUrl: null, verification: 'crm_contact' }];
       } else {
         const found = await findRuCompanyEmail(site_url, domain, emailDomainCache);
         smtpSilent = noteEmailVerdict(found.verdict);
@@ -1012,23 +1018,34 @@ async function runJob(
           });
           return null;
         }
-        email = {
-          email: found.email,
-          emailType: found.emailType,
-          isRouting: found.isRouting,
-          recipientRole: found.recipientRole,
-          sourceUrl: found.sourceUrl,
-          verification: found.verification,
-        };
+        // До трёх рабочих адресов, главный — первым.
+        foundEmails = found.emails.map((item) => ({ ...item, sourceUrl: found.sourceUrl }));
       }
-      if (await isSuppressed(db, email.email)) {
-        await finish(id, { stage: 'recipient_resolved', status: 'rejected', reason: 'SUPPRESSED_CONTACT', detail: email.email });
+      // Стоп-лист — по каждому адресу: запрещённый выпадает, главным становится
+      // следующий. Строка отсеивается, только если разрешённых не осталось.
+      const allowed: Array<Omit<RowEmail, 'emails'>> = [];
+      const suppressedEmails: string[] = [];
+      for (const item of foundEmails) {
+        if (await isSuppressed(db, item.email)) suppressedEmails.push(item.email);
+        else allowed.push(item);
+      }
+      if (!allowed.length) {
+        await finish(id, { stage: 'recipient_resolved', status: 'rejected', reason: 'SUPPRESSED_CONTACT', detail: suppressedEmails.join(', ') });
         if (smtpSilent) throw smtpSilentError();
         return null;
       }
+      const email: RowEmail = {
+        ...allowed[0],
+        emails: allowed.map((item) => ({
+          email: item.email,
+          verification: item.verification,
+          type: item.emailType,
+          is_routing: item.isRouting,
+        })),
+      };
       // Почту и вердикт проверки пишем сразу: строка, отсеянная дальше разбором
-      // или оценкой, показывает в журнале, какой адрес у неё был и чем
-      // кончилась проверка.
+      // или оценкой, показывает в журнале, какие адреса у неё были и чем
+      // кончилась проверка. Главный — в прежних колонках, все — в emails.
       const emailPatch = {
         recipient_email: email.email,
         email_type: email.emailType,
@@ -1036,6 +1053,7 @@ async function runJob(
         email_source_url: email.sourceUrl,
         recipient_role: email.recipientRole,
         is_routing: email.isRouting,
+        emails: email.emails,
       };
       if (email.verification === 'unverified') {
         // Почта не проверена — строка сразу очень спорная и дальше не идёт:
@@ -1473,6 +1491,7 @@ async function runJob(
           caseRecord: q.caseHit?.record ?? null,
           recipientEmail: q.email.email,
           amoStatus: q.amo?.status ?? null,
+          alt: altVariantFor(q.email.emails),
         },
         { sender, claims: libraries.claims, hypothesis: segmentsHypothesis },
       );

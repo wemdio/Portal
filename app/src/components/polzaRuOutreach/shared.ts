@@ -87,6 +87,11 @@ export interface RuRow {
   email_type: string | null;
   recipient_role: string | null;
   is_routing: boolean | null;
+  /**
+   * Все адреса компании в работе (до трёх, главный — первым; с 29.09.2026):
+   * [{ email, verification, type, is_routing }] — lib/outreachEmail/companyEmails.ts.
+   */
+  emails: unknown;
   letters: Letter[] | null;
   subject_b: string | null;
   case_id: string | null;

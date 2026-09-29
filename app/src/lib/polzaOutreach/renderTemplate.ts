@@ -121,6 +121,11 @@ export interface CompanyLettersInput {
   segments: string[];
   /** Тип выбранной почты (findEmail): общий ящик получает письмо 1 «кто отвечает». */
   emailType: string | null;
+  /**
+   * Второй вариант письма 1 для остальных адресов компании (altRoutingFor):
+   * true — «кто у вас за это отвечает?», false — лично; null — не нужен.
+   */
+  altRouting?: boolean | null;
 }
 
 export interface CompanyLetters {
@@ -145,7 +150,7 @@ export function composeCompanyLetters(template: PolzaChainTemplateLetters, input
   const caseHit = input.caseHit ? { ...input.caseHit, snippet: tidy(input.caseHit.snippet), segment: tidy(input.caseHit.segment) } : null;
   const primary = primaryTrigger(triggers);
   const isRouting = input.emailType === 'generic_company';
-  const letters = renderTemplate(template, {
+  const values: TemplateValues = {
     company,
     trigger: triggerPhrase(company, primary),
     triggerShort: triggerShort(primary),
@@ -154,7 +159,12 @@ export function composeCompanyLetters(template: PolzaChainTemplateLetters, input
     segments: segmentsBlock(company, input.segments),
     signature,
     isRouting,
-  });
+  };
+  const letters = renderTemplate(template, values);
+  // Второй вариант письма 1 — тот вид, которого нет у главного адреса: у
+  // компании есть и личный адрес, и общий ящик. Письма 2–4 и тема общие.
+  const altRouting = input.altRouting ?? null;
+  const altLetter1 = altRouting !== null && altRouting !== isRouting ? renderTemplate(template, { ...values, isRouting: altRouting })[0] : null;
   // Проверенные факты: цифры в письмах — только из них, а запретные и служебные
   // слова гард ищет в тексте без них (имя «Leading Edge» — не наша реклама).
   // Сегменты и строка о компании — из разбора сайта, цифр в них не бывает
@@ -168,5 +178,19 @@ export function composeCompanyLetters(template: PolzaChainTemplateLetters, input
     ...(caseHit ? [caseHit.snippet, caseHit.segment] : []),
     ...input.segments.map(tidy),
   ];
-  return { letters, guard: guardLetters(letters, allowedFacts, signature), isRouting };
+  const guard = guardLetters(letters, allowedFacts, signature);
+  if (!altLetter1) return { letters, guard, isRouting };
+  // Второй вариант проверяется теми же гардами, что и основной: его получит
+  // живой адрес компании. Провал любого — строка на ручную проверку.
+  const altGuard = guardLetters([altLetter1, ...letters.slice(1)], allowedFacts, signature);
+  const altLabel = altRouting ? 'вариант для общего ящика' : 'личный вариант';
+  const altViolations = altGuard.violations
+    .filter((v) => v.startsWith('письмо 1'))
+    .map((v) => v.replace(/^письмо 1/, `письмо 1 (${altLabel})`));
+  const [first, ...rest] = letters;
+  return {
+    letters: [{ ...first, alt_body: altLetter1.body, alt_routing: altRouting as boolean }, ...rest],
+    guard: { ok: guard.ok && altViolations.length === 0, violations: [...guard.violations, ...altViolations] },
+    isRouting,
+  };
 }
