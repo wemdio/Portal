@@ -15,7 +15,6 @@ import {
   importMailboxes,
   moveMailboxes,
   patchMailbox,
-  setEgressAcceptsNew,
   startMailboxProbe,
   type BulkMailboxAction,
   type EgressIpDto,
@@ -25,7 +24,7 @@ import {
   type MailboxTagDto,
   type ProbeResultDto,
 } from './api';
-import { EgressMoveMenu, EgressPanel } from './EgressPanel';
+import { EgressMoveMenu } from './EgressPanel';
 import { GOOGLE_STATE_LABELS, MAILBOX_STATUS_LABELS, providerLabel } from './labels';
 import { TagAssignMenu, TagChip, TagFilterMenu, tagTones } from './MailboxTags';
 import { SenderModal } from './SenderModal';
@@ -35,7 +34,8 @@ const EMPTY_SELECTION: ReadonlySet<string> = new Set();
 /** Пауза между буквой и запросом: иначе поиск стоит запроса на символ. */
 const SEARCH_DEBOUNCE_MS = 300;
 
-export function MailboxesTab() {
+/** initialEgressIp — адрес, по которому пришли из вкладки «Адреса отправки». */
+export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: string | null }) {
   const [mailboxes, setMailboxes] = useState<MailboxDto[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -78,10 +78,8 @@ export function MailboxesTab() {
   // и список перезагружался бы на каждый рендер.
   const tagFilterKey = [...tagFilter].sort().join(',');
   const [egressIps, setEgressIps] = useState<EgressIpDto[]>([]);
-  const [unassigned, setUnassigned] = useState(0);
-  // Фильтр по адресу — клик по адресу в блоке «Адреса отправки».
-  const [egressFilter, setEgressFilter] = useState<string | null>(null);
-  const [egressBusy, setEgressBusy] = useState<string | null>(null);
+  // Фильтр по адресу — клик по адресу во вкладке «Адреса отправки».
+  const [egressFilter, setEgressFilter] = useState<string | null>(initialEgressIp);
 
   const load = useCallback(async (targetPage: number) => {
     try {
@@ -123,17 +121,14 @@ export function MailboxesTab() {
     try {
       const res = await fetchEgressIps();
       setEgressIps(res.ips);
-      setUnassigned(res.unassigned);
     } catch {
-      /* адреса не доехали — блок просто не покажется */
+      /* адреса не доехали — меню «На адрес» просто не покажется */
     }
   }, []);
 
+  // Адреса здесь нужны только меню «На адрес»: их пульс опрашивает своя вкладка.
   useEffect(() => {
     void loadEgress();
-    // Пульс воркеров — раз в 30 с; чаще опрашивать незачем.
-    const timer = window.setInterval(() => void loadEgress(), 30_000);
-    return () => window.clearInterval(timer);
   }, [loadEgress]);
 
   // Ушли с экрана недонабрав — отложенный запрос отменяем.
@@ -329,19 +324,6 @@ export function MailboxesTab() {
     resetToFirstPage();
   };
 
-  const toggleAcceptsNew = async (row: EgressIpDto) => {
-    setEgressBusy(row.ip);
-    setError(null);
-    try {
-      await setEgressAcceptsNew(row.ip, !row.acceptsNew);
-      await loadEgress();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Не удалось переключить адрес');
-    } finally {
-      setEgressBusy(null);
-    }
-  };
-
   /** «На адрес»: ящик закреплён за адресом, перенос — осознанное действие. */
   const moveToEgress = async (ip: string) => {
     const ids = [...selected];
@@ -490,15 +472,6 @@ export function MailboxesTab() {
         {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
       </div>
 
-      <EgressPanel
-        ips={egressIps}
-        unassigned={unassigned}
-        filter={egressFilter}
-        busyIp={egressBusy}
-        onFilter={filterByEgress}
-        onToggleAcceptsNew={(row) => void toggleAcceptsNew(row)}
-      />
-
       {/* Поиск и фильтр тегов — между подключением и списком: это про список,
           но нужны до того, как в нём начнёшь что-то искать глазами. */}
       <div className="flex flex-wrap items-center justify-center gap-2">
@@ -532,6 +505,15 @@ export function MailboxesTab() {
             Ящики ({total})
             {egressFilter ? (
               <span className="ml-2 font-mono text-xs font-normal text-zinc-500">адрес {egressFilter}</span>
+            ) : null}
+            {egressFilter ? (
+              <button
+                type="button"
+                onClick={() => filterByEgress(null)}
+                className="ml-2 rounded-md px-2 py-0.5 text-xs font-normal text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700"
+              >
+                Показать ящики всех адресов
+              </button>
             ) : null}
           </h2>
           <div className="flex items-center gap-1">

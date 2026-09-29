@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { MailboxesTab } from './MailboxesTab';
 import { CampaignsTab } from './CampaignsTab';
+import { EgressTab } from './EgressTab';
 import { StoplistTab } from './StoplistTab';
 import { ThreadsTab } from './ThreadsTab';
 
@@ -16,6 +17,7 @@ const TABS = [
   { id: 'campaigns', label: 'Кампании' },
   { id: 'threads', label: 'Письма' },
   { id: 'stoplist', label: 'Стоп-лист' },
+  { id: 'egress', label: 'Адреса отправки' },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
@@ -50,6 +52,9 @@ export function SenderView() {
   // Переписка из ссылки (?thread=<id>): ведут ТГ-сообщение о лиде и вкладка
   // «Квалификация» автоаутрича. Открывается один раз, при заходе на страницу.
   const [initialThreadId] = useState<string | null>(() => searchParams.get('thread'));
+  // Адрес, по которому кликнули во вкладке «Адреса отправки»: «Ящики»
+  // открываются уже отфильтрованными по нему.
+  const [egressIp, setEgressIp] = useState<string | null>(null);
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-8">
@@ -68,6 +73,7 @@ export function SenderView() {
             onClick={() => {
               setTab(item.id);
               setFocusCampaignId(null);
+              setEgressIp(null);
             }}
             className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
               tab === item.id
@@ -80,10 +86,18 @@ export function SenderView() {
         ))}
       </div>
 
-      {tab === 'mailboxes' ? <MailboxesTab /> : null}
+      {tab === 'mailboxes' ? <MailboxesTab initialEgressIp={egressIp} /> : null}
       {tab === 'campaigns' ? <CampaignsTab focusCampaignId={focusCampaignId} /> : null}
       {tab === 'threads' ? <ThreadsTab initialThreadId={initialThreadId} /> : null}
       {tab === 'stoplist' ? <StoplistTab /> : null}
+      {tab === 'egress' ? (
+        <EgressTab
+          onOpenMailboxes={(ip) => {
+            setEgressIp(ip);
+            setTab('mailboxes');
+          }}
+        />
+      ) : null}
     </div>
   );
 }
