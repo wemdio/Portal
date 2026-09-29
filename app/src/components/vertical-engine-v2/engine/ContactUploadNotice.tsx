@@ -8,6 +8,7 @@ import { StatusBox } from './ui';
 
 export function ContactUploadNotice({ templateId }: { templateId: string }) {
   const [blocked, setBlocked] = useState<VeContactUploadStatus['blocked']>(null);
+  const [campaigns, setCampaigns] = useState<VeContactUploadStatus['campaigns']>([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [queued, setQueued] = useState(false);
@@ -27,6 +28,7 @@ export function ContactUploadNotice({ templateId }: { templateId: string }) {
         if (cancelled || version !== requestVersion.current) return;
         if (!response.ok) throw new Error(response.data.error ?? 'Не удалось проверить загрузку');
         setBlocked(response.data.blocked);
+        setCampaigns(response.data.campaigns ?? []);
         if (response.data.blocked) setQueued(false);
         setError('');
       } catch (caught) {
@@ -56,8 +58,21 @@ export function ContactUploadNotice({ templateId }: { templateId: string }) {
     } finally { submitting.current = false; setBusy(false); }
   }
 
-  if (!blocked && !queued && !error) return null;
+  if (!blocked && !queued && !error && !campaigns?.length) return null;
   return <div className="space-y-2" aria-live="polite">
+    {campaigns?.map(campaign => <div key={campaign.campaign_id} className="space-y-1">
+      <p className="font-medium">{campaigns.length > 1 ? `${campaign.campaign_name}: ` : ''}{
+        campaign.remote_status === 0 ? 'Черновик в Instantly — ожидает Start'
+        : campaign.remote_status === 2 ? 'На паузе в Instantly — отправка выключена'
+        : campaign.remote_status === 1 || campaign.remote_status === 4 ? 'Включена в Instantly — отправка по расписанию'
+        : campaign.remote_status === 3 ? 'Текущая отправка завершена в Instantly'
+        : campaign.remote_status == null ? 'Статус Instantly ещё не получен'
+        : 'Кампания требует проверки в Instantly'}</p>
+      <p className={HE.muted}>Загружено через Portal: {campaign.leads_count.toLocaleString('ru-RU')} контактов.
+        {campaign.status_observed_at ? ` Последняя проверка: ${new Date(campaign.status_observed_at).toLocaleString('ru-RU')}.` : ''}</p>
+      {campaign.remote_status === 0 || campaign.remote_status === 2 ? <p className={HE.muted}>
+        Проверьте кампанию и нажмите Start в Instantly. Portal сам отправку не включает; после Start продолжит дозагрузку по плану.</p> : null}
+    </div>)}
     {blocked ? <StatusBox tone="info">
       <p className="font-medium">Нет места для контактов в Instantly</p>
       <p className="mt-1">Загрузка новых контактов проекта приостановлена. Освободите место в рабочем пространстве Instantly или увеличьте тариф, затем запросите дозаливку.</p>

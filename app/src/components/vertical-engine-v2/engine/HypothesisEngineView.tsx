@@ -20,7 +20,6 @@ import {
 } from './api';
 import { HE, Spinner, StatusDot } from './design';
 import { matchesVeSearch } from './SearchableSelect';
-import { LaunchPortfolioView } from './LaunchPortfolioView';
 import { ProjectDetail } from './ProjectDetail';
 import { ProjectStatusBadge, StatusBox, formatDate, prettyHost, prettyProjectName } from './ui';
 
@@ -48,10 +47,8 @@ function ProjectCardSkeleton() {
 }
 
 export function VeEngineWorkspace({
-  view,
   onProjectOpenChange,
 }: {
-  view?: 'projects' | 'launch-queue';
   /** Уведомляем оболочку, что открыт мастер — та прячет свой хром. */
   onProjectOpenChange?: (open: boolean) => void;
 } = {}) {
@@ -69,8 +66,6 @@ export function VeEngineWorkspace({
   const [createPanelOpen, setCreatePanelOpen] = useState(false);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [internalView, setInternalView] = useState<'projects' | 'launch-queue'>('projects');
-  const activeView = view ?? internalView;
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -147,38 +142,6 @@ export function VeEngineWorkspace({
 
   return (
     <div className="text-left">
-      {view === undefined ? (
-        <div className="ve2-tabs mb-5" role="tablist" aria-label="Раздел Vertical Engine">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeView === 'projects'}
-            onClick={() => setInternalView('projects')}
-            className="ve2-tab"
-          >
-            Проекты
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeView === 'launch-queue'}
-            onClick={() => setInternalView('launch-queue')}
-            className="ve2-tab"
-          >
-            Очередь запусков
-          </button>
-        </div>
-      ) : null}
-
-      {activeView === 'launch-queue' ? (
-        <LaunchPortfolioView
-          onProjectOpen={(projectId) => {
-            setSelectedId(projectId);
-            onProjectOpenChange?.(true);
-          }}
-        />
-      ) : (
-        <>
           {errorMsg ? (
             <div className="mb-5">
               <StatusBox tone="error">{errorMsg}</StatusBox>
@@ -387,8 +350,6 @@ export function VeEngineWorkspace({
               </section>
             </aside>
           </div>
-        </>
-      )}
     </div>
   );
 }

@@ -258,6 +258,14 @@ describe('POST Vertical Engine v2 contact-delivery preview', () => {
     });
     await mockPortalDb.from('ve_contact_supply_plans').update({ source_state: { previous_base_id: 'later-supply-base' }, estimate: { remaining_ready_estimate: null } }).eq('id', 'supply-plan-1');
     expect(await read()).toMatchObject({ estimate: null, metrics: { ready: 2, hypothesis_estimated_workdays: null } });
+    await mockInstantlyDb.from('instantly_campaign_catalog').update({new_leads_contacted_count: null, analytics_synced_at: null}).eq('id', 'campaign-a');
+    const pending = await read();
+    expect(pending).toMatchObject({metrics: null, analytics_pending: true, estimate: null,
+      stock: {ready: 2, uploaded: 2, uploaded_today: 1, uncertain: 2, business_date: '2026-09-07', timezone: 'Europe/Moscow'}});
+    // Displaying trusted stock must not turn missing analytics into permission to deliver.
+    const blockedPreview = await POST(request(), {params: Promise.resolve({id: TEMPLATE_ID})});
+    expect(blockedPreview.status).toBe(503);
+    expect(await blockedPreview.json()).toMatchObject({code: 'DELIVERY_ANALYTICS_PENDING'});
   });
 
   it('uses only the exact active Portal period and the fresh unblocked audited audience', async () => {
