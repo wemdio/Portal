@@ -147,9 +147,12 @@ export async function GET(req: NextRequest, ctx: Ctx) {
 
   // Курсор, а не смещение: результаты дописываются воркером прямо во время
   // выгрузки, и offset на растущей таблице теряет и дублирует строки.
+  // Список колонок приходит из реестра — объявляем его обычной `string`, чтобы
+  // supabase-js не пытался вывести по нему форму строки (см. selectJobField).
+  const columns: string = jobTool.results.columns ?? '*';
   let query = auth.db
     .from(jobTool.results.table)
-    .select('*')
+    .select(columns)
     .eq(jobTool.results.jobColumn, id)
     .order('id', { ascending: true })
     .limit(limit);
@@ -158,7 +161,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   const { data, error } = await query;
   if (error) return finish(benchError('server_error', error.message), 0);
 
-  const rows = (data ?? []) as Array<Record<string, unknown>>;
+  const rows = (data ?? []) as unknown as Array<Record<string, unknown>>;
   const hasMore = rows.length === limit;
   const last = rows[rows.length - 1];
 
