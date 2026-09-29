@@ -5,9 +5,11 @@ import { serveClientDemo } from '@/lib/clientDemo/demoResponse';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { stripTaskHarvest } from '@/lib/hypothesisEngine/projectDetail';
 import {
+  toClientEngAutopilotHold,
   toClientEngCampaignName,
   toClientEngCollectInfo,
   toClientEngJobProgressLabel,
+  type ClientEngAutopilotHold,
 } from '@/lib/hypothesisEngine/clientEngProjection';
 import { requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
 import { reconcileProjectVerticals } from '@/lib/hypothesisEngine/actualsReconcile';
@@ -224,6 +226,78 @@ export async function GET(req: NextRequest) {
   );
   const activeJobRows = activeJobsRes.data ?? [];
   const finishedJobRows = finishedJobsRes.data ?? [];
+
+  /**
+   * Пауза автопилота — ОТДЕЛЬНЫМ запросом и best-effort, а не колонкой в
+   * выборке проектов выше.
+   *
+   * `autopilot_error` появляется миграцией, а на установке без неё PostgREST
+   * отвечает 42703 на ВЕСЬ `select` — дописать колонку к выборке проектов
+   * значило бы положить весь Command Center до применения миграции. Тот же
+   * приём и по той же причине применён к `max_emails_per_company` в
+   * `baseCollectEnqueue`: отдельный запрос, отказ — молча в дефолт.
+   *
+   * Дефолт здесь — «паузы не знаем», то есть НИЧЕГО не показать. Выдумывать
+   * состояние, которого мы не прочитали, дашборду нельзя: пустая карточка
+   * честнее придуманной.
+   *
+   * Проект с активной джобой паузу не показывает: запись остаётся в колонке и
+   * после того, как конвейер снова поехал, а блок «Right now» в этот момент
+   * уже печатает идущие стадии.
+   *
+   * «ЕСТЬ ЛИ АКТИВНЫЕ ДЖОБЫ» СЧИТАЕТСЯ ОТДЕЛЬНЫМ ЗАПРОСОМ, а не по
+   * `activeJobRows`. Та выборка капнута ACTIVE_JOBS_LIMIT строк на ВСЕ проекты
+   * пользователя: у аккаунта с полусотней идущих джоб на одном проекте джобы
+   * остальных в неё просто не попадают, и такой проект читался как простаивающий
+   * — то есть дашборд печатал бы старую паузу поверх ИДУЩЕГО конвейера, ровно
+   * тот случай, ради которого вторая граница и заводилась. Кап там законный:
+   * `activeJobs` — список для показа, и рисовать бесконечный список незачем.
+   *
+   * Выбран ids-only запрос, а не сравнение свежести: «пауза старше последнего
+   * движения по проекту» опирается на he_projects.updated_at, а его двигает
+   * учёт расхода стадии (accumulateProjectUsage) — то есть только ОПЛАЧЕННАЯ
+   * работа. Джоба, которая встала в pending и ещё ничего не потратила, такого
+   * следа не оставляет вовсе, и сравнение молча вернуло бы «не занят» в самом
+   * частом случае. Запрос к he_jobs отвечает на вопрос прямо.
+   *
+   * Он идёт ТОЛЬКО по проектам, у которых пауза реально записана (обычно их
+   * нет вовсе), берёт одну колонку и потому кап ему не нужен: строк столько,
+   * сколько активных джоб у этих проектов. Сбой запроса — как и сбой чтения
+   * самих пауз: не показываем ничего (выдумывать непрочитанное состояние
+   * нельзя), а не показываем всё.
+   */
+  const autopilotHoldByProjectId = new Map<string, ClientEngAutopilotHold>();
+  const holdsRes = await supabaseAdmin
+    .from('he_projects')
+    .select('id, autopilot, autopilot_error, autopilot_error_at')
+    .in('id', projectIds);
+  if (!holdsRes.error) {
+    for (const raw of holdsRes.data ?? []) {
+      const row = raw as Record<string, unknown>;
+      const pid = str(row.id);
+      if (!pid) continue;
+      // Пауза — факт автопилота: у ручного прогона координатор ничего не ставит.
+      if (row.autopilot !== true) continue;
+      const hold = toClientEngAutopilotHold(row);
+      if (hold) autopilotHoldByProjectId.set(pid, hold);
+    }
+  }
+  if (autopilotHoldByProjectId.size > 0) {
+    const heldIds = [...autopilotHoldByProjectId.keys()];
+    const busyRes = await supabaseAdmin
+      .from('he_jobs')
+      .select('project_id')
+      .in('project_id', heldIds)
+      .in('status', ['pending', 'running']);
+    if (busyRes.error) {
+      autopilotHoldByProjectId.clear();
+    } else {
+      for (const raw of busyRes.data ?? []) {
+        const pid = str((raw as Record<string, unknown>).project_id);
+        if (pid) autopilotHoldByProjectId.delete(pid);
+      }
+    }
+  }
   const configRows = configsRes.data ?? [];
   const runRows = runsRes.data ?? [];
 
@@ -448,7 +522,12 @@ export async function GET(req: NextRequest) {
     });
 
   return NextResponse.json({
-    projects: projectRows.map((p) => ({ id: p.id, name: p.name, status: p.status })),
+    projects: projectRows.map((p) => ({
+      id: p.id,
+      name: p.name,
+      status: p.status,
+      autopilot_hold: autopilotHoldByProjectId.get(p.id as string) ?? null,
+    })),
     verticals,
     today,
     autoRefill,

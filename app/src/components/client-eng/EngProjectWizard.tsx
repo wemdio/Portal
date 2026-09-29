@@ -20,7 +20,7 @@ import {
   type EngProject,
   type EngProjectDetailResponse,
 } from './api-client';
-import { engStageErrorText } from './engText';
+import { engAutopilotHoldText, engAutopilotIdleText, engStageErrorText } from './engText';
 import { EngBadge, EngSpinner, fmtDate, projectStatusTone } from './ui';
 import { EngStepBrief } from './EngStepBrief';
 import { EngStepVerticals } from './EngStepVerticals';
@@ -82,7 +82,22 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
   }, [load]);
 
   const jobs = useMemo(() => detail?.jobs ?? [], [detail]);
-  const hasActiveJobs = jobs.some((j) => j.status === 'pending' || j.status === 'running');
+  /**
+   * Занят ли проект — ОТВЕТОМ СЕРВЕРА (`has_active_jobs`, отдельный ids-only
+   * запрос в роуте деталки), а не пересчётом по `jobs`.
+   *
+   * Список `jobs` капнут тридцатью самыми свежими строками, и проект,
+   * накопивший больше тридцати новых записей, пока идёт долгая сборка базы,
+   * читался отсюда как простаивающий. Ценой этого были не только «working…» и
+   * поллинг: этот же флаг — вторая граница обеих карточек автопилота ниже,
+   * то есть кабинет показывал старую паузу или «ничего не идёт» поверх
+   * работающего конвейера.
+   *
+   * Запасной путь — прежний подсчёт по списку: ключа нет там, где сервер факт
+   * не прочитал, и в демо-выдаче.
+   */
+  const hasActiveJobs =
+    detail?.has_active_jobs ?? jobs.some((j) => j.status === 'pending' || j.status === 'running');
 
   // Поллим, пока есть активные джобы — прогресс шагов подъезжает сам.
   useEffect(() => {
@@ -174,6 +189,44 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
               Last error: {engStageErrorText(project.error_code)}
             </div>
           )}
+
+          {/* ЧТО С АВТОПИЛОТОМ. Три границы, и каждая обязательная:
+              1) только на проекте с ВКЛЮЧЁННЫМ автопилотом — у ручного прогона
+                 (RU-режим) координатор ничего не ставит, и паузы у него нет по
+                 построению;
+              2) только когда активных джоб НЕТ. Запись причины остаётся в
+                 колонке и после того, как конвейер снова поехал, и «мы не
+                 смогли» поверх идущей стадии было бы враньём — шапка в этот
+                 момент уже показывает «working…»;
+              3) НЕЙТРАЛЬНАЯ ветка — только когда у проекта нет и кода сбоя
+                 стадии. Причина (`error_code`) и пауза (`autopilot_hold`)
+                 пишутся РАЗНЫМИ путями: код стадии кладёт failJob воркера, и
+                 только для research-стадий (RESEARCH_STAGES,
+                 worker/hypothesisEngine.ts), а паузу — координатор после
+                 done-джобы, само нажатие «Start outreach» (реконсилер в режиме
+                 client пишет причину и снимает её) и ночной проход. Пересечься
+                 они могут, и без этого гейта нейтральная карточка вставала
+                 ПРЯМО ПОД красной «Last error», отменяя её словами.
+
+              Пауза и её отсутствие — РАЗНЫЕ ветки, а не два оттенка одной:
+              «что-то у нас не сработало» приезжает записанной причиной
+              (янтарь), «делать нечего, ждём» — её отсутствием (нейтральный
+              текст). Красного здесь нет ни у одной: ничего не потеряно, а
+              красный в кабинете закреплён за сбоем стадии выше. */}
+          {project?.autopilot === true &&
+            !hasActiveJobs &&
+            (project.autopilot_hold ? (
+              <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-amber)' }}>
+                {engAutopilotHoldText(project.autopilot_hold.code)}
+                {project.autopilot_hold.at && (
+                  <span style={{ color: 'var(--cp-text-l)' }}> · {fmtDate(project.autopilot_hold.at)}</span>
+                )}
+              </div>
+            ) : !project.error_code ? (
+              <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-text-m)' }}>
+                {engAutopilotIdleText()}
+              </div>
+            ) : null)}
 
           <nav className="flex flex-wrap gap-1.5" aria-label="Wizard steps">
             {STEPS.map((s) => (

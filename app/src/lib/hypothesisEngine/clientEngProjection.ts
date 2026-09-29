@@ -50,6 +50,11 @@
 import type { HeProjectDetail } from './projectDetail';
 import { HE_ENG_CAMPAIGN_NAMING } from './launchHandoff';
 import { classifyHeClientError, type HeClientErrorCode } from './clientErrors';
+// Пауза автопилота читается ТОЛЬКО разбором соседней полосы: второго источника
+// этого факта у кабинета нет и быть не должно (см. toClientEngAutopilotHold).
+// Импорт значения безопасен — модуль проекции в клиентский бандл не уезжает:
+// экраны берут отсюда только типы (`import type` в engText.ts/api-client.ts).
+import { toHeAutopilotPause, type HeAutopilotPauseReason } from './autopilotNext';
 
 type Row = Record<string, unknown>;
 
@@ -225,6 +230,81 @@ export function toClientEngStageErrorCode(raw: unknown): HeClientStageErrorCode 
   if (!trimmed) return null;
   if (STAGE_CANCELLED_MARKERS.has(trimmed.toLowerCase())) return STAGE_CANCELLED_CODE;
   return classifyHeClientError(raw);
+}
+
+/* ── Пауза автопилота (`he_projects.autopilot_error`) ── */
+
+/**
+ * Почему автопилот не повёл проект дальше — в словаре КАБИНЕТА.
+ *
+ * Источник факта один и он чужой: строку проекта разбирает `toHeAutopilotPause`
+ * (`autopilotNext.ts`), и это единственный способ прочитать паузу. Здесь
+ * происходит только перевод её причины на язык клиента — у него другой словарь
+ * и другие действия, чем у движка:
+ *
+ *  - `retrying`          — состояние не прочиталось или не записалось
+ *                          (`read_failed`/`enqueue_failed`). Единственная пара,
+ *                          которую поднимает сам конвейер: ТОТ ЖЕ код
+ *                          (`reconcileHeAutopilotProject`) зовёт и ночной
+ *                          проход, и кнопка кабинета. Обещать клиенту
+ *                          автоматический возврат тут нельзя: ночной проход
+ *                          идёт только на установке с выставленным
+ *                          `HE_AUTOPILOT_RECONCILE`, а по умолчанию он
+ *                          выключен — поэтому английский текст этого кода
+ *                          называет кнопку «Start outreach», и текст этот
+ *                          ЕДИНСТВЕННЫЙ источник правды о повторе
+ *                          (`components/client-eng/engText.ts`); второго,
+ *                          вычисляемого флага у паузы намеренно нет;
+ *  - `stage_stopped`     — оплаченная стадия уже падала, и второй раз за неё
+ *                          автопилот не платит (`stage_failed`);
+ *  - `letters_exhausted` — платные прогоны генерации писем на это поколение
+ *                          анализа исчерпаны;
+ *  - `target_missing`    — вести нечего: вертикаль или база исчезли, в джобе нет
+ *                          цели (`setup_incomplete`).
+ *
+ * ПОЧЕМУ ОТСУТСТВИЕ ПАУЗЫ — ТОЖЕ ФАКТ. Здоровые решения координатора
+ * («база уже готова», «сборка уже стоит», «цепочка ещё генерируется») паузы НЕ
+ * пишут вовсе (`pauseForHeAutopilotSkip` → null). Значит «мы ждём / делать
+ * нечего» кабинет показывает по ОТСУТСТВИЮ записи, а «у нас что-то не
+ * сработало» — по её наличию, и перепутать их нельзя: это разные ветки экрана,
+ * а не два оттенка одной.
+ */
+const CLIENT_AUTOPILOT_HOLD_BY_PAUSE: Record<HeAutopilotPauseReason, HeClientAutopilotHoldCode> = {
+  read_failed: 'retrying',
+  enqueue_failed: 'retrying',
+  stage_failed: 'stage_stopped',
+  letters_exhausted: 'letters_exhausted',
+  setup_incomplete: 'target_missing',
+};
+
+export type HeClientAutopilotHoldCode =
+  | 'retrying'
+  | 'stage_stopped'
+  | 'letters_exhausted'
+  | 'target_missing';
+
+/** Пауза в том виде, в каком её получает кабинет. */
+export interface ClientEngAutopilotHold {
+  code: HeClientAutopilotHoldCode;
+  /** Когда записана (ISO); `null` — метки нет или она нечитаема. */
+  at: string | null;
+}
+
+/**
+ * Строка `he_projects` → пауза для кабинета; `null` — паузы нет.
+ *
+ * Наружу уезжает КОД и метка времени, а не причина движка: словарь движка
+ * закрытый, но он про его собственные решения (`setup_incomplete` клиенту
+ * ничего не говорит и звучит как его недоделка), а карта `Record` по всем
+ * причинам заставляет компилятор потребовать перевод для КАЖДОЙ новой — молча
+ * протечь незнакомая причина не может.
+ */
+export function toClientEngAutopilotHold(
+  project: Row | null | undefined,
+): ClientEngAutopilotHold | null {
+  const pause = toHeAutopilotPause(project);
+  if (!pause) return null;
+  return { code: CLIENT_AUTOPILOT_HOLD_BY_PAUSE[pause.reason], at: pause.at };
 }
 
 // Живая задача сборки: экран рисует источник, статус и счётчик строк. Снапшот
@@ -811,6 +891,17 @@ export const HE_PROJECT_CLIENT_COLUMNS =
 export function toClientEngProjectRow(project: Row): Row {
   const out = pick(project, PROJECT_FIELDS);
   if ('error' in project) out.error_code = toClientEngStageErrorCode(project.error);
+  /*
+   * Пауза автопилота — тоже КОДОМ, а не текстом (toClientEngAutopilotHold).
+   * Ключ появляется только там, где колонку реально читали: деталка проекта
+   * берёт строку целиком (`loadHeProjectDetail`, `select('*')`), а список
+   * проектов и ответ на создание — по `HE_PROJECT_CLIENT_COLUMNS`, куда
+   * `autopilot_error` СОЗНАТЕЛЬНО не добавлен (причина — там же, в комментарии
+   * про `max_emails_per_company`: на установке без колонки PostgREST отвечает
+   * 42703 на ВЕСЬ select, и список проектов лёг бы целиком). Карточка списка
+   * поэтому паузу не рисует, а мастер рисует.
+   */
+  if ('autopilot_error' in project) out.autopilot_hold = toClientEngAutopilotHold(project);
   if ('brief' in project) {
     const brief = asRow(project.brief);
     if (brief) {

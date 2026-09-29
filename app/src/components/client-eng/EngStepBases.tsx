@@ -363,6 +363,23 @@ export function EngStepBases({ detail }: { detail: EngDetail; onChanged: () => v
                     </div>
                   )}
 
+                  {/* Тот же 'failed', но БЕЗ причины: `error_code` равен null,
+                      когда в колонке пусто (стадию убили вместе с подом, и
+                      he_bases.error пуст или отсутствует: легаси-строка,
+                      правка руками или писатель, положивший пустой текст). Без
+                      этой ветки карточка показывала красный бейдж и ничего
+                      больше — статус без единого слова читается как поломка
+                      продукта. Кнопки повторной сборки в кабинете нет (шаг 4 —
+                      витрина, сборку ведёт автопилот), поэтому здесь честная
+                      констатация и путь к человеку, а не действие. */}
+                  {b.status === 'failed' && !b.error_code && (
+                    <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-red)' }}>
+                      This collection stopped without a recorded reason. Everything collected before
+                      the stop is saved. Our team can see the run — contact your manager if you need
+                      this vertical collected again.
+                    </div>
+                  )}
+
                   {b.status === 'analyzing' && (
                     <div className="mt-2 text-[11px] inline-flex items-center gap-1.5" style={{ color: 'var(--cp-amber)' }}>
                       <EngSpinner className="h-3 w-3" /> Analyzing the base…

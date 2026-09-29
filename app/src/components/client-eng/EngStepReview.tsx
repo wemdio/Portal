@@ -495,6 +495,21 @@ function VerticalReviewCard({
         )}
       </div>
 
+      {/* Разобранная база БЕЗ шаблона и без идущей джобы — это провалившаяся
+          генерация писем: строки `he_templates` при провале не появляется,
+          база так и остаётся 'analyzed'. Раньше шаг 5 писал про такую
+          вертикаль ровно «no template yet» — подпись, неотличимая от «ещё не
+          дошли руки», и без единого следующего шага. Кнопки «построить
+          шаблон» здесь нет намеренно: генерация писем — платная стадия, и
+          кабинет её клиенту не предлагает. */}
+      {!template && !templateBusy && base?.status === 'analyzed' && (
+        <p className="mt-2 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
+          The base for this vertical is ready, but its template has not been built yet. Nothing
+          collected is lost — our team can see it. Contact your manager if this vertical stays this
+          way.
+        </p>
+      )}
+
       {/* Запущенный шаблон: окно отправки клиент может поменять и после
           запуска — правка едет в те самые кампании, которые он создал. */}
       {launch && template && <LaunchedSendingWindow templateId={template.id} />}

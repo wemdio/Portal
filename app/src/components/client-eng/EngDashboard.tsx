@@ -36,6 +36,7 @@ import {
   type EngDashboardResponse,
   type EngDashStage,
 } from './api-client';
+import { engAutopilotHoldText } from './engText';
 import { EngCard, EngSpinner } from './ui';
 
 const POLL_INTERVAL_MS = 15000;
@@ -641,6 +642,13 @@ export function EngDashboard() {
   const autoRefill = data?.autoRefill;
   const refillEnabled = autoRefill?.enabled === true;
   const projectNames = new Map(projects.map((p) => [p.id, p.name]));
+  // Проекты, которые автопилот не продвинул на последней сверке. Роут отдаёт
+  // сюда только код причины и только по проектам без активных джоб, поэтому
+  // здесь остаётся отобрать непустые — и сразу с СУЖЕННЫМ кодом, чтобы экран
+  // не подпирал его восклицательным знаком.
+  const heldProjects = projects.flatMap((p) =>
+    p.autopilot_hold ? [{ id: p.id, name: p.name, hold: p.autopilot_hold }] : [],
+  );
   const verticalNames = new Map(verticals.map((v) => [v.id, v.name]));
   // Джоба вертикали для ETA/живых подписей (свежие первыми — берём первую).
   const jobByVertical = new Map<string, EngDashboardActiveJob>();
@@ -748,6 +756,29 @@ export function EngDashboard() {
           </section>
 
           {activeJobs.length > 0 && <ActiveJobsCard jobs={activeJobs} verticalNames={verticalNames} />}
+
+          {/* Проект, который автопилот не продвинул. Место выбрано по вопросу,
+              с которым клиент сюда и приходит: «почему ничего не происходит?» —
+              поэтому блок стоит сразу под «Right now», где идущих стадий как
+              раз нет. Ссылка ведёт в мастер проекта: там та же фраза и шаг 2 с
+              «Start outreach»; собственной кнопки здесь нет намеренно —
+              дашборд ничего не запускает. */}
+          {heldProjects.length > 0 && (
+            <EngCard className="flex flex-col gap-2">
+              <span className="ds-eyebrow">Autopilot</span>
+              {heldProjects.map((p) => (
+                <Link
+                  key={p.id}
+                  href={`/client/eng/projects/${p.id}` as Route}
+                  prefetch={false}
+                  className="text-xs hover:underline"
+                  style={{ color: 'var(--cp-amber)' }}
+                >
+                  <span className="font-semibold">{p.name}</span> — {engAutopilotHoldText(p.hold.code)}
+                </Link>
+              ))}
+            </EngCard>
+          )}
 
           {/* 02 → Verticals */}
           {verticals.length === 0 ? (

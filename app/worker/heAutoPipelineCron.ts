@@ -50,11 +50,31 @@
  * одной вертикали; второе — навсегда брошенный незаконченный сбор, за который
  * уже заплатили. Поэтому проход идёт первым.
  *
+ * ПОСЛЕ доливов идёт ПРОХОД РЕКОНСИЛЕРА АВТОПИЛОТА
+ * (lib/hypothesisEngine/autopilotReconcile → runHeAutopilotReconcilePass): тем
+ * же кодом, что и кнопка «Start outreach» в кабинете, он доставляет проектам с
+ * autopilot=true стадии, которые никто не ставил — например когда координатор
+ * воркера не смог прочитать состояние после done-джобы и конвейер встал.
+ * Проход выключен по умолчанию, включается env-флагом HE_AUTOPILOT_RECONCILE=1.
+ *
+ * Почему ПОСЛЕ доливов, а не до (обратный довод к автоподъёму выше). Проход
+ * может поставить вертикали ОСНОВНУЮ сборку, и она заняла бы слот
+ * partial unique index he_bases_one_collecting_per_vertical на всю ночь. Но
+ * встретиться они почти не могут: долив идёт только в вертикаль с ЗАПУЩЕННОЙ
+ * кампанией, а такая вертикаль по определению имеет готовую базу и шаблон —
+ * значит реконсилер по ней ничего не ставит. Голодания при этом нет: вертикаль,
+ * которой реконсилер нужен, доливать некуда, и слот у неё никто не отнимает.
+ * Зато порядок «сначала деньги клиента, потом восстановление» честен: ночной
+ * добор приносит контакты в живые кампании, а доставка пропущенной стадии
+ * подождёт минуты.
+ *
  * Exit code: 0 — все конфиги отработали; 1 — был хотя бы один fail (постановка
- * или обход конфига) либо сам проход автоподъёма не отработал, чтобы cron-алерты
- * это видели. capacity_blocked код НЕ меняет: место у рассыльщика — штатный
+ * или обход конфига), либо сам проход автоподъёма не отработал, либо проход
+ * реконсилера упал (целиком или по отдельному проекту), чтобы cron-алерты это
+ * видели. capacity_blocked код НЕ меняет: место у рассыльщика — штатный
  * отказ, а не сбой тика. Отказ автоподъёма (потолок, остывание, занятая
- * вертикаль) — тоже штатный: код не меняет.
+ * вертикаль) — тоже штатный: код не меняет. Пропуск проекта реконсилером
+ * (нечего ставить, ждём человека) — тоже.
  */
 
 import { createWorkerLogger, requireSupabaseAdmin } from './_shared';
@@ -65,6 +85,11 @@ import {
   HE_AUTO_RESUME_PER_RUN,
   runHeAutoResumeTransientPass,
 } from '@/lib/hypothesisEngine/baseAutoResume';
+import {
+  HE_AUTOPILOT_RECONCILE_FLAG_ENV,
+  HE_AUTOPILOT_RECONCILE_PER_RUN,
+  runHeAutopilotReconcilePass,
+} from '@/lib/hypothesisEngine/autopilotReconcile';
 
 const WORKER_ID = 'he-auto-pipeline-cron';
 
@@ -128,6 +153,58 @@ async function main(): Promise<number> {
     log(level, `config ${d.configId}${target}${base}: ${d.status}${msg}`);
   }
 
+  // ─── Реконсилер автопилота: доставить стадии, которые никто не поставил ───
+  // Идёт ПОСЛЕ доливов (почему — в докблоке файла). Сбой прохода ночной добор
+  // уже не отменяет: он отработал.
+  let reconcileFailed = false;
+  try {
+    const reconcile = await runHeAutopilotReconcilePass(supabase);
+    if (!reconcile.enabled) {
+      log(
+        'info',
+        `Autopilot reconcile is off (${HE_AUTOPILOT_RECONCILE_FLAG_ENV} is not set) — nothing delivered`,
+      );
+    } else {
+      for (const row of reconcile.rows) {
+        const counts = row.counts
+          ? ` (chains ${row.counts.chainsEnqueued}, collects ${row.counts.collectsEnqueued}, ` +
+            `templates ${row.counts.templatesEnqueued}, analyses ${row.counts.analysesRequeued}, ` +
+            `skipped ${row.counts.verticalsSkipped})`
+          : '';
+        // Доставленное печатаем вместе с базой: без неё в ночном логе нельзя
+        // сопоставить строку с конкретной базой, а по ней специалист ищет и
+        // джобу, и расход.
+        const why = row.details
+          .filter((d) => d.outcome === 'skipped' && d.reason)
+          .map((d) => `${d.verticalId}=${d.reason}`)
+          .concat(
+            row.details
+              .filter((d) => d.outcome !== 'skipped')
+              .map((d) => `${d.verticalId}=${d.outcome}${d.baseId ? `:${d.baseId}` : ''}`),
+          )
+          .join(' ');
+        log(
+          row.outcome === 'failed' ? 'error' : 'info',
+          `autopilot reconcile project ${row.projectId}: ${row.outcome}${counts}` +
+            (row.pause ? `, pause ${row.pause}` : '') +
+            (why ? ` — ${why}` : '') +
+            (row.message ? ` — ${row.message}` : ''),
+        );
+      }
+      log(
+        'info',
+        `Autopilot reconcile: ${reconcile.projects} projects, ${reconcile.acted} acted, ` +
+          `${reconcile.idle} idle, ${reconcile.refused} refused, ${reconcile.failed} failed ` +
+          `(up to ${HE_AUTOPILOT_RECONCILE_PER_RUN} per night)`,
+      );
+      reconcileFailed = reconcile.failed > 0;
+    }
+  } catch (err) {
+    // Громко: флаг включён, а проход не отработал (нет прав, сбой БД).
+    log('error', 'Autopilot reconcile pass failed', err);
+    reconcileFailed = true;
+  }
+
   const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
   log(
     'info',
@@ -135,7 +212,7 @@ async function main(): Promise<number> {
       `${summary.noCampaign} no_campaign, ${summary.capacityBlocked} capacity_blocked, ` +
       `${summary.failed} failed in ${elapsedSec}s`,
   );
-  return summary.failed > 0 || resumeFailed ? 1 : 0;
+  return summary.failed > 0 || resumeFailed || reconcileFailed ? 1 : 0;
 }
 
 void main()

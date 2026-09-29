@@ -24,7 +24,11 @@ import type {
 } from '@/lib/hypothesisEngine/launchHandoff';
 // Только тип — см. пояснение в engText.ts: словарь кодов один на оба конца
 // провода, а сам модуль проекции в клиентский бандл не уезжает.
-import type { HeClientStageErrorCode } from '@/lib/hypothesisEngine/clientEngProjection';
+import type {
+  ClientEngAutopilotHold,
+  HeClientAutopilotHoldCode,
+  HeClientStageErrorCode,
+} from '@/lib/hypothesisEngine/clientEngProjection';
 
 // `HeBaseSummary`/`HeProjectDetailResponse` отсюда БОЛЬШЕ НЕ реэкспортируются:
 // оба обещают `error: string` — сырой текст стадии, которого в ответе кабинета
@@ -77,6 +81,15 @@ export type EngProject = Pick<
   brief?: HeProject['brief'];
   /** Причина падения research-пайплайна; `null`/нет ключа — падения не было. */
   error_code?: HeClientStageErrorCode | null;
+  /**
+   * Почему автопилот не продвинул проект на последней сверке; `null` — паузы
+   * нет. Ключа НЕТ в ответах, которые колонку не читают (список проектов и
+   * ответ на создание идут по `HE_PROJECT_CLIENT_COLUMNS`, куда
+   * `autopilot_error` не добавлен) — поэтому поле опциональное, а не
+   * `| null`: обещать в типе то, чего в JSON нет, значит разрешить
+   * компилятору молча прочитать `undefined`.
+   */
+  autopilot_hold?: ClientEngAutopilotHold | null;
 };
 
 /** Гипотеза после разметки: без `evidence` (цитаты и ссылки стадии). */
@@ -227,6 +240,15 @@ export type EngProjectDetailResponse = Omit<
 > & {
   project?: EngProject;
   bases?: EngBaseSummary[];
+  /**
+   * Идёт ли по проекту хоть одна задача (pending/running) — ответ СЕРВЕРА
+   * отдельным запросом, а не вывод из `jobs`: тот список капнут тридцатью
+   * самыми свежими строками и на занятом проекте с длинной очередью врёт
+   * «простаивает». Ключа нет, когда сервер этот факт не прочитал (сбой
+   * вспомогательного запроса) и в демо-выдаче — тогда экран считает по `jobs`,
+   * как считал раньше.
+   */
+  has_active_jobs?: boolean;
 };
 
 interface EngProjectsResponse {
@@ -418,7 +440,17 @@ export interface EngAutopilotResponse {
   chains_enqueued?: number;
   collects_enqueued?: number;
   templates_enqueued?: number;
+  /** Осиротевшим базам доставлен пропавший анализ — тоже поставленная стадия. */
+  analyses_requeued?: number;
   verticals_skipped?: number;
+  /**
+   * Пауза, записанная этим же нажатием: `null`/нет ключа — проект не на
+   * паузе. КОД, а не причина движка и не текст — тот же закрытый словарь, что
+   * у `EngProject.autopilot_hold`. Метки времени здесь нет намеренно: нажатие
+   * только что произошло, и второй источник её значения экрану не нужен —
+   * карточку паузы со временем рисует мастер по деталке проекта.
+   */
+  autopilot_hold_code?: HeClientAutopilotHoldCode | null;
   error?: string;
 }
 
@@ -600,7 +632,17 @@ export interface EngDashboardActiveJob {
 }
 
 export interface EngDashboardResponse {
-  projects?: Array<{ id: string; name: string; status: string }>;
+  projects?: Array<{
+    id: string;
+    name: string;
+    status: string;
+    /**
+     * Пауза автопилота проекта; `null` — паузы нет либо колонки ещё нет в БД
+     * (роут читает её отдельным best-effort запросом и при отказе молча
+     * отдаёт `null` — дашборд выдуманного состояния не показывает).
+     */
+    autopilot_hold?: ClientEngAutopilotHold | null;
+  }>;
   verticals?: EngDashboardVertical[];
   today?: { appended: number; valid: number; collected: number };
   autoRefill?: { enabled: boolean; next_run_at: string; daily_cap: number };
