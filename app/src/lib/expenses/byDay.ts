@@ -22,10 +22,12 @@ export interface DayGroup<Row> {
    * выгрузке у таких строк пустая клетка, а не ноль.
    */
   withoutRate: number;
+  /** Валютная часть `total` в исходной валюте, для справки: `{ USDT: 468 }`. */
+  foreignByCurrency: Record<string, number>;
   items: Row[];
 }
 
-type DatedRow = { occurred_on_msk: string; amount_rub: number | null };
+type DatedRow = { occurred_on_msk: string; amount: number; currency: string; amount_rub: number | null };
 
 export function groupByDay<Row extends DatedRow>(rows: Row[]): DayGroup<Row>[] {
   const byDate = new Map<string, DayGroup<Row>>();
@@ -33,12 +35,17 @@ export function groupByDay<Row extends DatedRow>(rows: Row[]): DayGroup<Row>[] {
     const date = row.occurred_on_msk;
     let group = byDate.get(date);
     if (!group) {
-      group = { date, count: 0, total: 0, withoutRate: 0, items: [] };
+      group = { date, count: 0, total: 0, withoutRate: 0, foreignByCurrency: {}, items: [] };
       byDate.set(date, group);
     }
     group.count += 1;
     if (row.amount_rub === null) group.withoutRate += 1;
-    else group.total += row.amount_rub;
+    else {
+      group.total += row.amount_rub;
+      if (row.currency !== 'RUB') {
+        group.foreignByCurrency[row.currency] = (group.foreignByCurrency[row.currency] ?? 0) + row.amount;
+      }
+    }
     group.items.push(row);
   }
   // Свежий день сверху: список читают сверху вниз и начинают с последнего.
