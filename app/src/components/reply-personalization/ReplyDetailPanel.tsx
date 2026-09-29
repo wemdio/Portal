@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
 import { fetchOpenDraft, fetchThread, generateReply, skipReply, type GenerateResponse } from './api';
 import { SendConfirmDialog } from './SendConfirmDialog';
 import type { ReplyListItem, ThreadMessage } from '@/lib/replyPersonalization/types';
@@ -51,6 +51,29 @@ function writeStore(key: string, value: string | null) {
   }
 }
 
+/*
+ * Высота поля ответа. Родная ручка textarea стоит в правом нижнем углу, а поле
+ * прижато к низу экрана: тянуть её можно только вверх, и она упирается в край.
+ * Поэтому ручка своя — полоса над блоком ответа: тянешь вверх, поле растёт за
+ * счёт переписки. Выбранную высоту помним в браузере, двойной щелчок по ручке
+ * возвращает исходную. Исходная — с запасом под черновик ИИ целиком: шести
+ * строк не хватало даже на короткий ответ.
+ */
+const EDITOR_HEIGHT_KEY = 'rp-reply-editor-height';
+const EDITOR_DEFAULT_PX = 320;
+const EDITOR_MIN_PX = 120;
+/** Столько оставляем шапке, кусочку переписки и кнопкам под полем. */
+const EDITOR_RESERVED_PX = 260;
+const EDITOR_KEY_STEP_PX = 24;
+
+function editorMaxHeight(panelPx: number): number {
+  return Math.max(EDITOR_MIN_PX, panelPx - EDITOR_RESERVED_PX);
+}
+
+function clampEditorHeight(px: number, panelPx: number): number {
+  return Math.round(Math.min(Math.max(px, EDITOR_MIN_PX), editorMaxHeight(panelPx)));
+}
+
 /**
  * Правая колонка: полный диалог по письму (наши письма — вправо, адресат —
  * влево, как в мессенджере), под ним генерация черновика и отправка.
@@ -77,6 +100,72 @@ export function ReplyDetailPanel({
   const [referredEmails, setReferredEmails] = useState<string[]>([]);
   /** Кому пишем: null — ответ в ту же переписку, иначе новый контакт из ответа. */
   const [recipient, setRecipient] = useState<string | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [editorHeight, setEditorHeight] = useState(EDITOR_DEFAULT_PX);
+  /** Предел для ручки — зависит от высоты панели, пересчитываем с окном. */
+  const [editorMax, setEditorMax] = useState(EDITOR_DEFAULT_PX);
+  /** Текущая высота без ожидания рендера: её пишем в хранилище по отпусканию ручки. */
+  const heightRef = useRef(EDITOR_DEFAULT_PX);
+  const dragRef = useRef<{ startY: number; startHeight: number } | null>(null);
+
+  const panelHeight = () => rootRef.current?.clientHeight ?? window.innerHeight;
+  const applyHeight = (px: number) => {
+    heightRef.current = px;
+    setEditorHeight(px);
+  };
+
+  // Сохранённую высоту читаем после монтирования: на сервере хранилища нет, и
+  // разметка до гидрации должна совпасть. Окно сжали — поле ужимаем следом,
+  // иначе оно выдавит кнопки «Отправить» за край.
+  useEffect(() => {
+    const panel = () => rootRef.current?.clientHeight ?? window.innerHeight;
+    const saved = Number(readStore(EDITOR_HEIGHT_KEY));
+    const initial = clampEditorHeight(saved > 0 ? saved : EDITOR_DEFAULT_PX, panel());
+    heightRef.current = initial;
+    setEditorHeight(initial);
+    setEditorMax(editorMaxHeight(panel()));
+    const onResize = () => {
+      const next = clampEditorHeight(heightRef.current, panel());
+      heightRef.current = next;
+      setEditorHeight(next);
+      setEditorMax(editorMaxHeight(panel()));
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  const startResize = (e: PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    dragRef.current = { startY: e.clientY, startHeight: heightRef.current };
+  };
+
+  const moveResize = (e: PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    // Ручка над полем: тянем вверх — поле выше.
+    applyHeight(clampEditorHeight(drag.startHeight + (drag.startY - e.clientY), panelHeight()));
+  };
+
+  const endResize = () => {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    writeStore(EDITOR_HEIGHT_KEY, String(heightRef.current));
+  };
+
+  const resizeByKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+    e.preventDefault();
+    const step = e.key === 'ArrowUp' ? EDITOR_KEY_STEP_PX : -EDITOR_KEY_STEP_PX;
+    const next = clampEditorHeight(heightRef.current + step, panelHeight());
+    applyHeight(next);
+    writeStore(EDITOR_HEIGHT_KEY, String(next));
+  };
+
+  const resetHeight = () => {
+    applyHeight(clampEditorHeight(EDITOR_DEFAULT_PX, panelHeight()));
+    writeStore(EDITOR_HEIGHT_KEY, null);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -195,7 +284,7 @@ export function ReplyDetailPanel({
   };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
       {/* Шапка диалога */}
       <div className="border-b border-gray-100 px-4 py-2.5">
         <div className="text-sm font-semibold text-gray-900">{item.companyName || item.leadEmail}</div>
@@ -241,11 +330,34 @@ export function ReplyDetailPanel({
         ) : null}
       </div>
 
+      {/* Ручка высоты поля ответа — граница между перепиской и ответом:
+          тянешь вверх, поле растёт. Почему своя, а не родная у textarea, —
+          см. EDITOR_HEIGHT_KEY. */}
+      <div
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Высота поля ответа"
+        aria-valuenow={editorHeight}
+        aria-valuemin={EDITOR_MIN_PX}
+        aria-valuemax={editorMax}
+        tabIndex={0}
+        title="Потяните вверх, чтобы увеличить поле ответа. Двойной щелчок — исходная высота"
+        onPointerDown={startResize}
+        onPointerMove={moveResize}
+        onPointerUp={endResize}
+        onPointerCancel={endResize}
+        onDoubleClick={resetHeight}
+        onKeyDown={resizeByKey}
+        className="group flex h-4 shrink-0 cursor-row-resize touch-none select-none items-center justify-center border-t border-gray-100 hover:bg-gray-50 focus:outline-none focus-visible:bg-gray-100"
+      >
+        <div className="h-1 w-10 rounded-full bg-gray-300 transition group-hover:bg-gray-400" />
+      </div>
+
       {/* Кому: адресат прислал новый адрес — можно написать туда, а не ему.
           Черновик пишется под выбранного получателя, поэтому после смены
           его нужно сгенерировать заново. */}
       {referredEmails.length > 0 ? (
-        <div className="border-t border-gray-100 px-4 pt-3">
+        <div className="px-4 pt-1">
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
             <span className="text-gray-500">Кому:</span>
             {[null, ...referredEmails].map((email) => {
@@ -280,7 +392,7 @@ export function ReplyDetailPanel({
           только поверх сгенерированного черновика — на короткое «Спасибо,
           перезвоним» менеджер ждал генерацию. Черновик ИИ ложится в это же
           поле, дальше его можно править как свой текст. */}
-      <div className="border-t border-gray-100 p-4">
+      <div className={referredEmails.length > 0 ? 'border-t border-gray-100 p-4' : 'px-4 pb-4 pt-1'}>
         <div className="mb-2 flex flex-wrap items-center gap-2">
           <button
             type="button"
@@ -304,9 +416,9 @@ export function ReplyDetailPanel({
         <textarea
           value={draftText}
           onChange={(e) => updateText(e.target.value)}
-          rows={6}
+          style={{ height: editorHeight }}
           placeholder="Напишите ответ сами или нажмите «Сгенерировать ответ»"
-          className="w-full rounded-lg border border-gray-300 p-3 text-sm"
+          className="w-full resize-none rounded-lg border border-gray-300 p-3 text-sm"
         />
         {draft && !draft.contextComplete ? (
           <p className="mt-1 text-xs text-amber-600">

@@ -62,7 +62,7 @@ export async function mockTransitionProjectPeriod(
   if (periods.length !== expectedCount || (active?.id ?? null) !== expectedActiveId) {
     return {
       data: null,
-      error: { message: 'project_period_state_changed', code: '40001' },
+      error: { message: 'project_period_state_changed', code: 'PT409' },
     };
   }
 
