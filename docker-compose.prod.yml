@@ -1570,7 +1570,7 @@ services:
       # внутри сервиса прибит к UTC явно (`timezone="UTC"` в main.py). Хост при
       # этом живёт в Europe/Moscow, и в host crontab те же 18:05 писались бы как
       # `5 18`. Две разные системы отсчёта, легко перепутать.
-      - EXTERNAL_SYNC_CRON=${EXTERNAL_SYNC_CRON:-5 15 * * *}  # 15:05 UTC = 18:05 МСК
+      - EXTERNAL_SYNC_CRON=${EXTERNAL_SYNC_CRON:-5 6,9,12,15,18 * * *}  # 9:05, 12:05, 15:05, 18:05, 21:05 МСК; 18:05 обязателен — на нём отчёт продаж в 18:15
       - EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_START_MSK:-18:05}
       - EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK=${EXTERNAL_SYNC_STARTUP_WINDOW_END_MSK:-18:15}
       - YANDEX_METRIKA_TOKEN=${YANDEX_METRIKA_TOKEN:-}

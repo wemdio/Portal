@@ -8,24 +8,21 @@ import {
   fetchEgressIps,
   fetchMailboxes,
   fetchMailboxProbe,
-  fetchMailboxStats,
   fetchMailboxTags,
   googleWorkspaceStatus,
   syncGoogleWorkspace,
   importMailboxes,
   moveMailboxes,
   patchMailbox,
-  setEgressAcceptsNew,
   startMailboxProbe,
   type BulkMailboxAction,
   type EgressIpDto,
   type ImportMailboxesResult,
   type MailboxDto,
-  type MailboxStatsDto,
   type MailboxTagDto,
   type ProbeResultDto,
 } from './api';
-import { EgressMoveMenu, EgressPanel } from './EgressPanel';
+import { EgressMoveMenu } from './EgressPanel';
 import { GOOGLE_STATE_LABELS, MAILBOX_STATUS_LABELS, providerLabel } from './labels';
 import { TagAssignMenu, TagChip, TagFilterMenu, tagTones } from './MailboxTags';
 import { SenderModal } from './SenderModal';
@@ -35,7 +32,8 @@ const EMPTY_SELECTION: ReadonlySet<string> = new Set();
 /** Пауза между буквой и запросом: иначе поиск стоит запроса на символ. */
 const SEARCH_DEBOUNCE_MS = 300;
 
-export function MailboxesTab() {
+/** initialEgressIp — адрес, по которому пришли из вкладки «Адреса отправки». */
+export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: string | null }) {
   const [mailboxes, setMailboxes] = useState<MailboxDto[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -78,10 +76,8 @@ export function MailboxesTab() {
   // и список перезагружался бы на каждый рендер.
   const tagFilterKey = [...tagFilter].sort().join(',');
   const [egressIps, setEgressIps] = useState<EgressIpDto[]>([]);
-  const [unassigned, setUnassigned] = useState(0);
-  // Фильтр по адресу — клик по адресу в блоке «Адреса отправки».
-  const [egressFilter, setEgressFilter] = useState<string | null>(null);
-  const [egressBusy, setEgressBusy] = useState<string | null>(null);
+  // Фильтр по адресу — клик по адресу во вкладке «Адреса отправки».
+  const [egressFilter, setEgressFilter] = useState<string | null>(initialEgressIp);
 
   const load = useCallback(async (targetPage: number) => {
     try {
@@ -123,17 +119,14 @@ export function MailboxesTab() {
     try {
       const res = await fetchEgressIps();
       setEgressIps(res.ips);
-      setUnassigned(res.unassigned);
     } catch {
-      /* адреса не доехали — блок просто не покажется */
+      /* адреса не доехали — меню «На адрес» просто не покажется */
     }
   }, []);
 
+  // Адреса здесь нужны только меню «На адрес»: их пульс опрашивает своя вкладка.
   useEffect(() => {
     void loadEgress();
-    // Пульс воркеров — раз в 30 с; чаще опрашивать незачем.
-    const timer = window.setInterval(() => void loadEgress(), 30_000);
-    return () => window.clearInterval(timer);
   }, [loadEgress]);
 
   // Ушли с экрана недонабрав — отложенный запрос отменяем.
@@ -246,22 +239,6 @@ export function MailboxesTab() {
     }
   };
 
-  // Статистика ответов по ящикам и доменам (задача 6.3): где рассылка
-  // отвечает, а где только жжёт базу.
-  const [statsOpen, setStatsOpen] = useState(false);
-  const [stats, setStats] = useState<MailboxStatsDto | null>(null);
-  const [statsByDomain, setStatsByDomain] = useState(false);
-
-  const openStats = async () => {
-    setError(null);
-    setStatsOpen(true);
-    try {
-      setStats(await fetchMailboxStats());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Не удалось загрузить статистику');
-    }
-  };
-
   const remove = async (mailbox: MailboxDto) => {
     if (!window.confirm(`Убрать ящик ${mailbox.email} из инструмента?`)) return;
     await deleteMailbox(mailbox.id);
@@ -327,19 +304,6 @@ export function MailboxesTab() {
   const filterByEgress = (ip: string | null) => {
     setEgressFilter(ip);
     resetToFirstPage();
-  };
-
-  const toggleAcceptsNew = async (row: EgressIpDto) => {
-    setEgressBusy(row.ip);
-    setError(null);
-    try {
-      await setEgressAcceptsNew(row.ip, !row.acceptsNew);
-      await loadEgress();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Не удалось переключить адрес');
-    } finally {
-      setEgressBusy(null);
-    }
   };
 
   /** «На адрес»: ящик закреплён за адресом, перенос — осознанное действие. */
@@ -490,15 +454,6 @@ export function MailboxesTab() {
         {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
       </div>
 
-      <EgressPanel
-        ips={egressIps}
-        unassigned={unassigned}
-        filter={egressFilter}
-        busyIp={egressBusy}
-        onFilter={filterByEgress}
-        onToggleAcceptsNew={(row) => void toggleAcceptsNew(row)}
-      />
-
       {/* Поиск и фильтр тегов — между подключением и списком: это про список,
           но нужны до того, как в нём начнёшь что-то искать глазами. */}
       <div className="flex flex-wrap items-center justify-center gap-2">
@@ -533,15 +488,17 @@ export function MailboxesTab() {
             {egressFilter ? (
               <span className="ml-2 font-mono text-xs font-normal text-zinc-500">адрес {egressFilter}</span>
             ) : null}
+            {egressFilter ? (
+              <button
+                type="button"
+                onClick={() => filterByEgress(null)}
+                className="ml-2 rounded-md px-2 py-0.5 text-xs font-normal text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700"
+              >
+                Показать ящики всех адресов
+              </button>
+            ) : null}
           </h2>
           <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => void openStats()}
-              className="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700"
-            >
-              Статистика ответов
-            </button>
             <button
               type="button"
               onClick={() => void load(page)}
@@ -859,105 +816,6 @@ export function MailboxesTab() {
           </div>
         ) : null}
       </div>
-
-      {/* Статистика ответов по ящикам/доменам (задача 6.3): reply rate считается
-          от получателей, которым реально ушло письмо, а не от строк писем. */}
-      {statsOpen ? (
-        <SenderModal
-          title="Статистика ответов"
-          subtitle="Доля ответов и отбоев среди получателей, которым ушло хотя бы одно письмо"
-          size="wide"
-          onClose={() => setStatsOpen(false)}
-          footer={
-            <button
-              type="button"
-              onClick={() => setStatsOpen(false)}
-              className="rounded-lg px-3 py-2 text-sm text-zinc-600 transition-colors hover:bg-zinc-100"
-            >
-              Закрыть
-            </button>
-          }
-        >
-          <div className="mb-3 inline-flex gap-1 rounded-xl border border-zinc-200 bg-zinc-50 p-1">
-            <button
-              type="button"
-              onClick={() => setStatsByDomain(false)}
-              className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-                !statsByDomain ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:bg-zinc-100'
-              }`}
-            >
-              По ящикам
-            </button>
-            <button
-              type="button"
-              onClick={() => setStatsByDomain(true)}
-              className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-                statsByDomain ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:bg-zinc-100'
-              }`}
-            >
-              По доменам
-            </button>
-          </div>
-
-          {!stats ? (
-            <div className="flex items-center justify-center gap-2 py-10 text-sm text-zinc-500">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Загрузка…
-            </div>
-          ) : statsByDomain ? (
-            <table className="w-full text-sm">
-              <thead className="text-left text-xs uppercase text-zinc-500">
-                <tr className="border-b border-zinc-200">
-                  <th className="py-2 pr-3 font-medium">Домен</th>
-                  <th className="py-2 pr-3 font-medium">Ящиков</th>
-                  <th className="py-2 pr-3 font-medium">Писем</th>
-                  <th className="py-2 pr-3 font-medium">Получателей</th>
-                  <th className="py-2 pr-3 font-medium">Ответы</th>
-                  <th className="py-2 pr-3 font-medium">Отбои</th>
-                </tr>
-              </thead>
-              <tbody>
-                {stats.domains.map((row) => (
-                  <tr key={row.domain} className="border-b border-zinc-100 last:border-0">
-                    <td className="py-2 pr-3 font-medium text-zinc-900">{row.domain}</td>
-                    <td className="py-2 pr-3 text-zinc-600">{row.mailboxes}</td>
-                    <td className="py-2 pr-3 text-zinc-600">{row.sent}</td>
-                    <td className="py-2 pr-3 text-zinc-600">{row.reached}</td>
-                    <td className="py-2 pr-3 text-emerald-700">{row.replyRate != null ? `${row.replyRate}%` : '—'}</td>
-                    <td className="py-2 pr-3 text-amber-700">{row.bounceRate != null ? `${row.bounceRate}%` : '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <table className="w-full text-sm">
-              <thead className="text-left text-xs uppercase text-zinc-500">
-                <tr className="border-b border-zinc-200">
-                  <th className="py-2 pr-3 font-medium">Ящик</th>
-                  <th className="py-2 pr-3 font-medium">Писем</th>
-                  <th className="py-2 pr-3 font-medium">Получателей</th>
-                  <th className="py-2 pr-3 font-medium">Ответы</th>
-                  <th className="py-2 pr-3 font-medium">Отбои</th>
-                </tr>
-              </thead>
-              <tbody>
-                {stats.mailboxes.map((row) => (
-                  <tr key={row.mailbox_id} className="border-b border-zinc-100 last:border-0">
-                    <td className="py-2 pr-3 font-medium text-zinc-900">
-                      {row.email}
-                      {!row.enabled ? <span className="ml-2 text-xs text-zinc-400">выключен</span> : null}
-                    </td>
-                    <td className="py-2 pr-3 text-zinc-600">{row.sent}</td>
-                    <td className="py-2 pr-3 text-zinc-600">{row.reached}</td>
-                    <td className="py-2 pr-3 text-emerald-700">{row.replyRate != null ? `${row.replyRate}%` : '—'}</td>
-                    <td className="py-2 pr-3 text-amber-700">{row.bounceRate != null ? `${row.bounceRate}%` : '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </SenderModal>
-      ) : null}
 
       {/* Разбор проверочной отправки: построчно, что отправили и что доставил
           провайдер. Одно окно — для любого ящика, открытое из строки. */}

@@ -663,22 +663,41 @@ export function removeSuppression(email: string) {
   });
 }
 
-/** Статистика ответов по ящикам и доменам (задача 6.3). */
-export interface MailboxStatRow {
+/** Вкладка «Статистика»: ответы, доставляемость, лиды за период. */
+export type SenderStatsPeriod = '7d' | '30d' | '90d' | 'all';
+
+export interface SenderStatCounters {
   reached: number;
   replied: number;
   bounced: number;
-  replyRate: number | null;
-  bounceRate: number | null;
+  leads: number;
 }
 
-export interface MailboxStatsDto {
-  mailboxes: (MailboxStatRow & { mailbox_id: string; email: string; domain: string; status: string; enabled: boolean; sent: number })[];
-  domains: (MailboxStatRow & { domain: string; mailboxes: number; sent: number })[];
+export interface SenderStatsDto {
+  period: SenderStatsPeriod;
+  /** Когорта: получатели, которым первое письмо ушло в периоде. */
+  totals: SenderStatCounters & {
+    unsubscribed: number;
+    in_progress: number;
+    median_reply_hours: number | null;
+  };
+  letters: { sent: number; failed: number };
+  /** Входящие по типу, без прогрева: human, auto_reply, bounce, unknown. */
+  inbox: Record<string, number>;
+  /** Попали в стоп-лист за период: hard_bounce, unsubscribe, complaint, manual. */
+  suppressed: Record<string, number>;
+  mailboxes: { total: number; enabled: number; failed: number };
+  days: { day: string; sent: number; replied: number; bounced: number; leads: number }[];
+  campaigns: (SenderStatCounters & { id: string; name: string; status: string; sent: number })[];
+  mailboxList: (SenderStatCounters & {
+    id: string; email: string; enabled: boolean; status: string; sent: number; failed: number;
+  })[];
+  domains: (SenderStatCounters & { domain: string; mailboxes: number; sent: number })[];
+  steps: { step: number; reached: number; replied: number }[];
 }
 
-export function fetchMailboxStats() {
-  return authFetchJson<MailboxStatsDto>(`${BASE}/mailbox-stats`);
+export function fetchSenderStats(period: SenderStatsPeriod) {
+  return authFetchJson<SenderStatsDto>(`${BASE}/stats?period=${period}`);
 }
 
 /** mode 'replace' — заменить базу; по умолчанию новые адреса добавляются к старым. */

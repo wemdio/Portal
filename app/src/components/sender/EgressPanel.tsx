@@ -8,7 +8,7 @@ import { useDismiss } from './MailboxTags';
 /**
  * Адреса отправки: с каждого выходит в интернет свой воркер, и каждый ящик
  * закреплён за одним адресом. Блок показывает, жив ли адрес и сколько на нём
- * ящиков; меню «На адрес» переносит выбранные ящики.
+ * ящиков; меню «На адрес» во вкладке «Ящики» переносит выбранные ящики.
  */
 
 const STATE_LABELS: Record<EgressIpDto['state'], { text: string; className: string }> = {
@@ -28,33 +28,20 @@ function silentFor(lastSeenAt: string | null): string {
 export function EgressPanel({
   ips,
   unassigned,
-  filter,
   busyIp,
-  onFilter,
+  onOpenMailboxes,
   onToggleAcceptsNew,
 }: {
   ips: EgressIpDto[];
   unassigned: number;
-  filter: string | null;
   busyIp: string | null;
-  onFilter: (ip: string | null) => void;
+  onOpenMailboxes: (ip: string) => void;
   onToggleAcceptsNew: (row: EgressIpDto) => void;
 }) {
-  if (!ips.length) return null;
-
   return (
     <div className="rounded-xl border border-zinc-200 bg-white">
-      <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-3">
+      <div className="border-b border-zinc-200 px-5 py-3">
         <h2 className="text-base font-semibold text-zinc-900">Адреса отправки</h2>
-        {filter ? (
-          <button
-            type="button"
-            onClick={() => onFilter(null)}
-            className="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700"
-          >
-            Показать ящики всех адресов
-          </button>
-        ) : null}
       </div>
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
@@ -72,15 +59,12 @@ export function EgressPanel({
             {ips.map((row) => {
               const state = STATE_LABELS[row.state];
               return (
-                <tr
-                  key={row.ip}
-                  className={`border-b border-zinc-100 last:border-0 ${filter === row.ip ? 'bg-blue-50/40' : ''}`}
-                >
+                <tr key={row.ip} className="border-b border-zinc-100 last:border-0">
                   <td className="px-5 py-2.5">
-                    {/* Клик по адресу — его ящики в таблице ниже. */}
+                    {/* Клик по адресу — его ящики во вкладке «Ящики». */}
                     <button
                       type="button"
-                      onClick={() => onFilter(filter === row.ip ? null : row.ip)}
+                      onClick={() => onOpenMailboxes(row.ip)}
                       title="Показать ящики этого адреса"
                       className="font-mono text-xs text-blue-600 underline-offset-2 hover:underline"
                     >

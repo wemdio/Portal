@@ -87,7 +87,7 @@ function serviceAccounts(): ServiceAccount[] {
     const admins = splitEmails(process.env[`SENDER_GOOGLE_ADMIN_EMAIL${suffix}`]);
     if (!clientEmail || !rawKey || !admins.length) return [];
     // В .env ключ лежит одной строкой с «\n» — иначе переносы ломают формат файла.
-    return [{ clientEmail, privateKey: rawKey.replace(/\n/g, '\n'), admins }];
+    return [{ clientEmail, privateKey: rawKey.replace(/\\n/g, '\n'), admins }];
   });
 }
 
