@@ -53,19 +53,28 @@ SENDER_GOOGLE_SA_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIV
 SENDER_GOOGLE_ADMIN_EMAIL=admin@<ваш-домен>
 ```
 
-**Sender-хост** (144.31.54.166, `/opt/portal-sender/.env`) — нужен воркеру,
-чтобы входить в ящики:
+**Sender-хосты** (144.31.54.166 и 77.239.125.235, `/opt/portal-sender/.env`) —
+те же три строки: воркер входит в ящики и раз в час сам перечитывает каталог,
+поэтому адрес админа ему тоже нужен.
+
+**Второй Workspace со своим служебным аккаунтом.** У каждого аккаунта Google
+может быть свой служебный аккаунт и свой ключ. Следующий набор — те же три
+имени с окончанием `_2`, дальше `_3` и так далее:
 
 ```
-SENDER_GOOGLE_SA_EMAIL=...
-SENDER_GOOGLE_SA_PRIVATE_KEY=...
+SENDER_GOOGLE_SA_EMAIL_2=portal-sender@<проект-2>.iam.gserviceaccount.com
+SENDER_GOOGLE_SA_PRIVATE_KEY_2=-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVATE KEY-----\n
+SENDER_GOOGLE_ADMIN_EMAIL_2=admin@<домен-2>
 ```
 
-Адрес админа воркеру не нужен: каталог он не читает.
+Шаги 1–4 выше делаются для каждого набора в своём Google: свой проект, свой
+ключ, делегирование в своей админке на свой Client ID. Прописать набор нужно
+везде — на портале и на обоих sender-хостах. Ящик входит ключом того
+служебного аккаунта, из чьего каталога он пришёл.
 
-**Второй Workspace.** Тот же служебный аккаунт можно подключить к нескольким
-Workspace: в админке второго повторить шаг 4 (тот же Client ID, те же два
-разрешения), а на портале дописать админа второго аккаунта через запятую:
+**Второй Workspace на том же служебном аккаунте.** Если новый аккаунт выдал
+делегирование уже существующему служебному аккаунту (шаг 4 в его админке с тем
+же Client ID), новый набор не нужен — достаточно дописать админа через запятую:
 
 ```
 SENDER_GOOGLE_ADMIN_EMAIL=admin@<домен-1>,admin@<домен-2>
@@ -79,6 +88,9 @@ SENDER_GOOGLE_ADMIN_EMAIL=admin@<домен-1>,admin@<домен-2>
 подхватятся:
 
 ```bash
+# портал
+docker compose -p portal -f docker-compose.prod.yml up -d --force-recreate --no-deps portal
+# каждый sender-хост
 docker compose -p portal-sender --env-file .env up -d --force-recreate worker-sender
 ```
 
