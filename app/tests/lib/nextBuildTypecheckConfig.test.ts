@@ -107,11 +107,12 @@ describe('Next build typecheck contract', () => {
   }
 
   /**
-   * Проверка типов идёт двумя командами: typecheck:strict (TypeScript 5,
-   * прод-сборка в Dockerfile) и typecheck:fast (TypeScript 7, CI веток, с
-   * 28.09.2026). Обе проверяют проект кусками, а не одним проходом: целиком он
-   * не влезает в 4 ГБ машины сборки ни у 5-го, ни у 7-го. Поэтому сторожим не
-   * одну команду, а инвариант для каждой — маршруты Next и КАЖДЫЙ
+   * Проверка типов — две команды: typecheck:fast (TypeScript 7; CI веток с
+   * 28.09.2026 и прод-сборка в Dockerfile с 29.09.2026) и typecheck:strict
+   * (TypeScript 5; запасная — откат одной строкой в Dockerfile, поэтому обязана
+   * оставаться полной). Обе проверяют проект кусками, а не одним проходом:
+   * целиком он не влезает в 4 ГБ машины сборки ни у 5-го, ни у 7-го. Поэтому
+   * сторожим не одну команду, а инвариант для каждой — маршруты Next и КАЖДЫЙ
    * tsconfig.typecheck.*.json обязаны прогоняться. Так из команды не выпадет
    * кусок (часть проекта перестала бы проверяться молча) и не появится
    * файл-сирота, который завели, но запускать забыли.
@@ -234,7 +235,7 @@ describe('Next build typecheck contract', () => {
     expect(validatorConfig.exclude).toEqual(['node_modules']);
   });
 
-  it('strictly prechecks the production Docker build before skipping the duplicate check', () => {
+  it('prechecks the production Docker build with the fast typecheck before skipping the duplicate check', () => {
     const dockerfile = fs.readFileSync(
       path.resolve(process.cwd(), '..', 'Dockerfile'),
       'utf8',
@@ -242,7 +243,7 @@ describe('Next build typecheck contract', () => {
     const builderStage = dockerfile.match(
       /FROM node:22-alpine AS builder([\s\S]*?)FROM node:22-alpine AS runner/,
     )?.[1] ?? '';
-    const precheckIndex = builderStage.indexOf('RUN npm run typecheck:strict');
+    const precheckIndex = builderStage.indexOf('RUN npm run typecheck:fast');
     const buildIndex = builderStage.indexOf(
       'RUN NEXT_BUILD_PRECHECKED_TYPECHECK=1 NEXT_BUILD_SKIP_TYPECHECK=1 npm run build',
     );
@@ -253,7 +254,7 @@ describe('Next build typecheck contract', () => {
     expect(builderStage).not.toMatch(
       /(?:ARG|ENV) NEXT_BUILD_(?:PRECHECKED_TYPECHECK|SKIP_TYPECHECK)/,
     );
-    expect(builderStage).not.toMatch(/npm run typecheck:strict[^\r\n]*\|\| true/);
+    expect(builderStage).not.toMatch(/npm run typecheck:[a-z]+[^\r\n]*\|\| true/);
     expect(dockerfile.match(/NEXT_BUILD_PRECHECKED_TYPECHECK=1/g)).toHaveLength(1);
   });
 });

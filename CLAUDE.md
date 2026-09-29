@@ -42,7 +42,7 @@ Portal — внутренний инструмент студии: Next.js app, 
 - Скрипты: `app/scripts/`
 - Миграции основной БД: `supabase/migrations/`, `supabase/instantly-migrations/`
 - Миграции аналитического датасета: `app/scripts/instantly-dataset/00*_*.sql`
-- Проверка типов — две версии TypeScript: в CI веток `npm run typecheck:fast` (TypeScript 7, пакет `typescript-7`, в разы быстрее), в прод-сборке Dockerfile `npm run typecheck:strict` (TypeScript 5). Обе вызывают tsc по явному пути: голые `tsc`/`npx tsc` могут запустить любую из двух версий.
+- Проверка типов — `npm run typecheck:fast` (TypeScript 7, пакет `typescript-7`, в разы быстрее): в CI веток и с 29.09.2026 в прод-сборке Dockerfile. `npm run typecheck:strict` (TypeScript 5) — запасная, откат одной строкой в Dockerfile; сам TypeScript 5 нужен Next.js и ESLint. Обе команды вызывают tsc по явному пути: голые `tsc`/`npx tsc` могут запустить любую из двух версий.
 
 ### Как деплоится ночной синк датасета (`app/scripts/instantly-dataset/`)
 

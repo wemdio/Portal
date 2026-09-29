@@ -115,15 +115,19 @@ export async function checkActiveJobs(
   key: BenchKeyRow,
   table: string,
   activeStatuses: string[],
+  toolLimit?: number,
 ): Promise<NextResponse | null> {
   const query = db.from(table) as CountableQuery;
   const { count } = await query.select('id', { count: 'exact', head: true }).in('status', activeStatuses);
 
-  if ((count ?? 0) >= key.max_active_jobs) {
+  // Действует более строгий из двух: общий потолок ключа или собственный
+  // потолок инструмента.
+  const limit = Math.min(key.max_active_jobs, toolLimit ?? Infinity);
+  if ((count ?? 0) >= limit) {
     return benchError(
       'conflict',
-      `Не больше ${key.max_active_jobs} незавершённых задач одновременно`,
-      { limit: key.max_active_jobs },
+      `Не больше ${limit} незавершённых задач одновременно`,
+      { limit },
     );
   }
   return null;
