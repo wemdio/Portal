@@ -20,7 +20,10 @@ import type { CampaignRow, MailboxRow, RecipientRow, StepRow } from './types';
  *   • письмо, пустое после подстановки переменных, не ставится в очередь;
  *   • шаг ставится один раз: если его письмо уже есть, получатель снимается
  *     с планирования, а не стоит в голове очереди, а если оно уже ушло —
- *     сдвигается на следующий шаг (settleTakenStep).
+ *     сдвигается на следующий шаг (settleTakenStep);
+ *   • адреса одной компании (group_key, заливка автоаутрича) начинают цепочку
+ *     с одного ящика и с разницей в сутки: три одинаковых письма не приходят
+ *     в компанию в одну минуту (loadGroups).
  */
 
 type Log = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => void;
@@ -36,6 +39,11 @@ const UNIQUE_VIOLATION = '23505';
  * одним запросом — это ~16 КБ.
  */
 const MAILBOX_CHUNK = 50;
+
+/** Первое письмо следующего адреса компании — не раньше суток после первого письма соседа. */
+const GROUP_GAP_MS = 24 * 60 * 60 * 1000;
+/** Статусы первого письма соседа, которые считаются отправкой (ушло, уходит или может уйти). */
+const GROUP_FIRST_STATUSES = ['scheduled', 'sending', 'sent', 'unknown'];
 
 interface MailboxSlot {
   mailbox: MailboxRow;
@@ -228,6 +236,79 @@ async function settleTakenStep(
   return 'held';
 }
 
+/** Сосед получателя по group_key в этой кампании: чей ящик и когда первое письмо. */
+interface GroupMember {
+  mailboxId: string | null;
+  /** Время первого письма (отправка или план), мс; null — первого письма ещё нет. */
+  firstAt: number | null;
+}
+
+/**
+ * Соседи по group_key для получателей прохода, стоящих на первом шаге: ящик
+ * каждого и время его первого письма (sent_at, для ещё не ушедшего —
+ * scheduled_at). Упавшее и отменённое письмо отправкой не считается. Не
+ * прочитали — исключение, как у стоп-листа: иначе адреса компании получили
+ * бы первое письмо в одну минуту. Ключ группы → id получателя → сосед.
+ */
+async function loadGroups(campaignId: string, recipients: RecipientRow[]): Promise<Map<string, Map<string, GroupMember>>> {
+  const groups = new Map<string, Map<string, GroupMember>>();
+  if (!supabaseAdmin) return groups;
+  const keys = [
+    ...new Set(
+      recipients
+        .filter((r) => r.group_key && r.last_step_sent === 0 && !r.mailbox_id)
+        .map((r) => String(r.group_key)),
+    ),
+  ];
+  if (!keys.length) return groups;
+
+  const memberGroup = new Map<string, string>();
+  for (const part of chunkForInFilter(keys)) {
+    const { data, error } = await supabaseAdmin
+      .from('sender_recipients')
+      .select('id, group_key, mailbox_id')
+      .eq('campaign_id', campaignId)
+      .in('group_key', part);
+    if (error) throw new Error(`соседи по компании не прочитаны: ${error.message}`);
+    for (const row of data ?? []) {
+      const key = String(row.group_key);
+      const id = String(row.id);
+      const group = groups.get(key) ?? new Map<string, GroupMember>();
+      group.set(id, { mailboxId: row.mailbox_id ? String(row.mailbox_id) : null, firstAt: null });
+      groups.set(key, group);
+      memberGroup.set(id, key);
+    }
+  }
+
+  // Первое письмо есть только у соседа, за которым уже закреплён ящик.
+  const planned = [...memberGroup.entries()]
+    .filter(([id, key]) => Boolean(groups.get(key)?.get(id)?.mailboxId))
+    .map(([id]) => id);
+  for (const part of chunkForInFilter(planned)) {
+    const { data, error } = await supabaseAdmin
+      .from('sender_messages')
+      .select('recipient_id, status, sent_at, scheduled_at')
+      .in('recipient_id', part)
+      .eq('step_no', 1)
+      .in('status', GROUP_FIRST_STATUSES);
+    if (error) throw new Error(`первые письма соседей по компании не прочитаны: ${error.message}`);
+    for (const row of data ?? []) {
+      const id = String(row.recipient_id);
+      const member = groups.get(memberGroup.get(id) ?? '')?.get(id);
+      const at = Date.parse(String(row.sent_at ?? row.scheduled_at ?? ''));
+      if (member && Number.isFinite(at)) member.firstAt = Math.max(member.firstAt ?? 0, at);
+    }
+  }
+  return groups;
+}
+
+/** Соседи получателя без него самого. */
+function neighboursOf(groups: Map<string, Map<string, GroupMember>>, recipient: RecipientRow): GroupMember[] {
+  const group = recipient.group_key ? groups.get(recipient.group_key) : undefined;
+  if (!group) return [];
+  return [...group.entries()].filter(([id]) => id !== recipient.id).map(([, member]) => member);
+}
+
 function pickSlot(slots: MailboxSlot[], recipient: RecipientRow): MailboxSlot | null {
   // Уже закреплённый ящик: если он ещё в пуле и лимит не выбран — только он,
   // иначе лид ждёт следующего окна. Менять отправителя посреди цепочки нельзя:
@@ -285,11 +366,13 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
   // пропускается целиком и повторится на следующем тике.
   let suppressed: Set<string>;
   let busy: Set<string>;
+  let groups: Map<string, Map<string, GroupMember>>;
   try {
     suppressed = await loadSuppressed(recipients.map((r) => r.email));
     busy = await loadCrossCampaignBusy(recipients.map((r) => r.email), campaign.id);
+    groups = await loadGroups(campaign.id, recipients);
   } catch (e) {
-    log('error', `Кампания ${campaign.name}: стоп-лист или занятость адресов не проверены — проход пропущен`, e);
+    log('error', `Кампания ${campaign.name}: стоп-лист, занятость адресов или соседи по компании не проверены — проход пропущен`, e);
     return 0;
   }
   const now = new Date();
@@ -366,7 +449,27 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
       continue;
     }
 
-    const slot = pickSlot(slots, recipient);
+    // Адрес компании, у которой уже есть адрес в этой рассылке (group_key):
+    // первое письмо — не раньше суток после первого письма соседа и с его
+    // ящика. Следующие шаги идут по своему расписанию, как у всех.
+    const neighbours = stepNo === 1 && !recipient.mailbox_id ? neighboursOf(groups, recipient) : [];
+    const neighbourFirstAt = Math.max(0, ...neighbours.map((n) => n.firstAt ?? 0));
+    if (neighbourFirstAt && now.getTime() < neighbourFirstAt + GROUP_GAP_MS) {
+      await db
+        .from('sender_recipients')
+        .update({ next_step_at: new Date(neighbourFirstAt + GROUP_GAP_MS).toISOString(), updated_at: now.toISOString() })
+        .eq('id', recipient.id)
+        .eq('status', 'active');
+      continue;
+    }
+    // Ящик соседа, если он ещё в пуле: лимит выбран — ждём, как с закреплённым
+    // ящиком. Ящик ушёл из пула — берём любой, иначе компания стояла бы вечно.
+    const neighbourSlots = neighbours
+      .map((n) => (n.mailboxId ? slots.find((s) => s.mailbox.id === n.mailboxId) : undefined))
+      .filter((s): s is MailboxSlot => Boolean(s));
+    const slot = neighbourSlots.length
+      ? neighbourSlots.find((s) => s.remaining > 0) ?? null
+      : pickSlot(slots, recipient);
     if (!slot) continue; // лимиты выбраны — лид подождёт следующего прохода
 
     const firstStep = steps[0];
@@ -420,6 +523,14 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
     slot.remaining -= 1;
     slot.cursor = new Date(scheduledAt.getTime() + nextGapMs(campaign.gap_seconds, campaign.gap_jitter_seconds));
     planned += 1;
+    // Соседи в этом же проходе видят ящик и время этого письма.
+    if (stepNo === 1) {
+      const member = recipient.group_key ? groups.get(recipient.group_key)?.get(recipient.id) : undefined;
+      if (member) {
+        member.mailboxId = slot.mailbox.id;
+        member.firstAt = scheduledAt.getTime();
+      }
+    }
   }
 
   const sampleOf = (emails: string[]) => emails.slice(0, 5).join(', ') + (emails.length > 5 ? ', …' : '');

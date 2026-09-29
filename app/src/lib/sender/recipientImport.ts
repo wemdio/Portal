@@ -12,6 +12,8 @@ export interface ParsedRecipient {
   email: string;
   name: string | null;
   vars: Record<string, string>;
+  /** Ключ группы (sender_recipients.group_key); есть только у заливки из автоаутрича. */
+  groupKey?: string | null;
 }
 
 export interface RecipientImportResult {
@@ -72,6 +74,11 @@ export interface RecipientInput {
   email: string;
   name?: string | null;
   vars: Record<string, string>;
+  /**
+   * Адреса одной компании (заливка из автоаутрича: id строки). Планировщик
+   * пишет им с одного ящика и с разницей в сутки; у файла ключа нет.
+   */
+  groupKey?: string | null;
 }
 
 /** Адрес в том виде, в каком он хранится в базе; null — адрес некорректный. */
@@ -137,6 +144,7 @@ export function normalizeRecipients(
       if (key && value) vars[key] = value;
     }
     const recipient: ParsedRecipient = { email, name: String(row.name ?? '').trim() || null, vars };
+    if (row.groupKey) recipient.groupKey = row.groupKey;
 
     if (opts.keep && !opts.keep(recipient)) {
       rejected += 1;
