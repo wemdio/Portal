@@ -106,3 +106,18 @@
 
 Новых тест-файлов не пишем. `npm run typecheck:fast`. После выкладки: сохранить правило на вкладке —
 следующий ответ оценён с `criteria_used = true`; ручное «Не лид» — сообщение в чат не уходит.
+
+## Реализация (29.09.2026)
+
+- Экран: `components/senderLeads/{OutreachTabs,QualificationTab,LeadVerdictBar,api}.tsx`, страницы
+  `/tools/polza-outreach` и `/tools/polza-ru-outreach` оборачивают прежний экран в «Запуски».
+- API: `app/api/tools/sender-leads/{route,settings/route,verdict/route}.ts`, запросы и типы —
+  `lib/senderLeads/history.ts`. Фильтр по папке — встраиванием `sender_campaigns!inner`, миграция
+  не понадобилась. У фильтра есть и `pending` (плашка «В очереди»).
+- Плашки считают оценку ИИ по ответу; ручная метка переписки показывается в строке главной
+  («Лид (вручную)»), счётчики не меняет.
+- «Письма»: метка и фильтр «Только лиды» (`/api/tools/sender/threads?onlyLeads=1`), в окне
+  переписки — полоса с объяснением ИИ и кнопками «Это лид» / «Не лид» (GET/PATCH
+  `/api/tools/sender-leads/verdict`), `?thread=<id>` открывает переписку. Правка
+  `api/tools/sender/threads/route.ts` по правилам `select-deploy-targets.sh` передеплоит и хосты
+  «Рассылки».

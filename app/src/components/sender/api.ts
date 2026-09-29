@@ -171,6 +171,9 @@ export interface ThreadDto {
   last_reply_at: string | null;
   has_human_reply: boolean;
   last_activity_at: string;
+  /** Итог квалификатора по переписке или ручная метка; null — не оценивалась. */
+  lead_verdict: 'lead' | 'not_lead' | null;
+  lead_verdict_source: 'ai' | 'manual' | null;
 }
 
 /** Письмо переписки: наше исходящее или ответ получателя. */
@@ -432,12 +435,14 @@ export function fetchThreads(params: {
   mailboxId?: string;
   search?: string;
   onlyReplied?: boolean;
+  onlyLeads?: boolean;
 } = {}) {
   const query = new URLSearchParams({ page: String(params.page ?? 1) });
   if (params.campaignId) query.set('campaignId', params.campaignId);
   if (params.mailboxId) query.set('mailboxId', params.mailboxId);
   if (params.search) query.set('search', params.search);
   if (params.onlyReplied) query.set('onlyReplied', '1');
+  if (params.onlyLeads) query.set('onlyLeads', '1');
   return authFetchJson<{ threads: ThreadDto[]; total: number; pageSize: number }>(
     `${BASE}/threads?${query.toString()}`,
   );

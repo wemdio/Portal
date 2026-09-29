@@ -1,4 +1,6 @@
+import { Suspense } from 'react';
 import { InDevelopmentGate } from '@/components/InDevelopmentGate';
+import { OutreachTabs } from '@/components/senderLeads/OutreachTabs';
 import { PolzaRuOutreachView } from '@/components/polzaRuOutreach/PolzaRuOutreachView';
 
 export default function PolzaRuOutreachPage() {
@@ -11,7 +13,13 @@ export default function PolzaRuOutreachPage() {
             Русский аутрич Polza: найм SDR, автоматизация аутрича, сигналы → компания и почта → готовая цепочка писем
           </p>
         </div>
-        <PolzaRuOutreachView />
+        {/* Suspense — OutreachTabs читает вкладку из адреса (?tab=qualification)
+            через useSearchParams; без границы ожидания сборка не пререндерит страницу. */}
+        <Suspense fallback={null}>
+          <OutreachTabs folderKey="auto_ru">
+            <PolzaRuOutreachView />
+          </OutreachTabs>
+        </Suspense>
       </div>
     </InDevelopmentGate>
   );
