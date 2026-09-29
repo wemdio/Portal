@@ -38,6 +38,7 @@ import httpx
 
 from .base import SyncSource
 from ._bank_common import classify_revenue, coerce_amount, parse_date, to_row
+from .bank_tochka import tochka_ssl_context
 
 #: Переменные окружения с токенами Т-Банка — по одному токену на бизнес.
 #: Третий бизнес добавляется дописыванием сюда ещё одного имени: всё
@@ -434,7 +435,16 @@ class BankTBankSync(SyncSource):
         headers = {"Authorization": f"Bearer {token}"}
         total = 0
 
-        async with httpx.AsyncClient(timeout=120, headers=headers) as client:
+        # 22–23.09.2026 Т-Банк, как Точка месяцем раньше, перешёл на УЦ
+        # Минцифры: на стандартном certifi рукопожатие падало с «self-signed
+        # certificate in certificate chain». Цепочка *.tbank.ru → Russian
+        # Trusted Sub CA → Russian Trusted Root CA, отпечаток корня сверен
+        # вживую 29.09 — тот же файл, что у Точки. Контекст общий: проверка
+        # сертификата включена, стандартные корни сохранены, корень
+        # добавлен с проверкой отпечатка (см. bank_tochka.tochka_ssl_context).
+        async with httpx.AsyncClient(
+            timeout=120, headers=headers, verify=tochka_ssl_context()
+        ) as client:
             try:
                 resp = await client.get(ACCOUNTS_URL)
                 resp.raise_for_status()
