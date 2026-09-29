@@ -47,6 +47,8 @@ export interface StackedPoint {
   partial: boolean;
   /** Разрез столбца: ключ ряда → сумма в рублях. */
   parts: Record<string, number>;
+  /** Справка под «Итого» в подсказке — например «в т.ч. 468 USDT». */
+  note?: string;
 }
 
 const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
@@ -199,11 +201,14 @@ function buildOption({
                            point.total,
                          )} ₽</span>
                        </div>`;
+        const note = point.note
+          ? `<div style="margin-top:2px;text-align:right;opacity:.6;font-variant-numeric:tabular-nums">${point.note}</div>`
+          : '';
         const partial = point.partial
           ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid ${GRID_LINE};max-width:240px;white-space:normal;color:#b45309">${partialTooltip}</div>`
           : '';
 
-        return `<div style="font-weight:600">${fullLabel(point.bucket, groupBy)}</div>${rows}${empty}${total}${partial}`;
+        return `<div style="font-weight:600">${fullLabel(point.bucket, groupBy)}</div>${rows}${empty}${total}${note}${partial}`;
       },
     },
     xAxis: {

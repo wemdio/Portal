@@ -121,6 +121,12 @@ export interface CompanyLettersInput {
   caseRecord: CaseRecord | null;
   recipientEmail: string;
   amoStatus: string | null;
+  /**
+   * Второй вариант письма 1 для остальных адресов компании: вид, которого нет
+   * у главного адреса (altRoutingFor), и адрес этого вида — для проверки.
+   * null — все адреса одного вида, второй вариант не нужен.
+   */
+  alt?: { isRouting: boolean; recipientEmail: string } | null;
 }
 
 export interface CompanyLetters {
@@ -175,7 +181,7 @@ export async function composeCompanyLetters(
     : null;
   const hypoText = hypothesis ? hypothesisText(input.brand, hypothesis) : null;
 
-  const letters = renderTemplate(template, {
+  const values: TemplateValues = {
     brand: input.brand,
     opening,
     about,
@@ -183,11 +189,18 @@ export async function composeCompanyLetters(
     hypothesis: hypoText,
     signature: formatSignature(deps.sender),
     isRouting: input.isRouting,
-  });
-  const text = letters.map((l) => `${l.subject}\n${l.body}`).join('\n');
+  };
+  const rendered = renderTemplate(template, values);
+  // Второй вариант письма 1 — тот вид, которого нет у главного адреса: у
+  // компании есть и адрес отдела, и общий ящик. Письма 2–4 и тема общие.
+  const alt = input.alt && input.alt.isRouting !== input.isRouting ? input.alt : null;
+  const altLetter1 = alt ? renderTemplate(template, { ...values, isRouting: alt.isRouting })[0] : null;
+  const letters: Letter[] = alt && altLetter1
+    ? [{ ...rendered[0], alt_body: altLetter1.body, alt_routing: alt.isRouting }, ...rendered.slice(1)]
+    : rendered;
+  const text = [...rendered.map((l) => `${l.subject}\n${l.body}`), ...(altLetter1 ? [altLetter1.body] : [])].join('\n');
   const used = claimsForChain(deps.claims, input.chain).filter((c) => c.claim_text.trim() && text.includes(c.claim_text.trim()));
-  const qa = runQa({
-    letters,
+  const qaInput = {
     expectedLetters: letterCountFor(input.chain),
     amoStatus: input.amoStatus,
     sender: deps.sender,
@@ -205,8 +218,18 @@ export async function composeCompanyLetters(
     ],
     targetMarket: input.targetMarket,
     marketQuote,
-    recipientEmail: input.recipientEmail,
-  });
+  };
+  const mainQa = runQa({ ...qaInput, letters: rendered, recipientEmail: input.recipientEmail });
+  // Второй вариант проверяется теми же правилами: его получит живой адрес
+  // компании. Провал любого — строка на ручную проверку; флаги второго
+  // варианта — с приставкой alt:.
+  const altQa = alt && altLetter1
+    ? runQa({ ...qaInput, letters: [altLetter1, ...rendered.slice(1)], recipientEmail: alt.recipientEmail })
+    : null;
+  const altFlags = (altQa?.flags ?? []).filter((flag) => !mainQa.flags.includes(flag)).map((flag) => `alt:${flag}`);
+  const qa: QaResult = altQa
+    ? { status: mainQa.status === 'passed' && altQa.status === 'passed' ? 'passed' : 'failed', flags: [...mainQa.flags, ...altFlags] }
+    : mainQa;
   return {
     letters,
     qa,

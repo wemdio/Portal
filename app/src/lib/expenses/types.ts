@@ -131,8 +131,18 @@ export interface IncomeRow {
   amount_rub: number | null;
 }
 
+/**
+ * Сколько пришло в исходной валюте по валютным строкам, уже пересчитанным в
+ * рубли: `{ USDT: 468 }`. Справка рядом с рублёвой суммой — сама сумма
+ * остаётся рублёвой. Строки без курса сюда не входят: у них свой счётчик
+ * `unconvertedByCurrency`, и одна сумма не должна попасть в оба.
+ */
+export type ForeignByCurrency = Record<string, number>;
+
 /** Точка ряда дохода: категорий у прихода нет, поэтому только разрез по банкам. */
-export type IncomeSeriesPoint = SeriesPointBase;
+export interface IncomeSeriesPoint extends SeriesPointBase {
+  foreignByCurrency: ForeignByCurrency;
+}
 
 /** Ключ бакета `nonRevenueByReason` для строк, у которых причина не записана. */
 export const UNKNOWN_EXCLUDE_REASON_KEY = 'unknown';
@@ -168,6 +178,8 @@ export interface IncomesSummary {
   unconvertedCount: number;
   /** Сумма в исходной валюте (поле amount) по строкам без курса, сгруппированная по валюте. */
   unconvertedByCurrency: Record<string, number>;
+  /** Валютная часть `total` в исходной валюте — см. ForeignByCurrency. */
+  foreignByCurrency: ForeignByCurrency;
   series: IncomeSeriesPoint[];
 }
 
@@ -187,4 +199,6 @@ export interface PayerBreakdownItem {
   /** См. VendorBreakdownItem: строки без курса ЦБ не должны потеряться в total. */
   unconvertedCount: number;
   unconvertedByCurrency: Record<string, number>;
+  /** Валютная часть `total` в исходной валюте — см. ForeignByCurrency. */
+  foreignByCurrency: ForeignByCurrency;
 }

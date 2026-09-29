@@ -10,9 +10,10 @@
  * любые адреса НЕ на домене компании.
  *
  * Поиск и проверка — общие у аутричей (lib/outreachEmail/findAndVerify.ts):
- * обход сайта через портальный кэш и SMTP-проверка выбранного адреса. Здесь
- * только правила выбора: нерабочий адрес исключается, и pickRuEmail выбирает
- * следующий по тем же приоритетам.
+ * обход сайта через портальный кэш и SMTP-проверка адресов. Здесь только
+ * правила выбора: проверенный адрес исключается, и pickRuEmail выбирает
+ * следующий по тем же приоритетам. В работу — до трёх рабочих адресов
+ * (emails), первый из них главный.
  */
 
 import {
@@ -30,6 +31,15 @@ export interface RuEmailPick {
   recipientRole: string | null;
 }
 
+/** Адрес компании в работе — элемент колонки emails строки. */
+export interface RuFoundEmail {
+  email: string;
+  emailType: 'department' | 'generic' | 'person' | null;
+  isRouting: boolean;
+  recipientRole: string | null;
+  verification: OutreachEmailVerification;
+}
+
 export interface RuEmailResult extends RuEmailPick {
   sourceUrl: string | null;
   /** Вердикт проверки — в email_verification строки; null — адреса нет. */
@@ -38,6 +48,8 @@ export interface RuEmailResult extends RuEmailPick {
   verdict: OutreachEmailVerdict;
   /** Адреса, отбракованные проверкой, — пояснение в журнале. */
   triedInvalid: string[];
+  /** Адреса в работу по приоритету (1–3), главный — первым; пусто — адреса нет. */
+  emails: RuFoundEmail[];
 }
 
 const DEPARTMENT_LOCALS: Array<[string, string]> = [
@@ -136,5 +148,12 @@ export async function findRuCompanyEmail(website: string, companyDomain: string,
     verification: found?.verification ?? null,
     verdict: search.verdict,
     triedInvalid: search.triedInvalid,
+    emails: search.results.map((item) => ({
+      email: item.email,
+      emailType: item.emailType,
+      isRouting: item.isRouting,
+      recipientRole: item.recipientRole,
+      verification: item.verification,
+    })),
   };
 }

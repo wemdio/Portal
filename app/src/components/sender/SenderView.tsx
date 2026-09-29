@@ -22,11 +22,13 @@ type TabId = (typeof TABS)[number]['id'];
 
 /**
  * Вкладка из адреса: ?tab=campaigns. Ссылка на кампанию (?campaign=<id>)
- * без вкладки тоже ведёт в «Кампании» — иначе она открывала бы «Ящики».
+ * без вкладки тоже ведёт в «Кампании» — иначе она открывала бы «Ящики»;
+ * ссылка на переписку (?thread=<id>) — в «Письма».
  */
-function initialTab(tab: string | null, campaignId: string | null): TabId {
+function initialTab(tab: string | null, campaignId: string | null, threadId: string | null): TabId {
   const known = TABS.find((item) => item.id === tab);
   if (known) return known.id;
+  if (threadId) return 'threads';
   return campaignId ? 'campaigns' : 'mailboxes';
 }
 
@@ -34,15 +36,20 @@ function initialTab(tab: string | null, campaignId: string | null): TabId {
  * Страница «Рассылка». Адрес /tools/sender?tab=campaigns&campaign=<id> сразу
  * открывает кампании и подсвечивает нужную: так ведёт кнопка «Открыть в
  * Рассылке» с экрана запуска автоаутрича — иначе рассылку запуска
- * приходилось бы искать глазами в списке. Адрес читается один раз, при
- * открытии страницы.
+ * приходилось бы искать глазами в списке. ?tab=threads&thread=<id> сразу
+ * открывает переписку. Адрес читается один раз, при открытии страницы.
  */
 export function SenderView() {
   const searchParams = useSearchParams();
-  const [tab, setTab] = useState<TabId>(() => initialTab(searchParams.get('tab'), searchParams.get('campaign')));
+  const [tab, setTab] = useState<TabId>(() =>
+    initialTab(searchParams.get('tab'), searchParams.get('campaign'), searchParams.get('thread')),
+  );
   // Кампания из ссылки. Сбрасывается при смене вкладки: вернувшись в
   // «Кампании», человек ждёт обычный список, а не повторную подсветку.
   const [focusCampaignId, setFocusCampaignId] = useState<string | null>(() => searchParams.get('campaign'));
+  // Переписка из ссылки (?thread=<id>): ведут ТГ-сообщение о лиде и вкладка
+  // «Квалификация» автоаутрича. Открывается один раз, при заходе на страницу.
+  const [initialThreadId] = useState<string | null>(() => searchParams.get('thread'));
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-8">
@@ -75,7 +82,7 @@ export function SenderView() {
 
       {tab === 'mailboxes' ? <MailboxesTab /> : null}
       {tab === 'campaigns' ? <CampaignsTab focusCampaignId={focusCampaignId} /> : null}
-      {tab === 'threads' ? <ThreadsTab /> : null}
+      {tab === 'threads' ? <ThreadsTab initialThreadId={initialThreadId} /> : null}
       {tab === 'stoplist' ? <StoplistTab /> : null}
     </div>
   );

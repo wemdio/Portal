@@ -9,6 +9,13 @@
  * Цитаты (B2B, ICP, запуск) сверяются со страницей дословно; несверившаяся —
  * отсутствует. Контекст, боль, угол и сегменты — формулировки модели, в
  * письмо идут только как гипотеза («I would probably start with…»).
+ *
+ * С 29.09.2026 (спека 2026-09-29-en-outreach-letters-pain-design.md) разбор
+ * пишет боль компании для письма 1 (pain_line → {{pain}}) вместо строки «что
+ * вы делаете» (about_line, отзыв продаж: «кринжик»). Боль строится от повода,
+ * известного до разбора (найм — короткое название вакансии, YC), и от того,
+ * что и кому компания продаёт; повод (с батчем YC) входит в ключ кэша.
+ *
  * Стек продаж (HubSpot, Salesforce, Apollo, Clay, Instantly, Outreach,
  * Lemlist) определяется по коду главной страницы, без LLM.
  *
@@ -52,8 +59,8 @@ export interface SiteProfile {
   exclusion: SiteExclusion | null;
   /** Название, как компания пишет себя на сайте (сверено со страницами); в письма — вместо имени из адреса вакансии. */
   brandName: string | null;
-  /** Строка письма 1 о компании — что продаёт и кому ({{about}}); прошла проверку aboutLineOf. */
-  aboutLine: string | null;
+  /** Боль компании для письма 1 ({{pain}}) с учётом повода; прошла проверку painLineOf. */
+  painLine: string | null;
   companyContext: string | null;
   likelyGtmProblem: string | null;
   outreachAngle: string | null;
@@ -73,7 +80,7 @@ export const EMPTY_PROFILE: SiteProfile = {
   highValue: false,
   exclusion: null,
   brandName: null,
-  aboutLine: null,
+  painLine: null,
   companyContext: null,
   likelyGtmProblem: null,
   outreachAngle: null,
@@ -93,7 +100,7 @@ const SYSTEM = `You analyze a company's website for Polza Agency, a B2B outbound
   "high_value": boolean,          // high-value B2B deal (enterprise/mid-market software, industrial equipment, professional services with large contracts)
   "exclusion": string,            // "staffing" | "job_board" | "lead_gen_agency" | "marketing_agency" | "b2c" | "local_service" | "course" | "" — only if clearly true
   "brand_name": string,           // the company name exactly as the site writes it, without Inc./LLC/GmbH; ""
-  "about_line": string,           // ONE sentence for a cold email, addressed to the company ("you"), 10–25 words: what they sell and to whom, taken only from the pages; plain spoken English, no praise, no numbers, no guesses about their problems or plans; "" if the pages do not say it clearly
+  "pain_line": string,            // 1–2 sentences for a cold email, addressed to the company ("you", "your team"), 12–40 words: the likely sales/pipeline bottleneck of THIS company given the OCCASION from the message and what they sell and to whom. Pattern: "When [the situation of the occasion], the bottleneck is usually not [the obvious thing] but [the real one]." With no occasion, start from what they sell and to whom. Plain spoken English; no numbers, questions, quotes, brackets or praise; never retell what the company does ("you provide", "you offer", "your company is"); never "we"/"our"; "" if the pages do not say clearly what they sell and to whom
   "company_context": string,      // what the company does, 5–15 words, plain English, no hype
   "likely_gtm_problem": string,   // a plausible go-to-market challenge for a company like this, 8–20 words, phrased as a hypothesis
   "outreach_angle": string,       // the angle to open with, 5–15 words
@@ -108,7 +115,7 @@ Rules: quotes are copied character-for-character from the page text; never inven
  * чистка сегментов, даты). Правка промпта меняет ключ кэша сама (хэш ниже), а
  * правку разбора код не видит — её отмечаем, подняв это значение.
  */
-const SITE_PARSER_VERSION = 'p1';
+const SITE_PARSER_VERSION = 'p2';
 
 /**
  * Версия для ключа кэша: версия разбора + короткий хэш текста SYSTEM. Поправили
@@ -168,9 +175,38 @@ function profileFromCache(raw: unknown, fallbackDescription: string | null): Sit
   };
 }
 
+/**
+ * Повод компании, известный до разбора сайта: найм (короткое название
+ * вакансии) или YC (батч); нет — null, боль строится от того, что и кому
+ * компания продаёт. Найм здесь — ещё не подтверждённый повод: мандат на
+ * outbound проверяет разбор вакансии после сайта.
+ */
+export type SiteOccasion = { type: 'hiring'; title: string } | { type: 'yc'; batch: string };
+
+/** Повод словами для модели разбора. */
+function occasionText(occasion: SiteOccasion | null): string {
+  if (!occasion) return 'No specific occasion: build the pain from what they sell and to whom.';
+  return occasion.type === 'hiring'
+    ? `They are hiring for a ${occasion.title} role.`
+    : // Батч («W24», «Winter 2024») модели не даём: цифр в боли быть не должно.
+      'They recently went through Y Combinator.';
+}
+
+/**
+ * Отпечаток повода в ключе кэша: разбор с болью под один повод не отдаётся
+ * компании с другим (та же компания в новом запуске — уже с другой вакансией).
+ */
+export function occasionFingerprint(occasion: SiteOccasion | null): string {
+  if (!occasion) return 'none';
+  const value = (occasion.type === 'hiring' ? occasion.title : occasion.batch).replace(/\s+/g, ' ').trim().toLowerCase();
+  return `${occasion.type}:${createHash('sha256').update(value).digest('hex').slice(0, 10)}`;
+}
+
 export interface SiteProfileOptions {
   /** Нормализованный домен — ключ кэша профиля; по умолчанию берётся из адреса сайта. */
   domain?: string;
+  /** Повод компании до разбора — для боли письма 1 ({{pain}}) и ключа кэша. */
+  occasion?: SiteOccasion | null;
   /**
    * ИИ ответил целым ответом (профиль не из кэша): раннер по этому обнуляет
    * серию «ИИ не ответил» — предохранитель «ИИ молчит» считает только ответы
@@ -186,24 +222,32 @@ function brandNameOf(value: unknown, allText: string): string | null {
   return allText.toLowerCase().includes(name.toLowerCase()) ? name : null;
 }
 
-// Строка о компании уходит в письмо без правки человеком: реклама, обещания и
-// голос «мы» в ней — брак, лучше письмо без неё.
-const ABOUT_BANNED_RE = /\b(leading|world-class|revolutionary|best-in-class|cutting-edge|innovative|amazing|impressive|guarantee[sd]?)\b/i;
+// Боль уходит в письмо без правки человеком: реклама, обещания и голос «мы»
+// в ней — брак, лучше письмо без неё.
+const PAIN_BANNED_RE = /\b(leading|world-class|revolutionary|best-in-class|cutting-edge|innovative|amazing|impressive|guarantee[sd]?)\b/i;
 // «We», «our» — голос самой компании, скопированный с сайта. Регистр важен: «US hospitals» — не «us».
-const ABOUT_OWN_VOICE_RE = /\b(?:[Ww]e|[Oo]ur|us)\b/;
+const PAIN_OWN_VOICE_RE = /\b(?:[Ww]e|[Oo]ur|us)\b/;
+// Пересказ того, что компания делает, — то, от чего боль и уводит («You provide
+// tele-audiology solutions…»). «Your team is hiring» — не пересказ, его не трогаем.
+const PAIN_RETELL_RE = /\byou (?:provide|offer)\b|\byour (?:company|business) (?:is|does|provides|offers)\b/i;
 
 /**
- * Строка {{about}}: одно законченное предложение 6–30 слов, без цифр (цифры в
+ * Строка {{pain}}: 1–2 законченных предложения, 12–40 слов, без цифр (цифры в
  * письме — только из кейса и повода), вопросов, восклицаний, кавычек и
- * скобок. Не прошла — null: абзац с {{about}} из письма удаляется.
+ * скобок, без рекламы, голоса «we/our» и пересказа деятельности. Не прошла —
+ * null: абзац с {{pain}} из письма удаляется.
  */
-export function aboutLineOf(value: unknown): string | null {
+export function painLineOf(value: unknown): string | null {
   let line = asString(value).replace(/\s+/g, ' ').trim();
   if (!line) return null;
   if (!/[.]$/.test(line)) line = `${line}.`;
   const words = line.split(' ').length;
-  if (words < 6 || words > 30) return null;
-  if (/\d|[?!{}"«»;]/.test(line) || /\.\s+\S/.test(line.slice(0, -1)) || ABOUT_BANNED_RE.test(line) || ABOUT_OWN_VOICE_RE.test(line)) return null;
+  if (words < 12 || words > 40) return null;
+  // Апостроф внутри слова («don't», «team’s») — не кавычка.
+  if (/\d|[?!"'‘’“”«»()[\]{}]/.test(line.replace(/(\w)['’](\w)/g, '$1$2'))) return null;
+  // Предложения — по точке перед следующим словом: больше двух — не строка письма.
+  if ((line.slice(0, -1).match(/\.\s+\S/g) ?? []).length > 1) return null;
+  if (PAIN_BANNED_RE.test(line) || PAIN_OWN_VOICE_RE.test(line) || PAIN_RETELL_RE.test(line)) return null;
   return line.charAt(0).toUpperCase() + line.slice(1);
 }
 
@@ -229,8 +273,10 @@ export async function buildSiteProfile(
   options: SiteProfileOptions = {},
 ): Promise<SiteProfile> {
   const domain = options.domain || normalizeDomain(website);
+  const occasion = options.occasion ?? null;
+  // Боль пишется под повод: в ключе кэша — версия промпта и отпечаток повода.
   const cacheKey: SiteAnalysisCacheKey | null = domain.includes('.')
-    ? { lang: 'en', domain, promptVersion: SITE_PROMPT_VERSION, model: outreachModel('en', 'analysis') }
+    ? { lang: 'en', domain, promptVersion: `${SITE_PROMPT_VERSION}:${occasionFingerprint(occasion)}`, model: outreachModel('en', 'analysis') }
     : null;
   if (cacheKey) {
     const cached = profileFromCache(await readSiteAnalysisCache(cacheKey), fallbackDescription);
@@ -241,6 +287,8 @@ export async function buildSiteProfile(
   if (!pages.length) return EMPTY_PROFILE;
 
   const user = [
+    `=== OCCASION ===
+${occasionText(occasion)}`,
     ...(fallbackDescription ? [`=== DIRECTORY DESCRIPTION (not a page) ===\n${fallbackDescription}`] : []),
     ...pages.map((p) => `=== PAGE ${p.url} ===\n${p.text.slice(0, PAGE_TEXT_CHARS)}`),
   ].join('\n\n');
@@ -284,7 +332,7 @@ export async function buildSiteProfile(
     highValue: asBool(raw.high_value),
     exclusion: ['staffing', 'job_board', 'lead_gen_agency', 'marketing_agency', 'b2c', 'local_service', 'course'].includes(exclusion) ? exclusion : null,
     brandName: brandNameOf(raw.brand_name, allText),
-    aboutLine: aboutLineOf(raw.about_line),
+    painLine: painLineOf(raw.pain_line),
     companyContext: clean(raw.company_context, 18),
     likelyGtmProblem: clean(raw.likely_gtm_problem, 24),
     outreachAngle: clean(raw.outreach_angle, 18),

@@ -42,6 +42,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { altRoutingFor } from '@/lib/outreachEmail/companyEmails';
 import { smtpAvailable, type EmailDomainCache, type OutreachEmailVerdict } from '@/lib/outreachEmail/findAndVerify';
 import { outreachApiKey } from '@/lib/outreachLlm/client';
 import {
@@ -64,9 +65,9 @@ import {
 import { isSuppressed } from '@/lib/polzaRuOutreach/company';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { analyzeVacancy } from './analyzeVacancy';
-import { displayName, letterCompanyName, SEQUENCE_ID, triggerPhrase } from './buildLetters';
+import { displayName, letterCompanyName, SEQUENCE_ID, shortJobTitle, triggerPhrase } from './buildLetters';
 import { loadEnCases, routeEnCase, type EnCase } from './caseRouter';
-import { findCompanyEmail, type PolzaEmailType } from './findEmail';
+import { findCompanyEmail, toCompanyEmails, type PolzaEmailType, type PolzaFoundEmail } from './findEmail';
 import { POLZA_FUNNEL_COLUMNS, polzaFunnel, type PolzaFunnelRow } from './funnel';
 import { icpFilter } from './icpFilter';
 import { employeesFromBucket, leadStatus, primaryTrigger, scoreLead, type LeadScore, type Trigger } from './leadScore';
@@ -74,7 +75,7 @@ import { composeCompanyLetters, offerKeyOf } from './renderTemplate';
 import { lookupPdlProfile, normalizeDomain, PDL_COUNTRY_BY_CODE, resolveCompanyDomain } from './resolveDomain';
 import { selectVacancies } from './selectVacancies';
 import { loadSignature } from './settings';
-import { buildSiteProfile, type SiteProfile } from './siteProfile';
+import { buildSiteProfile, type SiteOccasion, type SiteProfile } from './siteProfile';
 import {
   createChainTemplates,
   REBUILD_LEASE_KEY,
@@ -220,6 +221,7 @@ const UNPROCESSED_PATCH: Record<string, unknown> = {
   email_type: null,
   email_source_url: null,
   email_verification: null,
+  emails: [],
   lead_status: null,
 };
 
@@ -278,6 +280,19 @@ interface Candidate {
   companyName: string;
   vacancy: PolzaOutreachVacancyCandidate | null;
   yc: YcCompany | null;
+}
+
+/**
+ * Повод компании, известный до разбора сайта, — под него разбор пишет боль
+ * письма 1 ({{pain}}). Порядок как у primaryTrigger: найм, затем YC. Найм ещё
+ * не подтверждён (мандат на outbound проверяет разбор вакансии после сайта),
+ * но вакансия есть — боль про неё не выдумана. Название длиннее шести слов —
+ * просто «sales», как во фразе-поводе.
+ */
+function siteOccasionOf(c: Candidate): SiteOccasion | null {
+  if (c.vacancy) return { type: 'hiring', title: shortJobTitle(c.vacancy.jobTitle) ?? 'sales' };
+  if (c.yc?.batch) return { type: 'yc', batch: c.yc.batch };
+  return null;
 }
 
 function nameKey(name: string): string {
@@ -370,6 +385,8 @@ interface Prepared {
   countryCode: string | null;
   /** Общий ящик (info@, hello@) получает письмо 1 «кто у вас за это отвечает?». */
   emailType: PolzaEmailType | null;
+  /** Адреса компании в работе (1–3), главный — первым: по ним решается второй вариант письма 1. */
+  emails: PolzaFoundEmail[];
 }
 
 /** Всё, что известно о компании после разбора и оценки, — вход писем. */
@@ -382,6 +399,7 @@ interface Qualified {
   score: LeadScore;
   caseHit: EnCase | null;
   emailType: PolzaEmailType | null;
+  emails: PolzaFoundEmail[];
 }
 
 /** «Дубль домена» и строка, чей домен он повторил, — для уборки после стопа по лимиту. */
@@ -1015,22 +1033,30 @@ async function runJob(
         if (invalid) log('info', `S5 ${domain}: all candidates failed verification: ${found.triedInvalid.join(', ')}`);
         return excludeRow(id, ST.s5Email, invalid ? 'email_invalid' : 'no_corporate_email');
       }
-      if (await isSuppressed(db, found.email)) {
-        log('info', `S5 ${domain}: ${found.email} is on the sender stop-list`);
+      // Стоп-лист — по каждому адресу: запрещённый выпадает, главным становится
+      // следующий. Строка отсеивается, только если разрешённых не осталось.
+      const allowed: PolzaFoundEmail[] = [];
+      for (const item of found.emails) {
+        if (await isSuppressed(db, item.email)) log('info', `S5 ${domain}: ${item.email} is on the sender stop-list`);
+        else allowed.push(item);
+      }
+      const main = allowed[0];
+      if (!main) {
         await excludeRow(id, ST.s5Email, 'suppressed_contact');
         if (smtpSilent) throw smtpSilentError();
         return null;
       }
       // Почту и вердикт проверки пишем сразу: строка, отсеянная дальше
-      // разбором или оценкой, показывает в журнале, какой адрес у неё был и
-      // чем кончилась проверка.
+      // разбором или оценкой, показывает в журнале, какие адреса у неё были и
+      // чем кончилась проверка. Главный — в прежних колонках, все — в emails.
       const emailPatch = {
-        selected_company_email: found.email,
-        email_type: found.emailType,
+        selected_company_email: main.email,
+        email_type: main.emailType,
         email_source_url: found.emailSourceUrl,
-        email_verification: found.verification,
+        email_verification: main.verification,
+        emails: toCompanyEmails(allowed),
       };
-      if (found.verification === 'unverified') {
+      if (main.verification === 'unverified') {
         // Почта не проверена — на ручную проверку, и дальше строка не идёт:
         // разбор ИИ ей не оплачиваем, письма не пишем, решает человек. «Почту»
         // в воронке она не проходит (lib/polzaOutreach/funnel.ts).
@@ -1040,7 +1066,7 @@ async function runJob(
       }
       await updateRow(id, { ...emailPatch, stage: ST.s5Email });
       count(tally, 'emailFound');
-      return { id, tally, c, domain, website, employees, countryCode, emailType: found.emailType };
+      return { id, tally, c, domain, website, employees, countryCode, emailType: main.emailType, emails: allowed };
     };
 
     // ── S4 для одной компании: дешёвый ИИ, поводы, Lead Score ──
@@ -1064,6 +1090,7 @@ async function runJob(
       try {
         site = await buildSiteProfile(website, c.yc?.description ?? c.vacancy?.companyDescription ?? null, {
           domain,
+          occasion: siteOccasionOf(c),
           onLlmAnswer: noteLlmAnswered,
         });
       } catch (err) {
@@ -1132,7 +1159,7 @@ async function runJob(
         outreach_angle: site.outreachAngle,
         segments: site.segments,
         brand_name: brandName,
-        about_line: site.aboutLine,
+        pain_line: site.painLine,
       };
       if (!isB2b) return excludeRow(id, ST.s4Analyzed, 'not_b2b', common);
       if (!triggers.length) return excludeRow(id, ST.s4Analyzed, 'no_trigger', common);
@@ -1171,7 +1198,7 @@ async function runJob(
       if (status === 'skip') return excludeRow(id, ST.s4Analyzed, 'low_score', patch);
       count(tally, 'writeNow');
       await updateRow(id, { ...patch, status: 'qualified', stage: ST.s4Analyzed });
-      return { id, tally, c, site, triggers, score, caseHit: routed?.record ?? null, emailType: p.emailType };
+      return { id, tally, c, site, triggers, score, caseHit: routed?.record ?? null, emailType: p.emailType, emails: p.emails };
     };
 
     // Места в лимите готовых для писем, которые сейчас собираются. Между
@@ -1229,11 +1256,12 @@ async function runJob(
         {
           companyName: q.c.companyName,
           brandName: q.site.brandName ?? q.c.yc?.name ?? null,
-          aboutLine: q.site.aboutLine,
+          painLine: q.site.painLine,
           triggers: q.triggers,
           caseHit: q.caseHit,
           segments: q.site.segments,
           emailType: q.emailType,
+          altRouting: altRoutingFor(toCompanyEmails(q.emails)),
         },
         signature,
       );

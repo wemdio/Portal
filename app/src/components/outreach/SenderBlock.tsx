@@ -48,11 +48,23 @@ function companies(n: number): string {
   return `${n} компаний`;
 }
 
+function addresses(n: number): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return `${n} адрес`;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${n} адреса`;
+  return `${n} адресов`;
+}
+
 function campaignStatus(status: string): { label: string; tone: string } {
   return CAMPAIGN_STATUS[status] ?? { label: status, tone: 'bg-gray-100 text-gray-600' };
 }
 
-/** Итог заливки словами: куда и сколько залито, что пропущено и почему. */
+/**
+ * Итог заливки словами: куда и сколько залито, что пропущено и почему. У
+ * компании бывает до трёх адресов, поэтому залитое — компании и адреса, а
+ * пропуски — адреса.
+ */
 function uploadText(r: UploadJobResult): string {
   const skipped = [
     r.skippedSuppressed ? `стоп-лист ${r.skippedSuppressed}` : null,
@@ -61,8 +73,12 @@ function uploadText(r: UploadJobResult): string {
     r.skippedEmptyLetter ? `без письма ${r.skippedEmptyLetter}` : null,
     r.skippedInvalid ? `плохой адрес ${r.skippedInvalid}` : null,
   ].filter(Boolean);
-  const head = `В рассылку «${r.campaignName}» ${r.mode === 'append' ? 'добавлено' : 'залито'}: ${companies(r.inserted)}`;
-  const tail = skipped.length ? `; пропущено: ${skipped.join(', ')}.` : '.';
+  // Ответ старого сервера (до 29.09.2026) без companies — один адрес на компанию.
+  const companyCount = r.companies ?? r.inserted;
+  const head =
+    `В рассылку «${r.campaignName}» ${r.mode === 'append' ? 'добавлено' : 'залито'}: ${companies(companyCount)}` +
+    (r.inserted !== companyCount ? ` (${addresses(r.inserted)})` : '');
+  const tail = skipped.length ? `; пропущено адресов: ${skipped.join(', ')}.` : '.';
   // Черновик сам не отправляет — без этой фразы легко решить, что письма уже ушли.
   const next = r.mode === 'new' ? ' Это черновик: письма пойдут после кнопки «Запустить рассылку».' : '';
   return head + tail + next;
@@ -268,10 +284,11 @@ export function SenderBlock({ jobUrl, running, readyCount, onChanged }: Props) {
         ) : null}
         {offerUpload && pending.uploadable > 0 ? (
           <div>
-            {hasUploads ? 'Новых готовых к заливке' : 'Готово к заливке'}: {companies(pending.uploadable)}.
+            {hasUploads ? 'Новых готовых к заливке' : 'Готово к заливке'}: {companies(pending.uploadable)}
+            {pending.addresses != null && pending.addresses !== pending.uploadable ? ` (${addresses(pending.addresses)})` : ''}.
           </div>
         ) : null}
-        {offerUpload && blocked.length ? <div className="text-gray-500">Не зальются: {blocked.join(', ')}.</div> : null}
+        {offerUpload && blocked.length ? <div className="text-gray-500">Не зальются адреса: {blocked.join(', ')}.</div> : null}
         {!running && pending.total === 0 && uploaded === 0 && uploadedDeleted === 0 ? (
           <div className="text-gray-500">Готовых компаний для заливки нет.</div>
         ) : null}

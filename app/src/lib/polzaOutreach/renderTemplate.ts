@@ -5,9 +5,11 @@
  * Шаблон пишет писатель один раз на оффер (templateWriter.ts); здесь под
  * компанию подставляются только проверенные факты: название, фраза-повод
  * (triggerPhrase — детерминированная, из подтверждённого повода), короткий
- * повод, предложение об утверждённом кейсе, первые сегменты из разбора сайта и
- * подпись из настроек. Выбор вариантов: письмо 1 лично (sales@, личный адрес)
- * или «кто у вас за это отвечает?» (общий ящик), письмо 3 с кейсом или без.
+ * повод, боль компании из разбора сайта ({{pain}}, 29.09.2026 вместо строки
+ * «что компания делает» {{about}}), предложение об утверждённом кейсе, первые
+ * сегменты из разбора сайта и подпись из настроек. Выбор вариантов: письмо 1
+ * лично (sales@, личный адрес) или «прислать тому, кто отвечает за продажи?»
+ * (общий ящик), письмо 3 с кейсом или без.
  * Строка с пустым значением удаляется целиком — как пустой абзац у прежней
  * цепочки (signed()).
  *
@@ -28,6 +30,12 @@ import {
 
 const P = POLZA_TEMPLATE_PLACEHOLDERS;
 const ANY_PLACEHOLDER = /\{\{[^{}]*\}\}/g;
+/**
+ * Строка о компании из шаблонов до 29.09.2026. Шаблоны старых запусков не
+ * переписываем: их {{about}} убирается вместе со своим абзацем, как пустое
+ * значение, — иначе гард писем бракует «остались переменные».
+ */
+const LEGACY_ABOUT = '{{about}}';
 
 /** Оффер компании — тип её главного повода; без повода — none. */
 export function offerKeyOf(primary: Trigger | null): PolzaOfferKey {
@@ -39,8 +47,8 @@ export interface TemplateValues {
   /** Фраза-повод (triggerPhrase); нет — строка с {{trigger}} удаляется. */
   trigger: string | null;
   triggerShort: string;
-  /** Строка о компании (siteProfile.aboutLine); нет — строка с {{about}} удаляется. */
-  about: string | null;
+  /** Боль компании (siteProfile.painLine); нет — строка с {{pain}} удаляется. */
+  pain: string | null;
   /** Предложение о кейсе (caseSentence); есть — письмо 3 с кейсом. */
   caseText: string | null;
   /** Блок сегментов (segmentsBlock); нет — строка удаляется. */
@@ -88,7 +96,8 @@ export function renderTemplate(template: PolzaChainTemplateLetters, v: TemplateV
     [P.company]: v.company,
     [P.trigger]: v.trigger,
     [P.triggerShort]: v.triggerShort,
-    [P.about]: v.about,
+    [P.pain]: v.pain,
+    [LEGACY_ABOUT]: null,
     [P.case]: v.caseText,
     [P.segments]: v.segments,
     [P.signature]: v.signature,
@@ -111,8 +120,8 @@ export interface CompanyLettersInput {
   companyName: string;
   /** Название с сайта: заменяет слаг из адреса вакансии (letterCompanyName). */
   brandName?: string | null;
-  /** Строка о компании из разбора сайта — {{about}}. */
-  aboutLine?: string | null;
+  /** Боль компании из разбора сайта — {{pain}}. */
+  painLine?: string | null;
   /** Все подтверждённые поводы строки — главный среди них выбирает primaryTrigger. */
   triggers: Trigger[];
   /** Кейс по отрасли (routeEnCase); нет — письмо 3 без кейса. */
@@ -121,6 +130,11 @@ export interface CompanyLettersInput {
   segments: string[];
   /** Тип выбранной почты (findEmail): общий ящик получает письмо 1 «кто отвечает». */
   emailType: string | null;
+  /**
+   * Второй вариант письма 1 для остальных адресов компании (altRoutingFor):
+   * true — «кто у вас за это отвечает?», false — лично; null — не нужен.
+   */
+  altRouting?: boolean | null;
 }
 
 export interface CompanyLetters {
@@ -140,33 +154,52 @@ export function composeCompanyLetters(template: PolzaChainTemplateLetters, input
   // должности или кейса (так бывает в источниках) разошёлся бы с письмом.
   const tidy = (text: string) => text.replace(/\s+/g, ' ').trim();
   const company = tidy(displayName(letterCompanyName(input.companyName, input.brandName)));
-  const about = input.aboutLine ? tidy(input.aboutLine) : null;
+  const pain = input.painLine ? tidy(input.painLine) : null;
   const triggers = input.triggers.map((t) => ({ ...t, title: tidy(t.title) }));
   const caseHit = input.caseHit ? { ...input.caseHit, snippet: tidy(input.caseHit.snippet), segment: tidy(input.caseHit.segment) } : null;
   const primary = primaryTrigger(triggers);
   const isRouting = input.emailType === 'generic_company';
-  const letters = renderTemplate(template, {
+  const values: TemplateValues = {
     company,
     trigger: triggerPhrase(company, primary),
     triggerShort: triggerShort(primary),
-    about,
+    pain,
     caseText: caseHit ? caseSentence(caseHit) : null,
     segments: segmentsBlock(company, input.segments),
     signature,
     isRouting,
-  });
+  };
+  const letters = renderTemplate(template, values);
+  // Второй вариант письма 1 — тот вид, которого нет у главного адреса: у
+  // компании есть и личный адрес, и общий ящик. Письма 2–4 и тема общие.
+  const altRouting = input.altRouting ?? null;
+  const altLetter1 = altRouting !== null && altRouting !== isRouting ? renderTemplate(template, { ...values, isRouting: altRouting })[0] : null;
   // Проверенные факты: цифры в письмах — только из них, а запретные и служебные
   // слова гард ищет в тексте без них (имя «Leading Edge» — не наша реклама).
-  // Сегменты и строка о компании — из разбора сайта, цифр в них не бывает
-  // (siteProfile); в строке о компании законны слова вроде «LLM» и «evidence».
+  // Сегменты и боль — из разбора сайта, цифр в них не бывает (siteProfile);
+  // в боли законны слова вроде «LLM» и «evidence».
   const allowedFacts = [
     company,
-    ...(about ? [about] : []),
+    ...(pain ? [pain] : []),
     ...triggers.map((t) => t.title),
     // В фразу-повод идёт короткое название вакансии — его цифры тоже из факта.
     ...triggers.map((t) => (t.type === 'hiring' ? shortJobTitle(t.title) : null)).filter((s): s is string => Boolean(s)),
     ...(caseHit ? [caseHit.snippet, caseHit.segment] : []),
     ...input.segments.map(tidy),
   ];
-  return { letters, guard: guardLetters(letters, allowedFacts, signature), isRouting };
+  const guard = guardLetters(letters, allowedFacts, signature);
+  if (!altLetter1) return { letters, guard, isRouting };
+  // Второй вариант проверяется теми же гардами, что и основной: его получит
+  // живой адрес компании. Провал любого — строка на ручную проверку.
+  const altGuard = guardLetters([altLetter1, ...letters.slice(1)], allowedFacts, signature);
+  const altLabel = altRouting ? 'вариант для общего ящика' : 'личный вариант';
+  const altViolations = altGuard.violations
+    .filter((v) => v.startsWith('письмо 1'))
+    .map((v) => v.replace(/^письмо 1/, `письмо 1 (${altLabel})`));
+  const [first, ...rest] = letters;
+  return {
+    letters: [{ ...first, alt_body: altLetter1.body, alt_routing: altRouting as boolean }, ...rest],
+    guard: { ok: guard.ok && altViolations.length === 0, violations: [...guard.violations, ...altViolations] },
+    isRouting,
+  };
 }

@@ -343,6 +343,8 @@ export async function importRecipients(
       email: recipient.email,
       name: recipient.name,
       vars: recipient.vars,
+      // Все строки пачки с одним набором колонок: у ручной базы ключа нет.
+      group_key: recipient.groupKey ?? null,
       status: 'active',
       next_step_at: nextStepAt,
     }));

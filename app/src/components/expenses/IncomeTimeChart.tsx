@@ -3,6 +3,7 @@
 import { useMemo } from 'react';
 
 import StackedTimeChart, { type StackedPoint } from '@/components/expenses/StackedTimeChart';
+import { formatForeignNote } from '@/lib/expenses/client';
 import { INCOME_SOURCE_VALUES, sourceColor, sourceLabel } from '@/lib/expenses/labels';
 import type { GroupBy } from '@/lib/expenses/period';
 import type { IncomeSeriesPoint } from '@/lib/expenses/types';
@@ -28,6 +29,7 @@ export default function IncomeTimeChart({
         total: point.total,
         partial: point.partial,
         parts: point.bySource,
+        note: formatForeignNote(point.foreignByCurrency) || undefined,
       })),
     [series],
   );

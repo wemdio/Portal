@@ -4,11 +4,18 @@
  * «SDR hiring-trigger» от 11.09.2026 (гарантия «3 SQL или бесплатно» ушла
  * вместе с ней — в новой цепочке её нет).
  *
- *  1 — route to owner: повод + «кто отвечает за outbound?»;
- *  2 — боль и механика;
+ *  1 — повод → боль компании ({{pain}}) → что делает Polza → первые
+ *      сегменты; вопрос «прислать список?» (общий ящик — «прислать тому, кто
+ *      отвечает за продажи?»);
+ *  2 — конкретная проблема, чем она обходится и что сделаем для компании;
  *  3 — доказательство: утверждённый кейс (только при совпадении отрасли),
  *      гипотеза из 2–3 сегментов, предложение бесплатной выборки 20–30 компаний;
  *  4 — закрыть переписку.
+ *
+ * 29.09.2026 — по структуре четырёх писем Ника (продажи): вместо строки «что
+ * вы делаете» ({{about}}, «кринжик») — боль под повод, письма короче
+ * (guardTemplate: письмо 1 ≤ 60 слов без плейсхолдеров, 2–4 ≤ 70). Спека
+ * docs/superpowers/specs/2026-09-29-en-outreach-letters-pain-design.md.
  *
  * Одно письмо — одна мысль и один вопрос. Имени получателя у нас нет (почта
  * компании), поэтому обращение «Hi there,». Фразы-поводы — формулировки CEO,
@@ -40,14 +47,17 @@ import {
  * Версия писем строки (sequence_id). С 26.09.2026 письма — шаблон цепочки
  * оффера от писателя с подставленными фактами компании; прежняя
  * детерминированная цепочка (en_trigger_router_v1) — только его образец.
+ * v2 (29.09.2026) — шаблоны с болью {{pain}} вместо строки о компании.
  */
-export const SEQUENCE_ID = 'en_offer_templates_v1';
+export const SEQUENCE_ID = 'en_offer_templates_v2';
 
 export interface BuildLettersInput {
   company: string;
   trigger: Trigger | null;
-  /** Строка о компании из разбора сайта (siteProfile.aboutLine) — значение {{about}}. */
-  about?: string | null;
+  /** Боль компании из разбора сайта (siteProfile.painLine) — значение {{pain}}. */
+  pain?: string | null;
+  /** Письмо 1 для общего ящика: вопрос «прислать тому, кто отвечает за продажи?». */
+  routing?: boolean;
   caseHit: EnCase | null;
   segments: string[];
 }
@@ -178,10 +188,10 @@ function signed(...paragraphs: Array<string | null | undefined | false>): string
 
 /**
  * Цепочка — образец писателя шаблонов (templateWriter.ts собирает её на
- * плейсхолдерах). 28.09.2026 переписана: прежний текст CEO шёл почти дословно
- * во все письма («топорно и одинаково» — отзыв продаж). Смысл и порядок те же:
- * повод и строка о компании → почему буксует и что делаем → пример и
- * бесплатная выборка → закрыть переписку. Письма 2–4 — ответы в той же ветке:
+ * плейсхолдерах). 29.09.2026 переписана по структуре Ника: повод и боль →
+ * что делаем и с каких сегментов начали бы → вопрос «прислать список?»;
+ * письмо 2 — проблема, её цена и что сделаем; письмо 3 — пример и бесплатная
+ * выборка; письмо 4 — закрыть переписку. Письма 2–4 — ответы в той же ветке:
  * своей темы у них нет.
  */
 export function buildLetters(input: BuildLettersInput): PolzaOutreachLetter[] {
@@ -190,31 +200,37 @@ export function buildLetters(input: BuildLettersInput): PolzaOutreachLetter[] {
 
   const letter1 = signed(
     phrase,
-    input.about,
-    `When a team is ${triggerShort(input.trigger)}, most of the early effort goes into research: which accounts to go after, who to contact there and what to say to them. That is the part we take on — the account list, contacts, the sequence and the launch — and the interested replies go straight to your team.`,
-    'Who would be the right person to talk to about this?',
+    input.pain,
+    'That is the part we take on: the account list, the right contacts and the outbound sequence, with interested replies going straight to your team.',
+    segmentsBlock(company, input.segments),
+    input.routing
+      ? `Should I send a first list of 20–30 target accounts to whoever handles sales at ${company}?`
+      : 'Want me to send over a first list of 20–30 target accounts?',
   );
 
   const letter2 = signed(
-    'Following up on my note. Outbound rarely stalls because of the sending tool. It stalls because the same generic email goes to a broad list, and nobody has a real reason to reply.',
-    `What we would do for ${company} instead: a few narrow segments, a separate reason to write to each company, and every reply handed to you with the full thread.`,
-    'Would it help if I sketched what that could look like for you?',
+    'Outbound usually stalls because one generic email goes to a broad list and nobody has a reason to reply.',
+    'That costs more than silence: the domain wears out and the team burns time on the wrong accounts.',
+    `What we would do for ${company} instead: narrow segments, a reason to write to each account, and replies handed over with the thread.`,
+    'Want to see what that could look like?',
   );
 
   const letter3 = signed(
     input.caseHit ? caseSentence(input.caseHit) : null,
     segmentsBlock(company, input.segments),
-    `I can put together a free sample of 20–30 target accounts for ${company}, so you can judge the quality before we even talk.`,
+    `Before any call, I can put together a free sample of 20–30 target accounts for ${company}, so you can judge the quality first.`,
     'Want me to send it over?',
   );
 
   const letter4 = signed(
-    `Last note from me. If new pipeline is on the agenda at ${company}, the account sample is still on the table. If not, a short “not now” is enough and I will leave it there.`,
-    'Should I close the loop?',
+    `Last note from me. If new pipeline is on the agenda at ${company}, the account sample could still be useful. If not, I will close the thread here.`,
+    'Should I leave it at that?',
   );
 
+  // Тема — боль и компания или роль, как у Ника («pipeline before your new SDR ramps»).
+  const subject = input.trigger?.type === 'hiring' ? 'pipeline before your new hire ramps' : `target accounts for ${company}`;
   return [
-    { n: 1, subject: `pipeline at ${company}`, body: letter1 },
+    { n: 1, subject, body: letter1 },
     { n: 2, subject: '', body: letter2 },
     { n: 3, subject: '', body: letter3 },
     { n: 4, subject: '', body: letter4 },
@@ -305,10 +321,23 @@ const EMOJI_RE = /\p{Extended_Pictographic}/u;
 const MARKDOWN_RE = /\*\*|__|^#{1,6}\s/m;
 // Письмо 1 для общего ящика читает не ЛПР: оно обязано спросить, кто
 // отвечает, или попросить переслать письмо. Голое «forward» не в счёт — «move
-// forward», «look forward» так же пропустили бы прямое письмо.
+// forward», «look forward» так же пропустили бы прямое письмо. «Send them to
+// whoever handles sales» — вопрос письма 1 по структуре Ника (29.09.2026).
 const ROUTING_RE =
-  /\b(?:right person|right people|right contact|who (?:owns|handles|leads|runs|looks after|is responsible|would be the right)|point me to|forward (?:this|it|my (?:note|email|message))|pass (?:this|it) (?:on|along))\b/i;
+  /\b(?:right person|right people|right contact|who (?:owns|handles|leads|runs|looks after|is responsible|would be the right)|whoever (?:handles|runs|owns|leads)|point me to|forward (?:this|it|my (?:note|email|message))|pass (?:this|it) (?:on|along))\b/i;
 const SUBJECT_MAX = 80;
+/**
+ * Длина письма шаблона в словах без плейсхолдеров и приветствия: письмо 1 —
+ * до 60 (с болью ≤ 40 слов и сегментами выходит около 110–120), письма 2–4 —
+ * до 70. Длинные письма не дочитывают (отзыв продаж 29.09.2026).
+ */
+const LETTER1_MAX_WORDS = 60;
+const LETTER_MAX_WORDS = 70;
+
+/** Слова текста письма: в счёт идёт то, где есть буква или цифра («—» и «-» — не слова). */
+function wordCount(text: string): number {
+  return text.split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w)).length;
+}
 // Шаблон идёт всем компаниям оффера, фактов о результатах у него нет: цифра в
 // шаблоне — только размер бесплатной выборки, и только во фразе о выборке
 // аккаунтов («20–30 accounts», «20–30 B2B accounts»). «20–30» в другом месте
@@ -395,8 +424,9 @@ function exampleLeak(text: string, examples: readonly string[]): string | null {
  * Правила guardLetters для шаблона цепочки оффера — один раз на оффер: шаблон
  * идёт всем компаниям оффера, и ошибка в нём повторилась бы в каждом письме.
  * Плюс правила самого шаблона: только плейсхолдеры оффера и на своих местах,
- * повод/кейс/сегменты — отдельным абзацем без вводной строки, подпись —
+ * повод/боль/кейс/сегменты — отдельным абзацем без вводной строки, подпись —
  * последней строкой, у общего ящика — вопрос «кто у вас за это отвечает»,
+ * длина писем без плейсхолдеров (too_long),
  * ничего из примеров задания (examples: компания Acme, должности и фразы
  * примеров повода — templateWriter.templateQaExamples). Готовые письма
  * компании после подстановки проверяет guardLetters.
@@ -456,7 +486,7 @@ export function guardTemplate(t: PolzaChainTemplateLetters, offer: PolzaOfferKey
       if (!allowed.has(found) || found === P.signature) flags.push(`${tag}:placeholder_not_allowed(${found})`);
     }
     if (/[{}]/.test(plain)) flags.push(`${tag}:placeholder_broken`);
-    for (const ph of [P.trigger, P.about, P.case, P.segments]) {
+    for (const ph of [P.trigger, P.pain, P.case, P.segments]) {
       if (!text.includes(ph)) continue;
       if (countOf(text, ph) > 1) flags.push(`${tag}:placeholder_repeated(${ph})`);
       if (!ownParagraph(text, ph)) flags.push(`${tag}:placeholder_not_alone(${ph})`);
@@ -478,24 +508,28 @@ export function guardTemplate(t: PolzaChainTemplateLetters, offer: PolzaOfferKey
     if (leak) flags.push(`${tag}:example_leak(${leak})`);
     const digits = unsupportedNumbers(plain);
     if (digits.length) flags.push(`${tag}:unsupported_number(${digits.join(' ')})`);
+    const words = wordCount(plain.replace(/^\s*Hi there,/, ' '));
+    if (words > (tag.startsWith('L1') ? LETTER1_MAX_WORDS : LETTER_MAX_WORDS)) flags.push(`${tag}:too_long(${words})`);
   }
 
-  // Обязательные плейсхолдеры и их места: повод и строка о компании — в
-  // письме 1 (оба варианта), кейс — только в письме 3 с кейсом, сегменты —
-  // только в письме 3.
+  // Обязательные плейсхолдеры и их места: повод и боль — в письме 1 (оба
+  // варианта) и только там; кейс — только в письме 3 с кейсом; сегменты — в
+  // письме 1 (обязательно, оба варианта) и в письме 3 (без кейса — обязательно).
   if (allowed.has(P.trigger)) {
     if (!t.bodyDirect.includes(P.trigger)) flags.push(`L1:placeholder_missing(${P.trigger})`);
     if (!t.bodyRouting.includes(P.trigger)) flags.push(`L1r:placeholder_missing(${P.trigger})`);
   }
-  if (!t.bodyDirect.includes(P.about)) flags.push(`L1:placeholder_missing(${P.about})`);
-  if (!t.bodyRouting.includes(P.about)) flags.push(`L1r:placeholder_missing(${P.about})`);
+  for (const ph of [P.pain, P.segments]) {
+    if (!t.bodyDirect.includes(ph)) flags.push(`L1:placeholder_missing(${ph})`);
+    if (!t.bodyRouting.includes(ph)) flags.push(`L1r:placeholder_missing(${ph})`);
+  }
   if (!t.bodyWithCase.includes(P.case)) flags.push(`L3c:placeholder_missing(${P.case})`);
   if (!t.bodyWithoutCase.includes(P.segments)) flags.push(`L3:placeholder_missing(${P.segments})`);
   for (const [tag, raw] of bodies) {
     if (allowed.has(P.trigger) && !tag.startsWith('L1') && raw.includes(P.trigger)) flags.push(`${tag}:placeholder_misplaced(${P.trigger})`);
-    if (!tag.startsWith('L1') && raw.includes(P.about)) flags.push(`${tag}:placeholder_misplaced(${P.about})`);
+    if (!tag.startsWith('L1') && raw.includes(P.pain)) flags.push(`${tag}:placeholder_misplaced(${P.pain})`);
     if (tag !== 'L3c' && raw.includes(P.case)) flags.push(`${tag}:placeholder_misplaced(${P.case})`);
-    if (!tag.startsWith('L3') && raw.includes(P.segments)) flags.push(`${tag}:placeholder_misplaced(${P.segments})`);
+    if (!tag.startsWith('L1') && !tag.startsWith('L3') && raw.includes(P.segments)) flags.push(`${tag}:placeholder_misplaced(${P.segments})`);
   }
 
   if (t.bodyRouting.trim() && !ROUTING_RE.test(t.bodyRouting.replace(ANY_PLACEHOLDER, ' '))) flags.push('L1r:not_routing');
@@ -550,7 +584,8 @@ const TEMPLATE_FLAG_TEXT: Record<FlagLang, Record<string, string>> = {
     prior_contact: 'implies an earlier conversation — we have never talked to the recipient',
     example_leak: 'copied from the examples of this task (the company Acme, sample job titles or trigger phrases) — the template goes to every company',
     unsupported_number: 'numbers — the only allowed one is "20–30" in the phrase about the free sample of accounts',
-    not_routing: 'the shared-inbox variant must ask who the right person is or ask to forward this email',
+    not_routing: 'the shared-inbox variant must ask who the right person is, offer to send the list to whoever handles sales, or ask to forward this email',
+    too_long: `too long — email 1 must stay within ${LETTER1_MAX_WORDS} words and emails 2–4 within ${LETTER_MAX_WORDS}, not counting placeholders and the greeting; cut it down. Words now`,
     subject_missing: 'no subject',
     subject_placeholder: 'only {{company}} is allowed in the subject',
     subject_exclamation: 'exclamation mark',
@@ -580,6 +615,7 @@ const TEMPLATE_FLAG_TEXT: Record<FlagLang, Record<string, string>> = {
     example_leak: 'перенесён пример из задания',
     unsupported_number: 'цифры не из фразы о выборке 20–30 аккаунтов',
     not_routing: 'вариант для общего ящика не спрашивает, кто отвечает',
+    too_long: `слишком длинное (письмо 1 — до ${LETTER1_MAX_WORDS} слов, 2–4 — до ${LETTER_MAX_WORDS}, без плейсхолдеров); слов`,
     subject_missing: 'нет темы',
     subject_placeholder: 'в теме плейсхолдер кроме {{company}}',
     subject_exclamation: 'восклицательный знак',

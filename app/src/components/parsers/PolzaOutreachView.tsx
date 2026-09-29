@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Play, X } from 'lucide-react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch } from '@/lib/authFetch';
+import { companyEmailCell, extraCompanyEmails } from '@/lib/outreachEmail/companyEmails';
 import type { PolzaOutreachCompanyRow, PolzaOutreachConfig, PolzaOutreachFunnel, PolzaOutreachParserJob } from '@/types';
 import type { OutreachLlmBudgetSnapshot } from '@/lib/outreachLlm/types';
 import { fetchAllResultPages } from '@/lib/polzaOutreach/resultsPaging';
@@ -39,12 +40,15 @@ const RESULTS_LIMIT = 50;
 const READY_EXPORT_HEADER = [
   'company_name',
   'email',
+  'email_2',
+  'email_3',
   'domain',
   'job_country',
   'job_title',
   'job_url',
   'letter_1_subject',
   'letter_1_body',
+  'letter_1_alt_body',
   'letter_2_subject',
   'letter_2_body',
   'letter_3_subject',
@@ -70,12 +74,15 @@ const EXPORT_HEADER = [
   'email',
   'email_type',
   'email_verification',
+  'email_2',
+  'email_3',
   'status',
   'stage',
   'exclusion_reason',
   'review_reason',
   'letter_1_subject',
   'letter_1_body',
+  'letter_1_alt_body',
   'letter_2_subject',
   'letter_2_body',
   'letter_3_subject',
@@ -148,18 +155,27 @@ function downloadBlob(content: string, mime: string, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
+/** Почта 2 и 3 компании: адрес со статусом проверки или без него (файл для отправки). */
+function extraEmailCells(row: PolzaOutreachCompanyRow, withStatus: boolean): [string, string] {
+  const extra = extraCompanyEmails(row.emails, row.selected_company_email ?? null);
+  const cell = (i: number) => (withStatus ? companyEmailCell(extra[i]) : extra[i]?.email ?? '');
+  return [cell(0), cell(1)];
+}
+
 function readyExportRow(row: PolzaOutreachCompanyRow) {
   const letters = row.letters ?? [];
-  const letter = (n: number, field: 'subject' | 'body') => letters.find((l) => l.n === n)?.[field] ?? '';
+  const letter = (n: number, field: 'subject' | 'body' | 'alt_body') => letters.find((l) => l.n === n)?.[field] ?? '';
   return [
     row.company_name,
     row.selected_company_email ?? '',
+    ...extraEmailCells(row, false),
     row.normalized_domain ?? '',
     row.job_country_code ?? '',
     row.job_title ?? '',
     row.job_source_url ?? '',
     letter(1, 'subject'),
     letter(1, 'body'),
+    letter(1, 'alt_body'),
     letter(2, 'subject'),
     letter(2, 'body'),
     letter(3, 'subject'),
@@ -171,7 +187,7 @@ function readyExportRow(row: PolzaOutreachCompanyRow) {
 
 function exportRow(row: PolzaOutreachCompanyRow) {
   const letters = row.letters ?? [];
-  const letter = (n: number, field: 'subject' | 'body') => letters.find((l) => l.n === n)?.[field] ?? '';
+  const letter = (n: number, field: 'subject' | 'body' | 'alt_body') => letters.find((l) => l.n === n)?.[field] ?? '';
   return [
     row.company_name,
     row.normalized_domain ?? '',
@@ -189,12 +205,14 @@ function exportRow(row: PolzaOutreachCompanyRow) {
     row.selected_company_email ?? '',
     row.email_type ?? '',
     row.email_verification ?? '',
+    ...extraEmailCells(row, true),
     row.status,
     row.stage ?? '',
     row.exclusion_reason ?? '',
     row.review_reason ?? '',
     letter(1, 'subject'),
     letter(1, 'body'),
+    letter(1, 'alt_body'),
     letter(2, 'subject'),
     letter(2, 'body'),
     letter(3, 'subject'),

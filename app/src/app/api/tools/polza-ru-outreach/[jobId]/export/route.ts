@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import ExcelJS from 'exceljs';
 import { logError } from '@/lib/loggerServer';
+import { companyEmailCell, extraCompanyEmails } from '@/lib/outreachEmail/companyEmails';
 import { authed, jsonError } from '@/lib/polzaRuOutreach/routeAuth';
 import { DOUBT_LABELS, REASON_LABELS, STAGE_LABELS, type DoubtCode, type Stage } from '@/lib/polzaRuOutreach/types';
 
@@ -23,12 +24,25 @@ export const dynamic = 'force-dynamic';
  * где письма подставляются по имени колонки ({{email_1_body}}).
  */
 
-type Row = Record<string, unknown> & { letters?: Array<{ n: number; subject?: string; body?: string }> | null };
+type Row = Record<string, unknown> & {
+  letters?: Array<{ n: number; subject?: string; body?: string; alt_body?: string; alt_routing?: boolean }> | null;
+};
 type Col = { header: string; value: (r: Row) => unknown; width?: number };
 
 const letter = (n: number, part: 'subject' | 'body') => (r: Row) => r.letters?.find((l) => l.n === n)?.[part] ?? '';
 const field = (key: string) => (r: Row) => r[key] ?? '';
 const list = (key: string) => (r: Row) => (Array.isArray(r[key]) ? (r[key] as unknown[]).join('; ') : '');
+// Остальные адреса компании (до двух, с 29.09.2026): главный — recipient_email.
+const extra = (r: Row) => extraCompanyEmails(r.emails, typeof r.recipient_email === 'string' ? r.recipient_email : null);
+const extraEmail = (i: number) => (r: Row) => extra(r)[i]?.email ?? '';
+const extraVerification = (i: number) => (r: Row) => extra(r)[i]?.verification ?? '';
+const extraCell = (i: number) => (r: Row) => companyEmailCell(extra(r)[i]);
+// Второй вариант письма 1 — для адресов другого вида (лично / общий ящик).
+const letter1Alt = (r: Row) => r.letters?.find((l) => l.n === 1)?.alt_body ?? '';
+const letter1AltRouting = (r: Row) => {
+  const first = r.letters?.find((l) => l.n === 1);
+  return first?.alt_body ? String(first.alt_routing === true) : '';
+};
 const doubts = (r: Row) =>
   Array.isArray(r.doubt_flags) ? (r.doubt_flags as string[]).map((f) => DOUBT_LABELS[f as DoubtCode] ?? f).join('; ') : '';
 
@@ -50,6 +64,10 @@ const READY_COLUMNS: Col[] = [
   { header: 'recipient_role', value: field('recipient_role') },
   { header: 'recipient_email', value: field('recipient_email'), width: 30 },
   { header: 'email_verification', value: field('email_verification') },
+  { header: 'recipient_email_2', value: extraEmail(0), width: 30 },
+  { header: 'email_verification_2', value: extraVerification(0) },
+  { header: 'recipient_email_3', value: extraEmail(1), width: 30 },
+  { header: 'email_verification_3', value: extraVerification(1) },
   { header: 'case_id', value: field('case_id') },
   { header: 'case_match_reason', value: field('case_match_reason'), width: 30 },
   { header: 'case_text_approved', value: (r) => (r.case_id ? String(r.case_text_approved ?? '') : ''), width: 50 },
@@ -57,6 +75,9 @@ const READY_COLUMNS: Col[] = [
   { header: 'subject_a', value: letter(1, 'subject'), width: 36 },
   { header: 'subject_b', value: field('subject_b'), width: 36 },
   { header: 'email_1', value: letter(1, 'body'), width: 70 },
+  // Письмо 1 для адресов другого вида (email_1_alt_routing: true — общий ящик).
+  { header: 'email_1_alt', value: letter1Alt, width: 70 },
+  { header: 'email_1_alt_routing', value: letter1AltRouting },
   { header: 'email_2', value: letter(2, 'body'), width: 70 },
   { header: 'email_3', value: letter(3, 'body'), width: 70 },
   { header: 'email_4', value: letter(4, 'body'), width: 70 },
@@ -95,6 +116,9 @@ const JOURNAL_COLUMNS: Col[] = [
   // (почта не проверена) или отсеяна на шаге почты.
   { header: 'email_type', value: field('email_type') },
   { header: 'email_verification', value: field('email_verification') },
+  // Почта 2 и 3 — адрес со статусом проверки.
+  { header: 'recipient_email_2', value: extraCell(0), width: 36 },
+  { header: 'recipient_email_3', value: extraCell(1), width: 36 },
   { header: 'pipeline_stage', value: (r) => STAGE_LABELS[r.pipeline_stage as Stage] ?? r.pipeline_stage ?? '' },
   { header: 'row_status', value: field('row_status') },
   { header: 'reason_code', value: field('reason_code') },

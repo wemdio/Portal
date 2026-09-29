@@ -1,5 +1,11 @@
 import 'server-only';
 
+import {
+  letter1BodyFor,
+  readCompanyEmails,
+  type CompanyEmail,
+  type CompanyEmailVerification,
+} from '@/lib/outreachEmail/companyEmails';
 import type { OutreachLang } from '@/lib/outreachLlm/types';
 import { workerLeaseLive } from '@/lib/outreachLlm/workerLease';
 import { RU_OUTREACH_PARSER_TYPE } from '@/lib/polzaRuOutreach/types';
@@ -33,6 +39,13 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
  * (subject_1, email_1..email_4), а шаги рассылки — просто {{email_N}}: одна
  * рассылка везёт письма всех компаний запуска.
  *
+ * У компании бывает до трёх адресов (колонка emails строки, спека
+ * 2026-09-29-outreach-multi-email-design.md): строка разворачивается в
+ * получателя на каждый адрес. Письмо 1 — вариант по виду адреса (лично или
+ * «перешлите ответственному»), письма 2–4 общие. Получатели одной строки
+ * несут group_key = id строки: планировщик шлёт им с одного ящика и с
+ * разницей в сутки (sender/planner.ts).
+ *
  * Компания получает цепочку один раз. Залитая строка помечается датой заливки
  * (sender_uploaded_at) и ссылкой на рассылку (sender_campaign_id), и второй раз
  * её не зальют, пока стоит хоть одна из отметок. Удаление рассылки обнуляет
@@ -51,7 +64,8 @@ export const OUTREACH_ROW_TABLE: Record<OutreachLang, string> = {
 
 interface OutreachRow {
   id: string;
-  email: string;
+  /** Адреса компании (1–3), главный — первым; у старых строк — только главный. */
+  emails: CompanyEmail[];
   /** Как компанию зовут в письме: у RU бренд, у EN название. */
   company: string;
   domain: string;
@@ -65,7 +79,7 @@ interface OutreachSource {
   table: string;
   folderKey: string;
   sourceKind: CampaignSourceKind;
-  /** Колонка с адресом компании. */
+  /** Колонка с главным адресом компании. */
   emailColumn: string;
   /** Условия «строка готова» помимо адреса: колонка = значение. */
   readyEq: Array<[column: string, value: string]>;
@@ -80,6 +94,20 @@ interface OutreachSource {
 
 function text(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+/** Главный адрес из прежних колонок строки — первый в списке адресов. */
+function mainEmail(email: unknown, verification: unknown, type: unknown, isRouting: boolean): CompanyEmail | null {
+  const address = text(email);
+  if (!address) return null;
+  return {
+    email: address,
+    // Строка готова, только если главный адрес прошёл проверку (readyIn), —
+    // пустой вердикт здесь не встречается.
+    verification: (text(verification) || 'ok') as CompanyEmailVerification,
+    type: text(type) || null,
+    is_routing: isRouting,
+  };
 }
 
 /*
@@ -108,10 +136,11 @@ const SOURCES: Record<OutreachLang, OutreachSource> = {
     ],
     readyIn: [['email_verification', ['ok', 'catch_all', 'crm_contact']]],
     readyNotNull: ['chain_template_id'],
-    columns: 'id, recipient_email, company_brand, company_name, normalized_domain, letters',
+    columns:
+      'id, recipient_email, email_type, is_routing, email_verification, emails, company_brand, company_name, normalized_domain, letters',
     toRow: (raw) => ({
       id: String(raw.id),
-      email: text(raw.recipient_email),
+      emails: readCompanyEmails(raw.emails, mainEmail(raw.recipient_email, raw.email_verification, raw.email_type, raw.is_routing === true)),
       // Бренд — так компанию называют в письмах; юрлицо — запасной вариант.
       company: text(raw.company_brand) || text(raw.company_name),
       domain: text(raw.normalized_domain),
@@ -130,10 +159,13 @@ const SOURCES: Record<OutreachLang, OutreachSource> = {
     readyEq: [['status', 'ready']],
     readyIn: [['email_verification', ['ok', 'catch_all']]],
     readyNotNull: ['chain_template_id'],
-    columns: 'id, selected_company_email, company_name, normalized_domain, letters',
+    columns: 'id, selected_company_email, email_type, email_verification, emails, company_name, normalized_domain, letters',
     toRow: (raw) => ({
       id: String(raw.id),
-      email: text(raw.selected_company_email),
+      emails: readCompanyEmails(
+        raw.emails,
+        mainEmail(raw.selected_company_email, raw.email_verification, raw.email_type, raw.email_type === 'generic_company'),
+      ),
       company: text(raw.company_name),
       domain: text(raw.normalized_domain),
       letters: raw.letters,
@@ -352,31 +384,54 @@ async function countUploaded(source: OutreachSource, jobId: string): Promise<num
 
 // ── Строка аутрича → получатель рассылки ────────────────────────────────────
 
-function letterAt(letters: unknown, n: number): { subject: string; body: string } | null {
+interface StoredLetter {
+  subject: string;
+  body: string;
+  alt_body?: string;
+  alt_routing?: boolean;
+}
+
+function letterAt(letters: unknown, n: number): StoredLetter | null {
   if (!Array.isArray(letters)) return null;
   const found = letters.find(
     (item) => item !== null && typeof item === 'object' && Number((item as { n?: unknown }).n) === n,
-  ) as { subject?: unknown; body?: unknown } | undefined;
+  ) as { subject?: unknown; body?: unknown; alt_body?: unknown; alt_routing?: unknown } | undefined;
   if (!found) return null;
-  return { subject: text(found.subject), body: text(found.body) };
+  const altBody = text(found.alt_body);
+  return {
+    subject: text(found.subject),
+    body: text(found.body),
+    ...(altBody && typeof found.alt_routing === 'boolean' ? { alt_body: altBody, alt_routing: found.alt_routing } : {}),
+  };
 }
 
 /**
- * Получатель из готовой строки. Строку без темы или без текста первого
- * письма не пропустит importRecipients: шаг 1 рассылки — тема {{subject_1}} и
- * тело {{email_1}}, и пустое после подстановки первое письмо в рассылку не
- * льётся (skippedEmptyLetter) — правило одно с формой «Рассылки».
- * Недостающее письмо 2–4 — пустая строка: такой шаг планировщик не
- * отправляет, и цепочка для компании просто кончается раньше.
+ * Получатели из готовой строки — по одному на адрес компании. Письмо 1 —
+ * вариант по виду адреса (второй вариант лежит в letters, если среди адресов
+ * есть оба вида); тема и письма 2–4 общие. group_key — id строки: адреса
+ * одной компании планировщик ведёт с одного ящика и с разницей в сутки.
+ *
+ * Строку без темы или без текста первого письма не пропустит
+ * importRecipients: шаг 1 рассылки — тема {{subject_1}} и тело {{email_1}}, и
+ * пустое после подстановки первое письмо в рассылку не льётся
+ * (skippedEmptyLetter) — правило одно с формой «Рассылки». Недостающее письмо
+ * 2–4 — пустая строка: такой шаг планировщик не отправляет, и цепочка для
+ * компании просто кончается раньше.
  */
-function recipientOf(row: OutreachRow): RecipientInput {
-  const vars: Record<string, string> = {
-    subject_1: letterAt(row.letters, 1)?.subject ?? '',
+function recipientsOf(row: OutreachRow): RecipientInput[] {
+  const letter1 = letterAt(row.letters, 1);
+  const shared: Record<string, string> = {
+    subject_1: letter1?.subject ?? '',
     company: row.company,
     domain: row.domain,
   };
-  for (let n = 1; n <= LETTERS; n += 1) vars[`email_${n}`] = letterAt(row.letters, n)?.body ?? '';
-  return { email: row.email, name: row.company || null, vars };
+  for (let n = 2; n <= LETTERS; n += 1) shared[`email_${n}`] = letterAt(row.letters, n)?.body ?? '';
+  return row.emails.map((address) => ({
+    email: address.email,
+    name: row.company || null,
+    groupKey: row.id,
+    vars: { ...shared, email_1: letter1 ? letter1BodyFor(letter1, address.is_routing) : '' },
+  }));
 }
 
 // ── Новая рассылка ──────────────────────────────────────────────────────────
@@ -468,9 +523,10 @@ async function releaseRows(source: OutreachSource, ids: string[], campaignId: st
 }
 
 /**
- * Строки, чей адрес уже стоит в рассылке. Нужны уборке после сбоя доливки:
- * часть получателей могла лечь до сбоя, и снять с их строк отметку значило бы
- * залить эти компании второй раз, например в новую рассылку.
+ * Строки, у которых хоть один адрес уже стоит в рассылке. Нужны уборке после
+ * сбоя доливки: часть получателей могла лечь до сбоя, и снять с их строк
+ * отметку значило бы залить эти компании второй раз, например в новую
+ * рассылку. rows — получатели: по одному на адрес, id — строка компании.
  */
 async function rowsAlreadyInCampaign(
   campaignId: string,
@@ -513,17 +569,23 @@ export interface UploadJobResult {
   mode: 'new' | 'append';
   /** Строк запуска в этой заливке. */
   rows: number;
-  /** Новых получателей в рассылке. */
+  /** Компаний (строк), у которых хоть один адрес теперь в рассылке. */
+  companies: number;
+  /** Новых получателей (адресов) в рассылке. */
   inserted: number;
-  /** Адрес в стоп-листе: строка не помечена и зальётся, если адрес уберут из стоп-листа. */
+  /**
+   * Дальше — адреса, а не строки. Адрес в стоп-листе пропускается; строка без
+   * единого разрешённого адреса не помечена и зальётся, если адрес уберут из
+   * стоп-листа.
+   */
   skippedSuppressed: number;
   /** Адрес уже стоял в рассылке — строка помечена залитой. */
   skippedExisting: number;
   /** У двух компаний одна почта: письмо получит первая, обе строки помечены. */
   skippedDuplicates: number;
-  /** Некорректный адрес — строка не помечена. */
+  /** Некорректный адрес. */
   skippedInvalid: number;
-  /** Первое письмо без темы или без текста — строка не помечена. */
+  /** Первое письмо без темы или без текста. */
   skippedEmptyLetter: number;
   /** Готовых строк запуска, залитых раньше: второй раз они не льются. */
   alreadyUploaded: number;
@@ -556,9 +618,9 @@ async function appendTarget(folder: FolderRow, campaignId: string | null | undef
 
 function nothingLandedMessage(result: ImportRecipientsResult): string {
   const parts: string[] = [];
-  if (result.skippedSuppressed) parts.push(`в стоп-листе — ${result.skippedSuppressed}`);
-  if (result.skippedInvalid) parts.push(`некорректный адрес — ${result.skippedInvalid}`);
-  if (result.skippedEmptyLetter) parts.push(`первое письмо без темы или текста — ${result.skippedEmptyLetter}`);
+  if (result.skippedSuppressed) parts.push(`адресов в стоп-листе — ${result.skippedSuppressed}`);
+  if (result.skippedInvalid) parts.push(`некорректных адресов — ${result.skippedInvalid}`);
+  if (result.skippedEmptyLetter) parts.push(`адресов с первым письмом без темы или текста — ${result.skippedEmptyLetter}`);
   return `Ни одна компания не попала в рассылку${parts.length ? `: ${parts.join(', ')}` : ''}`;
 }
 
@@ -605,7 +667,8 @@ export async function uploadJobToSender(input: UploadJobInput): Promise<UploadJo
       409,
     );
   }
-  const candidates = pending.map((row) => ({ id: row.id, recipient: recipientOf(row) }));
+  // Получатель на каждый адрес строки; id — строка компании.
+  const candidates = pending.flatMap((row) => recipientsOf(row).map((recipient) => ({ id: row.id, recipient })));
 
   let campaignId: string;
   let campaignName: string;
@@ -620,7 +683,7 @@ export async function uploadJobToSender(input: UploadJobInput): Promise<UploadJo
     const mailboxes = await folderMailboxes(folder);
     // Имя с числом кандидатов — временное: после заливки в нём будет число
     // реально добавленных получателей.
-    campaignName = campaignNameFor(source, job.createdAt, candidates.length);
+    campaignName = campaignNameFor(source, job.createdAt, pending.length);
     ({ id: campaignId } = await createCampaign({
       name: campaignName,
       mailboxIds: mailboxes.working ? mailboxes.ids : [],
@@ -641,7 +704,7 @@ export async function uploadJobToSender(input: UploadJobInput): Promise<UploadJo
 
   const claimed: string[] = [];
   try {
-    await claimRows(source, job.id, candidates.map((c) => c.id), campaignId, claimed);
+    await claimRows(source, job.id, pending.map((row) => row.id), campaignId, claimed);
     if (!claimed.length) {
       throw new SenderOpError('Эти компании прямо сейчас заливаются в другую рассылку — обновите экран', 409);
     }
@@ -654,19 +717,23 @@ export async function uploadJobToSender(input: UploadJobInput): Promise<UploadJo
       { mode: 'append' },
     );
 
+    // Строка залита, если в рассылке хоть один её адрес; отметку снимаем
+    // только со строк, у которых не лёг ни один (стоп-лист, пустое письмо).
     const landed = new Set(imported.inCampaignRows);
+    const landedRows = new Set(batch.filter((_, index) => landed.has(index)).map((c) => c.id));
+    const batchRows = [...new Set(batch.map((c) => c.id))];
     await releaseRows(
       source,
-      batch.filter((_, index) => !landed.has(index)).map((c) => c.id),
+      batchRows.filter((id) => !landedRows.has(id)),
       campaignId,
     );
-    if (!landed.size) throw new SenderOpError(nothingLandedMessage(imported), 422);
+    if (!landedRows.size) throw new SenderOpError(nothingLandedMessage(imported), 422);
 
     // «RU · 26.09 · N компаний» — N по факту: стоп-лист, дубли и строки без
     // письма в рассылку не легли. Имя — для людей, сбой переименования
     // заливку не отменяет.
     if (!target) {
-      const finalName = campaignNameFor(source, job.createdAt, imported.inserted);
+      const finalName = campaignNameFor(source, job.createdAt, landedRows.size);
       if (finalName !== campaignName) {
         const { error: renameError } = await db()
           .from('sender_campaigns')
@@ -681,7 +748,8 @@ export async function uploadJobToSender(input: UploadJobInput): Promise<UploadJo
       campaignName,
       folderName: folder.name,
       mode: target ? 'append' : 'new',
-      rows: batch.length,
+      rows: batchRows.length,
+      companies: landedRows.size,
       inserted: imported.inserted,
       skippedSuppressed: imported.skippedSuppressed,
       skippedExisting: imported.skippedExisting,
@@ -806,13 +874,16 @@ export interface JobSenderStatus {
   /** Рассылки, созданные запуском или получившие его строки; новые сверху. */
   campaigns: JobSenderCampaign[];
   /**
-   * Готовые строки, ещё не залитые. uploadable — зальются нажатием (если
-   * запуск вообще можно заливать: см. smtpUnavailable и jobStatus);
-   * suppressed — адрес в стоп-листе; invalid — адрес некорректный. Письма
-   * здесь не читаются (это мегабайты на каждый показ экрана): строку без темы
-   * или без первого письма заливка отсеет сама и скажет об этом.
+   * Готовые строки, ещё не залитые. total и uploadable — строки (компании):
+   * uploadable — зальются нажатием, у них есть хоть один годный адрес (если
+   * запуск вообще можно заливать: см. smtpUnavailable и jobStatus).
+   * addresses — годные адреса этих строк: у компании их бывает до трёх.
+   * suppressed и invalid — адреса: в стоп-листе и некорректные; такой адрес
+   * пропускается, остальные адреса его компании зальются. Письма здесь не
+   * читаются (это мегабайты на каждый показ экрана): строку без темы или без
+   * первого письма заливка отсеет сама и скажет об этом.
    */
-  pending: { total: number; uploadable: number; suppressed: number; invalid: number };
+  pending: { total: number; uploadable: number; addresses: number; suppressed: number; invalid: number };
   /** Готовых строк в рассылках, которые есть сейчас. */
   uploaded: number;
   /**
@@ -863,9 +934,10 @@ export async function getJobSenderStatus(input: { lang: OutreachLang; jobId: str
   // ссылки — рассылку удалили; ни того ни другого — ждёт заливки.
   const perCampaign = new Map<string, number>();
   let uploadedDeleted = 0;
-  const pendingEmails: Array<string | null> = [];
+  // Адреса каждой ждущей строки (главный и остальные из emails).
+  const pendingRows: Array<Array<string | null>> = [];
   for (let from = 0; ; from += PAGE) {
-    const { data, error } = await readyQuery(source, job.id, `id, ${source.emailColumn}, sender_campaign_id, sender_uploaded_at`)
+    const { data, error } = await readyQuery(source, job.id, `id, ${source.emailColumn}, emails, sender_campaign_id, sender_uploaded_at`)
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw new SenderOpError(error.message, 500);
@@ -874,16 +946,22 @@ export async function getJobSenderStatus(input: { lang: OutreachLang; jobId: str
       const campaignId = row.sender_campaign_id ? String(row.sender_campaign_id) : null;
       if (campaignId) perCampaign.set(campaignId, (perCampaign.get(campaignId) ?? 0) + 1);
       else if (row.sender_uploaded_at) uploadedDeleted += 1;
-      else pendingEmails.push(normalizeRecipientEmail(String(row[source.emailColumn] ?? '')));
+      else {
+        const addresses = readCompanyEmails(row.emails, mainEmail(row[source.emailColumn], 'ok', null, false));
+        pendingRows.push(addresses.map((item) => normalizeRecipientEmail(item.email)));
+      }
     }
     if (page.length < PAGE) break;
   }
 
   // Те же правила, что у заливки: адрес приводится normalizeRecipientEmail,
-  // стоп-лист — sender_suppressions.
-  const valid = pendingEmails.filter((email): email is string => Boolean(email));
+  // стоп-лист — sender_suppressions, запрещённый адрес пропускается, а строка
+  // зальётся, если у неё остался хоть один годный адрес.
+  const allEmails = pendingRows.flat();
+  const valid = allEmails.filter((email): email is string => Boolean(email));
   const suppressedSet = await suppressedAmong([...new Set(valid)]);
   const suppressed = valid.filter((email) => suppressedSet.has(email)).length;
+  const uploadableRows = pendingRows.filter((emails) => emails.some((email) => email && !suppressedSet.has(email))).length;
 
   // Свои рассылки — по source_job_id; чужие, куда запуск доливал, — по
   // отметкам строк.
@@ -936,10 +1014,11 @@ export async function getJobSenderStatus(input: { lang: OutreachLang; jobId: str
     folder: { id: folder.id, name: folder.name, mailboxes: mailboxes.ids.length, workingMailboxes: mailboxes.working },
     campaigns,
     pending: {
-      total: pendingEmails.length,
-      uploadable: valid.length - suppressed,
+      total: pendingRows.length,
+      uploadable: uploadableRows,
+      addresses: valid.length - suppressed,
       suppressed,
-      invalid: pendingEmails.length - valid.length,
+      invalid: allEmails.length - valid.length,
     },
     uploaded: [...perCampaign.values()].reduce((sum, n) => sum + n, 0),
     uploadedDeleted,

@@ -24,6 +24,7 @@
 
 import { randomUUID } from 'crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { altVariantFor, readCompanyEmails, type CompanyEmailVerification } from '@/lib/outreachEmail/companyEmails';
 import {
   BudgetExceededError,
   JobBudget,
@@ -52,7 +53,8 @@ const ROWS = 'polza_ru_outreach_companies';
 const PAGE = 1000;
 const WAITING_COLUMNS =
   'id,chain_type,company_name,company_brand,about_line,is_routing,signals,signal_type,signal_title,signal_date,evidence_quote,source_url,' +
-  'prior_contact,market_evidence_quote,target_market,fit_reasons,case_id,recipient_email,amo_status,priority_score,doubt_flags,doubt_detail';
+  'prior_contact,market_evidence_quote,target_market,fit_reasons,case_id,recipient_email,amo_status,priority_score,doubt_flags,doubt_detail,' +
+  'email_type,email_verification,emails';
 const PRODUCT_PREFIX = 'Продукт: ';
 /** Письма строк собираются по четыре сразу: гипотеза — сетевой вызов. */
 const REBUILD_POOL = 4;
@@ -93,6 +95,10 @@ interface WaitingRow {
   priority_score: number | null;
   doubt_flags: string[] | null;
   doubt_detail: string | null;
+  email_type: string | null;
+  email_verification: string | null;
+  /** Адреса компании (lib/outreachEmail/companyEmails.ts): по ним — второй вариант письма 1. */
+  emails: unknown;
 }
 
 export interface RegenerateSummary {
@@ -466,6 +472,21 @@ function companyInput(row: WaitingRow, chain: ChainType, libraries: Libraries): 
     caseRecord: row.case_id ? libraries.cases.find((c) => c.case_id === row.case_id) ?? null : null,
     recipientEmail: row.recipient_email ?? '',
     amoStatus: row.amo_status,
+    // Оба варианта письма 1 пересобираются вместе: второй нужен, если среди
+    // адресов компании есть и адрес отдела, и общий ящик.
+    alt: altVariantFor(
+      readCompanyEmails(
+        row.emails,
+        row.recipient_email
+          ? {
+              email: row.recipient_email,
+              verification: (row.email_verification ?? 'ok') as CompanyEmailVerification,
+              type: row.email_type,
+              is_routing: row.is_routing === true,
+            }
+          : null,
+      ),
+    ),
   };
 }
 

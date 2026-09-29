@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Loader2, X } from 'lucide-react';
 import type { PolzaOutreachCompanyRow } from '@/types';
+import { extraCompanyEmails } from '@/lib/outreachEmail/companyEmails';
 import { passedFunnelStep, type PolzaFunnelKey } from '@/lib/polzaOutreach/funnel';
 
 /**
@@ -90,8 +91,13 @@ function describe(
       fallback = 'не прошла фильтр';
       break;
     case 'email_found': {
-      const verification = row.email_verification ? EMAIL_VERIFICATION_LABELS[row.email_verification] ?? row.email_verification : null;
-      detail = [row.selected_company_email, verification].filter(Boolean).join(' · ');
+      const label = (value: string | null | undefined) => (value ? EMAIL_VERIFICATION_LABELS[value] ?? value : null);
+      // Главный адрес и остальные (до трёх, с 29.09.2026) — каждый со статусом.
+      const main = [row.selected_company_email, label(row.email_verification)].filter(Boolean).join(' · ');
+      const extra = extraCompanyEmails(row.emails, row.selected_company_email ?? null).map((item) =>
+        [item.email, label(item.verification)].filter(Boolean).join(' · '),
+      );
+      detail = [main, ...extra].filter(Boolean).join('; ');
       fallback = 'почта не найдена';
       break;
     }

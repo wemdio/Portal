@@ -195,8 +195,11 @@ describe('Vertical Engine v2 Step 5 client onboarding', () => {
       });
     });
 
-    const presetSelect = await screen.findByLabelText('Настройки отправки');
-    expect(presetSelect).toHaveValue('VBI Новый клиент');
+    // После создания фокус может вернуться в поле выбора, и оно раскрыто с пустым
+    // поиском вместо названия: закрываем его, прежде чем смотреть выбранное.
+    const presetSelect = await screen.findByRole('combobox', { name: 'Настройки отправки' });
+    act(() => presetSelect.blur());
+    await waitFor(() => expect(presetSelect).toHaveValue('VBI Новый клиент'));
     expect(screen.getByText('Основной Instantly')).toBeInTheDocument();
     expect(screen.getByText('VBI')).toBeInTheDocument();
     expect(screen.queryByText(/sender-(one|two)@secret\.test/)).not.toBeInTheDocument();
