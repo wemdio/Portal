@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 import sources.bank_tbank as tbank
-from sources.bank_tbank import BankTBankSync
+from sources.bank_tbank import BankTBankSync, TBankSyncIncomplete
 
 TOKEN_1 = "token-one-secret"
 TOKEN_2 = "token-two-secret"
@@ -179,7 +179,8 @@ async def test_currency_of_the_account_lands_in_the_row(monkeypatch):
 
 async def test_failed_accounts_request_skips_only_that_token(monkeypatch, capsys):
     """Если список счетов для токена не получен — логируем и идём к
-    следующему токену, а не роняем весь источник."""
+    следующему токену, а в конце прогон падает: «success, 0 записей» при
+    отказе банка неделю прятал поломку (сентябрь 2026)."""
     monkeypatch.setenv("TBANK_TOKEN", TOKEN_1)
     monkeypatch.setenv("TBANK_TOKEN_2", TOKEN_2)
     monkeypatch.setattr(
@@ -187,9 +188,10 @@ async def test_failed_accounts_request_skips_only_that_token(monkeypatch, capsys
     )
 
     conn = _FakeConn()
-    total = await BankTBankSync().run(conn)
+    with pytest.raises(TBankSyncIncomplete, match="TBANK_TOKEN_2 список счетов"):
+        await BankTBankSync().run(conn)
 
-    assert total == 1
+    # Живой токен успел залиться до того, как прогон упал.
     assert _account_ids(conn) == [ACC_1]
 
     logged = capsys.readouterr().out
@@ -227,9 +229,9 @@ async def test_failing_period_does_not_take_out_the_other_accounts(
     monkeypatch.setattr(_FakeClient, "get", flaky_get)
 
     conn = _FakeConn()
-    total = await BankTBankSync().run(conn)
+    with pytest.raises(TBankSyncIncomplete, match=ACC_2A):
+        await BankTBankSync().run(conn)
 
-    assert total == 1
     assert _account_ids(conn) == [ACC_2B]
     assert "period FAIL" in capsys.readouterr().out
 
@@ -244,8 +246,11 @@ async def test_token_value_never_reaches_the_log(monkeypatch, capsys):
         {TOKEN_1: RuntimeError(f"401 for Bearer {TOKEN_1}")},
     )
 
-    await BankTBankSync().run(_FakeConn())
+    with pytest.raises(TBankSyncIncomplete) as failure:
+        await BankTBankSync().run(_FakeConn())
 
+    # Текст ошибки уходит в external_sync_runs.error и в алерт — туда тоже нельзя.
+    assert TOKEN_1 not in str(failure.value)
     logged = capsys.readouterr().out
     assert TOKEN_1 not in logged
     assert "<redacted>" in logged
