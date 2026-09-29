@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { Loader2, Send } from 'lucide-react';
+import { LeadVerdictBar } from '@/components/senderLeads/LeadVerdictBar';
 import { fetchThread, replyToThread, type ThreadItemDto } from './api';
 import { SenderModal } from './SenderModal';
 
@@ -21,7 +22,16 @@ function formatAt(value: string | null): string {
  * лида тем же тредом — раньше оператор переключался в почтовый клиент, и
  * отправленный оттуда ответ в портале не появлялся.
  */
-export function ThreadModal({ recipientId, onClose }: { recipientId: string; onClose: () => void }) {
+export function ThreadModal({
+  recipientId,
+  onClose,
+  onVerdictChange,
+}: {
+  recipientId: string;
+  onClose: () => void;
+  /** Человек поставил метку «Лид» / «Не лид» — списку пора обновить свою. */
+  onVerdictChange?: () => void;
+}) {
   const [items, setItems] = useState<ThreadItemDto[]>([]);
   const [title, setTitle] = useState('Переписка');
   const [subtitle, setSubtitle] = useState<string | undefined>(undefined);
@@ -70,6 +80,7 @@ export function ThreadModal({ recipientId, onClose }: { recipientId: string; onC
 
   return (
     <SenderModal title={title} subtitle={subtitle} size="wide" onClose={onClose}>
+      <LeadVerdictBar recipientId={recipientId} onChange={onVerdictChange} />
       {loading ? (
         <div className="flex items-center justify-center gap-2 py-10 text-sm text-zinc-500">
           <Loader2 className="h-4 w-4 animate-spin" />

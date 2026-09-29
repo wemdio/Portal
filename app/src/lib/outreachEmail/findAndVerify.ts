@@ -13,6 +13,12 @@
  * только цикл «выбрали → проверили → нерабочий исключили → выбрали следующий»:
  * мёртвый sales@ не повод терять компанию, если на сайте есть живой info@.
  *
+ * Компания получает до трёх рабочих адресов (спека
+ * 2026-09-29-outreach-multi-email-design.md): кандидаты идут по тем же правилам
+ * pick, проверенные исключаются, OK копятся, пока их не станет maxResults или
+ * не кончатся кандидаты и проверки (maxChecks, OUTREACH_EMAIL_MAX_CHECKS).
+ * Первый адрес — главный: тот, что выбрали бы и при одном адресе.
+ *
  * Вердикты:
  *   ok         — ящик подтверждён (role- и free-адреса — тоже рабочие для B2B);
  *   catch_all  — сервер принимает любой адрес: отказа не будет, дойдёт ли — неизвестно;
@@ -39,6 +45,8 @@ import {
 } from '@/lib/jobs/autoPipelineEmailValidation';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
+import { MAX_COMPANY_EMAILS } from './companyEmails';
+
 export type OutreachEmailVerdict = 'ok' | 'catch_all' | 'unverified' | 'invalid' | 'none';
 /** Вердикт найденного адреса — его пишут в email_verification строки. */
 export type OutreachEmailVerification = 'ok' | 'catch_all' | 'unverified';
@@ -57,20 +65,30 @@ export interface FindAndVerifyOptions<P extends { email: string }> {
   /** Язык обхода: заголовок Accept-Language и порядок страниц контактов. */
   locale: 'ru' | 'en';
   /**
-   * Правила выбора адреса аутрича. excluded — отбракованные проверкой адреса в
-   * нижнем регистре: их пропускать. null — подходящих адресов больше нет.
+   * Правила выбора адреса аутрича. excluded — уже проверенные адреса в нижнем
+   * регистре (и нерабочие, и принятые): их пропускать. null — подходящих
+   * адресов больше нет.
    */
   pick: (emails: string[], excluded: ReadonlySet<string>) => P | null;
   domainCache: EmailDomainCache;
-  /** Сколько адресов проверить, прежде чем признать почту нерабочей (по умолчанию 3). */
-  maxCandidates?: number;
+  /** Сколько рабочих адресов собрать (по умолчанию 3, MAX_COMPANY_EMAILS). */
+  maxResults?: number;
+  /** Сколько адресов проверить на компанию всего (по умолчанию OUTREACH_EMAIL_MAX_CHECKS, 6). */
+  maxChecks?: number;
   /** Страниц обхода сайта (по умолчанию 8). */
   maxPages?: number;
 }
 
+export type VerifiedPick<P extends { email: string }> = P & { verification: OutreachEmailVerification };
+
 export interface CompanyEmailSearch<P extends { email: string }> {
-  /** Выбранный адрес с вердиктом проверки; null — при verdict 'invalid' и 'none'. */
-  result: (P & { verification: OutreachEmailVerification }) | null;
+  /** Главный адрес с вердиктом проверки (= results[0]); null — при verdict 'invalid' и 'none'. */
+  result: VerifiedPick<P> | null;
+  /**
+   * Адреса в работу по приоритету, главный — первым: 1–maxResults адресов со
+   * статусом ok, либо один адрес catch_all / unverified. Пусто — адреса нет.
+   */
+  results: VerifiedPick<P>[];
   verdict: OutreachEmailVerdict;
   /** Адреса, отбракованные проверкой, в порядке проверки — для журнала. */
   triedInvalid: string[];
@@ -98,7 +116,6 @@ const CACHE_MAX_EMAILS = 30;
 const PAGE_TIMEOUT_MS = 15_000;
 const SITE_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_PAGES = 8;
-const DEFAULT_MAX_CANDIDATES = 3;
 // Обычная проверка — доли секунды. Минуты уходят, только когда висят прокси
 // или MX (у каждого из трёх прокси по 25 с, до трёх MX на домен), и ответа всё
 // равно не будет: адрес — «не удалось проверить», строка идёт дальше.
@@ -111,17 +128,24 @@ function envMs(name: string, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-// Потолок на компанию целиком: чтение кэша, обход сайта и проверка до трёх
-// адресов. Каждый шаг ограничен и сам (минута на сайт, 90 с на адрес), но
-// вместе это до шести минут на одну компанию, а параллельных слотов на почту
+// Потолок на компанию целиком: чтение кэша, обход сайта и проверка до шести
+// адресов (MAX_CHECKS). Каждый шаг ограничен и сам (минута на сайт, 90 с на
+// адрес), но вместе это до десяти минут на одну компанию, а параллельных слотов на почту
 // у раннера всего несколько: пара сайтов-ловушек или зависших прокси — и темп
 // запуска падает в ноль.
 // Тот же урок, что у обогащения сайтов (FETCH_EMAIL_ROW_HARD_TIMEOUT_MS в
 // websiteEnrichmentWorker.ts): отдельные потолки шагов не ограничивают строку.
-// Две минуты хватает нормальному сайту и проверке. Кончилось время — уже
+// Две минуты хватает нормальному сайту и проверке: обычная проверка адреса —
+// доли секунды. Кончилось время — уже подтверждённые адреса остаются, первый
 // выбранный адрес уходит как «не удалось проверить», а если до адреса не
 // дошли — почты нет.
 const COMPANY_TIMEOUT_MS = envMs('OUTREACH_EMAIL_COMPANY_TIMEOUT_MS', 120_000);
+
+// Проверок адресов на компанию. Раньше их было до трёх, и все — ради одного
+// рабочего адреса. Теперь собираем до трёх рабочих, и нерабочие между ними
+// тоже тратят проверки: шести хватает сайту с парой мёртвых адресов, а
+// общий потолок времени компании (COMPANY_TIMEOUT_MS) держит всё вместе.
+const MAX_CHECKS = Math.floor(envMs('OUTREACH_EMAIL_MAX_CHECKS', 6));
 
 /** И Error, и ошибка Supabase (PostgrestError — не Error) несут message. */
 function warn(message: string, err?: unknown): void {
@@ -326,20 +350,28 @@ async function verifyAddress(
 }
 
 /**
- * Лучший рабочий адрес компании по правилам pick. Нерабочий кандидат
- * исключается, и pick выбирает следующего — до maxCandidates проверок.
- * «Не удалось проверить» — окончательный ответ: следующий адрес того же домена
- * упрётся в те же прокси и MX, а правила выбора уже сказали, кто лучше.
+ * Рабочие адреса компании по правилам pick: до maxResults адресов со статусом
+ * ok, не больше maxChecks проверок. Проверенный адрес исключается, и pick
+ * выбирает следующего.
+ *
+ * Правила остановки:
+ *   • invalid — пропуск, берём следующего;
+ *   • catch_all, пока OK нет, — домен принимает любой адрес (решается на домен
+ *     и кэшируется в domainCache): дальше не проверяем, в работу один этот
+ *     адрес. catch_all после OK (адрес на другом поддомене) в работу не идёт;
+ *   • unverified, пока OK нет, — окончательный ответ, как раньше: следующий
+ *     адрес того же домена упрётся в те же прокси и MX. unverified после OK —
+ *     проверка останавливается, найденные OK остаются.
  *
  * Всё вместе — не дольше COMPANY_TIMEOUT_MS: каждый шаг получает свой потолок,
- * но не больше остатка общего времени. Время вышло на проверке — выбранный
- * адрес уходит как «не удалось проверить»; до адреса не дошли — почты нет.
+ * но не больше остатка общего времени. Время вышло на проверке — адрес
+ * «не удалось проверить»: первый уходит так, после найденных OK — остаются они.
  */
 export async function findAndVerifyCompanyEmail<P extends { email: string }>(
   opts: FindAndVerifyOptions<P>,
 ): Promise<CompanyEmailSearch<P>> {
   const url = cacheKeyFor(opts.website, opts.domain);
-  if (!url) return { result: null, verdict: 'none', triedInvalid: [], sourceUrl: null };
+  if (!url) return { result: null, results: [], verdict: 'none', triedInvalid: [], sourceUrl: null };
   const deadline = Date.now() + COMPANY_TIMEOUT_MS;
   const left = () => deadline - Date.now();
 
@@ -351,23 +383,39 @@ export async function findAndVerifyCompanyEmail<P extends { email: string }>(
     if (scraped.cutByDeadline) warn(`company email search hit the ${COMPANY_TIMEOUT_MS}ms cap before any address (${url})`);
     emails = scraped.emails;
   }
-  const maxCandidates = Math.max(1, opts.maxCandidates ?? DEFAULT_MAX_CANDIDATES);
+  const maxResults = Math.max(1, Math.floor(opts.maxResults ?? MAX_COMPANY_EMAILS));
+  const maxChecks = Math.max(1, Math.floor(opts.maxChecks ?? MAX_CHECKS));
   const excluded = new Set<string>();
   const triedInvalid: string[] = [];
-  while (triedInvalid.length < maxCandidates) {
+  const ok: VerifiedPick<P>[] = [];
+  let checks = 0;
+  while (checks < maxChecks && ok.length < maxResults) {
     const picked = opts.pick(emails, excluded);
     if (!picked) break;
     const key = picked.email.trim().toLowerCase();
     // Правила выбора обязаны пропускать исключённые адреса. Не пропустили —
     // считаем, что кандидаты кончились: иначе один адрес проверялся бы по кругу.
     if (excluded.has(key)) break;
+    excluded.add(key);
+    checks += 1;
     const verification = await verifyAddress(picked.email, opts.domainCache, left());
     if (verification === 'invalid') {
-      excluded.add(key);
       triedInvalid.push(picked.email);
       continue;
     }
-    return { result: { ...picked, verification }, verdict: verification, triedInvalid, sourceUrl: url };
+    if (verification === 'ok') {
+      ok.push({ ...picked, verification });
+      continue;
+    }
+    // catch_all или unverified. Рабочих ещё нет — это и есть ответ, один адрес.
+    if (!ok.length) {
+      const only: VerifiedPick<P> = { ...picked, verification };
+      return { result: only, results: [only], verdict: verification, triedInvalid, sourceUrl: url };
+    }
+    // Уже есть OK: «не удалось проверить» — прокси или время кончились, дальше
+    // не проверяем. catch_all на другом поддомене — не OK, пропускаем.
+    if (verification === 'unverified') break;
   }
-  return { result: null, verdict: triedInvalid.length ? 'invalid' : 'none', triedInvalid, sourceUrl: null };
+  if (ok.length) return { result: ok[0], results: ok, verdict: 'ok', triedInvalid, sourceUrl: url };
+  return { result: null, results: [], verdict: triedInvalid.length ? 'invalid' : 'none', triedInvalid, sourceUrl: null };
 }

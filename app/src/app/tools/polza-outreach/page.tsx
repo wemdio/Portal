@@ -1,4 +1,6 @@
+import { Suspense } from 'react';
 import { InDevelopmentGate } from '@/components/InDevelopmentGate';
+import { OutreachTabs } from '@/components/senderLeads/OutreachTabs';
 import { PolzaOutreachView } from '@/components/parsers/PolzaOutreachView';
 
 export default function PolzaOutreachPage() {
@@ -14,7 +16,13 @@ export default function PolzaOutreachPage() {
             Найм в sales/GTM и стартапы YC → Lead Score → почта → цепочка из четырёх писем на английском
           </p>
         </div>
-        <PolzaOutreachView />
+        {/* Suspense — OutreachTabs читает вкладку из адреса (?tab=qualification)
+            через useSearchParams; без границы ожидания сборка не пререндерит страницу. */}
+        <Suspense fallback={null}>
+          <OutreachTabs folderKey="auto_en">
+            <PolzaOutreachView />
+          </OutreachTabs>
+        </Suspense>
       </div>
     </InDevelopmentGate>
   );

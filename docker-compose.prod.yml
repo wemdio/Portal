@@ -763,6 +763,41 @@ services:
     networks:
       - portal-network
 
+  # Квалификатор ответов «Рассылки»: живой ответ → оценка ИИ → лид в ТГ-чат
+  # (docs/superpowers/specs/2026-09-29-sender-reply-leads-design.md).
+  # Свой ключ Requesty — расходы на квалификацию видны отдельно от Instantly.
+  # Бот «Polza Site Feedback» только пишет в чат: его обновления принимает
+  # сервис лидмагнита, кнопок и webhook здесь нет. Чат по умолчанию —
+  # «Продажи Polza» (-1001852890744), подчат General (THREAD_ID пусто).
+  # Правка env требует пересоздания:
+  #   docker compose -p portal -f docker-compose.prod.yml up -d --force-recreate --no-deps worker-sender-leads
+  worker-sender-leads:
+    image: ${DOCKER_USERNAME}/portal-worker:prod
+    container_name: portal-worker-sender-leads
+    command: ["node", "/app/workers/senderLeads.js"]
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      - SENDER_LEADS_AI_API_KEY=${SENDER_LEADS_AI_API_KEY:-}
+      - SENDER_LEADS_AI_MODEL=${SENDER_LEADS_AI_MODEL:-}
+      - SENDER_LEADS_TELEGRAM_BOT_TOKEN=${SENDER_LEADS_TELEGRAM_BOT_TOKEN:-}
+      - SENDER_LEADS_TELEGRAM_CHAT_ID=${SENDER_LEADS_TELEGRAM_CHAT_ID:-}
+      - SENDER_LEADS_TELEGRAM_THREAD_ID=${SENDER_LEADS_TELEGRAM_THREAD_ID:-}
+      - PORTAL_PUBLIC_URL=${PORTAL_PUBLIC_URL:-}
+    stop_grace_period: 1m
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.25'
+          pids: 256
+    restart: unless-stopped
+    networks:
+      - portal-network
+
   worker-hypothesis-engine:
     image: ${DOCKER_USERNAME}/portal-worker:prod
     container_name: portal-worker-hypothesis-engine

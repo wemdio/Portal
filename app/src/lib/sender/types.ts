@@ -83,6 +83,12 @@ export interface RecipientRow {
   last_step_sent: number;
   next_step_at: string | null;
   thread_message_id: string | null;
+  /**
+   * Адреса одной компании (заливка автоаутрича: id строки). Первое письмо —
+   * с того же ящика, что у соседей, и не раньше суток после их первого письма
+   * (planner.ts). null — ручная база, правило не действует.
+   */
+  group_key?: string | null;
 }
 
 export interface MessageRow {

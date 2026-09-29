@@ -19,9 +19,10 @@
  *    случае главная и пара разделов.
  *
  * Поиск и проверка — общие у аутричей (lib/outreachEmail/findAndVerify.ts):
- * обход сайта через портальный кэш и SMTP-проверка выбранного адреса. Здесь
- * только правила выбора: нерабочий адрес исключается, и pickCompanyEmail берёт
- * следующий по тем же приоритетам.
+ * обход сайта через портальный кэш и SMTP-проверка адресов. Здесь только
+ * правила выбора: проверенный адрес исключается, и pickCompanyEmail берёт
+ * следующий по тем же приоритетам. В работу — до трёх рабочих адресов
+ * (emails), первый из них главный.
  *
  * Сетевые ошибки не валят запуск: сайт не открылся — почты нет, компания
  * отсеивается с причиной no_corporate_email.
@@ -33,10 +34,19 @@ import {
   type OutreachEmailVerdict,
   type OutreachEmailVerification,
 } from '@/lib/outreachEmail/findAndVerify';
+import type { CompanyEmail } from '@/lib/outreachEmail/companyEmails';
 
 export type PolzaEmailType = 'generic_company' | 'department_company' | 'person_company';
 
+/** Адрес компании в работе — элемент колонки emails строки. */
+export interface PolzaFoundEmail {
+  email: string;
+  emailType: PolzaEmailType;
+  verification: OutreachEmailVerification;
+}
+
 export interface PolzaEmailResult {
+  /** Главный адрес (= emails[0]). */
   email: string | null;
   emailType: PolzaEmailType | null;
   emailSourceUrl: string | null;
@@ -46,6 +56,23 @@ export interface PolzaEmailResult {
   verdict: OutreachEmailVerdict;
   /** Адреса, отбракованные проверкой, — для журнала. */
   triedInvalid: string[];
+  /** Адреса в работу по приоритету (1–3), главный — первым; пусто — адреса нет. */
+  emails: PolzaFoundEmail[];
+}
+
+/** Общий ящик получает письмо 1 «кто у вас за это отвечает?». */
+export function isRoutingEmailType(type: string | null | undefined): boolean {
+  return type === 'generic_company';
+}
+
+/** Адреса → колонка emails строки. */
+export function toCompanyEmails(emails: PolzaFoundEmail[]): CompanyEmail[] {
+  return emails.map((item) => ({
+    email: item.email,
+    verification: item.verification,
+    type: item.emailType,
+    is_routing: isRoutingEmailType(item.emailType),
+  }));
 }
 
 /** Роли по убыванию пользы для холодного письма в отдел продаж. */
@@ -185,5 +212,6 @@ export async function findCompanyEmail(
     verification: found?.verification ?? null,
     verdict: search.verdict,
     triedInvalid: search.triedInvalid,
+    emails: search.results.map((item) => ({ email: item.email, emailType: item.emailType, verification: item.verification })),
   };
 }

@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import ExcelJS from 'exceljs';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { logError } from '@/lib/loggerServer';
+import { extraCompanyEmails } from '@/lib/outreachEmail/companyEmails';
 import { polzaReviewLabel } from '@/lib/polzaOutreach/types';
 
 export const dynamic = 'force-dynamic';
@@ -54,11 +55,16 @@ const COLUMNS: { header: string; key: string; width: number }[] = [
   { header: 'Почта', key: 'selected_company_email', width: 28 },
   { header: 'Тип почты', key: 'email_type', width: 18 },
   { header: 'Проверка почты', key: 'email_verification', width: 22 },
+  // У компании до трёх проверенных адресов (с 29.09.2026): остальные — со статусом.
+  { header: 'Почта 2', key: 'email_2', width: 34 },
+  { header: 'Почта 3', key: 'email_3', width: 34 },
   { header: 'Статус', key: 'status', width: 18 },
   { header: 'Причина исключения', key: 'exclusion_reason', width: 22 },
   { header: 'На ручную проверку', key: 'review_reason', width: 22 },
   { header: 'Письмо 1 — тема', key: 'letter1_subject', width: 34 },
   { header: 'Письмо 1 — текст', key: 'letter1_body', width: 60 },
+  // Среди адресов есть и личный, и общий ящик — второй вариант письма 1.
+  { header: 'Письмо 1 — второй вариант', key: 'letter1_alt_body', width: 60 },
   { header: 'Письмо 2 — тема', key: 'letter2_subject', width: 34 },
   { header: 'Письмо 2 — текст', key: 'letter2_body', width: 60 },
   { header: 'Письмо 3 — тема', key: 'letter3_subject', width: 34 },
@@ -81,6 +87,11 @@ const READY_COLUMNS: { header: string; key: string; width: number }[] = [
   // Вердикт SMTP-проверки как есть (ok / catch_all): catch-all отказа не
   // даст, но дойдёт ли письмо — неизвестно, это видно и при отправке.
   { header: 'email_verification', key: 'email_verification', width: 16 },
+  // Остальные адреса компании (до двух) и их вердикты — рядом с главным.
+  { header: 'email_2', key: 'email_2_plain', width: 30 },
+  { header: 'email_2_verification', key: 'email_2_verification', width: 16 },
+  { header: 'email_3', key: 'email_3_plain', width: 30 },
+  { header: 'email_3_verification', key: 'email_3_verification', width: 16 },
   { header: 'domain', key: 'normalized_domain', width: 24 },
   { header: 'country', key: 'country', width: 14 },
   { header: 'employee_range', key: 'employee_range', width: 12 },
@@ -98,6 +109,9 @@ const READY_COLUMNS: { header: string; key: string; width: number }[] = [
   { header: 'cta_type', key: 'cta_type', width: 10 },
   { header: 'letter_1_subject', key: 'letter1_subject', width: 34 },
   { header: 'letter_1_body', key: 'letter1_body', width: 60 },
+  // Письмо 1 для адресов другого вида (alt_routing: true — общий ящик).
+  { header: 'letter_1_alt_body', key: 'letter1_alt_body', width: 60 },
+  { header: 'letter_1_alt_routing', key: 'letter1_alt_routing', width: 12 },
   { header: 'letter_2_subject', key: 'letter2_subject', width: 34 },
   { header: 'letter_2_body', key: 'letter2_body', width: 60 },
   { header: 'letter_3_subject', key: 'letter3_subject', width: 34 },
@@ -159,7 +173,7 @@ function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status });
 }
 
-type Letter = { n: number; subject?: string | null; body?: string | null };
+type Letter = { n: number; subject?: string | null; body?: string | null; alt_body?: string | null; alt_routing?: boolean };
 
 export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: string }> }) {
   const token = getBearerToken(req.headers.get('authorization'));
@@ -208,6 +222,15 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     const letters = (row.letters as Letter[] | null) ?? [];
     const letter = (n: number, field: 'subject' | 'body') => letters.find((l) => l.n === n)?.[field] ?? '';
     const reason = (value: unknown) => (typeof value === 'string' ? REASON_RU[value] ?? value : '');
+    const extra = extraCompanyEmails(row.emails, typeof row.selected_company_email === 'string' ? row.selected_company_email : null);
+    const extraCell = (i: number) => {
+      const item = extra[i];
+      if (!item) return '';
+      const status = EMAIL_VERIFICATION_RU[item.verification] ?? item.verification;
+      const type = item.type ? EMAIL_TYPE_RU[item.type] ?? item.type : '';
+      return `${item.email} (${[type, status].filter(Boolean).join(', ')})`;
+    };
+    const letter1 = letters.find((l) => l.n === 1);
 
     sheet.addRow({
       ...row,
@@ -237,7 +260,15 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
           ? Object.entries(row.score_breakdown as Record<string, number>).map(([k, v]) => `${k}=${v}`).join(', ')
           : '',
       lead_status: row.lead_status === 'write_now' ? 'write now' : row.lead_status === 'manual_check' ? 'manual check' : row.lead_status === 'skip' ? 'skip' : '',
+      email_2: extraCell(0),
+      email_3: extraCell(1),
+      email_2_plain: extra[0]?.email ?? '',
+      email_2_verification: extra[0]?.verification ?? '',
+      email_3_plain: extra[1]?.email ?? '',
+      email_3_verification: extra[1]?.verification ?? '',
       letter1_subject: letter(1, 'subject'), letter1_body: letter(1, 'body'),
+      letter1_alt_body: letter1?.alt_body ?? '',
+      letter1_alt_routing: letter1?.alt_body ? String(letter1.alt_routing === true) : '',
       letter2_subject: letter(2, 'subject'), letter2_body: letter(2, 'body'),
       letter3_subject: letter(3, 'subject'), letter3_body: letter(3, 'body'),
       letter4_subject: letter(4, 'subject'), letter4_body: letter(4, 'body'),

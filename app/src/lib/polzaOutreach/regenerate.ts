@@ -30,10 +30,12 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { altRoutingFor, readCompanyEmails, type CompanyEmailVerification } from '@/lib/outreachEmail/companyEmails';
 import { JobBudget, runWithOutreachContext, type OutreachLlmBudgetSnapshot } from '@/lib/outreachLlm/context';
 import { withoutWorkerLease, workerLeaseLive, workerLeaseOf } from '@/lib/outreachLlm/workerLease';
 import { SEQUENCE_ID } from './buildLetters';
 import type { EnCase } from './caseRouter';
+import { isRoutingEmailType } from './findEmail';
 import { POLZA_FUNNEL_COLUMNS, polzaFunnel, type PolzaFunnelRow } from './funnel';
 import type { Trigger } from './leadScore';
 import { composeCompanyLetters, type CompanyLettersInput } from './renderTemplate';
@@ -59,7 +61,9 @@ import {
 
 const ROWS = 'polza_outreach_companies';
 const PAGE = 1000;
-const WAITING_COLUMNS = 'id,company_name,brand_name,about_line,trigger_list,recommended_case,segments,email_type,lead_score';
+const WAITING_COLUMNS =
+  'id,company_name,brand_name,pain_line,trigger_list,recommended_case,segments,email_type,lead_score,' +
+  'selected_company_email,email_verification,emails';
 /** review_reason строк, ждущих шаблон: код и подробность («template_failed: …»). */
 const TEMPLATE_FAILED_LIKE = 'template_failed%';
 /** Письма собираются без ИИ — параллельно пишем только строки в базу. */
@@ -69,12 +73,17 @@ interface WaitingRow {
   id: string;
   company_name: string;
   brand_name: string | null;
-  about_line: string | null;
+  /** Боль компании из разбора сайта — {{pain}}; у строк до 29.09.2026 пусто. */
+  pain_line: string | null;
   trigger_list: unknown;
   recommended_case: string | null;
   segments: unknown;
   email_type: string | null;
   lead_score: number | null;
+  selected_company_email: string | null;
+  email_verification: string | null;
+  /** Адреса компании (lib/outreachEmail/companyEmails.ts): по ним — второй вариант письма 1. */
+  emails: unknown;
 }
 
 export interface RegenerateSummary {
@@ -224,12 +233,27 @@ function companyInput(row: WaitingRow, cases: EnCase[]): CompanyLettersInput {
   return {
     companyName: row.company_name,
     brandName: row.brand_name,
-    aboutLine: row.about_line,
+    painLine: row.pain_line,
     triggers,
     // Кейс — только утверждённый сейчас: отозванный после запуска в письмо не идёт.
     caseHit: row.recommended_case ? cases.find((c) => c.caseId === row.recommended_case) ?? null : null,
     segments,
     emailType: row.email_type,
+    // Оба варианта письма 1 пересобираются вместе: второй нужен, если среди
+    // адресов компании есть и личный, и общий ящик.
+    altRouting: altRoutingFor(
+      readCompanyEmails(
+        row.emails,
+        row.selected_company_email
+          ? {
+              email: row.selected_company_email,
+              verification: (row.email_verification ?? 'ok') as CompanyEmailVerification,
+              type: row.email_type,
+              is_routing: isRoutingEmailType(row.email_type),
+            }
+          : null,
+      ),
+    ),
   };
 }
 

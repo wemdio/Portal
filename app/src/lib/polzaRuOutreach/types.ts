@@ -355,6 +355,13 @@ export interface Letter {
   n: number;
   subject: string;
   body: string;
+  /**
+   * Письмо 1 для адресов другого вида, чем главный (лично / «перешлите
+   * ответственному») — lib/outreachEmail/companyEmails.ts.
+   */
+  alt_body?: string;
+  /** Вид этого варианта: true — «перешлите ответственному». */
+  alt_routing?: boolean;
 }
 
 export interface QaResult {

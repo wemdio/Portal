@@ -39,7 +39,7 @@ function formatAt(value: string | null): string {
  * переписок столько же, сколько получателей, и тянуть их все ради порядка
  * нельзя.
  */
-export function ThreadsTab() {
+export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: string | null } = {}) {
   // По умолчанию разбивка по кампаниям: сюда заходят смотреть конкретную
   // рассылку, а сплошной список — второй взгляд на те же переписки.
   const [mode, setMode] = useState<Mode>('campaigns');
@@ -47,6 +47,7 @@ export function ThreadsTab() {
   const [campaignId, setCampaignId] = useState('');
   const [mailboxId, setMailboxId] = useState('');
   const [onlyReplied, setOnlyReplied] = useState(false);
+  const [onlyLeads, setOnlyLeads] = useState(false);
 
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
@@ -57,7 +58,9 @@ export function ThreadsTab() {
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [openThread, setOpenThread] = useState<string | null>(null);
+  // Переписка из ссылки открывается сразу, не дожидаясь списка: её может не
+  // быть на первой странице.
+  const [openThread, setOpenThread] = useState<string | null>(initialThreadId);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setQuery(search.trim()), SEARCH_DEBOUNCE_MS);
@@ -70,6 +73,7 @@ export function ThreadsTab() {
         page,
         search: query,
         onlyReplied,
+        onlyLeads,
         // Фильтры кампании и ящика живут только в своём режиме: переключение
         // на «Списком» не должно молча оставлять невидимый фильтр.
         campaignId: mode === 'campaigns' ? campaignId : '',
@@ -84,7 +88,7 @@ export function ThreadsTab() {
     } finally {
       setLoading(false);
     }
-  }, [page, query, onlyReplied, mode, campaignId, mailboxId]);
+  }, [page, query, onlyReplied, onlyLeads, mode, campaignId, mailboxId]);
 
   useEffect(() => {
     void load();
@@ -156,6 +160,19 @@ export function ThreadsTab() {
             className="h-4 w-4 cursor-pointer rounded border-zinc-300"
           />
           Только с ответами
+        </label>
+
+        <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-zinc-600">
+          <input
+            type="checkbox"
+            checked={onlyLeads}
+            onChange={(e) => {
+              setOnlyLeads(e.target.checked);
+              setPage(1);
+            }}
+            className="h-4 w-4 cursor-pointer rounded border-zinc-300"
+          />
+          Только лиды
         </label>
       </div>
 
@@ -258,7 +275,7 @@ export function ThreadsTab() {
             </div>
           ) : threads.length === 0 ? (
             <p className="px-5 py-12 text-center text-sm text-zinc-500">
-              {query || onlyReplied
+              {query || onlyReplied || onlyLeads
                 ? 'Ничего не нашлось — попробуйте снять фильтр.'
                 : 'Переписок пока нет: они появляются здесь, как только уходит первое письмо.'}
             </p>
@@ -283,6 +300,22 @@ export function ThreadsTab() {
                       ) : thread.reply_count > 0 ? (
                         <span className="rounded-md bg-zinc-100 px-2 py-0.5 text-xs text-zinc-600">
                           Входящее
+                        </span>
+                      ) : null}
+                      {/* Метка квалификатора ответов или человека: итог по переписке. */}
+                      {thread.lead_verdict === 'lead' ? (
+                        <span
+                          className="rounded-md bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-700"
+                          title={thread.lead_verdict_source === 'manual' ? 'Отмечено вручную' : 'Оценка ИИ'}
+                        >
+                          Лид{thread.lead_verdict_source === 'manual' ? ' (вручную)' : ''}
+                        </span>
+                      ) : thread.lead_verdict === 'not_lead' ? (
+                        <span
+                          className="rounded-md bg-zinc-100 px-2 py-0.5 text-xs text-zinc-500"
+                          title={thread.lead_verdict_source === 'manual' ? 'Отмечено вручную' : 'Оценка ИИ'}
+                        >
+                          Не лид{thread.lead_verdict_source === 'manual' ? ' (вручную)' : ''}
                         </span>
                       ) : null}
                     </div>
@@ -336,7 +369,13 @@ export function ThreadsTab() {
           вообще не удалось к ним привязать. */}
       <UnlinkedReplies refreshKey={page} />
 
-      {openThread ? <ThreadModal recipientId={openThread} onClose={() => setOpenThread(null)} /> : null}
+      {openThread ? (
+        <ThreadModal
+          recipientId={openThread}
+          onClose={() => setOpenThread(null)}
+          onVerdictChange={() => void load()}
+        />
+      ) : null}
     </div>
   );
 }

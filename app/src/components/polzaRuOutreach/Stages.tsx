@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { Loader2, X } from 'lucide-react';
 import { OutreachStages } from '@/components/parsers/OutreachStages';
+import { companyEmailCell, extraCompanyEmails } from '@/lib/outreachEmail/companyEmails';
 import { CHAIN_LABELS, REASON_LABELS, STAGES, type Stage } from '@/lib/polzaRuOutreach/types';
 import { API, api, STATUS_LABELS, type RuRow } from './shared';
 
@@ -46,6 +47,8 @@ function passedDetail(row: RuRow): string {
     row.chain_type ? CHAIN_LABELS[row.chain_type] : null,
     row.priority_score != null ? `оценка ${row.priority_score}` : null,
     row.recipient_email,
+    // Остальные адреса компании (до двух, с 29.09.2026) — со статусом проверки.
+    ...extraCompanyEmails(row.emails, row.recipient_email).map(companyEmailCell),
   ].filter(Boolean).join(' · ');
 }
 

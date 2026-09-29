@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, ChevronsUpDown } from 'lucide-react';
 
 import type { DayGroup } from '@/lib/expenses/byDay';
-import { expensesFetch, formatMoney, formatRub, pluralOps } from '@/lib/expenses/client';
+import { expensesFetch, formatForeignNote, formatMoney, formatRub, pluralOps } from '@/lib/expenses/client';
 import { categoryLabel, sourceLabel } from '@/lib/expenses/labels';
 import { SMALL_PAYMENT_THRESHOLD_RUB, type ExpenseRow, type IncomeRow } from '@/lib/expenses/types';
 
@@ -245,6 +245,11 @@ export default function DailyLedger({ kind, query, smallOnly = false }: Props) {
                 <span className="text-right text-xs text-zinc-500">{day.count}</span>
                 <span className="text-right text-xs font-medium text-zinc-900">
                   {formatRub(day.total)}
+                  {kind === 'incomes' && formatForeignNote(day.foreignByCurrency) && (
+                    <span className="ml-1 text-[10px] font-normal text-zinc-400">
+                      {formatForeignNote(day.foreignByCurrency)}
+                    </span>
+                  )}
                   {day.withoutRate > 0 && (
                     <span
                       className="ml-1 text-[10px] font-normal text-amber-600"
