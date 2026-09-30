@@ -5803,23 +5803,20 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     setSaving(true);
     setProxyError(null);
     try {
-      for (let i = 0; i < lines.length; i++) {
-        const res = await authFetch(`${API_BASE}/proxies`, {
-          method: 'POST',
-          body: JSON.stringify({
-            campaign_id: campaignId,
-            url: lines[i],
-            name: '',
-            proxy_list_id: activeList,
-          }),
-        });
-        if (!res.ok) {
-          const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
-          setProxyError(
-            `Строка ${i + 1}: ${errBody?.error ?? `ошибка ${res.status}`}. Остальные строки не загружены.`,
-          );
-          return;
-        }
+      // Одним запросом на весь список: по строке на запрос тысяча прокси
+      // грузилась ~9 минут без единого признака жизни (30.09.2026).
+      const res = await authFetch(`${API_BASE}/proxies/bulk`, {
+        method: 'POST',
+        body: JSON.stringify({
+          campaign_id: campaignId,
+          proxies_text: lines.join('\n'),
+          proxy_list_id: activeList,
+        }),
+      });
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+        setProxyError(errBody?.error ?? `Не удалось загрузить прокси (ошибка ${res.status})`);
+        return;
       }
       setBulkText(''); setShowBulk(false);
       void reloadAll();
