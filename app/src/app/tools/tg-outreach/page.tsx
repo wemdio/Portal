@@ -2006,7 +2006,9 @@ function BulkActionsBar({
 }) {
   if (selectedCount === 0) return null;
   return (
-    <div className="flex flex-wrap items-center gap-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2">
+    // Прилипает к верху: в списке на сотни строк за кнопками приходилось
+    // каждый раз возвращаться в начало страницы.
+    <div className="sticky top-0 z-20 flex flex-wrap items-center gap-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 shadow-sm">
       <span className="text-xs font-medium text-indigo-900">Выбрано: {selectedCount}</span>
       {onCheck && (
         <button
@@ -5539,6 +5541,9 @@ function ProxyVerdict({
  */
 type ActiveProxyListKey = string | null;
 
+/** Строк прокси на странице списка. */
+const PROXY_PAGE_SIZE = 30;
+
 function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
   const [lists, setLists] = useState<OutreachProxyList[]>([]);
   const [activeList, setActiveList] = useState<ActiveProxyListKey>(null);
@@ -5590,6 +5595,28 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
 
   const proxyIds = useMemo(() => proxies.map(p => p.id), [proxies]);
   const { selectedIds, isSelected, toggle, setAll, clear } = useRowSelection(proxyIds);
+
+  /**
+   * Страница списка. Пулы грузят по тысяче прокси, и тысяча строк с выпадающим
+   * списком в каждой делала вкладку тяжёлой. Страница запоминается вместе со
+   * списком, которому принадлежит: при переходе в другой список она сама
+   * становится первой, без эффекта-сбрасывателя. Выделение и «выбрать все»
+   * по-прежнему работают по всему списку, а не по странице — массовые
+   * действия (проверить, перенести, удалить) нужны именно на весь пул.
+   */
+  const [proxyPageState, setProxyPageState] = useState<{ list: string | null; page: number }>(
+    { list: null, page: 0 },
+  );
+  const proxyPageCount = Math.max(1, Math.ceil(proxies.length / PROXY_PAGE_SIZE));
+  const proxyPage = Math.min(
+    proxyPageState.list === activeList ? proxyPageState.page : 0,
+    proxyPageCount - 1,
+  );
+  const pagedProxies = useMemo(
+    () => proxies.slice(proxyPage * PROXY_PAGE_SIZE, (proxyPage + 1) * PROXY_PAGE_SIZE),
+    [proxies, proxyPage],
+  );
+  const goToProxyPage = (page: number) => setProxyPageState({ list: activeList, page });
 
   /** Итог по каждому прокси — чтобы строка списка показала его без перезагрузки. */
   const checkById = useMemo(() => {
@@ -6416,7 +6443,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
               <SelectAllCheckbox total={proxies.length} selectedCount={selectedIds.length} onChange={setAll} />
               <span>URL / Название</span><span>Активен</span><span>Список</span><span />
             </div>
-            {proxies.map(p => {
+            {pagedProxies.map(p => {
               const check = checkById.get(p.id);
               return (
               <div
@@ -6475,6 +6502,24 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
               </div>
               );
             })}
+            {proxyPageCount > 1 && (
+              <div className="flex items-center justify-between gap-3 px-4 py-2 text-xs text-gray-500 bg-gray-50">
+                <span>
+                  {proxyPage * PROXY_PAGE_SIZE + 1}–{Math.min((proxyPage + 1) * PROXY_PAGE_SIZE, proxies.length)} из {proxies.length}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={() => goToProxyPage(proxyPage - 1)} disabled={proxyPage === 0}
+                    className="rounded-full border border-gray-200 bg-white px-3 py-1 hover:bg-gray-100 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">
+                    Назад
+                  </button>
+                  <span>Стр. {proxyPage + 1} из {proxyPageCount}</span>
+                  <button type="button" onClick={() => goToProxyPage(proxyPage + 1)} disabled={proxyPage >= proxyPageCount - 1}
+                    className="rounded-full border border-gray-200 bg-white px-3 py-1 hover:bg-gray-100 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">
+                    Вперёд
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
