@@ -29,6 +29,12 @@
  * короткий повод, кейс, сегменты: одни и те же для образца и для писем),
  * гарды готовых писем (guardLetters) и проверка шаблона до подстановки
  * (guardTemplate).
+ *
+ * 30.09.2026 — разбор первой выгрузки по шаблону Ника: тема письма 1 — в
+ * нескольких вариантах от повода и роли (letterSubject, {{subject}}), письмо
+ * 2 начинается с напоминания о первом письме ({{followup}}) и говорит о
+ * проблеме повода, а не об аутриче вообще; у компании без боли из разбора
+ * сайта — запасная боль по поводу (fallbackPain), абзац больше не выпадает.
  */
 
 import type { EnCase } from './caseRouter';
@@ -48,8 +54,9 @@ import {
  * оффера от писателя с подставленными фактами компании; прежняя
  * детерминированная цепочка (en_trigger_router_v1) — только его образец.
  * v2 (29.09.2026) — шаблоны с болью {{pain}} вместо строки о компании.
+ * v3 (30.09.2026) — тема от повода и роли, письмо 2 с напоминанием о поводе.
  */
-export const SEQUENCE_ID = 'en_offer_templates_v2';
+export const SEQUENCE_ID = 'en_offer_templates_v3';
 
 export interface BuildLettersInput {
   company: string;
@@ -161,6 +168,126 @@ export function triggerShort(t: Trigger | null): string {
   }
 }
 
+/** Роль для темы и коротких фраз: название вакансии не длиннее четырёх слов. */
+function shortRole(t: Trigger | null): string | null {
+  if (t?.type !== 'hiring') return null;
+  const title = shortJobTitle(t.title);
+  return title && title.split(' ').length <= 4 ? title : null;
+}
+
+const SUBJECT_MAX = 80;
+
+/**
+ * Варианты темы письма 1 — «боль + компания, роль или повод», как у Ника
+ * («pipeline before {role} ramps», «accounts for the new {role}», «target
+ * accounts for {company}»). Раньше тему писал писатель шаблона — одну на
+ * оффер, и 78 писем из 100 ушли бы с «outbound for {company}».
+ */
+export function subjectVariants(company: string, t: Trigger | null): string[] {
+  switch (t?.type) {
+    case 'hiring': {
+      const role = shortRole(t);
+      if (!role) {
+        return [
+          'pipeline before your new hire ramps',
+          'first weeks of a new sales hire',
+          `${company} sales hiring`,
+          `target accounts for ${company}`,
+        ];
+      }
+      return [
+        `pipeline before your new ${role} ramps`,
+        `accounts for the new ${role}`,
+        `before your new ${role} starts`,
+        `pipeline for ${company}'s new ${role}`,
+        `target accounts for ${company}`,
+      ];
+    }
+    case 'yc':
+      return [`target accounts for ${company}`, `outbound segments for ${company}`, 'first pipeline after YC', `first accounts for ${company} after YC`];
+    case 'launch':
+      return [`target accounts for the ${company} launch`, 'first accounts for the new launch', `outbound segments for ${company}`];
+    case 'tech_stack':
+      return [`target accounts for ${company}`, `outbound segments for ${company}`, `account list for ${company}`];
+    default:
+      return [`target accounts for ${company}`, `outbound segments for ${company}`, `new pipeline for ${company}`];
+  }
+}
+
+/** Тема письма 1 — значение {{subject}}: вариант выбирается по компании; слишком длинные (длинное название) отпадают. */
+export function letterSubject(company: string, t: Trigger | null): string {
+  const variants = subjectVariants(company, t);
+  const fit = variants.filter((s) => s.length <= SUBJECT_MAX);
+  return pickVariant(company, fit.length ? fit : variants) ?? 'target accounts';
+}
+
+/**
+ * Первая строка письма 2 — значение {{followup}}: напоминание о своём первом
+ * письме с поводом компании («Following up on {company}'s {trigger}» у Ника).
+ * Есть всегда: без повода — про outbound компании.
+ */
+export function followupPhrase(company: string, t: Trigger | null): string {
+  switch (t?.type) {
+    case 'hiring': {
+      const title = shortJobTitle(t.title);
+      return title ? `Following up on my note about the ${title} role at ${company}.` : `Following up on my note about sales hiring at ${company}.`;
+    }
+    case 'yc':
+      return `Following up on my note about outbound at ${company} after YC.`;
+    case 'launch':
+      return `Following up on my note about the ${company} launch.`;
+    default:
+      return `Following up on my note about outbound at ${company}.`;
+  }
+}
+
+/**
+ * Запасная боль по поводу — когда разбор сайта боль не дал или она не прошла
+ * проверку (painLineOf). Без неё абзац {{pain}} выпадал, и следующая фраза
+ * письма («We take that off your plate…») ни к чему не относилась.
+ */
+export function fallbackPain(company: string, t: Trigger | null): string {
+  const variants = ((): string[] => {
+    switch (t?.type) {
+      case 'hiring': {
+        const who = shortRole(t) ?? 'sales hire';
+        return [
+          `When a new ${who} starts, the bottleneck is usually not the hire itself but having enough of the right accounts to work from the first week.`,
+          `A new ${who} usually loses the first weeks to building lists by hand instead of talking to buyers.`,
+        ];
+      }
+      case 'yc':
+        return [
+          'After YC, the bottleneck is usually not the product but getting enough first conversations with the right buyers.',
+          'After YC, prospecting usually stays with the founders and competes with everything else for their time.',
+        ];
+      case 'launch':
+        return ['After a launch, the bottleneck is usually not the product but getting it in front of new accounts while the news is fresh.'];
+      case 'tech_stack':
+        return ['With the tools already in place, the bottleneck is usually not sending but deciding which accounts to write to and why.'];
+      default:
+        return ['For most B2B teams, the bottleneck is usually not the offer but a steady flow of conversations with the right accounts.'];
+    }
+  })();
+  return pickVariant(company, variants) ?? variants[0];
+}
+
+/** Проблема повода и чем она обходится — второй абзац письма 2 в образце писателю. */
+function followupProblem(t: Trigger | null): string {
+  switch (t?.type) {
+    case 'hiring':
+      return 'A common issue with a new sales hire: the first weeks go into building lists by hand. As a result, real conversations start late and the ramp drags.';
+    case 'yc':
+      return 'A common issue after YC: the founders do the prospecting themselves, in between everything else. As a result, outbound runs in bursts and the pipeline never gets steady.';
+    case 'launch':
+      return 'A common issue after a launch: the news reaches the existing audience and stops there. As a result, the window closes without new conversations.';
+    case 'tech_stack':
+      return 'A common issue with the tools already in place: one generic email goes to a broad list. As a result, the domain wears out and the team burns time on the wrong accounts.';
+    default:
+      return 'A common issue we see: one generic email goes to a broad list and nobody has a reason to reply. As a result, the domain wears out and the team burns time on the wrong accounts.';
+  }
+}
+
 /**
  * Предложение об утверждённом кейсе — значение {{case}}. Было «For a similar
  * {segment} company, we helped {snippet}» — а snippet сам начинается с того же
@@ -190,7 +317,8 @@ function signed(...paragraphs: Array<string | null | undefined | false>): string
  * Цепочка — образец писателя шаблонов (templateWriter.ts собирает её на
  * плейсхолдерах). 29.09.2026 переписана по структуре Ника: повод и боль →
  * что делаем и с каких сегментов начали бы → вопрос «прислать список?»;
- * письмо 2 — проблема, её цена и что сделаем; письмо 3 — пример и бесплатная
+ * письмо 2 — напоминание о поводе, проблема этого повода, её цена и что
+ * сделаем для компании; письмо 3 — пример и бесплатная
  * выборка; письмо 4 — закрыть переписку. Письма 2–4 — ответы в той же ветке:
  * своей темы у них нет.
  */
@@ -200,7 +328,7 @@ export function buildLetters(input: BuildLettersInput): PolzaOutreachLetter[] {
 
   const letter1 = signed(
     phrase,
-    input.pain,
+    input.pain ?? fallbackPain(company, input.trigger),
     'That is the part we take on: the account list, the right contacts and the outbound sequence, with interested replies going straight to your team.',
     segmentsBlock(company, input.segments),
     input.routing
@@ -209,10 +337,10 @@ export function buildLetters(input: BuildLettersInput): PolzaOutreachLetter[] {
   );
 
   const letter2 = signed(
-    'Outbound usually stalls because one generic email goes to a broad list and nobody has a reason to reply.',
-    'That costs more than silence: the domain wears out and the team burns time on the wrong accounts.',
-    `What we would do for ${company} instead: narrow segments, a reason to write to each account, and replies handed over with the thread.`,
-    'Want to see what that could look like?',
+    followupPhrase(company, input.trigger),
+    followupProblem(input.trigger),
+    `For ${company}, we could prepare three things: target accounts, the right contacts at each one, and a first sequence per segment.`,
+    'Would you want to see what that account list could look like?',
   );
 
   const letter3 = signed(
@@ -227,8 +355,7 @@ export function buildLetters(input: BuildLettersInput): PolzaOutreachLetter[] {
     'Should I leave it at that?',
   );
 
-  // Тема — боль и компания или роль, как у Ника («pipeline before your new SDR ramps»).
-  const subject = input.trigger?.type === 'hiring' ? 'pipeline before your new hire ramps' : `target accounts for ${company}`;
+  const subject = letterSubject(company, input.trigger);
   return [
     { n: 1, subject, body: letter1 },
     { n: 2, subject: '', body: letter2 },
@@ -325,7 +452,6 @@ const MARKDOWN_RE = /\*\*|__|^#{1,6}\s/m;
 // whoever handles sales» — вопрос письма 1 по структуре Ника (29.09.2026).
 const ROUTING_RE =
   /\b(?:right person|right people|right contact|who (?:owns|handles|leads|runs|looks after|is responsible|would be the right)|whoever (?:handles|runs|owns|leads)|point me to|forward (?:this|it|my (?:note|email|message))|pass (?:this|it) (?:on|along))\b/i;
-const SUBJECT_MAX = 80;
 /**
  * Длина письма шаблона в словах без плейсхолдеров и приветствия: письмо 1 —
  * до 60 (с болью ≤ 40 слов и сегментами выходит около 110–120), письма 2–4 —
@@ -426,6 +552,8 @@ function exampleLeak(text: string, examples: readonly string[]): string | null {
  * Плюс правила самого шаблона: только плейсхолдеры оффера и на своих местах,
  * повод/боль/кейс/сегменты — отдельным абзацем без вводной строки, подпись —
  * последней строкой, у общего ящика — вопрос «кто у вас за это отвечает»,
+ * напоминание {{followup}} — в письме 2 и только там, тема — {{subject}} (её
+ * ставит код; своя тема — только у шаблонов до 30.09.2026),
  * длина писем без плейсхолдеров (too_long),
  * ничего из примеров задания (examples: компания Acme, должности и фразы
  * примеров повода — templateWriter.templateQaExamples). Готовые письма
@@ -439,10 +567,11 @@ export function guardTemplate(t: PolzaChainTemplateLetters, offer: PolzaOfferKey
   const flags: string[] = [];
   const allowed = new Set<string>(polzaTemplatePlaceholdersFor(offer));
 
-  // Тема: из плейсхолдеров — только название компании.
+  // Тема: {{subject}} — её подставит код (letterSubject). Своя тема — у
+  // шаблонов до 30.09.2026: из плейсхолдеров в ней только название компании.
   const subject = t.subject.trim();
   if (!subject) flags.push('subject_missing');
-  else {
+  else if (subject !== P.subject) {
     const rest = subject.split(P.company).join(' ');
     if (/[{}]/.test(rest)) flags.push('subject_placeholder');
     if (subject.includes('!')) flags.push('subject_exclamation');
@@ -486,7 +615,7 @@ export function guardTemplate(t: PolzaChainTemplateLetters, offer: PolzaOfferKey
       if (!allowed.has(found) || found === P.signature) flags.push(`${tag}:placeholder_not_allowed(${found})`);
     }
     if (/[{}]/.test(plain)) flags.push(`${tag}:placeholder_broken`);
-    for (const ph of [P.trigger, P.pain, P.case, P.segments]) {
+    for (const ph of [P.trigger, P.pain, P.case, P.segments, P.followup]) {
       if (!text.includes(ph)) continue;
       if (countOf(text, ph) > 1) flags.push(`${tag}:placeholder_repeated(${ph})`);
       if (!ownParagraph(text, ph)) flags.push(`${tag}:placeholder_not_alone(${ph})`);
@@ -523,12 +652,14 @@ export function guardTemplate(t: PolzaChainTemplateLetters, offer: PolzaOfferKey
     if (!t.bodyDirect.includes(ph)) flags.push(`L1:placeholder_missing(${ph})`);
     if (!t.bodyRouting.includes(ph)) flags.push(`L1r:placeholder_missing(${ph})`);
   }
+  if (!t.letter2.includes(P.followup)) flags.push(`L2:placeholder_missing(${P.followup})`);
   if (!t.bodyWithCase.includes(P.case)) flags.push(`L3c:placeholder_missing(${P.case})`);
   if (!t.bodyWithoutCase.includes(P.segments)) flags.push(`L3:placeholder_missing(${P.segments})`);
   for (const [tag, raw] of bodies) {
     if (allowed.has(P.trigger) && !tag.startsWith('L1') && raw.includes(P.trigger)) flags.push(`${tag}:placeholder_misplaced(${P.trigger})`);
     if (!tag.startsWith('L1') && raw.includes(P.pain)) flags.push(`${tag}:placeholder_misplaced(${P.pain})`);
     if (tag !== 'L3c' && raw.includes(P.case)) flags.push(`${tag}:placeholder_misplaced(${P.case})`);
+    if (tag !== 'L2' && raw.includes(P.followup)) flags.push(`${tag}:placeholder_misplaced(${P.followup})`);
     if (!tag.startsWith('L1') && !tag.startsWith('L3') && raw.includes(P.segments)) flags.push(`${tag}:placeholder_misplaced(${P.segments})`);
   }
 
