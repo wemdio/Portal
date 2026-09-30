@@ -5443,7 +5443,11 @@ export function DatabaseSpreadsheet() {
             message:
               status === 'cancelled'
                 ? `Оценка ЦА отменена (обработано: ${safeProcessed})`
-                : finalErrorCount > 0
+                : status === 'failed'
+                  // Причина открывается в самом окне оценки; в подписи — только факт,
+                  // иначе «0 успешно, 223 с ошибками» читается как нормальный итог.
+                  ? `Оценка ЦА остановлена (оценено: ${successCount} из ${total})`
+                  : finalErrorCount > 0
                   ? `Оценка ЦА: ${successCount} успешно, ${finalErrorCount} с ошибками`
                   : `Оценка ЦА завершена: ${safeProcessed} строк`,
             time: Date.now(),

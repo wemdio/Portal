@@ -5,7 +5,7 @@ import { generateReplyWithSearch } from './geminiClient';
 import { fetchReplyThread } from './instantlyThread';
 import { resolveProjectReply } from './projectReply';
 import { findReferredEmails } from './referredContact';
-import type { GenerateDraftResult, ThreadMessage } from './types';
+import type { GenerateDraftResult, ReplyLanguage, ThreadMessage } from './types';
 
 export class GenerateDraftError extends Error {
   constructor(message: string, public status = 400) {
@@ -36,6 +36,8 @@ export async function generateDraftForQualification(
   userId: string,
   /** Новый контакт из ответа адресата; null/пусто — ответ в ту же переписку. */
   recipientEmail: string | null = null,
+  /** Язык письма из переключателя в чате; по умолчанию русский. */
+  language: ReplyLanguage = 'ru',
 ): Promise<GenerateDraftResult> {
   const startedAt = Date.now();
 
@@ -94,6 +96,7 @@ export async function generateDraftForQualification(
     contextComplete,
     campaignSteps,
     recipientEmail: newContact,
+    language,
   });
   const result = await generateReplyWithSearch(messages);
 

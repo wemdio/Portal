@@ -33,6 +33,39 @@ export interface OpenRouterChatOptions {
 
 const RETRYABLE_STATUS = new Set([502, 503, 504]);
 
+/**
+ * Отказ уровня аккаунта у провайдера (месячный лимит расходов, пустой баланс,
+ * отозванный ключ) — в отличие от таймаута или кривого JSON он не пройдёт ни
+ * через секунду, ни на соседней строке. Повторы и остаток очереди только жгут
+ * время: 30.09.2026 оценка ЦА так «завершилась» с нулём оценок, а в таблицу
+ * каждой строке лёг английский текст Requesty.
+ *
+ * Возвращает текст для человека либо null, если ошибка обычная.
+ * Принимает как чистое сообщение провайдера, так и наши обёртки вида
+ * «ИИ ответил HTTP 412: {...}» — ищем по подстроке.
+ */
+export function fatalAiAccountError(errorMessage: string): string | null {
+  const lower = errorMessage.toLowerCase();
+  if (lower.includes('spend limit')) {
+    return 'Исчерпан месячный лимит расходов на ИИ. Поднимите лимит в кабинете Requesty и запустите заново.';
+  }
+  if (
+    lower.includes('insufficient credit')
+    || lower.includes('insufficient_quota')
+    || lower.includes('out of credits')
+  ) {
+    return 'На счёте ИИ-провайдера закончились средства. Пополните баланс и запустите заново.';
+  }
+  if (
+    lower.includes('invalid authorization')
+    || lower.includes('invalid api key')
+    || lower.includes('http 401')
+  ) {
+    return 'Ключ ИИ-провайдера не принят (недействителен или отозван). Нужно обновить ключ на сервере.';
+  }
+  return null;
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

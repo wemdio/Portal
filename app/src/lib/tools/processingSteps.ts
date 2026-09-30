@@ -51,6 +51,7 @@ import {
   parseCleanupResponseJson,
   parseCleanupResponse,
 } from '@/lib/nameCleanupProtocol';
+import { fatalAiAccountError } from '@/lib/openrouter/client';
 
 // Re-export: исторический дом парсеров — здесь; тесты и внешние импортёры
 // продолжают работать. Каноничная реализация теперь в nameCleanupProtocol.
@@ -1487,6 +1488,12 @@ export async function stepTAScore(
         if (fatalErrors.length > 0) return;
         if (err instanceof AiRequestCancelledError) { cancellationError = err; return; }
         failureReason = err instanceof Error ? err.message : String(err);
+        // Лимит расходов / мёртвый ключ не «пройдёт» на следующей пачке. Без
+        // этой ветки шаг честно дожёвывал все пачки (30.09.2026 — 209 пустых
+        // запросов), ставил всем балл 5 и порогом 7 обнулял базу: 2944 строки
+        // на входе, 0 на выходе, и ни слова о причине. Валим шаг целиком.
+        const accountFailure = fatalAiAccountError(failureReason);
+        if (accountFailure) { recordFatalError(new Error(accountFailure)); return; }
         break;
       }
       if (await isScoringStopped()) return;

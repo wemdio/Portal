@@ -1,9 +1,16 @@
 'use client';
 
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
-import { fetchOpenDraft, fetchThread, generateReply, skipReply, type GenerateResponse } from './api';
+import {
+  fetchOpenDraft,
+  fetchThread,
+  generateReply,
+  saveReplyLanguage,
+  skipReply,
+  type GenerateResponse,
+} from './api';
 import { SendConfirmDialog } from './SendConfirmDialog';
-import type { ReplyListItem, ThreadMessage } from '@/lib/replyPersonalization/types';
+import type { ReplyLanguage, ReplyListItem, ThreadMessage } from '@/lib/replyPersonalization/types';
 
 function formatTime(iso?: string) {
   if (!iso) return '';
@@ -100,6 +107,8 @@ export function ReplyDetailPanel({
   const [referredEmails, setReferredEmails] = useState<string[]>([]);
   /** Кому пишем: null — ответ в ту же переписку, иначе новый контакт из ответа. */
   const [recipient, setRecipient] = useState<string | null>(null);
+  /** Язык письма этой переписки; приходит с тредом, по умолчанию русский. */
+  const [language, setLanguage] = useState<ReplyLanguage>('ru');
   const rootRef = useRef<HTMLDivElement>(null);
   const [editorHeight, setEditorHeight] = useState(EDITOR_DEFAULT_PX);
   /** Предел для ручки — зависит от высоты панели, пересчитываем с окном. */
@@ -177,6 +186,7 @@ export function ReplyDetailPanel({
         setThread(res.messages);
         setThreadIncomplete(!res.contextComplete);
         setReferredEmails(res.referredEmails ?? []);
+        setLanguage(res.language === 'en' ? 'en' : 'ru');
       })
       .catch((err) => {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Не удалось загрузить переписку');
@@ -253,7 +263,7 @@ export function ReplyDetailPanel({
     setError(null);
     writeStore(GEN_KEY(qualificationId), String(Date.now()));
     try {
-      const result = await generateReply(qualificationId, projectId, recipient);
+      const result = await generateReply(qualificationId, projectId, recipient, language);
       // Новый черновик заменяет набранный текст — и в браузере тоже.
       writeStore(TEXT_KEY(qualificationId), null);
       setDraft(result);
@@ -268,6 +278,18 @@ export function ReplyDetailPanel({
 
   const handleCopy = () => {
     navigator.clipboard.writeText(draftText).catch(() => {});
+  };
+
+  /**
+   * Язык запоминается на переписке, а не в браузере: у русской и английской
+   * веток одной кампании выбор должен пережить и закрытие вкладки, и то, что
+   * письмо откроет другой сотрудник. Сбой сохранения не мешает генерации —
+   * язык всё равно уйдёт вместе с ней.
+   */
+  const handleLanguage = (next: ReplyLanguage) => {
+    if (next === language) return;
+    setLanguage(next);
+    void saveReplyLanguage(item.id, projectId, next).catch(() => {});
   };
 
   const handleSkip = async () => {
@@ -410,6 +432,24 @@ export function ReplyDetailPanel({
           >
             {skipping ? 'Пропускаю...' : 'Пропустить'}
           </button>
+          {/* Язык письма: ИИ пишет по правилам и примерам на русском, поэтому
+              английский ответ нужно попросить явно. Выбор держится на переписке. */}
+          <div className="flex overflow-hidden rounded-lg border border-gray-300" role="group" aria-label="Язык письма">
+            {([['ru', 'Рус'], ['en', 'Англ']] as const).map(([code, label]) => (
+              <button
+                key={code}
+                type="button"
+                onClick={() => handleLanguage(code)}
+                aria-pressed={language === code}
+                title={code === 'en' ? 'ИИ напишет ответ на английском' : 'ИИ напишет ответ на русском'}
+                className={`px-2.5 py-1.5 text-sm font-medium transition ${
+                  language === code ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           {draft ? <span className="ml-auto text-xs text-gray-500">В поле — черновик ИИ, его можно править</span> : null}
         </div>
 
@@ -456,7 +496,19 @@ export function ReplyDetailPanel({
           onCancel={() => setConfirmOpen(false)}
           onSent={() => {
             setConfirmOpen(false);
+            // Показываем отправленное письмо в переписке сразу. Instantly
+            // отдаёт его в треде с задержкой, а сам тред кэшируется — раньше
+            // после «Отправить» менялся только статус в списке слева, и было
+            // непонятно, ушло письмо или нет. Поле ответа при этом очищаем:
+            // текст уже не черновик, а отправленное письмо.
+            const sentText = draftText;
             forgetLocal();
+            setThread((prev) => [
+              ...prev,
+              { fromUs: true, text: sentText, timestamp: new Date().toISOString() },
+            ]);
+            setDraft(null);
+            setDraftText('');
             onHandled(item.id, 'sent');
           }}
           qualificationId={item.id}

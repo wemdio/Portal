@@ -74,18 +74,30 @@ async function loadLinkHistory(
  */
 export async function listProjectReplies(
   projectId: string,
-  options: { campaignId?: string | null; search?: string; limit?: number } = {},
+  options: {
+    campaignId?: string | null;
+    search?: string;
+    limit?: number;
+    /**
+     * Только те ответы, которым квалификатор поставил «лид». Вердикта нет у
+     * писем с живых аккаунтов и у истории недавно привязанных кампаний — под
+     * этим фильтром они не показываются вовсе, иначе «лиды» смешивались бы с
+     * непроверенными письмами.
+     */
+    onlyLeads?: boolean;
+  } = {},
 ): Promise<ProjectRepliesPage> {
+  const onlyLeads = options.onlyLeads === true;
   const projectCampaignIds = await getProjectCampaignIds(projectId);
   const catalog = await getCampaignCatalog(projectCampaignIds);
 
   // Счётчики — по всем кампаниям проекта, независимо от выбранной: кнопки
   // кампаний над списком показывают, куда переключаться.
   const syncedCampaignIds = projectCampaignIds.filter((id) => catalog.get(id)?.accountId === 'main');
-  const counts = await countSyncedQualificationsByCampaign(syncedCampaignIds, options.search);
+  const counts = await countSyncedQualificationsByCampaign(syncedCampaignIds, options.search, { onlyLeads });
 
   // История недавно привязанных кампаний: в таблице квалификатора её нет.
-  const history = await loadLinkHistory(projectId, syncedCampaignIds, options.search);
+  const history = onlyLeads ? [] : await loadLinkHistory(projectId, syncedCampaignIds, options.search);
   for (const row of history) counts.set(row.campaignId, (counts.get(row.campaignId) ?? 0) + 1);
 
   // Сверху кампании, где больше ответов; без счётчика (живые аккаунты) — в конце.
@@ -112,10 +124,13 @@ export async function listProjectReplies(
   const parts = await Promise.all(
     [...byAccount].map(async ([accountId, ids]) => {
       if (accountId === 'main') {
-        const { rows, total } = await listSyncedQualifications(ids, { limit, search: options.search });
+        const { rows, total } = await listSyncedQualifications(ids, { limit, search: options.search, onlyLeads });
         const extra = history.filter((row) => ids.includes(row.campaignId));
         return { rows: [...rows, ...extra], total: (total + extra.length) as number | null, hasMore: total > rows.length };
       }
+      // У живого аккаунта квалификации нет — под фильтром «только лиды» такие
+      // кампании молчат, а не подмешивают непроверенные письма.
+      if (onlyLeads) return { rows: [], total: 0 as number | null, hasMore: false };
       const { rows, hasMore } = await listLiveReplies({ campaignIds: ids, accountId, limit, search: options.search });
       return { rows, total: null, hasMore };
     }),
