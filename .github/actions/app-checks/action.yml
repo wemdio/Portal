@@ -1,0 +1,89 @@
+name: App checks
+description: >
+  Линт, проверка типов и тесты приложения — те же шаги и в том же порядке, что
+  блок «Run tests» в .semaphore/semaphore.yml. Репозиторий должен быть уже
+  выкачан (actions/checkout) до вызова.
+
+inputs:
+  tests:
+    description: "branch — тесты, связанные с изменениями ветки (branch-tests.mjs); all — весь набор"
+    required: false
+    default: branch
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - name: Shell checks
+      shell: bash
+      run: |
+        bash -n drain-worker.sh
+        bash -n .semaphore/select-deploy-targets.sh
+        bash -n .semaphore/test-select-deploy-targets.sh
+        bash .semaphore/test-select-deploy-targets.sh
+
+    # node_modules целиком, а не ~/.npm: postinstall (patch-package, биндинги
+    # sqlite3, браузер Playwright) при попадании в кэш повторять не нужно.
+    - name: Restore node_modules
+      id: deps
+      uses: actions/cache@v4
+      with:
+        path: |
+          app/node_modules
+          ~/.cache/ms-playwright
+        key: node-modules-v1-${{ runner.os }}-${{ hashFiles('app/package-lock.json') }}
+
+    # Ретраи — как в Semaphore: postinstall качает ffmpeg и chromium со
+    # сторонних хостов, обрыв сети не должен красить прогон.
+    - name: npm install
+      if: steps.deps.outputs.cache-hit != 'true'
+      shell: bash
+      working-directory: app
+      run: |
+        i=1
+        until npm install; do
+          if [ "$i" -ge 3 ]; then echo "npm install не прошёл 3 раза подряд"; exit 1; fi
+          echo "npm install упал (попытка $i из 3), повтор через $((i*15))с"
+          sleep $((i*15))
+          i=$((i+1))
+        done
+
+    # Кэш eslint и incremental-состояние TypeScript (.next/cache) + кэш jest.
+    # SHA в ключе: записи кэша не перезаписываются, восстановление — по префиксу.
+    - name: Restore checks cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          app/.next/cache
+          app/.jest-cache
+        key: checks-v1-${{ github.ref_name }}-${{ github.sha }}
+        restore-keys: |
+          checks-v1-${{ github.ref_name }}-
+          checks-v1-
+
+    - name: Lint
+      shell: bash
+      working-directory: app
+      run: npm run lint
+
+    - name: Typecheck
+      shell: bash
+      working-directory: app
+      env:
+        NODE_OPTIONS: --max-old-space-size=4096
+      run: npm run typecheck:fast
+
+    - name: Tests (related to branch changes)
+      if: inputs.tests == 'branch'
+      shell: bash
+      working-directory: app
+      run: node scripts/ci/branch-tests.mjs --maxWorkers=3 --workerIdleMemoryLimit=1200MB --cacheDirectory=.jest-cache
+
+    - name: Tests (full suite)
+      if: inputs.tests == 'all'
+      shell: bash
+      working-directory: app
+      run: node node_modules/jest/bin/jest.js --watchAll=false --maxWorkers=3 --workerIdleMemoryLimit=1200MB --cacheDirectory=.jest-cache

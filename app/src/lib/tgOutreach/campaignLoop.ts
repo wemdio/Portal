@@ -1711,7 +1711,13 @@ export async function runCampaignLoop(
     );
     // Use paused (not error) so resumeRunningCampaigns retries us automatically
     // once accounts become active again, instead of leaving the campaign stuck.
-    const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId);
+    //
+    // Остановку оператора пауза не перетирает. Обработчик «Остановить» пишет
+    // stopped ДО того, как цикл дойдёт сюда, и безусловная запись возвращала
+    // кампанию в paused: авто-возобновление раз в 5 минут снова поднимало её,
+    // она снова падала сюда — по кругу. Профили при этом не применить: они
+    // требуют остановленной кампании (30.09.2026, «АИ МОП»).
+    const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId).neq('status', 'stopped');
     if (stErr) log('error', `Не смог записать статус "на паузе" в базу данных — ${stErr.message}`);
     return;
   }
@@ -1797,7 +1803,8 @@ export async function runCampaignLoop(
     log('info', `Повторная попытка: подключились ${retryClients.length} из ${accounts.length} аккаунтов`);
     if (retryClients.length === 0) {
       log('error', 'Повторная попытка тоже провалилась — кампания на паузе. Проверьте прокси и сессии аккаунтов, затем запустите снова.');
-      const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId);
+      // Остановку оператора не перетираем — см. такую же запись выше.
+      const { error: stErr } = await db.from('tg_outreach_campaigns').update({ status: 'paused' }).eq('id', campaignId).neq('status', 'stopped');
       if (stErr) log('error', `Не смог записать статус "на паузе" в базу данных — ${stErr.message}`);
       return;
     }

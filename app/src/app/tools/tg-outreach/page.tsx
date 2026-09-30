@@ -39,6 +39,7 @@ import {
   ShieldCheck,
   FileSpreadsheet,
   LayoutDashboard,
+  Power,
   PowerOff,
   FolderPlus,
   Inbox,
@@ -2006,7 +2007,9 @@ function BulkActionsBar({
 }) {
   if (selectedCount === 0) return null;
   return (
-    <div className="flex flex-wrap items-center gap-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2">
+    // Прилипает к верху: в списке на сотни строк за кнопками приходилось
+    // каждый раз возвращаться в начало страницы.
+    <div className="sticky top-0 z-20 flex flex-wrap items-center gap-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 shadow-sm">
       <span className="text-xs font-medium text-indigo-900">Выбрано: {selectedCount}</span>
       {onCheck && (
         <button
@@ -3018,6 +3021,35 @@ function CampaignAccountsTab({
     }
   };
 
+  /**
+   * «Активен» сразу всем выбранным. Партию заливают выключенной, и жать
+   * переключатель в каждой из тридцати строк — то, ради чего панель и нужна.
+   * Строки меняем по ответу сервера, а не заранее: архивные он не включает,
+   * и оптимистичная правка показала бы их включёнными.
+   */
+  const [bulkActiveBusy, setBulkActiveBusy] = useState(false);
+  const applyBulkActive = async (isActive: boolean) => {
+    if (selectedIds.length === 0 || bulkActiveBusy) return;
+    setBulkActiveBusy(true);
+    try {
+      const res = await authFetch(`${API_BASE}/accounts/bulk-active`, {
+        method: 'POST',
+        body: JSON.stringify({ ids: selectedIds, is_active: isActive }),
+      });
+      const body = await res.json().catch(() => null) as
+        | { ids?: string[]; skipped?: number; error?: string }
+        | null;
+      if (!res.ok || !body?.ids) {
+        alert(body?.error ?? `Не удалось изменить аккаунты (HTTP ${res.status})`);
+        return;
+      }
+      for (const id of body.ids) patchAccount(id, { is_active: isActive });
+      if (body.skipped) alert(`Не изменено: ${body.skipped}. Архивные аккаунты не включаются — сначала верните их из архива.`);
+    } finally {
+      setBulkActiveBusy(false);
+    }
+  };
+
   const deleteAccount = async (id: string) => {
     if (!confirm('Удалить аккаунт?')) return;
     // Ответ проверяем: раньше отказ прилетал молча, список перезагружался, и
@@ -3616,6 +3648,26 @@ function CampaignAccountsTab({
             >
               {bulkProxyBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Network className="h-3.5 w-3.5" />}
               Назначить прокси
+            </button>
+            <button
+              type="button"
+              onClick={() => { void applyBulkActive(true); }}
+              disabled={bulkActiveBusy}
+              title="Сделать выбранные аккаунты активными — рассылка начнёт их брать"
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-emerald-300 hover:bg-emerald-50 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {bulkActiveBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Power className="h-3.5 w-3.5" />}
+              Включить
+            </button>
+            <button
+              type="button"
+              onClick={() => { void applyBulkActive(false); }}
+              disabled={bulkActiveBusy}
+              title="Сделать выбранные аккаунты неактивными — рассылка перестанет их брать"
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-gray-300 hover:bg-gray-100 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <PowerOff className="h-3.5 w-3.5" />
+              Выключить
             </button>
             {/* Перенос между кампаниями: партию закупили под один проект, а
                 нужна она в другом. Кнопка живёт только у остановленной
@@ -5539,6 +5591,9 @@ function ProxyVerdict({
  */
 type ActiveProxyListKey = string | null;
 
+/** Строк прокси на странице списка. */
+const PROXY_PAGE_SIZE = 30;
+
 function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
   const [lists, setLists] = useState<OutreachProxyList[]>([]);
   const [activeList, setActiveList] = useState<ActiveProxyListKey>(null);
@@ -5590,6 +5645,28 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
 
   const proxyIds = useMemo(() => proxies.map(p => p.id), [proxies]);
   const { selectedIds, isSelected, toggle, setAll, clear } = useRowSelection(proxyIds);
+
+  /**
+   * Страница списка. Пулы грузят по тысяче прокси, и тысяча строк с выпадающим
+   * списком в каждой делала вкладку тяжёлой. Страница запоминается вместе со
+   * списком, которому принадлежит: при переходе в другой список она сама
+   * становится первой, без эффекта-сбрасывателя. Выделение и «выбрать все»
+   * по-прежнему работают по всему списку, а не по странице — массовые
+   * действия (проверить, перенести, удалить) нужны именно на весь пул.
+   */
+  const [proxyPageState, setProxyPageState] = useState<{ list: string | null; page: number }>(
+    { list: null, page: 0 },
+  );
+  const proxyPageCount = Math.max(1, Math.ceil(proxies.length / PROXY_PAGE_SIZE));
+  const proxyPage = Math.min(
+    proxyPageState.list === activeList ? proxyPageState.page : 0,
+    proxyPageCount - 1,
+  );
+  const pagedProxies = useMemo(
+    () => proxies.slice(proxyPage * PROXY_PAGE_SIZE, (proxyPage + 1) * PROXY_PAGE_SIZE),
+    [proxies, proxyPage],
+  );
+  const goToProxyPage = (page: number) => setProxyPageState({ list: activeList, page });
 
   /** Итог по каждому прокси — чтобы строка списка показала его без перезагрузки. */
   const checkById = useMemo(() => {
@@ -5803,23 +5880,20 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
     setSaving(true);
     setProxyError(null);
     try {
-      for (let i = 0; i < lines.length; i++) {
-        const res = await authFetch(`${API_BASE}/proxies`, {
-          method: 'POST',
-          body: JSON.stringify({
-            campaign_id: campaignId,
-            url: lines[i],
-            name: '',
-            proxy_list_id: activeList,
-          }),
-        });
-        if (!res.ok) {
-          const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
-          setProxyError(
-            `Строка ${i + 1}: ${errBody?.error ?? `ошибка ${res.status}`}. Остальные строки не загружены.`,
-          );
-          return;
-        }
+      // Одним запросом на весь список: по строке на запрос тысяча прокси
+      // грузилась ~9 минут без единого признака жизни (30.09.2026).
+      const res = await authFetch(`${API_BASE}/proxies/bulk`, {
+        method: 'POST',
+        body: JSON.stringify({
+          campaign_id: campaignId,
+          proxies_text: lines.join('\n'),
+          proxy_list_id: activeList,
+        }),
+      });
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+        setProxyError(errBody?.error ?? `Не удалось загрузить прокси (ошибка ${res.status})`);
+        return;
       }
       setBulkText(''); setShowBulk(false);
       void reloadAll();
@@ -6249,16 +6323,34 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
               Каждая строка — отдельный прокси. Все уйдут в <b>{activeList === null ? '«Неопределённые»' : `«${lists.find(l => l.id === activeList)?.name ?? '—'}»`}</b>.
             </p>
             <textarea value={bulkText} onChange={e => setBulkText(e.target.value)} rows={5}
-              placeholder={'http://user:pass@host:port\nпо одному URL на строку'}
+              placeholder={'host:port@user:pass\nuser:pass@host:port\nhost:port:user:pass\nпо одному прокси на строку'}
               className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y font-mono" />
             <div className="flex gap-2">
               <button type="button" onClick={() => { void addBulk(); }} disabled={saving || !bulkText.trim()}
                 className="rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
                 {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Добавить'}
               </button>
+              {/* Файл провайдера как есть: читаем в поле, чтобы список был
+                  виден до отправки. Формат строк разбирает сервер. */}
+              <label className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer">
+                <Upload className="h-3.5 w-3.5" />
+                Из файла .txt
+                <input type="file" accept=".txt,.csv,text/plain" className="hidden" disabled={saving}
+                  onChange={e => {
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    if (!file) return;
+                    void file.text().then(text => setBulkText(text.replace(/^﻿/, '').trim()));
+                  }} />
+              </label>
               <button type="button" onClick={() => setShowBulk(false)}
                 className="rounded-full border border-gray-200 px-4 py-2 text-xs text-gray-500 hover:bg-gray-100 transition cursor-pointer">Отмена</button>
             </div>
+            {bulkText.trim() && (
+              <p className="text-xs text-gray-500">
+                Строк: {bulkText.split('\n').filter(l => l.trim()).length}
+              </p>
+            )}
           </div>
         )}
 
@@ -6401,7 +6493,7 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
               <SelectAllCheckbox total={proxies.length} selectedCount={selectedIds.length} onChange={setAll} />
               <span>URL / Название</span><span>Активен</span><span>Список</span><span />
             </div>
-            {proxies.map(p => {
+            {pagedProxies.map(p => {
               const check = checkById.get(p.id);
               return (
               <div
@@ -6460,6 +6552,24 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
               </div>
               );
             })}
+            {proxyPageCount > 1 && (
+              <div className="flex items-center justify-between gap-3 px-4 py-2 text-xs text-gray-500 bg-gray-50">
+                <span>
+                  {proxyPage * PROXY_PAGE_SIZE + 1}–{Math.min((proxyPage + 1) * PROXY_PAGE_SIZE, proxies.length)} из {proxies.length}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={() => goToProxyPage(proxyPage - 1)} disabled={proxyPage === 0}
+                    className="rounded-full border border-gray-200 bg-white px-3 py-1 hover:bg-gray-100 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">
+                    Назад
+                  </button>
+                  <span>Стр. {proxyPage + 1} из {proxyPageCount}</span>
+                  <button type="button" onClick={() => goToProxyPage(proxyPage + 1)} disabled={proxyPage >= proxyPageCount - 1}
+                    className="rounded-full border border-gray-200 bg-white px-3 py-1 hover:bg-gray-100 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">
+                    Вперёд
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -6851,6 +6961,16 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
           )}
         </div>
         <div className="flex items-center gap-2">
+          {/* Пауза — не остановка: её каждые 5 минут пробует поднять
+              авто-возобновление, а профили применяются только к остановленной
+              кампании. Без этой кнопки из паузы нельзя было выйти в «остановлена». */}
+          {campaign.status === 'paused' && !stopping && (
+            <button type="button" onClick={() => void doAction('stop')} disabled={actionLoading}
+              className="inline-flex items-center gap-1.5 rounded-full border border-rose-300 px-4 py-2.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+              <Square className="h-3.5 w-3.5" />
+              Остановить
+            </button>
+          )}
           {campaign.status !== 'running' && !stopping ? (
             <button type="button" onClick={() => void doAction('start')}
               disabled={actionLoading}

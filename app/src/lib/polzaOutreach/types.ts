@@ -242,6 +242,12 @@ export function isPolzaOfferKey(value: string): value is PolzaOfferKey {
  * утверждённом кейсе, блок первых сегментов (из разбора сайта) и подпись из
  * настроек. {{about}} в шаблонах старых запусков renderTemplate просто
  * убирает вместе с его абзацем.
+ *
+ * С 30.09.2026 (разбор выгрузки по шаблону Ника): {{followup}} — первая
+ * строка письма 2, напоминание о первом письме с поводом компании;
+ * {{subject}} — тема письма 1: её пишет не писатель, а код, в нескольких
+ * вариантах от повода и роли (letterSubject), иначе у сотни писем оффера
+ * тема одна.
  */
 export const POLZA_TEMPLATE_PLACEHOLDERS = {
   company: '{{company}}',
@@ -250,14 +256,16 @@ export const POLZA_TEMPLATE_PLACEHOLDERS = {
   triggerShort: '{{trigger_short}}',
   case: '{{case}}',
   segments: '{{segments}}',
+  followup: '{{followup}}',
+  subject: '{{subject}}',
   signature: '{{signature}}',
 } as const;
 export type PolzaTemplatePlaceholder = (typeof POLZA_TEMPLATE_PLACEHOLDERS)[keyof typeof POLZA_TEMPLATE_PLACEHOLDERS];
 
-/** Плейсхолдеры, которые может использовать шаблон оффера: без повода нет и фразы-повода. */
+/** Плейсхолдеры текста писем оффера: без повода нет и фразы-повода. {{subject}} — только тема, её ставит код. */
 export function polzaTemplatePlaceholdersFor(offer: PolzaOfferKey): PolzaTemplatePlaceholder[] {
   const p = POLZA_TEMPLATE_PLACEHOLDERS;
-  return [p.company, ...(offer === 'none' ? [] : [p.trigger]), p.pain, p.triggerShort, p.case, p.segments, p.signature];
+  return [p.company, ...(offer === 'none' ? [] : [p.trigger]), p.pain, p.triggerShort, p.case, p.segments, p.followup, p.signature];
 }
 
 /**

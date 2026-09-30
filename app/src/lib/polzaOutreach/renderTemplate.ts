@@ -13,11 +13,28 @@
  * Строка с пустым значением удаляется целиком — как пустой абзац у прежней
  * цепочки (signed()).
  *
+ * С 30.09.2026: тема письма 1 — вариант от повода и роли (letterSubject,
+ * {{subject}}), письмо 2 открывает напоминание о поводе ({{followup}}), а
+ * компании без боли из разбора сайта достаётся запасная по поводу
+ * (fallbackPain) — абзац боли не выпадает.
+ *
  * Готовые письма проверяет guardLetters, как и раньше: шаблон проверен до
  * подстановки (guardTemplate), но подставленные факты — нет.
  */
 
-import { caseSentence, displayName, guardLetters, letterCompanyName, segmentsBlock, shortJobTitle, triggerPhrase, triggerShort } from './buildLetters';
+import {
+  caseSentence,
+  displayName,
+  fallbackPain,
+  followupPhrase,
+  guardLetters,
+  letterCompanyName,
+  letterSubject,
+  segmentsBlock,
+  shortJobTitle,
+  triggerPhrase,
+  triggerShort,
+} from './buildLetters';
 import type { EnCase } from './caseRouter';
 import { primaryTrigger, type Trigger } from './leadScore';
 import {
@@ -47,8 +64,12 @@ export interface TemplateValues {
   /** Фраза-повод (triggerPhrase); нет — строка с {{trigger}} удаляется. */
   trigger: string | null;
   triggerShort: string;
-  /** Боль компании (siteProfile.painLine); нет — строка с {{pain}} удаляется. */
+  /** Боль компании (siteProfile.painLine или запасная по поводу); нет — строка с {{pain}} удаляется. */
   pain: string | null;
+  /** Напоминание о первом письме (followupPhrase) — первая строка письма 2. */
+  followup: string;
+  /** Тема письма 1 (letterSubject) — значение {{subject}}. */
+  subject: string;
   /** Предложение о кейсе (caseSentence); есть — письмо 3 с кейсом. */
   caseText: string | null;
   /** Блок сегментов (segmentsBlock); нет — строка удаляется. */
@@ -100,10 +121,13 @@ export function renderTemplate(template: PolzaChainTemplateLetters, v: TemplateV
     [LEGACY_ABOUT]: null,
     [P.case]: v.caseText,
     [P.segments]: v.segments,
+    [P.followup]: v.followup,
     [P.signature]: v.signature,
   };
+  // Тема: {{subject}} — вариант под компанию; у шаблонов до 30.09.2026 тема
+  // своя, с названием компании.
   const subject = template.subject
-    .replace(ANY_PLACEHOLDER, (found) => (found === P.company ? v.company : found))
+    .replace(ANY_PLACEHOLDER, (found) => (found === P.subject ? v.subject : found === P.company ? v.company : found))
     .replace(/\s+/g, ' ')
     .trim();
   return [
@@ -154,10 +178,10 @@ export function composeCompanyLetters(template: PolzaChainTemplateLetters, input
   // должности или кейса (так бывает в источниках) разошёлся бы с письмом.
   const tidy = (text: string) => text.replace(/\s+/g, ' ').trim();
   const company = tidy(displayName(letterCompanyName(input.companyName, input.brandName)));
-  const pain = input.painLine ? tidy(input.painLine) : null;
   const triggers = input.triggers.map((t) => ({ ...t, title: tidy(t.title) }));
   const caseHit = input.caseHit ? { ...input.caseHit, snippet: tidy(input.caseHit.snippet), segment: tidy(input.caseHit.segment) } : null;
   const primary = primaryTrigger(triggers);
+  const pain = input.painLine ? tidy(input.painLine) : fallbackPain(company, primary);
   const isRouting = input.emailType === 'generic_company';
   const values: TemplateValues = {
     company,
@@ -166,6 +190,8 @@ export function composeCompanyLetters(template: PolzaChainTemplateLetters, input
     pain,
     caseText: caseHit ? caseSentence(caseHit) : null,
     segments: segmentsBlock(company, input.segments),
+    followup: followupPhrase(company, primary),
+    subject: letterSubject(company, primary),
     signature,
     isRouting,
   };
@@ -180,7 +206,7 @@ export function composeCompanyLetters(template: PolzaChainTemplateLetters, input
   // в боли законны слова вроде «LLM» и «evidence».
   const allowedFacts = [
     company,
-    ...(pain ? [pain] : []),
+    pain,
     ...triggers.map((t) => t.title),
     // В фразу-повод идёт короткое название вакансии — его цифры тоже из факта.
     ...triggers.map((t) => (t.type === 'hiring' ? shortJobTitle(t.title) : null)).filter((s): s is string => Boolean(s)),

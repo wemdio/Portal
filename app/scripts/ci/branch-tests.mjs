@@ -42,6 +42,7 @@ const RUN_ALL_WHEN_CHANGED = [
   /(^|\/)__mocks__\//,
   /^app\/scripts\/ci\//,
   /^\.semaphore\//,
+  /^\.github\//,
 ];
 
 /** Тест читает файлы или запускает процессы сам, мимо импортов. */
@@ -92,14 +93,14 @@ function runAll(reason) {
   finish([], `весь набор — ${reason}`);
 }
 
-const branch = process.env.SEMAPHORE_GIT_BRANCH || git(['rev-parse', '--abbrev-ref', 'HEAD']) || '';
+const branch = process.env.SEMAPHORE_GIT_BRANCH || process.env.GITHUB_REF_NAME || git(['rev-parse', '--abbrev-ref', 'HEAD']) || '';
 
 let base = process.env.CI_TESTS_BASE ? git(['rev-parse', process.env.CI_TESTS_BASE]) : null;
 if (!base) {
   const shallow = git(['rev-parse', '--is-shallow-repository']) === 'true';
   // В CI клон неглубокий и только своей ветки: test дотягиваем отдельно.
   // Локально ничего не качаем — берём тот origin/test, что уже есть.
-  if (process.env.SEMAPHORE === 'true') {
+  if (process.env.SEMAPHORE === 'true' || process.env.GITHUB_ACTIONS === 'true') {
     fetchHistory([...(shallow ? ['--depth=300'] : []), 'origin', '+refs/heads/test:refs/remotes/origin/test']);
   }
   base = git(['merge-base', 'origin/test', 'HEAD']);
