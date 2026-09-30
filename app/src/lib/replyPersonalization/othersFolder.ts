@@ -9,6 +9,7 @@ import { readInstantlyEmailReadDeferral } from '@/lib/instantly/emailReadDeferra
 import type { Email } from '@/lib/instantly/types';
 import {
   findQualificationIdsByEmailIds,
+  findRepeatReplyIds,
   getCampaignAccountIds,
   getLatestDraftStatuses,
   getProjectCampaignIds,
@@ -111,7 +112,10 @@ export async function listProjectOthers(
     const row = othersLetterToRow(email, campaignId);
     return { ...row, id: qualificationIds.get(email.id) ?? row.id };
   });
-  const statuses = await getLatestDraftStatuses(rows.map((row) => row.id));
+  const [statuses, repeats] = await Promise.all([
+    getLatestDraftStatuses(rows.map((row) => row.id)),
+    getProjectCampaignIds(projectId).then((campaignIds) => findRepeatReplyIds(campaignIds, rows)),
+  ]);
   const seen = new Set<string>();
   const replies: ReplyListItem[] = [];
   for (const row of rows) {
@@ -121,6 +125,7 @@ export async function listProjectOthers(
     replies.push({
       ...row,
       source: 'others',
+      repeat: repeats.has(row.id),
       listStatus: status === 'sent' ? 'sent' : status === 'skipped' ? 'skipped' : 'new',
     });
   }
