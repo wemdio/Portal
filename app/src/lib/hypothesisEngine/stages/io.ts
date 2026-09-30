@@ -15,12 +15,23 @@
  * Недоступный сайт (волна 4b): провал ЧТЕНИЯ отличается от истёкшего срока и от
  * отмены типом — HeSiteUnreachableError. Это факт о сайте клиента, и стадия
  * решает по нему не так, как по транзиенту: см. класс ниже.
+ *
+ * Маршрут чтения (волна 7): у рынка 'us' свой порядок групп прокси и свой
+ * Accept-Language — см. ENG_WEBSITE_ROUTE. Рынок 'ru' читает сайт ровно теми
+ * же запросом и маршрутом, что и до этой правки; общий парсер
+ * (lib/enrich/websiteParser.ts) держит русские значения дефолтами.
  */
 
 import { assertPublicWebsite } from '@/lib/clientDemo/personalize';
 import { DEFAULT_MAX_ABOUT_CANDIDATES } from '@/lib/enrich/aboutCandidates';
-import { fetchAndExtract, isWebsiteNoHtmlError, normalizeUrl } from '@/lib/enrich/websiteParser';
+import {
+  fetchAndExtract,
+  isWebsiteNoHtmlError,
+  normalizeUrl,
+  type WebsiteFetchRouteOrder,
+} from '@/lib/enrich/websiteParser';
 import { getHeActiveJobSignal } from '../llm';
+import type { HeMarket } from '../market';
 import { isHeOperationTimeout, withHeDeadline } from '../operationDeadline';
 import { defaultSearch, HE_SEARCH_TIMEOUT_MS } from './searchIo';
 import type { HeStageContext } from './shared';
@@ -33,8 +44,13 @@ const DNS_TIMEOUT_MS = 8_000;
 
 /**
  * Чтение сайта: константы цепочки fetchAndExtract (lib/enrich/websiteParser.ts).
- * На каждый адрес там 2 попытки по FETCH_TIMEOUT_MS с паузой
+ * На каждый адрес там 2 попытки по WEBSITE_FETCH_TIMEOUT_MS с паузой
  * FETCH_RETRY_DELAY_MS между ними; адресов — главная + www + http.
+ *
+ * Срок попытки передаётся в fetchAndExtract ЯВНО (defaultFetchText ниже), а не
+ * совпадает с его дефолтом по договорённости: арифметика бюджета опирается
+ * именно на это число, и молчаливое совпадение с чужой константой держалось бы
+ * ровно до первой её правки.
  */
 const WEBSITE_FETCH_TIMEOUT_MS = 8_000;
 const WEBSITE_FETCH_ATTEMPTS = 2;
@@ -198,11 +214,37 @@ function asSiteUnreachable(
 }
 
 /**
+ * Маршрут чтения для АНГЛИЙСКОГО рынка.
+ *
+ * Дефолт websiteParser рассчитан на .ru-сайт: лестница попыток начинается с
+ * приоритетной (российской) группы прокси, а запрос уходит с русским
+ * Accept-Language. Для сайта из США это неверно дважды — русский exit-узел
+ * чаще режут и медленнее ходит, а по языку сайт может отдать другую страницу
+ * или редирект. Переворачиваем порядок групп и просим английскую страницу;
+ * российская группа остаётся ВТОРОЙ попыткой, ни один маршрут не потерян.
+ *
+ * Рынок 'ru' не передаёт ничего: и заголовок, и порядок там ровно те же, что
+ * были до этой правки. Строка языка совпадает с EN_ACCEPT_LANGUAGE почтового
+ * скрапера — два места, куда уезжает английская локаль, обязаны просить одно.
+ */
+const ENG_WEBSITE_ROUTE: { routeOrder: WebsiteFetchRouteOrder; acceptLanguage: string } = {
+  routeOrder: 'non-priority-first',
+  acceptLanguage: 'en-US,en',
+};
+
+/**
  * Дефолтный фетч: нормализация URL → SSRF-гейт (DNS/приватные адреса режем
  * до первого запроса) → fetchAndExtract (главная + «о компании», ≤3000 символов).
  * Оба шага дают собственный род недоступности — см. HeSiteUnreachableError.
+ *
+ * Порядок шагов важен: проверка публичности адреса идёт ПЕРВОЙ, до любого
+ * запроса, и маршрут рынка её не обходит.
  */
-export async function defaultFetchText(url: string, parent?: AbortSignal): Promise<string> {
+export async function defaultFetchText(
+  url: string,
+  parent?: AbortSignal,
+  market: HeMarket = 'ru',
+): Promise<string> {
   const normalized = normalizeUrl(url);
   return withHeDeadline('website extraction', WEBSITE_TIMEOUT_MS, parent, async (signal) => {
     try {
@@ -216,7 +258,11 @@ export async function defaultFetchText(url: string, parent?: AbortSignal): Promi
     signal.throwIfAborted();
     let text: string;
     try {
-      text = await fetchAndExtract(normalized, { signal });
+      text = await fetchAndExtract(normalized, {
+        timeout: WEBSITE_FETCH_TIMEOUT_MS,
+        signal,
+        ...(market === 'us' ? ENG_WEBSITE_ROUTE : {}),
+      });
     } catch (e) {
       // Пустая/JS-страница сюда НЕ попадает: у неё есть HTML, и fetchAndExtract
       // возвращает про это текст, а не бросает.
@@ -239,12 +285,16 @@ export function heStageSignal(ctx: HeStageContext): AbortSignal | undefined {
 }
 
 export function resolveFetchText(ctx: HeStageContext): HeFetchTextFn {
+  // Рынок проекта ведёт маршрут и язык запроса только в дефолтной реализации
+  // (тот же приём, что у resolveSearch с geo Serper); подменённый ctx.fetchText
+  // — тесты и особые стадии — работает как раньше.
   const parent = heStageSignal(ctx);
+  const market = ctx.market;
   const custom = ctx.fetchText;
   return (url) =>
     (custom
       ? withHeDeadline('website extraction', WEBSITE_TIMEOUT_MS, parent, () => custom(url))
-      : defaultFetchText(url, parent)
+      : defaultFetchText(url, parent, market)
     ).finally(() => ctx.onActivity?.());
 }
 

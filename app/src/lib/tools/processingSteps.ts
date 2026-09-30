@@ -20,6 +20,7 @@ import {
 } from './dfybUtils';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
 import { fetchAndExtract } from '@/lib/enrich/websiteParser';
+import { isBlockedCompanyWebsiteDomain } from '@/lib/companiesDirectory/contactPolicy';
 import { validateEmail, type DomainInfo } from '@/lib/emailValidation/validator';
 import { isSupportEmail } from './supportEmails';
 import { makeCheckpointGate } from './checkpointGate';
@@ -547,8 +548,23 @@ const NON_SCRAPEABLE_HOSTS: readonly string[] = [
 // тот же класс мусора что hh.ru для RU. Блокируем ТОЛЬКО при locale='en':
 // в RU-базах linkedin/indeed исторически не блокировались, поведение по
 // умолчанию не меняем.
+//
+// Общий признак всего списка: страница РАССКАЗЫВАЕТ о компании (или о её
+// вакансии), но не принадлежит компании. Почта, которую с такой страницы
+// можно снять, — почта каталога (support@…), и она уходит клиенту как
+// «контакт компании». Пустая ячейка честнее чужого адреса.
+//
+// Чего здесь намеренно НЕТ: конструкторы сайтов (wixsite.com, squarespace.com,
+// webflow.io, tilda.ws и прочие). У малого бизнеса там НАСТОЯЩИЙ сайт с
+// настоящей почтой — блок вычеркнул бы живые компании.
 const NON_SCRAPEABLE_HOSTS_EN_EXTRA: readonly string[] = [
   'linkedin.com', 'indeed.com', 'glassdoor.com', 'wellfound.com',
+  // Каталоги компаний и карточки профилей: логин-волл/антибот, своих почт
+  // компании там нет, зато есть почты самого каталога.
+  'crunchbase.com', 'owler.com', 'zoominfo.com', 'yelp.com', 'bbb.org',
+  'yellowpages.com', 'manta.com', 'x.com', 'wikipedia.org',
+  // ATS: страница вакансии на чужом хостинге. Вместо контактов — форма отклика.
+  'greenhouse.io', 'lever.co', 'workable.com', 'smartrecruiters.com', 'ashbyhq.com',
 ];
 
 const NON_SCRAPEABLE_HOSTS_EN: readonly string[] = [
@@ -567,7 +583,17 @@ export function isNonScrapeableHost(raw: string, locale?: ConstructorLocale): bo
   const host = hostOf(raw);
   if (!host) return false;
   const blocked = locale === 'en' ? NON_SCRAPEABLE_HOSTS_EN : NON_SCRAPEABLE_HOSTS;
-  return blocked.some((d) => host === d || host.endsWith(`.${d}`));
+  if (blocked.some((d) => host === d || host.endsWith(`.${d}`))) return true;
+  // Только locale='en'. isBlockedCompanyWebsiteDomain — тот же предикат,
+  // которым реестр компаний отбраковывает «сайт», оказавшийся соцсетью,
+  // мессенджером или link-in-bio: facebook/instagram/youtube/vk/ok/t.me/
+  // linktr.ee/taplink/wa.me/maps.google + RU-каталоги (2gis, rusprofile,
+  // yell, zoon, flamp, list-org) и маркетплейсы (ozon, wildberries, avito).
+  // Ни одного конструктора сайтов в BLOCKED_WEBSITE_DOMAINS нет — иначе
+  // переиспользовать его здесь было бы нельзя.
+  // RU-ветка предиката не трогается: при locale!=='en' выражение до вызова
+  // не доходит, поведение конструктора для RU-баз байт-в-байт прежнее.
+  return locale === 'en' && isBlockedCompanyWebsiteDomain(host);
 }
 
 export async function stepFindEmails(

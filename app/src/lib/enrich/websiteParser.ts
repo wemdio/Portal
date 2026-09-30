@@ -27,6 +27,29 @@ const BROWSER_USER_AGENT =
 // Пул прокси вынесен в proxyPool.ts (21.09.2026): тот же код понадобился
 // почтовому скраперу для ретрая 403 через RU-адрес. Поведение не менялось.
 
+/**
+ * Язык запроса — ОПЦИЯ со старым значением по умолчанию. Русский дефолт стоит
+ * потому, что все нынешние вызывающие читают .ru-сайты: ИНН-парсер, конструктор
+ * баз, enrich-воркер, движок вертикалей v2, staff-инструменты, поисковый
+ * парсер. Тот же приём и та же строка EN уже работают в почтовом скрапере
+ * (enrich/emailScraper.ts, локаль джобы конструктора).
+ */
+const DEFAULT_ACCEPT_LANGUAGE = 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7';
+
+/**
+ * Порядок групп прокси в лестнице попыток fetchHtmlWithRetry.
+ *
+ *  - 'priority-first' — ДЕФОЛТ и сегодняшний маршрут всех вызывающих:
+ *    приоритетная (российская) группа на первой попытке, fallback на повторе.
+ *    Трогать его нельзя: инцидент 28.07.2026 — 9 из 12 нод общего пула HK/EU,
+ *    .ru-сайты отдавали им 403/геоблок, success rate ИНН-парсера 27%
+ *    (подробности в proxyPool.ts).
+ *  - 'non-priority-first' — обратный порядок для англоязычных сайтов: сначала
+ *    нода ВНЕ приоритетной группы, RU-группа остаётся вторым шансом. Включается
+ *    только из английского кабинета (hypothesisEngine/stages/io.ts, market 'us').
+ */
+export type WebsiteFetchRouteOrder = 'priority-first' | 'non-priority-first';
+
 const ABOUT_PATHS = [
   '/about',
   '/about-us',
@@ -751,6 +774,8 @@ async function fetchHtml(
     signal?: AbortSignal;
     allowHttpErrors?: boolean;
     preferPriority?: boolean;
+    /** Заголовок Accept-Language; не передан — русский DEFAULT_ACCEPT_LANGUAGE. */
+    acceptLanguage?: string;
     /** undefined keeps the legacy proxy selection; null explicitly fetches directly. */
     dispatcher?: Dispatcher | null;
   },
@@ -782,7 +807,7 @@ async function fetchHtml(
       headers: {
         'User-Agent': BROWSER_USER_AGENT,
         Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Language': options?.acceptLanguage ?? DEFAULT_ACCEPT_LANGUAGE,
       },
       signal: controller.signal,
       redirect: 'follow',
@@ -827,15 +852,39 @@ export async function fetchHtmlWithRetry(
      * false принудительно использует fallback на всех попытках; true — priority.
      */
     preferPriority?: boolean;
+    /** Заголовок Accept-Language; не передан — русский DEFAULT_ACCEPT_LANGUAGE. */
+    acceptLanguage?: string;
+    /** Порядок групп прокси; не передан — 'priority-first', сегодняшняя лестница. */
+    routeOrder?: WebsiteFetchRouteOrder;
   },
 ): Promise<{ html: string; status: number } | null> {
   const retries = Math.max(0, Math.floor(options?.retries ?? FETCH_RETRIES));
+  const nonPriorityFirst = options?.routeOrder === 'non-priority-first';
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     // Первая попытка — приоритетный пул (RU). Retry — уходим в fallback:
     // если RU-прокси упал/дал 403 на .ru-сайте, второй раз через тот же
     // RU-прокси обычно ничего не даст; шанс через HK/EU выше нуля.
-    const preferPriority = options?.preferPriority ?? attempt === 0;
-    const result = await fetchHtml(url, { ...options, preferPriority });
+    //
+    // 'non-priority-first' переворачивает лестницу для англоязычного сайта:
+    // первой идёт нода вне приоритетной группы, RU становится вторым шансом —
+    // ни один маршрут не теряется, меняется только порядок. Явный
+    // preferPriority вызывающего сильнее порядка: он и был, и остаётся
+    // способом прибить все попытки к одной группе.
+    const preferPriority =
+      options?.preferPriority ?? (nonPriorityFirst ? attempt > 0 : attempt === 0);
+    // Строго «не RU» умеет только pickNonPriorityProxyUrl: preferPriority=false
+    // берёт YANDEXMAPS_PROXY_URLS, где приоритетные ноды тоже перечислены.
+    // Такой группы нет (пусто или совпадает с приоритетной) — остаёмся на
+    // обычном выборе, то есть на сегодняшнем маршруте.
+    const otherNode =
+      nonPriorityFirst && attempt === 0 && options?.preferPriority === undefined
+        ? await getNonPriorityProxyDispatcher()
+        : undefined;
+    const result = await fetchHtml(url, {
+      ...options,
+      preferPriority,
+      ...(otherNode ? { dispatcher: otherNode } : {}),
+    });
     if (result) return result;
     if (options?.signal?.aborted) return null;
     if (attempt < retries) {
@@ -1129,11 +1178,22 @@ export function isWebsiteNoHtmlError(e: unknown): e is WebsiteNoHtmlError {
 
 export async function fetchAndExtract(
   rawUrl: string,
-  options?: { timeout?: number; signal?: AbortSignal },
+  options?: {
+    timeout?: number;
+    signal?: AbortSignal;
+    /** Заголовок Accept-Language; не передан — русский DEFAULT_ACCEPT_LANGUAGE. */
+    acceptLanguage?: string;
+    /** Порядок групп прокси; не передан — 'priority-first', сегодняшняя лестница. */
+    routeOrder?: WebsiteFetchRouteOrder;
+  },
 ): Promise<string> {
   const url = normalizeUrl(rawUrl);
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
   const signal = options?.signal;
+  // Язык и порядок групп получает КАЖДЫЙ запрос цепочки: главная, www,
+  // http-вариант и страницы «о компании» — это один и тот же сайт, и читать
+  // его половиной адресов не тем маршрутом смысла нет.
+  const route = { acceptLanguage: options?.acceptLanguage, routeOrder: options?.routeOrder };
   const tryWithWww = !/^https?:\/\/www\./i.test(url);
   const origin = new URL(url).origin;
   const wwwOrigin = tryWithWww ? origin.replace(/^https?:\/\//i, (m) => `${m}www.`) : origin;
@@ -1144,7 +1204,7 @@ export async function fetchAndExtract(
   let mainText = '';
   let hadAnyHtml = false;
 
-  mainHtml = await fetchHtmlWithRetry(url, { timeout, signal, allowHttpErrors: true });
+  mainHtml = await fetchHtmlWithRetry(url, { timeout, signal, allowHttpErrors: true, ...route });
   if (mainHtml) {
     mainText = extractTextFromHtml(mainHtml.html);
     hadAnyHtml = true;
@@ -1154,6 +1214,7 @@ export async function fetchAndExtract(
       timeout,
       signal,
       allowHttpErrors: true,
+      ...route,
     });
     if (wwwHtml) {
       mainHtml = wwwHtml;
@@ -1166,6 +1227,7 @@ export async function fetchAndExtract(
       timeout,
       signal,
       allowHttpErrors: true,
+      ...route,
     });
     if (httpHtml) {
       mainHtml = httpHtml;
@@ -1203,7 +1265,7 @@ export async function fetchAndExtract(
   let aboutText = '';
   for (const candidate of allCandidates) {
     if (signal?.aborted) break;
-    const html = await fetchHtmlWithRetry(candidate, { timeout, signal });
+    const html = await fetchHtmlWithRetry(candidate, { timeout, signal, ...route });
     if (html) {
       const text = extractTextFromHtml(html.html);
       hadAnyHtml = true;
