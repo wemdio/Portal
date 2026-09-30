@@ -721,7 +721,7 @@ function clientCoreWords(clientName: string): string[] {
  * Само число нужно, чтобы из двух подошедших проектов выбрать более точный:
  * «Onlanta 2.0» побеждает «Onlanta».
  */
-function clientNameMatchScore(campaignName: string, clientName: string): number {
+export function clientNameMatchScore(campaignName: string, clientName: string): number {
   const campaignWords = wordsForStrongMatch(campaignName);
   const clientWords = clientCoreWords(clientName);
   if (!clientWords.some((word) => word.length >= 4 && !GENERIC_TOKENS.has(word))) return 0;
