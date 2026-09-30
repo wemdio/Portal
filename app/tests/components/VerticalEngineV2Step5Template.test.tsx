@@ -248,8 +248,8 @@ describe('Vertical Engine v2 Step 5 launch plan for Portal projects without peri
     },
   ];
 
-  const EXTEND_BY_DEADLINE =
-    'Продлевайте проект полем «Дедлайн» в карточке. Если создать проекту период, загрузка по этому плану остановится.';
+  const CONTINUE_AFTER_DEADLINE =
+    'Дедлайн задаёт плановую дату. После неё сбор и пополнение продолжаются в выбранном темпе до достижения цели. Если создать проекту период, загрузка по этому плану остановится.';
 
   function launchSettings(extra: Record<string, unknown> = {}) {
     mockVeEngineCall.mockImplementation(async (url: string) => (
@@ -318,8 +318,8 @@ describe('Vertical Engine v2 Step 5 launch plan for Portal projects without peri
       /^Без периода · дедлайн 30\.09\.2026 · обязательство в карточке «4000» · всего контактов по проекту 25\s905 \(в расчёт не входит\)$/,
     );
     // Продление через период остановило бы план: предупреждаем до запуска.
-    expect(screen.getByText(EXTEND_BY_DEADLINE)).toBeInTheDocument();
-    await user.type(screen.getByLabelText('Цель контактов до дедлайна'), '4000');
+    expect(screen.getByText(CONTINUE_AFTER_DEADLINE)).toBeInTheDocument();
+    await user.type(screen.getByLabelText('Цель новых контактов'), '4000');
     await waitFor(() => expect(mockPreviewDeliveryPlan).toHaveBeenCalledWith('template-1', {
       portal_project_id: STAFF_LINE_ID,
       expected_portal_period_id: null,
@@ -356,7 +356,7 @@ describe('Vertical Engine v2 Step 5 launch plan for Portal projects without peri
     expect(screen.getByText(`${reason} Новый запуск заблокирован.`)).toBeInTheDocument();
     // A project with closed periods is not «без периода»; only its reason is shown.
     expect(Boolean(screen.queryByText(/Без периода/))).toBe(projectId === ENAGENCY_ID);
-    await user.type(screen.getByLabelText('Цель контактов до дедлайна'), '4000');
+    await user.type(screen.getByLabelText('Цель новых контактов'), '4000');
     await new Promise((resolve) => setTimeout(resolve, 400));
     expect(mockPreviewDeliveryPlan).not.toHaveBeenCalled();
   });
@@ -370,7 +370,7 @@ describe('Vertical Engine v2 Step 5 launch plan for Portal projects without peri
     const { projectSelect } = await openLaunchForm();
     await waitFor(() => expect(projectSelect).toHaveValue('Staff Line'));
     expect(projectSelect).toBeDisabled();
-    expect(screen.getByLabelText('Цель контактов до дедлайна')).toHaveValue(4000);
+    expect(screen.getByLabelText('Цель новых контактов')).toHaveValue(4000);
     expect(screen.getByText(`${issue} Новый запуск заблокирован.`)).toBeInTheDocument();
     await new Promise((resolve) => setTimeout(resolve, 400));
     expect(mockPreviewDeliveryPlan).not.toHaveBeenCalled();
@@ -405,7 +405,7 @@ describe('Vertical Engine v2 Step 5 launch plan for Portal projects without peri
     await user.type(projectSelect, 'клиент портала');
     await user.keyboard('{ArrowDown}{Enter}');
     expect(screen.queryByText(/Без периода/)).not.toBeInTheDocument();
-    expect(screen.queryByText(EXTEND_BY_DEADLINE)).not.toBeInTheDocument();
+    expect(screen.queryByText(CONTINUE_AFTER_DEADLINE)).not.toBeInTheDocument();
     await user.type(screen.getByLabelText('Цель контактов за период'), '23');
     await waitFor(() => expect(mockPreviewDeliveryPlan).toHaveBeenCalledWith('template-1', expect.objectContaining({
       portal_project_id: PERIOD_PROJECT_ID, expected_portal_period_id: PERIOD_ID, target_contacts: 23,

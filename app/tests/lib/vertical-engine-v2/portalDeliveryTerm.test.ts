@@ -42,12 +42,8 @@ describe('project card deadline formats', () => {
     });
   });
 
-  it('compares a DD.MM.YY deadline with today as a date, not as text', () => {
-    expect(describePortalProjectTerm({ ...STAFF_LINE, deadline: '22.09.26' }, [], { today: TODAY })).toEqual({
-      ok: false,
-      code: 'PROJECT_DEADLINE_PASSED',
-      error: 'Дедлайн проекта (22.09.2026) уже прошёл. Обновите поле «Дедлайн» в карточке проекта.',
-    });
+  it('keeps the original past planning date without stopping the launch', () => {
+    expect(describePortalProjectTerm({ ...STAFF_LINE, deadline: '22.09.26' }, [], { today: TODAY })).toMatchObject({ ok: true, deadline: '2026-09-22' });
   });
 });
 
@@ -79,7 +75,7 @@ describe('Portal project term without periods', () => {
     );
   });
 
-  it('rejects a deadline that is not an ISO date and a deadline that has passed', () => {
+  it('rejects an invalid date but permits continuation after a valid deadline', () => {
     const notDate = describePortalProjectTerm({ ...STAFF_LINE, deadline: '05.18.2026' }, [], { today: TODAY });
     expect(notDate).toMatchObject({ ok: false, code: 'PROJECT_DEADLINE_INVALID' });
     expect(!notDate.ok && notDate.error).toContain('«Дедлайн»');
@@ -89,8 +85,7 @@ describe('Portal project term without periods', () => {
     expect(describePortalProjectTerm({ ...STAFF_LINE, deadline: '2026-02-30' }, [])).toMatchObject({ code: 'PROJECT_DEADLINE_INVALID' });
 
     const passed = describePortalProjectTerm({ ...STAFF_LINE, deadline: '2026-09-22' }, [], { today: TODAY });
-    expect(passed).toMatchObject({ ok: false, code: 'PROJECT_DEADLINE_PASSED' });
-    expect(!passed.ok && passed.error).toBe('Дедлайн проекта (22.09.2026) уже прошёл. Обновите поле «Дедлайн» в карточке проекта.');
+    expect(passed).toMatchObject({ ok: true, deadline: '2026-09-22' });
     // The deadline day itself is still a working day of the plan.
     expect(describePortalProjectTerm({ ...STAFF_LINE, deadline: TODAY }, [], { today: TODAY }).ok).toBe(true);
   });
@@ -136,11 +131,7 @@ describe('Portal project term without periods', () => {
       code: 'PORTAL_PROJECT_NOT_IN_WORK',
       error: `Проект в Portal не в работе (статус «Завершен»). Верните рабочий статус в карточке проекта. ${note}`,
     });
-    expect(describePortalProjectTerm({ ...STAFF_LINE, deadline: '2026-09-22' }, [], { today: TODAY, bound: true })).toEqual({
-      ok: false,
-      code: 'PROJECT_DEADLINE_PASSED',
-      error: `Дедлайн проекта (22.09.2026) уже прошёл. Обновите поле «Дедлайн» в карточке проекта. ${note}`,
-    });
+    expect(describePortalProjectTerm({ ...STAFF_LINE, deadline: '2026-09-22' }, [], { today: TODAY, bound: true })).toMatchObject({ ok: true, deadline: '2026-09-22' });
     expect(describePortalProjectTerm({ ...STAFF_LINE, deadline: null }, [], { bound: true })).toEqual({
       ok: false,
       code: 'PROJECT_DEADLINE_REQUIRED',
