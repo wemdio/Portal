@@ -721,7 +721,7 @@ function clientCoreWords(clientName: string): string[] {
  * Само число нужно, чтобы из двух подошедших проектов выбрать более точный:
  * «Onlanta 2.0» побеждает «Onlanta».
  */
-function clientNameMatchScore(campaignName: string, clientName: string): number {
+export function clientNameMatchScore(campaignName: string, clientName: string): number {
   const campaignWords = wordsForStrongMatch(campaignName);
   const clientWords = clientCoreWords(clientName);
   if (!clientWords.some((word) => word.length >= 4 && !GENERIC_TOKENS.has(word))) return 0;
@@ -729,6 +729,32 @@ function clientNameMatchScore(campaignName: string, clientName: string): number 
   const matched = campaignWords.some((_, start) =>
     clientWords.every((word, offset) => campaignWords[start + offset] === word));
   return matched ? clientWords.length : 0;
+}
+
+function sharedPrefixLength(a: string, b: string): number {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i += 1;
+  return i;
+}
+
+/**
+ * Приблизительное совпадение — только для ПОДСКАЗОК в ручной привязке, не для
+ * автоматической. Ловит опечатки в названиях кампаний: «Евмаркетиг
+ * стоматологии» против проекта «Евмаркетинг» — пропущенная буква, из-за
+ * которой кампания ни к чему не привязывалась и нигде не показывалась.
+ * Автопривязке такое не отдаём намеренно: выбор подтверждает человек.
+ */
+export function isApproximateClientNameMatch(campaignName: string, clientName: string): boolean {
+  const campaignWords = wordsForStrongMatch(campaignName);
+  const clientWords = clientCoreWords(clientName).filter(
+    (word) => word.length >= 6 && !GENERIC_TOKENS.has(word),
+  );
+  return clientWords.some((clientWord) =>
+    campaignWords.some(
+      (word) =>
+        Math.abs(word.length - clientWord.length) <= 2 &&
+        sharedPrefixLength(word, clientWord) >= Math.max(6, Math.min(word.length, clientWord.length) - 2),
+    ));
 }
 
 /**
