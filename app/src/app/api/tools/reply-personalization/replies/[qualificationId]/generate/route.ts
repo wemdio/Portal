@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import { generateDraftForQualification, GenerateDraftError } from '@/lib/replyPersonalization/generateDraft';
-import { getOpenDraft } from '@/lib/replyPersonalization/db';
+import { getOpenDraft, setThreadLanguage } from '@/lib/replyPersonalization/db';
+import type { ReplyLanguage } from '@/lib/replyPersonalization/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -9,12 +10,26 @@ export const POST = withAuth(async (req: NextRequest, user, params) => {
   const qualificationId = params?.qualificationId;
   if (!qualificationId) return NextResponse.json({ error: 'qualificationId is required' }, { status: 400 });
 
-  const body = (await req.json().catch(() => null)) as { projectId?: string; recipientEmail?: string | null } | null;
+  const body = (await req.json().catch(() => null)) as {
+    projectId?: string;
+    recipientEmail?: string | null;
+    language?: string;
+  } | null;
   if (!body?.projectId) return NextResponse.json({ error: 'projectId is required' }, { status: 400 });
   const recipientEmail = typeof body.recipientEmail === 'string' ? body.recipientEmail : null;
+  // Язык — то, что выбрано переключателем прямо сейчас; заодно запоминаем его
+  // на переписке, чтобы при следующем открытии чата он не сбросился на русский.
+  const language: ReplyLanguage = body.language === 'en' ? 'en' : 'ru';
 
   try {
-    const result = await generateDraftForQualification(body.projectId, qualificationId, user.id, recipientEmail);
+    await setThreadLanguage(qualificationId, body.projectId, language, user.id);
+    const result = await generateDraftForQualification(
+      body.projectId,
+      qualificationId,
+      user.id,
+      recipientEmail,
+      language,
+    );
     return NextResponse.json(result);
   } catch (err) {
     if (err instanceof GenerateDraftError) {

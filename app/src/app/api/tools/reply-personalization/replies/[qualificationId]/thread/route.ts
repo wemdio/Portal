@@ -3,6 +3,7 @@ import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import { fetchReplyThread } from '@/lib/replyPersonalization/instantlyThread';
 import { resolveProjectReply } from '@/lib/replyPersonalization/projectReply';
 import { findReferredEmails } from '@/lib/replyPersonalization/referredContact';
+import { getThreadLanguage, listSentDrafts } from '@/lib/replyPersonalization/db';
 import type { ThreadMessage } from '@/lib/replyPersonalization/types';
 
 export const dynamic = 'force-dynamic';
@@ -38,6 +39,34 @@ function fallbackThread(reply: { replyBody: string | null; lastOutboundPreview: 
   return thread;
 }
 
+/**
+ * Только буквы и цифры: копия письма из Instantly приходит из HTML, и знаки
+ * препинания, кавычки и переносы в ней отличаются от того, что мы отправляли.
+ */
+const normalize = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+/**
+ * Дописывает в тред наши отправленные ответы, которых в нём ещё нет.
+ *
+ * Instantly показывает только что отправленное письмо в треде с задержкой (а
+ * сам тред мы ещё и кэшируем на 5 минут), поэтому после «Отправить» переписка
+ * выглядела так, будто ответа не было: менялся только статус в списке слева.
+ * Журнал отправок — наш, и он точно знает, что ушло.
+ *
+ * Сверяем по началу текста: копия из Instantly содержит наш текст плюс
+ * процитированную историю переписки, поэтому равенство строк не подходит.
+ */
+function withSentDrafts(messages: ThreadMessage[], sent: { text: string; sentAt: string }[]): ThreadMessage[] {
+  const result = [...messages];
+  for (const draft of sent) {
+    const key = normalize(draft.text).slice(0, 120);
+    if (!key) continue;
+    if (result.some((m) => m.fromUs && normalize(m.text).includes(key))) continue;
+    result.push({ fromUs: true, text: draft.text, timestamp: draft.sentAt || undefined });
+  }
+  return result;
+}
+
 export const GET = withAuth(async (req: NextRequest, _user, params) => {
   const qualificationId = params?.qualificationId;
   if (!qualificationId) return NextResponse.json({ error: 'qualificationId is required' }, { status: 400 });
@@ -45,12 +74,20 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
   const projectId = new URL(req.url).searchParams.get('projectId');
   if (!projectId) return NextResponse.json({ error: 'projectId is required' }, { status: 400 });
 
+  // Отправленное нами и язык переписки читаем всегда мимо кэша треда: это наши
+  // же данные, они меняются от кнопки «Отправить» и переключателя языка.
+  const [sent, language] = await Promise.all([
+    listSentDrafts(qualificationId),
+    getThreadLanguage(qualificationId),
+  ]);
+
   const cached = THREAD_CACHE.get(qualificationId);
   if (cached && cached.expiresAt > Date.now()) {
     return NextResponse.json({
-      messages: cached.messages,
+      messages: withSentDrafts(cached.messages, sent),
       contextComplete: cached.contextComplete,
       referredEmails: cached.referredEmails,
+      language,
     });
   }
 
@@ -70,7 +107,14 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
   const referredEmails = findReferredEmails(lastInbound, [qualification.leadEmail, qualification.eaccount]);
 
   pruneCache();
+  // В кэш кладём то, что пришло из Instantly: наши отправки дописываются поверх
+  // при каждой отдаче, иначе свежий ответ застревал бы в кэше на пять минут.
   THREAD_CACHE.set(qualificationId, { messages, contextComplete, referredEmails, expiresAt: Date.now() + CACHE_TTL_MS });
 
-  return NextResponse.json({ messages, contextComplete, referredEmails });
+  return NextResponse.json({
+    messages: withSentDrafts(messages, sent),
+    contextComplete,
+    referredEmails,
+    language,
+  });
 });

@@ -37,6 +37,31 @@ function listBadge(item: ReplyListItem) {
   return item.listStatus === 'new' && item.repeat ? REPEAT_BADGE : LIST_STATUS_BADGE[item.listStatus];
 }
 
+/**
+ * Вердикт квалификатора по ответу — им же помечены лиды в дашбордах. Раньше он
+ * приходил в список, но нигде не показывался, и менеджер шёл по письмам подряд,
+ * не зная, где интерес. Показываем только решённые случаи: 'pending',
+ * 'processing', 'error' и письма живых аккаунтов метки не получают.
+ */
+const LEAD_BADGE: Record<string, { label: string; className: string }> = {
+  lead: { label: 'лид', className: 'bg-amber-100 text-amber-800' },
+  not_lead: { label: 'не лид', className: 'bg-gray-100 text-gray-400' },
+  needs_review: { label: 'под вопросом', className: 'bg-sky-100 text-sky-700' },
+};
+
+function LeadBadge({ item }: { item: ReplyListItem }) {
+  const badge = item.qualificationStatus ? LEAD_BADGE[item.qualificationStatus] : undefined;
+  if (!badge) return null;
+  return (
+    <span
+      className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${badge.className}`}
+      title="Оценка квалификатора по тексту ответа"
+    >
+      {badge.label}
+    </span>
+  );
+}
+
 /** Палитра аватаров проектов — как кружки аккаунтов в анализаторе тг-переписок. */
 const AVATAR_COLORS = [
   'bg-blue-100 text-blue-700',
@@ -111,6 +136,12 @@ export function ReplyPersonalizationView() {
    * конце) выглядела как отсутствующая.
    */
   const [campaignsExpanded, setCampaignsExpanded] = useState(false);
+  /**
+   * «Только лиды» — письма, которым квалификатор поставил вердикт 'lead'.
+   * Фильтруем на сервере: в списке подгружаются сотни писем страницами, и
+   * отбор по загруженному куску показывал бы «лидов» меньше, чем их есть.
+   */
+  const [onlyLeads, setOnlyLeads] = useState(false);
   const [replyQuery, setReplyQuery] = useState('');
   /** replyQuery после паузы в наборе — чтобы не дёргать сервер на каждую букву. */
   const [replySearch, setReplySearch] = useState('');
@@ -144,7 +175,12 @@ export function ReplyPersonalizationView() {
     const seq = ++requestSeq.current;
     setItemsLoading(true);
     try {
-      const res = await fetchReplies(projectId, { campaignId: campaignFilter || null, search: replySearch, limit });
+      const res = await fetchReplies(projectId, {
+        campaignId: campaignFilter || null,
+        search: replySearch,
+        limit,
+        onlyLeads,
+      });
       if (seq !== requestSeq.current) return;
       setItems(res.replies);
       setCampaigns(res.campaigns);
@@ -166,7 +202,7 @@ export function ReplyPersonalizationView() {
     } finally {
       if (seq === requestSeq.current) setItemsLoading(false);
     }
-  }, [projectId, campaignFilter, replySearch, limit]);
+  }, [projectId, campaignFilter, replySearch, limit, onlyLeads]);
 
   useEffect(() => {
     reloadReplies();
@@ -279,7 +315,7 @@ export function ReplyPersonalizationView() {
     reloadReplies();
   }, [loadProjects, reloadReplies]);
 
-  const filtersActive = Boolean(campaignFilter || replySearch);
+  const filtersActive = Boolean(campaignFilter || replySearch || onlyLeads);
   /** Кампании проекта не привязаны — обе вкладки будут пустыми, и это не «никто не ответил». */
   const noCampaigns = Boolean(project) && !missingReason && !itemsLoading && campaigns.length === 0;
   /** Число на кнопке «Все кампании»; null — есть кампании без счётчика. */
@@ -497,6 +533,26 @@ export function ReplyPersonalizationView() {
                 </button>
               ) : null}
             </div>
+            {/* Отбор по вердикту квалификатора. Вкладка Others живая, в ней
+                вердикта нет вовсе — там переключатель не показываем. */}
+            {tab === 'replies' ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setOnlyLeads((v) => !v);
+                  setLimit(REPLIES_PAGE_SIZE);
+                }}
+                aria-pressed={onlyLeads}
+                title="Показать только ответы, которые квалификатор признал лидами"
+                className={`rounded-full border px-2.5 py-1 text-xs transition ${
+                  onlyLeads
+                    ? 'border-amber-500 bg-amber-50 text-amber-800'
+                    : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                Только лиды
+              </button>
+            ) : null}
             {tab === 'others' && othersNotices.length ? (
               <div className="space-y-0.5 text-[11px] text-amber-600">
                 {othersNotices.map((notice) => (
@@ -598,10 +654,13 @@ export function ReplyPersonalizationView() {
                   <span className="truncate text-sm font-medium text-gray-900">
                     {item.companyName || item.leadEmail}
                   </span>
-                  <span
-                    className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${listBadge(item).className}`}
-                  >
-                    {listBadge(item).label}
+                  <span className="flex shrink-0 items-center gap-1">
+                    <LeadBadge item={item} />
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${listBadge(item).className}`}
+                    >
+                      {listBadge(item).label}
+                    </span>
                   </span>
                 </div>
                 {item.companyName ? (

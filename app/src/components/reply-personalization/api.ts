@@ -1,5 +1,11 @@
 import { supabase } from '@/lib/supabaseClient';
-import type { DraftStatus, OthersPage, ReplyCampaignOption, ReplyListItem } from '@/lib/replyPersonalization/types';
+import type {
+  DraftStatus,
+  OthersPage,
+  ReplyCampaignOption,
+  ReplyLanguage,
+  ReplyListItem,
+} from '@/lib/replyPersonalization/types';
 
 const BASE = '/api/tools/reply-personalization';
 
@@ -94,12 +100,13 @@ export interface RepliesResponse {
 
 export function fetchReplies(
   projectId: string,
-  filters: { campaignId?: string | null; search?: string; limit?: number } = {},
+  filters: { campaignId?: string | null; search?: string; limit?: number; onlyLeads?: boolean } = {},
 ) {
   const query = new URLSearchParams();
   if (filters.campaignId) query.set('campaignId', filters.campaignId);
   if (filters.search?.trim()) query.set('q', filters.search.trim());
   if (filters.limit) query.set('limit', String(filters.limit));
+  if (filters.onlyLeads) query.set('onlyLeads', '1');
   const suffix = query.toString() ? `?${query}` : '';
   return fetchWithAuth<RepliesResponse>(`${BASE}/projects/${projectId}/replies${suffix}`);
 }
@@ -125,6 +132,8 @@ export interface ThreadResponse {
   contextComplete: boolean;
   /** Адреса, на которые адресат перенаправил в последнем ответе. */
   referredEmails: string[];
+  /** Язык письма, сохранённый на этой переписке; по умолчанию 'ru'. */
+  language: ReplyLanguage;
 }
 
 export function fetchThread(qualificationId: string, projectId: string) {
@@ -151,10 +160,23 @@ export function fetchOpenDraft(qualificationId: string) {
 }
 
 /** recipientEmail — новый контакт из ответа; null — ответ в ту же переписку. */
-export function generateReply(qualificationId: string, projectId: string, recipientEmail: string | null = null) {
+export function generateReply(
+  qualificationId: string,
+  projectId: string,
+  recipientEmail: string | null = null,
+  language: ReplyLanguage = 'ru',
+) {
   return fetchWithAuth<GenerateResponse>(`${BASE}/replies/${qualificationId}/generate`, {
     method: 'POST',
-    body: JSON.stringify({ projectId, recipientEmail }),
+    body: JSON.stringify({ projectId, recipientEmail, language }),
+  });
+}
+
+/** Запомнить язык на переписке, когда его переключили, но ещё не генерировали. */
+export function saveReplyLanguage(qualificationId: string, projectId: string, language: ReplyLanguage) {
+  return fetchWithAuth<{ language: ReplyLanguage }>(`${BASE}/replies/${qualificationId}/language`, {
+    method: 'PUT',
+    body: JSON.stringify({ projectId, language }),
   });
 }
 
@@ -205,4 +227,4 @@ export async function extractTextFromFile(file: File): Promise<string> {
   return data.text;
 }
 
-export type { DraftStatus };
+export type { DraftStatus, ReplyLanguage };
