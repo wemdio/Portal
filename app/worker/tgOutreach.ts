@@ -534,7 +534,7 @@ export async function pollOnce(): Promise<boolean> {
   return true;
 }
 
-export async function resumeRunningCampaigns() {
+export async function resumeRunningCampaigns(opts: { onBoot?: boolean } = {}) {
   // On worker boot, also rescue campaigns stuck in `error` from previous runs
   // (e.g. transient DB/proxy/network outages that flipped status to error and
   // then got cleared, but nothing brought the campaigns back).
@@ -553,16 +553,23 @@ export async function resumeRunningCampaigns() {
   const campaignIds = running.map(c => c.id);
   // During deploy drain/restart we can end up with stale stop/restart jobs
   // that would immediately kill auto-resumed campaigns on next worker boot.
-  await db
-    .from('tg_outreach_jobs')
-    .update({
-      status: 'completed',
-      finished_at: new Date().toISOString(),
-      error_message: 'Auto-completed stale stop/restart job during worker resume',
-    })
-    .in('campaign_id', campaignIds)
-    .in('action', ['stop', 'restart'])
-    .in('status', ['pending', 'running']);
+  //
+  // Только на старте процесса. Эта же функция идёт по таймеру раз в 5 минут,
+  // и там «устаревшей» оказывалась живая остановка: оператор жмёт «Остановить»
+  // на кампании в паузе, а проверка закрывает его задачу невыполненной и
+  // поднимает кампанию обратно.
+  if (opts.onBoot) {
+    await db
+      .from('tg_outreach_jobs')
+      .update({
+        status: 'completed',
+        finished_at: new Date().toISOString(),
+        error_message: 'Auto-completed stale stop/restart job during worker resume',
+      })
+      .in('campaign_id', campaignIds)
+      .in('action', ['stop', 'restart'])
+      .in('status', ['pending', 'running']);
+  }
 
   log('info', `Found ${running.length} campaigns with status running/paused, scheduling auto-resume`);
   for (const campaign of running) {
@@ -674,7 +681,7 @@ const USERNAME_CHECK_INTERVAL_MS = 60_000;
 async function main() {
   log('info', 'TG Outreach worker starting...');
   await resetStuckJobs();
-  await resumeRunningCampaigns();
+  await resumeRunningCampaigns({ onBoot: true });
   await resumeWarmupRuns();
 
   // Independent heartbeat ticker keeps the docker healthcheck green as long

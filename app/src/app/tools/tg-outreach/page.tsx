@@ -6911,6 +6911,16 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
           )}
         </div>
         <div className="flex items-center gap-2">
+          {/* Пауза — не остановка: её каждые 5 минут пробует поднять
+              авто-возобновление, а профили применяются только к остановленной
+              кампании. Без этой кнопки из паузы нельзя было выйти в «остановлена». */}
+          {campaign.status === 'paused' && !stopping && (
+            <button type="button" onClick={() => void doAction('stop')} disabled={actionLoading}
+              className="inline-flex items-center gap-1.5 rounded-full border border-rose-300 px-4 py-2.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+              <Square className="h-3.5 w-3.5" />
+              Остановить
+            </button>
+          )}
           {campaign.status !== 'running' && !stopping ? (
             <button type="button" onClick={() => void doAction('start')}
               disabled={actionLoading}
