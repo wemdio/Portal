@@ -8,6 +8,7 @@ import {
   mapBriefScoringWithConcurrency,
   resolveBriefScoringConcurrency,
 } from '@/lib/briefScoring/concurrency';
+import { fatalAiAccountError } from '@/lib/openrouter/client';
 
 type QueueItem = {
   id: string;
@@ -239,6 +240,10 @@ export async function runBriefScoringJob(jobId: string) {
     }
 
     let cancelled = false;
+    // Первая ошибка уровня аккаунта останавливает задачу целиком, остальное —
+    // последняя ошибка строки: её показываем, если ни одна строка не оценена.
+    let fatalError: string | null = null;
+    let lastRowError: string | null = null;
 
     await supabaseAdmin.rpc('reset_stale_brief_scoring_items', {
       p_job_id: jobId,
@@ -343,14 +348,18 @@ export async function runBriefScoringJob(jobId: string) {
           }
         } catch (err) {
           const message = err instanceof Error ? err.message : 'Ошибка оценки ЦА';
+          const fatal = fatalAiAccountError(message);
+          if (fatal && !fatalError) fatalError = fatal;
+          const rowError = fatal ?? message;
+          lastRowError = rowError;
 
           for (const item of activeItems) {
-            const retry = shouldRetryBriefScoringError(message, item.attempt_count);
+            const retry = !fatal && shouldRetryBriefScoringError(message, item.attempt_count);
             if (retry) {
               await requeueItem(item, message);
               continue;
             }
-            const failed = await updateQueueFailed(item, message);
+            const failed = await updateQueueFailed(item, rowError);
             if (failed) {
               errors += 1;
               processed += 1;
@@ -372,9 +381,14 @@ export async function runBriefScoringJob(jobId: string) {
           error_count: errors,
         })
         .eq('id', jobId);
+
+      if (fatalError) break;
     }
 
-    if (cancelled) {
+    // Отменённая и упёршаяся в лимит задача закрываются одинаково: остаток
+    // очереди не имеет смысла молоть, но и висеть в «в работе» не должен.
+    const abortReason = cancelled ? 'Операция отменена пользователем' : fatalError;
+    if (abortReason) {
       const now = new Date().toISOString();
       await supabaseAdmin
         .from('brief_scoring_queue')
@@ -382,7 +396,7 @@ export async function runBriefScoringJob(jobId: string) {
           status: 'failed',
           score: null,
           reason: null,
-          last_error: 'Операция отменена пользователем',
+          last_error: abortReason,
           updated_at: now,
           completed_at: now,
         })
@@ -396,7 +410,18 @@ export async function runBriefScoringJob(jobId: string) {
     ]);
 
     const processedTotal = completedCount + failedCount;
-    const finalStatus: JobRow['status'] = cancelled ? 'cancelled' : 'completed';
+    // Задача, где не оценено НИ ОДНОЙ строки, — это не «завершено»: раньше
+    // такой прогон рапортовал «0 успешно, N с ошибками» и закрывался, а
+    // человек видел только значки ошибок в таблице и не знал, в чём дело.
+    const nothingScored = completedCount === 0 && failedCount > 0;
+    const finalStatus: JobRow['status'] = cancelled
+      ? 'cancelled'
+      : fatalError || nothingScored
+        ? 'failed'
+        : 'completed';
+    const finalError = finalStatus === 'failed'
+      ? fatalError ?? lastRowError ?? 'Ни одна строка не получила оценку от ИИ'
+      : null;
 
     await supabaseAdmin
       .from('brief_scoring_jobs')
@@ -406,6 +431,7 @@ export async function runBriefScoringJob(jobId: string) {
         success_count: completedCount,
         error_count: failedCount,
         completed_at: new Date().toISOString(),
+        ...(finalError ? { error_message: finalError } : {}),
       })
       .eq('id', jobId);
 
