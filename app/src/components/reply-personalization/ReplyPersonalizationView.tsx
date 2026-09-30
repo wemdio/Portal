@@ -30,6 +30,13 @@ const LIST_STATUS_BADGE: Record<ReplyListItem['listStatus'], { label: string; cl
   skipped: { label: 'пропущено', className: 'bg-gray-100 text-gray-500' },
 };
 
+/** Необработанное письмо адресата, который уже отвечал раньше, — не «новый». */
+const REPEAT_BADGE = { label: 'повторный', className: 'bg-violet-100 text-violet-700' };
+
+function listBadge(item: ReplyListItem) {
+  return item.listStatus === 'new' && item.repeat ? REPEAT_BADGE : LIST_STATUS_BADGE[item.listStatus];
+}
+
 /** Палитра аватаров проектов — как кружки аккаунтов в анализаторе тг-переписок. */
 const AVATAR_COLORS = [
   'bg-blue-100 text-blue-700',
@@ -557,9 +564,9 @@ export function ReplyPersonalizationView() {
                     {item.companyName || item.leadEmail}
                   </span>
                   <span
-                    className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${LIST_STATUS_BADGE[item.listStatus].className}`}
+                    className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${listBadge(item).className}`}
                   >
-                    {LIST_STATUS_BADGE[item.listStatus].label}
+                    {listBadge(item).label}
                   </span>
                 </div>
                 {item.companyName ? (

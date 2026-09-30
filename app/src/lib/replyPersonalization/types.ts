@@ -81,6 +81,8 @@ export interface DraftRow {
 export interface ReplyListItem extends QualificationRow {
   /** По последнему черновику: 'sent' — ответили, 'skipped' — пропустили, иначе 'new'. */
   listStatus: 'new' | 'sent' | 'skipped';
+  /** Адресат уже отвечал раньше: необработанное письмо — «повторный», а не «новый». */
+  repeat?: boolean;
   /** 'others' — строка вкладки Others (папка Others в Instantly). */
   source?: 'others';
 }

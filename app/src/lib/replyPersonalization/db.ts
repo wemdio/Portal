@@ -397,7 +397,56 @@ export async function findQualificationIdsByEmailIds(emailIds: string[]): Promis
   return result;
 }
 
-/** Последний статус на каждый qualification_id ('skipped' исключается из выдачи целиком в вызывающем коде). */
+/**
+ * Какие из писем — не первый ответ адресата: он уже писал нам раньше по
+ * кампаниям проекта. В списке такие письма помечаются «повторный», а не
+ * «новый», чтобы продолжение диалога не выглядело свежим лидом. Более ранние
+ * ответы ищем и в таблице квалификатора, и среди самих переданных писем
+ * (письма живых аккаунтов в таблицу не попадают).
+ */
+export async function findRepeatReplyIds(
+  campaignIds: string[],
+  rows: Pick<QualificationRow, 'id' | 'leadEmail' | 'replyTimestamp'>[],
+): Promise<Set<string>> {
+  const firstReplyAt = new Map<string, number>();
+  const note = (email: string | null, timestamp: string | null) => {
+    const key = (email ?? '').trim().toLowerCase();
+    const at = timestamp ? Date.parse(timestamp) : NaN;
+    if (!key || Number.isNaN(at)) return;
+    const known = firstReplyAt.get(key);
+    if (known === undefined || at < known) firstReplyAt.set(key, at);
+  };
+  for (const row of rows) note(row.leadEmail, row.replyTimestamp);
+
+  const emails = [...new Set(rows.map((row) => row.leadEmail).filter(Boolean))];
+  if (campaignIds.length && emails.length) {
+    const { instantly } = requireClients();
+    const chunks: string[][] = [];
+    for (let i = 0; i < emails.length; i += 100) chunks.push(emails.slice(i, i + 100));
+    await Promise.all(
+      chunks.map(async (chunk) => {
+        const { data, error } = await instantly
+          .from('instantly_lead_qualifications')
+          .select('lead_email, reply_timestamp')
+          .in('campaign_id', campaignIds)
+          .in('lead_email', chunk)
+          .order('reply_timestamp', { ascending: true });
+        if (error) throw new Error(`earlier replies query failed: ${error.message}`);
+        for (const row of data ?? []) note(row.lead_email as string, row.reply_timestamp as string | null);
+      }),
+    );
+  }
+
+  const repeats = new Set<string>();
+  for (const row of rows) {
+    const first = firstReplyAt.get(row.leadEmail.trim().toLowerCase());
+    const at = row.replyTimestamp ? Date.parse(row.replyTimestamp) : NaN;
+    if (first !== undefined && !Number.isNaN(at) && at > first) repeats.add(row.id);
+  }
+  return repeats;
+}
+
+/** Последний статус на каждый qualification_id('skipped' исключается из выдачи целиком в вызывающем коде). */
 export async function getLatestDraftStatuses(
   qualificationIds: string[],
 ): Promise<Record<string, DraftStatus>> {
