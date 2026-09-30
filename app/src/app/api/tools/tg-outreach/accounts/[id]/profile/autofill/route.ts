@@ -6,6 +6,7 @@ import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
 import { describeTelegramError } from '@/lib/tgOutreach/profile/applyProfile';
 import { loadAccountForProfile, connectAccount } from '@/lib/tgOutreach/profile/session';
+import { withTimeout } from '@/lib/tgOutreach/withTimeout';
 import {
   buildBio,
   companyFromCampaign,
@@ -37,14 +38,36 @@ async function firstFreeUsername(
   let checked = 0;
   for (const candidate of candidates) {
     checked += 1;
+    let timedOut = false;
     try {
-      const ok = await client.invoke(new Api.account.CheckUsername({ username: candidate }));
+      const ok = await withTimeout(
+        client.invoke(new Api.account.CheckUsername({ username: candidate })),
+        CHECK_TIMEOUT_MS,
+        'проверка ника',
+      ).catch((e) => {
+        timedOut = e instanceof Error && e.message.includes('нет ответа за');
+        throw e;
+      });
       if (ok === true) return { username: candidate, checked };
-    } catch {
+    } catch (e) {
+      // Молчание — не «ник занят», а мёртвое соединение: следующий вариант
+      // провисит столько же. 30.09.2026 одна строка модалки крутилась так
+      // минутами, без ошибки и без шанса дождаться.
+      if (timedOut) throw e;
       // USERNAME_INVALID / USERNAME_OCCUPIED / флуд — пробуем следующий.
     }
   }
   return { username: null, checked };
+}
+
+const CHECK_TIMEOUT_MS = 15_000;
+
+/** Разрыв на полуживом сокете тоже умеет висеть — ждём его недолго. */
+async function disconnectBounded(client: TelegramClient): Promise<void> {
+  await Promise.race([
+    client.disconnect().catch(() => {}),
+    new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+  ]);
 }
 
 /**
@@ -162,7 +185,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       } catch (e) {
         return jsonError(`Не удалось подобрать ник: ${describeTelegramError(e)}`, 502);
       } finally {
-        try { await client.disconnect(); } catch { /* соединение уже закрыто */ }
+        await disconnectBounded(client);
       }
     },
   );

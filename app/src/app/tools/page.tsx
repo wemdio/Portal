@@ -33,7 +33,6 @@ import {
   Telescope,
   MapPin,
   MessageSquareReply,
-  Link2,
 } from 'lucide-react';
 import { authFetch } from '@/lib/authFetch';
 import { ALL_TOOL_IDS, TOOLS_CONFIG, TOOL_GROUPS, type ToolId } from '@/lib/toolsRegistry';
@@ -118,7 +117,6 @@ const TOOL_ICONS: Record<ToolId, ComponentType<{ className?: string }>> = {
   sender: MailPlus,
   'polza-outreach': Briefcase,
   'polza-ru-outreach': Send,
-  'unlinked-campaigns': Link2,
 };
 
 function ToolLinkCard({
