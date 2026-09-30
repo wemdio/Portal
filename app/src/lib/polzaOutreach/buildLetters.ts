@@ -168,11 +168,25 @@ export function triggerShort(t: Trigger | null): string {
   }
 }
 
-/** Роль для темы и коротких фраз: название вакансии не длиннее четырёх слов. */
+// Роль, которую можно назвать в теме и в боли: английское название продажной
+// должности. «Stage», «Alternance», «Commercial», «Responsable Commercial»
+// (французские вакансии) и стажёры давали «pipeline before your new Stage ramps».
+const SALES_ROLE_RE = /\b(?:sales|account executive|account manager|business development|sdr|bdr|ae|revenue|gtm|growth|partnerships?)\b/i;
+const NOT_A_ROLE_RE = /\b(?:intern|internship|stage|stagiaire|alternance|trainee|werkstudent|praktik\w*)\b/i;
+
+/** Роль для темы и коротких фраз: английская продажная должность не длиннее четырёх слов. */
 function shortRole(t: Trigger | null): string | null {
   if (t?.type !== 'hiring') return null;
   const title = shortJobTitle(t.title);
-  return title && title.split(' ').length <= 4 ? title : null;
+  if (!title || title.split(' ').length > 4) return null;
+  // Название продукта или юрлица внутри должности («Version2.ai Business Development Representative»).
+  if (/[.\d@]/.test(title)) return null;
+  return SALES_ROLE_RE.test(title) && !NOT_A_ROLE_RE.test(title) ? title : null;
+}
+
+/** «Knit's», но «Defense Unicorns'». */
+function possessive(name: string): string {
+  return /s$/i.test(name) ? `${name}'` : `${name}'s`;
 }
 
 const SUBJECT_MAX = 80;
@@ -199,7 +213,7 @@ export function subjectVariants(company: string, t: Trigger | null): string[] {
         `pipeline before your new ${role} ramps`,
         `accounts for the new ${role}`,
         `before your new ${role} starts`,
-        `pipeline for ${company}'s new ${role}`,
+        `pipeline for ${possessive(company)} new ${role}`,
         `target accounts for ${company}`,
       ];
     }
@@ -253,7 +267,7 @@ export function fallbackPain(company: string, t: Trigger | null): string {
         const who = shortRole(t) ?? 'sales hire';
         return [
           `When a new ${who} starts, the bottleneck is usually not the hire itself but having enough of the right accounts to work from the first week.`,
-          `A new ${who} usually loses the first weeks to building lists by hand instead of talking to buyers.`,
+          `For a new ${who}, the bottleneck is usually not the pitch but knowing which accounts are worth the first calls.`,
         ];
       }
       case 'yc':
