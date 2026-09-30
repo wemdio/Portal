@@ -13,13 +13,10 @@ import {
   describePortalProjectTerm,
   findManualFactIssue,
   loadNoPeriodPlanOwners,
-  localIsoDate,
   PORTAL_PROJECT_TERM_COLUMNS,
-  PORTAL_TERM_TEXT,
   type PortalPeriodStateRow,
   type PortalProjectTermOk,
   type PortalProjectTermRow,
-  withBoundResumeNote,
 } from './portalDeliveryTerm';
 
 export type ContactDeliveryPreviewRequest = {
@@ -142,7 +139,6 @@ export async function buildVeContactDeliveryPreview(
 
   let period: PortalPeriodRow | null = null;
   let projectTerm: PortalProjectTermOk | null = null;
-  let projectPlanBound = false;
   // Без периода факт плана — первые контакты кампаний этого VE2-проекта;
   // он известен только после сверки кампаний ниже.
   let contactsDone: number | null;
@@ -213,7 +209,6 @@ export async function buildVeContactDeliveryPreview(
       }
     }
     projectTerm = term;
-    projectPlanBound = boundHere;
     contactsDone = null;
     deadline = term.deadline;
   }
@@ -248,9 +243,6 @@ export async function buildVeContactDeliveryPreview(
     return outcome(409, 'CONTACT_DELIVERY_PLAN_INVALID', error instanceof Error ? error.message : 'Настройки плана недоступны');
   }
   const { dailyCapacity: senderCapacity, scheduleDays, timezone } = settings;
-  if (projectTerm && deadline < localIsoDate(input.now ?? new Date(), timezone)) {
-    return outcome(409, 'PROJECT_DEADLINE_PASSED', withBoundResumeNote(PORTAL_TERM_TEXT.deadlinePassed(deadline), projectPlanBound));
-  }
 
   let audits: VeSegmentationAudit[] = [];
   const auditId = cleanString(input.segmentationAuditId);
@@ -367,7 +359,7 @@ export async function buildVeContactDeliveryPreview(
   }
 
   const remainingWorkdays = plan.days.length;
-  const requiredDaily = remainingWorkdays > 0
+  const requiredDaily = deadline < plan.businessDate ? Math.min(senderCapacity, plan.remainingContacts) : remainingWorkdays > 0
     ? Math.ceil(plan.remainingContacts / remainingWorkdays)
     : 0;
   const effectiveDaily = plan.days[0]?.quota ?? 0;

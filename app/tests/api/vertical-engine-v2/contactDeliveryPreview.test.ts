@@ -363,6 +363,7 @@ describe('POST Vertical Engine v2 contact-delivery preview', () => {
     ]);
     await mockInstantlyDb.from('instantly_campaign_catalog').insert([
       { id: 'active-campaign', new_leads_contacted_count: 1 },
+      { id: 'queued-campaign', new_leads_contacted_count: 0 },
     ]);
     await mockPortalDb.from('ve_contact_delivery_rows').insert([
       { id: 'r1', ve_project_id: VE_PROJECT_ID, campaign_row_id: 'child-active', status: 'accepted', email_normalized: 'ready-a@example.test' },
@@ -487,6 +488,18 @@ describe('contact-delivery preview for a Portal project without periods', () => 
     expect((await response.json()).preview).toMatchObject({ contacts_done_count: 7, remaining: 3993 });
   });
 
+  it('previews overdue launches at their configured capacity without changing the card date', async () => {
+    for (const deadline of ['2026-09-04', '2026-09-06']) {
+      await withoutPeriod({ deadline });
+      const response = await POST(noPeriodRequest(), { params: Promise.resolve({ id: TEMPLATE_ID }) });
+      expect(response.status).toBe(200);
+      const { preview } = await response.json();
+      expect(preview.deadline).toBe(deadline);
+      expect(preview.effective_daily).toBeGreaterThan(0);
+      expect(preview.effective_daily).toBeLessThanOrEqual(preview.sender_capacity);
+    }
+  });
+
   it.each([
     {
       name: 'a missing card deadline (ENagency)',
@@ -499,19 +512,6 @@ describe('contact-delivery preview for a Portal project without periods', () => 
       arrange: () => withoutPeriod({ deadline: '05.18.2026' }),
       code: 'PROJECT_DEADLINE_INVALID',
       error: expect.stringContaining('«Дедлайн»'),
-    },
-    {
-      name: 'a passed deadline',
-      arrange: () => withoutPeriod({ deadline: '2026-09-04' }),
-      code: 'PROJECT_DEADLINE_PASSED',
-      error: 'Дедлайн проекта (04.09.2026) уже прошёл. Обновите поле «Дедлайн» в карточке проекта.',
-    },
-    {
-      // Часы теста 2026-09-06T21:30Z — это уже 07.09 00:30 по Москве, часовому поясу отправки.
-      name: 'a deadline that ended at midnight in the delivery timezone',
-      arrange: () => withoutPeriod({ deadline: '2026-09-06' }),
-      code: 'PROJECT_DEADLINE_PASSED',
-      error: 'Дедлайн проекта (06.09.2026) уже прошёл. Обновите поле «Дедлайн» в карточке проекта.',
     },
     {
       name: 'only closed periods',
@@ -549,12 +549,6 @@ describe('contact-delivery preview for a Portal project without periods', () => 
   // Для уже идущего плана правка карточки возвращает загрузку, только пока
   // кампании плана не завершились: иначе пакет уходит из портфеля.
   it.each([
-    {
-      name: 'a passed deadline',
-      project: { deadline: '2026-09-04' },
-      code: 'PROJECT_DEADLINE_PASSED',
-      error: 'Дедлайн проекта (04.09.2026) уже прошёл. Обновите поле «Дедлайн» в карточке проекта. Загрузка продолжится сама, если к этому времени кампании плана ещё не завершились; иначе понадобится новый запуск.',
-    },
     {
       name: 'a finished project',
       project: { status: 'Завершен' },

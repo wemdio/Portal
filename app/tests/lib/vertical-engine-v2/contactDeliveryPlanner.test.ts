@@ -67,4 +67,19 @@ describe('buildContactDeliveryPlan', () => {
     expect(plan.capacityShortfall).toBe(3919);
     expect(plan.days[0].quota).toBe(27);
   });
+
+  it('continues after the planning deadline at the chosen pace, with a bounded forecast and the same target', () => {
+    const input = { now: new Date('2026-10-02T21:30:00Z'), timezone: 'Europe/Moscow', deadline: '2026-09-30',
+      scheduleDays: [1,2,3,4,5], contactsObligation: 800, contactsDone: 0, dailyCapacity: 360,
+      availableContacts: 724, outstandingContacts: 50 };
+    const plan = buildContactDeliveryPlan(input);
+    expect(plan.deadline).toBe('2026-09-30');
+    expect(plan.days).toEqual([{ date: '2026-10-05', quota: 360 }, { date: '2026-10-06', quota: 360 },
+      { date: '2026-10-07', quota: 4 }]);
+    expect(buildContactDeliveryPlan({ ...input, dailyCapacity: 100 }).days[0].quota).toBe(100);
+    expect(buildContactDeliveryPlan({ ...input, contactsDone: 800 }).days).toEqual([]);
+    expect(buildContactDeliveryPlan({ ...input, dailyCapacity: 0 }).days.every(day => day.quota === 0)).toBe(true);
+    expect(buildContactDeliveryPlan({ ...input, dailyCapacity: 1, contactsObligation: 2147483647 }).days).toHaveLength(366);
+    expect(buildContactDeliveryPlan({ ...input, outstandingContacts: 800 }).days[0].quota).toBe(0);
+  });
 });

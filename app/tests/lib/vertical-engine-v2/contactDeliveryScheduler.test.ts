@@ -351,7 +351,8 @@ describe('VE2 contact delivery scheduler', () => {
       },
     });
     const instantly = createMockSupabase({
-      tables: { client_campaign_presets: [{ id: 'preset-1', client_user_id: 'client', instantly_account_id: 'main' }] },
+      tables: { client_campaign_presets: [{ id: 'preset-1', client_user_id: 'client', instantly_account_id: 'main' }],
+          instantly_campaign_catalog: [{ id: 'original-campaign', new_leads_contacted_count: 0 }] },
       rpcHandlers: { client_blocklist_snapshot: () => ({ data: { count: 1, emails: ['blocked@example.test'] } }) },
     });
     const input = { portalDb: portal as never, instantlyDb: instantly as never, veProjectId: 've', now: new Date('2026-09-07T06:00:00Z') };
@@ -457,7 +458,8 @@ describe('VE2 contact delivery scheduler', () => {
         },
       });
       const instantly = createMockSupabase({
-        tables: { client_campaign_presets: [{ id: 'preset-1', client_user_id: 'client', instantly_account_id: 'main' }] },
+        tables: { client_campaign_presets: [{ id: 'preset-1', client_user_id: 'client', instantly_account_id: 'main' }],
+          instantly_campaign_catalog: [{ id: 'original-campaign', new_leads_contacted_count: 0 }] },
         rpcHandlers: { client_blocklist_snapshot: () => ({ data: { count: 0, emails: [] } }) },
       });
       const input = { portalDb: portal as never, instantlyDb: instantly as never, veProjectId: 've', now: new Date('2026-09-07T06:00:00Z') };
@@ -530,12 +532,14 @@ describe('VE2 contact delivery scheduler', () => {
       .rejects.toThrow('Проекту в Portal создан период');
     expect(afterPeriod.rpcCalls.some((call) => call.fn === 've_enqueue_contact_supply_batch')).toBe(false);
 
-    // Дедлайн карточки считается по часовому поясу отправки: 21:30 UTC — уже следующий день по Москве.
+    // После плановой даты продолжаем двухдневный запас по сохранённому лимиту.
     const afterDeadline = createMockSupabase({ enforceQueryWindows: true, rpcHandlers: handlers, tables: tables({ deadline: '2026-09-10' }) });
-    await expect(runProjectContactSupply({
-      portalDb: afterDeadline as never, instantlyDb: instantly as never, veProjectId: 've', now: new Date('2026-09-10T21:30:00Z'),
-    })).rejects.toThrow('Дедлайн проекта (10.09.2026) уже прошёл');
-    expect(afterDeadline.rpcCalls.some((call) => call.fn === 've_enqueue_contact_supply_batch')).toBe(false);
+    const afterDeadlineNow = new Date('2026-09-11T06:00:00Z');
+    await afterDeadline.from('ve_launch_queue_campaigns').update({status_observed_at: afterDeadlineNow.toISOString()}).eq('id', 'campaign-row');
+    await runProjectContactSupply({
+      portalDb: afterDeadline as never, instantlyDb: instantly as never, veProjectId: 've', now: afterDeadlineNow,
+    });
+    expect(afterDeadline.rpcCalls.find((call) => call.fn === 've_enqueue_contact_supply_batch')?.params.p_limit).toBe(37);
   });
 
   it('does not read or mutate the Portal DB without the Instantly client', async () => {

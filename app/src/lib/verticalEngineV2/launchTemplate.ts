@@ -60,8 +60,6 @@ import {
   findManualFactIssue,
   loadNoPeriodPlanOwners,
   loadPortalProjectTerm,
-  localIsoDate,
-  PORTAL_TERM_TEXT,
 } from './portalDeliveryTerm';
 
 export type VeLaunchLocale = 'ru' | 'en';
@@ -649,7 +647,6 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
 
   // A project without periods is its own term. Check it and the manual fact
   // before the first write here or in Instantly.
-  let projectTermDeadline: string | null = null;
   if (expectedPortalPeriodId === null) {
     try {
       const [{ project: portalProject, periods }, planOwners] = await Promise.all([
@@ -661,7 +658,6 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
       if (!term.ok) return conflict(term.code, term.error);
       const manualFact = await findManualFactIssue(instantlyDb, portalProject);
       if (manualFact) return conflict(manualFact.code, manualFact.error);
-      projectTermDeadline = term.deadline;
     } catch (error) {
       await logError(`${eventPrefix}.portal_project_term_failed`, error, { userId, templateId, portalProjectId });
       return { status: 500, body: { error: 'Не удалось проверить проект Portal перед запуском.' } };
@@ -709,9 +705,6 @@ export async function runVeTemplateLaunch(input: VeTemplateLaunchInput): Promise
   }
   const { scheduleDays: deliveryScheduleDays, timezone: deliveryTimezone, dailyCapacity: senderDailyCapacity } = deliverySettings;
   const deliveryPlanBoundAt = new Date().toISOString();
-  if (projectTermDeadline && projectTermDeadline < localIsoDate(new Date(deliveryPlanBoundAt), deliveryTimezone)) {
-    return conflict('PROJECT_DEADLINE_PASSED', PORTAL_TERM_TEXT.deadlinePassed(projectTermDeadline));
-  }
   const { data: deliveryPlanData, error: deliveryPlanError } = await portalDb.rpc(
     've_bind_contact_delivery_plan',
     {

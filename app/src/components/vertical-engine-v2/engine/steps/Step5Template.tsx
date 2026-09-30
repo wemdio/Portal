@@ -882,7 +882,7 @@ export function DeliveryPlanBlock({ launch, disabled = false, preparedPreview }:
             </div>
             <div>
               <label htmlFor="ve2-delivery-target" className="ve2-label">
-                {term ? 'Цель контактов до дедлайна' : 'Цель контактов за период'}
+                {term ? 'Цель новых контактов' : 'Цель контактов за период'}
               </label>
               <input
                 id="ve2-delivery-target"
@@ -927,7 +927,7 @@ export function DeliveryPlanBlock({ launch, disabled = false, preparedPreview }:
                 </p>
                 {/* Перепривязки плана к периоду нет: созданный период останавливает загрузку. */}
                 <p className="mt-1 text-xs text-gray-500">
-                  Продлевайте проект полем «Дедлайн» в карточке. Если создать проекту период, загрузка по этому плану остановится.
+                  Дедлайн задаёт плановую дату. После неё сбор и пополнение продолжаются в выбранном темпе до достижения цели. Если создать проекту период, загрузка по этому плану остановится.
                 </p>
               </>
             ) : null
