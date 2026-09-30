@@ -53,6 +53,13 @@ export interface QualificationRow {
   outOfCampaign?: boolean;
 }
 
+/**
+ * Язык, на котором ИИ пишет ответ. Хранится на переписке (см. миграцию
+ * 20260930_0010): у русского и английского адресата разные ветки одной и той
+ * же кампании, и выбор должен пережить закрытие вкладки и смену сотрудника.
+ */
+export type ReplyLanguage = 'ru' | 'en';
+
 export interface ThreadMessage {
   fromUs: boolean;
   text: string;

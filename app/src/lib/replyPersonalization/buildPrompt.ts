@@ -1,6 +1,12 @@
 import type { CampaignStepText } from './campaignSequence';
 import { UNIVERSAL_REPLY_RULES } from './promptRules';
-import type { GlobalKnowledgeBase, KnowledgeBase, QualificationRow, ThreadMessage } from './types';
+import type {
+  GlobalKnowledgeBase,
+  KnowledgeBase,
+  QualificationRow,
+  ReplyLanguage,
+  ThreadMessage,
+} from './types';
 
 export interface PromptMessage {
   role: 'system' | 'user';
@@ -40,8 +46,15 @@ export function buildReplyPrompt(input: {
   campaignSteps?: CampaignStepText[];
   /** Новый контакт, на которого перенаправил адресат; null — ответ в ту же переписку. */
   recipientEmail?: string | null;
+  /**
+   * Язык письма. Раньше его не было вовсе: правила, тон и примеры написаны
+   * по-русски, и на английскую переписку ИИ отвечал как придётся. Теперь язык
+   * задаёт сотрудник переключателем в чате; по умолчанию — русский.
+   */
+  language?: ReplyLanguage;
 }): PromptMessage[] {
   const { kb, globalKb, brief, qualification, thread, contextComplete } = input;
+  const language: ReplyLanguage = input.language === 'en' ? 'en' : 'ru';
   const recipientEmail = input.recipientEmail ?? null;
   const rules = input.systemPrompt?.trim() || UNIVERSAL_REPLY_RULES;
 
@@ -83,7 +96,11 @@ ${formatThread(thread)}
 ${recipientEmail
     ? `Адресат перенаправил нас к новому контакту: ${recipientEmail}. Напиши письмо НОВОМУ контакту — оно уйдёт на ${recipientEmail}, а не тому, кто ответил. Это первое письмо этому человеку: начни с того, кто перенаправил, дальше — предложение из цепочки под эту компанию.`
     : `Напиши следующий ответ от НАС адресату, отвечая на его последнюю реплику.
-Ответ уйдёт на ${qualification.leadEmail} в эту же переписку.`}`;
+Ответ уйдёт на ${qualification.leadEmail} в эту же переписку.`}
+
+${language === 'en'
+    ? 'ЯЗЫК ОТВЕТА: английский. Всё письмо целиком — на английском, включая приветствие и подпись, даже если бриф, правила и переписка на русском. Требование обращаться на «вы» к английскому тексту не применяй.'
+    : 'ЯЗЫК ОТВЕТА: русский. Всё письмо целиком — на русском, даже если адресат написал на другом языке.'}`;
 
   return [
     { role: 'system', content: system },

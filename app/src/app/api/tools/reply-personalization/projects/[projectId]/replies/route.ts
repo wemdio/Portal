@@ -20,6 +20,9 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
   const search = (url.searchParams.get('q') ?? '').trim().slice(0, 200);
   const limitParam = Number(url.searchParams.get('limit'));
   const limit = Number.isFinite(limitParam) && limitParam > 0 ? limitParam : undefined;
+  // «Только лиды» — вердикт квалификатора, он есть лишь у синхронизированных
+  // кампаний основного аккаунта; живые письма под этим фильтром не показываем.
+  const onlyLeads = url.searchParams.get('onlyLeads') === '1';
 
   // Письма не показываем, только если собрать ответ не из чего — нет брифа.
   const [projectBrief, kb] = await Promise.all([getProjectBrief(projectId), getKnowledgeBase(projectId)]);
@@ -28,7 +31,7 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
     return NextResponse.json({ replies: [], campaigns: [], total: 0, hasMore: false, missingReason });
   }
 
-  const page = await listProjectReplies(projectId, { campaignId, search, limit });
+  const page = await listProjectReplies(projectId, { campaignId, search, limit, onlyLeads });
   const [statuses, repeats] = await Promise.all([
     getLatestDraftStatuses(page.rows.map((q) => q.id)),
     findRepeatReplyIds(page.campaigns.map((c) => c.id), page.rows),

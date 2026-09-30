@@ -6,7 +6,14 @@
 
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
-import type { DraftRow, DraftStatus, GlobalKnowledgeBase, KnowledgeBase, QualificationRow } from './types';
+import type {
+  DraftRow,
+  DraftStatus,
+  GlobalKnowledgeBase,
+  KnowledgeBase,
+  QualificationRow,
+  ReplyLanguage,
+} from './types';
 
 export function requireClients() {
   if (!supabaseAdmin || !supabaseInstantly) {
@@ -341,7 +348,7 @@ function sanitizeSearch(value: string): string {
  */
 export async function listSyncedQualifications(
   campaignIds: string[],
-  options: { limit: number; search?: string },
+  options: { limit: number; search?: string; onlyLeads?: boolean },
 ): Promise<{ rows: QualificationRow[]; total: number }> {
   if (!campaignIds.length) return { rows: [], total: 0 };
   const { instantly } = requireClients();
@@ -349,6 +356,7 @@ export async function listSyncedQualifications(
     .from('instantly_lead_qualifications')
     .select(QUALIFICATION_COLUMNS, { count: 'exact' })
     .in('campaign_id', campaignIds);
+  if (options.onlyLeads) query = query.eq('status', 'lead');
   const search = sanitizeSearch(options.search ?? '');
   if (search) query = query.or(`lead_email.ilike.*${search}*,company_name.ilike.*${search}*`);
   const { data, error, count } = await query
@@ -365,6 +373,7 @@ export async function listSyncedQualifications(
 export async function countSyncedQualificationsByCampaign(
   campaignIds: string[],
   search?: string,
+  options: { onlyLeads?: boolean } = {},
 ): Promise<Map<string, number>> {
   const { instantly } = requireClients();
   const cleaned = sanitizeSearch(search ?? '');
@@ -374,6 +383,7 @@ export async function countSyncedQualificationsByCampaign(
         .from('instantly_lead_qualifications')
         .select('id', { count: 'exact', head: true })
         .eq('campaign_id', campaignId);
+      if (options.onlyLeads) query = query.eq('status', 'lead');
       if (cleaned) query = query.or(`lead_email.ilike.*${cleaned}*,company_name.ilike.*${cleaned}*`);
       const { count, error } = await query;
       if (error) throw new Error(`qualifications count failed: ${error.message}`);
@@ -620,4 +630,61 @@ export async function updateDraftText(draftId: string, text: string): Promise<vo
     .update({ generated_text: text })
     .eq('id', draftId);
   if (error) throw new Error(`draft text-update failed: ${error.message}`);
+}
+
+/**
+ * Что мы уже отправили по этому письму, по времени отправки. Нужно, чтобы
+ * переписка на экране показывала наш ответ сразу: Instantly отдаёт только что
+ * отправленное письмо в треде не мгновенно, и сотрудник видел диалог без
+ * своего ответа — «статус поменялся, а письма нет».
+ */
+export async function listSentDrafts(
+  qualificationId: string,
+): Promise<{ text: string; sentAt: string }[]> {
+  const { admin } = requireClients();
+  const { data, error } = await admin
+    .from('reply_personalization_drafts')
+    .select('generated_text, sent_at')
+    .eq('qualification_id', qualificationId)
+    .eq('status', 'sent')
+    .order('sent_at', { ascending: true });
+  if (error) throw new Error(`sent drafts lookup failed: ${error.message}`);
+  return (data ?? [])
+    .filter((row) => typeof row.generated_text === 'string' && row.generated_text.trim())
+    .map((row) => ({ text: row.generated_text as string, sentAt: (row.sent_at as string) ?? '' }));
+}
+
+/**
+ * Язык письма для этой переписки. Строки нет — язык по умолчанию, русский:
+ * так же отвечаем и при ошибке чтения, чтобы переписка открывалась всегда.
+ */
+export async function getThreadLanguage(qualificationId: string): Promise<ReplyLanguage> {
+  const { admin } = requireClients();
+  const { data, error } = await admin
+    .from('reply_personalization_thread_prefs')
+    .select('language')
+    .eq('qualification_id', qualificationId)
+    .maybeSingle();
+  if (error) throw new Error(`thread language lookup failed: ${error.message}`);
+  return data?.language === 'en' ? 'en' : 'ru';
+}
+
+export async function setThreadLanguage(
+  qualificationId: string,
+  projectId: string,
+  language: ReplyLanguage,
+  userId: string,
+): Promise<void> {
+  const { admin } = requireClients();
+  const { error } = await admin.from('reply_personalization_thread_prefs').upsert(
+    {
+      qualification_id: qualificationId,
+      project_id: projectId,
+      language,
+      updated_by: userId,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'qualification_id' },
+  );
+  if (error) throw new Error(`thread language upsert failed: ${error.message}`);
 }
