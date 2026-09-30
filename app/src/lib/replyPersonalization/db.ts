@@ -65,6 +65,24 @@ export async function getProjectCampaignIds(projectId: string): Promise<string[]
   return [...ids];
 }
 
+/**
+ * Кампании, привязанные к проекту не раньше `sinceIso`. Сборщик ответов берёт
+ * только привязанные кампании и письма не старше суток, поэтому у свежей
+ * привязки истории в таблице квалификатора нет — её дочитываем из Instantly.
+ */
+export async function getRecentlyLinkedCampaignIds(projectId: string, sinceIso: string): Promise<Set<string>> {
+  const { instantly } = requireClients();
+  const [legacy, period] = await Promise.all([
+    instantly.from('project_instantly_campaigns').select('campaign_id').eq('project_id', projectId).gte('created_at', sinceIso),
+    instantly.from('project_period_instantly_campaigns').select('campaign_id').eq('project_id', projectId).gte('created_at', sinceIso),
+  ]);
+  const ids = new Set<string>();
+  for (const row of [...(legacy.data ?? []), ...(period.data ?? [])]) {
+    if (row.campaign_id) ids.add(row.campaign_id as string);
+  }
+  return ids;
+}
+
 export interface CampaignCatalogEntry {
   accountId: string;
   /** Название из каталога; пустая строка — кампания ещё не попала в каталог. */

@@ -1,5 +1,6 @@
-import { UnlinkedCampaignsView } from '@/components/unlinked-campaigns/UnlinkedCampaignsView';
+import { redirect } from 'next/navigation';
 
+/** Экран переехал во вкладку «Персонализированных ответов»; старые ссылки ведут туда. */
 export default function UnlinkedCampaignsPage() {
-  return <UnlinkedCampaignsView />;
+  redirect('/tools/reply-personalization?tab=campaigns');
 }
