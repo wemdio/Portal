@@ -39,6 +39,7 @@ import {
   ShieldCheck,
   FileSpreadsheet,
   LayoutDashboard,
+  Power,
   PowerOff,
   FolderPlus,
   Inbox,
@@ -3020,6 +3021,35 @@ function CampaignAccountsTab({
     }
   };
 
+  /**
+   * «Активен» сразу всем выбранным. Партию заливают выключенной, и жать
+   * переключатель в каждой из тридцати строк — то, ради чего панель и нужна.
+   * Строки меняем по ответу сервера, а не заранее: архивные он не включает,
+   * и оптимистичная правка показала бы их включёнными.
+   */
+  const [bulkActiveBusy, setBulkActiveBusy] = useState(false);
+  const applyBulkActive = async (isActive: boolean) => {
+    if (selectedIds.length === 0 || bulkActiveBusy) return;
+    setBulkActiveBusy(true);
+    try {
+      const res = await authFetch(`${API_BASE}/accounts/bulk-active`, {
+        method: 'POST',
+        body: JSON.stringify({ ids: selectedIds, is_active: isActive }),
+      });
+      const body = await res.json().catch(() => null) as
+        | { ids?: string[]; skipped?: number; error?: string }
+        | null;
+      if (!res.ok || !body?.ids) {
+        alert(body?.error ?? `Не удалось изменить аккаунты (HTTP ${res.status})`);
+        return;
+      }
+      for (const id of body.ids) patchAccount(id, { is_active: isActive });
+      if (body.skipped) alert(`Не изменено: ${body.skipped}. Архивные аккаунты не включаются — сначала верните их из архива.`);
+    } finally {
+      setBulkActiveBusy(false);
+    }
+  };
+
   const deleteAccount = async (id: string) => {
     if (!confirm('Удалить аккаунт?')) return;
     // Ответ проверяем: раньше отказ прилетал молча, список перезагружался, и
@@ -3618,6 +3648,26 @@ function CampaignAccountsTab({
             >
               {bulkProxyBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Network className="h-3.5 w-3.5" />}
               Назначить прокси
+            </button>
+            <button
+              type="button"
+              onClick={() => { void applyBulkActive(true); }}
+              disabled={bulkActiveBusy}
+              title="Сделать выбранные аккаунты активными — рассылка начнёт их брать"
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-emerald-300 hover:bg-emerald-50 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {bulkActiveBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Power className="h-3.5 w-3.5" />}
+              Включить
+            </button>
+            <button
+              type="button"
+              onClick={() => { void applyBulkActive(false); }}
+              disabled={bulkActiveBusy}
+              title="Сделать выбранные аккаунты неактивными — рассылка перестанет их брать"
+              className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition hover:border-gray-300 hover:bg-gray-100 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <PowerOff className="h-3.5 w-3.5" />
+              Выключить
             </button>
             {/* Перенос между кампаниями: партию закупили под один проект, а
                 нужна она в другом. Кнопка живёт только у остановленной
