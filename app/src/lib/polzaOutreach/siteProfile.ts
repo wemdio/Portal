@@ -16,6 +16,14 @@
  * известного до разбора (найм — короткое название вакансии, YC), и от того,
  * что и кому компания продаёт; повод (с батчем YC) входит в ключ кэша.
  *
+ * 30.09.2026 — первая выгрузка показала: почти все боли были не про продажи
+ * компании, а про проблему её клиентов, которую решает продукт («When
+ * managing self-checkout systems, the bottleneck is … human error in
+ * scanning» — и следом «We take that off your plate»), а у найма — про подбор
+ * людей. Задание переписано с примерами «не так / так» и стоит после
+ * сегментов (боль называет покупателей), а painLineOf пропускает только
+ * строку со словами о продажах и без слов о подборе.
+ *
  * Стек продаж (HubSpot, Salesforce, Apollo, Clay, Instantly, Outreach,
  * Lemlist) определяется по коду главной страницы, без LLM.
  *
@@ -100,22 +108,33 @@ const SYSTEM = `You analyze a company's website for Polza Agency, a B2B outbound
   "high_value": boolean,          // high-value B2B deal (enterprise/mid-market software, industrial equipment, professional services with large contracts)
   "exclusion": string,            // "staffing" | "job_board" | "lead_gen_agency" | "marketing_agency" | "b2c" | "local_service" | "course" | "" — only if clearly true
   "brand_name": string,           // the company name exactly as the site writes it, without Inc./LLC/GmbH; ""
-  "pain_line": string,            // 1–2 sentences for a cold email, addressed to the company ("you", "your team"), 12–40 words: the likely sales/pipeline bottleneck of THIS company given the OCCASION from the message and what they sell and to whom. Pattern: "When [the situation of the occasion], the bottleneck is usually not [the obvious thing] but [the real one]." With no occasion, start from what they sell and to whom. Plain spoken English; no numbers, questions, quotes, brackets or praise; never retell what the company does ("you provide", "you offer", "your company is"); never "we"/"our"; "" if the pages do not say clearly what they sell and to whom
   "company_context": string,      // what the company does, 5–15 words, plain English, no hype
   "likely_gtm_problem": string,   // a plausible go-to-market challenge for a company like this, 8–20 words, phrased as a hypothesis
   "outreach_angle": string,       // the angle to open with, 5–15 words
   "segments": [string, string, string], // three target customer segments THIS company could sell to, 2–7 words each, no numbers
+  "pain_line": string,            // ONE sentence for a cold email from an outbound agency to this company, 14–36 words. It is about THIS COMPANY'S OWN SELLING — how its team finds, reaches and wins its buyers (the segments above) — in the situation of the OCCASION from the message. Pattern: "When [their sales situation from the occasion], the bottleneck is usually not [the obvious thing] but [the real sales obstacle]." The real obstacle is a selling one: knowing which accounts to go after first, reaching the right people at their buyers, getting enough first conversations, a list the new hire can work from day one. Name their buyers in plain words, never their product. It is NEVER the problem their product solves for their customers and NEVER about recruiting, candidates or culture. Plain spoken English; no numbers, questions, quotes, brackets or praise; never retell what the company does ("you provide", "you offer"); never "we"/"our"; "" if the pages do not say clearly what they sell and to whom. See PAIN_LINE EXAMPLES below
   "industry_group": string,       // one of ${JSON.stringify(INDUSTRY_GROUPS)} or "": it_saas = SaaS/AI/software/MarTech; manufacturing = industrial/equipment/hardware; hr_education = HR tech/recruiting software/workforce; horeca = hospitality/local networks; auto_logistics = marketplaces/service platforms/automotive/logistics; digital_agency = digital/event/marketing/production agencies
   "launch": { "quote": string, "url": string, "date_text": string } // a RECENT product launch/new product announcement: verbatim quote, page URL, verbatim date text; empty strings if none
 }
-Rules: quotes are copied character-for-character from the page text; never invent; prefer "" over a guess.`;
+Rules: quotes are copied character-for-character from the page text; never invent; prefer "" over a guess.
+
+PAIN_LINE EXAMPLES (do not copy the wording, write your own for this company):
+- Sells camera AI for self-checkout to retail chains; occasion: Y Combinator.
+  WRONG (their customers' problem, not their selling): "When managing self-checkout systems, the bottleneck is usually not the technology but the human error in scanning."
+  RIGHT: "After YC, the bottleneck is usually not the product but getting loss prevention leads at large retail chains to take a first conversation."
+- Sells legal software to law firms and in-house legal teams; occasion: hiring for an Account Executive role.
+  WRONG (recruiting): "When hiring for key roles, the bottleneck is usually not finding candidates but ensuring they align with your goals."
+  WRONG (their customers' problem): "When managing legal operations, the bottleneck is usually not the technology but the lack of visibility into case statuses."
+  RIGHT: "When a new Account Executive starts, the bottleneck is usually not the hire itself but knowing which law firms and in-house legal teams are worth the first weeks."
+- Sells scheduling software to waste haulers; no occasion.
+  RIGHT: "Selling to waste haulers, the bottleneck is usually not the demo but finding which regional operators are ready to change how they plan routes and who decides there."`;
 
 /**
  * Версия кода разбора ответа (что и как попадает в SiteProfile: сверка цитат,
  * чистка сегментов, даты). Правка промпта меняет ключ кэша сама (хэш ниже), а
  * правку разбора код не видит — её отмечаем, подняв это значение.
  */
-const SITE_PARSER_VERSION = 'p2';
+const SITE_PARSER_VERSION = 'p3';
 
 /**
  * Версия для ключа кэша: версия разбора + короткий хэш текста SYSTEM. Поправили
@@ -230,12 +249,21 @@ const PAIN_OWN_VOICE_RE = /\b(?:[Ww]e|[Oo]ur|us)\b/;
 // Пересказ того, что компания делает, — то, от чего боль и уводит («You provide
 // tele-audiology solutions…»). «Your team is hiring» — не пересказ, его не трогаем.
 const PAIN_RETELL_RE = /\byou (?:provide|offer)\b|\byour (?:company|business) (?:is|does|provides|offers)\b/i;
+// Боль — про продажи самой компании: в строке есть хотя бы одно слово о них.
+// «Sales», «customers», «calls» сюда не входят нарочно: они встречаются и в
+// проблемах клиентов компании («managing customer communication», «during
+// calls»), а именно такие строки первая выгрузка и пропустила.
+const PAIN_SELLING_RE =
+  /\b(?:pipeline|accounts?|buyers?|prospects?|prospecting|outbound|outreach|conversations?|meetings?|demos?|deals?|decision[- ]makers?|pilots?|design partners?|territor(?:y|ies)|quota|ramp(?:s|ed|ing)?|first customers|new customers|in front of|worth the first|first (?:call|conversation)s?|who decides|reach(?:ing)? the right)\b/i;
+// Про подбор людей — письмо читается как от кадрового агентства.
+const PAIN_RECRUITING_RE = /\bcandidates?\b|\bright talent\b|\bcompany culture\b|\bhiring for key\b|\bapplicants?\b/i;
 
 /**
  * Строка {{pain}}: 1–2 законченных предложения, 12–40 слов, без цифр (цифры в
  * письме — только из кейса и повода), вопросов, восклицаний, кавычек и
- * скобок, без рекламы, голоса «we/our» и пересказа деятельности. Не прошла —
- * null: абзац с {{pain}} из письма удаляется.
+ * скобок, без рекламы, голоса «we/our» и пересказа деятельности; про продажи
+ * самой компании (PAIN_SELLING_RE), а не про подбор людей. Не прошла — null:
+ * в письмо идёт запасная боль по поводу (buildLetters.fallbackPain).
  */
 export function painLineOf(value: unknown): string | null {
   let line = asString(value).replace(/\s+/g, ' ').trim();
@@ -248,6 +276,7 @@ export function painLineOf(value: unknown): string | null {
   // Предложения — по точке перед следующим словом: больше двух — не строка письма.
   if ((line.slice(0, -1).match(/\.\s+\S/g) ?? []).length > 1) return null;
   if (PAIN_BANNED_RE.test(line) || PAIN_OWN_VOICE_RE.test(line) || PAIN_RETELL_RE.test(line)) return null;
+  if (PAIN_RECRUITING_RE.test(line) || !PAIN_SELLING_RE.test(line)) return null;
   return line.charAt(0).toUpperCase() + line.slice(1);
 }
 

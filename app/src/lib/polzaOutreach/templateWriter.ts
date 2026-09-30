@@ -18,6 +18,10 @@
  * guardTemplate; провал — один повтор с замечаниями, снова провал — шаблон
  * failed, компании оффера уходят на ручную проверку (template_failed), а
  * «Переписать цепочку» пробует заново.
+ *
+ * С 30.09.2026 тему письма 1 писатель не пишет: её ставит код в нескольких
+ * вариантах от повода и роли (letterSubject), в шаблоне на её месте
+ * {{subject}}. Письмо 2 открывает {{followup}} и говорит о проблеме повода.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -27,6 +31,7 @@ import {
   buildLetters,
   caseSentence,
   describeTemplateFlag,
+  followupPhrase,
   guardTemplate,
   normalizeSampleRange,
   segmentsBlock,
@@ -184,8 +189,14 @@ const POLZA_WHAT =
  */
 const LETTER1_TAIL =
   'then what Polza does, in one sentence with three parts (the account list, the right contacts, the outbound sequence with interested replies going to their team); then {{segments}}; the one question — body_direct: whether to send over a first list of 20–30 target accounts; body_routing: whether to send that list to whoever handles sales at {{company}}';
-const LETTER2 =
-  'a follow-up that adds something new instead of repeating email 1: one concrete problem (outbound rarely stalls because of the tool — it stalls because the same generic email goes to a broad list and nobody has a reason to reply), what that costs the business (a worn-out sending domain, time burned on the wrong accounts), and what we would do for {{company}} instead, in three parts (narrow segments, a separate reason to write to each account, replies handed over with the thread); the one question: whether to show what that could look like';
+/**
+ * Цель письма 2 (структура Ника: напоминание → конкретная боль → последствия
+ * → решение → вопрос). Проблема — своя у каждого повода: общее рассуждение об
+ * аутриче одинаково читалось бы у всех компаний запуска.
+ */
+function letter2Goal(problem: string, cost: string): string {
+  return `a follow-up that adds something new instead of repeating email 1: opens with {{followup}} (a ready sentence reminding of my first email); then one concrete problem typical for this situation (${problem}) and what it costs the business (${cost}) — a general observation ("a common issue…", "as a result…"), not a diagnosis of the recipient; then what we could do for {{company}}, in three deliverables (a list of target accounts, the right contacts at each one, a first sequence written per segment); the one question: whether they want to see what that account list could look like`;
+}
 const LETTER3 =
   'proof: the "with case" variant opens with {{case}}, the "without case" variant with {{segments}} (the first segments we would test for them; it may follow {{case}} in the "with case" variant too); then offer a free sample of 20–30 target accounts before any call, so they can judge the quality first; the one question: whether to send it';
 const LETTER4 =
@@ -198,7 +209,7 @@ const OFFER_BRIEFS: Record<PolzaOfferKey, OfferBrief> = {
     essence: `The company is hiring for a sales/GTM role (SDR, BDR, AE, Head of Sales). We do not write about the hire itself or about recruiting. ${POLZA_WHAT}, so new pipeline can start moving in parallel with the hire and a new rep does not spend the ramp-up on manual research.`,
     goals: [
       `{{trigger}} (the hiring fact), then {{pain}} (the likely sales bottleneck of this company while it is hiring); ${LETTER1_TAIL}. The point: a new rep should not spend the ramp-up on manual research`,
-      LETTER2,
+      letter2Goal('a new sales hire spends the first weeks building lists by hand', 'real conversations start late and the ramp drags'),
       LETTER3,
       LETTER4,
     ],
@@ -208,7 +219,7 @@ const OFFER_BRIEFS: Record<PolzaOfferKey, OfferBrief> = {
     essence: `The company went through Y Combinator. At this stage the job is proving repeatable GTM fast: finding the first right-fit B2B accounts and getting qualified replies. ${POLZA_WHAT}, so the founders are not stuck doing manual prospecting.`,
     goals: [
       `{{trigger}} (the YC fact), then {{pain}} (the likely sales bottleneck of this company after YC); ${LETTER1_TAIL}. The point: the founders should not be stuck prospecting by hand`,
-      LETTER2,
+      letter2Goal('after YC the founders do the prospecting themselves, in between everything else', 'outbound runs in bursts and the pipeline never gets steady'),
       LETTER3,
       LETTER4,
     ],
@@ -218,7 +229,7 @@ const OFFER_BRIEFS: Record<PolzaOfferKey, OfferBrief> = {
     essence: `The company recently launched a product or a major feature. The next step is finding the first right B2B accounts for it and getting early qualified conversations while the launch is fresh. ${POLZA_WHAT}.`,
     goals: [
       `{{trigger}} (the launch fact), then {{pain}} (the likely sales bottleneck of this company after the launch); ${LETTER1_TAIL}`,
-      LETTER2,
+      letter2Goal('launch news reaches the existing audience and stops there', 'the window closes without new conversations'),
       LETTER3,
       LETTER4,
     ],
@@ -228,7 +239,7 @@ const OFFER_BRIEFS: Record<PolzaOfferKey, OfferBrief> = {
     essence: `The company already uses outbound/CRM tools, so the bottleneck is probably not sending but account selection and the angle. ${POLZA_WHAT}: the right accounts, contacts and a tested angle go into the tools they already have.`,
     goals: [
       `{{trigger}} (the tools they run), then {{pain}} (the likely sales bottleneck of this company — the tools alone do not fix it); ${LETTER1_TAIL}. The point: it all goes into the tools they already have`,
-      LETTER2,
+      letter2Goal('with the tools in place, one generic email still goes to a broad list', 'the sending domain wears out and the team burns time on the wrong accounts'),
       LETTER3,
       LETTER4,
     ],
@@ -238,7 +249,7 @@ const OFFER_BRIEFS: Record<PolzaOfferKey, OfferBrief> = {
     essence: `There is no specific signal: the company looks like a Polza client — it sells B2B to a clear audience. Offer outbound as a channel for new B2B pipeline: ${POLZA_WHAT}.`,
     goals: [
       `{{pain}} (the likely sales bottleneck of this company, from what they sell and to whom; this offer has no {{trigger}}); ${LETTER1_TAIL}`,
-      LETTER2,
+      letter2Goal('one generic email goes to a broad list and nobody has a reason to reply', 'the sending domain wears out and the team burns time on the wrong accounts'),
       LETTER3,
       LETTER4,
     ],
@@ -285,6 +296,8 @@ const EXAMPLE_FRAGMENTS = [
   'is a YC',
   'launch news',
   'just launched something new',
+  // Напоминание {{followup}}: его подставит код.
+  'Following up on my note',
   // Пример {{pain}} из промпта писателя.
   'clinic software',
   'hospital groups',
@@ -317,6 +330,7 @@ export function sampleTemplateLetters(offer: PolzaOfferKey): PolzaChainTemplateL
   // Сначала целые фразы (в них есть название компании), потом само название.
   const swaps: Array<[string | null, string]> = [
     [triggerPhrase(EXAMPLE_COMPANY, trigger), P.trigger],
+    [followupPhrase(EXAMPLE_COMPANY, trigger), P.followup],
     [SAMPLE_PAIN, P.pain],
     [caseSentence(SAMPLE_CASE), P.case],
     [segmentsBlock(EXAMPLE_COMPANY, SAMPLE_SEGMENTS), P.segments],
@@ -326,7 +340,7 @@ export function sampleTemplateLetters(offer: PolzaOfferKey): PolzaChainTemplateL
   ];
   const text = (value: string) => swaps.reduce((out, [piece, placeholder]) => (piece ? out.split(piece).join(placeholder) : out), value);
   return {
-    subject: text(withCase[0].subject),
+    subject: P.subject,
     bodyDirect: text(withCase[0].body),
     bodyRouting: text(routing[0].body),
     letter2: text(withCase[1].body),
@@ -339,8 +353,6 @@ export function sampleTemplateLetters(offer: PolzaOfferKey): PolzaChainTemplateL
 function sampleChain(offer: PolzaOfferKey): string {
   const t = sampleTemplateLetters(offer);
   return [
-    `SUBJECT OF EMAIL 1: ${t.subject}`,
-    '',
     'EMAIL 1 — DIRECT (body_direct):',
     t.bodyDirect,
     '',
@@ -371,6 +383,7 @@ const WRITER_SYSTEM = [
   '{{pain}} — one or two ready sentences, different for every company: the likely sales bottleneck of the recipient given the trigger (e.g. "When a clinic software team is hiring its first SDRs, the bottleneck is usually not the hire itself but knowing which hospital groups the new reps should work first."). It is what makes email 1 personal. A paragraph of its own right after {{trigger}}. It can be empty and then its paragraph is removed, so the email must read fine without it. Do not repeat or paraphrase it, and never describe what the recipient does or sells.',
   '{{trigger_short}} — a short phrase for the same reason to use inside a sentence (e.g. "hiring for GTM roles": "when a team is {{trigger_short}}, …").',
   '{{case}} — one complete sentence about an approved Polza client case, inserted verbatim (e.g. "For a similar B2B software company, we helped … get … replies."). A paragraph of its own.',
+  '{{followup}} — a ready sentence that opens email 2 and reminds of my first email and its reason (e.g. "Following up on my note about the Founding Account Executive role at Acme."). The first paragraph of email 2, a paragraph of its own; only there. Do not repeat its meaning in your own words.',
   '{{segments}} — a short block with the first 2–3 segments we would test for the company, with its own lead-in line ("For Acme, I would probably start with:" and a numbered list). Used in email 1 and email 3. A paragraph of its own, no lead-in of yours before it. It can be empty and then its paragraph is removed.',
   '{{signature}} — the sender signature block (several lines).',
   '',
@@ -378,13 +391,13 @@ const WRITER_SYSTEM = [
   '1. Every email starts with the line "Hi there," and ends with a blank line followed by {{signature}} as the very last line. No "Best,"/"Thanks," line — the signature block closes the email.',
   '2. Separate paragraphs with a blank line.',
   '3. Exactly one question mark in every email — one call to action.',
-  '4. Email 1 has a subject line: short, lowercase, no "!", may contain {{company}}, no other placeholder. Emails 2–4 are replies in the same thread and have no subject.',
+  '4. Do not write subject lines: code sets the subject of email 1 for every company, and emails 2–4 are replies in the same thread.',
   '5. The only number allowed is "20–30", and only in the phrase about the list or the free sample of 20–30 accounts; the numbers of a case come only inside {{case}}. Never invent results or promises: no percentages; no multipliers or amounts, in digits or in words ("twice", "double", "2x", "tenfold", "in half", "dozens", "hundreds", "thousands", "three meetings", "ten leads"); no time-frame promises ("in two weeks", "within a month", "in the next few weeks", "by next quarter"). Proposing a call "next week" or "this week" is fine.',
   '6. Nothing about the recipient beyond the placeholders: do not guess their market, customers, plans or problems. Their pain comes only inside {{pain}}; anything else about problems is a general observation about outbound, not a diagnosis of the recipient.',
   '7. We have never talked to the recipient: no "as we discussed", "following up on our call", "we spoke". Emails 2–4 follow up on my own previous email.',
   '8. Never: urgency or scarcity pressure, guarantees, hype words ("leading", "world-class", "revolutionary", "best-in-class", "full-service"), exclamation marks, emoji, markdown (**bold**, # headings), internal words (score, scoring, ICP, LLM, JSON, null, evidence, validation). Plain dash lists like in the sample are fine.',
   '9. Tone: it must read like one person wrote it to one company, not like a mass email. Short, plain, peer-to-peer, first person of the sender, natural American business English; vary sentence length; say concrete things. No stock phrases: "I hope this finds you well", "just checking in", "quick follow-up", "touch base", "circle back", "reach out", "I wanted to", "leverage", "streamline", "take X to the next level". Each follow-up adds something new instead of repeating the previous email. Short emails get read: not counting the placeholders and the greeting, email 1 stays within 60 words and emails 2–4 within 70; email 4 is the shortest.',
-  '10. {{trigger}}, {{pain}}, {{case}} and {{segments}} are paragraphs of their own: a blank line before and after, no other text, and no lead-in line ending with ":" right before them — when a value is empty, its paragraph is removed and nothing must dangle.',
+  '10. {{trigger}}, {{pain}}, {{followup}}, {{case}} and {{segments}} are paragraphs of their own: a blank line before and after, no other text, and no lead-in line ending with ":" right before them — when a value is empty, its paragraph is removed and nothing must dangle.',
   `11. The examples in this task (the company "${EXAMPLE_COMPANY}", its job titles, trigger phrases and the {{pain}} example) only show what the code will insert — never copy them or their wording into the template.`,
   '',
   'Answer with a strict JSON object in the format from the message, with no markdown and no comments.',
@@ -392,7 +405,7 @@ const WRITER_SYSTEM = [
 
 const CONTRACT = [
   '{"letters":[',
-  '  {"n":1,"subject":"…","body_direct":"…","body_routing":"…"},',
+  '  {"n":1,"body_direct":"…","body_routing":"…"},',
   '  {"n":2,"body":"…"},',
   '  {"n":3,"body_with_case":"…","body_without_case":"…"},',
   '  {"n":4,"body":"…"}]}',
@@ -409,6 +422,7 @@ function writerUserPrompt(offer: PolzaOfferKey, retry: RetryNote | null): string
   const places = [
     ...(hasTrigger ? [`${P.trigger} — in email 1, both variants`] : []),
     `${P.pain} — in email 1, both variants${hasTrigger ? `, right after ${P.trigger}` : ''}, and nowhere else`,
+    `${P.followup} — the first paragraph of email 2, and nowhere else`,
     `${P.case} — only in email 3 "with case"`,
     `${P.segments} — in email 1, both variants, and in email 3 "without case" (it may also follow ${P.case} in "with case"); nowhere else`,
     `${P.signature} — the last line of every email`,
@@ -479,7 +493,8 @@ function normalizeBody(value: unknown): string {
 /**
  * Письма шаблона из ответа писателя или из строки базы (тот же контракт).
  * Нет массива letters — null; недостающее поле — пустая строка, её поймает
- * guardTemplate («текст пустой»).
+ * guardTemplate («текст пустой»). Тему писатель с 30.09.2026 не пишет: нет
+ * её — {{subject}}, тему подставит код; своя тема — у шаблонов старых запусков.
  */
 export function parseTemplateLetters(raw: unknown): PolzaChainTemplateLetters | null {
   const list = raw && typeof raw === 'object' ? (raw as { letters?: unknown }).letters : undefined;
@@ -493,7 +508,7 @@ export function parseTemplateLetters(raw: unknown): PolzaChainTemplateLetters | 
   });
   const field = (n: number, key: string) => normalizeBody(byN.get(n)?.[key]);
   return {
-    subject: field(1, 'subject').replace(/\s+/g, ' '),
+    subject: field(1, 'subject').replace(/\s+/g, ' ') || P.subject,
     bodyDirect: field(1, 'body_direct'),
     bodyRouting: field(1, 'body_routing'),
     letter2: field(2, 'body'),
@@ -654,7 +669,9 @@ async function writeTemplate(deps: TemplateWriterDeps, offer: PolzaOfferKey, cla
         timeoutMs: Math.min(deps.writerTimeoutMs, left),
         signal: deps.signal,
       });
-      letters = parseTemplateLetters(raw);
+      const parsed = parseTemplateLetters(raw);
+      // Тему ставит код: написанная писателем вопреки заданию не нужна.
+      letters = parsed ? { ...parsed, subject: P.subject } : null;
       flags = letters ? guardTemplate(letters, offer, EXAMPLE_FRAGMENTS).flags : ['letters_missing'];
       if (!flags.length) break;
       log('warn', `job ${deps.jobId}: offer ${offer} attempt ${attempt} failed QA: ${flags.join(', ')}`);
