@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
-import { clientNameMatchScore } from '@/lib/tools/instantlyCampaignCatalog';
+import { clientNameMatchScore, isApproximateClientNameMatch } from '@/lib/tools/instantlyCampaignCatalog';
 
 export const dynamic = 'force-dynamic';
 
@@ -85,10 +85,15 @@ export const GET = withAuth(async (req: NextRequest) => {
       accountId: row.instantly_account_id ?? 'main',
       removedBy: removedBy.get(row.id) ?? [],
       // Проекты, чьё имя звучит в названии кампании, — те самые «спорные»,
-      // из-за которых автопривязка отказалась выбирать сама.
+      // из-за которых автопривязка отказалась выбирать сама. Плюс похожие с
+      // точностью до опечатки: «Евмаркетиг стоматологии» → «Евмаркетинг».
       suggestions: projectRows
-        .map((p) => ({ id: p.id, client: p.client, status: p.status, score: clientNameMatchScore(row.name ?? '', p.client) }))
-        .filter((p) => p.score > 0)
+        .map((p) => {
+          const score = clientNameMatchScore(row.name ?? '', p.client);
+          const approximate = score === 0 && isApproximateClientNameMatch(row.name ?? '', p.client);
+          return { id: p.id, client: p.client, status: p.status, score, approximate };
+        })
+        .filter((p) => p.score > 0 || p.approximate)
         .sort((a, b) => b.score - a.score || a.client.localeCompare(b.client, 'ru'))
         .slice(0, 5),
     }));

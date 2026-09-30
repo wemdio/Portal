@@ -9,6 +9,8 @@ interface Suggestion {
   client: string;
   status: string;
   score: number;
+  /** Совпало с точностью до опечатки в названии кампании — не точное совпадение. */
+  approximate?: boolean;
 }
 
 interface UnlinkedRow {
@@ -193,6 +195,10 @@ export function UnlinkedCampaignsView() {
                     <p className="mt-1 text-xs text-gray-500">
                       В названии звучат сразу несколько проектов — выберите нужный.
                     </p>
+                  ) : row.suggestions[0]?.approximate ? (
+                    <p className="mt-1 text-xs text-gray-500">
+                      Похоже на «{row.suggestions[0].client}», но в названии кампании опечатка — проверьте.
+                    </p>
                   ) : null}
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     <select
@@ -205,7 +211,9 @@ export function UnlinkedCampaignsView() {
                       {row.suggestions.length > 0 ? (
                         <optgroup label="Подходят по названию">
                           {row.suggestions.map((s) => (
-                            <option key={s.id} value={s.id}>{s.client}{s.status ? ` — ${s.status}` : ''}</option>
+                            <option key={s.id} value={s.id}>
+                              {s.client}{s.approximate ? ' (похоже)' : ''}{s.status ? ` — ${s.status}` : ''}
+                            </option>
                           ))}
                         </optgroup>
                       ) : null}
