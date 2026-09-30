@@ -1,5 +1,7 @@
 import {
   countSyncedQualificationsByCampaign,
+  findQualificationIdsByEmailIds,
+  getRecentlyLinkedCampaignIds,
   getCampaignAccountIds,
   getCampaignCatalog,
   getProjectCampaignIds,
@@ -24,6 +26,46 @@ export interface ProjectRepliesPage {
   hasMore: boolean;
 }
 
+/** За сколько дней привязка считается свежей и её историю дочитываем из Instantly. */
+const LINK_HISTORY_DAYS = 30;
+/** Писем истории на запрос: кампании привязывают десятками ответов, не тысячами. */
+const LINK_HISTORY_LIMIT = 300;
+const LINK_HISTORY_TTL_MS = 60_000;
+const linkHistoryCache = new Map<string, { rows: QualificationRow[]; expiresAt: number }>();
+
+/**
+ * Ответы, пришедшие до привязки кампании к проекту. Сборщик берёт только
+ * привязанные кампании и письма не старше суток, поэтому кампания, которую
+ * привязали позже (вручную или после правки названия), появлялась в проекте
+ * пустой, хотя в Instantly на неё уже ответили. Читаем такие письма живьём —
+ * без квалификации и уведомлений — и отдаём только те, которых в таблице нет.
+ * Минутный кэш: список перечитывается после каждого ответа, а лимит чтения
+ * писем Instantly общий на весь воркспейс.
+ */
+async function loadLinkHistory(
+  projectId: string,
+  mainCampaignIds: string[],
+  search: string | undefined,
+): Promise<QualificationRow[]> {
+  if (!mainCampaignIds.length) return [];
+  const since = new Date(Date.now() - LINK_HISTORY_DAYS * 24 * 60 * 60_000).toISOString();
+  const recent = await getRecentlyLinkedCampaignIds(projectId, since);
+  const campaignIds = mainCampaignIds.filter((id) => recent.has(id));
+  if (!campaignIds.length) return [];
+
+  const key = `${campaignIds.join(',')}|${search ?? ''}`;
+  const cached = linkHistoryCache.get(key);
+  let live = cached && cached.expiresAt > Date.now() ? cached.rows : null;
+  if (!live) {
+    live = (await listLiveReplies({ campaignIds, accountId: 'main', limit: LINK_HISTORY_LIMIT, search })).rows;
+    // Пустой ответ не кэшируем: это может быть занятый Instantly, а не пустая кампания.
+    if (live.length) linkHistoryCache.set(key, { rows: live, expiresAt: Date.now() + LINK_HISTORY_TTL_MS });
+  }
+  if (!live.length) return [];
+  const synced = await findQualificationIdsByEmailIds(live.map((row) => row.id));
+  return live.filter((row) => !synced.has(row.id));
+}
+
 /**
  * Ответы лидов по проекту — все, включая отказы. Кампании основного аккаунта
  * читаются из таблицы квалификатора, кампании остальных аккаунтов — живым
@@ -41,6 +83,10 @@ export async function listProjectReplies(
   // кампаний над списком показывают, куда переключаться.
   const syncedCampaignIds = projectCampaignIds.filter((id) => catalog.get(id)?.accountId === 'main');
   const counts = await countSyncedQualificationsByCampaign(syncedCampaignIds, options.search);
+
+  // История недавно привязанных кампаний: в таблице квалификатора её нет.
+  const history = await loadLinkHistory(projectId, syncedCampaignIds, options.search);
+  for (const row of history) counts.set(row.campaignId, (counts.get(row.campaignId) ?? 0) + 1);
 
   // Сверху кампании, где больше ответов; без счётчика (живые аккаунты) — в конце.
   const campaigns: ReplyCampaignOption[] = projectCampaignIds
@@ -67,7 +113,8 @@ export async function listProjectReplies(
     [...byAccount].map(async ([accountId, ids]) => {
       if (accountId === 'main') {
         const { rows, total } = await listSyncedQualifications(ids, { limit, search: options.search });
-        return { rows, total: total as number | null, hasMore: total > rows.length };
+        const extra = history.filter((row) => ids.includes(row.campaignId));
+        return { rows: [...rows, ...extra], total: (total + extra.length) as number | null, hasMore: total > rows.length };
       }
       const { rows, hasMore } = await listLiveReplies({ campaignIds: ids, accountId, limit, search: options.search });
       return { rows, total: null, hasMore };
