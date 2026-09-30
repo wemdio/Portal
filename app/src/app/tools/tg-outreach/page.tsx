@@ -6246,16 +6246,34 @@ function CampaignProxiesTab({ campaignId }: { campaignId: string }) {
               Каждая строка — отдельный прокси. Все уйдут в <b>{activeList === null ? '«Неопределённые»' : `«${lists.find(l => l.id === activeList)?.name ?? '—'}»`}</b>.
             </p>
             <textarea value={bulkText} onChange={e => setBulkText(e.target.value)} rows={5}
-              placeholder={'http://user:pass@host:port\nпо одному URL на строку'}
+              placeholder={'host:port@user:pass\nuser:pass@host:port\nhost:port:user:pass\nпо одному прокси на строку'}
               className="block w-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 resize-y font-mono" />
             <div className="flex gap-2">
               <button type="button" onClick={() => { void addBulk(); }} disabled={saving || !bulkText.trim()}
                 className="rounded-full bg-indigo-600 px-5 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
                 {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Добавить'}
               </button>
+              {/* Файл провайдера как есть: читаем в поле, чтобы список был
+                  виден до отправки. Формат строк разбирает сервер. */}
+              <label className="inline-flex items-center gap-1.5 rounded-full border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 hover:border-indigo-300 hover:bg-indigo-50 transition cursor-pointer">
+                <Upload className="h-3.5 w-3.5" />
+                Из файла .txt
+                <input type="file" accept=".txt,.csv,text/plain" className="hidden" disabled={saving}
+                  onChange={e => {
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    if (!file) return;
+                    void file.text().then(text => setBulkText(text.replace(/^﻿/, '').trim()));
+                  }} />
+              </label>
               <button type="button" onClick={() => setShowBulk(false)}
                 className="rounded-full border border-gray-200 px-4 py-2 text-xs text-gray-500 hover:bg-gray-100 transition cursor-pointer">Отмена</button>
             </div>
+            {bulkText.trim() && (
+              <p className="text-xs text-gray-500">
+                Строк: {bulkText.split('\n').filter(l => l.trim()).length}
+              </p>
+            )}
           </div>
         )}
 
