@@ -77,7 +77,7 @@ export function DeliveryRatePanel({ projectId, presetId, templateIds, disabled =
   };
   return <section className="border-t border-[var(--ve2-line)] pt-5 space-y-3" aria-labelledby={`${id}-title`}>
     <h3 id={`${id}-title`} className="ve2-h3">Темп новых контактов</h3>
-    <p className={HE.muted}>Общий лимит для всех запусков этого проекта. Дневной план рассчитывается по оставшейся цели и рабочим дням до дедлайна.</p>
+    <p className={HE.muted}>Общий лимит для всех запусков этого проекта. До дедлайна дневной план учитывает оставшуюся цель и рабочие дни. После дедлайна пополнение продолжается в выбранном темпе до достижения цели. Пауза кампании в Instantly останавливает дозагрузку.</p>
     <fieldset disabled={busy || disabled} className="space-y-3">
       <legend className="sr-only">Режим дневного лимита</legend>
       <label className="flex items-start gap-2"><input type="radio" name={id} checked={mode === 'auto'} onChange={() => { setMode('auto'); invalidate(); }} className="mt-1" />

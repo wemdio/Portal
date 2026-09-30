@@ -236,8 +236,6 @@ describe('VE2 launch for a Portal project without periods', () => {
 
   it.each([
     ['a missing deadline', { deadline: null }, 'PROJECT_DEADLINE_REQUIRED'],
-    ['a passed deadline', { deadline: '2026-09-22' }, 'PROJECT_DEADLINE_PASSED'],
-    ['a passed deadline typed as DD.MM.YY', { deadline: '22.09.26' }, 'PROJECT_DEADLINE_PASSED'],
     ['a finished project', { status: 'Завершен' }, 'PORTAL_PROJECT_NOT_IN_WORK'],
   ])('refuses %s before binding or creating campaigns', async (_name, project, code) => {
     const { outcome, portal } = await launch(portalDb(project));
@@ -254,8 +252,8 @@ describe('VE2 launch for a Portal project without periods', () => {
     expect(mockCreateCampaign).not.toHaveBeenCalled();
   });
 
-  it('launches with a deadline typed as DD.MM.YY, as the project card hints', async () => {
-    const { outcome, portal } = await launch(portalDb({ deadline: '31.10.26' }));
+  it.each(['31.10.26', '2026-09-22', '22.09.26'])('prepares an approved launch with the planning date %s, including past dates', async deadline => {
+    const { outcome, portal } = await launch(portalDb({ deadline }));
     expect(outcome.status).toBe(200);
     expect(portal.rpcCalls.some((call) => call.fn === 've_bind_contact_delivery_plan')).toBe(true);
   });

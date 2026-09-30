@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { CampaignStatus } from '@/lib/instantly/types';
+import { getCampaign, getCampaignAnalyticsOverview } from '@/lib/instantly/client';
 
 const PAGE_SIZE = 500;
 const ID_BATCH_SIZE = 100;
@@ -51,11 +52,35 @@ function exactContactCount(value: unknown): number | null {
   return Number.isSafeInteger(number) && number >= 0 ? number : null;
 }
 
+/** A campaign without its first send may be absent from /campaigns/analytics.
+ * The scoped overview still returns explicit counters. Verify the campaign in
+ * its immutable workspace first: an unscoped overview would count other runs.
+ * No catalog writes here; this path is also used by read-only previews.
+ */
+async function readMissingCampaignCount(campaignId: string, accountId: unknown): Promise<number> {
+  if (typeof accountId !== 'string' || !accountId.trim()) throw new ContactDeliveryAnalyticsUnavailableError();
+  try {
+    const options = { accountId };
+    const campaign = await getCampaign(campaignId, options);
+    if (campaign?.id !== campaignId) throw new ContactDeliveryAnalyticsUnavailableError();
+    const overview = await getCampaignAnalyticsOverview({ campaign_id: campaignId }, options);
+    const count = overview?.new_leads_contacted_count;
+    const sent = overview?.emails_sent_count;
+    if (typeof count !== 'number' || exactContactCount(count) === null
+      || typeof sent !== 'number' || exactContactCount(sent) === null || count > sent) {
+      throw new ContactDeliveryAnalyticsUnavailableError();
+    }
+    return count;
+  } catch {
+    throw new ContactDeliveryAnalyticsUnavailableError();
+  }
+}
+
 /**
  * All campaign history matters when distinguishing delivered-but-not-contacted
  * supply from the Portal period's fulfillment fact. A released bundle must not
- * disappear from that calculation. Missing catalog rows conservatively count
- * as zero. An explicit initial null is allowed only for an empty campaign that
+ * disappear from that calculation. Missing analytics require a scoped provider
+ * read. An explicit initial null is allowed only for an empty campaign that
  * has not been activated and was observed as draft/paused. Previously delivered
  * campaigns and malformed or incomplete synced facts still fail closed.
  */
@@ -69,11 +94,11 @@ export async function loadVeContactDeliveryCampaignInventory(
   activeCampaignRowIds: string[];
   observedFirstContacted: number;
 }> {
-  const items = await readContactDeliveryPages<{ id: string; status: string }>(
+  const items = await readContactDeliveryPages<{ id: string; status: string; instantly_account_id?: string }>(
     'delivery queue inventory',
     (from, to) => portalDb
       .from('ve_launch_queue_items')
-      .select('id, status', { count: 'exact' })
+      .select('id, status, instantly_account_id', { count: 'exact' })
       .eq('project_id', veProjectId)
       .order('id', { ascending: true })
       .range(from, to),
@@ -89,6 +114,8 @@ export async function loadVeContactDeliveryCampaignInventory(
   const activeCampaignRowIds = new Set<string>();
   const initialEmptyCampaignIds = new Set<string>();
   const childIds = new Set<string>();
+  const campaignAccounts = new Map<string, string | undefined>();
+  const itemAccounts = new Map(items.map(item => [item.id, item.instantly_account_id]));
   for (let offset = 0; offset < itemIds.length; offset += ID_BATCH_SIZE) {
     const ids = itemIds.slice(offset, offset + ID_BATCH_SIZE);
     const campaigns = await readContactDeliveryPages<{
@@ -111,7 +138,9 @@ export async function loadVeContactDeliveryCampaignInventory(
         throw new Error('delivery campaign inventory has invalid or duplicate identities');
       }
       childIds.add(campaign.id);
+      if (allIds.has(campaign.campaign_id)) throw new Error('delivery campaign identity belongs to multiple launch rows');
       allIds.add(campaign.campaign_id);
+      campaignAccounts.set(campaign.campaign_id, itemAccounts.get(campaign.item_id));
       if (campaign.leads_count === 0 && campaign.activated_at === null &&
         (campaign.remote_status === CampaignStatus.Draft || campaign.remote_status === CampaignStatus.Paused) &&
         typeof campaign.status_observed_at === 'string' && Number.isFinite(Date.parse(campaign.status_observed_at))) {
@@ -149,7 +178,10 @@ export async function loadVeContactDeliveryCampaignInventory(
       // Do not make an unknown count in an already delivered campaign look empty.
       const awaitingFirstAnalytics = campaign.new_leads_contacted_count === null &&
         campaign.analytics_synced_at === null && initialEmptyCampaignIds.has(campaign.id);
-      const contacts = awaitingFirstAnalytics ? 0 : exactContactCount(campaign.new_leads_contacted_count);
+      const contacts = awaitingFirstAnalytics ? 0
+        : campaign.new_leads_contacted_count == null
+          ? await readMissingCampaignCount(campaign.id, campaignAccounts.get(campaign.id))
+          : exactContactCount(campaign.new_leads_contacted_count);
       if (contacts === null) {
         throw new ContactDeliveryAnalyticsUnavailableError();
       }
@@ -161,6 +193,11 @@ export async function loadVeContactDeliveryCampaignInventory(
       if (!Number.isSafeInteger(observedFirstContacted)) {
         throw new Error('delivery first-contacted total exceeds the safe integer range');
       }
+    }
+    for (const id of ids.filter(id => !observedIds.has(id))) {
+      observedFirstContacted += await readMissingCampaignCount(id, campaignAccounts.get(id));
+      if (!Number.isSafeInteger(observedFirstContacted)) throw new Error('delivery first-contacted total exceeds the safe integer range');
+      observedIds.add(id);
     }
   }
   return { allCampaignIds, activeCampaignIds: [...activeIds].sort(), activeCampaignRowIds: [...activeCampaignRowIds], observedFirstContacted };
