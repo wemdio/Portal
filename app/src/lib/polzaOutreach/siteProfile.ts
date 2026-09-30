@@ -24,6 +24,13 @@
  * сегментов (боль называет покупателей), а painLineOf пропускает только
  * строку со словами о продажах и без слов о подборе.
  *
+ * Вторая выгрузка того же дня: у 99 компаний из 100 стояла запасная боль —
+ * строка модели не прошла проверку или пришла пустой, и узнать, какая, было
+ * неоткуда. Теперь проверка смотрит на «настоящее узкое место» — часть после
+ * «but»: «not finding candidates but knowing which clinics to target» — годная
+ * строка, подбор в ней отвергнут самой фразой; отклонённая строка пишется в
+ * лог воркера с причиной.
+ *
  * Стек продаж (HubSpot, Salesforce, Apollo, Clay, Instantly, Outreach,
  * Lemlist) определяется по коду главной страницы, без LLM.
  *
@@ -112,7 +119,7 @@ const SYSTEM = `You analyze a company's website for Polza Agency, a B2B outbound
   "likely_gtm_problem": string,   // a plausible go-to-market challenge for a company like this, 8–20 words, phrased as a hypothesis
   "outreach_angle": string,       // the angle to open with, 5–15 words
   "segments": [string, string, string], // three target customer segments THIS company could sell to, 2–7 words each, no numbers
-  "pain_line": string,            // ONE sentence for a cold email from an outbound agency to this company, 14–36 words. It is about THIS COMPANY'S OWN SELLING — how its team finds, reaches and wins its buyers (the segments above) — in the situation of the OCCASION from the message. Pattern: "When [their sales situation from the occasion], the bottleneck is usually not [the obvious thing] but [the real sales obstacle]." The real obstacle is a selling one: knowing which accounts to go after first, reaching the right people at their buyers, getting enough first conversations, a list the new hire can work from day one. Name their buyers in plain words, never their product. It is NEVER the problem their product solves for their customers and NEVER about recruiting, candidates or culture. Plain spoken English; no numbers, questions, quotes, brackets or praise; never retell what the company does ("you provide", "you offer"); never "we"/"our"; "" if the pages do not say clearly what they sell and to whom. See PAIN_LINE EXAMPLES below
+  "pain_line": string,            // ONE sentence for a cold email from an outbound agency to this company, 14–36 words. It is about THIS COMPANY'S OWN SELLING — how its team finds, reaches and wins its buyers (the segments above) — in the situation of the OCCASION from the message. Pattern: "When [their sales situation from the occasion], the bottleneck is usually not [the obvious thing] but [the real sales obstacle]." The real obstacle is a selling one: knowing which accounts to go after first, reaching the right people at their buyers, getting enough first conversations, a list the new hire can work from day one. Name their buyers in plain words, never their product. It is NEVER the problem their product solves for their customers and NEVER about recruiting: for a hiring occasion the obvious thing is "the hire itself", not candidates, talent or culture. Plain spoken English; no numbers, questions, quotes, brackets or praise; never retell what the company does ("you provide", "you offer"); never "we"/"our"; "" if the pages do not say clearly what they sell and to whom. See PAIN_LINE EXAMPLES below
   "industry_group": string,       // one of ${JSON.stringify(INDUSTRY_GROUPS)} or "": it_saas = SaaS/AI/software/MarTech; manufacturing = industrial/equipment/hardware; hr_education = HR tech/recruiting software/workforce; horeca = hospitality/local networks; auto_logistics = marketplaces/service platforms/automotive/logistics; digital_agency = digital/event/marketing/production agencies
   "launch": { "quote": string, "url": string, "date_text": string } // a RECENT product launch/new product announcement: verbatim quote, page URL, verbatim date text; empty strings if none
 }
@@ -134,7 +141,7 @@ PAIN_LINE EXAMPLES (do not copy the wording, write your own for this company):
  * чистка сегментов, даты). Правка промпта меняет ключ кэша сама (хэш ниже), а
  * правку разбора код не видит — её отмечаем, подняв это значение.
  */
-const SITE_PARSER_VERSION = 'p3';
+const SITE_PARSER_VERSION = 'p4';
 
 /**
  * Версия для ключа кэша: версия разбора + короткий хэш текста SYSTEM. Поправили
@@ -249,34 +256,54 @@ const PAIN_OWN_VOICE_RE = /\b(?:[Ww]e|[Oo]ur|us)\b/;
 // Пересказ того, что компания делает, — то, от чего боль и уводит («You provide
 // tele-audiology solutions…»). «Your team is hiring» — не пересказ, его не трогаем.
 const PAIN_RETELL_RE = /\byou (?:provide|offer)\b|\byour (?:company|business) (?:is|does|provides|offers)\b/i;
-// Боль — про продажи самой компании: в строке есть хотя бы одно слово о них.
-// «Sales», «customers», «calls» сюда не входят нарочно: они встречаются и в
-// проблемах клиентов компании («managing customer communication», «during
-// calls»), а именно такие строки первая выгрузка и пропустила.
+// Боль — про продажи самой компании: в «настоящем узком месте» (после «but»)
+// есть слова о них — кого искать, до кого дойти, с кем говорить. «Sales»,
+// «customers», «calls» сюда не входят нарочно: они встречаются и в проблемах
+// клиентов компании («managing customer communication», «during calls»), а
+// именно такие строки первая выгрузка и пропустила.
 const PAIN_SELLING_RE =
-  /\b(?:pipeline|accounts?|buyers?|prospects?|prospecting|outbound|outreach|conversations?|meetings?|demos?|deals?|decision[- ]makers?|pilots?|design partners?|territor(?:y|ies)|quota|ramp(?:s|ed|ing)?|first customers|new customers|in front of|worth the first|first (?:call|conversation)s?|who decides|reach(?:ing)? the right)\b/i;
+  /\b(?:pipeline|accounts?|lists?|buyers?|prospects?|prospecting|outbound|outreach|conversations?|meetings?|demos?|deals?|decision[- ]makers?|pilots?|design partners?|territor(?:y|ies)|quota|first customers|new customers|in front of|who decides|who to (?:call|contact|target)|(?:which|what) [^.,;]{3,80}? (?:to|are|is|have|need) (?:target|prioriti[sz]e|go after|pursue|approach|call|contact|focus on|work|worth|ready|the best fit|most likely|an? |the |now)|(?:reach|reaching|get(?:ting)? to|get(?:ting)? through to) the (?:right|actual) (?:people|person|contacts?|teams?|leaders?|owners?)|sell(?:ing)? (?:in)?to|first (?:call|conversation|week)s?)\b/i;
 // Про подбор людей — письмо читается как от кадрового агентства.
-const PAIN_RECRUITING_RE = /\bcandidates?\b|\bright talent\b|\bcompany culture\b|\bhiring for key\b|\bapplicants?\b/i;
+const PAIN_RECRUITING_RE = /\bcandidates?\b|\btalent\b|\bculture\b|\bapplicants?\b|\brecruit\w*|\balign/i;
 
 /**
- * Строка {{pain}}: 1–2 законченных предложения, 12–40 слов, без цифр (цифры в
- * письме — только из кейса и повода), вопросов, восклицаний, кавычек и
- * скобок, без рекламы, голоса «we/our» и пересказа деятельности; про продажи
- * самой компании (PAIN_SELLING_RE), а не про подбор людей. Не прошла — null:
- * в письмо идёт запасная боль по поводу (buildLetters.fallbackPain).
+ * Почему строка {{pain}} не годится; null — годится. 1–2 законченных
+ * предложения, 12–40 слов, без цифр (цифры в письме — только из кейса и
+ * повода), вопросов, восклицаний, кавычек и скобок, без рекламы, голоса
+ * «we/our» и пересказа деятельности. Настоящее узкое место — часть после
+ * последнего «but» (нет его — вся строка) — про продажи самой компании, а не
+ * про подбор людей.
+ */
+function painRejection(line: string): string | null {
+  const words = line.split(' ').length;
+  if (words < 12 || words > 40) return `длина ${words} слов`;
+  // Апостроф внутри слова («don't», «team’s») — не кавычка.
+  if (/\d|[?!"'‘’“”«»()[\]{}]/.test(line.replace(/(\w)['’](\w)/g, '$1$2'))) return 'цифры, кавычки, скобки или вопрос';
+  // Предложения — по точке перед следующим словом: больше двух — не строка письма.
+  if ((line.slice(0, -1).match(/\.\s+\S/g) ?? []).length > 1) return 'больше двух предложений';
+  if (PAIN_BANNED_RE.test(line)) return 'рекламное слово';
+  if (PAIN_OWN_VOICE_RE.test(line)) return 'голос «we/our»';
+  if (PAIN_RETELL_RE.test(line)) return 'пересказ деятельности';
+  const but = line.toLowerCase().lastIndexOf(' but ');
+  const real = but >= 0 ? line.slice(but + 5) : line;
+  if (PAIN_RECRUITING_RE.test(real)) return 'про подбор людей';
+  if (!PAIN_SELLING_RE.test(real)) return 'не про продажи компании';
+  return null;
+}
+
+function normalizePain(value: unknown): string {
+  const line = asString(value).replace(/\s+/g, ' ').trim();
+  return line && !/[.]$/.test(line) ? `${line}.` : line;
+}
+
+/**
+ * Строка {{pain}} из ответа разбора, прошедшая проверку (painRejection). Не
+ * прошла или пустая — null: в письмо идёт запасная боль по поводу
+ * (buildLetters.fallbackPain).
  */
 export function painLineOf(value: unknown): string | null {
-  let line = asString(value).replace(/\s+/g, ' ').trim();
-  if (!line) return null;
-  if (!/[.]$/.test(line)) line = `${line}.`;
-  const words = line.split(' ').length;
-  if (words < 12 || words > 40) return null;
-  // Апостроф внутри слова («don't», «team’s») — не кавычка.
-  if (/\d|[?!"'‘’“”«»()[\]{}]/.test(line.replace(/(\w)['’](\w)/g, '$1$2'))) return null;
-  // Предложения — по точке перед следующим словом: больше двух — не строка письма.
-  if ((line.slice(0, -1).match(/\.\s+\S/g) ?? []).length > 1) return null;
-  if (PAIN_BANNED_RE.test(line) || PAIN_OWN_VOICE_RE.test(line) || PAIN_RETELL_RE.test(line)) return null;
-  if (PAIN_RECRUITING_RE.test(line) || !PAIN_SELLING_RE.test(line)) return null;
+  const line = normalizePain(value);
+  if (!line || painRejection(line)) return null;
   return line.charAt(0).toUpperCase() + line.slice(1);
 }
 
@@ -351,6 +378,15 @@ ${occasionText(occasion)}`,
     return t && t.split(' ').length <= maxWords ? t : null;
   };
 
+  // Без боли из разбора письмо получает запасную по поводу — одинаковую у
+  // всех компаний. Почему её нет, иначе не узнать: строку модели нигде не видно.
+  const painRaw = normalizePain(raw.pain_line);
+  const painLine = painLineOf(raw.pain_line);
+  if (!painLine) {
+    const why = painRaw ? `${painRejection(painRaw) ?? 'отклонена'}: ${painRaw.slice(0, 300)}` : 'модель вернула пустую строку';
+    console.warn(`[polza-outreach][site][WARN] ${domain}: боль не принята — ${why}`);
+  }
+
   const pagesDescribe = pages.some((p) => p.text.length > DESCRIPTIVE_PAGE_CHARS);
   const profile: SiteProfile = {
     reachable: true,
@@ -361,7 +397,7 @@ ${occasionText(occasion)}`,
     highValue: asBool(raw.high_value),
     exclusion: ['staffing', 'job_board', 'lead_gen_agency', 'marketing_agency', 'b2c', 'local_service', 'course'].includes(exclusion) ? exclusion : null,
     brandName: brandNameOf(raw.brand_name, allText),
-    painLine: painLineOf(raw.pain_line),
+    painLine,
     companyContext: clean(raw.company_context, 18),
     likelyGtmProblem: clean(raw.likely_gtm_problem, 24),
     outreachAngle: clean(raw.outreach_angle, 18),

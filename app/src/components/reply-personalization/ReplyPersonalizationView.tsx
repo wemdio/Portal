@@ -30,6 +30,13 @@ const LIST_STATUS_BADGE: Record<ReplyListItem['listStatus'], { label: string; cl
   skipped: { label: 'пропущено', className: 'bg-gray-100 text-gray-500' },
 };
 
+/** Необработанное письмо адресата, который уже отвечал раньше, — не «новый». */
+const REPEAT_BADGE = { label: 'повторный', className: 'bg-violet-100 text-violet-700' };
+
+function listBadge(item: ReplyListItem) {
+  return item.listStatus === 'new' && item.repeat ? REPEAT_BADGE : LIST_STATUS_BADGE[item.listStatus];
+}
+
 /** Палитра аватаров проектов — как кружки аккаунтов в анализаторе тг-переписок. */
 const AVATAR_COLORS = [
   'bg-blue-100 text-blue-700',
@@ -97,6 +104,13 @@ export function ReplyPersonalizationView() {
   // Фильтры списка писем — как в Instantly: кампания и поиск по почте ответившего.
   const [campaigns, setCampaigns] = useState<ReplyCampaignOption[]>([]);
   const [campaignFilter, setCampaignFilter] = useState('');
+  /**
+   * Показаны ли все кампании проекта. Свёрнутый список раньше был областью со
+   * своей прокруткой: кампании ниже четвёртой строки не было видно и о том,
+   * что список продолжается, ничто не сообщало — кампания без ответов (она в
+   * конце) выглядела как отсутствующая.
+   */
+  const [campaignsExpanded, setCampaignsExpanded] = useState(false);
   const [replyQuery, setReplyQuery] = useState('');
   /** replyQuery после паузы в наборе — чтобы не дёргать сервер на каждую букву. */
   const [replySearch, setReplySearch] = useState('');
@@ -231,6 +245,7 @@ export function ReplyPersonalizationView() {
     setSelectedId(null);
     setMissingReason(null);
     setCampaignFilter('');
+    setCampaignsExpanded(false);
     setReplyQuery('');
     setReplySearch('');
     setLimit(REPLIES_PAGE_SIZE);
@@ -265,6 +280,8 @@ export function ReplyPersonalizationView() {
   }, [loadProjects, reloadReplies]);
 
   const filtersActive = Boolean(campaignFilter || replySearch);
+  /** Кампании проекта не привязаны — обе вкладки будут пустыми, и это не «никто не ответил». */
+  const noCampaigns = Boolean(project) && !missingReason && !itemsLoading && campaigns.length === 0;
   /** Число на кнопке «Все кампании»; null — есть кампании без счётчика. */
   const allCampaignsCount = campaigns.every((c) => c.replyCount !== null)
     ? campaigns.reduce((sum, c) => sum + (c.replyCount ?? 0), 0)
@@ -488,7 +505,12 @@ export function ReplyPersonalizationView() {
               </div>
             ) : null}
             {tab === 'replies' && campaigns.length > 1 ? (
-              <div className="flex max-h-28 flex-wrap gap-1 overflow-y-auto" role="group" aria-label="Кампании">
+              <div className="space-y-1">
+              <div
+                className={`flex flex-wrap gap-1 ${campaignsExpanded ? 'max-h-72 overflow-y-auto' : 'max-h-28 overflow-hidden'}`}
+                role="group"
+                aria-label="Кампании"
+              >
                 {[{ id: '', name: 'Все кампании', replyCount: allCampaignsCount }, ...campaigns].map((c) => {
                   const isActive = campaignFilter === c.id;
                   return (
@@ -515,6 +537,16 @@ export function ReplyPersonalizationView() {
                   );
                 })}
               </div>
+              {campaigns.length > 4 ? (
+                <button
+                  type="button"
+                  onClick={() => setCampaignsExpanded((v) => !v)}
+                  className="text-[11px] text-blue-600 hover:underline"
+                >
+                  {campaignsExpanded ? 'Свернуть кампании' : `Показать все кампании (${campaigns.length})`}
+                </button>
+              ) : null}
+              </div>
             ) : null}
           </div>
         ) : null}
@@ -531,15 +563,25 @@ export function ReplyPersonalizationView() {
           ) : (
             <>
             {listItems.length === 0 ? (
-              <div className="p-3 text-sm text-gray-500">
-                {tab === 'others'
-                  ? replySearch
-                    ? 'По этому поиску писем нет.'
-                    : 'В Others по ящикам проекта писем нет.'
-                  : filtersActive
-                    ? 'По этому фильтру писем нет.'
-                    : 'Пока никто не ответил.'}
-              </div>
+              // Пустой список без единой кампании — почти всегда не «никто не
+              // ответил», а непривязанные кампании: переименование клиента в
+              // карточке привязку не создаёт, её делают там же в карточке.
+              noCampaigns ? (
+                <div className="p-3 text-sm text-gray-500">
+                  У проекта не привязано ни одной кампании Instantly — писем взять неоткуда.
+                  Привяжите кампании в карточке проекта.
+                </div>
+              ) : (
+                <div className="p-3 text-sm text-gray-500">
+                  {tab === 'others'
+                    ? replySearch
+                      ? 'По этому поиску писем нет.'
+                      : 'В Others по ящикам проекта писем нет.'
+                    : filtersActive
+                      ? 'По этому фильтру писем нет.'
+                      : 'Пока никто не ответил.'}
+                </div>
+              )
             ) : null}
             {listItems.map((item) => (
               <button
@@ -557,9 +599,9 @@ export function ReplyPersonalizationView() {
                     {item.companyName || item.leadEmail}
                   </span>
                   <span
-                    className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${LIST_STATUS_BADGE[item.listStatus].className}`}
+                    className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${listBadge(item).className}`}
                   >
-                    {LIST_STATUS_BADGE[item.listStatus].label}
+                    {listBadge(item).label}
                   </span>
                 </div>
                 {item.companyName ? (

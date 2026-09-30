@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/instantly/apiRouteHelper';
-import { getKnowledgeBase, getLatestDraftStatuses, getProjectBrief, missingBriefReason } from '@/lib/replyPersonalization/db';
+import { findRepeatReplyIds, getKnowledgeBase, getLatestDraftStatuses, getProjectBrief, missingBriefReason } from '@/lib/replyPersonalization/db';
 import { listProjectReplies } from '@/lib/replyPersonalization/projectReply';
 import type { ReplyListItem } from '@/lib/replyPersonalization/types';
 
@@ -29,10 +29,14 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
   }
 
   const page = await listProjectReplies(projectId, { campaignId, search, limit });
-  const statuses = await getLatestDraftStatuses(page.rows.map((q) => q.id));
+  const [statuses, repeats] = await Promise.all([
+    getLatestDraftStatuses(page.rows.map((q) => q.id)),
+    findRepeatReplyIds(page.campaigns.map((c) => c.id), page.rows),
+  ]);
 
   const replies: ReplyListItem[] = page.rows.map((q) => ({
     ...q,
+    repeat: repeats.has(q.id),
     listStatus: statuses[q.id] === 'sent' ? 'sent' : statuses[q.id] === 'skipped' ? 'skipped' : 'new',
   }));
 
