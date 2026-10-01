@@ -118,6 +118,8 @@ export interface MailParts {
  * релей провайдера может срезать заголовок List-Unsubscribe, и тогда способ
  * отказаться остаётся только один — в самом тексте. Повторно строка не
  * добавляется: если автор уже написал свою, чужую снизу не подставляем.
+ * Отправитель, которому этот размен не нужен, гасит строку отдельно от
+ * заголовка — `optOutLine: false`.
  *
  * Ссылки под словом (`[Alial](https://alial.ru)`) разворачиваются здесь же:
  * в HTML-части — тегом, в текстовой — «подпись (адрес)». Поэтому обе части
@@ -129,8 +131,15 @@ export function buildMailParts(input: {
   html?: string | null;
   /** Строку отказа и заголовок можно не добавлять — например, у тестового письма. */
   unsubscribe?: boolean;
+  /**
+   * Видимая строка отказа — отдельно от заголовка: письмо, которое читается
+   * как написанное человеком, строки внизу не имеет, а способ отказаться всё
+   * равно остаётся в List-Unsubscribe.
+   */
+  optOutLine?: boolean;
 }): MailParts {
   const unsubscribe = input.unsubscribe ?? true;
+  const optOutLine = input.optOutLine ?? true;
   const address = bareAddress(input.from);
 
   // source — текст с разметкой ссылок; части письма ниже собираются из него.
@@ -138,7 +147,7 @@ export function buildMailParts(input: {
   let html = (input.html ?? '').trim();
   if (!source) source = htmlToText(html);
 
-  if (unsubscribe && !source.includes(address)) {
+  if (unsubscribe && optOutLine && !source.includes(address)) {
     const line = unsubscribeLine(input.from);
     source = source ? `${source}\n\n—\n${line}` : line;
     // HTML пересобираем из текста ниже, если своего HTML у письма нет.
