@@ -203,6 +203,14 @@ export interface ImportRecipientsResult {
   truncated?: number | null;
 }
 
+/** Строка результатов А/Б-теста: один вариант одного письма цепочки. */
+export interface VariantStatDto {
+  step: number;
+  variant: number;
+  sent: number;
+  replied: number;
+}
+
 /** Кампания целиком — то, с чем открывается форма редактирования. */
 export interface CampaignDetailsDto {
   campaign: {
@@ -216,10 +224,13 @@ export interface CampaignDetailsDto {
     gap_seconds: number;
     gap_jitter_seconds: number;
   };
-  steps: { step_no: number; delay_hours: number; subject: string; body: string }[];
+  /** Строка на вариант письма: у шага без А/Б-теста она одна (variant_no = 1). */
+  steps: { step_no: number; variant_no?: number; delay_hours: number; subject: string; body: string }[];
   mailboxes: { id: string; email: string }[];
   /** Ответили по шагам цепочки: на каком касании лид ответил (задача 6.4). */
   repliesByStep?: { step: number; replied: number }[];
+  /** Результаты А/Б-теста: сколько ушло и сколько ответили по каждому варианту. */
+  variantStats?: VariantStatDto[];
   recipients: {
     total: number;
     /** Счётчики «заполнено у N» посчитаны по всей базе, а не по выборке. */
@@ -230,11 +241,17 @@ export interface CampaignDetailsDto {
   editable: boolean;
 }
 
+/** Одно письмо: тема и текст. У шага их несколько, если идёт А/Б-тест. */
+export interface LetterInput {
+  subject: string;
+  body: string;
+}
+
 export interface StepInput {
   /** Задержка от предыдущего шага в часах; у первого письма игнорируется. */
   delayHours: number;
-  subject: string;
-  body: string;
+  /** Варианты письма шага: один — обычный шаг, несколько — А/Б-тест. */
+  variants: LetterInput[];
 }
 
 async function upload<T>(url: string, file: File, fields?: Record<string, string>): Promise<T> {
@@ -543,8 +560,12 @@ export interface RecipientVariableDto {
 /** Предпросмотр письма на реальных строках (задача 5.6). */
 export interface PreviewSampleDto {
   email: string;
-  steps: { subject: string; body: string }[];
+  /** variant — подпись варианта А/Б-теста («А», «Б»); null — вариант один. */
+  steps: { subject: string; body: string; variant?: string | null }[];
 }
+
+/** Шаги письма для предпросмотра: как в форме, вместе с вариантами А/Б-теста. */
+export type PreviewStepInput = { variants: LetterInput[] };
 
 export interface RecipientColumnsDto {
   emailHeader: string | null;
@@ -561,7 +582,7 @@ export interface RecipientColumnsDto {
   samples?: PreviewSampleDto[];
 }
 
-export function previewRecipients(file: File, steps?: { subject: string; body: string }[]) {
+export function previewRecipients(file: File, steps?: PreviewStepInput[]) {
   return upload<RecipientColumnsDto>(
     `${BASE}/recipients/preview`,
     file,
@@ -570,7 +591,7 @@ export function previewRecipients(file: File, steps?: { subject: string; body: s
 }
 
 /** Предпросмотр шагов на реальных получателях уже загруженной базы кампании. */
-export function previewCampaignSteps(campaignId: string, steps: { subject: string; body: string }[]) {
+export function previewCampaignSteps(campaignId: string, steps: PreviewStepInput[]) {
   return authFetchJson<{ samples: PreviewSampleDto[] }>(`${BASE}/campaigns/${campaignId}/preview`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

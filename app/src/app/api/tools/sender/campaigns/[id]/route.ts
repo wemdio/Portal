@@ -50,7 +50,12 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     const [{ data: campaign }, { data: steps }, { data: pool }, { data: sample }, { count }] =
       await Promise.all([
         supabaseAdmin.from('sender_campaigns').select('*').eq('id', id).maybeSingle(),
-        supabaseAdmin.from('sender_campaign_steps').select('*').eq('campaign_id', id).order('step_no'),
+        supabaseAdmin
+          .from('sender_campaign_steps')
+          .select('*')
+          .eq('campaign_id', id)
+          .order('step_no')
+          .order('variant_no'),
         supabaseAdmin
           .from('sender_campaign_mailboxes')
           .select('mailbox_id, sender_mailboxes(id, email)')
@@ -88,6 +93,20 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     const repliesByStep = stepCounts
       .map((count, index) => ({ step: index + 1, replied: count }))
       .filter((row) => row.replied > 0);
+
+    // Результаты А/Б-теста: сколько ушло и сколько ответили по каждому варианту
+    // письма. Не посчиталось — экран просто не покажет таблицу, остальное от
+    // этого не зависит.
+    const { data: variantRows } = await db.rpc('sender_campaign_variant_stats', { p_campaign_id: id });
+    const variantStats = (Array.isArray(variantRows) ? variantRows : []).map((row) => {
+      const stat = row as { step_no: number; variant_no: number; sent: number; replied: number };
+      return {
+        step: Number(stat.step_no),
+        variant: Number(stat.variant_no),
+        sent: Number(stat.sent ?? 0),
+        replied: Number(stat.replied ?? 0),
+      };
+    });
 
     // Вложенная запись приезжает объектом или массивом — приводим к одному виду.
     const mailboxes = (pool ?? []).flatMap((row) => {
@@ -130,6 +149,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       steps: steps ?? [],
       mailboxes,
       repliesByStep,
+      variantStats,
       recipients: {
         total,
         // Счётчики «заполнено у N» честны, только если посчитаны по всей

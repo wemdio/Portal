@@ -10,6 +10,7 @@ import {
 } from './recipientImport';
 import { applyVars, recipientVars } from './template';
 import type { CampaignSourceKind } from './types';
+import { MAX_VARIANTS } from './variants';
 
 /**
  * Операции над кампанией «Рассылки»: создание, шаги цепочки, заливка базы и
@@ -33,17 +34,27 @@ export class SenderOpError extends Error {
   }
 }
 
-/** Шаг цепочки в том виде, в каком его присылает форма; проверяет prepareSteps. */
-export interface CampaignStepInput {
+/** Один вариант письма шага: А/Б-тест — это несколько таких у одного шага. */
+export interface CampaignStepVariantInput {
   subject?: string;
   body?: string;
-  /** Задержка от предыдущего шага в часах; у первого письма игнорируется. */
-  delayHours?: number;
 }
 
-/** Проверенный шаг — ровно то, что ложится в sender_campaign_steps. */
+/** Шаг цепочки в том виде, в каком его присылает форма; проверяет prepareSteps. */
+export interface CampaignStepInput extends CampaignStepVariantInput {
+  /** Задержка от предыдущего шага в часах; у первого письма игнорируется. */
+  delayHours?: number;
+  /**
+   * А/Б-тест: варианты письма этого шага. Есть — subject/body выше не читаются
+   * (их шлют заливки автоаутрича, у которых вариант всегда один).
+   */
+  variants?: CampaignStepVariantInput[];
+}
+
+/** Проверенный вариант шага — ровно то, что ложится в sender_campaign_steps. */
 export interface PreparedStep {
   step_no: number;
+  variant_no: number;
   delay_hours: number;
   subject: string;
   body: string;
@@ -71,21 +82,41 @@ function requireDb() {
   return supabaseAdmin;
 }
 
+/** Варианты шага: явный список А/Б-теста или единственное письмо шага. */
+function variantsOf(step: CampaignStepInput): CampaignStepVariantInput[] {
+  const list = step.variants?.length ? step.variants : [{ subject: step.subject, body: step.body }];
+  return list.slice(0, MAX_VARIANTS).filter((variant) => (variant.body ?? '').trim());
+}
+
 /**
  * Шаги цепочки → строки sender_campaign_steps. Шаги без текста выпадают, а
  * оставшиеся нумеруются подряд. У первого письма обязательна тема: от неё
  * строятся темы follow-up («Re: …» — template.followUpSubject).
+ *
+ * У шага может быть несколько вариантов письма (А/Б-тест) — тогда он даёт
+ * несколько строк с одним step_no и разными variant_no. Пустые варианты
+ * выпадают, как и пустые шаги: отправлять нечего.
  */
 export function prepareSteps(steps: CampaignStepInput[]): PreparedStep[] {
-  const list = steps.slice(0, MAX_STEPS).filter((step) => (step.body ?? '').trim());
+  const list = steps
+    .slice(0, MAX_STEPS)
+    .map((step) => ({ delayHours: step.delayHours, variants: variantsOf(step) }))
+    .filter((step) => step.variants.length);
   if (!list.length) throw new SenderOpError('Добавьте хотя бы одно письмо', 400);
-  if (!(list[0].subject ?? '').trim()) throw new SenderOpError('У первого письма должна быть тема', 400);
-  return list.map((step, index) => ({
-    step_no: index + 1,
-    delay_hours: index === 0 ? 0 : Math.max(1, Math.round(step.delayHours ?? 72)),
-    subject: (step.subject ?? '').trim(),
-    body: (step.body ?? '').trim(),
-  }));
+  // Тема нужна каждому варианту первого письма: лид получает один из них, и
+  // письмо без темы — это письмо без темы, каким бы вариант ни был.
+  if (list[0].variants.some((variant) => !(variant.subject ?? '').trim())) {
+    throw new SenderOpError('У первого письма должна быть тема — у каждого варианта', 400);
+  }
+  return list.flatMap((step, index) =>
+    step.variants.map((variant, variantIndex) => ({
+      step_no: index + 1,
+      variant_no: variantIndex + 1,
+      delay_hours: index === 0 ? 0 : Math.max(1, Math.round(step.delayHours ?? 72)),
+      subject: (variant.subject ?? '').trim(),
+      body: (variant.body ?? '').trim(),
+    })),
+  );
 }
 
 /**
@@ -286,18 +317,23 @@ export async function importRecipients(
 
   // Первое письмо рендерим так же, как планировщик: тело и тему. Шага нет —
   // сверять не с чем, а запуск такую кампанию и так не пропустит.
-  const { data: firstStep, error: stepError } = await db
+  //
+  // Вариантов первого письма может быть несколько (А/Б-тест), а какой достанется
+  // строке — известно только после вставки, по её id. Поэтому отсеиваем строку
+  // лишь тогда, когда пустыми выходят все варианты: иначе из базы вылетали бы
+  // адреса, которым один из вариантов написался бы нормально.
+  const { data: firstStepVariants, error: stepError } = await db
     .from('sender_campaign_steps')
     .select('subject, body')
     .eq('campaign_id', campaignId)
-    .eq('step_no', 1)
-    .maybeSingle();
+    .eq('step_no', 1);
   if (stepError) throw new SenderOpError(stepError.message, 500);
-  const firstLetterFilled = firstStep
+  const variants = (firstStepVariants ?? []) as { subject: string | null; body: string | null }[];
+  const firstLetterFilled = variants.length
     ? (recipient: ParsedRecipient) => {
         const vars = recipientVars(recipient);
-        return Boolean(
-          applyVars(String(firstStep.body ?? ''), vars).trim() && applyVars(String(firstStep.subject ?? ''), vars).trim(),
+        return variants.some((variant) =>
+          Boolean(applyVars(String(variant.body ?? ''), vars).trim() && applyVars(String(variant.subject ?? ''), vars).trim()),
         );
       }
     : undefined;
