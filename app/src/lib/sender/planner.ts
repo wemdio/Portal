@@ -1,8 +1,9 @@
 import 'server-only';
 
+import { buildMessageId } from '@/lib/mail/message';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { chunkForInFilter } from './inFilter';
-import { applyVars, buildMessageId, followUpSubject, recipientVars } from './template';
+import { applyVars, followUpSubject, recipientVars } from './template';
 import { nextGapMs, nextWindowSlot, type SendWindow } from './sendWindow';
 import { advanceRecipient } from './stepAdvance';
 import type { CampaignRow, MailboxRow, RecipientRow, StepRow } from './types';

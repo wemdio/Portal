@@ -92,6 +92,7 @@ import { loadLibraries, type CaseRecord } from './libraries';
 import { isFatalLlmError, llmAnswersInRun } from './llm';
 import { baseChain, decide, routeCase, routeChain, scoreCompany, splitAutomation, type Route, type Score } from './router';
 import { amoLookup, loadAmoIndex, type AmoIndex, type AmoRecord } from './sources/amo';
+import { lookupCatalogEmails } from './sources/catalogEmail';
 import { loadSizeByInn } from './sources/directory';
 import { fetchRevenue, revenueGrowthSignal } from './sources/fnsRevenue';
 import { fetchEmployerSite, fetchVacancyCard, type HhVacancyCard } from './sources/hhCard';
@@ -212,8 +213,14 @@ function log(level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) {
   else console[level](line);
 }
 
+/**
+ * Потолок просмотра: сколько компаний запуск готов проверить ради заказанных
+ * строк. Было 15 на строку — при доходимости новых компаний около 6% (запуск
+ * 01.10.2026: 19 готовых из 304 новых кандидатов) этого не хватало даже на
+ * один лимит, и запуск упирался в потолок раньше, чем набирал норму.
+ */
 export function maxCandidatesFor(target: number): number {
-  return Math.min(12_000, Math.max(300, target * 15));
+  return Math.min(20_000, Math.max(300, target * 30));
 }
 
 export function nextWaveSize(target: number, totals: { scanned: number; ready: number }): number {
@@ -1004,7 +1011,10 @@ async function runJob(
       if (reactivation && amoRec?.contactEmail) {
         foundEmails = [{ email: amoRec.contactEmail, emailType: 'person', isRouting: false, recipientRole: 'Контакт из AMO', sourceUrl: null, verification: 'crm_contact' }];
       } else {
-        const found = await findRuCompanyEmail(site_url, domain, emailDomainCache);
+        // Каталоги Яндекс Карт — второй источник адреса: на сайте почта есть
+        // не всегда (01.10.2026 — 131 отсев EMAIL_NOT_FOUND из 433 компаний).
+        const catalog = await lookupCatalogEmails(db, domain);
+        const found = await findRuCompanyEmail(site_url, domain, emailDomainCache, catalog);
         smtpSilent = noteEmailVerdict(found.verdict);
         if (!found.email || !found.verification) {
           // Адреса на сайте есть, но все не прошли проверку, — своя причина:

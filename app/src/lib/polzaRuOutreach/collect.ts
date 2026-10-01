@@ -309,11 +309,29 @@ export async function collectCandidates(
   // Сначала компании с поводом и несколькими источниками, затем свежие; профиль — в конце.
   const pool = merged.sort(
     (a, b) =>
-      Number(b.signals.length > 0) - Number(a.signals.length > 0) ||
-      b.sources.length - a.sources.length ||
+      Number(hasOutsideSignal(b)) - Number(hasOutsideSignal(a)) ||
+      sourceWeight(b) - sourceWeight(a) ||
       latest(b) - latest(a),
   );
   return { pool, sourceErrors };
+}
+
+/**
+ * Старый отказ в AMO местом в очереди не распоряжается.
+ *
+ * Повод `crm_lost` есть у каждого реактивационного кандидата по построению, а
+ * источник 'crm' склеивается с hh и новостями сайта — вместе это ставило
+ * старые отказы в самое начало очереди. Запуск 01.10.2026 на 100 строк
+ * остановился по target_reached, просмотрев 433 кандидата из 35 938 в пуле:
+ * 81 готовая строка из 100 — компании, с которыми мы уже общались. В цепочку
+ * «Возврат» они по-прежнему попадают, но ждут общей очереди.
+ */
+function hasOutsideSignal(c: Candidate): boolean {
+  return c.signals.some((s) => s.type !== 'crm_lost');
+}
+
+function sourceWeight(c: Candidate): number {
+  return c.sources.filter((s) => s !== 'crm').length;
 }
 
 function latest(c: Candidate): number {

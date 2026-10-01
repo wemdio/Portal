@@ -3980,8 +3980,11 @@ async function notifySpecialistsAboutLead(
       workerLog('warn', `lead alert contact lookup failed for ${qualificationId}; sending with available metadata`, error);
     }
 
+    const handoffConfigured = handoffEnabled()
+      && Boolean(project?.specialist_user_id && project?.handoff_email?.trim() && project?.handoff_legend?.trim());
     const tgResult = await sendTelegramLeadAlertForSpecialists({
-      expectHandoff: handoffEnabled() && Boolean(project?.specialist_user_id && project?.handoff_email?.trim() && project?.handoff_legend?.trim()),
+      expectHandoff: handoffConfigured,
+      manualHandoff: handoffConfigured && project?.handoff_auto_send === false,
       allowRejection: project?.handoff_auto_send === false && userIdList.length === 1,
       userIds: userIdList,
       projectLeadUserIds: [...projectLeadUserIds],
@@ -4444,6 +4447,7 @@ async function maybeReconcileLeadNotificationDeliveries(): Promise<number> {
 
 async function sendTelegramLeadAlertForSpecialists(data: {
   expectHandoff?: boolean;
+  manualHandoff?: boolean;
   allowRejection?: boolean;
   userIds: string[];
   projectLeadUserIds: string[];
@@ -4510,6 +4514,7 @@ async function sendTelegramLeadAlertForSpecialists(data: {
 
     const result = await sendLeadTelegramAlert({
       expectHandoff: data.expectHandoff,
+      manualHandoff: data.manualHandoff,
       allowRejection: data.allowRejection,
       qualificationId: data.qualificationId,
       campaignId: data.campaignId,

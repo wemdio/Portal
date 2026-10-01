@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { Loader2, Pause, Play, Plus, Settings, Square, Trash2, Users } from 'lucide-react';
 import {
   deleteCampaign,
@@ -11,7 +12,7 @@ import {
   type CampaignDto,
   type SenderFolderDto,
 } from './api';
-import { CampaignFormModal } from './CampaignFormModal';
+import { takeCampaignNotice } from './campaignNotice';
 import { timezoneLabel, weekdaysLabel } from './CampaignSteps';
 import { FolderSettingsModal, chainDaysLabel } from './FolderSettingsModal';
 import { RecipientsModal } from './RecipientsModal';
@@ -272,15 +273,15 @@ function CampaignRow({
  * прокручивается к ней, и она ненадолго подсвечивается.
  */
 export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: string | null } = {}) {
+  // Настройки кампании — отдельная страница: в окне поверх списка не помещались
+  // ни письма цепочки, ни база с ящиками одновременно.
+  const router = useRouter();
   const [campaigns, setCampaigns] = useState<CampaignDto[]>([]);
   // В список влезли не все кампании: сервер отдаёт последние.
   const [truncated, setTruncated] = useState(false);
   const [folders, setFolders] = useState<SenderFolderDto[]>([]);
   const [foldersError, setFoldersError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [formOpen, setFormOpen] = useState(false);
-  // Какую кампанию открыли по названию. null — окно создания новой.
-  const [editing, setEditing] = useState<CampaignDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // Кому показать базу получателей (задача 5.2): список с фильтрами и поиском.
@@ -330,6 +331,15 @@ export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: str
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Итог сохранения со страницы настроек: она ушла в список и оставила подпись
+  // («база загружена, столько-то получателей») — показываем её здесь.
+  useEffect(() => {
+    const saved = takeCampaignNotice();
+    if (!saved) return;
+    if (saved.notice) setNotice(saved.notice);
+    if (saved.error) setError(saved.error);
+  }, []);
 
   // Строка уже на экране (подсветка ставится вместе со списком) — прокручиваем
   // к ней и через несколько секунд гасим подсветку.
@@ -382,7 +392,7 @@ export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: str
         ) : null}
         <button
           type="button"
-          onClick={() => setFormOpen(true)}
+          onClick={() => router.push('/tools/sender/campaigns/new')}
           className="ml-auto inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500"
         >
           <Plus className="h-4 w-4" />
@@ -440,7 +450,7 @@ export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: str
                       key={campaign.id}
                       campaign={campaign}
                       highlighted={campaign.id === highlightId}
-                      onEdit={() => setEditing(campaign)}
+                      onEdit={() => router.push(`/tools/sender/campaigns/${campaign.id}`)}
                       onRecipients={() => setRecipientsOf(campaign)}
                       onAction={(action) => void act(campaign, action)}
                     />
@@ -458,7 +468,7 @@ export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: str
                   </p>
                   <button
                     type="button"
-                    onClick={() => setFormOpen(true)}
+                    onClick={() => router.push('/tools/sender/campaigns/new')}
                     className="mt-3 text-sm text-blue-600 transition-colors hover:text-blue-500"
                   >
                     {folders.length ? 'Создать кампанию' : 'Создать первую'}
@@ -474,22 +484,6 @@ export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: str
         <p className="text-xs text-zinc-500">
           Показаны последние {campaignsLabel(campaigns.length)} — более старые в список не поместились.
         </p>
-      ) : null}
-
-      {formOpen || editing ? (
-        <CampaignFormModal
-          key={editing?.id ?? 'new'}
-          campaign={editing ?? undefined}
-          onClose={() => {
-            setFormOpen(false);
-            setEditing(null);
-          }}
-          onCreated={async ({ notice: savedNotice, error: savedError }) => {
-            setNotice(savedNotice ?? null);
-            setError(savedError ?? null);
-            await load();
-          }}
-        />
       ) : null}
 
       {recipientsOf ? (
