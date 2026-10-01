@@ -96,16 +96,23 @@ function variantsOf(step: CampaignStepInput): CampaignStepVariantInput[] {
  * У шага может быть несколько вариантов письма (А/Б-тест) — тогда он даёт
  * несколько строк с одним step_no и разными variant_no. Пустые варианты
  * выпадают, как и пустые шаги: отправлять нечего.
+ *
+ * partial — сохранение недописанного черновика: писем может не быть вовсе, а
+ * тема первого письма может быть ещё не придумана. Отправить такую кампанию
+ * всё равно нельзя — это проверяет запуск (startCampaign).
  */
-export function prepareSteps(steps: CampaignStepInput[]): PreparedStep[] {
+export function prepareSteps(steps: CampaignStepInput[], opts: { partial?: boolean } = {}): PreparedStep[] {
   const list = steps
     .slice(0, MAX_STEPS)
     .map((step) => ({ delayHours: step.delayHours, variants: variantsOf(step) }))
     .filter((step) => step.variants.length);
-  if (!list.length) throw new SenderOpError('Добавьте хотя бы одно письмо', 400);
+  if (!list.length) {
+    if (opts.partial) return [];
+    throw new SenderOpError('Добавьте хотя бы одно письмо', 400);
+  }
   // Тема нужна каждому варианту первого письма: лид получает один из них, и
   // письмо без темы — это письмо без темы, каким бы вариант ни был.
-  if (list[0].variants.some((variant) => !(variant.subject ?? '').trim())) {
+  if (!opts.partial && list[0].variants.some((variant) => !(variant.subject ?? '').trim())) {
     throw new SenderOpError('У первого письма должна быть тема — у каждого варианта', 400);
   }
   return list.flatMap((step, index) =>
@@ -119,27 +126,42 @@ export function prepareSteps(steps: CampaignStepInput[]): PreparedStep[] {
   );
 }
 
+/** Название недописанного черновика, когда своё ещё не придумали. */
+const DRAFT_NAME_FORMAT = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long' });
+
+export function draftName(): string {
+  return `Черновик от ${DRAFT_NAME_FORMAT.format(new Date())}`;
+}
+
 /**
  * Название, пул ящиков и шаги — без них кампании нет. Одна проверка на
  * создание и на правку: тексты ошибок оператор видит одинаковые.
  *
  * allowEmptyPool — исключение для черновика из автоаутрича (createCampaign):
  * форма и правка по-прежнему требуют ящики.
+ *
+ * partial — форма сохраняет черновик сама, пока его пишут: там ещё может не
+ * быть ни названия, ни ящиков, ни писем. Запуск такую кампанию не пропустит
+ * (startCampaign), зато недописанное не пропадает при выходе со страницы.
  */
 export function validateCampaignDraft(
   input: { name: string; mailboxIds: string[]; steps: CampaignStepInput[] },
-  opts: { allowEmptyPool?: boolean } = {},
+  opts: { allowEmptyPool?: boolean; partial?: boolean } = {},
 ) {
-  const name = (input.name ?? '').trim();
+  const name = (input.name ?? '').trim() || (opts.partial ? draftName() : '');
   if (!name) throw new SenderOpError('Укажите название кампании', 400);
 
   const mailboxIds = [...new Set((input.mailboxIds ?? []).filter((id) => typeof id === 'string' && id))];
-  if (!mailboxIds.length && !opts.allowEmptyPool) throw new SenderOpError('Выберите хотя бы один ящик', 400);
+  if (!mailboxIds.length && !opts.allowEmptyPool && !opts.partial) {
+    throw new SenderOpError('Выберите хотя бы один ящик', 400);
+  }
 
-  return { name, mailboxIds, steps: prepareSteps(input.steps ?? []) };
+  return { name, mailboxIds, steps: prepareSteps(input.steps ?? [], { partial: opts.partial }) };
 }
 
 async function insertSteps(campaignId: string, steps: PreparedStep[]): Promise<void> {
+  // Недописанный черновик может быть ещё без писем — вставлять нечего.
+  if (!steps.length) return;
   const { error } = await requireDb()
     .from('sender_campaign_steps')
     .insert(steps.map((step) => ({ campaign_id: campaignId, ...step })));
@@ -182,6 +204,11 @@ export interface CreateCampaignInput {
    * аутрича перед запуском подставляет ящики папки.
    */
   allowEmptyPool?: boolean;
+  /**
+   * Недописанный черновик из формы: название, ящики и письма могут быть ещё
+   * не заполнены. Так форма сохраняет кампанию, пока её пишут.
+   */
+  partial?: boolean;
   createdBy: string | null;
 }
 
@@ -191,7 +218,10 @@ export interface CreateCampaignInput {
  */
 export async function createCampaign(input: CreateCampaignInput): Promise<{ id: string }> {
   const db = requireDb();
-  const { name, mailboxIds, steps } = validateCampaignDraft(input, { allowEmptyPool: input.allowEmptyPool });
+  const { name, mailboxIds, steps } = validateCampaignDraft(input, {
+    allowEmptyPool: input.allowEmptyPool,
+    partial: input.partial,
+  });
 
   const { data: campaign, error } = await db
     .from('sender_campaigns')
@@ -531,12 +561,20 @@ export async function startCampaign(campaignId: string): Promise<void> {
     );
   }
 
-  const { count: stepCount, error: stepsError } = await db
+  // Письма проверяем здесь, а не только в форме: недописанный черновик
+  // сохраняется как есть (validateCampaignDraft, partial), и первое письмо
+  // без темы или вовсе без писем не должно уехать.
+  const { data: firstStepRows, error: stepsError } = await db
     .from('sender_campaign_steps')
-    .select('id', { count: 'exact', head: true })
-    .eq('campaign_id', campaignId);
+    .select('step_no, subject')
+    .eq('campaign_id', campaignId)
+    .eq('step_no', 1);
   if (stepsError) throw new SenderOpError(stepsError.message, 500);
-  if (!stepCount) throw new SenderOpError('В кампании нет шагов — добавьте хотя бы одно письмо', 422);
+  const firstVariants = (firstStepRows ?? []) as { subject: string | null }[];
+  if (!firstVariants.length) throw new SenderOpError('В кампании нет шагов — добавьте хотя бы одно письмо', 422);
+  if (firstVariants.some((variant) => !String(variant.subject ?? '').trim())) {
+    throw new SenderOpError('У первого письма нет темы — допишите её у каждого варианта', 422);
+  }
 
   // Пауза отменяет запланированные письма, но строки остаются, а у очереди
   // есть уникальность (recipient_id, step_no). Без уборки повторный запуск
