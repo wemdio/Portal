@@ -3089,6 +3089,13 @@ html[data-portal-theme='dark'] .portal-shell .hover\:bg-blue-50\/60:hover {
 html[data-portal-theme='dark'] .portal-shell .hover\:border-blue-300:hover {
   border-color: rgba(96, 165, 250, 0.5) !important;
 }
+/* Синяя рамка цветной карточки (вариант А письма в «Рассылке»): без правила
+   она оставалась светлым Tailwind-дефолтом и светилась на тёмном фоне —
+   у emerald/amber/violet такие правила уже есть ниже. */
+html[data-portal-theme='dark'] .portal-shell .border-blue-200,
+html[data-portal-theme='dark'] .portal-shell .border-blue-300 {
+  border-color: rgba(96, 165, 250, 0.35) !important;
+}
 
 /* === ACCENT TEXT — blue для CTA-ссылок, оставляем ярким для читаемости === */
 html[data-portal-theme='dark'] .portal-shell .text-blue-600,
