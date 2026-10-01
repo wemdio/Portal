@@ -195,7 +195,8 @@ export function sanitizeRuOutreachConfig(raw: Partial<RuOutreachConfig>): RuOutr
   const minRevenue = clampInt(raw.min_revenue, 30_000_000, 0, 1_000_000_000_000);
   const senderId = typeof raw.sender_id === 'string' && /^[0-9a-f-]{36}$/i.test(raw.sender_id) ? raw.sender_id : null;
   return {
-    sources: sources.length ? sources : ['hh', 'direct', 'crm', 'site_news'],
+    // Без 'crm': старые отказы из AMO включаются галочкой осознанно (см. LaunchPanel).
+    sources: sources.length ? sources : ['hh', 'direct', 'site_news'],
     freshness_days: clampInt(raw.freshness_days, DEFAULT_FRESHNESS_DAYS, 1, MAX_FRESHNESS_DAYS),
     limit: clampInt(raw.limit, DEFAULT_LIMIT, 1, MAX_LIMIT),
     write_threshold: write,

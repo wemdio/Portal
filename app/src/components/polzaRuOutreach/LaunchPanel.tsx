@@ -36,7 +36,11 @@ const input =
 const label = 'mb-1 block text-sm font-medium text-gray-700';
 const section = 'mb-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500';
 
-const DEFAULT_SOURCES: SourceCode[] = ['hh', 'direct', 'crm', 'site_news'];
+// AMO со списком источников по умолчанию снят 01.10.2026: у старых отказов
+// почта уже известна, фильтры по ЦА и размеру им не применяются — доходимость
+// до базы 63% против 6% у новых компаний, и они занимали четыре строки базы из
+// пяти. Нужен возврат — источник включается галочкой осознанно.
+const DEFAULT_SOURCES: SourceCode[] = ['hh', 'direct', 'site_news'];
 
 const MILLION = 1_000_000;
 
