@@ -10,7 +10,9 @@
  * любые адреса НЕ на домене компании.
  *
  * Поиск и проверка — общие у аутричей (lib/outreachEmail/findAndVerify.ts):
- * обход сайта через портальный кэш и SMTP-проверка адресов. Здесь только
+ * обход сайта через портальный кэш и SMTP-проверка адресов. Вторым источником
+ * адресов идут наши каталоги Яндекс Карт (sources/catalogEmail.ts): на сайте
+ * почта есть не всегда, а правила выбора и проверка для обоих источников одни. Здесь только
  * правила выбора: проверенный адрес исключается, и pickRuEmail выбирает
  * следующий по тем же приоритетам. В работу — до трёх рабочих адресов
  * (emails), первый из них главный.
@@ -126,13 +128,20 @@ export function pickRuEmail(emails: string[], companyDomain: string, excluded: R
 }
 
 /** domainCache — один на запуск (MX и catch-all доменов для SMTP-проверки). */
-export async function findRuCompanyEmail(website: string, companyDomain: string, domainCache: EmailDomainCache): Promise<RuEmailResult> {
+export async function findRuCompanyEmail(
+  website: string,
+  companyDomain: string,
+  domainCache: EmailDomainCache,
+  /** Адреса из наших каталогов — проверяются наравне с найденными на сайте. */
+  catalog?: { emails: string[]; sourceUrl: string | null },
+): Promise<RuEmailResult> {
   const search = await findAndVerifyCompanyEmail({
     website,
     domain: companyDomain,
     locale: 'ru',
     maxPages: MAX_PAGES,
     domainCache,
+    extra: catalog,
     pick: (emails, excluded) => {
       const picked = pickRuEmail(emails, companyDomain, excluded);
       return picked.email ? { ...picked, email: picked.email } : null;

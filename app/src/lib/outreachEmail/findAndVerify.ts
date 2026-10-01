@@ -2,7 +2,10 @@
  * Почта компании для автоаутричей RU и EN: поиск на сайте и проверка адреса
  * (docs/superpowers/specs/2026-09-26-outreach-to-sender-design.md §3).
  *
- * Поиск — портальный scrapeEmails через общий кэш email_scraper_cache. Ключ
+ * Поиск — портальный scrapeEmails через общий кэш email_scraper_cache, плюс
+ * адреса, которые вызывающий код принёс из другого источника (opts.extra — у
+ * RU-аутрича это каталоги Яндекс Карт). Проверка и правила выбора у них общие
+ * с сайтовыми. Ключ
  * (нормализованный адрес сайта) и формат записи — как у обогащения сайтов
  * (lib/enrich/websiteEnrichmentWorker.ts, fetchEmailsForUrl/setEmailCache):
  * сайт, который портал уже обходил за неделю, второй раз не обходится — ни
@@ -71,6 +74,12 @@ export interface FindAndVerifyOptions<P extends { email: string }> {
    */
   pick: (emails: string[], excluded: ReadonlySet<string>) => P | null;
   domainCache: EmailDomainCache;
+  /**
+   * Адреса из другого источника (наши каталоги), которые проверяются наравне
+   * с найденными на сайте. sourceUrl — ссылка на карточку: попадёт в журнал,
+   * если выбранный адрес пришёл оттуда, а не с сайта.
+   */
+  extra?: { emails: string[]; sourceUrl: string | null };
   /** Сколько рабочих адресов собрать (по умолчанию 3, MAX_COMPANY_EMAILS). */
   maxResults?: number;
   /** Сколько адресов проверить на компанию всего (по умолчанию OUTREACH_EMAIL_MAX_CHECKS, 6). */
@@ -93,8 +102,9 @@ export interface CompanyEmailSearch<P extends { email: string }> {
   /** Адреса, отбракованные проверкой, в порядке проверки — для журнала. */
   triedInvalid: string[];
   /**
-   * Корень обхода. scrapeEmails не отдаёт, на какой странице лежал адрес, —
-   * честный источник только «сайт компании». null, когда адреса нет.
+   * Откуда адрес. scrapeEmails не отдаёт, на какой странице лежал адрес, —
+   * честный источник только «сайт компании»; для адреса из opts.extra это
+   * ссылка оттуда (карточка каталога). null, когда адреса нет.
    */
   sourceUrl: string | null;
 }
@@ -383,6 +393,12 @@ export async function findAndVerifyCompanyEmail<P extends { email: string }>(
     if (scraped.cutByDeadline) warn(`company email search hit the ${COMPANY_TIMEOUT_MS}ms cap before any address (${url})`);
     emails = scraped.emails;
   }
+  // Адреса каталога идут после сайтовых: порядок на выбор не влияет (правила
+  // сортируют сами), но источник адреса мы отличаем именно по этому списку.
+  const fromSite = new Set(emails.map((e) => e.trim().toLowerCase()));
+  const extraEmails = (opts.extra?.emails ?? []).filter((e) => !fromSite.has(e.trim().toLowerCase()));
+  if (extraEmails.length) emails = [...emails, ...extraEmails];
+  const sourceOf = (email: string): string => (fromSite.has(email.trim().toLowerCase()) ? url : opts.extra?.sourceUrl ?? url);
   const maxResults = Math.max(1, Math.floor(opts.maxResults ?? MAX_COMPANY_EMAILS));
   const maxChecks = Math.max(1, Math.floor(opts.maxChecks ?? MAX_CHECKS));
   const excluded = new Set<string>();
@@ -410,12 +426,12 @@ export async function findAndVerifyCompanyEmail<P extends { email: string }>(
     // catch_all или unverified. Рабочих ещё нет — это и есть ответ, один адрес.
     if (!ok.length) {
       const only: VerifiedPick<P> = { ...picked, verification };
-      return { result: only, results: [only], verdict: verification, triedInvalid, sourceUrl: url };
+      return { result: only, results: [only], verdict: verification, triedInvalid, sourceUrl: sourceOf(only.email) };
     }
     // Уже есть OK: «не удалось проверить» — прокси или время кончились, дальше
     // не проверяем. catch_all на другом поддомене — не OK, пропускаем.
     if (verification === 'unverified') break;
   }
-  if (ok.length) return { result: ok[0], results: ok, verdict: 'ok', triedInvalid, sourceUrl: url };
+  if (ok.length) return { result: ok[0], results: ok, verdict: 'ok', triedInvalid, sourceUrl: sourceOf(ok[0].email) };
   return { result: null, results: [], verdict: triedInvalid.length ? 'invalid' : 'none', triedInvalid, sourceUrl: null };
 }
