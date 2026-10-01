@@ -31,6 +31,8 @@ interface CreateBody {
   sendWeekdays?: number[];
   gapSeconds?: number;
   gapJitterSeconds?: number;
+  /** Автосохранение недописанной формы: проверки откладываются до запуска. */
+  draft?: boolean;
 }
 
 async function campaignStats(campaignId: string) {
@@ -176,6 +178,9 @@ export async function POST(req: NextRequest) {
         sendWeekdays: body.sendWeekdays,
         gapSeconds: body.gapSeconds,
         gapJitterSeconds: body.gapJitterSeconds,
+        // Форма сохраняет недописанный черновик сама — его проверять по полной
+        // нельзя: ни писем, ни ящиков там может ещё не быть.
+        partial: body.draft === true,
         createdBy: auth.user.id,
       });
       return NextResponse.json({ id });

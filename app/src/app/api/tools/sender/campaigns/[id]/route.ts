@@ -28,6 +28,8 @@ interface PatchBody {
   sendWeekdays?: number[];
   gapSeconds?: number;
   gapJitterSeconds?: number;
+  /** Автосохранение недописанной формы: проверки откладываются до запуска. */
+  draft?: boolean;
 }
 
 /**
@@ -182,11 +184,16 @@ async function updateSettings(id: string, body: PatchBody) {
 
   // Та же проверка, что при создании (campaignOps): ошибка — SenderOpError,
   // её в ответ превращает PATCH.
-  const { name, mailboxIds, steps } = validateCampaignDraft({
-    name: body.name ?? '',
-    mailboxIds: body.mailboxIds ?? [],
-    steps: body.steps ?? [],
-  });
+  const { name, mailboxIds, steps } = validateCampaignDraft(
+    {
+      name: body.name ?? '',
+      mailboxIds: body.mailboxIds ?? [],
+      steps: body.steps ?? [],
+    },
+    // Автосохранение недописанного черновика: править его можно и пустым,
+    // отправить — нет (проверки на запуске, startCampaign).
+    { partial: body.draft === true },
+  );
 
   const nowIso = new Date().toISOString();
   const { error } = await supabaseAdmin
