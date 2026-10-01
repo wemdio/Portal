@@ -48,6 +48,36 @@ export function weekdaysLabel(days: number[]): string {
 }
 
 /**
+ * Цвет письма цепочки: полоса слева и номер шага. Письма идут друг за другом
+ * одинаковыми блоками, и без цвета это читается как одна серая простыня —
+ * особенно на тёмной теме, где все рамки сливаются.
+ *
+ * Оттенки намеренно насыщенные (400/600, а не пастельные 50): такие видно и на
+ * белом, и на чёрном без отдельных правил темы.
+ */
+const LETTER_ACCENTS = [
+  { stripe: 'border-l-blue-400', badge: 'bg-blue-600' },
+  { stripe: 'border-l-violet-400', badge: 'bg-violet-600' },
+  { stripe: 'border-l-emerald-400', badge: 'bg-emerald-600' },
+  { stripe: 'border-l-amber-400', badge: 'bg-amber-500' },
+  { stripe: 'border-l-fuchsia-400', badge: 'bg-fuchsia-600' },
+];
+
+export type StepAccent = (typeof LETTER_ACCENTS)[number];
+
+export function letterAccent(index: number): StepAccent {
+  return LETTER_ACCENTS[index % LETTER_ACCENTS.length];
+}
+
+/** Фон и чип варианта А/Б: рядом стоящие варианты должны различаться сразу. */
+const VARIANT_TONES = [
+  { card: 'border-blue-200 bg-blue-50', chip: 'bg-blue-600 text-white' },
+  { card: 'border-amber-200 bg-amber-50', chip: 'bg-amber-500 text-white' },
+  { card: 'border-emerald-200 bg-emerald-50', chip: 'bg-emerald-600 text-white' },
+  { card: 'border-violet-200 bg-violet-50', chip: 'bg-violet-600 text-white' },
+];
+
+/**
  * Шаг формы: номер, заголовок и сводка справа.
  *
  * Номера — не украшение: до них четыре одинаковых блока в рамках читались как
@@ -59,20 +89,23 @@ export function Step({
   title,
   hint,
   done,
+  accent,
   children,
 }: {
   no: number;
   title: string;
   hint?: string;
   done: boolean;
+  /** Цвет письма цепочки; у остальных шагов его нет. */
+  accent?: StepAccent;
   children: ReactNode;
 }) {
   return (
-    <section className="rounded-xl border border-zinc-200 p-4">
+    <section className={`rounded-xl border border-zinc-200 p-4 ${accent ? `border-l-4 ${accent.stripe}` : ''}`}>
       <div className="mb-3 flex flex-wrap items-center gap-2.5">
         <span
           className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold transition-colors ${
-            done ? 'bg-blue-600 text-white' : 'bg-zinc-100 text-zinc-500'
+            done ? `${accent?.badge ?? 'bg-blue-600'} text-white` : 'bg-zinc-100 text-zinc-500'
           }`}
         >
           {no}
@@ -281,6 +314,8 @@ interface LetterProps {
   disabled?: boolean;
   /** Название шага: «Первое письмо», «Письмо 2»… */
   title?: string;
+  /** Цвет этого письма в цепочке — letterAccent(индекс). */
+  accent?: StepAccent;
   /** Высота поля письма в строках: на странице настроек она больше, чем в окне. */
   rows?: number;
   /** Через сколько часов после предыдущего письма уйдёт этот шаг. */
@@ -309,6 +344,7 @@ export function LetterStep({
   emptyHint,
   disabled = false,
   title = 'Первое письмо',
+  accent,
   rows = 8,
   delayHours,
   onDelayHours,
@@ -321,6 +357,7 @@ export function LetterStep({
       no={no}
       title={title}
       done={done}
+      accent={accent}
       hint={[
         delayHours != null && onDelayHours ? `через ${delayHours} ч после предыдущего` : null,
         testing ? `А/Б-тест: ${variants.length} варианта` : null,
@@ -357,14 +394,16 @@ export function LetterStep({
           ) : null}
         </div>
       ) : null}
-      {variants.map((letter, index) => (
+      {variants.map((letter, index) => {
+        const tone = VARIANT_TONES[index % VARIANT_TONES.length];
+        return (
         <div
           key={index}
-          className={testing ? 'mb-3 rounded-lg border border-zinc-200 bg-zinc-50/50 p-3 last:mb-0' : ''}
+          className={testing ? `mb-3 rounded-lg border p-3 last:mb-0 ${tone.card}` : ''}
         >
           {testing ? (
             <div className="mb-2 flex items-center gap-2">
-              <span className="rounded-md bg-zinc-200 px-2 py-0.5 text-xs font-medium text-zinc-700">
+              <span className={`rounded-md px-2 py-0.5 text-xs font-semibold ${tone.chip}`}>
                 Вариант {variantLabel(index + 1)}
               </span>
               {onRemoveVariant && !disabled ? (
@@ -388,7 +427,8 @@ export function LetterStep({
             disabled={disabled}
           />
         </div>
-      ))}
+        );
+      })}
 
       {/* А/Б-тест: второй вариант письма этого же шага. База делится поровну,
           и через неделю видно, на какой текст больше ответов. */}
@@ -471,6 +511,17 @@ interface ScheduleProps {
 }
 
 /**
+ * Час из поля ввода в допустимых границах. Пустое поле и нечисло оставляют
+ * прежнее значение: иначе на середине набора («1» → стёрли → NaN) час
+ * обнулялся бы сам.
+ */
+function clampHour(raw: string, current: number, min: number, max: number): number {
+  const value = Number(raw);
+  if (raw.trim() === '' || !Number.isFinite(value)) return current;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+/**
  * Шаг «Когда отправлять». Часы, дни, пояс и паузы между письмами — одно
  * решение о ритме кампании, поэтому и на экране это один шаг.
  */
@@ -510,13 +561,16 @@ export function ScheduleStep({
       <div className="flex flex-wrap items-center gap-2 text-sm text-zinc-600">
         <span className="w-10 text-xs uppercase tracking-wide text-zinc-500">Часы</span>
         <div className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-1.5">
+          {/* Границы держим кодом, а не только атрибутами min/max: их слушают
+              только стрелки, а вписать руками можно было и 99, и −5 — окно
+              отправки от такого молча становилось пустым. */}
           <input
             type="number"
             min={0}
             max={23}
             value={hourFrom}
             disabled={disabled}
-            onChange={(e) => onHourFrom(Number(e.target.value))}
+            onChange={(e) => onHourFrom(clampHour(e.target.value, hourFrom, 0, 23))}
             className="w-12 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none"
           />
           <span className="text-zinc-400">—</span>
@@ -526,7 +580,7 @@ export function ScheduleStep({
             max={24}
             value={hourTo}
             disabled={disabled}
-            onChange={(e) => onHourTo(Number(e.target.value))}
+            onChange={(e) => onHourTo(clampHour(e.target.value, hourTo, 1, 24))}
             className="w-12 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none"
           />
         </div>
@@ -637,6 +691,13 @@ export function ScheduleStep({
           кнопки, а не в сообщении об ошибке после. */}
       {weekdays.length === 0 ? (
         <p className="mt-3 text-xs text-amber-600">Не выбрано ни одного дня — отправлять будет некогда.</p>
+      ) : null}
+      {/* Час начала не раньше часа конца — иначе окно пустое и письма не едут,
+          а на экране это выглядит как работающая кампания. */}
+      {hourFrom >= hourTo ? (
+        <p className="mt-3 text-xs text-amber-600">
+          Начало не раньше конца ({hourFrom}:00–{hourTo}:00) — в такое окно отправлять нечего.
+        </p>
       ) : null}
     </Step>
   );

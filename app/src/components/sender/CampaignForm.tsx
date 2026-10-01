@@ -25,6 +25,7 @@ import {
   ScheduleStep,
   Step,
   WORKDAYS,
+  letterAccent,
   letterIssues,
   type LetterVariant,
 } from './CampaignSteps';
@@ -96,6 +97,8 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   const router = useRouter();
   const editing = campaignId != null;
   const [loading, setLoading] = useState(editing);
+  /** Кампанию не удалось прочитать: сохранять поверх неё нельзя. */
+  const [loadFailed, setLoadFailed] = useState(false);
   // Идущую и завершённую кампанию показываем, но не даём править: планировщик
   // материализует письма в очередь заранее, и правка на ходу догнала бы только
   // часть базы — с непонятной границей между старым и новым текстом.
@@ -138,8 +141,11 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   // Новая кампания сохраняется черновиком сама, пока её пишут: закрыли вкладку
   // или ушли со страницы — написанное осталось в списке, а не пропало.
   const [draftSavedAt, setDraftSavedAt] = useState<Date | null>(null);
-  /** id заведённого черновика: ref, потому что его читает таймер автосохранения. */
-  const draftRef = useRef<string | null>(null);
+  /**
+   * Куда сохранять: открытая кампания или черновик, который заведёт первое
+   * автосохранение. Ref, потому что его читает таймер.
+   */
+  const draftRef = useRef<string | null>(campaignId ?? null);
   /** Идущее сохранение: второй вызов ждёт его, а не заводит вторую кампанию. */
   const draftBusy = useRef<Promise<void> | null>(null);
   /** Снимок настроек, который уже сохранён: без изменений не сохраняем заново. */
@@ -186,6 +192,9 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
       setReadOnly(!details.editable);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить кампанию');
+      // Кампания не прочиталась — автосохранению нельзя: пустая форма записала
+      // бы поверх настоящих писем и ящиков.
+      setLoadFailed(true);
     } finally {
       setLoading(false);
     }
@@ -301,11 +310,12 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   );
 
   /**
-   * Сохранить недописанную новую кампанию черновиком; возвращает её id.
+   * Сохранить то, что сейчас в форме, не требуя полноты; возвращает id
+   * кампании (новая заводится черновиком).
    *
-   * Сервер принимает такой черновик без проверок (partial): ни ящиков, ни
-   * писем в нём может ещё не быть. Уехать он всё равно не может — «Запустить»
-   * проверяет всё заново.
+   * Сервер принимает такое сохранение без проверок (partial): ни ящиков, ни
+   * писем, ни темы в нём может ещё не быть. Уехать такая кампания всё равно не
+   * может — «Запустить» проверяет всё заново.
    */
   const saveDraft = useCallback(async (): Promise<string | null> => {
     // Сохранение уже идёт — дожидаемся его. Без этого «выйти» в момент
@@ -341,13 +351,27 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
     return draftRef.current;
   }, []);
 
-  // Пауза после последней правки: сохранять на каждую букву незачем, а ждать
-  // дольше — значит рисковать написанным, если вкладку закроют.
+  /**
+   * Автосохранение: пауза после последней правки — сохранять на каждую букву
+   * незачем, а ждать дольше значит рисковать написанным, если вкладку закроют.
+   *
+   * Работает и у новой кампании, и у правки черновика или кампании на паузе:
+   * письмо, ящики и расписание пропадали одинаково, с какой стороны ни зайди.
+   * Идущую и завершённую кампанию не трогаем — их и править нельзя.
+   *
+   * Первый проход только запоминает, что уже сохранено: без этого правка
+   * кампании записала бы поверх неё пустую форму, пока та ещё грузится.
+   */
   useEffect(() => {
-    if (editing || readOnly || saving || !draftWorthSaving) return;
+    if (readOnly || loading || saving || loadFailed) return;
+    if (!savedSnapshot.current) {
+      savedSnapshot.current = payloadSnapshot;
+      return;
+    }
+    if (!draftWorthSaving) return;
     const timer = window.setTimeout(() => void saveDraft(), DRAFT_SAVE_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [editing, readOnly, saving, draftWorthSaving, saveDraft, payloadSnapshot]);
+  }, [readOnly, loading, saving, loadFailed, draftWorthSaving, saveDraft, payloadSnapshot]);
 
   /**
    * Результаты А/Б показываем только по шагам, где вариантов правда несколько:
@@ -461,14 +485,14 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   };
 
   /**
-   * Уйти со страницы, не запуская кампанию: недописанная новая кампания
-   * остаётся черновиком в списке, вместе с выбранной базой.
+   * Уйти со страницы, не запуская кампанию: написанное остаётся сохранённым —
+   * и у новой кампании (черновиком в списке), и у открытой на правку.
    *
    * Базу докладываем здесь, а не автосохранением: файл грузится один раз и
    * целиком, повторять это каждые пару секунд незачем.
    */
   const closePage = async () => {
-    if (editing || readOnly || !draftWorthSaving) {
+    if (readOnly || loadFailed || !draftWorthSaving) {
       leave();
       return;
     }
@@ -478,18 +502,18 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
       leave();
       return;
     }
+    const saved = editing
+      ? 'Изменения сохранены.'
+      : 'Черновик сохранён — он в списке кампаний. Письма пойдут после «Запустить».';
     if (!recipientsFile) {
-      leave({ notice: 'Черновик сохранён — он в списке кампаний. Письма пойдут после «Запустить».' }, id);
+      leave({ notice: saved }, id);
       return;
     }
     try {
-      leave({ notice: `Черновик сохранён. ${await sendFile(id)}` }, id);
+      leave({ notice: `${saved} ${await sendFile(id)}` }, id);
     } catch {
       leave(
-        {
-          notice:
-            'Черновик сохранён, но база не загрузилась — откройте кампанию по названию и выберите файл ещё раз.',
-        },
+        { notice: `${saved} База не загрузилась — откройте кампанию по названию и выберите файл ещё раз.` },
         id,
       );
     }
@@ -647,22 +671,22 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
             ) : (
               <span className="text-xs text-zinc-500">{statusHint}</span>
             )}
-            {/* Новую кампанию не обязательно дописывать за один раз: она сама
-                ложится черновиком в список, и к ней можно вернуться. */}
-            {!editing && !readOnly ? (
+            {/* Дописывать за один раз не обязательно: форма сохраняется сама,
+                и к кампании можно вернуться. */}
+            {readOnly ? null : (
               <span className="text-xs text-zinc-500">
                 {draftSavedAt
-                  ? `Черновик сохранён в ${draftSavedAt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`
-                  : 'Черновик сохранится сам'}
+                  ? `Сохранено в ${draftSavedAt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`
+                  : 'Сохраняется само'}
               </span>
-            ) : null}
+            )}
             <button
               type="button"
               onClick={() => void closePage()}
               disabled={saving}
               className="rounded-lg px-3 py-2 text-sm text-zinc-600 transition-colors hover:bg-zinc-100 disabled:opacity-50"
             >
-              {editing || readOnly ? 'Закрыть' : 'Выйти — сохранится черновик'}
+              {readOnly ? 'Закрыть' : 'Выйти'}
             </button>
             {readOnly ? null : (
               <button
@@ -870,6 +894,9 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
                 (letter) => (index === 0 ? letter.subject.trim() : true) && letter.body.trim(),
               )}
               title={index === 0 ? 'Первое письмо' : `Письмо ${index + 1}`}
+              // Свой цвет у каждого письма цепочки: без него блоки читаются
+              // как одна простыня, особенно на тёмной теме.
+              accent={letterAccent(index)}
               variants={step.variants}
               rows={14}
               delayHours={index === 0 ? undefined : step.delayHours}
