@@ -149,7 +149,8 @@ function makeTick(identity: EgressIdentity, lease: LeaseKeeper) {
       await processSenderReplies({ log, egressIp });
     }
 
-    // Проверочные отправки и ручные ответы операторов — с ящиков своего адреса.
+    // Проверочные отправки, ручные ответы операторов и тестовые письма себе —
+    // с ящиков своего адреса.
     await guarded('Проверочные отправки не обработались', () => sendPendingProbes({ log, egressIp }));
     await guarded('Ручные ответы не обработались', () => processManualMessages({ log, egressIp }));
 

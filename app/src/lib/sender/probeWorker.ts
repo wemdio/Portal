@@ -4,9 +4,9 @@ import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { assertSafeImapTarget } from '@/lib/byoMailbox/netGuard';
+import { buildMessageId } from '@/lib/mail/message';
 import { authForMailbox } from './mailboxAuth';
 import { sendSenderMail } from './smtp';
-import { buildMessageId } from './template';
 import type { MailboxRow } from './types';
 
 /**

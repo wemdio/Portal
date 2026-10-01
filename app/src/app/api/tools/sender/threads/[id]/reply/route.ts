@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/sender/apiHelpers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { buildMessageId } from '@/lib/sender/template';
+import { buildMessageId } from '@/lib/mail/message';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
