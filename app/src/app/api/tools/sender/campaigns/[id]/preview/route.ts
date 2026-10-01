@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/sender/apiHelpers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { applyVars, followUpSubject, recipientVars } from '@/lib/sender/template';
+import { pickVariant, variantLabel } from '@/lib/sender/variants';
 import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
@@ -12,6 +13,14 @@ const MAX_STEPS = 5;
 interface StepInput {
   subject?: string;
   body?: string;
+  /** Варианты письма шага (А/Б-тест); нет — шаг с одним письмом. */
+  variants?: { subject?: string; body?: string }[];
+}
+
+/** Варианты шага в порядке номеров: А/Б-тест или единственное письмо. */
+function variantsOf(step: StepInput): { subject?: string; body?: string }[] {
+  const list = step.variants?.length ? step.variants : [{ subject: step.subject, body: step.body }];
+  return list.filter((variant) => (variant.body ?? '').trim());
 }
 
 /**
@@ -29,7 +38,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     const { id } = await params;
     const body = (await req.json().catch(() => null)) as { steps?: StepInput[] } | null;
-    const steps = (body?.steps ?? []).slice(0, MAX_STEPS).filter((s) => (s.body ?? '').trim());
+    const steps = (body?.steps ?? [])
+      .slice(0, MAX_STEPS)
+      .map((step) => variantsOf(step))
+      .filter((variants) => variants.length);
     if (!steps.length) return jsonError('Нет писем для предпросмотра', 400);
 
     const { data: campaign } = await supabaseAdmin
@@ -41,23 +53,36 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     const { data: rows } = await supabaseAdmin
       .from('sender_recipients')
-      .select('email, name, vars')
+      .select('id, email, name, vars')
       .eq('campaign_id', id)
       .order('created_at')
       .limit(SAMPLE);
-    const recipients = (rows ?? []) as { email: string; name: string | null; vars: Record<string, string> }[];
+    const recipients = (rows ?? []) as {
+      id: string;
+      email: string;
+      name: string | null;
+      vars: Record<string, string>;
+    }[];
     if (!recipients.length) return jsonError('В кампании пока нет получателей — загрузите базу', 422);
 
+    // При А/Б-тесте показываем ровно тот вариант, который уедет этому адресу:
+    // вариант считается от id получателя, так же как в планировщике.
     const samples = recipients.map((recipient) => {
       const vars = recipientVars(recipient);
-      const firstSubject = applyVars(steps[0].subject ?? '', vars);
+      const chosen = steps.map((variants, index) => {
+        const variant = pickVariant(recipient.id, index + 1, variants.length);
+        return { variant, letter: variants[variant - 1] };
+      });
+      const firstSubject = applyVars(chosen[0].letter.subject ?? '', vars);
       return {
         email: recipient.email,
-        steps: steps.map((step, index) => ({
+        steps: chosen.map(({ letter, variant }, index) => ({
           subject: index === 0
             ? firstSubject
-            : followUpSubject(applyVars(step.subject ?? '', vars), firstSubject),
-          body: applyVars(step.body ?? '', vars),
+            : followUpSubject(applyVars(letter.subject ?? '', vars), firstSubject),
+          body: applyVars(letter.body ?? '', vars),
+          // Подпись варианта нужна только когда вариантов больше одного.
+          variant: steps[index].length > 1 ? variantLabel(variant) : null,
         })),
       };
     });

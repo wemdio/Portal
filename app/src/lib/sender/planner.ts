@@ -4,6 +4,7 @@ import { buildMessageId } from '@/lib/mail/message';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { chunkForInFilter } from './inFilter';
 import { applyVars, followUpSubject, recipientVars } from './template';
+import { pickVariant } from './variants';
 import { nextGapMs, nextWindowSlot, type SendWindow } from './sendWindow';
 import { advanceRecipient } from './stepAdvance';
 import type { CampaignRow, MailboxRow, RecipientRow, StepRow } from './types';
@@ -323,12 +324,48 @@ function pickSlot(slots: MailboxSlot[], recipient: RecipientRow): MailboxSlot | 
   return free.reduce((best, slot) => (slot.remaining > best.remaining ? slot : best));
 }
 
+/**
+ * Темы первых писем тех, кто уже на follow-up: тема «Re: …» строится от письма,
+ * которое лид реально получил.
+ *
+ * Пересчитать её из шагов нельзя: при А/Б-тесте первое письмо у соседей по базе
+ * называется по-разному, а набор вариантов между паузой и продолжением могли
+ * поправить. Не прочитали — не беда: ниже есть запасной вариант из шагов.
+ */
+async function loadFirstSubjects(recipients: RecipientRow[]): Promise<Map<string, string>> {
+  const subjects = new Map<string, string>();
+  if (!supabaseAdmin) return subjects;
+  const ids = recipients.filter((r) => r.last_step_sent > 0).map((r) => r.id);
+  if (!ids.length) return subjects;
+
+  for (const part of chunkForInFilter(ids)) {
+    const { data, error } = await supabaseAdmin
+      .from('sender_messages')
+      .select('recipient_id, subject')
+      .in('recipient_id', part)
+      .eq('step_no', 1);
+    if (error) return subjects;
+    for (const row of data ?? []) subjects.set(String(row.recipient_id), String(row.subject ?? ''));
+  }
+  return subjects;
+}
+
+/**
+ * Вариант письма шага, который достанется этому получателю. Шага нет вовсе —
+ * null: цепочка для него кончилась.
+ */
+function variantFor(steps: StepRow[], stepNo: number, recipientId: string): StepRow | null {
+  const variants = steps.filter((s) => s.step_no === stepNo).sort((a, b) => a.variant_no - b.variant_no);
+  if (!variants.length) return null;
+  return variants[pickVariant(recipientId, stepNo, variants.length) - 1];
+}
+
 async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
   if (!supabaseAdmin) return 0;
   const db = supabaseAdmin;
 
   const [{ data: stepRows }, { data: poolRows }] = await Promise.all([
-    db.from('sender_campaign_steps').select('*').eq('campaign_id', campaign.id).order('step_no'),
+    db.from('sender_campaign_steps').select('*').eq('campaign_id', campaign.id).order('step_no').order('variant_no'),
     db.from('sender_campaign_mailboxes').select('mailbox_id').eq('campaign_id', campaign.id),
   ]);
 
@@ -376,6 +413,7 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
     log('error', `Кампания ${campaign.name}: стоп-лист, занятость адресов или соседи по компании не проверены — проход пропущен`, e);
     return 0;
   }
+  const firstSubjects = await loadFirstSubjects(recipients);
   const now = new Date();
   const slots: MailboxSlot[] = [];
   for (const mailbox of mailboxes) {
@@ -407,7 +445,9 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
     }
 
     const stepNo = recipient.last_step_sent + 1;
-    const step = steps.find((s) => s.step_no === stepNo);
+    // А/Б-тест: у шага бывает несколько вариантов письма, и получателю всегда
+    // достаётся один и тот же — вариант считается от его id (variants.ts).
+    const step = variantFor(steps, stepNo, recipient.id);
     if (!step) {
       // Цепочка кончилась — лид отработан.
       await db
@@ -473,10 +513,14 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
       : pickSlot(slots, recipient);
     if (!slot) continue; // лимиты выбраны — лид подождёт следующего прохода
 
-    const firstStep = steps[0];
+    // Тема follow-up строится от первого письма ИМЕННО этого получателя: при
+    // А/Б-тесте у соседа по базе первое письмо называется иначе. Берём тему
+    // отправленного письма, а если её не прочитали — собираем из шага.
+    const firstSubject = firstSubjects.get(recipient.id)
+      ?? applyVars((variantFor(steps, 1, recipient.id) ?? steps[0]).subject, vars);
     const subject = stepNo === 1
       ? applyVars(step.subject, vars)
-      : followUpSubject(applyVars(step.subject, vars), applyVars(firstStep.subject, vars));
+      : followUpSubject(applyVars(step.subject, vars), firstSubject);
 
     const scheduledAt = nextWindowSlot(slot.cursor, windowOf(campaign));
     const messageId = buildMessageId(slot.mailbox.email);
@@ -486,6 +530,8 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
       recipient_id: recipient.id,
       mailbox_id: slot.mailbox.id,
       step_no: stepNo,
+      // Какой вариант уехал — иначе ответы не с чем сравнивать.
+      variant_no: step.variant_no,
       to_email: recipient.email,
       subject,
       body,

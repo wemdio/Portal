@@ -1,8 +1,10 @@
 'use client';
 
 import { useRef, useState, type ReactNode } from 'react';
+import { Split } from 'lucide-react';
 import { hasBrokenLinkMarkup } from '@/lib/mail/linkMarkup';
 import { placeholderKeys } from '@/lib/sender/templateVars';
+import { MAX_VARIANTS, MIN_RECIPIENTS_PER_VARIANT, variantLabel } from '@/lib/sender/variants';
 import type { RecipientColumnsDto } from './api';
 import { LinkInsert } from './LetterLinks';
 import { TemplateField, insertLink, insertVariable, placeCaret } from './TemplateField';
@@ -105,50 +107,35 @@ export function letterIssues(subject: string, body: string, columns: RecipientCo
   };
 }
 
-interface LetterProps {
-  no: number;
-  done: boolean;
+/** Одно письмо шага. Их несколько, когда у шага идёт А/Б-тест. */
+export interface LetterVariant {
   subject: string;
   body: string;
-  onSubject: (value: string) => void;
-  onBody: (value: string) => void;
-  columns: RecipientColumnsDto | null;
-  /** Счётчики «заполнено у N» посчитаны по всей базе, а не по выборке. */
-  countsExact?: boolean;
-  /** Подпись, когда базы ещё нет: у создания и у правки она разная. */
-  emptyHint: string;
-  disabled?: boolean;
-  /** Название шага: «Первое письмо», «Письмо 2»… */
-  title?: string;
-  /** Высота поля письма в строках: на странице настроек она больше, чем в окне. */
-  rows?: number;
-  /** Через сколько часов после предыдущего письма уйдёт этот шаг. */
-  delayHours?: number;
-  onDelayHours?: (value: number) => void;
-  onRemove?: () => void;
 }
 
 /**
- * Шаг «Письмо» цепочки: тема, текст и переменные из базы. Пустая тема у
- * follow-up — норма: письмо уйдёт ответом в тот же тред с «Re:».
+ * Поля одного письма: тема, текст, вставка ссылки и переменные базы.
+ *
+ * Отдельный компонент, потому что у шага таких писем бывает несколько
+ * (варианты А/Б-теста), и у каждого свои курсор, выделение и подсказки.
  */
-export function LetterStep({
-  no,
-  done,
-  subject,
-  body,
-  onSubject,
-  onBody,
+function LetterFields({
+  letter,
+  onChange,
   columns,
-  countsExact = true,
-  emptyHint,
-  disabled = false,
-  title = 'Первое письмо',
-  rows = 8,
-  delayHours,
-  onDelayHours,
-  onRemove,
-}: LetterProps) {
+  countsExact,
+  rows,
+  subjectPlaceholder,
+  disabled,
+}: {
+  letter: LetterVariant;
+  onChange: (patch: Partial<LetterVariant>) => void;
+  columns: RecipientColumnsDto | null;
+  countsExact: boolean;
+  rows: number;
+  subjectPlaceholder: string;
+  disabled: boolean;
+}) {
   const subjectRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
   const bodyRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
   // Куда вставлять переменную по клику на подсказку — в поле, где был курсор.
@@ -156,89 +143,51 @@ export function LetterStep({
   // Выделение в тексте на момент открытия окошка ссылки: пока оператор
   // вписывает адрес, фокус уже не в письме, и выделение оттуда не прочитать.
   const linkRange = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
-  const { variables, unknownKeys, partlyEmpty } = letterIssues(subject, body, columns);
+  const { variables, unknownKeys, partlyEmpty } = letterIssues(letter.subject, letter.body, columns);
 
   const insertAtCursor = (key: string) => {
     const isSubject = lastField === 'subject';
     const el = (isSubject ? subjectRef : bodyRef).current;
-    const text = isSubject ? subject : body;
+    const text = isSubject ? letter.subject : letter.body;
     const next = insertVariable(text, el?.selectionStart ?? text.length, key);
-    (isSubject ? onSubject : onBody)(next.text);
+    onChange(isSubject ? { subject: next.text } : { body: next.text });
     placeCaret(el, next.caret);
   };
 
   /** Выделенный в письме текст — он же подпись будущей ссылки по умолчанию. */
   const grabSelection = () => {
     const el = bodyRef.current;
-    const start = el?.selectionStart ?? body.length;
+    const start = el?.selectionStart ?? letter.body.length;
     const end = el?.selectionEnd ?? start;
     linkRange.current = { start, end };
-    return body.slice(start, end).trim();
+    return letter.body.slice(start, end).trim();
   };
 
   const addLink = (label: string, url: string) => {
     const { start, end } = linkRange.current;
-    const next = insertLink(body, start, end, label, url);
-    onBody(next.text);
+    const next = insertLink(letter.body, start, end, label, url);
+    onChange({ body: next.text });
     placeCaret(bodyRef.current, next.caret);
   };
 
   return (
-    <Step
-      no={no}
-      title={title}
-      done={done}
-      hint={
-        delayHours != null && onDelayHours
-          ? `через ${delayHours} ч после предыдущего`
-          : undefined
-      }
-    >
-      {/* Задержка и удаление — атрибуты шага цепочки, а не письма: живут
-          в шапке шага, чтобы текст оставался только текстом. */}
-      {delayHours != null && onDelayHours ? (
-        <div className="mb-2 flex flex-wrap items-center gap-2 text-sm text-zinc-600">
-          <span className="text-xs text-zinc-500">Отправить через</span>
-          <input
-            type="number"
-            min={1}
-            max={720}
-            value={delayHours}
-            disabled={disabled}
-            onChange={(e) => onDelayHours(Math.max(1, Math.round(Number(e.target.value) || 1)))}
-            className="w-16 rounded-lg border border-zinc-300 bg-white px-2 py-1 text-center text-sm text-zinc-900"
-          />
-          <span className="text-xs text-zinc-500">
-            ч после предыдущего письма (тему можно оставить пустой — уйдёт как «Re:» в тот же тред)
-          </span>
-          {onRemove ? (
-            <button
-              type="button"
-              onClick={onRemove}
-              disabled={disabled}
-              className="ml-auto text-xs text-zinc-400 transition-colors hover:text-red-600 disabled:opacity-50"
-            >
-              Убрать шаг
-            </button>
-          ) : null}
-        </div>
-      ) : null}
+    <>
       <div className="mb-2">
         <TemplateField
-          value={subject}
-          onChange={onSubject}
+          value={letter.subject}
+          onChange={(value) => onChange({ subject: value })}
           variables={variables}
           fieldRef={subjectRef}
           onFocus={() => setLastField('subject')}
-          placeholder={delayHours != null ? 'Тема (пусто = «Re:» в тот же тред)' : 'Тема письма'}
+          placeholder={subjectPlaceholder}
           disabled={disabled}
           className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
         />
       </div>
       <TemplateField
         multiline
-        value={body}
-        onChange={onBody}
+        value={letter.body}
+        onChange={(value) => onChange({ body: value })}
         variables={variables}
         fieldRef={bodyRef}
         onFocus={() => setLastField('body')}
@@ -255,7 +204,7 @@ export function LetterStep({
         <LinkInsert disabled={disabled} onOpen={grabSelection} onInsert={addLink} />
         <span className="text-xs text-zinc-500">Выделите слово — оно станет подписью ссылки</span>
       </div>
-      {hasBrokenLinkMarkup(body) ? (
+      {hasBrokenLinkMarkup(letter.body) ? (
         <p className="mt-2 text-sm text-amber-600">
           Ссылка без «https://» останется в письме текстом — впишите адрес целиком.
         </p>
@@ -298,9 +247,7 @@ export function LetterStep({
             })}
           </div>
         </div>
-      ) : (
-        <p className="mt-2 text-xs text-zinc-500">{emptyHint}</p>
-      )}
+      ) : null}
 
       {unknownKeys.length ? (
         <p className="mt-2 text-sm text-red-600">
@@ -314,6 +261,156 @@ export function LetterStep({
           получателей — у них на этом месте ничего не будет.
         </p>
       ) : null}
+    </>
+  );
+}
+
+interface LetterProps {
+  no: number;
+  done: boolean;
+  /** Письма этого шага: одно — обычный шаг, несколько — А/Б-тест. */
+  variants: LetterVariant[];
+  onVariant: (index: number, patch: Partial<LetterVariant>) => void;
+  onAddVariant?: () => void;
+  onRemoveVariant?: (index: number) => void;
+  columns: RecipientColumnsDto | null;
+  /** Счётчики «заполнено у N» посчитаны по всей базе, а не по выборке. */
+  countsExact?: boolean;
+  /** Подпись, когда базы ещё нет: у создания и у правки она разная. */
+  emptyHint: string;
+  disabled?: boolean;
+  /** Название шага: «Первое письмо», «Письмо 2»… */
+  title?: string;
+  /** Высота поля письма в строках: на странице настроек она больше, чем в окне. */
+  rows?: number;
+  /** Через сколько часов после предыдущего письма уйдёт этот шаг. */
+  delayHours?: number;
+  onDelayHours?: (value: number) => void;
+  onRemove?: () => void;
+}
+
+/**
+ * Шаг «Письмо» цепочки: тема, текст и переменные из базы. Пустая тема у
+ * follow-up — норма: письмо уйдёт ответом в тот же тред с «Re:».
+ *
+ * А/Б-тест: у шага может быть несколько вариантов письма. База делится между
+ * ними поровну, каждый получатель попадает в один вариант и остаётся в нём
+ * (lib/sender/variants.ts) — иначе ответ нельзя было бы приписать тексту.
+ */
+export function LetterStep({
+  no,
+  done,
+  variants,
+  onVariant,
+  onAddVariant,
+  onRemoveVariant,
+  columns,
+  countsExact = true,
+  emptyHint,
+  disabled = false,
+  title = 'Первое письмо',
+  rows = 8,
+  delayHours,
+  onDelayHours,
+  onRemove,
+}: LetterProps) {
+  const testing = variants.length > 1;
+
+  return (
+    <Step
+      no={no}
+      title={title}
+      done={done}
+      hint={[
+        delayHours != null && onDelayHours ? `через ${delayHours} ч после предыдущего` : null,
+        testing ? `А/Б-тест: ${variants.length} варианта` : null,
+      ]
+        .filter(Boolean)
+        .join(' · ') || undefined}
+    >
+      {/* Задержка и удаление — атрибуты шага цепочки, а не письма: живут
+          в шапке шага, чтобы текст оставался только текстом. */}
+      {delayHours != null && onDelayHours ? (
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-sm text-zinc-600">
+          <span className="text-xs text-zinc-500">Отправить через</span>
+          <input
+            type="number"
+            min={1}
+            max={720}
+            value={delayHours}
+            disabled={disabled}
+            onChange={(e) => onDelayHours(Math.max(1, Math.round(Number(e.target.value) || 1)))}
+            className="w-16 rounded-lg border border-zinc-300 bg-white px-2 py-1 text-center text-sm text-zinc-900"
+          />
+          <span className="text-xs text-zinc-500">
+            ч после предыдущего письма (тему можно оставить пустой — уйдёт как «Re:» в тот же тред)
+          </span>
+          {onRemove ? (
+            <button
+              type="button"
+              onClick={onRemove}
+              disabled={disabled}
+              className="ml-auto text-xs text-zinc-400 transition-colors hover:text-red-600 disabled:opacity-50"
+            >
+              Убрать шаг
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {variants.map((letter, index) => (
+        <div
+          key={index}
+          className={testing ? 'mb-3 rounded-lg border border-zinc-200 bg-zinc-50/50 p-3 last:mb-0' : ''}
+        >
+          {testing ? (
+            <div className="mb-2 flex items-center gap-2">
+              <span className="rounded-md bg-zinc-200 px-2 py-0.5 text-xs font-medium text-zinc-700">
+                Вариант {variantLabel(index + 1)}
+              </span>
+              {onRemoveVariant && !disabled ? (
+                <button
+                  type="button"
+                  onClick={() => onRemoveVariant(index)}
+                  className="ml-auto text-xs text-zinc-400 transition-colors hover:text-red-600"
+                >
+                  Убрать вариант
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          <LetterFields
+            letter={letter}
+            onChange={(patch) => onVariant(index, patch)}
+            columns={columns}
+            countsExact={countsExact}
+            rows={rows}
+            subjectPlaceholder={delayHours != null ? 'Тема (пусто = «Re:» в тот же тред)' : 'Тема письма'}
+            disabled={disabled}
+          />
+        </div>
+      ))}
+
+      {/* А/Б-тест: второй вариант письма этого же шага. База делится поровну,
+          и через неделю видно, на какой текст больше ответов. */}
+      {onAddVariant && !disabled && variants.length < MAX_VARIANTS ? (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onAddVariant}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-dashed border-zinc-300 px-2.5 py-1 text-xs text-zinc-600 transition-colors hover:border-blue-400 hover:text-blue-600"
+          >
+            <Split className="h-3.5 w-3.5" />
+            {testing ? 'Ещё вариант' : 'А/Б-тест: второй вариант'}
+          </button>
+          <span className="text-xs text-zinc-500">
+            {testing
+              ? `База разделится поровну между вариантами — нужно от ${MIN_RECIPIENTS_PER_VARIANT} адресов на каждый`
+              : 'Два текста на одну базу — сравним по ответам'}
+          </span>
+        </div>
+      ) : null}
+
+      {columns ? null : <p className="mt-2 text-xs text-zinc-500">{emptyHint}</p>}
     </Step>
   );
 }
