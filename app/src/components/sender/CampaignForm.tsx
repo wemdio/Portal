@@ -25,6 +25,7 @@ import {
   ScheduleStep,
   Step,
   WORKDAYS,
+  letterAccent,
   letterIssues,
   type LetterVariant,
 } from './CampaignSteps';
@@ -893,6 +894,9 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
                 (letter) => (index === 0 ? letter.subject.trim() : true) && letter.body.trim(),
               )}
               title={index === 0 ? 'Первое письмо' : `Письмо ${index + 1}`}
+              // Свой цвет у каждого письма цепочки: без него блоки читаются
+              // как одна простыня, особенно на тёмной теме.
+              accent={letterAccent(index)}
               variants={step.variants}
               rows={14}
               delayHours={index === 0 ? undefined : step.delayHours}
