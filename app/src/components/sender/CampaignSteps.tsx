@@ -471,6 +471,17 @@ interface ScheduleProps {
 }
 
 /**
+ * Час из поля ввода в допустимых границах. Пустое поле и нечисло оставляют
+ * прежнее значение: иначе на середине набора («1» → стёрли → NaN) час
+ * обнулялся бы сам.
+ */
+function clampHour(raw: string, current: number, min: number, max: number): number {
+  const value = Number(raw);
+  if (raw.trim() === '' || !Number.isFinite(value)) return current;
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+/**
  * Шаг «Когда отправлять». Часы, дни, пояс и паузы между письмами — одно
  * решение о ритме кампании, поэтому и на экране это один шаг.
  */
@@ -510,13 +521,16 @@ export function ScheduleStep({
       <div className="flex flex-wrap items-center gap-2 text-sm text-zinc-600">
         <span className="w-10 text-xs uppercase tracking-wide text-zinc-500">Часы</span>
         <div className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-1.5">
+          {/* Границы держим кодом, а не только атрибутами min/max: их слушают
+              только стрелки, а вписать руками можно было и 99, и −5 — окно
+              отправки от такого молча становилось пустым. */}
           <input
             type="number"
             min={0}
             max={23}
             value={hourFrom}
             disabled={disabled}
-            onChange={(e) => onHourFrom(Number(e.target.value))}
+            onChange={(e) => onHourFrom(clampHour(e.target.value, hourFrom, 0, 23))}
             className="w-12 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none"
           />
           <span className="text-zinc-400">—</span>
@@ -526,7 +540,7 @@ export function ScheduleStep({
             max={24}
             value={hourTo}
             disabled={disabled}
-            onChange={(e) => onHourTo(Number(e.target.value))}
+            onChange={(e) => onHourTo(clampHour(e.target.value, hourTo, 1, 24))}
             className="w-12 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none"
           />
         </div>
@@ -637,6 +651,13 @@ export function ScheduleStep({
           кнопки, а не в сообщении об ошибке после. */}
       {weekdays.length === 0 ? (
         <p className="mt-3 text-xs text-amber-600">Не выбрано ни одного дня — отправлять будет некогда.</p>
+      ) : null}
+      {/* Час начала не раньше часа конца — иначе окно пустое и письма не едут,
+          а на экране это выглядит как работающая кампания. */}
+      {hourFrom >= hourTo ? (
+        <p className="mt-3 text-xs text-amber-600">
+          Начало не раньше конца ({hourFrom}:00–{hourTo}:00) — в такое окно отправлять нечего.
+        </p>
       ) : null}
     </Step>
   );
