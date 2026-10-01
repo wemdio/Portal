@@ -13,6 +13,10 @@ import type { MailboxRow } from './types';
  * sender-хоста — поэтому не из API-процесса, а через БД, как у остальной
  * отправки. Ответ уходит с закреплённого ящика лида (sticky sender) и с
  * In-Reply-To в тот же тред.
+ *
+ * Той же очередью уходит тестовое письмо себе из формы кампании: произвольное
+ * письмо с выбранного ящика, только без переписки — campaign_id и recipient_id
+ * у него пустые (миграция 20261001_0020).
  */
 
 type Log = (level: 'info' | 'warn' | 'error', msg: string, extra?: unknown) => void;
@@ -21,8 +25,9 @@ const MAX_ATTEMPTS = 3;
 
 interface ManualRow {
   id: string;
-  campaign_id: string;
-  recipient_id: string;
+  /** null у тестового письма: его шлют себе до того, как кампания создана. */
+  campaign_id: string | null;
+  recipient_id: string | null;
   mailbox_id: string;
   to_email: string;
   subject: string;

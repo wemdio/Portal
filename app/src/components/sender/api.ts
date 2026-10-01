@@ -578,6 +578,29 @@ export function previewCampaignSteps(campaignId: string, steps: { subject: strin
   });
 }
 
+/** Состояние тестового письма в очереди отправки. */
+export interface TestLetterDto {
+  status: 'queued' | 'sending' | 'sent' | 'failed';
+  error: string | null;
+  sent_at: string | null;
+}
+
+/**
+ * Отправить письмо кампании на свой адрес. Уходит той же очередью, что и живая
+ * отправка, поэтому результат спрашиваем отдельно — fetchTestLetter.
+ */
+export function sendTestLetter(input: { mailboxId: string; to: string; subject: string; body: string }) {
+  return authFetchJson<{ id: string; from: string }>(`${BASE}/test-send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export function fetchTestLetter(id: string) {
+  return authFetchJson<{ test: TestLetterDto }>(`${BASE}/test-send?id=${encodeURIComponent(id)}`);
+}
+
 /** Строка базы кампании (экран получателей, задача 5.2). */
 export interface CampaignRecipientDto {
   id: string;

@@ -29,6 +29,21 @@ export function insertVariable(
   return { text: text.slice(0, start) + inserted + text.slice(end), caret: start + inserted.length };
 }
 
+/**
+ * Вставляет ссылку `[подпись](адрес)` вместо выделения (или на место каретки)
+ * и возвращает новый текст с позицией каретки после вставки.
+ */
+export function insertLink(
+  text: string,
+  start: number,
+  end: number,
+  label: string,
+  url: string,
+): { text: string; caret: number } {
+  const inserted = `[${label}](${url})`;
+  return { text: text.slice(0, start) + inserted + text.slice(end), caret: start + inserted.length };
+}
+
 export function placeCaret(el: FieldElement | null, caret: number) {
   if (!el) return;
   // После setState текст в поле обновится только на следующем кадре.

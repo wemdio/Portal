@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { linkMarkupToText, splitLinkMarkup } from './linkMarkup';
 
 /**
  * Сборка исходящего письма — общая для обоих движков отправки портала:
@@ -40,8 +41,21 @@ function escapeHtml(text: string): string {
   return text.replace(/[&<>"]/g, (c) => HTML_ESCAPES[c] ?? c);
 }
 
+/** Абзац письма в HTML: ссылки под словом — тегом, остальное экранируется. */
+function blockToHtml(block: string): string {
+  return splitLinkMarkup(block)
+    .map((chunk) =>
+      chunk.kind === 'link'
+        ? `<a href="${escapeHtml(chunk.url)}">${escapeHtml(chunk.text)}</a>`
+        : escapeHtml(chunk.text),
+    )
+    .join('')
+    .replace(/\n/g, '<br>');
+}
+
 /**
- * Текст письма в простой HTML: абзацы и переносы строк, больше ничего.
+ * Текст письма в простой HTML: абзацы, переносы строк и ссылки под словом
+ * (`[Alial](https://alial.ru)` — см. linkMarkup), больше ничего.
  *
  * Разметка нарочно скучная. HTML здесь нужен не для оформления, а чтобы
  * письмо было multipart/alternative: холодное письмо из одной-единственной
@@ -51,7 +65,7 @@ export function textToHtml(text: string): string {
   const paragraphs = text
     .replace(/\r\n/g, '\n')
     .split(/\n{2,}/)
-    .map((block) => escapeHtml(block.trim()).replace(/\n/g, '<br>'))
+    .map((block) => blockToHtml(block.trim()))
     .filter(Boolean);
   const body = paragraphs.length ? paragraphs.map((p) => `<p>${p}</p>`).join('\n') : '<p></p>';
   return `<div dir="auto">\n${body}\n</div>`;
@@ -104,6 +118,10 @@ export interface MailParts {
  * релей провайдера может срезать заголовок List-Unsubscribe, и тогда способ
  * отказаться остаётся только один — в самом тексте. Повторно строка не
  * добавляется: если автор уже написал свою, чужую снизу не подставляем.
+ *
+ * Ссылки под словом (`[Alial](https://alial.ru)`) разворачиваются здесь же:
+ * в HTML-части — тегом, в текстовой — «подпись (адрес)». Поэтому обе части
+ * всегда собираются из одного исходника с разметкой.
  */
 export function buildMailParts(input: {
   from: string;
@@ -115,22 +133,22 @@ export function buildMailParts(input: {
   const unsubscribe = input.unsubscribe ?? true;
   const address = bareAddress(input.from);
 
-  let text = (input.text ?? '').trim();
+  // source — текст с разметкой ссылок; части письма ниже собираются из него.
+  let source = (input.text ?? '').trim();
   let html = (input.html ?? '').trim();
-  if (!text && !html) text = '';
-  if (!text) text = htmlToText(html);
+  if (!source) source = htmlToText(html);
 
-  if (unsubscribe && !text.includes(address)) {
+  if (unsubscribe && !source.includes(address)) {
     const line = unsubscribeLine(input.from);
-    text = text ? `${text}\n\n—\n${line}` : line;
+    source = source ? `${source}\n\n—\n${line}` : line;
     // HTML пересобираем из текста ниже, если своего HTML у письма нет.
     if (html) html += `\n<p style="color:#888;font-size:12px">${escapeHtml(line)}</p>`;
   }
 
-  if (!html) html = textToHtml(text);
+  if (!html) html = textToHtml(source);
 
   return {
-    text,
+    text: linkMarkupToText(source),
     html,
     headers: unsubscribe ? { 'List-Unsubscribe': `<${unsubscribeMailto(input.from)}>` } : {},
   };

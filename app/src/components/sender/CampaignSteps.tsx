@@ -1,9 +1,11 @@
 'use client';
 
 import { useRef, useState, type ReactNode } from 'react';
+import { hasBrokenLinkMarkup } from '@/lib/mail/linkMarkup';
 import { placeholderKeys } from '@/lib/sender/templateVars';
 import type { RecipientColumnsDto } from './api';
-import { TemplateField, insertVariable, placeCaret } from './TemplateField';
+import { LinkInsert } from './LetterLinks';
+import { TemplateField, insertLink, insertVariable, placeCaret } from './TemplateField';
 
 /**
  * Шаги формы кампании, одинаковые для создания и редактирования: оболочка
@@ -118,6 +120,8 @@ interface LetterProps {
   disabled?: boolean;
   /** Название шага: «Первое письмо», «Письмо 2»… */
   title?: string;
+  /** Высота поля письма в строках: на странице настроек она больше, чем в окне. */
+  rows?: number;
   /** Через сколько часов после предыдущего письма уйдёт этот шаг. */
   delayHours?: number;
   onDelayHours?: (value: number) => void;
@@ -140,6 +144,7 @@ export function LetterStep({
   emptyHint,
   disabled = false,
   title = 'Первое письмо',
+  rows = 8,
   delayHours,
   onDelayHours,
   onRemove,
@@ -148,6 +153,9 @@ export function LetterStep({
   const bodyRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
   // Куда вставлять переменную по клику на подсказку — в поле, где был курсор.
   const [lastField, setLastField] = useState<'subject' | 'body'>('body');
+  // Выделение в тексте на момент открытия окошка ссылки: пока оператор
+  // вписывает адрес, фокус уже не в письме, и выделение оттуда не прочитать.
+  const linkRange = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
   const { variables, unknownKeys, partlyEmpty } = letterIssues(subject, body, columns);
 
   const insertAtCursor = (key: string) => {
@@ -157,6 +165,22 @@ export function LetterStep({
     const next = insertVariable(text, el?.selectionStart ?? text.length, key);
     (isSubject ? onSubject : onBody)(next.text);
     placeCaret(el, next.caret);
+  };
+
+  /** Выделенный в письме текст — он же подпись будущей ссылки по умолчанию. */
+  const grabSelection = () => {
+    const el = bodyRef.current;
+    const start = el?.selectionStart ?? body.length;
+    const end = el?.selectionEnd ?? start;
+    linkRange.current = { start, end };
+    return body.slice(start, end).trim();
+  };
+
+  const addLink = (label: string, url: string) => {
+    const { start, end } = linkRange.current;
+    const next = insertLink(body, start, end, label, url);
+    onBody(next.text);
+    placeCaret(bodyRef.current, next.caret);
   };
 
   return (
@@ -218,11 +242,24 @@ export function LetterStep({
         variables={variables}
         fieldRef={bodyRef}
         onFocus={() => setLastField('body')}
-        rows={8}
+        rows={rows}
         placeholder="Здравствуйте, {{first_name}}! Пишу по поводу {{company_name}}…"
         disabled={disabled}
         className="w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
       />
+
+      {/* Ссылка под словом: выделили «Alial» — кнопка подставит подпись, адрес
+          вписывается рядом. В тексте это остаётся разметкой с видимым адресом,
+          синей ссылкой её покажет предпросмотр. */}
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <LinkInsert disabled={disabled} onOpen={grabSelection} onInsert={addLink} />
+        <span className="text-xs text-zinc-500">Выделите слово — оно станет подписью ссылки</span>
+      </div>
+      {hasBrokenLinkMarkup(body) ? (
+        <p className="mt-2 text-sm text-amber-600">
+          Ссылка без «https://» останется в письме текстом — впишите адрес целиком.
+        </p>
+      ) : null}
 
       {/* Переменные — из колонок базы: клик вставляет в поле, где стоял
           курсор; то же самое выпадает подсказкой после «{{». */}

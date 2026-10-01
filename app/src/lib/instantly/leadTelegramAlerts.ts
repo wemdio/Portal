@@ -11,6 +11,13 @@ export interface LeadTelegramSpecialistMention {
 
 export interface LeadTelegramAlertData {
   expectHandoff?: boolean;
+  /**
+   * Передача ручная: лид попадёт в таблицу клиента только после отправки из
+   * карточки передачи. Специалисты дважды спрашивали «в чате есть, в таблице
+   * нет» — предупреждение нужно рядом со ссылкой на таблицу, а не только в
+   * карточке передачи ответом ниже.
+   */
+  manualHandoff?: boolean;
   /** Explicitly disabled for automatic projects and unknown configuration. */
   allowRejection?: boolean;
   qualificationId: string;
@@ -157,6 +164,11 @@ function buildMessage(data: LeadTelegramAlertData, statusText?: string): string 
   // Reserve the durable table link and qualification ID before fitting prose.
   const footer: string[] = [];
   if (statusText) footer.push('', escapeHtml(statusText));
+  if (data.manualHandoff) {
+    footer.push('', statusText
+      ? '⚠️ В таблице клиента лид появится после передачи.'
+      : '⚠️ В таблице клиента лид появится после передачи — форма придёт ответом на это сообщение.');
+  }
   if (data.boardLink) footer.push('', `📋 <a href="${escapeHtml(data.boardLink)}">Все лиды проекта</a>`);
   footer.push('', `<code>${escapeHtml(data.qualificationId)}</code>`);
   const remaining = () => Math.max(0, 4096 - visibleLength([...lines, ...footer].join('\n')));
