@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, FileSpreadsheet, Loader2, Mail } from 'lucide-react';
 import { applyVars, followUpSubject } from '@/lib/sender/template';
+import { MIN_RECIPIENTS_PER_VARIANT, variantLabel } from '@/lib/sender/variants';
 import {
   createCampaign,
   fetchCampaign,
@@ -16,9 +17,17 @@ import {
   type CampaignDto,
   type PreviewSampleDto,
   type RecipientColumnsDto,
+  type VariantStatDto,
 } from './api';
 import { stashCampaignNotice, type CampaignNotice } from './campaignNotice';
-import { LetterStep, ScheduleStep, Step, WORKDAYS, letterIssues } from './CampaignSteps';
+import {
+  LetterStep,
+  ScheduleStep,
+  Step,
+  WORKDAYS,
+  letterIssues,
+  type LetterVariant,
+} from './CampaignSteps';
 import { LetterText } from './LetterLinks';
 import { MailboxPickerModal, type PickedMailbox } from './MailboxPickerModal';
 import { SenderModal } from './SenderModal';
@@ -34,6 +43,30 @@ const TEST_EMAIL_KEY = 'sender.testEmail';
 /** Сколько ждём отправки теста: письмо уходит очередью воркера, не мгновенно. */
 const TEST_WAIT_TRIES = 20;
 const TEST_WAIT_MS = 3000;
+
+/** Шаг цепочки в форме: варианты письма (А/Б-тест) и задержка от предыдущего. */
+interface LetterStepState {
+  variants: LetterVariant[];
+  delayHours: number;
+}
+
+function emptyLetterStep(): LetterStepState {
+  return { variants: [{ subject: '', body: '' }], delayHours: 72 };
+}
+
+/** Строки шагов из базы → шаги формы: варианты одного step_no в один шаг. */
+function groupSteps(
+  rows: { step_no: number; variant_no?: number; delay_hours: number; subject: string; body: string }[],
+): LetterStepState[] {
+  const byStep = new Map<number, LetterStepState>();
+  for (const row of [...rows].sort((a, b) => a.step_no - b.step_no || (a.variant_no ?? 1) - (b.variant_no ?? 1))) {
+    const step = byStep.get(row.step_no);
+    const letter = { subject: row.subject, body: row.body };
+    if (step) step.variants.push(letter);
+    else byStep.set(row.step_no, { variants: [letter], delayHours: row.delay_hours || 72 });
+  }
+  return [...byStep.values()];
+}
 
 const STATUS_HINT: Record<CampaignDto['status'], string> = {
   draft: 'Черновик — письма пойдут только после «Запустить» в списке',
@@ -87,10 +120,9 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   );
 
   // Цепочка писем до пяти шагов: follow-up уходит ответом в тред первого
-  // письма с «Re:», шаг без темы — норма.
-  const [letters, setLetters] = useState<{ subject: string; body: string; delayHours: number }[]>([
-    { subject: '', body: '', delayHours: 72 },
-  ]);
+  // письма с «Re:», шаг без темы — норма. У шага может быть несколько
+  // вариантов письма — это А/Б-тест, база делится между ними поровну.
+  const [letters, setLetters] = useState<LetterStepState[]>([emptyLetterStep()]);
   const [hourFrom, setHourFrom] = useState(9);
   const [hourTo, setHourTo] = useState(18);
   const [timezone, setTimezone] = useState('Europe/Moscow');
@@ -106,9 +138,12 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   const [preview, setPreview] = useState<PreviewSampleDto[] | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [repliesByStep, setRepliesByStep] = useState<{ step: number; replied: number }[]>([]);
+  // Результаты А/Б-теста по вариантам писем; пусто — тестов не было.
+  const [variantStats, setVariantStats] = useState<VariantStatDto[]>([]);
   // Тестовое письмо себе: адрес помним между кампаниями — проверяют на свой.
   const [testEmail, setTestEmail] = useState('');
-  const [testStep, setTestStep] = useState(0);
+  // Какое письмо цепочки отправить тестом: шаг и вариант А/Б-теста.
+  const [testKey, setTestKey] = useState('0:0');
   const [testBusy, setTestBusy] = useState(false);
   const [testNote, setTestNote] = useState<string | null>(null);
 
@@ -133,17 +168,10 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
       setTimezone(details.campaign.timezone);
       setGapSeconds(details.campaign.gap_seconds);
       setGapJitterSeconds(details.campaign.gap_jitter_seconds);
-      if (details.steps.length) {
-        setLetters(
-          details.steps.map((step) => ({
-            subject: step.subject,
-            body: step.body,
-            delayHours: step.delay_hours || 72,
-          })),
-        );
-      }
+      if (details.steps.length) setLetters(groupSteps(details.steps));
       setSaved(details.recipients);
       setRepliesByStep(details.repliesByStep ?? []);
+      setVariantStats(details.variantStats ?? []);
       setReadOnly(!details.editable);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить кампанию');
@@ -193,14 +221,24 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   // уже загруженной базе: письмо всегда сверяется с тем, что реально уедет.
   const columns = fileColumns ?? saved?.columns ?? null;
   const countsExact = fileColumns ? true : (saved?.exact ?? true);
-  // Переменные проверяются по всей цепочке: неизвестная в любом шаге — ошибка.
-  const { unknownKeys } = letterIssues(letters.map((l) => `${l.subject}\n${l.body}`).join('\n\n'), '', columns);
+  // Переменные проверяются по всей цепочке и по всем вариантам: неизвестная в
+  // любом письме — ошибка.
+  const allLetters = letters.flatMap((step) => step.variants);
+  const { unknownKeys } = letterIssues(
+    allLetters.map((letter) => `${letter.subject}\n${letter.body}`).join('\n\n'),
+    '',
+    columns,
+  );
   const baseReady = editing ? (saved?.total ?? 0) > 0 || recipientsFile != null : recipientsFile != null;
 
-  const firstLetter = letters[0];
-  const lettersDone = Boolean(firstLetter?.subject.trim() && firstLetter?.body.trim())
-    && letters.slice(1).every((letter) => Boolean(letter.body.trim()))
-    && unknownKeys.length === 0;
+  // Первое письмо: тема и текст обязательны у каждого варианта — лид получит
+  // один из них. У follow-up обязателен только текст.
+  const lettersDone = Boolean(
+    letters[0]?.variants.length
+      && letters[0].variants.every((letter) => letter.subject.trim() && letter.body.trim())
+      && letters.slice(1).every((step) => step.variants.every((letter) => letter.body.trim()))
+      && unknownKeys.length === 0,
+  );
 
   /**
    * Готовность шагов — один список, из которого берутся и подсветка номера, и
@@ -214,6 +252,33 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
     { no: 5, title: 'дни отправки', done: weekdays.length > 0 },
   ];
   const missing = steps.filter((step) => !step.done);
+
+  /** Цепочка для сервера: шаг с вариантами письма и задержкой от предыдущего. */
+  const stepsPayload = letters.map((step, index) => ({
+    delayHours: index === 0 ? 0 : step.delayHours,
+    variants: step.variants,
+  }));
+
+  /**
+   * Результаты А/Б показываем только по шагам, где вариантов правда несколько:
+   * строка «вариант А» у обычного письма — шум.
+   */
+  const testedSteps = new Set(
+    variantStats.filter((row) => row.variant > 1).map((row) => row.step),
+  );
+  const abResults = variantStats.filter((row) => testedSteps.has(row.step));
+
+  /** Что можно отправить тестом: каждое письмо цепочки и каждый его вариант. */
+  const testTargets = letters.flatMap((step, stepIndex) =>
+    step.variants.map((letter, variantIndex) => ({
+      key: `${stepIndex}:${variantIndex}`,
+      stepIndex,
+      letter,
+      label:
+        (stepIndex === 0 ? 'Первое письмо' : `Письмо ${stepIndex + 1}`)
+        + (step.variants.length > 1 ? ` · вариант ${variantLabel(variantIndex + 1)}` : ''),
+    })),
+  );
 
   /** Загрузить выбранный файл в кампанию и рассказать, что получилось. */
   const sendFile = async (id: string) => {
@@ -241,11 +306,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
       ({ id } = await createCampaign({
         name,
         mailboxIds: mailboxes.map((m) => m.id),
-        steps: letters.map((letter, index) => ({
-          delayHours: index === 0 ? 0 : letter.delayHours,
-          subject: letter.subject,
-          body: letter.body,
-        })),
+        steps: stepsPayload,
         timezone,
         sendHourFrom: hourFrom,
         sendHourTo: hourTo,
@@ -286,11 +347,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
       await updateCampaign(campaignId, {
         name,
         mailboxIds: mailboxes.map((m) => m.id),
-        steps: letters.map((letter, index) => ({
-          delayHours: index === 0 ? 0 : letter.delayHours,
-          subject: letter.subject,
-          body: letter.body,
-        })),
+        steps: stepsPayload,
         timezone,
         sendHourFrom: hourFrom,
         sendHourTo: hourTo,
@@ -349,7 +406,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
     setError(null);
     setPreview(null);
     try {
-      const previewSteps = letters.map((letter) => ({ subject: letter.subject, body: letter.body }));
+      const previewSteps = letters.map((step) => ({ variants: step.variants }));
       if (recipientsFile) {
         const res = await previewRecipients(recipientsFile, previewSteps);
         if (res.samples?.length) setPreview(res.samples);
@@ -376,7 +433,8 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
    */
   const sendTest = async () => {
     const mailbox = mailboxes[0];
-    const letter = letters[testStep] ?? letters[0];
+    const target = testTargets.find((item) => item.key === testKey) ?? testTargets[0];
+    const letter = target?.letter;
     if (!mailbox || !letter?.body.trim()) {
       setError('Для теста нужны выбранный ящик (шаг 3) и текст письма (шаг 4)');
       return;
@@ -396,9 +454,9 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
       const vars: Record<string, string> = Object.fromEntries(
         (columns?.variables ?? []).map((v) => [v.key, v.sample ?? '']),
       );
-      const firstSubject = applyVars(letters[0]?.subject ?? '', vars);
-      const subject = testStep === 0
-        ? firstSubject
+      const firstSubject = applyVars(letters[0]?.variants[0]?.subject ?? '', vars);
+      const subject = target.stepIndex === 0
+        ? applyVars(letter.subject, vars)
         : followUpSubject(applyVars(letter.subject, vars), firstSubject);
 
       const { id } = await sendTestLetter({
@@ -680,20 +738,47 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
         </div>
 
         <div className="space-y-3">
-          {letters.map((letter, index) => (
+          {letters.map((step, index) => (
             <LetterStep
               key={index}
               no={4}
-              done={Boolean((index === 0 ? letter.subject.trim() : true) && letter.body.trim())}
+              done={step.variants.every(
+                (letter) => (index === 0 ? letter.subject.trim() : true) && letter.body.trim(),
+              )}
               title={index === 0 ? 'Первое письмо' : `Письмо ${index + 1}`}
-              subject={letter.subject}
-              body={letter.body}
+              variants={step.variants}
               rows={14}
-              delayHours={index === 0 ? undefined : letter.delayHours}
+              delayHours={index === 0 ? undefined : step.delayHours}
               onDelayHours={index === 0 ? undefined : (value) => setLetters((prev) => prev.map((l, i) => (i === index ? { ...l, delayHours: value } : l)))}
               onRemove={index === 0 || readOnly ? undefined : () => setLetters((prev) => prev.filter((_, i) => i !== index))}
-              onSubject={(value) => setLetters((prev) => prev.map((l, i) => (i === index ? { ...l, subject: value } : l)))}
-              onBody={(value) => setLetters((prev) => prev.map((l, i) => (i === index ? { ...l, body: value } : l)))}
+              onVariant={(variantIndex, patch) =>
+                setLetters((prev) =>
+                  prev.map((l, i) =>
+                    i === index
+                      ? { ...l, variants: l.variants.map((v, vi) => (vi === variantIndex ? { ...v, ...patch } : v)) }
+                      : l,
+                  ),
+                )
+              }
+              onAddVariant={() =>
+                setLetters((prev) =>
+                  prev.map((l, i) =>
+                    // Новый вариант — копия первого: правят обычно пару фраз,
+                    // а не пишут письмо заново.
+                    i === index ? { ...l, variants: [...l.variants, { ...l.variants[0] }] } : l,
+                  ),
+                )
+              }
+              onRemoveVariant={
+                step.variants.length > 1
+                  ? (variantIndex) =>
+                      setLetters((prev) =>
+                        prev.map((l, i) =>
+                          i === index ? { ...l, variants: l.variants.filter((_, vi) => vi !== variantIndex) } : l,
+                        ),
+                      )
+                  : undefined
+              }
               columns={columns}
               countsExact={countsExact}
               disabled={readOnly}
@@ -710,7 +795,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
           {!readOnly && letters.length < MAX_LETTERS ? (
             <button
               type="button"
-              onClick={() => setLetters((prev) => [...prev, { subject: '', body: '', delayHours: 72 }])}
+              onClick={() => setLetters((prev) => [...prev, emptyLetterStep()])}
               className="w-full rounded-xl border border-dashed border-zinc-300 py-2.5 text-sm text-zinc-500 transition-colors hover:border-blue-400 hover:text-blue-600"
             >
               + Добавить письмо в цепочку ({letters.length} из {MAX_LETTERS})
@@ -735,6 +820,44 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
               </span>
             ) : null}
 
+            {abResults.length ? (
+              <div className="w-full border-t border-zinc-100 pt-3">
+                <p className="mb-1.5 text-xs font-medium text-zinc-700">Результаты А/Б-теста</p>
+                <table className="w-full text-xs text-zinc-600">
+                  <thead className="text-zinc-400">
+                    <tr>
+                      <th className="py-1 text-left font-normal">Письмо</th>
+                      <th className="py-1 text-right font-normal">Отправлено</th>
+                      <th className="py-1 text-right font-normal">Ответили</th>
+                      <th className="py-1 text-right font-normal">Доля ответов</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {abResults.map((row) => (
+                      <tr key={`${row.step}:${row.variant}`} className="border-t border-zinc-100">
+                        <td className="py-1">
+                          {row.step === 1 ? 'Первое письмо' : `Письмо ${row.step}`} · вариант{' '}
+                          {variantLabel(row.variant)}
+                        </td>
+                        <td className="py-1 text-right">{row.sent}</td>
+                        <td className="py-1 text-right">{row.replied}</td>
+                        <td className="py-1 text-right">
+                          {row.sent ? `${((row.replied / row.sent) * 100).toFixed(1)}%` : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {/* Главная ошибка в А/Б: объявить победителя на двух ответах. */}
+                {abResults.some((row) => row.sent < MIN_RECIPIENTS_PER_VARIANT) ? (
+                  <p className="mt-1.5 text-xs text-amber-600">
+                    Писем ещё мало: пока на вариант не ушло хотя бы {MIN_RECIPIENTS_PER_VARIANT}, разница в
+                    ответах — случайность, а не победа текста.
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+
             {/* Тест себе: предпросмотр показывает текст, а как письмо выглядит
                 в почте — видно только из почты. */}
             <div className="flex w-full flex-wrap items-center gap-2 border-t border-zinc-100 pt-3">
@@ -745,15 +868,15 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
                 placeholder="Почта для теста"
                 className="w-56 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs text-zinc-900"
               />
-              {letters.length > 1 ? (
+              {testTargets.length > 1 ? (
                 <select
-                  value={testStep}
-                  onChange={(e) => setTestStep(Number(e.target.value))}
+                  value={testKey}
+                  onChange={(e) => setTestKey(e.target.value)}
                   className="rounded-lg border border-zinc-300 bg-white px-2 py-1.5 text-xs text-zinc-900"
                 >
-                  {letters.map((_, index) => (
-                    <option key={index} value={index}>
-                      {index === 0 ? 'Первое письмо' : `Письмо ${index + 1}`}
+                  {testTargets.map((target) => (
+                    <option key={target.key} value={target.key}>
+                      {target.label}
                     </option>
                   ))}
                 </select>
@@ -809,7 +932,15 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
                 <p className="text-xs font-medium text-zinc-500">Получатель: {sample.email}</p>
                 {sample.steps.map((step, index) => (
                   <div key={index} className="mt-2 border-t border-zinc-100 pt-2 first:border-0 first:pt-0">
-                    <p className="text-sm font-medium text-zinc-900">{step.subject || 'Re: (в тот же тред)'}</p>
+                    <p className="text-sm font-medium text-zinc-900">
+                      {step.subject || 'Re: (в тот же тред)'}
+                      {/* При А/Б-тесте видно, какой вариант уедет этому адресу. */}
+                      {step.variant ? (
+                        <span className="ml-2 rounded-md bg-zinc-100 px-1.5 py-0.5 text-xs font-normal text-zinc-500">
+                          вариант {step.variant}
+                        </span>
+                      ) : null}
+                    </p>
                     {/* Ссылки под словом рисуем ссылками: разметку в поле письма
                         иначе не с чем сверить. */}
                     <LetterText

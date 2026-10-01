@@ -67,13 +67,18 @@ async function afterSend(message: MessageRow, mailbox: MailboxRow, sentAt: strin
   const recipient = recipientRow as RecipientRow | null;
   if (!recipient) return;
 
-  const { data: nextStepRow } = await db
+  // Любая строка следующего шага: при А/Б-тесте их несколько, и отсюда нужна
+  // только задержка — она у вариантов одна. Запрос на одну строку (maybeSingle)
+  // здесь нельзя: на нескольких вариантах он вернул бы ошибку, шаг счёлся бы
+  // последним, и цепочка молча обрывалась бы на предыдущем письме.
+  const { data: nextStepRows } = await db
     .from('sender_campaign_steps')
     .select('*')
     .eq('campaign_id', message.campaign_id)
     .eq('step_no', message.step_no + 1)
-    .maybeSingle();
-  const nextStep = nextStepRow as StepRow | null;
+    .order('variant_no')
+    .limit(1);
+  const nextStep = ((nextStepRows ?? [])[0] as StepRow | undefined) ?? null;
 
   // Шаг, корень переписки и срок следующего шага — общим правилом с
   // планировщиком (stepAdvance.ts).

@@ -66,6 +66,8 @@ export interface StepRow {
   id: string;
   campaign_id: string;
   step_no: number;
+  /** Вариант письма этого шага (А/Б-тест); без теста всегда 1. */
+  variant_no: number;
   /** Задержка от предыдущего шага в часах; у первого письма игнорируется. */
   delay_hours: number;
   subject: string;
