@@ -438,6 +438,8 @@ export function createCampaign(body: {
   /** Пауза между письмами одного ящика: базовая и случайная добавка, секунды. */
   gapSeconds: number;
   gapJitterSeconds: number;
+  /** Автосохранение недописанной формы: кампанию заведут без проверок. */
+  draft?: boolean;
 }) {
   return authFetchJson<{ id: string }>(`${BASE}/campaigns`, {
     method: 'POST',
@@ -515,6 +517,8 @@ export function updateCampaign(
     sendWeekdays: number[];
     gapSeconds: number;
     gapJitterSeconds: number;
+    /** Автосохранение недописанной формы: правки примут без проверок. */
+    draft?: boolean;
   },
 ) {
   return authFetchJson<{ ok: true; unstuck: number }>(`${BASE}/campaigns/${id}`, {

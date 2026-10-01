@@ -37,6 +37,8 @@ const SHOWN_MAILBOXES = 8;
 const MAX_LETTERS = 5;
 /** Куда возвращаемся из настроек. */
 const LIST_URL = '/tools/sender?tab=campaigns';
+/** Пауза после последней правки, через которую новая кампания ляжет черновиком. */
+const DRAFT_SAVE_DELAY_MS = 2000;
 
 /** Куда положили адрес для тестового письма — его спрашивают в каждой кампании. */
 const TEST_EMAIL_KEY = 'sender.testEmail';
@@ -133,6 +135,15 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   const [weekdays, setWeekdays] = useState<number[]>([...WORKDAYS]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Новая кампания сохраняется черновиком сама, пока её пишут: закрыли вкладку
+  // или ушли со страницы — написанное осталось в списке, а не пропало.
+  const [draftSavedAt, setDraftSavedAt] = useState<Date | null>(null);
+  /** id заведённого черновика: ref, потому что его читает таймер автосохранения. */
+  const draftRef = useRef<string | null>(null);
+  /** Идущее сохранение: второй вызов ждёт его, а не заводит вторую кампанию. */
+  const draftBusy = useRef<Promise<void> | null>(null);
+  /** Снимок настроек, который уже сохранён: без изменений не сохраняем заново. */
+  const savedSnapshot = useRef('');
   // Предпросмотр на реальных получателях (задача 5.6) и разбивка ответов по
   // шагам цепочки (задача 6.4) — обе про письма.
   const [preview, setPreview] = useState<PreviewSampleDto[] | null>(null);
@@ -260,6 +271,85 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   }));
 
   /**
+   * Настройки кампании одним куском — их же сохраняет автосохранение.
+   *
+   * Лежит в ref, потому что автосохранение запускается по таймеру: к моменту
+   * срабатывания в замыкании оказались бы значения на момент последней правки,
+   * а сохранить надо то, что в форме сейчас.
+   */
+  const campaignPayload = {
+    name,
+    mailboxIds: mailboxes.map((m) => m.id),
+    steps: stepsPayload,
+    timezone,
+    sendHourFrom: hourFrom,
+    sendHourTo: hourTo,
+    sendWeekdays: weekdays,
+    gapSeconds,
+    gapJitterSeconds,
+  };
+  const payloadRef = useRef(campaignPayload);
+  payloadRef.current = campaignPayload;
+  // Снимок строкой: по нему автосохранение понимает, что менялось, и по нему
+  // же заводится таймер — иначе он сбрасывался бы на каждую перерисовку.
+  const payloadSnapshot = JSON.stringify(campaignPayload);
+
+  // Что-то уже написали: пустую форму черновиком не заводим — иначе список
+  // кампаний зарастёт пустышками от случайных заходов.
+  const draftWorthSaving = Boolean(
+    name.trim() || letters.some((step) => step.variants.some((v) => v.subject.trim() || v.body.trim())),
+  );
+
+  /**
+   * Сохранить недописанную новую кампанию черновиком; возвращает её id.
+   *
+   * Сервер принимает такой черновик без проверок (partial): ни ящиков, ни
+   * писем в нём может ещё не быть. Уехать он всё равно не может — «Запустить»
+   * проверяет всё заново.
+   */
+  const saveDraft = useCallback(async (): Promise<string | null> => {
+    // Сохранение уже идёт — дожидаемся его. Без этого «выйти» в момент
+    // автосохранения завёл бы вторую такую же кампанию.
+    if (draftBusy.current) {
+      await draftBusy.current;
+      return draftRef.current;
+    }
+    const snapshot = JSON.stringify(payloadRef.current);
+    if (snapshot === savedSnapshot.current) return draftRef.current;
+
+    const run = (async () => {
+      try {
+        if (draftRef.current) {
+          await updateCampaign(draftRef.current, { ...payloadRef.current, draft: true });
+        } else {
+          const { id } = await createCampaign({ ...payloadRef.current, draft: true });
+          draftRef.current = id;
+        }
+        savedSnapshot.current = snapshot;
+        setDraftSavedAt(new Date());
+      } catch {
+        // Автосохранение молчит: это фон, а не действие человека. Не вышло —
+        // следующая правка попробует снова, а в шапке не появится «сохранён».
+      }
+    })();
+    draftBusy.current = run;
+    try {
+      await run;
+    } finally {
+      draftBusy.current = null;
+    }
+    return draftRef.current;
+  }, []);
+
+  // Пауза после последней правки: сохранять на каждую букву незачем, а ждать
+  // дольше — значит рисковать написанным, если вкладку закроют.
+  useEffect(() => {
+    if (editing || readOnly || saving || !draftWorthSaving) return;
+    const timer = window.setTimeout(() => void saveDraft(), DRAFT_SAVE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [editing, readOnly, saving, draftWorthSaving, saveDraft, payloadSnapshot]);
+
+  /**
    * Результаты А/Б показываем только по шагам, где вариантов правда несколько:
    * строка «вариант А» у обычного письма — шум.
    */
@@ -303,17 +393,16 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   const create = async () => {
     let id: string;
     try {
-      ({ id } = await createCampaign({
-        name,
-        mailboxIds: mailboxes.map((m) => m.id),
-        steps: stepsPayload,
-        timezone,
-        sendHourFrom: hourFrom,
-        sendHourTo: hourTo,
-        sendWeekdays: weekdays,
-        gapSeconds,
-        gapJitterSeconds,
-      }));
+      // Черновик этой же кампании мог уже завестись автосохранением — тогда
+      // дописываем его, иначе в списке появилась бы вторая такая же. Сначала
+      // дожидаемся автосохранения, если оно как раз идёт.
+      await saveDraft();
+      if (draftRef.current) {
+        await updateCampaign(draftRef.current, campaignPayload);
+        id = draftRef.current;
+      } else {
+        ({ id } = await createCampaign(campaignPayload));
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось создать кампанию');
       setSaving(false);
@@ -344,17 +433,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   const save = async () => {
     if (!campaignId) return;
     try {
-      await updateCampaign(campaignId, {
-        name,
-        mailboxIds: mailboxes.map((m) => m.id),
-        steps: stepsPayload,
-        timezone,
-        sendHourFrom: hourFrom,
-        sendHourTo: hourTo,
-        sendWeekdays: weekdays,
-        gapSeconds,
-        gapJitterSeconds,
-      });
+      await updateCampaign(campaignId, campaignPayload);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось сохранить кампанию');
       setSaving(false);
@@ -379,6 +458,41 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
       return;
     }
     leave({ notice: 'Кампания сохранена.' }, campaignId);
+  };
+
+  /**
+   * Уйти со страницы, не запуская кампанию: недописанная новая кампания
+   * остаётся черновиком в списке, вместе с выбранной базой.
+   *
+   * Базу докладываем здесь, а не автосохранением: файл грузится один раз и
+   * целиком, повторять это каждые пару секунд незачем.
+   */
+  const closePage = async () => {
+    if (editing || readOnly || !draftWorthSaving) {
+      leave();
+      return;
+    }
+    setSaving(true);
+    const id = await saveDraft();
+    if (!id) {
+      leave();
+      return;
+    }
+    if (!recipientsFile) {
+      leave({ notice: 'Черновик сохранён — он в списке кампаний. Письма пойдут после «Запустить».' }, id);
+      return;
+    }
+    try {
+      leave({ notice: `Черновик сохранён. ${await sendFile(id)}` }, id);
+    } catch {
+      leave(
+        {
+          notice:
+            'Черновик сохранён, но база не загрузилась — откройте кампанию по названию и выберите файл ещё раз.',
+        },
+        id,
+      );
+    }
   };
 
   const submit = async () => {
@@ -511,7 +625,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
         <div className="flex flex-wrap items-center gap-3 px-4 py-3">
           <button
             type="button"
-            onClick={() => leave()}
+            onClick={() => void closePage()}
             className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm text-zinc-600 transition-colors hover:bg-zinc-100"
           >
             <ArrowLeft className="h-4 w-4" />
@@ -533,12 +647,22 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
             ) : (
               <span className="text-xs text-zinc-500">{statusHint}</span>
             )}
+            {/* Новую кампанию не обязательно дописывать за один раз: она сама
+                ложится черновиком в список, и к ней можно вернуться. */}
+            {!editing && !readOnly ? (
+              <span className="text-xs text-zinc-500">
+                {draftSavedAt
+                  ? `Черновик сохранён в ${draftSavedAt.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`
+                  : 'Черновик сохранится сам'}
+              </span>
+            ) : null}
             <button
               type="button"
-              onClick={() => leave()}
-              className="rounded-lg px-3 py-2 text-sm text-zinc-600 transition-colors hover:bg-zinc-100"
+              onClick={() => void closePage()}
+              disabled={saving}
+              className="rounded-lg px-3 py-2 text-sm text-zinc-600 transition-colors hover:bg-zinc-100 disabled:opacity-50"
             >
-              {readOnly ? 'Закрыть' : 'Отмена'}
+              {editing || readOnly ? 'Закрыть' : 'Выйти — сохранится черновик'}
             </button>
             {readOnly ? null : (
               <button
