@@ -2,8 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { releaseOutreachRowsBeforeCampaignDelete, type OutreachCampaignDeleteResult } from '@/lib/outreachSender/deletion';
 import { authenticateRequest, jsonError } from '@/lib/sender/apiHelpers';
 import {
+  cancelScheduledStart,
   EDITABLE_CAMPAIGN_STATUSES,
   replaceSteps,
+  scheduleCampaignStart,
   SenderOpError,
   startCampaign,
   validateCampaignDraft,
@@ -17,7 +19,9 @@ import { withToolTrace } from '@/lib/toolTrace';
 export const dynamic = 'force-dynamic';
 
 interface PatchBody {
-  action?: 'start' | 'pause' | 'finish';
+  action?: 'start' | 'pause' | 'finish' | 'schedule' | 'unschedule';
+  /** Отложенный запуск (action 'schedule'): момент в ISO, по UTC. */
+  startAt?: string;
   /** Правка настроек: приезжает вместо action. */
   name?: string;
   mailboxIds?: string[];
@@ -269,6 +273,17 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         await startCampaign(id);
         return NextResponse.json({ ok: true, status: 'running', mailboxesAdded });
       }
+      if (body.action === 'schedule') {
+        // Ящики папки берём сразу: проверка запуска должна увидеть пул сейчас.
+        const mailboxesAdded = await fillPoolFromFolder(id);
+        await scheduleCampaignStart(id, new Date(String(body.startAt ?? '')));
+        return NextResponse.json({ ok: true, mailboxesAdded });
+      }
+      if (body.action === 'unschedule') {
+        await cancelScheduledStart(id);
+        return NextResponse.json({ ok: true });
+      }
+      if (body.action !== 'pause' && body.action !== 'finish') return jsonError('Неизвестное действие', 400);
     } catch (e) {
       if (e instanceof SenderOpError) return jsonError(e.message, e.status);
       throw e;
@@ -277,7 +292,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     const status = body.action === 'pause' ? 'paused' : 'done';
     const { error } = await supabaseAdmin
       .from('sender_campaigns')
-      .update({ status, updated_at: new Date().toISOString() })
+      // Завершённая кампания не должна запуститься по отложенному времени.
+      .update({ status, updated_at: new Date().toISOString(), ...(status === 'done' ? { scheduled_start_at: null } : {}) })
       .eq('id', id);
     if (error) return jsonError(error.message, 500);
 

@@ -109,3 +109,18 @@ export function nextGapMs(gapSeconds: number, jitterSeconds: number): number {
   const jitter = jitterSeconds > 0 ? Math.floor(Math.random() * jitterSeconds) : 0;
   return (gapSeconds + jitter) * 1000;
 }
+
+/**
+ * Локальное время зоны → момент и обратно — для отложенного запуска кампании
+ * (окно на экране кампаний): оператор вводит время по поясу кампании.
+ */
+export function zonedTimeToUtc(
+  parts: { year: number; month: number; day: number; hour: number; minute: number },
+  timezone: string,
+): Date {
+  return fromLocal(parts, timezone);
+}
+
+export function zonedParts(date: Date, timezone: string): { year: number; month: number; day: number; hour: number; minute: number; weekday: number } {
+  return localParts(date, timezone);
+}

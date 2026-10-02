@@ -79,6 +79,7 @@ import {
 import { companyBrand, isSuppressed, loadPreviouslyExported, normalizeDomain, siteUrl, type ExportedIndex } from './company';
 import { findRuCompanyEmail } from './findEmail';
 import { journalCounts } from './funnel';
+import { buildBridge, type BridgeRequest } from './letters/bridge';
 import { buildSegmentsHypothesis, type SegmentsHypothesis } from './letters/chains';
 import { composeCompanyLetters } from './letters/renderTemplate';
 import {
@@ -1387,6 +1388,19 @@ async function runJob(
       });
     };
 
+    // Связка повода с предложением: как гипотеза, необязательна — при лимите
+    // на ИИ или сбое модели в письмо встаёт запасная фраза по офферу.
+    const companyBridge = async (req: BridgeRequest): Promise<string | null> => {
+      lettersStillWanted();
+      if (budget.exhausted()) return null;
+      return buildBridge(req).catch((err: unknown) => {
+        if (err instanceof LlmAuthError || err instanceof CancelledError) throw err;
+        lettersStillWanted();
+        if (!(err instanceof BudgetExceededError)) log('warn', `bridge failed for ${req.brand}: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      });
+    };
+
     // Места в лимите готовых для писем, которые сейчас собираются. Между
     // проверкой лимита и готовой строкой — ожидание шаблона оффера (писатель
     // пишет до нескольких минут): без мест все потоки пула прошли бы проверку
@@ -1496,14 +1510,13 @@ async function runJob(
           baseChain: q.route.from,
           marketQuote: q.marketQuote,
           productSummary: q.site.productSummary,
-          aboutLine: q.site.aboutLine,
           targetMarket: q.vacancy?.targetMarket ?? null,
           caseRecord: q.caseHit?.record ?? null,
           recipientEmail: q.email.email,
           amoStatus: q.amo?.status ?? null,
           alt: altVariantFor(q.email.emails),
         },
-        { sender, claims: libraries.claims, hypothesis: segmentsHypothesis },
+        { sender, claims: libraries.claims, hypothesis: segmentsHypothesis, bridge: companyBridge },
       );
       lettersStillWanted();
       reach(q.tally, 'sequence_assembled');
