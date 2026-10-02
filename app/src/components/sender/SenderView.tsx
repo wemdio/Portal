@@ -57,7 +57,8 @@ export function SenderView() {
   const [egressIp, setEgressIp] = useState<string | null>(null);
 
   return (
-    <div className="mx-auto max-w-6xl px-6 py-8">
+    // «Письма» — три колонки, как «Персонализированные ответы»: им нужна вся ширина.
+    <div className={`mx-auto px-6 py-8 ${tab === 'threads' ? 'max-w-none' : 'max-w-6xl'}`}>
       <div className="mb-6">
         <h1 className="text-xl font-semibold text-zinc-900">Рассылка</h1>
         <p className="mt-1 text-sm text-zinc-500">

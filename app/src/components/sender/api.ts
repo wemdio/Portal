@@ -653,11 +653,65 @@ export function fetchCampaignRecipients(
 }
 
 /** Ответить лиду из окна переписки (задача 4.1): уходит с закреплённого ящика. */
-export function replyToThread(recipientId: string, text: string) {
-  return authFetchJson<{ ok: true }>(`${BASE}/threads/${recipientId}/reply`, {
+export function replyToThread(recipientId: string, text: string, draftId?: string | null) {
+  return authFetchJson<{ ok: true; messageId?: string }>(`${BASE}/threads/${recipientId}/reply`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, draftId: draftId ?? null }),
+  });
+}
+
+export type ReplyLanguage = 'ru' | 'en';
+
+/** Черновик персонализированного ответа ИИ (lib/senderReplies/draft.ts). */
+export interface ReplyDraftDto {
+  id: string;
+  text: string;
+  factsUsed: string;
+  sources: Array<{ url: string; title?: string }>;
+  language: ReplyLanguage;
+  createdAt: string;
+}
+
+export function fetchReplyDraft(recipientId: string) {
+  return authFetchJson<{ draft: ReplyDraftDto | null; language: ReplyLanguage; hasBrief: boolean }>(
+    `${BASE}/threads/${recipientId}/draft`,
+  );
+}
+
+export function generateReplyDraft(recipientId: string, language: ReplyLanguage) {
+  return authFetchJson<{ draft: ReplyDraftDto }>(`${BASE}/threads/${recipientId}/draft`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ language }),
+  });
+}
+
+export function saveReplyLanguage(recipientId: string, language: ReplyLanguage) {
+  return authFetchJson<{ ok: true }>(`${BASE}/threads/${recipientId}/draft`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ language }),
+  });
+}
+
+/** Бриф, тон и пример письма кампании — база знаний ИИ-ответов. */
+export interface CampaignReplyKbDto {
+  name: string;
+  brief: string;
+  tone: string;
+  example: string;
+}
+
+export function fetchCampaignReplyKb(campaignId: string) {
+  return authFetchJson<CampaignReplyKbDto>(`${BASE}/campaigns/${campaignId}/reply-kb`);
+}
+
+export function saveCampaignReplyKb(campaignId: string, kb: Omit<CampaignReplyKbDto, 'name'>) {
+  return authFetchJson<{ ok: true }>(`${BASE}/campaigns/${campaignId}/reply-kb`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(kb),
   });
 }
 
