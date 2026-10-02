@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Globe, RefreshCw, Search, Settings, X } from 'lucide-react';
+import { ChevronDown, Globe, RefreshCw, Search, Settings, X } from 'lucide-react';
 import { fetchOthers, fetchProjects, fetchReplies, type ProjectListItem } from './api';
 import { GlobalKnowledgeForm } from './GlobalKnowledgeForm';
 import { KnowledgeBaseForm } from './KnowledgeBaseForm';
@@ -129,13 +129,24 @@ export function ReplyPersonalizationView() {
   // Фильтры списка писем — как в Instantly: кампания и поиск по почте ответившего.
   const [campaigns, setCampaigns] = useState<ReplyCampaignOption[]>([]);
   const [campaignFilter, setCampaignFilter] = useState('');
-  /**
-   * Показаны ли все кампании проекта. Свёрнутый список раньше был областью со
-   * своей прокруткой: кампании ниже четвёртой строки не было видно и о том,
-   * что список продолжается, ничто не сообщало — кампания без ответов (она в
-   * конце) выглядела как отсутствующая.
-   */
+  /** Открыт ли выпадающий список кампаний; закрывается выбором или кликом мимо. */
   const [campaignsExpanded, setCampaignsExpanded] = useState(false);
+  const campaignMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!campaignsExpanded) return;
+    const close = (event: MouseEvent) => {
+      if (!campaignMenuRef.current?.contains(event.target as Node)) setCampaignsExpanded(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setCampaignsExpanded(false);
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [campaignsExpanded]);
   /**
    * «Только лиды» — письма, которым квалификатор поставил вердикт 'lead'.
    * Фильтруем на сервере: в списке подгружаются сотни писем страницами, и
@@ -322,6 +333,9 @@ export function ReplyPersonalizationView() {
   const allCampaignsCount = campaigns.every((c) => c.replyCount !== null)
     ? campaigns.reduce((sum, c) => sum + (c.replyCount ?? 0), 0)
     : null;
+  const campaignOptions = [{ id: '', name: 'Все кампании', replyCount: allCampaignsCount }, ...campaigns];
+  // Выбранная кампания пропала из списка (сменился проект) — подпись «Все кампании».
+  const activeCampaign = campaignOptions.find((c) => c.id === campaignFilter) ?? campaignOptions[0];
 
   const listItems = tab === 'others' ? othersVisible : items;
   const listLoading = tab === 'others' ? othersLoading : itemsLoading;
@@ -561,47 +575,59 @@ export function ReplyPersonalizationView() {
               </div>
             ) : null}
             {tab === 'replies' && campaigns.length > 1 ? (
-              <div className="space-y-1">
-              <div
-                className={`flex flex-wrap gap-1 ${campaignsExpanded ? 'max-h-72 overflow-y-auto' : 'max-h-28 overflow-hidden'}`}
-                role="group"
-                aria-label="Кампании"
-              >
-                {[{ id: '', name: 'Все кампании', replyCount: allCampaignsCount }, ...campaigns].map((c) => {
-                  const isActive = campaignFilter === c.id;
-                  return (
-                    <button
-                      key={c.id || 'all'}
-                      type="button"
-                      onClick={() => {
-                        setCampaignFilter(c.id);
-                        setLimit(REPLIES_PAGE_SIZE);
-                      }}
-                      title={c.name}
-                      aria-pressed={isActive}
-                      className={`flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition ${
-                        isActive
-                          ? 'border-blue-500 bg-blue-50 text-blue-700'
-                          : 'border-gray-200 text-gray-600 hover:bg-gray-50'
-                      }`}
-                    >
-                      <span className="truncate">{c.name}</span>
-                      {c.replyCount !== null ? (
-                        <span className={isActive ? 'text-blue-500' : 'text-gray-400'}>{c.replyCount}</span>
-                      ) : null}
-                    </button>
-                  );
-                })}
-              </div>
-              {campaigns.length > 4 ? (
+              // Кампании — выпадающим списком: лентой кнопок они занимали
+              // полэкрана над письмами.
+              <div ref={campaignMenuRef} className="relative">
                 <button
                   type="button"
                   onClick={() => setCampaignsExpanded((v) => !v)}
-                  className="text-[11px] text-blue-600 hover:underline"
+                  aria-haspopup="listbox"
+                  aria-expanded={campaignsExpanded}
+                  className={`flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left text-xs transition ${
+                    campaignFilter
+                      ? 'border-blue-500 bg-blue-50 text-blue-700'
+                      : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+                  }`}
                 >
-                  {campaignsExpanded ? 'Свернуть кампании' : `Показать все кампании (${campaigns.length})`}
+                  <span className="truncate">{activeCampaign.name}</span>
+                  {activeCampaign.replyCount !== null ? (
+                    <span className={campaignFilter ? 'text-blue-500' : 'text-gray-400'}>{activeCampaign.replyCount}</span>
+                  ) : null}
+                  <ChevronDown className={`ml-auto h-3.5 w-3.5 shrink-0 transition-transform ${campaignsExpanded ? 'rotate-180' : ''}`} />
                 </button>
-              ) : null}
+                {campaignsExpanded ? (
+                  <div
+                    role="listbox"
+                    aria-label="Кампании"
+                    className="absolute left-0 right-0 z-20 mt-1 max-h-80 overflow-y-auto rounded-lg border border-gray-200 bg-white py-1 shadow-lg"
+                  >
+                    {campaignOptions.map((c) => {
+                      const isActive = campaignFilter === c.id;
+                      return (
+                        <button
+                          key={c.id || 'all'}
+                          type="button"
+                          role="option"
+                          aria-selected={isActive}
+                          onClick={() => {
+                            setCampaignFilter(c.id);
+                            setLimit(REPLIES_PAGE_SIZE);
+                            setCampaignsExpanded(false);
+                          }}
+                          title={c.name}
+                          className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${
+                            isActive ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-50'
+                          }`}
+                        >
+                          <span className="truncate">{c.name}</span>
+                          {c.replyCount !== null ? (
+                            <span className={`ml-auto shrink-0 ${isActive ? 'text-blue-500' : 'text-gray-400'}`}>{c.replyCount}</span>
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
               </div>
             ) : null}
           </div>
