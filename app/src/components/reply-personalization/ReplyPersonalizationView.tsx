@@ -24,14 +24,21 @@ function mergeReplies(current: ReplyListItem[], next: ReplyListItem[]): ReplyLis
   );
 }
 
-const LIST_STATUS_BADGE: Record<ReplyListItem['listStatus'], { label: string; className: string }> = {
-  new: { label: 'новый', className: 'bg-blue-100 text-blue-700' },
-  sent: { label: 'отправлено', className: 'bg-emerald-100 text-emerald-700' },
-  skipped: { label: 'пропущено', className: 'bg-gray-100 text-gray-500' },
+// hint — подсказка при наведении: что значит метка и что с письмом делать.
+type Badge = { label: string; className: string; hint: string };
+
+const LIST_STATUS_BADGE: Record<ReplyListItem['listStatus'], Badge> = {
+  new: { label: 'новый', className: 'bg-blue-100 text-blue-700', hint: 'Человек ответил впервые, мы ещё не ответили' },
+  sent: { label: 'отправлено', className: 'bg-emerald-100 text-emerald-700', hint: 'Мы уже ответили на это письмо' },
+  skipped: { label: 'пропущено', className: 'bg-gray-100 text-gray-500', hint: 'Отмечено «Пропустить» — отвечать не стали' },
 };
 
 /** Необработанное письмо адресата, который уже отвечал раньше, — не «новый». */
-const REPEAT_BADGE = { label: 'повторный', className: 'bg-violet-100 text-violet-700' };
+const REPEAT_BADGE: Badge = {
+  label: 'повторный',
+  className: 'bg-violet-100 text-violet-700',
+  hint: 'Человек уже писал нам раньше, это его следующее письмо; на него мы ещё не ответили',
+};
 
 function listBadge(item: ReplyListItem) {
   return item.listStatus === 'new' && item.repeat ? REPEAT_BADGE : LIST_STATUS_BADGE[item.listStatus];
@@ -43,10 +50,10 @@ function listBadge(item: ReplyListItem) {
  * не зная, где интерес. Показываем только решённые случаи: 'pending',
  * 'processing', 'error' и письма живых аккаунтов метки не получают.
  */
-const LEAD_BADGE: Record<string, { label: string; className: string }> = {
-  lead: { label: 'лид', className: 'bg-amber-100 text-amber-800' },
-  not_lead: { label: 'не лид', className: 'bg-gray-100 text-gray-400' },
-  needs_review: { label: 'под вопросом', className: 'bg-sky-100 text-sky-700' },
+const LEAD_BADGE: Record<string, Badge> = {
+  lead: { label: 'лид', className: 'bg-amber-100 text-amber-800', hint: 'ИИ по тексту видит интерес — стоит ответить в первую очередь' },
+  not_lead: { label: 'не лид', className: 'bg-gray-100 text-gray-400', hint: 'ИИ интереса не видит: отказ, автоответ или «переслали коллегам»' },
+  needs_review: { label: 'под вопросом', className: 'bg-sky-100 text-sky-700', hint: 'ИИ не уверен — посмотрите письмо сами' },
 };
 
 function LeadBadge({ item }: { item: ReplyListItem }) {
@@ -54,8 +61,8 @@ function LeadBadge({ item }: { item: ReplyListItem }) {
   if (!badge) return null;
   return (
     <span
-      className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${badge.className}`}
-      title="Оценка квалификатора по тексту ответа"
+      className={`cursor-help rounded px-1.5 py-0.5 text-[10px] font-semibold ${badge.className}`}
+      title={badge.hint}
     >
       {badge.label}
     </span>
@@ -683,7 +690,8 @@ export function ReplyPersonalizationView() {
                   <span className="flex shrink-0 items-center gap-1">
                     <LeadBadge item={item} />
                     <span
-                      className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${listBadge(item).className}`}
+                      className={`cursor-help rounded px-1.5 py-0.5 text-[10px] font-semibold ${listBadge(item).className}`}
+                      title={listBadge(item).hint}
                     >
                       {listBadge(item).label}
                     </span>
