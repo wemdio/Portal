@@ -141,12 +141,20 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
     });
   });
 
-  it('pauses before the provider call when the workspace has no free storage', async () => {
+  it('checks a zero billing hint through a journaled import instead of inventing a storage refusal', async () => {
     capacityMock.mockResolvedValue({ limit: 1000, used: 1000, remaining: 0 });
+    createLeadsMock.mockResolvedValueOnce({ leads_uploaded: 1 })
+      .mockResolvedValueOnce({ leads_uploaded: 1, remaining_in_plan: 99 });
     const result = await appendLeadsToClientCampaign(capacityInput);
-    expect(result).toMatchObject({ accepted: 0, skipped: 0, capacityBlocked: true, attemptedIndexes: [], skippedIndexes: [] });
-    expect(createLeadsMock).not.toHaveBeenCalled();
-    expect(mainDb.getRows('client_campaign_append_batches')).toHaveLength(0);
+    expect(result).toMatchObject({ accepted: 2, skipped: 0, capacityBlocked: false,
+      attemptedIndexes: [0, 1], acceptedIndexes: [0, 1], skippedIndexes: [], identityComplete: true });
+    expect(createLeadsMock.mock.calls.map(([chunk]) => chunk)).toEqual([[leads[0]], [leads[1]]]);
+    expect(mainDb.getRows('client_campaign_append_batches')).toHaveLength(2);
+
+    createLeadsMock.mockClear().mockResolvedValue({ leads_uploaded: 0, remaining_in_plan: 0 });
+    expect(await appendLeadsToClientCampaign(capacityInput)).toMatchObject({ accepted: 0, skipped: 0,
+      capacityBlocked: true, attemptedIndexes: [0], deferredIndexes: [0], skippedIndexes: [] });
+    expect(createLeadsMock).toHaveBeenCalledTimes(1);
   });
 
   it('uploads only the available prefix and keeps the rest outside permanent tariff skips', async () => {
@@ -160,12 +168,24 @@ describe('appendLeadsToClientCampaign report ledger integration', () => {
 
   it('does not stop before all available provider chunks are uploaded', async () => {
     capacityMock.mockResolvedValue({ limit: 1100, used: 0, remaining: 1100 });
-    createLeadsMock.mockImplementation(async (chunk) => ({ leads_uploaded: chunk.length }));
+    let providerRemaining = 1100;
+    createLeadsMock.mockImplementation(async (chunk) => {
+      providerRemaining -= chunk.length;
+      return { leads_uploaded: chunk.length, remaining_in_plan: providerRemaining };
+    });
     const result = await appendLeadsToClientCampaign({ ...capacityInput,
       leads: Array.from({ length: 1101 }, (_, i) => ({ email: `lead-${i}@example.com` })) });
     expect(createLeadsMock.mock.calls.map((call) => call[0].length)).toEqual([1000, 100]);
     expect(result).toMatchObject({ accepted: 1100, capacityBlocked: true, skipped: 0 });
     expect(result.attemptedIndexes).toHaveLength(1100);
+
+    // A positive billing hint can also lag behind storage changes. Without a
+    // counter from the import service it must not cap the untouched tail.
+    capacityMock.mockResolvedValue({ limit: 1000, used: 999, remaining: 1 });
+    createLeadsMock.mockClear().mockImplementation(async (chunk) => ({ leads_uploaded: chunk.length }));
+    expect(await appendLeadsToClientCampaign(capacityInput)).toMatchObject({ accepted: 2,
+      acceptedIndexes: [0, 1], capacityBlocked: false, identityComplete: true });
+    expect(createLeadsMock.mock.calls.map(([chunk]) => chunk)).toEqual([[leads[0]], [leads[1]]]);
   });
 
   it('preserves exact partial acceptance when the plan fills during a request', async () => {
