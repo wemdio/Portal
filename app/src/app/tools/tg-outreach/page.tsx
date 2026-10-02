@@ -2311,7 +2311,7 @@ interface AccountsUploadSummary {
  * неопределённым, и новая партия оказывалась где придётся.
  */
 type AccountSortKey =
-  | 'name' | 'added' | 'sending' | 'phone' | 'proxy' | 'health' | 'price' | 'active';
+  | 'name' | 'added' | 'sending' | 'status' | 'proxy' | 'health' | 'price' | 'active';
 
 interface AccountSort {
   key: AccountSortKey;
@@ -2327,7 +2327,16 @@ const TONE_RANK: Record<string, number> = {
 };
 
 /** Колонки, которые осмысленно открывать «сначала худшие»: время и проблемы. */
-const DESC_FIRST: AccountSortKey[] = ['added', 'sending', 'health', 'price'];
+const DESC_FIRST: AccountSortKey[] = ['added', 'sending', 'status', 'health', 'price'];
+
+/**
+ * Насколько плох итог проверки аккаунта — для сортировки по столбцу «Статус»:
+ * по убыванию сверху баны и заморозки, внутри группы — свежие проверки.
+ */
+const CHECK_RANK: Record<string, number> = {
+  ok: 0, queued: 1, error: 2, proxy_dead: 3, no_session: 4, session_duplicate: 5,
+  session_revoked: 6, restricted: 7, frozen: 8, banned: 9,
+};
 
 function SortHeader({
   col,
@@ -2360,7 +2369,7 @@ function SortHeader({
   );
 }
 
-const ACCOUNT_GRID = 'grid grid-cols-[32px_44px_minmax(0,1fr)_76px_126px_120px_360px_138px_92px_60px_88px] gap-4 items-center';
+const ACCOUNT_GRID = 'grid grid-cols-[32px_44px_minmax(0,1fr)_76px_126px_150px_360px_138px_92px_60px_88px] gap-4 items-center';
 
 /**
  * Ячейка здоровья: слово и цвет, объяснение — под курсором.
@@ -2539,8 +2548,13 @@ function CampaignAccountsTab({
           return ([a.first_name, a.last_name].filter(Boolean).join(' ').trim() || a.session_name).toLowerCase();
         case 'added':
           return a.created_at ? new Date(a.created_at).getTime() : null;
-        case 'phone':
-          return a.phone || null;
+        case 'status': {
+          // Группа — тяжесть итога проверки, порядок внутри — когда проверили:
+          // так видно, кого и когда заблокировало последним.
+          if (!a.check_status) return null;
+          const checked = a.checked_at ? new Date(a.checked_at).getTime() : 0;
+          return (CHECK_RANK[a.check_status] ?? 2) * 1e13 + checked;
+        }
         case 'proxy': {
           const proxy = proxies.find(p => p.id === a.proxy_id);
           return proxy ? (proxy.name || proxy.url || '').toLowerCase() : null;
@@ -3810,7 +3824,13 @@ function CampaignAccountsTab({
               sort={accountSort}
               onSort={toggleAccountSort}
             />
-            <SortHeader col="phone" label="Телефон" sort={accountSort} onSort={toggleAccountSort} />
+            <SortHeader
+              col="status"
+              label="Статус"
+              title="Итог последней проверки аккаунта: жив, ограничен, заморожен, бан. Сортировка — сначала худшие, внутри — свежие."
+              sort={accountSort}
+              onSort={toggleAccountSort}
+            />
             <SortHeader col="proxy" label="Прокси" sort={accountSort} onSort={toggleAccountSort} />
             <SortHeader
               col="health"
@@ -3894,9 +3914,12 @@ function CampaignAccountsTab({
                       {errorCount}
                     </button>
                   )}
-                  {onCooldown && (
-                    <span className="text-[10px] text-amber-600 shrink-0">
-                      Кулдаун до {new Date(a.cooldown_until!).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}
+                  {/* Номер и страна — рядом с именем: аккаунты зовутся
+                      «s386_tdata», и страну по имени не узнать, а прокси
+                      обязаны совпадать с ней по гео. */}
+                  {(a.phone || a.country_code) && (
+                    <span className="min-w-0 truncate text-[10px] text-gray-400">
+                      {[a.phone, accountCountryLabel(a.phone, a.country_code)].filter(Boolean).join(' · ')}
                     </span>
                   )}
                   </div>
@@ -3909,7 +3932,9 @@ function CampaignAccountsTab({
                   </div>
                   {/* Итог проверки. Чужие сеансы выносим отдельно: это ответ на
                       вопрос, почему аккаунты теряют сессии пачками. */}
-                  {(a.check_status || a.check_requested_at) && (
+                  {(a.check_requested_at || a.profile_requested_at || a.profile_status === 'failed'
+                    || a.moved_from_campaign_id || a.appeal_requested_at || a.appeal_status
+                    || (a.other_sessions?.length ?? 0) > 0 || resetError?.id === a.id) && (
                     <div className="mt-1 flex flex-wrap items-center gap-1.5">
                       {a.check_requested_at && (
                         <span
@@ -3918,17 +3943,6 @@ function CampaignAccountsTab({
                         >
                           проверка в очереди
                         </span>
-                      )}
-                      {a.check_status && (
-                        <span
-                          title={a.check_detail ?? undefined}
-                          className={`rounded-md px-1.5 py-0.5 text-[10px] ${CHECK_LABEL[a.check_status]?.cls ?? 'bg-gray-100 text-gray-500'}`}
-                        >
-                          {CHECK_LABEL[a.check_status]?.text ?? a.check_status}
-                        </span>
-                      )}
-                      {a.check_status === 'frozen' && (
-                        <AppealButton account={a} onDone={() => { void load(); }} />
                       )}
                       {a.profile_requested_at && (
                         <span
@@ -4013,11 +4027,6 @@ function CampaignAccountsTab({
                       {resetError?.id === a.id && (
                         <span className="text-[10px] text-rose-600">{resetError.message}</span>
                       )}
-                      {a.checked_at && (
-                        <span className="text-[10px] text-gray-400">
-                          {new Date(a.checked_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
-                        </span>
-                      )}
                     </div>
                   )}
                 </div>
@@ -4033,20 +4042,35 @@ function CampaignAccountsTab({
                     : '—'}
                 </span>
                 <HealthCell mark={sendingMark} />
-                {/*
-                  Страна под номером: аккаунты покупают партиями и в списке они
-                  зовутся «s386_tdata» — по имени страну не узнать. А она тут не
-                  украшение: прокси обязаны совпадать с ней по гео, и от неё же
-                  зависит, сколько писем аккаунт отдаст.
-                */}
-                <span className="min-w-0 truncate">
-                  <span className="block truncate text-xs text-gray-500">{a.phone || '—'}</span>
-                  {(a.phone || a.country_code) && (
-                    <span className="block truncate text-[10px] text-gray-400">
-                      {accountCountryLabel(a.phone, a.country_code)}
-                    </span>
+                {/* Статус блокировки отдельным столбцом: по нему сортируют,
+                    чтобы найти, кого и когда заблокировало. */}
+                <div className="min-w-0 space-y-0.5">
+                  {a.check_status ? (
+                    <div className="flex flex-wrap items-center gap-1">
+                      <span
+                        title={a.check_detail ?? undefined}
+                        className={`rounded-md px-1.5 py-0.5 text-[10px] ${CHECK_LABEL[a.check_status]?.cls ?? 'bg-gray-100 text-gray-500'}`}
+                      >
+                        {CHECK_LABEL[a.check_status]?.text ?? a.check_status}
+                      </span>
+                      {a.check_status === 'frozen' && (
+                        <AppealButton account={a} onDone={() => { void load(); }} />
+                      )}
+                    </div>
+                  ) : (
+                    <span className="text-xs text-gray-300">—</span>
                   )}
-                </span>
+                  {a.checked_at && (
+                    <div className="text-[10px] text-gray-400">
+                      {new Date(a.checked_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                    </div>
+                  )}
+                  {onCooldown && (
+                    <div className="text-[10px] text-amber-600">
+                      Кулдаун до {new Date(a.cooldown_until!).toLocaleString('ru-RU', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' })}
+                    </div>
+                  )}
+                </div>
                 {editingProxyFor === a.id ? (
                   /* Свой список вместо <select>: рядом с каждым адресом стоит
                      его состояние, иначе сорок одинаковых строк «тот же хост,
@@ -6884,10 +6908,11 @@ const TABS = [
   // дела», а не «какие тут настройки» — их заводят один раз и больше не трогают.
   { id: 'dashboard', label: 'Сводка', icon: LayoutDashboard },
   { id: 'settings', label: 'Настройки', icon: Settings },
+  // Дальше — в порядке заполнения кампании: аккаунты, им прокси, базы, прогрев.
   { id: 'accounts', label: 'Аккаунты', icon: Users },
+  { id: 'proxies', label: 'Прокси', icon: Network },
   { id: 'bases', label: 'Базы', icon: Database },
   { id: 'warmup', label: 'Прогрев', icon: Flame },
-  { id: 'proxies', label: 'Прокси', icon: Network },
   { id: 'logs', label: 'Логи', icon: ScrollText },
   { id: 'dialogs', label: 'Диалоги', icon: MessageCircle },
   { id: 'report', label: 'Отчёт', icon: FileSpreadsheet },
