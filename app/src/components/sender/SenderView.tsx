@@ -14,8 +14,8 @@ import { ThreadsTab } from './ThreadsTab';
 // пишутся прямо там же (задача 4.1); разбор входящих остаётся в инструменте
 // «Персонализированные ответы».
 const TABS = [
-  { id: 'mailboxes', label: 'Ящики' },
   { id: 'campaigns', label: 'Кампании' },
+  { id: 'mailboxes', label: 'Ящики' },
   { id: 'threads', label: 'Письма' },
   { id: 'stats', label: 'Статистика' },
   { id: 'stoplist', label: 'Стоп-лист' },
@@ -25,15 +25,13 @@ const TABS = [
 type TabId = (typeof TABS)[number]['id'];
 
 /**
- * Вкладка из адреса: ?tab=campaigns. Ссылка на кампанию (?campaign=<id>)
- * без вкладки тоже ведёт в «Кампании» — иначе она открывала бы «Ящики»;
+ * Вкладка из адреса: ?tab=mailboxes. Без вкладки открываются «Кампании»;
  * ссылка на переписку (?thread=<id>) — в «Письма».
  */
-function initialTab(tab: string | null, campaignId: string | null, threadId: string | null): TabId {
+function initialTab(tab: string | null, threadId: string | null): TabId {
   const known = TABS.find((item) => item.id === tab);
   if (known) return known.id;
-  if (threadId) return 'threads';
-  return campaignId ? 'campaigns' : 'mailboxes';
+  return threadId ? 'threads' : 'campaigns';
 }
 
 /**
@@ -46,7 +44,7 @@ function initialTab(tab: string | null, campaignId: string | null, threadId: str
 export function SenderView() {
   const searchParams = useSearchParams();
   const [tab, setTab] = useState<TabId>(() =>
-    initialTab(searchParams.get('tab'), searchParams.get('campaign'), searchParams.get('thread')),
+    initialTab(searchParams.get('tab'), searchParams.get('thread')),
   );
   // Кампания из ссылки. Сбрасывается при смене вкладки: вернувшись в
   // «Кампании», человек ждёт обычный список, а не повторную подсветку.
