@@ -9,11 +9,13 @@
  *  - дополнительный callLLMText — свободный текст без json_object
  *    (цепочки писем парсятся маркерами ---LETTER N---, а не схемой).
  *
- * Цены (USD/M токенов) — по прайсу Requesty на момент написания; при смене
- * моделей обновить MODEL_PRICES. Фолбэка «считать по самой дорогой» больше нет:
- * он завышал самый массовый вызов движка в ~33 раза. Модель без ставки прогон
- * не останавливает: расход берётся из usage.cost роутера, а сам пробел в
- * таблице виден в логе (см. costOfCall).
+ * Расход вызова берётся из usage.cost роутера — это цена, которую Requesty
+ * выставил (с его наценкой, кешем и фактической моделью ответа). Таблица
+ * MODEL_PRICES (USD/M токенов, прайс Requesty на момент написания) — только
+ * запасной путь, когда роутер usage.cost не вернул; при смене моделей её всё
+ * равно обновлять. Фолбэка «считать по самой дорогой» больше нет: он завышал
+ * самый массовый вызов движка в ~33 раза. Модель без ставки прогон не
+ * останавливает, а сам пробел в таблице виден в логе (см. costOfCall).
  *
  * Транспорт (раздел «Транспорт» ниже): у каждой ПОПЫТКИ есть свой срок и
  * ограниченные повторы. Классы сбоя — типизированные (HeLlmHttpError.kind,
@@ -56,8 +58,11 @@ const MODEL_PRICES: Record<string, ModelPrices> = {
   'gpt-5.2':                        { in: 1.25, out: 10.0 },
   'openai/gpt-5.2':                 { in: 1.25, out: 10.0 },
   // Прод-модели после A/B eval (2026-08), прайс Requesty USD/M токенов.
-  'gpt-5.5':                        { in: 4.5, out: 27.0 },
-  'openai/gpt-5.5':                 { in: 4.5, out: 27.0 },
+  // gpt-5.5 сверен со ставкой соседнего движка (verticalEngineV2/llm.ts,
+  // 5.0/30.0): здесь стояло 4.5/27.0, на 10% ниже, а это модель research и
+  // bulk в проде (docker-compose.prod.yml, HE_MODEL_RESEARCH/HE_MODEL_BULK).
+  'gpt-5.5':                        { in: 5.0, out: 30.0 },
+  'openai/gpt-5.5':                 { in: 5.0, out: 30.0 },
   'gemini-3.1-pro-preview':         { in: 1.8, out: 10.8 },
   'google/gemini-3.1-pro-preview':  { in: 1.8, out: 10.8 },
   // Дефолт роли gate (HE_MODEL_DEFAULTS.gate) — самый массовый вызов движка:
@@ -107,17 +112,31 @@ function getApiKey(): string {
 }
 
 /**
- * Стоимость вызова. Порядок: ставка из MODEL_PRICES (штатный путь, цифры не
- * меняются) → фактический `usage.cost` роутера → 0 с записью в лог.
+ * Наценка роутера поверх прайса модели. Ставки MODEL_PRICES — прайс без неё, а
+ * usage.cost её уже содержит, поэтому оценка по таблице умножается на тот же
+ * множитель, что и у соседнего движка (verticalEngineV2/llm.ts: «Reserve
+ * estimates include its 5% markup»). Иначе запасной путь систематически занижал бы
+ * расход на эти 5%.
+ */
+const REQUESTY_MARKUP = 1.05;
+
+/**
+ * Стоимость вызова. Порядок: фактический `usage.cost` роутера → ставка из
+ * MODEL_PRICES с наценкой роутера → 0 с записью в лог.
+ *
+ * usage.cost — первым: это цена, которую выставил Requesty (в VE2 это и есть
+ * источник аудита расхода), и в ней уже учтены наценка роутера, кешированные
+ * токены и модель, фактически ответившая на запрос. Таблица этого не знает
+ * ничего, поэтому раньше, при наличии ставки, точная цифра роутера
+ * выбрасывалась, и расход по моделям с ставкой стабильно занижался.
  *
  * Ставки может не быть у модели из env или из явного opts.model, и бросать
  * здесь нельзя: к моменту подсчёта вызов уже оплачен, стадия упала бы ПОСЛЕ
  * успешного ответа модели — пробел в бухгалтерии не повод останавливать
- * работающий платный прогон. Requesty отдаёт свою цену вызова в usage.cost
- * (в VE2 это и есть источник аудита расхода) — это точнее любой таблицы, и
- * ставку «самой дорогой» модели не выдумываем ни при каких условиях. Если и
- * usage.cost нет — вклад нулевой (сумму складывают в stages/shared.ts и
- * прибавляют к numeric-колонке, NaN сломал бы её), но не молча: см. noteUnpriced.
+ * работающий платный прогон. Ставку «самой дорогой» модели не выдумываем ни
+ * при каких условиях. Если нет ни usage.cost, ни ставки — вклад нулевой (сумму
+ * складывают в stages/shared.ts и прибавляют к numeric-колонке, NaN сломал бы
+ * её), но не молча: см. noteUnpriced.
  */
 function costOfCall(
   model: string,
@@ -126,11 +145,17 @@ function costOfCall(
   reportedCostUsd?: number,
 ): number {
   const p = lookupPrices(model);
-  if (p) return (promptTokens / 1_000_000) * p.in + (completionTokens / 1_000_000) * p.out;
   if (reportedCostUsd !== undefined) {
-    noteUnpriced(model, 'router', `расход взят из usage.cost роутера ($${reportedCostUsd}) — допишите ставку в hypothesisEngine/llm.ts`);
+    if (!p) {
+      noteUnpriced(
+        model,
+        'router',
+        `расход взят из usage.cost роутера ($${reportedCostUsd}), но без него этот вызов ушёл бы в ноль — допишите ставку в hypothesisEngine/llm.ts`,
+      );
+    }
     return reportedCostUsd;
   }
+  if (p) return ((promptTokens / 1_000_000) * p.in + (completionTokens / 1_000_000) * p.out) * REQUESTY_MARKUP;
   noteUnpriced(model, 'missing', 'и роутер не вернул usage.cost — расход этого вызова НЕ попал в cost_usd, допишите ставку в hypothesisEngine/llm.ts');
   return 0;
 }
@@ -171,7 +196,7 @@ export function getHeModel(kind: HeModelKind): string {
       model,
       'config',
       `роль '${kind}' (${configured ? HE_MODEL_ENV[kind] : `HE_MODEL_DEFAULTS.${kind}`}) — ` +
-        `расход ляжет на usage.cost роутера, а без него в ноль — допишите ставку в hypothesisEngine/llm.ts`,
+        `расход считается по usage.cost роутера, а когда его нет — в ноль: допишите ставку в hypothesisEngine/llm.ts`,
     );
   }
   return model;
@@ -282,6 +307,23 @@ export interface HeActiveJobChannel {
    * процесса, как было.
    */
   log?: (msg: string) => void;
+  /**
+   * Расход КАЖДОГО ответа модели, за который провайдер выставил счёт, —
+   * включая попытки схемы, которые вызов потом отбросил. Зовётся до того, как
+   * вызов решит свою судьбу, поэтому до воркера доходят и деньги вызова,
+   * который в итоге бросил исключение (стадия их уже не вернёт: usage у неё
+   * приезжает только вместе с результатом).
+   *
+   * Канал запоминается в начале вызова, а не читается на каждом ответе: поздний
+   * ответ вызова, переживший свою джобу, иначе записался бы на следующую.
+   */
+  onSpend?: (spend: HeLlmSpend) => void;
+}
+
+/** Расход одного оплаченного ответа модели. */
+export interface HeLlmSpend {
+  tokensUsed: number;
+  costUsd: number;
 }
 
 let activeJob: HeActiveJobChannel | null = null;
@@ -372,7 +414,13 @@ export class HeLlmHttpError extends Error {
   }
 }
 
-/** Сеть не дошла или ответ не разобрался: запрос как будто не состоялся. */
+/**
+ * Ответа нет или он не разобрался: соединение не установилось, оборвалось (до
+ * доставки запроса ИЛИ после неё, пока провайдер генерировал ответ), тело 200
+ * не дочиталось. Исполнил ли провайдер запрос и выставил ли счёт — по этому
+ * классу НЕ известно; поэтому повтор внутри вызова ему положен только быстрый
+ * (см. LLM_UNCERTAIN_RETRY_WINDOW_MS), а не «как будто запроса не было».
+ */
 export class HeLlmTransportError extends Error {
   /** Дискриминант класса: instanceof ложен, если в процессе две копии модуля. */
   readonly heLlmFailure = true as const;
@@ -429,6 +477,27 @@ export function heLlmFailureOf(error: unknown): HeLlmFailureFacts | null {
 const RETRYABLE_STATUSES = new Set<number>([408, 425, 500, 502, 503, 504, 529]);
 /** Повторов после первой попытки (итого до 4 запросов на один вызов). */
 const MAX_HTTP_RETRIES = 3;
+/**
+ * Окно, в котором транзиентный отказ повторяется ВНУТРИ вызова: отказ пришёл не
+ * позже чем через столько мс после отправки ЭТОЙ попытки.
+ *
+ * Зачем окно. Транзиентный класс (5xx, 408/425, обрыв связи, недочитанное тело
+ * 200) не доказывает, что провайдер запрос не исполнял: 504 шлюза или обрыв
+ * сокета через восемь минут генерации hypotheses (maxTokens 32768) приходят
+ * ПОСЛЕ того, как модель отработала, и такая генерация может быть оплачена.
+ * Раньше её повторяли до трёх раз подряд — до четырёх оплаченных генераций на
+ * одну попытку схемы. Окно ограничивает то, что повтор может оплатить второй
+ * раз: отказ, пришедший за 15 с (отказ соединения, DNS, мгновенные 502/503
+ * роутера, 529 перегрузки), стоит не больше 15 с работы провайдера, а штатный
+ * отказ «на входе» укладывается в него с запасом. Пришедший позже не
+ * повторяется здесь: он уходит наверх, как и до волны 3 (стадия либо
+ * поглощает отказ элемента, либо падает и решение принимает политика попыток
+ * джобы).
+ *
+ * 429 под окно не попадает: это отказ провайдера принять запрос (rate_limit), а
+ * не исход исполненной работы, — его пауза и повтор прежние.
+ */
+const LLM_UNCERTAIN_RETRY_WINDOW_MS = 15_000;
 /** База экспоненциального бэкоффа: 2с → 4с → 8с. */
 const RETRY_BASE_MS = 2000;
 /**
@@ -653,10 +722,18 @@ function httpFailureKind(status: number, body: string): HeLlmFailureKind {
  * Сколько ждать перед повтором — или null, если повторять нельзя.
  * 429: ждём ровно столько, сколько попросил провайдер, но не дольше
  * MAX_RETRY_WAIT_MS; больше — честный отказ, решение за джобой.
+ * Транзиентный отказ, пришедший позже LLM_UNCERTAIN_RETRY_WINDOW_MS после
+ * отправки попытки, не повторяется: провайдер мог его уже исполнить и выставить
+ * счёт.
  */
-function retryWaitMs(failure: HeLlmHttpError | HeLlmTransportError, attempt: number): number | null {
+function retryWaitMs(
+  failure: HeLlmHttpError | HeLlmTransportError,
+  attempt: number,
+  elapsedMs: number,
+): number | null {
   if (failure.kind !== 'transient' && failure.kind !== 'rate_limit') return null;
   if (attempt >= MAX_HTTP_RETRIES) return null;
+  if (failure.kind === 'transient' && elapsedMs > LLM_UNCERTAIN_RETRY_WINDOW_MS) return null;
   const asked = failure instanceof HeLlmHttpError ? failure.retryAfterMs : undefined;
   const wait = Math.max(RETRY_BASE_MS * 2 ** attempt, asked ?? 0);
   return wait > MAX_RETRY_WAIT_MS ? null : wait;
@@ -688,6 +765,9 @@ async function rawCall(
   for (let attempt = 0; ; attempt++) {
     signal.throwIfAborted();
     let failure: HeLlmHttpError | HeLlmTransportError;
+    // Отсчёт от отправки ЭТОЙ попытки (пауза бэкоффа сюда не входит): по нему
+    // retryWaitMs отличает отказ «на входе» от отказа после генерации.
+    const sentAt = Date.now();
     try {
       // Признак жизни ДО запроса и сразу ПОСЛЕ ответа: между ними идёт самое
       // длинное законное молчание движка — генерация ответа моделью. Отметка на
@@ -758,8 +838,20 @@ async function rawCall(
             );
     }
 
-    const waitMs = retryWaitMs(failure, attempt);
-    if (waitMs === null) throw failure;
+    const elapsedMs = Date.now() - sentAt;
+    const waitMs = retryWaitMs(failure, attempt, elapsedMs);
+    if (waitMs === null) {
+      // Транзиент, которому повтор не положен только из-за окна, — в лог: иначе
+      // по логу не отличить «повторы кончились» от «повтор мог оплатить
+      // генерацию второй раз».
+      if (failure.kind === 'transient' && attempt < MAX_HTTP_RETRIES && elapsedMs > LLM_UNCERTAIN_RETRY_WINDOW_MS) {
+        llmLog(
+          `[he-llm] ${model}: ${failure.kind} (${failure.message.slice(0, 160)}) через ${elapsedMs} мс после отправки — ` +
+            `внутри вызова не повторяем: провайдер мог исполнить запрос и выставить счёт`,
+        );
+      }
+      throw failure;
+    }
     // Строка получает личность прогона (id воркера, джобы, проекта, стадия) из
     // канала активной джобы: в общем логе контейнера иначе не видно, чей это
     // повтор. Вне воркера — прежний console.warn процесса.
@@ -842,7 +934,9 @@ export async function callLLMWithSchema<T>(
   opts: HeLlmSchemaCallOptions,
 ): Promise<LLMResult<T>> {
   const maxTokens = opts.maxTokens ?? 4096;
-  return callLLMWithSchemaAttempts(messages, schema, opts, maxTokens, getHeActiveJobSignal());
+  // Канал читаем ОДИН раз, в начале вызова (см. HeActiveJobChannel.onSpend).
+  const job = activeJob;
+  return callLLMWithSchemaAttempts(messages, schema, opts, maxTokens, job?.signal ?? null, job?.onSpend);
 }
 
 async function callLLMWithSchemaAttempts<T>(
@@ -851,6 +945,7 @@ async function callLLMWithSchemaAttempts<T>(
   opts: HeLlmSchemaCallOptions,
   maxTokens: number,
   parent: AbortSignal | null,
+  onSpend: ((spend: HeLlmSpend) => void) | undefined,
 ): Promise<LLMResult<T>> {
   const attempts: Array<{
     text: string;
@@ -903,6 +998,10 @@ async function callLLMWithSchemaAttempts<T>(
     );
     const { promptTokens, completionTokens, tokensUsed, reportedCostUsd } = usageOf(response);
     const costUsd = costOfCall(opts.model, promptTokens, completionTokens, reportedCostUsd);
+    // Ответ оплачен — воркер узнаёт об этом сразу, до решения о его годности:
+    // если следующая попытка бросит (транспорт, срок, прерывание), расход
+    // этой иначе не дошёл бы никуда (discarded живёт только до return).
+    onSpend?.({ tokensUsed, costUsd });
     /** Отброшенная попытка тоже оплачена: копим её расход (см. discarded). */
     const keepDiscardedUsage = () => {
       discarded.tokensUsed += tokensUsed;
@@ -911,7 +1010,8 @@ async function callLLMWithSchemaAttempts<T>(
       discarded.costUsd += costUsd;
       llmLog(
         `[he-llm] ${opts.model}: попытка ${attempt + 1}/${SCHEMA_ATTEMPTS} отброшена, ` +
-          `её расход учтён (+${tokensUsed} tok, $${costUsd.toFixed(6)})`,
+          `оплачена (+${tokensUsed} tok, $${costUsd.toFixed(6)}): расход идёт в итог вызова, ` +
+          `а если вызов откажет — в учёт прогона воркера`,
       );
     };
 
@@ -996,21 +1096,25 @@ export async function callLLMText(
   opts: HeLlmCallOptions,
 ): Promise<LLMTextResult> {
   const maxTokens = opts.maxTokens ?? 8192;
+  // Канал читаем ОДИН раз, в начале вызова (см. HeActiveJobChannel.onSpend).
+  const job = activeJob;
   // Попытка одна (повтора схемы у свободного текста нет), поэтому срок попытки
   // ограничивает и весь вызов.
   const { text, response } = await withLlmDeadline(
     'LLM request',
     llmAttemptTimeoutMs(maxTokens),
-    getHeActiveJobSignal(),
+    job?.signal ?? null,
     (signal) => rawCall(messages, opts.model, maxTokens, false, signal),
   );
   const { promptTokens, completionTokens, tokensUsed, reportedCostUsd } = usageOf(response);
+  const costUsd = costOfCall(opts.model, promptTokens, completionTokens, reportedCostUsd);
+  job?.onSpend?.({ tokensUsed, costUsd });
   return {
     text: text.trim(),
     tokensUsed,
     promptTokens,
     completionTokens,
-    costUsd: costOfCall(opts.model, promptTokens, completionTokens, reportedCostUsd),
+    costUsd,
     rawResponse: response,
     finishReason: response.choices?.[0]?.finish_reason,
   };

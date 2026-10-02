@@ -159,15 +159,24 @@ export interface HeCollectInfo {
  */
 export interface EngConstructInfo {
   status: 'dispatched' | 'done' | 'failed' | 'cancelled';
-  dispatched_at?: string;
   /** Почт найдено конструктором. */
   emails_found?: number;
   /** Почт с вердиктом ok после валидации. */
   valid_count?: number;
   note?: string;
+  /**
+   * Вердикты построчные (контракт «один адрес на строку»). `false` — базу
+   * собирал прежний контракт, и us-запуск её откажет (baseCollectedBeforeSplit).
+   * Считает проекция тем же маркером, что и запуск.
+   */
+  per_address_verdicts?: boolean;
 }
 
-/** collect_info с полями ENG-конвейера (construct + stats). */
+/**
+ * collect_info с полями ENG-конвейера (construct + stats). Только то, что
+ * отдаёт проекция (COLLECT_STATS_FIELDS / CONSTRUCT_FIELDS): поле, которого
+ * в ответе нет, здесь не объявляется.
+ */
 export interface EngCollectInfo extends HeCollectInfo {
   construct?: EngConstructInfo;
   stats?: {
@@ -175,7 +184,8 @@ export interface EngCollectInfo extends HeCollectInfo {
     tasks_done?: number;
     tasks_failed?: number;
     rows_total?: number;
-    finished_at?: string;
+    /** Строк, которые гейт релевантности пометил как вне вертикали. */
+    low_relevance?: number;
   };
 }
 
@@ -208,6 +218,12 @@ export type EngBaseSummary = Omit<
    * (дедуп-ветка POST /verticals/[id]/collect).
    */
   error_code?: HeClientStageErrorCode | null;
+  /**
+   * Прогон ежедневного долива («auto-refill: …»), а не база под запуск: его
+   * строки уходят прямо в идущую кампанию. Ключа нет у ответов без
+   * `collect_info` и `filename`.
+   */
+  refill?: boolean;
 };
 
 /** Строка списка проектов кабинета (GET /eng/projects). */
@@ -569,7 +585,11 @@ export async function updateEngSendingWindow(
 
 /* ── ENG Command Center (GET /eng/dashboard) ── */
 
-/** Этап вертикали на дашборде (порядок конвейера research → … → launched). */
+/**
+ * Этап вертикали на дашборде (порядок конвейера research → … → launched).
+ * `launch_unfinished` — запись о запуске есть, но часть аудитории не уехала
+ * (`heLaunchIsIncomplete`): это не «live», его достраивают на шаге 5.
+ */
 export type EngDashStage =
   | 'research'
   | 'letters'
@@ -578,6 +598,7 @@ export type EngDashStage =
   | 'analyzing'
   | 'analyzed'
   | 'template'
+  | 'launch_unfinished'
   | 'launched';
 
 export interface EngDashboardVertical {
@@ -621,6 +642,12 @@ export interface EngDashboardVertical {
   forecast: { pct: number } | null;
   /** Факт по запущенной кампании (петля actualsReconcile, свежесть 24ч). */
   actual: { reply_pct: number; sent: number; measured_at: string } | null;
+  /**
+   * Ночной добор снял ЭТУ вертикаль правилом сухой вертикали
+   * (`he_verticals.refill_dry_since`): проект может идти, а она — нет. Поля
+   * нет (ответ старше) либо `false` — пометки нет или её не прочитали.
+   */
+  refill_dry?: boolean;
 }
 
 export interface EngDashboardEvent {
@@ -630,6 +657,7 @@ export interface EngDashboardEvent {
     | 'base_analyzed'
     | 'template_ready'
     | 'launched'
+    | 'launch_unfinished'
     | 'refill_appended'
     | 'refill_empty'
     | 'failed';
@@ -665,7 +693,12 @@ export interface EngDashboardResponse {
     refill?: HeClientRefillState;
   }>;
   verticals?: EngDashboardVertical[];
-  today?: { appended: number; valid: number; collected: number };
+  /**
+   * Счётчики дня. `collected` — СТРОКИ сборок (в том числе пустые строки
+   * компаний без найденного адреса); `collected_companies` — компании, 0 =
+   * «не знаем» (база без счётчика компаний), тогда правду говорят только строки.
+   */
+  today?: { appended: number; valid: number; collected: number; collected_companies?: number };
   /**
    * Про АККАУНТ целиком, а не про проект: момент следующей ночи и суммарный
    * дневной кап ТОЛЬКО тех проектов, которые в неё пойдут (проект на паузе в

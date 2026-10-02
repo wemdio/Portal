@@ -92,7 +92,14 @@ import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { enqueueHeBaseCollect } from './baseCollectEnqueue';
 import { parseLaunchInfo } from './launchHandoff';
 
-/** Лимит строк одной refill-сборки (на вертикаль за тик). */
+/**
+ * Потолок КОМПАНИЙ одной refill-сборки (на вертикаль за тик), а не строк — имя
+ * константы старше разноса адресов по строкам. Уходит в payload.limit джобы, и
+ * стадия считает его компаниями: после разноса одна компания даёт до
+ * max_emails_per_company строк. Сколько компаний собрать на самом деле, стадия
+ * ещё режет под остаток дневного капа (resolveHeRefillCollectCompanies,
+ * stages/baseCollectRefill.ts), этот потолок — верхняя граница.
+ */
 export const HE_AUTO_REFILL_ROWS_LIMIT = 200;
 /** Дефолт verticals_per_run — зеркало DEFAULT миграции 20260804_0005. */
 export const HE_AUTO_DEFAULT_VERTICALS_PER_RUN = 3;

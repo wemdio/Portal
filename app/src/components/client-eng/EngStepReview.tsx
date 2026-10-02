@@ -746,13 +746,24 @@ export function EngStepReview({ detail, onChanged }: { detail: EngDetail; onChan
 
   // Карточка имеет смысл, только когда есть что ревьюить: готовая цепочка,
   // база или шаблон вертикали.
+  // База карточки — та, по которой строится или построен запуск: база шаблона,
+  // а без шаблона — самая свежая НЕ доливная. Базы приходят свежими первыми, и
+  // у запущенной вертикали первой стоит ночной долив («auto-refill: …»): его
+  // строки уходят прямо в идущую кампанию, к запуску он отношения не имеет, и
+  // превью его строк здесь выдавало бы себя за аудиторию запуска.
   const cards = verticals
-    .map((vertical) => ({
-      vertical,
-      chain: chains.find((c) => c.vertical_id === vertical.id && c.status === 'ready'),
-      base: bases.find((b) => b.vertical_id === vertical.id),
-      template: templates.find((t) => t.vertical_id === vertical.id),
-    }))
+    .map((vertical) => {
+      const template = templates.find((t) => t.vertical_id === vertical.id);
+      const base =
+        (template ? bases.find((b) => b.id === template.base_id) : undefined) ??
+        bases.find((b) => b.vertical_id === vertical.id && b.refill !== true);
+      return {
+        vertical,
+        chain: chains.find((c) => c.vertical_id === vertical.id && c.status === 'ready'),
+        base,
+        template,
+      };
+    })
     .filter((c) => c.chain || c.base || c.template);
 
   // К запуску готовы ready-шаблоны без записи о запуске И те, чей запуск НЕ

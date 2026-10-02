@@ -15,9 +15,9 @@
 import { useMemo } from 'react';
 import { Database } from 'lucide-react';
 import type { HeTemplate, HeVertical } from '@/lib/hypothesisEngine/types';
-import { parseLaunchInfo } from '@/lib/hypothesisEngine/launchHandoff';
+import { heLaunchIsIncomplete, parseLaunchInfo } from '@/lib/hypothesisEngine/launchHandoff';
 import { type EngBaseSummary } from './api-client';
-import { engStageErrorText } from './engText';
+import { engRefillStoppedText, engStageErrorText } from './engText';
 import { EngBadge, EngCard, EngSpinner, baseStatusTone, fmtDate } from './ui';
 import type { EngDetail } from './EngProjectWizard';
 
@@ -102,16 +102,26 @@ function CollectProgress({ base }: { base: EngBaseSummary }) {
  * вертикали, после капа на компанию» надо там, где известна сетка, и класть
  * готовое число в collect_info.stats — кабинет не должен это выводить сам.
  *
- * ДВЕ ветки из трёх говорят не «сколько уедет», а «не уедет ничего»: база без
- * вердиктов и база, где ни один вердикт не 'ok'. Обе запуск ENG-клиента
- * отклоняет до создания кампании (runHeTemplateLaunch: baseNotVerified /
- * noValidEmails), поэтому здесь про это сказано прямо — клиент не должен
- * узнавать об отказе на шаге 5, пройдя часы сборки.
+ * ТРИ ветки из четырёх говорят не «сколько уедет», а «не уедет ничего»: база
+ * без вердиктов, база, собранная прежним контрактом (вердикт не построчный), и
+ * база, где ни один вердикт не 'ok'. Все три запуск ENG-клиента отклоняет до
+ * создания кампании (runHeTemplateLaunch: baseNotVerified /
+ * baseCollectedBeforeSplit / noValidEmails), поэтому здесь про это сказано
+ * прямо — клиент не должен узнавать об отказе на шаге 5, пройдя часы сборки.
+ *
+ * КОМУ ПАНЕЛЬ ВООБЩЕ ПОЛОЖЕНА. Только базе, которую ещё можно запустить: авто-
+ * база вертикали в 'analyzing' или 'analyzed'. Упавшую базу запуск не берёт (у
+ * неё не бывает шаблона), а объяснение причины у неё своё — код стадии ниже;
+ * панель рядом с ним спорила бы с ним («проверка не доработала» против «срез
+ * не про вертикаль»). Прогон ежедневного долива не запускается вовсе — его
+ * строки уходят прямо в идущую кампанию, и «уточним при запуске» про него ложь.
  */
 function SendVolume({ base }: { base: EngBaseSummary }) {
   // Только авто-база: у загруженного файла движок строки не размечает, и
   // запуск их не фильтрует (`isAutoBase` в runHeTemplateLaunch).
   if (base.source !== 'auto' || base.row_count <= 0) return null;
+  if (base.refill === true) return null;
+  if (base.status !== 'analyzed' && base.status !== 'analyzing') return null;
 
   const construct = base.collect_info?.construct;
   // valid_count пишется только вместе с импортом результата конструктора;
@@ -120,11 +130,8 @@ function SendVolume({ base }: { base: EngBaseSummary }) {
     construct && construct.status !== 'dispatched' && typeof construct.valid_count === 'number'
       ? construct.valid_count
       : null;
-  // `stats.low_relevance` отдаёт проекция (COLLECT_STATS_FIELDS), но в DTO
-  // кабинета `stats` описан под прогресс-карту сборки и этого поля не знает.
-  // Читаем узким кастом здесь, а не расширяем тип в api-client.ts — файл
-  // чужой полосы.
-  const flagged = (base.collect_info?.stats as { low_relevance?: number } | undefined)?.low_relevance ?? 0;
+  // `stats.low_relevance` отдаёт проекция (COLLECT_STATS_FIELDS).
+  const flagged = base.collect_info?.stats?.low_relevance ?? 0;
 
   // Вердиктов нет ВООБЩЕ — и это не «узнаем на запуске», а отказ запуска.
   // `valid_count` пишется ровно тем же импортом результата конструктора, что и
@@ -137,8 +144,7 @@ function SendVolume({ base }: { base: EngBaseSummary }) {
   // POST /verticals/[id]/collect нет, а «Start outreach» новой сборки при
   // готовой базе не ставит), поэтому действие — то же, что у пустого пресета на
   // шаге 5: попросить менеджера. Легаси-база сюда НЕ попадает: импорт до
-  // 26.09.2026 тоже писал valid_count, её отклонит другой предохранитель
-  // (baseCollectedBeforeSplit) — врать про причину нечем.
+  // 26.09.2026 тоже писал valid_count — её разбирает следующая ветка.
   if (verified === null) {
     return (
       <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
@@ -146,6 +152,22 @@ function SendVolume({ base }: { base: EngBaseSummary }) {
         unverified address is never mailed. This base cannot be launched: step 5 «Review &amp; Launch» will
         refuse it. Ask your manager to collect this audience again; a new collection runs verification to the
         end.
+      </div>
+    );
+  }
+
+  // Вердикты есть, но НЕ построчные: базу собирал прежний контракт (до
+  // 26.09.2026 одна строка держала несколько адресов, и проверка сохраняла один
+  // результат на всю ячейку). us-запуск такую базу отклоняет целиком
+  // (baseCollectedBeforeSplit) тем же маркером, что проекция кладёт в
+  // `per_address_verdicts`. Ключа нет (ответ старше) — не гадаем, идём дальше
+  // прежним путём.
+  if (construct?.per_address_verdicts === false) {
+    return (
+      <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-amber)' }}>
+        This base was collected before every address got its own email check, so its check results cannot be
+        tied to single addresses — step 5 «Review &amp; Launch» will refuse it. Ask your manager to collect this
+        audience again; a new collection keeps one address per row with its own check result.
       </div>
     );
   }
@@ -228,6 +250,10 @@ function AutopilotDecisions({ base }: { base: EngBaseSummary }) {
 
 function TemplateLaunchStatus({ template }: { template: HeTemplate }) {
   const launch = parseLaunchInfo((template as { launch_info?: unknown }).launch_info);
+  // Тот же предикат, что у шага 5 и у самого запуска: часть аудитории осталась
+  // без кампании или без адресов. Зелёное «launched» здесь значило бы, что
+  // делать нечего, а достроить запуск может только нажатие на шаге 5.
+  const unfinished = launch !== null && heLaunchIsIncomplete(launch);
 
   if (!launch) {
     return (
@@ -252,12 +278,20 @@ function TemplateLaunchStatus({ template }: { template: HeTemplate }) {
   return (
     <div className="mt-2 rounded-md p-3 text-xs flex flex-col gap-1" style={{ border: '1px solid var(--cp-divider)' }}>
       <div className="flex items-center gap-2">
-        <EngBadge label="launched (paused)" tone="green" />
+        <EngBadge
+          label={unfinished ? 'launch unfinished' : 'launched (paused)'}
+          tone={unfinished ? 'amber' : 'green'}
+        />
         <span className="font-semibold" style={{ color: 'var(--cp-paper)' }}>{launch.campaign_name}</span>
       </div>
       <div className="ds-mono" style={{ color: 'var(--cp-text-m)' }}>
-        {launch.leads_count.toLocaleString('en-US')} contacts · {fmtDate(launch.created_at)}
+        {launch.leads_count.toLocaleString('en-US')} contacts{unfinished ? ' so far' : ''} · {fmtDate(launch.created_at)}
       </div>
+      {unfinished && (
+        <span className="text-[11px]" style={{ color: 'var(--cp-amber)' }}>
+          Part of this audience has not gone out yet — finish the launch on step 5 «Review &amp; Launch».
+        </span>
+      )}
       {/* White-label: сегменты — подписи, а не ссылки. Вести клиента наружу
           некуда: своего входа в рассыльщик у него нет, а ссылка светит бренд. */}
       {Array.isArray(launch.campaigns) && launch.campaigns.length > 1 ? (
@@ -322,6 +356,9 @@ export function EngStepBases({ detail }: { detail: EngDetail; onChanged: () => v
             {/* Готовые/падавшие базы вертикали */}
             {ownBases.filter((b) => b.status !== 'collecting').map((b) => {
               const template = templates.find((t) => t.base_id === b.id);
+              // Прогон ежедневного долива: не база под запуск, и у его отказа
+              // другой ответ «что делать» (перезапуска ночи у клиента нет).
+              const refill = b.refill === true;
               const templateJobActive = jobs.some(
                 (j) =>
                   j.stage === 'template' &&
@@ -344,6 +381,14 @@ export function EngStepBases({ detail }: { detail: EngDetail; onChanged: () => v
                     </span>
                   </div>
 
+                  {refill && b.status !== 'failed' && (
+                    <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-text-l)' }}>
+                      This is a daily refill run, not a base to launch: whatever it adds goes straight into the
+                      running campaign, and only addresses with a verified email are added. Recent activity on
+                      the Command Center shows what each run added.
+                    </div>
+                  )}
+
                   <SendVolume base={b} />
 
                   <AutopilotDecisions base={b} />
@@ -359,7 +404,7 @@ export function EngStepBases({ detail }: { detail: EngDetail; onChanged: () => v
                       не хватает. */}
                   {b.status === 'failed' && b.error_code && (
                     <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-red)' }}>
-                      {engStageErrorText(b.error_code)}
+                      {engStageErrorText(b.error_code, refill ? 'refill' : 'collection')}
                     </div>
                   )}
 
@@ -369,14 +414,16 @@ export function EngStepBases({ detail }: { detail: EngDetail; onChanged: () => v
                       правка руками или писатель, положивший пустой текст). Без
                       этой ветки карточка показывала красный бейдж и ничего
                       больше — статус без единого слова читается как поломка
-                      продукта. Кнопки повторной сборки в кабинете нет (шаг 4 —
-                      витрина, сборку ведёт автопилот), поэтому здесь честная
-                      констатация и путь к человеку, а не действие. */}
+                      продукта. Действие то же, что у кодов с перезапуском:
+                      клиентское «Start outreach» ставит вертикали новую сборку
+                      (упавшая база её не останавливает), но собранное этой
+                      базой не переиспользует — поэтому «всё сохранено» здесь не
+                      пишется. У ночи долива перезапуска нет вовсе. */}
                   {b.status === 'failed' && !b.error_code && (
                     <div className="mt-2 text-[11px]" style={{ color: 'var(--cp-red)' }}>
-                      This collection stopped without a recorded reason. Everything collected before
-                      the stop is saved. Our team can see the run — contact your manager if you need
-                      this vertical collected again.
+                      {refill
+                        ? engRefillStoppedText()
+                        : 'This collection stopped without a recorded reason, so this base will not be launched. If you still need this vertical, «Start outreach» on step 2 starts a new collection for it; contact your manager if it keeps stopping.'}
                     </div>
                   )}
 

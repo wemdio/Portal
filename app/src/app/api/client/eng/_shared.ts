@@ -6,10 +6,15 @@
  * и русский текст стадий. До этой волны роуты клали `error.message` прямо в
  * ответ (11 мест), и кабинет печатал его как есть.
  *
- * Контракт один на весь контур: наружу — английская КОНСТАНТА роута плюс
- * машинный код причины (`lib/hypothesisEngine/clientErrors`), настоящая ошибка
- * уходит в `application_logs` общим `logError`. Код нужен фронту, чтобы
- * различать «повторить» и «это наша проблема, мы уже знаем», не разбирая текст.
+ * Контракт один на весь контур: наружу — только английская КОНСТАНТА роута,
+ * настоящая ошибка уходит в `application_logs` общим `logError`.
+ *
+ * Машинного кода причины в теле 5xx больше НЕТ. Он был, но его не читал никто:
+ * общий `authFetchJson` (lib/authFetch.ts) бросает `new Error(body.error)` и
+ * всё остальное тело выбрасывает, а `engApiFetch` кабинета читает только
+ * `error`. Поле, которое пишется и не читается, — обещание механизма, которого
+ * нет. Классифицированную причину кабинет получает другим путём — кодом
+ * `error_code` в проекции сохранённой ошибки стадии (clientEngProjection).
  *
  * Файл не роут: Next.js делает эндпоинтом только `route.ts`, остальное в папке
  * — обычные модули (как `api/tools/2gis-parser/_shared.ts`).
@@ -18,14 +23,12 @@
 import { NextResponse } from 'next/server';
 import type { LogContext } from '@/lib/logger';
 import { logError } from '@/lib/loggerServer';
-import { classifyHeClientError } from '@/lib/hypothesisEngine/clientErrors';
 
 /**
- * 500 клиентского контура: залогировать сырьё, отдать константу + код.
+ * 500 клиентского контура: залогировать сырьё, отдать константу.
  *
  * `scrubBrand` (как в `jsonError`) здесь не нужен: `message` — литерал вызова,
- * а `code` — токен из закрытого списка `HeClientErrorCode`. Ни один байт входа
- * в ответ не попадает.
+ * ни один байт входа в ответ не попадает.
  */
 export async function engServerError(
   event: string,
@@ -34,5 +37,5 @@ export async function engServerError(
   context?: LogContext,
 ): Promise<NextResponse> {
   await logError(event, error, context);
-  return NextResponse.json({ error: message, code: classifyHeClientError(error) }, { status: 500 });
+  return NextResponse.json({ error: message }, { status: 500 });
 }

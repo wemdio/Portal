@@ -3,10 +3,12 @@
  *
  * Модуль НЕЙТРАЛЬНЫЙ: ни одного импорта (ни движков, ни supabase-клиента,
  * ни 'server-only'), поэтому его одинаково читают воркер, стадия и route.ts.
- * Предикат — копия того, который восемь месяцев держит конструктор баз
+ * Предикат вырос из того, который восемь месяцев держит конструктор баз
  * (lib/tools/baseConstructorWorker.ts, isTransientPersistError): те же коды
- * SQLSTATE/PostgREST и тот же список текстов Kong'а, который срезает коды,
- * когда его апстрим исчезает.
+ * SQLSTATE/PostgREST и его список текстов Kong'а, который срезает коды, когда
+ * его апстрим исчезает. Список здесь шире на собственные тела 503/504 Kong и
+ * nginx: конструктор передаёт статус ответа аргументом и ловит их по нему, а
+ * вызывающие этого модуля статус, как правило, не передают.
  *
  * Почему НЕ lib/supabaseRetry.isTransientError, который уже есть в репозитории:
  * он считает транзиентными /abort/ и /timeout/ в тексте. В движке гипотез
@@ -32,12 +34,17 @@ const TRANSIENT_DB_CODE = /^(?:08\w{3}|57P0[123]|53[23]00|PGRST00[0-3])$/;
 /**
  * HTTP-статусы шлюза, за которыми стоит не отказ запроса, а недоступность.
  *
- * Читается ТОЛЬКО через необязательный аргумент `status`: ошибки supabase-js
- * своего HTTP-статуса не несут (postgrest-js на не-JSON теле собирает
- * `{ message: body }`, а `status` кладёт рядом с ошибкой, не внутрь неё), и ни
- * один сегодняшний вызывающий его не передаёт. То есть 429/503 от Kong ловятся
- * не этим набором, а текстами ниже; набор нужен вызывающему, у которого статус
- * действительно на руках (например слой fetch).
+ * Читается ТОЛЬКО через необязательный аргумент `status` и только для самой
+ * ошибки (не для её `cause`): ошибки supabase-js своего HTTP-статуса не несут
+ * (postgrest-js на не-JSON теле собирает `{ message: body }`, а `status` кладёт
+ * рядом с ошибкой, в ответ запроса, не внутрь неё). Поле `status` у самой
+ * ошибки НЕ читается сознательно: оно есть у чужих классов (отказ модели
+ * HeLlmHttpError несёт 503 провайдера), и такой отказ в цепочке причин не
+ * должен становиться «блипом БД». Вызывающий, у которого статус ответа на руках
+ * (`const { error, status } = await …`), передаёт его сам.
+ *
+ * Без аргумента шлюзовой отказ узнаётся по ТЕКСТУ ниже: тела Kong и nginx
+ * перечислены там поимённо.
  */
 const TRANSIENT_DB_STATUS = new Set([429, 502, 503, 504]);
 
@@ -45,21 +52,28 @@ const TRANSIENT_DB_STATUS = new Set([429, 502, 503, 504]);
  * Тексты, по которым узнаём блип, когда кода нет вовсе. Сюда намеренно НЕ
  * входят невалидный JSON, отказ прав, ошибка схемы и нарушение ограничения:
  * повторы такой запрос не исправят, а попытки сожгут.
+ *
+ * Собственные тела шлюзов — дословно, потому что postgrest-js отдаёт их
+ * сообщением ошибки, а статуса в ней нет (см. выше):
+ *  - Kong: 502 «An invalid response was received from the upstream server»,
+ *    503 «The upstream server is currently unavailable», «name resolution
+ *    failed» (апстрим-контейнер пересоздаётся), «failure to get a peer from the
+ *    ring-balancer», 504 «The upstream server is timing out»;
+ *  - nginx: «502 Bad Gateway», «503 Service Temporarily Unavailable»,
+ *    «504 Gateway Time-out».
  */
 const TRANSIENT_DB_MESSAGE =
-  /invalid response was received from the upstream server|bad gateway|service unavailable|gateway timeout|database system is (?:in recovery mode|starting up|shutting down)|schema cache.*(?:retrying|connection)|(?:ECONNRESET|ECONNREFUSED|EAI_AGAIN|ETIMEDOUT|EPIPE|ENETUNREACH|UND_ERR_\w+)|fetch failed|connection (?:reset|terminated|closed)/i;
+  /invalid response was received from the upstream server|upstream server is (?:currently unavailable|timing out)|name resolution failed|failure to get a peer from the ring-balancer|bad gateway|service (?:temporarily )?unavailable|gateway time-?out|database system is (?:in recovery mode|starting up|shutting down)|schema cache.*(?:retrying|connection)|(?:ECONNRESET|ECONNREFUSED|EAI_AGAIN|ETIMEDOUT|EPIPE|ENETUNREACH|UND_ERR_\w+)|fetch failed|connection (?:reset|terminated|closed)/i;
 
 /** Поля, которые предикат читает у ошибки PostgREST, Error'а и обёртки над ними. */
 interface DbErrorLike {
   message?: unknown;
   code?: unknown;
-  status?: unknown;
   cause?: unknown;
 }
 
 function matches(error: DbErrorLike, status?: number): boolean {
-  const httpStatus = Number(status ?? error.status);
-  if (Number.isFinite(httpStatus) && TRANSIENT_DB_STATUS.has(httpStatus)) return true;
+  if (status !== undefined && TRANSIENT_DB_STATUS.has(status)) return true;
   if (typeof error.code === 'string' && TRANSIENT_DB_CODE.test(error.code)) return true;
   return typeof error.message === 'string' && TRANSIENT_DB_MESSAGE.test(error.message);
 }

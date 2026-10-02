@@ -8,12 +8,28 @@
  * сегментам кампаний создаётся несколько, и отказ поздней группы оставлял
  * созданные кампании без записи о них: повтор создавал каждому уже уехавшему
  * сегменту ВТОРУЮ одноимённую кампанию, а ёмкость воркспейса тратилась дважды.
- * Теперь кампания попадает в launch_info СРАЗУ, как узнан её id, недоехавшие
- * сегменты записываются в launch_info.pending, и такой запуск:
+ * Теперь launch_info пишется ПО ХОДУ запуска (с 01.10.2026): сразу, как узнан
+ * id новой кампании (до досылки цепочки и до загрузки), и после каждого
+ * подтверждённого чанка загрузки. В записи — созданные кампании с
+ * подтверждёнными счётчиками и launch_info.pending: что ещё должно уехать, по
+ * сегментам и ПОИМЁННО (адреса). Такой запуск:
  *   - повтор НЕ блокирует (409 остаётся только у законченного запуска);
- *   - повтор ДОСТРАИВАЕТ: кампания, которая уже приняла адреса, не трогается
- *     вовсе; пустая — переиспользуется (адреса, уже лежащие у рассыльщика, он
- *     пропускает сам); заново создаются только сегменты, у которых кампании нет.
+ *   - повтор ДОСТРАИВАЕТ ровно должное: кампания сегмента без долга не
+ *     трогается вовсе; кампания с долгом дозаполняется его адресами (адреса,
+ *     уже лежащие у рассыльщика, он пропускает сам); заново создаются только
+ *     сегменты, у которых кампании нет (или она удалена у рассыльщика).
+ * Смерть процесса посреди запуска (рестарт, деплой) теряет поэтому не больше
+ * одного шага: кампанию, созданную между ответом рассыльщика и записью, или
+ * судьбу одного чанка — его повтор досылает с skip_if_in_campaign.
+ *
+ * АРЕНДА. Пока запуск идёт, запись держит running_until (продлевается каждой
+ * записью, HE_LAUNCH_LEASE_MS; у первой попытки — с её первой записи, у
+ * остальных — до первого обращения к рассыльщику, шаг 5b′), и второй запрос на
+ * тот же шаблон получает 409, а не достраивает запуск параллельно с первым.
+ * Каждая запись попытки условна (токен попытки attempt): попытка, у которой
+ * запись перехватили, дальше не идёт. Финальная запись аренду снимает; после
+ * смерти процесса она истекает сама.
+ *
  * Законченный запуск ведёт себя как до 28.09.2026 (force = новые кампании), и
  * записи без ключа pending — все, что есть в RU-инструменте, — считаются
  * законченными.
@@ -44,7 +60,10 @@
  * launchHandoff.ts): запуск HE-шаблона billing клиента не меняет.
  *
  * Три предохранителя стоят ДО первого вызова рассыльщика и все fail-closed —
- * ни один адрес не должен уехать «на всякий случай» (шаги 4c, 5 и 5a):
+ * ни один адрес не должен уехать «на всякий случай» (шаги 4c, 5 и 5a). Их
+ * общее условие — прочитанный рынок проекта (шаг 4b): не прочитался — запуск
+ * не состоялся в ОБОИХ контурах, потому что угадывать рынок по контуру значило
+ * бы снять us-предохранители с us-проекта, запущенного из RU-инструмента:
  *   - запуск с базы us-проекта, собранной до обязательного разноса адресов по
  *     строкам, не состоится: её вердикт валидации может принадлежать другому
  *     адресу той же компании (шаг 4c);
@@ -84,13 +103,14 @@
  * список; скалярные поля — основная кампания (их читает refill-долив).
  */
 
+import { randomUUID } from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { buildCampaignPayloadFromPreset } from '@/lib/clientLaunch/buildCampaignPayload';
 import { hasUsableCampaignSequences } from '@/lib/clientLaunch/campaignSequences';
 import { filterBlockedLeads, getBlockedEmailSet } from '@/lib/clientBlocklist/blockedContacts';
 import type { ClientCampaignPreset } from '@/lib/clientLaunch/types';
 import { createCampaign, createLeads, updateCampaign } from '@/lib/instantly/client';
-import { isInstantlyContactCapacityError } from '@/lib/instantly/errors';
+import { InstantlyApiError, isInstantlyContactCapacityError } from '@/lib/instantly/errors';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { logAudit, logError } from '@/lib/loggerServer';
 import type { HeBase, HeTemplate } from './types';
@@ -98,6 +118,7 @@ import { classifyBaseRowsIntoSegments, detectSegmentLanguage } from './segmentCl
 import { projectMarket, type HeMarket } from './market';
 import {
   HE_ENG_CAMPAIGN_NAMING,
+  HE_LAUNCH_LEASE_MS,
   HE_LAUNCH_MAX_LEADS,
   buildLaunchCampaignName,
   buildLaunchSequence,
@@ -109,6 +130,7 @@ import {
   instantlyCampaignUrl,
   mapBaseRowsToLeads,
   parseLaunchInfo,
+  readHeLaunchLease,
   segmentVariantsWarning,
   selectLeadsWithinLaunchCap,
   type HeTemplateLaunchCampaign,
@@ -137,16 +159,29 @@ interface HeLaunchMessages {
   /** Весь остаток аудитории оказался в чёрном списке клиента. */
   allContactsBlocked: string;
   tooManyLeads: (count: number) => string;
+  /** Рынок проекта не прочитался — запуск остановлен до рассыльщика (шаг 4b). */
+  marketReadFailed: string;
+  /** Запуск этого шаблона идёт (или оборвался) — аренда записи жива (шаг 1). */
+  launchInProgress: string;
+  /** Начало запуска не записалось в шаблон — остановлено до рассыльщика (шаг 5b′). */
+  launchStartSaveFailed: string;
+  /** Незаконченный запуск: пресета, с которым он начат, больше нет (шаг 3). */
+  resumePresetMissing: string;
+  /** Незаконченный запуск достроен с пресетом записи, а не с выбранным (шаг 3). */
+  resumePresetPinnedNote: string;
   /**
    * Потолок сработал как ВЫБОР, а не отказ (market='us', шаг 5b): что уехало и
-   * что снято. Четыре числа, потому что клиенту важны оба измерения — компании
-   * и адреса, — и обе стороны потолка.
+   * что снято. Пять чисел, потому что клиенту важны оба измерения — компании
+   * и адреса, — обе стороны потолка, и снятые адреса делятся на два разных
+   * случая: все адреса компаний без единого адреса в запуске и вторые-третьи
+   * адреса компаний, у которых один адрес уехал.
    */
   launchCapTrimmedNote: (
     companiesSent: number,
     addressesSent: number,
     addressesHeldBack: number,
     companiesHeldBack: number,
+    addressesOfHeldBackCompanies: number,
   ) => string;
   segmentSplitInfo: (campaignsCount: number) => string;
   rowsSkippedNote: (invalid: number, irrelevant: number) => string;
@@ -157,19 +192,38 @@ interface HeLaunchMessages {
   blockedContactsNote: (blocked: number) => string;
   instantlyFailedFallback: string;
   zeroAccepted: string;
-  launchInfoSaveWarning: string;
+  /**
+   * Итоговая запись о запуске не сохранилась. Аргумент — сохранилась ли хоть
+   * одна запись этой попытки (аренда или промежуточная): тогда в шаблоне
+   * осталась более ранняя запись с живой арендой, и повтор сначала получит
+   * «запуск ещё идёт»; иначе записи нет вовсе, и повтор не заблокирован.
+   */
+  launchInfoSaveWarning: (intermediateSaved: boolean) => string;
   segmentVariantsWarning: (dropped: number, lettersCount: number) => string;
-  /** Рассыльщик подтвердил МЕНЬШЕ адресов, чем мы отправили (шаг 6). */
-  partialImportNote: (requested: number, accepted: number) => string;
+  /**
+   * Рассыльщик подтвердил МЕНЬШЕ адресов, чем мы отправили (шаг 6). Третье
+   * число — сколько из отправленных он пропустил как уже лежащие в кампаниях
+   * воркспейса (только загрузки достройки): они не «непринятые».
+   */
+  partialImportNote: (requested: number, accepted: number, alreadyPresent: number) => string;
   /** Повтор: кампании, уже принявшие адреса, оставлены как есть. */
   relaunchKeptCampaignsNote: (kept: number) => string;
-  /** Повтор: пустые кампании прошлой попытки дозаполнены вместо дублей. */
+  /** Повтор: пустые или недозаполненные кампании прошлой попытки дозаполнены вместо дублей. */
   relaunchRefilledCampaignsNote: (refilled: number) => string;
   /** Повтор: сколько кампаний создано СЕЙЧАС (сегментам, у которых их не было). */
   relaunchCreatedCampaignsNote: (created: number) => string;
+  /** Повтор: кампаний прошлой попытки у рассыльщика больше нет — созданы новые. */
+  relaunchReplacedCampaignsNote: (replaced: number) => string;
+  /** Повтор: адреса долга уже лежали в кампаниях воркспейса и не добавлялись. */
+  resumeAlreadyInCampaignNote: (present: number) => string;
+  /** Повтор: адреса долга больше нельзя отправлять (блок, вердикт, ушли из базы). */
+  owedUnsendableNote: (unsendable: number) => string;
   /** Место под контакты в воркспейсе кончилось — остальные сегменты не создавались. */
   capacityStopNote: (segments: number) => string;
 }
+
+/** Аренда запуска в минутах — для текстов: число в них обязано следовать константе. */
+const LEASE_MINUTES = Math.round(HE_LAUNCH_LEASE_MS / 60_000);
 
 const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
   ru: {
@@ -200,19 +254,55 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
     allContactsBlocked: 'Все адреса базы в чёрном списке клиента — отправлять некому.',
     tooManyLeads: (count) =>
       `Слишком много лидов для запуска из мастера: ${count.toLocaleString('ru-RU')}. Максимум — ${HE_LAUNCH_MAX_LEADS.toLocaleString('ru-RU')}`,
+    marketReadFailed:
+      'Не удалось прочитать рынок проекта — запуск остановлен до создания кампании: без рынка ' +
+      'неизвестно, какие проверки адресов обязательны. Повторите попытку через минуту.',
+    launchInProgress:
+      'Запуск этого шаблона ещё идёт или оборвался посередине меньше ' +
+      `${LEASE_MINUTES} минут назад. Подождите несколько минут и откройте шаблон снова: если часть ` +
+      'запуска осталась незаконченной, повторный запуск достроит её, а не создаст второй запуск.',
+    launchStartSaveFailed:
+      'Не удалось отметить начало запуска в шаблоне — запуск остановлен до первого обращения к ' +
+      'Instantly. Повторите попытку через минуту.',
+    resumePresetMissing:
+      'Запуск этого шаблона не закончен, а пресета, с которым он начат, больше нет. Достроить его ' +
+      'можно только в том же воркспейсе Instantly (там лежат его кампании): верните пресет клиенту ' +
+      'или разберите запуск вручную.',
+    resumePresetPinnedNote:
+      'Незаконченный запуск достроен с пресетом, с которым он начат, а не с выбранным сейчас: ' +
+      'его кампании живут в воркспейсе того пресета.',
     // Достижим у us-проекта, запущенного сотрудником из RU-инструмента: гейт и
     // выборку по потолку задаёт рынок ПРОЕКТА, а язык текстов — контур.
-    launchCapTrimmedNote: (companiesSent, addressesSent, addressesHeldBack, companiesHeldBack) =>
-      `Потолок одного запуска — ${HE_LAUNCH_MAX_LEADS.toLocaleString('ru-RU')} адресов, ` +
-      'поэтому отправлено не всё: ' +
-      `${addressesSent.toLocaleString('ru-RU')} адресов у ${companiesSent.toLocaleString('ru-RU')} компаний — ` +
-      'сначала по одному адресу на компанию — с лучшим вердиктом валидации, — ' +
-      'потом вторые, пока хватало потолка. ' +
-      `Потолок снял ${addressesHeldBack.toLocaleString('ru-RU')} адресов` +
-      (companiesHeldBack > 0
-        ? ` у ${companiesHeldBack.toLocaleString('ru-RU')} компаний, которым не досталось ни одного адреса`
-        : ' у компаний, чей лучший адрес уже уехал') +
-      '. Снятые строки остались в базе и НЕ помечены отправленными.',
+    launchCapTrimmedNote: (
+      companiesSent,
+      addressesSent,
+      addressesHeldBack,
+      companiesHeldBack,
+      addressesOfHeldBackCompanies,
+    ) => {
+      const extra = addressesHeldBack - addressesOfHeldBackCompanies;
+      const parts: string[] = [];
+      if (addressesOfHeldBackCompanies > 0) {
+        parts.push(
+          `${addressesOfHeldBackCompanies.toLocaleString('ru-RU')} — все адреса ` +
+            `${companiesHeldBack.toLocaleString('ru-RU')} компаний, которым не досталось ни одного адреса`,
+        );
+      }
+      if (extra > 0) {
+        parts.push(
+          `${extra.toLocaleString('ru-RU')} — вторые и следующие адреса компаний, чей лучший адрес уже уехал`,
+        );
+      }
+      return (
+        `Потолок одного запуска — ${HE_LAUNCH_MAX_LEADS.toLocaleString('ru-RU')} адресов, ` +
+        'поэтому отправлено не всё: ' +
+        `${addressesSent.toLocaleString('ru-RU')} адресов у ${companiesSent.toLocaleString('ru-RU')} компаний — ` +
+        'сначала по одному адресу на компанию — с лучшим вердиктом валидации, — ' +
+        'потом вторые, пока хватало потолка. ' +
+        `Потолок снял ${addressesHeldBack.toLocaleString('ru-RU')} адресов: ${parts.join('; ')}` +
+        '. Снятые строки остались в базе и НЕ помечены отправленными.'
+      );
+    },
     segmentSplitInfo: (campaignsCount) =>
       `Сегментные варианты материализованы: запуск разбит на ${campaignsCount} кампании по сегментам базы (у каждой сегментной — свои тексты писем). Все кампании на паузе.`,
     rowsSkippedNote: (invalid, irrelevant) =>
@@ -234,15 +324,24 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       `Исключено контактов из чёрного списка клиента: ${blocked.toLocaleString('ru-RU')}.`,
     instantlyFailedFallback: 'Не удалось создать кампанию',
     zeroAccepted: 'Система рассылки не приняла ни одного контакта. Кампания оставлена на паузе.',
-    launchInfoSaveWarning:
-      'Кампания создана, но запись о запуске не сохранилась в шаблон (вероятно, не применена миграция he_templates.launch_info) — повторный запуск не будет заблокирован.',
+    launchInfoSaveWarning: (intermediateSaved) =>
+      intermediateSaved
+        ? 'Кампании созданы, но итоговая запись о запуске не сохранилась в шаблон — в нём осталась ' +
+          'более ранняя запись (промежуточная запись этой попытки или запись до неё). Повтор в ближайшие ' +
+          `${LEASE_MINUTES} минут ответит «запуск ещё идёт»; прежде чем повторять, сверьте кампании ` +
+          'шаблона в Instantly с этой записью.'
+        : 'Кампания создана, но запись о запуске не сохранилась в шаблон (вероятно, не применена миграция he_templates.launch_info) — повторный запуск не будет заблокирован.',
     segmentVariantsWarning: (dropped, lettersCount) =>
       `Сегментные варианты (${dropped} шт. в ${lettersCount} письмах) не попали в кампанию: ` +
       'Instantly не умеет условные блоки — в рассылку ушёл основной текст писем.',
-    partialImportNote: (requested, accepted) =>
+    partialImportNote: (requested, accepted, alreadyPresent) =>
       `Instantly подтвердил ${accepted.toLocaleString('ru-RU')} адресов из ` +
-      `${requested.toLocaleString('ru-RU')} отправленных: остаток ` +
-      `${(requested - accepted).toLocaleString('ru-RU')} в кампанию не попал. ` +
+      `${requested.toLocaleString('ru-RU')} отправленных` +
+      (alreadyPresent > 0
+        ? `, ещё ${alreadyPresent.toLocaleString('ru-RU')} уже лежали в кампаниях воркспейса`
+        : '') +
+      ': остаток ' +
+      `${(requested - accepted - alreadyPresent).toLocaleString('ru-RU')} в кампанию не попал. ` +
       'Отправленными эти строки НЕ помечены (запуск в базу не пишет вовсе), поэтому остаток ' +
       'повторяем — но повторная загрузка делается осознанно, а не автоматически: ' +
       'адрес, уже лежащий в кампании, получил бы второе письмо.',
@@ -250,14 +349,26 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       `Повтор запуска: ${kept.toLocaleString('ru-RU')} кампаний этого шаблона уже созданы прошлой ` +
       'попыткой — они оставлены как есть, второй раз не создавались и лидов в них не досылали.',
     relaunchRefilledCampaignsNote: (refilled) =>
-      `Повтор запуска: ${refilled.toLocaleString('ru-RU')} пустых кампаний прошлой попытки ` +
-      'дозаполнены вместо создания одноимённых дублей. Адреса, которые уже лежат в кампаниях ' +
+      `Повтор запуска: ${refilled.toLocaleString('ru-RU')} пустых или недозаполненных кампаний ` +
+      'прошлой попытки дозаполнены вместо создания одноимённых дублей. Адреса, которые уже лежат в кампаниях ' +
       'воркспейса, Instantly при этом пропускает — иначе получатель получил бы второе письмо.',
     relaunchCreatedCampaignsNote: (created) =>
       `Повтор запуска: создано кампаний сейчас — ${created.toLocaleString('ru-RU')}: ` +
       'по тем частям аудитории, у которых кампании не было вовсе. Адреса, уже лежащие в кампаниях ' +
       'воркспейса, Instantly в них не берёт (защита от второго письма), поэтому принятых в такой ' +
       'кампании может быть меньше, чем отправлено.',
+    relaunchReplacedCampaignsNote: (replaced) =>
+      `Повтор запуска: ${replaced.toLocaleString('ru-RU')} кампаний прошлой попытки в Instantly больше ` +
+      'нет (удалены) — для тех же частей аудитории созданы новые. Адреса, уже лежащие в кампаниях ' +
+      'воркспейса, Instantly в них не берёт.',
+    resumeAlreadyInCampaignNote: (present) =>
+      `Повтор запуска: ${present.toLocaleString('ru-RU')} адресов уже лежали в кампаниях воркспейса ` +
+      '(скорее всего, их успела принять оборванная попытка) — второй раз их не добавляли, и ' +
+      'непринятыми они не считаются.',
+    owedUnsendableNote: (unsendable) =>
+      `Повтор запуска: ${unsendable.toLocaleString('ru-RU')} адресов из незаконченной части запуска ` +
+      'не отправлено — с прошлой попытки они попали в чёрный список клиента, лишились допускающего ' +
+      'вердикта валидации или ушли из базы.',
     capacityStopNote: (segments) =>
       'В воркспейсе Instantly кончилось место под контакты, поэтому ' +
       `${segments.toLocaleString('ru-RU')} сегментов этого запуска не создавались вовсе. ` +
@@ -312,19 +423,62 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
     allContactsBlocked: 'Every address in this base is on your blocked-contacts list, so there is nobody to write to.',
     tooManyLeads: (count) =>
       `Too many leads for a wizard launch: ${count.toLocaleString('en-US')}. Maximum is ${HE_LAUNCH_MAX_LEADS.toLocaleString('en-US')}.`,
+    // Тексты отказов 5xx этого словаря, которые клиенту можно показать как есть
+    // (они говорят, что кампания не создана и повтор безопасен), перечислены в
+    // HE_LAUNCH_CLIENT_SAFE_SERVER_ERRORS ниже — клиентский роут заменяет
+    // остальные 5xx общей константой.
+    marketReadFailed:
+      'The settings of this project could not be read, so the launch was stopped before any campaign ' +
+      'was created. Please try again in a minute.',
+    launchInProgress:
+      'A launch of this template is still in progress, or stopped midway less than ' +
+      `${LEASE_MINUTES} minutes ago. Wait a few minutes and check this template again: if part of the ` +
+      'launch is unfinished, launching again finishes that part instead of starting a second launch.',
+    launchStartSaveFailed:
+      'The start of this launch could not be recorded, so it was stopped before any campaign was ' +
+      'created or changed. Please try again in a minute.',
+    resumePresetMissing:
+      'This launch is unfinished, and the sending preset it was started with is no longer available, ' +
+      'so it cannot be finished from here. Ask your manager to look at this launch.',
+    resumePresetPinnedNote:
+      'This unfinished launch was finished with the sending preset it was started with, not the one ' +
+      'picked now, because its campaigns live there.',
     // Обещать «остальное уедет позже» нельзя: добора именно этих строк в
     // движке нет, ночной долив собирает НОВЫЕ компании. Поэтому говорим ровно
     // то, что правда: что уехало, что снято и что снятое не сожжено.
-    launchCapTrimmedNote: (companiesSent, addressesSent, addressesHeldBack, companiesHeldBack) =>
-      `One launch carries at most ${HE_LAUNCH_MAX_LEADS.toLocaleString('en-US')} addresses, so not every ` +
-      `address of this audience is in it: ${addressesSent.toLocaleString('en-US')} addresses across ` +
-      `${companiesSent.toLocaleString('en-US')} companies are being sent — one address per company first, ` +
-      'the one whose email check came back strongest, then second addresses while the limit allowed. ' +
-      `The limit held back ${addressesHeldBack.toLocaleString('en-US')} addresses` +
-      (companiesHeldBack > 0
-        ? ` of ${companiesHeldBack.toLocaleString('en-US')} companies that got no address in this launch`
-        : ' of companies whose strongest address is already in it') +
-      '. Nothing was marked as contacted and your audience keeps every held-back address.',
+    launchCapTrimmedNote: (
+      companiesSent,
+      addressesSent,
+      addressesHeldBack,
+      companiesHeldBack,
+      addressesOfHeldBackCompanies,
+    ) => {
+      const extra = addressesHeldBack - addressesOfHeldBackCompanies;
+      const parts: string[] = [];
+      if (addressesOfHeldBackCompanies > 0) {
+        parts.push(
+          `${addressesOfHeldBackCompanies.toLocaleString('en-US')} of them ` +
+            `${addressesOfHeldBackCompanies === 1 ? 'belongs' : 'belong'} to ` +
+            `${companiesHeldBack.toLocaleString('en-US')} ` +
+            `${companiesHeldBack === 1 ? 'company' : 'companies'} that got no address in this launch`,
+        );
+      }
+      if (extra > 0) {
+        parts.push(
+          `${extra.toLocaleString('en-US')} of them ` +
+            `${extra === 1 ? 'is a further address' : 'are further addresses'} of companies that ` +
+            'already have one address in it',
+        );
+      }
+      return (
+        `One launch carries at most ${HE_LAUNCH_MAX_LEADS.toLocaleString('en-US')} addresses, so not every ` +
+        `address of this audience is in it: ${addressesSent.toLocaleString('en-US')} addresses across ` +
+        `${companiesSent.toLocaleString('en-US')} companies are being sent — one address per company first, ` +
+        'the one whose email check came back strongest, then second addresses while the limit allowed. ' +
+        `The limit held back ${addressesHeldBack.toLocaleString('en-US')} addresses: ${parts.join(', and ')}` +
+        '. Nothing was marked as contacted and your audience keeps every held-back address.'
+      );
+    },
     segmentSplitInfo: (campaignsCount) =>
       `Segment variants materialized: the launch was split into ${campaignsCount} campaigns by base segment (each segment campaign carries its own letter texts). All campaigns are paused.`,
     rowsSkippedNote: (invalid, irrelevant) =>
@@ -346,18 +500,29 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       `Contacts left out because they are on your blocked-contacts list: ${blocked.toLocaleString('en-US')}.`,
     instantlyFailedFallback: 'Failed to create the campaign',
     zeroAccepted: 'The mailing system did not accept any contacts. The campaign was left paused.',
-    launchInfoSaveWarning:
-      'The campaign was created, but the launch record was not saved to the template (the he_templates.launch_info migration is probably not applied) — a re-launch will not be blocked.',
+    // Вторая ветка называет нашу колонку — клиентский роут заменит её общей
+    // формулировкой (INTERNAL_TRACE_RE); первая написана для клиента.
+    launchInfoSaveWarning: (intermediateSaved) =>
+      intermediateSaved
+        ? 'The campaigns were created, but the final record of this launch could not be saved, so the ' +
+          'template keeps an earlier record of it. Launching again within the next ' +
+          `${LEASE_MINUTES} minutes is refused as still in progress; ask your manager to compare the ` +
+          'campaigns with that record before launching again.'
+        : 'The campaign was created, but the launch record was not saved to the template (the he_templates.launch_info migration is probably not applied) — a re-launch will not be blocked.',
     segmentVariantsWarning: (dropped, lettersCount) =>
       `Segment variants (${dropped} across ${lettersCount} letters) were not included in the campaign: ` +
       'the mailing system cannot run conditional blocks — the main letter text was used instead.',
     // Клиенту важно, что остаток НЕ сожжён, и что второй загрузкой мы не рискуем
     // отправить кому-то второе письмо. Действие — к менеджеру, как и в других
     // текстах этого файла: кнопки повторной загрузки в кабинете нет.
-    partialImportNote: (requested, accepted) =>
+    partialImportNote: (requested, accepted, alreadyPresent) =>
       `The mailing system confirmed ${accepted.toLocaleString('en-US')} of the ` +
-      `${requested.toLocaleString('en-US')} addresses we sent, so ` +
-      `${(requested - accepted).toLocaleString('en-US')} of them did not get into the campaign. ` +
+      `${requested.toLocaleString('en-US')} addresses we sent` +
+      (alreadyPresent > 0
+        ? ` and found ${alreadyPresent.toLocaleString('en-US')} more already in one of your campaigns`
+        : '') +
+      ', so ' +
+      `${(requested - accepted - alreadyPresent).toLocaleString('en-US')} of them did not get into the campaign. ` +
       'Nothing in your audience was marked as contacted, so those addresses can still be used. ' +
       'Ask your manager to look at this launch before anyone uploads them a second time — an address ' +
       'that is already in a campaign would get two letters.',
@@ -367,7 +532,7 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       'contacts were added to them.',
     relaunchRefilledCampaignsNote: (refilled) =>
       `This launch was repeated: ${refilled.toLocaleString('en-US')} campaigns that an earlier attempt ` +
-      'created but left without contacts were filled now, instead of creating a second campaign with ' +
+      'created but did not finish filling were completed now, instead of creating a second campaign with ' +
       'the same name. Addresses that are already in a campaign are skipped, so nobody gets two letters.',
     relaunchCreatedCampaignsNote: (created) =>
       `This launch was repeated: ${created.toLocaleString('en-US')} campaign${created === 1 ? '' : 's'} ` +
@@ -375,6 +540,21 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       'audience that had no campaign at all. Addresses that are already in one of your campaigns are ' +
       'skipped there, so such a campaign can end up with fewer contacts than we sent — that way nobody ' +
       'gets two letters.',
+    relaunchReplacedCampaignsNote: (replaced) =>
+      `This launch was repeated: ${replaced.toLocaleString('en-US')} ` +
+      `campaign${replaced === 1 ? '' : 's'} that an earlier attempt created ` +
+      `${replaced === 1 ? 'is' : 'are'} no longer in the mailing workspace, so new ` +
+      `${replaced === 1 ? 'one was' : 'ones were'} created for the same part of your audience. Addresses ` +
+      'that are already in one of your campaigns are skipped there, so nobody gets two letters.',
+    resumeAlreadyInCampaignNote: (present) =>
+      `This launch was repeated: ${present.toLocaleString('en-US')} ` +
+      `address${present === 1 ? ' was' : 'es were'} already in one of your campaigns (most likely the ` +
+      'interrupted attempt got them in), so they were not added a second time.',
+    owedUnsendableNote: (unsendable) =>
+      `This launch was repeated: ${unsendable.toLocaleString('en-US')} ` +
+      `address${unsendable === 1 ? '' : 'es'} from its unfinished part ${unsendable === 1 ? 'was' : 'were'} ` +
+      'not sent, because since the earlier attempt they were blocked, lost their passing email check or ' +
+      'left this audience.',
     capacityStopNote: (segments) =>
       'The mailing workspace has no room left for new contacts, so ' +
       `${segments.toLocaleString('en-US')} segments of this launch were not created at all. ` +
@@ -382,6 +562,51 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       'were already created.',
   },
 };
+
+/**
+ * 5xx ядра, которые клиентский ENG-роут отдаёт кабинету КАК ЕСТЬ, а не общей
+ * константой «Failed to launch the campaign»: английские константы этого
+ * словаря без сырья, и каждая говорит клиенту то, что ему нужно для решения —
+ * кампания не создана и повтор безопасен (блоклист, пресет, рынок, начало
+ * запуска не записались) либо кампании стоят на паузе и записаны (никто не
+ * принял ни одного адреса). Остальные 5xx несут сообщение Postgres или тело
+ * ответа рассыльщика и наружу не уходят (api/client/eng/templates/[id]/launch).
+ */
+const HE_LAUNCH_CLIENT_SAFE_SERVER_ERRORS: ReadonlySet<string> = new Set([
+  MESSAGES.en.blocklistLoadFailed,
+  MESSAGES.en.presetLoadFailed,
+  MESSAGES.en.marketReadFailed,
+  MESSAGES.en.launchStartSaveFailed,
+  MESSAGES.en.zeroAccepted,
+]);
+
+/** Можно ли показать клиенту текст 5xx ядра как есть (см. набор выше). */
+export function isHeLaunchClientSafeServerError(text: unknown): boolean {
+  return typeof text === 'string' && HE_LAUNCH_CLIENT_SAFE_SERVER_ERRORS.has(text);
+}
+
+/**
+ * Загрузка лидов идёт ЧАНКАМИ по столько адресов, сколько рассыльщик берёт
+ * одним запросом (createLeads режет так же, LEADS_PER_REQUEST в
+ * lib/instantly/client.ts). Сама разбивка трафика не меняет — тот же набор
+ * запросов, — но даёт запуску точный подтверждённый счёт после каждого
+ * запроса: при ошибке второго чанка первый уже записан как принятый, а не
+ * превращается в «ноль» (шаг 6).
+ */
+const HE_LAUNCH_UPLOAD_CHUNK = 1000;
+
+/** Кампании у рассыльщика больше нет (удалена) — 404 на её id. */
+function isInstantlyNotFound(err: unknown): boolean {
+  return err instanceof InstantlyApiError && err.status === 404;
+}
+
+/** Запись о запуске перехватила другая попытка — эта дальше не идёт (шаг 6). */
+class HeLaunchTakenOverError extends Error {
+  constructor() {
+    super('launch record taken over by another attempt');
+    this.name = 'HeLaunchTakenOverError';
+  }
+}
 
 export interface HeTemplateLaunchInput {
   portalDb: SupabaseClient;
@@ -425,6 +650,16 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     return { status: 409, body: { error: t.templateNotReady } };
   }
 
+  // АРЕНДА (см. шапку): запись держит другая попытка, живая или умершая меньше
+  // HE_LAUNCH_LEASE_MS назад. Отказ — раньше всего остального, в том числе
+  // раньше «уже запущено»: пока аренда жива, запись может быть промежуточной.
+  // Повтор достраивать параллельно с живой попыткой нельзя: обе грузили бы
+  // одни и те же адреса.
+  const startLease = readHeLaunchLease(template.launch_info);
+  if (startLease.runningUntilMs !== null && startLease.runningUntilMs > Date.now()) {
+    return { status: 409, body: { error: t.launchInProgress } };
+  }
+
   const existingLaunch = parseLaunchInfo(template.launch_info);
   // Незакончённый запуск (в записи остались сегменты без кампании или без
   // лидов) повтор НЕ блокирует и force для него не нужен: достраивать нечего
@@ -435,6 +670,11 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   if (existingLaunch && !force && !resumeLaunch) {
     return { status: 409, body: { error: t.alreadyLaunched, launch: existingLaunch } };
   }
+  // Долг незакончённого запуска (шаги 5a′ и 5c). Поимённым он бывает только
+  // целиком: если хоть у одного сегмента нет списка адресов (запись до
+  // 01.10.2026), повтор идёт прежним путём — через классификатор.
+  const owed: HeTemplateLaunchPending[] = resumeLaunch && existingLaunch ? existingLaunch.pending ?? [] : [];
+  const owedByEmails = owed.length > 0 && owed.every((entry) => Array.isArray(entry.emails));
 
   // 2. База шаблона.
   //    project_id нужен, чтобы узнать рынок проекта (имя кампании и гейты, шаг
@@ -459,10 +699,21 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
 
   // 3. Пресет — service-level read по id (у staff); в клиентском контуре —
   //    со скоупом владельца (чужой пресет = «не найден»).
+  //
+  //    ДОСТРОЙКА берёт пресет ЗАПИСИ, а не выбранный сейчас. Пресет задаёт
+  //    аккаунт рассыльщика, то есть воркспейс, где лежат кампании запуска:
+  //    достройка через другой аккаунт искала бы их не там (PATCH и загрузка в
+  //    чужой воркспейс отвечают «не найдено», и повтор не кончался бы никогда),
+  //    а skip_if_in_campaign не видит кампаний другого воркспейса — адреса,
+  //    уже принятые первой попыткой, ушли бы второй раз. Пресета записи нет
+  //    — достроить нечем, это отказ, а не тихий переход в другой воркспейс.
+  const resumePresetId = resumeLaunch && existingLaunch?.preset_id ? existingLaunch.preset_id : null;
+  const effectivePresetId = resumePresetId ?? presetId;
+  const presetPinned = resumePresetId !== null && resumePresetId !== presetId;
   let presetQuery = instantlyDb
     .from('client_campaign_presets')
     .select('*')
-    .eq('id', presetId);
+    .eq('id', effectivePresetId);
   if (scopeClientUserId) {
     presetQuery = presetQuery.eq('client_user_id', scopeClientUserId);
   }
@@ -471,7 +722,10 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     await logError(`${eventPrefix}.preset_failed`, presetErr, { userId });
     return { status: 500, body: { error: t.presetLoadFailed } };
   }
-  if (!presetRow) return { status: 404, body: { error: t.presetNotFound } };
+  if (!presetRow) {
+    if (resumePresetId) return { status: 409, body: { error: t.resumePresetMissing } };
+    return { status: 404, body: { error: t.presetNotFound } };
+  }
   const preset = presetRow as ClientCampaignPreset;
 
   // 4. Письма шаблона + условия сегментных вариантов (when) для сплита запуска.
@@ -493,6 +747,17 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   //     внутреннего RU-инструмента, а клиент в своём рассыльщике увидит то же
   //     самое имя и получит те же письма со своих домённых ящиков.
   //     Читается ДО шага 5 (раньше было 5c) именно из-за гейта.
+  //
+  //     Рынок не прочитался — запуск НЕ СОСТОЯЛСЯ, в обоих контурах (fail-closed,
+  //     01.10.2026). Раньше здесь был фолбэк по контуру: 'us' для en, 'ru' для
+  //     RU-инструмента. Безопасен он был только для имени кампании: us-проект,
+  //     запущенный сотрудником из RU-инструмента во время блипа БД, получал
+  //     'ru', то есть мягкую ветку — строки без вердикта уезжали на домены
+  //     ENG-клиента, отказ легаси-базы (4c) и отбор по компаниям (5b) не
+  //     срабатывали. Различить рынок без этого чтения нечем, поэтому для RU это
+  //     тоже новый отказ — но только на сбое БД, до первого вызова рассыльщика,
+  //     и повтор безопасен. Строки проекта нет — база ушла вместе с ним
+  //     (he_bases.project_id on delete cascade): «база не найдена».
   const { data: projectRow, error: projectErr } = await portalDb
     .from('he_projects')
     .select('market')
@@ -500,18 +765,10 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     .maybeSingle();
   if (projectErr) {
     await logError(`${eventPrefix}.project_market_failed`, projectErr, { userId, templateId });
+    return { status: 500, body: { error: t.marketReadFailed } };
   }
-  // Рынок не прочитался (блип БД или строки нет) — запуск НЕ роняем, имя того
-  // не стоит. Фолбэк по контуру: ru-инструмент получает сегодняшние дефолты
-  // (байт-в-байт), а en-контур обслуживает только eng-клиентов (гейт
-  // requireEngMarket), и английское имя там безопаснее русского «база».
-  // Для гейта вердиктов этот фолбэк тоже в безопасную сторону: неизвестный
-  // рынок в клиентском контуре трактуется как 'us', то есть строже.
-  const market: HeMarket = projectRow
-    ? projectMarket(projectRow as { market?: string | null })
-    : locale === 'en'
-      ? 'us'
-      : 'ru';
+  if (!projectRow) return { status: 404, body: { error: t.baseNotFound } };
+  const market: HeMarket = projectMarket(projectRow as { market?: string | null });
   // undefined = дефолты buildLaunchCampaignName, т.е. прежнее имя RU-запуска.
   const campaignNaming = market === 'us' ? HE_ENG_CAMPAIGN_NAMING : undefined;
 
@@ -680,8 +937,13 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   // сегментам ниже.
   let leads = mappedLeads;
   let leadRowIndices = mappedRowIndices;
-  if (!emailColumn) return { status: 400, body: { error: t.noEmailColumn } };
-  if (leads.length === 0) {
+  // Отказы «отправлять некому» (здесь и после чёрного списка) — у первой
+  // попытки. У достройки с поимённым долгом пустой остаток — не отказ, а
+  // итог: должное больше нельзя отправить, и запуск закрывается с
+  // owedUnsendableNote (шаг 5a′), а не висит «незаконченным» с отказом, который
+  // повтор никогда не снимет.
+  if (!emailColumn && !owedByEmails) return { status: 400, body: { error: t.noEmailColumn } };
+  if (leads.length === 0 && !owedByEmails) {
     // «База не проверена» и «в базе нет валидных адресов» — разные причины и
     // разные действия: в первом случае базу надо пересобрать, а не искать
     // адреса. Не называть первую значило бы отправить специалиста и клиента
@@ -718,7 +980,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   let blockedContacts = 0;
   try {
     if (!clientUserId) {
-      throw new Error(`пресет ${presetId}: пустой client_user_id — чей чёрный список применять, неизвестно`);
+      throw new Error(`пресет ${effectivePresetId}: пустой client_user_id — чей чёрный список применять, неизвестно`);
     }
     const blockedEmails = await getBlockedEmailSet(instantlyDb, clientUserId);
     // filterBlockedLeads — единственный носитель правил нормализации; здесь по
@@ -742,12 +1004,37 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     await logError(`${eventPrefix}.blocklist_failed`, err, {
       userId,
       templateId,
-      presetId,
+      presetId: effectivePresetId,
       clientUserId: clientUserId || null,
     });
     return { status: 500, body: { error: t.blocklistLoadFailed } };
   }
-  if (leads.length === 0) return { status: 400, body: { error: t.allContactsBlocked } };
+  if (leads.length === 0 && !owedByEmails) return { status: 400, body: { error: t.allContactsBlocked } };
+
+  // 5a′. ДОСТРОЙКА — ТОЛЬКО ДОЛЖНОЕ. Повтор незакончённого запуска с поимённым
+  //      долгом шлёт ровно адреса из launch_info.pending, а не всю базу: всё
+  //      остальное уже лежит в кампаниях запуска или не должно туда попасть
+  //      (строки, добавленные в базу после запуска, возит ночной долив).
+  //      Фильтр стоит ПОСЛЕ гейтов и чёрного списка намеренно: адрес из долга,
+  //      который с прошлой попытки заблокирован, лишился вердикта или ушёл из
+  //      базы, не уедет и сейчас — сколько таких, говорит owedUnsendableNote.
+  //      До потолка (5b): долг — подмножество того, что потолок уже выбрал
+  //      прошлой попыткой, второй выбор его бы только перекроил.
+  let owedUnsendable = 0;
+  if (owedByEmails) {
+    const owedEmails = new Set<string>();
+    for (const entry of owed) for (const email of entry.emails ?? []) owedEmails.add(email);
+    const keptLeads: typeof leads = [];
+    const keptRowIndices: number[] = [];
+    leads.forEach((lead, i) => {
+      if (!owedEmails.has(lead.email)) return;
+      keptLeads.push(lead);
+      keptRowIndices.push(leadRowIndices[i]);
+    });
+    owedUnsendable = owedEmails.size - keptLeads.length;
+    leads = keptLeads;
+    leadRowIndices = keptRowIndices;
+  }
 
   // 5b. ПОТОЛОК ЗАПУСКА. Считается ПОСЛЕ чёрного списка (до 26.09.2026 списка
   //     тут не было вовсе): решение принимается по тому, что реально уедет.
@@ -785,8 +1072,10 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   //     такую базу принимает, а пречек кнопку всё ещё гасит. Предикат развилки
   //     теперь один (heLaunchRefusesOverCap), компонент — чужой лейн.
   let capCompaniesSent = 0;
+  let capAddressesSent = 0;
   let capAddressesHeldBack = 0;
   let capCompaniesHeldBack = 0;
+  let capAddressesOfHeldBackCompanies = 0;
   if (leads.length > HE_LAUNCH_MAX_LEADS) {
     // Развилка «отказ или выбор» — ОДНА, из launchHandoff.ts: этим же
     // предикатом обязан пользоваться пречек staff-шага 5, который гасит кнопку
@@ -812,8 +1101,10 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     leads = keptLeads;
     leadRowIndices = keptRowIndices;
     capCompaniesSent = selection.companiesSent;
+    capAddressesSent = selection.addressesSent;
     capAddressesHeldBack = selection.addressesHeldBack;
     capCompaniesHeldBack = selection.companiesHeldBack;
+    capAddressesOfHeldBackCompanies = selection.addressesOfHeldBackCompanies;
     // Ключ компании — то, на чём стоит вся арифметика выше: без него «по одному
     // адресу на компанию» вырождается в «первые N адресов подряд», а числа
     // предупреждения остаются внутренне согласованными и потому неотличимыми от
@@ -847,48 +1138,189 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     }
   }
 
-  // 5c. Материализация 15%: сплит лидов по сегментам базы. Классификатор —
-  //     LLM (bulk-модель, батчами); системный сбой → null → легаси-путь:
-  //     одна кампания, сегментные варианты выкинуты с предупреждением.
+  // 5b′. АРЕНДА ЗАПИСИ (см. шапку). Каждая запись этой попытки — условная: по
+  //      токену, с которого попытка началась (запись, прочитанная в шаге 1), а
+  //      после первой подтверждённой записи — по своему токену. Ноль строк
+  //      значит «запись переписал кто-то другой» — дальше эта попытка не идёт.
+  //
+  //      Попытка, у которой запись УЖЕ есть (достройка, force, мусор в
+  //      колонке), берёт аренду ДО первого обращения к рассыльщику и до
+  //      платного классификатора: к записи добавляются только токен и
+  //      running_until, её содержание остаётся прежним (кабинет, долив и
+  //      дашборд видят тот же запуск). Первая попытка (записи нет) аренду
+  //      берёт первой же записью — сразу после того, как узнан id первой
+  //      кампании, до её загрузки: писать до кампании нечего (запись без
+  //      campaign_id все читатели считают «запуска нет»), а гонку двух первых
+  //      попыток решает условие «колонка пуста» — проигравшая останавливается
+  //      с одной пустой кампанией на паузе (её id уходит в лог) и без загрузки.
+  //
+  //      Сбой записи аренды — отказ до рассыльщика: без неё повтор во время
+  //      запуска нечем остановить. Сбой ПРОМЕЖУТОЧНОЙ записи запуск не роняет
+  //      (кампании уже созданы, обрыв был бы хуже) — он идёт в лог, а итог
+  //      решает финальная запись, как и до 01.10.2026.
+  const attemptToken = randomUUID();
+  const attemptStartedAt = new Date().toISOString();
+  const startRaw: unknown = template.launch_info;
+  const hasStartRecord = startRaw !== null && startRaw !== undefined;
+  let ownsRecord = false;
+  let lastWriteError: unknown = null;
+  let progressSaveFailures = 0;
+  const leaseUntil = (): string => new Date(Date.now() + HE_LAUNCH_LEASE_MS).toISOString();
+
+  const writeRecord = async (
+    record: unknown,
+    mode: 'start' | 'mine',
+  ): Promise<{ matched: number; error: unknown }> => {
+    let query = portalDb.from('he_templates').update({ launch_info: record }).eq('id', templateId);
+    if (mode === 'mine') {
+      query = query.eq('launch_info->>attempt', attemptToken);
+    } else if (!hasStartRecord) {
+      query = query.is('launch_info', null);
+    } else if (startLease.attempt) {
+      query = query.eq('launch_info->>attempt', startLease.attempt);
+    } else if (startLease.createdAt) {
+      query = query.eq('launch_info->>created_at', startLease.createdAt);
+    }
+    // Записи без токена и без created_at (не наш формат) условия не дают — для
+    // них запись безусловная, как до 01.10.2026.
+    const { data, error } = await query.select('id');
+    return { matched: Array.isArray(data) ? data.length : 0, error };
+  };
+
+  /**
+   * Условная запись. Пока своя запись не подтверждена, пробуем оба условия:
+   * «запись та, с которой начали», затем «запись уже наша» — последнее
+   * случается, когда предыдущая запись вернула ошибку, но в базу легла.
+   */
+  const saveRecord = async (record: unknown): Promise<'saved' | 'taken' | 'failed'> => {
+    const modes: Array<'start' | 'mine'> = ownsRecord ? ['mine'] : ['start', 'mine'];
+    for (const mode of modes) {
+      const { matched, error } = await writeRecord(record, mode);
+      if (error) {
+        lastWriteError = error;
+        return 'failed';
+      }
+      if (matched > 0) {
+        ownsRecord = true;
+        return 'saved';
+      }
+    }
+    return 'taken';
+  };
+
+  /**
+   * Снять аренду, когда попытка ничего не создала: вернуть запись, с которой
+   * она начала. Нужна только попытке, бравшей аренду до рассыльщика (шаг 5b′);
+   * не вышло — аренда истечёт сама.
+   */
+  const releaseClaim = async (): Promise<void> => {
+    if (!hasStartRecord || !ownsRecord) return;
+    const { error } = await portalDb
+      .from('he_templates')
+      .update({ launch_info: startRaw })
+      .eq('id', templateId)
+      .eq('launch_info->>attempt', attemptToken);
+    if (error) await logError(`${eventPrefix}.claim_release_failed`, error, { userId, templateId });
+  };
+
+  const startFields =
+    startRaw && typeof startRaw === 'object' && !Array.isArray(startRaw)
+      ? (startRaw as Record<string, unknown>)
+      : {};
+  if (hasStartRecord) {
+    const claimed = await saveRecord({ ...startFields, attempt: attemptToken, running_until: leaseUntil() });
+    if (claimed === 'taken') return { status: 409, body: { error: t.launchInProgress } };
+    if (claimed === 'failed') {
+      await logError(`${eventPrefix}.claim_failed`, lastWriteError, { userId, templateId });
+      return { status: 500, body: { error: t.launchStartSaveFailed } };
+    }
+  }
+
+  // 5c. Группы запуска.
+  //
+  //     ДОСТРОЙКА С ПОИМЁННЫМ ДОЛГОМ: группы — это сегменты из
+  //     launch_info.pending с их адресами (тем, что от них осталось после
+  //     шага 5a′). Классификатор НЕ зовётся: раскладка уже сделана и оплачена
+  //     прошлой попыткой, а его повторный ответ мог бы разложить базу иначе —
+  //     сегмент без группы молча выпадал из долга, и запуск записывался
+  //     законченным с незагруженными адресами.
+  //
+  //     ИНАЧЕ — материализация 15%: сплит лидов по сегментам базы.
+  //     Классификатор — LLM (bulk-модель, батчами); системный сбой → null →
+  //     легаси-путь: одна кампания, сегментные варианты выкинуты с
+  //     предупреждением.
   interface LeadGroup {
     segment: string | null;
     leadIdx: number[];
   }
-  let groups: LeadGroup[] = [{ segment: null, leadIdx: leads.map((_, i) => i) }];
+  let groups: LeadGroup[] = [];
   let segmentsMaterialized = false;
-  if (segmentWhens.length > 0) {
-    let assignments: Map<number, string> | null = null;
-    try {
-      assignments = await classifyBaseRowsIntoSegments({
-        rows: leadRowIndices.map((ri) => rows[ri] ?? {}),
-        segments: segmentWhens,
-        language: detectSegmentLanguage(segmentWhens),
-      });
-    } catch {
-      assignments = null;
-    }
-    if (assignments) {
-      const defaultIdx: number[] = [];
-      const bySegment = new Map<string, number[]>();
-      leadRowIndices.forEach((_rowIndex, leadPos) => {
-        const seg = assignments.get(leadPos);
-        if (!seg) {
-          defaultIdx.push(leadPos);
-          return;
-        }
-        const list = bySegment.get(seg) ?? [];
-        list.push(leadPos);
-        bySegment.set(seg, list);
-      });
-      const next: LeadGroup[] = [];
-      if (defaultIdx.length > 0) next.push({ segment: null, leadIdx: defaultIdx });
-      for (const when of segmentWhens) {
-        const idxs = bySegment.get(when);
-        if (idxs && idxs.length > 0) next.push({ segment: when, leadIdx: idxs });
+  if (owedByEmails) {
+    const posByEmail = new Map<string, number>();
+    leads.forEach((lead, i) => posByEmail.set(lead.email, i));
+    const owedGroups = new Map<string, LeadGroup>();
+    const taken = new Set<number>();
+    for (const entry of owed) {
+      const key = entry.segment ?? '';
+      const group = owedGroups.get(key) ?? { segment: entry.segment, leadIdx: [] };
+      for (const email of entry.emails ?? []) {
+        const pos = posByEmail.get(email);
+        if (pos === undefined || taken.has(pos)) continue;
+        taken.add(pos);
+        group.leadIdx.push(pos);
       }
-      if (next.length > 0) groups = next;
-      segmentsMaterialized = segmentWhens.some((w) => (bySegment.get(w) ?? []).length > 0);
+      owedGroups.set(key, group);
     }
+    // Пустая группа — сегмент, чей долг целиком стал неотправляемым (5a′): его
+    // кампания, если есть, переносится как есть, а в долг он не возвращается.
+    groups = [...owedGroups.values()]
+      .filter((g) => g.leadIdx.length > 0)
+      .map((g) => ({ segment: g.segment, leadIdx: [...g.leadIdx].sort((a, b) => a - b) }));
+  } else {
+    groups = [{ segment: null, leadIdx: leads.map((_, i) => i) }];
+    if (segmentWhens.length > 0) {
+      let assignments: Map<number, string> | null = null;
+      try {
+        assignments = await classifyBaseRowsIntoSegments({
+          rows: leadRowIndices.map((ri) => rows[ri] ?? {}),
+          segments: segmentWhens,
+          language: detectSegmentLanguage(segmentWhens),
+        });
+      } catch {
+        assignments = null;
+      }
+      if (assignments) {
+        const defaultIdx: number[] = [];
+        const bySegment = new Map<string, number[]>();
+        leadRowIndices.forEach((_rowIndex, leadPos) => {
+          const seg = assignments.get(leadPos);
+          if (!seg) {
+            defaultIdx.push(leadPos);
+            return;
+          }
+          const list = bySegment.get(seg) ?? [];
+          list.push(leadPos);
+          bySegment.set(seg, list);
+        });
+        const next: LeadGroup[] = [];
+        if (defaultIdx.length > 0) next.push({ segment: null, leadIdx: defaultIdx });
+        for (const when of segmentWhens) {
+          const idxs = bySegment.get(when);
+          if (idxs && idxs.length > 0) next.push({ segment: when, leadIdx: idxs });
+        }
+        if (next.length > 0) groups = next;
+        segmentsMaterialized = segmentWhens.some((w) => (bySegment.get(w) ?? []).length > 0);
+      }
+    }
+  }
+
+  // Классификатор (LLM, батчами) мог идти минутами — аренду, взятую до него,
+  // продлеваем перед первым обращением к рассыльщику, чтобы её срок считался
+  // от загрузок, а не от начала попытки. Перехватили, пока шла классификация,
+  // — дальше не идём: у рассыльщика эта попытка ещё ничего не сделала.
+  if (hasStartRecord && !owedByEmails && segmentWhens.length > 0) {
+    const renewed = await saveRecord({ ...startFields, attempt: attemptToken, running_until: leaseUntil() });
+    if (renewed === 'taken') return { status: 409, body: { error: t.launchInProgress } };
   }
 
   const instantlyRequestOptions = { accountId: resolveInstantlyAccountId(preset.instantly_account_id) };
@@ -899,20 +1331,22 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   //    (segment=null) создаётся первой — её id уходит в скалярные поля
   //    launch_info (их читает refill-долив и старый UI).
   //
-  //    ЧТО СОЗДАНО — ТО ЗАПИСАНО. Кампания попадает в campaigns[] сразу, как
-  //    узнан её id, ДО загрузки лидов. До 28.09.2026 запись делалась после
-  //    загрузки, поэтому кампания, у которой упала загрузка, не попадала в
-  //    launch_info вообще: 500, сирота у рассыльщика, а повтор создавал ей
-  //    двойника с тем же именем. Писем сирота сама не шлёт (V1 не активирует
-  //    кампании никогда), но ёмкость воркспейса тратит.
+  //    ЧТО СОЗДАНО — ТО ЗАПИСАНО, И СРАЗУ. Новая кампания попадает в
+  //    campaigns[] и в launch_info (persistProgress), как только узнан её id —
+  //    ДО досылки цепочки PATCH'ем и до загрузки лидов; после каждого
+  //    подтверждённого чанка загрузки запись обновляется снова. До 28.09.2026
+  //    запись делалась после загрузки, а до 01.10.2026 — один раз после всего
+  //    цикла: кампания, у которой упали PATCH или загрузка, либо весь запуск,
+  //    оборванный рестартом посреди цикла, оставались без записи, и повтор
+  //    создавал двойников с тем же именем и грузил в них те же адреса.
   //
   //    ДОСТРОЙКА ПОВТОРА (resumeLaunch): что уже создано, берётся из записи
-  //    прошлой попытки — по СЕГМЕНТУ. Кампания, которая уже приняла адреса, не
-  //    трогается вовсе (её получатели могут быть в рассылке); пустая —
-  //    переиспользуется под тот же сегмент; заново создаются только сегменты,
-  //    у которых кампании нет. Это единственный способ не плодить одноимённые
-  //    кампании, не выдумывая нового состояния: список кампаний запуск и так
-  //    хранит.
+  //    прошлой попытки — по СЕГМЕНТУ. Кампания сегмента без долга не трогается
+  //    вовсе (её получатели могут быть в рассылке); кампания сегмента с долгом
+  //    дозаполняется его адресами; заново создаются только сегменты, у которых
+  //    кампании нет, — или чья кампания у рассыльщика удалена (404 на PATCH или
+  //    на первой загрузке): тогда она выпадает из записи, и сегмент получает
+  //    новую. Иначе такой повтор падал бы на 404 вечно.
   const recordedBySegment = new Map<string, HeTemplateLaunchCampaign>();
   if (resumeLaunch && existingLaunch) {
     for (const recorded of existingLaunch.campaigns ?? []) {
@@ -933,7 +1367,9 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   }
 
   const campaigns: HeTemplateLaunchCampaign[] = [];
-  const pending: HeTemplateLaunchPending[] = [];
+  // Сегменты, решённые как недоехавшие в ЭТОЙ попытке (отказ, ёмкость, ноль
+  // принятых у свежей кампании) — с адресами, которые они ещё должны.
+  const settledPending: HeTemplateLaunchPending[] = [];
   // Отказы сегментов машинно: имя сегмента обязано доехать до предупреждения
   // клиенту, а склеенную строку warnings разобрать обратно нельзя — в условии
   // сегмента бывает ': '. Клиентский роут читает этот список и НЕ отдаёт его
@@ -941,40 +1377,154 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   const segmentFailures: Array<{ segment: string | null; error: string }> = [];
   const groupErrors: string[] = [];
   const usedRecords = new Set<string>();
-  let accepted = 0;
-  let requested = 0;
-  let attempted = 0;
-  let keptCampaigns = 0;
+  // Сегменты, чья записанная кампания у рассыльщика удалена: из записи она
+  // выпадает, вместо неё создаётся новая.
+  const replacedSegments = new Set<string>();
+  // id кампаний, созданных ЭТОЙ попыткой: если запись перехватят, они
+  // останутся без записи, и лог — единственное место, где их найти.
+  const createdCampaignIds: string[] = [];
+  let keptInLoop = 0;
   let refilledCampaigns = 0;
   // Кампании, созданные ИМЕННО СЕЙЧАС. На достройке это третье число рядом с
   // «перенесено» и «дозаполнено»: без него ответ про повтор говорит, что
   // сохранено, но молчит про то, что появилось (шаг 7, warnings и аудит).
   let createdCampaigns = 0;
+  let replacedCampaigns = 0;
+  // Адреса, которые рассыльщик на ЭТОЙ попытке пропустил как уже лежащие в
+  // кампаниях воркспейса (загрузки достройки идут с skip_if_in_campaign).
+  let alreadyPresentNow = 0;
   let capacityStopped = false;
   let capacitySkippedSegments = 0;
-  for (const group of groups) {
-    const segmentKey = group.segment ?? '';
-    const recorded = recordedBySegment.get(segmentKey);
 
-    // Кампания сегмента уже создана И приняла адреса: второй раз не создаём и
-    // лидов не досылаем — её получатели уже у рассыльщика, и второй загрузкой
-    // кто-то получил бы второе письмо. Запись переносим как есть, вместе с её
-    // счётчиками: суммы записи не должны похудеть от повтора.
-    if (recorded && recorded.leads_count > 0) {
+  const recordFor = (segmentKey: string): HeTemplateLaunchCampaign | undefined =>
+    replacedSegments.has(segmentKey) ? undefined : recordedBySegment.get(segmentKey);
+  // Старый путь достройки (долг без адресов): кампания, уже принявшая адреса,
+  // не трогается — как до 01.10.2026. У поимённого долга такого правила нет:
+  // группы там — только должные сегменты, и их кампании дозаполняются.
+  const isKeptGroup = (g: LeadGroup): boolean => {
+    if (owedByEmails) return false;
+    const recorded = recordFor(g.segment ?? '');
+    return Boolean(recorded && recorded.leads_count > 0);
+  };
+  // Старый путь достройки: долг сегмента, который в этой попытке не получил
+  // обрабатываемой группы (классификатор вернул null или разложил базу иначе),
+  // ПЕРЕНОСИТСЯ в новую запись как был. Терять его нельзя: адреса сегмента не
+  // уехали, а запись без pending читается как законченный запуск.
+  const carriedOwed: HeTemplateLaunchPending[] =
+    resumeLaunch && !owedByEmails
+      ? owed.filter(
+          (entry) =>
+            !groups.some((g) => (g.segment ?? '') === (entry.segment ?? '') && !isKeptGroup(g)),
+        )
+      : [];
+  const carriedRecords = (): HeTemplateLaunchCampaign[] =>
+    [...recordedBySegment.entries()]
+      .filter(([key]) => !usedRecords.has(key) && !replacedSegments.has(key))
+      .map(([, recorded]) => recorded);
+  const owedEntryForGroup = (g: LeadGroup): HeTemplateLaunchPending => ({
+    segment: g.segment,
+    stage: recordFor(g.segment ?? '') ? 'leads' : 'campaign',
+    emails: g.leadIdx.map((i) => leads[i].email),
+  });
+
+  /**
+   * Запись о запуске на текущий момент: кампании этой попытки + перенесённые
+   * из прошлой, pending — решённые недоезды, группа «в полёте» с её остатком
+   * и все ещё не начатые группы. Скалярные поля — ОСНОВНАЯ кампания
+   * (segment=null; её ищет ночной долив, autoPipeline.ts), суммы — по всем.
+   */
+  const buildLaunchInfo = (
+    inFlight: HeTemplateLaunchPending | null,
+    nextGroup: number,
+  ): HeTemplateLaunchInfo | null => {
+    const all = [...campaigns, ...carriedRecords()];
+    if (all.length === 0) return null;
+    const primary = all.find((c) => c.segment === null) ?? all[0];
+    const pendingNow: HeTemplateLaunchPending[] = [
+      ...settledPending,
+      ...(inFlight ? [inFlight] : []),
+      ...groups.slice(nextGroup).filter((g) => !isKeptGroup(g)).map(owedEntryForGroup),
+      ...carriedOwed,
+    ];
+    let leadsCount = 0;
+    let leadsRequested = 0;
+    let leadsAttempted = 0;
+    let leadsAlreadyPresent = 0;
+    for (const c of all) {
+      leadsCount += c.leads_count;
+      leadsRequested += c.leads_requested ?? c.leads_count;
+      leadsAttempted += c.leads_attempted ?? c.leads_count;
+      leadsAlreadyPresent += c.leads_already_present ?? 0;
+    }
+    return {
+      campaign_id: primary.campaign_id,
+      campaign_name: primary.campaign_name,
+      campaign_url: primary.campaign_url,
+      leads_count: leadsCount,
+      preset_id: effectivePresetId,
+      created_at: attemptStartedAt,
+      campaigns: all,
+      // Счётчики рассыльщика целиком, а не только принятые: без «сколько
+      // запрошено» молчаливая частичная загрузка неотличима от «столько адресов
+      // и было» (launchHandoff.ts, HeTemplateLaunchCampaign).
+      leads_requested: leadsRequested,
+      leads_attempted: leadsAttempted,
+      ...(leadsAlreadyPresent > 0 ? { leads_already_present: leadsAlreadyPresent } : {}),
+      // Пустого массива не пишем: ключ означает «запуск не закончен», и запись
+      // без него читается как законченная — в том числе все записи до 28.09.2026.
+      ...(pendingNow.length > 0 ? { pending: pendingNow } : {}),
+    };
+  };
+
+  /** Промежуточная запись с продлённой арендой. Перехват записи — стоп. */
+  const persistProgress = async (inFlight: HeTemplateLaunchPending | null, nextGroup: number): Promise<void> => {
+    const info = buildLaunchInfo(inFlight, nextGroup);
+    if (!info) return;
+    const outcome = await saveRecord({ ...info, attempt: attemptToken, running_until: leaseUntil() });
+    if (outcome === 'taken') throw new HeLaunchTakenOverError();
+    if (outcome === 'failed') {
+      progressSaveFailures += 1;
+      if (progressSaveFailures === 1) {
+        await logError(`${eventPrefix}.progress_save_failed`, lastWriteError, { userId, templateId });
+      }
+    }
+  };
+
+  const takenOver = async (): Promise<HeTemplateLaunchOutcome> => {
+    await logError(`${eventPrefix}.taken_over`, new HeLaunchTakenOverError(), {
+      userId,
+      templateId,
+      createdCampaignIds: [...createdCampaignIds],
+    });
+    return { status: 409, body: { error: t.launchInProgress } };
+  };
+
+  for (let gi = 0; gi < groups.length; gi += 1) {
+    const group = groups[gi];
+    const segmentKey = group.segment ?? '';
+    const recorded = recordFor(segmentKey);
+    const groupLeads = group.leadIdx.map((i) => leads[i]);
+    const groupEmails = groupLeads.map((lead) => lead.email);
+
+    // Старый путь достройки: кампания сегмента уже создана И приняла адреса —
+    // второй раз не создаём и лидов не досылаем. Запись переносим как есть,
+    // вместе с её счётчиками: суммы записи не должны похудеть от повтора.
+    if (recorded && isKeptGroup(group)) {
       campaigns.push(recorded);
       usedRecords.add(segmentKey);
-      accepted += recorded.leads_count;
-      requested += recorded.leads_requested ?? recorded.leads_count;
-      attempted += recorded.leads_attempted ?? recorded.leads_count;
-      keptCampaigns += 1;
+      keptInLoop += 1;
       continue;
     }
 
     // Место под контакты в воркспейсе кончилось: следующий сегмент этого не
     // переживёт, а созданная под него кампания стала бы ещё одной пустой
-    // сиротой. Сегмент уходит в pending — повтор его достроит.
+    // сиротой. Сегмент уходит в pending со всеми адресами — повтор его достроит.
     if (capacityStopped) {
-      pending.push({ segment: group.segment, stage: recorded ? 'leads' : 'campaign' });
+      settledPending.push({
+        segment: group.segment,
+        stage: recorded ? 'leads' : 'campaign',
+        emails: groupEmails,
+      });
       capacitySkippedSegments += 1;
       continue;
     }
@@ -982,10 +1532,17 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     const sequence = buildLaunchSequence(templateLetters, { segmentWhen: group.segment });
     if (!sequence) {
       // Недостижимо (пустые письма отсёк шаг 4 на том же наборе), но отказом
-      // выходить нельзя: созданные кампании остались бы без записи — ровно та
-      // сирота, которую лечит этот шаг. Пока кампаний нет, ответ прежний.
-      if (campaigns.length === 0) return { status: 400, body: { error: t.noLetters } };
-      pending.push({ segment: group.segment, stage: recorded ? 'leads' : 'campaign' });
+      // выходить нельзя: созданные кампании остались бы без итоговой записи.
+      // Пока кампаний нет, ответ прежний.
+      if (campaigns.length === 0 && !resumeLaunch) {
+        await releaseClaim();
+        return { status: 400, body: { error: t.noLetters } };
+      }
+      settledPending.push({
+        segment: group.segment,
+        stage: recorded ? 'leads' : 'campaign',
+        emails: groupEmails,
+      });
       groupErrors.push(`${group.segment ?? 'default'}: ${t.noLetters}`);
       segmentFailures.push({ segment: group.segment, error: t.noLetters });
       continue;
@@ -995,124 +1552,216 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     const campaignName =
       recorded?.campaign_name ||
       buildLaunchCampaignName(base.filename, new Date(), group.segment, campaignNaming);
-    const groupLeads = group.leadIdx.map((i) => leads[i]);
-    let campaign: HeTemplateLaunchCampaign | null = null;
+    // Состояние группы — в объекте, а не в let: его меняют вложенные функции, и
+    // ветке catch нужно знать, есть ли у сегмента кампания и докуда дошла загрузка.
+    const current: {
+      campaign: HeTemplateLaunchCampaign | null;
+      reused: boolean;
+      sentUpTo: number;
+      accepted: number;
+      netRequested: number;
+    } = { campaign: null, reused: false, sentUpTo: 0, accepted: 0, netRequested: 0 };
     try {
       const payload = buildCampaignPayloadFromPreset({
         preset,
         sequence: { name: campaignName, steps: sequence.steps },
       });
-      let campaignId: string;
-      if (recorded) {
-        // Пустая кампания прошлой попытки. Цепочку досылаем PATCH'ем — той же
-        // операцией, что и ниже при непринятых sequences: кампания на паузе и
-        // без лидов, переписать её письма безопасно, а гарантия «внутри лежит
-        // актуальная цепочка шаблона» нужна (упасть прошлая попытка могла и на
-        // самом этом PATCH'е).
-        campaignId = recorded.campaign_id;
-        await updateCampaign(campaignId, { sequences: payload.sequences }, instantlyRequestOptions);
-        refilledCampaigns += 1;
-      } else {
+
+      // Новая кампания: в запись — СРАЗУ, как узнан id, и только потом PATCH
+      // цепочки. Иначе отказ PATCH'а оставлял созданную кампанию вне записи, и
+      // повтор создавал ей двойника.
+      const openFresh = async (): Promise<void> => {
         const created = await createCampaign(payload, instantlyRequestOptions);
         const createdId = (created as { id?: string }).id ?? null;
         if (!createdId) {
           throw new Error('Instantly вернул кампанию без идентификатора');
         }
-        campaignId = createdId;
-        // Считаем СРАЗУ после того, как id узнан: кампания у рассыльщика уже
-        // есть, даже если PATCH цепочки или загрузка ниже упадут.
         createdCampaigns += 1;
-
+        createdCampaignIds.push(createdId);
+        const fresh: HeTemplateLaunchCampaign = {
+          campaign_id: createdId,
+          campaign_name: campaignName,
+          campaign_url: instantlyCampaignUrl(createdId),
+          segment: group.segment,
+          leads_count: 0,
+          leads_requested: 0,
+          leads_attempted: 0,
+        };
+        campaigns.push(fresh);
+        current.campaign = fresh;
+        current.reused = false;
+        await persistProgress(
+          { segment: group.segment, stage: 'leads', emails: groupEmails.slice(current.sentUpTo) },
+          gi + 1,
+        );
         // Как в клиентском запуске: если Instantly не сохранил sequences при
         // создании — досылаем PATCH'ем.
         if (!hasUsableCampaignSequences(created.sequences)) {
-          await updateCampaign(campaignId, { sequences: payload.sequences }, instantlyRequestOptions);
+          await updateCampaign(createdId, { sequences: payload.sequences }, instantlyRequestOptions);
         }
+      };
+
+      // Записанной кампании сегмента у рассыльщика больше нет: из записи она
+      // выпадает (replacedSegments), сегмент получает новую.
+      const replaceMissing = async (missing: HeTemplateLaunchCampaign, err: unknown): Promise<void> => {
+        replacedSegments.add(segmentKey);
+        replacedCampaigns += 1;
+        await logError(`${eventPrefix}.recorded_campaign_missing`, err, {
+          userId,
+          templateId,
+          segment: group.segment,
+          campaignId: missing.campaign_id,
+        });
+        await openFresh();
+      };
+
+      if (recorded) {
+        // Кампания прошлой попытки — копия записи: счётчики дописываются к ней.
+        const reuse: HeTemplateLaunchCampaign = { ...recorded };
+        let missing = false;
+        if (reuse.leads_count === 0) {
+          // Ни одного подтверждённого адреса: цепочку досылаем PATCH'ем — той же
+          // операцией, что у новой кампании. Кампания на паузе и без лидов,
+          // переписать её письма безопасно, а упасть прошлая попытка могла и
+          // на самом этом PATCH'е. У кампании с подтверждёнными адресами
+          // PATCH'а нет: цепочка в ней уже стоит, и её получатели могут быть в
+          // рассылке.
+          try {
+            await updateCampaign(reuse.campaign_id, { sequences: payload.sequences }, instantlyRequestOptions);
+          } catch (patchErr) {
+            if (!isInstantlyNotFound(patchErr)) throw patchErr;
+            missing = true;
+            await replaceMissing(reuse, patchErr);
+          }
+        }
+        if (!missing) {
+          campaigns.push(reuse);
+          usedRecords.add(segmentKey);
+          refilledCampaigns += 1;
+          current.campaign = reuse;
+          current.reused = true;
+        }
+      } else {
+        await openFresh();
       }
 
-      // Кампания есть — записываем СРАЗУ, до загрузки лидов (см. шапку шага).
-      // leads_requested известен уже здесь, leads_count/leads_attempted
-      // дописываются ответом загрузки: у кампании, чья загрузка упала,
-      // остаётся честный ноль принятых, а не догадка.
-      campaign = {
-        campaign_id: campaignId,
-        campaign_name: campaignName,
-        campaign_url: instantlyCampaignUrl(campaignId),
-        segment: group.segment,
-        leads_count: 0,
-        leads_requested: groupLeads.length,
-      };
-      campaigns.push(campaign);
-      if (recorded) usedRecords.add(segmentKey);
-      requested += groupLeads.length;
+      // Загрузка ЧАНКАМИ (HE_LAUNCH_UPLOAD_CHUNK): после каждого подтверждённого
+      // чанка запись обновляется, и остаток группы в pending — только то, чего
+      // рассыльщик ещё не подтвердил.
+      while (current.sentUpTo < groupLeads.length) {
+        const target = current.campaign;
+        if (!target) throw new Error('кампания группы не определена');
+        const chunk = groupLeads.slice(current.sentUpTo, current.sentUpTo + HE_LAUNCH_UPLOAD_CHUNK);
+        let result: Awaited<ReturnType<typeof createLeads>>;
+        try {
+          result = await createLeads(
+            chunk,
+            {
+              campaign_id: target.campaign_id,
+              skip_if_in_workspace: false,
+              // ПЕРВАЯ попытка запуска — три false, как и до 28.09.2026: наш
+              // пайплайн сам решает, кому писать.
+              //
+              // ДОСТРОЙКА переворачивает флаг у ВСЕХ кампаний захода, а не только
+              // у переиспользованных. Правило — «может ли этот шаблон УЖЕ держать
+              // эти адреса у рассыльщика», и у СВЕЖЕЙ кампании достройки ответ
+              // тоже «да»:
+              //   - чанк, на котором оборвалась прошлая попытка, мог лечь у
+              //     рассыльщика, не подтвердившись нам (ответ потерян): его
+              //     адреса остались в долге, хотя уже в кампании;
+              //   - кампания прошлой попытки могла быть создана и потеряна
+              //     (оборванный ответ createCampaign, смерть процесса между
+              //     ответом и записью): сегмент лежит в долге со стадией
+              //     'campaign', хотя его адреса, возможно, уже у рассыльщика;
+              //   - старый путь достройки (долг без адресов) раскладывает базу
+              //     классификатором заново, и лид, уехавший в кампанию сегмента
+              //     A, на этом заходе может попасть в сегмент B.
+              // Цена флага: он шире имени (отсеивает и по ЧУЖИМ кампаниям
+              // воркспейса); такие адреса идут в alreadyPresent, а не в
+              // «непринятые» — на повторе «не добавить» безопаснее, чем
+              // «отправить дважды». На force-перезапуске ЗАКОНЧЕННОГО запуска
+              // флаг остаётся false: там оператор осознанно создаёт новые
+              // кампании по той же аудитории, и пропуск оставил бы их пустыми.
+              skip_if_in_campaign: resumeLaunch,
+              skip_if_in_list: false,
+            },
+            instantlyRequestOptions,
+          );
+        } catch (uploadErr) {
+          // Переиспользуемая кампания удалена у рассыльщика, и в неё ещё не лёг
+          // ни один чанк этой попытки — сегмент получает новую кампанию.
+          if (current.reused && current.sentUpTo === 0 && isInstantlyNotFound(uploadErr)) {
+            campaigns.splice(campaigns.indexOf(target), 1);
+            usedRecords.delete(segmentKey);
+            refilledCampaigns -= 1;
+            current.campaign = null;
+            current.reused = false;
+            await replaceMissing(target, uploadErr);
+            continue;
+          }
+          throw uploadErr;
+        }
+        // Пропущенные как уже лежащие в кампаниях воркспейса — только у
+        // загрузки достройки (флаг skip_if_in_campaign). Если рассыльщик не
+        // прислал skipped_count, его нормализатор считает пропущенным весь
+        // остаток чанка — тогда и настоящие отказы попадут сюда, а не в
+        // «непринятые»; в ответе это видно отдельной фразой.
+        const present = resumeLaunch
+          ? Math.min(result.skipped_count, Math.max(0, result.total_sent - result.leads_uploaded))
+          : 0;
+        const prevRequested = target.leads_requested ?? target.leads_count;
+        const prevAttempted = target.leads_attempted ?? target.leads_count;
+        target.leads_requested = prevRequested + chunk.length;
+        target.leads_attempted = prevAttempted + result.total_sent;
+        target.leads_count += result.leads_uploaded;
+        if (present > 0) target.leads_already_present = (target.leads_already_present ?? 0) + present;
+        alreadyPresentNow += present;
+        current.accepted += result.leads_uploaded;
+        current.netRequested += chunk.length - present;
+        current.sentUpTo += chunk.length;
 
-      const leadResult = await createLeads(
-        groupLeads,
-        {
-          campaign_id: campaignId,
-          skip_if_in_workspace: false,
-          // ПЕРВАЯ попытка запуска — три false, как и до 28.09.2026: наш
-          // пайплайн сам решает, кому писать.
-          //
-          // ДОСТРОЙКА переворачивает флаг у ВСЕХ кампаний захода, а не только у
-          // переиспользованных (в первой версии достройки здесь стояло
-          // `Boolean(recorded)` — только переиспользованные).
-          // Правило — «может ли этот шаблон УЖЕ держать эти адреса у
-          // рассыльщика», и у СВЕЖЕЙ кампании достройки ответ тоже «да»:
-          //   - сегменты раскладывает LLM (classifyBaseRowsIntoSegments), и на
-          //     повторе раскладка своя: лид, уехавший в кампанию сегмента A
-          //     (её достройка не трогает вовсе — leads_count > 0), на этом
-          //     заходе попадает в сегмент B, чья кампания создаётся впервые, —
-          //     и без флага получил бы второе письмо из B;
-          //   - кампания прошлой попытки могла быть создана и потеряна
-          //     (оборванный ответ createCampaign, таймаут роута до записи):
-          //     сегмент лежит в pending со стадией 'campaign', хотя его адреса
-          //     уже у рассыльщика;
-          //   - переиспользуемая кампания — прежний случай: часть адресов могла
-          //     лечь, не подтвердившись нам (чанк из 1000).
-          // Цена флага: он шире имени (отсеивает и по ЧУЖИМ кампаниям
-          // воркспейса), поэтому пропущенный адрес виден в partialImportNote
-          // ниже — на повторе «потерять адрес» безопаснее, чем «отправить
-          // дважды». На force-перезапуске ЗАКОНЧЕННОГО запуска флаг остаётся
-          // false: там оператор осознанно создаёт новые кампании по той же
-          // аудитории, и пропуск оставил бы их пустыми.
-          skip_if_in_campaign: resumeLaunch,
-          skip_if_in_list: false,
-        },
-        instantlyRequestOptions,
-      );
-      accepted += leadResult.leads_uploaded;
-      attempted += leadResult.total_sent;
-      campaign.leads_count = leadResult.leads_uploaded;
-      campaign.leads_attempted = leadResult.total_sent;
-      // Кампания создана, но не приняла ни одного адреса — запуск сегмента не
-      // состоялся, и повтор обязан о нём знать: иначе он увидит «запуск
-      // закончен» и по force создаст одноимённого двойника.
-      //
-      // Только у СВЕЖЕЙ кампании. У переиспользованной ноль принятых означает,
-      // что рассыльщик партию обработал и не взял (в том числе потому, что
-      // адреса уже лежат в кампании с прошлой попытки — мы сами просили их
-      // пропустить), и следующий такой же повтор ничего нового не узнает.
-      // Пометить её «не поехала» значило бы звать оператора нажимать запуск
-      // по кругу; остаток при этом не теряется — он в partialImportNote.
-      if (leadResult.leads_uploaded === 0 && !recorded) {
-        pending.push({ segment: group.segment, stage: 'leads' });
+        if (current.sentUpTo < groupLeads.length) {
+          await persistProgress(
+            { segment: group.segment, stage: 'leads', emails: groupEmails.slice(current.sentUpTo) },
+            gi + 1,
+          );
+          continue;
+        }
+        // Группа загружена. Свежая кампания не приняла ни одного адреса, хотя
+        // часть их не лежала в кампаниях воркспейса, — запуск сегмента не
+        // состоялся, и повтор обязан о нём знать: иначе он увидит «запуск
+        // закончен» и по force создаст одноимённого двойника.
+        //
+        // Только у СВЕЖЕЙ кампании. У переиспользованной ноль принятых означает,
+        // что рассыльщик партию обработал и не взял, и следующий такой же
+        // повтор ничего нового не узнает. Пометить её «не поехала» значило бы
+        // звать оператора нажимать запуск по кругу; остаток при этом не
+        // теряется — он в partialImportNote.
+        if (!current.reused && current.accepted === 0 && current.netRequested > 0) {
+          settledPending.push({ segment: group.segment, stage: 'leads', emails: groupEmails });
+        }
+        // Последняя группа — без промежуточной записи: сразу за циклом идёт
+        // итоговая, и обращений к рассыльщику между ними нет.
+        if (gi < groups.length - 1) await persistProgress(null, gi + 1);
       }
     } catch (err) {
-      // Ни одной кампании нет — как раньше: весь запуск считается failed
-      // (создавать было нечего, ретрай безопасен, записи не нужно). Дальше —
-      // частичный успех: созданное записано, недоехавшее в pending.
+      if (err instanceof HeLaunchTakenOverError) return takenOver();
+      // Ни одной кампании нет и это не достройка — как раньше: весь запуск
+      // считается failed (создавать было нечего, ретрай безопасен, аренда
+      // снимается). Дальше — частичный успех: созданное записано, недоехавшее
+      // в pending с адресами, которые ещё не подтверждены.
       const message = err instanceof Error ? err.message : t.instantlyFailedFallback;
-      if (campaigns.length === 0) {
+      if (campaigns.length === 0 && !resumeLaunch) {
+        await releaseClaim();
         await logError(`${eventPrefix}.failed`, err, { userId, templateId });
         return { status: 500, body: { error: message.slice(0, 300) } };
       }
-      // Кампания у сегмента ЕСТЬ и когда упала загрузка (campaign записан), и
-      // когда падение случилось на переиспользуемой кампании прошлой попытки
-      // (recorded) — стадия обязана это различать, иначе журнал скажет «кампании
-      // нет» про существующую.
-      const stage = campaign || recorded ? 'leads' : 'campaign';
-      pending.push({ segment: group.segment, stage });
+      // Кампания у сегмента ЕСТЬ и когда упали PATCH или загрузка новой
+      // кампании (она уже в записи), и когда падение случилось на кампании
+      // прошлой попытки — стадия обязана это различать, иначе журнал скажет
+      // «кампании нет» про существующую.
+      const stage = current.campaign || recordFor(segmentKey) ? 'leads' : 'campaign';
+      settledPending.push({ segment: group.segment, stage, emails: groupEmails.slice(current.sentUpTo) });
       groupErrors.push(`${group.segment ?? 'default'}: ${message.slice(0, 200)}`);
       segmentFailures.push({ segment: group.segment, error: message.slice(0, 200) });
       await logError(`${eventPrefix}.group_failed`, err, {
@@ -1125,76 +1774,75 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       // место не появится за миллисекунды, а каждая следующая кампания станет
       // пустой сиротой. Цикл останавливаем, остальные сегменты — в pending.
       if (isInstantlyContactCapacityError(err)) capacityStopped = true;
+      if (gi < groups.length - 1) {
+        try {
+          await persistProgress(null, gi + 1);
+        } catch (persistErr) {
+          if (persistErr instanceof HeLaunchTakenOverError) return takenOver();
+          throw persistErr;
+        }
+      }
     }
   }
 
-  // Кампании прошлой попытки, которым в ЭТОМ запуске не нашлось сегмента
-  // (классификатор разложил базу иначе): у рассыльщика они есть, и потерять их
-  // из записи нельзя — иначе следующий повтор создаст им двойников.
-  for (const [key, recorded] of recordedBySegment) {
-    if (usedRecords.has(key)) continue;
-    campaigns.push(recorded);
-    accepted += recorded.leads_count;
-    requested += recorded.leads_requested ?? recorded.leads_count;
-    attempted += recorded.leads_attempted ?? recorded.leads_count;
-    keptCampaigns += 1;
+  // 7. Итоговая запись о запуске — та же сборка, что у промежуточных, без
+  //    аренды (запуск закончен этой попыткой) и без групп «в полёте». Кампании
+  //    прошлой попытки, которым в ЭТОМ запуске не нашлось группы, переносятся
+  //    как есть: у рассыльщика они есть, и потерять их из записи нельзя —
+  //    иначе следующий повтор создаст им двойников.
+  //
+  //    Запись сохраняется ДО решения об ответе — и даже когда рассыльщик не
+  //    принял ни одного адреса. Всё, что создано у рассыльщика, обязано быть
+  //    записано: именно на этом пути (500 без записи) терялась кампания первой
+  //    группы, и повтор плодил ей двойника.
+  const launchInfo = buildLaunchInfo(null, groups.length);
+  if (!launchInfo) {
+    // Кампаний нет ни новых, ни перенесённых: так бывает только у достройки,
+    // чья единственная записанная кампания удалена у рассыльщика, а новую
+    // создать не вышло. Записывать нечего — возвращаем запись, с которой
+    // начали (повтор снова попробует создать кампанию), и отвечаем отказом.
+    await releaseClaim();
+    return {
+      status: 500,
+      body: { error: (segmentFailures[0]?.error ?? t.instantlyFailedFallback).slice(0, 300) },
+    };
   }
-
-  // 7. Запись о запуске в шаблон. Скалярные поля — ОСНОВНАЯ кампания
-  //    (segment=null), полный список — campaigns[]. До 28.09.2026 тут стояло
-  //    campaigns[0] — то же самое, пока основная группа идёт первой и доходит до
-  //    конца; но теперь в campaigns[0] может лежать кампания, созданная без
-  //    лидов, или перенесённая запись сегмента, и ночной долив (autoPipeline.ts
-  //    ищет именно segment=null) ушёл бы не туда.
-  // Пустым campaigns[] здесь быть не может: каждая ветка цикла либо кладёт
-  // кампанию, либо переносит запись, либо (когда не создано ещё ничего)
-  // отвечает отказом выше.
-  const primary = campaigns.find((c) => c.segment === null) ?? campaigns[0];
-  const launchInfo: HeTemplateLaunchInfo = {
-    campaign_id: primary.campaign_id,
-    campaign_name: primary.campaign_name,
-    campaign_url: primary.campaign_url,
-    leads_count: accepted,
-    preset_id: presetId,
-    created_at: new Date().toISOString(),
-    campaigns,
-    // Счётчики рассыльщика целиком, а не только принятые: без «сколько
-    // запрошено» молчаливая частичная загрузка неотличима от «столько адресов и
-    // было» (launchHandoff.ts, HeTemplateLaunchCampaign).
-    leads_requested: requested,
-    leads_attempted: attempted,
-    // Пустого массива не пишем: ключ означает «запуск не закончен», и запись без
-    // него читается как законченная — в том числе все записи до 28.09.2026.
-    ...(pending.length > 0 ? { pending } : {}),
-  };
-
-  // Запись сохраняется ДО решения об ответе — и даже когда рассыльщик не принял
-  // ни одного адреса. Всё, что создано у рассыльщика, обязано быть записано:
-  // именно на этом пути (500 без записи) терялась кампания первой группы, и
-  // повтор плодил ей двойника.
-  const { error: updErr } = await portalDb
-    .from('he_templates')
-    .update({ launch_info: launchInfo })
-    .eq('id', templateId);
+  const finalSave = await saveRecord({ ...launchInfo, attempt: attemptToken });
+  if (finalSave === 'taken') return takenOver();
+  const updErr = finalSave === 'failed' ? lastWriteError : null;
   if (updErr) {
     // Кампания уже создана — не превращаем ответ в ошибку (иначе слепой
-    // ретрай плодит дубли), но честно предупреждаем, что дедуп-записи нет.
+    // ретрай плодит дубли), но честно предупреждаем, что итоговой записи нет.
     await logError(`${eventPrefix}.info_save_failed`, updErr, {
       userId,
       templateId,
-      instantlyCampaignId: primary.campaign_id,
+      instantlyCampaignId: launchInfo.campaign_id,
     });
+  }
+
+  const accepted = launchInfo.leads_count;
+  const requested = launchInfo.leads_requested ?? accepted;
+  const attempted = launchInfo.leads_attempted ?? accepted;
+  const alreadyPresentTotal = launchInfo.leads_already_present ?? 0;
+  const pending = launchInfo.pending ?? [];
+  const keptCampaigns = keptInLoop + carriedRecords().length;
+  if (owedByEmails) {
+    segmentsMaterialized =
+      (launchInfo.campaigns ?? []).some((c) => c.segment !== null) ||
+      pending.some((p) => p.segment !== null);
   }
 
   // Ни одного принятого адреса — отправлять оказалось некому, и «ok» тут врал
   // бы клиенту про запущенный аутрич. Кампании остались на паузе и ЗАПИСАНЫ
-  // выше, поэтому повтор их достроит, а не продублирует.
-  if (accepted === 0) {
-    return { status: 500, body: { error: t.zeroAccepted, campaign_id: primary.campaign_id } };
+  // выше, поэтому повтор их достроит, а не продублирует. Адреса, которые
+  // достройка нашла уже лежащими в кампаниях (их приняла оборванная попытка, не
+  // успев записать подтверждение), — не «никто не принят»: они в рассылке.
+  if (accepted === 0 && alreadyPresentTotal === 0) {
+    return { status: 500, body: { error: t.zeroAccepted, campaign_id: launchInfo.campaign_id } };
   }
 
   const warnings: string[] = [];
-  if (updErr) warnings.push(t.launchInfoSaveWarning);
+  if (updErr) warnings.push(t.launchInfoSaveWarning(ownsRecord));
   if (skippedInvalid > 0 || skippedIrrelevant > 0) {
     warnings.push(t.rowsSkippedNote(skippedInvalid, skippedIrrelevant));
   }
@@ -1217,15 +1865,15 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   }
   // Потолок запуска (шаг 5b) — первым делом среди «почему уехало не всё»: он
   // единственный, кто снимает ПРОВЕРЕННЫЕ адреса, и единственный, чьё число
-  // клиент может сверить со своим заказом компаний. leads.length здесь — это
-  // уже выбранное потолком, то есть ровно то, что уезжает.
+  // клиент может сверить со своим заказом компаний.
   if (capAddressesHeldBack > 0) {
     warnings.push(
       t.launchCapTrimmedNote(
         capCompaniesSent,
-        leads.length,
+        capAddressesSent,
         capAddressesHeldBack,
         capCompaniesHeldBack,
+        capAddressesOfHeldBackCompanies,
       ),
     );
   }
@@ -1241,13 +1889,24 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
           : null;
     if (segWarning) warnings.push(segWarning);
   }
-  if (segmentsMaterialized && campaigns.length > 1) {
-    warnings.push(t.segmentSplitInfo(campaigns.length));
+  if (segmentsMaterialized && (launchInfo.campaigns ?? []).length > 1) {
+    warnings.push(t.segmentSplitInfo((launchInfo.campaigns ?? []).length));
   }
   // Частичная загрузка — ПРЕДУПРЕЖДЕНИЕ, а не отказ: кампании созданы, адреса
   // в них лежат, и бросок на accepted < requested сломал бы работающий запуск.
-  if (requested > accepted) {
-    warnings.push(t.partialImportNote(requested, accepted));
+  // Адреса, которые достройка нашла уже лежащими в кампаниях, непринятыми не
+  // считаются: они в рассылке.
+  if (requested - accepted - alreadyPresentTotal > 0) {
+    warnings.push(t.partialImportNote(requested, accepted, alreadyPresentTotal));
+  }
+  if (alreadyPresentNow > 0) {
+    warnings.push(t.resumeAlreadyInCampaignNote(alreadyPresentNow));
+  }
+  if (owedUnsendable > 0) {
+    warnings.push(t.owedUnsendableNote(owedUnsendable));
+  }
+  if (presetPinned) {
+    warnings.push(t.resumePresetPinnedNote);
   }
   if (keptCampaigns > 0) {
     warnings.push(t.relaunchKeptCampaignsNote(keptCampaigns));
@@ -1255,11 +1914,16 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   if (refilledCampaigns > 0) {
     warnings.push(t.relaunchRefilledCampaignsNote(refilledCampaigns));
   }
+  if (replacedCampaigns > 0) {
+    warnings.push(t.relaunchReplacedCampaignsNote(replacedCampaigns));
+  }
   // Что СОЗДАНО — только на достройке: у первой попытки «создано N кампаний»
   // ничего не объясняет (создано всё), а у повтора это ровно то, чего в ответе
-  // не хватало рядом с «перенесено» и «дозаполнено».
-  if (resumeLaunch && createdCampaigns > 0) {
-    warnings.push(t.relaunchCreatedCampaignsNote(createdCampaigns));
+  // не хватало рядом с «перенесено» и «дозаполнено». Замены удалённых кампаний
+  // названы своей фразой выше — «частям, у которых кампании не было вовсе»
+  // про них неправда.
+  if (resumeLaunch && createdCampaigns - replacedCampaigns > 0) {
+    warnings.push(t.relaunchCreatedCampaignsNote(createdCampaigns - replacedCampaigns));
   }
   if (capacitySkippedSegments > 0) {
     warnings.push(t.capacityStopNote(capacitySkippedSegments));
@@ -1277,17 +1941,20 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       userId,
       templateId,
       baseId: base.id,
-      presetId,
-      instantlyCampaignId: primary.campaign_id,
-      campaigns: campaigns.length,
+      presetId: effectivePresetId,
+      presetPinned,
+      instantlyCampaignId: launchInfo.campaign_id,
+      campaigns: (launchInfo.campaigns ?? []).length,
       segmentsMaterialized,
       accepted,
-      // Все три счётчика рассыльщика: запрошено / признано полученным /
-      // принято. Остаток requested-accepted ПОВТОРЯЕМ (ни одна строка базы
-      // запуском не помечается отправленной), и по журналу видно, часто ли он
-      // вообще бывает.
+      // Все счётчики рассыльщика: запрошено / признано полученным / принято /
+      // уже лежало в кампаниях. Остаток requested-accepted-present ПОВТОРЯЕМ
+      // (ни одна строка базы запуском не помечается отправленной), и по
+      // журналу видно, часто ли он вообще бывает.
       requested,
       attempted,
+      alreadyPresent: alreadyPresentTotal,
+      alreadyPresentNow,
       totalLeads: leads.length,
       // Воронка отсева — в аудит, чтобы «отправили меньше, чем в базе»
       // объяснялось без доступа к строкам базы.
@@ -1304,16 +1971,22 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       capCompaniesSent,
       capAddressesHeldBack,
       capCompaniesHeldBack,
+      capAddressesOfHeldBackCompanies,
       // Стандартные поля лида: сколько раз одноимённая переменная письма
       // запретила заполнить поле. 0 — правило коллизии ни разу не сработало.
       standardFieldsHeldBack,
-      // Достройка повтора: что перенесено, что дозаполнено, что осталось.
+      // Достройка повтора: что перенесено, что дозаполнено, что заменено, что
+      // осталось, и шла ли она по поимённому долгу (без классификатора).
       resumeLaunch,
+      owedByEmails,
+      owedUnsendable,
       keptCampaigns,
       refilledCampaigns,
       createdCampaigns,
+      replacedCampaigns,
       pendingSegments: pending.length,
       capacitySkippedSegments,
+      progressSaveFailures,
       force,
     },
   );

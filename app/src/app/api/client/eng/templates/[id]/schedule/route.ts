@@ -2,10 +2,14 @@
  * Окно отправки запущенного шаблона английского кабинета: посмотреть и
  * поменять.
  *
- * GET  — что предложить клиенту: его сохранённый выбор (или дефолт), список
- *        поясов и дней, которые рассыльщик принимает, и флаг «шаблон уже
- *        запущен». Работает и до запуска: тем же ответом кабинет заполняет
- *        форму на шаге «Review & Launch».
+ * GET  — что предложить клиенту: окно, которое СЕЙЧАС стоит у кампаний
+ *        запуска (или, до запуска, дефолт), список поясов и дней, которые
+ *        рассыльщик принимает, и флаг «шаблон уже запущен». Работает и до
+ *        запуска: тем же ответом кабинет заполняет форму на шаге «Review &
+ *        Launch». Кабинет печатает `schedule ?? default` как текущее окно
+ *        (EngStepReview.tsx), поэтому у запущенного шаблона `schedule` обязан
+ *        быть правдой: сохранённый выбор клиента — только если он новее записи о
+ *        запуске, иначе окно основной кампании, прочитанное у рассыльщика.
  * PATCH — переставить окно у кампаний, которые создал ЭТОТ запуск. Второй
  *        обязательный сценарий владельца: клиент выбрал окно при запуске и
  *        может передумать после.
@@ -33,6 +37,7 @@ import { withToolTrace } from '@/lib/toolTrace';
 import { loadClientHeTemplate, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
 import { parseLaunchInfo } from '@/lib/hypothesisEngine/launchHandoff';
 import { resolveInstantlyAccountId, type InstantlyRequestOptions } from '@/lib/instantly/accounts';
+import type { ClientLaunchScheduleOverride } from '@/lib/clientLaunch/types';
 import { resolveClientInstantlyRequestOptions } from '@/lib/instantly/clientAccountOptions';
 import { logAudit, logError, logWarn } from '@/lib/loggerServer';
 import { engServerError } from '../../../_shared';
@@ -44,6 +49,7 @@ import {
   engDefaultSendingWindow,
   loadEngSendingWindow,
   parseEngSendingWindow,
+  readEngCampaignSendingWindow,
   saveEngSendingWindow,
   toClientEngSendingWindow,
 } from '../../../_launchWindow';
@@ -76,15 +82,33 @@ async function noteDroppedTimezones(userId: string): Promise<void> {
 /**
  * Кампании запуска. Скалярное поле — основная кампания (запуски до сплита),
  * `campaigns[]` — все, включая сегментные: окно выбрано на шаблон, ставим всем.
+ * `primaryId` и `createdAt` нужны GET: чьё окно читать у рассыльщика и с чем
+ * сравнивать свежесть сохранённого выбора.
  */
-function launchCampaignIds(launchInfo: unknown): { ids: string[]; presetId: string } | null {
+function launchCampaignIds(
+  launchInfo: unknown,
+): { ids: string[]; presetId: string; primaryId: string; createdAt: string } | null {
   const launch = parseLaunchInfo(launchInfo);
   if (!launch) return null;
   const ids = (launch.campaigns?.map((c) => c.campaign_id) ?? [launch.campaign_id]).filter(
     (cid): cid is string => typeof cid === 'string' && cid.length > 0,
   );
   if (ids.length === 0) return null;
-  return { ids, presetId: launch.preset_id };
+  return { ids, presetId: launch.preset_id, primaryId: launch.campaign_id, createdAt: launch.created_at };
+}
+
+/**
+ * Сохранённый выбор описывает ЭТОТ запуск, только если записан после него.
+ * Запуск клиента пишет выбор после записи о запуске (роут launch), правка окна
+ * — тем более; а запуск сотрудника из RU-инструмента, force-перезапуск и
+ * достройка, чей PATCH окна не дошёл, переписывают запись о запуске, не трогая
+ * выбор, — тогда выбор старше и про прошлые кампании. Непарсящееся время —
+ * «не знаем», то есть не свежий.
+ */
+function savedAfterLaunch(savedAt: string | null, launchCreatedAt: string): boolean {
+  const saved = savedAt ? Date.parse(savedAt) : Number.NaN;
+  const launched = launchCreatedAt ? Date.parse(launchCreatedAt) : Number.NaN;
+  return Number.isFinite(saved) && Number.isFinite(launched) && saved >= launched;
 }
 
 /**
@@ -148,7 +172,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   }
 
   // Сохранённого окна может не быть (шаблон ещё не запускали, запуск до этой
-  // волны, миграция не применена) — это не ошибка: форма стартует с дефолта.
+  // волны или не из кабинета, миграция не применена) — это не ошибка.
   const stored = await loadEngSendingWindow(supabaseAdmin, id);
   if (!stored.ok) {
     await logError('client.eng.template.schedule.stored_read_failed', stored.error, {
@@ -158,12 +182,44 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   }
   await noteDroppedTimezones(userId);
 
+  const launch = launchCampaignIds((templateRow as { launch_info?: unknown } | null)?.launch_info);
+  let current: ClientLaunchScheduleOverride | null = stored.ok ? stored.window : null;
+  if (launch && !(stored.ok && stored.window && savedAfterLaunch(stored.savedAt, launch.createdAt))) {
+    // Шаблон запущен, а выбора клиента про ЭТОТ запуск нет: кампании стоят с
+    // часами пресета (запуск сотрудника, запуск до этой волны), со старым
+    // выбором (force поверх него) или с прежними часами (PATCH окна не дошёл).
+    // Показать здесь дефолт или старый выбор значило бы выдать за текущее
+    // окно то, по чему письма не пойдут, — читаем окно у рассыльщика. Не
+    // прочиталось — честный отказ: «не знаем окна» лучше, чем чужие часы под
+    // фразой «Emails go out only inside these hours».
+    const requestOptions = supabaseInstantly
+      ? await resolveLaunchRequestOptions({
+          instantlyDb: supabaseInstantly,
+          userId,
+          templateId: id,
+          presetId: launch.presetId,
+        })
+      : null;
+    const live = requestOptions
+      ? await readEngCampaignSendingWindow({ campaignId: launch.primaryId, requestOptions })
+      : ({ ok: false, error: new Error('instantly db or preset account unavailable') } as const);
+    if (!live.ok || !live.window) {
+      return engServerError(
+        'client.eng.template.schedule.live_read_failed',
+        live.ok ? new Error('campaign sending window is not representable') : live.error,
+        LOAD_FAILED,
+        { userId, templateId: id },
+      );
+    }
+    current = live.window;
+  }
+
   return NextResponse.json({
-    schedule: stored.ok && stored.window ? toClientEngSendingWindow(stored.window) : null,
+    schedule: current ? toClientEngSendingWindow(current) : null,
     default: toClientEngSendingWindow(engDefaultSendingWindow()),
     timezones: ENG_SENDING_WINDOW_TIMEZONES.map((o) => ({ value: o.value, label: o.label })),
     weekdays: ENG_SENDING_WINDOW_WEEKDAYS.map((o) => ({ value: o.value, label: o.label })),
-    launched: launchCampaignIds((templateRow as { launch_info?: unknown } | null)?.launch_info) !== null,
+    launched: launch !== null,
   });
 }
 

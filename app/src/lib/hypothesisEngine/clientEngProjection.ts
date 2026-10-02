@@ -48,7 +48,12 @@
  */
 
 import type { HeProjectDetail } from './projectDetail';
-import { HE_ENG_CAMPAIGN_NAMING } from './launchHandoff';
+import {
+  HE_ENG_CAMPAIGN_NAMING,
+  findEmailColumn,
+  heConstructContactCap,
+  heLaunchEmailVerdict,
+} from './launchHandoff';
 import { classifyHeClientError, type HeClientErrorCode } from './clientErrors';
 // Пауза автопилота читается ТОЛЬКО разбором соседней полосы: второго источника
 // этого факта у кабинета нет и быть не должно (см. toClientEngAutopilotHold).
@@ -199,9 +204,10 @@ const BASE_FIELDS = [
  * `unknown` и теряет конкретику («сегмент исчерпан» → «техническая проблема»),
  * а отмена — она сверяется ПОЛНЫМ совпадением строки — перестаёт отличаться от
  * сбоя. Код разбирается один раз, здесь, и на экране разворачивается обратно в
- * текст (`components/client-eng/engText.ts`). Словарь тот же, что у 5xx роутов
- * (`api/client/eng/_shared.ts` → `classifyHeClientError`), второго контракта
- * ошибок в контуре нет.
+ * текст (`components/client-eng/engText.ts`) по справочнику
+ * `components/client-eng/clientFailureText.ts` — сам классификатор в браузер не
+ * уезжает. 5xx роутов кода не несут (`api/client/eng/_shared.ts`: его никто не
+ * читал), так что этот код — единственный машинный контракт ошибок контура.
  */
 const STAGE_CANCELLED_CODE = 'cancelled';
 
@@ -435,7 +441,9 @@ const COLLECT_STATS_FIELDS = [
 ] as const;
 
 // `note` СКВОЗЬ НЕ ПРОХОДИТ (как и tasks[].source) — переводится подписью,
-// см. CONSTRUCT_NOTE_LABELS.
+// см. CONSTRUCT_NOTE_LABELS. `contact_cap` тоже не проходит: это отчёт
+// конструктора, кабинету из него нужен один факт — `per_address_verdicts`
+// (см. toClientConstruct).
 const CONSTRUCT_FIELDS = ['status', 'emails_found', 'valid_count'] as const;
 
 /**
@@ -521,14 +529,25 @@ const BASE_ROW_KEPT_MARKER = '_email_status';
 
 /**
  * Вердикт валидации почты наружу. В jsonb лежит ячейка из выгрузки
- * конструктора (колонка «email статус», baseCollect.ts:1823-1838) — свободный
- * текст подрядчика в неизвестном нам словаре, в том числе русский; превью
- * печатает его как есть (EngStepReview.tsx:121). Поэтому выпускаем только две
- * СВОИ константы. Раскраска ячейки смотрит на 'ok' / непустую строку / пусто
- * (EngStepReview.tsx:112-118) — она сохраняется.
+ * конструктора (колонка «email статус») — свободный текст подрядчика в
+ * неизвестном нам словаре, в том числе русский; превью печатает его как есть
+ * (EngStepReview, колонка «email status»). Поэтому выпускаем только СВОИ
+ * константы — и в словаре ЗАПУСКА с того же шага, иначе превью и отчёт запуска
+ * называют одну и ту же строку противоположными словами:
+ *  - `ok`         — допущенный вердикт (heLaunchEmailVerdict → 'accepted');
+ *  - `invalid`    — вердикт есть, но не допущен ('rejected'; запуск: «with an
+ *                   invalid email»);
+ *  - `unverified` — адрес в строке есть, вердикта нет ('missing'; запуск:
+ *                   «has no validation verdict… An unverified address is never
+ *                   contacted»);
+ *  - ключа нет    — в строке нет и адреса: компания без найденной почты. Запуск
+ *                   такую строку молча отбрасывает и в «непроверенные» не
+ *                   считает — значит и превью не должно.
+ * Раскраска ячейки смотрит на 'ok' / непустую строку / пусто — она сохраняется.
  */
 const EMAIL_STATUS_OK = 'ok';
-const EMAIL_STATUS_OTHER = 'unverified';
+const EMAIL_STATUS_INVALID = 'invalid';
+const EMAIL_STATUS_UNVERIFIED = 'unverified';
 
 // personalization_plan (маппинг операторов) и fixed_block — внутренняя кухня
 // генерации; letters клиент и так читает.
@@ -759,6 +778,15 @@ function toClientConstruct(construct: Row): Row {
     const label = CONSTRUCT_NOTE_LABELS.find(([re]) => re.test(note));
     if (label) out.note = label[1];
   }
+  /*
+   * Вердикты построчные — то есть джобу конструктора ставил контракт «один
+   * адрес на строку» (с 26.09.2026). Тот же маркер и тот же предикат, по
+   * которому us-запуск отказывает легаси-базе (`heConstructContactCap`,
+   * launchTemplate.ts, шаг 4c: baseCollectedBeforeSplit). Без него карточка
+   * базы обещала «точное число уточним при запуске» базе, которую запуск
+   * откажет целиком. Булев признак, а не сам кап: кап — отчёт конструктора.
+   */
+  out.per_address_verdicts = heConstructContactCap({ construct }) !== null;
   return out;
 }
 
@@ -790,6 +818,25 @@ export function toClientEngCollectInfo(info: Row): Row {
 }
 
 /**
+ * База — прогон ежедневного долива, а не база вертикали под запуск.
+ *
+ * Два признака, и хватает любого: `collect_info.refill === true` ставит
+ * постановка долива (baseCollectEnqueue), а имя «auto-refill: …» — ночной тик
+ * (autoPipeline). По имени же отделяет доливы от основных баз автопилот
+ * (autopilotReconcile), так что кабинет не может назвать «основной» базу,
+ * которую конвейер считает доливом.
+ *
+ * Зачем кабинету: долив не запускается с шага 5 и ничего не ждёт от клиента —
+ * его строки уходят прямо в уже идущую кампанию. Без признака карточка такой
+ * базы получала тексты про запуск и пересборку, которых у долива нет.
+ */
+function isHeRefillBaseRow(base: Row): boolean {
+  const info = asRow(base.collect_info);
+  if (info?.refill === true) return true;
+  return typeof base.filename === 'string' && base.filename.startsWith('auto-refill');
+}
+
+/**
  * Строка базы в деталке мастера (шаги «Bases & Launch» и «Review & Launch»).
  *
  * `columns` режется тем же `toClientEngBaseColumns`, что и в GET
@@ -809,6 +856,7 @@ export function toClientEngBase(base: Row): Row {
   // дедуп-ветка collect-роута читает `id, status, collect_info` без `error`,
   // и обещать ей код причины незачем.
   if ('error' in base) out.error_code = toClientEngStageErrorCode(base.error);
+  if ('collect_info' in base || 'filename' in base) out.refill = isHeRefillBaseRow(base);
   if ('collect_info' in base) {
     const info = asRow(base.collect_info);
     out.collect_info = info ? toClientEngCollectInfo(info) : base.collect_info;
@@ -1007,10 +1055,19 @@ export function toClientEngBaseDataRow(row: Row): Row {
     if (key.startsWith('_')) continue;
     out[key] = value;
   }
-  const status = row[BASE_ROW_KEPT_MARKER];
-  if (typeof status === 'string' && status.trim()) {
-    out[BASE_ROW_KEPT_MARKER] =
-      status.trim().toLowerCase() === EMAIL_STATUS_OK ? EMAIL_STATUS_OK : EMAIL_STATUS_OTHER;
+  // Тот же предикат вердикта, что у запуска (heLaunchEmailVerdict), и та же
+  // колонка адреса (findEmailColumn) — по уже очищенной строке, иначе служебная
+  // `_email_status` сама сошла бы за колонку «email».
+  const verdict = heLaunchEmailVerdict(row[BASE_ROW_KEPT_MARKER]);
+  if (verdict === 'accepted') {
+    out[BASE_ROW_KEPT_MARKER] = EMAIL_STATUS_OK;
+  } else if (verdict === 'rejected') {
+    out[BASE_ROW_KEPT_MARKER] = EMAIL_STATUS_INVALID;
+  } else {
+    const emailColumn = findEmailColumn(Object.keys(out), [out]);
+    if (emailColumn && String(out[emailColumn] ?? '').trim() !== '') {
+      out[BASE_ROW_KEPT_MARKER] = EMAIL_STATUS_UNVERIFIED;
+    }
   }
   return out;
 }

@@ -8,7 +8,7 @@ import { scrubBrand } from '@/lib/scrubBrand';
 import { isValidUuid } from '@/lib/apiValidation';
 import { withToolTrace } from '@/lib/toolTrace';
 import { loadClientHeTemplate, requireEngMarket } from '@/lib/hypothesisEngine/apiGuards';
-import { runHeTemplateLaunch } from '@/lib/hypothesisEngine/launchTemplate';
+import { isHeLaunchClientSafeServerError, runHeTemplateLaunch } from '@/lib/hypothesisEngine/launchTemplate';
 import { toClientEngCampaignName, toClientEngLaunchInfo } from '@/lib/hypothesisEngine/clientEngProjection';
 import { getHeClientFailure } from '@/lib/hypothesisEngine/clientErrors';
 import { parseLaunchInfo, type HeLaunchPresetOption } from '@/lib/hypothesisEngine/launchHandoff';
@@ -92,14 +92,22 @@ const SEGMENT_FAILED_PREFIX = 'Segment campaign failed: ';
 
 /**
  * Окно отправки клиента не доехало НИ ДО ОДНОЙ кампании. Кампании при этом
- * СОЗДАНЫ и стоят на паузе с окном пресета (часы администратора), поэтому
- * отказом ответ не делаем — слепой повтор наплодил бы дубли кампаний и лидов, —
- * но клиент обязан узнать, что до старта окно надо переставить.
+ * СОЗДАНЫ и стоят на паузе со своими прежними часами: новая — с часами пресета
+ * (их заполнял администратор), кампания прошлой попытки на достройке — с теми,
+ * что стояли у неё раньше. Поэтому отказом ответ не делаем — слепой повтор
+ * наплодил бы дубли кампаний и лидов, — но клиент обязан узнать, что до старта
+ * окно надо переставить.
+ *
+ * Слово «default» здесь было ложью: в кабинете «default» — это 09:00–17:00
+ * Eastern (engDefaultSendingWindow), а у кампаний остались часы пресета.
+ * Посмотреть настоящие часы клиент может там же, куда его отправляет фраза:
+ * GET .../schedule, не найдя сохранённого выбора новее этого запуска, читает
+ * окно основной кампании у рассыльщика.
  */
 const WARNING_SCHEDULE_NOT_APPLIED =
-  'The campaigns were created, but the sending window you picked did not reach them — they kept the ' +
-  'default window. They stay paused — open the sending window on this step and save it again before ' +
-  'anyone starts them.';
+  'The campaigns were created, but the sending window you picked did not reach them, so they kept ' +
+  'their earlier sending hours. They stay paused — open the sending window of this template to see ' +
+  'those hours, and save your window again before anyone starts them.';
 
 /**
  * Окно доехало до ЧАСТИ кампаний запуска (сплит по сегментам базы создаёт их
@@ -114,16 +122,21 @@ function scheduleAppliedPartlyWarning(keptDefaultWindow: string[]): string {
   return (
     'The sending window you picked reached only part of this launch. ' +
     (named
-      ? `These campaigns kept the default window: ${named}. `
-      : 'Some campaigns kept the default window. ') +
+      ? `These campaigns kept their earlier sending hours: ${named}. `
+      : 'Some campaigns kept their earlier sending hours. ') +
     'They stay paused — open the sending window on this step and save it again before anyone starts them.'
   );
 }
 
-/** Окно у рассыльщика стоит, а в кабинете не сохранилось (запись выбора). */
+/**
+ * Окно у рассыльщика стоит, а в кабинете не сохранилось (запись выбора).
+ * Прежнее «this screen may show the default window» стало неправдой: без
+ * сохранённого выбора новее запуска GET .../schedule читает окно основной
+ * кампании у рассыльщика, то есть показывает то, что там стоит.
+ */
 const WARNING_SCHEDULE_NOT_SAVED =
-  'Your sending window is live on the campaigns but was not saved in the cabinet, ' +
-  'so this screen may show the default window next time.';
+  'Your sending window is live on the campaigns but could not be saved in the cabinet, so the ' +
+  'sending-window screen reads it back from the campaigns instead.';
 
 /**
  * Внутренний след в строке предупреждения: кириллица (фраза написана для
@@ -217,7 +230,8 @@ export async function GET(req: NextRequest) {
 
 // POST — «Launch (paused)»: ДЕЛЕГИРУЕМ в общее ядро runHeTemplateLaunch (та
 // же механика, что у staff: PAUSED-кампания, лиды базы, launch_info в
-// шаблоне, повтор только с force). Отличия клиентского контура: пресет читается
+// шаблоне, повтор законченного запуска только с force, незаконченный —
+// достраивается). Отличия клиентского контура: пресет читается
 // со скоупом владельца, тексты EN, бренд рассыльщика скрабим из ошибок, а
 // ответ ядра не отдаём как есть — сужаем белым списком (см. выше): в нём
 // ссылка на панель рассыльщика, id пресета и предупреждения, написанные для
@@ -276,11 +290,20 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       eventPrefix: 'client.eng.template.launch',
     });
 
-    // 5xx ядра запуска несут сырьё: сообщение Postgres (launchTemplate:153,176)
-    // и тело ответа API рассыльщика (:346). Наружу — константа + код причины,
-    // настоящий текст уходит в application_logs.
+    // 5xx ядра запуска несут сырьё: сообщение Postgres (чтения шаблона и базы)
+    // и тело ответа API рассыльщика (отказ первой кампании). Наружу — константа
+    // + код причины, настоящий текст уходит в application_logs.
+    //
+    // Исключение — английские константы ядра, которые клиенту нужны КАК ЕСТЬ
+    // (isHeLaunchClientSafeServerError): «чёрный список не прочитался /
+    // настройки проекта не прочитались / начало запуска не записалось — кампания
+    // не создана, повторите через минуту» и «рассыльщик не принял ни одного
+    // адреса, кампании на паузе». Подменённые общей «Failed to launch the
+    // campaign», они не давали клиенту отличить безопасный повтор от сбоя
+    // посреди запуска. Сырья в них нет, это литералы словаря ядра.
     if (outcome.status >= 500 && typeof outcome.body.error === 'string') {
-      return engServerError('client.eng.template.launch_failed', new Error(outcome.body.error), LAUNCH_FAILED, {
+      const outward = isHeLaunchClientSafeServerError(outcome.body.error) ? outcome.body.error : LAUNCH_FAILED;
+      return engServerError('client.eng.template.launch_failed', new Error(outcome.body.error), outward, {
         userId,
         templateId: id,
         status: outcome.status,
@@ -337,12 +360,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         .map((c) => ({ id: c.campaign_id, name: toClientEngCampaignName(c.campaign_name) }));
 
       // Аккаунт рассыльщика — тот же, в котором ядро создало кампанию: он задан
-      // пресетом (скоуп владельца, чужой пресет невидим). Промах аккаунтом
-      // означал бы PATCH в чужой воркспейс.
+      // пресетом ЗАПИСИ о запуске (скоуп владельца, чужой пресет невидим), а не
+      // выбранным в запросе — достройку ядро ведёт пресетом, с которым запуск
+      // начат (launchTemplate.ts, шаг 3). Промах аккаунтом означал бы PATCH в
+      // чужой воркспейс.
+      const launchPresetId = launched?.preset_id || presetId;
       const { data: presetAccountRow, error: presetAccountErr } = await supabaseInstantly
         .from('client_campaign_presets')
         .select('instantly_account_id')
-        .eq('id', presetId)
+        .eq('id', launchPresetId)
         .eq('client_user_id', userId)
         .maybeSingle();
       if (presetAccountErr) {

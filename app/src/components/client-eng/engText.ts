@@ -14,7 +14,7 @@
  * Тексты приезжают в кабинет ДВУМЯ разными путями, и правило для них разное:
  *
  * 1. ЖИВОЙ ответ `/api/client/eng/**` (`body.error`, брошенная ошибка фетча).
- *    Роуты после волны 0 отдают английскую КОНСТАНТУ роута плюс машинный код
+ *    Роуты после волны 0 отдают английскую КОНСТАНТУ роута
  *    (`api/client/eng/_shared.ts`), так что тут достаточно скраба: подменять
  *    осмысленную фразу роута на общий текст — значит терять конкретику. →
  *    `engErrorText`.
@@ -30,14 +30,18 @@
 
 import { scrubBrand } from '@/lib/scrubBrand';
 import { isAuthExpiredError } from '@/lib/authFetch';
-// Классификатор ЧИСТЫЙ (ни одного импорта, см. шапку clientErrors.ts), поэтому
-// его можно тянуть в 'use client': в бандл уезжает только он сам, без
-// supabaseAdmin, 'server-only' и node-модулей.
+// Только справочник «код → текст», а НЕ классификатор: `lib/hypothesisEngine/
+// clientErrors` в браузер не тянем вовсе — в его регэкспах имена провайдеров,
+// наших каталогов и таблиц и русские фразы стадий, и всё это уезжало в чанк
+// /client/eng. Разбор сырых строк живёт на сервере (проекция отдаёт код).
 import {
+  HE_REFILL_HOLD_LIFT_EN,
+  HE_REFILL_RUN_KEPT_EN,
+  HE_REFILL_RUN_WHAT_TO_DO_EN,
   formatHeClientFailure,
-  heClientErrorText,
   heClientFailureFor,
-} from '@/lib/hypothesisEngine/clientErrors';
+  type HeClientErrorCode,
+} from './clientFailureText';
 // ТОЛЬКО ТИП, и это важно: `clientEngProjection` тянет launchHandoff и дальше
 // серверный стек, а в бандл кабинета ему нельзя. `isolatedModules: true`
 // (tsconfig) гарантирует, что `import type` стирается компилятором целиком —
@@ -65,26 +69,88 @@ const AUTH_EXPIRED_EN =
 const CYRILLIC_RE = /[Ѐ-ӿ]/;
 
 /**
- * Подрядчики движка. `scrubBrand` знает только рассыльщика, а имена LLM- и
- * поисковых провайдеров приезжают из текста их же ответов — клиенту они
- * говорят лишь то, на чём мы собраны.
+ * След отказа подрядчика движка в тексте — БЕЗ имён самих подрядчиков.
+ * `scrubBrand` знает только рассыльщика, а отказы LLM- и поискового провайдера
+ * собирает наш же код в узнаваемой форме: «<Имя> <HTTP-статус>: <тело>» и
+ * «<Имя> transport: …» (lib/hypothesisEngine/llm.ts), «<Имя> billing |
+ * configuration | transient | query rejected: …» (lib/search/serperClient.ts);
+ * третья примета — сырое JSON-тело ответа. Такую строку клиенту показывать
+ * нельзя: она говорит лишь то, на чём мы собраны.
+ *
+ * Раньше здесь был список имён (`Requesty|Serper|OpenRouter`), но этот модуль
+ * едет в браузерный чанк кабинета, и список сам рассказывал, на чём мы
+ * собраны, — тот же класс утечки, что и классификатор, который отсюда убран.
+ * Форма ловит те же строки: имя без статуса и без префикса причины в отказах
+ * провайдеров не встречается.
  */
-const VENDOR_RE = /\b(?:Requesty|Serper|OpenRouter)\b/i;
+const PROVIDER_TRACE_RE =
+  /\b[A-Za-z]+\s+(?:HTTP\s*)?\d{3}\s*[:(]|\b[A-Za-z]+\s+(?:billing|configuration|transient|transport|query rejected):|\{\s*"/;
+
+/**
+ * Где показана ошибка стадии — от этого зависит, какое действие у клиента
+ * вообще есть:
+ *  - `research`   — шапка мастера и список проектов (`he_projects.error`, его
+ *                   пишут только research-стадии); перезапуск — «Re-run
+ *                   research» шага 1;
+ *  - `collection` — карточка основной базы вертикали; новую сборку ставит
+ *                   «Start outreach» шага 2;
+ *  - `refill`     — карточка прогона ежедневного долива («auto-refill: …»).
+ *                   Перезапустить ночь клиент не может (её ставит крон), а
+ *                   пойдёт ли следующая, решают конфиг, пауза и бюджет —
+ *                   их показывает Command Center, а не эта карточка.
+ */
+export type EngFailureScope = 'research' | 'collection' | 'refill';
 
 /**
  * Остановка руками — не сбой, и объяснять её надо другими словами, чем любой
- * код справочника `clientErrors` («у вас что-то сломалось» вместо «вы это
- * отменили» — прямая ложь). Сами строки-маркеры и их сверку см. в
- * `STAGE_CANCELLED_MARKERS` проекции: разбор живёт на сервере, сюда приезжает
- * уже код.
+ * код справочника («у вас что-то сломалось» вместо «вы это отменили» — прямая
+ * ложь). Сами строки-маркеры и их сверку см. в `STAGE_CANCELLED_MARKERS`
+ * проекции: разбор живёт на сервере, сюда приезжает уже код.
+ *
+ * «Всё собранное сохранено» здесь НЕ пишется: cancel-роут кабинета снимает с
+ * отменённой базы харвест (`dropCancelledBaseHarvest`), а строки базы пишет
+ * только финальная запись стадии — у базы, отменённой посреди сборки, других
+ * копий собранного нет. Отменённая на анализе база строки хранит, но и её
+ * «Start outreach» не переиспользует: упавшая база новую сборку не
+ * останавливает, и та собирает заново.
  */
-const STAGE_CANCELLED_EN =
-  'The run was cancelled before this step finished. Everything collected before the stop is saved — start it again whenever you are ready.';
+const STAGE_CANCELLED_EN: Record<EngFailureScope, string> = {
+  research: 'The research was cancelled before it finished. Press «Re-run research» on step 1 to start it again.',
+  collection:
+    'The collection was cancelled before it finished, so this base will not be launched. If you still need this vertical, «Start outreach» on step 2 starts a new collection for it — it does not reuse what this one had gathered.',
+  refill: `This refill run was cancelled before it finished. ${HE_REFILL_RUN_KEPT_EN} A refill run is not restarted by hand; the Command Center shows whether the daily refill goes on.`,
+};
+
+/**
+ * Коды, у которых в справочнике уже ДОЛИВНОЕ действие: ёмкость, дневной кап и
+ * тариф клиента. У остальных «что делать» говорит про кнопки перезапуска
+ * research/сборки — для ночи долива это неправда, их заменяет общий доливный
+ * ответ.
+ */
+const REFILL_OWN_ACTION_CODES: ReadonlySet<HeClientErrorCode> = new Set<HeClientErrorCode>([
+  'sending_capacity',
+  'refill_budget_spent',
+  'refill_repeat_run',
+  'subscription_inactive',
+  'awaiting_payment',
+  'contacts_exhausted',
+]);
+
+/**
+ * Запасной текст ЖИВОГО ответа, который показывать нельзя (кириллица или след
+ * отказа подрядчика после скраба). Раньше здесь классифицировали сырую строку прямо в
+ * браузере — ради этого классификатор и ехал в клиентский чанк. Живые ответы
+ * кабинета — английские константы роутов, и разбор такой строки давал
+ * `unknown` с текстом про «шаг движка» даже для неудачного сохранения формы.
+ * Поэтому здесь одна честная фраза про запрос, а не про стадию.
+ */
+const LIVE_FAILED_EN =
+  'The request did not go through because of a problem on our side. Try again in a minute; if it keeps failing, contact your manager.';
 
 /**
  * Скраб без подстановки объяснения: `null`, если текст и после скраба показывать
- * нельзя (кириллица — фраза писалась для staff; имя подрядчика — светит, на чём
- * мы собраны).
+ * нельзя (кириллица — фраза писалась для staff; след отказа подрядчика — светит,
+ * на чём мы собраны).
  *
  * Вынесено из `engErrorText` отдельной функцией, чтобы вызывающий мог подставить
  * СВОЙ общий текст. Объяснения классификатора написаны про стадии движка
@@ -94,41 +160,59 @@ const STAGE_CANCELLED_EN =
  */
 export function engSafeText(raw: string): string | null {
   const scrubbed = scrubBrand(raw).replace(/система рассылки/gi, SENDING_SERVICE_EN);
-  if (CYRILLIC_RE.test(scrubbed) || VENDOR_RE.test(scrubbed)) return null;
+  if (CYRILLIC_RE.test(scrubbed) || PROVIDER_TRACE_RE.test(scrubbed)) return null;
   return scrubbed;
 }
 
 /**
  * Текст ЖИВОГО ответа кабинета: без бренда и без русской подстановки.
  *
- * Страховка на конце: если после скраба остался русский текст или имя
+ * Страховка на конце: если после скраба остался русский текст или след отказа
  * подрядчика — фраза пришла не из английской константы роута, и показывать её
- * нельзя. Тогда отдаём объяснение классификатора; он собирает ответ ТОЛЬКО из
- * своих констант, так что ни один байт входа наружу не уходит. Классифицируем
- * ИСХОДНУЮ строку, а не `scrubbed`: правила классификатора опираются в том
- * числе на имена подрядчиков и коды их ответов, скраб бы их сломал.
+ * нельзя. Тогда отдаём общую константу `LIVE_FAILED_EN`: ни один байт входа
+ * наружу не уходит.
  */
 export function engErrorText(raw: string): string {
-  return engSafeText(raw) ?? heClientErrorText(raw);
+  return engSafeText(raw) ?? LIVE_FAILED_EN;
 }
 
 /**
  * Текст СОХРАНЁННОЙ ошибки стадии для карточки базы/проекта — по коду причины,
- * который посчитал роут (`toClientEngStageErrorCode`).
+ * который посчитал роут (`toClientEngStageErrorCode`), и по месту показа
+ * (`EngFailureScope`).
  *
  * Функция принимает КОД, а не строку, и это не косметика: пока на вход шла
  * сырая `he_*.error`, текст стадии физически лежал в теле ответа и был виден в
  * devtools. Теперь его там нет — разбирать в браузере просто нечего.
  *
  * Собирается ответ только из констант: `STAGE_CANCELLED_EN` здесь и тексты
- * справочника `clientErrors` (он тоже не пропускает наружу ни байта входа).
- * `unknown` — общая английская формулировка: причина у staff остаётся в самой
- * колонке `he_*.error`, в `he_jobs.error` и в логах воркера, а в кабинете её
- * не логируем, чтобы не вернуть утечку через консоль.
+ * справочника `clientFailureText` (он тоже не пропускает наружу ни байта
+ * входа). `unknown` — общая английская формулировка: причина у staff остаётся
+ * в самой колонке `he_*.error`, в `he_jobs.error` и в логах воркера, а в
+ * кабинете её не логируем, чтобы не вернуть утечку через консоль.
+ *
+ * У ночи долива «что уцелело» одно на все коды (`HE_REFILL_RUN_KEPT_EN`):
+ * тексты справочника про «законченные шаги» и «собранные контакты» писались
+ * для основной сборки, а у ночи долива уцелевшее — только то, что уже в
+ * кампании.
  */
-export function engStageErrorText(code: HeClientStageErrorCode): string {
-  if (code === 'cancelled') return STAGE_CANCELLED_EN;
-  return formatHeClientFailure(heClientFailureFor(code));
+export function engStageErrorText(code: HeClientStageErrorCode, scope: EngFailureScope): string {
+  if (code === 'cancelled') return STAGE_CANCELLED_EN[scope];
+  const failure = heClientFailureFor(code);
+  if (scope !== 'refill') return formatHeClientFailure(failure);
+  return formatHeClientFailure({
+    title: failure.title,
+    whatIsSaved: HE_REFILL_RUN_KEPT_EN,
+    whatToDo: REFILL_OWN_ACTION_CODES.has(code) ? failure.whatToDo : HE_REFILL_RUN_WHAT_TO_DO_EN,
+  });
+}
+
+/**
+ * Прогон долива упал, а причины в колонке нет (стадию убили вместе с подом,
+ * легаси-строка). Тот же доливный ответ, что и у кодов без своего действия.
+ */
+export function engRefillStoppedText(): string {
+  return `This refill run stopped without a recorded reason. ${HE_REFILL_RUN_KEPT_EN} ${HE_REFILL_RUN_WHAT_TO_DO_EN}`;
 }
 
 /**
@@ -187,10 +271,13 @@ export function engAutopilotHoldText(code: HeClientAutopilotHoldCode): string {
  * которые эта пауза добавляет от себя:
  *
  *  - СРОКА НЕТ И БЫТЬ НЕ МОЖЕТ. Автоснятия по таймеру у паузы намеренно нет:
- *    возвращает проект сотрудник, руками, и только когда место реально
- *    освободилось. «Вернёмся завтра/через час» здесь было бы описанием
- *    механизма, которого нет, — ровно та ложь, из-за которой у `stage_stopped`
- *    тоже нет обещаний;
+ *    возвращает проект сотрудник, руками. «Вернёмся завтра/через час» здесь
+ *    было бы описанием механизма, которого нет, — ровно та ложь, из-за которой
+ *    у `stage_stopped` тоже нет обещаний. Обещать и то, что команда «уже
+ *    знает» или «освободит место», нельзя: уведомления сотруднику о паузе нет.
+ *    Поэтому фраза про снятие паузы — общая с карточкой базы
+ *    (`HE_REFILL_HOLD_LIFT_EN`, справочник `clientFailureText`): снимает
+ *    только команда, само не вернётся, пишите менеджеру;
  *  - КНОПКИ КЛИЕНТУ НЕ ПРЕДЛАГАЕТСЯ, и текст её не ищет. Возобновление лежит
  *    на staff-поверхности сознательно: клиентская мутирующая ручка означала бы
  *    право клиента начать платную работу у провайдера в момент, когда грузить
@@ -207,7 +294,7 @@ export function engAutopilotHoldText(code: HeClientAutopilotHoldCode): string {
  * и то, что место занято чужой нагрузкой, — наша кухня, а не факт о клиенте.
  */
 export function engRefillHoldText(): string {
-  return 'The daily refill for this project is on hold: there is no room left for new contacts in the sending capacity we run it on, so the nightly collection is not started. Everything already added to your campaigns stays there and keeps sending. Our team frees the room and puts the project back into the daily refill — it does not resume by itself. Contact your manager if you need it back sooner.';
+  return `The daily refill for this project is on hold: there is no room left for new contacts in the sending capacity we run it on, so the nightly collection is not started. Everything already added to your campaigns stays there and keeps sending. ${HE_REFILL_HOLD_LIFT_EN}`;
 }
 
 /**

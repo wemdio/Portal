@@ -69,10 +69,22 @@ import { supabaseAdminFetchWithRetry } from '@/lib/supabaseAdmin';
  *    отвечает заголовками дольше 98 секунд; полный цикл всех трёх отказов
  *    соединения ≈32 000 мс и в бюджет укладывается вчетверо.
  *
- * Сам наш abort в этом цикле НЕ повторяется: `shouldRetry` требует СТРОКОВОГО
- * `code`, а у DOMException и у HeStageDbTimeoutError его нет, и до этого
- * `supabaseAdminFetchWithRetry` видит `init.signal.aborted` и бросает сразу.
- * То есть срок расходуется один раз, а не трижды.
+ * Сам наш abort в этом цикле НЕ повторяется: `supabaseAdminFetchWithRetry`
+ * видит `init.signal.aborted` и бросает сразу, до своего `shouldRetry` (а тот
+ * повторяет только коды обрыва связи, и ABORT_ERR среди них нет).
+ *
+ * НО ЦИКЛ ПОВТОРОВ ЕСТЬ И ВЫШЕ НАС — в самом postgrest-js (2.105.x, повторы
+ * включены по умолчанию). Отказ fetch'а он повторяет для GET/HEAD/OPTIONS ещё
+ * до 3 раз с паузами 1/2/4 с, если у ошибки НЕ name 'AbortError' и НЕ code
+ * 'ABORT_ERR'. Имя у нашей ошибки срока своё (HeStageDbTimeoutError), поэтому
+ * без кода чтение, вставшее на заголовках, уходило в БД четыре раза и
+ * стоило ≈ 4 × 120 000 + 7 000 ≈ 487 000 мс вместо 120 000 — до клиента стадий
+ * (общий админский клиент) такой отказ приходил как AbortError и не повторялся
+ * вовсе. Поэтому у HeStageDbTimeoutError есть `code = 'ABORT_ERR'`: postgrest-js
+ * отдаёт её сразу, и для чтения срок расходуется один раз — ровно как обещано
+ * выше. Записи (POST/PATCH/DELETE) postgrest-js не повторяет никогда.
+ * Обрыв связи и прочие отказы транспорта наш fetch отдаёт как есть (см.
+ * failure), и postgrest-js повторяет их для GET так же, как до клиента стадий.
  */
 export const HE_STAGE_DB_TIMEOUT_MS = Math.max(
   1_000,
@@ -95,6 +107,14 @@ export class HeStageDbTimeoutError extends Error {
    * Next-бандл): instanceof тогда ложен, а поле — нет.
    */
   readonly heStageDbTimeout = true as const;
+  /**
+   * Код, по которому postgrest-js НЕ повторяет отказ fetch'а (его повторы GET и
+   * HEAD смотрят только на name 'AbortError' и code 'ABORT_ERR'). Без него
+   * вставшее на заголовках чтение уходило в БД четыре раза подряд — см.
+   * HE_STAGE_DB_TIMEOUT_MS. Наш транзиентный предикат (lib/db/transientError.ts)
+   * этот код блипом не считает, `supabaseAdminFetchWithRetry` его не повторяет.
+   */
+  readonly code = 'ABORT_ERR' as const;
 
   constructor(
     readonly method: string,
@@ -384,9 +404,14 @@ export function createHeStageSupabase(options: {
  * своими сроками. Одиночный UPDATE стоит не больше HE_STAGE_DB_TIMEOUT_MS
  * (120 000 мс) — это его собственный потолок на заголовки, а таймер взведён ОДИН
  * РАЗ на весь цикл повторов транспорта, — то есть в окно он укладывается, но
- * ровно впритык, а не «с запасом»: медленная БД съест его целиком. Одиночными из
- * четырёх записей являются ДВЕ (мемо гейта и терминальная запись refill-базы),
- * остальные ДВЕ шлют по нескольку запросов подряд:
+ * ровно впритык, а не «с запасом»: медленная БД съест его целиком. Почти все
+ * такие записи — одиночный запрос (полный список и без числа — у
+ * paidCheckpointDb в stages/baseCollect.ts); по нескольку запросов подряд шлют
+ * ТРИ:
+ *  - запись НОВОГО плана в стор вертикали (rememberPlan: upsert
+ *    he_catalog_cursors, затем — только когда сменился ключ плана, а в сторе
+ *    лежит отметка остывания — снятие этой отметки): до двух запросов, худший
+ *    случай 2 × 120 000 = 240 000 мс, примерно ДВА окна;
  *  - финальная запись базы (baseCollect, harvestRow) сидит в цикле
  *    HARVEST_WRITE_ATTEMPTS = 3 попыток, худший случай —
  *    3 × HE_STAGE_DB_TIMEOUT_MS + паузы 1 000 и 2 000 мс ≈ 363 000 мс, то есть

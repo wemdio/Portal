@@ -9,16 +9,27 @@
  * зависший провайдер выглядит как бренд без следов. Отмена задачи прерывает
  * перебор брендов, а не пропускает один бренд.
  *
- * Отказ ДОСТУПА к провайдеру (поиск: деньги/ключ; модель: деньги/ключ/лимит
- * частоты) прерывает перебор так же, как отмена: он перманентен для прогона, а
- * успешная стадия с пустым списком сущностей читается стадией hypotheses как
- * «следов бренда нет» — вывод о рынке вместо честного отказа. Так же прерывает
- * перебор и ПОЛНЫЙ отказ поиска (ни одного обслуженного бренда за два подряд):
- * платить вызовом модели за каждый следующий бренд не за что
- * (heSearchOutageFailure). Сбой ОДНОГО бренда (мёртвый сайт, пустая выдача, 4xx
- * на его же контексте) по-прежнему пропускается — см. HE_RUN_STOPPING_LLM_KINDS
- * ниже.
+ * Отказ ДОСТУПА к провайдеру (поиск: деньги/ключ; модель: деньги/ключ, а на
+ * рынке us ещё и лимит частоты) прерывает перебор так же, как отмена: он
+ * перманентен для прогона, а успешная стадия с пустым списком сущностей
+ * читается стадией hypotheses как «следов бренда нет» — вывод о рынке вместо
+ * честного отказа. Так же прерывает перебор и ПОЛНЫЙ отказ поиска (ни одного
+ * обслуженного бренда за два подряд): платить вызовом модели за каждый
+ * следующий бренд не за что (heSearchOutageFailure). Сбой ОДНОГО бренда
+ * (мёртвый сайт, пустая выдача, 4xx на его же контексте) по-прежнему
+ * пропускается — см. heRunStoppingLlmFailure ниже.
+ *
+ * Чекпойнт перебора (только market='us'): после каждого бренда, как только
+ * хоть один бренд разобран, разобранный префикс пишется в he_jobs.result этой
+ * же джобы, и повтор джобы продолжает с него — оплаченные ответы модели второй
+ * раз не покупаются (HE_ITEM_CHECKPOINT_KEY ниже).
  */
+
+import { createHash } from 'node:crypto';
+
+import { z } from 'zod';
+
+import { stripUnstorableJsonChars } from '@/lib/jsonbSafe';
 
 import {
   callLLMWithSchema,
@@ -65,35 +76,150 @@ import type { HeCompetitorEntry } from './competitors';
  * потому что две копии этого списка рано или поздно разойдутся, а расходятся
  * они деньгами.
  *
- *  - billing / configuration: нужен человек. Воркер умеет отказать по ним
- *    терминально (failJob, terminalProviderRefusal) — то есть НЕ переплатить
- *    стадию двумя лишними прогонами;
- *  - rate_limit: транспорт уже пересидел 429 внутри вызова (до 3 повторов,
- *    каждое ожидание ≤30 с) и всё равно получил отказ, значит окно провайдера
- *    длиннее просьбы, которую он присылал в Retry-After. Воркер
- *    умеет отодвинуть повтор до времени, которое назвал провайдер
- *    (failJob → rateLimitPauseMs, run_after, потолок паузы 10 минут). Попытку
- *    такая пауза ТРАТИТ — бесплатной стоянки в воркере нет намеренно, иначе
- *    стадия переплачивалась бы кратно MAX_ATTEMPTS (см. комментарий
- *    RATE_LIMIT_PAUSE_DEFAULT_MS в worker/hypothesisEngine.ts). Проглоченный
- *    здесь, 429 вместо этого выжигал весь перебор со скоростью сети.
+ *  - billing / configuration (оба рынка): нужен человек. Воркер отказывает по
+ *    ним терминально (failJob, terminalProviderRefusal) — то есть НЕ
+ *    переплачивает стадию двумя лишними прогонами;
+ *  - rate_limit — ТОЛЬКО market='us' (см. heRunStoppingLlmFailure). Транспорт
+ *    уже пересидел 429 внутри вызова (до 3 повторов, каждое ожидание ≤30 с) и
+ *    всё равно получил отказ. Воркер отодвигает повтор до времени, которое
+ *    назвал провайдер (failJob → rateLimitPauseMs, run_after, потолок паузы
+ *    10 минут), и тратит на это попытку. Повтор начинает стадию заново, но
+ *    НЕ с первого элемента: перебор на us пишет чекпойнт после каждого
+ *    элемента (HE_ITEM_CHECKPOINT_KEY), и уже полученные ответы модели
+ *    берутся из него. Худший случай стойкого 429 на последнем элементе —
+ *    каждый полученный ответ (вердикт, разбор бренда) оплачен один раз, а не
+ *    MAX_ATTEMPTS раз; заново спрашивается только элемент, на котором прогон
+ *    встал (сам 429 не оплачивается).
  *
- * Absorbed по-прежнему: 'transient' (5xx, обрыв, битый конверт — соседний
+ * На русском рынке (легаси /tools/hypothesis-engine, ежедневный инструмент
+ * специалистов) 429 поглощается поэлементно, как было до волны 3: элемент
+ * пропускается, перебор идёт дальше, стадия кончается за одно исполнение.
+ * Волна 3 сделала 429 останавливающим и для RU, не сказав об этом, и воркер
+ * перезапускал стадию с первого элемента, заново покупая уже готовые вердикты
+ * (до трёх исполнений там, где база платила один раз). Чекпойнта у RU нет —
+ * лишних записей в he_jobs легаси-инструмент не получает.
+ *
+ * Absorbed на обоих рынках: 'transient' (5xx, обрыв, битый конверт — соседний
  * элемент честно может ответить) и 'permanent' (прочие 4xx: это про ЭТОТ
  * запрос — слишком длинный контекст одного бренда, отказ фильтра содержимого).
  * Схемные сбои (LLMValidationError) и усечения тоже остаются поэлементными:
  * они про ответ модели, а не про доступ к ней.
  */
-const HE_RUN_STOPPING_LLM_KINDS = new Set<HeLlmFailureKind>(['billing', 'configuration', 'rate_limit']);
+const HE_RUN_STOPPING_LLM_KINDS = new Set<HeLlmFailureKind>(['billing', 'configuration']);
 
 /**
  * Факты отказа модели, если он останавливает весь прогон, — иначе null.
  * Читается ТИПОМ (heLlmFailureOf → дискриминант класса транспорта), никогда
  * регэкспом по тексту: в этом движке «aborted» означает отмену пользователем.
+ * rate_limit останавливает только market='us' — там повтор продолжает с
+ * чекпойнта (см. docblock HE_RUN_STOPPING_LLM_KINDS).
  */
-export function heRunStoppingLlmFailure(error: unknown): HeLlmFailureFacts | null {
+export function heRunStoppingLlmFailure(error: unknown, market: HeMarket): HeLlmFailureFacts | null {
   const failure = heLlmFailureOf(error);
-  return failure && HE_RUN_STOPPING_LLM_KINDS.has(failure.kind) ? failure : null;
+  if (!failure) return null;
+  if (HE_RUN_STOPPING_LLM_KINDS.has(failure.kind)) return failure;
+  return failure.kind === 'rate_limit' && market === 'us' ? failure : null;
+}
+
+/**
+ * ЧЕКПОЙНТ ПОЭЛЕМЕНТНОГО ПЕРЕБОРА (brand_cloud и evidence, только market='us').
+ *
+ * Где лежит и почему там. В he_jobs.result СВОЕЙ ЖЕ строки джобы, под одним
+ * ключом. Пока джоба не 'done', колонку не читает никто: latestDoneJobResult
+ * фильтрует status='done', списки джоб кабинета и staff-инструмента result не
+ * выбирают (HE_JOB_LIST_COLUMNS, HE_JOB_CLIENT_COLUMNS, дашборд ENG). Запись
+ * отказа воркера (failJob) result не трогает, клейм читает строку целиком
+ * (`select('*')`), поэтому повтор той же джобы получает чекпойнт в job.result.
+ * Done-запись воркера заменяет result целиком — после успеха чекпойнта нет.
+ * Новая джоба (следующая ночь, перезапуск исследования) — новая строка с
+ * пустым result: чужой чекпойнт она не увидит никогда. payload для этого не
+ * годится: failJob при прерывании переписывает его из копии, снятой ДО стадии.
+ *
+ * Чем пишется. Клиентом стадий (ctx.supabase) после каждого элемента. Запись
+ * best-effort: отказ значит лишь, что чекпойнт отстал, а следующая запись
+ * кумулятивна и догонит его. Худший случай — записи не дошли подряд прямо
+ * перед остановкой прогона: повтор заново купит ответы ровно этих элементов
+ * (обычно одного). Сам вызов, на котором прогон остановился (429, отмена,
+ * сторож), в префикс не входит никогда.
+ *
+ * Чего в нём НЕТ — расхода. Каждое исполнение отдаёт воркеру только свой
+ * расход. Расход исполнения, которое бросило, — забота учёта воркера (сегодня
+ * он его не записывает вовсе); перенос его сюда задвоил бы cost_usd в тот же
+ * день, когда воркер начнёт записывать его сам.
+ *
+ * Отпечаток входа. Чекпойнт годен, только пока вход перебора тот же: другой
+ * список кандидатов или брендов (перезапуск предыдущей стадии) — и чекпойнт
+ * отбрасывается с отдельной строкой в логе, перебор идёт с начала.
+ */
+const HE_ITEM_CHECKPOINT_KEY = 'he_item_checkpoint';
+
+/** Отпечаток входа перебора для чекпойнта: тот же вход — тот же отпечаток. */
+export function heItemCheckpointFingerprint(input: unknown): string {
+  return createHash('sha256').update(JSON.stringify(input)).digest('hex').slice(0, 32);
+}
+
+/** Сырой чекпойнт из job.result (null — его нет). Разбор формы — у стадии. */
+export function readHeItemCheckpoint(job: HeJob): unknown {
+  const value = job.result?.[HE_ITEM_CHECKPOINT_KEY];
+  return value === undefined ? null : value;
+}
+
+/** Записать чекпойнт перебора в he_jobs.result своей строки. Никогда не бросает. */
+export async function writeHeItemCheckpoint(
+  ctx: HeStageContext,
+  job: HeJob,
+  checkpoint: Record<string, unknown>,
+  logTag: string,
+): Promise<void> {
+  try {
+    const { error } = await ctx.supabase
+      .from('he_jobs')
+      // Текст модели внутри (цитаты, обоснования): NUL и одиночный суррогат
+      // PostgREST отверг бы вместе со всей записью.
+      .update({ result: { [HE_ITEM_CHECKPOINT_KEY]: stripUnstorableJsonChars(checkpoint) } })
+      .eq('id', job.id)
+      .eq('status', 'running');
+    if (error) stageLog(ctx, `${logTag} чекпойнт перебора не записан: ${error.message.slice(0, 160)}`);
+  } catch (e) {
+    stageLog(ctx, `${logTag} чекпойнт перебора не записан: ${heIoFailureReason(e)}`);
+  }
+}
+
+const BrandCloudCheckpointSchema = z.object({
+  stage: z.literal('brand_cloud'),
+  v: z.literal(1),
+  fingerprint: z.string(),
+  next: z.number().int().min(1),
+  answered: z.number().int().min(1),
+  search_answered: z.number().int().min(0),
+  entities: z.array(
+    z.object({
+      name: z.string(),
+      kind: z.string(),
+      classification: z.enum(['anomaly', 'noise', 'potential']),
+      potential_pct: z.number(),
+      rationale: z.string(),
+      source_brand: z.string(),
+    }),
+  ),
+});
+type BrandCloudCheckpoint = z.infer<typeof BrandCloudCheckpointSchema>;
+
+/** Годный чекпойнт этого входа или null (с причиной в логе, если он был). */
+function readBrandCloudCheckpoint(
+  ctx: HeStageContext,
+  job: HeJob,
+  fingerprint: string,
+  total: number,
+): BrandCloudCheckpoint | null {
+  const raw = readHeItemCheckpoint(job);
+  if (raw === null) return null;
+  const parsed = BrandCloudCheckpointSchema.safeParse(raw);
+  if (!parsed.success || parsed.data.fingerprint !== fingerprint || parsed.data.next > total) {
+    stageLog(ctx, '[brand_cloud] чекпойнт прошлого исполнения не подходит к этому входу — перебор с начала');
+    return null;
+  }
+  return parsed.data;
 }
 
 /** Класс и код отказа модели для лога стадии. */
@@ -206,12 +332,31 @@ export async function runBrandCloudStage(job: HeJob, ctx: HeStageContext): Promi
   ];
 
   const jobSignal = heStageSignal(ctx);
-  const entities: BrandCloudEntity[] = [];
+  // Чекпойнт перебора — только us (см. HE_ITEM_CHECKPOINT_KEY): на RU 429 не
+  // останавливает перебор, и легаси-инструмент лишних записей в he_jobs не
+  // получает.
+  const resumable = market === 'us';
+  const fingerprint = resumable ? heItemCheckpointFingerprint(targets) : '';
+  const restored = resumable ? readBrandCloudCheckpoint(ctx, job, fingerprint, targets.length) : null;
+  if (restored) {
+    stageLog(
+      ctx,
+      `[brand_cloud] продолжаем с чекпойнта прошлого исполнения этой джобы: ${restored.next}/${targets.length} `
+        + `брендов уже пройдено (разобрано ${restored.answered}), их ответы модели повторно не покупаем`,
+    );
+  }
+  const entities: BrandCloudEntity[] = restored ? restored.entities : [];
   // Подпись прогресса уезжает в he_jobs.progress.label и печатается клиенту
   // как есть (блок «Right now» кабинета ENG), поэтому зависит от рынка, а не
   // переводится насовсем: тот же V1 обслуживает русский внутренний инструмент.
   const progressLabel = market === 'us' ? 'mapping a brand' : 'разбираем бренд';
+  // Счётчик поиска — ЭТОГО исполнения: остановка по полному отказу поиска
+  // (heSearchOutageFailure) судит о том, что поиск делает сейчас, а не о
+  // префиксе из чекпойнта. Обслуженные запросы префикса учитываются только в
+  // итоговой проверке «ни один бренд не получил выдачи» ниже.
   const tally = newHeSearchTally();
+  const restoredSearchAnswered = restored?.search_answered ?? 0;
+  let searchedThisRun = 0;
   /**
    * Сколько брендов модель РАЗОБРАЛА (ответ прошёл схему) и первый проглоченный
    * сбой. Зачем: пустой список сущностей — утверждение «следов бренда нет», его
@@ -219,20 +364,21 @@ export async function runBrandCloudStage(job: HeJob, ctx: HeStageContext): Promi
    * по нулю ответов: ноль ответов — отсутствие факта, ровно как ноль обслуженных
    * запросов у поиска (heSearchStageFailure).
    */
-  let brandsAnswered = 0;
+  let brandsAnswered = restored?.answered ?? 0;
   let firstModelFailure: unknown;
-  for (let i = 0; i < targets.length; i += 1) {
+  for (let i = restored?.next ?? 0; i < targets.length; i += 1) {
     const target = targets[i];
     await reportProgress(ctx, job.id, i + 1, targets.length, progressLabel);
     stageLog(ctx, `[brand_cloud] ${target.name}…`);
     const { pages, searchResults } = await collectBrandPages(target, ctx, market, tally);
+    searchedThisRun += 1;
     // Ниже — платный вызов модели на КАЖДЫЙ бренд, и половина его входа приходит
     // из поиска. Останавливаемся до вызова, пока перебор не сжёг бюджет модели
     // на пустом входе: отказ по деньгам/ключу сам не пройдёт, а поиск, не
     // обслуживший НИ ОДНОГО бренда за два подряд, лёг целиком
     // (heSearchOutageFailure). Пустая выдача по бренду — факт о бренде, и сюда
     // не попадает; одиночный блип не переживает следующего бренда.
-    const outage = heSearchOutageFailure(tally, i + 1);
+    const outage = heSearchOutageFailure(tally, searchedThisRun);
     if (outage) {
       stageLog(
         ctx,
@@ -262,15 +408,16 @@ export async function runBrandCloudStage(job: HeJob, ctx: HeStageContext): Promi
       // Отмена задачи — не сбой одного бренда: продолжать перебор нельзя,
       // иначе отмена не останавливает расход на остальных брендах.
       if (jobSignal?.aborted) throw e;
-      // Отказ ДОСТУПА к модели (деньги, ключ, лимит частоты) — тоже не сбой
-      // одного бренда: следующий бренд получит тот же ответ. Раньше его
+      // Отказ ДОСТУПА к модели (деньги, ключ; на us ещё и лимит частоты) — тоже
+      // не сбой одного бренда: следующий бренд получит тот же ответ. Раньше его
       // проглатывал этот catch, и класс, который транспорт выделил специально
       // для решения ДЖОБЫ, до неё не доходил: brand_cloud заканчивался УСПЕХОМ
       // с пустым списком сущностей, а стадия hypotheses читает это как «следов
       // бренда нет» — то есть отказ провайдера превращался в вывод о рынке.
-      // Бросаем исходную ошибку: её тип нужен воркеру целым (park по 429,
-      // терминальный отказ по 402/401).
-      const refusal = heRunStoppingLlmFailure(e);
+      // Бросаем исходную ошибку: её тип нужен воркеру целым (пауза по 429,
+      // терминальный отказ по 402/401). 429 на RU сюда не попадает и
+      // поглощается ниже как сбой одного бренда (см. heRunStoppingLlmFailure).
+      const refusal = heRunStoppingLlmFailure(e, market);
       if (refusal) {
         stageLog(
           ctx,
@@ -283,11 +430,33 @@ export async function runBrandCloudStage(job: HeJob, ctx: HeStageContext): Promi
       if (firstModelFailure === undefined) firstModelFailure = e;
       stageLog(ctx, `[brand_cloud] LLM по ${target.name} упал: ${heIoFailureReason(e)}`);
     }
+    // Чекпойнт пишется, только когда в префиксе есть хоть один РАЗОБРАННЫЙ
+    // бренд. Префикс из одних сбоев хранить незачем (оплаченного ответа в нём
+    // нет), а вреден он прямо: при нуле разобранных стадия ниже бросает, и
+    // повтор, начатый с конца такого префикса, бросил бы снова, не попробовав
+    // ни одного бренда.
+    if (resumable && brandsAnswered > 0) {
+      await writeHeItemCheckpoint(
+        ctx,
+        job,
+        {
+          stage: 'brand_cloud',
+          v: 1,
+          fingerprint,
+          next: i + 1,
+          answered: brandsAnswered,
+          search_answered: restoredSearchAnswered + tally.answered,
+          entities,
+        },
+        '[brand_cloud]',
+      );
+    }
   }
 
   // Ни один бренд не получил выдачи из-за провайдера: «следов бренда нет» было
-  // бы ложью про все бренды сразу, а её читает стадия hypotheses.
-  const searchFailure = heSearchStageFailure(tally);
+  // бы ложью про все бренды сразу, а её читает стадия hypotheses. Обслуженные
+  // запросы префикса из чекпойнта (только us) — в том же счёте.
+  const searchFailure = heSearchStageFailure({ ...tally, answered: tally.answered + restoredSearchAnswered });
   if (searchFailure) {
     stageLog(
       ctx,

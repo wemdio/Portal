@@ -91,12 +91,29 @@ export interface HeTemplateLaunchCampaign {
    * `leads_requested - leads_count` — ПОВТОРЯЕМЫЙ: ни одна строка базы при
    * запуске не помечается отправленной (запуск в he_bases не пишет вовсе).
    *
-   * Ключей нет у записей до 28.09.2026 и у кампании, чью загрузку прервала
-   * ошибка: тогда принято неизвестно сколько, и такой сегмент попадает в
-   * `pending` вместо того, чтобы врать числом.
+   * Все три счётчика копятся ПО ЧАНКАМ загрузки (до 1000 адресов за запрос,
+   * launchTemplate.ts, шаг 6) и пишутся в запись после каждого
+   * подтверждённого чанка. Поэтому у кампании, чью загрузку прервала ошибка,
+   * здесь стоят ПОДТВЕРЖДЁННЫЕ рассыльщиком числа, а не ноль и не догадка;
+   * адреса неподтверждённых чанков лежат в `pending[].emails` её сегмента, и
+   * повтор досылает именно их. Неизвестной остаётся судьба одного чанка —
+   * того, на котором случилась ошибка (ответ мог потеряться после того, как
+   * рассыльщик его принял): его повтор шлёт с skip_if_in_campaign.
+   *
+   * Ключей нет только у записей до 28.09.2026.
    */
   leads_requested?: number;
   leads_attempted?: number;
+  /**
+   * Сколько из отправленных рассыльщик ПРОПУСТИЛ как уже лежащие в кампаниях
+   * воркспейса (skipped_count его ответа; бывает только у загрузок достройки —
+   * они идут с skip_if_in_campaign). Эти адреса в рассылке, поэтому в остаток
+   * «непринятых» не входят: непринятые = leads_requested − leads_count −
+   * leads_already_present. Без поля остаток назвал бы непринятыми адреса,
+   * которые уже в кампании, и повторял бы это на каждом следующем повторе.
+   * Ключа нет — ноль.
+   */
+  leads_already_present?: number;
 }
 
 /**
@@ -114,6 +131,25 @@ export interface HeTemplateLaunchPending {
   segment: string | null;
   /** Где остановились: кампании нет / есть, но лиды не загружены. */
   stage: 'campaign' | 'leads';
+  /**
+   * АДРЕСА, которые этот сегмент ещё должен (lowercase, как у лидов запуска):
+   * вся его группа, если кампании нет, или остаток после последнего
+   * подтверждённого чанка загрузки.
+   *
+   * Зачем хранить, а не пересчитывать: раскладку по сегментам делает LLM
+   * (segmentClassify), и на повторе она своя — сегмент мог не получить ни
+   * одной строки (классификатор вернул null или разложил иначе), а его адреса
+   * уйти в группу, чья кампания уже приняла адреса и не трогается. Без списка
+   * такой сегмент молча выпадал из pending, и запуск записывался законченным с
+   * незагруженными адресами. Со списком повтор достраивает РОВНО должное, не
+   * зовёт классификатор второй раз (он платный) и не зависит от того, как тот
+   * разложит базу сегодня (launchTemplate.ts, шаг 5c).
+   *
+   * Ключа нет у записей, написанных до этой правки: такой повтор идёт старым
+   * путём (классификатор), но pending сегмента без группы ПЕРЕНОСИТ, а не
+   * теряет.
+   */
+  emails?: string[];
 }
 
 /**
@@ -135,6 +171,8 @@ export interface HeTemplateLaunchInfo {
   /** Суммы по кампаниям: запрошено и признано полученным (см. кампанию выше). */
   leads_requested?: number;
   leads_attempted?: number;
+  /** Сумма leads_already_present по кампаниям; ключа нет — ноль. */
+  leads_already_present?: number;
   /** Сегменты, которые не поехали; ключа нет — запуск закончен. */
   pending?: HeTemplateLaunchPending[];
 }
@@ -161,6 +199,7 @@ export function parseLaunchInfo(raw: unknown): HeTemplateLaunchInfo | null {
         .map((c) => {
           const requested = optionalCount(c.leads_requested);
           const attempted = optionalCount(c.leads_attempted);
+          const present = optionalCount(c.leads_already_present);
           return {
             campaign_id: c.campaign_id as string,
             campaign_name: typeof c.campaign_name === 'string' ? c.campaign_name : '',
@@ -170,6 +209,7 @@ export function parseLaunchInfo(raw: unknown): HeTemplateLaunchInfo | null {
               typeof c.leads_count === 'number' && Number.isFinite(c.leads_count) ? c.leads_count : 0,
             ...(requested !== undefined ? { leads_requested: requested } : {}),
             ...(attempted !== undefined ? { leads_attempted: attempted } : {}),
+            ...(present !== undefined && present > 0 ? { leads_already_present: present } : {}),
           };
         })
     : undefined;
@@ -182,10 +222,16 @@ export function parseLaunchInfo(raw: unknown): HeTemplateLaunchInfo | null {
         .map((p) => ({
           segment: typeof p.segment === 'string' ? p.segment : null,
           stage: p.stage === 'leads' ? ('leads' as const) : ('campaign' as const),
+          // Список читается только целиком: массив, в котором есть не-строка,
+          // — не наш формат, и достраивать по нему нельзя (ключа как бы нет).
+          ...(Array.isArray(p.emails) && p.emails.every((e) => typeof e === 'string')
+            ? { emails: (p.emails as string[]).filter((e) => e.length > 0) }
+            : {}),
         }))
     : undefined;
   const requestedTotal = optionalCount(r.leads_requested);
   const attemptedTotal = optionalCount(r.leads_attempted);
+  const presentTotal = optionalCount(r.leads_already_present);
   return {
     campaign_id: r.campaign_id,
     campaign_name: typeof r.campaign_name === 'string' ? r.campaign_name : '',
@@ -196,6 +242,7 @@ export function parseLaunchInfo(raw: unknown): HeTemplateLaunchInfo | null {
     ...(campaigns && campaigns.length > 0 ? { campaigns } : {}),
     ...(requestedTotal !== undefined ? { leads_requested: requestedTotal } : {}),
     ...(attemptedTotal !== undefined ? { leads_attempted: attemptedTotal } : {}),
+    ...(presentTotal !== undefined && presentTotal > 0 ? { leads_already_present: presentTotal } : {}),
     ...(pending && pending.length > 0 ? { pending } : {}),
   };
 }
@@ -220,6 +267,59 @@ export function parseLaunchInfo(raw: unknown): HeTemplateLaunchInfo | null {
  */
 export function heLaunchIsIncomplete(info: HeTemplateLaunchInfo | null | undefined): boolean {
   return (info?.pending?.length ?? 0) > 0;
+}
+
+/**
+ * Сколько живёт АРЕНДА запуска: пока она не истекла, второй запрос на запуск
+ * того же шаблона отвечает отказом, а не достраивает и не создаёт параллельно
+ * (launchTemplate.ts, шаги 1 и 6).
+ *
+ * Аренда продлевается КАЖДОЙ промежуточной записью попытки (и ещё раз — после
+ * платного классификатора сегментов, перед первым обращением к рассыльщику),
+ * поэтому величина — это не длина запуска, а самый длинный промежуток между
+ * двумя записями: досылка цепочки PATCH'ем плюс загрузка одного чанка (до 1000
+ * адресов). Запрос к рассыльщику в худшем случае — ожидание лимитера (до 15 с,
+ * lib/instantly/rateLimiter.ts), три 429 с паузами 4+8+16 с и таймаут 90 с
+ * (lib/instantly/client.ts), то есть около двух с половиной минут на вызов и
+ * около пяти на такой промежуток. 15 минут — втрое больше.
+ *
+ * Цена величины — ожидание после СМЕРТИ процесса посреди запуска: повтор
+ * отвечает «запуск ещё идёт» до конца аренды, потом достраивает. Короче
+ * делать нельзя: истёкшая аренда у живой попытки — это второй запрос,
+ * который достраивает тот же запуск параллельно с ней.
+ */
+export const HE_LAUNCH_LEASE_MS = 15 * 60_000;
+
+/** Служебные поля записи о запуске, которых нет в HeTemplateLaunchInfo. */
+export interface HeLaunchLease {
+  /** Токен попытки, писавшей запись последней (null — запись до 01.10.2026). */
+  attempt: string | null;
+  /** created_at записи — ключ сравнения для записей без токена. */
+  createdAt: string | null;
+  /** До какого момента (мс) попытка держит запуск; null — не держит. */
+  runningUntilMs: number | null;
+}
+
+/**
+ * Прочитать аренду и токен из СЫРОЙ записи `he_templates.launch_info`.
+ *
+ * Отдельно от parseLaunchInfo намеренно: эти поля нужны только ядру запуска
+ * (шаг 1 — «не идёт ли запуск», шаг 6 — условная запись), а всем остальным
+ * читателям записи (кабинет, долив, дашборд) они не нужны и в
+ * HeTemplateLaunchInfo не входят. Кабинету они не уходят и так: проекция
+ * записи — белый список полей (clientEngProjection.ts).
+ */
+export function readHeLaunchLease(raw: unknown): HeLaunchLease {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { attempt: null, createdAt: null, runningUntilMs: null };
+  }
+  const r = raw as Record<string, unknown>;
+  const until = typeof r.running_until === 'string' ? Date.parse(r.running_until) : Number.NaN;
+  return {
+    attempt: typeof r.attempt === 'string' && r.attempt.length > 0 ? r.attempt : null,
+    createdAt: typeof r.created_at === 'string' && r.created_at.length > 0 ? r.created_at : null,
+    runningUntilMs: Number.isFinite(until) ? until : null,
+  };
 }
 
 /** Ссылка на кампанию в Instantly (та же база URL, что и в остальном портале). */
@@ -412,7 +512,8 @@ export function heLaunchEmailVerdict(rawStatus: unknown): HeLaunchEmailVerdict {
  *     ячейки. Это состояние HEAD, отдельное продуктовое решение, и по
  *     маркеру его не отличить;
  *   - колонка `he_bases.contact_cap_applied` для той же цели НЕ годится: её не
- *     пишут на инсталляции без миграции 20260926_0001 и у частичного импорта.
+ *     пишет никто (стадия сборки перестала — читателя не было), и NULL в ней
+ *     ничего не означает. Кап базы — только здесь, в collect_info.
  */
 export function heConstructContactCap(collectInfo: unknown): number | null {
   if (!collectInfo || typeof collectInfo !== 'object') return null;
@@ -940,6 +1041,14 @@ export interface HeLaunchCapSelection {
   /** Компаний, которым не досталось ни одного адреса. */
   companiesHeldBack: number;
   /**
+   * Сколько из addressesHeldBack принадлежат компаниям БЕЗ единого адреса в
+   * запуске (все их адреса). Остаток addressesHeldBack — вторые и следующие
+   * адреса компаний, у которых один адрес уехал. Предупреждению нужны обе
+   * части: приписать все снятые адреса «компаниям без адреса» значило бы
+   * завысить их вдвое у базы с двумя адресами на компанию.
+   */
+  addressesOfHeldBackCompanies: number;
+  /**
    * Чем выбраны колонки ключа компании. Не влияет ни на одно число выше — это
    * ДИАГНОСТИКА для журнала запуска: 'named' означает «колонку угадали по
    * имени», 'none' по обоим полям — «ключа нет вовсе», и тогда правило «по
@@ -1012,8 +1121,10 @@ export function selectLeadsWithinLaunchCap(input: HeLaunchCapInput): HeLaunchCap
   }
 
   let companiesSent = 0;
+  let addressesOfHeldBackCompanies = 0;
   for (const group of ranked) {
     if (group.some((leadPos) => kept.has(leadPos))) companiesSent += 1;
+    else addressesOfHeldBackCompanies += group.length;
   }
 
   return {
@@ -1022,6 +1133,7 @@ export function selectLeadsWithinLaunchCap(input: HeLaunchCapInput): HeLaunchCap
     addressesSent: kept.size,
     addressesHeldBack: leadRowIndices.length - kept.size,
     companiesHeldBack: ranked.length - companiesSent,
+    addressesOfHeldBackCompanies,
     companyKeyResolution: cols.resolution,
     addressesWithoutCompanyKey,
   };

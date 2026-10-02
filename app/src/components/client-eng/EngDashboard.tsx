@@ -56,6 +56,8 @@ const STAGE_STATUS: Record<EngDashStage, { tag: string; dot: string; text: strin
   analyzing: { tag: 'analysis', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
   analyzed: { tag: 'analyzed', dot: 'var(--cp-grey)', text: 'var(--cp-paper-mute)' },
   template: { tag: 'ready to launch', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
+  // Запуск записан, но не закончен — нужен шаг клиента (шаг 5), поэтому amber.
+  launch_unfinished: { tag: 'launch unfinished', dot: 'var(--cp-amber)', text: 'var(--cp-amber)' },
   launched: { tag: 'live', dot: 'var(--cp-green)', text: 'var(--cp-green)' },
 };
 
@@ -74,13 +76,20 @@ const JOB_STAGE_LABELS: Record<string, string> = {
   dossier: 'writing the dossier',
 };
 
-/** Шаг мастера проекта, куда ведёт кнопка вертикали. */
-function wizardStepFor(stage: EngDashStage): number {
+/**
+ * Шаг мастера проекта, куда ведёт кнопка вертикали. Сухая вертикаль ведёт на
+ * шаг 2: кнопка «Resume auto-refill» живёт там.
+ */
+function wizardStepFor(stage: EngDashStage, refillHeldHere: boolean): number {
   switch (stage) {
     case 'research':
       return 2; // Verticals: там живёт прогресс research
     case 'letters':
       return 3; // Letters
+    case 'launch_unfinished':
+      return 5; // Review & Launch: там достраивается запуск
+    case 'launched':
+      return refillHeldHere ? 2 : 4;
     default:
       return 4; // Bases & Launch
   }
@@ -196,6 +205,8 @@ function currentIndexFor(vertical: EngDashboardVertical): number {
       return 5;
     case 'template':
       return 6;
+    case 'launch_unfinished':
+      return 6;
     case 'launched':
       return 6;
   }
@@ -224,8 +235,16 @@ const REFILL_PIPE_EVIDENCE: Record<HeClientRefillState, string> = {
   off: 'not configured',
 };
 
+/**
+ * Ночной добор ПРОЕКТА идёт, но ЭТУ вертикаль правило сухой вертикали с него
+ * сняло (`refill_dry`). Только для `running`: у `paused` и `off` своя, более
+ * общая правда — добора нет у всего проекта.
+ */
+const REFILL_DRY_NEXT_LINE = 'next: daily refill paused for this vertical — resume it on step 2';
+const REFILL_DRY_PIPE_EVIDENCE = 'paused for this vertical';
+
 /** Строка «next: …» — следующий шаг конвейера из текущей стадии. */
-function nextLineFor(stage: EngDashStage, refill: HeClientRefillState): string {
+function nextLineFor(stage: EngDashStage, refill: HeClientRefillState, dry: boolean): string {
   switch (stage) {
     case 'research':
       return 'next: verticals review';
@@ -241,8 +260,10 @@ function nextLineFor(stage: EngDashStage, refill: HeClientRefillState): string {
       return 'next: 85/15 template';
     case 'template':
       return 'next: launch from Review & Launch';
+    case 'launch_unfinished':
+      return 'next: finish the launch on step 5 «Review & Launch»';
     case 'launched':
-      return REFILL_NEXT_LINE[refill];
+      return refill === 'running' && dry ? REFILL_DRY_NEXT_LINE : REFILL_NEXT_LINE[refill];
   }
 }
 
@@ -254,6 +275,8 @@ function buildPipelineRows(
   const s = vertical.stats;
   const fmt = (n: number) => n.toLocaleString('en-US');
   const launched = vertical.stage === 'launched';
+  const launchUnfinished = vertical.stage === 'launch_unfinished';
+  const dryHere = refill === 'running' && vertical.refill_dry === true;
   const cur = currentIndexFor(vertical);
   const stateOf = (i: number): PipeRow['state'] =>
     launched || i < cur ? 'done' : i === cur ? 'current' : 'future';
@@ -345,9 +368,12 @@ function buildPipelineRows(
       key: 'launch',
       label: 'Launch',
       state: stateOf(6),
+      // Незаконченный запуск сам не достроится — точка неподвижная (held), а
+      // не «идёт работа».
+      ...(launchUnfinished ? { marker: 'held' as const } : {}),
       // White-label: имя кампании — подпись, а не ссылка. Наружу вести некуда:
       // у клиента нет своего входа в рассыльщик, а сама ссылка светила бы бренд.
-      evidence: launched ? (
+      evidence: launchUnfinished ? 'unfinished — finish it on step 5' : launched ? (
         <>
           {s.leads_launched > 0 ? `${fmt(s.leads_launched)} leads` : ''}
           {s.leads_launched > 0 && vertical.launch?.campaign_name ? ' · ' : ''}
@@ -370,12 +396,13 @@ function buildPipelineRows(
       // Маркер — тоже утверждение, и под паузой оба прежних врали: зелёная
       // точка значит «живой цикл», пульсирующая янтарная — «прямо сейчас
       // работает». Остановленный добор не то и не другое, поэтому у него своя
-      // точка: янтарная, но неподвижная.
-      marker: refillRunning ? 'amber' : refill === 'paused' ? 'held' : 'green',
+      // точка: янтарная, но неподвижная. Сухая вертикаль — тот же «held»: проект
+      // идёт, а её ночь не берёт.
+      marker: refillRunning ? 'amber' : refill === 'paused' || dryHere ? 'held' : 'green',
       evidence: refillRunning
         ? withEta('collecting refill…')
         : `${s.appended_today > 0 ? `+${fmt(s.appended_today)} today · ` : ''}${
-            REFILL_PIPE_EVIDENCE[refill]
+            dryHere ? REFILL_DRY_PIPE_EVIDENCE : REFILL_PIPE_EVIDENCE[refill]
           }`,
     });
   }
@@ -460,14 +487,16 @@ function relTime(iso: string): string {
 }
 
 /* Иконки ленты — lucide фиксированного размера; цвет только со смыслом:
-   green — запуск/долив (заработанный плюс), red — сбой, остальное — спокойный
-   paper-faint. Никакой «радуги» по типам событий. */
+   green — запуск/долив (заработанный плюс), red — сбой, amber — нужен шаг
+   клиента (незаконченный запуск, как и у статуса вертикали), остальное —
+   спокойный paper-faint. Никакой «радуги» по типам событий. */
 const EVENT_ICON: Record<EngDashboardEvent['type'], { Icon: typeof Mail; color: string }> = {
   letters_ready: { Icon: Mail, color: 'var(--cp-paper-faint)' },
   base_collected: { Icon: Database, color: 'var(--cp-paper-faint)' },
   base_analyzed: { Icon: CheckCircle2, color: 'var(--cp-paper-faint)' },
   template_ready: { Icon: Wand2, color: 'var(--cp-paper-faint)' },
   launched: { Icon: Rocket, color: 'var(--cp-green)' },
+  launch_unfinished: { Icon: Rocket, color: 'var(--cp-amber)' },
   refill_appended: { Icon: RefreshCw, color: 'var(--cp-green)' },
   refill_empty: { Icon: RefreshCw, color: 'var(--cp-paper-faint)' },
   failed: { Icon: AlertTriangle, color: 'var(--cp-red)' },
@@ -565,7 +594,8 @@ function VerticalCard({
   /** Состояние ночного добора ПРОЕКТА этой вертикали, а не аккаунта. */
   refill: HeClientRefillState;
 }) {
-  const step = wizardStepFor(vertical.stage);
+  const dryHere = refill === 'running' && vertical.refill_dry === true;
+  const step = wizardStepFor(vertical.stage, dryHere);
   const launched = vertical.stage === 'launched';
   const status = STAGE_STATUS[vertical.stage];
   const rows = buildPipelineRows(vertical, activeJob, refill);
@@ -617,7 +647,7 @@ function VerticalCard({
 
       <div className="pt-2.5" style={{ borderTop: '1px solid var(--cp-divider)' }}>
         <span className="ds-mono text-[11px]" style={{ color: 'var(--cp-paper-faint)' }}>
-          {nextLineFor(vertical.stage, refill)}
+          {nextLineFor(vertical.stage, refill, vertical.refill_dry === true)}
         </span>
       </div>
 
@@ -676,6 +706,19 @@ export function EngDashboard() {
   const events = data?.events ?? [];
   const activeJobs = data?.activeJobs ?? [];
   const today = data?.today ?? { appended: 0, valid: 0, collected: 0 };
+  /*
+   * «Collected today» — КОМПАНИИ, когда роут их знает, иначе СТРОКИ под своим
+   * именем (то же правило, что у карточки вертикали). Строки — не адреса: у
+   * компании без найденного адреса одна пустая строка, и таких часто
+   * большинство, поэтому подпись «address rows» над этим числом врала.
+   * `collected_companies` = 0 при ненулевых строках значит «не знаем» (база без
+   * счётчика компаний) — тогда печатаем строки.
+   */
+  const collectedCompanies = today.collected_companies ?? 0;
+  const collectedTile =
+    collectedCompanies > 0 || today.collected === 0
+      ? { value: collectedCompanies, hint: 'companies collected' }
+      : { value: today.collected, hint: 'rows collected, incl. companies with no address found' };
   const autoRefill = data?.autoRefill;
   const projectNames = new Map(projects.map((p) => [p.id, p.name]));
   /**
@@ -759,11 +802,8 @@ export function EngDashboard() {
                 [
                   // Счётчики — тихие mono-числа + label, без hero-метрик;
                   // цвет только paper, статусной окраски у агрегатов дня нет.
-                  // `today.collected` — сумма `stats.collected` ночных доливов, а это
-                  // `finalRows.length`, то есть СТРОКИ (у market='us' одна строка =
-                  // один адрес). Компаний долив не считает, поэтому подпись про
-                  // строки: раньше здесь стояло «new companies harvested».
-                  { label: 'Collected today', value: today.collected, hint: 'address rows collected' },
+                  // Единица «Collected today» выбрана выше (collectedTile).
+                  { label: 'Collected today', value: collectedTile.value, hint: collectedTile.hint },
                   { label: 'Valid today', value: today.valid, hint: 'emails passed validation' },
                   { label: 'Appended today', value: today.appended, hint: 'leads added to campaigns' },
                 ] as const

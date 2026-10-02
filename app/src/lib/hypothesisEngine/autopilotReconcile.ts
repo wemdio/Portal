@@ -24,10 +24,14 @@
  *     проход доставляет только то, что НЕ ПЫТАЛИСЬ делать: упавшую цепочку и
  *     упавший анализ поднимает человек; упавшие ПИСЬМА — исключение, их
  *     ночной проход повторяет, но не бесконечно: тормоз поколения
- *     (heTemplateGenerationBudget) даёт три платных прогона на одно поколение
- *     анализа, и новый бюджет открывает только новая done-джоба base_analyze
- *     той же базы. Отменённые КЛИЕНТОМ цепочку, анализ и письма ночь не
- *     трогает вовсе. Часть упавших СБОРОК поднимает отдельный
+ *     (heTemplateGenerationBudget) не ставит новую генерацию, когда по
+ *     поколению анализа засчитано уже три прогона, и новый бюджет открывает
+ *     только новая done-джоба base_analyze той же базы. Три — порог
+ *     ПОСТАНОВКИ, а не потолок расхода: начатая строка дорабатывает свои
+ *     попытки, а бесплатные прерывания в счёт не идут (честный худший случай —
+ *     в докблоке HE_TEMPLATE_PAID_RUNS_PER_ANALYSIS). Отменённые КЛИЕНТОМ
+ *     цепочку, сборку, анализ и письма ночь не трогает вовсе — ни повтором,
+ *     ни новой сборкой на их месте. Часть упавших СБОРОК поднимает отдельный
  *     проход baseAutoResume, и «часть» здесь не оговорка, а его условия:
  *     он поднимает ТОЛЬКО ВРЕМЕННЫЙ отказ провайдера (перманентный отказ,
  *     отмену клиентом и решения самого движка SQL прохода отсеивает), сам
@@ -37,13 +41,17 @@
  *     HE_AUTO_RESUME_MAX_AGE_HOURS = 72 ч. Значит при перманентном отказе,
  *     на третьем падении и на базе старше трёх суток сборку не поднимает
  *     НИКТО, кроме человека, — и это состояние, а не щель в расписании.
- *     Упавший анализ здесь
- *     отдельным гейтом (failedAnalyzeBaseIds), потому что его фейл не оставляет
- *     следа на самой базе: она висит в 'analyzing', и ремонт сироты выглядел бы
- *     как бесплатная доставка пропущенной стадии.
+ *     Упавший или отменённый анализ здесь
+ *     отдельным гейтом (последний исход base_analyze базы), потому что его
+ *     фейл не оставляет следа на самой базе: она висит в 'analyzing', и ремонт
+ *     сироты выглядел бы как бесплатная доставка пропущенной стадии. Гейт
+ *     сборки различает отказ и отмену тоже по статусу джобы, а не по тексту
+ *     he_bases.error: отменённая клиентом сборка паузы «платный шаг упал» не
+ *     даёт, а база, за которую ничего не платили (сорвавшаяся постановка),
+ *     провалом не считается вовсе.
  * Тормоз писем (heTemplateGenerationBudget) применяется в ОБОИХ режимах: там
  * бюджет считается по поколению анализа, и повторная кнопка тоже не должна
- * оплачивать четвёртый прогон по тому же анализу.
+ * ставить новую генерацию по анализу, на котором порог уже достигнут.
  *
  * ЧЕГО ЗДЕСЬ НЕТ. Ни одной новой постановки сборки мимо enqueueHeBaseCollect
  * (его дедуп — единственное, что стоит между ночным проходом и второй платной
@@ -66,6 +74,7 @@ import {
   heTemplateGenerationBudget,
   isAnalyzingBaseLive,
   isHeAutopilotReadError,
+  latestEndedJobByBase,
   liveBaseIdsFromJobs,
   pauseForHeAutopilotSkip,
   recordHeAutopilotPause,
@@ -75,6 +84,7 @@ import type {
   HeAnalyzingBase,
   HeAutopilotPauseReason,
   HeAutopilotSkipReason,
+  HeJobEndedOutcome,
   HeTemplateGenerationBudget,
 } from './autopilotNext';
 
@@ -112,7 +122,10 @@ export type HeAutopilotRefusal = 'not_researched' | 'no_verticals';
 export interface HeAutopilotLettersBudget {
   /** База, по которой считался бюджет. */
   baseId: string;
-  /** Сколько платных прогонов уже записано на это поколение анализа. */
+  /**
+   * Сколько прогонов засчитано этому поколению анализа (попытки строк; см.
+   * heTemplateGenerationBudget — бесплатно прерванные сюда не входят).
+   */
   paidRuns: number;
   /** created_at поколения (done-джобы base_analyze); null — её нет. */
   generationAt: string | null;
@@ -161,6 +174,13 @@ export type HeAutopilotReconcileResult =
       verticalId?: string;
       baseId?: string;
       pause: HeAutopilotPauseReason;
+      /**
+       * Что этот же вызов УСПЕЛ поставить по предыдущим вертикалям до сбоя
+       * (нет ключа — сбой случился до первой постановки). Ночной проход
+       * считает по нему проекты, начавшие платную работу (см.
+       * HE_AUTOPILOT_RECONCILE_PER_RUN), и печатает его в строке проекта.
+       */
+      counts?: HeAutopilotReconcileCounts;
     };
 
 /**
@@ -202,8 +222,9 @@ function payloadField(payload: unknown, key: 'base_id' | 'vertical_id'): string 
  *     analyzed; refill-базы «auto-refill: …» не в счёт) → base_collect;
  *   осиротевшая 'analyzing'-база → доставка пропавшего base_analyze тем же
  *     общим ремонтом (строки собраны и оплачены — пересобирать нечего), но
- *     ночью — только если анализ этой базы ЕЩЁ НЕ ПАДАЛ (см. п. 2 докблока
- *     файла: иначе повтор платного анализа шёл бы каждую ночь);
+ *     ночью — только если анализ этой базы ещё не падал и не был отменён
+ *     клиентом (см. п. 2 докблока файла: иначе повтор платного анализа шёл бы
+ *     каждую ночь); сорвавшаяся постановка ремонта сборку НЕ ставит;
  *   база analyzed, шаблона и активной template-джобы нет, бюджет поколения не
  *     исчерпан → template.
  *
@@ -271,18 +292,25 @@ export async function reconcileHeAutopilotProject(
   // второй раз не платит (докблок файла). Кнопка клиента читает их незачем —
   // повтор там и есть смысл нажатия.
   //
-  // Стадий тут ДВЕ, и вторая (base_analyze) — та, без которой ночной проход
-  // платил бы вечно. Финальный фейл анализа НЕ трогает he_bases: failJob воркера
-  // лечит базу только после base_collect, а сама стадия выставляет 'analyzing' на
-  // входе и 'analyzed' только на успехе. Значит база остаётся в 'analyzing' без
-  // активной джобы — то есть ОСИРОТЕВШЕЙ по общему предикату, — и ремонт ниже
-  // ставил бы ей новый ПЛАТНЫЙ base_analyze каждую ночь, без всякой границы:
-  // ни attempts упавшей строки, ни статус базы этого не останавливают.
+  // Стадий тут ЧЕТЫРЕ, и у двух «базовых» своя причина:
+  //  - base_analyze — без неё ночной проход платил бы вечно. Финальный фейл
+  //    анализа НЕ трогает he_bases: failJob воркера лечит базу только после
+  //    base_collect, а сама стадия выставляет 'analyzing' на входе и
+  //    'analyzed' только на успехе. Значит база остаётся в 'analyzing' без
+  //    активной джобы — то есть ОСИРОТЕВШЕЙ по общему предикату, — и ремонт
+  //    ниже ставил бы ей новый ПЛАТНЫЙ base_analyze каждую ночь, без всякой
+  //    границы: ни attempts упавшей строки, ни статус базы этого не
+  //    останавливают;
+  //  - base_collect — без неё гейт сборки не отличал бы отказ от отмены: обе
+  //    оставляют базу 'failed', а различает их только статус СВОЕЙ джобы
+  //    (см. гейт 'collect_failed_before' ниже).
   const failedChainVerticals = new Set<string>();
-  const failedAnalyzeBaseIds = new Set<string>();
   const cancelledChainVerticals = new Set<string>();
-  const cancelledAnalyzeBaseIds = new Set<string>();
   const cancelledTemplateBaseIds = new Set<string>();
+  /** base_id → исход последнего упавшего/отменённого base_analyze. */
+  let analyzeEnded = new Map<string, HeJobEndedOutcome>();
+  /** base_id → исход последней упавшей/отменённой джобы сборки ИЛИ анализа. */
+  let baseJobEnded = new Map<string, HeJobEndedOutcome>();
   if (nightly) {
     /**
      * 'cancelled' читается наравне с 'failed', и по РАЗНЫМ причинам.
@@ -297,12 +325,15 @@ export async function reconcileHeAutopilotProject(
      *
      * Отмена — РЕШЕНИЕ, а не отказ, поэтому она попадает в отдельные
      * множества: причина пропуска у неё своя и паузы кабинету не даёт.
+     *
+     * У баз решает ПОСЛЕДНИЙ исход (latestEndedJobByBase, порядок created_at,
+     * тайбрейк id): у одной базы бывают оба, и правду о ней говорит поздний.
      */
     const { data: failedJobs, error: failedJobsErr } = await supabase
       .from('he_jobs')
-      .select('id, stage, status, payload')
+      .select('id, stage, status, payload, created_at')
       .eq('project_id', projectId)
-      .in('stage', ['chain', 'base_analyze', 'template'])
+      .in('stage', ['chain', 'base_collect', 'base_analyze', 'template'])
       .in('status', ['failed', 'cancelled']);
     if (failedJobsErr) {
       await recordHeAutopilotPause(supabase, projectId, 'read_failed');
@@ -314,22 +345,19 @@ export async function reconcileHeAutopilotProject(
         pause: 'read_failed',
       };
     }
-    for (const row of failedJobs ?? []) {
-      const cancelled = (row as Row).status === 'cancelled';
-      if ((row as Row).stage === 'chain') {
-        const verticalId = payloadField((row as Row).payload, 'vertical_id');
+    const endedRows = (failedJobs ?? []) as Row[];
+    for (const row of endedRows) {
+      const cancelled = row.status === 'cancelled';
+      if (row.stage === 'chain') {
+        const verticalId = payloadField(row.payload, 'vertical_id');
         if (verticalId) (cancelled ? cancelledChainVerticals : failedChainVerticals).add(verticalId);
-      } else if ((row as Row).stage === 'template') {
-        const baseId = payloadField((row as Row).payload, 'base_id');
+      } else if (row.stage === 'template') {
+        const baseId = payloadField(row.payload, 'base_id');
         if (baseId && cancelled) cancelledTemplateBaseIds.add(baseId);
-      } else if (cancelled) {
-        const baseId = payloadField((row as Row).payload, 'base_id');
-        if (baseId) cancelledAnalyzeBaseIds.add(baseId);
-      } else {
-        const baseId = payloadField((row as Row).payload, 'base_id');
-        if (baseId) failedAnalyzeBaseIds.add(baseId);
       }
     }
+    analyzeEnded = latestEndedJobByBase(endedRows, ['base_analyze']);
+    baseJobEnded = latestEndedJobByBase(endedRows, ['base_collect', 'base_analyze']);
   }
 
   const chains = chainsRes.data ?? [];
@@ -344,7 +372,7 @@ export async function reconcileHeAutopilotProject(
   // Флаг — ДО постановки джоб: воркер подхватывает followups только при
   // autopilot=true, а клеймить свежие джобы он начнёт позже этой транзакции.
   // Ночной проход флага не трогает: он и отбирает проекты по нему, а лишняя
-  // запись двигала бы updated_at, по которому проход выбирает застоявшихся.
+  // запись двигала бы updated_at проекта без всякой работы по нему.
   if (!nightly) {
     const { error: flagErr } = await supabase
       .from('he_projects')
@@ -427,6 +455,7 @@ export async function reconcileHeAutopilotProject(
             error: chainErr,
             verticalId,
             pause: 'enqueue_failed',
+            counts,
           };
         }
         counts.chainsEnqueued += 1;
@@ -469,18 +498,22 @@ export async function reconcileHeAutopilotProject(
         // там, где клиент ждёт одну, за новые вызовы модели. По той же причине
         // выходим после первой вылеченной: вертикали нужна ОДНА база.
         if (collectingBase || analyzingLive || analyzedBase) break;
-        // Анализ этой базы уже падал. Ночью его не переоплачиваем: ремонт тут
-        // бесплатен сам по себе (вставка строки), но джоба, которую он ставит, —
-        // ПЛАТНЫЙ прогон модели, и повтор его решает человек (кнопка кабинета
-        // или специалист), как и у сборки с цепочкой. Базу при этом считаем
-        // занятой вертикалью (analyzingLive), иначе ниже пошла бы НОВАЯ платная
-        // сборка: 'analyzing' не тот статус, который видит гейт
-        // 'collect_failed_before'.
-        if (nightly && cancelledAnalyzeBaseIds.has(asString(base.id))) {
-          skipReason = 'analysis_cancelled';
-        } else if (nightly && failedAnalyzeBaseIds.has(asString(base.id))) {
+        // Анализ этой базы уже ЗАПУСКАЛСЯ — упал или отменён клиентом. Ночью
+        // его не переоплачиваем: ремонт тут бесплатен сам по себе (вставка
+        // строки), но джоба, которую он ставит, — ПЛАТНЫЙ прогон модели, и
+        // повтор его решает человек (кнопка кабинета или специалист), как и у
+        // сборки с цепочкой. Отменённый — тем более: клиент его только что
+        // остановил (база при этом 'analyzing', если запись стадии опередила
+        // роут отмены). У ОБОИХ исходов база считается занятой вертикалью
+        // (analyzingLive): ремонта соседних сирот на следующем шаге цикла уже
+        // не будет (вертикали нужна одна база), и новой платной сборки ниже —
+        // тоже, а без этого она пошла бы: 'analyzing' не тот статус, который
+        // видит гейт сборки. Решает ПОСЛЕДНИЙ исход: отменённый, а потом
+        // упавший анализ — это 'analysis_failed_before', и наоборот.
+        const ended = nightly ? analyzeEnded.get(asString(base.id)) : undefined;
+        if (ended) {
           analyzingLive = true;
-          skipReason = 'analysis_failed_before';
+          skipReason = ended === 'cancelled' ? 'analysis_cancelled' : 'analysis_failed_before';
           continue;
         }
         try {
@@ -507,8 +540,35 @@ export async function reconcileHeAutopilotProject(
         }
       }
 
+      // ПОСЛЕДНЯЯ платная попытка вертикали, закончившаяся базой 'failed', —
+      // по статусу СВОЕЙ джобы, а не по тексту he_bases.error (ночью; кнопке
+      // это незачем). Свежая база — первой (выборка по created_at desc).
+      // Формы 'failed'-базы (refill сюда не входит) по последней
+      // упавшей/отменённой джобе её сборки или анализа:
+      //  - сборка 'failed' (стадия сама отказала: ноль строк, проба среза,
+      //    таймаут конструктора — или исчерпаны попытки) → 'failed';
+      //  - сборка или анализ 'cancelled' («Cancel all jobs» посреди работы —
+      //    роут отмены валит базу) → 'cancelled';
+      //  - анализ 'failed', а базу потом свалил роут отмены → 'failed';
+      //  - такой джобы нет вовсе: компенсация сорвавшейся постановки сборки
+      //    (джобы не было — ничего не куплено) или ремонт «анализировать
+      //    нечего» → база ПРОПУСКАЕТСЯ, платным провалом она не считается, и
+      //    решает следующая по свежести 'failed'-база вертикали, если есть.
+      const lastPaidFailure = nightly
+        ? autoBases
+          .filter((b) => b.status === 'failed')
+          .map((b) => baseJobEnded.get(asString(b.id)))
+          .find((ended): ended is HeJobEndedOutcome => ended !== undefined)
+        : undefined;
+
       if (!collectingBase && !analyzingLive && !analyzedBase) {
-        if (nightly && autoBases.some((b) => b.status === 'failed')) {
+        if (lastPaidFailure === 'cancelled') {
+          // Сборку (или анализ) последней базы вертикали ОТМЕНИЛ клиент: роут
+          // отмены перевёл базу в 'failed'. Это решение, а не отказ: паузы нет,
+          // и новую сборку ночь за него не начинает — возобновляет он сам
+          // кнопкой «Start outreach».
+          skipReason = 'collect_cancelled';
+        } else if (lastPaidFailure === 'failed') {
           // Сборка этой вертикали уже падала. Ночью её не переоплачиваем:
           // поднять упавшую базу умеет отдельный проход (baseAutoResume) со
           // своими потолками, а новая сборка — решение человека.
@@ -530,6 +590,7 @@ export async function reconcileHeAutopilotProject(
               error: new Error(collect.message),
               verticalId,
               pause: 'enqueue_failed',
+              counts,
             };
           }
           if (collect.created) {
@@ -581,6 +642,7 @@ export async function reconcileHeAutopilotProject(
               verticalId,
               baseId: analyzedBaseId,
               pause: budgetPause,
+              counts,
             };
           }
           if (!budget.allowed) {
@@ -609,10 +671,11 @@ export async function reconcileHeAutopilotProject(
                 verticalId,
                 baseId: analyzedBaseId,
                 pause: 'enqueue_failed',
+                counts,
               };
             }
             counts.templatesEnqueued += 1;
-            details.push({ verticalId, outcome: 'template_enqueued' });
+            details.push({ verticalId, outcome: 'template_enqueued', baseId: analyzedBaseId });
             enqueued = true;
           }
         }
@@ -654,14 +717,61 @@ export async function reconcileHeAutopilotProject(
 export const HE_AUTOPILOT_RECONCILE_FLAG_ENV = 'HE_AUTOPILOT_RECONCILE';
 
 /**
- * Сколько проектов проход берёт за ночь. Порядок — по updated_at возрастанию,
- * то есть самые застоявшиеся первыми: строку проекта двигает учёт расхода
- * каждой оплаченной стадии (worker/hypothesisEngine: accumulateProjectUsage),
- * поэтому наверху оказывается ровно тот, по кому ничего не происходит. Пометка
- * паузы updated_at НЕ двигает — иначе проход сам отправлял бы найденное в
- * конец очереди.
+ * Сколько проектов за один проход может НАЧАТЬ платную работу (поставить хоть
+ * одну стадию: цепочку, сборку, анализ или письма). Это граница расхода и
+ * «радиуса» ошибки ночного кода, и считает она только ДЕЙСТВОВАВШИЕ проекты:
+ * проект, по которому ставить нечего (готовый, ждущий человека, отказ), её не
+ * тратит.
+ *
+ * До правки аудита (F06) этим же числом ограничивалась сама ВЫБОРКА — десять
+ * проектов по updated_at возрастанию. Готовый проект updated_at не двигает
+ * (запуск и долив его не трогают, autopilot=false никто не пишет), и как только
+ * таких набиралось десять, проход каждую ночь читал одни и те же десять и до
+ * проекта, которому он нужен, не доходил никогда. Теперь выборка — окно
+ * HE_AUTOPILOT_RECONCILE_WINDOW со сдвигом по ночам, а это число — только
+ * потолок действовавших.
+ *
+ * Потолок — НА ПРОХОД, а не на календарную ночь: счётчик живёт в памяти, и
+ * повторный запуск крона той же ночью (или после смерти процесса посреди
+ * прохода) начинает его с нуля. Дублей при этом не будет — дедупы постановок
+ * те же, — но действовать за ночь могут до 10 проектов на КАЖДЫЙ запуск.
  */
 export const HE_AUTOPILOT_RECONCILE_PER_RUN = 10;
+
+/**
+ * Окно прохода: сколько проектов-кандидатов он ОСМАТРИВАЕТ за запуск.
+ *
+ * Порядок — по id (неизменный первичный ключ: переписать строку «на месте» так,
+ * чтобы она перескочила окно, нельзя), начало окна сдвигается каждые сутки
+ * UTC на размер окна по кругу: ночь n начинает с позиции (n × окно) mod
+ * кандидатов. Состояния между ночами нет — сдвиг вычисляется из даты, поэтому
+ * его не теряет ни смерть процесса, ни повторный запуск.
+ *
+ * Что это даёт, по всем случаям:
+ *  - кандидатов не больше окна (сегодня их единицы) — каждую ночь осматриваются
+ *    ВСЕ, только с разного места; проект, которому нужна работа, ждёт лишь
+ *    тогда, когда до него в этом порядке уже 10 проектов начали работу;
+ *  - кандидатов больше окна — окна соседних ночей стыкуются без пропусков, и
+ *    каждый проект осматривается хотя бы раз за ⌈кандидатов / окно⌉ ночей;
+ *  - набор кандидатов изменился между счётом и чтением окна (проект вошёл или
+ *    вышел из выборки) — окно этой ночи может сдвинуться на несколько строк:
+ *    кто-то будет осмотрен дважды подряд или пропущен на одну ночь, но не
+ *    «закрыт навсегда» — следующие ночи его покроют;
+ *  - процесс умер посреди окна — хвост этой ночи доосмотрят, когда до него
+ *    дойдёт окно (при кандидатах не больше окна — следующей же ночью).
+ *
+ * Двести осмотров — это двести снапшотов по шесть-семь коротких чтений: для
+ * ночного крона это минуты, а не часы.
+ */
+export const HE_AUTOPILOT_RECONCILE_WINDOW = 200;
+
+const RECONCILE_DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Поставил ли вызов хоть одну стадию. */
+function enqueuedAny(counts: HeAutopilotReconcileCounts | undefined): boolean {
+  if (!counts) return false;
+  return counts.chainsEnqueued + counts.collectsEnqueued + counts.templatesEnqueued + counts.analysesRequeued > 0;
+}
 
 /** Включён ли проход. Пустое/нераспознанное значение = выключен. */
 export function heAutopilotReconcileEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -683,7 +793,7 @@ function lettersBudgetNote(details: HeAutopilotVerticalDetail[]): string | undef
     const letters = detail.letters;
     if (!letters) continue;
     parts.push(
-      `${detail.verticalId} letters ${letters.paidRuns}/${HE_TEMPLATE_PAID_RUNS_PER_ANALYSIS} paid runs`
+      `${detail.verticalId} letters ${letters.paidRuns}/${HE_TEMPLATE_PAID_RUNS_PER_ANALYSIS} counted runs`
         + ` on base ${letters.baseId}, analysis ${letters.generationAt ?? 'unknown'}`,
     );
   }
@@ -707,6 +817,11 @@ export interface HeAutopilotReconcilePassRow {
 export interface HeAutopilotReconcilePassSummary {
   /** false — флаг не выставлен, проектов не читали вовсе. */
   enabled: boolean;
+  /**
+   * Сколько проектов этот запуск РАЗОБРАЛ (= rows.length). Меньше окна, если
+   * кандидатов меньше или если HE_AUTOPILOT_RECONCILE_PER_RUN проектов уже
+   * начали работу и остаток окна ждёт следующей ночи.
+   */
   projects: number;
   acted: number;
   idle: number;
@@ -725,9 +840,15 @@ export interface HeAutopilotReconcilePassSummary {
  *    /tools/hypothesis-engine работает на тех же таблицах, и проход не имеет
  *    права ставить ему ничего;
  *  - только status='researched' (третья проверка — внутри реконсилера);
- *  - не больше HE_AUTOPILOT_RECONCILE_PER_RUN проектов за ночь;
- *  - дважды за ночь по одному проекту пройти нечем: крон one-shot, выборка
- *    отдаёт строку проекта один раз (id — первичный ключ), а повторный запуск
+ *  - осматривается окно из HE_AUTOPILOT_RECONCILE_WINDOW кандидатов со
+ *    сдвигом по ночам, а платную работу начинают не больше
+ *    HE_AUTOPILOT_RECONCILE_PER_RUN из них (проекты, которым ставить нечего,
+ *    потолок не тратят); дойдя до потолка, проход останавливается, и
+ *    остаток окна ждёт следующей ночи — в логе это видно по тому, что
+ *    действовавших ('acted' плюс 'failed'-строки со счётчиками постановок)
+ *    ровно столько, сколько потолок;
+ *  - дважды за запуск по одному проекту пройти нечем: окно собирается из
+ *    двух чтений по id и склеивается без повторов, а повторный запуск
  *    прохода всё равно ничего не продублирует — дедупы постановок те же.
  *
  * Сбой ЧТЕНИЯ списка бросается наверх (крон скажет громко); сбой по отдельному
@@ -735,7 +856,15 @@ export interface HeAutopilotReconcilePassSummary {
  */
 export async function runHeAutopilotReconcilePass(
   supabase: SupabaseClient,
-  opts: { limit?: number; env?: NodeJS.ProcessEnv } = {},
+  opts: {
+    /** Потолок проектов, начавших работу (по умолчанию HE_AUTOPILOT_RECONCILE_PER_RUN). */
+    limit?: number;
+    /** Размер окна осмотра (по умолчанию HE_AUTOPILOT_RECONCILE_WINDOW). */
+    window?: number;
+    /** «Сейчас» для сдвига окна (мс); по умолчанию Date.now(). */
+    now?: number;
+    env?: NodeJS.ProcessEnv;
+  } = {},
 ): Promise<HeAutopilotReconcilePassSummary> {
   const summary: HeAutopilotReconcilePassSummary = {
     enabled: false,
@@ -749,24 +878,59 @@ export async function runHeAutopilotReconcilePass(
   if (!heAutopilotReconcileEnabled(opts.env ?? process.env)) return summary;
   summary.enabled = true;
 
-  const { data, error } = await supabase
+  const actingCap = Math.max(1, Math.floor(opts.limit ?? HE_AUTOPILOT_RECONCILE_PER_RUN));
+  const windowSize = Math.max(1, Math.floor(opts.window ?? HE_AUTOPILOT_RECONCILE_WINDOW));
+
+  // Сколько кандидатов — нужно только для сдвига окна по кругу.
+  const { count, error: countErr } = await supabase
     .from('he_projects')
-    .select('id, status, market, autopilot')
+    .select('id', { count: 'exact', head: true })
     .eq('autopilot', true)
     .eq('market', 'us')
-    .eq('status', 'researched')
-    .order('updated_at', { ascending: true })
-    .limit(opts.limit ?? HE_AUTOPILOT_RECONCILE_PER_RUN);
-  if (error) throw new Error(`he_projects autopilot reconcile read: ${error.message}`);
+    .eq('status', 'researched');
+  if (countErr) throw new Error(`he_projects autopilot reconcile count: ${countErr.message}`);
+  const total = typeof count === 'number' && count > 0 ? count : 0;
 
-  const projects = ((data ?? []) as Row[]).filter(
+  /** Кусок окна: кандидаты по id, позиции [from, to] включительно. */
+  const readCandidates = async (from: number, to: number): Promise<Row[]> => {
+    const { data, error } = await supabase
+      .from('he_projects')
+      .select('id, status, market, autopilot')
+      .eq('autopilot', true)
+      .eq('market', 'us')
+      .eq('status', 'researched')
+      .order('id', { ascending: true })
+      .range(from, to);
+    if (error) throw new Error(`he_projects autopilot reconcile read: ${error.message}`);
+    return (data ?? []) as Row[];
+  };
+
+  const windowRows: Row[] = [];
+  if (total > 0) {
+    const night = Math.floor((opts.now ?? Date.now()) / RECONCILE_DAY_MS);
+    const start = (night * windowSize) % total;
+    windowRows.push(...await readCandidates(start, start + windowSize - 1));
+    // Окно перешло через конец списка — добираем с начала, но не дальше start:
+    // дальше лежит уже прочитанное.
+    const wrap = Math.min(start, windowSize - windowRows.length);
+    if (wrap > 0) {
+      const seen = new Set(windowRows.map((row) => asString(row.id)));
+      for (const row of await readCandidates(0, wrap - 1)) {
+        if (!seen.has(asString(row.id))) windowRows.push(row);
+      }
+    }
+  }
+
+  const projects = windowRows.filter(
     // Второй гейт — на строке: фильтр запроса и проверка значения не одно и то
     // же (колонка market могла не существовать, флаг мог прийти строкой).
     (row) => asString(row.id).length > 0 && row.autopilot === true && normalizeHeMarket(row.market) === 'us',
   );
-  summary.projects = projects.length;
 
+  /** Проекты, по которым этот запуск ПОСТАВИЛ хоть что-то (в т. ч. до сбоя). */
+  let startedWork = 0;
   for (const project of projects) {
+    if (startedWork >= actingCap) break;
     const projectId = asString(project.id);
     try {
       const result = await reconcileHeAutopilotProject(supabase, {
@@ -781,23 +945,26 @@ export async function runHeAutopilotReconcilePass(
       }
       if (!result.ok) {
         summary.failed += 1;
+        // Сбой посреди обхода вертикалей мог прийти ПОСЛЕ постановок по
+        // предыдущим — они тоже платная работа и тратят потолок.
+        if (enqueuedAny(result.counts)) startedWork += 1;
         summary.rows.push({
           projectId,
           outcome: 'failed',
           pause: result.pause,
+          ...(result.counts ? { counts: result.counts } : {}),
           details: [],
           message: `${result.step}: ${result.error instanceof Error ? result.error.message : String(result.error)}`,
         });
         continue;
       }
-      const acted =
-        result.counts.chainsEnqueued +
-          result.counts.collectsEnqueued +
-          result.counts.templatesEnqueued +
-          result.counts.analysesRequeued >
-        0;
-      if (acted) summary.acted += 1;
-      else summary.idle += 1;
+      const acted = enqueuedAny(result.counts);
+      if (acted) {
+        summary.acted += 1;
+        startedWork += 1;
+      } else {
+        summary.idle += 1;
+      }
       const lettersNote = lettersBudgetNote(result.details);
       summary.rows.push({
         projectId,
@@ -808,6 +975,9 @@ export async function runHeAutopilotReconcilePass(
         ...(lettersNote ? { message: lettersNote } : {}),
       });
     } catch (e) {
+      // Бросок — что успели поставить, неизвестно, и потолок он НЕ тратит:
+      // иначе проект, падающий так каждую ночь, съедал бы место в нём —
+      // ровно то голодание, от которого потолок отделён от окна.
       summary.failed += 1;
       summary.rows.push({
         projectId,
@@ -819,5 +989,6 @@ export async function runHeAutopilotReconcilePass(
     }
   }
 
+  summary.projects = summary.rows.length;
   return summary;
 }

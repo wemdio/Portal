@@ -341,8 +341,11 @@ export async function GET(req: NextRequest) {
    *  - `collected` — СТРОКИ сборки: `stats.collected` долива это
    *    `finalRows.length` (stages/baseCollectRefill.ts, runStats). У market='us'
    *    конструктор разносит один адрес на строку (шаг `split_emails`), поэтому
-   *    у компании с пятью адресами строк пять — компаниями это число не
-   *    является, и карточка «Collected today» печатает его как строки.
+   *    у компании с пятью адресами строк пять, а у компании без найденного
+   *    адреса — одна ПУСТАЯ строка (их часто большинство); туда же входят
+   *    строки, отложенные гейтом релевантности. Ни компаниями, ни адресами это
+   *    число не является — карточка «Collected today» печатает его как строки,
+   *    когда компаний не знает.
    *  - `collected_companies` — КОМПАНИИ, и только записанным числом:
    *    `collect_info.stats.companies_total` баз сегодняшних доливов
    *    (companiesTotalOf). Воронка самого прогона компаний не знает вовсе:
@@ -397,6 +400,45 @@ export async function GET(req: NextRequest) {
   // договорённость, что у `stats.companies` вертикали: «не знаем», и тогда
   // единственное правдивое число дня — строки в `collected`.
   today.collected_companies = companiesKnown ? collectedCompanies : 0;
+
+  /**
+   * ПОМЕТКА СУХОЙ ВЕРТИКАЛИ — отдельным запросом и best-effort, тем же приёмом
+   * и по той же причине, что паузы выше и ниже: `refill_dry_since` появляется
+   * миграцией 20260930_0003, а на установке без неё PostgREST отвечает 42703
+   * на ВЕСЬ `select` — дописать колонку к выборке вертикалей значило бы
+   * положить весь Command Center до применения миграции.
+   *
+   * Зачем: правило сухой вертикали снимает с ночного добора ОДНУ вертикаль, а
+   * состояние добора выше — про проект. Без пометки карточка такой вертикали
+   * печатала «next: daily refill 03:20 UTC» с зелёной точкой, пока шаг 2 того
+   * же проекта писал «Auto-refill is paused for this vertical».
+   *
+   * Дефолт — «пометки нет», и это прочитанный факт, а не выдумка: без колонки
+   * правила нет и у ночного тика. Худший случай — колонка есть, а этот запрос
+   * сорвался: тогда до следующего полла (15 с) карточка покажет добор, который
+   * ночь вертикали не даст. Признак — только штамп, как у шага 2
+   * (`refillPauseNote`, EngStepVerticals): по нему же правило решает, выдавать
+   * ли вертикали слот. Запрос идёт только когда есть включённый конфиг — без
+   * него ночного добора нет вовсе и печатать про вертикаль нечего. Окно
+   * рассинхрона то же, что у шага 2: флаг правила (`HE_VERTICAL_DRY_STOP`)
+   * читает воркер, а не кабинет, и пометки выключенного правила снимает первый
+   * ночной проход проекта с включённым конфигом — до него карточка может
+   * показать паузу, которой той ночью уже не будет.
+   */
+  const dryVerticalIds = new Set<string>();
+  if (verticalIds.length > 0 && configRows.some((c) => c.enabled === true)) {
+    const dryRes = await supabaseAdmin
+      .from('he_verticals')
+      .select('id, refill_dry_since')
+      .in('id', verticalIds)
+      .not('refill_dry_since', 'is', null);
+    if (!dryRes.error) {
+      for (const raw of dryRes.data ?? []) {
+        const row = raw as Record<string, unknown>;
+        if (str(row.refill_dry_since).trim()) dryVerticalIds.add(str(row.id));
+      }
+    }
+  }
 
   const verticals = verticalRows
     .slice()
@@ -472,6 +514,7 @@ export async function GET(req: NextRequest) {
                 measured_at: str(v.actual_measured_at),
               }
             : null,
+        refill_dry: dryVerticalIds.has(vid),
       };
     });
 

@@ -17,7 +17,7 @@ const MIN_MAIN_TEXT_TO_SKIP_ABOUT = Number(
   process.env.WEBSITE_ENRICHMENT_MIN_MAIN_TEXT_TO_SKIP_ABOUT ?? '220',
 );
 
-import { getNonPriorityProxyDispatcher, getProxyDispatcher } from '@/lib/enrich/proxyPool';
+import { getNonPriorityProxyDispatcher, getProxyDispatcher, getProxyGroups } from '@/lib/enrich/proxyPool';
 
 type Dispatcher = import('undici').Dispatcher;
 
@@ -35,6 +35,57 @@ const BROWSER_USER_AGENT =
  * (enrich/emailScraper.ts, локаль джобы конструктора).
  */
 const DEFAULT_ACCEPT_LANGUAGE = 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7';
+
+/**
+ * Accept-Language английского сайта — для тех, кто передаёт `acceptLanguage`
+ * явно. Сам парсер эту строку не выбирает никогда: дефолт выше прежний.
+ *
+ * Та же строка, что у почтового скрапера при locale='en'
+ * (EN_ACCEPT_LANGUAGE в enrich/emailScraper.ts) и у чтения сайта клиента в
+ * английском кабинете (ENG_WEBSITE_ROUTE в hypothesisEngine/stages/io.ts). У тех
+ * двух пока свои копии литерала; читатель этой константы — шаг описаний
+ * конструктора при locale='en' (tools/processingSteps.ts, stepEnrich), чтобы
+ * одна EN-джоба читала сайт одним языком на обоих шагах.
+ */
+export const WEBSITE_ACCEPT_LANGUAGE_EN = 'en-US,en';
+
+/**
+ * Язык СЛУЖЕБНОГО текста, который fetchAndExtract вставляет в результат сам:
+ * подписи склейки «о компании + главная» и заглушка «HTML есть, а текста нет».
+ *
+ * Дефолт — русский, байт-в-байт прежние строки. Его читают не только люди:
+ * siteProfile движка ищет в тексте сайта оборот «требует JavaScript», чтобы
+ * отличить тонкий сайт, — поэтому русские строки не меняются и английские им
+ * не замена, а вариант по запросу вызывающего.
+ *
+ * Английский вариант нужен тому, чей результат уезжает англоязычному клиенту
+ * как данные: колонка описания EN-джобы конструктора (stepEnrich) доезжает до
+ * превью базы английского кабинета, и русская подпись там — русский текст у
+ * ENG-клиента.
+ */
+export type WebsiteTextLanguage = 'ru' | 'en';
+
+const EXTRACT_TEXT_LABELS: Record<WebsiteTextLanguage, { about: string; home: string; noText: string }> = {
+  ru: {
+    about: '--- О компании ---',
+    home: '--- Главная ---',
+    noText: 'Страница доступна, но требует JavaScript или блокирует парсер.',
+  },
+  en: {
+    about: '--- About ---',
+    home: '--- Home page ---',
+    noText: 'The page responded, but it needs JavaScript or blocks the parser.',
+  },
+};
+
+/**
+ * Заглушка английского варианта: «страница ответила, текста нет». Экспорт — для
+ * вызывающего, которому такая строка не нужна в данных (stepEnrich при
+ * locale='en' оставляет ячейку описания пустой). Сравнивать с ней можно
+ * напрямую: sanitizeText эту строку не меняет, а MAX_TEXT_LENGTH она не
+ * достигает.
+ */
+export const WEBSITE_NO_TEXT_STUB_EN = EXTRACT_TEXT_LABELS.en.noText;
 
 /**
  * Порядок групп прокси в лестнице попыток fetchHtmlWithRetry.
@@ -840,6 +891,71 @@ async function fetchHtml(
   }
 }
 
+/**
+ * Перевёрнутая лестница ('non-priority-first') без «другой» ноды — СТРОКА В ЛОГ.
+ *
+ * Что происходит без неё. Первая попытка тогда идёт обычным выбором пула с
+ * preferPriority=false (proxyPool.pickProxyUrl): нода из списка
+ * YANDEXMAPS_PROXY_URLS или legacy PROXY_URLS, где перечислены и RU-ноды; если
+ * этот список пуст — RU-группа; если живой ноды не нашлось — напрямую. Вторая
+ * попытка — RU-группа. То есть лестница схлопывается почти в сегодняшний
+ * маршрут, а вызывающий об этом не узнаёт: результат выглядит как обычное
+ * чтение сайта. Причин две, и строка их различает, потому что лечатся они
+ * по-разному:
+ *  - группы вне приоритетной НЕТ (в YANDEXMAPS_PROXY_URLS нет ни одной ноды,
+ *    которой нет в YANDEXMAPS_PROXY_URLS_PRIORITY) — это конфигурация, и
+ *    правка порядка на этом хосте не делает ничего;
+ *  - группа есть, но все её ноды сейчас выбыли (proxyPool, «Выбывание нод»)
+ *    или агент ноды не создался — это состояние, оно проходит само.
+ *
+ * Не чаще раза в ROUTE_FALLBACK_WARN_EVERY_MS на процесс, с числом
+ * схлопнувшихся запросов с прошлой такой строки: один сайт — это до десятка
+ * запросов цепочки fetchAndExtract, и строка на каждый утопила бы лог. Счётчик
+ * живёт в памяти процесса и обнуляется рестартом — это строка лога, а не учёт.
+ * Никогда не бросает: диагностика не имеет права сорвать чтение сайта (в том
+ * числе там, где пул подменён и getProxyGroups нет).
+ */
+const ROUTE_FALLBACK_WARN_EVERY_MS = 10 * 60_000;
+let routeFallbackWarnedAt = 0;
+let routeFallbackSuppressed = 0;
+
+function warnNonPriorityRouteMissing(url: string): void {
+  try {
+    const now = Date.now();
+    if (now - routeFallbackWarnedAt < ROUTE_FALLBACK_WARN_EVERY_MS) {
+      routeFallbackSuppressed += 1;
+      return;
+    }
+    const suppressed = routeFallbackSuppressed;
+    routeFallbackWarnedAt = now;
+    routeFallbackSuppressed = 0;
+    let reason = 'нет живой ноды вне приоритетной группы';
+    try {
+      const { priority, fallback } = getProxyGroups();
+      reason = fallback.some((u) => !priority.includes(u))
+        ? 'все ноды вне приоритетной группы сейчас выбыли или их агент не создался'
+        : 'группы вне приоритетной нет: в YANDEXMAPS_PROXY_URLS нет нод сверх YANDEXMAPS_PROXY_URLS_PRIORITY';
+    } catch {
+      // Пул недоступен или подменён — причина остаётся общей.
+    }
+    let host = url;
+    try {
+      host = new URL(url).hostname;
+    } catch {
+      // Невалидный адрес — печатаем как есть.
+    }
+    console.warn(
+      `[fetchHtml] порядок non-priority-first не выполнен (${host}): ${reason}. ` +
+        'Первая попытка идёт обычным выбором пула (YANDEXMAPS_PROXY_URLS, при пустом списке — RU-группа, ' +
+        'без живой ноды — напрямую), то есть почти прежним маршрутом' +
+        (suppressed > 0 ? `; с прошлой такой строки — ещё ${suppressed} запросов` : '') +
+        '. Следующая такая строка — не раньше чем через 10 мин.',
+    );
+  } catch {
+    // Строка лога не должна сорвать запрос.
+  }
+}
+
 export async function fetchHtmlWithRetry(
   url: string,
   options?: {
@@ -875,11 +991,12 @@ export async function fetchHtmlWithRetry(
     // Строго «не RU» умеет только pickNonPriorityProxyUrl: preferPriority=false
     // берёт YANDEXMAPS_PROXY_URLS, где приоритетные ноды тоже перечислены.
     // Такой группы нет (пусто или совпадает с приоритетной) — остаёмся на
-    // обычном выборе, то есть на сегодняшнем маршруте.
-    const otherNode =
-      nonPriorityFirst && attempt === 0 && options?.preferPriority === undefined
-        ? await getNonPriorityProxyDispatcher()
-        : undefined;
+    // обычном выборе, то есть почти на сегодняшнем маршруте, и говорим это
+    // строкой в лог (warnNonPriorityRouteMissing): молча схлопнувшаяся
+    // лестница неотличима от работающей.
+    const wantsOtherNode = nonPriorityFirst && attempt === 0 && options?.preferPriority === undefined;
+    const otherNode = wantsOtherNode ? await getNonPriorityProxyDispatcher() : undefined;
+    if (wantsOtherNode && !otherNode) warnNonPriorityRouteMissing(url);
     const result = await fetchHtml(url, {
       ...options,
       preferPriority,
@@ -1185,9 +1302,15 @@ export async function fetchAndExtract(
     acceptLanguage?: string;
     /** Порядок групп прокси; не передан — 'priority-first', сегодняшняя лестница. */
     routeOrder?: WebsiteFetchRouteOrder;
+    /**
+     * Язык служебного текста результата (подписи склейки, заглушка «текста
+     * нет»); не передан — русский, прежние строки. См. WebsiteTextLanguage.
+     */
+    textLanguage?: WebsiteTextLanguage;
   },
 ): Promise<string> {
   const url = normalizeUrl(rawUrl);
+  const labels = EXTRACT_TEXT_LABELS[options?.textLanguage === 'en' ? 'en' : 'ru'];
   const timeout = options?.timeout ?? FETCH_TIMEOUT_MS;
   const signal = options?.signal;
   // Язык и порядок групп получает КАЖДЫЙ запрос цепочки: главная, www,
@@ -1280,13 +1403,13 @@ export async function fetchAndExtract(
   let combined: string;
   if (aboutText.length > 0 && mainText.length > 0) {
     // About page content has priority — placed first so it doesn't get truncated
-    combined = `--- О компании ---\n${aboutText}\n\n--- Главная ---\n${mainText}`;
+    combined = `${labels.about}\n${aboutText}\n\n${labels.home}\n${mainText}`;
   } else if (aboutText.length > 0) {
     combined = aboutText;
   } else if (mainText.length > 0) {
     combined = mainText;
   } else if (hadAnyHtml) {
-    combined = 'Страница доступна, но требует JavaScript или блокирует парсер.';
+    combined = labels.noText;
   } else {
     throw new WebsiteNoHtmlError();
   }

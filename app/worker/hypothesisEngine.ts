@@ -35,9 +35,10 @@
  * ОПЛАТУ, идут третьим клиентом без сигнала (stageDb.heCheckpointSupabase,
  * см. paidCheckpointDb в stages/baseCollect.ts) — оба срока у них те же, а
  * сигнала нет, чтобы их отказ не превращал оплаченную работу в неоплаченную.
- * Сегодня таких записей ЧЕТЫРЕ, и числа здесь нет намеренно: список ведёт один
- * докблок paidCheckpointDb, а копия числа в шапке воркера уже разъезжалась с
- * ним (две записи стало четыре, когда освобождение дошло до ветки долива).
+ * Числа таких записей здесь нет намеренно: полный список ведёт один докблок
+ * paidCheckpointDb, а копия числа в шапке воркера с ним уже разъезжалась (две
+ * записи стало четыре, когда освобождение дошло до ветки долива, потом список
+ * вырос снова — план, проба среза, стор плана, расширение, конструктор).
  * Поэтому вставшее тело жирной строки he_bases.data кончается само за
  * HE_STAGE_DB_TIMEOUT_MS, а abort сторожа доходит до транспорта — аварийный выход
  * процесса перестаёт быть единственным способом раскрутить такое чтение. Общий
@@ -59,10 +60,12 @@
  * и молчащий PostgREST держал бы всю очередь при зелёном healthcheck.
  */
 
+import fs from 'node:fs';
 import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLoop, sleep, startWorkerHeartbeat } from './_shared';
 import { supabaseAdminFetchWithRetry } from '@/lib/supabaseAdmin';
 import { runHeStage } from '@/lib/hypothesisEngine/stages';
 import { getHeActiveJobSignal, heLlmFailureOf, heLlmMaxAttemptMs, setHeActiveJob } from '@/lib/hypothesisEngine/llm';
+import type { HeLlmSpend } from '@/lib/hypothesisEngine/llm';
 // Клиент БД СТАДИЙ: срок на заголовки И на паузу между кусками тела, обрыв по
 // сигналу джобы. Отдельный от `db` сознательно — см. комментарий у stageDb ниже.
 import { createHeStageSupabase, isHeStageDbInterruption, HE_STAGE_DB_TIMEOUT_MS } from '@/lib/hypothesisEngine/stageDb';
@@ -211,10 +214,21 @@ const INTERRUPTION_RETRY_MAX_MS = 120_000;
  * 429 на 18-м) это 18 × 17 ≈ 306 оплаченных вызовов вместо 51.
  *
  * Ценность стоянки сохранена целиком: повтор идёт НЕ раньше времени, которое
- * назвал провайдер, а не через 5 секунд. Терпение джобы — до 3 × потолка
- * (30 минут) вместо 10 секунд у HEAD, а потолок платной работы — те же
- * MAX_ATTEMPTS полных прогонов, что и у любого другого отказа. Отдельный
- * счётчик стоянок для этого не нужен: attempts и есть предел, и он один.
+ * назвал провайдер, а не через 5 секунд. Пауза ставится только перед повтором,
+ * а на последней попытке повтора нет (finalFail), поэтому пауз не больше
+ * MAX_ATTEMPTS − 1 = 2 по ≤ RATE_LIMIT_PAUSE_MAX_MS: терпение джобы — до
+ * ~20 минут (плюс ожидания внутри вызова) вместо 10 секунд у HEAD, а потолок
+ * платной работы — те же MAX_ATTEMPTS полных прогонов, что и у любого другого
+ * отказа. Отдельный счётчик стоянок для этого не нужен: attempts и есть
+ * предел, и он один.
+ *
+ * MAX_ATTEMPTS полных прогонов — ПОТОЛОК, а у поэлементных стадий он ниже.
+ * evidence и brand_cloud на market='us' пишут обработанный префикс в
+ * he_jobs.result своей строки (stages/brandCloud.ts, writeHeItemCheckpoint), и
+ * повтор после 429 доплачивает только необработанный хвост: на примере выше
+ * 17 вердиктов оплачиваются один раз, а не 51. На RU 429 внутри этих стадий до
+ * воркера не доходит вовсе — кандидат или бренд пропускается и стадия идёт
+ * дальше, как до волны 3 (heRunStoppingLlmFailure).
  */
 const RATE_LIMIT_PAUSE_DEFAULT_MS = 60_000;
 /** Потолок одной паузы: дольше — уже не «подожди», а «зайди позже». */
@@ -235,8 +249,9 @@ const RATE_LIMIT_PAUSE_MAX_MS = 10 * 60_000;
  * в гонке с таймером — так он завершается даже там, где сигнал не проброшен.
  * По истечении срока НЕ бросаем наверх и НЕ выходим из процесса: и то и другое
  * отправило бы оплаченную стадию на повтор (failJob / resetStuckJobs). Пишем
- * громкую строку и отдаём слот следующей джобе; своя строка может остаться
- * 'running' до ближайшего рестарта, зато остальные проекты идут дальше.
+ * громкую строку и отдаём слот следующей джобе; своя строка остаётся
+ * 'running', и её вместе с готовым результатом подбирает сборщик брошенных
+ * строк (collectStrandedJobs), зато остальные проекты идут дальше.
  */
 const POST_STAGE_DEADLINE_MS = 2 * 60_000;
 
@@ -368,9 +383,16 @@ function heJobInterruptionKind(error: unknown): string {
  * идемпотентна и адресована по id, внутри финализации она уже повторена с
  * бэкоффом (DONE_WRITE_ATTEMPTS), поэтому следующий прогон стадии предъявит тот
  * же результат той же БД — и оплатит стадию заново. Джоба уходит в 'failed' с
- * причиной сразу: «оплачено, но не сохранено» — это работа для человека, а не
- * для трёх повторов. Имя таблицы в тексте намеренно: кабинет сворачивает
- * причину в 'internal' (clientErrors.classifyHeClientError).
+ * причиной: «оплачено, но не сохранено» — это работа для человека, а не для
+ * трёх повторов. Имя таблицы в тексте намеренно: кабинет сворачивает причину в
+ * 'internal' (clientErrors.classifyHeClientError).
+ *
+ * Сразу — только когда done-запись отвергнута НЕ блипом (isTransientDbError
+ * ложен: размер, содержимое, права). Блип и истёкший срок участка терминальным
+ * отказом сразу не становятся: строка с готовым результатом уходит сборщику
+ * (collectStrandedJobs), и тот доставляет ТОТ ЖЕ результат, когда БД
+ * вернётся; этим классом он закрывает строку, лишь когда доставка отвергнута
+ * не блипом или исчерпала STRANDED_DELIVERY_ATTEMPTS при отвечающей БД.
  */
 class HeJobResultWriteError extends Error {
   /** Дискриминант: instanceof ложен, если в бандле окажется две копии модуля. */
@@ -402,8 +424,11 @@ function isHeJobTerminal(error: unknown): boolean {
  * модели.
  *
  * Транзиентный отказ поиска сюда НЕ попадает (kind === 'transient': 429, 5xx,
- * таймаут, обрыв сети) — ему повторы как раз нужны, он остаётся обычным фейлом
- * со своими MAX_ATTEMPTS.
+ * 408/425, таймаут, обрыв сети, а также отказ ОДНОМУ запросу — 400/404/413/422
+ * и пустой запрос, см. SerperFailureKind в lib/search/serperClient.ts): он не
+ * повторяется на каждом следующем запросе, поэтому остаётся обычным фейлом со
+ * своими MAX_ATTEMPTS, а стадия падает на нём, только если поиск не обслужил
+ * ни одного запроса (stages/searchIo.ts).
  */
 function heSearchRefusalOf(error: unknown): HeSearchProviderError | null {
   for (let e: unknown = error, depth = 0; e && depth < 4; depth += 1) {
@@ -537,10 +562,12 @@ function withStageActivity<T extends object>(client: T, onActivity: () => void):
         return (...args: unknown[]) => {
           onActivity();
           const result = method.apply(target, args);
-          // schema() отдаёт клиент, а не билдер: у него нет своего завершения,
-          // и оборачивать его как запрос нечем — его from() пройдёт этим же
-          // прокси на следующем обращении.
-          if (prop === 'schema' || result === null || typeof result !== 'object') return result;
+          if (result === null || typeof result !== 'object') return result;
+          // schema() отдаёт КЛИЕНТ, а не билдер: своего завершения у него нет,
+          // зато его from()/rpc() — запросы. Оборачиваем его этим же прокси
+          // (так же, как withAbortSignal ниже), иначе `schema(x).from(t)`
+          // уходил бы мимо прокси и сторож не видел бы ни одного такого запроса.
+          if (prop === 'schema') return withStageActivity(result as object, onActivity);
           return touchOnSettle(result as object, onActivity);
         };
       }
@@ -661,10 +688,10 @@ function withAbortSignal<T extends object>(client: T, signal: AbortSignal): T {
  * логе: повтор оплаченной стадии здесь недопустим, а необработанный поздний
  * отказ уронил бы процесс (unhandled rejection) и сделал ровно это.
  *
- * Возвращает, УЛОЖИЛСЯ ли участок в срок. Читателей два, и обоим нужно знать
- * именно это: финализация — чтобы отдать брошенную строку сборщику
- * (markJobStranded), а сам сборщик — чтобы не вычёркивать строку, запись
- * которой не доехала.
+ * Возвращает, УЛОЖИЛСЯ ли участок в срок. Читатели — финализация (отдать
+ * брошенную строку сборщику, markJobStranded) и failJob (его итог читают
+ * pollOnce, resetStuckJobs и сам сборщик: строку, запись которой не доехала,
+ * из списка не вычёркивают).
  */
 async function withPostStageDeadline(
   job: HeJob,
@@ -710,54 +737,274 @@ async function withPostStageDeadline(
 }
 
 /**
- * Строки, чью финализацию ЭТОТ процесс бросил на полпути: истёк срок участка
- * после стадии или не прочитался статус джобы. Стадия при этом УЖЕ оплачена.
+ * Готовый результат ОПЛАЧЕННОЙ стадии, который ещё не лёг в he_jobs, — и
+ * бухгалтерия его финализации.
+ *
+ * projectBooked — прибавлен ли расход прогона к he_projects. Там накопитель —
+ * инкремент (accumulateProjectUsage), второй раз прибавлять нельзя; he_jobs
+ * пишется абсолютным значением от снимка строки, и его повтор безопасен.
+ * Флаг ставится только по ПОДТВЕРЖДЁННОЙ записи. Запрос, оборванный сроком
+ * участка, мог всё же лечь в БД — тогда сборщик прибавит расход к he_projects
+ * второй раз; это остаточный случай, и он завышает воронку, а не теряет её.
+ */
+interface HeStrandedDelivery {
+  result: unknown;
+  tokensUsed: number;
+  costUsd: number;
+  projectBooked: boolean;
+}
+
+/** Брошенная строка: почему, чем её закрыть и что в неё доставить. */
+interface HeStrandedJob {
+  job: HeJob;
+  reason: string;
+  /**
+   * Чем закрыть строку через failJob, когда доставлять нечего: ИСХОДНЫЙ отказ
+   * (прерывание остаётся прерыванием, отказ провайдера — отказом), а для
+   * брошенной финализации — HeJobResultWriteError.
+   */
+  failure: unknown;
+  /** Результат завершённой стадии: сборщик пишет его done-строкой, а не 'failed'. */
+  delivery: HeStrandedDelivery | null;
+  /** Попытки доставки, при которых статус ПРОЧИТАЛСЯ, а done-запись не легла. */
+  deliveryTries: number;
+}
+
+/**
+ * Строки, запись которых этот воркер бросил на полпути (этот процесс или
+ * прошлый процесс того же контейнера, см. ниже), — и стадия при этом либо уже
+ * оплачена и завершена (истёк срок участка после стадии, не прочитался статус,
+ * done-запись отвергнута блипом), либо закончилась отказом, запись которого не
+ * легла (failJob вернул false: pollOnce, а также resetStuckJobs — для строк,
+ * которые он и так закрывает).
  *
  * Зачем отдельный список. Единственным сборщиком застрявших 'running' был
  * resetStuckJobs, а он отрабатывает только на старте процесса — брошенная
  * строка висела до ближайшего рестарта (часы), и вместе с ней стоял проект.
  * Вернуть её в pending, как это делает resetStuckJobs, здесь НЕЛЬЗЯ: рестарт
  * обрывает стадию посередине (работа не сделана), а тут стадия отработала и
- * оплачена — повтор оплатил бы её заново. Поэтому сборщик закрывает строку
- * терминально, тем же классом, что и неудавшаяся done-запись.
+ * оплачена — повтор оплатил бы её заново. Поэтому сборщик ДОСТАВЛЯЕТ готовый
+ * результат той же done-строкой, что и финализация (deliverDoneRow), и только
+ * если доставка отвергнута не блипом или исчерпала STRANDED_DELIVERY_ATTEMPTS
+ * при отвечающей БД, закрывает строку терминально (HeJobResultWriteError).
+ * Строку без результата он закрывает её исходным отказом.
  *
  * Список свой, а не «все 'running' в таблице»: воркер single-flight, но
  * заметать чужие строки по одному лишь статусу — значит убить джобу соседнего
- * процесса, если он когда-нибудь появится. Пережить рестарт списку не нужно:
- * то, что он не успел собрать, подберёт resetStuckJobs.
+ * процесса, если он когда-нибудь появится.
+ *
+ * Список переживает выход процесса: он дублируется в файл STRANDED_PATH и
+ * читается на старте ДО resetStuckJobs, а тот строки из списка не трогает —
+ * иначе рестарт закрывал бы оплаченную и завершённую стадию бесплатным
+ * прерыванием 'restart', то есть оплачивал бы её заново. Граница — срок жизни
+ * файла (см. STRANDED_PATH): пересоздание контейнера, пока БД ещё лежит,
+ * список теряет, и такую строку resetStuckJobs снова закроет бесплатным
+ * прерыванием — стадия будет оплачена повторно. Перед остановкой процесса
+ * сборщик делает последний проход (main).
  */
-const strandedJobs = new Map<string, { job: HeJob; reason: string }>();
+const strandedJobs = new Map<string, HeStrandedJob>();
+
+/**
+ * Сколько раз сборщик доставляет результат при ОТВЕЧАЮЩЕЙ на чтение БД. Тики,
+ * где не прочитался даже статус (БД лежит), не считаются: пока БД недоступна,
+ * ждать дешевле, чем выбросить оплаченный результат. Каждая доставка — до
+ * DONE_WRITE_ATTEMPTS запросов внутри POST_STAGE_DEADLINE_MS.
+ */
+const STRANDED_DELIVERY_ATTEMPTS = 5;
+
+/**
+ * Файл списка брошенных строк — рядом с heartbeat и с тем же сроком жизни:
+ * файловая система контейнера переживает выход процесса и `docker restart`
+ * (autoheal, аварийный выход сторожа), но НЕ пересоздание контейнера при
+ * деплое — volume у воркера нет (docker-compose.prod.yml).
+ */
+const STRANDED_PATH = process.env.HE_WORKER_STRANDED_PATH ?? '/tmp/hypothesis-engine-stranded.json';
+
+/**
+ * Поля отказа, по которым failJob решает судьбу джобы. Все они читаются по
+ * ДИСКРИМИНАНТУ, а не по классу (isHeJobInterruption, isHeJobTerminal,
+ * heLlmFailureOf, heSearchRefusalOf), поэтому отказ, восстановленный из файла
+ * простым Error с этими полями, классифицируется так же, как исходный.
+ */
+const FAILURE_FIELDS = [
+  'heJobInterruption',
+  'heJobTerminal',
+  'heLlmFailure',
+  'heSearchProvider',
+  'kind',
+  'status',
+  'retryAfterMs',
+  'httpStatus',
+] as const;
+
+function serializeFailure(error: unknown, depth = 0): Record<string, unknown> {
+  const record = (error !== null && typeof error === 'object' ? error : {}) as Record<string, unknown>;
+  const out: Record<string, unknown> = {
+    name: error instanceof Error ? error.name : 'Error',
+    message: error instanceof Error ? error.message : String(error),
+  };
+  for (const field of FAILURE_FIELDS) {
+    const value = record[field];
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') out[field] = value;
+  }
+  // Цепочку причин — на ту же глубину, что читают heLlmFailureOf/heSearchRefusalOf.
+  if (depth < 3 && record.cause) out.cause = serializeFailure(record.cause, depth + 1);
+  return out;
+}
+
+function reviveFailure(raw: unknown): Error {
+  const record = (raw !== null && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const error = new Error(typeof record.message === 'string' ? record.message : 'he_jobs stranded job') as Error &
+    Record<string, unknown>;
+  if (typeof record.name === 'string') error.name = record.name;
+  for (const field of FAILURE_FIELDS) if (field in record) error[field] = record[field];
+  if (record.cause) error.cause = reviveFailure(record.cause);
+  return error;
+}
+
+/** Записать список в файл (атомарно: tmp + rename). Сбой — громкая строка, не исключение. */
+function persistStrandedJobs(): void {
+  try {
+    if (!strandedJobs.size) {
+      fs.rmSync(STRANDED_PATH, { force: true });
+      return;
+    }
+    const entries = [...strandedJobs.values()].map((entry) => ({
+      job: entry.job,
+      reason: entry.reason,
+      failure: serializeFailure(entry.failure),
+      delivery: entry.delivery,
+      deliveryTries: entry.deliveryTries,
+    }));
+    const tmp = `${STRANDED_PATH}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(entries));
+    fs.renameSync(tmp, STRANDED_PATH);
+  } catch (e) {
+    log(
+      'error',
+      `Список брошенных строк не записан в ${STRANDED_PATH}: ${e instanceof Error ? e.message : String(e)} — `
+        + 'после рестарта процесса его строки закроет resetStuckJobs бесплатным прерыванием',
+    );
+  }
+}
+
+/** Прочитать список, оставленный прошлым процессом этого контейнера. */
+function loadStrandedJobs(): void {
+  let text: string;
+  try {
+    text = fs.readFileSync(STRANDED_PATH, 'utf8');
+  } catch (e) {
+    if ((e as { code?: unknown }).code !== 'ENOENT') {
+      log('error', `Список брошенных строк не прочитан из ${STRANDED_PATH}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    return;
+  }
+  try {
+    const entries: unknown = JSON.parse(text);
+    if (!Array.isArray(entries)) throw new Error('ожидался массив');
+    for (const raw of entries) {
+      const entry = (raw ?? {}) as Record<string, unknown>;
+      const job = entry.job as HeJob | undefined;
+      if (!job || typeof job.id !== 'string') continue;
+      const delivery = entry.delivery as HeStrandedDelivery | null | undefined;
+      strandedJobs.set(job.id, {
+        job,
+        reason: typeof entry.reason === 'string' ? entry.reason : 'restored after restart',
+        failure: reviveFailure(entry.failure),
+        delivery:
+          delivery && typeof delivery === 'object'
+            ? {
+                result: delivery.result,
+                tokensUsed: Number(delivery.tokensUsed) || 0,
+                costUsd: Number(delivery.costUsd) || 0,
+                projectBooked: delivery.projectBooked === true,
+              }
+            : null,
+        deliveryTries: Number(entry.deliveryTries) || 0,
+      });
+    }
+    if (strandedJobs.size) {
+      log('info', `Восстановлено брошенных строк из ${STRANDED_PATH}: ${strandedJobs.size} — их закроет сборщик, не resetStuckJobs`);
+    }
+  } catch (e) {
+    log('error', `Список брошенных строк в ${STRANDED_PATH} не разобрался: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
 
 /** Пометить строку брошенной. Первая причина важнее: с неё всё началось. */
-function markJobStranded(job: HeJob, reason: string): void {
-  if (!strandedJobs.has(job.id)) strandedJobs.set(job.id, { job, reason });
+function markJobStranded(
+  job: HeJob,
+  reason: string,
+  close: { failure: unknown; delivery?: HeStrandedDelivery | null },
+): void {
+  if (strandedJobs.has(job.id)) return;
+  strandedJobs.set(job.id, { job, reason, failure: close.failure, delivery: close.delivery ?? null, deliveryTries: 0 });
+  persistStrandedJobs();
+}
+
+function forgetStrandedJob(id: string): void {
+  if (strandedJobs.delete(id)) persistStrandedJobs();
 }
 
 /**
- * Закрыть брошенные строки. Зовётся каждым тиком поллера, пустой список стоит
- * одну проверку.
+ * Доставить или закрыть брошенные строки. Зовётся каждым тиком поллера (пустой
+ * список стоит одну проверку) и последний раз перед остановкой процесса.
  *
  * Статус перечитываем: срок участка мог истечь УЖЕ ПОСЛЕ done-записи (на
  * дочейне или на постановке followups), и тогда строка честно 'done' —
- * перезаписать её отказом значило бы стереть результат оплаченной стадии.
- * Терминальной пометки не переживает только сама запись: не удалась — строка
- * остаётся в списке до следующего тика.
+ * перезаписать её значило бы стереть результат оплаченной стадии. Строка не в
+ * 'running' (done, отменена, отложена, удалена) из списка просто уходит.
+ * Не удалась сама запись — строка остаётся в списке до следующего тика.
  */
 async function collectStrandedJobs(): Promise<void> {
   if (!strandedJobs.size) return;
-  for (const [id, { job, reason }] of [...strandedJobs]) {
+  for (const [id, entry] of [...strandedJobs]) {
+    const { job } = entry;
     try {
       const { data, error } = await db.from('he_jobs').select('status').eq('id', id).maybeSingle();
       // БД ещё не вернулась — не гадаем о статусе, попробуем на следующем тике.
       if (error) continue;
       const status = (data as { status: string } | null)?.status;
       if (status !== 'running') {
-        strandedJobs.delete(id);
-        log('info', `Job ${id} (${job.stage}) брошенная финализация: строка уже '${status ?? 'удалена'}' — собирать нечего`);
+        forgetStrandedJob(id);
+        log('info', `Job ${id} (${job.stage}) брошенная строка: уже '${status ?? 'удалена'}' — собирать нечего`);
         continue;
       }
-      const written = await failJob(job, new HeJobResultWriteError(`he_jobs finalization abandoned (${reason})`));
-      if (written) strandedJobs.delete(id);
+      const delivery = entry.delivery;
+      if (delivery) {
+        entry.deliveryTries += 1;
+        // Текст уходит в he_jobs.error при терминальном закрытии — английский,
+        // как и прочие причины этого класса.
+        let outcome = { kind: 'retry', message: `post-stage deadline ${POST_STAGE_DEADLINE_MS}ms expired` } as HeDoneWriteOutcome;
+        await withPostStageDeadline(job, 'stranded delivery', async (client, signal) => {
+          outcome = await deliverDoneRow(client, signal, job, delivery);
+        });
+        if (outcome.kind === 'delivered') {
+          forgetStrandedJob(id);
+          log(
+            'info',
+            `Job ${id} (${job.stage}) брошенный результат доставлен сборщиком (попытка ${entry.deliveryTries}) — `
+              + 'оплаченная стадия не повторяется',
+          );
+          continue;
+        }
+        if (outcome.kind === 'retry' && entry.deliveryTries < STRANDED_DELIVERY_ATTEMPTS) {
+          persistStrandedJobs();
+          log(
+            'error',
+            `Job ${id} (${job.stage}) брошенный результат не доставлен (попытка `
+              + `${entry.deliveryTries}/${STRANDED_DELIVERY_ATTEMPTS}), повторим на следующем тике: ${outcome.message}`,
+          );
+          continue;
+        }
+        // Запись отвергнута не блипом либо попытки при отвечающей БД кончились:
+        // результат не сохранить, строку закрывает терминальный класс.
+        entry.failure = new HeJobResultWriteError(`he_jobs finalization abandoned (${entry.reason}): ${outcome.message}`);
+        entry.delivery = null;
+        persistStrandedJobs();
+      }
+      const written = await failJob(job, entry.failure);
+      if (written) forgetStrandedJob(id);
     } catch (e) {
       log(
         'error',
@@ -769,12 +1016,18 @@ async function collectStrandedJobs(): Promise<void> {
 
 /**
  * Записать расход прогона, который НЕ закончился done-апдейтом: прерванный
- * сторожем и тот, чей результат не удалось сохранить.
+ * сторожем, упавший (стадия бросила исключение — расход тогда знает только
+ * канал активной джобы, llm.ts onSpend) и тот, чей результат не удалось
+ * сохранить.
  *
- * Вызовы модели в обоих случаях уже оплачены, и невидимым этот расход быть не
- * должен: воронка себестоимости (he_projects) занижалась ровно на те деньги,
+ * Вызовы модели во всех этих случаях уже оплачены, и невидимым этот расход быть
+ * не должен: воронка себестоимости (he_projects) занижалась ровно на те деньги,
  * которые потом тратились второй раз. Своих ошибок наружу не бросает — они
  * логируются: решение о судьбе джобы принимает вызывающий.
+ *
+ * booking — бухгалтерия финализации (HeStrandedDelivery): если расход уже
+ * прибавлен к he_projects, второй раз не прибавляем, а подтверждённую запись
+ * отмечаем в нём.
  */
 async function recordStageSpend(
   client: HeWorkerDb,
@@ -782,6 +1035,7 @@ async function recordStageSpend(
   tokensUsed: number,
   costUsd: number,
   why: string,
+  booking?: { projectBooked: boolean },
 ): Promise<void> {
   if (!tokensUsed && !costUsd) return;
   const { error } = await client
@@ -795,7 +1049,9 @@ async function recordStageSpend(
   if (error) {
     log('error', `Job ${job.id} (${job.stage}) расход прогона не записан в he_jobs (${why}): ${error.message}`);
   }
-  const funnelOk = await accumulateProjectUsage(client, job.project_id, tokensUsed, costUsd);
+  const funnelOk = booking?.projectBooked === true
+    || await accumulateProjectUsage(client, job.project_id, tokensUsed, costUsd);
+  if (booking && funnelOk) booking.projectBooked = true;
   const spend = `+${tokensUsed} tok, $${costUsd.toFixed(6)}`;
   if (!error && funnelOk) {
     log('info', `Job ${job.id} (${job.stage}) расход прогона учтён (${why}): ${spend}`);
@@ -864,7 +1120,7 @@ async function resetStuckJobs() {
   // отказ — нет: повторы его не вылечат.
   let rows: HeJob[] = [];
   for (let attempt = 1; attempt <= STUCK_READ_ATTEMPTS; attempt += 1) {
-    const { data, error } = await db
+    const { data, error, status } = await db
       .from('he_jobs')
       .select('*')
       .eq('status', 'running');
@@ -872,7 +1128,7 @@ async function resetStuckJobs() {
       rows = (data ?? []) as HeJob[];
       break;
     }
-    const retry = attempt < STUCK_READ_ATTEMPTS && isTransientDbError(error);
+    const retry = attempt < STUCK_READ_ATTEMPTS && isTransientDbError(error, status);
     log(
       'error',
       `Stuck running jobs could not be read (attempt ${attempt}/${STUCK_READ_ATTEMPTS})`
@@ -880,6 +1136,19 @@ async function resetStuckJobs() {
     );
     if (!retry) return;
     await sleep(STUCK_READ_RETRY_BASE_MS * attempt);
+  }
+  // Строки из списка брошенных (прочитан из файла до этого вызова, см. main) —
+  // НЕ прерывание: их стадия завершилась и оплачена либо их отказ уже
+  // классифицирован. Бесплатный 'restart' оплатил бы такую стадию заново; их
+  // доставляет или закрывает исходным отказом сборщик (collectStrandedJobs).
+  const stranded = rows.filter((row) => strandedJobs.has(row.id));
+  if (stranded.length) {
+    log(
+      'info',
+      `Stuck running jobs left to the stranded collector (их стадия уже оплачена или отказ уже известен): `
+        + stranded.map((row) => `${row.id} (${row.stage})`).join(', '),
+    );
+    rows = rows.filter((row) => !strandedJobs.has(row.id));
   }
   if (!rows.length) return;
   log('info', `Resetting ${rows.length} stuck running jobs to pending`);
@@ -893,7 +1162,10 @@ async function resetStuckJobs() {
       // фраза попадала в 'unknown' («техническая проблема», без «на нашей
       // стороне»). Имя he_jobs даёт 'internal' — честный класс для рестарта
       // воркера. Русская часть остаётся для staff-инструмента.
-      await failJob(row, new HeJobInterruptionError('he_jobs restart: воркер перезапущен во время стадии', 'restart'));
+      const restart = new HeJobInterruptionError('he_jobs restart: воркер перезапущен во время стадии', 'restart');
+      // Запись не легла — строка не должна ждать следующего рестарта:
+      // тот же отказ допишет сборщик, как только БД ответит.
+      if (!(await failJob(row, restart))) markJobStranded(row, 'restart reset did not land', { failure: restart });
     } catch (e) {
       log(
         'error',
@@ -1088,6 +1360,36 @@ async function chainNextResearchStage(client: HeWorkerDb, job: HeJob) {
   }
 }
 
+/**
+ * Чем считать отказ стадии, вылетевший из runHeStage (или из чтения рынка до
+ * неё).
+ *
+ * Сторож прервал молчащую стадию: то, чем она упала ПОСЛЕ abort, — это
+ * прерывание, а не её собственный сбой. Отмена пользователем сюда не попадает:
+ * её reason — DOMException, и её обрабатывает failJob по статусу.
+ *
+ * ТЕЛО ответа БД встало на середине — прерывание (kind='db'), не сбой стадии:
+ * работа не выполнялась и не отказала, её оборвал срок клиента стадий.
+ * Политика при этом НЕ новая, а сохранённая: до этой правки такое чтение не
+ * кончалось ничем, кроме сторожа простоя, а сторож считает прерывание
+ * бесплатным. Потолок платных прогонов тот же и общий
+ * (HE_JOB_FREE_INTERRUPTIONS подряд, дальше обычные попытки) — второго
+ * счётчика здесь не появляется.
+ *
+ * Фаза ЗАГОЛОВКОВ и обрыв связи сюда не попадают сознательно
+ * (isHeStageDbInterruption истинен только для вставшего тела): они ограничены
+ * тем же сроком и без этой правки и уже сегодня тратят попытку — бесплатные
+ * повторы поднимали бы потолок платных прогонов стадии с 3 до 8 там, где
+ * сегодня 3.
+ */
+function stageFailureOf(error: unknown, abortReason: unknown): unknown {
+  if (isHeJobInterruption(abortReason)) return abortReason;
+  if (isHeStageDbInterruption(error)) {
+    return new HeJobInterruptionError(error instanceof Error ? error.message : String(error), 'db');
+  }
+  return error;
+}
+
 async function handleJob(job: HeJob) {
   log('info', `Running stage ${job.stage} for project ${job.project_id} (job ${job.id}, attempt ${job.attempts})`);
 
@@ -1128,10 +1430,20 @@ async function handleJob(job: HeJob) {
   // — сток один; llm.ts только отмечает в нём каждую попытку запроса, иначе
   // генерация ответа (самое длинное законное молчание движка) выглядит
   // зависанием, а прерывание её — бесплатным.
+  //
+  // Тот же канал несёт РАСХОД: каждый оплаченный ответ модели этого прогона
+  // (включая отброшенные попытки схемы) прибавляется в paid. Стадия отдаёт свой
+  // расход только вместе с результатом, поэтому без этой суммы деньги прогона,
+  // который бросил исключение, не попадали в he_jobs/he_projects вовсе.
+  const paid: HeLlmSpend = { tokensUsed: 0, costUsd: 0 };
   setHeActiveJob({
     signal: abort.signal,
     onActivity: () => watchdog.touch(),
     log: (msg) => log('warn', `Job ${job.id} (${job.stage}) project ${job.project_id}: ${msg}`),
+    onSpend: (spend) => {
+      paid.tokensUsed += spend.tokensUsed;
+      paid.costUsd += spend.costUsd;
+    },
   });
   const cancelWatcher = setInterval(() => {
     void (async () => {
@@ -1148,10 +1460,14 @@ async function handleJob(job: HeJob) {
     })();
   }, CANCEL_WATCH_MS);
 
-  let stageResult;
+  // Исход прогона стадии. Отказ не бросается из catch сразу: сначала (после
+  // finally, когда сторож снят) записываем его оплаченный расход.
+  let run:
+    | { ok: true; stageResult: Awaited<ReturnType<typeof runHeStage>> }
+    | { ok: false; error: unknown };
   try {
     // Рынок проекта (geo поиска, язык промптов/писем) — один read на джобу.
-    const { data: proj, error: projErr } = await db
+    const { data: proj, error: projErr, status: projStatus } = await db
       .from('he_projects')
       .select('market')
       .eq('id', job.project_id)
@@ -1172,11 +1488,11 @@ async function handleJob(job: HeJob) {
     // «прерывание».
     if (projErr) {
       const text = `he_projects market read: ${projErr.message}`;
-      throw isTransientDbError(projErr) ? new HeJobInterruptionError(text, 'db') : new Error(text);
+      throw isTransientDbError(projErr, projStatus) ? new HeJobInterruptionError(text, 'db') : new Error(text);
     }
     const market = normalizeHeMarket((proj as { market?: string } | null)?.market);
 
-    stageResult = await runHeStage(job, {
+    const stageResult = await runHeStage(job, {
       // Клиент СТАДИЙ (stageDb): у каждого запроса срок на заголовки и на паузу
       // между кусками тела, и его обрывает сигнал джобы. Поверх — отметка
       // активности: каждый запрос стадии к БД признак жизни для сторожа, иначе
@@ -1202,31 +1518,9 @@ async function handleJob(job: HeJob) {
         log('info', `[${job.stage}] ${msg}`);
       },
     });
+    run = { ok: true, stageResult };
   } catch (e) {
-    // Сторож прервал молчащую стадию: то, чем она упала ПОСЛЕ abort, — это
-    // прерывание, а не её собственный сбой. Отмена пользователем сюда не
-    // попадает: её reason — DOMException, и её обрабатывает failJob по статусу.
-    const reason: unknown = abort.signal.reason;
-    if (isHeJobInterruption(reason)) throw reason;
-    /**
-     * ТЕЛО ответа БД встало на середине — прерывание (kind='db'), не сбой
-     * стадии: работа не выполнялась и не отказала, её оборвал срок клиента
-     * стадий. Политика при этом НЕ новая, а сохранённая: до этой правки такое
-     * чтение не кончалось ничем, кроме сторожа простоя, а сторож считает
-     * прерывание бесплатным. Потолок платных прогонов тот же и общий
-     * (HE_JOB_FREE_INTERRUPTIONS подряд, дальше обычные попытки) — второго
-     * счётчика здесь не появляется.
-     *
-     * Фаза ЗАГОЛОВКОВ и обрыв связи сюда не попадают сознательно
-     * (isHeStageDbInterruption истинен только для вставшего тела): они
-     * ограничены тем же сроком и без этой правки и уже сегодня тратят попытку —
-     * бесплатные повторы поднимали бы потолок платных прогонов стадии с 3 до 8
-     * там, где сегодня 3.
-     */
-    if (isHeStageDbInterruption(e)) {
-      throw new HeJobInterruptionError(e instanceof Error ? e.message : String(e), 'db');
-    }
-    throw e;
+    run = { ok: false, error: stageFailureOf(e, abort.signal.reason) };
   } finally {
     clearInterval(cancelWatcher);
     // Сторож снимается вместе со стадией СОЗНАТЕЛЬНО: дальше идёт неатомарная
@@ -1239,8 +1533,50 @@ async function handleJob(job: HeJob) {
     watchdog.stop();
     setHeActiveJob(null);
   }
-  const tokensUsed = stageResult.tokensUsed ?? 0;
-  const costUsd = stageResult.costUsd ?? 0;
+
+  if (!run.ok) {
+    // Стадия бросила: её результата нет, а расход, если он был, знает только
+    // канал (paid). Записываем его ДО решения о судьбе джобы (pollOnce →
+    // failJob) — под сроком участка, своим отдельным: повтор, отмена,
+    // терминальный отказ — в любом исходе эти вызовы модели уже оплачены.
+    if (paid.tokensUsed || paid.costUsd) {
+      const failure = run.error;
+      try {
+        await withPostStageDeadline(job, 'failed-run spend', async (client) => {
+          await recordStageSpend(
+            client,
+            job,
+            paid.tokensUsed,
+            paid.costUsd,
+            `стадия упала: ${failure instanceof Error ? `${failure.name}: ${failure.message}` : String(failure)}`.slice(0, 300),
+          );
+        });
+      } catch (e) {
+        log('error', `Job ${job.id} (${job.stage}) расход упавшего прогона не записан: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    throw run.error;
+  }
+  const { stageResult } = run;
+  /**
+   * Расход прогона — то, что вернула стадия, но НЕ МЕНЬШЕ того, что канал
+   * насчитал по оплаченным ответам модели за этот прогон. Стадия теряет деньги
+   * там, где вызов отказал после отброшенной попытки схемы (отказ несёт расход
+   * лишь текстом, а чаще — никак) или где она проглотила отказ, не прибавив его
+   * расход. Больше канала стадия может отчитаться законно (вне llm.ts у движка
+   * платных вызовов нет, но страхуемся), поэтому берём максимум, а не сумму:
+   * сумма посчитала бы дважды всё, что стадия учла сама.
+   */
+  const tokensUsed = Math.max(stageResult.tokensUsed ?? 0, paid.tokensUsed);
+  const costUsd = Math.max(stageResult.costUsd ?? 0, paid.costUsd);
+  if (paid.costUsd > (stageResult.costUsd ?? 0) || paid.tokensUsed > (stageResult.tokensUsed ?? 0)) {
+    log(
+      'warn',
+      `Job ${job.id} (${job.stage}) стадия отчиталась о расходе меньше оплаченного: `
+        + `стадия ${stageResult.tokensUsed ?? 0} tok/$${(stageResult.costUsd ?? 0).toFixed(6)}, `
+        + `ответы модели ${paid.tokensUsed} tok/$${paid.costUsd.toFixed(6)} — в учёт идёт оплаченное`,
+    );
+  }
 
   /**
    * ЦЕНТРАЛЬНАЯ проверка прерывания: стадия вернулась, но джобу успели
@@ -1268,6 +1604,9 @@ async function handleJob(job: HeJob) {
 
   // Финализация (и учёт расхода прерванного прогона) — под своим сроком:
   // сторожа здесь уже нет, см. POST_STAGE_DEADLINE_MS.
+  // Результат и бухгалтерия финализации — один объект: его же получит сборщик,
+  // если строку придётся бросить, и по нему он знает, что уже записано.
+  const delivery: HeStrandedDelivery = { result: stageResult.result, tokensUsed, costUsd, projectBooked: false };
   const finalized = await withPostStageDeadline(job, 'finalization', async (client, signal) => {
     if (interrupted) {
       // Прерывание идёт той же политикой, что и в catch: бесплатно до
@@ -1277,16 +1616,24 @@ async function handleJob(job: HeJob) {
       await recordStageSpend(client, job, tokensUsed, costUsd, `прерывание ${heJobInterruptionKind(abortReason)}`);
       throw abortReason;
     }
-    await finalizeJob(client, signal, job, { tokensUsed, costUsd }, stageResult.result);
+    await finalizeJob(client, signal, job, delivery);
   });
-  // Срок участка истёк: строка осталась 'running', а стадия ОПЛАЧЕНА. Раньше её
-  // не подбирал никто до ближайшего рестарта процесса — теперь закроем
-  // терминально, без повтора стадии (collectStrandedJobs).
-  //
-  // Прерванный прогон сюда НЕ отдаём: там стадия не доработала, и её судьба —
-  // бесплатное прерывание с повтором, а не терминальный отказ. Если срок истёк
-  // на записи его расхода, строка, как и раньше, дождётся resetStuckJobs.
-  if (!finalized && !interrupted) markJobStranded(job, 'finalization deadline');
+  if (!finalized) {
+    // Срок участка истёк: строка осталась 'running'. Раньше её не подбирал
+    // никто до ближайшего рестарта процесса.
+    //  - Завершённый прогон: стадия ОПЛАЧЕНА, и сборщик доставит её результат
+    //    той же done-строкой, без повтора стадии (collectStrandedJobs).
+    //  - Прерванный: стадия не доработала, её судьба — бесплатное прерывание с
+    //    повтором; сборщик допишет именно его, а не терминальный отказ. Раньше
+    //    такая строка ждала resetStuckJobs, то есть ближайшего рестарта.
+    if (interrupted) markJobStranded(job, 'finalization deadline (interrupted run)', { failure: abortReason });
+    else {
+      markJobStranded(job, 'finalization deadline', {
+        failure: new HeJobResultWriteError('he_jobs finalization abandoned (finalization deadline)'),
+        delivery,
+      });
+    }
+  }
 }
 
 /**
@@ -1294,15 +1641,19 @@ async function handleJob(job: HeJob) {
  * followups. Вынесена отдельной функцией, потому что целиком идёт под сроком
  * участка (withPostStageDeadline) и на прокинутом клиенте: `db` напрямую здесь
  * означал бы запрос без сигнала, то есть возможность повиснуть навсегда.
+ *
+ * Если done-строка не легла (статус не прочитался, done-запись отвергнута
+ * блипом или оборвана сроком), строка с ГОТОВЫМ результатом уходит сборщику
+ * (markJobStranded) — он доставит её, когда БД вернётся. Терминальный отказ
+ * (HeJobResultWriteError) бросается только на отказ НЕ блипом.
  */
 async function finalizeJob(
   client: HeWorkerDb,
   signal: AbortSignal,
   job: HeJob,
-  spend: { tokensUsed: number; costUsd: number },
-  stageResultPayload: unknown,
+  delivery: HeStrandedDelivery,
 ) {
-  const { tokensUsed, costUsd } = spend;
+  const { tokensUsed, costUsd } = delivery;
 
   // base_collect переводит свою строку обратно в pending (self-requeue на
   // время работы дочерних парсеров) и возвращает {waiting: true}. Не затираем
@@ -1340,13 +1691,17 @@ async function finalizeJob(
   }
   if (statusErr) {
     // Статус неизвестен — писать 'done' нельзя (см. выше), повторять стадию
-    // тоже: она оплачена. Расход записываем, строку отдаём сборщику.
-    await recordStageSpend(client, job, tokensUsed, costUsd, `статус джобы не прочитан: ${statusErr}`);
-    markJobStranded(job, 'status read failed');
+    // тоже: она оплачена. Расход записываем, строку с результатом отдаём
+    // сборщику: прочитав 'running', он доставит ту же done-строку.
+    await recordStageSpend(client, job, tokensUsed, costUsd, `статус джобы не прочитан: ${statusErr}`, delivery);
+    markJobStranded(job, 'status read failed', {
+      failure: new HeJobResultWriteError('he_jobs finalization abandoned (status read failed)'),
+      delivery,
+    });
     log(
       'error',
       `Job ${job.id} (${job.stage}) статус джобы не прочитан за ${DONE_WRITE_ATTEMPTS} попытки — `
-        + `done-запись не делаем (она затёрла бы self-requeue или отмену), строку закроет сборщик: ${statusErr}`,
+        + `done-запись не делаем (она затёрла бы self-requeue или отмену), результат доставит сборщик: ${statusErr}`,
     );
     return;
   }
@@ -1373,7 +1728,7 @@ async function finalizeJob(
     if (waitingErr) {
       log('error', `Job ${job.id} (${job.stage}) usage/payload update failed: ${waitingErr.message}`);
     }
-    await accumulateProjectUsage(client, job.project_id, tokensUsed, costUsd);
+    delivery.projectBooked = await accumulateProjectUsage(client, job.project_id, tokensUsed, costUsd);
     log(
       'info',
       cancelled
@@ -1383,13 +1738,62 @@ async function finalizeJob(
     return;
   }
 
+  const outcome = await deliverDoneRow(client, signal, job, delivery);
+  if (outcome.kind === 'delivered') return;
+  // Расход прогона попадает в воронку НЕЗАВИСИМО от судьбы записи: вызовы
+  // оплачены, и занижалась ровно та сумма, которая иначе тратится второй раз.
+  // Раньше throw стоял ПЕРЕД учётом — отчёт о себестоимости терял именно
+  // двойные траты.
+  await recordStageSpend(client, job, tokensUsed, costUsd, `done-запись отвергнута: ${outcome.message}`, delivery);
+  if (outcome.kind === 'retry') {
+    // Блип или истёкший срок: та же запись ляжет, когда БД вернётся, — и
+    // результат оплаченной стадии сохранится. Раньше он выбрасывался, а
+    // джоба уходила в 'failed' (research — вместе с проектом).
+    markJobStranded(job, 'done write rejected', {
+      failure: new HeJobResultWriteError(`he_jobs finalization abandoned (done write rejected): ${outcome.message}`),
+      delivery,
+    });
+    log(
+      'error',
+      `Job ${job.id} (${job.stage}) done-запись не легла за ${DONE_WRITE_ATTEMPTS} попытки (блип БД или срок участка) — `
+        + `стадию не повторяем, результат доставит сборщик: ${outcome.message}`,
+    );
+    return;
+  }
+  // Отказ не блипом: повтор стадии предъявит тот же результат той же БД и
+  // оплатит стадию заново (см. HeJobResultWriteError). Джоба честно
+  // становится 'failed' с причиной — это и был смысл чтения ошибки.
+  throw new HeJobResultWriteError(`he_jobs done write: ${outcome.message}`);
+}
+
+/** Чем кончилась доставка done-строки. */
+type HeDoneWriteOutcome =
+  | { kind: 'delivered' }
+  /** Блип БД или срок участка: ту же запись можно повторить позже. */
+  | { kind: 'retry'; message: string }
+  /** Запись отвергнута не блипом: повтор её не исправит. */
+  | { kind: 'refused'; message: string };
+
+/**
+ * Записать done-строку готового результата и довести финализацию до конца
+ * (расход в he_projects, дочейн, followups). Общая для финализации и сборщика
+ * брошенных строк: результат один и тот же, и путь у него должен быть один.
+ * Наружу не бросает: исход записи — в возвращаемом значении.
+ */
+async function deliverDoneRow(
+  client: HeWorkerDb,
+  signal: AbortSignal,
+  job: HeJob,
+  delivery: HeStrandedDelivery,
+): Promise<HeDoneWriteOutcome> {
+  const { tokensUsed, costUsd } = delivery;
   // Результат чистим ПЕРЕД записью: Postgres не хранит ни NUL, ни одиночный
   // UTF-16 суррогат, а сюда приезжает текст модели (обрыв по max_tokens ровно
   // между половинами пары — уже наблюдался как «Unterminated string») и
   // соскрапленные строки. Такой результат PostgREST отвергает ЦЕЛИКОМ.
   const doneRow = {
     status: 'done',
-    result: stripUnstorableJsonChars((stageResultPayload ?? {}) as Record<string, unknown>),
+    result: stripUnstorableJsonChars((delivery.result ?? {}) as Record<string, unknown>),
     error: null,
     finished_at: new Date().toISOString(),
     tokens_used: (job.tokens_used ?? 0) + tokensUsed,
@@ -1405,14 +1809,14 @@ async function finalizeJob(
    * оплачивался ещё дважды. Повторяем то, что сломалось: запись идемпотентна и
    * адресована по id, а стадия — нет.
    */
-  let doneErr: string | null = null;
+  let doneErr: { message: string; transient: boolean } | null = null;
   for (let attempt = 1; attempt <= DONE_WRITE_ATTEMPTS; attempt += 1) {
-    const { error } = await client.from('he_jobs').update(doneRow).eq('id', job.id);
+    const { error, status } = await client.from('he_jobs').update(doneRow).eq('id', job.id);
     if (!error) {
       doneErr = null;
       break;
     }
-    doneErr = error.message;
+    doneErr = { message: error.message, transient: isTransientDbError(error, status) };
     // Срок участка истёк (запросы оборваны) — спать и повторять уже некому.
     if (attempt >= DONE_WRITE_ATTEMPTS || signal.aborted) break;
     log(
@@ -1422,18 +1826,14 @@ async function finalizeJob(
     await sleep(DONE_WRITE_RETRY_BASE_MS * 2 ** (attempt - 1));
   }
   if (doneErr) {
-    // Расход прогона попадает в воронку НЕЗАВИСИМО от судьбы записи: вызовы
-    // оплачены, и занижалась ровно та сумма, которая иначе тратится второй раз.
-    // Раньше throw стоял ПЕРЕД учётом — отчёт о себестоимости терял именно
-    // двойные траты.
-    await recordStageSpend(client, job, tokensUsed, costUsd, `done-запись отвергнута: ${doneErr}`);
-    // Класс терминальный: повтор стадии предъявит тот же результат той же БД
-    // и оплатит стадию заново (см. HeJobResultWriteError). Джоба честно
-    // становится 'failed' с причиной — это и был смысл чтения ошибки.
-    throw new HeJobResultWriteError(`he_jobs done write: ${doneErr}`);
+    return signal.aborted || doneErr.transient
+      ? { kind: 'retry', message: doneErr.message }
+      : { kind: 'refused', message: doneErr.message };
   }
 
-  await accumulateProjectUsage(client, job.project_id, tokensUsed, costUsd);
+  if (!delivery.projectBooked) {
+    delivery.projectBooked = await accumulateProjectUsage(client, job.project_id, tokensUsed, costUsd);
+  }
   // Дочейн следующей research-стадии сам обрабатывает свой сбой: наверх ничего
   // не бросает, иначе failJob вернул бы уже done-джобу в pending и оплаченная
   // стадия исполнилась бы заново.
@@ -1453,6 +1853,7 @@ async function finalizeJob(
     log('error', `Job ${job.id} (${job.stage}) autopilot followups failed: ${e instanceof Error ? e.message : String(e)}`);
   }
   log('info', `Job ${job.id} (${job.stage}) → done (+${tokensUsed} tok, $${costUsd.toFixed(6)})`);
+  return { kind: 'delivered' };
 }
 
 /**
@@ -1491,10 +1892,19 @@ async function finalizeJob(
  *    считать живой базой и что делать с осиротевшей.
  *
  * 'failed' остаётся фолбэком ровно там, где анализ невозможен: живого анализа
- * нет и анализировать нечего (нет строк/колонок), в этом конвейере анализа не
- * бывает вовсе (refill) или сама постановка не удалась. Иначе база без живой
- * джобы висела бы в 'analyzing' навсегда, а автопилот вертикали считал бы её
- * подготовленной и больше ничего не ставил.
+ * нет и анализировать нечего (нет строк/колонок) или в этом конвейере анализа
+ * не бывает вовсе (refill). Иначе база без живой джобы висела бы в 'analyzing'
+ * навсегда, а автопилот вертикали считал бы её подготовленной и больше ничего
+ * не ставил.
+ *
+ * Сбой самой постановки анализа — НЕ 'failed': repairOrphanAnalyzingBase
+ * бросает, и база с оплаченными строками остаётся 'analyzing' (catch ниже
+ * только пишет строку лога). 'failed' здесь вернул бы её компании в пул, и
+ * следующая сборка купила бы их заново. Бесплатную вставку повторит следующий
+ * ремонт той же сироты (завершение цепочки писем, «Start outreach», ночной
+ * проход автопилота, если он включён). У RU-инструмента (autopilot = false)
+ * этих контуров нет: база остаётся 'analyzing', как до ветки, где этот ремонт
+ * 'analyzing' не трогал вовсе.
  */
 async function repairBaseAfterCollectFinalFail(
   client: HeWorkerDb,
@@ -1612,16 +2022,18 @@ async function repairBaseAfterCollectFinalFail(
         `Job ${job.id} (base_collect) base ${baseId}: осиротевший analyzing вылечен постановкой base_analyze (${rowCount} собранных строк сохранены)`,
       );
     } else {
-      // 'failed' — либо анализировать нечего (нет строк/колонок, refill), либо
-      // не удалась сама постановка анализа; точная причина уже в he_bases.error.
+      // 'failed' — анализировать нечего (нет строк/колонок, refill); точная
+      // причина уже в he_bases.error. Сбой самой постановки сюда не приходит:
+      // он бросает, и его ловит catch ниже.
       log(
         'error',
         `Job ${job.id} (base_collect) base ${baseId}: осиротевший analyzing не удалось довести до анализа → failed`,
       );
     }
   } catch (e) {
-    // Ремонт не записался — база остаётся в 'analyzing' до следующего прохода
-    // (автопилот вертикали или повторный «Start outreach» кабинета её долечат).
+    // Ремонт не записался (в том числе не удалась постановка анализа) — база
+    // остаётся в 'analyzing' до следующего прохода (автопилот вертикали или
+    // повторный «Start outreach» кабинета её долечат).
     // Бросать наверх нельзя: failJob вызван из catch pollOnce.
     log(
       'error',
@@ -1672,6 +2084,8 @@ async function writeJobFailure(
   const safeMsg = stripUnstorableJsonChars(msg);
   // Отменённая пользователем джоба: стадия упала по AbortSignal. Это не фейл —
   // не инкрементируем attempts, не затираем 'cancelled', не валим проект/базу.
+  // Чтение — быстрый путь для лога; если оно не прочиталось (или отмена легла
+  // ПОСЛЕ него), 'cancelled' защищает CAS самой записи отказа ниже.
   const { data: currentBefore } = await client
     .from('he_jobs')
     .select('status')
@@ -1708,7 +2122,8 @@ async function writeJobFailure(
   // Дискриминант heJobTerminal носят ДВА класса, и они разные новости:
   // HeJobResultWriteError («результат оплачен, но не сохранился» — здешний и
   // тот, которым сборщик закрывает брошенную строку) и HeVocabEmptyError
-  // (stages/vocab.ts: словарь пуст дважды, платить за это трижды не за что).
+  // (stages/vocab.ts: обязательный список словаря пуст или отсутствует и после
+  // повтора, платить за это трижды не за что).
   // Поэтому ниже в лог уходит ИМЯ класса, а не выдумка про запись результата.
   const terminalStageFailure = isHeJobTerminal(err);
 
@@ -1811,22 +2226,38 @@ async function writeJobFailure(
    * Запись отказа при блипе БД ПОВТОРЯЕМ. Это ровно тот случай, когда
    * транзиентный отказ БД стоил ЦЕЛОЙ ДЖОБЫ: апдейт отвергался, строка
    * оставалась 'running', и подобрать её было некому до следующего рестарта
-   * процесса (collectStrandedJobs ведёт только СВОЙ список брошенных строк, а
-   * туда попадает не всякий отказ) — вместе с ней стоял весь проект, потому что
-   * воркер single-flight. Повторяется ЗАПРОС: он адресован по id и идемпотентен
-   * (одни и те же attempts, run_after считается до цикла), поэтому лишних
-   * прогонов стадии не появляется ни одного.
+   * процесса — вместе с ней стоял весь проект, потому что воркер single-flight.
+   * Повторяется ЗАПРОС: он адресован по id и идемпотентен (одни и те же
+   * attempts, run_after считается до цикла), поэтому лишних прогонов стадии не
+   * появляется ни одного. Не легла и после повторов — вызывающий отдаёт
+   * строку сборщику (pollOnce, resetStuckJobs → markJobStranded).
+   *
+   * Запись — с CAS по статусу: она ложится только поверх 'running', 'pending'
+   * (self-requeue base_collect) или 'failed' (повтор, чей первый ответ
+   * потерялся, хотя запись легла), но НИКОГДА поверх 'cancelled' и 'done'.
+   * Без CAS отмена, легшая между чтением выше и записью (или между попытками
+   * повтора), перетиралась 'pending' — отменённая работа воскресала и снова
+   * оплачивалась; а 'done' стирал бы сохранённый результат оплаченной стадии.
+   * Сколько строк задето, читаем из ответа (select): ноль — строка закрыта
+   * без нас, и проект/базу этот отказ не трогает, как и ветка отмены выше.
    */
   let failErrMsg: string | null = null;
+  let failLanded = true;
   for (let attempt = 1; attempt <= FAIL_WRITE_ATTEMPTS; attempt += 1) {
-    const { error } = await client.from('he_jobs').update(failRow).eq('id', job.id);
+    const { data: landed, error, status } = await client
+      .from('he_jobs')
+      .update(failRow)
+      .eq('id', job.id)
+      .in('status', ['running', 'pending', 'failed'])
+      .select('id');
     if (!error) {
       failErrMsg = null;
+      failLanded = Array.isArray(landed) && landed.length > 0;
       break;
     }
     failErrMsg = error.message;
     // Срок участка истёк (запросы оборваны) или отказ не блип — повторять нечем.
-    if (attempt >= FAIL_WRITE_ATTEMPTS || signal?.aborted || !isTransientDbError(error)) break;
+    if (attempt >= FAIL_WRITE_ATTEMPTS || signal?.aborted || !isTransientDbError(error, status)) break;
     log(
       'error',
       `Job ${job.id} (${job.stage}) fail update rejected (attempt ${attempt}/${FAIL_WRITE_ATTEMPTS}), `
@@ -1839,6 +2270,13 @@ async function writeJobFailure(
   const failErr = failErrMsg ? { message: failErrMsg } : null;
   if (failErr) {
     log('error', `Job ${job.id} (${job.stage}) fail update rejected: ${failErr.message} (причина отказа: ${msg})`);
+  } else if (!failLanded) {
+    log(
+      'info',
+      `Job ${job.id} (${job.stage}) отказ не записан: строка уже закрыта без воркера `
+        + `(отменена пользователем, завершена или удалена) — проект и базу не трогаем: ${msg}`,
+    );
+    return true;
   }
 
   // Финальный фейл research-стадии валит весь research-пайплайн проекта.
@@ -1872,10 +2310,21 @@ async function pollOnce(): Promise<boolean> {
   await collectStrandedJobs();
   const job = await claimJob();
   if (!job) return false;
+  // Клейм прошёл только поверх 'pending' — значит брошенная запись по этой
+  // строке устарела (сборщик, прочитай он статус в этом тике, вычеркнул бы её
+  // сам). Иначе её прежний результат (например {waiting} тика base_collect)
+  // позже доставился бы поверх НОВОГО прогона.
+  if (strandedJobs.has(job.id)) forgetStrandedJob(job.id);
   try {
     await handleJob(job);
   } catch (err) {
-    await failJob(job, err);
+    // Запись отказа не легла (БД лежит дольше её повторов или истёк срок
+    // участка) — строка осталась 'running'. Раньше её не подбирал никто до
+    // рестарта, а рестарт закрывал её бесплатным прерыванием: оплаченная
+    // стадия, чей результат уже отвергнут (HeJobResultWriteError), или
+    // терминальный отказ провайдера исполнялись заново. Сборщик допишет ТОТ ЖЕ
+    // отказ, как только БД ответит.
+    if (!(await failJob(job, err))) markJobStranded(job, 'fail write did not land', { failure: err });
   }
   return true;
 }
@@ -1905,6 +2354,9 @@ async function main() {
       + `stage DB per-request ${HE_STAGE_DB_TIMEOUT_MS}ms (headers / body-chunk pause)`,
   );
 
+  // Брошенные строки прошлого процесса этого контейнера — ДО resetStuckJobs:
+  // иначе он закрыл бы их бесплатным прерыванием (см. strandedJobs).
+  loadStrandedJobs();
   await resetStuckJobs();
 
   try {
@@ -1915,6 +2367,16 @@ async function main() {
       pollOnce,
       realtimeTables: ['he_jobs'],
     });
+    // Последний проход сборщика перед остановкой: список переживает
+    // `docker restart`, но не пересоздание контейнера при деплое. Не дольше
+    // минуты: при лежащей БД чтение статуса через `db` может висеть минутами,
+    // а остановку (stop_grace_period) держать нечем — файл списка уже записан.
+    await Promise.race([
+      collectStrandedJobs(),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, 60_000).unref?.();
+      }),
+    ]);
   } finally {
     clearInterval(heartbeat);
   }

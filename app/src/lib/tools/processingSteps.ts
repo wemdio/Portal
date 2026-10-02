@@ -19,7 +19,11 @@ import {
   extractEmails,
 } from './dfybUtils';
 import { scrapeEmails } from '@/lib/enrich/emailScraper';
-import { fetchAndExtract } from '@/lib/enrich/websiteParser';
+import {
+  fetchAndExtract,
+  WEBSITE_ACCEPT_LANGUAGE_EN,
+  WEBSITE_NO_TEXT_STUB_EN,
+} from '@/lib/enrich/websiteParser';
 import { isBlockedCompanyWebsiteDomain } from '@/lib/companiesDirectory/contactPolicy';
 import { validateEmail, type DomainInfo } from '@/lib/emailValidation/validator';
 import { isSupportEmail } from './supportEmails';
@@ -550,13 +554,35 @@ const NON_SCRAPEABLE_HOSTS: readonly string[] = [
 // умолчанию не меняем.
 //
 // Общий признак всего списка: страница РАССКАЗЫВАЕТ о компании (или о её
-// вакансии), но не принадлежит компании. Почта, которую с такой страницы
-// можно снять, — почта каталога (support@…), и она уходит клиенту как
-// «контакт компании». Пустая ячейка честнее чужого адреса.
+// вакансии), но не принадлежит компании — компания живёт на ПУТИ чужого
+// origin (yelp.com/biz/acme, boards.greenhouse.io/acme). Список читают ОБА
+// шага, которые ходят на сайт, и у обоих довод один и тот же — механизм, а
+// не вкус: и почтовый обход (enrich/emailScraper.ts), и чтение описания
+// (enrich/websiteParser.ts, fetchAndExtract) считают сайтом компании ORIGIN
+// адреса и дописывают к нему свои пути (/contact, /about, …).
+//  - find_emails: страницы /contact, /about такого origin — страницы самого
+//    каталога, и найденная там почта (support@…) уходит клиенту как «контакт
+//    компании». Пустая ячейка честнее чужого адреса.
+//  - enrich_descriptions: карточка за логин-воллом или антиботом отдаёт
+//    текст стены. Если он короче порога главной страницы
+//    (WEBSITE_ENRICHMENT_MIN_MAIN_TEXT_TO_SKIP_ABOUT, по умолчанию 220
+//    символов), fetchAndExtract идёт за страницами «о компании» того же
+//    origin, то есть читает описание САМОГО каталога и пишет его в колонку
+//    описания компании; если длиннее — в ячейку уходит сам текст стены.
+//    Длинная читаемая карточка давала бы описание компании, но отличить её от
+//    стены по адресу нельзя, и вслепую выбираем пустую ячейку.
+// ИСКЛЮЧЕНИЕ из второго довода — EN_DESCRIPTION_READABLE_HOSTS ниже: статья
+// Википедии читается без стены, текста у статьи о компании обычно больше
+// порога, и до страниц «о компании» дело не доходит; а для компании без
+// своего сайта она бывает единственным описанием. Остаток риска назван: у
+// статьи-заглушки короче порога чтение пойдёт по ссылке «About Wikipedia» того
+// же origin, и в ячейку попадёт текст о самой Википедии. Случай редкий и принят.
 //
 // Чего здесь намеренно НЕТ: конструкторы сайтов (wixsite.com, squarespace.com,
-// webflow.io, tilda.ws и прочие). У малого бизнеса там НАСТОЯЩИЙ сайт с
-// настоящей почтой — блок вычеркнул бы живые компании.
+// webflow.io, tilda.ws и прочие). Там компания живёт на СВОЁМ поддомене
+// (acme.wixsite.com), то есть origin — это и есть её сайт с её почтой; блок
+// вычеркнул бы живые компании. Для общего предиката реестра этот же инвариант
+// держит код, а не комментарий — см. EN_WEBSITE_BUILDER_HOSTS.
 const NON_SCRAPEABLE_HOSTS_EN_EXTRA: readonly string[] = [
   'linkedin.com', 'indeed.com', 'glassdoor.com', 'wellfound.com',
   // Каталоги компаний и карточки профилей: логин-волл/антибот, своих почт
@@ -572,6 +598,46 @@ const NON_SCRAPEABLE_HOSTS_EN: readonly string[] = [
   ...NON_SCRAPEABLE_HOSTS_EN_EXTRA,
 ];
 
+/**
+ * Хосты EN-списка, которые шагу ОПИСАНИЙ можно читать (только locale='en',
+ * только purpose='description'). Почтовый обход их по-прежнему пропускает:
+ * почта со страниц самой Википедии клиенту не нужна ни при каком раскладе.
+ * Довод — в комментарии над NON_SCRAPEABLE_HOSTS_EN_EXTRA.
+ */
+const EN_DESCRIPTION_READABLE_HOSTS: readonly string[] = ['wikipedia.org'];
+
+/**
+ * Хостинги конструкторов сайтов: компания живёт на СВОЁМ поддомене, origin —
+ * её сайт. Только locale='en' и только перед общим предикатом реестра
+ * (isBlockedCompanyWebsiteDomain): его список BLOCKED_WEBSITE_DOMAINS ведёт
+ * другой модуль под свою задачу (contactPolicy, импорт реестра), и пополниться
+ * он может чем угодно. Эта проверка делает инвариант «EN-конструктор не
+ * вычёркивает сайт на конструкторе» свойством кода, а не обещанием в
+ * комментарии.
+ *
+ * Пропускаем только ПОДДОМЕН (acme.wixsite.com): сам корень хостинга — это
+ * сайт конструктора, а не компании, и его блок, если он когда-нибудь появится в
+ * общем списке, остаётся в силе.
+ *
+ * Сегодня ни одного из этих хостов в BLOCKED_WEBSITE_DOMAINS нет, то есть
+ * проверка ничего не меняет — она про завтрашнюю правку чужого списка.
+ */
+const EN_WEBSITE_BUILDER_HOSTS: readonly string[] = [
+  'wixsite.com', 'squarespace.com', 'webflow.io', 'tilda.ws',
+  'weebly.com', 'wordpress.com', 'godaddysites.com', 'myshopify.com',
+];
+
+function hostMatches(host: string, domains: readonly string[]): boolean {
+  return domains.some((d) => host === d || host.endsWith(`.${d}`));
+}
+
+/**
+ * Для какого шага спрашиваем. 'emails' — поиск почт (дефолт, прежний смысл
+ * предиката); 'description' — шаг описаний (stepEnrich). Различаются только при
+ * locale='en' и только хостами EN_DESCRIPTION_READABLE_HOSTS.
+ */
+export type NonScrapeablePurpose = 'emails' | 'description';
+
 function hostOf(raw: string): string {
   let v = (raw ?? '').trim().toLowerCase();
   if (!v) return '';
@@ -579,21 +645,42 @@ function hostOf(raw: string): string {
   try { return new URL(v).hostname.replace(/^www\./, ''); } catch { return ''; }
 }
 
-export function isNonScrapeableHost(raw: string, locale?: ConstructorLocale): boolean {
+export function isNonScrapeableHost(
+  raw: string,
+  locale?: ConstructorLocale,
+  purpose: NonScrapeablePurpose = 'emails',
+): boolean {
   const host = hostOf(raw);
   if (!host) return false;
+  // Только locale='en' и только шаг описаний — см. EN_DESCRIPTION_READABLE_HOSTS.
+  if (locale === 'en' && purpose === 'description' && hostMatches(host, EN_DESCRIPTION_READABLE_HOSTS)) {
+    return false;
+  }
   const blocked = locale === 'en' ? NON_SCRAPEABLE_HOSTS_EN : NON_SCRAPEABLE_HOSTS;
   if (blocked.some((d) => host === d || host.endsWith(`.${d}`))) return true;
-  // Только locale='en'. isBlockedCompanyWebsiteDomain — тот же предикат,
-  // которым реестр компаний отбраковывает «сайт», оказавшийся соцсетью,
-  // мессенджером или link-in-bio: facebook/instagram/youtube/vk/ok/t.me/
-  // linktr.ee/taplink/wa.me/maps.google + RU-каталоги (2gis, rusprofile,
-  // yell, zoon, flamp, list-org) и маркетплейсы (ozon, wildberries, avito).
-  // Ни одного конструктора сайтов в BLOCKED_WEBSITE_DOMAINS нет — иначе
-  // переиспользовать его здесь было бы нельзя.
-  // RU-ветка предиката не трогается: при locale!=='en' выражение до вызова
-  // не доходит, поведение конструктора для RU-баз байт-в-байт прежнее.
-  return locale === 'en' && isBlockedCompanyWebsiteDomain(host);
+  // RU-ветка предиката не трогается: при locale!=='en' дальше этой строки
+  // ничего нет, поведение конструктора для RU-баз байт-в-байт прежнее.
+  if (locale !== 'en') return false;
+  // Сайт на поддомене конструктора — сайт компании, что бы ни лежало в общем
+  // списке реестра (см. EN_WEBSITE_BUILDER_HOSTS).
+  if (EN_WEBSITE_BUILDER_HOSTS.some((d) => host.endsWith(`.${d}`))) return false;
+  // isBlockedCompanyWebsiteDomain — предикат, которым реестр компаний
+  // отбраковывает «сайт», не принадлежащий компании. Что в его списке
+  // (BLOCKED_WEBSITE_DOMAINS, companiesDirectory/contactPolicy.ts) на
+  // 02.10.2026, все 27 значений по классам:
+  //  - соцсети, мессенджеры и чаты: facebook, instagram, youtube, vk, ok,
+  //    t.me, telegram.me, wa.me, jivo.chat;
+  //  - link-in-bio и страницы записи: linktr.ee, taplink.cc, dikidi.net;
+  //  - карты и каталоги: maps.google.com, yandex.ru, yandex.com, 2gis, yell,
+  //    zoon, flamp, rusprofile, list-org, sbis.ru, biziq.ru (это открытая база
+  //    компаний России, не конструктор сайтов), плюс фрагмент 'company.aspx',
+  //    который как хост не совпадает ни с чем;
+  //  - маркетплейсы: ozon, wildberries, avito.
+  // Страница компании там — ПУТЬ на общем origin (vk.com/acme, linktr.ee/acme),
+  // и довод над NON_SCRAPEABLE_HOSTS_EN_EXTRA работает целиком. Конструкторов
+  // сайтов с компанией на своём поддомене в списке сегодня нет, а если они туда
+  // попадут, их поддомены пропустит проверка выше.
+  return isBlockedCompanyWebsiteDomain(host);
 }
 
 export async function stepFindEmails(
@@ -952,8 +1039,11 @@ export async function stepSiteCheck(
 export interface StepEnrichOptions {
   /**
    * Локаль джобы (job.locale). При 'en': новая колонка описания называется
-   * «Description» (вместо «Описание»), блок-лист хостов расширен EN
-   * job-бордами. Default 'ru' — прежнее поведение.
+   * «Description» (вместо «Описание»), блок-лист хостов расширен EN-списком
+   * (purpose='description': Википедию читаем), сайт запрашивается с тем же
+   * Accept-Language, что у почтового обхода этой же джобы, служебные подписи
+   * текста — английские, а заглушка «страница ответила, текста нет» в ячейку не
+   * пишется. Default 'ru' — прежнее поведение.
    */
   locale?: ConstructorLocale;
 }
@@ -995,8 +1085,21 @@ export async function stepEnrich(
       r.url &&
       !attemptedRows.has(r.i) &&
       !(r.row[targetDescIdx] || '').trim() &&
-      !isNonScrapeableHost(r.url, locale),
+      !isNonScrapeableHost(r.url, locale, 'description'),
     );
+
+  /**
+   * Чтение сайта EN-джобы — по-английски, и это про ОДНУ джобу, а не про вкус.
+   * Почтовый обход той же джобы (find_emails → scrapeEmails с locale) уже ходит
+   * с Accept-Language 'en-US,en'; без этой опции шаг описаний просил ту же
+   * страницу с русским дефолтом парсера, и сайт с переключателем языка отдавал
+   * двум шагам разные версии. Служебные подписи результата — тоже английские:
+   * колонка описания доезжает до превью базы английского кабинета.
+   * RU-джоба получает ровно прежний объект опций { timeout, signal }.
+   */
+  const enFetch = locale === 'en'
+    ? { acceptLanguage: WEBSITE_ACCEPT_LANGUAGE_EN, textLanguage: 'en' as const }
+    : {};
 
   if (toProcess.length === 0) { await onProgress(100); return [newHeader, ...newBody]; }
 
@@ -1049,10 +1152,13 @@ export async function stepEnrich(
     try {
       // signal comes from the pool's per-task watchdog. Pass it down so a
       // tarpit website's fetch is aborted at ENRICH_PER_SITE_TIMEOUT_MS.
-      const text = await fetchAndExtract(item.url, { timeout: 15_000, signal });
+      const text = await fetchAndExtract(item.url, { timeout: 15_000, signal, ...enFetch });
+      // EN: «страница ответила, текста нет» — не описание компании, и клиенту
+      // в колонке Description она не нужна; ячейка остаётся пустой.
+      const usable = locale === 'en' ? text !== WEBSITE_NO_TEXT_STUB_EN : true;
       // The watchdog may already have released this slot. A late fetch result
       // must not mutate data after its timeout checkpoint was persisted.
-      if (text && !settledIndexes.has(_i)) {
+      if (text && usable && !settledIndexes.has(_i)) {
         newBody[item.i][targetDescIdx] = text.slice(0, 2000);
       }
     } catch {

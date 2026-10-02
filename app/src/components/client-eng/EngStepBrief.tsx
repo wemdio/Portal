@@ -80,10 +80,22 @@ function isResearchActive(jobs: HeJobSummary[]): boolean {
  *
  * Оба поля приходят БУЛЕВЫМИ из проекции кабинета (clientEngProjection):
  * служебная пометка стадии с русской причиной в кабинет не уезжает.
+ *
+ * ОБА ФАКТА — ПРО ПОСЛЕДНЮЮ ЗАПИСАННУЮ ПРОВЕРКУ САЙТА, А НЕ ПРО СЕЙЧАС. Стадия
+ * пишет их ровно в двух местах: отказом «сайт не открылся» и финальной записью
+ * удачного прогона. Прогон, который сайт открыл, но упал дальше (биллинг,
+ * таймаут модели, отмена), не пишет ничего — пометка прошлого прогона остаётся.
+ * Поэтому подсказка говорит в прошедшем времени и ставит условие: «нужно, если
+ * сайт всё ещё не открывается». В настоящем времени («we could not open your
+ * site») она была ложью рядом с карточкой биллинга, когда сайт уже ожил.
  */
 function businessDescriptionHint(brief: Record<string, unknown>): string {
-  if (brief.site_unreachable === true) return ' — required: we could not open your site';
-  if (brief.site_thin === true) return ' — recommended: your site gave us very little to read';
+  if (brief.site_unreachable === true) {
+    return ' — required while your site does not open: our last recorded check could not open it';
+  }
+  if (brief.site_thin === true) {
+    return ' — recommended: our last recorded read of your site found very little text';
+  }
   return '';
 }
 

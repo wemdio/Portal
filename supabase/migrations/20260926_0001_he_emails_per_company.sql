@@ -74,5 +74,9 @@ comment on column public.he_projects.max_emails_per_company is
   'ENG: сколько адресов одной компании брать в работу по умолчанию для новых авто-сборок проекта (NULL = дефолт движка).';
 comment on column public.he_bases.max_emails_per_company is
   'ENG: действующий для этой базы лимит адресов на компанию (снят с проекта при постановке сборки; NULL = дефолт движка).';
+-- Колонку стадия сборки НЕ пишет (читателя у неё не было — раунд исправлений
+-- 02.10): применённый кап базы живёт в collect_info.construct.contact_cap, его
+-- читают запуск и долив (launchHandoff.heConstructContactCap). Комментарий
+-- колонки говорит это прямо, чтобы NULL не читали как «капа не было».
 comment on column public.he_bases.contact_cap_applied is
-  'ENG: лимит, реально применённый конструктором к этой базе (NULL = конструктор капа не применял).';
+  'ENG: не заполняется; лимит адресов на компанию, применённый конструктором, — в collect_info.construct.contact_cap. NULL здесь ничего не означает.';

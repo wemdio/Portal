@@ -14,11 +14,21 @@
  * отброшенная (dropped), это разные исходы.
  *
  * Под эти правила НЕ попадает и отказ ДОСТУПА к провайдеру (поиск: деньги,
- * ключ; модель: деньги, ключ, лимит частоты): он перманентен для прогона, то
- * есть повторится на каждом следующем кандидате, и стадия прерывается ДО
- * перезаписи he_hypotheses. Туда же — ПОЛНЫЙ отказ поиска (ни одного
- * обслуженного запроса за двух кандидатов подряд): «тонкие доказательства» это
- * про один кандидат, а не про прогон, у которого источников нет вовсе.
+ * ключ; модель: деньги, ключ, а на рынке us ещё и лимит частоты): он
+ * перманентен для прогона, то есть повторится на каждом следующем кандидате, и
+ * стадия прерывается ДО перезаписи he_hypotheses. Туда же — ПОЛНЫЙ отказ поиска
+ * (ни одного обслуженного запроса за двух кандидатов подряд): «тонкие
+ * доказательства» это про один кандидат, а не про прогон, у которого источников
+ * нет вовсе. 429 модели на RU (легаси /tools/hypothesis-engine) поглощается
+ * поэлементно, как до волны 3: кандидат уходит в stage_error, стадия кончается
+ * за одно исполнение (политика — heRunStoppingLlmFailure в brandCloud.ts).
+ *
+ * Чекпойнт перебора (только market='us'): после каждого кандидата пройденный
+ * префикс (принятые гипотезы и счётчики) пишется в he_jobs.result этой же
+ * джобы, и повтор джобы — после паузы по 429, прерывания или обычного фейла —
+ * продолжает с него. Вердикты, уже оплаченные вызовом ресёрч-модели, второй раз
+ * не покупаются (как и поиск по их кандидатам). Механизм и его границы — у
+ * HE_ITEM_CHECKPOINT_KEY в brandCloud.ts.
  *
  * Сама перезапись стала условной: снос прошлых 'proposed' гипотез проекта
  * делается только если этот прогон принял хотя бы одну — иначе ночь заменяла
@@ -30,9 +40,13 @@
  * доказательств капается по % (≤ 20) — см. evidence_dropped в result.
  */
 
+import { z } from 'zod';
+
 import { callLLMWithSchema, getHeModel } from '../llm';
 import {
+  HeEvidenceItemSchema,
   HeEvidenceVerdictSchema,
+  type HeEvidenceVerdict,
   type HeHypothesisCandidate,
   type HeSiteProfileOutput,
 } from '../schemas';
@@ -42,9 +56,16 @@ import { verifyEvidenceItems } from '../verifyEvidence';
 import { buildEvidenceMessages } from '../prompts/evidence';
 import { buildEvidenceMessagesEn } from '../prompts/evidence.en';
 import type { HeEvidenceItem, HeHypothesisTier, HeJob } from '../types';
-// Политика «какой отказ провайдера модели останавливает прогон» — одна на две
-// стадии с поэлементным платным вызовом; её дом brandCloud.ts (там же docblock).
-import { heLlmRefusalLabel, heRunStoppingLlmFailure } from './brandCloud';
+// Политика «какой отказ провайдера модели останавливает прогон» и чекпойнт
+// перебора — одни на две стадии с поэлементным платным вызовом; их дом
+// brandCloud.ts (там же docblock).
+import {
+  heItemCheckpointFingerprint,
+  heLlmRefusalLabel,
+  heRunStoppingLlmFailure,
+  readHeItemCheckpoint,
+  writeHeItemCheckpoint,
+} from './brandCloud';
 import { loadMarkupHistory, loadPortfolioProfile } from './hypotheses';
 import { heStageSignal, resolveFetchText, resolveSearch } from './io';
 import {
@@ -85,6 +106,51 @@ interface AcceptedHypothesis {
 
 function normTitle(t: string): string {
   return t.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Чекпойнт перебора кандидатов (только market='us', см. HE_ITEM_CHECKPOINT_KEY
+ * в brandCloud.ts): кандидаты [0, next) пройдены — их вердикты (keep/merge/drop)
+ * и поэлементные сбои уже учтены в accepted и счётчиках. Кандидат, на котором
+ * прогон остановился, в префикс не входит и на повторе спрашивается заново.
+ */
+const EvidenceCheckpointSchema = z.object({
+  stage: z.literal('evidence'),
+  v: z.literal(1),
+  fingerprint: z.string(),
+  next: z.number().int().min(1),
+  accepted: z.array(
+    z.object({
+      tier: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+      title: z.string(),
+      description: z.string(),
+      fit_rationale: z.string(),
+      evidence: z.array(HeEvidenceItemSchema),
+      potential_pct: z.number(),
+    }),
+  ),
+  merged: z.number().int().min(0),
+  dropped: z.number().int().min(0),
+  evidence_dropped: z.number().int().min(0),
+  search_answered: z.number().int().min(0),
+});
+type EvidenceCheckpoint = z.infer<typeof EvidenceCheckpointSchema>;
+
+/** Годный чекпойнт этого входа или null (с причиной в логе, если он был). */
+function readEvidenceCheckpoint(
+  ctx: HeStageContext,
+  job: HeJob,
+  fingerprint: string,
+  total: number,
+): EvidenceCheckpoint | null {
+  const raw = readHeItemCheckpoint(job);
+  if (raw === null) return null;
+  const parsed = EvidenceCheckpointSchema.safeParse(raw);
+  if (!parsed.success || parsed.data.fingerprint !== fingerprint || parsed.data.next > total) {
+    stageLog(ctx, '[evidence] чекпойнт прошлого исполнения не подходит к этому входу — перебор с начала');
+    return null;
+  }
+  return parsed.data;
 }
 
 /**
@@ -137,21 +203,96 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
     loadMarkupHistory(ctx, job.project_id, market),
   ]);
 
-  const accepted: AcceptedHypothesis[] = [];
-  let merged = 0;
-  let dropped = 0;
-  let evidenceDropped = 0;
+  // Чекпойнт перебора — только us: на RU 429 не останавливает перебор, и
+  // легаси-инструмент лишних записей в he_jobs не получает. Отпечаток — по
+  // кандидатам целиком: другой результат стадии hypotheses — другой вход.
+  const resumable = market === 'us';
+  const fingerprint = resumable ? heItemCheckpointFingerprint(candidates) : '';
+  const restored = resumable ? readEvidenceCheckpoint(ctx, job, fingerprint, candidates.length) : null;
+  if (restored) {
+    stageLog(
+      ctx,
+      `[evidence] продолжаем с чекпойнта прошлого исполнения этой джобы: ${restored.next}/${candidates.length} `
+        + `кандидатов уже проверено (принято ${restored.accepted.length}), их вердикты повторно не покупаем`,
+    );
+  }
+  const accepted: AcceptedHypothesis[] = restored ? restored.accepted : [];
+  let merged = restored?.merged ?? 0;
+  let dropped = restored?.dropped ?? 0;
+  let evidenceDropped = restored?.evidence_dropped ?? 0;
+
+  /**
+   * Вердикт keep/merge кандидата → пост-верификация, якорь, кап и слияние.
+   * Вынесено из цикла, чтобы у каждой ветки цикла был один выход — к записи
+   * чекпойнта после кандидата (us), — а не `continue` мимо неё.
+   */
+  const settleVerdict = async (
+    candidate: HeHypothesisCandidate,
+    v: HeEvidenceVerdict,
+    sources: Array<{ url: string; text: string }>,
+  ): Promise<void> => {
+    // Кодовая пост-верификация: URL обязан быть среди скачанных источников,
+    // цитата — подстрокой его текста. Сфабрикованное выкидываем; гипотеза
+    // без единого проверенного доказательства капается по % (свои же правила
+    // промпта: «нет доказательного пути» → низкий потенциал).
+    const check = verifyEvidenceItems(v.evidence, sources);
+    if (check.dropped > 0) {
+      evidenceDropped += check.dropped;
+      stageLog(
+        ctx,
+        `[evidence] «${candidate.title}»: отброшено ${check.dropped} недоказанных пунктов (URL/цитата не из скачанного)`,
+      );
+    }
+    // Дата-якорь: программный матч сегмента датасета + факт reply% →
+    // ограниченная поправка (0.7×LLM + 0.3×datasetScore). Без честного
+    // матча/объёма — оценка LLM без изменений (см. scoreAnchor.ts).
+    const anchor = await anchorPotentialPct(v.potential_pct, candidate.title, market);
+    if (anchor.applied && anchor.pct !== v.potential_pct) {
+      stageLog(ctx, `[evidence] «${candidate.title}»: ${v.potential_pct}% → ${anchor.pct}% (${anchor.note})`);
+    }
+    // Кап «нет проверенных доказательств» — ПОСЛЕ якоря: иначе горячий
+    // сегмент датасета поднимал бы неверифицированную гипотезу до ~43%.
+    const finalPct = check.valid.length === 0 ? Math.min(anchor.pct, 20) : anchor.pct;
+
+    if (v.verdict === 'merge' && v.merge_with_title) {
+      const target = accepted.find((a) => normTitle(a.title) === normTitle(v.merge_with_title as string));
+      if (target) {
+        target.evidence = [...target.evidence, ...check.valid].slice(0, MAX_EVIDENCE_PER_HYPOTHESIS);
+        target.potential_pct = Math.max(target.potential_pct, finalPct);
+        merged += 1;
+        return;
+      }
+      // Цель мержа не найдена среди принятых — трактуем как keep.
+      stageLog(ctx, `[evidence] merge-цель «${v.merge_with_title}» не найдена, keep`);
+    }
+
+    accepted.push({
+      tier: candidate.tier,
+      title: candidate.title,
+      description: candidate.description,
+      // Вердикт обязан пронести fit_rationale (возможно, уточнив по фактам);
+      // пустое поле — откат к исходной цепочке кандидата.
+      fit_rationale: v.fit_rationale || candidate.fit_rationale,
+      evidence: check.valid.slice(0, MAX_EVIDENCE_PER_HYPOTHESIS),
+      potential_pct: finalPct,
+    });
+  };
 
   // Подпись прогресса уезжает в he_jobs.progress.label и печатается клиенту
   // как есть (блок «Right now» кабинета ENG), поэтому зависит от рынка, а не
   // переводится насовсем: тот же V1 обслуживает русский внутренний инструмент.
   const progressLabel = market === 'us' ? 'checking a hypothesis' : 'проверяем гипотезу';
-  // Счётчик один на всю стадию: «тонкие доказательства» из-за пустой выдачи по
-  // одному кандидату — норма, а вот НУЛЬ обслуженных запросов за всю стадию
-  // означает, что кластеризация ранжировала бы гипотезы по пустоте.
+  // Счётчик один на всё исполнение: «тонкие доказательства» из-за пустой выдачи
+  // по одному кандидату — норма, а вот НУЛЬ обслуженных запросов за всю стадию
+  // означает, что кластеризация ранжировала бы гипотезы по пустоте. Остановка по
+  // полному отказу поиска (heSearchOutageFailure) судит по ЭТОМУ исполнению —
+  // о том, что поиск делает сейчас; обслуженные запросы префикса из чекпойнта
+  // (только us) учитываются лишь в итоговой проверке после цикла.
   const tally = newHeSearchTally();
+  const restoredSearchAnswered = restored?.search_answered ?? 0;
+  let searchedThisRun = 0;
 
-  for (let i = 0; i < candidates.length; i += 1) {
+  for (let i = restored?.next ?? 0; i < candidates.length; i += 1) {
     const candidate = candidates[i];
     await reportProgress(ctx, job.id, i + 1, candidates.length, progressLabel);
     stageLog(ctx, `[evidence] «${candidate.title}»…`);
@@ -186,7 +327,8 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
     // (heSearchOutageFailure). Одна пустая выдача, один упавший кандидат и
     // одиночный блип сюда не попадают: первая считается обслуженной, вторые два
     // не переживают следующего кандидата.
-    const outage = heSearchOutageFailure(tally, i + 1);
+    searchedThisRun += 1;
+    const outage = heSearchOutageFailure(tally, searchedThisRun);
     if (outage) {
       stageLog(
         ctx,
@@ -234,65 +376,23 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
       if (v.verdict === 'drop') {
         dropped += 1;
         stageLog(ctx, `[evidence] drop: ${v.reason}`);
-        continue;
+      } else {
+        await settleVerdict(candidate, v, sources);
       }
-
-      // Кодовая пост-верификация: URL обязан быть среди скачанных источников,
-      // цитата — подстрокой его текста. Сфабрикованное выкидываем; гипотеза
-      // без единого проверенного доказательства капается по % (свои же правила
-      // промпта: «нет доказательного пути» → низкий потенциал).
-      const check = verifyEvidenceItems(v.evidence, sources);
-      if (check.dropped > 0) {
-        evidenceDropped += check.dropped;
-        stageLog(
-          ctx,
-          `[evidence] «${candidate.title}»: отброшено ${check.dropped} недоказанных пунктов (URL/цитата не из скачанного)`,
-        );
-      }
-      // Дата-якорь: программный матч сегмента датасета + факт reply% →
-      // ограниченная поправка (0.7×LLM + 0.3×datasetScore). Без честного
-      // матча/объёма — оценка LLM без изменений (см. scoreAnchor.ts).
-      const anchor = await anchorPotentialPct(v.potential_pct, candidate.title, market);
-      if (anchor.applied && anchor.pct !== v.potential_pct) {
-        stageLog(ctx, `[evidence] «${candidate.title}»: ${v.potential_pct}% → ${anchor.pct}% (${anchor.note})`);
-      }
-      // Кап «нет проверенных доказательств» — ПОСЛЕ якоря: иначе горячий
-      // сегмент датасета поднимал бы неверифицированную гипотезу до ~43%.
-      const finalPct = check.valid.length === 0 ? Math.min(anchor.pct, 20) : anchor.pct;
-
-      if (v.verdict === 'merge' && v.merge_with_title) {
-        const target = accepted.find((a) => normTitle(a.title) === normTitle(v.merge_with_title as string));
-        if (target) {
-          target.evidence = [...target.evidence, ...check.valid].slice(0, MAX_EVIDENCE_PER_HYPOTHESIS);
-          target.potential_pct = Math.max(target.potential_pct, finalPct);
-          merged += 1;
-          continue;
-        }
-        // Цель мержа не найдена среди принятых — трактуем как keep.
-        stageLog(ctx, `[evidence] merge-цель «${v.merge_with_title}» не найдена, keep`);
-      }
-
-      accepted.push({
-        tier: candidate.tier,
-        title: candidate.title,
-        description: candidate.description,
-        // Вердикт обязан пронести fit_rationale (возможно, уточнив по фактам);
-        // пустое поле — откат к исходной цепочке кандидата.
-        fit_rationale: v.fit_rationale || candidate.fit_rationale,
-        evidence: check.valid.slice(0, MAX_EVIDENCE_PER_HYPOTHESIS),
-        potential_pct: finalPct,
-      });
     } catch (e) {
       // Отмена задачи — не «кандидат отброшен»: прерываем стадию, иначе цифра
       // dropped соврёт, а перебор продолжит тратить деньги после отмены.
       if (jobSignal?.aborted) throw e;
-      // Отказ ДОСТУПА к модели (деньги, ключ, лимит частоты) — тоже не «кандидат
-      // отброшен»: остальные кандидаты получат тот же ответ, dropped соврёт на
-      // все оставшиеся, а перезапись he_hypotheses ниже заменила бы хороший
-      // набор гипотез проекта пустым. Проглоченный здесь, этот класс не доходил
-      // до джобы — а park по 429 и терминальный отказ по 402/401 живут именно
-      // там. Бросаем исходную ошибку: воркеру нужен её тип целым.
-      const refusal = heRunStoppingLlmFailure(e);
+      // Отказ ДОСТУПА к модели (деньги, ключ; на us ещё и лимит частоты) — тоже
+      // не «кандидат отброшен»: остальные кандидаты получат тот же ответ,
+      // dropped соврёт на все оставшиеся, а перезапись he_hypotheses ниже
+      // заменила бы хороший набор гипотез проекта пустым. Проглоченный здесь,
+      // этот класс не доходил до джобы — а пауза по 429 и терминальный отказ по
+      // 402/401 живут именно там. Бросаем исходную ошибку: воркеру нужен её тип
+      // целым. Чекпойнт (us) при этом остаётся на предыдущем кандидате: этот в
+      // префикс не попал и на повторе будет спрошен заново. 429 на RU сюда не
+      // попадает и поглощается ниже как stage_error (heRunStoppingLlmFailure).
+      const refusal = heRunStoppingLlmFailure(e, market);
       if (refusal) {
         stageLog(
           ctx,
@@ -305,12 +405,30 @@ export async function runEvidenceStage(job: HeJob, ctx: HeStageContext): Promise
       dropped += 1;
       stageLog(ctx, `[evidence] stage_error по «${candidate.title}»: ${heIoFailureReason(e)}`);
     }
+    if (resumable) {
+      await writeHeItemCheckpoint(
+        ctx,
+        job,
+        {
+          stage: 'evidence',
+          v: 1,
+          fingerprint,
+          next: i + 1,
+          accepted,
+          merged,
+          dropped,
+          evidence_dropped: evidenceDropped,
+          search_answered: restoredSearchAnswered + tally.answered,
+        },
+        '[evidence]',
+      );
+    }
   }
 
   // Отказ поиска на ВСЕХ запросах (или перманентный отказ где угодно):
   // доказательств не искали, а не «не нашли». Падаем до удаления прошлых
   // предложенных гипотез — иначе проект остался бы и без старых, и без новых.
-  const searchFailure = heSearchStageFailure(tally);
+  const searchFailure = heSearchStageFailure({ ...tally, answered: tally.answered + restoredSearchAnswered });
   if (searchFailure) {
     stageLog(
       ctx,

@@ -30,6 +30,15 @@ export interface SerperSearchOptions {
  * Вид отказа провайдера. Пустая выдача отказом НЕ является: пустая выдача —
  * факт о рынке, отказ — отсутствие факта. Путать их дорого: на пустом входе
  * платный конвейер доезжает до конца и выставляет счёт за пустоту.
+ *
+ * Деление — по тому, повторится ли отказ на КАЖДОМ следующем запросе:
+ *  - billing / configuration — да (кончились кредиты; ключ не задан или
+ *    отвергнут: 401/403) — дальше спрашивать бессмысленно;
+ *  - transient — нет: временный сбой (429, 5xx, 408/425, свой срок, обрыв
+ *    сети) ИЛИ отказ ОДНОМУ запросу (400/404/413/422 и прочие 4xx, пустой
+ *    запрос) — следующий запрос с другим текстом его не наследует. Потребитель
+ *    (lib/hypothesisEngine/stages/searchIo.ts) по этому виду не останавливает
+ *    перебор, пока хоть один запрос обслужен.
  */
 export type SerperFailureKind = 'billing' | 'configuration' | 'transient';
 
@@ -60,6 +69,17 @@ const MISSING_KEY_MESSAGE = 'Serper configuration: search API key is not set.';
 const TIMEOUT_MESSAGE = 'Serper transient: timeout.';
 const TRANSPORT_MESSAGE = 'Serper transient: transport.';
 const RATE_LIMIT_MESSAGE = 'Serper transient: rate limited.';
+/**
+ * Отказ ОДНОМУ запросу (400/404/413/422 и прочие 4xx, кроме ключа, денег,
+ * лимита частоты и 408/425). Префикса «Serper transient:» у текста нет
+ * сознательно: кабинет (clientErrors.classifyHeClientError) читает его как
+ * «сервис временно недоступен», а если стадия упадёт на таком отказе, значит
+ * провайдер отверг ВСЕ её запросы, и «временно недоступен» было бы неправдой.
+ * Без якоря текст получает общий код кабинета («техническая проблема,
+ * попробуйте ещё раз») — для отвергнутых запросов это правда.
+ */
+const QUERY_REJECTED_MESSAGE = 'Serper query rejected: the search API refused this request.';
+const EMPTY_QUERY_MESSAGE = 'Serper query rejected: the search request is empty.';
 
 /**
  * «Кончились кредиты» Serper отдаёт не только кодом 402: тот же отказ приходит
@@ -91,7 +111,8 @@ export async function serperSearch(
 
 /**
  * То же обращение к Serper, но с КЛАССИФИКАЦИЕЙ исхода: отказ по деньгам,
- * отказ по ключу/запросу и транзиентный сбой отделены от полученной выдачи.
+ * отказ по ключу и временный сбой либо отказ одному запросу (см.
+ * SerperFailureKind) отделены от полученной выдачи.
  * Нужна тем, кто на пустом входе продолжает тратить деньги (исследование в
  * движках): пустая выдача — результат, отказ — его отсутствие.
  */
@@ -114,9 +135,21 @@ function httpFailure(status: number, body: string): SerperFailure {
   }
   if (status === 429) return { kind: 'transient', message: RATE_LIMIT_MESSAGE, httpStatus: status };
   if (status >= 500) return { kind: 'transient', message: FAILURE_MESSAGES.transient, httpStatus: status };
-  // Остальные 4xx (401/403 — ключ, 400/422 — запрос) повтором не лечатся:
-  // и то и другое чинит человек, поэтому вид один.
-  return { kind: 'configuration', message: FAILURE_MESSAGES.configuration, httpStatus: status };
+  // 408 (сервер не дождался запроса) и 425 (слишком рано) — временные по
+  // протоколу; классификатор модели повторяет их так же (hypothesisEngine/llm.ts,
+  // RETRYABLE_STATUSES).
+  if (status === 408) return { kind: 'transient', message: TIMEOUT_MESSAGE, httpStatus: status };
+  if (status === 425) return { kind: 'transient', message: FAILURE_MESSAGES.transient, httpStatus: status };
+  // Ключ: не задан или отвергнут — повторится на каждом запросе, чинит человек.
+  if (status === 401 || status === 403) {
+    return { kind: 'configuration', message: FAILURE_MESSAGES.configuration, httpStatus: status };
+  }
+  // Остальные 4xx (400/404/413/422 …) — отказ ЭТОМУ запросу: запросы
+  // исследования пишет модель, и один пустой, слишком длинный или странный
+  // запрос не говорит ничего о следующем. Раньше он был 'configuration', то
+  // есть терминальным с первого раза для всей джобы — с текстом «ключ неверен»
+  // при исправном ключе.
+  return { kind: 'transient', message: QUERY_REJECTED_MESSAGE, httpStatus: status };
 }
 
 /** Строковые поля ответа — только для CREDIT_PHRASE; наружу не уезжают. */
@@ -136,6 +169,11 @@ async function runSerperSearch(
   // Задача уже отменена. Отмена — не отказ провайдера; её разбирает
   // вызывающая сторона по своему же сигналу.
   if (opts?.signal?.aborted) return { items: [] };
+  // Пустой запрос (модель вернула '' в search_queries) — отказ этому запросу,
+  // без обращения к провайдеру: ответить на него нечем. Только для
+  // классифицирующего входа: serperSearch для прочих потребителей ведёт себя
+  // как раньше, байт в байт.
+  if (classify && !query.trim()) return { items: [], failure: { kind: 'transient', message: EMPTY_QUERY_MESSAGE } };
   const metered = getProviderUsageScope() !== undefined;
   const metering = await beginProviderUsage('serper');
   const usage: ProviderUsageDetails = { status: 'ambiguous' };

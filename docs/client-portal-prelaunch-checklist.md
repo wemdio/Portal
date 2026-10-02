@@ -7,7 +7,7 @@
 **Pre-requisites for the run.**
 
 - A test client user with `role='client'` in `public.profiles`. Pick someone who has at least one project assigned, at least one Instantly campaign in their `client_instantly_access` rows, and at least one forwarded reply for that campaign.
-- A separate "second" test client (or admin) so we can confirm cross-client isolation by trying to read the first client's resources from a second tab. If you can't easily set this up, mark the cross-client checks as N/A and rely on the automated tests in `app/tests/api/clientPortalSmoke.test.ts` (RBAC suite, 11 cases).
+- A separate "second" test client (or admin) so we can confirm cross-client isolation by trying to read the first client's resources from a second tab. **This is required, not optional:** do not mark the cross-client checks as N/A. The route-level RBAC suite that used to cover them, `app/tests/api/clientPortalSmoke.test.ts`, was deleted on 2026-08-31 (commit `35bf27d38`, test-suite reduction), and nothing replaced it — see section 15 for what the remaining tests do and do not cover. Without a second client the run is incomplete.
 - Browser dev tools open the whole time — keep an eye on the Network tab for any 4xx/5xx that the UI swallows silently.
 
 ---
@@ -136,7 +136,7 @@ The Email Sequences tab is the legacy way to write sequences pre-launch wizard.
 
 1. **Empty state.** With no campaigns assigned: "Кампаний пока нет" + a CTA "Создать кампанию" linking to `/client/launch`.
 2. **With campaigns.** Each card shows: имя, статус (active / paused / draft), отправлено / открытий / ответов / лидов. `lastSyncedAt` shown somewhere visible.
-3. **Cross-client isolation.** Log in as the second test client. Confirm you only see your own campaigns. Then in the network tab manually edit a request URL to use the first client's `campaign_id` — the API must return 404. (The smoke test suite locks this with 11 RBAC cases; this manual step is just a sanity check on prod.)
+3. **Cross-client isolation.** Log in as the second test client. Confirm you only see your own campaigns. Then in the network tab manually edit a request URL to use the first client's `campaign_id` — the API must return 404. (No automated test checks this per endpoint any more — the RBAC smoke suite was deleted on 2026-08-31, see section 15 — so this manual step is the only check. Repeat it for the replies, thread and lead-comment requests of that campaign.)
 4. **Activate / Pause buttons (if the campaign has a launch).** Click pause on a running campaign.
    - **Network.** `POST /api/client/campaigns/[id]/pause` returns 200 with `{ ok: true, status: 'paused' }`.
    - The UI updates without a full reload.
@@ -213,18 +213,17 @@ Tariff API (`GET /api/client/tariff`) exposes plan + limits + status. If the UI 
 
 ---
 
-## 15. What's covered automatically (don't re-test manually)
+## 15. What's covered automatically — and what no longer is
 
-These are locked by `app/tests/api/clientPortalSmoke.test.ts` (55 tests, runs in <1 s):
+**Read this before skipping anything.** This section used to point at `app/tests/api/clientPortalSmoke.test.ts` (55 route-level tests). That file was deleted on 2026-08-31 (commit `35bf27d38`, test-suite reduction) and no replacement suite exists — there is no `clientEngScopeGuards.test.ts` either. What the tree still checks automatically:
 
-- Auth boundary on every `/api/client/*` endpoint (401 without token, 403 for non-client role).
-- Empty new-user state shape for: onboarding, brief, preset, tariff, campaigns, leads, bases, projects.
-- Brief save round-trip + hypotheses gate (no brief → 400, cached path doesn't call LLM, regenerate=1 forces a fresh call, audience='client' is passed so the prompt drops the «Сигналы» branch).
-- RBAC across clients on every campaign-bound endpoint (campaigns/[id], replies, thread, reply, forward, activate, pause) and lead comments.
-- Cross-campaign emailId leak (using a known-allowed `campaign_id` with a foreign `emailId` → 404).
-- Reports scope filtering (forbidden IDs dropped silently, all-forbidden → 400, no synced data → 503).
+- `app/tests/api/requireClientAuth.test.ts` and `app/tests/api/clientAuthHelper.test.ts` — the shared guard `requireClientAuth` itself: 401 without a user, 403 for a non-client role, demo accounts read-only, infrastructure errors answered 503 instead of an empty result. They test the guard function, **not** that every route calls it.
+- `app/tests/lib/clientInstantlyAccess.test.ts` — the scope helpers the campaign routes use (`filterAllowedIds`, `isResourceAllowed`, `scopeAutoReportCampaignIds`). Again the helpers, not the routes.
+- `app/tests/architecture/verticalEngineV2Isolation.test.ts` — a static scan of the **ENG cabinet routes only** (`/api/client/eng`, section 17): every handler calls `requireClientAuth`, the market gate and an owner-scope check; client-facing error text is English and free of vendor and table names; no unbounded row reads. It does not cover the routes of sections 1–14.
 
-If any of those test cases fails, that's a higher-priority signal than anything in the manual checklist.
+What is **not** covered automatically any more, so it must be tested by hand on every run: empty new-user state shapes (onboarding, brief, preset, tariff, campaigns, leads, bases, projects); the brief save round-trip and the hypotheses gate (section 3); RBAC across clients on every campaign-bound endpoint — campaigns/[id], replies, thread, reply, forward, activate, pause — and lead comments (section 8, item 3, with the second test client); the cross-campaign `emailId` leak (a known-allowed `campaign_id` with a foreign `emailId` must answer 404); reports scope filtering.
+
+If any of the tests above fails, that is still a higher-priority signal than anything in the manual checklist — but a green run of them says nothing about the items in the previous paragraph.
 
 ---
 
@@ -240,7 +239,7 @@ If anything is red:
 
 1. Capture: page URL, network request URL + status, response body, browser console errors.
 2. Open an issue (or message Sergey) with all of the above.
-3. Re-run the smoke jest suite — if it's green, the bug is UI-only; if it's red too, there's a backend regression.
+3. Re-run the tests named in section 15 (`npx jest <file>` from `app/`, one file at a time). Note that a green run does **not** prove the bug is UI-only: route-level RBAC and empty-state shapes have no automated coverage since 2026-08-31, so reproduce the failing request by hand (the network tab capture from step 1) before calling it a UI bug.
 
 ---
 

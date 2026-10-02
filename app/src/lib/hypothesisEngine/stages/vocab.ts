@@ -9,6 +9,8 @@
  * (prompts/vocab.en.ts) — типы компаний/должности/запросы под ENG-источники.
  */
 
+import { z } from 'zod';
+
 import {
   callLLMWithSchema,
   getHeModel,
@@ -41,9 +43,95 @@ const REGISTRY_QUERIES_TO_VERIFY = 2;
 
 /** Поля вокабуляра, пустота которых = бесполезный вокабуляр (порог в HeVocabSchema). */
 const REQUIRED_VOCAB_FIELDS = ['company_types', 'job_titles'] as const;
+type RequiredVocabField = (typeof REQUIRED_VOCAB_FIELDS)[number];
+
+/** Потолок ответа модели вокабуляра; он же назван в тексте отказа про усечение. */
+const VOCAB_MAX_TOKENS = 8192;
 
 /**
- * Пустой словарь: отказ, который повтор стадии не лечит.
+ * Пустой элемент списка (`term`/`title` — пустая строка или одни пробелы)
+ * выбрасываем ДО схемы, а не отвергаем им весь ответ.
+ *
+ * Схема (HeVocabSchema) держит `.trim().min(1)` на `term`/`title`, и один
+ * пустой элемент среди сорока валидных отвергал ВЕСЬ оплаченный словарь. Путь
+ * такой ошибки — «company_types.N.term», то есть это не «словарь пуст», и она
+ * шла обычным схемным сбоем: два вызова на исполнение × MAX_ATTEMPTS = шесть
+ * оплаченных bulk-вызовов и упавший вокабуляр там, где до волны 3 ответ
+ * принимался с первого вызова (и на ежедневном RU-инструменте тоже). Пустой
+ * термин или должность не несут ни одному потребителю ничего, поэтому такой
+ * элемент просто не попадает в he_vocab (до волны 3 он сохранялся пустой
+ * строкой). Список, в котором НЕ осталось ни одного элемента, после этого
+ * упирается в `.min(1)` и честно читается как пустой (HeVocabEmptyError).
+ *
+ * Элемент с полем НЕ строкой (нет `term`, число, null) не трогаем: это формат
+ * ответа, и ему положены штатные повторы схемного сбоя.
+ */
+function dropBlankVocabEntries(value: unknown, onDropped: (count: number) => void): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const answer = value as Record<string, unknown>;
+  let dropped = 0;
+  const withoutBlank = (list: unknown, field: 'term' | 'title'): unknown => {
+    if (!Array.isArray(list)) return list;
+    return list.filter((item) => {
+      const text = item && typeof item === 'object' ? (item as Record<string, unknown>)[field] : undefined;
+      const blank = typeof text === 'string' && text.trim() === '';
+      if (blank) dropped += 1;
+      return !blank;
+    });
+  };
+  const out: Record<string, unknown> = { ...answer };
+  if ('company_types' in answer) out.company_types = withoutBlank(answer.company_types, 'term');
+  if ('job_titles' in answer) out.job_titles = withoutBlank(answer.job_titles, 'title');
+  onDropped(dropped);
+  return out;
+}
+
+/**
+ * Обязательные поля, из-за которых ответ модели непригоден: ПУСТОЙ список
+ * (`too_small` ровно на пути поля) и ОТСУТСТВУЮЩИЙ (`invalid_type` на том же
+ * пути — ключа нет, null или не список). Пути у них одинаковые — «job_titles»,
+ * — и различает их только код: раньше обрезанный ответ, который ремонт JSON
+ * закрыл без job_titles, назывался «пустым словарём». Проблемы ВНУТРИ
+ * элементов («company_types.3.kind») сюда не попадают — это формат ответа.
+ */
+function unusableVocabFields(error: LLMValidationError): {
+  empty: RequiredVocabField[];
+  missing: RequiredVocabField[];
+} {
+  const empty: RequiredVocabField[] = [];
+  const missing: RequiredVocabField[] = [];
+  const zodError = error.zodError;
+  if (!(zodError instanceof z.ZodError)) return { empty, missing };
+  for (const issue of zodError.issues) {
+    if (issue.path.length !== 1) continue;
+    const field = REQUIRED_VOCAB_FIELDS.find((f) => f === issue.path[0]);
+    if (!field) continue;
+    if (issue.code === 'too_small' && !empty.includes(field)) empty.push(field);
+    if (issue.code === 'invalid_type' && !missing.includes(field)) missing.push(field);
+  }
+  return { empty, missing };
+}
+
+/**
+ * Последний ответ не был целым JSON — его закрыл ремонт усечённого ответа
+ * (tryRepairTruncatedJson в llm.ts). Тот же разбор, что у вызова: снять
+ * markdown-фенс и распарсить.
+ */
+function vocabAnswerWasCut(rawText: string): boolean {
+  const cleaned = rawText.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+  try {
+    JSON.parse(cleaned);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Непригодный словарь: отказ, который повтор стадии не лечит. Два случая —
+ * обязательный список пуст или его нет в ответе вовсе (ответ обрезан и закрыт
+ * ремонтом JSON раньше поля либо модель поле пропустила); текст отказа
+ * называет, какой именно.
  *
  * Класс терминальный (дискриминант heJobTerminal читает воркер, isHeJobTerminal)
  * ровно по арифметике оплаты. Внутри ОДНОГО вызова модель уже получила второй
@@ -51,8 +139,11 @@ const REQUIRED_VOCAB_FIELDS = ['company_types', 'job_titles'] as const;
  * цена вопроса — два bulk-вызова. Без терминальности к ним прибавлялись ещё две
  * полные попытки джобы (MAX_ATTEMPTS = 3) с тем же промптом на том же тексте
  * вертикали: шесть оплаченных вызовов, чтобы шесть раз услышать один ответ.
- * Провайдер тут ни при чём — молчит предметная область, а она за пять минут не
- * меняется, и разбирать это человеку.
+ * Провайдер тут ни при чём — молчит предметная область (или ответ на неё не
+ * помещается в лимит), а она за пять минут не меняется, и разбирать это
+ * человеку. Отсутствующее поле терминально по той же арифметике: повтор идёт
+ * тем же промптом с тем же лимитом токенов и почти наверняка обрежется в том же
+ * месте — шесть вызовов вместо двух ради одного и того же ответа.
  */
 class HeVocabEmptyError extends Error {
   /** Дискриминант: instanceof ложен, если в бандле окажется две копии модуля. */
@@ -78,25 +169,63 @@ class HeVocabEmptyError extends Error {
  * (stages/dossier.ts) считало hh-вакансии не по тем ролям, и в логе была
  * только строка «продолжаем без …».
  *
- * Различение остаётся прежним и оно важно для цены: пустой список — это про
- * предметную область (терминально), кривой элемент внутри списка — про формат
- * ответа, и ему повторы положены как любому схемному сбою.
+ * Различение важно для цены: пустой или отсутствующий список — терминально
+ * (см. HeVocabEmptyError), кривой элемент внутри списка — про формат ответа, и
+ * ему повторы положены как любому схемному сбою. Пустой элемент к кривым не
+ * относится: он выбрасывается до схемы (dropBlankVocabEntries).
  */
-async function callVocabModel(messages: LLMMessage[], model: string) {
+async function callVocabModel(messages: LLMMessage[], model: string, log: (msg: string) => void) {
+  // Сколько пустых элементов выбросила последняя проверка схемы — то есть та,
+  // чей ответ и вернулся (у каждой попытки схемы свой разбор, значение
+  // перезаписывается, а не копится).
+  let blankDropped = 0;
+  const schema = z.preprocess(
+    (value) => dropBlankVocabEntries(value, (count) => {
+      blankDropped = count;
+    }),
+    HeVocabSchema,
+  );
   try {
-    return await callLLMWithSchema(messages, HeVocabSchema, { model, maxTokens: 8192 });
+    const llm = await callLLMWithSchema(messages, schema, { model, maxTokens: VOCAB_MAX_TOKENS });
+    if (blankDropped > 0) {
+      log(`[vocab] модель вернула пустых элементов словаря: ${blankDropped} — выброшены, остальное принято`);
+    }
+    return llm;
   } catch (error) {
     if (error instanceof LLMValidationError) {
-      const paths = llmValidationIssuePaths(error);
-      // Пустой список на верхнем уровне даёт путь ровно «company_types»;
-      // кривой элемент — «company_types.0.term», и это другая новость.
-      const empty = REQUIRED_VOCAB_FIELDS.filter((field) => paths.includes(field));
-      if (empty.length > 0) {
+      const { empty, missing } = unusableVocabFields(error);
+      if (empty.length > 0 || missing.length > 0) {
+        const reasons: string[] = [];
+        // Разбор — по ПОСЛЕДНЕМУ ответу (его схема и текст приезжают в ошибке);
+        // первый тоже не прошёл схему, но чем именно — здесь не видно.
+        if (empty.length > 0) {
+          // «Пусто» — и `[]`, и список из одних пустых элементов (их выбросил
+          // dropBlankVocabEntries): фраза верна для обоих.
+          reasons.push(`и после повтора с фидбэком в списке нет ни одного непустого элемента (${empty.join(', ')})`);
+        }
+        if (missing.length > 0) {
+          reasons.push(
+            vocabAnswerWasCut(error.rawText)
+              ? `и после повтора ответ модели пришёл не целым JSON (обрезан по лимиту ${VOCAB_MAX_TOKENS} `
+                + `токенов или сломан), и ремонт закрыл его раньше поля (${missing.join(', ')})`
+              : `и после повтора в ответе модели нет поля (${missing.join(', ')})`,
+          );
+        }
         throw new HeVocabEmptyError(
-          `[vocab] модель дважды вернула пустой словарь (${empty.join(', ')}): ` +
-            'без типов компаний план сбора остался бы без терминов источника, ' +
+          `[vocab] словарь непригоден: ${reasons.join('; ')}. ` +
+            'Без типов компаний план сбора остался бы без терминов источника, ' +
             'без должностей досье считало бы не те роли. Стадия остановлена, ' +
-            'повтор её не починит — нужен человек: уточните описание вертикали и запустите заново.',
+            'повтор тем же промптом её не починит — нужен человек: уточните или сузьте описание вертикали ' +
+            'и запустите заново.',
+        );
+      }
+      // Кривой элемент — формат ответа: штатный повтор схемного сбоя. Пути — в
+      // лог, чтобы специалист не путал это с пустым словарём.
+      const paths = llmValidationIssuePaths(error);
+      if (paths.length > 0) {
+        log(
+          `[vocab] ответ модели и после повтора не прошёл схему (${paths.slice(0, 6).join(', ')}`
+            + `${paths.length > 6 ? ', …' : ''}) — это формат ответа, а не пустой словарь`,
         );
       }
     }
@@ -148,6 +277,17 @@ export async function runVocabStage(job: HeJob, ctx: HeStageContext): Promise<He
   // теряет: боли и мотивы приходят списком гипотез ниже, а он для сегментов и
   // объявлен ПЕРВИЧНЫМ источником. RU-ветка (legacy /tools/hypothesis-engine)
   // получает summary как раньше, байт-в-байт.
+  //
+  // Срез мотива НЕ общий для всех потребителей summary, и это надо знать.
+  // EN-планировщик источников (stages/baseCollect.ts, collectPlanInput →
+  // buildSourcePlanMessagesEn и его ремонтный и расширяющий варианты) и
+  // проверка «порог размера обоснован» (heSizeBasisEn) получают summary
+  // ЦЕЛИКОМ, вместе с «They buy because …» — хотя довод выше (мотив даёт
+  // фильтры каталога, под которые компаний нет) к планировщику относится так
+  // же. Порезать его и там — отдельное решение с ценой: вход планировщика
+  // хешируется в ключ переиспользования плана (heCatalogPlanKey), поэтому такая
+  // правка обнулит сохранённые планы всех ENG-вертикалей, и каждая купит новый
+  // план и новую пробу среза.
   const summary = vertical.summary ?? '';
   const model = getHeModel('bulk');
   const llm = await callVocabModel(
@@ -158,6 +298,7 @@ export async function runVocabStage(job: HeJob, ctx: HeStageContext): Promise<He
       hypotheses,
     }),
     model,
+    (msg) => stageLog(ctx, msg),
   );
   addUsage(usage, llm);
   const vocab = llm.data;

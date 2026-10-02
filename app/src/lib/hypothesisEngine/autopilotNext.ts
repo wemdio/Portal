@@ -21,7 +21,11 @@
  *                        считается, но и новой сборки НЕ вызывает: ей
  *                        доставляют пропавший base_analyze
  *                        (repairOrphanAnalyzingBase) — собранные и оплаченные
- *                        строки не выбрасываем. Сборка идёт только там, где
+ *                        строки не выбрасываем. Если же анализ этой базы уже
+ *                        ЗАПУСКАЛСЯ и упал или был отменён клиентом, дочейн
+ *                        его не переоплачивает и сборку тоже не ставит
+ *                        (analysis_failed_before / analysis_cancelled) —
+ *                        повтор решает человек. Сборка идёт только там, где
  *                        анализировать нечего. Сама
  *                        base_collect в не-refill режиме завершает базу в
  *                        'analyzing' и ставит base_analyze — это звено
@@ -39,7 +43,10 @@
  *    + HE_AUTOPILOT_PAUSE_REASONS): закрытый список машинных токенов, который
  *    читают ночной реконсилер (autopilotReconcile.ts) и проекция кабинета;
  *  - heTemplateGenerationBudget: тормоз бесконечной платной генерации писем,
- *    привязанный к ПОКОЛЕНИЮ анализа базы.
+ *    привязанный к ПОКОЛЕНИЮ анализа базы;
+ *  - latestEndedJobByBase / endedBaseAnalyzeOutcomes: «эту стадию по базе уже
+ *    пробовали» — последний упавший или отменённый исход, общий для дочейна и
+ *    ночного реконсилера.
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -103,8 +110,9 @@ const PAUSE_AT_COLUMN = 'autopilot_error_at';
  *                          терминал: повторить может и ночной реконсилер, и
  *                          кнопка кабинета — путь у них один;
  *  - 'enqueue_failed'    — постановка стадии отвергнута БД. Тоже повторяется;
- *  - 'letters_exhausted' — платные прогоны генерации писем на это поколение
- *                          анализа исчерпаны (см. heTemplateGenerationBudget);
+ *  - 'letters_exhausted' — засчитанные прогоны генерации писем на это поколение
+ *                          анализа дошли до порога (см.
+ *                          heTemplateGenerationBudget);
  *  - 'stage_failed'      — оплаченная стадия закончилась отказом, и сам по себе
  *                          автопилот за неё второй раз не платит;
  *  - 'setup_incomplete'  — вести нечего: вертикаль или база исчезли, в джобе нет
@@ -178,9 +186,10 @@ export function toHeAutopilotPause(
  *    шаблоны). Уронить из-за этой записи уже сделанную работу нельзя. Сюда же
  *    попадает инсталляция без применённой миграции (PostgREST 42703) — там
  *    запись просто не выполняется, и всё остальное работает как раньше;
- *  - updated_at НЕ ТРОГАЕТСЯ. По нему ночной проход выбирает самые застоявшиеся
- *    проекты (autopilotReconcile.ts); пометка паузы — не работа по проекту, и
- *    двигать его в конец очереди она не должна;
+ *  - updated_at НЕ ТРОГАЕТСЯ: пометка паузы — не работа по проекту, а колонку
+ *    двигает учёт расхода оплаченных стадий (worker/hypothesisEngine:
+ *    accumulateProjectUsage). Очередь ночного прохода от неё больше не зависит
+ *    (он идёт по id с ночным сдвигом окна, см. runHeAutopilotReconcilePass);
  *  - СНЯТИЕ адресное: `.not(is null)` — строку без причины запись не трогает
  *    вовсе.
  */
@@ -311,8 +320,15 @@ export function liveBaseIdsFromJobs(jobs: { payload?: unknown }[]): Set<string> 
 
 /**
  * Итог ремонта осиротевшей 'analyzing'-базы: 'reanalyzed' — у базы ЕСТЬ
- * поставленный анализ (вставили сейчас или он уже был, см. дедуп ниже),
- * 'failed' — база переведена в терминальный статус.
+ * поставленный анализ (вставили сейчас, он уже был, см. дедуп ниже, или
+ * вставка «упала», но перечитывание нашло её строку), 'failed' — АНАЛИЗИРОВАТЬ
+ * НЕЧЕГО (refill, нет строк или колонок), и база переведена в терминальный
+ * статус. Только этот исход разрешает вызывающему новую сборку.
+ *
+ * Третьего вердикта нет намеренно: «не смогли поставить анализ» — это БРОСОК,
+ * а не значение. Значение 'failed' на этом месте до волны правок аудита
+ * означало две разные новости, и каждый вызывающий читал его как «нечего
+ * анализировать» и ставил новую платную сборку поверх оплаченных строк.
  */
 export type HeAnalyzingBaseRepair = 'reanalyzed' | 'failed';
 
@@ -332,19 +348,34 @@ export type HeAnalyzingBaseRepair = 'reanalyzed' | 'failed';
  *
  * 'failed' (CAS по 'analyzing') остаётся ровно там, где анализ невозможен:
  * анализировать нечего (нет строк или колонок — base_analyze сходил бы к LLM по
- * нулю строк и выставил 'analyzed' пустышке), в этом конвейере анализа не бывает
- * вовсе (refill: долив лидов в кампанию, его терминальные статусы пишет
- * stages/baseCollectRefill.ts) или сама постановка не удалась. Иначе база без
- * живой джобы висела бы в 'analyzing' навсегда, а автопилот вертикали считал бы
- * её подготовленной и больше ничего не ставил.
+ * нулю строк и выставил 'analyzed' пустышке) или в этом конвейере анализа не
+ * бывает вовсе (refill: долив лидов в кампанию, его терминальные статусы пишет
+ * stages/baseCollectRefill.ts).
+ *
+ * СБОЙ ПОСТАНОВКИ — НЕ 'failed', а бросок, и база остаётся в 'analyzing'.
+ * Раньше отвергнутая вставка валила базу с оплаченными строками в 'failed' и
+ * возвращала тот же вердикт, что и «нечего анализировать», — и все вызывающие
+ * (дочейн после chain, реконсилер по кнопке и ночью) ставили на это НОВУЮ
+ * платную сборку: компании базы выпадали из исключений (`.neq('status',
+ * 'failed')`) и покупались заново. А при ПОТЕРЯННОМ ответе (вставка
+ * закоммитилась, шлюз ответил 502) живая джоба анализа затем сама переписывала
+ * базу в 'analyzing' → 'analyzed', и у вертикали оказывались две платные базы.
+ * Поэтому после отказа вставки строка перечитывается тем же дедупом: нашлась —
+ * 'reanalyzed'; не нашлась или перечитать не удалось — бросок с базой в
+ * 'analyzing'. Зависнуть она так не может: без живой джобы её снова видят
+ * осиротевшей и дочейн после следующего chain, и кнопка «Start outreach», и
+ * ночной проход — каждый повторит БЕСПЛАТНУЮ вставку. RU-инструмент (autopilot
+ * = false) этих контуров не имеет, и там база остаётся 'analyzing' — ровно как
+ * до ветки, где 'analyzing' ремонт не трогал вовсе.
  *
  * Живость базы проверяет ВЫЗЫВАЮЩИЙ (isAnalyzingBaseLive), но СВОЙ дедуп у
  * вставки тоже есть: снапшот живости вызывающего отделён от этой вставки
  * запросами (а у роута — ещё и обходом остальных вертикалей), и двух гонящихся
  * контуров или одного устаревшего снапшота хватает, чтобы по одной базе ушло
- * два base_analyze — то есть платный анализ дважды. Сбой записи бросаем:
- * вызывающий сам решает, что с этим делать, но ни один из трёх не имеет права
- * принять «не смогли починить» за «нечего анализировать» и запустить сборку.
+ * два base_analyze — то есть платный анализ дважды. Сбой записи и постановки
+ * бросаем: вызывающий сам решает, что с этим делать, но ни один из трёх не
+ * имеет права принять «не смогли починить» за «нечего анализировать» и
+ * запустить сборку.
  */
 export async function repairOrphanAnalyzingBase(
   supabase: SupabaseClient,
@@ -408,9 +439,24 @@ export async function repairOrphanAnalyzingBase(
     payload: { base_id: base.id },
   });
   if (enqueueErr) {
-    // Анализ поставить не вышло — тогда прежний исход, иначе база зависнет.
-    await markFailed(`${reason}; he_jobs base_analyze enqueue: ${enqueueErr.message}`);
-    return 'failed';
+    // «Отвергнута» ≠ «не легла»: ответ шлюза мог потеряться при закоммиченной
+    // вставке. Перечитываем тем же дедупом; базу в 'failed' не роняем ни при
+    // каком исходе — см. докблок: строки оплачены, а 'failed' для вызывающего
+    // означает «собирай заново».
+    const { data: landed, error: landedErr } = await supabase
+      .from('he_jobs')
+      .select('id, payload')
+      .eq('project_id', projectId)
+      .eq('stage', 'base_analyze')
+      .in('status', ['pending', 'running']);
+    if (!landedErr && (landed ?? []).some((j) => jobBaseId((j as { payload?: unknown }).payload) === base.id)) {
+      return 'reanalyzed';
+    }
+    throw new Error(
+      `he_jobs base_analyze enqueue: ${enqueueErr.message}`
+        + (landedErr ? `; he_jobs base_analyze re-read: ${landedErr.message}` : '')
+        + ` (he_bases ${base.id} left 'analyzing')`,
+    );
   }
   return 'reanalyzed';
 }
@@ -418,6 +464,83 @@ export async function repairOrphanAnalyzingBase(
 /** Причина ремонта: base_analyze не был поставлен, живой джобы по базе нет. */
 export const ORPHAN_ANALYZING_REASON =
   'he_jobs base_analyze не поставлен: база осталась в analyzing без активной джобы';
+
+/* ───────────── «Эту стадию уже пробовали»: последний неуспешный исход ───────────── */
+
+/** Неуспешный терминальный исход джобы: отказ движка или отмена клиентом. */
+export type HeJobEndedOutcome = 'failed' | 'cancelled';
+
+/**
+ * base_id → исход ПОСЛЕДНЕЙ упавшей или отменённой джобы из `stages` по этой
+ * базе. Строки — уже прочитанные he_jobs (status, stage, payload, created_at,
+ * id) в любом порядке; 'done', активные и чужие стадии пропускаются.
+ *
+ * ПОСЛЕДНЯЯ, а не «любая»: у одной базы бывают оба исхода (клиент отменил
+ * анализ, потом нажал «Start outreach» и новый анализ упал — или наоборот), и
+ * правду о ней говорит тот, что случился позже. Порядок — created_at, тайбрейк
+ * id: ровно так выбирает «последнюю джобу базы» и SQL автоподъёма
+ * (20260929_0001_he_base_transient_resume.sql).
+ *
+ * Отдельной функцией, а не внутри каждого контура: «уже пробовали» читают и
+ * дочейн после chain (endedBaseAnalyzeOutcomes ниже), и ночной реконсилер из
+ * своего снапшота — два экземпляра правила разъехались бы молча.
+ */
+export function latestEndedJobByBase(
+  rows: ReadonlyArray<Record<string, unknown>>,
+  stages: readonly string[],
+): Map<string, HeJobEndedOutcome> {
+  const ended = rows
+    .filter((row) => (row.status === 'failed' || row.status === 'cancelled')
+      && typeof row.stage === 'string' && stages.includes(row.stage)
+      && jobBaseId(row.payload) !== null)
+    .map((row) => ({
+      baseId: jobBaseId(row.payload) as string,
+      outcome: row.status as HeJobEndedOutcome,
+      // Нечитаемая метка — самой старой: «позже» про неё сказать нечего.
+      at: typeof row.created_at === 'string' ? Date.parse(row.created_at) || 0 : 0,
+      id: typeof row.id === 'string' ? row.id : '',
+    }))
+    .sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const byBase = new Map<string, HeJobEndedOutcome>();
+  for (const row of ended) byBase.set(row.baseId, row.outcome);
+  return byBase;
+}
+
+/**
+ * Исход последнего упавшего/отменённого base_analyze по каждой из `baseIds`
+ * (нет ключа — анализ этой базы не падал и не отменялся).
+ *
+ * Зачем. Финальный фейл анализа НЕ трогает he_bases: failJob воркера лечит базу
+ * только после base_collect, а стадия ставит 'analyzing' на входе и 'analyzed'
+ * лишь на успехе. Отменённый анализ — тоже 'analyzing', если запись стадии
+ * опередила роут отмены. Значит такая база выглядит ОСИРОТЕВШЕЙ по общему
+ * предикату, и ремонт без этого чтения ставил бы ей новый ПЛАТНЫЙ анализ —
+ * которого никто не просил.
+ *
+ * Сбой чтения — HeAutopilotReadError: «не знаю, падал ли анализ» не равно «не
+ * падал», и платную постановку на догадке не делаем.
+ */
+export async function endedBaseAnalyzeOutcomes(
+  supabase: SupabaseClient,
+  projectId: string,
+  baseIds: readonly string[],
+): Promise<Map<string, HeJobEndedOutcome>> {
+  if (baseIds.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('he_jobs')
+    .select('id, stage, status, payload, created_at')
+    .eq('project_id', projectId)
+    .eq('stage', 'base_analyze')
+    .in('status', ['failed', 'cancelled'])
+    .in('payload->>base_id', [...baseIds]);
+  if (error) throw new HeAutopilotReadError(`he_jobs base_analyze ended read: ${error.message}`);
+  const wanted = new Set(baseIds);
+  const rows = ((data ?? []) as Array<Record<string, unknown>>).filter((row) => {
+    const baseId = jobBaseId(row.payload);
+    return baseId !== null && wanted.has(baseId);
+  });
+  return latestEndedJobByBase(rows, ['base_analyze']);
+}
 
 /* ───────────── Почему шаг не понадобился: причина вместо молчания ───────────── */
 
@@ -452,7 +575,7 @@ export const HE_AUTOPILOT_SKIP_REASONS = [
   'chain_failed_before', // цепочка уже падала; автоматически за неё не платим
   'collect_failed_before', // сборка уже падала; автоматически за неё не платим
   'analysis_failed_before', // анализ базы уже падал; автоматически за него не платим
-  'letters_exhausted',   // платные прогоны писем на это поколение анализа исчерпаны
+  'letters_exhausted',   // засчитанные прогоны писем на это поколение анализа дошли до порога
   /**
    * Решения КЛИЕНТА, а не отказы. Кнопка «Cancel all jobs» переводит джобы в
    * 'cancelled', и ночью за такую работу не платим заново: клиент её только
@@ -461,6 +584,7 @@ export const HE_AUTOPILOT_SKIP_REASONS = [
    * возобновляет он сам кнопкой «Start outreach».
    */
   'chain_cancelled',     // цепочку писем отменил клиент
+  'collect_cancelled',   // сборку (или анализ) последней базы вертикали отменил клиент
   'analysis_cancelled',  // анализ базы отменил клиент
   'template_cancelled',  // генерацию писем по базе отменил клиент
   'orphan_repair_failed',      // ремонт осиротевшей базы не удался (запись)
@@ -499,6 +623,7 @@ export function pauseForHeAutopilotSkip(
     case 'analysis_failed_before':
       return 'stage_failed';
     case 'chain_cancelled':
+    case 'collect_cancelled':
     case 'analysis_cancelled':
     case 'template_cancelled':
       return null;
@@ -514,14 +639,33 @@ export function pauseForHeAutopilotSkip(
 /* ───────────── Тормоз бесконечной платной генерации писем ───────────── */
 
 /**
- * Сколько ПЛАТНЫХ прогонов генерации писем разрешено на ОДНО поколение анализа
- * базы.
+ * Порог тормоза писем: новая генерация по поколению анализа базы НЕ СТАВИТСЯ,
+ * когда засчитанных прогонов (heTemplateGenerationBudget) уже столько.
  *
- * Три — ровно столько же, сколько воркер (MAX_ATTEMPTS в
- * worker/hypothesisEngine.ts) даёт одной строке джобы. Совпадение осознанное:
- * тормоз не обязан укорачивать прогон, который воркер и так собирался сделать,
- * он обязан не дать НАЧАТЬ следующий круг за те же деньги. Константу не
- * импортируем: она живёт в воркере, а этот модуль тянут и роуты Next.
+ * ЭТО ПОРОГ ПОСТАНОВКИ, А НЕ ПОТОЛОК РАСХОДА — и «три платных прогона на
+ * поколение» он не означает, по двум причинам:
+ *  - тормоз не даёт НАЧАТЬ строку, но не укорачивает уже начатую. Строка,
+ *    поставленная при двух засчитанных прогонах, проходит все свои
+ *    MAX_ATTEMPTS = 3 (worker/hypothesisEngine.ts), так что по счётчику
+ *    поколение доходит до (3 − 1) + 3 = 5 засчитанных прогонов;
+ *  - засчитываются ПОПЫТКИ (he_jobs.attempts), а не вызовы модели. Бесплатное
+ *    прерывание (рестарт пода, сторож простоя) попытку не тратит, хотя
+ *    прерванный прогон мог уже оплатить модель (воркер даже записывает этот
+ *    расход в he_jobs.cost_usd). Перед каждой засчитанной попыткой воркер
+ *    допускает до HE_JOB_FREE_INTERRUPTIONS = 5 прерываний подряд, то есть одна
+ *    строка — это до 3 × (1 + 5) = 18 прогонов стадии, а сколько из них было
+ *    прервано, строка не хранит: payload.interruptions — серия ПОДРЯД, её
+ *    снимает следующий обычный фейл или done.
+ * Худший случай машинного пути на одно поколение — три строки (две по одному
+ * засчитанному прогону, третья на все три попытки): до 5 засчитанных попыток
+ * и до 6 + 6 + 18 = 30 прогонов стадии с прерываниями. Строки, отменённые
+ * клиентом, сюда не входят: их attempts обычно 0, и их число задаёт человек.
+ * Граница КОНЕЧНА — ради этого тормоз и стоит; строже (ровно три) её сделала
+ * бы только постановка «paidRuns + MAX_ATTEMPTS ≤ порог», а она при этих числах
+ * оставляет одну строку на поколение — это решение о продукте, а не правка.
+ *
+ * Три — столько же, сколько MAX_ATTEMPTS воркера даёт одной строке. Константу
+ * не импортируем: она живёт в воркере, а этот модуль тянут и роуты Next.
  */
 export const HE_TEMPLATE_PAID_RUNS_PER_ANALYSIS = 3;
 
@@ -529,7 +673,11 @@ export const HE_TEMPLATE_PAID_RUNS_PER_ANALYSIS = 3;
 export interface HeTemplateGenerationBudget {
   /** Можно ли ставить ещё одну генерацию. */
   allowed: boolean;
-  /** Сколько платных прогонов уже стоило это поколение. */
+  /**
+   * Сколько прогонов засчитано этому поколению: попытки строк (он же счётчик
+   * he_jobs.attempts), закончившейся строке — минимум одна. Бесплатно
+   * прерванные прогоны сюда не попадают (см. HE_TEMPLATE_PAID_RUNS_PER_ANALYSIS).
+   */
   paidRuns: number;
   /** created_at последней done-джобы base_analyze этой базы (null — её нет). */
   generationAt: string | null;
@@ -541,7 +689,8 @@ function jobBaseId(payload: unknown): string | null {
 }
 
 /**
- * ТОРМОЗ: сколько платных генераций писем уже съело текущее поколение анализа.
+ * ТОРМОЗ: сколько засчитанных генераций писем уже съело текущее поколение
+ * анализа.
  *
  * ЗАЧЕМ. Упавшая стадия template не оставляет после себя ничего: строка джобы
  * терминальна, he_templates нет, база остаётся 'analyzed'. Поэтому всякий, кто
@@ -557,10 +706,13 @@ function jobBaseId(payload: unknown): string | null {
  * проходит. Без привязки тормоз запретил бы и его — а это живая продуктовая
  * потребность, ради которой ручная кнопка и существует.
  *
- * СЧИТАЕМ ДЕНЬГИ, А НЕ СТРОКИ. attempts в этом движке инкрементируется только
- * на ПЛАТНОМ фейле: бесплатное прерывание (рестарт пода, сторож простоя) его не
- * трогает. Поэтому строка, убитая деплоем и не потратившая попытки, бюджет не
- * ест — следующая генерация разрешена. Закончившейся строке (done/failed)
+ * СЧИТАЕМ ПОПЫТКИ, А НЕ СТРОКИ — и попытка здесь приближение денег, а не
+ * деньги. attempts в этом движке инкрементируется только на ЗАСЧИТАННОМ фейле:
+ * бесплатное прерывание (рестарт пода, сторож простоя) его не трогает. Поэтому
+ * строка, убитая деплоем и не потратившая попытки, порог не приближает —
+ * следующая генерация разрешена, хотя прерванный прогон мог уже оплатить
+ * модель; насколько это расходится с деньгами — в докблоке
+ * HE_TEMPLATE_PAID_RUNS_PER_ANALYSIS. Закончившейся строке (done/failed)
  * засчитываем минимум один прогон: она дошла до конца, значит модель звали хотя
  * бы раз, даже если счётчик этого не записал.
  *
@@ -685,7 +837,9 @@ async function afterChainDone(supabase: SupabaseClient, job: HeJob): Promise<Aut
     .select(HE_ANALYZING_BASE_FIELDS)
     .eq('vertical_id', verticalId)
     .eq('source', 'auto')
-    .in('status', ['analyzing', 'analyzed']);
+    .in('status', ['analyzing', 'analyzed'])
+    // Свежая — первой: вертикали нужна ОДНА база, и лечится первая годная.
+    .order('created_at', { ascending: false });
   if (doneBaseErr) throw new HeAutopilotReadError(`autopilot done-base read: ${doneBaseErr.message}`);
   const prepared = (preparedBases ?? []) as unknown as HeAnalyzingBase[];
   if (prepared.some((b) => b.status === 'analyzed')) return skipped('base_ready');
@@ -712,17 +866,31 @@ async function afterChainDone(supabase: SupabaseClient, job: HeJob): Promise<Aut
     // финального фейла base_collect: годной базе доставляем base_analyze —
     // тогда «analyzing the base…» в кабинете снова правда, а новая платная
     // сборка не нужна. В 'failed' уходит только то, что анализировать нечем, и
-    // лишь тогда ниже идёт сборка.
-    let reanalyzed = 0;
+    // лишь тогда ниже идёт сборка; не удавшаяся постановка БРОСАЕТ (база
+    // остаётся 'analyzing'), и сборки тоже нет.
+    //
+    // Но «осиротевшая» по предикату ≠ «анализ не ставили». Анализ, который уже
+    // ЗАПУСКАЛСЯ и упал (failJob базу не трогает — она так и висит в
+    // 'analyzing') или был отменён клиентом, этот дочейн не переоплачивает: он
+    // автоматический, и правило у него то же, что у ночного прохода, — за
+    // упавшую или отменённую платную стадию машина второй раз не платит.
+    // Такая база вертикаль ЗАНИМАЕТ (иначе ниже пошла бы новая платная сборка
+    // или анализ соседней сироты); повтор — кнопка «Start outreach» или
+    // специалист. Порядок и остановка — как у реконсилера: свежая база первой,
+    // и вопрос вертикали закрывает первая же база, занятая или вылеченная.
+    const ended = await endedBaseAnalyzeOutcomes(supabase, job.project_id, orphans.map((b) => b.id));
     for (const orphan of orphans) {
+      const end = ended.get(orphan.id);
+      if (end) return skipped(end === 'cancelled' ? 'analysis_cancelled' : 'analysis_failed_before');
       const verdict = await repairOrphanAnalyzingBase(supabase, {
         projectId: job.project_id,
         base: orphan,
         reason: ORPHAN_ANALYZING_REASON,
       });
-      if (verdict === 'reanalyzed') reanalyzed += 1;
+      // Вертикали нужна ОДНА база: вылеченная первой закрывает вопрос, вторую
+      // сироту анализировать незачем — это второй платный анализ.
+      if (verdict === 'reanalyzed') return 'reanalyzed';
     }
-    if (reanalyzed > 0) return 'reanalyzed';
   }
 
   const res = await enqueueHeBaseCollect(supabase, {
@@ -736,22 +904,31 @@ async function afterChainDone(supabase: SupabaseClient, job: HeJob): Promise<Aut
   return res.created ? 'enqueued' : 'existing';
 }
 
-/** base_analyze done → постановка генерации шаблона по проанализированной базе. */
-async function afterBaseAnalyzeDone(supabase: SupabaseClient, job: HeJob): Promise<AutopilotFollowup> {
+/**
+ * base_analyze done → постановка генерации шаблона по проанализированной базе.
+ * Вместе с итогом отдаёт вертикаль базы (null — не прочиталась): по ней
+ * enqueueAutopilotFollowups решает, вправе ли он СНЯТЬ паузу проекта.
+ */
+async function afterBaseAnalyzeDone(
+  supabase: SupabaseClient,
+  job: HeJob,
+): Promise<{ outcome: AutopilotFollowup; verticalId: string | null }> {
   const baseId = typeof job.payload?.base_id === 'string' ? job.payload.base_id : null;
-  if (!baseId) return skipped('no_base_in_job');
+  if (!baseId) return { outcome: skipped('no_base_in_job'), verticalId: null };
 
   const { data: base, error: baseErr } = await supabase
     .from('he_bases')
-    .select('id, status')
+    .select('id, status, vertical_id')
     .eq('id', baseId)
     .maybeSingle();
   if (baseErr) throw new HeAutopilotReadError(`autopilot base read: ${baseErr.message}`);
   // Шаблон строится только по проанализированной базе (контракт ручной кнопки).
-  if (!base) return skipped('base_missing');
+  if (!base) return { outcome: skipped('base_missing'), verticalId: null };
+  const rawVerticalId = (base as { vertical_id?: unknown }).vertical_id;
+  const verticalId = typeof rawVerticalId === 'string' && rawVerticalId.length > 0 ? rawVerticalId : null;
   const baseStatus = (base as { status?: unknown }).status;
   if (baseStatus !== 'analyzed') {
-    return skipped(baseStatus === 'failed' ? 'base_failed' : 'base_not_analyzed');
+    return { outcome: skipped(baseStatus === 'failed' ? 'base_failed' : 'base_not_analyzed'), verticalId };
   }
 
   // Дедуп — как у ручного роута bases/[id]/template: активная template-джоба
@@ -768,7 +945,7 @@ async function afterBaseAnalyzeDone(supabase: SupabaseClient, job: HeJob): Promi
   const existing = (active ?? []).find(
     (j) => (j.payload as { base_id?: string } | null)?.base_id === baseId,
   );
-  if (existing) return 'existing';
+  if (existing) return { outcome: 'existing', verticalId };
 
   // ТОРМОЗ платной генерации писем: бюджет поколения анализа (см.
   // heTemplateGenerationBudget). Здесь он почти всегда пропускает — эта
@@ -779,7 +956,7 @@ async function afterBaseAnalyzeDone(supabase: SupabaseClient, job: HeJob): Promi
     projectId: job.project_id,
     baseId,
   });
-  if (!budget.allowed) return skipped('letters_exhausted');
+  if (!budget.allowed) return { outcome: skipped('letters_exhausted'), verticalId };
 
   const { error: jobErr } = await supabase.from('he_jobs').insert({
     project_id: job.project_id,
@@ -788,17 +965,63 @@ async function afterBaseAnalyzeDone(supabase: SupabaseClient, job: HeJob): Promi
     payload: { base_id: baseId },
   });
   if (jobErr) throw new Error(`autopilot template enqueue: ${jobErr.message}`);
-  return 'enqueued';
+  return { outcome: 'enqueued', verticalId };
+}
+
+/** Итог дочейна, при котором конвейер ЭТОЙ вертикали пошёл дальше. */
+function isFollowupProgress(outcome: AutopilotFollowup): boolean {
+  return outcome === 'enqueued' || outcome === 'existing' || outcome === 'reanalyzed';
+}
+
+/**
+ * Вправе ли дочейн вертикали `verticalId` СНЯТЬ причину паузы проекта.
+ *
+ * Причина — ОДНО поле на проект, а дочейн видит одну вертикаль. Снимая её по
+ * своему здоровому итогу, он стирал паузу, которую записал кто-то по ДРУГОЙ
+ * вертикали (у B исчерпаны письма, у A после chain поставилась сборка — и
+ * кабинет говорил «autopilot has not flagged anything», хотя B ждёт
+ * менеджера). Поэтому снимать можно, только когда других вертикалей, способных
+ * держать паузу, у проекта нет: каждая вертикаль с accepted-гипотезой — это
+ * ровно та, что разбирает реконсилер (остальные он пропускает как
+ * 'not_selected' без паузы). Иначе снятие оставлено пути, который видит все
+ * вертикали сразу, — reconcileHeAutopilotProject (кнопка «Start outreach» и
+ * ночной проход).
+ *
+ * Сбой чтения → «нельзя»: устаревшая пауза безопаснее ложного «всё чисто» —
+ * кнопка, которую она называет, идемпотентна и пересчитает причину заново.
+ */
+async function followupMayClearPause(
+  supabase: SupabaseClient,
+  projectId: string,
+  verticalId: string | null,
+): Promise<boolean> {
+  if (!verticalId) return false;
+  try {
+    const { data, error } = await supabase
+      .from('he_hypotheses')
+      .select('vertical_id')
+      .eq('project_id', projectId)
+      .eq('status', 'accepted');
+    if (error) return false;
+    return (data ?? []).every((row) => (row as { vertical_id?: unknown }).vertical_id === verticalId);
+  } catch {
+    return false;
+  }
 }
 
 /**
  * Дочейнить следующую стадию конвейера автопилота после done-джобы.
  * Бросает ошибку наверх — воркер логирует и продолжает (done уже записан).
  *
- * Перед броском и после каждого итога на строку проекта пишется ПРИЧИНА
+ * Перед броском и после итога-пропуска на строку проекта пишется ПРИЧИНА
  * (recordHeAutopilotPause): сбой чтения — 'read_failed', сбой постановки —
  * 'enqueue_failed', пропуск — то, во что его сворачивает
- * pauseForHeAutopilotSkip. Прогресс и здоровое решение причину СНИМАЮТ.
+ * pauseForHeAutopilotSkip (поверх прежней: последняя запись выигрывает, а
+ * какая из причин проекта важнее, решает реконсилер, видящий все вертикали).
+ * СНИМАЕТ причину дочейн только при ПРОГРЕССЕ своей вертикали и только когда
+ * других выбранных клиентом вертикалей у проекта нет (followupMayClearPause);
+ * здоровый пропуск («база уже готова», «анализ отменён») причину не трогает
+ * вовсе — у дочейна нет полного вида, чтобы сказать «стоять не на чем».
  * Ни один из этих путей не пишет статус: «не прочитали» терминалом не бывает.
  *
  * Причина — сигнал кабинету и след специалисту, а НЕ состояние, из которого
@@ -825,10 +1048,18 @@ export async function enqueueAutopilotFollowups(
   if (!project || (project as { autopilot?: boolean }).autopilot !== true) return {};
 
   let result: AutopilotFollowupsResult;
+  let verticalId: string | null;
   try {
-    result = job.stage === 'chain'
-      ? { collect: await afterChainDone(supabase, job) }
-      : { template: await afterBaseAnalyzeDone(supabase, job) };
+    if (job.stage === 'chain') {
+      result = { collect: await afterChainDone(supabase, job) };
+      verticalId = typeof job.payload?.vertical_id === 'string' && job.payload.vertical_id.length > 0
+        ? job.payload.vertical_id
+        : null;
+    } else {
+      const step = await afterBaseAnalyzeDone(supabase, job);
+      result = { template: step.outcome };
+      verticalId = step.verticalId;
+    }
   } catch (e) {
     await recordHeAutopilotPause(
       supabase,
@@ -840,6 +1071,14 @@ export async function enqueueAutopilotFollowups(
 
   const outcome = result.collect ?? result.template ?? null;
   const pause = outcome ? pauseForFollowup(outcome) : null;
-  await recordHeAutopilotPause(supabase, job.project_id, pause);
+  if (pause) {
+    await recordHeAutopilotPause(supabase, job.project_id, pause);
+  } else if (
+    outcome
+    && isFollowupProgress(outcome)
+    && await followupMayClearPause(supabase, job.project_id, verticalId)
+  ) {
+    await recordHeAutopilotPause(supabase, job.project_id, null);
+  }
   return pause ? { ...result, pause } : result;
 }

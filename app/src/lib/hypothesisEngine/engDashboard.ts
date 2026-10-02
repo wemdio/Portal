@@ -12,7 +12,7 @@
  * (auth + скоуп created_by + батч-запросы), вся склейка здесь.
  */
 
-import { parseLaunchInfo, type HeTemplateLaunchInfo } from './launchHandoff';
+import { heLaunchIsIncomplete, parseLaunchInfo, type HeTemplateLaunchInfo } from './launchHandoff';
 
 /* ─────────────────────────── Время (UTC) ─────────────────────────── */
 
@@ -49,6 +49,19 @@ export function nextDailyRunIso(now: Date): string {
 
 /* ─────────────────────────── Этап вертикали ─────────────────────────── */
 
+/**
+ * `launch_unfinished` — запись о запуске есть, но `heLaunchIsIncomplete` (часть
+ * аудитории без кампании или без адресов). Тот же предикат, что у шага 5 и у
+ * самого запуска: «live» для такой записи значило бы, что клиенту делать
+ * нечего, хотя достроить запуск может только его нажатие на шаге 5.
+ *
+ * `pending` есть и у ИДУЩЕГО запуска: ядро пишет запись по ходу (группа в
+ * полёте и ещё не начатые группы — launchTemplate.ts, persistProgress), а
+ * аренда (`running_until`) в проекцию кабинета не уходит. Поэтому подпись
+ * говорит «ещё не уехала» (has not gone out yet), а не «не уехала»: она верна
+ * и посреди запуска, и после обрыва. Нажатие на шаге 5, пока аренда жива,
+ * получает честный 409 «запуск ещё идёт или оборвался меньше 15 минут назад».
+ */
 export type EngDashStage =
   | 'research'
   | 'letters'
@@ -57,6 +70,7 @@ export type EngDashStage =
   | 'analyzing'
   | 'analyzed'
   | 'template'
+  | 'launch_unfinished'
   | 'launched';
 
 /** Пять точек прогресса карточки: research → letters → base → template → launched. */
@@ -164,6 +178,15 @@ export function deriveEngVerticalStage(input: EngDashVerticalSlice): EngDashStag
     collectingBase ??
     latest(bases);
 
+  if (launched && heLaunchIsIncomplete(launched.launch)) {
+    return {
+      stage: 'launch_unfinished',
+      stageDetail: 'launch unfinished — part of the audience has not gone out yet',
+      dots: [true, true, true, true, false],
+      mainBase,
+      launch: launched.launch,
+    };
+  }
   if (launched) {
     return {
       stage: 'launched',
@@ -272,11 +295,15 @@ export interface EngDashEvent {
     | 'base_analyzed'
     | 'template_ready'
     | 'launched'
+    /** Запуск записан, но не закончен (`heLaunchIsIncomplete`) — не «launched». */
+    | 'launch_unfinished'
     | 'refill_appended'
     /**
-     * Ночь БЕЗ отправки и БЕЗ сбоя. Две причины, одна строка ленты:
-     * отправлять нечего ('no_new') и у рассыльщика нет места, ночь отложена
-     * (stats.error_kind='instantly_capacity'). Тип переиспользован осознанно:
+     * Ночь БЕЗ отправки и БЕЗ сбоя кода. Причины разные, строка ленты одна:
+     * отправлять нечего ('no_new'), у рассыльщика нет места
+     * (stats.error_kind='instantly_capacity'), дневной бюджет не дал строк
+     * (stats.budget_outcome) и отмена клиентом без подтверждённого приёма
+     * (stats.cancelled). Тип переиспользован осознанно:
      * в кабинете он рисуется серым, а 'failed' — красным сбоем (EVENT_ICON,
      * components/client-eng/EngDashboard.tsx), и отложенная ночь — именно
      * серая. Разница причин — в тексте, а не в типе: заводить ключ, которого
@@ -389,11 +416,16 @@ export function buildEngDashboardEvents(input: {
     if (!launch) continue;
     const at = launch.created_at || asStr(t.created_at);
     if (!at) continue;
-    events.push({
-      type: 'launched',
-      text: `campaign launched (paused)${launch.campaign_name ? `: ${launch.campaign_name}` : ''}`,
-      at,
-    });
+    const name = launch.campaign_name ? `: ${launch.campaign_name}` : '';
+    events.push(
+      heLaunchIsIncomplete(launch)
+        ? {
+            type: 'launch_unfinished',
+            text: `campaign launch unfinished — part of the audience has not gone out yet${name}`,
+            at,
+          }
+        : { type: 'launched', text: `campaign launched (paused)${name}`, at },
+    );
   }
 
   for (const run of runs) {
@@ -408,10 +440,13 @@ export function buildEngDashboardEvents(input: {
       // Часть строк рассыльщик не взял по ёмкости (stats.deferred +
       // deferred_reason, пишет stages/baseCollectRefill.ts). Ночь состоялась,
       // но не целиком: без остатка «+N leads» читается как «уехало всё».
+      // «not sent», а не «on hold»: эти строки не хранятся и не досылаются
+      // (база 'analyzed', её компании исключены из следующих сборок), а
+      // «on hold» обещало бы, что они ещё уедут.
       const deferred = asNum(stats.deferred);
       const heldBack =
         deferred > 0 && asStr(stats.deferred_reason) === 'instantly_capacity'
-          ? `, ${deferred} on hold (no room)`
+          ? `, ${deferred} not sent (no room)`
           : '';
       events.push({
         type: 'refill_appended',
@@ -426,39 +461,59 @@ export function buildEngDashboardEvents(input: {
       // ровно то, что верно для обоих: отправлять нечего.
       events.push({ type: 'refill_empty', text: withVertical('refill: nothing new to send', vname), at });
     } else if (status === 'failed') {
-      // Нет места у рассыльщика — не сбой, а отложенная ночь. САМ ПРОГОН
-      // БОЛЬШЕ НЕ ВСТАЁТ: с миграции 20260930_0005 доказанное переполнение
-      // ставит durable-паузу ПРОЕКТА (he_auto_pipeline_configs.refill_paused_at),
-      // и ночной тик не купит сборку, пока сотрудник не возобновит добор
-      // кнопкой staff-инструмента; автоснятия по таймеру нет. Подпись ниже
-      // («on hold») от этого верна и для паузы, но обещать возобновление здесь
-      // нельзя. Собранное при этом цело не всегда: если часть строк уехала,
-      // остаток (stats.deferred) не досылается. Читаем машинную причину, а не текст:
-      // stats.error_kind='instantly_capacity' пишут оба отказа по ёмкости —
-      // предполёт тика до сборки (autoPipeline.ts, строка журнала без base_id)
-      // и пауза долива (stages/baseCollectRefill.ts, runStats), — поэтому у
-      // ленты одно условие на оба.
-      // Исчерпанный дневной бюджет — НЕ поломка, а решение: волна 6b сделала
-      // такую ночь 'failed', чтобы компании вернулись в пул (иначе они
-      // выжигались бы за ноль отправок), и без этой ветки клиент читал бы
-      // «refill failed» про штатный конец дневного капа. Исход уже лежит в том
-      // же stats, который ветка читает.
+      // Нет места у рассыльщика — не сбой кода, а ночь, которую некуда было
+      // отправить. Подпись — про ЭТОТ прогон («stopped»), а не про состояние
+      // добора («on hold»): строка ленты историческая, а durable-пауза проекта
+      // (he_auto_pipeline_configs.refill_paused_at) пишется best-effort — без
+      // конфига или колонок её нет, а поставленную снимает сотрудник. Текущее
+      // состояние добора кабинет печатает отдельно, по `projects[].refill`.
+      // Читаем машинную причину, а не текст: stats.error_kind='instantly_capacity'
+      // пишут оба отказа по ёмкости — предполёт тика до сборки (autoPipeline.ts,
+      // строка журнала без base_id) и отказ долива (stages/baseCollectRefill.ts,
+      // runStats), — поэтому у ленты одно условие на оба.
+      // Нулевой дневной бюджет — НЕ поломка, а решение, и у него ДВА исхода с
+      // разным смыслом: 'cap_exhausted' — кап проекта на сегодня занят другими
+      // бронями; 'already_reserved' — это повтор прогона той же базы, а её
+      // первый прогон ещё держит свою бронь (кап проекта при этом может быть
+      // свободен — писать «лимит исчерпан» было бы неправдой).
       const budgetOutcome = asStr(stats.budget_outcome);
-      const budgetStopped = budgetOutcome === 'cap_exhausted' || budgetOutcome === 'already_reserved';
+      // Отмена клиентом («Cancel all jobs») — решение человека, а не сбой:
+      // stats.cancelled пишет stages/baseCollectRefill.ts (refillUserCancelled).
+      // «nothing added» здесь не пишем: строка прогона знает только
+      // подтверждённый приём (stats.appended), а запрос в полёте мог лечь.
+      if (stats.cancelled === true) {
+        const appendedBeforeCancel = asNum(stats.appended);
+        events.push(
+          appendedBeforeCancel > 0
+            ? {
+                type: 'refill_appended',
+                text: withVertical(`refill cancelled: +${appendedBeforeCancel} leads before the cancel`, vname),
+                at,
+              }
+            : { type: 'refill_empty', text: withVertical('refill cancelled', vname), at },
+        );
+        continue;
+      }
       events.push(
         asStr(stats.error_kind) === 'instantly_capacity'
           ? {
               type: 'refill_empty',
-              text: withVertical('refill on hold: no room for new contacts', vname),
+              text: withVertical('refill stopped: no room for new contacts', vname),
               at,
             }
-          : budgetStopped
+          : budgetOutcome === 'cap_exhausted'
             ? {
                 type: 'refill_empty',
-                text: withVertical("refill: today's contact limit is already used", vname),
+                text: withVertical("refill: nothing added — today's contact limit was already taken", vname),
                 at,
               }
-            : { type: 'failed', text: withVertical('refill failed', vname), at },
+            : budgetOutcome === 'already_reserved'
+              ? {
+                  type: 'refill_empty',
+                  text: withVertical('refill: nothing added — repeat of a run that already started today', vname),
+                  at,
+                }
+              : { type: 'failed', text: withVertical('refill failed', vname), at },
       );
     }
   }

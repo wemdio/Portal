@@ -27,10 +27,11 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { updateCampaign } from '@/lib/instantly/client';
+import { getCampaign, updateCampaign } from '@/lib/instantly/client';
 import type { InstantlyRequestOptions } from '@/lib/instantly/accounts';
+import type { CampaignSchedule } from '@/lib/instantly/types';
 import { buildCampaignSchedule } from '@/lib/clientLaunch/scheduleMapping';
-import { isInstantlyValidTimezone } from '@/lib/clientLaunch/timezones';
+import { isInstantlyValidTimezone, normalizeInstantlyTimezone } from '@/lib/clientLaunch/timezones';
 import type { ClientLaunchScheduleOverride } from '@/lib/clientLaunch/types';
 
 /** Пункт выпадашки кабинета: клиент видит подпись, наружу уезжает value. */
@@ -53,15 +54,21 @@ export interface EngSendingWindowWeekdayOption {
  * `America/Dawson` — единственный доступный «Pacific»: с 2020 года Юкон живёт
  * на постоянном UTC-7, то есть летом зона совпадает с Лос-Анджелесом, а зимой
  * уходит на час вперёд (окно 09:00–17:00 станет для клиента 08:00–16:00).
- * Внутри рабочего дня это терпимо, но это компромисс, а не точное совпадение;
- * ближе в белом списке ничего нет.
+ * Ближе в белом списке ничего нет: ни America/Los_Angeles, ни другой зоны с
+ * переходом на тихоокеанское летнее время (ни Etc/GMT+8) рассыльщик не
+ * принимает. Поэтому компромисс назван В САМОЙ ПОДПИСИ — клиент видит только
+ * её (в выпадашке и в строке «когда уходят письма»), и подпись «Pacific time»
+ * без оговорки обещала бы часы, которых зимой нет.
  */
 const TIMEZONE_CANDIDATES: readonly EngSendingWindowTimezoneOption[] = Object.freeze([
   { value: 'America/Detroit', label: 'Eastern time — New York, Toronto' },
   { value: 'America/Chicago', label: 'Central time — Chicago, Dallas' },
   { value: 'America/Boise', label: 'Mountain time — Denver, Salt Lake City' },
   { value: 'America/Creston', label: 'Arizona — Phoenix (no daylight saving)' },
-  { value: 'America/Dawson', label: 'Pacific time — Los Angeles, Seattle' },
+  {
+    value: 'America/Dawson',
+    label: 'Pacific — Los Angeles, Seattle (fixed UTC-7: in winter, emails go out 1 hour earlier local time)',
+  },
   { value: 'America/Anchorage', label: 'Alaska time — Anchorage' },
   { value: 'Etc/GMT+10', label: 'Hawaii — Honolulu (no daylight saving)' },
   { value: 'Africa/Abidjan', label: 'UTC (no daylight saving)' },
@@ -238,6 +245,15 @@ export async function applyEngSendingWindow(args: {
  * ЕГО выбор, не спрашивая рассыльщика (и не раскрывая ни кампаний, ни их id), а
  * повторный запуск шаблона (force) и правка окна стартуют с того же значения, а
  * не с пресета администратора.
+ *
+ * Строке верят, только если она СВЕЖЕЕ записи о запуске (`savedAt` ≥
+ * `launch_info.created_at`, см. GET .../schedule). Окно ставит только
+ * клиентский контур, а кампании запуска создаются и другими путями — запуском
+ * сотрудника из RU-инструмента (окно пресета), force-перезапуском поверх
+ * старого выбора, запуском, где PATCH окна не дошёл. Тогда строки нет или она
+ * про прошлый запуск, и GET читает окно у рассыльщика
+ * (readEngCampaignSendingWindow) — иначе кабинет выдавал бы за текущее окно
+ * дефолт или чужие часы.
  */
 const TABLE = 'he_launch_schedule';
 
@@ -251,21 +267,22 @@ export async function loadEngSendingWindow(
   db: SupabaseClient,
   templateId: string,
 ): Promise<
-  | { ok: true; window: ClientLaunchScheduleOverride | null }
+  | { ok: true; window: ClientLaunchScheduleOverride | null; savedAt: string | null }
   | { ok: false; error: unknown }
 > {
   const { data, error } = await db
     .from(TABLE)
-    .select('schedule_timezone, schedule_from, schedule_to, schedule_days')
+    .select('schedule_timezone, schedule_from, schedule_to, schedule_days, updated_at')
     .eq('template_id', templateId)
     .maybeSingle();
   if (error) return { ok: false, error };
-  if (!data) return { ok: true, window: null };
+  if (!data) return { ok: true, window: null, savedAt: null };
   const row = data as {
     schedule_timezone?: unknown;
     schedule_from?: unknown;
     schedule_to?: unknown;
     schedule_days?: unknown;
+    updated_at?: unknown;
   };
   // Строку писали мы же и через тот же разбор, но читаем её как чужие данные:
   // в базе может лежать запись от старой версии колонки или ручная правка
@@ -275,6 +292,52 @@ export async function loadEngSendingWindow(
     from: row.schedule_from,
     to: row.schedule_to,
     days: Array.isArray(row.schedule_days) ? row.schedule_days.map((d) => Number(d)) : [],
+  });
+  return {
+    ok: true,
+    window: parsed.ok ? parsed.window : null,
+    savedAt: typeof row.updated_at === 'string' && row.updated_at.length > 0 ? row.updated_at : null,
+  };
+}
+
+/**
+ * Окно отправки, которое СЕЙЧАС стоит у кампании рассыльщика, — в форме
+ * кабинета. Нужен, когда сохранённого выбора клиента нет или он про прошлый
+ * запуск (см. «Строке верят…» выше).
+ *
+ * Разбор строгий, без подстановки дефолтов (в отличие от общего
+ * `campaignScheduleToOverride`, который на мусоре отдаёт часы SCHEDULE_DEFAULTS
+ * — для экрана «вот ваше окно» это была бы выдумка): одно расписание, часы
+ * ЧЧ:ММ, конец позже начала, хотя бы один день, пояс из белого списка. Что не
+ * разобралось — `window: null`, «окно у кампании есть, но кабинет его показать
+ * не может»; решает вызывающий роут.
+ */
+export async function readEngCampaignSendingWindow(args: {
+  campaignId: string;
+  requestOptions: InstantlyRequestOptions;
+}): Promise<{ ok: true; window: ClientLaunchScheduleOverride | null } | { ok: false; error: unknown }> {
+  let schedule: CampaignSchedule | null | undefined;
+  try {
+    const campaign = await getCampaign(args.campaignId, args.requestOptions);
+    schedule = (campaign as { campaign_schedule?: CampaignSchedule | null } | null)?.campaign_schedule;
+  } catch (error) {
+    return { ok: false, error };
+  }
+  const entries = Array.isArray(schedule?.schedules) ? schedule.schedules : [];
+  // Несколько расписаний кабинет одной формой не покажет: первое из них
+  // выдавать за всё окно кампании значило бы соврать про остальные.
+  if (entries.length !== 1) return { ok: true, window: null };
+  const entry = entries[0];
+  const dayMap = (entry?.days ?? {}) as Record<number, boolean>;
+  const days: number[] = [];
+  for (let d = 0; d <= 6; d += 1) {
+    if (dayMap[d]) days.push(d);
+  }
+  const parsed = parseEngSendingWindow({
+    timezone: typeof entry?.timezone === 'string' ? normalizeInstantlyTimezone(entry.timezone) : '',
+    from: entry?.timing?.from,
+    to: entry?.timing?.to,
+    days,
   });
   return { ok: true, window: parsed.ok ? parsed.window : null };
 }

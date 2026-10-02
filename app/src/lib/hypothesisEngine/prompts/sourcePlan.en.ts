@@ -9,9 +9,15 @@
  *    фирмографические фильтры industry/size/country/name;
  *  - funded — стартапы и раунды финансирования (funded_companies, YC/SEC):
  *    фильтры industry/country/min_funding_usd/funded_since;
- *  - eng_hiring — компании, нанимающие ENG-роли (eng_hiring_cache, кэш ATS-
- *    досок Greenhouse/Lever/…): название вакансии ложится в строки базы как
- *    крючок персонализации;
+ *  - eng_hiring — компании, которые нанимают на КОММЕРЧЕСКИЕ роли
+ *    (eng_hiring_cache): на market='us' сборка читает только строки
+ *    source='jobhive' (fetchEngHiringRows в stages/baseCollect.ts), а ингест
+ *    jobhive пропускает только продажи, развитие бизнеса, партнёрства и
+ *    выручку (isHighIntentB2BSalesTitle, lib/parsers/jobhiveIngest.ts).
+ *    Задача на любую другую роль («clinics hiring nurses») вернула бы ноль
+ *    строк, а план хранится и переиспользуется каждую ночь (he_catalog_cursors)
+ *    — пустой слот повторялся бы вместе с ним, поэтому промпт называет границу
+ *    прямо. Название вакансии ложится в строки базы как крючок персонализации;
  *  - google_maps — локальный/geo-бизнес: короткие рубричные запросы с гео,
  *    язык/регион выдачи берутся из рынка проекта (en/US).
  *
@@ -27,7 +33,7 @@ const SYSTEM_EN = `You are a head of lead research at Polza agency, an expert in
 SOURCES AND WHEN TO USE THEM:
 1) pdl — EU/US company catalog (People Data Labs): firmographic slices of the business landscape. This is the DEFAULT source whenever the vertical maps to companies describable by industry/size/country. Filters: industries (lowercased LinkedIn industry labels, e.g. "software", "staffing and recruiting", "hospital & health care"), sizes (headcount buckets: "1-10", "11-50", "51-200", "201-500", "501-1000", "1001-5000", "5001-10000", "10001+"), countries (lowercased English country names, e.g. "united states", "germany", "united kingdom"), name (company-name substring — only for named-account hunts).
 2) funded — startups and funding rounds (Y Combinator, SEC Form D). Use when a hypothesis is about recently funded companies ("startups that just raised and will scale X"). Filters: industries, countries (same format as pdl), min_funding_usd (last round OR total raised, USD), funded_since (YYYY-MM-DD — last funding on/after this date).
-3) eng_hiring — companies actively hiring English-language roles (cache of ATS job boards: Greenhouse/Lever/Ashby/…). Use for hiring-signal hypotheses ("companies hiring role X"): the vacancy title lands in base rows as a personalization hook. Parameters: roles (English role keywords, e.g. "account executive", "head of sales" — matched against vacancy titles), countries (ATS country codes: "us", "gb", "ca", "de", "fr", "nl", "ie", "es", "au", "sg", "remote"), posted_within_days (recency window, e.g. 30).
+3) eng_hiring — companies hiring for COMMERCIAL roles only: sales, business development, partnerships, revenue (a feed of ATS job postings that keeps only those roles). Use it for hiring-signal hypotheses about building or scaling a sales function ("companies hiring account executives", "companies hiring SDRs"): the vacancy title lands in base rows as a personalization hook. It holds NO postings for any other role (engineers, nurses, drivers, teachers…), so a hypothesis about hiring such a role gets no eng_hiring task — collect it by its line of business through pdl, funded or google_maps instead. Parameters: roles (English sales-role keywords, e.g. "account executive", "head of sales", "business development" — matched against vacancy titles), countries (ATS country codes: "us", "gb", "ca", "de", "fr", "nl", "ie", "es", "au", "sg", "remote"), posted_within_days (recency window, e.g. 30).
 4) google_maps — local/geo business (dental clinics, auto repair, coffee shops) and niches absent from the catalogs. Queries are SHORT category strings ("dentist", "auto repair"), not prose, plus geo. Result language/region come from the project market (en/US).
 
 RULES:

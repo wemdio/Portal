@@ -186,7 +186,7 @@ export function EngProjectWizard({ projectId }: { projectId: string }) {
               проект в 'draft', — поэтому префикс «Last error» здесь честен. */}
           {project?.error_code && (
             <div className="ds-card p-3 text-xs" style={{ color: 'var(--cp-red)' }}>
-              Last error: {engStageErrorText(project.error_code)}
+              Last error: {engStageErrorText(project.error_code, 'research')}
             </div>
           )}
 

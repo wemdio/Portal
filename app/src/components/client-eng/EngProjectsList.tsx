@@ -193,7 +193,7 @@ export function EngProjectsList() {
                   код причины, экран — английское объяснение по коду. */}
               {p.error_code && (
                 <div className="text-[11px]" style={{ color: 'var(--cp-red)' }}>
-                  {engStageErrorText(p.error_code)}
+                  {engStageErrorText(p.error_code, 'research')}
                 </div>
               )}
             </Link>

@@ -10,190 +10,42 @@
  * staff и легаси-инструмент /tools/hypothesis-engine, поэтому маппинг живёт
  * на границе клиентского контура: в `api/client/eng/**` и `components/client-eng/*`.
  *
- * Модуль ЧИСТЫЙ и не импортирует verticalEngineV2 (правило изоляции движков,
+ * Модуль ЧИСТЫЙ (единственный импорт — справочник текстов без зависимостей) и
+ * не импортирует verticalEngineV2 (правило изоляции движков,
  * docs/design/2026-08-20-vertical-engine-v2-isolation.md): идея классификации
  * скопирована из `verticalEngineV2/collectionErrors.ts`, тексты и набор
  * правил написаны заново под строки V1 и под английский рынок.
  *
- * Инвариант: результат собирается ТОЛЬКО из констант этого файла. Ни одна
+ * СЕРВЕРНЫЙ модуль: браузер его не импортирует (см. реэкспорт ниже). Строки
+ * клиента классифицируются на сервере — проекция кабинета отдаёт код причины
+ * (`clientEngProjection.toClientEngStageErrorCode`), экран разворачивает код в
+ * текст по справочнику.
+ *
+ * Инвариант: результат собирается ТОЛЬКО из констант справочника. Ни одна
  * подстрока входа наружу не попадает — иначе утечка возвращается через
  * «понятное сообщение».
  *
  * Коды `billing` / `configuration` вынесены отдельными предикатами: их
- * переиспользует волна 3 (политика ретраев — платную операцию не повторяем,
- * пока не пополнен баланс и не починен ключ).
+ * читает политика повторов воркера (волна 3, через `llm.ts`) — на таком отказе
+ * платная стадия не повторяется вовсе, она падает сразу, и перезапускает её
+ * человек.
  */
 
-export type HeClientErrorCode =
-  /** У провайдера ИИ/поиска кончились деньги — повтор бессмысленен. */
-  | 'billing'
-  /** Ключ провайдера не задан/отклонён — нужна правка конфигурации. */
-  | 'configuration'
-  /** Провайдер временно недоступен или ограничил запросы. */
-  | 'provider'
-  /** Проба каталожного среза: сегмент не про эту вертикаль, база не собиралась. */
-  | 'audience_mismatch'
-  /** В источниках не осталось новых компаний после исключения уже собранных. */
-  | 'segment_exhausted'
-  /** Источник не отдал строк (ошибка чтения каталога или пустая выдача). */
-  | 'source'
-  /** Сайт самого клиента не открылся — исследованию нечего было читать. */
-  | 'website_unreachable'
-  /** Конструктор баз не обогатил строки почтами. */
-  | 'enrichment'
-  /** Шаг не уложился в отведённое время. */
-  | 'timeout'
-  /** Идёт прогрев ящиков — отправка/долив пока закрыты. */
-  | 'subscription_warmup'
-  /** Подписка не активна. */
-  | 'subscription_inactive'
-  /** Подписка оформлена, оплата не поступила. */
-  | 'awaiting_payment'
-  /** Исчерпан лимит контактов тарифа. */
-  | 'contacts_exhausted'
-  /** У рассыльщика нет места под новые контакты — ёмкость, а не тариф клиента. */
-  | 'sending_capacity'
-  /** Дневной кап добора на сегодня израсходован — ночь отложена, а не потеряна. */
-  | 'refill_budget_spent'
-  /** Узнанный сбой инфраструктуры (БД/сеть) — клиенту деталей не даём. */
-  | 'internal'
-  /** Ничего не опознали. */
-  | 'unknown';
+// Тексты и словарь кодов живут в клиентобезопасном справочнике без единого
+// регэкспа (`components/client-eng/clientFailureText.ts`): браузер берёт их
+// оттуда и этот модуль не импортирует, поэтому классификатор ниже — с именами
+// провайдеров, наших каталогов и таблиц и русскими фразами стадий — в
+// клиентский чанк не уезжает. Здесь реэкспорт: серверные импорты (`llm.ts`,
+// роут запуска, архитектурный тест) остаются прежними.
+import { heClientFailureFor, type HeClientErrorCode, type HeClientFailure } from '@/components/client-eng/clientFailureText';
 
-export interface HeClientFailure {
-  code: HeClientErrorCode;
-  /** Одна строка заголовка: что произошло. */
-  title: string;
-  /** Что при этом уцелело (оплаченные строки, кампания). */
-  whatIsSaved: string;
-  /** Следующий шаг клиента. */
-  whatToDo: string;
-}
-
-/**
- * Тексты. Правила: только английский, без имён провайдеров и таблиц, без
- * внутренних id и без слова «error code» — код уезжает в атрибут, а не в текст.
- * Биллинг провайдера клиенту не объясняем деталями: это наша проблема.
- */
-const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
-  billing: {
-    title: 'The run stopped on our side — one of the services we pay for ran out of balance.',
-    whatIsSaved: 'Everything collected so far is saved.',
-    whatToDo: 'Our team is already notified; the run continues once the balance is topped up.',
-  },
-  configuration: {
-    title: 'The run stopped on our side — one of the services we rely on is not configured correctly.',
-    whatIsSaved: 'Everything collected so far is saved.',
-    whatToDo: 'Our team is already notified; no action is needed from you.',
-  },
-  provider: {
-    title: 'A service we rely on was temporarily unavailable, so the step stopped early.',
-    whatIsSaved: 'Everything collected so far is saved.',
-    whatToDo: 'Start the step again in a few minutes; if it keeps failing, contact your manager.',
-  },
-  audience_mismatch: {
-    title: 'The catalog slice we could build for this vertical did not match it, so no base was built.',
-    whatIsSaved: 'No contacts were bought for this vertical.',
-    whatToDo:
-      'This was a deliberate stop — mailing such a list would hurt the verticals that do work. Pick another vertical or upload your own list.',
-  },
-  segment_exhausted: {
-    title: 'The sources have no new companies left for this vertical.',
-    whatIsSaved: 'Companies collected earlier stay in the bases you already have.',
-    whatToDo:
-      'This does not mean the market is exhausted — only these sources are. Pick another vertical or upload your own list.',
-  },
-  source: {
-    title: 'The company sources did not return any rows for this vertical.',
-    whatIsSaved: 'Everything collected so far is saved.',
-    whatToDo: 'Start the collection again; if it keeps coming back empty, contact your manager.',
-  },
-  /**
-   * Единственный код, где виноват не наш контур: сайт, который клиент указал
-   * сам, не открылся (домена нет в DNS либо ни один адрес не отдал HTML —
-   * lib/hypothesisEngine/stages/io.ts, HeSiteUnreachableError). Поэтому здесь,
-   * в отличие от соседей, есть шаг, который клиент реально может сделать: адрес
-   * он задаёт при создании проекта, а описание бизнеса — на шаге «Brief», и
-   * ровно оно снимает отказ на следующем прогоне research.
-   */
-  website_unreachable: {
-    title: 'We could not open the website you gave us, so the research had nothing to read.',
-    whatIsSaved: 'The project and everything you entered are saved.',
-    whatToDo:
-      'Open the address in a browser to check it: if it does not open, start a new project with the correct one. If it opens but stays closed to us, describe your business in a few sentences in the Brief step and re-run the research.',
-  },
-  enrichment: {
-    title: 'Finding and validating emails did not finish for this base.',
-    whatIsSaved: 'The companies collected are saved; rows without a validated email will not be mailed.',
-    whatToDo: 'Start the collection again to retry the enrichment, or continue with the rows you have.',
-  },
-  timeout: {
-    title: 'The step did not finish in time and was stopped.',
-    whatIsSaved: 'Everything collected so far is saved.',
-    whatToDo: 'Start it again; if it times out twice, contact your manager.',
-  },
-  subscription_warmup: {
-    title: 'Your mailboxes are still warming up, so sending is on hold.',
-    whatIsSaved: 'Contacts collected for you are saved and wait for the warm-up to finish.',
-    whatToDo: 'Sending resumes automatically when the warm-up period ends.',
-  },
-  subscription_inactive: {
-    title: 'Sending is paused because the subscription is not active.',
-    whatIsSaved: 'Contacts collected for you are saved.',
-    whatToDo: 'Renew the subscription in Billing to resume sending.',
-  },
-  awaiting_payment: {
-    title: 'Sending is paused until the first payment goes through.',
-    whatIsSaved: 'Contacts collected for you are saved.',
-    whatToDo: 'Complete the payment in Billing to resume sending.',
-  },
-  contacts_exhausted: {
-    title: 'The contact limit of your plan is used up for this billing period.',
-    whatIsSaved: 'Contacts already uploaded keep running in your campaigns.',
-    whatToDo: 'Upgrade the plan or wait for the next billing period to add more contacts.',
-  },
-  /**
-   * НЕ путать с contacts_exhausted: тот про тариф клиента («поднимите план»), а
-   * этот — про ёмкость НАШЕГО рассыльщика, за которую клиент не отвечает и
-   * доплачивать ему нечего. Поэтому в тексте нет ни слова «plan», ни шага от
-   * клиента: ночь отложена, а не потеряна (ночной долив ставится заново каждые
-   * сутки, крон heAutoPipelineCron).
-   */
-  sending_capacity: {
-    title: 'Adding new contacts is on hold — our sending platform has no room for them right now.',
-    whatIsSaved:
-      'Nothing was lost: everything collected so far is saved, and the campaigns already running keep sending.',
-    whatToDo: 'No action is needed from you — the daily refill resumes by itself once room frees up.',
-  },
-  /**
-   * Дневной кап добора на сегодня уже израсходован — ночь отложена, а не
-   * потеряна. Отдельный код, потому что волна 6b сознательно сделала такую
-   * ночь 'failed': иначе её компании выжигались бы (исключались из всех
-   * будущих сборок) за ноль отправок. Общий `internal` говорил бы «техническая
-   * проблема, попробуйте ещё раз» про штатный конец дневного лимита, а
-   * «попробуйте» здесь вдобавок неисполнимо — кнопки ночного добора у клиента
-   * нет, следующую ночь ставит крон.
-   */
-  refill_budget_spent: {
-    title: "Adding new contacts paused for today — this project's daily contact limit is already used.",
-    whatIsSaved:
-      'Nothing was lost: the companies collected for this run go back to the pool, and the campaigns already running keep sending.',
-    whatToDo: 'No action is needed from you — the daily refill picks this vertical up again tomorrow.',
-  },
-  internal: {
-    title: 'The step stopped because of a technical problem on our side.',
-    whatIsSaved: 'Everything collected so far is saved.',
-    whatToDo: 'Try again; if it happens twice, contact your manager.',
-  },
-  unknown: {
-    title: 'The step stopped because of a technical problem.',
-    whatIsSaved: 'Everything collected so far is saved.',
-    whatToDo: 'Try again; if it happens twice, contact your manager.',
-  },
-};
-
-/** Полный список кодов — для ревью текстов и исчерпывающих switch'ей. */
-export const HE_CLIENT_ERROR_CODES = Object.keys(FAILURES) as HeClientErrorCode[];
+export {
+  HE_CLIENT_ERROR_CODES,
+  formatHeClientFailure,
+  heClientFailureFor,
+  type HeClientErrorCode,
+  type HeClientFailure,
+} from '@/components/client-eng/clientFailureText';
 
 /** Вход может прийти строкой (`he_bases.error`), Error'ом стадии или строкой Supabase. */
 function errorMessage(error: unknown): string {
@@ -261,10 +113,26 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
   // stages/baseCollectRefill.ts) и CAPACITY_REFUSAL_ERROR (отказ предполёта до
   // сборки, autoPipeline.ts). Якорь — общая подстрока обоих; менять её можно
   // только вместе с ними, оба места на это ссылаются.
-  // Дневной кап добора исчерпан (stages/baseCollectRefill.ts, обе формулировки
-  // шага 5б несут общую подстроку «дневной бюджет добора»). Правило стоит ВЫШЕ
-  // общих: текст русский и без якоря уехал бы в 'internal' с неправдой
-  // «техническая проблема, попробуйте ещё раз».
+  // Дневной кап добора не дал строк (stages/baseCollectRefill.ts, шаг 5б). Обе
+  // формулировки несут общую подстроку «дневной бюджет добора», но означают
+  // разное: «… этой базы … забронирован её первым прогоном» — исход
+  // 'already_reserved', повтор прогона той же базы (кап проекта может быть
+  // свободен), остальное — 'cap_exhausted', кап проекта занят. Поэтому сначала
+  // узкий якорь, потом общий: поменяют узкую формулировку — повтор уедет в
+  // общий код с прежним текстом, а не в 'internal'. Правила стоят ВЫШЕ общих:
+  // текст русский и без якоря уехал бы в 'internal' с неправдой «техническая
+  // проблема, попробуйте ещё раз».
+  // Куда эти тексты доезжают СЕГОДНЯ. Кабинет классифицирует he_bases.error
+  // (и ошибки проекта/джоб), а не collect_info.refill_result.error и не журнал
+  // прогонов. В he_bases.error попадает только текст 'cap_exhausted': такая
+  // база уходит в 'failed'. 'already_reserved' базу НЕ возвращает — она
+  // остаётся 'analyzed' с пустым error (runHeRefillAppend, persistRefillBase),
+  // и её текст лежит только в refill_result.error и строке прогона; ленту
+  // кабинет строит по stats.budget_outcome (engDashboard.ts). То есть правило
+  // 'refill_repeat_run' сегодня не срабатывает ни на одной строке, которую
+  // кабинет разбирает, — оно держит узкий текст вне общего кода на случай,
+  // если его когда-нибудь запишут в he_bases.error.
+  if (/дневной бюджет добора этой базы/i.test(message)) return 'refill_repeat_run';
   if (/дневной бюджет добора/i.test(message)) return 'refill_budget_spent';
   if (/лимит контактов воркспейса/i.test(message)) return 'sending_capacity';
   if (/Лимит контактов исчерпан/i.test(message)) return 'contacts_exhausted';
@@ -310,24 +178,10 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
 }
 
 /**
- * Текст по известному коду — для мест, где причина уже машинная и разбирать
- * нечего: префлайт тарифа перед доливом, отказ биллинга, гейт конфигурации.
+ * Классификация + безопасный английский текст — для серверных мест, где на
+ * руках сырая строка (предупреждения запуска). Кабинетные экраны получают
+ * готовый код из проекции и сюда не ходят.
  */
-export function heClientFailureFor(code: HeClientErrorCode): HeClientFailure {
-  return { code, ...FAILURES[code] };
-}
-
-/** Классификация + безопасный английский текст. */
 export function getHeClientFailure(error: unknown): HeClientFailure {
   return heClientFailureFor(classifyHeClientError(error));
-}
-
-/** Одной строкой — для компактных мест кабинета (карточка базы, список проектов). */
-export function formatHeClientFailure(failure: HeClientFailure): string {
-  return `${failure.title} ${failure.whatIsSaved} ${failure.whatToDo}`;
-}
-
-/** Короткий путь «сырьё → строка для экрана». */
-export function heClientErrorText(error: unknown): string {
-  return formatHeClientFailure(getHeClientFailure(error));
 }
