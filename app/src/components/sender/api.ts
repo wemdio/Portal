@@ -1,4 +1,5 @@
 import { authFetch, authFetchJson } from '@/lib/authFetch';
+import type { BounceKinds, DomainHealth } from '@/lib/sender/domainReputation';
 
 const BASE = '/api/tools/sender';
 
@@ -734,13 +735,19 @@ export interface SenderStatsDto {
   inbox: Record<string, number>;
   /** Попали в стоп-лист за период: hard_bounce, unsubscribe, complaint, manual. */
   suppressed: Record<string, number>;
+  /** Отказы по причине (sender_bounce_category); старый расчёт без поля. */
+  bounceKinds?: BounceKinds;
   mailboxes: { total: number; enabled: number; failed: number };
   days: { day: string; sent: number; replied: number; bounced: number; leads: number }[];
   campaigns: (SenderStatCounters & { id: string; name: string; status: string; sent: number })[];
   mailboxList: (SenderStatCounters & {
     id: string; email: string; enabled: boolean; status: string; sent: number; failed: number;
+    bounceKinds?: BounceKinds;
   })[];
-  domains: (SenderStatCounters & { domain: string; mailboxes: number; sent: number })[];
+  /** health — проверка DNS домена; null — ещё не проверялся. */
+  domains: (SenderStatCounters & {
+    domain: string; mailboxes: number; sent: number; bounceKinds: BounceKinds; health: DomainHealth | null;
+  })[];
   steps: { step: number; reached: number; replied: number }[];
 }
 

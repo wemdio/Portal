@@ -4,6 +4,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { EChartsCoreOption } from 'echarts/core';
 import { AlertCircle, Loader2, RefreshCw } from 'lucide-react';
 import EChart from '@/components/charts/EChart';
+import { DomainDeliverability } from './DomainDeliverability';
+import type { BounceKinds } from '@/lib/sender/domainReputation';
 import {
   AXIS_FONT_SIZE,
   AXIS_LINE,
@@ -291,6 +293,7 @@ function Deliverability({ data }: { data: SenderStatsDto }) {
   const suppressed = Object.entries(data.suppressed).sort((a, b) => b[1] - a[1]);
   const barWidth = bounce === null ? 0 : Math.min(100, (bounce / (BOUNCE_BAD * 2)) * 100);
   const tone = bounceTone(bounce);
+  const kinds: BounceKinds = data.bounceKinds ?? {};
 
   return (
     <div className="rounded-xl border border-zinc-200 bg-white p-5">
@@ -319,6 +322,18 @@ function Deliverability({ data }: { data: SenderStatsDto }) {
       </div>
 
       <div className="mt-4 divide-y divide-zinc-100">
+        <Row
+          label="Отклонили как спам"
+          value={nf(kinds.spam ?? 0)}
+          tone={kinds.spam ? 'bad' : null}
+        />
+        <Row
+          label="Не прошли проверку подписи домена"
+          value={nf(kinds.auth ?? 0)}
+          tone={kinds.auth ? 'warn' : null}
+        />
+        <Row label="Адреса нет" value={nf(kinds.no_user ?? 0)} />
+        <Row label="Временно не доставлены" value={nf(kinds.temporary ?? 0)} />
         <Row
           label="Не отправились (ошибка SMTP)"
           value={data.letters.failed ? `${nf(data.letters.failed)} · ${formatRate(failRate)}` : '0'}
@@ -399,7 +414,8 @@ function Steps({ steps }: { steps: SenderStatsDto['steps'] }) {
 
 // ─── Разрезы: кампании / домены / ящики ─────────────────────────────────────
 
-type Breakdown = 'campaigns' | 'domains' | 'mailboxes';
+// Домены — отдельной таблицей с репутацией (DomainDeliverability).
+type Breakdown = 'campaigns' | 'mailboxes';
 type SortKey = 'sent' | 'reached' | 'replyRate' | 'leads' | 'bounceRate';
 
 type TableRow = SenderStatCounters & { key: string; name: string; note?: string; sent: number };
@@ -427,17 +443,14 @@ function BreakdownTable({ data }: { data: SenderStatsDto }) {
       ? data.campaigns.map((c) => ({
         ...c, key: c.id, name: c.name, note: c.status === 'running' ? undefined : c.status === 'paused' ? 'на паузе' : c.status === 'done' ? 'завершена' : 'черновик',
       }))
-      : view === 'domains'
-        ? data.domains.map((d) => ({ ...d, key: d.domain, name: d.domain, note: `ящиков: ${d.mailboxes}` }))
-        : data.mailboxList.map((m) => ({
-          ...m, key: m.id, name: m.email, note: !m.enabled ? 'выключен' : m.status === 'failed' ? 'ошибка входа' : undefined,
-        }));
+      : data.mailboxList.map((m) => ({
+        ...m, key: m.id, name: m.email, note: !m.enabled ? 'выключен' : m.status === 'failed' ? 'ошибка входа' : undefined,
+      }));
     return [...base].sort((a, b) => sortValue(b, sort) - sortValue(a, sort));
   }, [data, view, sort]);
 
   const tabs: { id: Breakdown; label: string }[] = [
     { id: 'campaigns', label: `Кампании (${data.campaigns.length})` },
-    { id: 'domains', label: `Домены (${data.domains.length})` },
     { id: 'mailboxes', label: `Ящики (${data.mailboxList.length})` },
   ];
 
@@ -468,7 +481,7 @@ function BreakdownTable({ data }: { data: SenderStatsDto }) {
             <thead className="sticky top-0 bg-white text-left text-xs uppercase text-zinc-500">
               <tr className="border-b border-zinc-200">
                 <th className="px-5 py-2 font-medium">
-                  {view === 'campaigns' ? 'Кампания' : view === 'domains' ? 'Домен' : 'Ящик'}
+                  {view === 'campaigns' ? 'Кампания' : 'Ящик'}
                 </th>
                 {COLUMNS.map((col) => (
                   <th key={col.key} className="px-3 py-2 text-right font-medium">
@@ -678,6 +691,8 @@ export function StatsTab() {
             <Deliverability data={data} />
             <Steps steps={data.steps} />
           </div>
+
+          <DomainDeliverability domains={data.domains} />
 
           <BreakdownTable data={data} />
         </div>

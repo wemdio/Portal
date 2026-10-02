@@ -22,6 +22,7 @@ import { processSenderReplies } from '@/lib/sender/repliesWorker';
 import { checkDeliveredProbes, sendPendingProbes } from '@/lib/sender/probeWorker';
 import { processManualMessages } from '@/lib/sender/manualWorker';
 import { runSenderMonitor } from '@/lib/sender/monitorWorker';
+import { runDomainHealth } from '@/lib/sender/domainHealth';
 import { syncGoogleWorkspaceMailboxes } from '@/lib/sender/googleSyncWorker';
 import {
   checkEgress,
@@ -55,6 +56,13 @@ let lastGoogleSyncAt = 0;
 // метрики скользящие, чаще незачем, а TG не должен шуметь.
 const MONITOR_INTERVAL_MS = Number(process.env.SENDER_MONITOR_INTERVAL_MS ?? 300_000);
 let lastMonitorAt = 0;
+
+// Подписи и чёрные списки доменов (вкладка «Статистика»). Запуск раз в
+// полчаса, но каждый домен перепроверяется лишь раз в 12 ч — счёт ведёт
+// sender_domain_health, рестарт воркера лишних запросов не даёт.
+const DOMAIN_HEALTH_INTERVAL_MS = Number(process.env.SENDER_DOMAIN_HEALTH_INTERVAL_MS ?? 1_800_000);
+let lastDomainHealthAt = 0;
+let domainHealthRunning = false;
 
 /** Как часто перепроверять, с какого адреса нас видит интернет. */
 const EGRESS_CHECK_INTERVAL_MS = 10 * 60 * 1000;
@@ -121,6 +129,16 @@ async function runFleetJobs(): Promise<void> {
   if (Date.now() - lastMonitorAt >= MONITOR_INTERVAL_MS) {
     lastMonitorAt = Date.now();
     await guarded('Монитор не отработал', () => runSenderMonitor({ log }));
+  }
+
+  // Фоном, без await: DNS-запросы к пятнадцати доменам идут минутами, а
+  // тик общий с отправкой. Следующий запуск — не раньше, чем кончится этот.
+  if (!domainHealthRunning && Date.now() - lastDomainHealthAt >= DOMAIN_HEALTH_INTERVAL_MS) {
+    lastDomainHealthAt = Date.now();
+    domainHealthRunning = true;
+    void guarded('Домены не проверились по DNS', () => runDomainHealth({ log })).finally(() => {
+      domainHealthRunning = false;
+    });
   }
 }
 
