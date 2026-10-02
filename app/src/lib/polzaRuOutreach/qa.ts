@@ -164,6 +164,12 @@ const TEMPLATE_ALLOWED_WORDS = ['15 минут', 'B2B', 'b2b'];
  */
 const FABRICATION = /(?<![а-яё])в\s+(?:\S+\s+)?раз[аы]?(?![а-яё])|вдвое|втрое|вчетверо|десятк|сотн|сотен|тысяч|процент|недел|месяц|месяч|квартал/gi;
 /**
+ * Выгода оффера по CEO (02.10.2026): заявки приходят каждый месяц, а платят
+ * один раз за настройку. Это про модель работы, а не обещание объёма или
+ * срока — без числа «каждый месяц» и «ежемесячно» разрешены.
+ */
+const MONTHLY_FLOW = /каждый\s+месяц|ежемесячно/gi;
+/**
  * Намёк на прошлый контакт — не только «уже общались»: «ранее обсуждали»,
  * «с вами переписывались», «наш разговор», «нашей встречи».
  */
@@ -173,6 +179,10 @@ const PRIOR_CONTACT =
 const TEMPLATE_FORBIDDEN_EXTRA: Array<[RegExp, string]> = [[/гарант/i, 'forbidden:guarantee']];
 /** Абзацы шаблона — через пустую строку, как у renderTemplate. */
 const PARAGRAPH_BREAK = /\n[ \t]*\n/;
+
+function escapeRe(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 function countOf(text: string, piece: string): number {
   return text.split(piece).length - 1;
@@ -206,7 +216,7 @@ function textChecks(tag: string, text: string, chain: ChainType, writerFree: str
   }
   const digits = unsupportedNumbers(own.replace(SEGMENTS_RANGE, ' '), TEMPLATE_ALLOWED_WORDS);
   if (digits.length) flags.push(`${tag}:unsupported_number(${digits.join(' ')})`);
-  const made = Array.from(new Set((own.match(FABRICATION) ?? []).map((m) => m.toLowerCase()))).slice(0, 3);
+  const made = Array.from(new Set((own.replace(MONTHLY_FLOW, ' ').match(FABRICATION) ?? []).map((m) => m.toLowerCase()))).slice(0, 3);
   if (made.length) flags.push(`${tag}:fabrication(${made.join(', ')})`);
   // Прошлый контакт — только «Возврату»: у остальных офферов разговор в AMO,
   // если он был, приносит {{повод}}, а текст шаблона идёт всем компаниям.
@@ -269,10 +279,10 @@ export function runTemplateQa(input: TemplateQaInput): QaResult {
       if (!allowed.has(found) || found === P.signature) flags.push(`${tag}:placeholder_not_allowed(${found})`);
     }
     if (/[{}]/.test(plain)) flags.push(`${tag}:placeholder_broken`);
-    for (const ph of [P.opening, P.about, P.case, P.hypothesis]) {
+    for (const ph of [P.opening, P.bridge, P.case, P.hypothesis]) {
       if (countOf(text, ph) > 1) flags.push(`${tag}:placeholder_repeated(${ph})`);
     }
-    for (const ph of [P.opening, P.about, P.hypothesis]) {
+    for (const ph of [P.opening, P.bridge, P.hypothesis]) {
       if (text.includes(ph) && !ownParagraph(text, ph)) flags.push(`${tag}:placeholder_not_alone(${ph})`);
     }
 
@@ -284,19 +294,25 @@ export function runTemplateQa(input: TemplateQaInput): QaResult {
     textChecks(tag, text, chain, writerFree, examples, flags);
   }
 
-  // Обязательные плейсхолдеры и их места: повод и строка о компании — в
+  // Обязательные плейсхолдеры и их места: повод и связка — в
   // письме 1 (оба варианта) и только там (в других письмах они повторяли бы
   // письмо 1), кейс — только в письме 3 с кейсом, гипотеза — только в письме 3
   // без кейса.
   if (!t.bodyDirect.includes(P.opening)) flags.push(`L1:placeholder_missing(${P.opening})`);
   if (!t.bodyRouting.includes(P.opening)) flags.push(`L1r:placeholder_missing(${P.opening})`);
-  if (!t.bodyDirect.includes(P.about)) flags.push(`L1:placeholder_missing(${P.about})`);
-  if (!t.bodyRouting.includes(P.about)) flags.push(`L1r:placeholder_missing(${P.about})`);
+  if (!t.bodyDirect.includes(P.bridge)) flags.push(`L1:placeholder_missing(${P.bridge})`);
+  if (!t.bodyRouting.includes(P.bridge)) flags.push(`L1r:placeholder_missing(${P.bridge})`);
+  // Связка продолжает повод: стоит абзацем сразу за ним, иначе повод
+  // повисает отдельно от предложения (замечание CEO 02.10.2026).
+  const bridgeAfterOpening = new RegExp(`${escapeRe(P.opening)}[ \t]*\n[ \t]*\n[ \t]*${escapeRe(P.bridge)}`);
+  for (const [tag, raw] of [['L1', t.bodyDirect], ['L1r', t.bodyRouting]] as const) {
+    if (raw.includes(P.opening) && raw.includes(P.bridge) && !bridgeAfterOpening.test(raw)) flags.push(`${tag}:bridge_not_after_opening`);
+  }
   if (chainUsesCase(chain) && !(t.bodyWithCase ?? '').includes(P.case)) flags.push(`L3c:placeholder_missing(${P.case})`);
   if (chainUsesHypothesis(chain) && !t.bodyWithoutCase.includes(P.hypothesis)) flags.push(`L3:placeholder_missing(${P.hypothesis})`);
   for (const [tag, raw] of bodies) {
     if (tag !== 'L1' && tag !== 'L1r' && raw.includes(P.opening)) flags.push(`${tag}:placeholder_misplaced(${P.opening})`);
-    if (tag !== 'L1' && tag !== 'L1r' && raw.includes(P.about)) flags.push(`${tag}:placeholder_misplaced(${P.about})`);
+    if (tag !== 'L1' && tag !== 'L1r' && raw.includes(P.bridge)) flags.push(`${tag}:placeholder_misplaced(${P.bridge})`);
     if (tag !== 'L3c' && allowed.has(P.case) && raw.includes(P.case)) flags.push(`${tag}:placeholder_misplaced(${P.case})`);
     if (tag !== 'L3' && allowed.has(P.hypothesis) && raw.includes(P.hypothesis)) flags.push(`${tag}:placeholder_misplaced(${P.hypothesis})`);
   }
@@ -332,6 +348,7 @@ const TEMPLATE_FLAG_TEXT: Record<string, string> = {
   placeholder_not_alone: 'плейсхолдер должен быть отдельным абзацем, без другого текста',
   placeholder_missing: 'нет обязательного плейсхолдера',
   placeholder_misplaced: 'плейсхолдер не на своём месте',
+  bridge_not_after_opening: '{{связка}} должна стоять отдельным абзацем сразу после {{повод}}',
   no_cta: 'нет вопроса — нужен ровно один «?»',
   more_than_one_cta: 'больше одного «?» — нужен ровно один',
   exclamation: 'восклицательный знак (можно только в «Добрый день!»)',
@@ -346,7 +363,7 @@ const TEMPLATE_FLAG_TEXT: Record<string, string> = {
   markdown: 'разметка markdown',
   false_prior_contact: 'намёк на прошлый контакт («уже общались», «ранее обсуждали», «наш разговор») — только в оффере «Возврат»',
   unsupported_number: 'цифры не из утверждённых формулировок («2–3» — только перед словом «сегмент»)',
-  fabrication: 'число словами или обещание срока или результата — подтвердить нечем',
+  fabrication: 'число словами или обещание срока или результата — подтвердить нечем («каждый месяц» и «ежемесячно» без числа можно)',
   example_leak: 'в текст попал пример из задания — в шаблоне не может быть конкретной компании',
   not_shortest: 'письмо 4 должно быть короче письма 2 и письма 3 без кейса',
   subject_missing: 'нет темы',

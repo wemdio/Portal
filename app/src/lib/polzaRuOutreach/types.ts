@@ -33,8 +33,10 @@ export const LETTER_COUNT = 4;
  * Версия писем строки (template_version). С 26.09.2026 письма — шаблон цепочки
  * оффера от писателя (letters/templateWriter.ts) с подставленными фактами
  * компании; прежние детерминированные цепочки (chains_v4) — только его образец.
+ * v2 (02.10.2026): связка повода с предложением вместо строки о компании,
+ * выгода и модель оплаты в письме 1.
  */
-export const TEMPLATE_VERSION = 'offer_templates_v1@2026-09-26';
+export const TEMPLATE_VERSION = 'offer_templates_v2@2026-10-02';
 
 /** Писем в цепочке: во всех цепочках четыре, как у CEO (решение 26.09.2026). */
 export function letterCountFor(_chain: ChainType): number {
@@ -44,20 +46,29 @@ export function letterCountFor(_chain: ChainType): number {
 /**
  * Плейсхолдеры шаблона цепочки — только они меняются от компании к компании
  * (спека 2026-09-26-outreach-to-sender-design.md §4): бренд, фраза-повод из
- * проверенных фактов (openingSentence), строка о компании (что продаёт и
- * кому — из разбора сайта, 28.09.2026: без неё письма всем компаниям оффера
- * были одним текстом), текст утверждённого кейса, гипотеза сегментов и
- * подпись отправителя.
+ * проверенных фактов (openingSentence), связка повода с предложением (одна
+ * фраза дешёвой модели на компанию, letters/bridge.ts), текст утверждённого
+ * кейса, гипотеза сегментов и подпись отправителя.
+ *
+ * Связка заменила строку о компании 02.10.2026 по замечанию CEO: пересказ
+ * «Компания … предлагает …» письму не нужен, а повод должен вести к
+ * предложению.
  */
 export const TEMPLATE_PLACEHOLDERS = {
   brand: '{{бренд}}',
   opening: '{{повод}}',
-  about: '{{о компании}}',
+  bridge: '{{связка}}',
   case: '{{кейс}}',
   hypothesis: '{{гипотеза}}',
   signature: '{{подпись}}',
 } as const;
 export type TemplatePlaceholder = (typeof TEMPLATE_PLACEHOLDERS)[keyof typeof TEMPLATE_PLACEHOLDERS];
+
+/**
+ * Строка о компании шаблонов до 02.10.2026. В старых шаблонах (пересборка
+ * «Переписать цепочку» старого запуска) её абзац просто удаляется.
+ */
+export const LEGACY_ABOUT_PLACEHOLDER = '{{о компании}}';
 
 /** Конец каждого письма шаблона — как у signed(): подпись подставляется целиком. */
 export const TEMPLATE_SIGN_OFF = `С уважением,\n${TEMPLATE_PLACEHOLDERS.signature}`;
@@ -98,7 +109,7 @@ export function templatePlaceholdersFor(chain: ChainType): TemplatePlaceholder[]
   return [
     p.brand,
     p.opening,
-    p.about,
+    p.bridge,
     ...(chainUsesCase(chain) ? [p.case] : []),
     ...(chainUsesHypothesis(chain) ? [p.hypothesis] : []),
     p.signature,
