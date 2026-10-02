@@ -4,6 +4,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { EChartsCoreOption } from 'echarts/core';
 import { AlertCircle, Loader2, RefreshCw } from 'lucide-react';
 import EChart from '@/components/charts/EChart';
+import { DomainDeliverability } from './DomainDeliverability';
+import type { BounceKinds } from '@/lib/sender/domainReputation';
 import {
   AXIS_FONT_SIZE,
   AXIS_LINE,
@@ -19,7 +21,9 @@ import {
   type ChartTheme,
 } from '@/components/charts/theme';
 import {
+  fetchCampaigns,
   fetchSenderStats,
+  type CampaignDto,
   type SenderStatCounters,
   type SenderStatsDto,
   type SenderStatsPeriod,
@@ -159,10 +163,11 @@ function buildDailyOption(days: SenderStatsDto['days'], theme: ChartTheme, anima
       axisLabel,
     },
     // Две оси: писем уходят сотни, ответов — единицы, и на общей шкале линии
-    // ответов лежали бы на нуле. Левая — письма, правая — люди.
+    // ответов лежали бы на нуле. Левая — письма; у линий свой масштаб без
+    // подписей (шкала «люди» сбивала с толку), числа — в подсказке.
     yAxis: [
       { type: 'value', name: 'письма', minInterval: 1, nameTextStyle: axisLabel, splitLine: { lineStyle: { color: GRID_LINE } }, axisLabel },
-      { type: 'value', name: 'люди', minInterval: 1, nameTextStyle: axisLabel, splitLine: { show: false }, axisLabel },
+      { type: 'value', minInterval: 1, splitLine: { show: false }, axisLabel: { show: false } },
     ],
     series: [
       {
@@ -288,6 +293,7 @@ function Deliverability({ data }: { data: SenderStatsDto }) {
   const suppressed = Object.entries(data.suppressed).sort((a, b) => b[1] - a[1]);
   const barWidth = bounce === null ? 0 : Math.min(100, (bounce / (BOUNCE_BAD * 2)) * 100);
   const tone = bounceTone(bounce);
+  const kinds: BounceKinds = data.bounceKinds ?? {};
 
   return (
     <div className="rounded-xl border border-zinc-200 bg-white p-5">
@@ -316,6 +322,18 @@ function Deliverability({ data }: { data: SenderStatsDto }) {
       </div>
 
       <div className="mt-4 divide-y divide-zinc-100">
+        <Row
+          label="Отклонили как спам"
+          value={nf(kinds.spam ?? 0)}
+          tone={kinds.spam ? 'bad' : null}
+        />
+        <Row
+          label="Не прошли проверку подписи домена"
+          value={nf(kinds.auth ?? 0)}
+          tone={kinds.auth ? 'warn' : null}
+        />
+        <Row label="Адреса нет" value={nf(kinds.no_user ?? 0)} />
+        <Row label="Временно не доставлены" value={nf(kinds.temporary ?? 0)} />
         <Row
           label="Не отправились (ошибка SMTP)"
           value={data.letters.failed ? `${nf(data.letters.failed)} · ${formatRate(failRate)}` : '0'}
@@ -396,7 +414,8 @@ function Steps({ steps }: { steps: SenderStatsDto['steps'] }) {
 
 // ─── Разрезы: кампании / домены / ящики ─────────────────────────────────────
 
-type Breakdown = 'campaigns' | 'domains' | 'mailboxes';
+// Домены — отдельной таблицей с репутацией (DomainDeliverability).
+type Breakdown = 'campaigns' | 'mailboxes';
 type SortKey = 'sent' | 'reached' | 'replyRate' | 'leads' | 'bounceRate';
 
 type TableRow = SenderStatCounters & { key: string; name: string; note?: string; sent: number };
@@ -424,17 +443,14 @@ function BreakdownTable({ data }: { data: SenderStatsDto }) {
       ? data.campaigns.map((c) => ({
         ...c, key: c.id, name: c.name, note: c.status === 'running' ? undefined : c.status === 'paused' ? 'на паузе' : c.status === 'done' ? 'завершена' : 'черновик',
       }))
-      : view === 'domains'
-        ? data.domains.map((d) => ({ ...d, key: d.domain, name: d.domain, note: `ящиков: ${d.mailboxes}` }))
-        : data.mailboxList.map((m) => ({
-          ...m, key: m.id, name: m.email, note: !m.enabled ? 'выключен' : m.status === 'failed' ? 'ошибка входа' : undefined,
-        }));
+      : data.mailboxList.map((m) => ({
+        ...m, key: m.id, name: m.email, note: !m.enabled ? 'выключен' : m.status === 'failed' ? 'ошибка входа' : undefined,
+      }));
     return [...base].sort((a, b) => sortValue(b, sort) - sortValue(a, sort));
   }, [data, view, sort]);
 
   const tabs: { id: Breakdown; label: string }[] = [
     { id: 'campaigns', label: `Кампании (${data.campaigns.length})` },
-    { id: 'domains', label: `Домены (${data.domains.length})` },
     { id: 'mailboxes', label: `Ящики (${data.mailboxList.length})` },
   ];
 
@@ -465,7 +481,7 @@ function BreakdownTable({ data }: { data: SenderStatsDto }) {
             <thead className="sticky top-0 bg-white text-left text-xs uppercase text-zinc-500">
               <tr className="border-b border-zinc-200">
                 <th className="px-5 py-2 font-medium">
-                  {view === 'campaigns' ? 'Кампания' : view === 'domains' ? 'Домен' : 'Ящик'}
+                  {view === 'campaigns' ? 'Кампания' : 'Ящик'}
                 </th>
                 {COLUMNS.map((col) => (
                   <th key={col.key} className="px-3 py-2 text-right font-medium">
@@ -519,11 +535,28 @@ function BreakdownTable({ data }: { data: SenderStatsDto }) {
 
 export function StatsTab() {
   const [period, setPeriod] = useState<SenderStatsPeriod>('30d');
+  // null — все кампании сразу.
+  const [campaignId, setCampaignId] = useState<string | null>(null);
+  const [campaignList, setCampaignList] = useState<Pick<CampaignDto, 'id' | 'name'>[]>([]);
   const [data, setData] = useState<SenderStatsDto | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // Кнопка «Обновить» перезапускает тот же эффект, что и смена периода.
   const [reloadKey, setReloadKey] = useState(0);
+
+  // Список для выбора — все кампании, а не только с письмами в периоде:
+  // иначе выбранная кампания пропадала бы из списка при смене периода.
+  useEffect(() => {
+    let cancelled = false;
+    fetchCampaigns()
+      .then((res) => {
+        if (!cancelled) setCampaignList(res.campaigns.map(({ id, name }) => ({ id, name })));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -531,7 +564,7 @@ export function StatsTab() {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetchSenderStats(period);
+        const res = await fetchSenderStats(period, campaignId);
         if (!cancelled) setData(res);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Не удалось загрузить статистику');
@@ -542,7 +575,7 @@ export function StatsTab() {
     return () => {
       cancelled = true;
     };
-  }, [period, reloadKey]);
+  }, [period, campaignId, reloadKey]);
 
   const t = data?.totals;
   const replyRate = t ? rate(t.replied, t.reached) : null;
@@ -552,20 +585,34 @@ export function StatsTab() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="inline-flex gap-1 rounded-xl border border-zinc-200 bg-white p-1">
-          {PERIODS.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              disabled={loading}
-              onClick={() => setPeriod(p.id)}
-              className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-60 ${
-                period === p.id ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:bg-zinc-100'
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="inline-flex gap-1 rounded-xl border border-zinc-200 bg-white p-1">
+            {PERIODS.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                disabled={loading}
+                onClick={() => setPeriod(p.id)}
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-60 ${
+                  period === p.id ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:bg-zinc-100'
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          <select
+            value={campaignId ?? ''}
+            onChange={(e) => setCampaignId(e.target.value || null)}
+            disabled={loading}
+            aria-label="Кампания"
+            className="max-w-xs rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-700 disabled:opacity-60"
+          >
+            <option value="">Все кампании</option>
+            {campaignList.map((c) => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </select>
         </div>
         <button
           type="button"
@@ -644,6 +691,8 @@ export function StatsTab() {
             <Deliverability data={data} />
             <Steps steps={data.steps} />
           </div>
+
+          <DomainDeliverability domains={data.domains} />
 
           <BreakdownTable data={data} />
         </div>

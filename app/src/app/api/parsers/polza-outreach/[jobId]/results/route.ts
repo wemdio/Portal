@@ -52,6 +52,9 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
     .order('id', { ascending: true })
     .range(offset, offset + limit - 1);
   if (statusFilter) resultsQuery = resultsQuery.eq('status', statusFilter);
+  // Клик по причине в «Почему отсеивались» — строки ровно с этой причиной.
+  const reasonFilter = sp.get('reason');
+  if (reasonFilter) resultsQuery = resultsQuery.eq('exclusion_reason', reasonFilter);
 
   const { data, error, count } = await resultsQuery;
   if (error) {

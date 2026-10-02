@@ -1,7 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Globe, RefreshCw, Search, Settings, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { ChevronDown, Globe, RefreshCw, Search, Settings, X } from 'lucide-react';
 import { fetchOthers, fetchProjects, fetchReplies, type ProjectListItem } from './api';
 import { GlobalKnowledgeForm } from './GlobalKnowledgeForm';
 import { KnowledgeBaseForm } from './KnowledgeBaseForm';
@@ -24,14 +24,100 @@ function mergeReplies(current: ReplyListItem[], next: ReplyListItem[]): ReplyLis
   );
 }
 
-const LIST_STATUS_BADGE: Record<ReplyListItem['listStatus'], { label: string; className: string }> = {
-  new: { label: 'новый', className: 'bg-blue-100 text-blue-700' },
-  sent: { label: 'отправлено', className: 'bg-emerald-100 text-emerald-700' },
-  skipped: { label: 'пропущено', className: 'bg-gray-100 text-gray-500' },
+/**
+ * Ширина колонок «Проекты» и «Письма» — перетаскиванием границы: длинные
+ * названия проектов и адреса резались троеточием. Ширина запоминается в
+ * браузере; двойной клик по границе возвращает исходную.
+ */
+const COLUMN_WIDTHS_KEY = 'reply-personalization:column-widths';
+const DEFAULT_WIDTHS = { projects: 240, list: 360 };
+const WIDTH_LIMITS = { projects: [160, 520], list: [260, 760] } as const;
+type ColumnKey = keyof typeof DEFAULT_WIDTHS;
+
+function clampWidth(key: ColumnKey, value: number): number {
+  const [min, max] = WIDTH_LIMITS[key];
+  return Math.round(Math.min(max, Math.max(min, value)));
+}
+
+function useColumnWidths() {
+  const [widths, setWidths] = useState(DEFAULT_WIDTHS);
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(COLUMN_WIDTHS_KEY) ?? 'null') as Partial<typeof DEFAULT_WIDTHS> | null;
+      if (saved) {
+        setWidths({
+          projects: clampWidth('projects', Number(saved.projects) || DEFAULT_WIDTHS.projects),
+          list: clampWidth('list', Number(saved.list) || DEFAULT_WIDTHS.list),
+        });
+      }
+    } catch {
+      // нет доступа к хранилищу — ширина по умолчанию
+    }
+  }, []);
+  const save = (next: typeof DEFAULT_WIDTHS) => {
+    try {
+      localStorage.setItem(COLUMN_WIDTHS_KEY, JSON.stringify(next));
+    } catch {
+      // не запомнилось — не страшно
+    }
+  };
+  const startDrag = (key: ColumnKey, event: ReactMouseEvent) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = widths[key];
+    let latest = widths;
+    const onMove = (e: MouseEvent) => {
+      latest = { ...latest, [key]: clampWidth(key, startWidth + e.clientX - startX) };
+      setWidths(latest);
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      save(latest);
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+  const reset = (key: ColumnKey) => {
+    const next = { ...widths, [key]: DEFAULT_WIDTHS[key] };
+    setWidths(next);
+    save(next);
+  };
+  return { widths, startDrag, reset };
+}
+
+function ColumnResizer({ onMouseDown, onDoubleClick }: { onMouseDown: (e: ReactMouseEvent) => void; onDoubleClick: () => void }) {
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      title="Потяните, чтобы изменить ширину; двойной клик — как было"
+      onMouseDown={onMouseDown}
+      onDoubleClick={onDoubleClick}
+      className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-blue-400/40"
+    />
+  );
+}
+
+// hint — подсказка при наведении: что значит метка и что с письмом делать.
+type Badge = { label: string; className: string; hint: string };
+
+const LIST_STATUS_BADGE: Record<ReplyListItem['listStatus'], Badge> = {
+  new: { label: 'новый', className: 'bg-blue-100 text-blue-700', hint: 'Человек ответил впервые, мы ещё не ответили' },
+  sent: { label: 'отправлено', className: 'bg-emerald-100 text-emerald-700', hint: 'Мы уже ответили на это письмо' },
+  skipped: { label: 'пропущено', className: 'bg-gray-100 text-gray-500', hint: 'Отмечено «Пропустить» — отвечать не стали' },
 };
 
 /** Необработанное письмо адресата, который уже отвечал раньше, — не «новый». */
-const REPEAT_BADGE = { label: 'повторный', className: 'bg-violet-100 text-violet-700' };
+const REPEAT_BADGE: Badge = {
+  label: 'повторный',
+  className: 'bg-violet-100 text-violet-700',
+  hint: 'Человек уже писал нам раньше, это его следующее письмо; на него мы ещё не ответили',
+};
 
 function listBadge(item: ReplyListItem) {
   return item.listStatus === 'new' && item.repeat ? REPEAT_BADGE : LIST_STATUS_BADGE[item.listStatus];
@@ -43,10 +129,10 @@ function listBadge(item: ReplyListItem) {
  * не зная, где интерес. Показываем только решённые случаи: 'pending',
  * 'processing', 'error' и письма живых аккаунтов метки не получают.
  */
-const LEAD_BADGE: Record<string, { label: string; className: string }> = {
-  lead: { label: 'лид', className: 'bg-amber-100 text-amber-800' },
-  not_lead: { label: 'не лид', className: 'bg-gray-100 text-gray-400' },
-  needs_review: { label: 'под вопросом', className: 'bg-sky-100 text-sky-700' },
+const LEAD_BADGE: Record<string, Badge> = {
+  lead: { label: 'лид', className: 'bg-amber-100 text-amber-800', hint: 'ИИ по тексту видит интерес — стоит ответить в первую очередь' },
+  not_lead: { label: 'не лид', className: 'bg-gray-100 text-gray-400', hint: 'ИИ интереса не видит: отказ, автоответ или «переслали коллегам»' },
+  needs_review: { label: 'под вопросом', className: 'bg-sky-100 text-sky-700', hint: 'ИИ не уверен — посмотрите письмо сами' },
 };
 
 function LeadBadge({ item }: { item: ReplyListItem }) {
@@ -54,8 +140,8 @@ function LeadBadge({ item }: { item: ReplyListItem }) {
   if (!badge) return null;
   return (
     <span
-      className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${badge.className}`}
-      title="Оценка квалификатора по тексту ответа"
+      className={`cursor-help rounded px-1.5 py-0.5 text-[10px] font-semibold ${badge.className}`}
+      title={badge.hint}
     >
       {badge.label}
     </span>
@@ -129,13 +215,24 @@ export function ReplyPersonalizationView() {
   // Фильтры списка писем — как в Instantly: кампания и поиск по почте ответившего.
   const [campaigns, setCampaigns] = useState<ReplyCampaignOption[]>([]);
   const [campaignFilter, setCampaignFilter] = useState('');
-  /**
-   * Показаны ли все кампании проекта. Свёрнутый список раньше был областью со
-   * своей прокруткой: кампании ниже четвёртой строки не было видно и о том,
-   * что список продолжается, ничто не сообщало — кампания без ответов (она в
-   * конце) выглядела как отсутствующая.
-   */
+  /** Открыт ли выпадающий список кампаний; закрывается выбором или кликом мимо. */
   const [campaignsExpanded, setCampaignsExpanded] = useState(false);
+  const campaignMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!campaignsExpanded) return;
+    const close = (event: MouseEvent) => {
+      if (!campaignMenuRef.current?.contains(event.target as Node)) setCampaignsExpanded(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setCampaignsExpanded(false);
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [campaignsExpanded]);
   /**
    * «Только лиды» — письма, которым квалификатор поставил вердикт 'lead'.
    * Фильтруем на сервере: в списке подгружаются сотни писем страницами, и
@@ -322,6 +419,9 @@ export function ReplyPersonalizationView() {
   const allCampaignsCount = campaigns.every((c) => c.replyCount !== null)
     ? campaigns.reduce((sum, c) => sum + (c.replyCount ?? 0), 0)
     : null;
+  const campaignOptions = [{ id: '', name: 'Все кампании', replyCount: allCampaignsCount }, ...campaigns];
+  // Выбранная кампания пропала из списка (сменился проект) — подпись «Все кампании».
+  const activeCampaign = campaignOptions.find((c) => c.id === campaignFilter) ?? campaignOptions[0];
 
   const listItems = tab === 'others' ? othersVisible : items;
   const listLoading = tab === 'others' ? othersLoading : itemsLoading;
@@ -358,6 +458,7 @@ export function ReplyPersonalizationView() {
   // Поиск по списку проектов: их 60, и листать до нужного дольше, чем набрать
   // пару букв. Ищем по вхождению без учёта регистра и ё/е.
   const [projectQuery, setProjectQuery] = useState('');
+  const columns = useColumnWidths();
   const visibleProjects = useMemo(() => {
     const norm = (v: string) => v.toLowerCase().replace(/ё/g, 'е').trim();
     const q = norm(projectQuery);
@@ -365,9 +466,16 @@ export function ReplyPersonalizationView() {
   }, [projects, projectQuery]);
 
   return (
-    <div className="grid h-full min-h-0 grid-cols-[240px_360px_minmax(0,1fr)]">
+    <div
+      className="grid h-full min-h-0"
+      style={{ gridTemplateColumns: `${columns.widths.projects}px ${columns.widths.list}px minmax(0,1fr)` }}
+    >
       {/* Колонка 1: проекты */}
-      <aside className="flex min-h-0 flex-col border-r border-gray-200 bg-white">
+      <aside className="relative flex min-h-0 flex-col border-r border-gray-200 bg-white">
+        <ColumnResizer
+          onMouseDown={(e) => columns.startDrag('projects', e)}
+          onDoubleClick={() => columns.reset('projects')}
+        />
         <div className="flex items-center justify-between gap-2 border-b border-gray-100 px-3 py-2.5">
           <h2 className="text-sm font-semibold text-gray-900">Проекты ({projects.length})</h2>
           {canManageGlobalKb ? (
@@ -439,7 +547,7 @@ export function ReplyPersonalizationView() {
                     {p.client.charAt(0).toUpperCase() || '?'}
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium text-gray-900">{p.client}</span>
+                    <span className="block truncate text-sm font-medium text-gray-900" title={p.client}>{p.client}</span>
                     {p.missingReason ? (
                       <span className="block text-[11px] text-amber-600">{p.missingReason.toLowerCase()}</span>
                     ) : null}
@@ -469,7 +577,11 @@ export function ReplyPersonalizationView() {
       </aside>
 
       {/* Колонка 2: письма */}
-      <div className="flex min-h-0 flex-col border-r border-gray-200 bg-white">
+      <div className="relative flex min-h-0 flex-col border-r border-gray-200 bg-white">
+        <ColumnResizer
+          onMouseDown={(e) => columns.startDrag('list', e)}
+          onDoubleClick={() => columns.reset('list')}
+        />
         <div className="flex items-center justify-between gap-2 border-b border-gray-100 px-3 py-2">
           {project ? (
             <div className="flex items-center gap-1" role="group" aria-label="Папка писем">
@@ -561,47 +673,59 @@ export function ReplyPersonalizationView() {
               </div>
             ) : null}
             {tab === 'replies' && campaigns.length > 1 ? (
-              <div className="space-y-1">
-              <div
-                className={`flex flex-wrap gap-1 ${campaignsExpanded ? 'max-h-72 overflow-y-auto' : 'max-h-28 overflow-hidden'}`}
-                role="group"
-                aria-label="Кампании"
-              >
-                {[{ id: '', name: 'Все кампании', replyCount: allCampaignsCount }, ...campaigns].map((c) => {
-                  const isActive = campaignFilter === c.id;
-                  return (
-                    <button
-                      key={c.id || 'all'}
-                      type="button"
-                      onClick={() => {
-                        setCampaignFilter(c.id);
-                        setLimit(REPLIES_PAGE_SIZE);
-                      }}
-                      title={c.name}
-                      aria-pressed={isActive}
-                      className={`flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition ${
-                        isActive
-                          ? 'border-blue-500 bg-blue-50 text-blue-700'
-                          : 'border-gray-200 text-gray-600 hover:bg-gray-50'
-                      }`}
-                    >
-                      <span className="truncate">{c.name}</span>
-                      {c.replyCount !== null ? (
-                        <span className={isActive ? 'text-blue-500' : 'text-gray-400'}>{c.replyCount}</span>
-                      ) : null}
-                    </button>
-                  );
-                })}
-              </div>
-              {campaigns.length > 4 ? (
+              // Кампании — выпадающим списком: лентой кнопок они занимали
+              // полэкрана над письмами.
+              <div ref={campaignMenuRef} className="relative">
                 <button
                   type="button"
                   onClick={() => setCampaignsExpanded((v) => !v)}
-                  className="text-[11px] text-blue-600 hover:underline"
+                  aria-haspopup="listbox"
+                  aria-expanded={campaignsExpanded}
+                  className={`flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left text-xs transition ${
+                    campaignFilter
+                      ? 'border-blue-500 bg-blue-50 text-blue-700'
+                      : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+                  }`}
                 >
-                  {campaignsExpanded ? 'Свернуть кампании' : `Показать все кампании (${campaigns.length})`}
+                  <span className="truncate">{activeCampaign.name}</span>
+                  {activeCampaign.replyCount !== null ? (
+                    <span className={campaignFilter ? 'text-blue-500' : 'text-gray-400'}>{activeCampaign.replyCount}</span>
+                  ) : null}
+                  <ChevronDown className={`ml-auto h-3.5 w-3.5 shrink-0 transition-transform ${campaignsExpanded ? 'rotate-180' : ''}`} />
                 </button>
-              ) : null}
+                {campaignsExpanded ? (
+                  <div
+                    role="listbox"
+                    aria-label="Кампании"
+                    className="absolute left-0 right-0 z-20 mt-1 max-h-80 overflow-y-auto rounded-lg border border-gray-200 bg-white py-1 shadow-lg"
+                  >
+                    {campaignOptions.map((c) => {
+                      const isActive = campaignFilter === c.id;
+                      return (
+                        <button
+                          key={c.id || 'all'}
+                          type="button"
+                          role="option"
+                          aria-selected={isActive}
+                          onClick={() => {
+                            setCampaignFilter(c.id);
+                            setLimit(REPLIES_PAGE_SIZE);
+                            setCampaignsExpanded(false);
+                          }}
+                          title={c.name}
+                          className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition ${
+                            isActive ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-50'
+                          }`}
+                        >
+                          <span className="truncate">{c.name}</span>
+                          {c.replyCount !== null ? (
+                            <span className={`ml-auto shrink-0 ${isActive ? 'text-blue-500' : 'text-gray-400'}`}>{c.replyCount}</span>
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -651,13 +775,14 @@ export function ReplyPersonalizationView() {
                 }`}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="truncate text-sm font-medium text-gray-900">
+                  <span className="min-w-0 truncate text-sm font-medium text-gray-900" title={item.companyName || item.leadEmail}>
                     {item.companyName || item.leadEmail}
                   </span>
                   <span className="flex shrink-0 items-center gap-1">
                     <LeadBadge item={item} />
                     <span
-                      className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${listBadge(item).className}`}
+                      className={`cursor-help rounded px-1.5 py-0.5 text-[10px] font-semibold ${listBadge(item).className}`}
+                      title={listBadge(item).hint}
                     >
                       {listBadge(item).label}
                     </span>

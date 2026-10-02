@@ -22,8 +22,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     if (!supabaseAdmin) return jsonError('Сервис не настроен', 503);
 
     const { id } = await params;
-    const body = (await req.json().catch(() => null)) as { text?: unknown } | null;
+    const body = (await req.json().catch(() => null)) as { text?: unknown; draftId?: unknown } | null;
     const text = typeof body?.text === 'string' ? body.text.trim() : '';
+    // Черновик ИИ, из которого вырос ответ: отмечаем его отправленным, чтобы
+    // по истории было видно, ушёл ли текст ИИ и с какими правками.
+    const draftId = typeof body?.draftId === 'string' && body.draftId ? body.draftId : null;
     if (!text) return jsonError('Письмо пустое', 400);
     if (text.length > MAX_BODY_CHARS) return jsonError('Письмо слишком длинное', 400);
 
@@ -70,7 +73,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       : `Re: ${firstSubject}`;
     const inReplyTo = (lastReply as { message_id?: string } | null)?.message_id ?? recipient.thread_message_id ?? null;
 
-    const { error } = await db.from('sender_manual_messages').insert({
+    const { data: inserted, error } = await db.from('sender_manual_messages').insert({
       campaign_id: recipient.campaign_id,
       recipient_id: recipient.id,
       mailbox_id: recipient.mailbox_id,
@@ -81,9 +84,17 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       in_reply_to: inReplyTo,
       status: 'queued',
       created_by: auth.user.id,
-    });
+    }).select('id').single();
     if (error) return jsonError(error.message, 500);
 
-    return NextResponse.json({ ok: true });
+    if (draftId) {
+      await db
+        .from('sender_reply_drafts')
+        .update({ status: 'sent', sent_at: new Date().toISOString(), manual_message_id: inserted.id })
+        .eq('id', draftId)
+        .eq('recipient_id', recipient.id);
+    }
+
+    return NextResponse.json({ ok: true, messageId: inserted.id });
   });
 }

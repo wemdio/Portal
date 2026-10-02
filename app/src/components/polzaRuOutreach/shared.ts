@@ -1,7 +1,7 @@
 'use client';
 
-import { authFetch, authFetchJson } from '@/lib/authFetch';
-import { CHAIN_LABELS, type ChainType, type Letter, type RuOutreachConfig, type Signal, type Stage } from '@/lib/polzaRuOutreach/types';
+import { authFetchJson } from '@/lib/authFetch';
+import type { ChainType, Letter, RuOutreachConfig, Signal } from '@/lib/polzaRuOutreach/types';
 
 export const API = '/api/tools/polza-ru-outreach';
 
@@ -109,24 +109,6 @@ export interface RuRow {
 
 export const api = authFetchJson;
 
-/** Скачивание файла, который собирает сервер (Excel). */
-export async function downloadFile(url: string, fallbackName: string): Promise<void> {
-  const res = await authFetch(url);
-  if (!res.ok) {
-    const body = (await res.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error ?? `Не удалось выгрузить (HTTP ${res.status})`);
-  }
-  const blob = await res.blob();
-  const href = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = href;
-  a.download = fallbackName;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(href), 60_000);
-}
-
 export const STATUS_LABELS: Record<RuRow['row_status'], string> = {
   processing: 'в работе',
   ready: 'готово',
@@ -158,42 +140,8 @@ export const SIGNAL_LABELS: Record<string, string> = {
   sales_hiring_broad: 'вакансия продаж (не SDR)',
 };
 
-export const MODE_LABELS: Record<string, string> = CHAIN_LABELS;
-
 export function fmtDate(value: string | null | undefined): string {
   if (!value) return '—';
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? value : d.toLocaleDateString('ru-RU');
 }
-
-/** Доллары для строки расхода на ИИ — общие с английским экраном запуска. */
-export { fmtUsd } from '@/lib/outreachLlm/format';
-
-export function fmtDateTime(value: string | null | undefined): string {
-  if (!value) return '—';
-  const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? value : d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
-}
-
-/** Ответ `/{jobId}/results`: строки страницы плюс счётчики для воронки и фильтров. */
-export interface ResultsResponse {
-  items: RuRow[];
-  count: number;
-  funnel: Record<Stage, number>;
-  reason_counts: Record<string, number>;
-  status_counts: Record<string, number>;
-}
-
-/** Быстрые фильтры над таблицей результатов. */
-export type ResultsFilter = 'ready' | 'doubtful' | 'manual_review' | 'rejected' | 'all';
-
-export const RESULT_FILTERS: Array<[ResultsFilter, string]> = [
-  ['ready', 'Готовые'],
-  ['doubtful', 'Очень спорные'],
-  ['manual_review', 'Ручная проверка'],
-  ['rejected', 'Отсеянные'],
-  ['all', 'Все'],
-];
-
-/** Сколько строк результатов на странице. */
-export const RESULTS_PAGE = 50;
