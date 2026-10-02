@@ -110,6 +110,9 @@ export function ReplyDetailPanel({
   /** Язык письма этой переписки; приходит с тредом, по умолчанию русский. */
   const [language, setLanguage] = useState<ReplyLanguage>('ru');
   const rootRef = useRef<HTMLDivElement>(null);
+  /** Лента писем и последнее письмо в ней — чтобы открыть ветку на его начале. */
+  const threadRef = useRef<HTMLDivElement>(null);
+  const lastMessageRef = useRef<HTMLDivElement>(null);
   const [editorHeight, setEditorHeight] = useState(EDITOR_DEFAULT_PX);
   /** Предел для ручки — зависит от высоты панели, пересчитываем с окном. */
   const [editorMax, setEditorMax] = useState(EDITOR_DEFAULT_PX);
@@ -175,6 +178,17 @@ export function ReplyDetailPanel({
     applyHeight(clampEditorHeight(EDITOR_DEFAULT_PX, panelHeight()));
     writeStore(EDITOR_HEIGHT_KEY, null);
   };
+
+  // Ветка открывается на начале последнего письма, как в Instantly: перед
+  // ответом нужен его контекст, а не первое письмо цепочки. Каждое письмо
+  // часто несёт под собой всю прежнюю переписку — к низу последнего листать
+  // ещё дальше. Только своя лента: страница целиком не прокручивается.
+  useEffect(() => {
+    const box = threadRef.current;
+    const last = lastMessageRef.current;
+    if (threadLoading || !box || !last) return;
+    box.scrollTop = Math.max(0, last.offsetTop - 16);
+  }, [threadLoading, thread.length]);
 
   useEffect(() => {
     let cancelled = false;
@@ -323,14 +337,18 @@ export function ReplyDetailPanel({
       </div>
 
       {/* Переписка пузырями */}
-      <div className="flex-1 space-y-2 overflow-y-auto p-4">
+      <div ref={threadRef} className="relative flex-1 space-y-2 overflow-y-auto p-4">
         {threadLoading ? (
           <div className="text-sm text-gray-500">Загружаем переписку...</div>
         ) : thread.length === 0 ? (
           <div className="text-sm text-gray-500">Переписка не найдена.</div>
         ) : (
           thread.map((m, idx) => (
-            <div key={idx} className={`flex ${m.fromUs ? 'justify-end' : 'justify-start'}`}>
+            <div
+              key={idx}
+              ref={idx === thread.length - 1 ? lastMessageRef : undefined}
+              className={`flex ${m.fromUs ? 'justify-end' : 'justify-start'}`}
+            >
               <div
                 className={`max-w-[80%] rounded-2xl border px-3.5 py-2 text-sm ${
                   m.fromUs ? 'border-blue-200 bg-blue-50' : 'border-gray-200 bg-gray-50'

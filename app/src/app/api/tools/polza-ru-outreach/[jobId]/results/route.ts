@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { logError } from '@/lib/loggerServer';
+import { POLZA_RESULTS_MAX_PAGE } from '@/lib/polzaOutreach/resultsPaging';
 import { funnelFromRows } from '@/lib/polzaRuOutreach/funnel';
 import { authed, jsonError } from '@/lib/polzaRuOutreach/routeAuth';
 
@@ -26,7 +27,10 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ jobId: stri
   if ('error' in auth) return auth.error;
   const { jobId } = await ctx.params;
   const sp = req.nextUrl.searchParams;
-  const limit = Math.min(500, Math.max(1, Number(sp.get('limit') ?? '50')));
+  // Потолок как у английского (POLZA_RESULTS_MAX_PAGE): общий экран читает
+  // прогон целиком страницами по 1000 и останавливается на короткой — при
+  // потолке 500 выгрузка CSV молча обрезалась бы на первой странице.
+  const limit = Math.min(POLZA_RESULTS_MAX_PAGE, Math.max(1, Math.trunc(Number(sp.get('limit') ?? '50')) || 50));
   const offset = Math.max(0, Number(sp.get('offset') ?? '0'));
   const status = sp.get('status');
   const stage = sp.get('stage');

@@ -4,7 +4,7 @@ import { AlertCircle, Check, Loader2 } from 'lucide-react';
 
 /**
  * Конвейер аутрича как цепочка этапов (общий для английского и русского).
- * Смысл и история решения — в шапке PolzaOutreachStages.tsx.
+ * Смысл: по плоской воронке не понять, где работа и где встала (components/outreach/run).
  */
 
 export type StageState = 'done' | 'active' | 'error' | 'stopped' | 'pending';
@@ -39,7 +39,7 @@ const ROW_CLASS: Record<StageState, string> = {
   pending: 'border-gray-200 border-l-2 border-l-transparent',
 };
 
-/** Первый этап с нулём — текущий (или вставший). Правило из PolzaOutreachStages. */
+/** Первый этап с нулём — текущий (или вставший). */
 export function stageStatesFromCounts(
   counts: number[],
   run: { running: boolean; failed: boolean } | null,

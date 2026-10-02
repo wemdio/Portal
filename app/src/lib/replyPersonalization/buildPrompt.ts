@@ -32,14 +32,16 @@ function preferProject(projectValue: string, globalValue: string): string {
 }
 
 export function buildReplyPrompt(input: {
-  kb: KnowledgeBase;
+  /** Тон/пример/факты проекта (у «Рассылки» — кампании); пустое поле = глобальное. */
+  kb: Pick<KnowledgeBase, 'toneNotes' | 'exampleCase' | 'productFacts'>;
   /** Глобальный тон/пример — fallback для проектов без своих значений. */
   globalKb: Pick<GlobalKnowledgeBase, 'toneNotes' | 'exampleCase'>;
   /** Правила письма из глобальных настроек (правит админ); пусто — стандартные из кода. */
   systemPrompt?: string;
   /** Бриф проекта живьём из карточки (projects.brief_text), не из базы знаний. */
   brief: string;
-  qualification: QualificationRow;
+  /** Кому пишем. Instantly отдаёт строку квалификации, «Рассылка» — получателя. */
+  qualification: Pick<QualificationRow, 'companyName' | 'leadEmail'>;
   thread: ThreadMessage[];
   contextComplete: boolean;
   /** Письма цепочки кампании по порядку; пусто — не удалось получить. */

@@ -1,4 +1,4 @@
-import type { MailboxDto } from './api';
+import type { CampaignDto, MailboxDto } from './api';
 
 /**
  * Подписи ящика — в одном месте, потому что их читают на трёх экранах: в
@@ -11,6 +11,17 @@ export const MAILBOX_STATUS_LABELS: Record<MailboxDto['status'], { text: string;
   verified: { text: 'Готов', className: 'bg-emerald-100 text-emerald-700' },
   failed: { text: 'Ошибка', className: 'bg-red-100 text-red-700' },
   disabled: { text: 'Выключен', className: 'bg-zinc-100 text-zinc-600' },
+};
+
+/**
+ * Статус кампании — его показывают и список кампаний, и колонка кампаний на
+ * вкладке «Письма»: одна подпись на оба места.
+ */
+export const CAMPAIGN_STATUS_LABELS: Record<CampaignDto['status'], { text: string; className: string }> = {
+  draft: { text: 'Черновик', className: 'bg-zinc-100 text-zinc-600' },
+  running: { text: 'Идёт', className: 'bg-emerald-100 text-emerald-700' },
+  paused: { text: 'Пауза', className: 'bg-amber-100 text-amber-700' },
+  done: { text: 'Завершена', className: 'bg-zinc-100 text-zinc-600' },
 };
 
 /**
