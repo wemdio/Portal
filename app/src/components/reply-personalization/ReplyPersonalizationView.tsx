@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { ChevronDown, Globe, RefreshCw, Search, Settings, X } from 'lucide-react';
 import { fetchOthers, fetchProjects, fetchReplies, type ProjectListItem } from './api';
 import { GlobalKnowledgeForm } from './GlobalKnowledgeForm';
@@ -21,6 +21,85 @@ function mergeReplies(current: ReplyListItem[], next: ReplyListItem[]): ReplyLis
   const seen = new Set(current.map((item) => item.id));
   return [...current, ...next.filter((item) => !seen.has(item.id))].sort((a, b) =>
     (b.replyTimestamp ?? '').localeCompare(a.replyTimestamp ?? ''),
+  );
+}
+
+/**
+ * Ширина колонок «Проекты» и «Письма» — перетаскиванием границы: длинные
+ * названия проектов и адреса резались троеточием. Ширина запоминается в
+ * браузере; двойной клик по границе возвращает исходную.
+ */
+const COLUMN_WIDTHS_KEY = 'reply-personalization:column-widths';
+const DEFAULT_WIDTHS = { projects: 240, list: 360 };
+const WIDTH_LIMITS = { projects: [160, 520], list: [260, 760] } as const;
+type ColumnKey = keyof typeof DEFAULT_WIDTHS;
+
+function clampWidth(key: ColumnKey, value: number): number {
+  const [min, max] = WIDTH_LIMITS[key];
+  return Math.round(Math.min(max, Math.max(min, value)));
+}
+
+function useColumnWidths() {
+  const [widths, setWidths] = useState(DEFAULT_WIDTHS);
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(COLUMN_WIDTHS_KEY) ?? 'null') as Partial<typeof DEFAULT_WIDTHS> | null;
+      if (saved) {
+        setWidths({
+          projects: clampWidth('projects', Number(saved.projects) || DEFAULT_WIDTHS.projects),
+          list: clampWidth('list', Number(saved.list) || DEFAULT_WIDTHS.list),
+        });
+      }
+    } catch {
+      // нет доступа к хранилищу — ширина по умолчанию
+    }
+  }, []);
+  const save = (next: typeof DEFAULT_WIDTHS) => {
+    try {
+      localStorage.setItem(COLUMN_WIDTHS_KEY, JSON.stringify(next));
+    } catch {
+      // не запомнилось — не страшно
+    }
+  };
+  const startDrag = (key: ColumnKey, event: ReactMouseEvent) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = widths[key];
+    let latest = widths;
+    const onMove = (e: MouseEvent) => {
+      latest = { ...latest, [key]: clampWidth(key, startWidth + e.clientX - startX) };
+      setWidths(latest);
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      save(latest);
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+  const reset = (key: ColumnKey) => {
+    const next = { ...widths, [key]: DEFAULT_WIDTHS[key] };
+    setWidths(next);
+    save(next);
+  };
+  return { widths, startDrag, reset };
+}
+
+function ColumnResizer({ onMouseDown, onDoubleClick }: { onMouseDown: (e: ReactMouseEvent) => void; onDoubleClick: () => void }) {
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      title="Потяните, чтобы изменить ширину; двойной клик — как было"
+      onMouseDown={onMouseDown}
+      onDoubleClick={onDoubleClick}
+      className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-blue-400/40"
+    />
   );
 }
 
@@ -379,6 +458,7 @@ export function ReplyPersonalizationView() {
   // Поиск по списку проектов: их 60, и листать до нужного дольше, чем набрать
   // пару букв. Ищем по вхождению без учёта регистра и ё/е.
   const [projectQuery, setProjectQuery] = useState('');
+  const columns = useColumnWidths();
   const visibleProjects = useMemo(() => {
     const norm = (v: string) => v.toLowerCase().replace(/ё/g, 'е').trim();
     const q = norm(projectQuery);
@@ -386,9 +466,16 @@ export function ReplyPersonalizationView() {
   }, [projects, projectQuery]);
 
   return (
-    <div className="grid h-full min-h-0 grid-cols-[240px_360px_minmax(0,1fr)]">
+    <div
+      className="grid h-full min-h-0"
+      style={{ gridTemplateColumns: `${columns.widths.projects}px ${columns.widths.list}px minmax(0,1fr)` }}
+    >
       {/* Колонка 1: проекты */}
-      <aside className="flex min-h-0 flex-col border-r border-gray-200 bg-white">
+      <aside className="relative flex min-h-0 flex-col border-r border-gray-200 bg-white">
+        <ColumnResizer
+          onMouseDown={(e) => columns.startDrag('projects', e)}
+          onDoubleClick={() => columns.reset('projects')}
+        />
         <div className="flex items-center justify-between gap-2 border-b border-gray-100 px-3 py-2.5">
           <h2 className="text-sm font-semibold text-gray-900">Проекты ({projects.length})</h2>
           {canManageGlobalKb ? (
@@ -460,7 +547,7 @@ export function ReplyPersonalizationView() {
                     {p.client.charAt(0).toUpperCase() || '?'}
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium text-gray-900">{p.client}</span>
+                    <span className="block truncate text-sm font-medium text-gray-900" title={p.client}>{p.client}</span>
                     {p.missingReason ? (
                       <span className="block text-[11px] text-amber-600">{p.missingReason.toLowerCase()}</span>
                     ) : null}
@@ -490,7 +577,11 @@ export function ReplyPersonalizationView() {
       </aside>
 
       {/* Колонка 2: письма */}
-      <div className="flex min-h-0 flex-col border-r border-gray-200 bg-white">
+      <div className="relative flex min-h-0 flex-col border-r border-gray-200 bg-white">
+        <ColumnResizer
+          onMouseDown={(e) => columns.startDrag('list', e)}
+          onDoubleClick={() => columns.reset('list')}
+        />
         <div className="flex items-center justify-between gap-2 border-b border-gray-100 px-3 py-2">
           {project ? (
             <div className="flex items-center gap-1" role="group" aria-label="Папка писем">
@@ -684,7 +775,7 @@ export function ReplyPersonalizationView() {
                 }`}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="truncate text-sm font-medium text-gray-900">
+                  <span className="min-w-0 truncate text-sm font-medium text-gray-900" title={item.companyName || item.leadEmail}>
                     {item.companyName || item.leadEmail}
                   </span>
                   <span className="flex shrink-0 items-center gap-1">
