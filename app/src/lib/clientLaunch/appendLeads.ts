@@ -329,7 +329,11 @@ export async function appendLeadsToClientCampaign(
   let workspaceRemaining: number | null = null;
   if (input.pauseOnWorkspaceCapacity) {
     const capacity = await getWorkspaceContactCapacity(instantlyRequestOptions);
-    workspaceRemaining = capacity?.remaining ?? null;
+    // Billing can disagree with the import service (e.g. after storage add-ons
+    // change). Use it only to size the first chunk. Even a reported zero must
+    // reach the normal ledger-backed import with one approved contact before
+    // persisting a storage pause; it is not itself a rejected upload.
+    workspaceRemaining = capacity ? Math.max(1, capacity.remaining) : null;
   }
 
   for (let offset = 0; offset < leadsToSend.length;) {
@@ -392,8 +396,10 @@ export async function appendLeadsToClientCampaign(
         // Blocklisted/invalid contacts consume no storage. Continue through the
         // untouched tail while slots remain, bounded by the original daily batch.
         const remaining = leadResult.remaining_in_plan;
+        // Only an import response can confirm exhausted storage. Missing
+        // counters must not turn a stale billing hint into a durable pause.
         workspaceRemaining = typeof remaining === 'number' && Number.isSafeInteger(remaining) && remaining >= 0
-          ? remaining : workspaceRemaining === null ? null : Math.max(0, workspaceRemaining - chunkAccepted);
+          ? remaining : null;
         chunkCapacityBlocked = workspaceRemaining === 0;
         capacityBlocked = chunkCapacityBlocked;
         // Only explicit provider reasons prove permanent omissions. Do not use
