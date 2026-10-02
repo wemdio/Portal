@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Loader2, MessageSquare, Search } from 'lucide-react';
 import { fetchCampaigns, fetchThreads, type CampaignDto, type ThreadDto } from './api';
+import { CAMPAIGN_STATUS_LABELS } from './labels';
 import { ThreadModal } from './ThreadModal';
 import { UnlinkedReplies } from './UnlinkedReplies';
 
@@ -68,6 +69,9 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
   }, [search]);
 
   const load = useCallback(async () => {
+    // Крутилка на каждую загрузку, а не только на первую: при смене страницы
+    // список молча стоял прежним, и было непонятно, идёт ли загрузка.
+    setLoading(true);
     try {
       const res = await fetchThreads({
         page,
@@ -91,6 +95,8 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
   }, [page, query, onlyReplied, onlyLeads, mode, campaignId, mailboxId]);
 
   useEffect(() => {
+    // Загрузка списка при смене фильтра или страницы — запрос во внешнюю систему.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, [load]);
 
@@ -211,7 +217,14 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
                       campaignId === campaign.id ? 'bg-blue-50 font-medium text-blue-700' : 'text-zinc-700 hover:bg-zinc-100'
                     }`}
                   >
-                    {campaign.name}
+                    <span className="flex items-start justify-between gap-2">
+                      <span className="min-w-0">{campaign.name}</span>
+                      <span
+                        className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${CAMPAIGN_STATUS_LABELS[campaign.status].className}`}
+                      >
+                        {CAMPAIGN_STATUS_LABELS[campaign.status].text}
+                      </span>
+                    </span>
                   </button>
                   {/* Ящики показываем только у раскрытой кампании: иначе колонка
                       превращается в список из сотен адресов всех кампаний разом. */}
@@ -257,8 +270,9 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
 
         <div className="min-w-0 flex-1 rounded-xl border border-zinc-200 bg-white">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 px-5 py-3">
-            <h2 className="text-base font-semibold text-zinc-900">
+            <h2 className="inline-flex items-center gap-2 text-base font-semibold text-zinc-900">
               Переписки ({total})
+              {loading ? <Loader2 className="h-4 w-4 animate-spin text-zinc-400" /> : null}
             </h2>
             {mode === 'campaigns' && selectedCampaign ? (
               <span className="text-xs text-zinc-500">
@@ -268,7 +282,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
             ) : null}
           </div>
 
-          {loading ? (
+          {loading && threads.length === 0 ? (
             <div className="flex items-center justify-center gap-2 px-5 py-10 text-sm text-zinc-500">
               <Loader2 className="h-4 w-4 animate-spin" />
               Загрузка…
@@ -280,7 +294,9 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
                 : 'Переписок пока нет: они появляются здесь, как только уходит первое письмо.'}
             </p>
           ) : (
-            <div className="divide-y divide-zinc-100">
+            // Пока грузится следующая страница, прежняя видна приглушённой:
+            // список не прыгает, а по виду ясно, что он сейчас сменится.
+            <div className={`divide-y divide-zinc-100 transition-opacity ${loading ? 'pointer-events-none opacity-50' : ''}`}>
               {threads.map((thread) => (
                 <button
                   key={thread.recipient_id}
@@ -344,18 +360,19 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
               <button
                 type="button"
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page <= 1}
+                disabled={page <= 1 || loading}
                 className="rounded-md px-3 py-1.5 text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-40"
               >
                 ← Назад
               </button>
-              <span className="text-zinc-500">
+              <span className="inline-flex items-center gap-1.5 text-zinc-500">
+                {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
                 Стр. {page} из {maxPage}
               </span>
               <button
                 type="button"
                 onClick={() => setPage((p) => Math.min(maxPage, p + 1))}
-                disabled={page >= maxPage}
+                disabled={page >= maxPage || loading}
                 className="rounded-md px-3 py-1.5 text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-40"
               >
                 Вперёд →

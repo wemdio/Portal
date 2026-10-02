@@ -15,14 +15,8 @@ import {
 import { takeCampaignNotice } from './campaignNotice';
 import { timezoneLabel, weekdaysLabel } from './CampaignSteps';
 import { FolderSettingsModal, chainDaysLabel } from './FolderSettingsModal';
+import { CAMPAIGN_STATUS_LABELS } from './labels';
 import { RecipientsModal } from './RecipientsModal';
-
-const STATUS_LABELS: Record<CampaignDto['status'], { text: string; className: string }> = {
-  draft: { text: 'Черновик', className: 'bg-zinc-100 text-zinc-600' },
-  running: { text: 'Идёт', className: 'bg-emerald-100 text-emerald-700' },
-  paused: { text: 'Пауза', className: 'bg-amber-100 text-amber-700' },
-  done: { text: 'Завершена', className: 'bg-zinc-100 text-zinc-600' },
-};
 
 type CampaignAction = 'start' | 'pause' | 'finish' | 'delete';
 
@@ -150,7 +144,7 @@ function CampaignRow({
   onRecipients: () => void;
   onAction: (action: CampaignAction) => void;
 }) {
-  const status = STATUS_LABELS[campaign.status];
+  const status = CAMPAIGN_STATUS_LABELS[campaign.status];
   const stats = campaign.stats;
   // Черновик автоаутрича, залитый, пока в папке не было ящиков: пул он
   // возьмёт из папки при запуске — без подсказки «0 ящиков» пугал бы.
