@@ -14,7 +14,11 @@ import {
 } from '@/lib/leadsReport/leadFilters';
 
 const DEFAULT_PIPELINE_NAME = 'Воронка - новые лиды';
-const QUALIFIED_STATUS = 'Квалифицированный лид';
+const QUALIFIED_STATUS = 'Лид квалифицирован';
+// Этап переименовывали в AMO («Квалифицированный лид» → «Лид квалифицирован»,
+// 02.10.2026) — отчёт тогда упал. Id при переименовании не меняется, поэтому
+// ищем по нему, а имя — запасной путь.
+const QUALIFIED_STATUS_ID = 87397290;
 const MEETING_SCHEDULED_STATUS = 'Назначена встреча';
 const MEETING_HELD_STATUS = 'Встреча проведена + КП отправлено';
 const PARKING_STATUS = 'Перенос';
@@ -100,16 +104,20 @@ type Thresholds = {
 function findStatus(
   statuses: AmoStatusMetricRow[],
   name: string,
+  statusId?: number,
 ): AmoStatusMetricRow {
-  const found = statuses.find(
-    (status) => normalize(status.status_name) === normalize(name),
-  );
+  const found = (statusId !== undefined
+    ? statuses.find((status) => Number(status.status_id) === statusId)
+    : undefined)
+    ?? statuses.find(
+      (status) => normalize(status.status_name) === normalize(name),
+    );
   if (!found) throw new Error(`AMO status not found: ${name}`);
   return found;
 }
 
 function buildThresholds(statuses: AmoStatusMetricRow[]): Thresholds {
-  const qualified = findStatus(statuses, QUALIFIED_STATUS);
+  const qualified = findStatus(statuses, QUALIFIED_STATUS, QUALIFIED_STATUS_ID);
   const meetingScheduled = findStatus(statuses, MEETING_SCHEDULED_STATUS);
   const meetingHeld = findStatus(statuses, MEETING_HELD_STATUS);
   const parking = findStatus(statuses, PARKING_STATUS);
