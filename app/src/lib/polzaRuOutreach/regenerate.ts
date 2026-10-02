@@ -35,6 +35,7 @@ import {
 import { WORKER_LEASE_KEY, withoutWorkerLease, workerLeaseLive, workerLeaseOf } from '@/lib/outreachLlm/workerLease';
 import { dropLettersDoubts, lettersQaDoubtText, templateDoubtText, withLettersDoubt } from './doubts';
 import { journalCounts, type JournalCountRow, type JournalCounts } from './funnel';
+import { buildBridge, type BridgeRequest } from './letters/bridge';
 import { buildSegmentsHypothesis, type SegmentsHypothesis } from './letters/chains';
 import { composeCompanyLetters, type CompanyLettersInput } from './letters/renderTemplate';
 import {
@@ -467,7 +468,6 @@ function companyInput(row: WaitingRow, chain: ChainType, libraries: Libraries): 
     baseChain: chain === 'automation' ? (prior ? 'reactivation' : (primary && chainOfSignal(primary.type)) || 'icp_only') : undefined,
     marketQuote: row.market_evidence_quote,
     productSummary: product ? product.slice(PRODUCT_PREFIX.length) : null,
-    aboutLine: row.about_line,
     targetMarket: row.target_market,
     caseRecord: row.case_id ? libraries.cases.find((c) => c.case_id === row.case_id) ?? null : null,
     recipientEmail: row.recipient_email ?? '',
@@ -531,6 +531,19 @@ async function rebuildRows(input: RebuildInput, template: ChainTemplate, rows: W
     }
   };
 
+  // Связка — так же: не успели или сбой — запасная фраза по офферу.
+  const bridge = async (req: BridgeRequest): Promise<string | null> => {
+    const left = deadlineAt - Date.now();
+    if (left < HYPOTHESIS_MIN_LEFT_MS || budget.exhausted()) return null;
+    try {
+      return await buildBridge(req, { timeoutMs: Math.min(HYPOTHESIS_TIMEOUT_MS, left - HYPOTHESIS_TIMEOUT_MS) });
+    } catch (err) {
+      if (err instanceof LlmAuthError) throw err;
+      if (!(err instanceof BudgetExceededError)) log('warn', `bridge failed for ${req.brand}: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
+  };
+
   let slots = input.target - readyAtStart;
   let next = 0;
   while (next < rows.length && slots > 0) {
@@ -538,7 +551,7 @@ async function rebuildRows(input: RebuildInput, template: ChainTemplate, rows: W
     const batch = rows.slice(next, next + slots);
     next += batch.length;
     const composed = await mapPool(batch, REBUILD_POOL, (row) =>
-      composeCompanyLetters(letters, companyInput(row, chain, libraries), { sender, claims: libraries.claims, hypothesis }),
+      composeCompanyLetters(letters, companyInput(row, chain, libraries), { sender, claims: libraries.claims, hypothesis, bridge }),
     );
     for (const [i, row] of batch.entries()) {
       const c = composed[i];

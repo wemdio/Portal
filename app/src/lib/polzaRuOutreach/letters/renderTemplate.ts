@@ -4,7 +4,8 @@
  *
  * Шаблон пишет писатель один раз на оффер (templateWriter.ts); здесь под
  * компанию подставляются только проверенные факты: бренд, фраза-повод
- * (openingSentence — детерминированная, из подтверждённого сигнала), текст
+ * (openingSentence — детерминированная, из подтверждённого сигнала), связка
+ * повода с предложением (bridge.ts — дешёвая модель или запасная фраза), текст
  * утверждённого кейса, гипотеза сегментов и подпись. Выбор вариантов: письмо 1
  * лично ЛПР или «перешлите ответственному» (общая почта), письмо 3 с кейсом
  * или без. Строка с пустым значением удаляется целиком, как пустой абзац у
@@ -17,6 +18,7 @@
 import { claimsForChain, formatSignature, type CaseRecord, type OfferClaim, type SenderProfile } from '../libraries';
 import { runQa } from '../qa';
 import {
+  LEGACY_ABOUT_PLACEHOLDER,
   TEMPLATE_PLACEHOLDERS,
   TEMPLATE_SIGN_OFF,
   letterCountFor,
@@ -26,6 +28,7 @@ import {
   type QaResult,
   type Signal,
 } from '../types';
+import { fallbackBridge, type BridgeRequest } from './bridge';
 import { hypothesisText, openingSentence, type ChainInput, type SegmentsHypothesis } from './chains';
 
 const P = TEMPLATE_PLACEHOLDERS;
@@ -35,8 +38,8 @@ export interface TemplateValues {
   brand: string;
   /** Фраза-повод (openingSentence); нет — строка с {{повод}} удаляется. */
   opening: string | null;
-  /** Строка о компании из разбора сайта; нет — строка с {{о компании}} удаляется. */
-  about: string | null;
+  /** Связка повода с предложением; нет — строка с {{связка}} удаляется. */
+  bridge: string | null;
   /** Текст утверждённого кейса; есть и шаблон с кейсом — письмо 3 с кейсом. */
   caseText: string | null;
   /** Гипотеза сегментов текстом (hypothesisText); нет — строка удаляется. */
@@ -82,7 +85,9 @@ export function renderTemplate(template: ChainTemplateLetters, v: TemplateValues
   const values: Record<string, string | null> = {
     [P.brand]: v.brand,
     [P.opening]: v.opening,
-    [P.about]: v.about,
+    [P.bridge]: v.bridge,
+    // Старые шаблоны: строки о компании в письмах больше нет — абзац удаляется.
+    [LEGACY_ABOUT_PLACEHOLDER]: null,
     [P.case]: v.caseText,
     [P.hypothesis]: v.hypothesis,
     [P.signature]: v.signature,
@@ -115,8 +120,6 @@ export interface CompanyLettersInput {
   baseChain?: ChainType;
   marketQuote: string | null;
   productSummary: string | null;
-  /** Строка о компании из разбора сайта — {{о компании}}. */
-  aboutLine?: string | null;
   targetMarket: string | null;
   caseRecord: CaseRecord | null;
   recipientEmail: string;
@@ -148,6 +151,12 @@ export interface CompanyLettersDeps {
    * необязательна, и лимит на ИИ или сбой модели строку не останавливают.
    */
   hypothesis: (req: { brand: string; productSummary: string | null; marketQuote: string }) => Promise<SegmentsHypothesis | null>;
+  /**
+   * Связка повода с предложением дешёвой моделью. null — запасная фраза по
+   * офферу (fallbackBridge): лимит на ИИ или сбой модели строку не
+   * останавливают.
+   */
+  bridge: (req: BridgeRequest) => Promise<string | null>;
 }
 
 /**
@@ -169,7 +178,13 @@ export async function composeCompanyLetters(
     baseChain: input.baseChain,
   };
   const opening = openingSentence(chainInput, input.brand);
-  const about = input.aboutLine?.replace(/\s+/g, ' ').trim() || null;
+  // Связка нужна, только если есть повод и шаблон её ставит (старые шаблоны —
+  // нет). У возврата повод — прошлый разговор, связывать нечего: модель не зовём.
+  const firstBodies = [template.bodyDirect, template.bodyRouting].join('\n');
+  const fallback = fallbackBridge(input.chain, input.baseChain);
+  const bridge = opening && fallback && firstBodies.includes(P.bridge)
+    ? (await deps.bridge({ chain: input.chain, baseChain: input.baseChain, brand: input.brand, opening, productSummary: input.productSummary })) ?? fallback
+    : null;
   const caseText = input.caseRecord?.case_text_short.trim() || null;
   const withCase = Boolean(caseText) && template.bodyWithCase !== null;
   // Гипотезу считаем, только когда она попадёт в письмо: вариант без кейса с
@@ -184,7 +199,7 @@ export async function composeCompanyLetters(
   const values: TemplateValues = {
     brand: input.brand,
     opening,
-    about,
+    bridge,
     caseText: withCase ? caseText : null,
     hypothesis: hypoText,
     signature: formatSignature(deps.sender),
@@ -212,7 +227,6 @@ export async function composeCompanyLetters(
       // Отправитель представляется в письмах 2–3 текстом шаблона.
       deps.sender.company_name,
       ...(opening ? [opening] : []),
-      ...(about ? [about] : []),
       ...input.signals.flatMap((s) => [s.title, s.quote ?? '']).filter(Boolean),
       ...(marketQuote ? [marketQuote] : []),
     ],

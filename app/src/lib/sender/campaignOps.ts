@@ -509,24 +509,12 @@ async function recipientsWithTakenStep(campaignId: string): Promise<Array<{ id: 
 }
 
 /**
- * Запустить кампанию. Получатели, которым ещё ничего не отправляли, встают в
- * очередь немедленно: дальше их разложит по окну отправки планировщик.
- *
- * Кампанию без писем или без единого рабочего ящика не запускаем: раньше она
- * становилась «идущей» и молча не отправляла ничего — планировщик пропускал
- * её на каждом проходе, а оператор ждал писем.
- *
- * Запускается только черновик или кампания на паузе. Идущую повторно не
- * запускаем: очередь ей заново выставила бы тех, чьё письмо уже стоит в
- * очереди, — планировщик упирался бы в уникальность (recipient_id, step_no)
- * на каждом проходе. Завершённую — тоже: её письма сняты, и «запуск» молча
- * вернул бы в работу базу, которую оператор закрыл. Дата первого запуска при
- * продолжении после паузы не сдвигается.
+ * Проверки запуска без самого запуска: статус, получатели, рабочие ящики,
+ * тема первого письма. Их же проходит отложенный запуск в момент, когда его
+ * назначают, — чтобы оператор узнал о пустом пуле сейчас, а не утром.
  */
-export async function startCampaign(campaignId: string): Promise<void> {
+async function assertStartable(campaignId: string): Promise<{ id: string; status: string; started_at: string | null }> {
   const db = requireDb();
-  const nowIso = new Date().toISOString();
-
   const { data: campaign, error: campaignError } = await db
     .from('sender_campaigns')
     .select('id, status, started_at')
@@ -575,6 +563,28 @@ export async function startCampaign(campaignId: string): Promise<void> {
   if (firstVariants.some((variant) => !String(variant.subject ?? '').trim())) {
     throw new SenderOpError('У первого письма нет темы — допишите её у каждого варианта', 422);
   }
+  return campaign as { id: string; status: string; started_at: string | null };
+}
+
+/**
+ * Запустить кампанию. Получатели, которым ещё ничего не отправляли, встают в
+ * очередь немедленно: дальше их разложит по окну отправки планировщик.
+ *
+ * Кампанию без писем или без единого рабочего ящика не запускаем: раньше она
+ * становилась «идущей» и молча не отправляла ничего — планировщик пропускал
+ * её на каждом проходе, а оператор ждал писем.
+ *
+ * Запускается только черновик или кампания на паузе. Идущую повторно не
+ * запускаем: очередь ей заново выставила бы тех, чьё письмо уже стоит в
+ * очереди, — планировщик упирался бы в уникальность (recipient_id, step_no)
+ * на каждом проходе. Завершённую — тоже: её письма сняты, и «запуск» молча
+ * вернул бы в работу базу, которую оператор закрыл. Дата первого запуска при
+ * продолжении после паузы не сдвигается.
+ */
+export async function startCampaign(campaignId: string): Promise<void> {
+  const db = requireDb();
+  const nowIso = new Date().toISOString();
+  const campaign = await assertStartable(campaignId);
 
   // Пауза отменяет запланированные письма, но строки остаются, а у очереди
   // есть уникальность (recipient_id, step_no). Без уборки повторный запуск
@@ -629,10 +639,51 @@ export async function startCampaign(campaignId: string): Promise<void> {
   // что кампания уже не черновик и не на паузе.
   const { data: switched, error } = await db
     .from('sender_campaigns')
-    .update({ status: 'running', updated_at: nowIso, started_at: campaign.started_at ?? nowIso })
+    // Запуск снимает и отложенный: кнопка «Запустить сразу» его отменяет.
+    .update({
+      status: 'running',
+      updated_at: nowIso,
+      started_at: campaign.started_at ?? nowIso,
+      scheduled_start_at: null,
+      scheduled_start_error: null,
+    })
     .eq('id', campaignId)
     .in('status', EDITABLE_CAMPAIGN_STATUSES)
     .select('id');
   if (error) throw new SenderOpError(error.message, 500);
   if (!switched?.length) throw new SenderOpError('Кампанию уже запустили или завершили — обновите экран', 409);
+}
+
+/** Дальше этого отложить запуск нельзя: опечатка в годе не должна прятать кампанию на годы. */
+const MAX_SCHEDULE_AHEAD_MS = 90 * 24 * 3600_000;
+
+/**
+ * Отложенный запуск: кампания остаётся черновиком или на паузе, в момент
+ * startAt её запустит воркер (scheduledStart.ts). Проверки запуска — сейчас.
+ */
+export async function scheduleCampaignStart(campaignId: string, startAt: Date): Promise<void> {
+  const db = requireDb();
+  if (Number.isNaN(startAt.getTime())) throw new SenderOpError('Не указано время запуска', 400);
+  const now = Date.now();
+  if (startAt.getTime() <= now + 60_000) throw new SenderOpError('Время запуска уже прошло — выберите позже или запустите сразу', 422);
+  if (startAt.getTime() > now + MAX_SCHEDULE_AHEAD_MS) throw new SenderOpError('Отложить можно не больше чем на 90 дней', 422);
+  await assertStartable(campaignId);
+  const { data, error } = await db
+    .from('sender_campaigns')
+    .update({ scheduled_start_at: startAt.toISOString(), scheduled_start_error: null, updated_at: new Date().toISOString() })
+    .eq('id', campaignId)
+    .in('status', EDITABLE_CAMPAIGN_STATUSES)
+    .select('id');
+  if (error) throw new SenderOpError(error.message, 500);
+  if (!data?.length) throw new SenderOpError('Кампанию уже запустили или завершили — обновите экран', 409);
+}
+
+/** Отменить отложенный запуск. */
+export async function cancelScheduledStart(campaignId: string): Promise<void> {
+  const db = requireDb();
+  const { error } = await db
+    .from('sender_campaigns')
+    .update({ scheduled_start_at: null, scheduled_start_error: null, updated_at: new Date().toISOString() })
+    .eq('id', campaignId);
+  if (error) throw new SenderOpError(error.message, 500);
 }
