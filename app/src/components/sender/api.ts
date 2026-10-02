@@ -744,8 +744,10 @@ export interface SenderStatsDto {
   steps: { step: number; reached: number; replied: number }[];
 }
 
-export function fetchSenderStats(period: SenderStatsPeriod) {
-  return authFetchJson<SenderStatsDto>(`${BASE}/stats?period=${period}`);
+/** campaignId null — все кампании сразу. */
+export function fetchSenderStats(period: SenderStatsPeriod, campaignId: string | null = null) {
+  const campaign = campaignId ? `&campaign=${encodeURIComponent(campaignId)}` : '';
+  return authFetchJson<SenderStatsDto>(`${BASE}/stats?period=${period}${campaign}`);
 }
 
 /** mode 'replace' — заменить базу; по умолчанию новые адреса добавляются к старым. */

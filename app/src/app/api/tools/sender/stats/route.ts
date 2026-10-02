@@ -5,6 +5,8 @@ import { withToolTrace } from '@/lib/toolTrace';
 
 export const dynamic = 'force-dynamic';
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const PERIOD_DAYS: Record<string, number | null> = { '7d': 7, '30d': 30, '90d': 90, all: null };
 
 type Counters = { reached: number; replied: number; bounced: number; leads: number };
@@ -14,7 +16,7 @@ type MailboxRow = Counters & {
 
 /**
  * Вкладка «Статистика» «Рассылки»: всё считает sender_stats_dashboard
- * (миграция 20260929_0050) одним вызовом, здесь — только период и разрез по
+ * (миграции 20260929_0050, 20261002_0010 — выбор кампании) одним вызовом, здесь — только период и разрез по
  * доменам: строк ящиков сотни, JS справляется.
  *
  * Период — скользящие сутки от текущего момента, а не календарные: «7 дней»
@@ -30,8 +32,14 @@ export async function GET(req: NextRequest) {
     if (!(period in PERIOD_DAYS)) return jsonError('Неизвестный период', 400);
     const days = PERIOD_DAYS[period];
     const since = days === null ? null : new Date(Date.now() - days * 86_400_000).toISOString();
+    // ?campaign=<id> — одна кампания; без него — все сразу.
+    const campaign = req.nextUrl.searchParams.get('campaign') || null;
+    if (campaign && !UUID_RE.test(campaign)) return jsonError('Неизвестная кампания', 400);
 
-    const { data, error } = await supabaseAdmin.rpc('sender_stats_dashboard', { p_since: since });
+    const { data, error } = await supabaseAdmin.rpc('sender_stats_dashboard', {
+      p_since: since,
+      p_campaign_id: campaign,
+    });
     if (error) return jsonError(error.message, 500);
 
     const stats = data as { mailboxList: MailboxRow[] } & Record<string, unknown>;

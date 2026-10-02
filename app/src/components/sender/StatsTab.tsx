@@ -19,7 +19,9 @@ import {
   type ChartTheme,
 } from '@/components/charts/theme';
 import {
+  fetchCampaigns,
   fetchSenderStats,
+  type CampaignDto,
   type SenderStatCounters,
   type SenderStatsDto,
   type SenderStatsPeriod,
@@ -159,10 +161,11 @@ function buildDailyOption(days: SenderStatsDto['days'], theme: ChartTheme, anima
       axisLabel,
     },
     // Две оси: писем уходят сотни, ответов — единицы, и на общей шкале линии
-    // ответов лежали бы на нуле. Левая — письма, правая — люди.
+    // ответов лежали бы на нуле. Левая — письма; у линий свой масштаб без
+    // подписей (шкала «люди» сбивала с толку), числа — в подсказке.
     yAxis: [
       { type: 'value', name: 'письма', minInterval: 1, nameTextStyle: axisLabel, splitLine: { lineStyle: { color: GRID_LINE } }, axisLabel },
-      { type: 'value', name: 'люди', minInterval: 1, nameTextStyle: axisLabel, splitLine: { show: false }, axisLabel },
+      { type: 'value', minInterval: 1, splitLine: { show: false }, axisLabel: { show: false } },
     ],
     series: [
       {
@@ -519,11 +522,28 @@ function BreakdownTable({ data }: { data: SenderStatsDto }) {
 
 export function StatsTab() {
   const [period, setPeriod] = useState<SenderStatsPeriod>('30d');
+  // null — все кампании сразу.
+  const [campaignId, setCampaignId] = useState<string | null>(null);
+  const [campaignList, setCampaignList] = useState<Pick<CampaignDto, 'id' | 'name'>[]>([]);
   const [data, setData] = useState<SenderStatsDto | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // Кнопка «Обновить» перезапускает тот же эффект, что и смена периода.
   const [reloadKey, setReloadKey] = useState(0);
+
+  // Список для выбора — все кампании, а не только с письмами в периоде:
+  // иначе выбранная кампания пропадала бы из списка при смене периода.
+  useEffect(() => {
+    let cancelled = false;
+    fetchCampaigns()
+      .then((res) => {
+        if (!cancelled) setCampaignList(res.campaigns.map(({ id, name }) => ({ id, name })));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -531,7 +551,7 @@ export function StatsTab() {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetchSenderStats(period);
+        const res = await fetchSenderStats(period, campaignId);
         if (!cancelled) setData(res);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Не удалось загрузить статистику');
@@ -542,7 +562,7 @@ export function StatsTab() {
     return () => {
       cancelled = true;
     };
-  }, [period, reloadKey]);
+  }, [period, campaignId, reloadKey]);
 
   const t = data?.totals;
   const replyRate = t ? rate(t.replied, t.reached) : null;
@@ -552,20 +572,34 @@ export function StatsTab() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="inline-flex gap-1 rounded-xl border border-zinc-200 bg-white p-1">
-          {PERIODS.map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              disabled={loading}
-              onClick={() => setPeriod(p.id)}
-              className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-60 ${
-                period === p.id ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:bg-zinc-100'
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="inline-flex gap-1 rounded-xl border border-zinc-200 bg-white p-1">
+            {PERIODS.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                disabled={loading}
+                onClick={() => setPeriod(p.id)}
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors disabled:opacity-60 ${
+                  period === p.id ? 'bg-blue-600 text-white' : 'text-zinc-500 hover:bg-zinc-100'
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          <select
+            value={campaignId ?? ''}
+            onChange={(e) => setCampaignId(e.target.value || null)}
+            disabled={loading}
+            aria-label="Кампания"
+            className="max-w-xs rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-700 disabled:opacity-60"
+          >
+            <option value="">Все кампании</option>
+            {campaignList.map((c) => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </select>
         </div>
         <button
           type="button"
