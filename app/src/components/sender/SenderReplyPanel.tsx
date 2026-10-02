@@ -73,7 +73,9 @@ export function SenderReplyPanel({
   const [confirming, setConfirming] = useState(false);
   const [sending, setSending] = useState(false);
   const [copied, setCopied] = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  /** Лента писем и последнее письмо в ней — чтобы открыть переписку на его начале. */
+  const threadRef = useRef<HTMLDivElement>(null);
+  const lastItemRef = useRef<HTMLDivElement>(null);
 
   const loadThread = useCallback(async () => {
     const res = await fetchThread(recipientId);
@@ -110,9 +112,14 @@ export function SenderReplyPanel({
     writeSaved(recipientId, text);
   }, [recipientId, text]);
 
+  // Переписка открывается на начале последнего письма, как в Instantly: к низу
+  // длинного письма (часто с цитатой всей прежней переписки) листать незачем.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: 'end' });
-  }, [items.length]);
+    const box = threadRef.current;
+    const last = lastItemRef.current;
+    if (loading || !box || !last) return;
+    box.scrollTop = Math.max(0, last.offsetTop - 16);
+  }, [loading, items.length]);
 
   const pending = items.some((item) => item.direction === 'out' && item.note && PENDING_NOTES.has(item.note));
   useEffect(() => {
@@ -192,16 +199,20 @@ export function SenderReplyPanel({
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+      <div ref={threadRef} className="relative min-h-0 flex-1 overflow-y-auto px-5 py-4">
         <LeadVerdictBar recipientId={recipientId} onChange={onVerdictChange} />
         {items.length === 0 ? (
           <p className="py-10 text-center text-sm text-zinc-500">Писем в этой переписке пока нет.</p>
         ) : (
           <div className="space-y-3">
-            {items.map((item) => {
+            {items.map((item, idx) => {
               const outgoing = item.direction === 'out';
               return (
-                <div key={item.id} className={`flex ${outgoing ? 'justify-end' : 'justify-start'}`}>
+                <div
+                  key={item.id}
+                  ref={idx === items.length - 1 ? lastItemRef : undefined}
+                  className={`flex ${outgoing ? 'justify-end' : 'justify-start'}`}
+                >
                   <div className={`max-w-[85%] rounded-xl border p-3 ${outgoing ? 'border-blue-100 bg-blue-50' : 'border-zinc-200 bg-white'}`}>
                     <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
                       <span className="font-medium text-zinc-700">{outgoing ? 'Мы' : item.fromEmail || 'Адресат'}</span>
@@ -215,7 +226,6 @@ export function SenderReplyPanel({
                 </div>
               );
             })}
-            <div ref={bottomRef} />
           </div>
         )}
       </div>
