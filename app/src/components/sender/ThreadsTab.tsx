@@ -1,12 +1,16 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type CSSProperties } from 'react';
 import { Loader2, MessageSquare, RefreshCw, Search, Settings2 } from 'lucide-react';
+import { ColumnResizer, useColumnWidths } from '@/components/ResizableColumns';
 import { fetchCampaigns, fetchThreads, type CampaignDto, type ThreadDto } from './api';
 import { CampaignReplyKbModal } from './CampaignReplyKbModal';
 import { CAMPAIGN_STATUS_LABELS } from './labels';
 import { SenderReplyPanel } from './SenderReplyPanel';
 import { UnlinkedReplies } from './UnlinkedReplies';
+
+const COLUMN_DEFAULTS = { campaigns: 250, threads: 380 };
+const COLUMN_LIMITS = { campaigns: [180, 520], threads: [280, 760] } as const;
 
 /** Пауза перед запросом: человек печатает адрес, а не отправляет запрос на каждую букву. */
 const SEARCH_DEBOUNCE_MS = 250;
@@ -89,6 +93,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
     return () => { cancelled = true; };
   }, []);
 
+  const columns = useColumnWidths('sender-threads:column-widths', COLUMN_DEFAULTS, COLUMN_LIMITS);
   const maxPage = Math.max(1, Math.ceil(total / pageSize));
   const pickCampaign = (id: string) => {
     setCampaignId(id);
@@ -98,9 +103,22 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
 
   return (
     <div className="space-y-4">
-      <div className="grid h-[calc(100vh-15rem)] min-h-[560px] grid-cols-1 overflow-hidden rounded-xl border border-zinc-200 bg-white lg:grid-cols-[250px_380px_minmax(0,1fr)]">
+      {/* Высота — почти весь экран: переписке и полю ответа было тесно. Ширину
+          колонок кампаний и переписок тянут мышью (ResizableColumns). */}
+      <div
+        className="grid h-[calc(100vh-8rem)] min-h-[720px] grid-cols-1 overflow-hidden rounded-xl border border-zinc-200 bg-white lg:grid-cols-[var(--col-campaigns)_var(--col-threads)_minmax(0,1fr)]"
+        style={{
+          '--col-campaigns': `${columns.widths.campaigns}px`,
+          '--col-threads': `${columns.widths.threads}px`,
+        } as CSSProperties}
+      >
         {/* ── Кампании ── */}
-        <div className="flex min-h-0 flex-col border-b border-zinc-200 lg:border-b-0 lg:border-r">
+        <div className="relative flex min-h-0 flex-col border-b border-zinc-200 lg:border-b-0 lg:border-r">
+          <ColumnResizer
+            className="hidden lg:block"
+            onMouseDown={(e) => columns.startDrag('campaigns', e)}
+            onDoubleClick={() => columns.reset('campaigns')}
+          />
           <div className="border-b border-zinc-200 px-4 py-2.5 text-xs uppercase tracking-wide text-zinc-500">Кампании</div>
           <div className="min-h-0 flex-1 overflow-y-auto py-1">
             <button
@@ -171,7 +189,12 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
         </div>
 
         {/* ── Переписки ── */}
-        <div className="flex min-h-0 flex-col border-b border-zinc-200 lg:border-b-0 lg:border-r">
+        <div className="relative flex min-h-0 flex-col border-b border-zinc-200 lg:border-b-0 lg:border-r">
+          <ColumnResizer
+            className="hidden lg:block"
+            onMouseDown={(e) => columns.startDrag('threads', e)}
+            onDoubleClick={() => columns.reset('threads')}
+          />
           <div className="space-y-2 border-b border-zinc-200 px-3 py-2.5">
             <div className="flex items-center justify-between gap-2">
               <span className="inline-flex items-center gap-2 text-sm font-semibold text-zinc-900">

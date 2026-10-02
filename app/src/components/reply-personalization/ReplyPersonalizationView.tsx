@@ -1,8 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, Globe, RefreshCw, Search, Settings, X } from 'lucide-react';
 import { fetchOthers, fetchProjects, fetchReplies, type ProjectListItem } from './api';
+import { ColumnResizer, useColumnWidths } from '@/components/ResizableColumns';
 import { GlobalKnowledgeForm } from './GlobalKnowledgeForm';
 import { KnowledgeBaseForm } from './KnowledgeBaseForm';
 import { ReplyDetailPanel } from './ReplyDetailPanel';
@@ -24,84 +25,9 @@ function mergeReplies(current: ReplyListItem[], next: ReplyListItem[]): ReplyLis
   );
 }
 
-/**
- * Ширина колонок «Проекты» и «Письма» — перетаскиванием границы: длинные
- * названия проектов и адреса резались троеточием. Ширина запоминается в
- * браузере; двойной клик по границе возвращает исходную.
- */
-const COLUMN_WIDTHS_KEY = 'reply-personalization:column-widths';
-const DEFAULT_WIDTHS = { projects: 240, list: 360 };
-const WIDTH_LIMITS = { projects: [160, 520], list: [260, 760] } as const;
-type ColumnKey = keyof typeof DEFAULT_WIDTHS;
-
-function clampWidth(key: ColumnKey, value: number): number {
-  const [min, max] = WIDTH_LIMITS[key];
-  return Math.round(Math.min(max, Math.max(min, value)));
-}
-
-function useColumnWidths() {
-  const [widths, setWidths] = useState(DEFAULT_WIDTHS);
-  useEffect(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(COLUMN_WIDTHS_KEY) ?? 'null') as Partial<typeof DEFAULT_WIDTHS> | null;
-      if (saved) {
-        setWidths({
-          projects: clampWidth('projects', Number(saved.projects) || DEFAULT_WIDTHS.projects),
-          list: clampWidth('list', Number(saved.list) || DEFAULT_WIDTHS.list),
-        });
-      }
-    } catch {
-      // нет доступа к хранилищу — ширина по умолчанию
-    }
-  }, []);
-  const save = (next: typeof DEFAULT_WIDTHS) => {
-    try {
-      localStorage.setItem(COLUMN_WIDTHS_KEY, JSON.stringify(next));
-    } catch {
-      // не запомнилось — не страшно
-    }
-  };
-  const startDrag = (key: ColumnKey, event: ReactMouseEvent) => {
-    event.preventDefault();
-    const startX = event.clientX;
-    const startWidth = widths[key];
-    let latest = widths;
-    const onMove = (e: MouseEvent) => {
-      latest = { ...latest, [key]: clampWidth(key, startWidth + e.clientX - startX) };
-      setWidths(latest);
-    };
-    const onUp = () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      save(latest);
-    };
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  };
-  const reset = (key: ColumnKey) => {
-    const next = { ...widths, [key]: DEFAULT_WIDTHS[key] };
-    setWidths(next);
-    save(next);
-  };
-  return { widths, startDrag, reset };
-}
-
-function ColumnResizer({ onMouseDown, onDoubleClick }: { onMouseDown: (e: ReactMouseEvent) => void; onDoubleClick: () => void }) {
-  return (
-    <div
-      role="separator"
-      aria-orientation="vertical"
-      title="Потяните, чтобы изменить ширину; двойной клик — как было"
-      onMouseDown={onMouseDown}
-      onDoubleClick={onDoubleClick}
-      className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize hover:bg-blue-400/40"
-    />
-  );
-}
+// Ширина колонок «Проекты» и «Письма» тянется мышью — см. ResizableColumns.
+const COLUMN_DEFAULTS = { projects: 240, list: 360 };
+const COLUMN_LIMITS = { projects: [160, 520], list: [260, 760] } as const;
 
 // hint — подсказка при наведении: что значит метка и что с письмом делать.
 type Badge = { label: string; className: string; hint: string };
@@ -458,7 +384,7 @@ export function ReplyPersonalizationView() {
   // Поиск по списку проектов: их 60, и листать до нужного дольше, чем набрать
   // пару букв. Ищем по вхождению без учёта регистра и ё/е.
   const [projectQuery, setProjectQuery] = useState('');
-  const columns = useColumnWidths();
+  const columns = useColumnWidths('reply-personalization:column-widths', COLUMN_DEFAULTS, COLUMN_LIMITS);
   const visibleProjects = useMemo(() => {
     const norm = (v: string) => v.toLowerCase().replace(/ё/g, 'е').trim();
     const q = norm(projectQuery);

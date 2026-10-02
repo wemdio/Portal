@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Copy, Loader2, Send, Sparkles } from 'lucide-react';
+import { EditorResizeHandle, useEditorHeight } from '@/components/ResizableEditor';
 import { LeadVerdictBar } from '@/components/senderLeads/LeadVerdictBar';
 import {
   fetchReplyDraft,
@@ -75,6 +76,10 @@ export function SenderReplyPanel({
   const [copied, setCopied] = useState(false);
   /** Лента писем и последнее письмо в ней — чтобы открыть переписку на его начале. */
   const threadRef = useRef<HTMLDivElement>(null);
+  // Высота поля ответа — своя ручка над блоком ответа, как в «Персонализированных
+  // ответах» (ResizableEditor): родная в углу textarea упиралась в край экрана.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const editor = useEditorHeight('sender-reply-editor-height', rootRef);
   const lastItemRef = useRef<HTMLDivElement>(null);
 
   const loadThread = useCallback(async () => {
@@ -190,7 +195,7 @@ export function SenderReplyPanel({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div ref={rootRef} className="flex h-full min-h-0 flex-col">
       <div className="border-b border-zinc-200 px-5 py-3">
         <div className="truncate text-base font-semibold text-zinc-900">{header?.title ?? 'Переписка'}</div>
         <div className="truncate text-xs text-zinc-500">
@@ -230,7 +235,12 @@ export function SenderReplyPanel({
         )}
       </div>
 
-      <div className="border-t border-zinc-200 px-5 py-3">
+      <EditorResizeHandle
+        {...editor}
+        className="border-zinc-200 hover:bg-zinc-50 focus-visible:bg-zinc-100"
+        gripClassName="bg-zinc-300 group-hover:bg-zinc-400"
+      />
+      <div className="px-5 pb-3 pt-1">
         <div className="mb-2 flex flex-wrap items-center gap-2">
           <button
             type="button"
@@ -269,10 +279,10 @@ export function SenderReplyPanel({
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
-          rows={8}
+          style={{ height: editor.editorHeight }}
           placeholder="Ответ адресату — сгенерируйте ИИ или напишите сами"
           disabled={generating || sending}
-          className="w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 disabled:bg-zinc-50"
+          className="w-full resize-none rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 disabled:bg-zinc-50"
         />
         {draft?.factsUsed ? <p className="mt-1 truncate text-xs text-zinc-500" title={draft.factsUsed}>Факты: {draft.factsUsed}</p> : null}
 
