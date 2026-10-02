@@ -511,9 +511,8 @@ export function heLaunchEmailVerdict(rawStatus: unknown): HeLaunchEmailVerdict {
  *     ни до, ни после 26.09.2026, поэтому RU-вердикт — по-прежнему лучший из
  *     ячейки. Это состояние HEAD, отдельное продуктовое решение, и по
  *     маркеру его не отличить;
- *   - колонка `he_bases.contact_cap_applied` для той же цели НЕ годится: её не
- *     пишет никто (стадия сборки перестала — читателя не было), и NULL в ней
- *     ничего не означает. Кап базы — только здесь, в collect_info.
+ *   - отдельной колонки под применённый кап у he_bases нет (миграция
+ *     20260926_0001 её не заводит): кап базы — только здесь, в collect_info.
  */
 export function heConstructContactCap(collectInfo: unknown): number | null {
   if (!collectInfo || typeof collectInfo !== 'object') return null;

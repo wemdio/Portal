@@ -65,7 +65,9 @@ import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
  *     (construct.status='done' в collect_info) или строк нет вовсе.
  *     DISPATCH-CONSTRUCT создаёт BC-джобу (bc_job_id — в collect_info.construct)
  *     и уходит в self-requeue с паузой 60с; WAIT-CONSTRUCT опрашивает её до
- *     терминального статуса (таймаут 6ч → база failed); IMPORT мапит сетку
+ *     терминального статуса (таймаут 6ч → база failed, у ночного долива —
+ *     по серии отказов, closeHeRefillBaseUndelivered; у ENG сама BC-джоба
+ *     отменяется); IMPORT мапит сетку
  *     обратно в унифицированные колонки по имени заголовка (email — первый
  *     адрес ячейки: в ENG-сетке он там один, в RU-сетке ячейка может быть
  *     склеенной) и добавляет колонку description В КОНЕЦ заголовков.
@@ -200,6 +202,7 @@ import {
 import { heCheckpointSupabase, isHeStageDbInterruption } from '../stageDb';
 import type { HeBase, HeJob, HeProject, HeVertical } from '../types';
 import {
+  closeHeRefillBaseUndelivered,
   completeHeRefillNoNew,
   resolveHeRefillCollectCompanies,
   runHeRefillAppend,
@@ -777,10 +780,8 @@ export interface HeConstructInfo {
    * (step_config.cap_emails_per_company.max). ЕДИНСТВЕННАЯ запись этого
    * значения: его читают запуск (launchHandoff.heConstructContactCap — маркер
    * «сетку собирал контракт со split_emails») и долив (baseCollectRefill).
-   * Колонку he_bases.contact_cap_applied стадия НЕ пишет: читателя у неё нет
-   * ни одного, а писалась она лишь у баз с явным капом проекта, то есть у
-   * базы с дефолтной пятёркой там стоял NULL — «кап не применялся», что
-   * неправда.
+   * Отдельной колонки под этот кап у he_bases нет (миграция 20260926_0001 её
+   * не заводит): читателя у неё не было бы.
    */
   contact_cap?: number;
   /**
@@ -1044,7 +1045,8 @@ function isChildFailed(source: HeCollectSource, status: string): boolean {
  * ПОЛНЫЙ СПИСОК записей через этот клиент. Числа в шапке нет намеренно — копия
  * числа уже разъезжалась со списком; проверка — поиск по `paidCheckpointDb(` и
  * `paidCheckpoint: true` в этом файле и в refill-ветке
- * (stages/baseCollectRefill.ts), которая поэтому и импортирует эту функцию.
+ * (stages/baseCollectRefill.ts), которая поэтому и импортирует эту функцию, а
+ * также поиск по `heCheckpointSupabase(` в stages/brandCloud.ts.
  * В этом файле:
  *  a. ПЛАН, ЗА КОТОРЫЙ ЗАПЛАТИЛИ (фаза PLAN, `collect_info.plan` — только когда
  *     план куплен, а не взят из стора вертикали). Потеряв её, повтор не находит
@@ -1064,6 +1066,14 @@ function isChildFailed(source: HeCollectSource, status: string): boolean {
  *     (`collect_info.construct.bc_job_id`). Строка base_constructor_jobs уже
  *     вставлена, и воркер конструктора оплатит по ней краул и SMTP-пробы;
  *     потеряв запись, повтор стадии поставит вторую джобу на те же компании.
+ * Вне сборки — одна запись, и она зовёт heCheckpointSupabase напрямую (модуль
+ * сборки research-стадии не импортируют):
+ *  f. ЧЕКПОЙНТ ПОЭЛЕМЕНТНОГО ПЕРЕБОРА evidence и brand_cloud (stages/brandCloud.ts,
+ *     writeHeItemCheckpoint → he_jobs.result.he_item_checkpoint; только
+ *     market='us', барьер status='running'). В нём префикс уже оплаченных
+ *     вердиктов ресёрч-модели и разборов брендов; потеряв его, повтор джобы
+ *     заново покупает вердикт (или разбор) и поисковые запросы каждого
+ *     элемента после последней дошедшей записи. Одиночный запрос.
  * И ещё две записи этого файла (1, 2) и две записи refill-ветки (3, 4) —
  * подробно, потому что их потеря дороже всего:
  *  1. МЕМО РЕЛЕВАНТ-ГЕЙТА (`collect_info.relevance_gate`, ran=true). Гейт судит
@@ -1081,10 +1091,11 @@ function isChildFailed(source: HeCollectSource, status: string): boolean {
  *     дорогой вид оплаченного, потому что отменить приём нельзя. Эта же запись
  *     несёт решение «вернуть компании в пул или оставить исключёнными»
  *     (companies_released), и её потеря роняет базу в чужие руки: строка
- *     остаётся 'collecting', финальный фейл джобы уводит её в 'failed'
- *     (repairBaseAfterCollectFinalFail), а 'failed'-база ВЫПАДАЕТ из
+ *     остаётся 'collecting', финальный фейл джобы на первом отказе подряд
+ *     уводит её в 'failed' (repairBaseAfterCollectFinalFail →
+ *     closeHeRefillBaseAfterFinalFail), а 'failed'-база ВЫПАДАЕТ из
  *     кросс-базового исключения — то есть уже написанные компании объявляются
- *     несобранными и ночь за ночью пересобираются за деньги.
+ *     несобранными и пересобираются за деньги.
  *  4. СТРОКА ПРОГОНА ДОЛИВА (`he_auto_pipeline_runs`, writeRefillRun). В её
  *     `stats.appended` лежит число уже принятых лидов. Отправку сверх капа она
  *     сама больше не открывает — это решает бронь дневного бюджета
@@ -3049,8 +3060,8 @@ const HE_CATALOG_CURSOR_TABLE = 'he_catalog_cursors';
  * `from: null`: режим чтения каталога выбирается по рынку, а не по доступности
  * стора, поэтому при market='us' срез читается тем же порядком, только pdl — с
  * первой строки и без записи закладок. Исключение уже собранных компаний на
- * выборке тоже работает без стора — ему стор не нужен. Индексы, которые
- * заводит та же миграция под keyset funded по времени вставки, нужны и без
+ * выборке тоже работает без стора — ему стор не нужен. Индекс, который
+ * заводит та же миграция под keyset funded по времени вставки, нужен и без
  * стора, поэтому миграцию применяют ДО деплоя кода.
  *
  * ЗАПИСИ ПЛАНА И ОСТЫВАНИЯ идут клиентом чекпойнта оплаты (paidCheckpointDb):
@@ -3769,6 +3780,44 @@ async function loadOtherBaseExclusionKeys(
   return keys;
 }
 
+/**
+ * Срез сборки из харвеста завершённых задач: мёрдж, исключение компаний других
+ * баз проекта, кап. Чистая функция, и ОДНА на двоих: фаза HARVEST стадии и
+ * ремонт refill-базы после финального фейла (closeHeRefillBaseAfterFinalFail),
+ * которому нужен ровно тот срез, что купила ночь, — второй копии этой
+ * арифметики, способной разойтись с первой, нет.
+ *
+ * Round-robin по задачам (а не concat): ни один источник не съедает кап
+ * целиком. Строки без компании и строки-мусор, чья компания схлопывается в
+ * пустой ключ («ООО», «—», «»), выбрасываем до мёрджа — все они делили бы
+ * один пустой ключ «|» (дедуп ниже их тоже отбрасывает, это первая линия).
+ *
+ * Внутри КАЖДОЙ задачи (только market='us') строки с сайтом/почтой поднимаем
+ * наверх — contactableFirst. Между задачами порядок не трогаем ни здесь, ни
+ * где-либо ещё: очерёдность источников — дело round-robin'а, и общая
+ * сортировка сломала бы ровно то, против чего он заведён. RU-путь получает
+ * тот же массив, что и до правки.
+ *
+ * Кап — после дедупа и исключения, как раньше после дедупа.
+ */
+function harvestSlice(
+  done: HeCollectTaskState[],
+  market: HeMarket,
+  existingKeys: HeBaseExclusionKeys,
+  limit: number,
+): { interleaved: HeUnifiedRow[]; kept: HeUnifiedRow[]; merged: HeUnifiedRow[] } {
+  const interleaved = dedupUnifiedRows(
+    interleaveTaskHarvests(
+      done.map((t) => {
+        const rows = (t.harvest ?? []).filter((r) => normalizeCompanyForDedup(r.company) !== '');
+        return market === 'us' ? contactableFirst(rows) : rows;
+      }),
+    ),
+  );
+  const kept = interleaved.filter((r) => !matchesExclusion(existingKeys, r.company, r.inn, r.website));
+  return { interleaved, kept, merged: kept.slice(0, limit) };
+}
+
 /* ─────────────────────────── Фаза CONSTRUCT ─────────────────────────── */
 
 /**
@@ -3888,7 +3937,7 @@ function constructStepsFor(
 /** Канонические заголовки сетки конструктора (порядок — как HE_AUTO_COLLECT_COLUMNS). */
 const CONSTRUCT_HEADERS_RU = ['Компания', 'Сайт', 'Email', 'Телефон', 'Вакансия', 'Адрес', 'Категория', 'Сотрудники', 'Выручка', 'ИНН', 'Источник'];
 const CONSTRUCT_HEADERS_EN = ['Company', 'Site', 'Email', 'Phone', 'Vacancy', 'Address', 'Category', 'Employees', 'Revenue', 'INN', 'Source'];
-/** Сколько ждём BC-джобу, прежде чем считать её зависшей (база → failed). */
+/** Сколько ждём BC-джобу, прежде чем считать её зависшей (база закрывается, см. фазу CONSTRUCT). */
 const CONSTRUCT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 /** Пауза между тиками ожидания BC-джобы (run_after). */
 const CONSTRUCT_REQUEUE_MS = 60_000;
@@ -4525,6 +4574,130 @@ async function ensureBaseAnalyzeJob(
   return 'enqueued';
 }
 
+/**
+ * Остановить джобу конструктора, чей результат больше никто не импортирует:
+ * ENG-базу закрыл таймаут ожидания (фаза CONSTRUCT) или ремонт refill-базы
+ * после финального фейла (closeHeRefillBaseAfterFinalFail). Без отмены джоба
+ * стоит в общей FIFO-очереди конструктора (её делят RU и ENG), а потом
+ * краулит сайты и платит SMTP-пробы впустую — и у ночного долива так копится
+ * по джобе за ночь, удлиняя очередь, из-за которой и случился таймаут.
+ *
+ * Запись — та же, которой отменяет кнопка «Отменить» конструктора (PATCH
+ * api/tools/base-constructor/[id], action='cancel'): status 'cancelled' и
+ * completed_at, только поверх 'pending'/'processing'; нового статуса нет.
+ * Pending-строку воркер конструктора после этого не заберёт (клейм идёт по
+ * status='pending'), идущий прогон встанет на ближайшей проверке isCancelled,
+ * а его прогресс и финальная запись отмену не перетирают (условия по статусу
+ * в lib/tools/baseConstructorWorker.ts). Сделанная до отмены работа уже
+ * оплачена и пропадает — отмена останавливает только остаток.
+ *
+ * Зовётся только ПОСЛЕ терминальной записи базы: отменённая раньше джоба на
+ * повторе стадии читалась бы как законченная (isConstructJobSettled), и
+ * импортировался бы её частичный результат.
+ *
+ * Никогда не бросает: база уже закрыта, а несостоявшаяся отмена стоит ровно
+ * того, что было до неё, — джоба доработает впустую.
+ */
+async function cancelAbandonedConstructJob(ctx: HeStageContext, bcJobId: string | null | undefined): Promise<void> {
+  if (!bcJobId) return;
+  try {
+    const { data, error } = await ctx.supabase
+      .from('base_constructor_jobs')
+      .update({ status: 'cancelled', completed_at: new Date().toISOString() })
+      .eq('id', bcJobId)
+      .in('status', ['pending', 'processing'])
+      .select('id');
+    if (error) throw new Error(error.message);
+    stageLog(
+      ctx,
+      Array.isArray(data) && data.length > 0
+        ? `[base_collect] construct: джоба конструктора ${bcJobId} отменена — её результат не импортируется`
+        : `[base_collect] construct: джоба конструктора ${bcJobId} уже завершилась — отменять нечего`,
+    );
+  } catch (e) {
+    stageLog(
+      ctx,
+      `[base_collect] construct: отмена джобы конструктора ${bcJobId} не записалась ` +
+        `(${e instanceof Error ? e.message : String(e)}) — она доработает впустую`,
+    );
+  }
+}
+
+/**
+ * Закрыть REFILL-базу, которую бросила ФИНАЛЬНО упавшая джоба base_collect, —
+ * вход ремонта воркера (worker/hypothesisEngine.ts:
+ * repairBaseAfterCollectFinalFail) для базы, которая ещё 'collecting'.
+ *
+ * Раньше ремонт писал такой базе 'failed' сам: компании возвращались при любой
+ * серии отказов, строка прогона оставалась 'collecting', а поставленная джоба
+ * конструктора дорабатывала впустую. Теперь решение — то же, что у таймаута
+ * конструктора и у отказа долива (closeHeRefillBaseUndelivered, серия
+ * refillFailStreak), а джоба конструктора, если она ещё в очереди или в работе,
+ * отменяется.
+ *
+ * Срез считается купленным, если гейт релевантности его судил (ran=true) или
+ * поставлена джоба конструктора. Его строки ремонт читает, только когда серия
+ * велит их оставить: тем же harvestSlice, что фаза HARVEST, по харвесту задач в
+ * collect_info и ключам других баз проекта — то есть ровно тот срез, который
+ * стадия собрала бы следующим тиком. Это чтение data других баз проекта (как на
+ * каждом тике импорта стадии) — внутри срока участка воркера. Не уложилось в
+ * срок — failJob вернёт false, и строку подберёт сборщик брошенных строк. Он
+ * прочитает уже 'failed' (запись отказа легла раньше ремонта) и ПОВТОРИТ сам
+ * ремонт — до STRANDED_DELIVERY_ATTEMPTS раз, только для base_collect с base_id
+ * (worker/hypothesisEngine.ts, collectStrandedJobs). Повтор безопасен: ремонт
+ * выходит сразу, если база уже терминальна, и пишет базу CAS'ом по её статусу.
+ *
+ * Доставку провайдеру этот путь не различает: долив, принявший лидов, но не
+ * записавший базу (persistRefillBase) три попытки подряд, приходит сюда тоже.
+ * Его компании на первом отказе подряд возвращаются в пул, как и до правки;
+ * второго письма не будет (skipIfInCampaign), цена — повторная сборка.
+ *
+ * Бросает только до записи базы — на чтении базы и на отказе самой записи;
+ * вызывающий тогда закрывает базу прежним путём.
+ */
+export async function closeHeRefillBaseAfterFinalFail(
+  ctx: HeStageContext,
+  job: HeJob,
+  baseId: string,
+  reason: string,
+): Promise<void> {
+  const { data, error } = await ctx.supabase
+    .from('he_bases')
+    .select('id, vertical_id, status, collect_info')
+    .eq('id', baseId)
+    .maybeSingle();
+  if (error || !data) throw new Error(`he_bases ${baseId}: ${error?.message ?? 'not found'}`);
+  const row = data as { vertical_id: string; status?: string; collect_info?: HeCollectInfo | null };
+  if (row.status !== 'collecting') return;
+  const info: HeCollectInfo = row.collect_info && typeof row.collect_info === 'object' ? row.collect_info : {};
+  const construct = info.construct;
+  const bought = info.relevance_gate?.ran === true || !!construct?.bc_job_id;
+  const result = await closeHeRefillBaseUndelivered({
+    ctx,
+    projectId: job.project_id,
+    base: { id: baseId, vertical_id: row.vertical_id },
+    reason,
+    info: dropCollectWorkState(info),
+    slice: bought
+      ? async () => {
+          const project = await readProject(ctx.supabase, job.project_id);
+          const market = ctx.market ?? projectMarket(project);
+          // Лимит — как у самой стадии: замороженный на тике плана (у купленного
+          // среза план есть всегда), не больше лимита постановки.
+          let limit = totalRowsCap(job);
+          if (typeof info.limit === 'number' && Number.isFinite(info.limit)) limit = Math.min(limit, info.limit);
+          const done = (info.tasks ?? []).filter((t) => t.status === 'done');
+          const existingKeys = await loadOtherBaseExclusionKeys(ctx, job.project_id, baseId, market);
+          return {
+            rows: harvestSlice(done, market, existingKeys, limit).merged,
+            columns: [...HE_AUTO_COLLECT_COLUMNS],
+          };
+        }
+      : null,
+  });
+  if (result && construct?.status === 'dispatched') await cancelAbandonedConstructJob(ctx, construct.bc_job_id);
+}
+
 /* ─────────────────────────── Стадия ─────────────────────────── */
 
 export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Promise<HeStageResult> {
@@ -5095,37 +5268,16 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // ─── HARVEST ───
   const done = tasks.filter((t) => t.status === 'done');
   const failed = tasks.filter((t) => t.status === 'failed');
-  // Round-robin по задачам (а не concat): ни один источник не съедает кап
-  // целиком. Строки без компании и строки-мусор, чья компания схлопывается в
-  // пустой ключ («ООО», «—», «»), выбрасываем до мёрджа — все они делили бы
-  // один пустой ключ «|» (дедуп ниже их тоже отбрасывает, это первая линия).
-  //
-  // Внутри КАЖДОЙ задачи (только market='us') строки с сайтом/почтой поднимаем
-  // наверх — contactableFirst. Между задачами порядок не трогаем ни здесь, ни
-  // где-либо ещё: очерёдность источников — дело round-robin'а, и общая
-  // сортировка сломала бы ровно то, против чего он заведён. RU-путь получает
-  // тот же массив, что и до правки.
-  const interleaved = dedupUnifiedRows(
-    interleaveTaskHarvests(
-      done.map((t) => {
-        const rows = (t.harvest ?? []).filter((r) => normalizeCompanyForDedup(r.company) !== '');
-        return market === 'us' ? contactableFirst(rows) : rows;
-      }),
-    ),
-  );
-
   // Исключаем компании, уже собранные в других базах этого проекта. Для
   // реестра это страховка (основное исключение прошло на выборке), для
-  // hh/карт — единственная точка исключения.
+  // hh/карт — единственная точка исключения. Сам мёрдж — harvestSlice (limit
+  // уже посчитан выше: totalRowsCap(job), у refill — уменьшенный под дневной кап).
   const existingKeys = await getExcludedKeys();
-  const kept = interleaved.filter((r) => !matchesExclusion(existingKeys, r.company, r.inn, r.website));
+  const { interleaved, kept, merged } = harvestSlice(done, market, existingKeys, limit);
   const excludedExisting = interleaved.length - kept.length;
   if (excludedExisting > 0) {
     stageLog(ctx, `[base_collect] исключено ${excludedExisting} строк — компании уже есть в других базах проекта`);
   }
-  // Кап — после дедупа и исключения, как раньше после дедупа (limit уже
-  // посчитан выше: totalRowsCap(job), у refill — уменьшенный под дневной кап).
-  const merged = kept.slice(0, limit);
 
   // ЕДИНСТВЕННЫЙ замер эффекта contactableFirst: сколько строк со связью
   // получила база и сколько их было во всём харвесте. Пишем только когда кап
@@ -5574,11 +5726,38 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
         }`,
       );
     } else {
-      // Таймаут ожидания конструктора — вечно не ждём: база failed с разбором.
+      // Таймаут ожидания конструктора — вечно не ждём: база закрывается с
+      // разбором, а джоба конструктора у ENG отменяется (её результат больше
+      // никто не импортирует).
       if (constructWaitExpired(construct)) {
         const note = `Конструктор баз не завершился за 6ч (job ${construct.bc_job_id}, статус: ${bc?.status ?? 'не найдена'})`;
         info.construct = { ...construct, note };
-        await ctx.supabase
+        if (isRefill) {
+          // Ночной долив — терминалом долива, с серией отказов
+          // (closeHeRefillBaseUndelivered): раньше здесь всегда писалось
+          // 'failed', и забитая очередь конструктора каждую ночь возвращала
+          // срез, который следующая ночь покупала снова. Срез куплен (гейт и
+          // джоба конструктора), его строки — merged этого тика. null — базу
+          // уже закрыл кто-то другой (отмена клиентом), писать нечего.
+          const refillResult = await closeHeRefillBaseUndelivered({
+            ctx,
+            projectId: job.project_id,
+            base: { id: baseId, vertical_id: base.vertical_id },
+            reason: note,
+            info: dropCollectWorkState(info),
+            stats,
+            slice: async () => ({ rows: merged, columns: [...HE_AUTO_COLLECT_COLUMNS] }),
+          });
+          // Отмена — ПОСЛЕ терминальной записи: отменённая раньше джоба на
+          // повторе стадии (если бы запись не легла) прочиталась бы как
+          // законченная, и импортировался бы её частичный результат.
+          if (refillResult) await cancelAbandonedConstructJob(ctx, construct.bc_job_id);
+          // Джоба, как и раньше, падает с этой причиной (кабинет честно
+          // показывает несостоявшуюся сборку); её повторы упираются в
+          // start-guard — база уже не 'collecting' — и ничего не покупают.
+          throw new Error(note);
+        }
+        const { error: timeoutWriteErr } = await ctx.supabase
           .from('he_bases')
           .update({
             status: 'failed',
@@ -5587,6 +5766,10 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
             updated_at: new Date().toISOString(),
           })
           .eq('id', baseId);
+        // Только ENG: у RU-инструмента джоба конструктора принадлежит
+        // сотруднику и видна ему в /tools/base-constructor — её судьбу решает
+        // он, как и до этой правки. Отмена — лишь когда база закрыта (см. выше).
+        if (market === 'us' && !timeoutWriteErr) await cancelAbandonedConstructJob(ctx, construct.bc_job_id);
         throw new Error(note);
       }
       await requeueSelf(ctx, job, CONSTRUCT_REQUEUE_MS);
@@ -5766,8 +5949,8 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     ...(offTargetNote ? { error: offTargetNote.slice(0, 500) } : {}),
     collect_info: { ...dropCollectWorkState(info), stats: statsWithQuality },
     // Кап «адресов на компанию» живёт в collect_info.construct.contact_cap —
-    // там его и читают (запуск, долив). Колонку he_bases.contact_cap_applied
-    // стадия не пишет: читателя у неё нет (см. HeConstructInfo.contact_cap).
+    // там его и читают (запуск, долив); отдельной колонки под него у he_bases
+    // нет (см. HeConstructInfo.contact_cap).
     updated_at: new Date().toISOString(),
   };
   /**

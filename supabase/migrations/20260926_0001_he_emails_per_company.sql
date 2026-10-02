@@ -9,10 +9,13 @@
 -- сколько адресов на компанию»), а не константой в коде.
 --
 -- МОДЕЛЬ — как у V2 (`20260920_0001_ve_emails_per_company.sql`), но своими
--- колонками: значение проекта (дефолт для новых сборок) + значение базы
--- (действует на эту сборку, снимается с проекта один раз на постановке) +
--- запись о том, какой лимит реально применён (для последующего ужесточения без
--- повторной оплаты сборки). Функций и RPC, в отличие от V2, здесь нет: ENG
+-- колонками и без колонки «применённого» лимита: значение проекта (дефолт для
+-- новых сборок) + значение базы (действует на эту сборку, снимается с проекта
+-- один раз на постановке). Лимит, который конструктор реально применил к базе,
+-- стадия сборки пишет в `collect_info.construct.contact_cap`, и читают его
+-- оттуда: запуск (`launchHandoff.heConstructContactCap`), долив
+-- (`stages/baseCollectRefill.ts`) и проекция кабинета. Колонки под него нет:
+-- читателя у неё не было бы. Функций и RPC, в отличие от V2, здесь нет: ENG
 -- применяет лимит шагом конструктора, а не разбиением готовой базы.
 --
 -- NULL = поведение до этой миграции: стадия подставляет прежнюю пятёрку
@@ -41,9 +44,6 @@ alter table public.he_projects
 alter table public.he_bases
   add column if not exists max_emails_per_company integer;
 
-alter table public.he_bases
-  add column if not exists contact_cap_applied integer;
-
 -- ─── 2. Границы значения ─────────────────────────────────────────────────
 -- 1..100: ноль или отрицательное — не «без лимита», а опечатка, которая молча
 -- обнулила бы базу; сотня с запасом закрывает любую осмысленную настройку.
@@ -62,21 +62,9 @@ alter table public.he_bases
   add constraint he_bases_max_emails_per_company_check
   check (max_emails_per_company is null or max_emails_per_company between 1 and 100);
 
-alter table public.he_bases
-  drop constraint if exists he_bases_contact_cap_applied_check;
-alter table public.he_bases
-  add constraint he_bases_contact_cap_applied_check
-  check (contact_cap_applied is null or contact_cap_applied between 1 and 100);
-
 -- ─── 3. Комментарии ──────────────────────────────────────────────────────
 
 comment on column public.he_projects.max_emails_per_company is
   'ENG: сколько адресов одной компании брать в работу по умолчанию для новых авто-сборок проекта (NULL = дефолт движка).';
 comment on column public.he_bases.max_emails_per_company is
   'ENG: действующий для этой базы лимит адресов на компанию (снят с проекта при постановке сборки; NULL = дефолт движка).';
--- Колонку стадия сборки НЕ пишет (читателя у неё не было — раунд исправлений
--- 02.10): применённый кап базы живёт в collect_info.construct.contact_cap, его
--- читают запуск и долив (launchHandoff.heConstructContactCap). Комментарий
--- колонки говорит это прямо, чтобы NULL не читали как «капа не было».
-comment on column public.he_bases.contact_cap_applied is
-  'ENG: не заполняется; лимит адресов на компанию, применённый конструктором, — в collect_info.construct.contact_cap. NULL здесь ничего не означает.';

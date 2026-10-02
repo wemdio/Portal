@@ -434,7 +434,9 @@ export function createHeStageSupabase(options: {
  * Границы использования — узкие и проверяемые: клиент отдаётся ТОЛЬКО под запись
  * чекпойнта оплаты (критерий «деньги, а не работа» и полный список — у
  * paidCheckpointDb в stages/baseCollect.ts; refill-ветка
- * stages/baseCollectRefill.ts берёт его оттуда же). Ни одно ЧТЕНИЕ стадии через
+ * stages/baseCollectRefill.ts берёт его оттуда же; чекпойнт перебора
+ * evidence/brand_cloud (stages/brandCloud.ts, writeHeItemCheckpoint) зовёт эту
+ * функцию напрямую). Ни одно ЧТЕНИЕ стадии через
  * него не идёт — иначе пропало бы то, ради чего волна 4b и делалась: чтения
  * стадии должны кончаться.
  *

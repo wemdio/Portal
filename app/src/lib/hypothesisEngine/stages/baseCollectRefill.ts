@@ -114,7 +114,10 @@
  *     (REFILL_RELEASE_FAIL_STREAK_LIMIT, refillFailStreak) база снова
  *     'analyzed' — иначе ночной крон собирал бы один и тот же срез каждую
  *     ночь. Вне серии — ночь, которой бюджет не дал ни строки, и отмена
- *     клиентом: их компании возвращаются всегда (см. runHeRefillAppend);
+ *     клиентом: их компании возвращаются всегда (см. runHeRefillAppend).
+ *     Тем же правилом, со строкой прогона 'failed', закрываются и два отказа
+ *     ДО долива — таймаут конструктора и ремонт воркера после финального
+ *     фейла (closeHeRefillBaseUndelivered);
  *   - пустой harvest — ШТАТНЫЙ исход добора («новых компаний нет»): база
  *     НЕ failed, прогон 'no_new', джоба завершается успешно;
  *   - строки собрались, но НИ У ОДНОЙ нет вердикта валидации — это не пустой
@@ -1166,8 +1169,10 @@ async function persistRefillBase(
  * доставку предшественника он не видит, а «не знаем» — это 'analyzed'.
  * Путей, где база с доставкой всё же может стать 'failed', два, и оба — когда
  * терминальная запись ЭТОГО прогона (persistRefillBase, оба вызова) не дошла:
- *   - ремонт воркера после ФИНАЛЬНОГО фейла base_collect
- *     (repairBaseAfterCollectFinalFail, CAS по 'collecting');
+ *   - ремонт воркера после ФИНАЛЬНОГО фейла base_collect — на первом отказе
+ *     подряд либо когда сам ремонт сорвался до записи базы (тогда прежний
+ *     'failed'); со второго подряд база уходит в 'analyzed' со строками среза
+ *     (closeHeRefillBaseUndelivered, CAS по 'collecting');
  *   - отмена клиентом, пришедшая во время долива: cancel-роут пишет
  *     'collecting'-базе 'failed', и переписать её 'analyzed' было некому.
  * Второе письмо в обоих случаях не уходит: долив идёт со skipIfInCampaign=true
@@ -1325,10 +1330,11 @@ async function recordRefillCapacityPause(
  *      · stats.budget_outcome 'already_reserved' — бронь держал прошлый прогон
  *        той же базы, который мог отправить; итог ночи неизвестен → 'skip';
  *      · остальное → 'failure';
- *  - 'collecting' ЧУЖОЙ базы — строку никто не закрыл: таймаут конструктора
- *    6 ч валит базу сам и бросает, ремонт воркера после финального фейла
- *    переводит базу в 'failed' без строки прогона, процесс умирает между
- *    записью базы и строки, запись строки падает. Итог ночи тогда — СТАТУС ЕЁ
+ *  - 'collecting' ЧУЖОЙ базы — строку никто не закрыл: процесс умер между
+ *    записью базы и строки, запись строки упала, ремонт воркера сорвался до
+ *    своего терминала и закрыл базу прежним 'failed', либо ночь закрыта кодом
+ *    до closeHeRefillBaseUndelivered (тогда таймаут конструктора и ремонт
+ *    писали базу сами, без строки прогона). Итог ночи тогда — СТАТУС ЕЁ
  *    БАЗЫ:
  *      · 'failed' с текстом отмены → 'skip';
  *      · 'failed' иначе → 'failure' (компании вернулись в пул — ровно тот
@@ -1386,7 +1392,8 @@ function refillStreakVerdict(
  * момент постановки, у вставленной стадией — момент финала).
  *
  * Никогда не бросает: вызывается из catch-ветки долива, где падать нельзя
- * (см. шапку файла). Непрочитанная история = 0, то есть отказ считается
+ * (см. шапку файла), и из closeHeRefillBaseUndelivered. Непрочитанная
+ * история = 0, то есть отказ считается
  * разовым и компании возвращаются в пул — из двух исходов это обратимый:
  * вернуть срез можно ещё раз, а выжженный назад не достать.
  *
@@ -1663,6 +1670,129 @@ export async function completeHeRefillNoNew(args: {
     result: refillResult,
   });
   stageLog(ctx, '[base_collect] refill: новых компаний нет — прогон no_new, база analyzed');
+  return refillResult;
+}
+
+/**
+ * ОТКАЗ REFILL-БАЗЫ, ЗАКРЫТЫЙ НЕ ВЕТКОЙ ДОЛИВА. Писателей у него два:
+ *  - таймаут ожидания конструктора 6 ч (stages/baseCollect.ts, фаза CONSTRUCT);
+ *  - ремонт воркера после ФИНАЛЬНОГО фейла base_collect, пока база ещё
+ *    'collecting' (worker/hypothesisEngine.ts: repairBaseAfterCollectFinalFail
+ *    → closeHeRefillBaseAfterFinalFail в stages/baseCollect.ts).
+ * Раньше оба писали базе 'failed' сами, мимо серии отказов, а строку прогона
+ * оставляли 'collecting'. Пока общая очередь конструктора забита, каждая ночь
+ * поэтому заново покупала тот же возвращённый срез — гейт релевантности и ещё
+ * одну джобу конструктора, — и так без предела.
+ *
+ * Решение о компаниях — то же, что у отказа долива (runHeRefillAppend, п. 5),
+ * плюс один исход, которого у долива не бывает (там срез всегда куплен):
+ *  - срез не куплен (`slice` = null: ни суда гейта, ни джобы конструктора) →
+ *    компании возвращаются, серия не читается. Повторная сборка купит здесь
+ *    только бесплатные чтения каталога, а выжечь некупленное — потерять
+ *    компании даром;
+ *  - срез куплен → refillFailStreak: первый отказ подряд возвращает компании
+ *    (база 'failed', как и раньше), со второго база 'analyzed', а строки среза
+ *    ложатся в её `data`. Без строк 'analyzed' не исключила бы ничего:
+ *    исключение будущих сборок читает именно `data` не-'failed' баз
+ *    (loadOtherBaseExclusionKeys), а у собирающейся базы она пуста;
+ *  - строк среза не получить (`slice()` бросил) или их ноль → возврат: из двух
+ *    ошибок обратимая, как у непрочитанной серии.
+ *
+ * Запись базы — КЛИЕНТОМ СТАДИИ и с CAS по 'collecting'. Это работа, а не
+ * деньги (провайдер строк не получал), и её потеря оставляет базу
+ * 'collecting': повтор доходит до того же решения бесплатно. Отмена клиентом,
+ * легшая раньше, выигрывает — CAS не перепишет её 'failed'. Строку прогона
+ * пишет writeRefillRun со статусом 'failed', и refillStreakVerdict читает её как
+ * обычный отказ.
+ *
+ * Возвращает итог (он же collect_info.refill_result) или null, если базу уже
+ * закрыл кто-то другой и CAS ничего не задел — тогда не пишется ничего.
+ */
+export async function closeHeRefillBaseUndelivered(args: {
+  ctx: HeStageContext;
+  projectId: string;
+  base: { id: string; vertical_id: string };
+  /** Причина: he_bases.error у 'failed', refill_result.error и error строки прогона. */
+  reason: string;
+  /** collect_info базы уже без рабочего состояния (dropCollectWorkState). */
+  info: HeCollectInfo;
+  /** Воронка сборки, если вызывающий её посчитал. */
+  stats?: HeCollectInfo['stats'];
+  /** Строки купленного среза — только если серия велит их оставить; null — срез не куплен. */
+  slice: (() => Promise<{ rows: HeUnifiedRow[]; columns: string[] }>) | null;
+}): Promise<HeRefillResult | null> {
+  const { ctx, projectId, base, reason, info, stats, slice } = args;
+  /** null — серия решению не понадобилась и не читалась. */
+  let failStreak: number | null = null;
+  let kept: { rows: HeUnifiedRow[]; columns: string[] } | null = null;
+  if (slice) {
+    failStreak = await refillFailStreak(ctx, base.vertical_id, base.id);
+    if (failStreak >= REFILL_RELEASE_FAIL_STREAK_LIMIT) {
+      try {
+        const bought = await slice();
+        if (bought.rows.length > 0) kept = bought;
+      } catch (e) {
+        stageLog(
+          ctx,
+          `[base_collect] refill: строки купленного среза не получены ` +
+            `(${e instanceof Error ? e.message : String(e)}) — компании возвращаются в пул`,
+        );
+      }
+    }
+  }
+  const message = reason.slice(0, 500);
+  const refillResult: HeRefillResult = {
+    status: 'failed',
+    error: message,
+    companies_released: kept === null,
+    ...(failStreak === null ? {} : { fail_streak: failStreak }),
+    completed_at: new Date().toISOString(),
+  };
+  const collectInfo: HeCollectInfo = { ...info, ...(stats ? { stats } : {}), refill_result: refillResult };
+  const now = new Date().toISOString();
+  const patch = kept
+    ? {
+        columns: kept.columns,
+        sample_rows: kept.rows.slice(0, SAMPLE_ROWS),
+        data: kept.rows,
+        row_count: kept.rows.length,
+        status: 'analyzed',
+        error: null,
+        collect_info: collectInfo,
+        updated_at: now,
+      }
+    : { status: 'failed', error: message, collect_info: collectInfo, updated_at: now };
+  const { data: landed, error } = await ctx.supabase
+    .from('he_bases')
+    .update(patch)
+    .eq('id', base.id)
+    .eq('status', 'collecting')
+    .select('id');
+  if (error) throw new Error(`he_bases refill close: ${error.message}`);
+  if (!landed || landed.length === 0) {
+    stageLog(ctx, `[base_collect] refill: база ${base.id} уже не 'collecting' — её закрыли без нас, решение не пишем`);
+    return null;
+  }
+  const config = await loadRefillConfig(ctx, projectId);
+  await writeRefillRun(ctx, {
+    configId: config?.id ?? null,
+    projectId,
+    verticalId: base.vertical_id,
+    baseId: base.id,
+    result: refillResult,
+  });
+  stageLog(
+    ctx,
+    `[base_collect] refill failed до долива: ${message} — ` +
+      (kept
+        ? `отказ ${(failStreak ?? 0) + 1}-й подряд, компании остаются исключёнными ` +
+          `(база analyzed, ${kept.rows.length} строк): иначе ночной прогон собрал бы тот же срез заново`
+        : failStreak === null
+          ? 'срез не куплен, база failed (компании в пул)'
+          : failStreak < REFILL_RELEASE_FAIL_STREAK_LIMIT
+            ? 'первый отказ подряд, база failed (компании в пул)'
+            : 'строк среза нет, база failed (компании в пул)'),
+  );
   return refillResult;
 }
 

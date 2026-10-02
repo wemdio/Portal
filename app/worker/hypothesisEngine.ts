@@ -91,6 +91,7 @@ import {
   repairOrphanAnalyzingBase,
 } from '@/lib/hypothesisEngine/autopilotNext';
 import type { HeAnalyzingBase } from '@/lib/hypothesisEngine/autopilotNext';
+import { closeHeRefillBaseAfterFinalFail } from '@/lib/hypothesisEngine/stages/baseCollect';
 import { isHeSearchProviderError } from '@/lib/hypothesisEngine/stages/searchIo';
 import type { HeSearchProviderError } from '@/lib/hypothesisEngine/stages/searchIo';
 import type { HeJob, HeStage } from '@/lib/hypothesisEngine/types';
@@ -768,6 +769,17 @@ interface HeStrandedJob {
   delivery: HeStrandedDelivery | null;
   /** Попытки доставки, при которых статус ПРОЧИТАЛСЯ, а done-запись не легла. */
   deliveryTries: number;
+  /**
+   * Доставку бросили (отказ не блипом или попытки кончились) и закрывают
+   * строку отказом `failure`. Результат при этом НЕ выбрасывается: последняя
+   * done-запись могла лечь без ответа, и тогда строка окажется 'done' — с
+   * хвостом, который обязан дойти (finishLandedDoneRow).
+   */
+  abandoned: boolean;
+  /** Попытки хвоста done-строки (finishLandedDoneRow), при которых статус ПРОЧИТАЛСЯ. */
+  tailTries: number;
+  /** Повторы ремонта базы, обрезанного сроком после записи отказа (см. collectStrandedJobs). */
+  repairTries: number;
 }
 
 /**
@@ -787,7 +799,9 @@ interface HeStrandedJob {
  * результат той же done-строкой, что и финализация (deliverDoneRow), и только
  * если доставка отвергнута не блипом или исчерпала STRANDED_DELIVERY_ATTEMPTS
  * при отвечающей БД, закрывает строку терминально (HeJobResultWriteError).
- * Строку без результата он закрывает её исходным отказом.
+ * Строку без результата он закрывает её исходным отказом. Строку, которая уже
+ * 'done' (done-запись легла, а ответ на неё потерян), он доводит хвостом
+ * финализации (finishLandedDoneRow), а не вычеркивает молча.
  *
  * Список свой, а не «все 'running' в таблице»: воркер single-flight, но
  * заметать чужие строки по одному лишь статусу — значит убить джобу соседнего
@@ -808,7 +822,9 @@ const strandedJobs = new Map<string, HeStrandedJob>();
  * Сколько раз сборщик доставляет результат при ОТВЕЧАЮЩЕЙ на чтение БД. Тики,
  * где не прочитался даже статус (БД лежит), не считаются: пока БД недоступна,
  * ждать дешевле, чем выбросить оплаченный результат. Каждая доставка — до
- * DONE_WRITE_ATTEMPTS запросов внутри POST_STAGE_DEADLINE_MS.
+ * DONE_WRITE_ATTEMPTS запросов внутри POST_STAGE_DEADLINE_MS. Тот же предел и
+ * тот же счёт «только тики с прочитанным статусом» — у хвоста легшей
+ * done-строки (finishLandedDoneRow, свой счётчик tailTries).
  */
 const STRANDED_DELIVERY_ATTEMPTS = 5;
 
@@ -875,6 +891,9 @@ function persistStrandedJobs(): void {
       failure: serializeFailure(entry.failure),
       delivery: entry.delivery,
       deliveryTries: entry.deliveryTries,
+      abandoned: entry.abandoned,
+      tailTries: entry.tailTries,
+      repairTries: entry.repairTries,
     }));
     const tmp = `${STRANDED_PATH}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(entries));
@@ -921,6 +940,9 @@ function loadStrandedJobs(): void {
               }
             : null,
         deliveryTries: Number(entry.deliveryTries) || 0,
+        abandoned: entry.abandoned === true,
+        tailTries: Number(entry.tailTries) || 0,
+        repairTries: Number(entry.repairTries) || 0,
       });
     }
     if (strandedJobs.size) {
@@ -938,7 +960,16 @@ function markJobStranded(
   close: { failure: unknown; delivery?: HeStrandedDelivery | null },
 ): void {
   if (strandedJobs.has(job.id)) return;
-  strandedJobs.set(job.id, { job, reason, failure: close.failure, delivery: close.delivery ?? null, deliveryTries: 0 });
+  strandedJobs.set(job.id, {
+    job,
+    reason,
+    failure: close.failure,
+    delivery: close.delivery ?? null,
+    deliveryTries: 0,
+    abandoned: false,
+    tailTries: 0,
+    repairTries: 0,
+  });
   persistStrandedJobs();
 }
 
@@ -952,9 +983,36 @@ function forgetStrandedJob(id: string): void {
  *
  * Статус перечитываем: срок участка мог истечь УЖЕ ПОСЛЕ done-записи (на
  * дочейне или на постановке followups), и тогда строка честно 'done' —
- * перезаписать её значило бы стереть результат оплаченной стадии. Строка не в
- * 'running' (done, отменена, отложена, удалена) из списка просто уходит.
- * Не удалась сама запись — строка остаётся в списке до следующего тика.
+ * перезаписать её значило бы стереть результат оплаченной стадии.
+ *
+ * ВЕСЬ набор того, что может вернуть чтение статуса (he_jobs_status_check знает
+ * пять статусов, плюс отказ чтения и пропавшая строка), и что с ним делается:
+ *  - чтение отвергнуто → ничего, следующий тик; попытки не тратятся;
+ *  - 'running', запись с результатом, доставку не бросали → deliverDoneRow.
+ *    Блип или срок — следующий тик, до STRANDED_DELIVERY_ATTEMPTS попыток;
+ *    отказ не блипом или конец попыток — доставка БРОШЕНА (abandoned), и
+ *    строку закрывает failJob с HeJobResultWriteError;
+ *  - 'running' без результата или с брошенной доставкой → failJob исходным
+ *    отказом. Не лёг — следующий тик. Лёг у записи без результата — она
+ *    вычеркнута. Лёг у брошенной доставки — запись остаётся ещё на одно чтение:
+ *    CAS отказа поверх 'done' не пишет (и отвечает «записано»), а последняя
+ *    done-запись могла лечь без ответа — тогда следующее чтение увидит 'done';
+ *  - 'done', запись с результатом (брошенной доставка или нет) → done-строка
+ *    ЛЕГЛА, ответ на неё потерян: хвост finishLandedDoneRow (расход в
+ *    he_projects, дочейн, followups), каждый шаг со своим дедупом. Не уложился
+ *    в срок или не прочиталось чтение дедупа — следующий тик, до
+ *    STRANDED_DELIVERY_ATTEMPTS попыток, дальше громкая строка лога и запись
+ *    вычеркнута. Раньше такую строку просто вычеркивали — и проект
+ *    молча стоял в 'researching' без живой джобы и без следующей стадии;
+ *  - 'done' без результата → строку закрыл не прогон этой записи (у записи
+ *    отказа результата нет) — вычеркнуть;
+ *  - 'pending' (self-requeue base_collect, чей статус финализация не
+ *    прочитала), 'failed' (отказ, легший без ответа, в том числе наш у
+ *    брошенной доставки), 'cancelled', строки нет, любой другой статус →
+ *    строку закрыли без сборщика; вычеркнуть. Перед этим запись с результатом,
+ *    чей расход ещё не дошёл до he_projects, его записывает (recordStageSpend):
+ *    вызовы модели оплачены при любом исходе строки, а у срока финализации,
+ *    оборвавшего её до учёта, другого писателя этого расхода нет.
  */
 async function collectStrandedJobs(): Promise<void> {
   if (!strandedJobs.size) return;
@@ -965,13 +1023,107 @@ async function collectStrandedJobs(): Promise<void> {
       // БД ещё не вернулась — не гадаем о статусе, попробуем на следующем тике.
       if (error) continue;
       const status = (data as { status: string } | null)?.status;
+      const delivery = entry.delivery;
+      if (status === 'done' && delivery) {
+        entry.tailTries += 1;
+        let finished = false;
+        let why = `не уложился в ${POST_STAGE_DEADLINE_MS}ms`;
+        try {
+          finished = await withPostStageDeadline(job, 'stranded done tail', async (client) => {
+            await finishLandedDoneRow(client, job, delivery);
+          });
+        } catch (e) {
+          why = e instanceof Error ? e.message : String(e);
+        }
+        if (finished) {
+          forgetStrandedJob(id);
+          continue;
+        }
+        if (entry.tailTries < STRANDED_DELIVERY_ATTEMPTS) {
+          persistStrandedJobs();
+          log(
+            'error',
+            `Job ${id} (${job.stage}) хвост легшей done-строки не доведён (попытка `
+              + `${entry.tailTries}/${STRANDED_DELIVERY_ATTEMPTS}), повторим на следующем тике: ${why}`,
+          );
+          continue;
+        }
+        forgetStrandedJob(id);
+        log(
+          'error',
+          `Job ${id} (${job.stage}) хвост легшей done-строки брошен после ${entry.tailTries} попыток (${why}) — `
+            + `проект ${job.project_id} может стоять без следующей стадии (дочейн/followups), `
+            + `расход в he_projects ${delivery.projectBooked ? 'учтён' : 'НЕ учтён'}`,
+        );
+        continue;
+      }
       if (status !== 'running') {
+        if (delivery && !delivery.projectBooked) {
+          await withPostStageDeadline(job, 'stranded spend', async (client) => {
+            await recordStageSpend(
+              client,
+              job,
+              delivery.tokensUsed,
+              delivery.costUsd,
+              `брошенная строка уже '${status ?? 'удалена'}'`,
+              delivery,
+            );
+          });
+        }
+        /**
+         * Ремонт базы, обрезанный сроком участка. Финальный отказ base_collect
+         * пишет строку отказа, а ПОТОМ чинит базу (repairBaseAfterCollectFinalFail)
+         * — внутри того же срока. Если срок кончился между ними, строка уже
+         * 'failed', failJob вернул false, и записью о брошенной строке остаёмся
+         * только мы. Без этого повтора база навсегда стояла бы в 'collecting'
+         * без живой джобы, а дедуп постановки сборки видел бы её как «уже
+         * собирается» — вертикаль заблокирована. Повтор безопасен: ремонт
+         * выходит сразу, если база уже терминальна, и пишет базу CAS'ом по
+         * её текущему статусу.
+         */
+        const repairBaseId =
+          status === 'failed' && job.stage === 'base_collect' && typeof job.payload?.base_id === 'string'
+            ? job.payload.base_id
+            : null;
+        if (repairBaseId) {
+          const failure = entry.failure;
+          const repairMsg = stripUnstorableJsonChars(
+            failure instanceof Error ? failure.message : String(failure ?? entry.reason),
+          );
+          let repaired = false;
+          let why = 'не уложился в срок';
+          try {
+            repaired = await withPostStageDeadline(job, 'stranded base repair', async (client) => {
+              await repairBaseAfterCollectFinalFail(client, job, repairBaseId, repairMsg);
+            });
+          } catch (e) {
+            why = e instanceof Error ? e.message : String(e);
+          }
+          if (!repaired) {
+            entry.repairTries += 1;
+            if (entry.repairTries < STRANDED_DELIVERY_ATTEMPTS) {
+              persistStrandedJobs();
+              log(
+                'warn',
+                `Job ${id} (base_collect) ремонт базы ${repairBaseId} не доведён (попытка ${entry.repairTries}/`
+                  + `${STRANDED_DELIVERY_ATTEMPTS}: ${why}) — повторю следующим тиком`,
+              );
+              continue;
+            }
+            // Предел: дальше база остаётся как есть — ровно то состояние, что было
+            // до этого повтора, но теперь о нём кричит лог.
+            log(
+              'error',
+              `Job ${id} (base_collect) ремонт базы ${repairBaseId} брошен после ${entry.repairTries} попыток `
+                + `(${why}) — база может остаться в нетерминальном статусе, нужен человек`,
+            );
+          }
+        }
         forgetStrandedJob(id);
         log('info', `Job ${id} (${job.stage}) брошенная строка: уже '${status ?? 'удалена'}' — собирать нечего`);
         continue;
       }
-      const delivery = entry.delivery;
-      if (delivery) {
+      if (delivery && !entry.abandoned) {
         entry.deliveryTries += 1;
         // Текст уходит в he_jobs.error при терминальном закрытии — английский,
         // как и прочие причины этого класса.
@@ -998,13 +1150,17 @@ async function collectStrandedJobs(): Promise<void> {
           continue;
         }
         // Запись отвергнута не блипом либо попытки при отвечающей БД кончились:
-        // результат не сохранить, строку закрывает терминальный класс.
+        // результат не сохранить, строку закрывает терминальный класс. Сам
+        // результат (его бухгалтерию) запись хранит дальше: последняя попытка
+        // могла лечь без ответа, и тогда хвост done-строки ещё понадобится.
         entry.failure = new HeJobResultWriteError(`he_jobs finalization abandoned (${entry.reason}): ${outcome.message}`);
-        entry.delivery = null;
+        entry.abandoned = true;
         persistStrandedJobs();
       }
       const written = await failJob(job, entry.failure);
-      if (written) forgetStrandedJob(id);
+      // Брошенная доставка — ещё одно чтение статуса: 'failed' вычеркнет её,
+      // 'done' (легла последняя done-запись) доведёт хвост.
+      if (written && !delivery) forgetStrandedJob(id);
     } catch (e) {
       log(
         'error',
@@ -1857,6 +2013,159 @@ async function deliverDoneRow(
 }
 
 /**
+ * Хвост done-строки, которая ЛЕГЛА без подтверждения: UPDATE закоммичен, а
+ * ответ на него не дошёл (каждый повтор получил 502 шлюза) либо срок участка
+ * оборвал финализацию уже после записи. Зовёт его сборщик, прочитав 'done' у
+ * записи с результатом (collectStrandedJobs).
+ *
+ * Шаги те же, что у deliverDoneRow после записи, но любой из них мог УЖЕ
+ * случиться — финализация успела часть до обрыва, или прошлый тик сборщика
+ * дошёл до середины, — а повтор каждого стоит денег. Поэтому дедуп у каждого
+ * свой и сильнее, чем в обычном пути:
+ *  - расход в he_projects — только при delivery.projectBooked=false; флаг
+ *    ставится по подтверждённой записи и сразу уходит в файл списка (рестарт
+ *    посреди хвоста не прибавит второй раз). Остаток прежний (см.
+ *    HeStrandedDelivery): прибавка, которая легла, но ответа не дала,
+ *    прибавится повторно — завышенная воронка, без повтора работы;
+ *  - дочейн research-стадии — см. landedChainBlocker;
+ *  - followups автопилота — см. landedFollowupBlocker.
+ * Сбой чтения дедупа бросается: «не знаем» не равно «нет», и сборщик повторит
+ * хвост следующим тиком.
+ */
+async function finishLandedDoneRow(
+  client: HeWorkerDb,
+  job: HeJob,
+  delivery: HeStrandedDelivery,
+): Promise<void> {
+  const { tokensUsed, costUsd } = delivery;
+  if (!delivery.projectBooked) {
+    delivery.projectBooked = await accumulateProjectUsage(client, job.project_id, tokensUsed, costUsd);
+    if (delivery.projectBooked) persistStrandedJobs();
+  }
+  const nextStage = NEXT_RESEARCH_STAGE[job.stage];
+  if (nextStage) {
+    const blocker = await landedChainBlocker(client, job);
+    if (blocker) {
+      log('info', `Job ${job.id} (${job.stage}) хвост легшей done-строки: ${nextStage} не ставим — ${blocker}`);
+    } else {
+      // Свой сбой постановки дочейн обрабатывает сам (повторы, затем проект
+      // 'failed' с причиной) и наружу не бросает.
+      await chainNextResearchStage(client, job);
+    }
+  }
+  if (job.stage === 'chain' || job.stage === 'base_analyze') {
+    const blocker = await landedFollowupBlocker(client, job);
+    if (blocker) {
+      log('info', `Job ${job.id} (${job.stage}) хвост легшей done-строки: followups не ставим — ${blocker}`);
+    } else {
+      try {
+        const followups = await enqueueAutopilotFollowups(client, job);
+        const summary = Object.entries(followups)
+          .map(([stage, outcome]) => `${stage}=${outcome}`)
+          .join(' ');
+        if (summary) log('info', `Job ${job.id} (${job.stage}) autopilot followups: ${summary}`);
+      } catch (e) {
+        log('error', `Job ${job.id} (${job.stage}) autopilot followups failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+  log(
+    'info',
+    `Job ${job.id} (${job.stage}) → done: хвост легшей done-строки доведён сборщиком `
+      + `(+${tokensUsed} tok, $${costUsd.toFixed(6)}, he_projects ${delivery.projectBooked ? 'учтён' : 'НЕ учтён'})`,
+  );
+}
+
+/**
+ * Почему хвост легшей done-строки НЕ ставит следующую research-стадию (null —
+ * ставить можно; дальше обычный chainNextResearchStage с его собственным
+ * дедупом по pending/running).
+ *
+ * Обычный дедуп здесь слаб: между обрывом и хвостом следующая стадия могла уже
+ * отработать — тик, где сборщик не прочитал статус, а клейм прошёл, — и тогда
+ * pending/running-строки нет, а вставка оплатила бы стадию второй раз. Поэтому
+ * смотрим research-строки проекта, созданные ПОСЛЕ этой джобы, в любом
+ * статусе. Источник у такой строки один из двух: наш же дочейн, легший до
+ * обрыва, или новый запуск research (enqueueHeResearchJob пускает его, как
+ * только активных research-джоб нет, а эта уже 'done'). В обоих случаях
+ * ставить нечего.
+ *
+ * Второе условие — проект всё ещё 'researching'. Хвост приходит позже обычной
+ * финализации (минуты, а при лежащей БД и дольше), и за это время cancel-роут
+ * мог перевести проект в 'draft', а отказ — в 'failed': дочейн после этого —
+ * платная стадия проекта, который её не ждёт.
+ */
+async function landedChainBlocker(client: HeWorkerDb, job: HeJob): Promise<string | null> {
+  const [newer, project] = await Promise.all([
+    client
+      .from('he_jobs')
+      .select('stage, status')
+      .eq('project_id', job.project_id)
+      .in('stage', [...RESEARCH_STAGES])
+      .neq('id', job.id)
+      .gt('created_at', job.created_at)
+      .limit(1),
+    client.from('he_projects').select('status').eq('id', job.project_id).maybeSingle(),
+  ]);
+  if (newer.error) throw new Error(`he_jobs landed-chain dedup read: ${newer.error.message}`);
+  if (project.error) throw new Error(`he_projects landed-chain status read: ${project.error.message}`);
+  const row = (newer.data ?? [])[0] as { stage?: string; status?: string } | undefined;
+  if (row) return `после этой джобы уже создана research-строка ${row.stage} (${row.status})`;
+  const projectStatus = (project.data as { status?: string } | null)?.status;
+  if (projectStatus !== 'researching') return `проект уже '${projectStatus ?? 'удалён'}'`;
+  return null;
+}
+
+/**
+ * Почему хвост легшей done-строки НЕ ставит followups автопилота (null —
+ * ставить можно; дальше enqueueAutopilotFollowups со своими проверками, в том
+ * числе autopilot проекта).
+ *
+ * Их собственный дедуп видит только живое: для chain — базу вертикали в
+ * collecting/analyzing/analyzed, для base_analyze — pending/running
+ * template-джобу базы. Если постановка легла до обрыва, а поставленное успело
+ * отработать (template — done) или упасть (сборка — 'failed'), повтор купил бы
+ * письма или сборку второй раз. Поэтому ищем то, что постановка создаёт, в
+ * любом статусе, созданное ПОСЛЕ этой джобы: для chain — авто-базу вертикали,
+ * для base_analyze — template-джобу той же базы. Её мог поставить и человек
+ * (кнопка сборки, «Start outreach») — тогда ставить тем более нечего.
+ */
+async function landedFollowupBlocker(client: HeWorkerDb, job: HeJob): Promise<string | null> {
+  if (job.stage === 'chain') {
+    const verticalId = typeof job.payload?.vertical_id === 'string' ? job.payload.vertical_id : null;
+    // Без вертикали followup сам ничего не поставит (no_vertical_in_job).
+    if (!verticalId) return null;
+    const { data, error } = await client
+      .from('he_bases')
+      .select('id, status')
+      .eq('vertical_id', verticalId)
+      .eq('source', 'auto')
+      .gt('created_at', job.created_at)
+      .limit(1);
+    if (error) throw new Error(`he_bases landed-followup dedup read: ${error.message}`);
+    const row = (data ?? [])[0] as { id?: string; status?: string } | undefined;
+    return row ? `после этой джобы у вертикали уже создана авто-база ${row.id} (${row.status})` : null;
+  }
+  if (job.stage === 'base_analyze') {
+    const baseId = typeof job.payload?.base_id === 'string' ? job.payload.base_id : null;
+    // Без базы followup сам ничего не поставит (no_base_in_job).
+    if (!baseId) return null;
+    const { data, error } = await client
+      .from('he_jobs')
+      .select('id, status')
+      .eq('project_id', job.project_id)
+      .eq('stage', 'template')
+      .eq('payload->>base_id', baseId)
+      .gt('created_at', job.created_at)
+      .limit(1);
+    if (error) throw new Error(`he_jobs landed-followup dedup read: ${error.message}`);
+    const row = (data ?? [])[0] as { id?: string; status?: string } | undefined;
+    return row ? `после этой джобы по базе уже создана template-джоба ${row.id} (${row.status})` : null;
+  }
+  return null;
+}
+
+/**
  * Ремонт базы после ФИНАЛЬНОГО фейла base_collect. Решение принимается по
  * ТЕРМИНАЛЬНОСТИ статуса (HE_BASE_TERMINAL_STATUSES), а не по списку знакомых
  * нетерминальных: 'analyzing' лечится, любой другой НЕтерминальный — валится,
@@ -1874,6 +2183,13 @@ async function deliverDoneRow(
  *    собранного нет, база уходит в 'failed' с причиной. Иначе она навсегда
  *    остаётся «живой» для collect-роута и держит partial unique index
  *    he_bases_one_collecting_per_vertical.
+ *  - 'collecting' у ночного долива ENG (payload.refill) — исключение из
+ *    предыдущего пункта: у такой базы срез мог быть уже куплен (гейт, джоба
+ *    конструктора), и закрывает её терминал долива с серией отказов
+ *    (closeHeRefillBaseAfterFinalFail, stages/baseCollect.ts): 'failed' на
+ *    первом отказе подряд, 'analyzed' со строками среза со второго, строка
+ *    прогона 'failed', джоба конструктора отменена. Не вышло до записи базы —
+ *    прежний 'failed'.
  *  - 'analyzing' — harvest УЖЕ прошёл: строки собраны, конструктор оплачен,
  *    умерла только вставка base_analyze (stages/baseCollect.ts делает её
  *    отдельным запросом после перевода базы в 'analyzing'). Обычно пару
@@ -1978,6 +2294,29 @@ async function repairBaseAfterCollectFinalFail(
   // отказ пробы среза; так выглядели базы Franchise Brands 12.08) — не трогаем:
   // текст start-guard перетёр бы осмысленную причину.
   if (HE_BASE_TERMINAL_STATUSES.has(baseStatus)) return;
+  // Ночной долив ENG (payload.refill ставит только крон для market='us'):
+  // судьбу компаний решает серия отказов, как у отказа долива и таймаута
+  // конструктора, строка прогона закрывается 'failed', а джоба конструктора
+  // отменяется (closeHeRefillBaseAfterFinalFail). Раньше здесь всегда писалось
+  // 'failed' — компании возвращались каждую ночь, и тот же срез покупался
+  // заново без предела. Не вышло до записи базы — прежний путь ниже.
+  if (job.payload?.refill === true && baseStatus === 'collecting') {
+    try {
+      await closeHeRefillBaseAfterFinalFail(
+        { supabase: client, log: (m) => log('info', `Job ${job.id} (base_collect) ${m}`) },
+        job,
+        baseId,
+        msg,
+      );
+      return;
+    } catch (e) {
+      log(
+        'error',
+        `Job ${job.id} (base_collect) base ${baseId}: refill-ремонт с серией отказов не удался `
+          + `(${e instanceof Error ? e.message : String(e)}) — пробую закрыть базу прежним путём (failed, компании в пул); не выйдет — повторит сборщик брошенных строк`,
+      );
+    }
+  }
   // Любой нетерминальный статус, КРОМЕ 'analyzing', собранного не имеет: сборка
   // умерла до harvest, спасать нечего — база уходит в 'failed' с причиной.
   // 'collecting' (штатный статус авто-сборки) и любой третий нетерминальный
