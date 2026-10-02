@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, FileSpreadsheet, Loader2, Mail } from 'lucide-react';
 import { applyVars, followUpSubject } from '@/lib/sender/template';
-import { MIN_RECIPIENTS_PER_VARIANT, variantLabel } from '@/lib/sender/variants';
+import { variantLabel } from '@/lib/sender/variants';
 import {
   createCampaign,
   fetchCampaign,
@@ -999,13 +999,6 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
                     ))}
                   </tbody>
                 </table>
-                {/* Главная ошибка в А/Б: объявить победителя на двух ответах. */}
-                {abResults.some((row) => row.sent < MIN_RECIPIENTS_PER_VARIANT) ? (
-                  <p className="mt-1.5 text-xs text-amber-600">
-                    Писем ещё мало: пока на вариант не ушло хотя бы {MIN_RECIPIENTS_PER_VARIANT}, разница в
-                    ответах — случайность, а не победа текста.
-                  </p>
-                ) : null}
               </div>
             ) : null}
 
