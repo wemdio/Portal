@@ -17,6 +17,7 @@ import { createWorkerLogger, requireSupabaseAdmin, setupGracefulShutdown, pollLo
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { verifyPendingMailboxes } from '@/lib/sender/verifyWorker';
 import { planSenderMessages } from '@/lib/sender/planner';
+import { runScheduledStarts } from '@/lib/sender/scheduledStart';
 import { processSenderBatch } from '@/lib/sender/sendWorker';
 import { processSenderReplies } from '@/lib/sender/repliesWorker';
 import { checkDeliveredProbes, sendPendingProbes } from '@/lib/sender/probeWorker';
@@ -123,6 +124,8 @@ async function runFleetJobs(): Promise<void> {
     await guarded('Каталог Google не синхронизировался', () => syncGoogleWorkspaceMailboxes({ log }));
   }
 
+  // Отложенные запуски — до планировщика: запущенную кампанию он разложит в тот же проход.
+  await guarded('Отложенные запуски не обработались', () => runScheduledStarts({ log }));
   await guarded('Планировщик не отработал', () => planSenderMessages({ log }));
   await guarded('Доставка проб не проверилась', () => checkDeliveredProbes(log));
 

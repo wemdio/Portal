@@ -83,6 +83,10 @@ export interface CampaignDto {
   source_kind: 'manual' | 'polza_ru' | 'polza_en';
   /** Запуск автоаутрича, из которого залиты получатели. */
   source_job_id: string | null;
+  /** Отложенный запуск (ISO): кампания стартует сама, когда наступит это время. */
+  scheduled_start_at?: string | null;
+  /** Почему отложенный запуск не состоялся. */
+  scheduled_start_error?: string | null;
 }
 
 /** Ящик папки: адрес и можно ли с него слать прямо сейчас. */
@@ -535,6 +539,24 @@ export function patchCampaign(id: string, action: 'start' | 'pause' | 'finish') 
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action }),
+  });
+}
+
+/** Отложить запуск кампании до startAt (ISO, UTC). */
+export function scheduleCampaign(id: string, startAt: string) {
+  return authFetchJson<{ ok: true; mailboxesAdded?: number }>(`${BASE}/campaigns/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'schedule', startAt }),
+  });
+}
+
+/** Отменить отложенный запуск. */
+export function unscheduleCampaign(id: string) {
+  return authFetchJson<{ ok: true }>(`${BASE}/campaigns/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'unschedule' }),
   });
 }
 

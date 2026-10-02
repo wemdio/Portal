@@ -2,12 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Loader2, Pause, Play, Plus, Settings, Square, Trash2, Users } from 'lucide-react';
+import { CalendarClock, Loader2, Pause, Play, Plus, Settings, Square, Trash2, Users, X } from 'lucide-react';
 import {
   deleteCampaign,
   fetchCampaigns,
   fetchFolders,
   patchCampaign,
+  scheduleCampaign,
+  unscheduleCampaign,
   type CampaignDeleteOutreachDto,
   type CampaignDto,
   type SenderFolderDto,
@@ -17,11 +19,13 @@ import { timezoneLabel, weekdaysLabel } from './CampaignSteps';
 import { FolderSettingsModal, chainDaysLabel } from './FolderSettingsModal';
 import { CAMPAIGN_STATUS_LABELS } from './labels';
 import { RecipientsModal } from './RecipientsModal';
+import { formatInZone, StartCampaignModal, zoneCaption } from './StartCampaignModal';
 
-type CampaignAction = 'start' | 'pause' | 'finish' | 'delete';
+type CampaignAction = 'start' | 'pause' | 'finish' | 'delete' | 'unschedule';
 
 const ACTION_FAILED: Record<CampaignAction, string> = {
   start: 'Не удалось запустить',
+  unschedule: 'Не удалось отменить отложенный запуск',
   pause: 'Не удалось поставить на паузу',
   finish: 'Не удалось завершить',
   delete: 'Не удалось удалить',
@@ -186,6 +190,14 @@ function CampaignRow({
           {timezoneLabel(campaign.timezone)}
           {poolFromFolder ? ' · ящики возьмёт из папки при запуске' : ''}
         </div>
+        {campaign.scheduled_start_at ? (
+          <div className="mt-1 inline-flex items-center gap-1.5 text-xs font-medium text-blue-700">
+            <CalendarClock className="h-3.5 w-3.5" />
+            Запуск {formatInZone(campaign.scheduled_start_at, campaign.timezone)}, {zoneCaption(campaign.timezone, new Date(campaign.scheduled_start_at))}
+          </div>
+        ) : campaign.scheduled_start_error ? (
+          <div className="mt-1 text-xs text-red-600">Отложенный запуск не состоялся: {campaign.scheduled_start_error}</div>
+        ) : null}
       </div>
 
       <div className="flex items-center gap-2">
@@ -216,7 +228,17 @@ function CampaignRow({
             className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500"
           >
             <Play className="h-3.5 w-3.5" />
-            Запустить
+            {campaign.status === 'paused' ? 'Продолжить' : 'Запустить'}
+          </button>
+        ) : null}
+        {campaign.scheduled_start_at && campaign.status !== 'running' && campaign.status !== 'done' ? (
+          <button
+            type="button"
+            onClick={() => onAction('unschedule')}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100"
+          >
+            <X className="h-3.5 w-3.5" />
+            Отменить запуск
           </button>
         ) : null}
 
@@ -280,6 +302,8 @@ export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: str
   const [notice, setNotice] = useState<string | null>(null);
   // Кому показать базу получателей (задача 5.2): список с фильтрами и поиском.
   const [recipientsOf, setRecipientsOf] = useState<CampaignDto | null>(null);
+  // «Запустить» / «Продолжить» открывает выбор: сразу или отложить.
+  const [startOf, setStartOf] = useState<CampaignDto | null>(null);
   // Папка, чьи настройки открыты.
   const [folderSettings, setFolderSettings] = useState<SenderFolderDto | null>(null);
   // Кампания из ссылки ищется один раз — после первой загрузки: обновление
@@ -345,6 +369,10 @@ export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: str
   }, [highlightId]);
 
   const act = async (campaign: CampaignDto, action: CampaignAction) => {
+    if (action === 'start') {
+      setStartOf(campaign);
+      return;
+    }
     if (action === 'finish' && !window.confirm(`Завершить кампанию «${campaign.name}»? Запланированные письма отменятся.`)) {
       return;
     }
@@ -356,18 +384,37 @@ export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: str
         const res = await deleteCampaign(campaign.id);
         const outreachNotice = res.outreach ? deletedOutreachNotice(campaign, res.outreach) : null;
         if (outreachNotice) setNotice(outreachNotice);
+      } else if (action === 'unschedule') {
+        await unscheduleCampaign(campaign.id);
+        setNotice(`Отложенный запуск кампании «${campaign.name}» отменён.`);
       } else {
-        const res = await patchCampaign(campaign.id, action);
-        // Кампания без ящиков взяла их из папки — об этом стоит сказать:
-        // иначе непонятно, с каких ящиков она поехала.
-        if (action === 'start' && res.mailboxesAdded) {
-          setNotice(`Кампания «${campaign.name}» запущена. Ящики взяты из настроек папки: ${res.mailboxesAdded}.`);
-        }
+        await patchCampaign(campaign.id, action);
       }
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : ACTION_FAILED[action]);
     }
+  };
+
+  // Ошибку окно показывает само — поэтому здесь исключения летят дальше.
+  const startNow = async (campaign: CampaignDto) => {
+    const res = await patchCampaign(campaign.id, 'start');
+    // Кампания без ящиков взяла их из папки — об этом стоит сказать:
+    // иначе непонятно, с каких ящиков она поехала.
+    setNotice(
+      res.mailboxesAdded
+        ? `Кампания «${campaign.name}» запущена. Ящики взяты из настроек папки: ${res.mailboxesAdded}.`
+        : `Кампания «${campaign.name}» запущена.`,
+    );
+    setError(null);
+    await load();
+  };
+
+  const scheduleStart = async (campaign: CampaignDto, startAtIso: string) => {
+    await scheduleCampaign(campaign.id, startAtIso);
+    setNotice(`Кампания «${campaign.name}» запустится ${formatInZone(startAtIso, campaign.timezone)} (${zoneCaption(campaign.timezone, new Date(startAtIso))}).`);
+    setError(null);
+    await load();
   };
 
   const groups = groupCampaigns(campaigns, folders);
@@ -484,6 +531,16 @@ export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: str
         <RecipientsModal
           campaign={recipientsOf}
           onClose={() => setRecipientsOf(null)}
+        />
+      ) : null}
+
+      {startOf ? (
+        <StartCampaignModal
+          key={startOf.id}
+          campaign={startOf}
+          onClose={() => setStartOf(null)}
+          onStartNow={() => startNow(startOf)}
+          onSchedule={(iso) => scheduleStart(startOf, iso)}
         />
       ) : null}
 
