@@ -15,6 +15,7 @@ import { getDraftById, markDraftSent, updateDraftText } from './db';
 import { fetchReplyThread } from './instantlyThread';
 import { resolveProjectReply } from './projectReply';
 import { findReferredEmails } from './referredContact';
+import type { Email } from '@/lib/instantly/types';
 import type { QualificationRow } from './types';
 
 /** Щедрый верхний предел тела письма: реальный ответ 90-170 слов, это защита от мусора, не лимит стиля. */
@@ -41,32 +42,32 @@ export function replySubject(subject: string | null): string {
  * символов (liveReplyList), цитировать обрезок нельзя. Сбой запроса не должен
  * ронять отправку — откатываемся на сохранённые поля.
  */
-async function buildQuoteSource(
-  qualification: QualificationRow,
-  accountId: string,
-): Promise<QuoteSource> {
-  const fallback: QuoteSource = {
-    bodyText: qualification.replyBody,
-    fromEmail: qualification.leadEmail,
-    timestamp: qualification.replyTimestamp,
-  };
-  if (!qualification.instantlyEmailId) return fallback;
+async function fetchOriginal(emailId: string, accountId: string): Promise<Email | null> {
   try {
-    const original = await getEmail(qualification.instantlyEmailId, {
+    return await getEmail(emailId, {
       accountId,
       requestPriority: 'interactive',
       consumer: 'personalization_send',
     });
-    if (!original) return fallback;
-    return {
-      bodyText: extractBodyText(original.body) ?? qualification.replyBody,
-      fromName: original.from_address_json?.[0]?.name ?? null,
-      fromEmail: original.from_address_email ?? qualification.leadEmail,
-      timestamp: original.timestamp_email ?? original.timestamp_created ?? qualification.replyTimestamp,
-    };
   } catch {
-    return fallback;
+    return null;
   }
+}
+
+function buildQuoteSource(qualification: QualificationRow, original: Email | null): QuoteSource {
+  if (!original) {
+    return {
+      bodyText: qualification.replyBody,
+      fromEmail: qualification.leadEmail,
+      timestamp: qualification.replyTimestamp,
+    };
+  }
+  return {
+    bodyText: extractBodyText(original.body) ?? qualification.replyBody,
+    fromName: original.from_address_json?.[0]?.name ?? null,
+    fromEmail: original.from_address_email ?? qualification.leadEmail,
+    timestamp: original.timestamp_email ?? original.timestamp_created ?? qualification.replyTimestamp,
+  };
 }
 
 /**
@@ -92,9 +93,16 @@ export async function sendDraft(draftId: string, finalText: string, toEmail: str
 
   const reply = await resolveProjectReply(draft.projectId, draft.qualificationId);
   if (!reply) throw new SendDraftError('Письмо не найдено', 404);
-  const { qualification, accountId } = reply;
-  if (!qualification.instantlyEmailId) throw new SendDraftError('Нет id письма для ответа в Instantly', 422);
-  if (!qualification.eaccount) throw new SendDraftError('Не определён почтовый ящик отправителя (eaccount)', 422);
+  const { accountId } = reply;
+  if (!reply.qualification.instantlyEmailId) throw new SendDraftError('Нет id письма для ответа в Instantly', 422);
+
+  // Ящик у старых и обычных кампанийных ответов в таблице квалификатора часто
+  // пуст (колонку завели для сирот) — берём его из самого письма, как передача
+  // лида. Письмо всё равно нужно для цитаты.
+  const original = await fetchOriginal(reply.qualification.instantlyEmailId, accountId);
+  const eaccount = reply.qualification.eaccount || original?.eaccount?.trim() || null;
+  if (!eaccount) throw new SendDraftError('Не определён почтовый ящик отправителя (eaccount)', 422);
+  const qualification = { ...reply.qualification, instantlyEmailId: reply.qualification.instantlyEmailId, eaccount };
 
   const target = toEmail?.trim().toLowerCase() || null;
   const newContact = target && target !== qualification.leadEmail.toLowerCase() ? target : null;
@@ -114,7 +122,7 @@ export async function sendDraft(draftId: string, finalText: string, toEmail: str
   // Instantly рендерит тело как HTML: голый { text } с \n схлопывается в один
   // сплошной абзац («простыня» в письме адресата). Шлём HTML с <br> и text как
   // fallback, к обоим — процитированное письмо лида.
-  const quoteSrc = await buildQuoteSource(qualification, accountId);
+  const quoteSrc = buildQuoteSource(qualification, original);
   const bodyHtml = appendQuotedHistoryHtml(textToReplyHtml(finalText), quoteSrc);
   const bodyText = appendQuotedHistoryText(finalText, quoteSrc);
 
@@ -123,7 +131,6 @@ export async function sendDraft(draftId: string, finalText: string, toEmail: str
     // отвечает 400 «not part of an Instantly campaign». Отправляем новым
     // письмом с того же ящика, как кабинет клиента и передача лида; заведомо
     // провальный reply не тратим.
-    const eaccount = qualification.eaccount;
     const sendAsNewLetter = () =>
       sendTestEmail(
         { eaccount, to_address_email_list: qualification.leadEmail, subject, body: { html: bodyHtml } },
