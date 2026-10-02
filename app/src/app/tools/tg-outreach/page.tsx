@@ -1528,38 +1528,8 @@ function DialogsTab({ campaignId }: {
               <option value="bots">Боты</option>
             </select>
           </div>
-          <div className="flex items-center gap-1">
-            <span className="text-xs text-gray-500">Сообщений:</span>
-            <select
-              value={filterMessages}
-              onChange={(e) => { setFilterMessages(e.target.value as typeof filterMessages); setOffset(0); }}
-              aria-label="Показывать диалоги по количеству сообщений"
-              className={`rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterMessages !== 'all' ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
-            >
-              <option value="all">Все</option>
-              <option value="one" title="Мы написали, ответа не было">1 сообщение</option>
-              <option value="many" title="Разговор завязался — есть хотя бы один ответ">2 и больше</option>
-            </select>
-          </div>
-          {/* База и аккаунт — те же дропдауны, но появляются не всегда:
-              с единственной базой (аккаунтом) выбирать не из чего. */}
-          {bases.length > 1 && (
-            <div className="flex items-center gap-1">
-              <span className="text-xs text-gray-500">База:</span>
-              <select
-                value={filterBaseId}
-                onChange={(e) => { setFilterBaseId(e.target.value); setOffset(0); }}
-                aria-label="Показывать диалоги только по одной базе"
-                title="Из какой базы контакт, которому писали"
-                className={`max-w-[220px] rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterBaseId ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
-              >
-                <option value="">Все</option>
-                {bases.map((b) => (
-                  <option key={b.id} value={b.id}>{b.name}</option>
-                ))}
-              </select>
-            </div>
-          )}
+          {/* Аккаунт и база — те же дропдауны, но появляются не всегда:
+              с единственным аккаунтом (базой) выбирать не из чего. */}
           {accounts.length > 1 && (
             <div className="flex items-center gap-1">
               <span className="text-xs text-gray-500">Аккаунт:</span>
@@ -1573,6 +1543,36 @@ function DialogsTab({ campaignId }: {
                 <option value="">Все</option>
                 {accounts.map((a) => (
                   <option key={a.id} value={a.id}>{accountLabel(a) ?? a.session_name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-500">Сообщений:</span>
+            <select
+              value={filterMessages}
+              onChange={(e) => { setFilterMessages(e.target.value as typeof filterMessages); setOffset(0); }}
+              aria-label="Показывать диалоги по количеству сообщений"
+              className={`rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterMessages !== 'all' ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
+            >
+              <option value="all">Все</option>
+              <option value="one" title="Мы написали, ответа не было">1 сообщение</option>
+              <option value="many" title="Разговор завязался — есть хотя бы один ответ">2 и больше</option>
+            </select>
+          </div>
+          {bases.length > 1 && (
+            <div className="flex items-center gap-1">
+              <span className="text-xs text-gray-500">База:</span>
+              <select
+                value={filterBaseId}
+                onChange={(e) => { setFilterBaseId(e.target.value); setOffset(0); }}
+                aria-label="Показывать диалоги только по одной базе"
+                title="Из какой базы контакт, которому писали"
+                className={`max-w-[220px] rounded-full border px-3 py-1.5 text-xs font-medium outline-none transition cursor-pointer ${filterBaseId ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-gray-200 bg-white text-gray-700 hover:border-indigo-300'}`}
+              >
+                <option value="">Все</option>
+                {bases.map((b) => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
                 ))}
               </select>
             </div>
@@ -4926,6 +4926,19 @@ function CampaignBasesTab({
   const [sendersDraft, setSendersDraft] = useState<Set<string>>(new Set());
   const [savingSenders, setSavingSenders] = useState(false);
 
+  /**
+   * Только список баз и без «Загрузка…»: после создания, заливки файла,
+   * удаления список обновляется на месте, а не пропадает и не отрисовывается
+   * заново со спиннером — так оператор не теряет, где был.
+   */
+  const refreshBases = useCallback(async () => {
+    const res = await authFetch(`${API_BASE}/bases?campaign_id=${campaignId}`);
+    if (!res.ok) return;
+    const d = (await res.json()) as { items: OutreachBase[]; orphans?: OutreachBase[] };
+    setBases(d.items);
+    setOrphans(d.orphans ?? []);
+  }, [campaignId]);
+
   const load = useCallback(async () => {
     setLoading(true);
     const [basesRes, linkRes, accRes, proxRes, sendRes] = await Promise.all([
@@ -4996,8 +5009,14 @@ function CampaignBasesTab({
         setError(d?.error ?? `Ошибка ${res.status}`);
         return;
       }
+      // Новая база сразу встаёт в начало списка (как в выдаче сервера —
+      // свежие сверху); перезапрашивать весь список ради неё не нужно.
+      const created = (await res.json()) as Omit<OutreachBase, 'counts'>;
+      setBases((cur) => [
+        { ...created, counts: { total: 0, pending: 0, sent: 0, replied: 0, failed: 0, skipped: 0 } },
+        ...cur.filter((b) => b.id !== created.id),
+      ]);
       setNewName('');
-      void load();
     } finally { setBusy(false); }
   };
 
@@ -5039,7 +5058,7 @@ function CampaignBasesTab({
         return;
       }
       setNotice(`База «${base.name}» перенесена в кампанию.`);
-      void load();
+      void refreshBases();
     } finally { setBusy(false); }
   };
 
@@ -5168,7 +5187,7 @@ function CampaignBasesTab({
         setError(d?.error ?? `Не удалось удалить базу (${res.status})`);
         return;
       }
-      void load();
+      void refreshBases();
     } finally { setBusy(false); }
   };
 
@@ -5194,7 +5213,7 @@ function CampaignBasesTab({
         return;
       }
       setNotice(`Возвращено в очередь: ${d?.requeued ?? 0}.`);
-      void load();
+      void refreshBases();
     } finally { setBusy(false); }
   };
 
@@ -5231,7 +5250,7 @@ function CampaignBasesTab({
           + (s.withAttachment ? ` С файлом в таблице: ${s.withAttachment} — проверьте, что файлы загружены (кнопка «файлы» у базы).` : ''),
         );
       }
-      void load();
+      void refreshBases();
     } finally {
       setBusy(false);
       e.target.value = '';
