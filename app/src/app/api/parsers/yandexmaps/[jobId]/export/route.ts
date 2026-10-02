@@ -1,10 +1,21 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { PassThrough, Readable } from 'node:stream';
+import ExcelJS from 'exceljs';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
+import { iterateOrganizations } from '@/lib/yandexmaps/organizationPages';
 
 export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
 
-const PAGE = 5000;
+/**
+ * Выгрузка запуска ЯКарт целиком: ?format=csv (по умолчанию) или xlsx.
+ *
+ * Excel раньше собирался в браузере из того, что успела подгрузить страница, —
+ * на 194 тысячах строк туда доезжали первые пять. Теперь оба формата собирает
+ * сервер и отдаёт потоком по мере чтения страниц: в памяти держится одна
+ * страница, а не вся выдача.
+ */
 
 const COLUMNS = [
   'name', 'phone', 'website', 'email', 'address', 'city',
@@ -27,6 +38,11 @@ function esc(v: unknown): string {
   return s;
 }
 
+function cell(v: unknown): string | number {
+  if (v === null || v === undefined) return '';
+  return typeof v === 'number' ? v : String(v);
+}
+
 function getJobIdFromUrl(req: NextRequest) {
   const parts = req.nextUrl.pathname.split('/').filter(Boolean);
   return parts[parts.length - 2] ?? '';
@@ -41,41 +57,49 @@ export async function GET(req: NextRequest) {
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const jobId = getJobIdFromUrl(req);
+  const format = req.nextUrl.searchParams.get('format') === 'xlsx' ? 'xlsx' : 'csv';
 
-  const lines: string[] = [HEADERS.join(',')];
-  let offset = 0;
-
-  for (;;) {
-    const { data, error } = await supabase
-      .from('yandex_maps_organizations')
-      .select('*')
-      .eq('job_id', jobId)
-      .order('created_at', { ascending: true })
-      .range(offset, offset + PAGE - 1);
-
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-    if (!data || data.length === 0) break;
-
-    for (const row of data) {
-      const r = row as unknown as Record<string, unknown>;
-      lines.push(COLUMNS.map((c) => esc(r[c])).join(','));
-    }
-
-    offset += data.length;
-    if (data.length < PAGE) break;
-  }
-
-  const bom = '\uFEFF';
-  const csv = bom + lines.join('\r\n');
   const now = new Date();
   const d = String(now.getDate()).padStart(2, '0');
   const m = String(now.getMonth() + 1).padStart(2, '0');
-  const filename = `yandex_${d}${m}${now.getFullYear()}_${jobId.slice(0, 8)}.csv`;
+  const filename = `yandex_${d}${m}${now.getFullYear()}_${jobId.slice(0, 8)}.${format}`;
 
-  return new NextResponse(csv, {
+  const out = new PassThrough();
+
+  // Ошибка посреди потока: заголовки уже ушли, статус не поменять — обрываем
+  // поток, и браузер покажет недокачанный файл, а не молча обрезанный.
+  const fail = (e: unknown) => out.destroy(e instanceof Error ? e : new Error(String(e)));
+
+  if (format === 'csv') {
+    void (async () => {
+      out.write('﻿' + HEADERS.join(',') + '\r\n');
+      for await (const rows of iterateOrganizations(supabase, jobId)) {
+        const chunk = rows.map((r) => COLUMNS.map((c) => esc(r[c])).join(',')).join('\r\n') + '\r\n';
+        if (!out.write(chunk)) await new Promise((resolve) => out.once('drain', resolve));
+      }
+      out.end();
+    })().catch(fail);
+  } else {
+    void (async () => {
+      // Потоковая книга без общих строк и стилей: 200 тысяч строк не держим в памяти.
+      const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({ stream: out, useSharedStrings: false, useStyles: false });
+      const sheet = workbook.addWorksheet('Organizations');
+      sheet.addRow(HEADERS).commit();
+      for await (const rows of iterateOrganizations(supabase, jobId)) {
+        for (const r of rows) sheet.addRow(COLUMNS.map((c) => cell(r[c]))).commit();
+      }
+      sheet.commit();
+      await workbook.commit();
+    })().catch(fail);
+  }
+
+  return new Response(Readable.toWeb(out) as ReadableStream, {
     headers: {
-      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Type': format === 'xlsx'
+        ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        : 'text/csv; charset=utf-8',
       'Content-Disposition': `attachment; filename="${filename}"`,
+      'Cache-Control': 'no-store',
     },
   });
 }
