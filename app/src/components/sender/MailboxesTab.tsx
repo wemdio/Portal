@@ -501,39 +501,12 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
       </div>
 
       <div className="rounded-xl border border-zinc-200 bg-white">
-        <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-3">
-          <h2 className="text-base font-semibold text-zinc-900">
-            Ящики ({total})
-            {egressFilter ? (
-              <span className="ml-2 font-mono text-xs font-normal text-zinc-500">адрес {egressFilter}</span>
-            ) : null}
-            {egressFilter ? (
-              <button
-                type="button"
-                onClick={() => filterByEgress(null)}
-                className="ml-2 rounded-md px-2 py-0.5 text-xs font-normal text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700"
-              >
-                Показать ящики всех адресов
-              </button>
-            ) : null}
-          </h2>
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => void load(page)}
-              className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700"
-            >
-              <RefreshCw className="h-3.5 w-3.5" />
-              Обновить
-            </button>
-          </div>
-        </div>
-
-        {/* Панель появляется только при выборе: пустая полоса кнопок над
-            таблицей мозолила бы глаза в обычном режиме, когда действия
-            построчные. Действия те же, что в строке, но на всю выборку. */}
+        {/* Панель действий встаёт на место заголовка, а не под него: иначе при
+            первой галочке список съезжает вниз и выбранная строка уходит из-под
+            курсора. Высота у обоих вариантов одна. Действия те же, что в
+            строке, но на всю выборку. */}
         {selected.size > 0 ? (
-          <div className="flex flex-wrap items-center gap-2 border-b border-zinc-200 bg-blue-50/60 px-5 py-2.5 text-sm">
+          <div className="flex min-h-12 flex-wrap items-center gap-2 rounded-t-xl border-b border-zinc-200 bg-blue-50/60 px-5 py-2 text-sm">
             <span className="font-medium text-zinc-900">Выбрано: {selected.size}</span>
             <button
               type="button"
@@ -579,7 +552,35 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
             </button>
             {bulkBusy ? <Loader2 className="h-4 w-4 animate-spin text-zinc-400" /> : null}
           </div>
-        ) : null}
+        ) : (
+        <div className="flex min-h-12 items-center justify-between border-b border-zinc-200 px-5 py-2">
+          <h2 className="text-base font-semibold text-zinc-900">
+            Ящики ({total})
+            {egressFilter ? (
+              <span className="ml-2 font-mono text-xs font-normal text-zinc-500">адрес {egressFilter}</span>
+            ) : null}
+            {egressFilter ? (
+              <button
+                type="button"
+                onClick={() => filterByEgress(null)}
+                className="ml-2 rounded-md px-2 py-0.5 text-xs font-normal text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700"
+              >
+                Показать ящики всех адресов
+              </button>
+            ) : null}
+          </h2>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => void load(page)}
+              className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              Обновить
+            </button>
+          </div>
+        </div>
+        )}
 
         {loading ? (
           <div className="flex items-center justify-center gap-2 px-5 py-10 text-sm text-zinc-500">
