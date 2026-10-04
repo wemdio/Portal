@@ -65,7 +65,9 @@ function tableOf(value: unknown): TableKey | null {
 // админу, как и вкладка «Библиотеки».
 async function authedAdmin(req: NextRequest) {
   const admin = await requireAdmin(req);
-  if ('error' in admin) return admin;
+  // admin.error, а не 'error' in admin: у успешного ответа requireAdmin поле
+  // error тоже объявлено (undefined), и проверка через in пропускала бы его.
+  if (admin.error) return { error: admin.error };
   return authed(req);
 }
 

@@ -61,7 +61,7 @@ async function recordOutcomes(
   if (!supabaseAdmin || !outcomes.size) return;
   // Успешный прогон last_error не трогает: прошлая ошибка остаётся видна с
   // датой, а экран по датам понимает, что она уже позади.
-  const rows = [...outcomes].map(([account, o]) => ({
+  const rows = [...outcomes].map(([account, o]): Record<string, unknown> & { account: string } => ({
     account,
     last_run_at: nowIso,
     last_source: source,
