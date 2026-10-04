@@ -2,6 +2,8 @@
 
 import { useState, type ReactNode } from 'react';
 import { useSearchParams } from 'next/navigation';
+import { isAdmin } from '@/lib/roles';
+import { useUser } from '@/lib/UserProvider';
 import { QualificationTab } from './QualificationTab';
 
 /** Своя вкладка языка после «Квалификации» (у русского — «Библиотеки»). */
@@ -43,14 +45,20 @@ export function OutreachTabs({
     { id: 'qualification', label: 'Квалификация' },
     ...extraTabs.map(({ id, label }) => ({ id, label })),
   ];
+  // Квалификация и вкладки языка (Библиотеки) — только админу: остальные
+  // видят их серыми, без перехода, в том числе по прямой ссылке ?tab=.
+  const { userRole } = useUser();
+  const locked = !isAdmin(userRole);
   const searchParams = useSearchParams();
   const [tab, setTab] = useState<string>(() => {
     const fromUrl = searchParams.get('tab');
     return tabs.some((t) => t.id === fromUrl) ? fromUrl! : 'runs';
   });
   const [opened, setOpened] = useState<Set<string>>(() => new Set([tab]));
+  const current = locked ? 'runs' : tab;
 
   const select = (next: string) => {
+    if (locked && next !== 'runs') return;
     setTab(next);
     setOpened((prev) => (prev.has(next) ? prev : new Set(prev).add(next)));
     writeTabToUrl(next);
@@ -58,30 +66,44 @@ export function OutreachTabs({
 
   return (
     <div className="space-y-6">
-      <div className="flex gap-2 border-b border-zinc-200">
-        {tabs.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            onClick={() => select(item.id)}
-            className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
-              tab === item.id ? 'border-blue-600 text-blue-600' : 'border-transparent text-zinc-500 hover:text-zinc-700'
-            }`}
-          >
-            {item.label}
-          </button>
-        ))}
+      <div className="flex flex-wrap items-center gap-2 border-b border-zinc-200">
+        {tabs.map((item) => {
+          const disabled = locked && item.id !== 'runs';
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => select(item.id)}
+              disabled={disabled}
+              title={disabled ? 'Доступ только для администрации' : undefined}
+              className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
+                current === item.id
+                  ? 'border-blue-600 text-blue-600'
+                  : disabled
+                    ? 'cursor-not-allowed border-transparent text-zinc-300'
+                    : 'border-transparent text-zinc-500 hover:text-zinc-700'
+              }`}
+            >
+              {item.label}
+            </button>
+          );
+        })}
+        {locked ? (
+          <span className="mb-1 ml-2 rounded-md bg-amber-50 px-2.5 py-1 text-xs text-amber-800">
+            {tabs.slice(1).map((t) => `«${t.label}»`).join(' и ')} — доступ только для администрации
+          </span>
+        ) : null}
       </div>
 
-      <div className={tab === 'runs' ? '' : 'hidden'}>{children}</div>
-      {opened.has('qualification') ? (
-        <div className={tab === 'qualification' ? '' : 'hidden'}>
+      <div className={current === 'runs' ? '' : 'hidden'}>{children}</div>
+      {!locked && opened.has('qualification') ? (
+        <div className={current === 'qualification' ? '' : 'hidden'}>
           <QualificationTab folderKey={folderKey} />
         </div>
       ) : null}
       {extraTabs.map((extra) =>
-        opened.has(extra.id) ? (
-          <div key={extra.id} className={tab === extra.id ? '' : 'hidden'}>
+        !locked && opened.has(extra.id) ? (
+          <div key={extra.id} className={current === extra.id ? '' : 'hidden'}>
             {extra.content}
           </div>
         ) : null,

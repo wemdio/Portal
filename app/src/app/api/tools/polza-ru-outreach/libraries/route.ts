@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { logAudit, logError } from '@/lib/loggerServer';
+import { requireAdmin } from '@/lib/adminAuth';
 import { authed, jsonError } from '@/lib/polzaRuOutreach/routeAuth';
 
 export const dynamic = 'force-dynamic';
@@ -60,6 +61,14 @@ function tableOf(value: unknown): TableKey | null {
   return typeof value === 'string' && value in TABLES ? (value as TableKey) : null;
 }
 
+// Чтение открыто всем: окно запуска берёт отсюда подписи. Правка — только
+// админу, как и вкладка «Библиотеки».
+async function authedAdmin(req: NextRequest) {
+  const admin = await requireAdmin(req);
+  if ('error' in admin) return admin;
+  return authed(req);
+}
+
 export async function GET(req: NextRequest) {
   const auth = await authed(req);
   if ('error' in auth) return auth.error;
@@ -73,7 +82,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const auth = await authed(req);
+  const auth = await authedAdmin(req);
   if ('error' in auth) return auth.error;
   const body = (await req.json().catch(() => null)) as { table?: string; record?: Record<string, unknown> } | null;
   const key = tableOf(body?.table);
@@ -95,7 +104,7 @@ export async function POST(req: NextRequest) {
 }
 
 export async function PATCH(req: NextRequest) {
-  const auth = await authed(req);
+  const auth = await authedAdmin(req);
   if ('error' in auth) return auth.error;
   const body = (await req.json().catch(() => null)) as { table?: string; id?: string; patch?: Record<string, unknown> } | null;
   const key = tableOf(body?.table);
@@ -115,7 +124,7 @@ export async function PATCH(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
-  const auth = await authed(req);
+  const auth = await authedAdmin(req);
   if ('error' in auth) return auth.error;
   const key = tableOf(req.nextUrl.searchParams.get('table'));
   const id = req.nextUrl.searchParams.get('id');

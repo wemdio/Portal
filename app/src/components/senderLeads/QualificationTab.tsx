@@ -233,8 +233,7 @@ function SettingsCard({ folderKey }: { folderKey: string }) {
               className="mt-1.5 w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
             />
             <p className="mt-1 text-xs text-zinc-500">
-              Приоритетнее общих правил. Пример: «Лид — если просят цену, созвон или прислать список; передача контакта
-              коллеге — тоже лид».
+              По умолчанию — общие правила квалификатора; изменённый текст приоритетнее них.
             </p>
           </div>
 
