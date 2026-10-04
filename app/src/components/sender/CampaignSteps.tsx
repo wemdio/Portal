@@ -92,7 +92,8 @@ export function Step({
   accent,
   children,
 }: {
-  no: number;
+  /** Число или подпункт («1.1»). */
+  no: number | string;
   title: string;
   hint?: string;
   done: boolean;
@@ -104,7 +105,7 @@ export function Step({
     <section className={`rounded-xl border border-zinc-200 p-4 ${accent ? `border-l-4 ${accent.stripe}` : ''}`}>
       <div className="mb-3 flex flex-wrap items-center gap-2.5">
         <span
-          className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold transition-colors ${
+          className={`flex h-6 min-w-6 shrink-0 items-center justify-center rounded-full px-1 text-xs font-semibold transition-colors ${
             done ? `${accent?.badge ?? 'bg-blue-600'} text-white` : 'bg-zinc-100 text-zinc-500'
           }`}
         >
@@ -318,9 +319,12 @@ interface LetterProps {
   accent?: StepAccent;
   /** Высота поля письма в строках: на странице настроек она больше, чем в окне. */
   rows?: number;
-  /** Через сколько часов после предыдущего письма уйдёт этот шаг. */
-  delayHours?: number;
-  onDelayHours?: (value: number) => void;
+  /**
+   * Через сколько часов после предыдущего письма уйдёт этот шаг. null — поле
+   * стёрли и ещё не вписали новое; undefined — у шага задержки нет (первое письмо).
+   */
+  delayHours?: number | null;
+  onDelayHours?: (value: number | null) => void;
   onRemove?: () => void;
 }
 
@@ -367,17 +371,20 @@ export function LetterStep({
     >
       {/* Задержка и удаление — атрибуты шага цепочки, а не письма: живут
           в шапке шага, чтобы текст оставался только текстом. */}
-      {delayHours != null && onDelayHours ? (
+      {delayHours !== undefined && onDelayHours ? (
         <div className="mb-2 flex flex-wrap items-center gap-2 text-sm text-zinc-600">
           <span className="text-xs text-zinc-500">Отправить через</span>
           <input
             type="number"
             min={1}
             max={720}
-            value={delayHours}
+            value={delayHours ?? ''}
             disabled={disabled}
-            onChange={(e) => onDelayHours(Math.max(1, Math.round(Number(e.target.value) || 1)))}
-            className="w-16 rounded-lg border border-zinc-300 bg-white px-2 py-1 text-center text-sm text-zinc-900"
+            aria-invalid={delayHours === null}
+            onChange={(e) => onDelayHours(numberField(e.target.value, 1, 720))}
+            className={`w-16 rounded-lg border bg-white px-2 py-1 text-center text-sm text-zinc-900 ${
+              delayHours === null ? 'border-red-300' : 'border-zinc-300'
+            }`}
           />
           <span className="text-xs text-zinc-500">
             ч после предыдущего письма (тему можно оставить пустой — уйдёт как «Re:» в тот же тред)
@@ -423,7 +430,7 @@ export function LetterStep({
             columns={columns}
             countsExact={countsExact}
             rows={rows}
-            subjectPlaceholder={delayHours != null ? 'Тема (пусто = «Re:» в тот же тред)' : 'Тема письма'}
+            subjectPlaceholder={delayHours !== undefined ? 'Тема (пусто = «Re:» в тот же тред)' : 'Тема письма'}
             disabled={disabled}
           />
         </div>
@@ -490,18 +497,19 @@ export function timezoneLabel(timezone: string): string {
 interface ScheduleProps {
   no: number;
   done: boolean;
-  hourFrom: number;
-  hourTo: number;
+  /** null — поле стёрли и ещё не вписали: сохранение попросит заполнить. */
+  hourFrom: number | null;
+  hourTo: number | null;
   weekdays: number[];
   timezone: string;
-  gapSeconds: number;
-  gapJitterSeconds: number;
-  onHourFrom: (value: number) => void;
-  onHourTo: (value: number) => void;
+  gapSeconds: number | null;
+  gapJitterSeconds: number | null;
+  onHourFrom: (value: number | null) => void;
+  onHourTo: (value: number | null) => void;
   onWeekdays: (days: number[]) => void;
   onTimezone: (value: string) => void;
-  onGapSeconds: (value: number) => void;
-  onGapJitterSeconds: (value: number) => void;
+  onGapSeconds: (value: number | null) => void;
+  onGapJitterSeconds: (value: number | null) => void;
   disabled?: boolean;
   /**
    * Своё поле пояса вместо списка TIMEZONES — у настроек папки, где пояс
@@ -511,14 +519,22 @@ interface ScheduleProps {
 }
 
 /**
- * Час из поля ввода в допустимых границах. Пустое поле и нечисло оставляют
- * прежнее значение: иначе на середине набора («1» → стёрли → NaN) час
- * обнулялся бы сам.
+ * Число из поля ввода в допустимых границах; пустое поле — null.
+ *
+ * Пустоту не подменяем ни прежним значением, ни нулём: иначе поле нельзя
+ * стереть целиком и вписать своё. Что поле пустое, говорит сохранение.
+ * Границы держим кодом, а не только атрибутами min/max: их слушают только
+ * стрелки, а вписать руками можно и 99, и −5.
  */
-function clampHour(raw: string, current: number, min: number, max: number): number {
+export function numberField(raw: string, min: number, max: number): number | null {
   const value = Number(raw);
-  if (raw.trim() === '' || !Number.isFinite(value)) return current;
+  if (raw.trim() === '' || !Number.isFinite(value)) return null;
   return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+/** Пустое числовое поле подсвечиваем, чтобы было видно, что заполнить. */
+function emptyRing(value: number | null): string {
+  return value === null ? ' rounded ring-1 ring-red-400' : '';
 }
 
 /**
@@ -556,32 +572,31 @@ export function ScheduleStep({
       no={no}
       title="Когда отправлять"
       done={done}
-      hint={`${hourFrom}:00–${hourTo}:00 · ${weekdaysLabel(weekdays)} · ${timezoneLabel(timezone)}`}
+      hint={`${hourFrom ?? '?'}:00–${hourTo ?? '?'}:00 · ${weekdaysLabel(weekdays)} · ${timezoneLabel(timezone)}`}
     >
       <div className="flex flex-wrap items-center gap-2 text-sm text-zinc-600">
         <span className="w-10 text-xs uppercase tracking-wide text-zinc-500">Часы</span>
         <div className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-1.5">
-          {/* Границы держим кодом, а не только атрибутами min/max: их слушают
-              только стрелки, а вписать руками можно было и 99, и −5 — окно
-              отправки от такого молча становилось пустым. */}
           <input
             type="number"
             min={0}
             max={23}
-            value={hourFrom}
+            value={hourFrom ?? ''}
             disabled={disabled}
-            onChange={(e) => onHourFrom(clampHour(e.target.value, hourFrom, 0, 23))}
-            className="w-12 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none"
+            aria-label="Час начала"
+            onChange={(e) => onHourFrom(numberField(e.target.value, 0, 23))}
+            className={`w-12 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none${emptyRing(hourFrom)}`}
           />
           <span className="text-zinc-400">—</span>
           <input
             type="number"
             min={1}
             max={24}
-            value={hourTo}
+            value={hourTo ?? ''}
             disabled={disabled}
-            onChange={(e) => onHourTo(clampHour(e.target.value, hourTo, 1, 24))}
-            className="w-12 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none"
+            aria-label="Час конца"
+            onChange={(e) => onHourTo(numberField(e.target.value, 1, 24))}
+            className={`w-12 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none${emptyRing(hourTo)}`}
           />
         </div>
         {/* Пояс обязателен: окно считается в локальном времени кампании, и без
@@ -667,20 +682,22 @@ export function ScheduleStep({
             type="number"
             min={0}
             max={3600}
-            value={gapSeconds}
+            value={gapSeconds ?? ''}
             disabled={disabled}
-            onChange={(e) => onGapSeconds(Math.max(0, Math.round(Number(e.target.value) || 0)))}
-            className="w-14 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none"
+            aria-label="Пауза между письмами, секунд"
+            onChange={(e) => onGapSeconds(numberField(e.target.value, 0, 3600))}
+            className={`w-14 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none${emptyRing(gapSeconds)}`}
           />
           <span className="text-xs text-zinc-400">±</span>
           <input
             type="number"
             min={0}
             max={3600}
-            value={gapJitterSeconds}
+            value={gapJitterSeconds ?? ''}
             disabled={disabled}
-            onChange={(e) => onGapJitterSeconds(Math.max(0, Math.round(Number(e.target.value) || 0)))}
-            className="w-14 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none"
+            aria-label="Случайная добавка к паузе, секунд"
+            onChange={(e) => onGapJitterSeconds(numberField(e.target.value, 0, 3600))}
+            className={`w-14 border-0 bg-transparent p-0 text-center text-sm font-medium text-zinc-900 focus:outline-none${emptyRing(gapJitterSeconds)}`}
           />
           <span className="text-xs text-zinc-400">сек</span>
         </div>
@@ -694,7 +711,7 @@ export function ScheduleStep({
       ) : null}
       {/* Час начала не раньше часа конца — иначе окно пустое и письма не едут,
           а на экране это выглядит как работающая кампания. */}
-      {hourFrom >= hourTo ? (
+      {hourFrom !== null && hourTo !== null && hourFrom >= hourTo ? (
         <p className="mt-3 text-xs text-amber-600">
           Начало не раньше конца ({hourFrom}:00–{hourTo}:00) — в такое окно отправлять нечего.
         </p>

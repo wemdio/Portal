@@ -179,6 +179,16 @@ export async function replaceSteps(campaignId: string, steps: PreparedStep[]): P
   await insertSteps(campaignId, steps);
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Проект кампании из тела запроса: uuid или null. Мусор не доходит до базы —
+ * иначе вместо понятного «без проекта» был бы отказ внешнего ключа.
+ */
+export function projectIdOf(raw: unknown): string | null {
+  return typeof raw === 'string' && UUID_RE.test(raw.trim()) ? raw.trim() : null;
+}
+
 export interface CreateCampaignInput {
   name: string;
   mailboxIds: string[];
@@ -193,6 +203,8 @@ export interface CreateCampaignInput {
   gapJitterSeconds?: number;
   /** Папка рассылок (sender_folders) — у рассылок из автоаутрича. */
   folderId?: string | null;
+  /** Проект портала, к которому относится кампания; необязательно. */
+  projectId?: string | null;
   sourceKind?: CampaignSourceKind;
   /** Запуск автоаутрича (parser_jobs.id), из которого зальются получатели. */
   sourceJobId?: string | null;
@@ -235,6 +247,7 @@ export async function createCampaign(input: CreateCampaignInput): Promise<{ id: 
       gap_seconds: input.gapSeconds ?? 180,
       gap_jitter_seconds: input.gapJitterSeconds ?? 120,
       folder_id: input.folderId ?? null,
+      project_id: projectIdOf(input.projectId),
       source_kind: input.sourceKind ?? 'manual',
       source_job_id: input.sourceJobId ?? null,
       created_by: input.createdBy,
@@ -289,17 +302,21 @@ export interface ImportRecipientsResult {
 }
 
 /**
- * Адреса из списка, стоящие в стоп-листе. Не прочитали — ошибка, а не пустой
- * список: иначе при сбое базы (в том числе 414 на длинном адресе запроса)
- * адреса из стоп-листа молча уехали бы в кампанию.
+ * Адреса из списка, стоящие в стоп-листе: общем и этой кампании. Не прочитали
+ * — ошибка, а не пустой список: иначе при сбое базы (в том числе 414 на
+ * длинном адресе запроса) адреса из стоп-листа молча уехали бы в кампанию.
  */
-async function loadSuppressedEmails(emails: string[]): Promise<Set<string>> {
+async function loadSuppressedEmails(emails: string[], campaignId: string): Promise<Set<string>> {
   const db = requireDb();
   const suppressed = new Set<string>();
   for (const part of chunkForInFilter(emails)) {
-    const { data, error } = await db.from('sender_suppressions').select('email').in('email', part);
+    const [global, own] = await Promise.all([
+      db.from('sender_suppressions').select('email').in('email', part),
+      db.from('sender_campaign_suppressions').select('email').eq('campaign_id', campaignId).in('email', part),
+    ]);
+    const error = global.error ?? own.error;
     if (error) throw new SenderOpError(`Не удалось сверить базу со стоп-листом: ${error.message}`, 500);
-    for (const row of data ?? []) suppressed.add(String(row.email));
+    for (const row of [...(global.data ?? []), ...(own.data ?? [])]) suppressed.add(String(row.email));
   }
   return suppressed;
 }
@@ -387,7 +404,7 @@ export async function importRecipients(
 
   // Стоп-лист — до любых записей: не прочитался он — замена базы не должна
   // успеть стереть старую.
-  const suppressed = await loadSuppressedEmails(recipients.map((recipient) => recipient.email));
+  const suppressed = await loadSuppressedEmails(recipients.map((recipient) => recipient.email), campaignId);
 
   if (replace) {
     // mailbox_id проставляется ровно в тот момент, когда планировщик завёл

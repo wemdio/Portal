@@ -46,12 +46,17 @@ function writeStore(key: string, value: string | null) {
  * Высота поля и обработчики ручки. rootRef — панель целиком: от её высоты
  * зависит предел, чтобы поле не выдавило кнопки «Отправить» за край.
  */
-export function useEditorHeight(storageKey: string, rootRef: RefObject<HTMLElement | null>) {
-  const [editorHeight, setEditorHeight] = useState(EDITOR_DEFAULT_PX);
+export function useEditorHeight(
+  storageKey: string,
+  rootRef: RefObject<HTMLElement | null>,
+  /** Исходная высота; у «Писем» Рассылки она ниже — там поле съедало переписку. */
+  defaultPx: number = EDITOR_DEFAULT_PX,
+) {
+  const [editorHeight, setEditorHeight] = useState(defaultPx);
   /** Предел для ручки — зависит от высоты панели, пересчитываем с окном. */
-  const [editorMax, setEditorMax] = useState(EDITOR_DEFAULT_PX);
+  const [editorMax, setEditorMax] = useState(defaultPx);
   /** Текущая высота без ожидания рендера: её пишем в хранилище по отпусканию ручки. */
-  const heightRef = useRef(EDITOR_DEFAULT_PX);
+  const heightRef = useRef(defaultPx);
   const dragRef = useRef<{ startY: number; startHeight: number } | null>(null);
 
   const panelHeight = () => rootRef.current?.clientHeight ?? window.innerHeight;
@@ -65,7 +70,7 @@ export function useEditorHeight(storageKey: string, rootRef: RefObject<HTMLEleme
   useEffect(() => {
     const panel = () => rootRef.current?.clientHeight ?? window.innerHeight;
     const saved = Number(readStore(storageKey));
-    const initial = clampEditorHeight(saved > 0 ? saved : EDITOR_DEFAULT_PX, panel());
+    const initial = clampEditorHeight(saved > 0 ? saved : defaultPx, panel());
     heightRef.current = initial;
     setEditorHeight(initial);
     setEditorMax(editorMaxHeight(panel()));
@@ -77,7 +82,7 @@ export function useEditorHeight(storageKey: string, rootRef: RefObject<HTMLEleme
     };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
-  }, [storageKey, rootRef]);
+  }, [storageKey, rootRef, defaultPx]);
 
   const handleProps = {
     onPointerDown: (e: PointerEvent<HTMLDivElement>) => {
@@ -102,7 +107,7 @@ export function useEditorHeight(storageKey: string, rootRef: RefObject<HTMLEleme
       writeStore(storageKey, String(heightRef.current));
     },
     onDoubleClick: () => {
-      applyHeight(clampEditorHeight(EDITOR_DEFAULT_PX, panelHeight()));
+      applyHeight(clampEditorHeight(defaultPx, panelHeight()));
       writeStore(storageKey, null);
     },
     onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => {

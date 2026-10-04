@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { logAudit } from '@/lib/loggerServer';
+import { requireAdmin } from '@/lib/adminAuth';
 import { authenticateRequest, jsonError } from '@/lib/sender/apiHelpers';
 import { findFolderByKey, parseFolderKey, parseSettingsInput, settingsDto } from '@/lib/senderLeads/history';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -31,7 +32,8 @@ export async function GET(req: NextRequest) {
  */
 export async function PUT(req: NextRequest) {
   return withToolTrace({ request: req, operation: 'tools.senderLeads.settings.update' }, async () => {
-    const auth = await authenticateRequest(req.headers.get('authorization'));
+    // Вкладка «Квалификация» — только админу; сервер держит то же правило.
+    const auth = await requireAdmin(req);
     if ('error' in auth) return auth.error;
     if (!supabaseAdmin) return jsonError('Сервис не настроен', 503);
 

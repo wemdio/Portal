@@ -102,9 +102,11 @@ export function CampaignReplyKbModal({ campaignId, onClose }: { campaignId: stri
       ) : (
         <div className="space-y-4">
           {FIELDS.map((f) => (
-            <label key={f.key} className="block">
+            // div, а не label: label отдаёт клик по любому своему месту первой
+            // кнопке внутри — «Из файла» открывался кликом по всей шапке поля.
+            <div key={f.key}>
               <span className="flex items-center justify-between gap-2">
-                <span className="text-sm font-medium text-zinc-800">{f.label}</span>
+                <label htmlFor={`kb-${f.key}`} className="text-sm font-medium text-zinc-800">{f.label}</label>
                 {f.key === 'brief' ? (
                   <button
                     type="button"
@@ -119,12 +121,13 @@ export function CampaignReplyKbModal({ campaignId, onClose }: { campaignId: stri
               </span>
               <span className="mb-1 block text-xs text-zinc-500">{f.hint}</span>
               <textarea
+                id={`kb-${f.key}`}
                 value={values[f.key]}
                 onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
                 rows={f.rows}
                 className="w-full resize-y rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900"
               />
-            </label>
+            </div>
           ))}
           <input
             ref={fileRef}

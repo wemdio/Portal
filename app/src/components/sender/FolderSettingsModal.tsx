@@ -138,12 +138,13 @@ interface Props {
 export function FolderSettingsModal({ folder, onClose, onSaved }: Props) {
   const [mailboxes, setMailboxes] = useState<PickedMailbox[]>(folder.mailboxes);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [hourFrom, setHourFrom] = useState(folder.send_hour_from);
-  const [hourTo, setHourTo] = useState(folder.send_hour_to);
+  // null — поле стёрли, чтобы вписать своё: заполнить попросит «Сохранить».
+  const [hourFrom, setHourFrom] = useState<number | null>(folder.send_hour_from);
+  const [hourTo, setHourTo] = useState<number | null>(folder.send_hour_to);
   const [weekdays, setWeekdays] = useState<number[]>(folder.send_weekdays);
   const [timezone, setTimezone] = useState(folder.timezone);
-  const [gapSeconds, setGapSeconds] = useState(folder.gap_seconds);
-  const [gapJitterSeconds, setGapJitterSeconds] = useState(folder.gap_jitter_seconds);
+  const [gapSeconds, setGapSeconds] = useState<number | null>(folder.gap_seconds);
+  const [gapJitterSeconds, setGapJitterSeconds] = useState<number | null>(folder.gap_jitter_seconds);
   // Интервалы — в днях, как о них думают: «второе письмо через день». В базе
   // часы. Поле, которого не касались, сохраняется в исходных часах — 36 ч не
   // превратятся в 48 из-за того, что поле показывает дни.
@@ -152,6 +153,9 @@ export function FolderSettingsModal({ folder, onClose, onSaved }: Props) {
   const [delayDays, setDelayDays] = useState<string[]>(initialDays);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Что не так, показываем после первого «Сохранить», а не на ходу: стёртое
+  // поле на полпути к новому числу — не ошибка.
+  const [tried, setTried] = useState(false);
 
   const delayHours = delayDays.map((text, index) => {
     if (text === initialDays[index]) return initialHours[index];
@@ -163,30 +167,32 @@ export function FolderSettingsModal({ folder, onClose, onSaved }: Props) {
   const timezoneValid = isKnownTimezone(timezone);
   const working = mailboxes.filter(isWorking).length;
 
-  // Что мешает сохранить — один список: из него и подсказка внизу окна, и
-  // запрет кнопки. Сервер проверяет то же самое, но ответ «нельзя» после
-  // нажатия хуже, чем причина на экране до него.
+  // Что мешает сохранить — один список: из него и подсказка внизу окна после
+  // нажатия «Сохранить». Сервер проверяет то же самое, но его «нельзя» менее
+  // понятно, чем причина рядом с кнопкой.
   const problems: string[] = [];
-  if (!Number.isInteger(hourFrom) || hourFrom < 0 || hourFrom > 23) {
-    problems.push('Начало окна отправки — час от 0 до 23');
-  } else if (!Number.isInteger(hourTo) || hourTo < 1 || hourTo > 24) {
-    problems.push('Конец окна отправки — час от 1 до 24');
+  if (hourFrom === null || hourTo === null) {
+    problems.push('Заполните часы отправки');
   } else if (hourTo <= hourFrom) {
     problems.push('Конец окна отправки должен быть позже начала');
   }
   if (!weekdays.length) problems.push('Выберите хотя бы один день отправки');
   if (!timezoneValid) problems.push('Неизвестный часовой пояс — впишите его латиницей, например Europe/Moscow');
-  if (gapSeconds > MAX_GAP_SECONDS || gapJitterSeconds > MAX_GAP_SECONDS) {
+  if (gapSeconds === null || gapJitterSeconds === null) {
+    problems.push('Заполните паузу между письмами');
+  } else if (gapSeconds > MAX_GAP_SECONDS || gapJitterSeconds > MAX_GAP_SECONDS) {
     problems.push(`Пауза между письмами — не больше ${MAX_GAP_SECONDS} секунд`);
   }
   delayHours.forEach((hours, index) => {
     if (hours == null) problems.push(`Письмо ${index + 2}: укажите целое число дней от 1 до ${MAX_DELAY_DAYS}`);
   });
-  const scheduleDone = weekdays.length > 0 && timezoneValid && hourTo > hourFrom;
+  const scheduleDone = weekdays.length > 0 && timezoneValid
+    && hourFrom !== null && hourTo !== null && hourTo > hourFrom
+    && gapSeconds !== null && gapJitterSeconds !== null;
 
   const save = async () => {
-    if (problems.length) {
-      setError(problems[0]);
+    setTried(true);
+    if (problems.length || hourFrom === null || hourTo === null || gapSeconds === null || gapJitterSeconds === null) {
       return;
     }
     setSaving(true);
@@ -225,10 +231,10 @@ export function FolderSettingsModal({ folder, onClose, onSaved }: Props) {
         onClose={onClose}
         footer={
           <>
-            {error ? (
+            {tried && problems.length ? (
+              <span className="mr-auto text-sm text-red-600">{problems.join('. ')}</span>
+            ) : error ? (
               <span className="mr-auto text-sm text-red-600">{error}</span>
-            ) : problems.length ? (
-              <span className="mr-auto text-sm text-amber-600">{problems[0]}</span>
             ) : (
               <span className="mr-auto text-xs text-zinc-500">Действует на кампании, созданные после сохранения</span>
             )}
@@ -242,7 +248,7 @@ export function FolderSettingsModal({ folder, onClose, onSaved }: Props) {
             <button
               type="button"
               onClick={() => void save()}
-              disabled={saving || problems.length > 0}
+              disabled={saving}
               className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-50"
             >
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}

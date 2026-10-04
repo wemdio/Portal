@@ -8,6 +8,7 @@ import { variantLabel } from '@/lib/sender/variants';
 import {
   createCampaign,
   fetchCampaign,
+  fetchSenderProjects,
   fetchTestLetter,
   previewCampaignSteps,
   previewRecipients,
@@ -17,6 +18,7 @@ import {
   type CampaignDto,
   type PreviewSampleDto,
   type RecipientColumnsDto,
+  type SenderProjectDto,
   type VariantStatDto,
 } from './api';
 import { stashCampaignNotice, type CampaignNotice } from './campaignNotice';
@@ -50,7 +52,8 @@ const TEST_WAIT_MS = 3000;
 /** Шаг цепочки в форме: варианты письма (А/Б-тест) и задержка от предыдущего. */
 interface LetterStepState {
   variants: LetterVariant[];
-  delayHours: number;
+  /** null — поле задержки стёрли и ещё не вписали. */
+  delayHours: number | null;
 }
 
 function emptyLetterStep(): LetterStepState {
@@ -128,11 +131,16 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   // письма с «Re:», шаг без темы — норма. У шага может быть несколько
   // вариантов письма — это А/Б-тест, база делится между ними поровну.
   const [letters, setLetters] = useState<LetterStepState[]>([emptyLetterStep()]);
-  const [hourFrom, setHourFrom] = useState(9);
-  const [hourTo, setHourTo] = useState(18);
+  // null — поле стёрли, чтобы вписать своё: заполнить попросит сохранение.
+  const [hourFrom, setHourFrom] = useState<number | null>(9);
+  const [hourTo, setHourTo] = useState<number | null>(18);
   const [timezone, setTimezone] = useState('Europe/Moscow');
-  const [gapSeconds, setGapSeconds] = useState(180);
-  const [gapJitterSeconds, setGapJitterSeconds] = useState(120);
+  const [gapSeconds, setGapSeconds] = useState<number | null>(180);
+  const [gapJitterSeconds, setGapJitterSeconds] = useState<number | null>(120);
+  // Проект портала (шаг 1.1) — необязательно: внутренние рассылки ни к какому
+  // клиентскому проекту не относятся.
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const [projects, setProjects] = useState<SenderProjectDto[]>([]);
   // Будни по умолчанию: холодная рассылка в выходные бьёт по ответам и по
   // репутации домена. Но это умолчание, а не запрет — день включается кнопкой.
   const [weekdays, setWeekdays] = useState<number[]>([...WORKDAYS]);
@@ -165,6 +173,21 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   const [testNote, setTestNote] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetchSenderProjects();
+        if (!cancelled) setProjects(res.projects);
+      } catch {
+        /* список не доехал — выбор проекта останется пустым, кампания сохранится и так */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     try {
       setTestEmail(window.localStorage.getItem(TEST_EMAIL_KEY) ?? '');
     } catch {
@@ -185,6 +208,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
       setTimezone(details.campaign.timezone);
       setGapSeconds(details.campaign.gap_seconds);
       setGapJitterSeconds(details.campaign.gap_jitter_seconds);
+      setProjectId(details.campaign.project_id ?? null);
       if (details.steps.length) setLetters(groupSteps(details.steps));
       setSaved(details.recipients);
       setRepliesByStep(details.repliesByStep ?? []);
@@ -273,9 +297,25 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   ];
   const missing = steps.filter((step) => !step.done);
 
+  /**
+   * Стёртые числовые поля. Пустыми их оставлять можно, пока пишут, — иначе
+   * поле нельзя очистить и вписать своё. Сохранить с пустыми нельзя: сервер
+   * подставил бы вместо них значения по умолчанию.
+   */
+  const emptyFields = [
+    hourFrom === null || hourTo === null ? 'часы отправки (шаг 5)' : null,
+    gapSeconds === null || gapJitterSeconds === null ? 'паузу между письмами (шаг 5)' : null,
+    ...letters.map((step, index) =>
+      index > 0 && step.delayHours === null ? `задержку письма ${index + 1}` : null,
+    ),
+  ].filter((field): field is string => field !== null);
+  const emptyFieldsError = emptyFields.length ? `Заполните ${emptyFields.join(', ')}` : null;
+
   /** Цепочка для сервера: шаг с вариантами письма и задержкой от предыдущего. */
+  // Пустые поля сюда не доезжают: пока они есть, ни автосохранение, ни
+  // сохранение не запускаются (emptyFields). Подстановка — только для типов.
   const stepsPayload = letters.map((step, index) => ({
-    delayHours: index === 0 ? 0 : step.delayHours,
+    delayHours: index === 0 ? 0 : (step.delayHours ?? 72),
     variants: step.variants,
   }));
 
@@ -291,11 +331,12 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
     mailboxIds: mailboxes.map((m) => m.id),
     steps: stepsPayload,
     timezone,
-    sendHourFrom: hourFrom,
-    sendHourTo: hourTo,
+    sendHourFrom: hourFrom ?? 9,
+    sendHourTo: hourTo ?? 18,
     sendWeekdays: weekdays,
-    gapSeconds,
-    gapJitterSeconds,
+    gapSeconds: gapSeconds ?? 180,
+    gapJitterSeconds: gapJitterSeconds ?? 120,
+    projectId,
   };
   const payloadRef = useRef(campaignPayload);
   payloadRef.current = campaignPayload;
@@ -369,9 +410,12 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
       return;
     }
     if (!draftWorthSaving) return;
+    // Стёртое поле автосохранение пережидает: иначе вместо пустоты в кампанию
+    // записалось бы значение по умолчанию.
+    if (emptyFieldsError) return;
     const timer = window.setTimeout(() => void saveDraft(), DRAFT_SAVE_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [readOnly, loading, saving, loadFailed, draftWorthSaving, saveDraft, payloadSnapshot]);
+  }, [readOnly, loading, saving, loadFailed, draftWorthSaving, emptyFieldsError, saveDraft, payloadSnapshot]);
 
   /**
    * Результаты А/Б показываем только по шагам, где вариантов правда несколько:
@@ -496,6 +540,10 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
       leave();
       return;
     }
+    if (emptyFieldsError) {
+      setError(emptyFieldsError);
+      return;
+    }
     setSaving(true);
     const id = await saveDraft();
     if (!id) {
@@ -522,6 +570,10 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
   const submit = async () => {
     if (missing.length) {
       setError(`Заполните шаги: ${missing.map((step) => `${step.no} — ${step.title}`).join(', ')}`);
+      return;
+    }
+    if (emptyFieldsError) {
+      setError(emptyFieldsError);
       return;
     }
     setSaving(true);
@@ -692,7 +744,7 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
               <button
                 type="button"
                 onClick={() => void submit()}
-                disabled={saving || missing.length > 0}
+                disabled={saving}
                 className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-50"
               >
                 {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
@@ -714,6 +766,15 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
               disabled={readOnly}
               placeholder="Например: клиники Москвы, сентябрь"
               className="w-full rounded-lg border border-zinc-300 bg-white px-3.5 py-2.5 text-sm text-zinc-900 disabled:bg-zinc-50"
+            />
+          </Step>
+
+          <Step no="1.1" title="Проект" done={projectId !== null} hint="необязательно">
+            <ProjectSelect
+              projects={projects}
+              value={projectId}
+              onChange={setProjectId}
+              disabled={readOnly}
             />
           </Step>
 
@@ -1099,5 +1160,49 @@ export function CampaignForm({ campaignId }: { campaignId?: string }) {
         </SenderModal>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Проект портала для кампании: сначала проекты в работе, остальные — ниже.
+ * Привязанный проект может быть уже завершён — он всё равно в списке, иначе
+ * выбор показал бы «без проекта».
+ */
+function ProjectSelect({
+  projects,
+  value,
+  onChange,
+  disabled,
+}: {
+  projects: SenderProjectDto[];
+  value: string | null;
+  onChange: (value: string | null) => void;
+  disabled: boolean;
+}) {
+  const active = projects.filter((project) => project.active);
+  const other = projects.filter((project) => !project.active);
+  return (
+    <select
+      value={value ?? ''}
+      disabled={disabled}
+      onChange={(e) => onChange(e.target.value || null)}
+      className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2.5 text-sm text-zinc-900 disabled:bg-zinc-50"
+    >
+      <option value="">Без проекта</option>
+      {active.length ? (
+        <optgroup label="В работе">
+          {active.map((project) => (
+            <option key={project.id} value={project.id}>{project.label}</option>
+          ))}
+        </optgroup>
+      ) : null}
+      {other.length ? (
+        <optgroup label="На паузе и завершённые">
+          {other.map((project) => (
+            <option key={project.id} value={project.id}>{project.label}</option>
+          ))}
+        </optgroup>
+      ) : null}
+    </select>
   );
 }

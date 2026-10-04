@@ -31,6 +31,8 @@ interface CreateBody {
   sendWeekdays?: number[];
   gapSeconds?: number;
   gapJitterSeconds?: number;
+  /** Проект портала; null или нет поля — без проекта. */
+  projectId?: string | null;
   /** Автосохранение недописанной формы: проверки откладываются до запуска. */
   draft?: boolean;
 }
@@ -178,6 +180,7 @@ export async function POST(req: NextRequest) {
         sendWeekdays: body.sendWeekdays,
         gapSeconds: body.gapSeconds,
         gapJitterSeconds: body.gapJitterSeconds,
+        projectId: body.projectId ?? null,
         // Форма сохраняет недописанный черновик сама — его проверять по полной
         // нельзя: ни писем, ни ящиков там может ещё не быть.
         partial: body.draft === true,

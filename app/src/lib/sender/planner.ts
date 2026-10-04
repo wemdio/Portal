@@ -102,13 +102,19 @@ async function remainingQuota(mailbox: MailboxRow, log: Log): Promise<number> {
  * молча давал «стоп-лист пуст», и письмо уходило тому, кто просил не писать.
  * Вызывающий пропускает проход кампании.
  */
-async function loadSuppressed(emails: string[]): Promise<Set<string>> {
+/** Адреса в стоп-листе — общем и этой кампании. */
+async function loadSuppressed(emails: string[], campaignId: string): Promise<Set<string>> {
   const suppressed = new Set<string>();
   if (!supabaseAdmin || !emails.length) return suppressed;
+  const db = supabaseAdmin;
   for (const part of chunkForInFilter(emails)) {
-    const { data, error } = await supabaseAdmin.from('sender_suppressions').select('email').in('email', part);
+    const [global, own] = await Promise.all([
+      db.from('sender_suppressions').select('email').in('email', part),
+      db.from('sender_campaign_suppressions').select('email').eq('campaign_id', campaignId).in('email', part),
+    ]);
+    const error = global.error ?? own.error;
     if (error) throw new Error(`стоп-лист не прочитан: ${error.message}`);
-    for (const row of data ?? []) suppressed.add(String(row.email).toLowerCase());
+    for (const row of [...(global.data ?? []), ...(own.data ?? [])]) suppressed.add(String(row.email).toLowerCase());
   }
   return suppressed;
 }
@@ -406,7 +412,7 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
   let busy: Set<string>;
   let groups: Map<string, Map<string, GroupMember>>;
   try {
-    suppressed = await loadSuppressed(recipients.map((r) => r.email));
+    suppressed = await loadSuppressed(recipients.map((r) => r.email), campaign.id);
     busy = await loadCrossCampaignBusy(recipients.map((r) => r.email), campaign.id);
     groups = await loadGroups(campaign.id, recipients);
   } catch (e) {

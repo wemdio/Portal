@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Copy, Loader2, Send, Sparkles } from 'lucide-react';
-import { EditorResizeHandle, useEditorHeight } from '@/components/ResizableEditor';
+import { EDITOR_DEFAULT_PX, EditorResizeHandle, useEditorHeight } from '@/components/ResizableEditor';
 import { LeadVerdictBar } from '@/components/senderLeads/LeadVerdictBar';
 import {
   fetchReplyDraft,
@@ -79,7 +79,8 @@ export function SenderReplyPanel({
   // Высота поля ответа — своя ручка над блоком ответа, как в «Персонализированных
   // ответах» (ResizableEditor): родная в углу textarea упиралась в край экрана.
   const rootRef = useRef<HTMLDivElement>(null);
-  const editor = useEditorHeight('sender-reply-editor-height', rootRef);
+  // Вдвое ниже общей: на всю высоту поле прятало переписку, на которую отвечают.
+  const editor = useEditorHeight('sender-reply-editor-height', rootRef, EDITOR_DEFAULT_PX / 2);
   const lastItemRef = useRef<HTMLDivElement>(null);
 
   const loadThread = useCallback(async () => {
