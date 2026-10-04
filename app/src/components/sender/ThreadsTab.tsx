@@ -137,10 +137,18 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
                     campaignId === campaign.id ? 'bg-blue-50 text-blue-700' : 'text-zinc-700 hover:bg-zinc-100'
                   }`}
                 >
-                  <button type="button" onClick={() => pickCampaign(campaign.id)} className="min-w-0 flex-1 text-left">
-                    <span className={campaignId === campaign.id ? 'font-medium' : ''}>{campaign.name}</span>
+                  {/* Статус всегда справа, у шестерёнки: длинное название
+                      переносится само, а статус не уезжает под него. */}
+                  <button
+                    type="button"
+                    onClick={() => pickCampaign(campaign.id)}
+                    className="flex min-w-0 flex-1 items-start gap-1.5 text-left"
+                  >
+                    <span className={`min-w-0 flex-1 break-words ${campaignId === campaign.id ? 'font-medium' : ''}`}>
+                      {campaign.name}
+                    </span>
                     <span
-                      className={`ml-1.5 inline-block rounded px-1.5 py-0.5 align-middle text-[10px] font-medium ${CAMPAIGN_STATUS_LABELS[campaign.status].className}`}
+                      className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${CAMPAIGN_STATUS_LABELS[campaign.status].className}`}
                     >
                       {CAMPAIGN_STATUS_LABELS[campaign.status].text}
                     </span>
