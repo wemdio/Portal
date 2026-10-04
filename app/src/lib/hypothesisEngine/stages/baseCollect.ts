@@ -103,7 +103,11 @@ import { markAutomatedConstructor } from '@/lib/tools/baseConstructorQueue';
  * лидов проекта (resolveHeRefillCollectCompanies, ниже «РАЗМЕР REFILL-СБОРКИ»),
  * а не флэтовым числом: иначе краул сайта и SMTP-проба оплачивались бы по
  * компаниям, чьи адреса кап того же вечера выбросит, а сами компании оставались
- * бы выжженными для будущих сборок проекта.
+ * бы выжженными для будущих сборок проекта. У market='us' компании, которым кап
+ * всё же не оставил письма, не выжигаются, а ждут в очереди переноса
+ * (he_refill_carryover) и уходят первыми в следующие ночи; ночь, которой
+ * очереди хватает, PLAN…CONSTRUCT не проходит вовсе (блок «ПЕРЕНОС» в
+ * stages/baseCollectRefill.ts).
  *
  * Продолжение сбора больших сегментов (>50k — больше одного капа limit):
  * повторная сборка той же вертикали исключает компании других he_bases
@@ -204,6 +208,9 @@ import type { HeBase, HeJob, HeProject, HeVertical } from '../types';
 import {
   closeHeRefillBaseUndelivered,
   completeHeRefillNoNew,
+  countHeRefillCarryover,
+  heRefillCarryKeyFn,
+  loadHeRefillReleasedCompanies,
   resolveHeRefillCollectCompanies,
   runHeRefillAppend,
   type HeRefillResult,
@@ -445,15 +452,69 @@ export function mapFundedRow(row: Record<string, unknown>): HeUnifiedRow {
  * пока меняет ровно ноль строк и оживает в тот день, когда колонку заполнит
  * ингест; разовый бэкфилл этого не сделает — ночной upsert идёт полной строкой
  * по (source, source_job_id) и вернёт null на место.
+ *
+ * `_hiring_seen_at` — когда ingest последний раз видел ЭТУ вакансию
+ * (`last_seen_at` кэша на момент чтения; читается только при market='us', см.
+ * fetchEngHiringRows). Скрытое поле, как `_email_status`: в columns не входит,
+ * в сетку конструктора и в кабинет не уезжает (клиентская проекция режет
+ * ключи с `_`). Читатель один — срок переноса (heRefillCarryExpiry в
+ * stages/baseCollectRefill.ts): крючок «hiring X» не должен доехать до письма
+ * старше окна ENG_HIRING_FEED_FRESH_DAYS. Даты нет (запрос вне market='us') —
+ * поля нет, и строка ровно прежняя.
  */
-export function mapEngHiringRow(row: Record<string, unknown>): HeUnifiedRow {
-  return unifiedRow({
+export function mapEngHiringRow(row: Record<string, unknown>): HeUnifiedRow & HeHiringSeenRow {
+  const out = unifiedRow({
     company: cell(row.company_name),
     website: cell(row.company_site_url),
     vacancy_title: cell(row.vacancy_title),
     address: cell(row.location) || cell(row.country),
     category: blurbCell(row.company_description),
     source_detail: `eng_hiring:${cell(row.source) || 'unknown'}`,
+  });
+  const seenMs = typeof row.last_seen_at === 'string' ? Date.parse(row.last_seen_at) : NaN;
+  return Number.isFinite(seenMs) ? { ...out, _hiring_seen_at: new Date(seenMs).toISOString() } : out;
+}
+
+/**
+ * Строка базы с датой последнего показа её вакансии фидом найма (только
+ * market='us', см. mapEngHiringRow). Поле переживает харвест, мёрдж и запись
+ * базы как есть, а сетку конструктора — через withHiringSeenAt.
+ */
+export type HeHiringSeenRow = { _hiring_seen_at?: string };
+
+/**
+ * Вернуть `_hiring_seen_at` строкам после импорта конструктора (только
+ * market='us'). Сетка конструктора несёт 11 колонок, скрытое поле она теряет;
+ * восстанавливаем его по ключу компании «компания|домен» (heCompanyRowKey — тот
+ * же ключ, по которому раскладываются пометки гейта) и ТОЛЬКО при совпадении
+ * вакансии: дата принадлежит конкретному крючку, и чужой крючок её не получает.
+ * Ключ не нашёлся (конструктор дописал строке сайт, которого у неё не было, —
+ * домен в ключе поменялся) — запасной матч по одному имени компании, только
+ * если под этим именем в харвесте ровно одна строка с датой, и снова при
+ * совпадении вакансии. Не совпало ничего — поля нет, и перенос считает возраст
+ * крючка неизвестным (компания возвращается в пул, а не ждёт в очереди).
+ */
+function withHiringSeenAt<T extends HeUnifiedRow & HeHiringSeenRow>(
+  rows: T[],
+  source: ReadonlyArray<HeUnifiedRow & HeHiringSeenRow>,
+): T[] {
+  const byKey = new Map<string, { vacancy: string; seenAt: string }>();
+  const byName = new Map<string, { vacancy: string; seenAt: string } | null>();
+  for (const r of source) {
+    if (typeof r._hiring_seen_at !== 'string' || !r._hiring_seen_at) continue;
+    const hit = { vacancy: cell(r.vacancy_title), seenAt: r._hiring_seen_at };
+    byKey.set(heCompanyRowKey(r), hit);
+    const name = normalizeCompanyForDedup(r.company);
+    // null — имя встретилось дважды: по одному имени тогда не решаем.
+    if (name) byName.set(name, byName.has(name) ? null : hit);
+  }
+  if (byKey.size === 0) return rows;
+  return rows.map((r) => {
+    if (r._hiring_seen_at) return r;
+    const hit = byKey.get(heCompanyRowKey(r)) ?? byName.get(normalizeCompanyForDedup(r.company)) ?? null;
+    return hit && hit.vacancy !== '' && hit.vacancy === cell(r.vacancy_title)
+      ? { ...r, _hiring_seen_at: hit.seenAt }
+      : r;
   });
 }
 
@@ -1074,7 +1135,7 @@ function isChildFailed(source: HeCollectSource, status: string): boolean {
  *     вердиктов ресёрч-модели и разборов брендов; потеряв его, повтор джобы
  *     заново покупает вердикт (или разбор) и поисковые запросы каждого
  *     элемента после последней дошедшей записи. Одиночный запрос.
- * И ещё две записи этого файла (1, 2) и две записи refill-ветки (3, 4) —
+ * И ещё две записи этого файла (1, 2) и четыре записи refill-ветки (3–6) —
  * подробно, потому что их потеря дороже всего:
  *  1. МЕМО РЕЛЕВАНТ-ГЕЙТА (`collect_info.relevance_gate`, ran=true). Гейт судит
  *     строки моделью батчами по 50 (relevanceGate.findIrrelevantRows), и каждый
@@ -1104,6 +1165,16 @@ function isChildFailed(source: HeCollectSource, status: string): boolean {
  *     размер следующей сборки (refillAppendedToday): потерянная строка — это не
  *     потерянный отчёт, а исчезнувший расход, под который следующая ночь
  *     покупает компании, чьи строки бюджет потом выбросит.
+ *  5. ИТОГ ПЕРЕНЕСЁННЫХ КОМПАНИЙ (`he_refill_carryover`,
+ *     settleHeRefillCarryover, только market='us'). 'sent' фиксирует, что
+ *     провайдер уже получил адрес перенесённой компании. Потеря записи
+ *     оставляет захват брошенным — следующая ночь снимает его в 'dropped', то
+ *     есть стоит компании, но не второго письма.
+ *  6. ОЧЕРЕДЬ ПЕРЕНОСА (`he_refill_carryover`, queueHeRefillCarryover, только
+ *     market='us'). Компании ночи, оплаченные гейтом, краулом и SMTP-пробой и
+ *     не получившие ни одного письма. База ночи к этому моменту терминальна, и
+ *     повтор джобы запись не воспроизведёт: потерянная — это компании,
+ *     выжженные так же, как до переноса.
  *
  * ЧТЕНИЯ через этот клиент не идут ни одного: ради того, чтобы чтения стадии
  * кончались, привязка к сигналу и вводилась. Поэтому решения, которым нужно
@@ -2239,12 +2310,34 @@ const ENG_HIRING_MAX_PAGES = 20;
 /**
  * Сколько суток строка jobhive считается живой после того, как ingest видел её
  * в фиде последний раз (`last_seen_at`; ingest ставит его каждой строке фида
- * каждый прогон, а строки, ушедшие из фида, не удаляет). Ingest ежесуточный,
- * поэтому три дня — запас на два пропущенных прогона. Молчит ingest дольше —
+ * каждый прогон, а строки, ушедшие из фида, не удаляет).
+ *
+ * Четырнадцать — решение владельца 04.10.2026 (одобрено окно 7–14 суток).
+ * Замер production в тот же день: фид жив и обновился накануне; строк по
+ * давности last_seen — до 1 суток 12 992, 1–3 суток 1 011, 3–7 суток 1 074,
+ * 7–14 суток 2 125, старше 14 суток 9 255. Окно 3 суток пропускало 14 003
+ * строки, 7 — 15 077, 14 — 17 202 (+3 199 строк против трёх суток; строка фида
+ * — компания × страна).
+ * Ingest ежесуточный, поэтому окно заодно переживает двухнедельный простой
+ * ingest'а, а не два пропущенных прогона, как прежние три дня.
+ *
+ * Цена названа вслух: компания, ушедшая из фида до 14 суток назад, ещё
+ * попадает в сборку со своей последней вакансией, и крючок «hiring X» в письме
+ * может говорить о вакансии, которой уже нет. Молчит ingest дольше окна —
  * eng_hiring при market='us' не даёт строк вовсе, и это правда: кто нанимает
  * сейчас, мы тогда не знаем.
+ *
+ * ОКНО ДЕРЖИТ И ПЕРЕНОС (stages/baseCollectRefill.ts, heRefillCarryExpiry).
+ * Компания без письма ждёт в очереди he_refill_carryover до
+ * HE_REFILL_CARRYOVER_MAX_AGE_DAYS суток, и без границы её крючок доезжал бы до
+ * письма в возрасте до 14 + 7 = 21 суток. Поэтому строка фида несёт момент,
+ * когда ingest последний раз видел ЕЁ вакансию (`_hiring_seen_at`,
+ * mapEngHiringRow), и перенесённая компания с крючком истекает не позже
+ * `_hiring_seen_at` + это окно. Даты у строки с крючком нет — компания не
+ * переносится, а возвращается в пул: свежесть вакансии проверит следующая
+ * сборка тем же фильтром.
  */
-const ENG_HIRING_FEED_FRESH_DAYS = 3;
+export const ENG_HIRING_FEED_FRESH_DAYS = 14;
 
 /** Значения фильтров справочников хранятся в нижнем регистре — приводим и фильтр. */
 function lowerList(values: string[]): string[] {
@@ -2883,6 +2976,10 @@ async function fillMissingCompanySites(
  *    она доезжала бы в базу с вакансией, которой давно нет, и крючок «hiring X»
  *    в письме был бы неправдой.
  */
+/** Колонки eng_hiring_cache, которые читает сборка (у market='us' — плюс last_seen_at). */
+const ENG_HIRING_SELECT =
+  'id, created_at, company_name, company_site_url, company_description, vacancy_title, location, country, country_code, source, published_at';
+
 async function fetchEngHiringRows(
   ctx: HeStageContext,
   query: HeCollectTask['eng_hiring_query'],
@@ -2913,8 +3010,15 @@ async function fetchEngHiringRows(
       // ВТОРЫМ запросом по id уже отобранных строк — там, где сейчас стоит
       // resolveEngHiringSites. Обрезка на нашей стороне трафик не уменьшает:
       // она ограничивает то, что попадёт в строку базы и в промпт.
+      //
+      // `last_seen_at` — только при market='us' (`slot`): это момент, когда
+      // ingest последний раз видел вакансию строки, и он едет в строку базы
+      // (`_hiring_seen_at`, mapEngHiringRow) границей срока переноса. Запрос
+      // вне market='us' — прежний байт-в-байт. Приведение типа — только для
+      // разбора select'а типами supabase-js (строку с переменным хвостом он не
+      // разбирает); строки ниже читаются как Record<string, unknown>.
       .select(
-        'id, created_at, company_name, company_site_url, company_description, vacancy_title, location, country, country_code, source, published_at',
+        (slot ? `${ENG_HIRING_SELECT}, last_seen_at` : ENG_HIRING_SELECT) as typeof ENG_HIRING_SELECT,
       );
     if (slot) {
       q = q
@@ -3727,6 +3831,16 @@ function matchesExclusion(
  * выпала бы из исключения — проект начал бы собирать компании, которые у
  * клиента уже есть. Экономия была бы нулевой (у базы без строк `data` пуст),
  * а цена ошибки — оплаченный повторный сбор.
+ *
+ * ОТПУЩЕННЫЕ КОМПАНИИ ПЕРЕНОСА (только market='us'). Компания, которая ждала в
+ * очереди he_refill_carryover дольше срока и так и не дошла до провайдера,
+ * отпущена (stages/baseCollectRefill.ts, блок «ПЕРЕНОС», шаг 6): её строки в
+ * `data` базы-источника больше не исключают её из сборок, и компанию можно
+ * подготовить заново. Пропускаются ТОЛЬКО строки этой компании и ТОЛЬКО в этой
+ * базе (пара «база-источник + ключ компании»): в другой базе та же компания
+ * означала бы, что её уже готовили отдельно, и исключение обязано держать.
+ * Очередь не прочиталась — не пропускается ничего, то есть исключение прежнее.
+ * У RU запрос и проход по строкам — байт-в-байт прежние.
  */
 async function loadOtherBaseExclusionKeys(
   ctx: HeStageContext,
@@ -3736,11 +3850,13 @@ async function loadOtherBaseExclusionKeys(
 ): Promise<HeBaseExclusionKeys> {
   const { data, error } = await ctx.supabase
     .from('he_bases')
-    .select('data')
+    .select(market === 'us' ? 'id, data' : 'data')
     .eq('project_id', projectId)
     .neq('status', 'failed')
     .neq('id', baseId);
   if (error) throw new Error(`he_bases exclusion read: ${error.message}`);
+  const released = market === 'us' ? await loadHeRefillReleasedCompanies(ctx, projectId) : null;
+  const carryKeyOf = released && released.size > 0 ? heRefillCarryKeyFn(HE_AUTO_COLLECT_COLUMNS) : null;
 
   const keys: HeBaseExclusionKeys = {
     nameInns: new Map<string, Set<string>>(),
@@ -3749,35 +3865,75 @@ async function loadOtherBaseExclusionKeys(
     sites: new Set<string>(),
     useWebsite: market === 'us',
   };
-  for (const row of (data ?? []) as Array<{ data?: unknown }>) {
+  for (const row of (data ?? []) as Array<{ id?: unknown; data?: unknown }>) {
     const rows = Array.isArray(row.data) ? row.data.slice(0, MAX_ROWS_LIMIT) : [];
+    const releasedHere =
+      carryKeyOf && released && typeof row.id === 'string' ? released.get(row.id) : undefined;
     for (const item of rows) {
-      const rec = item as Record<string, unknown> | null;
-      const innKey = normalizeInnForDedup(rec?.inn);
-      if (innKey) keys.inns.add(innKey);
-      const siteKey = keys.useWebsite ? companySiteKey(rec?.website) : '';
-      if (siteKey) keys.sites.add(siteKey);
-      const company = rec?.company;
-      if (typeof company !== 'string') continue;
-      const nameKey = normalizeCompanyForDedup(company);
-      if (!nameKey) continue;
-      let bucket = keys.nameInns.get(nameKey);
-      if (!bucket) {
-        bucket = new Set<string>();
-        keys.nameInns.set(nameKey, bucket);
+      if (releasedHere && carryKeyOf && item && typeof item === 'object') {
+        if (releasedHere.has(carryKeyOf(item as Record<string, unknown>))) continue;
       }
-      if (innKey) bucket.add(innKey);
-      if (siteKey) {
-        let sites = keys.nameSites.get(nameKey);
-        if (!sites) {
-          sites = new Set<string>();
-          keys.nameSites.set(nameKey, sites);
-        }
-        sites.add(siteKey);
-      }
+      addExclusionRow(keys, item as Record<string, unknown> | null);
     }
   }
   return keys;
+}
+
+/**
+ * Одна строка чужой базы → ключи исключения. Вынесено из
+ * loadOtherBaseExclusionKeys без единой правки логики: тем же правилом
+ * «та же компания» пользуется перенос (heCarryExclusionKeys ниже), и второго
+ * определения, способного разойтись с исключением сборок, быть не должно.
+ */
+function addExclusionRow(keys: HeBaseExclusionKeys, rec: Record<string, unknown> | null): void {
+  const innKey = normalizeInnForDedup(rec?.inn);
+  if (innKey) keys.inns.add(innKey);
+  const siteKey = keys.useWebsite ? companySiteKey(rec?.website) : '';
+  if (siteKey) keys.sites.add(siteKey);
+  const company = rec?.company;
+  if (typeof company !== 'string') return;
+  const nameKey = normalizeCompanyForDedup(company);
+  if (!nameKey) return;
+  let bucket = keys.nameInns.get(nameKey);
+  if (!bucket) {
+    bucket = new Set<string>();
+    keys.nameInns.set(nameKey, bucket);
+  }
+  if (innKey) bucket.add(innKey);
+  if (siteKey) {
+    let sites = keys.nameSites.get(nameKey);
+    if (!sites) {
+      sites = new Set<string>();
+      keys.nameSites.set(nameKey, sites);
+    }
+    sites.add(siteKey);
+  }
+}
+
+/**
+ * Ключи исключения по строкам ОДНОЙ базы, правилом market='us' (домен
+ * участвует). Читатель — перенос (stages/baseCollectRefill.ts,
+ * heRefillCarryPeerConflicts): компания очереди, которую параллельная сборка
+ * другой вертикали того же проекта подготовила ещё раз, узнаётся ровно тем
+ * правилом, которым её исключила бы любая следующая сборка.
+ */
+export function heCarryExclusionKeys(rows: readonly unknown[]): HeBaseExclusionKeys {
+  const keys: HeBaseExclusionKeys = {
+    nameInns: new Map<string, Set<string>>(),
+    inns: new Set<string>(),
+    nameSites: new Map<string, Set<string>>(),
+    sites: new Set<string>(),
+    useWebsite: true,
+  };
+  for (const item of rows) {
+    if (item && typeof item === 'object') addExclusionRow(keys, item as Record<string, unknown>);
+  }
+  return keys;
+}
+
+/** Строка совпала с ключами исключения (то же правило, что у сборки). */
+export function heCarryRowExcluded(keys: HeBaseExclusionKeys, row: Record<string, unknown>): boolean {
+  return matchesExclusion(keys, cell(row.company), row.inn, row.website);
 }
 
 /**
@@ -4830,6 +4986,13 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // Перекос между вертикалями ОДНОЙ ночи этим не лечится: каждая считает
   // размер на своём тике плана по тому, что успели долить до неё, а отправку
   // сверх дневного капа держит бронь дневного бюджета, а не этот расчёт.
+  //
+  // ПЕРЕНОС (только market='us', решение владельца 04.10.2026): компании,
+  // которым прошлые ночи не досталось ни одного письма, ждут в очереди
+  // he_refill_carryover и уходят первыми. Хватает их на остаток дня — эта
+  // ночь сборку НЕ покупает вовсе (ни плана, ни гейта, ни конструктора) и сразу
+  // уходит в долив одной очередью. Не хватает — сборка считается от остатка
+  // минус компании очереди. Разбор — блок «ПЕРЕНОС» в stages/baseCollectRefill.ts.
   if (isRefill) {
     const frozenLimit =
       info.plan && typeof info.limit === 'number' && Number.isFinite(info.limit) ? info.limit : null;
@@ -4837,11 +5000,53 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       limit = Math.min(limit, frozenLimit);
     } else {
       const payloadLimit = limit;
-      limit = await resolveHeRefillCollectCompanies(ctx, {
+      const sizing = await resolveHeRefillCollectCompanies(ctx, {
         projectId: job.project_id,
+        verticalId: base.vertical_id,
+        baseId,
         payloadLimit,
         contactCap,
+        market,
       });
+      if (sizing.carryOnly) {
+        stageLog(
+          ctx,
+          `[base_collect] refill: в очереди переноса ${sizing.carriedCompanies} компаний — хватает на ` +
+            'остаток дня, сборку не покупаем: долив только из очереди',
+        );
+        const carryStats: NonNullable<HeCollectInfo['stats']> = {
+          tasks_total: 0,
+          tasks_done: 0,
+          tasks_failed: 0,
+          rows_total: 0,
+          excluded_existing_bases: 0,
+          excluded_during_fetch: 0,
+          companies_total: 0,
+          ok_contacts: 0,
+          finished_at: new Date().toISOString(),
+        };
+        return await runHeRefillAppend({
+          ctx,
+          job,
+          base: { id: baseId, project_id: job.project_id, vertical_id: base.vertical_id },
+          info: dropCollectWorkState(info),
+          stats: carryStats,
+          finalRows: [],
+          finalColumns: [...HE_AUTO_COLLECT_COLUMNS],
+          emailStatuses: [],
+          usage,
+          market,
+          carryOnly: true,
+        });
+      }
+      limit = sizing.limit;
+      if (sizing.carriedCompanies > 0) {
+        stageLog(
+          ctx,
+          `[base_collect] refill: в очереди переноса ${sizing.carriedCompanies} компаний — они уйдут ` +
+            'первыми, сборка считается от остатка дня без них',
+        );
+      }
       if (limit < payloadLimit) {
         stageLog(
           ctx,
@@ -5321,6 +5526,33 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
     // добора (сегмент под вертикаль уже выбран прошлыми сборками), а не сбой:
     // база уходит в терминальный 'analyzed' (НЕ failed), прогон журналируется
     // 'no_new', джоба завершается успешно.
+    //
+    // ИСКЛЮЧЕНИЕ — очередь переноса (только market='us'): новых компаний нет,
+    // а подготовленные с прошлых ночей ждут. Без этой ветки они ждали бы зря:
+    // каждая следующая ночь снова покупала бы пустую сборку (очереди не хватает
+    // на день — значит сборка ставится) и снова кончалась бы 'no_new', пока у
+    // очереди не выйдет срок. Поэтому пустой харвест с непустой очередью идёт в
+    // долив с пустой собственной сеткой — отправляется только очередь.
+    const carriedWaiting =
+      isRefill && market === 'us' ? await countHeRefillCarryover(ctx, base.vertical_id, baseId) : 0;
+    if (isRefill && carriedWaiting > 0) {
+      stageLog(
+        ctx,
+        `[base_collect] refill: новых компаний нет, в очереди переноса ${carriedWaiting} — долив только из очереди`,
+      );
+      return await runHeRefillAppend({
+        ctx,
+        job,
+        base: { id: baseId, project_id: job.project_id, vertical_id: base.vertical_id },
+        info: dropCollectWorkState(info),
+        stats,
+        finalRows: [],
+        finalColumns: [...HE_AUTO_COLLECT_COLUMNS],
+        emailStatuses: [],
+        usage,
+        market,
+      });
+    }
     if (isRefill) {
       const refillResult = await completeHeRefillNoNew({
         ctx,
@@ -5798,7 +6030,7 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
   // суд ПОСЛЕ импорта идёт ровно тогда, когда суда до конструктора не было
   // (gateRan=false): RU-инструмент, ENG-база с фазой CONSTRUCT от прошлой
   // сборки и ENG-база, у которой гейт до конструктора отказал.
-  type StoredRow = HeUnifiedRow & { _email_status?: string; _low_relevance?: boolean };
+  type StoredRow = HeUnifiedRow & HeHiringSeenRow & { _email_status?: string; _low_relevance?: boolean };
   let storedRows: StoredRow[] = finalRows;
   if (finalEmailStatuses) {
     storedRows = storedRows.map((r, i) => {
@@ -5806,6 +6038,10 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       return st ? { ...r, _email_status: st } : r;
     });
   }
+  // ENG: дата последнего показа вакансии фидом найма, потерянная в сетке
+  // конструктора, — обратно на строки (граница срока переноса крючка, см.
+  // withHiringSeenAt). RU не затронут: у его строк этого поля нет.
+  if (market === 'us') storedRows = withHiringSeenAt(storedRows, merged);
   // ENG: гейт отработал ДО конструктора, и платить второй раз не за что.
   // Помечаем по ключам компаний: вычеркнутые строки дописаны в конец
   // finalRows, а среди оплаченных таких ключей быть не может — конструктор
@@ -5918,6 +6154,8 @@ export async function runBaseCollectStage(job: HeJob, ctx: HeStageContext): Prom
       finalColumns,
       emailStatuses: finalEmailStatuses,
       usage,
+      // Перенос неотправленных компаний — только 'us' (решает сам долив).
+      market,
     });
   }
 

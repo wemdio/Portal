@@ -101,6 +101,13 @@
  * Системный сбой классификатора → легаси-путь: одна кампания, варианты
  * выкинуты с явным предупреждением. launch_info.campaigns хранит весь
  * список; скалярные поля — основная кампания (их читает refill-долив).
+ *
+ * ОТКАЗ ПО МЕСТУ ПОД КОНТАКТЫ (решение владельца 04.10.2026). ENG-кабинет
+ * читает нейтральную фразу без слова про место и рассыльщика (EN
+ * capacityStopNote, HE_TEAM_ON_IT_EN), а команда получает алерт в health-бот
+ * (alertTeamOnLaunchCapacity → opsAlert.ts) — на ЛЮБОМ таком отказе из
+ * кабинета, в том числе когда клиент читает лишь общий отказ запуска.
+ * RU-инструмент (locale 'ru') алерта не шлёт и читает прежний текст байт в байт.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -113,9 +120,13 @@ import { createCampaign, createLeads, updateCampaign } from '@/lib/instantly/cli
 import { InstantlyApiError, isInstantlyContactCapacityError } from '@/lib/instantly/errors';
 import { resolveInstantlyAccountId } from '@/lib/instantly/accounts';
 import { logAudit, logError } from '@/lib/loggerServer';
+// Справочник клиентских текстов без зависимостей: нейтральная фраза про отказ,
+// который чинит команда (решение владельца 04.10.2026).
+import { HE_TEAM_ON_IT_EN } from '@/components/client-eng/clientFailureText';
 import type { HeBase, HeTemplate } from './types';
 import { classifyBaseRowsIntoSegments, detectSegmentLanguage } from './segmentClassify';
 import { projectMarket, type HeMarket } from './market';
+import { HE_OPS_STAGE_TEMPLATE_LAUNCH, notifyHeClientStop } from './opsAlert';
 import {
   HE_ENG_CAMPAIGN_NAMING,
   HE_LAUNCH_LEASE_MS,
@@ -218,8 +229,13 @@ interface HeLaunchMessages {
   resumeAlreadyInCampaignNote: (present: number) => string;
   /** Повтор: адреса долга больше нельзя отправлять (блок, вердикт, ушли из базы). */
   owedUnsendableNote: (unsendable: number) => string;
-  /** Место под контакты в воркспейсе кончилось — остальные сегменты не создавались. */
-  capacityStopNote: (segments: number) => string;
+  /**
+   * Место под контакты в воркспейсе кончилось — остальные сегменты не
+   * создавались. Второй аргумент — позвало ли ядро на этом отказе алерт
+   * команде с рынком 'us' (шаг 6, catch): только тогда EN-текст вправе сказать
+   * «команда уже работает». RU-текст его не читает.
+   */
+  capacityStopNote: (segments: number, teamAlerted: boolean) => string;
 }
 
 /** Аренда запуска в минутах — для текстов: число в них обязано следовать константе. */
@@ -555,11 +571,28 @@ const MESSAGES: Record<HeLaunchLocale, HeLaunchMessages> = {
       `address${unsendable === 1 ? '' : 'es'} from its unfinished part ${unsendable === 1 ? 'was' : 'were'} ` +
       'not sent, because since the earlier attempt they were blocked, lost their passing email check or ' +
       'left this audience.',
-    capacityStopNote: (segments) =>
-      'The mailing workspace has no room left for new contacts, so ' +
-      `${segments.toLocaleString('en-US')} segments of this launch were not created at all. ` +
-      'Ask your manager to free up room; repeating this launch does not duplicate the campaigns that ' +
-      'were already created.',
+    // Решение владельца 04.10.2026: про место под контакты, рассыльщика и
+    // «освободите место» клиент не читает — только нейтральную фразу
+    // HE_TEAM_ON_IT_EN. Её вторая половина («команда уже знает и работает»)
+    // правда только при teamAlerted: на этом же отказе ядро позвало алерт
+    // команде с рынком 'us' (шаг 6, catch → opsAlert.notifyHeClientStop).
+    // Иначе — та же причина без обещания. «more»: сегмент, на котором кончилось
+    // место, назван своим предупреждением («Segment campaign failed», роут
+    // кабинета), а это число — сегменты ПОСЛЕ него, которые даже не пробовали.
+    // «did not go out», а не «were not created»: на достройке у такого сегмента
+    // кампания может уже быть — не уехали только его адреса. Факт про повтор
+    // оставлен — он правда (незаконченный запуск достраивается, шапка файла),
+    // а «Launch all (paused)», единственная кнопка запуска кабинета, берёт и
+    // незаконченные запуски (EngStepReview.tsx).
+    capacityStopNote: (segments, teamAlerted) =>
+      `${segments.toLocaleString('en-US')} more segment${segments === 1 ? '' : 's'} of your audience ` +
+      'did not go out in this launch. ' +
+      (teamAlerted
+        ? `${HE_TEAM_ON_IT_EN} Your manager can tell you when it is fixed — then launch again with ` +
+          '«Launch all (paused)»'
+        : 'This stopped because of a temporary problem on our side. Ask your manager when to launch ' +
+          'again with «Launch all (paused)»') +
+      '; repeating this launch does not duplicate the campaigns that were already created.',
   },
 };
 
@@ -1395,6 +1428,43 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
   let alreadyPresentNow = 0;
   let capacityStopped = false;
   let capacitySkippedSegments = 0;
+  // Позвало ли ядро алерт команде о месте под контакты с рынком 'us' — условие
+  // фразы «команда уже работает» в capacityStopNote (EN).
+  let capacityTeamAlerted = false;
+
+  /**
+   * Отказ рассыльщика по месту под контакты — команде в health-бот (решение
+   * владельца 04.10.2026, opsAlert.ts). ТОЛЬКО из ENG-кабинета (locale 'en'):
+   * staff RU-инструмента сам читает про место и сам его освобождает, его
+   * запуск не шлёт ничего. Рынок — прочитанный рынок проекта (шаг 4b): не-'us'
+   * opsAlert отбрасывает, и тогда EN-текст обещания не даёт.
+   *
+   * Зовётся там же, где отказ узнан (catch шага 6), — ДО любого ответа и до
+   * текста клиенту, при любой форме исхода. После такого отказа ядро больше не
+   * создаёт кампаний и не грузит адресов (остальные сегменты уходят в pending,
+   * capacityStopped), поэтому вызов один на запуск; повторные нажатия гасит
+   * дедупликация opsAlert (проект + вид + провайдер, 6 ч). `void`: веб-сервер
+   * долгоживущий, ответ клиенту Telegram не ждёт; функция не бросает.
+   */
+  const alertTeamOnLaunchCapacity = (reason: string): void => {
+    capacityTeamAlerted = market === 'us';
+    void notifyHeClientStop({
+      projectId: base.project_id,
+      market,
+      stage: HE_OPS_STAGE_TEMPLATE_LAUNCH,
+      kind: 'capacity_pause',
+      provider: 'sending',
+      reason,
+      baseId: base.id,
+      templateId,
+      // Правда для любой формы исхода: ни одной кампании (общий отказ
+      // запуска), отказ последнего сегмента, ноль принятых — причина не
+      // названа; остались несозданные сегменты — нейтральная фраза.
+      clientSees:
+        'отказ запуска без причины; если после него остались несозданные сегменты — «временная проблема ' +
+        'на нашей стороне, команда уже работает»',
+    });
+  };
 
   const recordFor = (segmentKey: string): HeTemplateLaunchCampaign | undefined =>
     replacedSegments.has(segmentKey) ? undefined : recordedBySegment.get(segmentKey);
@@ -1751,6 +1821,10 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
       // снимается). Дальше — частичный успех: созданное записано, недоехавшее
       // в pending с адресами, которые ещё не подтверждены.
       const message = err instanceof Error ? err.message : t.instantlyFailedFallback;
+      // Место под контакты кончилось — команде (только ENG-кабинет, см.
+      // alertTeamOnLaunchCapacity). Раньше ветки «ни одной кампании»: команда
+      // узнаёт и тогда, когда клиент читает лишь общий отказ запуска.
+      if (locale === 'en' && isInstantlyContactCapacityError(err)) alertTeamOnLaunchCapacity(message);
       if (campaigns.length === 0 && !resumeLaunch) {
         await releaseClaim();
         await logError(`${eventPrefix}.failed`, err, { userId, templateId });
@@ -1926,7 +2000,7 @@ export async function runHeTemplateLaunch(input: HeTemplateLaunchInput): Promise
     warnings.push(t.relaunchCreatedCampaignsNote(createdCampaigns - replacedCampaigns));
   }
   if (capacitySkippedSegments > 0) {
-    warnings.push(t.capacityStopNote(capacitySkippedSegments));
+    warnings.push(t.capacityStopNote(capacitySkippedSegments, capacityTeamAlerted));
   }
   for (const ge of groupErrors) {
     warnings.push(

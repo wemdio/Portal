@@ -28,7 +28,8 @@
  * Коды `billing` / `configuration` вынесены отдельными предикатами: их
  * читает политика повторов воркера (волна 3, через `llm.ts`) — на таком отказе
  * платная стадия не повторяется вовсе, она падает сразу, и перезапускает её
- * человек.
+ * человек. Их же (через `heTeamFixableFailureOf`) читает алерт команде
+ * (`opsAlert.ts`): клиент на этих кодах читает «команда уже работает».
  */
 
 // Тексты и словарь кодов живут в клиентобезопасном справочнике без единого
@@ -88,6 +89,24 @@ export function isHeProviderConfigurationError(error: unknown): boolean {
 }
 
 /**
+ * Отказ, который чинит только команда: первые два правила
+ * `classifyHeClientError` ровно в его порядке (биллинг раньше конфигурации).
+ *
+ * Отдельной функцией ради ОДНОГО читателя кроме классификатора — алерта команде
+ * (worker/hypothesisEngine.ts → opsAlert.ts). Кабинет пишет на эти коды «мы уже
+ * работаем над этим» (clientFailureText.ts, HE_TEAM_ON_IT_EN), и это правда
+ * только если команда узнаёт о КАЖДОМ тексте, который кабинет свернёт в эти
+ * коды, — а не только о типизированных отказах провайдера. Классификатор
+ * зовёт эту же функцию, поэтому правила разъехаться не могут.
+ */
+export function heTeamFixableFailureOf(error: unknown): 'billing' | 'configuration' | null {
+  const message = errorMessage(error);
+  if (isHeProviderBillingError(message)) return 'billing';
+  if (isHeProviderConfigurationError(message)) return 'configuration';
+  return null;
+}
+
+/**
  * Код причины по тексту сбоя. Порядок правил значим: «Авто-сборка не дала
  * строк: pdl_companies read: <текст Postgres>» обязан остаться `source`, а не
  * съехать в `internal` по имени таблицы внутри.
@@ -96,8 +115,8 @@ export function classifyHeClientError(error: unknown): HeClientErrorCode {
   const message = errorMessage(error);
   if (!message.trim()) return 'unknown';
 
-  if (isHeProviderBillingError(message)) return 'billing';
-  if (isHeProviderConfigurationError(message)) return 'configuration';
+  const teamFixable = heTeamFixableFailureOf(message);
+  if (teamFixable) return teamFixable;
   if (/\b(?:Requesty|Serper|OpenRouter)\s*(?:HTTP\s*)?[:(]?\s*(?:429|5\d\d)\b/i.test(message)) return 'provider';
   if (/\bSerper transient:/i.test(message)) return 'provider';
 

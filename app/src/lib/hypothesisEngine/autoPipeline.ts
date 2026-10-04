@@ -26,6 +26,14 @@
  *      пометку снимает клиент из кабинета. Правило выключено по умолчанию
  *      (флаг окружения HE_VERTICAL_DRY_STOP); без флага серия только считается
  *      в ночной лог;
+ *   3a-. ПЕРЕНОС (решение владельца 04.10.2026): компании, которым прошлые
+ *      ночи не досталось ни одного письма, ждут в he_refill_carryover и уходят
+ *      первыми. Хватает их у проекта на остаток дня — ночь получают ТОЛЬКО
+ *      вертикали со старейшей очередью, пока их компаний хватает на день (их
+ *      ночь сборку и не покупает, см. stages/baseCollectRefill.ts, блок
+ *      «ПЕРЕНОС»), остальные пропускаются ('carry_covers'): бюджет дня всё
+ *      равно уйдёт очереди, и их ночь кончилась бы 'cap_exhausted' без единого
+ *      письма. Подробности — у readCarryoverByVertical;
  *   3a. ПРЕДПОЛЁТ ЁМКОСТИ: сколько контактов ещё принимает воркспейс
  *      рассыльщика. Ноль — сборка НЕ ставится (и остальные вертикали проекта
  *      тоже: воркспейс у них общий), потому что платит сборка, а не долив:
@@ -35,7 +43,10 @@
  *      (обязательный fail-open: слепой предполёт, угадавший ноль, остановил бы
  *      продукт на ровном месте). Точный ноль вдобавок ЗАПИСЫВАЕТ durable-паузу
  *      проекта (шаг 1- выше) — иначе завтрашняя ночь спрашивала бы то же самое
- *      заново;
+ *      заново — и сообщает команде в health-бот (opsAlert.notifyHeClientStop);
+ *      проект, который тик пропускает из-за стоящей паузы, получает такое же
+ *      напоминание раз за ночь. Перед выходом тик отправляет всё, что алерты
+ *      отложили в свёртку (flushHeOpsAlerts): крон одноразовый;
  *   4. постановка refill-сборки через общий enqueueHeBaseCollect (его же
  *      дедуп: уже собирающаяся auto-база / активная base_collect-джоба →
  *      'existing' и слот verticals_per_run НЕ расходуется): he_bases
@@ -91,6 +102,11 @@ import type { InstantlyRequestOptions } from '@/lib/instantly/accounts';
 import { supabaseInstantly } from '@/lib/supabaseInstantly';
 import { enqueueHeBaseCollect } from './baseCollectEnqueue';
 import { parseLaunchInfo } from './launchHandoff';
+// Алерт команде в health-бот (решение владельца 04.10.2026): кабинет ENG пишет
+// клиенту «временная проблема, команда уже работает», и при паузе по ёмкости
+// это правда только потому, что пауза сообщает о себе здесь и в доливе
+// (stages/baseCollectRefill.ts). Модуль лёгкий: тянет только workerAlert.
+import { flushHeOpsAlerts, notifyHeClientStop } from './opsAlert';
 
 /**
  * Потолок КОМПАНИЙ одной refill-сборки (на вертикаль за тик), а не строк — имя
@@ -210,6 +226,15 @@ export function heVerticalDryStopEnabled(env: NodeJS.ProcessEnv = process.env): 
  * Без второго пути механизм имел бы дыру ровно по правам ключа: именно там,
  * где предполёт слеп, ночь за ночью покупалась бы сборка, которую некуда
  * отправить.
+ *
+ * ОБА ПУТИ СООБЩАЮТ КОМАНДЕ (opsAlert.notifyHeClientStop, health-бот), в
+ * момент, когда причина паузы стала известна, — записалась пауза или нет.
+ * Причина: кабинет ENG (решение владельца 04.10.2026) не называет клиенту ни
+ * рассыльщика, ни ёмкость и пишет «временная проблема на нашей стороне, команда
+ * уже работает» (components/client-eng/clientFailureText.ts, HE_TEAM_ON_IT_EN).
+ * Вторая половина фразы правдива, только пока эти вызовы стоят: убрать их можно
+ * только вместе с фразой. Пока пауза стоит, тик напоминает о проекте раз за
+ * ночь.
  *
  * ЧТО НЕ ЯВЛЯЕТСЯ ОСНОВАНИЕМ ДЛЯ ПАУЗЫ — по всему набору исходов предполёта:
  *   * null от getWorkspaceContactCapacity (403 без scope, 404, 429, 5xx,
@@ -411,6 +436,7 @@ export type HeAutoPipelineDetailStatus =
   | 'budget_exhausted'
   | 'paused'
   | 'dry'
+  | 'carry_covers'
   | 'failed';
 
 /**
@@ -489,6 +515,13 @@ export interface HeAutoPipelineTickSummary {
    * отнимает и счётчик остаётся нулём.
    */
   dry: number;
+  /**
+   * Вертикалей, которым ночь не поставлена, потому что очередь переноса
+   * проекта покрывает остаток дня, а их очередь не из старейших (шаг 3a- в
+   * шапке). НЕ failed: это экономия — бюджет дня всё равно уйдёт перенесённым
+   * компаниям.
+   */
+  carryCovers: number;
   failed: number;
   details: HeAutoPipelineTickDetail[];
 }
@@ -497,6 +530,8 @@ interface ConfigRow {
   id: string;
   project_id: string;
   verticals_per_run: number | null;
+  /** Дневной кап лидов проекта; null — значение нечитаемо. */
+  daily_leads_cap: number | null;
   /** null — колонки ещё нет (миграция не прокатана) либо значение нечитаемо. */
   dry_nights_limit: number | null;
   /**
@@ -875,6 +910,99 @@ async function readRefillDayRemaining(
   }
 }
 
+/**
+ * ПЕРЕНОС: сколько перенесённых компаний (he_refill_carryover, 'pending', срок
+ * не вышел) ждёт у каждой вертикали проекта — для шага 3a- тика.
+ *
+ * Зачем тику. Ночь вертикали с очередью сначала отправляет очередь (стадия
+ * долива, блок «ПЕРЕНОС» в stages/baseCollectRefill.ts), и если очереди
+ * проекта хватает на остаток дня, сборка ЛЮБОЙ другой вертикали этой ночью
+ * кончится 'cap_exhausted': её компании вернутся в пул, и следующая сборка
+ * купит их заново. Не ставить такую сборку — это и есть «ничего не покупать
+ * дважды» на уровне проекта.
+ *
+ * ОЧЕРЕДЬ ВЕРТИКАЛИ СЧИТАЕТСЯ, только если её последняя РЕШАЮЩАЯ ночь —
+ * 'appended'. Иначе одна сломанная вертикаль (пропал пресет, снята кампания) с
+ * непустой очередью каждую ночь отнимала бы день у здоровых, а её очередь всё
+ * равно не уходила бы — проект стоял бы до конца срока очереди (7 суток). С
+ * этим правилом сломанная вертикаль перестаёт закрывать день после первой же
+ * неудачной ночи: её ночь падает на шаге кампании/пресета, до брони, и строка
+ * прогона — обычный 'failed'.
+ *
+ * Не решают (пропускаются, как и в серии отказов refillStreakVerdict): ночь без
+ * бюджета ('failed' с budget_outcome 'cap_exhausted'), повтор прогона той же
+ * базы ('already_reserved') и отмена клиентом (stats.cancelled). Ночь без
+ * бюджета ПЕРЕНОСИТ свои компании (решение владельца 04.10.2026), и именно у
+ * её вертикали очередь самая большая; считать её «сломанной» значило бы
+ * оставить эту очередь без ночи, пока она не истечёт. Решающей ночи в окне
+ * нет вовсе (у вертикали только ночи без бюджета) — очередь считается: каждая
+ * такая ночь дошла до брони, то есть кампания и пресет у вертикали живы.
+ *
+ * `null` — «не знаем» (нет миграции 20261004_0001, сбой чтения): тик ведёт себя
+ * как до переноса. Читается обычным клиентом тика; RU сюда не доходит — тик
+ * берёт только market='us'.
+ */
+async function readCarryoverByVertical(
+  supabase: SupabaseClient,
+  projectId: string,
+  now: Date,
+): Promise<Map<string, { companies: number; oldestMs: number }> | null> {
+  try {
+    const { data, error } = await supabase
+      .from('he_refill_carryover')
+      .select('vertical_id, prepared_at')
+      .eq('project_id', projectId)
+      .eq('status', 'pending')
+      .gt('expires_at', now.toISOString())
+      .limit(5000);
+    if (error) return null;
+    const queues = new Map<string, { companies: number; oldestMs: number }>();
+    for (const row of (data ?? []) as Array<{ vertical_id?: unknown; prepared_at?: unknown }>) {
+      const verticalId = asString(row.vertical_id);
+      if (!verticalId) continue;
+      const preparedMs = Date.parse(asString(row.prepared_at));
+      const queue = queues.get(verticalId) ?? { companies: 0, oldestMs: Number.POSITIVE_INFINITY };
+      queue.companies += 1;
+      if (Number.isFinite(preparedMs)) queue.oldestMs = Math.min(queue.oldestMs, preparedMs);
+      queues.set(verticalId, queue);
+    }
+    if (queues.size === 0) return queues;
+    const { data: runs, error: runsErr } = await supabase
+      .from('he_auto_pipeline_runs')
+      .select('vertical_id, status, stats')
+      .eq('project_id', projectId)
+      .in('vertical_id', [...queues.keys()])
+      .not('base_id', 'is', null)
+      .neq('status', 'collecting')
+      .order('created_at', { ascending: false })
+      .limit(200);
+    if (runsErr) return null;
+    const decisive = new Map<string, string>();
+    for (const run of (runs ?? []) as Array<{ vertical_id?: unknown; status?: unknown; stats?: unknown }>) {
+      const verticalId = asString(run.vertical_id);
+      if (!verticalId || decisive.has(verticalId)) continue;
+      const status = asString(run.status);
+      const stats = (run.stats && typeof run.stats === 'object' ? run.stats : {}) as {
+        budget_outcome?: unknown;
+        cancelled?: unknown;
+      };
+      const undecided =
+        status === 'failed'
+        && (stats.cancelled === true
+          || stats.budget_outcome === 'cap_exhausted'
+          || stats.budget_outcome === 'already_reserved');
+      if (!undecided) decisive.set(verticalId, status);
+    }
+    for (const verticalId of [...queues.keys()]) {
+      const last = decisive.get(verticalId);
+      if (last !== undefined && last !== 'appended') queues.delete(verticalId);
+    }
+    return queues;
+  } catch {
+    return null;
+  }
+}
+
 /** Запись журнала прогонов; ошибка вставки — фейл обхода конфига. */
 async function insertRun(
   supabase: SupabaseClient,
@@ -896,7 +1024,9 @@ async function insertRun(
  * собирает, а снятие паузы не должно включать добор тому, кто выключил его сам.
  */
 async function loadConfigs(supabase: SupabaseClient): Promise<ConfigRow[]> {
-  const base = 'id, project_id, verticals_per_run';
+  // daily_leads_cap — колонка той же миграции, что и сама таблица
+  // (20260804_0005), поэтому в обязательной части выборки.
+  const base = 'id, project_id, verticals_per_run, daily_leads_cap';
   let rows: Array<Record<string, unknown>>;
   const first = await supabase
     .from('he_auto_pipeline_configs')
@@ -916,6 +1046,7 @@ async function loadConfigs(supabase: SupabaseClient): Promise<ConfigRow[]> {
     id: asString(row.id),
     project_id: asString(row.project_id),
     verticals_per_run: asNumberOrNull(row.verticals_per_run),
+    daily_leads_cap: asNumberOrNull(row.daily_leads_cap),
     dry_nights_limit: asNumberOrNull(row.dry_nights_limit),
     refill_paused_at: asStringOrNull(row.refill_paused_at),
     refill_pause_reason: asStringOrNull(row.refill_pause_reason),
@@ -988,6 +1119,23 @@ async function runForConfig(
       message: `nightly refill paused since ${config.refill_paused_at}`
         + (config.refill_pause_reason ? ` — ${config.refill_pause_reason}` : ''),
     });
+    // Напоминание команде — раз за ночь, пока пауза стоит: клиент всё это
+    // время читает «команда уже работает», а у паузы нет автоснятия. Тик
+    // одноразовый и бывает раз в сутки, поэтому «раз за тик» и есть «раз за
+    // ночь»; проекты одной ночи opsAlert сворачивает в одно сообщение-список,
+    // а отправку списка обеспечивает flushHeOpsAlerts в конце тика.
+    await notifyHeClientStop({
+      projectId: config.project_id,
+      // Тик берёт только market='us' (runHeAutoPipelineTick).
+      market: 'us',
+      stage: 'refill_paused',
+      kind: 'capacity_pause',
+      provider: 'sending',
+      reason:
+        `пауза стоит с ${config.refill_paused_at}` +
+        (config.refill_pause_reason ? `; ${config.refill_pause_reason}` : ''),
+      pauseRecorded: false,
+    });
     // Что именно произошло, объясняют строка ночного лога и сама пометка со
     // штампом; last_run_at при этом двигается как у любого обойдённого конфига.
     await touchLastRun();
@@ -1033,6 +1181,44 @@ async function runForConfig(
   if (budgetExhausted) {
     summary.budgetExhausted += 1;
     detail({ status: 'budget_exhausted', message: `daily lead budget for ${dateTag} is fully reserved` });
+  }
+
+  // ─── ПЕРЕНОС (шаг 3a- в шапке, после бюджета, до сборок) ───
+  // Очередь проекта считается только по вертикалям, которые этой ночью вообще
+  // могут отправить: есть кампания и нет пометки сухой вертикали. Остаток дня —
+  // по броням, а до первой брони суток (обычный тик в 03:20) — полный кап
+  // проекта. Кап не прочитался — правило молчит (прежнее поведение).
+  //
+  // Хватает очереди на день — ночь получают ТОЛЬКО вертикали с самой старой
+  // очередью, по возрастанию её возраста, пока их компаний не хватит на
+  // остаток дня (carryPicked). Ночь такой вертикали сборку не покупает
+  // (carryOnly в стадии), а остальные — и без очереди, и с более свежей —
+  // пропускаются ('carry_covers'): их ночь кончилась бы 'cap_exhausted', то
+  // есть строкой отказа и ещё одной вертикалью, которой бюджет не дал ничего.
+  // Старые идут первыми, потому что у очереди есть срок: при гонке за бронь
+  // случайный победитель оставлял бы старейшие компании ждать до истечения.
+  const carryByVertical =
+    budgetExhausted || verticals.length === 0
+      ? null
+      : await readCarryoverByVertical(supabase, config.project_id, now);
+  const carryCandidates: Array<{ id: string; companies: number; oldestMs: number }> = [];
+  for (const vertical of verticals) {
+    if (!carryByVertical || !campaignByVertical.has(vertical.id)) continue;
+    if (dryStopEnabled && vertical.refill_dry_since) continue;
+    const queue = carryByVertical.get(vertical.id);
+    if (queue && queue.companies > 0) carryCandidates.push({ id: vertical.id, ...queue });
+  }
+  const projectCarry = carryCandidates.reduce((sum, c) => sum + c.companies, 0);
+  const dayLeft = dayRemaining ?? config.daily_leads_cap;
+  const carryCoversDay = dayLeft !== null && projectCarry > 0 && projectCarry >= dayLeft;
+  const carryPicked = new Set<string>();
+  if (carryCoversDay) {
+    let picked = 0;
+    for (const c of carryCandidates.slice().sort((a, b) => a.oldestMs - b.oldestMs)) {
+      if (picked >= (dayLeft ?? 0) || carryPicked.size >= perRun) break;
+      carryPicked.add(c.id);
+      picked += c.companies;
+    }
   }
 
   for (const vertical of budgetExhausted ? [] : verticals) {
@@ -1088,6 +1274,26 @@ async function runForConfig(
       }
     }
 
+    // ─── ПЕРЕНОС ЗАКРЫВАЕТ ДЕНЬ (до предполёта: запрос к рассыльщику не
+    //     тратим на вертикаль, которую не собираем) ───
+    // Очереди проекта хватает на остаток дня: ночь ставим только вертикалям
+    // со старейшей очередью (carryPicked) — их ночь сборку и не купит
+    // (carryOnly в стадии), а ночь любой другой кончилась бы 'cap_exhausted'
+    // без единого письма. Строки журнала пропуск не пишет — та же причина,
+    // что у budget_exhausted и dry.
+    if (carryCoversDay && !carryPicked.has(vertical.id)) {
+      summary.carryCovers += 1;
+      detail({
+        verticalId: vertical.id,
+        status: 'carry_covers',
+        ...dryNightsDetail,
+        message:
+          `carried-over companies (${projectCarry}) cover today's lead budget (${dayLeft}) — ` +
+          'older queues go first, no run for this vertical tonight',
+      });
+      continue;
+    }
+
     // ─── ПРЕДПОЛЁТ ЁМКОСТИ ВОРКСПЕЙСА (до постановки, до денег) ───
     // Платит СБОРКА: краул сайтов и SMTP-проба каждого адреса уходят задолго до
     // долива, и раньше «нет места у рассыльщика» обнаруживалось только на
@@ -1108,12 +1314,27 @@ async function runForConfig(
       // себя как до этой правки, то есть пропускаем ночь и пробуем завтра.
       // Пишем ДО insertRun: строка журнала — объяснение, а деньги экономит
       // пауза, и терять её из-за сбоя вставки журнала незачем.
-      await pauseHeAutoPipelineRefill(
+      const paused = await pauseHeAutoPipelineRefill(
         supabase,
         config.project_id,
         buildHeCapacityPauseReason('ночной предполёт ёмкости (остаток 0)'),
         { now },
       );
+      // Команде — в момент паузы, независимо от того, легла ли она (без
+      // конфига или колонок кабинет всё равно покажет «команда уже работает»
+      // по строке журнала ниже). Ждём, а не `void`: крон одноразовый, и
+      // невыжданная отправка умерла бы вместе с процессом; ожидание ограничено
+      // 15 с внутри opsAlert.
+      await notifyHeClientStop({
+        projectId: config.project_id,
+        // Тик берёт только market='us' (runHeAutoPipelineTick).
+        market: 'us',
+        stage: 'refill_preflight',
+        kind: 'capacity_pause',
+        provider: 'sending',
+        reason: CAPACITY_REFUSAL_ERROR,
+        pauseRecorded: paused,
+      });
       await insertRun(supabase, {
         config_id: config.id,
         project_id: config.project_id,
@@ -1216,6 +1437,7 @@ export async function runHeAutoPipelineTick(
     budgetExhausted: 0,
     paused: 0,
     dry: 0,
+    carryCovers: 0,
     failed: 0,
     details: [],
   };
@@ -1242,18 +1464,27 @@ export async function runHeAutoPipelineTick(
   // рассыльщику на воркспейс, сколько бы конфигов и вертикалей тик ни обошёл.
   const capacityProbe = createHeWorkspaceCapacityProbe();
 
-  for (const config of eligible) {
-    try {
-      await runForConfig(supabase, config, now, summary, capacityProbe);
-    } catch (e) {
-      summary.failed += 1;
-      summary.details.push({
-        configId: config.id,
-        projectId: config.project_id,
-        status: 'failed',
-        message: e instanceof Error ? e.message : String(e),
-      });
+  try {
+    for (const config of eligible) {
+      try {
+        await runForConfig(supabase, config, now, summary, capacityProbe);
+      } catch (e) {
+        summary.failed += 1;
+        summary.details.push({
+          configId: config.id,
+          projectId: config.project_id,
+          status: 'failed',
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
     }
+  } finally {
+    // Крон одноразовый: полный воркспейс останавливает все проекты одной и той
+    // же ночью, и opsAlert отправляет сразу только первый из них, а остальные
+    // копит на 10 минут в одно сообщение-список. Без этой отправки список
+    // умер бы вместе с процессом, и команда узнала бы об одном проекте из
+    // многих. Не бросает и ограничен по времени внутри opsAlert.
+    await flushHeOpsAlerts();
   }
 
   return summary;

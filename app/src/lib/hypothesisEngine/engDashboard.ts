@@ -13,6 +13,9 @@
  */
 
 import { heLaunchIsIncomplete, parseLaunchInfo, type HeTemplateLaunchInfo } from './launchHandoff';
+// Справочник клиентских текстов без зависимостей (тот же, что реэкспортирует
+// clientErrors.ts): короткая нейтральная фраза про отказ, который чинит команда.
+import { HE_TEAM_ON_IT_SHORT_EN } from '@/components/client-eng/clientFailureText';
 
 /* ─────────────────────────── Время (UTC) ─────────────────────────── */
 
@@ -440,13 +443,24 @@ export function buildEngDashboardEvents(input: {
       // Часть строк рассыльщик не взял по ёмкости (stats.deferred +
       // deferred_reason, пишет stages/baseCollectRefill.ts). Ночь состоялась,
       // но не целиком: без остатка «+N leads» читается как «уехало всё».
-      // «not sent», а не «on hold»: эти строки не хранятся и не досылаются
-      // (база 'analyzed', её компании исключены из следующих сборок), а
-      // «on hold» обещало бы, что они ещё уедут.
+      // «not sent», а не «on hold»: число — про ЭТОТ прогон, и только это про
+      // него правда при любой судьбе строк. Судьба у них разная: у market='us'
+      // компании, ни один адрес которых не дошёл до рассыльщика, ложатся в
+      // очередь переноса (he_refill_carryover, stages/baseCollectRefill.ts) и
+      // идут первыми в следующие ночи своей вертикали — до
+      // HE_REFILL_CARRYOVER_MAX_AGE_DAYS (7) суток, потом отпускаются, и их
+      // может заново подготовить обычная сборка; вторые адреса компаний,
+      // которым письмо ушло, не переносятся вовсе (компания охвачена); очередь
+      // не прочиталась или не записалась (нет миграции) — не переносится
+      // ничего, компании остаются исключёнными. «on hold» обещало бы, что
+      // уедут все эти строки, а этого не обещает ни одна из форм. Причину не
+      // называем (решение владельца 04.10.2026): «работаем» правда, потому что
+      // та же ветка долива, что пишет deferred_reason, сначала шлёт алерт
+      // команде (alertRefillCapacityStop → opsAlert.ts).
       const deferred = asNum(stats.deferred);
       const heldBack =
         deferred > 0 && asStr(stats.deferred_reason) === 'instantly_capacity'
-          ? `, ${deferred} not sent (no room)`
+          ? `, ${deferred} not sent (${HE_TEAM_ON_IT_SHORT_EN})`
           : '';
       events.push({
         type: 'refill_appended',
@@ -456,9 +470,10 @@ export function buildEngDashboardEvents(input: {
     } else if (status === 'no_new') {
       // 'no_new' ставится по ДВУМ причинам (stages/baseCollectRefill.ts):
       // пустой harvest (новых компаний действительно нет) и valid === 0
-      // (компании нашлись, но ни одного адреса с вердиктом 'ok'). Про
-      // компании мы знаем только в первом случае, поэтому подпись говорит
-      // ровно то, что верно для обоих: отправлять нечего.
+      // (компании нашлись, но ни одного адреса с вердиктом 'ok'); у
+      // market='us' — только если и очередь переноса не дала ни одного
+      // допущенного адреса. Про компании мы знаем только в первом случае,
+      // поэтому подпись говорит ровно то, что верно для обоих: отправлять нечего.
       events.push({ type: 'refill_empty', text: withVertical('refill: nothing new to send', vname), at });
     } else if (status === 'failed') {
       // Нет места у рассыльщика — не сбой кода, а ночь, которую некуда было
@@ -470,7 +485,10 @@ export function buildEngDashboardEvents(input: {
       // Читаем машинную причину, а не текст: stats.error_kind='instantly_capacity'
       // пишут оба отказа по ёмкости — предполёт тика до сборки (autoPipeline.ts,
       // строка журнала без base_id) и отказ долива (stages/baseCollectRefill.ts,
-      // runStats), — поэтому у ленты одно условие на оба.
+      // runStats), — поэтому у ленты одно условие на оба. Причину клиенту не
+      // называем (решение владельца 04.10.2026): короткая общая фраза, и она
+      // правда, потому что оба места записи такого отказа шлют алерт команде
+      // (lib/hypothesisEngine/opsAlert.ts).
       // Нулевой дневной бюджет — НЕ поломка, а решение, и у него ДВА исхода с
       // разным смыслом: 'cap_exhausted' — кап проекта на сегодня занят другими
       // бронями; 'already_reserved' — это повтор прогона той же базы, а её
@@ -498,7 +516,7 @@ export function buildEngDashboardEvents(input: {
         asStr(stats.error_kind) === 'instantly_capacity'
           ? {
               type: 'refill_empty',
-              text: withVertical('refill stopped: no room for new contacts', vname),
+              text: withVertical(`refill stopped: ${HE_TEAM_ON_IT_SHORT_EN}`, vname),
               at,
             }
           : budgetOutcome === 'cap_exhausted'

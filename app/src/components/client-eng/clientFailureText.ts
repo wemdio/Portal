@@ -18,7 +18,8 @@
  *
  * ПРАВИЛА ТЕКСТОВ. Только английский; без имён провайдеров, таблиц и внутренних
  * id. Каждое предложение обязано быть правдой для ЛЮБОЙ строки, которая до него
- * доедет, при ДЕФОЛТНОЙ конфигурации: ни уведомлений, которых никто не шлёт, ни
+ * доедет, при ДЕФОЛТНОЙ конфигурации: ни уведомлений, которых никто не шлёт (а
+ * то, что шлют, названо у HE_TEAM_ON_IT_EN вместе с отправителем), ни
  * автопродолжения, которого нет (провайдерский отказ терминален сразу, ночной
  * реконсилер и авто-резюм выключены по умолчанию и упавшую работу не
  * переоплачивают), ни кнопок, которых в кабинете нет. Действия называются теми
@@ -108,14 +109,53 @@ const FINISHED_WORK_KEPT =
 export const HE_REFILL_RUN_KEPT_EN = 'Contacts already in your campaigns stay there and keep sending.';
 
 /**
- * Кто снимает паузу долива по ёмкости. ОДНА фраза на два экрана — карточку
- * базы (`sending_capacity` ниже) и Command Center (`engRefillHoldText`), чтобы
- * они не могли разойтись: автоснятия по таймеру у паузы нет, снимает её только
- * сотрудник (staff-роут refill-pause), а уведомления сотруднику о паузе нет —
- * поэтому клиента просят написать менеджеру, а не ждать.
+ * ОДНА нейтральная фраза на все отказы, которые чинит только команда:
+ * провайдер отказал по деньгам ('billing') или по настройке ('configuration'),
+ * у рассыльщика кончилось место ('sending_capacity' и пауза ночного добора в
+ * Command Center). Решение владельца 04.10.2026: клиенту не пишем ни про
+ * баланс, ни про провайдеров, ключи, тарифы и ёмкость. Машинные коды при этом
+ * остаются разными — их читают политика повторов воркера (llm.ts) и алерт
+ * команде; сливается только то, что клиент читает.
+ *
+ * «Our team has been notified and is already working on it» — ПРАВДА ТОЛЬКО
+ * ПОТОМУ, ЧТО КОМАНДУ УВЕДОМЛЯЕТ АЛЕРТ В HEALTH-БОТ: lib/hypothesisEngine/
+ * opsAlert.ts (`notifyHeClientStop`). Его зовут: воркер
+ * (worker/hypothesisEngine.ts, writeJobFailure) на КАЖДОМ отказе, который
+ * кабинет свернёт в 'billing'/'configuration' (тот же предикат,
+ * clientErrors.heTeamFixableFailureOf), и оба места, где пишется пауза по
+ * ёмкости (stages/baseCollectRefill.ts, autoPipeline.ts). Убрали алерт или
+ * любой из вызовов — убирайте и эту фразу, иначе кабинет врёт. Алерт
+ * best-effort: без TELEGRAM_HEALTH_BOT_TOKEN / TELEGRAM_HEALTH_CHAT_ID в
+ * контейнере движка он молчит — их наличие в предрелизной проверке.
  */
-export const HE_REFILL_HOLD_LIFT_EN =
-  'Only our team can lift this hold — it does not resume by itself, so contact your manager if you need the daily refill back.';
+export const HE_TEAM_ON_IT_EN =
+  'This stopped because of a temporary problem on our side. Our team has been notified and is already working on it.';
+
+/**
+ * Та же фраза для коротких подписей (лента и карточки Command Center), где
+ * полное предложение не помещается. Правда по той же причине, что и у
+ * HE_TEAM_ON_IT_EN, — менять их только вместе.
+ */
+export const HE_TEAM_ON_IT_SHORT_EN = 'temporary problem on our side, we are working on it';
+
+/**
+ * Кто снимает паузу долива. ОДНА фраза на два экрана — карточку базы
+ * (`sending_capacity` ниже) и Command Center (`engRefillHoldText`), чтобы они
+ * не могли разойтись: автоснятия по таймеру у паузы нет, снимает её только
+ * сотрудник (staff-роут refill-pause). Срока не называем: когда он её снимет,
+ * кабинет не знает.
+ */
+export const HE_REFILL_HOLD_LIFT_EN = 'Only our team can lift the hold — it does not resume on a timer.';
+
+/**
+ * Что делать клиенту на шаге, который остановил отказ, чинимый командой
+ * ('billing'/'configuration'). Шаг сам не продолжается (отказ терминален с
+ * первого ответа, авто-резюм и ночной реконсилер выключены по умолчанию и
+ * такие отказы не поднимают), а нажать кнопку до починки — значит упереться в
+ * тот же отказ, поэтому сверка с менеджером стоит раньше кнопки.
+ */
+const TEAM_FIX_WHAT_TO_DO =
+  `This step does not restart by itself. Your manager can tell you when it is fixed — then start it again: ${WHERE_TO_RESTART}.`;
 
 /**
  * Что делать с остановившимся прогоном ежедневного долива, если у кода нет
@@ -127,17 +167,18 @@ export const HE_REFILL_RUN_WHAT_TO_DO_EN =
   'This was one run of the daily refill, and a refill run is not restarted by hand; the Command Center shows whether the daily refill goes on. Contact your manager if it keeps stopping.';
 
 const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
+  // 'billing' и 'configuration' читаются клиентом ОДИНАКОВО (HE_TEAM_ON_IT_EN):
+  // «команда уже работает» здесь правда, потому что воркер шлёт алерт на каждый
+  // такой отказ (opsAlert.ts). «Продолжится само» не пишем: шаг терминален.
   billing: {
-    title: 'The run stopped on our side — one of the services we pay for ran out of balance.',
+    title: HE_TEAM_ON_IT_EN,
     whatIsSaved: FINISHED_WORK_KEPT,
-    // Ни «команда уже знает», ни «продолжится после пополнения»: алерта на
-    // такой отказ нет, а воркер пишет его терминальным с первого ответа.
-    whatToDo: `This step does not restart by itself. Tell your manager so the balance gets topped up, then start it again — ${WHERE_TO_RESTART}.`,
+    whatToDo: TEAM_FIX_WHAT_TO_DO,
   },
   configuration: {
-    title: 'The run stopped on our side — one of the services we rely on is not configured correctly.',
+    title: HE_TEAM_ON_IT_EN,
     whatIsSaved: FINISHED_WORK_KEPT,
-    whatToDo: `This step does not restart by itself. Tell your manager so the setup gets fixed, then start it again — ${WHERE_TO_RESTART}.`,
+    whatToDo: TEAM_FIX_WHAT_TO_DO,
   },
   provider: {
     title: 'A service we rely on was temporarily unavailable, so the step stopped early.',
@@ -224,20 +265,23 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
   /**
    * НЕ путать с contacts_exhausted: тот про тариф клиента («поднимите план»), а
    * этот — про ёмкость НАШЕГО рассыльщика, за которую клиент не отвечает и
-   * доплачивать ему нечего, поэтому ни слова «plan».
+   * доплачивать ему нечего, поэтому ни слова «plan» — и, по решению владельца
+   * 04.10.2026, ни слова про ёмкость вообще: заголовок общий с 'billing' и
+   * 'configuration' (HE_TEAM_ON_IT_EN). «Команда уже работает» здесь правда,
+   * потому что оба места записи паузы по ёмкости шлют алерт (opsAlert.ts).
    *
    * Код стоит только на базе долива, которая ничего не отдала провайдеру
-   * (база 'failed' пишется лишь при недоставленном отказе), — отсюда «ничего
-   * не добавлено». «Ничего не потеряно» писать нельзя: сборка этой ночи уже
-   * оплачена. С волны 6b тот же отказ пишет durable-паузу проекта, которую
-   * снимает только сотрудник; запись best-effort (нет конфига или колонок —
-   * паузы нет), поэтому про паузу сказано «может», а проверить её состояние
-   * отправляем в Command Center.
+   * (база 'failed' пишется лишь при недоставленном отказе). «Ничего не
+   * потеряно» писать нельзя: сборка этой ночи уже оплачена. С волны 6b тот же
+   * отказ пишет durable-паузу проекта, которую снимает только сотрудник;
+   * запись best-effort (нет конфига или колонок — паузы нет), поэтому про
+   * паузу сказано «может», а проверить её состояние отправляем в Command
+   * Center.
    */
   sending_capacity: {
-    title: 'Nothing from this run was added to your campaign — our sending platform had no room for new contacts.',
+    title: HE_TEAM_ON_IT_EN,
     whatIsSaved: HE_REFILL_RUN_KEPT_EN,
-    whatToDo: `The daily refill of this project may now be on hold — the Command Center shows whether it is. ${HE_REFILL_HOLD_LIFT_EN}`,
+    whatToDo: `The daily refill of this project may be on hold until it is fixed — the Command Center shows whether it is. ${HE_REFILL_HOLD_LIFT_EN}`,
   },
   /**
    * Дневной кап добора проекта на сегодня занят другими бронями. Отдельный

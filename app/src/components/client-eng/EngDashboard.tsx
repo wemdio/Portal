@@ -37,6 +37,7 @@ import {
   type EngDashStage,
 } from './api-client';
 import { engAutopilotHoldText, engRefillHoldText } from './engText';
+import { HE_TEAM_ON_IT_SHORT_EN } from './clientFailureText';
 // Только тип — см. пояснение в engText.ts: набор состояний один на оба конца
 // провода, а сам модуль проекции в клиентский бандл не уезжает.
 import type { HeClientRefillState } from '@/lib/hypothesisEngine/clientEngProjection';
@@ -220,18 +221,20 @@ function currentIndexFor(vertical: EngDashboardVertical): number {
  * сегодня его некуда грузить, и обещать «next run 03:20 UTC» проекту, который
  * ночь пропустит, нельзя (эта фраза и была ложью до правки). Срок здесь не
  * называется намеренно: возвращает проект в добор сотрудник, руками, и когда
- * освободится место — кабинет не знает.
+ * освободится место — кабинет не знает. Причину не называем (решение владельца
+ * 04.10.2026): короткая общая фраза справочника, правдивая потому, что пауза
+ * шлёт алерт команде (см. HE_TEAM_ON_IT_EN в clientFailureText.ts).
  */
 const REFILL_NEXT_LINE: Record<HeClientRefillState, string> = {
   running: 'next: daily refill 03:20 UTC',
-  paused: 'next: daily refill on hold — no room for new contacts',
+  paused: `next: daily refill on hold — ${HE_TEAM_ON_IT_SHORT_EN}`,
   off: 'next: daily refill — not configured',
 };
 
-/** То же тремя словами — в строку «Daily refill» карты пайплайна. */
+/** То же коротко — в строку «Daily refill» карты пайплайна. */
 const REFILL_PIPE_EVIDENCE: Record<HeClientRefillState, string> = {
   running: 'next 03:20 UTC',
-  paused: 'on hold — no room for new contacts',
+  paused: `on hold — ${HE_TEAM_ON_IT_SHORT_EN}`,
   off: 'not configured',
 };
 
@@ -851,7 +854,7 @@ export function EngDashboard() {
                       on hold
                     </span>
                     <span className="text-[10px]" style={{ color: 'var(--cp-paper-faint)' }}>
-                      no room for new contacts
+                      {HE_TEAM_ON_IT_SHORT_EN}
                     </span>
                   </>
                 ) : (
@@ -894,7 +897,8 @@ export function EngDashboard() {
           )}
 
           {/* Проект, которому остановили ночной добор из-за нехватки места под
-              новые контакты. Отдельный блок, а не строка в карточке: карточка
+              новые контакты (клиенту причина не называется — engRefillHoldText).
+              Отдельный блок, а не строка в карточке: карточка
               отвечает «когда следующая ночь», а здесь нужно сказать, что
               произошло и кто это разберёт, — в 10 пикселей подписи это не
               влезает, а недосказанность здесь и была ложью.

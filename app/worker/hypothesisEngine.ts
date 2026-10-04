@@ -94,6 +94,12 @@ import type { HeAnalyzingBase } from '@/lib/hypothesisEngine/autopilotNext';
 import { closeHeRefillBaseAfterFinalFail } from '@/lib/hypothesisEngine/stages/baseCollect';
 import { isHeSearchProviderError } from '@/lib/hypothesisEngine/stages/searchIo';
 import type { HeSearchProviderError } from '@/lib/hypothesisEngine/stages/searchIo';
+// Алерт команде в health-бот, когда ENG-проект остановлен отказом, который
+// чинит только команда (решение владельца 04.10.2026). Предикат — тот же, по
+// которому кабинет сворачивает причину в 'billing'/'configuration'.
+import { heTeamFixableFailureOf } from '@/lib/hypothesisEngine/clientErrors';
+import { flushHeOpsAlerts, notifyHeClientStop } from '@/lib/hypothesisEngine/opsAlert';
+import type { HeOpsStopKind, HeOpsStopProvider } from '@/lib/hypothesisEngine/opsAlert';
 import type { HeJob, HeStage } from '@/lib/hypothesisEngine/types';
 
 const WORKER_ID = `hypothesis-engine-${process.pid}`;
@@ -437,6 +443,108 @@ function heSearchRefusalOf(error: unknown): HeSearchProviderError | null {
     e = (e as { cause?: unknown }).cause;
   }
   return null;
+}
+
+/**
+ * Отказ, о котором надо сказать команде: проект остановлен тем, что чинит
+ * только она (деньги или ключ у провайдера модели либо поиска). null — не такой.
+ *
+ * Два источника, и нужны оба:
+ *  - ТИП (heLlmFailureOf / heSearchRefusalOf) — тот же, что делает отказ
+ *    терминальным выше; он же называет провайдера и HTTP-статус;
+ *  - ТЕКСТ — ровно тот предикат, по которому кабинет свернёт причину в
+ *    'billing'/'configuration' (clientErrors.heTeamFixableFailureOf). Кабинет
+ *    на этих кодах пишет клиенту «команда уже работает» (clientFailureText,
+ *    HE_TEAM_ON_IT_EN), и эта фраза обязана быть правдой и там, где типа нет:
+ *    стадия сама записала в he_bases.error «Авто-сборка не дала строк: … Serper
+ *    billing: …» и бросила обычный Error, или 5xx-ответ с «insufficient credits»
+ *    в теле (транспорт держит его транзиентным, а кабинет читает биллингом).
+ */
+function heOpsStopOf(
+  llmFailure: ReturnType<typeof heLlmFailureOf>,
+  searchRefusal: HeSearchProviderError | null,
+  msg: string,
+): { kind: HeOpsStopKind; provider: HeOpsStopProvider; httpStatus?: number } | null {
+  if (searchRefusal && searchRefusal.kind !== 'transient') {
+    return { kind: searchRefusal.kind, provider: 'search', httpStatus: searchRefusal.httpStatus };
+  }
+  if (llmFailure?.kind === 'billing' || llmFailure?.kind === 'configuration') {
+    return { kind: llmFailure.kind, provider: 'model', httpStatus: llmFailure.status };
+  }
+  const textKind = heTeamFixableFailureOf(msg);
+  if (!textKind) return null;
+  return { kind: textKind, provider: /\bSerper\b/i.test(msg) ? 'search' : 'model' };
+}
+
+/** Срок чтения рынка и имени проекта для алерта: дольше ждать незачем, алерт отвязан от очереди. */
+const OPS_ALERT_PROJECT_READ_MS = 10_000;
+/** Пауза перед вторым и последним чтением, если первое не удалось. */
+const OPS_ALERT_PROJECT_REREAD_MS = 30_000;
+
+/**
+ * Сообщить команде об остановке ENG-проекта (lib/hypothesisEngine/opsAlert.ts).
+ *
+ * ОТВЯЗАНО ОТ ОЧЕРЕДИ: промис не ждём, а всё, что внутри может отказать, —
+ * поймано. Запись отказа джобы уже сделана к этому моменту, и ни чтение
+ * проекта, ни Telegram не могут ни задержать следующую джобу (воркер
+ * single-flight), ни уронить процесс.
+ *
+ * RU НЕ ЗАДЕТ: для RU-проекта (market='ru') opsAlert отбрасывает алерт до
+ * отправки; единственный след — одно читающее чтение he_projects(market, name)
+ * на джобе, уже упавшей таким отказом. Записей нет, сообщений нет.
+ *
+ * Рынок не прочитался — алерт уходит с пометкой «рынок не прочитан»: кабинет
+ * ENG-клиента уже пообещал, что команда знает, и промолчать хуже, чем один раз
+ * написать про RU-проект. Проекта нет вовсе (удалён) — молчим: сообщать некому.
+ */
+function alertTeamOnClientStop(
+  job: HeJob,
+  stop: { kind: HeOpsStopKind; provider: HeOpsStopProvider; httpStatus?: number },
+  msg: string,
+): void {
+  void (async () => {
+    let market: string | null = null;
+    let projectName: string | null = null;
+    // Две попытки с паузой: блип БД не должен ни потерять ENG-алерт, ни
+    // отправить алерт про RU-проект с пометкой «рынок не прочитан».
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        const { data, error } = await withAbortSignal(db, AbortSignal.timeout(OPS_ALERT_PROJECT_READ_MS))
+          .from('he_projects')
+          .select('market, name')
+          .eq('id', job.project_id)
+          .maybeSingle();
+        if (error) throw new Error(error.message);
+        if (!data) return;
+        const row = data as { market?: unknown; name?: unknown };
+        market = normalizeHeMarket(row.market);
+        projectName = typeof row.name === 'string' ? row.name : null;
+        break;
+      } catch (e) {
+        log(
+          'warn',
+          `Job ${job.id} (${job.stage}) ops alert: проект не прочитан, попытка ${attempt}/2 `
+            + `(${e instanceof Error ? e.message : String(e)})`
+            + (attempt < 2 ? '' : ' — алерт уйдёт с пометкой «рынок не прочитан»'),
+        );
+        if (attempt < 2) await sleep(OPS_ALERT_PROJECT_REREAD_MS);
+      }
+    }
+    await notifyHeClientStop({
+      projectId: job.project_id,
+      projectName,
+      market,
+      stage: job.stage,
+      kind: stop.kind,
+      provider: stop.provider,
+      reason: msg,
+      httpStatus: stop.httpStatus ?? null,
+      jobId: job.id,
+      baseId: typeof job.payload?.base_id === 'string' ? job.payload.base_id : null,
+    });
+  })().catch((e) => {
+    log('warn', `Job ${job.id} (${job.stage}) ops alert не отправлен: ${e instanceof Error ? e.message : String(e)}`);
+  });
 }
 
 /** Прерывания подряд — в payload джобы (своей колонки не нужно; стадии лишние ключи игнорируют). */
@@ -2618,6 +2726,15 @@ async function writeJobFailure(
     return true;
   }
 
+  // Отказ, который чинит только команда (деньги/ключ провайдера), — алерт в
+  // health-бот; только ENG, RU отбрасывает opsAlert. Здесь, а не в ветке
+  // финального фейла: текстовый случай (стадия записала причину в he_bases.error
+  // и бросила обычный Error) клиент видит уже с ПЕРВОЙ попытки. Не легла запись
+  // (failErr) — алерт всё равно уходит: тот же отказ допишет сборщик, а повтор
+  // алерта погасит дедуп opsAlert. Отмена/закрытая строка выше — без алерта.
+  const opsStop = heOpsStopOf(llmFailure, searchRefusal, msg);
+  if (opsStop) alertTeamOnClientStop(job, opsStop, msg);
+
   // Финальный фейл research-стадии валит весь research-пайплайн проекта.
   if (finalFail && RESEARCH_STAGES.has(job.stage)) {
     await client
@@ -2716,6 +2833,11 @@ async function main() {
         setTimeout(resolve, 60_000).unref?.();
       }),
     ]);
+    // Список ENG-проектов, остановленных тем же отказом провайдера, копится до
+    // конца окна свёртки (opsAlert.ts) — отправляем его до выхода, иначе он
+    // умрёт с процессом. Пусто (RU-трафик, отказов не было) — сразу дальше;
+    // ждать дольше срока отправки opsAlert не будет.
+    await flushHeOpsAlerts();
   } finally {
     clearInterval(heartbeat);
   }

@@ -38,6 +38,7 @@ import {
   HE_REFILL_HOLD_LIFT_EN,
   HE_REFILL_RUN_KEPT_EN,
   HE_REFILL_RUN_WHAT_TO_DO_EN,
+  HE_TEAM_ON_IT_EN,
   formatHeClientFailure,
   heClientFailureFor,
   type HeClientErrorCode,
@@ -267,34 +268,34 @@ export function engAutopilotHoldText(code: HeClientAutopilotHoldCode): string {
  * Что кабинет говорит про проект, которому ночной добор остановлен нехваткой
  * места под новые контакты (`he_auto_pipeline_configs.refill_paused_at`).
  *
+ * ПРИЧИНУ НЕ НАЗЫВАЕМ. Решение владельца 04.10.2026: про ёмкость, рассыльщика
+ * и тарифы клиент не читает ни слова — только общая фраза справочника
+ * (`HE_TEAM_ON_IT_EN`, `clientFailureText`), одна на все отказы, которые чинит
+ * команда. «Команда уже работает» здесь правда потому, что оба места записи
+ * паузы (stages/baseCollectRefill.ts, autoPipeline.ts) шлют алерт в health-бот
+ * (lib/hypothesisEngine/opsAlert.ts); без этих вызовов фразу писать нельзя.
+ *
  * Правила формулировки — те же, что у пауз автопилота выше, плюс две вещи,
  * которые эта пауза добавляет от себя:
  *
  *  - СРОКА НЕТ И БЫТЬ НЕ МОЖЕТ. Автоснятия по таймеру у паузы намеренно нет:
  *    возвращает проект сотрудник, руками. «Вернёмся завтра/через час» здесь
- *    было бы описанием механизма, которого нет, — ровно та ложь, из-за которой
- *    у `stage_stopped` тоже нет обещаний. Обещать и то, что команда «уже
- *    знает» или «освободит место», нельзя: уведомления сотруднику о паузе нет.
- *    Поэтому фраза про снятие паузы — общая с карточкой базы
- *    (`HE_REFILL_HOLD_LIFT_EN`, справочник `clientFailureText`): снимает
- *    только команда, само не вернётся, пишите менеджеру;
+ *    было бы описанием механизма, которого нет. Поэтому фраза про снятие
+ *    паузы — общая с карточкой базы (`HE_REFILL_HOLD_LIFT_EN`): снимает только
+ *    команда, по таймеру не вернётся;
  *  - КНОПКИ КЛИЕНТУ НЕ ПРЕДЛАГАЕТСЯ, и текст её не ищет. Возобновление лежит
  *    на staff-поверхности сознательно: клиентская мутирующая ручка означала бы
  *    право клиента начать платную работу у провайдера в момент, когда грузить
- *    всё равно некуда. Названо единственное действие, которое у клиента
- *    действительно есть, — менеджер, как у `stage_stopped`.
+ *    всё равно некуда.
  *
  * ПРО СОБРАННОЕ СКАЗАНО РОВНО СТОЛЬКО, СКОЛЬКО ПРАВДА. «Ничего не потеряно»
  * написать нельзя: если место кончилось на ПОЛПУТИ, часть строк той ночи уже
  * уехала в кампанию, а остаток (`stats.deferred` долива) не досылается и
  * теряется. Поэтому фраза говорит только про то, что уже в кампаниях, — это
  * верно для обеих форм отказа (целиком и наполовину).
- *
- * Имени рассыльщика в тексте нет: счётчик ёмкости общий на весь его аккаунт,
- * и то, что место занято чужой нагрузкой, — наша кухня, а не факт о клиенте.
  */
 export function engRefillHoldText(): string {
-  return `The daily refill for this project is on hold: there is no room left for new contacts in the sending capacity we run it on, so the nightly collection is not started. Everything already added to your campaigns stays there and keeps sending. ${HE_REFILL_HOLD_LIFT_EN}`;
+  return `The daily refill for this project is on hold. ${HE_TEAM_ON_IT_EN} Everything already added to your campaigns stays there and keeps sending. ${HE_REFILL_HOLD_LIFT_EN}`;
 }
 
 /**
