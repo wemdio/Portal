@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
+  BarChart3,
   CalendarClock,
   ChevronLeft,
   ChevronRight,
@@ -160,6 +161,7 @@ function CampaignRow({
   highlighted,
   onEdit,
   onRecipients,
+  onStats,
   onAction,
 }: {
   campaign: CampaignDto;
@@ -167,6 +169,7 @@ function CampaignRow({
   highlighted: boolean;
   onEdit: () => void;
   onRecipients: () => void;
+  onStats: () => void;
   onAction: (action: CampaignAction) => void;
 }) {
   const status = CAMPAIGN_STATUS_LABELS[campaign.status];
@@ -231,6 +234,15 @@ function CampaignRow({
         >
           <Users className="h-3.5 w-3.5" />
           База
+        </button>
+        {/* Полная статистика кампании — вкладка «Статистика», 30 дней. */}
+        <button
+          type="button"
+          onClick={onStats}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100"
+        >
+          <BarChart3 className="h-3.5 w-3.5" />
+          Статистика
         </button>
 
         {campaign.status === 'running' ? (
@@ -309,7 +321,14 @@ function CampaignRow({
  * Рассылке» на экране запуска аутрича): после первой загрузки список
  * прокручивается к ней, и она ненадолго подсвечивается.
  */
-export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: string | null } = {}) {
+export function CampaignsTab({
+  focusCampaignId = null,
+  onOpenStats,
+}: {
+  focusCampaignId?: string | null;
+  /** «Статистика» в строке кампании: вкладка статистики с этой кампанией. */
+  onOpenStats?: (campaignId: string) => void;
+} = {}) {
   // Настройки кампании — отдельная страница: в окне поверх списка не помещались
   // ни письма цепочки, ни база с ящиками одновременно.
   const router = useRouter();
@@ -465,6 +484,7 @@ export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: str
       highlighted={campaign.id === highlightId}
       onEdit={() => router.push(`/tools/sender/campaigns/${campaign.id}`)}
       onRecipients={() => setRecipientsOf(campaign)}
+      onStats={() => onOpenStats?.(campaign.id)}
       onAction={(action) => void act(campaign, action)}
     />
   );

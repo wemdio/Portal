@@ -533,10 +533,11 @@ function BreakdownTable({ data }: { data: SenderStatsDto }) {
 
 // ─── Вкладка ────────────────────────────────────────────────────────────────
 
-export function StatsTab() {
+/** initialCampaignId — кампания, из строки которой нажали «Статистика». */
+export function StatsTab({ initialCampaignId = null }: { initialCampaignId?: string | null } = {}) {
   const [period, setPeriod] = useState<SenderStatsPeriod>('30d');
   // null — все кампании сразу.
-  const [campaignId, setCampaignId] = useState<string | null>(null);
+  const [campaignId, setCampaignId] = useState<string | null>(initialCampaignId);
   const [campaignList, setCampaignList] = useState<Pick<CampaignDto, 'id' | 'name'>[]>([]);
   const [data, setData] = useState<SenderStatsDto | null>(null);
   const [loading, setLoading] = useState(true);
