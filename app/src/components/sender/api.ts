@@ -333,8 +333,24 @@ export interface GoogleSyncResult {
   failed: { account: string; error: string }[];
 }
 
+/** Итог последнего синка каталога по одному Workspace (админ-аккаунту). */
+export interface GoogleSyncAccountDto {
+  account: string;
+  /** null — синка по этому аккаунту ещё не было. */
+  lastRunAt: string | null;
+  lastSource: 'auto' | 'manual' | null;
+  lastOkAt: string | null;
+  /** Остаётся и после удачных прогонов — свежая ли она, видно по lastErrorAt. */
+  lastError: string | null;
+  lastErrorAt: string | null;
+  mailboxes: number | null;
+  added: number | null;
+}
+
 export function googleWorkspaceStatus() {
-  return authFetchJson<{ configured: boolean }>(`${BASE}/mailboxes/google`);
+  return authFetchJson<{ configured: boolean; accounts: GoogleSyncAccountDto[] }>(
+    `${BASE}/mailboxes/google`,
+  );
 }
 
 /** Синхронизировать каталог прямо сейчас; раз в час это делает воркер сам. */

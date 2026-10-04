@@ -40,6 +40,46 @@ export interface GoogleSyncResult {
   failed: { account: string; error: string }[];
 }
 
+/** Итог прогона по одному аккаунту — для экрана, см. sender_google_sync_accounts. */
+interface AccountOutcome {
+  mailboxes: number | null;
+  added: number;
+  /** Каталог не прочитался или не записались ящики — текст для экрана. */
+  errors: string[];
+}
+
+/**
+ * Записывает итог прогона по аккаунтам. Запись итога не должна ронять сам
+ * синк: ящики уже обновлены, а строка на экране — лишь отчёт о прогоне.
+ */
+async function recordOutcomes(
+  outcomes: Map<string, AccountOutcome>,
+  source: 'auto' | 'manual',
+  nowIso: string,
+  log: Log,
+): Promise<void> {
+  if (!supabaseAdmin || !outcomes.size) return;
+  // Успешный прогон last_error не трогает: прошлая ошибка остаётся видна с
+  // датой, а экран по датам понимает, что она уже позади.
+  const rows = [...outcomes].map(([account, o]) => ({
+    account,
+    last_run_at: nowIso,
+    last_source: source,
+    ...(o.mailboxes === null ? {} : { mailboxes: o.mailboxes, added: o.added }),
+    ...(o.errors.length
+      ? { last_error: o.errors.join('; ').slice(0, 2000), last_error_at: nowIso }
+      : { last_ok_at: nowIso }),
+  }));
+  // Строки с разным набором полей — отдельными запросами: в одном upsert
+  // PostgREST дописал бы недостающие поля значением null.
+  for (const row of rows) {
+    const { error } = await supabaseAdmin
+      .from('sender_google_sync_accounts')
+      .upsert(row, { onConflict: 'account' });
+    if (error) log('warn', `Итог синка ${row.account} не записался: ${error.message}`);
+  }
+}
+
 const empty = (): GoogleSyncResult => ({
   added: 0, updated: 0, suspended: 0, missing: 0, total: 0, failed: [],
 });
@@ -48,8 +88,11 @@ function stateOf(user: WorkspaceUser): 'active' | 'suspended' {
   return user.suspended || user.archived ? 'suspended' : 'active';
 }
 
-export async function syncGoogleWorkspaceMailboxes(opts?: { log?: Log }): Promise<GoogleSyncResult> {
+export async function syncGoogleWorkspaceMailboxes(
+  opts?: { log?: Log; source?: 'auto' | 'manual' },
+): Promise<GoogleSyncResult> {
   const log: Log = opts?.log ?? (() => {});
+  const source = opts?.source ?? 'auto';
   if (!supabaseAdmin || !isGoogleWorkspaceConfigured()) return empty();
   const db = supabaseAdmin;
 
@@ -59,11 +102,14 @@ export async function syncGoogleWorkspaceMailboxes(opts?: { log?: Log }): Promis
   // «Пропал» по полной картине, а не по первому прочитанному аккаунту.
   const listed = new Map<string, { user: WorkspaceUser; account: string }>();
   const readAccounts = new Set<string>();
+  const outcomes = new Map<string, AccountOutcome>();
+  const nowIso = new Date().toISOString();
 
   for (const account of accounts) {
     try {
       const users = await listWorkspaceMailboxes(account);
       readAccounts.add(account);
+      outcomes.set(account, { mailboxes: users.length, added: 0, errors: [] });
       for (const user of users) {
         if (!listed.has(user.email)) listed.set(user.email, { user, account });
       }
@@ -71,15 +117,22 @@ export async function syncGoogleWorkspaceMailboxes(opts?: { log?: Log }): Promis
       const error = e instanceof Error ? e.message : String(e);
       log('warn', `Каталог Google ${account} не прочитался: ${error}`);
       result.failed.push({ account, error });
+      outcomes.set(account, { mailboxes: null, added: 0, errors: [`каталог не прочитался: ${error}`] });
     }
   }
 
   // Ни один каталог не прочитался — это ошибка подключения, а не пустой домен.
   if (!readAccounts.size) {
+    await recordOutcomes(outcomes, source, nowIso, log);
     throw new Error(result.failed.map((f) => `${f.account}: ${f.error}`).join('; '));
   }
 
-  const nowIso = new Date().toISOString();
+  // Не записавшиеся ящики — тоже ошибка прогона: на экране «всё хорошо» при
+  // молча не добавленных ящиках вводило бы в заблуждение.
+  const rowFailed = (account: string, email: string, message: string) => {
+    const o = outcomes.get(account);
+    if (o && o.errors.length < 3) o.errors.push(`${email}: ${message}`);
+  };
 
   const { data: existingRows } = await db
     .from('sender_mailboxes')
@@ -120,9 +173,12 @@ export async function syncGoogleWorkspaceMailboxes(opts?: { log?: Log }): Promis
       });
       if (error) {
         log('warn', `Ящик ${user.email} не добавился: ${error.message}`);
+        rowFailed(account, user.email, `не добавился (${error.message})`);
         continue;
       }
       result.added += 1;
+      const o = outcomes.get(account);
+      if (o) o.added += 1;
       continue;
     }
 
@@ -150,6 +206,7 @@ export async function syncGoogleWorkspaceMailboxes(opts?: { log?: Log }): Promis
     const { error } = await db.from('sender_mailboxes').update(patch).eq('id', known.id);
     if (error) {
       log('warn', `Ящик ${user.email} не обновился: ${error.message}`);
+      rowFailed(account, user.email, `не обновился (${error.message})`);
       continue;
     }
     result.updated += 1;
@@ -175,6 +232,8 @@ export async function syncGoogleWorkspaceMailboxes(opts?: { log?: Log }): Promis
       .eq('id', row.id);
     result.missing += 1;
   }
+
+  await recordOutcomes(outcomes, source, nowIso, log);
 
   log(
     'info',

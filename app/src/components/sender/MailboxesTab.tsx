@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Loader2, RefreshCw, Search, Trash2, Upload, Users, X } from 'lucide-react';
+import { Loader2, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import {
   bulkMailboxes,
   deleteMailbox,
@@ -9,19 +9,16 @@ import {
   fetchMailboxes,
   fetchMailboxProbe,
   fetchMailboxTags,
-  googleWorkspaceStatus,
-  syncGoogleWorkspace,
-  importMailboxes,
   moveMailboxes,
   patchMailbox,
   startMailboxProbe,
   type BulkMailboxAction,
   type EgressIpDto,
-  type ImportMailboxesResult,
   type MailboxDto,
   type MailboxTagDto,
   type ProbeResultDto,
 } from './api';
+import { AddMailboxesModal } from './AddMailboxesModal';
 import { EgressMoveMenu } from './EgressPanel';
 import { GOOGLE_STATE_LABELS, MAILBOX_STATUS_LABELS, providerLabel } from './labels';
 import { TagAssignMenu, TagChip, TagFilterMenu, tagTones } from './MailboxTags';
@@ -42,8 +39,8 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
   // переход на другую страницу — кружок поверх уже показанных строк. Подменять
   // на заглушку и её тоже значит заставлять глаз заново искать, где он был.
   const [paging, setPaging] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [result, setResult] = useState<ImportMailboxesResult | null>(null);
+  // «Добавить почты»: файл и каталог Google — в окне, список под ним свободен.
+  const [addOpen, setAddOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Выбор хранится вместе со страницей, которой он принадлежит, а не
@@ -55,11 +52,6 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
     { page: 1, ids: new Set() },
   );
   const [bulkBusy, setBulkBusy] = useState(false);
-  // Подключение к Workspace настраивается на сервере; кнопка показывается,
-  // только если настроено, — иначе она обещала бы то, чего портал не умеет.
-  const [googleReady, setGoogleReady] = useState(false);
-  const [googleBusy, setGoogleBusy] = useState(false);
-  const fileRef = useRef<HTMLInputElement>(null);
 
   // search — то, что набрано в поле; appliedSearch — то, что уже ушло в запрос.
   // Разделены, чтобы каждая буква не стоила похода на сервер, а список не
@@ -142,21 +134,6 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
   }, [load, page]);
 
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const res = await googleWorkspaceStatus();
-        if (!cancelled) setGoogleReady(res.configured);
-      } catch {
-        /* не доехал статус — просто не показываем кнопку */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
     // Ящики после загрузки проверяются воркером — подтягиваем статусы, пока
     // есть хоть один в очереди на проверку. Сортировка по email стабильна,
     // поэтому опрос больше дёргает строки местами.
@@ -165,43 +142,6 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
   }, [load, page]);
 
   const maxPage = Math.max(1, Math.ceil(total / PAGE_SIZE));
-
-  const handleUpload = async (file: File) => {
-    setUploading(true);
-    setError(null);
-    setResult(null);
-    try {
-      setResult(await importMailboxes(file));
-      await load(page);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Не удалось загрузить файл');
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const runGoogleSync = async () => {
-    setGoogleBusy(true);
-    setError(null);
-    setResult(null);
-    try {
-      const res = await syncGoogleWorkspace();
-      setNotice(
-        `Каталог Google: всего ящиков ${res.total}, новых ${res.added}`
-        + (res.suspended ? `, заблокированных ${res.suspended}` : '')
-        + (res.missing ? `, пропало из каталога ${res.missing}` : '')
-        + '. Новые ящики выключены — отметьте галочками те, с которых шлём.'
-        + (res.failed.length
-          ? ` Не прочитался каталог: ${res.failed.map((f) => `${f.account} (${f.error})`).join('; ')}.`
-          : ''),
-      );
-      await load(page);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Не удалось синхронизировать каталог Google');
-    } finally {
-      setGoogleBusy(false);
-    }
-  };
 
   const act = async (id: string, body: Record<string, unknown>) => {
     await patchMailbox(id, body);
@@ -377,93 +317,18 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
 
   return (
     <div className="space-y-6">
-      <div className="rounded-xl border border-zinc-200 bg-white p-5">
-        <h2 className="text-base font-semibold text-zinc-900">Подключить ящики файлом</h2>
-        <p className="mt-1 text-sm text-zinc-500">
-          Выгрузка провайдера как есть: CSV или XLSX. Колонки и сам провайдер распознаются сами — по хостам
-          в файле, шапке выгрузки и домену ящика. Ящики Google Workspace подтягиваются из каталога сами, раз
-          в час, и появляются выключенными: отметьте галочками те, с которых шлём. До проверки входа ящик в
-          рассылку не идёт.
-        </p>
+      {addOpen ? (
+        <AddMailboxesModal
+          onClose={() => setAddOpen(false)}
+          onChanged={() => void Promise.all([load(page), loadTags()])}
+        />
+      ) : null}
 
-        <div className="mt-4 flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            onClick={() => fileRef.current?.click()}
-            disabled={uploading}
-            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500 disabled:opacity-50"
-          >
-            {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-            {uploading ? 'Загружаю…' : 'Выбрать файл'}
-          </button>
+      {notice ? <p className="text-center text-sm text-emerald-600">{notice}</p> : null}
+      {error ? <p className="text-center text-sm text-red-600">{error}</p> : null}
 
-          {googleReady ? (
-            <button
-              type="button"
-              onClick={() => void runGoogleSync()}
-              disabled={googleBusy}
-              className="inline-flex items-center gap-2 rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:opacity-50"
-            >
-              {googleBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Users className="h-4 w-4" />}
-              {googleBusy ? 'Синхронизирую…' : 'Синхронизировать с Google'}
-            </button>
-          ) : null}
-
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".csv,.tsv,.xlsx,.xls"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) void handleUpload(file);
-              e.target.value = '';
-            }}
-          />
-        </div>
-
-        {result ? (
-          <div className="mt-4 rounded-lg bg-zinc-50 p-3 text-sm">
-            <p className="text-zinc-900">Подключено ящиков: {result.imported}</p>
-            {result.truncated != null && result.fileRows != null ? (
-              <p className="mt-0.5 text-amber-600">
-                В файле {result.fileRows} строк, прочитано {result.truncated} — дальше первых 20 000 портал не берёт.
-              </p>
-            ) : null}
-            {/* Провайдера выбрал портал, а не человек — значит, его решение
-                должно быть видно сразу, а не всплывать на проверке входа. */}
-            {Object.keys(result.detected ?? {}).length ? (
-              <p className="mt-0.5 text-zinc-600">
-                Распознано:{' '}
-                {Object.entries(result.detected)
-                  .sort((a, b) => b[1] - a[1])
-                  .map(([id, count]) => `${providerLabel(id)} — ${count}`)
-                  .join(', ')}
-              </p>
-            ) : null}
-            {result.errors.length ? (
-              <ul className="mt-2 space-y-1 text-zinc-600">
-                {/* line === null — сломан файл целиком: подпись «Строка N» тут
-                    отправила бы искать проблему в данных, хотя она в заголовках. */}
-                {result.errors.slice(0, 10).map((row, index) => (
-                  <li key={`${row.line ?? 'file'}-${row.email ?? ''}-${index}`}>
-                    {row.line === null
-                      ? row.message
-                      : `Строка ${row.line}${row.email ? ` (${row.email})` : ''}: ${row.message}`}
-                  </li>
-                ))}
-                {result.errors.length > 10 ? <li>…и ещё {result.errors.length - 10}</li> : null}
-              </ul>
-            ) : null}
-          </div>
-        ) : null}
-
-        {notice ? <p className="mt-3 text-sm text-emerald-600">{notice}</p> : null}
-        {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
-      </div>
-
-      {/* Поиск и фильтр тегов — между подключением и списком: это про список,
-          но нужны до того, как в нём начнёшь что-то искать глазами. */}
+      {/* Поиск, фильтр тегов и «Добавить почты» — над списком: это про список,
+          и нужны до того, как в нём начнёшь что-то искать глазами. */}
       <div className="flex flex-wrap items-center justify-center gap-2">
         <div className="relative w-full max-w-md">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
@@ -498,6 +363,14 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
             await Promise.all([loadTags(), load(page)]);
           }}
         />
+        <button
+          type="button"
+          onClick={() => setAddOpen(true)}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-500"
+        >
+          <Plus className="h-4 w-4" />
+          Добавить почты
+        </button>
       </div>
 
       <div className="rounded-xl border border-zinc-200 bg-white">
