@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Loader2, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
+import { Check, Loader2, Pencil, Plus, RefreshCw, Search, Trash2, X } from 'lucide-react';
 import {
   bulkMailboxes,
   deleteMailbox,
@@ -527,20 +527,9 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                         {mailbox.last_error ? (
                           <div className="mt-0.5 text-xs text-amber-600">{mailbox.last_error}</div>
                         ) : null}
-                        {/* Имя отправителя в письмах («Иван <box@dom>»): правится
-                            прямо в строке, как лимит. */}
-                        <input
-                          type="text"
-                          defaultValue={mailbox.display_name ?? ''}
-                          placeholder="Имя отправителя"
-                          disabled={false}
-                          onBlur={(e) => {
-                            const next = e.target.value.trim();
-                            if (next !== (mailbox.display_name ?? '')) {
-                              void act(mailbox.id, { displayName: next });
-                            }
-                          }}
-                          className="mt-1 w-44 rounded-md border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-xs text-zinc-600"
+                        <SenderNameField
+                          value={mailbox.display_name ?? ''}
+                          onSave={(next) => act(mailbox.id, { displayName: next })}
                         />
                         {mailbox.probe ? (
                           <button
@@ -766,6 +755,96 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
           )}
         </SenderModal>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * Имя отправителя в письмах («Иван <box@dom>»). Правится только по карандашу:
+ * открытое поле в каждой строке ловило случайные клики и выглядело как форма.
+ * Enter или клик мимо — сохранить, Esc — отменить.
+ */
+function SenderNameField({ value, onSave }: { value: string; onSave: (next: string) => Promise<void> }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const [saving, setSaving] = useState(false);
+  // Enter сохраняет, а следом поле теряет фокус и зовёт сохранение ещё раз.
+  const busy = useRef(false);
+
+  const start = () => {
+    setDraft(value);
+    setEditing(true);
+  };
+
+  const save = async () => {
+    if (busy.current) return;
+    const next = draft.trim();
+    if (next === value) {
+      setEditing(false);
+      return;
+    }
+    busy.current = true;
+    setSaving(true);
+    try {
+      await onSave(next);
+      setEditing(false);
+    } catch {
+      /* не сохранилось — поле остаётся открытым с набранным */
+    } finally {
+      busy.current = false;
+      setSaving(false);
+    }
+  };
+
+  if (!editing) {
+    return (
+      <div className="group mt-1 flex items-center gap-1 text-xs">
+        <span className={value ? 'text-zinc-600' : 'text-zinc-400'}>{value || 'Имя не задано'}</span>
+        <button
+          type="button"
+          onClick={start}
+          aria-label="Изменить имя отправителя"
+          title="Изменить имя отправителя"
+          className="rounded p-0.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
+        >
+          <Pencil className="h-3 w-3" />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-1 flex items-center gap-1">
+      <input
+        type="text"
+        value={draft}
+        autoFocus
+        disabled={saving}
+        placeholder="Имя отправителя"
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') void save();
+          if (e.key === 'Escape') setEditing(false);
+        }}
+        onBlur={() => void save()}
+        className="w-44 rounded-md border border-zinc-300 bg-white px-2 py-0.5 text-xs text-zinc-900"
+      />
+      {saving ? (
+        <Loader2 className="h-3 w-3 animate-spin text-zinc-400" />
+      ) : (
+        // onMouseDown, а не onClick: иначе blur поля сохранит раньше клика.
+        <button
+          type="button"
+          onMouseDown={(e) => {
+            e.preventDefault();
+            void save();
+          }}
+          aria-label="Сохранить имя"
+          className="rounded p-0.5 text-emerald-600 hover:bg-zinc-100"
+        >
+          <Check className="h-3 w-3" />
+        </button>
+      )}
     </div>
   );
 }
