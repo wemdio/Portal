@@ -206,7 +206,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
           <div className="space-y-2 border-b border-zinc-200 px-3 py-2.5">
             <div className="flex items-center justify-between gap-2">
               <span className="inline-flex items-center gap-2 text-sm font-semibold text-zinc-900">
-                Переписки {total}
+                Переписок — {total} шт.
                 {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400" /> : null}
               </span>
               <button
