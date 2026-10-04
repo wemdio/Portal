@@ -500,8 +500,6 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                   <th className="px-3 py-2 font-medium">В Google</th>
                   <th className="px-3 py-2 font-medium">Статус</th>
                   <th className="px-3 py-2 font-medium">Лимит/день</th>
-                  <th className="px-3 py-2 font-medium">SMTP</th>
-                  <th className="px-3 py-2 font-medium">IMAP</th>
                   <th className="px-5 py-2" />
                 </tr>
               </thead>
@@ -628,12 +626,6 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                           }}
                           className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1 text-sm text-zinc-900"
                         />
-                      </td>
-                      <td className="px-3 py-2.5 text-zinc-600">
-                        {mailbox.smtp_host}:{mailbox.smtp_port}
-                      </td>
-                      <td className="px-3 py-2.5 text-zinc-600">
-                        {mailbox.imap_host ? `${mailbox.imap_host}:${mailbox.imap_port}` : '—'}
                       </td>
                       <td className="px-5 py-2.5">
                         <div className="flex items-center justify-end gap-2">
