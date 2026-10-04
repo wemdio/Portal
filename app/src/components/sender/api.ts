@@ -228,6 +228,8 @@ export interface CampaignDetailsDto {
     send_weekdays: number[];
     gap_seconds: number;
     gap_jitter_seconds: number;
+    /** Проект портала; null — кампания ни к какому не привязана. */
+    project_id: string | null;
   };
   /** Строка на вариант письма: у шага без А/Б-теста она одна (variant_no = 1). */
   steps: { step_no: number; variant_no?: number; delay_hours: number; subject: string; body: string }[];
@@ -459,6 +461,8 @@ export function createCampaign(body: {
   /** Пауза между письмами одного ящика: базовая и случайная добавка, секунды. */
   gapSeconds: number;
   gapJitterSeconds: number;
+  /** Проект портала; null — без проекта. */
+  projectId: string | null;
   /** Автосохранение недописанной формы: кампанию заведут без проверок. */
   draft?: boolean;
 }) {
@@ -538,6 +542,8 @@ export function updateCampaign(
     sendWeekdays: number[];
     gapSeconds: number;
     gapJitterSeconds: number;
+    /** Проект портала; null — отвязать. */
+    projectId: string | null;
     /** Автосохранение недописанной формы: правки примут без проверок. */
     draft?: boolean;
   },
@@ -856,4 +862,15 @@ export function uploadRecipients(campaignId: string, file: File, mode: 'append' 
     file,
     mode === 'replace' ? { mode } : undefined,
   );
+}
+
+/** Проект портала для привязки кампании; active — в работе, тестировании или подготовке. */
+export interface SenderProjectDto {
+  id: string;
+  label: string;
+  active: boolean;
+}
+
+export function fetchSenderProjects() {
+  return authFetchJson<{ projects: SenderProjectDto[] }>(`${BASE}/projects`);
 }

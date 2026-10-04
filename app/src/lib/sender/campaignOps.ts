@@ -179,6 +179,16 @@ export async function replaceSteps(campaignId: string, steps: PreparedStep[]): P
   await insertSteps(campaignId, steps);
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Проект кампании из тела запроса: uuid или null. Мусор не доходит до базы —
+ * иначе вместо понятного «без проекта» был бы отказ внешнего ключа.
+ */
+export function projectIdOf(raw: unknown): string | null {
+  return typeof raw === 'string' && UUID_RE.test(raw.trim()) ? raw.trim() : null;
+}
+
 export interface CreateCampaignInput {
   name: string;
   mailboxIds: string[];
@@ -193,6 +203,8 @@ export interface CreateCampaignInput {
   gapJitterSeconds?: number;
   /** Папка рассылок (sender_folders) — у рассылок из автоаутрича. */
   folderId?: string | null;
+  /** Проект портала, к которому относится кампания; необязательно. */
+  projectId?: string | null;
   sourceKind?: CampaignSourceKind;
   /** Запуск автоаутрича (parser_jobs.id), из которого зальются получатели. */
   sourceJobId?: string | null;
@@ -235,6 +247,7 @@ export async function createCampaign(input: CreateCampaignInput): Promise<{ id: 
       gap_seconds: input.gapSeconds ?? 180,
       gap_jitter_seconds: input.gapJitterSeconds ?? 120,
       folder_id: input.folderId ?? null,
+      project_id: projectIdOf(input.projectId),
       source_kind: input.sourceKind ?? 'manual',
       source_job_id: input.sourceJobId ?? null,
       created_by: input.createdBy,
