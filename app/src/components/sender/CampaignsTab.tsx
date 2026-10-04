@@ -254,7 +254,9 @@ function CampaignRow({
             <Pause className="h-3.5 w-3.5" />
             Пауза
           </button>
-        ) : campaign.status !== 'done' ? (
+        ) : campaign.status !== 'done' && !campaign.scheduled_start_at ? (
+          // Запуск уже назначен — вместо «Запустить» только «Отменить запуск»:
+          // две кнопки запуска рядом читались как «время не сохранилось».
           <button
             type="button"
             onClick={() => onAction('start')}
