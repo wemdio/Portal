@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState, type CSSProperties } from 'react';
-import { Loader2, MessageSquare, RefreshCw, Search, Settings2 } from 'lucide-react';
+import { Loader2, MessageSquare, RefreshCw, Search, Settings } from 'lucide-react';
 import { ColumnResizer, useColumnWidths } from '@/components/ResizableColumns';
 import { fetchCampaigns, fetchThreads, type CampaignDto, type ThreadDto } from './api';
 import { CampaignReplyKbModal } from './CampaignReplyKbModal';
@@ -160,7 +160,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
                     title="База знаний для ответов: бриф, тон, пример"
                     className="shrink-0 rounded p-0.5 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-700"
                   >
-                    <Settings2 className="h-3.5 w-3.5" />
+                    <Settings className="h-3.5 w-3.5" />
                   </button>
                 </div>
                 {/* Ящики — только у выбранной кампании: иначе колонка превращается
