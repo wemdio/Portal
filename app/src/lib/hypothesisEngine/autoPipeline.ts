@@ -33,7 +33,10 @@
  *      ночь сборку и не покупает, см. stages/baseCollectRefill.ts, блок
  *      «ПЕРЕНОС»), остальные пропускаются ('carry_covers'): бюджет дня всё
  *      равно уйдёт очереди, и их ночь кончилась бы 'cap_exhausted' без единого
- *      письма. Подробности — у readCarryoverByVertical;
+ *      письма. День закрывает только очередь вертикали, чья ночь действительно
+ *      поставлена: застрявшая в сборке ('existing') или не поставленная
+ *      вертикаль уступает ночь следующей очереди, а затем и вертикалям без
+ *      очереди. Подробности — у readCarryoverByVertical и в цикле вертикалей;
  *   3a. ПРЕДПОЛЁТ ЁМКОСТИ: сколько контактов ещё принимает воркспейс
  *      рассыльщика. Ноль — сборка НЕ ставится (и остальные вертикали проекта
  *      тоже: воркспейс у них общий), потому что платит сборка, а не долив:
@@ -516,10 +519,10 @@ export interface HeAutoPipelineTickSummary {
    */
   dry: number;
   /**
-   * Вертикалей, которым ночь не поставлена, потому что очередь переноса
-   * проекта покрывает остаток дня, а их очередь не из старейших (шаг 3a- в
-   * шапке). НЕ failed: это экономия — бюджет дня всё равно уйдёт перенесённым
-   * компаниям.
+   * Вертикалей, которым ночь не поставлена, потому что очереди переноса уже
+   * поставленных этой ночью вертикалей покрывают остаток дня, а их очередь не
+   * из старейших (шаг 3a- в шапке). НЕ failed: это экономия — бюджет дня всё
+   * равно уйдёт перенесённым компаниям.
    */
   carryCovers: number;
   failed: number;
@@ -929,6 +932,12 @@ async function readRefillDayRemaining(
  * неудачной ночи: её ночь падает на шаге кампании/пресета, до брони, и строка
  * прогона — обычный 'failed'.
  *
+ * Вертикаль, чья база застряла в сборке, решающей ночи не получает вовсе
+ * (строка прогона так и стоит 'collecting'), и это правило её не отсеет. Её
+ * отсеивает тик: очередь считается закрывающей день, только когда ночь
+ * вертикали этим тиком действительно поставлена (carryRunning в
+ * runForConfig), а 'existing' — не поставлена.
+ *
  * Не решают (пропускаются, как и в серии отказов refillStreakVerdict): ночь без
  * бюджета ('failed' с budget_outcome 'cap_exhausted'), повтор прогона той же
  * базы ('already_reserved') и отмена клиентом (stats.cancelled). Ночь без
@@ -1191,12 +1200,23 @@ async function runForConfig(
   //
   // Хватает очереди на день — ночь получают ТОЛЬКО вертикали с самой старой
   // очередью, по возрастанию её возраста, пока их компаний не хватит на
-  // остаток дня (carryPicked). Ночь такой вертикали сборку не покупает
-  // (carryOnly в стадии), а остальные — и без очереди, и с более свежей —
-  // пропускаются ('carry_covers'): их ночь кончилась бы 'cap_exhausted', то
-  // есть строкой отказа и ещё одной вертикалью, которой бюджет не дал ничего.
-  // Старые идут первыми, потому что у очереди есть срок: при гонке за бронь
-  // случайный победитель оставлял бы старейшие компании ждать до истечения.
+  // остаток дня. Ночь такой вертикали сборку не покупает (carryOnly в
+  // стадии), а остальные — и без очереди, и с более свежей — пропускаются
+  // ('carry_covers'): их ночь кончилась бы 'cap_exhausted', то есть строкой
+  // отказа и ещё одной вертикалью, которой бюджет не дал ничего. Старые идут
+  // первыми, потому что у очереди есть срок: при гонке за бронь случайный
+  // победитель оставлял бы старейшие компании ждать до истечения.
+  //
+  // День закрывает только очередь вертикали, чья ночь ДЕЙСТВИТЕЛЬНО поставлена
+  // (carryRunning), а не очередь, которую мы надеялись отправить. Поэтому при
+  // покрытом дне вертикали с очередью идут первыми (от старейшей), остальные —
+  // следом в прежнем порядке, и решение «пропустить» принимается по уже
+  // поставленным ночам. Вертикаль, чья ночь не встала — уже собирается
+  // ('existing': база застряла в сборке), сбой постановки, пометка сухой, —
+  // день не закрывает: ночь получает следующая по возрасту очередь, а не
+  // хватило очередей — и вертикали без очереди. Без этого одна застрявшая
+  // вертикаль с самой старой очередью отнимала бы ночь у здоровых до конца
+  // срока очереди (до 7 суток).
   const carryByVertical =
     budgetExhausted || verticals.length === 0
       ? null
@@ -1211,17 +1231,22 @@ async function runForConfig(
   const projectCarry = carryCandidates.reduce((sum, c) => sum + c.companies, 0);
   const dayLeft = dayRemaining ?? config.daily_leads_cap;
   const carryCoversDay = dayLeft !== null && projectCarry > 0 && projectCarry >= dayLeft;
-  const carryPicked = new Set<string>();
-  if (carryCoversDay) {
-    let picked = 0;
-    for (const c of carryCandidates.slice().sort((a, b) => a.oldestMs - b.oldestMs)) {
-      if (picked >= (dayLeft ?? 0) || carryPicked.size >= perRun) break;
-      carryPicked.add(c.id);
-      picked += c.companies;
-    }
-  }
+  const carryQueueOf = new Map(carryCandidates.map((c) => [c.id, c.companies]));
+  const verticalById = new Map(verticals.map((v) => [v.id, v]));
+  const tickOrder = carryCoversDay
+    ? [
+        ...carryCandidates
+          .slice()
+          .sort((a, b) => a.oldestMs - b.oldestMs)
+          .map((c) => verticalById.get(c.id))
+          .filter((v): v is (typeof verticals)[number] => v !== undefined),
+        ...verticals.filter((v) => !carryQueueOf.has(v.id)),
+      ]
+    : verticals;
+  /** Компании очередей вертикалей, чья ночь этим тиком действительно поставлена. */
+  let carryRunning = 0;
 
-  for (const vertical of budgetExhausted ? [] : verticals) {
+  for (const vertical of budgetExhausted ? [] : tickOrder) {
     if (enqueued >= perRun) break;
     const target = campaignByVertical.get(vertical.id);
     if (!target) {
@@ -1276,20 +1301,20 @@ async function runForConfig(
 
     // ─── ПЕРЕНОС ЗАКРЫВАЕТ ДЕНЬ (до предполёта: запрос к рассыльщику не
     //     тратим на вертикаль, которую не собираем) ───
-    // Очереди проекта хватает на остаток дня: ночь ставим только вертикалям
-    // со старейшей очередью (carryPicked) — их ночь сборку и не купит
-    // (carryOnly в стадии), а ночь любой другой кончилась бы 'cap_exhausted'
-    // без единого письма. Строки журнала пропуск не пишет — та же причина,
-    // что у budget_exhausted и dry.
-    if (carryCoversDay && !carryPicked.has(vertical.id)) {
+    // Очереди уже поставленных ночей хватает на остаток дня (carryRunning):
+    // их ночь сборку и не купит (carryOnly в стадии), а ночь любой другой
+    // кончилась бы 'cap_exhausted' без единого письма. Пока не хватает —
+    // ночь получает следующая вертикаль порядка tickOrder. Строки журнала
+    // пропуск не пишет — та же причина, что у budget_exhausted и dry.
+    if (carryCoversDay && carryRunning >= (dayLeft ?? 0)) {
       summary.carryCovers += 1;
       detail({
         verticalId: vertical.id,
         status: 'carry_covers',
         ...dryNightsDetail,
         message:
-          `carried-over companies (${projectCarry}) cover today's lead budget (${dayLeft}) — ` +
-          'older queues go first, no run for this vertical tonight',
+          `carried-over companies of the verticals running tonight (${carryRunning}) cover ` +
+          `today's lead budget (${dayLeft}) — older queues go first, no run for this vertical tonight`,
       });
       continue;
     }
@@ -1391,6 +1416,8 @@ async function runForConfig(
 
     enqueued += 1;
     summary.enqueued += 1;
+    // Ночь встала — её очередь (если есть) уйдёт этой ночью и закрывает день.
+    carryRunning += carryQueueOf.get(vertical.id) ?? 0;
     const baseId = asString(result.base.id);
     await insertRun(supabase, {
       config_id: config.id,

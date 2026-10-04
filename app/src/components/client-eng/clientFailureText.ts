@@ -126,7 +126,9 @@ export const HE_REFILL_RUN_KEPT_EN = 'Contacts already in your campaigns stay th
  * ёмкости (stages/baseCollectRefill.ts, autoPipeline.ts). Убрали алерт или
  * любой из вызовов — убирайте и эту фразу, иначе кабинет врёт. Алерт
  * best-effort: без TELEGRAM_HEALTH_BOT_TOKEN / TELEGRAM_HEALTH_CHAT_ID в
- * контейнере движка он молчит — их наличие в предрелизной проверке.
+ * контейнере движка он молчит — их наличие в предрелизной проверке. Не
+ * принятый Telegram алерт окно дедупликации не взводит: следующий такой же
+ * отказ пишет снова.
  */
 export const HE_TEAM_ON_IT_EN =
   'This stopped because of a temporary problem on our side. Our team has been notified and is already working on it.';
@@ -180,10 +182,22 @@ const FAILURES: Record<HeClientErrorCode, Omit<HeClientFailure, 'code'>> = {
     whatIsSaved: FINISHED_WORK_KEPT,
     whatToDo: TEAM_FIX_WHAT_TO_DO,
   },
+  /**
+   * Кратковременный отказ подрядчика (429/5xx модели или поиска, «transient»
+   * поиска). Решение владельца 04.10.2026: клиент не читает про провайдеров и
+   * сервисы, на которых мы собраны, — только «временная проблема на нашей
+   * стороне». Но «команда уже работает» (HE_TEAM_ON_IT_EN) здесь НЕПРАВДА:
+   * этот код алертом команде не обеспечен (opsAlert.ts шлёт только
+   * 'billing' / 'configuration' / ёмкость), такой отказ обычно проходит сам, и
+   * честный совет — повторить чуть позже. Заголовок без совета: у прогона
+   * долива «что делать» заменяет HE_REFILL_RUN_WHAT_TO_DO_EN (ночь руками не
+   * перезапускается, engText.ts), а предупреждение запуска шаблона показывает
+   * один заголовок (api/client/eng/templates/[id]/launch).
+   */
   provider: {
-    title: 'A service we rely on was temporarily unavailable, so the step stopped early.',
+    title: 'This stopped early because of a temporary problem on our side.',
     whatIsSaved: FINISHED_WORK_KEPT,
-    whatToDo: `Wait a few minutes and start it again — ${WHERE_TO_RESTART}. If it keeps failing, contact your manager.`,
+    whatToDo: `Trying again a little later usually helps: wait a few minutes, then start it again — ${WHERE_TO_RESTART}. If it keeps failing, contact your manager.`,
   },
   /**
    * Действия — только те, что в ENG-кабинете есть. Загрузки своего списка в

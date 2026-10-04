@@ -2154,8 +2154,9 @@ async function measureRefillSkipExposure(
  *  2. СЧИТАЕТ следующая ночь вертикали на тике плана
  *     (resolveHeRefillCollectCompanies): компаний очереди хватает на остаток
  *     дня — сборку не покупает. Тик крона (autoPipeline.ts) той же арифметикой
- *     по проекту не ставит сборку вертикалям без очереди, пока очередь
- *     проекта покрывает день.
+ *     по проекту не ставит сборку вертикалям без очереди, пока день покрывают
+ *     очереди вертикалей, чья ночь этим тиком действительно поставлена
+ *     (застрявшая в сборке вертикаль день не закрывает).
  *  3. БЕРЁТ ночь вертикали в доливе (claimHeRefillCarryover): 'pending' →
  *     'claimed' с id своей базы. Конкурентов нет: собирающаяся база у вертикали
  *     одна (he_bases_one_collecting_per_vertical), поэтому чужой 'claimed' —
@@ -2272,6 +2273,57 @@ const HE_REFILL_CARRYOVER_CLAIM_MAX = 500;
  * и 500 uuid в ней — это 18 КБ URL, больше буфера заголовков шлюза.
  */
 const HE_REFILL_CARRYOVER_ID_CHUNK = 50;
+
+/**
+ * Строк очереди на одну страницу чтения, которому нужен ВЕСЬ набор (отпущенные
+ * компании проекта, состояния копий параллельных баз). Один запрос PostgREST
+ * отдаёт не больше своего потолка строк (db-max-rows; у Supabase по умолчанию
+ * 1000), и хвост сверх него молча пропадал бы. Страница не больше этого потолка,
+ * а конец набора — ПУСТАЯ страница, а не короткая: так чтение верно при любом
+ * потолке сервера, в том числе ниже этой константы.
+ */
+const HE_REFILL_CARRYOVER_READ_PAGE = 1000;
+
+/**
+ * Предохранитель числа страниц одного такого чтения: миллион строк очереди у
+ * одного проекта — это десятки лет ночей, то есть сбой, а не данные.
+ */
+const HE_REFILL_CARRYOVER_READ_MAX_PAGES = 1000;
+
+/**
+ * Прочитать набор строк he_refill_carryover целиком, страницами по `id`
+ * (keyset: `id > последний прочитанный`, порядок по `id`). `page` строит
+ * запрос одной страницы: фильтры набора + `.gt('id', after)` при `after` +
+ * `.order('id').limit(HE_REFILL_CARRYOVER_READ_PAGE)`. Каждая строка обязана
+ * нести `id`.
+ *
+ * Бросает (`label: причина`) на сбое любой страницы, на ключе, который не
+ * растёт, и на превышении предохранителя — полнабора не отдаёт. У каждого
+ * читателя бросок ведёт в его безопасный исход: сверка копий не берёт очередь
+ * этой ночью (компании ждут), отпущенные компании остаются исключёнными до
+ * следующей сборки. Полнабора у сверки копий был бы хуже броска: недочитанная
+ * копия читается как «могла уйти письмом», и наша терялась бы навсегда.
+ */
+async function readHeRefillCarryPages(
+  label: string,
+  page: (afterId: string | null) => PromiseLike<{ data: unknown; error: { message: string } | null }>,
+): Promise<Array<Record<string, unknown>>> {
+  const out: Array<Record<string, unknown>> = [];
+  let after: string | null = null;
+  for (let n = 0; n < HE_REFILL_CARRYOVER_READ_MAX_PAGES; n += 1) {
+    const { data, error } = await page(after);
+    if (error) throw new Error(`${label}: ${error.message}`);
+    const rows = (Array.isArray(data) ? data : []) as Array<Record<string, unknown>>;
+    if (rows.length === 0) return out;
+    out.push(...rows);
+    const last = rows[rows.length - 1].id;
+    if (typeof last !== 'string' || (after !== null && last <= after)) {
+      throw new Error(`${label}: страница не продвинула ключ id`);
+    }
+    after = last;
+  }
+  throw new Error(`${label}: больше ${HE_REFILL_CARRYOVER_READ_MAX_PAGES} страниц`);
+}
 
 /**
  * Строка очереди — строка базы с вердиктом, пометкой гейта и датой последнего
@@ -2445,12 +2497,18 @@ async function heRefillCarryPeerConflicts(
 
   const states = new Map<string, { status: string; reason: string | null; expiresAtMs: number }>();
   for (const ids of chunked(peers.map((p) => p.id), HE_REFILL_CARRYOVER_ID_CHUNK)) {
-    const { data, error: qErr } = await ctx.supabase
-      .from('he_refill_carryover')
-      .select('source_base_id, company_key, status, settle_reason, expires_at')
-      .in('source_base_id', ids);
-    if (qErr) throw new Error(`he_refill_carryover peers: ${qErr.message}`);
-    for (const r of (data ?? []) as Array<Record<string, unknown>>) {
+    // Страницами: у полусотни баз строк очереди бывает больше потолка одного
+    // запроса, а строка, не дошедшая до этой карты, читается как «копия могла
+    // уйти письмом» — и наша копия терялась бы навсегда ('prepared_elsewhere').
+    const data = await readHeRefillCarryPages('he_refill_carryover peers', (after) => {
+      let q = ctx.supabase
+        .from('he_refill_carryover')
+        .select('id, source_base_id, company_key, status, settle_reason, expires_at')
+        .in('source_base_id', ids);
+      if (after !== null) q = q.gt('id', after);
+      return q.order('id', { ascending: true }).limit(HE_REFILL_CARRYOVER_READ_PAGE);
+    });
+    for (const r of data) {
       if (typeof r.source_base_id !== 'string' || typeof r.company_key !== 'string') continue;
       states.set(`${r.source_base_id}\u0000${r.company_key}`, {
         status: typeof r.status === 'string' ? r.status : '',
@@ -2898,6 +2956,29 @@ async function writeHeRefillCarryQueue(ctx: HeStageContext, plan: HeRefillCarryQ
  * база-источник → ключи компаний, которые больше не исключаются. Отпущена =
  * 'released' либо 'pending' с прошедшим сроком (шаг 6 блока «ПЕРЕНОС»).
  *
+ * ЧИТАЕТ ВЕСЬ НАБОР И ТОЛЬКО ЕГО. Страницами (readHeRefillCarryPages), двумя
+ * наборами: 'released' и 'pending' с `expires_at <= now` (та же граница, что
+ * у захвата, который предлагает только `expires_at > now`). Живая очередь,
+ * 'claimed', 'sent' и 'dropped' сюда не приходят: по ним исключение держит, и
+ * читать их незачем. Прежде это был один запрос по 'pending' + 'released' без
+ * страниц, и после потолка строк одного запроса (около тысячи: при 50
+ * отпущенных за ночь — около трёх недель одной вертикали) часть отпущенных
+ * компаний не доходила до карты и оставалась исключённой навсегда — ровно та
+ * потеря, ради которой перенос заведён.
+ *
+ * РОСТ И ЦЕНА (решение по чистке — в миграции 20261004_0001). 'released' —
+ * терминальная строка, и чистить её нельзя: она и ЕСТЬ пропуск исключения;
+ * удалённая строка снова исключила бы компанию, пока жива база-источник
+ * (удаление базы уносит строку каскадом). Пишется она только на истечении
+ * срока и на крючке найма, который не доживёт свежим, то есть не больше
+ * компаний ночи, оставшихся без письма: до ~50 на вертикаль за ночь при
+ * дефолтах (кап 50, пол сборки 100), а в обычном цикле переноса — около нуля.
+ * Худший год — ~18 тыс. строк на вертикаль: 19 страниц по индексу
+ * (project_id, status, id), около 3 МБ трёх коротких полей на чтение. Это
+ * всегда меньше чтения, рядом с которым оно идёт: каждая отпущенная компания
+ * лежит целыми строками в `data` своей базы, а исключение читает `data` всех
+ * баз проекта.
+ *
  * Не бросает: не прочиталось — пустая карта, то есть истёкшие компании
  * остаются исключёнными, как до переноса. Это безопасная сторона — потерянная
  * компания, а не вторая подготовка.
@@ -2908,24 +2989,26 @@ export async function loadHeRefillReleasedCompanies(
 ): Promise<Map<string, Set<string>>> {
   const out = new Map<string, Set<string>>();
   try {
-    const nowMs = Date.now();
-    const { data, error } = await ctx.supabase
-      .from('he_refill_carryover')
-      .select('source_base_id, company_key, status, expires_at')
-      .eq('project_id', projectId)
-      .in('status', ['pending', 'released']);
-    if (error) throw new Error(error.message);
-    for (const raw of (data ?? []) as Array<Record<string, unknown>>) {
-      const baseId = raw.source_base_id;
-      const key = raw.company_key;
-      if (typeof baseId !== 'string' || typeof key !== 'string' || !key) continue;
-      const released =
-        raw.status === 'released'
-        || (raw.status === 'pending' && typeof raw.expires_at === 'string' && Date.parse(raw.expires_at) <= nowMs);
-      if (!released) continue;
-      const keys = out.get(baseId);
-      if (keys) keys.add(key);
-      else out.set(baseId, new Set([key]));
+    const now = new Date().toISOString();
+    for (const status of ['released', 'pending'] as const) {
+      const rows = await readHeRefillCarryPages(`he_refill_carryover ${status}`, (after) => {
+        let q = ctx.supabase
+          .from('he_refill_carryover')
+          .select('id, source_base_id, company_key')
+          .eq('project_id', projectId)
+          .eq('status', status);
+        if (status === 'pending') q = q.lte('expires_at', now);
+        if (after !== null) q = q.gt('id', after);
+        return q.order('id', { ascending: true }).limit(HE_REFILL_CARRYOVER_READ_PAGE);
+      });
+      for (const raw of rows) {
+        const baseId = raw.source_base_id;
+        const key = raw.company_key;
+        if (typeof baseId !== 'string' || typeof key !== 'string' || !key) continue;
+        const keys = out.get(baseId);
+        if (keys) keys.add(key);
+        else out.set(baseId, new Set([key]));
+      }
     }
     return out;
   } catch (e) {

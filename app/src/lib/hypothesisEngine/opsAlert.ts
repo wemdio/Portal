@@ -29,7 +29,17 @@
  *
  * ДЕДУПЛИКАЦИЯ — в памяти процесса, двумя ключами:
  *  1. проект + вид отказа + провайдер: повтор в течение окна вида
- *     (heOpsRepeatWindowMs) не пишется вовсе. Провайдер в ключе обязателен:
+ *     (heOpsRepeatWindowMs) не пишется вовсе — но окно держится, ТОЛЬКО ЕСЛИ
+ *     сообщение про этот проект Telegram принял (`sendWorkerAlert` → true).
+ *     Занимается оно синхронно, при решении «слать» (иначе два почти
+ *     одновременных вызова ушли бы оба), а снимается, когда ни один чат
+ *     сообщение не принял: нет кредов, ошибка Telegram, сеть. Тогда следующий
+ *     такой же отказ пишет снова, а не молчит час или шесть, пока кабинет
+ *     говорит клиенту, что команда знает. Снимается по настоящему исходу
+ *     отправки, даже если он пришёл позже срока ожидания вызывающего. Повтор
+ *     того же отказа, пришедший, пока первое сообщение ещё в пути, гасится и
+ *     при неудаче не досылается — это то же событие, напишет следующее.
+ *     Провайдер в ключе обязателен:
  *     отказ модели после отказа поиска у того же проекта — ВТОРАЯ поломка, и
  *     кабинет про неё тоже пишет «команда уже работает». Окна разные:
  *       - 'billing' / 'configuration' — HE_OPS_TEAM_FIX_REPEAT_MS (1 ч). Оба
@@ -49,7 +59,9 @@
  *     проекты с тем же отказом в течение HE_OPS_BURST_WINDOW_MS (10 мин)
  *     копятся и уходят ОДНИМ сообщением-списком в конце окна — кончившийся
  *     баланс у провайдера валит все проекты очереди подряд, и это одна новость,
- *     а не двадцать.
+ *     а не двадцать. Окно свёртки от исхода отправки НЕ зависит (иначе при
+ *     лежащем Telegram объём ниже не держался бы); не принятый список снимает
+ *     окна ключа 1 у всех своих проектов.
  * ОБЪЁМ при отказе провайдера ограничивает второй ключ, а не первый: на пару
  * «провайдер + вид» не больше двух сообщений за окно свёртки (первое и
  * список), то есть не больше 12 за любой час в одном процессе, сколько бы
@@ -75,7 +87,10 @@
  * процессе может не ждать промис (`void`), одноразовый — обязан дождаться.
  *
  * Секретов в сообщении нет: причина обрезается до HE_OPS_REASON_MAX символов,
- * похожее на ключ/токен вымарывается. Транспорт — существующий
+ * похожее на ключ/токен вымарывается. Имя проекта — не длиннее
+ * HE_OPS_NAME_MAX: список из двадцати проектов должен влезть в одно сообщение
+ * (длинное транспорт режет сам и отправляет, но хвост списка тогда теряется).
+ * Транспорт — существующий
  * `lib/telegram/workerAlert.ts` (health-бот по умолчанию), второго клиента
  * Telegram здесь нет. Без кредов он только пишет предупреждение в stderr —
  * поэтому наличие TELEGRAM_HEALTH_BOT_TOKEN / TELEGRAM_HEALTH_CHAT_ID в
@@ -148,6 +163,8 @@ export const HE_OPS_BURST_WINDOW_MS = 10 * 60 * 1000;
 export const HE_OPS_SEND_TIMEOUT_MS = 15_000;
 /** Длина причины в сообщении. */
 export const HE_OPS_REASON_MAX = 200;
+/** Длина имени проекта в сообщении (id проекта пишется всегда целиком). */
+const HE_OPS_NAME_MAX = 60;
 /** Сколько проектов перечислять в свёрнутом сообщении; остальные — числом. */
 const HE_OPS_BURST_LIST_MAX = 20;
 
@@ -190,24 +207,46 @@ function redactSecrets(text: string): string {
     .replace(/\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}\b/g, '[redacted]');
 }
 
+/**
+ * Не длиннее max символов, с «…» на срезе. Срез не рвёт суррогатную пару:
+ * половинка эмодзи — невалидный UTF-8, и Telegram отклонил бы сообщение целиком.
+ */
+function clip(text: string, max: number): string {
+  if (text.length <= max) return text;
+  let end = max - 1;
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${text.slice(0, end)}…`;
+}
+
 /** Причина для сообщения: одна строка, без секретов, не длиннее HE_OPS_REASON_MAX. */
 export function heOpsReasonText(raw: string | null | undefined): string {
   const flat = redactSecrets(String(raw ?? '')).replace(/\s+/g, ' ').trim();
   if (!flat) return 'причина не записана';
-  return flat.length > HE_OPS_REASON_MAX ? `${flat.slice(0, HE_OPS_REASON_MAX - 1)}…` : flat;
+  return clip(flat, HE_OPS_REASON_MAX);
 }
 
 function projectLabel(stop: HeOpsStop): string {
   const name = stop.projectName?.trim();
-  return name ? `«${name}» (${stop.projectId})` : stop.projectId;
+  return name ? `«${clip(name, HE_OPS_NAME_MAX)}» (${stop.projectId})` : stop.projectId;
 }
 
-/** Отправка с собственным сроком: sendWorkerAlert не бросает, но и срока не знает. */
-async function sendBounded(alert: Parameters<typeof sendWorkerAlert>[0]): Promise<void> {
+/**
+ * Отправка с собственным сроком: sendWorkerAlert не бросает, но и срока не знает.
+ * `holds` — окна молчания проектов этого сообщения: не принял ни один чат —
+ * окна снимаются (см. шапку), по настоящему исходу, а не по сроку ожидания.
+ */
+async function sendBounded(alert: Parameters<typeof sendWorkerAlert>[0], holds: HeOpsHeld[]): Promise<void> {
   const deadline: { timer?: ReturnType<typeof setTimeout> } = {};
   try {
+    const delivered = sendWorkerAlert(alert).catch(() => false);
+    void delivered
+      .then((accepted) => {
+        if (!accepted) releaseHolds(holds);
+      })
+      .catch(() => undefined);
     await Promise.race([
-      sendWorkerAlert(alert).catch(() => undefined),
+      delivered,
       new Promise<void>((resolve) => {
         deadline.timer = setTimeout(() => {
           console.warn(`[he-ops-alert] Telegram не ответил за ${HE_OPS_SEND_TIMEOUT_MS}ms — идём дальше`);
@@ -223,7 +262,7 @@ async function sendBounded(alert: Parameters<typeof sendWorkerAlert>[0]): Promis
   }
 }
 
-function sendSingle(stop: HeOpsStop): Promise<void> {
+function sendSingle(stop: HeOpsStop, held: HeOpsHeld): Promise<void> {
   return sendBounded({
     workerId: WORKER_ID,
     subject: `клиентский проект остановлен — ${KIND_LABEL[stop.kind]}, ${PROVIDER_LABEL[stop.provider]}`,
@@ -245,10 +284,11 @@ function sendSingle(stop: HeOpsStop): Promise<void> {
       'клиент видит': stop.clientSees?.trim() || 'временная проблема на нашей стороне, команда уже работает',
       'сделать': actionFor(stop.kind, stop.provider, stop.stage),
     },
-  });
+  }, [held]);
 }
 
-function sendBurst(provider: HeOpsStopProvider, kind: HeOpsStopKind, stops: HeOpsStop[]): Promise<void> {
+function sendBurst(provider: HeOpsStopProvider, kind: HeOpsStopKind, pending: HeOpsPending[]): Promise<void> {
+  const stops = pending.map((p) => p.stop);
   const shown = stops.slice(0, HE_OPS_BURST_LIST_MAX);
   const lines = shown.map((s) => `${projectLabel(s)} — ${s.stage}${s.market ? '' : ' (рынок не прочитан)'}`);
   if (stops.length > shown.length) lines.push(`и ещё ${stops.length - shown.length}`);
@@ -263,21 +303,51 @@ function sendBurst(provider: HeOpsStopProvider, kind: HeOpsStopKind, stops: HeOp
       'первая причина': heOpsReasonText(stops[0]?.reason),
       'сделать': actions.join('; '),
     },
-  });
+  }, pending.map((p) => p.held));
 }
 
 /**
- * До какого момента (мс) молчать по ключу «проект | вид отказа | провайдер».
- * Хранится срок, а не время отправки: окно у видов разное.
+ * Окно молчания по ключу «проект | вид отказа | провайдер»: до какого момента
+ * (мс) молчать. Хранится срок, а не время отправки: окно у видов разное.
+ * Объектом, а не числом: снять окно может только тот вызов, который его занял
+ * (`releaseHolds` сверяет идентичность), а не более поздний с тем же сроком.
  */
-const silentUntilByProjectKind = new Map<string, number>();
+interface HeOpsHold {
+  until: number;
+}
+
+/** Окно вместе с его ключом — что снять, если сообщение не принял ни один чат. */
+interface HeOpsHeld {
+  key: string;
+  hold: HeOpsHold;
+}
+
+const silentUntilByProjectKind = new Map<string, HeOpsHold>();
+
+/** Снять окна, которые всё ещё принадлежат этим вызовам (см. шапку). */
+function releaseHolds(holds: HeOpsHeld[]): void {
+  for (const { key, hold } of holds) {
+    if (silentUntilByProjectKind.get(key) === hold) silentUntilByProjectKind.delete(key);
+  }
+  if (holds.length) {
+    console.warn(
+      `[he-ops-alert] алерт не принят ни одним чатом — окно молчания снято у ${holds.length} проект(ов), следующий такой же отказ напишет снова`,
+    );
+  }
+}
+
+/** Отказ, отложенный в свёртку, вместе с окном его проекта. */
+interface HeOpsPending {
+  stop: HeOpsStop;
+  held: HeOpsHeld;
+}
 
 interface HeOpsBurst {
   provider: HeOpsStopProvider;
   kind: HeOpsStopKind;
   /** Когда ушло первое сообщение окна. */
   leadAt: number;
-  pending: HeOpsStop[];
+  pending: HeOpsPending[];
   timer: ReturnType<typeof setTimeout> | null;
 }
 
@@ -308,18 +378,21 @@ export function notifyHeClientStop(stop: HeOpsStop, opts: { now?: number } = {})
     if (stop.market !== null && stop.market !== 'us') return Promise.resolve();
     const now = opts.now ?? Date.now();
 
-    for (const [key, until] of silentUntilByProjectKind) {
-      if (now >= until) silentUntilByProjectKind.delete(key);
+    for (const [key, hold] of silentUntilByProjectKind) {
+      if (now >= hold.until) silentUntilByProjectKind.delete(key);
     }
     const projectKey = `${stop.projectId}|${stop.kind}|${stop.provider}`;
-    const until = silentUntilByProjectKind.get(projectKey);
-    if (until !== undefined && now < until) return Promise.resolve();
-    silentUntilByProjectKind.set(projectKey, now + heOpsRepeatWindowMs(stop.kind));
+    const current = silentUntilByProjectKind.get(projectKey);
+    if (current !== undefined && now < current.until) return Promise.resolve();
+    // Занимаем окно сразу (решение синхронное), но держится оно, только если
+    // сообщение примут: иначе sendBounded его снимет (см. шапку).
+    const held: HeOpsHeld = { key: projectKey, hold: { until: now + heOpsRepeatWindowMs(stop.kind) } };
+    silentUntilByProjectKind.set(projectKey, held.hold);
 
     const burstKey = `${stop.provider}|${stop.kind}`;
     const open = bursts.get(burstKey);
     if (open && now - open.leadAt < HE_OPS_BURST_WINDOW_MS) {
-      open.pending.push(stop);
+      open.pending.push({ stop, held });
       if (!open.timer) {
         open.timer = setTimeout(
           () => {
@@ -337,7 +410,7 @@ export function notifyHeClientStop(stop: HeOpsStop, opts: { now?: number } = {})
     // этот отказ открывает новое окно.
     const previous = open ? flushBurst(burstKey) : Promise.resolve();
     bursts.set(burstKey, { provider: stop.provider, kind: stop.kind, leadAt: now, pending: [], timer: null });
-    return Promise.all([previous, sendSingle(stop)]).then(() => undefined, () => undefined);
+    return Promise.all([previous, sendSingle(stop, held)]).then(() => undefined, () => undefined);
   } catch (e) {
     console.warn('[he-ops-alert] алерт не собран:', e);
     return Promise.resolve();
