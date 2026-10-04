@@ -759,36 +759,34 @@ export function saveCampaignReplyKb(campaignId: string, kb: Omit<CampaignReplyKb
   });
 }
 
-/** Строка стоп-листа (задача 5.3). */
+/** Строка стоп-листа (задача 5.3). campaign_id null — общий стоп-лист. */
 export interface SuppressionDto {
   email: string;
   reason: string;
   note: string | null;
   created_at: string;
+  campaign_id: string | null;
+  campaign_name: string | null;
 }
 
-export function fetchSuppressions(params: { page?: number; search?: string } = {}) {
+/** Какой стоп-лист показать: общий, кампаний или оба. */
+export type SuppressionScope = 'global' | 'campaign' | 'all';
+
+export function fetchSuppressions(params: { page?: number; search?: string; scope?: SuppressionScope } = {}) {
   const query = new URLSearchParams({ page: String(params.page ?? 1) });
   if (params.search) query.set('search', params.search);
+  if (params.scope) query.set('scope', params.scope);
   return authFetchJson<{ suppressions: SuppressionDto[]; total: number; pageSize: number }>(
     `${BASE}/suppressions?${query.toString()}`,
   );
 }
 
-export function addSuppressions(input: string, note?: string) {
-  const emails = input.split(/[\s,;]+/).filter(Boolean);
-  return authFetchJson<{ imported: number; skippedExisting: number }>(`${BASE}/suppressions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ emails, note }),
-  });
-}
-
 /**
- * Большой список (загрузка файла) — частями: один запрос на десятки тысяч
- * адресов упирается в размер тела и таймаут.
+ * Добавить адреса в стоп-лист. campaignId — в стоп-лист этой кампании, без
+ * него — в общий. Большой список (загрузка файла) — частями: один запрос на
+ * десятки тысяч адресов упирается в размер тела и таймаут.
  */
-export async function addSuppressionList(emails: string[], note?: string) {
+export async function addSuppressionList(emails: string[], opts: { note?: string; campaignId?: string | null } = {}) {
   const CHUNK = 5000;
   let imported = 0;
   let skippedExisting = 0;
@@ -796,7 +794,7 @@ export async function addSuppressionList(emails: string[], note?: string) {
     const res = await authFetchJson<{ imported: number; skippedExisting: number }>(`${BASE}/suppressions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ emails: emails.slice(i, i + CHUNK), note }),
+      body: JSON.stringify({ emails: emails.slice(i, i + CHUNK), note: opts.note, campaignId: opts.campaignId ?? null }),
     });
     imported += res.imported;
     skippedExisting += res.skippedExisting;
@@ -804,8 +802,10 @@ export async function addSuppressionList(emails: string[], note?: string) {
   return { imported, skippedExisting };
 }
 
-export function removeSuppression(email: string) {
-  return authFetchJson<{ ok: true }>(`${BASE}/suppressions?email=${encodeURIComponent(email)}`, {
+export function removeSuppression(email: string, campaignId?: string | null) {
+  const query = new URLSearchParams({ email });
+  if (campaignId) query.set('campaignId', campaignId);
+  return authFetchJson<{ ok: true }>(`${BASE}/suppressions?${query.toString()}`, {
     method: 'DELETE',
   });
 }
