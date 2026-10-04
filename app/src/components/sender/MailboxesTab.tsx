@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Loader2, RefreshCw, Search, Trash2, Upload, Users } from 'lucide-react';
+import { Loader2, RefreshCw, Search, Trash2, Upload, Users, X } from 'lucide-react';
 import {
   bulkMailboxes,
   deleteMailbox,
@@ -283,6 +283,14 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
     }, SEARCH_DEBOUNCE_MS);
   };
 
+  // Крестик сбрасывает поиск сразу, без паузы ввода.
+  const clearSearch = () => {
+    if (searchTimer.current) window.clearTimeout(searchTimer.current);
+    setSearch('');
+    setAppliedSearch('');
+    resetToFirstPage();
+  };
+
   const toggleTagFilter = (id: string) => {
     const next = new Set(tagFilter);
     if (next.has(id)) next.delete(id); else next.add(id);
@@ -464,8 +472,19 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
             onChange={(e) => onSearchChange(e.target.value)}
             placeholder="Поиск по адресу"
             aria-label="Поиск по адресу"
-            className="w-full rounded-lg border border-zinc-300 bg-white py-2 pl-9 pr-3 text-sm text-zinc-900"
+            className="w-full rounded-lg border border-zinc-300 bg-white py-2 pl-9 pr-9 text-sm text-zinc-900"
           />
+          {search && (
+            <button
+              type="button"
+              onClick={clearSearch}
+              aria-label="Очистить поиск"
+              title="Очистить поиск"
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
         <TagFilterMenu
           tags={tags}
