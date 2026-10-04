@@ -70,7 +70,6 @@ export function OutreachRunResults<Row extends { id: string }, Config, Job exten
   const summary = adapter.runSummary(job);
   const readyCount = resp ? adapter.readyCount(resp) : null;
   const unverifiedCount = resp ? adapter.unverifiedCount(resp) : 0;
-  const reasons = resp ? adapter.reasonCounts(resp) : null;
   const funnel = resp?.funnel ?? null;
   const counts = adapter.stageCounts(funnel);
   const jobUrl = job ? `${adapter.apiBase}/${job.id}` : null;
@@ -140,7 +139,11 @@ export function OutreachRunResults<Row extends { id: string }, Config, Job exten
 
       {job && jobUrl ? (
         <>
-          <ChainTemplates key={job.id} jobUrl={jobUrl} running={running} lang={adapter.lang} onChanged={onRefresh} />
+          {/* Цепочки на экране не показываем — только когда компании ждут
+              «Переписать цепочку»: без блока их не довести до готовых. */}
+          {summary.stopReason === 'awaiting_templates' ? (
+            <ChainTemplates key={job.id} jobUrl={jobUrl} running={running} lang={adapter.lang} onChanged={onRefresh} />
+          ) : null}
           <SenderBlock key={`sender-${job.id}`} jobUrl={jobUrl} running={running} readyCount={readyCount} onChanged={onRefresh} />
         </>
       ) : null}
@@ -151,31 +154,6 @@ export function OutreachRunResults<Row extends { id: string }, Config, Job exten
           load={loadStage}
           onClose={() => setOpenStage(null)}
         />
-      ) : null}
-
-      {/* Причина отсева — кнопка: показывает в таблице ровно эти строки. */}
-      {reasons && Object.keys(reasons).length > 0 ? (
-        <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-          <div className="mb-2 text-sm font-semibold text-gray-900">Почему отсеивались</div>
-          <div className="flex flex-wrap gap-2">
-            {Object.entries(reasons)
-              .sort((a, b) => b[1] - a[1])
-              .map(([code, value]) => (
-                <button
-                  key={code}
-                  type="button"
-                  onClick={() => onReasonChange(reason === code ? null : code)}
-                  className={`rounded-full border px-2.5 py-0.5 text-xs transition ${
-                    reason === code
-                      ? 'border-violet-300 bg-violet-50 text-violet-800'
-                      : 'border-gray-200 bg-gray-50 text-gray-600 hover:bg-gray-100'
-                  }`}
-                >
-                  {adapter.reasonLabel(code)}: {value}
-                </button>
-              ))}
-          </div>
-        </div>
       ) : null}
 
       <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">

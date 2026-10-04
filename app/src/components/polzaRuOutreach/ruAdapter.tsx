@@ -238,7 +238,6 @@ function summaryExtras(job: RuJob) {
   if (!detail) return null;
   const notes = [
     job.status === 'running' || job.status === 'pending' ? `в пуле ${detail.pool ?? '…'} компаний` : null,
-    detail.doubtful ? `очень спорных ${detail.doubtful}` : null,
     detail.stop_reason === 'pool_exhausted' ? 'кандидаты закончились раньше лимита' : null,
     detail.stop_reason === 'scan_limit' ? 'достигнут потолок просмотра' : null,
   ].filter(Boolean);
@@ -252,23 +251,6 @@ function summaryExtras(job: RuJob) {
             .map(([code, msg]) => `${SOURCE_LABELS[code as SourceCode] ?? code}: ${msg}`)
             .join(' · ')}
         </div>
-      ) : null}
-      {detail.chains && Object.keys(detail.chains).length > 0 ? (
-        <div className="flex flex-wrap items-center gap-2 px-1 text-xs">
-          <span className="text-gray-500">Цепочки после скоринга:</span>
-          {Object.entries(detail.chains).map(([c, n]) => (
-            <span key={c} className="rounded-full bg-violet-50 px-2 py-0.5 text-violet-700">
-              {chainLabel(c)}: {n}
-            </span>
-          ))}
-        </div>
-      ) : null}
-      {/* Вакансии разбираются после поиска почты — считаются только компании с рабочей почтой. */}
-      {detail.sdr && detail.sdr.any_sales_vacancy > 0 ? (
-        <p className="px-1 text-xs text-gray-500">
-          Вакансии продаж (среди компаний с рабочей почтой): у {detail.sdr.any_sales_vacancy} компаний. В SDR-цепочку — {detail.sdr.strict_sdr} (роль
-          SDR/BDR и холодный поиск новых B2B-клиентов), остальные {detail.sdr.broad_to_general_queue} идут по другим поводам.
-        </p>
       ) : null}
     </>
   );
