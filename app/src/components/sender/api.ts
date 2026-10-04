@@ -228,6 +228,8 @@ export interface CampaignDetailsDto {
     send_weekdays: number[];
     gap_seconds: number;
     gap_jitter_seconds: number;
+    /** Проект портала; null — кампания ни к какому не привязана. */
+    project_id: string | null;
   };
   /** Строка на вариант письма: у шага без А/Б-теста она одна (variant_no = 1). */
   steps: { step_no: number; variant_no?: number; delay_hours: number; subject: string; body: string }[];
@@ -333,8 +335,24 @@ export interface GoogleSyncResult {
   failed: { account: string; error: string }[];
 }
 
+/** Итог последнего синка каталога по одному Workspace (админ-аккаунту). */
+export interface GoogleSyncAccountDto {
+  account: string;
+  /** null — синка по этому аккаунту ещё не было. */
+  lastRunAt: string | null;
+  lastSource: 'auto' | 'manual' | null;
+  lastOkAt: string | null;
+  /** Остаётся и после удачных прогонов — свежая ли она, видно по lastErrorAt. */
+  lastError: string | null;
+  lastErrorAt: string | null;
+  mailboxes: number | null;
+  added: number | null;
+}
+
 export function googleWorkspaceStatus() {
-  return authFetchJson<{ configured: boolean }>(`${BASE}/mailboxes/google`);
+  return authFetchJson<{ configured: boolean; accounts: GoogleSyncAccountDto[] }>(
+    `${BASE}/mailboxes/google`,
+  );
 }
 
 /** Синхронизировать каталог прямо сейчас; раз в час это делает воркер сам. */
@@ -443,6 +461,8 @@ export function createCampaign(body: {
   /** Пауза между письмами одного ящика: базовая и случайная добавка, секунды. */
   gapSeconds: number;
   gapJitterSeconds: number;
+  /** Проект портала; null — без проекта. */
+  projectId: string | null;
   /** Автосохранение недописанной формы: кампанию заведут без проверок. */
   draft?: boolean;
 }) {
@@ -522,6 +542,8 @@ export function updateCampaign(
     sendWeekdays: number[];
     gapSeconds: number;
     gapJitterSeconds: number;
+    /** Проект портала; null — отвязать. */
+    projectId: string | null;
     /** Автосохранение недописанной формы: правки примут без проверок. */
     draft?: boolean;
   },
@@ -737,36 +759,34 @@ export function saveCampaignReplyKb(campaignId: string, kb: Omit<CampaignReplyKb
   });
 }
 
-/** Строка стоп-листа (задача 5.3). */
+/** Строка стоп-листа (задача 5.3). campaign_id null — общий стоп-лист. */
 export interface SuppressionDto {
   email: string;
   reason: string;
   note: string | null;
   created_at: string;
+  campaign_id: string | null;
+  campaign_name: string | null;
 }
 
-export function fetchSuppressions(params: { page?: number; search?: string } = {}) {
+/** Какой стоп-лист показать: общий, кампаний или оба. */
+export type SuppressionScope = 'global' | 'campaign' | 'all';
+
+export function fetchSuppressions(params: { page?: number; search?: string; scope?: SuppressionScope } = {}) {
   const query = new URLSearchParams({ page: String(params.page ?? 1) });
   if (params.search) query.set('search', params.search);
+  if (params.scope) query.set('scope', params.scope);
   return authFetchJson<{ suppressions: SuppressionDto[]; total: number; pageSize: number }>(
     `${BASE}/suppressions?${query.toString()}`,
   );
 }
 
-export function addSuppressions(input: string, note?: string) {
-  const emails = input.split(/[\s,;]+/).filter(Boolean);
-  return authFetchJson<{ imported: number; skippedExisting: number }>(`${BASE}/suppressions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ emails, note }),
-  });
-}
-
 /**
- * Большой список (загрузка файла) — частями: один запрос на десятки тысяч
- * адресов упирается в размер тела и таймаут.
+ * Добавить адреса в стоп-лист. campaignId — в стоп-лист этой кампании, без
+ * него — в общий. Большой список (загрузка файла) — частями: один запрос на
+ * десятки тысяч адресов упирается в размер тела и таймаут.
  */
-export async function addSuppressionList(emails: string[], note?: string) {
+export async function addSuppressionList(emails: string[], opts: { note?: string; campaignId?: string | null } = {}) {
   const CHUNK = 5000;
   let imported = 0;
   let skippedExisting = 0;
@@ -774,7 +794,7 @@ export async function addSuppressionList(emails: string[], note?: string) {
     const res = await authFetchJson<{ imported: number; skippedExisting: number }>(`${BASE}/suppressions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ emails: emails.slice(i, i + CHUNK), note }),
+      body: JSON.stringify({ emails: emails.slice(i, i + CHUNK), note: opts.note, campaignId: opts.campaignId ?? null }),
     });
     imported += res.imported;
     skippedExisting += res.skippedExisting;
@@ -782,8 +802,10 @@ export async function addSuppressionList(emails: string[], note?: string) {
   return { imported, skippedExisting };
 }
 
-export function removeSuppression(email: string) {
-  return authFetchJson<{ ok: true }>(`${BASE}/suppressions?email=${encodeURIComponent(email)}`, {
+export function removeSuppression(email: string, campaignId?: string | null) {
+  const query = new URLSearchParams({ email });
+  if (campaignId) query.set('campaignId', campaignId);
+  return authFetchJson<{ ok: true }>(`${BASE}/suppressions?${query.toString()}`, {
     method: 'DELETE',
   });
 }
@@ -840,4 +862,15 @@ export function uploadRecipients(campaignId: string, file: File, mode: 'append' 
     file,
     mode === 'replace' ? { mode } : undefined,
   );
+}
+
+/** Проект портала для привязки кампании; active — в работе, тестировании или подготовке. */
+export interface SenderProjectDto {
+  id: string;
+  label: string;
+  active: boolean;
+}
+
+export function fetchSenderProjects() {
+  return authFetchJson<{ projects: SenderProjectDto[] }>(`${BASE}/projects`);
 }

@@ -55,6 +55,9 @@ export function SenderView() {
   // Адрес, по которому кликнули во вкладке «Адреса отправки»: «Ящики»
   // открываются уже отфильтрованными по нему.
   const [egressIp, setEgressIp] = useState<string | null>(null);
+  // Кампания, по которой нажали «Статистика» в списке: вкладка статистики
+  // открывается сразу с ней.
+  const [statsCampaignId, setStatsCampaignId] = useState<string | null>(null);
 
   return (
     // «Письма» — три колонки, как «Персонализированные ответы»: им нужна вся ширина.
@@ -75,6 +78,7 @@ export function SenderView() {
               setTab(item.id);
               setFocusCampaignId(null);
               setEgressIp(null);
+              setStatsCampaignId(null);
             }}
             className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium transition-colors ${
               tab === item.id
@@ -88,9 +92,18 @@ export function SenderView() {
       </div>
 
       {tab === 'mailboxes' ? <MailboxesTab initialEgressIp={egressIp} /> : null}
-      {tab === 'campaigns' ? <CampaignsTab focusCampaignId={focusCampaignId} /> : null}
+      {tab === 'campaigns' ? (
+        <CampaignsTab
+          focusCampaignId={focusCampaignId}
+          onOpenStats={(campaignId) => {
+            setStatsCampaignId(campaignId);
+            setFocusCampaignId(null);
+            setTab('stats');
+          }}
+        />
+      ) : null}
       {tab === 'threads' ? <ThreadsTab initialThreadId={initialThreadId} /> : null}
-      {tab === 'stats' ? <StatsTab /> : null}
+      {tab === 'stats' ? <StatsTab key={statsCampaignId ?? 'all'} initialCampaignId={statsCampaignId} /> : null}
       {tab === 'stoplist' ? <StoplistTab /> : null}
       {tab === 'egress' ? (
         <EgressTab

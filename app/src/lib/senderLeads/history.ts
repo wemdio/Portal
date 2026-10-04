@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { LEAD_CRITERIA_MAX } from './settings';
+import { DEFAULT_LEAD_CRITERIA, LEAD_CRITERIA_MAX, isDefaultLeadCriteria } from './settings';
 
 /**
  * Вкладка «Квалификация» автоаутрича: история оценок ответов папки и её
@@ -114,13 +114,14 @@ export async function findFolderByKey(db: SupabaseClient, key: string): Promise<
 }
 
 export function settingsDto(folder: FolderLeadRow | null): LeadSettingsDto {
-  if (!folder) return { folderExists: false, folderName: null, enabled: true, telegram: true, criteria: '' };
+  // Своего правила нет — показываем пересказ общих правил, а не пустое поле.
+  if (!folder) return { folderExists: false, folderName: null, enabled: true, telegram: true, criteria: DEFAULT_LEAD_CRITERIA };
   return {
     folderExists: true,
     folderName: folder.name,
     enabled: folder.leads_enabled,
     telegram: folder.leads_telegram,
-    criteria: folder.lead_criteria ?? '',
+    criteria: folder.lead_criteria ?? DEFAULT_LEAD_CRITERIA,
   };
 }
 
@@ -139,7 +140,11 @@ export function parseSettingsInput(body: unknown): { ok: true; value: { leads_en
   if (text.length > LEAD_CRITERIA_MAX) {
     return { ok: false, error: `«Что считать лидом» — не длиннее ${LEAD_CRITERIA_MAX} символов` };
   }
-  return { ok: true, value: { leads_enabled: enabled, leads_telegram: telegram, lead_criteria: text || null } };
+  // Текст по умолчанию — не своё правило: в базе null, ИИ идёт по общим правилам.
+  return {
+    ok: true,
+    value: { leads_enabled: enabled, leads_telegram: telegram, lead_criteria: text && !isDefaultLeadCriteria(text) ? text : null },
+  };
 }
 
 /**

@@ -197,30 +197,32 @@ function LibrarySection({
       </div>
 
       {totalPages > 1 && (
-        <div className="flex items-center justify-between gap-3 border-t border-gray-200 px-5 py-3">
-          <span className="text-xs text-gray-500">
-            {from + 1}–{from + pageRows.length} из {filtered.length}
-          </span>
-          <span className="flex items-center gap-1">
+        // Всё по центру одной группой: на широком экране счётчик слева и кнопки
+        // справа разъезжались на весь экран.
+        <div className="flex flex-col items-center gap-1 border-t border-gray-200 px-5 py-3">
+          <span className="flex items-center gap-3">
             <button
               type="button"
               disabled={page === 0}
               onClick={() => setPage(page - 1)}
-              className="rounded-md px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-40 disabled:hover:bg-transparent"
+              className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:hover:bg-transparent"
             >
               Назад
             </button>
-            <span className="px-1 text-xs text-gray-500">
-              стр. {page + 1} из {totalPages}
+            <span className="text-sm text-gray-500">
+              Стр. {page + 1} из {totalPages}
             </span>
             <button
               type="button"
               disabled={page >= totalPages - 1}
               onClick={() => setPage(page + 1)}
-              className="rounded-md px-2 py-1 text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-40 disabled:hover:bg-transparent"
+              className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:hover:bg-transparent"
             >
               Вперёд
             </button>
+          </span>
+          <span className="text-xs text-gray-400">
+            {from + 1}–{from + pageRows.length} из {filtered.length}
           </span>
         </div>
       )}

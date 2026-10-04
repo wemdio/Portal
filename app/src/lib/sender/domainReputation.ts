@@ -71,6 +71,9 @@ export const BLACKLIST_LABELS: Record<string, string> = {
   uribl: 'URIBL',
 };
 
+/** Списки, попадание в которые — «есть риски», а не «плохая». */
+const SOFT_BLACKLISTS = new Set(['surbl']);
+
 export function evaluateDomainReputation(input: ReputationInput): Reputation {
   const { health, reached, replied, bounceKinds, othersReplyRate } = input;
   const bad: string[] = [];
@@ -79,8 +82,16 @@ export function evaluateDomainReputation(input: ReputationInput): Reputation {
   if (health) {
     const listed = Object.entries(health.blacklists)
       .filter(([, status]) => status === 'listed')
-      .map(([list]) => BLACKLIST_LABELS[list] ?? list);
-    if (listed.length) bad.push(`в чёрном списке: ${listed.join(', ')}`);
+      .map(([list]) => list);
+    // SURBL — риск, а не приговор: он проверяет ссылки и адреса в тексте
+    // письма, Gmail его не смотрит. На 04.10.2026 в нём оказалась половина
+    // наших доменов, включая те, с которых «Рассылка» не отправила ни письма, —
+    // «плохая» по одному SURBL прятала домены с настоящими проблемами.
+    const hard = listed.filter((list) => !SOFT_BLACKLISTS.has(list));
+    const soft = listed.filter((list) => SOFT_BLACKLISTS.has(list));
+    const label = (lists: string[]) => lists.map((list) => BLACKLIST_LABELS[list] ?? list).join(', ');
+    if (hard.length) bad.push(`в чёрном списке: ${label(hard)}`);
+    if (soft.length) warn.push(`в чёрном списке ${label(soft)} — опасно для ссылок и адресов в тексте письма`);
     if (health.spf === 'missing') bad.push('нет SPF — почтовики не знают, кому разрешено слать от домена');
     if (health.spf === 'multiple') bad.push('две записи SPF — почтовики считают это ошибкой');
     if (health.dmarc === 'missing') warn.push('нет DMARC');

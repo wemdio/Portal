@@ -4,6 +4,7 @@ import { authenticateRequest, jsonError } from '@/lib/sender/apiHelpers';
 import {
   cancelScheduledStart,
   EDITABLE_CAMPAIGN_STATUSES,
+  projectIdOf,
   replaceSteps,
   scheduleCampaignStart,
   SenderOpError,
@@ -32,6 +33,8 @@ interface PatchBody {
   sendWeekdays?: number[];
   gapSeconds?: number;
   gapJitterSeconds?: number;
+  /** Проект портала: null — отвязать. Нет поля — привязку не трогаем. */
+  projectId?: string | null;
   /** Автосохранение недописанной формы: проверки откладываются до запуска. */
   draft?: boolean;
 }
@@ -210,6 +213,8 @@ async function updateSettings(id: string, body: PatchBody) {
       send_weekdays: body.sendWeekdays?.length ? body.sendWeekdays : [1, 2, 3, 4, 5],
       gap_seconds: Math.max(0, Math.round(body.gapSeconds ?? 180)),
       gap_jitter_seconds: Math.max(0, Math.round(body.gapJitterSeconds ?? 120)),
+      // Без поля привязку не трогаем: кампанию правят и не из формы.
+      ...('projectId' in body ? { project_id: projectIdOf(body.projectId) } : {}),
       updated_at: nowIso,
     })
     .eq('id', id);

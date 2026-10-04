@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState, type CSSProperties } from 'react';
-import { Loader2, MessageSquare, RefreshCw, Search, Settings2 } from 'lucide-react';
+import { Loader2, MessageSquare, RefreshCw, Search, Settings } from 'lucide-react';
 import { ColumnResizer, useColumnWidths } from '@/components/ResizableColumns';
 import { fetchCampaigns, fetchThreads, type CampaignDto, type ThreadDto } from './api';
 import { CampaignReplyKbModal } from './CampaignReplyKbModal';
@@ -137,10 +137,18 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
                     campaignId === campaign.id ? 'bg-blue-50 text-blue-700' : 'text-zinc-700 hover:bg-zinc-100'
                   }`}
                 >
-                  <button type="button" onClick={() => pickCampaign(campaign.id)} className="min-w-0 flex-1 text-left">
-                    <span className={campaignId === campaign.id ? 'font-medium' : ''}>{campaign.name}</span>
+                  {/* Статус всегда справа, у шестерёнки: длинное название
+                      переносится само, а статус не уезжает под него. */}
+                  <button
+                    type="button"
+                    onClick={() => pickCampaign(campaign.id)}
+                    className="flex min-w-0 flex-1 items-start gap-1.5 text-left"
+                  >
+                    <span className={`min-w-0 flex-1 break-words ${campaignId === campaign.id ? 'font-medium' : ''}`}>
+                      {campaign.name}
+                    </span>
                     <span
-                      className={`ml-1.5 inline-block rounded px-1.5 py-0.5 align-middle text-[10px] font-medium ${CAMPAIGN_STATUS_LABELS[campaign.status].className}`}
+                      className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${CAMPAIGN_STATUS_LABELS[campaign.status].className}`}
                     >
                       {CAMPAIGN_STATUS_LABELS[campaign.status].text}
                     </span>
@@ -152,7 +160,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
                     title="База знаний для ответов: бриф, тон, пример"
                     className="shrink-0 rounded p-0.5 text-zinc-400 hover:bg-zinc-200 hover:text-zinc-700"
                   >
-                    <Settings2 className="h-3.5 w-3.5" />
+                    <Settings className="h-3.5 w-3.5" />
                   </button>
                 </div>
                 {/* Ящики — только у выбранной кампании: иначе колонка превращается
@@ -198,7 +206,7 @@ export function ThreadsTab({ initialThreadId = null }: { initialThreadId?: strin
           <div className="space-y-2 border-b border-zinc-200 px-3 py-2.5">
             <div className="flex items-center justify-between gap-2">
               <span className="inline-flex items-center gap-2 text-sm font-semibold text-zinc-900">
-                Переписки {total}
+                Переписок — {total} шт.
                 {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400" /> : null}
               </span>
               <button

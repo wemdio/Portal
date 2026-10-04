@@ -2,7 +2,22 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { CalendarClock, Loader2, Pause, Play, Plus, Settings, Square, Trash2, Users, X } from 'lucide-react';
+import {
+  BarChart3,
+  CalendarClock,
+  ChevronLeft,
+  ChevronRight,
+  Loader2,
+  Pause,
+  Play,
+  Plus,
+  Search,
+  Settings,
+  Square,
+  Trash2,
+  Users,
+  X,
+} from 'lucide-react';
 import {
   deleteCampaign,
   fetchCampaigns,
@@ -33,6 +48,13 @@ const ACTION_FAILED: Record<CampaignAction, string> = {
 
 /** Сколько держится подсветка кампании, открытой по ссылке. */
 const HIGHLIGHT_MS = 4000;
+/** Кампаний на страницу в «Остальных»: папки листаются прокруткой, а эти — страницами. */
+const REST_PAGE_SIZE = 20;
+
+/** Совпадает ли название кампании с поиском: без регистра, по подстроке. */
+function matchesSearch(campaign: CampaignDto, query: string): boolean {
+  return !query || campaign.name.toLowerCase().includes(query);
+}
 
 /**
  * Вопрос перед удалением. У кампании автоаутрича удаление решает и судьбу её
@@ -139,6 +161,7 @@ function CampaignRow({
   highlighted,
   onEdit,
   onRecipients,
+  onStats,
   onAction,
 }: {
   campaign: CampaignDto;
@@ -146,6 +169,7 @@ function CampaignRow({
   highlighted: boolean;
   onEdit: () => void;
   onRecipients: () => void;
+  onStats: () => void;
   onAction: (action: CampaignAction) => void;
 }) {
   const status = CAMPAIGN_STATUS_LABELS[campaign.status];
@@ -211,6 +235,15 @@ function CampaignRow({
           <Users className="h-3.5 w-3.5" />
           База
         </button>
+        {/* Полная статистика кампании — вкладка «Статистика», 30 дней. */}
+        <button
+          type="button"
+          onClick={onStats}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100"
+        >
+          <BarChart3 className="h-3.5 w-3.5" />
+          Статистика
+        </button>
 
         {campaign.status === 'running' ? (
           <button
@@ -221,7 +254,9 @@ function CampaignRow({
             <Pause className="h-3.5 w-3.5" />
             Пауза
           </button>
-        ) : campaign.status !== 'done' ? (
+        ) : campaign.status !== 'done' && !campaign.scheduled_start_at ? (
+          // Запуск уже назначен — вместо «Запустить» только «Отменить запуск»:
+          // две кнопки запуска рядом читались как «время не сохранилось».
           <button
             type="button"
             onClick={() => onAction('start')}
@@ -288,7 +323,14 @@ function CampaignRow({
  * Рассылке» на экране запуска аутрича): после первой загрузки список
  * прокручивается к ней, и она ненадолго подсвечивается.
  */
-export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: string | null } = {}) {
+export function CampaignsTab({
+  focusCampaignId = null,
+  onOpenStats,
+}: {
+  focusCampaignId?: string | null;
+  /** «Статистика» в строке кампании: вкладка статистики с этой кампанией. */
+  onOpenStats?: (campaignId: string) => void;
+} = {}) {
   // Настройки кампании — отдельная страница: в окне поверх списка не помещались
   // ни письма цепочки, ни база с ящиками одновременно.
   const router = useRouter();
@@ -312,6 +354,9 @@ export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: str
   const [highlightId, setHighlightId] = useState<string | null>(null);
   // Кампании из ссылки нет в списке — сказать, а не молча показать список.
   const [linkMissing, setLinkMissing] = useState<string | null>(null);
+  // Поиск по названию — по всем папкам сразу, на клиенте: кампаний сотни.
+  const [search, setSearch] = useState('');
+  const [restPage, setRestPage] = useState(1);
 
   const load = useCallback(async () => {
     // Папки и кампании грузятся независимо: не загрузились папки — кампании
@@ -326,6 +371,13 @@ export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: str
         pendingFocus.current = null;
         if (list.some((campaign) => campaign.id === target)) {
           setHighlightId(target);
+          // Кампания из ссылки в «Остальных» может быть не на первой странице.
+          const folderIds = new Set(
+            foldersRes.status === 'fulfilled' ? foldersRes.value.folders.map((folder) => folder.id) : [],
+          );
+          const rest = list.filter((campaign) => !campaign.folder_id || !folderIds.has(campaign.folder_id));
+          const index = rest.findIndex((campaign) => campaign.id === target);
+          if (index >= 0) setRestPage(Math.floor(index / REST_PAGE_SIZE) + 1);
         } else {
           setLinkMissing(
             cut
@@ -417,7 +469,66 @@ export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: str
     await load();
   };
 
-  const groups = groupCampaigns(campaigns, folders);
+  const query = search.trim().toLowerCase();
+  const groups = groupCampaigns(campaigns.filter((campaign) => matchesSearch(campaign, query)), folders);
+  const folderGroups = groups.filter((group) => group.folder);
+  const restGroup = groups.find((group) => !group.folder);
+
+  const onSearch = (value: string) => {
+    setSearch(value);
+    setRestPage(1);
+  };
+
+  const renderRow = (campaign: CampaignDto) => (
+    <CampaignRow
+      key={campaign.id}
+      campaign={campaign}
+      highlighted={campaign.id === highlightId}
+      onEdit={() => router.push(`/tools/sender/campaigns/${campaign.id}`)}
+      onRecipients={() => setRecipientsOf(campaign)}
+      onStats={() => onOpenStats?.(campaign.id)}
+      onAction={(action) => void act(campaign, action)}
+    />
+  );
+
+  /** Шапка группы: название, счётчик и у папки — сводка и «Настройки». */
+  const renderHeader = (group: CampaignGroup) => {
+    const folder = group.folder;
+    const shown = group.campaigns.length;
+    // Счётчик папки — по всей базе: в список влезают только последние
+    // кампании, и «3 кампании» при десяти в папке вводили бы в заблуждение.
+    // При поиске — сколько нашлось.
+    const total = folder && !query ? Math.max(folder.campaignCount, shown) : shown;
+    return (
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-200 px-5 py-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-baseline gap-x-2">
+            <h2 className="text-base font-semibold text-zinc-900">{group.title}</h2>
+            <span className="text-sm text-zinc-400">
+              {query
+                ? `найдено: ${shown}`
+                : total === shown ? campaignsLabel(total) : `${campaignsLabel(total)}, показаны последние ${shown}`}
+            </span>
+          </div>
+          {folder ? <FolderSummary folder={folder} /> : null}
+        </div>
+        {folder ? (
+          <button
+            type="button"
+            onClick={() => setFolderSettings(folder)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 transition-colors hover:bg-zinc-100"
+          >
+            <Settings className="h-3.5 w-3.5" />
+            Настройки
+          </button>
+        ) : null}
+      </div>
+    );
+  };
+
+  const restPages = Math.max(1, Math.ceil((restGroup?.campaigns.length ?? 0) / REST_PAGE_SIZE));
+  const restPageSafe = Math.min(restPage, restPages);
+  const restShown = restGroup?.campaigns.slice((restPageSafe - 1) * REST_PAGE_SIZE, restPageSafe * REST_PAGE_SIZE) ?? [];
 
   return (
     <div className="space-y-4">
@@ -426,11 +537,29 @@ export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: str
       {linkMissing ? <p className="text-sm text-amber-600">{linkMissing}</p> : null}
 
       <div className="flex flex-wrap items-center justify-between gap-3">
-        {folders.length ? (
-          <p className="text-sm text-zinc-500">
-            Кампании автоаутричей лежат в своих папках, созданные вручную — в «Остальных».
-          </p>
-        ) : null}
+        {/* Поиск над всеми папками: кампаний сотни, и искать глазами по трём
+            спискам с прокруткой и страницами — долго. */}
+        <div className="relative w-full max-w-md">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
+          <input
+            value={search}
+            onChange={(e) => onSearch(e.target.value)}
+            placeholder="Поиск кампании по названию"
+            aria-label="Поиск кампании по названию"
+            className="w-full rounded-lg border border-zinc-300 bg-white py-2 pl-9 pr-9 text-sm text-zinc-900"
+          />
+          {search ? (
+            <button
+              type="button"
+              onClick={() => onSearch('')}
+              aria-label="Очистить поиск"
+              title="Очистить поиск"
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          ) : null}
+        </div>
         <button
           type="button"
           onClick={() => router.push('/tools/sender/campaigns/new')}
@@ -454,54 +583,64 @@ export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: str
           Загрузка…
         </div>
       ) : (
-        groups.map((group) => {
-          const folder = group.folder;
-          const shown = group.campaigns.length;
-          // Счётчик папки — по всей базе: в список влезают только последние
-          // кампании, и «3 кампании» при десяти в папке вводили бы в заблуждение.
-          const total = folder ? Math.max(folder.campaignCount, shown) : shown;
-          return (
-            <section key={group.key} className="rounded-xl border border-zinc-200 bg-white">
-              <div className="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-200 px-5 py-3">
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-baseline gap-x-2">
-                    <h2 className="text-base font-semibold text-zinc-900">{group.title}</h2>
-                    <span className="text-sm text-zinc-400">
-                      {total === shown ? campaignsLabel(total) : `${campaignsLabel(total)}, показаны последние ${shown}`}
-                    </span>
-                  </div>
-                  {folder ? <FolderSummary folder={folder} /> : null}
-                </div>
-                {folder ? (
-                  <button
-                    type="button"
-                    onClick={() => setFolderSettings(folder)}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs text-zinc-700 transition-colors hover:bg-zinc-100"
-                  >
-                    <Settings className="h-3.5 w-3.5" />
-                    Настройки
-                  </button>
-                ) : null}
-              </div>
+        <>
+          {/* Папки автоаутричей — рядом, по половине ширины: у каждой своя
+              прокрутка на ~7 кампаний, и обе видны без пролистывания страницы. */}
+          {folderGroups.length ? (
+            <div className="grid items-start gap-4 lg:grid-cols-2">
+              {folderGroups.map((group) => (
+                <section key={group.key} className="min-w-0 rounded-xl border border-zinc-200 bg-white">
+                  {renderHeader(group)}
+                  {group.campaigns.length > 0 ? (
+                    <div className="max-h-[600px] divide-y divide-zinc-100 overflow-y-auto">
+                      {group.campaigns.map(renderRow)}
+                    </div>
+                  ) : (
+                    <p className="px-5 py-8 text-center text-sm text-zinc-500">
+                      {query
+                        ? 'В этой папке ничего не нашлось.'
+                        : 'Кампаний пока нет. Они появятся здесь после кнопки «Залить в Рассылку» на экране запуска автоаутрича.'}
+                    </p>
+                  )}
+                </section>
+              ))}
+            </div>
+          ) : null}
 
-              {shown > 0 ? (
-                <div className="divide-y divide-zinc-100">
-                  {group.campaigns.map((campaign) => (
-                    <CampaignRow
-                      key={campaign.id}
-                      campaign={campaign}
-                      highlighted={campaign.id === highlightId}
-                      onEdit={() => router.push(`/tools/sender/campaigns/${campaign.id}`)}
-                      onRecipients={() => setRecipientsOf(campaign)}
-                      onAction={(action) => void act(campaign, action)}
-                    />
-                  ))}
-                </div>
-              ) : folder ? (
-                <p className="px-5 py-8 text-center text-sm text-zinc-500">
-                  Кампаний пока нет. Они появятся здесь после кнопки «Залить в Рассылку» на экране запуска
-                  автоаутрича.
-                </p>
+          {restGroup ? (
+            <section className="rounded-xl border border-zinc-200 bg-white">
+              {renderHeader(restGroup)}
+              {restShown.length > 0 ? (
+                <>
+                  <div className="divide-y divide-zinc-100">{restShown.map(renderRow)}</div>
+                  {restPages > 1 ? (
+                    <div className="flex items-center justify-end gap-2 border-t border-zinc-200 px-5 py-2.5 text-sm text-zinc-600">
+                      <button
+                        type="button"
+                        onClick={() => setRestPage(restPageSafe - 1)}
+                        disabled={restPageSafe <= 1}
+                        aria-label="Предыдущая страница"
+                        className="rounded-md p-1 hover:bg-zinc-100 disabled:opacity-40"
+                      >
+                        <ChevronLeft className="h-4 w-4" />
+                      </button>
+                      <span>
+                        {restPageSafe} из {restPages}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setRestPage(restPageSafe + 1)}
+                        disabled={restPageSafe >= restPages}
+                        aria-label="Следующая страница"
+                        className="rounded-md p-1 hover:bg-zinc-100 disabled:opacity-40"
+                      >
+                        <ChevronRight className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ) : null}
+                </>
+              ) : query ? (
+                <p className="px-5 py-8 text-center text-sm text-zinc-500">Ничего не нашлось.</p>
               ) : (
                 <div className="px-5 py-10 text-center">
                   <p className="text-sm text-zinc-500">
@@ -517,8 +656,8 @@ export function CampaignsTab({ focusCampaignId = null }: { focusCampaignId?: str
                 </div>
               )}
             </section>
-          );
-        })
+          ) : null}
+        </>
       )}
 
       {truncated ? (

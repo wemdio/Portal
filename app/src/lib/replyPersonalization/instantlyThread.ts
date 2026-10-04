@@ -14,18 +14,74 @@
 // найдёт: Instantly его к ней не привязал. Для него берём всю переписку ящика
 // с этим адресом.
 
+import * as cheerio from 'cheerio';
 import { listEmails } from '@/lib/instantly/client';
+import {
+  LEAD_DATE_FIRST_ATTRIBUTION,
+  LEAD_DATED_ATTRIBUTION,
+  LEAD_MONTH_FIRST_ATTRIBUTION,
+  removeLeadReplyQuotes,
+} from '@/lib/instantly/leadReplyHtml';
 import type { Email } from '@/lib/instantly/types';
+import { htmlToText } from './campaignSequence';
 import type { QualificationRow, ThreadMessage } from './types';
 
 /** Писем переписки ящика с адресом: последних хватает, прогрев бывает длинным. */
 const MAILBOX_CONVERSATION_LIMIT = 50;
 
+/**
+ * Строка, с которой начинается процитированная история: «> …», «On … wrote:»
+ * (у Gmail она бывает разорвана переносом до «wrote:»), «пт, 25 сент. … <a@b>:»,
+ * «-----Original Message-----», «From: …».
+ */
+function isQuoteStart(line: string): boolean {
+  const t = line.trim();
+  return t.startsWith('>')
+    || /^On\s.*\b\d{4}\b.*\d{1,2}:\d{2}/i.test(t)
+    || /\bwrote:$/i.test(t)
+    || /(?:написал|писал|пишет)(?:а|\(а\))?:$/i.test(t)
+    || /\d{1,2}:\d{2}.*<[^<>\s]+@[^<>\s]+>:$/.test(t)
+    || LEAD_DATED_ATTRIBUTION.test(t)
+    || LEAD_DATE_FIRST_ATTRIBUTION.test(t)
+    || LEAD_MONTH_FIRST_ATTRIBUTION.test(t)
+    || /^-{2,}\s*(?:Original Message|Исходное сообщение|Пересылаемое сообщение)/i.test(t)
+    || /^(?:From|От):\s/i.test(t);
+}
+
+/**
+ * Письмо без цитаты прошлой переписки: каждое прошлое письмо и так стоит в
+ * треде отдельным сообщением, а цитата превращала его в простыню из «>».
+ * Письмо, целиком состоящее из цитаты, оставляем как есть — пустым не показываем.
+ */
+function cutQuotedHistory(text: string): string {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  const cut = lines.findIndex(isQuoteStart);
+  return (cut > 0 ? lines.slice(0, cut) : lines).join('\n').trim();
+}
+
+/** Текстовая версия тоже приходит с &gt; вместо «>»; теги в ней не трогаем — «<a@b>» это адрес. */
+function decodeEntities(text: string): string {
+  return text
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&amp;/gi, '&');
+}
+
 function extractEmailText(body: Email['body']): string {
   if (!body) return '';
-  if (typeof body === 'string') return body.trim();
-  if (body.text) return body.text.trim();
-  if (body.html) return body.html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  if (typeof body === 'string') return cutQuotedHistory(decodeEntities(body));
+  if (body.text) return cutQuotedHistory(decodeEntities(body.text));
+  if (body.html) {
+    // Цитаты-блоки (Gmail, Яндекс, Outlook) убираем по разметке, а не по тексту;
+    // переносы строк и символы (&gt;, &lt;, &amp;) — как у письма в почте.
+    // Переносы внутри исходника HTML — не переносы письма.
+    const $ = cheerio.load(body.html);
+    removeLeadReplyQuotes($);
+    return cutQuotedHistory(htmlToText(($('body').html() ?? body.html).replace(/\s*\n\s*/g, ' ')));
+  }
   return '';
 }
 
