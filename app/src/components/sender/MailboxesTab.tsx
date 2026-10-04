@@ -497,7 +497,6 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                   <th className="px-3 py-2 font-medium">Тег</th>
                   <th className="px-3 py-2 font-medium">Адрес</th>
                   <th className="px-3 py-2 font-medium">В рассылке</th>
-                  <th className="px-3 py-2 font-medium">В Google</th>
                   <th className="px-3 py-2 font-medium">Статус</th>
                   <th className="px-3 py-2 font-medium">Лимит/день</th>
                   <th className="px-5 py-2" />
@@ -506,6 +505,7 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
               <tbody>
                 {mailboxes.map((mailbox) => {
                   const status = MAILBOX_STATUS_LABELS[mailbox.status];
+                  const googleProblem = mailbox.google_state ? GOOGLE_STATE_LABELS[mailbox.google_state] : undefined;
                   return (
                     <tr
                       key={mailbox.id}
@@ -589,22 +589,16 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                         </label>
                       </td>
                       <td className="px-3 py-2.5">
-                        {mailbox.google_state ? (
-                          <span
-                            className={`rounded-md px-2 py-0.5 text-xs font-medium ${
-                              GOOGLE_STATE_LABELS[mailbox.google_state]?.className ?? 'bg-zinc-100 text-zinc-600'
-                            }`}
-                          >
-                            {GOOGLE_STATE_LABELS[mailbox.google_state]?.text ?? mailbox.google_state}
+                        {/* Заблокирован или пропал в Google — это главное о
+                            ящике: синк сам снял его с рассылки, и статус входа
+                            тут уже ничего не скажет. Ящик не в рассылке —
+                            портал в него не заходит, и «Проверяется» висело бы
+                            вечно. */}
+                        {googleProblem ? (
+                          <span className={`whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-medium ${googleProblem.className}`}>
+                            {googleProblem.text}
                           </span>
-                        ) : (
-                          <span className="text-xs text-zinc-400">—</span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2.5">
-                        {/* Ящик не в рассылке — портал в него не заходит, и
-                            «Проверяется» висело бы вечно. */}
-                        {mailbox.enabled ? (
+                        ) : mailbox.enabled ? (
                           <span className={`rounded-md px-2 py-0.5 text-xs font-medium ${status.className}`}>
                             {status.text}
                           </span>
