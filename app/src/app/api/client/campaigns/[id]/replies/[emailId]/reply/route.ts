@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { requireClientAuth, jsonError } from '@/lib/clientApiHelper';
 import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAccess';
 import { getEmail, listEmails, replyToEmail, sendTestEmail } from '@/lib/instantly/client';
+import { InstantlyApiError } from '@/lib/instantly/errors';
 import { isNotPartOfCampaignError } from '@/lib/instantly/notPartOfCampaign';
 import { findEaccountForReply } from '@/lib/clientCampaignReplies/findEaccount';
 import { resolveStrayAccess } from '@/lib/clientCampaignReplies/strayAccess';
@@ -14,6 +15,7 @@ import { extractBodyText } from '@/lib/clientCampaignReplies/mapEmail';
 import { appendQuotedHistoryText, appendQuotedHistoryHtml } from '@/lib/clientCampaignReplies/quoteHistory';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { recordEmailReplied, recordEmailRead } from '@/lib/clientCampaignReplies/clientEmailReads';
+import { prepareClientReplyOutbox, finishClientReplyOutbox } from '@/lib/clientCampaignReplies/clientReplyOutbox';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -165,6 +167,7 @@ export async function POST(
     // Плата: письмо не заводит сущность в Unibox провайдера, поэтому в треде не
     // появится (кабинет предупреждает об этом заранее) — но до адресата доходит.
     let fallbackRecipientEmail: string | null = null;
+    let fallbackOutboxConfirmed = true;
     const sendAsNewLetter = async (recipient: string): Promise<void> => {
       // Independent last gate for the explicit /emails/test destination. If a
       // future caller passes Instantly's `lead` again, block it before the POST.
@@ -177,16 +180,51 @@ export async function POST(
         });
         throw new Error('Адрес получателя не совпадает с автором письма. Ответ не отправлен.');
       }
-      await sendTestEmail(
-        {
-          eaccount,
-          // Дедуп на случай, если лид уже оказался в cc.
-          to_address_email_list: mergeCcLists([actual], mergedCc).join(', '),
-          subject: replySubject,
-          body: { html: replyHtml },
-        },
-        instantlyRequestOptions,
-      );
+      const allRecipients = mergeCcLists([actual], mergedCc);
+      const outboxId = await prepareClientReplyOutbox({
+        clientUserId: userId,
+        campaignId,
+        sourceEmailId: emailId,
+        leadEmail: replyRecipientEmail,
+        fromEmail: eaccount,
+        toEmail: actual,
+        allRecipients,
+        subject: replySubject,
+        bodyText: validation.body_text!,
+      });
+      try {
+        await sendTestEmail(
+          {
+            eaccount,
+            // Дедуп на случай, если лид уже оказался в cc.
+            to_address_email_list: allRecipients.join(', '),
+            subject: replySubject,
+            body: { html: replyHtml },
+          },
+          instantlyRequestOptions,
+        );
+      } catch (err) {
+        // A 4xx rejection is definitive. A timeout/429/5xx may have been
+        // accepted upstream, so keep the record pending and forbid a blind retry.
+        if (err instanceof InstantlyApiError && err.status >= 400 && err.status < 500 && err.status !== 429) {
+          try {
+            await finishClientReplyOutbox(outboxId, 'failed');
+          } catch (recordErr) {
+            await logError('client.campaign.replies.reply.outbox_failed', recordErr, { campaignId, emailId, userId, outboxId });
+          }
+          throw err;
+        }
+        await logError('client.campaign.replies.reply.result_unknown', err, { campaignId, emailId, userId, outboxId });
+        throw new Error('Результат отправки неизвестен. Не отправляйте письмо повторно, пока не проверите его статус в истории Portal.');
+      }
+      try {
+        await finishClientReplyOutbox(outboxId, 'accepted');
+      } catch (err) {
+        // Provider acceptance and DB state are separate. Preserve the pending
+        // record and tell the client not to retry a potentially delivered email.
+        fallbackOutboxConfirmed = false;
+        await logError('client.campaign.replies.reply.outbox_failed', err, { campaignId, emailId, userId, outboxId });
+      }
       fallbackRecipientEmail = actual;
     };
 
@@ -244,6 +282,7 @@ export async function POST(
       to_email: fallbackRecipientEmail,
       sender_email: original.from_address_email?.trim().toLowerCase() ?? null,
       provider_lead_email: original.lead?.trim().toLowerCase() ?? null,
+      outbox_confirmed: via === 'test' ? fallbackOutboxConfirmed : null,
       cc_count: mergedCc.length,
       bcc_count: validation.bcc ? validation.bcc.split(',').length : 0,
       userId,
@@ -251,7 +290,7 @@ export async function POST(
 
     // eaccount в ответ не отдаём: он клиенту не нужен, а для гипотетического
     // чужого письма это был бы адрес чужого ящика.
-    return NextResponse.json({ ok: true, via, to_email: replyRecipientEmail });
+    return NextResponse.json({ ok: true, via, to_email: replyRecipientEmail, outbox_confirmed: fallbackOutboxConfirmed });
   } catch (err) {
     await logError('client.campaign.replies.reply.failed', err, { campaignId, emailId, userId });
     return jsonError(err instanceof Error ? err.message : 'Не удалось отправить ответ', 502);
