@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { Bell, BellOff } from 'lucide-react';
 import { EditorResizeHandle, useEditorHeight } from '@/components/ResizableEditor';
 import {
   fetchOpenDraft,
@@ -11,6 +12,7 @@ import {
   type GenerateResponse,
 } from './api';
 import { SendConfirmDialog } from './SendConfirmDialog';
+import { playChime, primeChime } from '@/lib/doneChime';
 import type { ReplyLanguage, ReplyListItem, ThreadMessage } from '@/lib/replyPersonalization/types';
 
 function formatTime(iso?: string) {
@@ -41,6 +43,8 @@ const GEN_KEY = (id: string) => `rp-reply-generating:${id}`;
 /** Дольше генерация не идёт — старую отметку «генерирую» считаем брошенной. */
 const GEN_MAX_MS = 5 * 60_000;
 const GEN_POLL_MS = 4_000;
+/** Звук «ответ готов» — общий на все письма; 'off' — выключен. */
+const SOUND_KEY = 'rp-done-sound';
 
 function readStore(key: string): string | null {
   try {
@@ -87,6 +91,7 @@ export function ReplyDetailPanel({
   const [recipient, setRecipient] = useState<string | null>(null);
   /** Язык письма этой переписки; приходит с тредом, по умолчанию русский. */
   const [language, setLanguage] = useState<ReplyLanguage>('ru');
+  const [soundOn, setSoundOn] = useState(true);
   const rootRef = useRef<HTMLDivElement>(null);
   /** Лента писем и последнее письмо в ней — чтобы открыть ветку на его начале. */
   const threadRef = useRef<HTMLDivElement>(null);
@@ -104,6 +109,10 @@ export function ReplyDetailPanel({
     if (threadLoading || !box || !last) return;
     box.scrollTop = Math.max(0, last.offsetTop - 16);
   }, [threadLoading, thread.length]);
+
+  useEffect(() => {
+    setSoundOn(readStore(SOUND_KEY) !== 'off');
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -188,6 +197,12 @@ export function ReplyDetailPanel({
     const typedByHand = draftText.trim() && draftText !== draft?.text;
     if (typedByHand && !window.confirm('Заменить написанный текст черновиком от ИИ?')) return;
     const qualificationId = item.id;
+    // Звук включаем на клике: позже, когда ответ придёт, браузер иначе не даст.
+    if (soundOn) primeChime();
+    // Читаем при завершении: за время генерации звук могли выключить.
+    const chime = (kind: 'done' | 'error') => {
+      if (readStore(SOUND_KEY) !== 'off') playChime(kind);
+    };
     setGenerating(true);
     setError(null);
     writeStore(GEN_KEY(qualificationId), String(Date.now()));
@@ -197,11 +212,23 @@ export function ReplyDetailPanel({
       writeStore(TEXT_KEY(qualificationId), null);
       setDraft(result);
       setDraftText(result.text);
+      chime('done');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось сгенерировать ответ');
+      chime('error');
     } finally {
       writeStore(GEN_KEY(qualificationId), null);
       setGenerating(false);
+    }
+  };
+
+  const toggleSound = () => {
+    const next = !soundOn;
+    setSoundOn(next);
+    writeStore(SOUND_KEY, next ? null : 'off');
+    if (next) {
+      primeChime();
+      playChime('done');
     }
   };
 
@@ -365,6 +392,15 @@ export function ReplyDetailPanel({
               </button>
             ))}
           </div>
+          <button
+            type="button"
+            onClick={toggleSound}
+            aria-pressed={soundOn}
+            title={soundOn ? 'Звук, когда ответ готов: вкл' : 'Звук, когда ответ готов: выкл'}
+            className="rounded-lg border border-gray-300 p-1.5 text-gray-600 hover:bg-gray-50"
+          >
+            {soundOn ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4 text-gray-400" />}
+          </button>
           {draft ? <span className="ml-auto text-xs text-gray-500">В поле — черновик ИИ, его можно править</span> : null}
         </div>
 
