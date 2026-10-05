@@ -3252,6 +3252,11 @@ async def run_client_reply_report() -> None:
                     AND context->>'via' = 'test')::int AS fallback,
                   count(*) FILTER (WHERE event = 'client.campaign.replies.reply.failed')::int AS failed,
                   count(*) FILTER (WHERE event = 'client.campaign.replies.reply.recipient_blocked')::int AS blocked,
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.outbox_failed')::int AS outbox_failed,
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.result_unknown')::int AS result_unknown,
+                  count(*) FILTER (WHERE event = 'client.campaign.replies.reply.sent'
+                    AND context->>'via' = 'test'
+                    AND context->>'outbox_confirmed' = 'false')::int AS untracked,
                   count(*) FILTER (WHERE event = 'client.campaign.replies.reply.sent'
                     AND context->>'via' = 'test'
                     AND (nullif(context->>'to_email', '') IS NULL
@@ -3274,15 +3279,19 @@ async def run_client_reply_report() -> None:
             incidents = await conn.fetch("""
                 SELECT created_at, event, message, context->>'emailId' AS email_id,
                        context->>'sender_email' AS sender_email,
-                       context->>'to_email' AS to_email
+                       context->>'to_email' AS to_email,
+                       context->>'outbox_confirmed' AS outbox_confirmed
                 FROM public.application_logs
                 WHERE created_at >= $1
                   AND (
                     event IN ('client.campaign.replies.reply.failed',
-                              'client.campaign.replies.reply.recipient_blocked')
+                              'client.campaign.replies.reply.recipient_blocked',
+                              'client.campaign.replies.reply.outbox_failed',
+                              'client.campaign.replies.reply.result_unknown')
                     OR (event = 'client.campaign.replies.reply.sent'
                       AND context->>'via' = 'test'
-                      AND (nullif(context->>'to_email', '') IS NULL
+                      AND (context->>'outbox_confirmed' = 'false'
+                        OR nullif(context->>'to_email', '') IS NULL
                         OR nullif(context->>'sender_email', '') IS NULL
                         OR lower(context->>'to_email') <> lower(context->>'sender_email')))
                   )
@@ -3302,12 +3311,16 @@ async def run_client_reply_report() -> None:
     wrong = counts["wrong_recipient"]
     unverified = counts["unverified"]
     failed = counts["failed"]
-    icon = "🔴" if blocked or wrong else "🟠" if failed or unverified else "🟢"
+    outbox_failed = counts["outbox_failed"]
+    result_unknown = counts["result_unknown"]
+    untracked = counts["untracked"]
+    icon = "🔴" if blocked or wrong or outbox_failed or result_unknown or untracked else "🟠" if failed or unverified else "🟢"
     lines = [
         f"{icon} <b>Ответы клиентам за 24 часа</b> — {_now_msk()}",
         f"По журналу принято Instantly: {counts['sent']} · отдельным письмом: {counts['fallback']}",
         f"Отказов при отправке: {failed} · блокировок адресата: {blocked}",
         f"Адресат не совпал с автором: {wrong} · адресат не записан в старом аудите: {unverified}",
+        f"Журнал исходящих: ошибок {outbox_failed} · статус неизвестен {result_unknown} · принятых без подтверждения записи {untracked}",
         f"Ответы с другим адресом автора, адресат проверен: {counts['protected']}",
     ]
     if incidents:
@@ -3325,6 +3338,8 @@ async def run_client_reply_report() -> None:
                     )
                 else:
                     detail = " · адресат/автор не записан в старом аудите"
+                if row["outbox_confirmed"] == "false":
+                    detail += " · запись в журнал не подтверждена"
             elif row["message"]:
                 detail = f" · {html.escape(row['message'][:100])}"
             lines.append(f"• {time_msk} {html.escape(event)} · <code>{email_id}</code>{detail}")

@@ -866,6 +866,48 @@ try {
   });
   await commit();
 
+  // Exercise the same RPC role as the worker, not the migration owner. The
+  // guard's implementation was correct while its missing EXECUTE grant kept
+  // every real supply job from reaching collection.
+  await db.exec(migration('20261005_0062_ve_supply_eligibility_rpc_grant.sql'));
+  await db.exec(migration('20261005_0062_ve_supply_eligibility_rpc_grant.sql'));
+  const asRole = async (role, run) => {
+    await db.exec(`set role ${role}`);
+    try { return await run(); } finally { await db.exec('reset role'); }
+  };
+  const eligibilitySql = 'select (public.ve_require_contact_supply_active($1,$2::timestamptz)).status as s';
+  await begin();
+  await inRollback(async () => {
+    await rows("update public.projects set status='В работе',deadline='2000-01-01' where id=$1",[STAFF]);
+    await rows("update public.ve_launch_queue_items set status='active' where id=$1",[ITEM]);
+    // Model the failed plan, then use the same explicit resume RPC as the UI.
+    await rows("update public.ve_contact_supply_plans set status='error',last_error='supply eligibility check: permission denied for function ve_require_contact_supply_active' where id=$1",[PLAN]);
+    const before = await rows('select id,status,run_id,attempt_id from public.ve_contact_delivery_rows where ve_project_id=$1 order by id',[VE]);
+    await asRole('service_role',async () => {
+      await expectError('worker cannot collect an errored plan before explicit resume',eligibilitySql,[PLAN,refillNow],/plan is not active/);
+      await one("select public.ve_set_contact_supply_status($1,'active',$2,$3::timestamptz)",[PLAN,USER,refillNow]);
+      check((await one(eligibilitySql,[PLAN,refillNow])).s==='active',
+        'worker can check resumed supply eligibility after the planning deadline');
+    });
+    check(JSON.stringify(before)===JSON.stringify(await rows(
+      'select id,status,run_id,attempt_id from public.ve_contact_delivery_rows where ve_project_id=$1 order by id',[VE])),
+    'supply resume leaves delivery identities and their states unchanged');
+    for (const role of ['anon','authenticated']) {
+      await asRole(role,() => expectError(`${role} cannot call worker eligibility RPC`,eligibilitySql,[PLAN,refillNow],/permission denied/i));
+    }
+    await inRollback(async () => {
+      await rows("update public.ve_contact_supply_plans set status='paused' where id=$1",[PLAN]);
+      await asRole('service_role',() => expectError('worker grant does not bypass specialist pause',eligibilitySql,[PLAN,refillNow],/plan is not active/));
+    });
+    await inRollback(async () => {
+      await rows("update public.ve_contact_supply_plans set approval_snapshot='{}'::jsonb where id=$1",[PLAN]);
+      await asRole('service_role',() => expectError('worker grant does not bypass stale approval',eligibilitySql,[PLAN,refillNow],/approval rules are stale/));
+    });
+    await rows("update public.projects set status='Завершен' where id=$1",[STAFF]);
+    await asRole('service_role',() => expectError('worker grant does not bypass a closed project',eligibilitySql,[PLAN,refillNow],/active campaign ownership and unfulfilled period/));
+  });
+  await commit();
+
   // ── Помощники не доступны ролям API ──
   await db.exec('set role service_role');
   await expectError('service_role cannot bypass the reservation wrapper for refill',

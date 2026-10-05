@@ -24,6 +24,8 @@ export interface ClientReply {
   content_preview: string | null;
   /** Plaintext body (html → text if needed) */
   body_text: string | null;
+  /** This inbound was attributed to the client's campaign by our intake, not Instantly. */
+  out_of_campaign?: boolean;
 }
 
 export interface ClientRepliesPage {
@@ -63,6 +65,8 @@ export interface ThreadMessage {
   to_recipients: Recipient[];
   /** Carbon-copy (CC) recipients of this message. */
   cc_recipients: Recipient[];
+  /** Local record for an out-of-campaign /emails/test send absent from Instantly Unibox. */
+  delivery_status?: 'sending' | 'accepted' | 'failed';
 }
 
 export interface ClientReplyThread {
