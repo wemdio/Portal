@@ -283,9 +283,11 @@ interface Props {
   lang: 'ru' | 'en';
   /** После переписывания: перечитать запуск и таблицу — готовых и расход могло стать больше. */
   onChanged?: () => void;
+  /** Чужой запуск: цепочки видны, переписать может только автор. */
+  readOnly?: boolean;
 }
 
-export function ChainTemplates({ jobUrl, running, lang, onChanged }: Props) {
+export function ChainTemplates({ jobUrl, running, lang, onChanged, readOnly = false }: Props) {
   const [templates, setTemplates] = useState<ChainTemplateItem[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});
@@ -451,13 +453,16 @@ export function ChainTemplates({ jobUrl, running, lang, onChanged }: Props) {
               ) : null}
 
               {/* Кнопка — только когда сервер её примет: запуск закончен и есть кого пересобрать. */}
-              {needsRewrite && running ? (
+              {readOnly && (needsRewrite || lettersPending) ? (
+                <div className="mt-2 text-xs text-gray-500">Переписать цепочку может только автор запуска.</div>
+              ) : null}
+              {!readOnly && needsRewrite && running ? (
                 <div className="mt-2 text-xs text-gray-500">Переписать цепочку можно после окончания запуска.</div>
               ) : null}
-              {needsRewrite && !running && waiting === 0 ? (
+              {!readOnly && needsRewrite && !running && waiting === 0 ? (
                 <div className="mt-2 text-xs text-gray-500">Эту цепочку сейчас не ждёт ни одна компания — переписывать незачем.</div>
               ) : null}
-              {(needsRewrite || lettersPending) && !running && waiting !== 0 && !isBusy ? (
+              {!readOnly && (needsRewrite || lettersPending) && !running && waiting !== 0 && !isBusy ? (
                 <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
                   <button
                     type="button"

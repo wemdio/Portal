@@ -21,6 +21,10 @@ export interface OutreachRunJob {
   total_parsed?: number | null;
   error_message?: string | null;
   created_at: string;
+  /** Автор запуска: чужие запуски открыты только на чтение. */
+  user_id?: string | null;
+  /** Имя автора — подпись в общем списке запусков. */
+  author_name?: string | null;
 }
 
 /** Ответ `/{jobId}/results` в части, общей для обоих языков. */
