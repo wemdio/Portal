@@ -6,8 +6,10 @@ import { getResourceInstantlyAccountId, isResourceAllowed } from '@/lib/clientAc
 import { listEmails } from '@/lib/instantly/client';
 import { mapInstantlyEmailToReply } from '@/lib/clientCampaignReplies/mapEmail';
 import { getReadEmailIds } from '@/lib/clientCampaignReplies/clientEmailReads';
-import { filterForeignEmails, resolveClientMailboxes } from '@/lib/clientCampaignReplies/foreignMailboxFilter';
-import type { ClientRepliesPage } from '@/lib/clientCampaignReplies/types';
+import { filterForeignEmails, normalizeMailbox, resolveClientMailboxes } from '@/lib/clientCampaignReplies/foreignMailboxFilter';
+import { looksLikeEmail } from '@/lib/clientCampaignReplies/repliesWindow';
+import { supabaseInstantly } from '@/lib/supabaseInstantly';
+import type { ClientReply, ClientRepliesPage } from '@/lib/clientCampaignReplies/types';
 import { logError } from '@/lib/loggerServer';
 
 export const dynamic = 'force-dynamic';
@@ -45,6 +47,55 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
 
   try {
     const accountId = getResourceInstantlyAccountId(campaignId, accessRows, 'campaign');
+    let savedSearchFailed = false;
+    // Search the durable reply index first. Instantly's email search does not
+    // include replies it associated with another campaign, and the normal feed
+    // only contains a recent page. Both make older/stray dialogues disappear.
+    if (search && looksLikeEmail(search) && supabaseInstantly) {
+      const { data: saved, error: savedError } = await supabaseInstantly
+        .from('instantly_lead_qualifications')
+        .select('instantly_email_id, lead_email, lead_name, reply_subject, reply_preview, reply_body, reply_timestamp, created_at, thread_id, eaccount, reply_out_of_campaign')
+        .eq('campaign_id', campaignId)
+        .ilike('lead_email', search.toLowerCase())
+        .is('machine_reply_kind', null)
+        .not('instantly_email_id', 'is', null)
+        .order('created_at', { ascending: false })
+        .limit(MAX_LIMIT);
+      if (savedError) {
+        savedSearchFailed = true;
+        await logError('client.campaign.replies.saved_search_failed', savedError, { campaignId });
+      } else if (saved?.length) {
+        const mailboxes = await resolveClientMailboxes(userId, campaignId, accountId);
+        const exact = search.toLowerCase();
+        const rows = saved.filter((row) => {
+          const mailbox = normalizeMailbox(row.eaccount);
+          if (row.lead_email?.trim().toLowerCase() !== exact) return false;
+          // Linked replies already belong to this campaign. Older records
+          // often have no eaccount, so use the live feed's foreign-mailbox
+          // rule. Strays need positive mailbox ownership (strayAccess).
+          if (row.reply_out_of_campaign) return Boolean(mailbox && mailboxes?.has(mailbox));
+          return !mailbox || !mailboxes || mailboxes.has(mailbox);
+        });
+        if (rows.length > 0) {
+          const readSet = await getReadEmailIds(userId, rows.map((row) => row.instantly_email_id));
+          const items: ClientReply[] = rows.map((row) => ({
+            id: row.instantly_email_id,
+            timestamp: row.reply_timestamp ?? row.created_at,
+            subject: row.reply_subject,
+            from_email: row.lead_email,
+            from_name: row.lead_name,
+            lead_id: null,
+            thread_id: row.thread_id,
+            is_unread: !readSet.has(row.instantly_email_id),
+            ai_interest_value: null,
+            content_preview: row.reply_preview?.slice(0, 200) ?? null,
+            body_text: row.reply_body?.slice(0, 20_000) ?? null,
+            out_of_campaign: row.reply_out_of_campaign === true,
+          }));
+          return NextResponse.json({ items: items.slice(0, limit), next_starting_after: null } satisfies ClientRepliesPage);
+        }
+      }
+    }
     // Одно чтение одной кампании на действие человека (вкладка «Ответы»,
     // поиск, «ещё») — людская доля бюджета чтения (requestPriority ниже), а не
     // фоновая: иначе при насыщенном фоне вкладка ловила бы
@@ -70,6 +121,9 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     const visible = await filterForeignEmails(data.items ?? [], mailboxes, { campaignId, userId });
 
     const items = visible.map(mapInstantlyEmailToReply);
+    if (savedSearchFailed && items.length === 0) {
+      return jsonError('Поиск ответов не завершён. Повторите через несколько секунд.', 503);
+    }
     // «NEW»-бейдж берём из НАШЕЙ персональной прочитанности (client_email_reads),
     // а не из общего флага Instantly: портал больше не вызывает markThreadAsRead,
     // поэтому is_unread из Instantly здесь иначе залипал бы навсегда (как и в
