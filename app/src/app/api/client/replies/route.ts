@@ -783,31 +783,30 @@ export async function GET(req: NextRequest) {
 
   const campaignNames = await readCampaignNames(allowedCampaignIds);
   const exactEmail = search && looksLikeEmail(search) ? search.toLowerCase() : null;
-  const saved = exactEmail
-    ? await readSavedReplyItemsByEmail(allowedCampaignIds, campaignNames, accessRows, userId, exactEmail)
-    : null;
-  let replyItems = saved ?? [];
-  let failures = 0;
+  // The saved index covers old replies, while the live window can contain a
+  // new inbound that has not been qualified yet. Search must merge both.
+  const [saved, live] = await Promise.all([
+    exactEmail
+      ? readSavedReplyItemsByEmail(allowedCampaignIds, campaignNames, accessRows, userId, exactEmail)
+      : Promise.resolve(null),
+    readReplyItems(allowedCampaignIds, campaignNames, accessRows, userId),
+  ]);
+  const replyItems = [...live.items, ...(saved ?? [])];
+  const failures = live.failures;
   let deepSearchFailures = 0;
 
-  if (replyItems.length === 0) {
-    const live = await readReplyItems(allowedCampaignIds, campaignNames, accessRows, userId);
-    replyItems = live.items;
-    failures = live.failures;
+  // The regular feed remains a bounded recent window. Older out-of-campaign
+  // replies are included by exact-address DB search above, not this window.
+  const strayItems = await readStrayReplyItems(allowedCampaignIds, campaignNames, accessRows, userId);
+  if (strayItems.length > 0) replyItems.push(...strayItems);
 
-    // The regular feed remains a bounded recent window. Older out-of-campaign
-    // replies are included by the exact-address DB search above, not this window.
-    const strayItems = await readStrayReplyItems(allowedCampaignIds, campaignNames, accessRows, userId);
-    if (strayItems.length > 0) replyItems.push(...strayItems);
-
-    // Historical replies predating our durable records still need Instantly.
-    if (exactEmail && !replyItems.some((item) => item.lead_email.toLowerCase() === exactEmail)) {
-      const extra = await fetchLeadReplyItems(
-        allowedCampaignIds, campaignNames, accessRows, userId, exactEmail,
-      );
-      replyItems.push(...extra.items);
-      deepSearchFailures = extra.failures;
-    }
+  // Historical replies predating our durable records still need Instantly.
+  if (exactEmail && !replyItems.some((item) => item.lead_email.toLowerCase() === exactEmail)) {
+    const extra = await fetchLeadReplyItems(
+      allowedCampaignIds, campaignNames, accessRows, userId, exactEmail,
+    );
+    replyItems.push(...extra.items);
+    deepSearchFailures = extra.failures;
   }
 
   if (!search && allowedCampaignIds.length > 0 && failures === allowedCampaignIds.length) {

@@ -48,6 +48,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
   try {
     const accountId = getResourceInstantlyAccountId(campaignId, accessRows, 'campaign');
     let savedSearchFailed = false;
+    let savedItems: ClientReply[] = [];
     // Search the durable reply index first. Instantly's email search does not
     // include replies it associated with another campaign, and the normal feed
     // only contains a recent page. Both make older/stray dialogues disappear.
@@ -77,8 +78,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
           return !mailbox || !mailboxes || mailboxes.has(mailbox);
         });
         if (rows.length > 0) {
-          const readSet = await getReadEmailIds(userId, rows.map((row) => row.instantly_email_id));
-          const items: ClientReply[] = rows.map((row) => ({
+          savedItems = rows.map((row) => ({
             id: row.instantly_email_id,
             timestamp: row.reply_timestamp ?? row.created_at,
             subject: row.reply_subject,
@@ -86,13 +86,12 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
             from_name: row.lead_name,
             lead_id: null,
             thread_id: row.thread_id,
-            is_unread: !readSet.has(row.instantly_email_id),
+            is_unread: false,
             ai_interest_value: null,
             content_preview: row.reply_preview?.slice(0, 200) ?? null,
             body_text: row.reply_body?.slice(0, 20_000) ?? null,
             out_of_campaign: row.reply_out_of_campaign === true,
           }));
-          return NextResponse.json({ items: items.slice(0, limit), next_starting_after: null } satisfies ClientRepliesPage);
         }
       }
     }
@@ -100,17 +99,24 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     // поиск, «ещё») — людская доля бюджета чтения (requestPriority ниже), а не
     // фоновая: иначе при насыщенном фоне вкладка ловила бы
     // «email read deferred: budget».
-    const data = await listEmails({
-      campaign_id: campaignId,
-      // Instantly v2 фильтрует по `email_type`, а не `ue_type` (ue_type —
-      // это поле в ответе). Без этого Instantly игнорил наш фильтр и
-      // возвращал все письма по кампании — и входящие, и наши же
-      // исходящие первые шаги.
-      email_type: 'received',
-      limit,
-      starting_after: startingAfter,
-      search,
-    }, { accountId, consumer: 'client_campaign_feed', requestPriority: 'interactive' });
+    let data: Awaited<ReturnType<typeof listEmails>>;
+    try {
+      data = await listEmails({
+        campaign_id: campaignId,
+        // Instantly v2 фильтрует по `email_type`, а не `ue_type` (ue_type —
+        // это поле в ответе). Без этого Instantly игнорил наш фильтр и
+        // возвращал все письма по кампании — и входящие, и наши же
+        // исходящие первые шаги.
+        email_type: 'received',
+        limit,
+        starting_after: startingAfter,
+        search,
+      }, { accountId, consumer: 'client_campaign_feed', requestPriority: 'interactive' });
+    } catch (err) {
+      if (savedItems.length === 0) throw err;
+      await logError('client.campaign.replies.live_search_failed', err, { campaignId });
+      data = { items: [], next_starting_after: undefined };
+    }
 
     // Кросс-клиентская гигиена: Instantly клеит входящее к кампании по адресу
     // отправителя, не проверяя получателя — письма, пришедшие на ящик ДРУГОГО
@@ -120,10 +126,17 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     const mailboxes = await resolveClientMailboxes(userId, campaignId, accountId);
     const visible = await filterForeignEmails(data.items ?? [], mailboxes, { campaignId, userId });
 
-    const items = visible.map(mapInstantlyEmailToReply);
-    if (savedSearchFailed && items.length === 0) {
+    const liveItems = visible.map(mapInstantlyEmailToReply);
+    if (savedSearchFailed && liveItems.length === 0) {
       return jsonError('Поиск ответов не завершён. Повторите через несколько секунд.', 503);
     }
+    // Preserve fresh inbound replies that have not entered the qualification
+    // index yet, while keeping older and out-of-campaign saved replies.
+    const byId = new Map<string, ClientReply>();
+    for (const item of savedItems) byId.set(item.id, item);
+    for (const item of liveItems) byId.set(item.id, item);
+    const items = [...byId.values()].sort((a, b) =>
+      (b.timestamp ? Date.parse(b.timestamp) : 0) - (a.timestamp ? Date.parse(a.timestamp) : 0));
     // «NEW»-бейдж берём из НАШЕЙ персональной прочитанности (client_email_reads),
     // а не из общего флага Instantly: портал больше не вызывает markThreadAsRead,
     // поэтому is_unread из Instantly здесь иначе залипал бы навсегда (как и в
@@ -131,8 +144,8 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     const readSet = await getReadEmailIds(userId, items.map((i) => i.id));
     for (const it of items) it.is_unread = !readSet.has(it.id);
     const payload: ClientRepliesPage = {
-      items,
-      next_starting_after: data.next_starting_after ?? null,
+      items: items.slice(0, limit),
+      next_starting_after: savedItems.length > 0 ? null : data.next_starting_after ?? null,
     };
     return NextResponse.json(payload);
   } catch (err) {
