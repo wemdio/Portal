@@ -15,7 +15,8 @@ export interface OutreachRunJob {
   id: string;
   status: 'pending' | 'running' | 'completed' | 'failed' | string;
   parser_type?: string;
-  config?: { limit?: number | null } | null;
+  /** autofill — запуск создан автодобором (lib/outreachAutofill), а не человеком. */
+  config?: { limit?: number | null; autofill?: boolean } | null;
   progress_percent?: number | null;
   progress_detail?: unknown;
   total_parsed?: number | null;

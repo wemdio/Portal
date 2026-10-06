@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, Loader2, Play } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, Play, Save } from 'lucide-react';
 import {
   CHAIN_LABELS,
   CHAIN_TYPES,
@@ -29,6 +29,12 @@ interface Props {
   initial?: Partial<RuOutreachConfig> | null;
   onClose: () => void;
   onStart: (config: Partial<RuOutreachConfig>) => void;
+  /**
+   * autofill — настройки автодобора (вкладка «Автодобор»): «Сохранить» вместо
+   * «Запустить», без «сколько компаний» (считает автодобор) и без «брать уже
+   * выгруженные» (автосбор их не берёт).
+   */
+  mode?: 'run' | 'autofill';
 }
 
 const input =
@@ -86,7 +92,8 @@ function Slider({
   );
 }
 
-export function LaunchPanel({ open, busy, senders, initial, onClose, onStart }: Props) {
+export function LaunchPanel({ open, busy, senders, initial, onClose, onStart, mode = 'run' }: Props) {
+  const autofill = mode === 'autofill';
   const [sources, setSources] = useState<SourceCode[]>(initial?.sources ?? DEFAULT_SOURCES);
   // Ползунок свежести начинается с 7 дней — старый запуск с меньшим окном подтягиваем к нему.
   const [freshness, setFreshness] = useState(Math.min(MAX_FRESHNESS_DAYS, Math.max(7, initial?.freshness_days ?? DEFAULT_FRESHNESS_DAYS)));
@@ -128,8 +135,12 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart }: 
   return (
     <SidePanel
       open={open}
-      title={initial ? 'Повторить запуск' : 'Новый запуск'}
-      hint="Письма не отправляются: результат — таблица и Excel с готовыми цепочками."
+      title={autofill ? 'Настройки автодобора' : initial ? 'Повторить запуск' : 'Новый запуск'}
+      hint={
+        autofill
+          ? 'Сколько компаний собрать, считает автодобор: неделя рассылки папки.'
+          : 'Письма не отправляются: результат — таблица и Excel с готовыми цепочками.'
+      }
       onClose={onClose}
       footer={
         <div className="flex items-center justify-between gap-3">
@@ -150,8 +161,14 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart }: 
               onClick={submit}
               className="inline-flex items-center rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50"
             >
-              {busy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
-              Запустить
+              {busy ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : autofill ? (
+                <Save className="mr-2 h-4 w-4" />
+              ) : (
+                <Play className="mr-2 h-4 w-4" />
+              )}
+              {autofill ? 'Сохранить' : 'Запустить'}
             </button>
           </span>
         </div>
@@ -183,11 +200,13 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart }: 
         </p>
 
         <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+          {!autofill && (
           <div>
             <label className={label}>Сколько готовых компаний</label>
             <input className={input} type="number" min={1} max={MAX_LIMIT} value={limit} onChange={(e) => setLimit(Number(e.target.value))} />
             <p className="mt-1 text-xs text-gray-500">Готовые уходят в Instantly. На 500 запуск идёт несколько часов и заметно дороже по ИИ.</p>
           </div>
+          )}
           <div>
             <label className={label}>Подпись</label>
             <select className={input} value={senderId} onChange={(e) => setSenderId(e.target.value)}>
@@ -256,7 +275,9 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart }: 
           {advanced ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
           Тонкая настройка
         </button>
-        {!advanced && <p className="mt-1 text-xs text-gray-500">Сумма госконтракта и повторные выгрузки.</p>}
+        {!advanced && (
+          <p className="mt-1 text-xs text-gray-500">{autofill ? 'Сумма госконтракта.' : 'Сумма госконтракта и повторные выгрузки.'}</p>
+        )}
 
         {advanced && (
           <div className="mt-4 space-y-5">
@@ -265,10 +286,12 @@ export function LaunchPanel({ open, busy, senders, initial, onClose, onStart }: 
               <input className={input} type="number" min={0} step={100000} value={minContract} onChange={(e) => setMinContract(Number(e.target.value))} />
             </div>
 
-            <label className="flex items-center gap-2 text-sm text-gray-700">
-              <input type="checkbox" checked={includeExported} onChange={(e) => setIncludeExported(e.target.checked)} />
-              Брать компании, которые уже выгружались раньше
-            </label>
+            {!autofill && (
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input type="checkbox" checked={includeExported} onChange={(e) => setIncludeExported(e.target.checked)} />
+                Брать компании, которые уже выгружались раньше
+              </label>
+            )}
           </div>
         )}
       </div>

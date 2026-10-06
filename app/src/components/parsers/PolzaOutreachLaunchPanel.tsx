@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Check, ChevronDown, ChevronRight, Loader2, Play } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, Loader2, Play, Save } from 'lucide-react';
 import type { PolzaOutreachConfig } from '@/types';
 import { authFetchJson } from '@/lib/authFetch';
 import {
@@ -20,6 +20,12 @@ type Props = {
   initial?: PolzaOutreachConfig | null;
   onClose: () => void;
   onStart: (config: PolzaOutreachConfig) => Promise<void>;
+  /**
+   * autofill — настройки автодобора (вкладка «Автодобор»): «Сохранить» вместо
+   * «Запустить», без «готовых компаний» (считает автодобор) и без «брать уже
+   * выгруженные» (автосбор их не берёт).
+   */
+  mode?: 'run' | 'autofill';
 };
 
 // По алфавиту: в сетке из 21+ стран нужную иначе ищут глазами. Названия —
@@ -74,7 +80,8 @@ const sectionCls = 'mb-3 text-xs font-semibold uppercase tracking-wide text-gray
  * компаний, свежесть, лимит на ИИ и источники — осталось наверху; батч YC,
  * размер компании и порог Lead Score убраны в «Тонкую настройку».
  */
-export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Props) {
+export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart, mode = 'run' }: Props) {
+  const autofill = mode === 'autofill';
   const [countries, setCountries] = useState<string[]>(initial?.countries ?? [...POLZA_OUTREACH_DEFAULT_COUNTRIES]);
   const [days, setDays] = useState<number>(initial?.posted_within_days ?? 30);
   const [limit, setLimit] = useState(String(initial?.limit ?? 500));
@@ -200,8 +207,12 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
   return (
     <SidePanel
       open
-      title={initial ? 'Повторить запуск' : 'Новый запуск'}
-      hint="Без отправки: на выходе таблица, CSV и Excel с готовыми цепочками."
+      title={autofill ? 'Настройки автодобора' : initial ? 'Повторить запуск' : 'Новый запуск'}
+      hint={
+        autofill
+          ? 'Сколько компаний собрать, считает автодобор: неделя рассылки папки.'
+          : 'Без отправки: на выходе таблица, CSV и Excel с готовыми цепочками.'
+      }
       onClose={onClose}
       footer={
         <div className="flex items-center justify-between gap-3">
@@ -222,8 +233,14 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
               disabled={busy || !canStart}
               className="inline-flex items-center rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50"
             >
-              {busy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
-              Запустить
+              {busy ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : autofill ? (
+                <Save className="mr-2 h-4 w-4" />
+              ) : (
+                <Play className="mr-2 h-4 w-4" />
+              )}
+              {autofill ? 'Сохранить' : 'Запустить'}
             </button>
           </span>
         </div>
@@ -295,6 +312,7 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
         </div>
 
         <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+          {!autofill && (
           <label className="block">
             {/* Число про выход, а не про выборку: конвейер добирает кандидатов
                 волнами, пока не наберёт столько готовых компаний. */}
@@ -310,6 +328,7 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
               className={inputCls}
             />
           </label>
+          )}
 
           <div>
             <span className={labelCls}>Свежесть вакансий</span>
@@ -435,10 +454,12 @@ export function PolzaOutreachLaunchPanel({ busy, initial, onClose, onStart }: Pr
             {/* По умолчанию компании, уже готовые в прошлых запусках, отсеиваются:
                 второй раз одной компании не пишем. Галочка — для осознанного
                 повтора (например, прошлую выгрузку так и не отправили). */}
-            <label className="flex items-center gap-2 text-sm text-gray-700 sm:col-span-2">
-              <input type="checkbox" checked={includeExported} onChange={(e) => setIncludeExported(e.target.checked)} />
-              Брать компании, которые уже выгружались раньше
-            </label>
+            {!autofill && (
+              <label className="flex items-center gap-2 text-sm text-gray-700 sm:col-span-2">
+                <input type="checkbox" checked={includeExported} onChange={(e) => setIncludeExported(e.target.checked)} />
+                Брать компании, которые уже выгружались раньше
+              </label>
+            )}
           </div>
         )}
       </div>

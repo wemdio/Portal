@@ -136,7 +136,7 @@ export function OutreachRunView<Row extends { id: string }, Config, Job extends 
         return {
           id: job.id,
           status: job.status as JobRailItem['status'],
-          title: target ? `На ${target} компаний` : 'Запуск',
+          title: `${job.config?.autofill ? 'Автодобор · ' : ''}${target ? `на ${target} компаний` : 'запуск'}`.replace(/^./, (c) => c.toUpperCase()),
           subtitle: `${author}${fmtJobDate(job.created_at)} · готово ${done}${target ? ` из ${target}` : ''}`,
           percent: job.status === 'completed' ? 100 : job.progress_percent ?? 0,
           deletable: own && job.status !== 'running' && job.status !== 'pending',
