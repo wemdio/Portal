@@ -55,7 +55,7 @@ import DashboardTab from '@/components/tg-outreach/DashboardTab';
 import BaseComparison from '@/components/tg-outreach/BaseComparison';
 import { AccountPicker } from '@/components/tg-outreach/AccountPicker';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
-import CrmSettingsPanel from '@/components/tg-outreach/CrmSettingsPanel';
+import CrmSettingsPanel, { type CrmSettings } from '@/components/tg-outreach/CrmSettingsPanel';
 import type {
   CampaignStatus,
   DialogStatus,
@@ -431,7 +431,7 @@ function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: 
 /* =================== SETTINGS TAB =================== */
 function SettingsTab({ campaign, onSave }: {
   campaign: OutreachCampaign;
-  onSave: (openai: OpenAISettings, telegram: TelegramSettings) => Promise<void>;
+  onSave: (openai: OpenAISettings, telegram: TelegramSettings, crm: CrmSettings | null) => Promise<void>;
 }) {
   const [openai, setOpenai] = useState<OpenAISettings>({ ...DEFAULT_OPENAI_SETTINGS, ...campaign.openai_settings });
   const [telegram, setTelegram] = useState<TelegramSettings>({
@@ -445,6 +445,9 @@ function SettingsTab({ campaign, onSave }: {
     },
   });
   const [saving, setSaving] = useState(false);
+  // Блок CRM грузит свои настройки сам и отдаёт текущий выбор сюда.
+  const [crm, setCrm] = useState<CrmSettings | null>(null);
+  const crmIncomplete = !!crm?.enabled && !crm.status_id;
   const [blockedRaw, setBlockedRaw] = useState(
     (campaign.telegram_settings?.blocked_usernames ?? []).join(', ')
   );
@@ -453,7 +456,7 @@ function SettingsTab({ campaign, onSave }: {
     setSaving(true);
     const parsed = blockedRaw.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean);
     const updatedTelegram = { ...telegram, blocked_usernames: parsed };
-    try { await onSave(openai, updatedTelegram); } finally { setSaving(false); }
+    try { await onSave(openai, updatedTelegram, crm); } finally { setSaving(false); }
   };
 
   const setOAI = <K extends keyof OpenAISettings>(k: K, v: OpenAISettings[K]) =>
@@ -482,8 +485,8 @@ function SettingsTab({ campaign, onSave }: {
         </p>
       </section>
 
-      {/* Переданный лид — сразу сделкой в CRM (наша AMO или клиента). Своя кнопка сохранения. */}
-      <CrmSettingsPanel campaignId={campaign.id} />
+      {/* Переданный лид — сразу сделкой в CRM (наша AMO или клиента). Сохраняется общей кнопкой. */}
+      <CrmSettingsPanel campaignId={campaign.id} onChange={setCrm} />
 
       {/* Заголовок «Telegram» снят с секции: экран целиком про Telegram-аутрич,
           и подпись ничего не отделяла от соседних блоков. */}
@@ -681,11 +684,14 @@ function SettingsTab({ campaign, onSave }: {
         )}
       </section>
 
-      <button type="button" onClick={handleSave} disabled={saving}
-        className="inline-flex items-center gap-2 rounded-full bg-indigo-600 px-6 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
-        {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-        Сохранить настройки
-      </button>
+      <div className="flex items-center gap-3">
+        <button type="button" onClick={handleSave} disabled={saving || crmIncomplete}
+          className="inline-flex items-center gap-2 rounded-full bg-indigo-600 px-6 py-2.5 text-xs font-semibold text-white hover:bg-indigo-700 hover:shadow-md transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer">
+          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+          Сохранить настройки
+        </button>
+        {crmIncomplete && <span className="text-[11px] text-amber-600">Выберите воронку и этап CRM</span>}
+      </div>
     </div>
   );
 }
@@ -7036,10 +7042,11 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
     onUpdate();
   };
 
-  const saveSettings = async (openai: OpenAISettings, telegram: TelegramSettings) => {
+  const saveSettings = async (openai: OpenAISettings, telegram: TelegramSettings, crm: CrmSettings | null) => {
     await authFetch(`${API_BASE}/campaigns/${campaign.id}`, {
       method: 'PUT',
-      body: JSON.stringify({ openai_settings: openai, telegram_settings: telegram }),
+      // crm null — блок CRM ещё не загрузился: не трогаем сохранённое.
+      body: JSON.stringify({ openai_settings: openai, telegram_settings: telegram, crm_settings: crm ?? undefined }),
     });
     onUpdate();
   };
