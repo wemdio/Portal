@@ -131,18 +131,19 @@ export function OutreachRunView<Row extends { id: string }, Config, Job extends 
         const target = job.config?.limit ?? null;
         const done = job.total_parsed ?? 0;
         const own = isOwn(job);
-        // В общем списке видно, чей запуск; в «Моих» и так ясно.
-        const author = scope === 'all' ? `${own ? 'вы' : job.author_name ?? 'коллега'} · ` : '';
         return {
           id: job.id,
           status: job.status as JobRailItem['status'],
           title: `${job.config?.autofill ? 'Автодобор · ' : ''}${target ? `на ${target} компаний` : 'запуск'}`.replace(/^./, (c) => c.toUpperCase()),
-          subtitle: `${author}${fmtJobDate(job.created_at)} · готово ${done}${target ? ` из ${target}` : ''}`,
+          subtitle: `${fmtJobDate(job.created_at)} · готово ${done}${target ? ` из ${target}` : ''}`,
+          // Подписываем только чужие: свои и так узнаются, а «вы» на каждой строке — шум.
+          // Пока сессия не прочитана, своё от чужого не отличить — не подписываем.
+          author: !sessionUserId || own ? null : job.author_name ?? 'коллега',
           percent: job.status === 'completed' ? 100 : job.progress_percent ?? 0,
           deletable: own && job.status !== 'running' && job.status !== 'pending',
         };
       }),
-    [jobs, isOwn, scope],
+    [jobs, isOwn, sessionUserId],
   );
 
   // Полоса ошибки уходит сама через 15 секунд — и её можно закрыть раньше.
@@ -507,6 +508,7 @@ export function OutreachRunView<Row extends { id: string }, Config, Job extends 
             onStopJob={activeJob?.id && activeOwn ? () => void stopJob() : undefined}
             onDeleteJob={activeJob?.id && activeOwn ? () => setDeleteCandidate(activeJob.id) : undefined}
             readOnly={!activeOwn}
+            author={sessionUserId && activeJob && !activeOwn ? activeJob.author_name ?? 'коллега' : null}
           />
         </WorkArea>
       )}
