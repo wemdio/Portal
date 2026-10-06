@@ -17,47 +17,20 @@
  * процесса, а не внутри запущенной кампании.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
+import { POLZA_SOURCE_TG_OUTREACH } from '@/lib/crm/connections';
 import {
-  isAuthAmoError,
-  isTransientAmoError,
-  splitNoteText,
-  AmoHttpError,
-  type AmoClient,
-  type AmoTelegramField,
-} from '@/lib/crm/amoClient';
-import {
-  POLZA_SOURCE_FIELD_ID,
-  POLZA_SOURCE_TG_OUTREACH,
-  resolveCrmConnection,
-} from '@/lib/crm/connections';
+  CRM_PUSH_POLL_INTERVAL_MS,
+  activeCrmSettings,
+  processCrmQueue,
+  type CrmQueueRow,
+  type CrmSettings,
+} from '@/lib/crm/dealQueue';
 import { buildLeadMessage } from './leadMessage';
 import { loadLeadOrigin } from './leadOrigin';
 
 type LogFn = (level: 'info' | 'warning' | 'error', msg: string) => void;
 
-export interface CrmSettings {
-  enabled: boolean;
-  /** `'polza'` — наша AMO, иначе id из `crm_connections`. */
-  connection: string;
-  pipeline_id: number | null;
-  status_id: number | null;
-}
-
-export const CRM_PUSH_POLL_INTERVAL_MS = 15_000;
-export const CRM_PUSH_RETRY_DELAY_MS = 5 * 60_000;
-export const CRM_PUSH_MAX_ATTEMPTS = 5;
-/** На сколько задача «занята» опросом — защита от двойной отправки. */
-const CRM_PUSH_LEASE_MS = 10 * 60_000;
-const CRM_PUSH_BATCH = 10;
-
-/** Настройки кампании, если передача в CRM включена и заполнена; иначе null. */
-export function activeCrmSettings(raw: unknown): CrmSettings | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const s = raw as Partial<CrmSettings>;
-  if (!s.enabled || typeof s.connection !== 'string' || !s.connection) return null;
-  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null);
-  return { enabled: true, connection: s.connection, pipeline_id: num(s.pipeline_id), status_id: num(s.status_id) };
-}
+export { CRM_PUSH_POLL_INTERVAL_MS, activeCrmSettings, type CrmSettings };
 
 /** Имя контакта в CRM: ник с собачкой, а без ника — числовой id. */
 export function crmContactName(username: string | null, tgUserId: number | null): string {
@@ -148,162 +121,28 @@ export async function enqueueCrmPush(db: SupabaseClient, args: {
   }
 }
 
-interface PushRow {
-  id: string;
-  campaign_id: string;
-  connection: string;
-  pipeline_id: number | null;
-  status_id: number | null;
+interface PushRow extends CrmQueueRow {
   campaign_name: string;
   username: string | null;
   tg_user_id: number | null;
   offer: string | null;
-  message_text: string;
-  attempts: number;
-  amo_lead_id: number | null;
-  amo_contact_id: number | null;
 }
 
-/** enum_id «Telegram Outreach» в поле «Источник» — по адресу AMO, на жизнь процесса. */
-const sourceEnumCache = new Map<string, number | null>();
-
-async function polzaSourceEnumId(client: AmoClient): Promise<number | null> {
-  if (sourceEnumCache.has(client.baseUrl)) return sourceEnumCache.get(client.baseUrl) ?? null;
-  const id = await client.findLeadFieldEnumId(POLZA_SOURCE_FIELD_ID, POLZA_SOURCE_TG_OUTREACH);
-  sourceEnumCache.set(client.baseUrl, id);
-  return id;
-}
-
-/**
- * Поле Telegram у контактов — по адресу AMO, на жизнь процесса. Неудачный
- * запрос не кешируем и не валим им сделку: ник всё равно будет в имени.
- */
-const telegramFieldCache = new Map<string, AmoTelegramField | null>();
-
-async function telegramContactField(client: AmoClient): Promise<AmoTelegramField | null> {
-  if (telegramFieldCache.has(client.baseUrl)) return telegramFieldCache.get(client.baseUrl) ?? null;
-  try {
-    const field = await client.findTelegramContactField();
-    telegramFieldCache.set(client.baseUrl, field);
-    return field;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Создать сделку по одной задаче. Промежуточные id пишем сразу: если упадёт
- * на примечании, повтор не заведёт второй контакт и вторую сделку.
- */
-async function pushOne(db: SupabaseClient, task: PushRow, log: LogFn): Promise<void> {
-  const who = crmContactName(task.username, task.tg_user_id);
-  try {
-    const { client, isPolza } = await resolveCrmConnection(db, task.connection);
-    let warning: string | null = null;
-
-    let contactId = task.amo_contact_id;
-    let leadId = task.amo_lead_id;
-
-    if (!leadId) {
-      if (!contactId) {
-        const telegram = (task.username ?? '').trim().replace(/^@/, '') || null;
-        contactId = (await client.findContact({ name: who, telegram }))
-          ?? (await client.createContact({
-            name: who,
-            telegram,
-            telegramField: telegram ? await telegramContactField(client) : null,
-          }));
-        await db.from('tg_outreach_crm_pushes').update({ amo_contact_id: contactId }).eq('id', task.id);
-      }
-
-      const customFields: Array<{ field_id: number; values: Array<{ enum_id: number }> }> = [];
-      if (isPolza) {
-        const enumId = await polzaSourceEnumId(client).catch(() => null);
-        if (enumId) customFields.push({ field_id: POLZA_SOURCE_FIELD_ID, values: [{ enum_id: enumId }] });
-        else warning = `в поле «Источник» не найдено значение «${POLZA_SOURCE_TG_OUTREACH}» — проставьте руками`;
-      }
-
-      const name = task.campaign_name ? `${who} · ${task.campaign_name}` : who;
-      leadId = await client.createLead({
-        name,
-        pipelineId: task.pipeline_id,
-        statusId: task.status_id,
-        contactId,
-        tags: task.offer ? [task.offer.slice(0, 100)] : [],
-        customFields,
-      });
-      await db
-        .from('tg_outreach_crm_pushes')
-        .update({ amo_lead_id: leadId, lead_url: `${client.baseUrl}/leads/detail/${leadId}` })
-        .eq('id', task.id);
-    }
-
-    for (const part of splitNoteText(task.message_text)) {
-      await client.addLeadNote(leadId, part);
-    }
-
-    await db
-      .from('tg_outreach_crm_pushes')
-      .update({ status: 'sent', sent_at: new Date().toISOString(), error_message: warning })
-      .eq('id', task.id);
-    log('info', `CRM: сделка ${leadId} создана для ${who} (${task.campaign_name})${warning ? ` — ${warning}` : ''}`);
-  } catch (err) {
-    const msg = (err instanceof Error ? err.message : String(err)).slice(0, 500);
-    const attempts = task.attempts + 1;
-    // Ошибки вне AMO (подключение удалено, нет ключа шифрования) — не сетевые,
-    // повтор их не вылечит.
-    const transient = err instanceof AmoHttpError && isTransientAmoError(err);
-    if (transient && attempts < CRM_PUSH_MAX_ATTEMPTS) {
-      await db
-        .from('tg_outreach_crm_pushes')
-        .update({
-          attempts,
-          next_attempt_at: new Date(Date.now() + CRM_PUSH_RETRY_DELAY_MS).toISOString(),
-          error_message: `Повторю через ${Math.round(CRM_PUSH_RETRY_DELAY_MS / 60_000)} мин: ${msg}`,
-        })
-        .eq('id', task.id);
-      log('warning', `CRM: сделка для ${who} не создана — ${msg}. Повторю через ${Math.round(CRM_PUSH_RETRY_DELAY_MS / 60_000)} мин.`);
-      return;
-    }
-    await db
-      .from('tg_outreach_crm_pushes')
-      .update({ status: 'failed', attempts, error_message: msg })
-      .eq('id', task.id);
-    if (isAuthAmoError(err) && task.connection !== 'polza') {
-      await db
-        .from('crm_connections')
-        .update({ status: 'error', last_error: msg, updated_at: new Date().toISOString() })
-        .eq('id', task.connection);
-    }
-    log('error', `CRM: сделка для ${who} НЕ создана (${task.campaign_name}) — ${msg}`);
-  }
-}
-
-/** Один проход по очереди CRM. Ошибка одной задачи не мешает остальным. */
+/** Один проход по очереди CRM TG-аутрича — общей машиной `lib/crm/dealQueue.ts`. */
 export async function processCrmPushes(db: SupabaseClient, log: LogFn): Promise<number> {
-  const nowIso = new Date().toISOString();
-  const { data, error } = await db
-    .from('tg_outreach_crm_pushes')
-    .select('id, campaign_id, connection, pipeline_id, status_id, campaign_name, username, tg_user_id, offer, message_text, attempts, amo_lead_id, amo_contact_id')
-    .eq('status', 'pending')
-    .lte('next_attempt_at', nowIso)
-    .order('created_at', { ascending: true })
-    .limit(CRM_PUSH_BATCH);
-  if (error) throw new Error(error.message);
-
-  let handled = 0;
-  for (const task of (data ?? []) as PushRow[]) {
-    // Занимаем задачу: если вдруг опросов два, второй её не возьмёт.
-    const { data: claimed } = await db
-      .from('tg_outreach_crm_pushes')
-      .update({ next_attempt_at: new Date(Date.now() + CRM_PUSH_LEASE_MS).toISOString() })
-      .eq('id', task.id)
-      .eq('status', 'pending')
-      .lte('next_attempt_at', nowIso)
-      .select('id');
-    if (!claimed?.length) continue;
-    await pushOne(db, task, log);
-    handled++;
-  }
-  return handled;
+  return processCrmQueue<PushRow>(db, {
+    table: 'tg_outreach_crm_pushes',
+    extraColumns: 'campaign_name, username, tg_user_id, offer',
+    log,
+    toDeal: (row) => {
+      const who = crmContactName(row.username, row.tg_user_id);
+      return {
+        contact: { name: who, telegram: (row.username ?? '').trim().replace(/^@/, '') || null },
+        leadName: row.campaign_name ? `${who} · ${row.campaign_name}` : who,
+        tags: row.offer ? [row.offer] : [],
+        polzaSource: POLZA_SOURCE_TG_OUTREACH,
+        label: `${who} (${row.campaign_name})`,
+      };
+    },
+  });
 }

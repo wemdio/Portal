@@ -134,6 +134,19 @@ export function contactTelegramValues(fields: AmoContactField[] | null | undefin
   return out;
 }
 
+/** Почты из стандартного поля Email контакта, в нижнем регистре. */
+export function contactEmailValues(fields: AmoContactField[] | null | undefined): string[] {
+  const out: string[] = [];
+  for (const f of fields ?? []) {
+    if ((f.field_code ?? '').toUpperCase() !== 'EMAIL') continue;
+    for (const v of f.values ?? []) {
+      const val = String(v.value ?? '').trim().toLowerCase();
+      if (val) out.push(val);
+    }
+  }
+  return out;
+}
+
 export interface AmoClient {
   baseUrl: string;
   listPipelines(): Promise<AmoPipeline[]>;
@@ -143,9 +156,19 @@ export interface AmoClient {
    * названии. null — в аккаунте такого поля нет, ник останется только в имени.
    */
   findTelegramContactField(): Promise<AmoTelegramField | null>;
-  /** Контакт с этим именем или с этим ником в поле Telegram. */
-  findContact(input: { name: string; telegram: string | null }): Promise<number | null>;
-  createContact(input: { name: string; telegram: string | null; telegramField: AmoTelegramField | null }): Promise<number>;
+  /** Контакт с этим именем, ником в поле Telegram или почтой в поле Email. */
+  findContact(input: { name: string; telegram?: string | null; email?: string | null }): Promise<number | null>;
+  /**
+   * Новый контакт. Почта уходит в стандартное поле Email: по нему встроенная
+   * почта amoCRM показывает переписку в ленте сделки и даёт отвечать из AMO.
+   */
+  createContact(input: {
+    name: string;
+    telegram?: string | null;
+    telegramField?: AmoTelegramField | null;
+    email?: string | null;
+    phone?: string | null;
+  }): Promise<number>;
   createLead(input: {
     name: string;
     pipelineId: number | null;
@@ -255,32 +278,40 @@ export function createAmoClient(opts: { baseUrl: string; token: string; fetchImp
       return text ? { fieldId: text.id, enumId: null } : null;
     },
 
-    async findContact({ name, telegram }) {
+    async findContact({ name, telegram, email }) {
       type Raw = { _embedded?: { contacts?: Array<{ id: number; name?: string; custom_fields_values?: AmoContactField[] | null }> } };
       const nick = telegram ? normalizeTelegram(telegram) : '';
-      // Ищем по нику без собачки: так находятся и контакт с именем «@ник», и
-      // заведённый руками «Илья» с ником в поле Telegram.
-      const query = nick || name;
+      const mail = (email ?? '').trim().toLowerCase();
+      // Ищем по нику без собачки или по почте: так находятся и контакт с
+      // именем «@ник», и заведённый руками «Илья» с ником или почтой в полях.
+      const query = nick || mail || name;
       const data = await call<Raw>('GET', `/api/v4/contacts?limit=50&query=${encodeURIComponent(query)}`);
       const want = name.trim().toLowerCase();
       // Поиск AMO нечёткий: по «ivan» найдутся и «ivanov», и контакты, где
       // строка лежит в любом поле. Берём только точное совпадение.
       const hit = (data?._embedded?.contacts ?? []).find((c) =>
         (c.name ?? '').trim().toLowerCase() === want
-        || (nick !== '' && contactTelegramValues(c.custom_fields_values).includes(nick)));
+        || (nick !== '' && contactTelegramValues(c.custom_fields_values).includes(nick))
+        || (mail !== '' && contactEmailValues(c.custom_fields_values).includes(mail)));
       return hit ? hit.id : null;
     },
 
-    async createContact({ name, telegram, telegramField }) {
+    async createContact({ name, telegram, telegramField, email, phone }) {
       type Raw = { _embedded?: { contacts?: Array<{ id: number }> } };
-      const contact: Record<string, unknown> = { name };
+      const fields: Array<Record<string, unknown>> = [];
       const nick = telegram ? String(telegram).trim().replace(/^@/, '') : '';
       if (nick && telegramField) {
-        contact.custom_fields_values = [{
+        fields.push({
           field_id: telegramField.fieldId,
           values: [telegramField.enumId ? { value: nick, enum_id: telegramField.enumId } : { value: nick }],
-        }];
+        });
       }
+      const mail = (email ?? '').trim();
+      if (mail) fields.push({ field_code: 'EMAIL', values: [{ value: mail, enum_code: 'WORK' }] });
+      const tel = (phone ?? '').trim();
+      if (tel) fields.push({ field_code: 'PHONE', values: [{ value: tel, enum_code: 'WORK' }] });
+      const contact: Record<string, unknown> = { name };
+      if (fields.length) contact.custom_fields_values = fields;
       const data = await call<Raw>('POST', '/api/v4/contacts', [contact]);
       const id = data?._embedded?.contacts?.[0]?.id;
       if (!id) throw new AmoHttpError('AMO не вернула id созданного контакта', 500);

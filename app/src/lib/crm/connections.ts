@@ -17,6 +17,7 @@ export const POLZA_CONNECTION_NAME = 'Наша AMO (Polza)';
 /** Поле «Источник» сделки нашей AMO и значение для TG-аутрича. */
 export const POLZA_SOURCE_FIELD_ID = 1314379;
 export const POLZA_SOURCE_TG_OUTREACH = 'Telegram Outreach';
+export const POLZA_SOURCE_EMAIL_OUTREACH = 'Email Outreach';
 
 export interface CrmConnectionPublic {
   id: string;

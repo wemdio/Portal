@@ -5,12 +5,14 @@ import { INTERNAL_ROLES } from '@/lib/roles';
 import {
   qualifyReply,
   getBodyText,
+  extractAuthoredReplyText,
   fetchBriefByCampaign,
   classifyMachineReply,
   fetchThreadContext,
   type ThreadContext,
 } from './leadQualifier';
 import { sendLeadTelegramAlert, type LeadTelegramSpecialistMention } from './leadTelegramAlerts';
+import { buildEmailLeadCard, enqueueEmailLeadCrmPush, type EmailLeadMessage } from '@/lib/crm/emailLeadPush';
 import {
   getClientRepliesBotToken,
   sendClientReplyTelegram,
@@ -2080,6 +2082,48 @@ export async function qualifyOneReply(
       });
     } catch (err) {
       workerLog('warn', `lead board row upsert failed for ${leadEmail} (campaign ${campaignId}): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // Лид → сделка в CRM, если у проекта включена передача (настройка проекта в
+  // «Персонализированных ответах»). Один раз на тред — тот же барьер, что у
+  // уведомлений специалиста; повтор той же почты в проекте отсекает индекс
+  // очереди. Сбой постановки не мешает остальной обработке лида.
+  if (specialistLeadSideEffectsAllowed && inserted?.id && qualifiedProjectId && supabaseMain) {
+    try {
+      const seen = new Set<string>();
+      const messages: EmailLeadMessage[] = [];
+      for (const email of [...(result.threadContext?.threadEmails ?? []), result.threadContext?.replyEmail ?? effectiveReply]) {
+        if (!email || seen.has(email.id)) continue;
+        seen.add(email.id);
+        const raw = getBodyText(email.body);
+        messages.push({
+          role: email.ue_type === 2 ? 'lead' : 'us',
+          text: extractAuthoredReplyText(raw) || raw,
+          timestamp: email.timestamp_email ?? email.timestamp_created ?? null,
+        });
+      }
+      await enqueueEmailLeadCrmPush(supabaseMain, {
+        projectId: qualifiedProjectId,
+        qualificationId: inserted.id,
+        campaignId,
+        campaignName: campaignName ?? '',
+        leadEmail,
+        leadName: leadName ?? null,
+        companyName: companyName ?? null,
+        phone: leadPhone ?? null,
+        messageText: buildEmailLeadCard({
+          campaignName: campaignName ?? '',
+          leadEmail,
+          leadName: leadName ?? null,
+          companyName: companyName ?? null,
+          phone: leadPhone ?? null,
+          messages,
+        }),
+        log: (level, msg) => workerLog(level === 'warning' ? 'warn' : level, msg),
+      });
+    } catch (err) {
+      workerLog('warn', `CRM enqueue failed for ${leadEmail} (campaign ${campaignId}): ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
