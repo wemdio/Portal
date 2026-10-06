@@ -1134,7 +1134,7 @@ export async function handleChat(
       ? oai.target_chats_positive
       : oai.target_chats_negative;
 
-    let outcome: { ok: true } | { ok: false; error: string };
+    let outcome: { ok: true } | { ok: false; error: string } | null;
     if (targetChat) {
       const messageIdsToForward = pickForwardIds(history, tg.forward_limit, sent.id);
       // Карточку шлём только положительному триггеру: отрицательный уходит в
@@ -1182,14 +1182,17 @@ export async function handleChat(
         }
       }
     } else {
-      log('info', `${displayName}: триггер "${triggerLabel}" сработал, но чат для пересылки не указан в настройках кампании — пересылка пропущена`);
-      outcome = { ok: false, error: 'чат для пересылки не указан в настройках кампании' };
+      // Чат не обязателен: без него передача лида — это статус «Лид» (и CRM
+      // ниже), а не сбой пересылки.
+      log('info', `${displayName}: триггер "${triggerLabel}" сработал, чат для пересылки не указан — ${triggerType === 'positive' ? 'помечен лидом без пересылки' : 'пересылка пропущена'}`);
+      outcome = null;
     }
 
     // Отметку ставим только положительному триггеру. Отрицательный тоже
     // пересылает, но в другой чат и по другому поводу: «ушёл менеджеру» про
-    // человека, который отказался, — неправда.
-    const autoForward: AutoForwardOutcome | undefined = triggerType === 'positive'
+    // человека, который отказался, — неправда. Без чата пересылки не было —
+    // и отметки нет.
+    const autoForward: AutoForwardOutcome | undefined = triggerType === 'positive' && outcome
       ? {
           chat: targetChat || null,
           at: outcome.ok ? new Date().toISOString() : null,

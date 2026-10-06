@@ -102,7 +102,7 @@ export function AutofillTab<Config>({
   const weekTarget = state ? state.perDay * TARGET_DAYS : 0;
 
   return (
-    <div className="max-w-3xl space-y-4">
+    <div className="space-y-4">
       <div className="rounded-xl border border-gray-200 bg-white p-5">
         <div className="flex items-center justify-between gap-4">
           <div>
