@@ -3,6 +3,7 @@ import type { NextRequest } from 'next/server';
 import { createAuthedSupabaseClient, getBearerToken } from '@/lib/supabaseRouteClient';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { outreachApiKey } from '@/lib/outreachLlm/client';
+import { listOutreachJobs, parseJobsScope } from '@/lib/polzaOutreach/jobsList';
 import { sanitizePolzaOutreachConfig, type PolzaOutreachConfig } from '@/lib/polzaOutreach/types';
 
 export const dynamic = 'force-dynamic';
@@ -44,18 +45,18 @@ export async function GET(req: NextRequest) {
   const requestId = req.headers.get('x-request-id') ?? crypto.randomUUID();
   const logMeta = { userId: user.id, requestId, route: req.nextUrl.pathname };
 
-  const { data, error } = await supabase
-    .from('parser_jobs')
-    .select('*')
-    .eq('parser_type', PARSER_TYPE)
-    .order('created_at', { ascending: false })
-    .limit(25);
+  const { jobs, error } = await listOutreachJobs(supabase, {
+    userId: user.id,
+    parserType: PARSER_TYPE,
+    scope: parseJobsScope(req.nextUrl.searchParams.get('scope')),
+    limit: 25,
+  });
 
   if (error) {
     await logError('parser.polza_outreach.jobs.list.failed', error, { parserType: PARSER_TYPE }, logMeta);
     return jsonError(error.message, 500, { request_id: requestId });
   }
-  return NextResponse.json({ jobs: data ?? [] });
+  return NextResponse.json({ jobs });
 }
 
 /**

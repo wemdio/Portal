@@ -6,8 +6,14 @@ import {
 import type { ChannelMetrics } from '@/lib/leadsReport/metrics';
 import { shortMskDate } from '@/lib/leadsReport/weekWindow';
 
+type Counts = Omit<ChannelMetrics, 'channel'>;
+
 function section(metric: ChannelMetrics): string {
-  return `${metric.channel.displayName}\n`
+  return line(metric.channel.displayName, metric);
+}
+
+function line(title: string, metric: Counts): string {
+  return `${title}\n`
     + `Пришло — ${metric.arrived} | `
     + `Лидов — ${metric.qualifiedLeads} | `
     + `Встреч (Было/Запланировано) — `
@@ -70,5 +76,21 @@ export function formatSummaryMessages(
       ].join('\n\n'),
     );
   }
+
+  // Сумма по всем каналам обоих сообщений (просьба Егора, 05.10.2026). Каналы
+  // не пересекаются — сделка попадает ровно в один (`detectSummaryChannel`),
+  // поэтому простое сложение ничего не задваивает. Стоит в конце последнего
+  // сообщения: в первом её не сверить с ручным отчётом — там нет
+  // конференций и SDR.
+  const total = [...main, ...extra].reduce<Counts>(
+    (sum, metric) => ({
+      arrived: sum.arrived + metric.arrived,
+      qualifiedLeads: sum.qualifiedLeads + metric.qualifiedLeads,
+      meetingsScheduled: sum.meetingsScheduled + metric.meetingsScheduled,
+      meetingsHeld: sum.meetingsHeld + metric.meetingsHeld,
+    }),
+    { arrived: 0, qualifiedLeads: 0, meetingsScheduled: 0, meetingsHeld: 0 },
+  );
+  messages[messages.length - 1] += `\n\n${line('🧮 Итого по всем каналам', total)}`;
   return messages;
 }

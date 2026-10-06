@@ -55,6 +55,7 @@ import DashboardTab from '@/components/tg-outreach/DashboardTab';
 import BaseComparison from '@/components/tg-outreach/BaseComparison';
 import { AccountPicker } from '@/components/tg-outreach/AccountPicker';
 import WarmupTab from '@/components/tg-outreach/WarmupTab';
+import CrmSettingsPanel from '@/components/tg-outreach/CrmSettingsPanel';
 import type {
   CampaignStatus,
   DialogStatus,
@@ -479,6 +480,9 @@ function SettingsTab({ campaign, onSave }: {
           В чат пересылки бот отправляет сам, когда в его ответе встречается триггерная фраза.
         </p>
       </section>
+
+      {/* Переданный лид — сразу сделкой в CRM (наша AMO или клиента). Своя кнопка сохранения. */}
+      <CrmSettingsPanel campaignId={campaign.id} />
 
       {/* Заголовок «Telegram» снят с секции: экран целиком про Telegram-аутрич,
           и подпись ничего не отделяла от соседних блоков. */}
@@ -1117,8 +1121,10 @@ function LogsTab({ campaignId }: { campaignId: string }) {
 // Флага «своя/чужая кампания» здесь больше нет. Он появился как зеркало RLS из
 // 20260320_0003 (читать всем, писать владельцу) — а 20260807_0004 это правило
 // сняла: аутрич командный, кампанию ведут несколько специалистов.
-function DialogsTab({ campaignId }: {
+function DialogsTab({ campaignId, crmEnabled }: {
   campaignId: string;
+  /** Включена ли у кампании передача в CRM — тогда у лидов без сделки есть кнопка «В CRM». */
+  crmEnabled: boolean;
 }) {
   const [dialogs, setDialogs] = useState<OutreachDialog[]>([]);
   /** Диалог, у которого не сохранилось изменение, и причина — под его карточкой. */
@@ -1159,6 +1165,7 @@ function DialogsTab({ campaignId }: {
   /** `<dialogId>:<kind>` пока собирается предпросмотр и ставится задача. */
   const [forwarding, setForwarding] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState<string | null>(null);
+  const [crmPushing, setCrmPushing] = useState<string | null>(null);
   const limit = 30;
 
   const fetchAccounts = useCallback(async () => {
@@ -1378,6 +1385,23 @@ function DialogsTab({ campaignId }: {
       });
     } finally {
       setCancelling(null);
+    }
+  };
+
+  /** Поставить лида в очередь CRM: повтор после сбоя или первый раз для старого лида. */
+  const pushToCrm = async (dialog: OutreachDialog) => {
+    setCrmPushing(dialog.id);
+    try {
+      const res = await authFetch(`${API_BASE}/dialogs/${dialog.id}/crm-push`, { method: 'POST' });
+      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      if (!res.ok) {
+        alert(body?.error ?? `Не удалось отправить в CRM (${res.status})`);
+        return;
+      }
+      patchDialogs((d) => d.id === dialog.id, { crm: { status: 'pending', lead_url: null, error_message: null } });
+      window.setTimeout(() => void fetchDialogs({ silent: true }), 20_000);
+    } finally {
+      setCrmPushing(null);
     }
   };
 
@@ -1817,6 +1841,30 @@ function DialogsTab({ campaignId }: {
                         Передача отменена ({d.forward.kind === 'lead' ? 'лид' : 'партнёр'}) — менеджеру ничего не ушло
                         {d.forward.error_message ? `. ${d.forward.error_message}` : ''}
                       </p>
+                    )}
+                    {/* Сделка в CRM по лиду: ссылка, очередь или причина сбоя с повтором. */}
+                    {d.crm?.status === 'sent' && (
+                      <p className="mt-1.5 text-[10px] text-emerald-700">
+                        В CRM ✓{d.crm.lead_url && (
+                          <> — <a href={d.crm.lead_url} target="_blank" rel="noreferrer" className="underline hover:text-emerald-900">сделка</a></>
+                        )}
+                        {d.crm.error_message && <span className="text-amber-700"> · {d.crm.error_message}</span>}
+                      </p>
+                    )}
+                    {d.crm?.status === 'pending' && (
+                      <p className="mt-1.5 text-[10px] text-gray-500">
+                        В CRM: в очереди{d.crm.error_message ? ` · ${d.crm.error_message}` : ''}
+                      </p>
+                    )}
+                    {(d.crm?.status === 'failed' || (crmEnabled && !d.crm && d.status === 'lead' && d.forward?.kind !== 'partner')) && (
+                      <div className={`mt-1.5 flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-[10px] ${d.crm ? 'border border-amber-200 bg-amber-50 text-amber-700' : 'text-gray-500'}`}>
+                        <span>{d.crm ? `CRM: ${d.crm.error_message || 'сделка не создана'}` : 'Лид ещё не в CRM'}</span>
+                        <button type="button" disabled={crmPushing === d.id} onClick={() => void pushToCrm(d)}
+                          className="ml-auto inline-flex cursor-pointer items-center gap-1 rounded-full border border-indigo-200 bg-white px-2.5 py-0.5 font-medium text-indigo-700 hover:bg-indigo-50 disabled:opacity-50">
+                          {crmPushing === d.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Send className="h-3 w-3" />}
+                          {d.crm ? 'Отправить в CRM ещё раз' : 'Отправить в CRM'}
+                        </button>
+                      </div>
                     )}
                     {/* Сорвавшаяся автопересылка: лид, который не доехал до
                         менеджера. Диалог при этом всё равно стал «Лидом» — без
@@ -7077,7 +7125,7 @@ function CampaignView({ campaign, onUpdate, onDelete }: {
           <WarmupTab campaignId={campaign.id} campaignStatus={campaign.status} />
         )}
         {tab === 'logs' && <LogsTab campaignId={campaign.id} />}
-        {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} />}
+        {tab === 'dialogs' && <DialogsTab campaignId={campaign.id} crmEnabled={Boolean(campaign.crm_settings?.enabled)} />}
         {tab === 'report' && <CampaignReportTab campaignId={campaign.id} />}
       </div>
     </div>

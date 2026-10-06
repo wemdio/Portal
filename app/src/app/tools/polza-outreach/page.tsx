@@ -1,6 +1,7 @@
 import { Suspense } from 'react';
 import { InDevelopmentGate } from '@/components/InDevelopmentGate';
 import { OutreachTabs } from '@/components/senderLeads/OutreachTabs';
+import { EnAutofillTab } from '@/components/parsers/EnAutofillTab';
 import { PolzaOutreachView } from '@/components/parsers/PolzaOutreachView';
 
 export default function PolzaOutreachPage() {
@@ -19,7 +20,7 @@ export default function PolzaOutreachPage() {
         {/* Suspense — OutreachTabs читает вкладку из адреса (?tab=qualification)
             через useSearchParams; без границы ожидания сборка не пререндерит страницу. */}
         <Suspense fallback={null}>
-          <OutreachTabs folderKey="auto_en">
+          <OutreachTabs folderKey="auto_en" extraTabs={[{ id: 'autofill', label: 'Автодобор', content: <EnAutofillTab /> }]}>
             <PolzaOutreachView />
           </OutreachTabs>
         </Suspense>

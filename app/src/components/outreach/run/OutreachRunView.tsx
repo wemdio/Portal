@@ -38,6 +38,17 @@ function fmtJobDate(value: string): string {
     : d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
+type JobsScope = 'all' | 'mine';
+
+/** Выбор «Все / Мои» запоминаем в браузере — у каждого языка свой. */
+function readScope(key: string): JobsScope {
+  try {
+    return window.localStorage.getItem(key) === 'mine' ? 'mine' : 'all';
+  } catch {
+    return 'all';
+  }
+}
+
 function csvCell(value: unknown) {
   const text = String(value ?? '').replaceAll('\r', ' ').replaceAll('\n', ' ').replaceAll('\t', ' ');
   return `"${text.replaceAll('"', '""')}"`;
@@ -89,24 +100,49 @@ export function OutreachRunView<Row extends { id: string }, Config, Job extends 
   const [exportProgress, setExportProgress] = useState<string | null>(null);
   const [sessionUserId, setSessionUserId] = useState<string | null>(null);
   const [deleteCandidate, setDeleteCandidate] = useState<string | null>(null);
+  // Запуски видят все сотрудники; «Мои» — только свои. Чужие — на чтение.
+  const scopeKey = `outreach_jobs_scope_${adapter.parserType}`;
+  // null — выбор ещё не прочитан: список не грузим, чтобы не показать «Все» на миг.
+  const [scope, setScope] = useState<JobsScope | null>(null);
+  useEffect(() => {
+    // Выбор из браузера — только после монтирования, иначе разойдётся с сервером.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setScope(readScope(scopeKey));
+  }, [scopeKey]);
+  const changeScope = useCallback(
+    (next: JobsScope) => {
+      setScope(next);
+      try {
+        window.localStorage.setItem(scopeKey, next);
+      } catch {
+        /* приватное окно — выбор просто не запомнится */
+      }
+    },
+    [scopeKey],
+  );
 
   const activeJob = useMemo(() => jobs.find((job) => job.id === activeJobId) ?? null, [activeJobId, jobs]);
+  const isOwn = useCallback((job: Job | null) => Boolean(job && sessionUserId && job.user_id === sessionUserId), [sessionUserId]);
+  const activeOwn = isOwn(activeJob);
 
   const railItems = useMemo<JobRailItem[]>(
     () =>
       jobs.map((job) => {
         const target = job.config?.limit ?? null;
         const done = job.total_parsed ?? 0;
+        const own = isOwn(job);
+        // В общем списке видно, чей запуск; в «Моих» и так ясно.
+        const author = scope === 'all' ? `${own ? 'вы' : job.author_name ?? 'коллега'} · ` : '';
         return {
           id: job.id,
           status: job.status as JobRailItem['status'],
-          title: target ? `На ${target} компаний` : 'Запуск',
-          subtitle: `${fmtJobDate(job.created_at)} · готово ${done}${target ? ` из ${target}` : ''}`,
+          title: `${job.config?.autofill ? 'Автодобор · ' : ''}${target ? `на ${target} компаний` : 'запуск'}`.replace(/^./, (c) => c.toUpperCase()),
+          subtitle: `${author}${fmtJobDate(job.created_at)} · готово ${done}${target ? ` из ${target}` : ''}`,
           percent: job.status === 'completed' ? 100 : job.progress_percent ?? 0,
-          deletable: job.status !== 'running' && job.status !== 'pending',
+          deletable: own && job.status !== 'running' && job.status !== 'pending',
         };
       }),
-    [jobs],
+    [jobs, isOwn, scope],
   );
 
   // Полоса ошибки уходит сама через 15 секунд — и её можно закрыть раньше.
@@ -118,10 +154,13 @@ export function OutreachRunView<Row extends { id: string }, Config, Job extends 
   const totalPages = Math.max(1, Math.ceil((resp?.count ?? 0) / RESULTS_LIMIT));
 
   const refreshJobs = useCallback(async () => {
-    const data = await apiFetch<{ jobs: Job[] }>(base, { method: 'GET' });
-    setJobs(data.jobs ?? []);
-    setActiveJobId((prev) => prev ?? data.jobs?.[0]?.id ?? null);
-  }, [base]);
+    if (!scope) return;
+    const data = await apiFetch<{ jobs: Job[] }>(`${base}?scope=${scope}`, { method: 'GET' });
+    const list = data.jobs ?? [];
+    setJobs(list);
+    // После смены «Все / Мои» выбранного запуска в списке может не оказаться.
+    setActiveJobId((prev) => (prev && list.some((job) => job.id === prev) ? prev : list[0]?.id ?? null));
+  }, [base, scope]);
 
   const query = filterQuery(filter, reason);
 
@@ -388,7 +427,7 @@ export function OutreachRunView<Row extends { id: string }, Config, Job extends 
         </div>
       ) : null}
 
-      {jobs.length === 0 ? (
+      {jobs.length === 0 && scope !== 'mine' ? (
         <div className="rounded-xl border border-gray-200 bg-white p-8 text-center shadow-sm">
           <div className="text-base font-semibold text-gray-900">Запусков ещё не было</div>
           <p className="mx-auto mt-1 max-w-xl text-sm text-gray-500">{adapter.emptyDescription}</p>
@@ -403,21 +442,40 @@ export function OutreachRunView<Row extends { id: string }, Config, Job extends 
       ) : (
         <WorkArea
           aside={
-            <JobRail
-              items={railItems}
-              activeId={activeJobId}
-              onSelect={(id) => {
-                setActiveJobId(id);
-                setReason(null);
-              }}
-              onNew={() => openPanel(null)}
-              onRefresh={() => void manualRefresh().catch((e) => setError(e instanceof Error ? e.message : 'Ошибка загрузки'))}
-              onRepeat={(id) => {
-                const job = jobs.find((j) => j.id === id);
-                if (job) openPanel(adapter.jobConfig(job));
-              }}
-              onDelete={(id) => setDeleteCandidate(id)}
-            />
+            <div className="space-y-2">
+              <div className="flex rounded-lg border border-gray-200 bg-white p-0.5 text-sm shadow-sm" role="tablist">
+                {(['all', 'mine'] as const).map((value) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="tab"
+                    aria-selected={scope === value}
+                    onClick={() => changeScope(value)}
+                    className={`flex-1 rounded-md px-3 py-1.5 font-medium transition ${
+                      scope === value ? 'bg-violet-50 text-violet-700' : 'text-gray-500 hover:text-gray-900'
+                    }`}
+                  >
+                    {value === 'all' ? 'Все запуски' : 'Мои'}
+                  </button>
+                ))}
+              </div>
+              <JobRail
+                items={railItems}
+                emptyText={scope === 'mine' ? 'У вас запусков ещё не было.' : undefined}
+                activeId={activeJobId}
+                onSelect={(id) => {
+                  setActiveJobId(id);
+                  setReason(null);
+                }}
+                onNew={() => openPanel(null)}
+                onRefresh={() => void manualRefresh().catch((e) => setError(e instanceof Error ? e.message : 'Ошибка загрузки'))}
+                onRepeat={(id) => {
+                  const job = jobs.find((j) => j.id === id);
+                  if (job) openPanel(adapter.jobConfig(job));
+                }}
+                onDelete={(id) => setDeleteCandidate(id)}
+              />
+            </div>
           }
         >
           <OutreachRunResults
@@ -446,8 +504,9 @@ export function OutreachRunView<Row extends { id: string }, Config, Job extends 
             onExtraExport={(kind) => {
               if (activeJobId && adapter.extraExportUrl) void downloadXlsx(adapter.extraExportUrl(activeJobId, kind), `${kind}_`);
             }}
-            onStopJob={activeJob?.id ? () => void stopJob() : undefined}
-            onDeleteJob={activeJob?.id ? () => setDeleteCandidate(activeJob.id) : undefined}
+            onStopJob={activeJob?.id && activeOwn ? () => void stopJob() : undefined}
+            onDeleteJob={activeJob?.id && activeOwn ? () => setDeleteCandidate(activeJob.id) : undefined}
+            readOnly={!activeOwn}
           />
         </WorkArea>
       )}

@@ -215,12 +215,16 @@ const letterCells = (row: RuRow) => [
 
 type Sender = { id: string; sender_name: string; sender_title: string | null; is_default: boolean; status: string };
 
-/** Панель запуска со списком отправителей — он нужен только здесь, грузим при открытии. */
-function RuLaunchPanel(props: {
+/**
+ * Панель запуска со списком отправителей — он нужен только здесь, грузим при
+ * открытии. Она же — настройки автодобора (mode 'autofill', RuAutofillTab).
+ */
+export function RuLaunchPanel(props: {
   busy: boolean;
   initial: Partial<RuOutreachConfig> | null;
   onClose: () => void;
   onStart: (config: Partial<RuOutreachConfig>) => void;
+  mode?: 'run' | 'autofill';
 }) {
   const [senders, setSenders] = useState<Sender[]>([]);
   useEffect(() => {
@@ -230,7 +234,17 @@ function RuLaunchPanel(props: {
       .catch(() => undefined);
     return () => { cancelled = true; };
   }, []);
-  return <LaunchPanel open busy={props.busy} senders={senders} initial={props.initial} onClose={props.onClose} onStart={props.onStart} />;
+  return (
+    <LaunchPanel
+      open
+      busy={props.busy}
+      senders={senders}
+      initial={props.initial}
+      onClose={props.onClose}
+      onStart={props.onStart}
+      mode={props.mode}
+    />
+  );
 }
 
 function summaryExtras(job: RuJob) {

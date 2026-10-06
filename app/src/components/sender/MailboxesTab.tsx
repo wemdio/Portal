@@ -498,7 +498,7 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                   <th className="px-3 py-2 font-medium">Адрес отправки</th>
                   <th className="px-3 py-2 font-medium">В рассылке</th>
                   <th className="px-3 py-2 font-medium">Статус</th>
-                  <th className="px-3 py-2 font-medium">Лимит/день</th>
+                  <th className="px-3 py-2 font-medium" title="Новых писем в день / всего писем в день вместе с напоминаниями">Новых / всего в день</th>
                   <th className="px-5 py-2" />
                 </tr>
               </thead>
@@ -607,19 +607,37 @@ export function MailboxesTab({ initialEgressIp = null }: { initialEgressIp?: str
                         )}
                       </td>
                       <td className="px-3 py-2.5">
-                        <input
-                          type="number"
-                          min={1}
-                          max={500}
-                          defaultValue={mailbox.daily_campaign_limit}
-                          onBlur={(e) => {
-                            const next = Number(e.target.value);
-                            if (next && next !== mailbox.daily_campaign_limit) {
-                              void act(mailbox.id, { dailyCampaignLimit: next });
-                            }
-                          }}
-                          className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1 text-sm text-zinc-900"
-                        />
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="number"
+                            min={1}
+                            max={500}
+                            title="Новых (первых) писем в день"
+                            defaultValue={mailbox.daily_campaign_limit}
+                            onBlur={(e) => {
+                              const next = Number(e.target.value);
+                              if (next && next !== mailbox.daily_campaign_limit) {
+                                void act(mailbox.id, { dailyCampaignLimit: next });
+                              }
+                            }}
+                            className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1 text-sm text-zinc-900"
+                          />
+                          <span className="text-zinc-400">/</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={500}
+                            title="Всего писем в день вместе с напоминаниями"
+                            defaultValue={mailbox.daily_total_limit}
+                            onBlur={(e) => {
+                              const next = Number(e.target.value);
+                              if (next && next !== mailbox.daily_total_limit) {
+                                void act(mailbox.id, { dailyTotalLimit: next });
+                              }
+                            }}
+                            className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1 text-sm text-zinc-900"
+                          />
+                        </div>
                       </td>
                       <td className="px-5 py-2.5">
                         <div className="flex items-center justify-end gap-2">

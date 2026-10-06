@@ -15,8 +15,13 @@ import type { CampaignRow, MailboxRow, RecipientRow, StepRow } from './types';
  *
  * Правила, которые здесь держатся:
  *   • лид закреплён за одним ящиком на всю цепочку (sticky sender);
- *   • дневной лимит ящика считается вместе с уже запланированными письмами,
- *     иначе очередь за один проход выберет недельный объём;
+ *   • у ящика два дневных лимита — «новых» (первые письма, daily_campaign_limit)
+ *     и «всего» (все шаги, daily_total_limit); оба считаются вместе с уже
+ *     запланированными письмами, иначе очередь за один проход выберет
+ *     недельный объём;
+ *   • напоминания (шаги 2+) всех кампаний планируются раньше новых первых
+ *     писем: иначе непочатые адреса, ждущие дольше, выбирали весь лимит, и
+ *     второе письмо уходило через неделю вместо суток (06.10.2026);
  *   • письма ставятся с паузой друг от друга и только внутрь окна отправки;
  *   • адрес из стоп-листа не получает письмо, а лид закрывается;
  *   • письмо, пустое после подстановки переменных, не ставится в очередь;
@@ -47,9 +52,15 @@ const GROUP_GAP_MS = 24 * 60 * 60 * 1000;
 /** Статусы первого письма соседа, которые считаются отправкой (ушло, уходит или может уйти). */
 const GROUP_FIRST_STATUSES = ['scheduled', 'sending', 'sent', 'unknown'];
 
+/** Проход планировщика: сначала напоминания всех кампаний, потом новые первые письма. */
+type PlanPhase = 'followups' | 'first';
+
 interface MailboxSlot {
   mailbox: MailboxRow;
+  /** Остаток «всего в день» — на любое письмо цепочки. */
   remaining: number;
+  /** Остаток «новых в день» — на первое письмо (не больше remaining). */
+  remainingNew: number;
   /** Время, на которое уже поставлено последнее письмо этого ящика. */
   cursor: Date;
 }
@@ -64,36 +75,55 @@ function windowOf(campaign: CampaignRow): SendWindow {
 }
 
 /**
- * Остаток дневного лимита ящика: отправленное сегодня плюс уже запланированное.
- * Не прочитали — ноль на этот проход: раньше ошибка запроса считалась «ничего
- * не отправлено», и ящику давали весь дневной лимит сверх уже ушедшего.
- * Перелимит бьёт по репутации ящика, пропуск одного тика — нет.
+ * Остатки дневных лимитов ящика: отправленное сегодня плюс уже запланированное.
+ * total — «всего в день» (все шаги), fresh — «новых в день» (шаг 1), не больше
+ * total. Не прочитали — ноль на этот проход: раньше ошибка запроса считалась
+ * «ничего не отправлено», и ящику давали весь дневной лимит сверх уже
+ * ушедшего. Перелимит бьёт по репутации ящика, пропуск одного тика — нет.
  */
-async function remainingQuota(mailbox: MailboxRow, log: Log): Promise<number> {
-  if (!supabaseAdmin) return 0;
+async function remainingQuota(mailbox: MailboxRow, log: Log): Promise<{ total: number; fresh: number }> {
+  if (!supabaseAdmin) return { total: 0, fresh: 0 };
+  const db = supabaseAdmin;
   const dayStart = new Date();
   dayStart.setUTCHours(0, 0, 0, 0);
 
-  const [sent, pending] = await Promise.all([
-    supabaseAdmin
+  const sentQuery = (firstOnly: boolean) => {
+    const query = db
       .from('sender_messages')
       .select('id', { count: 'exact', head: true })
       .eq('mailbox_id', mailbox.id)
       .eq('status', 'sent')
-      .gte('sent_at', dayStart.toISOString()),
-    supabaseAdmin
+      .gte('sent_at', dayStart.toISOString());
+    return firstOnly ? query.eq('step_no', 1) : query;
+  };
+  const pendingQuery = (firstOnly: boolean) => {
+    const query = db
       .from('sender_messages')
       .select('id', { count: 'exact', head: true })
       .eq('mailbox_id', mailbox.id)
-      .in('status', ['scheduled', 'sending']),
+      .in('status', ['scheduled', 'sending']);
+    return firstOnly ? query.eq('step_no', 1) : query;
+  };
+  const [sent, pending, sentFirst, pendingFirst] = await Promise.all([
+    sentQuery(false),
+    pendingQuery(false),
+    sentQuery(true),
+    pendingQuery(true),
   ]);
-  const error = sent.error ?? pending.error;
+  const error = sent.error ?? pending.error ?? sentFirst.error ?? pendingFirst.error;
   if (error) {
     log('error', `Ящик ${mailbox.email}: лимит не прочитан — в этот проход с него не пишем`, error.message);
-    return 0;
+    return { total: 0, fresh: 0 };
   }
 
-  return Math.max(0, mailbox.daily_campaign_limit - (sent.count ?? 0) - (pending.count ?? 0));
+  const total = Math.max(0, mailbox.daily_total_limit - (sent.count ?? 0) - (pending.count ?? 0));
+  const fresh = Math.max(0, mailbox.daily_campaign_limit - (sentFirst.count ?? 0) - (pendingFirst.count ?? 0));
+  return { total, fresh: Math.min(total, fresh) };
+}
+
+/** У слота есть место под письмо: любое — «всего», первое — ещё и «новых». */
+function slotHasRoom(slot: MailboxSlot, isFirst: boolean): boolean {
+  return slot.remaining > 0 && (!isFirst || slot.remainingNew > 0);
 }
 
 /**
@@ -317,15 +347,15 @@ function neighboursOf(groups: Map<string, Map<string, GroupMember>>, recipient: 
   return [...group.entries()].filter(([id]) => id !== recipient.id).map(([, member]) => member);
 }
 
-function pickSlot(slots: MailboxSlot[], recipient: RecipientRow): MailboxSlot | null {
+function pickSlot(slots: MailboxSlot[], recipient: RecipientRow, isFirst: boolean): MailboxSlot | null {
   // Уже закреплённый ящик: если он ещё в пуле и лимит не выбран — только он,
   // иначе лид ждёт следующего окна. Менять отправителя посреди цепочки нельзя:
   // для получателя это выглядит как письмо от другого человека.
   if (recipient.mailbox_id) {
     const own = slots.find((s) => s.mailbox.id === recipient.mailbox_id);
-    return own && own.remaining > 0 ? own : null;
+    return own && slotHasRoom(own, isFirst) ? own : null;
   }
-  const free = slots.filter((s) => s.remaining > 0);
+  const free = slots.filter((s) => slotHasRoom(s, isFirst));
   if (!free.length) return null;
   return free.reduce((best, slot) => (slot.remaining > best.remaining ? slot : best));
 }
@@ -366,7 +396,7 @@ function variantFor(steps: StepRow[], stepNo: number, recipientId: string): Step
   return variants[pickVariant(recipientId, stepNo, variants.length) - 1];
 }
 
-async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
+async function planCampaign(campaign: CampaignRow, log: Log, phase: PlanPhase): Promise<number> {
   if (!supabaseAdmin) return 0;
   const db = supabaseAdmin;
 
@@ -394,12 +424,16 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
     return 0;
   }
 
-  const { data: recipientRows } = await db
+  const dueQuery = db
     .from('sender_recipients')
     .select('*')
     .eq('campaign_id', campaign.id)
     .eq('status', 'active')
-    .lte('next_step_at', new Date().toISOString())
+    .lte('next_step_at', new Date().toISOString());
+  const { data: recipientRows } = await (phase === 'followups'
+    ? dueQuery.gt('last_step_sent', 0)
+    : dueQuery.eq('last_step_sent', 0)
+  )
     .order('next_step_at')
     .limit(RECIPIENTS_PER_CAMPAIGN);
 
@@ -427,7 +461,8 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
     // ящиков ставит первое письмо в один момент (всплеск в начале окна, потом
     // простой). Случайный сдвиг до 45 минут размазывает старт по окну.
     const startOffsetMs = Math.floor(Math.random() * 45 * 60 * 1000);
-    slots.push({ mailbox, remaining: await remainingQuota(mailbox, log), cursor: new Date(now.getTime() + startOffsetMs) });
+    const quota = await remainingQuota(mailbox, log);
+    slots.push({ mailbox, remaining: quota.total, remainingNew: quota.fresh, cursor: new Date(now.getTime() + startOffsetMs) });
   }
 
   // Статус получателя меняем только у всё ещё активного (.eq('status',
@@ -514,9 +549,10 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
     const neighbourSlots = neighbours
       .map((n) => (n.mailboxId ? slots.find((s) => s.mailbox.id === n.mailboxId) : undefined))
       .filter((s): s is MailboxSlot => Boolean(s));
+    const isFirst = stepNo === 1;
     const slot = neighbourSlots.length
-      ? neighbourSlots.find((s) => s.remaining > 0) ?? null
-      : pickSlot(slots, recipient);
+      ? neighbourSlots.find((s) => slotHasRoom(s, isFirst)) ?? null
+      : pickSlot(slots, recipient, isFirst);
     if (!slot) continue; // лимиты выбраны — лид подождёт следующего прохода
 
     // Тема follow-up строится от первого письма ИМЕННО этого получателя: при
@@ -574,6 +610,7 @@ async function planCampaign(campaign: CampaignRow, log: Log): Promise<number> {
       .eq('id', recipient.id);
 
     slot.remaining -= 1;
+    if (isFirst) slot.remainingNew -= 1;
     slot.cursor = new Date(scheduledAt.getTime() + nextGapMs(campaign.gap_seconds, campaign.gap_jitter_seconds));
     planned += 1;
     // Соседи в этом же проходе видят ящик и время этого письма.
@@ -618,14 +655,19 @@ export async function planSenderMessages(opts?: { log?: Log }): Promise<number> 
   }
 
   let planned = 0;
-  for (const campaign of (data ?? []) as CampaignRow[]) {
-    // Каждая кампания — отдельно: исключение в одной (битые данные, сбой
-    // запроса) раньше обрывало весь проход, и остальные кампании стояли,
-    // пока её не починят.
-    try {
-      planned += await planCampaign(campaign, log);
-    } catch (e) {
-      log('error', `Кампания ${campaign.name} (${campaign.id}): проход планировщика упал — остальные идут дальше`, e);
+  // Два прохода: напоминания всех кампаний, потом новые первые письма. Лимиты
+  // ящиков общие на все кампании и читаются из базы на каждый проход кампании,
+  // так что запланированное в первом проходе уже учтено во втором.
+  for (const phase of ['followups', 'first'] as const) {
+    for (const campaign of (data ?? []) as CampaignRow[]) {
+      // Каждая кампания — отдельно: исключение в одной (битые данные, сбой
+      // запроса) раньше обрывало весь проход, и остальные кампании стояли,
+      // пока её не починят.
+      try {
+        planned += await planCampaign(campaign, log, phase);
+      } catch (e) {
+        log('error', `Кампания ${campaign.name} (${campaign.id}): проход планировщика упал — остальные идут дальше`, e);
+      }
     }
   }
   if (planned) log('info', `Запланировано писем: ${planned}`);

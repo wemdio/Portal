@@ -170,6 +170,29 @@ export async function GET(req: NextRequest) {
             };
           }
         }
+
+        // Сделка в CRM по диалогу: живая (в очереди или создана) важнее упавших.
+        const { data: pushes } = await auth.supabase
+          .from('tg_outreach_crm_pushes')
+          .select('dialog_id, status, lead_url, error_message, created_at')
+          .in('dialog_id', ids)
+          .order('created_at', { ascending: false });
+        const pushByDialog = new Map<string, Record<string, unknown>>();
+        for (const p of (pushes ?? []) as Array<Record<string, unknown>>) {
+          const key = p.dialog_id as string;
+          const current = pushByDialog.get(key);
+          if (!current || (active(p.status) && !active(current.status))) pushByDialog.set(key, p);
+        }
+        for (const row of rows) {
+          const p = pushByDialog.get(row.id as string);
+          if (p) {
+            row.crm = {
+              status: p.status,
+              lead_url: p.lead_url ?? null,
+              error_message: p.error_message ?? null,
+            };
+          }
+        }
       }
 
       /**

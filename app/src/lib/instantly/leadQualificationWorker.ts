@@ -1,5 +1,6 @@
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
+import { isOwnAgencyCampaign } from '@/lib/instantly/ownAgencyCampaign';
 import { logInfo, logWarn } from '@/lib/loggerServer';
 import { INTERNAL_ROLES } from '@/lib/roles';
 import {
@@ -809,6 +810,21 @@ async function getPortalLinkedCampaignIds(): Promise<string[]> {
     if (row.project_id && row.campaign_id && validProjectIds.has(row.project_id)) {
       campaignIds.add(row.campaign_id);
     }
+  }
+
+  // Наши «N. Polza_…» квалификатор не трогает (с 06.10.2026, просьба
+  // пользователя): ни пометки «лид», ни уведомлений, ни доски — сделки по ним
+  // продажи заводят руками, а диалоги «Персонализированные ответы» читают
+  // напрямую из Instantly. См. lib/instantly/ownAgencyCampaign.ts.
+  const { data: ownRows, error: ownError } = await supabaseAdmin
+    .from('instantly_campaign_catalog')
+    .select('id, name')
+    .ilike('name', '%polza%');
+  if (ownError) {
+    throw new Error(`own agency campaigns unavailable: ${ownError.message}`);
+  }
+  for (const row of (ownRows ?? []) as { id: string; name: string | null }[]) {
+    if (isOwnAgencyCampaign(row.name)) campaignIds.delete(row.id);
   }
 
   return [...campaignIds];

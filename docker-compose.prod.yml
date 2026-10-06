@@ -706,7 +706,6 @@ services:
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - LEADS_REPORT_TG_BOT_TOKEN=${LEADS_REPORT_TG_BOT_TOKEN}
       - LEADS_REPORT_TG_ADMIN_IDS=${LEADS_REPORT_TG_ADMIN_IDS}
-      - LEADS_REPORT_PIPELINE_NAME=${LEADS_REPORT_PIPELINE_NAME:-Воронка - новые лиды}
       # TG-алерт при сбое leadsReportSummaryCron. Идёт в канал health-check
       # бота (см. app/src/lib/telegram/workerAlert.ts).
       - TELEGRAM_HEALTH_BOT_TOKEN=${TELEGRAM_HEALTH_BOT_TOKEN}

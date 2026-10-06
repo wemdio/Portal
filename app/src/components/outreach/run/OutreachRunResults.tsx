@@ -34,6 +34,8 @@ type Props<Row extends { id: string }, Config, Job extends OutreachRunJob> = {
   onExtraExport: (kind: string) => void;
   onStopJob?: () => void;
   onDeleteJob?: () => void;
+  /** Чужой запуск: смотреть можно, менять — только автору. */
+  readOnly?: boolean;
 };
 
 const FILTER_TITLES: Record<string, string> = { ready: 'Готовые к отправке', all: 'Компании' };
@@ -59,6 +61,7 @@ export function OutreachRunResults<Row extends { id: string }, Config, Job exten
   onExtraExport,
   onStopJob,
   onDeleteJob,
+  readOnly = false,
 }: Props<Row, Config, Job>) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [openStage, setOpenStage] = useState<number | null>(null);
@@ -142,7 +145,7 @@ export function OutreachRunResults<Row extends { id: string }, Config, Job exten
           {/* Цепочки на экране не показываем — только когда компании ждут
               «Переписать цепочку»: без блока их не довести до готовых. */}
           {summary.stopReason === 'awaiting_templates' ? (
-            <ChainTemplates key={job.id} jobUrl={jobUrl} running={running} lang={adapter.lang} onChanged={onRefresh} />
+            <ChainTemplates key={job.id} jobUrl={jobUrl} running={running} lang={adapter.lang} onChanged={onRefresh} readOnly={readOnly} />
           ) : null}
           <SenderBlock key={`sender-${job.id}`} jobUrl={jobUrl} running={running} readyCount={readyCount} onChanged={onRefresh} />
         </>

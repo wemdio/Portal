@@ -243,6 +243,13 @@ export interface OutreachCampaign {
   status: CampaignStatus;
   openai_settings: OpenAISettings;
   telegram_settings: TelegramSettings;
+  /** Передача лидов в CRM; null — выключена. См. lib/tgOutreach/crmPush.ts. */
+  crm_settings?: {
+    enabled: boolean;
+    connection: string | null;
+    pipeline_id: number | null;
+    status_id: number | null;
+  } | null;
   created_at: string;
   updated_at: string;
   /**
@@ -544,6 +551,13 @@ export interface OutreachDialog {
      * Почему отправки не было: у сорвавшейся — причина сбоя целиком, по ней
      * оператор чинит и повторяет; у снятой — кто её снял.
      */
+    error_message: string | null;
+  } | null;
+  /** Сделка в CRM по переданному лиду (tg_outreach_crm_pushes). */
+  crm?: {
+    status: 'pending' | 'sent' | 'failed';
+    lead_url: string | null;
+    /** У упавшей — причина; у созданной — предупреждение (например, про «Источник»). */
     error_message: string | null;
   } | null;
 }
