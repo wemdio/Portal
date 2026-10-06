@@ -23,7 +23,10 @@ export interface MailboxDto {
   imap_host: string | null;
   imap_port: number;
   status: 'pending' | 'verified' | 'failed' | 'disabled';
+  /** Новых (первых) писем в день. */
   daily_campaign_limit: number;
+  /** Всего писем в день, со всеми шагами цепочек. */
+  daily_total_limit: number;
   last_verified_at: string | null;
   last_error: string | null;
   last_send_at: string | null;

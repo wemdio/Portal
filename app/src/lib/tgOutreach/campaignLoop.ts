@@ -37,6 +37,7 @@ import { applyQueuedProfile, PROFILE_REST_HOURS, type QueuedProfilePayload } fro
 import { runLeadForwardPoller, isAccountRestrictedError } from './leadForward';
 import { buildLeadMessage, splitTelegramMessage } from './leadMessage';
 import { loadLeadOrigin } from './leadOrigin';
+import { enqueueCrmPush } from './crmPush';
 import { withTimeout } from './withTimeout';
 import { truncateMessage } from '@/lib/logger';
 import { extractOrConvertToMp3, transcribeAudio } from '@/lib/transcription';
@@ -1198,6 +1199,12 @@ export async function handleChat(
 
     await markProcessed(db, campaign.id, tgUserId, tgUsername);
     await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, triggerType === 'positive' ? 'lead' : 'not_lead', { tgIsBot, canSend: false, autoForward });
+    // Лид по интересу — и в CRM, если она включена у кампании. Независимо от
+    // того, дошла ли карточка в чат: лид настоящий в любом случае. Карточку
+    // соберёт сама очередь из только что записанного диалога.
+    if (triggerType === 'positive') {
+      await enqueueCrmPush(db, { campaignId: campaign.id, tgUserId, log });
+    }
   } else {
     await upsertDialog(db, campaign.id, account.id, tgUserId, tgUsername, chatMessages, undefined, { tgIsBot });
   }

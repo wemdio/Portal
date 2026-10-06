@@ -12,6 +12,7 @@ import {
 import { startTrace } from '@/lib/tracer';
 import { verifyBaseUsernames } from '@/lib/tgOutreach/firstTouch/verifyUsernames';
 import { shouldReportTmeDown } from '@/lib/tgOutreach/usernameExists';
+import { processCrmPushes, CRM_PUSH_POLL_INTERVAL_MS } from '@/lib/tgOutreach/crmPush';
 
 const WORKER_ID = `tg-outreach-${process.pid}`;
 const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000;
@@ -832,6 +833,24 @@ async function main() {
       });
   }, USERNAME_CHECK_INTERVAL_MS);
   if (typeof usernameCheckTimer.unref === 'function') usernameCheckTimer.unref();
+
+  /**
+   * Очередь сделок в CRM по переданным лидам (tg_outreach_crm_pushes).
+   *
+   * На уровне процесса, а не внутри кампании: Telegram-сессия AMO не нужна, и
+   * остановка кампании не должна задерживать лида, который уже передан.
+   */
+  let crmPushBusy = false;
+  const crmPushTimer = setInterval(() => {
+    if (shouldStop() || crmPushBusy) return;
+    crmPushBusy = true;
+    processCrmPushes(db, (level, msg) => log(level === 'warning' ? 'warn' : level, msg))
+      .catch((err) => log('error', `Очередь CRM упала: ${err instanceof Error ? err.message : String(err)}`))
+      .finally(() => {
+        crmPushBusy = false;
+      });
+  }, CRM_PUSH_POLL_INTERVAL_MS);
+  if (typeof crmPushTimer.unref === 'function') crmPushTimer.unref();
 
   await pollLoop({
     log,

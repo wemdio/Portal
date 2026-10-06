@@ -93,8 +93,26 @@ export async function sendWorkerAlert(alert: WorkerAlert): Promise<void> {
       lines.push(`• <i>${escapeHtml(k)}</i>: <code>${escapeHtml(String(v))}</code>`);
     }
   }
-  const text = lines.join('\n').slice(0, MAX_MSG_LEN);
+  await sendToChats(creds, lines.join('\n').slice(0, MAX_MSG_LEN));
+}
 
+/**
+ * Обычное сообщение в тот же чат (без «🚨» и блока ошибки): итоги фоновых
+ * задач, которые читает человек. text — готовый HTML (parse_mode HTML),
+ * экранирует вызывающий. Никогда не бросает, как и sendWorkerAlert.
+ */
+export async function sendWorkerNotice(text: string): Promise<void> {
+  const creds = loadCreds();
+  if (!creds) {
+    console.warn(`[worker-alert] no TG creds — skip notice: ${text.slice(0, 120)}`);
+    return;
+  }
+  await sendToChats(creds, text.slice(0, MAX_MSG_LEN));
+}
+
+export { escapeHtml as escapeTelegramHtml };
+
+async function sendToChats(creds: { token: string; chatIds: string[] }, text: string): Promise<void> {
   for (const chatId of creds.chatIds) {
     try {
       const res = await fetch(

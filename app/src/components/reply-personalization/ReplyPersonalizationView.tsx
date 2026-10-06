@@ -308,8 +308,6 @@ export function ReplyPersonalizationView() {
     setReplyQuery('');
     setReplySearch('');
     setLimit(REPLIES_PAGE_SIZE);
-    // Окно базы знаний открываем само только тем, кому без него не ответить.
-    if (p.missingReason) setKbModalOpen(true);
   }, []);
 
   const handleHandled = useCallback(
@@ -340,7 +338,7 @@ export function ReplyPersonalizationView() {
 
   const filtersActive = Boolean(campaignFilter || replySearch || onlyLeads);
   /** Кампании проекта не привязаны — обе вкладки будут пустыми, и это не «никто не ответил». */
-  const noCampaigns = Boolean(project) && !missingReason && !itemsLoading && campaigns.length === 0;
+  const noCampaigns = Boolean(project) && !itemsLoading && campaigns.length === 0;
   /** Число на кнопке «Все кампании»; null — есть кампании без счётчика. */
   const allCampaignsCount = campaigns.every((c) => c.replyCount !== null)
     ? campaigns.reduce((sum, c) => sum + (c.replyCount ?? 0), 0)
@@ -546,7 +544,7 @@ export function ReplyPersonalizationView() {
             </button>
           ) : null}
         </div>
-        {project && !missingReason ? (
+        {project ? (
           <div className="space-y-2 border-b border-gray-100 px-3 py-2">
             <div className="relative">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" aria-hidden />
@@ -657,13 +655,15 @@ export function ReplyPersonalizationView() {
           </div>
         ) : null}
         <div className="flex-1 overflow-y-auto">
+          {/* Без брифа письма видны (с 06.10.2026): отвечать можно руками,
+              ИИ соберёт черновик только из общих кейсов и тона. */}
+          {project && missingReason ? (
+            <p className="border-b border-amber-100 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-700">
+              Нет брифа — ИИ ответит только по общим кейсам и тону, лучше вручную
+            </p>
+          ) : null}
           {!project ? (
             <div className="p-3 text-sm text-gray-500">Выберите проект слева.</div>
-          ) : missingReason ? (
-            <div className="p-3 text-sm text-gray-500">
-              {missingReason} — ИИ не из чего собрать ответ. Заполните бриф в карточке проекта или
-              нажмите шестерёнку у проекта слева и вставьте его там.
-            </div>
           ) : listLoading && listItems.length === 0 ? (
             <div className="p-3 text-sm text-gray-500">Загрузка...</div>
           ) : (

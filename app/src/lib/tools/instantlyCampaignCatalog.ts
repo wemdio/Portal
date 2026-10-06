@@ -3,6 +3,7 @@ import 'server-only';
 import type { Campaign } from '@/lib/instantly/types';
 import { supabaseInstantly as supabaseAdmin } from '@/lib/supabaseInstantly';
 import { supabaseAdmin as supabaseMain } from '@/lib/supabaseAdmin';
+import { isOwnAgencyCampaign, isOwnAgencyProjectClient } from '@/lib/instantly/ownAgencyCampaign';
 import {
   resolveInstantlyAccountId,
   listInstantlyAccounts,
@@ -1289,11 +1290,20 @@ export async function autoMatchCampaignsToProjects(): Promise<{ matched: number 
       scores.set(project.id, Math.max(scores.get(project.id) ?? 0, score));
       textMatchScoresByCampaign.set(campaign.id, scores);
 
+      const existingOwners = ownerProjectIdsByCampaign.get(campaign.id);
+
+      // Наши «N. Polza_…» идут в проект Polza мимо границы периода (см.
+      // lib/instantly/ownAgencyCampaign.ts): 06.10.2026 период открыли 05.10, и
+      // все «1.–11. Polza» остались без проекта — их ответы не видел никто.
+      // Уже привязанную к нему не трогаем вовсе: иначе захват перенёс бы её из
+      // прошлого периода в текущий и переписал историю периодов.
+      const ownAgency = isOwnAgencyProjectClient(project.client) && isOwnAgencyCampaign(campaign.name);
+      if (ownAgency && existingOwners?.has(project.id)) continue;
+
       // Period eligibility decides whether a link should be created. It must
       // not erase a project from the independent name-ambiguity set above.
-      if (activePeriod && !campaignStartsInsidePeriod(campaign, activePeriod)) continue;
+      if (activePeriod && !ownAgency && !campaignStartsInsidePeriod(campaign, activePeriod)) continue;
 
-      const existingOwners = ownerProjectIdsByCampaign.get(campaign.id);
       const hasForeignOwner = existingOwners
         ? [...existingOwners].some((ownerProjectId) => ownerProjectId !== project.id)
         : false;

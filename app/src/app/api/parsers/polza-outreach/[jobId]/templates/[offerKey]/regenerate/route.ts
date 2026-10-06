@@ -47,7 +47,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
 
   const { data: job, error: jobErr } = await auth.supabase
     .from('parser_jobs')
-    .select('id,status,config,progress_detail,completed_at')
+    .select('id,user_id,status,config,progress_detail,completed_at')
     .eq('id', jobId)
     .eq('parser_type', 'polza_outreach')
     .maybeSingle();
@@ -56,6 +56,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ jobId: str
     return jsonError(jobErr.message, 500);
   }
   if (!job) return jsonError('Запуск не найден', 404);
+  // Чужие запуски открыты только на чтение: переписывание тратит лимит автора на ИИ.
+  if (job.user_id !== auth.user.id) return jsonError('Переписать цепочку может только автор запуска', 403);
   // Быстрые отказы до загрузки подписи и кейсов; окончательно то же
   // проверяется под маркером пересборки (regenerate.ts).
   if (job.status === 'pending' || job.status === 'running') return jsonError(RUNNING_TEXT, 409);

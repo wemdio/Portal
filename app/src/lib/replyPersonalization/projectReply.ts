@@ -10,6 +10,7 @@ import {
 } from './db';
 import { getLiveReply, listLiveReplies } from './liveReplyList';
 import { getProjectMailboxes, type ProjectMailboxes } from './projectMailboxes';
+import { isOwnAgencyCampaign } from '@/lib/instantly/ownAgencyCampaign';
 import type { QualificationRow, ReplyCampaignOption } from './types';
 
 /** Сколько писем отдаём за раз; прокрутка до конца списка просит следующую сотню. */
@@ -66,6 +67,24 @@ async function loadLinkHistory(
   return live.filter((row) => !synced.has(row.id));
 }
 
+const ownLiveCache = new Map<string, { rows: QualificationRow[]; hasMore: boolean; expiresAt: number }>();
+
+/**
+ * Наши кампании «N. Polza_…» основного аккаунта: квалификатор их не берёт
+ * (см. lib/instantly/ownAgencyCampaign.ts), поэтому читаем живьём, как
+ * кампании других аккаунтов. Минутный кэш — лимит чтения писем Instantly общий
+ * на весь воркспейс, а список перечитывается после каждого ответа.
+ */
+async function listOwnAgencyLiveReplies(campaignIds: string[], limit: number, search: string | undefined) {
+  const key = `${campaignIds.join(',')}|${limit}|${search ?? ''}`;
+  const cached = ownLiveCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached;
+  const result = await listLiveReplies({ campaignIds, accountId: 'main', limit, search });
+  // Пустой ответ не кэшируем: это может быть занятый Instantly, а не пустая кампания.
+  if (result.rows.length) ownLiveCache.set(key, { ...result, expiresAt: Date.now() + LINK_HISTORY_TTL_MS });
+  return result;
+}
+
 /**
  * Ответы лидов по проекту — все, включая отказы. Кампании основного аккаунта
  * читаются из таблицы квалификатора, кампании остальных аккаунтов — живым
@@ -93,7 +112,11 @@ export async function listProjectReplies(
 
   // Счётчики — по всем кампаниям проекта, независимо от выбранной: кнопки
   // кампаний над списком показывают, куда переключаться.
-  const syncedCampaignIds = projectCampaignIds.filter((id) => catalog.get(id)?.accountId === 'main');
+  // Живьём читаются кампании других аккаунтов и наши «N. Polza_…» основного:
+  // в таблице квалификатора их нет.
+  const isLive = (id: string) =>
+    (catalog.get(id)?.accountId ?? 'main') !== 'main' || isOwnAgencyCampaign(catalog.get(id)?.name);
+  const syncedCampaignIds = projectCampaignIds.filter((id) => !isLive(id));
   const counts = await countSyncedQualificationsByCampaign(syncedCampaignIds, options.search, { onlyLeads });
 
   // История недавно привязанных кампаний: в таблице квалификатора её нет.
@@ -116,13 +139,24 @@ export async function listProjectReplies(
   const limit = Math.min(Math.max(options.limit ?? LIST_PAGE_SIZE, 1), LIST_MAX_LIMIT);
 
   const byAccount = new Map<string, string[]>();
+  const ownLiveIds: string[] = [];
   for (const id of campaignIds) {
     const account = catalog.get(id)?.accountId ?? 'main';
+    if (account === 'main' && isLive(id)) {
+      ownLiveIds.push(id);
+      continue;
+    }
     byAccount.set(account, [...(byAccount.get(account) ?? []), id]);
   }
 
-  const parts = await Promise.all(
-    [...byAccount].map(async ([accountId, ids]) => {
+  const parts = await Promise.all([
+    // Наши «N. Polza_…»: вердикта нет — под «только лиды» молчат.
+    (async () => {
+      if (!ownLiveIds.length || onlyLeads) return { rows: [] as QualificationRow[], total: 0 as number | null, hasMore: false };
+      const { rows, hasMore } = await listOwnAgencyLiveReplies(ownLiveIds, limit, options.search);
+      return { rows, total: null as number | null, hasMore };
+    })(),
+    ...[...byAccount].map(async ([accountId, ids]) => {
       if (accountId === 'main') {
         const { rows, total } = await listSyncedQualifications(ids, { limit, search: options.search, onlyLeads });
         const extra = history.filter((row) => ids.includes(row.campaignId));
@@ -134,7 +168,7 @@ export async function listProjectReplies(
       const { rows, hasMore } = await listLiveReplies({ campaignIds: ids, accountId, limit, search: options.search });
       return { rows, total: null, hasMore };
     }),
-  );
+  ]);
 
   // Имя кампании в строке — из каталога: у живых писем его нет вовсе.
   const campaignNames = new Map(campaigns.map((c) => [c.id, c.name]));

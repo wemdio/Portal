@@ -20,15 +20,13 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
   const search = (url.searchParams.get('q') ?? '').trim().slice(0, 200);
   const fresh = url.searchParams.get('fresh') === '1';
 
-  // Как и в основном списке: без брифа собрать ответ не из чего.
-  const [projectBrief, kb] = await Promise.all([getProjectBrief(projectId), getKnowledgeBase(projectId)]);
-  const missingReason = missingBriefReason(projectBrief, kb?.localBrief);
-  if (missingReason) {
-    const empty: OthersPage = { replies: [], nextCursor: null, notices: [], missingReason };
-    return NextResponse.json(empty);
-  }
-
-  const page = await listProjectOthers(projectId, { cursor, search, fresh });
-  const body: OthersPage = { ...page, missingReason: null };
+  // Как и в основном списке: без брифа письма показываем, а нехватку брифа
+  // отдаём предупреждением — отвечать можно руками.
+  const [projectBrief, kb, page] = await Promise.all([
+    getProjectBrief(projectId),
+    getKnowledgeBase(projectId),
+    listProjectOthers(projectId, { cursor, search, fresh }),
+  ]);
+  const body: OthersPage = { ...page, missingReason: missingBriefReason(projectBrief, kb?.localBrief) };
   return NextResponse.json(body);
 });

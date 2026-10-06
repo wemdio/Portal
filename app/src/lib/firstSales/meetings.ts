@@ -174,8 +174,12 @@ export async function fetchMeetingLinks(
 
 /** Встроенный тип задачи AMO «Встреча» («Звонок» — 1). */
 const MEETING_TASK_TYPE_ID = 2;
-/** Этап, на котором карточка «застревает», когда встречу провели, а сделку не передвинули. */
-const MEETING_SCHEDULED_STATUS = 'Назначена встреча';
+/**
+ * «Назначена встреча» в «Воронке - новые лиды» — этап, на котором карточка
+ * «застревает», когда встречу провели, а сделку не передвинули. По id, а не по
+ * названию: переименование этапа в AMO раньше молча выключало это правило.
+ */
+const MEETING_SCHEDULED_STATUS_ID = 63384126;
 
 /**
  * Встречи, которые прошли, но этапом не отмечены: сделка → срок задачи.
@@ -221,18 +225,6 @@ export async function fetchTaskMeetings(
     if (prev === undefined || task.complete_till < prev) taskAtByDeal.set(dealId, task.complete_till);
   }
   if (taskAtByDeal.size === 0) return new Map();
-
-  const { data: statusData, error: statusError } = await db
-    .from('amo_statuses')
-    .select('status_id, status_name')
-    .eq('pipeline_id', pipelineId);
-  if (statusError) throw statusError;
-  const scheduled = ((statusData ?? []) as Array<{ status_id: number; status_name: string | null }>)
-    .find((s) => (s.status_name ?? '').trim() === MEETING_SCHEDULED_STATUS);
-  // Этап переименовали или удалили — правило молча выключается, а не падает
-  // весь дашборд: встречи по этапу при этом считаются как обычно.
-  if (!scheduled) return new Map();
-  const scheduledId = Number(scheduled.status_id);
 
   const dealIds = [...taskAtByDeal.keys()];
   const toMs = to.getTime();
@@ -296,7 +288,7 @@ export async function fetchTaskMeetings(
       : events.length > 0
         ? events[0]!.from
         : (currentStatus.get(dealId) ?? null);
-    if (statusAtEnd === scheduledId) result.set(dealId, taskAt);
+    if (statusAtEnd === MEETING_SCHEDULED_STATUS_ID) result.set(dealId, taskAt);
   }
   return result;
 }

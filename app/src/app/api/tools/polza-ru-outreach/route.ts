@@ -1,26 +1,27 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { logAudit, logError } from '@/lib/loggerServer';
 import { outreachApiKey } from '@/lib/outreachLlm/client';
+import { listOutreachJobs, parseJobsScope } from '@/lib/polzaOutreach/jobsList';
 import { authed, jsonError } from '@/lib/polzaRuOutreach/routeAuth';
 import { RU_OUTREACH_PARSER_TYPE, sanitizeRuOutreachConfig, type RuOutreachConfig } from '@/lib/polzaRuOutreach/types';
 
 export const dynamic = 'force-dynamic';
 
-/** История запусков «Нашего автоаутрича». */
+/** История запусков «Нашего автоаутрича»: все или только свои (`?scope=mine`). */
 export async function GET(req: NextRequest) {
   const auth = await authed(req);
   if ('error' in auth) return auth.error;
-  const { data, error } = await auth.supabase
-    .from('parser_jobs')
-    .select('*')
-    .eq('parser_type', RU_OUTREACH_PARSER_TYPE)
-    .order('created_at', { ascending: false })
-    .limit(30);
+  const { jobs, error } = await listOutreachJobs(auth.supabase, {
+    userId: auth.user.id,
+    parserType: RU_OUTREACH_PARSER_TYPE,
+    scope: parseJobsScope(req.nextUrl.searchParams.get('scope')),
+    limit: 30,
+  });
   if (error) {
     await logError('polza_ru_outreach.jobs.list.failed', error, undefined, { userId: auth.user.id });
     return jsonError(error.message, 500);
   }
-  return NextResponse.json({ jobs: data ?? [] });
+  return NextResponse.json({ jobs });
 }
 
 /**

@@ -24,12 +24,11 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
   // кампаний основного аккаунта; живые письма под этим фильтром не показываем.
   const onlyLeads = url.searchParams.get('onlyLeads') === '1';
 
-  // Письма не показываем, только если собрать ответ не из чего — нет брифа.
+  // Без брифа письма всё равно показываем (с 06.10.2026): отвечать можно
+  // руками, а ИИ соберёт черновик из общих кейсов и тона. `missingReason`
+  // уходит на экран предупреждением над списком.
   const [projectBrief, kb] = await Promise.all([getProjectBrief(projectId), getKnowledgeBase(projectId)]);
   const missingReason = missingBriefReason(projectBrief, kb?.localBrief);
-  if (missingReason) {
-    return NextResponse.json({ replies: [], campaigns: [], total: 0, hasMore: false, missingReason });
-  }
 
   const page = await listProjectReplies(projectId, { campaignId, search, limit, onlyLeads });
   const [statuses, repeats] = await Promise.all([
@@ -48,6 +47,6 @@ export const GET = withAuth(async (req: NextRequest, _user, params) => {
     campaigns: page.campaigns,
     total: page.total,
     hasMore: page.hasMore,
-    missingReason: null,
+    missingReason,
   });
 });

@@ -1,3 +1,4 @@
+import { runAutofillTick } from '@/lib/outreachAutofill/check';
 import { runPolzaOutreachJob } from '@/lib/polzaOutreach/runner';
 import { runRuOutreachJob } from '@/lib/polzaRuOutreach/runner';
 import { createWorkerLogger, pollLoop, requireSupabaseAdmin, setupGracefulShutdown, sleep } from './_shared';
@@ -15,6 +16,25 @@ const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_INTERVAL_MS ?? '5000');
 const WORKER_ID = `polza-outreach-${process.pid}-${Date.now()}`;
 const log = createWorkerLogger(WORKER_ID);
 const running = new Set<Promise<void>>();
+/**
+ * Автодобор базы (lib/outreachAutofill): раз в минуту разбирает законченные
+ * автосборы, а в 09:00 и 21:00 МСК проверяет, хватает ли базы на 3 рабочих дня.
+ * Здесь же, где идут запуски: сбор, заливка в «Рассылку» и старт — в одном процессе.
+ */
+const AUTOFILL_TICK_MS = 60_000;
+let autofillTicking = false;
+
+async function autofillTick(): Promise<void> {
+  if (autofillTicking) return;
+  autofillTicking = true;
+  try {
+    await runAutofillTick(new Date(), log);
+  } catch (err) {
+    log('error', 'Autofill tick crashed', err);
+  } finally {
+    autofillTicking = false;
+  }
+}
 
 const SLOTS: Array<{ parserType: string; label: string; run: (jobId: string) => Promise<void>; active: boolean }> = [
   { parserType: 'polza_outreach', label: 'Polza outreach', run: runPolzaOutreachJob, active: false },
@@ -70,6 +90,11 @@ async function main(): Promise<void> {
   await startupRecovery();
   log('info', 'Startup recovery done');
 
+  void autofillTick();
+  const autofillTimer = setInterval(() => {
+    if (!shouldStop()) void autofillTick();
+  }, AUTOFILL_TICK_MS);
+
   await pollLoop({
     log,
     pollIntervalMs: POLL_INTERVAL_MS,
@@ -77,6 +102,7 @@ async function main(): Promise<void> {
     pollOnce,
     realtimeTables: ['parser_jobs'],
   });
+  clearInterval(autofillTimer);
 }
 
 main().catch((err) => {

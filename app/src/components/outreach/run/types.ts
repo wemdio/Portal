@@ -15,12 +15,17 @@ export interface OutreachRunJob {
   id: string;
   status: 'pending' | 'running' | 'completed' | 'failed' | string;
   parser_type?: string;
-  config?: { limit?: number | null } | null;
+  /** autofill — запуск создан автодобором (lib/outreachAutofill), а не человеком. */
+  config?: { limit?: number | null; autofill?: boolean } | null;
   progress_percent?: number | null;
   progress_detail?: unknown;
   total_parsed?: number | null;
   error_message?: string | null;
   created_at: string;
+  /** Автор запуска: чужие запуски открыты только на чтение. */
+  user_id?: string | null;
+  /** Имя автора — подпись в общем списке запусков. */
+  author_name?: string | null;
 }
 
 /** Ответ `/{jobId}/results` в части, общей для обоих языков. */

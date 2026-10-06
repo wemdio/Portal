@@ -34,7 +34,9 @@ export interface MailboxRow {
   /** Адрес отправки, за которым закреплён ящик; null — ещё не выдан. */
   egress_ip: string | null;
   status: MailboxStatus;
+  /** «Новых в день»: первые письма с ящика за сутки UTC (планировщик). */
   daily_campaign_limit: number;
+  /** «Всего в день»: все письма цепочек с ящика за сутки UTC (планировщик). */
   daily_total_limit: number;
   last_verified_at: string | null;
   last_error: string | null;
