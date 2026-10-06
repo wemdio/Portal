@@ -1,4 +1,4 @@
--- «Перенос» в первичке опознаётся по id этапа, а не по названию.
+-- Первичка опознаёт этапы по id, а не по названию и не по зашитому порядку.
 --
 -- Повод: 02.10.2026 продажи переименовали этап «Квалифицированный лид» в «Лид
 -- квалифицирован», и пятничный отчёт упал. Здесь «Перенос» искался по
@@ -9,9 +9,23 @@
 -- таким названием нет (в «Работе с базой» — «перенос на потом», его и прежнее
 -- условие не трогало), так что цифры не меняются.
 --
--- Тело view повторяет 20260911_0001 целиком; отличия — условие на id вместо
--- названия и снятый join с `amo_statuses` в CTE `reached` (нужен был только
--- ради названия).
+-- Пороги «квал / встреча / счёт / договор» раньше были зашиты числами
+-- 40 / 70 / 100 / 110 (номера этапов). Вставь продажи этап посередине или
+-- переставь этапы — номера сдвинутся, и пороги молча начнут ловить не те
+-- этапы. Теперь порог — номер самого опорного этапа «Воронки - новые лиды» по
+-- его id (CTE `anchors`): 87397290 «Лид квалифицирован», 65917186 «Встреча
+-- проведена + КП отправлено», 63386002 «Отправлен счет», 65954530
+-- «Согласование договора». Сегодня их номера ровно 40 / 70 / 100 / 110, так
+-- что цифры не меняются (как и раньше, к сделкам других воронок применяются
+-- те же числа). Удалят опорный этап — порог станет NULL и метрика обнулится
+-- на дашборде, а не соврёт.
+--
+-- 10000 оставлено числом: это системные «Успешно» / «Закрыто» AMO, их место
+-- в воронке менять нельзя.
+--
+-- Тело view повторяет 20260911_0001 целиком; отличия — CTE `anchors`, пороги
+-- из него, условие на id «Переноса» вместо названия и снятый join с
+-- `amo_statuses` в CTE `reached` (нужен был только ради названия).
 
 create or replace view public.amo_lead_stage_dates_v as
 with ev as (
@@ -74,6 +88,16 @@ origin as (
   left join initial_status i on i.amo_deal_id = l.amo_id
   left join public.amo_status_pipeline_v sp on sp.status_id = i.status_id
 ),
+anchors as (
+  -- Номера опорных этапов «Воронки - новые лиды» — по id, см. заголовок файла.
+  select
+    max(sort) filter (where status_id = 87397290) as qualified_sort,
+    max(sort) filter (where status_id = 65917186) as meeting_sort,
+    max(sort) filter (where status_id = 63386002) as invoice_sort,
+    max(sort) filter (where status_id = 65954530) as contract_sort
+  from public.amo_statuses
+  where pipeline_id = 7670334
+),
 reached as (
   -- Порядок этапа берётся у САМОГО этапа (у переехавшей сделки события ведут
   -- в этапы старой воронки, и поиск по текущей не находил бы ничего), но
@@ -87,18 +111,19 @@ reached as (
     ev.amo_deal_id,
     -- «Перенос» (63387178) — парковка, а не шаг к квалу или встрече: см. 20260911_0001.
     min(ev.changed_at) filter (
-      where sp.sort >= 40 and sp.sort < 10000 and ev.to_status is distinct from 63387178
+      where sp.sort >= a.qualified_sort and sp.sort < 10000 and ev.to_status is distinct from 63387178
     )                                                                     as ev_qualified_at,
     min(ev.changed_at) filter (
-      where sp.sort >= 70 and sp.sort < 10000 and ev.to_status is distinct from 63387178
+      where sp.sort >= a.meeting_sort and sp.sort < 10000 and ev.to_status is distinct from 63387178
     )                                                                     as ev_meeting_at,
-    min(ev.changed_at) filter (where sp.sort >= 100 and sp.sort < 10000) as ev_invoice_at,
-    min(ev.changed_at) filter (where sp.sort >= 110 and sp.sort < 10000) as ev_contract_at,
+    min(ev.changed_at) filter (where sp.sort >= a.invoice_sort and sp.sort < 10000) as ev_invoice_at,
+    min(ev.changed_at) filter (where sp.sort >= a.contract_sort and sp.sort < 10000) as ev_contract_at,
     -- Момент попадания в «Успешно реализовано» по истории. Нужен как запасной
     -- источник для won_at: после переезда текущий статус сделки уже не 142.
     -- Ограничение по воронке сюда не распространяется — см. заголовок файла.
     min(ev.changed_at) filter (where ev.to_status = 142)                 as ev_won_at
   from ev
+  cross join anchors a
   left join origin o on o.amo_deal_id = ev.amo_deal_id
   left join public.amo_status_pipeline_v sp
          on sp.status_id = ev.to_status
@@ -111,17 +136,17 @@ select
   o.pipeline_id,
   l.created_at,
   case
-    when init_s.sort >= 40 and init_s.sort < 10000 and init_s.status_id is distinct from 63387178
+    when init_s.sort >= a.qualified_sort and init_s.sort < 10000 and init_s.status_id is distinct from 63387178
     then l.created_at
     else r.ev_qualified_at
   end                                                                                              as first_qualified_at,
   case
-    when init_s.sort >= 70 and init_s.sort < 10000 and init_s.status_id is distinct from 63387178
+    when init_s.sort >= a.meeting_sort and init_s.sort < 10000 and init_s.status_id is distinct from 63387178
     then l.created_at
     else r.ev_meeting_at
   end                                                                                              as first_meeting_at,
-  case when init_s.sort >= 100 and init_s.sort < 10000 then l.created_at else r.ev_invoice_at   end as first_invoice_at,
-  case when init_s.sort >= 110 and init_s.sort < 10000 then l.created_at else r.ev_contract_at  end as first_contract_at,
+  case when init_s.sort >= a.invoice_sort and init_s.sort < 10000 then l.created_at else r.ev_invoice_at   end as first_invoice_at,
+  case when init_s.sort >= a.contract_sort and init_s.sort < 10000 then l.created_at else r.ev_contract_at  end as first_contract_at,
   -- Дата оплаты по-прежнему из closed_at: он синкается с 2024 года и достоверен
   -- для всей истории, тогда как события уходят вглубь не так далеко.
   --
@@ -147,6 +172,7 @@ select
   coalesce(h.first_event_at is not null and l.created_at >= h.first_event_at, false) as history_complete
 from public.amo_leads l
 cross join horizon h
+cross join anchors a
 left join origin o on o.amo_deal_id = l.amo_id
 left join initial_status i on i.amo_deal_id = l.amo_id
 -- Начальный этап ищем в ИСХОДНОЙ воронке: в текущей его может не быть.

@@ -16,11 +16,11 @@ import type { ProjectPeriodRow, RenewalProjectRow } from '@/lib/renewals/metrics
  * по сделкам, поэтому дашборд идёт туда же.
  *
  * Что считается продлением: сделка воронки, которая ХОТЯ БЫ РАЗ дошла до
- * этапа «Продлено» (`sort` = 90). Именно «дошла», а не «стоит сейчас»:
+ * этапа «Продлено». Именно «дошла», а не «стоит сейчас»:
  * продлённый клиент через месяц уезжает в «Паузу» или «Реанимацию», и по
  * текущему этапу продление молча исчезло бы из истории задним числом. Этапы
- * «Пауза»/«Отвал» имеют `sort` больше 90, так что сравнение «>= 90» тут тоже
- * не годится — только точное равенство плюс история переходов.
+ * «Пауза»/«Отвал» стоят в воронке дальше «Продлено», так что сравнение по
+ * порядку тут тоже не годится — только точный этап плюс история переходов.
  *
  * Тип вторичной сделки («продление» / «реанимация» / «апсейл») на попадание в
  * цифру НЕ влияет: для финансов это всё оплата от текущего клиента. Тип виден
@@ -31,11 +31,14 @@ import type { ProjectPeriodRow, RenewalProjectRow } from '@/lib/renewals/metrics
  * весь UI остаются нетронутыми, меняется только откуда берутся строки.
  */
 
-/** «Продлено». Точное значение, не порог — см. шапку файла. */
-export const RENEWED_SORT = 90;
+// Этапы — по id AMO, а не по названию или порядку: продажи этапы
+// переименовывают и переставляют, а id остаётся прежним.
+
+/** «Продлено». Точный этап, не порог — см. шапку файла. */
+export const RENEWED_STATUS_ID = 87712818;
 
 /** «Счет / договор на продление» — из даты перехода сюда берём «дату договора». */
-export const CONTRACT_SORT = 80;
+export const CONTRACT_STATUS_ID = 87712814;
 
 export type AmoStatusRow = {
   status_id: number;
@@ -206,15 +209,22 @@ export function mapAmoRenewals(
   statuses: AmoStatusRow[],
   events: AmoStatusEventRow[],
 ): AmoRenewalsData {
-  const sortById = new Map<number, number>();
-  for (const status of statuses) {
-    if (status.sort !== null) sortById.set(Number(status.status_id), Number(status.sort));
+  // Этап удалили из воронки (и завели заново с новым id) — громкая ошибка
+  // лучше, чем дашборд, молча показывающий ноль продлений.
+  for (const [statusId, name] of [
+    [RENEWED_STATUS_ID, 'Продлено'],
+    [CONTRACT_STATUS_ID, 'Счет / договор на продление'],
+  ] as const) {
+    if (!statuses.some((status) => Number(status.status_id) === statusId)) {
+      throw new Error(`AMO status not found: ${name} (id ${statusId})`);
+    }
   }
 
   const reachedRenewed = new Set<number>();
   for (const lead of leads) {
-    const sort = lead.status_id === null ? undefined : sortById.get(Number(lead.status_id));
-    if (sort === RENEWED_SORT) reachedRenewed.add(Number(lead.amo_id));
+    if (lead.status_id !== null && Number(lead.status_id) === RENEWED_STATUS_ID) {
+      reachedRenewed.add(Number(lead.amo_id));
+    }
   }
 
   // Самый ранний переход в «Счет / договор на продление» — он и есть дата
@@ -224,13 +234,12 @@ export function mapAmoRenewals(
 
   for (const event of events) {
     if (!event.to_value) continue;
-    const sort = sortById.get(Number(event.to_value));
-    if (sort === undefined) continue; // чужая воронка — её номеров нет в карте
+    const statusId = Number(event.to_value);
     const dealId = Number(event.amo_deal_id);
 
-    if (sort === RENEWED_SORT) reachedRenewed.add(dealId);
+    if (statusId === RENEWED_STATUS_ID) reachedRenewed.add(dealId);
 
-    if (sort === CONTRACT_SORT) {
+    if (statusId === CONTRACT_STATUS_ID) {
       const day = eventDayKey(event.changed_at);
       const known = contractDayByDeal.get(dealId);
       if (day !== null && (known === undefined || day < known)) contractDayByDeal.set(dealId, day);

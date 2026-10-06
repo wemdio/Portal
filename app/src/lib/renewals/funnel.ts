@@ -36,14 +36,19 @@ import { chunkArray, IN_CHUNK_SIZE } from '@/lib/cisLeads/batchedQuery';
 export const SECONDARY_PIPELINE_ID = Number(process.env.RENEWALS_PIPELINE_ID ?? '11176862');
 
 /**
- * Верхняя граница прямого пути. Этапы выше по `sort` — «Пауза», «Реанимация»,
- * «Отвал / не продлен» — не продолжение пути, а исходы: сделка попадает туда
- * ВМЕСТО продления, а не после него. Считать их ступенями воронки значило бы
- * записать отвалившиеся сделки в продлённые, потому что их `sort` больше.
+ * Верхняя граница прямого пути — «Продлено» (по id: продажи этапы
+ * переставляют, а id остаётся прежним; порядок берём у самого этапа). Этапы
+ * дальше по `sort` — «Пауза», «Реанимация», «Отвал / не продлен» — не
+ * продолжение пути, а исходы: сделка попадает туда ВМЕСТО продления, а не
+ * после него. Считать их ступенями воронки значило бы записать отвалившиеся
+ * сделки в продлённые, потому что их `sort` больше.
  */
-const PATH_MAX_SORT = 90;
+const PATH_END_STATUS_ID = 87712818;
 
-/** Нижняя граница: `sort` 10 — служебное «Неразобранное», входом оно не является. */
+/**
+ * Нижняя граница: `sort` 10 — служебное «Неразобранное», входом оно не является.
+ * Числом можно: его место, как и у системных 142/143, AMO менять не даёт.
+ */
 const PATH_MIN_SORT = 20;
 
 /** Системные «Успешно реализовано» / «Закрыто и не реализовано». */
@@ -187,6 +192,10 @@ export async function fetchRenewalsFunnel(
   const statuses = (statusData ?? []) as StatusRow[];
   const statusById = new Map<number, StatusRow>();
   for (const row of statuses) statusById.set(Number(row.status_id), row);
+  const pathEndSort = statusById.get(PATH_END_STATUS_ID)?.sort;
+  if (pathEndSort === undefined || pathEndSort === null) {
+    throw new Error(`AMO status not found: Продлено (id ${PATH_END_STATUS_ID})`);
+  }
 
   const { data: leadData, error: leadError } = await db
     .from('amo_leads')
@@ -319,7 +328,7 @@ export async function fetchRenewalsFunnel(
   const countAt = (sort: number) => dealsBySort.get(sort)?.length ?? 0;
 
   const stages: FunnelStage[] = statuses
-    .filter((row) => row.sort !== null && row.sort >= PATH_MIN_SORT && row.sort <= PATH_MAX_SORT)
+    .filter((row) => row.sort !== null && row.sort >= PATH_MIN_SORT && row.sort <= pathEndSort)
     .sort((a, b) => (a.sort as number) - (b.sort as number))
     .map((row) => ({
       statusId: Number(row.status_id),
@@ -329,7 +338,7 @@ export async function fetchRenewalsFunnel(
     }));
 
   const outcomeRows = statuses
-    .filter((row) => row.sort !== null && row.sort > PATH_MAX_SORT && row.sort < SYSTEM_SORT)
+    .filter((row) => row.sort !== null && row.sort > pathEndSort && row.sort < SYSTEM_SORT)
     .sort((a, b) => (a.sort as number) - (b.sort as number));
 
   const outcomes: FunnelOutcome[] = outcomeRows.map((row) => ({
@@ -344,7 +353,7 @@ export async function fetchRenewalsFunnel(
   }
 
   const dealGroups: RenewalsStageDeals[] = [...dealsBySort.entries()]
-    .filter(([sort]) => sort <= PATH_MAX_SORT)
+    .filter(([sort]) => sort <= pathEndSort)
     .sort(([a], [b]) => a - b)
     .map(([sort, deals]) => {
       const status = nameBySort.get(sort);
