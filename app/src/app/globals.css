@@ -3537,6 +3537,12 @@ html[data-portal-theme='dark'] .portal-shell .bg-indigo-50\/70,
 html[data-portal-theme='dark'] .portal-shell .bg-indigo-50\/80 {
   background-color: rgba(99, 102, 241, 0.18) !important;
 }
+/* Прилипающая плашка массовых действий (TG-аутрич): тот же индиговый
+   оттенок, но непрозрачный — поверх прокручиваемой таблицы полупрозрачный
+   фон пропускал строки под собой (06.10.2026). */
+html[data-portal-theme='dark'] .portal-shell .bulk-actions-bar.bg-indigo-50 {
+  background: linear-gradient(rgba(99, 102, 241, 0.18), rgba(99, 102, 241, 0.18)), var(--pd-surface) !important;
+}
 html[data-portal-theme='dark'] .portal-shell .bg-indigo-500,
 html[data-portal-theme='dark'] .portal-shell .bg-indigo-600,
 html[data-portal-theme='dark'] .portal-shell .bg-indigo-700 {

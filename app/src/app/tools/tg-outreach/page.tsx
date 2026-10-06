@@ -2056,8 +2056,9 @@ function BulkActionsBar({
   if (selectedCount === 0) return null;
   return (
     // Прилипает к верху: в списке на сотни строк за кнопками приходилось
-    // каждый раз возвращаться в начало страницы.
-    <div className="sticky top-0 z-20 flex flex-wrap items-center gap-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 shadow-sm">
+    // каждый раз возвращаться в начало страницы. `bulk-actions-bar` — сплошной
+    // фон в тёмной теме (globals.css): полупрозрачный пропускал строки таблицы.
+    <div className="bulk-actions-bar sticky top-0 z-20 flex flex-wrap items-center gap-3 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 shadow-sm">
       <span className="text-xs font-medium text-indigo-900">Выбрано: {selectedCount}</span>
       {onCheck && (
         <button
