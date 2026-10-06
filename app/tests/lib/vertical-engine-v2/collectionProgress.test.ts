@@ -151,9 +151,12 @@ describe('VE2 collection progress presentation', () => {
     // The coordinator yields while its constructor is active; pending must not
     // hide that activity or display the step's percentage as whole-base progress.
     expect(getPreparationPresentation({ preparation, base: collecting, jobs: [parent] }))
-      .toMatchObject({ title: 'Проверяем email', tone: 'info', currentStep: 0 });
-    expect(getPreparationPresentation({ preparation, base: collecting, jobs: [{ ...parent, status: 'failed', error: 'Stopped' }] }).tone).toBe('err');
-    expect(getPreparationPresentation({ preparation, base: { ...collecting, collect_info: {} }, jobs: [parent] }).tone).toBe('muted');
+      .toMatchObject({ title: 'Проверяем email', tone: 'info', currentStep: 0,
+        guidance: { action: 'wait', title: 'От вас сейчас ничего не требуется' } });
+    expect(getPreparationPresentation({ preparation, base: collecting, jobs: [{ ...parent, status: 'failed', error: 'Stopped' }] }))
+      .toMatchObject({ tone: 'err', guidance: { action: 'continue' } });
+    expect(getPreparationPresentation({ preparation, base: { ...collecting, collect_info: {} }, jobs: [parent] }))
+      .toMatchObject({ tone: 'muted', guidance: { action: 'wait' } });
     collecting.collect_info.construct.progress.current_step_progress = 130;
     expect(getCollectionProgress(collecting.collect_info).stepPercent).toBeNull();
     collecting.collect_info.construct.progress = { status: 'completed', current_step_progress: 100 };
@@ -182,11 +185,15 @@ describe('VE2 collection progress presentation', () => {
       const presentation = getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: stopped, jobs: [] });
       expect(presentation).toMatchObject({ tone: readyRows > 0 ? 'ok' : 'muted', currentStep: readyRows > 0 ? 3 : null, canContinue: true });
       expect(presentation.title).toBe(readyRows > 0 ? 'База и письма готовы к согласованию' : 'Готовых контактов пока нет');
+      expect(presentation.guidance?.action).toBe(readyRows > 0 ? 'review' : 'continue');
+      expect(getPreparationPresentation({ preparation: { ...preparation, status: 'ready' }, base: stopped, jobs: [], approved: true }).guidance.action)
+        .toBe(readyRows > 0 ? 'launch' : 'continue');
     }
     collecting.collect_info.relevance_review_requested = false;
     collecting.collect_info.construct.progress = { status: 'processing', current_step_key: 'validate_emails', current_step_progress: 37 };
     for (const history of [[], [{ ...parent, status: 'done' as const }]]) {
-      expect(getPreparationPresentation({ preparation, base: collecting, jobs: history }).tone).toBe('muted');
+      expect(getPreparationPresentation({ preparation, base: collecting, jobs: history }))
+        .toMatchObject({ tone: 'muted', guidance: { action: history.length ? 'continue' : 'check' } });
     }
     collecting.collect_info = { stats: { rows_total: Number.NaN }, tasks: [{ status: 'done', rows: -1 }] };
     expect(getCollectionProgress(collecting.collect_info)).toMatchObject({ candidates: null, sourceRows: null });
