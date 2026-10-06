@@ -375,6 +375,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   };
   const research = async () => {
     setResearchBusy(true);
+    setError('');
     try {
       const result = await veEnginePost<VeJobResponse>(`${VE_API}/projects/${projectId}/research`);
       if (!result.ok) setError(result.data.error ?? 'Не удалось начать исследование');
@@ -399,6 +400,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
     }
   };
   const saveOffer = async (value: string) => {
+    setError('');
     try {
       const result = await veEnginePatch<VeProjectResponse>(`${VE_API}/projects/${projectId}`, {
         offer_override: value,
@@ -410,6 +412,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
     }
   };
   const runDossier = async (id: string) => {
+    setError('');
     try {
       const response = await veEnginePost<VeJobResponse>(`${VE_API}/verticals/${id}/dossier`);
       if (!response.ok) setError(response.data.error ?? 'Не удалось собрать досье');
@@ -420,6 +423,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
   };
   const restoreHypothesis = async (id: string) => {
     setBusy(true);
+    setError('');
     try {
       const response = await veEnginePatch<{ error?: string }>(`${VE_API}/hypotheses/${id}`, { status: 'proposed' });
       if (!response.ok) setError(response.data.error ?? 'Не удалось вернуть гипотезу');
@@ -439,6 +443,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
       )
     )
       return;
+    setError('');
     try {
       const response = await veEnginePost<{ error?: string }>(`${VE_API}/projects/${projectId}/cancel`);
       if (!response.ok) setError(response.data.error ?? 'Не удалось остановить подготовку');
@@ -458,6 +463,7 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
       return;
     }
     if (!guardLeave()) return;
+    setError('');
     setLaunchHypothesisIds(ids);
     setStep(4);
     topRef.current?.scrollIntoView({ block: 'start' });
@@ -791,17 +797,10 @@ export function AutoOutreachProject({ projectId, onBack }: { projectId: string; 
                     preparation={preparation}
                     base={preparationBase}
                     jobs={detail.jobs}
+                    onContinue={() => void change({ action: 'prepare', hypothesis_id: activeId })}
+                    continueDisabled={busy || locked}
                   />
-                  {(!preparation || preparation.status === 'error') && preparationBase?.status !== 'failed' ? (
-                    <button
-                      type="button"
-                      disabled={busy || locked}
-                      className={HE.btnGhost}
-                      onClick={() => void change({ action: 'prepare', hypothesis_id: activeId })}
-                    >
-                      Продолжить подготовку
-                    </button>
-                  ) : null}
+                  {!preparation ? <button type="button" className={HE.btnGhost} onClick={() => jump(1)}>К гипотезам</button> : null}
                 </>
               )}
               <button type="button" className={HE.btnPrimary} onClick={() => jump(3)}>
