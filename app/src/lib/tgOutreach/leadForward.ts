@@ -29,6 +29,7 @@ import type { TelegramClient } from 'telegram';
 import { splitTelegramMessage } from './leadMessage';
 import { forwardKindLabel, forwardWho } from './campaignLog';
 import { withTimeout } from './withTimeout';
+import { enqueueCrmPush } from './crmPush';
 
 type LogFn = (level: 'info' | 'warning' | 'error', msg: string) => void;
 
@@ -274,151 +275,166 @@ export async function processLeadForwards(args: {
   for (const task of pending) {
     if (args.shouldStop?.()) break;
 
-    const retry = retries.get(task.id);
-    if (retry && retry.notBefore > now()) continue;
+    // Лид, передача которого завершилась — отправлена или окончательно не ушла, —
+    // уходит и в CRM, если она включена у кампании (см. `finally` ниже). Не
+    // ушедший в чат лид всё равно настоящий: в CRM он нужен тем более.
+    const settledBefore = result.sent + result.failed;
+    try {
+      const retry = retries.get(task.id);
+      if (retry && retry.notBefore > now()) continue;
 
-    const holder = getClient(task.account_id);
-    if (!holder) {
-      if (!warnedNoClient.has(task.id)) {
-        warnedNoClient.add(task.id);
-        log('warning', `Передача (${forwardKindLabel(task.kind)}): аккаунт задачи не подключён — жду, пока он поднимется. Поставил ${task.requested_by_name || '—'}.`);
-      }
-      continue;
-    }
-
-    const outcome = await sendLeadForward({
-      db,
-      client: holder.client,
-      task,
-      accountName: holder.accountName,
-      log,
-      timeoutMs: args.timeoutMs,
-    });
-
-    if (outcome === 'restricted') {
-      /**
-       * Аккаунт под PEER_FLOOD — ждать нечего: ограничение снимается часами,
-       * а лид нужен менеджеру сейчас. Карточку отправляет любой здоровый
-       * аккаунт кампании; оригиналы переписки у подменного не найдутся, и это
-       * допустимая потеря — карточка содержит переписку текстом.
-       */
-      const spare = args.getFallbackClient?.(task.account_id) ?? null;
-      if (!spare) {
-        await db
-          .from('tg_outreach_lead_forwards')
-          .update({
-            status: 'failed',
-            error_message: `Аккаунт ${holder.accountName} ограничен Telegram (PEER_FLOOD), а свободного аккаунта кампании нет`,
-          })
-          .eq('id', task.id);
-        log('error', `Передача (${forwardKindLabel(task.kind)}): НЕ отправлена — аккаунт ${holder.accountName} под PEER_FLOOD, свободного аккаунта для подмены нет. Верните передачу, когда аккаунт отдохнёт.`);
-        result.failed++;
+      const holder = getClient(task.account_id);
+      if (!holder) {
+        if (!warnedNoClient.has(task.id)) {
+          warnedNoClient.add(task.id);
+          log('warning', `Передача (${forwardKindLabel(task.kind)}): аккаунт задачи не подключён — жду, пока он поднимется. Поставил ${task.requested_by_name || '—'}.`);
+        }
         continue;
       }
-      log('warning', `Передача (${forwardKindLabel(task.kind)}): аккаунт ${holder.accountName} под PEER_FLOOD — отправляю карточку аккаунтом ${spare.accountName}.`);
-      const viaSpare = await sendLeadForward({
+
+      const outcome = await sendLeadForward({
         db,
-        client: spare.client,
+        client: holder.client,
         task,
-        accountName: spare.accountName,
+        accountName: holder.accountName,
         log,
         timeoutMs: args.timeoutMs,
-        cardOnly: true,
       });
-      if (viaSpare === 'sent') {
-        result.sent++;
-        continue;
-      }
-      if (viaSpare === 'retry') {
-        // Подменный в коротком FLOOD_WAIT и придёт в себя: задача остаётся в
-        // очереди. Следующая попытка снова начнётся с хозяина и снова уйдёт
-        // на подмену — это дешевле, чем выбрать подменного раз и навсегда.
-        retries.set(task.id, { attempts: (retry?.attempts ?? 0) + 1, notBefore: now() + FORWARD_RETRY_DELAY_MS });
-        result.retried++;
-        continue;
-      }
-      if (viaSpare === 'restricted') {
-        // Оба ограничены. Гарантий по третьему нет, а молча перебирать всю
-        // кампанию каждые 10 секунд незачем — закрываем с понятной причиной.
-        await db
-          .from('tg_outreach_lead_forwards')
-          .update({
-            status: 'failed',
-            error_message: `Аккаунты ${holder.accountName} и ${spare.accountName} ограничены Telegram (PEER_FLOOD)`,
-          })
-          .eq('id', task.id);
-      }
-      // 'failed' подменный уже записал сам — с настоящей причиной отказа.
-      result.failed++;
-      continue;
-    }
 
-    if (outcome === 'retry') {
-      /**
-       * Сорвалось по сети — пересобираем соединение, чтобы следующая попытка
-       * шла по свежему сокету, а не билась о тот же мёртвый.
-       *
-       * Именно на этом терялись лиды: попытки идут раз в пять минут, а круг
-       * доходит до аккаунта раз в сутки, и «подождём, пока круг починит» на
-       * деле означало пять одинаковых отказов подряд.
-       */
-      if (args.reconnect) {
-        const ok = await args.reconnect(task.account_id);
-        if (!ok) {
-          log('warning', `Передача (${forwardKindLabel(task.kind)}): переподключить аккаунт ${holder.accountName} не удалось — следующая попытка пойдёт по прежнему соединению.`);
-        }
-      }
-      const attempts = (retry?.attempts ?? 0) + 1;
-      if (attempts >= FORWARD_MAX_TRANSIENT_ATTEMPTS) {
+      if (outcome === 'restricted') {
         /**
-         * Свой аккаунт не оживает — отдаём карточку любому здоровому.
-         *
-         * Лид у менеджера — итог всей работы кампании, и терять его из-за
-         * одного зависшего сокета нельзя. Карточка содержит переписку текстом,
-         * так что менеджер получает всё нужное; оригиналов у подменного нет, и
-         * пересылку он пропускает.
+         * Аккаунт под PEER_FLOOD — ждать нечего: ограничение снимается часами,
+         * а лид нужен менеджеру сейчас. Карточку отправляет любой здоровый
+         * аккаунт кампании; оригиналы переписки у подменного не найдутся, и это
+         * допустимая потеря — карточка содержит переписку текстом.
          */
         const spare = args.getFallbackClient?.(task.account_id) ?? null;
-        if (spare) {
-          log('warning', `Передача (${forwardKindLabel(task.kind)}): аккаунт ${holder.accountName} не отвечает ${attempts} попыток — отправляю карточку подменным аккаунтом ${spare.accountName}.`);
-          const viaSpare = await sendLeadForward({
-            db,
-            client: spare.client,
-            task,
-            accountName: spare.accountName,
-            log,
-            timeoutMs: args.timeoutMs,
-            cardOnly: true,
-          });
-          retries.delete(task.id);
-          if (viaSpare === 'sent') {
-            result.sent++;
-            continue;
-          }
-          // Не смог и подменный — значит дело не в аккаунте. Дальше по общей
-          // ветке: пометить «не отправлена» и показать оператору.
-          log('error', `Передача (${forwardKindLabel(task.kind)}): подменный аккаунт ${spare.accountName} тоже не смог отправить карточку.`);
+        if (!spare) {
+          await db
+            .from('tg_outreach_lead_forwards')
+            .update({
+              status: 'failed',
+              error_message: `Аккаунт ${holder.accountName} ограничен Telegram (PEER_FLOOD), а свободного аккаунта кампании нет`,
+            })
+            .eq('id', task.id);
+          log('error', `Передача (${forwardKindLabel(task.kind)}): НЕ отправлена — аккаунт ${holder.accountName} под PEER_FLOOD, свободного аккаунта для подмены нет. Верните передачу, когда аккаунт отдохнёт.`);
+          result.failed++;
+          continue;
         }
-
-        // Пять раз по пять минут — аккаунт не оживает; дальше ждать молча
-        // значит прятать проблему. Оператор увидит «не отправлена» и решит:
-        // поставить заново или разобраться с аккаунтом.
-        await db
-          .from('tg_outreach_lead_forwards')
-          .update({ status: 'failed', error_message: `Аккаунт ${holder.accountName} не отвечает: ${attempts} попыток подряд сорвались по сети` })
-          .eq('id', task.id);
-        log('error', `Передача (${forwardKindLabel(task.kind)}): НЕ отправлена — аккаунт ${holder.accountName} не отвечает ${attempts} попыток подряд. Проверьте прокси и аккаунт, затем поставьте передачу заново.`);
-        retries.delete(task.id);
+        log('warning', `Передача (${forwardKindLabel(task.kind)}): аккаунт ${holder.accountName} под PEER_FLOOD — отправляю карточку аккаунтом ${spare.accountName}.`);
+        const viaSpare = await sendLeadForward({
+          db,
+          client: spare.client,
+          task,
+          accountName: spare.accountName,
+          log,
+          timeoutMs: args.timeoutMs,
+          cardOnly: true,
+        });
+        if (viaSpare === 'sent') {
+          result.sent++;
+          continue;
+        }
+        if (viaSpare === 'retry') {
+          // Подменный в коротком FLOOD_WAIT и придёт в себя: задача остаётся в
+          // очереди. Следующая попытка снова начнётся с хозяина и снова уйдёт
+          // на подмену — это дешевле, чем выбрать подменного раз и навсегда.
+          retries.set(task.id, { attempts: (retry?.attempts ?? 0) + 1, notBefore: now() + FORWARD_RETRY_DELAY_MS });
+          result.retried++;
+          continue;
+        }
+        if (viaSpare === 'restricted') {
+          // Оба ограничены. Гарантий по третьему нет, а молча перебирать всю
+          // кампанию каждые 10 секунд незачем — закрываем с понятной причиной.
+          await db
+            .from('tg_outreach_lead_forwards')
+            .update({
+              status: 'failed',
+              error_message: `Аккаунты ${holder.accountName} и ${spare.accountName} ограничены Telegram (PEER_FLOOD)`,
+            })
+            .eq('id', task.id);
+        }
+        // 'failed' подменный уже записал сам — с настоящей причиной отказа.
         result.failed++;
-      } else {
-        retries.set(task.id, { attempts, notBefore: now() + FORWARD_RETRY_DELAY_MS });
-        result.retried++;
+        continue;
       }
-      continue;
-    }
 
-    retries.delete(task.id);
-    if (outcome === 'sent') result.sent++; else result.failed++;
+      if (outcome === 'retry') {
+        /**
+         * Сорвалось по сети — пересобираем соединение, чтобы следующая попытка
+         * шла по свежему сокету, а не билась о тот же мёртвый.
+         *
+         * Именно на этом терялись лиды: попытки идут раз в пять минут, а круг
+         * доходит до аккаунта раз в сутки, и «подождём, пока круг починит» на
+         * деле означало пять одинаковых отказов подряд.
+         */
+        if (args.reconnect) {
+          const ok = await args.reconnect(task.account_id);
+          if (!ok) {
+            log('warning', `Передача (${forwardKindLabel(task.kind)}): переподключить аккаунт ${holder.accountName} не удалось — следующая попытка пойдёт по прежнему соединению.`);
+          }
+        }
+        const attempts = (retry?.attempts ?? 0) + 1;
+        if (attempts >= FORWARD_MAX_TRANSIENT_ATTEMPTS) {
+          /**
+           * Свой аккаунт не оживает — отдаём карточку любому здоровому.
+           *
+           * Лид у менеджера — итог всей работы кампании, и терять его из-за
+           * одного зависшего сокета нельзя. Карточка содержит переписку текстом,
+           * так что менеджер получает всё нужное; оригиналов у подменного нет, и
+           * пересылку он пропускает.
+           */
+          const spare = args.getFallbackClient?.(task.account_id) ?? null;
+          if (spare) {
+            log('warning', `Передача (${forwardKindLabel(task.kind)}): аккаунт ${holder.accountName} не отвечает ${attempts} попыток — отправляю карточку подменным аккаунтом ${spare.accountName}.`);
+            const viaSpare = await sendLeadForward({
+              db,
+              client: spare.client,
+              task,
+              accountName: spare.accountName,
+              log,
+              timeoutMs: args.timeoutMs,
+              cardOnly: true,
+            });
+            retries.delete(task.id);
+            if (viaSpare === 'sent') {
+              result.sent++;
+              continue;
+            }
+            // Не смог и подменный — значит дело не в аккаунте. Дальше по общей
+            // ветке: пометить «не отправлена» и показать оператору.
+            log('error', `Передача (${forwardKindLabel(task.kind)}): подменный аккаунт ${spare.accountName} тоже не смог отправить карточку.`);
+          }
+
+          // Пять раз по пять минут — аккаунт не оживает; дальше ждать молча
+          // значит прятать проблему. Оператор увидит «не отправлена» и решит:
+          // поставить заново или разобраться с аккаунтом.
+          await db
+            .from('tg_outreach_lead_forwards')
+            .update({ status: 'failed', error_message: `Аккаунт ${holder.accountName} не отвечает: ${attempts} попыток подряд сорвались по сети` })
+            .eq('id', task.id);
+          log('error', `Передача (${forwardKindLabel(task.kind)}): НЕ отправлена — аккаунт ${holder.accountName} не отвечает ${attempts} попыток подряд. Проверьте прокси и аккаунт, затем поставьте передачу заново.`);
+          retries.delete(task.id);
+          result.failed++;
+        } else {
+          retries.set(task.id, { attempts, notBefore: now() + FORWARD_RETRY_DELAY_MS });
+          result.retried++;
+        }
+        continue;
+      }
+
+      retries.delete(task.id);
+      if (outcome === 'sent') result.sent++; else result.failed++;
+    } finally {
+      if (task.kind === 'lead' && result.sent + result.failed > settledBefore) {
+        await enqueueCrmPush(db, {
+          campaignId,
+          dialogId: task.dialog_id,
+          messageText: task.message_text,
+          log,
+        });
+      }
+    }
   }
 
   return result;
