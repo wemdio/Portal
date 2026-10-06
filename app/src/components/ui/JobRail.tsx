@@ -1,6 +1,6 @@
 'use client';
 
-import { Plus, RefreshCw, RotateCcw, Trash2, User } from 'lucide-react';
+import { Plus, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
 
 export type JobRailStatus = 'pending' | 'running' | 'completed' | 'failed';
 
@@ -25,8 +25,6 @@ export interface JobRailItem {
   title: string;
   /** Мелкая строка под полосой: время и сколько готово. */
   subtitle: string;
-  /** Автор чужого запуска — своей строкой, чтобы не обрезался вместе с датой. */
-  author?: string | null;
   /** Доля выполненного, 0–100. Завершённый запуск вызывающая сторона отдаёт как 100. */
   percent: number;
   /** Запуск нельзя удалять, пока он идёт. */
@@ -88,12 +86,6 @@ export function JobRail({ items, activeId, onSelect, onNew, onRefresh, onRepeat,
                     {JOB_RAIL_STATUS_LABELS[item.status]}
                   </span>
                 </div>
-                {item.author ? (
-                  <div className="mt-1 flex items-center gap-1 text-xs text-violet-700">
-                    <User className="h-3 w-3 shrink-0" />
-                    <span className="truncate">{item.author}</span>
-                  </div>
-                ) : null}
 
                 <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-gray-200">
                   <div

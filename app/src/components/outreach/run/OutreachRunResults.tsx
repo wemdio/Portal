@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment, useCallback, useState } from 'react';
-import { ChevronDown, ChevronRight, Download, FileText, Filter, Loader2, Mail, Square, Trash2, User, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, Download, FileText, Filter, Loader2, Mail, Square, Trash2, X } from 'lucide-react';
 import { fmtUsd } from '@/lib/outreachLlm/format';
 import { OutreachStages } from '@/components/parsers/OutreachStages';
 import { ChainTemplates } from '@/components/outreach/ChainTemplates';
@@ -36,8 +36,6 @@ type Props<Row extends { id: string }, Config, Job extends OutreachRunJob> = {
   onDeleteJob?: () => void;
   /** Чужой запуск: смотреть можно, менять — только автору. */
   readOnly?: boolean;
-  /** Имя автора, если запуск чужой. */
-  author?: string | null;
 };
 
 const FILTER_TITLES: Record<string, string> = { ready: 'Готовые к отправке', all: 'Компании' };
@@ -64,7 +62,6 @@ export function OutreachRunResults<Row extends { id: string }, Config, Job exten
   onStopJob,
   onDeleteJob,
   readOnly = false,
-  author = null,
 }: Props<Row, Config, Job>) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [openStage, setOpenStage] = useState<number | null>(null);
@@ -99,12 +96,6 @@ export function OutreachRunResults<Row extends { id: string }, Config, Job exten
 
   return (
     <div className="space-y-4">
-      {job && author ? (
-        <div className="flex items-center gap-1.5 px-1 text-sm text-gray-500">
-          <User className="h-4 w-4 shrink-0 text-violet-700" />
-          Автор запуска: <span className="font-medium text-gray-900">{author}</span> · только просмотр
-        </div>
-      ) : null}
       {/* Цепочка шагов вместо ряда цифр: по плоской воронке не понять, где
           сейчас работа и где она встала. Пока запуск не выбран — цепочки нет. */}
       {jobStatus ? (
