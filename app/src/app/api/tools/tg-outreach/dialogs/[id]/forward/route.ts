@@ -18,6 +18,8 @@ import { buildLeadMessage, type ForwardKind } from '@/lib/tgOutreach/leadMessage
 import { checkForwardConflict, cancelBlockReason, type ExistingForward } from '@/lib/tgOutreach/forwardConflict';
 import { loadLeadOrigin } from '@/lib/tgOutreach/leadOrigin';
 import { logCampaign, forwardKindLabel, forwardWho } from '@/lib/tgOutreach/campaignLog';
+import { enqueueCrmPush, type EnqueueResult } from '@/lib/tgOutreach/crmPush';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import type { OpenAISettings } from '@/lib/tgOutreach/types';
 
 export const dynamic = 'force-dynamic';
@@ -75,13 +77,10 @@ async function prepare(
   const targetChat = (kind === 'partner'
     ? (oai.target_chats_partner?.trim() || oai.target_chats_positive?.trim())
     : oai.target_chats_positive?.trim()) ?? '';
-  if (!targetChat) {
-    return {
-      error: kind === 'partner'
-        ? 'В настройках кампании не указан ни «Чат для партнёров», ни «Чат для пересылки (+)»'
-        : 'В настройках кампании не указан «Чат для пересылки (+)»',
-      status: 400,
-    };
+  // Лиду чат не обязателен: без него передача — это пометка «Лид» (и сделка в
+  // CRM, если включена). Партнёру пометить нечем — без чата ему некуда.
+  if (!targetChat && kind === 'partner') {
+    return { error: 'В настройках кампании не указан ни «Чат для партнёров», ни «Чат для пересылки (+)»', status: 400 };
   }
 
   // Оффер и чат-источник ищем по юзернейму в базах этой кампании: в диалоге
@@ -141,6 +140,43 @@ async function loadForwards(db: SupabaseClient, dialogId: string): Promise<Exist
   return (data ?? []) as ExistingForward[];
 }
 
+/**
+ * Передача лида без чата для пересылки: статус «Лид» и сделка в CRM, если она
+ * включена у кампании. В Telegram ничего не уходит, задачи в очереди нет.
+ *
+ * Статус здесь — всё действие, поэтому его сбой — ошибка ответа, а не строка
+ * в журнале, как при обычной передаче.
+ */
+async function markLeadOnly(db: SupabaseClient, dialogId: string, prepared: Prepared, name: string) {
+  const { error } = await db
+    .from('tg_outreach_dialogs')
+    .update({ status: 'lead' })
+    .eq('id', dialogId)
+    .neq('status', 'lead');
+  if (error) {
+    await logCampaign(db, prepared.campaignId, 'error',
+      `Передача (лид) ${prepared.who}: статус «Лид» не проставился — ${error.message} (нажал ${name})`);
+    return jsonError(error.message, 500);
+  }
+
+  await logCampaign(db, prepared.campaignId, 'info',
+    `Передача (лид) ${prepared.who}: чат для пересылки не указан — помечен лидом без пересылки (нажал ${name})`);
+
+  // Очередь CRM пишется только сервисной ролью — как и в «Отправить в CRM».
+  // Про постановку или сбой enqueueCrmPush пишет в журнал сама.
+  let crm: EnqueueResult = 'disabled';
+  if (supabaseAdmin) {
+    crm = await enqueueCrmPush(supabaseAdmin, {
+      campaignId: prepared.campaignId,
+      dialogId,
+      messageText: prepared.text,
+      log: (level, msg) => void logCampaign(db, prepared.campaignId, level, msg),
+    });
+  }
+
+  return NextResponse.json({ ok: true, mark_only: true, crm }, { status: 201 });
+}
+
 /** Человеческое имя того, кто нажал кнопку — для строки «передал». */
 function operatorName(user: { email?: string | null; user_metadata?: Record<string, unknown> | null }): string {
   const meta = user.user_metadata ?? {};
@@ -188,9 +224,9 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       // подтверждении, в журнале останется только эта строка, и по ней видно,
       // что решение принимали и отменили.
       await logCampaign(auth.supabase, prepared.campaignId, 'info',
-        `Передача (${forwardKindLabel(kind)}) ${prepared.who}: открыт предпросмотр, получатель ${prepared.targetChat} (нажал ${who})`);
+        `Передача (${forwardKindLabel(kind)}) ${prepared.who}: открыт предпросмотр, ${prepared.targetChat ? `получатель ${prepared.targetChat}` : 'чат не указан — будет только пометка «Лид»'} (нажал ${who})`);
 
-      return NextResponse.json({ text: prepared.text, target_chat: prepared.targetChat });
+      return NextResponse.json({ text: prepared.text, target_chat: prepared.targetChat || null, mark_only: !prepared.targetChat });
     },
   );
 }
@@ -227,6 +263,8 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         }
         return jsonError(prepared.error, prepared.status);
       }
+
+      if (!prepared.targetChat) return markLeadOnly(auth.supabase, id, prepared, name);
 
       const { data, error } = await auth.supabase
         .from('tg_outreach_lead_forwards')

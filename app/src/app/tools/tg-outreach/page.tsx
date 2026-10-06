@@ -475,9 +475,10 @@ function SettingsTab({ campaign, onSave }: {
           <Field label="Чат для пересылки (+)" value={openai.target_chats_positive} onChange={v => setOAI('target_chats_positive', v)} placeholder="@username" />
         </div>
         {/* Чат пересылки наполняет автоматика по триггерной фразе; ручные
-            передачи с вкладки «Диалоги» — лид и партнёр — уходят в него же. */}
+            передачи с вкладки «Диалоги» — лид и партнёр — уходят в него же.
+            Пустой чат — передача лида становится просто пометкой «Лид». */}
         <p className="text-[10px] text-gray-400 -mt-2">
-          В чат пересылки бот отправляет сам, когда в его ответе встречается триггерная фраза.
+          В чат пересылки бот отправляет сам по триггерной фразе. Пусто — контакт только помечается лидом.
         </p>
       </section>
 
@@ -1309,9 +1310,34 @@ function DialogsTab({ campaignId, crmEnabled }: {
     try {
       const previewRes = await authFetch(`${API_BASE}/dialogs/${dialog.id}/forward?kind=${kind}`);
       const preview = (await previewRes.json().catch(() => null)) as
-        { text?: string; target_chat?: string; error?: string } | null;
+        { text?: string; target_chat?: string | null; mark_only?: boolean; error?: string } | null;
       if (!previewRes.ok) {
         alert(preview?.error ?? `Не удалось собрать сообщение (${previewRes.status})`);
+        return;
+      }
+
+      // Чат для пересылки не указан — передача лида сводится к пометке «Лид»
+      // (и сделке в CRM, если она включена). В Telegram ничего не уходит.
+      if (preview?.mark_only) {
+        if (!confirm(
+          'Чат для пересылки не указан — контакт будет помечен лидом без пересылки'
+          + (crmEnabled ? ' и отправлен в CRM' : '') + '.\n\nПометить лидом?',
+        )) return;
+        const res = await authFetch(`${API_BASE}/dialogs/${dialog.id}/forward`, {
+          method: 'POST',
+          body: JSON.stringify({ kind }),
+        });
+        const body = (await res.json().catch(() => null)) as { error?: string; crm?: string } | null;
+        if (!res.ok) {
+          alert(body?.error ?? `Не удалось пометить лидом (${res.status})`);
+          return;
+        }
+        const patch: Partial<OutreachDialog> = { status: 'lead' };
+        if (body?.crm === 'queued') {
+          patch.crm = { status: 'pending', lead_url: null, error_message: null };
+          window.setTimeout(() => void fetchDialogs({ silent: true }), 20_000);
+        }
+        patchDialogs((d) => d.id === dialog.id, patch);
         return;
       }
 
@@ -1778,7 +1804,7 @@ function DialogsTab({ campaignId, crmEnabled }: {
                             type="button"
                             disabled={forwarding === `${d.id}:lead`}
                             onClick={() => void forwardDialog(d, 'lead')}
-                            title="Передать как лида в чат из настроек кампании"
+                            title="Пометить лидом и передать в чат из настроек кампании (если он указан)"
                             className="ml-2 inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[10px] font-medium text-emerald-700 hover:bg-emerald-100 hover:border-emerald-300 transition disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {forwarding === `${d.id}:lead`
