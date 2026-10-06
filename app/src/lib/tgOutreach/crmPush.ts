@@ -9,7 +9,7 @@
  *    окончательно не ушла; автопередача по интересу случилась). Ошибок наружу
  *    не бросает: сбой CRM не должен мешать лиду дойти до менеджера в чат.
  *  - `processCrmPushes` раз в несколько секунд разбирает очередь в воркере
- *    tg-outreach: контакт `@ник`, сделка `@ник · кампания` с тегом оффера,
+ *    tg-outreach: контакт `@ник` (ник и в поле Telegram контакта), сделка `@ник · кампания` с тегом оффера,
  *    примечания с перепиской.
  *
  * Очередь отдельная от передач в Telegram: у AMO свои повторы и свои отказы,
@@ -17,7 +17,14 @@
  * процесса, а не внутри запущенной кампании.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { isAuthAmoError, isTransientAmoError, splitNoteText, AmoHttpError, type AmoClient } from '@/lib/crm/amoClient';
+import {
+  isAuthAmoError,
+  isTransientAmoError,
+  splitNoteText,
+  AmoHttpError,
+  type AmoClient,
+  type AmoTelegramField,
+} from '@/lib/crm/amoClient';
 import {
   POLZA_SOURCE_FIELD_ID,
   POLZA_SOURCE_TG_OUTREACH,
@@ -168,6 +175,23 @@ async function polzaSourceEnumId(client: AmoClient): Promise<number | null> {
 }
 
 /**
+ * Поле Telegram у контактов — по адресу AMO, на жизнь процесса. Неудачный
+ * запрос не кешируем и не валим им сделку: ник всё равно будет в имени.
+ */
+const telegramFieldCache = new Map<string, AmoTelegramField | null>();
+
+async function telegramContactField(client: AmoClient): Promise<AmoTelegramField | null> {
+  if (telegramFieldCache.has(client.baseUrl)) return telegramFieldCache.get(client.baseUrl) ?? null;
+  try {
+    const field = await client.findTelegramContactField();
+    telegramFieldCache.set(client.baseUrl, field);
+    return field;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Создать сделку по одной задаче. Промежуточные id пишем сразу: если упадёт
  * на примечании, повтор не заведёт второй контакт и вторую сделку.
  */
@@ -182,7 +206,13 @@ async function pushOne(db: SupabaseClient, task: PushRow, log: LogFn): Promise<v
 
     if (!leadId) {
       if (!contactId) {
-        contactId = (await client.findContactByName(who)) ?? (await client.createContact(who));
+        const telegram = (task.username ?? '').trim().replace(/^@/, '') || null;
+        contactId = (await client.findContact({ name: who, telegram }))
+          ?? (await client.createContact({
+            name: who,
+            telegram,
+            telegramField: telegram ? await telegramContactField(client) : null,
+          }));
         await db.from('tg_outreach_crm_pushes').update({ amo_contact_id: contactId }).eq('id', task.id);
       }
 
