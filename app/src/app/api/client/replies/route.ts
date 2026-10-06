@@ -411,6 +411,7 @@ type StrayQualificationRow = {
   reply_timestamp: string | null;
   created_at: string | null;
   eaccount: string | null;
+  reply_out_of_campaign?: boolean;
 };
 
 /**
@@ -438,7 +439,7 @@ function mapStrayQualificationToItem(
     website: null,
     linkedin_url: null,
     reply_subject: row.reply_subject,
-    reply_body: row.reply_body ?? row.reply_preview,
+    reply_body: (row.reply_body ?? row.reply_preview)?.slice(0, 20_000) ?? null,
     last_outbound_preview: null,
     reply_timestamp: row.reply_timestamp,
     status: 'reply',
@@ -452,6 +453,59 @@ function mapStrayQualificationToItem(
     // В ответ отдаём — в отличие от live-окна, но ТОЛЬКО свой ящик.
     ...(ownMailbox ? { eaccount: ownMailbox } : {}),
   };
+}
+
+/** Exact-address search uses our durable reply records, including older strays. */
+async function readSavedReplyItemsByEmail(
+  campaignIds: string[],
+  campaignNames: Map<string, string>,
+  accessRows: ClientAccessRow[],
+  userId: string,
+  email: string,
+): Promise<LeadListItem[] | null> {
+  if (!supabaseInstantly || campaignIds.length === 0) return [];
+  const { data, error } = await supabaseInstantly
+    .from('instantly_lead_qualifications')
+    .select(
+      'id, campaign_id, campaign_name, lead_email, lead_name, company_name, thread_id, reply_subject, reply_preview, reply_body, status, ai_reason, instantly_email_id, reply_timestamp, created_at, eaccount, reply_out_of_campaign',
+    )
+    .in('campaign_id', campaignIds)
+    .ilike('lead_email', email)
+    .is('machine_reply_kind', null)
+    .not('instantly_email_id', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(200);
+  if (error) {
+    await logError('client.replies.saved_search_failed', error, { userId });
+    return null;
+  }
+
+  // ILIKE treats '_' and '%' as wildcards. Never return a neighbouring address.
+  const rows = ((data ?? []) as StrayQualificationRow[])
+    .filter((row) => row.lead_email?.trim().toLowerCase() === email);
+  const linked = rows.filter((row) => !row.reply_out_of_campaign).map((row) => ({
+    ...mapStrayQualificationToItem(row, campaignNames.get(row.campaign_id ?? '') ?? null, null),
+    id: `reply:${row.campaign_id}:${row.instantly_email_id}`,
+    out_of_campaign: false,
+    eaccount: row.eaccount,
+  }));
+  const visibleLinked = await applyForeignFilter(userId, linked, accessRows);
+
+  const strays = rows.filter((row) => row.reply_out_of_campaign);
+  const mailboxSets = new Map<string, Set<string> | null>();
+  await Promise.all([...new Set(strays.map((row) => row.campaign_id).filter((id): id is string => Boolean(id)))].map(async (campaignId) => {
+    const accountId = getResourceInstantlyAccountId(campaignId, accessRows, 'campaign');
+    mailboxSets.set(campaignId, await resolveClientMailboxes(userId, campaignId, accountId));
+  }));
+  return [...visibleLinked, ...strays.map((row) => {
+    const box = normalizeMailbox(row.eaccount);
+    const mailboxes = mailboxSets.get(row.campaign_id ?? '') ?? null;
+    return mapStrayQualificationToItem(
+      row,
+      campaignNames.get(row.campaign_id ?? '') ?? null,
+      box && mailboxes?.has(box) ? box : null,
+    );
+  })];
 }
 
 /**
@@ -537,7 +591,7 @@ async function fetchLeadReplyItems(
   accessRows: ClientAccessRow[],
   userId: string,
   leadEmail: string,
-): Promise<LeadListItem[]> {
+): Promise<{ items: LeadListItem[]; failures: number }> {
   const settled = await Promise.allSettled(
     campaignIds.map((campaignId) => {
       const accountId = getResourceInstantlyAccountId(campaignId, accessRows, 'campaign');
@@ -568,18 +622,20 @@ async function fetchLeadReplyItems(
   );
 
   const items: LeadListItem[] = [];
+  let failures = 0;
   for (let i = 0; i < settled.length; i += 1) {
     const result = settled[i];
     if (result.status === 'fulfilled') {
       items.push(...result.value.map((it) => ({ ...it })));
     } else {
+      failures += 1;
       await logError('client.leads.deep_search_failed', result.reason, {
         campaignId: campaignIds[i],
         leadEmail,
       });
     }
   }
-  return applyForeignFilter(userId, items, accessRows);
+  return { items: await applyForeignFilter(userId, items, accessRows), failures };
 }
 
 /**
@@ -726,40 +782,35 @@ export async function GET(req: NextRequest) {
   const allowedCampaignIds = filterAllowedIds([], accessRows, 'campaign');
 
   const campaignNames = await readCampaignNames(allowedCampaignIds);
-  const { items: replyItems, failures } = await readReplyItems(
-    allowedCampaignIds,
-    campaignNames,
-    accessRows,
-    userId,
-  );
+  const exactEmail = search && looksLikeEmail(search) ? search.toLowerCase() : null;
+  // The saved index covers old replies, while the live window can contain a
+  // new inbound that has not been qualified yet. Search must merge both.
+  const [saved, live] = await Promise.all([
+    exactEmail
+      ? readSavedReplyItemsByEmail(allowedCampaignIds, campaignNames, accessRows, userId, exactEmail)
+      : Promise.resolve(null),
+    readReplyItems(allowedCampaignIds, campaignNames, accessRows, userId),
+  ]);
+  const replyItems = [...live.items, ...(saved ?? [])];
+  const failures = live.failures;
+  let deepSearchFailures = 0;
 
-  // Блок «Ответы вне кампании»: сироты из instantly_lead_qualifications
-  // (othersWatchdog). Live-окно их не содержит — Instantly эти письма к
-  // кампаниям не привязал. Дедуп против live-элементов по instantly_email_id
-  // делает mergeAndSortItems ниже (live идёт первым и выигрывает).
+  // The regular feed remains a bounded recent window. Older out-of-campaign
+  // replies are included by exact-address DB search above, not this window.
   const strayItems = await readStrayReplyItems(allowedCampaignIds, campaignNames, accessRows, userId);
   if (strayItems.length > 0) replyItems.push(...strayItems);
 
-  if (
-    allowedCampaignIds.length > 0 &&
-    failures === allowedCampaignIds.length
-  ) {
-    return jsonError('Не удалось загрузить ответы', 502);
+  // Historical replies predating our durable records still need Instantly.
+  if (exactEmail && !replyItems.some((item) => item.lead_email.toLowerCase() === exactEmail)) {
+    const extra = await fetchLeadReplyItems(
+      allowedCampaignIds, campaignNames, accessRows, userId, exactEmail,
+    );
+    replyItems.push(...extra.items);
+    deepSearchFailures = extra.failures;
   }
 
-  // Глубокий поиск по email: если терм похож на адрес, подмешиваем переписку
-  // с этим лидом напрямую из Instantly — окно фида (последние ~300 на кампанию)
-  // могло её уже вытеснить, и локальный поиск по окну её бы не нашёл (кейс
-  // 05.08: менеджер не находил недельные треды двух лидов).
-  if (search && looksLikeEmail(search)) {
-    const extra = await fetchLeadReplyItems(
-      allowedCampaignIds,
-      campaignNames,
-      accessRows,
-      userId,
-      search,
-    );
-    if (extra.length > 0) replyItems.push(...extra);
+  if (!search && allowedCampaignIds.length > 0 && failures === allowedCampaignIds.length) {
+    return jsonError('Не удалось загрузить ответы', 502);
   }
 
   const merged = mergeAndSortItems(replyItems);
@@ -798,6 +849,11 @@ export async function GET(req: NextRequest) {
 
   // Одна строка на ПЕРЕПИСКУ (тред/лид); статус агрегируется по всем входящим.
   const searched = groupByConversation(preMatched);
+
+  // A rate-limited provider search must never masquerade as "no such dialog".
+  if (search && searched.length === 0 && (failures > 0 || deepSearchFailures > 0 || (saved === null && exactEmail))) {
+    return jsonError('Поиск ответов не завершён. Повторите через несколько секунд.', 503);
+  }
 
   const filtered = statusFilter === 'unread'
     ? searched.filter((i) => i.is_unread === true)
