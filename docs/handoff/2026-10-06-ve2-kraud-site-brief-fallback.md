@@ -2,6 +2,9 @@
 
 Date: 2026-10-06. Based on `origin/test` at `baed76d0c` (fast-forwarded the task
 checkout); intended delivery branch: `Sergey`. Production was only inspected.
+Fix commit: `63a51acad`. A concurrent `origin/Sergey` change at `b1754f1b1`
+caused a non-fast-forward push rejection; it was merged without conflicts or
+force-pushing, preserving both the latest test base and the other developer's work.
 
 ## Verified failure
 
@@ -42,7 +45,9 @@ row was changed.
   timeout and no-HTML failure all exercise the fallback; absent facts, blocked
   addresses, cancellation and unknown errors remain failures. Healthy-site
   behavior and case preservation are checked. All eight tests passed.
-- Fast branch runner: 36 suites, 289 passed, 2 skipped, 10.643 seconds.
+- Fast branch runner before integration: 36 suites, 289 passed, 2 skipped,
+  10.643 seconds. After merging the concurrent Sergey change: 55 suites,
+  486 passed, 2 skipped, 11.574 seconds.
 - Full `typecheck:strict` passed. `typecheck:fast` could not start its compiler
   because the local shared node_modules lacks `typescript-7/bin/tsc`; used the
   documented TypeScript 5 fallback without changing shared dependencies.

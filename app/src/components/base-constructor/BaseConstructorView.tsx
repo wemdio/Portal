@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type DragEvent } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import { authFetch } from '@/lib/authFetch';
+import { CLIENT_CONSTRUCTOR_ERROR } from '@/lib/tools/baseConstructorPresentation';
 import { buildDatabasesImportUrl, writePendingDbImport } from '@/lib/databases/pendingImport';
 import { ClientTariffUsageInline } from '@/components/client/ClientTariffUsageInline';
 import {
@@ -2140,7 +2141,10 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
               <h2 className={`text-base ${clientMode ? 'font-semibold m-0 text-[var(--cp-red)]' : 'font-bold text-red-700'}`}>Ошибка</h2>
             </div>
             <div className="px-6 py-5 space-y-3">
-              <p className={`text-sm ${clientMode ? 'text-[var(--cp-red)]' : 'text-red-600'}`}>{activeJob.error_message || 'Неизвестная ошибка'}</p>
+              <p className={`text-sm ${clientMode ? 'text-[var(--cp-red)]' : 'text-red-600'}`}>
+                {clientMode ? CLIENT_CONSTRUCTOR_ERROR : activeJob.error_message || 'Неизвестная ошибка'}
+              </p>
+              {clientMode && <a href="/client/support" className="ds-btn-secondary inline-flex">Написать в поддержку</a>}
               <button
                 onClick={resetForm}
                 className={clientMode
@@ -2182,7 +2186,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     {activeJob.result_stats?.emails_found ?? 0}
                   </span>
                   {' email найдено'}
-                  {(activeJob.result_stats?.avg_ta_score ?? 0) > 0 && (
+                  {(activeJob.result_stats?.ta_scoring_failed_rows ?? 0) === 0 && (activeJob.result_stats?.avg_ta_score ?? 0) > 0 && (
                     <>
                       {' · средний ЦА '}
                       <span className="ds-mono tabular-nums font-semibold text-[var(--cp-paper)]">
@@ -2214,7 +2218,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     {activeJob.result_stats?.emails_found ?? 0}
                   </p>
                 </div>
-                {(activeJob.result_stats?.avg_ta_score ?? 0) > 0 && (
+                {(activeJob.result_stats?.ta_scoring_failed_rows ?? 0) === 0 && (activeJob.result_stats?.avg_ta_score ?? 0) > 0 && (
                   <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-5">
                     <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Средний ЦА</p>
                     <p className="mt-2 text-2xl font-bold text-blue-600">
@@ -2238,15 +2242,15 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                 <p className={`text-sm font-semibold mb-2 ${clientMode ? 'text-[var(--cp-paper)]' : 'text-blue-900'}`}>Оценка ЦА — детали</p>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-sm">
                   <div>
-                    <p className={clientMode ? 'text-xs text-[var(--cp-paper-faint)]' : 'text-xs text-blue-700'}>AI оценил</p>
+                    <p className={clientMode ? 'text-xs text-[var(--cp-paper-faint)]' : 'text-xs text-blue-700'}>Строк с оценкой</p>
                     <p className={clientMode ? 'font-bold text-[var(--cp-paper)]' : 'font-bold text-blue-900'}>
-                      {activeJob.result_stats.ta_scoring_pre_filter_rows} компаний
+                      {Math.max(0, activeJob.result_stats.ta_scoring_pre_filter_rows - (activeJob.result_stats.ta_scoring_failed_rows ?? 0))}
                     </p>
                   </div>
                   <div>
                     <p className={clientMode ? 'text-xs text-[var(--cp-paper-faint)]' : 'text-xs text-blue-700'}>Средний балл (до фильтра)</p>
                     <p className={clientMode ? 'font-bold text-[var(--cp-paper)]' : 'font-bold text-blue-900'}>
-                      {activeJob.result_stats.ta_scoring_pre_filter_avg ?? 0}
+                      {(activeJob.result_stats.ta_scoring_failed_rows ?? 0) > 0 ? 'Оценка не завершена' : activeJob.result_stats.ta_scoring_pre_filter_avg ?? 0}
                     </p>
                   </div>
                   <div>
@@ -2265,10 +2269,12 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                         : ''}
                     </p>
                     <p className="mt-1">
-                      У них в колонке «ЦА Причина» стоит «Ошибка оценки» с баллом 5 — это не решение AI,
-                      а сбой обращения к нему. Такие строки стоит перепроверить вручную или прогнать заново.
+                      {clientMode
+                        ? 'Произошёл технический сбой при оценке. Балл 5 рядом с «Ошибка оценки» — служебная отметка, он не отражает соответствие компании вашей целевой аудитории. Обратитесь в поддержку: мы проверим сбой и поможем с повторной оценкой. Проверять эти строки вручную не требуется.'
+                        : 'В колонке «ЦА Причина» стоит «Ошибка оценки» с баллом 5 — это служебная отметка сбоя, а не оценка компании. Устраните причину и повторите оценку этих строк.'}
                     </p>
-                    {!!activeJob.result_stats.ta_scoring_errors?.length && (
+                    {clientMode && <a href="/client/support" className="mt-2 inline-flex underline">Написать в поддержку</a>}
+                    {!clientMode && !!activeJob.result_stats.ta_scoring_errors?.length && (
                       <p className="mt-1.5">
                         Причина: {activeJob.result_stats.ta_scoring_errors
                           .map((e) => `${e.reason}${e.count > 1 ? ` (×${e.count})` : ''}`)
@@ -2277,7 +2283,7 @@ export function BaseConstructorView({ clientMode = false }: BaseConstructorViewP
                     )}
                   </div>
                 )}
-                {activeJob.result_stats.total_rows === 0 && (activeJob.result_stats.ta_scoring_filtered_out ?? 0) > 0 && (
+                {(activeJob.result_stats.ta_scoring_failed_rows ?? 0) === 0 && activeJob.result_stats.total_rows === 0 && (activeJob.result_stats.ta_scoring_filtered_out ?? 0) > 0 && (
                   <p className={clientMode ? 'mt-3 text-xs text-[var(--cp-paper-mute)]' : 'mt-3 text-xs text-blue-800'}>
                     Все компании AI оценил ниже 7 — это значит, что либо бриф не подходит к базе,
                     либо описаний компаний (шаг «Обогатить описаниями») мало для уверенной оценки.
