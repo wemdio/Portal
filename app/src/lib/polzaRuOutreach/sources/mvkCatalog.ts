@@ -284,7 +284,10 @@ async function listExpodat(cfg: ExhibitionCatalog, http: PoliteFetcher): Promise
     const items = parseExpodatListPage(html, base);
     const fresh = items.filter((e) => !byKey.has(e.sourceKey));
     for (const e of fresh) byKey.set(e.sourceKey, e);
-    if (items.length < EXPODAT_PAGE || !fresh.length) break;
+    // Конец — по сырым ссылкам, не по разобранным: безымянные заглушки «-» мы
+    // отбрасываем, и неполная по разбору страница ещё не последняя (БИОТ: 96 из 246).
+    const onPage = new Set(Array.from(html.matchAll(/href="\/companies\/company\/(\d+)/g), (m) => m[1])).size;
+    if (onPage < EXPODAT_PAGE || !fresh.length) break;
   }
   return { exhibitors: Array.from(byKey.values()), catalogYear: Number(cfg.eventStart.slice(0, 4)) };
 }

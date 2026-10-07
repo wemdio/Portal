@@ -14,7 +14,7 @@ comment on column public.polza_ru_signal_uploads.source is
 comment on column public.polza_ru_signal_uploads.source_key is
   'Ключ выпуска выставки в автосинке (mvk:pcvexpo-2026) — повторный синк обновляет ту же загрузку.';
 comment on column public.polza_ru_signal_uploads.sync_meta is
-  'Итог последнего автосинка: сколько в каталоге, отсеяно иностранцев и без сайта, id уже отсеянных.';
+  'Итог последнего автосинка: сколько в каталоге, отсеяно иностранцев и без сайта, ключи отсеянных иностранцев.';
 
 -- Обычный (не частичный) уникальный индекс: на нём держится upsert из кода;
 -- у ручных загрузок source_key null, а null-ы в уникальном индексе не конфликтуют.
