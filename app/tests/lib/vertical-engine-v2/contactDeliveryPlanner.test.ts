@@ -19,6 +19,12 @@ describe('buildContactDeliveryPlan', () => {
     expect(contactTargetDailyPlan(state, 10000, now)).toBe(189);
     expect(contactTargetDailyPlan(state, 20000, now)).toBe(216);
     expect(contactTargetDailyPlan(state, 1000, now)).toBe(19);
+    expect(contactTargetDailyPlan(state, 38, now)).toBe(0);
+    expect(contactTargetDailyPlan(state, 39, now)).toBe(1);
+    expect(contactTargetDailyPlan({ ...state, minimum_target: 40, reserved_contacts: 2 }, 40, now)).toBe(0);
+    expect(contactTargetDailyPlan({ ...state, has_period: true, actual_contacted: 1000,
+      committed_contacts: 50, minimum_target: 1030 }, 1030, now)).toBe(0);
+    expect(contactTargetDailyPlan({ ...state, committed_contacts: 0, minimum_target: 1 }, 1, now)).toBe(1);
     expect(contactTargetDailyPlan({ ...state, actual_contacted: 1000 }, 1000, now)).toBe(0);
     expect(state).toEqual(before);
     for (const value of ['', '1e3', '2.5', '-1', '0', '1000001']) expect(parseContactTarget(value)).toBeNull();
