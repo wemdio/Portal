@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
+import { accountRestUntilIso } from '@/lib/tgOutreach/accountRest';
 import { parseBulkDeleteBody } from '@/lib/tgOutreach/bulkDelete';
 
 export const dynamic = 'force-dynamic';
@@ -62,6 +63,7 @@ export async function POST(req: NextRequest) {
         });
       }
 
+      const restUntil = accountRestUntilIso();
       const insertRows = rows.map((r) => ({
         campaign_id: campaignId,
         session_name: r.session_name,
@@ -73,6 +75,9 @@ export async function POST(req: NextRequest) {
         // Выключен до настройки: включённый аккаунт попадает в боевую рассылку
         // на ближайшем перезапуске круга — без прокси, профиля и проверок.
         is_active: false,
+        // Отлёжка после загрузки (lib/tgOutreach/accountRest.ts): свежий
+        // аккаунт не идёт в боевую рассылку первые часы, прогрев можно.
+        profile_rest_until: restUntil,
       }));
 
       const { data, error } = await auth.supabase

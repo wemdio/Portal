@@ -204,8 +204,8 @@ export function describeSending(ctx: SendingContext): HealthMark {
     return {
       tone: 'rest',
       label: 'в отлёжке',
-      detail: `Аккаунт сменил данные профиля — имя или ник. До ${hhmm(account.profile_rest_until as string)} `
-        + 'он не идёт в боевую рассылку: Telegram настороженно смотрит на переименованный аккаунт, '
+      detail: `Аккаунт недавно загружен или сменил профиль. До ${hhmm(account.profile_rest_until as string)} `
+        + 'он не идёт в боевую рассылку: Telegram настороженно смотрит на свежий или переименованный аккаунт, '
         + 'который сразу пишет незнакомым. Прогрев между своими в это время разрешён.',
       days: null,
     };

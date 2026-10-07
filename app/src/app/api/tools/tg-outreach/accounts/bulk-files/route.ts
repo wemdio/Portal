@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { authenticateRequest, jsonError } from '@/lib/tgOutreach/apiHelpers';
 import { withToolTrace } from '@/lib/toolTrace';
+import { accountRestUntilIso } from '@/lib/tgOutreach/accountRest';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { sqliteBufferToSessionString, authKeyFingerprint } from '@/lib/telegram/sessionUtils';
 import {
@@ -158,6 +159,8 @@ export async function POST(req: NextRequest) {
       const tdataSkipped: TdataSkip[] = [];
       const tdataErrors: TdataError[] = [];
       let tdataRows: Array<Record<string, unknown>> = [];
+      // Отлёжка после загрузки (lib/tgOutreach/accountRest.ts) — одна на партию.
+      const restUntil = accountRestUntilIso();
       let uncheckedExisting = 0;
 
       if (zipFiles.length) {
@@ -194,6 +197,7 @@ export async function POST(req: NextRequest) {
 
           tdataRows = fresh.map((candidate) => ({
             campaign_id: campaignId,
+            profile_rest_until: restUntil,
             session_name: candidate.name,
             api_id: candidate.apiId,
             api_hash: candidate.apiHash,
@@ -234,6 +238,7 @@ export async function POST(req: NextRequest) {
           session_data: '',
           // Выключен до настройки — см. пояснение выше.
           is_active: false,
+          profile_rest_until: restUntil,
           price: declaredPrice,
           ...(declaredCountry ? { country_code: declaredCountry } : {}),
         })),
