@@ -28,6 +28,8 @@ import type { QualificationRow, ThreadMessage } from './types';
 
 /** Писем переписки ящика с адресом: последних хватает, прогрев бывает длинным. */
 const MAILBOX_CONVERSATION_LIMIT = 50;
+/** Писем с адресатом в кампании: максимум страницы Instantly, без него отдаётся меньше. */
+const CAMPAIGN_CONVERSATION_LIMIT = 100;
 
 /**
  * Строка, с которой начинается процитированная история: «> …», «On … wrote:»
@@ -109,10 +111,18 @@ export async function fetchFullThread(params: {
         search: params.leadEmail,
         mode: 'emode_all',
         sort_order: 'asc',
+        limit: CAMPAIGN_CONVERSATION_LIMIT,
       },
       { accountId: params.accountId, timeoutMs: 20_000, requestPriority: 'interactive', consumer: 'personalization_thread' },
     );
-    const messages = toThreadMessages((response.items ?? []).filter((email) => email.thread_id === params.threadId));
+    // Весь диалог с адресатом в кампании, а не только ветка его ответа: шаг
+    // цепочки с новой темой Instantly шлёт отдельным тредом, и ИИ не видел
+    // часть наших писем (просьба 07.10.2026). Свой тред берём всегда — ответ
+    // бывает с другого адреса; чужие письма, где адрес лишь упомянут, отсекает
+    // поле lead.
+    const leadEmail = params.leadEmail.toLowerCase();
+    const messages = toThreadMessages((response.items ?? []).filter((email) =>
+      email.thread_id === params.threadId || (email.lead ?? '').toLowerCase() === leadEmail));
     return messages.length > 0 ? messages : null;
   } catch {
     // Сбой живого запроса не должен ронять генерацию — вызывающий код
