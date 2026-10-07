@@ -12,7 +12,9 @@ export const dynamic = 'force-dynamic';
  * PATCH — настройки папки: ящики, окно отправки, пояс, паузы и задержки
  * писем 2–4. Меняется только присланное; проверки — lib/sender/folders.
  * Действует на рассылки, которые создаст следующая заливка из автоаутрича:
- * созданные раньше живут по своим настройкам.
+ * созданные раньше живут по своим настройкам. Исключение — добавленные ящики:
+ * они доливаются в идущие и стоящие на паузе рассылки папки, а автодобор
+ * пересчитывает базу под новую скорость (lib/sender/folders).
  */
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return withToolTrace({ request: req, operation: 'tools.sender.folders.update' }, async () => {
@@ -31,7 +33,12 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       await logAudit(
         'sender.folder.updated',
         `Рассылка: изменены настройки папки «${result.folder.name}»`,
-        { folderId: id, fields: Object.keys(body), droppedMailboxes: result.droppedMailboxes },
+        {
+          folderId: id,
+          fields: Object.keys(body),
+          droppedMailboxes: result.droppedMailboxes,
+          pooledCampaigns: result.pooledCampaigns,
+        },
         { userId: auth.user.id },
       );
       return NextResponse.json(result);

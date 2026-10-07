@@ -51,6 +51,11 @@ export function isAutofillLang(value: unknown): value is AutofillLang {
   return value === 'ru' || value === 'en';
 }
 
+/** Папка «Рассылки» → язык автодобора; не папка автоаутрича — null. */
+export function autofillLangByFolderKey(key: string): AutofillLang | null {
+  return AUTOFILL_LANGS.find((lang) => AUTOFILL_FOLDER_KEY[lang] === key) ?? null;
+}
+
 function db() {
   if (!supabaseAdmin) throw new Error('Сервис не настроен: нет сервисного ключа базы');
   return supabaseAdmin;
@@ -68,6 +73,20 @@ export async function updateAutofill(lang: AutofillLang, patch: Partial<Omit<Aut
     .update({ ...patch, updated_at: new Date().toISOString() })
     .eq('lang', lang);
   if (error) throw new Error(`настройки автодобора не записаны: ${error.message}`);
+}
+
+/**
+ * Проверить базу на следующем тике воркера, не дожидаясь 09:00/21:00 МСК:
+ * пустая отметка последней проверки снимает ограничение «раз в час проверки»
+ * (checkBase). Зовётся, когда в папке автоаутрича поменялись ящики: от их
+ * «новых в день» зависит и скорость рассылки, и сколько компаний заказывать
+ * автосбору, — без пересчёта новые ящики остались бы без базы до вечера.
+ *
+ * Второго автосбора за день это не даёт: его держит отдельная проверка по дню
+ * последнего сбора (last_job_day).
+ */
+export async function requestAutofillRecheck(lang: AutofillLang): Promise<void> {
+  await updateAutofill(lang, { last_check_at: null });
 }
 
 /** Полный конфиг запуска языка: санитайзер своего аутрича. */
