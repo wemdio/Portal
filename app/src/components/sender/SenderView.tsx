@@ -5,6 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import { MailboxesTab } from './MailboxesTab';
 import { CampaignsTab } from './CampaignsTab';
 import { EgressTab } from './EgressTab';
+import { SeedBoxesTab } from './SeedBoxesTab';
 import { StatsTab } from './StatsTab';
 import { StoplistTab } from './StoplistTab';
 import { ThreadsTab } from './ThreadsTab';
@@ -18,6 +19,7 @@ const TABS = [
   { id: 'mailboxes', label: 'Ящики' },
   { id: 'threads', label: 'Письма' },
   { id: 'stats', label: 'Статистика' },
+  { id: 'seeds', label: 'Контрольные ящики' },
   { id: 'stoplist', label: 'Стоп-лист' },
   { id: 'egress', label: 'Адреса отправки' },
 ] as const;
@@ -104,6 +106,7 @@ export function SenderView() {
       ) : null}
       {tab === 'threads' ? <ThreadsTab initialThreadId={initialThreadId} /> : null}
       {tab === 'stats' ? <StatsTab key={statsCampaignId ?? 'all'} initialCampaignId={statsCampaignId} /> : null}
+      {tab === 'seeds' ? <SeedBoxesTab /> : null}
       {tab === 'stoplist' ? <StoplistTab /> : null}
       {tab === 'egress' ? (
         <EgressTab

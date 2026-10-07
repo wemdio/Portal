@@ -22,6 +22,7 @@ import { processSenderBatch } from '@/lib/sender/sendWorker';
 import { processSenderReplies } from '@/lib/sender/repliesWorker';
 import { checkDeliveredProbes, sendPendingProbes } from '@/lib/sender/probeWorker';
 import { processManualMessages } from '@/lib/sender/manualWorker';
+import { checkSeedProbes, planSeedProbes, sendDueSeedProbes } from '@/lib/sender/seedBoxes';
 import { runSenderMonitor } from '@/lib/sender/monitorWorker';
 import { runDomainHealth } from '@/lib/sender/domainHealth';
 import { syncGoogleWorkspaceMailboxes } from '@/lib/sender/googleSyncWorker';
@@ -128,6 +129,10 @@ async function runFleetJobs(): Promise<void> {
   await guarded('Отложенные запуски не обработались', () => runScheduledStarts({ log }));
   await guarded('Планировщик не отработал', () => planSenderMessages({ log }));
   await guarded('Доставка проб не проверилась', () => checkDeliveredProbes(log));
+  // Контрольные ящики: план на день (пока выключен SENDER_SEED_PROBES_ENABLED)
+  // и проверка папки уже отправленных проб — раз в 5 минут.
+  await guarded('Контрольные пробы не запланировались', () => planSeedProbes({ log }));
+  await guarded('Контрольные ящики не проверились', () => checkSeedProbes({ log }));
 
   if (Date.now() - lastMonitorAt >= MONITOR_INTERVAL_MS) {
     lastMonitorAt = Date.now();
@@ -174,6 +179,7 @@ function makeTick(identity: EgressIdentity, lease: LeaseKeeper) {
     // с ящиков своего адреса.
     await guarded('Проверочные отправки не обработались', () => sendPendingProbes({ log, egressIp }));
     await guarded('Ручные ответы не обработались', () => processManualMessages({ log, egressIp }));
+    await guarded('Контрольные пробы не отправились', () => sendDueSeedProbes({ log, egressIp }));
 
     return sent;
   };
